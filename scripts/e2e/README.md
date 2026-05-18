@@ -78,6 +78,12 @@ FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_PROGRAM_GATE_SELF_CHECK=1 ./scripts/e2e/ffs_p
 # Run the V1.2 program gate rollup and emit the release recommendation manifest
 ./scripts/e2e/ffs_v12_program_gate_e2e.sh
 
+# Run the verification contract acceptance gate
+./scripts/e2e/ffs_verification_gate_e2e.sh
+
+# Verify the verification-gate RCH capture contract without running cargo
+FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_VERIFICATION_GATE_SELF_CHECK=1 ./scripts/e2e/ffs_verification_gate_e2e.sh
+
 # Run invariant-oracle replay/minimization and consumer-validation smoke
 ./scripts/e2e/ffs_invariant_oracle_e2e.sh
 

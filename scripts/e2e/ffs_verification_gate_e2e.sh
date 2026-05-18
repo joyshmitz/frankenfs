@@ -36,6 +36,8 @@ case ",${RCH_ENV_ALLOWLIST:-}," in
 esac
 RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-600}"
 RCH_ARTIFACT_RETRIEVAL_GRACE_SECS="${RCH_ARTIFACT_RETRIEVAL_GRACE_SECS:-8}"
+SELF_CHECK="${FFS_VERIFICATION_GATE_SELF_CHECK:-0}"
+SKIP_SELF_CHECK="${FFS_VERIFICATION_GATE_SKIP_SELF_CHECK:-0}"
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -135,6 +137,177 @@ log_test_tail() {
 
 e2e_init "ffs_verification_gate"
 e2e_print_env
+
+write_fixture_rch_stub() {
+    local stub_path="$1"
+
+    cat >"$stub_path" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+fixture_case="${FFS_VERIFICATION_GATE_FIXTURE_CASE:-complete}"
+
+if [[ "${1:-}" != "exec" || "${2:-}" != "--" ]]; then
+    echo "unexpected verification-gate fixture rch invocation: $*" >&2
+    exit 64
+fi
+shift 2
+command_text="$*"
+
+case "$fixture_case" in
+    local_fallback)
+        echo "[RCH] local (fixture forced local fallback)"
+        exit 1
+        ;;
+    missing_remote_evidence)
+        ;;
+    complete)
+        echo "[RCH] remote worker=fixture exit=0"
+        ;;
+    *)
+        echo "unknown verification-gate fixture case: $fixture_case" >&2
+        exit 64
+        ;;
+esac
+
+finish_success() {
+    if [[ "$fixture_case" == "complete" ]]; then
+        echo "Remote command finished: exit=0"
+    fi
+    exit 0
+}
+
+emit_named_tests() {
+    local module="$1"
+    local count="$2"
+    local index
+    for index in $(seq 1 "$count"); do
+        printf 'test %s::tests::case_%03d ... ok\n' "$module" "$index"
+    done
+}
+
+case "$command_text" in
+    "cargo test -p ffs-harness --lib -- artifact_manifest")
+        emit_named_tests "artifact_manifest" 20
+        finish_success
+        ;;
+    "cargo test -p ffs-harness --lib -- log_contract")
+        emit_named_tests "log_contract" 15
+        finish_success
+        ;;
+    "cargo test -p ffs-harness --lib -- verification_runner")
+        emit_named_tests "verification_runner" 20
+        finish_success
+        ;;
+    "cargo test -p ffs-harness --lib")
+        emit_named_tests "full_harness" 180
+        finish_success
+        ;;
+    *)
+        echo "unexpected verification-gate fixture command: $command_text" >&2
+        exit 64
+        ;;
+esac
+SH
+    chmod +x "$stub_path"
+}
+
+extract_child_result_json() {
+    local log_path="$1"
+    sed -n 's/^JSON summary written: //p' "$log_path" | tail -n 1
+}
+
+run_fixture_child() {
+    local stub_path="$1"
+    local fixture_case="$2"
+    local child_log="$E2E_LOG_DIR/verification_gate_fixture_${fixture_case}.log"
+    local child_status
+
+    set +e
+    FFS_E2E_DISABLE_TEMP_CLEANUP=1 \
+        FFS_VERIFICATION_GATE_SELF_CHECK=0 \
+        FFS_VERIFICATION_GATE_SKIP_SELF_CHECK=1 \
+        FFS_VERIFICATION_GATE_FIXTURE_CASE="$fixture_case" \
+        RCH_BIN="$stub_path" \
+        RCH_COMMAND_TIMEOUT_SECS=2 \
+        RCH_ARTIFACT_RETRIEVAL_GRACE_SECS=1 \
+        "$REPO_ROOT/scripts/e2e/ffs_verification_gate_e2e.sh" >"$child_log" 2>&1
+    child_status=$?
+    set -e
+
+    printf '%s\t%s\n' "$child_status" "$child_log"
+}
+
+run_self_check() {
+    if [[ "$SKIP_SELF_CHECK" == "1" ]]; then
+        return 0
+    fi
+
+    e2e_step "Deterministic verification-gate wrapper self-check"
+    local stub_path child_info child_status child_log result_path
+    stub_path="$E2E_LOG_DIR/rch-verification-gate-fixture"
+    write_fixture_rch_stub "$stub_path"
+
+    child_info="$(run_fixture_child "$stub_path" "complete")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    if [[ "$child_status" == "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && jq -e '
+            .verdict == "PASS"
+            and .invalid_scenario_marker_count == 0
+            and .rch_local_fallback_rejected_count == 0
+            and ([.scenarios[] | select(.scenario_id == "artifact_manifest_unit_tests" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "log_contract_unit_tests" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "verification_runner_unit_tests" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "scenario_catalog_valid" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "cross_epic_conformance" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "structured_logging_fields" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "schema_version_consistency" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "e2e_marker_format_sync" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "full_harness_suite" and .outcome == "PASS")] | length == 1)
+        ' "$result_path" >/dev/null; then
+        scenario_result "verification_gate_fixture_complete_self_check" "PASS" "result=${result_path}"
+    else
+        scenario_result "verification_gate_fixture_complete_self_check" "FAIL" "log=${child_log}"
+        return 1
+    fi
+
+    child_info="$(run_fixture_child "$stub_path" "local_fallback")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    if [[ "$child_status" != "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && jq -e '.verdict == "FAIL" and .rch_local_fallback_rejected_count >= 1' "$result_path" >/dev/null \
+        && grep -q "RCH_LOCAL_FALLBACK_REJECTED" "$child_log"; then
+        scenario_result "verification_gate_fixture_local_fallback_self_check" "PASS" "result=${result_path}"
+    else
+        scenario_result "verification_gate_fixture_local_fallback_self_check" "FAIL" "log=${child_log}"
+        return 1
+    fi
+
+    child_info="$(run_fixture_child "$stub_path" "missing_remote_evidence")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    if [[ "$child_status" != "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && jq -e '.verdict == "FAIL"' "$result_path" >/dev/null \
+        && grep -q "RCH_REMOTE_EVIDENCE_MISSING" "$child_log"; then
+        scenario_result "verification_gate_fixture_missing_remote_evidence_self_check" "PASS" "result=${result_path}"
+    else
+        scenario_result "verification_gate_fixture_missing_remote_evidence_self_check" "FAIL" "log=${child_log}"
+        return 1
+    fi
+}
+
+if [[ "$SELF_CHECK" == "1" ]]; then
+    run_self_check
+    e2e_pass
+    exit 0
+fi
 
 #######################################
 # Scenario 1: artifact_manifest unit tests pass

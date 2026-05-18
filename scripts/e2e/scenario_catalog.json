@@ -2648,6 +2648,24 @@
           "category": "happy",
           "status": "active",
           "evidence": "SCENARIO_RESULT|scenario_id=full_harness_suite|outcome=PASS"
+        },
+        {
+          "id": "verification_gate_fixture_complete_self_check",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=verification_gate_fixture_complete_self_check|outcome=PASS"
+        },
+        {
+          "id": "verification_gate_fixture_local_fallback_self_check",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=verification_gate_fixture_local_fallback_self_check|outcome=PASS"
+        },
+        {
+          "id": "verification_gate_fixture_missing_remote_evidence_self_check",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=verification_gate_fixture_missing_remote_evidence_self_check|outcome=PASS"
         }
       ]
     },
