@@ -48,6 +48,58 @@
 
 **btrfs Total: 86 MUST clauses, 86 passing = 100.0%**
 
+## Full-Gate Runtime Semantic Coverage
+
+`crates/ffs-harness/tests/conformance.rs::full_conformance_gate_pass()` also
+executes runtime semantic checks that are not field-layout rows in the on-disk
+structure matrices above. The counts below are scenario-level semantic
+requirements, not additional structure-field MUST clauses.
+
+### ext4 Runtime Semantics
+
+| Surface | Full-gate test function(s) | Requirements | Passing | Status | Notes |
+|---------|----------------------------|:------------:|:-------:|:------:|-------|
+| Inline-data OpenFs read and VFS behavior | `ext4_inline_data_openfs_read_conforms`, `ext4_inline_data_xattr_continuation_openfs_read_conforms`, `ext4_inline_data_openfs_read_boundaries_conform`, `ext4_inline_data_zero_size_and_extreme_read_bounds_conform`, `ext4_inline_data_vfs_lookup_readdir_conforms`, `ext4_inline_data_write_rejects_without_mutating_contents`, `ext4_inline_data_fallocate_rejects_without_mutating_contents` | 7 | 7 | PASS | Covers inode-body and xattr-continuation readback, boundary clamps, VFS lookup/readdir, and unsupported mutation non-effects. |
+| Casefold lookup semantics | `ext4_dir_block_casefold_lookup_conforms`, `ext4_casefold_openfs_lookup_is_case_insensitive` | 2 | 2 | PASS | Covers directory-block casefold lookup and mounted OpenFs case-insensitive lookup. |
+| fscrypt raw-name and legacy policy transport | `ext4_fscrypt_nokey_readdir_and_lookup_preserve_raw_bytes`, `ext4_fscrypt_legacy_policy_transport_discrepancy_conforms` | 3 | 3 | PASS | Covers no-key raw-byte readdir, no-key lookup, and the documented legacy policy ioctl transport discrepancy without requiring a new accepted divergence row. |
+| Recovery, path resolution, and journal replay | `ext4_orphan_recovery_conforms`, `ext4_path_resolution_conforms`, `ext4_reference_image_opens_with_journal_replay_segments` | 3 | 3 | PASS | Covers orphan cleanup, multi-component path traversal, and reference-image open with journal replay segments. |
+| Fallocate and preallocation contracts | `ext4_fallocate_zero_range_zeroes_target_range`, `ext4_fallocate_collapse_range_shifts_tail_and_shrinks_file`, `ext4_fallocate_collapse_range_reaching_eof_rejects_without_mutation`, `ext4_fallocate_insert_range_inserts_hole_and_grows_file`, `ext4_generic_112_preallocation_contract_conforms` | 5 | 5 | PASS | Covers zero-range, collapse-range, EOF rejection, insert-range, and generic/112 preallocation behavior. |
+| Legacy data mapping and compression readback | `ext4_indirect_block_addressing_conforms`, `ext4_e2compr_write_readback_conforms_for_gzip_and_lzo` | 3 | 3 | PASS | Counts indirect block addressing plus gzip and lzo e2compr readback scenarios. |
+| Fast-commit replay and fallback | `ext4_fast_commit_replay_openfs_evidence_conforms`, `ext4_fast_commit_truncated_stream_falls_back_to_jbd2_only` | 2 | 2 | PASS | Covers complete fast-commit replay and truncated-stream fallback to JBD2-only replay. |
+| Active MMP write rejection | `ext4_active_mmp_write_open_is_rejected` | 1 | 1 | PASS | Complements the on-disk MMP fixture row with the runtime write-open rejection contract. |
+
+**ext4 runtime semantic total: 26 scenario requirements, 26 passing = 100.0%**
+
+### btrfs Runtime Semantics
+
+| Surface | Full-gate test function(s) | Requirements | Passing | Status | Notes |
+|---------|----------------------------|:------------:|:-------:|:------:|-------|
+| Fallocate and preallocation contracts | `btrfs_generic_112_preallocation_contract_conforms`, `btrfs_fallocate_does_not_prealloc_over_live_data_conforms` | 2 | 2 | PASS | Covers generic/112 preallocation and prevention of preallocation over live data. |
+| Send-stream behavior | `btrfs_send_stream_multi_command_conforms`, `btrfs_send_stream_unknown_command_preserves_attrs_as_unspec`, `btrfs_send_stream_rejects_missing_end_command` | 3 | 3 | PASS | Covers multi-command replay, unknown command attribute preservation, and missing-END rejection. |
+| Transparent decompression | `btrfs_transparent_decompression_zlib_regular_extent_conforms`, `btrfs_transparent_decompression_lzo_regular_extent_conforms`, `btrfs_transparent_decompression_zstd_regular_extent_conforms` | 3 | 3 | PASS | Covers zlib, lzo, and zstd regular extent readback. |
+| Subvolume mount root aliasing | `btrfs_subvolume_mount_root_alias_conforms` | 1 | 1 | PASS | Covers alternate subvolume root exposure through the mount surface. |
+| Tree-log replay | `btrfs_tree_log_replay_multilevel_conforms`, `btrfs_tree_log_replay_skips_when_log_root_absent` | 2 | 2 | PASS | Covers multilevel replay and absent-log-root fast path. |
+| Chunk and device tree walking | `btrfs_chunk_tree_walk_adds_and_sorts_new_chunks`, `btrfs_device_tree_walk_enumerates_all_devices`, `btrfs_chunk_mapping_fixture_conforms` | 3 | 3 | PASS | Covers chunk-tree discovery/sorting, device enumeration, and fixture-backed logical-to-physical mapping. |
+| Multi-device RAID and DUP reads | `btrfs_multi_device_raid6_read_conforms`, `btrfs_multi_device_raid10_read_conforms`, `btrfs_multi_device_raid5_read_conforms`, `btrfs_multi_device_dup_read_conforms`, `btrfs_multi_device_raid1_read_falls_back_to_second_mirror`, `btrfs_multi_device_raid0_dispatches_to_correct_stripe` | 6 | 6 | PASS | Covers RAID6, RAID10, RAID5, DUP, RAID1 mirror fallback, and RAID0 stripe dispatch. |
+
+**btrfs runtime semantic total: 20 scenario requirements, 20 passing = 100.0%**
+
+## Coverage Accounting
+
+| Coverage family | Requirements | Passing | Score | Notes |
+|-----------------|:------------:|:-------:|:-----:|-------|
+| ext4 on-disk structures | 75 | 75 | 100.0% | Field-layout and parser MUST clauses from the ext4 matrix. |
+| btrfs on-disk structures | 86 | 86 | 100.0% | Field-layout and parser MUST clauses from the btrfs matrix. |
+| ext4 full-gate runtime semantics | 26 | 26 | 100.0% | Scenario-level semantic requirements exercised by `full_conformance_gate_pass()`. |
+| btrfs full-gate runtime semantics | 20 | 20 | 100.0% | Scenario-level semantic requirements exercised by `full_conformance_gate_pass()`. |
+
+**Structure + runtime semantic total: 207 requirements, 207 passing = 100.0%**
+
+Policy, provenance, checksum-manifest, legacy-golden shape, fuzz-smoke, and
+open-ended-inventory validators are required full-gate controls, but they are
+tracked in their dedicated provenance/checksum/inventory rows instead of being
+folded into the structure or runtime semantic denominators.
+
 ## Priority Gaps
 
 None. All identified on-disk structures have conformance fixtures.
@@ -130,4 +182,4 @@ report used to close `bd-rchk7.1`.
 
 ---
 
-*Last updated: 2026-05-05*
+*Last updated: 2026-05-18*
