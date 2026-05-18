@@ -16,7 +16,7 @@
   <a href="https://github.com/Dicklesworthstone/frankenfs/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT%2BOpenAI%2FAnthropic%20Rider-blue.svg" alt="MIT+Rider License"></a>
   <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/rust-nightly%202024-orange.svg" alt="Rust Nightly"></a>
   <img src="https://img.shields.io/badge/tracked%20V1%20parity-100%25%20(97%2F97)-brightgreen" alt="Tracked V1 Parity 100%">
-  <img src="https://img.shields.io/badge/tests-7%2C421%20entries-brightgreen" alt="7,421 tests">
+  <img src="https://img.shields.io/badge/tests-7%2C444%20entries-brightgreen" alt="7,444 tests">
   <img src="https://img.shields.io/badge/fuzz%20targets-60-brightgreen" alt="60 fuzz targets">
   <img src="https://img.shields.io/badge/unsafe-forbidden-brightgreen.svg" alt="Unsafe Forbidden">
   <img src="https://img.shields.io/badge/runtime-asupersync%200.3-blueviolet.svg" alt="asupersync 0.3 runtime">
@@ -31,7 +31,7 @@
 
 **The solution.** FrankenFS extracts the *behavior* of ext4 and btrfs from ~205K lines of Linux kernel C (v6.19), re-implements that behavior idiomatically in Rust (no unsafe), and adds three things kernel filesystems don't have: block-level MVCC with safe-merge proofs, RaptorQ fountain-coded self-healing, and explicit-opt-in FUSE writeback-cache barriers with a 12-point crash matrix.
 
-It runs as a normal Linux process via FUSE. The tracked V1 parity matrix is at 100% (97/97), every public claim is gated by a checked-in release-gate policy with structured proof bundles, and the workspace ships **21 crates, 415K LOC, 7,421 test entries (7,382 `#[test]` + 39 `proptest!`; counts move with every commit), 60 fuzz targets, 11 criterion benchmarks, 113 end-to-end gate scripts, and 23 evidence-event types** under `#![forbid(unsafe_code)]`.
+It runs as a normal Linux process via FUSE. The tracked V1 parity matrix is at 100% (97/97), every public claim is gated by a checked-in release-gate policy with structured proof bundles, and the workspace ships **21 crates, 415K LOC, 7,444 test entries (7,391 `#[test]` + 53 `proptest!`; counts move with every commit), 60 fuzz targets, 11 criterion benchmarks, 114 end-to-end gate scripts, and 23 evidence-event types** under `#![forbid(unsafe_code)]`.
 
 | Pillar | What it does | Why it matters |
 |---|---|---|
@@ -3376,7 +3376,7 @@ Rows in the btrfs experimental RW contract can still be `partially supported` or
 - **Writeback-cache.** Epoch-based commit barriers with per-inode staged/visible/durable tracking, deferred visibility for MVCC isolation, dirty-page ordering oracle, 12-point crash/replay matrix artifact gate, runtime guard, and host/lane manifest checks. Kernel option default-off; explicit opt-in is evidence-gated.
 - **Observability.** Evidence ledger with 23 event types and 8 operator presets (`replay-anomalies`, `repair-failures`, `pressure-transitions`, `contention`, `metrics`, `cache`, `mvcc`, `repair-live`), contention metrics, policy-switch detection, structured logging across all subsystems, JSONL audit trail.
 - **CLI.** `inspect`, `mvcc-stats`, `info`, `dump`, `fsck`, `repair`, `mount` (22 flags), `scrub`, `parity`, `evidence`, `mkfs`.
-- **Testing.** ~7,421 `#[test]` / `proptest!` entries across 21 crates as of 2026-05-17 (7,382 `#[test]` + 39 `proptest!`; the count grows with every commit), 60 fuzz targets, 11 criterion benchmarks, 113 end-to-end gate scripts, metamorphic-relation proptests across the checksum/parser surface, and 167+ insta snapshots covering every emitted report shape.
+- **Testing.** ~7,444 `#[test]` / `proptest!` entries across 21 crates as of 2026-05-18 (7,391 `#[test]` + 53 `proptest!`; the count grows with every commit), 60 fuzz targets, 11 criterion benchmarks, 114 end-to-end gate scripts, metamorphic-relation proptests across the checksum/parser surface, and 167+ insta snapshots covering every emitted report shape.
 
 ### What's next
 
