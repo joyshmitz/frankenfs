@@ -7470,6 +7470,12 @@
           "category": "error",
           "status": "active",
           "evidence": "scenario_result \"metamorphic_seed_catalog_fixture_local_fallback_self_check\" \"PASS\""
+        },
+        {
+          "id": "metamorphic_seed_catalog_fixture_missing_remote_evidence_self_check",
+          "category": "error",
+          "status": "active",
+          "evidence": "scenario_result \"metamorphic_seed_catalog_fixture_missing_remote_evidence_self_check\" \"PASS\""
         }
       ]
     },

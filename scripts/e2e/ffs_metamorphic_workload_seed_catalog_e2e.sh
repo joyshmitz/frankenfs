@@ -14,6 +14,7 @@ source "$REPO_ROOT/scripts/e2e/lib.sh"
 
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_metamorphic_workload_seed_catalog}"
 export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR"
+e2e_rch_add_env_allowlist CARGO_TARGET_DIR
 RCH_CAPTURE_VISIBILITY="${FFS_METAMORPHIC_WORKLOAD_SEED_CATALOG_RCH_VISIBILITY:-summary}"
 RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-420}"
 RCH_ARTIFACT_RETRIEVAL_GRACE_SECS="${RCH_ARTIFACT_RETRIEVAL_GRACE_SECS:-8}"
@@ -97,77 +98,7 @@ PY
 run_rch_capture() {
     local output_path="$1"
     shift
-    local status=0
-    local pid
-    local deadline
-    local remote_exit=""
-    local wait_status
-    local had_errexit=0
-
-    case $- in
-        *e*) had_errexit=1 ;;
-    esac
-
-    : >"$output_path"
-    set +e
-    RCH_VISIBILITY="$RCH_CAPTURE_VISIBILITY" "${RCH_BIN:-rch}" exec -- "$@" >"$output_path" 2>&1 &
-    pid=$!
-    if [[ "$had_errexit" -eq 1 ]]; then
-        set -e
-    fi
-
-    deadline=$((SECONDS + RCH_COMMAND_TIMEOUT_SECS))
-    while kill -0 "$pid" >/dev/null 2>&1; do
-        remote_exit="$(sed -n 's/.*Remote command finished: exit=\([0-9][0-9]*\).*/\1/p' "$output_path" | tail -n 1)"
-        if [[ -n "$remote_exit" ]]; then
-            sleep "$RCH_ARTIFACT_RETRIEVAL_GRACE_SECS"
-            if kill -0 "$pid" >/dev/null 2>&1; then
-                e2e_log "RCH_ARTIFACT_RETRIEVAL_STOPPED_AFTER_REMOTE_EXIT|exit=${remote_exit}|output=${output_path}|command=$*"
-                kill -TERM "$pid" >/dev/null 2>&1 || true
-                e2e_rch_cancel_matching_queue_entry "$@"
-            fi
-            break
-        fi
-        if ((SECONDS >= deadline)); then
-            e2e_log "RCH_TIMEOUT|seconds=${RCH_COMMAND_TIMEOUT_SECS}|output=${output_path}|command=$*"
-            kill -TERM "$pid" >/dev/null 2>&1 || true
-            e2e_rch_cancel_matching_queue_entry "$@"
-            status=124
-            break
-        fi
-        sleep 2
-    done
-
-    set +e
-    wait "$pid" >/dev/null 2>&1
-    wait_status=$?
-    if [[ "$had_errexit" -eq 1 ]]; then
-        set -e
-    fi
-    if [[ -n "$remote_exit" ]]; then
-        status="$remote_exit"
-    elif [[ $status -eq 0 ]]; then
-        status="$wait_status"
-    fi
-
-    if grep -Fq "[RCH] local" "$output_path" || grep -Fq "exec called with non-compilation command" "$output_path"; then
-        e2e_log "RCH_LOCAL_FALLBACK_REJECTED|output=${output_path}|command=$*"
-        printf 'RCH_LOCAL_FALLBACK_REJECTED|output=%s\n' "$output_path" >>"$output_path"
-        return 99
-    fi
-    if [[ $status -eq 0 ]]; then
-        if ! grep -Fq "[RCH] remote" "$output_path" && ! grep -Fq "Remote command finished: exit=0" "$output_path"; then
-            e2e_log "RCH_REMOTE_EVIDENCE_MISSING|output=${output_path}|command=$*"
-            printf 'RCH_REMOTE_EVIDENCE_MISSING|output=%s\n' "$output_path" >>"$output_path"
-            return 99
-        fi
-        return 0
-    fi
-    if [[ $status -eq 124 ]] && grep -q "Remote command finished: exit=0" "$output_path"; then
-        e2e_log "RCH_ARTIFACT_RETRIEVAL_STOPPED_AFTER_REMOTE_EXIT|output=${output_path}|command=$*"
-        return 0
-    fi
-    return "$status"
+    RCH_VISIBILITY="$RCH_CAPTURE_VISIBILITY" e2e_rch_capture "$output_path" "$@"
 }
 
 run_cargo_capture() {
@@ -299,13 +230,18 @@ case "$fixture_case" in
         ;;
     complete)
         ;;
+    missing_remote_evidence)
+        ;;
     *)
         echo "unknown metamorphic workload seed catalog fixture case: $fixture_case" >&2
         exit 64
         ;;
 esac
 
-echo "[RCH] remote worker=fixture exit=0" >&2
+if [[ "$fixture_case" == "complete" ]]; then
+    echo "[RCH] remote worker=fixture exit=0" >&2
+    echo "Remote command finished: exit=0" >&2
+fi
 case "$command_text" in
     *"test -p ffs-harness --lib metamorphic_workload_seed_catalog"*)
         printf '%s\n' \
@@ -427,6 +363,20 @@ run_self_check() {
     else
         scenario_result "metamorphic_seed_catalog_fixture_local_fallback_self_check" "FAIL" "log=${child_log}"
         e2e_fail "metamorphic workload seed catalog local fallback fixture self-check failed"
+    fi
+
+    child_info="$(run_fixture_child "$stub_path" "missing_remote_evidence")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    if [[ "$child_status" != "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && jq -e '.verdict == "FAIL"' "$result_path" >/dev/null \
+        && grep -q "RCH_REMOTE_EVIDENCE_MISSING" "$child_log"; then
+        scenario_result "metamorphic_seed_catalog_fixture_missing_remote_evidence_self_check" "PASS" "result=${result_path}"
+    else
+        scenario_result "metamorphic_seed_catalog_fixture_missing_remote_evidence_self_check" "FAIL" "log=${child_log}"
+        e2e_fail "metamorphic workload seed catalog missing-remote-evidence fixture self-check failed"
     fi
 }
 

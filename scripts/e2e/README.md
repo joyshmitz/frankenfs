@@ -487,9 +487,9 @@ FFS_METAMORPHIC_WORKLOAD_SEED_CATALOG_SELF_CHECK=1 \
 The self-check uses a stubbed `rch` binary to prove the wrapper extracts JSON
 and Markdown validator output, preserves relation/source coverage and
 permissioned ACK metadata, rejects invalid variants, verifies focused unit-test
-output, and preserves the shared `RCH_LOCAL_FALLBACK_REJECTED` marker. It does
-not run cargo, mounted lanes, xfstests, fuzz/performance campaigns, or
-permissioned campaigns.
+output, and preserves the shared `RCH_LOCAL_FALLBACK_REJECTED` and
+`RCH_REMOTE_EVIDENCE_MISSING` markers. It does not run cargo, mounted lanes,
+xfstests, fuzz/performance campaigns, or permissioned campaigns.
 
 ## Btrfs Send/Receive Corpus Contract
 
