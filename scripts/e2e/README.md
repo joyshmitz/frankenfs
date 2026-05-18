@@ -201,6 +201,9 @@ FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_LOG_CONTRACT_SELF_CHECK=1 ./scripts/e2e/ffs_l
 # Run open-ended inventory and source-scope scanner validation
 ./scripts/e2e/ffs_open_ended_inventory_scanner_e2e.sh
 
+# Verify the open-ended inventory/source-scope RCH capture contract without running cargo
+FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_OPEN_ENDED_INVENTORY_SCANNER_SELF_CHECK=1 ./scripts/e2e/ffs_open_ended_inventory_scanner_e2e.sh
+
 # Run repair confidence mutation-safety threshold validation
 ./scripts/e2e/ffs_repair_confidence_lab_e2e.sh
 
@@ -249,6 +252,15 @@ Read source-scope reports with this split in mind:
 - Do not delete local artifacts to silence dirty diagnostics, do not close
   readiness gaps from untracked-only evidence, and do not mutate foreign tracker
   rows while handling source-scope cleanup.
+
+The wrapper self-check exercises positive and negative note scans, real
+inventory accounting, source-scope manifest accounting, missing-family
+rejection, dirty-workspace unit-test accounting, local fallback, and missing
+remote evidence without invoking cargo:
+
+```bash
+FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_OPEN_ENDED_INVENTORY_SCANNER_SELF_CHECK=1 ./scripts/e2e/ffs_open_ended_inventory_scanner_e2e.sh
+```
 
 ## Fuzz Smoke QA Artifact Wrapper
 

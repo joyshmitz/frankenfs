@@ -4,6 +4,9 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 source "$REPO_ROOT/scripts/e2e/lib.sh"
 
+SELF_CHECK="${FFS_OPEN_ENDED_INVENTORY_SCANNER_SELF_CHECK:-0}"
+SKIP_SELF_CHECK="${FFS_OPEN_ENDED_INVENTORY_SCANNER_SKIP_SELF_CHECK:-0}"
+
 scenario_result() {
     local scenario_id="$1"
     local outcome="$2"
@@ -12,6 +15,378 @@ scenario_result() {
 }
 
 e2e_init "ffs_open_ended_inventory_scanner"
+
+write_fixture_rch_stub() {
+    local stub_path="$1"
+
+    cat >"$stub_path" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+fixture_case="${FFS_OPEN_ENDED_INVENTORY_SCANNER_FIXTURE_CASE:-complete}"
+
+if [[ "${1:-}" != "exec" || "${2:-}" != "--" ]]; then
+    echo "unexpected open-ended scanner fixture rch invocation: $*" >&2
+    exit 64
+fi
+shift 2
+command_text="$*"
+
+case "$fixture_case" in
+    local_fallback)
+        echo "[RCH] local (fixture forced local fallback)"
+        exit 1
+        ;;
+    missing_remote_evidence)
+        ;;
+    complete)
+        echo "[RCH] remote worker=fixture exit=0"
+        ;;
+    *)
+        echo "unknown open-ended scanner fixture case: $fixture_case" >&2
+        exit 64
+        ;;
+esac
+
+finish_success() {
+    if [[ "$fixture_case" == "complete" ]]; then
+        echo "Remote command finished: exit=0"
+    fi
+    exit 0
+}
+
+finish_failure() {
+    local status="$1"
+    if [[ "$fixture_case" == "complete" ]]; then
+        echo "Remote command finished: exit=${status}"
+    fi
+    exit "$status"
+}
+
+emit_note_report() {
+    local kind="$1"
+    local reproduction_command="$2"
+    python3 - "$kind" "$reproduction_command" <<'PY'
+import json
+import sys
+
+kind, reproduction_command = sys.argv[1:3]
+patterns = [
+    "add more cases",
+    "expand corpus",
+    "TODO fuzz",
+    "HACK",
+    "XXX",
+    "future edge cases",
+    "adversarial inputs",
+    "more goldens",
+    "known gaps",
+    "fake delay",
+    "mock implementation",
+    "dummy implementation",
+    "placeholder implementation",
+    "stub implementation",
+    "not yet implemented",
+    "temporary sleep",
+    "thread::sleep",
+]
+
+def row(index, decision="requires_inventory_row", proof_type="parser-unit"):
+    false_positive = decision == "false_positive"
+    return {
+        "source_path": "tests/open-ended-inventory/scanner_fixture_positive.md",
+        "line_number": index + 1,
+        "section_id": f"fixture-section-{index}",
+        "matched_phrase": patterns[index % len(patterns)],
+        "matched_text_snippet_hash": "sha256:" + str(index) * 64,
+        "decision": decision,
+        "false_positive_reason": "fixture intentionally exercises non-applicable prose" if false_positive else "n/a",
+        "linked_bead_or_artifact": "bd-rchk0.fixture" if not false_positive else "docs-non-goal-fixture",
+        "risk_surface": "source-scope",
+        "existing_evidence": ["fixture-evidence"],
+        "proof_type": proof_type,
+        "unit_test_expectation": "open_ended_inventory::tests::fixture_contract",
+        "e2e_fuzz_smoke_expectation": "scripts/e2e/ffs_open_ended_inventory_scanner_e2e.sh",
+        "required_log_fields": ["scanner_version", "reproduction_command"],
+        "required_artifacts": ["fixture-report.json"],
+        "non_applicability_rationale": "fixture non-goal" if false_positive else "n/a",
+        "reproduction_command": reproduction_command,
+    }
+
+if kind == "negative":
+    rows = [
+        row(0, "requires_inventory_row"),
+        row(1, "requires_inventory_row", "long-campaign"),
+        row(2, "requires_inventory_row", "golden-fixture"),
+    ]
+    report = {
+        "scanner_version": "bd-mockscan-open-ended-note-scanner-v2",
+        "valid": False,
+        "errors": ["open-ended row lacks linked bead/artifact"],
+        "reproduction_command": reproduction_command,
+        "match_count": 3,
+        "false_positive_count": 0,
+        "unresolved_note_count": 3,
+        "search_patterns": patterns,
+        "rows": rows,
+    }
+elif kind == "real":
+    rows = [row(0)]
+    report = {
+        "scanner_version": "bd-mockscan-open-ended-note-scanner-v2",
+        "valid": True,
+        "errors": [],
+        "reproduction_command": reproduction_command,
+        "match_count": 1,
+        "false_positive_count": 0,
+        "unresolved_note_count": 0,
+        "search_patterns": patterns,
+        "rows": rows,
+    }
+else:
+    rows = [
+        row(0),
+        row(1),
+        row(2, "false_positive", "docs-non-goal"),
+        row(3, "false_positive", "docs-non-goal"),
+    ]
+    report = {
+        "scanner_version": "bd-mockscan-open-ended-note-scanner-v2",
+        "valid": True,
+        "errors": [],
+        "reproduction_command": reproduction_command,
+        "match_count": 4,
+        "false_positive_count": 2,
+        "unresolved_note_count": 0,
+        "search_patterns": patterns,
+        "rows": rows,
+    }
+
+print(json.dumps(report, indent=2, sort_keys=True))
+PY
+}
+
+emit_source_scope_report() {
+    python3 - <<'PY'
+import json
+
+required_families = [
+    "readme_status_docs",
+    "agent_workflow_docs",
+    "feature_parity_doc",
+    "canonical_spec_docs",
+    "architecture_design_docs",
+    "conformance_docs",
+    "conformance_fixture_artifacts",
+    "fixture_manifests",
+    "test_control_artifacts",
+    "tests",
+    "checked_in_evidence_artifacts",
+    "crate_manifest_and_benchmark_sources",
+    "fuzz_campaign_artifacts",
+    "fuzz_corpus_notes",
+    "fuzz_targets",
+    "fuzz_orchestration",
+    "operational_scripts",
+    "harness_scripts",
+    "operator_runbook_docs",
+    "operational_evidence_artifacts",
+    "mounted_lane_docs",
+    "repair_docs",
+    "performance_control_artifacts",
+    "performance_xfstests_notes",
+]
+build_output_sensitive_families = {
+    "agent_workflow_docs",
+    "architecture_design_docs",
+    "conformance_docs",
+    "conformance_fixture_artifacts",
+    "test_control_artifacts",
+    "tests",
+    "checked_in_evidence_artifacts",
+    "crate_manifest_and_benchmark_sources",
+    "fuzz_campaign_artifacts",
+    "fuzz_targets",
+    "fuzz_orchestration",
+    "operational_scripts",
+    "operator_runbook_docs",
+    "operational_evidence_artifacts",
+    "performance_control_artifacts",
+}
+
+scanned_sources = []
+for family in required_families:
+    included_globs = [f"{family}/**"]
+    excluded_globs = []
+    if family in build_output_sensitive_families:
+        excluded_globs.extend(["target/**", "**/.rch-target/**", "**/.rch-target-*/**"])
+    if family == "tests":
+        excluded_globs.append("vendor/**")
+    if family == "harness_scripts":
+        included_globs = ["scripts/e2e/**/*.sh", "scripts/e2e/**/*.py", "scripts/e2e/**/*.json"]
+        excluded_globs.append("scripts/e2e/_artifacts/**")
+    scanned_sources.append(
+        {
+            "id": f"fixture_{family}",
+            "source_family": family,
+            "included_globs": included_globs,
+            "excluded_globs": excluded_globs,
+            "inclusion_decision": "included",
+            "file_or_directory_hash": "sha256:" + "0" * 64,
+            "matched_note_count": 0,
+            "linked_bead_or_artifact_count": 0,
+            "stale_allowance": "none",
+            "output_path": f"artifacts/fixture/{family}.json",
+            "reproduction_command": "cargo run -p ffs-harness -- validate-source-scope-manifest --manifest tests/source-scope-manifest/source_scope_manifest.json --workspace-root .",
+            "matched_paths": [{"source_path": f"{family}/fixture.txt"}],
+        }
+    )
+
+report = {
+    "schema_version": 1,
+    "source_manifest_version": 1,
+    "valid": True,
+    "errors": [],
+    "source_count": len(required_families),
+    "reproduction_command": "cargo run -p ffs-harness -- validate-source-scope-manifest --manifest tests/source-scope-manifest/source_scope_manifest.json --workspace-root .",
+    "scanned_sources": scanned_sources,
+}
+print(json.dumps(report, indent=2, sort_keys=True))
+PY
+}
+
+case "$command_text" in
+    *"open-ended-note-scanner"*"scanner_fixture_positive.md"*)
+        emit_note_report "positive" "cargo run -p ffs-harness -- open-ended-note-scanner --source tests/open-ended-inventory/scanner_fixture_positive.md"
+        finish_success
+        ;;
+    *"open-ended-note-scanner"*"scanner_fixture_negative.md"*)
+        emit_note_report "negative" "cargo run -p ffs-harness -- open-ended-note-scanner --source tests/open-ended-inventory/scanner_fixture_negative.md"
+        finish_failure 1
+        ;;
+    *"open-ended-note-scanner"*"FUZZ_AND_CONFORMANCE_INVENTORY.md"*)
+        emit_note_report "real" "cargo run -p ffs-harness -- open-ended-note-scanner --source docs/reports/FUZZ_AND_CONFORMANCE_INVENTORY.md"
+        finish_success
+        ;;
+    *"validate-source-scope-manifest"*"--remove-source-family tests"*)
+        echo 'source scope manifest missing required family `tests`'
+        finish_failure 1
+        ;;
+    *"validate-source-scope-manifest"*)
+        emit_source_scope_report
+        finish_success
+        ;;
+    *"cargo test"*source_scope_scan*)
+        echo "test open_ended_inventory::tests::source_scope_scan_uses_git_tracked_files_for_canonical_hashes ... ok"
+        echo "test open_ended_inventory::tests::source_scope_scan_report_json_shape ... ok"
+        echo "test result: ok. fixture passed"
+        finish_success
+        ;;
+    *)
+        echo "unexpected open-ended scanner fixture command: $command_text" >&2
+        exit 64
+        ;;
+esac
+SH
+    chmod +x "$stub_path"
+}
+
+extract_child_result_json() {
+    local log_path="$1"
+    sed -n 's/^JSON summary written: //p' "$log_path" | tail -n 1
+}
+
+run_fixture_child() {
+    local stub_path="$1"
+    local fixture_case="$2"
+    local child_log="$E2E_LOG_DIR/open_ended_inventory_fixture_${fixture_case}.log"
+    local child_status
+
+    set +e
+    FFS_E2E_DISABLE_TEMP_CLEANUP=1 \
+        FFS_OPEN_ENDED_INVENTORY_SCANNER_SELF_CHECK=0 \
+        FFS_OPEN_ENDED_INVENTORY_SCANNER_SKIP_SELF_CHECK=1 \
+        FFS_OPEN_ENDED_INVENTORY_SCANNER_FIXTURE_CASE="$fixture_case" \
+        RCH_BIN="$stub_path" \
+        RCH_COMMAND_TIMEOUT_SECS=2 \
+        RCH_ARTIFACT_RETRIEVAL_GRACE_SECS=1 \
+        "$REPO_ROOT/scripts/e2e/ffs_open_ended_inventory_scanner_e2e.sh" >"$child_log" 2>&1
+    child_status=$?
+    set -e
+
+    printf '%s\t%s\n' "$child_status" "$child_log"
+}
+
+run_self_check() {
+    if [[ "$SKIP_SELF_CHECK" == "1" ]]; then
+        return 0
+    fi
+
+    e2e_step "Deterministic open-ended inventory scanner wrapper self-check"
+    local stub_path child_info child_status child_log result_path
+    stub_path="$E2E_LOG_DIR/rch-open-ended-inventory-scanner-fixture"
+    write_fixture_rch_stub "$stub_path"
+
+    child_info="$(run_fixture_child "$stub_path" "complete")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    if [[ "$child_status" == "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && jq -e '
+            .verdict == "PASS"
+            and .invalid_scenario_marker_count == 0
+            and .rch_local_fallback_rejected_count == 0
+            and ([.scenarios[] | select(.scenario_id == "open_ended_note_scanner_inputs_present" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "open_ended_note_scanner_positive_fixture" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "open_ended_note_scanner_negative_fixture" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "open_ended_note_scanner_report_contract" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "open_ended_note_scanner_real_inventory" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "source_scope_manifest_real_workspace" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "source_scope_manifest_missing_family" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "source_scope_dirty_workspace_stability" and .outcome == "PASS")] | length == 1)
+        ' "$result_path" >/dev/null; then
+        scenario_result "open_ended_inventory_fixture_complete_self_check" "PASS" "result=${result_path}"
+    else
+        scenario_result "open_ended_inventory_fixture_complete_self_check" "FAIL" "log=${child_log}"
+        return 1
+    fi
+
+    child_info="$(run_fixture_child "$stub_path" "local_fallback")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    if [[ "$child_status" != "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && jq -e '.verdict == "FAIL" and .rch_local_fallback_rejected_count >= 1' "$result_path" >/dev/null \
+        && grep -q "RCH_LOCAL_FALLBACK_REJECTED" "$child_log"; then
+        scenario_result "open_ended_inventory_fixture_local_fallback_self_check" "PASS" "result=${result_path}"
+    else
+        scenario_result "open_ended_inventory_fixture_local_fallback_self_check" "FAIL" "log=${child_log}"
+        return 1
+    fi
+
+    child_info="$(run_fixture_child "$stub_path" "missing_remote_evidence")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    if [[ "$child_status" != "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && jq -e '.verdict == "FAIL"' "$result_path" >/dev/null \
+        && grep -q "RCH_REMOTE_EVIDENCE_MISSING" "$child_log"; then
+        scenario_result "open_ended_inventory_fixture_missing_remote_evidence_self_check" "PASS" "result=${result_path}"
+    else
+        scenario_result "open_ended_inventory_fixture_missing_remote_evidence_self_check" "FAIL" "log=${child_log}"
+        return 1
+    fi
+}
+
+if [[ "$SELF_CHECK" == "1" ]]; then
+    run_self_check
+    e2e_pass
+    exit 0
+fi
+
 e2e_print_env
 
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_open_ended_scanner}"
