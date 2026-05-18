@@ -31,7 +31,7 @@
 
 **The solution.** FrankenFS extracts the *behavior* of ext4 and btrfs from ~205K lines of Linux kernel C (v6.19), re-implements that behavior idiomatically in Rust (no unsafe), and adds three things kernel filesystems don't have: block-level MVCC with safe-merge proofs, RaptorQ fountain-coded self-healing, and explicit-opt-in FUSE writeback-cache barriers with a 12-point crash matrix.
 
-It runs as a normal Linux process via FUSE. The tracked V1 parity matrix is at 100% (97/97), every public claim is gated by a checked-in release-gate policy with structured proof bundles, and the workspace ships **21 crates, 415K LOC, 7,442 test entries (7,389 `#[test]` + 53 `proptest!`; counts move with every commit), 60 fuzz targets, 11 criterion benchmarks, 114 end-to-end gate scripts, and 23 evidence-event types** under `#![forbid(unsafe_code)]`.
+It runs as a normal Linux process via FUSE. The tracked V1 parity matrix is at 100% (97/97), every public claim is gated by a checked-in release-gate policy with structured proof bundles, and the workspace ships **21 crates, 416K LOC, 7,442 test entries (7,389 `#[test]` + 53 `proptest!`; counts move with every commit), 60 fuzz targets, 11 criterion benchmarks, 114 end-to-end gate scripts, and 23 evidence-event types** under `#![forbid(unsafe_code)]`.
 
 | Pillar | What it does | Why it matters |
 |---|---|---|
@@ -2490,7 +2490,7 @@ frankenfs/
 ├── docs/                       Design docs, manifests, runbooks, reports
 ├── security/                   adversarial_image_threat_model.json
 ├── vendor/                     vendor/fuser pinned to ABI 7.40 via [patch.crates-io]
-├── .beads/                     issues.jsonl (raw rows: 2,914 closed + 75 open + 1 deferred)
+├── .beads/                     issues.jsonl (raw rows: 2,915 closed + 75 open + 1 deferred)
 ├── beads_compliance_audit/     Cross-pass bead-completion audit artifacts
 └── ci-artifacts/               CI run outputs
 ```
