@@ -2602,6 +2602,30 @@
           "category": "edge",
           "status": "active",
           "evidence": "SCENARIO_RESULT|scenario_id=v12_program_gate_${number}|outcome=${status}"
+        },
+        {
+          "id": "v12_program_gate_uses_shared_rch_capture",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=v12_program_gate_uses_shared_rch_capture|outcome=PASS"
+        },
+        {
+          "id": "v12_program_gate_fixture_complete_self_check",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=v12_program_gate_fixture_complete_self_check|outcome=PASS"
+        },
+        {
+          "id": "v12_program_gate_fixture_local_fallback_self_check",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=v12_program_gate_fixture_local_fallback_self_check|outcome=PASS"
+        },
+        {
+          "id": "v12_program_gate_fixture_missing_remote_evidence_self_check",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=v12_program_gate_fixture_missing_remote_evidence_self_check|outcome=PASS"
         }
       ]
     },

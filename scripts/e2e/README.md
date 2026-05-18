@@ -353,7 +353,10 @@ Artifacts are written to `artifacts/release_gate/v12/`:
 Use `FFS_V12_PROGRAM_GATE_SCENARIO_TIMEOUT_SECS=<seconds>` to adjust the
 per-scenario budget. Use `FFS_V12_PROGRAM_GATE_SMOKE=1` for the two-scenario
 synthetic smoke path that validates manifest and exit-code semantics without
-running the full gate. Release notes and waiver handling are documented in
+running the full gate. Use `FFS_V12_PROGRAM_GATE_RCH_SELF_CHECK=1` for the
+fixture-only RCH guardrail check that proves cargo-bearing lanes use the shared
+fail-closed capture helper and reject local fallback or missing remote evidence.
+Release notes and waiver handling are documented in
 `docs/release/V1.2_release_notes.md` and `docs/release/V1.2_test_waivers.md`.
 
 ## Scenario Catalog Contract

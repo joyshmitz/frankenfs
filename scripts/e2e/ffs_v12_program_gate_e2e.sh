@@ -18,6 +18,9 @@ export RUST_LOG="${RUST_LOG:-info}"
 export RUST_BACKTRACE="${RUST_BACKTRACE:-1}"
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/projects/.cargo-target-frankenfs-v12-program-gate}"
 export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR,RUST_LOG,RUST_BACKTRACE"
+e2e_rch_add_env_allowlist CARGO_TARGET_DIR RUST_LOG RUST_BACKTRACE
+RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-900}"
+RCH_ARTIFACT_RETRIEVAL_GRACE_SECS="${RCH_ARTIFACT_RETRIEVAL_GRACE_SECS:-8}"
 
 ARTIFACT_DIR="${FFS_V12_PROGRAM_GATE_ARTIFACT_DIR:-$REPO_ROOT/artifacts/release_gate/v12}"
 SCENARIO_DIR="$ARTIFACT_DIR/scenarios"
@@ -25,6 +28,7 @@ MANIFEST_JSON="$ARTIFACT_DIR/program_gate_manifest.json"
 COMMAND_LOG="$ARTIFACT_DIR/command_transcript.tsv"
 DEFAULT_BUDGET_SECS="${FFS_V12_PROGRAM_GATE_SCENARIO_TIMEOUT_SECS:-300}"
 SMOKE_MODE="${FFS_V12_PROGRAM_GATE_SMOKE:-0}"
+RCH_SELF_CHECK="${FFS_V12_PROGRAM_GATE_RCH_SELF_CHECK:-0}"
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -49,6 +53,20 @@ tail_text() {
     if [[ -f "$path" ]]; then
         tail -c 200 "$path" | tr '\n' ' '
     fi
+}
+
+scenario_result() {
+    local scenario_id="$1"
+    local status="$2"
+    local detail="$3"
+
+    e2e_log "SCENARIO_RESULT|scenario_id=${scenario_id}|outcome=${status}|detail=${detail}"
+    if [[ "$status" == "PASS" ]]; then
+        PASS_COUNT=$((PASS_COUNT + 1))
+    else
+        FAIL_COUNT=$((FAIL_COUNT + 1))
+    fi
+    TOTAL=$((TOTAL + 1))
 }
 
 count_active_waiver_rows() {
@@ -200,6 +218,52 @@ run_scenario_command() {
         "$stdout_path;$stderr_path"
 }
 
+run_rch_scenario_command() {
+    local number="$1"
+    local name="$2"
+    local child_gate_bead="$3"
+    local budget_secs="${4:-$DEFAULT_BUDGET_SECS}"
+    shift 4
+
+    local stdout_path="$ARTIFACT_DIR/scenario_${number}.stdout"
+    local stderr_path="$ARTIFACT_DIR/scenario_${number}.stderr"
+    local started_at finished_at started_s finished_s duration_ms budget_ms status exit_code
+    local command_text saved_timeout
+    started_at="$(iso_now)"
+    started_s="$(date +%s)"
+    command_text="$*"
+    e2e_step "Scenario ${number}: ${name}"
+    : >"$stderr_path"
+
+    saved_timeout="${RCH_COMMAND_TIMEOUT_SECS:-}"
+    set +e
+    RCH_COMMAND_TIMEOUT_SECS="$budget_secs" e2e_rch_capture "$stdout_path" "$@"
+    exit_code=$?
+    set -e
+    if [[ -n "$saved_timeout" ]]; then
+        RCH_COMMAND_TIMEOUT_SECS="$saved_timeout"
+    else
+        unset RCH_COMMAND_TIMEOUT_SECS
+    fi
+
+    finished_at="$(iso_now)"
+    finished_s="$(date +%s)"
+    duration_ms=$(((finished_s - started_s) * 1000))
+    budget_ms=$((budget_secs * 1000))
+    if [[ "$exit_code" -eq 0 ]]; then
+        status="PASS"
+    elif [[ "$exit_code" -eq 124 ]]; then
+        status="TIMEOUT"
+    else
+        status="FAIL"
+    fi
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$started_at" "$number" "$name" "$exit_code" "$command_text" "$stdout_path" "$stderr_path" >>"$COMMAND_LOG"
+    write_scenario_record "$number" "$name" "$status" "$started_at" "$finished_at" \
+        "$duration_ms" "$budget_ms" "$child_gate_bead" "$exit_code" "$stdout_path" "$stderr_path" \
+        "$stdout_path;$stderr_path"
+}
+
 run_scenario_check() {
     local number="$1"
     local name="$2"
@@ -236,31 +300,125 @@ run_smoke_mode() {
     fi
 }
 
+write_fake_rch() {
+    local fake_rch="$1"
+    cat >"$fake_rch" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+mode="${FFS_V12_PROGRAM_GATE_FAKE_RCH_MODE:-complete}"
+
+if [[ "${1:-}" == "exec" && "${2:-}" == "--" ]]; then
+    case "$mode" in
+        complete)
+            printf '[RCH] remote worker=fake-v12-program-gate\n'
+            printf 'Remote command finished: exit=0\n'
+            exit 0
+            ;;
+        local_fallback)
+            printf '[RCH] local (remote execution failed)\n'
+            printf 'Remote command finished: exit=0\n'
+            exit 0
+            ;;
+        missing_remote_evidence)
+            printf 'fake rch completed without remote proof\n'
+            exit 0
+            ;;
+        *)
+            printf 'unsupported fake rch mode: %s\n' "$mode" >&2
+            exit 2
+            ;;
+    esac
+fi
+
+if [[ "${1:-}" == "queue" && "${2:-}" == "--json" ]]; then
+    printf '{"data":{"active_builds":[]}}\n'
+    exit 0
+fi
+
+if [[ "${1:-}" == "cancel" ]]; then
+    exit 0
+fi
+
+printf 'unsupported fake rch invocation: %s\n' "$*" >&2
+exit 2
+SH
+    chmod +x "$fake_rch"
+}
+
+run_rch_fixture_probe() {
+    local scenario_id="$1"
+    local mode="$2"
+    local expected_status="$3"
+    local expected_marker="$4"
+    local probe_dir="$E2E_TEMP_DIR/v12_rch_${mode}_probe"
+    local fake_rch="$probe_dir/rch"
+    local output_path="$probe_dir/rch_capture.log"
+    local status=0
+
+    mkdir -p "$probe_dir"
+    write_fake_rch "$fake_rch"
+
+    set +e
+    FFS_V12_PROGRAM_GATE_FAKE_RCH_MODE="$mode" \
+        RCH_BIN="$fake_rch" \
+        RCH_COMMAND_TIMEOUT_SECS=15 \
+        RCH_ARTIFACT_RETRIEVAL_GRACE_SECS=0 \
+        e2e_rch_capture "$output_path" cargo test -p fake-v12-program-gate --lib
+    status=$?
+    set -e
+
+    if [[ "$status" -eq "$expected_status" ]] && grep -Fq "$expected_marker" "$output_path"; then
+        scenario_result "$scenario_id" "PASS" "mode=${mode} status=${status} output=${output_path}"
+    else
+        scenario_result "$scenario_id" "FAIL" "mode=${mode} status=${status} expected=${expected_status} marker=${expected_marker} output=${output_path}"
+    fi
+}
+
+run_rch_self_check() {
+    local forbidden_pattern
+
+    forbidden_pattern='${RCH_BIN:-rch}'
+    forbidden_pattern="\"${forbidden_pattern}\" exec -- cargo"
+    e2e_step "V1.2 RCH capture fixture self-check"
+    if grep -F "$forbidden_pattern" "$0" | grep -v "forbidden_pattern" >/dev/null; then
+        scenario_result "v12_program_gate_uses_shared_rch_capture" "FAIL" "cargo-bearing lanes still call rch exec directly"
+    else
+        scenario_result "v12_program_gate_uses_shared_rch_capture" "PASS" "cargo-bearing lanes use run_rch_scenario_command"
+    fi
+    run_rch_fixture_probe "v12_program_gate_fixture_complete_self_check" \
+        "complete" 0 "Remote command finished: exit=0"
+    run_rch_fixture_probe "v12_program_gate_fixture_local_fallback_self_check" \
+        "local_fallback" 99 "RCH_LOCAL_FALLBACK_REJECTED"
+    run_rch_fixture_probe "v12_program_gate_fixture_missing_remote_evidence_self_check" \
+        "missing_remote_evidence" 99 "RCH_REMOTE_EVIDENCE_MISSING"
+}
+
 run_full_mode() {
-    run_scenario_command 1 "bd-m5wf.1.7 performance optimization gate" "bd-m5wf.1.7" "$DEFAULT_BUDGET_SECS" \
-        "${RCH_BIN:-rch}" exec -- cargo test -p ffs-harness --lib perf_comparison -- --nocapture
-    run_scenario_command 2 "bd-m5wf.2.5 writeback-cache gate" "bd-m5wf.2.5" "$DEFAULT_BUDGET_SECS" \
-        "${RCH_BIN:-rch}" exec -- cargo test -p ffs-core writeback -- --nocapture
-    run_scenario_command 3 "bd-m5wf.3.5 safe-merge high-contention gate" "bd-m5wf.3.5" "$DEFAULT_BUDGET_SECS" \
-        "${RCH_BIN:-rch}" exec -- cargo test -p ffs-mvcc --test mvcc_stress_suite verification_gate_safe_merge_correctness_under_high_contention -- --nocapture
-    run_scenario_command 4 "bd-m5wf.4.5 adaptive refresh gate" "bd-m5wf.4.5" "$DEFAULT_BUDGET_SECS" \
-        "${RCH_BIN:-rch}" exec -- cargo test -p ffs-repair verification_gate_hybrid -- --nocapture
+    run_rch_scenario_command 1 "bd-m5wf.1.7 performance optimization gate" "bd-m5wf.1.7" "$DEFAULT_BUDGET_SECS" \
+        cargo test -p ffs-harness --lib perf_comparison -- --nocapture
+    run_rch_scenario_command 2 "bd-m5wf.2.5 writeback-cache gate" "bd-m5wf.2.5" "$DEFAULT_BUDGET_SECS" \
+        cargo test -p ffs-core writeback -- --nocapture
+    run_rch_scenario_command 3 "bd-m5wf.3.5 safe-merge high-contention gate" "bd-m5wf.3.5" "$DEFAULT_BUDGET_SECS" \
+        cargo test -p ffs-mvcc --test mvcc_stress_suite verification_gate_safe_merge_correctness_under_high_contention -- --nocapture
+    run_rch_scenario_command 4 "bd-m5wf.4.5 adaptive refresh gate" "bd-m5wf.4.5" "$DEFAULT_BUDGET_SECS" \
+        cargo test -p ffs-repair verification_gate_hybrid -- --nocapture
     run_scenario_command 5 "bd-m5wf.5.5 multi-host repair gate" "bd-m5wf.5.5" "$DEFAULT_BUDGET_SECS" \
         ./scripts/e2e/ffs_repair_recovery_smoke.sh
-    run_scenario_command 6 "bd-m5wf.6.5 btrfs multi-device and subvolume gate" "bd-m5wf.6.5" "$DEFAULT_BUDGET_SECS" \
-        "${RCH_BIN:-rch}" exec -- cargo test -p ffs-core btrfs_subvolume -- --nocapture
+    run_rch_scenario_command 6 "bd-m5wf.6.5 btrfs multi-device and subvolume gate" "bd-m5wf.6.5" "$DEFAULT_BUDGET_SECS" \
+        cargo test -p ffs-core btrfs_subvolume -- --nocapture
     run_scenario_command 7 "bd-m5wf.7.5 xfstests conformance regression gate" "bd-m5wf.7.5" "$DEFAULT_BUDGET_SECS" \
         ./scripts/e2e/ffs_xfstests_regression_gate.sh
     run_scenario_command 8 "bd-m5wf.8.7 observability metrics and dashboard gate" "bd-m5wf.8.7" "$DEFAULT_BUDGET_SECS" \
         ./scripts/e2e/ffs_operator_tooling_gate_e2e.sh
     run_scenario_command 9 "bd-m5wf.9.5 coverage hardening gate" "bd-m5wf.9.5" "$DEFAULT_BUDGET_SECS" \
         ./scripts/e2e/ffs_verification_gate_e2e.sh
-    run_scenario_command 10 "workspace format gate" "bd-ckivp" "$DEFAULT_BUDGET_SECS" \
-        "${RCH_BIN:-rch}" exec -- cargo fmt --check
-    run_scenario_command 11 "workspace clippy gate" "bd-ckivp" "$DEFAULT_BUDGET_SECS" \
-        "${RCH_BIN:-rch}" exec -- cargo clippy --workspace --all-targets -- -D warnings
-    run_scenario_command 12 "workspace tests no-fail-fast gate" "bd-ckivp" "$DEFAULT_BUDGET_SECS" \
-        "${RCH_BIN:-rch}" exec -- cargo test --workspace --no-fail-fast
+    run_rch_scenario_command 10 "workspace format gate" "bd-ckivp" "$DEFAULT_BUDGET_SECS" \
+        cargo fmt --check
+    run_rch_scenario_command 11 "workspace clippy gate" "bd-ckivp" "$DEFAULT_BUDGET_SECS" \
+        cargo clippy --workspace --all-targets -- -D warnings
+    run_rch_scenario_command 12 "workspace tests no-fail-fast gate" "bd-ckivp" "$DEFAULT_BUDGET_SECS" \
+        cargo test --workspace --no-fail-fast
     run_scenario_check 13 "CLI ergonomics evidence" "bd-ckivp" \
         "grep -q '\"mount\"' crates/ffs-cli/src/main.rs && grep -q '\"repair\"' crates/ffs-cli/src/main.rs && grep -q '\"evidence\"' crates/ffs-cli/src/main.rs && grep -q '\"mkfs\"' crates/ffs-cli/src/main.rs"
     run_scenario_check 14 "structured logging traceability evidence" "bd-ckivp" \
@@ -365,6 +523,16 @@ PY
 
 e2e_init "ffs_v12_program_gate"
 e2e_print_env
+
+if [[ "$RCH_SELF_CHECK" == "1" ]]; then
+    run_rch_self_check
+    if [[ "$FAIL_COUNT" -gt 0 ]]; then
+        e2e_fail "ffs_v12_program_gate RCH self-check failed: ${FAIL_COUNT} failed"
+    else
+        e2e_pass "ffs_v12_program_gate RCH self-check completed"
+    fi
+    exit 0
+fi
 
 if [[ "$SMOKE_MODE" == "1" ]]; then
     run_smoke_mode
