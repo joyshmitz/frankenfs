@@ -13,6 +13,9 @@
 # 7. Structured logging: WAL replay lifecycle markers present
 # 8. Structured logging: crash matrix markers present
 # 9. E2E scripts for WAL/crash-matrix exist and are well-formed
+# 10. Fixture mode proves cataloged markers without cargo
+# 11. Fixture mode proves local fallback rejection
+# 12. Fixture mode proves missing remote evidence rejection
 #
 # Usage: ./scripts/e2e/ffs_mvcc_replay_gate_e2e.sh
 #
@@ -39,6 +42,8 @@ RCH_AGENT_TARGET_SUFFIX="${AGENT_NAME:-${USER:-agent}}"
 RCH_CARGO_TARGET_DIR="${RCH_CARGO_TARGET_DIR:-${TMPDIR:-/tmp}/rch_target_frankenfs_mvcc_replay_gate_$RCH_AGENT_TARGET_SUFFIX}"
 RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-900}"
 RCH_ARTIFACT_RETRIEVAL_GRACE_SECS="${RCH_ARTIFACT_RETRIEVAL_GRACE_SECS:-8}"
+SELF_CHECK="${FFS_MVCC_REPLAY_GATE_SELF_CHECK:-0}"
+SKIP_SELF_CHECK="${FFS_MVCC_REPLAY_GATE_SKIP_SELF_CHECK:-0}"
 
 rch_allow_env() {
     local name="$1"
@@ -150,7 +155,183 @@ scenario_result() {
     TOTAL=$((TOTAL + 1))
 }
 
+write_fixture_rch_stub() {
+    local stub_path="$1"
+
+    cat >"$stub_path" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+fixture_case="${FFS_MVCC_REPLAY_GATE_FIXTURE_CASE:-complete}"
+
+if [[ "${1:-}" != "exec" || "${2:-}" != "--" ]]; then
+    echo "unexpected fixture rch invocation: $*" >&2
+    exit 64
+fi
+shift 2
+command_text="$*"
+
+case "$fixture_case" in
+    local_fallback)
+        echo "[RCH] local (fixture forced local fallback)" >&2
+        exit 1
+        ;;
+    complete)
+        echo "[RCH] remote worker=fixture exit=0" >&2
+        echo "Remote command finished: exit=0" >&2
+        ;;
+    missing_remote_evidence)
+        ;;
+    *)
+        echo "unknown MVCC replay gate fixture case: $fixture_case" >&2
+        exit 64
+        ;;
+esac
+
+case "$command_text" in
+    *"cargo test -p ffs-mvcc --lib")
+        echo "running 320 tests"
+        for i in $(seq -w 1 320); do
+            echo "test mvcc_full_suite::fixture_case_${i} ... ok"
+        done
+        ;;
+    *"cargo test -p ffs-mvcc --lib -- wal_replay::tests"*)
+        echo "running 16 tests"
+        for i in $(seq -w 1 16); do
+            echo "test wal_replay::tests::fixture_replay_case_${i} ... ok"
+        done
+        ;;
+    *"cargo test -p ffs-mvcc --lib -- crash_matrix"*)
+        echo "running 16 tests"
+        for i in $(seq -w 1 16); do
+            echo "test crash_matrix::tests::fixture_crash_case_${i} ... ok"
+        done
+        ;;
+    *"cargo test -p ffs-mvcc --lib -- persist::tests"*)
+        echo "running 26 tests"
+        for i in $(seq -w 1 26); do
+            echo "test persist::tests::fixture_persist_case_${i} ... ok"
+        done
+        ;;
+    *"cargo test -p ffs-cli -- wal_replay"*)
+        printf '%s\n' \
+            "running 4 tests" \
+            "test cli::wal_replay_fixture_summary ... ok" \
+            "test cli::wal_replay_fixture_json ... ok" \
+            "test cli::wal_replay_fixture_errors ... ok" \
+            "test cli::wal_replay_fixture_paths ... ok"
+        ;;
+    *"cargo test -p ffs-core -- mvcc_wal_recovery"*)
+        printf '%s\n' \
+            "running 2 tests" \
+            "test mvcc_wal_recovery::fixture_replays_visible_state ... ok" \
+            "test mvcc_wal_recovery::fixture_rejects_torn_record ... ok"
+        ;;
+    *)
+        echo "unexpected fixture command: $command_text" >&2
+        exit 64
+        ;;
+esac
+SH
+    chmod +x "$stub_path"
+}
+
+extract_child_result_json() {
+    local log_path="$1"
+    sed -n 's/^JSON summary written: //p' "$log_path" | tail -n 1
+}
+
+run_fixture_child() {
+    local stub_path="$1"
+    local fixture_case="$2"
+    local child_log="$E2E_LOG_DIR/mvcc_replay_gate_fixture_${fixture_case}.log"
+    local child_status
+
+    set +e
+    FFS_E2E_DISABLE_TEMP_CLEANUP=1 \
+        FFS_MVCC_REPLAY_GATE_SELF_CHECK=0 \
+        FFS_MVCC_REPLAY_GATE_SKIP_SELF_CHECK=1 \
+        FFS_MVCC_REPLAY_GATE_FIXTURE_CASE="$fixture_case" \
+        RCH_BIN="$stub_path" \
+        RCH_COMMAND_TIMEOUT_SECS=2 \
+        RCH_ARTIFACT_RETRIEVAL_GRACE_SECS=1 \
+        "$REPO_ROOT/scripts/e2e/ffs_mvcc_replay_gate_e2e.sh" >"$child_log" 2>&1
+    child_status=$?
+    set -e
+
+    printf '%s\t%s\n' "$child_status" "$child_log"
+}
+
+run_self_check() {
+    if [[ "$SKIP_SELF_CHECK" == "1" ]]; then
+        return 0
+    fi
+
+    e2e_step "Deterministic MVCC replay gate wrapper self-check"
+    local stub_path child_info child_status child_log result_path
+    stub_path="$E2E_LOG_DIR/rch-mvcc-replay-gate-fixture"
+    write_fixture_rch_stub "$stub_path"
+
+    child_info="$(run_fixture_child "$stub_path" "complete")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    if [[ "$child_status" == "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && jq -e '
+            .verdict == "PASS"
+            and .rch_local_fallback_rejected_count == 0
+            and ([.scenarios[] | select(.scenario_id == "mvcc_full_suite" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "wal_replay_tests" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "crash_matrix_tests" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "persist_layer_tests" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "cli_wal_telemetry_tests" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "core_wal_recovery" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "wal_replay_logging" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "crash_matrix_logging" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "mvcc_e2e_scripts" and .outcome == "PASS")] | length == 1)
+        ' "$result_path" >/dev/null; then
+        scenario_result "mvcc_replay_fixture_complete_self_check" "PASS" "result=${result_path}"
+    else
+        scenario_result "mvcc_replay_fixture_complete_self_check" "FAIL" "log=${child_log}"
+        return 1
+    fi
+
+    child_info="$(run_fixture_child "$stub_path" "local_fallback")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    if [[ "$child_status" != "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && jq -e '.verdict == "FAIL" and .rch_local_fallback_rejected_count >= 1' "$result_path" >/dev/null; then
+        scenario_result "mvcc_replay_fixture_local_fallback_self_check" "PASS" "result=${result_path}"
+    else
+        scenario_result "mvcc_replay_fixture_local_fallback_self_check" "FAIL" "log=${child_log}"
+        return 1
+    fi
+
+    child_info="$(run_fixture_child "$stub_path" "missing_remote_evidence")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    if [[ "$child_status" != "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && jq -e '.verdict == "FAIL"' "$result_path" >/dev/null \
+        && grep -q "RCH_REMOTE_EVIDENCE_MISSING" "$child_log"; then
+        scenario_result "mvcc_replay_fixture_missing_remote_evidence_self_check" "PASS" "result=${result_path}"
+    else
+        scenario_result "mvcc_replay_fixture_missing_remote_evidence_self_check" "FAIL" "log=${child_log}"
+        return 1
+    fi
+}
+
 e2e_init "ffs_mvcc_replay_gate"
+
+if [[ "$SELF_CHECK" == "1" ]]; then
+    run_self_check
+    e2e_pass
+    exit 0
+fi
 
 WAL_REPLAY_SRC="crates/ffs-mvcc/src/wal_replay.rs"
 CRASH_MATRIX_SRC="crates/ffs-mvcc/src/crash_matrix.rs"
