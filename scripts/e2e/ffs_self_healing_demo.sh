@@ -24,9 +24,9 @@ export RUST_LOG="${RUST_LOG:-info}"
 export RUST_BACKTRACE="${RUST_BACKTRACE:-1}"
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_self_healing_demo}"
 RCH_BIN="${RCH_BIN:-rch}"
-RCH_VISIBILITY="${RCH_VISIBILITY:-summary}"
 RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-900}"
 RCH_ARTIFACT_RETRIEVAL_GRACE_SECS="${RCH_ARTIFACT_RETRIEVAL_GRACE_SECS:-8}"
+RCH_CAPTURE_VISIBILITY="${FFS_SELF_HEALING_DEMO_RCH_VISIBILITY:-${RCH_VISIBILITY:-summary}}"
 SELF_CHECK="${FFS_SELF_HEALING_DEMO_SELF_CHECK:-0}"
 SKIP_SELF_CHECK="${FFS_SELF_HEALING_DEMO_SKIP_SELF_CHECK:-0}"
 
@@ -37,12 +37,7 @@ for arg in "$@"; do
     esac
 done
 
-for rch_env_var in CARGO_TARGET_DIR RUST_LOG RUST_BACKTRACE; do
-    case ",${RCH_ENV_ALLOWLIST:-}," in
-        *",${rch_env_var},"*) ;;
-        *) export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}${rch_env_var}" ;;
-    esac
-done
+e2e_rch_add_env_allowlist CARGO_TARGET_DIR RUST_LOG RUST_BACKTRACE
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -61,100 +56,11 @@ scenario_result() {
     TOTAL=$((TOTAL + 1))
 }
 
-cancel_matching_rch_queue_entry() {
-    local command_text="$*"
-    local queue_json
-    local ids
-    if ! command -v jq >/dev/null 2>&1; then
-        return 0
-    fi
-    queue_json="$("$RCH_BIN" queue --json 2>/dev/null || true)"
-    if [[ -z "$queue_json" ]]; then
-        return 0
-    fi
-    ids="$(jq -r --arg cmd "$command_text" '
-        .data.active_builds[]?
-        | select(.project_id | startswith("frankenfs-"))
-        | select(.command == $cmd)
-        | .id
-    ' <<<"$queue_json" || true)"
-    for id in $ids; do
-        if "$RCH_BIN" cancel "$id" >/dev/null 2>&1; then
-            e2e_log "RCH_STALE_QUEUE_CANCELLED|id=${id}|command=${command_text}"
-        fi
-    done
-}
-
 run_rch_capture() {
-    local output_path="$1"
-    local status=0
-    local pid
-    local deadline
-    local remote_exit=""
-    local wait_status
-    local had_errexit=0
+    local log_path="$1"
     shift
 
-    case $- in
-        *e*) had_errexit=1 ;;
-    esac
-
-    : >"$output_path"
-    set +e
-    RCH_VISIBILITY="$RCH_VISIBILITY" RCH_LOG_LEVEL="${RCH_LOG_LEVEL:-info}" "$RCH_BIN" exec -- "$@" >"$output_path" 2>&1 &
-    pid=$!
-    if [[ "$had_errexit" -eq 1 ]]; then
-        set -e
-    fi
-
-    deadline=$((SECONDS + RCH_COMMAND_TIMEOUT_SECS))
-    while kill -0 "$pid" >/dev/null 2>&1; do
-        remote_exit="$(sed -n 's/.*Remote command finished: exit=\([0-9][0-9]*\).*/\1/p' "$output_path" | tail -n 1)"
-        if [[ -n "$remote_exit" ]]; then
-            sleep "$RCH_ARTIFACT_RETRIEVAL_GRACE_SECS"
-            if kill -0 "$pid" >/dev/null 2>&1; then
-                e2e_log "RCH_ARTIFACT_RETRIEVAL_STOPPED_AFTER_REMOTE_EXIT|exit=${remote_exit}|output=${output_path}|command=$*"
-                kill -TERM "$pid" >/dev/null 2>&1 || true
-                cancel_matching_rch_queue_entry "$@"
-            fi
-            break
-        fi
-        if ((SECONDS >= deadline)); then
-            e2e_log "RCH_TIMEOUT|seconds=${RCH_COMMAND_TIMEOUT_SECS}|output=${output_path}|command=$*"
-            kill -TERM "$pid" >/dev/null 2>&1 || true
-            cancel_matching_rch_queue_entry "$@"
-            status=124
-            break
-        fi
-        sleep 2
-    done
-
-    set +e
-    wait "$pid" >/dev/null 2>&1
-    wait_status=$?
-    if [[ "$had_errexit" -eq 1 ]]; then
-        set -e
-    fi
-    if [[ -n "$remote_exit" ]]; then
-        status="$remote_exit"
-    elif [[ $status -eq 0 ]]; then
-        status="$wait_status"
-    fi
-
-    if grep -Fq "[RCH] local" "$output_path" || grep -Fq "exec called with non-compilation command" "$output_path"; then
-        e2e_log "RCH_LOCAL_FALLBACK_REJECTED|output=${output_path}|command=$*"
-        printf 'RCH_LOCAL_FALLBACK_REJECTED|output=%s\n' "$output_path" >>"$output_path"
-        return 99
-    fi
-    if [[ $status -eq 0 ]]; then
-        if ! grep -Fq "[RCH] remote" "$output_path" && ! grep -Fq "Remote command finished: exit=0" "$output_path"; then
-            e2e_log "RCH_REMOTE_EVIDENCE_MISSING|output=${output_path}|command=$*"
-            printf 'RCH_REMOTE_EVIDENCE_MISSING|output=%s\n' "$output_path" >>"$output_path"
-            return 99
-        fi
-        return 0
-    fi
-    return "$status"
+    RCH_VISIBILITY="$RCH_CAPTURE_VISIBILITY" e2e_rch_capture "$log_path" "$@"
 }
 
 write_fixture_rch_stub() {
@@ -179,6 +85,7 @@ case "$fixture_case" in
         ;;
     complete)
         echo "[RCH] remote worker=fixture exit=0" >&2
+        echo "Remote command finished: exit=0" >&2
         ;;
     missing_remote_evidence)
         ;;
