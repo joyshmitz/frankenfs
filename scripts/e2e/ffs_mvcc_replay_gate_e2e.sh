@@ -36,25 +36,14 @@ export RUST_LOG="${RUST_LOG:-info}"
 export RUST_BACKTRACE="${RUST_BACKTRACE:-1}"
 
 RCH_BIN="${RCH_BIN:-rch}"
-RCH_VISIBILITY="${RCH_VISIBILITY:-summary}"
-RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:-CARGO_TARGET_DIR,RUST_LOG,RUST_BACKTRACE}"
+e2e_rch_add_env_allowlist CARGO_TARGET_DIR RUST_LOG RUST_BACKTRACE
+RCH_CAPTURE_VISIBILITY="${FFS_MVCC_REPLAY_GATE_RCH_VISIBILITY:-${RCH_VISIBILITY:-summary}}"
 RCH_AGENT_TARGET_SUFFIX="${AGENT_NAME:-${USER:-agent}}"
 RCH_CARGO_TARGET_DIR="${RCH_CARGO_TARGET_DIR:-${TMPDIR:-/tmp}/rch_target_frankenfs_mvcc_replay_gate_$RCH_AGENT_TARGET_SUFFIX}"
 RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-900}"
 RCH_ARTIFACT_RETRIEVAL_GRACE_SECS="${RCH_ARTIFACT_RETRIEVAL_GRACE_SECS:-8}"
 SELF_CHECK="${FFS_MVCC_REPLAY_GATE_SELF_CHECK:-0}"
 SKIP_SELF_CHECK="${FFS_MVCC_REPLAY_GATE_SKIP_SELF_CHECK:-0}"
-
-rch_allow_env() {
-    local name="$1"
-    if [[ ",$RCH_ENV_ALLOWLIST," != *",$name,"* ]]; then
-        RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST},$name"
-    fi
-}
-
-rch_allow_env CARGO_TARGET_DIR
-rch_allow_env RUST_LOG
-rch_allow_env RUST_BACKTRACE
 
 terminate_rch_capture() {
     local pid="$1"
@@ -80,7 +69,7 @@ run_rch_cargo_capture() {
     setsid env \
         CARGO_TARGET_DIR="$RCH_CARGO_TARGET_DIR" \
         RCH_ENV_ALLOWLIST="$RCH_ENV_ALLOWLIST" \
-        RCH_VISIBILITY="$RCH_VISIBILITY" \
+        RCH_VISIBILITY="$RCH_CAPTURE_VISIBILITY" \
         RCH_LOG_LEVEL="${RCH_LOG_LEVEL:-info}" \
         "$RCH_BIN" exec -- cargo "$@" >"$log_path" 2>&1 &
     pid=$!
