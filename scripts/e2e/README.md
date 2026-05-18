@@ -1746,6 +1746,22 @@ It writes JSON and Markdown reports, checks historical 86/86, 90/90, and 100
 percent migration classifications, injects unsafe flat parity wording, injects
 missing owner beads, and runs the module unit tests.
 
+## Ambition Evidence Matrix
+
+The ambition evidence matrix gate verifies the control-plane contract consumed
+by proof bundles, release gates, remediation catalogs, README/FEATURE_PARITY
+wording, and follow-up beads. The E2E smoke is:
+
+```bash
+./scripts/e2e/ffs_ambition_evidence_matrix_e2e.sh
+```
+
+Verify the ambition evidence matrix RCH capture contract without running cargo:
+
+```bash
+FFS_E2E_DISABLE_TEMP_CLEANUP=1 FFS_AMBITION_EVIDENCE_MATRIX_SELF_CHECK=1 ./scripts/e2e/ffs_ambition_evidence_matrix_e2e.sh
+```
+
 ## Docs Status Drift
 
 Docs status drift validation consumes support-state accounting plus the ambition

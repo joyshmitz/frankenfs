@@ -20,6 +20,8 @@ case ",${RCH_ENV_ALLOWLIST:-}," in
 esac
 RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-600}"
 RCH_ARTIFACT_RETRIEVAL_GRACE_SECS="${RCH_ARTIFACT_RETRIEVAL_GRACE_SECS:-8}"
+SELF_CHECK="${FFS_AMBITION_EVIDENCE_MATRIX_SELF_CHECK:-0}"
+SKIP_SELF_CHECK="${FFS_AMBITION_EVIDENCE_MATRIX_SKIP_SELF_CHECK:-0}"
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -110,6 +112,371 @@ run_rch_capture() {
 }
 
 e2e_init "ffs_ambition_evidence_matrix"
+
+write_fixture_rch_stub() {
+    local stub_path="$1"
+
+    cat >"$stub_path" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+fixture_case="${FFS_AMBITION_EVIDENCE_MATRIX_FIXTURE_CASE:-complete}"
+
+if [[ "${1:-}" != "exec" || "${2:-}" != "--" ]]; then
+    echo "unexpected ambition matrix fixture rch invocation: $*" >&2
+    exit 64
+fi
+shift 2
+command_text="$*"
+
+case "$fixture_case" in
+    local_fallback)
+        echo "[RCH] local (fixture forced local fallback)"
+        exit 1
+        ;;
+    missing_remote_evidence)
+        ;;
+    complete)
+        echo "[RCH] remote worker=fixture exit=0"
+        ;;
+    *)
+        echo "unknown ambition matrix fixture case: $fixture_case" >&2
+        exit 64
+        ;;
+esac
+
+finish_success() {
+    if [[ "$fixture_case" == "complete" ]]; then
+        echo "Remote command finished: exit=0"
+    fi
+    exit 0
+}
+
+finish_failure() {
+    local status="$1"
+    if [[ "$fixture_case" == "complete" ]]; then
+        echo "Remote command finished: exit=${status}"
+    fi
+    exit "$status"
+}
+
+emit_json_report() {
+    cat <<'JSON'
+{
+  "matrix_version": 1,
+  "source_bead_ids": [
+    "bd-rchk0.5.10",
+    "bd-rchk0.5.11",
+    "bd-rchk0.5.12",
+    "bd-rchk0.5.13",
+    "bd-rchk0.5.14"
+  ],
+  "tracker_limitation": "dotted child dependency edges are validated from JSONL fixtures",
+  "grouped_by_user_risk": {
+    "low": [
+      "bd-rchk0.5.10"
+    ]
+  },
+  "grouped_by_security_coverage": {
+    "covered": [
+      "bd-rchk0.5.11"
+    ]
+  },
+  "grouped_by_remediation_coverage": {
+    "covered": [
+      "bd-rchk0.5.12"
+    ]
+  },
+  "grouped_by_demo_coverage": {
+    "covered": [
+      "bd-rchk0.5.13"
+    ]
+  },
+  "grouped_by_budget_status": {
+    "validated": [
+      "bd-rchk0.5.14"
+    ]
+  },
+  "grouped_by_release_gate_consumer": {
+    "release-gates": [
+      "bd-rchk0.5.10"
+    ]
+  },
+  "grouped_by_matrix_status": {
+    "validated": [
+      "bd-rchk0.5.10"
+    ]
+  },
+  "operational_prerequisites": [
+    {
+      "prerequisite_bead_id": "bd-rchk0.4.1"
+    },
+    {
+      "prerequisite_bead_id": "bd-rchk0.4.2"
+    },
+    {
+      "prerequisite_bead_id": "bd-rchk0.4.3"
+    },
+    {
+      "prerequisite_bead_id": "bd-rchk4.2"
+    },
+    {
+      "prerequisite_bead_id": "bd-rchk4.3"
+    },
+    {
+      "prerequisite_bead_id": "bd-rchk7.2"
+    },
+    {
+      "prerequisite_bead_id": "bd-rchk0.1.3"
+    },
+    {
+      "prerequisite_bead_id": "bd-rchk0.2.3"
+    },
+    {
+      "prerequisite_bead_id": "bd-rchk0.3.3"
+    }
+  ],
+  "dependency_gate_map": [
+    {
+      "source_bead_id": "bd-rchk0.5.10",
+      "prerequisite_bead_ids": [
+        "bd-rchk0.4.1",
+        "bd-rchk0.4.2",
+        "bd-rchk0.4.3",
+        "bd-rchk4.2",
+        "bd-rchk4.3",
+        "bd-rchk7.2",
+        "bd-rchk0.1.3",
+        "bd-rchk0.2.3",
+        "bd-rchk0.3.3"
+      ]
+    }
+  ],
+  "required_output_coverage": [
+    {
+      "source_bead_id": "bd-rchk0.5.10",
+      "represented": true,
+      "matrix_fields": [
+        "user_risk"
+      ]
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.11",
+      "represented": true,
+      "matrix_fields": [
+        "security_coverage"
+      ]
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.12",
+      "represented": true,
+      "matrix_fields": [
+        "remediation_coverage"
+      ]
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.13",
+      "represented": true,
+      "matrix_fields": [
+        "demo_coverage"
+      ]
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.14",
+      "represented": true,
+      "matrix_fields": [
+        "budget_status"
+      ]
+    }
+  ],
+  "consumer_summaries": [
+    {
+      "consumer_name": "proof-bundle",
+      "consumer_version": "fixture"
+    },
+    {
+      "consumer_name": "release-gates",
+      "consumer_version": "fixture"
+    },
+    {
+      "consumer_name": "remediation-catalog",
+      "consumer_version": "fixture"
+    },
+    {
+      "consumer_name": "README/FEATURE_PARITY",
+      "consumer_version": "fixture"
+    },
+    {
+      "consumer_name": "follow-up-bead",
+      "consumer_version": "fixture"
+    }
+  ],
+  "consumer_contracts": [
+    {
+      "consumer_name": "proof-bundle"
+    },
+    {
+      "consumer_name": "release-gates"
+    },
+    {
+      "consumer_name": "remediation-catalog"
+    },
+    {
+      "consumer_name": "README/FEATURE_PARITY"
+    },
+    {
+      "consumer_name": "follow-up-bead"
+    }
+  ],
+  "downgrade_decisions": [
+    {
+      "source_bead_id": "bd-rchk0.5.10",
+      "decision": "fixture"
+    }
+  ],
+  "consumer_versions": [
+    "fixture"
+  ],
+  "stale_reference_checks": [
+    "fixture"
+  ],
+  "missing_field_diagnostics": [
+    "fixture"
+  ],
+  "generated_artifact_paths": [
+    "artifacts/fixture/ambition_evidence_matrix.json"
+  ],
+  "reproduction_command": "cargo run -p ffs-harness -- validate-ambition-evidence-matrix --issues .beads/issues.jsonl"
+}
+JSON
+}
+
+case "$command_text" in
+    *"issues_stale_reference.jsonl"*)
+        echo "bd-rchk0.5.14"
+        finish_failure 1
+        ;;
+    *"issues_missing_artifact.jsonl"*)
+        echo "artifact_path"
+        finish_failure 1
+        ;;
+    *"cargo test"*ambition_evidence_matrix*)
+        for i in $(seq 1 10); do
+            echo "test ambition_evidence_matrix::tests::fixture_case_${i} ... ok"
+        done
+        echo "test result: ok. fixture passed"
+        finish_success
+        ;;
+    *"validate-ambition-evidence-matrix"*)
+        emit_json_report
+        finish_success
+        ;;
+    *)
+        echo "unexpected ambition matrix fixture command: $command_text" >&2
+        exit 64
+        ;;
+esac
+SH
+    chmod +x "$stub_path"
+}
+
+extract_child_result_json() {
+    local log_path="$1"
+    sed -n 's/^JSON summary written: //p' "$log_path" | tail -n 1
+}
+
+run_fixture_child() {
+    local stub_path="$1"
+    local fixture_case="$2"
+    local child_log="$E2E_LOG_DIR/ambition_matrix_fixture_${fixture_case}.log"
+    local child_status
+
+    set +e
+    FFS_E2E_DISABLE_TEMP_CLEANUP=1 \
+        FFS_AMBITION_EVIDENCE_MATRIX_SELF_CHECK=0 \
+        FFS_AMBITION_EVIDENCE_MATRIX_SKIP_SELF_CHECK=1 \
+        FFS_AMBITION_EVIDENCE_MATRIX_FIXTURE_CASE="$fixture_case" \
+        RCH_BIN="$stub_path" \
+        RCH_COMMAND_TIMEOUT_SECS=2 \
+        RCH_ARTIFACT_RETRIEVAL_GRACE_SECS=1 \
+        "$REPO_ROOT/scripts/e2e/ffs_ambition_evidence_matrix_e2e.sh" >"$child_log" 2>&1
+    child_status=$?
+    set -e
+
+    printf '%s\t%s\n' "$child_status" "$child_log"
+}
+
+run_self_check() {
+    if [[ "$SKIP_SELF_CHECK" == "1" ]]; then
+        return 0
+    fi
+
+    e2e_step "Deterministic ambition evidence matrix wrapper self-check"
+    local stub_path child_info child_status child_log result_path
+    stub_path="$E2E_LOG_DIR/rch-ambition-evidence-matrix-fixture"
+    write_fixture_rch_stub "$stub_path"
+
+    child_info="$(run_fixture_child "$stub_path" "complete")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    if [[ "$child_status" == "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && jq -e '
+            .verdict == "PASS"
+            and .invalid_scenario_marker_count == 0
+            and .rch_local_fallback_rejected_count == 0
+            and ([.scenarios[] | select(.scenario_id == "ambition_matrix_wired" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "ambition_matrix_report_renders" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "ambition_matrix_grouping" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "ambition_matrix_log_tokens" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "ambition_matrix_required_outputs" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "ambition_matrix_consumer_contracts" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "ambition_matrix_stale_reference_fails" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "ambition_matrix_missing_artifact_fails" and .outcome == "PASS")] | length == 1)
+            and ([.scenarios[] | select(.scenario_id == "ambition_matrix_unit_tests" and .outcome == "PASS")] | length == 1)
+        ' "$result_path" >/dev/null; then
+        scenario_result "ambition_matrix_fixture_complete_self_check" "PASS" "result=${result_path}"
+    else
+        scenario_result "ambition_matrix_fixture_complete_self_check" "FAIL" "log=${child_log}"
+        return 1
+    fi
+
+    child_info="$(run_fixture_child "$stub_path" "local_fallback")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    if [[ "$child_status" != "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && jq -e '.verdict == "FAIL" and .rch_local_fallback_rejected_count >= 1' "$result_path" >/dev/null \
+        && grep -q "RCH_LOCAL_FALLBACK_REJECTED" "$child_log"; then
+        scenario_result "ambition_matrix_fixture_local_fallback_self_check" "PASS" "result=${result_path}"
+    else
+        scenario_result "ambition_matrix_fixture_local_fallback_self_check" "FAIL" "log=${child_log}"
+        return 1
+    fi
+
+    child_info="$(run_fixture_child "$stub_path" "missing_remote_evidence")"
+    child_status="${child_info%%$'\t'*}"
+    child_log="${child_info#*$'\t'}"
+    result_path="$(extract_child_result_json "$child_log")"
+    if [[ "$child_status" != "0" ]] \
+        && [[ -n "$result_path" ]] \
+        && jq -e '.verdict == "FAIL"' "$result_path" >/dev/null \
+        && grep -q "RCH_REMOTE_EVIDENCE_MISSING" "$child_log"; then
+        scenario_result "ambition_matrix_fixture_missing_remote_evidence_self_check" "PASS" "result=${result_path}"
+    else
+        scenario_result "ambition_matrix_fixture_missing_remote_evidence_self_check" "FAIL" "log=${child_log}"
+        return 1
+    fi
+}
+
+if [[ "$SELF_CHECK" == "1" ]]; then
+    run_self_check
+    e2e_pass
+    exit 0
+fi
+
 e2e_print_env
 # Preserve the temp workspace as part of the proof artifact. This repo forbids
 # automated file deletion, including cleanup of directories created by a smoke.

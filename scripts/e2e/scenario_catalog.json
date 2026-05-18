@@ -6178,6 +6178,24 @@
           "category": "happy",
           "status": "active",
           "evidence": "SCENARIO_RESULT|scenario_id=ambition_matrix_unit_tests|outcome=PASS"
+        },
+        {
+          "id": "ambition_matrix_fixture_complete_self_check",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=ambition_matrix_fixture_complete_self_check|outcome=PASS"
+        },
+        {
+          "id": "ambition_matrix_fixture_local_fallback_self_check",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=ambition_matrix_fixture_local_fallback_self_check|outcome=PASS"
+        },
+        {
+          "id": "ambition_matrix_fixture_missing_remote_evidence_self_check",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=ambition_matrix_fixture_missing_remote_evidence_self_check|outcome=PASS"
         }
       ]
     },
