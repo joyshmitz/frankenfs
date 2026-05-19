@@ -1521,7 +1521,7 @@ impl Drop for IoctlTraceProbe {
 }
 
 fn validate_ioctl_trace_path(path: &Path) -> std::io::Result<()> {
-    match std::fs::metadata(path) {
+    match std::fs::symlink_metadata(path) {
         Ok(metadata) => {
             let file_type = metadata.file_type();
             if file_type.is_file() {
@@ -8935,6 +8935,40 @@ mod tests {
         let trace_path = std::env::temp_dir();
         let probe = IoctlTraceProbe::new(trace_path);
 
+        assert!(probe.sender.is_none());
+        assert!(probe.worker.is_none());
+        assert!(probe.flush_sync().is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ioctl_trace_symlink_path_disables_writer_without_following_target() {
+        let unique = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .expect("system time after unix epoch")
+            .as_nanos();
+        let trace_dir = std::env::temp_dir();
+        let target_path = trace_dir.join(format!(
+            "ffs_fuse_ioctl_trace_symlink_target_{}_{}.log",
+            std::process::id(),
+            unique
+        ));
+        let symlink_path = trace_dir.join(format!(
+            "ffs_fuse_ioctl_trace_symlink_{}_{}.log",
+            std::process::id(),
+            unique
+        ));
+        std::fs::write(&target_path, "seed\n").expect("seed symlink target");
+        std::os::unix::fs::symlink(&target_path, &symlink_path)
+            .expect("create ioctl trace symlink");
+
+        let err = validate_ioctl_trace_path(&symlink_path).expect_err("symlink must be rejected");
+        assert!(
+            err.to_string().contains("symlink"),
+            "unexpected validation error: {err}"
+        );
+
+        let probe = IoctlTraceProbe::new(symlink_path);
         assert!(probe.sender.is_none());
         assert!(probe.worker.is_none());
         assert!(probe.flush_sync().is_err());
