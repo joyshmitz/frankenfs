@@ -390,6 +390,8 @@ pub struct AllocHint {
     pub goal_group: Option<GroupNumber>,
     /// Preferred block number (e.g., adjacent to last allocated extent).
     pub goal_block: Option<BlockNumber>,
+    /// Optional NUMA placement preference prepared by higher layers.
+    pub numa: Option<NumaAllocationPreference>,
 }
 
 // ── NUMA allocation topology contract ──────────────────────────────────────
@@ -458,6 +460,13 @@ pub struct NumaAllocationTopology {
 pub struct NumaAllocationPlan {
     pub group_nodes: Vec<Option<NumaNodeId>>,
     pub disposition: NumaTopologyDisposition,
+}
+
+/// Optional NUMA preference attached to an allocation request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NumaAllocationPreference {
+    pub plan: NumaAllocationPlan,
+    pub preferred_node: NumaNodeId,
 }
 
 /// How the allocator may interpret the validated topology.
@@ -579,6 +588,90 @@ pub fn resolve_numa_allocation_goal(
         }
     }
     GroupNumber(0)
+}
+
+fn allocation_group_order(geo: &FsGeometry, hint: &AllocHint) -> Result<Vec<GroupNumber>> {
+    let group_len = usize::try_from(geo.group_count)
+        .map_err(|_| FfsError::InvalidGeometry("group_count does not fit usize".into()))?;
+    let mut order = Vec::with_capacity(group_len);
+
+    if let Some(numa) = &hint.numa {
+        validate_allocator_numa_preference(geo, numa)?;
+        if hint.goal_group.is_none() && hint.goal_block.is_none() {
+            push_numa_preferred_groups(geo, numa, &mut order);
+        }
+    }
+
+    let fallback_goal = legacy_allocation_goal_group(geo, hint);
+    push_legacy_group_order(geo, fallback_goal, &mut order);
+    Ok(order)
+}
+
+fn validate_allocator_numa_preference(
+    geo: &FsGeometry,
+    numa: &NumaAllocationPreference,
+) -> Result<()> {
+    let group_len = usize::try_from(geo.group_count)
+        .map_err(|_| FfsError::InvalidGeometry("group_count does not fit usize".into()))?;
+    if numa.plan.group_nodes.len() != group_len {
+        return Err(FfsError::InvalidGeometry(format!(
+            "NUMA allocation plan covers {} groups but geometry has {} groups",
+            numa.plan.group_nodes.len(),
+            geo.group_count
+        )));
+    }
+    Ok(())
+}
+
+fn legacy_allocation_goal_group(geo: &FsGeometry, hint: &AllocHint) -> GroupNumber {
+    hint.goal_group
+        .or_else(|| hint.goal_block.map(|b| geo.absolute_to_group_block(b).0))
+        .unwrap_or(GroupNumber(0))
+}
+
+fn push_numa_preferred_groups(
+    geo: &FsGeometry,
+    numa: &NumaAllocationPreference,
+    order: &mut Vec<GroupNumber>,
+) {
+    for (index, node) in numa.plan.group_nodes.iter().enumerate() {
+        if *node != Some(numa.preferred_node) {
+            continue;
+        }
+        let Ok(group) = u32::try_from(index) else {
+            continue;
+        };
+        push_unique_group(geo, order, GroupNumber(group));
+    }
+}
+
+fn push_legacy_group_order(
+    geo: &FsGeometry,
+    goal_group: GroupNumber,
+    order: &mut Vec<GroupNumber>,
+) {
+    push_unique_group(geo, order, goal_group);
+
+    for delta in 1..=8_u32 {
+        let next = goal_group.0.wrapping_add(delta);
+        if next < geo.group_count {
+            push_unique_group(geo, order, GroupNumber(next));
+        }
+        let prev = goal_group.0.wrapping_sub(delta);
+        if prev < geo.group_count {
+            push_unique_group(geo, order, GroupNumber(prev));
+        }
+    }
+
+    for group in 0..geo.group_count {
+        push_unique_group(geo, order, GroupNumber(group));
+    }
+}
+
+fn push_unique_group(geo: &FsGeometry, order: &mut Vec<GroupNumber>, group: GroupNumber) {
+    if group.0 < geo.group_count && !order.contains(&group) {
+        order.push(group);
+    }
 }
 
 fn validate_numa_contract_metadata(
@@ -1203,37 +1296,7 @@ pub fn alloc_blocks(
         return Err(FfsError::Format("cannot allocate 0 blocks".into()));
     }
 
-    // Determine goal group.
-    let goal_group = hint
-        .goal_group
-        .or_else(|| hint.goal_block.map(|b| geo.absolute_to_group_block(b).0))
-        .unwrap_or(GroupNumber(0));
-
-    // Try goal group first.
-    if let Some(alloc) = try_alloc_in_group(cx, dev, geo, groups, goal_group, count, hint)? {
-        return Ok(alloc);
-    }
-
-    // Try nearby groups (within 8 groups of goal).
-    for delta in 1..=8u32 {
-        for dir in [1i64, -1i64] {
-            let g = i64::from(goal_group.0) + dir * i64::from(delta);
-            #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-            if g >= 0 && (g as u32) < geo.group_count {
-                let group = GroupNumber(g as u32);
-                if let Some(alloc) = try_alloc_in_group(cx, dev, geo, groups, group, count, hint)? {
-                    return Ok(alloc);
-                }
-            }
-        }
-    }
-
-    // Scan all groups.
-    for g in 0..geo.group_count {
-        let group = GroupNumber(g);
-        if group == goal_group {
-            continue;
-        }
+    for group in allocation_group_order(geo, hint)? {
         if let Some(alloc) = try_alloc_in_group(cx, dev, geo, groups, group, count, hint)? {
             return Ok(alloc);
         }
@@ -1417,37 +1480,7 @@ pub fn alloc_blocks_persist(
         return Err(FfsError::Format("cannot allocate 0 blocks".into()));
     }
 
-    let goal_group = hint
-        .goal_group
-        .or_else(|| hint.goal_block.map(|b| geo.absolute_to_group_block(b).0))
-        .unwrap_or(GroupNumber(0));
-
-    // Try goal group first.
-    if let Some(alloc) = try_alloc_safe(cx, dev, geo, groups, goal_group, count, hint, pctx)? {
-        return Ok(alloc);
-    }
-
-    // Try nearby groups (within 8 groups of goal).
-    for delta in 1..=8u32 {
-        for dir in [1i64, -1i64] {
-            let g = i64::from(goal_group.0) + dir * i64::from(delta);
-            #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-            if g >= 0 && (g as u32) < geo.group_count {
-                let group = GroupNumber(g as u32);
-                if let Some(alloc) = try_alloc_safe(cx, dev, geo, groups, group, count, hint, pctx)?
-                {
-                    return Ok(alloc);
-                }
-            }
-        }
-    }
-
-    // Scan all groups.
-    for g in 0..geo.group_count {
-        let group = GroupNumber(g);
-        if group == goal_group {
-            continue;
-        }
+    for group in allocation_group_order(geo, hint)? {
         if let Some(alloc) = try_alloc_safe(cx, dev, geo, groups, group, count, hint, pctx)? {
             return Ok(alloc);
         }
@@ -1638,38 +1671,9 @@ pub fn alloc_blocks_batch_persist(
 
     cx_checkpoint(cx)?;
 
-    let goal_group = hint
-        .goal_group
-        .or_else(|| hint.goal_block.map(|b| geo.absolute_to_group_block(b).0))
-        .unwrap_or(GroupNumber(0));
-
     let mut results = Vec::with_capacity(n as usize);
     let mut remaining = n;
-
-    // Build ordered group list: goal group first, then nearby, then full scan.
-    let mut group_order = Vec::with_capacity(geo.group_count as usize);
-
-    let start_scan = goal_group.0.saturating_sub(8);
-    let end_scan = (goal_group.0.saturating_add(8) + 1).min(geo.group_count);
-
-    group_order.push(goal_group);
-    for delta in 1..=8u32 {
-        let next = goal_group.0.wrapping_add(delta);
-        if next < end_scan {
-            group_order.push(GroupNumber(next));
-        }
-        let prev = goal_group.0.wrapping_sub(delta);
-        if prev >= start_scan && prev < geo.group_count {
-            // prev >= start_scan is enough, but prev < geo.group_count handles wrap-around.
-            group_order.push(GroupNumber(prev));
-        }
-    }
-
-    for g in 0..geo.group_count {
-        if g < start_scan || g >= end_scan {
-            group_order.push(GroupNumber(g));
-        }
-    }
+    let group_order = allocation_group_order(geo, hint)?;
 
     for &group in &group_order {
         if remaining == 0 {
@@ -3283,6 +3287,7 @@ mod tests {
         let hint = AllocHint {
             goal_group: Some(GroupNumber(0)),
             goal_block: Some(BlockNumber(10000)), // This is in group 1
+            numa: None,
         };
 
         let alloc = alloc_blocks(&cx, &dev, &geo, &mut groups, 1, &hint).unwrap();
@@ -3973,6 +3978,7 @@ mod tests {
         let hint = AllocHint {
             goal_group: Some(GroupNumber(2)),
             goal_block: None,
+            numa: None,
         };
         assert_eq!(hint.goal_group, Some(GroupNumber(2)));
         assert!(hint.goal_block.is_none());
@@ -3994,6 +4000,29 @@ mod tests {
             },
             evidence_claim: NumaEvidenceClaim::AdvisoryOnly,
             downstream_consumers: required_numa_consumers(),
+        }
+    }
+
+    fn balanced_numa_preference(
+        geo: &FsGeometry,
+        preferred_node: NumaNodeId,
+    ) -> NumaAllocationPreference {
+        let topology = observed_numa_topology(vec![
+            NumaNodeGroupRange {
+                node_id: NumaNodeId(0),
+                first_group: GroupNumber(0),
+                group_count: 2,
+            },
+            NumaNodeGroupRange {
+                node_id: NumaNodeId(1),
+                first_group: GroupNumber(2),
+                group_count: 2,
+            },
+        ]);
+        let plan = validate_numa_allocation_topology(geo, &topology, 1_010).unwrap();
+        NumaAllocationPreference {
+            plan,
+            preferred_node,
         }
     }
 
@@ -4127,10 +4156,12 @@ mod tests {
         let explicit_group = AllocHint {
             goal_group: Some(GroupNumber(3)),
             goal_block: Some(goal_block),
+            numa: None,
         };
         let explicit_block = AllocHint {
             goal_group: None,
             goal_block: Some(goal_block),
+            numa: None,
         };
 
         assert_eq!(
@@ -4237,6 +4268,171 @@ mod tests {
     }
 
     #[test]
+    fn numa_allocation_no_hint_keeps_legacy_group_order() {
+        let geo = make_geometry();
+        let order = allocation_group_order(&geo, &AllocHint::default()).unwrap();
+        assert_eq!(
+            order,
+            vec![
+                GroupNumber(0),
+                GroupNumber(1),
+                GroupNumber(2),
+                GroupNumber(3),
+            ]
+        );
+    }
+
+    #[test]
+    fn numa_allocation_prefers_requested_node_groups() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let geo = make_geometry();
+        let mut groups = make_groups(&geo);
+        let hint = AllocHint {
+            numa: Some(balanced_numa_preference(&geo, NumaNodeId(1))),
+            ..AllocHint::default()
+        };
+
+        let alloc = alloc_blocks(&cx, &dev, &geo, &mut groups, 1, &hint).unwrap();
+        let (group, _) = geo.absolute_to_group_block(alloc.start);
+
+        assert_eq!(group, GroupNumber(2));
+    }
+
+    #[test]
+    fn numa_allocation_exhausted_node_falls_back_to_legacy_order() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let geo = make_geometry();
+        let mut groups = make_groups(&geo);
+        groups[2].free_blocks = 0;
+        groups[3].free_blocks = 0;
+        let hint = AllocHint {
+            numa: Some(balanced_numa_preference(&geo, NumaNodeId(1))),
+            ..AllocHint::default()
+        };
+
+        let alloc = alloc_blocks(&cx, &dev, &geo, &mut groups, 1, &hint).unwrap();
+        let (group, _) = geo.absolute_to_group_block(alloc.start);
+
+        assert_eq!(group, GroupNumber(0));
+    }
+
+    #[test]
+    fn numa_allocation_goal_hints_override_preference() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let geo = make_geometry();
+        let mut goal_group_groups = make_groups(&geo);
+        let mut goal_block_groups = make_groups(&geo);
+        let goal_block = geo.group_block_to_absolute(GroupNumber(1), 17);
+        let goal_group_hint = AllocHint {
+            goal_group: Some(GroupNumber(0)),
+            numa: Some(balanced_numa_preference(&geo, NumaNodeId(1))),
+            ..AllocHint::default()
+        };
+        let goal_block_hint = AllocHint {
+            goal_block: Some(goal_block),
+            numa: Some(balanced_numa_preference(&geo, NumaNodeId(1))),
+            ..AllocHint::default()
+        };
+
+        let goal_group_alloc =
+            alloc_blocks(&cx, &dev, &geo, &mut goal_group_groups, 1, &goal_group_hint).unwrap();
+        let goal_block_alloc =
+            alloc_blocks(&cx, &dev, &geo, &mut goal_block_groups, 1, &goal_block_hint).unwrap();
+        let (goal_group, _) = geo.absolute_to_group_block(goal_group_alloc.start);
+        let (goal_block_group, _) = geo.absolute_to_group_block(goal_block_alloc.start);
+
+        assert_eq!(goal_group, GroupNumber(0));
+        assert_eq!(goal_block_group, GroupNumber(1));
+    }
+
+    #[test]
+    fn numa_allocation_rejects_geometry_mismatched_plan() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let mut geo = make_geometry();
+        let mut groups = make_groups(&geo);
+        let hint = AllocHint {
+            numa: Some(balanced_numa_preference(&geo, NumaNodeId(1))),
+            ..AllocHint::default()
+        };
+        geo.group_count = 3;
+
+        let err = alloc_blocks(&cx, &dev, &geo, &mut groups, 1, &hint).unwrap_err();
+
+        assert!(
+            matches!(err, FfsError::InvalidGeometry(message) if message.contains("NUMA allocation plan covers 4 groups but geometry has 3 groups"))
+        );
+    }
+
+    #[test]
+    fn numa_batch_alloc_prefers_node_then_falls_back() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let geo = make_geometry();
+        let mut groups = make_groups(&geo);
+        groups[2].free_blocks = 2;
+        groups[3].free_blocks = 0;
+        let pctx = make_persist_ctx();
+        let hint = AllocHint {
+            numa: Some(balanced_numa_preference(&geo, NumaNodeId(1))),
+            ..AllocHint::default()
+        };
+
+        let allocs =
+            alloc_blocks_batch_persist(&cx, &dev, &geo, &mut groups, 5, &hint, &pctx).unwrap();
+        let groups_allocated = allocs
+            .iter()
+            .map(|alloc| geo.absolute_to_group_block(alloc.start).0)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            groups_allocated,
+            vec![
+                GroupNumber(2),
+                GroupNumber(2),
+                GroupNumber(0),
+                GroupNumber(0),
+                GroupNumber(0),
+            ]
+        );
+    }
+
+    #[test]
+    fn numa_batch_alloc_failure_rolls_back_preferred_node() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let geo = make_geometry();
+        let mut groups = make_groups(&geo);
+        groups[0].free_blocks = 0;
+        groups[1].free_blocks = 0;
+        groups[2].free_blocks = 2;
+        groups[3].free_blocks = 0;
+        let pctx = make_persist_ctx();
+        let hint = AllocHint {
+            numa: Some(balanced_numa_preference(&geo, NumaNodeId(1))),
+            ..AllocHint::default()
+        };
+
+        let err =
+            alloc_blocks_batch_persist(&cx, &dev, &geo, &mut groups, 5, &hint, &pctx).unwrap_err();
+        let group_two_bitmap = dev.read_block(&cx, groups[2].block_bitmap_block).unwrap();
+        let reserved = reserved_blocks_in_group(&geo, &groups, GroupNumber(2));
+
+        assert!(matches!(err, FfsError::NoSpace));
+        assert_eq!(groups[2].free_blocks, 2);
+        for bit in 0..geo.blocks_in_group(GroupNumber(2)) {
+            assert_eq!(
+                bitmap_get(group_two_bitmap.as_slice(), bit),
+                is_reserved(&reserved, bit),
+                "rollback must not leave non-reserved group 2 block {bit} allocated",
+            );
+        }
+    }
+
+    #[test]
     fn group_stats_from_group_desc_maps_all_fields() {
         let gd = Ext4GroupDesc {
             block_bitmap: 100,
@@ -4271,6 +4467,7 @@ mod tests {
         let hint = AllocHint {
             goal_group: Some(GroupNumber(1)),
             goal_block: Some(first_data_block),
+            numa: None,
         };
         let block_alloc = BlockAlloc {
             start: first_data_block,
@@ -4293,7 +4490,7 @@ mod tests {
 
         let expected = "\
 GroupStats { group: GroupNumber(1), free_blocks: 8192, free_inodes: 2048, used_dirs: 0, block_bitmap_block: BlockNumber(8193), inode_bitmap_block: BlockNumber(8194), inode_table_block: BlockNumber(8195), flags: 0, block_bitmap_csum: 0, inode_bitmap_csum: 0 }
-AllocHint { goal_group: Some(GroupNumber(1)), goal_block: Some(BlockNumber(8323)) }
+AllocHint { goal_group: Some(GroupNumber(1)), goal_block: Some(BlockNumber(8323)), numa: None }
 BlockAlloc { start: BlockNumber(8323), count: 4 }
 InodeAlloc { ino: InodeNumber(17), group: GroupNumber(1) }
 131
@@ -5267,6 +5464,7 @@ InodeAlloc { ino: InodeNumber(17), group: GroupNumber(1) }
         let hint = AllocHint {
             goal_group: Some(GroupNumber(2)),
             goal_block: None,
+            numa: None,
         };
 
         let result =
