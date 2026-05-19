@@ -1515,7 +1515,8 @@ fn try_alloc_safe(
     let reserved = reserved_blocks_in_group(geo, groups, group);
 
     let bitmap_buf = dev.read_block(cx, groups[gidx].block_bitmap_block)?;
-    let mut bitmap = bitmap_buf.as_slice().to_vec();
+    let original_bitmap = bitmap_buf.as_slice().to_vec();
+    let mut bitmap = original_bitmap.clone();
 
     // Ensure all reserved blocks are marked as allocated in the bitmap.
     for &r in &reserved {
@@ -1551,10 +1552,20 @@ fn try_alloc_safe(
         }
 
         dev.write_block(cx, groups[gidx].block_bitmap_block, &bitmap)?;
-        groups[gidx].free_blocks = groups[gidx].free_blocks.saturating_sub(alloc_count);
+        let previous_free_blocks = groups[gidx].free_blocks;
+        groups[gidx].free_blocks = previous_free_blocks.saturating_sub(alloc_count);
 
         // Persist group descriptor (includes bitmap checksum stamping if metadata_csum).
-        persist_group_desc(cx, dev, pctx, group, &groups[gidx])?;
+        if let Err(error) = persist_group_desc(cx, dev, pctx, group, &groups[gidx]) {
+            groups[gidx].free_blocks = previous_free_blocks;
+            restore_block_bitmap_after_group_desc_error(
+                cx,
+                dev,
+                groups[gidx].block_bitmap_block,
+                &original_bitmap,
+                error,
+            )?;
+        }
 
         let abs_start = geo.group_block_to_absolute(group, rel_start);
         Ok(Some(BlockAlloc {
@@ -1564,6 +1575,25 @@ fn try_alloc_safe(
     } else {
         Ok(None)
     }
+}
+
+fn restore_block_bitmap_after_group_desc_error(
+    cx: &Cx,
+    dev: &dyn BlockDevice,
+    bitmap_block: BlockNumber,
+    original_bitmap: &[u8],
+    error: FfsError,
+) -> Result<()> {
+    if let Err(rollback_error) = dev.write_block(cx, bitmap_block, original_bitmap) {
+        return Err(FfsError::Corruption {
+            block: bitmap_block.0,
+            detail: format!(
+                "group descriptor persistence failed after bitmap allocation ({error}); \
+                 rollback of block bitmap failed ({rollback_error})"
+            ),
+        });
+    }
+    Err(error)
 }
 
 /// Free `count` contiguous blocks with full on-disk accounting.
@@ -1731,7 +1761,8 @@ fn try_alloc_batch_in_group(
     let reserved = reserved_blocks_in_group(geo, groups, group);
 
     let bitmap_buf = dev.read_block(cx, groups[gidx].block_bitmap_block)?;
-    let mut bitmap = bitmap_buf.as_slice().to_vec();
+    let original_bitmap = bitmap_buf.as_slice().to_vec();
+    let mut bitmap = original_bitmap.clone();
 
     // Mark reserved blocks.
     for &r in &reserved {
@@ -1777,10 +1808,20 @@ fn try_alloc_batch_in_group(
         block: 0,
         detail: "group allocation count is bounded by u32 request".into(),
     })?;
-    groups[gidx].free_blocks = groups[gidx].free_blocks.saturating_sub(count_allocated);
+    let previous_free_blocks = groups[gidx].free_blocks;
+    groups[gidx].free_blocks = previous_free_blocks.saturating_sub(count_allocated);
 
     // Single GDT persist for all allocations in this group.
-    persist_group_desc(cx, dev, pctx, group, &groups[gidx])?;
+    if let Err(error) = persist_group_desc(cx, dev, pctx, group, &groups[gidx]) {
+        groups[gidx].free_blocks = previous_free_blocks;
+        restore_block_bitmap_after_group_desc_error(
+            cx,
+            dev,
+            groups[gidx].block_bitmap_block,
+            &original_bitmap,
+            error,
+        )?;
+    }
 
     Ok(allocated)
 }
@@ -2138,7 +2179,10 @@ mod tests {
     use super::*;
     use ffs_block::BlockBuf;
     use std::collections::HashMap;
-    use std::sync::Mutex;
+    use std::sync::{
+        Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
 
     struct MemBlockDevice {
         block_size: u32,
@@ -2179,6 +2223,56 @@ mod tests {
 
         fn sync(&self, _cx: &Cx) -> Result<()> {
             Ok(())
+        }
+    }
+
+    struct FailGdtWriteDevice<'a> {
+        inner: &'a MemBlockDevice,
+        gdt_block: BlockNumber,
+        remaining_failures: AtomicUsize,
+    }
+
+    impl<'a> FailGdtWriteDevice<'a> {
+        fn new(inner: &'a MemBlockDevice, gdt_block: BlockNumber) -> Self {
+            Self {
+                inner,
+                gdt_block,
+                remaining_failures: AtomicUsize::new(1),
+            }
+        }
+    }
+
+    impl BlockDevice for FailGdtWriteDevice<'_> {
+        fn read_block(&self, cx: &Cx, block: BlockNumber) -> Result<BlockBuf> {
+            self.inner.read_block(cx, block)
+        }
+
+        fn write_block(&self, cx: &Cx, block: BlockNumber, data: &[u8]) -> Result<()> {
+            if block == self.gdt_block
+                && self
+                    .remaining_failures
+                    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
+                        remaining.checked_sub(1)
+                    })
+                    .is_ok()
+            {
+                return Err(FfsError::Io(std::io::Error::other(
+                    "injected GDT write failure",
+                )));
+            }
+            self.inner.write_block(cx, block, data)
+        }
+
+        fn block_size(&self) -> u32 {
+            self.inner.block_size()
+        }
+
+        fn block_count(&self) -> u64 {
+            self.inner.block_count()
+        }
+
+        fn sync(&self, cx: &Cx) -> Result<()> {
+            self.inner.sync(cx)
         }
     }
 
@@ -2992,6 +3086,48 @@ mod tests {
         let gdt_raw = dev.read_block(&cx, pctx.gdt_block).unwrap();
         let gd = Ext4GroupDesc::parse_from_bytes(gdt_raw.as_slice(), pctx.desc_size).unwrap();
         assert_eq!(gd.free_blocks_count, 8191);
+    }
+
+    #[test]
+    fn alloc_persist_gdt_write_failure_restores_bitmap_and_group_stats() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let geo = make_geometry();
+        let mut groups = make_groups(&geo);
+        let pctx = make_persist_ctx();
+        seed_gdt_block(&dev, &pctx, &groups);
+
+        let initial_free = groups[0].free_blocks;
+        let bitmap_block = groups[0].block_bitmap_block;
+        let initial_bitmap = dev
+            .read_block(&cx, bitmap_block)
+            .unwrap()
+            .as_slice()
+            .to_vec();
+        let initial_gdt_free = read_gdt_free_blocks(&cx, &dev, &pctx, GroupNumber(0));
+        let failing = FailGdtWriteDevice::new(&dev, pctx.gdt_block);
+
+        let err = alloc_blocks_persist(
+            &cx,
+            &failing,
+            &geo,
+            &mut groups,
+            1,
+            &AllocHint::default(),
+            &pctx,
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, FfsError::Io(_)));
+        assert_eq!(groups[0].free_blocks, initial_free);
+        assert_eq!(
+            dev.read_block(&cx, bitmap_block).unwrap().as_slice(),
+            initial_bitmap.as_slice()
+        );
+        assert_eq!(
+            read_gdt_free_blocks(&cx, &dev, &pctx, GroupNumber(0)),
+            initial_gdt_free
+        );
     }
 
     #[test]
@@ -5720,6 +5856,48 @@ InodeAlloc { ino: InodeNumber(17), group: GroupNumber(1) }
         occupied_by_group[3] = occupied_all_allocatable_except(&geo, &groups, GroupNumber(3), &[]);
 
         assert_batch_single_equivalence(&occupied_by_group, 4, &AllocHint::default());
+    }
+
+    #[test]
+    fn batch_alloc_gdt_write_failure_restores_bitmap_and_group_stats() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let geo = make_geometry();
+        let mut groups = make_groups(&geo);
+        let pctx = make_persist_ctx();
+        seed_gdt_block(&dev, &pctx, &groups);
+
+        let initial_free = groups[0].free_blocks;
+        let bitmap_block = groups[0].block_bitmap_block;
+        let initial_bitmap = dev
+            .read_block(&cx, bitmap_block)
+            .unwrap()
+            .as_slice()
+            .to_vec();
+        let initial_gdt_free = read_gdt_free_blocks(&cx, &dev, &pctx, GroupNumber(0));
+        let failing = FailGdtWriteDevice::new(&dev, pctx.gdt_block);
+
+        let err = alloc_blocks_batch_persist(
+            &cx,
+            &failing,
+            &geo,
+            &mut groups,
+            3,
+            &AllocHint::default(),
+            &pctx,
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, FfsError::Io(_)));
+        assert_eq!(groups[0].free_blocks, initial_free);
+        assert_eq!(
+            dev.read_block(&cx, bitmap_block).unwrap().as_slice(),
+            initial_bitmap.as_slice()
+        );
+        assert_eq!(
+            read_gdt_free_blocks(&cx, &dev, &pctx, GroupNumber(0)),
+            initial_gdt_free
+        );
     }
 
     #[test]
