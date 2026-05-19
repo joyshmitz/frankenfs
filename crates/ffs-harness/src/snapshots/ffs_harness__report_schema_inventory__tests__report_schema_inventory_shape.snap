@@ -9,11 +9,11 @@ expression: json
   "reproduction_command": "ffs-harness validate-report-schema-inventory --out artifacts/report-schema-inventory/report.json --summary-out artifacts/report-schema-inventory/report.md",
   "report_valid": true,
   "counts": {
-    "total_rows": 111,
+    "total_rows": 112,
     "required_rows": 10,
-    "advisory_only_rows": 99,
+    "advisory_only_rows": 100,
     "permissioned_only_rows": 1,
-    "covered_rows": 110,
+    "covered_rows": 111,
     "missing_rows": 0,
     "excluded_rows": 1
   },

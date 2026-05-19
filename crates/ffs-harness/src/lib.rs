@@ -64,6 +64,7 @@ pub mod repair_confidence_lab;
 pub mod repair_corpus;
 pub mod repair_writeback_serialization;
 pub mod report_schema_inventory;
+pub mod runtime_console_report;
 pub mod rw_background_repair_gate;
 pub mod scrub_repair_scheduler;
 pub mod soak_canary_campaign;

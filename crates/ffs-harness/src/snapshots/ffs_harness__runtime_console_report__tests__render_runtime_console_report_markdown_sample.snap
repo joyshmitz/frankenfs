@@ -1,0 +1,48 @@
+---
+source: crates/ffs-harness/src/runtime_console_report.rs
+expression: markdown
+---
+# Runtime Console Report
+
+- Report: `runtime_console_report`
+- Valid: `true`
+- Operation: `runtime-console-op-20260519T000000Z`
+- Scenario: `managed_writeback_console_observability`
+- Runtime mode: `per_core`
+- Read/write: `true`
+- Workers: `4`
+- Product evidence claim: `none`
+- Release gate effect: `operational_observability_only`
+- Swarm responsiveness claim: `not_claimed`
+- Adaptive runtime claim: `not_claimed`
+
+## Counters
+
+| Metric | Value |
+|---|---:|
+| Requests | 1000 |
+| Bytes read | 8388608 |
+| Bytes written | 2097152 |
+| Errors | 2 |
+| Throttled | 20 |
+| Shed | 4 |
+| Backpressure decisions | 1000 |
+
+## Distribution
+
+- Per-core rows: `4`
+- Imbalance ratio: `1.50`
+- Degradation level: `throttling`
+
+## Bounds
+
+- Snapshot count: `10`
+- Interval millis: `5000`
+- Max log bytes: `1048576`
+- Artifact count: `3`
+- Cleanup: `clean`
+- Adaptive runtime manifest: `artifacts/adaptive-runtime/runner/runner_manifest.json`
+
+## Issues
+
+none

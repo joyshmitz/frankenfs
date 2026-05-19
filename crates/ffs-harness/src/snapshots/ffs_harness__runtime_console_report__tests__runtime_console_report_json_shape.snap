@@ -1,0 +1,98 @@
+---
+source: crates/ffs-harness/src/runtime_console_report.rs
+expression: json
+---
+{
+  "schema_version": 1,
+  "report_id": "runtime_console_report",
+  "operation_id": "runtime-console-op-20260519T000000Z",
+  "scenario_id": "managed_writeback_console_observability",
+  "runtime_mode": "per_core",
+  "read_write": true,
+  "worker_count": 4,
+  "started_at": "2026-05-19T00:00:00Z",
+  "shutdown_at": "2026-05-19T00:10:00Z",
+  "counters": {
+    "requests_total": 1000,
+    "requests_read": 600,
+    "requests_write": 250,
+    "requests_metadata": 150,
+    "bytes_read": 8388608,
+    "bytes_written": 2097152,
+    "errors_total": 2,
+    "throttled_requests": 20,
+    "shed_requests": 4
+  },
+  "backpressure_decisions": {
+    "pass": 960,
+    "throttle": 20,
+    "shed": 4,
+    "emergency": 0,
+    "no_signal": 16
+  },
+  "degradation_level": "throttling",
+  "per_core_distribution": {
+    "rows": [
+      {
+        "core_id": 0,
+        "request_count": 250,
+        "cache_hits": 180,
+        "cache_misses": 40
+      },
+      {
+        "core_id": 1,
+        "request_count": 200,
+        "cache_hits": 140,
+        "cache_misses": 45
+      },
+      {
+        "core_id": 2,
+        "request_count": 300,
+        "cache_hits": 210,
+        "cache_misses": 60
+      },
+      {
+        "core_id": 3,
+        "request_count": 250,
+        "cache_hits": 170,
+        "cache_misses": 55
+      }
+    ],
+    "imbalance_ratio": 1.5
+  },
+  "adaptive_runtime_manifest_ref": {
+    "manifest_path": "artifacts/adaptive-runtime/runner/runner_manifest.json",
+    "report_id": "adaptive_runtime_runner_report",
+    "runtime_controls_accepted": false
+  },
+  "artifact_paths": [
+    "artifacts/runtime-console/console_report.json",
+    "artifacts/runtime-console/console_report.md",
+    "artifacts/runtime-console/structured.jsonl"
+  ],
+  "cleanup_status": "clean",
+  "reproduction_command": "ffs mount --runtime-mode per-core --console --console-out artifacts/runtime-console/console_report.json",
+  "product_evidence_claim": "none",
+  "release_gate_effect": "operational_observability_only",
+  "claim_state": {
+    "swarm_responsiveness": "not_claimed",
+    "adaptive_runtime": "not_claimed"
+  },
+  "capture_bounds": {
+    "host_paths_redacted": true,
+    "mountpoints_redacted": true,
+    "operator_env_redacted": true,
+    "max_log_bytes": 1048576,
+    "snapshot_count": 10,
+    "interval_millis": 5000
+  },
+  "validation": {
+    "valid": true,
+    "runtime_mode": "per_core",
+    "backpressure_decision_total": 1000,
+    "per_core_row_count": 4,
+    "imbalance_ratio": "1.50",
+    "artifact_count": 3,
+    "issues": []
+  }
+}

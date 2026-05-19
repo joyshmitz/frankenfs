@@ -539,6 +539,15 @@ fn adaptive_swarm_advisory_report_rows() -> Vec<ReportSchemaInventoryRow> {
             "crates/ffs-harness/src/snapshots/ffs_harness__adaptive_runtime_manifest__tests__adaptive_runtime_runner_report_json_shape.snap",
         ),
         covered_advisory_row(
+            "runtime_console_report",
+            "crates/ffs-harness/src/runtime_console_report.rs",
+            "RuntimeConsoleReport + RuntimeConsoleValidationReport",
+            "validate_runtime_console_report",
+            "managed/per-core mount runtime console artifact contract",
+            "runtime_console_report_json_shape",
+            "crates/ffs-harness/src/snapshots/ffs_harness__runtime_console_report__tests__runtime_console_report_json_shape.snap",
+        ),
+        covered_advisory_row(
             "topology_runtime_advisor_report",
             "crates/ffs-harness/src/topology_runtime_advisor.rs",
             "TopologyRuntimeAdvisorReport",
@@ -2201,12 +2210,12 @@ mod tests {
             report.schema_version,
             REPORT_SCHEMA_INVENTORY_SCHEMA_VERSION
         );
-        assert_eq!(report.total_rows, 111);
+        assert_eq!(report.total_rows, 112);
         assert_eq!(report.required_rows, 10);
-        assert_eq!(report.advisory_only_rows, 99);
+        assert_eq!(report.advisory_only_rows, 100);
         assert_eq!(report.permissioned_only_rows, 1);
         assert_eq!(report.excluded_rows, 1);
-        assert_eq!(report.covered_rows, 110);
+        assert_eq!(report.covered_rows, 111);
         assert_eq!(report.missing_rows, 0);
         for report_id in [
             "swarm_operator_report",
@@ -2245,6 +2254,7 @@ mod tests {
             "agent_mail_reservation_snapshot_report",
             "crash_replay_suite_report",
             "fsx_stress_report",
+            "runtime_console_report",
         ] {
             assert!(
                 report.report_ids.iter().any(|id| id == report_id),
@@ -3167,6 +3177,14 @@ mod tests {
                 "adaptive-runtime-runner",
                 "adaptive_runtime_runner_report_json_shape",
                 "ffs_harness__adaptive_runtime_manifest__tests__adaptive_runtime_runner_report_json_shape.snap",
+            ),
+            (
+                "runtime_console_report",
+                "crates/ffs-harness/src/runtime_console_report.rs",
+                "RuntimeConsoleReport + RuntimeConsoleValidationReport",
+                "validate_runtime_console_report",
+                "runtime_console_report_json_shape",
+                "ffs_harness__runtime_console_report__tests__runtime_console_report_json_shape.snap",
             ),
             (
                 "topology_runtime_advisor_report",

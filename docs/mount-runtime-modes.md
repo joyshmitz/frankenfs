@@ -8,6 +8,38 @@
 | `managed` | `--runtime-mode managed` | Background mount with graceful Ctrl+C shutdown and metrics. |
 | `per-core` | `--runtime-mode per-core` | Managed mount with thread-per-core dispatch and per-core metrics. |
 
+## Runtime Console Artifact Contract
+
+`ffs mount --console` must emit a schema-pinned runtime console artifact before
+operators rely on managed or per-core console output. The checked-in contract is
+`crates/ffs-harness/src/runtime_console_report.rs`, report ID
+`runtime_console_report`, schema version `1`.
+
+The artifact is operational observability only:
+
+| Field | Required value |
+|-------|----------------|
+| `product_evidence_claim` | `none` |
+| `release_gate_effect` | `operational_observability_only` |
+| `claim_state.swarm_responsiveness` | `not_claimed` |
+| `claim_state.adaptive_runtime` | `not_claimed` |
+
+The report must include `operation_id`, `scenario_id`, `runtime_mode`,
+`read_write`, `worker_count`, `started_at`, `shutdown_at`, request counters,
+bytes read and written, error counts, throttled and shed request counts,
+backpressure decision counts, `degradation_level`, per-core request/cache
+distribution, `imbalance_ratio`, optional adaptive-runtime manifest reference,
+artifact paths, cleanup status, and the exact reproduction command.
+
+Console persistence is fail-closed unless host paths, mountpoints, and operator
+environment values are redacted. Artifact paths must be repository-relative
+`artifacts/...` paths or redacted FrankenFS temp artifact roots; secret-bearing
+absolute paths are rejected. Log volume, snapshot count, and interval cadence
+are bounded by the harness contract (`16 MiB`, `240` snapshots, and
+`1s..600s`). Local console output must not claim `swarm.responsiveness` or
+`adaptive_runtime` acceptance; those claims require their own permissioned
+proof-bundle lane.
+
 ## Topology Runtime Advisor
 
 The topology runtime advisor is a non-permissioned preflight for choosing a
