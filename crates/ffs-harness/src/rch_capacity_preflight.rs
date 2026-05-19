@@ -357,6 +357,13 @@ fn validate_probe(
                     "failed or refused probe verdict must set fail_closed=true",
                 );
             }
+            if probe.exit_code == Some(0) {
+                push_error(
+                    diagnostics,
+                    "probe_failure_exit_code_clean",
+                    "failed or refused probe verdict cannot report exit_code=0",
+                );
+            }
         }
         (true, "no_remote_summary") => push_error(
             diagnostics,
@@ -523,6 +530,18 @@ mod tests {
 
         assert!(!validation.valid);
         assert!(has_code(&validation, "probe_failure_not_fail_closed"));
+    }
+
+    #[test]
+    fn rejects_remote_failure_with_clean_exit_code() {
+        let mut report = sample_report();
+        report.probe.verdict = "remote_failure".to_owned();
+        report.probe.exit_code = Some(0);
+
+        let validation = validate(&report);
+
+        assert!(!validation.valid);
+        assert!(has_code(&validation, "probe_failure_exit_code_clean"));
     }
 
     #[test]
