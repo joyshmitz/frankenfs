@@ -193,19 +193,23 @@ Each claim increments `repair_generation`. A host with a higher
 
 ```rust
 pub struct RepairOwnership {
-    host_id: Uuid,
+    host_id: String,
     hostname: String,
-    record_path: PathBuf,
     lease_ttl: Duration,
 }
 
 impl RepairOwnership {
-    pub fn try_acquire(cx: &Cx, image_path: &Path) -> Result<Option<OwnershipGuard>>;
-    pub fn renew(cx: &Cx, guard: &OwnershipGuard) -> Result<()>;
-    pub fn release(cx: &Cx, guard: OwnershipGuard) -> Result<()>;
-    pub fn is_owned_by_us(cx: &Cx, image_path: &Path) -> Result<bool>;
+    pub fn try_acquire(&self, cx: &Cx, image_path: &Path) -> std::io::Result<AcquireResult>;
+    pub fn renew(&self, cx: &Cx, guard: &mut OwnershipGuard) -> std::io::Result<()>;
+    pub fn release(cx: &Cx, guard: OwnershipGuard) -> std::io::Result<()>;
+    pub fn is_owned_by_us(&self, cx: &Cx, image_path: &Path) -> std::io::Result<bool>;
 }
 ```
+
+Each method checkpoints `Cx` before coordination-file read, parse, write,
+rename, and remove boundaries. A pre-cancelled `Cx` returns
+`ErrorKind::Interrupted` and must not create, renew, or remove the ownership
+record.
 
 ### 5.2 Coordination Record (`ffs-repair/src/ownership.rs`)
 

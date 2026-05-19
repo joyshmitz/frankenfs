@@ -9,6 +9,7 @@
 //!
 //! See `docs/design-multi-host-repair.md` for the full protocol design.
 
+use asupersync::Cx;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -20,6 +21,7 @@ const DEFAULT_LEASE_TTL_SECS: u64 = 300;
 
 /// Coordination record version.
 const RECORD_VERSION: u32 = 1;
+const OWNERSHIP_CANCELLED_MESSAGE: &str = "repair ownership operation cancelled";
 static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 // ── Coordination Record ────────────────────────────────────────────────────
@@ -151,13 +153,16 @@ impl RepairOwnership {
     /// Returns `Acquired` if ownership was successfully claimed,
     /// `OwnedByOther` if another process/host holds a valid lease, or
     /// `ConflictLost` if we lost a tiebreak.
-    pub fn try_acquire(&self, image_path: &Path) -> std::io::Result<AcquireResult> {
+    pub fn try_acquire(&self, cx: &Cx, image_path: &Path) -> std::io::Result<AcquireResult> {
+        cx_checkpoint(cx, "start ownership acquisition")?;
         let record_path = Self::record_path_for(image_path);
         let now = SystemTime::now();
 
         // Read existing record
+        cx_checkpoint(cx, "read existing ownership record")?;
         match std::fs::read_to_string(&record_path) {
             Ok(contents) => {
+                cx_checkpoint(cx, "parse existing ownership record")?;
                 let existing: CoordinationRecord = serde_json::from_str(&contents)
                     .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
@@ -188,15 +193,15 @@ impl RepairOwnership {
 
                 // Lease expired or we already own it — claim.
                 let (new_gen, new_lease_version) = next_claim_counters(&existing)?;
-                self.write_claim(&record_path, new_gen, new_lease_version)?;
+                self.write_claim(cx, &record_path, new_gen, new_lease_version)?;
 
                 // Post-write verification: re-read to detect conflicts
-                self.verify_or_tiebreak(&record_path, new_gen, new_lease_version)
+                self.verify_or_tiebreak(cx, &record_path, new_gen, new_lease_version)
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 // No record — claim with generation 1
-                self.write_claim(&record_path, 1, 1)?;
-                self.verify_or_tiebreak(&record_path, 1, 1)
+                self.write_claim(cx, &record_path, 1, 1)?;
+                self.verify_or_tiebreak(cx, &record_path, 1, 1)
             }
             Err(e) => Err(e),
         }
@@ -205,10 +210,12 @@ impl RepairOwnership {
     /// Write our ownership claim to the coordination record.
     fn write_claim(
         &self,
+        cx: &Cx,
         record_path: &Path,
         generation: u64,
         lease_version: u64,
     ) -> std::io::Result<()> {
+        cx_checkpoint(cx, "prepare ownership claim")?;
         let record = CoordinationRecord {
             version: RECORD_VERSION,
             host_id: self.host_id.clone(),
@@ -224,9 +231,12 @@ impl RepairOwnership {
         let json = serde_json::to_string_pretty(&record).map_err(std::io::Error::other)?;
 
         // Atomic write: write to temp, then rename
+        cx_checkpoint(cx, "write temporary ownership claim")?;
         let tmp_path = temp_record_path(record_path)?;
         std::fs::write(&tmp_path, &json)?;
+        cx_checkpoint(cx, "commit ownership claim")?;
         std::fs::rename(&tmp_path, record_path)?;
+        cx_checkpoint(cx, "finish ownership claim")?;
 
         debug!(
             target: "ffs::repair::ownership",
@@ -242,11 +252,12 @@ impl RepairOwnership {
     /// concurrently, prefer the higher generation, then lower host UUID.
     fn verify_or_tiebreak(
         &self,
+        cx: &Cx,
         record_path: &Path,
         expected_gen: u64,
         expected_lease_version: u64,
     ) -> std::io::Result<AcquireResult> {
-        let current = Self::read_record(record_path)?;
+        let current = Self::read_record(cx, record_path)?;
 
         if self.claim_matches(&current, expected_gen, expected_lease_version) {
             return Ok(AcquireResult::Acquired(OwnershipGuard {
@@ -256,8 +267,8 @@ impl RepairOwnership {
         }
 
         if self.should_rewrite_conflicting_claim(&current, expected_gen) {
-            self.write_claim(record_path, expected_gen, expected_lease_version)?;
-            let record = Self::read_record(record_path)?;
+            self.write_claim(cx, record_path, expected_gen, expected_lease_version)?;
+            let record = Self::read_record(cx, record_path)?;
             return Ok(self.acquisition_result_for_current_claim(
                 record_path,
                 record,
@@ -269,8 +280,10 @@ impl RepairOwnership {
         Ok(self.conflict_lost(current))
     }
 
-    fn read_record(record_path: &Path) -> std::io::Result<CoordinationRecord> {
+    fn read_record(cx: &Cx, record_path: &Path) -> std::io::Result<CoordinationRecord> {
+        cx_checkpoint(cx, "read ownership record")?;
         let contents = std::fs::read_to_string(record_path)?;
+        cx_checkpoint(cx, "parse ownership record")?;
         serde_json::from_str(&contents)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
     }
@@ -350,10 +363,9 @@ impl RepairOwnership {
     }
 
     /// Renew an existing lease.
-    pub fn renew(&self, guard: &mut OwnershipGuard) -> std::io::Result<()> {
-        let contents = std::fs::read_to_string(&guard.record_path)?;
-        let current: CoordinationRecord = serde_json::from_str(&contents)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    pub fn renew(&self, cx: &Cx, guard: &mut OwnershipGuard) -> std::io::Result<()> {
+        cx_checkpoint(cx, "start ownership renewal")?;
+        let current = Self::read_record(cx, &guard.record_path)?;
         if !Self::same_lease_incarnation(&current, &guard.record) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
@@ -371,11 +383,17 @@ impl RepairOwnership {
             ));
         }
 
-        guard.record.renew();
-        let json = serde_json::to_string_pretty(&guard.record).map_err(std::io::Error::other)?;
+        cx_checkpoint(cx, "prepare ownership renewal")?;
+        let mut renewed = guard.record.clone();
+        renewed.renew();
+        let json = serde_json::to_string_pretty(&renewed).map_err(std::io::Error::other)?;
         let tmp_path = temp_record_path(&guard.record_path)?;
+        cx_checkpoint(cx, "write temporary ownership renewal")?;
         std::fs::write(&tmp_path, &json)?;
+        cx_checkpoint(cx, "commit ownership renewal")?;
         std::fs::rename(&tmp_path, &guard.record_path)?;
+        guard.record = renewed;
+        cx_checkpoint(cx, "finish ownership renewal")?;
         debug!(
             target: "ffs::repair::ownership",
             host_id = %self.host_id,
@@ -387,12 +405,14 @@ impl RepairOwnership {
     /// Release ownership explicitly. Consumes the guard to prevent
     /// further use after release.
     #[allow(clippy::needless_pass_by_value)]
-    pub fn release(guard: OwnershipGuard) -> std::io::Result<()> {
+    pub fn release(cx: &Cx, guard: OwnershipGuard) -> std::io::Result<()> {
+        cx_checkpoint(cx, "start ownership release")?;
         let contents = match std::fs::read_to_string(&guard.record_path) {
             Ok(contents) => contents,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
             Err(e) => return Err(e),
         };
+        cx_checkpoint(cx, "parse ownership release record")?;
         let current: CoordinationRecord = serde_json::from_str(&contents)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         if !Self::same_lease_incarnation(&current, &guard.record) {
@@ -414,8 +434,10 @@ impl RepairOwnership {
 
         // Remove the coordination record so the next host can claim immediately
         // instead of waiting for TTL expiry.
+        cx_checkpoint(cx, "remove ownership record")?;
         match std::fs::remove_file(&guard.record_path) {
             Ok(()) => {
+                cx_checkpoint(cx, "finish ownership release")?;
                 info!(
                     target: "ffs::repair::ownership",
                     host_id = %guard.record.host_id,
@@ -429,10 +451,12 @@ impl RepairOwnership {
     }
 
     /// Check if we currently own the image (without modifying the record).
-    pub fn is_owned_by_us(&self, image_path: &Path) -> std::io::Result<bool> {
+    pub fn is_owned_by_us(&self, cx: &Cx, image_path: &Path) -> std::io::Result<bool> {
+        cx_checkpoint(cx, "start ownership status check")?;
         let record_path = Self::record_path_for(image_path);
         match std::fs::read_to_string(&record_path) {
             Ok(contents) => {
+                cx_checkpoint(cx, "parse ownership status record")?;
                 let record: CoordinationRecord = serde_json::from_str(&contents)
                     .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
                 let now = SystemTime::now();
@@ -449,6 +473,15 @@ impl RepairOwnership {
             && current.repair_generation == expected.repair_generation
             && current.lease_version == expected.lease_version
     }
+}
+
+fn cx_checkpoint(cx: &Cx, phase: &'static str) -> std::io::Result<()> {
+    cx.checkpoint().map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::Interrupted,
+            format!("{OWNERSHIP_CANCELLED_MESSAGE}: {phase}"),
+        )
+    })
 }
 
 // ── Time helpers ───────────────────────────────────────────────────────────
@@ -828,8 +861,9 @@ mod tests {
         let image = dir.join("test.img");
         std::fs::write(&image, b"fake image").unwrap();
 
+        let cx = Cx::for_testing();
         let mgr = RepairOwnership::new("host-1".into(), "test-host".into());
-        let result = mgr.try_acquire(&image).expect("acquire");
+        let result = mgr.try_acquire(&cx, &image).expect("acquire");
         assert!(
             matches!(result, AcquireResult::Acquired(_)),
             "should acquire when no record exists"
@@ -840,19 +874,40 @@ mod tests {
     }
 
     #[test]
+    fn acquire_cancelled_before_record_write_does_not_mutate_disk() {
+        let dir = tempdir();
+        let image = dir.join("test.img");
+        std::fs::write(&image, b"fake image").unwrap();
+
+        let cx = cancelled_cx();
+        let mgr = RepairOwnership::new("host-1".into(), "test-host".into());
+        let err = mgr
+            .try_acquire(&cx, &image)
+            .expect_err("cancelled acquire must fail");
+
+        assert_cancelled(&err);
+        let record_path = RepairOwnership::record_path_for(&image);
+        assert!(
+            !record_path.exists(),
+            "pre-cancelled acquire must not create ownership record"
+        );
+    }
+
+    #[test]
     fn acquire_rejects_when_owned_by_other() {
         let dir = tempdir();
         let image = dir.join("test.img");
         std::fs::write(&image, b"fake image").unwrap();
 
+        let cx = Cx::for_testing();
         // Host A acquires
         let mgr_a = RepairOwnership::new("aaaa".into(), "host-a".into());
-        let result_a = mgr_a.try_acquire(&image).expect("acquire a");
+        let result_a = mgr_a.try_acquire(&cx, &image).expect("acquire a");
         assert!(matches!(result_a, AcquireResult::Acquired(_)));
 
         // Host B tries to acquire — should be rejected
         let mgr_b = RepairOwnership::new("bbbb".into(), "host-b".into());
-        let result_b = mgr_b.try_acquire(&image).expect("acquire b");
+        let result_b = mgr_b.try_acquire(&cx, &image).expect("acquire b");
         assert!(
             matches!(result_b, AcquireResult::OwnedByOther { .. }),
             "should be rejected: {result_b:?}"
@@ -870,8 +925,9 @@ mod tests {
         let record_path = RepairOwnership::record_path_for(&image);
         std::fs::write(&record_path, serde_json::to_string_pretty(&record).unwrap()).unwrap();
 
+        let cx = Cx::for_testing();
         let mgr = RepairOwnership::new("host-1".into(), "same-host-new-process".into());
-        let result = mgr.try_acquire(&image).expect("acquire");
+        let result = mgr.try_acquire(&cx, &image).expect("acquire");
 
         assert!(
             matches!(result, AcquireResult::OwnedByOther { ref owner_host_id, .. } if owner_host_id == "host-1"),
@@ -901,8 +957,9 @@ mod tests {
         std::fs::write(&record_path, serde_json::to_string_pretty(&record).unwrap()).unwrap();
 
         // New host should be able to claim
+        let cx = Cx::for_testing();
         let mgr = RepairOwnership::new("new-host".into(), "alive".into());
-        let result = mgr.try_acquire(&image).expect("acquire");
+        let result = mgr.try_acquire(&cx, &image).expect("acquire");
         let guard = acquired_guard(result).expect("expected acquired");
         assert_eq!(guard.record().host_id, "new-host");
         assert_eq!(guard.record().lease_version, 5);
@@ -920,9 +977,10 @@ mod tests {
         let record_path = RepairOwnership::record_path_for(&image);
         std::fs::write(&record_path, serde_json::to_string_pretty(&record).unwrap()).unwrap();
 
+        let cx = Cx::for_testing();
         let mgr = RepairOwnership::new("new-host".into(), "alive".into());
         let err = mgr
-            .try_acquire(&image)
+            .try_acquire(&cx, &image)
             .expect_err("exhausted generation must fail");
 
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
@@ -945,9 +1003,10 @@ mod tests {
         let record_path = RepairOwnership::record_path_for(&image);
         std::fs::write(&record_path, serde_json::to_string_pretty(&record).unwrap()).unwrap();
 
+        let cx = Cx::for_testing();
         let mgr = RepairOwnership::new("new-host".into(), "alive".into());
         let err = mgr
-            .try_acquire(&image)
+            .try_acquire(&cx, &image)
             .expect_err("exhausted lease version must fail");
 
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
@@ -965,17 +1024,41 @@ mod tests {
         let image = dir.join("test.img");
         std::fs::write(&image, b"fake image").unwrap();
 
+        let cx = Cx::for_testing();
         let mgr = RepairOwnership::new("host-1".into(), "test".into());
-        let result = mgr.try_acquire(&image).expect("acquire");
+        let result = mgr.try_acquire(&cx, &image).expect("acquire");
         let guard = acquired_guard(result).expect("expected acquired");
 
         let record_path = RepairOwnership::record_path_for(&image);
         assert!(record_path.exists());
 
-        RepairOwnership::release(guard).expect("release");
+        RepairOwnership::release(&cx, guard).expect("release");
         assert!(
             !record_path.exists(),
             "record should be removed after release"
+        );
+    }
+
+    #[test]
+    fn release_cancelled_before_remove_keeps_record_on_disk() {
+        let dir = tempdir();
+        let image = dir.join("test.img");
+        std::fs::write(&image, b"fake image").unwrap();
+
+        let cx = Cx::for_testing();
+        let mgr = RepairOwnership::new("host-1".into(), "test".into());
+        let result = mgr.try_acquire(&cx, &image).expect("acquire");
+        let guard = acquired_guard(result).expect("expected acquired");
+        let record_path = RepairOwnership::record_path_for(&image);
+
+        let cancel_cx = cancelled_cx();
+        let err =
+            RepairOwnership::release(&cancel_cx, guard).expect_err("cancelled release must fail");
+
+        assert_cancelled(&err);
+        assert!(
+            record_path.exists(),
+            "pre-cancelled release must leave ownership record in place"
         );
     }
 
@@ -985,9 +1068,10 @@ mod tests {
         let image = dir.join("test.img");
         std::fs::write(&image, b"fake image").unwrap();
 
+        let cx = Cx::for_testing();
         let mgr =
             RepairOwnership::new("host-1".into(), "test".into()).with_ttl(Duration::from_secs(10));
-        let result = mgr.try_acquire(&image).expect("acquire");
+        let result = mgr.try_acquire(&cx, &image).expect("acquire");
         let mut guard = acquired_guard(result).expect("expected acquired");
 
         let old_time = format_iso8601(
@@ -998,7 +1082,7 @@ mod tests {
         guard.record.claimed_at = old_time.clone();
         write_test_record(guard.record_path(), guard.record());
 
-        mgr.renew(&mut guard).expect("renew");
+        mgr.renew(&cx, &mut guard).expect("renew");
         assert_ne!(
             guard.record().claimed_at,
             old_time,
@@ -1012,18 +1096,45 @@ mod tests {
         let image = dir.join("test.img");
         std::fs::write(&image, b"fake image").unwrap();
 
+        let cx = Cx::for_testing();
         let mgr_a =
             RepairOwnership::new("host-a".into(), "test-a".into()).with_ttl(Duration::from_secs(1));
-        let result = mgr_a.try_acquire(&image).expect("acquire");
+        let result = mgr_a.try_acquire(&cx, &image).expect("acquire");
         let mut guard = acquired_guard(result).expect("expected acquired");
 
         mark_record_expired(guard.record_path());
         let mgr_b = RepairOwnership::new("host-b".into(), "test-b".into());
-        let takeover = mgr_b.try_acquire(&image).expect("takeover");
+        let takeover = mgr_b.try_acquire(&cx, &image).expect("takeover");
         assert!(matches!(takeover, AcquireResult::Acquired(_)));
 
-        let err = mgr_a.renew(&mut guard).expect_err("renew must fail");
+        let err = mgr_a.renew(&cx, &mut guard).expect_err("renew must fail");
         assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+    }
+
+    #[test]
+    fn renew_cancelled_before_write_does_not_mutate_record_or_guard() {
+        let dir = tempdir();
+        let image = dir.join("test.img");
+        std::fs::write(&image, b"fake image").unwrap();
+
+        let cx = Cx::for_testing();
+        let mgr =
+            RepairOwnership::new("host-1".into(), "test".into()).with_ttl(Duration::from_secs(10));
+        let result = mgr.try_acquire(&cx, &image).expect("acquire");
+        let mut guard = acquired_guard(result).expect("expected acquired");
+        let record_path = guard.record_path().to_owned();
+        let before_disk = std::fs::read_to_string(&record_path).expect("record exists");
+        let before_guard = guard.record().clone();
+
+        let cancel_cx = cancelled_cx();
+        let err = mgr
+            .renew(&cancel_cx, &mut guard)
+            .expect_err("cancelled renew must fail");
+
+        assert_cancelled(&err);
+        let after_disk = std::fs::read_to_string(&record_path).expect("record remains");
+        assert_eq!(after_disk, before_disk);
+        assert_eq!(guard.record(), &before_guard);
     }
 
     #[test]
@@ -1032,16 +1143,17 @@ mod tests {
         let image = dir.join("test.img");
         std::fs::write(&image, b"fake image").unwrap();
 
+        let cx = Cx::for_testing();
         let mgr = RepairOwnership::new("host-1".into(), "test".into());
-        assert!(!mgr.is_owned_by_us(&image).unwrap());
+        assert!(!mgr.is_owned_by_us(&cx, &image).unwrap());
 
-        let result = mgr.try_acquire(&image).expect("acquire");
+        let result = mgr.try_acquire(&cx, &image).expect("acquire");
         assert!(matches!(result, AcquireResult::Acquired(_)));
-        assert!(mgr.is_owned_by_us(&image).unwrap());
+        assert!(mgr.is_owned_by_us(&cx, &image).unwrap());
 
         // Different host should not own
         let other = RepairOwnership::new("host-2".into(), "other".into());
-        assert!(!other.is_owned_by_us(&image).unwrap());
+        assert!(!other.is_owned_by_us(&cx, &image).unwrap());
     }
 
     #[test]
@@ -1050,17 +1162,18 @@ mod tests {
         let image = dir.join("test.img");
         std::fs::write(&image, b"fake image").unwrap();
 
+        let cx = Cx::for_testing();
         let mgr_a =
             RepairOwnership::new("host-a".into(), "test-a".into()).with_ttl(Duration::from_secs(1));
-        let result = mgr_a.try_acquire(&image).expect("acquire");
+        let result = mgr_a.try_acquire(&cx, &image).expect("acquire");
         let guard = acquired_guard(result).expect("expected acquired");
 
         mark_record_expired(guard.record_path());
         let mgr_b = RepairOwnership::new("host-b".into(), "test-b".into());
-        let takeover = mgr_b.try_acquire(&image).expect("takeover");
+        let takeover = mgr_b.try_acquire(&cx, &image).expect("takeover");
         assert!(matches!(takeover, AcquireResult::Acquired(_)));
 
-        let err = RepairOwnership::release(guard).expect_err("release must fail");
+        let err = RepairOwnership::release(&cx, guard).expect_err("release must fail");
         assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
 
         let record_path = RepairOwnership::record_path_for(&image);
@@ -1089,7 +1202,8 @@ mod tests {
             record_path: record_path.clone(),
             record: guard_record,
         };
-        let err = RepairOwnership::release(guard).expect_err("release must fail");
+        let cx = Cx::for_testing();
+        let err = RepairOwnership::release(&cx, guard).expect_err("release must fail");
         assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
 
         let contents = std::fs::read_to_string(record_path).expect("record remains");
@@ -1204,6 +1318,20 @@ mod tests {
     fn different_pid() -> u32 {
         let pid = std::process::id();
         if pid == u32::MAX { pid - 1 } else { pid + 1 }
+    }
+
+    fn cancelled_cx() -> Cx {
+        let cx = Cx::for_testing();
+        cx.set_cancel_requested(true);
+        cx
+    }
+
+    fn assert_cancelled(err: &std::io::Error) {
+        assert_eq!(err.kind(), std::io::ErrorKind::Interrupted);
+        assert!(
+            err.to_string().contains(OWNERSHIP_CANCELLED_MESSAGE),
+            "wrong cancellation error: {err}"
+        );
     }
 
     fn acquired_guard(result: AcquireResult) -> Option<OwnershipGuard> {
