@@ -392,6 +392,325 @@ pub struct AllocHint {
     pub goal_block: Option<BlockNumber>,
 }
 
+// ── NUMA allocation topology contract ──────────────────────────────────────
+
+/// Maximum advisory topology age accepted by the NUMA allocation contract.
+pub const NUMA_TOPOLOGY_MAX_AGE_SECS: u64 = 7 * 24 * 60 * 60;
+
+/// Highest NUMA node id the allocator contract accepts from host probes.
+pub const MAX_NUMA_NODE_ID: u32 = 4095;
+
+/// Downstream consumers that must be named by any NUMA topology contract input.
+pub const REQUIRED_NUMA_TOPOLOGY_CONSUMERS: [&str; 5] = [
+    "ffs-alloc",
+    "ffs-core",
+    "topology_adaptive_runtime_reports",
+    "proof_bundle_release_gate",
+    "docs",
+];
+
+/// NUMA node identifier reported by host topology probes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NumaNodeId(pub u32);
+
+/// Contiguous block-group range owned by one NUMA node.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NumaNodeGroupRange {
+    pub node_id: NumaNodeId,
+    pub first_group: GroupNumber,
+    pub group_count: u32,
+}
+
+/// Host topology evidence source for NUMA-aware allocation placement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NumaTopologySource {
+    /// No trusted node map is available; allocator placement must use legacy hints.
+    Unknown { reason: String },
+    /// Host is known to expose a single NUMA node.
+    SingleNode,
+    /// Fresh observed topology ranges, covering every block group exactly once.
+    Observed {
+        observed_at_unix_secs: u64,
+        max_age_secs: u64,
+        node_groups: Vec<NumaNodeGroupRange>,
+    },
+}
+
+/// Evidence claim level attached to NUMA topology inputs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NumaEvidenceClaim {
+    /// Input may influence advisory placement only.
+    AdvisoryOnly,
+    /// Invalid for allocator topology input; release readiness is proven elsewhere.
+    ProductReadiness,
+}
+
+/// Executable NUMA allocation topology contract input.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NumaAllocationTopology {
+    pub source: NumaTopologySource,
+    pub evidence_claim: NumaEvidenceClaim,
+    pub downstream_consumers: Vec<String>,
+}
+
+/// Validated NUMA allocation plan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NumaAllocationPlan {
+    pub group_nodes: Vec<Option<NumaNodeId>>,
+    pub disposition: NumaTopologyDisposition,
+}
+
+/// How the allocator may interpret the validated topology.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NumaTopologyDisposition {
+    /// Multi-node topology is fresh enough for advisory placement.
+    AdvisoryMap,
+    /// Topology is unknown; preserve legacy placement semantics.
+    UnknownFallback,
+    /// Single-node host; every group maps to node zero.
+    SingleNodeFallback,
+}
+
+/// Contract validation failures for NUMA allocation topology input.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NumaTopologyError {
+    ProductReadinessClaim,
+    MissingConsumer {
+        consumer: &'static str,
+    },
+    EmptyUnknownReason,
+    EmptyGeometry,
+    GeometryTooLarge,
+    MissingNodeMap,
+    InvalidNodeId {
+        node_id: NumaNodeId,
+    },
+    EmptyGroupRange {
+        node_id: NumaNodeId,
+        first_group: GroupNumber,
+    },
+    GroupRangeOutOfBounds {
+        first_group: GroupNumber,
+        group_count: u32,
+        total_groups: u32,
+    },
+    DuplicateGroup {
+        group: GroupNumber,
+    },
+    UncoveredGroup {
+        group: GroupNumber,
+    },
+    FutureEvidence {
+        observed_at_unix_secs: u64,
+        now_unix_secs: u64,
+    },
+    StaleEvidence {
+        age_secs: u64,
+        max_age_secs: u64,
+    },
+    ExcessiveEvidenceWindow {
+        max_age_secs: u64,
+    },
+}
+
+/// Validate the executable NUMA allocation topology contract.
+pub fn validate_numa_allocation_topology(
+    geo: &FsGeometry,
+    topology: &NumaAllocationTopology,
+    now_unix_secs: u64,
+) -> std::result::Result<NumaAllocationPlan, NumaTopologyError> {
+    validate_numa_contract_metadata(topology)?;
+
+    let group_len = numa_group_len(geo)?;
+    match &topology.source {
+        NumaTopologySource::Unknown { reason } => {
+            if reason.trim().is_empty() {
+                return Err(NumaTopologyError::EmptyUnknownReason);
+            }
+            Ok(NumaAllocationPlan {
+                group_nodes: vec![None; group_len],
+                disposition: NumaTopologyDisposition::UnknownFallback,
+            })
+        }
+        NumaTopologySource::SingleNode => Ok(NumaAllocationPlan {
+            group_nodes: vec![Some(NumaNodeId(0)); group_len],
+            disposition: NumaTopologyDisposition::SingleNodeFallback,
+        }),
+        NumaTopologySource::Observed {
+            observed_at_unix_secs,
+            max_age_secs,
+            node_groups,
+        } => validate_observed_numa_topology(
+            geo,
+            group_len,
+            *observed_at_unix_secs,
+            *max_age_secs,
+            node_groups,
+            now_unix_secs,
+        ),
+    }
+}
+
+/// Resolve allocation goal precedence with optional NUMA placement.
+///
+/// Explicit `goal_group` and `goal_block` keep their existing precedence over
+/// advisory NUMA placement. The preferred NUMA node can only select a starting
+/// group when no explicit allocation hint is present.
+#[must_use]
+pub fn resolve_numa_allocation_goal(
+    geo: &FsGeometry,
+    hint: &AllocHint,
+    plan: &NumaAllocationPlan,
+    preferred_node: Option<NumaNodeId>,
+) -> GroupNumber {
+    if let Some(goal_group) = hint.goal_group {
+        return goal_group;
+    }
+    if let Some(goal_block) = hint.goal_block {
+        return geo.absolute_to_group_block(goal_block).0;
+    }
+    if let Some(preferred_node) = preferred_node {
+        if let Some(group_index) = plan
+            .group_nodes
+            .iter()
+            .position(|node| *node == Some(preferred_node))
+        {
+            return GroupNumber(u32::try_from(group_index).unwrap_or(u32::MAX));
+        }
+    }
+    GroupNumber(0)
+}
+
+fn validate_numa_contract_metadata(
+    topology: &NumaAllocationTopology,
+) -> std::result::Result<(), NumaTopologyError> {
+    if topology.evidence_claim == NumaEvidenceClaim::ProductReadiness {
+        return Err(NumaTopologyError::ProductReadinessClaim);
+    }
+    if let Some(consumer) = REQUIRED_NUMA_TOPOLOGY_CONSUMERS
+        .iter()
+        .copied()
+        .find(|required| {
+            !topology
+                .downstream_consumers
+                .iter()
+                .any(|consumer| consumer == required)
+        })
+    {
+        return Err(NumaTopologyError::MissingConsumer { consumer });
+    }
+    Ok(())
+}
+
+fn numa_group_len(geo: &FsGeometry) -> std::result::Result<usize, NumaTopologyError> {
+    if geo.group_count == 0 {
+        return Err(NumaTopologyError::EmptyGeometry);
+    }
+    usize::try_from(geo.group_count).map_err(|_| NumaTopologyError::GeometryTooLarge)
+}
+
+fn validate_observed_numa_topology(
+    geo: &FsGeometry,
+    group_len: usize,
+    observed_at_unix_secs: u64,
+    max_age_secs: u64,
+    node_groups: &[NumaNodeGroupRange],
+    now_unix_secs: u64,
+) -> std::result::Result<NumaAllocationPlan, NumaTopologyError> {
+    if node_groups.is_empty() {
+        return Err(NumaTopologyError::MissingNodeMap);
+    }
+    if max_age_secs > NUMA_TOPOLOGY_MAX_AGE_SECS {
+        return Err(NumaTopologyError::ExcessiveEvidenceWindow { max_age_secs });
+    }
+    let age_secs = now_unix_secs.checked_sub(observed_at_unix_secs).ok_or(
+        NumaTopologyError::FutureEvidence {
+            observed_at_unix_secs,
+            now_unix_secs,
+        },
+    )?;
+    if age_secs > max_age_secs {
+        return Err(NumaTopologyError::StaleEvidence {
+            age_secs,
+            max_age_secs,
+        });
+    }
+
+    let mut group_nodes = vec![None; group_len];
+    for range in node_groups {
+        validate_numa_group_range(geo, range)?;
+        let end = range.first_group.0.checked_add(range.group_count).ok_or(
+            NumaTopologyError::GroupRangeOutOfBounds {
+                first_group: range.first_group,
+                group_count: range.group_count,
+                total_groups: geo.group_count,
+            },
+        )?;
+
+        for group in range.first_group.0..end {
+            let group_index =
+                usize::try_from(group).map_err(|_| NumaTopologyError::GeometryTooLarge)?;
+            let slot = group_nodes.get_mut(group_index).ok_or(
+                NumaTopologyError::GroupRangeOutOfBounds {
+                    first_group: range.first_group,
+                    group_count: range.group_count,
+                    total_groups: geo.group_count,
+                },
+            )?;
+            if slot.is_some() {
+                return Err(NumaTopologyError::DuplicateGroup {
+                    group: GroupNumber(group),
+                });
+            }
+            *slot = Some(range.node_id);
+        }
+    }
+
+    if let Some(group_index) = group_nodes.iter().position(Option::is_none) {
+        let group = u32::try_from(group_index).map_err(|_| NumaTopologyError::GeometryTooLarge)?;
+        return Err(NumaTopologyError::UncoveredGroup {
+            group: GroupNumber(group),
+        });
+    }
+
+    Ok(NumaAllocationPlan {
+        group_nodes,
+        disposition: NumaTopologyDisposition::AdvisoryMap,
+    })
+}
+
+fn validate_numa_group_range(
+    geo: &FsGeometry,
+    range: &NumaNodeGroupRange,
+) -> std::result::Result<(), NumaTopologyError> {
+    if range.node_id.0 > MAX_NUMA_NODE_ID {
+        return Err(NumaTopologyError::InvalidNodeId {
+            node_id: range.node_id,
+        });
+    }
+    if range.group_count == 0 {
+        return Err(NumaTopologyError::EmptyGroupRange {
+            node_id: range.node_id,
+            first_group: range.first_group,
+        });
+    }
+    let Some(end) = range.first_group.0.checked_add(range.group_count) else {
+        return Err(NumaTopologyError::GroupRangeOutOfBounds {
+            first_group: range.first_group,
+            group_count: range.group_count,
+            total_groups: geo.group_count,
+        });
+    };
+    if range.first_group.0 >= geo.group_count || end > geo.group_count {
+        return Err(NumaTopologyError::GroupRangeOutOfBounds {
+            first_group: range.first_group,
+            group_count: range.group_count,
+            total_groups: geo.group_count,
+        });
+    }
+    Ok(())
+}
+
 // ── Allocation result ───────────────────────────────────────────────────────
 
 /// Result of a block allocation.
@@ -3657,6 +3976,264 @@ mod tests {
         };
         assert_eq!(hint.goal_group, Some(GroupNumber(2)));
         assert!(hint.goal_block.is_none());
+    }
+
+    fn required_numa_consumers() -> Vec<String> {
+        REQUIRED_NUMA_TOPOLOGY_CONSUMERS
+            .iter()
+            .map(|consumer| (*consumer).to_owned())
+            .collect()
+    }
+
+    fn observed_numa_topology(node_groups: Vec<NumaNodeGroupRange>) -> NumaAllocationTopology {
+        NumaAllocationTopology {
+            source: NumaTopologySource::Observed {
+                observed_at_unix_secs: 1_000,
+                max_age_secs: 60,
+                node_groups,
+            },
+            evidence_claim: NumaEvidenceClaim::AdvisoryOnly,
+            downstream_consumers: required_numa_consumers(),
+        }
+    }
+
+    #[test]
+    fn numa_topology_unknown_falls_back_without_product_claim() {
+        let geo = make_geometry();
+        let topology = NumaAllocationTopology {
+            source: NumaTopologySource::Unknown {
+                reason: "host probe unavailable".to_owned(),
+            },
+            evidence_claim: NumaEvidenceClaim::AdvisoryOnly,
+            downstream_consumers: required_numa_consumers(),
+        };
+
+        let plan = validate_numa_allocation_topology(&geo, &topology, 1_000).unwrap();
+
+        assert_eq!(plan.disposition, NumaTopologyDisposition::UnknownFallback);
+        assert_eq!(plan.group_nodes, vec![None; 4]);
+        assert_eq!(
+            resolve_numa_allocation_goal(&geo, &AllocHint::default(), &plan, Some(NumaNodeId(1))),
+            GroupNumber(0)
+        );
+    }
+
+    #[test]
+    fn numa_topology_single_node_maps_all_groups_to_node_zero() {
+        let geo = make_geometry();
+        let topology = NumaAllocationTopology {
+            source: NumaTopologySource::SingleNode,
+            evidence_claim: NumaEvidenceClaim::AdvisoryOnly,
+            downstream_consumers: required_numa_consumers(),
+        };
+
+        let plan = validate_numa_allocation_topology(&geo, &topology, 1_000).unwrap();
+
+        assert_eq!(
+            plan.disposition,
+            NumaTopologyDisposition::SingleNodeFallback
+        );
+        assert_eq!(plan.group_nodes, vec![Some(NumaNodeId(0)); 4]);
+        assert_eq!(
+            resolve_numa_allocation_goal(&geo, &AllocHint::default(), &plan, Some(NumaNodeId(0))),
+            GroupNumber(0)
+        );
+    }
+
+    #[test]
+    fn numa_topology_balanced_mapping_validates() {
+        let geo = make_geometry();
+        let topology = observed_numa_topology(vec![
+            NumaNodeGroupRange {
+                node_id: NumaNodeId(0),
+                first_group: GroupNumber(0),
+                group_count: 2,
+            },
+            NumaNodeGroupRange {
+                node_id: NumaNodeId(1),
+                first_group: GroupNumber(2),
+                group_count: 2,
+            },
+        ]);
+
+        let plan = validate_numa_allocation_topology(&geo, &topology, 1_010).unwrap();
+
+        assert_eq!(plan.disposition, NumaTopologyDisposition::AdvisoryMap);
+        assert_eq!(
+            plan.group_nodes,
+            vec![
+                Some(NumaNodeId(0)),
+                Some(NumaNodeId(0)),
+                Some(NumaNodeId(1)),
+                Some(NumaNodeId(1)),
+            ]
+        );
+        assert_eq!(
+            resolve_numa_allocation_goal(&geo, &AllocHint::default(), &plan, Some(NumaNodeId(1))),
+            GroupNumber(2)
+        );
+    }
+
+    #[test]
+    fn numa_topology_imbalanced_groups_validate() {
+        let geo = make_geometry();
+        let topology = observed_numa_topology(vec![
+            NumaNodeGroupRange {
+                node_id: NumaNodeId(0),
+                first_group: GroupNumber(0),
+                group_count: 1,
+            },
+            NumaNodeGroupRange {
+                node_id: NumaNodeId(1),
+                first_group: GroupNumber(1),
+                group_count: 3,
+            },
+        ]);
+
+        let plan = validate_numa_allocation_topology(&geo, &topology, 1_010).unwrap();
+
+        assert_eq!(
+            plan.group_nodes,
+            vec![
+                Some(NumaNodeId(0)),
+                Some(NumaNodeId(1)),
+                Some(NumaNodeId(1)),
+                Some(NumaNodeId(1)),
+            ]
+        );
+        assert_eq!(
+            resolve_numa_allocation_goal(&geo, &AllocHint::default(), &plan, Some(NumaNodeId(1))),
+            GroupNumber(1)
+        );
+    }
+
+    #[test]
+    fn numa_topology_goal_group_precedence_over_numa_and_goal_block() {
+        let geo = make_geometry();
+        let topology = observed_numa_topology(vec![
+            NumaNodeGroupRange {
+                node_id: NumaNodeId(0),
+                first_group: GroupNumber(0),
+                group_count: 2,
+            },
+            NumaNodeGroupRange {
+                node_id: NumaNodeId(1),
+                first_group: GroupNumber(2),
+                group_count: 2,
+            },
+        ]);
+        let plan = validate_numa_allocation_topology(&geo, &topology, 1_010).unwrap();
+        let goal_block = geo.group_block_to_absolute(GroupNumber(1), 7);
+        let explicit_group = AllocHint {
+            goal_group: Some(GroupNumber(3)),
+            goal_block: Some(goal_block),
+        };
+        let explicit_block = AllocHint {
+            goal_group: None,
+            goal_block: Some(goal_block),
+        };
+
+        assert_eq!(
+            resolve_numa_allocation_goal(&geo, &explicit_group, &plan, Some(NumaNodeId(0))),
+            GroupNumber(3)
+        );
+        assert_eq!(
+            resolve_numa_allocation_goal(&geo, &explicit_block, &plan, Some(NumaNodeId(0))),
+            GroupNumber(1)
+        );
+    }
+
+    #[test]
+    fn numa_topology_rejects_invalid_contracts() {
+        let geo = make_geometry();
+
+        let missing_map = observed_numa_topology(Vec::new());
+        assert_eq!(
+            validate_numa_allocation_topology(&geo, &missing_map, 1_000).unwrap_err(),
+            NumaTopologyError::MissingNodeMap
+        );
+
+        let duplicate_group = observed_numa_topology(vec![
+            NumaNodeGroupRange {
+                node_id: NumaNodeId(0),
+                first_group: GroupNumber(0),
+                group_count: 2,
+            },
+            NumaNodeGroupRange {
+                node_id: NumaNodeId(1),
+                first_group: GroupNumber(1),
+                group_count: 3,
+            },
+        ]);
+        assert_eq!(
+            validate_numa_allocation_topology(&geo, &duplicate_group, 1_000).unwrap_err(),
+            NumaTopologyError::DuplicateGroup {
+                group: GroupNumber(1)
+            }
+        );
+
+        let uncovered_group = observed_numa_topology(vec![NumaNodeGroupRange {
+            node_id: NumaNodeId(0),
+            first_group: GroupNumber(0),
+            group_count: 3,
+        }]);
+        assert_eq!(
+            validate_numa_allocation_topology(&geo, &uncovered_group, 1_000).unwrap_err(),
+            NumaTopologyError::UncoveredGroup {
+                group: GroupNumber(3)
+            }
+        );
+
+        let invalid_node = observed_numa_topology(vec![NumaNodeGroupRange {
+            node_id: NumaNodeId(MAX_NUMA_NODE_ID + 1),
+            first_group: GroupNumber(0),
+            group_count: 4,
+        }]);
+        assert_eq!(
+            validate_numa_allocation_topology(&geo, &invalid_node, 1_000).unwrap_err(),
+            NumaTopologyError::InvalidNodeId {
+                node_id: NumaNodeId(MAX_NUMA_NODE_ID + 1)
+            }
+        );
+
+        let stale = observed_numa_topology(vec![NumaNodeGroupRange {
+            node_id: NumaNodeId(0),
+            first_group: GroupNumber(0),
+            group_count: 4,
+        }]);
+        assert_eq!(
+            validate_numa_allocation_topology(&geo, &stale, 1_061).unwrap_err(),
+            NumaTopologyError::StaleEvidence {
+                age_secs: 61,
+                max_age_secs: 60
+            }
+        );
+
+        let mut product_readiness = observed_numa_topology(vec![NumaNodeGroupRange {
+            node_id: NumaNodeId(0),
+            first_group: GroupNumber(0),
+            group_count: 4,
+        }]);
+        product_readiness.evidence_claim = NumaEvidenceClaim::ProductReadiness;
+        assert_eq!(
+            validate_numa_allocation_topology(&geo, &product_readiness, 1_000).unwrap_err(),
+            NumaTopologyError::ProductReadinessClaim
+        );
+
+        let mut missing_consumer = observed_numa_topology(vec![NumaNodeGroupRange {
+            node_id: NumaNodeId(0),
+            first_group: GroupNumber(0),
+            group_count: 4,
+        }]);
+        missing_consumer
+            .downstream_consumers
+            .retain(|consumer| consumer != "ffs-core");
+        assert_eq!(
+            validate_numa_allocation_topology(&geo, &missing_consumer, 1_000).unwrap_err(),
+            NumaTopologyError::MissingConsumer {
+                consumer: "ffs-core"
+            }
+        );
     }
 
     #[test]

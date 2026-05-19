@@ -107,6 +107,38 @@ and is not affected by topology advisor reports.
 | accepted large-host release state | Host topology floor visibility is advisory input, not release acceptance. |
 | public readiness upgrade | `product_evidence_claim=none` and `release_gate_effect=advisory_only`. |
 
+### NUMA Allocation Topology Contract
+
+`ffs-alloc` owns the executable NUMA placement contract through
+`NumaAllocationTopology` and `validate_numa_allocation_topology`. Topology and
+adaptive runtime reports may feed this contract, but their evidence claim must
+remain `AdvisoryOnly`; attempts to convert advisor replay into product readiness
+are rejected before allocator placement can use the input.
+
+| Source | Accepted shape | Allocator meaning |
+|--------|----------------|-------------------|
+| `Unknown` | Non-empty reason, no node map. | Preserve existing `AllocHint` semantics and fall back to group 0 when no explicit hint exists. |
+| `SingleNode` | Host is known to expose one NUMA node. | Map every block group to node 0 and keep this as fallback semantics, not readiness evidence. |
+| `Observed` | Fresh bounded evidence with non-overlapping node ranges covering every block group exactly once. | Optional NUMA preference may choose the first group on the preferred node when no explicit allocation hint exists. |
+
+The contract rejects missing observed maps, duplicate group ownership,
+uncovered groups, out-of-range group ranges, invalid node ids, stale or
+unbounded evidence windows, and missing downstream consumer declarations.
+Required consumers are `ffs-alloc`, `ffs-core`,
+`topology_adaptive_runtime_reports`, `proof_bundle_release_gate`, and `docs`.
+
+Placement precedence is fixed:
+
+1. `AllocHint.goal_group`
+2. `AllocHint.goal_block`
+3. Optional preferred NUMA node from a validated advisory plan
+4. Legacy fallback group 0
+
+`ffs-core` may pass future mount/runtime preferences into this contract, and
+topology/adaptive reports may name the proposed node map, but proof bundles and
+release gates must keep the wording advisory until independent release evidence
+exists.
+
 ### Troubleshooting
 
 | Symptom | Likely cause | Operator action |
