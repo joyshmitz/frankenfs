@@ -6404,6 +6404,7 @@ fn build_fsck_output(path: &PathBuf, options: FsckCommandOptions) -> Result<Fsck
     let mut phases = Vec::new();
     let mut limitations = Vec::new();
     let repair_coordination = coordinate_repair_write_access(
+        &cx,
         "ffs::cli::fsck",
         REPAIR_COORDINATION_SCENARIO_FSCK,
         "fsck",
@@ -7350,11 +7351,11 @@ mod tests {
     };
     use crate::cmd_repair::{
         Ext4RepairStaleness, MAX_EXT4_REPAIR_GROUP_SPECS, REPAIR_COORDINATION_SCENARIO_REPAIR,
-        RepairCoordinationRecord, RepairCoordinationStatus, btrfs_super_mirror_offsets,
-        build_btrfs_repair_group_spec, build_ext4_repair_group_specs, build_repair_output,
-        coordinate_repair_write_access, merge_scrub_reports, normalize_btrfs_superblock_as_primary,
-        partition_scrub_range, repair_coordination_record_path, repair_worker_limit,
-        select_btrfs_repair_groups, select_ext4_repair_groups,
+        RepairCoordinationStatus, btrfs_super_mirror_offsets, build_btrfs_repair_group_spec,
+        build_ext4_repair_group_specs, build_repair_output, coordinate_repair_write_access,
+        merge_scrub_reports, normalize_btrfs_superblock_as_primary, partition_scrub_range,
+        repair_coordination_record_path, repair_worker_limit, select_btrfs_repair_groups,
+        select_ext4_repair_groups,
     };
     use clap::Parser;
     use ffs_block::CacheRuntimeMetricsSnapshot;
@@ -7368,6 +7369,7 @@ mod tests {
     };
     use ffs_harness::artifact_manifest::parse_manifest_timestamp_epoch_days;
     use ffs_repair::evidence::{EvidenceEventType, EvidenceRecord};
+    use ffs_repair::ownership::CoordinationRecord;
     use ffs_repair::pipeline::RepairRuntimeMetricsSnapshot;
     use serde_json::Value;
     use std::io::{self, Seek, SeekFrom, Write};
@@ -9263,17 +9265,23 @@ mod tests {
             .unwrap_or_else(|| "unknown-host".to_owned())
     }
 
+    /// Write a live foreign-host lease record so write-side repair coordination
+    /// is blocked by another host's active ownership lease.
     fn write_test_coordination_record(image: &std::path::Path, owner_host: &str) -> PathBuf {
         let record_path = repair_coordination_record_path(image);
-        let record = RepairCoordinationRecord {
-            policy: "single_host_only_v1".to_owned(),
-            image_path: image.display().to_string(),
-            owner_host: owner_host.to_owned(),
-            owner_process_id: 4242,
-            last_command: "repair".to_owned(),
-            last_operation_id: "repair-coordination-test".to_owned(),
-            recorded_at_ns: 7,
+        let mut record = CoordinationRecord {
+            version: 1,
+            host_id: format!("ffs-test-host-id-{owner_host}"),
+            hostname: owner_host.to_owned(),
+            pid: 4242,
+            claimed_at: "2020-01-01T00:00:00Z".to_owned(),
+            lease_ttl_secs: 300,
+            lease_version: 4,
+            repair_generation: 7,
+            groups_owned: Vec::new(),
         };
+        // Re-stamp claimed_at to the current time so the foreign lease is live.
+        record.renew();
         let mut bytes =
             serde_json::to_vec_pretty(&record).expect("coordination record should serialize");
         bytes.push(b'\n');
@@ -10776,6 +10784,7 @@ mod tests {
 
         with_temp_image_path(&image, |path| {
             let decision = coordinate_repair_write_access(
+                &crate::cli_cx(),
                 "ffs::test",
                 REPAIR_COORDINATION_SCENARIO_REPAIR,
                 "repair",
@@ -10827,6 +10836,7 @@ mod tests {
         with_temp_image_path(&image, |path| {
             write_test_coordination_record(&path, "remote-host");
             let decision = coordinate_repair_write_access(
+                &crate::cli_cx(),
                 "ffs::test",
                 REPAIR_COORDINATION_SCENARIO_REPAIR,
                 "repair",
@@ -10836,10 +10846,17 @@ mod tests {
             assert!(!decision.writes_allowed);
         });
 
-        let json = parse_first_json_line(&buffer);
+        // The lease protocol also emits its own `ffs::repair::ownership` logs,
+        // so select the CLI coordination event explicitly rather than the
+        // first line.
+        let logs = parse_json_logs(&buffer);
+        let json = logs
+            .iter()
+            .find(|line| line["event_name"] == "repair_coordination_rejected")
+            .expect("expected a repair_coordination_rejected log line");
         assert_eq!(json["scenario_id"], REPAIR_COORDINATION_SCENARIO_REPAIR);
         assert_eq!(json["outcome"], "rejected");
-        assert_eq!(json["error_class"], "multi_host_unsupported");
+        assert_eq!(json["error_class"], "foreign_lease_active");
         assert_eq!(json["command"], "repair");
         assert_eq!(json["level"], "WARN");
         assert_eq!(json["target"], "ffs::test");
@@ -13915,6 +13932,7 @@ mod tests {
         with_temp_image_path(&image, |path| {
             let local_host = test_local_host_name();
             let first = coordinate_repair_write_access(
+                &crate::cli_cx(),
                 "ffs::test",
                 REPAIR_COORDINATION_SCENARIO_REPAIR,
                 "repair",
@@ -13928,6 +13946,7 @@ mod tests {
             ));
 
             let second = coordinate_repair_write_access(
+                &crate::cli_cx(),
                 "ffs::test",
                 REPAIR_COORDINATION_SCENARIO_REPAIR,
                 "repair",
@@ -13939,18 +13958,27 @@ mod tests {
                 second.output.status,
                 RepairCoordinationStatus::Claimed
             ));
+            // The same host+process incarnation reclaims its own lease and the
+            // monotonic repair generation advances on each renewal.
+            assert_eq!(first.output.repair_generation, Some(1));
+            assert_eq!(second.output.repair_generation, Some(2));
             assert!(
-                second.output.detail.contains("remains pinned to host"),
+                second
+                    .output
+                    .detail
+                    .contains("lease-based repair ownership claimed"),
                 "unexpected same-host refresh detail: {}",
                 second.output.detail
             );
 
             let record_bytes = std::fs::read(repair_coordination_record_path(&path))
                 .expect("read persisted coordination record");
-            let record: RepairCoordinationRecord =
+            let record: CoordinationRecord =
                 serde_json::from_slice(&record_bytes).expect("parse persisted coordination record");
-            assert_eq!(record.owner_host, local_host);
-            assert_eq!(record.last_command, "repair");
+            assert_eq!(record.hostname, local_host);
+            assert_eq!(record.host_id, second.output.host_id);
+            assert_eq!(record.pid, std::process::id());
+            assert_eq!(record.repair_generation, 2);
         });
     }
 
@@ -13963,6 +13991,7 @@ mod tests {
         with_temp_image_path(&image, |path| {
             write_test_coordination_record(&path, "remote-host");
             let decision = coordinate_repair_write_access(
+                &crate::cli_cx(),
                 "ffs::test",
                 REPAIR_COORDINATION_SCENARIO_REPAIR,
                 "repair",
@@ -13978,7 +14007,18 @@ mod tests {
             assert_eq!(decision.output.owner_host.as_deref(), Some("remote-host"));
             assert_eq!(
                 decision.output.error_class.as_deref(),
-                Some("multi_host_unsupported")
+                Some("foreign_lease_active")
+            );
+            assert_eq!(
+                decision.output.owner_host_id.as_deref(),
+                Some("ffs-test-host-id-remote-host")
+            );
+            assert!(
+                decision
+                    .output
+                    .lease_expires_in_secs
+                    .is_some_and(|remaining| remaining > 0),
+                "live foreign lease must report remaining TTL"
             );
         });
     }
@@ -14125,7 +14165,7 @@ mod tests {
             output
                 .limitations
                 .iter()
-                .any(|limitation| { limitation.contains("Multi-host repair is out of scope") })
+                .any(|limitation| { limitation.contains("holds a live lease for host") })
         );
     }
 
@@ -14370,9 +14410,7 @@ mod tests {
             .expect("repair phase should be present");
         assert_eq!(repair_phase.status, "error");
         assert!(
-            repair_phase
-                .detail
-                .contains("Multi-host repair is out of scope"),
+            repair_phase.detail.contains("holds a live lease for host"),
             "unexpected blocked repair detail: {}",
             repair_phase.detail
         );

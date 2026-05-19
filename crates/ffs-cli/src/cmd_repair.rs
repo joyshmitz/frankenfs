@@ -7,6 +7,7 @@ use ffs_ondisk::{
     verify_btrfs_superblock_checksum,
 };
 use ffs_repair::codec::encode_group;
+use ffs_repair::ownership::{AcquireResult, OwnershipGuard, RepairOwnership};
 use ffs_repair::recovery::{GroupRecoveryOrchestrator, RecoveryOutcome};
 use ffs_repair::scrub::{ScrubReport, Scrubber, Severity};
 use ffs_repair::storage::{REPAIR_DESC_SLOT_COUNT, RepairGroupLayout, RepairGroupStorage};
@@ -14,9 +15,8 @@ use ffs_repair::symbol::RepairGroupDescExt;
 use ffs_types::{
     BTRFS_SUPER_INFO_OFFSET, BTRFS_SUPER_INFO_SIZE, BlockNumber, ByteOffset, GroupNumber,
 };
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::OpenOptions as StdOpenOptions;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 use tracing::{info, info_span, warn};
@@ -148,7 +148,13 @@ const BTRFS_SUPER_BYTENR_OFFSET: usize = 0x30;
 const BTRFS_SUPER_CSUM_OFFSET: usize = 0;
 const BTRFS_SUPER_CSUM_LEN: usize = 4;
 const BTRFS_SUPER_CSUM_DATA_OFFSET: usize = 0x20;
-const REPAIR_COORDINATION_POLICY: &str = "single_host_only_v1";
+/// Coordination policy identifier surfaced in repair/fsck JSON output.
+///
+/// `lease_v1` denotes the lease-based ownership protocol from
+/// `ffs_repair::ownership`: write-side repair is owned by one host at a time
+/// via a TTL-bounded coordination record, expired leases can be taken over,
+/// and concurrent claims converge through a deterministic host-id tiebreak.
+const REPAIR_COORDINATION_POLICY: &str = "lease_v1";
 pub const REPAIR_COORDINATION_SCENARIO_REPAIR: &str = "cli_repair_multi_host_guard";
 pub const REPAIR_COORDINATION_SCENARIO_FSCK: &str = "cli_fsck_repair_multi_host_guard";
 
@@ -168,10 +174,29 @@ pub struct RepairCoordinationOutput {
     pub scenario_id: String,
     pub coordination_file: String,
     pub local_host: String,
+    /// Stable host identifier of this process, used for deterministic
+    /// lease-conflict tiebreaks (derived from the host machine-id).
+    pub host_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub owner_host: Option<String>,
+    /// Host identifier of the lease owner (this host when claimed, the
+    /// foreign or winning host when blocked).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner_host_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub owner_process_id: Option<u32>,
+    /// Lease incarnation counter from the coordination record.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lease_version: Option<u64>,
+    /// Monotonic repair-generation counter from the coordination record.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repair_generation: Option<u64>,
+    /// Lease time-to-live in seconds for the claimed lease.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lease_ttl_secs: Option<u64>,
+    /// Remaining seconds before a blocking foreign lease expires.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lease_expires_in_secs: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_class: Option<String>,
     pub detail: String,
@@ -188,25 +213,6 @@ impl RepairCoordinationOutput {
 pub struct RepairCoordinationDecision {
     pub output: RepairCoordinationOutput,
     pub writes_allowed: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RepairCoordinationRecord {
-    pub policy: String,
-    pub image_path: String,
-    pub owner_host: String,
-    pub owner_process_id: u32,
-    pub last_command: String,
-    pub last_operation_id: String,
-    pub recorded_at_ns: u64,
-}
-
-fn coordination_now_ns() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |duration| {
-            u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
-        })
 }
 
 fn local_host_name() -> String {
@@ -240,14 +246,59 @@ fn sanitize_token(raw: &str) -> String {
     }
 }
 
+/// Path of the per-image repair coordination record.
+///
+/// Delegates to [`RepairOwnership::record_path_for`] so the CLI and the
+/// shared lease protocol always agree on the `.<image>.ffs-repair-owner.json`
+/// location.
 pub fn repair_coordination_record_path(image: &Path) -> PathBuf {
-    let parent = image.parent().unwrap_or_else(|| Path::new("."));
-    let file_name = image
-        .file_name()
-        .and_then(|name| name.to_str())
-        .filter(|name| !name.is_empty())
-        .unwrap_or("image");
-    parent.join(format!(".{file_name}.ffs-repair-owner.json"))
+    RepairOwnership::record_path_for(image)
+}
+
+/// Derive a stable per-host identifier for repair-ownership tiebreaks.
+///
+/// Prefers the systemd / D-Bus machine-id (a stable per-host UUID), which
+/// gives a deterministic lexicographic tiebreak across hosts that never
+/// communicate. An explicit `FFS_REPAIR_HOST_ID` override takes precedence
+/// for hosts without a machine-id or for controlled multi-host testing.
+/// Falls back to a hostname-derived token so the protocol still functions
+/// everywhere, and finally to a fixed sentinel.
+fn repair_host_id(local_host: &str) -> String {
+    let env_override = std::env::var("FFS_REPAIR_HOST_ID").ok();
+    let machine_id = ["/etc/machine-id", "/var/lib/dbus/machine-id"]
+        .into_iter()
+        .find_map(|path| std::fs::read_to_string(path).ok());
+    resolve_host_id(env_override.as_deref(), machine_id.as_deref(), local_host)
+}
+
+/// Pure host-id resolution from candidate sources.
+///
+/// Split out from [`repair_host_id`] so the precedence rules (explicit
+/// override, then a hex machine-id, then a hostname-derived token) can be
+/// exercised without environment or filesystem access.
+fn resolve_host_id(
+    env_override: Option<&str>,
+    machine_id: Option<&str>,
+    local_host: &str,
+) -> String {
+    if let Some(value) = env_override {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_owned();
+        }
+    }
+    if let Some(raw) = machine_id {
+        let id = raw.trim();
+        if !id.is_empty() && id.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return id.to_ascii_lowercase();
+        }
+    }
+    let token = sanitize_token(local_host);
+    if token == "unknown" {
+        "unknown-host-id".to_owned()
+    } else {
+        format!("host-{token}")
+    }
 }
 
 fn repair_coordination_operation_id(command: &str, image: &Path, host: &str) -> String {
@@ -261,53 +312,13 @@ fn repair_coordination_operation_id(command: &str, image: &Path, host: &str) -> 
     )
 }
 
-fn build_coordination_record(
-    path: &Path,
-    local_host: &str,
-    command: &str,
-    operation_id: &str,
-) -> RepairCoordinationRecord {
-    RepairCoordinationRecord {
-        policy: REPAIR_COORDINATION_POLICY.to_owned(),
-        image_path: path.display().to_string(),
-        owner_host: local_host.to_owned(),
-        owner_process_id: std::process::id(),
-        last_command: command.to_owned(),
-        last_operation_id: operation_id.to_owned(),
-        recorded_at_ns: coordination_now_ns(),
-    }
-}
-
-fn write_coordination_record(
-    record_path: &Path,
-    record: &RepairCoordinationRecord,
-    create_new: bool,
-) -> std::io::Result<()> {
-    let mut bytes = serde_json::to_vec_pretty(record).map_err(|error| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!("failed to serialize repair coordination record: {error}"),
-        )
-    })?;
-    bytes.push(b'\n');
-    if create_new {
-        let mut file = StdOpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(record_path)?;
-        std::io::Write::write_all(&mut file, &bytes)?;
-        std::io::Write::flush(&mut file)
-    } else {
-        std::fs::write(record_path, bytes)
-    }
-}
-
 #[derive(Debug)]
 struct RepairCoordinationContext {
     target: &'static str,
     scenario_id: &'static str,
     command: &'static str,
     local_host: String,
+    host_id: String,
     operation_id: String,
     coordination_file: PathBuf,
     coordination_file_display: String,
@@ -329,6 +340,7 @@ impl RepairCoordinationContext {
         path: &Path,
     ) -> Self {
         let local_host = local_host_name();
+        let host_id = repair_host_id(&local_host);
         let coordination_file = repair_coordination_record_path(path);
         let operation_id = repair_coordination_operation_id(command, path, &local_host);
         let coordination_file_display = coordination_file.display().to_string();
@@ -337,6 +349,7 @@ impl RepairCoordinationContext {
             scenario_id,
             command,
             local_host,
+            host_id,
             operation_id,
             coordination_file,
             coordination_file_display,
@@ -427,10 +440,9 @@ impl RepairCoordinationContext {
         &self,
         status: RepairCoordinationStatus,
         writes_allowed: bool,
-        owner_host: Option<String>,
-        owner_process_id: Option<u32>,
         error_class: Option<&str>,
         detail: String,
+        lease: LeaseFields,
     ) -> RepairCoordinationDecision {
         RepairCoordinationDecision {
             output: RepairCoordinationOutput {
@@ -440,8 +452,14 @@ impl RepairCoordinationContext {
                 scenario_id: self.scenario_id.to_owned(),
                 coordination_file: self.coordination_file_display.clone(),
                 local_host: self.local_host.clone(),
-                owner_host,
-                owner_process_id,
+                host_id: self.host_id.clone(),
+                owner_host: lease.owner_host,
+                owner_host_id: lease.owner_host_id,
+                owner_process_id: lease.owner_process_id,
+                lease_version: lease.lease_version,
+                repair_generation: lease.repair_generation,
+                lease_ttl_secs: lease.lease_ttl_secs,
+                lease_expires_in_secs: lease.lease_expires_in_secs,
                 error_class: error_class.map(str::to_owned),
                 detail,
             },
@@ -450,9 +468,26 @@ impl RepairCoordinationContext {
     }
 }
 
+/// Lease-derived fields attached to a [`RepairCoordinationOutput`].
+///
+/// Populated from an [`AcquireResult`]: claimed leases carry this host's
+/// incarnation counters, while blocked decisions carry the foreign or
+/// winning host's identity and (for live foreign leases) remaining TTL.
+#[derive(Debug, Clone, Default)]
+struct LeaseFields {
+    owner_host: Option<String>,
+    owner_host_id: Option<String>,
+    owner_process_id: Option<u32>,
+    lease_version: Option<u64>,
+    repair_generation: Option<u64>,
+    lease_ttl_secs: Option<u64>,
+    lease_expires_in_secs: Option<u64>,
+}
+
 fn not_required_decision(ctx: &RepairCoordinationContext) -> RepairCoordinationDecision {
     let detail =
-        "write-side repair was not requested; single-host coordination is not required".to_owned();
+        "write-side repair was not requested; lease-based ownership coordination is not required"
+            .to_owned();
     ctx.log_info(RepairCoordinationLogRecord {
         outcome: "not_required",
         error_class: "none",
@@ -463,53 +498,146 @@ fn not_required_decision(ctx: &RepairCoordinationContext) -> RepairCoordinationD
         RepairCoordinationStatus::NotRequired,
         false,
         None,
-        None,
-        None,
         detail,
+        LeaseFields::default(),
     )
 }
 
 fn claimed_decision(
     ctx: &RepairCoordinationContext,
-    owner_host: &str,
-    owner_process_id: u32,
-    detail: String,
+    guard: &OwnershipGuard,
 ) -> RepairCoordinationDecision {
+    let record = guard.record();
+    let detail = format!(
+        "FrankenFS lease-based repair ownership claimed for host {} (host_id {}, pid {}); \
+         lease v{} generation {} ttl {}s; coordination record {}",
+        ctx.local_host,
+        ctx.host_id,
+        record.pid,
+        record.lease_version,
+        record.repair_generation,
+        record.lease_ttl_secs,
+        ctx.coordination_file.display(),
+    );
     ctx.log_info(RepairCoordinationLogRecord {
         outcome: "applied",
         error_class: "none",
-        owner_host: Some(owner_host),
+        owner_host: Some(&ctx.local_host),
         event_name: "repair_coordination_applied",
     });
     ctx.decision(
         RepairCoordinationStatus::Claimed,
         true,
-        Some(owner_host.to_owned()),
-        Some(owner_process_id),
         None,
         detail,
+        LeaseFields {
+            owner_host: Some(ctx.local_host.clone()),
+            owner_host_id: Some(ctx.host_id.clone()),
+            owner_process_id: Some(record.pid),
+            lease_version: Some(record.lease_version),
+            repair_generation: Some(record.repair_generation),
+            lease_ttl_secs: Some(record.lease_ttl_secs),
+            lease_expires_in_secs: None,
+        },
     )
 }
 
-fn blocked_decision(
+fn foreign_lease_decision(
     ctx: &RepairCoordinationContext,
-    owner_host: Option<&str>,
-    owner_process_id: Option<u32>,
-    error_class: &'static str,
-    detail: String,
+    owner_host_id: &str,
+    owner_hostname: &str,
+    expires_in_secs: u64,
 ) -> RepairCoordinationDecision {
-    ctx.log_warn(error_class, owner_host);
+    let detail = format!(
+        "FrankenFS blocks write-side repair on host {} (host_id {}) because coordination record {} \
+         holds a live lease for host {} (host_id {}); the lease expires in {expires_in_secs}s. \
+         Use read-only diagnostics, or retry after the lease expires or is handed off.",
+        ctx.local_host,
+        ctx.host_id,
+        ctx.coordination_file.display(),
+        owner_hostname,
+        owner_host_id,
+    );
+    ctx.log_warn("foreign_lease_active", Some(owner_hostname));
     ctx.decision(
         RepairCoordinationStatus::Blocked,
         false,
-        owner_host.map(str::to_owned),
-        owner_process_id,
-        Some(error_class),
+        Some("foreign_lease_active"),
         detail,
+        LeaseFields {
+            owner_host: Some(owner_hostname.to_owned()),
+            owner_host_id: Some(owner_host_id.to_owned()),
+            lease_expires_in_secs: Some(expires_in_secs),
+            ..LeaseFields::default()
+        },
     )
 }
 
+fn conflict_lost_decision(
+    ctx: &RepairCoordinationContext,
+    winner_host_id: &str,
+) -> RepairCoordinationDecision {
+    let detail = format!(
+        "FrankenFS blocks write-side repair on host {} (host_id {}) because a concurrent claim on \
+         coordination record {} won the deterministic ownership tiebreak for host_id \
+         {winner_host_id}. Retry after a short backoff.",
+        ctx.local_host,
+        ctx.host_id,
+        ctx.coordination_file.display(),
+    );
+    ctx.log_warn("ownership_conflict_lost", None);
+    ctx.decision(
+        RepairCoordinationStatus::Blocked,
+        false,
+        Some("ownership_conflict_lost"),
+        detail,
+        LeaseFields {
+            owner_host_id: Some(winner_host_id.to_owned()),
+            ..LeaseFields::default()
+        },
+    )
+}
+
+fn coordination_error_decision(
+    ctx: &RepairCoordinationContext,
+    error: &std::io::Error,
+) -> RepairCoordinationDecision {
+    let (error_class, reason) = match error.kind() {
+        std::io::ErrorKind::InvalidData => (
+            "coordination_metadata_invalid",
+            "is unreadable or holds an invalid lease record",
+        ),
+        std::io::ErrorKind::Interrupted => (
+            "coordination_cancelled",
+            "could not be evaluated because the operation was cancelled",
+        ),
+        _ => ("coordination_io", "could not be read or written"),
+    };
+    let detail = format!(
+        "FrankenFS blocks write-side repair because coordination record {} {reason}: {error}. \
+         Review the record before retrying.",
+        ctx.coordination_file.display(),
+    );
+    ctx.log_warn(error_class, None);
+    ctx.decision(
+        RepairCoordinationStatus::Blocked,
+        false,
+        Some(error_class),
+        detail,
+        LeaseFields::default(),
+    )
+}
+
+/// Gate write-side repair behind the shared lease-based ownership protocol.
+///
+/// Delegates the acquire decision to [`ffs_repair::ownership::RepairOwnership`]:
+/// an absent or expired lease is claimed (and an expired foreign lease is
+/// taken over), a live foreign lease is rejected with its remaining TTL, a
+/// lost deterministic tiebreak is reported as a conflict, and an unreadable
+/// record fails closed. Read-only diagnostics pass `require_write_guard=false`
+/// and never touch the coordination record.
 pub fn coordinate_repair_write_access(
+    cx: &Cx,
     target: &'static str,
     scenario_id: &'static str,
     command: &'static str,
@@ -522,83 +650,18 @@ pub fn coordinate_repair_write_access(
         return not_required_decision(&ctx);
     }
 
-    let new_record = build_coordination_record(path, &ctx.local_host, command, &ctx.operation_id);
-    match write_coordination_record(&ctx.coordination_file, &new_record, true) {
-        Ok(()) => {
-            let detail = format!(
-                "FrankenFS V1.x write-side repair is single-host only; claimed coordination record {} for host {}",
-                ctx.coordination_file.display(),
-                ctx.local_host
-            );
-            claimed_decision(&ctx, &ctx.local_host, new_record.owner_process_id, detail)
+    let ownership = RepairOwnership::new(ctx.host_id.clone(), ctx.local_host.clone());
+    match ownership.try_acquire(cx, path) {
+        Ok(AcquireResult::Acquired(guard)) => claimed_decision(&ctx, &guard),
+        Ok(AcquireResult::OwnedByOther {
+            owner_host_id,
+            owner_hostname,
+            expires_in_secs,
+        }) => foreign_lease_decision(&ctx, &owner_host_id, &owner_hostname, expires_in_secs),
+        Ok(AcquireResult::ConflictLost { winner_host_id }) => {
+            conflict_lost_decision(&ctx, &winner_host_id)
         }
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            let existing_record = std::fs::read(&ctx.coordination_file)
-                .ok()
-                .and_then(|bytes| serde_json::from_slice::<RepairCoordinationRecord>(&bytes).ok());
-
-            match existing_record {
-                Some(existing_record)
-                    if existing_record.owner_host == ctx.local_host
-                        && existing_record.policy == REPAIR_COORDINATION_POLICY =>
-                {
-                    if let Err(refresh_error) =
-                        write_coordination_record(&ctx.coordination_file, &new_record, false)
-                    {
-                        let detail = format!(
-                            "FrankenFS V1.x blocks write-side repair because the coordination record {} could not be refreshed for host {}: {}",
-                            ctx.coordination_file.display(),
-                            ctx.local_host,
-                            refresh_error
-                        );
-                        return blocked_decision(
-                            &ctx,
-                            Some(&existing_record.owner_host),
-                            Some(existing_record.owner_process_id),
-                            "coordination_io",
-                            detail,
-                        );
-                    }
-
-                    let detail = format!(
-                        "FrankenFS V1.x write-side repair remains pinned to host {}; refreshed coordination record {}",
-                        ctx.local_host,
-                        ctx.coordination_file.display()
-                    );
-                    claimed_decision(&ctx, &ctx.local_host, new_record.owner_process_id, detail)
-                }
-                Some(existing_record) => {
-                    let detail = format!(
-                        "FrankenFS V1.x blocks write-side repair on host {} because coordination record {} belongs to host {}. Multi-host repair is out of scope; use read-only diagnostics or hand off ownership explicitly.",
-                        ctx.local_host,
-                        ctx.coordination_file.display(),
-                        existing_record.owner_host
-                    );
-                    blocked_decision(
-                        &ctx,
-                        Some(&existing_record.owner_host),
-                        Some(existing_record.owner_process_id),
-                        "multi_host_unsupported",
-                        detail,
-                    )
-                }
-                None => {
-                    let detail = format!(
-                        "FrankenFS V1.x blocks write-side repair because coordination record {} is unreadable or invalid. Review the record before retrying.",
-                        ctx.coordination_file.display()
-                    );
-                    blocked_decision(&ctx, None, None, "coordination_metadata_invalid", detail)
-                }
-            }
-        }
-        Err(error) => {
-            let detail = format!(
-                "FrankenFS V1.x blocks write-side repair because coordination record {} could not be created: {}",
-                ctx.coordination_file.display(),
-                error
-            );
-            blocked_decision(&ctx, None, None, "coordination_io", detail)
-        }
+        Err(error) => coordination_error_decision(&ctx, &error),
     }
 }
 
@@ -2041,6 +2104,7 @@ pub fn build_repair_output(path: &PathBuf, options: RepairCommandOptions) -> Res
     let cx = cli_cx();
     let mut limitations = Vec::new();
     let repair_coordination = coordinate_repair_write_access(
+        &cx,
         "ffs::cli::repair",
         REPAIR_COORDINATION_SCENARIO_REPAIR,
         "repair",
@@ -2693,16 +2757,32 @@ pub fn print_repair_output(json: bool, output: &RepairOutput) -> Result<()> {
         output.repair_coordination.scenario_id
     );
     println!(
-        "repair_coordination_detail: {} (coordination_file={}, local_host={})",
+        "repair_coordination_detail: {} (coordination_file={}, local_host={}, host_id={})",
         output.repair_coordination.detail,
         output.repair_coordination.coordination_file,
-        output.repair_coordination.local_host
+        output.repair_coordination.local_host,
+        output.repair_coordination.host_id
     );
     if let Some(owner_host) = &output.repair_coordination.owner_host {
         println!("repair_coordination_owner_host: {owner_host}");
     }
+    if let Some(owner_host_id) = &output.repair_coordination.owner_host_id {
+        println!("repair_coordination_owner_host_id: {owner_host_id}");
+    }
     if let Some(owner_process_id) = output.repair_coordination.owner_process_id {
         println!("repair_coordination_owner_process_id: {owner_process_id}");
+    }
+    if let Some(lease_version) = output.repair_coordination.lease_version {
+        println!("repair_coordination_lease_version: {lease_version}");
+    }
+    if let Some(repair_generation) = output.repair_coordination.repair_generation {
+        println!("repair_coordination_repair_generation: {repair_generation}");
+    }
+    if let Some(lease_ttl_secs) = output.repair_coordination.lease_ttl_secs {
+        println!("repair_coordination_lease_ttl_secs: {lease_ttl_secs}");
+    }
+    if let Some(expires_in) = output.repair_coordination.lease_expires_in_secs {
+        println!("repair_coordination_lease_expires_in_secs: {expires_in}");
     }
     if let Some(error_class) = &output.repair_coordination.error_class {
         println!("repair_coordination_error_class: {error_class}");
@@ -2716,4 +2796,319 @@ pub fn print_repair_output(json: bool, output: &RepairOutput) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod coordination_tests {
+    use super::*;
+    use ffs_repair::ownership::CoordinationRecord;
+
+    /// Create a unique temporary directory and return a fake image path inside
+    /// it. The image file itself is not created; coordination only needs the
+    /// parent directory to exist for the adjacent record file.
+    fn temp_image_path() -> PathBuf {
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("ffs-cli-coord-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        dir.join("image.ext4")
+    }
+
+    fn cleanup(image: &Path) {
+        if let Some(parent) = image.parent() {
+            let _ = std::fs::remove_dir_all(parent);
+        }
+    }
+
+    fn foreign_record(host_id: &str, hostname: &str, expired: bool) -> CoordinationRecord {
+        let mut record = CoordinationRecord {
+            version: 1,
+            host_id: host_id.to_owned(),
+            hostname: hostname.to_owned(),
+            pid: 999_001,
+            claimed_at: "2020-01-01T00:00:00Z".to_owned(),
+            lease_ttl_secs: if expired { 1 } else { 300 },
+            lease_version: 4,
+            repair_generation: 7,
+            groups_owned: Vec::new(),
+        };
+        if !expired {
+            // Re-stamp claimed_at to now so the lease is live.
+            record.renew();
+        }
+        record
+    }
+
+    fn write_record(image: &Path, record: &CoordinationRecord) {
+        let path = repair_coordination_record_path(image);
+        std::fs::write(
+            &path,
+            serde_json::to_string_pretty(record).expect("serialize"),
+        )
+        .expect("write coordination record");
+    }
+
+    #[test]
+    fn resolve_host_id_prefers_explicit_override() {
+        assert_eq!(
+            resolve_host_id(Some("  pinned-host-id  "), Some("deadbeef"), "worker-1"),
+            "pinned-host-id"
+        );
+    }
+
+    #[test]
+    fn resolve_host_id_uses_lowercased_hex_machine_id() {
+        assert_eq!(
+            resolve_host_id(None, Some("ABCDEF0123456789\n"), "worker-1"),
+            "abcdef0123456789"
+        );
+    }
+
+    #[test]
+    fn resolve_host_id_skips_non_hex_machine_id_for_hostname_token() {
+        // A non-hex machine-id is not a valid stable UUID; fall back to host.
+        assert_eq!(
+            resolve_host_id(None, Some("not-a-machine-id"), "Worker Box 7"),
+            "host-worker-box-7"
+        );
+    }
+
+    #[test]
+    fn resolve_host_id_sentinel_when_hostname_is_empty() {
+        assert_eq!(resolve_host_id(None, None, ""), "unknown-host-id");
+    }
+
+    #[test]
+    fn coordinate_not_required_when_write_guard_unset() {
+        let image = temp_image_path();
+        let cx = Cx::for_testing();
+        let decision = coordinate_repair_write_access(
+            &cx,
+            "ffs::test",
+            REPAIR_COORDINATION_SCENARIO_REPAIR,
+            "repair",
+            &image,
+            false,
+        );
+        assert!(!decision.writes_allowed);
+        assert_eq!(
+            decision.output.status,
+            RepairCoordinationStatus::NotRequired
+        );
+        assert!(!repair_coordination_record_path(&image).exists());
+        cleanup(&image);
+    }
+
+    #[test]
+    fn coordinate_claims_absent_record() {
+        let image = temp_image_path();
+        let cx = Cx::for_testing();
+        let decision = coordinate_repair_write_access(
+            &cx,
+            "ffs::test",
+            REPAIR_COORDINATION_SCENARIO_REPAIR,
+            "repair",
+            &image,
+            true,
+        );
+        assert!(decision.writes_allowed);
+        assert_eq!(decision.output.status, RepairCoordinationStatus::Claimed);
+        assert_eq!(decision.output.policy, "lease_v1");
+        assert_eq!(decision.output.repair_generation, Some(1));
+        assert_eq!(decision.output.lease_version, Some(1));
+        assert_eq!(decision.output.lease_ttl_secs, Some(300));
+        assert_eq!(
+            decision.output.owner_host_id.as_deref(),
+            Some(decision.output.host_id.as_str())
+        );
+        assert!(repair_coordination_record_path(&image).exists());
+        cleanup(&image);
+    }
+
+    #[test]
+    fn coordinate_same_incarnation_refreshes_and_bumps_generation() {
+        let image = temp_image_path();
+        let cx = Cx::for_testing();
+        let first = coordinate_repair_write_access(
+            &cx,
+            "ffs::test",
+            REPAIR_COORDINATION_SCENARIO_REPAIR,
+            "repair",
+            &image,
+            true,
+        );
+        let second = coordinate_repair_write_access(
+            &cx,
+            "ffs::test",
+            REPAIR_COORDINATION_SCENARIO_REPAIR,
+            "repair",
+            &image,
+            true,
+        );
+        assert!(first.writes_allowed && second.writes_allowed);
+        assert_eq!(first.output.repair_generation, Some(1));
+        assert_eq!(second.output.repair_generation, Some(2));
+        assert_eq!(second.output.status, RepairCoordinationStatus::Claimed);
+        cleanup(&image);
+    }
+
+    #[test]
+    fn coordinate_blocks_live_foreign_lease_with_remaining_ttl() {
+        let image = temp_image_path();
+        write_record(
+            &image,
+            &foreign_record("ffs-test-foreign-host-id", "foreign-worker", false),
+        );
+        let cx = Cx::for_testing();
+        let decision = coordinate_repair_write_access(
+            &cx,
+            "ffs::test",
+            REPAIR_COORDINATION_SCENARIO_REPAIR,
+            "repair",
+            &image,
+            true,
+        );
+        assert!(!decision.writes_allowed);
+        assert_eq!(decision.output.status, RepairCoordinationStatus::Blocked);
+        assert_eq!(
+            decision.output.error_class.as_deref(),
+            Some("foreign_lease_active")
+        );
+        assert_eq!(
+            decision.output.owner_host.as_deref(),
+            Some("foreign-worker")
+        );
+        assert_eq!(
+            decision.output.owner_host_id.as_deref(),
+            Some("ffs-test-foreign-host-id")
+        );
+        let remaining = decision
+            .output
+            .lease_expires_in_secs
+            .expect("live foreign lease must report remaining TTL");
+        assert!(
+            remaining > 0 && remaining <= 300,
+            "remaining TTL out of range: {remaining}"
+        );
+        cleanup(&image);
+    }
+
+    #[test]
+    fn coordinate_takes_over_expired_foreign_lease() {
+        let image = temp_image_path();
+        write_record(
+            &image,
+            &foreign_record("ffs-test-dead-host-id", "crashed-worker", true),
+        );
+        let cx = Cx::for_testing();
+        let decision = coordinate_repair_write_access(
+            &cx,
+            "ffs::test",
+            REPAIR_COORDINATION_SCENARIO_REPAIR,
+            "repair",
+            &image,
+            true,
+        );
+        assert!(
+            decision.writes_allowed,
+            "expired foreign lease must be taken over"
+        );
+        assert_eq!(decision.output.status, RepairCoordinationStatus::Claimed);
+        // Takeover increments the foreign record's repair_generation (7 -> 8).
+        assert_eq!(decision.output.repair_generation, Some(8));
+        assert_eq!(
+            decision.output.owner_host_id.as_deref(),
+            Some(decision.output.host_id.as_str())
+        );
+        cleanup(&image);
+    }
+
+    #[test]
+    fn coordinate_fails_closed_on_invalid_record() {
+        let image = temp_image_path();
+        std::fs::write(repair_coordination_record_path(&image), b"{ not valid json")
+            .expect("write invalid record");
+        let cx = Cx::for_testing();
+        let decision = coordinate_repair_write_access(
+            &cx,
+            "ffs::test",
+            REPAIR_COORDINATION_SCENARIO_REPAIR,
+            "repair",
+            &image,
+            true,
+        );
+        assert!(!decision.writes_allowed);
+        assert_eq!(decision.output.status, RepairCoordinationStatus::Blocked);
+        assert_eq!(
+            decision.output.error_class.as_deref(),
+            Some("coordination_metadata_invalid")
+        );
+        cleanup(&image);
+    }
+
+    #[test]
+    fn conflict_lost_decision_fails_closed_for_winning_host() {
+        let image = temp_image_path();
+        let ctx = RepairCoordinationContext::new(
+            "ffs::test",
+            REPAIR_COORDINATION_SCENARIO_REPAIR,
+            "repair",
+            &image,
+        );
+        let decision = conflict_lost_decision(&ctx, "winner-host-id");
+        assert!(!decision.writes_allowed);
+        assert_eq!(decision.output.status, RepairCoordinationStatus::Blocked);
+        assert_eq!(
+            decision.output.error_class.as_deref(),
+            Some("ownership_conflict_lost")
+        );
+        assert_eq!(
+            decision.output.owner_host_id.as_deref(),
+            Some("winner-host-id")
+        );
+        assert!(
+            decision
+                .output
+                .detail
+                .contains("deterministic ownership tiebreak")
+        );
+        cleanup(&image);
+    }
+
+    #[test]
+    fn coordination_error_decision_classifies_io_kinds() {
+        let image = temp_image_path();
+        let ctx = RepairCoordinationContext::new(
+            "ffs::test",
+            REPAIR_COORDINATION_SCENARIO_REPAIR,
+            "repair",
+            &image,
+        );
+        let invalid = std::io::Error::new(std::io::ErrorKind::InvalidData, "bad record");
+        assert_eq!(
+            coordination_error_decision(&ctx, &invalid)
+                .output
+                .error_class
+                .as_deref(),
+            Some("coordination_metadata_invalid")
+        );
+        let cancelled = std::io::Error::new(std::io::ErrorKind::Interrupted, "cancelled");
+        assert_eq!(
+            coordination_error_decision(&ctx, &cancelled)
+                .output
+                .error_class
+                .as_deref(),
+            Some("coordination_cancelled")
+        );
+        let other = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
+        assert_eq!(
+            coordination_error_decision(&ctx, &other)
+                .output
+                .error_class
+                .as_deref(),
+            Some("coordination_io")
+        );
+        cleanup(&image);
+    }
 }
