@@ -2209,12 +2209,56 @@ mod tests {
         }
     }
 
+    fn make_batch_equivalence_geometry() -> FsGeometry {
+        FsGeometry {
+            blocks_per_group: 64,
+            inodes_per_group: 16,
+            block_size: 1024,
+            total_blocks: 256,
+            total_inodes: 64,
+            first_data_block: 0,
+            group_count: 4,
+            inode_size: 128,
+            desc_size: 32,
+            reserved_gdt_blocks: 0,
+            first_meta_bg: 0,
+            feature_compat: ffs_ondisk::Ext4CompatFeatures(0),
+            feature_incompat: ffs_ondisk::Ext4IncompatFeatures(0),
+            feature_ro_compat: ffs_ondisk::Ext4RoCompatFeatures(0),
+            log_groups_per_flex: 0,
+            backup_bgs: [0, 0],
+            first_inode: 11,
+            cluster_ratio: 1,
+        }
+    }
+
     fn make_groups(geo: &FsGeometry) -> Vec<GroupStats> {
         let bpg = u64::from(geo.blocks_per_group);
         (0..geo.group_count)
             .map(|g| {
                 // Place metadata within each group's own block range so that
                 // FLEX_BG cross-group checks don't create spurious reservations.
+                let group_start = u64::from(g) * bpg;
+                GroupStats {
+                    group: GroupNumber(g),
+                    free_blocks: geo.blocks_per_group,
+                    free_inodes: geo.inodes_per_group,
+                    used_dirs: 0,
+                    block_bitmap_block: BlockNumber(group_start + 1),
+                    inode_bitmap_block: BlockNumber(group_start + 2),
+                    inode_table_block: BlockNumber(group_start + 3),
+                    flags: 0,
+                    block_bitmap_csum: 0,
+                    inode_bitmap_csum: 0,
+                }
+            })
+            .collect()
+    }
+
+    fn make_batch_equivalence_groups(geo: &FsGeometry) -> Vec<GroupStats> {
+        let bpg = u64::from(geo.blocks_per_group);
+        (0..geo.group_count)
+            .map(|g| {
                 let group_start = u64::from(g) * bpg;
                 GroupStats {
                     group: GroupNumber(g),
@@ -2675,6 +2719,205 @@ mod tests {
         }
         let cx = test_cx();
         dev.write_block(&cx, pctx.gdt_block, &buf).unwrap();
+    }
+
+    fn make_batch_equivalence_persist_ctx(geo: &FsGeometry) -> PersistCtx {
+        PersistCtx {
+            gdt_block: BlockNumber(200),
+            desc_size: geo.desc_size,
+            has_metadata_csum: false,
+            csum_seed: 0,
+            uuid: [0; 16],
+            group_desc_checksum_kind: ffs_ondisk::ext4::Ext4GroupDescChecksumKind::None,
+            blocks_per_group: geo.blocks_per_group,
+            inodes_per_group: geo.inodes_per_group,
+        }
+    }
+
+    fn seed_batch_equivalence_bitmaps(
+        cx: &Cx,
+        dev: &MemBlockDevice,
+        geo: &FsGeometry,
+        groups: &mut [GroupStats],
+        occupied_by_group: &[Vec<u32>],
+    ) {
+        for group_idx in 0..geo.group_count {
+            let group = GroupNumber(group_idx);
+            let gidx = group_idx as usize;
+            let mut bitmap = vec![0_u8; geo.block_size as usize];
+            let blocks_in_group = geo.blocks_in_group(group);
+            for rel in reserved_blocks_in_group(geo, groups, group) {
+                bitmap_set(&mut bitmap, rel);
+            }
+            if let Some(occupied) = occupied_by_group.get(gidx) {
+                for &rel in occupied {
+                    if rel < blocks_in_group {
+                        bitmap_set(&mut bitmap, rel);
+                    }
+                }
+            }
+            groups[gidx].free_blocks = bitmap_count_free(&bitmap, blocks_in_group);
+            dev.write_block(cx, groups[gidx].block_bitmap_block, &bitmap)
+                .unwrap();
+        }
+    }
+
+    fn make_batch_equivalence_world(
+        occupied_by_group: &[Vec<u32>],
+    ) -> (MemBlockDevice, FsGeometry, Vec<GroupStats>, PersistCtx) {
+        let cx = test_cx();
+        let geo = make_batch_equivalence_geometry();
+        let dev = MemBlockDevice::new(geo.block_size);
+        let mut groups = make_batch_equivalence_groups(&geo);
+        seed_batch_equivalence_bitmaps(&cx, &dev, &geo, &mut groups, occupied_by_group);
+        let pctx = make_batch_equivalence_persist_ctx(&geo);
+        seed_gdt_block(&dev, &pctx, &groups);
+        (dev, geo, groups, pctx)
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct BatchAllocationSnapshot {
+        free_blocks: Vec<u32>,
+        block_bitmaps: Vec<Vec<u8>>,
+        gdt_free_blocks: Vec<u32>,
+    }
+
+    fn batch_allocation_snapshot(
+        cx: &Cx,
+        dev: &MemBlockDevice,
+        geo: &FsGeometry,
+        groups: &[GroupStats],
+        pctx: &PersistCtx,
+    ) -> BatchAllocationSnapshot {
+        let block_bitmaps = groups
+            .iter()
+            .map(|group| {
+                dev.read_block(cx, group.block_bitmap_block)
+                    .unwrap()
+                    .as_slice()
+                    .to_vec()
+            })
+            .collect();
+
+        BatchAllocationSnapshot {
+            free_blocks: groups.iter().map(|group| group.free_blocks).collect(),
+            block_bitmaps,
+            gdt_free_blocks: (0..geo.group_count)
+                .map(|group| read_gdt_free_blocks(cx, dev, pctx, GroupNumber(group)))
+                .collect(),
+        }
+    }
+
+    fn read_gdt_free_blocks(
+        cx: &Cx,
+        dev: &MemBlockDevice,
+        pctx: &PersistCtx,
+        group: GroupNumber,
+    ) -> u32 {
+        let ds = usize::from(pctx.desc_size);
+        let descs_per_block = dev.block_size() as usize / ds;
+        let group_index = group.0 as usize;
+        let gdt_block_idx = group_index / descs_per_block;
+        let offset_in_block = (group_index % descs_per_block) * ds;
+        let raw = dev
+            .read_block(cx, BlockNumber(pctx.gdt_block.0 + gdt_block_idx as u64))
+            .unwrap();
+        let gd =
+            Ext4GroupDesc::parse_from_bytes(&raw.as_slice()[offset_in_block..], pctx.desc_size)
+                .unwrap();
+        gd.free_blocks_count
+    }
+
+    fn rollback_single_allocations(
+        cx: &Cx,
+        dev: &MemBlockDevice,
+        geo: &FsGeometry,
+        groups: &mut [GroupStats],
+        pctx: &PersistCtx,
+        allocations: &[BlockAlloc],
+    ) {
+        for alloc in allocations.iter().rev() {
+            free_blocks_persist(cx, dev, geo, groups, alloc.start, alloc.count, pctx).unwrap();
+        }
+    }
+
+    fn assert_batch_single_equivalence(
+        occupied_by_group: &[Vec<u32>],
+        request: u32,
+        hint: &AllocHint,
+    ) {
+        let cx = test_cx();
+        let (dev_batch, geo, mut groups_batch, pctx) =
+            make_batch_equivalence_world(occupied_by_group);
+        let (dev_single, _, mut groups_single, _) = make_batch_equivalence_world(occupied_by_group);
+        let initial = batch_allocation_snapshot(&cx, &dev_batch, &geo, &groups_batch, &pctx);
+
+        let batch_result = alloc_blocks_batch_persist(
+            &cx,
+            &dev_batch,
+            &geo,
+            &mut groups_batch,
+            request,
+            hint,
+            &pctx,
+        );
+
+        let mut single_allocations = Vec::new();
+        let mut single_error = None;
+        for _ in 0..request {
+            match alloc_blocks_persist(&cx, &dev_single, &geo, &mut groups_single, 1, hint, &pctx) {
+                Ok(alloc) => single_allocations.push(alloc),
+                Err(error) => {
+                    single_error = Some(error);
+                    break;
+                }
+            }
+        }
+        if single_error.is_some() {
+            rollback_single_allocations(
+                &cx,
+                &dev_single,
+                &geo,
+                &mut groups_single,
+                &pctx,
+                &single_allocations,
+            );
+        }
+
+        match (batch_result, single_error) {
+            (Ok(batch_allocations), None) => {
+                assert_eq!(batch_allocations, single_allocations);
+                assert_eq!(
+                    batch_allocation_snapshot(&cx, &dev_batch, &geo, &groups_batch, &pctx),
+                    batch_allocation_snapshot(&cx, &dev_single, &geo, &groups_single, &pctx)
+                );
+            }
+            (Err(FfsError::NoSpace), Some(FfsError::NoSpace)) => {
+                assert_eq!(
+                    batch_allocation_snapshot(&cx, &dev_batch, &geo, &groups_batch, &pctx),
+                    initial
+                );
+                assert_eq!(
+                    batch_allocation_snapshot(&cx, &dev_single, &geo, &groups_single, &pctx),
+                    initial
+                );
+            }
+            (batch, single) => panic!(
+                "batch and single allocation outcomes diverged: batch={batch:?} single={single:?}"
+            ),
+        }
+    }
+
+    fn occupied_all_allocatable_except(
+        geo: &FsGeometry,
+        groups: &[GroupStats],
+        group: GroupNumber,
+        free_rels: &[u32],
+    ) -> Vec<u32> {
+        let reserved = reserved_blocks_in_group(geo, groups, group);
+        (0..geo.blocks_in_group(group))
+            .filter(|rel| !is_reserved(&reserved, *rel) && !free_rels.contains(rel))
+            .collect()
     }
 
     fn assert_group_bitmap_checksums_valid(
@@ -4512,6 +4755,45 @@ InodeAlloc { ino: InodeNumber(17), group: GroupNumber(1) }
         })
     }
 
+    fn batch_occupied_group_strat() -> impl Strategy<Value = Vec<u32>> {
+        prop::collection::vec(0_u32..64, 0..48)
+    }
+
+    fn batch_equivalence_hint_from_case(
+        geo: &FsGeometry,
+        hint_case: u8,
+        group_seed: u32,
+        rel_seed: u32,
+    ) -> AllocHint {
+        let group = GroupNumber(group_seed % geo.group_count);
+        let rel = rel_seed % geo.blocks_in_group(group);
+        match hint_case % 5 {
+            0 => AllocHint::default(),
+            1 => AllocHint {
+                goal_group: Some(group),
+                ..AllocHint::default()
+            },
+            2 => AllocHint {
+                goal_block: Some(geo.group_block_to_absolute(group, rel)),
+                ..AllocHint::default()
+            },
+            3 => AllocHint {
+                goal_group: Some(group),
+                goal_block: Some(geo.group_block_to_absolute(group, rel)),
+                numa: None,
+            },
+            _ => {
+                let block_group = GroupNumber((group.0 + 1) % geo.group_count);
+                let block_rel = rel_seed % geo.blocks_in_group(block_group);
+                AllocHint {
+                    goal_group: Some(group),
+                    goal_block: Some(geo.group_block_to_absolute(block_group, block_rel)),
+                    numa: None,
+                }
+            }
+        }
+    }
+
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(128))]
 
@@ -5377,9 +5659,68 @@ InodeAlloc { ino: InodeNumber(17), group: GroupNumber(1) }
             let count = max_count.saturating_sub(count_offset).max(1);
             prop_assert_eq!(bitmap_largest_free_run(&bm, count), count);
         }
+
+        #[test]
+        fn proptest_batch_alloc_matches_repeated_single_persist(
+            group0 in batch_occupied_group_strat(),
+            group1 in batch_occupied_group_strat(),
+            group2 in batch_occupied_group_strat(),
+            group3 in batch_occupied_group_strat(),
+            request in 1_u32..96,
+            hint_case in 0_u8..5,
+            group_seed in 0_u32..16,
+            rel_seed in 0_u32..64,
+        ) {
+            let geo = make_batch_equivalence_geometry();
+            let hint = batch_equivalence_hint_from_case(&geo, hint_case, group_seed, rel_seed);
+            let occupied_by_group = vec![group0, group1, group2, group3];
+
+            assert_batch_single_equivalence(&occupied_by_group, request, &hint);
+        }
     }
 
     // ── Batch allocation tests ────────────────────────────────────────────
+
+    #[test]
+    fn batch_vs_single_equivalence_spills_after_goal_group_exhausts() {
+        let geo = make_batch_equivalence_geometry();
+        let groups = make_batch_equivalence_groups(&geo);
+        let mut occupied_by_group = vec![Vec::new(); geo.group_count as usize];
+        occupied_by_group[1] =
+            occupied_all_allocatable_except(&geo, &groups, GroupNumber(1), &[8, 9, 10]);
+        let hint = AllocHint {
+            goal_group: Some(GroupNumber(1)),
+            ..AllocHint::default()
+        };
+
+        assert_batch_single_equivalence(&occupied_by_group, 7, &hint);
+    }
+
+    #[test]
+    fn batch_vs_single_equivalence_respects_goal_group_over_foreign_goal_block() {
+        let geo = make_batch_equivalence_geometry();
+        let occupied_by_group = vec![Vec::new(); geo.group_count as usize];
+        let hint = AllocHint {
+            goal_group: Some(GroupNumber(2)),
+            goal_block: Some(geo.group_block_to_absolute(GroupNumber(3), 20)),
+            numa: None,
+        };
+
+        assert_batch_single_equivalence(&occupied_by_group, 12, &hint);
+    }
+
+    #[test]
+    fn batch_alloc_insufficient_space_rolls_back_seeded_bitmaps() {
+        let geo = make_batch_equivalence_geometry();
+        let groups = make_batch_equivalence_groups(&geo);
+        let mut occupied_by_group = vec![Vec::new(); geo.group_count as usize];
+        occupied_by_group[0] = occupied_all_allocatable_except(&geo, &groups, GroupNumber(0), &[8]);
+        occupied_by_group[1] = occupied_all_allocatable_except(&geo, &groups, GroupNumber(1), &[8]);
+        occupied_by_group[2] = occupied_all_allocatable_except(&geo, &groups, GroupNumber(2), &[8]);
+        occupied_by_group[3] = occupied_all_allocatable_except(&geo, &groups, GroupNumber(3), &[]);
+
+        assert_batch_single_equivalence(&occupied_by_group, 4, &AllocHint::default());
+    }
 
     #[test]
     fn batch_alloc_zero_returns_empty() {
