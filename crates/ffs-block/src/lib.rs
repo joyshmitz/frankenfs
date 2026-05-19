@@ -1394,6 +1394,13 @@ impl InFlightBlocks {
     }
 }
 
+/// One shard of the cache miss page-lock table.
+///
+/// Wait protocol: a waiter holds `in_flight`, loops on the target block
+/// membership predicate, increments `waiters` immediately before parking on
+/// `ready`, and decrements after every wake before re-checking the predicate.
+/// A permit drop must remove the block while holding `in_flight`, release that
+/// mutex, then notify waiters so the cleared predicate is visible before wakeup.
 struct PageLockShard {
     in_flight: Mutex<InFlightBlocks>,
     ready: Condvar,
@@ -4881,6 +4888,26 @@ mod tests {
         }
     }
 
+    const PAGE_LOCK_WAITER_TIMEOUT: Duration = Duration::from_secs(2);
+    const PAGE_LOCK_WAITER_POLL: Duration = Duration::from_millis(2);
+
+    fn wait_until_page_lock_waiters(
+        table: &PageLockTable,
+        block: BlockNumber,
+        expected: usize,
+        timeout: Duration,
+    ) -> usize {
+        let deadline = Instant::now() + timeout;
+        let shard = &table.shards[table.shard_index(block)];
+        loop {
+            let current = shard.waiters.load(Ordering::Acquire);
+            if current >= expected || Instant::now() >= deadline {
+                return current;
+            }
+            std::thread::sleep(PAGE_LOCK_WAITER_POLL);
+        }
+    }
+
     #[cfg(feature = "s3fifo")]
     fn s3_access(state: &mut ArcState, key: BlockNumber) {
         arc_access(state, key);
@@ -5049,6 +5076,70 @@ mod tests {
 
         fn sync(&self, cx: &Cx) -> Result<()> {
             self.sync_calls.fetch_add(1, Ordering::SeqCst);
+            self.inner.sync(cx)
+        }
+    }
+
+    #[derive(Debug)]
+    struct PausingFirstReadBlockDevice<D: BlockDevice> {
+        inner: D,
+        target: BlockNumber,
+        reads: AtomicUsize,
+        first_read_started: Mutex<Option<std::sync::mpsc::Sender<()>>>,
+        first_read_release: Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+
+    impl<D: BlockDevice> PausingFirstReadBlockDevice<D> {
+        fn new(
+            inner: D,
+            target: BlockNumber,
+            first_read_started: std::sync::mpsc::Sender<()>,
+            first_read_release: std::sync::mpsc::Receiver<()>,
+        ) -> Self {
+            Self {
+                inner,
+                target,
+                reads: AtomicUsize::new(0),
+                first_read_started: Mutex::new(Some(first_read_started)),
+                first_read_release: Mutex::new(first_read_release),
+            }
+        }
+
+        fn read_count(&self) -> usize {
+            self.reads.load(Ordering::SeqCst)
+        }
+    }
+
+    impl<D: BlockDevice> BlockDevice for PausingFirstReadBlockDevice<D> {
+        fn read_block(&self, cx: &Cx, block: BlockNumber) -> Result<BlockBuf> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            if block == self.target {
+                let notify = self.first_read_started.lock().take();
+                if let Some(notify) = notify {
+                    notify.send(()).expect("notify first read started");
+                    self.first_read_release
+                        .lock()
+                        .recv_timeout(PAGE_LOCK_WAITER_TIMEOUT)
+                        .expect("release first read before timeout");
+                }
+            }
+
+            self.inner.read_block(cx, block)
+        }
+
+        fn write_block(&self, cx: &Cx, block: BlockNumber, data: &[u8]) -> Result<()> {
+            self.inner.write_block(cx, block, data)
+        }
+
+        fn block_size(&self) -> u32 {
+            self.inner.block_size()
+        }
+
+        fn block_count(&self) -> u64 {
+            self.inner.block_count()
+        }
+
+        fn sync(&self, cx: &Cx) -> Result<()> {
             self.inner.sync(cx)
         }
     }
@@ -7431,6 +7522,99 @@ mod tests {
         );
         assert_eq!(metrics.misses, 1);
         assert_eq!(metrics.hits, u64::try_from(THREADS - 1).expect("fits u64"));
+        assert_eq!(cache.page_locks.in_flight_len(), 0);
+    }
+
+    #[test]
+    fn page_lock_table_same_block_waiter_notifies_with_bounded_join() {
+        use std::sync::mpsc;
+        use std::thread;
+
+        const NUM_BLOCKS: usize = 16;
+        const BLOCK_SIZE: u32 = 4096;
+        const TARGET_BLOCK: BlockNumber = BlockNumber(7);
+
+        let mem = MemoryByteDevice::new(BLOCK_SIZE as usize * NUM_BLOCKS);
+        let dev = ByteBlockDevice::new(mem, BLOCK_SIZE).expect("device");
+
+        let cx = Cx::for_testing();
+        let payload = vec![0x5A; BLOCK_SIZE as usize];
+        dev.write_block(&cx, TARGET_BLOCK, &payload)
+            .expect("seed target block");
+
+        let (first_read_started_tx, first_read_started_rx) = mpsc::channel();
+        let (first_read_release_tx, first_read_release_rx) = mpsc::channel();
+        let pausing = PausingFirstReadBlockDevice::new(
+            dev,
+            TARGET_BLOCK,
+            first_read_started_tx,
+            first_read_release_rx,
+        );
+        let cache = StdArc::new(ArcCache::new(pausing, 8).expect("cache"));
+        let (done_tx, done_rx) = mpsc::channel();
+
+        let leader_cache = StdArc::clone(&cache);
+        let leader_done = done_tx.clone();
+        let leader = thread::spawn(move || {
+            let cx = Cx::for_testing();
+            let buf = leader_cache
+                .read_block(&cx, TARGET_BLOCK)
+                .expect("leader read");
+            assert_eq!(buf.as_slice()[0], 0x5A);
+            leader_done.send("leader").expect("send leader completion");
+        });
+
+        first_read_started_rx
+            .recv_timeout(PAGE_LOCK_WAITER_TIMEOUT)
+            .expect("first same-block miss reached the device");
+
+        let waiter_cache = StdArc::clone(&cache);
+        let waiter_done = done_tx;
+        let waiter = thread::spawn(move || {
+            let cx = Cx::for_testing();
+            let buf = waiter_cache
+                .read_block(&cx, TARGET_BLOCK)
+                .expect("waiter read");
+            assert_eq!(buf.as_slice()[0], 0x5A);
+            waiter_done.send("waiter").expect("send waiter completion");
+        });
+
+        let waiters = wait_until_page_lock_waiters(
+            &cache.page_locks,
+            TARGET_BLOCK,
+            1,
+            PAGE_LOCK_WAITER_TIMEOUT,
+        );
+        first_read_release_tx
+            .send(())
+            .expect("release first same-block miss");
+        assert_eq!(
+            waiters, 1,
+            "same-block second reader should park on the page-lock condvar"
+        );
+
+        let mut completions = [
+            done_rx
+                .recv_timeout(PAGE_LOCK_WAITER_TIMEOUT)
+                .expect("first reader completed after notify"),
+            done_rx
+                .recv_timeout(PAGE_LOCK_WAITER_TIMEOUT)
+                .expect("second reader completed after notify"),
+        ];
+        completions.sort_unstable();
+        assert_eq!(completions, ["leader", "waiter"]);
+
+        leader.join().expect("leader thread panicked");
+        waiter.join().expect("waiter thread panicked");
+
+        let metrics = cache.metrics();
+        assert_eq!(
+            cache.inner().read_count(),
+            1,
+            "parked waiter should reuse the leader's populated cache entry"
+        );
+        assert_eq!(metrics.misses, 1);
+        assert_eq!(metrics.hits, 1);
         assert_eq!(cache.page_locks.in_flight_len(), 0);
     }
 
