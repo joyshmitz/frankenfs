@@ -227,6 +227,7 @@ pub fn allocate_extent(
     let tree_hint = AllocHint {
         goal_group: hint.goal_group,
         goal_block: start.0.checked_add(u64::from(allocated)).map(BlockNumber),
+        numa: hint.numa.clone(),
     };
     let mut tree_alloc = GroupBlockAllocator {
         cx,
@@ -285,6 +286,7 @@ pub fn allocate_unwritten_extent(
     let tree_hint = AllocHint {
         goal_group: hint.goal_group,
         goal_block: start.0.checked_add(u64::from(allocated)).map(BlockNumber),
+        numa: hint.numa.clone(),
     };
     let mut tree_alloc = GroupBlockAllocator {
         cx,

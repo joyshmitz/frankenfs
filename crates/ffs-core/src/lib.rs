@@ -21,8 +21,9 @@ pub use ffs_block::RepairFlushLifecycle;
 
 use asupersync::{Cx, RaptorQConfig};
 use ffs_alloc::{
-    AllocHint, FsGeometry, GroupStats, PersistCtx, bitmap_count_free, bitmap_get,
-    bitmap_largest_free_run,
+    AllocHint, FsGeometry, GroupStats, NumaAllocationPreference, NumaAllocationTopology,
+    NumaNodeId, NumaTopologyDisposition, PersistCtx, bitmap_count_free, bitmap_get,
+    bitmap_largest_free_run, resolve_numa_allocation_goal, validate_numa_allocation_topology,
 };
 use ffs_block::{
     BlockBuf, BlockDevice, ByteDevice, FileByteDevice, read_btrfs_superblock_region,
@@ -358,6 +359,12 @@ pub struct OpenOptions {
     pub ext4_data_err_policy: Ext4DataErrPolicy,
     /// Whether JBD2 descriptor/commit/revoke checksums are enforced during replay.
     pub ext4_verify_journal_checksums: bool,
+    /// Optional runtime NUMA placement policy for allocator hints.
+    ///
+    /// Defaults off. When enabled, topology data is validated per allocation
+    /// request and only influences advisory group ordering; explicit
+    /// `goal_group` / `goal_block` hints retain compatibility precedence.
+    pub numa_allocation_policy: NumaAllocationPolicy,
 }
 
 #[allow(clippy::derivable_impls)]
@@ -373,6 +380,54 @@ impl Default for OpenOptions {
             btrfs_mount_selection: BtrfsMountSelection::DefaultRoot,
             ext4_data_err_policy: Ext4DataErrPolicy::Ignore,
             ext4_verify_journal_checksums: true,
+            numa_allocation_policy: NumaAllocationPolicy::Disabled,
+        }
+    }
+}
+
+/// Claim tier carried by runtime NUMA allocation placement logs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NumaAllocationClaimTier {
+    /// Advisory placement only; not a release-readiness performance claim.
+    Advisory,
+    /// Placement was enabled in an environment that can only produce downgrade evidence.
+    CapabilityDowngraded,
+}
+
+impl NumaAllocationClaimTier {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Advisory => "advisory",
+            Self::CapabilityDowngraded => "capability_downgraded",
+        }
+    }
+}
+
+/// Runtime policy for propagating NUMA topology into allocation hints.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum NumaAllocationPolicy {
+    /// Preserve legacy allocator hints and do not attach NUMA preferences.
+    #[default]
+    Disabled,
+    /// Validate `topology` and prefer groups mapped to `preferred_node`.
+    PreferredNode {
+        topology: NumaAllocationTopology,
+        preferred_node: NumaNodeId,
+        claim_tier: NumaAllocationClaimTier,
+    },
+}
+
+impl NumaAllocationPolicy {
+    fn preferred_node_parts(
+        &self,
+    ) -> Option<(&NumaAllocationTopology, NumaNodeId, NumaAllocationClaimTier)> {
+        match self {
+            Self::Disabled => None,
+            Self::PreferredNode {
+                topology,
+                preferred_node,
+                claim_tier,
+            } => Some((topology, *preferred_node, *claim_tier)),
         }
     }
 }
@@ -652,6 +707,8 @@ pub struct OpenFs {
     pub mount_mode: MountMode,
     /// Active ext4 `data_err=` policy selected at open time.
     pub ext4_data_err_policy: Ext4DataErrPolicy,
+    /// Runtime NUMA allocation policy selected at open time.
+    pub numa_allocation_policy: NumaAllocationPolicy,
     /// Latched when an ext4 write I/O error forces a read-only remount.
     ext4_forced_read_only: AtomicBool,
     /// Block device for I/O operations.
@@ -735,6 +792,7 @@ impl std::fmt::Debug for OpenFs {
             .field("external_journal_info", &self.external_journal_info)
             .field("mount_mode", &self.mount_mode)
             .field("ext4_data_err_policy", &self.ext4_data_err_policy)
+            .field("numa_allocation_policy", &self.numa_allocation_policy)
             .field(
                 "ext4_forced_read_only",
                 &self.ext4_forced_read_only.load(Ordering::SeqCst),
@@ -2453,6 +2511,7 @@ impl OpenFs {
             external_journal_info: None,
             mount_mode: options.mount_mode,
             ext4_data_err_policy: options.ext4_data_err_policy,
+            numa_allocation_policy: options.numa_allocation_policy.clone(),
             ext4_forced_read_only: AtomicBool::new(false),
             dev,
             mvcc_store,
@@ -7908,15 +7967,17 @@ impl OpenFs {
 
             let (ind_block_num, new_metadata_block) = if current_ind == 0 {
                 // Allocate a new indirect block.
-                let hint = AllocHint {
-                    goal_group: None,
-                    goal_block: None,
-                };
                 let Ext4AllocState {
                     geo,
                     groups,
                     persist_ctx,
                 } = &mut *alloc;
+                let hint = self.numa_allocation_hint(
+                    geo,
+                    AllocHint::default(),
+                    "ext4_indirect_block",
+                    None,
+                );
                 let alloc_result = ffs_alloc::alloc_blocks_persist(
                     cx,
                     &block_dev,
@@ -8100,16 +8161,14 @@ impl OpenFs {
         }
         let block_dev = self.block_device_adapter();
         let bs = self.block_size();
-        let hint = AllocHint {
-            goal_group: None,
-            goal_block: None,
-        };
         let Ext4AllocState {
             geo,
             groups,
             persist_ctx,
             ..
         } = &mut *alloc;
+        let hint =
+            self.numa_allocation_hint(geo, AllocHint::default(), "ext4_indirect_block", None);
         let result =
             ffs_alloc::alloc_blocks_persist(cx, &block_dev, geo, groups, 1, &hint, persist_ctx)?;
         let new_block = result.start;
@@ -8161,16 +8220,13 @@ impl OpenFs {
         if current != 0 {
             return Ok((BlockNumber(u64::from(current)), Vec::new()));
         }
-        let hint = AllocHint {
-            goal_group: None,
-            goal_block: None,
-        };
         let Ext4AllocState {
             geo,
             groups,
             persist_ctx,
             ..
         } = &mut *alloc;
+        let hint = self.numa_allocation_hint(geo, AllocHint::default(), "ext4_pointer_block", None);
         let result =
             ffs_alloc::alloc_blocks_persist(cx, &block_dev, geo, groups, 1, &hint, persist_ctx)?;
         let new_block = result.start;
@@ -8454,15 +8510,17 @@ impl OpenFs {
 
         // Allocate physical blocks and write.
         for i in 0..blocks_needed {
-            let hint = AllocHint {
-                goal_group: None,
-                goal_block: None,
-            };
             let Ext4AllocState {
                 geo,
                 groups,
                 persist_ctx,
             } = &mut *alloc;
+            let hint = self.numa_allocation_hint(
+                geo,
+                AllocHint::default(),
+                "ext4_compressed_cluster",
+                Some(ino),
+            );
             let alloc_result = ffs_alloc::alloc_blocks_persist(
                 cx,
                 &block_dev,
@@ -8577,15 +8635,17 @@ impl OpenFs {
             let mut block_data = vec![0_u8; bs_usize];
             block_data[..end - start].copy_from_slice(&data[start..end]);
 
-            let hint = AllocHint {
-                goal_group: None,
-                goal_block: None,
-            };
             let Ext4AllocState {
                 geo,
                 groups,
                 persist_ctx,
             } = &mut *alloc;
+            let hint = self.numa_allocation_hint(
+                geo,
+                AllocHint::default(),
+                "ext4_uncompressed_cluster",
+                Some(ino),
+            );
             let alloc_result = ffs_alloc::alloc_blocks_persist(
                 cx,
                 &block_dev,
@@ -9250,6 +9310,94 @@ impl OpenFs {
         BlockNumber(ext.physical_start + u64::from(ext.actual_len()))
     }
 
+    fn runtime_numa_now_secs() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or(Duration::ZERO)
+            .as_secs()
+    }
+
+    fn numa_allocation_hint(
+        &self,
+        geo: &FsGeometry,
+        base: AllocHint,
+        operation: &'static str,
+        ino: Option<InodeNumber>,
+    ) -> AllocHint {
+        Self::numa_allocation_hint_from_policy(
+            &self.numa_allocation_policy,
+            geo,
+            base,
+            operation,
+            ino,
+            Self::runtime_numa_now_secs(),
+        )
+    }
+
+    fn numa_allocation_hint_from_policy(
+        policy: &NumaAllocationPolicy,
+        geo: &FsGeometry,
+        mut hint: AllocHint,
+        operation: &'static str,
+        ino: Option<InodeNumber>,
+        now_unix_secs: u64,
+    ) -> AllocHint {
+        let Some((topology, preferred_node, claim_tier)) = policy.preferred_node_parts() else {
+            trace!(
+                target: "ffs::write",
+                op = operation,
+                inode = ino.map(|ino| ino.0),
+                numa_policy = "disabled",
+                claim_tier = "disabled",
+                fallback_reason = "policy_disabled",
+                "numa_allocation_hint"
+            );
+            return hint;
+        };
+
+        let plan = match validate_numa_allocation_topology(geo, topology, now_unix_secs) {
+            Ok(plan) => plan,
+            Err(error) => {
+                warn!(
+                    target: "ffs::write",
+                    op = operation,
+                    inode = ino.map(|ino| ino.0),
+                    preferred_node = preferred_node.0,
+                    claim_tier = claim_tier.label(),
+                    fallback_reason = ?error,
+                    "numa_allocation_hint_fallback"
+                );
+                return hint;
+            }
+        };
+
+        let selected_group = resolve_numa_allocation_goal(geo, &hint, &plan, Some(preferred_node));
+        let fallback_reason = match plan.disposition {
+            NumaTopologyDisposition::AdvisoryMap => "none",
+            NumaTopologyDisposition::UnknownFallback => "unknown_topology",
+            NumaTopologyDisposition::SingleNodeFallback => "single_node_topology",
+        };
+        trace!(
+            target: "ffs::write",
+            op = operation,
+            inode = ino.map(|ino| ino.0),
+            preferred_node = preferred_node.0,
+            selected_group = selected_group.0,
+            disposition = ?plan.disposition,
+            claim_tier = claim_tier.label(),
+            fallback_reason,
+            explicit_goal_group = hint.goal_group.map(|group| group.0),
+            explicit_goal_block = hint.goal_block.map(|block| block.0),
+            "numa_allocation_hint"
+        );
+
+        hint.numa = Some(NumaAllocationPreference {
+            plan,
+            preferred_node,
+        });
+        hint
+    }
+
     /// Get a block device adapter for the underlying byte device, wrapped
     /// in MVCC versioning logic at the current latest snapshot.
     fn block_device_adapter(&self) -> MvccBlockDevice<ByteDeviceBlockAdapter<'_>> {
@@ -9637,16 +9785,21 @@ impl OpenFs {
         let mut block_dev = self.block_device_adapter();
 
         // Allocate a data block for the directory and initialize with . and ..
-        let hint = AllocHint {
-            goal_group: Some(parent_group),
-            goal_block: None,
-        };
         let dir_alloc = {
             let Ext4AllocState {
                 geo,
                 groups,
                 persist_ctx,
             } = &mut *alloc;
+            let hint = self.numa_allocation_hint(
+                geo,
+                AllocHint {
+                    goal_group: Some(parent_group),
+                    ..AllocHint::default()
+                },
+                "ext4_mkdir_data_block",
+                Some(ino),
+            );
             ffs_alloc::alloc_blocks_persist(cx, &block_dev, geo, groups, 1, &hint, persist_ctx)?
         };
 
@@ -9680,7 +9833,15 @@ impl OpenFs {
                 dev: &block_dev,
                 geo,
                 groups,
-                hint,
+                hint: self.numa_allocation_hint(
+                    geo,
+                    AllocHint {
+                        goal_group: Some(parent_group),
+                        ..AllocHint::default()
+                    },
+                    "ext4_mkdir_extent_tree",
+                    Some(ino),
+                ),
                 pctx: persist_ctx,
             };
             ffs_btree::insert(cx, &block_dev, &mut root_bytes, extent, &mut tree_alloc)?;
@@ -9852,10 +10013,15 @@ impl OpenFs {
                 parent,
                 i128::from(added_sectors),
             )?;
-            let hint = AllocHint {
-                goal_group: None,
-                goal_block: extents.last().map(Self::extent_end_hint),
-            };
+            let hint = self.numa_allocation_hint(
+                &alloc.geo,
+                AllocHint {
+                    goal_block: extents.last().map(Self::extent_end_hint),
+                    ..AllocHint::default()
+                },
+                "ext4_dir_growth",
+                Some(parent),
+            );
             let new_alloc = ffs_alloc::alloc_blocks_persist(
                 cx,
                 dev,
@@ -9915,10 +10081,15 @@ impl OpenFs {
                 physical_start: new_alloc.start.0,
             };
             let mut root_bytes = Self::extent_root(&parent_upd);
-            let tree_hint = AllocHint {
-                goal_group: None,
-                goal_block: Some(new_alloc.start),
-            };
+            let tree_hint = self.numa_allocation_hint(
+                &alloc.geo,
+                AllocHint {
+                    goal_block: Some(new_alloc.start),
+                    ..AllocHint::default()
+                },
+                "ext4_dir_extent_tree",
+                Some(parent),
+            );
             let mut tree_alloc = ffs_extent::GroupBlockAllocator {
                 cx,
                 dev,
@@ -10901,10 +11072,15 @@ impl OpenFs {
                 let mut logical = mapping.logical_start;
                 while remaining > 0 {
                     let chunk = remaining.min(MAX_EXTENT_COUNT);
-                    let hint = AllocHint {
-                        goal_group: None,
-                        goal_block,
-                    };
+                    let hint = self.numa_allocation_hint(
+                        &alloc.geo,
+                        AllocHint {
+                            goal_block,
+                            ..AllocHint::default()
+                        },
+                        "ext4_fallocate",
+                        Some(ino),
+                    );
                     let alloc_mapping = {
                         let Ext4AllocState {
                             geo,
@@ -11119,10 +11295,15 @@ impl OpenFs {
                         ino,
                         i128::from(added_sectors),
                     )?;
-                    let hint = AllocHint {
-                        goal_group: None,
-                        goal_block: extents.last().map(Self::extent_end_hint),
-                    };
+                    let hint = self.numa_allocation_hint(
+                        &alloc.geo,
+                        AllocHint {
+                            goal_block: extents.last().map(Self::extent_end_hint),
+                            ..AllocHint::default()
+                        },
+                        "ext4_write",
+                        Some(ino),
+                    );
                     let mut root_bytes = Self::extent_root(&inode);
                     let mapping = if let Some(tx) = &mut scope.tx {
                         let tx_dev = TransactionBlockAdapter {
@@ -12032,15 +12213,20 @@ impl OpenFs {
                 // Inline region exhausted and no external block exists yet — allocate one.
                 let mut alloc = alloc_mutex.lock();
                 let ino_group = ffs_types::inode_to_group(ino, alloc.geo.inodes_per_group);
-                let hint = AllocHint {
-                    goal_group: Some(ino_group),
-                    goal_block: None,
-                };
                 let Ext4AllocState {
                     geo,
                     groups,
                     persist_ctx,
                 } = &mut *alloc;
+                let hint = self.numa_allocation_hint(
+                    geo,
+                    AllocHint {
+                        goal_group: Some(ino_group),
+                        ..AllocHint::default()
+                    },
+                    "ext4_setxattr_external_block",
+                    Some(ino),
+                );
                 let block_alloc = ffs_alloc::alloc_blocks_persist(
                     cx,
                     &block_dev,
@@ -12114,10 +12300,15 @@ impl OpenFs {
             if old_acl != 0 && old_refcount > 1 {
                 // Block was shared, we must allocate a new block (COW)
                 let ino_group = ffs_types::inode_to_group(ino, geo.inodes_per_group);
-                let hint = AllocHint {
-                    goal_group: Some(ino_group),
-                    goal_block: None,
-                };
+                let hint = self.numa_allocation_hint(
+                    geo,
+                    AllocHint {
+                        goal_group: Some(ino_group),
+                        ..AllocHint::default()
+                    },
+                    "ext4_setxattr_cow_block",
+                    Some(ino),
+                );
                 let block_alloc = ffs_alloc::alloc_blocks_persist(
                     cx,
                     &block_dev,
@@ -12318,10 +12509,15 @@ impl OpenFs {
                 )?;
             } else if old_refcount > 1 {
                 let ino_group = ffs_types::inode_to_group(ino, geo.inodes_per_group);
-                let hint = AllocHint {
-                    goal_group: Some(ino_group),
-                    goal_block: None,
-                };
+                let hint = self.numa_allocation_hint(
+                    geo,
+                    AllocHint {
+                        goal_group: Some(ino_group),
+                        ..AllocHint::default()
+                    },
+                    "ext4_removexattr_cow_block",
+                    Some(ino),
+                );
                 let block_alloc = ffs_alloc::alloc_blocks_persist(
                     cx,
                     &block_dev,
@@ -20349,6 +20545,226 @@ mod tests {
         let guard = tracing::dispatcher::set_default(&dispatch);
         tracing::callsite::rebuild_interest_cache();
         guard
+    }
+
+    fn numa_test_geometry() -> FsGeometry {
+        FsGeometry {
+            blocks_per_group: 8192,
+            inodes_per_group: 2048,
+            block_size: 4096,
+            total_blocks: 32768,
+            total_inodes: 8192,
+            first_data_block: 1,
+            group_count: 4,
+            inode_size: 256,
+            desc_size: 32,
+            reserved_gdt_blocks: 0,
+            first_meta_bg: 0,
+            feature_compat: ffs_ondisk::Ext4CompatFeatures(0),
+            feature_incompat: ffs_ondisk::Ext4IncompatFeatures(0),
+            feature_ro_compat: ffs_ondisk::Ext4RoCompatFeatures(0),
+            log_groups_per_flex: 0,
+            backup_bgs: [0, 0],
+            first_inode: 11,
+            cluster_ratio: 1,
+        }
+    }
+
+    fn numa_required_consumers() -> Vec<String> {
+        ffs_alloc::REQUIRED_NUMA_TOPOLOGY_CONSUMERS
+            .iter()
+            .map(|consumer| (*consumer).to_owned())
+            .collect()
+    }
+
+    fn observed_runtime_numa_topology(
+        observed_at_unix_secs: u64,
+        max_age_secs: u64,
+    ) -> NumaAllocationTopology {
+        NumaAllocationTopology {
+            source: ffs_alloc::NumaTopologySource::Observed {
+                observed_at_unix_secs,
+                max_age_secs,
+                node_groups: vec![
+                    ffs_alloc::NumaNodeGroupRange {
+                        node_id: NumaNodeId(0),
+                        first_group: GroupNumber(0),
+                        group_count: 2,
+                    },
+                    ffs_alloc::NumaNodeGroupRange {
+                        node_id: NumaNodeId(1),
+                        first_group: GroupNumber(2),
+                        group_count: 2,
+                    },
+                ],
+            },
+            evidence_claim: ffs_alloc::NumaEvidenceClaim::AdvisoryOnly,
+            downstream_consumers: numa_required_consumers(),
+        }
+    }
+
+    fn preferred_node_policy(topology: NumaAllocationTopology) -> NumaAllocationPolicy {
+        NumaAllocationPolicy::PreferredNode {
+            topology,
+            preferred_node: NumaNodeId(1),
+            claim_tier: NumaAllocationClaimTier::Advisory,
+        }
+    }
+
+    #[test]
+    fn numa_runtime_policy_disabled_keeps_existing_allocation_hint() {
+        let geo = numa_test_geometry();
+        let hint = OpenFs::numa_allocation_hint_from_policy(
+            &NumaAllocationPolicy::Disabled,
+            &geo,
+            AllocHint {
+                goal_group: Some(GroupNumber(2)),
+                goal_block: Some(BlockNumber(16_385)),
+                ..AllocHint::default()
+            },
+            "test_disabled",
+            Some(InodeNumber(11)),
+            1_010,
+        );
+
+        assert_eq!(hint.goal_group, Some(GroupNumber(2)));
+        assert_eq!(hint.goal_block, Some(BlockNumber(16_385)));
+        assert!(hint.numa.is_none());
+    }
+
+    #[test]
+    fn numa_runtime_policy_prefers_requested_node_without_explicit_goal() {
+        let geo = numa_test_geometry();
+        let hint = OpenFs::numa_allocation_hint_from_policy(
+            &preferred_node_policy(observed_runtime_numa_topology(1_000, 60)),
+            &geo,
+            AllocHint::default(),
+            "test_write",
+            Some(InodeNumber(12)),
+            1_010,
+        );
+        let numa = hint.numa.as_ref().expect("policy should attach NUMA hint");
+
+        assert_eq!(numa.preferred_node, NumaNodeId(1));
+        assert_eq!(numa.plan.disposition, NumaTopologyDisposition::AdvisoryMap);
+        assert_eq!(
+            resolve_numa_allocation_goal(&geo, &hint, &numa.plan, Some(numa.preferred_node)),
+            GroupNumber(2)
+        );
+    }
+
+    #[test]
+    fn numa_runtime_policy_explicit_goal_preserves_precedence() {
+        let geo = numa_test_geometry();
+        let hint = OpenFs::numa_allocation_hint_from_policy(
+            &preferred_node_policy(observed_runtime_numa_topology(1_000, 60)),
+            &geo,
+            AllocHint {
+                goal_group: Some(GroupNumber(0)),
+                ..AllocHint::default()
+            },
+            "test_explicit_goal",
+            Some(InodeNumber(13)),
+            1_010,
+        );
+        let numa = hint.numa.as_ref().expect("policy should attach NUMA hint");
+
+        assert_eq!(
+            resolve_numa_allocation_goal(&geo, &hint, &numa.plan, Some(numa.preferred_node)),
+            GroupNumber(0)
+        );
+    }
+
+    #[test]
+    fn numa_runtime_policy_unknown_topology_falls_back_to_legacy_groups() {
+        let geo = numa_test_geometry();
+        let policy = NumaAllocationPolicy::PreferredNode {
+            topology: NumaAllocationTopology {
+                source: ffs_alloc::NumaTopologySource::Unknown {
+                    reason: "host topology unavailable".to_owned(),
+                },
+                evidence_claim: ffs_alloc::NumaEvidenceClaim::AdvisoryOnly,
+                downstream_consumers: numa_required_consumers(),
+            },
+            preferred_node: NumaNodeId(1),
+            claim_tier: NumaAllocationClaimTier::CapabilityDowngraded,
+        };
+
+        let hint = OpenFs::numa_allocation_hint_from_policy(
+            &policy,
+            &geo,
+            AllocHint::default(),
+            "test_unknown",
+            None,
+            1_010,
+        );
+        let numa = hint
+            .numa
+            .as_ref()
+            .expect("unknown topology still records fallback plan");
+
+        assert_eq!(
+            numa.plan.disposition,
+            NumaTopologyDisposition::UnknownFallback
+        );
+        assert!(numa.plan.group_nodes.iter().all(Option::is_none));
+        assert_eq!(
+            resolve_numa_allocation_goal(&geo, &hint, &numa.plan, Some(numa.preferred_node)),
+            GroupNumber(0)
+        );
+    }
+
+    #[test]
+    fn numa_runtime_policy_stale_topology_drops_preference() {
+        let geo = numa_test_geometry();
+        let hint = OpenFs::numa_allocation_hint_from_policy(
+            &preferred_node_policy(observed_runtime_numa_topology(1_000, 60)),
+            &geo,
+            AllocHint::default(),
+            "test_stale",
+            Some(InodeNumber(14)),
+            1_061,
+        );
+
+        assert!(hint.numa.is_none());
+    }
+
+    #[test]
+    fn numa_runtime_policy_single_node_fallback_maps_every_group_to_node_zero() {
+        let geo = numa_test_geometry();
+        let policy = NumaAllocationPolicy::PreferredNode {
+            topology: NumaAllocationTopology {
+                source: ffs_alloc::NumaTopologySource::SingleNode,
+                evidence_claim: ffs_alloc::NumaEvidenceClaim::AdvisoryOnly,
+                downstream_consumers: numa_required_consumers(),
+            },
+            preferred_node: NumaNodeId(0),
+            claim_tier: NumaAllocationClaimTier::CapabilityDowngraded,
+        };
+
+        let hint = OpenFs::numa_allocation_hint_from_policy(
+            &policy,
+            &geo,
+            AllocHint::default(),
+            "test_single_node",
+            None,
+            1_010,
+        );
+        let numa = hint
+            .numa
+            .as_ref()
+            .expect("single-node topology should attach fallback plan");
+
+        assert_eq!(
+            numa.plan.disposition,
+            NumaTopologyDisposition::SingleNodeFallback
+        );
+        assert!(
+            numa.plan
+                .group_nodes
+                .iter()
+                .all(|node| *node == Some(NumaNodeId(0)))
+        );
     }
 
     #[test]
