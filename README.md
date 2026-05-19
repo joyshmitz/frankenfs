@@ -2508,7 +2508,7 @@ frankenfs/
 
 ## Fuzz Target Inventory
 
-All 61 libfuzzer targets are in `fuzz/fuzz_targets/`. Each one is driven by `cargo fuzz run <target>` (with `cargo-fuzz` installed) or via the smoke-gate script. The corpora live under `tests/fuzz_corpus/`. A categorized listing:
+All 61 libfuzzer targets are in `fuzz/fuzz_targets/`. Each one is driven by `cargo fuzz run <target>` (with `cargo-fuzz` installed) or via the smoke-gate script. Target-specific corpora live under `fuzz/corpus/<target>/`; shared regression seeds remain under `tests/fuzz_corpus/`. A categorized listing:
 
 ### On-disk parser fuzzers (ext4)
 

@@ -26,6 +26,7 @@ or a bead/artifact owner.
 |----|-----------------|--------------|------------------|---------------------|------------------------|----------------------------------|---------------------------|----------|-------------------------|--------------|-----------------------------|
 | A1 | fuzz/fuzz_targets/fuzz_fuse_splice_mount.rs; fuzz/fuzz_targets/fuzz_ioctl_dispatch.rs | FUSE and ioctl parser cursor saturation | `20260506_bd-rchk0_59_high_cursor_warm` ran both high-cursor targets for 60 seconds each with copied corpora: `fuzz_fuse_splice_mount` 451 seeds, 270632 runs, 0 crashes; `fuzz_ioctl_dispatch` 429 seeds, 463477 runs, 0 crashes | long-campaign | deferred | required | source_path,row_id,decision,reproduction_command,artifact_path,owner_status | artifact-covered | bd-rchk0.59; artifacts/fuzz/20260506_bd-rchk0_59_high_cursor_warm/campaign_summary.json | covered by bounded copied-corpus campaign on thinkstation1; logs and repro command in artifacts/fuzz/20260506_bd-rchk0_59_high_cursor_warm/ | n/a |
 | A2 | fuzz/fuzz_targets/fuzz_inode_roundtrip.rs | Inode round-trip extra-area branches | `bd-rchk0.21` added all seven POSIX file-type synthetic lanes plus extra-area round-trip reconciliation for `fuzz_inode_roundtrip` | corpus-seed | existing | required | source_path,row_id,decision,reproduction_command,artifact_path,owner_status | artifact-covered | bd-rchk0.21; fuzz/fuzz_targets/fuzz_inode_roundtrip.rs | covered by closed targeted fuzz artifact | n/a |
+| A3 | fuzz/fuzz_targets/fuzz_verification_runner.rs; crates/ffs-harness/src/verification_runner.rs | E2E `SCENARIO_RESULT` parser and script-conformance classifier | `bd-93wfn` registered `fuzz_verification_runner`, added deterministic parser and conformance classification assertions, and seeded duplicate-core-field plus legacy-status marker coverage | corpus-seed | existing | required | source_path,row_id,decision,reproduction_command,artifact_path,owner_status | artifact-covered | bd-93wfn; fuzz/fuzz_targets/fuzz_verification_runner.rs; fuzz/corpus/fuzz_verification_runner/seed_valid_invalid_markers | covered by RCH compile, clippy, zero-run, and seed-corpus smoke for `fuzz_verification_runner` | n/a |
 | B1 | crates/ffs-dir/src/lib.rs; crates/ffs-harness/tests/ext4_dir_rec_len_kernel_reference.rs | ext4 directory entry rec_len after unlink | `ext4_dir_rec_len_kernel_reference_coalesces_after_unlink` now pins debugfs `rm` rec_len coalescing end-to-end | golden-fixture | existing | required | source_path,row_id,decision,reproduction_command,artifact_path,owner_status | artifact-covered | crates/ffs-harness/tests/ext4_dir_rec_len_kernel_reference.rs::ext4_dir_rec_len_kernel_reference_coalesces_after_unlink | covered by kernel-reference harness | n/a |
 | B2 | conformance/fixtures/ext4_inode_inline_data.json; conformance/fixtures/ext4_inode_inline_data_with_continuation.json; crates/ffs-harness/tests/kernel_reference.rs | ext4 inline data continuation fixtures | `ext4_inline_data_continuation_kernel_reference` now creates an e2fsprogs `inline_data` image through debugfs and verifies `i_block` plus `system.data` continuation bytes | golden-fixture | existing | required | source_path,row_id,decision,reproduction_command,artifact_path,owner_status | artifact-covered | crates/ffs-harness/tests/kernel_reference.rs::ext4_inline_data_continuation_kernel_reference | covered by kernel-reference harness | n/a |
 | B3 | crates/ffs-harness/tests/kernel_reference.rs; crates/ffs-inode/tests/conformance_inode_golden.rs | ext4 large file i_size_high over 4 GiB | `ext4_large_isize_high_matches_debugfs_and_openfs` creates a sparse 64 MiB ext4 image, uses `debugfs sif` to set a 5 GiB regular-file size, and compares debugfs, raw `i_size_lo`/`i_size_high`, `ffs_ondisk`, and `OpenFs` | golden-fixture | existing | required | source_path,row_id,decision,reproduction_command,artifact_path,owner_status | artifact-covered | bd-rchk0.60; crates/ffs-harness/tests/kernel_reference.rs::ext4_large_isize_high_matches_debugfs_and_openfs | covered by sparse kernel-reference harness requiring `mkfs.ext4` and `debugfs`; no dense multi-GB allocation; repro: `CARGO_TARGET_DIR=/data/tmp/rch_target_frankenfs_BrightForge_bd-rchk0_60_test RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- cargo test -p ffs-harness --test kernel_reference ext4_large_isize_high_matches_debugfs_and_openfs -- --nocapture` | n/a |
@@ -53,7 +54,7 @@ file counts are:
 | Well-corpused (>= 100)   | 40    | includes cli_btrfs_parsers (111), btrfs_send_stream (114), btrfs_tree_items (114), ext4_htree_mmp (113), and repair_evidence_ledger (4794) |
 | Mid-coverage (30-99)     | 3     | btrfs_devitem (37), wal_replay (67), ext4_image_reader (90) |
 | Low-corpus (10-29)       | 3     | ext4_chksum (13), ext4_casefold (20), repair_symbols (28) |
-| Minimal smoke/admin (1-9) | 14    | manifest, dashboard, smoke, round-trip, and narrow parser targets with intentional seed-only corpora |
+| Minimal smoke/admin (1-9) | 15    | manifest, dashboard, smoke, round-trip, verification-runner, and narrow parser targets with intentional seed-only corpora |
 
 **Open items in this category:**
 - None in the `bd-rchk7.1` registry. Reopen this section only for new
@@ -71,6 +72,14 @@ file counts are:
   contract (commits `0fed288`, `45dc836`); `bd-rchk0.21` added all
   seven POSIX file-type synthetic lanes and extra-area round-trip
   reconciliation, then validated the target with a short corpus smoke.
+- A3: `bd-93wfn` added `fuzz_verification_runner` for
+  `verification_runner::parse_e2e_output` and
+  `verification_runner::check_script_conformance`, including deterministic
+  parser signatures, malformed marker rejection, exact generated-script
+  conformance classification, and the
+  `fuzz/corpus/fuzz_verification_runner/seed_valid_invalid_markers`
+  seed. RCH validation covered target compile, clippy, zero-run, and
+  seed-corpus smoke.
 
 ## B. Conformance harnesses — kernel-reference parity
 
