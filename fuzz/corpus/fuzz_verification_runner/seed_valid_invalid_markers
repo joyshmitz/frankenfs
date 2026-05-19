@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+source "$REPO_ROOT/scripts/e2e/lib.sh"
+e2e_init "verification_runner_fuzz_seed"
+scenario_result "verification_runner_valid_marker" "PASS" "valid marker"
+echo "SCENARIO_RESULT|scenario_id=verification_runner_duplicate_marker|outcome=PASS|outcome=FAIL"
+echo "SCENARIO_RESULT|scenario_id=verification_runner_legacy_marker|status=PASS"
+if [[ ${FAIL_COUNT:-0} -ne 0 ]]; then exit 1; fi

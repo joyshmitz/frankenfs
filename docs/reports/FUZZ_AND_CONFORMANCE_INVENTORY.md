@@ -41,7 +41,7 @@ or a bead/artifact owner.
 
 ## A. Fuzz target corpora — saturation status
 
-As of 2026-05-18, 60 fuzz targets exist under `fuzz/fuzz_targets/`.
+As of 2026-05-18, 61 fuzz targets exist under `fuzz/fuzz_targets/`.
 Each source file has a matching `fuzz/Cargo.toml` bin path and a
 `fuzz/corpus/<target>` directory in the local tree. Recent corpus
 expansion this session (commits `f27cebb` through `0fed288`) raised

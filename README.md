@@ -2471,7 +2471,7 @@ frankenfs/
 │   └── …                       (40+ subdirectories, one per scenario class)
 │
 ├── fuzz/
-│   └── fuzz_targets/           60 libfuzzer targets
+│   └── fuzz_targets/           61 libfuzzer targets
 │
 ├── scripts/
 │   ├── verify_golden.sh        Canonical CI verification gate
@@ -2508,7 +2508,7 @@ frankenfs/
 
 ## Fuzz Target Inventory
 
-All 60 libfuzzer targets are in `fuzz/fuzz_targets/`. Each one is driven by `cargo fuzz run <target>` (with `cargo-fuzz` installed) or via the smoke-gate script. The corpora live under `tests/fuzz_corpus/`. A categorized listing:
+All 61 libfuzzer targets are in `fuzz/fuzz_targets/`. Each one is driven by `cargo fuzz run <target>` (with `cargo-fuzz` installed) or via the smoke-gate script. The corpora live under `tests/fuzz_corpus/`. A categorized listing:
 
 ### On-disk parser fuzzers (ext4)
 
@@ -2606,6 +2606,7 @@ All 60 libfuzzer targets are in `fuzz/fuzz_targets/`. Each one is driven by `car
 |---|---|
 | `fuzz_fuzz_dashboard` | Fuzz-dashboard JSON shape |
 | `fuzz_fuzz_smoke_manifest` | Fuzz smoke manifest validators (drift detection, source paths) |
+| `fuzz_verification_runner` | E2E `SCENARIO_RESULT` parser and script-conformance classifier |
 | `fuzz_authoritative_lane_manifest` | Proof-bundle authoritative-lane manifest parser |
 | `fuzz_perf_baseline` | Performance manifest validator |
 | `fuzz_swarm_workload_harness` | Swarm workload harness manifest |
