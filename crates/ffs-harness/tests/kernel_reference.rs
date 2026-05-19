@@ -63,6 +63,7 @@ fn ext4_tools_available() -> bool {
 const FILE_CONTENT: &[u8] = b"hello from FrankenFS reference test\n";
 const LARGE_FILE_CONTENT: &[u8] = b"hello from FrankenFS 64mb geometry variant\n";
 const DIR_INDEX_FILE_CONTENT: &[u8] = b"hello from FrankenFS dir_index variant\n";
+const HTREE_GOLDEN_FILE_CONTENT: &[u8] = b"x";
 const DIR_INDEX_HASH_SEED: &str = "11111111-2222-3333-4444-555555555555";
 const INLINE_XATTR_USER_VALUE: &str = "image/png";
 const INLINE_XATTR_SECURITY_VALUE: &str = "system_u:object_r:tmp_t:s0";
@@ -77,6 +78,9 @@ const LARGE_ISIZE_HIGH_PATH: &str = "/huge_sparse_i_size_high.bin";
 const LARGE_ISIZE_HIGH_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 const LARGE_ISIZE_HIGH_IMAGE_BYTES: u64 = 64 * 1024 * 1024;
 const LARGE_ISIZE_HIGH_SEED_BYTES: usize = 4096;
+const HTREE_GOLDEN_FILE_COUNT: usize = 200;
+const SPARSE_SUPER_MEDIUM_BLOCKS: usize = 1;
+const SPARSE_SUPER_LARGE_BLOCKS: usize = 6;
 // Keep this large enough that e2fsck -D reliably promotes /htree into a real
 // hash-indexed directory across supported e2fsprogs versions.
 const DIR_INDEX_FILE_COUNT: usize = 256;
@@ -238,6 +242,108 @@ fn create_dir_index_reference_image(image_path: &Path) -> PathBuf {
     // debugfs population alone does not guarantee that /htree materializes an
     // on-disk DX root. e2fsck -D rebuilds the directory index so the reference
     // image actually exercises ext4's hash-tree lookup contract.
+    run_e2fsck_dir_index(image_path);
+
+    std::fs::remove_file(&content_path).ok();
+    image_path.to_path_buf()
+}
+
+/// Create the committed 64 MiB sparse_super golden image variant.
+fn create_sparse_super_golden_image(image_path: &Path) -> PathBuf {
+    let f = std::fs::File::create(image_path).expect("create image file");
+    f.set_len(64 * 1024 * 1024).expect("set image length");
+    drop(f);
+
+    if trace_ext4_tools() {
+        eprintln!(
+            "mkfs.ext4 params: -L ffs-64mb -b 4096 -q -O sparse_super {}",
+            image_path.display()
+        );
+    }
+    let st = Command::new("mkfs.ext4")
+        .args(["-L", "ffs-64mb", "-b", "4096", "-q", "-O", "sparse_super"])
+        .arg(image_path)
+        .stderr(std::process::Stdio::null())
+        .status()
+        .expect("run mkfs.ext4");
+    assert!(st.success(), "mkfs.ext4 -O sparse_super failed");
+
+    let small_path = image_path.with_extension("sparse.small.tmp");
+    let empty_path = image_path.with_extension("sparse.empty.tmp");
+    let medium_path = image_path.with_extension("sparse.medium.tmp");
+    let large_path = image_path.with_extension("sparse.large.tmp");
+    std::fs::write(&small_path, FILE_CONTENT).expect("write small content file");
+    std::fs::write(&empty_path, []).expect("write empty content file");
+    std::fs::write(&medium_path, vec![b'M'; SPARSE_SUPER_MEDIUM_BLOCKS * 4096])
+        .expect("write medium content file");
+    std::fs::write(&large_path, vec![b'L'; SPARSE_SUPER_LARGE_BLOCKS * 4096])
+        .expect("write large content file");
+
+    run_debugfs_w(image_path, "mkdir /a");
+    run_debugfs_w(image_path, "mkdir /a/b");
+    run_debugfs_w(image_path, "mkdir /a/b/c");
+    run_debugfs_w(
+        image_path,
+        &format!("write {} /a/small.txt", small_path.display()),
+    );
+    run_debugfs_w(
+        image_path,
+        &format!("write {} /empty.dat", empty_path.display()),
+    );
+    run_debugfs_w(image_path, "symlink /link_to_small /a/small.txt");
+    run_debugfs_w(
+        image_path,
+        &format!("write {} /a/b/medium.bin", medium_path.display()),
+    );
+    run_debugfs_w(
+        image_path,
+        &format!("write {} /a/b/c/large.bin", large_path.display()),
+    );
+
+    std::fs::remove_file(&small_path).ok();
+    std::fs::remove_file(&empty_path).ok();
+    std::fs::remove_file(&medium_path).ok();
+    std::fs::remove_file(&large_path).ok();
+    image_path.to_path_buf()
+}
+
+/// Create the committed 8 MiB htree/dir_index golden image variant.
+fn create_htree_dirindex_golden_image(image_path: &Path) -> PathBuf {
+    let f = std::fs::File::create(image_path).expect("create image file");
+    f.set_len(8 * 1024 * 1024).expect("set image length");
+    drop(f);
+
+    if trace_ext4_tools() {
+        eprintln!(
+            "mkfs.ext4 params: -L ffs-htree -b 4096 -q -O dir_index {}",
+            image_path.display()
+        );
+    }
+    let st = Command::new("mkfs.ext4")
+        .args(["-L", "ffs-htree", "-b", "4096", "-q", "-O", "dir_index"])
+        .arg(image_path)
+        .stderr(std::process::Stdio::null())
+        .status()
+        .expect("run mkfs.ext4");
+    assert!(st.success(), "mkfs.ext4 -O dir_index failed");
+    run_debugfs_w(
+        image_path,
+        &format!("set_super_value hash_seed {DIR_INDEX_HASH_SEED}"),
+    );
+
+    run_debugfs_w(image_path, "mkdir /bigdir");
+
+    let content_path = image_path.with_extension("htree.content.tmp");
+    std::fs::write(&content_path, HTREE_GOLDEN_FILE_CONTENT).expect("write htree content file");
+
+    for idx in 0..HTREE_GOLDEN_FILE_COUNT {
+        let cmd = format!("write {} /bigdir/file_{idx:03}.txt", content_path.display());
+        run_debugfs_w(image_path, &cmd);
+    }
+    run_debugfs_w(
+        image_path,
+        &format!("write {} /marker.txt", content_path.display()),
+    );
     run_e2fsck_dir_index(image_path);
 
     std::fs::remove_file(&content_path).ok();
@@ -1378,7 +1484,7 @@ struct Ext4GoldenVariant {
     create_image: fn(&Path) -> PathBuf,
 }
 
-fn ext4_golden_variants() -> [Ext4GoldenVariant; 3] {
+fn ext4_golden_variants() -> [Ext4GoldenVariant; 5] {
     [
         Ext4GoldenVariant {
             name: "ext4_8mb_reference",
@@ -1397,6 +1503,18 @@ fn ext4_golden_variants() -> [Ext4GoldenVariant; 3] {
             golden_file: "ext4_dir_index_reference.json",
             temp_image_name: "ffs_ref_variant_dir_index.ext4",
             create_image: create_dir_index_reference_image,
+        },
+        Ext4GoldenVariant {
+            name: "ext4_64mb_sparse_super",
+            golden_file: "ext4_64mb_sparse_super.json",
+            temp_image_name: "ffs_ref_variant_sparse_super.ext4",
+            create_image: create_sparse_super_golden_image,
+        },
+        Ext4GoldenVariant {
+            name: "ext4_htree_dirindex",
+            golden_file: "ext4_htree_dirindex.json",
+            temp_image_name: "ffs_ref_variant_htree.ext4",
+            create_image: create_htree_dirindex_golden_image,
         },
     ]
 }
