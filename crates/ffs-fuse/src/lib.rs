@@ -30,7 +30,7 @@ use std::os::raw::c_int;
 #[cfg(unix)]
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 #[cfg(unix)]
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 #[cfg(test)]
 use std::sync::atomic::AtomicUsize;
@@ -1405,7 +1405,26 @@ impl IoctlTraceProbe {
         Self::saturating_add_u64(&self.dropped_events, 1);
     }
 
+    fn disabled(path: PathBuf, dropped_events: Arc<AtomicU64>) -> Self {
+        Self {
+            path,
+            sender: None,
+            worker: None,
+            dropped_events,
+        }
+    }
+
     fn new(path: PathBuf) -> Self {
+        let dropped_events = Arc::new(AtomicU64::new(0));
+        if let Err(error) = validate_ioctl_trace_path(&path) {
+            warn!(
+                path = %path.display(),
+                %error,
+                "disabling ioctl trace because trace path is not a regular appendable file"
+            );
+            return Self::disabled(path, dropped_events);
+        }
+
         let (sender, receiver) = sync_channel::<IoctlTraceMsg>(IOCTL_TRACE_CHANNEL_CAPACITY);
         let worker_path = path.clone();
         let worker = match thread::Builder::new()
@@ -1426,7 +1445,7 @@ impl IoctlTraceProbe {
             path,
             sender: worker.as_ref().map(|_| sender),
             worker,
-            dropped_events: Arc::new(AtomicU64::new(0)),
+            dropped_events,
         }
     }
 
@@ -1501,12 +1520,54 @@ impl Drop for IoctlTraceProbe {
     }
 }
 
+fn validate_ioctl_trace_path(path: &Path) -> std::io::Result<()> {
+    match std::fs::metadata(path) {
+        Ok(metadata) => {
+            let file_type = metadata.file_type();
+            if file_type.is_file() {
+                Ok(())
+            } else {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!(
+                        "ioctl trace path must be a regular file or absent, found {}",
+                        ioctl_trace_file_type_name(file_type)
+                    ),
+                ))
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+fn ioctl_trace_file_type_name(file_type: std::fs::FileType) -> &'static str {
+    if file_type.is_dir() {
+        "directory"
+    } else if file_type.is_symlink() {
+        "symlink"
+    } else if file_type.is_fifo() {
+        "fifo"
+    } else if file_type.is_socket() {
+        "socket"
+    } else if file_type.is_char_device() {
+        "character device"
+    } else if file_type.is_block_device() {
+        "block device"
+    } else {
+        "non-regular file"
+    }
+}
+
+fn open_ioctl_trace_file(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).append(true);
+    options.custom_flags(libc::O_NONBLOCK);
+    options.open(path)
+}
+
 fn ioctl_trace_writer_loop(path: &Path, receiver: &Receiver<IoctlTraceMsg>) {
-    let mut file = match std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-    {
+    let mut file = match open_ioctl_trace_file(path) {
         Ok(file) => file,
         Err(error) => {
             warn!(
@@ -8850,6 +8911,33 @@ mod tests {
 
         assert_eq!(probe.dropped_events.load(Ordering::Relaxed), u64::MAX);
         probe.dropped_events.store(0, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn ioctl_trace_special_path_disables_writer_without_blocking_drop() {
+        let trace_path = PathBuf::from("/dev/null");
+        let started = Instant::now();
+        let probe = IoctlTraceProbe::new(trace_path);
+
+        assert!(probe.sender.is_none());
+        assert!(probe.worker.is_none());
+        assert!(probe.flush_sync().is_err());
+
+        drop(probe);
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "unsupported special trace path must not leave a blocking writer to join"
+        );
+    }
+
+    #[test]
+    fn ioctl_trace_directory_path_disables_writer_without_draining_thread() {
+        let trace_path = std::env::temp_dir();
+        let probe = IoctlTraceProbe::new(trace_path);
+
+        assert!(probe.sender.is_none());
+        assert!(probe.worker.is_none());
+        assert!(probe.flush_sync().is_err());
     }
 
     #[test]
