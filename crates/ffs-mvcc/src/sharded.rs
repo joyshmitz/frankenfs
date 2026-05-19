@@ -124,19 +124,21 @@ struct CommitInstallContext {
 /// ```
 ///
 /// `conflict_policy` is a leaf lock — only ever acquired alone, for
-/// brief reads or a single write. The publication gate's
+/// brief reads or a single write. `commit` and `commit_ssi` snapshot
+/// the effective policy before acquiring shard locks, then use that
+/// lock-free value during preflight. The publication gate's
 /// `wait_lock` is internal to `CommitPublicationGate` and is acquired
-/// AFTER all shard locks are dropped (see `commit` line 657).
+/// after all shard locks are dropped.
 ///
 /// Production callers comply:
 ///
-/// | Caller             | active_snapshots | shards     | contention_metrics |
-/// |--------------------|------------------|------------|---------------------|
-/// | `commit`           | -                | W (sorted) | W (briefly)         |
-/// | `commit_ssi`       | -                | W (sorted) | W (briefly)         |
-/// | `prune_safe`       | W                | W (per)    | -                   |
-/// | `register_snapshot`| W                | -          | -                   |
-/// | `release_snapshot` | W                | -          | -                   |
+/// | Caller             | conflict_policy | active_snapshots | shards     | contention_metrics |
+/// |--------------------|-----------------|------------------|------------|---------------------|
+/// | `commit`           | R (alone)       | -                | W (sorted) | R (alone, Adaptive); W (briefly) |
+/// | `commit_ssi`       | R (alone)       | -                | W (sorted) | R (alone, Adaptive); W (briefly) |
+/// | `prune_safe`       | -               | W                | W (per)    | -                   |
+/// | `register_snapshot`| -               | W                | -          | -                   |
+/// | `release_snapshot` | -               | W                | -          | -                   |
 /// | `set_conflict_policy` / `effective_policy`: leaf only       |
 ///
 /// Acquiring `contention_metrics.write()` BEFORE
@@ -363,9 +365,9 @@ impl ShardedMvccStore {
         &self,
         txn: &Transaction,
         shard_guards: &[(usize, ShardWriteGuard<'_>)],
+        effective: ConflictPolicy,
         merge_log_event: &'static str,
     ) -> Result<(), CommitError> {
-        let effective = self.effective_policy();
         let mut had_conflict = false;
         let mut merge_succeeded = false;
 
@@ -651,11 +653,15 @@ impl ShardedMvccStore {
         }
 
         let shard_indices = self.involved_shards(&txn);
+        let effective = self.effective_policy();
         let mut shard_guards = self.lock_shards(&shard_indices);
 
-        if let Err(error) =
-            self.preflight_fcw_locked(&txn, &shard_guards, "sharded_fcw_conflict_merged")
-        {
+        if let Err(error) = self.preflight_fcw_locked(
+            &txn,
+            &shard_guards,
+            effective,
+            "sharded_fcw_conflict_merged",
+        ) {
             return Err((error, txn));
         }
 
@@ -717,11 +723,15 @@ impl ShardedMvccStore {
         }
 
         let shard_indices = self.ssi_shards_for_txn(&txn);
+        let effective = self.effective_policy();
         let mut shard_guards = self.lock_shards(&shard_indices);
 
-        if let Err(error) =
-            self.preflight_fcw_locked(&txn, &shard_guards, "sharded_ssi_fcw_conflict_merged")
-        {
+        if let Err(error) = self.preflight_fcw_locked(
+            &txn,
+            &shard_guards,
+            effective,
+            "sharded_ssi_fcw_conflict_merged",
+        ) {
             return Err((error, txn));
         }
 
@@ -1680,16 +1690,98 @@ mod tests {
         }
     }
 
-    /// bd-bky2f — regression guard for the canonical lock-ordering
-    /// invariant on `ShardedMvccStore`
-    /// (active_snapshots → shards → contention_metrics). Spawns three
-    /// concurrent workers that exercise the three nested-lock code
-    /// paths simultaneously: commit (shards.W → contention_metrics.W),
-    /// prune_safe (active_snapshots.W → shards.W), and
-    /// register/release_snapshot (active_snapshots.W). A watchdog
-    /// thread fails the test with a tagged panic if the workers do not
-    /// finish within 15s; any future AB-BA introduced by a refactor
-    /// surfaces as a clear failure rather than a silent stall.
+    fn assert_policy_wait_does_not_pin_shard<F>(label: &'static str, commit: F)
+    where
+        F: FnOnce(Arc<ShardedMvccStore>, BlockNumber) + Send + 'static,
+    {
+        use std::sync::mpsc;
+        use std::thread;
+        use std::time::{Duration, Instant};
+
+        let store = Arc::new(make_store(4));
+        store.set_conflict_policy(ConflictPolicy::Adaptive);
+        let block = BlockNumber(0);
+        let shard_idx = store.shard_index(block);
+        let policy_guard = store.conflict_policy.write();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (finished_tx, finished_rx) = mpsc::channel();
+
+        let worker_store = Arc::clone(&store);
+        let worker = thread::spawn(move || {
+            started_tx.send(()).expect("send start");
+            commit(worker_store, block);
+            finished_tx.send(()).expect("send finish");
+        });
+
+        started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("worker started");
+        thread::sleep(Duration::from_millis(20));
+        let finished_while_policy_held = finished_rx.try_recv().is_ok();
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let mut shard_available = false;
+        while Instant::now() < deadline {
+            if let Some(shard_guard) = store.shards[shard_idx].try_write() {
+                drop(shard_guard);
+                shard_available = true;
+                break;
+            }
+            thread::yield_now();
+        }
+
+        drop(policy_guard);
+        if !finished_while_policy_held {
+            finished_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("worker finished after policy lock released");
+        }
+        worker.join().expect("worker panicked");
+
+        assert!(
+            !finished_while_policy_held,
+            "{label}: commit path did not wait on the held conflict_policy lock"
+        );
+        assert!(
+            shard_available,
+            "{label}: commit path held a shard write lock while waiting on conflict_policy"
+        );
+    }
+
+    #[test]
+    fn commit_snapshots_policy_before_shard_locks() {
+        assert_policy_wait_does_not_pin_shard("commit", |store, block| {
+            let mut txn = store.begin();
+            txn.stage_write(block, vec![0xA5; 8]);
+            store.commit(txn).expect("commit after policy unlock");
+        });
+    }
+
+    #[test]
+    fn commit_ssi_snapshots_policy_before_shard_locks() {
+        assert_policy_wait_does_not_pin_shard("commit_ssi", |store, block| {
+            let mut txn = store.begin();
+            txn.stage_write(block, vec![0x5A; 8]);
+            store
+                .commit_ssi(txn)
+                .expect("SSI commit after policy unlock");
+        });
+    }
+
+    /// bd-bky2f / bd-c1yn6 — regression guard for the canonical
+    /// lock-ordering invariant on `ShardedMvccStore`
+    /// (active_snapshots → shards → contention_metrics, with
+    /// conflict_policy as a leaf-only lock). Spawns concurrent workers
+    /// that exercise the nested-lock and leaf-lock code paths
+    /// simultaneously: commit (shards.W → contention_metrics.W),
+    /// commit_ssi (shards.W → contention_metrics.W), prune_safe
+    /// (active_snapshots.W → shards.W), register/release_snapshot
+    /// (active_snapshots.W), and conflict-policy updates/effective
+    /// reads (conflict_policy alone, then contention_metrics alone for
+    /// Adaptive). A watchdog thread fails the test with a tagged panic
+    /// if the workers do not finish within 15s; any future AB-BA
+    /// introduced by a refactor surfaces as a clear failure rather than
+    /// a silent stall.
     #[test]
     fn lock_ordering_under_concurrent_commit_prune_and_register() {
         use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
@@ -1720,12 +1812,13 @@ mod tests {
             assert!(
                 watchdog_done.load(AtomicOrdering::Acquire),
                 "bd-bky2f: ShardedMvccStore lock-ordering watchdog tripped - \
-                 commit/prune/register workers did not finish within 15s, \
+                 commit/ssi/prune/register/policy workers did not finish within 15s, \
                  indicating a likely AB-BA deadlock",
             );
         });
 
-        // Worker A: commit pipeline (shards.W → contention_metrics.W).
+        // Worker A: commit pipeline (conflict_policy.R alone, then
+        // shards.W → contention_metrics.W).
         let store_a = Arc::clone(&store);
         let worker_a = thread::spawn(move || {
             for i in 0..64_u64 {
@@ -1735,27 +1828,55 @@ mod tests {
             }
         });
 
-        // Worker B: prune_safe (active_snapshots.W → shards.W per shard).
+        // Worker B: SSI commit pipeline (conflict_policy.R alone, then
+        // shards.W → contention_metrics.W).
         let store_b = Arc::clone(&store);
         let worker_b = thread::spawn(move || {
-            for _ in 0..32 {
-                let _ = store_b.prune_safe();
+            for i in 0..64_u64 {
+                let block = BlockNumber(1024 + i);
+                let mut txn = store_b.begin();
+                txn.stage_write(block, vec![(i & 0xFF) as u8; 16]);
+                let _ = store_b.commit_ssi(txn).expect("SSI commit must not block");
             }
         });
 
-        // Worker C: register/release_snapshot (active_snapshots.W only).
+        // Worker C: prune_safe (active_snapshots.W → shards.W per shard).
         let store_c = Arc::clone(&store);
         let worker_c = thread::spawn(move || {
+            for _ in 0..32 {
+                let _ = store_c.prune_safe();
+            }
+        });
+
+        // Worker D: register/release_snapshot (active_snapshots.W only).
+        let store_d = Arc::clone(&store);
+        let worker_d = thread::spawn(move || {
             for _ in 0..64 {
-                let snap = store_c.current_snapshot();
-                store_c.register_snapshot(snap);
-                let _ = store_c.release_snapshot(snap);
+                let snap = store_d.current_snapshot();
+                store_d.register_snapshot(snap);
+                let _ = store_d.release_snapshot(snap);
+            }
+        });
+
+        // Worker E: conflict_policy leaf updates and effective-policy reads.
+        let store_e = Arc::clone(&store);
+        let worker_e = thread::spawn(move || {
+            let policies = [
+                ConflictPolicy::Adaptive,
+                ConflictPolicy::Strict,
+                ConflictPolicy::SafeMerge,
+            ];
+            for i in 0..96 {
+                store_e.set_conflict_policy(policies[i % policies.len()]);
+                let _ = store_e.effective_policy();
             }
         });
 
         worker_a.join().expect("worker A panicked");
         worker_b.join().expect("worker B panicked");
         worker_c.join().expect("worker C panicked");
+        worker_d.join().expect("worker D panicked");
+        worker_e.join().expect("worker E panicked");
         let watchdog_join_started = Instant::now();
         done.store(true, AtomicOrdering::Release);
         watchdog.join().expect("watchdog panicked");
