@@ -12,9 +12,9 @@
 #   1 — checksum mismatch (behavioral change detected)
 #
 # This script is the canonical verification gate for the isomorphism
-# proof protocol. Any optimization PR MUST run this and demonstrate
-# no checksum changes (or provide an isomorphism proof explaining why
-# changes are acceptable).
+# proof protocol, including legacy summary/structural fixture goldens.
+# Any optimization PR MUST run this and demonstrate no checksum changes
+# (or provide an isomorphism proof explaining why changes are acceptable).
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"

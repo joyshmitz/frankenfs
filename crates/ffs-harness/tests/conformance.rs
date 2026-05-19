@@ -6040,14 +6040,6 @@ fn sorted_names(names: impl IntoIterator<Item = String>) -> Vec<String> {
     names
 }
 
-fn require_positive_numeric_field(golden: &Value, file_name: &str, field: &str) {
-    let value = golden
-        .get(field)
-        .and_then(Value::as_u64)
-        .unwrap_or_else(|| panic!("golden {file_name} missing numeric field {field}"));
-    assert!(value > 0, "golden {file_name} field {field} should be > 0");
-}
-
 fn require_nonempty_string_field<'a>(golden: &'a Value, file_name: &str, field: &str) -> &'a str {
     let value = golden
         .get(field)
@@ -6060,28 +6052,189 @@ fn require_nonempty_string_field<'a>(golden: &'a Value, file_name: &str, field: 
     value
 }
 
+#[derive(Clone, Copy)]
+struct LegacyExt4FixtureProfile {
+    file_name: &'static str,
+    volume_name: &'static str,
+    size_mib: u64,
+    block_size: u64,
+    blocks_count: u64,
+    inodes_count: u64,
+    features: &'static [&'static str],
+}
+
+#[derive(Clone, Copy)]
+struct LegacyBtrfsFixtureProfile {
+    file_name: &'static str,
+    label: &'static str,
+    size_mib: u64,
+    sectorsize: u64,
+    nodesize: u64,
+    generation: u64,
+}
+
+const LEGACY_EXT4_CONTENT_ENTRIES: &[&str] = &[
+    "/README.txt file",
+    "/dir1 directory",
+    "/dir1/file1.bin file size 256",
+    "/dir1/dir2 directory",
+    "/dir1/dir2/file2.txt file",
+    "/symlink symlink target dir1/file1.bin",
+];
+
+const LEGACY_EXT4_PROFILES: &[LegacyExt4FixtureProfile] = &[
+    LegacyExt4FixtureProfile {
+        file_name: "ext4_small.json",
+        volume_name: "ext4_small",
+        size_mib: 16,
+        block_size: 4096,
+        blocks_count: 4096,
+        inodes_count: 4096,
+        features: &["extent", "filetype"],
+    },
+    LegacyExt4FixtureProfile {
+        file_name: "ext4_medium.json",
+        volume_name: "ext4_medium",
+        size_mib: 64,
+        block_size: 4096,
+        blocks_count: 16_384,
+        inodes_count: 16_384,
+        features: &["extent", "filetype", "dir_index"],
+    },
+    LegacyExt4FixtureProfile {
+        file_name: "ext4_large.json",
+        volume_name: "ext4_large",
+        size_mib: 128,
+        block_size: 4096,
+        blocks_count: 32_768,
+        inodes_count: 32_768,
+        features: &["extent", "filetype", "dir_index", "sparse_super"],
+    },
+];
+
+const LEGACY_BTRFS_PROFILES: &[LegacyBtrfsFixtureProfile] = &[
+    LegacyBtrfsFixtureProfile {
+        file_name: "btrfs_small.json",
+        label: "btrfs_small",
+        size_mib: 256,
+        sectorsize: 4096,
+        nodesize: 16_384,
+        generation: 8,
+    },
+    LegacyBtrfsFixtureProfile {
+        file_name: "btrfs_medium.json",
+        label: "btrfs_medium",
+        size_mib: 512,
+        sectorsize: 4096,
+        nodesize: 16_384,
+        generation: 8,
+    },
+    LegacyBtrfsFixtureProfile {
+        file_name: "btrfs_large.json",
+        label: "btrfs_large",
+        size_mib: 1024,
+        sectorsize: 4096,
+        nodesize: 16_384,
+        generation: 8,
+    },
+];
+
+fn legacy_ext4_profile(file_name: &str) -> Option<LegacyExt4FixtureProfile> {
+    LEGACY_EXT4_PROFILES
+        .iter()
+        .copied()
+        .find(|profile| profile.file_name == file_name)
+}
+
+fn legacy_btrfs_profile(file_name: &str) -> Option<LegacyBtrfsFixtureProfile> {
+    LEGACY_BTRFS_PROFILES
+        .iter()
+        .copied()
+        .find(|profile| profile.file_name == file_name)
+}
+
+fn assert_exact_u64_field(golden: &Value, file_name: &str, field: &str, expected: u64) {
+    let actual = golden
+        .get(field)
+        .and_then(Value::as_u64)
+        .unwrap_or_else(|| panic!("golden {file_name} missing numeric field {field}"));
+    assert_eq!(
+        actual, expected,
+        "golden {file_name} field {field} no longer matches the declared fixture profile"
+    );
+}
+
+fn assert_exact_str_field(golden: &Value, file_name: &str, field: &str, expected: &str) {
+    let actual = golden
+        .get(field)
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| panic!("golden {file_name} missing string field {field}"));
+    assert_eq!(
+        actual, expected,
+        "golden {file_name} field {field} no longer matches the declared fixture profile"
+    );
+}
+
+fn assert_expected_json_fields(golden: &Value, file_name: &str, expected_fields: &[&str]) {
+    let object = golden
+        .as_object()
+        .unwrap_or_else(|| panic!("golden {file_name} should be a JSON object"));
+    let actual = sorted_names(object.keys().cloned());
+    let expected = sorted_names(expected_fields.iter().map(|field| (*field).to_owned()));
+    assert_eq!(
+        actual, expected,
+        "golden {file_name} changed its legacy inspect summary schema"
+    );
+}
+
 fn validate_legacy_ext4_inspect_golden(file_name: &str, golden: &Value) {
+    let profile = legacy_ext4_profile(file_name)
+        .unwrap_or_else(|| panic!("unexpected legacy ext4 inspect golden {file_name}"));
+    assert_expected_json_fields(
+        golden,
+        file_name,
+        &[
+            "block_size",
+            "blocks_count",
+            "filesystem",
+            "inodes_count",
+            "volume_name",
+        ],
+    );
     assert_eq!(
         golden.get("filesystem").and_then(Value::as_str),
         Some("ext4"),
         "golden {file_name} filesystem should be ext4"
     );
-    for field in ["block_size", "blocks_count", "inodes_count"] {
-        require_positive_numeric_field(golden, file_name, field);
-    }
-    require_nonempty_string_field(golden, file_name, "volume_name");
+    assert_exact_u64_field(golden, file_name, "block_size", profile.block_size);
+    assert_exact_u64_field(golden, file_name, "blocks_count", profile.blocks_count);
+    assert_exact_u64_field(golden, file_name, "inodes_count", profile.inodes_count);
+    assert_exact_str_field(golden, file_name, "volume_name", profile.volume_name);
 }
 
 fn validate_legacy_btrfs_inspect_golden(file_name: &str, golden: &Value) {
+    let profile = legacy_btrfs_profile(file_name)
+        .unwrap_or_else(|| panic!("unexpected legacy btrfs inspect golden {file_name}"));
+    assert_expected_json_fields(
+        golden,
+        file_name,
+        &[
+            "filesystem",
+            "generation",
+            "label",
+            "nodesize",
+            "sectorsize",
+        ],
+    );
     assert_eq!(
         golden.get("filesystem").and_then(Value::as_str),
         Some("btrfs"),
         "golden {file_name} filesystem should be btrfs"
     );
-    for field in ["sectorsize", "nodesize", "generation"] {
-        require_positive_numeric_field(golden, file_name, field);
-    }
-    require_nonempty_string_field(golden, file_name, "label");
+    assert_exact_u64_field(golden, file_name, "sectorsize", profile.sectorsize);
+    assert_exact_u64_field(golden, file_name, "nodesize", profile.nodesize);
+    assert_exact_u64_field(golden, file_name, "generation", profile.generation);
+    assert_exact_str_field(golden, file_name, "label", profile.label);
 }
 
 fn validate_fast_commit_fixture_golden(file_name: &str, golden: &Value) {
@@ -6175,6 +6328,107 @@ fn validate_fast_commit_fixture_golden(file_name: &str, golden: &Value) {
     }
 }
 
+fn assert_text_contains(text: &str, label: &str, needle: &str) {
+    assert!(
+        text.contains(needle),
+        "{label} should contain legacy fixture contract marker: {needle}"
+    );
+}
+
+fn validate_legacy_fixture_contract_sources(workspace: &Path) {
+    let readme_path = workspace.join("tests/fixtures/README.md");
+    let ext4_script_path = workspace.join("scripts/fixtures/make_ext4_fixtures.sh");
+    let btrfs_script_path = workspace.join("scripts/fixtures/make_btrfs_fixtures.sh");
+    let verify_script_path = workspace.join("scripts/verify_golden.sh");
+
+    let readme = fs::read_to_string(&readme_path)
+        .unwrap_or_else(|err| panic!("read {}: {err}", readme_path.display()));
+    let ext4_script = fs::read_to_string(&ext4_script_path)
+        .unwrap_or_else(|err| panic!("read {}: {err}", ext4_script_path.display()));
+    let btrfs_script = fs::read_to_string(&btrfs_script_path)
+        .unwrap_or_else(|err| panic!("read {}: {err}", btrfs_script_path.display()));
+    let verify_script = fs::read_to_string(&verify_script_path)
+        .unwrap_or_else(|err| panic!("read {}: {err}", verify_script_path.display()));
+
+    assert_text_contains(
+        &readme,
+        "tests/fixtures/README.md",
+        "Legacy ext4 inspect JSON files are summary goldens.",
+    );
+    assert_text_contains(
+        &readme,
+        "tests/fixtures/README.md",
+        "Legacy btrfs inspect JSON files are structural-only goldens.",
+    );
+    assert_text_contains(
+        &verify_script,
+        "scripts/verify_golden.sh",
+        "legacy summary/structural fixture goldens",
+    );
+
+    for profile in LEGACY_EXT4_PROFILES {
+        let stem = profile.file_name.trim_end_matches(".json");
+        let features = profile.features.join(",");
+        assert_text_contains(
+            &readme,
+            "tests/fixtures/README.md",
+            &format!("| {stem} | {} MiB | `{features}`", profile.size_mib),
+        );
+        assert_text_contains(
+            &ext4_script,
+            "scripts/fixtures/make_ext4_fixtures.sh",
+            &format!(
+                "create_image \"{stem}\" {} \"{features}\"",
+                profile.size_mib
+            ),
+        );
+    }
+
+    for entry in LEGACY_EXT4_CONTENT_ENTRIES {
+        assert_text_contains(&readme, "tests/fixtures/README.md", entry);
+    }
+    for command in [
+        "mkdir dir1",
+        "mkdir dir1/dir2",
+        "write $tmp_dir/README.txt README.txt",
+        "write $tmp_dir/file1.bin dir1/file1.bin",
+        "write $tmp_dir/file2.txt dir1/dir2/file2.txt",
+        "symlink symlink dir1/file1.bin",
+        "bs=256 count=1",
+    ] {
+        assert_text_contains(
+            &ext4_script,
+            "scripts/fixtures/make_ext4_fixtures.sh",
+            command,
+        );
+    }
+
+    for profile in LEGACY_BTRFS_PROFILES {
+        let stem = profile.file_name.trim_end_matches(".json");
+        assert_text_contains(
+            &readme,
+            "tests/fixtures/README.md",
+            &format!("| {stem} | {} MiB | Default", profile.size_mib),
+        );
+        assert_text_contains(
+            &btrfs_script,
+            "scripts/fixtures/make_btrfs_fixtures.sh",
+            &format!("create_image \"{stem}\" {}", profile.size_mib),
+        );
+    }
+    for command in [
+        "WITH_CONTENT=false",
+        "mkfs.btrfs -f -L \"$name\"",
+        "Skipping content population",
+    ] {
+        assert_text_contains(
+            &btrfs_script,
+            "scripts/fixtures/make_btrfs_fixtures.sh",
+            command,
+        );
+    }
+}
+
 fn validate_fscrypt_transport_discrepancy_golden(file_name: &str, golden: &Value) {
     assert_eq!(
         golden.get("scenario_id").and_then(Value::as_str),
@@ -6254,6 +6508,7 @@ fn validate_fscrypt_transport_discrepancy_golden(file_name: &str, golden: &Value
 fn validate_legacy_fixture_goldens(workspace: &Path) {
     let golden_dir = workspace.join("tests/fixtures/golden");
     let checksum_inventory = parse_checksum_inventory(&golden_dir.join("checksums.txt"));
+    validate_legacy_fixture_contract_sources(workspace);
     let actual_json_files = sorted_names(
         fs::read_dir(&golden_dir)
             .unwrap_or_else(|err| panic!("read legacy golden dir {}: {err}", golden_dir.display()))

@@ -10,7 +10,7 @@
 #   tests/fixtures/images/ext4_small.img   (16 MiB)
 #   tests/fixtures/images/ext4_medium.img  (64 MiB)
 #   tests/fixtures/images/ext4_large.img   (128 MiB)
-#   tests/fixtures/golden/ext4_*.json      (inspect output)
+#   tests/fixtures/golden/ext4_*.json      (legacy summary inspect output)
 #   tests/fixtures/golden/checksums.txt    (SHA-256 verification)
 
 set -euo pipefail

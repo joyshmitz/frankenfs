@@ -13,7 +13,7 @@
 #   tests/fixtures/images/btrfs_small.img   (256 MiB)
 #   tests/fixtures/images/btrfs_medium.img  (512 MiB)
 #   tests/fixtures/images/btrfs_large.img   (1024 MiB)
-#   tests/fixtures/golden/btrfs_*.json      (inspect output)
+#   tests/fixtures/golden/btrfs_*.json      (legacy structural inspect output)
 #   tests/fixtures/golden/checksums.txt     (updated)
 
 set -euo pipefail

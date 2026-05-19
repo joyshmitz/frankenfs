@@ -64,7 +64,25 @@ This script:
 
 ## Image Contents
 
+The legacy inspect-output JSON files in `tests/fixtures/golden` intentionally
+freeze the older `ffs inspect` summary surface. They are not the canonical
+product conformance proof; canonical semantic goldens live under
+`conformance/golden`. The harness test
+`validate_legacy_fixture_goldens` keeps these legacy files tied to the fixture
+constructors below so shallow-but-valid JSON cannot drift to a different
+declared variant unnoticed.
+
 ### ext4 Images
+
+Legacy ext4 inspect JSON files are summary goldens. The machine-checked
+semantic contract for their regenerated images is:
+
+- `/README.txt file`
+- `/dir1 directory`
+- `/dir1/file1.bin file size 256`
+- `/dir1/dir2 directory`
+- `/dir1/dir2/file2.txt file`
+- `/symlink symlink target dir1/file1.bin`
 
 Each ext4 image contains a known directory structure:
 
@@ -79,6 +97,11 @@ Each ext4 image contains a known directory structure:
 ```
 
 ### btrfs Images
+
+Legacy btrfs inspect JSON files are structural-only goldens. By default, the
+fixture generator formats valid btrfs images with default features and does not
+populate file content; canonical btrfs semantic coverage is owned by
+`conformance/golden/btrfs_*.json`.
 
 By default, btrfs images contain only the filesystem structure (no files).
 Use `--with-content` (requires sudo) to populate with the same structure as ext4.
