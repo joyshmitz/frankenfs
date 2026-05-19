@@ -319,6 +319,23 @@ impl ShardedMvccStore {
             .map_or(CommitSeq(0), |version| version.commit_seq)
     }
 
+    fn latest_published_commit_seq_in_shard(
+        shard: &MvccShard,
+        block: BlockNumber,
+        published_high: CommitSeq,
+    ) -> CommitSeq {
+        shard
+            .versions
+            .get(&block)
+            .and_then(|versions| {
+                versions
+                    .iter()
+                    .rev()
+                    .find(|version| version.commit_seq <= published_high)
+            })
+            .map_or(CommitSeq(0), |version| version.commit_seq)
+    }
+
     fn resolved_write_bytes_locked(
         txn: &Transaction,
         block: BlockNumber,
@@ -617,11 +634,8 @@ impl ShardedMvccStore {
     pub fn latest_commit_seq(&self, block: BlockNumber) -> CommitSeq {
         let shard_idx = self.shard_index(block);
         let shard = self.shards[shard_idx].read();
-        shard
-            .versions
-            .get(&block)
-            .and_then(|v| v.last())
-            .map_or(CommitSeq(0), |v| v.commit_seq)
+        let published_high = CommitSeq(self.publication_gate.completed());
+        Self::latest_published_commit_seq_in_shard(&shard, block, published_high)
     }
 
     /// Read the version of `block` visible at `snapshot`.
@@ -986,6 +1000,56 @@ mod tests {
             .expect("commit 2 published after predecessor");
         worker.join().expect("worker joined");
         assert_eq!(gate.completed(), 2);
+    }
+
+    #[test]
+    fn latest_commit_seq_hides_unpublished_versions() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let store = Arc::new(make_store(1));
+        let block = BlockNumber(7);
+        store.next_commit.store(2, Ordering::SeqCst);
+
+        let (started_tx, started_rx) = mpsc::channel();
+        let worker_store = Arc::clone(&store);
+        let worker = std::thread::spawn(move || {
+            let mut txn = worker_store.begin();
+            txn.stage_write(block, vec![0xC2]);
+            started_tx.send(()).expect("send started");
+            worker_store.commit(txn).expect("commit 2");
+        });
+
+        started_rx.recv().expect("worker started");
+        let mut installed = CommitSeq(0);
+        for _ in 0..1_000 {
+            {
+                let shard = store.shards[store.shard_index(block)].read();
+                installed = ShardedMvccStore::latest_commit_seq_in_shard(&shard, block);
+            }
+            if installed == CommitSeq(2) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(
+            installed,
+            CommitSeq(2),
+            "commit 2 should install before waiting on publication"
+        );
+
+        let visible_snapshot = store.current_snapshot();
+        assert_eq!(visible_snapshot.high, CommitSeq(0));
+        assert_eq!(store.latest_commit_seq(block), CommitSeq(0));
+        assert_eq!(store.read_visible(block, visible_snapshot), None);
+
+        store.publication_gate.publish(CommitSeq(1));
+        worker.join().expect("worker joined");
+
+        let latest = store.current_snapshot();
+        assert_eq!(latest.high, CommitSeq(2));
+        assert_eq!(store.latest_commit_seq(block), CommitSeq(2));
+        assert_eq!(store.read_visible(block, latest), Some(vec![0xC2]));
     }
 
     #[test]
