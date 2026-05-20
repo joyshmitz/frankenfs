@@ -745,6 +745,17 @@ pub fn default_release_gate_wording_contracts() -> Vec<DocsStatusReleaseGateWord
             "large-host swarm workload and p99 attribution evidence",
             "bd-rchk0.53.5",
         ),
+        release_gate_wording_contract(
+            "numa.allocation.placement",
+            "readme.roadmap.numa_allocator",
+            "README.md",
+            "project-status",
+            FeatureState::Validated,
+            FeatureState::Hidden,
+            "numa_allocation_placement",
+            "authoritative large-host NUMA allocation placement and p99 attribution evidence",
+            "bd-rchk0.53.8",
+        ),
     ]
 }
 
@@ -1639,11 +1650,11 @@ mod tests {
         assert_eq!(report.rule_count, 12);
         assert_eq!(report.observation_count, 12);
         assert_eq!(report.drift_classification_counts["matches"], 12);
-        assert_eq!(report.release_gate_wording_contract_count, 6);
-        assert_eq!(report.release_gate_wording_observation_count, 6);
+        assert_eq!(report.release_gate_wording_contract_count, 7);
+        assert_eq!(report.release_gate_wording_observation_count, 7);
         assert_eq!(
             report.release_gate_wording_drift_classification_counts["matches"],
-            6
+            7
         );
     }
 

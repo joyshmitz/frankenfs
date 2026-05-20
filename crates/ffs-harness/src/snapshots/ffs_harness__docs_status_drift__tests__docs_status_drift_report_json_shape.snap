@@ -9,8 +9,8 @@ expression: json
   "source_issue_count": 32,
   "rule_count": 12,
   "observation_count": 12,
-  "release_gate_wording_contract_count": 6,
-  "release_gate_wording_observation_count": 6,
+  "release_gate_wording_contract_count": 7,
+  "release_gate_wording_observation_count": 7,
   "required_doc_targets": [
     "README.md",
     "FEATURE_PARITY.md",
@@ -196,7 +196,7 @@ expression: json
     "matches": 12
   },
   "release_gate_wording_drift_classification_counts": {
-    "matches": 6
+    "matches": 7
   },
   "required_log_fields": [
     "docs_target",

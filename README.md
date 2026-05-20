@@ -2658,7 +2658,7 @@ The V1 surface (the tracked 97-row parity matrix) is implemented and tested. The
 | **Block-level dedup** | BLAKE3-keyed dedup table, COW reference counting | The native-mode BLAKE3 path already produces strong block identifiers |
 | **Compressed MVCC pages** | Per-page Zstd/Brotli compression *of MVCC metadata*, not just version data | Version-data compression is done; metadata compression needs spec work |
 | **First-class CLI for adaptive conflict policy** | `--mvcc-policy {strict,safe-merge,adaptive}` on `ffs mount` | Currently library-only; CLI surface awaits broader operator experience |
-| **NUMA-aware allocator** | Per-NUMA-node block group preference, observed via NUMA p99 attribution | The advisory NUMA p99 ledger is in place; the allocator hook is V1.x |
+| **NUMA-aware allocator: authoritative large-host evidence** | Per-NUMA-node block group preference *proven* to improve `swarm.responsiveness` on a permissioned 64+ core / 256GB+ host | The opt-in allocator hook, contract, runtime topology propagation, and the advisory `numa_allocation_placement_report` evidence lane are implemented; authoritative large-host proof remains gated on the permissioned campaign `bd-rchk0.53.8` |
 
 These items are surfaced via the proof-bundle release-gate policy (`tests/release-gates/release_gate_policy_v1.json`) under explicit `non-goals` and `deferred` lists, so docs and release wording cannot accidentally claim coverage they don't have.
 

@@ -248,12 +248,115 @@ Placement precedence is fixed:
 3. Optional preferred NUMA node from a validated advisory plan
 4. Legacy fallback group 0
 
-`ffs-core` may pass future mount/runtime preferences into this contract, and
-topology/adaptive reports may name the proposed node map, but proof bundles and
-release gates must keep the wording advisory until independent release evidence
-exists.
+`ffs-core` carries the runtime NUMA allocation policy and propagates validated
+preferences into this contract, and topology/adaptive reports may name the
+proposed node map, but proof bundles and release gates must keep the wording
+advisory until independent release evidence exists.
 
-### Troubleshooting
+### Opt-in NUMA Allocation Policy
+
+NUMA-aware allocation placement is **opt-in and off by default**. The runtime
+policy lives in `ffs-core` as `NumaAllocationPolicy`:
+
+| Policy | Behavior |
+|--------|----------|
+| `Disabled` (default) | Legacy allocator hints only; no NUMA preference is attached. The compatibility fallback is `goal_group` → `goal_block` → group 0. |
+| `PreferredNode` | Validates `NumaAllocationTopology`, attaches a `NumaAllocationPreference` for `preferred_node`, and carries a `NumaAllocationClaimTier` (`advisory` or `capability_downgraded`). |
+
+When the policy is active, `ffs-core` emits a `numa_allocation_hint` trace
+record per allocation decision (`op`, `inode`, `preferred_node`,
+`selected_group`, `disposition`, `claim_tier`, `fallback_reason`,
+`explicit_goal_group`, `explicit_goal_block`) and a `numa_allocation_hint_fallback`
+warning whenever topology validation fails. Explicit `goal_group`/`goal_block`
+hints always win over a NUMA preference, so enabling the policy never changes
+ext4/btrfs on-disk allocation semantics — it only reorders the candidate group
+search when no explicit hint is present.
+
+### NUMA Allocation Placement Evidence
+
+The `numa_allocation_placement_report` contract
+(`crates/ffs-harness/src/numa_allocation_placement_report.rs`, report ID
+`numa_allocation_placement_report`, schema version `1`) turns the
+`numa_allocation_hint` decision logs, the validated group-to-node map, and an
+optional p99 latency attribution into a single advisory evidence artifact.
+
+Non-permissioned validation (dry, no mount, no campaign):
+
+```bash
+ffs-harness validate-numa-allocation-placement \
+  --report artifacts/numa-placement/run.json \
+  --reference-unix-secs "$(date +%s)" \
+  --format json --summary-out artifacts/numa-placement/run.md
+```
+
+`scripts/e2e/ffs_numa_allocation_placement_e2e.sh` is the dry replay lane
+(suite `ffs_numa_allocation_placement` in `scripts/e2e/scenario_catalog.json`):
+it proves the balanced, skewed-metadata, preferred-node-exhaustion,
+cross-node-fallback, repair/scrub-interference, and unknown-topology replay
+fixtures validate, and that stale topology and `swarm.responsiveness` promotion
+fail closed.
+
+The report fields a support engineer needs:
+
+| Field | Operator meaning |
+|-------|------------------|
+| `topology_source` | `observed`, `single_node`, or `unknown` — the evidence source backing placement. |
+| `node_count` / `group_count` | NUMA nodes and block groups the report covers. |
+| `group_node_map` | The validated group-to-node assignment (`observed` topology only). |
+| `topology_observed_at_unix_secs` / `topology_max_age_secs` | Freshness window; stale or future observed topology fails closed. |
+| `claim_tier` | `advisory` or `capability_downgraded`. |
+| `decisions` | `advisory_map_used`, `explicit_hint`, and `fallback_unknown_topology` / `fallback_single_node` / `fallback_validation_error` tallies — the per-decision `fallback_reason` rolled up. |
+| `p99` | `baseline_p99_micros`, `observed_p99_micros`, and the `outcome` (`helped`, `hurt`, `neutral`, `not_attributed`). |
+| `release_gate_effect` | `advisory_replay_only` (advisory tier) or `small_host_downgrade_only` (capability-downgraded tier). |
+| `artifact_paths` / `raw_log_paths` | Repository-relative redacted artifact and raw `numa_allocation_hint` log locations. |
+| `reproduction_command` | The exact validator command to reproduce the report. |
+
+The validator rejects any report whose `release_gate_effect` is stronger than
+the claim tier allows: even a p99 `helped` outcome stays advisory replay or
+small-host downgrade evidence. `product_evidence_claim` must be `none` and
+`swarm_responsiveness_claim` must stay `not_claimed`.
+
+### NUMA Readiness Boundary
+
+NUMA placement readiness is separated into four evidence tiers:
+
+| Tier | What it proves | Where it lives |
+|------|----------------|----------------|
+| Implemented opt-in behavior | The allocator hook, contract, and runtime policy exist and preserve compatibility semantics. | `ffs-alloc`/`ffs-core`; closed beads `bd-53b28.1/.2/.3`. |
+| Advisory replay evidence | A `numa_allocation_placement_report` with `claim_tier=advisory` from replay fixtures or a non-permissioned run. | `validate-numa-allocation-placement`; `release_gate_effect=advisory_replay_only`. |
+| Small-host downgrade evidence | A placement report from a host that cannot meet the large-host floor. | `claim_tier=capability_downgraded`; `release_gate_effect=small_host_downgrade_only`. |
+| Authoritative large-host proof | NUMA placement *measurably* improves `swarm.responsiveness`. | The permissioned campaign **`bd-rchk0.53.8`** only. |
+
+Authoritative large-host evidence requires the same permissioned contract used
+elsewhere — a 64+ logical CPU / 256GB+ host with visible NUMA topology and:
+
+```bash
+FFS_ENABLE_PERMISSIONED_SWARM_WORKLOAD=1
+FFS_SWARM_WORKLOAD_REAL_RUN_ACK=swarm-workload-may-use-permissioned-large-host
+FFS_SWARM_WORKLOAD_PERMISSIONED_RUNNER=<configured runner>
+```
+
+The `numa_allocation_placement_report` advisory artifact must never consume
+those tokens, run the campaign, or mark `swarm.responsiveness` complete. The
+release-gate wording contract `numa.allocation.placement`
+(`crates/ffs-harness/src/docs_status_drift.rs`, controlling lane
+`numa_allocation_placement`, remediation bead `bd-rchk0.53.8`) keeps the README
+roadmap wording downgraded: `validate-docs-status-drift` fails if docs claim
+NUMA allocation readiness without that authoritative large-host evidence.
+
+### NUMA Troubleshooting
+
+| Symptom | Likely cause | Operator action |
+|---------|--------------|-----------------|
+| `numa_allocation_hint` logs show `fallback_reason=unknown_topology` | The host topology probe produced no trusted node map. | Expected on small/unknown hosts; placement preserves legacy `goal_group` semantics. Not a defect. |
+| `fallback_reason=single_node_topology` | The host exposes one NUMA node. | Expected single-node fallback; NUMA preference cannot help and is not used. |
+| `numa_allocation_hint_fallback` warnings | `validate_numa_allocation_topology` rejected the input (stale evidence, impossible map, missing consumers). | Refresh the topology evidence; the allocator already fell back safely to legacy hints. |
+| `validate-numa-allocation-placement` reports `stale topology evidence` | The report's `topology_observed_at_unix_secs` is older than `topology_max_age_secs`. | Regenerate the placement report from a fresh `numa_allocation_hint` log, or pass `--reference-unix-secs` for a deterministic fixture check. |
+| `validate-numa-allocation-placement` reports an `impossible group-to-node map` | A group maps to a node ≥ `node_count`, a group is mapped twice, or coverage is incomplete. | The placement evidence is corrupt — re-derive the group-to-node map from the validated `NumaAllocationTopology`. |
+| `p99.outcome does not match baseline/observed p99` | The report's `p99.outcome` was hand-edited or mis-derived. | Recompute the outcome from `baseline_p99_micros`/`observed_p99_micros`; the validator never trusts a stated outcome over the measured delta. |
+| Disabled policy, no `numa_allocation_hint` logs | `NumaAllocationPolicy::Disabled` (the default). | Expected; enable `PreferredNode` only with a validated advisory topology and never to make a public readiness claim. |
+
+### Topology Advisor Troubleshooting
 
 | Symptom | Likely cause | Operator action |
 |---------|--------------|-----------------|
