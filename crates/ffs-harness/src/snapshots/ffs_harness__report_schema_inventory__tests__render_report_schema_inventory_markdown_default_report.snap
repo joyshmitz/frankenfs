@@ -13,11 +13,11 @@ expression: markdown
 
 | Metric | Count |
 |---|---:|
-| Total rows | 112 |
+| Total rows | 113 |
 | Required rows | 10 |
-| Advisory-only rows | 100 |
+| Advisory-only rows | 101 |
 | Permissioned-only rows | 1 |
-| Covered rows | 111 |
+| Covered rows | 112 |
 | Missing rows | 0 |
 | Excluded rows | 1 |
 
@@ -79,6 +79,7 @@ None.
 | `mounted_write_errno_budget_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `mounted_write_error_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `mounted_write_matrix_report` | `AdvisoryOnly` | `Covered` | none | none |
+| `numa_allocation_placement_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `open_ended_inventory_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `open_ended_note_scan_report` | `AdvisoryOnly` | `Covered` | none | none |
 | `operational_evidence_index` | `AdvisoryOnly` | `Covered` | none | none |

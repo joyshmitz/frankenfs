@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "report_id": "numa_allocation_placement_report",
+  "operation_id": "numa-placement-skewed-20260519T120500Z",
+  "scenario_id": "numa_allocation_skewed_metadata_hotshards",
+  "topology_source": "observed",
+  "node_count": 2,
+  "group_count": 4,
+  "topology_observed_at_unix_secs": 1778996400,
+  "topology_max_age_secs": 604800,
+  "group_node_map": [
+    { "group": 0, "node": 0 },
+    { "group": 1, "node": 0 },
+    { "group": 2, "node": 1 },
+    { "group": 3, "node": 1 }
+  ],
+  "claim_tier": "advisory",
+  "decisions": {
+    "advisory_map_used": 300,
+    "explicit_hint": 650,
+    "fallback_unknown_topology": 0,
+    "fallback_single_node": 0,
+    "fallback_validation_error": 50
+  },
+  "p99": {
+    "baseline_p99_micros": 5000,
+    "observed_p99_micros": 5020,
+    "outcome": "neutral"
+  },
+  "artifact_paths": [
+    "artifacts/numa-placement/skewed_metadata_hotshards.json"
+  ],
+  "raw_log_paths": [
+    "artifacts/numa-placement/skewed_metadata_hotshards_hint.log"
+  ],
+  "cleanup_status": "clean",
+  "reproduction_command": "ffs-harness validate-numa-allocation-placement --report conformance/fixtures/numa_allocation_placement/skewed_metadata_hotshards.json",
+  "product_evidence_claim": "none",
+  "release_gate_effect": "advisory_replay_only",
+  "swarm_responsiveness_claim": "not_claimed"
+}

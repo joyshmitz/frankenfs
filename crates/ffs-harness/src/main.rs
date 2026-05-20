@@ -136,6 +136,10 @@ use ffs_harness::{
         DEFAULT_MATRIX_PATH, fail_on_mounted_write_matrix_errors, load_mounted_write_matrix,
         validate_mounted_write_matrix,
     },
+    numa_allocation_placement_report::{
+        NumaPlacementValidationConfig, fail_on_numa_allocation_placement_errors,
+        render_numa_allocation_placement_markdown, validate_numa_allocation_placement_report_json,
+    },
     open_ended_inventory::{
         DEFAULT_SOURCE_SCOPE_MANIFEST_PATH, OpenEndedNoteSource, load_source_scope_manifest,
         scan_open_ended_notes, scan_source_scope_manifest, validate_current_inventory,
@@ -604,6 +608,9 @@ fn run() -> Result<()> {
         Some("rch-proof-ledger") => rch_proof_ledger_cmd(&args[1..]),
         Some("validate-rch-capacity-preflight") => validate_rch_capacity_preflight_cmd(&args[1..]),
         Some("validate-runtime-console") => validate_runtime_console_cmd(&args[1..]),
+        Some("validate-numa-allocation-placement") => {
+            validate_numa_allocation_placement_cmd(&args[1..])
+        }
         Some("validate-fuzz-smoke") => validate_fuzz_smoke_cmd(&args[1..]),
         Some("validate-proof-overhead-budget") => validate_proof_overhead_budget_cmd(&args[1..]),
         Some("adaptive-runtime-runner") => adaptive_runtime_runner_cmd(&args[1..]),
@@ -3360,10 +3367,8 @@ fn validate_runtime_console_cmd(args: &[String]) -> Result<()> {
         .with_context(|| format!("read runtime console report: {report_path}"))?;
 
     let config = if let Some(timestamp) = reference_timestamp {
-        let reference_epoch_days =
-            parse_manifest_timestamp_epoch_days(&timestamp).with_context(|| {
-                format!("--reference-timestamp must be RFC3339-like: {timestamp}")
-            })?;
+        let reference_epoch_days = parse_manifest_timestamp_epoch_days(&timestamp)
+            .with_context(|| format!("--reference-timestamp must be RFC3339-like: {timestamp}"))?;
         RuntimeConsoleValidationConfig {
             reference_epoch_days: Some(reference_epoch_days),
             max_age_days: max_age_days.or(Some(7)),
@@ -3404,6 +3409,100 @@ fn print_runtime_console_usage() {
     println!(
         "Usage: ffs-harness validate-runtime-console --report FILE [--format json|markdown] \
          [--out FILE] [--summary-out FILE] [--reference-timestamp RFC3339] [--max-age-days N]"
+    );
+}
+
+/// Validator for `numa_allocation_placement_report` JSON artifacts.
+///
+/// This is advisory replay/downgrade evidence: it checks the placement report's
+/// schema and safety contract but never promotes NUMA placement into a
+/// `swarm.responsiveness` claim. `--reference-unix-secs` keeps fixture-driven
+/// topology-freshness validation deterministic.
+fn validate_numa_allocation_placement_cmd(args: &[String]) -> Result<()> {
+    let mut report_path: Option<String> = None;
+    let mut out_path: Option<String> = None;
+    let mut summary_out_path: Option<String> = None;
+    let mut format = ReadinessReportFormat::Json;
+    let mut reference_unix_secs: Option<u64> = None;
+    let mut i = 0;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "--report" => {
+                i += 1;
+                report_path = Some(args.get(i).context("--report requires a path")?.to_owned());
+            }
+            "--format" => {
+                i += 1;
+                format = parse_readiness_report_format(
+                    args.get(i).context("--format requires json or markdown")?,
+                )?;
+            }
+            "--out" => {
+                i += 1;
+                out_path = Some(args.get(i).context("--out requires a path")?.to_owned());
+            }
+            "--summary-out" => {
+                i += 1;
+                summary_out_path = Some(
+                    args.get(i)
+                        .context("--summary-out requires a path")?
+                        .to_owned(),
+                );
+            }
+            "--reference-unix-secs" => {
+                i += 1;
+                reference_unix_secs = Some(
+                    args.get(i)
+                        .context("--reference-unix-secs requires a value")?
+                        .parse()
+                        .context("--reference-unix-secs must be a non-negative integer")?,
+                );
+            }
+            "--help" | "-h" => {
+                print_numa_allocation_placement_usage();
+                return Ok(());
+            }
+            other => bail!("unknown validate-numa-allocation-placement argument: {other}"),
+        }
+        i += 1;
+    }
+
+    let report_path = report_path.context("--report is required")?;
+    let json = fs::read_to_string(&report_path)
+        .with_context(|| format!("read numa allocation placement report: {report_path}"))?;
+    let config = NumaPlacementValidationConfig {
+        reference_unix_secs,
+    };
+    let validation = validate_numa_allocation_placement_report_json(&json, &config);
+    let markdown = render_numa_allocation_placement_markdown(&validation);
+    let output = match format {
+        ReadinessReportFormat::Json => serde_json::to_string_pretty(&validation)?,
+        ReadinessReportFormat::Markdown => markdown.clone(),
+    };
+
+    if let Some(path) = out_path {
+        write_text_file(Path::new(&path), &format!("{output}\n"))?;
+        println!(
+            "numa allocation placement validation written: {path} valid={} topology={}",
+            validation.valid, validation.topology_source
+        );
+    } else {
+        println!("{output}");
+    }
+
+    if let Some(path) = summary_out_path {
+        write_text_file(Path::new(&path), &format!("{markdown}\n"))?;
+    }
+
+    fail_on_numa_allocation_placement_errors(&validation)
+}
+
+fn print_numa_allocation_placement_usage() {
+    println!(
+        "Usage: ffs-harness validate-numa-allocation-placement --report FILE \
+         [--format json|markdown] [--out FILE] [--summary-out FILE] \
+         [--reference-unix-secs N]"
     );
 }
 
@@ -9576,6 +9675,9 @@ fn print_usage_commands() {
     );
     println!(
         "  ffs-harness validate-runtime-console --report FILE [--format json|markdown] [--out FILE] [--summary-out FILE] [--reference-timestamp RFC3339] [--max-age-days N]"
+    );
+    println!(
+        "  ffs-harness validate-numa-allocation-placement --report FILE [--format json|markdown] [--out FILE] [--summary-out FILE] [--reference-unix-secs N]"
     );
     println!(
         "  ffs-harness validate-remediation-catalog [--catalog FILE] [--format json|markdown] [--out FILE] [--summary-out FILE]"

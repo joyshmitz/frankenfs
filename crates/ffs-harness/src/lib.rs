@@ -40,6 +40,7 @@ pub mod mounted_repair_policy;
 pub mod mounted_write_errno_budget;
 pub mod mounted_write_error_classes;
 pub mod mounted_write_matrix;
+pub mod numa_allocation_placement_report;
 pub mod open_ended_inventory;
 pub mod operational_evidence_index;
 pub mod operational_readiness_report;

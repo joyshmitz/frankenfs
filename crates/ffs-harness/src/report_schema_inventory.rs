@@ -548,6 +548,15 @@ fn adaptive_swarm_advisory_report_rows() -> Vec<ReportSchemaInventoryRow> {
             "crates/ffs-harness/src/snapshots/ffs_harness__runtime_console_report__tests__runtime_console_report_json_shape.snap",
         ),
         covered_advisory_row(
+            "numa_allocation_placement_report",
+            "crates/ffs-harness/src/numa_allocation_placement_report.rs",
+            "NumaAllocationPlacementReport + NumaPlacementValidationReport",
+            "validate-numa-allocation-placement",
+            "NUMA allocation placement replay/p99 evidence contract",
+            "numa_allocation_placement_report_json_shape",
+            "crates/ffs-harness/src/snapshots/ffs_harness__numa_allocation_placement_report__tests__numa_allocation_placement_report_json_shape.snap",
+        ),
+        covered_advisory_row(
             "topology_runtime_advisor_report",
             "crates/ffs-harness/src/topology_runtime_advisor.rs",
             "TopologyRuntimeAdvisorReport",
@@ -2024,6 +2033,10 @@ mod tests {
 
     const EXEMPT_JSON_SHAPE_SNAPSHOT_EVIDENCE: &[(&str, &str)] = &[
         (
+            "claimability_plan_rch_blocked_report_json_shape",
+            "RCH-blocked scenario variant of the claimability_plan_report shape; the durable report contract is the tracked claimability_plan_report_json_shape row",
+        ),
+        (
             "crash_replay_suite_config_json_shape",
             "CrashReplaySuiteConfig is a repro input config, while the public output contract is crash_replay_suite_report_json_shape",
         ),
@@ -2210,12 +2223,12 @@ mod tests {
             report.schema_version,
             REPORT_SCHEMA_INVENTORY_SCHEMA_VERSION
         );
-        assert_eq!(report.total_rows, 112);
+        assert_eq!(report.total_rows, 113);
         assert_eq!(report.required_rows, 10);
-        assert_eq!(report.advisory_only_rows, 100);
+        assert_eq!(report.advisory_only_rows, 101);
         assert_eq!(report.permissioned_only_rows, 1);
         assert_eq!(report.excluded_rows, 1);
-        assert_eq!(report.covered_rows, 111);
+        assert_eq!(report.covered_rows, 112);
         assert_eq!(report.missing_rows, 0);
         for report_id in [
             "swarm_operator_report",
@@ -3185,6 +3198,14 @@ mod tests {
                 "validate_runtime_console_report",
                 "runtime_console_report_json_shape",
                 "ffs_harness__runtime_console_report__tests__runtime_console_report_json_shape.snap",
+            ),
+            (
+                "numa_allocation_placement_report",
+                "crates/ffs-harness/src/numa_allocation_placement_report.rs",
+                "NumaAllocationPlacementReport + NumaPlacementValidationReport",
+                "validate-numa-allocation-placement",
+                "numa_allocation_placement_report_json_shape",
+                "ffs_harness__numa_allocation_placement_report__tests__numa_allocation_placement_report_json_shape.snap",
             ),
             (
                 "topology_runtime_advisor_report",

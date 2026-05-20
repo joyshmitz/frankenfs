@@ -8242,6 +8242,76 @@
           "evidence": "runtime_console_self_check_missing_report"
         }
       ]
+    },
+    {
+      "suite_id": "ffs_numa_allocation_placement",
+      "script": "scripts/e2e/ffs_numa_allocation_placement_e2e.sh",
+      "required_categories": [
+        "happy",
+        "error"
+      ],
+      "scenarios": [
+        {
+          "id": "numa_placement_balanced_numa_replay",
+          "category": "happy",
+          "status": "active",
+          "evidence": "numa_placement_balanced_numa_replay"
+        },
+        {
+          "id": "numa_placement_skewed_metadata_hotshards",
+          "category": "degradation",
+          "status": "active",
+          "evidence": "numa_placement_skewed_metadata_hotshards"
+        },
+        {
+          "id": "numa_placement_preferred_node_exhaustion",
+          "category": "degradation",
+          "status": "active",
+          "evidence": "numa_placement_preferred_node_exhaustion"
+        },
+        {
+          "id": "numa_placement_cross_node_fallback",
+          "category": "happy",
+          "status": "active",
+          "evidence": "numa_placement_cross_node_fallback"
+        },
+        {
+          "id": "numa_placement_repair_scrub_interference",
+          "category": "degradation",
+          "status": "active",
+          "evidence": "numa_placement_repair_scrub_interference"
+        },
+        {
+          "id": "numa_placement_unknown_topology_fallback",
+          "category": "happy",
+          "status": "active",
+          "evidence": "numa_placement_unknown_topology_fallback"
+        },
+        {
+          "id": "numa_placement_stale_topology_refusal",
+          "category": "error",
+          "status": "active",
+          "evidence": "numa_placement_stale_topology_refusal"
+        },
+        {
+          "id": "numa_placement_swarm_promotion_refusal",
+          "category": "error",
+          "status": "active",
+          "evidence": "numa_placement_swarm_promotion_refusal"
+        },
+        {
+          "id": "numa_placement_self_check_catches_corruption",
+          "category": "error",
+          "status": "active",
+          "evidence": "numa_placement_self_check_catches_corruption"
+        },
+        {
+          "id": "numa_placement_self_check_missing_report",
+          "category": "error",
+          "status": "active",
+          "evidence": "numa_placement_self_check_missing_report"
+        }
+      ]
     }
   ],
   "gate_minimums": [

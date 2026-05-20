@@ -1,0 +1,28 @@
+---
+source: crates/ffs-harness/src/numa_allocation_placement_report.rs
+expression: markdown
+---
+# NUMA Allocation Placement Report
+
+- Report: `numa_allocation_placement_report`
+- Valid: `true`
+- Operation: `numa-placement-op-20260519T000000Z`
+- Scenario: `numa_allocation_balanced_replay`
+- Topology source: `observed`
+- Node count: `2`
+- Group count: `4`
+- Claim tier: `advisory`
+- Release gate effect: `advisory_replay_only`
+- Swarm responsiveness claim: `not_claimed`
+
+## Placement Decisions
+
+| Metric | Value |
+|---|---:|
+| Total decisions | 900 |
+| Advisory map used | 720 |
+| p99 outcome | helped |
+
+## Issues
+
+none
