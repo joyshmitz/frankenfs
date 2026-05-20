@@ -2,6 +2,7 @@
 
 mod cmd_evidence;
 mod cmd_repair;
+mod mount_console;
 mod repair_btrfs_parsers;
 
 use cmd_repair::{
@@ -23,6 +24,7 @@ use ffs_btrfs::{
     BTRFS_FS_TREE_OBJECTID, BTRFS_ITEM_INODE_ITEM, BTRFS_ITEM_ROOT_ITEM, BtrfsInodeItem,
     parse_inode_item, parse_root_item,
 };
+use ffs_core::degradation::DegradationLevel;
 use ffs_core::{
     BackpressureGate, BtrfsMountSelection, CrashRecoveryOutcome, DegradationFsm, Ext4DataErrPolicy,
     Ext4JournalReplayMode, FsFlavor, FsOps, OpenFs, OpenOptions, RepairWritebackBlock,
@@ -36,6 +38,7 @@ use ffs_harness::{
         fail_on_adaptive_runtime_evidence_errors, load_adaptive_runtime_evidence_manifest,
         validate_adaptive_runtime_evidence_manifest_with_config,
     },
+    runtime_console_report::RuntimeConsoleMode,
     writeback_cache_audit::{
         build_writeback_cache_audit_report, build_writeback_crash_replay_report,
         build_writeback_ordering_report, fail_on_writeback_cache_audit_errors,
@@ -60,6 +63,9 @@ use ffs_repair::scrub::{
 use ffs_types::{
     BTRFS_SUPER_INFO_OFFSET, BTRFS_SUPER_INFO_SIZE, BlockNumber, EXT4_SUPERBLOCK_OFFSET,
     EXT4_SUPERBLOCK_SIZE, GroupNumber, InodeNumber, MountMode,
+};
+use mount_console::{
+    MountConsoleConfig, MountConsoleCore, MountConsoleObservation, emit_mount_console,
 };
 use serde::Serialize;
 use std::collections::BTreeSet;
@@ -527,6 +533,7 @@ struct MountCmdOptions {
     adaptive_runtime_summary: MountAdaptiveRuntimeSummaryConfig,
     background_scrub: MountBackgroundScrubConfig,
     writeback_cache: MountWritebackCacheConfig,
+    console: MountConsoleConfig,
 }
 
 fn default_env_filter() -> EnvFilter {
@@ -739,6 +746,25 @@ enum Command {
         /// Write adaptive runtime shutdown evidence as concise Markdown.
         #[arg(long = "adaptive-runtime-summary-md")]
         adaptive_runtime_summary_md: Option<PathBuf>,
+        /// Enable the operator runtime console for this managed/per-core mount.
+        ///
+        /// On shutdown the console emits a bounded, redacted, schema-pinned
+        /// `runtime_console_report` artifact (request counters, throttled/shed
+        /// counts, degradation level, per-core distribution, cleanup status).
+        /// Requires `--runtime-mode managed` or `--runtime-mode per-core`.
+        /// Console output is operational observability only: it never promotes
+        /// `swarm.responsiveness` or `adaptive_runtime` readiness.
+        #[arg(long = "console")]
+        console: bool,
+        /// Write the runtime console snapshot as machine JSON (requires `--console`).
+        ///
+        /// Defaults to `artifacts/runtime-console/<operation-id>.json` when
+        /// `--console` is set without an explicit path.
+        #[arg(long = "console-json")]
+        console_json: Option<PathBuf>,
+        /// Write the runtime console snapshot as a Markdown summary (requires `--console`).
+        #[arg(long = "console-summary")]
+        console_summary: Option<PathBuf>,
         /// Allow other users to access the mount.
         #[arg(long)]
         allow_other: bool,
@@ -1791,6 +1817,9 @@ fn run() -> Result<()> {
             adaptive_runtime_manifest,
             adaptive_runtime_summary_json,
             adaptive_runtime_summary_md,
+            console,
+            console_json,
+            console_summary,
             allow_other,
             rw,
             writeback_cache,
@@ -1818,6 +1847,12 @@ fn run() -> Result<()> {
                 background_scrub_interval_secs,
                 background_scrub_ledger,
             )?;
+            let console = mount_console::MountConsoleConfig::from_cli(
+                console,
+                console_json,
+                console_summary,
+            )?;
+            console.reject_unsupported_runtime(runtime_mode == MountRuntimeMode::Standard)?;
             mount_cmd(
                 &image,
                 &mountpoint,
@@ -1855,6 +1890,7 @@ fn run() -> Result<()> {
                         writeback_cache_ordering_oracle,
                         writeback_cache_crash_replay_oracle,
                     ),
+                    console,
                 },
             )
         }
@@ -5295,6 +5331,7 @@ struct ManagedMountParams<'a> {
     backpressure: Option<Arc<BackpressureGate>>,
     adaptive_runtime_plan: Option<&'a MountAdaptiveRuntimePlan>,
     adaptive_runtime_summary: &'a MountAdaptiveRuntimeSummaryConfig,
+    console: &'a MountConsoleConfig,
     unmount_timeout_secs: u64,
     operation_id: &'a str,
     scenario_id: &'a str,
@@ -5333,6 +5370,7 @@ fn build_mount_per_core_shutdown_observation(
 }
 
 fn mount_with_managed_fuse(open_fs: Arc<OpenFs>, params: &ManagedMountParams<'_>) -> Result<()> {
+    let mount_started = std::time::SystemTime::now();
     let config = MountConfig {
         options: MountOptions {
             read_only: !params.read_write,
@@ -5375,7 +5413,19 @@ fn mount_with_managed_fuse(open_fs: Arc<OpenFs>, params: &ManagedMountParams<'_>
     );
 
     let metrics = handle.wait();
+    let mount_ended = std::time::SystemTime::now();
     log_mount_shutdown_metrics(params.operation_id, params.scenario_id, &metrics);
+    emit_mount_console(
+        params.console,
+        &mount_console_observation(
+            params,
+            RuntimeConsoleMode::Managed,
+            MountConsoleRuntimeMetrics::from_snapshot(&metrics),
+            Vec::new(),
+            mount_started,
+            mount_ended,
+        ),
+    )?;
     emit_mount_adaptive_runtime_shutdown_summary(
         MountAdaptiveRuntimeShutdownContext {
             image_path: params.image_path,
@@ -5396,9 +5446,101 @@ fn mount_with_managed_fuse(open_fs: Arc<OpenFs>, params: &ManagedMountParams<'_>
     Ok(())
 }
 
+/// Runtime counters lifted from a `MetricsSnapshot` for the console observation.
+#[derive(Clone, Copy)]
+struct MountConsoleRuntimeMetrics {
+    requests_total: u64,
+    requests_err: u64,
+    bytes_read: u64,
+    requests_throttled: u64,
+    requests_shed: u64,
+}
+
+impl MountConsoleRuntimeMetrics {
+    fn from_snapshot(metrics: &ffs_fuse::MetricsSnapshot) -> Self {
+        Self {
+            requests_total: metrics.requests_total,
+            requests_err: metrics.requests_err,
+            bytes_read: metrics.bytes_read,
+            requests_throttled: metrics.requests_throttled,
+            requests_shed: metrics.requests_shed,
+        }
+    }
+}
+
+/// Assemble a `MountConsoleObservation` from a finished managed/per-core mount.
+fn mount_console_observation(
+    params: &ManagedMountParams<'_>,
+    runtime_mode: RuntimeConsoleMode,
+    metrics: MountConsoleRuntimeMetrics,
+    per_core: Vec<MountConsoleCore>,
+    started_at: std::time::SystemTime,
+    shutdown_at: std::time::SystemTime,
+) -> MountConsoleObservation {
+    let degradation_level = params
+        .backpressure
+        .as_ref()
+        .map_or(DegradationLevel::Normal, |gate| gate.level());
+    MountConsoleObservation {
+        operation_id: params.operation_id.to_owned(),
+        scenario_id: params.scenario_id.to_owned(),
+        runtime_mode,
+        read_write: params.read_write,
+        started_at,
+        shutdown_at,
+        requests_total: metrics.requests_total,
+        requests_err: metrics.requests_err,
+        bytes_read: metrics.bytes_read,
+        requests_throttled: metrics.requests_throttled,
+        requests_shed: metrics.requests_shed,
+        degradation_level,
+        per_core,
+        clean_shutdown: true,
+        reproduction_command: mount_runtime_reproduction_command(
+            params.image_path,
+            params.mountpoint,
+            params.runtime,
+            params.read_write,
+        ),
+    }
+}
+
+/// Emit the runtime console artifact for a finished per-core mount.
+fn emit_per_core_mount_console(
+    params: &ManagedMountParams<'_>,
+    metrics: &ffs_fuse::MetricsSnapshot,
+    aggregate: &ffs_fuse::per_core::AggregateMetrics,
+    started_at: std::time::SystemTime,
+    shutdown_at: std::time::SystemTime,
+) -> Result<()> {
+    let per_core: Vec<MountConsoleCore> = aggregate
+        .per_core
+        .iter()
+        .enumerate()
+        .map(|(core_id, core)| MountConsoleCore {
+            core_id: u32::try_from(core_id).unwrap_or(u32::MAX),
+            requests: core.requests,
+            cache_hits: core.cache_hits,
+            cache_misses: core.cache_misses,
+        })
+        .collect();
+    emit_mount_console(
+        params.console,
+        &mount_console_observation(
+            params,
+            RuntimeConsoleMode::PerCore,
+            MountConsoleRuntimeMetrics::from_snapshot(metrics),
+            per_core,
+            started_at,
+            shutdown_at,
+        ),
+    )
+}
+
 fn mount_with_per_core_fuse(open_fs: Arc<OpenFs>, params: &ManagedMountParams<'_>) -> Result<()> {
     use ffs_fuse::per_core::{PerCoreConfig, PerCoreDispatcher};
 
+    let mount_started = std::time::SystemTime::now();
     let per_core_config = PerCoreConfig::default();
     let dispatcher = PerCoreDispatcher::new(per_core_config.clone());
 
@@ -5447,6 +5589,7 @@ fn mount_with_per_core_fuse(open_fs: Arc<OpenFs>, params: &ManagedMountParams<'_
     );
 
     let metrics = handle.wait();
+    let mount_ended = std::time::SystemTime::now();
 
     let aggregate = dispatcher.aggregate_metrics();
     debug!(
@@ -5473,6 +5616,8 @@ fn mount_with_per_core_fuse(open_fs: Arc<OpenFs>, params: &ManagedMountParams<'_
         imbalance_ratio = aggregate.imbalance_ratio(),
         "per_core_mount_shutdown_complete"
     );
+
+    emit_per_core_mount_console(params, &metrics, &aggregate, mount_started, mount_ended)?;
 
     let observation =
         build_mount_per_core_shutdown_observation(metrics, dispatcher.num_cores(), &aggregate);
@@ -6063,6 +6208,7 @@ fn mount_cmd(image_path: &Path, mountpoint: &Path, options: &MountCmdOptions) ->
                     .map(|plan| Arc::clone(&plan.gate)),
                 adaptive_runtime_plan: adaptive_runtime_plan.as_ref(),
                 adaptive_runtime_summary: &options.adaptive_runtime_summary,
+                console: &options.console,
                 unmount_timeout_secs: runtime.managed_unmount_timeout_secs(),
                 operation_id: &operation_id,
                 scenario_id,
@@ -7333,16 +7479,16 @@ mod tests {
         FsckCommandOptions, FsckFlags, InfoCommandOptions, InfoSections, LogFormat,
         MAX_EXT4_INFO_GROUPS, MountAccessMode, MountAdaptiveRuntimeConfig,
         MountAdaptiveRuntimeSummaryConfig, MountBackgroundRepairMode, MountBackgroundScrubConfig,
-        MountBackgroundScrubMode, MountBackgroundScrubRequest, MountCmdOptions, MountMode,
-        MountRuntimeConfig, MountRuntimeMode, MountWritebackCacheConfig, RepairCommandOptions,
-        RepairFlags, WRITEBACK_CACHE_KILL_SWITCH_ENV, btrfs_chunk_type_flag_names,
-        build_ext4_group_info, build_fsck_output, build_info_output, build_mount_open_options,
-        choose_btrfs_scrub_block_size, ext4_appears_clean_state, ext4_mount_replay_mode,
-        format_ratio_thousandths, log_mount_runtime_rejected, log_mount_runtime_selected,
-        mount_cmd, mount_operation_id, open_filesystem_for_mount, parse_btrfs_mount_selection,
-        read_ext4_group_desc_from_path, read_ext4_inode_from_path, read_file_region,
-        start_mount_background_scrub, summarize_repair_staleness, unavailable_repair_info,
-        validate_mount_adaptive_runtime_request_with_config,
+        MountBackgroundScrubMode, MountBackgroundScrubRequest, MountCmdOptions, MountConsoleConfig,
+        MountMode, MountRuntimeConfig, MountRuntimeMode, MountWritebackCacheConfig,
+        RepairCommandOptions, RepairFlags, WRITEBACK_CACHE_KILL_SWITCH_ENV,
+        btrfs_chunk_type_flag_names, build_ext4_group_info, build_fsck_output, build_info_output,
+        build_mount_open_options, choose_btrfs_scrub_block_size, ext4_appears_clean_state,
+        ext4_mount_replay_mode, format_ratio_thousandths, log_mount_runtime_rejected,
+        log_mount_runtime_selected, mount_cmd, mount_operation_id, open_filesystem_for_mount,
+        parse_btrfs_mount_selection, read_ext4_group_desc_from_path, read_ext4_inode_from_path,
+        read_file_region, start_mount_background_scrub, summarize_repair_staleness,
+        unavailable_repair_info, validate_mount_adaptive_runtime_request_with_config,
         validate_mount_writeback_cache_request,
     };
     use crate::cmd_evidence::{
@@ -7409,6 +7555,7 @@ mod tests {
             adaptive_runtime_summary: MountAdaptiveRuntimeSummaryConfig::disabled(),
             background_scrub: test_mount_background_scrub_disabled(),
             writeback_cache,
+            console: MountConsoleConfig::default(),
         }
     }
 
@@ -10953,6 +11100,7 @@ mod tests {
                         adaptive_runtime_summary: MountAdaptiveRuntimeSummaryConfig::disabled(),
                         background_scrub: test_mount_background_scrub_disabled(),
                         writeback_cache: MountWritebackCacheConfig::disabled(),
+                        console: MountConsoleConfig::default(),
                     },
                 )
                 .expect_err("non-clean MMP state should reject mount before FUSE starts");
@@ -11026,6 +11174,7 @@ mod tests {
                 adaptive_runtime_summary: MountAdaptiveRuntimeSummaryConfig::disabled(),
                 background_scrub: test_mount_background_scrub_disabled(),
                 writeback_cache: MountWritebackCacheConfig::disabled(),
+                console: MountConsoleConfig::default(),
             },
         )
         .expect_err("managed mode with missing image should fail at open");
@@ -11059,6 +11208,7 @@ mod tests {
                 adaptive_runtime_summary: MountAdaptiveRuntimeSummaryConfig::disabled(),
                 background_scrub: test_mount_background_scrub_disabled(),
                 writeback_cache: MountWritebackCacheConfig::disabled(),
+                console: MountConsoleConfig::default(),
             },
         )
         .expect_err("per-core mode with missing image should fail at open");
@@ -11121,6 +11271,7 @@ mod tests {
             adaptive_runtime_summary: MountAdaptiveRuntimeSummaryConfig::disabled(),
             background_scrub: test_mount_background_scrub_disabled(),
             writeback_cache: MountWritebackCacheConfig::disabled(),
+            console: MountConsoleConfig::default(),
         });
         assert_eq!(
             open_options.btrfs_mount_selection,
@@ -11145,6 +11296,7 @@ mod tests {
             adaptive_runtime_summary: MountAdaptiveRuntimeSummaryConfig::disabled(),
             background_scrub: test_mount_background_scrub_disabled(),
             writeback_cache: MountWritebackCacheConfig::disabled(),
+            console: MountConsoleConfig::default(),
         });
         assert_eq!(
             open_options.btrfs_mount_selection,
@@ -11173,6 +11325,7 @@ mod tests {
             adaptive_runtime_summary: MountAdaptiveRuntimeSummaryConfig::disabled(),
             background_scrub: test_mount_background_scrub_disabled(),
             writeback_cache: MountWritebackCacheConfig::disabled(),
+            console: MountConsoleConfig::default(),
         });
         assert_eq!(
             open_options.btrfs_mount_selection,
@@ -11205,6 +11358,7 @@ mod tests {
                     adaptive_runtime_summary: MountAdaptiveRuntimeSummaryConfig::disabled(),
                     background_scrub: test_mount_background_scrub_disabled(),
                     writeback_cache: MountWritebackCacheConfig::disabled(),
+                    console: MountConsoleConfig::default(),
                 },
             )
             .expect_err("missing btrfs subvolume should fail before FUSE mount");
@@ -11248,6 +11402,7 @@ mod tests {
                     adaptive_runtime_summary: MountAdaptiveRuntimeSummaryConfig::disabled(),
                     background_scrub: test_mount_background_scrub_disabled(),
                     writeback_cache: MountWritebackCacheConfig::disabled(),
+                    console: MountConsoleConfig::default(),
                 },
             )
             .expect_err("missing btrfs snapshot should fail before FUSE mount");
@@ -11288,6 +11443,7 @@ mod tests {
                     adaptive_runtime_summary: MountAdaptiveRuntimeSummaryConfig::disabled(),
                     background_scrub: test_mount_background_scrub_disabled(),
                     writeback_cache: MountWritebackCacheConfig::disabled(),
+                    console: MountConsoleConfig::default(),
                 },
             )
             .expect("named btrfs subvolume should open through mount operator path");
@@ -11347,6 +11503,7 @@ mod tests {
                     adaptive_runtime_summary: MountAdaptiveRuntimeSummaryConfig::disabled(),
                     background_scrub: test_mount_background_scrub_disabled(),
                     writeback_cache: MountWritebackCacheConfig::disabled(),
+                    console: MountConsoleConfig::default(),
                 },
             )
             .expect("named btrfs snapshot should open through mount operator path");
