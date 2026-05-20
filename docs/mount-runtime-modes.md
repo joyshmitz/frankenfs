@@ -10,10 +10,59 @@
 
 ## Runtime Console Artifact Contract
 
-`ffs mount --console` must emit a schema-pinned runtime console artifact before
-operators rely on managed or per-core console output. The checked-in contract is
+`ffs mount --console` emits a schema-pinned runtime console artifact when a
+managed or per-core mount shuts down. The checked-in contract is
 `crates/ffs-harness/src/runtime_console_report.rs`, report ID
 `runtime_console_report`, schema version `1`.
+
+### Enabling the console
+
+```bash
+# Managed mount: console JSON to the default artifact path
+# (artifacts/runtime-console/<operation-id>.json).
+ffs mount image.img /mnt/ffs --runtime-mode managed --console
+
+# Per-core mount: explicit JSON + Markdown summary destinations.
+ffs mount image.img /mnt/ffs --runtime-mode per-core --rw --console \
+  --console-json artifacts/runtime-console/per_core_run.json \
+  --console-summary artifacts/runtime-console/per_core_run.md
+```
+
+| Flag | Effect |
+|------|--------|
+| `--console` | Enable the console; on shutdown emit a JSON artifact (default path under `artifacts/runtime-console/`). |
+| `--console-json <path>` | Write the console JSON to an explicit path (requires `--console`). |
+| `--console-summary <path>` | Also write a Markdown summary (requires `--console`). |
+
+Incompatible combinations fail closed at flag parsing:
+
+- `--console` with `--runtime-mode standard` is rejected — the standard runtime
+  has no managed metrics surface to snapshot.
+- `--console-json` / `--console-summary` without `--console` are rejected.
+
+A disabled console is a true no-op: no observation is gathered and no artifact
+is written. An enabled console always writes a JSON artifact so a run never
+leaves a hollow, evidence-free console claim.
+
+### Console field meanings
+
+| Field | Operator meaning |
+|-------|------------------|
+| `operation_id`, `scenario_id` | Stable identifiers for the mount run and its CLI scenario. |
+| `runtime_mode` | `managed` or `per_core`; `managed` always reports `worker_count=1`. |
+| `read_write` | Whether the mount was writable. |
+| `worker_count` | Per-core worker count (per-core mode) or `1` (managed mode). |
+| `started_at`, `shutdown_at` | UTC RFC3339 mount start and shutdown timestamps. |
+| `counters.requests_total` | Total FUSE requests dispatched. The runtime does not tag op classes, so the whole count is surfaced under `requests_metadata`. |
+| `counters.bytes_read` / `bytes_written` | Bytes served; `bytes_written` is `0` (the FUSE metrics snapshot does not split write bytes). |
+| `counters.errors_total` | Requests that completed with an error. |
+| `counters.throttled_requests` / `shed_requests` | Requests delayed / rejected by backpressure. |
+| `backpressure_decisions` | `pass` / `throttle` / `shed` / `emergency` / `no_signal` tallies summing to `requests_total`. |
+| `degradation_level` | `normal`, `degraded`, `throttling`, `shedding`, or `emergency` at shutdown. |
+| `per_core_distribution.rows` | Per-core request count and cache hit/miss counts (per-core mode). |
+| `per_core_distribution.imbalance_ratio` | Max/min per-core request ratio (`1.0` = perfectly balanced). |
+| `cleanup_status` | `clean` on a graceful shutdown; `preserved_artifacts` when the run did not finish cleanly. |
+| `reproduction_command` | The exact `ffs mount` command to reproduce the run. |
 
 The artifact is operational observability only:
 
@@ -24,21 +73,54 @@ The artifact is operational observability only:
 | `claim_state.swarm_responsiveness` | `not_claimed` |
 | `claim_state.adaptive_runtime` | `not_claimed` |
 
-The report must include `operation_id`, `scenario_id`, `runtime_mode`,
-`read_write`, `worker_count`, `started_at`, `shutdown_at`, request counters,
-bytes read and written, error counts, throttled and shed request counts,
-backpressure decision counts, `degradation_level`, per-core request/cache
-distribution, `imbalance_ratio`, optional adaptive-runtime manifest reference,
-artifact paths, cleanup status, and the exact reproduction command.
-
 Console persistence is fail-closed unless host paths, mountpoints, and operator
-environment values are redacted. Artifact paths must be repository-relative
-`artifacts/...` paths or redacted FrankenFS temp artifact roots; secret-bearing
-absolute paths are rejected. Log volume, snapshot count, and interval cadence
-are bounded by the harness contract (`16 MiB`, `240` snapshots, and
-`1s..600s`). Local console output must not claim `swarm.responsiveness` or
-`adaptive_runtime` acceptance; those claims require their own permissioned
-proof-bundle lane.
+environment values are redacted. Artifact paths recorded in the report are
+repository-relative `artifacts/...` paths or redacted FrankenFS temp artifact
+roots; a console output path outside `artifacts/` is redacted to
+`artifacts/runtime-console/<file_name>` so a persisted report never leaks an
+operator host path. Log volume, snapshot count, and interval cadence are bounded
+by the harness contract (`16 MiB`, `240` snapshots, and `1s..600s`).
+
+### Forbidden interpretations
+
+| Do not claim from console output | Reason |
+|----------------------------------|--------|
+| `swarm.responsiveness` validated | Console output is local operational observability. `swarm.responsiveness` requires the permissioned large-host campaign (`bd-rchk0.53.8`) with raw workload logs, p99 attribution, and proof-bundle lanes. |
+| `adaptive_runtime` proof-bundle pass | The console never sets `adaptive_runtime` acceptance; the adaptive runtime proof-bundle lane needs its own fresh artifacts. |
+| xfstests pass/fail/not-run baseline | The console reports runtime counters, not conformance execution evidence. |
+| permissioned large-host evidence | A local console run is not a large-host campaign result on its own. |
+| public readiness upgrade | `product_evidence_claim=none` and `release_gate_effect=operational_observability_only`. |
+
+### Validating a console artifact
+
+The non-permissioned validator checks a `runtime_console_report` JSON artifact
+against the schema/safety contract without mounting anything:
+
+```bash
+ffs-harness validate-runtime-console \
+  --report artifacts/runtime-console/per_core_run.json \
+  --format json
+```
+
+`scripts/e2e/ffs_runtime_console_e2e.sh` is the dry, non-mutating fixture lane
+(suite `ffs_runtime_console` in `scripts/e2e/scenario_catalog.json`): it proves
+honest console fixtures validate and contract violations fail closed. It does
+not mount a filesystem, run xfstests, or run a permissioned campaign.
+
+### Console failure triage
+
+| Symptom | Likely cause | Operator action |
+|---------|--------------|-----------------|
+| `--console` rejected at flag parsing | Used with `--runtime-mode standard`. | Re-run with `--runtime-mode managed` or `per-core`. |
+| `--console-json` rejected | `--console` not set. | Add `--console`, or drop the output-path flag. |
+| Console log line `runtime_console_snapshot_skipped` | The runtime observation was internally inconsistent. | Inspect the `reason` field; the mount itself still completed — the console artifact was skipped, not silently dropped. |
+| Console log line `runtime_console_report_advisory_only` | The emitted report failed schema validation (for example a per-core mount with an idle, zero-request worker). | The artifact is still written; treat it as advisory and inspect `issue_count`. |
+| `validate-runtime-console` reports `stale runtime console report` | The artifact's `shutdown_at` is older than the freshness window. | Pass `--reference-timestamp` for a deterministic fixture check, or regenerate the artifact. |
+| `validate-runtime-console` rejects an artifact path | The report references a path outside `artifacts/` or a secret-bearing path. | Re-emit the console under `artifacts/runtime-console/`. |
+| Console E2E logs `RCH_LOCAL_FALLBACK_REJECTED` | The cargo build lane could not reach an admissible RCH worker. | Retry once RCH capacity recovers; the validator runs locally once the harness binary is built. |
+
+The permissioned large-host boundary for `swarm.responsiveness` evidence is
+`bd-rchk0.53.8`; console output never substitutes for that campaign.
 
 ## Topology Runtime Advisor
 

@@ -2344,9 +2344,37 @@ jq -r 'select(.event_type=="policy_decision")
 ffs evidence repair.jsonl --preset replay-anomalies
 ```
 
-### `tokio_console`-style live introspection (off by default)
+### Operator runtime console (`ffs mount --console`)
 
-asupersync exposes runtime introspection points compatible with the same console protocol; future work will ship a `--console` flag on `ffs mount` (currently library-only).
+Managed and per-core mounts can emit an operator-facing runtime console
+artifact on shutdown:
+
+```bash
+# Managed mount: write the console snapshot to the default artifact path.
+ffs mount image.img /mnt/ffs --runtime-mode managed --console
+
+# Per-core mount: write JSON and a Markdown summary to explicit paths.
+ffs mount image.img /mnt/ffs --runtime-mode per-core --rw --console \
+  --console-json artifacts/runtime-console/run.json \
+  --console-summary artifacts/runtime-console/run.md
+```
+
+The console turns existing runtime signals (request counters, throttled/shed
+counts, degradation level, per-core request/cache distribution, cleanup status)
+into a bounded, redacted, schema-pinned `runtime_console_report` artifact. It is
+**operational observability only**: every artifact carries
+`product_evidence_claim=none` and never promotes `swarm.responsiveness` or
+`adaptive_runtime` readiness. The standard runtime mode has no managed metrics
+surface, so `--console` requires `--runtime-mode managed` or `per-core`.
+
+Validate a console artifact (non-permissioned, non-mutating):
+
+```bash
+ffs-harness validate-runtime-console --report artifacts/runtime-console/run.json
+```
+
+See [docs/mount-runtime-modes.md](docs/mount-runtime-modes.md#runtime-console-artifact-contract)
+for field meanings, forbidden interpretations, and failure triage.
 
 ---
 
