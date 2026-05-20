@@ -1723,10 +1723,10 @@ mod tests {
         }
     }
 
-    fn rch_preflight_input(
-        report: &RchCapacityPreflightReport,
-        validation: &RchCapacityPreflightValidationReport,
-    ) -> ClaimabilityRchCapacityPreflightInput<'_> {
+    fn rch_preflight_input<'a>(
+        report: &'a RchCapacityPreflightReport,
+        validation: &'a RchCapacityPreflightValidationReport,
+    ) -> ClaimabilityRchCapacityPreflightInput<'a> {
         ClaimabilityRchCapacityPreflightInput {
             source_report: report,
             validation_report: validation,
