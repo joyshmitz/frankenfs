@@ -160,6 +160,7 @@ pub struct ClaimabilityPlanValidationReport {
 }
 
 #[must_use]
+#[allow(clippy::too_many_lines)]
 pub fn build_claimability_plan_report(
     config: &ClaimabilityPlanConfig,
     tracker_report: &TrackerSourceHygieneReport,
@@ -328,6 +329,7 @@ fn rejected_fallback_marker(probe_verdict: &str) -> Option<String> {
 }
 
 #[must_use]
+#[allow(clippy::too_many_lines)]
 pub fn validate_claimability_plan_report(
     report: &ClaimabilityPlanReport,
 ) -> ClaimabilityPlanValidationReport {
@@ -506,6 +508,7 @@ pub fn fail_on_claimability_plan_errors(report: &ClaimabilityPlanReport) -> Resu
 }
 
 #[must_use]
+#[allow(clippy::too_many_lines)]
 pub fn render_claimability_plan_markdown(report: &ClaimabilityPlanReport) -> String {
     let mut markdown = String::new();
     markdown.push_str("# Claimability Plan\n\n");
@@ -1671,11 +1674,7 @@ mod tests {
             schema_version: 1,
             capacity_verdict: capacity_verdict.to_owned(),
             status_capture: RchCapacityStatusCapture {
-                exit_code: if capacity_verdict == "status_capture_failed" {
-                    1
-                } else {
-                    0
-                },
+                exit_code: i32::from(capacity_verdict == "status_capture_failed"),
                 success: Some(capacity_verdict != "status_capture_failed"),
             },
             daemon: RchCapacityDaemonSummary {
@@ -1699,7 +1698,9 @@ mod tests {
             blocker_reasons: if capacity_verdict == "admissible_capacity_available" {
                 Vec::new()
             } else {
-                vec!["critical_pressure_workers".to_owned()]
+                // Must match the reason token the rch_capacity_preflight
+                // validator requires when critical_pressure count is positive.
+                vec!["critical_pressure".to_owned()]
             },
             operator_actions: Vec::new(),
             probe: RchCapacityProbeReport {

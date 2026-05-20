@@ -1804,6 +1804,9 @@ fn optional_string_field(value: &Value, field: &str) -> Option<String> {
     value.get(field).and_then(Value::as_str).map(str::to_owned)
 }
 
+// serde `skip_serializing_if` invokes this with `&bool`, so the reference
+// argument is required by the call contract.
+#[allow(clippy::trivially_copy_pass_by_ref)]
 fn is_false(value: &bool) -> bool {
     !*value
 }

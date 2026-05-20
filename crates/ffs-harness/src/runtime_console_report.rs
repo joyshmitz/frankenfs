@@ -304,7 +304,7 @@ pub fn validate_runtime_console_report_json(
 ) -> RuntimeConsoleValidationReport {
     match serde_json::from_str::<RuntimeConsoleReport>(json) {
         Ok(report) => validate_runtime_console_report_with_config(&report, config),
-        Err(error) => invalid_json_report(error.to_string()),
+        Err(error) => invalid_json_report(&error.to_string()),
     }
 }
 
@@ -415,7 +415,7 @@ impl RuntimeConsoleBackpressureDecisionCounts {
     }
 }
 
-fn invalid_json_report(error: String) -> RuntimeConsoleValidationReport {
+fn invalid_json_report(error: &str) -> RuntimeConsoleValidationReport {
     let issue = RuntimeConsoleIssue {
         path: "$".to_owned(),
         message: format!("invalid or incomplete runtime console JSON: {error}"),
