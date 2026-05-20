@@ -1,0 +1,44 @@
+---
+source: crates/ffs-harness/src/claimability_plan.rs
+expression: markdown
+---
+# Claimability Plan
+
+- Status: `pass`
+- Generated at: `2026-05-14T00:00:00Z`
+- Tracker queue verdict: `ready`
+- Rows: `2`
+- Reservation conflict: `unknown`
+- Self-held reservations: `0`
+- Suppressed bv parent epics: `0`
+- RCH capacity verdict: `no_admissible_workers`
+- RCH admissible workers: `0`
+- RCH probe verdict: `local_fallback_rejected`
+- RCH preflight report: `preflight.json`
+- RCH probe raw log: `artifacts/e2e/rch/preflight.raw.log`
+
+## Next Safe Actions
+
+- `RCH capacity preflight preflight.json blocks RCH-dependent rows: verdict=no_admissible_workers admissible_workers=0 probe=local_fallback_rejected`
+- `claim one claimable row, reserve its exact files, then announce on Agent Mail`
+- `do not use local cargo fallback as proof for RCH-dependent rows`
+- `treat RCH-dependent ready rows as infrastructure-blocked until a fresh preflight reports admissible workers`
+
+## Reservation Allocation
+
+- Status: `unavailable_no_reservation_snapshot`
+- Advisory only: `true`
+- Self-held target paths: `none`
+- Suggested disjoint target paths: `none`
+
+## Rows
+
+| ID | Classification | Status | Reason | Next Action |
+|---|---|---|---|---|
+| `bd-local` | `Claimable` | `open` | source-aware tracker report marks this row claimable | `br update --no-db --json --actor $AGENT_NAME --claim bd-local` |
+| `bd-rch` | `InfrastructureBlockedRchCapacity` | `open` | RCH-dependent row has markers label:rch,text:validation-requires-rch-cargo; capacity_verdict=no_admissible_workers admissible_workers=0 probe_verdict=local_fallback_rejected report_path=preflight.json probe_raw_log=artifacts/e2e/rch/preflight.raw.log | `do not claim bd-rch until RCH capacity preflight reports admissible remote workers` |
+
+## Reproduction
+
+- `ffs-harness validate-tracker-source-hygiene --issues .beads/issues.jsonl --out tracker_source_hygiene_report.json`
+- `ffs-harness claimability-plan --tracker-report tracker_source_hygiene_report.json --rch-capacity-preflight-report preflight.json --out claimability_plan.json`

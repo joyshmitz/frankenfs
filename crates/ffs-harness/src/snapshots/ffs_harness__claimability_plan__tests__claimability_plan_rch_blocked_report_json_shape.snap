@@ -1,0 +1,124 @@
+---
+source: crates/ffs-harness/src/claimability_plan.rs
+expression: json
+---
+{
+  "schema_version": 1,
+  "status": "pass",
+  "generated_at": "2026-05-14T00:00:00Z",
+  "mutation_policy": "report-only; this planner never claims, closes, deletes, rewrites, or edits tracker rows",
+  "tracker_report_path": "tracker_source_hygiene_report.json",
+  "rch_capacity_preflight_report_path": "preflight.json",
+  "tracker_queue_verdict": "ready",
+  "source_aware_claimable_ids": [
+    "bd-rch",
+    "bd-local"
+  ],
+  "reservation_snapshot": {
+    "present": false,
+    "source_freshness": "unknown",
+    "conflict_classification": "unknown",
+    "active_peer_conflict_count": 0,
+    "active_self_reservation_count": 0,
+    "target_paths": [],
+    "self_held_target_paths": []
+  },
+  "reservation_allocation_plan": {
+    "status": "unavailable_no_reservation_snapshot",
+    "advisory_only": true,
+    "mutation_policy": "advisory-only; this planner never calls MCP, claims, releases, creates, or mutates Agent Mail reservations",
+    "conflict_group_count": 0,
+    "self_held_reservation_count": 0,
+    "self_held_target_paths": [],
+    "suggested_disjoint_target_paths": [],
+    "safe_reservation_commands": [],
+    "groups": []
+  },
+  "bv_snapshot": {
+    "present": false,
+    "recommendation_count": 0,
+    "parent_epic_recommendation_ids": [],
+    "suppressed_parent_epic_ids": []
+  },
+  "rch_capacity_preflight": {
+    "report_path": "preflight.json",
+    "report_valid": true,
+    "capacity_verdict": "no_admissible_workers",
+    "probe_verdict": "local_fallback_rejected",
+    "admissible_worker_count": 0,
+    "rejected_fallback_marker": "RCH_LOCAL_FALLBACK_REJECTED",
+    "probe_raw_log": "artifacts/e2e/rch/preflight.raw.log",
+    "infrastructure_blocking": true,
+    "next_safe_actions": [
+      "treat RCH-dependent ready rows as infrastructure-blocked until a fresh preflight reports admissible workers",
+      "do not use local cargo fallback as proof for RCH-dependent rows"
+    ],
+    "diagnostic_codes": []
+  },
+  "rows": [
+    {
+      "id": "bd-local",
+      "title": "Non-RCH local task",
+      "status": "open",
+      "priority": 1,
+      "issue_type": "task",
+      "source_repo": ".",
+      "assignee": null,
+      "classification": "claimable",
+      "reason": "source-aware tracker report marks this row claimable",
+      "blocked_by": [],
+      "owner_handoff_required": false,
+      "next_safe_actions": [
+        "br update --no-db --json --actor $AGENT_NAME --claim bd-local",
+        "file_reservation_paths(project_key, agent_name, target_paths, reason=\"bd-local\")",
+        "send_message(... thread_id=\"bd-local\", subject=\"[bd-local] Start: Non-RCH local task\")"
+      ],
+      "reproduction_commands": [
+        "ffs-harness claimability-plan --tracker-report tracker_source_hygiene_report.json --out claimability_plan.json"
+      ]
+    },
+    {
+      "id": "bd-rch",
+      "title": "RCH-dependent local task",
+      "status": "open",
+      "priority": 1,
+      "issue_type": "task",
+      "source_repo": ".",
+      "assignee": null,
+      "classification": "infrastructure_blocked_rch_capacity",
+      "reason": "RCH-dependent row has markers label:rch,text:validation-requires-rch-cargo; capacity_verdict=no_admissible_workers admissible_workers=0 probe_verdict=local_fallback_rejected report_path=preflight.json probe_raw_log=artifacts/e2e/rch/preflight.raw.log",
+      "blocked_by": [],
+      "owner_handoff_required": false,
+      "next_safe_actions": [
+        "do not claim bd-rch until RCH capacity preflight reports admissible remote workers",
+        "attach RCH capacity preflight artifact preflight.json when reopening bd-rch",
+        "inspect RCH probe raw log artifacts/e2e/rch/preflight.raw.log before retrying remote cargo gates",
+        "preserve fail-closed marker RCH_LOCAL_FALLBACK_REJECTED; do not accept local cargo fallback"
+      ],
+      "reproduction_commands": [
+        "ffs-harness claimability-plan --tracker-report tracker_source_hygiene_report.json --out claimability_plan.json"
+      ]
+    }
+  ],
+  "next_safe_actions": [
+    "RCH capacity preflight preflight.json blocks RCH-dependent rows: verdict=no_admissible_workers admissible_workers=0 probe=local_fallback_rejected",
+    "claim one claimable row, reserve its exact files, then announce on Agent Mail",
+    "do not use local cargo fallback as proof for RCH-dependent rows",
+    "treat RCH-dependent ready rows as infrastructure-blocked until a fresh preflight reports admissible workers"
+  ],
+  "reproduction_commands": [
+    "ffs-harness validate-tracker-source-hygiene --issues .beads/issues.jsonl --out tracker_source_hygiene_report.json",
+    "ffs-harness claimability-plan --tracker-report tracker_source_hygiene_report.json --rch-capacity-preflight-report preflight.json --out claimability_plan.json"
+  ],
+  "validation": {
+    "schema_version": 1,
+    "valid": true,
+    "row_count": 2,
+    "classifications_seen": [
+      "claimable",
+      "infrastructure_blocked_rch_capacity"
+    ],
+    "errors": []
+  },
+  "errors": []
+}

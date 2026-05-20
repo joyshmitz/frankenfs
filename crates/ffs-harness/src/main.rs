@@ -55,7 +55,8 @@ use ffs_harness::{
         render_chaos_replay_lab_markdown, validate_chaos_replay_lab,
     },
     claimability_plan::{
-        ClaimabilityPlanConfig, build_claimability_plan_report, fail_on_claimability_plan_errors,
+        ClaimabilityPlanConfig, ClaimabilityRchCapacityPreflightInput,
+        build_claimability_plan_report, fail_on_claimability_plan_errors,
         render_claimability_plan_markdown,
     },
     cross_oracle_arbitration::{
@@ -8119,6 +8120,7 @@ fn claimability_plan_cmd(args: &[String]) -> Result<()> {
     let mut tracker_report_path: Option<String> = None;
     let mut reservation_report_path: Option<String> = None;
     let mut bv_report_path: Option<String> = None;
+    let mut rch_capacity_preflight_report_path: Option<String> = None;
     let mut out_path: Option<String> = None;
     let mut summary_out_path: Option<String> = None;
     let mut generated_at = current_unix_timestamp_label();
@@ -8138,6 +8140,11 @@ fn claimability_plan_cmd(args: &[String]) -> Result<()> {
             }
             "--bv-report" => {
                 bv_report_path = Some(require_value(args, i, "--bv-report")?.to_owned());
+                i += 2;
+            }
+            "--rch-capacity-preflight-report" => {
+                rch_capacity_preflight_report_path =
+                    Some(require_value(args, i, "--rch-capacity-preflight-report")?.to_owned());
                 i += 2;
             }
             "--generated-at" => {
@@ -8188,17 +8195,36 @@ fn claimability_plan_cmd(args: &[String]) -> Result<()> {
     } else {
         None
     };
+    let rch_capacity_preflight = if let Some(path) = &rch_capacity_preflight_report_path {
+        let source_report = load_rch_capacity_preflight_report(path)?;
+        let validation_report =
+            validate_rch_capacity_preflight_report(&source_report, path.clone());
+        Some((source_report, validation_report))
+    } else {
+        None
+    };
     let config = ClaimabilityPlanConfig {
         generated_at,
         tracker_report_path,
         reservation_report_path,
         bv_report_path,
+        rch_capacity_preflight_report_path,
     };
+    let rch_capacity_preflight_input =
+        rch_capacity_preflight
+            .as_ref()
+            .map(
+                |(source_report, validation_report)| ClaimabilityRchCapacityPreflightInput {
+                    source_report,
+                    validation_report,
+                },
+            );
     let report = build_claimability_plan_report(
         &config,
         &tracker_report,
         reservation_report.as_ref(),
         bv_snapshot.as_ref(),
+        rch_capacity_preflight_input,
     );
     let json = serde_json::to_string_pretty(&report)?;
     let markdown = render_claimability_plan_markdown(&report);
@@ -9347,7 +9373,7 @@ fn print_usage_core_commands() {
         "  ffs-harness validate-tracker-source-hygiene [--issues FILE] [--strict] [--out FILE]"
     );
     println!(
-        "  ffs-harness claimability-plan --tracker-report FILE [--reservation-report FILE] [--bv-report FILE] [--format json|markdown] [--out FILE] [--summary-out FILE]"
+        "  ffs-harness claimability-plan --tracker-report FILE [--reservation-report FILE] [--bv-report FILE] [--rch-capacity-preflight-report FILE] [--format json|markdown] [--out FILE] [--summary-out FILE]"
     );
     println!(
         "  ffs-harness validate-report-schema-inventory [--format json|markdown] [--out FILE] [--summary-out FILE]"
@@ -10121,6 +10147,7 @@ fn print_claimability_plan_usage() {
         "  --reservation-report FILE          Read optional Agent Mail reservation report JSON"
     );
     println!("  --bv-report FILE                   Read optional bv robot JSON snapshot");
+    println!("  --rch-capacity-preflight-report FILE Read optional RCH capacity preflight JSON");
     println!("  --generated-at VALUE               Override generated_at label");
     println!("  --format json|markdown             Output format (default: json)");
     println!("  --out FILE                         Write selected-format report to FILE");

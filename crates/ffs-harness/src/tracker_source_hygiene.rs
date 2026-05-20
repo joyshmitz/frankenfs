@@ -257,6 +257,12 @@ pub struct TrackerIssueWorkRow {
     pub issue_type: Option<String>,
     pub source_repo: Option<String>,
     pub assignee: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub rch_dependent: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rch_dependency_markers: Vec<String>,
     pub blocked_by: Vec<TrackerDependencyStatus>,
 }
 
@@ -475,6 +481,20 @@ impl<'a> TrackerIssue<'a> {
         optional_string_field(self.value, "updated_at")
     }
 
+    fn labels(&self) -> Vec<String> {
+        self.value
+            .get("labels")
+            .and_then(Value::as_array)
+            .map(|labels| {
+                labels
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     fn is_local(&self) -> bool {
         is_local_issue_id(&self.id())
     }
@@ -503,6 +523,7 @@ impl<'a> TrackerIssue<'a> {
     }
 
     fn work_row(&self, statuses: &BTreeMap<String, String>) -> TrackerIssueWorkRow {
+        let rch_dependency_markers = self.rch_dependency_markers();
         TrackerIssueWorkRow {
             id: self.id(),
             title: self.title(),
@@ -511,6 +532,9 @@ impl<'a> TrackerIssue<'a> {
             issue_type: self.issue_type(),
             source_repo: self.source_repo(),
             assignee: self.assignee(),
+            labels: self.labels(),
+            rch_dependent: !rch_dependency_markers.is_empty(),
+            rch_dependency_markers,
             blocked_by: self.blocking_dependencies(statuses),
         }
     }
@@ -620,6 +644,56 @@ impl<'a> TrackerIssue<'a> {
             parts.extend(labels.iter().filter_map(Value::as_str).map(str::to_owned));
         }
         parts.join(" ")
+    }
+
+    fn text_for_rch_dependency(&self) -> String {
+        let mut parts = vec![
+            self.id(),
+            self.title(),
+            string_field(self.value, "description"),
+            string_field(self.value, "acceptance_criteria"),
+            string_field(self.value, "design"),
+            string_field(self.value, "notes"),
+        ];
+        parts.extend(self.labels());
+        parts.join(" ")
+    }
+
+    fn rch_dependency_markers(&self) -> Vec<String> {
+        let labels = self.labels();
+        let mut markers = Vec::new();
+        if labels.iter().any(|label| label.eq_ignore_ascii_case("rch")) {
+            markers.push("label:rch".to_owned());
+        }
+
+        let text = self.text_for_rch_dependency().to_ascii_lowercase();
+        for (needle, marker) in [
+            ("rch-routed", "text:rch-routed"),
+            ("routed through rch", "text:routed-through-rch"),
+            ("through direct rch", "text:direct-rch"),
+            ("direct rch", "text:direct-rch"),
+            ("via rch", "text:via-rch"),
+            ("rch cargo", "text:rch-cargo"),
+            ("remote cargo", "text:remote-cargo"),
+            ("remote check/clippy", "text:remote-check-clippy"),
+            ("rch capacity preflight", "text:rch-capacity-preflight"),
+            ("capacity preflight", "text:capacity-preflight"),
+            ("proof-ledger", "text:proof-ledger"),
+        ] {
+            if text.contains(needle) && !markers.iter().any(|value| value == marker) {
+                markers.push(marker.to_owned());
+            }
+        }
+
+        let requires_rch_cargo_proof =
+            text.contains("validation includes") && text.contains("rch") && text.contains("cargo");
+        if requires_rch_cargo_proof {
+            markers.push("text:validation-requires-rch-cargo".to_owned());
+        }
+
+        markers.sort();
+        markers.dedup();
+        markers
     }
 }
 
@@ -1728,6 +1802,10 @@ fn string_field_or(value: &Value, field: &str, default: &str) -> String {
 
 fn optional_string_field(value: &Value, field: &str) -> Option<String> {
     value.get(field).and_then(Value::as_str).map(str::to_owned)
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 fn is_local_issue_id(id: &str) -> bool {
@@ -2966,6 +3044,74 @@ mod tests {
             report.source_aware_queue_state.claimable_ids,
             vec!["bd-fallback"]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn rch_dependency_markers_include_labels_and_acceptance_text() -> Result<(), String> {
+        let issues = [
+            line(&serde_json::json!({
+                "id": "bd-rch-label",
+                "title": "RCH labeled work",
+                "description": "Local-safe planning task.",
+                "status": "open",
+                "priority": 1,
+                "labels": ["rch", "harness"]
+            }))?,
+            line(&serde_json::json!({
+                "id": "bd-rch-acceptance",
+                "title": "RCH acceptance text work",
+                "description": "Local-safe planning task.",
+                "acceptance_criteria": "Validation includes focused RCH cargo test and remote check/clippy.",
+                "status": "open",
+                "priority": 1,
+                "labels": ["harness"]
+            }))?,
+            line(&serde_json::json!({
+                "id": "bd-local",
+                "title": "Plain local work",
+                "description": "No remote build dependency in this row.",
+                "status": "open",
+                "priority": 1,
+                "labels": ["harness"]
+            }))?,
+        ]
+        .join("\n");
+
+        let report =
+            analyze_tracker_source_hygiene(&issues, &config()).map_err(|err| err.to_string())?;
+        let by_id: BTreeMap<&str, &TrackerIssueWorkRow> = report
+            .source_aware_ready_rows
+            .iter()
+            .map(|row| (row.id.as_str(), row))
+            .collect();
+
+        let label_row = by_id
+            .get("bd-rch-label")
+            .ok_or_else(|| "missing bd-rch-label".to_owned())?;
+        assert!(label_row.rch_dependent);
+        assert_eq!(label_row.rch_dependency_markers, vec!["label:rch"]);
+
+        let acceptance_row = by_id
+            .get("bd-rch-acceptance")
+            .ok_or_else(|| "missing bd-rch-acceptance".to_owned())?;
+        assert!(acceptance_row.rch_dependent);
+        assert!(
+            acceptance_row
+                .rch_dependency_markers
+                .contains(&"text:validation-requires-rch-cargo".to_owned())
+        );
+        assert!(
+            acceptance_row
+                .rch_dependency_markers
+                .contains(&"text:remote-check-clippy".to_owned())
+        );
+
+        let local_row = by_id
+            .get("bd-local")
+            .ok_or_else(|| "missing bd-local".to_owned())?;
+        assert!(!local_row.rch_dependent);
+        assert!(local_row.rch_dependency_markers.is_empty());
         Ok(())
     }
 

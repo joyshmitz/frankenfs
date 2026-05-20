@@ -1,6 +1,9 @@
 #![allow(clippy::module_name_repetitions)]
 #![forbid(unsafe_code)]
 
+use crate::rch_capacity_preflight::{
+    RchCapacityPreflightReport, RchCapacityPreflightValidationReport,
+};
 use crate::tracker_source_hygiene::{
     AgentMailReservationLeaseReport, AgentMailReservationSnapshotReport, TrackerDependencyStatus,
     TrackerIssueProgressRow, TrackerIssueSample, TrackerIssueWorkRow, TrackerPermissionGate,
@@ -20,6 +23,13 @@ pub struct ClaimabilityPlanConfig {
     pub tracker_report_path: String,
     pub reservation_report_path: Option<String>,
     pub bv_report_path: Option<String>,
+    pub rch_capacity_preflight_report_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ClaimabilityRchCapacityPreflightInput<'a> {
+    pub source_report: &'a RchCapacityPreflightReport,
+    pub validation_report: &'a RchCapacityPreflightValidationReport,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -33,16 +43,34 @@ pub struct ClaimabilityPlanReport {
     pub reservation_report_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bv_report_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rch_capacity_preflight_report_path: Option<String>,
     pub tracker_queue_verdict: String,
     pub source_aware_claimable_ids: Vec<String>,
     pub reservation_snapshot: ClaimabilityReservationSnapshotSummary,
     pub reservation_allocation_plan: ClaimabilityReservationAllocationPlan,
     pub bv_snapshot: ClaimabilityBvSnapshotSummary,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rch_capacity_preflight: Option<ClaimabilityRchCapacityPreflightSummary>,
     pub rows: Vec<ClaimabilityPlanRow>,
     pub next_safe_actions: Vec<String>,
     pub reproduction_commands: Vec<String>,
     pub validation: ClaimabilityPlanValidationReport,
     pub errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClaimabilityRchCapacityPreflightSummary {
+    pub report_path: String,
+    pub report_valid: bool,
+    pub capacity_verdict: String,
+    pub probe_verdict: String,
+    pub admissible_worker_count: u64,
+    pub rejected_fallback_marker: Option<String>,
+    pub probe_raw_log: String,
+    pub infrastructure_blocking: bool,
+    pub next_safe_actions: Vec<String>,
+    pub diagnostic_codes: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -115,6 +143,7 @@ pub enum ClaimabilityClassification {
     Claimable,
     PermissionGated,
     Blocked,
+    InfrastructureBlockedRchCapacity,
     ReservedByPeer,
     ParentEpic,
     StaleInProgressReclaimCandidate,
@@ -136,23 +165,35 @@ pub fn build_claimability_plan_report(
     tracker_report: &TrackerSourceHygieneReport,
     reservation_report: Option<&AgentMailReservationSnapshotReport>,
     bv_snapshot: Option<&Value>,
+    rch_capacity_preflight: Option<ClaimabilityRchCapacityPreflightInput<'_>>,
 ) -> ClaimabilityPlanReport {
     let reservation_snapshot = reservation_summary(reservation_report);
     let reservation_allocation_plan = reservation_allocation_plan(reservation_report);
     let active_peer_conflict = reservation_snapshot.active_peer_conflict_count > 0;
     let parent_epic_ids = parent_epic_ids(tracker_report);
     let bv_snapshot = bv_summary(bv_snapshot, &parent_epic_ids, tracker_report);
+    let rch_capacity_preflight_summary = rch_capacity_preflight.map(rch_capacity_summary);
+    let rch_capacity_blocks = rch_capacity_preflight_summary
+        .as_ref()
+        .is_some_and(|summary| summary.infrastructure_blocking);
     let mut rows = BTreeMap::new();
 
     for row in &tracker_report.source_aware_ready_rows {
         let classification = if active_peer_conflict {
             ClaimabilityClassification::ReservedByPeer
+        } else if rch_capacity_blocks && row.rch_dependent {
+            ClaimabilityClassification::InfrastructureBlockedRchCapacity
         } else {
             ClaimabilityClassification::Claimable
         };
         insert_row(
             &mut rows,
-            plan_row_from_work_row(row, classification, reservation_report),
+            plan_row_from_work_row(
+                row,
+                classification,
+                reservation_report,
+                rch_capacity_preflight_summary.as_ref(),
+            ),
         );
     }
     for row in &tracker_report.permission_gated_rows {
@@ -176,8 +217,13 @@ pub fn build_claimability_plan_report(
     }
 
     let rows: Vec<ClaimabilityPlanRow> = rows.into_values().collect();
-    let mut next_safe_actions =
-        plan_next_safe_actions(tracker_report, &rows, &reservation_snapshot, &bv_snapshot);
+    let mut next_safe_actions = plan_next_safe_actions(
+        tracker_report,
+        &rows,
+        &reservation_snapshot,
+        &bv_snapshot,
+        rch_capacity_preflight_summary.as_ref(),
+    );
     next_safe_actions.sort();
     next_safe_actions.dedup();
 
@@ -185,6 +231,7 @@ pub fn build_claimability_plan_report(
         config,
         config.reservation_report_path.is_some(),
         config.bv_report_path.is_some(),
+        rch_capacity_preflight_summary.is_some(),
     );
     let mut report = ClaimabilityPlanReport {
         schema_version: CLAIMABILITY_PLAN_SCHEMA_VERSION,
@@ -196,6 +243,7 @@ pub fn build_claimability_plan_report(
         tracker_report_path: config.tracker_report_path.clone(),
         reservation_report_path: config.reservation_report_path.clone(),
         bv_report_path: config.bv_report_path.clone(),
+        rch_capacity_preflight_report_path: config.rch_capacity_preflight_report_path.clone(),
         tracker_queue_verdict: tracker_report.source_aware_queue_state.verdict.clone(),
         source_aware_claimable_ids: tracker_report
             .source_aware_queue_state
@@ -204,6 +252,7 @@ pub fn build_claimability_plan_report(
         reservation_snapshot,
         reservation_allocation_plan,
         bv_snapshot,
+        rch_capacity_preflight: rch_capacity_preflight_summary,
         rows,
         next_safe_actions,
         reproduction_commands,
@@ -225,6 +274,57 @@ pub fn build_claimability_plan_report(
     report.errors.clone_from(&validation.errors);
     report.validation = validation;
     report
+}
+
+fn rch_capacity_summary(
+    input: ClaimabilityRchCapacityPreflightInput<'_>,
+) -> ClaimabilityRchCapacityPreflightSummary {
+    let validation = input.validation_report;
+    let source = input.source_report;
+    let rejected_fallback_marker = rejected_fallback_marker(&validation.probe_verdict);
+    let infrastructure_blocking = validation.valid
+        && (matches!(
+            validation.capacity_verdict.as_str(),
+            "no_admissible_workers" | "no_workers_reported" | "status_capture_failed"
+        ) || rejected_fallback_marker.is_some());
+    let mut next_safe_actions = Vec::new();
+    if infrastructure_blocking {
+        next_safe_actions.push(
+            "treat RCH-dependent ready rows as infrastructure-blocked until a fresh preflight reports admissible workers"
+                .to_owned(),
+        );
+        next_safe_actions
+            .push("do not use local cargo fallback as proof for RCH-dependent rows".to_owned());
+    } else {
+        next_safe_actions.push(
+            "RCH preflight is advisory and does not override tracker, permission, or reservation gates"
+                .to_owned(),
+        );
+    }
+    ClaimabilityRchCapacityPreflightSummary {
+        report_path: validation.report_path.clone(),
+        report_valid: validation.valid,
+        capacity_verdict: validation.capacity_verdict.clone(),
+        probe_verdict: validation.probe_verdict.clone(),
+        admissible_worker_count: validation.worker_counts.admissible,
+        rejected_fallback_marker,
+        probe_raw_log: source.probe.raw_log.clone(),
+        infrastructure_blocking,
+        next_safe_actions,
+        diagnostic_codes: validation
+            .diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.code.clone())
+            .collect(),
+    }
+}
+
+fn rejected_fallback_marker(probe_verdict: &str) -> Option<String> {
+    match probe_verdict {
+        "local_fallback_rejected" => Some("RCH_LOCAL_FALLBACK_REJECTED".to_owned()),
+        "remote_required_refused" => Some("RCH_REMOTE_REQUIRED_REFUSED".to_owned()),
+        _ => None,
+    }
 }
 
 #[must_use]
@@ -299,6 +399,46 @@ pub fn validate_claimability_plan_report(
                 "permission-gated row {} must include permission_gate",
                 row.id
             ));
+        }
+        if row.classification == ClaimabilityClassification::InfrastructureBlockedRchCapacity
+            && report.rch_capacity_preflight.is_none()
+        {
+            errors.push(format!(
+                "RCH infrastructure-blocked row {} must include rch_capacity_preflight summary",
+                row.id
+            ));
+        }
+    }
+
+    if let Some(summary) = &report.rch_capacity_preflight {
+        if summary.report_path.trim().is_empty() {
+            errors.push("rch_capacity_preflight.report_path is required".to_owned());
+        }
+        if !summary.report_valid {
+            errors.push(format!(
+                "rch_capacity_preflight report {} is invalid; run validate-rch-capacity-preflight first",
+                summary.report_path
+            ));
+        }
+        if summary.infrastructure_blocking && summary.next_safe_actions.is_empty() {
+            errors.push(
+                "infrastructure-blocking RCH preflight must include next_safe_actions".to_owned(),
+            );
+        }
+        let has_infrastructure_blocked_row = report.rows.iter().any(|row| {
+            row.classification == ClaimabilityClassification::InfrastructureBlockedRchCapacity
+        });
+        if summary.infrastructure_blocking
+            && has_infrastructure_blocked_row
+            && !report
+                .next_safe_actions
+                .iter()
+                .any(|action| action.contains("RCH-dependent") || action.contains("RCH capacity"))
+        {
+            errors.push(
+                "infrastructure-blocking RCH preflight must produce top-level RCH guidance"
+                    .to_owned(),
+            );
         }
     }
 
@@ -392,6 +532,27 @@ pub fn render_claimability_plan_markdown(report: &ClaimabilityPlanReport) -> Str
         "- Suppressed bv parent epics: `{}`",
         report.bv_snapshot.suppressed_parent_epic_ids.len()
     );
+    if let Some(summary) = &report.rch_capacity_preflight {
+        let _ = writeln!(
+            markdown,
+            "- RCH capacity verdict: `{}`",
+            summary.capacity_verdict
+        );
+        let _ = writeln!(
+            markdown,
+            "- RCH admissible workers: `{}`",
+            summary.admissible_worker_count
+        );
+        let _ = writeln!(markdown, "- RCH probe verdict: `{}`", summary.probe_verdict);
+        let _ = writeln!(
+            markdown,
+            "- RCH preflight report: `{}`",
+            summary.report_path
+        );
+        if !summary.probe_raw_log.trim().is_empty() {
+            let _ = writeln!(markdown, "- RCH probe raw log: `{}`", summary.probe_raw_log);
+        }
+    }
 
     markdown.push_str("\n## Next Safe Actions\n\n");
     for action in &report.next_safe_actions {
@@ -508,6 +669,7 @@ fn plan_row_from_work_row(
     row: &TrackerIssueWorkRow,
     classification: ClaimabilityClassification,
     reservation_report: Option<&AgentMailReservationSnapshotReport>,
+    rch_capacity_preflight: Option<&ClaimabilityRchCapacityPreflightSummary>,
 ) -> ClaimabilityPlanRow {
     let (reason, next_safe_actions) =
         if classification == ClaimabilityClassification::ReservedByPeer {
@@ -521,6 +683,11 @@ fn plan_row_from_work_row(
                     row.id
                 ),
             ],
+            )
+        } else if classification == ClaimabilityClassification::InfrastructureBlockedRchCapacity {
+            (
+                rch_capacity_blocked_reason(row, rch_capacity_preflight),
+                rch_capacity_blocked_next_actions(row, rch_capacity_preflight),
             )
         } else {
             (
@@ -554,6 +721,58 @@ fn plan_row_from_work_row(
         next_safe_actions,
         reproduction_commands,
     }
+}
+
+fn rch_capacity_blocked_reason(
+    row: &TrackerIssueWorkRow,
+    rch_capacity_preflight: Option<&ClaimabilityRchCapacityPreflightSummary>,
+) -> String {
+    let markers = if row.rch_dependency_markers.is_empty() {
+        "none".to_owned()
+    } else {
+        row.rch_dependency_markers.join(",")
+    };
+    let Some(summary) = rch_capacity_preflight else {
+        return format!(
+            "RCH-dependent row has markers {markers}, but no capacity preflight summary was attached"
+        );
+    };
+    format!(
+        "RCH-dependent row has markers {markers}; capacity_verdict={} admissible_workers={} probe_verdict={} report_path={} probe_raw_log={}",
+        summary.capacity_verdict,
+        summary.admissible_worker_count,
+        summary.probe_verdict,
+        summary.report_path,
+        summary.probe_raw_log
+    )
+}
+
+fn rch_capacity_blocked_next_actions(
+    row: &TrackerIssueWorkRow,
+    rch_capacity_preflight: Option<&ClaimabilityRchCapacityPreflightSummary>,
+) -> Vec<String> {
+    let mut actions = vec![format!(
+        "do not claim {} until RCH capacity preflight reports admissible remote workers",
+        row.id
+    )];
+    if let Some(summary) = rch_capacity_preflight {
+        actions.push(format!(
+            "attach RCH capacity preflight artifact {} when reopening {}",
+            summary.report_path, row.id
+        ));
+        if !summary.probe_raw_log.trim().is_empty() {
+            actions.push(format!(
+                "inspect RCH probe raw log {} before retrying remote cargo gates",
+                summary.probe_raw_log
+            ));
+        }
+        if let Some(marker) = &summary.rejected_fallback_marker {
+            actions.push(format!(
+                "preserve fail-closed marker {marker}; do not accept local cargo fallback"
+            ));
+        }
+    }
+    actions
 }
 
 fn claimable_next_actions(
@@ -798,14 +1017,13 @@ fn unavailable_reservation_snapshot_allocation_plan() -> ClaimabilityReservation
 fn blocked_reservation_snapshot_allocation_plan(
     report: &AgentMailReservationSnapshotReport,
 ) -> Option<ClaimabilityReservationAllocationPlan> {
-    let blocked_status = if report.source_freshness != "fresh" {
-        Some("blocked_stale_or_unknown_snapshot")
-    } else if report.target_paths.is_empty() {
-        Some("blocked_no_target_paths")
-    } else if report.target_paths.iter().any(|path| has_glob_token(path)) {
-        Some("blocked_wildcard_target_paths")
-    } else {
-        None
+    let blocked_status = match report.source_freshness.as_str() {
+        "fresh" if report.target_paths.is_empty() => Some("blocked_no_target_paths"),
+        "fresh" if report.target_paths.iter().any(|path| has_glob_token(path)) => {
+            Some("blocked_wildcard_target_paths")
+        }
+        "fresh" => None,
+        _ => Some("blocked_stale_or_unknown_snapshot"),
     }?;
     Some(allocation_plan(
         blocked_status,
@@ -1157,6 +1375,7 @@ fn plan_next_safe_actions(
     rows: &[ClaimabilityPlanRow],
     reservation_summary: &ClaimabilityReservationSnapshotSummary,
     bv_summary: &ClaimabilityBvSnapshotSummary,
+    rch_capacity_preflight: Option<&ClaimabilityRchCapacityPreflightSummary>,
 ) -> Vec<String> {
     let mut actions = Vec::new();
     if rows
@@ -1213,6 +1432,20 @@ fn plan_next_safe_actions(
             "preserve foreign rows as owner-handoff only; do not mutate them locally".to_owned(),
         );
     }
+    if let Some(summary) = rch_capacity_preflight {
+        if rows.iter().any(|row| {
+            row.classification == ClaimabilityClassification::InfrastructureBlockedRchCapacity
+        }) {
+            actions.extend(summary.next_safe_actions.clone());
+            actions.push(format!(
+                "RCH capacity preflight {} blocks RCH-dependent rows: verdict={} admissible_workers={} probe={}",
+                summary.report_path,
+                summary.capacity_verdict,
+                summary.admissible_worker_count,
+                summary.probe_verdict
+            ));
+        }
+    }
     if actions.is_empty() {
         actions.extend(
             tracker_report
@@ -1228,6 +1461,7 @@ fn plan_reproduction_commands(
     config: &ClaimabilityPlanConfig,
     has_reservation_report: bool,
     has_bv_report: bool,
+    has_rch_capacity_preflight_report: bool,
 ) -> Vec<String> {
     let mut command = format!(
         "ffs-harness claimability-plan --tracker-report {}",
@@ -1242,6 +1476,17 @@ fn plan_reproduction_commands(
     }
     if let Some(path) = config.bv_report_path.as_ref().filter(|_| has_bv_report) {
         let _ = write!(command, " --bv-report {}", shell_arg(path));
+    }
+    if let Some(path) = config
+        .rch_capacity_preflight_report_path
+        .as_ref()
+        .filter(|_| has_rch_capacity_preflight_report)
+    {
+        let _ = write!(
+            command,
+            " --rch-capacity-preflight-report {}",
+            shell_arg(path)
+        );
     }
     command.push_str(" --out claimability_plan.json");
     vec![
@@ -1281,6 +1526,11 @@ fn markdown_table_cell(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rch_capacity_preflight::{
+        RchCapacityDaemonSummary, RchCapacityPreflightReport, RchCapacityPreflightValidationReport,
+        RchCapacityProbeReport, RchCapacityStatusCapture, RchCapacityWorkerCounts,
+        validate_rch_capacity_preflight_report,
+    };
     use crate::tracker_source_hygiene::{
         AgentMailReservationLeaseReport, TrackerForeignReconciliationPlan, TrackerIssueProgressRow,
         TrackerLocalGraphExports, TrackerLocalNonclaimableRow, TrackerPermissionGate,
@@ -1293,6 +1543,7 @@ mod tests {
             tracker_report_path: "tracker_source_hygiene_report.json".to_owned(),
             reservation_report_path: None,
             bv_report_path: None,
+            rch_capacity_preflight_report_path: None,
         }
     }
 
@@ -1383,8 +1634,22 @@ mod tests {
             issue_type: Some("task".to_owned()),
             source_repo: Some(".".to_owned()),
             assignee: None,
+            labels: Vec::new(),
+            rch_dependent: false,
+            rch_dependency_markers: Vec::new(),
             blocked_by: Vec::new(),
         }
+    }
+
+    fn rch_work_row(id: &str, title: &str) -> TrackerIssueWorkRow {
+        let mut row = work_row(id, title);
+        row.labels = vec!["rch".to_owned()];
+        row.rch_dependent = true;
+        row.rch_dependency_markers = vec![
+            "label:rch".to_owned(),
+            "text:validation-requires-rch-cargo".to_owned(),
+        ];
+        row
     }
 
     fn permission_gate() -> TrackerPermissionGate {
@@ -1394,6 +1659,77 @@ mod tests {
                 .to_owned(),
             required_value: "1,swarm-workload-may-use-permissioned-large-host".to_owned(),
             present: false,
+        }
+    }
+
+    fn rch_preflight_report(
+        capacity_verdict: &str,
+        admissible_workers: u64,
+        probe_verdict: &str,
+    ) -> RchCapacityPreflightReport {
+        RchCapacityPreflightReport {
+            schema_version: 1,
+            capacity_verdict: capacity_verdict.to_owned(),
+            status_capture: RchCapacityStatusCapture {
+                exit_code: if capacity_verdict == "status_capture_failed" {
+                    1
+                } else {
+                    0
+                },
+                success: Some(capacity_verdict != "status_capture_failed"),
+            },
+            daemon: RchCapacityDaemonSummary {
+                workers_total: 7,
+                workers_healthy: 6,
+                slots_total: Some(7),
+                slots_available: Some(admissible_workers),
+            },
+            worker_counts: RchCapacityWorkerCounts {
+                admissible: admissible_workers,
+                critical_pressure: if capacity_verdict == "no_admissible_workers" {
+                    6
+                } else {
+                    0
+                },
+                telemetry_gap: 0,
+                telemetry_stale: 0,
+                unhealthy: 0,
+                unreachable: 0,
+            },
+            blocker_reasons: if capacity_verdict == "admissible_capacity_available" {
+                Vec::new()
+            } else {
+                vec!["critical_pressure_workers".to_owned()]
+            },
+            operator_actions: Vec::new(),
+            probe: RchCapacityProbeReport {
+                requested: true,
+                command: vec![
+                    "cargo".to_owned(),
+                    "check".to_owned(),
+                    "-p".to_owned(),
+                    "ffs-error".to_owned(),
+                    "--lib".to_owned(),
+                ],
+                exit_code: if probe_verdict == "remote_success" {
+                    Some(0)
+                } else {
+                    Some(101)
+                },
+                verdict: probe_verdict.to_owned(),
+                fail_closed: probe_verdict != "remote_success",
+                raw_log: "artifacts/e2e/rch/preflight.raw.log".to_owned(),
+            },
+        }
+    }
+
+    fn rch_preflight_input(
+        report: &RchCapacityPreflightReport,
+        validation: &RchCapacityPreflightValidationReport,
+    ) -> ClaimabilityRchCapacityPreflightInput<'_> {
+        ClaimabilityRchCapacityPreflightInput {
+            source_report: report,
+            validation_report: validation,
         }
     }
 
@@ -1568,7 +1904,7 @@ mod tests {
         cfg.reservation_report_path = Some("agent_mail_reservations.json".to_owned());
         cfg.bv_report_path = Some("bv_robot_next.json".to_owned());
 
-        build_claimability_plan_report(&cfg, &tracker, Some(&reservation), Some(&bv))
+        build_claimability_plan_report(&cfg, &tracker, Some(&reservation), Some(&bv), None)
     }
 
     #[test]
@@ -1577,7 +1913,7 @@ mod tests {
         tracker.source_aware_ready_rows = vec![work_row("bd-clean", "Clean local task")];
         tracker.source_aware_queue_state = queue_state("ready", vec!["bd-clean".to_owned()]);
 
-        let report = build_claimability_plan_report(&config(), &tracker, None, None);
+        let report = build_claimability_plan_report(&config(), &tracker, None, None, None);
 
         assert_eq!(report.status, "pass");
         assert_eq!(
@@ -1591,6 +1927,121 @@ mod tests {
         assert!(row.next_safe_actions.iter().any(|action| {
             action.contains("file_reservation_paths") && action.contains("bd-clean")
         }));
+    }
+
+    #[test]
+    fn clean_capacity_leaves_rch_dependent_rows_claimable() {
+        let mut tracker = base_report();
+        tracker.source_aware_ready_rows = vec![rch_work_row("bd-rch", "RCH-dependent local task")];
+        tracker.source_aware_queue_state = queue_state("ready", vec!["bd-rch".to_owned()]);
+        let preflight = rch_preflight_report("admissible_capacity_available", 2, "remote_success");
+        let validation = validate_rch_capacity_preflight_report(&preflight, "preflight.json");
+
+        let report = build_claimability_plan_report(
+            &config(),
+            &tracker,
+            None,
+            None,
+            Some(rch_preflight_input(&preflight, &validation)),
+        );
+
+        assert!(report.validation.valid, "{:#?}", report.validation.errors);
+        assert_eq!(
+            class_ids(&report, ClaimabilityClassification::Claimable),
+            vec!["bd-rch"]
+        );
+        assert_eq!(
+            report
+                .rch_capacity_preflight
+                .as_ref()
+                .map(|summary| summary.admissible_worker_count),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn no_admissible_workers_blocks_only_rch_dependent_ready_rows() {
+        let mut tracker = base_report();
+        tracker.source_aware_ready_rows = vec![
+            rch_work_row("bd-rch", "RCH-dependent local task"),
+            work_row("bd-local", "Non-RCH local task"),
+        ];
+        tracker.source_aware_queue_state =
+            queue_state("ready", vec!["bd-rch".to_owned(), "bd-local".to_owned()]);
+        let preflight = rch_preflight_report("no_admissible_workers", 0, "local_fallback_rejected");
+        let validation = validate_rch_capacity_preflight_report(&preflight, "preflight.json");
+
+        let report = build_claimability_plan_report(
+            &config(),
+            &tracker,
+            None,
+            None,
+            Some(rch_preflight_input(&preflight, &validation)),
+        );
+
+        assert!(report.validation.valid, "{:#?}", report.validation.errors);
+        assert_eq!(
+            class_ids(
+                &report,
+                ClaimabilityClassification::InfrastructureBlockedRchCapacity
+            ),
+            vec!["bd-rch"]
+        );
+        assert_eq!(
+            class_ids(&report, ClaimabilityClassification::Claimable),
+            vec!["bd-local"]
+        );
+        let row = report.rows.iter().find(|row| row.id == "bd-rch").unwrap();
+        assert!(
+            row.reason
+                .contains("capacity_verdict=no_admissible_workers")
+        );
+        assert!(
+            row.reason
+                .contains("probe_raw_log=artifacts/e2e/rch/preflight.raw.log")
+        );
+        assert!(
+            row.next_safe_actions
+                .iter()
+                .any(|action| { action.contains("RCH_LOCAL_FALLBACK_REJECTED") })
+        );
+    }
+
+    #[test]
+    fn local_fallback_rejection_blocks_rch_dependent_rows_even_with_capacity() {
+        let mut tracker = base_report();
+        tracker.source_aware_ready_rows = vec![rch_work_row("bd-rch", "RCH-dependent local task")];
+        tracker.source_aware_queue_state = queue_state("ready", vec!["bd-rch".to_owned()]);
+        let preflight = rch_preflight_report(
+            "admissible_capacity_available",
+            2,
+            "local_fallback_rejected",
+        );
+        let validation = validate_rch_capacity_preflight_report(&preflight, "preflight.json");
+
+        let report = build_claimability_plan_report(
+            &config(),
+            &tracker,
+            None,
+            None,
+            Some(rch_preflight_input(&preflight, &validation)),
+        );
+
+        assert!(report.validation.valid, "{:#?}", report.validation.errors);
+        assert_eq!(
+            class_ids(
+                &report,
+                ClaimabilityClassification::InfrastructureBlockedRchCapacity
+            ),
+            vec!["bd-rch"]
+        );
+        assert_eq!(
+            report
+                .rch_capacity_preflight
+                .as_ref()
+                .and_then(|summary| summary.rejected_fallback_marker.as_deref()),
+            Some("RCH_LOCAL_FALLBACK_REJECTED")
+        );
     }
 
     #[test]
@@ -1609,7 +2060,7 @@ mod tests {
         }];
         tracker.source_aware_queue_state = queue_state("permission_gated", Vec::new());
 
-        let report = build_claimability_plan_report(&config(), &tracker, None, None);
+        let report = build_claimability_plan_report(&config(), &tracker, None, None, None);
 
         assert_eq!(
             class_ids(&report, ClaimabilityClassification::PermissionGated),
@@ -1618,6 +2069,46 @@ mod tests {
         let row = report.rows.iter().find(|row| row.id == "bd-rchk3").unwrap();
         assert!(row.permission_gate.is_some());
         assert!(row.next_safe_actions[0].contains("request exact ACK"));
+    }
+
+    #[test]
+    fn permission_gated_rows_keep_precedence_over_rch_capacity_blocks() {
+        let mut tracker = base_report();
+        tracker.permission_gated_rows = vec![TrackerPermissionGatedRow {
+            id: "bd-rchk3".to_owned(),
+            title: "Run permissioned xfstests through RCH".to_owned(),
+            status: "open".to_owned(),
+            priority: Some(1),
+            issue_type: Some("task".to_owned()),
+            source_repo: Some(".".to_owned()),
+            assignee: None,
+            blocked_by: Vec::new(),
+            permission_gate: permission_gate(),
+        }];
+        tracker.source_aware_queue_state = queue_state("permission_gated", Vec::new());
+        let preflight = rch_preflight_report("no_admissible_workers", 0, "local_fallback_rejected");
+        let validation = validate_rch_capacity_preflight_report(&preflight, "preflight.json");
+
+        let report = build_claimability_plan_report(
+            &config(),
+            &tracker,
+            None,
+            None,
+            Some(rch_preflight_input(&preflight, &validation)),
+        );
+
+        assert!(report.validation.valid, "{:#?}", report.validation.errors);
+        assert_eq!(
+            class_ids(&report, ClaimabilityClassification::PermissionGated),
+            vec!["bd-rchk3"]
+        );
+        assert!(
+            class_ids(
+                &report,
+                ClaimabilityClassification::InfrastructureBlockedRchCapacity
+            )
+            .is_empty()
+        );
     }
 
     #[test]
@@ -1643,7 +2134,7 @@ mod tests {
         tracker.blocked_local_rows = vec![blocked];
         tracker.source_aware_queue_state = queue_state("blocked_or_permission_gated", Vec::new());
 
-        let report = build_claimability_plan_report(&config(), &tracker, None, None);
+        let report = build_claimability_plan_report(&config(), &tracker, None, None, None);
 
         assert!(report.validation.valid, "{:#?}", report.validation.errors);
         assert_eq!(
@@ -1730,7 +2221,8 @@ mod tests {
             errors: Vec::new(),
         };
 
-        let report = build_claimability_plan_report(&config(), &tracker, Some(&reservation), None);
+        let report =
+            build_claimability_plan_report(&config(), &tracker, Some(&reservation), None, None);
 
         assert_eq!(
             class_ids(&report, ClaimabilityClassification::ReservedByPeer),
@@ -1765,7 +2257,8 @@ mod tests {
             )],
         );
 
-        let report = build_claimability_plan_report(&config(), &tracker, Some(&reservation), None);
+        let report =
+            build_claimability_plan_report(&config(), &tracker, Some(&reservation), None, None);
         let allocation = &report.reservation_allocation_plan;
 
         assert_eq!(allocation.status, "safe_disjoint_suggestions");
@@ -1805,8 +2298,13 @@ mod tests {
             )],
         );
 
-        let report =
-            build_claimability_plan_report(&config(), &base_report(), Some(&reservation), None);
+        let report = build_claimability_plan_report(
+            &config(),
+            &base_report(),
+            Some(&reservation),
+            None,
+            None,
+        );
         let allocation = &report.reservation_allocation_plan;
 
         assert_eq!(allocation.status, "blocked_broad_peer_reservation");
@@ -1851,8 +2349,13 @@ mod tests {
             ],
         );
 
-        let report =
-            build_claimability_plan_report(&config(), &base_report(), Some(&reservation), None);
+        let report = build_claimability_plan_report(
+            &config(),
+            &base_report(),
+            Some(&reservation),
+            None,
+            None,
+        );
 
         assert_eq!(report.reservation_snapshot.active_self_reservation_count, 1);
         assert_eq!(
@@ -1896,8 +2399,13 @@ mod tests {
             )],
         );
 
-        let report =
-            build_claimability_plan_report(&config(), &base_report(), Some(&reservation), None);
+        let report = build_claimability_plan_report(
+            &config(),
+            &base_report(),
+            Some(&reservation),
+            None,
+            None,
+        );
 
         assert_eq!(report.reservation_snapshot.active_self_reservation_count, 0);
         assert!(
@@ -1927,8 +2435,13 @@ mod tests {
         );
         reservation.source_freshness = "stale".to_owned();
 
-        let report =
-            build_claimability_plan_report(&config(), &base_report(), Some(&reservation), None);
+        let report = build_claimability_plan_report(
+            &config(),
+            &base_report(),
+            Some(&reservation),
+            None,
+            None,
+        );
 
         assert_eq!(report.reservation_snapshot.active_self_reservation_count, 1);
         assert_eq!(
@@ -1970,8 +2483,13 @@ mod tests {
             ],
         );
 
-        let report =
-            build_claimability_plan_report(&config(), &base_report(), Some(&reservation), None);
+        let report = build_claimability_plan_report(
+            &config(),
+            &base_report(),
+            Some(&reservation),
+            None,
+            None,
+        );
 
         assert_eq!(report.reservation_snapshot.active_peer_conflict_count, 1);
         assert_eq!(report.reservation_snapshot.active_self_reservation_count, 1);
@@ -2003,7 +2521,8 @@ mod tests {
             vec![work_row("bd-ready", "Ready with live reservation snapshot")];
         tracker.source_aware_queue_state = queue_state("ready", vec!["bd-ready".to_owned()]);
 
-        let report = build_claimability_plan_report(&config(), &tracker, Some(&reservation), None);
+        let report =
+            build_claimability_plan_report(&config(), &tracker, Some(&reservation), None, None);
 
         assert!(report.validation.valid);
         assert_eq!(report.reservation_snapshot.active_peer_conflict_count, 1);
@@ -2050,8 +2569,13 @@ mod tests {
             )],
         );
 
-        let report =
-            build_claimability_plan_report(&config(), &base_report(), Some(&reservation), None);
+        let report = build_claimability_plan_report(
+            &config(),
+            &base_report(),
+            Some(&reservation),
+            None,
+            None,
+        );
 
         assert_eq!(
             report.reservation_allocation_plan.status,
@@ -2086,7 +2610,7 @@ mod tests {
         }];
         tracker.source_aware_queue_state = queue_state("stale_in_progress", Vec::new());
 
-        let report = build_claimability_plan_report(&config(), &tracker, None, None);
+        let report = build_claimability_plan_report(&config(), &tracker, None, None, None);
 
         assert_eq!(
             class_ids(
@@ -2131,7 +2655,7 @@ mod tests {
         let mut cfg = config();
         cfg.bv_report_path = Some("bv_robot_next.json".to_owned());
 
-        let report = build_claimability_plan_report(&cfg, &tracker, None, Some(&bv));
+        let report = build_claimability_plan_report(&cfg, &tracker, None, Some(&bv), None);
 
         assert_eq!(
             class_ids(&report, ClaimabilityClassification::ForeignExcluded),
@@ -2149,6 +2673,85 @@ mod tests {
                 .iter()
                 .any(|action| { action.contains("do not claim raw bv parent epics") })
         );
+    }
+
+    #[test]
+    fn foreign_rows_remain_owner_handoff_under_blocked_rch_capacity() {
+        let mut tracker = base_report();
+        tracker.foreign_open_samples = vec![TrackerIssueSample {
+            id: "br-r37".to_owned(),
+            title: "Foreign tracker row requiring RCH".to_owned(),
+            status: "open".to_owned(),
+            priority: Some(1),
+            issue_type: Some("task".to_owned()),
+            source_repo: Some("../franken_networkx".to_owned()),
+        }];
+        tracker.source_aware_queue_state = queue_state("foreign_open", Vec::new());
+        let preflight = rch_preflight_report("no_admissible_workers", 0, "local_fallback_rejected");
+        let validation = validate_rch_capacity_preflight_report(&preflight, "preflight.json");
+
+        let report = build_claimability_plan_report(
+            &config(),
+            &tracker,
+            None,
+            None,
+            Some(rch_preflight_input(&preflight, &validation)),
+        );
+
+        assert!(report.validation.valid, "{:#?}", report.validation.errors);
+        assert_eq!(
+            class_ids(&report, ClaimabilityClassification::ForeignExcluded),
+            vec!["br-r37"]
+        );
+        assert!(
+            class_ids(
+                &report,
+                ClaimabilityClassification::InfrastructureBlockedRchCapacity
+            )
+            .is_empty()
+        );
+        assert!(report.rows[0].owner_handoff_required);
+    }
+
+    fn rch_blocked_guidance_report() -> ClaimabilityPlanReport {
+        let mut tracker = base_report();
+        tracker.source_aware_ready_rows = vec![
+            rch_work_row("bd-rch", "RCH-dependent local task"),
+            work_row("bd-local", "Non-RCH local task"),
+        ];
+        tracker.source_aware_queue_state =
+            queue_state("ready", vec!["bd-rch".to_owned(), "bd-local".to_owned()]);
+        let preflight = rch_preflight_report("no_admissible_workers", 0, "local_fallback_rejected");
+        let validation = validate_rch_capacity_preflight_report(&preflight, "preflight.json");
+        let mut cfg = config();
+        cfg.rch_capacity_preflight_report_path = Some("preflight.json".to_owned());
+
+        build_claimability_plan_report(
+            &cfg,
+            &tracker,
+            None,
+            None,
+            Some(rch_preflight_input(&preflight, &validation)),
+        )
+    }
+
+    #[test]
+    fn render_claimability_plan_markdown_rch_blocked_snapshot() {
+        let report = rch_blocked_guidance_report();
+        let markdown = render_claimability_plan_markdown(&report);
+
+        insta::assert_snapshot!("render_claimability_plan_markdown_rch_blocked", markdown);
+    }
+
+    #[test]
+    fn claimability_plan_rch_blocked_report_json_shape() -> Result<()> {
+        let report = rch_blocked_guidance_report();
+        let json = serde_json::to_string_pretty(&report)?;
+
+        insta::assert_snapshot!("claimability_plan_rch_blocked_report_json_shape", json);
+        let parsed: ClaimabilityPlanReport = serde_json::from_str(&json)?;
+        assert_eq!(parsed, report);
+        Ok(())
     }
 
     #[test]
