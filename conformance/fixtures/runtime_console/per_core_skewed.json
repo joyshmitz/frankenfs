@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "report_id": "runtime_console_report",
+  "operation_id": "runtime-console-per-core-20260519T090000Z",
+  "scenario_id": "cli_mount_runtime_per_core_rw",
+  "runtime_mode": "per_core",
+  "read_write": true,
+  "worker_count": 4,
+  "started_at": "2026-05-19T09:00:00Z",
+  "shutdown_at": "2026-05-19T09:15:00Z",
+  "counters": {
+    "requests_total": 1000,
+    "requests_read": 0,
+    "requests_write": 0,
+    "requests_metadata": 1000,
+    "bytes_read": 8388608,
+    "bytes_written": 2097152,
+    "errors_total": 4,
+    "throttled_requests": 40,
+    "shed_requests": 8
+  },
+  "backpressure_decisions": {
+    "pass": 952,
+    "throttle": 40,
+    "shed": 8,
+    "emergency": 0,
+    "no_signal": 0
+  },
+  "degradation_level": "throttling",
+  "per_core_distribution": {
+    "rows": [
+      { "core_id": 0, "request_count": 400, "cache_hits": 280, "cache_misses": 90 },
+      { "core_id": 1, "request_count": 300, "cache_hits": 200, "cache_misses": 70 },
+      { "core_id": 2, "request_count": 200, "cache_hits": 140, "cache_misses": 40 },
+      { "core_id": 3, "request_count": 100, "cache_hits": 60, "cache_misses": 30 }
+    ],
+    "imbalance_ratio": 4.0
+  },
+  "adaptive_runtime_manifest_ref": {
+    "manifest_path": "artifacts/adaptive-runtime/runner/runner_manifest.json",
+    "report_id": "adaptive_runtime_runner_report",
+    "runtime_controls_accepted": false
+  },
+  "artifact_paths": [
+    "artifacts/runtime-console/per_core_skewed.json",
+    "artifacts/runtime-console/per_core_skewed.md"
+  ],
+  "cleanup_status": "clean",
+  "reproduction_command": "ffs mount image.img /mnt --runtime-mode per-core --read-write --console --console-json artifacts/runtime-console/per_core_skewed.json --console-summary artifacts/runtime-console/per_core_skewed.md",
+  "product_evidence_claim": "none",
+  "release_gate_effect": "operational_observability_only",
+  "claim_state": {
+    "swarm_responsiveness": "not_claimed",
+    "adaptive_runtime": "not_claimed"
+  },
+  "capture_bounds": {
+    "host_paths_redacted": true,
+    "mountpoints_redacted": true,
+    "operator_env_redacted": true,
+    "max_log_bytes": 1048576,
+    "snapshot_count": 1,
+    "interval_millis": 1000
+  }
+}

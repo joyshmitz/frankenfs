@@ -1,0 +1,55 @@
+{
+  "schema_version": 1,
+  "report_id": "runtime_console_report",
+  "operation_id": "runtime-console-oversized-20260519T120000Z",
+  "scenario_id": "cli_mount_runtime_managed_ro",
+  "runtime_mode": "managed",
+  "read_write": false,
+  "worker_count": 1,
+  "started_at": "2026-05-19T12:00:00Z",
+  "shutdown_at": "2026-05-19T12:20:00Z",
+  "counters": {
+    "requests_total": 500,
+    "requests_read": 0,
+    "requests_write": 0,
+    "requests_metadata": 500,
+    "bytes_read": 2097152,
+    "bytes_written": 0,
+    "errors_total": 1,
+    "throttled_requests": 0,
+    "shed_requests": 0
+  },
+  "backpressure_decisions": {
+    "pass": 500,
+    "throttle": 0,
+    "shed": 0,
+    "emergency": 0,
+    "no_signal": 0
+  },
+  "degradation_level": "normal",
+  "per_core_distribution": {
+    "rows": [
+      { "core_id": 0, "request_count": 500, "cache_hits": 380, "cache_misses": 90 }
+    ],
+    "imbalance_ratio": 1.0
+  },
+  "artifact_paths": [
+    "artifacts/runtime-console/oversized_capture.json"
+  ],
+  "cleanup_status": "clean",
+  "reproduction_command": "ffs mount image.img /mnt --runtime-mode managed --console",
+  "product_evidence_claim": "none",
+  "release_gate_effect": "operational_observability_only",
+  "claim_state": {
+    "swarm_responsiveness": "not_claimed",
+    "adaptive_runtime": "not_claimed"
+  },
+  "capture_bounds": {
+    "host_paths_redacted": true,
+    "mountpoints_redacted": true,
+    "operator_env_redacted": true,
+    "max_log_bytes": 99999999,
+    "snapshot_count": 9999,
+    "interval_millis": 999
+  }
+}

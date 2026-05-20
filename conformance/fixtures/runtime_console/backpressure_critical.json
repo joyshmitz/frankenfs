@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "report_id": "runtime_console_report",
+  "operation_id": "runtime-console-critical-20260519T100000Z",
+  "scenario_id": "cli_mount_runtime_per_core_rw",
+  "runtime_mode": "per_core",
+  "read_write": true,
+  "worker_count": 2,
+  "started_at": "2026-05-19T10:00:00Z",
+  "shutdown_at": "2026-05-19T10:08:00Z",
+  "counters": {
+    "requests_total": 600,
+    "requests_read": 0,
+    "requests_write": 0,
+    "requests_metadata": 600,
+    "bytes_read": 1048576,
+    "bytes_written": 524288,
+    "errors_total": 30,
+    "throttled_requests": 150,
+    "shed_requests": 200
+  },
+  "backpressure_decisions": {
+    "pass": 160,
+    "throttle": 150,
+    "shed": 200,
+    "emergency": 90,
+    "no_signal": 0
+  },
+  "degradation_level": "emergency",
+  "per_core_distribution": {
+    "rows": [
+      { "core_id": 0, "request_count": 350, "cache_hits": 200, "cache_misses": 100 },
+      { "core_id": 1, "request_count": 250, "cache_hits": 140, "cache_misses": 80 }
+    ],
+    "imbalance_ratio": 1.4
+  },
+  "artifact_paths": [
+    "artifacts/runtime-console/backpressure_critical.json"
+  ],
+  "cleanup_status": "preserved_artifacts",
+  "reproduction_command": "ffs mount image.img /mnt --runtime-mode per-core --read-write --console --console-json artifacts/runtime-console/backpressure_critical.json",
+  "product_evidence_claim": "none",
+  "release_gate_effect": "operational_observability_only",
+  "claim_state": {
+    "swarm_responsiveness": "not_claimed",
+    "adaptive_runtime": "not_claimed"
+  },
+  "capture_bounds": {
+    "host_paths_redacted": true,
+    "mountpoints_redacted": true,
+    "operator_env_redacted": true,
+    "max_log_bytes": 1048576,
+    "snapshot_count": 1,
+    "interval_millis": 1000
+  }
+}

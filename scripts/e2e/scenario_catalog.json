@@ -8172,6 +8172,76 @@
           "evidence": "SCENARIO_RESULT|scenario_id=crash_replay_refinement_unit_tests|outcome=PASS"
         }
       ]
+    },
+    {
+      "suite_id": "ffs_runtime_console",
+      "script": "scripts/e2e/ffs_runtime_console_e2e.sh",
+      "required_categories": [
+        "happy",
+        "error"
+      ],
+      "scenarios": [
+        {
+          "id": "runtime_console_managed_clean_shutdown",
+          "category": "happy",
+          "status": "active",
+          "evidence": "runtime_console_managed_clean_shutdown"
+        },
+        {
+          "id": "runtime_console_per_core_skewed_distribution",
+          "category": "happy",
+          "status": "active",
+          "evidence": "runtime_console_per_core_skewed_distribution"
+        },
+        {
+          "id": "runtime_console_backpressure_critical_shed",
+          "category": "degradation",
+          "status": "active",
+          "evidence": "runtime_console_backpressure_critical_shed"
+        },
+        {
+          "id": "runtime_console_malformed_advisory_promotion",
+          "category": "error",
+          "status": "active",
+          "evidence": "runtime_console_malformed_advisory_promotion"
+        },
+        {
+          "id": "runtime_console_stale_timestamp_refusal",
+          "category": "error",
+          "status": "active",
+          "evidence": "runtime_console_stale_timestamp_refusal"
+        },
+        {
+          "id": "runtime_console_future_timestamp_refusal",
+          "category": "error",
+          "status": "active",
+          "evidence": "runtime_console_future_timestamp_refusal"
+        },
+        {
+          "id": "runtime_console_oversized_output_refusal",
+          "category": "error",
+          "status": "active",
+          "evidence": "runtime_console_oversized_output_refusal"
+        },
+        {
+          "id": "runtime_console_missing_report_refusal",
+          "category": "error",
+          "status": "active",
+          "evidence": "runtime_console_missing_report_refusal"
+        },
+        {
+          "id": "runtime_console_self_check_catches_corruption",
+          "category": "error",
+          "status": "active",
+          "evidence": "runtime_console_self_check_catches_corruption"
+        },
+        {
+          "id": "runtime_console_self_check_missing_report",
+          "category": "error",
+          "status": "active",
+          "evidence": "runtime_console_self_check_missing_report"
+        }
+      ]
     }
   ],
   "gate_minimums": [

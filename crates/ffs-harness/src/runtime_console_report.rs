@@ -903,6 +903,268 @@ fn current_epoch_days() -> Option<u32> {
     u32::try_from(total_days).ok()
 }
 
+// ── Console snapshot builder ────────────────────────────────────────────────
+//
+// The builder is the single normalization point that turns a managed or
+// per-core mount's runtime observations into the `RuntimeConsoleReport`
+// contract. It does not invent a parallel metrics system: callers gather raw
+// counters from existing runtime signals (`MetricsSnapshot`, per-core
+// `AggregateMetrics`, `BackpressureGate`/`DegradationFsm`, adaptive-runtime
+// shutdown summaries) and hand them to the builder as a `RuntimeConsoleObservation`.
+
+/// Per-core observation captured from the runtime dispatcher.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeConsoleCoreObservation {
+    pub core_id: u32,
+    pub request_count: u64,
+    pub cache_hits: u64,
+    pub cache_misses: u64,
+}
+
+/// Backpressure decision tallies captured from the runtime gate.
+///
+/// These are effect counts: requests delayed (`throttled`), rejected (`shed`),
+/// and rejected while the degradation FSM was in its emergency band
+/// (`emergency`). They must not exceed `requests_total`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RuntimeConsoleBackpressureObservation {
+    pub throttled: u64,
+    pub shed: u64,
+    pub emergency: u64,
+}
+
+/// Capture cadence the operator requested for the console artifact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RuntimeConsoleCaptureRequest {
+    pub snapshot_count: u32,
+    pub interval_millis: u64,
+    pub max_log_bytes: u64,
+}
+
+impl RuntimeConsoleCaptureRequest {
+    /// A single bounded shutdown snapshot with conservative defaults.
+    #[must_use]
+    pub const fn single_shutdown_snapshot() -> Self {
+        Self {
+            snapshot_count: 1,
+            interval_millis: RUNTIME_CONSOLE_MIN_INTERVAL_MILLIS,
+            max_log_bytes: 1_048_576,
+        }
+    }
+}
+
+/// Normalized runtime observation captured at mount shutdown.
+///
+/// `requests_read`, `requests_write`, and `requests_metadata` must sum to
+/// `requests_total`. Callers that cannot tag FUSE op classes should use
+/// [`RuntimeConsoleObservation::with_aggregate_requests`], which records the
+/// whole dispatch count under `requests_metadata`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeConsoleObservation {
+    pub operation_id: String,
+    pub scenario_id: String,
+    pub runtime_mode: RuntimeConsoleMode,
+    pub read_write: bool,
+    pub worker_count: u32,
+    pub started_at: String,
+    pub shutdown_at: String,
+    pub requests_total: u64,
+    pub requests_read: u64,
+    pub requests_write: u64,
+    pub requests_metadata: u64,
+    pub bytes_read: u64,
+    pub bytes_written: u64,
+    pub errors_total: u64,
+    pub backpressure: RuntimeConsoleBackpressureObservation,
+    pub degradation_level: RuntimeConsoleDegradationLevel,
+    pub per_core: Vec<RuntimeConsoleCoreObservation>,
+    pub adaptive_runtime_manifest: Option<RuntimeConsoleAdaptiveRuntimeManifestRef>,
+    pub artifact_paths: Vec<String>,
+    pub cleanup_status: RuntimeConsoleCleanupStatus,
+    pub reproduction_command: String,
+    pub capture: RuntimeConsoleCaptureRequest,
+}
+
+impl RuntimeConsoleObservation {
+    /// Record an aggregate dispatch count under `requests_metadata`.
+    ///
+    /// The managed and per-core FUSE runtimes count every dispatched request
+    /// without tagging it as read/write/metadata, so the honest mapping is to
+    /// surface the whole count under `requests_metadata` and leave the
+    /// finer-grained buckets at zero.
+    pub fn with_aggregate_requests(&mut self, requests_total: u64) -> &mut Self {
+        self.requests_total = requests_total;
+        self.requests_read = 0;
+        self.requests_write = 0;
+        self.requests_metadata = requests_total;
+        self
+    }
+}
+
+/// Build a `RuntimeConsoleReport` from a normalized runtime observation.
+///
+/// The builder fails closed on internally inconsistent observations (request
+/// classes that do not sum, backpressure effect counts larger than the request
+/// total, a worker/per-core-row mismatch). It does not refuse to produce a
+/// report for a degraded shutdown: `cleanup_status` carries that signal so a
+/// partial run still emits classified evidence instead of being dropped.
+pub fn build_runtime_console_report(
+    observation: &RuntimeConsoleObservation,
+) -> Result<RuntimeConsoleReport> {
+    let classified = observation
+        .requests_read
+        .saturating_add(observation.requests_write)
+        .saturating_add(observation.requests_metadata);
+    if classified != observation.requests_total {
+        bail!(
+            "runtime console observation: requests_read+write+metadata ({classified}) \
+             must equal requests_total ({})",
+            observation.requests_total
+        );
+    }
+    if !observation.read_write && (observation.requests_write > 0 || observation.bytes_written > 0)
+    {
+        bail!("runtime console observation: read-only mount cannot record write activity");
+    }
+
+    let decided = observation
+        .backpressure
+        .throttled
+        .saturating_add(observation.backpressure.shed)
+        .saturating_add(observation.backpressure.emergency);
+    if decided > observation.requests_total {
+        bail!(
+            "runtime console observation: backpressure decisions ({decided}) \
+             exceed requests_total ({})",
+            observation.requests_total
+        );
+    }
+
+    let rows = build_per_core_rows(observation)?;
+    let imbalance_ratio = compute_imbalance_ratio(&rows);
+
+    let backpressure_decisions = RuntimeConsoleBackpressureDecisionCounts {
+        pass: observation.requests_total.saturating_sub(decided),
+        throttle: observation.backpressure.throttled,
+        shed: observation.backpressure.shed,
+        emergency: observation.backpressure.emergency,
+        no_signal: 0,
+    };
+
+    let report = RuntimeConsoleReport {
+        schema_version: RUNTIME_CONSOLE_REPORT_SCHEMA_VERSION,
+        report_id: RUNTIME_CONSOLE_REPORT_ID.to_owned(),
+        operation_id: observation.operation_id.clone(),
+        scenario_id: observation.scenario_id.clone(),
+        runtime_mode: observation.runtime_mode,
+        read_write: observation.read_write,
+        worker_count: observation.worker_count,
+        started_at: observation.started_at.clone(),
+        shutdown_at: observation.shutdown_at.clone(),
+        counters: RuntimeConsoleCounters {
+            requests_total: observation.requests_total,
+            requests_read: observation.requests_read,
+            requests_write: observation.requests_write,
+            requests_metadata: observation.requests_metadata,
+            bytes_read: observation.bytes_read,
+            bytes_written: observation.bytes_written,
+            errors_total: observation.errors_total,
+            throttled_requests: observation.backpressure.throttled,
+            shed_requests: observation.backpressure.shed,
+        },
+        backpressure_decisions,
+        degradation_level: observation.degradation_level,
+        per_core_distribution: RuntimeConsolePerCoreDistribution {
+            rows,
+            imbalance_ratio,
+        },
+        adaptive_runtime_manifest_ref: observation.adaptive_runtime_manifest.clone(),
+        artifact_paths: observation.artifact_paths.clone(),
+        cleanup_status: observation.cleanup_status,
+        reproduction_command: observation.reproduction_command.clone(),
+        product_evidence_claim: RUNTIME_CONSOLE_PRODUCT_EVIDENCE_CLAIM.to_owned(),
+        release_gate_effect: RUNTIME_CONSOLE_RELEASE_GATE_EFFECT.to_owned(),
+        claim_state: RuntimeConsoleClaimState {
+            swarm_responsiveness: RUNTIME_CONSOLE_SWARM_RESPONSIVENESS_CLAIM.to_owned(),
+            adaptive_runtime: RUNTIME_CONSOLE_ADAPTIVE_RUNTIME_CLAIM.to_owned(),
+        },
+        capture_bounds: RuntimeConsoleCaptureBounds {
+            host_paths_redacted: true,
+            mountpoints_redacted: true,
+            operator_env_redacted: true,
+            max_log_bytes: observation.capture.max_log_bytes,
+            snapshot_count: observation.capture.snapshot_count,
+            interval_millis: observation.capture.interval_millis,
+        },
+    };
+    Ok(report)
+}
+
+fn build_per_core_rows(
+    observation: &RuntimeConsoleObservation,
+) -> Result<Vec<RuntimeConsoleCoreDistribution>> {
+    match observation.runtime_mode {
+        RuntimeConsoleMode::Managed => {
+            if observation.worker_count != 1 {
+                bail!("runtime console observation: managed mode must report worker_count=1");
+            }
+            if !observation.per_core.is_empty() && observation.per_core.len() != 1 {
+                bail!("runtime console observation: managed mode accepts at most one per-core row");
+            }
+            let (cache_hits, cache_misses) = observation
+                .per_core
+                .first()
+                .map_or((0, 0), |row| (row.cache_hits, row.cache_misses));
+            Ok(vec![RuntimeConsoleCoreDistribution {
+                core_id: 0,
+                request_count: observation.requests_total,
+                cache_hits,
+                cache_misses,
+            }])
+        }
+        RuntimeConsoleMode::PerCore => {
+            if observation.per_core.is_empty() {
+                bail!("runtime console observation: per-core mode requires per-core rows");
+            }
+            let row_count = u32::try_from(observation.per_core.len()).unwrap_or(u32::MAX);
+            if row_count != observation.worker_count {
+                bail!(
+                    "runtime console observation: per-core rows ({row_count}) \
+                     must match worker_count ({})",
+                    observation.worker_count
+                );
+            }
+            Ok(observation
+                .per_core
+                .iter()
+                .map(|row| RuntimeConsoleCoreDistribution {
+                    core_id: row.core_id,
+                    request_count: row.request_count,
+                    cache_hits: row.cache_hits,
+                    cache_misses: row.cache_misses,
+                })
+                .collect())
+        }
+    }
+}
+
+fn compute_imbalance_ratio(rows: &[RuntimeConsoleCoreDistribution]) -> f64 {
+    let mut min_requests = u64::MAX;
+    let mut max_requests = 0_u64;
+    for row in rows {
+        min_requests = min_requests.min(row.request_count);
+        max_requests = max_requests.max(row.request_count);
+    }
+    if rows.is_empty() || min_requests == 0 || max_requests == 0 {
+        return 1.0;
+    }
+    // Report the true max/min ratio. The contract caps a *valid* report at
+    // RUNTIME_CONSOLE_MAX_IMBALANCE_RATIO; an observation skewed beyond that cap
+    // is surfaced honestly and the validator flags it rather than the builder
+    // silently clamping the imbalance into the representable band.
+    round_two_decimals(max_requests as f64 / min_requests as f64).max(1.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1229,5 +1491,238 @@ mod tests {
                 interval_millis: 5_000,
             },
         }
+    }
+
+    fn sample_observation() -> RuntimeConsoleObservation {
+        RuntimeConsoleObservation {
+            operation_id: "runtime-console-op-20260519T000000Z".to_owned(),
+            scenario_id: "cli_mount_runtime_per_core_rw".to_owned(),
+            runtime_mode: RuntimeConsoleMode::PerCore,
+            read_write: true,
+            worker_count: 3,
+            started_at: "2026-05-19T00:00:00Z".to_owned(),
+            shutdown_at: "2026-05-19T00:05:00Z".to_owned(),
+            requests_total: 900,
+            requests_read: 0,
+            requests_write: 0,
+            requests_metadata: 900,
+            bytes_read: 4_194_304,
+            bytes_written: 1_048_576,
+            errors_total: 3,
+            backpressure: RuntimeConsoleBackpressureObservation {
+                throttled: 30,
+                shed: 6,
+                emergency: 0,
+            },
+            degradation_level: RuntimeConsoleDegradationLevel::Throttling,
+            per_core: vec![
+                RuntimeConsoleCoreObservation {
+                    core_id: 0,
+                    request_count: 400,
+                    cache_hits: 300,
+                    cache_misses: 80,
+                },
+                RuntimeConsoleCoreObservation {
+                    core_id: 1,
+                    request_count: 300,
+                    cache_hits: 220,
+                    cache_misses: 60,
+                },
+                RuntimeConsoleCoreObservation {
+                    core_id: 2,
+                    request_count: 200,
+                    cache_hits: 140,
+                    cache_misses: 40,
+                },
+            ],
+            adaptive_runtime_manifest: None,
+            artifact_paths: vec!["artifacts/runtime-console/console_report.json".to_owned()],
+            cleanup_status: RuntimeConsoleCleanupStatus::Clean,
+            reproduction_command: "ffs mount image.img /mnt --runtime-mode per-core --console"
+                .to_owned(),
+            capture: RuntimeConsoleCaptureRequest::single_shutdown_snapshot(),
+        }
+    }
+
+    #[test]
+    fn build_per_core_snapshot_is_contract_valid() -> Result<()> {
+        let report = build_runtime_console_report(&sample_observation())?;
+        let validation =
+            validate_runtime_console_report_with_config(&report, &fixture_validation_config());
+        assert!(validation.valid, "{:?}", validation.errors);
+        assert_eq!(report.per_core_distribution.rows.len(), 3);
+        // imbalance ratio is max/min request counts (400 / 200).
+        assert!((report.per_core_distribution.imbalance_ratio - 2.0).abs() < FLOAT_TOLERANCE);
+        assert_eq!(
+            report.backpressure_decisions.total(),
+            report.counters.requests_total
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn build_managed_snapshot_collapses_to_single_worker() -> Result<()> {
+        let mut observation = sample_observation();
+        observation.runtime_mode = RuntimeConsoleMode::Managed;
+        observation.worker_count = 1;
+        observation.scenario_id = "cli_mount_runtime_managed_rw".to_owned();
+        observation.per_core = vec![RuntimeConsoleCoreObservation {
+            core_id: 0,
+            request_count: 0,
+            cache_hits: 540,
+            cache_misses: 180,
+        }];
+
+        let report = build_runtime_console_report(&observation)?;
+        let validation =
+            validate_runtime_console_report_with_config(&report, &fixture_validation_config());
+        assert!(validation.valid, "{:?}", validation.errors);
+        assert_eq!(report.per_core_distribution.rows.len(), 1);
+        assert_eq!(report.per_core_distribution.rows[0].request_count, 900);
+        assert!((report.per_core_distribution.imbalance_ratio - 1.0).abs() < FLOAT_TOLERANCE);
+        Ok(())
+    }
+
+    #[test]
+    fn build_disabled_console_is_a_no_op_for_the_caller() {
+        // A disabled console emits nothing: the builder is simply not invoked.
+        // The contract still rejects an empty per-core observation so a caller
+        // cannot accidentally persist a hollow artifact.
+        let mut observation = sample_observation();
+        observation.per_core.clear();
+        let error = build_runtime_console_report(&observation)
+            .expect_err("per-core mode requires per-core rows");
+        assert!(error.to_string().contains("per-core rows"), "{error}");
+    }
+
+    #[test]
+    fn build_partial_shutdown_emits_classified_evidence() -> Result<()> {
+        let mut observation = sample_observation();
+        observation.cleanup_status = RuntimeConsoleCleanupStatus::PreservedArtifacts;
+        observation.errors_total = 12;
+        let report = build_runtime_console_report(&observation)?;
+        assert_eq!(
+            report.cleanup_status,
+            RuntimeConsoleCleanupStatus::PreservedArtifacts
+        );
+        assert_eq!(report.counters.errors_total, 12);
+        let validation =
+            validate_runtime_console_report_with_config(&report, &fixture_validation_config());
+        assert!(validation.valid, "{:?}", validation.errors);
+        Ok(())
+    }
+
+    #[test]
+    fn build_without_adaptive_manifest_omits_the_reference() -> Result<()> {
+        let observation = sample_observation();
+        assert!(observation.adaptive_runtime_manifest.is_none());
+        let report = build_runtime_console_report(&observation)?;
+        assert!(report.adaptive_runtime_manifest_ref.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn build_saturated_backpressure_snapshot_is_contract_valid() -> Result<()> {
+        let mut observation = sample_observation();
+        observation.degradation_level = RuntimeConsoleDegradationLevel::Emergency;
+        observation.backpressure = RuntimeConsoleBackpressureObservation {
+            throttled: 200,
+            shed: 150,
+            emergency: 90,
+        };
+        let report = build_runtime_console_report(&observation)?;
+        assert_eq!(
+            report.degradation_level,
+            RuntimeConsoleDegradationLevel::Emergency
+        );
+        assert_eq!(report.backpressure_decisions.throttle, 200);
+        assert_eq!(report.backpressure_decisions.shed, 150);
+        assert_eq!(report.backpressure_decisions.emergency, 90);
+        assert_eq!(
+            report.backpressure_decisions.pass,
+            900 - 200 - 150 - 90,
+            "pass decisions absorb the remaining requests"
+        );
+        let validation =
+            validate_runtime_console_report_with_config(&report, &fixture_validation_config());
+        assert!(validation.valid, "{:?}", validation.errors);
+        Ok(())
+    }
+
+    #[test]
+    fn build_rejects_unbalanced_request_classes() {
+        let mut observation = sample_observation();
+        observation.requests_metadata = 800;
+        let error = build_runtime_console_report(&observation)
+            .expect_err("unbalanced request classes must fail closed");
+        assert!(error.to_string().contains("requests_total"), "{error}");
+    }
+
+    #[test]
+    fn build_rejects_backpressure_overflow() {
+        let mut observation = sample_observation();
+        observation.backpressure.shed = observation.requests_total;
+        observation.backpressure.throttled = 10;
+        let error = build_runtime_console_report(&observation)
+            .expect_err("backpressure totals above the request total must fail closed");
+        assert!(
+            error.to_string().contains("backpressure decisions"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn build_rejects_read_only_write_activity() {
+        let mut observation = sample_observation();
+        observation.read_write = false;
+        let error = build_runtime_console_report(&observation)
+            .expect_err("read-only console reports cannot record written bytes");
+        assert!(error.to_string().contains("read-only"), "{error}");
+    }
+
+    #[test]
+    fn build_rejects_worker_count_mismatch() {
+        let mut observation = sample_observation();
+        observation.worker_count = 5;
+        let error = build_runtime_console_report(&observation)
+            .expect_err("per-core rows must match worker_count");
+        assert!(error.to_string().contains("worker_count"), "{error}");
+    }
+
+    #[test]
+    fn per_core_request_sum_matches_aggregate_total() -> Result<()> {
+        // Regression guard: the per-core distribution must always re-sum to
+        // requests_total for any balanced or skewed fixture.
+        for skew in [[300, 300, 300], [700, 150, 50], [16, 100, 784]] {
+            let mut observation = sample_observation();
+            let total: u64 = skew.iter().sum();
+            observation.with_aggregate_requests(total);
+            observation.per_core = skew
+                .iter()
+                .enumerate()
+                .map(|(index, &count)| RuntimeConsoleCoreObservation {
+                    core_id: u32::try_from(index).unwrap(),
+                    request_count: count,
+                    cache_hits: count / 2,
+                    cache_misses: count / 4,
+                })
+                .collect();
+            observation.backpressure = RuntimeConsoleBackpressureObservation::default();
+            let report = build_runtime_console_report(&observation)?;
+            let sum: u64 = report
+                .per_core_distribution
+                .rows
+                .iter()
+                .map(|row| row.request_count)
+                .sum();
+            assert_eq!(
+                sum, total,
+                "per-core sum must match total for skew {skew:?}"
+            );
+            let validation =
+                validate_runtime_console_report_with_config(&report, &fixture_validation_config());
+            assert!(validation.valid, "skew {skew:?}: {:?}", validation.errors);
+        }
+        Ok(())
     }
 }

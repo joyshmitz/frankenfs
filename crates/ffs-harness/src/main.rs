@@ -249,6 +249,10 @@ use ffs_harness::{
         current_report_schema_inventory, fail_on_report_schema_inventory_errors,
         render_report_schema_inventory_markdown, validate_report_schema_inventory,
     },
+    runtime_console_report::{
+        RuntimeConsoleValidationConfig, fail_on_runtime_console_report_errors,
+        render_runtime_console_report_markdown, validate_runtime_console_report_json,
+    },
     scrub_repair_scheduler::{
         DEFAULT_SCRUB_REPAIR_SCHEDULER_MANIFEST, fail_on_scrub_repair_scheduler_errors,
         load_scrub_repair_scheduler_manifest, render_scrub_repair_scheduler_markdown,
@@ -599,6 +603,7 @@ fn run() -> Result<()> {
         Some("claimability-plan") => claimability_plan_cmd(&args[1..]),
         Some("rch-proof-ledger") => rch_proof_ledger_cmd(&args[1..]),
         Some("validate-rch-capacity-preflight") => validate_rch_capacity_preflight_cmd(&args[1..]),
+        Some("validate-runtime-console") => validate_runtime_console_cmd(&args[1..]),
         Some("validate-fuzz-smoke") => validate_fuzz_smoke_cmd(&args[1..]),
         Some("validate-proof-overhead-budget") => validate_proof_overhead_budget_cmd(&args[1..]),
         Some("adaptive-runtime-runner") => adaptive_runtime_runner_cmd(&args[1..]),
@@ -3282,6 +3287,123 @@ fn validate_rch_capacity_preflight_cmd(args: &[String]) -> Result<()> {
 fn print_rch_capacity_preflight_usage() {
     println!(
         "Usage: ffs-harness validate-rch-capacity-preflight --report FILE [--format json|markdown] [--out FILE] [--summary-out FILE]"
+    );
+}
+
+/// Non-permissioned validator for `runtime_console_report` JSON artifacts.
+///
+/// This is an operational observability validator. It checks the schema/safety
+/// contract of a console artifact and never promotes the artifact into product
+/// evidence. `--reference-timestamp` and `--max-age-days` keep fixture-driven
+/// validation deterministic; without them the current wall clock is used.
+fn validate_runtime_console_cmd(args: &[String]) -> Result<()> {
+    let mut report_path: Option<String> = None;
+    let mut out_path: Option<String> = None;
+    let mut summary_out_path: Option<String> = None;
+    let mut format = ReadinessReportFormat::Json;
+    let mut reference_timestamp: Option<String> = None;
+    let mut max_age_days: Option<u32> = None;
+    let mut i = 0;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "--report" => {
+                i += 1;
+                report_path = Some(args.get(i).context("--report requires a path")?.to_owned());
+            }
+            "--format" => {
+                i += 1;
+                format = parse_readiness_report_format(
+                    args.get(i).context("--format requires json or markdown")?,
+                )?;
+            }
+            "--out" => {
+                i += 1;
+                out_path = Some(args.get(i).context("--out requires a path")?.to_owned());
+            }
+            "--summary-out" => {
+                i += 1;
+                summary_out_path = Some(
+                    args.get(i)
+                        .context("--summary-out requires a path")?
+                        .to_owned(),
+                );
+            }
+            "--reference-timestamp" => {
+                i += 1;
+                reference_timestamp = Some(
+                    args.get(i)
+                        .context("--reference-timestamp requires an RFC3339 value")?
+                        .to_owned(),
+                );
+            }
+            "--max-age-days" => {
+                i += 1;
+                max_age_days = Some(
+                    args.get(i)
+                        .context("--max-age-days requires a value")?
+                        .parse()
+                        .context("--max-age-days must be a non-negative integer")?,
+                );
+            }
+            "--help" | "-h" => {
+                print_runtime_console_usage();
+                return Ok(());
+            }
+            other => bail!("unknown validate-runtime-console argument: {other}"),
+        }
+        i += 1;
+    }
+
+    let report_path = report_path.context("--report is required")?;
+    let json = fs::read_to_string(&report_path)
+        .with_context(|| format!("read runtime console report: {report_path}"))?;
+
+    let config = if let Some(timestamp) = reference_timestamp {
+        let reference_epoch_days =
+            parse_manifest_timestamp_epoch_days(&timestamp).with_context(|| {
+                format!("--reference-timestamp must be RFC3339-like: {timestamp}")
+            })?;
+        RuntimeConsoleValidationConfig {
+            reference_epoch_days: Some(reference_epoch_days),
+            max_age_days: max_age_days.or(Some(7)),
+        }
+    } else {
+        let mut config = RuntimeConsoleValidationConfig::with_current_reference();
+        if let Some(days) = max_age_days {
+            config.max_age_days = Some(days);
+        }
+        config
+    };
+
+    let validation = validate_runtime_console_report_json(&json, &config);
+    let markdown = render_runtime_console_report_markdown(&validation);
+    let output = match format {
+        ReadinessReportFormat::Json => serde_json::to_string_pretty(&validation)?,
+        ReadinessReportFormat::Markdown => markdown.clone(),
+    };
+
+    if let Some(path) = out_path {
+        write_text_file(Path::new(&path), &format!("{output}\n"))?;
+        println!(
+            "runtime console validation written: {path} valid={} mode={} cleanup={}",
+            validation.valid, validation.runtime_mode, validation.cleanup_status
+        );
+    } else {
+        println!("{output}");
+    }
+
+    if let Some(path) = summary_out_path {
+        write_text_file(Path::new(&path), &format!("{markdown}\n"))?;
+    }
+
+    fail_on_runtime_console_report_errors(&validation)
+}
+
+fn print_runtime_console_usage() {
+    println!(
+        "Usage: ffs-harness validate-runtime-console --report FILE [--format json|markdown] \
+         [--out FILE] [--summary-out FILE] [--reference-timestamp RFC3339] [--max-age-days N]"
     );
 }
 
@@ -9451,6 +9573,9 @@ fn print_usage_commands() {
     );
     println!(
         "  ffs-harness validate-rch-capacity-preflight --report FILE [--format json|markdown] [--out FILE] [--summary-out FILE]"
+    );
+    println!(
+        "  ffs-harness validate-runtime-console --report FILE [--format json|markdown] [--out FILE] [--summary-out FILE] [--reference-timestamp RFC3339] [--max-age-days N]"
     );
     println!(
         "  ffs-harness validate-remediation-catalog [--catalog FILE] [--format json|markdown] [--out FILE] [--summary-out FILE]"
