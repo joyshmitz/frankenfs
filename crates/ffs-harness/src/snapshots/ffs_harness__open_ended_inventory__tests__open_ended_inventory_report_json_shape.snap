@@ -3,7 +3,7 @@ source: crates/ffs-harness/src/open_ended_inventory.rs
 expression: "serde_json::to_string_pretty(&shape)?"
 ---
 {
-  "row_count": 14,
+  "row_count": 16,
   "proof_types": [
     "parser-unit",
     "mounted-e2e",
@@ -41,21 +41,21 @@ expression: "serde_json::to_string_pretty(&shape)?"
       "has_non_applicability_rationale": false
     },
     {
-      "id": "B1",
-      "source_location": "crates/ffs-dir/src/lib.rs; crates/ffs-harness/tests/ext4_dir_rec_len_kernel_reference.rs",
-      "required_proof_type": "golden-fixture",
+      "id": "A3",
+      "source_location": "fuzz/fuzz_targets/fuzz_verification_runner.rs; crates/ffs-harness/src/verification_runner.rs",
+      "required_proof_type": "corpus-seed",
       "decision": "artifact-covered",
-      "linked_bead_or_artifact": "crates/ffs-harness/tests/ext4_dir_rec_len_kernel_reference.rs::ext4_dir_rec_len_kernel_reference_coalesces_after_unlink",
-      "owner_status": "covered by kernel-reference harness",
+      "linked_bead_or_artifact": "bd-93wfn; fuzz/fuzz_targets/fuzz_verification_runner.rs; fuzz/corpus/fuzz_verification_runner/seed_valid_invalid_markers",
+      "owner_status": "covered by RCH compile, clippy, zero-run, and seed-corpus smoke for `fuzz_verification_runner`",
       "has_non_applicability_rationale": false
     },
     {
-      "id": "B2",
-      "source_location": "conformance/fixtures/ext4_inode_inline_data.json; conformance/fixtures/ext4_inode_inline_data_with_continuation.json; crates/ffs-harness/tests/kernel_reference.rs",
-      "required_proof_type": "golden-fixture",
+      "id": "A4",
+      "source_location": "fuzz/fuzz_targets/fuzz_rch_capacity_preflight.rs; crates/ffs-harness/src/rch_capacity_preflight.rs",
+      "required_proof_type": "corpus-seed",
       "decision": "artifact-covered",
-      "linked_bead_or_artifact": "crates/ffs-harness/tests/kernel_reference.rs::ext4_inline_data_continuation_kernel_reference",
-      "owner_status": "covered by kernel-reference harness",
+      "linked_bead_or_artifact": "bd-rchfz; fuzz/fuzz_targets/fuzz_rch_capacity_preflight.rs; fuzz/corpus/fuzz_rch_capacity_preflight/seed_no_admissible_local_fallback_rejected.json",
+      "owner_status": "covered by focused RCH fuzz target compile, clippy, zero-run, and seed-corpus smoke",
       "has_non_applicability_rationale": false
     }
   ]

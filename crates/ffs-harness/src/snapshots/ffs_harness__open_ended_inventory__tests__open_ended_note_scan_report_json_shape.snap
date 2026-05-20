@@ -42,10 +42,10 @@ expression: "serde_json::to_string_pretty(&shape)?"
       "source_path": "tests/open-ended-inventory/scanner_fixture_positive.md",
       "line_number": 11,
       "section_id": "real-notes-that-are-already-linked",
-      "matched_phrase": "more goldens",
+      "matched_phrase": "HACK",
       "decision": "already_linked",
-      "linked_bead_or_artifact": "bd-l7ov7",
-      "proof_type": "golden-fixture",
+      "linked_bead_or_artifact": "bd-mockscan",
+      "proof_type": "long-campaign",
       "required_log_field_count": 8,
       "required_artifact_count": 3
     },
@@ -53,10 +53,10 @@ expression: "serde_json::to_string_pretty(&shape)?"
       "source_path": "tests/open-ended-inventory/scanner_fixture_positive.md",
       "line_number": 12,
       "section_id": "real-notes-that-are-already-linked",
-      "matched_phrase": "known gaps",
+      "matched_phrase": "XXX",
       "decision": "already_linked",
-      "linked_bead_or_artifact": "bd-l7ov7",
-      "proof_type": "mounted-e2e",
+      "linked_bead_or_artifact": "bd-mockscan",
+      "proof_type": "long-campaign",
       "required_log_field_count": 8,
       "required_artifact_count": 3
     }
