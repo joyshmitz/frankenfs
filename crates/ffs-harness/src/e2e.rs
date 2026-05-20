@@ -2808,6 +2808,12 @@ mod tests {
             .collect::<BTreeSet<_>>();
         markers.insert("[RCH] local");
         markers.insert("exec called with non-compilation command");
+        // Capacity-preflight reference markers are guardrail markers emitted by
+        // `e2e_rch_capture` directly rather than remote-exit transcript classes,
+        // so — like `[RCH] local` above — they are part of the guardrail
+        // vocabulary without a dedicated `RCH_FIXTURE_MATRIX` transcript fixture.
+        markers.insert("RCH_CAPACITY_PREFLIGHT_REFERENCE");
+        markers.insert("RCH_CAPACITY_PREFLIGHT_REFERENCE_MISSING");
         markers
     }
 
