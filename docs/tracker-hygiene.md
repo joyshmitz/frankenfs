@@ -164,6 +164,22 @@ not authorize mutation by itself. Use it to contact the likely owner project and
 to record the exact rule any later move, removal, rewrite, or `project` backfill
 must satisfy.
 
+## Standing Reality-Check Cadence
+
+Run the source-aware tracker hygiene E2E at the start and close of each swarm
+tick, and before promoting any public `release-ready` or readiness wording:
+
+```bash
+./scripts/e2e/ffs_tracker_source_hygiene_e2e.sh
+```
+
+Any FrankenFS-local open row with `priority: 0` blocks release-ready/readiness
+claims until that row is closed or explicitly reprioritized with evidence.
+Foreign-looking P0 rows remain owner-handoff items, not FrankenFS release
+blockers. The Rust unit test `release_readiness_blocked_by_open_p0` and E2E
+scenario `tracker_source_hygiene_release_readiness_blocked_by_open_p0` enforce
+the local-P0 blocker contract.
+
 ## Serialized Report Coverage Gate
 
 When source-aware triage produces another missing JSON/report-shape bead, run
@@ -262,8 +278,10 @@ Include:
 - Confirmation that no mutation has happened yet
 
 Use `cc` sparingly. Message only agents likely to own the source project or the
-current tracker operation. If a file reservation exists for `.beads/issues.jsonl`,
-do not bypass it.
+current tracker operation. Agent Mail reservations on `.beads/issues.jsonl` are
+advisory for manual JSONL edits; do not reserve that file for routine tracker
+closeout, and do not block `br close` or `br sync --flush-only` on an advisory
+reservation.
 
 ## Advisory Reservation Allocation
 

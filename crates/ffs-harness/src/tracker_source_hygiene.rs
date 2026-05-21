@@ -748,6 +748,21 @@ pub fn fail_on_tracker_source_hygiene_errors(report: &TrackerSourceHygieneReport
     Ok(())
 }
 
+#[must_use]
+pub fn release_readiness_open_p0_ids(report: &TrackerSourceHygieneReport) -> Vec<String> {
+    report
+        .local_open_rows
+        .iter()
+        .filter(|row| row.priority == Some(0))
+        .map(|row| row.id.clone())
+        .collect()
+}
+
+#[must_use]
+pub fn release_readiness_blocked_by_open_p0(report: &TrackerSourceHygieneReport) -> bool {
+    !release_readiness_open_p0_ids(report).is_empty()
+}
+
 pub fn write_tracker_source_hygiene_local_graph_exports(
     config: &TrackerSourceHygieneConfig,
     report: &TrackerSourceHygieneReport,
@@ -3046,6 +3061,60 @@ mod tests {
         assert_eq!(
             report.source_aware_queue_state.claimable_ids,
             vec!["bd-fallback"]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn release_readiness_blocked_by_open_p0() -> Result<(), String> {
+        let issues = [
+            line(&serde_json::json!({
+                "id": "bd-p0-live",
+                "title": "P0 data-loss bug still open",
+                "status": "open",
+                "priority": 0,
+                "issue_type": "bug"
+            }))?,
+            line(&serde_json::json!({
+                "id": "bd-release-ready-claim",
+                "title": "publish release-ready readiness claim",
+                "description": "This row is only safe after every open P0 row is closed.",
+                "status": "open",
+                "priority": 2,
+                "issue_type": "docs"
+            }))?,
+            line(&serde_json::json!({
+                "id": "bd-p0-closed",
+                "title": "closed P0 should not block the release-ready gate",
+                "status": "closed",
+                "priority": 0,
+                "issue_type": "bug"
+            }))?,
+            line(&serde_json::json!({
+                "id": "frankenredis-p0",
+                "title": "foreign P0 belongs to another tracker",
+                "status": "open",
+                "priority": 0,
+                "issue_type": "bug"
+            }))?,
+        ]
+        .join("\n");
+
+        let report =
+            analyze_tracker_source_hygiene(&issues, &config()).map_err(|err| err.to_string())?;
+
+        assert!(super::release_readiness_blocked_by_open_p0(&report));
+        assert_eq!(
+            super::release_readiness_open_p0_ids(&report),
+            vec!["bd-p0-live"]
+        );
+        assert_eq!(report.foreign_open, 1);
+        assert!(
+            report
+                .source_aware_queue_state
+                .claimable_ids
+                .contains(&"bd-p0-live".to_owned()),
+            "P0 work can still be claimable while blocking public readiness"
         );
         Ok(())
     }

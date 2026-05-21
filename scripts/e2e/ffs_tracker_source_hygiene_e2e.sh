@@ -66,6 +66,9 @@ PERMISSION_ACK_SELF_CHECK=1
 PERMISSION_ACK_XFSTESTS_SELF_CHECK_LOG="${E2E_LOG_DIR}/tracker_source_hygiene_permission_ack_xfstests_self_check.log"
 PERMISSION_ACK_SWARM_FIXTURE="$E2E_TEMP_DIR/tracker_source_hygiene_permission_ack_swarm.jsonl"
 PERMISSION_ACK_SWARM_SELF_CHECK_LOG="${E2E_LOG_DIR}/tracker_source_hygiene_permission_ack_swarm_self_check.log"
+RELEASE_READY_P0_SELF_CHECK=1
+RELEASE_READY_P0_FIXTURE="$E2E_TEMP_DIR/tracker_source_hygiene_release_ready_p0.jsonl"
+RELEASE_READY_P0_SELF_CHECK_LOG="${E2E_LOG_DIR}/tracker_source_hygiene_release_ready_p0_self_check.log"
 
 case "${TRACKER_SOURCE_HYGIENE_STRICT:-0}" in
     1|true|TRUE|yes|YES)
@@ -96,6 +99,11 @@ esac
 case "${TRACKER_SOURCE_HYGIENE_PERMISSION_ACK_SELF_CHECK:-1}" in
     0|false|FALSE|no|NO)
         PERMISSION_ACK_SELF_CHECK=0
+        ;;
+esac
+case "${TRACKER_SOURCE_HYGIENE_RELEASE_READY_P0_SELF_CHECK:-1}" in
+    0|false|FALSE|no|NO)
+        RELEASE_READY_P0_SELF_CHECK=0
         ;;
 esac
 
@@ -1147,6 +1155,52 @@ JSONL
         fi
     else
         scenario_result "tracker_source_hygiene_permission_gated_blocked_self_check" "FAIL" "log=$PERMISSION_GATED_BLOCKED_SELF_CHECK_LOG"
+    fi
+fi
+
+if [[ "$RELEASE_READY_P0_SELF_CHECK" -eq 1 \
+    && -z "${TRACKER_SOURCE_HYGIENE_ISSUES:-}" \
+    && -z "$EXPECTED_GOLDEN" \
+    && "$STRICT_MODE" -eq 0 ]]; then
+    e2e_step "Release-ready P0 blocker self-check"
+    cat >"$RELEASE_READY_P0_FIXTURE" <<'JSONL'
+{"id":"bd-p0-live","title":"P0 data-loss bug still open","description":"Any public release-ready or readiness claim must stay blocked while this row is open.","status":"open","priority":0,"issue_type":"bug"}
+{"id":"bd-release-ready-claim","title":"publish release-ready readiness claim","description":"This claim is only safe after every open P0 row is closed.","status":"open","priority":2,"issue_type":"docs"}
+{"id":"bd-p0-closed","title":"closed P0 should not block release-ready wording","status":"closed","priority":0,"issue_type":"bug"}
+{"id":"frankenredis-p0","title":"foreign P0 belongs to another tracker","status":"open","priority":0,"issue_type":"bug"}
+JSONL
+
+    if TRACKER_SOURCE_HYGIENE_DEFAULT_FIXTURE_SELF_CHECK=0 \
+        TRACKER_SOURCE_HYGIENE_NON_MUTATING_FALLBACK_SELF_CHECK=0 \
+        TRACKER_SOURCE_HYGIENE_PERMISSION_GATED_BLOCKED_SELF_CHECK=0 \
+        TRACKER_SOURCE_HYGIENE_PERMISSION_ACK_SELF_CHECK=0 \
+        TRACKER_SOURCE_HYGIENE_RELEASE_READY_P0_SELF_CHECK=0 \
+        TRACKER_SOURCE_HYGIENE_ISSUES="$RELEASE_READY_P0_FIXTURE" \
+        TRACKER_SOURCE_HYGIENE_EXPECT_LOCAL_OPEN=2 \
+        TRACKER_SOURCE_HYGIENE_EXPECT_FOREIGN_OPEN=1 \
+        TRACKER_SOURCE_HYGIENE_EXPECT_READY=2 \
+        TRACKER_SOURCE_HYGIENE_EXPECT_PERMISSION_GATED=0 \
+        TRACKER_SOURCE_HYGIENE_EXPECT_LOCAL_NONCLAIMABLE=0 \
+        "$REPO_ROOT/scripts/e2e/ffs_tracker_source_hygiene_e2e.sh" \
+        >"$RELEASE_READY_P0_SELF_CHECK_LOG" 2>&1; then
+        RELEASE_READY_P0_REPORT="$(
+            awk -F'detail=report=' \
+                '/scenario_id=tracker_source_hygiene_report_emitted/ && /outcome=PASS/ { print $2; exit }' \
+                "$RELEASE_READY_P0_SELF_CHECK_LOG"
+        )"
+        if [[ -n "$RELEASE_READY_P0_REPORT" ]] \
+            && jq -e '
+                ([.local_open_rows[] | select((.priority // 999) == 0) | .id] == ["bd-p0-live"])
+                and any(.local_open_rows[]; .id == "bd-release-ready-claim" and ((.title + " " + (.description // "")) | test("release-ready|readiness"; "i")))
+                and (.source_aware_queue_state.claimable_ids == ["bd-p0-live", "bd-release-ready-claim"])
+                and (.foreign_open_samples | map(.id) == ["frankenredis-p0"])
+            ' "$RELEASE_READY_P0_REPORT" >/dev/null; then
+            scenario_result "tracker_source_hygiene_release_readiness_blocked_by_open_p0" "PASS" "log=$RELEASE_READY_P0_SELF_CHECK_LOG report=$RELEASE_READY_P0_REPORT p0_blocker=bd-p0-live"
+        else
+            scenario_result "tracker_source_hygiene_release_readiness_blocked_by_open_p0" "FAIL" "log=$RELEASE_READY_P0_SELF_CHECK_LOG report=${RELEASE_READY_P0_REPORT:-missing}"
+        fi
+    else
+        scenario_result "tracker_source_hygiene_release_readiness_blocked_by_open_p0" "FAIL" "log=$RELEASE_READY_P0_SELF_CHECK_LOG"
     fi
 fi
 
