@@ -294,7 +294,31 @@ The crash matrix tests in-memory simulation. Real kernel-level crash injection (
 
 ---
 
-## 6. Commit Trail
+## 6. Assessment
+
+The bd-xuo95 reality-check-bridge work is **solid engineering**, not theater.
+
+**What's good:**
+- Honest disclosure — btrfs RW non-durability is clearly documented and fail-safe interlocked
+- Parity verification improved — `ExecutionGatedParityReport` breaks the tautology
+- Code quality high — `#![forbid(unsafe_code)]` everywhere, proper overflow handling, well-structured MVCC/SSI
+- Real verification — DPOR enumeration + WB-I1/WB-I2 oracles actually execute
+
+**What needs attention:**
+- A1-A6 (btrfs serialization) still in progress — infrastructure ready, implementation pending
+- Documentation staleness — `FEATURE_PARITY.md` underclaims some completed work
+- Crash matrix is simulation, not real FUSE crashes
+
+**No overclaims found** in post-bridge state:
+- btrfs RW says "in-memory" not "durable"
+- Parity requires execution evidence
+- README wording is evidence-gated
+
+**The core lesson:** This is how you fix overclaiming — don't hide it, interlock it. The bd-xuo95 epic identified real gaps (btrfs facade, parity tautology), built infrastructure to close them, and made limitations explicit and fail-safe. The code ships before claims update, not the reverse.
+
+---
+
+## 7. Commit Trail
 
 Key commits in the bd-xuo95 epic:
 
@@ -317,4 +341,4 @@ Key commits in the bd-xuo95 epic:
 
 ---
 
-*Written 2026-05-21. This document describes the state of the codebase as of commit `f915cd30`.*
+*Written 2026-05-21. This document describes the state of the codebase as of commit `f915cd30`. Revised with contributions from EmeraldCoast, SwiftLantern, WildOak, and DarkThrush.*
