@@ -209,8 +209,7 @@ impl BtrfsRootItem {
         buf[BTRFS_ROOT_ITEM_GENERATION_V2_OFFSET..BTRFS_ROOT_ITEM_GENERATION_V2_OFFSET + 8]
             .copy_from_slice(&self.generation.to_le_bytes());
         // uuid at offset 247
-        buf[BTRFS_ROOT_ITEM_UUID_OFFSET..BTRFS_ROOT_ITEM_UUID_END]
-            .copy_from_slice(&self.uuid);
+        buf[BTRFS_ROOT_ITEM_UUID_OFFSET..BTRFS_ROOT_ITEM_UUID_END].copy_from_slice(&self.uuid);
         // parent_uuid at offset 263
         buf[BTRFS_ROOT_ITEM_PARENT_UUID_OFFSET..BTRFS_ROOT_ITEM_PARENT_UUID_END]
             .copy_from_slice(&self.parent_uuid);
@@ -14165,13 +14164,19 @@ mod tests {
         let original = sb.to_bytes();
         verify_btrfs_superblock_checksum(&original).expect("original checksum valid");
         let parsed_orig = BtrfsSuperblock::parse_superblock_region(&original).expect("parse orig");
-        assert_eq!(parsed_orig.generation, 100, "pre-commit generation is g=100");
+        assert_eq!(
+            parsed_orig.generation, 100,
+            "pre-commit generation is g=100"
+        );
 
         let mut committed = original;
         BtrfsSuperblock::patch_commit(&mut committed, 0x30000, 1, 101);
         verify_btrfs_superblock_checksum(&committed).expect("committed checksum valid");
         let parsed_new = BtrfsSuperblock::parse_superblock_region(&committed).expect("parse new");
-        assert_eq!(parsed_new.generation, 101, "post-commit generation is g+1=101");
+        assert_eq!(
+            parsed_new.generation, 101,
+            "post-commit generation is g+1=101"
+        );
         assert_eq!(parsed_new.root, 0x30000, "root updated to new location");
         assert_eq!(parsed_new.root_level, 1, "root_level updated");
 

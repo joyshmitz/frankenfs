@@ -3075,10 +3075,7 @@ mod tests {
                 .find(|row| row.report_id == report_id)
                 .expect("inventory includes open-ended/source-scope report");
 
-            assert_eq!(
-                row.module_path,
-                "tools/ffs-ops/src/open_ended_inventory.rs"
-            );
+            assert_eq!(row.module_path, "tools/ffs-ops/src/open_ended_inventory.rs");
             assert_eq!(row.rust_type, rust_type);
             assert_eq!(row.producer, producer);
             assert_eq!(

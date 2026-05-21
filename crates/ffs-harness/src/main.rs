@@ -3853,6 +3853,9 @@ fn evaluate_release_gates_cmd(args: &[String]) -> Result<()> {
     let mut bundle_config = ProofBundleValidationConfig::new(&cmd_args.bundle_path);
     bundle_config.current_git_sha = cmd_args.current_git_sha;
     bundle_config.max_age_days = cmd_args.max_age_days;
+    // Release-gate evaluation controls public readiness wording, so executable
+    // lanes must be re-run instead of accepting checked-in artifact hashes alone.
+    bundle_config.execute_configured_lanes = true;
 
     let policy = load_release_gate_policy(Path::new(&cmd_args.policy_path))?;
     let proof_report = validate_proof_bundle(&bundle_config)?;

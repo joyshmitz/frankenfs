@@ -420,10 +420,10 @@ impl WritebackCacheCrashPhase {
             Self::BeforeFirstWrite | Self::AfterCancellationBeforeWriteback => DporSample::Start,
             Self::AfterFirstWriteBeforeFlush => DporSample::EarlyFlush,
             Self::AfterFlushBeforeFsync => DporSample::MidFlush,
-            Self::AfterRepeatedWriteBeforeFsync => DporSample::PreSuperblock,
             Self::AfterFsyncBeforeMetadata
             | Self::AfterMetadataBeforeFsyncdir
-            | Self::AfterFsyncdirBeforeUnmount
+            | Self::AfterRepeatedWriteBeforeFsync => DporSample::PreSuperblock,
+            Self::AfterFsyncdirBeforeUnmount
             | Self::AfterRepeatedWriteFsync
             | Self::AfterCleanUnmountBeforeReopen
             | Self::AfterReopenBeforeRepairRefresh
@@ -867,6 +867,47 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn writeback_cache_crash_matrix_respects_fsyncdir_boundary() {
+        let outcomes = run_writeback_cache_crash_matrix(11).expect("run matrix");
+        let before_metadata = outcomes
+            .iter()
+            .find(|o| o.crash_point_id == "cp04_after_fsync_before_metadata")
+            .expect("cp04 present");
+        let before_fsyncdir = outcomes
+            .iter()
+            .find(|o| o.crash_point_id == "cp05_after_metadata_before_fsyncdir")
+            .expect("cp05 present");
+        let after_fsyncdir = outcomes
+            .iter()
+            .find(|o| o.crash_point_id == "cp06_after_fsyncdir_before_unmount")
+            .expect("cp06 present");
+
+        for outcome in [before_metadata, before_fsyncdir] {
+            assert_eq!(
+                outcome.dpor_crash_point_id, "dpor_pre_superblock",
+                "{} must model the pre-commit boundary",
+                outcome.crash_point_id
+            );
+            assert!(
+                !outcome.superblock_durable,
+                "{} must not be recorded as committed before fsyncdir",
+                outcome.crash_point_id
+            );
+            assert_eq!(outcome.observed_generation, outcome.pre_generation);
+        }
+
+        assert_eq!(
+            after_fsyncdir.dpor_crash_point_id, "dpor_post_superblock",
+            "cp06 is the first directory-durable post-commit phase"
+        );
+        assert!(after_fsyncdir.superblock_durable);
+        assert_eq!(
+            after_fsyncdir.observed_generation,
+            after_fsyncdir.post_generation
+        );
     }
 
     #[test]
