@@ -37,6 +37,8 @@ pub const BTRFS_ITEM_ROOT_ITEM: u8 = 132;
 /// btrfs item type constants for extent/block-group management (write path).
 pub const BTRFS_ITEM_EXTENT_ITEM: u8 = 168;
 pub const BTRFS_ITEM_METADATA_ITEM: u8 = 169;
+pub const BTRFS_ITEM_TREE_BLOCK_REF: u8 = 176;
+pub const BTRFS_ITEM_EXTENT_DATA_REF: u8 = 178;
 pub const BTRFS_ITEM_BLOCK_GROUP_ITEM: u8 = 192;
 pub const BTRFS_ITEM_DEV_ITEM: u8 = 216;
 pub const BTRFS_ITEM_CHUNK: u8 = 228;
@@ -1375,6 +1377,7 @@ pub enum BtrfsMutationError {
     KeyAlreadyExists,
     KeyNotFound,
     MissingNode(u64),
+    NoSpace,
     BrokenInvariant(&'static str),
     AddressOverflow,
 }
@@ -1387,6 +1390,7 @@ impl std::fmt::Display for BtrfsMutationError {
             Self::KeyAlreadyExists => write!(f, "key already exists"),
             Self::KeyNotFound => write!(f, "key not found"),
             Self::MissingNode(block) => write!(f, "missing tree node {block}"),
+            Self::NoSpace => write!(f, "no space left in matching block groups"),
             Self::BrokenInvariant(msg) => write!(f, "broken invariant: {msg}"),
             Self::AddressOverflow => write!(f, "address overflow"),
         }
@@ -1410,6 +1414,190 @@ pub enum BtrfsCowNode {
         keys: Vec<BtrfsKey>,
         children: Vec<u64>,
     },
+}
+
+/// btrfs node header size in bytes.
+pub const BTRFS_HEADER_SIZE: usize = 101;
+/// btrfs leaf item descriptor size in bytes.
+pub const BTRFS_ITEM_SIZE: usize = 25;
+/// btrfs internal key-pointer size in bytes.
+pub const BTRFS_KEY_PTR_SIZE: usize = 33;
+
+/// Parameters for serializing a btrfs node to on-disk format.
+#[derive(Debug, Clone)]
+pub struct BtrfsNodeSerializeParams {
+    /// Filesystem UUID (16 bytes).
+    pub fsid: [u8; 16],
+    /// Chunk tree UUID (16 bytes).
+    pub chunk_tree_uuid: [u8; 16],
+    /// Byte offset where this node will be written on disk.
+    pub bytenr: u64,
+    /// Header flags (BTRFS_HEADER_FLAG_*).
+    pub flags: u64,
+    /// Current transaction generation.
+    pub generation: u64,
+    /// Tree ID that owns this node (e.g., FS_TREE = 5).
+    pub owner: u64,
+    /// Node size in bytes (from superblock, default 16384).
+    pub nodesize: u32,
+    /// Child generation values for internal nodes (indexed by child position).
+    pub child_generations: Vec<u64>,
+}
+
+impl BtrfsCowNode {
+    /// Serialize this node to on-disk btrfs format.
+    ///
+    /// Returns a byte vector of exactly `params.nodesize` bytes.
+    pub fn serialize(
+        &self,
+        params: &BtrfsNodeSerializeParams,
+    ) -> Result<Vec<u8>, BtrfsMutationError> {
+        let nodesize = params.nodesize as usize;
+        if nodesize < BTRFS_HEADER_SIZE {
+            return Err(BtrfsMutationError::InvalidConfig(
+                "nodesize too small for header",
+            ));
+        }
+
+        let mut buf = vec![0u8; nodesize];
+
+        // Write header fields (skip checksum at 0..32, computed last)
+        // fsid at 0x20
+        buf[0x20..0x30].copy_from_slice(&params.fsid);
+        // bytenr at 0x30
+        buf[0x30..0x38].copy_from_slice(&params.bytenr.to_le_bytes());
+        // flags at 0x38
+        buf[0x38..0x40].copy_from_slice(&params.flags.to_le_bytes());
+        // chunk_tree_uuid at 0x40
+        buf[0x40..0x50].copy_from_slice(&params.chunk_tree_uuid);
+        // generation at 0x50
+        buf[0x50..0x58].copy_from_slice(&params.generation.to_le_bytes());
+        // owner at 0x58
+        buf[0x58..0x60].copy_from_slice(&params.owner.to_le_bytes());
+
+        match self {
+            BtrfsCowNode::Leaf { items } => {
+                // nritems at 0x60
+                let nritems = u32::try_from(items.len())
+                    .map_err(|_| BtrfsMutationError::InvalidConfig("too many items"))?;
+                buf[0x60..0x64].copy_from_slice(&nritems.to_le_bytes());
+                // level at 0x64 = 0 for leaf
+                buf[0x64] = 0;
+
+                // Serialize items: item descriptors at header end, data from tail
+                let mut item_offset = BTRFS_HEADER_SIZE;
+                let mut data_end = nodesize;
+
+                for item in items {
+                    // Check space for item descriptor
+                    if item_offset + BTRFS_ITEM_SIZE > data_end {
+                        return Err(BtrfsMutationError::InvalidConfig("node overflow: items"));
+                    }
+                    // Check space for item data
+                    let data_size = item.data.len();
+                    if data_end < data_size || data_end - data_size < item_offset + BTRFS_ITEM_SIZE
+                    {
+                        return Err(BtrfsMutationError::InvalidConfig("node overflow: data"));
+                    }
+
+                    // Write item data from tail
+                    data_end -= data_size;
+                    buf[data_end..data_end + data_size].copy_from_slice(&item.data);
+
+                    // Write item descriptor (25 bytes)
+                    // key: objectid (8), type (1), offset (8) = 17 bytes
+                    buf[item_offset..item_offset + 8]
+                        .copy_from_slice(&item.key.objectid.to_le_bytes());
+                    buf[item_offset + 8] = item.key.item_type;
+                    buf[item_offset + 9..item_offset + 17]
+                        .copy_from_slice(&item.key.offset.to_le_bytes());
+                    // data offset (from header end) at 0x11
+                    let data_offset = u32::try_from(data_end - BTRFS_HEADER_SIZE)
+                        .map_err(|_| BtrfsMutationError::InvalidConfig("data offset overflow"))?;
+                    buf[item_offset + 17..item_offset + 21]
+                        .copy_from_slice(&data_offset.to_le_bytes());
+                    // data size at 0x15
+                    let size = u32::try_from(data_size)
+                        .map_err(|_| BtrfsMutationError::InvalidConfig("data size overflow"))?;
+                    buf[item_offset + 21..item_offset + 25].copy_from_slice(&size.to_le_bytes());
+
+                    item_offset += BTRFS_ITEM_SIZE;
+                }
+            }
+            BtrfsCowNode::Internal { keys, children } => {
+                if keys.len() + 1 != children.len() {
+                    return Err(BtrfsMutationError::BrokenInvariant(
+                        "keys.len + 1 != children.len",
+                    ));
+                }
+                // nritems at 0x60 = number of key-pointers = children.len()
+                let nritems = u32::try_from(children.len())
+                    .map_err(|_| BtrfsMutationError::InvalidConfig("too many children"))?;
+                buf[0x60..0x64].copy_from_slice(&nritems.to_le_bytes());
+                // level at 0x64 > 0 for internal (we use 1 as default)
+                buf[0x64] = 1;
+
+                // Serialize key-pointers (33 bytes each)
+                let mut kp_offset = BTRFS_HEADER_SIZE;
+                for (i, child_ptr) in children.iter().enumerate() {
+                    if kp_offset + BTRFS_KEY_PTR_SIZE > nodesize {
+                        return Err(BtrfsMutationError::InvalidConfig("node overflow: key-ptrs"));
+                    }
+
+                    // key (17 bytes): use keys[i] if i < keys.len(), else use a max key
+                    let key = if i < keys.len() {
+                        &keys[i]
+                    } else {
+                        // Last child has no separator key in our model; use max key
+                        static MAX_KEY: BtrfsKey = BtrfsKey {
+                            objectid: u64::MAX,
+                            item_type: u8::MAX,
+                            offset: u64::MAX,
+                        };
+                        &MAX_KEY
+                    };
+                    buf[kp_offset..kp_offset + 8].copy_from_slice(&key.objectid.to_le_bytes());
+                    buf[kp_offset + 8] = key.item_type;
+                    buf[kp_offset + 9..kp_offset + 17].copy_from_slice(&key.offset.to_le_bytes());
+                    // blockptr at 0x11
+                    buf[kp_offset + 17..kp_offset + 25].copy_from_slice(&child_ptr.to_le_bytes());
+                    // generation at 0x19
+                    let child_gen = params
+                        .child_generations
+                        .get(i)
+                        .copied()
+                        .unwrap_or(params.generation);
+                    buf[kp_offset + 25..kp_offset + 33].copy_from_slice(&child_gen.to_le_bytes());
+
+                    kp_offset += BTRFS_KEY_PTR_SIZE;
+                }
+            }
+        }
+
+        // Compute CRC32C over [32..nodesize) and store at [0..4)
+        let crc = ffs_types::crc32c(&buf[32..]);
+        buf[0..4].copy_from_slice(&crc.to_le_bytes());
+
+        Ok(buf)
+    }
+
+    /// Tree level: 0 for leaf, 1 for internal (simplified).
+    #[must_use]
+    pub fn level(&self) -> u8 {
+        match self {
+            BtrfsCowNode::Leaf { .. } => 0,
+            BtrfsCowNode::Internal { .. } => 1,
+        }
+    }
+
+    /// Number of items (leaf) or children (internal).
+    #[must_use]
+    pub fn nritems(&self) -> usize {
+        match self {
+            BtrfsCowNode::Leaf { items } => items.len(),
+            BtrfsCowNode::Internal { children, .. } => children.len(),
+        }
+    }
 }
 
 /// Block lifecycle interface for btrfs COW mutation planning.
@@ -3062,7 +3250,7 @@ impl BtrfsExtentAllocator {
     /// Scans block groups with `BTRFS_BLOCK_GROUP_DATA` flag for a gap
     /// large enough to hold `num_bytes`.
     pub fn alloc_data(&mut self, num_bytes: u64) -> Result<ExtentAllocation, BtrfsMutationError> {
-        self.alloc_extent(num_bytes, BTRFS_BLOCK_GROUP_DATA, false)
+        self.alloc_extent(num_bytes, BTRFS_BLOCK_GROUP_DATA, false, 0, 0)
     }
 
     /// Allocate a metadata extent (tree block).
@@ -3070,7 +3258,22 @@ impl BtrfsExtentAllocator {
         &mut self,
         num_bytes: u64,
     ) -> Result<ExtentAllocation, BtrfsMutationError> {
-        self.alloc_extent(num_bytes, BTRFS_BLOCK_GROUP_METADATA, true)
+        self.alloc_metadata_for_tree(num_bytes, BTRFS_EXTENT_TREE_OBJECTID, 0)
+    }
+
+    /// Allocate a metadata extent for a specific owning tree.
+    ///
+    /// The allocation records both the `METADATA_ITEM` ownership item and a
+    /// `TREE_BLOCK_REF` keyed by the owning root. This pins the A2 invariant
+    /// that a tree node is never written before the extent tree can prove that
+    /// the node's logical bytenr is allocated and referenced.
+    pub fn alloc_metadata_for_tree(
+        &mut self,
+        num_bytes: u64,
+        root: u64,
+        level: u8,
+    ) -> Result<ExtentAllocation, BtrfsMutationError> {
+        self.alloc_extent(num_bytes, BTRFS_BLOCK_GROUP_METADATA, true, root, level)
     }
 
     /// Core allocation logic.
@@ -3080,6 +3283,8 @@ impl BtrfsExtentAllocator {
         num_bytes: u64,
         required_flags: u64,
         is_metadata: bool,
+        ref_root: u64,
+        ref_level: u8,
     ) -> Result<ExtentAllocation, BtrfsMutationError> {
         if num_bytes == 0 {
             return Err(BtrfsMutationError::InvalidConfig(
@@ -3094,9 +3299,7 @@ impl BtrfsExtentAllocator {
             .find(|bg| (bg.item.flags & required_flags) != 0 && bg.item.free_bytes() >= num_bytes)
             .map(|bg| bg.start);
 
-        let bg_start = bg_start.ok_or(BtrfsMutationError::BrokenInvariant(
-            "no block group with enough free space",
-        ))?;
+        let bg_start = bg_start.ok_or(BtrfsMutationError::NoSpace)?;
 
         debug!(
             target: "ffs::btrfs::alloc",
@@ -3135,7 +3338,7 @@ impl BtrfsExtentAllocator {
 
         let allocated_ranges: Vec<(u64, u64)> = extents
             .iter()
-            .map(|(key, _)| (key.objectid, key.offset))
+            .filter_map(|(key, _)| allocation_extent_range(*key))
             .collect();
 
         let mut found = None;
@@ -3190,9 +3393,7 @@ impl BtrfsExtentAllocator {
             }
         }
 
-        let bytenr = found.ok_or(BtrfsMutationError::BrokenInvariant(
-            "block group has no gap",
-        ))?;
+        let bytenr = found.ok_or(BtrfsMutationError::NoSpace)?;
         let extent = ExtentKey { bytenr, num_bytes };
 
         debug!(
@@ -3223,6 +3424,22 @@ impl BtrfsExtentAllocator {
             offset: num_bytes,
         };
         self.extent_tree.insert(key, &extent_item.to_bytes())?;
+
+        if is_metadata {
+            let ref_key = BtrfsKey {
+                objectid: bytenr,
+                item_type: BTRFS_ITEM_TREE_BLOCK_REF,
+                offset: ref_root,
+            };
+            self.extent_tree.insert(ref_key, &[])?;
+            trace!(
+                target: "ffs::btrfs::alloc",
+                bytenr,
+                root = ref_root,
+                level = ref_level,
+                "tree_block_ref_insert"
+            );
+        }
 
         trace!(
             target: "ffs::btrfs::alloc",
@@ -3255,10 +3472,10 @@ impl BtrfsExtentAllocator {
         // Queue delayed ref.
         let ref_type = if is_metadata {
             BtrfsRef::TreeBlock {
-                root: bg_start,
+                root: ref_root,
                 owner: bytenr,
                 offset: num_bytes,
-                level: 0,
+                level: ref_level,
             }
         } else {
             BtrfsRef::DataExtent {
@@ -3340,6 +3557,7 @@ impl BtrfsExtentAllocator {
 
         // Remove from extent tree only after ownership and accounting checks pass.
         self.extent_tree.delete(&key)?;
+        self.delete_backrefs_for_extent(bytenr, is_metadata)?;
         trace!(
             target: "ffs::btrfs::alloc",
             bytenr, size = num_bytes, "extent_item_remove"
@@ -3395,6 +3613,70 @@ impl BtrfsExtentAllocator {
     /// Drain all queued delayed references (for transaction commit).
     pub fn drain_delayed_refs(&mut self) -> Vec<DelayedRef> {
         self.delayed_ref_queue.drain_all()
+    }
+
+    /// Reclaim data extents that are allocated in the extent tree but absent
+    /// from the caller's durable `EXTENT_DATA` reference set.
+    ///
+    /// This is the recovery cleanup path for an interrupted btrfs writeback:
+    /// data blocks that were allocated before their referencing metadata became
+    /// durable are freed instead of leaking.
+    pub fn reclaim_unreferenced_data_extents(
+        &mut self,
+        referenced: &HashSet<ExtentKey>,
+    ) -> Result<Vec<ExtentAllocation>, BtrfsMutationError> {
+        let mut orphaned = Vec::new();
+        for bg in self
+            .block_groups
+            .values()
+            .filter(|bg| (bg.item.flags & BTRFS_BLOCK_GROUP_DATA) != 0)
+        {
+            let bg_end = bg
+                .start
+                .checked_add(bg.item.total_bytes)
+                .ok_or(BtrfsMutationError::AddressOverflow)?;
+            let range_start = BtrfsKey {
+                objectid: bg.start,
+                item_type: BTRFS_ITEM_EXTENT_ITEM,
+                offset: 0,
+            };
+            let range_end = BtrfsKey {
+                objectid: bg_end,
+                item_type: BTRFS_ITEM_EXTENT_ITEM,
+                offset: u64::MAX,
+            };
+            for (key, _) in self.extent_tree.range(&range_start, &range_end)? {
+                if key.objectid >= bg_end || key.item_type != BTRFS_ITEM_EXTENT_ITEM {
+                    continue;
+                }
+                let extent = ExtentKey {
+                    bytenr: key.objectid,
+                    num_bytes: key.offset,
+                };
+                if !referenced.contains(&extent) {
+                    orphaned.push(ExtentAllocation {
+                        bytenr: extent.bytenr,
+                        num_bytes: extent.num_bytes,
+                        block_group_start: bg.start,
+                    });
+                }
+            }
+        }
+
+        for extent in &orphaned {
+            self.free_extent(extent.bytenr, extent.num_bytes, false)?;
+        }
+
+        if !orphaned.is_empty() {
+            info!(
+                target: "ffs::btrfs::alloc",
+                reclaimed = orphaned.len(),
+                bytes = orphaned.iter().map(|extent| extent.num_bytes).sum::<u64>(),
+                "orphan_data_extents_reclaimed"
+            );
+        }
+
+        Ok(orphaned)
     }
 
     /// Number of queued delayed references.
@@ -3473,6 +3755,12 @@ impl BtrfsExtentAllocator {
                 if key.objectid >= bg_end {
                     break;
                 }
+                if !matches!(
+                    key.item_type,
+                    BTRFS_ITEM_EXTENT_ITEM | BTRFS_ITEM_METADATA_ITEM
+                ) {
+                    continue;
+                }
                 let extent_start = key.objectid.max(bg.start);
                 let extent_end = key
                     .objectid
@@ -3538,6 +3826,45 @@ impl BtrfsExtentAllocator {
         self.block_groups
             .values()
             .fold(0_u64, |total, bg| total.saturating_add(bg.item.total_bytes))
+    }
+
+    fn delete_backrefs_for_extent(
+        &mut self,
+        bytenr: u64,
+        is_metadata: bool,
+    ) -> Result<(), BtrfsMutationError> {
+        let ref_item_type = if is_metadata {
+            BTRFS_ITEM_TREE_BLOCK_REF
+        } else {
+            BTRFS_ITEM_EXTENT_DATA_REF
+        };
+        let range_start = BtrfsKey {
+            objectid: bytenr,
+            item_type: ref_item_type,
+            offset: 0,
+        };
+        let range_end = BtrfsKey {
+            objectid: bytenr,
+            item_type: ref_item_type,
+            offset: u64::MAX,
+        };
+        let refs: Vec<BtrfsKey> = self
+            .extent_tree
+            .range(&range_start, &range_end)?
+            .into_iter()
+            .map(|(key, _)| key)
+            .collect();
+        for key in refs {
+            self.extent_tree.delete(&key)?;
+        }
+        Ok(())
+    }
+}
+
+fn allocation_extent_range(key: BtrfsKey) -> Option<(u64, u64)> {
+    match key.item_type {
+        BTRFS_ITEM_EXTENT_ITEM | BTRFS_ITEM_METADATA_ITEM => Some((key.objectid, key.offset)),
+        _ => None,
     }
 }
 
@@ -8991,6 +9318,119 @@ mod tests {
     }
 
     #[test]
+    fn alloc_metadata_records_tree_block_ref() {
+        let mut alloc = BtrfsExtentAllocator::new(1).expect("alloc");
+        alloc.add_block_group(0x20_0000, make_meta_bg(0x20_0000, 0x10_0000));
+
+        let meta = alloc
+            .alloc_metadata_for_tree(4096, BTRFS_FS_TREE_OBJECTID, 1)
+            .expect("metadata alloc");
+        let metadata_key = BtrfsKey {
+            objectid: meta.bytenr,
+            item_type: BTRFS_ITEM_METADATA_ITEM,
+            offset: meta.num_bytes,
+        };
+        let ref_key = BtrfsKey {
+            objectid: meta.bytenr,
+            item_type: BTRFS_ITEM_TREE_BLOCK_REF,
+            offset: BTRFS_FS_TREE_OBJECTID,
+        };
+
+        assert_eq!(
+            alloc
+                .extent_tree
+                .range(&metadata_key, &metadata_key)
+                .expect("metadata item lookup")
+                .len(),
+            1
+        );
+        assert_eq!(
+            alloc
+                .extent_tree
+                .range(&ref_key, &ref_key)
+                .expect("tree block ref lookup")
+                .len(),
+            1
+        );
+        assert_eq!(
+            alloc.pending_for(&ExtentKey {
+                bytenr: meta.bytenr,
+                num_bytes: meta.num_bytes,
+            })[0]
+                .ref_type,
+            BtrfsRef::TreeBlock {
+                root: BTRFS_FS_TREE_OBJECTID,
+                owner: meta.bytenr,
+                offset: meta.num_bytes,
+                level: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn free_metadata_removes_tree_block_ref() {
+        let mut alloc = BtrfsExtentAllocator::new(1).expect("alloc");
+        alloc.add_block_group(0x20_0000, make_meta_bg(0x20_0000, 0x10_0000));
+
+        let meta = alloc
+            .alloc_metadata_for_tree(4096, BTRFS_FS_TREE_OBJECTID, 0)
+            .expect("metadata alloc");
+        alloc
+            .free_extent(meta.bytenr, meta.num_bytes, true)
+            .expect("free metadata");
+
+        let metadata_key = BtrfsKey {
+            objectid: meta.bytenr,
+            item_type: BTRFS_ITEM_METADATA_ITEM,
+            offset: meta.num_bytes,
+        };
+        let ref_key = BtrfsKey {
+            objectid: meta.bytenr,
+            item_type: BTRFS_ITEM_TREE_BLOCK_REF,
+            offset: BTRFS_FS_TREE_OBJECTID,
+        };
+        assert!(
+            alloc
+                .extent_tree
+                .range(&metadata_key, &metadata_key)
+                .expect("metadata item lookup")
+                .is_empty()
+        );
+        assert!(
+            alloc
+                .extent_tree
+                .range(&ref_key, &ref_key)
+                .expect("tree block ref lookup")
+                .is_empty()
+        );
+        assert_eq!(alloc.block_group(0x20_0000).expect("meta bg").used_bytes, 0);
+    }
+
+    #[test]
+    fn metadata_alloc_uses_mixed_block_group_when_present() {
+        let mut alloc = BtrfsExtentAllocator::new(1).expect("alloc");
+        let mixed_start = 0x30_0000;
+        alloc.add_block_group(
+            mixed_start,
+            BtrfsBlockGroupItem {
+                total_bytes: 0x10_0000,
+                used_bytes: 0,
+                flags: BTRFS_BLOCK_GROUP_DATA | BTRFS_BLOCK_GROUP_METADATA,
+            },
+        );
+
+        let meta = alloc.alloc_metadata(8192).expect("metadata alloc");
+        assert_eq!(meta.block_group_start, mixed_start);
+        assert_eq!(
+            alloc
+                .block_group(mixed_start)
+                .expect("mixed block group")
+                .used_bytes,
+            8192
+        );
+    }
+
+    #[test]
     fn delayed_refs_tracked() {
         let mut alloc = BtrfsExtentAllocator::new(1).expect("alloc");
         alloc.add_block_group(0x1_0000, make_data_bg(0x1_0000, 0x10_0000));
@@ -10401,11 +10841,10 @@ mod tests {
         alloc.alloc_data(128).expect("first alloc should fit");
 
         // Second allocation exceeds remaining space.
-        let result = alloc.alloc_data(256);
-        assert!(
-            result.is_err(),
-            "allocating beyond capacity should fail (ENOSPC)"
-        );
+        let err = alloc
+            .alloc_data(256)
+            .expect_err("allocating beyond capacity should fail");
+        assert_eq!(err, BtrfsMutationError::NoSpace);
     }
 
     // Extent Allocation Test 5: Allocation respects block group boundaries
@@ -10916,10 +11355,7 @@ mod tests {
         let err = alloc
             .alloc_data(1)
             .expect_err("full block group should reject one more byte");
-        assert_eq!(
-            err,
-            BtrfsMutationError::BrokenInvariant("no block group with enough free space")
-        );
+        assert_eq!(err, BtrfsMutationError::NoSpace);
     }
 
     #[test]
@@ -11035,6 +11471,97 @@ mod tests {
             "failed free should not delete the extent item"
         );
         assert_eq!(alloc.delayed_ref_count(), 0);
+    }
+
+    #[test]
+    fn reclaim_unreferenced_data_extents_frees_orphans_only() {
+        let mut alloc = BtrfsExtentAllocator::new(1).expect("alloc");
+        let bg_start = 0x10_0000;
+        alloc.add_block_group(bg_start, make_data_bg(bg_start, 16 * 4096));
+
+        let referenced = alloc.alloc_data(4096).expect("referenced data");
+        let orphan = alloc.alloc_data(8192).expect("orphan data");
+        let mut durable_extent_data = HashSet::new();
+        durable_extent_data.insert(ExtentKey {
+            bytenr: referenced.bytenr,
+            num_bytes: referenced.num_bytes,
+        });
+
+        let reclaimed = alloc
+            .reclaim_unreferenced_data_extents(&durable_extent_data)
+            .expect("reclaim orphan");
+        assert_eq!(reclaimed.len(), 1);
+        assert_eq!(reclaimed[0].bytenr, orphan.bytenr);
+        assert_eq!(reclaimed[0].num_bytes, orphan.num_bytes);
+
+        let referenced_key = BtrfsKey {
+            objectid: referenced.bytenr,
+            item_type: BTRFS_ITEM_EXTENT_ITEM,
+            offset: referenced.num_bytes,
+        };
+        let orphan_key = BtrfsKey {
+            objectid: orphan.bytenr,
+            item_type: BTRFS_ITEM_EXTENT_ITEM,
+            offset: orphan.num_bytes,
+        };
+        assert_eq!(
+            alloc
+                .extent_tree
+                .range(&referenced_key, &referenced_key)
+                .expect("referenced extent lookup")
+                .len(),
+            1
+        );
+        assert!(
+            alloc
+                .extent_tree
+                .range(&orphan_key, &orphan_key)
+                .expect("orphan extent lookup")
+                .is_empty()
+        );
+        assert_eq!(
+            alloc.block_group(bg_start).expect("bg").used_bytes,
+            referenced.num_bytes
+        );
+    }
+
+    #[test]
+    fn reclaim_unreferenced_data_extents_leaves_metadata_extents() {
+        let mut alloc = BtrfsExtentAllocator::new(1).expect("alloc");
+        let data_start = 0x10_0000;
+        let meta_start = 0x20_0000;
+        alloc.add_block_group(data_start, make_data_bg(data_start, 16 * 4096));
+        alloc.add_block_group(meta_start, make_meta_bg(meta_start, 16 * 4096));
+
+        let data = alloc.alloc_data(4096).expect("orphan data");
+        let meta = alloc.alloc_metadata(4096).expect("metadata");
+        let reclaimed = alloc
+            .reclaim_unreferenced_data_extents(&HashSet::new())
+            .expect("reclaim data orphan");
+        assert_eq!(reclaimed.len(), 1);
+        assert_eq!(reclaimed[0].bytenr, data.bytenr);
+
+        let meta_key = BtrfsKey {
+            objectid: meta.bytenr,
+            item_type: BTRFS_ITEM_METADATA_ITEM,
+            offset: meta.num_bytes,
+        };
+        assert_eq!(
+            alloc
+                .extent_tree
+                .range(&meta_key, &meta_key)
+                .expect("metadata extent lookup")
+                .len(),
+            1,
+            "metadata extents are not data-orphan cleanup candidates"
+        );
+        assert_eq!(
+            alloc
+                .block_group(meta_start)
+                .expect("metadata bg")
+                .used_bytes,
+            meta.num_bytes
+        );
     }
 
     #[test]
@@ -12913,6 +13440,8 @@ mod tests {
         //   #define BTRFS_ROOT_ITEM_KEY       132
         //   #define BTRFS_EXTENT_ITEM_KEY     168
         //   #define BTRFS_METADATA_ITEM_KEY   169
+        //   #define BTRFS_TREE_BLOCK_REF_KEY 176
+        //   #define BTRFS_EXTENT_DATA_REF_KEY 178
         //   #define BTRFS_BLOCK_GROUP_ITEM_KEY 192
         //   #define BTRFS_FREE_SPACE_INFO_KEY  198
         //   #define BTRFS_FREE_SPACE_EXTENT_KEY 199
@@ -12928,6 +13457,8 @@ mod tests {
         assert_eq!(BTRFS_ITEM_ROOT_ITEM, 132);
         assert_eq!(BTRFS_ITEM_EXTENT_ITEM, 168);
         assert_eq!(BTRFS_ITEM_METADATA_ITEM, 169);
+        assert_eq!(BTRFS_ITEM_TREE_BLOCK_REF, 176);
+        assert_eq!(BTRFS_ITEM_EXTENT_DATA_REF, 178);
         assert_eq!(BTRFS_ITEM_BLOCK_GROUP_ITEM, 192);
         assert_eq!(BTRFS_ITEM_FREE_SPACE_INFO, 198);
         assert_eq!(BTRFS_ITEM_FREE_SPACE_EXTENT, 199);
@@ -12949,6 +13480,9 @@ mod tests {
                     && BTRFS_ITEM_EXTENT_DATA < BTRFS_ITEM_ROOT_ITEM
                     && BTRFS_ITEM_ROOT_ITEM < BTRFS_ITEM_EXTENT_ITEM
                     && BTRFS_ITEM_EXTENT_ITEM < BTRFS_ITEM_METADATA_ITEM
+                    && BTRFS_ITEM_METADATA_ITEM < BTRFS_ITEM_TREE_BLOCK_REF
+                    && BTRFS_ITEM_TREE_BLOCK_REF < BTRFS_ITEM_EXTENT_DATA_REF
+                    && BTRFS_ITEM_EXTENT_DATA_REF < BTRFS_ITEM_BLOCK_GROUP_ITEM
                     && BTRFS_ITEM_METADATA_ITEM < BTRFS_ITEM_BLOCK_GROUP_ITEM
                     && BTRFS_ITEM_BLOCK_GROUP_ITEM < BTRFS_ITEM_FREE_SPACE_INFO
                     && BTRFS_ITEM_FREE_SPACE_INFO < BTRFS_ITEM_FREE_SPACE_EXTENT
@@ -12970,9 +13504,12 @@ mod tests {
                  — these slots must remain free"
             );
             assert!(
-                BTRFS_ITEM_METADATA_ITEM == 169 && BTRFS_ITEM_BLOCK_GROUP_ITEM == 192,
-                "kernel reserves 170..192 for {{TREE_BLOCK_REF=176, EXTENT_DATA_REF=178, \
-                 SHARED_BLOCK_REF=182, SHARED_DATA_REF=184}} — these slots must remain free"
+                BTRFS_ITEM_METADATA_ITEM == 169
+                    && BTRFS_ITEM_TREE_BLOCK_REF == 176
+                    && BTRFS_ITEM_EXTENT_DATA_REF == 178
+                    && BTRFS_ITEM_BLOCK_GROUP_ITEM == 192,
+                "kernel reserves 170..192 for extent backrefs; TREE_BLOCK_REF=176 and \
+                 EXTENT_DATA_REF=178 are intentionally modeled by the allocator"
             );
         }
     }
@@ -13091,6 +13628,8 @@ mod tests {
         // Extent / block-group / chunk management.
         assert_eq!(BTRFS_ITEM_EXTENT_ITEM, 168);
         assert_eq!(BTRFS_ITEM_METADATA_ITEM, 169);
+        assert_eq!(BTRFS_ITEM_TREE_BLOCK_REF, 176);
+        assert_eq!(BTRFS_ITEM_EXTENT_DATA_REF, 178);
         assert_eq!(BTRFS_ITEM_BLOCK_GROUP_ITEM, 192);
         assert_eq!(BTRFS_ITEM_FREE_SPACE_INFO, 198);
         assert_eq!(BTRFS_ITEM_FREE_SPACE_EXTENT, 199);
@@ -13100,7 +13639,7 @@ mod tests {
 
         // Uniqueness invariant: every constant must have a distinct
         // value so the leaf-walk dispatch is unambiguous.
-        let constants: [(&str, u8); 17] = [
+        let constants: [(&str, u8); 19] = [
             ("INODE_ITEM", BTRFS_ITEM_INODE_ITEM),
             ("INODE_REF", BTRFS_ITEM_INODE_REF),
             ("XATTR_ITEM", BTRFS_ITEM_XATTR_ITEM),
@@ -13112,6 +13651,8 @@ mod tests {
             ("ROOT_REF", BTRFS_ITEM_ROOT_REF),
             ("EXTENT_ITEM", BTRFS_ITEM_EXTENT_ITEM),
             ("METADATA_ITEM", BTRFS_ITEM_METADATA_ITEM),
+            ("TREE_BLOCK_REF", BTRFS_ITEM_TREE_BLOCK_REF),
+            ("EXTENT_DATA_REF", BTRFS_ITEM_EXTENT_DATA_REF),
             ("BLOCK_GROUP_ITEM", BTRFS_ITEM_BLOCK_GROUP_ITEM),
             ("FREE_SPACE_INFO", BTRFS_ITEM_FREE_SPACE_INFO),
             ("FREE_SPACE_EXTENT", BTRFS_ITEM_FREE_SPACE_EXTENT),
@@ -13337,5 +13878,122 @@ mod tests {
             10,
             "the reserved tree objectid range must be contiguous 1..=11"
         );
+    }
+
+    #[test]
+    fn cow_node_serialize_leaf_roundtrip() {
+        use ffs_ondisk::{BtrfsHeader, parse_leaf_items, verify_btrfs_tree_block_checksum};
+
+        const INODE_ITEM_KEY: u8 = 1;
+        const DIR_ITEM_KEY: u8 = 84;
+
+        let items = vec![
+            BtrfsTreeItem {
+                key: BtrfsKey {
+                    objectid: 256,
+                    item_type: INODE_ITEM_KEY,
+                    offset: 0,
+                },
+                data: vec![0xAA; 160],
+            },
+            BtrfsTreeItem {
+                key: BtrfsKey {
+                    objectid: 256,
+                    item_type: DIR_ITEM_KEY,
+                    offset: 0x1234,
+                },
+                data: vec![0xBB; 32],
+            },
+        ];
+        let node = BtrfsCowNode::Leaf {
+            items: items.clone(),
+        };
+
+        let params = BtrfsNodeSerializeParams {
+            fsid: [0x11; 16],
+            chunk_tree_uuid: [0x22; 16],
+            bytenr: 0x10000,
+            flags: 0,
+            generation: 100,
+            owner: 5,
+            nodesize: 16384,
+            child_generations: vec![],
+        };
+
+        let buf = node.serialize(&params).expect("serialize should succeed");
+        assert_eq!(buf.len(), 16384);
+
+        verify_btrfs_tree_block_checksum(&buf, ffs_types::BTRFS_CSUM_TYPE_CRC32C)
+            .expect("checksum should be valid");
+
+        let hdr = BtrfsHeader::parse_from_block(&buf).expect("parse header");
+        assert_eq!(hdr.bytenr, 0x10000);
+        assert_eq!(hdr.generation, 100);
+        assert_eq!(hdr.owner, 5);
+        assert_eq!(hdr.nritems, 2);
+        assert_eq!(hdr.level, 0);
+
+        let (_, parsed_items) = parse_leaf_items(&buf).expect("parse should succeed");
+        assert_eq!(parsed_items.len(), 2);
+        assert_eq!(parsed_items[0].key.objectid, 256);
+        assert_eq!(parsed_items[0].key.item_type, INODE_ITEM_KEY);
+        assert_eq!(parsed_items[1].key.objectid, 256);
+        assert_eq!(parsed_items[1].key.item_type, DIR_ITEM_KEY);
+    }
+
+    #[test]
+    fn cow_node_serialize_internal_roundtrip() {
+        use ffs_ondisk::{BtrfsHeader, parse_internal_items, verify_btrfs_tree_block_checksum};
+
+        let keys = vec![
+            BtrfsKey {
+                objectid: 256,
+                item_type: 1,
+                offset: 0,
+            },
+            BtrfsKey {
+                objectid: 512,
+                item_type: 1,
+                offset: 0,
+            },
+        ];
+        let children = vec![0x20000_u64, 0x30000_u64, 0x40000_u64];
+        let node = BtrfsCowNode::Internal {
+            keys,
+            children: children.clone(),
+        };
+
+        let params = BtrfsNodeSerializeParams {
+            fsid: [0x33; 16],
+            chunk_tree_uuid: [0x44; 16],
+            bytenr: 0x50000,
+            flags: 0,
+            generation: 200,
+            owner: 1,
+            nodesize: 16384,
+            child_generations: vec![190, 195, 200],
+        };
+
+        let buf = node.serialize(&params).expect("serialize should succeed");
+        assert_eq!(buf.len(), 16384);
+
+        verify_btrfs_tree_block_checksum(&buf, ffs_types::BTRFS_CSUM_TYPE_CRC32C)
+            .expect("checksum should be valid");
+
+        let hdr = BtrfsHeader::parse_from_block(&buf).expect("parse header");
+        assert_eq!(hdr.bytenr, 0x50000);
+        assert_eq!(hdr.generation, 200);
+        assert_eq!(hdr.owner, 1);
+        assert_eq!(hdr.nritems, 3);
+        assert_eq!(hdr.level, 1);
+
+        let (_, key_ptrs) = parse_internal_items(&buf).expect("parse should succeed");
+        assert_eq!(key_ptrs.len(), 3);
+        assert_eq!(key_ptrs[0].blockptr, 0x20000);
+        assert_eq!(key_ptrs[0].generation, 190);
+        assert_eq!(key_ptrs[1].blockptr, 0x30000);
+        assert_eq!(key_ptrs[1].generation, 195);
+        assert_eq!(key_ptrs[2].blockptr, 0x40000);
+        assert_eq!(key_ptrs[2].generation, 200);
     }
 }
