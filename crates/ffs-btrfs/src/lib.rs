@@ -4,6 +4,17 @@
 //! Builds on `ffs_ondisk::btrfs` parsing primitives. I/O-agnostic —
 //! callers provide a read callback for physical byte access.
 
+pub mod crash_consistency;
+pub mod writeback;
+
+pub use crash_consistency::{
+    CrashConsistencyHarness, CrashConsistencyResult, DporEnumerator, run_dpor_crash_test,
+};
+pub use writeback::{
+    CrashPoint, DagNode, WbI1Oracle, WbI1Violation, WbI2Oracle, WbI2Violation,
+    WriteDependencyDag, WritebackExecutor,
+};
+
 use asupersync::Cx;
 use ffs_mvcc::{CommitError, MvccStore, Transaction};
 pub use ffs_ondisk::btrfs::*;
@@ -196,6 +207,7 @@ impl BtrfsRootItem {
         buf[BTRFS_ROOT_ITEM_FLAGS_OFFSET..BTRFS_ROOT_ITEM_FLAGS_OFFSET + 8]
             .copy_from_slice(&self.flags.to_le_bytes());
         // refs at offset 216 (u32)
+        #[allow(clippy::cast_possible_truncation)]
         let refs_u32 = self.refs.min(u64::from(u32::MAX)) as u32;
         buf[BTRFS_ROOT_ITEM_REFS_OFFSET..BTRFS_ROOT_ITEM_REFS_OFFSET + 4]
             .copy_from_slice(&refs_u32.to_le_bytes());
