@@ -1913,7 +1913,59 @@ fn attach_configured_lane_executed_evidence(
             Err(error) => report.errors.push(error),
         }
     }
+    // C2: validate that pass lanes have green executed evidence
+    validate_executable_lane_pass_requires_evidence(manifest, report);
     report.valid = report.errors.is_empty();
+}
+
+/// C2: A lane can only be 'pass' if backed by ExecutedEvidence with exit_code==0.
+///
+/// For executable proof bundle lanes:
+/// - A lane marked Pass MUST have executed evidence with outcome Success (exit_code 0)
+/// - A lane backed only by checked-in artifact hashes (no evidence) fails validation
+fn validate_executable_lane_pass_requires_evidence(
+    manifest: &ProofBundleManifest,
+    report: &mut ProofBundleValidationReport,
+) {
+    for lane_id in EXECUTABLE_PROOF_BUNDLE_LANES {
+        let Some(lane) = manifest.lanes.iter().find(|l| l.lane_id == lane_id) else {
+            continue;
+        };
+
+        // Only validate pass lanes - other statuses don't require green evidence
+        if lane.status != ProofBundleOutcome::Pass {
+            continue;
+        }
+
+        // Find the evidence for this lane
+        let evidence = report
+            .executed_evidence
+            .iter()
+            .find(|e| e.lane_id == lane_id);
+
+        match evidence {
+            Some(ev) => {
+                // Evidence exists - check exit_code is 0
+                if ev.exit_code != Some(0) {
+                    report.errors.push(format!(
+                        "lane {} is marked pass but ExecutedEvidence exit_code={:?} (expected 0). \
+                         A pass lane requires exit_code==0.",
+                        lane_id,
+                        ev.exit_code
+                    ));
+                }
+            }
+            None => {
+                // No evidence - pass lane must have evidence
+                report.errors.push(format!(
+                    "lane {} is marked pass but has no ExecutedEvidence. \
+                     A pass lane for an executable lane requires fresh executed evidence, \
+                     not just checked-in artifact hashes.",
+                    lane_id
+                ));
+            }
+        }
+    }
 }
 
 fn lane_executed_evidence_command(
@@ -3892,5 +3944,203 @@ mod tests {
             assert!(summary.contains(label), "summary missing {label}");
         }
         Ok(())
+    }
+
+    #[test]
+    fn c2_pass_lane_requires_executed_evidence_exit_code_zero() -> Result<()> {
+        // C2: A pass lane for an executable lane requires ExecutedEvidence with exit_code==0
+        let mut sample = sample_bundle()?;
+        configure_executable_lane_commands(&mut sample.manifest)?;
+
+        // Run validation with execution enabled
+        let report = validate_sample_with_execution(&sample);
+
+        // All executable lanes should have evidence
+        assert!(
+            !report.executed_evidence.is_empty(),
+            "executable lanes should have attached evidence"
+        );
+
+        // Verify pass lanes have exit_code==0
+        for ev in &report.executed_evidence {
+            if is_executable_proof_bundle_lane(&ev.lane_id) {
+                // Our test fixture uses printf which succeeds with exit_code 0
+                assert_eq!(
+                    ev.exit_code,
+                    Some(0),
+                    "pass lane {} should have exit_code==0",
+                    ev.lane_id
+                );
+            }
+        }
+
+        // Report should be valid (all pass lanes have green evidence)
+        assert!(
+            report.valid,
+            "report should be valid when pass lanes have exit_code==0: errors={:?}",
+            report.errors
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn c2_pass_lane_without_evidence_is_rejected() {
+        // C2: A lane backed only by checked-in artifact hashes (no evidence) should fail
+        // This simulates a pass lane without running the actual command
+        let mut report = ProofBundleValidationReport {
+            schema_version: PROOF_BUNDLE_SCHEMA_VERSION,
+            bundle_id: "test".to_owned(),
+            manifest_path: "test.json".to_owned(),
+            valid: true,
+            totals: ProofBundleTotals::default(),
+            missing_required_lanes: Vec::new(),
+            duplicate_lane_ids: Vec::new(),
+            duplicate_scenario_ids: Vec::new(),
+            stale_git_sha: None,
+            stale_timestamp: None,
+            broken_links: Vec::new(),
+            raw_log_hash_mismatches: Vec::new(),
+            artifact_hash_mismatches: Vec::new(),
+            artifact_hash_chain: None,
+            artifact_reports: Vec::new(),
+            redaction_errors: Vec::new(),
+            redaction_leaks: Vec::new(),
+            integrity_errors: Vec::new(),
+            lanes: Vec::new(),
+            lane_provenance: Vec::new(),
+            executed_evidence: Vec::new(), // NO EVIDENCE
+            swarm_evidence: Vec::new(),
+            adaptive_runtime_evidence: Vec::new(),
+            errors: Vec::new(),
+            warnings: Vec::new(),
+            reproduction_command: String::new(),
+        };
+
+        // Create a manifest with a pass lane but no evidence
+        let mut manifest = ProofBundleManifest {
+            schema_version: PROOF_BUNDLE_SCHEMA_VERSION,
+            bundle_id: "test".to_owned(),
+            generated_at: "2026-01-01T00:00:00Z".to_owned(),
+            git_sha: "abc123".to_owned(),
+            toolchain: "test".to_owned(),
+            kernel: "test".to_owned(),
+            mount_capability: "test".to_owned(),
+            required_lanes: Vec::new(),
+            lanes: Vec::new(),
+            redaction: ProofBundleRedactionPolicy::default(),
+            integrity: None,
+        };
+
+        // Add a pass lane for an executable lane
+        manifest.lanes.push(ProofBundleLane {
+            lane_id: "conformance".to_owned(), // executable lane
+            status: ProofBundleOutcome::Pass,
+            raw_log_path: "log.txt".to_owned(),
+            raw_log_sha256: String::new(),
+            summary_path: "summary.txt".to_owned(),
+            scenario_ids: vec!["s1".to_owned()],
+            gate_inputs: vec!["g1".to_owned()],
+            artifacts: Vec::new(),
+            metadata: BTreeMap::new(),
+        });
+
+        // Run the validation
+        validate_executable_lane_pass_requires_evidence(&manifest, &mut report);
+
+        // Should have an error about missing evidence
+        assert!(
+            !report.errors.is_empty(),
+            "pass lane without evidence should generate an error"
+        );
+        assert!(
+            report.errors.iter().any(|e| e.contains("no ExecutedEvidence")),
+            "error should mention missing ExecutedEvidence: {:?}",
+            report.errors
+        );
+    }
+
+    #[test]
+    fn c2_pass_lane_with_nonzero_exit_code_is_rejected() {
+        // C2: A pass lane with exit_code != 0 should fail
+        let mut report = ProofBundleValidationReport {
+            schema_version: PROOF_BUNDLE_SCHEMA_VERSION,
+            bundle_id: "test".to_owned(),
+            manifest_path: "test.json".to_owned(),
+            valid: true,
+            totals: ProofBundleTotals::default(),
+            missing_required_lanes: Vec::new(),
+            duplicate_lane_ids: Vec::new(),
+            duplicate_scenario_ids: Vec::new(),
+            stale_git_sha: None,
+            stale_timestamp: None,
+            broken_links: Vec::new(),
+            raw_log_hash_mismatches: Vec::new(),
+            artifact_hash_mismatches: Vec::new(),
+            artifact_hash_chain: None,
+            artifact_reports: Vec::new(),
+            redaction_errors: Vec::new(),
+            redaction_leaks: Vec::new(),
+            integrity_errors: Vec::new(),
+            lanes: Vec::new(),
+            lane_provenance: Vec::new(),
+            executed_evidence: vec![ProofBundleExecutedEvidenceReport {
+                lane_id: "conformance".to_owned(),
+                command: "false".to_owned(),
+                args: vec![],
+                exit_code: Some(1), // NON-ZERO EXIT
+                stdout_sha256: String::new(),
+                stderr_sha256: String::new(),
+                duration_ms: 0,
+                ran_at: 0,
+                git_sha: "abc".to_owned(),
+                host_class: "ci".to_owned(),
+                outcome: "failed".to_owned(),
+                outcome_detail: Some("exit_code=1".to_owned()),
+            }],
+            swarm_evidence: Vec::new(),
+            adaptive_runtime_evidence: Vec::new(),
+            errors: Vec::new(),
+            warnings: Vec::new(),
+            reproduction_command: String::new(),
+        };
+
+        let mut manifest = ProofBundleManifest {
+            schema_version: PROOF_BUNDLE_SCHEMA_VERSION,
+            bundle_id: "test".to_owned(),
+            generated_at: "2026-01-01T00:00:00Z".to_owned(),
+            git_sha: "abc123".to_owned(),
+            toolchain: "test".to_owned(),
+            kernel: "test".to_owned(),
+            mount_capability: "test".to_owned(),
+            required_lanes: Vec::new(),
+            lanes: Vec::new(),
+            redaction: ProofBundleRedactionPolicy::default(),
+            integrity: None,
+        };
+
+        manifest.lanes.push(ProofBundleLane {
+            lane_id: "conformance".to_owned(),
+            status: ProofBundleOutcome::Pass, // Marked as pass but exit_code=1
+            raw_log_path: "log.txt".to_owned(),
+            raw_log_sha256: String::new(),
+            summary_path: "summary.txt".to_owned(),
+            scenario_ids: vec!["s1".to_owned()],
+            gate_inputs: vec!["g1".to_owned()],
+            artifacts: Vec::new(),
+            metadata: BTreeMap::new(),
+        });
+
+        validate_executable_lane_pass_requires_evidence(&manifest, &mut report);
+
+        assert!(
+            !report.errors.is_empty(),
+            "pass lane with non-zero exit_code should generate an error"
+        );
+        assert!(
+            report.errors.iter().any(|e| e.contains("exit_code") && e.contains("expected 0")),
+            "error should mention exit_code mismatch: {:?}",
+            report.errors
+        );
     }
 }
