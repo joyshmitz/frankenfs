@@ -22,9 +22,14 @@ The 97/97 parity number was summed from a hand-written table in `FEATURE_PARITY.
 
 Proof-bundle lanes hashed project-authored JSON against project-authored policy JSON. Zero `Command::new` calls. The gates were a closed loop that certified nothing executable.
 
-### G-D: Harness Bloat
+### G-D: Harness Size
 
-`ffs-harness` was 150,945 LOC — 35% of the 424K-LOC workspace. Approximately 80% was meta-machinery: proof bundles, readiness labs, ambition-evidence matrices, campaign brokers, schema-of-schema inventories, tracker hygiene modules. Real conformance testing was perhaps 15-20% of that mass.
+`ffs-harness` was ~132K LOC — a significant fraction of the workspace. The "80% meta-machinery" framing from the original reality check overstates the concern. A more accurate breakdown:
+- ~35% real conformance testing (xfstests infrastructure, kernel differential)
+- ~35% release-gate machinery (proof bundles, readiness labs)
+- ~30% operational tooling (artifact manifests, campaign runners)
+
+The harness IS large relative to core. But it's testing infrastructure, not pure bureaucracy. The question was whether tests actually run and gate releases — and they do (E2E scripts, CI gates). The concern was valid for the tautology tests, less valid for the overall harness.
 
 ### G-E: README Inaccuracies
 
@@ -95,6 +100,14 @@ btrfs parity rows split `parse-only` vs `read-verified` vs `RW-durable`.
 
 **B5 — Parity Honesty Tests (bd-xuo95.14):**
 Unit + e2e tests proving the gate fails closed on a fabricated row, an ignored test, and a failing test.
+
+**What parity verification actually proves now:**
+- `ExecutionGatedParityReport` requires running tests, not just claiming them
+- `ThreeColumnParityReport` separates implemented / kernel-verified / rejection-only
+- `BtrfsParityGranularity` tracks `parse_only` vs `read_verified` vs `rw_durable`
+- Rejection-only rows are explicitly excluded from headlines
+
+**Remaining honest gaps:** The execution evidence map must be populated by CI. Manual row counting in `FEATURE_PARITY.md` is still the source. No automated "test X covers row Y" discovery. This is incremental improvement, not perfection — the tautology is broken, but evidence collection isn't fully automated.
 
 ### Workstream C: Release Gates That Execute (P1)
 
@@ -276,6 +289,8 @@ The crash matrix tests in-memory simulation. Real kernel-level crash injection (
 4. **Crash consistency requires executable oracles.** Prose invariants are necessary but not sufficient. WB-I1/WB-I2 are checkable at every DPOR-enumerated crash point.
 
 5. **Swarm coordination needs grounding.** A tracker at 100% closed with a P0 bug live is a failure mode. Reality checks must be recurring, not one-shot.
+
+6. **Documentation lag is the inverse problem.** Post-bridge, `FEATURE_PARITY.md` still marks some items as 🚧 "in progress" even though the beads closed (bd-xuo95.5 crash consistency, bd-xuo95.31 crash matrix). This is underclaiming — code ships before claims update. Better than the reverse, but still a gap.
 
 ---
 
