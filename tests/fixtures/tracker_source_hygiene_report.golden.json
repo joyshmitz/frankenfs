@@ -689,6 +689,7 @@
     "jq -s '[.[] | select(((.id // \"\") | test(\"^(bd|frankenfs)-\") | not) and ((.status // \"open\") == \"open\")) | {id,title,status,priority,source_repo}]' .beads/issues.jsonl",
     "jq -s '[.[] | select(((.id // \"\") | test(\"^(bd|frankenfs)-\")) and ((.status // \"open\") == \"open\")) | {id,title,status,priority,issue_type,assignee,owner}] | sort_by(.priority, .id)' .beads/issues.jsonl",
     "jq -c 'select(((.id // \"\") | test(\"^(bd|frankenfs)-\")) and ((.status // \"open\") == \"open\"))' .beads/issues.jsonl > tracker_source_hygiene_local_open.jsonl",
+    "mkdir -p /data/tmp/ffs-source-aware-bv/.beads && jq -c 'select((.id // \"\") | test(\"^(bd|frankenfs)-\"))' .beads/issues.jsonl > /data/tmp/ffs-source-aware-bv/.beads/issues.jsonl && BEADS_DIR=/data/tmp/ffs-source-aware-bv/.beads br --db /data/tmp/ffs-source-aware-bv/.beads/beads.db sync --import-only --orphans allow --json && bv --no-cache --db /data/tmp/ffs-source-aware-bv/.beads --robot-triage",
     "XFSTESTS_REAL_RUN_ACK=xfstests-may-mutate-test-and-scratch-devices ./scripts/e2e/ffs_tracker_source_hygiene_e2e.sh",
     "FFS_ENABLE_PERMISSIONED_SWARM_WORKLOAD=1 FFS_SWARM_WORKLOAD_REAL_RUN_ACK=swarm-workload-may-use-permissioned-large-host ./scripts/e2e/ffs_tracker_source_hygiene_e2e.sh",
     "TRACKER_SOURCE_HYGIENE_STRICT=1 ./scripts/e2e/ffs_tracker_source_hygiene_e2e.sh"

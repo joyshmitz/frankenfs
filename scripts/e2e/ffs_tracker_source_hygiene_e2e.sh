@@ -41,6 +41,11 @@ LOCAL_NONCLAIMABLE_JSONL="${E2E_LOG_DIR}/tracker_source_hygiene_local_nonclaimab
 LOCAL_OPEN_SHA256="${LOCAL_OPEN_JSONL}.sha256"
 SOURCE_AWARE_READY_SHA256="${SOURCE_AWARE_READY_JSONL}.sha256"
 LOCAL_NONCLAIMABLE_SHA256="${LOCAL_NONCLAIMABLE_JSONL}.sha256"
+BV_SOURCE_AWARE_ROOT="${E2E_TEMP_DIR}/tracker_source_hygiene_bv_source_aware"
+BV_SOURCE_AWARE_BEADS_DIR="${BV_SOURCE_AWARE_ROOT}/.beads"
+BV_SOURCE_AWARE_ISSUES_JSONL="${BV_SOURCE_AWARE_BEADS_DIR}/issues.jsonl"
+BV_SOURCE_AWARE_IMPORT_JSON="${E2E_LOG_DIR}/tracker_source_hygiene_bv_source_aware_import.json"
+BV_SOURCE_AWARE_TRIAGE_JSON="${E2E_LOG_DIR}/tracker_source_hygiene_bv_source_aware_triage.json"
 STRICT_MODE=0
 STRICT_JSON=false
 STALE_IN_PROGRESS_SECONDS="${TRACKER_SOURCE_HYGIENE_STALE_IN_PROGRESS_SECONDS:-21600}"
@@ -558,6 +563,7 @@ if jq -s \
             "jq -s '\''[.[] | select(((.id // \"\") | test(\"^(bd|frankenfs)-\") | not) and ((.status // \"open\") == \"open\")) | {id,title,status,priority,source_repo}]'\'' .beads/issues.jsonl",
             "jq -s '\''[.[] | select(((.id // \"\") | test(\"^(bd|frankenfs)-\")) and ((.status // \"open\") == \"open\")) | {id,title,status,priority,issue_type,assignee,owner}] | sort_by(.priority, .id)'\'' .beads/issues.jsonl",
             "jq -c '\''select(((.id // \"\") | test(\"^(bd|frankenfs)-\")) and ((.status // \"open\") == \"open\"))'\'' .beads/issues.jsonl > tracker_source_hygiene_local_open.jsonl",
+            "mkdir -p /data/tmp/ffs-source-aware-bv/.beads && jq -c '\''select((.id // \"\") | test(\"^(bd|frankenfs)-\"))'\'' .beads/issues.jsonl > /data/tmp/ffs-source-aware-bv/.beads/issues.jsonl && BEADS_DIR=/data/tmp/ffs-source-aware-bv/.beads br --db /data/tmp/ffs-source-aware-bv/.beads/beads.db sync --import-only --orphans allow --json && bv --no-cache --db /data/tmp/ffs-source-aware-bv/.beads --robot-triage",
             "XFSTESTS_REAL_RUN_ACK=xfstests-may-mutate-test-and-scratch-devices ./scripts/e2e/ffs_tracker_source_hygiene_e2e.sh",
             "FFS_ENABLE_PERMISSIONED_SWARM_WORKLOAD=1 FFS_SWARM_WORKLOAD_REAL_RUN_ACK=swarm-workload-may-use-permissioned-large-host ./scripts/e2e/ffs_tracker_source_hygiene_e2e.sh",
             "TRACKER_SOURCE_HYGIENE_STRICT=1 ./scripts/e2e/ffs_tracker_source_hygiene_e2e.sh"
@@ -642,6 +648,7 @@ FOREIGN_STALE_IN_PROGRESS_COUNT="$(jq -r '.excluded_foreign_stale_in_progress_co
 LOCAL_OPEN_COUNT="$(jq -r '.local_open' "$REPORT_JSON")"
 READY_COUNT="$(jq -r '.source_aware_ready_rows | length' "$REPORT_JSON")"
 LOCAL_NONCLAIMABLE_COUNT="$(jq -r '.local_nonclaimable_rows | length' "$REPORT_JSON")"
+LOCAL_IN_PROGRESS_COUNT="$(jq -r '.source_aware_queue_state.local_in_progress_count' "$REPORT_JSON")"
 if [[ "$FOREIGN_OPEN_COUNT" =~ ^[0-9]+$ && "$LOCAL_OPEN_COUNT" =~ ^[0-9]+$ ]]; then
     scenario_result "tracker_source_hygiene_foreign_rows_classified" "PASS" "local_open=${LOCAL_OPEN_COUNT} source_aware_ready=${READY_COUNT} foreign_open=${FOREIGN_OPEN_COUNT}"
 else
@@ -681,6 +688,86 @@ if jq -s --slurpfile report "$REPORT_JSON" '
     scenario_result "tracker_source_hygiene_local_graph_exports_valid" "PASS" "local_open=${LOCAL_OPEN_COUNT} source_aware_ready=${READY_COUNT}"
 else
     scenario_result "tracker_source_hygiene_local_graph_exports_valid" "FAIL" "local graph export validation failed"
+fi
+
+e2e_step "Verify source-aware bv triage"
+if command -v br >/dev/null 2>&1 && command -v bv >/dev/null 2>&1; then
+    if mkdir -p "$BV_SOURCE_AWARE_BEADS_DIR" \
+        && jq -c -s '
+            def local_id($id):
+                (($id // "") | test("^(bd|frankenfs)-"));
+            def normalize_row:
+                (.id // "") as $issue_id
+                | .description = (.description // .notes // "")
+                | .status = (.status // "open")
+                | .priority = (.priority // 2)
+                | .issue_type = (.issue_type // "task")
+                | .created_at = (.created_at // "2026-01-01T00:00:00Z")
+                | .created_by = (.created_by // "tracker-source-hygiene-e2e")
+                | .updated_at = (.updated_at // .created_at)
+                | .source_repo = (.source_repo // ".")
+                | .compaction_level = (.compaction_level // 0)
+                | .original_size = (.original_size // 0)
+                | .labels = (.labels // [])
+                | .dependencies = (
+                    (.dependencies // [])
+                    | map(
+                        select(local_id(.depends_on_id))
+                        | .issue_id = (.issue_id // $issue_id)
+                        | .created_at = (.created_at // "2026-01-01T00:00:00Z")
+                        | .created_by = (.created_by // "tracker-source-hygiene-e2e")
+                        | .metadata = (.metadata // "{}")
+                        | .thread_id = (.thread_id // "")
+                    )
+                );
+            def synthetic_dependency($id):
+                {
+                    id: $id,
+                    title: "Synthetic local dependency placeholder for source-aware bv import",
+                    description: "Generated only inside the tracker-source-hygiene E2E temp Beads DB so bv can preserve a local orphan dependency edge.",
+                    status: "closed",
+                    priority: 4,
+                    issue_type: "task",
+                    created_at: "2026-01-01T00:00:00Z",
+                    created_by: "tracker-source-hygiene-e2e",
+                    updated_at: "2026-01-01T00:00:00Z",
+                    closed_at: "2026-01-01T00:00:00Z",
+                    close_reason: "Synthetic temp-only dependency closure row",
+                    source_repo: ".",
+                    compaction_level: 0,
+                    original_size: 0,
+                    labels: ["tracker-source-hygiene", "synthetic-temp"],
+                    dependencies: []
+                };
+            ([.[] | select(local_id(.id))] | sort_by(.id)) as $local_rows
+            | ($local_rows | map(.id) | unique) as $local_ids
+            | ($local_rows | [ .[] | (.dependencies // [])[]? | .depends_on_id // empty | select(local_id(.)) ] | unique) as $dependency_ids
+            | ($dependency_ids - $local_ids) as $missing_ids
+            | (($local_rows | map(normalize_row)) + ($missing_ids | map(synthetic_dependency(.))))[]
+            ' "$ISSUES_JSONL" >"$BV_SOURCE_AWARE_ISSUES_JSONL" \
+        && BEADS_DIR="$BV_SOURCE_AWARE_BEADS_DIR" br --db "$BV_SOURCE_AWARE_BEADS_DIR/beads.db" sync --import-only --orphans allow --json >"$BV_SOURCE_AWARE_IMPORT_JSON" \
+        && bv --no-cache --db "$BV_SOURCE_AWARE_BEADS_DIR" --robot-triage >"$BV_SOURCE_AWARE_TRIAGE_JSON" \
+        && jq -e \
+            --argjson local_open "$LOCAL_OPEN_COUNT" \
+            --argjson local_in_progress "$LOCAL_IN_PROGRESS_COUNT" \
+            '
+            (($local_open + $local_in_progress) as $expected_open
+            | (.triage.meta.issue_count >= $expected_open)
+            and (.triage.quick_ref.open_count == $expected_open)
+            and (.triage.project_health.counts.total >= $expected_open)
+            and ([
+                (.triage.quick_ref.top_picks[]?.id // empty),
+                (.triage.recommendations[]?.id // empty),
+                (.triage.quick_wins[]?.id // empty),
+                (.triage.blockers_to_clear[]?.id // empty)
+            ] | all(test("^(bd|frankenfs)-"))))
+            ' "$BV_SOURCE_AWARE_TRIAGE_JSON" >/dev/null; then
+        scenario_result "tracker_source_hygiene_bv_source_aware_triage_clean" "PASS" "triage=$BV_SOURCE_AWARE_TRIAGE_JSON local_open=${LOCAL_OPEN_COUNT} local_in_progress=${LOCAL_IN_PROGRESS_COUNT}"
+    else
+        scenario_result "tracker_source_hygiene_bv_source_aware_triage_clean" "FAIL" "source-aware bv triage failed"
+    fi
+else
+    scenario_result "tracker_source_hygiene_bv_source_aware_triage_clean" "FAIL" "br or bv not found"
 fi
 
 if jq -s --slurpfile report "$REPORT_JSON" '

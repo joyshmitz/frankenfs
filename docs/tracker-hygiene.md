@@ -121,14 +121,41 @@ The same run writes local-only JSONL graph inputs next to the report:
 
 - `tracker_source_hygiene_local_open.jsonl`
 - `tracker_source_hygiene_source_aware_ready.jsonl`
+- `tracker_source_hygiene_local_nonclaimable.jsonl`
 - matching `.sha256` checksum files
 
 Use these exports when a graph or ready-work tool reads the contaminated full
-JSONL store. `local_open` contains full original FrankenFS-local open rows,
-including dependencies. `source_aware_ready` contains only claimable local rows:
+JSONL store. `local_open` contains compact FrankenFS-local open work rows.
+`source_aware_ready` contains only claimable local rows:
 it excludes epics, blocked rows, foreign-looking rows, and permission-gated
-rows until the required ACK is present. These artifacts are copies; generating
-them does not close, rewrite, delete, or rename any tracker row.
+rows until the required ACK is present. `local_nonclaimable` explains the
+local open rows that are not claimable because they are epics, blocked, or
+permission-gated. These artifacts are copies; generating them does not close,
+rewrite, delete, or rename any tracker row.
+
+When `bv --robot-triage` needs a clean FrankenFS-only graph, do not point it at
+the polluted live `.beads` store. Materialize an offline `.beads` view from
+full local-prefix rows, import that copy into a temp Beads DB, and pass that
+temp `.beads` directory to `bv --db`. Including all local-prefix rows preserves
+closed dependency context while still excluding foreign-project rows:
+
+```bash
+mkdir -p /data/tmp/ffs-source-aware-bv/.beads
+jq -c 'select((.id // "") | test("^(bd|frankenfs)-"))' .beads/issues.jsonl \
+  > /data/tmp/ffs-source-aware-bv/.beads/issues.jsonl
+BEADS_DIR=/data/tmp/ffs-source-aware-bv/.beads \
+  br --db /data/tmp/ffs-source-aware-bv/.beads/beads.db \
+  sync --import-only --orphans allow --json
+bv --no-cache --db /data/tmp/ffs-source-aware-bv/.beads --robot-triage
+```
+
+The E2E wrapper validates this path with
+`tracker_source_hygiene_bv_source_aware_triage_clean`: the `bv` open count must
+match local open plus local in-progress rows, total issue counts must cover that
+active local set, and every emitted recommendation/top-pick/blocker ID must
+match the FrankenFS local ID prefixes. This is the acceptance path for graph
+analysis under closed-row pollution; raw `bv` over the live store remains
+diagnostic only until the contaminated history is reconciled by its owner.
 
 `foreign_reconciliation_plan` is also report-only. It turns each foreign group
 into an owner-handoff packet with the recommended Agent Mail thread, owner
