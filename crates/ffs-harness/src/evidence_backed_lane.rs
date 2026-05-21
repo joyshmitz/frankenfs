@@ -24,7 +24,7 @@ pub struct EvidenceBackedLane {
 impl EvidenceBackedLane {
     /// Derive lane outcome from execution evidence.
     fn outcome_from_evidence(evidence: &ExecutedEvidence) -> ProofBundleOutcome {
-        match &evidence.outcome {
+        match evidence.outcome() {
             ExecutionOutcome::Success => ProofBundleOutcome::Pass,
             ExecutionOutcome::Failed { .. } | ExecutionOutcome::Signaled => {
                 ProofBundleOutcome::Fail
@@ -35,10 +35,10 @@ impl EvidenceBackedLane {
     }
 
     fn build_summary(lane_id: &str, evidence: &ExecutedEvidence) -> String {
-        let status = match &evidence.outcome {
+        let status = match evidence.outcome() {
             ExecutionOutcome::Success => "passed",
             ExecutionOutcome::Failed { exit_code } => {
-                let stdout_sha256 = &evidence.stdout_sha256;
+                let stdout_sha256 = evidence.stdout_sha256();
                 return format!(
                     "lane {lane_id} failed with exit code {exit_code}; stdout_sha256={stdout_sha256}"
                 );
@@ -55,10 +55,10 @@ impl EvidenceBackedLane {
             "lane {} {}; command={} exit_code={:?} duration_ms={} stdout_sha256={}",
             lane_id,
             status,
-            evidence.command,
-            evidence.exit_code,
-            evidence.duration_ms,
-            evidence.stdout_sha256
+            evidence.command(),
+            evidence.exit_code(),
+            evidence.duration_ms(),
+            evidence.stdout_sha256()
         )
     }
 }
@@ -280,7 +280,11 @@ impl EvidenceBackedLaneReport {
             .iter()
             .filter(|l| l.outcome == ProofBundleOutcome::Error)
             .count();
-        let all_passed = fail_count == 0 && error_count == 0;
+        let all_passed = !lanes.is_empty()
+            && pass_count == lanes.len()
+            && fail_count == 0
+            && skip_count == 0
+            && error_count == 0;
 
         Self {
             lanes,
@@ -301,7 +305,7 @@ mod tests {
     #[test]
     fn outcome_from_evidence_maps_success_to_pass() {
         let evidence = ExecutedEvidence::run("true", &[]);
-        assert!(evidence.outcome.is_success());
+        assert!(evidence.outcome().is_success());
         assert_eq!(
             EvidenceBackedLane::outcome_from_evidence(&evidence),
             ProofBundleOutcome::Pass
@@ -311,7 +315,7 @@ mod tests {
     #[test]
     fn outcome_from_evidence_maps_failure_to_fail() {
         let evidence = ExecutedEvidence::run("false", &[]);
-        assert!(evidence.outcome.is_failure());
+        assert!(evidence.outcome().is_failure());
         assert_eq!(
             EvidenceBackedLane::outcome_from_evidence(&evidence),
             ProofBundleOutcome::Fail
@@ -322,7 +326,7 @@ mod tests {
     fn outcome_from_evidence_maps_skipped_to_skip() {
         let evidence =
             ExecutedEvidence::run_with_prerequisite("true", &[], || Err("test skip".to_string()));
-        assert!(evidence.outcome.is_skipped());
+        assert!(evidence.outcome().is_skipped());
         assert_eq!(
             EvidenceBackedLane::outcome_from_evidence(&evidence),
             ProofBundleOutcome::Skip
@@ -333,7 +337,7 @@ mod tests {
     fn outcome_from_evidence_maps_launch_failure_to_error() {
         let evidence = ExecutedEvidence::run("nonexistent_command_xyz_123", &[]);
         assert!(matches!(
-            evidence.outcome,
+            evidence.outcome(),
             ExecutionOutcome::LaunchFailed { .. }
         ));
         assert_eq!(
@@ -355,12 +359,12 @@ mod tests {
 
         assert_eq!(result.lane_id, "test_lane");
         assert_eq!(result.outcome, ProofBundleOutcome::Pass);
-        assert_eq!(result.evidence.command, "echo");
-        assert_eq!(result.evidence.args, vec!["hello"]);
-        assert_eq!(result.evidence.exit_code, Some(0));
-        assert!(result.evidence.outcome.is_success());
-        assert!(!result.evidence.stdout_sha256.is_empty());
-        assert!(!result.evidence.git_sha.is_empty());
+        assert_eq!(result.evidence.command(), "echo");
+        assert_eq!(result.evidence.args(), ["hello"]);
+        assert_eq!(result.evidence.exit_code(), Some(0));
+        assert!(result.evidence.outcome().is_success());
+        assert!(!result.evidence.stdout_sha256().is_empty());
+        assert!(!result.evidence.git_sha().is_empty());
         assert!(result.summary.contains("passed"));
         assert!(result.summary.contains("stdout_sha256="));
     }
@@ -378,8 +382,8 @@ mod tests {
 
         assert_eq!(result.lane_id, "fail_lane");
         assert_eq!(result.outcome, ProofBundleOutcome::Fail);
-        assert_eq!(result.evidence.exit_code, Some(1));
-        assert!(result.evidence.outcome.is_failure());
+        assert_eq!(result.evidence.exit_code(), Some(1));
+        assert!(result.evidence.outcome().is_failure());
         assert!(result.summary.contains("failed"));
         assert!(result.summary.contains("exit code 1"));
     }
@@ -397,8 +401,8 @@ mod tests {
 
         assert_eq!(result.lane_id, "gated_lane");
         assert_eq!(result.outcome, ProofBundleOutcome::Skip);
-        assert!(result.evidence.outcome.is_skipped());
-        assert_eq!(result.evidence.duration_ms, 0);
+        assert!(result.evidence.outcome().is_skipped());
+        assert_eq!(result.evidence.duration_ms(), 0);
         assert!(result.summary.contains("skipped"));
         assert!(result.summary.contains("capability missing"));
     }
@@ -415,7 +419,7 @@ mod tests {
         let result = execute_lane(&lane_cmd);
 
         assert_eq!(result.outcome, ProofBundleOutcome::Pass);
-        assert!(result.evidence.outcome.is_success());
+        assert!(result.evidence.outcome().is_success());
     }
 
     #[test]
@@ -488,7 +492,31 @@ mod tests {
     }
 
     #[test]
-    fn evidence_backed_lane_report_all_passed_when_no_failures() {
+    fn evidence_backed_lane_report_all_passed_when_every_lane_passes() {
+        let lanes = vec![
+            EvidenceBackedLane {
+                lane_id: "pass1".to_string(),
+                outcome: ProofBundleOutcome::Pass,
+                evidence: ExecutedEvidence::run("true", &[]),
+                summary: "passed".to_string(),
+            },
+            EvidenceBackedLane {
+                lane_id: "pass2".to_string(),
+                outcome: ProofBundleOutcome::Pass,
+                evidence: ExecutedEvidence::run("true", &[]),
+                summary: "passed".to_string(),
+            },
+        ];
+
+        let report = EvidenceBackedLaneReport::from_lanes(lanes);
+
+        assert!(report.all_passed);
+        assert_eq!(report.pass_count, 2);
+        assert_eq!(report.skip_count, 0);
+    }
+
+    #[test]
+    fn evidence_backed_lane_report_not_all_passed_when_any_lane_skips() {
         let lanes = vec![
             EvidenceBackedLane {
                 lane_id: "pass1".to_string(),
@@ -508,9 +536,18 @@ mod tests {
 
         let report = EvidenceBackedLaneReport::from_lanes(lanes);
 
-        assert!(report.all_passed);
+        assert!(!report.all_passed);
         assert_eq!(report.pass_count, 1);
         assert_eq!(report.skip_count, 1);
+    }
+
+    #[test]
+    fn evidence_backed_lane_report_empty_lanes_are_not_all_passed() {
+        let report = EvidenceBackedLaneReport::from_lanes(Vec::new());
+
+        assert!(!report.all_passed);
+        assert_eq!(report.pass_count, 0);
+        assert_eq!(report.skip_count, 0);
     }
 
     #[test]
@@ -524,8 +561,8 @@ mod tests {
 
         let result = execute_lane(&lane_cmd);
 
-        assert!(!result.evidence.git_sha.is_empty());
-        assert!(!matches!(result.evidence.host_class, HostClass::Unknown));
+        assert!(!result.evidence.git_sha().is_empty());
+        assert!(!matches!(result.evidence.host_class(), HostClass::Unknown));
     }
 
     #[test]
@@ -584,7 +621,7 @@ mod tests {
             result.outcome,
             result.summary
         );
-        assert!(result.evidence.outcome.is_skipped());
+        assert!(result.evidence.outcome().is_skipped());
         assert!(result.summary.contains("skipped"));
     }
 }

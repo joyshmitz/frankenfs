@@ -8,3 +8,9 @@ fn executed_evidence_cannot_be_deserialized() {
     let t = trybuild::TestCases::new();
     t.compile_fail("tests/ui/executed_evidence_no_deserialize.rs");
 }
+
+#[test]
+fn executed_evidence_cannot_be_directly_constructed() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/ui/executed_evidence_direct_construct.rs");
+}

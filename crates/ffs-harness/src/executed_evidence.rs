@@ -20,25 +20,25 @@ use tracing::{debug, info, warn};
 #[derive(Debug, Clone, Serialize)]
 pub struct ExecutedEvidence {
     /// The command that was executed (e.g., "cargo", "/bin/bash").
-    pub command: String,
+    command: String,
     /// Arguments passed to the command.
-    pub args: Vec<String>,
+    args: Vec<String>,
     /// Process exit code (None if terminated by signal).
-    pub exit_code: Option<i32>,
-    /// BLAKE3 hash of stdout as hex string.
-    pub stdout_sha256: String,
-    /// BLAKE3 hash of stderr as hex string.
-    pub stderr_sha256: String,
+    exit_code: Option<i32>,
+    /// SHA-256 hash of stdout as hex string.
+    stdout_sha256: String,
+    /// SHA-256 hash of stderr as hex string.
+    stderr_sha256: String,
     /// Execution duration in milliseconds.
-    pub duration_ms: u64,
+    duration_ms: u64,
     /// Unix timestamp (seconds since epoch) when execution started.
-    pub ran_at: u64,
+    ran_at: u64,
     /// Git commit SHA at execution time.
-    pub git_sha: String,
+    git_sha: String,
     /// Host classification for capability gating.
-    pub host_class: HostClass,
+    host_class: HostClass,
     /// Execution outcome classification.
-    pub outcome: ExecutionOutcome,
+    outcome: ExecutionOutcome,
 }
 
 /// Host capability classification for execution gating.
@@ -94,6 +94,66 @@ impl ExecutionOutcome {
 }
 
 impl ExecutedEvidence {
+    /// Command that was executed.
+    #[must_use]
+    pub fn command(&self) -> &str {
+        &self.command
+    }
+
+    /// Arguments passed to the command.
+    #[must_use]
+    pub fn args(&self) -> &[String] {
+        &self.args
+    }
+
+    /// Process exit code, if the process exited normally.
+    #[must_use]
+    pub const fn exit_code(&self) -> Option<i32> {
+        self.exit_code
+    }
+
+    /// SHA-256 hash of captured stdout.
+    #[must_use]
+    pub fn stdout_sha256(&self) -> &str {
+        &self.stdout_sha256
+    }
+
+    /// SHA-256 hash of captured stderr.
+    #[must_use]
+    pub fn stderr_sha256(&self) -> &str {
+        &self.stderr_sha256
+    }
+
+    /// Execution duration in milliseconds.
+    #[must_use]
+    pub const fn duration_ms(&self) -> u64 {
+        self.duration_ms
+    }
+
+    /// Unix timestamp when execution started.
+    #[must_use]
+    pub const fn ran_at(&self) -> u64 {
+        self.ran_at
+    }
+
+    /// Git commit SHA at execution time.
+    #[must_use]
+    pub fn git_sha(&self) -> &str {
+        &self.git_sha
+    }
+
+    /// Host classification for capability gating.
+    #[must_use]
+    pub const fn host_class(&self) -> HostClass {
+        self.host_class
+    }
+
+    /// Execution outcome classification.
+    #[must_use]
+    pub const fn outcome(&self) -> &ExecutionOutcome {
+        &self.outcome
+    }
+
     /// Execute a command and capture evidence.
     ///
     /// This is the ONLY way to construct `ExecutedEvidence`. The process is
@@ -410,16 +470,14 @@ mod tests {
             Err("missing FUSE capability".to_string())
         });
 
-        assert!(evidence.outcome.is_skipped());
-        assert!(!evidence.outcome.is_success());
-        assert!(!evidence.outcome.is_failure());
-        assert_eq!(evidence.duration_ms, 0);
-
-        if let ExecutionOutcome::Skipped { reason } = &evidence.outcome {
-            assert_eq!(reason, "missing FUSE capability");
-        } else {
-            panic!("expected Skipped outcome");
-        }
+        assert!(evidence.outcome().is_skipped());
+        assert!(!evidence.outcome().is_success());
+        assert!(!evidence.outcome().is_failure());
+        assert_eq!(evidence.duration_ms(), 0);
+        assert!(matches!(
+            evidence.outcome(),
+            ExecutionOutcome::Skipped { reason } if reason == "missing FUSE capability"
+        ));
     }
 
     #[test]

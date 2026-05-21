@@ -1214,7 +1214,7 @@ mod tests {
         for (name, addr) in [("root", sb.root), ("chunk_root", sb.chunk_root)] {
             let mapping = ffs_ondisk::map_logical_to_physical(&chunks, addr)
                 .expect("mapping ok")
-                .unwrap_or_else(|| panic!("{name} should be covered"));
+                .expect("bootstrap root should be covered");
             assert_eq!(mapping.devid, 1, "{name} devid");
             assert_eq!(mapping.physical, 0x10_0000 + addr, "{name} physical");
         }
@@ -1775,7 +1775,7 @@ mod tests {
         // Only rows with green evidence count as implemented
         // Rows with red evidence go to missing_evidence_rows
         assert!(report.total_rows > 0);
-        assert!(report.evidence_git_sha == Some("abc123".to_string()));
+        assert_eq!(report.evidence_git_sha, Some("abc123".to_string()));
     }
 
     #[test]

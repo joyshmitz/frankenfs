@@ -1801,20 +1801,20 @@ impl ProofBundleReportBuilder {
 }
 
 impl ProofBundleExecutedEvidenceReport {
-    fn from_executed_evidence(lane_id: &str, evidence: ExecutedEvidence) -> Self {
-        let host_class = executed_evidence_host_class_label(evidence.host_class).to_owned();
-        let outcome = executed_evidence_outcome_label(&evidence.outcome).to_owned();
-        let outcome_detail = executed_evidence_outcome_detail(&evidence.outcome);
+    fn from_executed_evidence(lane_id: &str, evidence: &ExecutedEvidence) -> Self {
+        let host_class = executed_evidence_host_class_label(evidence.host_class()).to_owned();
+        let outcome = executed_evidence_outcome_label(evidence.outcome()).to_owned();
+        let outcome_detail = executed_evidence_outcome_detail(evidence.outcome());
         Self {
             lane_id: lane_id.to_owned(),
-            command: evidence.command,
-            args: evidence.args,
-            exit_code: evidence.exit_code,
-            stdout_sha256: evidence.stdout_sha256,
-            stderr_sha256: evidence.stderr_sha256,
-            duration_ms: evidence.duration_ms,
-            ran_at: evidence.ran_at,
-            git_sha: evidence.git_sha,
+            command: evidence.command().to_owned(),
+            args: evidence.args().to_vec(),
+            exit_code: evidence.exit_code(),
+            stdout_sha256: evidence.stdout_sha256().to_owned(),
+            stderr_sha256: evidence.stderr_sha256().to_owned(),
+            duration_ms: evidence.duration_ms(),
+            ran_at: evidence.ran_at(),
+            git_sha: evidence.git_sha().to_owned(),
             host_class,
             outcome,
             outcome_detail,
@@ -1961,9 +1961,9 @@ fn attach_configured_lane_executed_evidence(
                 let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
                 let evidence = ExecutedEvidence::run(&command, &arg_refs);
                 let launch_failed =
-                    matches!(&evidence.outcome, ExecutionOutcome::LaunchFailed { .. });
+                    matches!(evidence.outcome(), ExecutionOutcome::LaunchFailed { .. });
                 let evidence_report =
-                    ProofBundleExecutedEvidenceReport::from_executed_evidence(lane_id, evidence);
+                    ProofBundleExecutedEvidenceReport::from_executed_evidence(lane_id, &evidence);
                 if launch_failed {
                     report.errors.push(format!(
                         "lane {lane_id} configured ExecutedEvidence command failed to launch: {} {:?}",

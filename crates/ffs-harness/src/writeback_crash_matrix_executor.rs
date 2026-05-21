@@ -76,7 +76,7 @@ impl ExecutedWritebackCrashMatrixReport {
     #[must_use]
     pub fn is_executed_and_accepted(&self) -> bool {
         let evidence_ran = matches!(
-            self.evidence.outcome,
+            self.evidence.outcome(),
             ExecutionOutcome::Success
                 | ExecutionOutcome::Failed { .. }
                 | ExecutionOutcome::Signaled

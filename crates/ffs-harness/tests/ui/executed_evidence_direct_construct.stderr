@@ -1,0 +1,25 @@
+error[E0451]: fields `command`, `args`, `exit_code`, `stdout_sha256`, `stderr_sha256`, `duration_ms`, `ran_at`, `git_sha`, `host_class` and `outcome` of struct `ffs_harness::executed_evidence::ExecutedEvidence` are private
+  --> tests/ui/executed_evidence_direct_construct.rs:8:9
+   |
+ 7 |     let _evidence = ExecutedEvidence {
+   |                     ---------------- in this type
+ 8 |         command: "true".to_string(),
+   |         ^^^^^^^ private field
+ 9 |         args: Vec::new(),
+   |         ^^^^ private field
+10 |         exit_code: Some(0),
+   |         ^^^^^^^^^ private field
+11 |         stdout_sha256: "0".repeat(64),
+   |         ^^^^^^^^^^^^^ private field
+12 |         stderr_sha256: "0".repeat(64),
+   |         ^^^^^^^^^^^^^ private field
+13 |         duration_ms: 0,
+   |         ^^^^^^^^^^^ private field
+14 |         ran_at: 0,
+   |         ^^^^^^ private field
+15 |         git_sha: "forged".to_string(),
+   |         ^^^^^^^ private field
+16 |         host_class: HostClass::Full,
+   |         ^^^^^^^^^^ private field
+17 |         outcome: ExecutionOutcome::Success,
+   |         ^^^^^^^ private field
