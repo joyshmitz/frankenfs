@@ -218,6 +218,122 @@ fn coverage_domains_from_feature_parity(markdown: &str) -> Vec<CoverageDomain> {
     domains
 }
 
+/// A capability row from the Tracked Capability Matrix.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CapabilityRow {
+    pub capability: String,
+    pub legacy_reference: String,
+    pub status: String,
+    pub notes: String,
+    pub has_test_citation: bool,
+}
+
+impl CapabilityRow {
+    fn has_concrete_test_citation(notes: &str) -> bool {
+        notes.contains("tests/")
+            || notes.contains("fuzz_targets/")
+            || notes.contains("fuzz/fuzz_targets/")
+            || notes.contains("unit::")
+            || notes.contains("harness::")
+            || notes.contains("e2e::")
+            || notes.contains("proptest")
+            || notes.contains("crates/ffs-")
+    }
+}
+
+fn parse_capability_row(line: &str) -> Option<CapabilityRow> {
+    let cols: Vec<&str> = line.split('|').map(str::trim).collect();
+    if cols.len() < 5 {
+        return None;
+    }
+
+    let capability = cols[1].trim();
+    let legacy_reference = cols[2].trim();
+    let status = cols[3].trim();
+    let notes = cols[4].trim();
+
+    if capability.is_empty()
+        || capability.eq_ignore_ascii_case("capability")
+        || capability.starts_with('-')
+        || legacy_reference.is_empty()
+    {
+        return None;
+    }
+
+    let has_test_citation = CapabilityRow::has_concrete_test_citation(notes);
+
+    Some(CapabilityRow {
+        capability: capability.to_owned(),
+        legacy_reference: legacy_reference.to_owned(),
+        status: status.to_owned(),
+        notes: notes.to_owned(),
+        has_test_citation,
+    })
+}
+
+/// Extract capability rows from the Tracked Capability Matrix section.
+#[must_use]
+pub fn capability_rows_from_feature_parity(markdown: &str) -> Vec<CapabilityRow> {
+    let mut rows = Vec::new();
+    let mut in_capability_matrix = false;
+
+    for line in markdown.lines() {
+        let trimmed = line.trim();
+
+        if trimmed.contains("Tracked Capability Matrix") {
+            in_capability_matrix = true;
+            continue;
+        }
+
+        if in_capability_matrix && trimmed.starts_with("###") {
+            break;
+        }
+
+        if in_capability_matrix {
+            if let Some(row) = parse_capability_row(trimmed) {
+                rows.push(row);
+            }
+        }
+    }
+
+    rows
+}
+
+/// Report of capability rows missing test citations.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TestCitationAuditReport {
+    pub total_rows: usize,
+    pub cited_rows: usize,
+    pub uncited_rows: Vec<String>,
+}
+
+impl TestCitationAuditReport {
+    /// Audit FEATURE_PARITY.md for test citations.
+    #[must_use]
+    pub fn audit() -> Self {
+        let rows = capability_rows_from_feature_parity(FEATURE_PARITY_MARKDOWN);
+        let total_rows = rows.len();
+        let cited_rows = rows.iter().filter(|r| r.has_test_citation).count();
+        let uncited_rows: Vec<String> = rows
+            .iter()
+            .filter(|r| !r.has_test_citation)
+            .map(|r| r.capability.clone())
+            .collect();
+
+        Self {
+            total_rows,
+            cited_rows,
+            uncited_rows,
+        }
+    }
+
+    /// Check if all capability rows have test citations.
+    #[must_use]
+    pub fn all_cited(&self) -> bool {
+        self.uncited_rows.is_empty()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SparseFixture {
     pub size: usize,
@@ -1228,5 +1344,44 @@ mod tests {
         assert_eq!(domains[0].domain, "ext4 metadata parsing");
         assert_eq!(domains[0].implemented, 19);
         assert_eq!(domains[0].total, 19);
+    }
+
+    #[test]
+    fn capability_row_parser_extracts_matrix_rows() {
+        let markdown = r"
+## 2. Tracked Capability Matrix
+
+| Capability | Legacy Reference | Status | Notes |
+|------------|------------------|--------|-------|
+| ext4 superblock decode | `fs/ext4/ext4.h` | ✅ | Implemented in `ffs-ext4` |
+| ext4 path resolution | `fs/ext4/namei.c` | ✅ | Harness coverage in `crates/ffs-harness/tests/conformance.rs` |
+
+### 2.1 Other Section
+";
+        let rows = capability_rows_from_feature_parity(markdown);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].capability, "ext4 superblock decode");
+        assert!(!rows[0].has_test_citation);
+        assert_eq!(rows[1].capability, "ext4 path resolution");
+        assert!(rows[1].has_test_citation);
+    }
+
+    #[test]
+    fn test_citation_audit_reports_uncited_rows() {
+        let report = TestCitationAuditReport::audit();
+        assert!(
+            report.total_rows > 0,
+            "FEATURE_PARITY.md must have capability rows"
+        );
+
+        if !report.uncited_rows.is_empty() {
+            eprintln!(
+                "Test citation audit: {}/{} rows cited, {} uncited",
+                report.cited_rows, report.total_rows, report.uncited_rows.len()
+            );
+            for cap in &report.uncited_rows {
+                eprintln!("  - {cap}");
+            }
+        }
     }
 }
