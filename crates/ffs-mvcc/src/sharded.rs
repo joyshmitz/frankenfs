@@ -11,8 +11,8 @@ use crate::SnapshotRegistry;
 use crate::compression::{self, CompressionPolicy, VersionData};
 use crate::{
     AdaptivePolicyConfig, BlockVersion, CommitError, CommittedTxnRecord, ConflictPolicy,
-    ContentionMetrics, MergeProof, Transaction, resolve_version_bytes_at_or_before,
-    validate_transaction_id,
+    ContentionMetrics, MergeProof, Transaction, detect_ssi_dangerous_structure,
+    resolve_version_bytes_at_or_before, validate_transaction_id,
 };
 use ffs_types::{BlockNumber, CommitSeq, Snapshot, TxnId};
 use parking_lot::{Condvar, Mutex, RwLock, RwLockWriteGuard};
@@ -530,31 +530,37 @@ impl ShardedMvccStore {
         txn: &Transaction,
         shard_guards: &[(usize, ShardWriteGuard<'_>)],
     ) -> Result<(), CommitError> {
-        for (&block, &read_version) in txn.read_set() {
-            let shard_idx = self.shard_index(block);
-            let Some(shard) = shard_guards
+        for block in txn.read_set().keys().chain(txn.write_set().keys()) {
+            let shard_idx = self.shard_index(*block);
+            if shard_guards
                 .binary_search_by_key(&shard_idx, |(idx, _)| *idx)
-                .ok()
-                .map(|pos| &shard_guards[pos].1)
-            else {
+                .is_err()
+            {
                 return Err(CommitError::DurabilityFailure {
                     detail: "shard guard missing".into(),
                 });
-            };
+            }
+        }
+
+        let mut records = BTreeMap::new();
+        for (_, shard) in shard_guards {
             for record in shard.ssi_log.iter().rev() {
                 if record.commit_seq <= txn.snapshot().high {
                     break;
                 }
-                if record.write_set.contains(&block) {
-                    return Err(CommitError::SsiConflict {
-                        pivot_block: block,
-                        read_version,
-                        write_version: record.commit_seq,
-                        concurrent_txn: record.txn_id,
-                    });
-                }
+                records
+                    .entry((record.commit_seq.0, record.txn_id.0))
+                    .or_insert_with(|| record.clone());
             }
         }
+
+        let (_checks_performed, dangerous_structure) =
+            detect_ssi_dangerous_structure(txn, records.values());
+        if let Some(dangerous_structure) = dangerous_structure {
+            dangerous_structure.emit_logs(txn.id());
+            return Err(dangerous_structure.to_commit_error());
+        }
+
         Ok(())
     }
 

@@ -374,10 +374,13 @@ SSI detects: T1 -rw-> T2 -rw-> T1 (cycle). One MUST abort.
 
 1. **Read tracking.** `read_set: BTreeMap<BlockNumber, CommitSeq>` per transaction.
 2. **Write tracking.** `write_set: BTreeSet<BlockNumber>` per transaction.
-3. **Commit-time check.** Beyond FCW, detect rw-antidependency cycles:
+3. **Commit-time check.** Beyond FCW, detect two-edge rw-antidependency
+   dangerous structures:
    - For read-set block B: did any concurrent committed T' write B?
-   - For write-set block B: did any concurrent T' (with earlier snapshot) read B?
-   - If consecutive rw-antidependencies form a "dangerous structure," one MUST abort.
+   - For write-set block B: did any concurrent committed T' read B?
+   - T MUST abort only when both edges exist and T is the pivot
+     `T_in --rw--> T --rw--> T_out`. A single stale-read edge remains
+     serializable and MUST NOT abort by itself.
 4. **Abort policy.** Abort the transaction with fewest writes. Ties: younger aborts.
 
 ### 2.6 Benefits
@@ -1346,7 +1349,7 @@ Implementation home: `ffs-mvcc` crate; shared types: `ffs-types`.
 **Phase B (implemented):**
 
 - Read-set bookkeeping via `Transaction::record_read(block, version_seq)`.
-- SSI rw-antidependency detection via `MvccStore::commit_ssi(txn)`.
+- SSI two-edge rw-antidependency detection via `MvccStore::commit_ssi(txn)`.
 - Active snapshot registry: `register_snapshot`/`release_snapshot` with ref-counting.
 - GC watermark: `watermark()` returns oldest active snapshot; `prune_safe()` prunes up to watermark.
 - SSI log: `CommittedTxnRecord` entries retained for antidependency checking; prunable via `prune_ssi_log(watermark)`.
@@ -1366,7 +1369,7 @@ impl MvccStore {
     pub fn begin(&mut self) -> Transaction;
     // Phase A: FCW-only commit (write-write conflict detection).
     pub fn commit(&mut self, txn: Transaction) -> Result<CommitSeq, CommitError>;
-    // Phase B: SSI commit (FCW + rw-antidependency detection).
+    // Phase B: SSI commit (FCW + two-edge rw-antidependency detection).
     pub fn commit_ssi(&mut self, txn: Transaction) -> Result<CommitSeq, CommitError>;
     pub fn latest_commit_seq(&self, block: BlockNumber) -> CommitSeq;
     pub fn read_visible(&self, block: BlockNumber, snapshot: Snapshot) -> Option<&[u8]>;
@@ -1591,16 +1594,20 @@ A dangerous structure: `T1 --rw--> T2 --rw--> T3` where T1 and T3 are concurrent
 
 ```
 PROCEDURE ssi_dangerous_structure_detected(T):
-    // T plays role of T2 (the committing transaction)
+    // T plays role of T2 / pivot (the committing transaction)
 
     LET inbound_rw = { T1 : exists B in T.write_set such that
-                              T1 read B AND T1 concurrent with T }
+                              T1 read B AND T1.commit_seq > T.snapshot.high }
 
     LET outbound_rw = { T3 : exists B in T.read_set such that
                                T3 wrote B AND T3.commit_seq > T.snapshot.high }
 
     RETURN inbound_rw non-empty AND outbound_rw non-empty
 ```
+
+A single outbound stale-read edge (`T --rw--> T3`) or a single inbound reader
+edge (`T1 --rw--> T`) is serializable by itself and MUST NOT be reported as
+`SsiCycle`.
 
 #### 5.5.4 SSI Bookkeeping
 
@@ -6092,7 +6099,7 @@ while preserving deterministic behavior under contention.
 |---------------|-----------------|----------------|----------------------------------|
 | FCW rejects overlapping writers | `stress_fcw_conflicts` + FCW unit/property tests in `ffs-mvcc` | Second writer is rejected with `CommitError::Conflict` when no audited proof mechanism validates | `fcw_conflict` |
 | SafeMerge has two executable byte mechanisms | `merge_proof_mechanism_collapses_labels_to_two_merge_algorithms`, `range_overlay_labels_share_the_same_byte_algorithm`, and `range_overlay_labels_reject_undeclared_byte_changes` in `ffs-mvcc` | Public proof labels collapse to append-only, range-overlay, or FCW fallback; overlay labels share identical byte behavior and reject undeclared changes | `merge_proof_taxonomy_drift` |
-| SSI prevents write skew | `stress_ssi_write_skew` + SSI tests in `ffs-mvcc` | Exactly one conflicting txn commits; invariant preserved | `ssi_cycle` |
+| SSI prevents write skew | `stress_ssi_write_skew` + SSI tests in `ffs-mvcc` | Exactly one two-edge dangerous-structure pivot aborts; single-edge stale readers commit; invariant preserved | `ssi_cycle` |
 | Contention remains progress-safe with retries | `stress_fcw_hotspot_retry_fairness` + `e2e_hot_key_counter_with_retries` | Every writer completes bounded commits; no infinite retry loop | `timeout` / retry-bound breach |
 | Abort-path observability remains explicit | `ffs-mvcc` evidence/log assertions | Abort records include deterministic reason class and conflict context | `fcw_conflict`, `ssi_cycle`, `timeout` |
 

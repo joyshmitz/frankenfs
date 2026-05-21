@@ -464,7 +464,7 @@ Traditional FUSE filesystems serialize all writes through a single lock. Franken
 
 ### Version chains and snapshot isolation
 
-Every logical block maintains a version chain: an ordered sequence of `BlockVersion` entries, each tagged with a `CommitSeq` and a writer `TxnId`. Readers acquire a snapshot (`Snapshot { high: CommitSeq }`) and see only versions with `commit_seq <= snapshot.high`. Writers accumulate staged writes in a `Transaction` and attempt to commit atomically. Serializable Snapshot Isolation (SSI) detects rw-antidependencies and aborts writers whose snapshots are no longer serializable.
+Every logical block maintains a version chain: an ordered sequence of `BlockVersion` entries, each tagged with a `CommitSeq` and a writer `TxnId`. Readers acquire a snapshot (`Snapshot { high: CommitSeq }`) and see only versions with `commit_seq <= snapshot.high`. Writers accumulate staged writes in a `Transaction` and attempt to commit atomically. Serializable Snapshot Isolation (SSI) detects two-edge rw-antidependency dangerous structures and aborts writers whose snapshots are no longer serializable.
 
 ### First-Committer-Wins with merge proofs
 
@@ -1773,7 +1773,7 @@ The trade-off vs raw bitmaps is the cost of rebuilding the index when bits flip.
 
 Snapshot isolation alone (`snapshot_read`, `optimistic_commit`) prevents most anomalies but admits *write skew*: two transactions read overlapping data and write disjoint data, where the combined effect violates a constraint. SSI (Cahill, Röhm, Fekete, SIGMOD '08, "Serializable Isolation for Snapshot Databases") adds rw-antidependency tracking: whenever transaction `T1`'s write is dependent on `T2`'s prior read of the same item, an edge is recorded. If a cycle of rw-edges forms, one transaction is aborted.
 
-FrankenFS tracks these edges lazily inside the commit path in `ffs-mvcc` and aborts the committing transaction when an inbound rw-cycle is detected. SSI-related aborts surface as the `SerializationConflict` evidence event with reason `TxnAbortReason::SsiCycle`.
+FrankenFS tracks these edges lazily inside the commit path in `ffs-mvcc` and aborts the committing transaction only when it is the pivot of a two-edge dangerous structure: a committed concurrent transaction read a block the committer writes, and the committer read a block written by a committed concurrent transaction. A single stale-read edge remains serializable and does not abort by itself. SSI-related aborts surface as the `SerializationConflict` evidence event with reason `TxnAbortReason::SsiCycle` and conflict type `two_edge_rw_antidependency_cycle`.
 
 ---
 
@@ -3401,7 +3401,7 @@ Rows in the btrfs experimental RW contract can still be `partially supported` or
 
 - **ext4.** Superblock, inode, extent header/entry, group descriptor, feature flag decoding, mount-time journal recovery (JBD2 + fast-commit + external-journal pairing), FUSE mount (RO default, experimental RW), `e2compr` read+write for gzip/LZO/none, casefold, encryption nokey mode, inline data, indirect block addressing, fallocate (KEEP_SIZE / PUNCH_HOLE / ZERO_RANGE / COLLAPSE_RANGE / INSERT_RANGE), POSIX ACL xattrs, MMP conservative rejection.
 - **btrfs.** Superblock, B-tree header, leaf item metadata, geometry validation, RAID stripe mapping (single/DUP/RAID0/1/5/6/10), FUSE mount (RO default, experimental RW with core mutations), transparent ZLIB/LZO/ZSTD decompression, named subvolume/snapshot selection, tree-log replay, send/receive stream parsing, btrfs fallocate (KEEP_SIZE / PUNCH_HOLE / ZERO_RANGE / COLLAPSE_RANGE / INSERT_RANGE), backup superblock mirror repair, fragmentation-aware free-run reporting.
-- **MVCC.** Snapshot visibility, commit sequencing, FCW conflict detection, two same-block merge mechanisms behind semantic `MergeProof` labels, three conflict policies with adaptive expected-loss selection, EMA contention tracking, sharded concurrent store, Zstd/Brotli version compression, WAL persistence + crash recovery, SSI rw-antidependency detection.
+- **MVCC.** Snapshot visibility, commit sequencing, FCW conflict detection, two same-block merge mechanisms behind semantic `MergeProof` labels, three conflict policies with adaptive expected-loss selection, EMA contention tracking, sharded concurrent store, Zstd/Brotli version compression, WAL persistence + crash recovery, SSI two-edge rw-antidependency detection.
 - **Self-healing.** Bayesian durability autopilot, RaptorQ symbol generation/recovery, four refresh policies (Eager/Lazy/Adaptive/Hybrid), stale-window SLO with percentile-based breach detection, multi-host repair-ownership coordination, expected-loss policy comparison, mounted automatic repair contract (read-only + read-write via MVCC repair-writeback serializer).
 - **Writeback-cache.** Epoch-based commit barriers with per-inode staged/visible/durable tracking, deferred visibility for MVCC isolation, dirty-page ordering oracle, 12-point crash/replay matrix artifact gate, runtime guard, and host/lane manifest checks. Kernel option default-off; explicit opt-in is evidence-gated.
 - **Observability.** Evidence ledger with 23 event types and 8 operator presets (`replay-anomalies`, `repair-failures`, `pressure-transitions`, `contention`, `metrics`, `cache`, `mvcc`, `repair-live`), contention metrics, policy-switch detection, structured logging across all subsystems, JSONL audit trail.
@@ -3562,7 +3562,7 @@ A: Same on-disk format. Same observable behavior for V1 features. Different *int
 
 - Megiddo and Modha, *ARC: A Self-Tuning, Low Overhead Replacement Cache*, USENIX FAST 2003. The adaptive cache algorithm behind `ArcCache<D>` in `ffs-block`.
 - Yang et al, *FIFO Queues are All You Need for Cache Eviction*, ACM SOSP 2023. The S3-FIFO alternative.
-- Cahill, Röhm, Fekete, *Serializable Isolation for Snapshot Databases*, ACM SIGMOD 2008. The SSI rw-antidependency detection used in `ffs-mvcc`'s commit path.
+- Cahill, Röhm, Fekete, *Serializable Isolation for Snapshot Databases*, ACM SIGMOD 2008. The SSI two-edge rw-antidependency detection used in `ffs-mvcc`'s commit path.
 - Flanagan and Godefroid, *Dynamic Partial-Order Reduction for Model Checking Software*, ACM POPL 2005. The DPOR algorithm used by `LabRuntime`.
 - Abdulla, Aronis, Jonsson, Sagonas, *Optimal Dynamic Partial Order Reduction*, ACM POPL 2014. The optimal variant.
 - Bernstein, Hadzilacos, Goodman, *Concurrency Control and Recovery in Database Systems*, 1987. Foundational MVCC theory.

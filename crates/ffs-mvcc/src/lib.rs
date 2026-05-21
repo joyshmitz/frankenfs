@@ -488,7 +488,7 @@ pub enum CommitError {
         observed: CommitSeq,
     },
     #[error(
-        "SSI: dangerous structure detected — rw-antidependency cycle via block {pivot_block} \
+        "SSI: two-edge dangerous structure detected via block {pivot_block} \
          (this txn read it at {read_version:?}, concurrent txn {concurrent_txn:?} wrote it at {write_version:?})"
     )]
     SsiConflict {
@@ -521,10 +521,6 @@ pub(crate) fn validate_transaction_id(txn_id: TxnId) -> Result<(), CommitError> 
 }
 
 /// Record of a committed transaction kept for SSI antidependency checking.
-///
-/// `snapshot` and `read_set` are retained for future bidirectional SSI
-/// (checking if the committer's reads were invalidated by a *later*
-/// concurrent reader that also committed).
 #[derive(Debug, Clone)]
 pub(crate) struct CommittedTxnRecord {
     pub(crate) txn_id: TxnId,
@@ -532,6 +528,149 @@ pub(crate) struct CommittedTxnRecord {
     pub(crate) snapshot: Snapshot,
     pub(crate) write_set: BTreeSet<BlockNumber>,
     pub(crate) read_set: BTreeMap<BlockNumber, CommitSeq>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SsiRwEdge {
+    pub(crate) reader_txn: TxnId,
+    pub(crate) writer_txn: TxnId,
+    pub(crate) block: BlockNumber,
+    pub(crate) read_version: CommitSeq,
+    pub(crate) reader_snapshot_high: CommitSeq,
+    pub(crate) write_version: CommitSeq,
+}
+
+/// Two adjacent rw-antidependencies with the committing transaction as pivot.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SsiDangerousStructure {
+    pub(crate) incoming: SsiRwEdge,
+    pub(crate) outgoing: SsiRwEdge,
+}
+
+impl SsiDangerousStructure {
+    #[must_use]
+    pub(crate) fn to_commit_error(self) -> CommitError {
+        CommitError::SsiConflict {
+            pivot_block: self.outgoing.block,
+            read_version: self.outgoing.read_version,
+            write_version: self.outgoing.write_version,
+            concurrent_txn: self.outgoing.writer_txn,
+        }
+    }
+
+    pub(crate) fn emit_logs(self, pivot_txn: TxnId) {
+        debug!(
+            target: "ffs::ssi",
+            txn_id = pivot_txn.0,
+            incoming_reader_txn = self.incoming.reader_txn.0,
+            incoming_block = self.incoming.block.0,
+            incoming_read_version = self.incoming.read_version.0,
+            incoming_reader_snapshot_high = self.incoming.reader_snapshot_high.0,
+            outgoing_writer_txn = self.outgoing.writer_txn.0,
+            outgoing_block = self.outgoing.block.0,
+            outgoing_read_version = self.outgoing.read_version.0,
+            outgoing_reader_snapshot_high = self.outgoing.reader_snapshot_high.0,
+            outgoing_write_version = self.outgoing.write_version.0,
+            cycle = %format_args!(
+                "T{} -rw[block {}]-> T{} -rw[block {}]-> T{}",
+                self.incoming.reader_txn.0,
+                self.incoming.block.0,
+                pivot_txn.0,
+                self.outgoing.block.0,
+                self.outgoing.writer_txn.0
+            ),
+            "ssi_two_edge_dangerous_structure"
+        );
+        warn!(
+            target: "ffs::ssi",
+            txn_id = pivot_txn.0,
+            incoming_reader_txn = self.incoming.reader_txn.0,
+            incoming_block = self.incoming.block.0,
+            incoming_reader_snapshot_high = self.incoming.reader_snapshot_high.0,
+            outgoing_writer_txn = self.outgoing.writer_txn.0,
+            outgoing_block = self.outgoing.block.0,
+            outgoing_reader_snapshot_high = self.outgoing.reader_snapshot_high.0,
+            conflict_type = "two_edge_dangerous_structure",
+            action = "abort",
+            "ssi_conflict"
+        );
+        warn!(
+            target: "ffs::mvcc::evidence",
+            event = "txn_aborted",
+            txn_id = pivot_txn.0,
+            reason = "ssi_cycle",
+            incoming_reader_txn = self.incoming.reader_txn.0,
+            incoming_block = self.incoming.block.0,
+            incoming_reader_snapshot_high = self.incoming.reader_snapshot_high.0,
+            outgoing_writer_txn = self.outgoing.writer_txn.0,
+            outgoing_block = self.outgoing.block.0,
+            outgoing_reader_snapshot_high = self.outgoing.reader_snapshot_high.0,
+            read_version = self.outgoing.read_version.0,
+            write_version = self.outgoing.write_version.0
+        );
+    }
+}
+
+fn ssi_incoming_edge(txn: &Transaction, record: &CommittedTxnRecord) -> Option<SsiRwEdge> {
+    record.read_set.iter().find_map(|(&block, &read_version)| {
+        txn.write_set().contains_key(&block).then_some(SsiRwEdge {
+            reader_txn: record.txn_id,
+            writer_txn: txn.id(),
+            block,
+            read_version,
+            reader_snapshot_high: record.snapshot.high,
+            write_version: CommitSeq(0),
+        })
+    })
+}
+
+fn ssi_outgoing_edge(txn: &Transaction, record: &CommittedTxnRecord) -> Option<SsiRwEdge> {
+    txn.read_set().iter().find_map(|(&block, &read_version)| {
+        record.write_set.contains(&block).then_some(SsiRwEdge {
+            reader_txn: txn.id(),
+            writer_txn: record.txn_id,
+            block,
+            read_version,
+            reader_snapshot_high: txn.snapshot().high,
+            write_version: record.commit_seq,
+        })
+    })
+}
+
+pub(crate) fn detect_ssi_dangerous_structure<'a>(
+    txn: &Transaction,
+    records: impl IntoIterator<Item = &'a CommittedTxnRecord>,
+) -> (u64, Option<SsiDangerousStructure>) {
+    if txn.write_set().is_empty() {
+        return (0, None);
+    }
+
+    let mut checks_performed = 0_u64;
+    let mut incoming = None;
+    let mut outgoing = None;
+
+    for record in records {
+        if record.commit_seq <= txn.snapshot().high {
+            continue;
+        }
+        checks_performed = checks_performed.saturating_add(1);
+
+        if incoming.is_none() {
+            incoming = ssi_incoming_edge(txn, record);
+        }
+        if outgoing.is_none() {
+            outgoing = ssi_outgoing_edge(txn, record);
+        }
+
+        if let (Some(incoming), Some(outgoing)) = (incoming, outgoing) {
+            return (
+                checks_performed,
+                Some(SsiDangerousStructure { incoming, outgoing }),
+            );
+        }
+    }
+
+    (checks_performed, None)
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1591,18 +1730,16 @@ impl MvccStore {
 
     /// Commit with Serializable Snapshot Isolation (SSI) enforcement.
     ///
-    /// This extends FCW with rw-antidependency tracking.  A "dangerous
-    /// structure" is detected when:
+    /// This extends FCW with rw-antidependency tracking. A transaction aborts
+    /// only when it is the pivot of a two-edge dangerous structure:
     ///
-    /// 1. This transaction **read** block B at version V.
-    /// 2. A concurrent transaction (committed after our snapshot) **wrote**
-    ///    a newer version of B (i.e., `latest_commit_seq(B) > V` AND
-    ///    the writer committed after our snapshot).
-    /// 3. This transaction itself has writes — so it's not read-only.
+    /// 1. A concurrent transaction read a block this transaction writes.
+    /// 2. This transaction read a block that a concurrent transaction wrote
+    ///    after this transaction's snapshot.
     ///
-    /// This is the simplified "first-updater-wins + read-set check" variant
-    /// of SSI (as used by PostgreSQL).  Read-only transactions never trigger
-    /// SSI aborts.
+    /// A single rw-antidependency edge remains serializable by itself and does
+    /// not trigger an SSI abort. Read-only transactions never trigger SSI
+    /// aborts.
     pub fn commit_ssi(&mut self, txn: Transaction) -> Result<CommitSeq, CommitError> {
         let started = Instant::now();
         let txn_id = txn.id().0;
@@ -1687,7 +1824,7 @@ impl MvccStore {
                 self.emit_serialization_conflict(
                     txn_id,
                     Some(concurrent_txn.0),
-                    "rw_antidependency_cycle",
+                    "two_edge_rw_antidependency_cycle",
                 );
             }
             CommitError::ChainBackpressure { .. } => self.emit_txn_aborted(TxnAbortedDetail {
@@ -2235,7 +2372,7 @@ impl MvccStore {
             return Err((error, txn));
         }
 
-        // Step 2: SSI rw-antidependency check (phantom detection).
+        // Step 2: SSI two-edge rw-antidependency check.
         let checks_performed = match self.validate_ssi_read_set(&txn) {
             Ok(count) => count,
             Err(e) => return Err((e, txn)),
@@ -2386,87 +2523,26 @@ impl MvccStore {
     }
 
     fn validate_ssi_read_set(&self, txn: &Transaction) -> Result<u64, CommitError> {
-        if txn.writes.is_empty() {
-            return Ok(0);
+        let records = self
+            .ssi_log
+            .iter()
+            .rev()
+            .take_while(|record| record.commit_seq > txn.snapshot.high);
+        let (checks_performed, dangerous_structure) = detect_ssi_dangerous_structure(txn, records);
+
+        if let Some(dangerous_structure) = dangerous_structure {
+            dangerous_structure.emit_logs(txn.id);
+            return Err(dangerous_structure.to_commit_error());
         }
 
-        let mut checks_performed = 0_u64;
-        for (&block, &read_version) in &txn.reads {
-            let mut found_conflict = None;
-            for record in self.ssi_log.iter().rev() {
-                if record.commit_seq <= txn.snapshot.high {
-                    break;
-                }
-                checks_performed += 1;
-                if record.write_set.contains(&block) {
-                    found_conflict = Some((
-                        record.commit_seq,
-                        record.txn_id,
-                        record.snapshot.high,
-                        record.read_set.len(),
-                    ));
-                    break;
-                }
-            }
-            if let Some((
-                write_version,
-                concurrent_txn,
-                writer_snapshot_high,
-                writer_read_set_size,
-            )) = found_conflict
-            {
-                debug!(
-                    target: "ffs::ssi",
-                    txn_id = txn.id.0,
-                    concurrent_txn = concurrent_txn.0,
-                    pivot_block = block.0,
-                    read_version = read_version.0,
-                    write_version = write_version.0,
-                    writer_snapshot_high = writer_snapshot_high.0,
-                    writer_read_set_size,
-                    cycle = %format_args!(
-                        "T{} -rw[block {}]-> T{}: T{} read block {} at seq {}, T{} committed write at seq {}",
-                        txn.id.0, block.0, concurrent_txn.0,
-                        txn.id.0, block.0, read_version.0,
-                        concurrent_txn.0, write_version.0
-                    ),
-                    "dangerous_structure"
-                );
-                warn!(
-                    target: "ffs::ssi",
-                    txn_id = txn.id.0,
-                    concurrent_txn = concurrent_txn.0,
-                    pivot_block = block.0,
-                    conflict_type = "write_skew",
-                    action = "abort",
-                    "ssi_conflict"
-                );
-                warn!(
-                    target: "ffs::mvcc::evidence",
-                    event = "txn_aborted",
-                    txn_id = txn.id.0,
-                    reason = "ssi_cycle",
-                    block = block.0,
-                    read_version = read_version.0,
-                    write_version = write_version.0,
-                    concurrent_txn = concurrent_txn.0
-                );
-                return Err(CommitError::SsiConflict {
-                    pivot_block: block,
-                    read_version,
-                    write_version,
-                    concurrent_txn,
-                });
-            }
-            trace!(
-                target: "ffs::ssi",
-                txn_id = txn.id.0,
-                block_num = block.0,
-                snapshot_ver = read_version.0,
-                is_phantom = false,
-                "phantom_check"
-            );
-        }
+        trace!(
+            target: "ffs::ssi",
+            txn_id = txn.id.0,
+            read_set_size = txn.reads.len(),
+            write_set_size = txn.writes.len(),
+            checks_performed,
+            "ssi_two_edge_check_clean"
+        );
         Ok(checks_performed)
     }
 
@@ -6277,10 +6353,11 @@ mod tests {
         );
     }
 
-    /// Cascading-abort scenario: two dependent transactions read the same
-    /// stale source block and both must abort once that source is updated.
+    /// Single-edge stale-source readers are serializable before the upstream
+    /// update. SSI should avoid cascading aborts unless a second rw edge
+    /// makes the committing transaction a dangerous-structure pivot.
     #[test]
-    fn ssi_cascading_abort_for_shared_stale_dependency() {
+    fn ssi_avoids_cascading_abort_for_single_edge_stale_readers() {
         let mut store = MvccStore::new();
         let source = BlockNumber(500);
         let derived_a = BlockNumber(501);
@@ -6315,41 +6392,31 @@ mod tests {
             store.current_snapshot().high.0
         );
 
-        let abort_a = store.commit_ssi(dependent_a);
-        assert!(
-            matches!(
-                abort_a,
-                Err(CommitError::SsiConflict { pivot_block, .. }) if pivot_block == source
-            ),
-            "dependent A should abort on stale source read, got {abort_a:?}"
-        );
+        store
+            .commit_ssi(dependent_a)
+            .expect("single-edge stale reader A remains serializable");
+        store
+            .commit_ssi(dependent_b)
+            .expect("single-edge stale reader B remains serializable");
 
-        let abort_b = store.commit_ssi(dependent_b);
-        assert!(
-            matches!(
-                abort_b,
-                Err(CommitError::SsiConflict { pivot_block, .. }) if pivot_block == source
-            ),
-            "dependent B should abort on stale source read, got {abort_b:?}"
-        );
-
-        let snap_after_aborts = store.current_snapshot();
+        let snap_after_commits = store.current_snapshot();
         assert_eq!(
             store
-                .read_visible(derived_a, snap_after_aborts)
+                .read_visible(derived_a, snap_after_commits)
                 .expect("derived_a visible")
                 .as_ref(),
-            &[10]
+            &[11]
         );
         assert_eq!(
             store
-                .read_visible(derived_b, snap_after_aborts)
+                .read_visible(derived_b, snap_after_commits)
                 .expect("derived_b visible")
                 .as_ref(),
-            &[10]
+            &[12]
         );
 
-        // Fresh retry after abort should succeed with the new source version.
+        // Fresh retry after the upstream update should also succeed with the
+        // new source version.
         let mut retry = store.begin();
         let fresh_version = store.latest_commit_seq(source);
         retry.record_read(source, fresh_version);
@@ -6456,10 +6523,11 @@ mod tests {
             .expect("T2 no overlap with T1 writes (new snapshot)");
     }
 
-    /// Phantom detection: a concurrent writer to a block we read causes
-    /// an SSI abort.
+    /// A single rw-antidependency is serializable by ordering this transaction
+    /// before the concurrent writer. SSI must not abort until the transaction
+    /// is both the source and target of rw-antidependency edges.
     #[test]
-    fn phantom_detected_concurrent_writer_to_read_block() {
+    fn ssi_single_rw_antidependency_does_not_abort() {
         let mut store = MvccStore::new();
         let block_a = BlockNumber(10);
         let block_b = BlockNumber(20);
@@ -6481,12 +6549,9 @@ mod tests {
         t2.stage_write(block_a, vec![99]);
         store.commit_ssi(t2).expect("T2 commits first");
 
-        // T1 commit should fail: T2 wrote to block_a which T1 read.
-        let result = store.commit_ssi(t1);
-        assert!(
-            matches!(result, Err(CommitError::SsiConflict { pivot_block, .. }) if pivot_block == block_a),
-            "expected SSI conflict on block_a, got {result:?}"
-        );
+        store
+            .commit_ssi(t1)
+            .expect("single rw-antidependency is serializable");
     }
 
     /// No false positive: reading a block nobody else writes is clean.
@@ -6630,17 +6695,22 @@ mod tests {
         // Commit T1 first — should succeed (nothing written to A yet).
         store.commit_ssi(t1).expect("T1 should succeed");
 
-        // T2: reads B, which T1 just wrote → SSI conflict.
+        // T2 has only one rw edge here: it read B, which T1 just wrote.
+        // That is serializable by ordering T2 before T1, so it must not abort
+        // until another edge closes the dangerous structure.
         let r2 = store.commit_ssi(t2);
         assert!(
-            matches!(r2, Err(CommitError::SsiConflict { .. })),
-            "T2 should be rejected (T1 wrote to B which T2 read), got {r2:?}"
+            r2.is_ok(),
+            "T2 should not be rejected for a single rw edge, got {r2:?}"
         );
 
-        // T3: reads C, nobody wrote C (T2 was aborted) → should succeed.
-        store
-            .commit_ssi(t3)
-            .expect("T3 should succeed (C unmodified)");
+        // T3 reads C, which T2 wrote, and writes A, which T1 read. T3 is now
+        // the pivot in a two-edge dangerous structure: T1 -rw-> T3 -rw-> T2.
+        let r3 = store.commit_ssi(t3);
+        assert!(
+            matches!(r3, Err(CommitError::SsiConflict { .. })),
+            "T3 should be rejected after closing the two-edge structure, got {r3:?}"
+        );
     }
 
     /// SSI with the write-skew scenario across 20 seeds using the lab runtime.
@@ -6902,19 +6972,21 @@ mod tests {
         }
     }
 
-    /// E2E Scenario 3: Phantom read prevention via SSI.
+    /// E2E Scenario 3: range-summary write skew prevention via SSI.
     ///
-    /// T1 reads blocks 0..10, T2 writes to block 5, T2 commits first.
-    /// T1 should be aborted because T2 modified a block in T1's read-set.
+    /// T1 reads blocks 0..10 and writes a summary block. T2 reads the summary
+    /// block and writes to block 5. T1 is the pivot when it commits second:
+    /// T2 read T1's write target, and T1 read T2's write target.
     #[test]
-    fn e2e_phantom_read_prevention() {
+    fn e2e_ssi_two_edge_range_summary_write_skew_prevention() {
         let mut store = MvccStore::new();
 
-        // Seed blocks 0..10.
+        // Seed blocks 0..10 plus the summary block.
         let mut seed_txn = store.begin();
         for i in 0_u64..10 {
             seed_txn.stage_write(BlockNumber(i), vec![1]);
         }
+        seed_txn.stage_write(BlockNumber(100), vec![0]);
         store.commit_ssi(seed_txn).expect("seed");
 
         // T1: reads blocks 0..10 (the "scan").
@@ -6926,12 +6998,15 @@ mod tests {
         // T1 also writes something (required for SSI check to fire).
         t1.stage_write(BlockNumber(100), vec![99]);
 
-        // T2: writes block 5 (a "phantom" insert into T1's read range).
+        // T2: reads the summary block, then writes block 5 (a "phantom"
+        // insert into T1's read range).
         let mut t2 = store.begin();
+        t2.record_read(BlockNumber(100), store.latest_commit_seq(BlockNumber(100)));
         t2.stage_write(BlockNumber(5), vec![2]);
         store.commit_ssi(t2).expect("T2 commits first");
 
-        // T1 should be aborted — block 5 (in T1's read-set) was modified.
+        // T1 should be aborted: T2 read the summary block that T1 writes,
+        // and T1 read block 5 that T2 writes.
         let result = store.commit_ssi(t1);
         assert!(
             matches!(
@@ -9219,10 +9294,10 @@ mod tests {
         assert!(store.commit_ssi(t1).is_ok());
     }
 
-    /// SSI: transaction writes block A and reads block B. Concurrent write
-    /// to B → conflict.
+    /// SSI: transaction writes block A and reads block B. A concurrent write
+    /// to B alone is a single rw edge, not a dangerous structure.
     #[test]
-    fn ssi_write_skew_on_read_block() {
+    fn ssi_single_outgoing_rw_edge_is_allowed() {
         let mut store = MvccStore::new();
 
         let mut seed = store.begin();
@@ -9240,12 +9315,37 @@ mod tests {
         t2.stage_write(BlockNumber(1), vec![2; 64]);
         store.commit_ssi(t2).expect("t2");
 
-        // T1: rejected due to SSI conflict on block 1.
-        let err = store.commit_ssi(t1).unwrap_err();
-        assert!(
-            matches!(err, CommitError::SsiConflict { pivot_block, .. } if pivot_block == BlockNumber(1)),
-            "expected SsiConflict on block 1, got {err:?}"
-        );
+        store
+            .commit_ssi(t1)
+            .expect("single outgoing rw edge remains serializable");
+    }
+
+    /// SSI: a concurrent transaction read a block this transaction writes.
+    /// That inbound edge alone is serializable and should not abort.
+    #[test]
+    fn ssi_single_incoming_rw_edge_is_allowed() {
+        let mut store = MvccStore::new();
+        let block_a = BlockNumber(0);
+        let block_b = BlockNumber(1);
+
+        let mut seed = store.begin();
+        seed.stage_write(block_a, vec![0; 64]);
+        seed.stage_write(block_b, vec![0; 64]);
+        store.commit_ssi(seed).expect("seed");
+
+        let mut writer = store.begin();
+        writer.stage_write(block_a, vec![1; 64]);
+
+        let mut prior_reader = store.begin();
+        prior_reader.record_read(block_a, store.latest_commit_seq(block_a));
+        prior_reader.stage_write(block_b, vec![2; 64]);
+        store
+            .commit_ssi(prior_reader)
+            .expect("prior reader commits");
+
+        store
+            .commit_ssi(writer)
+            .expect("single incoming rw edge remains serializable");
     }
 
     /// SSI: write-write conflict is caught by FCW layer before SSI check.
@@ -9283,7 +9383,8 @@ mod tests {
         assert!(store.commit_ssi(t1).is_ok());
     }
 
-    /// SSI: T2 wrote block 0 (in T1's read set) → T1 gets SsiConflict.
+    /// SSI: T2 wrote block 0 (in T1's read set) and read block 2 (in T1's
+    /// write set), so T1 has both inbound and outbound rw edges.
     #[test]
     fn ssi_overlapping_read_write_sets_detected() {
         let mut store = MvccStore::new();

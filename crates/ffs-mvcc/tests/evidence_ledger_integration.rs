@@ -114,7 +114,7 @@ fn ssi_conflict_produces_serialization_conflict_evidence() {
         .expect("serialization detail");
     assert_eq!(
         serialization_detail.conflict_type,
-        "rw_antidependency_cycle"
+        "two_edge_rw_antidependency_cycle"
     );
 
     let abort_record = records
