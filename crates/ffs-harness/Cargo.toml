@@ -39,6 +39,7 @@ lzokay-native = { workspace = true }
 proptest = { workspace = true }
 tempfile = { workspace = true }
 tracing-subscriber.workspace = true
+trybuild = { workspace = true }
 zstd = { workspace = true }
 
 [[bench]]
