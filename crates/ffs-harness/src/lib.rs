@@ -239,6 +239,16 @@ impl CapabilityRow {
             || notes.contains("e2e::")
             || notes.contains("proptest")
             || notes.contains("crates/ffs-")
+            || notes.contains("coverage")
+            || notes.contains("test::")
+    }
+
+    /// A row is properly classified if it either:
+    /// 1. Has a concrete test citation, OR
+    /// 2. Is explicitly marked as 'unproven' (no test exists yet)
+    #[must_use]
+    pub fn is_properly_classified(&self) -> bool {
+        self.has_test_citation || self.notes.to_lowercase().contains("unproven")
     }
 }
 
@@ -305,7 +315,10 @@ pub fn capability_rows_from_feature_parity(markdown: &str) -> Vec<CapabilityRow>
 pub struct TestCitationAuditReport {
     pub total_rows: usize,
     pub cited_rows: usize,
+    pub unproven_rows: usize,
     pub uncited_rows: Vec<String>,
+    /// Rows that are neither cited nor explicitly marked 'unproven'.
+    pub improperly_classified: Vec<String>,
 }
 
 impl TestCitationAuditReport {
@@ -315,16 +328,27 @@ impl TestCitationAuditReport {
         let rows = capability_rows_from_feature_parity(FEATURE_PARITY_MARKDOWN);
         let total_rows = rows.len();
         let cited_rows = rows.iter().filter(|r| r.has_test_citation).count();
+        let unproven_rows = rows
+            .iter()
+            .filter(|r| !r.has_test_citation && r.notes.to_lowercase().contains("unproven"))
+            .count();
         let uncited_rows: Vec<String> = rows
             .iter()
             .filter(|r| !r.has_test_citation)
+            .map(|r| r.capability.clone())
+            .collect();
+        let improperly_classified: Vec<String> = rows
+            .iter()
+            .filter(|r| !r.is_properly_classified())
             .map(|r| r.capability.clone())
             .collect();
 
         Self {
             total_rows,
             cited_rows,
+            unproven_rows,
             uncited_rows,
+            improperly_classified,
         }
     }
 
@@ -332,6 +356,12 @@ impl TestCitationAuditReport {
     #[must_use]
     pub fn all_cited(&self) -> bool {
         self.uncited_rows.is_empty()
+    }
+
+    /// Check if all rows are properly classified (cited OR marked 'unproven').
+    #[must_use]
+    pub fn all_properly_classified(&self) -> bool {
+        self.improperly_classified.is_empty()
     }
 }
 
@@ -1377,12 +1407,40 @@ mod tests {
 
         if !report.uncited_rows.is_empty() {
             eprintln!(
-                "Test citation audit: {}/{} rows cited, {} uncited",
-                report.cited_rows, report.total_rows, report.uncited_rows.len()
+                "Test citation audit: {}/{} rows cited, {} uncited, {} unproven",
+                report.cited_rows,
+                report.total_rows,
+                report.uncited_rows.len(),
+                report.unproven_rows
             );
             for cap in &report.uncited_rows {
                 eprintln!("  - {cap}");
             }
         }
+    }
+
+    #[test]
+    fn all_capability_rows_must_be_properly_classified() {
+        let report = TestCitationAuditReport::audit();
+
+        if !report.all_properly_classified() {
+            eprintln!(
+                "\nFEATURE_PARITY.md audit failed: {} rows lack test citation or 'unproven' marker",
+                report.improperly_classified.len()
+            );
+            eprintln!("Each capability row must either:");
+            eprintln!("  1. Cite a concrete test (tests/, crates/ffs-, harness::, etc.), OR");
+            eprintln!("  2. Be explicitly marked 'unproven' in the Notes column\n");
+            for cap in &report.improperly_classified {
+                eprintln!("  ✗ {cap}");
+            }
+            eprintln!();
+        }
+
+        assert!(
+            report.all_properly_classified(),
+            "FEATURE_PARITY.md has {} improperly classified rows (see stderr for list)",
+            report.improperly_classified.len()
+        );
     }
 }
