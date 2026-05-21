@@ -15,7 +15,8 @@
 <p align="center">
   <a href="https://github.com/Dicklesworthstone/frankenfs/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT%2BOpenAI%2FAnthropic%20Rider-blue.svg" alt="MIT+Rider License"></a>
   <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/rust-nightly%202024-orange.svg" alt="Rust Nightly"></a>
-  <img src="https://img.shields.io/badge/tracked%20V1%20parity-100%25%20(97%2F97)-brightgreen" alt="Tracked V1 Parity 100%">
+  <img src="https://img.shields.io/badge/ParityReport-97%2F97%20feature%20rows-blue" alt="ParityReport: 97/97 feature rows">
+  <img src="https://img.shields.io/badge/parity%20columns-implemented%20%7C%20kernel--verified%20%7C%20rejection--only-lightgrey" alt="Parity accounting columns">
   <img src="https://img.shields.io/badge/tests-7%2C442%20entries-brightgreen" alt="7,442 tests">
   <img src="https://img.shields.io/badge/fuzz%20targets-60-brightgreen" alt="60 fuzz targets">
   <img src="https://img.shields.io/badge/unsafe-forbidden-brightgreen.svg" alt="Unsafe Forbidden">
@@ -31,11 +32,11 @@
 
 **The solution.** FrankenFS extracts the *behavior* of ext4 and btrfs from ~205K lines of Linux kernel C (v6.19), re-implements that behavior idiomatically in Rust (no unsafe), and adds three things kernel filesystems don't have: block-level MVCC with safe-merge proofs, RaptorQ fountain-coded self-healing, and explicit-opt-in FUSE writeback-cache barriers with a 12-point crash matrix.
 
-It runs as a normal Linux process via FUSE. The tracked V1 parity matrix is at 100% (97/97), every public claim is gated by a checked-in release-gate policy with structured proof bundles, and the workspace ships **21 crates, 416K LOC, 7,442 test entries (7,389 `#[test]` + 53 `proptest!`; counts move with every commit), 60 fuzz targets, 11 criterion benchmarks, 114 end-to-end gate scripts, and 23 evidence-event types** under `#![forbid(unsafe_code)]`.
+It runs as a normal Linux process via FUSE. The current `ParityReport::current()` printout is 97/97 rows in the tracked feature denominator, while the B-series accounting keeps implemented, kernel-verified, and rejection-only rows separate instead of promoting the self-summed table as a blanket parity headline. Every public claim is gated by a checked-in release-gate policy with structured proof bundles, and the workspace ships **21 crates, 416K LOC, 7,442 test entries (7,389 `#[test]` + 53 `proptest!`; counts move with every commit), 60 fuzz targets, 11 criterion benchmarks, 114 end-to-end gate scripts, and 23 evidence-event types** under `#![forbid(unsafe_code)]`.
 
 | Pillar | What it does | Why it matters |
 |---|---|---|
-| **Block-level MVCC** | Version chains per block, snapshot isolation, two executable same-block merge mechanisms (`AppendOnly` and range overlay) exposed through `MergeProof` labels, and three `ConflictPolicy` modes (`Strict` / `SafeMerge` / `Adaptive`) selected by an expected-loss decision model | Concurrent readers + writers without the JBD2 global lock. Safe-merge proofs let non-conflicting concurrent writes to the same block coexist when they validate through one of the two audited mechanisms. Under a 120-writer stress, SafeMerge runs 9.5× lower expected loss than Strict with zero data corruption. |
+| **Block-level MVCC** | Version chains per block, snapshot isolation, two executable same-block merge mechanisms (`AppendOnly` and range overlay) exposed through `MergeProof` labels, and three `ConflictPolicy` modes (`Strict` / `SafeMerge` / `Adaptive`) selected by an expected-loss decision model | Concurrent readers + writers without the JBD2 global lock. Safe-merge proofs let non-conflicting concurrent writes to the same block coexist when they validate through one of the two audited mechanisms. Under a 120-writer stress benchmark, SafeMerge runs 9.5× lower expected loss than Strict with zero data corruption. Note: the FUSE write path currently stages all writes with `MergeProof::Unsafe`; the 9.5× benefit is bench-demonstrated but not yet wired into production FUSE writes (tracked: bd-xuo95.28). |
 | **RaptorQ self-healing** | Fountain-coded repair symbols (RFC 6330), Bayesian Beta-posterior durability autopilot, four refresh policies (`Eager` / `Lazy` / `Adaptive` / `Hybrid`), percentile-based stale-window SLO monitoring | Corruption is detected during scrub and recovered without human intervention. `ffs repair` / `ffs fsck --repair` operate offline; `ffs mount --background-repair --background-scrub-ledger <jsonl>` enables mounted automatic recovery with a durable evidence trail. Hybrid refresh cuts p95 stale-window age by 83.3% under write-heavy workloads. |
 | **Writeback-cache safety net** | Per-inode `staged ≥ visible ≥ durable` epoch state machine, six formal invariants (I1–I6), 12-scenario crash/replay artifact gate, runtime kill switch | Kernel FUSE `writeback_cache` is a footgun for MVCC isolation by default. FrankenFS opts in *only* with `--rw --writeback-cache` plus three accepted-artifact gates, a matching host/lane manifest, and a disarmed kill switch. `flush` stays non-durable; `fsync` / `fsyncdir` are the durability boundaries operators reason about. |
 | **Memory safety** | `#![forbid(unsafe_code)]` at every crate root, edition 2024 (nightly), workspace-level Clippy enforcement | Eliminates at compile time the bug class that has cost the Linux kernel a decade of CVEs: buffer overflows, use-after-free, uninitialized reads. |
@@ -167,7 +168,7 @@ To avoid wasted reading, here is what this project is explicitly **not** trying 
 
 - **Not a kernel filesystem.** It runs in userspace via FUSE. If you need the absolute lowest latency or kernel features unavailable to FUSE (like `mmap` with full kernel semantics on a file that is also being written), use kernel ext4 / btrfs.
 - **Not a drop-in replacement for `mount -t ext4`.** Mount the same images; observe semantically equivalent behavior; but the userspace path adds FUSE round-trip latency.
-- **Not production-ready for irreplaceable data.** The tracked V1 parity matrix is complete, but the operational readiness lanes (xfstests, swarm.responsiveness, performance.baseline, soak/canary) are mid-evidence. Use this on data you can lose.
+- **Not production-ready for irreplaceable data.** The tracked V1 feature denominator is complete according to `ParityReport::current()`, but the operational readiness lanes (xfstests, swarm.responsiveness, performance.baseline, soak/canary) are mid-evidence. Use this on data you can lose.
 - **Not a research playground for "yet another Rust ext4 parser".** Every parser is fixture-pinned, kernel-differential-validated, and metamorphic-relation-proptested. The aim is fidelity, not whimsy.
 - **Not a multi-filesystem framework.** ext4 and btrfs are V1; XFS, ZFS, NTFS, etc. are out of scope. The structured-concurrency + repair-symbol architecture *would* generalize, but each format requires its own behavioral extraction effort and we are not signing up for that work.
 - **Not a tokio project.** The entire tokio ecosystem is explicitly forbidden by the workspace lints; asupersync is the runtime.
@@ -500,7 +501,7 @@ E[loss_strict]      = conflict_rate · abort_cost
 E[loss_safe_merge]  = P(corruption) · severity + conflict_rate · (1 − merge_success_rate) · abort_cost
 ```
 
-Three EMA-smoothed metrics drive the decision: `conflict_rate`, `merge_success_rate`, `abort_rate`. During a configurable warmup (default 50 commits) the system defaults to SafeMerge; afterwards the Adaptive policy selects whichever strategy has the lower expected loss. Under a 120-writer stress test, SafeMerge achieves **9.5× lower expected loss than Strict with zero data corruption**.
+Three EMA-smoothed metrics drive the decision: `conflict_rate`, `merge_success_rate`, `abort_rate`. During a configurable warmup (default 50 commits) the system defaults to SafeMerge; afterwards the Adaptive policy selects whichever strategy has the lower expected loss. Under a 120-writer stress benchmark (where test code explicitly stages merge proofs), SafeMerge achieves **9.5× lower expected loss than Strict with zero data corruption**. The FUSE write path does not yet derive real merge proofs (tracked: bd-xuo95.28), so production writes currently use `MergeProof::Unsafe` and do not benefit from safe-merge until this is wired in.
 
 ### Sharded store for high concurrency
 
@@ -1125,7 +1126,7 @@ Every machine-readable artifact (release-gate, writeback-cache audit/ordering/cr
 
 ### Parity tracking
 
-`FEATURE_PARITY.md` is both human-readable and machine-parseable. The harness reads it to generate a quantitative parity report; `parity_report_matches_feature_parity_md` enforces the mapping in CI. Every feature is implemented (with a test ID), explicitly excluded (with a documented reason), or tracked as in-progress. None can silently fall out of scope.
+`FEATURE_PARITY.md` is both human-readable and machine-parseable. The harness reads it to generate `ParityReport::current()` for the tracked feature-denominator printout; `parity_report_matches_feature_parity_md` enforces that mapping in CI. The B-series parity accounting presents rows as implemented, kernel-verified, or rejection-only instead of treating the markdown domain sum as an authoritative readiness score. Every feature is implemented (with a test ID), explicitly excluded (with a documented reason), or tracked as in-progress. None can silently fall out of scope.
 
 ### Metrics framework
 
@@ -1436,7 +1437,7 @@ The `tracing-subscriber` integration supports JSON output for machine-readable l
 
 ## Evidence, Release Gates, and Readiness
 
-Tracked V1 parity is at 100% (97/97). That is a feature-matrix claim, not a production-readiness claim. The bridge from "implemented" to "public-claim-strengthening" is governed by a checked-in release-gate policy and a portable proof-bundle artifact.
+`ParityReport::current()` currently prints 97/97 rows in the tracked feature denominator. That is feature-matrix accounting, not a production-readiness claim; the B-series view keeps implemented rows, kernel-verified rows, and rejection-only rows in separate columns before public wording can strengthen. The bridge from "implemented" to "public-claim-strengthening" is governed by a checked-in release-gate policy and a portable proof-bundle artifact.
 
 ### Release-gate policy v1
 
@@ -3376,7 +3377,7 @@ The ext4 extent-tree implementation handles the full 4-level tree structure in ~
 
 ## Project Status
 
-**FrankenFS is in experimental operational state.** The tracked V1 parity matrix is complete (100%, 97/97), meaning every item in [`FEATURE_PARITY.md`](FEATURE_PARITY.md)'s current denominator has an implemented and tested contract. Three major subsystems have reached verification-gate maturity:
+**FrankenFS is in experimental operational state.** `ParityReport::current()` prints 97/97 rows for [`FEATURE_PARITY.md`](FEATURE_PARITY.md)'s tracked feature denominator, meaning every current denominator item has an implemented and tested contract. The B-series accounting still separates implemented, kernel-verified, and rejection-only rows before any wording is allowed to strengthen into broader readiness claims. Three major subsystems have reached verification-gate maturity:
 
 | Subsystem | Status | Key metric |
 |---|---|---|
@@ -3384,16 +3385,18 @@ The ext4 extent-tree implementation handles the full 4-level tree structure in ~
 | **Adaptive Repair Symbol Refresh** | Verified | Hybrid policy p95 stale-window reduction 83.3% under heavy writes |
 | **FUSE Writeback-Cache Barriers** | Verified | 12-point crash/replay matrix, epoch monotonicity preserved |
 
-### Feature parity
+### Feature parity accounting
 
-| Domain | Coverage |
+| Domain | `ParityReport::current()` rows |
 |---|---|
-| ext4 metadata parsing | 100.0% (27/27) |
-| btrfs metadata parsing | 100.0% (27/27) |
-| MVCC / COW core | 100.0% (14/14) |
-| FUSE surface | 100.0% (19/19) |
-| self-healing durability | 100.0% (10/10) |
-| **Overall** | **100.0% (97/97)** |
+| ext4 metadata parsing | 27/27 implemented |
+| btrfs metadata parsing | 27/27 implemented |
+| MVCC / COW core | 14/14 implemented |
+| FUSE surface | 19/19 implemented |
+| self-healing durability | 10/10 implemented |
+| **Overall tracked denominator** | **97/97 implemented** |
+
+These are the machine-parsed feature-denominator numbers printed by `ffs-harness parity`, not an authoritative readiness or kernel-verification headline. The B-series classifier keeps `implemented`, `kernel-verified`, and `rejection-only` rows distinct; deterministic rejection rows prove their rejection contract but do not strengthen a general verification claim.
 
 Rows in the btrfs experimental RW contract can still be `partially supported` or `unsupported` without reducing tracked parity when the expected V1 behavior is a deterministic partial-success or explicit rejection path that is implemented and tested.
 
@@ -3416,7 +3419,7 @@ Items outside the tracked 97-row parity denominator, the operational bridge back
 |---|---|---|
 | `bd-rchk1` | Docs/status reconciliation | Keep canonical docs explicit that tracked parity is complete while operational readiness work remains |
 | `bd-rchk2` | btrfs delayed refs | Complete: scoped V1 model with retry-safe failed-flush and overflow coverage |
-| `bd-rchk3` | xfstests | 2026-05-05 explicit-path preflight passes; real product pass/fail evidence remains blocked on permissioned execution with the exact `XFSTESTS_REAL_RUN_ACK` |
+| `bd-rchk3` | xfstests | 2026-05-21 xfstests lane wired to ExecutedEvidence via `evidence_backed_lane::execute_xfstests_lane()`; properly skips when prerequisites missing (fsstress, TEST_DIR, SCRATCH_MNT); real execution requires environment setup + `XFSTESTS_REAL_RUN_ACK=xfstests-may-mutate-test-and-scratch-devices` |
 | `bd-rchk4` | Mounted FUSE CI | Use the permissioned lane in `scripts/e2e/README.md` to run critical mounted ext4/btrfs paths with structured capability and cleanup artifacts |
 | `bd-rchk5` | Performance | Complete: dated 2026-05-03 core and mounted throughput/latency artifacts, host/runtime metadata, delta closeout, quarantined mounted latency claims recorded |
 | `bd-rchk6` | Mounted self-healing | Complete: automatic mounted repair implemented for `--background-repair --background-scrub-ledger`; RW repair routes through MVCC repair-writeback serializer with stale-snapshot rejection |
@@ -3469,7 +3472,7 @@ Full normative scope: [`COMPREHENSIVE_SPEC_FOR_FRANKENFS_V1.md`](COMPREHENSIVE_S
 
 - **Linux only.** FUSE is the sole mount target. No macOS or Windows support planned.
 - **Nightly Rust required.** Edition 2024 features require the nightly toolchain.
-- **Runtime is experimental.** Full tracked parity means the V1 matrix is implemented and tested; it does not mean operational hardening, performance tuning, or future-scope features are finished. Mount / write paths should be treated as experimental in operational environments.
+- **Runtime is experimental.** Tracked feature-denominator completion means the V1 matrix is implemented and tested; it does not mean operational hardening, performance tuning, kernel verification, or future-scope features are finished. Mount / write paths should be treated as experimental in operational environments.
 - **Kernel FUSE writeback-cache mode is default-off and release-gated in V1.x.** The `--writeback-cache` opt-in requires `--rw`, an accepted audit gate, an accepted ordering oracle, fresh runtime-guard evidence, an accepted crash/replay oracle, a matching host/lane manifest, and a disarmed `FFS_WRITEBACK_CACHE_KILL_SWITCH`. `flush` is non-durable; `fsync` / `fsyncdir` are the explicit durability boundaries.
 - **Swarm responsiveness claims require permissioned large-host evidence.** Local swarm workload and tail-latency smoke lanes are downgrade artifacts; only fresh `authoritative_large_host` proof-bundle lanes strengthen `swarm.responsiveness`.
 - **Default CLI mount path does not enable optional backpressure / per-core scheduling hooks.** `ffs-cli mount` defaults to the `standard` runtime mode without wiring `BackpressureGate` controls.
@@ -3487,7 +3490,7 @@ Full normative scope: [`COMPREHENSIVE_SPEC_FOR_FRANKENFS_V1.md`](COMPREHENSIVE_S
 A: Kernel filesystems can't be extended with MVCC or self-healing from userspace. FrankenFS is a research vehicle for exploring what ext4/btrfs could look like with modern concurrency control and erasure coding, while remaining mount-compatible with existing images.
 
 **Q: Can I mount real ext4/btrfs data with this today?**
-A: `ffs mount` supports both ext4 and btrfs images under the fully tracked V1 contract, but the runtime is operationally experimental. Default behavior is read-only; `--rw` enables write paths that are under active hardening. Do not rely on it for production data.
+A: `ffs mount` supports both ext4 and btrfs images under the tracked V1 feature contract, but the runtime is operationally experimental. Default behavior is read-only; `--rw` enables write paths that are under active hardening. Do not rely on it for production data.
 
 **Q: What does "spec-first" mean?**
 A: Instead of translating C to Rust line by line, we first extract the *behavioral contract* of each kernel subsystem into specification documents (~600 KB of structured Markdown across the canonical spec, the behavioral-extraction document, the architecture document, the porting plan, and the parity matrix). Then we implement from the spec in idiomatic Rust. This avoids carrying over C-isms and allows architectural improvements.
