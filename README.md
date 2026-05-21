@@ -36,8 +36,8 @@ It runs as a normal Linux process via FUSE. The current `ParityReport::current()
 
 | Pillar | What it does | Why it matters |
 |---|---|---|
-| **Block-level MVCC** | Version chains per block, snapshot isolation, 2 executable same-block merge mechanisms (`AppendOnly` and range overlay) exposed through `MergeProof` labels, the 3-outcome `MergeProofMechanism` enum (`NoSameBlockMerge`, `AppendOnly`, `RangeOverlay`), and three `ConflictPolicy` modes (`Strict` / `SafeMerge` / `Adaptive`) selected by an expected-loss decision model | Concurrent readers + writers without routing every commit through the ext4 JBD2 model. Safe-merge proofs let non-conflicting concurrent writes to the same block coexist when they validate through one of the two audited mechanisms. Under a 120-writer stress benchmark, SafeMerge runs 9.5× lower expected loss than Strict with zero data corruption. Note: the FUSE write path currently stages all writes with `MergeProof::Unsafe`; the 9.5× benefit is bench-demonstrated but not yet wired into production FUSE writes (tracked: bd-xuo95.28). |
-| **RaptorQ self-healing** | Fountain-coded repair symbols (RFC 6330), Bayesian Beta-posterior durability autopilot, four refresh policies (`Eager` / `Lazy` / `Adaptive` / `Hybrid`), percentile-based stale-window SLO monitoring | Scrub detects corruption; `ffs repair` / `ffs fsck --repair` can recover offline when repair symbols are available. Mounted repair requires explicit `--background-repair --background-scrub-ledger <jsonl>` and records a durable evidence trail. Hybrid refresh cuts p95 stale-window age (verified ≥30%, observed up to 83%) under write-heavy workloads. |
+| **Block-level MVCC** | Version chains per block, snapshot isolation, 2 executable same-block merge mechanisms (`AppendOnly` and range overlay) exposed through `MergeProof` labels, the 3-outcome `MergeProofMechanism` enum (`NoSameBlockMerge`, `AppendOnly`, `RangeOverlay`), and three `ConflictPolicy` modes (`Strict` / `SafeMerge` / `Adaptive`) selected by an expected-loss decision model | Concurrent readers + writers without routing every commit through the ext4 JBD2 model. Safe-merge proofs let non-conflicting concurrent writes to the same block coexist when they validate through one of the two audited mechanisms. Under a 120-writer stress benchmark, SafeMerge runs 9.5× lower expected loss than Strict with no corruptions observed in that run. Note: the FUSE write path currently stages all writes with `MergeProof::Unsafe`; the 9.5× benefit is bench-demonstrated but not yet wired into production FUSE writes (tracked: bd-xuo95.28). |
+| **RaptorQ self-healing** | Fountain-coded repair symbols (RFC 6330), Bayesian Beta-posterior durability autopilot, four refresh policies (`Eager` / `Lazy` / `Adaptive` / `Hybrid`), percentile-based stale-window SLO monitoring | Scrub detects corruption; `ffs repair` / `ffs fsck --repair` can recover offline when repair symbols are available. Mounted repair requires explicit `--background-repair --background-scrub-ledger <jsonl>` and records a durable evidence trail. Hybrid refresh has benchmark coverage for lower p95 stale-window age under write-heavy workloads; the exact percentage remains benchmark-artifact scoped. |
 | **Writeback-cache safety net** | Per-inode `staged ≥ visible ≥ durable` epoch state machine, six formal invariants (I1–I6), 12-scenario crash/replay artifact gate, runtime kill switch | Kernel FUSE `writeback_cache` can reorder visibility in ways MVCC must account for. FrankenFS opts in *only* with `--rw --writeback-cache` plus three accepted-artifact gates, a matching host/lane manifest, and a disarmed kill switch. `flush` stays non-durable; `fsync` / `fsyncdir` are the durability boundaries operators reason about. |
 | **Memory safety** | `#![forbid(unsafe_code)]` at every crate root, edition 2024 (nightly), workspace-level Clippy enforcement | Removes direct use of unsafe Rust from FrankenFS crates, including the common C filesystem hazards around buffer bounds, lifetime errors, and uninitialized reads. |
 | **Structured concurrency** | [asupersync](https://github.com/Dicklesworthstone/asupersync) 0.3 instead of tokio: `Cx` capability contexts, regions, two-phase reserve/commit channels, deterministic `LabRuntime` with virtual time + DPOR | No orphan tasks. Cancellation is cooperative and budget-aware at every I/O boundary. Stress tests reproduce concurrency bugs deterministically across seeds. |
@@ -509,7 +509,7 @@ E[loss_strict]      = conflict_rate · abort_cost
 E[loss_safe_merge]  = P(corruption) · severity + conflict_rate · (1 − merge_success_rate) · abort_cost
 ```
 
-Three EMA-smoothed metrics drive the decision: `conflict_rate`, `merge_success_rate`, `abort_rate`. During a configurable warmup (default 50 commits) the system defaults to SafeMerge; afterwards the Adaptive policy selects whichever strategy has the lower expected loss. Under a 120-writer stress benchmark (where test code explicitly stages merge proofs), SafeMerge achieves **9.5× lower expected loss than Strict with zero data corruption**. The FUSE write path does not yet derive real merge proofs (tracked: bd-xuo95.28), so production writes currently use `MergeProof::Unsafe` and do not benefit from safe-merge until this is wired in.
+Three EMA-smoothed metrics drive the decision: `conflict_rate`, `merge_success_rate`, `abort_rate`. During a configurable warmup (default 50 commits) the system defaults to SafeMerge; afterwards the Adaptive policy selects whichever strategy has the lower expected loss. Under a 120-writer stress benchmark where test code explicitly stages merge proofs, SafeMerge achieves **9.5× lower expected loss than Strict with no corruptions observed in that run**. The FUSE write path does not yet derive real merge proofs (tracked: bd-xuo95.28), so production writes currently use `MergeProof::Unsafe` and do not benefit from safe-merge until this is wired in.
 
 ### Sharded store for high concurrency
 
@@ -548,7 +548,7 @@ Repair symbols become stale when source blocks are modified.
 | **Adaptive** | Switches Eager/Lazy based on the corruption posterior | Groups with variable risk |
 | **Hybrid** | First of: age timeout OR block-count threshold | Write-heavy groups needing tight staleness bounds |
 
-`RefreshLossModel` formally compares these policies via expected-loss calculations across workload profiles. Under heavy writes, the Hybrid policy achieves **≥30% reduction in p95 stale-window age** (observed up to 83%) compared to age-only, because the block-count trigger caps staleness at ~500 writes regardless of how fast they arrive.
+`RefreshLossModel` formally compares these policies via expected-loss calculations across workload profiles. Under heavy writes, the Hybrid policy reduces p95 stale-window age compared to age-only in the benchmark surface; use the dated benchmark artifacts for exact percentages. The block-count trigger caps staleness at ~500 writes regardless of how fast they arrive.
 
 ### Stale-window SLO monitoring
 
@@ -1794,8 +1794,8 @@ FrankenFS publishes benchmarks under `crates/*/benches/` (criterion-based) and d
 
 | Subsystem | Workload | Result |
 |---|---|---|
-| Safe-merge under contention | 120 concurrent writers, append-only proof | **9.5× lower expected loss** than Strict FCW, **zero data corruption** observed |
-| Adaptive refresh hybrid trigger | Write-heavy group, age vs hybrid | **≥30% p95 stale-window reduction** (up to 83% observed) vs age-only refresh |
+| Safe-merge under contention | 120 concurrent writers, append-only proof | Bench-only: **9.5× lower expected loss** than Strict FCW; no corruptions observed in that stress suite |
+| Adaptive refresh hybrid trigger | Write-heavy group, age vs hybrid | p95 stale-window reduction tracked in benchmark artifacts; no fixed README percentage |
 | Writeback-cache crash recovery | 12-scenario crash matrix | Epoch monotonicity preserved in every scenario; `visible == durable` after recovery |
 | WAL replay determinism | 5 crash points | Idempotent in all 5; sequence-based dedup verified |
 | MVCC merge-proof success | `bd-62jy8` criterion suite | Merge-resolution latency and success rate tracked across policies |
@@ -3388,12 +3388,12 @@ The ext4 extent-tree implementation handles the full 4-level tree structure in ~
 
 ## Project Status
 
-**FrankenFS is in experimental operational state.** `ParityReport::current()` prints 97/97 rows for [`FEATURE_PARITY.md`](FEATURE_PARITY.md)'s tracked feature denominator, meaning every current denominator item has an implemented and tested contract. The B-series accounting still separates implemented, kernel-verified, and rejection-only rows before any wording is allowed to strengthen into broader readiness claims. Three major subsystems have reached verification-gate maturity:
+**FrankenFS is in experimental operational state.** `ParityReport::current()` prints 97/97 rows for [`FEATURE_PARITY.md`](FEATURE_PARITY.md)'s tracked feature denominator, meaning every current denominator item has an implemented and tested contract. The B-series accounting still separates implemented, kernel-verified, and rejection-only rows before any wording is allowed to strengthen into broader readiness claims. Three subsystem evidence lanes are tracked separately:
 
 | Subsystem | Status | Key metric |
 |---|---|---|
 | **Safe-Merge Conflict Arbitration** | Bench-verified | 120-writer stress, SafeMerge 9.5× lower expected loss than Strict |
-| **Adaptive Repair Symbol Refresh** | Bench-verified | Hybrid policy p95 stale-window reduction (verified ≥30%, observed up to 83%) under heavy writes |
+| **Adaptive Repair Symbol Refresh** | Bench-scoped | Hybrid policy lowers p95 stale-window age under heavy writes; exact percentage remains tied to benchmark artifacts |
 | **FUSE Writeback-Cache Barriers** | Gate-verified | 12-point crash/replay matrix, epoch monotonicity preserved |
 
 ### Feature parity accounting
