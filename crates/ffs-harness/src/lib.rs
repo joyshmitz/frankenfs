@@ -462,6 +462,132 @@ impl ExecutionGatedParityReport {
     }
 }
 
+/// Row classification for three-column parity truth (B3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ParityClassification {
+    /// Row has evidence-backed implementation.
+    Implemented,
+    /// Row has N consecutive green differential CI runs (verified against kernel).
+    KernelVerified,
+    /// Row covers deterministic rejection of unsupported ops (excluded from headlines).
+    RejectionOnly,
+    /// Row lacks evidence or failed tests.
+    Unverified,
+}
+
+/// Three-column parity report: implemented / kernel-verified / rejection-only.
+///
+/// - `rejection_only` rows are EXCLUDED from any 100% headline.
+/// - `kernel_verified` requires N consecutive green differential CI runs (default N=3).
+/// - A regression drops a row from kernel_verified back to implemented.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThreeColumnParityReport {
+    /// Total capability rows in FEATURE_PARITY.md.
+    pub total_rows: usize,
+    /// Rows with evidence-backed implementation.
+    pub implemented_rows: usize,
+    /// Rows verified against kernel with N consecutive green runs.
+    pub kernel_verified_rows: usize,
+    /// Rows that only test rejection of unsupported ops (excluded from headlines).
+    pub rejection_only_rows: usize,
+    /// Rows that failed classification (no evidence, failed tests, etc.).
+    pub unverified_rows: usize,
+    /// Consecutive green run threshold for kernel verification.
+    pub kernel_verification_threshold: usize,
+    /// Git SHA the report was generated at.
+    pub git_sha: Option<String>,
+}
+
+impl ThreeColumnParityReport {
+    /// Default threshold for kernel verification (consecutive green differential runs).
+    pub const DEFAULT_KERNEL_THRESHOLD: usize = 3;
+
+    /// Build a three-column parity report from row classifications.
+    #[must_use]
+    pub fn from_classifications(
+        classifications: &[(String, ParityClassification)],
+        git_sha: Option<String>,
+        kernel_threshold: Option<usize>,
+    ) -> Self {
+        let total_rows = classifications.len();
+        let threshold = kernel_threshold.unwrap_or(Self::DEFAULT_KERNEL_THRESHOLD);
+
+        let mut implemented_rows = 0;
+        let mut kernel_verified_rows = 0;
+        let mut rejection_only_rows = 0;
+        let mut unverified_rows = 0;
+
+        for (_, classification) in classifications {
+            match classification {
+                ParityClassification::Implemented => implemented_rows += 1,
+                ParityClassification::KernelVerified => kernel_verified_rows += 1,
+                ParityClassification::RejectionOnly => rejection_only_rows += 1,
+                ParityClassification::Unverified => unverified_rows += 1,
+            }
+        }
+
+        Self {
+            total_rows,
+            implemented_rows,
+            kernel_verified_rows,
+            rejection_only_rows,
+            unverified_rows,
+            kernel_verification_threshold: threshold,
+            git_sha,
+        }
+    }
+
+    /// Compute headline coverage percentage (rejection_only excluded).
+    ///
+    /// The 100% headline counts only implemented + kernel_verified rows,
+    /// NOT rejection_only rows.
+    #[must_use]
+    pub fn headline_coverage_percent(&self) -> f64 {
+        let headline_total = self.total_rows.saturating_sub(self.rejection_only_rows);
+        if headline_total == 0 {
+            return 0.0;
+        }
+        let headline_implemented = self.implemented_rows + self.kernel_verified_rows;
+        (headline_implemented as f64 / headline_total as f64) * 100.0
+    }
+
+    /// Counts for the headline (rejection_only excluded).
+    #[must_use]
+    pub fn headline_counts(&self) -> (usize, usize) {
+        let implemented = self.implemented_rows + self.kernel_verified_rows;
+        let total = self.total_rows.saturating_sub(self.rejection_only_rows);
+        (implemented, total)
+    }
+
+    /// Check if a rejection_only row would incorrectly raise headline counts.
+    ///
+    /// Returns Err if rejection_only rows are being counted in headlines.
+    pub fn verify_rejection_excluded(&self) -> Result<(), String> {
+        // Rejection rows should never be counted in implemented or kernel_verified
+        // This is enforced by the classification system, but we verify here.
+        let (headline_impl, headline_total) = self.headline_counts();
+
+        // Sanity check: headline_total should exclude rejection_only
+        let expected_total = self.total_rows.saturating_sub(self.rejection_only_rows);
+        if headline_total != expected_total {
+            return Err(format!(
+                "headline_total={} but expected {} (total={} - rejection={})",
+                headline_total, expected_total, self.total_rows, self.rejection_only_rows
+            ));
+        }
+
+        // Verify headline_impl doesn't include rejection_only
+        if headline_impl > headline_total {
+            return Err(format!(
+                "headline_implemented={} exceeds headline_total={} - rejection rows may be leaking",
+                headline_impl, headline_total
+            ));
+        }
+
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SparseFixture {
     pub size: usize,
@@ -1545,6 +1671,119 @@ mod tests {
         assert!(
             !report.missing_evidence_rows.is_empty(),
             "Failed test rows should be in missing_evidence_rows"
+        );
+    }
+
+    #[test]
+    fn three_column_parity_rejection_only_excluded_from_headline() {
+        // B3: rejection_only rows must be EXCLUDED from 100% headline
+        let classifications = vec![
+            ("row1".to_string(), ParityClassification::Implemented),
+            ("row2".to_string(), ParityClassification::KernelVerified),
+            ("row3".to_string(), ParityClassification::RejectionOnly),
+            ("row4".to_string(), ParityClassification::RejectionOnly),
+            ("row5".to_string(), ParityClassification::Unverified),
+        ];
+
+        let report = ThreeColumnParityReport::from_classifications(
+            &classifications,
+            Some("test123".to_string()),
+            None,
+        );
+
+        // Verify basic counts
+        assert_eq!(report.total_rows, 5);
+        assert_eq!(report.implemented_rows, 1);
+        assert_eq!(report.kernel_verified_rows, 1);
+        assert_eq!(report.rejection_only_rows, 2);
+        assert_eq!(report.unverified_rows, 1);
+
+        // Headline counts EXCLUDE rejection_only rows
+        let (headline_impl, headline_total) = report.headline_counts();
+        assert_eq!(headline_total, 3, "headline_total excludes 2 rejection_only rows");
+        assert_eq!(headline_impl, 2, "headline_impl = implemented + kernel_verified");
+
+        // Verify rejection is properly excluded
+        assert!(
+            report.verify_rejection_excluded().is_ok(),
+            "rejection_only rows must not leak into headlines"
+        );
+
+        // Headline coverage should be 2/3 = 66.67%
+        let coverage = report.headline_coverage_percent();
+        assert!(
+            (coverage - 66.67).abs() < 1.0,
+            "headline coverage should be ~66.67%, got {coverage}"
+        );
+    }
+
+    #[test]
+    fn three_column_parity_rejection_only_cannot_raise_counts() {
+        // B3 acceptance: unit test asserts rejection_only row cannot raise implemented or kernel_verified
+
+        // Create a report with ONLY rejection_only rows
+        let classifications = vec![
+            ("rej1".to_string(), ParityClassification::RejectionOnly),
+            ("rej2".to_string(), ParityClassification::RejectionOnly),
+            ("rej3".to_string(), ParityClassification::RejectionOnly),
+        ];
+
+        let report = ThreeColumnParityReport::from_classifications(
+            &classifications,
+            None,
+            None,
+        );
+
+        // All rows are rejection_only
+        assert_eq!(report.rejection_only_rows, 3);
+
+        // implemented and kernel_verified must be zero
+        assert_eq!(
+            report.implemented_rows, 0,
+            "rejection_only rows cannot raise implemented count"
+        );
+        assert_eq!(
+            report.kernel_verified_rows, 0,
+            "rejection_only rows cannot raise kernel_verified count"
+        );
+
+        // Headline should have 0 implemented out of 0 total (rejection excluded)
+        let (headline_impl, headline_total) = report.headline_counts();
+        assert_eq!(headline_total, 0, "all rows are rejection_only, headline_total is 0");
+        assert_eq!(headline_impl, 0, "no implemented or kernel_verified rows");
+
+        // Coverage of 0/0 should be 0%
+        assert_eq!(report.headline_coverage_percent(), 0.0);
+    }
+
+    #[test]
+    fn three_column_parity_kernel_verification_threshold() {
+        // B3: kernel_verified requires N consecutive green runs (default N=3)
+        let classifications = vec![
+            ("row1".to_string(), ParityClassification::KernelVerified),
+        ];
+
+        // Default threshold
+        let report = ThreeColumnParityReport::from_classifications(
+            &classifications,
+            None,
+            None,
+        );
+        assert_eq!(
+            report.kernel_verification_threshold,
+            ThreeColumnParityReport::DEFAULT_KERNEL_THRESHOLD,
+            "default threshold should be 3"
+        );
+
+        // Custom threshold
+        let report_custom = ThreeColumnParityReport::from_classifications(
+            &classifications,
+            None,
+            Some(5),
+        );
+        assert_eq!(
+            report_custom.kernel_verification_threshold, 5,
+            "custom threshold should be respected"
         );
     }
 
