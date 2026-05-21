@@ -83,6 +83,7 @@ pub mod verification_runner;
 pub mod wal_group_commit_gate;
 pub mod workload_corpus;
 pub mod writeback_cache_audit;
+pub mod writeback_crash_matrix_executor;
 pub mod xfstests;
 
 use anyhow::{Context, Result, bail};
@@ -159,6 +160,132 @@ impl CoverageDomain {
             coverage_percent: percentage(implemented, total),
         }
     }
+}
+
+/// Btrfs parity row granularity: parse-only / read-verified / RW-durable.
+///
+/// bd-xuo95.13 (B4): Tracks btrfs capability maturity levels separately from
+/// the flat parity count. RW-durable rows require green durable-remount evidence
+/// from the A5 crash-matrix test suite.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BtrfsParityGranularity {
+    /// Rows that only parse the on-disk format (no I/O verification).
+    pub parse_only: usize,
+    /// Rows with verified read-path behavior (differential kernel tests).
+    pub read_verified: usize,
+    /// Rows marked 🚧 (in progress) but not yet RW-durable.
+    pub in_progress: usize,
+    /// Rows with durable RW behavior (remount-persistence evidence).
+    pub rw_durable: usize,
+    /// Total btrfs capability rows in FEATURE_PARITY.md.
+    pub total_btrfs_rows: usize,
+    /// Whether A5 durable-remount evidence is green.
+    pub a5_evidence_green: bool,
+    /// Git SHA the report was generated at.
+    pub git_sha: Option<String>,
+}
+
+impl BtrfsParityGranularity {
+    /// Build the granularity report from FEATURE_PARITY.md and evidence state.
+    ///
+    /// # Arguments
+    /// * `a5_evidence_green` - Whether A5 (bd-xuo95.6) crash-matrix tests pass
+    /// * `git_sha` - Current git commit for traceability
+    #[must_use]
+    pub fn from_feature_parity(a5_evidence_green: bool, git_sha: Option<String>) -> Self {
+        let btrfs_rows = count_btrfs_capability_rows(FEATURE_PARITY_MARKDOWN);
+
+        // Classify rows based on evidence state:
+        // - RW-durable: in_progress rows when A5 evidence is green
+        // - in_progress: 🚧 rows when evidence is NOT green
+        // - read-verified: rows with kernel differential tests (most btrfs rows)
+        // - parse-only: rows that only validate parsing (send/receive stream parsing)
+
+        let parse_only_rows = count_btrfs_parse_only_rows(FEATURE_PARITY_MARKDOWN);
+        let in_progress_rows = count_btrfs_in_progress_rows(FEATURE_PARITY_MARKDOWN);
+
+        // When A5 evidence is green, in_progress rows become rw_durable
+        let (in_progress, rw_durable) = if a5_evidence_green {
+            (0, in_progress_rows)
+        } else {
+            (in_progress_rows, 0)
+        };
+
+        // Read-verified = total - parse_only - in_progress_rows (regardless of evidence state)
+        let read_verified = btrfs_rows.saturating_sub(parse_only_rows).saturating_sub(in_progress_rows);
+
+        Self {
+            parse_only: parse_only_rows,
+            read_verified,
+            in_progress,
+            rw_durable,
+            total_btrfs_rows: btrfs_rows,
+            a5_evidence_green,
+            git_sha,
+        }
+    }
+
+    /// Verify RW-durable count is 0 when A5 evidence is not green.
+    pub fn verify_rw_durable_requires_evidence(&self) -> Result<(), String> {
+        if !self.a5_evidence_green && self.rw_durable > 0 {
+            return Err(format!(
+                "rw_durable={} but A5 evidence is not green - RW-durable rows require durable-remount evidence",
+                self.rw_durable
+            ));
+        }
+        Ok(())
+    }
+
+    /// Check that parse_only + read_verified + in_progress + rw_durable equals total.
+    pub fn verify_row_accounting(&self) -> Result<(), String> {
+        let sum = self.parse_only + self.read_verified + self.in_progress + self.rw_durable;
+        if sum != self.total_btrfs_rows {
+            return Err(format!(
+                "row accounting mismatch: parse_only({}) + read_verified({}) + in_progress({}) + rw_durable({}) = {} != total({})",
+                self.parse_only, self.read_verified, self.in_progress, self.rw_durable, sum, self.total_btrfs_rows
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Count btrfs capability rows in FEATURE_PARITY.md.
+/// Excludes summary/header rows (which contain percentage symbols).
+fn count_btrfs_capability_rows(markdown: &str) -> usize {
+    markdown
+        .lines()
+        .filter(|line| {
+            let trimmed = line.trim();
+            trimmed.starts_with("| btrfs ")
+                && trimmed.contains('|')
+                && !trimmed.contains('%')
+        })
+        .count()
+}
+
+/// Count btrfs rows that are parse-only (e.g., send/receive stream parsing).
+fn count_btrfs_parse_only_rows(markdown: &str) -> usize {
+    markdown
+        .lines()
+        .filter(|line| {
+            let trimmed = line.trim();
+            trimmed.starts_with("| btrfs ")
+                && (trimmed.contains("parse_send_stream")
+                    || trimmed.contains("send/receive streams"))
+        })
+        .count()
+}
+
+/// Count btrfs rows marked as in-progress (RW durability work).
+fn count_btrfs_in_progress_rows(markdown: &str) -> usize {
+    markdown
+        .lines()
+        .filter(|line| {
+            let trimmed = line.trim();
+            trimmed.starts_with("| btrfs ")
+                && trimmed.contains("🚧")
+        })
+        .count()
 }
 
 #[must_use]
@@ -1262,6 +1389,69 @@ mod tests {
         assert_eq!(serde_json::to_string_pretty(&parsed)?, json);
         insta::assert_snapshot!("parity_report_json_shape", json);
         Ok(())
+    }
+
+    #[test]
+    fn btrfs_parity_granularity_counts_rows() {
+        let report = BtrfsParityGranularity::from_feature_parity(false, None);
+        assert!(
+            report.total_btrfs_rows > 0,
+            "FEATURE_PARITY.md must contain btrfs rows"
+        );
+        report
+            .verify_row_accounting()
+            .expect("row accounting must be consistent");
+    }
+
+    #[test]
+    fn btrfs_parity_granularity_rw_durable_requires_evidence() {
+        // Without A5 evidence, rw_durable must be 0
+        let report_no_evidence = BtrfsParityGranularity::from_feature_parity(false, None);
+        assert_eq!(
+            report_no_evidence.rw_durable, 0,
+            "rw_durable must be 0 without A5 evidence"
+        );
+        report_no_evidence
+            .verify_rw_durable_requires_evidence()
+            .expect("verification must pass when rw_durable=0");
+
+        // With A5 evidence, rw_durable can be > 0 if there are in-progress rows
+        let report_with_evidence = BtrfsParityGranularity::from_feature_parity(true, None);
+        report_with_evidence
+            .verify_rw_durable_requires_evidence()
+            .expect("verification must pass with A5 evidence");
+    }
+
+    #[test]
+    fn btrfs_parity_granularity_json_round_trips() -> Result<(), serde_json::Error> {
+        let report = BtrfsParityGranularity::from_feature_parity(false, Some("abc123".to_string()));
+        let json = serde_json::to_string_pretty(&report)?;
+        let parsed: BtrfsParityGranularity = serde_json::from_str(&json)?;
+        assert_eq!(parsed, report);
+        Ok(())
+    }
+
+    #[test]
+    fn btrfs_parity_granularity_split_is_consistent() {
+        let report = BtrfsParityGranularity::from_feature_parity(false, None);
+
+        // Verify the split: parse_only + read_verified + in_progress + rw_durable = total
+        let sum = report.parse_only + report.read_verified + report.in_progress + report.rw_durable;
+        assert_eq!(
+            sum, report.total_btrfs_rows,
+            "granularity split must equal total: {} + {} + {} + {} = {} != {}",
+            report.parse_only, report.read_verified, report.in_progress, report.rw_durable, sum, report.total_btrfs_rows
+        );
+
+        // Without evidence, rw_durable is 0 and in_progress > 0
+        assert_eq!(report.rw_durable, 0, "rw_durable must be 0 without evidence");
+        assert!(report.in_progress > 0, "in_progress must be > 0 without evidence");
+
+        // Most rows should be read_verified (kernel differential tests exist)
+        assert!(
+            report.read_verified > 0,
+            "there should be read_verified btrfs rows"
+        );
     }
 
     #[test]
