@@ -653,6 +653,7 @@ fn stress_honesty_ssi_single_edges_commit_two_edge_pivots_abort() {
                             );
                         }
                     }
+                    drop(guard);
                 })
                 .expect("create ssi honesty task");
             runtime.scheduler.lock().schedule(task_id, 0);
