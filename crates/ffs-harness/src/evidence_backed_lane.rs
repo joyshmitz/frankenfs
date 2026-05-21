@@ -38,17 +38,17 @@ impl EvidenceBackedLane {
         let status = match &evidence.outcome {
             ExecutionOutcome::Success => "passed",
             ExecutionOutcome::Failed { exit_code } => {
+                let stdout_sha256 = &evidence.stdout_sha256;
                 return format!(
-                    "lane {} failed with exit code {}; stdout_sha256={}",
-                    lane_id, exit_code, evidence.stdout_sha256
+                    "lane {lane_id} failed with exit code {exit_code}; stdout_sha256={stdout_sha256}"
                 );
             }
             ExecutionOutcome::Signaled => "terminated by signal",
             ExecutionOutcome::Skipped { reason } => {
-                return format!("lane {} skipped: {}", lane_id, reason);
+                return format!("lane {lane_id} skipped: {reason}");
             }
             ExecutionOutcome::LaunchFailed { error } => {
-                return format!("lane {} launch failed: {}", lane_id, error);
+                return format!("lane {lane_id} launch failed: {error}");
             }
         };
         format!(
@@ -224,12 +224,10 @@ pub fn find_permissioned_lane_command(lane_id: &str) -> Option<&'static LaneComm
 /// Execute a single lane and capture evidence.
 #[must_use]
 pub fn execute_lane(lane_cmd: &LaneCommand) -> EvidenceBackedLane {
-    let evidence = match lane_cmd.capability_check {
-        Some(check) => {
-            ExecutedEvidence::run_with_prerequisite(lane_cmd.command, lane_cmd.args, check)
-        }
-        None => ExecutedEvidence::run(lane_cmd.command, lane_cmd.args),
-    };
+    let evidence = lane_cmd.capability_check.map_or_else(
+        || ExecutedEvidence::run(lane_cmd.command, lane_cmd.args),
+        |check| ExecutedEvidence::run_with_prerequisite(lane_cmd.command, lane_cmd.args, check),
+    );
 
     let outcome = EvidenceBackedLane::outcome_from_evidence(&evidence);
     let summary = EvidenceBackedLane::build_summary(lane_cmd.lane_id, &evidence);

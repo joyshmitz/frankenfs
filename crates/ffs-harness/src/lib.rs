@@ -706,8 +706,7 @@ impl ThreeColumnParityReport {
         // Verify headline_impl doesn't include rejection_only
         if headline_impl > headline_total {
             return Err(format!(
-                "headline_implemented={} exceeds headline_total={} - rejection rows may be leaking",
-                headline_impl, headline_total
+                "headline_implemented={headline_impl} exceeds headline_total={headline_total} - rejection rows may be leaking"
             ));
         }
 
@@ -1943,7 +1942,7 @@ mod tests {
         assert_eq!(headline_impl, 0, "no implemented or kernel_verified rows");
 
         // Coverage of 0/0 should be 0%
-        assert_eq!(report.headline_coverage_percent(), 0.0);
+        assert!((report.headline_coverage_percent() - 0.0).abs() < f64::EPSILON);
     }
 
     #[test]

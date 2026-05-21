@@ -2020,10 +2020,9 @@ fn validate_executable_lane_pass_requires_evidence(
             None => {
                 // No evidence - pass lane must have evidence
                 report.errors.push(format!(
-                    "lane {} is marked pass but has no ExecutedEvidence. \
+                    "lane {lane_id} is marked pass but has no ExecutedEvidence. \
                      A pass lane for an executable lane requires fresh executed evidence, \
-                     not just checked-in artifact hashes.",
-                    lane_id
+                     not just checked-in artifact hashes."
                 ));
             }
         }
