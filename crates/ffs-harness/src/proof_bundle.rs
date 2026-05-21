@@ -41,6 +41,68 @@ pub const REQUIRED_PROOF_BUNDLE_LANES: [&str; 14] = [
 
 const EXECUTABLE_PROOF_BUNDLE_LANES: [&str; 4] =
     ["conformance", "fuse", "repair_lab", "crash_replay"];
+
+/// C3: Lanes that require special permissions or infrastructure to execute.
+/// These are labeled documentation-only until G1-G4 beads enable execution.
+const DOCUMENTATION_ONLY_LANES: [&str; 1] = ["xfstests"];
+
+/// C3: Lanes that are deferred for V1.x (not yet executable).
+const DEFERRED_LANES: [&str; 0] = [];
+
+/// C3: Lane execution classification.
+///
+/// Determines whether a lane can contribute 'pass' based on execution capability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LaneExecutionClass {
+    /// Lane requires ExecutedEvidence with exit_code==0 to pass.
+    Executable,
+    /// Lane cannot be executed on typical hosts (permissioned infrastructure).
+    /// Cannot contribute 'pass' until G1-G4 beads enable execution.
+    DocumentationOnly,
+    /// Lane execution deferred to V1.x (not yet implemented).
+    /// Cannot contribute 'pass'.
+    Deferred,
+    /// Lane uses alternative verification (swarm, adaptive_runtime, etc.).
+    AlternativeVerification,
+}
+
+impl LaneExecutionClass {
+    /// Classify a lane by its ID.
+    #[must_use]
+    pub fn classify(lane_id: &str) -> Self {
+        if EXECUTABLE_PROOF_BUNDLE_LANES.contains(&lane_id) {
+            Self::Executable
+        } else if DOCUMENTATION_ONLY_LANES.contains(&lane_id) {
+            Self::DocumentationOnly
+        } else if DEFERRED_LANES.contains(&lane_id) {
+            Self::Deferred
+        } else {
+            Self::AlternativeVerification
+        }
+    }
+
+    /// Whether this lane can contribute 'pass' to release readiness.
+    #[must_use]
+    pub const fn can_contribute_pass(self) -> bool {
+        match self {
+            Self::Executable | Self::AlternativeVerification => true,
+            Self::DocumentationOnly | Self::Deferred => false,
+        }
+    }
+
+    /// Label for display.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Executable => "executable",
+            Self::DocumentationOnly => "documentation_only",
+            Self::Deferred => "deferred",
+            Self::AlternativeVerification => "alternative_verification",
+        }
+    }
+}
+
 const EXECUTED_EVIDENCE_COMMAND_KEY: &str = "executed_evidence_command";
 const EXECUTED_EVIDENCE_ARGS_JSON_KEY: &str = "executed_evidence_args_json";
 const SWARM_WORKLOAD_HARNESS_LANE: &str = "swarm_workload_harness";
@@ -4142,5 +4204,81 @@ mod tests {
             "error should mention exit_code mismatch: {:?}",
             report.errors
         );
+    }
+
+    // C3: lane execution classification tests
+
+    #[test]
+    fn c3_lane_execution_class_covers_all_required_lanes() {
+        // C3: Every required lane must have an explicit classification
+        for lane_id in REQUIRED_PROOF_BUNDLE_LANES {
+            let class = LaneExecutionClass::classify(lane_id);
+            // Classification should be deterministic
+            assert_eq!(
+                class,
+                LaneExecutionClass::classify(lane_id),
+                "lane {lane_id} classification should be deterministic"
+            );
+        }
+    }
+
+    #[test]
+    fn c3_documentation_only_lanes_cannot_contribute_pass() {
+        // C3: Documentation-only lanes cannot contribute 'pass'
+        for lane_id in DOCUMENTATION_ONLY_LANES {
+            let class = LaneExecutionClass::classify(lane_id);
+            assert_eq!(
+                class,
+                LaneExecutionClass::DocumentationOnly,
+                "lane {lane_id} should be classified as documentation_only"
+            );
+            assert!(
+                !class.can_contribute_pass(),
+                "documentation_only lane {lane_id} must not contribute pass"
+            );
+        }
+    }
+
+    #[test]
+    fn c3_deferred_lanes_cannot_contribute_pass() {
+        // C3: Deferred lanes cannot contribute 'pass'
+        for lane_id in DEFERRED_LANES {
+            let class = LaneExecutionClass::classify(lane_id);
+            assert_eq!(
+                class,
+                LaneExecutionClass::Deferred,
+                "lane {lane_id} should be classified as deferred"
+            );
+            assert!(
+                !class.can_contribute_pass(),
+                "deferred lane {lane_id} must not contribute pass"
+            );
+        }
+    }
+
+    #[test]
+    fn c3_executable_lanes_can_contribute_pass() {
+        // C3: Executable lanes CAN contribute 'pass' (with evidence)
+        for lane_id in EXECUTABLE_PROOF_BUNDLE_LANES {
+            let class = LaneExecutionClass::classify(lane_id);
+            assert_eq!(
+                class,
+                LaneExecutionClass::Executable,
+                "lane {lane_id} should be classified as executable"
+            );
+            assert!(
+                class.can_contribute_pass(),
+                "executable lane {lane_id} should be able to contribute pass"
+            );
+        }
+    }
+
+    #[test]
+    fn c3_xfstests_is_documentation_only() {
+        // C3: xfstests requires permissioned infrastructure - documentation_only until G1-G4
+        let class = LaneExecutionClass::classify("xfstests");
+        assert_eq!(class, LaneExecutionClass::DocumentationOnly);
+        assert!(!class.can_contribute_pass());
+        assert_eq!(class.label(), "documentation_only");
     }
 }
