@@ -36,7 +36,7 @@
 | 18 | `ffs-tui` | TUI monitoring: live cache stats, MVCC version counts, repair status, I/O throughput | `ffs`, `ftui` | 9 |
 | 19 | `ffs-harness` | Conformance testing harness: parity reports, sparse JSON fixtures, compare FrankenFS behavior against real ext4/btrfs images | `ffs-core`, `ffs-ondisk`, `ffs-types`, `anyhow`, `hex`, `serde`, `serde_json`; dev: `criterion` | 9 |
 | 20 | `ffs-ext4` | Legacy/reference wrapper for ext4 parsing APIs (re-exports `ffs-ondisk::ext4::*`) | `ffs-ondisk` | 1 |
-| 21 | `ffs-btrfs` | Btrfs tree walking and mutation layer: root/inode/dir/extent-data helpers, chunk/device tree discovery, COW tree updates, delayed refs, snapshot/subvolume metadata, and MVCC-backed transaction manifests; re-exports low-level `ffs-ondisk::btrfs::*` primitives | `ffs-ondisk`, `ffs-types`, `ffs-mvcc`, `asupersync`, `thiserror`, `tracing` | 4-7 |
+| 21 | `ffs-btrfs` | Btrfs tree walking and mutation layer: root/inode/dir/extent-data helpers, chunk/device tree discovery, COW tree updates, delayed refs, snapshot/subvolume metadata, MVCC-backed transaction manifests, **metadata writeback serialization (CoW node → on-disk bytes)**, extent tree allocation for new nodes with `METADATA_ITEM`/`TREE_BLOCK_REF` accounting, data orphan reclamation after interrupted writeback, atomic superblock commit with generation bump; re-exports low-level `ffs-ondisk::btrfs::*` primitives | `ffs-ondisk`, `ffs-types`, `ffs-mvcc`, `asupersync`, `thiserror`, `tracing` | 4-7 |
 
 ---
 

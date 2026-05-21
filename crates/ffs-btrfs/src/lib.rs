@@ -1476,7 +1476,7 @@ impl BtrfsCowNode {
         buf[0x58..0x60].copy_from_slice(&params.owner.to_le_bytes());
 
         match self {
-            BtrfsCowNode::Leaf { items } => {
+            Self::Leaf { items } => {
                 // nritems at 0x60
                 let nritems = u32::try_from(items.len())
                     .map_err(|_| BtrfsMutationError::InvalidConfig("too many items"))?;
@@ -1524,7 +1524,7 @@ impl BtrfsCowNode {
                     item_offset += BTRFS_ITEM_SIZE;
                 }
             }
-            BtrfsCowNode::Internal { keys, children } => {
+            Self::Internal { keys, children } => {
                 if keys.len() + 1 != children.len() {
                     return Err(BtrfsMutationError::BrokenInvariant(
                         "keys.len + 1 != children.len",
@@ -1585,8 +1585,8 @@ impl BtrfsCowNode {
     #[must_use]
     pub fn level(&self) -> u8 {
         match self {
-            BtrfsCowNode::Leaf { .. } => 0,
-            BtrfsCowNode::Internal { .. } => 1,
+            Self::Leaf { .. } => 0,
+            Self::Internal { .. } => 1,
         }
     }
 
@@ -1594,8 +1594,8 @@ impl BtrfsCowNode {
     #[must_use]
     pub fn nritems(&self) -> usize {
         match self {
-            BtrfsCowNode::Leaf { items } => items.len(),
-            BtrfsCowNode::Internal { children, .. } => children.len(),
+            Self::Leaf { items } => items.len(),
+            Self::Internal { children, .. } => children.len(),
         }
     }
 }
@@ -13905,9 +13905,7 @@ mod tests {
                 data: vec![0xBB; 32],
             },
         ];
-        let node = BtrfsCowNode::Leaf {
-            items: items.clone(),
-        };
+        let node = BtrfsCowNode::Leaf { items };
 
         let params = BtrfsNodeSerializeParams {
             fsid: [0x11; 16],
@@ -13958,10 +13956,7 @@ mod tests {
             },
         ];
         let children = vec![0x20000_u64, 0x30000_u64, 0x40000_u64];
-        let node = BtrfsCowNode::Internal {
-            keys,
-            children: children.clone(),
-        };
+        let node = BtrfsCowNode::Internal { keys, children };
 
         let params = BtrfsNodeSerializeParams {
             fsid: [0x33; 16],
