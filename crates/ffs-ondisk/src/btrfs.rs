@@ -1705,7 +1705,7 @@ mod tests {
 
     #[test]
     fn superblock_patch_commit_updates_fields() {
-        let mut sb = BtrfsSuperblock {
+        let sb = BtrfsSuperblock {
             csum: [0; 32],
             fsid: [0x22; 16],
             bytenr: BTRFS_SUPER_INFO_OFFSET as u64,
