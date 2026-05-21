@@ -3,6 +3,7 @@
 use anyhow::{Context, Result, bail};
 use serde_json::json;
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -54,7 +55,7 @@ impl ModuleChange {
     }
 
     fn conformance_test_delta(&self) -> isize {
-        self.head_conformance_tests as isize - self.base_conformance_tests as isize
+        usize_delta(self.head_conformance_tests, self.base_conformance_tests)
     }
 }
 
@@ -81,20 +82,21 @@ pub fn run_harness_loc_guard(config: &HarnessLocGuardConfig) -> Result<HarnessLo
             let (classification, classified_by_census) = classifications
                 .get(&module_path)
                 .copied()
-                .map(|classification| (classification, true))
-                .unwrap_or((ModuleClassification::Meta, false));
+                .map_or((ModuleClassification::Meta, false), |classification| {
+                    (classification, true)
+                });
             let (base_tests, head_tests) = if classification == ModuleClassification::Conformance {
                 (
                     conformance_test_count_at_ref(
                         &config.workspace_root,
                         &config.base_ref,
                         &delta.path,
-                    )?,
+                    ),
                     conformance_test_count_at_ref(
                         &config.workspace_root,
                         &config.head_ref,
                         &delta.path,
-                    )?,
+                    ),
                 )
             } else {
                 (0, 0)
@@ -194,13 +196,15 @@ pub fn render_harness_loc_guard_text(report: &HarnessLocGuardReport) -> String {
         report.allowance
     );
     if let Some(message) = &report.warning_message {
-        out.push_str(&format!("\n{message}"));
+        write!(&mut out, "\n{message}").expect("writing to a String cannot fail");
     }
     if !report.unclassified_modules.is_empty() {
-        out.push_str(&format!(
+        write!(
+            &mut out,
             "\nunclassified_modules={}",
             report.unclassified_modules.join(",")
-        ));
+        )
+        .expect("writing to a String cannot fail");
     }
     out
 }
@@ -262,7 +266,11 @@ fn parse_numstat(raw: &str) -> Vec<NumstatDelta> {
             let path = fields.next()?.to_owned();
             let added_loc = added.parse::<isize>().ok()?;
             let removed_loc = removed.parse::<isize>().ok()?;
-            if path.ends_with(".rs") && path.starts_with(HARNESS_SRC_PREFIX) {
+            if Path::new(&path)
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("rs"))
+                && path.starts_with(HARNESS_SRC_PREFIX)
+            {
                 Some(NumstatDelta {
                     path,
                     added_loc,
@@ -279,12 +287,16 @@ fn conformance_test_count_at_ref(
     workspace_root: &Path,
     git_ref: &str,
     path: &str,
-) -> Result<usize> {
-    let blob = match run_git(workspace_root, &["show", &format!("{git_ref}:{path}")]) {
-        Ok(blob) => blob,
-        Err(_) => String::new(),
-    };
-    Ok(count_non_ignored_tests(&blob))
+) -> usize {
+    let blob = run_git(workspace_root, &["show", &format!("{git_ref}:{path}")])
+        .unwrap_or_default();
+    count_non_ignored_tests(&blob)
+}
+
+fn usize_delta(head: usize, base: usize) -> isize {
+    let head = isize::try_from(head).unwrap_or(isize::MAX);
+    let base = isize::try_from(base).unwrap_or(isize::MAX);
+    head.saturating_sub(base)
 }
 
 fn count_non_ignored_tests(source: &str) -> usize {
@@ -385,14 +397,14 @@ mod tests {
 
     #[test]
     fn ignored_tests_do_not_increase_allowance() {
-        let source = r#"
+        let source = r"
             #[test]
             fn counted() {}
 
             #[ignore]
             #[test]
             fn ignored() {}
-        "#;
+        ";
 
         assert_eq!(count_non_ignored_tests(source), 1);
     }

@@ -331,8 +331,11 @@ fn build_btrfs_fsops_image() -> Vec<u8> {
 fn open_writable_btrfs_fixture() -> OpenFs {
     let cx = Cx::for_testing();
     let dev = MemByteDevice::from_bytes(build_btrfs_fsops_image());
-    let mut fs =
-        OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).expect("open btrfs");
+    let opts = OpenOptions {
+        btrfs_rw_ephemeral_ok: true,
+        ..OpenOptions::default()
+    };
+    let mut fs = OpenFs::from_device(&cx, Box::new(dev), &opts).expect("open btrfs");
     fs.enable_writes(&cx).expect("enable btrfs writes");
     fs
 }

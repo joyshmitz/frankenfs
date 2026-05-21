@@ -2012,8 +2012,7 @@ fn validate_executable_lane_pass_requires_evidence(
                     report.errors.push(format!(
                         "lane {} is marked pass but ExecutedEvidence exit_code={:?} (expected 0). \
                          A pass lane requires exit_code==0.",
-                        lane_id,
-                        ev.exit_code
+                        lane_id, ev.exit_code
                     ));
                 }
             }
@@ -4115,7 +4114,10 @@ mod tests {
             "pass lane without evidence should generate an error"
         );
         assert!(
-            report.errors.iter().any(|e| e.contains("no ExecutedEvidence")),
+            report
+                .errors
+                .iter()
+                .any(|e| e.contains("no ExecutedEvidence")),
             "error should mention missing ExecutedEvidence: {:?}",
             report.errors
         );
@@ -4199,7 +4201,10 @@ mod tests {
             "pass lane with non-zero exit_code should generate an error"
         );
         assert!(
-            report.errors.iter().any(|e| e.contains("exit_code") && e.contains("expected 0")),
+            report
+                .errors
+                .iter()
+                .any(|e| e.contains("exit_code") && e.contains("expected 0")),
             "error should mention exit_code mismatch: {:?}",
             report.errors
         );

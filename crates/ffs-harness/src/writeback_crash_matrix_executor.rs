@@ -26,7 +26,7 @@ use ffs_btrfs::crash_consistency::{WritebackCacheCrashOutcome, run_writeback_cac
 use crate::executed_evidence::{ExecutedEvidence, ExecutionOutcome};
 use crate::writeback_cache_audit::{
     WRITEBACK_CACHE_CRASH_REPLAY_SCHEMA_VERSION, WritebackCrashPointEvidence,
-    WritebackCrashReplayDecision, WritebackCrashReplayOracle, WritebackCrashReplayOperation,
+    WritebackCrashReplayDecision, WritebackCrashReplayOperation, WritebackCrashReplayOracle,
     WritebackCrashReplayReport, WritebackMountOptions, WritebackUnsupportedCombination,
     build_writeback_crash_replay_report,
 };
@@ -77,7 +77,9 @@ impl ExecutedWritebackCrashMatrixReport {
     pub fn is_executed_and_accepted(&self) -> bool {
         let evidence_ran = matches!(
             self.evidence.outcome,
-            ExecutionOutcome::Success | ExecutionOutcome::Failed { .. } | ExecutionOutcome::Signaled
+            ExecutionOutcome::Success
+                | ExecutionOutcome::Failed { .. }
+                | ExecutionOutcome::Signaled
         );
         evidence_ran
             && self.all_phases_passed
@@ -187,13 +189,15 @@ fn executed_operation_trace() -> Vec<WritebackCrashReplayOperation> {
     STEPS
         .into_iter()
         .zip(1_u32..)
-        .map(|((operation, boundary), step)| WritebackCrashReplayOperation {
-            step,
-            operation: operation.to_owned(),
-            target: "/writeback/data.bin".to_owned(),
-            durability_boundary: boundary.to_owned(),
-            expected_result: "success".to_owned(),
-        })
+        .map(
+            |((operation, boundary), step)| WritebackCrashReplayOperation {
+                step,
+                operation: operation.to_owned(),
+                target: "/writeback/data.bin".to_owned(),
+                durability_boundary: boundary.to_owned(),
+                expected_result: "success".to_owned(),
+            },
+        )
         .collect()
 }
 
@@ -325,9 +329,7 @@ pub fn build_executed_writeback_crash_matrix_report(
 ///
 /// # Errors
 /// Returns an error if the DPOR harness or oracle validation fails.
-pub fn execute_writeback_crash_matrix(
-    seed: u64,
-) -> Result<ExecutedWritebackCrashMatrixReport> {
+pub fn execute_writeback_crash_matrix(seed: u64) -> Result<ExecutedWritebackCrashMatrixReport> {
     let evidence = capture_writeback_crash_matrix_evidence();
     build_executed_writeback_crash_matrix_report(seed, evidence)
 }
@@ -341,10 +343,7 @@ mod tests {
     fn executed_oracle_covers_all_twelve_crash_points() {
         let oracle = build_executed_writeback_crash_replay_oracle(0x1234).expect("build oracle");
         assert_eq!(oracle.crash_points.len(), 12);
-        for (required, point) in REQUIRED_CRASH_POINT_IDS
-            .iter()
-            .zip(&oracle.crash_points)
-        {
+        for (required, point) in REQUIRED_CRASH_POINT_IDS.iter().zip(&oracle.crash_points) {
             assert_eq!(&point.crash_point_id, required);
             assert!(
                 point.description.contains("executed via A4 DPOR harness"),
@@ -357,8 +356,8 @@ mod tests {
     #[test]
     fn executed_oracle_is_accepted_by_the_crash_replay_gate() {
         let oracle = build_executed_writeback_crash_replay_oracle(99).expect("build oracle");
-        let report = build_writeback_crash_replay_report(&oracle, "scenario", "cmd")
-            .expect("build report");
+        let report =
+            build_writeback_crash_replay_report(&oracle, "scenario", "cmd").expect("build report");
         assert!(
             matches!(report.decision, WritebackCrashReplayDecision::Accept),
             "executed crash matrix oracle must be accepted, got {:?}",
@@ -374,7 +373,10 @@ mod tests {
             .iter()
             .find(|p| p.crash_point_id == "cp09_after_cancellation_before_writeback")
             .expect("cp09 present");
-        assert_eq!(cp09.cancellation_state, "cancelled_before_writeback_classified");
+        assert_eq!(
+            cp09.cancellation_state,
+            "cancelled_before_writeback_classified"
+        );
     }
 
     #[test]
@@ -399,11 +401,14 @@ mod tests {
         // trivial command here to exercise report assembly without a slow
         // nested `cargo test` invocation.
         let evidence = ExecutedEvidence::run("true", &[]);
-        let report = build_executed_writeback_crash_matrix_report(7, evidence)
-            .expect("assemble report");
+        let report =
+            build_executed_writeback_crash_matrix_report(7, evidence).expect("assemble report");
         assert_eq!(report.executed_phase_count, 12);
         assert!(report.all_phases_passed, "all executed phases must pass");
-        assert!(matches!(report.decision, WritebackCrashReplayDecision::Accept));
+        assert!(matches!(
+            report.decision,
+            WritebackCrashReplayDecision::Accept
+        ));
         assert_eq!(report.phase_summaries.len(), 12);
         assert!(report.is_executed_and_accepted());
     }

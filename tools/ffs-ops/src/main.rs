@@ -117,8 +117,7 @@ fn harness_loc_growth_guard_cmd(args: &[String]) -> Result<()> {
     let mut base_ref = env::var("GITHUB_BASE_REF")
         .ok()
         .filter(|value| !value.is_empty())
-        .map(|base| format!("origin/{base}"))
-        .unwrap_or_else(|| "HEAD^".to_owned());
+        .map_or_else(|| "HEAD^".to_owned(), |base| format!("origin/{base}"));
     let mut head_ref = "HEAD".to_owned();
     let mut out_path = None;
     let mut format = HarnessLocGuardOutputFormat::Github;
@@ -127,19 +126,19 @@ fn harness_loc_growth_guard_cmd(args: &[String]) -> Result<()> {
     while i < args.len() {
         match args[i].as_str() {
             "--workspace-root" => {
-                workspace_root = require_value(args, i, "--workspace-root")?.to_owned();
+                require_value(args, i, "--workspace-root")?.clone_into(&mut workspace_root);
                 i += 2;
             }
             "--census" => {
-                census_path = require_value(args, i, "--census")?.to_owned();
+                require_value(args, i, "--census")?.clone_into(&mut census_path);
                 i += 2;
             }
             "--base" => {
-                base_ref = require_value(args, i, "--base")?.to_owned();
+                require_value(args, i, "--base")?.clone_into(&mut base_ref);
                 i += 2;
             }
             "--head" => {
-                head_ref = require_value(args, i, "--head")?.to_owned();
+                require_value(args, i, "--head")?.clone_into(&mut head_ref);
                 i += 2;
             }
             "--out" => {
@@ -306,11 +305,11 @@ fn validate_source_scope_manifest_cmd(args: &[String]) -> Result<()> {
     while i < args.len() {
         match args[i].as_str() {
             "--manifest" => {
-                manifest_path = require_value(args, i, "--manifest")?.to_owned();
+                require_value(args, i, "--manifest")?.clone_into(&mut manifest_path);
                 i += 2;
             }
             "--workspace-root" => {
-                workspace_root = require_value(args, i, "--workspace-root")?.to_owned();
+                require_value(args, i, "--workspace-root")?.clone_into(&mut workspace_root);
                 i += 2;
             }
             "--out" => {
@@ -449,7 +448,7 @@ fn validate_docs_status_drift_cmd(args: &[String]) -> Result<()> {
             other => bail!("unknown validate-docs-status-drift argument: {other}"),
         }
     }
-    config.generated_artifact_paths = generated_paths(&out_path, &summary_out_path);
+    config.generated_artifact_paths = generated_paths(out_path.as_deref(), summary_out_path.as_deref());
 
     let report = run_docs_status_drift(&config)?;
     let json = serde_json::to_string_pretty(&report)?;
@@ -538,7 +537,7 @@ fn validate_permissioned_campaign_broker_cmd(args: &[String]) -> Result<()> {
     while i < args.len() {
         match args[i].as_str() {
             "--manifest" => {
-                manifest_path = require_value(args, i, "--manifest")?.to_owned();
+                require_value(args, i, "--manifest")?.clone_into(&mut manifest_path);
                 i += 2;
             }
             "--out" => {
@@ -614,7 +613,7 @@ fn validate_permissioned_campaign_ledger_cmd(args: &[String]) -> Result<()> {
     while i < args.len() {
         match args[i].as_str() {
             "--manifest" => {
-                manifest_path = require_value(args, i, "--manifest")?.to_owned();
+                require_value(args, i, "--manifest")?.clone_into(&mut manifest_path);
                 i += 2;
             }
             "--ledger" => {
@@ -692,7 +691,7 @@ fn generate_permissioned_campaign_packet_cmd(args: &[String]) -> Result<()> {
     while i < args.len() {
         match args[i].as_str() {
             "--manifest" => {
-                manifest_path = require_value(args, i, "--manifest")?.to_owned();
+                require_value(args, i, "--manifest")?.clone_into(&mut manifest_path);
                 i += 2;
             }
             "--out" => {
@@ -925,7 +924,7 @@ fn parse_recommend_readiness_actions_args(args: &[String]) -> Result<Option<Read
                 i += 2;
             }
             "--invocation" => {
-                invocation = require_value(args, i, "--invocation")?.to_owned();
+                require_value(args, i, "--invocation")?.clone_into(&mut invocation);
                 i += 2;
             }
             "--help" | "-h" => {
@@ -1038,11 +1037,11 @@ fn readiness_action_dry_run_stderr_log(report: &ReadinessActionDryRunReport) -> 
     )
 }
 
-fn generated_paths(out_path: &Option<String>, summary_out_path: &Option<String>) -> Vec<String> {
+fn generated_paths(out_path: Option<&str>, summary_out_path: Option<&str>) -> Vec<String> {
     match (out_path, summary_out_path) {
-        (Some(json), Some(markdown)) => vec![json.clone(), markdown.clone()],
-        (Some(json), None) => vec![json.clone()],
-        (None, Some(markdown)) => vec![markdown.clone()],
+        (Some(json), Some(markdown)) => vec![json.to_owned(), markdown.to_owned()],
+        (Some(json), None) => vec![json.to_owned()],
+        (None, Some(markdown)) => vec![markdown.to_owned()],
         (None, None) => Vec::new(),
     }
 }
@@ -1099,8 +1098,7 @@ fn write_text_file(path: &Path, text: &str) -> Result<()> {
 fn current_unix_timestamp_label() -> String {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs().to_string())
-        .unwrap_or_else(|_| "0".to_owned())
+        .map_or_else(|_| "0".to_owned(), |duration| duration.as_secs().to_string())
 }
 
 fn open_ended_note_scanner_reproduction_command(

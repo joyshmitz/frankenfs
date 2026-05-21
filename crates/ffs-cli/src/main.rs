@@ -521,6 +521,7 @@ fn writeback_cache_runtime_kill_switch_enabled() -> bool {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)]
 struct MountCmdOptions {
     allow_other: bool,
     read_write: bool,
@@ -11103,6 +11104,7 @@ mod tests {
                     &MountCmdOptions {
                         allow_other: false,
                         read_write: true,
+                        btrfs_rw_ephemeral_ok: false,
                         mount_mode: MountMode::Compat,
                         btrfs_mount_selection: BtrfsMountSelection::DefaultRoot,
                         ext4_data_err_policy: Ext4DataErrPolicy::Ignore,
@@ -11177,6 +11179,7 @@ mod tests {
             &MountCmdOptions {
                 allow_other: false,
                 read_write: false,
+                btrfs_rw_ephemeral_ok: false,
                 mount_mode: MountMode::Compat,
                 btrfs_mount_selection: BtrfsMountSelection::DefaultRoot,
                 ext4_data_err_policy: Ext4DataErrPolicy::Ignore,
@@ -11211,6 +11214,7 @@ mod tests {
             &MountCmdOptions {
                 allow_other: false,
                 read_write: false,
+                btrfs_rw_ephemeral_ok: false,
                 mount_mode: MountMode::Compat,
                 btrfs_mount_selection: BtrfsMountSelection::DefaultRoot,
                 ext4_data_err_policy: Ext4DataErrPolicy::Ignore,
@@ -11274,6 +11278,7 @@ mod tests {
         let open_options = build_mount_open_options(&MountCmdOptions {
             allow_other: false,
             read_write: false,
+            btrfs_rw_ephemeral_ok: false,
             mount_mode: MountMode::Compat,
             btrfs_mount_selection: BtrfsMountSelection::DefaultRoot,
             ext4_data_err_policy: Ext4DataErrPolicy::Ignore,
@@ -11299,6 +11304,7 @@ mod tests {
         let open_options = build_mount_open_options(&MountCmdOptions {
             allow_other: false,
             read_write: true,
+            btrfs_rw_ephemeral_ok: false,
             mount_mode: MountMode::Compat,
             btrfs_mount_selection: BtrfsMountSelection::Subvolume("home".to_owned()),
             ext4_data_err_policy: Ext4DataErrPolicy::Ignore,
@@ -11328,6 +11334,7 @@ mod tests {
         let open_options = build_mount_open_options(&MountCmdOptions {
             allow_other: false,
             read_write: false,
+            btrfs_rw_ephemeral_ok: false,
             mount_mode: MountMode::Native,
             btrfs_mount_selection: BtrfsMountSelection::Snapshot("snap-1".to_owned()),
             ext4_data_err_policy: Ext4DataErrPolicy::Abort,
@@ -11361,6 +11368,7 @@ mod tests {
                 &MountCmdOptions {
                     allow_other: false,
                     read_write: false,
+                    btrfs_rw_ephemeral_ok: false,
                     mount_mode: MountMode::Compat,
                     btrfs_mount_selection: BtrfsMountSelection::Subvolume("missing".to_owned()),
                     ext4_data_err_policy: Ext4DataErrPolicy::Ignore,
@@ -11403,6 +11411,7 @@ mod tests {
                 &MountCmdOptions {
                     allow_other: false,
                     read_write: false,
+                    btrfs_rw_ephemeral_ok: false,
                     mount_mode: MountMode::Compat,
                     btrfs_mount_selection: BtrfsMountSelection::Snapshot(
                         "missing-snapshot".to_owned(),
@@ -11446,6 +11455,7 @@ mod tests {
                 &MountCmdOptions {
                     allow_other: false,
                     read_write: false,
+                    btrfs_rw_ephemeral_ok: false,
                     mount_mode: MountMode::Compat,
                     btrfs_mount_selection: BtrfsMountSelection::Subvolume("home".to_owned()),
                     ext4_data_err_policy: Ext4DataErrPolicy::Ignore,
@@ -11506,6 +11516,7 @@ mod tests {
                 &MountCmdOptions {
                     allow_other: false,
                     read_write: false,
+                    btrfs_rw_ephemeral_ok: false,
                     mount_mode: MountMode::Compat,
                     btrfs_mount_selection: BtrfsMountSelection::Snapshot("snap-home".to_owned()),
                     ext4_data_err_policy: Ext4DataErrPolicy::Ignore,

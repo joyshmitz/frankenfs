@@ -1,5 +1,5 @@
 ---
-source: crates/ffs-harness/src/docs_status_drift.rs
+source: tools/ffs-ops/src/docs_status_drift.rs
 expression: markdown
 ---
 # FrankenFS Docs Status Drift
@@ -8,7 +8,7 @@ expression: markdown
 - Release gate pass: `true`
 - Rules: `12`
 - Observations: `12`
-- Reproduction: `ffs-harness validate-docs-status-drift --issues .beads/issues.jsonl --feature-parity FEATURE_PARITY.md --out artifacts/docs-status/docs_status_drift.json --summary-out artifacts/docs-status/docs_status_drift.md`
+- Reproduction: `ffs-ops validate-docs-status-drift --issues .beads/issues.jsonl --feature-parity FEATURE_PARITY.md --out artifacts/docs-status/docs_status_drift.json --summary-out artifacts/docs-status/docs_status_drift.md`
 
 ## Observations
 | Feature | Target | Expected | Drift | Wording | Remediation |

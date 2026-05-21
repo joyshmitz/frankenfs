@@ -1956,13 +1956,17 @@ mod tests {
         proof.valid = false;
         proof.errors.push(
             "lane conformance is marked pass but ExecutedEvidence exit_code=Some(1) (expected 0). \
-             A pass lane requires exit_code==0.".to_owned()
+             A pass lane requires exit_code==0."
+                .to_owned(),
         );
 
         let report = evaluate_release_gates(&sample_policy(), &proof);
 
         // Release gate should fail closed due to invalid proof
-        assert!(!report.valid, "release gate should fail when proof has exit_code errors");
+        assert!(
+            !report.valid,
+            "release gate should fail when proof has exit_code errors"
+        );
         // Feature should be disabled due to invalid bundle
         assert_eq!(
             report.feature_reports[0].final_state,
@@ -1971,10 +1975,11 @@ mod tests {
         );
         // Findings should mention proof bundle errors
         assert!(
-            report.findings.iter().any(|f|
-                f.transition_reason.contains("proof bundle") ||
-                f.transition_reason.contains("errors")
-            ),
+            report
+                .findings
+                .iter()
+                .any(|f| f.transition_reason.contains("proof bundle")
+                    || f.transition_reason.contains("errors")),
             "findings should show proof bundle validation failure: {:?}",
             report.findings
         );
@@ -1988,13 +1993,17 @@ mod tests {
         proof.errors.push(
             "lane fuse is marked pass but has no ExecutedEvidence. \
              A pass lane for an executable lane requires fresh executed evidence, \
-             not just checked-in artifact hashes.".to_owned()
+             not just checked-in artifact hashes."
+                .to_owned(),
         );
 
         let report = evaluate_release_gates(&sample_policy(), &proof);
 
         // Release gate should fail closed due to invalid proof
-        assert!(!report.valid, "release gate should fail when proof has missing evidence errors");
+        assert!(
+            !report.valid,
+            "release gate should fail when proof has missing evidence errors"
+        );
         // Feature should be disabled due to invalid bundle
         assert_eq!(
             report.feature_reports[0].final_state,
@@ -2008,12 +2017,17 @@ mod tests {
         // C4: A lane cannot be pass without a valid proof bundle
         let mut proof = passing_proof();
         proof.valid = false; // Mark proof invalid
-        proof.errors.push("proof bundle validation failed".to_owned());
+        proof
+            .errors
+            .push("proof bundle validation failed".to_owned());
 
         let report = evaluate_release_gates(&sample_policy(), &proof);
 
         // Release gate must fail closed
-        assert!(!report.valid, "release gate must fail when proof bundle is invalid");
+        assert!(
+            !report.valid,
+            "release gate must fail when proof bundle is invalid"
+        );
 
         // When proof is invalid, features should downgrade
         assert!(

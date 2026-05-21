@@ -143,30 +143,30 @@ fn advisory_report_rows() -> Vec<ReportSchemaInventoryRow> {
         ),
         covered_advisory_row(
             "readiness_action_autopilot_source_reports",
-            "crates/ffs-harness/src/readiness_action_autopilot.rs",
+            "tools/ffs-ops/src/readiness_action_autopilot.rs",
             "Vec<ReadinessActionAutopilotReport>",
             "readiness-action source fixture planner",
             "readiness-action dry-run planner",
             "readiness_action_autopilot_report_json_shape",
-            "crates/ffs-harness/src/snapshots/ffs_harness__readiness_action_autopilot__tests__readiness_action_autopilot_report_json_shape.snap",
+            "tools/ffs-ops/src/snapshots/ffs_harness__readiness_action_autopilot__tests__readiness_action_autopilot_report_json_shape.snap",
         ),
         covered_advisory_row(
             "readiness_action_planning_result",
-            "crates/ffs-harness/src/readiness_action_autopilot.rs",
+            "tools/ffs-ops/src/readiness_action_autopilot.rs",
             "ReadinessActionPlanningResult",
             "plan_readiness_actions",
             "readiness-action dry-run and operator action selection",
             "readiness_action_planner_result_order_stable",
-            "crates/ffs-harness/src/snapshots/ffs_harness__readiness_action_autopilot__tests__readiness_action_planner_result_order_stable.snap",
+            "tools/ffs-ops/src/snapshots/ffs_harness__readiness_action_autopilot__tests__readiness_action_planner_result_order_stable.snap",
         ),
         covered_advisory_row(
             "readiness_action_dry_run_report",
-            "crates/ffs-harness/src/readiness_action_autopilot.rs",
+            "tools/ffs-ops/src/readiness_action_autopilot.rs",
             "ReadinessActionDryRunReport",
             "recommend-readiness-actions",
             "readiness-action operator dry-run handoff",
             "readiness_action_dry_run_json_report",
-            "crates/ffs-harness/src/snapshots/ffs_harness__readiness_action_autopilot__tests__readiness_action_dry_run_json_report.snap",
+            "tools/ffs-ops/src/snapshots/ffs_harness__readiness_action_autopilot__tests__readiness_action_dry_run_json_report.snap",
         ),
     ]);
     rows
@@ -260,12 +260,12 @@ fn readiness_foundation_advisory_report_rows() -> Vec<ReportSchemaInventoryRow> 
         ),
         covered_advisory_row(
             "readiness_action_fixture_validation_report",
-            "crates/ffs-harness/src/readiness_action_autopilot.rs",
+            "tools/ffs-ops/src/readiness_action_autopilot.rs",
             "ReadinessActionFixtureValidationReport",
             "validate_readiness_action_fixture_set",
             "readiness-action planner fixture validation and dry-run recommendation coverage",
             "readiness_action_fixture_validation_report_json_shape",
-            "crates/ffs-harness/src/snapshots/ffs_harness__readiness_action_autopilot__tests__readiness_action_fixture_validation_report_json_shape.snap",
+            "tools/ffs-ops/src/snapshots/ffs_harness__readiness_action_autopilot__tests__readiness_action_fixture_validation_report_json_shape.snap",
         ),
     ]);
     rows
@@ -298,39 +298,39 @@ fn open_ended_inventory_advisory_report_rows() -> Vec<ReportSchemaInventoryRow> 
     vec![
         covered_advisory_row(
             "open_ended_inventory_report",
-            "crates/ffs-harness/src/open_ended_inventory.rs",
+            "tools/ffs-ops/src/open_ended_inventory.rs",
             "OpenEndedInventoryReport",
             "validate-open-ended-inventory",
             "open-ended fuzz and conformance inventory gate",
             "open_ended_inventory_report_json_shape",
-            "crates/ffs-harness/src/snapshots/ffs_harness__open_ended_inventory__tests__open_ended_inventory_report_json_shape.snap",
+            "tools/ffs-ops/src/snapshots/ffs_harness__open_ended_inventory__tests__open_ended_inventory_report_json_shape.snap",
         ),
         covered_advisory_row(
             "open_ended_note_scan_report",
-            "crates/ffs-harness/src/open_ended_inventory.rs",
+            "tools/ffs-ops/src/open_ended_inventory.rs",
             "OpenEndedNoteScanReport",
             "open-ended-note-scanner",
             "open-ended note scanner operator handoff",
             "open_ended_note_scan_report_json_shape",
-            "crates/ffs-harness/src/snapshots/ffs_harness__open_ended_inventory__tests__open_ended_note_scan_report_json_shape.snap",
+            "tools/ffs-ops/src/snapshots/ffs_harness__open_ended_inventory__tests__open_ended_note_scan_report_json_shape.snap",
         ),
         covered_advisory_row(
             "source_scope_manifest_report",
-            "crates/ffs-harness/src/open_ended_inventory.rs",
+            "tools/ffs-ops/src/open_ended_inventory.rs",
             "SourceScopeManifestReport",
             "validate-source-scope-manifest",
             "source-scope manifest validation gate",
             "source_scope_manifest_report_json_shape",
-            "crates/ffs-harness/src/snapshots/ffs_harness__open_ended_inventory__tests__source_scope_manifest_report_json_shape.snap",
+            "tools/ffs-ops/src/snapshots/ffs_harness__open_ended_inventory__tests__source_scope_manifest_report_json_shape.snap",
         ),
         covered_advisory_row(
             "source_scope_scan_report",
-            "crates/ffs-harness/src/open_ended_inventory.rs",
+            "tools/ffs-ops/src/open_ended_inventory.rs",
             "SourceScopeScanReport",
             "validate-source-scope-manifest",
             "source-scope workspace scan and dirty-workspace diagnostics",
             "source_scope_scan_report_json_shape",
-            "crates/ffs-harness/src/snapshots/ffs_harness__open_ended_inventory__tests__source_scope_scan_report_json_shape.snap",
+            "tools/ffs-ops/src/snapshots/ffs_harness__open_ended_inventory__tests__source_scope_scan_report_json_shape.snap",
         ),
     ]
 }
@@ -608,12 +608,12 @@ fn proof_risk_advisory_report_rows() -> Vec<ReportSchemaInventoryRow> {
         ),
         covered_advisory_row(
             "ambition_evidence_matrix_report",
-            "crates/ffs-harness/src/ambition_evidence_matrix.rs",
+            "tools/ffs-ops/src/ambition_evidence_matrix.rs",
             "AmbitionEvidenceMatrixReport",
             "validate-ambition-evidence-matrix",
             "ambition evidence matrix validator",
             "ambition_evidence_matrix_report_json_shape",
-            "crates/ffs-harness/src/snapshots/ffs_harness__ambition_evidence_matrix__tests__ambition_evidence_matrix_report_json_shape.snap",
+            "tools/ffs-ops/src/snapshots/ffs_harness__ambition_evidence_matrix__tests__ambition_evidence_matrix_report_json_shape.snap",
         ),
         covered_advisory_row(
             "cross_oracle_arbitration_report",
@@ -771,12 +771,12 @@ fn governance_durability_advisory_report_rows() -> Vec<ReportSchemaInventoryRow>
         ),
         covered_advisory_row(
             "docs_status_drift_report",
-            "crates/ffs-harness/src/docs_status_drift.rs",
+            "tools/ffs-ops/src/docs_status_drift.rs",
             "DocsStatusDriftReport",
             "validate-docs-status-drift",
             "docs/status drift validator",
             "docs_status_drift_report_json_shape",
-            "crates/ffs-harness/src/snapshots/ffs_harness__docs_status_drift__tests__docs_status_drift_report_json_shape.snap",
+            "tools/ffs-ops/src/snapshots/ffs_harness__docs_status_drift__tests__docs_status_drift_report_json_shape.snap",
         ),
         covered_advisory_row(
             "operational_evidence_index",
@@ -1269,19 +1269,19 @@ fn authoritative_control_plane_required_rows() -> Vec<ReportSchemaInventoryRow> 
 fn permissioned_campaign_reports_row() -> ReportSchemaInventoryRow {
     covered_permissioned_row(
         "permissioned_campaign_reports",
-        "crates/ffs-harness/src/permissioned_campaign_broker.rs",
+        "tools/ffs-ops/src/permissioned_campaign_broker.rs",
         "PermissionedCampaignBrokerReport + PermissionedCampaignExecutionLedgerReport + SwarmCapabilityCalibrationReport",
         "permissioned campaign broker validators",
         "operator handoff packets for xfstests and large-host swarm campaigns",
         "permissioned_campaign_reports_json_shape",
-        "crates/ffs-harness/src/snapshots/ffs_harness__permissioned_campaign_broker__tests__permissioned_campaign_reports_json_shape.snap",
+        "tools/ffs-ops/src/snapshots/ffs_harness__permissioned_campaign_broker__tests__permissioned_campaign_reports_json_shape.snap",
     )
 }
 
 fn readiness_action_dry_run_metadata_row() -> ReportSchemaInventoryRow {
     excluded_row(
         "readiness_action_dry_run_metadata",
-        "crates/ffs-harness/src/readiness_action_autopilot.rs",
+        "tools/ffs-ops/src/readiness_action_autopilot.rs",
         "ReadinessActionDryRunMetadata",
         "nested dry-run metadata helper",
         "nested inside ReadinessActionDryRunReport",
@@ -1827,7 +1827,10 @@ fn expected_snapshot_module_prefix(module_path: &str) -> Option<String> {
         return None;
     }
 
-    let relative = path.strip_prefix("crates/ffs-harness/src").ok()?;
+    let relative = path
+        .strip_prefix("crates/ffs-harness/src")
+        .or_else(|_| path.strip_prefix("tools/ffs-ops/src"))
+        .ok()?;
     let without_extension = relative.with_extension("");
     let mut pieces = vec!["ffs_harness".to_owned()];
     for component in without_extension.components() {
@@ -2751,7 +2754,7 @@ mod tests {
 
         assert_eq!(
             row.module_path,
-            "crates/ffs-harness/src/readiness_action_autopilot.rs"
+            "tools/ffs-ops/src/readiness_action_autopilot.rs"
         );
         assert_eq!(row.rust_type, "ReadinessActionPlanningResult");
         assert_eq!(row.producer, "plan_readiness_actions");
@@ -2820,7 +2823,7 @@ mod tests {
 
         assert_eq!(
             row.module_path,
-            "crates/ffs-harness/src/readiness_action_autopilot.rs"
+            "tools/ffs-ops/src/readiness_action_autopilot.rs"
         );
         assert_eq!(row.rust_type, "ReadinessActionFixtureValidationReport");
         assert_eq!(row.producer, "validate_readiness_action_fixture_set");
@@ -3074,7 +3077,7 @@ mod tests {
 
             assert_eq!(
                 row.module_path,
-                "crates/ffs-harness/src/open_ended_inventory.rs"
+                "tools/ffs-ops/src/open_ended_inventory.rs"
             );
             assert_eq!(row.rust_type, rust_type);
             assert_eq!(row.producer, producer);
@@ -3277,7 +3280,7 @@ mod tests {
             ),
             (
                 "ambition_evidence_matrix_report",
-                "crates/ffs-harness/src/ambition_evidence_matrix.rs",
+                "tools/ffs-ops/src/ambition_evidence_matrix.rs",
                 "AmbitionEvidenceMatrixReport",
                 "validate-ambition-evidence-matrix",
                 "ambition_evidence_matrix_report_json_shape",
@@ -3892,7 +3895,7 @@ mod tests {
             ),
             (
                 "docs_status_drift_report",
-                "crates/ffs-harness/src/docs_status_drift.rs",
+                "tools/ffs-ops/src/docs_status_drift.rs",
                 "DocsStatusDriftReport",
                 "validate-docs-status-drift",
                 "docs_status_drift_report_json_shape",

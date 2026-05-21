@@ -151,10 +151,7 @@ fn check_fuse_capability() -> Result<(), String> {
 }
 
 fn check_xfstests_capability() -> Result<(), String> {
-    let xfstests_paths = [
-        "third_party/xfstests-dev/check",
-        "/opt/xfstests-dev/check",
-    ];
+    let xfstests_paths = ["third_party/xfstests-dev/check", "/opt/xfstests-dev/check"];
     let mut xfstests_found = false;
     for path in &xfstests_paths {
         if std::path::Path::new(path).exists() {
@@ -168,9 +165,7 @@ fn check_xfstests_capability() -> Result<(), String> {
 
     let mut missing = Vec::new();
 
-    let fsstress = std::process::Command::new("which")
-        .arg("fsstress")
-        .output();
+    let fsstress = std::process::Command::new("which").arg("fsstress").output();
     if !matches!(fsstress, Ok(ref o) if o.status.success()) {
         missing.push("fsstress (from ltp-fsstress)");
     }
@@ -194,14 +189,12 @@ fn check_xfstests_capability() -> Result<(), String> {
 /// Permissioned lanes that require explicit ACK environment variables.
 /// These are separate from RELEASE_GATE_LANE_COMMANDS because they run
 /// shell scripts with ACK requirements, not cargo test commands.
-pub const PERMISSIONED_LANE_COMMANDS: &[LaneCommand] = &[
-    LaneCommand {
-        lane_id: "xfstests",
-        command: "scripts/e2e/ffs_xfstests_executed_evidence_e2e.sh",
-        args: &[],
-        capability_check: Some(check_xfstests_capability),
-    },
-];
+pub const PERMISSIONED_LANE_COMMANDS: &[LaneCommand] = &[LaneCommand {
+    lane_id: "xfstests",
+    command: "scripts/e2e/ffs_xfstests_executed_evidence_e2e.sh",
+    args: &[],
+    capability_check: Some(check_xfstests_capability),
+}];
 
 /// Execute the xfstests lane with ExecutedEvidence capture.
 #[must_use]
@@ -574,8 +567,8 @@ mod tests {
 
     #[test]
     fn xfstests_lane_has_capability_check() {
-        let xfstests_lane = find_permissioned_lane_command("xfstests")
-            .expect("xfstests lane must exist");
+        let xfstests_lane =
+            find_permissioned_lane_command("xfstests").expect("xfstests lane must exist");
         assert_eq!(xfstests_lane.lane_id, "xfstests");
         assert!(xfstests_lane.command.contains("xfstests"));
         assert!(xfstests_lane.capability_check.is_some());

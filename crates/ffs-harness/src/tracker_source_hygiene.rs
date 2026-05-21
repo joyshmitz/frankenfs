@@ -3538,11 +3538,17 @@ mod tests {
             "bridge child beads should be claimable"
         );
         assert!(
-            report.source_aware_queue_state.claimable_ids.contains(&"bd-xuo95.1".to_owned()),
+            report
+                .source_aware_queue_state
+                .claimable_ids
+                .contains(&"bd-xuo95.1".to_owned()),
             "bd-xuo95.1 should be claimable"
         );
         assert!(
-            report.source_aware_queue_state.claimable_ids.contains(&"bd-xuo95.2".to_owned()),
+            report
+                .source_aware_queue_state
+                .claimable_ids
+                .contains(&"bd-xuo95.2".to_owned()),
             "bd-xuo95.2 should be claimable"
         );
         Ok(())
@@ -3622,7 +3628,10 @@ mod tests {
 
         // P0 blocker should be claimable (it's not blocked)
         assert!(
-            report.source_aware_queue_state.claimable_ids.contains(&"bd-p0-blocker".to_owned()),
+            report
+                .source_aware_queue_state
+                .claimable_ids
+                .contains(&"bd-p0-blocker".to_owned()),
             "P0 blocker should be claimable"
         );
         // Blocked bead should be in blocked list

@@ -1,5 +1,5 @@
 ---
-source: crates/ffs-harness/src/open_ended_inventory.rs
+source: tools/ffs-ops/src/open_ended_inventory.rs
 expression: json
 ---
 {

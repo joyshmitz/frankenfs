@@ -1,12 +1,12 @@
 ---
-source: crates/ffs-harness/src/report_schema_inventory.rs
+source: tools/ffs-ops/src/report_schema_inventory.rs
 expression: json
 ---
 {
   "schema_version": 1,
   "inventory_id": "ffs_harness_serialized_report_schema_inventory_v1",
   "product_evidence_claim": "none",
-  "reproduction_command": "ffs-harness validate-report-schema-inventory --out artifacts/report-schema-inventory/report.json --summary-out artifacts/report-schema-inventory/report.md",
+  "reproduction_command": "ffs-ops validate-report-schema-inventory --out artifacts/report-schema-inventory/report.json --summary-out artifacts/report-schema-inventory/report.md",
   "report_valid": true,
   "counts": {
     "total_rows": 113,
