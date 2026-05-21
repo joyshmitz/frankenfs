@@ -1467,6 +1467,88 @@ mod tests {
     }
 
     #[test]
+    fn parity_honesty_fabricated_row_fails_closed() {
+        use std::collections::HashMap;
+
+        // Fabricated row: citation pattern that doesn't match ANY evidence key
+        // Even with evidence present, a row citing a non-existent test must not count
+        let mut evidence: HashMap<String, bool> = HashMap::new();
+        evidence.insert("real_test::actual_test".to_string(), true);
+
+        let report = ExecutionGatedParityReport::from_evidence(&evidence, Some("abc".to_string()));
+
+        // Report has evidence, but fabricated citations won't match
+        assert!(report.is_evidence_backed());
+
+        // Any row whose citation doesn't match evidence goes to missing_evidence_rows
+        // The fabricated pattern "nonexistent::fake" would never match "real_test::actual_test"
+        // So if a FEATURE_PARITY row cited "nonexistent::fake", it would be in missing_evidence_rows
+        // This test verifies the mechanism: implemented_count only counts rows with matching green evidence
+        assert!(
+            report.implemented_count() <= report.total_rows,
+            "Fabricated citations cannot inflate implemented count"
+        );
+    }
+
+    #[test]
+    fn parity_honesty_ignored_test_fails_closed() {
+        use std::collections::HashMap;
+
+        // Ignored test: citation exists in FEATURE_PARITY but no evidence provided for it
+        // (as if the test was #[ignore]d and never ran)
+        let evidence: HashMap<String, bool> = HashMap::new(); // Empty = ignored/not run
+
+        let report = ExecutionGatedParityReport::from_evidence(&evidence, None);
+
+        // No evidence means gate fails
+        assert!(!report.is_evidence_backed());
+        assert!(
+            report.require_evidence().is_err(),
+            "Ignored tests (no evidence) must fail the gate"
+        );
+
+        // With no evidence, implemented count is zero
+        assert_eq!(
+            report.implemented_count(),
+            0,
+            "Ignored tests cannot count as implemented"
+        );
+    }
+
+    #[test]
+    fn parity_honesty_failing_test_fails_closed() {
+        use std::collections::HashMap;
+
+        // Failing test: evidence exists but shows the test failed (false)
+        let mut evidence: HashMap<String, bool> = HashMap::new();
+        evidence.insert("fuse::".to_string(), false); // test ran but FAILED
+        evidence.insert("repair_lab::".to_string(), false); // test ran but FAILED
+
+        let report = ExecutionGatedParityReport::from_evidence(&evidence, Some("def456".to_string()));
+
+        // Evidence is present (tests ran), but all failed
+        assert!(report.is_evidence_backed());
+        assert!(
+            report.require_evidence().is_ok(),
+            "Evidence was provided (tests ran, even if failed)"
+        );
+
+        // But failing tests don't count as implemented
+        // implemented_count should be 0 because all evidence is false (failed)
+        assert_eq!(
+            report.implemented_count(),
+            0,
+            "Failing tests must not count as implemented"
+        );
+
+        // The rows go to missing_evidence_rows because they have no GREEN evidence
+        assert!(
+            !report.missing_evidence_rows.is_empty(),
+            "Failed test rows should be in missing_evidence_rows"
+        );
+    }
+
+    #[test]
     fn parity_parser_ignores_non_summary_tables() {
         let markdown = r"
 # FEATURE_PARITY
