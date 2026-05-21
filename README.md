@@ -17,8 +17,8 @@
   <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/rust-nightly%202024-orange.svg" alt="Rust Nightly"></a>
   <img src="https://img.shields.io/badge/ParityReport-97%2F97%20feature%20rows-blue" alt="ParityReport: 97/97 feature rows">
   <img src="https://img.shields.io/badge/parity%20columns-implemented%20%7C%20kernel--verified%20%7C%20rejection--only-lightgrey" alt="Parity accounting columns">
-  <img src="https://img.shields.io/badge/tests-7%2C442%20entries-brightgreen" alt="7,442 tests">
-  <img src="https://img.shields.io/badge/fuzz%20targets-60-brightgreen" alt="60 fuzz targets">
+  <img src="https://img.shields.io/badge/tests-source--derived-brightgreen" alt="Tests source-derived">
+  <img src="https://img.shields.io/badge/fuzz%20targets-62-brightgreen" alt="62 fuzz targets">
   <img src="https://img.shields.io/badge/unsafe-forbidden-brightgreen.svg" alt="Unsafe Forbidden">
   <img src="https://img.shields.io/badge/runtime-asupersync%200.3-blueviolet.svg" alt="asupersync 0.3 runtime">
   <img src="https://img.shields.io/badge/status-experimental-yellow.svg" alt="Experimental">
@@ -32,11 +32,11 @@
 
 **The solution.** FrankenFS extracts the *behavior* of ext4 and btrfs from ~205K lines of Linux kernel C (v6.19), re-implements that behavior idiomatically in Rust (no unsafe), and adds three things kernel filesystems don't have: block-level MVCC with safe-merge proofs, RaptorQ fountain-coded self-healing, and explicit-opt-in FUSE writeback-cache barriers with a 12-point crash matrix.
 
-It runs as a normal Linux process via FUSE. The current `ParityReport::current()` printout is 97/97 rows in the tracked feature denominator, while the B-series accounting keeps implemented, kernel-verified, and rejection-only rows separate instead of promoting the self-summed table as a blanket parity headline. Every public claim is gated by a checked-in release-gate policy with structured proof bundles, and the workspace ships **21 crates, 416K LOC, 7,442 test entries (7,389 `#[test]` + 53 `proptest!`; counts move with every commit), 60 fuzz targets, 11 criterion benchmarks, 114 end-to-end gate scripts, and 23 evidence-event types** under `#![forbid(unsafe_code)]`.
+It runs as a normal Linux process via FUSE. The current `ParityReport::current()` printout is 97/97 rows in the tracked feature denominator, while the B-series accounting keeps implemented, kernel-verified, and rejection-only rows separate instead of promoting the self-summed table as a blanket parity headline. Every public claim is gated by a checked-in release-gate policy with structured proof bundles, and the workspace ships **21 crates, a source-derived test inventory, 62 fuzz targets, 11 criterion benchmarks, 121 tracked end-to-end gate scripts, and 23 evidence-event types** under `#![forbid(unsafe_code)]`. The README count guard `readme_quantitative_claims_match_code` re-derives these inventory numbers from source so fast-moving test counts are not hand-pinned here.
 
 | Pillar | What it does | Why it matters |
 |---|---|---|
-| **Block-level MVCC** | Version chains per block, snapshot isolation, two executable same-block merge mechanisms (`AppendOnly` and range overlay) exposed through `MergeProof` labels, and three `ConflictPolicy` modes (`Strict` / `SafeMerge` / `Adaptive`) selected by an expected-loss decision model | Concurrent readers + writers without the JBD2 global lock. Safe-merge proofs let non-conflicting concurrent writes to the same block coexist when they validate through one of the two audited mechanisms. Under a 120-writer stress benchmark, SafeMerge runs 9.5× lower expected loss than Strict with zero data corruption. Note: the FUSE write path currently stages all writes with `MergeProof::Unsafe`; the 9.5× benefit is bench-demonstrated but not yet wired into production FUSE writes (tracked: bd-xuo95.28). |
+| **Block-level MVCC** | Version chains per block, snapshot isolation, 2 executable same-block merge mechanisms (`AppendOnly` and range overlay) exposed through `MergeProof` labels, the 3-outcome `MergeProofMechanism` enum (`NoSameBlockMerge`, `AppendOnly`, `RangeOverlay`), and three `ConflictPolicy` modes (`Strict` / `SafeMerge` / `Adaptive`) selected by an expected-loss decision model | Concurrent readers + writers without the JBD2 global lock. Safe-merge proofs let non-conflicting concurrent writes to the same block coexist when they validate through one of the two audited mechanisms. Under a 120-writer stress benchmark, SafeMerge runs 9.5× lower expected loss than Strict with zero data corruption. Note: the FUSE write path currently stages all writes with `MergeProof::Unsafe`; the 9.5× benefit is bench-demonstrated but not yet wired into production FUSE writes (tracked: bd-xuo95.28). |
 | **RaptorQ self-healing** | Fountain-coded repair symbols (RFC 6330), Bayesian Beta-posterior durability autopilot, four refresh policies (`Eager` / `Lazy` / `Adaptive` / `Hybrid`), percentile-based stale-window SLO monitoring | Corruption is detected during scrub and recovered without human intervention. `ffs repair` / `ffs fsck --repair` operate offline; `ffs mount --background-repair --background-scrub-ledger <jsonl>` enables mounted automatic recovery with a durable evidence trail. Hybrid refresh cuts p95 stale-window age by 83.3% under write-heavy workloads. |
 | **Writeback-cache safety net** | Per-inode `staged ≥ visible ≥ durable` epoch state machine, six formal invariants (I1–I6), 12-scenario crash/replay artifact gate, runtime kill switch | Kernel FUSE `writeback_cache` is a footgun for MVCC isolation by default. FrankenFS opts in *only* with `--rw --writeback-cache` plus three accepted-artifact gates, a matching host/lane manifest, and a disarmed kill switch. `flush` stays non-durable; `fsync` / `fsyncdir` are the durability boundaries operators reason about. |
 | **Memory safety** | `#![forbid(unsafe_code)]` at every crate root, edition 2024 (nightly), workspace-level Clippy enforcement | Eliminates at compile time the bug class that has cost the Linux kernel a decade of CVEs: buffer overflows, use-after-free, uninitialized reads. |
@@ -726,7 +726,7 @@ Superblock (106 fields, including `s_mmp_*`, `s_backup_bgs`, quota inode metadat
 
 ### btrfs structures parsed
 
-Superblock (including `sys_chunk_array`, backup roots), B-tree headers (level, generation, owner), leaf items (key + offset + size), chunk items (stripe mapping for single + DUP + RAID 0/1/5/6/10), root items (root tree, extent tree, fs tree, checksum tree, device tree, log tree), device items (geometry validation with zero-capacity rejection), inode + xattr + extent-data items, send-stream commands (22 types, attribute TLV encoding, CRC32C per command).
+Superblock (including `sys_chunk_array`, backup roots), B-tree headers (level, generation, owner), leaf items (key + offset + size), chunk items (stripe mapping for single + DUP + RAID 0/1/5/6/10), root items (root tree, extent tree, fs tree, checksum tree, device tree, log tree), device items (geometry validation with zero-capacity rejection), inode + xattr + extent-data items, send-stream commands (23 command variants, attribute TLV encoding, CRC32C per command).
 
 ---
 
@@ -1051,7 +1051,7 @@ For RAID profiles (single, DUP, RAID0, RAID1, RAID5, RAID6, RAID10), stripe calc
 
 ### Send/receive parsing
 
-`parse_send_stream()` parses the btrfs send-stream format (magic, version, per-command CRC32C, required `END` terminator, 22 command types, attribute TLV encoding). Differential validation runs against upstream `btrfs receive --dump` on a CRC-valid synthetic stream.
+`parse_send_stream()` parses the btrfs send-stream format (magic, version, per-command CRC32C, required `END` terminator, 23 command variants, attribute TLV encoding). Differential validation runs against upstream `btrfs receive --dump` on a CRC-valid synthetic stream.
 
 ---
 
@@ -1130,7 +1130,7 @@ The full enumerated catalog is snapshot-pinned as a "metamorphic seed catalog" s
 
 ### Schema inventory
 
-Every machine-readable artifact (release-gate, writeback-cache audit/ordering/crash-replay, repair confidence, repair corpus, soak/canary campaign, swarm operator/cache/tail latency, readiness lab truth graph, ambition evidence matrix, fuzz dashboard, mounted lane decision, agent mail reservation, hysteresis, reservation snapshot, authoritative manifest, parity audit) has its JSON shape pinned in a checked-in inventory with structural validators and drift detectors. 167+ insta snapshot pins protect the markdown/JSON of every emitted report.
+Every machine-readable artifact (release-gate, writeback-cache audit/ordering/crash-replay, repair confidence, repair corpus, soak/canary campaign, swarm operator/cache/tail latency, readiness lab truth graph, ambition evidence matrix, fuzz dashboard, mounted lane decision, agent mail reservation, hysteresis, reservation snapshot, authoritative manifest, parity audit) has its JSON shape pinned in a checked-in inventory with structural validators and drift detectors. 205 tracked insta snapshot pins protect the markdown/JSON of every emitted report.
 
 ### Parity tracking
 
@@ -1259,7 +1259,7 @@ Treating evidence as a first-class output buys us:
 - Post-mortem reproducibility (every decision is timestamped and parameterized).
 - Independent verification (a third party can read the ledger without trusting FrankenFS code).
 
-This is why the schema inventory and 167+ insta snapshots exist: an evidence shape that drifts silently is a regression as serious as a parser bug.
+This is why the schema inventory and 205 tracked insta snapshots exist: an evidence shape that drifts silently is a regression as serious as a parser bug.
 
 ### Decision 5: Bayesian / expected-loss decision models, not heuristics
 
@@ -1307,7 +1307,7 @@ The project uses `.beads/issues.jsonl` as the canonical task store. Reasons:
 - Git-versioned: every issue change is a diff in `issues.jsonl`, reviewable in PR diffs.
 - Multi-project hygiene: cross-project pollution is detectable via the source-aware queue-state check.
 
-### Decision 10: 114 E2E gate scripts
+### Decision 10: 121 E2E gate scripts
 
 Each E2E script is a single scenario class: writeback-cache audit, repair writeback route, mounted differential oracle, etc. They could be a single mega-test. They are separate scripts because:
 
@@ -2517,7 +2517,7 @@ frankenfs/
 │   ├── flamegraph_generate.sh  Flamegraph workflow
 │   ├── run_e2e.sh              E2E suite orchestrator
 │   ├── update-goldens.sh       Regenerate golden outputs (use with care)
-│   └── e2e/                    114 E2E gate scripts (one per scenario)
+│   └── e2e/                    121 tracked E2E gate scripts (one per scenario)
 │
 ├── benchmarks/                 Saved baseline JSON manifests
 ├── baselines/                  Historical baseline archive
@@ -2573,7 +2573,7 @@ All 62 libfuzzer targets are in `fuzz/fuzz_targets/`. Each one is driven by `car
 |---|---|
 | `fuzz_btrfs_metadata` | Superblock + B-tree header decoding |
 | `fuzz_btrfs_verify_superblock_checksum` | Superblock CRC32C validation |
-| `fuzz_btrfs_tree_items` | All 22 item types in B-tree leaves |
+| `fuzz_btrfs_tree_items` | Declared btrfs item-type constants in B-tree leaves (19 currently) |
 | `fuzz_btrfs_tree_log` | Tree-log replay (`replay_tree_log` over synthesized log trees) |
 | `fuzz_btrfs_chunk_mapping` | `sys_chunk_array` + chunk-tree resolution |
 | `fuzz_btrfs_raid_profile` | Single / DUP / RAID0/1/5/6/10 stripe selection |
@@ -2961,7 +2961,7 @@ Crash recovery for a committing transaction depends on which side of the WAL `fs
 
 ## E2E Test Categories
 
-The 114 E2E gate scripts in `scripts/e2e/` are organized by capability area. Selected highlights, grouped by category:
+The 121 tracked E2E gate scripts in `scripts/e2e/` are organized by capability area. Selected highlights, grouped by category:
 
 ### Conformance and baseline
 - `ffs_baseline_validation_e2e.sh`: initial conformance gate
@@ -3420,7 +3420,7 @@ Rows in the btrfs experimental RW contract can still be `partially supported` or
 - **Writeback-cache.** Epoch-based commit barriers with per-inode staged/visible/durable tracking, deferred visibility for MVCC isolation, dirty-page ordering oracle, 12-point crash/replay matrix artifact gate, runtime guard, and host/lane manifest checks. Kernel option default-off; explicit opt-in is evidence-gated.
 - **Observability.** Evidence ledger with 23 event types and 8 operator presets (`replay-anomalies`, `repair-failures`, `pressure-transitions`, `contention`, `metrics`, `cache`, `mvcc`, `repair-live`), contention metrics, policy-switch detection, structured logging across all subsystems, JSONL audit trail.
 - **CLI.** `inspect`, `mvcc-stats`, `info`, `dump`, `fsck`, `repair`, `mount` (22 flags), `scrub`, `parity`, `evidence`, `mkfs`.
-- **Testing.** ~7,442 `#[test]` / `proptest!` entries across 21 crates as of 2026-05-18 (7,389 `#[test]` + 53 `proptest!`; the count grows with every commit), 60 fuzz targets, 11 criterion benchmarks, 114 end-to-end gate scripts, metamorphic-relation proptests across the checksum/parser surface, and 167+ insta snapshots covering every emitted report shape.
+- **Testing.** Source-derived `#[test]` / `proptest!` inventory across 21 crates, 62 fuzz targets, 11 criterion benchmarks, 121 tracked end-to-end gate scripts, metamorphic-relation proptests across the checksum/parser surface, and 205 tracked insta snapshots covering every emitted report shape.
 
 ### What's next
 
