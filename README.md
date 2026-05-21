@@ -194,6 +194,7 @@ Layer 3 (Storage):  [ffs-block]  [ffs-btree]  [ffs-xattr]----+
 Layer 4 (Alloc):                [ffs-alloc]
                                     |
 Layer 5 (Mid):  [ffs-journal]  [ffs-repair]  [ffs-extent]  [ffs-inode]
+                 [ffs-btrfs]  (runtime btrfs tree/chunk/mutation adapter)
                                                               |
 Layer 6 (Dir):                                            [ffs-dir]
 
@@ -204,7 +205,7 @@ Layer 8 (Interface):     [ffs-fuse]      [ffs]  (public facade)
 Layer 9 (Tooling):        [ffs-cli] [ffs-tui] [ffs-harness]
 
 Legacy extraction reference (retained, not on the runtime path):
-                        [ffs-ext4]   [ffs-btrfs]
+                        [ffs-ext4]
 ```
 
 ### Crate responsibilities
@@ -214,7 +215,7 @@ Legacy extraction reference (retained, not on the runtime path):
 | **Foundation** | `ffs-types`, `ffs-error` | Newtypes (`BlockNumber`, `InodeNumber`, `TxnId`, `CommitSeq`, `ByteOffset`, `DeviceId`); 21-variant `FfsError` with errno mappings |
 | **On-disk** | `ffs-ondisk` | Pure parsing of ext4 + btrfs superblocks, group descriptors, inodes, extents, B-tree headers. No I/O. |
 | **Storage** | `ffs-block`, `ffs-journal`, `ffs-mvcc` | Block I/O with ARC / S3-FIFO cache; JBD2 replay + ext4 fast-commit + external-journal pairing; native MVCC with version chains, sharded store, snapshot isolation, two same-block merge mechanisms behind semantic proof labels, three conflict policies, Zstd/Brotli version compression, WAL persistence + recovery |
-| **Tree / Alloc** | `ffs-btree`, `ffs-alloc`, `ffs-extent` | B+tree search/insert/split/merge; mballoc-style buddy allocator with goal-directed placement and Orlov directory spreading; extent mapping (logical→physical) |
+| **Tree / Alloc** | `ffs-btree`, `ffs-alloc`, `ffs-extent`, `ffs-btrfs` | B+tree search/insert/split/merge; mballoc-style buddy allocator with goal-directed placement and Orlov directory spreading; ext4 extent mapping; btrfs runtime tree walk, chunk/device mapping, tree-log replay, COW tree mutation helpers, and delayed-ref helpers consumed by `ffs-core` |
 | **Namespace** | `ffs-inode`, `ffs-dir`, `ffs-xattr` | Inode lifecycle with CRC32C checksum, htree directories with case-folding, user/system/security/trusted xattr namespaces |
 | **Interface** | `ffs-fuse`, `ffs-core`, `ffs` | FUSE protocol adapter (vendored `fuser` 7.40); `OpenFs` implementation of `FsOps` orchestrating format detection, mount, writeback epoch barrier, degradation FSM, backpressure gates; thin public facade |
 | **Repair** | `ffs-repair` | RaptorQ symbol generation/recovery, background `ScrubDaemon`, Bayesian `DurabilityAutopilot`, four refresh policies, stale-window SLO with breach detection, optimistic lease-based multi-host coordination, 23-event evidence ledger, repair-writeback serializer for read-write mounted repair |
@@ -225,6 +226,7 @@ Legacy extraction reference (retained, not on the runtime path):
 - **Parser crates are pure.** `ffs-ondisk` performs no I/O. It parses byte slices into typed structures, which makes it fuzz-friendly, snapshot-testable, and cross-platform.
 - **MVCC is transport-agnostic.** `ffs-mvcc` knows nothing about FUSE, files, or directories.
 - **FUSE delegates to `FsOps`.** `ffs-fuse` maps the FUSE protocol to `ffs-core::FsOps` (implemented by `OpenFs`) and contains no filesystem logic.
+- **btrfs runtime logic flows through `ffs-btrfs`.** `ffs-core` depends on `ffs-btrfs` for tree-log replay, inode/extent/xattr item parsing, chunk/device mapping, and the in-memory COW tree used by guarded btrfs mutation paths.
 - **Repair is orthogonal.** `ffs-repair` operates on blocks, not files. It doesn't know about inodes or directories.
 - **Repair wiring is lifecycle-based.** `ffs-core` reaches repair via `ffs-mvcc` / block-flush integration rather than a direct `ffs-core → ffs-repair` dependency edge.
 - **No dependency cycles.** The crate graph is a strict DAG, enforced by `cargo check`.
@@ -241,7 +243,8 @@ userspace read(fd, buf, count)
   → kernel FUSE → fuser → ffs-fuse::read()
     → begin_request_scope(cx, op): MVCC snapshot + backpressure check
       → ffs-core FsOps (OpenFs): flavor dispatch (ext4 / btrfs)
-        → extent/chunk mapping + block reads (ffs-extent, ffs-btree, ffs-block)
+        → extent/chunk mapping + block reads
+          (ext4: ffs-extent/ffs-btree/ffs-block; btrfs: ffs-btrfs + ffs-block)
         → flavor-specific inode/file assembly in ffs-core
     → end_request_scope(cx, scope): release snapshot, update metrics
   → fuser → kernel → userspace
@@ -2487,7 +2490,7 @@ frankenfs/
 │   ├── ffs-tui/                Live monitoring dashboard (ftui)
 │   ├── ffs-harness/            Conformance + benchmarks + proof-bundle validators
 │   ├── ffs-ext4/               Legacy extraction reference (not on runtime path)
-│   └── ffs-btrfs/              Tree-walk + COW tree + delayed refs
+│   └── ffs-btrfs/              Runtime btrfs tree-walk, COW tree, chunk mapping, delayed refs
 │
 ├── conformance/                Shared sparse parser/conformance fixtures
 │   ├── fixtures/               JSON fixtures with non-zero byte regions
