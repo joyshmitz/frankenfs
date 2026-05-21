@@ -7,14 +7,6 @@
 pub mod crash_consistency;
 pub mod writeback;
 
-pub use crash_consistency::{
-    CrashConsistencyHarness, CrashConsistencyResult, DporEnumerator, run_dpor_crash_test,
-};
-pub use writeback::{
-    CrashPoint, DagNode, WbI1Oracle, WbI1Violation, WbI2Oracle, WbI2Violation,
-    WriteDependencyDag, WritebackExecutor,
-};
-
 use asupersync::Cx;
 use ffs_mvcc::{CommitError, MvccStore, Transaction};
 pub use ffs_ondisk::btrfs::*;

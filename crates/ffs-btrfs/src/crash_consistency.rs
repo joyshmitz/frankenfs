@@ -9,7 +9,7 @@
 
 use std::collections::BTreeSet;
 
-use tracing::{debug, info, trace, warn};
+use tracing::{info, trace, warn};
 
 use crate::writeback::{CrashPoint, WbI1Oracle, WbI1Violation, WbI2Oracle, WbI2Violation, WriteDependencyDag};
 use crate::BtrfsMutationError;
@@ -205,7 +205,7 @@ impl DporEnumerator {
     }
 
     /// Record a crash point before flushing a block.
-    pub fn pre_flush(&mut self, block: u64, dag: &WriteDependencyDag) {
+    pub fn pre_flush(&mut self, block: u64, _dag: &WriteDependencyDag) {
         let id = format!("dpor_pre_{}", block);
         let crash_point = CrashPoint {
             id,
@@ -217,7 +217,7 @@ impl DporEnumerator {
     }
 
     /// Record that a block has been flushed.
-    pub fn post_flush(&mut self, block: u64, dag: &WriteDependencyDag) {
+    pub fn post_flush(&mut self, block: u64, _dag: &WriteDependencyDag) {
         self.flushed.insert(block);
         let id = format!("dpor_post_{}", block);
         let crash_point = CrashPoint {
@@ -230,7 +230,7 @@ impl DporEnumerator {
     }
 
     /// Record fsync barrier.
-    pub fn fsync_barrier(&mut self, dag: &WriteDependencyDag) {
+    pub fn fsync_barrier(&mut self, _dag: &WriteDependencyDag) {
         let crash_point = CrashPoint {
             id: "dpor_fsync_barrier".to_string(),
             durable_blocks: self.flushed.clone(),
@@ -398,5 +398,123 @@ mod tests {
         };
 
         assert!(!result.passed(), "result with WB-I2 violation should not pass");
+    }
+
+    #[test]
+    fn dpor_enumerates_at_least_8_crash_points() {
+        let tree = make_test_tree();
+        let dag = WriteDependencyDag::from_cow_tree(&tree, 100).expect("build dag");
+        let mut enumerator = DporEnumerator::new();
+
+        let order = dag.reverse_topological_order();
+        for block in &order {
+            enumerator.pre_flush(*block, &dag);
+            enumerator.post_flush(*block, &dag);
+        }
+        enumerator.fsync_barrier(&dag);
+        enumerator.superblock_commit(&dag);
+
+        assert!(
+            enumerator.crash_point_count() >= 8,
+            "DPOR should enumerate at least 8 crash points, got {}",
+            enumerator.crash_point_count()
+        );
+    }
+
+    #[test]
+    fn mutations_visible_after_insert() {
+        let mut tree = InMemoryCowBtrfsTree::new(4).expect("create tree");
+
+        let mut inserted_keys = Vec::new();
+        for i in 0..5 {
+            let key = BtrfsKey {
+                objectid: 1000 + i,
+                item_type: 0x84,
+                offset: 0,
+            };
+            tree.insert(key, &vec![i as u8; 50]).expect("insert");
+            inserted_keys.push(key);
+        }
+
+        for key in &inserted_keys {
+            let found = tree.find(key).expect("find");
+            assert!(found.is_some(), "mutation {} should be visible after insert", key.objectid);
+        }
+    }
+}
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use crate::{BtrfsBTree, BtrfsKey, InMemoryCowBtrfsTree};
+    use proptest::prelude::*;
+
+    proptest::proptest! {
+        #![proptest_config(proptest::test_runner::Config::with_cases(32))]
+
+        #[test]
+        fn mr_wb_writeback_order_preserves_invariants(
+            node_count in 3_usize..=12,
+            generation in 100_u64..=1000,
+        ) {
+            let mut tree = InMemoryCowBtrfsTree::new(4).expect("create tree");
+
+            for i in 0..node_count {
+                let key = BtrfsKey {
+                    objectid: i as u64,
+                    item_type: 0x84,
+                    offset: 0,
+                };
+                tree.insert(key, &vec![0u8; 100]).expect("insert");
+            }
+
+            let dag = WriteDependencyDag::from_cow_tree(&tree, generation).expect("build dag");
+            let results = run_dpor_crash_test(&dag, generation).expect("run test");
+
+            // Expected crash points: 2 per node (pre/post flush) + 1 fsync + 2 superblock (pre/post)
+            let expected_min = dag.node_count() * 2 + 3;
+            prop_assert!(
+                results.len() >= expected_min,
+                "DPOR should produce >= {} crash points (2*{} nodes + 3), got {}",
+                expected_min, dag.node_count(), results.len()
+            );
+
+            let failures: Vec<_> = results.iter().filter(|r| !r.passed()).collect();
+            prop_assert!(
+                failures.is_empty(),
+                "MR-WB: all crash points should pass WB-I1/WB-I2, failures: {:?}",
+                failures
+            );
+        }
+
+        #[test]
+        fn mr_wb_mutations_visible_after_insert(
+            item_count in 1_usize..=10,
+            seed in any::<u64>(),
+        ) {
+            let mut tree = InMemoryCowBtrfsTree::new(4).expect("create tree");
+
+            let mut inserted = Vec::new();
+            for i in 0..item_count {
+                let key = BtrfsKey {
+                    objectid: seed.wrapping_add(i as u64),
+                    item_type: 0x84,
+                    offset: i as u64,
+                };
+                let data = vec![(i % 256) as u8; 64];
+                tree.insert(key, &data).expect("insert");
+                inserted.push((key, data));
+            }
+
+            for (key, expected_data) in &inserted {
+                let found = tree.find(key).expect("find").expect("item should exist");
+                prop_assert_eq!(
+                    found.as_slice(),
+                    expected_data.as_slice(),
+                    "MR-WB: mutation data for {:?} should be visible",
+                    key
+                );
+            }
+        }
     }
 }

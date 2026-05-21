@@ -17,7 +17,7 @@
 //! - **WB-I2 (Atomic Generation Transition):** A reader after crash observes
 //!   generation `g` (pre-writeback) or `g+1` (post), never a torn mixture.
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet};
 
 use tracing::{debug, trace};
 
@@ -491,7 +491,7 @@ impl WritebackExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{BtrfsBTree, BtrfsKey, BtrfsTreeItem, InMemoryCowBtrfsTree};
+    use crate::{BtrfsBTree, BtrfsKey, InMemoryCowBtrfsTree};
 
     fn make_test_tree() -> InMemoryCowBtrfsTree {
         let mut tree = InMemoryCowBtrfsTree::new(4).expect("create tree");
