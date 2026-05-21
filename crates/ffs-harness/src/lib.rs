@@ -21,6 +21,7 @@ pub mod docs_status_drift;
 pub mod e2e;
 pub mod error_taxonomy;
 pub mod executed_evidence;
+pub mod evidence_backed_lane;
 pub mod fault_injection_corpus;
 pub mod fuzz_dashboard;
 pub mod fuzz_smoke;

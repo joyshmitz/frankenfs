@@ -1149,6 +1149,7 @@ mod tests {
             integrity_errors: Vec::new(),
             lanes,
             lane_provenance,
+            executed_evidence: Vec::new(),
             swarm_evidence: Vec::new(),
             adaptive_runtime_evidence: Vec::new(),
             errors: Vec::new(),
