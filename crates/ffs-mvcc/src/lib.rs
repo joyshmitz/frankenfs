@@ -113,6 +113,30 @@ impl MergeByteRange {
     }
 }
 
+/// Byte-level merge algorithm selected by a [`MergeProof`].
+///
+/// The public proof labels are semantic/diagnostic labels. They intentionally
+/// collapse to two same-block merge mechanisms plus one non-merge outcome:
+/// append-only concatenation, range overlay, or FCW fallback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MergeProofMechanism {
+    /// No same-block merge is attempted; FCW remains the decision boundary.
+    NoSameBlockMerge,
+    /// Preserve the snapshot prefix and append the staged suffix to `latest`.
+    AppendOnly,
+    /// Overlay declared byte ranges after validating that both writers touched
+    /// disjoint regions.
+    RangeOverlay,
+}
+
+/// Evidence label used when a same-block FCW conflict might be mergeable.
+///
+/// `AppendOnly` is its own executable mechanism. `IndependentKeys`,
+/// `NonOverlappingExtents`, and `TimestampOnlyInode` are not separate byte
+/// algorithms; they all route through the same range-overlay validator after
+/// the caller has established the family-specific semantic preconditions.
+/// `Unsafe` and `DisjointBlocks` deliberately do not merge same-block
+/// conflicts.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum MergeProof {
     #[default]
@@ -133,6 +157,17 @@ pub enum MergeProof {
 }
 
 impl MergeProof {
+    #[must_use]
+    pub fn mechanism(&self) -> MergeProofMechanism {
+        match self {
+            Self::Unsafe | Self::DisjointBlocks => MergeProofMechanism::NoSameBlockMerge,
+            Self::AppendOnly { .. } => MergeProofMechanism::AppendOnly,
+            Self::IndependentKeys { .. }
+            | Self::NonOverlappingExtents { .. }
+            | Self::TimestampOnlyInode { .. } => MergeProofMechanism::RangeOverlay,
+        }
+    }
+
     pub(crate) fn merge_bytes(&self, base: &[u8], latest: &[u8], staged: &[u8]) -> Option<Vec<u8>> {
         match self {
             Self::Unsafe | Self::DisjointBlocks => None,
@@ -3797,6 +3832,90 @@ mod tests {
             merged.is_none(),
             "disjoint-block proof is not valid for same-block FCW resolution"
         );
+    }
+
+    #[test]
+    fn merge_proof_mechanism_collapses_labels_to_two_merge_algorithms() {
+        let range = vec![MergeByteRange::new(2, 2)];
+        let cases = vec![
+            (MergeProof::Unsafe, MergeProofMechanism::NoSameBlockMerge),
+            (
+                MergeProof::DisjointBlocks,
+                MergeProofMechanism::NoSameBlockMerge,
+            ),
+            (
+                MergeProof::AppendOnly { base_len: 4 },
+                MergeProofMechanism::AppendOnly,
+            ),
+            (
+                MergeProof::IndependentKeys {
+                    touched_ranges: range.clone(),
+                },
+                MergeProofMechanism::RangeOverlay,
+            ),
+            (
+                MergeProof::NonOverlappingExtents {
+                    touched_ranges: range.clone(),
+                },
+                MergeProofMechanism::RangeOverlay,
+            ),
+            (
+                MergeProof::TimestampOnlyInode {
+                    touched_ranges: range,
+                },
+                MergeProofMechanism::RangeOverlay,
+            ),
+        ];
+
+        for (proof, mechanism) in cases {
+            assert_eq!(proof.mechanism(), mechanism, "proof label {proof:?}");
+        }
+    }
+
+    #[test]
+    fn range_overlay_labels_share_the_same_byte_algorithm() {
+        let proofs = vec![
+            MergeProof::IndependentKeys {
+                touched_ranges: vec![MergeByteRange::new(2, 2)],
+            },
+            MergeProof::NonOverlappingExtents {
+                touched_ranges: vec![MergeByteRange::new(2, 2)],
+            },
+            MergeProof::TimestampOnlyInode {
+                touched_ranges: vec![MergeByteRange::new(2, 2)],
+            },
+        ];
+
+        for proof in proofs {
+            let merged = proof
+                .merge_bytes(&[0, 0, 0, 0], &[9, 9, 0, 0], &[0, 0, 5, 5])
+                .expect("range-overlay proof should merge disjoint byte ranges");
+            assert_eq!(merged, vec![9, 9, 5, 5], "proof label {proof:?}");
+        }
+    }
+
+    #[test]
+    fn range_overlay_labels_reject_undeclared_byte_changes() {
+        let proofs = vec![
+            MergeProof::IndependentKeys {
+                touched_ranges: vec![MergeByteRange::new(2, 2)],
+            },
+            MergeProof::NonOverlappingExtents {
+                touched_ranges: vec![MergeByteRange::new(2, 2)],
+            },
+            MergeProof::TimestampOnlyInode {
+                touched_ranges: vec![MergeByteRange::new(2, 2)],
+            },
+        ];
+
+        for proof in proofs {
+            assert!(
+                proof
+                    .merge_bytes(&[0, 0, 0, 0], &[9, 9, 0, 0], &[0, 7, 5, 5])
+                    .is_none(),
+                "proof label {proof:?} must reject changes outside touched_ranges"
+            );
+        }
     }
 
     #[test]

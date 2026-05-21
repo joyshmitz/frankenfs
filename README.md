@@ -35,7 +35,7 @@ It runs as a normal Linux process via FUSE. The tracked V1 parity matrix is at 1
 
 | Pillar | What it does | Why it matters |
 |---|---|---|
-| **Block-level MVCC** | Version chains per block, snapshot isolation, six structured `MergeProof` variants, three `ConflictPolicy` modes (`Strict` / `SafeMerge` / `Adaptive`) selected by an expected-loss decision model | Concurrent readers + writers without the JBD2 global lock. Safe-merge proofs let non-conflicting concurrent writes to the same block coexist. Under a 120-writer stress, SafeMerge runs 9.5× lower expected loss than Strict with zero data corruption. |
+| **Block-level MVCC** | Version chains per block, snapshot isolation, two executable same-block merge mechanisms (`AppendOnly` and range overlay) exposed through `MergeProof` labels, and three `ConflictPolicy` modes (`Strict` / `SafeMerge` / `Adaptive`) selected by an expected-loss decision model | Concurrent readers + writers without the JBD2 global lock. Safe-merge proofs let non-conflicting concurrent writes to the same block coexist when they validate through one of the two audited mechanisms. Under a 120-writer stress, SafeMerge runs 9.5× lower expected loss than Strict with zero data corruption. |
 | **RaptorQ self-healing** | Fountain-coded repair symbols (RFC 6330), Bayesian Beta-posterior durability autopilot, four refresh policies (`Eager` / `Lazy` / `Adaptive` / `Hybrid`), percentile-based stale-window SLO monitoring | Corruption is detected during scrub and recovered without human intervention. `ffs repair` / `ffs fsck --repair` operate offline; `ffs mount --background-repair --background-scrub-ledger <jsonl>` enables mounted automatic recovery with a durable evidence trail. Hybrid refresh cuts p95 stale-window age by 83.3% under write-heavy workloads. |
 | **Writeback-cache safety net** | Per-inode `staged ≥ visible ≥ durable` epoch state machine, six formal invariants (I1–I6), 12-scenario crash/replay artifact gate, runtime kill switch | Kernel FUSE `writeback_cache` is a footgun for MVCC isolation by default. FrankenFS opts in *only* with `--rw --writeback-cache` plus three accepted-artifact gates, a matching host/lane manifest, and a disarmed kill switch. `flush` stays non-durable; `fsync` / `fsyncdir` are the durability boundaries operators reason about. |
 | **Memory safety** | `#![forbid(unsafe_code)]` at every crate root, edition 2024 (nightly), workspace-level Clippy enforcement | Eliminates at compile time the bug class that has cost the Linux kernel a decade of CVEs: buffer overflows, use-after-free, uninitialized reads. |
@@ -207,7 +207,7 @@ Legacy extraction reference (retained, not on the runtime path):
 |-------|--------|--------------|
 | **Foundation** | `ffs-types`, `ffs-error` | Newtypes (`BlockNumber`, `InodeNumber`, `TxnId`, `CommitSeq`, `ByteOffset`, `DeviceId`); 21-variant `FfsError` with errno mappings |
 | **On-disk** | `ffs-ondisk` | Pure parsing of ext4 + btrfs superblocks, group descriptors, inodes, extents, B-tree headers. No I/O. |
-| **Storage** | `ffs-block`, `ffs-journal`, `ffs-mvcc` | Block I/O with ARC / S3-FIFO cache; JBD2 replay + ext4 fast-commit + external-journal pairing; native MVCC with version chains, sharded store, snapshot isolation, six merge-proof variants, three conflict policies, Zstd/Brotli version compression, WAL persistence + recovery |
+| **Storage** | `ffs-block`, `ffs-journal`, `ffs-mvcc` | Block I/O with ARC / S3-FIFO cache; JBD2 replay + ext4 fast-commit + external-journal pairing; native MVCC with version chains, sharded store, snapshot isolation, two same-block merge mechanisms behind semantic proof labels, three conflict policies, Zstd/Brotli version compression, WAL persistence + recovery |
 | **Tree / Alloc** | `ffs-btree`, `ffs-alloc`, `ffs-extent` | B+tree search/insert/split/merge; mballoc-style buddy allocator with goal-directed placement and Orlov directory spreading; extent mapping (logical→physical) |
 | **Namespace** | `ffs-inode`, `ffs-dir`, `ffs-xattr` | Inode lifecycle with CRC32C checksum, htree directories with case-folding, user/system/security/trusted xattr namespaces |
 | **Interface** | `ffs-fuse`, `ffs-core`, `ffs` | FUSE protocol adapter (vendored `fuser` 7.40); `OpenFs` implementation of `FsOps` orchestrating format detection, mount, writeback epoch barrier, degradation FSM, backpressure gates; thin public facade |
@@ -470,16 +470,16 @@ Every logical block maintains a version chain: an ordered sequence of `BlockVers
 
 When a writer commits and discovers that a block it wrote has been modified since its snapshot, the default response is to abort (FCW). But many concurrent writes don't actually conflict at the byte level. Two writers might be appending to different regions of the same block, or updating disjoint metadata fields in the same inode block.
 
-`MergeProof` is structured evidence that two writes can be combined without data loss:
+`MergeProof` is structured evidence that two writes can be combined without data loss. The public labels are not six separate byte algorithms: `AppendOnly` is one mechanism, `IndependentKeys` / `NonOverlappingExtents` / `TimestampOnlyInode` all route through the same range-overlay validator, and `DisjointBlocks` / `Unsafe` do not attempt same-block conflict resolution.
 
-| Variant | Use case | Strategy |
+| Proof label | Use case | Executable mechanism |
 |---|---|---|
 | `AppendOnly { base_len }` | Log-structured appends, directory entry additions | Concatenate: keep the committed writer's prefix, append the new writer's tail |
 | `IndependentKeys { touched_ranges }` | Disjoint metadata field updates | Overlay: copy each writer's byte ranges onto the committed base |
 | `NonOverlappingExtents { touched_ranges }` | Extent-tree updates to different file regions | Same overlay strategy, scoped to extent blocks |
 | `TimestampOnlyInode { touched_ranges }` | Concurrent `setattr` on different inode timestamp fields | Same overlay, validated for inode-specific byte layout |
-| `DisjointBlocks` | Transactions touching completely different blocks | Trivially non-conflicting; no same-block overlap |
-| `Unsafe` | No proof available | Always aborts on conflict (FCW fallback) |
+| `DisjointBlocks` | Transactions touching completely different blocks | No same-block merge; this label documents why the FCW path should not have been reached |
+| `Unsafe` | No proof available | No same-block merge; always aborts on conflict (FCW fallback) |
 
 `MergeProof::merge_bytes()` takes `base` (the version at the writer's snapshot), `latest` (the currently committed version), and `staged` (the writer's proposed bytes). It validates that the proof's byte ranges are pairwise disjoint and that the committed writer didn't modify any of the same ranges, then produces the merged result.
 
@@ -3401,7 +3401,7 @@ Rows in the btrfs experimental RW contract can still be `partially supported` or
 
 - **ext4.** Superblock, inode, extent header/entry, group descriptor, feature flag decoding, mount-time journal recovery (JBD2 + fast-commit + external-journal pairing), FUSE mount (RO default, experimental RW), `e2compr` read+write for gzip/LZO/none, casefold, encryption nokey mode, inline data, indirect block addressing, fallocate (KEEP_SIZE / PUNCH_HOLE / ZERO_RANGE / COLLAPSE_RANGE / INSERT_RANGE), POSIX ACL xattrs, MMP conservative rejection.
 - **btrfs.** Superblock, B-tree header, leaf item metadata, geometry validation, RAID stripe mapping (single/DUP/RAID0/1/5/6/10), FUSE mount (RO default, experimental RW with core mutations), transparent ZLIB/LZO/ZSTD decompression, named subvolume/snapshot selection, tree-log replay, send/receive stream parsing, btrfs fallocate (KEEP_SIZE / PUNCH_HOLE / ZERO_RANGE / COLLAPSE_RANGE / INSERT_RANGE), backup superblock mirror repair, fragmentation-aware free-run reporting.
-- **MVCC.** Snapshot visibility, commit sequencing, FCW conflict detection, six merge-proof variants, three conflict policies with adaptive expected-loss selection, EMA contention tracking, sharded concurrent store, Zstd/Brotli version compression, WAL persistence + crash recovery, SSI rw-antidependency detection.
+- **MVCC.** Snapshot visibility, commit sequencing, FCW conflict detection, two same-block merge mechanisms behind semantic `MergeProof` labels, three conflict policies with adaptive expected-loss selection, EMA contention tracking, sharded concurrent store, Zstd/Brotli version compression, WAL persistence + crash recovery, SSI rw-antidependency detection.
 - **Self-healing.** Bayesian durability autopilot, RaptorQ symbol generation/recovery, four refresh policies (Eager/Lazy/Adaptive/Hybrid), stale-window SLO with percentile-based breach detection, multi-host repair-ownership coordination, expected-loss policy comparison, mounted automatic repair contract (read-only + read-write via MVCC repair-writeback serializer).
 - **Writeback-cache.** Epoch-based commit barriers with per-inode staged/visible/durable tracking, deferred visibility for MVCC isolation, dirty-page ordering oracle, 12-point crash/replay matrix artifact gate, runtime guard, and host/lane manifest checks. Kernel option default-off; explicit opt-in is evidence-gated.
 - **Observability.** Evidence ledger with 23 event types and 8 operator presets (`replay-anomalies`, `repair-failures`, `pressure-transitions`, `contention`, `metrics`, `cache`, `mvcc`, `repair-live`), contention metrics, policy-switch detection, structured logging across all subsystems, JSONL audit trail.

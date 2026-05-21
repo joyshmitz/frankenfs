@@ -1,8 +1,8 @@
 # Safe-Merge Taxonomy and Proof Obligations
 
 **Status:** Design-ready, backing executable taxonomy tests
-**Date:** 2026-03-14
-**Bead:** bd-m5wf.3.1
+**Date:** 2026-03-14; updated 2026-05-21 for `bd-xuo95.27`
+**Bead:** `bd-m5wf.3.1`, `bd-xuo95.27`
 **Scope:** Pairwise classification of concurrent filesystem mutations that may eventually bypass raw block-level FCW
 
 ## Current Code Facts
@@ -17,6 +17,34 @@ The live code is still conservative:
 - `ffs-alloc` updates block/inode bitmaps plus cached/persisted group descriptor counters; a missed or doubled bit flip is corruption, not a benign conflict.
 
 That means raw block-level FCW is still the correctness baseline. Any future “safe merge” path must prove that two higher-level mutations commute before they are collapsed into one MVCC decision.
+
+## Current `MergeProof` Mechanisms
+
+The public `ffs-mvcc::MergeProof` enum has six proof labels, but the executable
+same-block merge surface intentionally has only two real merge mechanisms:
+
+| Proof label | Executable mechanism | Same-block conflict behavior |
+|---|---|---|
+| `AppendOnly { base_len }` | append-only concatenation | Validates the unchanged snapshot prefix, keeps the already-committed suffix, and appends the staged suffix. |
+| `IndependentKeys { touched_ranges }` | range overlay | Uses the shared range-overlay validator after the caller proves key-level independence. |
+| `NonOverlappingExtents { touched_ranges }` | range overlay | Uses the shared range-overlay validator after the caller proves extent-interval independence. |
+| `TimestampOnlyInode { touched_ranges }` | range overlay | Uses the shared range-overlay validator after the caller proves only timestamp bytes changed. |
+| `DisjointBlocks` | no same-block merge | Documents that the transactions should not alias the same block; if FCW reaches this label, it aborts. |
+| `Unsafe` | no same-block merge | Default fallback; always aborts on same-block conflict. |
+
+This is an honesty constraint, not a feature gap. `IndependentKeys`,
+`NonOverlappingExtents`, and `TimestampOnlyInode` are semantic labels over the
+same byte-range overlay algorithm. They are retained so diagnostics and future
+callers can name the family-specific preconditions without implying distinct
+byte-level algorithms.
+
+Executable guardrails in `crates/ffs-mvcc/src/lib.rs`:
+
+- `merge_proof_mechanism_collapses_labels_to_two_merge_algorithms`
+- `range_overlay_labels_share_the_same_byte_algorithm`
+- `range_overlay_labels_reject_undeclared_byte_changes`
+- existing FCW/SafeMerge tests for `Unsafe`, `DisjointBlocks`, `AppendOnly`,
+  and `IndependentKeys`
 
 ## Canonical Merge Keys
 

@@ -6043,19 +6043,30 @@ transactions writing the same block. But what about "safe merge" scenarios
 where both transactions' changes could be applied? For example, two
 transactions each setting different bits in a bitmap block.
 
-**Status:** Resolved (2026-03-04, `bd-h6nz.6.2`).
+**Status:** Resolved (2026-03-04, `bd-h6nz.6.2`); wording corrected
+2026-05-21 for `bd-xuo95.27`.
 
-**Decision (Accepted):** FrankenFS V1.x keeps strict FCW + SSI only.
-- FCW remains the write-write arbitration rule.
-- SSI remains the serializability guard for rw-antidependency cycles.
-- No semantic "safe merge" and no adaptive conflict policy in V1.x.
+**Decision (Accepted):** FrankenFS V1.x keeps FCW + SSI as the correctness
+baseline. Same-block safe-merge is allowed only through the two audited
+byte-level mechanisms implemented in `ffs-mvcc`:
+
+- `AppendOnly { base_len }` validates an unchanged snapshot prefix and appends
+  the staged suffix to the already-committed suffix.
+- `IndependentKeys`, `NonOverlappingExtents`, and `TimestampOnlyInode` are
+  semantic labels over one range-overlay validator. They are not distinct byte
+  algorithms.
+- `Unsafe` and `DisjointBlocks` never merge same-block conflicts; they fall
+  back to FCW abort.
+- SSI remains the serializability guard for rw-antidependency conflicts.
+- Broader filesystem-semantic safe merge remains post-V1.x until each caller
+  proves its family-specific preconditions before emitting a proof label.
 
 **Expected-Loss Matrix (lower is better):**
 
 | Option | Correctness Loss | Starvation/Progress Loss | Complexity/Operability Loss | Composite |
 |--------|------------------|--------------------------|-----------------------------|-----------|
 | A. Strict FCW + SSI (current) | 1 | 2 | 1 | **4** |
-| B. Semantic safe-merge in V1.x | 5 | 1 | 8 | 14 |
+| B. Unbounded semantic safe-merge in V1.x | 5 | 1 | 8 | 14 |
 | C. Adaptive arbitration policy in V1.x | 4 | 2 | 6 | 12 |
 
 Option A is selected because it minimizes correctness and implementation risk
@@ -6079,14 +6090,16 @@ while preserving deterministic behavior under contention.
 
 | Policy Clause | Validation Path | Pass Condition | Decision-Sensitive Failure Class |
 |---------------|-----------------|----------------|----------------------------------|
-| FCW rejects overlapping writers | `stress_fcw_conflicts` + FCW unit/property tests in `ffs-mvcc` | Second writer is rejected with `CommitError::Conflict` | `fcw_conflict` |
+| FCW rejects overlapping writers | `stress_fcw_conflicts` + FCW unit/property tests in `ffs-mvcc` | Second writer is rejected with `CommitError::Conflict` when no audited proof mechanism validates | `fcw_conflict` |
+| SafeMerge has two executable byte mechanisms | `merge_proof_mechanism_collapses_labels_to_two_merge_algorithms`, `range_overlay_labels_share_the_same_byte_algorithm`, and `range_overlay_labels_reject_undeclared_byte_changes` in `ffs-mvcc` | Public proof labels collapse to append-only, range-overlay, or FCW fallback; overlay labels share identical byte behavior and reject undeclared changes | `merge_proof_taxonomy_drift` |
 | SSI prevents write skew | `stress_ssi_write_skew` + SSI tests in `ffs-mvcc` | Exactly one conflicting txn commits; invariant preserved | `ssi_cycle` |
 | Contention remains progress-safe with retries | `stress_fcw_hotspot_retry_fairness` + `e2e_hot_key_counter_with_retries` | Every writer completes bounded commits; no infinite retry loop | `timeout` / retry-bound breach |
 | Abort-path observability remains explicit | `ffs-mvcc` evidence/log assertions | Abort records include deterministic reason class and conflict context | `fcw_conflict`, `ssi_cycle`, `timeout` |
 
 **Follow-on Scope (deferred):**
-- Safe-merge remains a post-V1 item requiring per-block semantic merge proof
-  obligations and corruption-risk analysis.
+- Broader semantic safe-merge remains a post-V1 item requiring per-operation
+  proof obligations and corruption-risk analysis before callers emit proof
+  labels.
 - Adaptive conflict policy remains a post-V1 item and must show lower expected
   loss than strict FCW+SSI before adoption.
 
