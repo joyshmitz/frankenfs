@@ -1,0 +1,497 @@
+{
+  "bead_id": "bd-xuo95.33",
+  "campaign_id": "bd-xuo95.33-g4-soak-canary-20260521",
+  "campaign_scope": {
+    "not_a_dry_run": true,
+    "profile_source": "benchmarks/soak_canary_campaign_manifest.json",
+    "raw_artifact_dir": "baselines/hyperfine/20260521-bd-xuo95-33-soak",
+    "type": "bounded_real_soak_canary"
+  },
+  "commands": {
+    "ffs_cli_build_fallback_rejected": {
+      "command": "rch exec -- cargo build --profile release-perf -p ffs-cli",
+      "counted_as_validation": false,
+      "dispatch": "local_fallback",
+      "local_fallback_reason": "no admissible workers: critical_pressure=3,active_project_exclusion=4",
+      "outcome": "rejected_local_fallback",
+      "stderr_path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/ffs_cli_build.stderr",
+      "stdout_path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/ffs_cli_build.stdout"
+    },
+    "ffs_cli_build_queued_fallback_rejected": {
+      "command": "RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=180 RCH_QUEUE_WHEN_BUSY=1 rch exec -- cargo build --profile release-perf -p ffs-cli",
+      "counted_as_validation": false,
+      "dispatch": "local_fallback",
+      "local_fallback_reason": "no admissible workers: critical_pressure=3,insufficient_slots=1,active_project_exclusion=3",
+      "outcome": "rejected_local_fallback",
+      "stderr_path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/ffs_cli_build_remote.stderr",
+      "stdout_path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/ffs_cli_build_remote.stdout"
+    },
+    "manifest_validation": {
+      "command": "rch exec -- cargo run --quiet -p ffs-harness -- validate-soak-canary-campaigns --manifest benchmarks/soak_canary_campaign_manifest.json --artifact-root baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts --out baselines/hyperfine/20260521-bd-xuo95-33-soak/manifest_report.json --artifact-out baselines/hyperfine/20260521-bd-xuo95-33-soak/sample_artifact_manifest.json --summary-out baselines/hyperfine/20260521-bd-xuo95-33-soak/manifest_summary.md",
+      "dispatch": "remote",
+      "exit_code": 0,
+      "outcome": "pass",
+      "rch_wall_secs": 122.5,
+      "remote_exec_ms": 95421,
+      "remote_exit_code": 0,
+      "stderr_path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/manifest_validation.stderr",
+      "stdout_path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/manifest_validation.stdout",
+      "worker": "ts1"
+    },
+    "mounted_fuse_canary": {
+      "by_mode": {
+        "cold": {
+          "duration_ms": {
+            "max": 92,
+            "mean": 89.33,
+            "min": 86
+          },
+          "failures": 0,
+          "iterations": 3,
+          "mount_attempts": 3,
+          "passes": 3,
+          "ready_attempts": 3
+        },
+        "recovery": {
+          "duration_ms": {
+            "max": 100,
+            "mean": 93.33,
+            "min": 88
+          },
+          "failures": 0,
+          "iterations": 3,
+          "mount_attempts": 3,
+          "passes": 3,
+          "ready_attempts": 3
+        },
+        "warm": {
+          "duration_ms": {
+            "max": 137,
+            "mean": 129.67,
+            "min": 123
+          },
+          "failures": 0,
+          "iterations": 3,
+          "mount_attempts": 6,
+          "passes": 3,
+          "ready_attempts": 6
+        }
+      },
+      "command": "sudo -n scripts/mount_benchmark_probe.sh --bin /data/tmp/rch_target_frankenfs_bd_xuo95_33/release-perf/ffs-cli --image <probe-image> --mount-root <iteration-root> --mode <cold|warm|recovery> --out-json <report>",
+      "exit_code": 0,
+      "failures": 0,
+      "iterations": 9,
+      "note": "Host-local FUSE probe; cargo build attempts through rch fell back local under active project contention and are not counted as cargo validation proof.",
+      "outcome": "pass",
+      "passes": 9,
+      "total_duration_ms": 937
+    },
+    "repair_recovery_e2e_local_fallback_rejected": {
+      "command": "rch exec -- env CARGO_TARGET_DIR=/data/tmp/rch_target_frankenfs_bd_xuo95_33 FFS_REPAIR_E2E_ARTIFACT_STDOUT=1 FFS_REPAIR_E2E_ARTIFACT_DIR=baselines/hyperfine/20260521-bd-xuo95-33-soak/repair_remote_artifacts cargo test -p ffs-repair e2e_survive_five_percent_random_block_corruption_with_daemon -- --nocapture",
+      "counted_as_validation": false,
+      "dispatch": "local_fallback",
+      "local_fallback_reason": "no admissible workers: critical_pressure=3,insufficient_slots=1,active_project_exclusion=3",
+      "outcome": "rejected_local_fallback",
+      "stderr_path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/repair_recovery.stderr",
+      "stdout_path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/repair_recovery.stdout"
+    },
+    "repair_recovery_e2e_remote": {
+      "command": "rch exec -- cargo test -p ffs-repair e2e_survive_five_percent_random_block_corruption_with_daemon -- --nocapture",
+      "dispatch": "remote",
+      "exit_code": 0,
+      "failed": 0,
+      "filtered_out": 432,
+      "ignored": 0,
+      "measured": 0,
+      "outcome": "pass",
+      "passed": 1,
+      "rch_wall_secs": 421.9,
+      "remote_exec_ms": 340180,
+      "remote_exit_code": 0,
+      "result_lines": 5,
+      "stderr_path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/repair_recovery_remote.stderr",
+      "stdout_path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/repair_recovery_remote.stdout",
+      "test_runtime_secs": 0.85,
+      "worker": "vmi1264463"
+    },
+    "soak_canary_unit_contract": {
+      "command": "rch exec -- cargo test -p ffs-harness --lib soak_canary_campaign -- --nocapture",
+      "dispatch": "remote",
+      "exit_code": 0,
+      "failed": 0,
+      "filtered_out": 2007,
+      "ignored": 0,
+      "measured": 0,
+      "outcome": "pass",
+      "passed": 18,
+      "rch_wall_secs": 120.3,
+      "remote_exec_ms": 109867,
+      "remote_exit_code": 0,
+      "result_lines": 1,
+      "stderr_path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/soak_canary_unit.stderr",
+      "stdout_path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/soak_canary_unit.stdout",
+      "test_runtime_secs": 0.04,
+      "worker": "ts1"
+    }
+  },
+  "date_tag": "20260521",
+  "generated_at": "2026-05-21T08:51:17.549269Z",
+  "host_capabilities": {
+    "dev_fuse_present": true,
+    "mkfs_ext4": "/usr/sbin/mkfs.ext4",
+    "sudo_noninteractive": true
+  },
+  "manifest_validation": {
+    "long_profile_ids": [
+      "nightly",
+      "stress",
+      "canary"
+    ],
+    "profile_count": 4,
+    "sample_outcome_counts": {
+      "error": 1,
+      "fail": 1,
+      "flake": 1,
+      "pass": 1,
+      "skip": 1
+    },
+    "valid": true,
+    "workload_count": 7
+  },
+  "mounted_iterations": [
+    {
+      "attempt_count": 1,
+      "classification": "measured",
+      "cleanup_statuses": [
+        "unmounted"
+      ],
+      "duration_ms": 92,
+      "exit_code": 0,
+      "iteration": 1,
+      "mode": "cold",
+      "outcome": "pass",
+      "ready_attempt_count": 1,
+      "report_path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/mount_cold_1_report.json",
+      "stderr_path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/mount_cold_1.stderr",
+      "stdout_path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/mount_cold_1.stdout"
+    },
+    {
+      "attempt_count": 1,
+      "classification": "measured",
+      "cleanup_statuses": [
+        "unmounted"
+      ],
+      "duration_ms": 90,
+      "exit_code": 0,
+      "iteration": 2,
+      "mode": "cold",
+      "outcome": "pass",
+      "ready_attempt_count": 1,
+      "report_path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/mount_cold_2_report.json",
+      "stderr_path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/mount_cold_2.stderr",
+      "stdout_path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/mount_cold_2.stdout"
+    },
+    {
+      "attempt_count": 1,
+      "classification": "measured",
+      "cleanup_statuses": [
+        "unmounted"
+      ],
+      "duration_ms": 86,
+      "exit_code": 0,
+      "iteration": 3,
+      "mode": "cold",
+      "outcome": "pass",
+      "ready_attempt_count": 1,
+      "report_path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/mount_cold_3_report.json",
+      "stderr_path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/mount_cold_3.stderr",
+      "stdout_path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/mount_cold_3.stdout"
+    },
+    {
+      "attempt_count": 2,
+      "classification": "measured",
+      "cleanup_statuses": [
+        "unmounted"
+      ],
+      "duration_ms": 123,
+      "exit_code": 0,
+      "iteration": 1,
+      "mode": "warm",
+      "outcome": "pass",
+      "ready_attempt_count": 2,
+      "report_path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/mount_warm_1_report.json",
+      "stderr_path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/mount_warm_1.stderr",
+      "stdout_path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/mount_warm_1.stdout"
+    },
+    {
+      "attempt_count": 2,
+      "classification": "measured",
+      "cleanup_statuses": [
+        "unmounted"
+      ],
+      "duration_ms": 129,
+      "exit_code": 0,
+      "iteration": 2,
+      "mode": "warm",
+      "outcome": "pass",
+      "ready_attempt_count": 2,
+      "report_path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/mount_warm_2_report.json",
+      "stderr_path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/mount_warm_2.stderr",
+      "stdout_path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/mount_warm_2.stdout"
+    },
+    {
+      "attempt_count": 2,
+      "classification": "measured",
+      "cleanup_statuses": [
+        "unmounted"
+      ],
+      "duration_ms": 137,
+      "exit_code": 0,
+      "iteration": 3,
+      "mode": "warm",
+      "outcome": "pass",
+      "ready_attempt_count": 2,
+      "report_path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/mount_warm_3_report.json",
+      "stderr_path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/mount_warm_3.stderr",
+      "stdout_path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/mount_warm_3.stdout"
+    },
+    {
+      "attempt_count": 1,
+      "classification": "measured",
+      "cleanup_statuses": [
+        "unmounted"
+      ],
+      "duration_ms": 100,
+      "exit_code": 0,
+      "iteration": 1,
+      "mode": "recovery",
+      "outcome": "pass",
+      "ready_attempt_count": 1,
+      "report_path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/mount_recovery_1_report.json",
+      "stderr_path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/mount_recovery_1.stderr",
+      "stdout_path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/mount_recovery_1.stdout"
+    },
+    {
+      "attempt_count": 1,
+      "classification": "measured",
+      "cleanup_statuses": [
+        "unmounted"
+      ],
+      "duration_ms": 88,
+      "exit_code": 0,
+      "iteration": 2,
+      "mode": "recovery",
+      "outcome": "pass",
+      "ready_attempt_count": 1,
+      "report_path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/mount_recovery_2_report.json",
+      "stderr_path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/mount_recovery_2.stderr",
+      "stdout_path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/mount_recovery_2.stdout"
+    },
+    {
+      "attempt_count": 1,
+      "classification": "measured",
+      "cleanup_statuses": [
+        "unmounted"
+      ],
+      "duration_ms": 92,
+      "exit_code": 0,
+      "iteration": 3,
+      "mode": "recovery",
+      "outcome": "pass",
+      "ready_attempt_count": 1,
+      "report_path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/mount_recovery_3_report.json",
+      "stderr_path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/mount_recovery_3.stderr",
+      "stdout_path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/mount_recovery_3.stdout"
+    }
+  ],
+  "notes": [
+    "The initial repair recovery cargo command and both ffs-cli build commands fell back local under rch active-project contention and are retained only as rejected evidence.",
+    "Counted cargo validation evidence is remote: manifest validation on ts1, ffs-harness unit contract on ts1, and ffs-repair recovery E2E on vmi1264463.",
+    "Mounted FUSE canary is host-local by design because it probes /dev/fuse and sudo mount behavior on this machine."
+  ],
+  "raw_artifact_hashes": {
+    "baselines/hyperfine/20260521-bd-xuo95-33-soak/ffs_cli_build.stderr": {
+      "bytes": 6467,
+      "sha256": "0c53a8de9644a3309e6be88b529ffd8e4a4f7b8df9b63590d102a4f2688a951c"
+    },
+    "baselines/hyperfine/20260521-bd-xuo95-33-soak/ffs_cli_build.stdout": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "baselines/hyperfine/20260521-bd-xuo95-33-soak/ffs_cli_build_remote.stderr": {
+      "bytes": 539,
+      "sha256": "71a0e99ffce19e0037433b1830c2cb49ac80953d058afbc80b96adb3615f0232"
+    },
+    "baselines/hyperfine/20260521-bd-xuo95-33-soak/ffs_cli_build_remote.stdout": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "baselines/hyperfine/20260521-bd-xuo95-33-soak/manifest_report.json": {
+      "bytes": 23554,
+      "sha256": "bf33245ad7d45fbb7d9ae9061de67b777cbf1ab1930690fa5896868eff9b6bf7"
+    },
+    "baselines/hyperfine/20260521-bd-xuo95-33-soak/manifest_summary.md": {
+      "bytes": 2615,
+      "sha256": "00eee2a43fcde3cbdf05fe9dd2de41a5fcbef89416bb73edc368461e1ac46304"
+    },
+    "baselines/hyperfine/20260521-bd-xuo95-33-soak/manifest_validation.stderr": {
+      "bytes": 14932,
+      "sha256": "011b5dbc8297e11ef2feed5192e53a7c6e7a9eae5ea82a9b72b9de11a4b9f3ac"
+    },
+    "baselines/hyperfine/20260521-bd-xuo95-33-soak/manifest_validation.stdout": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "baselines/hyperfine/20260521-bd-xuo95-33-soak/mkfs_mount_probe.stderr": {
+      "bytes": 27,
+      "sha256": "6ce7960c36ed800a70a2d0233b96242a78e4a56d9e4eedd40a22c92e5eca5ab6"
+    },
+    "baselines/hyperfine/20260521-bd-xuo95-33-soak/mkfs_mount_recovery_probe.stderr": {
+      "bytes": 27,
+      "sha256": "6ce7960c36ed800a70a2d0233b96242a78e4a56d9e4eedd40a22c92e5eca5ab6"
+    },
+    "baselines/hyperfine/20260521-bd-xuo95-33-soak/mount_cold_1.stderr": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "baselines/hyperfine/20260521-bd-xuo95-33-soak/mount_cold_1.stdout": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "baselines/hyperfine/20260521-bd-xuo95-33-soak/mount_cold_1_report.json": {
+      "bytes": 1374,
+      "sha256": "0997266b8266565bd85bc2ce318a3f11f1ccb7e869d700f65cb28896dd7b4c7b"
+    },
+    "baselines/hyperfine/20260521-bd-xuo95-33-soak/mount_cold_2.stderr": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "baselines/hyperfine/20260521-bd-xuo95-33-soak/mount_cold_2.stdout": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "baselines/hyperfine/20260521-bd-xuo95-33-soak/mount_cold_2_report.json": {
+      "bytes": 1374,
+      "sha256": "d71a946ad75e10909269c99bdb1b49873d9385722c70dc3de00f3a6773191389"
+    },
+    "baselines/hyperfine/20260521-bd-xuo95-33-soak/mount_cold_3.stderr": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "baselines/hyperfine/20260521-bd-xuo95-33-soak/mount_cold_3.stdout": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "baselines/hyperfine/20260521-bd-xuo95-33-soak/mount_cold_3_report.json": {
+      "bytes": 1374,
+      "sha256": "0995586883e926336cfefa49fd0123ab6b39ee018ec15a58be4a58cb5e9ab1df"
+    },
+    "baselines/hyperfine/20260521-bd-xuo95-33-soak/mount_recovery_1.stderr": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "baselines/hyperfine/20260521-bd-xuo95-33-soak/mount_recovery_1.stdout": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "baselines/hyperfine/20260521-bd-xuo95-33-soak/mount_recovery_1_report.json": {
+      "bytes": 1419,
+      "sha256": "51656fa04b22ba713dbe94f6fdde9260899d96ca07247624024d11e67a342d84"
+    },
+    "baselines/hyperfine/20260521-bd-xuo95-33-soak/mount_recovery_2.stderr": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "baselines/hyperfine/20260521-bd-xuo95-33-soak/mount_recovery_2.stdout": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "baselines/hyperfine/20260521-bd-xuo95-33-soak/mount_recovery_2_report.json": {
+      "bytes": 1419,
+      "sha256": "4f6a8512c1a04329d150fa298aae6d14ba53c2d51f76ae3b7e6253e7b93d9095"
+    },
+    "baselines/hyperfine/20260521-bd-xuo95-33-soak/mount_recovery_3.stderr": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "baselines/hyperfine/20260521-bd-xuo95-33-soak/mount_recovery_3.stdout": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "baselines/hyperfine/20260521-bd-xuo95-33-soak/mount_recovery_3_report.json": {
+      "bytes": 1419,
+      "sha256": "fb2c3d3dde36251893b7a3acc8435018ea2bb8f1a66b4c723d4b219481be3dfc"
+    },
+    "baselines/hyperfine/20260521-bd-xuo95-33-soak/mount_warm_1.stderr": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "baselines/hyperfine/20260521-bd-xuo95-33-soak/mount_warm_1.stdout": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "baselines/hyperfine/20260521-bd-xuo95-33-soak/mount_warm_1_report.json": {
+      "bytes": 1895,
+      "sha256": "f9676bd014a65bb9c3f9b203bbcfe7a1fb11040b34ec5a13fa470fe0af3747e6"
+    },
+    "baselines/hyperfine/20260521-bd-xuo95-33-soak/mount_warm_2.stderr": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "baselines/hyperfine/20260521-bd-xuo95-33-soak/mount_warm_2.stdout": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "baselines/hyperfine/20260521-bd-xuo95-33-soak/mount_warm_2_report.json": {
+      "bytes": 1895,
+      "sha256": "46844fb55fbfb4c6b122c40c40866424fc795dde734b69f62a4cca370e63e7b6"
+    },
+    "baselines/hyperfine/20260521-bd-xuo95-33-soak/mount_warm_3.stderr": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "baselines/hyperfine/20260521-bd-xuo95-33-soak/mount_warm_3.stdout": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "baselines/hyperfine/20260521-bd-xuo95-33-soak/mount_warm_3_report.json": {
+      "bytes": 1895,
+      "sha256": "a1a368396deec9ca7114af7b11a17f0b7d118c62b1921eb46179c543db45986e"
+    },
+    "baselines/hyperfine/20260521-bd-xuo95-33-soak/mounted_canary_iterations.tsv": {
+      "bytes": 2060,
+      "sha256": "4b48cf725192fcbdaeed4d4a4d7ec99b94586eb471e70b0df1d08afab7fbebc4"
+    },
+    "baselines/hyperfine/20260521-bd-xuo95-33-soak/repair_recovery.stderr": {
+      "bytes": 5902,
+      "sha256": "ee1ccf71707d4e31a80651f954194391b189849ad7ba52ef591151f43593b964"
+    },
+    "baselines/hyperfine/20260521-bd-xuo95-33-soak/repair_recovery_remote.stderr": {
+      "bytes": 105950,
+      "sha256": "d06ea3c919110d04183ed857a4d71b65d19370e74e217827b9a0626ec32e5300"
+    },
+    "baselines/hyperfine/20260521-bd-xuo95-33-soak/repair_recovery_remote.stdout": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "baselines/hyperfine/20260521-bd-xuo95-33-soak/sample_artifact_manifest.json": {
+      "bytes": 24165,
+      "sha256": "f1bb5df8c38e4548c03bd1623e9ba581a17c4001323cd99850b0b291ee00ad79"
+    },
+    "baselines/hyperfine/20260521-bd-xuo95-33-soak/soak_canary_unit.stderr": {
+      "bytes": 28200,
+      "sha256": "146c01b8e77df1b0cc2d13307f930cde6104fda45ae83882ae1cf8b37ef57fd2"
+    },
+    "baselines/hyperfine/20260521-bd-xuo95-33-soak/soak_canary_unit.stdout": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  },
+  "repo": {
+    "branch": "main",
+    "head": "bf70d601edc37a077ce7102e3462a3f80f602a67",
+    "path": "/data/projects/frankenfs"
+  },
+  "schema_version": 1,
+  "verdict": "pass"
+}

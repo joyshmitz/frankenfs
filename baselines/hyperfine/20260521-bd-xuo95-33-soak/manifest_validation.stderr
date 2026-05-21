@@ -1,0 +1,194 @@
+  [2m2026-05-21T08:23:14.437733Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSelected worker: ts1 at ubuntu@192.168.1.107 (28 slots, speed 50.0)[0m
+    [2;3mat[0m rch/src/hook.rs:513 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-21T08:23:14.813117Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mStarting remote compilation pipeline for frankenfs (hash: 436897db3210d54e)[0m
+    [2;3mat[0m rch/src/hook.rs:5914 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-21T08:23:14.813189Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mPrepared dependency sync manifest for 23 roots[0m
+    [2;3mat[0m rch/src/hook.rs:5936 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-21T08:23:16.083943Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSyncing project to worker ts1...[0m
+    [2;3mat[0m rch/src/hook.rs:5966 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-21T08:23:16.084049Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mLoaded 2 pattern(s) from .rchignore (total: 41)[0m
+    [2;3mat[0m rch/src/transfer.rs:763 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-21T08:23:16.084059Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenfs -> /data/projects/frankenfs on ts1[0m
+    [2;3mat[0m rch/src/transfer.rs:1363 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-21T08:23:16.799902Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 715ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1432 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-21T08:23:16.800057Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenfs/crates/ffs -> /data/projects/frankenfs/crates/ffs on ts1[0m
+    [2;3mat[0m rch/src/transfer.rs:1363 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-21T08:23:17.136053Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 335ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1432 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-21T08:23:17.136219Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenfs/crates/ffs-alloc -> /data/projects/frankenfs/crates/ffs-alloc on ts1[0m
+    [2;3mat[0m rch/src/transfer.rs:1363 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-21T08:23:17.467827Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 331ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1432 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-21T08:23:17.467965Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenfs/crates/ffs-block -> /data/projects/frankenfs/crates/ffs-block on ts1[0m
+    [2;3mat[0m rch/src/transfer.rs:1363 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-21T08:23:17.791523Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 323ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1432 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-21T08:23:17.791678Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenfs/crates/ffs-btree -> /data/projects/frankenfs/crates/ffs-btree on ts1[0m
+    [2;3mat[0m rch/src/transfer.rs:1363 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-21T08:23:18.123584Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 331ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1432 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-21T08:23:18.123713Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenfs/crates/ffs-btrfs -> /data/projects/frankenfs/crates/ffs-btrfs on ts1[0m
+    [2;3mat[0m rch/src/transfer.rs:1363 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-21T08:23:18.462493Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 338ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1432 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-21T08:23:18.462711Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenfs/crates/ffs-cli -> /data/projects/frankenfs/crates/ffs-cli on ts1[0m
+    [2;3mat[0m rch/src/transfer.rs:1363 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-21T08:23:18.792050Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 329ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1432 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-21T08:23:18.792183Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenfs/crates/ffs-core -> /data/projects/frankenfs/crates/ffs-core on ts1[0m
+    [2;3mat[0m rch/src/transfer.rs:1363 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-21T08:23:19.129759Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 337ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1432 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-21T08:23:19.129888Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenfs/crates/ffs-dir -> /data/projects/frankenfs/crates/ffs-dir on ts1[0m
+    [2;3mat[0m rch/src/transfer.rs:1363 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-21T08:23:19.474588Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 344ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1432 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-21T08:23:19.474714Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenfs/crates/ffs-error -> /data/projects/frankenfs/crates/ffs-error on ts1[0m
+    [2;3mat[0m rch/src/transfer.rs:1363 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-21T08:23:19.807646Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 332ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1432 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-21T08:23:19.807774Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenfs/crates/ffs-ext4 -> /data/projects/frankenfs/crates/ffs-ext4 on ts1[0m
+    [2;3mat[0m rch/src/transfer.rs:1363 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-21T08:23:20.147935Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 340ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1432 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-21T08:23:20.148097Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenfs/crates/ffs-extent -> /data/projects/frankenfs/crates/ffs-extent on ts1[0m
+    [2;3mat[0m rch/src/transfer.rs:1363 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-21T08:23:20.491588Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 343ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1432 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-21T08:23:20.491744Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenfs/crates/ffs-fuse -> /data/projects/frankenfs/crates/ffs-fuse on ts1[0m
+    [2;3mat[0m rch/src/transfer.rs:1363 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-21T08:23:20.821767Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 330ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1432 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-21T08:23:20.821874Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenfs/crates/ffs-harness -> /data/projects/frankenfs/crates/ffs-harness on ts1[0m
+    [2;3mat[0m rch/src/transfer.rs:1363 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-21T08:23:21.152033Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 330ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1432 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-21T08:23:21.152156Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenfs/crates/ffs-inode -> /data/projects/frankenfs/crates/ffs-inode on ts1[0m
+    [2;3mat[0m rch/src/transfer.rs:1363 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-21T08:23:21.486447Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 334ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1432 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-21T08:23:21.486585Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenfs/crates/ffs-journal -> /data/projects/frankenfs/crates/ffs-journal on ts1[0m
+    [2;3mat[0m rch/src/transfer.rs:1363 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-21T08:23:21.819150Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 332ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1432 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-21T08:23:21.819337Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenfs/crates/ffs-mvcc -> /data/projects/frankenfs/crates/ffs-mvcc on ts1[0m
+    [2;3mat[0m rch/src/transfer.rs:1363 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-21T08:23:22.144970Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 325ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1432 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-21T08:23:22.145117Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenfs/crates/ffs-ondisk -> /data/projects/frankenfs/crates/ffs-ondisk on ts1[0m
+    [2;3mat[0m rch/src/transfer.rs:1363 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-21T08:23:22.485882Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 340ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1432 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-21T08:23:22.486027Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenfs/crates/ffs-repair -> /data/projects/frankenfs/crates/ffs-repair on ts1[0m
+    [2;3mat[0m rch/src/transfer.rs:1363 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-21T08:23:22.825702Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 339ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1432 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-21T08:23:22.825832Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenfs/crates/ffs-tui -> /data/projects/frankenfs/crates/ffs-tui on ts1[0m
+    [2;3mat[0m rch/src/transfer.rs:1363 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-21T08:23:23.158329Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 332ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1432 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-21T08:23:23.158449Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenfs/crates/ffs-types -> /data/projects/frankenfs/crates/ffs-types on ts1[0m
+    [2;3mat[0m rch/src/transfer.rs:1363 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-21T08:23:23.497139Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 338ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1432 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-21T08:23:23.497286Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenfs/crates/ffs-xattr -> /data/projects/frankenfs/crates/ffs-xattr on ts1[0m
+    [2;3mat[0m rch/src/transfer.rs:1363 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-21T08:23:23.834171Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 336ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1432 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-21T08:23:23.834281Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenfs/vendor/fuser -> /data/projects/frankenfs/vendor/fuser on ts1[0m
+    [2;3mat[0m rch/src/transfer.rs:1363 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-21T08:23:24.169158Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 334ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1432 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-21T08:23:24.169198Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSync complete: 34343 files, 1615723 bytes in 8068ms[0m
+    [2;3mat[0m rch/src/hook.rs:6129 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-21T08:23:24.820383Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mExecuting command remotely: cargo run --quiet -p ffs-harness -- validate-soak-canary-campaigns --manifest benchmarks/soak_canary_campaign_manifest.json --artifact-root baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts --out baselines/hyperfine/20260521-bd-xuo95-33-soak/manifest_report.json --artifact-out baselines/hyperfine/20260521-bd-xuo95-33-soak/sample_artifact_manifest.json --summary-out baselines/hyperfine/20260521-bd-xuo95-33-soak/manifest_summary.md[0m
+    [2;3mat[0m rch/src/hook.rs:6156 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-21T08:23:24.820458Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRewriting CARGO_TARGET_DIR for remote execution (worker-scoped path): /data/tmp/rch_target_frankenfs_bd_xuo95_33 -> /data/projects/frankenfs/.rch-target-ts1-job-29850584173511317-1779351796083936392-0[0m
+    [2;3mat[0m rch/src/transfer.rs:676 [2;3mon[0m ThreadId(1)
+
+Warning: Identity file /home/ubuntu/.ssh/id_rsa not accessible: No such file or directory.
+soak/canary campaign report written: baselines/hyperfine/20260521-bd-xuo95-33-soak/manifest_report.json valid=true profiles=4 workloads=7
+soak/canary sample artifact manifest written: baselines/hyperfine/20260521-bd-xuo95-33-soak/sample_artifact_manifest.json
+soak/canary campaign summary written: baselines/hyperfine/20260521-bd-xuo95-33-soak/manifest_summary.md
+  [2m2026-05-21T08:25:00.242454Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mRemote command finished: exit=0 in 95421ms[0m
+    [2;3mat[0m rch/src/hook.rs:6280 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-21T08:25:00.242925Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mRetrieving build artifacts...[0m
+    [2;3mat[0m rch/src/hook.rs:6329 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-21T08:25:00.243549Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRetrieving artifacts from /data/projects/frankenfs on ts1[0m
+    [2;3mat[0m rch/src/transfer.rs:2033 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-21T08:25:00.243590Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mLoaded 2 retrieval exclude pattern(s) from .rchignore (total: 6)[0m
+    [2;3mat[0m rch/src/transfer.rs:872 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-21T08:25:00.558729Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mArtifacts retrieved in 315ms (3 files, 4002 bytes)[0m
+    [2;3mat[0m rch/src/transfer.rs:2072 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-21T08:25:00.558757Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mArtifacts retrieved: 3 files, 4002 bytes in 315ms[0m
+    [2;3mat[0m rch/src/hook.rs:6362 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-21T08:25:00.558844Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRetrieving artifacts from /data/projects/frankenfs/.rch-target-ts1-job-29850584173511317-1779351796083936392-0 on ts1[0m
+    [2;3mat[0m rch/src/transfer.rs:2033 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-21T08:25:16.940050Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mArtifacts retrieved in 16381ms (4035 files, 71184 bytes)[0m
+    [2;3mat[0m rch/src/transfer.rs:2072 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-21T08:25:16.940077Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mCustom CARGO_TARGET_DIR artifacts retrieved: 4035 files, 71184 bytes in 16381ms[0m
+    [2;3mat[0m rch/src/hook.rs:6486 [2;3mon[0m ThreadId(1)
+
+[RCH] remote ts1 (122.5s)

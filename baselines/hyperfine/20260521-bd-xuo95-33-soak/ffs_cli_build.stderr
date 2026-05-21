@@ -1,0 +1,177 @@
+[RCH] local (no admissible workers: critical_pressure=3,active_project_exclusion=4)
+   Compiling proc-macro2 v1.0.106
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.45
+   Compiling cfg-if v1.0.4
+   Compiling libc v0.2.185
+   Compiling serde_core v1.0.228
+   Compiling shlex v1.3.0
+   Compiling find-msvc-tools v0.1.9
+   Compiling serde v1.0.228
+   Compiling crossbeam-utils v0.8.21
+   Compiling once_cell v1.21.4
+   Compiling autocfg v1.5.0
+   Compiling cfg_aliases v0.2.1
+   Compiling bitflags v2.11.1
+   Compiling cpufeatures v0.3.0
+   Compiling typenum v1.20.0
+   Compiling semver v1.0.28
+   Compiling thiserror v2.0.18
+   Compiling pin-project-lite v0.2.17
+   Compiling allocator-api2 v0.2.21
+   Compiling rayon-core v1.13.0
+   Compiling equivalent v1.0.2
+   Compiling zmij v1.0.21
+   Compiling anyhow v1.0.102
+   Compiling foldhash v0.2.0
+   Compiling memchr v2.8.0
+   Compiling serde_json v1.0.149
+   Compiling cmov v0.5.3
+   Compiling rustix v1.1.4
+   Compiling itoa v1.0.18
+   Compiling constant_time_eq v0.4.2
+   Compiling smallvec v1.15.1
+   Compiling arrayvec v0.7.6
+   Compiling either v1.15.0
+   Compiling const-oid v0.10.2
+   Compiling arrayref v0.3.9
+   Compiling linux-raw-sys v0.12.1
+   Compiling parking_lot_core v0.9.12
+   Compiling log v0.4.29
+   Compiling regex-syntax v0.8.10
+   Compiling getrandom v0.4.2
+   Compiling crc32fast v1.5.0
+   Compiling signal-hook v0.4.4
+   Compiling virtue-next v0.1.3
+   Compiling scopeguard v1.2.0
+   Compiling lazy_static v1.5.0
+   Compiling fastrand v2.4.1
+   Compiling nu-ansi-term v0.50.3
+   Compiling futures-core v0.3.32
+   Compiling bytes v1.11.1
+   Compiling parking v2.2.1
+   Compiling futures-io v0.3.32
+   Compiling unty-next v0.1.1
+   Compiling slab v0.4.12
+   Compiling base64 v0.22.1
+   Compiling pkg-config v0.3.33
+   Compiling rustversion v1.0.22
+   Compiling alloc-no-stdlib v2.0.4
+   Compiling zstd-safe v7.2.4
+   Compiling thiserror v1.0.69
+   Compiling simd-adler32 v0.3.9
+   Compiling adler2 v2.0.1
+   Compiling nix v0.31.2
+   Compiling thread_local v1.1.9
+   Compiling nix v0.29.0
+   Compiling zerocopy v0.8.48
+   Compiling utf8parse v0.2.2
+   Compiling sharded-slab v0.1.7
+   Compiling lock_api v0.4.14
+   Compiling fuser v0.17.0 (/data/projects/frankenfs/vendor/fuser)
+   Compiling byteorder v1.5.0
+   Compiling tracing-core v0.1.36
+   Compiling anstyle-parse v1.0.0
+   Compiling colorchoice v1.0.5
+   Compiling anstyle v1.0.14
+   Compiling rustc_version v0.4.1
+   Compiling is_terminal_polyfill v1.70.2
+   Compiling winnow v1.0.2
+   Compiling alloc-stdlib v0.2.2
+   Compiling anstyle-query v1.1.5
+   Compiling strsim v0.11.1
+   Compiling toml_writer v1.1.1+spec-1.1.0
+   Compiling heck v0.5.0
+   Compiling clap_lex v1.1.0
+   Compiling hex v0.4.3
+   Compiling itertools v0.14.0
+   Compiling memoffset v0.9.1
+   Compiling num-traits v0.2.19
+   Compiling miniz_oxide v0.8.9
+   Compiling ctutils v0.4.2
+   Compiling futures-lite v2.6.1
+   Compiling hashbrown v0.17.0
+   Compiling brotli-decompressor v5.0.0
+   Compiling crc32c v0.6.8
+   Compiling anstream v1.0.0
+   Compiling bincode_derive-next v2.1.0
+   Compiling tracing-log v0.2.0
+   Compiling toml_parser v1.1.2+spec-1.1.0
+   Compiling clap_builder v4.6.0
+   Compiling crossbeam-epoch v0.9.18
+   Compiling crossbeam-queue v0.3.12
+   Compiling arc-swap v1.9.1
+   Compiling flate2 v1.1.9
+   Compiling crossbeam-deque v0.8.6
+   Compiling syn v2.0.117
+   Compiling hybrid-array v0.4.10
+   Compiling indexmap v2.14.0
+   Compiling brotli v8.0.2
+   Compiling rmp v0.8.15
+   Compiling jobserver v0.1.34
+   Compiling regex-automata v0.4.14
+   Compiling block-buffer v0.12.0
+   Compiling crypto-common v0.2.1
+   Compiling cc v1.2.60
+   Compiling rayon v1.12.0
+   Compiling errno v0.3.14
+   Compiling socket2 v0.6.3
+   Compiling page_size v0.6.0
+   Compiling signal-hook-registry v1.4.8
+   Compiling parking_lot v0.12.5
+   Compiling digest v0.11.2
+   Compiling hmac v0.13.0
+   Compiling sha2 v0.11.0
+   Compiling sha1 v0.11.0
+   Compiling blake3 v1.8.4
+   Compiling zstd-sys v2.0.16+zstd.1.5.7
+   Compiling serde_spanned v1.1.1
+   Compiling toml_datetime v1.1.1+spec-1.1.0
+   Compiling toml v1.1.2+spec-1.1.0
+   Compiling polling v3.11.0
+   Compiling tempfile v3.27.0
+   Compiling matchers v0.2.0
+   Compiling ctrlc v3.5.2
+   Compiling serde_derive v1.0.228
+   Compiling tracing-attributes v0.1.31
+   Compiling thiserror-impl v2.0.18
+   Compiling prost-derive v0.13.5
+   Compiling pin-project-internal v1.1.11
+   Compiling visibility v0.1.1
+   Compiling asupersync-macros v0.3.1
+   Compiling thiserror-impl v1.0.69
+   Compiling zerocopy-derive v0.8.48
+   Compiling clap_derive v4.6.1
+   Compiling pin-project v1.1.11
+   Compiling tracing v0.1.44
+   Compiling lzokay-native v0.1.0
+   Compiling ffs-error v0.1.0 (/data/projects/frankenfs/crates/ffs-error)
+   Compiling prost v0.13.5
+   Compiling clap v4.6.1
+   Compiling ffs-types v0.1.0 (/data/projects/frankenfs/crates/ffs-types)
+   Compiling tracing-serde v0.2.0
+   Compiling franken-evidence v0.3.1
+   Compiling franken-kernel v0.3.1
+   Compiling rmp-serde v1.3.1
+   Compiling bincode-next v2.1.0
+   Compiling tracing-subscriber v0.3.23
+   Compiling ffs-ondisk v0.1.0 (/data/projects/frankenfs/crates/ffs-ondisk)
+   Compiling franken-decision v0.3.1
+   Compiling asupersync v0.3.1
+   Compiling ffs-xattr v0.1.0 (/data/projects/frankenfs/crates/ffs-xattr)
+   Compiling ffs-dir v0.1.0 (/data/projects/frankenfs/crates/ffs-dir)
+   Compiling zstd v0.13.3
+   Compiling ffs-block v0.1.0 (/data/projects/frankenfs/crates/ffs-block)
+   Compiling ffs-alloc v0.1.0 (/data/projects/frankenfs/crates/ffs-alloc)
+   Compiling ffs-btree v0.1.0 (/data/projects/frankenfs/crates/ffs-btree)
+   Compiling ffs-repair v0.1.0 (/data/projects/frankenfs/crates/ffs-repair)
+   Compiling ffs-journal v0.1.0 (/data/projects/frankenfs/crates/ffs-journal)
+   Compiling ffs-extent v0.1.0 (/data/projects/frankenfs/crates/ffs-extent)
+   Compiling ffs-inode v0.1.0 (/data/projects/frankenfs/crates/ffs-inode)
+   Compiling ffs-mvcc v0.1.0 (/data/projects/frankenfs/crates/ffs-mvcc)
+   Compiling ffs-btrfs v0.1.0 (/data/projects/frankenfs/crates/ffs-btrfs)
+   Compiling ffs-core v0.1.0 (/data/projects/frankenfs/crates/ffs-core)
+   Compiling ffs-fuse v0.1.0 (/data/projects/frankenfs/crates/ffs-fuse)
+   Compiling ffs-harness v0.1.0 (/data/projects/frankenfs/crates/ffs-harness)
+   Compiling ffs-cli v0.1.0 (/data/projects/frankenfs/crates/ffs-cli)
+    Finished `release-perf` profile [optimized] target(s) in 3m 38s

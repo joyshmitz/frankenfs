@@ -1,0 +1,462 @@
+{
+  "schema_version": 1,
+  "manifest_id": "bd-rchk0.5.9-soak-canary-campaigns-v1",
+  "valid": true,
+  "profile_count": 4,
+  "workload_count": 7,
+  "long_profile_ids": [
+    "nightly",
+    "stress",
+    "canary"
+  ],
+  "required_environment_fields": [
+    "campaign_id",
+    "git_sha",
+    "kernel",
+    "fuse_capability",
+    "toolchain",
+    "rustc_version",
+    "cargo_version",
+    "worker_id",
+    "cpu_cores_logical",
+    "ram_total_gb",
+    "workload_ids",
+    "seeds",
+    "duration_seconds",
+    "resource_usage"
+  ],
+  "required_log_fields": [
+    "campaign_id",
+    "profile_id",
+    "workload_id",
+    "seed",
+    "iteration",
+    "heartbeat_index",
+    "elapsed_seconds",
+    "outcome",
+    "classification",
+    "failure_threshold",
+    "resource_limits",
+    "artifact_path",
+    "stdout_path",
+    "stderr_path",
+    "cleanup_status",
+    "reproduction_command"
+  ],
+  "artifact_consumers": [
+    "operator_proof_bundle",
+    "release_gate_evaluator",
+    "operational_readiness_report"
+  ],
+  "stop_condition_precedence": [
+    "resource_budget_exceeded",
+    "timeout",
+    "infrastructure_error",
+    "failure_threshold_exceeded",
+    "flake_threshold_exceeded",
+    "host_capability_skip",
+    "stale_baseline",
+    "inconclusive",
+    "completed"
+  ],
+  "command_expansions": [
+    {
+      "profile_id": "smoke",
+      "workload_id": "soak_mount_cycle_ext4_ro",
+      "seed": 1001,
+      "command": "scripts/e2e/ffs_fuse_production.sh --campaign-profile smoke --scenario mount_cycle_ext4 --seed 1001 --out baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/soak_mount_cycle_ext4_ro",
+      "artifact_path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/smoke/soak_mount_cycle_ext4_ro_summary.json"
+    },
+    {
+      "profile_id": "smoke",
+      "workload_id": "soak_mount_cycle_ext4_ro",
+      "seed": 1002,
+      "command": "scripts/e2e/ffs_fuse_production.sh --campaign-profile smoke --scenario mount_cycle_ext4 --seed 1002 --out baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/soak_mount_cycle_ext4_ro",
+      "artifact_path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/smoke/soak_mount_cycle_ext4_ro_summary.json"
+    },
+    {
+      "profile_id": "nightly",
+      "workload_id": "soak_mount_cycle_ext4_ro",
+      "seed": 1001,
+      "command": "scripts/e2e/ffs_fuse_production.sh --campaign-profile nightly --scenario mount_cycle_ext4 --seed 1001 --out baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/soak_mount_cycle_ext4_ro",
+      "artifact_path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/nightly/soak_mount_cycle_ext4_ro_summary.json"
+    },
+    {
+      "profile_id": "nightly",
+      "workload_id": "soak_mount_cycle_ext4_ro",
+      "seed": 1002,
+      "command": "scripts/e2e/ffs_fuse_production.sh --campaign-profile nightly --scenario mount_cycle_ext4 --seed 1002 --out baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/soak_mount_cycle_ext4_ro",
+      "artifact_path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/nightly/soak_mount_cycle_ext4_ro_summary.json"
+    },
+    {
+      "profile_id": "stress",
+      "workload_id": "soak_mount_cycle_ext4_ro",
+      "seed": 1001,
+      "command": "scripts/e2e/ffs_fuse_production.sh --campaign-profile stress --scenario mount_cycle_ext4 --seed 1001 --out baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/soak_mount_cycle_ext4_ro",
+      "artifact_path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/stress/soak_mount_cycle_ext4_ro_summary.json"
+    },
+    {
+      "profile_id": "stress",
+      "workload_id": "soak_mount_cycle_ext4_ro",
+      "seed": 1002,
+      "command": "scripts/e2e/ffs_fuse_production.sh --campaign-profile stress --scenario mount_cycle_ext4 --seed 1002 --out baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/soak_mount_cycle_ext4_ro",
+      "artifact_path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/stress/soak_mount_cycle_ext4_ro_summary.json"
+    },
+    {
+      "profile_id": "canary",
+      "workload_id": "soak_mount_cycle_ext4_ro",
+      "seed": 1001,
+      "command": "scripts/e2e/ffs_fuse_production.sh --campaign-profile canary --scenario mount_cycle_ext4 --seed 1001 --out baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/soak_mount_cycle_ext4_ro",
+      "artifact_path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/canary/soak_mount_cycle_ext4_ro_summary.json"
+    },
+    {
+      "profile_id": "canary",
+      "workload_id": "soak_mount_cycle_ext4_ro",
+      "seed": 1002,
+      "command": "scripts/e2e/ffs_fuse_production.sh --campaign-profile canary --scenario mount_cycle_ext4 --seed 1002 --out baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/soak_mount_cycle_ext4_ro",
+      "artifact_path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/canary/soak_mount_cycle_ext4_ro_summary.json"
+    },
+    {
+      "profile_id": "nightly",
+      "workload_id": "soak_mount_cycle_btrfs_ro",
+      "seed": 2001,
+      "command": "scripts/e2e/ffs_fuse_production.sh --campaign-profile nightly --scenario mount_cycle_btrfs --seed 2001 --out baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/soak_mount_cycle_btrfs_ro",
+      "artifact_path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/nightly/soak_mount_cycle_btrfs_ro_summary.json"
+    },
+    {
+      "profile_id": "stress",
+      "workload_id": "soak_mount_cycle_btrfs_ro",
+      "seed": 2001,
+      "command": "scripts/e2e/ffs_fuse_production.sh --campaign-profile stress --scenario mount_cycle_btrfs --seed 2001 --out baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/soak_mount_cycle_btrfs_ro",
+      "artifact_path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/stress/soak_mount_cycle_btrfs_ro_summary.json"
+    },
+    {
+      "profile_id": "canary",
+      "workload_id": "soak_mount_cycle_btrfs_ro",
+      "seed": 2001,
+      "command": "scripts/e2e/ffs_fuse_production.sh --campaign-profile canary --scenario mount_cycle_btrfs --seed 2001 --out baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/soak_mount_cycle_btrfs_ro",
+      "artifact_path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/canary/soak_mount_cycle_btrfs_ro_summary.json"
+    },
+    {
+      "profile_id": "smoke",
+      "workload_id": "soak_metadata_churn_ext4",
+      "seed": 3001,
+      "command": "scripts/e2e/ffs_ext4_rw_smoke.sh --campaign-profile smoke --metadata-churn --seed 3001 --out baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/soak_metadata_churn_ext4",
+      "artifact_path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/smoke/soak_metadata_churn_ext4_summary.json"
+    },
+    {
+      "profile_id": "smoke",
+      "workload_id": "soak_metadata_churn_ext4",
+      "seed": 3002,
+      "command": "scripts/e2e/ffs_ext4_rw_smoke.sh --campaign-profile smoke --metadata-churn --seed 3002 --out baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/soak_metadata_churn_ext4",
+      "artifact_path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/smoke/soak_metadata_churn_ext4_summary.json"
+    },
+    {
+      "profile_id": "nightly",
+      "workload_id": "soak_metadata_churn_ext4",
+      "seed": 3001,
+      "command": "scripts/e2e/ffs_ext4_rw_smoke.sh --campaign-profile nightly --metadata-churn --seed 3001 --out baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/soak_metadata_churn_ext4",
+      "artifact_path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/nightly/soak_metadata_churn_ext4_summary.json"
+    },
+    {
+      "profile_id": "nightly",
+      "workload_id": "soak_metadata_churn_ext4",
+      "seed": 3002,
+      "command": "scripts/e2e/ffs_ext4_rw_smoke.sh --campaign-profile nightly --metadata-churn --seed 3002 --out baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/soak_metadata_churn_ext4",
+      "artifact_path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/nightly/soak_metadata_churn_ext4_summary.json"
+    },
+    {
+      "profile_id": "stress",
+      "workload_id": "soak_metadata_churn_ext4",
+      "seed": 3001,
+      "command": "scripts/e2e/ffs_ext4_rw_smoke.sh --campaign-profile stress --metadata-churn --seed 3001 --out baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/soak_metadata_churn_ext4",
+      "artifact_path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/stress/soak_metadata_churn_ext4_summary.json"
+    },
+    {
+      "profile_id": "stress",
+      "workload_id": "soak_metadata_churn_ext4",
+      "seed": 3002,
+      "command": "scripts/e2e/ffs_ext4_rw_smoke.sh --campaign-profile stress --metadata-churn --seed 3002 --out baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/soak_metadata_churn_ext4",
+      "artifact_path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/stress/soak_metadata_churn_ext4_summary.json"
+    },
+    {
+      "profile_id": "canary",
+      "workload_id": "soak_metadata_churn_ext4",
+      "seed": 3001,
+      "command": "scripts/e2e/ffs_ext4_rw_smoke.sh --campaign-profile canary --metadata-churn --seed 3001 --out baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/soak_metadata_churn_ext4",
+      "artifact_path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/canary/soak_metadata_churn_ext4_summary.json"
+    },
+    {
+      "profile_id": "canary",
+      "workload_id": "soak_metadata_churn_ext4",
+      "seed": 3002,
+      "command": "scripts/e2e/ffs_ext4_rw_smoke.sh --campaign-profile canary --metadata-churn --seed 3002 --out baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/soak_metadata_churn_ext4",
+      "artifact_path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/canary/soak_metadata_churn_ext4_summary.json"
+    },
+    {
+      "profile_id": "nightly",
+      "workload_id": "soak_read_write_verify_ext4",
+      "seed": 4001,
+      "command": "scripts/e2e/ffs_ext4_rw_smoke.sh --campaign-profile nightly --read-write-verify --seed 4001 --out baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/soak_read_write_verify_ext4",
+      "artifact_path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/nightly/soak_read_write_verify_ext4_summary.json"
+    },
+    {
+      "profile_id": "stress",
+      "workload_id": "soak_read_write_verify_ext4",
+      "seed": 4001,
+      "command": "scripts/e2e/ffs_ext4_rw_smoke.sh --campaign-profile stress --read-write-verify --seed 4001 --out baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/soak_read_write_verify_ext4",
+      "artifact_path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/stress/soak_read_write_verify_ext4_summary.json"
+    },
+    {
+      "profile_id": "canary",
+      "workload_id": "soak_read_write_verify_ext4",
+      "seed": 4001,
+      "command": "scripts/e2e/ffs_ext4_rw_smoke.sh --campaign-profile canary --read-write-verify --seed 4001 --out baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/soak_read_write_verify_ext4",
+      "artifact_path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/canary/soak_read_write_verify_ext4_summary.json"
+    },
+    {
+      "profile_id": "smoke",
+      "workload_id": "soak_repair_scrub_dry_run",
+      "seed": 5001,
+      "command": "scripts/e2e/ffs_repair_recovery_smoke.sh --campaign-profile smoke --dry-run --seed 5001 --out baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/soak_repair_scrub_dry_run",
+      "artifact_path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/smoke/soak_repair_scrub_dry_run_ledger_summary.json"
+    },
+    {
+      "profile_id": "smoke",
+      "workload_id": "soak_repair_scrub_dry_run",
+      "seed": 5002,
+      "command": "scripts/e2e/ffs_repair_recovery_smoke.sh --campaign-profile smoke --dry-run --seed 5002 --out baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/soak_repair_scrub_dry_run",
+      "artifact_path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/smoke/soak_repair_scrub_dry_run_ledger_summary.json"
+    },
+    {
+      "profile_id": "nightly",
+      "workload_id": "soak_repair_scrub_dry_run",
+      "seed": 5001,
+      "command": "scripts/e2e/ffs_repair_recovery_smoke.sh --campaign-profile nightly --dry-run --seed 5001 --out baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/soak_repair_scrub_dry_run",
+      "artifact_path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/nightly/soak_repair_scrub_dry_run_ledger_summary.json"
+    },
+    {
+      "profile_id": "nightly",
+      "workload_id": "soak_repair_scrub_dry_run",
+      "seed": 5002,
+      "command": "scripts/e2e/ffs_repair_recovery_smoke.sh --campaign-profile nightly --dry-run --seed 5002 --out baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/soak_repair_scrub_dry_run",
+      "artifact_path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/nightly/soak_repair_scrub_dry_run_ledger_summary.json"
+    },
+    {
+      "profile_id": "stress",
+      "workload_id": "soak_repair_scrub_dry_run",
+      "seed": 5001,
+      "command": "scripts/e2e/ffs_repair_recovery_smoke.sh --campaign-profile stress --dry-run --seed 5001 --out baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/soak_repair_scrub_dry_run",
+      "artifact_path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/stress/soak_repair_scrub_dry_run_ledger_summary.json"
+    },
+    {
+      "profile_id": "stress",
+      "workload_id": "soak_repair_scrub_dry_run",
+      "seed": 5002,
+      "command": "scripts/e2e/ffs_repair_recovery_smoke.sh --campaign-profile stress --dry-run --seed 5002 --out baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/soak_repair_scrub_dry_run",
+      "artifact_path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/stress/soak_repair_scrub_dry_run_ledger_summary.json"
+    },
+    {
+      "profile_id": "canary",
+      "workload_id": "soak_repair_scrub_dry_run",
+      "seed": 5001,
+      "command": "scripts/e2e/ffs_repair_recovery_smoke.sh --campaign-profile canary --dry-run --seed 5001 --out baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/soak_repair_scrub_dry_run",
+      "artifact_path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/canary/soak_repair_scrub_dry_run_ledger_summary.json"
+    },
+    {
+      "profile_id": "canary",
+      "workload_id": "soak_repair_scrub_dry_run",
+      "seed": 5002,
+      "command": "scripts/e2e/ffs_repair_recovery_smoke.sh --campaign-profile canary --dry-run --seed 5002 --out baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/soak_repair_scrub_dry_run",
+      "artifact_path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/canary/soak_repair_scrub_dry_run_ledger_summary.json"
+    },
+    {
+      "profile_id": "nightly",
+      "workload_id": "soak_writeback_cache_gate",
+      "seed": 6001,
+      "command": "scripts/e2e/ffs_writeback_e2e.sh --campaign-profile nightly --gate-only --seed 6001 --out baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/soak_writeback_cache_gate",
+      "artifact_path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/nightly/soak_writeback_cache_gate_gate_summary.json"
+    },
+    {
+      "profile_id": "canary",
+      "workload_id": "soak_writeback_cache_gate",
+      "seed": 6001,
+      "command": "scripts/e2e/ffs_writeback_e2e.sh --campaign-profile canary --gate-only --seed 6001 --out baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/soak_writeback_cache_gate",
+      "artifact_path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/canary/soak_writeback_cache_gate_gate_summary.json"
+    },
+    {
+      "profile_id": "smoke",
+      "workload_id": "soak_artifact_aggregation",
+      "seed": 7001,
+      "command": "env FFS_CAMPAIGN_SEED=7001 cargo run -p ffs-harness -- operational-readiness-report --artifacts baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/smoke --out baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/smoke/soak_artifact_aggregation_readiness.json --current-git-sha dry-run --format json",
+      "artifact_path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/smoke/soak_artifact_aggregation_summary.json"
+    },
+    {
+      "profile_id": "nightly",
+      "workload_id": "soak_artifact_aggregation",
+      "seed": 7001,
+      "command": "env FFS_CAMPAIGN_SEED=7001 cargo run -p ffs-harness -- operational-readiness-report --artifacts baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/nightly --out baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/nightly/soak_artifact_aggregation_readiness.json --current-git-sha dry-run --format json",
+      "artifact_path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/nightly/soak_artifact_aggregation_summary.json"
+    },
+    {
+      "profile_id": "stress",
+      "workload_id": "soak_artifact_aggregation",
+      "seed": 7001,
+      "command": "env FFS_CAMPAIGN_SEED=7001 cargo run -p ffs-harness -- operational-readiness-report --artifacts baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/stress --out baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/stress/soak_artifact_aggregation_readiness.json --current-git-sha dry-run --format json",
+      "artifact_path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/stress/soak_artifact_aggregation_summary.json"
+    },
+    {
+      "profile_id": "canary",
+      "workload_id": "soak_artifact_aggregation",
+      "seed": 7001,
+      "command": "env FFS_CAMPAIGN_SEED=7001 cargo run -p ffs-harness -- operational-readiness-report --artifacts baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/canary --out baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/canary/soak_artifact_aggregation_readiness.json --current-git-sha dry-run --format json",
+      "artifact_path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/canary/soak_artifact_aggregation_summary.json"
+    }
+  ],
+  "failure_evaluations": [
+    {
+      "profile_id": "smoke",
+      "workload_id": "soak_mount_cycle_ext4_ro",
+      "outcome": "pass",
+      "threshold_summary": "observed pass=3 fail=0 skip=0 error=0 flake=0; allowed fail<=0 error<=0 flake<=0",
+      "follow_up_bead": "bd-t21em",
+      "repro_artifacts_required": true
+    },
+    {
+      "profile_id": "smoke",
+      "workload_id": "soak_mount_cycle_ext4_ro",
+      "outcome": "fail",
+      "threshold_summary": "observed pass=0 fail=1 skip=0 error=0 flake=0; allowed fail<=0 error<=0 flake<=0",
+      "follow_up_bead": "bd-t21em",
+      "repro_artifacts_required": true
+    },
+    {
+      "profile_id": "smoke",
+      "workload_id": "soak_mount_cycle_ext4_ro",
+      "outcome": "error",
+      "threshold_summary": "observed pass=0 fail=0 skip=0 error=1 flake=0; allowed fail<=0 error<=0 flake<=0",
+      "follow_up_bead": "bd-t21em",
+      "repro_artifacts_required": true
+    },
+    {
+      "profile_id": "smoke",
+      "workload_id": "soak_mount_cycle_ext4_ro",
+      "outcome": "flake",
+      "threshold_summary": "observed pass=0 fail=0 skip=0 error=0 flake=1; allowed fail<=0 error<=0 flake<=0",
+      "follow_up_bead": "bd-t21em",
+      "repro_artifacts_required": true
+    },
+    {
+      "profile_id": "smoke",
+      "workload_id": "soak_mount_cycle_ext4_ro",
+      "outcome": "skip",
+      "threshold_summary": "observed pass=0 fail=0 skip=1 error=0 flake=0; allowed fail<=0 error<=0 flake<=0",
+      "follow_up_bead": "bd-t21em",
+      "repro_artifacts_required": true
+    }
+  ],
+  "root_cause_samples": [
+    {
+      "profile_id": "smoke",
+      "workload_id": "soak_mount_cycle_ext4_ro",
+      "stop_reason": "completed",
+      "classification": "clean_pass",
+      "follow_up_bead": "bd-t21em",
+      "quarantine_id": null,
+      "release_gate_impact": "eligible",
+      "repro_artifacts_required": true
+    },
+    {
+      "profile_id": "smoke",
+      "workload_id": "soak_mount_cycle_ext4_ro",
+      "stop_reason": "failure_threshold_exceeded",
+      "classification": "product_regression",
+      "follow_up_bead": "bd-t21em",
+      "quarantine_id": null,
+      "release_gate_impact": "block_release_gate",
+      "repro_artifacts_required": true
+    },
+    {
+      "profile_id": "smoke",
+      "workload_id": "soak_mount_cycle_ext4_ro",
+      "stop_reason": "host_capability_skip",
+      "classification": "host_capability_skip",
+      "follow_up_bead": "bd-t21em",
+      "quarantine_id": null,
+      "release_gate_impact": "skip_lane_with_host_blocker",
+      "repro_artifacts_required": true
+    },
+    {
+      "profile_id": "smoke",
+      "workload_id": "soak_mount_cycle_ext4_ro",
+      "stop_reason": "infrastructure_error",
+      "classification": "infrastructure_error",
+      "follow_up_bead": "bd-t21em",
+      "quarantine_id": null,
+      "release_gate_impact": "block_release_gate",
+      "repro_artifacts_required": true
+    },
+    {
+      "profile_id": "smoke",
+      "workload_id": "soak_mount_cycle_ext4_ro",
+      "stop_reason": "timeout",
+      "classification": "timeout",
+      "follow_up_bead": "bd-t21em",
+      "quarantine_id": null,
+      "release_gate_impact": "block_release_gate",
+      "repro_artifacts_required": true
+    },
+    {
+      "profile_id": "smoke",
+      "workload_id": "soak_mount_cycle_ext4_ro",
+      "stop_reason": "resource_budget_exceeded",
+      "classification": "resource_exhaustion",
+      "follow_up_bead": "bd-t21em",
+      "quarantine_id": null,
+      "release_gate_impact": "block_release_gate",
+      "repro_artifacts_required": true
+    },
+    {
+      "profile_id": "smoke",
+      "workload_id": "soak_mount_cycle_ext4_ro",
+      "stop_reason": "flake_threshold_exceeded",
+      "classification": "known_quarantined_flake",
+      "follow_up_bead": "soak_known_fuse_mount_retry_jitter",
+      "quarantine_id": "soak_known_fuse_mount_retry_jitter",
+      "release_gate_impact": "quarantine_with_expiry",
+      "repro_artifacts_required": true
+    },
+    {
+      "profile_id": "smoke",
+      "workload_id": "soak_mount_cycle_ext4_ro",
+      "stop_reason": "flake_threshold_exceeded",
+      "classification": "new_recurring_flake",
+      "follow_up_bead": "bd-t21em",
+      "quarantine_id": null,
+      "release_gate_impact": "block_release_gate",
+      "repro_artifacts_required": true
+    },
+    {
+      "profile_id": "smoke",
+      "workload_id": "soak_mount_cycle_ext4_ro",
+      "stop_reason": "stale_baseline",
+      "classification": "inconclusive",
+      "follow_up_bead": "bd-t21em",
+      "quarantine_id": null,
+      "release_gate_impact": "downgrade_until_fresh_evidence",
+      "repro_artifacts_required": true
+    }
+  ],
+  "heartbeat_summaries": [
+    "HEARTBEAT|campaign_id=dry-run-soak-canary|profile_id=smoke|heartbeat_index=1|elapsed_seconds=10|iteration=1|pass=2|fail=0|skip=1|error=0|flake=0|active_workloads=soak_mount_cycle_ext4_ro,soak_mount_cycle_btrfs_ro,soak_metadata_churn_ext4|cpu_percent=15|memory_mib=128|artifact_mib=4"
+  ],
+  "sample_outcome_counts": {
+    "error": 1,
+    "fail": 1,
+    "flake": 1,
+    "pass": 1,
+    "skip": 1
+  },
+  "sample_artifact_manifest_errors": [],
+  "errors": []
+}

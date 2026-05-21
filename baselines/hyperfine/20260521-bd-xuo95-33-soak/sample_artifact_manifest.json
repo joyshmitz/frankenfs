@@ -1,0 +1,695 @@
+{
+  "schema_version": 1,
+  "run_id": "soak_canary_campaign_dry_run",
+  "created_at": "2026-05-03T00:00:00Z",
+  "gate_id": "soak_canary_campaigns",
+  "bead_id": "bd-rchk0.5.9",
+  "git_context": {
+    "commit": "dry-run",
+    "branch": "main",
+    "clean": true
+  },
+  "environment": {
+    "hostname": "dry-run-host",
+    "cpu_model": "dry-run-cpu",
+    "cpu_count": 64,
+    "memory_gib": 256,
+    "kernel": "dry-run-kernel",
+    "rustc_version": "dry-run-rustc",
+    "cargo_version": "dry-run-cargo"
+  },
+  "scenarios": {
+    "soak_campaign_host_capability_skip": {
+      "scenario_id": "soak_campaign_host_capability_skip",
+      "outcome": "SKIP",
+      "detail": "missing FUSE capability is preserved as a host skip",
+      "duration_secs": 0.0
+    },
+    "soak_campaign_manifest_validates": {
+      "scenario_id": "soak_campaign_manifest_validates",
+      "outcome": "PASS",
+      "detail": "soak/canary campaign manifest validation",
+      "duration_secs": 0.0
+    },
+    "soak_campaign_product_failure_preserved": {
+      "scenario_id": "soak_campaign_product_failure_preserved",
+      "outcome": "FAIL",
+      "detail": "sample product failure keeps reproduction artifacts and follow-up bead",
+      "duration_secs": 0.0
+    },
+    "soak_campaign_worker_dependency_error": {
+      "scenario_id": "soak_campaign_worker_dependency_error",
+      "outcome": "FAIL",
+      "detail": "sample worker error is classified separately from product failure",
+      "duration_secs": 0.0
+    }
+  },
+  "artifacts": [
+    {
+      "path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/soak_canary_campaign_report.json",
+      "category": "summary_report",
+      "content_type": "application/json",
+      "size_bytes": 0,
+      "redacted": false,
+      "metadata": {
+        "bead_id": "bd-rchk0.5.9",
+        "manifest_id": "bd-rchk0.5.9-soak-canary-campaigns-v1",
+        "proof_bundle_lane": "soak_canary_campaigns",
+        "release_gate_feature": "operational.soak_canary"
+      }
+    },
+    {
+      "path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/heartbeat.jsonl",
+      "category": "e2e_log",
+      "content_type": "application/jsonl",
+      "size_bytes": 0,
+      "redacted": false,
+      "metadata": {
+        "log_type": "heartbeat",
+        "required_fields": "campaign_id,profile_id,workload_id,seed,iteration,heartbeat_index,elapsed_seconds,outcome,classification,failure_threshold,resource_limits,artifact_path,stdout_path,stderr_path,cleanup_status,reproduction_command"
+      }
+    },
+    {
+      "path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/flake_repro_pack.json",
+      "category": "repro_pack",
+      "content_type": "application/json",
+      "size_bytes": 0,
+      "redacted": false,
+      "metadata": {
+        "classification": "flake",
+        "follow_up_required": "true"
+      }
+    },
+    {
+      "path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/smoke/soak_mount_cycle_ext4_ro_summary.json",
+      "category": "benchmark_report",
+      "content_type": "application/json",
+      "size_bytes": 0,
+      "redacted": false,
+      "metadata": {
+        "profile_id": "smoke",
+        "seed": "1001",
+        "workload_id": "soak_mount_cycle_ext4_ro"
+      }
+    },
+    {
+      "path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/smoke/soak_mount_cycle_ext4_ro_summary.json",
+      "category": "benchmark_report",
+      "content_type": "application/json",
+      "size_bytes": 0,
+      "redacted": false,
+      "metadata": {
+        "profile_id": "smoke",
+        "seed": "1002",
+        "workload_id": "soak_mount_cycle_ext4_ro"
+      }
+    },
+    {
+      "path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/nightly/soak_mount_cycle_ext4_ro_summary.json",
+      "category": "benchmark_report",
+      "content_type": "application/json",
+      "size_bytes": 0,
+      "redacted": false,
+      "metadata": {
+        "profile_id": "nightly",
+        "seed": "1001",
+        "workload_id": "soak_mount_cycle_ext4_ro"
+      }
+    },
+    {
+      "path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/nightly/soak_mount_cycle_ext4_ro_summary.json",
+      "category": "benchmark_report",
+      "content_type": "application/json",
+      "size_bytes": 0,
+      "redacted": false,
+      "metadata": {
+        "profile_id": "nightly",
+        "seed": "1002",
+        "workload_id": "soak_mount_cycle_ext4_ro"
+      }
+    },
+    {
+      "path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/stress/soak_mount_cycle_ext4_ro_summary.json",
+      "category": "benchmark_report",
+      "content_type": "application/json",
+      "size_bytes": 0,
+      "redacted": false,
+      "metadata": {
+        "profile_id": "stress",
+        "seed": "1001",
+        "workload_id": "soak_mount_cycle_ext4_ro"
+      }
+    },
+    {
+      "path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/stress/soak_mount_cycle_ext4_ro_summary.json",
+      "category": "benchmark_report",
+      "content_type": "application/json",
+      "size_bytes": 0,
+      "redacted": false,
+      "metadata": {
+        "profile_id": "stress",
+        "seed": "1002",
+        "workload_id": "soak_mount_cycle_ext4_ro"
+      }
+    },
+    {
+      "path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/canary/soak_mount_cycle_ext4_ro_summary.json",
+      "category": "benchmark_report",
+      "content_type": "application/json",
+      "size_bytes": 0,
+      "redacted": false,
+      "metadata": {
+        "profile_id": "canary",
+        "seed": "1001",
+        "workload_id": "soak_mount_cycle_ext4_ro"
+      }
+    },
+    {
+      "path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/canary/soak_mount_cycle_ext4_ro_summary.json",
+      "category": "benchmark_report",
+      "content_type": "application/json",
+      "size_bytes": 0,
+      "redacted": false,
+      "metadata": {
+        "profile_id": "canary",
+        "seed": "1002",
+        "workload_id": "soak_mount_cycle_ext4_ro"
+      }
+    },
+    {
+      "path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/nightly/soak_mount_cycle_btrfs_ro_summary.json",
+      "category": "benchmark_report",
+      "content_type": "application/json",
+      "size_bytes": 0,
+      "redacted": false,
+      "metadata": {
+        "profile_id": "nightly",
+        "seed": "2001",
+        "workload_id": "soak_mount_cycle_btrfs_ro"
+      }
+    },
+    {
+      "path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/stress/soak_mount_cycle_btrfs_ro_summary.json",
+      "category": "benchmark_report",
+      "content_type": "application/json",
+      "size_bytes": 0,
+      "redacted": false,
+      "metadata": {
+        "profile_id": "stress",
+        "seed": "2001",
+        "workload_id": "soak_mount_cycle_btrfs_ro"
+      }
+    },
+    {
+      "path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/canary/soak_mount_cycle_btrfs_ro_summary.json",
+      "category": "benchmark_report",
+      "content_type": "application/json",
+      "size_bytes": 0,
+      "redacted": false,
+      "metadata": {
+        "profile_id": "canary",
+        "seed": "2001",
+        "workload_id": "soak_mount_cycle_btrfs_ro"
+      }
+    },
+    {
+      "path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/smoke/soak_metadata_churn_ext4_summary.json",
+      "category": "benchmark_report",
+      "content_type": "application/json",
+      "size_bytes": 0,
+      "redacted": false,
+      "metadata": {
+        "profile_id": "smoke",
+        "seed": "3001",
+        "workload_id": "soak_metadata_churn_ext4"
+      }
+    },
+    {
+      "path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/smoke/soak_metadata_churn_ext4_summary.json",
+      "category": "benchmark_report",
+      "content_type": "application/json",
+      "size_bytes": 0,
+      "redacted": false,
+      "metadata": {
+        "profile_id": "smoke",
+        "seed": "3002",
+        "workload_id": "soak_metadata_churn_ext4"
+      }
+    },
+    {
+      "path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/nightly/soak_metadata_churn_ext4_summary.json",
+      "category": "benchmark_report",
+      "content_type": "application/json",
+      "size_bytes": 0,
+      "redacted": false,
+      "metadata": {
+        "profile_id": "nightly",
+        "seed": "3001",
+        "workload_id": "soak_metadata_churn_ext4"
+      }
+    },
+    {
+      "path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/nightly/soak_metadata_churn_ext4_summary.json",
+      "category": "benchmark_report",
+      "content_type": "application/json",
+      "size_bytes": 0,
+      "redacted": false,
+      "metadata": {
+        "profile_id": "nightly",
+        "seed": "3002",
+        "workload_id": "soak_metadata_churn_ext4"
+      }
+    },
+    {
+      "path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/stress/soak_metadata_churn_ext4_summary.json",
+      "category": "benchmark_report",
+      "content_type": "application/json",
+      "size_bytes": 0,
+      "redacted": false,
+      "metadata": {
+        "profile_id": "stress",
+        "seed": "3001",
+        "workload_id": "soak_metadata_churn_ext4"
+      }
+    },
+    {
+      "path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/stress/soak_metadata_churn_ext4_summary.json",
+      "category": "benchmark_report",
+      "content_type": "application/json",
+      "size_bytes": 0,
+      "redacted": false,
+      "metadata": {
+        "profile_id": "stress",
+        "seed": "3002",
+        "workload_id": "soak_metadata_churn_ext4"
+      }
+    },
+    {
+      "path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/canary/soak_metadata_churn_ext4_summary.json",
+      "category": "benchmark_report",
+      "content_type": "application/json",
+      "size_bytes": 0,
+      "redacted": false,
+      "metadata": {
+        "profile_id": "canary",
+        "seed": "3001",
+        "workload_id": "soak_metadata_churn_ext4"
+      }
+    },
+    {
+      "path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/canary/soak_metadata_churn_ext4_summary.json",
+      "category": "benchmark_report",
+      "content_type": "application/json",
+      "size_bytes": 0,
+      "redacted": false,
+      "metadata": {
+        "profile_id": "canary",
+        "seed": "3002",
+        "workload_id": "soak_metadata_churn_ext4"
+      }
+    },
+    {
+      "path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/nightly/soak_read_write_verify_ext4_summary.json",
+      "category": "benchmark_report",
+      "content_type": "application/json",
+      "size_bytes": 0,
+      "redacted": false,
+      "metadata": {
+        "profile_id": "nightly",
+        "seed": "4001",
+        "workload_id": "soak_read_write_verify_ext4"
+      }
+    },
+    {
+      "path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/stress/soak_read_write_verify_ext4_summary.json",
+      "category": "benchmark_report",
+      "content_type": "application/json",
+      "size_bytes": 0,
+      "redacted": false,
+      "metadata": {
+        "profile_id": "stress",
+        "seed": "4001",
+        "workload_id": "soak_read_write_verify_ext4"
+      }
+    },
+    {
+      "path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/canary/soak_read_write_verify_ext4_summary.json",
+      "category": "benchmark_report",
+      "content_type": "application/json",
+      "size_bytes": 0,
+      "redacted": false,
+      "metadata": {
+        "profile_id": "canary",
+        "seed": "4001",
+        "workload_id": "soak_read_write_verify_ext4"
+      }
+    },
+    {
+      "path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/smoke/soak_repair_scrub_dry_run_ledger_summary.json",
+      "category": "benchmark_report",
+      "content_type": "application/json",
+      "size_bytes": 0,
+      "redacted": false,
+      "metadata": {
+        "profile_id": "smoke",
+        "seed": "5001",
+        "workload_id": "soak_repair_scrub_dry_run"
+      }
+    },
+    {
+      "path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/smoke/soak_repair_scrub_dry_run_ledger_summary.json",
+      "category": "benchmark_report",
+      "content_type": "application/json",
+      "size_bytes": 0,
+      "redacted": false,
+      "metadata": {
+        "profile_id": "smoke",
+        "seed": "5002",
+        "workload_id": "soak_repair_scrub_dry_run"
+      }
+    },
+    {
+      "path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/nightly/soak_repair_scrub_dry_run_ledger_summary.json",
+      "category": "benchmark_report",
+      "content_type": "application/json",
+      "size_bytes": 0,
+      "redacted": false,
+      "metadata": {
+        "profile_id": "nightly",
+        "seed": "5001",
+        "workload_id": "soak_repair_scrub_dry_run"
+      }
+    },
+    {
+      "path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/nightly/soak_repair_scrub_dry_run_ledger_summary.json",
+      "category": "benchmark_report",
+      "content_type": "application/json",
+      "size_bytes": 0,
+      "redacted": false,
+      "metadata": {
+        "profile_id": "nightly",
+        "seed": "5002",
+        "workload_id": "soak_repair_scrub_dry_run"
+      }
+    },
+    {
+      "path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/stress/soak_repair_scrub_dry_run_ledger_summary.json",
+      "category": "benchmark_report",
+      "content_type": "application/json",
+      "size_bytes": 0,
+      "redacted": false,
+      "metadata": {
+        "profile_id": "stress",
+        "seed": "5001",
+        "workload_id": "soak_repair_scrub_dry_run"
+      }
+    },
+    {
+      "path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/stress/soak_repair_scrub_dry_run_ledger_summary.json",
+      "category": "benchmark_report",
+      "content_type": "application/json",
+      "size_bytes": 0,
+      "redacted": false,
+      "metadata": {
+        "profile_id": "stress",
+        "seed": "5002",
+        "workload_id": "soak_repair_scrub_dry_run"
+      }
+    },
+    {
+      "path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/canary/soak_repair_scrub_dry_run_ledger_summary.json",
+      "category": "benchmark_report",
+      "content_type": "application/json",
+      "size_bytes": 0,
+      "redacted": false,
+      "metadata": {
+        "profile_id": "canary",
+        "seed": "5001",
+        "workload_id": "soak_repair_scrub_dry_run"
+      }
+    },
+    {
+      "path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/canary/soak_repair_scrub_dry_run_ledger_summary.json",
+      "category": "benchmark_report",
+      "content_type": "application/json",
+      "size_bytes": 0,
+      "redacted": false,
+      "metadata": {
+        "profile_id": "canary",
+        "seed": "5002",
+        "workload_id": "soak_repair_scrub_dry_run"
+      }
+    },
+    {
+      "path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/nightly/soak_writeback_cache_gate_gate_summary.json",
+      "category": "benchmark_report",
+      "content_type": "application/json",
+      "size_bytes": 0,
+      "redacted": false,
+      "metadata": {
+        "profile_id": "nightly",
+        "seed": "6001",
+        "workload_id": "soak_writeback_cache_gate"
+      }
+    },
+    {
+      "path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/canary/soak_writeback_cache_gate_gate_summary.json",
+      "category": "benchmark_report",
+      "content_type": "application/json",
+      "size_bytes": 0,
+      "redacted": false,
+      "metadata": {
+        "profile_id": "canary",
+        "seed": "6001",
+        "workload_id": "soak_writeback_cache_gate"
+      }
+    },
+    {
+      "path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/smoke/soak_artifact_aggregation_summary.json",
+      "category": "benchmark_report",
+      "content_type": "application/json",
+      "size_bytes": 0,
+      "redacted": false,
+      "metadata": {
+        "profile_id": "smoke",
+        "seed": "7001",
+        "workload_id": "soak_artifact_aggregation"
+      }
+    },
+    {
+      "path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/nightly/soak_artifact_aggregation_summary.json",
+      "category": "benchmark_report",
+      "content_type": "application/json",
+      "size_bytes": 0,
+      "redacted": false,
+      "metadata": {
+        "profile_id": "nightly",
+        "seed": "7001",
+        "workload_id": "soak_artifact_aggregation"
+      }
+    },
+    {
+      "path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/stress/soak_artifact_aggregation_summary.json",
+      "category": "benchmark_report",
+      "content_type": "application/json",
+      "size_bytes": 0,
+      "redacted": false,
+      "metadata": {
+        "profile_id": "stress",
+        "seed": "7001",
+        "workload_id": "soak_artifact_aggregation"
+      }
+    },
+    {
+      "path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/canary/soak_artifact_aggregation_summary.json",
+      "category": "benchmark_report",
+      "content_type": "application/json",
+      "size_bytes": 0,
+      "redacted": false,
+      "metadata": {
+        "profile_id": "canary",
+        "seed": "7001",
+        "workload_id": "soak_artifact_aggregation"
+      }
+    },
+    {
+      "path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/smoke/soak_mount_cycle_ext4_ro_threshold.json",
+      "category": "proof_artifact",
+      "content_type": "application/json",
+      "size_bytes": 0,
+      "redacted": false,
+      "metadata": {
+        "follow_up_bead": "bd-t21em",
+        "outcome": "pass",
+        "workload_id": "soak_mount_cycle_ext4_ro"
+      }
+    },
+    {
+      "path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/smoke/soak_mount_cycle_ext4_ro_threshold.json",
+      "category": "proof_artifact",
+      "content_type": "application/json",
+      "size_bytes": 0,
+      "redacted": false,
+      "metadata": {
+        "follow_up_bead": "bd-t21em",
+        "outcome": "fail",
+        "workload_id": "soak_mount_cycle_ext4_ro"
+      }
+    },
+    {
+      "path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/smoke/soak_mount_cycle_ext4_ro_threshold.json",
+      "category": "proof_artifact",
+      "content_type": "application/json",
+      "size_bytes": 0,
+      "redacted": false,
+      "metadata": {
+        "follow_up_bead": "bd-t21em",
+        "outcome": "error",
+        "workload_id": "soak_mount_cycle_ext4_ro"
+      }
+    },
+    {
+      "path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/smoke/soak_mount_cycle_ext4_ro_threshold.json",
+      "category": "proof_artifact",
+      "content_type": "application/json",
+      "size_bytes": 0,
+      "redacted": false,
+      "metadata": {
+        "follow_up_bead": "bd-t21em",
+        "outcome": "flake",
+        "workload_id": "soak_mount_cycle_ext4_ro"
+      }
+    },
+    {
+      "path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/smoke/soak_mount_cycle_ext4_ro_threshold.json",
+      "category": "proof_artifact",
+      "content_type": "application/json",
+      "size_bytes": 0,
+      "redacted": false,
+      "metadata": {
+        "follow_up_bead": "bd-t21em",
+        "outcome": "skip",
+        "workload_id": "soak_mount_cycle_ext4_ro"
+      }
+    },
+    {
+      "path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/smoke/soak_mount_cycle_ext4_ro_clean_pass_root_cause.json",
+      "category": "proof_artifact",
+      "content_type": "application/json",
+      "size_bytes": 0,
+      "redacted": false,
+      "metadata": {
+        "classification": "clean_pass",
+        "release_gate_impact": "eligible",
+        "stop_reason": "completed",
+        "workload_id": "soak_mount_cycle_ext4_ro"
+      }
+    },
+    {
+      "path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/smoke/soak_mount_cycle_ext4_ro_product_regression_root_cause.json",
+      "category": "proof_artifact",
+      "content_type": "application/json",
+      "size_bytes": 0,
+      "redacted": false,
+      "metadata": {
+        "classification": "product_regression",
+        "release_gate_impact": "block_release_gate",
+        "stop_reason": "failure_threshold_exceeded",
+        "workload_id": "soak_mount_cycle_ext4_ro"
+      }
+    },
+    {
+      "path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/smoke/soak_mount_cycle_ext4_ro_host_capability_skip_root_cause.json",
+      "category": "proof_artifact",
+      "content_type": "application/json",
+      "size_bytes": 0,
+      "redacted": false,
+      "metadata": {
+        "classification": "host_capability_skip",
+        "release_gate_impact": "skip_lane_with_host_blocker",
+        "stop_reason": "host_capability_skip",
+        "workload_id": "soak_mount_cycle_ext4_ro"
+      }
+    },
+    {
+      "path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/smoke/soak_mount_cycle_ext4_ro_infrastructure_error_root_cause.json",
+      "category": "proof_artifact",
+      "content_type": "application/json",
+      "size_bytes": 0,
+      "redacted": false,
+      "metadata": {
+        "classification": "infrastructure_error",
+        "release_gate_impact": "block_release_gate",
+        "stop_reason": "infrastructure_error",
+        "workload_id": "soak_mount_cycle_ext4_ro"
+      }
+    },
+    {
+      "path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/smoke/soak_mount_cycle_ext4_ro_timeout_root_cause.json",
+      "category": "proof_artifact",
+      "content_type": "application/json",
+      "size_bytes": 0,
+      "redacted": false,
+      "metadata": {
+        "classification": "timeout",
+        "release_gate_impact": "block_release_gate",
+        "stop_reason": "timeout",
+        "workload_id": "soak_mount_cycle_ext4_ro"
+      }
+    },
+    {
+      "path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/smoke/soak_mount_cycle_ext4_ro_resource_exhaustion_root_cause.json",
+      "category": "proof_artifact",
+      "content_type": "application/json",
+      "size_bytes": 0,
+      "redacted": false,
+      "metadata": {
+        "classification": "resource_exhaustion",
+        "release_gate_impact": "block_release_gate",
+        "stop_reason": "resource_budget_exceeded",
+        "workload_id": "soak_mount_cycle_ext4_ro"
+      }
+    },
+    {
+      "path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/smoke/soak_mount_cycle_ext4_ro_known_quarantined_flake_root_cause.json",
+      "category": "proof_artifact",
+      "content_type": "application/json",
+      "size_bytes": 0,
+      "redacted": false,
+      "metadata": {
+        "classification": "known_quarantined_flake",
+        "release_gate_impact": "quarantine_with_expiry",
+        "stop_reason": "flake_threshold_exceeded",
+        "workload_id": "soak_mount_cycle_ext4_ro"
+      }
+    },
+    {
+      "path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/smoke/soak_mount_cycle_ext4_ro_new_recurring_flake_root_cause.json",
+      "category": "proof_artifact",
+      "content_type": "application/json",
+      "size_bytes": 0,
+      "redacted": false,
+      "metadata": {
+        "classification": "new_recurring_flake",
+        "release_gate_impact": "block_release_gate",
+        "stop_reason": "flake_threshold_exceeded",
+        "workload_id": "soak_mount_cycle_ext4_ro"
+      }
+    },
+    {
+      "path": "baselines/hyperfine/20260521-bd-xuo95-33-soak/campaign-artifacts/smoke/soak_mount_cycle_ext4_ro_inconclusive_root_cause.json",
+      "category": "proof_artifact",
+      "content_type": "application/json",
+      "size_bytes": 0,
+      "redacted": false,
+      "metadata": {
+        "classification": "inconclusive",
+        "release_gate_impact": "downgrade_until_fresh_evidence",
+        "stop_reason": "stale_baseline",
+        "workload_id": "soak_mount_cycle_ext4_ro"
+      }
+    }
+  ],
+  "verdict": "FAIL",
+  "duration_secs": 30.0
+}

@@ -1,0 +1,10 @@
+mode	iteration	exit_code	duration_ms	report_path	stdout_path	stderr_path
+cold	1	0	92	baselines/hyperfine/20260521-bd-xuo95-33-soak/mount_cold_1_report.json	baselines/hyperfine/20260521-bd-xuo95-33-soak/mount_cold_1.stdout	baselines/hyperfine/20260521-bd-xuo95-33-soak/mount_cold_1.stderr
+cold	2	0	90	baselines/hyperfine/20260521-bd-xuo95-33-soak/mount_cold_2_report.json	baselines/hyperfine/20260521-bd-xuo95-33-soak/mount_cold_2.stdout	baselines/hyperfine/20260521-bd-xuo95-33-soak/mount_cold_2.stderr
+cold	3	0	86	baselines/hyperfine/20260521-bd-xuo95-33-soak/mount_cold_3_report.json	baselines/hyperfine/20260521-bd-xuo95-33-soak/mount_cold_3.stdout	baselines/hyperfine/20260521-bd-xuo95-33-soak/mount_cold_3.stderr
+warm	1	0	123	baselines/hyperfine/20260521-bd-xuo95-33-soak/mount_warm_1_report.json	baselines/hyperfine/20260521-bd-xuo95-33-soak/mount_warm_1.stdout	baselines/hyperfine/20260521-bd-xuo95-33-soak/mount_warm_1.stderr
+warm	2	0	129	baselines/hyperfine/20260521-bd-xuo95-33-soak/mount_warm_2_report.json	baselines/hyperfine/20260521-bd-xuo95-33-soak/mount_warm_2.stdout	baselines/hyperfine/20260521-bd-xuo95-33-soak/mount_warm_2.stderr
+warm	3	0	137	baselines/hyperfine/20260521-bd-xuo95-33-soak/mount_warm_3_report.json	baselines/hyperfine/20260521-bd-xuo95-33-soak/mount_warm_3.stdout	baselines/hyperfine/20260521-bd-xuo95-33-soak/mount_warm_3.stderr
+recovery	1	0	100	baselines/hyperfine/20260521-bd-xuo95-33-soak/mount_recovery_1_report.json	baselines/hyperfine/20260521-bd-xuo95-33-soak/mount_recovery_1.stdout	baselines/hyperfine/20260521-bd-xuo95-33-soak/mount_recovery_1.stderr
+recovery	2	0	88	baselines/hyperfine/20260521-bd-xuo95-33-soak/mount_recovery_2_report.json	baselines/hyperfine/20260521-bd-xuo95-33-soak/mount_recovery_2.stdout	baselines/hyperfine/20260521-bd-xuo95-33-soak/mount_recovery_2.stderr
+recovery	3	0	92	baselines/hyperfine/20260521-bd-xuo95-33-soak/mount_recovery_3_report.json	baselines/hyperfine/20260521-bd-xuo95-33-soak/mount_recovery_3.stdout	baselines/hyperfine/20260521-bd-xuo95-33-soak/mount_recovery_3.stderr
