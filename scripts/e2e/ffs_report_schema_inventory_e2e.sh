@@ -103,13 +103,13 @@ emit_row_result() {
     cat <<JSON
     {
       "report_id": "$report_id",
-      "module_path": "crates/ffs-harness/src/report_schema_inventory.rs",
+      "module_path": "tools/ffs-ops/src/report_schema_inventory.rs",
       "rust_type": "ReportSchemaInventoryReport",
       "downstream_consumer": "fixture self-check",
       "coverage_requirement": "$coverage_requirement",
       "coverage_status": "covered",
       "evidence_test": "report_schema_inventory_shape",
-      "snapshot_path": "crates/ffs-harness/src/snapshots/ffs_harness__report_schema_inventory__tests__report_schema_inventory_shape.snap",
+      "snapshot_path": "tools/ffs-ops/src/snapshots/ffs_harness__report_schema_inventory__tests__report_schema_inventory_shape.snap",
       "exclusion_reason": "",
       "claim_effect": "product_evidence_none",
       "missing_evidence": [],
@@ -124,7 +124,7 @@ emit_valid_report() {
   "schema_version": 1,
   "inventory_id": "ffs_harness_serialized_report_schema_inventory_v1",
   "product_evidence_claim": "none",
-  "reproduction_command": "ffs-harness validate-report-schema-inventory --out artifacts/report-schema-inventory/report.json --summary-out artifacts/report-schema-inventory/report.md",
+  "reproduction_command": "ffs-ops validate-report-schema-inventory --out artifacts/report-schema-inventory/report.json --summary-out artifacts/report-schema-inventory/report.md",
   "valid": true,
   "total_rows": 13,
   "required_rows": 6,
@@ -301,7 +301,7 @@ fi
 
 e2e_step "Scenario 1: report schema inventory CLI and docs are wired"
 if grep -q "pub mod report_schema_inventory" crates/ffs-harness/src/lib.rs \
-    && grep -q "validate-report-schema-inventory" crates/ffs-harness/src/main.rs \
+    && grep -q "validate-report-schema-inventory" tools/ffs-ops/src/main.rs \
     && grep -q "ffs_report_schema_inventory" scripts/e2e/scenario_catalog.json \
     && grep -q "Report Schema Inventory Gate" scripts/e2e/README.md \
     && grep -q "validate-report-schema-inventory" docs/tracker-hygiene.md; then
@@ -311,10 +311,10 @@ else
 fi
 
 e2e_step "Scenario 2: report schema inventory CLI writes JSON and Markdown artifacts"
-if e2e_rch_capture "$VALIDATE_RAW" cargo run --quiet -p ffs-harness -- \
+if e2e_rch_capture "$VALIDATE_RAW" cargo run --quiet -p ffs-ops -- \
     validate-report-schema-inventory --format json \
     && extract_json_report "$VALIDATE_RAW" "$REPORT_JSON" \
-    && e2e_rch_capture "$SUMMARY_RAW" cargo run --quiet -p ffs-harness -- \
+    && e2e_rch_capture "$SUMMARY_RAW" cargo run --quiet -p ffs-ops -- \
         validate-report-schema-inventory --format markdown \
     && extract_markdown_summary "$SUMMARY_RAW" "$SUMMARY_MD" \
     && [[ -s "$REPORT_JSON" ]] \
@@ -459,7 +459,7 @@ fi
 
 e2e_log "Report schema inventory JSON: $REPORT_JSON"
 e2e_log "Report schema inventory summary: $SUMMARY_MD"
-e2e_log "Reproduce: cargo run --quiet -p ffs-harness -- validate-report-schema-inventory --out $REPORT_JSON --summary-out $SUMMARY_MD"
+e2e_log "Reproduce: cargo run --quiet -p ffs-ops -- validate-report-schema-inventory --out $REPORT_JSON --summary-out $SUMMARY_MD"
 
 if ((FAIL_COUNT == 0)); then
     e2e_log "Report schema inventory scenarios passed: $PASS_COUNT/$TOTAL"

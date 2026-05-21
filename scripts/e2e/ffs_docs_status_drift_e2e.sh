@@ -119,7 +119,7 @@ for index, status in enumerate(statuses):
         "remediation_id": "bd-rchk0",
         "expected_public_status": status,
         "output_path": f"artifacts/docs-status/fixture-{index}.json",
-        "reproduction_command": "cargo run -p ffs-harness -- validate-docs-status-drift",
+        "reproduction_command": "cargo run -p ffs-ops -- validate-docs-status-drift",
     })
 for target in targets:
     if target not in {row["docs_target"] for row in observations}:
@@ -135,7 +135,7 @@ for target in targets:
             "remediation_id": "bd-rchk0",
             "expected_public_status": "validated",
             "output_path": "artifacts/docs-status/fixture-extra.json",
-            "reproduction_command": "cargo run -p ffs-harness -- validate-docs-status-drift",
+            "reproduction_command": "cargo run -p ffs-ops -- validate-docs-status-drift",
         })
 contracts = [
     {
@@ -375,17 +375,17 @@ fi
 
 e2e_step "Scenario 1: module and CLI are wired"
 if grep -q "pub mod docs_status_drift" crates/ffs-harness/src/lib.rs \
-    && grep -q "validate-docs-status-drift" crates/ffs-harness/src/main.rs; then
+    && grep -q "validate-docs-status-drift" tools/ffs-ops/src/main.rs; then
     scenario_result "docs_status_wired" "PASS" "module and CLI command exported"
 else
     scenario_result "docs_status_wired" "FAIL" "missing module export or CLI command"
 fi
 
 e2e_step "Scenario 2: CLI renders JSON and Markdown reports"
-if run_rch_capture "$REPORT_RAW" cargo run --quiet -p ffs-harness -- validate-docs-status-drift \
+if run_rch_capture "$REPORT_RAW" cargo run --quiet -p ffs-ops -- validate-docs-status-drift \
     --issues "$ISSUES_JSONL" \
     --feature-parity FEATURE_PARITY.md \
-    && run_rch_capture "$REPORT_MD_RAW" cargo run --quiet -p ffs-harness -- validate-docs-status-drift \
+    && run_rch_capture "$REPORT_MD_RAW" cargo run --quiet -p ffs-ops -- validate-docs-status-drift \
         --issues "$ISSUES_JSONL" \
         --feature-parity FEATURE_PARITY.md \
         --format markdown; then
@@ -539,7 +539,7 @@ cat >"$BAD_UPGRADE_JSON" <<'JSON'
   ]
 }
 JSON
-if run_rch_capture "$BAD_UPGRADE_RAW" cargo run --quiet -p ffs-harness -- validate-docs-status-drift \
+if run_rch_capture "$BAD_UPGRADE_RAW" cargo run --quiet -p ffs-ops -- validate-docs-status-drift \
     --issues "$ISSUES_JSONL" \
     --feature-parity FEATURE_PARITY.md \
     --snippets "$BAD_UPGRADE_JSON"; then
@@ -571,7 +571,7 @@ cat >"$BAD_FLAT_JSON" <<'JSON'
   ]
 }
 JSON
-if run_rch_capture "$BAD_FLAT_RAW" cargo run --quiet -p ffs-harness -- validate-docs-status-drift \
+if run_rch_capture "$BAD_FLAT_RAW" cargo run --quiet -p ffs-ops -- validate-docs-status-drift \
     --issues "$ISSUES_JSONL" \
     --feature-parity FEATURE_PARITY.md \
     --snippets "$BAD_FLAT_JSON"; then
@@ -598,7 +598,7 @@ cat >"$BAD_RELEASE_GATE_JSON" <<'JSON'
   ]
 }
 JSON
-if run_rch_capture "$BAD_RELEASE_GATE_RAW" cargo run --quiet -p ffs-harness -- validate-docs-status-drift \
+if run_rch_capture "$BAD_RELEASE_GATE_RAW" cargo run --quiet -p ffs-ops -- validate-docs-status-drift \
     --issues "$ISSUES_JSONL" \
     --feature-parity FEATURE_PARITY.md \
     --snippets "$BAD_RELEASE_GATE_JSON"; then

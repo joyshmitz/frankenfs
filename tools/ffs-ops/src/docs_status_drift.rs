@@ -26,7 +26,7 @@ pub const DOCS_STATUS_DRIFT_VERSION: &str = "bd-jtu4q-docs-status-drift-v1";
 pub const DEFAULT_DOCS_STATUS_DRIFT_ARTIFACT: &str = "artifacts/docs-status/docs_status_drift.json";
 pub const DEFAULT_DOCS_STATUS_DRIFT_SUMMARY: &str = "artifacts/docs-status/docs_status_drift.md";
 
-const REPRODUCTION_COMMAND: &str = "ffs-harness validate-docs-status-drift --issues .beads/issues.jsonl --feature-parity FEATURE_PARITY.md --out artifacts/docs-status/docs_status_drift.json --summary-out artifacts/docs-status/docs_status_drift.md";
+const REPRODUCTION_COMMAND: &str = "ffs-ops validate-docs-status-drift --issues .beads/issues.jsonl --feature-parity FEATURE_PARITY.md --out artifacts/docs-status/docs_status_drift.json --summary-out artifacts/docs-status/docs_status_drift.md";
 const RELEASE_GATE_CONTRACT: &str =
     "release-gates:bd-rchk0.5.6.1 fail-closed docs-status drift consumer";
 const RELEASE_GATE_WORDING_SOURCE_POLICY: &str = "tests/release-gates/release_gate_policy_v1.json";

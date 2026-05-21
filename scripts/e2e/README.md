@@ -401,7 +401,7 @@ command for agent runs is:
 
 ```bash
 rch exec -- env CARGO_TARGET_DIR=/data/tmp/rch_target_frankenfs_source_scope \
-  cargo run --quiet -p ffs-harness -- validate-source-scope-manifest \
+  cargo run --quiet -p ffs-ops -- validate-source-scope-manifest \
   --manifest tests/source-scope-manifest/source_scope_manifest.json \
   --workspace-root . \
   --out artifacts/source-scope/source_scope_manifest.json
@@ -1094,7 +1094,7 @@ The report schema inventory gate is built from the in-code
 Validate it with:
 
 ```bash
-cargo run -p ffs-harness -- validate-report-schema-inventory \
+cargo run -p ffs-ops -- validate-report-schema-inventory \
   --out artifacts/report-schema-inventory/report.json \
   --summary-out artifacts/report-schema-inventory/report.md
 ```
@@ -1975,7 +1975,7 @@ wording rather than deleting capability rows.
 Validate the current control surface with:
 
 ```bash
-cargo run -p ffs-harness -- validate-docs-status-drift \
+cargo run -p ffs-ops -- validate-docs-status-drift \
   --issues .beads/issues.jsonl \
   --feature-parity FEATURE_PARITY.md \
   --out artifacts/docs-status/docs_status_drift.json \
@@ -2439,17 +2439,17 @@ Use the validator and packet generator directly when promoting a generated
 manifest into operator handoff material:
 
 ```bash
-cargo run -p ffs-harness -- validate-permissioned-campaign-broker \
+cargo run -p ffs-ops -- validate-permissioned-campaign-broker \
   --manifest artifacts/e2e/<run>/permissioned_campaign_broker/manifests/xfstests_ready_manifest.json \
   --out artifacts/e2e/<run>/permissioned_campaign_broker/reports/xfstests_ready_report.json \
   --summary-out artifacts/e2e/<run>/permissioned_campaign_broker/reports/xfstests_ready_report.md
 
-cargo run -p ffs-harness -- generate-permissioned-campaign-packet \
+cargo run -p ffs-ops -- generate-permissioned-campaign-packet \
   --manifest artifacts/e2e/<run>/permissioned_campaign_broker/manifests/xfstests_ready_manifest.json \
   --out artifacts/e2e/<run>/permissioned_campaign_broker/packets/xfstests_handoff_packet.json \
   --summary-out artifacts/e2e/<run>/permissioned_campaign_broker/packets/xfstests_handoff_packet.md
 
-cargo run -p ffs-harness -- validate-swarm-capability-calibration \
+cargo run -p ffs-ops -- validate-swarm-capability-calibration \
   --manifest artifacts/e2e/<run>/permissioned_campaign_broker/manifests/swarm_calibration_candidate_manifest.json \
   --out artifacts/e2e/<run>/permissioned_campaign_broker/reports/swarm_calibration_candidate_report.json \
   --summary-out artifacts/e2e/<run>/permissioned_campaign_broker/reports/swarm_calibration_candidate_report.md

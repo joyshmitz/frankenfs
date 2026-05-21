@@ -956,6 +956,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ffs-ops"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "ffs-harness",
+ "serde_json",
+]
+
+[[package]]
 name = "ffs-repair"
 version = "0.1.0"
 dependencies = [

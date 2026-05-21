@@ -44,11 +44,14 @@ enum ModuleClassification {
 }
 
 #[test]
-fn module_census_matches_committed_harness_src_tree() -> Result<(), Box<dyn Error>> {
+fn module_census_matches_tracked_harness_src_tree() -> Result<(), Box<dyn Error>> {
     let census: ModuleCensus = serde_json::from_str(include_str!("../module_census.json"))?;
 
     assert_eq!(census.schema_version, 1);
-    assert_eq!(census.scope, "HEAD:crates/ffs-harness/src/*.rs");
+    assert_eq!(
+        census.scope,
+        "git-tracked index:crates/ffs-harness/src/*.rs"
+    );
 
     let mut entries_by_path = BTreeMap::new();
     for entry in &census.modules {
@@ -64,28 +67,27 @@ fn module_census_matches_committed_harness_src_tree() -> Result<(), Box<dyn Erro
         );
     }
 
-    let Some(source_names) =
-        try_run_git(&["ls-tree", "--name-only", "HEAD:crates/ffs-harness/src"])?
-    else {
+    let Some(source_names) = try_run_git(&["ls-files", "crates/ffs-harness/src/*.rs"])? else {
         assert_internal_summary(&census, &entries_by_path);
         assert_artifact_paths_exist(&entries_by_path);
         return Ok(());
     };
     let source_names = String::from_utf8(source_names)?;
-    let committed_paths = source_names
+    let tracked_paths = source_names
         .lines()
-        .filter(|name| has_rust_extension(name))
-        .map(|name| format!("src/{name}"))
+        .filter_map(|name| name.strip_prefix("crates/ffs-harness/"))
+        .filter(|path| path.starts_with("src/") && has_rust_extension(path))
+        .map(str::to_owned)
         .collect::<BTreeSet<_>>();
     let artifact_paths = entries_by_path.keys().cloned().collect::<BTreeSet<_>>();
 
-    if committed_paths.len() < artifact_paths.len() {
+    if tracked_paths.len() < artifact_paths.len() {
         assert_internal_summary(&census, &entries_by_path);
         assert_artifact_paths_exist(&entries_by_path);
         return Ok(());
     }
 
-    assert_eq!(artifact_paths, committed_paths);
+    assert_eq!(artifact_paths, tracked_paths);
 
     let mut total_loc = 0usize;
     let mut conformance_loc = 0usize;
@@ -93,13 +95,13 @@ fn module_census_matches_committed_harness_src_tree() -> Result<(), Box<dyn Erro
     let mut meta_loc = 0usize;
     let mut meta_modules = 0usize;
 
-    for path in &committed_paths {
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for path in &tracked_paths {
         let entry = entries_by_path
             .get(path)
             .ok_or_else(|| io::Error::other(format!("missing census entry for {path}")))?;
-        let object_path = format!("HEAD:crates/ffs-harness/{path}");
-        let committed_blob = run_git(&["show", &object_path])?;
-        let loc = wc_compatible_line_count(&committed_blob);
+        let source_blob = read_tracked_source_blob(manifest_dir, path)?;
+        let loc = wc_compatible_line_count(&source_blob);
 
         assert_eq!(entry.loc, loc, "LOC drift for {path}");
 
@@ -119,7 +121,7 @@ fn module_census_matches_committed_harness_src_tree() -> Result<(), Box<dyn Erro
     assert_summary(
         &census.summary,
         SummaryValues {
-            modules: committed_paths.len(),
+            modules: tracked_paths.len(),
             total_loc,
             conformance_modules,
             conformance_loc,
@@ -191,6 +193,15 @@ fn assert_artifact_paths_exist(entries_by_path: &BTreeMap<String, &ModuleEntry>)
     }
 }
 
+fn read_tracked_source_blob(manifest_dir: &Path, path: &str) -> Result<Vec<u8>, Box<dyn Error>> {
+    let git_path = format!("crates/ffs-harness/{path}");
+    if let Some(blob) = try_run_git(&["show", &format!(":{git_path}")])? {
+        return Ok(blob);
+    }
+
+    Ok(std::fs::read(manifest_dir.join(path))?)
+}
+
 fn assert_summary(summary: &CensusSummary, values: SummaryValues) {
     assert!(values.total_loc > 0);
     assert_eq!(summary.modules, values.modules);
@@ -220,20 +231,6 @@ fn try_run_git(args: &[&str]) -> Result<Option<Vec<u8>>, Box<dyn Error>> {
     } else {
         Ok(None)
     }
-}
-
-fn run_git(args: &[&str]) -> Result<Vec<u8>, Box<dyn Error>> {
-    let output = Command::new("git")
-        .current_dir(repository_root()?)
-        .args(args)
-        .output()?;
-
-    if output.status.success() {
-        return Ok(output.stdout);
-    }
-
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    Err(io::Error::other(format!("git {} failed: {stderr}", args.join(" "))).into())
 }
 
 fn repository_root() -> Result<PathBuf, Box<dyn Error>> {

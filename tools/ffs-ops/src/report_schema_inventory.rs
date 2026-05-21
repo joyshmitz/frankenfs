@@ -17,7 +17,7 @@ use std::path::{Component, Path};
 pub const REPORT_SCHEMA_INVENTORY_SCHEMA_VERSION: u32 = 1;
 pub const REPORT_SCHEMA_INVENTORY_ID: &str = "ffs_harness_serialized_report_schema_inventory_v1";
 pub const REPORT_SCHEMA_INVENTORY_PRODUCT_EVIDENCE_CLAIM: &str = "none";
-pub const REPORT_SCHEMA_INVENTORY_REPRODUCTION_COMMAND: &str = "ffs-harness validate-report-schema-inventory --out artifacts/report-schema-inventory/report.json --summary-out artifacts/report-schema-inventory/report.md";
+pub const REPORT_SCHEMA_INVENTORY_REPRODUCTION_COMMAND: &str = "ffs-ops validate-report-schema-inventory --out artifacts/report-schema-inventory/report.json --summary-out artifacts/report-schema-inventory/report.md";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReportSchemaInventory {

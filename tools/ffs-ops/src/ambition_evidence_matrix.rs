@@ -97,7 +97,7 @@ const REQUIRED_LOG_TOKENS: [&str; 11] = [
 ];
 
 const DEFAULT_ARTIFACT_PATH: &str = "artifacts/ambition/evidence_matrix.json";
-const REPRODUCTION_COMMAND: &str = "ffs-harness validate-ambition-evidence-matrix --issues .beads/issues.jsonl --out artifacts/ambition/evidence_matrix.json";
+const REPRODUCTION_COMMAND: &str = "ffs-ops validate-ambition-evidence-matrix --issues .beads/issues.jsonl --out artifacts/ambition/evidence_matrix.json";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AmbitionEvidenceMatrixConfig {
@@ -1274,7 +1274,7 @@ fn validate_required_log_contract(row: &AmbitionEvidenceMatrixRow, errors: &mut 
     }
     if !row
         .reproduction_command
-        .contains("ffs-harness validate-ambition-evidence-matrix")
+        .contains("ffs-ops validate-ambition-evidence-matrix")
     {
         errors.push(format!(
             "{} missing validate-ambition-evidence-matrix reproduction command",

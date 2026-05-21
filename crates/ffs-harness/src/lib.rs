@@ -2,6 +2,7 @@
 
 pub mod adaptive_runtime_manifest;
 pub mod adversarial_threat_model;
+#[path = "../../../tools/ffs-ops/src/ambition_evidence_matrix.rs"]
 pub mod ambition_evidence_matrix;
 pub mod artifact_manifest;
 pub mod authoritative_environment_manifest;
@@ -17,11 +18,12 @@ pub mod crash_promotion;
 pub mod crash_replay_artifact;
 pub mod cross_oracle_arbitration;
 pub mod deferred_parity_audit;
+#[path = "../../../tools/ffs-ops/src/docs_status_drift.rs"]
 pub mod docs_status_drift;
 pub mod e2e;
 pub mod error_taxonomy;
-pub mod executed_evidence;
 pub mod evidence_backed_lane;
+pub mod executed_evidence;
 pub mod fault_injection_corpus;
 pub mod fuzz_dashboard;
 pub mod fuzz_smoke;
@@ -43,6 +45,7 @@ pub mod mounted_write_errno_budget;
 pub mod mounted_write_error_classes;
 pub mod mounted_write_matrix;
 pub mod numa_allocation_placement_report;
+#[path = "../../../tools/ffs-ops/src/open_ended_inventory.rs"]
 pub mod open_ended_inventory;
 pub mod operational_evidence_index;
 pub mod operational_readiness_report;
@@ -53,10 +56,12 @@ pub mod perf_regression;
 pub mod perf_triage;
 pub mod performance_baseline_manifest;
 pub mod performance_delta_closeout;
+#[path = "../../../tools/ffs-ops/src/permissioned_campaign_broker.rs"]
 pub mod permissioned_campaign_broker;
 pub mod proof_bundle;
 pub mod proof_overhead_budget;
 pub mod rch_capacity_preflight;
+#[path = "../../../tools/ffs-ops/src/readiness_action_autopilot.rs"]
 pub mod readiness_action_autopilot;
 pub mod readiness_dashboard;
 pub mod readiness_lab;
@@ -66,6 +71,7 @@ pub mod remediation_severity_gate;
 pub mod repair_confidence_lab;
 pub mod repair_corpus;
 pub mod repair_writeback_serialization;
+#[path = "../../../tools/ffs-ops/src/report_schema_inventory.rs"]
 pub mod report_schema_inventory;
 pub mod runtime_console_report;
 pub mod rw_background_repair_gate;
@@ -212,7 +218,9 @@ impl BtrfsParityGranularity {
         };
 
         // Read-verified = total - parse_only - in_progress_rows (regardless of evidence state)
-        let read_verified = btrfs_rows.saturating_sub(parse_only_rows).saturating_sub(in_progress_rows);
+        let read_verified = btrfs_rows
+            .saturating_sub(parse_only_rows)
+            .saturating_sub(in_progress_rows);
 
         Self {
             parse_only: parse_only_rows,
@@ -242,7 +250,12 @@ impl BtrfsParityGranularity {
         if sum != self.total_btrfs_rows {
             return Err(format!(
                 "row accounting mismatch: parse_only({}) + read_verified({}) + in_progress({}) + rw_durable({}) = {} != total({})",
-                self.parse_only, self.read_verified, self.in_progress, self.rw_durable, sum, self.total_btrfs_rows
+                self.parse_only,
+                self.read_verified,
+                self.in_progress,
+                self.rw_durable,
+                sum,
+                self.total_btrfs_rows
             ));
         }
         Ok(())
@@ -256,9 +269,7 @@ fn count_btrfs_capability_rows(markdown: &str) -> usize {
         .lines()
         .filter(|line| {
             let trimmed = line.trim();
-            trimmed.starts_with("| btrfs ")
-                && trimmed.contains('|')
-                && !trimmed.contains('%')
+            trimmed.starts_with("| btrfs ") && trimmed.contains('|') && !trimmed.contains('%')
         })
         .count()
 }
@@ -282,8 +293,7 @@ fn count_btrfs_in_progress_rows(markdown: &str) -> usize {
         .lines()
         .filter(|line| {
             let trimmed = line.trim();
-            trimmed.starts_with("| btrfs ")
-                && trimmed.contains("🚧")
+            trimmed.starts_with("| btrfs ") && trimmed.contains("🚧")
         })
         .count()
 }
@@ -516,7 +526,10 @@ impl ExecutionGatedParityReport {
     /// `evidence_map` maps test citation patterns to whether they passed (true) or failed/missing (false).
     /// If `evidence_map` is empty, the report is marked as having no evidence.
     #[must_use]
-    pub fn from_evidence(evidence_map: &std::collections::HashMap<String, bool>, git_sha: Option<String>) -> Self {
+    pub fn from_evidence(
+        evidence_map: &std::collections::HashMap<String, bool>,
+        git_sha: Option<String>,
+    ) -> Self {
         let rows = capability_rows_from_feature_parity(FEATURE_PARITY_MARKDOWN);
         let total_rows = rows.len();
         let has_evidence = !evidence_map.is_empty();
@@ -537,9 +550,9 @@ impl ExecutionGatedParityReport {
             }
 
             // Check if any evidence key matches this row's citation
-            let has_green_evidence = evidence_map.iter().any(|(key, &passed)| {
-                passed && row.notes.contains(key)
-            });
+            let has_green_evidence = evidence_map
+                .iter()
+                .any(|(key, &passed)| passed && row.notes.contains(key));
 
             if has_green_evidence {
                 evidence_backed_rows += 1;
@@ -561,7 +574,8 @@ impl ExecutionGatedParityReport {
     /// Build from a set of test results where key is the test name and value is pass/fail.
     #[must_use]
     pub fn from_test_results(results: &[(String, bool)], git_sha: Option<String>) -> Self {
-        let evidence_map: std::collections::HashMap<String, bool> = results.iter().cloned().collect();
+        let evidence_map: std::collections::HashMap<String, bool> =
+            results.iter().cloned().collect();
         Self::from_evidence(&evidence_map, git_sha)
     }
 
@@ -582,7 +596,8 @@ impl ExecutionGatedParityReport {
         if !self.has_evidence {
             return Err(
                 "ExecutionGatedParityReport requires execution evidence but none was provided. \
-                 Run the test suite with evidence collection enabled.".to_string()
+                 Run the test suite with evidence collection enabled."
+                    .to_string(),
             );
         }
         Ok(())
@@ -1437,14 +1452,26 @@ mod tests {
         // Verify the split: parse_only + read_verified + in_progress + rw_durable = total
         let sum = report.parse_only + report.read_verified + report.in_progress + report.rw_durable;
         assert_eq!(
-            sum, report.total_btrfs_rows,
+            sum,
+            report.total_btrfs_rows,
             "granularity split must equal total: {} + {} + {} + {} = {} != {}",
-            report.parse_only, report.read_verified, report.in_progress, report.rw_durable, sum, report.total_btrfs_rows
+            report.parse_only,
+            report.read_verified,
+            report.in_progress,
+            report.rw_durable,
+            sum,
+            report.total_btrfs_rows
         );
 
         // Without evidence, rw_durable is 0 and in_progress > 0
-        assert_eq!(report.rw_durable, 0, "rw_durable must be 0 without evidence");
-        assert!(report.in_progress > 0, "in_progress must be > 0 without evidence");
+        assert_eq!(
+            report.rw_durable, 0,
+            "rw_durable must be 0 without evidence"
+        );
+        assert!(
+            report.in_progress > 0,
+            "in_progress must be > 0 without evidence"
+        );
 
         // Most rows should be read_verified (kernel differential tests exist)
         assert!(
@@ -1716,7 +1743,8 @@ mod tests {
     #[test]
     fn execution_gated_parity_report_requires_evidence() {
         // Build report with NO evidence - this should fail the gate
-        let empty_evidence: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
+        let empty_evidence: std::collections::HashMap<String, bool> =
+            std::collections::HashMap::new();
         let report = ExecutionGatedParityReport::from_evidence(&empty_evidence, None);
 
         // Verify the gate rejects empty evidence
@@ -1733,11 +1761,12 @@ mod tests {
 
         // Simulate evidence: some tests pass, some fail
         let mut evidence: HashMap<String, bool> = HashMap::new();
-        evidence.insert("fuse::".to_string(), true);      // green
+        evidence.insert("fuse::".to_string(), true); // green
         evidence.insert("repair_lab::".to_string(), true); // green
         evidence.insert("crash_replay::".to_string(), false); // red
 
-        let report = ExecutionGatedParityReport::from_evidence(&evidence, Some("abc123".to_string()));
+        let report =
+            ExecutionGatedParityReport::from_evidence(&evidence, Some("abc123".to_string()));
 
         // Should be evidence-backed
         assert!(report.is_evidence_backed());
@@ -1756,23 +1785,16 @@ mod tests {
         // - Running with stale/absent evidence set must fail CI
 
         // With no evidence, require_evidence() gates CI failure
-        let no_evidence = ExecutionGatedParityReport::from_evidence(
-            &std::collections::HashMap::new(),
-            None,
-        );
+        let no_evidence =
+            ExecutionGatedParityReport::from_evidence(&std::collections::HashMap::new(), None);
         let gate_result = no_evidence.require_evidence();
-        assert!(
-            gate_result.is_err(),
-            "CI must fail when evidence is absent"
-        );
+        assert!(gate_result.is_err(), "CI must fail when evidence is absent");
 
         // With evidence, implemented count comes only from green evidence
         let mut evidence = std::collections::HashMap::new();
         evidence.insert("test::some_test".to_string(), true);
-        let with_evidence = ExecutionGatedParityReport::from_evidence(
-            &evidence,
-            Some("deadbeef".to_string()),
-        );
+        let with_evidence =
+            ExecutionGatedParityReport::from_evidence(&evidence, Some("deadbeef".to_string()));
         assert!(
             with_evidence.require_evidence().is_ok(),
             "CI should pass when evidence is present"
@@ -1839,7 +1861,8 @@ mod tests {
         evidence.insert("fuse::".to_string(), false); // test ran but FAILED
         evidence.insert("repair_lab::".to_string(), false); // test ran but FAILED
 
-        let report = ExecutionGatedParityReport::from_evidence(&evidence, Some("def456".to_string()));
+        let report =
+            ExecutionGatedParityReport::from_evidence(&evidence, Some("def456".to_string()));
 
         // Evidence is present (tests ran), but all failed
         assert!(report.is_evidence_backed());
@@ -1889,8 +1912,14 @@ mod tests {
 
         // Headline counts EXCLUDE rejection_only rows
         let (headline_impl, headline_total) = report.headline_counts();
-        assert_eq!(headline_total, 3, "headline_total excludes 2 rejection_only rows");
-        assert_eq!(headline_impl, 2, "headline_impl = implemented + kernel_verified");
+        assert_eq!(
+            headline_total, 3,
+            "headline_total excludes 2 rejection_only rows"
+        );
+        assert_eq!(
+            headline_impl, 2,
+            "headline_impl = implemented + kernel_verified"
+        );
 
         // Verify rejection is properly excluded
         assert!(
@@ -1917,11 +1946,7 @@ mod tests {
             ("rej3".to_string(), ParityClassification::RejectionOnly),
         ];
 
-        let report = ThreeColumnParityReport::from_classifications(
-            &classifications,
-            None,
-            None,
-        );
+        let report = ThreeColumnParityReport::from_classifications(&classifications, None, None);
 
         // All rows are rejection_only
         assert_eq!(report.rejection_only_rows, 3);
@@ -1938,7 +1963,10 @@ mod tests {
 
         // Headline should have 0 implemented out of 0 total (rejection excluded)
         let (headline_impl, headline_total) = report.headline_counts();
-        assert_eq!(headline_total, 0, "all rows are rejection_only, headline_total is 0");
+        assert_eq!(
+            headline_total, 0,
+            "all rows are rejection_only, headline_total is 0"
+        );
         assert_eq!(headline_impl, 0, "no implemented or kernel_verified rows");
 
         // Coverage of 0/0 should be 0%
@@ -1948,16 +1976,10 @@ mod tests {
     #[test]
     fn three_column_parity_kernel_verification_threshold() {
         // B3: kernel_verified requires N consecutive green runs (default N=3)
-        let classifications = vec![
-            ("row1".to_string(), ParityClassification::KernelVerified),
-        ];
+        let classifications = vec![("row1".to_string(), ParityClassification::KernelVerified)];
 
         // Default threshold
-        let report = ThreeColumnParityReport::from_classifications(
-            &classifications,
-            None,
-            None,
-        );
+        let report = ThreeColumnParityReport::from_classifications(&classifications, None, None);
         assert_eq!(
             report.kernel_verification_threshold,
             ThreeColumnParityReport::DEFAULT_KERNEL_THRESHOLD,
@@ -1965,11 +1987,8 @@ mod tests {
         );
 
         // Custom threshold
-        let report_custom = ThreeColumnParityReport::from_classifications(
-            &classifications,
-            None,
-            Some(5),
-        );
+        let report_custom =
+            ThreeColumnParityReport::from_classifications(&classifications, None, Some(5));
         assert_eq!(
             report_custom.kernel_verification_threshold, 5,
             "custom threshold should be respected"

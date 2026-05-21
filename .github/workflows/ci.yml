@@ -223,6 +223,9 @@ jobs:
       - name: Build test binaries
         run: cargo test -p ffs-harness --no-run
 
+      - name: Run relocated ops tests
+        run: cargo test -p ffs-ops -- --nocapture
+
       - name: Run FUSE E2E tests
         run: cargo test -p ffs-harness --test fuse_e2e -- --nocapture
 

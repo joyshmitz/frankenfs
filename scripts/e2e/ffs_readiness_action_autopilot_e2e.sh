@@ -273,8 +273,8 @@ UNIT_TESTS_OK=0
 mkdir -p "$RCH_INPUT_DIR"
 
 e2e_step "Scenario 1: readiness action autopilot CLI is wired"
-if grep -q "recommend-readiness-actions" crates/ffs-harness/src/main.rs \
-    && grep -q "ReadinessActionDryRunReport" crates/ffs-harness/src/readiness_action_autopilot.rs \
+if grep -q "recommend-readiness-actions" tools/ffs-ops/src/main.rs \
+    && grep -q "ReadinessActionDryRunReport" tools/ffs-ops/src/readiness_action_autopilot.rs \
     && grep -q "ffs_readiness_action_autopilot" scripts/e2e/scenario_catalog.json; then
     scenario_result "readiness_action_autopilot_cli_wired" "PASS" "CLI command, report schema, and catalog suite are exported"
 else
@@ -282,7 +282,7 @@ else
 fi
 
 e2e_step "Scenario 2: dry-run report pack is emitted"
-if e2e_rch_capture "$DRY_RUN_RAW" cargo run --quiet -p ffs-harness -- \
+if e2e_rch_capture "$DRY_RUN_RAW" cargo run --quiet -p ffs-ops -- \
     recommend-readiness-actions \
     --out-json /dev/stdout \
     --out-md /dev/stdout \
@@ -395,7 +395,7 @@ fi
 
 e2e_step "Scenario 5: invalid input fails closed"
 printf '{"report_id":42}\n' >"$BAD_INPUT_JSON"
-if e2e_rch_capture "$BAD_INPUT_RAW" cargo run --quiet -p ffs-harness -- \
+if e2e_rch_capture "$BAD_INPUT_RAW" cargo run --quiet -p ffs-ops -- \
     recommend-readiness-actions \
     --input "$BAD_INPUT_JSON" \
     --out-json /dev/stdout \

@@ -237,7 +237,7 @@ for family in required_families:
             "linked_bead_or_artifact_count": 0,
             "stale_allowance": "none",
             "output_path": f"artifacts/fixture/{family}.json",
-            "reproduction_command": "cargo run -p ffs-harness -- validate-source-scope-manifest --manifest tests/source-scope-manifest/source_scope_manifest.json --workspace-root .",
+            "reproduction_command": "cargo run -p ffs-ops -- validate-source-scope-manifest --manifest tests/source-scope-manifest/source_scope_manifest.json --workspace-root .",
             "matched_paths": [{"source_path": f"{family}/fixture.txt"}],
         }
     )
@@ -248,7 +248,7 @@ report = {
     "valid": True,
     "errors": [],
     "source_count": len(required_families),
-    "reproduction_command": "cargo run -p ffs-harness -- validate-source-scope-manifest --manifest tests/source-scope-manifest/source_scope_manifest.json --workspace-root .",
+    "reproduction_command": "cargo run -p ffs-ops -- validate-source-scope-manifest --manifest tests/source-scope-manifest/source_scope_manifest.json --workspace-root .",
     "scanned_sources": scanned_sources,
 }
 print(json.dumps(report, indent=2, sort_keys=True))
@@ -257,15 +257,15 @@ PY
 
 case "$command_text" in
     *"open-ended-note-scanner"*"scanner_fixture_positive.md"*)
-        emit_note_report "positive" "cargo run -p ffs-harness -- open-ended-note-scanner --source tests/open-ended-inventory/scanner_fixture_positive.md"
+        emit_note_report "positive" "cargo run -p ffs-ops -- open-ended-note-scanner --source tests/open-ended-inventory/scanner_fixture_positive.md"
         finish_success
         ;;
     *"open-ended-note-scanner"*"scanner_fixture_negative.md"*)
-        emit_note_report "negative" "cargo run -p ffs-harness -- open-ended-note-scanner --source tests/open-ended-inventory/scanner_fixture_negative.md"
+        emit_note_report "negative" "cargo run -p ffs-ops -- open-ended-note-scanner --source tests/open-ended-inventory/scanner_fixture_negative.md"
         finish_failure 1
         ;;
     *"open-ended-note-scanner"*"FUZZ_AND_CONFORMANCE_INVENTORY.md"*)
-        emit_note_report "real" "cargo run -p ffs-harness -- open-ended-note-scanner --source docs/reports/FUZZ_AND_CONFORMANCE_INVENTORY.md"
+        emit_note_report "real" "cargo run -p ffs-ops -- open-ended-note-scanner --source docs/reports/FUZZ_AND_CONFORMANCE_INVENTORY.md"
         finish_success
         ;;
     *"validate-source-scope-manifest"*"--remove-source-family tests"*)
@@ -409,11 +409,11 @@ REAL_LOG="$E2E_LOG_DIR/open_ended_note_real_inventory.log"
 SOURCE_SCOPE_LOG="$E2E_LOG_DIR/source_scope_manifest_real_workspace.log"
 SOURCE_SCOPE_NEGATIVE_LOG="$E2E_LOG_DIR/source_scope_manifest_missing_tests.log"
 SOURCE_SCOPE_DIRTY_SNAPSHOT="$REPO_ROOT/crates/ffs-harness/src/snapshots/ffs_harness__open_ended_inventory__tests__source_scope_scan_report_json_shape.snap"
-POSITIVE_REPRO_COMMAND="cargo run -p ffs-harness -- open-ended-note-scanner --source tests/open-ended-inventory/scanner_fixture_positive.md"
-NEGATIVE_REPRO_COMMAND="cargo run -p ffs-harness -- open-ended-note-scanner --source tests/open-ended-inventory/scanner_fixture_negative.md"
-REAL_REPRO_COMMAND="cargo run -p ffs-harness -- open-ended-note-scanner --source docs/reports/FUZZ_AND_CONFORMANCE_INVENTORY.md"
+POSITIVE_REPRO_COMMAND="cargo run -p ffs-ops -- open-ended-note-scanner --source tests/open-ended-inventory/scanner_fixture_positive.md"
+NEGATIVE_REPRO_COMMAND="cargo run -p ffs-ops -- open-ended-note-scanner --source tests/open-ended-inventory/scanner_fixture_negative.md"
+REAL_REPRO_COMMAND="cargo run -p ffs-ops -- open-ended-note-scanner --source docs/reports/FUZZ_AND_CONFORMANCE_INVENTORY.md"
 
-HARNESS_CMD=(env "CARGO_TARGET_DIR=$CARGO_TARGET_DIR" cargo run --quiet -p ffs-harness --)
+HARNESS_CMD=(env "CARGO_TARGET_DIR=$CARGO_TARGET_DIR" cargo run --quiet -p ffs-ops --)
 
 run_harness() {
     local log_path="$1"
@@ -490,8 +490,8 @@ e2e_assert_file "$POSITIVE_FIXTURE"
 e2e_assert_file "$NEGATIVE_FIXTURE"
 e2e_assert_file "$REAL_INVENTORY"
 e2e_assert_file "$SOURCE_SCOPE_MANIFEST"
-if grep -q "open-ended-note-scanner" "$REPO_ROOT/crates/ffs-harness/src/main.rs" \
-    && grep -q "validate-source-scope-manifest" "$REPO_ROOT/crates/ffs-harness/src/main.rs"; then
+if grep -q "open-ended-note-scanner" "$REPO_ROOT/tools/ffs-ops/src/main.rs" \
+    && grep -q "validate-source-scope-manifest" "$REPO_ROOT/tools/ffs-ops/src/main.rs"; then
     scenario_result "open_ended_note_scanner_inputs_present" "PASS" "fixtures, inventory doc, source-scope manifest, and CLI commands are present"
 else
     scenario_result "open_ended_note_scanner_inputs_present" "FAIL" "CLI command missing"
@@ -726,7 +726,7 @@ if report["source_count"] != len(required_families):
 families = {source["source_family"] for source in report["scanned_sources"]}
 if families != required_families:
     raise SystemExit(f"source-scope families drifted: {sorted(families)}")
-if not report["reproduction_command"].startswith("cargo run -p ffs-harness -- validate-source-scope-manifest"):
+if not report["reproduction_command"].startswith("cargo run -p ffs-ops -- validate-source-scope-manifest"):
     raise SystemExit("source-scope report did not preserve reproduction command")
 for source in report["scanned_sources"]:
     for field in [

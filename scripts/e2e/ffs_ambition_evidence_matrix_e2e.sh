@@ -344,7 +344,7 @@ emit_json_report() {
   "generated_artifact_paths": [
     "artifacts/fixture/ambition_evidence_matrix.json"
   ],
-  "reproduction_command": "cargo run -p ffs-harness -- validate-ambition-evidence-matrix --issues .beads/issues.jsonl"
+  "reproduction_command": "cargo run -p ffs-ops -- validate-ambition-evidence-matrix --issues .beads/issues.jsonl"
 }
 JSON
 }
@@ -499,14 +499,14 @@ e2e_log "RCH input directory: $RCH_INPUT_DIR"
 
 e2e_step "Scenario 1: module and CLI are wired"
 if grep -q "pub mod ambition_evidence_matrix" crates/ffs-harness/src/lib.rs \
-    && grep -q "validate-ambition-evidence-matrix" crates/ffs-harness/src/main.rs; then
+    && grep -q "validate-ambition-evidence-matrix" tools/ffs-ops/src/main.rs; then
     scenario_result "ambition_matrix_wired" "PASS" "module and CLI command exported"
 else
     scenario_result "ambition_matrix_wired" "FAIL" "missing module export or CLI command"
 fi
 
 e2e_step "Scenario 2: CLI renders report"
-if run_rch_capture "$REPORT_RAW" cargo run --quiet -p ffs-harness -- validate-ambition-evidence-matrix \
+if run_rch_capture "$REPORT_RAW" cargo run --quiet -p ffs-ops -- validate-ambition-evidence-matrix \
     --issues "$RCH_ISSUES_JSONL"; then
     if python3 - "$REPORT_RAW" "$REPORT_JSON" <<'PY'
 import json
@@ -717,7 +717,7 @@ for dest in (local_dest, rch_dest):
     with open(dest, "w", encoding="utf-8") as out:
         out.write(payload)
 PY
-if run_rch_capture "$STALE_RAW" cargo run --quiet -p ffs-harness -- validate-ambition-evidence-matrix \
+if run_rch_capture "$STALE_RAW" cargo run --quiet -p ffs-ops -- validate-ambition-evidence-matrix \
     --issues "$RCH_STALE_ISSUES_JSONL"; then
     scenario_result "ambition_matrix_stale_reference_fails" "FAIL" "stale reference unexpectedly passed"
 elif grep -q "bd-rchk0.5.14" "$STALE_RAW"; then
@@ -746,7 +746,7 @@ for dest in (local_dest, rch_dest):
     with open(dest, "w", encoding="utf-8") as out:
         out.write(payload)
 PY
-if run_rch_capture "$MISSING_ARTIFACT_RAW" cargo run --quiet -p ffs-harness -- validate-ambition-evidence-matrix \
+if run_rch_capture "$MISSING_ARTIFACT_RAW" cargo run --quiet -p ffs-ops -- validate-ambition-evidence-matrix \
     --issues "$RCH_MISSING_ARTIFACT_JSONL"; then
     scenario_result "ambition_matrix_missing_artifact_fails" "FAIL" "missing artifact unexpectedly passed"
 elif grep -q "artifact_path" "$MISSING_ARTIFACT_RAW"; then

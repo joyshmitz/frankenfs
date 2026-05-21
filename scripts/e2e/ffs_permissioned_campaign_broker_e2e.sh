@@ -279,7 +279,7 @@ run_harness() {
 
     if [[ -z "$manifest_path" ]]; then
         printf '%s\n' "run_harness requires --manifest" >"$stderr_path"
-        record_command "$scenario_id" 2 "cargo run --quiet -p ffs-harness" "$stdout_path" "$stderr_path"
+        record_command "$scenario_id" 2 "cargo run --quiet -p ffs-ops" "$stdout_path" "$stderr_path"
         return 2
     fi
 
@@ -296,9 +296,9 @@ run_harness() {
 
     json_raw="${stdout_path}.json.rch.log"
     markdown_raw="${stdout_path}.markdown.rch.log"
-    command_text="$(quote_command "${RCH_BIN:-rch}" exec -- cargo run --quiet -p ffs-harness -- "${base_args[@]}")"
+    command_text="$(quote_command "${RCH_BIN:-rch}" exec -- cargo run --quiet -p ffs-ops -- "${base_args[@]}")"
 
-    run_rch_capture "$json_raw" cargo run --quiet -p ffs-harness -- "${base_args[@]}" || status=$?
+    run_rch_capture "$json_raw" cargo run --quiet -p ffs-ops -- "${base_args[@]}" || status=$?
     cp "$json_raw" "$stderr_path"
 
     if extract_report_json "$json_raw" "$stdout_path"; then
@@ -313,7 +313,7 @@ run_harness() {
     fi
 
     if [[ "$status" -eq 0 && -n "$summary_out_path" ]]; then
-        if run_rch_capture "$markdown_raw" cargo run --quiet -p ffs-harness -- "${base_args[@]}" --format markdown; then
+        if run_rch_capture "$markdown_raw" cargo run --quiet -p ffs-ops -- "${base_args[@]}" --format markdown; then
             if ! extract_report_markdown "$markdown_raw" "$summary_out_path"; then
                 status=1
             fi
@@ -467,9 +467,9 @@ SWARM_MISSING_INPUTS_JSON="$BLOCKER_DIR/swarm_missing_inputs.json"
 printf 'created_at\tscenario_id\texit_status\tcommand\tstdout_path\tstderr_path\tworker_identity\n' >"$COMMAND_TRANSCRIPT"
 
 e2e_step "Scenario 1: broker CLI is wired"
-if grep -q "validate-permissioned-campaign-broker" crates/ffs-harness/src/main.rs \
-    && grep -q "generate-permissioned-campaign-packet" crates/ffs-harness/src/main.rs \
-    && grep -q "validate-swarm-capability-calibration" crates/ffs-harness/src/main.rs \
+if grep -q "validate-permissioned-campaign-broker" tools/ffs-ops/src/main.rs \
+    && grep -q "generate-permissioned-campaign-packet" tools/ffs-ops/src/main.rs \
+    && grep -q "validate-swarm-capability-calibration" tools/ffs-ops/src/main.rs \
     && grep -q "pub mod permissioned_campaign_broker" crates/ffs-harness/src/lib.rs; then
     scenario_result "permissioned_broker_cli_wired" "PASS" "validator, packet generator, and calibration CLI are exported"
 else
