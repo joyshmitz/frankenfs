@@ -116,38 +116,39 @@ impl WriteDependencyDag {
     ///
     /// This is the order in which nodes must be flushed to maintain WB-I1.
     pub fn reverse_topological_order(&self) -> Vec<u64> {
-        // Kahn's algorithm: start from nodes with no children (leaves)
-        let mut in_degree: BTreeMap<u64, usize> = BTreeMap::new();
-        let mut parent_of: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
-
-        for (block, node) in &self.nodes {
-            in_degree.entry(*block).or_insert(0);
-            for child in &node.children {
-                *in_degree.entry(*child).or_insert(0) += 1;
-                parent_of.entry(*child).or_default().push(*block);
-            }
-        }
-
-        // Start with leaves (children in the DAG, which have in_degree from parents)
-        // Actually for reverse topo, we want nodes whose children are all processed
-        // Reframe: edges go parent -> child, we want reverse order (children first)
-
-        // Simpler approach: compute levels and sort
-        let mut by_level: BTreeMap<u8, Vec<u64>> = BTreeMap::new();
-        for (block, node) in &self.nodes {
-            by_level.entry(node.level).or_default().push(*block);
-        }
-
         let mut result = Vec::with_capacity(self.nodes.len());
-        // Levels 0 (leaves) first, then 1, 2, etc.
-        for level in by_level.keys() {
-            if let Some(blocks) = by_level.get(level) {
-                result.extend(blocks.iter().copied());
-            }
+        let mut visited = BTreeSet::new();
+
+        self.push_postorder(self.root, &mut visited, &mut result);
+
+        // Robustness for malformed in-memory DAGs: include any nodes not
+        // reachable from the recorded root, still preserving child-before-parent
+        // order within each reachable component.
+        for block in self.nodes.keys().copied() {
+            self.push_postorder(block, &mut visited, &mut result);
         }
 
-        trace!(order_len = result.len(), "writeback dag reverse_topological_order");
+        trace!(
+            order_len = result.len(),
+            "writeback dag reverse_topological_order"
+        );
         result
+    }
+
+    fn push_postorder(&self, block: u64, visited: &mut BTreeSet<u64>, result: &mut Vec<u64>) {
+        if !visited.insert(block) {
+            return;
+        }
+
+        let Some(node) = self.nodes.get(&block) else {
+            return;
+        };
+
+        for child in &node.children {
+            self.push_postorder(*child, visited, result);
+        }
+
+        result.push(block);
     }
 
     /// Mark a node as durable after it has been successfully flushed.
@@ -237,7 +238,10 @@ impl WbI1Oracle {
                 }
             }
         }
-        debug!(durable_count = self.durable_blocks.len(), "wb_i1 check passed");
+        debug!(
+            durable_count = self.durable_blocks.len(),
+            "wb_i1 check passed"
+        );
         Ok(())
     }
 
@@ -296,8 +300,7 @@ impl WbI2Oracle {
 
     /// Check WB-I2: observed generation must be pre or post, not torn.
     pub fn check(&self, observed_generation: u64) -> Result<(), WbI2Violation> {
-        if observed_generation == self.pre_generation
-            || observed_generation == self.post_generation
+        if observed_generation == self.pre_generation || observed_generation == self.post_generation
         {
             debug!(
                 observed = observed_generation,
@@ -354,7 +357,11 @@ pub struct CrashPoint {
 
 impl CrashPoint {
     /// Create a crash point from a DAG's current state.
-    pub fn from_dag(dag: &WriteDependencyDag, id: impl Into<String>, superblock_durable: bool) -> Self {
+    pub fn from_dag(
+        dag: &WriteDependencyDag,
+        id: impl Into<String>,
+        superblock_durable: bool,
+    ) -> Self {
         let durable_blocks = dag
             .nodes
             .iter()
@@ -433,33 +440,21 @@ impl WritebackExecutor {
 
     /// Issue fsync barrier before superblock write.
     pub fn fsync_barrier(&mut self) {
-        self.crash_points.push(CrashPoint::from_dag(
-            &self.dag,
-            "pre_fsync_barrier",
-            false,
-        ));
+        self.crash_points
+            .push(CrashPoint::from_dag(&self.dag, "pre_fsync_barrier", false));
         self.fsync_barrier_issued = true;
-        self.crash_points.push(CrashPoint::from_dag(
-            &self.dag,
-            "post_fsync_barrier",
-            false,
-        ));
+        self.crash_points
+            .push(CrashPoint::from_dag(&self.dag, "post_fsync_barrier", false));
         debug!("writeback executor fsync barrier issued");
     }
 
     /// Record superblock commit.
     pub fn commit_superblock(&mut self) {
-        self.crash_points.push(CrashPoint::from_dag(
-            &self.dag,
-            "pre_superblock",
-            false,
-        ));
+        self.crash_points
+            .push(CrashPoint::from_dag(&self.dag, "pre_superblock", false));
         // After superblock write, the commit is durable
-        self.crash_points.push(CrashPoint::from_dag(
-            &self.dag,
-            "post_superblock",
-            true,
-        ));
+        self.crash_points
+            .push(CrashPoint::from_dag(&self.dag, "post_superblock", true));
         debug!(
             generation = self.dag.generation,
             "writeback executor superblock committed"
@@ -542,6 +537,71 @@ mod tests {
     }
 
     #[test]
+    fn reverse_topological_order_preserves_internal_child_dependencies() {
+        let generation = 100;
+        let mut nodes = BTreeMap::new();
+        nodes.insert(
+            10,
+            DagNode {
+                block: 10,
+                level: 2,
+                generation,
+                children: vec![20],
+                durable: false,
+            },
+        );
+        nodes.insert(
+            20,
+            DagNode {
+                block: 20,
+                level: 1,
+                generation,
+                children: vec![30],
+                durable: false,
+            },
+        );
+        nodes.insert(
+            30,
+            DagNode {
+                block: 30,
+                level: 0,
+                generation,
+                children: Vec::new(),
+                durable: false,
+            },
+        );
+        let dag = WriteDependencyDag {
+            nodes,
+            root: 10,
+            generation,
+        };
+
+        let order = dag.reverse_topological_order();
+
+        assert_eq!(
+            order,
+            vec![30, 20, 10],
+            "every child must flush before the parent that references it"
+        );
+        for (parent, node) in &dag.nodes {
+            let parent_pos = order
+                .iter()
+                .position(|block| block == parent)
+                .expect("parent block appears in order");
+            for child in &node.children {
+                let child_pos = order
+                    .iter()
+                    .position(|block| block == child)
+                    .expect("child block appears in order");
+                assert!(
+                    child_pos < parent_pos,
+                    "child block {child} must precede parent block {parent}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn wb_i1_oracle_passes_for_empty_durable_set() {
         let tree = make_test_tree();
         let dag = WriteDependencyDag::from_cow_tree(&tree, 100).expect("build dag");
@@ -565,7 +625,10 @@ mod tests {
             .collect();
 
         let oracle = WbI1Oracle::new(leaves);
-        assert!(oracle.check(&dag).is_ok(), "leaves-only should satisfy WB-I1");
+        assert!(
+            oracle.check(&dag).is_ok(),
+            "leaves-only should satisfy WB-I1"
+        );
     }
 
     #[test]
@@ -587,7 +650,10 @@ mod tests {
             let oracle = WbI1Oracle::new(durable);
 
             let result = oracle.check(&dag);
-            assert!(result.is_err(), "parent without durable children should fail WB-I1");
+            assert!(
+                result.is_err(),
+                "parent without durable children should fail WB-I1"
+            );
         }
     }
 
