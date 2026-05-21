@@ -155,12 +155,40 @@ fn check_xfstests_capability() -> Result<(), String> {
         "third_party/xfstests-dev/check",
         "/opt/xfstests-dev/check",
     ];
+    let mut xfstests_found = false;
     for path in &xfstests_paths {
         if std::path::Path::new(path).exists() {
-            return Ok(());
+            xfstests_found = true;
+            break;
         }
     }
-    Err("xfstests not available (checked third_party/xfstests-dev/check and /opt/xfstests-dev/check)".to_string())
+    if !xfstests_found {
+        return Err("xfstests not available (checked third_party/xfstests-dev/check and /opt/xfstests-dev/check)".to_string());
+    }
+
+    let mut missing = Vec::new();
+
+    let fsstress = std::process::Command::new("which")
+        .arg("fsstress")
+        .output();
+    if !matches!(fsstress, Ok(ref o) if o.status.success()) {
+        missing.push("fsstress (from ltp-fsstress)");
+    }
+
+    let test_dir = std::env::var("TEST_DIR").ok();
+    let scratch_mnt = std::env::var("SCRATCH_MNT").ok();
+    if test_dir.is_none() || scratch_mnt.is_none() {
+        missing.push("TEST_DIR and SCRATCH_MNT environment variables");
+    }
+
+    if !missing.is_empty() {
+        return Err(format!(
+            "xfstests prerequisites missing: {}; set up xfstests environment or run via ffs_xfstests_preflight_e2e.sh",
+            missing.join(", ")
+        ));
+    }
+
+    Ok(())
 }
 
 /// Permissioned lanes that require explicit ACK environment variables.
@@ -526,5 +554,46 @@ mod tests {
         assert!(json.contains("\"command\":\"echo\""));
         assert!(json.contains("\"stdout_sha256\":"));
         assert!(json.contains("\"git_sha\":"));
+    }
+
+    #[test]
+    fn find_permissioned_lane_command_returns_xfstests() {
+        assert!(find_permissioned_lane_command("xfstests").is_some());
+        assert!(find_permissioned_lane_command("nonexistent").is_none());
+    }
+
+    #[test]
+    fn permissioned_lane_commands_have_correct_structure() {
+        for lane_cmd in PERMISSIONED_LANE_COMMANDS {
+            assert!(!lane_cmd.lane_id.is_empty());
+            assert!(!lane_cmd.command.is_empty());
+            assert!(
+                lane_cmd.capability_check.is_some(),
+                "permissioned lanes require capability checks"
+            );
+        }
+    }
+
+    #[test]
+    fn xfstests_lane_has_capability_check() {
+        let xfstests_lane = find_permissioned_lane_command("xfstests")
+            .expect("xfstests lane must exist");
+        assert_eq!(xfstests_lane.lane_id, "xfstests");
+        assert!(xfstests_lane.command.contains("xfstests"));
+        assert!(xfstests_lane.capability_check.is_some());
+    }
+
+    #[test]
+    fn xfstests_lane_skips_when_prerequisites_missing() {
+        let result = execute_xfstests_lane();
+        assert_eq!(result.lane_id, "xfstests");
+        assert!(
+            result.outcome == ProofBundleOutcome::Skip,
+            "xfstests lane should skip when prerequisites missing; got outcome={:?} summary={}",
+            result.outcome,
+            result.summary
+        );
+        assert!(result.evidence.outcome.is_skipped());
+        assert!(result.summary.contains("skipped"));
     }
 }
