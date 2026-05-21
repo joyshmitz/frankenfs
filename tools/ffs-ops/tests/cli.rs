@@ -19,6 +19,7 @@ fn help_lists_relocated_ops_commands() {
         "validate-docs-status-drift",
         "validate-report-schema-inventory",
         "validate-permissioned-campaign-broker",
+        "harness-loc-growth-guard",
     ] {
         assert!(stdout.contains(command), "missing command: {command}");
     }

@@ -19,6 +19,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@nightly
@@ -95,6 +97,10 @@ jobs:
 
       - name: Check
         run: cargo check --all-targets
+
+      - name: Harness LOC growth guard
+        if: github.event_name == 'pull_request'
+        run: cargo run -p ffs-ops -- harness-loc-growth-guard --base origin/${{ github.base_ref }} --head HEAD --format github
 
       - name: Unit tests
         run: cargo test --workspace

@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+mod harness_loc_guard;
+
 use anyhow::{Context, Result, bail};
 use ffs_harness::{
     ambition_evidence_matrix::{
@@ -41,15 +43,26 @@ use ffs_harness::{
         render_report_schema_inventory_markdown, validate_report_schema_inventory,
     },
 };
+use harness_loc_guard::{
+    HarnessLocGuardConfig, render_harness_loc_guard_github, render_harness_loc_guard_json,
+    render_harness_loc_guard_text, run_harness_loc_guard,
+};
 use std::env;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OutputFormat {
     Json,
     Markdown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HarnessLocGuardOutputFormat {
+    Github,
+    Json,
+    Text,
 }
 
 #[derive(Debug)]
@@ -93,8 +106,92 @@ fn run() -> Result<()> {
         "validate-permissioned-campaign-ledger" => validate_permissioned_campaign_ledger_cmd(rest),
         "generate-permissioned-campaign-packet" => generate_permissioned_campaign_packet_cmd(rest),
         "validate-swarm-capability-calibration" => validate_swarm_capability_calibration_cmd(rest),
+        "harness-loc-growth-guard" => harness_loc_growth_guard_cmd(rest),
         other => bail!("unknown ffs-ops command: {other}"),
     }
+}
+
+fn harness_loc_growth_guard_cmd(args: &[String]) -> Result<()> {
+    let mut workspace_root = ".".to_owned();
+    let mut census_path = "crates/ffs-harness/module_census.json".to_owned();
+    let mut base_ref = env::var("GITHUB_BASE_REF")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .map(|base| format!("origin/{base}"))
+        .unwrap_or_else(|| "HEAD^".to_owned());
+    let mut head_ref = "HEAD".to_owned();
+    let mut out_path = None;
+    let mut format = HarnessLocGuardOutputFormat::Github;
+    let mut fail_on_warning = false;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--workspace-root" => {
+                workspace_root = require_value(args, i, "--workspace-root")?.to_owned();
+                i += 2;
+            }
+            "--census" => {
+                census_path = require_value(args, i, "--census")?.to_owned();
+                i += 2;
+            }
+            "--base" => {
+                base_ref = require_value(args, i, "--base")?.to_owned();
+                i += 2;
+            }
+            "--head" => {
+                head_ref = require_value(args, i, "--head")?.to_owned();
+                i += 2;
+            }
+            "--out" => {
+                out_path = Some(require_value(args, i, "--out")?.to_owned());
+                i += 2;
+            }
+            "--format" => {
+                format =
+                    parse_harness_loc_guard_output_format(require_value(args, i, "--format")?)?;
+                i += 2;
+            }
+            "--fail-on-warning" => {
+                fail_on_warning = true;
+                i += 1;
+            }
+            "--help" | "-h" => {
+                print_harness_loc_growth_guard_usage();
+                return Ok(());
+            }
+            other => bail!("unknown harness-loc-growth-guard argument: {other}"),
+        }
+    }
+
+    let workspace_root = PathBuf::from(workspace_root);
+    let census_path = resolve_workspace_path(&workspace_root, &census_path);
+    let report = run_harness_loc_guard(&HarnessLocGuardConfig {
+        workspace_root,
+        census_path,
+        base_ref,
+        head_ref,
+    })?;
+    let output = match format {
+        HarnessLocGuardOutputFormat::Github => render_harness_loc_guard_github(&report),
+        HarnessLocGuardOutputFormat::Json => render_harness_loc_guard_json(&report)?,
+        HarnessLocGuardOutputFormat::Text => render_harness_loc_guard_text(&report),
+    };
+    if let Some(path) = out_path {
+        write_text_file(Path::new(&path), &format!("{output}\n"))?;
+        println!("harness LOC growth guard report written: {path}");
+    } else {
+        println!("{output}");
+    }
+    if report.warning && fail_on_warning {
+        bail!(
+            "{}",
+            report
+                .warning_message
+                .as_deref()
+                .unwrap_or("harness LOC growth guard warning")
+        );
+    }
+    Ok(())
 }
 
 fn validate_open_ended_inventory_cmd(args: &[String]) -> Result<()> {
@@ -971,6 +1068,24 @@ fn parse_output_format(raw: &str) -> Result<OutputFormat> {
     }
 }
 
+fn parse_harness_loc_guard_output_format(raw: &str) -> Result<HarnessLocGuardOutputFormat> {
+    match raw {
+        "github" => Ok(HarnessLocGuardOutputFormat::Github),
+        "json" => Ok(HarnessLocGuardOutputFormat::Json),
+        "text" => Ok(HarnessLocGuardOutputFormat::Text),
+        other => bail!("invalid --format value: {other}"),
+    }
+}
+
+fn resolve_workspace_path(workspace_root: &Path, path: &str) -> PathBuf {
+    let path = Path::new(path);
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        workspace_root.join(path)
+    }
+}
+
 fn write_text_file(path: &Path, text: &str) -> Result<()> {
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
@@ -1019,6 +1134,7 @@ fn print_usage() {
     println!("  validate-permissioned-campaign-ledger");
     println!("  generate-permissioned-campaign-packet");
     println!("  validate-swarm-capability-calibration");
+    println!("  harness-loc-growth-guard");
 }
 
 fn print_open_ended_inventory_usage() {
@@ -1074,6 +1190,12 @@ fn print_permissioned_campaign_packet_usage() {
 fn print_swarm_capability_calibration_usage() {
     println!(
         "Usage: ffs-ops validate-swarm-capability-calibration --manifest FILE [--format json|markdown] [--out FILE] [--summary-out FILE] [--reference-timestamp TS]"
+    );
+}
+
+fn print_harness_loc_growth_guard_usage() {
+    println!(
+        "Usage: ffs-ops harness-loc-growth-guard [--workspace-root DIR] [--census FILE] [--base REF] [--head REF] [--format github|json|text] [--out FILE] [--fail-on-warning]"
     );
 }
 
