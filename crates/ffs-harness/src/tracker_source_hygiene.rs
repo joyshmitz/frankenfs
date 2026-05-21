@@ -3500,4 +3500,141 @@ mod tests {
         );
         Ok(())
     }
+
+    // H2: bridge beads become the live br ready queue
+
+    #[test]
+    fn h2_bridge_beads_appear_in_ready_queue() -> Result<(), String> {
+        // H2: Bridge beads should appear in the ready queue when unblocked
+        let issues = [
+            line(&serde_json::json!({
+                "id": "bd-xuo95",
+                "title": "Reality-check bridge epic",
+                "status": "open",
+                "issue_type": "epic",
+                "priority": 1
+            }))?,
+            line(&serde_json::json!({
+                "id": "bd-xuo95.1",
+                "title": "Bridge child bead 1",
+                "status": "open",
+                "priority": 1
+            }))?,
+            line(&serde_json::json!({
+                "id": "bd-xuo95.2",
+                "title": "Bridge child bead 2",
+                "status": "open",
+                "priority": 2
+            }))?,
+        ]
+        .join("\n");
+
+        let report =
+            analyze_tracker_source_hygiene(&issues, &config()).map_err(|err| err.to_string())?;
+
+        // Bridge beads should be claimable
+        assert!(
+            report.source_aware_queue_state.claimable_count >= 2,
+            "bridge child beads should be claimable"
+        );
+        assert!(
+            report.source_aware_queue_state.claimable_ids.contains(&"bd-xuo95.1".to_owned()),
+            "bd-xuo95.1 should be claimable"
+        );
+        assert!(
+            report.source_aware_queue_state.claimable_ids.contains(&"bd-xuo95.2".to_owned()),
+            "bd-xuo95.2 should be claimable"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn h2_in_progress_beads_tracked_separately() -> Result<(), String> {
+        // H2: In-progress beads should be tracked, not counted as "all work complete"
+        let issues = [
+            line(&serde_json::json!({
+                "id": "bd-work1",
+                "title": "Work in progress",
+                "status": "in_progress",
+                "priority": 1
+            }))?,
+            line(&serde_json::json!({
+                "id": "bd-work2",
+                "title": "Open work",
+                "status": "open",
+                "priority": 1
+            }))?,
+        ]
+        .join("\n");
+
+        let report =
+            analyze_tracker_source_hygiene(&issues, &config()).map_err(|err| err.to_string())?;
+
+        // In-progress beads should be tracked
+        assert_eq!(
+            report.source_aware_queue_state.local_in_progress_count, 1,
+            "should track 1 in_progress bead"
+        );
+        // Open beads should still be claimable
+        assert_eq!(
+            report.source_aware_queue_state.claimable_count, 1,
+            "should have 1 claimable bead"
+        );
+        // local_open_count is just status=open rows (not in_progress)
+        assert_eq!(
+            report.source_aware_queue_state.local_open_count, 1,
+            "local_open_count should be 1 (only status=open)"
+        );
+        // Combined open + in_progress shows no false "all work complete"
+        assert!(
+            report.source_aware_queue_state.local_open_count
+                + report.source_aware_queue_state.local_in_progress_count
+                == 2,
+            "total work (open + in_progress) should be 2"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn h2_no_false_all_work_complete_with_open_p0() -> Result<(), String> {
+        // H2: Queue state should NOT show "ready" verdict when only P0 blocked work exists
+        let issues = [
+            line(&serde_json::json!({
+                "id": "bd-p0-blocker",
+                "title": "P0 blocker",
+                "status": "open",
+                "priority": 0
+            }))?,
+            line(&serde_json::json!({
+                "id": "bd-blocked",
+                "title": "Blocked by P0",
+                "status": "open",
+                "priority": 1,
+                "dependencies": [
+                    {"type": "blocks", "depends_on_id": "bd-p0-blocker"}
+                ]
+            }))?,
+        ]
+        .join("\n");
+
+        let report =
+            analyze_tracker_source_hygiene(&issues, &config()).map_err(|err| err.to_string())?;
+
+        // P0 blocker should be claimable (it's not blocked)
+        assert!(
+            report.source_aware_queue_state.claimable_ids.contains(&"bd-p0-blocker".to_owned()),
+            "P0 blocker should be claimable"
+        );
+        // Blocked bead should be in blocked list
+        assert!(
+            report.source_aware_queue_state.blocked_local_count >= 1,
+            "should have at least 1 blocked bead"
+        );
+        // Queue should show ready (P0 is claimable)
+        assert_eq!(
+            report.source_aware_queue_state.verdict, "ready",
+            "verdict should be ready when P0 is claimable"
+        );
+        Ok(())
+    }
 }
