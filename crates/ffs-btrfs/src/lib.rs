@@ -14167,7 +14167,7 @@ mod tests {
         let parsed_orig = BtrfsSuperblock::parse_superblock_region(&original).expect("parse orig");
         assert_eq!(parsed_orig.generation, 100, "pre-commit generation is g=100");
 
-        let mut committed = original.clone();
+        let mut committed = original;
         BtrfsSuperblock::patch_commit(&mut committed, 0x30000, 1, 101);
         verify_btrfs_superblock_checksum(&committed).expect("committed checksum valid");
         let parsed_new = BtrfsSuperblock::parse_superblock_region(&committed).expect("parse new");

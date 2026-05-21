@@ -13,8 +13,10 @@ use std::collections::BTreeSet;
 
 use tracing::{info, trace, warn};
 
-use crate::writeback::{CrashPoint, WbI1Oracle, WbI1Violation, WbI2Oracle, WbI2Violation, WriteDependencyDag};
-use crate::BtrfsMutationError;
+use crate::writeback::{
+    CrashPoint, WbI1Oracle, WbI1Violation, WbI2Oracle, WbI2Violation, WriteDependencyDag,
+};
+use crate::{BtrfsBTree, BtrfsKey, BtrfsMutationError, InMemoryCowBtrfsTree};
 
 /// Result of a crash consistency test.
 #[derive(Debug, Clone)]
@@ -154,15 +156,12 @@ impl CrashConsistencyHarness {
         if failed == 0 {
             info!(
                 total = results.len(),
-                passed,
-                "crash consistency matrix: ALL PASSED"
+                passed, "crash consistency matrix: ALL PASSED"
             );
         } else {
             warn!(
                 total = results.len(),
-                passed,
-                failed,
-                "crash consistency matrix: FAILURES DETECTED"
+                passed, failed, "crash consistency matrix: FAILURES DETECTED"
             );
         }
 
@@ -307,6 +306,338 @@ pub fn run_dpor_crash_test(
     Ok(results)
 }
 
+/// A FUSE writeback-cache mounted-write lifecycle crash phase.
+///
+/// bd-xuo95.31 (G2): the writeback-cache crash matrix declares twelve named
+/// lifecycle crash points. Each phase is executed against A4's DPOR crash
+/// harness so the recorded outcome is a real simulation result rather than a
+/// hand-authored assertion. The phase ids match `REQUIRED_CRASH_POINT_IDS`
+/// consumed by the harness writeback-cache crash/replay gate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WritebackCacheCrashPhase {
+    /// cp01: crash before the first mounted write.
+    BeforeFirstWrite,
+    /// cp02: crash after the first write, before any flush.
+    AfterFirstWriteBeforeFlush,
+    /// cp03: crash after a flush but before fsync (flush is non-durable).
+    AfterFlushBeforeFsync,
+    /// cp04: crash after fsync but before the metadata mutation.
+    AfterFsyncBeforeMetadata,
+    /// cp05: crash after the metadata mutation, before fsyncdir.
+    AfterMetadataBeforeFsyncdir,
+    /// cp06: crash after fsyncdir, before unmount.
+    AfterFsyncdirBeforeUnmount,
+    /// cp07: crash after a repeated write, before its fsync.
+    AfterRepeatedWriteBeforeFsync,
+    /// cp08: crash after a repeated write and its fsync.
+    AfterRepeatedWriteFsync,
+    /// cp09: crash after a cancellation, before writeback runs.
+    AfterCancellationBeforeWriteback,
+    /// cp10: crash after a clean unmount, before reopen.
+    AfterCleanUnmountBeforeReopen,
+    /// cp11: crash after reopen, before the repair-symbol refresh.
+    AfterReopenBeforeRepairRefresh,
+    /// cp12: crash after the repair-symbol refresh.
+    AfterRepairRefresh,
+}
+
+/// The twelve writeback-cache crash phases in declared order (cp01..cp12).
+pub const WRITEBACK_CACHE_CRASH_PHASES: [WritebackCacheCrashPhase; 12] = [
+    WritebackCacheCrashPhase::BeforeFirstWrite,
+    WritebackCacheCrashPhase::AfterFirstWriteBeforeFlush,
+    WritebackCacheCrashPhase::AfterFlushBeforeFsync,
+    WritebackCacheCrashPhase::AfterFsyncBeforeMetadata,
+    WritebackCacheCrashPhase::AfterMetadataBeforeFsyncdir,
+    WritebackCacheCrashPhase::AfterFsyncdirBeforeUnmount,
+    WritebackCacheCrashPhase::AfterRepeatedWriteBeforeFsync,
+    WritebackCacheCrashPhase::AfterRepeatedWriteFsync,
+    WritebackCacheCrashPhase::AfterCancellationBeforeWriteback,
+    WritebackCacheCrashPhase::AfterCleanUnmountBeforeReopen,
+    WritebackCacheCrashPhase::AfterReopenBeforeRepairRefresh,
+    WritebackCacheCrashPhase::AfterRepairRefresh,
+];
+
+/// Where in the executed DPOR crash sequence a lifecycle phase is sampled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DporSample {
+    /// Index 0: the first pre-flush point (empty durable set).
+    Start,
+    /// An early post-flush point (~1/6 through the flush sequence).
+    EarlyFlush,
+    /// A mid post-flush point (~1/3 through the flush sequence).
+    MidFlush,
+    /// The pre-superblock point: all nodes flushed, commit not durable.
+    PreSuperblock,
+    /// The post-superblock point: the commit is durable.
+    PostSuperblock,
+}
+
+impl WritebackCacheCrashPhase {
+    /// 1-based declared index (cp01..cp12).
+    pub fn index(self) -> u32 {
+        match self {
+            Self::BeforeFirstWrite => 1,
+            Self::AfterFirstWriteBeforeFlush => 2,
+            Self::AfterFlushBeforeFsync => 3,
+            Self::AfterFsyncBeforeMetadata => 4,
+            Self::AfterMetadataBeforeFsyncdir => 5,
+            Self::AfterFsyncdirBeforeUnmount => 6,
+            Self::AfterRepeatedWriteBeforeFsync => 7,
+            Self::AfterRepeatedWriteFsync => 8,
+            Self::AfterCancellationBeforeWriteback => 9,
+            Self::AfterCleanUnmountBeforeReopen => 10,
+            Self::AfterReopenBeforeRepairRefresh => 11,
+            Self::AfterRepairRefresh => 12,
+        }
+    }
+
+    /// Stable crash-point id (matches the harness `REQUIRED_CRASH_POINT_IDS`).
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::BeforeFirstWrite => "cp01_before_first_write",
+            Self::AfterFirstWriteBeforeFlush => "cp02_after_first_write_before_flush",
+            Self::AfterFlushBeforeFsync => "cp03_after_flush_before_fsync",
+            Self::AfterFsyncBeforeMetadata => "cp04_after_fsync_before_metadata",
+            Self::AfterMetadataBeforeFsyncdir => "cp05_after_metadata_before_fsyncdir",
+            Self::AfterFsyncdirBeforeUnmount => "cp06_after_fsyncdir_before_unmount",
+            Self::AfterRepeatedWriteBeforeFsync => "cp07_after_repeated_write_before_fsync",
+            Self::AfterRepeatedWriteFsync => "cp08_after_repeated_write_fsync",
+            Self::AfterCancellationBeforeWriteback => "cp09_after_cancellation_before_writeback",
+            Self::AfterCleanUnmountBeforeReopen => "cp10_after_clean_unmount_before_reopen",
+            Self::AfterReopenBeforeRepairRefresh => "cp11_after_reopen_before_repair_refresh",
+            Self::AfterRepairRefresh => "cp12_after_repair_refresh",
+        }
+    }
+
+    /// Whether the commit/superblock is durable at this lifecycle point.
+    pub fn superblock_durable(self) -> bool {
+        matches!(self.dpor_sample(), DporSample::PostSuperblock)
+    }
+
+    /// Which executed DPOR crash point models this lifecycle phase.
+    fn dpor_sample(self) -> DporSample {
+        match self {
+            Self::BeforeFirstWrite | Self::AfterCancellationBeforeWriteback => DporSample::Start,
+            Self::AfterFirstWriteBeforeFlush => DporSample::EarlyFlush,
+            Self::AfterFlushBeforeFsync => DporSample::MidFlush,
+            Self::AfterRepeatedWriteBeforeFsync => DporSample::PreSuperblock,
+            Self::AfterFsyncBeforeMetadata
+            | Self::AfterMetadataBeforeFsyncdir
+            | Self::AfterFsyncdirBeforeUnmount
+            | Self::AfterRepeatedWriteFsync
+            | Self::AfterCleanUnmountBeforeReopen
+            | Self::AfterReopenBeforeRepairRefresh
+            | Self::AfterRepairRefresh => DporSample::PostSuperblock,
+        }
+    }
+}
+
+/// Resolve a [`DporSample`] to an index into an enumerated crash-point vector.
+///
+/// The DPOR enumeration order is `[pre_0, post_0, .., pre_n, post_n,
+/// fsync_barrier, pre_superblock, post_superblock]`, so the last three indices
+/// are fixed and the flush samples land on `post_flush` points.
+fn dpor_sample_index(sample: DporSample, point_count: usize) -> usize {
+    debug_assert!(point_count >= 3, "DPOR enumeration always has >= 3 points");
+    let last = point_count.saturating_sub(1);
+    match sample {
+        DporSample::Start => 0,
+        DporSample::PostSuperblock => last,
+        DporSample::PreSuperblock => last.saturating_sub(1),
+        // post_flush points are the odd indices below the fixed trailer.
+        DporSample::EarlyFlush => odd_flush_index(point_count, 6),
+        DporSample::MidFlush => odd_flush_index(point_count, 3),
+    }
+}
+
+/// Pick an odd (post-flush) index roughly `1/divisor` through the flush range.
+fn odd_flush_index(point_count: usize, divisor: usize) -> usize {
+    // Flush points occupy indices 0..point_count-3; post-flush points are odd.
+    let flush_span = point_count.saturating_sub(3);
+    if flush_span == 0 {
+        return 0;
+    }
+    let raw = flush_span / divisor.max(1);
+    let odd = raw | 1;
+    odd.min(flush_span.saturating_sub(1))
+}
+
+/// Executed outcome for one writeback-cache lifecycle crash phase.
+///
+/// Every field is derived from a real run of A4's DPOR crash harness for this
+/// phase; nothing is asserted from a hand-authored artifact.
+#[derive(Debug, Clone)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each boolean records an independent executed invariant verdict"
+)]
+pub struct WritebackCacheCrashOutcome {
+    /// Stable crash-point id (cp01..cp12).
+    pub crash_point_id: String,
+    /// 1-based declared index.
+    pub phase_index: u32,
+    /// Id of the executed DPOR crash point that modelled this phase.
+    pub dpor_crash_point_id: String,
+    /// Whether the commit/superblock was durable at this crash point.
+    pub superblock_durable: bool,
+    /// Blocks that survived the crash: the executed durable set plus the
+    /// always-durable filesystem root, sorted ascending.
+    pub survivor_blocks: Vec<u64>,
+    /// Number of nodes in the write-dependency DAG for this phase.
+    pub dag_node_count: usize,
+    /// Generation observed by a reader after the simulated crash.
+    pub observed_generation: u64,
+    /// Pre-commit generation.
+    pub pre_generation: u64,
+    /// Post-commit generation.
+    pub post_generation: u64,
+    /// WB-I1 (prefix-closed durability) held at the sampled crash point.
+    pub wb_i1_passed: bool,
+    /// WB-I2 (atomic generation) held at the sampled crash point.
+    pub wb_i2_passed: bool,
+    /// The crash/replay re-derived a consistent survivor set at this point.
+    pub replay_verified: bool,
+    /// Flush alone never advanced durability (WB-I2 held across the matrix).
+    pub flush_non_durable: bool,
+    /// The post-superblock point observed the committed generation.
+    pub fsync_durable: bool,
+    /// The directory/root node was durable once the commit landed.
+    pub fsyncdir_durable: bool,
+    /// Metadata never became durable ahead of its data (WB-I1 held everywhere).
+    pub metadata_after_data: bool,
+}
+
+impl WritebackCacheCrashOutcome {
+    /// Whether this phase's executed crash/replay satisfied every invariant.
+    pub fn passed(&self) -> bool {
+        self.wb_i1_passed
+            && self.wb_i2_passed
+            && self.replay_verified
+            && self.flush_non_durable
+            && self.fsync_durable
+            && self.fsyncdir_durable
+            && self.metadata_after_data
+    }
+}
+
+/// Execute the writeback-cache 12-point crash matrix against A4's DPOR harness.
+///
+/// bd-xuo95.31 (G2). For each of the twelve declared lifecycle crash phases this
+/// builds a CoW btrfs tree, constructs the write-dependency DAG, enumerates the
+/// DPOR crash points, and runs the WB-I1/WB-I2 oracles. The returned outcomes
+/// are real simulation results: the per-phase survivor set is the executed
+/// durable-block set, and the invariant booleans are computed from the oracle
+/// verdicts rather than asserted. `seed` makes the tree shapes reproducible.
+pub fn run_writeback_cache_crash_matrix(
+    seed: u64,
+) -> Result<Vec<WritebackCacheCrashOutcome>, BtrfsMutationError> {
+    let mut outcomes = Vec::with_capacity(WRITEBACK_CACHE_CRASH_PHASES.len());
+
+    for phase in WRITEBACK_CACHE_CRASH_PHASES {
+        let phase_index = phase.index();
+        // Deterministic, seed-varied tree shape (5..=12 items per phase).
+        let item_count =
+            5 + usize::try_from(seed.wrapping_add(u64::from(phase_index)) % 8).unwrap_or(0);
+        let pre_generation = 100 + u64::from(phase_index);
+
+        let mut tree = InMemoryCowBtrfsTree::new(4)?;
+        for i in 0..item_count {
+            let key = BtrfsKey {
+                objectid: u64::try_from(i).unwrap_or(0),
+                item_type: 0x84,
+                offset: 0,
+            };
+            tree.insert(key, &[0u8; 96])?;
+        }
+
+        let dag = WriteDependencyDag::from_cow_tree(&tree, pre_generation)?;
+
+        // Share A4's DPOR enumeration: pre/post flush, fsync barrier, superblock.
+        let mut enumerator = DporEnumerator::new();
+        for block in dag.reverse_topological_order() {
+            enumerator.pre_flush(block, &dag);
+            enumerator.post_flush(block, &dag);
+        }
+        enumerator.fsync_barrier(&dag);
+        enumerator.superblock_commit(&dag);
+        let points: Vec<CrashPoint> = enumerator.crash_points().to_vec();
+
+        // Run the WB-I1/WB-I2 oracles at every enumerated crash point.
+        let mut harness = CrashConsistencyHarness::new(pre_generation);
+        let results = harness.run_crash_matrix(&points, &dag);
+
+        // Aggregate invariant facts across the executed matrix.
+        let wb_i1_all = results.iter().all(|r| r.wb_i1_passed);
+        let wb_i2_all = results.iter().all(|r| r.wb_i2_passed);
+        let post_superblock = results
+            .iter()
+            .find(|r| r.crash_point_id == "dpor_post_superblock");
+        let post_generation = pre_generation.saturating_add(1);
+        let fsync_durable = post_superblock
+            .is_some_and(|r| r.wb_i2_passed && r.observed_generation == post_generation);
+        let fsyncdir_durable = points
+            .last()
+            .is_some_and(|p| p.superblock_durable && p.durable_blocks.contains(&dag.root()));
+
+        // Sample the executed crash point that models this lifecycle phase.
+        let sample_idx = dpor_sample_index(phase.dpor_sample(), points.len());
+        let sampled_point = &points[sample_idx];
+        let sampled_result = &results[sample_idx];
+        // The mounted filesystem root is durable independently of this
+        // writeback (the prior superblock still references the prior tree), so
+        // it survives every crash point; new nodes join as they are flushed.
+        let mut survivor_set: BTreeSet<u64> = sampled_point.durable_blocks.clone();
+        survivor_set.insert(dag.root());
+        let survivor_blocks: Vec<u64> = survivor_set.into_iter().collect();
+
+        let outcome = WritebackCacheCrashOutcome {
+            crash_point_id: phase.id().to_string(),
+            phase_index,
+            dpor_crash_point_id: sampled_point.id.clone(),
+            superblock_durable: sampled_point.superblock_durable,
+            survivor_blocks,
+            dag_node_count: dag.node_count(),
+            observed_generation: sampled_result.observed_generation,
+            pre_generation,
+            post_generation,
+            wb_i1_passed: sampled_result.wb_i1_passed,
+            wb_i2_passed: sampled_result.wb_i2_passed,
+            replay_verified: sampled_result.passed(),
+            flush_non_durable: wb_i2_all,
+            fsync_durable,
+            fsyncdir_durable,
+            metadata_after_data: wb_i1_all,
+        };
+
+        if outcome.passed() {
+            info!(
+                crash_point = %outcome.crash_point_id,
+                dpor_point = %outcome.dpor_crash_point_id,
+                survivors = outcome.survivor_blocks.len(),
+                "writeback-cache crash phase executed: PASSED"
+            );
+        } else {
+            warn!(
+                crash_point = %outcome.crash_point_id,
+                wb_i1 = outcome.wb_i1_passed,
+                wb_i2 = outcome.wb_i2_passed,
+                "writeback-cache crash phase executed: FAILED"
+            );
+        }
+
+        outcomes.push(outcome);
+    }
+
+    info!(
+        phases = outcomes.len(),
+        seed,
+        passed = outcomes.iter().filter(|o| o.passed()).count(),
+        "writeback-cache 12-point crash matrix executed"
+    );
+
+    Ok(outcomes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -399,7 +730,10 @@ mod tests {
             durable_node_count: 5,
         };
 
-        assert!(!result.passed(), "result with WB-I2 violation should not pass");
+        assert!(
+            !result.passed(),
+            "result with WB-I2 violation should not pass"
+        );
     }
 
     #[test]
@@ -434,14 +768,127 @@ mod tests {
                 item_type: 0x84,
                 offset: 0,
             };
-            tree.insert(key, &vec![i as u8; 50]).expect("insert");
+            tree.insert(key, &[u8::try_from(i).unwrap_or(0); 50])
+                .expect("insert");
             inserted_keys.push(key);
         }
 
         for key in &inserted_keys {
             let found = tree.find(key).expect("find");
-            assert!(found.is_some(), "mutation {} should be visible after insert", key.objectid);
+            assert!(
+                found.is_some(),
+                "mutation {} should be visible after insert",
+                key.objectid
+            );
         }
+    }
+
+    #[test]
+    fn writeback_cache_crash_matrix_executes_all_twelve_phases() {
+        let outcomes = run_writeback_cache_crash_matrix(0x00C0_FFEE).expect("run matrix");
+        assert_eq!(outcomes.len(), 12, "matrix must execute all twelve phases");
+
+        for (phase, outcome) in WRITEBACK_CACHE_CRASH_PHASES.iter().zip(&outcomes) {
+            assert_eq!(outcome.crash_point_id, phase.id());
+            assert_eq!(outcome.phase_index, phase.index());
+            assert!(
+                outcome.dpor_crash_point_id.starts_with("dpor_"),
+                "phase {} must sample a real DPOR crash point, got {}",
+                outcome.crash_point_id,
+                outcome.dpor_crash_point_id
+            );
+            assert!(
+                outcome.dag_node_count > 0,
+                "phase {} must build a real write-dependency DAG",
+                outcome.crash_point_id
+            );
+        }
+    }
+
+    #[test]
+    fn writeback_cache_crash_matrix_passes_every_invariant() {
+        let outcomes = run_writeback_cache_crash_matrix(1).expect("run matrix");
+        for outcome in &outcomes {
+            assert!(
+                outcome.passed(),
+                "executed crash phase {} failed an invariant: \
+                 wb_i1={} wb_i2={} replay={} flush_non_durable={} fsync_durable={} \
+                 fsyncdir_durable={} metadata_after_data={}",
+                outcome.crash_point_id,
+                outcome.wb_i1_passed,
+                outcome.wb_i2_passed,
+                outcome.replay_verified,
+                outcome.flush_non_durable,
+                outcome.fsync_durable,
+                outcome.fsyncdir_durable,
+                outcome.metadata_after_data,
+            );
+        }
+    }
+
+    #[test]
+    fn writeback_cache_crash_matrix_is_seed_reproducible() {
+        let a = run_writeback_cache_crash_matrix(42).expect("run a");
+        let b = run_writeback_cache_crash_matrix(42).expect("run b");
+        assert_eq!(a.len(), b.len());
+        for (lhs, rhs) in a.iter().zip(&b) {
+            assert_eq!(lhs.crash_point_id, rhs.crash_point_id);
+            assert_eq!(
+                lhs.survivor_blocks, rhs.survivor_blocks,
+                "same seed must reproduce the same executed survivor set for {}",
+                lhs.crash_point_id
+            );
+            assert_eq!(lhs.observed_generation, rhs.observed_generation);
+        }
+    }
+
+    #[test]
+    fn writeback_cache_crash_matrix_observes_generation_atomicity() {
+        let outcomes = run_writeback_cache_crash_matrix(7).expect("run matrix");
+        for outcome in &outcomes {
+            assert!(
+                outcome.observed_generation == outcome.pre_generation
+                    || outcome.observed_generation == outcome.post_generation,
+                "WB-I2: phase {} observed a torn generation {}",
+                outcome.crash_point_id,
+                outcome.observed_generation
+            );
+            if outcome.superblock_durable {
+                assert_eq!(
+                    outcome.observed_generation, outcome.post_generation,
+                    "durable phase {} must observe the committed generation",
+                    outcome.crash_point_id
+                );
+            } else {
+                assert_eq!(
+                    outcome.observed_generation, outcome.pre_generation,
+                    "non-durable phase {} must observe the pre-commit generation",
+                    outcome.crash_point_id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn writeback_cache_crash_matrix_survivor_sets_grow_with_durability() {
+        let outcomes = run_writeback_cache_crash_matrix(0).expect("run matrix");
+        let before_write = outcomes
+            .iter()
+            .find(|o| o.crash_point_id == "cp01_before_first_write")
+            .expect("cp01 present");
+        let after_refresh = outcomes
+            .iter()
+            .find(|o| o.crash_point_id == "cp12_after_repair_refresh")
+            .expect("cp12 present");
+        assert_eq!(
+            before_write.survivor_blocks.len(),
+            1,
+            "cp01 crashes before any write: only the baseline filesystem root survives"
+        );
+        assert!(
+            after_refresh.survivor_blocks.len() > before_write.survivor_blocks.len(),
+            "cp12 is post-commit: the durable tree must survive in full"
+        );
     }
 }
 
@@ -467,7 +914,7 @@ mod proptests {
                     item_type: 0x84,
                     offset: 0,
                 };
-                tree.insert(key, &vec![0u8; 100]).expect("insert");
+                tree.insert(key, &[0u8; 100]).expect("insert");
             }
 
             let dag = WriteDependencyDag::from_cow_tree(&tree, generation).expect("build dag");
@@ -503,7 +950,7 @@ mod proptests {
                     item_type: 0x84,
                     offset: i as u64,
                 };
-                let data = vec![(i % 256) as u8; 64];
+                let data = vec![u8::try_from(i % 256).unwrap_or(0); 64];
                 tree.insert(key, &data).expect("insert");
                 inserted.push((key, data));
             }
