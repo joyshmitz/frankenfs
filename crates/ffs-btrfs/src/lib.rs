@@ -113,6 +113,9 @@ const BTRFS_ROOT_ITEM_PARENT_UUID_OFFSET: usize = 263;
 const BTRFS_ROOT_ITEM_UUID_END: usize = BTRFS_ROOT_ITEM_UUID_OFFSET + 16;
 const BTRFS_ROOT_ITEM_PARENT_UUID_END: usize = BTRFS_ROOT_ITEM_PARENT_UUID_OFFSET + 16;
 
+/// Full ROOT_ITEM size with V2 extension fields.
+pub const BTRFS_ROOT_ITEM_SIZE: usize = 279;
+
 /// Parsed subset of `btrfs_root_item` needed for tree bootstrapping,
 /// subvolume enumeration, and snapshot navigation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -133,6 +136,82 @@ pub struct BtrfsRootItem {
     pub uuid: [u8; 16],
     /// Parent UUID — set when this is a snapshot (identifies source subvolume).
     pub parent_uuid: [u8; 16],
+}
+
+impl BtrfsRootItem {
+    /// Update a ROOT_ITEM blob in-place with new root location and generation.
+    ///
+    /// This patches the bytenr, level, generation, and generation_v2 fields
+    /// at their known offsets, preserving all other fields (inode_item, etc.).
+    ///
+    /// # Arguments
+    /// * `data` - Mutable ROOT_ITEM data (must be at least 279 bytes)
+    /// * `bytenr` - New root node location
+    /// * `level` - New root level
+    /// * `generation` - Current transaction generation
+    pub fn patch_root_commit(
+        data: &mut [u8],
+        bytenr: u64,
+        level: u8,
+        generation: u64,
+    ) -> Result<(), ParseError> {
+        if data.len() < BTRFS_ROOT_ITEM_SIZE {
+            return Err(ParseError::InsufficientData {
+                needed: BTRFS_ROOT_ITEM_SIZE,
+                offset: 0,
+                actual: data.len(),
+            });
+        }
+        // Update bytenr at offset 176
+        data[BTRFS_ROOT_ITEM_BYTENR_OFFSET..BTRFS_ROOT_ITEM_BYTENR_OFFSET + 8]
+            .copy_from_slice(&bytenr.to_le_bytes());
+        // Update generation at offset 160
+        data[BTRFS_ROOT_ITEM_GENERATION_OFFSET..BTRFS_ROOT_ITEM_GENERATION_OFFSET + 8]
+            .copy_from_slice(&generation.to_le_bytes());
+        // Update level at offset 238
+        data[BTRFS_ROOT_ITEM_LEVEL_OFFSET] = level;
+        // Update generation_v2 at offset 239 (must match generation for UUID fields to be valid)
+        data[BTRFS_ROOT_ITEM_GENERATION_V2_OFFSET..BTRFS_ROOT_ITEM_GENERATION_V2_OFFSET + 8]
+            .copy_from_slice(&generation.to_le_bytes());
+        Ok(())
+    }
+
+    /// Create a minimal ROOT_ITEM blob suitable for new trees.
+    ///
+    /// Sets essential fields (bytenr, level, generation, root_dirid, refs)
+    /// and zeros the rest (inode_item, drop_progress, etc.).
+    #[must_use]
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut buf = vec![0u8; BTRFS_ROOT_ITEM_SIZE];
+        // generation at offset 160
+        buf[BTRFS_ROOT_ITEM_GENERATION_OFFSET..BTRFS_ROOT_ITEM_GENERATION_OFFSET + 8]
+            .copy_from_slice(&self.generation.to_le_bytes());
+        // root_dirid at offset 168
+        buf[BTRFS_ROOT_ITEM_ROOT_DIRID_OFFSET..BTRFS_ROOT_ITEM_ROOT_DIRID_OFFSET + 8]
+            .copy_from_slice(&self.root_dirid.to_le_bytes());
+        // bytenr at offset 176
+        buf[BTRFS_ROOT_ITEM_BYTENR_OFFSET..BTRFS_ROOT_ITEM_BYTENR_OFFSET + 8]
+            .copy_from_slice(&self.bytenr.to_le_bytes());
+        // flags at offset 208
+        buf[BTRFS_ROOT_ITEM_FLAGS_OFFSET..BTRFS_ROOT_ITEM_FLAGS_OFFSET + 8]
+            .copy_from_slice(&self.flags.to_le_bytes());
+        // refs at offset 216 (u32)
+        let refs_u32 = self.refs.min(u64::from(u32::MAX)) as u32;
+        buf[BTRFS_ROOT_ITEM_REFS_OFFSET..BTRFS_ROOT_ITEM_REFS_OFFSET + 4]
+            .copy_from_slice(&refs_u32.to_le_bytes());
+        // level at offset 238
+        buf[BTRFS_ROOT_ITEM_LEVEL_OFFSET] = self.level;
+        // generation_v2 at offset 239
+        buf[BTRFS_ROOT_ITEM_GENERATION_V2_OFFSET..BTRFS_ROOT_ITEM_GENERATION_V2_OFFSET + 8]
+            .copy_from_slice(&self.generation.to_le_bytes());
+        // uuid at offset 247
+        buf[BTRFS_ROOT_ITEM_UUID_OFFSET..BTRFS_ROOT_ITEM_UUID_END]
+            .copy_from_slice(&self.uuid);
+        // parent_uuid at offset 263
+        buf[BTRFS_ROOT_ITEM_PARENT_UUID_OFFSET..BTRFS_ROOT_ITEM_PARENT_UUID_END]
+            .copy_from_slice(&self.parent_uuid);
+        buf
+    }
 }
 
 /// A parsed btrfs ROOT_REF item linking parent subvolume to child.
@@ -6851,6 +6930,53 @@ mod tests {
             let b = parse_root_item(&payload).expect("second parse");
             proptest::prop_assert_eq!(a, b);
         }
+    }
+
+    #[test]
+    fn root_item_to_bytes_roundtrip() {
+        let item = BtrfsRootItem {
+            bytenr: 0x1234_0000,
+            level: 2,
+            generation: 500,
+            root_dirid: 256,
+            flags: 0,
+            refs: 1,
+            uuid: [0x11; 16],
+            parent_uuid: [0x22; 16],
+        };
+        let serialized = item.to_bytes();
+        assert_eq!(serialized.len(), BTRFS_ROOT_ITEM_SIZE);
+        let parsed = parse_root_item(&serialized).expect("roundtrip parse");
+        assert_eq!(parsed.bytenr, item.bytenr);
+        assert_eq!(parsed.level, item.level);
+        assert_eq!(parsed.generation, item.generation);
+        assert_eq!(parsed.root_dirid, item.root_dirid);
+        assert_eq!(parsed.flags, item.flags);
+        assert_eq!(parsed.refs, item.refs);
+        assert_eq!(parsed.uuid, item.uuid);
+        assert_eq!(parsed.parent_uuid, item.parent_uuid);
+    }
+
+    #[test]
+    fn root_item_patch_root_commit_updates_fields() {
+        let item = BtrfsRootItem {
+            bytenr: 0x1000,
+            level: 0,
+            generation: 100,
+            root_dirid: 256,
+            flags: 0,
+            refs: 1,
+            uuid: [0; 16],
+            parent_uuid: [0; 16],
+        };
+        let mut data = item.to_bytes();
+
+        BtrfsRootItem::patch_root_commit(&mut data, 0x2000, 1, 200).expect("patch");
+        let patched = parse_root_item(&data).expect("parse patched");
+        assert_eq!(patched.bytenr, 0x2000);
+        assert_eq!(patched.level, 1);
+        assert_eq!(patched.generation, 200);
+        assert_eq!(patched.root_dirid, 256);
     }
 
     #[test]
@@ -13990,5 +14116,99 @@ mod tests {
         assert_eq!(key_ptrs[1].generation, 195);
         assert_eq!(key_ptrs[2].blockptr, 0x40000);
         assert_eq!(key_ptrs[2].generation, 200);
+    }
+
+    /// WB-I2 executable oracle: after a commit, generation is atomically g or g+1.
+    ///
+    /// This test verifies that `BtrfsSuperblock::patch_commit` produces a valid
+    /// superblock with the new generation, and that a torn/partial write would
+    /// be detected via checksum failure. The key invariant is that a reader
+    /// observes either the old valid superblock (gen g) or the new valid one
+    /// (gen g+1), never a torn mixture.
+    #[test]
+    fn wb_i2_superblock_atomic_generation_transition() {
+        use ffs_ondisk::{BtrfsSuperblock, verify_btrfs_superblock_checksum};
+
+        let sb = BtrfsSuperblock {
+            csum: [0; 32],
+            fsid: [0x42; 16],
+            bytenr: ffs_types::BTRFS_SUPER_INFO_OFFSET as u64,
+            flags: 0,
+            magic: ffs_types::BTRFS_MAGIC,
+            generation: 100,
+            root: 0x10000,
+            chunk_root: 0x20000,
+            log_root: 0,
+            total_bytes: 1_000_000_000,
+            bytes_used: 500_000,
+            root_dir_objectid: 6,
+            num_devices: 1,
+            sectorsize: 4096,
+            nodesize: 16384,
+            stripesize: 4096,
+            compat_flags: 0,
+            compat_ro_flags: 0,
+            incompat_flags: 0,
+            csum_type: ffs_types::BTRFS_CSUM_TYPE_CRC32C,
+            root_level: 0,
+            chunk_root_level: 1,
+            log_root_level: 0,
+            label: "wb_i2_test".to_string(),
+            sys_chunk_array_size: 0,
+            sys_chunk_array: vec![],
+        };
+
+        let original = sb.to_bytes();
+        verify_btrfs_superblock_checksum(&original).expect("original checksum valid");
+        let parsed_orig = BtrfsSuperblock::parse_superblock_region(&original).expect("parse orig");
+        assert_eq!(parsed_orig.generation, 100, "pre-commit generation is g=100");
+
+        let mut committed = original.clone();
+        BtrfsSuperblock::patch_commit(&mut committed, 0x30000, 1, 101);
+        verify_btrfs_superblock_checksum(&committed).expect("committed checksum valid");
+        let parsed_new = BtrfsSuperblock::parse_superblock_region(&committed).expect("parse new");
+        assert_eq!(parsed_new.generation, 101, "post-commit generation is g+1=101");
+        assert_eq!(parsed_new.root, 0x30000, "root updated to new location");
+        assert_eq!(parsed_new.root_level, 1, "root_level updated");
+
+        let mut torn = committed.clone();
+        torn[0x48] ^= 0xFF;
+        assert!(
+            verify_btrfs_superblock_checksum(&torn).is_err(),
+            "torn write detected by checksum - WB-I2 upheld"
+        );
+
+        let mut gen_mismatch = committed.clone();
+        gen_mismatch[0x48..0x50].copy_from_slice(&99_u64.to_le_bytes());
+        assert!(
+            verify_btrfs_superblock_checksum(&gen_mismatch).is_err(),
+            "generation tampering detected - WB-I2 upheld"
+        );
+    }
+
+    /// ROOT_ITEM commit flow: patch_root_commit updates bytenr/level/generation.
+    #[test]
+    fn root_item_commit_updates_tree_location() {
+        let original = BtrfsRootItem {
+            bytenr: 0x1000,
+            level: 0,
+            generation: 50,
+            root_dirid: 256,
+            flags: 0,
+            refs: 1,
+            uuid: [0; 16],
+            parent_uuid: [0; 16],
+        };
+        let mut data = original.to_bytes();
+        let parsed_before = parse_root_item(&data).expect("parse before");
+        assert_eq!(parsed_before.bytenr, 0x1000);
+        assert_eq!(parsed_before.generation, 50);
+
+        BtrfsRootItem::patch_root_commit(&mut data, 0x2000, 1, 100).expect("patch");
+        let parsed_after = parse_root_item(&data).expect("parse after");
+        assert_eq!(parsed_after.bytenr, 0x2000, "bytenr updated for new root");
+        assert_eq!(parsed_after.level, 1, "level updated");
+        assert_eq!(parsed_after.generation, 100, "generation bumped");
+        assert_eq!(parsed_after.root_dirid, 256, "root_dirid preserved");
     }
 }

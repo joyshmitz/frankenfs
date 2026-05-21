@@ -234,6 +234,104 @@ impl BtrfsSuperblock {
 
         Self::parse_superblock_region(&image[BTRFS_SUPER_INFO_OFFSET..end])
     }
+
+    /// Serialize this superblock to on-disk format (4096 bytes).
+    ///
+    /// Writes all fields to their kernel-defined offsets and computes
+    /// the CRC32C checksum over bytes [0x20..4096).
+    #[must_use]
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut buf = vec![0u8; BTRFS_SUPER_INFO_SIZE];
+
+        // fsid at 0x20
+        buf[0x20..0x30].copy_from_slice(&self.fsid);
+        // bytenr at 0x30
+        buf[0x30..0x38].copy_from_slice(&self.bytenr.to_le_bytes());
+        // flags at 0x38
+        buf[0x38..0x40].copy_from_slice(&self.flags.to_le_bytes());
+        // magic at 0x40
+        buf[0x40..0x48].copy_from_slice(&self.magic.to_le_bytes());
+        // generation at 0x48
+        buf[0x48..0x50].copy_from_slice(&self.generation.to_le_bytes());
+        // root at 0x50
+        buf[0x50..0x58].copy_from_slice(&self.root.to_le_bytes());
+        // chunk_root at 0x58
+        buf[0x58..0x60].copy_from_slice(&self.chunk_root.to_le_bytes());
+        // log_root at 0x60
+        buf[0x60..0x68].copy_from_slice(&self.log_root.to_le_bytes());
+        // total_bytes at 0x70
+        buf[0x70..0x78].copy_from_slice(&self.total_bytes.to_le_bytes());
+        // bytes_used at 0x78
+        buf[0x78..0x80].copy_from_slice(&self.bytes_used.to_le_bytes());
+        // root_dir_objectid at 0x80
+        buf[0x80..0x88].copy_from_slice(&self.root_dir_objectid.to_le_bytes());
+        // num_devices at 0x88
+        buf[0x88..0x90].copy_from_slice(&self.num_devices.to_le_bytes());
+        // sectorsize at 0x90
+        buf[0x90..0x94].copy_from_slice(&self.sectorsize.to_le_bytes());
+        // nodesize at 0x94
+        buf[0x94..0x98].copy_from_slice(&self.nodesize.to_le_bytes());
+        // leaf_size at 0x98 (deprecated, same as nodesize)
+        buf[0x98..0x9C].copy_from_slice(&self.nodesize.to_le_bytes());
+        // stripesize at 0x9C
+        buf[0x9C..0xA0].copy_from_slice(&self.stripesize.to_le_bytes());
+        // sys_chunk_array_size at 0xA0
+        buf[0xA0..0xA4].copy_from_slice(&self.sys_chunk_array_size.to_le_bytes());
+        // chunk_root_generation at 0xA4 (same as generation for now)
+        buf[0xA4..0xAC].copy_from_slice(&self.generation.to_le_bytes());
+        // compat_flags at 0xAC
+        buf[0xAC..0xB4].copy_from_slice(&self.compat_flags.to_le_bytes());
+        // compat_ro_flags at 0xB4
+        buf[0xB4..0xBC].copy_from_slice(&self.compat_ro_flags.to_le_bytes());
+        // incompat_flags at 0xBC
+        buf[0xBC..0xC4].copy_from_slice(&self.incompat_flags.to_le_bytes());
+        // csum_type at 0xC4
+        buf[0xC4..0xC6].copy_from_slice(&self.csum_type.to_le_bytes());
+        // root_level at 0xC6
+        buf[0xC6] = self.root_level;
+        // chunk_root_level at 0xC7
+        buf[0xC7] = self.chunk_root_level;
+        // log_root_level at 0xC8
+        buf[0xC8] = self.log_root_level;
+        // label at 0x12B (256 bytes, null-padded)
+        let label_bytes = self.label.as_bytes();
+        let label_len = label_bytes.len().min(BTRFS_SUPER_LABEL_LEN - 1);
+        buf[BTRFS_SUPER_LABEL_OFFSET..BTRFS_SUPER_LABEL_OFFSET + label_len]
+            .copy_from_slice(&label_bytes[..label_len]);
+        // sys_chunk_array at 0x32B
+        let array_len = self.sys_chunk_array.len().min(BTRFS_SYS_CHUNK_ARRAY_MAX);
+        buf[BTRFS_SYS_CHUNK_ARRAY_OFFSET..BTRFS_SYS_CHUNK_ARRAY_OFFSET + array_len]
+            .copy_from_slice(&self.sys_chunk_array[..array_len]);
+
+        // Compute CRC32C over [0x20..4096) and store at [0x00..0x20)
+        let csum = ffs_types::crc32c(&buf[0x20..]);
+        buf[0..4].copy_from_slice(&csum.to_le_bytes());
+        // Rest of csum field is zeros (CRC32C produces 4 bytes, field is 32)
+
+        buf
+    }
+
+    /// Update an existing superblock blob in-place for a new commit.
+    ///
+    /// Patches root, root_level, generation, and recomputes checksum.
+    pub fn patch_commit(
+        data: &mut [u8],
+        root: u64,
+        root_level: u8,
+        generation: u64,
+    ) {
+        // root at 0x50
+        data[0x50..0x58].copy_from_slice(&root.to_le_bytes());
+        // root_level at 0xC6
+        data[0xC6] = root_level;
+        // generation at 0x48
+        data[0x48..0x50].copy_from_slice(&generation.to_le_bytes());
+        // chunk_root_generation at 0xA4
+        data[0xA4..0xAC].copy_from_slice(&generation.to_le_bytes());
+        // Recompute checksum
+        let csum = ffs_types::crc32c(&data[0x20..]);
+        data[0..4].copy_from_slice(&csum.to_le_bytes());
+    }
 }
 
 fn validate_superblock_tree_level(field: &'static str, level: u8) -> Result<(), ParseError> {
@@ -1559,6 +1657,91 @@ mod tests {
         assert_eq!(parsed.nodesize, 16384);
         assert_eq!(parsed.csum_type, ffs_types::BTRFS_CSUM_TYPE_CRC32C);
         assert_eq!(parsed.label, "ffs");
+    }
+
+    #[test]
+    fn superblock_to_bytes_roundtrip() {
+        let sb = BtrfsSuperblock {
+            csum: [0; 32],
+            fsid: [0x11; 16],
+            bytenr: BTRFS_SUPER_INFO_OFFSET as u64,
+            flags: 0,
+            magic: BTRFS_MAGIC,
+            generation: 100,
+            root: 0x10000,
+            chunk_root: 0x20000,
+            log_root: 0,
+            total_bytes: 1_000_000_000,
+            bytes_used: 500_000,
+            root_dir_objectid: 6,
+            num_devices: 1,
+            sectorsize: 4096,
+            nodesize: 16384,
+            stripesize: 4096,
+            compat_flags: 0,
+            compat_ro_flags: 0,
+            incompat_flags: 0,
+            csum_type: ffs_types::BTRFS_CSUM_TYPE_CRC32C,
+            root_level: 0,
+            chunk_root_level: 1,
+            log_root_level: 0,
+            label: "testfs".to_string(),
+            sys_chunk_array_size: 0,
+            sys_chunk_array: vec![],
+        };
+        let serialized = sb.to_bytes();
+        assert_eq!(serialized.len(), BTRFS_SUPER_INFO_SIZE);
+
+        verify_superblock_checksum(&serialized).expect("checksum valid");
+        let parsed = BtrfsSuperblock::parse_superblock_region(&serialized).expect("roundtrip parse");
+        assert_eq!(parsed.fsid, sb.fsid);
+        assert_eq!(parsed.generation, sb.generation);
+        assert_eq!(parsed.root, sb.root);
+        assert_eq!(parsed.chunk_root, sb.chunk_root);
+        assert_eq!(parsed.sectorsize, sb.sectorsize);
+        assert_eq!(parsed.nodesize, sb.nodesize);
+        assert_eq!(parsed.label, sb.label);
+    }
+
+    #[test]
+    fn superblock_patch_commit_updates_fields() {
+        let mut sb = BtrfsSuperblock {
+            csum: [0; 32],
+            fsid: [0x22; 16],
+            bytenr: BTRFS_SUPER_INFO_OFFSET as u64,
+            flags: 0,
+            magic: BTRFS_MAGIC,
+            generation: 50,
+            root: 0x1000,
+            chunk_root: 0x2000,
+            log_root: 0,
+            total_bytes: 1_000_000_000,
+            bytes_used: 100_000,
+            root_dir_objectid: 6,
+            num_devices: 1,
+            sectorsize: 4096,
+            nodesize: 16384,
+            stripesize: 4096,
+            compat_flags: 0,
+            compat_ro_flags: 0,
+            incompat_flags: 0,
+            csum_type: ffs_types::BTRFS_CSUM_TYPE_CRC32C,
+            root_level: 0,
+            chunk_root_level: 0,
+            log_root_level: 0,
+            label: String::new(),
+            sys_chunk_array_size: 0,
+            sys_chunk_array: vec![],
+        };
+        let mut data = sb.to_bytes();
+
+        BtrfsSuperblock::patch_commit(&mut data, 0x3000, 1, 100);
+        verify_superblock_checksum(&data).expect("patched checksum valid");
+        let patched = BtrfsSuperblock::parse_superblock_region(&data).expect("parse patched");
+        assert_eq!(patched.root, 0x3000);
+        assert_eq!(patched.root_level, 1);
+        assert_eq!(patched.generation, 100);
+        assert_eq!(patched.fsid, sb.fsid);
     }
 
     fn representative_sys_chunk_superblock() -> [u8; BTRFS_SUPER_INFO_SIZE] {
