@@ -46311,7 +46311,7 @@ mod tests {
         );
         match result {
             Err(FfsError::ReadOnly) => {} // expected
-            other => panic!("expected ReadOnly, got {:?}", other),
+            other => panic!("expected ReadOnly, got {other:?}"),
         }
 
         // Attempt mkdir - should also fail with EROFS
@@ -46325,7 +46325,7 @@ mod tests {
         );
         match result {
             Err(FfsError::ReadOnly) => {} // expected
-            other => panic!("expected ReadOnly for mkdir, got {:?}", other),
+            other => panic!("expected ReadOnly for mkdir, got {other:?}"),
         }
     }
 
@@ -46353,6 +46353,7 @@ mod tests {
         );
         // The operation may fail for other reasons (e.g., parent not a directory),
         // but it should NOT fail with ReadOnly since ephemeral_ok is true.
+        #[allow(clippy::equatable_if_let)]
         if let Err(FfsError::ReadOnly) = result {
             panic!("create should not return ReadOnly when btrfs_rw_ephemeral_ok=true");
         }
