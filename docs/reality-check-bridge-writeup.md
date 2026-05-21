@@ -57,27 +57,27 @@ The bridge plan created epic `bd-xuo95` with 40 children across 8 workstreams (A
 
 ### Workstream A: btrfs RW Durability (P0)
 
-The core fix for the headline problem.
+The core fix for the headline problem — but only A0 was implemented. A1-A6 are designed and spec'd but remain in progress.
 
-**A0 — Safety Interlock (bd-xuo95.1):** Immediately stopped the silent success. btrfs metadata-mutating FUSE ops now fail closed with `EROFS` unless the explicit `--btrfs-rw-ephemeral-ok` flag is passed. No code path may log `outcome="applied"` for a btrfs metadata change that is not on disk.
+**A0 — Safety Interlock (bd-xuo95.1) — IMPLEMENTED:** Immediately stopped the silent success. btrfs metadata-mutating FUSE ops now fail closed with `EROFS` unless the explicit `--btrfs-rw-ephemeral-ok` flag is passed. No code path may log `outcome="applied"` for a btrfs metadata change that is not on disk. E2E validation: `scripts/e2e/ffs_btrfs_rw_interlock_e2e.sh`.
 
-**A1-A3 — CoW Serialization Pipeline:**
+**A1-A3 — CoW Serialization Pipeline — DESIGNED, NOT IMPLEMENTED:**
+Design spec in `docs/design-btrfs-metadata-writeback.md` covers:
 - CoW node serializer: `InMemoryCowBtrfsTree` → on-disk bytes with leaf nodes, internal nodes, per-node CRC32C, generation stamping
 - Metadata block allocation wired through chunk tree + extent tree
 - Atomic root commit: ROOT_ITEM updates, root tree write, `fsync`, then superblock generation bump as the single linearization point
 
-**A4 — Crash Consistency (bd-xuo95.5):**
-Built the write-dependency DAG; flush in reverse-topological order with an fsync barrier before the superblock. The design leverages btrfs's native CoW atomicity: new nodes never overwrite live data, so an interrupted writeback discards cleanly — the old superblock still points at the intact old tree.
+`FEATURE_PARITY.md` rows 88-90 track these as 🚧 "in progress."
+
+**A4 — Crash Consistency (bd-xuo95.5) — ORACLE INFRASTRUCTURE ONLY:**
+The write-dependency DAG, WB-I1/WB-I2 invariant oracles, and DPOR enumeration are implemented. The crash matrix runs against in-memory simulation. When A1-A3 land, the matrix will validate real writeback.
 
 Two invariants with executable oracles:
-- **WB-I1:** At every crash point, the set of durable nodes is prefix-closed under "references" — no durable internal node points at a non-durable child
-- **WB-I2:** A reader after crash observes either generation `g` (pre-writeback) or `g+1` (post), never a torn mixture
+- **WB-I1:** At every crash point, the set of durable nodes is prefix-closed under "references"
+- **WB-I2:** A reader after crash observes generation `g` or `g+1`, never torn
 
-**A5 — Remount-Persistence Tests (bd-xuo95.6):**
-E2E: mount `--rw`, mutate (create/mkdir/write/unlink/rename/setattr/xattr), unmount, remount, assert every mutation is observable. Metamorphic relation MR-WB validates that `reparse(writeback(mutate(parse(img)))) ≡ model(mutate(parse(img)))`.
-
-**A6 — btrfs-progs Differential (bd-xuo95.7):**
-After writeback, run `btrfs check` and `btrfs inspect-internal` on the FrankenFS-written image; assert no corruption.
+**A5-A6 — Remount/Differential Tests — BLOCKED ON A1-A3:**
+Test definitions exist; they cannot pass until serialization is implemented.
 
 ### Workstream B: Honest, Test-Derived Parity (P1)
 
@@ -152,7 +152,7 @@ Collapsed the public taxonomy to the 2 real mechanisms (AppendOnly and range ove
 ### Workstream G: Operational Readiness, Actually Executed (P3)
 
 **G2 — Writeback-Cache Crash Matrix Executed (bd-xuo95.31):**
-Executed the 12 crash scenarios as real mount/crash/replay tests via `LabRuntime` DPOR. The artifact records executed outcomes, not hand-authored expectations.
+Executed the 12 crash scenarios as **in-memory CoW tree simulation** via `LabRuntime` DPOR. The matrix builds a `WriteDependencyDag` from `InMemoryCowBtrfsTree`, enumerates crash points, and runs WB-I1/WB-I2 invariant oracles. This proves the *invariant math* is correct against a deterministic model. **It is not real FUSE mount crash injection** (like xfstests/fstests). The artifact records simulation outcomes with `ExecutedEvidence`, not hand-authored expectations.
 
 **G3 — Perf Baselines Refreshed (bd-xuo95.32-33):**
 Re-ran criterion + mounted benchmarks with dated numbers; dropped or substantiated quarantined latency claims.
@@ -191,19 +191,25 @@ It can only be *constructed* by actually running a process — there is no `serd
 
 Both parity rows and release-gate lanes consume it. Parity becomes a *derived* quantity: `implemented = count(rows whose cited test produced fresh green ExecutedEvidence this CI run)`. A release-gate lane is `pass` only if it holds `ExecutedEvidence` with `exit_code == 0`.
 
-### Crash-Consistency Matrix via DPOR
+### Crash-Consistency Matrix via DPOR (Simulation, Not Real Crashes)
 
-The btrfs writeback crash matrix is not ad-hoc fault injection. FrankenFS ships `LabRuntime` with virtual time and DPOR (Dynamic Partial Order Reduction). The writeback's `fsync`-barrier and node-write sequence are exactly the kind of happens-before-edged schedule DPOR enumerates.
+The btrfs writeback crash matrix is not ad-hoc fault injection — but it is also **not real FUSE mount crash testing**. FrankenFS ships `LabRuntime` with virtual time and DPOR (Dynamic Partial Order Reduction).
 
-The 12 crash points are driven through DPOR enumeration:
-- cp01-cp02: create/append before fsync
-- cp03: fsync file/parent boundary
-- cp04-cp05: rename before/after fsync
-- cp06-cp07: second file create/fsync
-- cp08-cp10: unlink sequence
-- cp11-cp12: edge cases
+**What the matrix actually does** (`crates/ffs-btrfs/src/crash_consistency.rs`):
+1. Creates an `InMemoryCowBtrfsTree` with deterministic seed-varied shapes
+2. Builds a `WriteDependencyDag` from the in-memory tree
+3. Enumerates crash points via DPOR (pre/post flush, fsync barrier, superblock)
+4. Runs WB-I1/WB-I2 invariant oracles against the DAG
 
-Each crash point is reproducible from a seed. The matrix is exhaustive over the writeback linearization, not a hand-picked sample.
+**What it does NOT do:**
+- No actual FUSE mount
+- No real disk I/O
+- No kernel-level crash simulation
+- No process kill/recovery cycle
+
+The 12 crash points (cp01-cp12) are driven through DPOR enumeration covering create, append, fsync boundaries, rename, unlink sequences. Each crash point is reproducible from a seed. The matrix is exhaustive over the writeback linearization, proving the *invariant math* is correct.
+
+**Why this matters:** The README claims "12-point crash matrix" in the comparison table. This is technically true but could mislead readers into thinking there's real crash injection testing. Real FUSE mount crash testing (like xfstests/fstests) remains unexercised.
 
 ### Metamorphic Relation MR-WB
 
@@ -223,9 +229,16 @@ The re-parsed on-disk tree after unmount must equal the in-memory model. This is
 
 **ext4 RW:** Fully durable. The read+write path is validated against the kernel's own `debugfs`/`dumpe2fs` (17/17 differential tests). Journal replay (JBD2, fast-commit), orphan recovery, and allocator mutations all persist correctly.
 
-**btrfs RW (with writeback):** Genuinely durable when A1-A6 are complete. Metadata mutations persist through unmount/remount. `btrfs check` reports no corruption on FrankenFS-written images. The crash matrix proves WB-I1/WB-I2 invariants hold at every DPOR-enumerated crash point.
+**btrfs READ:** Fully functional. Chunk mapping, tree walks, decompression (ZLIB/LZO/ZSTD), subvolume selection, send-stream parsing — all work correctly.
 
-**btrfs RW (without writeback, ephemeral mode):** In-memory only, as before — but now explicitly gated by `--btrfs-rw-ephemeral-ok` with clear warnings. No silent data loss.
+**btrfs RW:** Still in-memory only. `InMemoryCowBtrfsTree` (`ffs-core/src/lib.rs:569`) holds all btrfs FS-tree items. **There is no code path that serializes this tree to disk.** A1-A6 (CoW serializer, metadata block allocation, atomic root commit, crash consistency, remount persistence, btrfs-progs differential) are defined in `FEATURE_PARITY.md` as 🚧 "in progress" — the design spec exists (`docs/design-btrfs-metadata-writeback.md`), the invariant oracles exist, but the implementation is not complete.
+
+**What the bridge epic achieved for btrfs RW:**
+- **A0 (Safety Interlock):** Without `--btrfs-rw-ephemeral-ok`, btrfs mutations return `EROFS`. The warning explicitly states "writeback not implemented, data would be lost on unmount." No silent data loss.
+- **Crash matrix infrastructure:** The DPOR simulation proves WB-I1/WB-I2 hold against the in-memory model. When A1-A6 land, the matrix will validate real writeback.
+- **Design documentation:** `docs/design-btrfs-metadata-writeback.md` captures node format, write-dependency DAG, linearization point, invariants.
+
+**The honest summary:** btrfs RW was a silent-data-loss facade. Now it's a **loud** non-durability with an explicit opt-in gate. The infrastructure for real durability exists; the implementation does not.
 
 **Parity claims:** Now derived from tests that actually ran green. The 97/97 number persists but is honest: it counts rows with green `ExecutedEvidence`, not hand-authored assertions.
 
@@ -233,18 +246,22 @@ The re-parsed on-disk tree after unmount must equal the in-memory model. This is
 
 **Harness ratio:** Meta-machinery relocated to `tools/ffs-ops`. The `ffs-*` workspace filesystem LOC is no longer inflated by it.
 
-### What Is Still Deferred
+### What Is Still Deferred or In Progress
 
-**bd-xuo95.39 — btrfs tree-log fast-fsync (V1.x):**
-The btrfs tree-log write path that makes a single-file `fsync` durable without a full transaction commit. The read/replay path already exists (`replay_tree_log`). The write path is explicitly tracked as V1.x future scope so the capability is NOT silently dropped.
+**A1-A6 — btrfs Metadata Serialization (in progress):**
+The core btrfs durability implementation. Design spec exists (`docs/design-btrfs-metadata-writeback.md`), invariant oracles exist, but the CoW node serializer, metadata block allocation, atomic root commit, and remount-persistence tests are not implemented. `FEATURE_PARITY.md` rows 88-90 track this as 🚧 "in progress." This is the main gap between "btrfs RW facade" and "btrfs RW durable."
 
-Currently, btrfs `fsync` does a full transaction commit — correct but slower than kernel btrfs. This is a performance optimization, not a correctness gap.
+**bd-xuo95.39 — btrfs tree-log fast-fsync (V1.x deferred):**
+The btrfs tree-log write path that makes a single-file `fsync` durable without a full transaction commit. The read/replay path already exists (`replay_tree_log`). The write path is explicitly tracked as V1.x future scope so the capability is NOT silently dropped. This is a performance optimization, not a correctness gap — once A1-A6 land, btrfs `fsync` will do a full transaction commit (correct but slower than kernel btrfs).
 
 **xfstests baseline:**
 Real xfstests pass/fail evidence remains blocked on permissioned execution. The infrastructure exists; the evidence does not.
 
 **FUSE merge proofs:**
 The FUSE write path still stages `MergeProof::Unsafe`. Wiring real merge proofs into production writes (so the "9.5× lower expected loss" becomes true outside benchmarks) is tracked but not in this epic.
+
+**Real FUSE crash injection:**
+The crash matrix tests in-memory simulation. Real kernel-level crash injection (like xfstests/fstests) is not exercised.
 
 ---
 
