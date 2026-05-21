@@ -4,7 +4,7 @@ use asupersync::types::Budget;
 use ffs_mvcc::sharded::ShardedMvccStore;
 use ffs_mvcc::{
     AdaptivePolicyConfig, CommitError, CompressionAlgo, CompressionPolicy, ConflictPolicy,
-    GcBackpressureConfig, MergeByteRange, MergeProof, MvccStore,
+    GcBackpressureConfig, MergeByteRange, MergeProof, MergeProofMechanism, MvccStore,
 };
 use ffs_types::{BlockNumber, Snapshot};
 use std::collections::VecDeque;
@@ -73,6 +73,14 @@ fn choose_block(
         WorkloadPattern::Adversarial => 0,
     };
     BlockNumber(block)
+}
+
+fn seed_sharded_blocks(store: &ShardedMvccStore, blocks: &[(BlockNumber, Vec<u8>)]) {
+    let mut txn = store.begin();
+    for (block, bytes) in blocks {
+        txn.stage_write(*block, bytes.clone());
+    }
+    store.commit(txn).expect("seed commit should succeed");
 }
 
 #[test]
@@ -531,6 +539,330 @@ fn stress_ssi_write_skew() {
             a + b,
             3,
             "seed {seed}: SSI should prevent double-write skew (a={a}, b={b})"
+        );
+    }
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn stress_honesty_ssi_single_edges_commit_two_edge_pivots_abort() {
+    const CASES_PER_SEED: u64 = 18;
+
+    for seed in 0_u64..32 {
+        let mut runtime = LabRuntime::new(LabConfig::new(seed).max_steps(300_000));
+        let region = runtime.state.create_root_region(Budget::INFINITE);
+        let store = Arc::new(Mutex::new(MvccStore::new()));
+        let single_outgoing_commits = Arc::new(AtomicU64::new(0));
+        let single_incoming_commits = Arc::new(AtomicU64::new(0));
+        let two_edge_aborts = Arc::new(AtomicU64::new(0));
+
+        for case_id in 0_u64..CASES_PER_SEED {
+            let store = Arc::clone(&store);
+            let single_outgoing_commits = Arc::clone(&single_outgoing_commits);
+            let single_incoming_commits = Arc::clone(&single_incoming_commits);
+            let two_edge_aborts = Arc::clone(&two_edge_aborts);
+            let (task_id, _handle) = runtime
+                .state
+                .create_task(region, Budget::INFINITE, async move {
+                    yield_now().await;
+                    let read_block = BlockNumber(
+                        10_000_u64
+                            .saturating_add(seed.saturating_mul(1_000))
+                            .saturating_add(case_id.saturating_mul(10)),
+                    );
+                    let write_block = BlockNumber(read_block.0 + 1);
+                    let side_block = BlockNumber(read_block.0 + 2);
+                    let mut guard = store.lock().expect("store lock");
+
+                    let mut seed_txn = guard.begin();
+                    seed_txn.stage_write(read_block, vec![1]);
+                    seed_txn.stage_write(write_block, vec![1]);
+                    seed_txn.stage_write(side_block, vec![1]);
+                    guard.commit_ssi(seed_txn).expect("seed commit");
+
+                    match case_id % 3 {
+                        0 => {
+                            let mut pivot = guard.begin();
+                            pivot.record_read(read_block, guard.latest_commit_seq(read_block));
+                            pivot.stage_write(write_block, vec![2]);
+
+                            let mut concurrent_writer = guard.begin();
+                            concurrent_writer.stage_write(read_block, vec![3]);
+                            guard
+                                .commit_ssi(concurrent_writer)
+                                .expect("concurrent writer commits");
+
+                            guard.commit_ssi(pivot).unwrap_or_else(|err| {
+                                panic!(
+                                    "seed {seed} case {case_id}: single outgoing rw edge must commit, got {err:?}"
+                                )
+                            });
+                            single_outgoing_commits.fetch_add(1, Ordering::Relaxed);
+                            eprintln!(
+                                "event=ssi_honesty seed={seed} case={case_id} outcome=single_outgoing_commit read_block={} write_block={}",
+                                read_block.0, write_block.0
+                            );
+                        }
+                        1 => {
+                            let mut pivot = guard.begin();
+                            pivot.stage_write(write_block, vec![2]);
+
+                            let mut concurrent_reader = guard.begin();
+                            concurrent_reader
+                                .record_read(write_block, guard.latest_commit_seq(write_block));
+                            concurrent_reader.stage_write(side_block, vec![3]);
+                            guard
+                                .commit_ssi(concurrent_reader)
+                                .expect("concurrent reader commits");
+
+                            guard.commit_ssi(pivot).unwrap_or_else(|err| {
+                                panic!(
+                                    "seed {seed} case {case_id}: single incoming rw edge must commit, got {err:?}"
+                                )
+                            });
+                            single_incoming_commits.fetch_add(1, Ordering::Relaxed);
+                            eprintln!(
+                                "event=ssi_honesty seed={seed} case={case_id} outcome=single_incoming_commit reader_block={} write_block={}",
+                                write_block.0, side_block.0
+                            );
+                        }
+                        _ => {
+                            let mut pivot = guard.begin();
+                            pivot.record_read(read_block, guard.latest_commit_seq(read_block));
+                            pivot.stage_write(write_block, vec![2]);
+
+                            let mut concurrent_pivot_neighbor = guard.begin();
+                            concurrent_pivot_neighbor
+                                .record_read(write_block, guard.latest_commit_seq(write_block));
+                            concurrent_pivot_neighbor.stage_write(read_block, vec![3]);
+                            guard
+                                .commit_ssi(concurrent_pivot_neighbor)
+                                .expect("neighbor commits");
+
+                            let err = guard
+                                .commit_ssi(pivot)
+                                .expect_err("two-edge dangerous-structure pivot must abort");
+                            assert!(
+                                matches!(err, CommitError::SsiConflict { .. }),
+                                "seed {seed} case {case_id}: expected SsiConflict, got {err:?}"
+                            );
+                            two_edge_aborts.fetch_add(1, Ordering::Relaxed);
+                            eprintln!(
+                                "event=ssi_honesty seed={seed} case={case_id} outcome=two_edge_abort incoming_block={} outgoing_block={}",
+                                write_block.0, read_block.0
+                            );
+                        }
+                    }
+                })
+                .expect("create ssi honesty task");
+            runtime.scheduler.lock().schedule(task_id, 0);
+        }
+
+        runtime.run_until_quiescent();
+
+        let outgoing = single_outgoing_commits.load(Ordering::Relaxed);
+        let incoming = single_incoming_commits.load(Ordering::Relaxed);
+        let two_edge = two_edge_aborts.load(Ordering::Relaxed);
+        assert_eq!(
+            outgoing,
+            CASES_PER_SEED / 3,
+            "seed {seed}: all single-outgoing cases must commit"
+        );
+        assert_eq!(
+            incoming,
+            CASES_PER_SEED / 3,
+            "seed {seed}: all single-incoming cases must commit"
+        );
+        assert_eq!(
+            two_edge,
+            CASES_PER_SEED / 3,
+            "seed {seed}: all two-edge pivot cases must abort"
+        );
+        eprintln!(
+            "event=ssi_honesty_seed_summary seed={seed} single_outgoing_commits={outgoing} single_incoming_commits={incoming} two_edge_aborts={two_edge}"
+        );
+    }
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn stress_honesty_merge_proofs_require_explicit_same_block_evidence() {
+    const WRITERS_PER_MODE: u8 = 24;
+
+    for seed in 0_u64..24 {
+        let store = ShardedMvccStore::with_compression_policy(2, CompressionPolicy::dedup_only());
+        store.set_conflict_policy(ConflictPolicy::SafeMerge);
+        let default_block = BlockNumber(20_000 + seed.saturating_mul(10));
+        let append_block = BlockNumber(default_block.0 + 1);
+        let disjoint_label_block = BlockNumber(default_block.0 + 2);
+        let range_base_block = BlockNumber(default_block.0 + 3);
+        seed_sharded_blocks(
+            &store,
+            &[
+                (default_block, vec![0]),
+                (append_block, vec![0]),
+                (disjoint_label_block, vec![0]),
+                (range_base_block, vec![0; 8]),
+                (BlockNumber(range_base_block.0 + 1), vec![0; 8]),
+                (BlockNumber(range_base_block.0 + 2), vec![0; 8]),
+            ],
+        );
+
+        let mut default_txns = Vec::new();
+        for writer in 1_u8..=WRITERS_PER_MODE {
+            let mut txn = store.begin();
+            txn.stage_write(default_block, vec![0, writer]);
+            default_txns.push(txn);
+        }
+
+        let mut default_commits = 0_u64;
+        let mut default_conflicts = 0_u64;
+        for txn in default_txns {
+            match store.commit(txn) {
+                Ok(_) => default_commits = default_commits.saturating_add(1),
+                Err((CommitError::Conflict { .. }, _)) => {
+                    default_conflicts = default_conflicts.saturating_add(1);
+                }
+                Err((err, _)) => panic!("seed {seed}: unexpected default-write error {err:?}"),
+            }
+        }
+        assert_eq!(
+            default_commits, 1,
+            "seed {seed}: exactly one plain same-block writer should commit"
+        );
+        assert_eq!(
+            default_conflicts,
+            u64::from(WRITERS_PER_MODE - 1),
+            "seed {seed}: plain same-block writers must not receive implicit merge evidence"
+        );
+
+        let mut append_txns = Vec::new();
+        for writer in 1_u8..=WRITERS_PER_MODE {
+            let mut txn = store.begin();
+            txn.stage_write_with_proof(
+                append_block,
+                vec![0, writer],
+                MergeProof::AppendOnly { base_len: 1 },
+            );
+            append_txns.push((writer, txn));
+        }
+
+        let mut append_commits = 0_u64;
+        for (writer, txn) in append_txns {
+            store
+                .commit(txn)
+                .unwrap_or_else(|_| panic!("seed {seed}: append writer {writer} should merge"));
+            append_commits = append_commits.saturating_add(1);
+        }
+        assert_eq!(
+            append_commits,
+            u64::from(WRITERS_PER_MODE),
+            "seed {seed}: explicit append-only proof should carry every writer"
+        );
+        let append_data = store
+            .read_visible(append_block, store.current_snapshot())
+            .expect("append block remains visible");
+        let mut expected_append = vec![0];
+        expected_append.extend(1_u8..=WRITERS_PER_MODE);
+        assert_eq!(
+            append_data, expected_append,
+            "seed {seed}: append proof must preserve every tail in commit order"
+        );
+
+        let mut disjoint_first = store.begin();
+        let mut disjoint_second = store.begin();
+        disjoint_first.stage_write_with_proof(
+            disjoint_label_block,
+            vec![0, 1],
+            MergeProof::DisjointBlocks,
+        );
+        disjoint_second.stage_write_with_proof(
+            disjoint_label_block,
+            vec![0, 2],
+            MergeProof::DisjointBlocks,
+        );
+        store
+            .commit(disjoint_first)
+            .expect("first disjoint-label write has no conflict");
+        let disjoint_err = store
+            .commit(disjoint_second)
+            .expect_err("DisjointBlocks is not same-block merge evidence");
+        assert!(
+            matches!(disjoint_err.0, CommitError::Conflict { .. }),
+            "seed {seed}: DisjointBlocks same-block conflict should stay FCW, got {disjoint_err:?}"
+        );
+
+        let range_cases = [
+            (
+                "IndependentKeys",
+                MergeProof::IndependentKeys {
+                    touched_ranges: vec![MergeByteRange::new(0, 2)],
+                },
+                MergeProof::IndependentKeys {
+                    touched_ranges: vec![MergeByteRange::new(2, 2)],
+                },
+            ),
+            (
+                "NonOverlappingExtents",
+                MergeProof::NonOverlappingExtents {
+                    touched_ranges: vec![MergeByteRange::new(0, 2)],
+                },
+                MergeProof::NonOverlappingExtents {
+                    touched_ranges: vec![MergeByteRange::new(2, 2)],
+                },
+            ),
+            (
+                "TimestampOnlyInode",
+                MergeProof::TimestampOnlyInode {
+                    touched_ranges: vec![MergeByteRange::new(0, 2)],
+                },
+                MergeProof::TimestampOnlyInode {
+                    touched_ranges: vec![MergeByteRange::new(2, 2)],
+                },
+            ),
+        ];
+
+        for (idx, (label, first_proof, second_proof)) in range_cases.into_iter().enumerate() {
+            assert_eq!(
+                first_proof.mechanism(),
+                MergeProofMechanism::RangeOverlay,
+                "{label} must remain a range-overlay label"
+            );
+            let block = BlockNumber(range_base_block.0 + u64::try_from(idx).expect("idx fits"));
+            let mut first = store.begin();
+            let mut second = store.begin();
+            first.stage_write_with_proof(block, vec![10, 11, 0, 0, 0, 0, 0, 0], first_proof);
+            second.stage_write_with_proof(block, vec![0, 0, 12, 13, 0, 0, 0, 0], second_proof);
+            store
+                .commit(first)
+                .unwrap_or_else(|_| panic!("seed {seed}: {label} first write should commit"));
+            store
+                .commit(second)
+                .unwrap_or_else(|_| panic!("seed {seed}: {label} second write should merge"));
+            let merged = store
+                .read_visible(block, store.current_snapshot())
+                .expect("range-overlay block visible");
+            assert_eq!(
+                merged,
+                vec![10, 11, 12, 13, 0, 0, 0, 0],
+                "seed {seed}: {label} must share range-overlay byte behavior"
+            );
+        }
+
+        assert_eq!(
+            MergeProof::Unsafe.mechanism(),
+            MergeProofMechanism::NoSameBlockMerge
+        );
+        assert_eq!(
+            MergeProof::DisjointBlocks.mechanism(),
+            MergeProofMechanism::NoSameBlockMerge
+        );
+        assert_eq!(
+            (MergeProof::AppendOnly { base_len: 1 }).mechanism(),
+            MergeProofMechanism::AppendOnly
+        );
+        eprintln!(
+            "event=merge_honesty seed={seed} default_commits={default_commits} default_conflicts={default_conflicts} append_commits={append_commits} range_overlay_labels=3 no_same_block_merge_labels=2"
         );
     }
 }

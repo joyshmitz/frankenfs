@@ -3911,6 +3911,27 @@ mod tests {
     }
 
     #[test]
+    fn stage_write_records_unsafe_merge_proof_by_default() {
+        let mut store = MvccStore::new();
+        let block = BlockNumber(6);
+        let mut txn = store.begin();
+
+        txn.stage_write(block, vec![1, 2, 3]);
+        assert_eq!(
+            txn.merge_proof(block),
+            Some(&MergeProof::Unsafe),
+            "plain stage_write must not silently attach bench-only merge evidence"
+        );
+
+        txn.stage_write_with_proof(block, vec![1, 2, 3, 4], append_only_proof(3));
+        assert_eq!(
+            txn.merge_proof(block),
+            Some(&MergeProof::AppendOnly { base_len: 3 }),
+            "explicit callers must still be able to supply executable merge evidence"
+        );
+    }
+
+    #[test]
     fn merge_proof_mechanism_collapses_labels_to_two_merge_algorithms() {
         let range = vec![MergeByteRange::new(2, 2)];
         let cases = vec![

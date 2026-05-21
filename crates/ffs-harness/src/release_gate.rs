@@ -1946,4 +1946,79 @@ mod tests {
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../tests/release-gates/release_gate_policy_v1.json")
     }
+
+    // C4: release-gate execution tests (lane fails closed on non-zero/absent command)
+
+    #[test]
+    fn c4_lane_fails_closed_on_nonzero_exit_code_error() {
+        // C4: When proof has errors about non-zero exit code, release gate fails closed
+        let mut proof = passing_proof();
+        proof.valid = false;
+        proof.errors.push(
+            "lane conformance is marked pass but ExecutedEvidence exit_code=Some(1) (expected 0). \
+             A pass lane requires exit_code==0.".to_owned()
+        );
+
+        let report = evaluate_release_gates(&sample_policy(), &proof);
+
+        // Release gate should fail closed due to invalid proof
+        assert!(!report.valid, "release gate should fail when proof has exit_code errors");
+        // Feature should be disabled due to invalid bundle
+        assert_eq!(
+            report.feature_reports[0].final_state,
+            FeatureState::Disabled,
+            "feature should be disabled when proof has exit_code errors"
+        );
+        // Findings should mention proof bundle errors
+        assert!(
+            report.findings.iter().any(|f|
+                f.transition_reason.contains("proof bundle") ||
+                f.transition_reason.contains("errors")
+            ),
+            "findings should show proof bundle validation failure: {:?}",
+            report.findings
+        );
+    }
+
+    #[test]
+    fn c4_lane_fails_closed_on_absent_evidence_error() {
+        // C4: When proof has errors about missing evidence, release gate fails closed
+        let mut proof = passing_proof();
+        proof.valid = false;
+        proof.errors.push(
+            "lane fuse is marked pass but has no ExecutedEvidence. \
+             A pass lane for an executable lane requires fresh executed evidence, \
+             not just checked-in artifact hashes.".to_owned()
+        );
+
+        let report = evaluate_release_gates(&sample_policy(), &proof);
+
+        // Release gate should fail closed due to invalid proof
+        assert!(!report.valid, "release gate should fail when proof has missing evidence errors");
+        // Feature should be disabled due to invalid bundle
+        assert_eq!(
+            report.feature_reports[0].final_state,
+            FeatureState::Disabled,
+            "feature should be disabled when proof has missing evidence errors"
+        );
+    }
+
+    #[test]
+    fn c4_lane_pass_requires_valid_proof_bundle() {
+        // C4: A lane cannot be pass without a valid proof bundle
+        let mut proof = passing_proof();
+        proof.valid = false; // Mark proof invalid
+        proof.errors.push("proof bundle validation failed".to_owned());
+
+        let report = evaluate_release_gates(&sample_policy(), &proof);
+
+        // Release gate must fail closed
+        assert!(!report.valid, "release gate must fail when proof bundle is invalid");
+
+        // When proof is invalid, features should downgrade
+        assert!(
+            report.feature_reports[0].final_state < FeatureState::Validated,
+            "feature state should be below Validated when proof is invalid"
+        );
+    }
 }
