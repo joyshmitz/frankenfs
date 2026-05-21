@@ -528,6 +528,8 @@ struct MountCmdOptions {
     btrfs_mount_selection: BtrfsMountSelection,
     ext4_data_err_policy: Ext4DataErrPolicy,
     ext4_verify_journal_checksums: bool,
+    /// Allow btrfs RW operations despite being non-durable (in-memory only).
+    btrfs_rw_ephemeral_ok: bool,
     runtime: MountRuntimeConfig,
     adaptive_runtime: MountAdaptiveRuntimeConfig,
     adaptive_runtime_summary: MountAdaptiveRuntimeSummaryConfig,
@@ -836,6 +838,15 @@ enum Command {
         /// Mount a specific btrfs snapshot by name.
         #[arg(long)]
         snapshot: Option<String>,
+        /// Allow btrfs metadata mutations despite being non-durable.
+        ///
+        /// WARNING: btrfs metadata writeback is not yet implemented. Mutations
+        /// execute against an in-memory COW tree that is NOT serialized to disk.
+        /// Without this flag, btrfs metadata-mutating operations return EROFS
+        /// to prevent silent data loss. Setting this flag acknowledges that
+        /// btrfs RW changes will be lost on unmount.
+        #[arg(long = "btrfs-rw-ephemeral-ok")]
+        btrfs_rw_ephemeral_ok: bool,
     },
     /// Run a read-only integrity scan (scrub) on a filesystem image.
     Scrub {
@@ -1836,6 +1847,7 @@ fn run() -> Result<()> {
             ext4_nojournal_checksum,
             subvol,
             snapshot,
+            btrfs_rw_ephemeral_ok,
         } => {
             let btrfs_mount_selection = parse_btrfs_mount_selection(subvol, snapshot)?;
             let background_scrub = MountBackgroundScrubConfig::resolve(
@@ -1871,6 +1883,7 @@ fn run() -> Result<()> {
                         Ext4DataErrPolicy::Ignore
                     },
                     ext4_verify_journal_checksums: !ext4_nojournal_checksum,
+                    btrfs_rw_ephemeral_ok,
                     runtime: MountRuntimeConfig {
                         mode: runtime_mode,
                         managed_unmount_timeout_secs,
@@ -6260,6 +6273,7 @@ fn build_mount_open_options(options: &MountCmdOptions) -> OpenOptions {
         ext4_verify_journal_checksums: options.ext4_verify_journal_checksums,
         mount_mode: options.mount_mode,
         btrfs_mount_selection: options.btrfs_mount_selection.clone(),
+        btrfs_rw_ephemeral_ok: options.btrfs_rw_ephemeral_ok,
         ..OpenOptions::default()
     }
 }
@@ -7547,6 +7561,7 @@ mod tests {
             btrfs_mount_selection: BtrfsMountSelection::DefaultRoot,
             ext4_data_err_policy: Ext4DataErrPolicy::Ignore,
             ext4_verify_journal_checksums: true,
+            btrfs_rw_ephemeral_ok: false,
             runtime: MountRuntimeConfig {
                 mode: MountRuntimeMode::Standard,
                 managed_unmount_timeout_secs: None,

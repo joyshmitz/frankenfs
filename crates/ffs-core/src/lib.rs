@@ -365,6 +365,14 @@ pub struct OpenOptions {
     /// request and only influences advisory group ordering; explicit
     /// `goal_group` / `goal_block` hints retain compatibility precedence.
     pub numa_allocation_policy: NumaAllocationPolicy,
+    /// Allow btrfs metadata mutations even though they are not durable.
+    ///
+    /// **WARNING:** btrfs metadata writeback is not yet implemented. Mutations
+    /// execute against an in-memory COW tree that is **not serialized to disk**.
+    /// Setting this flag acknowledges that btrfs RW changes will be lost on
+    /// unmount. Without this flag, btrfs metadata-mutating operations return
+    /// `EROFS` to prevent silent data loss.
+    pub btrfs_rw_ephemeral_ok: bool,
 }
 
 #[allow(clippy::derivable_impls)]
@@ -381,6 +389,7 @@ impl Default for OpenOptions {
             ext4_data_err_policy: Ext4DataErrPolicy::Ignore,
             ext4_verify_journal_checksums: true,
             numa_allocation_policy: NumaAllocationPolicy::Disabled,
+            btrfs_rw_ephemeral_ok: false,
         }
     }
 }
@@ -760,6 +769,12 @@ pub struct OpenFs {
     /// directly (O(log N) per hop) since mutations would otherwise require
     /// cache invalidation.
     btrfs_inode_path_cache: Mutex<Option<Arc<BtrfsInodePathIndex>>>,
+    /// Whether btrfs metadata mutations are allowed despite being non-durable.
+    ///
+    /// When `false` (default), all btrfs metadata-mutating operations return
+    /// `EROFS` to prevent silent data loss. When `true`, mutations proceed
+    /// against the in-memory COW tree but will be lost on unmount.
+    btrfs_rw_ephemeral_ok: bool,
 }
 
 /// Back-reference index used by `btrfs_resolve_inode_path` in read-only mode.
@@ -2522,6 +2537,7 @@ impl OpenFs {
             repair_flush_lifecycle: None,
             move_ext_donor_fds: Mutex::new(BTreeMap::new()),
             btrfs_inode_path_cache: Mutex::new(None),
+            btrfs_rw_ephemeral_ok: options.btrfs_rw_ephemeral_ok,
         };
 
         if fs.is_ext4() && !options.skip_validation {
@@ -2820,6 +2836,27 @@ impl OpenFs {
     #[must_use]
     pub fn is_btrfs(&self) -> bool {
         matches!(self.flavor, FsFlavor::Btrfs(_))
+    }
+
+    /// Check whether btrfs metadata mutations are allowed.
+    ///
+    /// Returns `Ok(())` if:
+    /// - This is an ext4 filesystem (interlock does not apply), or
+    /// - This is btrfs and `btrfs_rw_ephemeral_ok` was set at open time.
+    ///
+    /// Returns `Err(FfsError::ReadOnly)` if this is btrfs and the ephemeral
+    /// flag was not set, preventing silent data loss from non-durable mutations.
+    fn check_btrfs_mutation_allowed(&self, op: &str) -> ffs_error::Result<()> {
+        if self.is_btrfs() && !self.btrfs_rw_ephemeral_ok {
+            warn!(
+                operation = op,
+                error_class = "btrfs_rw_interlock",
+                "btrfs mutation refused: metadata writeback not yet durable; \
+                 pass --btrfs-rw-ephemeral-ok to acknowledge non-durable RW"
+            );
+            return Err(FfsError::ReadOnly);
+        }
+        Ok(())
     }
 
     /// Device length in bytes.
@@ -4611,6 +4648,10 @@ impl OpenFs {
         self.btrfs_alloc_state.as_ref().ok_or(FfsError::ReadOnly)
     }
 
+    /// Safety interlock: reject btrfs metadata mutations unless ephemeral-ok is set.
+    ///
+    /// Btrfs metadata writeback is not yet implemented: mutations execute against
+    /// an in-memory COW tree that is **never serialized to disk**. This interlock
     fn map_journal_commit_error(
         txn_id: u64,
         error: CommitError,
@@ -13396,6 +13437,27 @@ impl OpenFs {
         format!("btrfs-{op}-{}-{datasync_flag}", ino.0)
     }
 
+    /// Check that btrfs metadata mutations are allowed.
+    ///
+    /// btrfs metadata writeback is not yet implemented — mutations execute against
+    /// an in-memory COW tree that is never serialized to disk. Without the explicit
+    /// `btrfs_rw_ephemeral_ok` flag, this function returns `EROFS` to prevent silent
+    /// data loss. When the flag is set, mutations proceed (ephemeral, in-memory only).
+    fn require_btrfs_rw_allowed(&self, operation: &str) -> ffs_error::Result<()> {
+        if self.btrfs_rw_ephemeral_ok {
+            return Ok(());
+        }
+        warn!(
+            target: "ffs::btrfs::rw",
+            operation,
+            error_class = "btrfs_rw_not_durable",
+            outcome = "refused",
+            "btrfs metadata mutation refused: writeback not implemented, data would be lost on unmount; \
+             set btrfs_rw_ephemeral_ok=true to allow ephemeral in-memory mutations"
+        );
+        Err(FfsError::ReadOnly)
+    }
+
     fn ext4_flush_operation_id(ino: InodeNumber, fh: u64, lock_owner: u64) -> String {
         format!("ext4-flush-{}-{fh}-{lock_owner}", ino.0)
     }
@@ -13523,6 +13585,23 @@ impl OpenFs {
             return Err(FfsError::ReadOnly);
         }
 
+        // Interlock: btrfs metadata writeback is not yet durable; refuse fsync
+        // unless the caller explicitly acknowledged ephemeral RW mode.
+        if !self.btrfs_rw_ephemeral_ok {
+            warn!(
+                target: "ffs::btrfs::rw",
+                operation_id = %operation_id,
+                scenario_id,
+                outcome = "rejected",
+                error_class = "btrfs_rw_interlock",
+                ino = ino.0,
+                datasync,
+                "btrfs fsync refused: metadata writeback not yet durable; \
+                 pass --btrfs-rw-ephemeral-ok to acknowledge non-durable RW"
+            );
+            return Err(FfsError::ReadOnly);
+        }
+
         // Flush committed MVCC block versions to the underlying device.
         let base_dev = self.direct_block_device_adapter();
         let flushed = self.mvcc_store.read().flush_to_device(cx, &base_dev)?;
@@ -13580,6 +13659,7 @@ impl OpenFs {
         if data.is_empty() {
             return Ok(0);
         }
+        self.require_btrfs_rw_allowed("write")?;
 
         let alloc_mutex = self.require_btrfs_alloc_state()?;
         let canonical = self.btrfs_canonical_inode(ino)?;
@@ -13834,6 +13914,7 @@ impl OpenFs {
         uid: u32,
         gid: u32,
     ) -> ffs_error::Result<InodeAttr> {
+        self.require_btrfs_rw_allowed("create")?;
         let alloc_mutex = self.require_btrfs_alloc_state()?;
         let parent_oid = self.btrfs_canonical_inode(parent)?;
         let (secs, nanos) = Self::btrfs_now_timestamp();
@@ -13914,6 +13995,7 @@ impl OpenFs {
         uid: u32,
         gid: u32,
     ) -> ffs_error::Result<InodeAttr> {
+        self.require_btrfs_rw_allowed("mkdir")?;
         let alloc_mutex = self.require_btrfs_alloc_state()?;
         let parent_oid = self.btrfs_canonical_inode(parent)?;
         let (secs, nanos) = Self::btrfs_now_timestamp();
@@ -13993,6 +14075,7 @@ impl OpenFs {
         name: &[u8],
         expect_dir: bool,
     ) -> ffs_error::Result<()> {
+        self.require_btrfs_rw_allowed("unlink")?;
         Self::validate_single_path_component(name)?;
         let alloc_mutex = self.require_btrfs_alloc_state()?;
         let parent_oid = self.btrfs_canonical_inode(parent)?;
@@ -14115,6 +14198,7 @@ impl OpenFs {
         new_parent: InodeNumber,
         new_name: &[u8],
     ) -> ffs_error::Result<()> {
+        self.require_btrfs_rw_allowed("rename")?;
         let alloc_mutex = self.require_btrfs_alloc_state()?;
         let parent_oid = self.btrfs_canonical_inode(parent)?;
         let new_parent_oid = self.btrfs_canonical_inode(new_parent)?;
@@ -14223,6 +14307,7 @@ impl OpenFs {
         new_parent: InodeNumber,
         new_name: &[u8],
     ) -> ffs_error::Result<InodeAttr> {
+        self.require_btrfs_rw_allowed("link")?;
         let alloc_mutex = self.require_btrfs_alloc_state()?;
         let target_oid = self.btrfs_canonical_inode(ino)?;
         let parent_oid = self.btrfs_canonical_inode(new_parent)?;
@@ -14278,6 +14363,7 @@ impl OpenFs {
         uid: u32,
         gid: u32,
     ) -> ffs_error::Result<InodeAttr> {
+        self.require_btrfs_rw_allowed("symlink")?;
         let alloc_mutex = self.require_btrfs_alloc_state()?;
         let parent_oid = self.btrfs_canonical_inode(parent)?;
         let (secs, nanos) = Self::btrfs_now_timestamp();
@@ -14371,6 +14457,7 @@ impl OpenFs {
         ino: InodeNumber,
         attrs: &SetAttrRequest,
     ) -> ffs_error::Result<InodeAttr> {
+        self.require_btrfs_rw_allowed("setattr")?;
         let alloc_mutex = self.require_btrfs_alloc_state()?;
         let canonical = self.btrfs_canonical_inode(ino)?;
 
@@ -14467,6 +14554,7 @@ impl OpenFs {
         if length == 0 {
             return Ok(());
         }
+        self.require_btrfs_rw_allowed("fallocate")?;
 
         let (keep_size, punch_hole, collapse_range, zero_range, insert_range) =
             Self::btrfs_validate_fallocate_mode(mode, &operation_id, scenario_id)?;
@@ -14973,6 +15061,7 @@ impl OpenFs {
         value: &[u8],
         mode: XattrSetMode,
     ) -> ffs_error::Result<()> {
+        self.require_btrfs_rw_allowed("setxattr")?;
         Self::btrfs_validate_xattr_name(name)?;
         let alloc_mutex = self.require_btrfs_alloc_state()?;
         let canonical = self.btrfs_canonical_inode(ino)?;
@@ -15037,6 +15126,7 @@ impl OpenFs {
         ino: InodeNumber,
         name: &str,
     ) -> ffs_error::Result<bool> {
+        self.require_btrfs_rw_allowed("removexattr")?;
         Self::btrfs_validate_xattr_name(name)?;
         let alloc_mutex = self.require_btrfs_alloc_state()?;
         let canonical = self.btrfs_canonical_inode(ino)?;
@@ -18056,7 +18146,10 @@ impl FsOps for OpenFs {
                 value,
                 mode,
             ),
-            FsFlavor::Btrfs(_) => self.btrfs_setxattr(cx, scope, ino, name, value, mode),
+            FsFlavor::Btrfs(_) => {
+                self.check_btrfs_mutation_allowed("setxattr")?;
+                self.btrfs_setxattr(cx, scope, ino, name, value, mode)
+            }
         }
     }
 
@@ -18071,7 +18164,10 @@ impl FsOps for OpenFs {
             FsFlavor::Ext4(_) => {
                 self.ext4_removexattr(cx, scope, Self::ext4_canonical_inode(ino), name)
             }
-            FsFlavor::Btrfs(_) => self.btrfs_removexattr(cx, scope, ino, name),
+            FsFlavor::Btrfs(_) => {
+                self.check_btrfs_mutation_allowed("removexattr")?;
+                self.btrfs_removexattr(cx, scope, ino, name)
+            }
         }
     }
 
@@ -18100,6 +18196,7 @@ impl FsOps for OpenFs {
                 )
                 .map(Self::ext4_present_attr),
             FsFlavor::Btrfs(_) => {
+                self.check_btrfs_mutation_allowed("create")?;
                 self.btrfs_create(cx, parent, name.as_encoded_bytes(), mode, uid, gid)
             }
         }
@@ -18158,6 +18255,7 @@ impl FsOps for OpenFs {
                 )
                 .map(Self::ext4_present_attr),
             FsFlavor::Btrfs(_) => {
+                self.check_btrfs_mutation_allowed("mkdir")?;
                 self.btrfs_mkdir(cx, parent, name.as_encoded_bytes(), mode, uid, gid)
             }
         }
@@ -18179,6 +18277,7 @@ impl FsOps for OpenFs {
                 false,
             ),
             FsFlavor::Btrfs(_) => {
+                self.check_btrfs_mutation_allowed("unlink")?;
                 self.btrfs_unlink_impl(cx, scope, parent, name.as_encoded_bytes(), false)
             }
         }
@@ -18200,6 +18299,7 @@ impl FsOps for OpenFs {
                 true,
             ),
             FsFlavor::Btrfs(_) => {
+                self.check_btrfs_mutation_allowed("rmdir")?;
                 self.btrfs_unlink_impl(cx, scope, parent, name.as_encoded_bytes(), true)
             }
         }
@@ -18223,13 +18323,16 @@ impl FsOps for OpenFs {
                 Self::ext4_canonical_inode(new_parent),
                 new_name.as_encoded_bytes(),
             ),
-            FsFlavor::Btrfs(_) => self.btrfs_rename(
-                cx,
-                parent,
-                name.as_encoded_bytes(),
-                new_parent,
-                new_name.as_encoded_bytes(),
-            ),
+            FsFlavor::Btrfs(_) => {
+                self.check_btrfs_mutation_allowed("rename")?;
+                self.btrfs_rename(
+                    cx,
+                    parent,
+                    name.as_encoded_bytes(),
+                    new_parent,
+                    new_name.as_encoded_bytes(),
+                )
+            }
         }
     }
 
@@ -18307,7 +18410,10 @@ impl FsOps for OpenFs {
             FsFlavor::Ext4(_) => {
                 self.ext4_write(cx, scope, Self::ext4_canonical_inode(ino), offset, data)
             }
-            FsFlavor::Btrfs(_) => self.btrfs_write(cx, ino, offset, data),
+            FsFlavor::Btrfs(_) => {
+                self.check_btrfs_mutation_allowed("write")?;
+                self.btrfs_write(cx, ino, offset, data)
+            }
         }
     }
 
@@ -18329,7 +18435,10 @@ impl FsOps for OpenFs {
                     new_name.as_encoded_bytes(),
                 )
                 .map(Self::ext4_present_attr),
-            FsFlavor::Btrfs(_) => self.btrfs_link(cx, ino, new_parent, new_name.as_encoded_bytes()),
+            FsFlavor::Btrfs(_) => {
+                self.check_btrfs_mutation_allowed("link")?;
+                self.btrfs_link(cx, ino, new_parent, new_name.as_encoded_bytes())
+            }
         }
     }
 
@@ -18368,6 +18477,7 @@ impl FsOps for OpenFs {
                 )
                 .map(Self::ext4_present_attr),
             FsFlavor::Btrfs(_) => {
+                self.check_btrfs_mutation_allowed("symlink")?;
                 self.btrfs_symlink(cx, parent, name.as_encoded_bytes(), target, uid, gid)
             }
         }
@@ -18391,7 +18501,10 @@ impl FsOps for OpenFs {
                 length,
                 mode,
             ),
-            FsFlavor::Btrfs(_) => self.btrfs_fallocate(cx, ino, offset, length, mode),
+            FsFlavor::Btrfs(_) => {
+                self.check_btrfs_mutation_allowed("fallocate")?;
+                self.btrfs_fallocate(cx, ino, offset, length, mode)
+            }
         }
     }
 
@@ -19188,7 +19301,10 @@ impl FsOps for OpenFs {
             FsFlavor::Ext4(_) => self
                 .ext4_setattr(cx, scope, Self::ext4_canonical_inode(ino), attrs)
                 .map(Self::ext4_present_attr),
-            FsFlavor::Btrfs(_) => self.btrfs_setattr(cx, ino, attrs),
+            FsFlavor::Btrfs(_) => {
+                self.check_btrfs_mutation_allowed("setattr")?;
+                self.btrfs_setattr(cx, ino, attrs)
+            }
         }
     }
 
@@ -37051,7 +37167,11 @@ mod tests {
         let image = build_btrfs_fsops_image();
         let dev = TestDevice::from_vec(image);
         let cx = Cx::for_testing();
-        let mut fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
+        let opts = OpenOptions {
+            btrfs_rw_ephemeral_ok: true, // Enable ephemeral RW for tests
+            ..OpenOptions::default()
+        };
+        let mut fs = OpenFs::from_device(&cx, Box::new(dev), &opts).unwrap();
         fs.enable_writes(&cx).unwrap();
         assert!(fs.is_writable());
         (fs, cx)
@@ -46163,5 +46283,95 @@ mod tests {
                 }
             }
         }
+    }
+
+    // ── Btrfs RW interlock tests ──────────────────────────────────────
+
+    /// Test that btrfs mutations return EROFS when btrfs_rw_ephemeral_ok is false.
+    #[test]
+    fn btrfs_rw_interlock_refuses_mutations_without_ack() {
+        let cx = Cx::for_testing();
+        let image = build_btrfs_image();
+        let dev = TestDevice::from_vec(image);
+        let opts = OpenOptions {
+            btrfs_rw_ephemeral_ok: false,
+            ..OpenOptions::default()
+        };
+        let mut fs = OpenFs::from_device(&cx, Box::new(dev), &opts).unwrap();
+        fs.enable_writes(&cx).unwrap();
+
+        // Attempt a create operation - should fail with EROFS
+        let result = fs.create(
+            &cx,
+            InodeNumber(256),
+            OsStr::new("test.txt"),
+            0o644,
+            1000,
+            1000,
+        );
+        match result {
+            Err(FfsError::ReadOnly) => {} // expected
+            other => panic!("expected ReadOnly, got {:?}", other),
+        }
+
+        // Attempt mkdir - should also fail with EROFS
+        let result = fs.mkdir(
+            &cx,
+            InodeNumber(256),
+            OsStr::new("subdir"),
+            0o755,
+            1000,
+            1000,
+        );
+        match result {
+            Err(FfsError::ReadOnly) => {} // expected
+            other => panic!("expected ReadOnly for mkdir, got {:?}", other),
+        }
+    }
+
+    /// Test that btrfs mutations succeed when btrfs_rw_ephemeral_ok is true.
+    #[test]
+    fn btrfs_rw_interlock_allows_mutations_with_ack() {
+        let cx = Cx::for_testing();
+        let image = build_btrfs_image();
+        let dev = TestDevice::from_vec(image);
+        let opts = OpenOptions {
+            btrfs_rw_ephemeral_ok: true,
+            ..OpenOptions::default()
+        };
+        let mut fs = OpenFs::from_device(&cx, Box::new(dev), &opts).unwrap();
+        fs.enable_writes(&cx).unwrap();
+
+        // Attempt a create operation - should succeed (or fail for other reasons, not EROFS)
+        let result = fs.create(
+            &cx,
+            InodeNumber(256),
+            OsStr::new("test.txt"),
+            0o644,
+            1000,
+            1000,
+        );
+        // The operation may fail for other reasons (e.g., parent not a directory),
+        // but it should NOT fail with ReadOnly since ephemeral_ok is true.
+        if let Err(FfsError::ReadOnly) = result {
+            panic!("create should not return ReadOnly when btrfs_rw_ephemeral_ok=true");
+        }
+    }
+
+    /// Test that check_btrfs_mutation_allowed returns Ok for ext4 regardless of flag.
+    #[test]
+    fn btrfs_interlock_does_not_affect_ext4() {
+        let cx = Cx::for_testing();
+        // build_ext4_image takes block_size_log: 2 = 4KB blocks
+        let image = build_ext4_image(2);
+        let dev = TestDevice::from_vec(image);
+        let opts = OpenOptions {
+            btrfs_rw_ephemeral_ok: false, // even with false, ext4 should work
+            ..OpenOptions::default()
+        };
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &opts).unwrap();
+
+        // check_btrfs_mutation_allowed should return Ok for ext4
+        assert!(fs.check_btrfs_mutation_allowed("test_op").is_ok());
     }
 }
