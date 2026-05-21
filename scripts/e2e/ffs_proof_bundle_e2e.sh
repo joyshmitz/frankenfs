@@ -187,6 +187,7 @@ report = {
     "swarm_evidence": [],
     "adaptive_runtime_evidence": [],
     "lane_provenance": [],
+    "executed_evidence": [],
 }
 
 for index, lane in enumerate(lanes):
@@ -230,6 +231,22 @@ for index, lane in enumerate(lanes):
             "raw_log_path": f"logs/{lane}.log",
         }
     )
+    if lane in {"conformance", "fuse", "repair_lab", "crash_replay"}:
+        report["executed_evidence"].append(
+            {
+                "lane_id": lane,
+                "command": "printf",
+                "args": [f"{lane} executed\n"],
+                "exit_code": 0,
+                "stdout_sha256": "1" * 64,
+                "stderr_sha256": "2" * 64,
+                "duration_ms": 1,
+                "ran_at": 1770000000,
+                "git_sha": "fixture-git-sha",
+                "host_class": "rch_worker",
+                "outcome": "success",
+            }
+        )
 
 report["artifact_reports"].extend(
     [
@@ -303,6 +320,10 @@ print("## Lane Provenance")
 print("conformance strengthens_public_claim")
 print("known_deferrals unsupported_future_scope")
 print()
+print("## Executed Evidence")
+print("conformance success stdout_sha256")
+print("fuse success stdout_sha256")
+print()
 print("## Swarm Evidence")
 print("swarm_tail_latency p99_attribution available")
 print()
@@ -314,11 +335,12 @@ PY
 case "$command_text" in
     *"cargo test -p ffs-harness --lib proof_bundle"*)
         printf '%s\n' \
-            "running 47 tests" \
+            "running 49 tests" \
             "test proof_bundle::tests::sample_bundle_validates ... ok" \
+            "test proof_bundle::tests::executable_lanes_attach_process_run_evidence ... ok" \
             "test proof_bundle::tests::render_proof_bundle_markdown_sample_bundle_snapshot ... ok" \
             "test proof_bundle::tests::redaction_policy_failures_are_evidence_production_failures ... ok" \
-            "test result: ok. 47 passed; 0 failed; 0 ignored"
+            "test result: ok. 49 passed; 0 failed; 0 ignored"
         finish_success
         ;;
     *"proof_bundle_bad_hash.json"*)
@@ -655,6 +677,9 @@ for index, lane in enumerate(lanes):
             }
         )
     metadata["source_command"] = f"cargo run -p ffs-harness -- validate-{lane}"
+    if lane in {"conformance", "fuse", "repair_lab", "crash_replay"}:
+        metadata["executed_evidence_command"] = "printf"
+        metadata["executed_evidence_args_json"] = json.dumps([f"{lane} executed\n"])
     records.append(
         {
             "lane_id": lane,
@@ -733,12 +758,14 @@ then
         --bundle "$MANIFEST_JSON" \
         --current-git-sha "$GIT_SHA" \
         --max-age-days 10000 \
+        --execute-configured-lanes \
         && extract_json_object "$VALIDATE_RAW" "$REPORT_JSON" \
         && run_rch_capture "$SUMMARY_RAW" cargo run --quiet -p ffs-harness -- validate-proof-bundle \
             --bundle "$MANIFEST_JSON" \
             --current-git-sha "$GIT_SHA" \
             --max-age-days 10000 \
             --format markdown \
+            --execute-configured-lanes \
         && extract_markdown_report "$SUMMARY_RAW" "$SUMMARY_MD"; then
         scenario_result "proof_bundle_sample_validates" "PASS" "validation JSON and summary captured from RCH"
     else
@@ -816,6 +843,21 @@ if provenance_by_lane["known_deferrals"]["provenance_class"] != "unsupported_fut
     raise SystemExit("known deferrals lane did not stay unsupported future-scope context")
 if not all(row.get("source_command") and row.get("raw_log_path") for row in provenance_rows):
     raise SystemExit("lane provenance did not preserve source command and raw log path")
+executed_rows = report.get("executed_evidence", [])
+expected_executed_lanes = {"conformance", "fuse", "repair_lab", "crash_replay"}
+executed_by_lane = {row["lane_id"]: row for row in executed_rows}
+if set(executed_by_lane) != expected_executed_lanes:
+    raise SystemExit(f"unexpected executed evidence lanes: {sorted(executed_by_lane)}")
+for lane, evidence in executed_by_lane.items():
+    if evidence.get("command") != "printf":
+        raise SystemExit(f"{lane} executed evidence command was not recorded")
+    if evidence.get("exit_code") != 0 or evidence.get("outcome") != "success":
+        raise SystemExit(f"{lane} executed evidence did not record a successful run")
+    if len(evidence.get("stdout_sha256", "")) != 64:
+        raise SystemExit(f"{lane} stdout hash was not preserved")
+lane_by_id = {row["lane_id"]: row for row in report["lanes"]}
+if lane_by_id["conformance"]["status"] != "pass":
+    raise SystemExit("conformance lane did not remain pass after successful execution")
 for lane in required_lanes:
     if f"logs/{lane}.log" not in summary:
         raise SystemExit(f"missing raw log link for {lane}")
@@ -827,6 +869,8 @@ if "Artifact hash chain" not in summary:
     raise SystemExit("summary did not preserve hash-chain diagnostics")
 if "Lane Provenance" not in summary or "strengthens_public_claim" not in summary:
     raise SystemExit("summary did not preserve lane provenance diagnostics")
+if "Executed Evidence" not in summary or "Stdout SHA-256" not in summary:
+    raise SystemExit("summary did not preserve executed evidence diagnostics")
 if "Swarm Evidence" not in summary or "p99_attribution" not in summary:
     raise SystemExit("summary did not preserve swarm evidence diagnostics")
 if "Adaptive Runtime Evidence" not in summary or "adaptive_runtime_runner" not in summary:

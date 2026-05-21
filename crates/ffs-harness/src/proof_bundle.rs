@@ -10,6 +10,7 @@
 use crate::adaptive_runtime_manifest::{
     AdaptiveRuntimeReleaseClaimState, AdaptiveRuntimeRunnerClassification,
 };
+use crate::executed_evidence::{ExecutedEvidence, ExecutionOutcome, HostClass};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -38,6 +39,10 @@ pub const REQUIRED_PROOF_BUNDLE_LANES: [&str; 14] = [
     "adaptive_runtime",
 ];
 
+const EXECUTABLE_PROOF_BUNDLE_LANES: [&str; 4] =
+    ["conformance", "fuse", "repair_lab", "crash_replay"];
+const EXECUTED_EVIDENCE_COMMAND_KEY: &str = "executed_evidence_command";
+const EXECUTED_EVIDENCE_ARGS_JSON_KEY: &str = "executed_evidence_args_json";
 const SWARM_WORKLOAD_HARNESS_LANE: &str = "swarm_workload_harness";
 const SWARM_TAIL_LATENCY_LANE: &str = "swarm_tail_latency";
 const SWARM_VALIDATOR_REPORT_ROLE: &str = "swarm_validator_report";
@@ -76,6 +81,7 @@ pub struct ProofBundleValidationConfig {
     pub manifest_path: PathBuf,
     pub current_git_sha: Option<String>,
     pub max_age_days: Option<u64>,
+    pub execute_configured_lanes: bool,
 }
 
 impl ProofBundleValidationConfig {
@@ -85,6 +91,7 @@ impl ProofBundleValidationConfig {
             manifest_path: manifest_path.into(),
             current_git_sha: None,
             max_age_days: None,
+            execute_configured_lanes: false,
         }
     }
 }
@@ -195,6 +202,8 @@ pub struct ProofBundleValidationReport {
     pub lanes: Vec<ProofBundleLaneReport>,
     #[serde(default)]
     pub lane_provenance: Vec<ProofBundleLaneProvenanceReport>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub executed_evidence: Vec<ProofBundleExecutedEvidenceReport>,
     pub swarm_evidence: Vec<ProofBundleSwarmEvidenceReport>,
     pub adaptive_runtime_evidence: Vec<ProofBundleAdaptiveRuntimeEvidenceReport>,
     pub errors: Vec<String>,
@@ -362,6 +371,23 @@ pub struct ProofBundleLaneProvenanceReport {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProofBundleExecutedEvidenceReport {
+    pub lane_id: String,
+    pub command: String,
+    pub args: Vec<String>,
+    pub exit_code: Option<i32>,
+    pub stdout_sha256: String,
+    pub stderr_sha256: String,
+    pub duration_ms: u64,
+    pub ran_at: u64,
+    pub git_sha: String,
+    pub host_class: String,
+    pub outcome: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome_detail: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProofBundleSwarmEvidenceReport {
     pub lane_id: String,
     pub status: ProofBundleOutcome,
@@ -438,13 +464,17 @@ pub fn validate_proof_bundle(
         .manifest_path
         .parent()
         .unwrap_or_else(|| Path::new("."));
-    Ok(validate_proof_bundle_manifest(
+    let mut report = validate_proof_bundle_manifest(
         &manifest,
         bundle_root,
         &config.manifest_path,
         config.current_git_sha.as_deref(),
         config.max_age_days,
-    ))
+    );
+    if config.execute_configured_lanes {
+        attach_configured_lane_executed_evidence(&manifest, &mut report);
+    }
+    Ok(report)
 }
 
 #[must_use]
@@ -465,6 +495,25 @@ pub fn validate_proof_bundle_manifest(
     builder.build_lane_provenance(manifest, bundle_root);
 
     builder.finish(manifest)
+}
+
+#[must_use]
+pub fn validate_proof_bundle_manifest_with_execution(
+    manifest: &ProofBundleManifest,
+    bundle_root: &Path,
+    manifest_path: &Path,
+    current_git_sha: Option<&str>,
+    max_age_days: Option<u64>,
+) -> ProofBundleValidationReport {
+    let mut report = validate_proof_bundle_manifest(
+        manifest,
+        bundle_root,
+        manifest_path,
+        current_git_sha,
+        max_age_days,
+    );
+    attach_configured_lane_executed_evidence(manifest, &mut report);
+    report
 }
 
 #[must_use]
@@ -568,6 +617,36 @@ pub fn render_proof_bundle_markdown(report: &ProofBundleValidationReport) -> Str
                 provenance.raw_log_path,
                 provenance.raw_log_path,
                 escape_markdown_table_cell(&provenance.rationale)
+            )
+            .ok();
+        }
+    }
+    if !report.executed_evidence.is_empty() {
+        writeln!(&mut out).ok();
+        writeln!(&mut out, "## Executed Evidence").ok();
+        writeln!(
+            &mut out,
+            "| Lane | Outcome | Exit | Command | Stdout SHA-256 | Stderr SHA-256 | Git SHA | Host class | Duration ms |"
+        )
+        .ok();
+        writeln!(&mut out, "|---|---|---:|---|---|---|---|---|---:|").ok();
+        for evidence in &report.executed_evidence {
+            let exit_code = evidence
+                .exit_code
+                .map_or_else(|| "signal".to_owned(), |code| code.to_string());
+            let command = format!("{} {}", evidence.command, evidence.args.join(" "));
+            writeln!(
+                &mut out,
+                "| `{}` | `{}` | {} | `{}` | `{}` | `{}` | `{}` | `{}` | {} |",
+                evidence.lane_id,
+                escape_markdown_table_cell(&evidence.outcome),
+                exit_code,
+                escape_markdown_table_cell(command.trim()),
+                evidence.stdout_sha256,
+                evidence.stderr_sha256,
+                escape_markdown_table_cell(&evidence.git_sha),
+                escape_markdown_table_cell(&evidence.host_class),
+                evidence.duration_ms
             )
             .ok();
         }
@@ -1649,11 +1728,34 @@ impl ProofBundleReportBuilder {
             integrity_errors: self.integrity_errors,
             lanes: self.lanes,
             lane_provenance: self.lane_provenance,
+            executed_evidence: Vec::new(),
             swarm_evidence: self.swarm_evidence,
             adaptive_runtime_evidence: self.adaptive_runtime_evidence,
             errors: self.errors,
             warnings: self.warnings,
             reproduction_command: manifest.redaction.reproduction_command.clone(),
+        }
+    }
+}
+
+impl ProofBundleExecutedEvidenceReport {
+    fn from_executed_evidence(lane_id: &str, evidence: ExecutedEvidence) -> Self {
+        let host_class = executed_evidence_host_class_label(evidence.host_class).to_owned();
+        let outcome = executed_evidence_outcome_label(&evidence.outcome).to_owned();
+        let outcome_detail = executed_evidence_outcome_detail(&evidence.outcome);
+        Self {
+            lane_id: lane_id.to_owned(),
+            command: evidence.command,
+            args: evidence.args,
+            exit_code: evidence.exit_code,
+            stdout_sha256: evidence.stdout_sha256,
+            stderr_sha256: evidence.stderr_sha256,
+            duration_ms: evidence.duration_ms,
+            ran_at: evidence.ran_at,
+            git_sha: evidence.git_sha,
+            host_class,
+            outcome,
+            outcome_detail,
         }
     }
 }
@@ -1782,6 +1884,106 @@ fn lane_metadata_first<'a>(
         .find_map(|key| metadata.get(*key).map(String::as_str))
         .map(str::trim)
         .filter(|value| !value.is_empty())
+}
+
+fn attach_configured_lane_executed_evidence(
+    manifest: &ProofBundleManifest,
+    report: &mut ProofBundleValidationReport,
+) {
+    for lane_id in EXECUTABLE_PROOF_BUNDLE_LANES {
+        let Some(lane) = manifest.lanes.iter().find(|lane| lane.lane_id == lane_id) else {
+            continue;
+        };
+        match lane_executed_evidence_command(lane) {
+            Ok((command, args)) => {
+                let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+                let evidence = ExecutedEvidence::run(&command, &arg_refs);
+                let launch_failed =
+                    matches!(&evidence.outcome, ExecutionOutcome::LaunchFailed { .. });
+                let evidence_report =
+                    ProofBundleExecutedEvidenceReport::from_executed_evidence(lane_id, evidence);
+                if launch_failed {
+                    report.errors.push(format!(
+                        "lane {lane_id} configured ExecutedEvidence command failed to launch: {} {:?}",
+                        evidence_report.command, evidence_report.args
+                    ));
+                }
+                report.executed_evidence.push(evidence_report);
+            }
+            Err(error) => report.errors.push(error),
+        }
+    }
+    report.valid = report.errors.is_empty();
+}
+
+fn lane_executed_evidence_command(
+    lane: &ProofBundleLane,
+) -> std::result::Result<(String, Vec<String>), String> {
+    let command = lane
+        .metadata
+        .get(EXECUTED_EVIDENCE_COMMAND_KEY)
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|command| !command.is_empty())
+        .ok_or_else(|| {
+            format!(
+                "lane {} metadata.{EXECUTED_EVIDENCE_COMMAND_KEY} missing for executable proof lane",
+                lane.lane_id
+            )
+        })?
+        .to_owned();
+
+    let args = match lane
+        .metadata
+        .get(EXECUTED_EVIDENCE_ARGS_JSON_KEY)
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|args| !args.is_empty())
+    {
+        Some(raw_args) => serde_json::from_str::<Vec<String>>(raw_args).map_err(|error| {
+            format!(
+                "lane {} metadata.{EXECUTED_EVIDENCE_ARGS_JSON_KEY} must be a JSON string array: {error}",
+                lane.lane_id
+            )
+        })?,
+        None => Vec::new(),
+    };
+
+    Ok((command, args))
+}
+
+#[cfg(test)]
+fn is_executable_proof_bundle_lane(lane_id: &str) -> bool {
+    EXECUTABLE_PROOF_BUNDLE_LANES.contains(&lane_id)
+}
+
+fn executed_evidence_host_class_label(host_class: HostClass) -> &'static str {
+    match host_class {
+        HostClass::Full => "full",
+        HostClass::Ci => "ci",
+        HostClass::LocalUnprivileged => "local_unprivileged",
+        HostClass::RchWorker => "rch_worker",
+        HostClass::Unknown => "unknown",
+    }
+}
+
+fn executed_evidence_outcome_label(outcome: &ExecutionOutcome) -> &'static str {
+    match outcome {
+        ExecutionOutcome::Success => "success",
+        ExecutionOutcome::Failed { .. } => "failed",
+        ExecutionOutcome::Signaled => "signaled",
+        ExecutionOutcome::Skipped { .. } => "skipped",
+        ExecutionOutcome::LaunchFailed { .. } => "launch_failed",
+    }
+}
+
+fn executed_evidence_outcome_detail(outcome: &ExecutionOutcome) -> Option<String> {
+    match outcome {
+        ExecutionOutcome::Failed { exit_code } => Some(format!("exit_code={exit_code}")),
+        ExecutionOutcome::Skipped { reason } => Some(reason.clone()),
+        ExecutionOutcome::LaunchFailed { error } => Some(error.clone()),
+        ExecutionOutcome::Success | ExecutionOutcome::Signaled => None,
+    }
 }
 
 fn proof_bundle_path_exists(bundle_root: &Path, raw_path: &str) -> bool {
@@ -2450,6 +2652,32 @@ mod tests {
         )
     }
 
+    fn validate_sample_with_execution(sample: &SampleBundle) -> ProofBundleValidationReport {
+        validate_proof_bundle_manifest_with_execution(
+            &sample.manifest,
+            sample.root.path(),
+            &sample.root.path().join("manifest.json"),
+            Some("abcdef1"),
+            Some(10_000),
+        )
+    }
+
+    fn configure_executable_lane_commands(manifest: &mut ProofBundleManifest) -> Result<()> {
+        for lane in &mut manifest.lanes {
+            if is_executable_proof_bundle_lane(&lane.lane_id) {
+                lane.metadata.insert(
+                    EXECUTED_EVIDENCE_COMMAND_KEY.to_owned(),
+                    "printf".to_owned(),
+                );
+                lane.metadata.insert(
+                    EXECUTED_EVIDENCE_ARGS_JSON_KEY.to_owned(),
+                    serde_json::to_string(&[format!("{} executed\n", lane.lane_id)])?,
+                );
+            }
+        }
+        Ok(())
+    }
+
     fn first_lane_mut(manifest: &mut ProofBundleManifest) -> Result<&mut ProofBundleLane> {
         manifest
             .lanes
@@ -2527,6 +2755,17 @@ mod tests {
             .iter()
             .find(|evidence| evidence.lane_id == lane_id)
             .with_context(|| format!("adaptive runtime evidence should exist for lane {lane_id}"))
+    }
+
+    fn executed_evidence_by_lane<'a>(
+        report: &'a ProofBundleValidationReport,
+        lane_id: &str,
+    ) -> Result<&'a ProofBundleExecutedEvidenceReport> {
+        report
+            .executed_evidence
+            .iter()
+            .find(|evidence| evidence.lane_id == lane_id)
+            .with_context(|| format!("executed evidence should exist for lane {lane_id}"))
     }
 
     fn swarm_lane_mut<'a>(
@@ -2633,6 +2872,68 @@ mod tests {
         );
         assert_eq!(report.swarm_evidence.len(), 2);
         assert_eq!(report.adaptive_runtime_evidence.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn executable_lanes_attach_process_run_evidence() -> Result<()> {
+        let mut sample = sample_bundle()?;
+        configure_executable_lane_commands(&mut sample.manifest)?;
+        let report = validate_sample_with_execution(&sample);
+        assert!(report.valid, "{:?}", report.errors);
+        assert_eq!(
+            report.executed_evidence.len(),
+            EXECUTABLE_PROOF_BUNDLE_LANES.len()
+        );
+        for lane_id in EXECUTABLE_PROOF_BUNDLE_LANES {
+            let evidence = executed_evidence_by_lane(&report, lane_id)?;
+            assert_eq!(evidence.command, "printf");
+            assert_eq!(evidence.exit_code, Some(0));
+            assert_eq!(evidence.outcome, "success");
+            assert_eq!(evidence.stdout_sha256.len(), 64);
+            assert_eq!(evidence.stderr_sha256.len(), 64);
+            assert_eq!(
+                evidence.args,
+                vec![format!("{lane_id} executed\n")],
+                "lane {lane_id} did not preserve configured args"
+            );
+        }
+
+        let conformance = executed_evidence_by_lane(&report, "conformance")?;
+        let conformance_lane = report
+            .lanes
+            .iter()
+            .find(|lane| lane.lane_id == "conformance")
+            .context("conformance lane report")?;
+        assert_eq!(conformance_lane.status, ProofBundleOutcome::Pass);
+        assert_eq!(conformance.exit_code, Some(0));
+
+        let summary = render_proof_bundle_markdown(&report);
+        assert!(summary.contains("## Executed Evidence"));
+        assert!(summary.contains("conformance"));
+        assert!(summary.contains("Stdout SHA-256"));
+        Ok(())
+    }
+
+    #[test]
+    fn executable_lane_missing_command_fails_closed() -> Result<()> {
+        let mut sample = sample_bundle()?;
+        configure_executable_lane_commands(&mut sample.manifest)?;
+        let fuse = sample
+            .manifest
+            .lanes
+            .iter_mut()
+            .find(|lane| lane.lane_id == "fuse")
+            .context("fuse lane")?;
+        fuse.metadata.remove(EXECUTED_EVIDENCE_COMMAND_KEY);
+
+        let report = validate_sample_with_execution(&sample);
+
+        assert!(!report.valid);
+        assert!(report.executed_evidence.len() < EXECUTABLE_PROOF_BUNDLE_LANES.len());
+        assert!(report.errors.iter().any(|error| {
+            error.contains("lane fuse") && error.contains(EXECUTED_EVIDENCE_COMMAND_KEY)
+        }));
         Ok(())
     }
 

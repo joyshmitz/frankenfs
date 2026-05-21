@@ -3513,6 +3513,7 @@ fn validate_proof_bundle_cmd(args: &[String]) -> Result<()> {
     let mut out_path: Option<String> = None;
     let mut summary_out_path: Option<String> = None;
     let mut format = ProofBundleFormat::Json;
+    let mut execute_configured_lanes = false;
     let mut i = 0;
 
     while i < args.len() {
@@ -3555,6 +3556,9 @@ fn validate_proof_bundle_cmd(args: &[String]) -> Result<()> {
                         .to_owned(),
                 );
             }
+            "--execute-configured-lanes" => {
+                execute_configured_lanes = true;
+            }
             "--help" | "-h" => {
                 print_proof_bundle_usage();
                 return Ok(());
@@ -3568,6 +3572,7 @@ fn validate_proof_bundle_cmd(args: &[String]) -> Result<()> {
     let mut config = ProofBundleValidationConfig::new(&bundle_path);
     config.current_git_sha = current_git_sha;
     config.max_age_days = max_age_days;
+    config.execute_configured_lanes = execute_configured_lanes;
 
     let report = validate_proof_bundle(&config)?;
     let output = match format {
@@ -10550,6 +10555,9 @@ fn print_proof_bundle_usage() {
         "  --out FILE                         Write selected-format validation report to FILE"
     );
     println!("  --summary-out FILE                 Write Markdown inspection summary to FILE");
+    println!(
+        "  --execute-configured-lanes         Run configured executable lanes and attach ExecutedEvidence"
+    );
 }
 
 fn print_invariant_oracle_usage() {
