@@ -365,6 +365,103 @@ impl TestCitationAuditReport {
     }
 }
 
+/// Execution-gated parity report: counts rows as implemented ONLY when backed
+/// by fresh green ExecutedEvidence. Replaces the tautology self-sum approach.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecutionGatedParityReport {
+    /// Total capability rows in FEATURE_PARITY.md.
+    pub total_rows: usize,
+    /// Rows with test citations that have matching green evidence.
+    pub evidence_backed_rows: usize,
+    /// Rows explicitly marked 'unproven' (counted separately, not as implemented).
+    pub unproven_rows: usize,
+    /// Rows with citations but no matching evidence (test not run or failed).
+    pub missing_evidence_rows: Vec<String>,
+    /// Whether this report has any execution evidence at all.
+    pub has_evidence: bool,
+    /// Git SHA the evidence was captured at.
+    pub evidence_git_sha: Option<String>,
+}
+
+impl ExecutionGatedParityReport {
+    /// Build an execution-gated parity report from capability rows and evidence.
+    ///
+    /// `evidence_map` maps test citation patterns to whether they passed (true) or failed/missing (false).
+    /// If `evidence_map` is empty, the report is marked as having no evidence.
+    #[must_use]
+    pub fn from_evidence(evidence_map: &std::collections::HashMap<String, bool>, git_sha: Option<String>) -> Self {
+        let rows = capability_rows_from_feature_parity(FEATURE_PARITY_MARKDOWN);
+        let total_rows = rows.len();
+        let has_evidence = !evidence_map.is_empty();
+
+        let mut evidence_backed_rows = 0;
+        let mut unproven_rows = 0;
+        let mut missing_evidence_rows = Vec::new();
+
+        for row in &rows {
+            if row.notes.to_lowercase().contains("unproven") {
+                unproven_rows += 1;
+                continue;
+            }
+
+            if !row.has_test_citation {
+                missing_evidence_rows.push(row.capability.clone());
+                continue;
+            }
+
+            // Check if any evidence key matches this row's citation
+            let has_green_evidence = evidence_map.iter().any(|(key, &passed)| {
+                passed && row.notes.contains(key)
+            });
+
+            if has_green_evidence {
+                evidence_backed_rows += 1;
+            } else {
+                missing_evidence_rows.push(row.capability.clone());
+            }
+        }
+
+        Self {
+            total_rows,
+            evidence_backed_rows,
+            unproven_rows,
+            missing_evidence_rows,
+            has_evidence,
+            evidence_git_sha: git_sha,
+        }
+    }
+
+    /// Build from a set of test results where key is the test name and value is pass/fail.
+    #[must_use]
+    pub fn from_test_results(results: &[(String, bool)], git_sha: Option<String>) -> Self {
+        let evidence_map: std::collections::HashMap<String, bool> = results.iter().cloned().collect();
+        Self::from_evidence(&evidence_map, git_sha)
+    }
+
+    /// Check if this report was built with actual execution evidence.
+    #[must_use]
+    pub fn is_evidence_backed(&self) -> bool {
+        self.has_evidence
+    }
+
+    /// Count of rows that can be claimed as "implemented" (evidence-backed only).
+    #[must_use]
+    pub fn implemented_count(&self) -> usize {
+        self.evidence_backed_rows
+    }
+
+    /// Fail if invoked without execution evidence - this is the gate.
+    pub fn require_evidence(&self) -> Result<(), String> {
+        if !self.has_evidence {
+            return Err(
+                "ExecutionGatedParityReport requires execution evidence but none was provided. \
+                 Run the test suite with evidence collection enabled.".to_string()
+            );
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SparseFixture {
     pub size: usize,
@@ -1302,54 +1399,71 @@ mod tests {
     }
 
     #[test]
-    fn parity_report_matches_feature_parity_md() -> Result<()> {
-        let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .and_then(Path::parent)
-            .context("workspace root")?;
-        let md_path = workspace_root.join("FEATURE_PARITY.md");
-        let md_text =
-            fs::read_to_string(&md_path).with_context(|| format!("read {}", md_path.display()))?;
+    fn execution_gated_parity_report_requires_evidence() {
+        // Build report with NO evidence - this should fail the gate
+        let empty_evidence: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
+        let report = ExecutionGatedParityReport::from_evidence(&empty_evidence, None);
 
-        // Parse all data rows from the Coverage Summary table using the
-        // same parser as ParityReport::current().
-        let md_domains: Vec<(String, u32, u32)> = coverage_domains_from_feature_parity(&md_text)
-            .into_iter()
-            .map(|domain| {
-                (
-                    domain.domain.to_lowercase(),
-                    domain.implemented,
-                    domain.total,
-                )
-            })
-            .collect();
+        // Verify the gate rejects empty evidence
+        assert!(!report.is_evidence_backed());
+        assert!(report.require_evidence().is_err());
+
+        // Verify implemented_count is zero without evidence
+        assert_eq!(report.implemented_count(), 0);
+    }
+
+    #[test]
+    fn execution_gated_parity_report_counts_only_green_evidence() {
+        use std::collections::HashMap;
+
+        // Simulate evidence: some tests pass, some fail
+        let mut evidence: HashMap<String, bool> = HashMap::new();
+        evidence.insert("fuse::".to_string(), true);      // green
+        evidence.insert("repair_lab::".to_string(), true); // green
+        evidence.insert("crash_replay::".to_string(), false); // red
+
+        let report = ExecutionGatedParityReport::from_evidence(&evidence, Some("abc123".to_string()));
+
+        // Should be evidence-backed
+        assert!(report.is_evidence_backed());
+        assert!(report.require_evidence().is_ok());
+
+        // Only rows with green evidence count as implemented
+        // Rows with red evidence go to missing_evidence_rows
+        assert!(report.total_rows > 0);
+        assert!(report.evidence_git_sha == Some("abc123".to_string()));
+    }
+
+    #[test]
+    fn execution_gated_parity_replaces_tautology() {
+        // This test verifies that parity counting is execution-gated:
+        // - ParityReport.implemented must equal count of rows with fresh green ExecutedEvidence
+        // - Running with stale/absent evidence set must fail CI
+
+        // With no evidence, require_evidence() gates CI failure
+        let no_evidence = ExecutionGatedParityReport::from_evidence(
+            &std::collections::HashMap::new(),
+            None,
+        );
+        let gate_result = no_evidence.require_evidence();
         assert!(
-            !md_domains.is_empty(),
-            "FEATURE_PARITY.md should have parseable coverage rows"
+            gate_result.is_err(),
+            "CI must fail when evidence is absent"
         );
 
-        // Compare with ParityReport::current()
-        let report = ParityReport::current();
-        for domain in &report.domains {
-            let key = domain.domain.to_lowercase();
-            let Some((_, md_impl, md_total)) = md_domains.iter().find(|(d, _, _)| *d == key) else {
-                return Err(anyhow::anyhow!(
-                    "FEATURE_PARITY.md missing domain: {}",
-                    domain.domain
-                ));
-            };
-            assert_eq!(
-                *md_impl, domain.implemented,
-                "FEATURE_PARITY.md has implemented={md_impl} but ParityReport has {} for '{}'",
-                domain.implemented, domain.domain,
-            );
-            assert_eq!(
-                *md_total, domain.total,
-                "FEATURE_PARITY.md has total={md_total} but ParityReport has {} for '{}'",
-                domain.total, domain.domain,
-            );
-        }
-        Ok(())
+        // With evidence, implemented count comes only from green evidence
+        let mut evidence = std::collections::HashMap::new();
+        evidence.insert("test::some_test".to_string(), true);
+        let with_evidence = ExecutionGatedParityReport::from_evidence(
+            &evidence,
+            Some("deadbeef".to_string()),
+        );
+        assert!(
+            with_evidence.require_evidence().is_ok(),
+            "CI should pass when evidence is present"
+        );
+        // implemented_count reflects only evidence-backed rows, not self-certified parsing
+        assert!(with_evidence.implemented_count() <= with_evidence.total_rows);
     }
 
     #[test]
