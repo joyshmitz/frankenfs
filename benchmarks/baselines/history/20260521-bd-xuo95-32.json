@@ -1,0 +1,357 @@
+{
+  "schema_version": 1,
+  "baseline_id": "20260521-bd-xuo95-32",
+  "source_bead_id": "bd-xuo95.32",
+  "generated_at": "2026-05-21T07:55:55Z",
+  "date_tag": "20260521-bd-xuo95-32",
+  "commit": "d3cac79739e366c32879f9918c3f0443a33f6984",
+  "branch": "main",
+  "worktree_state": {
+    "dirty": true,
+    "note": "Swarm worktree contained unrelated foreign edits; this artifact records the benchmark outputs and hashes captured during the run."
+  },
+  "environment": {
+    "hostname": "thinkstation1",
+    "cpu_model": "AMD Ryzen Threadripper PRO 5975WX 32-Cores",
+    "kernel": "Linux 6.17.0-14-generic #14-Ubuntu SMP PREEMPT_DYNAMIC Fri Jan  9 17:01:16 UTC 2026 x86_64 GNU/Linux",
+    "memory_total_gib": 215.780,
+    "rustc": "rustc 1.97.0-nightly (37d85e592 2026-04-28)",
+    "hyperfine": "hyperfine 1.19.0",
+    "cargo_target_dir": "/data/tmp/rch_target_frankenfs_bd_xuo95_32",
+    "rch_worker": "ts1",
+    "kernel_fuse_mode": "permissioned_required",
+    "capabilities": {
+      "fuse": true,
+      "sudo_non_interactive": true,
+      "mkfs_ext4": true,
+      "hyperfine": true
+    }
+  },
+  "warmup_runs": {
+    "criterion_default_seconds": 3.0,
+    "mounted_hyperfine": 3
+  },
+  "measured_runs": {
+    "criterion_samples": 100,
+    "mounted_hyperfine": 10
+  },
+  "thresholds_file": "benchmarks/thresholds.toml",
+  "measurement_coverage": {
+    "criterion_measured_count": 8,
+    "mounted_measured_count": 3,
+    "pending_count": 0
+  },
+  "executed_evidence": [
+    {
+      "command": "rch",
+      "args": [
+        "exec",
+        "--",
+        "cargo",
+        "bench",
+        "--profile",
+        "release-perf",
+        "-p",
+        "ffs-repair",
+        "--bench",
+        "scrub_codec"
+      ],
+      "exit_code": 0,
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderr_sha256": "da78f352a584e7ba58760ba6abb9f52277f022e78e489956a2115983831e26dd",
+      "duration_ms": 230000,
+      "ran_at": 1779349475,
+      "git_sha": "d3cac79739e366c32879f9918c3f0443a33f6984",
+      "host_class": "rch_worker",
+      "outcome": "success",
+      "raw_stdout_path": "baselines/hyperfine/20260521-bd-xuo95-32/ffs_repair_scrub_codec.stdout",
+      "raw_stderr_path": "baselines/hyperfine/20260521-bd-xuo95-32/ffs_repair_scrub_codec.stderr",
+      "worker": "ts1"
+    },
+    {
+      "command": "rch",
+      "args": [
+        "exec",
+        "--",
+        "cargo",
+        "build",
+        "--profile",
+        "release-perf",
+        "-p",
+        "ffs-cli"
+      ],
+      "exit_code": 0,
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderr_sha256": "8782aec0426217578694173fb5282e71f1a4fd4dfbdd65e9203e8d89972cf181",
+      "duration_ms": 226000,
+      "ran_at": 1779349742,
+      "git_sha": "d3cac79739e366c32879f9918c3f0443a33f6984",
+      "host_class": "rch_worker",
+      "outcome": "success",
+      "raw_stdout_path": "baselines/hyperfine/20260521-bd-xuo95-32/ffs_cli_build.stdout",
+      "raw_stderr_path": "baselines/hyperfine/20260521-bd-xuo95-32/ffs_cli_build.stderr",
+      "worker": "ts1"
+    },
+    {
+      "command": "hyperfine",
+      "args": [
+        "--warmup",
+        "3",
+        "--runs",
+        "10",
+        "--export-json",
+        "baselines/hyperfine/20260521-bd-xuo95-32/ffs_cli_mount_cold_probe.json",
+        "sudo -n scripts/mount_benchmark_probe.sh --bin /data/tmp/rch_target_frankenfs_bd_xuo95_32/release-perf/ffs-cli --image baselines/hyperfine/20260521-bd-xuo95-32/mount_probe.ext4 --mount-root baselines/hyperfine/20260521-bd-xuo95-32/mount_probe_mounts --mode cold --out-json baselines/hyperfine/20260521-bd-xuo95-32/ffs_cli_mount_cold_probe_report.json"
+      ],
+      "exit_code": 0,
+      "stdout_sha256": "770f7ee37999c11bdaddd2666fbdcb7361345e8e25a86f4e16bdb7808aa5d467",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "duration_ms": 821,
+      "ran_at": 1779349980,
+      "git_sha": "d3cac79739e366c32879f9918c3f0443a33f6984",
+      "host_class": "full",
+      "outcome": "success",
+      "raw_stdout_path": "baselines/hyperfine/20260521-bd-xuo95-32/ffs_cli_mount_cold_probe.stdout",
+      "raw_stderr_path": "baselines/hyperfine/20260521-bd-xuo95-32/ffs_cli_mount_cold_probe.stderr"
+    },
+    {
+      "command": "hyperfine",
+      "args": [
+        "--warmup",
+        "3",
+        "--runs",
+        "10",
+        "--export-json",
+        "baselines/hyperfine/20260521-bd-xuo95-32/ffs_cli_mount_warm_probe.json",
+        "sudo -n scripts/mount_benchmark_probe.sh --bin /data/tmp/rch_target_frankenfs_bd_xuo95_32/release-perf/ffs-cli --image baselines/hyperfine/20260521-bd-xuo95-32/mount_probe.ext4 --mount-root baselines/hyperfine/20260521-bd-xuo95-32/mount_probe_mounts --mode warm --out-json baselines/hyperfine/20260521-bd-xuo95-32/ffs_cli_mount_warm_probe_report.json"
+      ],
+      "exit_code": 0,
+      "stdout_sha256": "7244b32933865ed8dc66eb5dff603bd503e7de8504c72174a508ddb0a4b8852d",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "duration_ms": 1128,
+      "ran_at": 1779350040,
+      "git_sha": "d3cac79739e366c32879f9918c3f0443a33f6984",
+      "host_class": "full",
+      "outcome": "success",
+      "raw_stdout_path": "baselines/hyperfine/20260521-bd-xuo95-32/ffs_cli_mount_warm_probe.stdout",
+      "raw_stderr_path": "baselines/hyperfine/20260521-bd-xuo95-32/ffs_cli_mount_warm_probe.stderr"
+    },
+    {
+      "command": "hyperfine",
+      "args": [
+        "--warmup",
+        "3",
+        "--runs",
+        "10",
+        "--export-json",
+        "baselines/hyperfine/20260521-bd-xuo95-32/ffs_cli_mount_recovery_probe.json",
+        "sudo -n scripts/mount_benchmark_probe.sh --bin /data/tmp/rch_target_frankenfs_bd_xuo95_32/release-perf/ffs-cli --image baselines/hyperfine/20260521-bd-xuo95-32/mount_recovery_probe.ext4 --mount-root baselines/hyperfine/20260521-bd-xuo95-32/mount_probe_mounts --mode recovery --out-json baselines/hyperfine/20260521-bd-xuo95-32/ffs_cli_mount_recovery_probe_report.json"
+      ],
+      "exit_code": 0,
+      "stdout_sha256": "b27a7671afea3eaee21f3d6af20121fb91f2404f5c1b8e4a36d6aa83bf103c91",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "duration_ms": 834,
+      "ran_at": 1779350070,
+      "git_sha": "d3cac79739e366c32879f9918c3f0443a33f6984",
+      "host_class": "full",
+      "outcome": "success",
+      "raw_stdout_path": "baselines/hyperfine/20260521-bd-xuo95-32/ffs_cli_mount_recovery_probe.stdout",
+      "raw_stderr_path": "baselines/hyperfine/20260521-bd-xuo95-32/ffs_cli_mount_recovery_probe.stderr"
+    }
+  ],
+  "measurements": [
+    {
+      "operation": "scrub_clean_256blocks",
+      "metric": "criterion_time",
+      "command": "rch exec -- cargo bench --profile release-perf -p ffs-repair --bench scrub_codec",
+      "benchmark_mode": "criterion",
+      "source_stderr": "baselines/hyperfine/20260521-bd-xuo95-32/ffs_repair_scrub_codec.stderr",
+      "ci_low_us": 69.112,
+      "mean_us": 69.782,
+      "ci_high_us": 70.514,
+      "throughput_ops_sec": 14330.343068,
+      "status": "measured"
+    },
+    {
+      "operation": "scrub_corrupted_256blocks",
+      "metric": "criterion_time",
+      "command": "rch exec -- cargo bench --profile release-perf -p ffs-repair --bench scrub_codec",
+      "benchmark_mode": "criterion",
+      "source_stderr": "baselines/hyperfine/20260521-bd-xuo95-32/ffs_repair_scrub_codec.stderr",
+      "ci_low_us": 69.962,
+      "mean_us": 70.981,
+      "ci_high_us": 72.077,
+      "throughput_ops_sec": 14088.277145,
+      "status": "measured"
+    },
+    {
+      "operation": "raptorq_encode_group_16blocks",
+      "metric": "criterion_time",
+      "command": "rch exec -- cargo bench --profile release-perf -p ffs-repair --bench scrub_codec",
+      "benchmark_mode": "criterion",
+      "source_stderr": "baselines/hyperfine/20260521-bd-xuo95-32/ffs_repair_scrub_codec.stderr",
+      "ci_low_us": 276.30,
+      "mean_us": 278.68,
+      "ci_high_us": 281.12,
+      "throughput_ops_sec": 3588.345055,
+      "status": "measured"
+    },
+    {
+      "operation": "raptorq_decode_group_16blocks",
+      "metric": "criterion_time",
+      "command": "rch exec -- cargo bench --profile release-perf -p ffs-repair --bench scrub_codec",
+      "benchmark_mode": "criterion",
+      "source_stderr": "baselines/hyperfine/20260521-bd-xuo95-32/ffs_repair_scrub_codec.stderr",
+      "ci_low_us": 616.50,
+      "mean_us": 625.09,
+      "ci_high_us": 634.56,
+      "throughput_ops_sec": 1599.769633,
+      "status": "measured"
+    },
+    {
+      "operation": "raptorq_decode_group_owned_symbols_16blocks",
+      "metric": "criterion_time",
+      "command": "rch exec -- cargo bench --profile release-perf -p ffs-repair --bench scrub_codec",
+      "benchmark_mode": "criterion",
+      "source_stderr": "baselines/hyperfine/20260521-bd-xuo95-32/ffs_repair_scrub_codec.stderr",
+      "ci_low_us": 613.69,
+      "mean_us": 620.65,
+      "ci_high_us": 628.14,
+      "throughput_ops_sec": 1611.214050,
+      "status": "measured"
+    },
+    {
+      "operation": "raptorq_decode_group_no_corruption_16blocks",
+      "metric": "criterion_time",
+      "command": "rch exec -- cargo bench --profile release-perf -p ffs-repair --bench scrub_codec",
+      "benchmark_mode": "criterion",
+      "source_stderr": "baselines/hyperfine/20260521-bd-xuo95-32/ffs_repair_scrub_codec.stderr",
+      "ci_low_us": 0.090619,
+      "mean_us": 0.091721,
+      "ci_high_us": 0.092921,
+      "throughput_ops_sec": 10902628.623761,
+      "status": "measured"
+    },
+    {
+      "operation": "lrc_encode_global_64blocks_8parity",
+      "metric": "criterion_time",
+      "command": "rch exec -- cargo bench --profile release-perf -p ffs-repair --bench scrub_codec",
+      "benchmark_mode": "criterion",
+      "source_stderr": "baselines/hyperfine/20260521-bd-xuo95-32/ffs_repair_scrub_codec.stderr",
+      "ci_low_us": 726.59,
+      "mean_us": 735.55,
+      "ci_high_us": 745.49,
+      "throughput_ops_sec": 1359.526885,
+      "status": "measured"
+    },
+    {
+      "operation": "repair_symbol_refresh_staleness_latency",
+      "metric": "criterion_time",
+      "command": "rch exec -- cargo bench --profile release-perf -p ffs-repair --bench scrub_codec",
+      "benchmark_mode": "criterion",
+      "source_stderr": "baselines/hyperfine/20260521-bd-xuo95-32/ffs_repair_scrub_codec.stderr",
+      "ci_low_us": 0.064598,
+      "mean_us": 0.065609,
+      "ci_high_us": 0.066704,
+      "throughput_ops_sec": 15241811.336859,
+      "status": "measured"
+    },
+    {
+      "operation": "mount_cold",
+      "metric": "latency",
+      "command": "hyperfine --warmup 3 --runs 10 --export-json baselines/hyperfine/20260521-bd-xuo95-32/ffs_cli_mount_cold_probe.json 'sudo -n scripts/mount_benchmark_probe.sh --bin /data/tmp/rch_target_frankenfs_bd_xuo95_32/release-perf/ffs-cli --image baselines/hyperfine/20260521-bd-xuo95-32/mount_probe.ext4 --mount-root baselines/hyperfine/20260521-bd-xuo95-32/mount_probe_mounts --mode cold --out-json baselines/hyperfine/20260521-bd-xuo95-32/ffs_cli_mount_cold_probe_report.json'",
+      "benchmark_mode": "hyperfine_mount_probe",
+      "source_json": "baselines/hyperfine/20260521-bd-xuo95-32/ffs_cli_mount_cold_probe.json",
+      "probe_report_json": "baselines/hyperfine/20260521-bd-xuo95-32/ffs_cli_mount_cold_probe_report.json",
+      "mean_us": 82084.88334,
+      "stddev_us": 3065.316345,
+      "p50_us": 82242.79244,
+      "p95_us": 86371.93844,
+      "p99_us": 86371.93844,
+      "cv": 0.037343,
+      "throughput_ops_sec": 12.182511,
+      "cleanup_status": "unmounted",
+      "status": "measured"
+    },
+    {
+      "operation": "mount_warm",
+      "metric": "latency",
+      "command": "hyperfine --warmup 3 --runs 10 --export-json baselines/hyperfine/20260521-bd-xuo95-32/ffs_cli_mount_warm_probe.json 'sudo -n scripts/mount_benchmark_probe.sh --bin /data/tmp/rch_target_frankenfs_bd_xuo95_32/release-perf/ffs-cli --image baselines/hyperfine/20260521-bd-xuo95-32/mount_probe.ext4 --mount-root baselines/hyperfine/20260521-bd-xuo95-32/mount_probe_mounts --mode warm --out-json baselines/hyperfine/20260521-bd-xuo95-32/ffs_cli_mount_warm_probe_report.json'",
+      "benchmark_mode": "hyperfine_mount_probe",
+      "source_json": "baselines/hyperfine/20260521-bd-xuo95-32/ffs_cli_mount_warm_probe.json",
+      "probe_report_json": "baselines/hyperfine/20260521-bd-xuo95-32/ffs_cli_mount_warm_probe_report.json",
+      "mean_us": 112768.56204,
+      "stddev_us": 3557.781958,
+      "p50_us": 112901.63124,
+      "p95_us": 117835.65174,
+      "p99_us": 117835.65174,
+      "cv": 0.031549,
+      "throughput_ops_sec": 8.867720,
+      "cleanup_status": "unmounted",
+      "status": "measured"
+    },
+    {
+      "operation": "mount_recovery",
+      "metric": "latency",
+      "command": "hyperfine --warmup 3 --runs 10 --export-json baselines/hyperfine/20260521-bd-xuo95-32/ffs_cli_mount_recovery_probe.json 'sudo -n scripts/mount_benchmark_probe.sh --bin /data/tmp/rch_target_frankenfs_bd_xuo95_32/release-perf/ffs-cli --image baselines/hyperfine/20260521-bd-xuo95-32/mount_recovery_probe.ext4 --mount-root baselines/hyperfine/20260521-bd-xuo95-32/mount_probe_mounts --mode recovery --out-json baselines/hyperfine/20260521-bd-xuo95-32/ffs_cli_mount_recovery_probe_report.json'",
+      "benchmark_mode": "hyperfine_mount_probe",
+      "source_json": "baselines/hyperfine/20260521-bd-xuo95-32/ffs_cli_mount_recovery_probe.json",
+      "probe_report_json": "baselines/hyperfine/20260521-bd-xuo95-32/ffs_cli_mount_recovery_probe_report.json",
+      "mean_us": 83436.19838,
+      "stddev_us": 3599.067536,
+      "p50_us": 82838.84178,
+      "p95_us": 89621.19778,
+      "p99_us": 89621.19778,
+      "cv": 0.043136,
+      "throughput_ops_sec": 11.985206,
+      "cleanup_status": "unmounted",
+      "status": "measured"
+    }
+  ],
+  "mounted_claim_resolution": {
+    "public_claim_change": "none",
+    "reserved_docs_untouched": [
+      "README.md",
+      "FEATURE_PARITY.md",
+      "COMPREHENSIVE_SPEC_FOR_FRANKENFS_V1.md"
+    ],
+    "interpretation": "The mounted latency lanes are substantiated with fresh permissioned local measurements, but they do not support a regression-free public claim. They remain measured-local evidence until a comparable authoritative baseline lane is rerun.",
+    "rows": [
+      {
+        "operation": "mount_cold",
+        "p99_us": 86371.93844,
+        "delta_vs_20260218_reference_percent": 139.729,
+        "delta_vs_20260503_sudo_current_percent": -49.518,
+        "claim_state_after": "measured_local_not_regression_free"
+      },
+      {
+        "operation": "mount_warm",
+        "p99_us": 117835.65174,
+        "delta_vs_20260218_reference_percent": 102.206,
+        "delta_vs_20260503_sudo_current_percent": -60.736,
+        "claim_state_after": "measured_local_not_regression_free"
+      },
+      {
+        "operation": "mount_recovery",
+        "p99_us": 89621.19778,
+        "delta_vs_20260218_reference_percent": 155.914,
+        "delta_vs_20260503_sudo_current_percent": 20.756,
+        "delta_vs_20260503_after_rerun_percent": 9.031,
+        "claim_state_after": "measured_local_not_regression_free"
+      }
+    ]
+  },
+  "raw_artifact_hashes": {
+    "ffs_repair_scrub_codec_stderr": "sha256:da78f352a584e7ba58760ba6abb9f52277f022e78e489956a2115983831e26dd",
+    "ffs_cli_build_stderr": "sha256:8782aec0426217578694173fb5282e71f1a4fd4dfbdd65e9203e8d89972cf181",
+    "mount_cold_hyperfine_json": "sha256:1998e1b9904a0d4be83291a7c406fcfad2450f3f8046bf15189ca13df931ef3f",
+    "mount_warm_hyperfine_json": "sha256:c06d6a2c4df0856576905e93c84d764f35d3763f05931bffdf9944fc4c5ead2e",
+    "mount_recovery_hyperfine_json": "sha256:ef031b5bc7e386d8ac5e4ff4b825bd874c199dfd2b3ca43f2bdcb0886d1d91bf",
+    "mount_cold_probe_report": "sha256:8a41c67f88d366f973839b3922950661cd52f245e0333e1189003e75afcbf993",
+    "mount_warm_probe_report": "sha256:56c0de8e89ecfa2749c1b45bfc8eec865a5eea3b82a33bc8f26b83f135afc47a",
+    "mount_recovery_probe_report": "sha256:51b4ef13bb2108052bc052ad587f1a555e2ba160916245a0117dbb70d393f610"
+  },
+  "warnings": [
+    "The ffs-cli prerequisite build emitted warnings from foreign ffs-btrfs edits in crash_consistency.rs and writeback.rs. This artifact records them in ffs_cli_build.stderr and does not modify those files."
+  ]
+}

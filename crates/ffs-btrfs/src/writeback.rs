@@ -2,6 +2,8 @@
 //!
 //! bd-xuo95.5 (A4): Implements write-dependency DAG construction, reverse-topological
 //! flush ordering, and crash consistency oracles (WB-I1, WB-I2) for btrfs metadata.
+#![allow(clippy::must_use_candidate)]
+#![allow(clippy::uninlined_format_args)]
 //!
 //! # Write-Dependency DAG
 //!
@@ -161,7 +163,7 @@ impl WriteDependencyDag {
 
     /// Check if a node is durable.
     pub fn is_durable(&self, block: u64) -> bool {
-        self.nodes.get(&block).map_or(false, |n| n.durable)
+        self.nodes.get(&block).is_some_and(|n| n.durable)
     }
 
     /// Return the root block number.

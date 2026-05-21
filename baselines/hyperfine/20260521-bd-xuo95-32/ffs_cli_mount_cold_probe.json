@@ -1,0 +1,38 @@
+{
+  "results": [
+    {
+      "command": "sudo -n scripts/mount_benchmark_probe.sh --bin /data/tmp/rch_target_frankenfs_bd_xuo95_32/release-perf/ffs-cli --image baselines/hyperfine/20260521-bd-xuo95-32/mount_probe.ext4 --mount-root baselines/hyperfine/20260521-bd-xuo95-32/mount_probe_mounts --mode cold --out-json baselines/hyperfine/20260521-bd-xuo95-32/ffs_cli_mount_cold_probe_report.json",
+      "mean": 0.08208488334,
+      "stddev": 0.003065316344744912,
+      "median": 0.08224279244,
+      "user": 0.02988448,
+      "system": 0.053314099999999996,
+      "min": 0.07677987044000001,
+      "max": 0.08637193844,
+      "times": [
+        0.08185953144000001,
+        0.08127318044000001,
+        0.08358521044,
+        0.08098157844000001,
+        0.08368999844,
+        0.08576992744,
+        0.08637193844,
+        0.07791154444000001,
+        0.07677987044000001,
+        0.08262605344
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

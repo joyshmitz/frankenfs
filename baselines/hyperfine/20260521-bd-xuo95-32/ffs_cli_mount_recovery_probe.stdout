@@ -1,0 +1,3 @@
+Benchmark 1: sudo -n scripts/mount_benchmark_probe.sh --bin /data/tmp/rch_target_frankenfs_bd_xuo95_32/release-perf/ffs-cli --image baselines/hyperfine/20260521-bd-xuo95-32/mount_recovery_probe.ext4 --mount-root baselines/hyperfine/20260521-bd-xuo95-32/mount_probe_mounts --mode recovery --out-json baselines/hyperfine/20260521-bd-xuo95-32/ffs_cli_mount_recovery_probe_report.json
+  Time (mean ± σ):      83.4 ms ±   3.6 ms    [User: 30.6 ms, System: 54.0 ms]
+  Range (min … max):    78.3 ms …  89.6 ms    10 runs

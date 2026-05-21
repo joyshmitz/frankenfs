@@ -6,6 +6,8 @@
 //! 1. Enumerating crash points during writeback
 //! 2. Simulating crashes at each point
 //! 3. Verifying WB-I1 and WB-I2 invariants hold after recovery
+#![allow(clippy::must_use_candidate)]
+#![allow(clippy::uninlined_format_args)]
 
 use std::collections::BTreeSet;
 
