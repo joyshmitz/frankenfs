@@ -7836,6 +7836,48 @@ mod tests {
     }
 
     #[test]
+    fn atomic_metrics_new_starts_at_zero() {
+        let m = AtomicMetrics::new();
+        let s = m.snapshot();
+        assert_eq!(s.requests_total, 0);
+        assert_eq!(s.requests_ok, 0);
+        assert_eq!(s.requests_err, 0);
+        assert_eq!(s.bytes_read, 0);
+        assert_eq!(s.requests_throttled, 0);
+        assert_eq!(s.requests_shed, 0);
+    }
+
+    #[test]
+    fn atomic_metrics_record_ok_increments_counters() {
+        let m = AtomicMetrics::new();
+        m.record_ok();
+        m.record_ok();
+        let s = m.snapshot();
+        assert_eq!(s.requests_total, 2);
+        assert_eq!(s.requests_ok, 2);
+        assert_eq!(s.requests_err, 0);
+    }
+
+    #[test]
+    fn atomic_metrics_record_err_increments_counters() {
+        let m = AtomicMetrics::new();
+        m.record_err();
+        let s = m.snapshot();
+        assert_eq!(s.requests_total, 1);
+        assert_eq!(s.requests_err, 1);
+        assert_eq!(s.requests_ok, 0);
+    }
+
+    #[test]
+    fn atomic_metrics_record_bytes_read() {
+        let m = AtomicMetrics::new();
+        m.record_bytes_read(1024);
+        m.record_bytes_read(2048);
+        let s = m.snapshot();
+        assert_eq!(s.bytes_read, 3072);
+    }
+
+    #[test]
     fn build_mount_options_includes_ro_when_read_only() {
         let opts = MountOptions::default();
         let mount_opts = build_mount_options(&opts);
