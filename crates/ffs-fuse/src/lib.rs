@@ -7784,6 +7784,32 @@ mod tests {
     }
 
     #[test]
+    fn writeback_cache_mode_from_enabled() {
+        assert!(matches!(
+            WritebackCacheMode::from_enabled(true),
+            WritebackCacheMode::Enabled
+        ));
+        assert!(matches!(
+            WritebackCacheMode::from_enabled(false),
+            WritebackCacheMode::Disabled
+        ));
+    }
+
+    #[test]
+    fn writeback_cache_mode_is_enabled() {
+        assert!(WritebackCacheMode::Enabled.is_enabled());
+        assert!(!WritebackCacheMode::Disabled.is_enabled());
+    }
+
+    #[test]
+    fn writeback_cache_mode_default_is_disabled() {
+        assert!(matches!(
+            WritebackCacheMode::default(),
+            WritebackCacheMode::Disabled
+        ));
+    }
+
+    #[test]
     fn build_mount_options_includes_ro_when_read_only() {
         let opts = MountOptions::default();
         let mount_opts = build_mount_options(&opts);
