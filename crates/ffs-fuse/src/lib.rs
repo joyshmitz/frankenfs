@@ -20,8 +20,9 @@ use ffs_error::FfsError;
 use ffs_types::{EXT4_EXTENTS_FL, InodeNumber};
 use fuser::{
     FileAttr, FileType, Filesystem, KernelConfig, MountOption, ReplyAttr, ReplyCreate, ReplyData,
-    ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyIoctl, ReplyLock, ReplyLseek, ReplyOpen,
-    ReplyStatfs, ReplyStatx, ReplyWrite, ReplyXattr, Request, TimeOrNow, consts as fuse_consts,
+    ReplyDirectory, ReplyDirectoryPlus, ReplyEmpty, ReplyEntry, ReplyIoctl, ReplyLock, ReplyLseek,
+    ReplyOpen, ReplyStatfs, ReplyStatx, ReplyWrite, ReplyXattr, Request, TimeOrNow,
+    consts as fuse_consts,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -5536,6 +5537,71 @@ impl Filesystem for FrankenFuse {
                     },
                     reply,
                 );
+            }
+        }
+    }
+
+    fn readdirplus(
+        &mut self,
+        _req: &Request<'_>,
+        ino: u64,
+        _fh: u64,
+        offset: i64,
+        mut reply: ReplyDirectoryPlus,
+    ) {
+        let cx = Self::cx_for_request();
+        let Ok(fs_offset) = u64::try_from(offset) else {
+            warn!(ino, offset, "readdirplus: negative offset");
+            reply.error(libc::EINVAL);
+            return;
+        };
+        match self.with_request_scope(&cx, RequestOp::Readdir, |cx, scope| {
+            self.inner
+                .ops
+                .readdir(cx, scope, InodeNumber(ino), fs_offset)
+        }) {
+            Ok(entries) => {
+                for entry in &entries {
+                    #[cfg(unix)]
+                    let name = OsStr::from_bytes(&entry.name);
+                    #[cfg(not(unix))]
+                    let owned_name = entry.name_str();
+                    #[cfg(not(unix))]
+                    let name = OsStr::new(&owned_name);
+
+                    // Get attributes for each entry
+                    let attr = match self.with_request_scope(&cx, RequestOp::Getattr, |cx, scope| {
+                        self.inner.ops.getattr(cx, scope, entry.ino)
+                    }) {
+                        Ok(attr) => to_file_attr(&attr),
+                        Err(_) => {
+                            // If we can't get attrs, skip this entry
+                            continue;
+                        }
+                    };
+
+                    let full = reply.add(
+                        entry.ino.0,
+                        i64::try_from(entry.offset).unwrap_or(i64::MAX),
+                        name,
+                        &ATTR_TTL,
+                        &attr,
+                        0, // generation - not tracked
+                    );
+                    if full {
+                        break;
+                    }
+                }
+                reply.ok();
+            }
+            Err(e) => {
+                let ctx = FuseErrorContext {
+                    error: &e,
+                    operation: "readdirplus",
+                    ino,
+                    offset: Some(fs_offset),
+                };
+                reply.error(ctx.log_and_errno());
             }
         }
     }
