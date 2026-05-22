@@ -3382,4 +3382,23 @@ mod tests {
         assert!(matches!(&err, FfsError::NotFound(_)));
         assert_eq!(err.to_errno(), libc::ENOENT);
     }
+
+    #[test]
+    fn seek_whence_from_raw_valid_values() {
+        assert_eq!(SeekWhence::from_raw(0), Some(SeekWhence::Set));
+        assert_eq!(SeekWhence::from_raw(1), Some(SeekWhence::Cur));
+        assert_eq!(SeekWhence::from_raw(2), Some(SeekWhence::End));
+        assert_eq!(SeekWhence::from_raw(3), Some(SeekWhence::Data));
+        assert_eq!(SeekWhence::from_raw(4), Some(SeekWhence::Hole));
+    }
+
+    #[test]
+    fn seek_whence_from_raw_invalid_values() {
+        assert_eq!(SeekWhence::from_raw(-1), None);
+        assert_eq!(SeekWhence::from_raw(5), None);
+        assert_eq!(SeekWhence::from_raw(100), None);
+        assert_eq!(SeekWhence::from_raw(i32::MAX), None);
+        assert_eq!(SeekWhence::from_raw(i32::MIN), None);
+    }
+
 }
