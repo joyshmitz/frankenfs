@@ -161,6 +161,68 @@ pub fn btrfs_inode_flags_to_fsflags(btrfs_flags: u64) -> u32 {
     fs_flags
 }
 
+/// Convert generic FS_*_FL flags to btrfs inode flags for `FS_IOC_SETFLAGS`.
+///
+/// Maps kernel `btrfs_ioctl_setflags()` flag conversion from `fs/btrfs/ioctl.c`.
+/// Only user-settable flags are converted; kernel-internal flags are ignored.
+#[must_use]
+pub fn fsflags_to_btrfs_inode_flags(fs_flags: u32) -> u64 {
+    use ffs_types::{
+        EXT4_APPEND_FL, EXT4_COMPR_FL, EXT4_DIRSYNC_FL, EXT4_IMMUTABLE_FL,
+        EXT4_NOATIME_FL, EXT4_NOCOMPR_FL, EXT4_NODUMP_FL, EXT4_SYNC_FL,
+    };
+    const FS_NOCOW_FL: u32 = 0x0080_0000;
+
+    let mut btrfs_flags: u64 = 0;
+    if fs_flags & EXT4_SYNC_FL != 0 {
+        btrfs_flags |= BTRFS_INODE_SYNC;
+    }
+    if fs_flags & EXT4_IMMUTABLE_FL != 0 {
+        btrfs_flags |= BTRFS_INODE_IMMUTABLE;
+    }
+    if fs_flags & EXT4_APPEND_FL != 0 {
+        btrfs_flags |= BTRFS_INODE_APPEND;
+    }
+    if fs_flags & EXT4_NODUMP_FL != 0 {
+        btrfs_flags |= BTRFS_INODE_NODUMP;
+    }
+    if fs_flags & EXT4_NOATIME_FL != 0 {
+        btrfs_flags |= BTRFS_INODE_NOATIME;
+    }
+    if fs_flags & EXT4_DIRSYNC_FL != 0 {
+        btrfs_flags |= BTRFS_INODE_DIRSYNC;
+    }
+    if fs_flags & FS_NOCOW_FL != 0 {
+        // NODATACOW implies NODATASUM
+        btrfs_flags |= BTRFS_INODE_NODATACOW | BTRFS_INODE_NODATASUM;
+    }
+    if fs_flags & EXT4_COMPR_FL != 0 {
+        btrfs_flags |= BTRFS_INODE_COMPRESS;
+    }
+    if fs_flags & EXT4_NOCOMPR_FL != 0 {
+        btrfs_flags |= BTRFS_INODE_NOCOMPRESS;
+    }
+    btrfs_flags
+}
+
+/// Mask of FS_*_FL flags that are user-settable on btrfs inodes.
+pub const BTRFS_USER_SETTABLE_FSFLAGS: u32 = {
+    use ffs_types::{
+        EXT4_APPEND_FL, EXT4_COMPR_FL, EXT4_DIRSYNC_FL, EXT4_IMMUTABLE_FL,
+        EXT4_NOATIME_FL, EXT4_NOCOMPR_FL, EXT4_NODUMP_FL, EXT4_SYNC_FL,
+    };
+    const FS_NOCOW_FL: u32 = 0x0080_0000;
+    EXT4_SYNC_FL
+        | EXT4_IMMUTABLE_FL
+        | EXT4_APPEND_FL
+        | EXT4_NODUMP_FL
+        | EXT4_NOATIME_FL
+        | EXT4_DIRSYNC_FL
+        | FS_NOCOW_FL
+        | EXT4_COMPR_FL
+        | EXT4_NOCOMPR_FL
+};
+
 /// Highest valid btrfs tree level. The kernel's `BTRFS_MAX_LEVEL` is the
 /// level count (8), so valid on-disk levels are `0..=7`.
 pub const BTRFS_MAX_TREE_LEVEL: u8 = 7;
@@ -14316,5 +14378,47 @@ mod tests {
         assert_eq!(parsed_after.level, 1, "level updated");
         assert_eq!(parsed_after.generation, 100, "generation bumped");
         assert_eq!(parsed_after.root_dirid, 256, "root_dirid preserved");
+    }
+
+    /// Roundtrip: fsflags → btrfs flags → fsflags preserves user-settable flags.
+    #[test]
+    fn inode_flags_roundtrip_preserves_user_settable() {
+        use crate::{
+            btrfs_inode_flags_to_fsflags, fsflags_to_btrfs_inode_flags,
+            BTRFS_USER_SETTABLE_FSFLAGS,
+        };
+
+        // Test individual flags
+        let test_flags = [
+            ffs_types::EXT4_SYNC_FL,
+            ffs_types::EXT4_IMMUTABLE_FL,
+            ffs_types::EXT4_APPEND_FL,
+            ffs_types::EXT4_NODUMP_FL,
+            ffs_types::EXT4_NOATIME_FL,
+            ffs_types::EXT4_DIRSYNC_FL,
+            0x0080_0000, // FS_NOCOW_FL
+            ffs_types::EXT4_COMPR_FL,
+            ffs_types::EXT4_NOCOMPR_FL,
+        ];
+
+        for &flag in &test_flags {
+            let btrfs = fsflags_to_btrfs_inode_flags(flag);
+            let back = btrfs_inode_flags_to_fsflags(btrfs);
+            // NOCOW sets both NODATACOW and NODATASUM, but only NOCOW comes back
+            assert_eq!(
+                back & flag, flag,
+                "roundtrip preserves flag 0x{flag:08x}"
+            );
+        }
+
+        // Test combined flags
+        let combined = BTRFS_USER_SETTABLE_FSFLAGS;
+        let btrfs_combined = fsflags_to_btrfs_inode_flags(combined);
+        let back_combined = btrfs_inode_flags_to_fsflags(btrfs_combined);
+        assert_eq!(
+            back_combined & BTRFS_USER_SETTABLE_FSFLAGS,
+            BTRFS_USER_SETTABLE_FSFLAGS,
+            "combined roundtrip preserves all user-settable flags"
+        );
     }
 }
