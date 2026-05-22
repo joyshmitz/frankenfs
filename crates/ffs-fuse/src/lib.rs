@@ -233,6 +233,10 @@ const BTRFS_IOC_SCRUB_CANCEL: u32 = 0x0000_941C;
 /// Query progress of a running scrub operation.
 const BTRFS_IOC_SCRUB_PROGRESS: u32 = 0xC400_941D;
 const BTRFS_SCRUB_ARGS_SIZE: u32 = 1024;
+/// `BTRFS_IOC_DEFRAG_RANGE` = `_IOW(0x94, 16, struct btrfs_ioctl_defrag_range_args)`.
+/// Defragment a range of a file.
+const BTRFS_IOC_DEFRAG_RANGE: u32 = 0x4030_9410;
+const BTRFS_DEFRAG_RANGE_ARGS_SIZE: u32 = 48;
 const FSCRYPT_POLICY_V1_SIZE: usize = 12;
 #[cfg(test)]
 const FSCRYPT_POLICY_V2_VERSION: u8 = 2;
@@ -3783,6 +3787,21 @@ impl FrankenFuse {
                     self.inner.ops.btrfs_scrub_progress(cx, scope, devid)
                 }) {
                     Ok(data) => IoctlResult::Data(data),
+                    Err(error) => IoctlResult::Error(error.to_errno()),
+                }
+            }
+            BTRFS_IOC_DEFRAG_RANGE => {
+                // Input: 48-byte struct with start, len, flags, extent_thresh, compress_type
+                if in_data.len() < BTRFS_DEFRAG_RANGE_ARGS_SIZE as usize {
+                    return IoctlResult::Error(libc::EINVAL);
+                }
+                let start = u64::from_le_bytes(in_data[0..8].try_into().unwrap_or([0; 8]));
+                let len = u64::from_le_bytes(in_data[8..16].try_into().unwrap_or([0; 8]));
+                let cx = Self::cx_for_request();
+                match self.with_request_scope(&cx, RequestOp::IoctlRead, |cx, scope| {
+                    self.inner.ops.btrfs_defrag_range(cx, scope, fh, start, len)
+                }) {
+                    Ok(()) => IoctlResult::Data(Vec::new()),
                     Err(error) => IoctlResult::Error(error.to_errno()),
                 }
             }

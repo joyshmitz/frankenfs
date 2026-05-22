@@ -1516,6 +1516,24 @@ pub trait FsOps: Send + Sync {
         ))
     }
 
+    /// Defragment a range of a file for `BTRFS_IOC_DEFRAG_RANGE`.
+    ///
+    /// Reorganizes extents in the specified range to reduce fragmentation.
+    /// For read-only mounts, returns `FfsError::ReadOnly`.
+    /// Non-btrfs backends must return `FfsError::UnsupportedFeature`.
+    fn btrfs_defrag_range(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _fh: u64,
+        _start: u64,
+        _len: u64,
+    ) -> ffs_error::Result<()> {
+        Err(FfsError::UnsupportedFeature(
+            "btrfs_defrag_range is not supported by this backend".to_owned(),
+        ))
+    }
+
     /// Set filesystem-specific inode flags (ext4 `EXT4_IOC_SETFLAGS`).
     ///
     /// Updates the raw `i_flags` field. The implementation should validate

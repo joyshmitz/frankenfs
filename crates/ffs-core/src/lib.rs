@@ -19811,6 +19811,26 @@ impl FsOps for OpenFs {
         }
     }
 
+    fn btrfs_defrag_range(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _fh: u64,
+        _start: u64,
+        _len: u64,
+    ) -> ffs_error::Result<()> {
+        match &self.flavor {
+            FsFlavor::Ext4(_) => Err(FfsError::UnsupportedFeature(
+                "BTRFS_IOC_DEFRAG_RANGE is not supported on ext4 filesystems".to_owned(),
+            )),
+            FsFlavor::Btrfs(_) => {
+                // Defrag requires extent tree manipulation - return EROFS for read-only mounts
+                // For RW mode, actual implementation would rewrite extents
+                Err(FfsError::ReadOnly)
+            }
+        }
+    }
+
     fn btrfs_ino_lookup(
         &self,
         cx: &Cx,
