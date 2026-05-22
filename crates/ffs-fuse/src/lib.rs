@@ -260,6 +260,10 @@ const BTRFS_IOC_QUOTA_RESCAN_STATUS: u32 = 0x8040_942D;
 /// Starts a qgroup quota rescan.
 const BTRFS_IOC_QUOTA_RESCAN: u32 = 0x4040_942C;
 const BTRFS_QUOTA_RESCAN_ARGS_SIZE: u32 = 64;
+/// `BTRFS_IOC_QUOTA_CTL` = `_IOWR(0x94, 40, struct btrfs_ioctl_quota_ctl_args)`.
+/// Enables, disables, or enables simple btrfs quotas.
+const BTRFS_IOC_QUOTA_CTL: u32 = 0xC010_9428;
+const BTRFS_QUOTA_CTL_ARGS_SIZE: u32 = 16;
 /// `BTRFS_IOC_DEFRAG_RANGE` = `_IOW(0x94, 16, struct btrfs_ioctl_defrag_range_args)`.
 /// Defragment a range of a file.
 const BTRFS_IOC_DEFRAG_RANGE: u32 = 0x4030_9410;
@@ -3973,6 +3977,25 @@ impl FrankenFuse {
                     Err(error) => IoctlResult::Error(error.to_errno()),
                 }
             }
+            BTRFS_IOC_QUOTA_CTL => {
+                if in_data.len() < BTRFS_QUOTA_CTL_ARGS_SIZE as usize
+                    || out_size < BTRFS_QUOTA_CTL_ARGS_SIZE
+                {
+                    return IoctlResult::Error(libc::EINVAL);
+                }
+                if self.inner.read_only {
+                    return IoctlResult::Error(libc::EROFS);
+                }
+                let cmd = u64::from_le_bytes(in_data[0..8].try_into().unwrap_or([0; 8]));
+                let status = u64::from_le_bytes(in_data[8..16].try_into().unwrap_or([0; 8]));
+                let cx = Self::cx_for_request();
+                match self.with_request_scope(&cx, RequestOp::IoctlWrite, |cx, scope| {
+                    self.inner.ops.btrfs_quota_control(cx, scope, cmd, status)
+                }) {
+                    Ok(data) => IoctlResult::Data(data),
+                    Err(error) => IoctlResult::Error(error.to_errno()),
+                }
+            }
             BTRFS_IOC_DEFRAG_RANGE => {
                 // Input: 48-byte struct with start, len, flags, extent_thresh, compress_type
                 if in_data.len() < BTRFS_DEFRAG_RANGE_ARGS_SIZE as usize {
@@ -6602,6 +6625,7 @@ mod tests {
         BtrfsQuotaRescanWait,
         BtrfsQuotaRescanStatus,
         BtrfsStartQuotaRescan(u64),
+        BtrfsQuotaControl(u64, u64),
         Getattr(InodeNumber),
         Statfs(InodeNumber),
         GetVersion(InodeNumber),
@@ -7379,6 +7403,23 @@ mod tests {
                 .expect("lock ioctl calls")
                 .push(IoctlCall::BtrfsStartQuotaRescan(flags));
             Ok(())
+        }
+
+        fn btrfs_quota_control(
+            &self,
+            _cx: &Cx,
+            _scope: &mut RequestScope,
+            cmd: u64,
+            status: u64,
+        ) -> ffs_error::Result<Vec<u8>> {
+            self.calls
+                .lock()
+                .expect("lock ioctl calls")
+                .push(IoctlCall::BtrfsQuotaControl(cmd, status));
+            let mut data = Vec::with_capacity(BTRFS_QUOTA_CTL_ARGS_SIZE as usize);
+            data.extend_from_slice(&cmd.to_le_bytes());
+            data.extend_from_slice(&(status | 0x10).to_le_bytes());
+            Ok(data)
         }
 
         fn get_btrfs_dev_info(
@@ -8691,6 +8732,94 @@ mod tests {
         let input = vec![0_u8; BTRFS_QUOTA_RESCAN_ARGS_SIZE as usize];
 
         let response = dispatch_ioctl_for_testing(&fuse, 1, 0, BTRFS_IOC_QUOTA_RESCAN, &input, 0);
+        assert_eq!(response, IoctlResult::Error(libc::EROFS));
+        assert!(calls.lock().expect("lock ioctl calls").is_empty());
+    }
+
+    #[test]
+    fn dispatch_ioctl_btrfs_quota_ctl_uses_write_scope() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let fuse = FrankenFuse::with_options(
+            Box::new(IoctlRecordingFs::new(0, Arc::clone(&calls))),
+            &MountOptions {
+                read_only: false,
+                ..MountOptions::default()
+            },
+        );
+        let mut input = Vec::with_capacity(BTRFS_QUOTA_CTL_ARGS_SIZE as usize);
+        input.extend_from_slice(&4_u64.to_le_bytes());
+        input.extend_from_slice(&0x20_u64.to_le_bytes());
+
+        let response = dispatch_ioctl_for_testing(
+            &fuse,
+            1,
+            0,
+            BTRFS_IOC_QUOTA_CTL,
+            &input,
+            BTRFS_QUOTA_CTL_ARGS_SIZE,
+        );
+        let mut expected = Vec::with_capacity(BTRFS_QUOTA_CTL_ARGS_SIZE as usize);
+        expected.extend_from_slice(&4_u64.to_le_bytes());
+        expected.extend_from_slice(&0x30_u64.to_le_bytes());
+        assert_eq!(response, IoctlResult::Data(expected));
+        assert_eq!(
+            calls.lock().expect("lock ioctl calls").as_slice(),
+            &[
+                IoctlCall::Begin(RequestOp::IoctlWrite),
+                IoctlCall::BtrfsQuotaControl(4, 0x20),
+                IoctlCall::End(RequestOp::IoctlWrite),
+            ]
+        );
+    }
+
+    #[test]
+    fn dispatch_ioctl_btrfs_quota_ctl_rejects_short_input_or_output() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let fuse = FrankenFuse::with_options(
+            Box::new(IoctlRecordingFs::new(0, Arc::clone(&calls))),
+            &MountOptions {
+                read_only: false,
+                ..MountOptions::default()
+            },
+        );
+        let input = vec![0_u8; BTRFS_QUOTA_CTL_ARGS_SIZE as usize];
+
+        let short_input = dispatch_ioctl_for_testing(
+            &fuse,
+            1,
+            0,
+            BTRFS_IOC_QUOTA_CTL,
+            &input[..BTRFS_QUOTA_CTL_ARGS_SIZE as usize - 1],
+            BTRFS_QUOTA_CTL_ARGS_SIZE,
+        );
+        assert_eq!(short_input, IoctlResult::Error(libc::EINVAL));
+
+        let short_output = dispatch_ioctl_for_testing(
+            &fuse,
+            1,
+            0,
+            BTRFS_IOC_QUOTA_CTL,
+            &input,
+            BTRFS_QUOTA_CTL_ARGS_SIZE - 1,
+        );
+        assert_eq!(short_output, IoctlResult::Error(libc::EINVAL));
+        assert!(calls.lock().expect("lock ioctl calls").is_empty());
+    }
+
+    #[test]
+    fn dispatch_ioctl_btrfs_quota_ctl_read_only_returns_erofs() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let fuse = FrankenFuse::new(Box::new(IoctlRecordingFs::new(0, Arc::clone(&calls))));
+        let input = vec![0_u8; BTRFS_QUOTA_CTL_ARGS_SIZE as usize];
+
+        let response = dispatch_ioctl_for_testing(
+            &fuse,
+            1,
+            0,
+            BTRFS_IOC_QUOTA_CTL,
+            &input,
+            BTRFS_QUOTA_CTL_ARGS_SIZE,
+        );
         assert_eq!(response, IoctlResult::Error(libc::EROFS));
         assert!(calls.lock().expect("lock ioctl calls").is_empty());
     }

@@ -19642,6 +19642,23 @@ impl FsOps for OpenFs {
         }
     }
 
+    fn btrfs_quota_control(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _cmd: u64,
+        _status: u64,
+    ) -> ffs_error::Result<Vec<u8>> {
+        match &self.flavor {
+            FsFlavor::Ext4(_) => Err(FfsError::UnsupportedFeature(
+                "BTRFS_IOC_QUOTA_CTL is not supported on ext4 filesystems".to_owned(),
+            )),
+            FsFlavor::Btrfs(_) => Err(FfsError::UnsupportedFeature(
+                "btrfs qgroup quota control is not implemented".to_owned(),
+            )),
+        }
+    }
+
     fn set_fs_label(
         &self,
         cx: &Cx,

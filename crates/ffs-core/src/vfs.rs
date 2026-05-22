@@ -1448,6 +1448,22 @@ pub trait FsOps: Send + Sync {
         ))
     }
 
+    /// Control btrfs qgroup quota state (`BTRFS_IOC_QUOTA_CTL`).
+    ///
+    /// The returned bytes are the kernel-compatible
+    /// `btrfs_ioctl_quota_ctl_args` payload.
+    fn btrfs_quota_control(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _cmd: u64,
+        _status: u64,
+    ) -> ffs_error::Result<Vec<u8>> {
+        Err(FfsError::UnsupportedFeature(
+            "btrfs_quota_control is not supported by this backend".to_owned(),
+        ))
+    }
+
     /// Force filesystem sync/commit (`BTRFS_IOC_SYNC`, `syncfs`).
     ///
     /// For btrfs: commits current transaction if in RW mode.
@@ -2474,6 +2490,16 @@ impl<T: FsOps + ?Sized> FsOps for Arc<T> {
         flags: u64,
     ) -> ffs_error::Result<()> {
         self.as_ref().btrfs_start_quota_rescan(cx, scope, flags)
+    }
+
+    fn btrfs_quota_control(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        cmd: u64,
+        status: u64,
+    ) -> ffs_error::Result<Vec<u8>> {
+        self.as_ref().btrfs_quota_control(cx, scope, cmd, status)
     }
 
     fn set_inode_flags(
