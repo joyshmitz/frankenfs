@@ -616,7 +616,15 @@ pub struct Ext4Superblock {
     pub errors: u16,
     pub mnt_count: u16,
     pub max_mnt_count: u16,
+    pub checkinterval: u32,
     pub error_count: u32,
+    pub def_resuid: u32,
+    pub def_resgid: u32,
+    pub block_group_nr: u16,
+    pub algorithm_usage_bitmap: u32,
+    pub prealloc_blocks: u8,
+    pub prealloc_dir_blocks: u8,
+    pub jnl_backup_type: u8,
 
     // ── Timestamps ───────────────────────────────────────────────────────
     pub mtime: u32,
@@ -761,6 +769,9 @@ impl Ext4Superblock {
         let checksum_type = ensure_slice(region, 0x175, 1)?[0];
         let def_hash_version = ensure_slice(region, 0xFC, 1)?[0];
         let log_groups_per_flex = ensure_slice(region, 0x174, 1)?[0];
+        let prealloc_blocks = ensure_slice(region, 0xCC, 1)?[0];
+        let prealloc_dir_blocks = ensure_slice(region, 0xCD, 1)?[0];
+        let jnl_backup_type = ensure_slice(region, 0xFD, 1)?[0];
         let time_high_and_error_codes = read_fixed::<8>(region, 0x274)?;
 
         Ok(Self {
@@ -807,7 +818,17 @@ impl Ext4Superblock {
             errors: read_le_u16(region, 0x3C)?,
             mnt_count: read_le_u16(region, 0x34)?,
             max_mnt_count: read_le_u16(region, 0x36)?,
+            checkinterval: read_le_u32(region, 0x44)?,
             error_count: read_le_u32(region, 0x194)?,
+            def_resuid: u32::from(read_le_u16(region, 0x50)?)
+                | (u32::from(read_le_u16(region, 0x284)?) << 16),
+            def_resgid: u32::from(read_le_u16(region, 0x52)?)
+                | (u32::from(read_le_u16(region, 0x286)?) << 16),
+            block_group_nr: read_le_u16(region, 0x5A)?,
+            algorithm_usage_bitmap: read_le_u32(region, 0xC8)?,
+            prealloc_blocks,
+            prealloc_dir_blocks,
+            jnl_backup_type,
 
             // Timestamps
             mtime: read_le_u32(region, 0x2C)?,
@@ -5757,19 +5778,26 @@ mod tests {
         assert_eq!(abs, 50 * 4096 + 512);
     }
 
-    #[test]
-    fn superblock_new_fields_parse() {
+    fn superblock_with_extended_fields() -> [u8; EXT4_SUPERBLOCK_SIZE] {
         let mut sb = make_valid_sb();
         sb[0xCE..0xD0].copy_from_slice(&7_u16.to_le_bytes()); // reserved_gdt_blocks
         sb[0x104..0x108].copy_from_slice(&3_u32.to_le_bytes()); // first_meta_bg
         sb[0x2C..0x30].copy_from_slice(&1_700_000_000_u32.to_le_bytes()); // mtime
         sb[0x3A..0x3C].copy_from_slice(&1_u16.to_le_bytes()); // state=clean
+        sb[0x44..0x48].copy_from_slice(&180_u32.to_le_bytes()); // checkinterval
         sb[0x4C..0x50].copy_from_slice(&1_u32.to_le_bytes()); // rev_level=DYNAMIC
+        sb[0x50..0x52].copy_from_slice(&0x1234_u16.to_le_bytes()); // def_resuid lo
+        sb[0x52..0x54].copy_from_slice(&0x5678_u16.to_le_bytes()); // def_resgid lo
         sb[0x54..0x58].copy_from_slice(&11_u32.to_le_bytes()); // first_ino
+        sb[0x5A..0x5C].copy_from_slice(&6_u16.to_le_bytes()); // block_group_nr
+        sb[0xC8..0xCC].copy_from_slice(&0xA5A5_5A5A_u32.to_le_bytes()); // algorithm_usage_bitmap
+        sb[0xCC] = 3; // prealloc_blocks
+        sb[0xCD] = 4; // prealloc_dir_blocks
         sb[0xE0..0xE4].copy_from_slice(&8_u32.to_le_bytes()); // journal_inum
         sb[0xE8..0xEC].copy_from_slice(&12_u32.to_le_bytes()); // last_orphan
         sb[0xEC..0xF0].copy_from_slice(&0xDEAD_BEEF_u32.to_le_bytes()); // hash_seed[0]
         sb[0xFC] = 1; // def_hash_version=HalfMD4
+        sb[0xFD] = 2; // jnl_backup_type
         sb[0x200..0x20E].copy_from_slice(b"acl,user_xattr"); // mount_opts
         sb[0x248..0x24C].copy_from_slice(&222_u32.to_le_bytes()); // overhead_clusters
         sb[0x160..0x164].copy_from_slice(&Ext4SuperFlags::UNSIGNED_HASH.0.to_le_bytes());
@@ -5797,20 +5825,32 @@ mod tests {
         sb[0x27C..0x27E].copy_from_slice(&1_u16.to_le_bytes()); // encoding=UTF-8
         sb[0x27E..0x280].copy_from_slice(&2_u16.to_le_bytes()); // encoding_flags
         sb[0x280..0x284].copy_from_slice(&13_u32.to_le_bytes()); // orphan_file_inum
+        sb[0x284..0x286].copy_from_slice(&0xABCD_u16.to_le_bytes()); // def_resuid hi
+        sb[0x286..0x288].copy_from_slice(&0x9ABC_u16.to_le_bytes()); // def_resgid hi
         sb[0x175] = 1; // checksum_type=crc32c
+        sb
+    }
 
-        let parsed = Ext4Superblock::parse_superblock_region(&sb).unwrap();
+    fn assert_extended_superblock_fields(parsed: &Ext4Superblock) {
         assert_eq!(parsed.reserved_gdt_blocks, 7);
         assert_eq!(parsed.first_meta_bg, 3);
         assert_eq!(parsed.mtime, 1_700_000_000);
         assert_eq!(parsed.state, 1);
+        assert_eq!(parsed.checkinterval, 180);
         assert_eq!(parsed.rev_level, 1);
+        assert_eq!(parsed.def_resuid, 0xABCD_1234);
+        assert_eq!(parsed.def_resgid, 0x9ABC_5678);
+        assert_eq!(parsed.block_group_nr, 6);
+        assert_eq!(parsed.algorithm_usage_bitmap, 0xA5A5_5A5A);
+        assert_eq!(parsed.prealloc_blocks, 3);
+        assert_eq!(parsed.prealloc_dir_blocks, 4);
         assert_eq!(parsed.first_ino, 11);
         assert_eq!(parsed.mount_opts, "acl,user_xattr");
         assert_eq!(parsed.journal_inum, 8);
         assert_eq!(parsed.last_orphan, 12);
         assert_eq!(parsed.hash_seed[0], 0xDEAD_BEEF);
         assert_eq!(parsed.def_hash_version, 1);
+        assert_eq!(parsed.jnl_backup_type, 2);
         assert!(parsed.has_super_flag(Ext4SuperFlags::UNSIGNED_HASH));
         assert_eq!(parsed.log_groups_per_flex, 4);
         assert_eq!(parsed.mmp_update_interval, 5);
@@ -5850,6 +5890,13 @@ mod tests {
         assert_eq!(parsed.orphan_file_inum, 13);
         assert_eq!(parsed.checksum_type, 1);
         assert_eq!(parsed.groups_count(), 1);
+    }
+
+    #[test]
+    fn superblock_new_fields_parse() {
+        let sb = superblock_with_extended_fields();
+        let parsed = Ext4Superblock::parse_superblock_region(&sb).unwrap();
+        assert_extended_superblock_fields(&parsed);
     }
 
     #[test]
