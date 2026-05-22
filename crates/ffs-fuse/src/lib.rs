@@ -332,9 +332,13 @@ const BTRFS_VOL_ARGS_SIZE: u32 = 4096;
 /// `FICLONE` = `_IOW(0x94, 9, int)`.
 /// Clone (reflink) entire file from source fd.
 const FICLONE: u32 = 0x4004_9409;
+/// `BTRFS_IOC_CLONE` - alias for FICLONE.
+const BTRFS_IOC_CLONE: u32 = FICLONE;
 /// `FICLONERANGE` = `_IOW(0x94, 13, struct file_clone_range)`.
 /// Clone a range of blocks between files.
 const FICLONERANGE: u32 = 0x4020_940D;
+/// `BTRFS_IOC_CLONE_RANGE` - alias for FICLONERANGE.
+const BTRFS_IOC_CLONE_RANGE: u32 = FICLONERANGE;
 const FILE_CLONE_RANGE_SIZE: u32 = 32;
 /// `BTRFS_IOC_BALANCE_V2` = `_IOWR(0x94, 32, struct btrfs_ioctl_balance_args)`.
 /// Start balance operation with filters.
@@ -9723,7 +9727,7 @@ mod tests {
             },
         );
         let mut input = vec![0_u8; BTRFS_VOL_ARGS_SIZE as usize];
-        input[0..7].copy_from_slice(b"1:+10G");
+        input[0..6].copy_from_slice(b"1:+10G");
 
         let response = dispatch_ioctl_for_testing(&fuse, 1, 0, BTRFS_IOC_RESIZE, &input, 0);
         assert_eq!(response, IoctlResult::Data(Vec::new()));
