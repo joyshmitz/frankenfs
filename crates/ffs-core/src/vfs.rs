@@ -1358,6 +1358,24 @@ pub trait FsOps: Send + Sync {
         ))
     }
 
+    /// Get btrfs supported feature flags for `BTRFS_IOC_GET_SUPPORTED_FEATURES`.
+    ///
+    /// Returns 72 bytes containing three sets of feature flags (each 24 bytes):
+    /// 1. Current features (same as get_btrfs_features)
+    /// 2. Supported features (what this implementation can mount)
+    /// 3. Settable features (what can be enabled - empty for read-only)
+    ///
+    /// Non-btrfs backends must return `FfsError::UnsupportedFeature`.
+    fn get_btrfs_supported_features(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+    ) -> ffs_error::Result<Vec<u8>> {
+        Err(FfsError::UnsupportedFeature(
+            "get_btrfs_supported_features is not supported by this backend".to_owned(),
+        ))
+    }
+
     /// Set filesystem-specific inode flags (ext4 `EXT4_IOC_SETFLAGS`).
     ///
     /// Updates the raw `i_flags` field. The implementation should validate
