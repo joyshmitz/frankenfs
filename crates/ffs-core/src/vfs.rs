@@ -1669,6 +1669,49 @@ pub trait FsOps: Send + Sync {
         ))
     }
 
+    /// Extended tree search for `BTRFS_IOC_TREE_SEARCH_V2`.
+    ///
+    /// Like tree_search but with variable-sized output buffer.
+    fn btrfs_tree_search_v2(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _args: &[u8],
+    ) -> ffs_error::Result<Vec<u8>> {
+        Err(FfsError::UnsupportedFeature(
+            "btrfs_tree_search_v2 is not supported by this backend".to_owned(),
+        ))
+    }
+
+    /// Unprivileged inode lookup for `BTRFS_IOC_INO_LOOKUP_USER`.
+    ///
+    /// Returns path from subvolume root to inode.
+    fn btrfs_ino_lookup_user(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _treeid: u64,
+        _dirid: u64,
+    ) -> ffs_error::Result<Vec<u8>> {
+        Err(FfsError::UnsupportedFeature(
+            "btrfs_ino_lookup_user is not supported by this backend".to_owned(),
+        ))
+    }
+
+    /// Get subvolume parent references for `BTRFS_IOC_GET_SUBVOL_ROOTREF`.
+    ///
+    /// Returns array of (dirid, name) pairs for parent directories.
+    fn btrfs_get_subvol_rootref(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _args: &[u8],
+    ) -> ffs_error::Result<Vec<u8>> {
+        Err(FfsError::UnsupportedFeature(
+            "btrfs_get_subvol_rootref is not supported by this backend".to_owned(),
+        ))
+    }
+
     /// Clone (reflink) entire file for `FICLONE`.
     ///
     /// Creates a CoW copy where dest file shares blocks with source.

@@ -277,6 +277,18 @@ const BTRFS_DEV_STATS_SIZE: u32 = 1032;
 /// Get subvolume info for the mounted subvol or specified inode.
 const BTRFS_IOC_GET_SUBVOL_INFO: u32 = 0x81F8_943C;
 const BTRFS_SUBVOL_INFO_SIZE: u32 = 504;
+/// `BTRFS_IOC_TREE_SEARCH_V2` = `_IOWR(0x94, 17, struct btrfs_ioctl_search_args_v2)`.
+/// Extended tree search with variable-sized buffer.
+const BTRFS_IOC_TREE_SEARCH_V2: u32 = 0xC070_9411;
+const BTRFS_TREE_SEARCH_V2_HEADER_SIZE: u32 = BTRFS_TREE_SEARCH_KEY_SIZE as u32 + 8;
+/// `BTRFS_IOC_INO_LOOKUP_USER` = `_IOWR(0x94, 62, struct btrfs_ioctl_ino_lookup_user_args)`.
+/// Unprivileged inode path lookup (4096 byte args).
+const BTRFS_IOC_INO_LOOKUP_USER: u32 = 0xD000_943E;
+const BTRFS_INO_LOOKUP_USER_SIZE: u32 = 4096;
+/// `BTRFS_IOC_GET_SUBVOL_ROOTREF` = `_IOWR(0x94, 61, struct btrfs_ioctl_get_subvol_rootref_args)`.
+/// Get subvolume parent references (4096 byte args).
+const BTRFS_IOC_GET_SUBVOL_ROOTREF: u32 = 0xD000_943D;
+const BTRFS_SUBVOL_ROOTREF_SIZE: u32 = 4096;
 const FSCRYPT_POLICY_V1_SIZE: usize = 12;
 #[cfg(test)]
 const FSCRYPT_POLICY_V2_VERSION: u8 = 2;
@@ -3989,6 +4001,50 @@ impl FrankenFuse {
                         data.resize(BTRFS_SUBVOL_INFO_SIZE as usize, 0);
                         IoctlResult::Data(data)
                     }
+                    Err(error) => IoctlResult::Error(error.to_errno()),
+                }
+            }
+            BTRFS_IOC_TREE_SEARCH_V2 => {
+                if in_data.len() < BTRFS_TREE_SEARCH_V2_HEADER_SIZE as usize
+                    || out_size < BTRFS_TREE_SEARCH_V2_HEADER_SIZE
+                {
+                    return IoctlResult::Error(libc::EINVAL);
+                }
+                let cx = Self::cx_for_request();
+                match self.with_request_scope(&cx, RequestOp::IoctlRead, |cx, scope| {
+                    self.inner.ops.btrfs_tree_search_v2(cx, scope, &in_data)
+                }) {
+                    Ok(data) => IoctlResult::Data(data),
+                    Err(error) => IoctlResult::Error(error.to_errno()),
+                }
+            }
+            BTRFS_IOC_INO_LOOKUP_USER => {
+                if in_data.len() < BTRFS_INO_LOOKUP_USER_SIZE as usize
+                    || out_size < BTRFS_INO_LOOKUP_USER_SIZE
+                {
+                    return IoctlResult::Error(libc::EINVAL);
+                }
+                let dirid = u64::from_ne_bytes(in_data[0..8].try_into().unwrap_or([0; 8]));
+                let treeid = u64::from_ne_bytes(in_data[8..16].try_into().unwrap_or([0; 8]));
+                let cx = Self::cx_for_request();
+                match self.with_request_scope(&cx, RequestOp::IoctlRead, |cx, scope| {
+                    self.inner.ops.btrfs_ino_lookup_user(cx, scope, treeid, dirid)
+                }) {
+                    Ok(data) => IoctlResult::Data(data),
+                    Err(error) => IoctlResult::Error(error.to_errno()),
+                }
+            }
+            BTRFS_IOC_GET_SUBVOL_ROOTREF => {
+                if in_data.len() < BTRFS_SUBVOL_ROOTREF_SIZE as usize
+                    || out_size < BTRFS_SUBVOL_ROOTREF_SIZE
+                {
+                    return IoctlResult::Error(libc::EINVAL);
+                }
+                let cx = Self::cx_for_request();
+                match self.with_request_scope(&cx, RequestOp::IoctlRead, |cx, scope| {
+                    self.inner.ops.btrfs_get_subvol_rootref(cx, scope, &in_data)
+                }) {
+                    Ok(data) => IoctlResult::Data(data),
                     Err(error) => IoctlResult::Error(error.to_errno()),
                 }
             }

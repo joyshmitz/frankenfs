@@ -19995,6 +19995,102 @@ impl FsOps for OpenFs {
         }
     }
 
+    fn btrfs_tree_search_v2(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        args: &[u8],
+    ) -> ffs_error::Result<Vec<u8>> {
+        match &self.flavor {
+            FsFlavor::Ext4(_) => Err(FfsError::UnsupportedFeature(
+                "BTRFS_IOC_TREE_SEARCH_V2 is not supported on ext4 filesystems".to_owned(),
+            )),
+            FsFlavor::Btrfs(_) => {
+                // search_args_v2 has same search_key at offset 0 (88 bytes),
+                // then buf_size (8 bytes), then buffer
+                if args.len() < 96 {
+                    return Err(FfsError::Io(std::io::Error::from_raw_os_error(libc::EINVAL)));
+                }
+                // Parse search_key from bytes
+                let key = BtrfsTreeSearchKey {
+                    tree_id: u64::from_le_bytes(args[0..8].try_into().unwrap_or([0; 8])),
+                    min_objectid: u64::from_le_bytes(args[8..16].try_into().unwrap_or([0; 8])),
+                    max_objectid: u64::from_le_bytes(args[16..24].try_into().unwrap_or([0; 8])),
+                    min_offset: u64::from_le_bytes(args[24..32].try_into().unwrap_or([0; 8])),
+                    max_offset: u64::from_le_bytes(args[32..40].try_into().unwrap_or([0; 8])),
+                    min_transid: u64::from_le_bytes(args[40..48].try_into().unwrap_or([0; 8])),
+                    max_transid: u64::from_le_bytes(args[48..56].try_into().unwrap_or([0; 8])),
+                    min_type: u32::from_le_bytes(args[56..60].try_into().unwrap_or([0; 4])),
+                    max_type: u32::from_le_bytes(args[60..64].try_into().unwrap_or([0; 4])),
+                    nr_items: u32::from_le_bytes(args[64..68].try_into().unwrap_or([0; 4])),
+                };
+                // Call existing tree_search implementation
+                let (nr_items, results) = self.btrfs_tree_search(cx, scope, key)?;
+                // Format v2 response: search_key (88) + buf_size (8) + results
+                let mut out = vec![0u8; 96 + results.len()];
+                out[0..88].copy_from_slice(&args[0..88]);
+                // Update nr_items in response
+                out[64..68].copy_from_slice(&nr_items.to_le_bytes());
+                out[88..96].copy_from_slice(&(results.len() as u64).to_le_bytes());
+                out[96..].copy_from_slice(&results);
+                Ok(out)
+            }
+        }
+    }
+
+    fn btrfs_ino_lookup_user(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        treeid: u64,
+        dirid: u64,
+    ) -> ffs_error::Result<Vec<u8>> {
+        match &self.flavor {
+            FsFlavor::Ext4(_) => Err(FfsError::UnsupportedFeature(
+                "BTRFS_IOC_INO_LOOKUP_USER is not supported on ext4 filesystems".to_owned(),
+            )),
+            FsFlavor::Btrfs(_) => {
+                // Use existing ino_lookup logic
+                let (resolved_treeid, path) = self.btrfs_ino_lookup(cx, scope, treeid, dirid)?;
+                // struct btrfs_ioctl_ino_lookup_user_args = 4096 bytes
+                // Layout: dirid(8) + treeid(8) + name(256) + path(3824)
+                let mut out = vec![0u8; 4096];
+                out[0..8].copy_from_slice(&dirid.to_le_bytes());
+                out[8..16].copy_from_slice(&resolved_treeid.to_le_bytes());
+                // Copy path to offset 264 (after name field)
+                let path_offset = 264;
+                let copy_len = path.len().min(out.len() - path_offset - 1);
+                out[path_offset..path_offset + copy_len].copy_from_slice(&path[..copy_len]);
+                Ok(out)
+            }
+        }
+    }
+
+    fn btrfs_get_subvol_rootref(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        args: &[u8],
+    ) -> ffs_error::Result<Vec<u8>> {
+        match &self.flavor {
+            FsFlavor::Ext4(_) => Err(FfsError::UnsupportedFeature(
+                "BTRFS_IOC_GET_SUBVOL_ROOTREF is not supported on ext4 filesystems".to_owned(),
+            )),
+            FsFlavor::Btrfs(_) => {
+                // struct btrfs_ioctl_get_subvol_rootref_args = 4096 bytes
+                // Layout: min_treeid(8) + rootref[255](4080) + num_items(1) + align(7)
+                // For now return empty list (no parent references)
+                let mut out = vec![0u8; 4096];
+                // Copy min_treeid from input
+                if args.len() >= 8 {
+                    out[0..8].copy_from_slice(&args[0..8]);
+                }
+                // num_items = 0 at offset 4088
+                Ok(out)
+            }
+        }
+    }
+
     fn clone_file(
         &self,
         _cx: &Cx,
