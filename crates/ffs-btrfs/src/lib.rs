@@ -7145,6 +7145,24 @@ mod tests {
         assert_eq!(parsed.mode, 0o040_755);
         assert_eq!(parsed.nlink, 2);
         assert_eq!(parsed.mtime_sec, 12);
+        assert_eq!(parsed.flags, 0, "flags default to 0 in smoke test");
+    }
+
+    #[test]
+    fn parse_inode_item_with_flags() {
+        use crate::{BTRFS_INODE_COMPRESS, BTRFS_INODE_NODATASUM};
+
+        let mut inode = [0_u8; 160];
+        // Set flags at offset 64
+        let test_flags = BTRFS_INODE_NODATASUM | BTRFS_INODE_COMPRESS;
+        inode[64..72].copy_from_slice(&test_flags.to_le_bytes());
+        // Set mode to regular file
+        inode[52..56].copy_from_slice(&0o100_644_u32.to_le_bytes());
+
+        let parsed = parse_inode_item(&inode).expect("parse inode with flags");
+        assert_eq!(parsed.flags, test_flags);
+        assert!(parsed.flags & BTRFS_INODE_NODATASUM != 0);
+        assert!(parsed.flags & BTRFS_INODE_COMPRESS != 0);
     }
 
     #[test]
