@@ -2327,6 +2327,32 @@ pub trait FsOps: Send + Sync {
         ))
     }
 
+    /// Freeze filesystem for `FIFREEZE`.
+    ///
+    /// Quiesces the filesystem for consistent snapshots.
+    /// Returns the freeze level (nesting count).
+    fn fs_freeze(&self, _cx: &Cx, _scope: &mut RequestScope) -> ffs_error::Result<i32> {
+        Err(FfsError::UnsupportedFeature(
+            "fs_freeze is not supported by this backend".to_owned(),
+        ))
+    }
+
+    /// Thaw filesystem for `FITHAW`.
+    ///
+    /// Resumes a frozen filesystem.
+    fn fs_thaw(&self, _cx: &Cx, _scope: &mut RequestScope) -> ffs_error::Result<()> {
+        Err(FfsError::UnsupportedFeature(
+            "fs_thaw is not supported by this backend".to_owned(),
+        ))
+    }
+
+    /// Get filesystem block size for `FIGETBSZ`.
+    fn get_block_size(&self, _cx: &Cx, _scope: &mut RequestScope) -> ffs_error::Result<u32> {
+        Err(FfsError::UnsupportedFeature(
+            "get_block_size is not supported by this backend".to_owned(),
+        ))
+    }
+
     /// Set inode attributes. Returns updated attributes.
     fn setattr(
         &self,
@@ -3166,6 +3192,18 @@ impl<T: FsOps + ?Sized> FsOps for Arc<T> {
         flags: &[u8],
     ) -> ffs_error::Result<()> {
         self.as_ref().fs_shutdown(cx, scope, flags)
+    }
+
+    fn fs_freeze(&self, cx: &Cx, scope: &mut RequestScope) -> ffs_error::Result<i32> {
+        self.as_ref().fs_freeze(cx, scope)
+    }
+
+    fn fs_thaw(&self, cx: &Cx, scope: &mut RequestScope) -> ffs_error::Result<()> {
+        self.as_ref().fs_thaw(cx, scope)
+    }
+
+    fn get_block_size(&self, cx: &Cx, scope: &mut RequestScope) -> ffs_error::Result<u32> {
+        self.as_ref().get_block_size(cx, scope)
     }
 
     fn setattr(

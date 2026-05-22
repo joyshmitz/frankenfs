@@ -21201,6 +21201,29 @@ impl FsOps for OpenFs {
         }
     }
 
+    fn fs_freeze(&self, _cx: &Cx, _scope: &mut RequestScope) -> ffs_error::Result<i32> {
+        match &self.flavor {
+            FsFlavor::Ext4(_) | FsFlavor::Btrfs(_) => Err(FfsError::UnsupportedFeature(
+                "FIFREEZE requires kernel-level freeze support".to_owned(),
+            )),
+        }
+    }
+
+    fn fs_thaw(&self, _cx: &Cx, _scope: &mut RequestScope) -> ffs_error::Result<()> {
+        match &self.flavor {
+            FsFlavor::Ext4(_) | FsFlavor::Btrfs(_) => Err(FfsError::UnsupportedFeature(
+                "FITHAW requires kernel-level freeze support".to_owned(),
+            )),
+        }
+    }
+
+    fn get_block_size(&self, _cx: &Cx, _scope: &mut RequestScope) -> ffs_error::Result<u32> {
+        match &self.flavor {
+            FsFlavor::Ext4(sb) => Ok(sb.block_size),
+            FsFlavor::Btrfs(sb) => Ok(sb.sectorsize),
+        }
+    }
+
     fn setattr(
         &self,
         cx: &Cx,

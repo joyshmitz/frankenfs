@@ -175,6 +175,15 @@ const EXT4_IOC_SWAP_BOOT: u32 = 0x0000_6611;
 /// `FS_IOC_SHUTDOWN` = `_IOW('X', 125, __u32)`.
 /// Shutdown filesystem (emergency stop, data loss risk).
 const FS_IOC_SHUTDOWN: u32 = 0x4004_587D;
+/// `FIFREEZE` = `_IOWR('X', 119, int)`.
+/// Freeze the filesystem (quiesce for snapshots).
+const FIFREEZE: u32 = 0xC004_5877;
+/// `FITHAW` = `_IOWR('X', 120, int)`.
+/// Thaw a frozen filesystem.
+const FITHAW: u32 = 0xC004_5878;
+/// `FIGETBSZ` = `_IO(0x00, 2)`.
+/// Get filesystem block size.
+const FIGETBSZ: u32 = 0x0000_0002;
 /// `FS_IOC_GETFSLABEL` = `_IOR(0x94, 0x31, char[FSLABEL_MAX])` on x86_64.
 const FS_IOC_GETFSLABEL: u32 = 0x8100_9431;
 /// `FS_IOC_SETFSLABEL` = `_IOW(0x94, 0x32, char[FSLABEL_MAX])` on x86_64.
@@ -3764,6 +3773,41 @@ impl FrankenFuse {
                     self.inner.ops.fs_shutdown(cx, scope, in_data)
                 }) {
                     Ok(()) => IoctlResult::Data(Vec::new()),
+                    Err(error) => IoctlResult::Error(error.to_errno()),
+                }
+            }
+            FIFREEZE => {
+                let cx = Self::cx_for_request();
+                match self.with_request_scope(&cx, RequestOp::IoctlWrite, |cx, scope| {
+                    self.inner.ops.fs_freeze(cx, scope)
+                }) {
+                    Ok(level) => {
+                        let mut buf = [0u8; 4];
+                        buf.copy_from_slice(&level.to_ne_bytes());
+                        IoctlResult::Data(buf.to_vec())
+                    }
+                    Err(error) => IoctlResult::Error(error.to_errno()),
+                }
+            }
+            FITHAW => {
+                let cx = Self::cx_for_request();
+                match self.with_request_scope(&cx, RequestOp::IoctlWrite, |cx, scope| {
+                    self.inner.ops.fs_thaw(cx, scope)
+                }) {
+                    Ok(()) => IoctlResult::Data(Vec::new()),
+                    Err(error) => IoctlResult::Error(error.to_errno()),
+                }
+            }
+            FIGETBSZ => {
+                let cx = Self::cx_for_request();
+                match self.with_request_scope(&cx, RequestOp::IoctlRead, |cx, scope| {
+                    self.inner.ops.get_block_size(cx, scope)
+                }) {
+                    Ok(bsz) => {
+                        let mut buf = [0u8; 4];
+                        buf.copy_from_slice(&(bsz as i32).to_ne_bytes());
+                        IoctlResult::Data(buf.to_vec())
+                    }
                     Err(error) => IoctlResult::Error(error.to_errno()),
                 }
             }
