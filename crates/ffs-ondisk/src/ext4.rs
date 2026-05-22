@@ -640,6 +640,12 @@ pub struct Ext4Superblock {
     pub last_orphan: u32,
     pub journal_uuid: [u8; 16],
 
+    // ── Snapshot metadata ────────────────────────────────────────────────
+    pub snapshot_inum: u32,
+    pub snapshot_id: u32,
+    pub snapshot_r_blocks_count: u64,
+    pub snapshot_list: u32,
+
     // ── Htree directory hashing ──────────────────────────────────────────
     pub hash_seed: [u32; 4],
     pub def_hash_version: u8,
@@ -816,6 +822,13 @@ impl Ext4Superblock {
             journal_dev: read_le_u32(region, 0xE4)?,
             last_orphan: read_le_u32(region, 0xE8)?,
             journal_uuid: read_fixed::<16>(region, 0xD0)?,
+
+            // Snapshot metadata
+            snapshot_inum: read_le_u32(region, 0x180)?,
+            snapshot_id: read_le_u32(region, 0x184)?,
+            snapshot_r_blocks_count: u64::from(read_le_u32(region, 0x188)?)
+                | (u64::from(read_le_u32(region, 0x18C)?) << 32),
+            snapshot_list: read_le_u32(region, 0x190)?,
 
             // Htree directory hashing
             hash_seed: [
@@ -5745,6 +5758,10 @@ mod tests {
         sb[0x174] = 4; // log_groups_per_flex
         sb[0x166..0x168].copy_from_slice(&5_u16.to_le_bytes()); // mmp_update_interval
         sb[0x168..0x170].copy_from_slice(&1234_u64.to_le_bytes()); // mmp_block
+        sb[0x180..0x184].copy_from_slice(&31_u32.to_le_bytes()); // snapshot_inum
+        sb[0x184..0x188].copy_from_slice(&32_u32.to_le_bytes()); // snapshot_id
+        sb[0x188..0x190].copy_from_slice(&33_u64.to_le_bytes()); // snapshot_r_blocks_count
+        sb[0x190..0x194].copy_from_slice(&34_u32.to_le_bytes()); // snapshot_list
         sb[0x24C..0x250].copy_from_slice(&7_u32.to_le_bytes()); // backup_bgs[0]
         sb[0x250..0x254].copy_from_slice(&11_u32.to_le_bytes()); // backup_bgs[1]
         sb[0x254..0x258].copy_from_slice(&[1, 2, 3, 4]); // encrypt_algos
@@ -5772,6 +5789,10 @@ mod tests {
         assert_eq!(parsed.log_groups_per_flex, 4);
         assert_eq!(parsed.mmp_update_interval, 5);
         assert_eq!(parsed.mmp_block, 1234);
+        assert_eq!(parsed.snapshot_inum, 31);
+        assert_eq!(parsed.snapshot_id, 32);
+        assert_eq!(parsed.snapshot_r_blocks_count, 33);
+        assert_eq!(parsed.snapshot_list, 34);
         assert_eq!(parsed.overhead_clusters, 222);
         assert_eq!(parsed.backup_bgs, [7, 11]);
         assert_eq!(parsed.encrypt_algos, [1, 2, 3, 4]);
