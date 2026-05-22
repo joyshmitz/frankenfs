@@ -35,14 +35,13 @@ use ffs_btrfs::{
     BTRFS_FT_CHRDEV, BTRFS_FT_DIR, BTRFS_FT_FIFO, BTRFS_FT_REG_FILE, BTRFS_FT_SOCK,
     BTRFS_FT_SYMLINK, BTRFS_ITEM_DIR_INDEX, BTRFS_ITEM_DIR_ITEM, BTRFS_ITEM_EXTENT_DATA,
     BTRFS_ITEM_INODE_ITEM, BTRFS_ITEM_INODE_REF, BTRFS_ITEM_ROOT_ITEM, BTRFS_ITEM_XATTR_ITEM,
-    BtrfsBTree, BtrfsBlockGroupItem, BtrfsCowNode, BtrfsDirItem, BtrfsExtentAllocator,
-    BtrfsExtentData, BtrfsInodeItem, BtrfsKey, BtrfsLeafEntry, BtrfsMutationError,
-    BtrfsNodeSerializeParams, BtrfsTreeItem, InMemoryCowBtrfsTree, BTRFS_USER_SETTABLE_FSFLAGS,
-    BTRFS_USER_SETTABLE_XFLAGS, btrfs_inode_flags_to_fsflags, btrfs_inode_flags_to_xflags,
+    BTRFS_USER_SETTABLE_FSFLAGS, BTRFS_USER_SETTABLE_XFLAGS, BtrfsBTree, BtrfsBlockGroupItem,
+    BtrfsCowNode, BtrfsDirItem, BtrfsExtentAllocator, BtrfsExtentData, BtrfsInodeItem, BtrfsKey,
+    BtrfsLeafEntry, BtrfsMutationError, BtrfsNodeSerializeParams, BtrfsTreeItem,
+    InMemoryCowBtrfsTree, btrfs_inode_flags_to_fsflags, btrfs_inode_flags_to_xflags,
     enumerate_snapshots, enumerate_subvolumes, fsflags_to_btrfs_inode_flags,
-    map_logical_to_physical, parse_dir_items, xflags_to_btrfs_inode_flags,
-    parse_extent_data, parse_inode_item, parse_root_item, parse_xattr_items, walk_chunk_tree,
-    walk_tree,
+    map_logical_to_physical, parse_dir_items, parse_extent_data, parse_inode_item, parse_root_item,
+    parse_xattr_items, walk_chunk_tree, walk_tree, xflags_to_btrfs_inode_flags,
 };
 use ffs_error::FfsError;
 use ffs_journal::{
@@ -8898,6 +8897,91 @@ fn encode_btrfs_fs_info_args(sb: &ffs_ondisk::BtrfsSuperblock) -> Vec<u8> {
     // flags (0x30..0x38) already zero from vec![0; ...]
     buf[0x38..0x40].copy_from_slice(&sb.generation.to_ne_bytes());
     buf[0x40..0x50].copy_from_slice(&sb.fsid);
+    buf
+}
+
+const BTRFS_FEATURE_COMPAT_SUPP: u64 = 0;
+const BTRFS_FEATURE_COMPAT_SAFE_SET: u64 = 0;
+const BTRFS_FEATURE_COMPAT_SAFE_CLEAR: u64 = 0;
+
+const BTRFS_FEATURE_COMPAT_RO_FREE_SPACE_TREE: u64 = 1 << 0;
+const BTRFS_FEATURE_COMPAT_RO_FREE_SPACE_TREE_VALID: u64 = 1 << 1;
+const BTRFS_FEATURE_COMPAT_RO_VERITY: u64 = 1 << 2;
+const BTRFS_FEATURE_COMPAT_RO_BLOCK_GROUP_TREE: u64 = 1 << 3;
+const BTRFS_FEATURE_COMPAT_RO_SUPP: u64 = BTRFS_FEATURE_COMPAT_RO_FREE_SPACE_TREE
+    | BTRFS_FEATURE_COMPAT_RO_FREE_SPACE_TREE_VALID
+    | BTRFS_FEATURE_COMPAT_RO_VERITY
+    | BTRFS_FEATURE_COMPAT_RO_BLOCK_GROUP_TREE;
+const BTRFS_FEATURE_COMPAT_RO_SAFE_SET: u64 = 0;
+const BTRFS_FEATURE_COMPAT_RO_SAFE_CLEAR: u64 = 0;
+
+const BTRFS_FEATURE_INCOMPAT_MIXED_BACKREF: u64 = 1 << 0;
+const BTRFS_FEATURE_INCOMPAT_DEFAULT_SUBVOL: u64 = 1 << 1;
+const BTRFS_FEATURE_INCOMPAT_MIXED_GROUPS: u64 = 1 << 2;
+const BTRFS_FEATURE_INCOMPAT_COMPRESS_LZO: u64 = 1 << 3;
+const BTRFS_FEATURE_INCOMPAT_COMPRESS_ZSTD: u64 = 1 << 4;
+const BTRFS_FEATURE_INCOMPAT_BIG_METADATA: u64 = 1 << 5;
+const BTRFS_FEATURE_INCOMPAT_EXTENDED_IREF: u64 = 1 << 6;
+const BTRFS_FEATURE_INCOMPAT_RAID56: u64 = 1 << 7;
+const BTRFS_FEATURE_INCOMPAT_SKINNY_METADATA: u64 = 1 << 8;
+const BTRFS_FEATURE_INCOMPAT_NO_HOLES: u64 = 1 << 9;
+const BTRFS_FEATURE_INCOMPAT_METADATA_UUID: u64 = 1 << 10;
+const BTRFS_FEATURE_INCOMPAT_RAID1C34: u64 = 1 << 11;
+const BTRFS_FEATURE_INCOMPAT_ZONED: u64 = 1 << 12;
+const BTRFS_FEATURE_INCOMPAT_SIMPLE_QUOTA: u64 = 1 << 16;
+const BTRFS_FEATURE_INCOMPAT_SUPP: u64 = BTRFS_FEATURE_INCOMPAT_MIXED_BACKREF
+    | BTRFS_FEATURE_INCOMPAT_DEFAULT_SUBVOL
+    | BTRFS_FEATURE_INCOMPAT_MIXED_GROUPS
+    | BTRFS_FEATURE_INCOMPAT_COMPRESS_LZO
+    | BTRFS_FEATURE_INCOMPAT_COMPRESS_ZSTD
+    | BTRFS_FEATURE_INCOMPAT_BIG_METADATA
+    | BTRFS_FEATURE_INCOMPAT_EXTENDED_IREF
+    | BTRFS_FEATURE_INCOMPAT_RAID56
+    | BTRFS_FEATURE_INCOMPAT_SKINNY_METADATA
+    | BTRFS_FEATURE_INCOMPAT_NO_HOLES
+    | BTRFS_FEATURE_INCOMPAT_METADATA_UUID
+    | BTRFS_FEATURE_INCOMPAT_RAID1C34
+    | BTRFS_FEATURE_INCOMPAT_ZONED
+    | BTRFS_FEATURE_INCOMPAT_SIMPLE_QUOTA;
+const BTRFS_FEATURE_INCOMPAT_SAFE_SET: u64 = BTRFS_FEATURE_INCOMPAT_EXTENDED_IREF;
+const BTRFS_FEATURE_INCOMPAT_SAFE_CLEAR: u64 = 0;
+
+fn encode_btrfs_feature_flags(
+    compat_flags: u64,
+    compat_ro_flags: u64,
+    incompat_flags: u64,
+    out: &mut Vec<u8>,
+) {
+    out.extend_from_slice(&compat_flags.to_le_bytes());
+    out.extend_from_slice(&compat_ro_flags.to_le_bytes());
+    out.extend_from_slice(&incompat_flags.to_le_bytes());
+}
+
+/// Encode the Linux `BTRFS_IOC_GET_SUPPORTED_FEATURES` payload.
+///
+/// The kernel returns three `struct btrfs_ioctl_feature_flags` records:
+/// supported, safe-to-set, and safe-to-clear.  Current superblock flags are
+/// handled by `BTRFS_IOC_GET_FEATURES`, not repeated here.
+fn encode_btrfs_supported_feature_flags() -> Vec<u8> {
+    let mut buf = Vec::with_capacity(72);
+    encode_btrfs_feature_flags(
+        BTRFS_FEATURE_COMPAT_SUPP,
+        BTRFS_FEATURE_COMPAT_RO_SUPP,
+        BTRFS_FEATURE_INCOMPAT_SUPP,
+        &mut buf,
+    );
+    encode_btrfs_feature_flags(
+        BTRFS_FEATURE_COMPAT_SAFE_SET,
+        BTRFS_FEATURE_COMPAT_RO_SAFE_SET,
+        BTRFS_FEATURE_INCOMPAT_SAFE_SET,
+        &mut buf,
+    );
+    encode_btrfs_feature_flags(
+        BTRFS_FEATURE_COMPAT_SAFE_CLEAR,
+        BTRFS_FEATURE_COMPAT_RO_SAFE_CLEAR,
+        BTRFS_FEATURE_INCOMPAT_SAFE_CLEAR,
+        &mut buf,
+    );
     buf
 }
 
@@ -19031,7 +19115,8 @@ impl FsOps for OpenFs {
 
                 let requested_btrfs = xflags_to_btrfs_inode_flags(fsx.xflags);
                 let user_settable_btrfs = xflags_to_btrfs_inode_flags(BTRFS_USER_SETTABLE_XFLAGS);
-                inode.flags = (inode.flags & !user_settable_btrfs) | (requested_btrfs & user_settable_btrfs);
+                inode.flags =
+                    (inode.flags & !user_settable_btrfs) | (requested_btrfs & user_settable_btrfs);
 
                 let (secs, nanos) = Self::btrfs_now_timestamp();
                 inode.ctime_sec = secs;
@@ -19422,6 +19507,19 @@ impl FsOps for OpenFs {
         }
     }
 
+    fn get_btrfs_supported_features(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+    ) -> ffs_error::Result<Vec<u8>> {
+        match &self.flavor {
+            FsFlavor::Ext4(_) => Err(FfsError::UnsupportedFeature(
+                "BTRFS_IOC_GET_SUPPORTED_FEATURES is not supported on ext4 filesystems".to_owned(),
+            )),
+            FsFlavor::Btrfs(_) => Ok(encode_btrfs_supported_feature_flags()),
+        }
+    }
+
     fn btrfs_ino_lookup(
         &self,
         cx: &Cx,
@@ -19691,7 +19789,8 @@ impl FsOps for OpenFs {
                 let requested_btrfs = fsflags_to_btrfs_inode_flags(flags);
                 let old_btrfs = inode.flags;
                 let user_settable_btrfs = fsflags_to_btrfs_inode_flags(BTRFS_USER_SETTABLE_FSFLAGS);
-                inode.flags = (old_btrfs & !user_settable_btrfs) | (requested_btrfs & user_settable_btrfs);
+                inode.flags =
+                    (old_btrfs & !user_settable_btrfs) | (requested_btrfs & user_settable_btrfs);
 
                 let (secs, nanos) = Self::btrfs_now_timestamp();
                 inode.ctime_sec = secs;
@@ -27329,6 +27428,40 @@ mod tests {
         assert_eq!(sb.magic, BTRFS_MAGIC);
         assert_eq!(sb.sectorsize, 4096);
         assert_eq!(sb.nodesize, 4096);
+    }
+
+    #[test]
+    fn open_fs_btrfs_supported_features_matches_kernel_sets() {
+        let image = build_btrfs_image();
+        let dev = TestDevice::from_vec(image);
+        let cx = Cx::for_testing();
+
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
+        let ops: &dyn FsOps = &fs;
+        let payload = ops
+            .get_btrfs_supported_features(&cx, &mut RequestScope::empty())
+            .expect("btrfs supported feature payload");
+
+        let fields: Vec<u64> = payload
+            .chunks_exact(8)
+            .map(|chunk| u64::from_le_bytes(chunk.try_into().expect("u64 field")))
+            .collect();
+
+        assert_eq!(payload.len(), 72);
+        assert_eq!(
+            fields.as_slice(),
+            &[
+                BTRFS_FEATURE_COMPAT_SUPP,
+                BTRFS_FEATURE_COMPAT_RO_SUPP,
+                BTRFS_FEATURE_INCOMPAT_SUPP,
+                BTRFS_FEATURE_COMPAT_SAFE_SET,
+                BTRFS_FEATURE_COMPAT_RO_SAFE_SET,
+                BTRFS_FEATURE_INCOMPAT_SAFE_SET,
+                BTRFS_FEATURE_COMPAT_SAFE_CLEAR,
+                BTRFS_FEATURE_COMPAT_RO_SAFE_CLEAR,
+                BTRFS_FEATURE_INCOMPAT_SAFE_CLEAR,
+            ]
+        );
     }
 
     #[test]

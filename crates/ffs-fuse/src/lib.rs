@@ -200,7 +200,7 @@ const BTRFS_IOC_SYNC: u32 = 0x9408;
 const BTRFS_IOC_GET_FEATURES: u32 = 0x8018_9439;
 const BTRFS_FEATURE_FLAGS_SIZE: u32 = 24;
 /// `BTRFS_IOC_GET_SUPPORTED_FEATURES` = `_IOR(0x94, 57, struct btrfs_ioctl_feature_flags[3])`.
-/// Returns three sets of feature flags (72 bytes): current, supported, and settable.
+/// Returns three 24-byte feature-flag sets: supported, safe-to-set, and safe-to-clear.
 const BTRFS_IOC_GET_SUPPORTED_FEATURES: u32 = 0x8048_9439;
 const BTRFS_SUPPORTED_FEATURE_FLAGS_SIZE: u32 = 72;
 const FSCRYPT_POLICY_V1_SIZE: usize = 12;
@@ -3553,9 +3553,7 @@ impl FrankenFuse {
                 }
                 let cx = Self::cx_for_request();
                 match self.with_request_scope(&cx, RequestOp::IoctlRead, |cx, scope| {
-                    self.inner
-                        .ops
-                        .get_subvol_flags(cx, scope, InodeNumber(ino))
+                    self.inner.ops.get_subvol_flags(cx, scope, InodeNumber(ino))
                 }) {
                     Ok(flags) => IoctlResult::Data(flags.to_ne_bytes().to_vec()),
                     Err(error) => IoctlResult::Error(error.to_errno()),

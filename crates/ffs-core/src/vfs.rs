@@ -1360,10 +1360,13 @@ pub trait FsOps: Send + Sync {
 
     /// Get btrfs supported feature flags for `BTRFS_IOC_GET_SUPPORTED_FEATURES`.
     ///
-    /// Returns 72 bytes containing three sets of feature flags (each 24 bytes):
-    /// 1. Current features (same as get_btrfs_features)
-    /// 2. Supported features (what this implementation can mount)
-    /// 3. Settable features (what can be enabled - empty for read-only)
+    /// Returns 72 bytes containing three `btrfs_ioctl_feature_flags`
+    /// records (each 24 bytes):
+    /// 1. Supported features (what this implementation can mount)
+    /// 2. Safe-to-set features (what can be enabled on a mounted filesystem)
+    /// 3. Safe-to-clear features (what can be disabled on a mounted filesystem)
+    ///
+    /// Current superblock flags are returned by `get_btrfs_features`.
     ///
     /// Non-btrfs backends must return `FfsError::UnsupportedFeature`.
     fn get_btrfs_supported_features(
