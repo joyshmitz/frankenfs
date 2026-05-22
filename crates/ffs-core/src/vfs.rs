@@ -1884,6 +1884,20 @@ pub trait FsOps: Send + Sync {
         ))
     }
 
+    /// Forget a stale device path for `BTRFS_IOC_FORGET_DEV`.
+    ///
+    /// The ioctl uses `struct btrfs_ioctl_vol_args` and is write-scoped.
+    fn btrfs_forget_dev(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _args: &[u8],
+    ) -> ffs_error::Result<()> {
+        Err(FfsError::UnsupportedFeature(
+            "btrfs_forget_dev is not supported by this backend".to_owned(),
+        ))
+    }
+
     /// Send subvolume for `BTRFS_IOC_SEND`.
     ///
     /// Implements btrfs send protocol for incremental/full sends.
@@ -1909,6 +1923,31 @@ pub trait FsOps: Send + Sync {
     ) -> ffs_error::Result<Vec<u8>> {
         Err(FfsError::UnsupportedFeature(
             "btrfs_set_received_subvol is not supported by this backend".to_owned(),
+        ))
+    }
+
+    /// Set the btrfs filesystem label for `BTRFS_IOC_SET_FSLABEL`.
+    fn btrfs_set_fslabel(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _args: &[u8],
+    ) -> ffs_error::Result<()> {
+        Err(FfsError::UnsupportedFeature(
+            "btrfs_set_fslabel is not supported by this backend".to_owned(),
+        ))
+    }
+
+    /// Deduplicate file extents for `BTRFS_IOC_FILE_EXTENT_SAME`.
+    fn btrfs_file_extent_same(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _ino: u64,
+        _args: &[u8],
+    ) -> ffs_error::Result<Vec<u8>> {
+        Err(FfsError::UnsupportedFeature(
+            "btrfs_file_extent_same is not supported by this backend".to_owned(),
         ))
     }
 
@@ -2766,6 +2805,34 @@ impl<T: FsOps + ?Sized> FsOps for Arc<T> {
         args: &[u8],
     ) -> ffs_error::Result<Vec<u8>> {
         self.as_ref().btrfs_dev_replace(cx, scope, args)
+    }
+
+    fn btrfs_forget_dev(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        args: &[u8],
+    ) -> ffs_error::Result<()> {
+        self.as_ref().btrfs_forget_dev(cx, scope, args)
+    }
+
+    fn btrfs_set_fslabel(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        args: &[u8],
+    ) -> ffs_error::Result<()> {
+        self.as_ref().btrfs_set_fslabel(cx, scope, args)
+    }
+
+    fn btrfs_file_extent_same(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        ino: u64,
+        args: &[u8],
+    ) -> ffs_error::Result<Vec<u8>> {
+        self.as_ref().btrfs_file_extent_same(cx, scope, ino, args)
     }
 
     fn get_quota_info(&self, cx: &Cx, scope: &mut RequestScope) -> ffs_error::Result<QuotaInfo> {

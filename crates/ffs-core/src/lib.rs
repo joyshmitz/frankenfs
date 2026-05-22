@@ -20250,6 +20250,22 @@ impl FsOps for OpenFs {
         }
     }
 
+    fn btrfs_forget_dev(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _args: &[u8],
+    ) -> ffs_error::Result<()> {
+        match &self.flavor {
+            FsFlavor::Ext4(_) => Err(FfsError::UnsupportedFeature(
+                "BTRFS_IOC_FORGET_DEV is not supported on ext4 filesystems".to_owned(),
+            )),
+            FsFlavor::Btrfs(_) => Err(FfsError::UnsupportedFeature(
+                "BTRFS_IOC_FORGET_DEV not applicable in FUSE context".to_owned(),
+            )),
+        }
+    }
+
     fn btrfs_send(
         &self,
         _cx: &Cx,
@@ -20283,6 +20299,37 @@ impl FsOps for OpenFs {
                 // Setting received UUID requires write access
                 Err(FfsError::ReadOnly)
             }
+        }
+    }
+
+    fn btrfs_set_fslabel(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _args: &[u8],
+    ) -> ffs_error::Result<()> {
+        match &self.flavor {
+            FsFlavor::Ext4(_) => Err(FfsError::UnsupportedFeature(
+                "BTRFS_IOC_SET_FSLABEL is not supported on ext4 filesystems".to_owned(),
+            )),
+            FsFlavor::Btrfs(_) => Err(FfsError::ReadOnly),
+        }
+    }
+
+    fn btrfs_file_extent_same(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _ino: u64,
+        _args: &[u8],
+    ) -> ffs_error::Result<Vec<u8>> {
+        match &self.flavor {
+            FsFlavor::Ext4(_) => Err(FfsError::UnsupportedFeature(
+                "BTRFS_IOC_FILE_EXTENT_SAME is not supported on ext4 filesystems".to_owned(),
+            )),
+            FsFlavor::Btrfs(_) => Err(FfsError::UnsupportedFeature(
+                "BTRFS_IOC_FILE_EXTENT_SAME protocol not yet implemented".to_owned(),
+            )),
         }
     }
 

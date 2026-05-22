@@ -328,6 +328,9 @@ const BTRFS_IOC_DEFRAG: u32 = 0x5000_9402;
 /// `BTRFS_IOC_SCAN_DEV` = `_IOW(0x94, 4, struct btrfs_ioctl_vol_args)`.
 /// Scan device for btrfs filesystem.
 const BTRFS_IOC_SCAN_DEV: u32 = 0x5000_9404;
+/// `BTRFS_IOC_FORGET_DEV` = `_IOW(0x94, 5, struct btrfs_ioctl_vol_args)`.
+/// Forget a stale btrfs device by path.
+const BTRFS_IOC_FORGET_DEV: u32 = 0x5000_9405;
 /// `BTRFS_IOC_SEND` = `_IOW(0x94, 38, struct btrfs_ioctl_send_args)`.
 /// Send subvolume as byte stream for btrfs send/receive.
 const BTRFS_IOC_SEND: u32 = 0x4048_9426;
@@ -336,6 +339,13 @@ const BTRFS_SEND_ARGS_SIZE: u32 = 72;
 /// Set received UUID after btrfs receive.
 const BTRFS_IOC_SET_RECEIVED_SUBVOL: u32 = 0xC040_9425;
 const BTRFS_RECEIVED_SUBVOL_ARGS_SIZE: u32 = 64;
+/// `BTRFS_IOC_SET_FSLABEL` = `_IOW(0x94, 50, char[256])`.
+/// Set filesystem label.
+const BTRFS_IOC_SET_FSLABEL: u32 = 0x4100_9432;
+/// `BTRFS_IOC_FILE_EXTENT_SAME` = `_IOWR(0x94, 54, struct btrfs_ioctl_same_args)`.
+/// Deduplicate file extents (alias for FIDEDUPERANGE).
+const BTRFS_IOC_FILE_EXTENT_SAME: u32 = 0xC018_9436;
+const BTRFS_SAME_ARGS_SIZE: u32 = 24;
 const BTRFS_VOL_ARGS_SIZE: u32 = 4096;
 /// `FICLONE` = `_IOW(0x94, 9, int)`.
 /// Clone (reflink) entire file from source fd.
@@ -4297,6 +4307,21 @@ impl FrankenFuse {
                     Err(error) => IoctlResult::Error(error.to_errno()),
                 }
             }
+            BTRFS_IOC_FORGET_DEV => {
+                if in_data.len() < BTRFS_VOL_ARGS_SIZE as usize {
+                    return IoctlResult::Error(libc::EINVAL);
+                }
+                if self.inner.read_only {
+                    return IoctlResult::Error(libc::EROFS);
+                }
+                let cx = Self::cx_for_request();
+                match self.with_request_scope(&cx, RequestOp::IoctlWrite, |cx, scope| {
+                    self.inner.ops.btrfs_forget_dev(cx, scope, in_data)
+                }) {
+                    Ok(()) => IoctlResult::Data(Vec::new()),
+                    Err(error) => IoctlResult::Error(error.to_errno()),
+                }
+            }
             BTRFS_IOC_SEND => {
                 // Send requires implementing the full btrfs send stream protocol
                 if in_data.len() < BTRFS_SEND_ARGS_SIZE as usize {
@@ -4304,7 +4329,7 @@ impl FrankenFuse {
                 }
                 let cx = Self::cx_for_request();
                 match self.with_request_scope(&cx, RequestOp::IoctlRead, |cx, scope| {
-                    self.inner.ops.btrfs_send(cx, scope, &in_data)
+                    self.inner.ops.btrfs_send(cx, scope, in_data)
                 }) {
                     Ok(()) => IoctlResult::Data(Vec::new()),
                     Err(error) => IoctlResult::Error(error.to_errno()),
@@ -4320,7 +4345,38 @@ impl FrankenFuse {
                 }
                 let cx = Self::cx_for_request();
                 match self.with_request_scope(&cx, RequestOp::IoctlWrite, |cx, scope| {
-                    self.inner.ops.btrfs_set_received_subvol(cx, scope, &in_data)
+                    self.inner.ops.btrfs_set_received_subvol(cx, scope, in_data)
+                }) {
+                    Ok(data) => IoctlResult::Data(data),
+                    Err(error) => IoctlResult::Error(error.to_errno()),
+                }
+            }
+            BTRFS_IOC_SET_FSLABEL => {
+                // Set label requires write access
+                if self.inner.read_only {
+                    return IoctlResult::Error(libc::EROFS);
+                }
+                let cx = Self::cx_for_request();
+                match self.with_request_scope(&cx, RequestOp::IoctlWrite, |cx, scope| {
+                    self.inner.ops.btrfs_set_fslabel(cx, scope, in_data)
+                }) {
+                    Ok(()) => IoctlResult::Data(Vec::new()),
+                    Err(error) => IoctlResult::Error(error.to_errno()),
+                }
+            }
+            BTRFS_IOC_FILE_EXTENT_SAME => {
+                // Dedupe requires write access
+                if self.inner.read_only {
+                    return IoctlResult::Error(libc::EROFS);
+                }
+                if in_data.len() < BTRFS_SAME_ARGS_SIZE as usize {
+                    return IoctlResult::Error(libc::EINVAL);
+                }
+                let cx = Self::cx_for_request();
+                match self.with_request_scope(&cx, RequestOp::IoctlWrite, |cx, scope| {
+                    self.inner
+                        .ops
+                        .btrfs_file_extent_same(cx, scope, ino, in_data)
                 }) {
                     Ok(data) => IoctlResult::Data(data),
                     Err(error) => IoctlResult::Error(error.to_errno()),
@@ -6969,6 +7025,7 @@ mod tests {
         BtrfsSnapDestroyV2(Vec<u8>),
         BtrfsAddDevice(Vec<u8>),
         BtrfsRemoveDevice(Vec<u8>),
+        BtrfsForgetDevice(Vec<u8>),
         BtrfsResize(Vec<u8>),
         BtrfsDevReplace(Vec<u8>),
         Getattr(InodeNumber),
@@ -7885,6 +7942,19 @@ mod tests {
                 .lock()
                 .expect("lock ioctl calls")
                 .push(IoctlCall::BtrfsRemoveDevice(vol_args.to_vec()));
+            Ok(())
+        }
+
+        fn btrfs_forget_dev(
+            &self,
+            _cx: &Cx,
+            _scope: &mut RequestScope,
+            vol_args: &[u8],
+        ) -> ffs_error::Result<()> {
+            self.calls
+                .lock()
+                .expect("lock ioctl calls")
+                .push(IoctlCall::BtrfsForgetDevice(vol_args.to_vec()));
             Ok(())
         }
 
@@ -9749,6 +9819,65 @@ mod tests {
         let input = vec![0_u8; BTRFS_VOL_ARGS_SIZE as usize];
 
         let response = dispatch_ioctl_for_testing(&fuse, 1, 0, BTRFS_IOC_RM_DEV, &input, 0);
+        assert_eq!(response, IoctlResult::Error(libc::EROFS));
+        assert!(calls.lock().expect("lock ioctl calls").is_empty());
+    }
+
+    #[test]
+    fn dispatch_ioctl_btrfs_forget_dev_uses_write_scope() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let fuse = FrankenFuse::with_options(
+            Box::new(IoctlRecordingFs::new(0, Arc::clone(&calls))),
+            &MountOptions {
+                read_only: false,
+                ..MountOptions::default()
+            },
+        );
+        let mut input = vec![0_u8; BTRFS_VOL_ARGS_SIZE as usize];
+        input[0..10].copy_from_slice(b"/dev/loop2");
+
+        let response = dispatch_ioctl_for_testing(&fuse, 1, 0, BTRFS_IOC_FORGET_DEV, &input, 0);
+        assert_eq!(response, IoctlResult::Data(Vec::new()));
+        assert_eq!(
+            calls.lock().expect("lock ioctl calls").as_slice(),
+            &[
+                IoctlCall::Begin(RequestOp::IoctlWrite),
+                IoctlCall::BtrfsForgetDevice(input),
+                IoctlCall::End(RequestOp::IoctlWrite),
+            ]
+        );
+    }
+
+    #[test]
+    fn dispatch_ioctl_btrfs_forget_dev_rejects_short_input() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let fuse = FrankenFuse::with_options(
+            Box::new(IoctlRecordingFs::new(0, Arc::clone(&calls))),
+            &MountOptions {
+                read_only: false,
+                ..MountOptions::default()
+            },
+        );
+
+        let response = dispatch_ioctl_for_testing(
+            &fuse,
+            1,
+            0,
+            BTRFS_IOC_FORGET_DEV,
+            &[0_u8; BTRFS_VOL_ARGS_SIZE as usize - 1],
+            0,
+        );
+        assert_eq!(response, IoctlResult::Error(libc::EINVAL));
+        assert!(calls.lock().expect("lock ioctl calls").is_empty());
+    }
+
+    #[test]
+    fn dispatch_ioctl_btrfs_forget_dev_read_only_returns_erofs() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let fuse = FrankenFuse::new(Box::new(IoctlRecordingFs::new(0, Arc::clone(&calls))));
+        let input = vec![0_u8; BTRFS_VOL_ARGS_SIZE as usize];
+
+        let response = dispatch_ioctl_for_testing(&fuse, 1, 0, BTRFS_IOC_FORGET_DEV, &input, 0);
         assert_eq!(response, IoctlResult::Error(libc::EROFS));
         assert!(calls.lock().expect("lock ioctl calls").is_empty());
     }
