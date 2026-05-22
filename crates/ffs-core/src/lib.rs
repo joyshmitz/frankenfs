@@ -36,14 +36,14 @@ use ffs_btrfs::{
     BTRFS_FS_TREE_OBJECTID, BTRFS_FT_BLKDEV, BTRFS_FT_CHRDEV, BTRFS_FT_DIR, BTRFS_FT_FIFO,
     BTRFS_FT_REG_FILE, BTRFS_FT_SOCK, BTRFS_FT_SYMLINK, BTRFS_ITEM_DIR_INDEX, BTRFS_ITEM_DIR_ITEM,
     BTRFS_ITEM_EXTENT_DATA, BTRFS_ITEM_INODE_ITEM, BTRFS_ITEM_INODE_REF, BTRFS_ITEM_ROOT_ITEM,
-    BTRFS_ITEM_XATTR_ITEM, BTRFS_ROOT_TREE_OBJECTID, BTRFS_USER_SETTABLE_FSFLAGS,
-    BTRFS_USER_SETTABLE_XFLAGS, BtrfsBTree, BtrfsBlockGroupItem, BtrfsCowNode, BtrfsDirItem,
-    BtrfsExtentAllocator, BtrfsExtentData, BtrfsInodeItem, BtrfsKey, BtrfsLeafEntry,
-    BtrfsMutationError, BtrfsNodeSerializeParams, BtrfsTreeItem, InMemoryCowBtrfsTree,
-    btrfs_inode_flags_to_fsflags, btrfs_inode_flags_to_xflags, enumerate_snapshots,
-    enumerate_subvolumes, fsflags_to_btrfs_inode_flags, map_logical_to_physical, parse_dir_items,
-    parse_extent_data, parse_inode_item, parse_root_item, parse_xattr_items, walk_chunk_tree,
-    walk_tree, xflags_to_btrfs_inode_flags,
+    BTRFS_ITEM_ROOT_REF, BTRFS_ITEM_XATTR_ITEM, BTRFS_ROOT_TREE_OBJECTID,
+    BTRFS_USER_SETTABLE_FSFLAGS, BTRFS_USER_SETTABLE_XFLAGS, BtrfsBTree, BtrfsBlockGroupItem,
+    BtrfsCowNode, BtrfsDirItem, BtrfsExtentAllocator, BtrfsExtentData, BtrfsInodeItem, BtrfsKey,
+    BtrfsLeafEntry, BtrfsMutationError, BtrfsNodeSerializeParams, BtrfsTreeItem,
+    InMemoryCowBtrfsTree, btrfs_inode_flags_to_fsflags, btrfs_inode_flags_to_xflags,
+    enumerate_snapshots, enumerate_subvolumes, fsflags_to_btrfs_inode_flags,
+    map_logical_to_physical, parse_dir_items, parse_extent_data, parse_inode_item, parse_root_item,
+    parse_xattr_items, walk_chunk_tree, walk_tree, xflags_to_btrfs_inode_flags,
 };
 use ffs_error::FfsError;
 use ffs_journal::{
@@ -8920,6 +8920,23 @@ pub const BTRFS_TREE_SEARCH_ARGS_SIZE: usize = 4096;
 /// Bytes available for search headers and item payloads after the search key.
 pub const BTRFS_TREE_SEARCH_BUF_SIZE: usize =
     BTRFS_TREE_SEARCH_ARGS_SIZE - BTRFS_TREE_SEARCH_KEY_SIZE;
+/// Encoded fixed header size of `struct btrfs_ioctl_search_args_v2` on x86_64.
+pub const BTRFS_TREE_SEARCH_V2_HEADER_SIZE: usize = BTRFS_TREE_SEARCH_KEY_SIZE + 8;
+/// Encoded size of `struct btrfs_ioctl_ino_lookup_user_args` on x86_64.
+pub const BTRFS_INO_LOOKUP_USER_ARGS_SIZE: usize = 4096;
+/// Encoded size of `struct btrfs_ioctl_get_subvol_rootref_args` on x86_64.
+pub const BTRFS_SUBVOL_ROOTREF_ARGS_SIZE: usize = 4096;
+const BTRFS_VOL_NAME_MAX: usize = 255;
+const BTRFS_INO_LOOKUP_USER_NAME_OFFSET: usize = 16;
+const BTRFS_INO_LOOKUP_USER_NAME_SIZE: usize = BTRFS_VOL_NAME_MAX + 1;
+const BTRFS_INO_LOOKUP_USER_PATH_OFFSET: usize =
+    BTRFS_INO_LOOKUP_USER_NAME_OFFSET + BTRFS_INO_LOOKUP_USER_NAME_SIZE;
+const BTRFS_INO_LOOKUP_USER_PATH_SIZE: usize =
+    BTRFS_INO_LOOKUP_USER_ARGS_SIZE - BTRFS_INO_LOOKUP_USER_PATH_OFFSET;
+const BTRFS_MAX_ROOTREF_BUFFER_NUM: usize = 255;
+const BTRFS_ROOTREF_ENTRY_SIZE: usize = 16;
+const BTRFS_SUBVOL_ROOTREF_NUM_ITEMS_OFFSET: usize =
+    8 + BTRFS_MAX_ROOTREF_BUFFER_NUM * BTRFS_ROOTREF_ENTRY_SIZE;
 
 /// Map a btrfs csum_type code to the digest width in bytes advertised by
 /// `btrfs_ioctl_fs_info_args::csum_size`.  Unknown csum types are reported
@@ -9080,17 +9097,54 @@ fn btrfs_search_item_matches(
         && item_tuple <= (search.max_objectid, search.max_type, search.max_offset)
 }
 
-fn encode_btrfs_tree_search_results(
+fn parse_btrfs_tree_search_key_bytes(data: &[u8]) -> ffs_error::Result<BtrfsTreeSearchKey> {
+    if data.len() < BTRFS_TREE_SEARCH_KEY_SIZE {
+        return Err(FfsError::Io(std::io::Error::from_raw_os_error(
+            libc::EINVAL,
+        )));
+    }
+
+    let read_u64 = |offset: usize| -> u64 {
+        u64::from_ne_bytes(
+            data[offset..offset + 8]
+                .try_into()
+                .expect("validated btrfs search key u64 field"),
+        )
+    };
+    let read_u32 = |offset: usize| -> u32 {
+        u32::from_ne_bytes(
+            data[offset..offset + 4]
+                .try_into()
+                .expect("validated btrfs search key u32 field"),
+        )
+    };
+
+    Ok(BtrfsTreeSearchKey {
+        tree_id: read_u64(0),
+        min_objectid: read_u64(8),
+        max_objectid: read_u64(16),
+        min_offset: read_u64(24),
+        max_offset: read_u64(32),
+        min_transid: read_u64(40),
+        max_transid: read_u64(48),
+        min_type: read_u32(56),
+        max_type: read_u32(60),
+        nr_items: read_u32(64),
+    })
+}
+
+fn encode_btrfs_tree_search_results_with_limit(
     search: &BtrfsTreeSearchKey,
     transid: u64,
     entries: impl IntoIterator<Item = BtrfsLeafEntry>,
+    buf_limit: usize,
 ) -> ffs_error::Result<(u32, Vec<u8>)> {
-    if search.nr_items == 0 || !btrfs_search_range_is_valid(search) {
+    if search.nr_items == 0 || !btrfs_search_range_is_valid(search) || buf_limit == 0 {
         return Ok((0, Vec::new()));
     }
 
     let mut count = 0_u32;
-    let mut buf = Vec::with_capacity(BTRFS_TREE_SEARCH_BUF_SIZE);
+    let mut buf = Vec::with_capacity(buf_limit.min(BTRFS_TREE_SEARCH_BUF_SIZE));
     for entry in entries {
         if count >= search.nr_items {
             break;
@@ -9103,7 +9157,7 @@ fn encode_btrfs_tree_search_results(
         let needed = BTRFS_TREE_SEARCH_HEADER_SIZE
             .checked_add(entry.data.len())
             .ok_or_else(|| FfsError::Format("btrfs tree-search item length overflow".into()))?;
-        if buf.len().saturating_add(needed) > BTRFS_TREE_SEARCH_BUF_SIZE {
+        if buf.len().saturating_add(needed) > buf_limit {
             break;
         }
 
@@ -9116,6 +9170,19 @@ fn encode_btrfs_tree_search_results(
         count += 1;
     }
     Ok((count, buf))
+}
+
+fn encode_btrfs_tree_search_results(
+    search: &BtrfsTreeSearchKey,
+    transid: u64,
+    entries: impl IntoIterator<Item = BtrfsLeafEntry>,
+) -> ffs_error::Result<(u32, Vec<u8>)> {
+    encode_btrfs_tree_search_results_with_limit(
+        search,
+        transid,
+        entries,
+        BTRFS_TREE_SEARCH_BUF_SIZE,
+    )
 }
 
 /// Encoded size of `struct btrfs_ioctl_dev_info_args` on x86_64.
@@ -19998,41 +20065,41 @@ impl FsOps for OpenFs {
     fn btrfs_tree_search_v2(
         &self,
         cx: &Cx,
-        scope: &mut RequestScope,
+        _scope: &mut RequestScope,
         args: &[u8],
     ) -> ffs_error::Result<Vec<u8>> {
         match &self.flavor {
             FsFlavor::Ext4(_) => Err(FfsError::UnsupportedFeature(
                 "BTRFS_IOC_TREE_SEARCH_V2 is not supported on ext4 filesystems".to_owned(),
             )),
-            FsFlavor::Btrfs(_) => {
-                // search_args_v2 has same search_key at offset 0 (88 bytes),
-                // then buf_size (8 bytes), then buffer
-                if args.len() < 96 {
-                    return Err(FfsError::Io(std::io::Error::from_raw_os_error(libc::EINVAL)));
+            FsFlavor::Btrfs(sb) => {
+                if args.len() < BTRFS_TREE_SEARCH_V2_HEADER_SIZE {
+                    return Err(FfsError::Io(std::io::Error::from_raw_os_error(
+                        libc::EINVAL,
+                    )));
                 }
-                // Parse search_key from bytes
-                let key = BtrfsTreeSearchKey {
-                    tree_id: u64::from_le_bytes(args[0..8].try_into().unwrap_or([0; 8])),
-                    min_objectid: u64::from_le_bytes(args[8..16].try_into().unwrap_or([0; 8])),
-                    max_objectid: u64::from_le_bytes(args[16..24].try_into().unwrap_or([0; 8])),
-                    min_offset: u64::from_le_bytes(args[24..32].try_into().unwrap_or([0; 8])),
-                    max_offset: u64::from_le_bytes(args[32..40].try_into().unwrap_or([0; 8])),
-                    min_transid: u64::from_le_bytes(args[40..48].try_into().unwrap_or([0; 8])),
-                    max_transid: u64::from_le_bytes(args[48..56].try_into().unwrap_or([0; 8])),
-                    min_type: u32::from_le_bytes(args[56..60].try_into().unwrap_or([0; 4])),
-                    max_type: u32::from_le_bytes(args[60..64].try_into().unwrap_or([0; 4])),
-                    nr_items: u32::from_le_bytes(args[64..68].try_into().unwrap_or([0; 4])),
-                };
-                // Call existing tree_search implementation
-                let (nr_items, results) = self.btrfs_tree_search(cx, scope, key)?;
-                // Format v2 response: search_key (88) + buf_size (8) + results
-                let mut out = vec![0u8; 96 + results.len()];
-                out[0..88].copy_from_slice(&args[0..88]);
-                // Update nr_items in response
-                out[64..68].copy_from_slice(&nr_items.to_le_bytes());
-                out[88..96].copy_from_slice(&(results.len() as u64).to_le_bytes());
-                out[96..].copy_from_slice(&results);
+                let key = parse_btrfs_tree_search_key_bytes(&args[..BTRFS_TREE_SEARCH_KEY_SIZE])?;
+                let raw_buf_size = u64::from_ne_bytes(
+                    args[BTRFS_TREE_SEARCH_KEY_SIZE..BTRFS_TREE_SEARCH_V2_HEADER_SIZE]
+                        .try_into()
+                        .expect("validated btrfs tree-search-v2 buf_size field"),
+                );
+                let buf_size = usize::try_from(raw_buf_size).unwrap_or(usize::MAX);
+                let entries = self.btrfs_tree_search_entries(cx, &key)?;
+                let (nr_items, results) = encode_btrfs_tree_search_results_with_limit(
+                    &key,
+                    sb.generation,
+                    entries,
+                    buf_size,
+                )?;
+
+                let mut out = vec![0u8; BTRFS_TREE_SEARCH_V2_HEADER_SIZE + results.len()];
+                out[..BTRFS_TREE_SEARCH_KEY_SIZE]
+                    .copy_from_slice(&args[..BTRFS_TREE_SEARCH_KEY_SIZE]);
+                out[64..68].copy_from_slice(&nr_items.to_ne_bytes());
+                out[BTRFS_TREE_SEARCH_KEY_SIZE..BTRFS_TREE_SEARCH_V2_HEADER_SIZE]
+                    .copy_from_slice(&raw_buf_size.to_ne_bytes());
+                out[BTRFS_TREE_SEARCH_V2_HEADER_SIZE..].copy_from_slice(&results);
                 Ok(out)
             }
         }
@@ -20050,17 +20117,46 @@ impl FsOps for OpenFs {
                 "BTRFS_IOC_INO_LOOKUP_USER is not supported on ext4 filesystems".to_owned(),
             )),
             FsFlavor::Btrfs(_) => {
-                // Use existing ino_lookup logic
-                let (resolved_treeid, path) = self.btrfs_ino_lookup(cx, scope, treeid, dirid)?;
-                // struct btrfs_ioctl_ino_lookup_user_args = 4096 bytes
-                // Layout: dirid(8) + treeid(8) + name(256) + path(3824)
-                let mut out = vec![0u8; 4096];
-                out[0..8].copy_from_slice(&dirid.to_le_bytes());
-                out[8..16].copy_from_slice(&resolved_treeid.to_le_bytes());
-                // Copy path to offset 264 (after name field)
-                let path_offset = 264;
-                let copy_len = path.len().min(out.len() - path_offset - 1);
-                out[path_offset..path_offset + copy_len].copy_from_slice(&path[..copy_len]);
+                let root_items = self.walk_btrfs_root_tree(cx)?;
+                let name = root_items
+                    .iter()
+                    .find_map(|entry| {
+                        if entry.key.item_type == BTRFS_ITEM_ROOT_REF && entry.key.offset == treeid
+                        {
+                            let root_ref = ffs_btrfs::parse_root_ref(&entry.data).ok()?;
+                            if root_ref.dirid == dirid {
+                                Some(root_ref.name)
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    })
+                    .ok_or_else(|| {
+                        FfsError::NotFound(format!(
+                            "btrfs root ref for tree {treeid} at dirid {dirid} not found"
+                        ))
+                    })?;
+                let (_resolved_treeid, path) = self.btrfs_ino_lookup(cx, scope, 0, dirid)?;
+
+                let mut out = vec![0u8; BTRFS_INO_LOOKUP_USER_ARGS_SIZE];
+                out[0..8].copy_from_slice(&dirid.to_ne_bytes());
+                out[8..16].copy_from_slice(&treeid.to_ne_bytes());
+
+                let name_len = name.len().min(BTRFS_INO_LOOKUP_USER_NAME_SIZE - 1);
+                out[BTRFS_INO_LOOKUP_USER_NAME_OFFSET
+                    ..BTRFS_INO_LOOKUP_USER_NAME_OFFSET + name_len]
+                    .copy_from_slice(&name[..name_len]);
+
+                let path_len = path
+                    .iter()
+                    .position(|&byte| byte == 0)
+                    .map_or(path.len(), |nul| nul + 1)
+                    .min(BTRFS_INO_LOOKUP_USER_PATH_SIZE);
+                out[BTRFS_INO_LOOKUP_USER_PATH_OFFSET
+                    ..BTRFS_INO_LOOKUP_USER_PATH_OFFSET + path_len]
+                    .copy_from_slice(&path[..path_len]);
                 Ok(out)
             }
         }
@@ -20068,7 +20164,7 @@ impl FsOps for OpenFs {
 
     fn btrfs_get_subvol_rootref(
         &self,
-        _cx: &Cx,
+        cx: &Cx,
         _scope: &mut RequestScope,
         args: &[u8],
     ) -> ffs_error::Result<Vec<u8>> {
@@ -20077,15 +20173,50 @@ impl FsOps for OpenFs {
                 "BTRFS_IOC_GET_SUBVOL_ROOTREF is not supported on ext4 filesystems".to_owned(),
             )),
             FsFlavor::Btrfs(_) => {
-                // struct btrfs_ioctl_get_subvol_rootref_args = 4096 bytes
-                // Layout: min_treeid(8) + rootref[255](4080) + num_items(1) + align(7)
-                // For now return empty list (no parent references)
-                let mut out = vec![0u8; 4096];
-                // Copy min_treeid from input
-                if args.len() >= 8 {
-                    out[0..8].copy_from_slice(&args[0..8]);
+                if args.len() < BTRFS_SUBVOL_ROOTREF_ARGS_SIZE {
+                    return Err(FfsError::Io(std::io::Error::from_raw_os_error(
+                        libc::EINVAL,
+                    )));
                 }
-                // num_items = 0 at offset 4088
+                let min_treeid = u64::from_ne_bytes(
+                    args[0..8]
+                        .try_into()
+                        .expect("validated btrfs subvol-rootref min_treeid"),
+                );
+                let parent_treeid = self
+                    .btrfs_context
+                    .as_ref()
+                    .map_or(BTRFS_FS_TREE_OBJECTID, |ctx| ctx.subvol_objectid);
+                let root_items = self.walk_btrfs_root_tree(cx)?;
+                let mut rootrefs = root_items
+                    .iter()
+                    .filter_map(|entry| {
+                        if entry.key.item_type == BTRFS_ITEM_ROOT_REF
+                            && entry.key.objectid == parent_treeid
+                            && entry.key.offset >= min_treeid
+                        {
+                            let root_ref = ffs_btrfs::parse_root_ref(&entry.data).ok()?;
+                            Some((entry.key.offset, root_ref.dirid))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                rootrefs.sort_unstable();
+
+                let mut out = vec![0u8; BTRFS_SUBVOL_ROOTREF_ARGS_SIZE];
+                let take_count = rootrefs.len().min(BTRFS_MAX_ROOTREF_BUFFER_NUM);
+                let next_min_treeid = rootrefs
+                    .get(take_count.saturating_sub(1))
+                    .map_or(min_treeid, |(treeid, _)| treeid.saturating_add(1));
+                out[0..8].copy_from_slice(&next_min_treeid.to_ne_bytes());
+                for (slot, (treeid, dirid)) in rootrefs.into_iter().take(take_count).enumerate() {
+                    let offset = 8 + slot * BTRFS_ROOTREF_ENTRY_SIZE;
+                    out[offset..offset + 8].copy_from_slice(&treeid.to_ne_bytes());
+                    out[offset + 8..offset + 16].copy_from_slice(&dirid.to_ne_bytes());
+                }
+                out[BTRFS_SUBVOL_ROOTREF_NUM_ITEMS_OFFSET] =
+                    u8::try_from(take_count).expect("take_count capped at u8-compatible size");
                 Ok(out)
             }
         }

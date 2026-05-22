@@ -280,7 +280,8 @@ const BTRFS_SUBVOL_INFO_SIZE: u32 = 504;
 /// `BTRFS_IOC_TREE_SEARCH_V2` = `_IOWR(0x94, 17, struct btrfs_ioctl_search_args_v2)`.
 /// Extended tree search with variable-sized buffer.
 const BTRFS_IOC_TREE_SEARCH_V2: u32 = 0xC070_9411;
-const BTRFS_TREE_SEARCH_V2_HEADER_SIZE: u32 = BTRFS_TREE_SEARCH_KEY_SIZE as u32 + 8;
+const BTRFS_TREE_SEARCH_V2_HEADER_SIZE: usize = BTRFS_TREE_SEARCH_KEY_SIZE + 8;
+const BTRFS_TREE_SEARCH_V2_HEADER_SIZE_U32: u32 = 112;
 /// `BTRFS_IOC_INO_LOOKUP_USER` = `_IOWR(0x94, 62, struct btrfs_ioctl_ino_lookup_user_args)`.
 /// Unprivileged inode path lookup (4096 byte args).
 const BTRFS_IOC_INO_LOOKUP_USER: u32 = 0xD000_943E;
@@ -4005,14 +4006,14 @@ impl FrankenFuse {
                 }
             }
             BTRFS_IOC_TREE_SEARCH_V2 => {
-                if in_data.len() < BTRFS_TREE_SEARCH_V2_HEADER_SIZE as usize
-                    || out_size < BTRFS_TREE_SEARCH_V2_HEADER_SIZE
+                if in_data.len() < BTRFS_TREE_SEARCH_V2_HEADER_SIZE
+                    || out_size < BTRFS_TREE_SEARCH_V2_HEADER_SIZE_U32
                 {
                     return IoctlResult::Error(libc::EINVAL);
                 }
                 let cx = Self::cx_for_request();
                 match self.with_request_scope(&cx, RequestOp::IoctlRead, |cx, scope| {
-                    self.inner.ops.btrfs_tree_search_v2(cx, scope, &in_data)
+                    self.inner.ops.btrfs_tree_search_v2(cx, scope, in_data)
                 }) {
                     Ok(data) => IoctlResult::Data(data),
                     Err(error) => IoctlResult::Error(error.to_errno()),
@@ -4028,7 +4029,9 @@ impl FrankenFuse {
                 let treeid = u64::from_ne_bytes(in_data[8..16].try_into().unwrap_or([0; 8]));
                 let cx = Self::cx_for_request();
                 match self.with_request_scope(&cx, RequestOp::IoctlRead, |cx, scope| {
-                    self.inner.ops.btrfs_ino_lookup_user(cx, scope, treeid, dirid)
+                    self.inner
+                        .ops
+                        .btrfs_ino_lookup_user(cx, scope, treeid, dirid)
                 }) {
                     Ok(data) => IoctlResult::Data(data),
                     Err(error) => IoctlResult::Error(error.to_errno()),
@@ -4042,7 +4045,7 @@ impl FrankenFuse {
                 }
                 let cx = Self::cx_for_request();
                 match self.with_request_scope(&cx, RequestOp::IoctlRead, |cx, scope| {
-                    self.inner.ops.btrfs_get_subvol_rootref(cx, scope, &in_data)
+                    self.inner.ops.btrfs_get_subvol_rootref(cx, scope, in_data)
                 }) {
                     Ok(data) => IoctlResult::Data(data),
                     Err(error) => IoctlResult::Error(error.to_errno()),
@@ -8367,6 +8370,25 @@ mod tests {
         buf
     }
 
+    fn btrfs_tree_search_v2_in(key: BtrfsTreeSearchKey, buf_size: u64) -> Vec<u8> {
+        let mut buf = btrfs_tree_search_in(key);
+        buf.extend_from_slice(&buf_size.to_ne_bytes());
+        buf
+    }
+
+    fn btrfs_ino_lookup_user_in(dirid: u64, treeid: u64) -> Vec<u8> {
+        let mut buf = vec![0_u8; BTRFS_INO_LOOKUP_USER_SIZE as usize];
+        buf[0..8].copy_from_slice(&dirid.to_ne_bytes());
+        buf[8..16].copy_from_slice(&treeid.to_ne_bytes());
+        buf
+    }
+
+    fn btrfs_subvol_rootref_in(min_treeid: u64) -> Vec<u8> {
+        let mut buf = vec![0_u8; BTRFS_SUBVOL_ROOTREF_SIZE as usize];
+        buf[0..8].copy_from_slice(&min_treeid.to_ne_bytes());
+        buf
+    }
+
     fn btrfs_defrag_range_in(start: u64, len: u64) -> Vec<u8> {
         let mut buf = vec![0_u8; BTRFS_DEFRAG_RANGE_ARGS_SIZE as usize];
         buf[0..8].copy_from_slice(&start.to_le_bytes());
@@ -8651,6 +8673,140 @@ mod tests {
                 IoctlCall::End(RequestOp::IoctlRead),
             ]
         );
+    }
+
+    #[test]
+    fn dispatch_ioctl_btrfs_tree_search_v2_rejects_short_input_or_output() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let fuse = FrankenFuse::new(Box::new(IoctlRecordingFs::new(0, Arc::clone(&calls))));
+        let search_key = BtrfsTreeSearchKey {
+            tree_id: 5,
+            min_objectid: 0,
+            max_objectid: u64::MAX,
+            min_offset: 0,
+            max_offset: u64::MAX,
+            min_transid: 0,
+            max_transid: u64::MAX,
+            min_type: 0,
+            max_type: u32::MAX,
+            nr_items: 1,
+        };
+        let input = btrfs_tree_search_v2_in(search_key, 4096);
+
+        let short_input = dispatch_ioctl_for_testing(
+            &fuse,
+            1,
+            0,
+            BTRFS_IOC_TREE_SEARCH_V2,
+            &input[..BTRFS_TREE_SEARCH_V2_HEADER_SIZE - 1],
+            BTRFS_TREE_SEARCH_V2_HEADER_SIZE_U32,
+        );
+        assert_eq!(short_input, IoctlResult::Error(libc::EINVAL));
+
+        let short_output = dispatch_ioctl_for_testing(
+            &fuse,
+            1,
+            0,
+            BTRFS_IOC_TREE_SEARCH_V2,
+            &input,
+            BTRFS_TREE_SEARCH_V2_HEADER_SIZE_U32 - 1,
+        );
+        assert_eq!(short_output, IoctlResult::Error(libc::EINVAL));
+        assert!(calls.lock().expect("lock ioctl calls").is_empty());
+    }
+
+    #[test]
+    fn dispatch_ioctl_btrfs_tree_search_v2_valid_request_reaches_backend() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let fuse = FrankenFuse::new(Box::new(IoctlRecordingFs::new(0, Arc::clone(&calls))));
+        let input = btrfs_tree_search_v2_in(
+            BtrfsTreeSearchKey {
+                tree_id: 5,
+                min_objectid: 0,
+                max_objectid: u64::MAX,
+                min_offset: 0,
+                max_offset: u64::MAX,
+                min_transid: 0,
+                max_transid: u64::MAX,
+                min_type: 0,
+                max_type: u32::MAX,
+                nr_items: 1,
+            },
+            4096,
+        );
+
+        let response = dispatch_ioctl_for_testing(
+            &fuse,
+            1,
+            0,
+            BTRFS_IOC_TREE_SEARCH_V2,
+            &input,
+            BTRFS_TREE_SEARCH_V2_HEADER_SIZE_U32,
+        );
+        assert_eq!(response, IoctlResult::Error(libc::EOPNOTSUPP));
+        assert_eq!(
+            calls.lock().expect("lock ioctl calls").as_slice(),
+            &[
+                IoctlCall::Begin(RequestOp::IoctlRead),
+                IoctlCall::End(RequestOp::IoctlRead),
+            ]
+        );
+    }
+
+    #[test]
+    fn dispatch_ioctl_btrfs_ino_lookup_user_rejects_short_input_or_output() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let fuse = FrankenFuse::new(Box::new(IoctlRecordingFs::new(0, Arc::clone(&calls))));
+        let input = btrfs_ino_lookup_user_in(256, 257);
+
+        let short_input = dispatch_ioctl_for_testing(
+            &fuse,
+            1,
+            0,
+            BTRFS_IOC_INO_LOOKUP_USER,
+            &input[..BTRFS_INO_LOOKUP_USER_SIZE as usize - 1],
+            BTRFS_INO_LOOKUP_USER_SIZE,
+        );
+        assert_eq!(short_input, IoctlResult::Error(libc::EINVAL));
+
+        let short_output = dispatch_ioctl_for_testing(
+            &fuse,
+            1,
+            0,
+            BTRFS_IOC_INO_LOOKUP_USER,
+            &input,
+            BTRFS_INO_LOOKUP_USER_SIZE - 1,
+        );
+        assert_eq!(short_output, IoctlResult::Error(libc::EINVAL));
+        assert!(calls.lock().expect("lock ioctl calls").is_empty());
+    }
+
+    #[test]
+    fn dispatch_ioctl_btrfs_get_subvol_rootref_rejects_short_input_or_output() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let fuse = FrankenFuse::new(Box::new(IoctlRecordingFs::new(0, Arc::clone(&calls))));
+        let input = btrfs_subvol_rootref_in(256);
+
+        let short_input = dispatch_ioctl_for_testing(
+            &fuse,
+            1,
+            0,
+            BTRFS_IOC_GET_SUBVOL_ROOTREF,
+            &input[..BTRFS_SUBVOL_ROOTREF_SIZE as usize - 1],
+            BTRFS_SUBVOL_ROOTREF_SIZE,
+        );
+        assert_eq!(short_input, IoctlResult::Error(libc::EINVAL));
+
+        let short_output = dispatch_ioctl_for_testing(
+            &fuse,
+            1,
+            0,
+            BTRFS_IOC_GET_SUBVOL_ROOTREF,
+            &input,
+            BTRFS_SUBVOL_ROOTREF_SIZE - 1,
+        );
+        assert_eq!(short_output, IoctlResult::Error(libc::EINVAL));
+        assert!(calls.lock().expect("lock ioctl calls").is_empty());
     }
 
     #[test]
