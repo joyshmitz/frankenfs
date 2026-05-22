@@ -1129,4 +1129,30 @@ mod tests {
         };
         assert!(agg.imbalance_ratio().is_infinite());
     }
+
+    // ── CoreMetrics default and snapshot tests ──────────────────────────────
+
+    #[test]
+    fn core_metrics_default_snapshot_all_zero() {
+        let m = CoreMetrics::default();
+        let snap = m.snapshot();
+        assert_eq!(snap.requests, 0);
+        assert_eq!(snap.pending_requests, 0);
+        assert_eq!(snap.cache_hits, 0);
+        assert_eq!(snap.cache_misses, 0);
+        assert_eq!(snap.stolen_from, 0);
+        assert_eq!(snap.stolen_to, 0);
+    }
+
+    #[test]
+    fn core_metrics_new_equals_default() {
+        let from_new = CoreMetrics::new();
+        let from_default = CoreMetrics::default();
+        let snap_new = from_new.snapshot();
+        let snap_default = from_default.snapshot();
+        assert_eq!(snap_new.requests, snap_default.requests);
+        assert_eq!(snap_new.pending_requests, snap_default.pending_requests);
+        assert_eq!(snap_new.cache_hits, snap_default.cache_hits);
+        assert_eq!(snap_new.cache_misses, snap_default.cache_misses);
+    }
 }
