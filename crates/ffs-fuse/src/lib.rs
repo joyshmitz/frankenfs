@@ -7763,6 +7763,17 @@ mod tests {
     }
 
     #[test]
+    fn to_fuser_file_type_all_variants() {
+        assert_eq!(to_fuser_file_type(FfsFileType::RegularFile), FileType::RegularFile);
+        assert_eq!(to_fuser_file_type(FfsFileType::Directory), FileType::Directory);
+        assert_eq!(to_fuser_file_type(FfsFileType::Symlink), FileType::Symlink);
+        assert_eq!(to_fuser_file_type(FfsFileType::BlockDevice), FileType::BlockDevice);
+        assert_eq!(to_fuser_file_type(FfsFileType::CharDevice), FileType::CharDevice);
+        assert_eq!(to_fuser_file_type(FfsFileType::Fifo), FileType::NamedPipe);
+        assert_eq!(to_fuser_file_type(FfsFileType::Socket), FileType::Socket);
+    }
+
+    #[test]
     fn mount_options_default_is_read_only() {
         let opts = MountOptions::default();
         assert!(opts.read_only);
