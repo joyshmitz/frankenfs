@@ -7306,6 +7306,30 @@ mod tests {
         assert_eq!(value, Some("my=fs"));
     }
 
+    #[test]
+    fn split_mount_option_empty_value() {
+        let (key, value) = split_mount_option("opt=").unwrap();
+        assert_eq!(key, "opt");
+        assert_eq!(value, Some(""));
+    }
+
+    #[test]
+    fn require_mount_option_value_returns_value() {
+        assert_eq!(require_mount_option_value("opt", Some("val")).unwrap(), "val");
+    }
+
+    #[test]
+    fn require_mount_option_value_rejects_none() {
+        let err = require_mount_option_value("opt", None).unwrap_err();
+        assert!(matches!(err, MountOptionParseError::MissingValue { .. }));
+    }
+
+    #[test]
+    fn require_mount_option_value_rejects_empty() {
+        let err = require_mount_option_value("opt", Some("")).unwrap_err();
+        assert!(matches!(err, MountOptionParseError::InvalidValue { .. }));
+    }
+
     // ── Ioctl parsing tests ─────────────────────────────────────────────────
 
     #[test]
