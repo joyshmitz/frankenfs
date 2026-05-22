@@ -7499,8 +7499,9 @@ mod tests {
         RepairCommandOptions, RepairFlags, WRITEBACK_CACHE_KILL_SWITCH_ENV,
         btrfs_chunk_type_flag_names, build_ext4_group_info, build_fsck_output, build_info_output,
         build_mount_open_options, choose_btrfs_scrub_block_size, count_blocks_at_severity_or_higher,
-        ext4_appears_clean_state,
-        ext4_mount_replay_mode, format_ratio_thousandths, log_mount_runtime_rejected,
+        ext4_appears_clean_state, ext4_state_flag_names,
+        ext4_mount_replay_mode, format_ratio_thousandths, format_uuid,
+        btrfs_checksum_type_name, log_mount_runtime_rejected,
         log_mount_runtime_selected, mount_cmd, mount_operation_id, open_filesystem_for_mount,
         parse_btrfs_mount_selection, read_ext4_group_desc_from_path, read_ext4_inode_from_path,
         read_file_region, start_mount_background_scrub, summarize_repair_staleness,
@@ -14871,6 +14872,114 @@ mod tests {
         assert_eq!(summary.fresh, 0);
         assert_eq!(summary.stale, 1);
         assert_eq!(summary.untracked, 0);
+    }
+
+    // ── ext4_state_flag_names: filesystem state display ───────────────────
+
+    #[test]
+    fn ext4_state_flag_names_valid() {
+        let names = ext4_state_flag_names(0x0001);
+        assert_eq!(names, vec!["VALID_FS"]);
+    }
+
+    #[test]
+    fn ext4_state_flag_names_error() {
+        let names = ext4_state_flag_names(0x0002);
+        assert_eq!(names, vec!["ERROR_FS"]);
+    }
+
+    #[test]
+    fn ext4_state_flag_names_multiple() {
+        let names = ext4_state_flag_names(0x0007); // VALID | ERROR | ORPHAN
+        assert_eq!(names, vec!["VALID_FS", "ERROR_FS", "ORPHAN_FS"]);
+    }
+
+    #[test]
+    fn ext4_state_flag_names_zero() {
+        let names = ext4_state_flag_names(0);
+        assert_eq!(names, vec!["NONE"]);
+    }
+
+    #[test]
+    fn ext4_state_flag_names_unknown() {
+        let names = ext4_state_flag_names(0x0008);
+        assert_eq!(names, vec!["UNKNOWN(0x0008)"]);
+    }
+
+    // ── btrfs_chunk_type_flag_names: chunk type display ────────────────────
+
+    #[test]
+    fn btrfs_chunk_type_flag_names_data() {
+        let names = btrfs_chunk_type_flag_names(1);
+        assert_eq!(names, vec!["DATA"]);
+    }
+
+    #[test]
+    fn btrfs_chunk_type_flag_names_system() {
+        let names = btrfs_chunk_type_flag_names(2);
+        assert_eq!(names, vec!["SYSTEM"]);
+    }
+
+    #[test]
+    fn btrfs_chunk_type_flag_names_metadata() {
+        let names = btrfs_chunk_type_flag_names(4);
+        assert_eq!(names, vec!["METADATA"]);
+    }
+
+    #[test]
+    fn btrfs_chunk_type_flag_names_combined() {
+        let names = btrfs_chunk_type_flag_names(7); // DATA | SYSTEM | METADATA
+        assert_eq!(names, vec!["DATA", "SYSTEM", "METADATA"]);
+    }
+
+    #[test]
+    fn btrfs_chunk_type_flag_names_zero() {
+        let names = btrfs_chunk_type_flag_names(0);
+        assert_eq!(names, vec!["NONE"]);
+    }
+
+    // ── btrfs_checksum_type_name: checksum type display ──────────────────
+
+    #[test]
+    fn btrfs_checksum_type_name_crc32c() {
+        assert_eq!(btrfs_checksum_type_name(ffs_types::BTRFS_CSUM_TYPE_CRC32C), "crc32c");
+    }
+
+    #[test]
+    fn btrfs_checksum_type_name_unknown() {
+        assert_eq!(btrfs_checksum_type_name(99), "unknown(99)");
+    }
+
+    // ── format_uuid: UUID display helper ──────────────────────────────────
+
+    #[test]
+    fn format_uuid_all_zeros() {
+        let uuid = [0u8; 16];
+        assert_eq!(
+            format_uuid(&uuid),
+            "00000000-0000-0000-0000-000000000000"
+        );
+    }
+
+    #[test]
+    fn format_uuid_all_ff() {
+        let uuid = [0xffu8; 16];
+        assert_eq!(
+            format_uuid(&uuid),
+            "ffffffff-ffff-ffff-ffff-ffffffffffff"
+        );
+    }
+
+    #[test]
+    fn format_uuid_typical() {
+        let uuid = [
+            0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0,
+            0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
+        ];
+        assert_eq!(
+            format_uuid(&uuid),
+            "12345678-9abc-def0-1122-334455667788"
+        );
     }
 
     // ── format_ratio_thousandths: metrics display helper ──────────────────
