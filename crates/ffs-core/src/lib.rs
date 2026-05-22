@@ -19659,6 +19659,24 @@ impl FsOps for OpenFs {
         }
     }
 
+    fn btrfs_assign_qgroup(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _assign: u64,
+        _src: u64,
+        _dst: u64,
+    ) -> ffs_error::Result<()> {
+        match &self.flavor {
+            FsFlavor::Ext4(_) => Err(FfsError::UnsupportedFeature(
+                "BTRFS_IOC_QGROUP_ASSIGN is not supported on ext4 filesystems".to_owned(),
+            )),
+            FsFlavor::Btrfs(_) => Err(FfsError::UnsupportedFeature(
+                "btrfs qgroup assign is not implemented".to_owned(),
+            )),
+        }
+    }
+
     fn set_fs_label(
         &self,
         cx: &Cx,
