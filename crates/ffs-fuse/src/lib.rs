@@ -17632,6 +17632,41 @@ mod tests {
         assert!(has_three);
     }
 
+    #[test]
+    fn access_predictor_invalidate_inode_removes_entry() {
+        let predictor = AccessPredictor::default();
+        let size = 4096_u32;
+        let ino = InodeNumber(42);
+
+        predictor.record_read(ino, 0, size);
+        predictor.record_read(ino, u64::from(size), size);
+
+        let has_before = {
+            let guard = predictor.state.lock().unwrap();
+            guard.history.contains_key(&ino.0)
+        };
+        assert!(has_before);
+
+        predictor.invalidate_inode(ino);
+
+        let has_after = {
+            let guard = predictor.state.lock().unwrap();
+            guard.history.contains_key(&ino.0)
+        };
+        assert!(!has_after);
+    }
+
+    #[test]
+    fn access_predictor_invalidate_nonexistent_is_noop() {
+        let predictor = AccessPredictor::default();
+        predictor.invalidate_inode(InodeNumber(999));
+        let count = {
+            let guard = predictor.state.lock().unwrap();
+            guard.history.len()
+        };
+        assert_eq!(count, 0);
+    }
+
     // ── Concurrent AccessPredictor stress ────────────────────────────────
 
     #[test]
