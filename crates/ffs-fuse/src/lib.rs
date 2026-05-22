@@ -215,6 +215,14 @@ const BTRFS_SUPPORTED_FEATURE_FLAGS_SIZE: u32 = 72;
 /// Input: 16-byte header with space_slots count. Output: header + space_info array.
 const BTRFS_IOC_SPACE_INFO: u32 = 0xC010_9414;
 const BTRFS_SPACE_ARGS_HEADER_SIZE: u32 = 16;
+/// `BTRFS_IOC_INO_PATHS` = `_IOWR(0x94, 35, struct btrfs_ioctl_ino_path_args)`.
+/// Given an inode number, returns all file paths that reference it.
+const BTRFS_IOC_INO_PATHS: u32 = 0xC038_9423;
+const BTRFS_INO_PATH_ARGS_SIZE: u32 = 56;
+/// `BTRFS_IOC_LOGICAL_INO` = `_IOWR(0x94, 36, struct btrfs_ioctl_logical_ino_args)`.
+/// Given a logical byte address, returns inodes that reference it.
+const BTRFS_IOC_LOGICAL_INO: u32 = 0xC038_9424;
+const BTRFS_LOGICAL_INO_ARGS_SIZE: u32 = 56;
 const FSCRYPT_POLICY_V1_SIZE: usize = 12;
 #[cfg(test)]
 const FSCRYPT_POLICY_V2_VERSION: u8 = 2;
@@ -3696,6 +3704,36 @@ impl FrankenFuse {
                 let cx = Self::cx_for_request();
                 match self.with_request_scope(&cx, RequestOp::IoctlRead, |cx, scope| {
                     self.inner.ops.get_btrfs_space_info(cx, scope, space_slots)
+                }) {
+                    Ok(data) => IoctlResult::Data(data),
+                    Err(error) => IoctlResult::Error(error.to_errno()),
+                }
+            }
+            BTRFS_IOC_INO_PATHS => {
+                // Input: 56-byte struct with inum, size, reserved, fspath pointer
+                // For now, return EOPNOTSUPP as implementing backref resolution is complex
+                if in_data.len() < BTRFS_INO_PATH_ARGS_SIZE as usize {
+                    return IoctlResult::Error(libc::EINVAL);
+                }
+                let inum = u64::from_le_bytes(in_data[0..8].try_into().unwrap_or([0; 8]));
+                let cx = Self::cx_for_request();
+                match self.with_request_scope(&cx, RequestOp::IoctlRead, |cx, scope| {
+                    self.inner.ops.get_btrfs_ino_paths(cx, scope, inum)
+                }) {
+                    Ok(data) => IoctlResult::Data(data),
+                    Err(error) => IoctlResult::Error(error.to_errno()),
+                }
+            }
+            BTRFS_IOC_LOGICAL_INO => {
+                // Input: 56-byte struct with logical addr, size, reserved, flags, inodes pointer
+                // For now, return EOPNOTSUPP as implementing logical-to-inode is complex
+                if in_data.len() < BTRFS_LOGICAL_INO_ARGS_SIZE as usize {
+                    return IoctlResult::Error(libc::EINVAL);
+                }
+                let logical = u64::from_le_bytes(in_data[0..8].try_into().unwrap_or([0; 8]));
+                let cx = Self::cx_for_request();
+                match self.with_request_scope(&cx, RequestOp::IoctlRead, |cx, scope| {
+                    self.inner.ops.get_btrfs_logical_ino(cx, scope, logical)
                 }) {
                     Ok(data) => IoctlResult::Data(data),
                     Err(error) => IoctlResult::Error(error.to_errno()),

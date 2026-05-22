@@ -1443,6 +1443,40 @@ pub trait FsOps: Send + Sync {
         ))
     }
 
+    /// Get paths referencing an inode for `BTRFS_IOC_INO_PATHS`.
+    ///
+    /// Given an inode number, walks back-references to find all file paths.
+    /// Returns serialized path data matching the kernel's output format.
+    ///
+    /// Non-btrfs backends must return `FfsError::UnsupportedFeature`.
+    fn get_btrfs_ino_paths(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _inum: u64,
+    ) -> ffs_error::Result<Vec<u8>> {
+        Err(FfsError::UnsupportedFeature(
+            "get_btrfs_ino_paths is not supported by this backend".to_owned(),
+        ))
+    }
+
+    /// Get inodes referencing a logical address for `BTRFS_IOC_LOGICAL_INO`.
+    ///
+    /// Given a logical byte address, finds inodes with extents covering it.
+    /// Returns serialized inode data matching the kernel's output format.
+    ///
+    /// Non-btrfs backends must return `FfsError::UnsupportedFeature`.
+    fn get_btrfs_logical_ino(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _logical: u64,
+    ) -> ffs_error::Result<Vec<u8>> {
+        Err(FfsError::UnsupportedFeature(
+            "get_btrfs_logical_ino is not supported by this backend".to_owned(),
+        ))
+    }
+
     /// Set filesystem-specific inode flags (ext4 `EXT4_IOC_SETFLAGS`).
     ///
     /// Updates the raw `i_flags` field. The implementation should validate

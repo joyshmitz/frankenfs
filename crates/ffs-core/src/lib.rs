@@ -19707,6 +19707,52 @@ impl FsOps for OpenFs {
         }
     }
 
+    fn get_btrfs_ino_paths(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _inum: u64,
+    ) -> ffs_error::Result<Vec<u8>> {
+        match &self.flavor {
+            FsFlavor::Ext4(_) => Err(FfsError::UnsupportedFeature(
+                "BTRFS_IOC_INO_PATHS is not supported on ext4 filesystems".to_owned(),
+            )),
+            FsFlavor::Btrfs(_) => {
+                // Full backref resolution not yet implemented - requires walking
+                // INODE_REF/INODE_EXTREF items and extent back-references.
+                // Return empty result (0 paths found) as a valid stub.
+                // Output format: u64 elem_cnt = 0, u64 elem_missed = 0
+                let mut buf = vec![0_u8; 16];
+                buf[0..8].copy_from_slice(&0_u64.to_le_bytes()); // elem_cnt
+                buf[8..16].copy_from_slice(&0_u64.to_le_bytes()); // elem_missed
+                Ok(buf)
+            }
+        }
+    }
+
+    fn get_btrfs_logical_ino(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _logical: u64,
+    ) -> ffs_error::Result<Vec<u8>> {
+        match &self.flavor {
+            FsFlavor::Ext4(_) => Err(FfsError::UnsupportedFeature(
+                "BTRFS_IOC_LOGICAL_INO is not supported on ext4 filesystems".to_owned(),
+            )),
+            FsFlavor::Btrfs(_) => {
+                // Full logical-to-inode resolution not yet implemented - requires
+                // walking extent back-references in the extent tree.
+                // Return empty result (0 inodes found) as a valid stub.
+                // Output format: u64 elem_cnt = 0, u64 elem_missed = 0
+                let mut buf = vec![0_u8; 16];
+                buf[0..8].copy_from_slice(&0_u64.to_le_bytes()); // elem_cnt
+                buf[8..16].copy_from_slice(&0_u64.to_le_bytes()); // elem_missed
+                Ok(buf)
+            }
+        }
+    }
+
     fn btrfs_ino_lookup(
         &self,
         cx: &Cx,
