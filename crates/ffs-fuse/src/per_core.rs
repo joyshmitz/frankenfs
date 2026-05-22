@@ -1028,4 +1028,36 @@ mod tests {
         };
         assert_eq!(cfg.normalized_steal_threshold(), PerCoreConfig::DEFAULT_STEAL_THRESHOLD);
     }
+
+    // ── resolved_cores edge cases ───────────────────────────────────────────
+
+    #[test]
+    fn resolved_cores_explicit_value() {
+        let cfg = PerCoreConfig {
+            num_cores: 8,
+            ..Default::default()
+        };
+        assert_eq!(cfg.resolved_cores(), 8);
+    }
+
+    #[test]
+    fn resolved_cores_zero_uses_parallelism() {
+        let cfg = PerCoreConfig {
+            num_cores: 0,
+            ..Default::default()
+        };
+        let resolved = cfg.resolved_cores();
+        // When num_cores is 0, resolved_cores() uses available_parallelism
+        // capped at 16, or falls back to 4.
+        assert!(resolved >= 1 && resolved <= 16);
+    }
+
+    #[test]
+    fn resolved_cores_one_is_valid() {
+        let cfg = PerCoreConfig {
+            num_cores: 1,
+            ..Default::default()
+        };
+        assert_eq!(cfg.resolved_cores(), 1);
+    }
 }
