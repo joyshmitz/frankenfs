@@ -7941,6 +7941,59 @@ mod tests {
         assert_eq!(cfg.unmount_timeout, Duration::from_secs(30));
     }
 
+    fn make_test_attr(kind: FfsFileType, size: u64) -> InodeAttr {
+        InodeAttr {
+            ino: InodeNumber(1),
+            size,
+            blocks: 1,
+            atime: SystemTime::UNIX_EPOCH,
+            mtime: SystemTime::UNIX_EPOCH,
+            ctime: SystemTime::UNIX_EPOCH,
+            crtime: SystemTime::UNIX_EPOCH,
+            kind,
+            perm: 0o644,
+            nlink: 1,
+            uid: 1000,
+            gid: 1000,
+            rdev: 0,
+            blksize: 4096,
+            generation: 1,
+        }
+    }
+
+    #[test]
+    fn validate_move_ext_source_accepts_valid_file() {
+        let attr = make_test_attr(FfsFileType::RegularFile, 4096);
+        assert!(FrankenFuse::validate_move_ext_source(&attr, EXT4_EXTENTS_FL).is_ok());
+    }
+
+    #[test]
+    fn validate_move_ext_source_rejects_directory() {
+        let attr = make_test_attr(FfsFileType::Directory, 4096);
+        assert_eq!(
+            FrankenFuse::validate_move_ext_source(&attr, EXT4_EXTENTS_FL),
+            Err(libc::EINVAL)
+        );
+    }
+
+    #[test]
+    fn validate_move_ext_source_rejects_empty_file() {
+        let attr = make_test_attr(FfsFileType::RegularFile, 0);
+        assert_eq!(
+            FrankenFuse::validate_move_ext_source(&attr, EXT4_EXTENTS_FL),
+            Err(libc::EINVAL)
+        );
+    }
+
+    #[test]
+    fn validate_move_ext_source_rejects_non_extent_file() {
+        let attr = make_test_attr(FfsFileType::RegularFile, 4096);
+        assert_eq!(
+            FrankenFuse::validate_move_ext_source(&attr, 0),
+            Err(libc::EOPNOTSUPP)
+        );
+    }
+
     #[test]
     fn build_mount_options_includes_ro_when_read_only() {
         let opts = MountOptions::default();
