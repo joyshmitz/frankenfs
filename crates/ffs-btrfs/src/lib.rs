@@ -371,6 +371,22 @@ pub struct BtrfsInodeItem {
     pub gid: u32,
     pub mode: u32,
     pub rdev: u64,
+    /// Inode flags from kernel `btrfs_inode_item.flags` at offset 64.
+    ///
+    /// Common flags (from `fs/btrfs/btrfs_inode.h`):
+    /// - `BTRFS_INODE_NODATASUM` (0x1): do not checksum data
+    /// - `BTRFS_INODE_NODATACOW` (0x2): no COW for data
+    /// - `BTRFS_INODE_READONLY` (0x4): read-only inode
+    /// - `BTRFS_INODE_NOCOMPRESS` (0x8): do not compress
+    /// - `BTRFS_INODE_PREALLOC` (0x10): has preallocated extents
+    /// - `BTRFS_INODE_SYNC` (0x20): sync on write
+    /// - `BTRFS_INODE_IMMUTABLE` (0x40): immutable
+    /// - `BTRFS_INODE_APPEND` (0x80): append-only
+    /// - `BTRFS_INODE_NODUMP` (0x100): do not dump
+    /// - `BTRFS_INODE_NOATIME` (0x200): no atime updates
+    /// - `BTRFS_INODE_DIRSYNC` (0x400): sync dir changes
+    /// - `BTRFS_INODE_COMPRESS` (0x800): compress data
+    pub flags: u64,
     pub atime_sec: u64,
     pub atime_nsec: u32,
     pub ctime_sec: u64,
@@ -385,7 +401,7 @@ impl BtrfsInodeItem {
     /// Serialize to the 160-byte on-disk representation.
     ///
     /// Layout matches the kernel `btrfs_inode_item` struct. Fields we do not
-    /// track (block_group, sequence, flags, reserved) are zeroed.
+    /// track (block_group, sequence, reserved) are zeroed.
     #[must_use]
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut buf = vec![0u8; 160];
@@ -399,7 +415,7 @@ impl BtrfsInodeItem {
         buf[48..52].copy_from_slice(&self.gid.to_le_bytes());
         buf[52..56].copy_from_slice(&self.mode.to_le_bytes());
         buf[56..64].copy_from_slice(&self.rdev.to_le_bytes());
-        // flags at 64..72 (zero)
+        buf[64..72].copy_from_slice(&self.flags.to_le_bytes());
         // sequence at 72..80 (zero)
         // reserved[4] at 80..112 (zero)
         buf[112..120].copy_from_slice(&self.atime_sec.to_le_bytes());
@@ -1088,6 +1104,7 @@ pub fn parse_inode_item(data: &[u8]) -> Result<BtrfsInodeItem, ParseError> {
         gid: read_u32(data, 48, "inode_item.gid")?,
         mode: read_u32(data, 52, "inode_item.mode")?,
         rdev: read_u64(data, 56, "inode_item.rdev")?,
+        flags: read_u64(data, 64, "inode_item.flags")?,
         atime_sec: read_u64(data, 112, "inode_item.atime_sec")?,
         atime_nsec,
         ctime_sec: read_u64(data, 124, "inode_item.ctime_sec")?,
@@ -7300,6 +7317,7 @@ mod tests {
             gid: u32::MAX,
             mode: u32::MAX,
             rdev: u64::MAX,
+            flags: u64::MAX,
             atime_sec: u64::MAX,
             atime_nsec: 999_999_999,
             ctime_sec: u64::MAX,
@@ -8413,6 +8431,7 @@ mod tests {
             gid: 1000,
             mode: 0o100_644,
             rdev: 0,
+            flags: 0x801, // BTRFS_INODE_NODATASUM | BTRFS_INODE_COMPRESS
             atime_sec: 1_700_000_000,
             atime_nsec: 123_456_789,
             ctime_sec: 1_700_000_001,
@@ -8432,6 +8451,7 @@ mod tests {
         assert_eq!(parsed.gid, original.gid);
         assert_eq!(parsed.mode, original.mode);
         assert_eq!(parsed.rdev, original.rdev);
+        assert_eq!(parsed.flags, original.flags);
         assert_eq!(parsed.atime_sec, original.atime_sec);
         assert_eq!(parsed.atime_nsec, original.atime_nsec);
         assert_eq!(parsed.ctime_sec, original.ctime_sec);
@@ -8466,6 +8486,7 @@ mod tests {
             gid: 0x6666_6666,
             mode: 0o100_644, // 0x000081A4
             rdev: 0x7777_7777_7777_7777,
+            flags: 0, // no flags set
             atime_sec: 0x8888_8888_8888_8888,
             atime_nsec: 100_000_001, // 0x05F5E101
             ctime_sec: 0xAAAA_AAAA_AAAA_AAAA,
@@ -8906,6 +8927,7 @@ mod tests {
             gid: 0,
             mode: 0o100_000,
             rdev: 0,
+            flags: 0,
             atime_sec: 0,
             atime_nsec: 0,
             ctime_sec: 0,
@@ -8920,6 +8942,7 @@ mod tests {
         assert_eq!(parsed.size, 0);
         assert_eq!(parsed.nlink, 1);
         assert_eq!(parsed.mode, 0o100_000);
+        assert_eq!(parsed.flags, 0);
     }
 
     #[test]
@@ -8933,6 +8956,7 @@ mod tests {
             gid: u32::MAX,
             mode: u32::MAX,
             rdev: u64::MAX,
+            flags: u64::MAX,
             atime_sec: u64::MAX,
             atime_nsec: 999_999_999,
             ctime_sec: u64::MAX,
@@ -8970,6 +8994,7 @@ mod tests {
             gid in proptest::prelude::any::<u32>(),
             mode in proptest::prelude::any::<u32>(),
             rdev in proptest::prelude::any::<u64>(),
+            flags in proptest::prelude::any::<u64>(),
             atime_sec in proptest::prelude::any::<u64>(),
             atime_nsec in 0_u32..1_000_000_000,
             ctime_sec in proptest::prelude::any::<u64>(),
@@ -8988,6 +9013,7 @@ mod tests {
                 gid,
                 mode,
                 rdev,
+                flags,
                 atime_sec,
                 atime_nsec,
                 ctime_sec,
@@ -9021,6 +9047,7 @@ mod tests {
             gid in proptest::prelude::any::<u32>(),
             mode in proptest::prelude::any::<u32>(),
             rdev in proptest::prelude::any::<u64>(),
+            flags in proptest::prelude::any::<u64>(),
             atime_sec in proptest::prelude::any::<u64>(),
             atime_nsec in 0_u32..1_000_000_000,
             ctime_sec in proptest::prelude::any::<u64>(),
@@ -9039,6 +9066,7 @@ mod tests {
                 gid,
                 mode,
                 rdev,
+                flags,
                 atime_sec,
                 atime_nsec,
                 ctime_sec,
