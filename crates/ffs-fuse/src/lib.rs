@@ -3639,6 +3639,7 @@ impl FrankenFuse {
 
                 let cx = Self::cx_for_request();
                 let mut donor_ino = None;
+                let mut donor_registered = false;
                 match self.with_request_scope(&cx, RequestOp::IoctlWrite, |cx, scope| {
                     let attr = self.inner.ops.getattr(cx, scope, InodeNumber(ino))?;
                     let flags = self
@@ -3654,6 +3655,7 @@ impl FrankenFuse {
                     self.inner
                         .ops
                         .register_move_ext_donor_fd(donor_fd, resolved_donor)?;
+                    donor_registered = true;
                     let moved_len = self.inner.ops.move_ext(
                         cx,
                         scope,
@@ -3664,6 +3666,7 @@ impl FrankenFuse {
                         len,
                     )?;
                     self.inner.ops.unregister_move_ext_donor_fd(donor_fd);
+                    donor_registered = false;
                     self.inner.ops.commit_request_scope(scope)?;
                     Ok(moved_len)
                 }) {
@@ -3680,7 +3683,7 @@ impl FrankenFuse {
                         ))
                     }
                     Err(error) => {
-                        if donor_ino.is_some() {
+                        if donor_registered {
                             self.inner.ops.unregister_move_ext_donor_fd(donor_fd);
                         }
                         let mut error_ctx = log_ctx;
@@ -4135,15 +4138,15 @@ impl FrankenFuse {
                 }
             }
             BTRFS_IOC_INO_PATHS => {
-                // Input: 56-byte struct with inum, size, reserved, fspath pointer
-                // For now, return EOPNOTSUPP as implementing backref resolution is complex
+                // Input: 56-byte struct with inum, size, reserved, fspath pointer.
                 if in_data.len() < BTRFS_INO_PATH_ARGS_SIZE as usize {
                     return IoctlResult::Error(libc::EINVAL);
                 }
                 let inum = u64::from_le_bytes(in_data[0..8].try_into().unwrap_or([0; 8]));
+                let size = u64::from_le_bytes(in_data[8..16].try_into().unwrap_or([0; 8]));
                 let cx = Self::cx_for_request();
                 match self.with_request_scope(&cx, RequestOp::IoctlRead, |cx, scope| {
-                    self.inner.ops.get_btrfs_ino_paths(cx, scope, inum)
+                    self.inner.ops.get_btrfs_ino_paths(cx, scope, inum, size)
                 }) {
                     Ok(data) => IoctlResult::Data(data),
                     Err(error) => IoctlResult::Error(error.to_errno()),
@@ -8019,6 +8022,39 @@ mod tests {
     }
 
     #[test]
+    fn classify_move_ext_error_read_only() {
+        assert_eq!(
+            FrankenFuse::classify_move_ext_error(&FfsError::ReadOnly),
+            "read_only"
+        );
+    }
+
+    #[test]
+    fn classify_move_ext_error_unsupported_feature() {
+        assert_eq!(
+            FrankenFuse::classify_move_ext_error(&FfsError::UnsupportedFeature("test".into())),
+            "unsupported_feature"
+        );
+    }
+
+    #[test]
+    fn classify_move_ext_error_not_found() {
+        assert_eq!(
+            FrankenFuse::classify_move_ext_error(&FfsError::NotFound("test".into())),
+            "not_found"
+        );
+    }
+
+    #[test]
+    fn classify_move_ext_error_io_ebadf() {
+        let io_err = std::io::Error::from_raw_os_error(libc::EBADF);
+        assert_eq!(
+            FrankenFuse::classify_move_ext_error(&FfsError::Io(io_err)),
+            "bad_donor_fd"
+        );
+    }
+
+    #[test]
     fn build_mount_options_includes_ro_when_read_only() {
         let opts = MountOptions::default();
         let mount_opts = build_mount_options(&opts);
@@ -8409,6 +8445,7 @@ mod tests {
         blksize: u32,
         move_ext_result: Option<u64>,
         move_ext_errno: Option<i32>,
+        commit_errno: Option<i32>,
         fs_label: Vec<u8>,
         btrfs_fs_info: Option<Vec<u8>>,
         btrfs_dev_info: Option<Vec<u8>>,
@@ -8431,6 +8468,7 @@ mod tests {
                 blksize: 4096,
                 move_ext_result: None,
                 move_ext_errno: None,
+                commit_errno: None,
                 fs_label: b"test_label\0".to_vec(),
                 btrfs_fs_info: None,
                 btrfs_dev_info: None,
@@ -8453,6 +8491,7 @@ mod tests {
                 blksize: 4096,
                 move_ext_result: None,
                 move_ext_errno: None,
+                commit_errno: None,
                 fs_label: b"test_label\0".to_vec(),
                 btrfs_fs_info: None,
                 btrfs_dev_info: None,
@@ -8478,6 +8517,7 @@ mod tests {
                 blksize: 4096,
                 move_ext_result: None,
                 move_ext_errno: None,
+                commit_errno: None,
                 fs_label: b"test_label\0".to_vec(),
                 btrfs_fs_info: None,
                 btrfs_dev_info: None,
@@ -8500,6 +8540,7 @@ mod tests {
                 blksize: 4096,
                 move_ext_result: None,
                 move_ext_errno: None,
+                commit_errno: None,
                 fs_label: b"test_label\0".to_vec(),
                 btrfs_fs_info: None,
                 btrfs_dev_info: None,
@@ -8522,6 +8563,7 @@ mod tests {
                 blksize: 4096,
                 move_ext_result: Some(moved_len),
                 move_ext_errno: None,
+                commit_errno: None,
                 fs_label: b"test_label\0".to_vec(),
                 btrfs_fs_info: None,
                 btrfs_dev_info: None,
@@ -8538,6 +8580,12 @@ mod tests {
             fs
         }
 
+        fn with_move_ext_commit_error(errno: i32, calls: Arc<Mutex<Vec<IoctlCall>>>) -> Self {
+            let mut fs = Self::with_move_ext_result(1, calls);
+            fs.commit_errno = Some(errno);
+            fs
+        }
+
         fn with_move_ext_blksize(blksize: u32, calls: Arc<Mutex<Vec<IoctlCall>>>) -> Self {
             Self {
                 encryption_policy: None,
@@ -8550,6 +8598,7 @@ mod tests {
                 blksize,
                 move_ext_result: Some(1),
                 move_ext_errno: None,
+                commit_errno: None,
                 fs_label: b"test_label\0".to_vec(),
                 btrfs_fs_info: None,
                 btrfs_dev_info: None,
@@ -8577,6 +8626,7 @@ mod tests {
                 blksize: 4096,
                 move_ext_result: Some(1),
                 move_ext_errno: None,
+                commit_errno: None,
                 fs_label: b"test_label\0".to_vec(),
                 btrfs_fs_info: None,
                 btrfs_dev_info: None,
@@ -8603,6 +8653,7 @@ mod tests {
                 blksize: 4096,
                 move_ext_result: None,
                 move_ext_errno: None,
+                commit_errno: None,
                 fs_label: b"test_label\0".to_vec(),
                 btrfs_fs_info: None,
                 btrfs_dev_info: None,
@@ -8625,6 +8676,7 @@ mod tests {
                 blksize: 4096,
                 move_ext_result: None,
                 move_ext_errno: None,
+                commit_errno: None,
                 fs_label: label.to_vec(),
                 btrfs_fs_info: None,
                 btrfs_dev_info: None,
@@ -8647,6 +8699,7 @@ mod tests {
                 blksize: 4096,
                 move_ext_result: None,
                 move_ext_errno: None,
+                commit_errno: None,
                 fs_label: b"test_label\0".to_vec(),
                 btrfs_fs_info: Some(payload),
                 btrfs_dev_info: None,
@@ -8669,6 +8722,7 @@ mod tests {
                 blksize: 4096,
                 move_ext_result: None,
                 move_ext_errno: None,
+                commit_errno: None,
                 fs_label: b"test_label\0".to_vec(),
                 btrfs_fs_info: None,
                 btrfs_dev_info: Some(payload),
@@ -9485,6 +9539,9 @@ mod tests {
                 .lock()
                 .expect("lock ioctl calls")
                 .push(IoctlCall::Commit);
+            if let Some(errno) = self.commit_errno {
+                return Err(FfsError::Io(std::io::Error::from_raw_os_error(errno)));
+            }
             Ok(CommitSeq(1))
         }
     }
@@ -12898,6 +12955,49 @@ mod tests {
                 IoctlCall::MoveExt(InodeNumber(9), donor_fd, 11, 22, 33),
                 IoctlCall::End(RequestOp::IoctlWrite),
                 IoctlCall::UnregisterMoveExtDonor(donor_fd),
+            ]
+        );
+    }
+
+    #[test]
+    fn dispatch_ioctl_move_ext_does_not_double_unregister_after_commit_error() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let options = MountOptions {
+            read_only: false,
+            ..MountOptions::default()
+        };
+        let fuse = FrankenFuse::with_options(
+            Box::new(IoctlRecordingFs::with_move_ext_commit_error(
+                libc::EIO,
+                Arc::clone(&calls),
+            )),
+            &options,
+        );
+        let donor_file = std::fs::File::open("/dev/null").expect("open donor fd");
+        let donor_fd = u32::try_from(donor_file.as_raw_fd()).expect("donor fd fits u32");
+        let donor_ino = InodeNumber(donor_file.metadata().expect("donor metadata").ino());
+        let request = FrankenFuse::encode_move_ext_response(donor_fd, 11, 22, 33, 0);
+
+        let response = dispatch_ioctl_for_testing(
+            &fuse,
+            9,
+            0,
+            EXT4_IOC_MOVE_EXT,
+            &request,
+            u32::try_from(MOVE_EXT_SIZE).expect("move_ext size fits"),
+        );
+        assert_eq!(response, IoctlResult::Error(libc::EIO));
+        assert_eq!(
+            calls.lock().expect("lock ioctl calls").as_slice(),
+            &[
+                IoctlCall::Begin(RequestOp::IoctlWrite),
+                IoctlCall::Getattr(InodeNumber(9)),
+                IoctlCall::GetFlags(InodeNumber(9)),
+                IoctlCall::RegisterMoveExtDonor(donor_fd, donor_ino),
+                IoctlCall::MoveExt(InodeNumber(9), donor_fd, 11, 22, 33),
+                IoctlCall::UnregisterMoveExtDonor(donor_fd),
+                IoctlCall::Commit,
+                IoctlCall::End(RequestOp::IoctlWrite),
             ]
         );
     }
