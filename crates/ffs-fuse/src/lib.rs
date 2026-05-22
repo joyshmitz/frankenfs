@@ -237,6 +237,13 @@ const BTRFS_SCRUB_ARGS_SIZE: u32 = 1024;
 /// Defragment a range of a file.
 const BTRFS_IOC_DEFRAG_RANGE: u32 = 0x4030_9410;
 const BTRFS_DEFRAG_RANGE_ARGS_SIZE: u32 = 48;
+/// `BTRFS_IOC_SNAP_CREATE_V2` = `_IOW(0x94, 23, struct btrfs_ioctl_vol_args_v2)`.
+/// Create a snapshot of a subvolume.
+const BTRFS_IOC_SNAP_CREATE_V2: u32 = 0x5000_9417;
+/// `BTRFS_IOC_SNAP_DESTROY` = `_IOW(0x94, 15, struct btrfs_ioctl_vol_args)`.
+/// Delete a snapshot or subvolume.
+const BTRFS_IOC_SNAP_DESTROY: u32 = 0x5000_940F;
+const BTRFS_VOL_ARGS_SIZE: u32 = 4096;
 const FSCRYPT_POLICY_V1_SIZE: usize = 12;
 #[cfg(test)]
 const FSCRYPT_POLICY_V2_VERSION: u8 = 2;
@@ -3798,8 +3805,34 @@ impl FrankenFuse {
                 let start = u64::from_le_bytes(in_data[0..8].try_into().unwrap_or([0; 8]));
                 let len = u64::from_le_bytes(in_data[8..16].try_into().unwrap_or([0; 8]));
                 let cx = Self::cx_for_request();
-                match self.with_request_scope(&cx, RequestOp::IoctlRead, |cx, scope| {
+                match self.with_request_scope(&cx, RequestOp::IoctlWrite, |cx, scope| {
                     self.inner.ops.btrfs_defrag_range(cx, scope, fh, start, len)
+                }) {
+                    Ok(()) => IoctlResult::Data(Vec::new()),
+                    Err(error) => IoctlResult::Error(error.to_errno()),
+                }
+            }
+            BTRFS_IOC_SNAP_CREATE_V2 => {
+                // Input: 4096-byte vol_args_v2 with fd, transid, flags, name
+                if in_data.len() < BTRFS_VOL_ARGS_SIZE as usize {
+                    return IoctlResult::Error(libc::EINVAL);
+                }
+                let cx = Self::cx_for_request();
+                match self.with_request_scope(&cx, RequestOp::IoctlRead, |cx, scope| {
+                    self.inner.ops.btrfs_snap_create(cx, scope, &in_data)
+                }) {
+                    Ok(()) => IoctlResult::Data(Vec::new()),
+                    Err(error) => IoctlResult::Error(error.to_errno()),
+                }
+            }
+            BTRFS_IOC_SNAP_DESTROY => {
+                // Input: 4096-byte vol_args with name
+                if in_data.len() < BTRFS_VOL_ARGS_SIZE as usize {
+                    return IoctlResult::Error(libc::EINVAL);
+                }
+                let cx = Self::cx_for_request();
+                match self.with_request_scope(&cx, RequestOp::IoctlRead, |cx, scope| {
+                    self.inner.ops.btrfs_snap_destroy(cx, scope, &in_data)
                 }) {
                     Ok(()) => IoctlResult::Data(Vec::new()),
                     Err(error) => IoctlResult::Error(error.to_errno()),
@@ -6218,6 +6251,7 @@ mod tests {
         GetBtrfsFsInfo,
         GetBtrfsDevInfo(u64, [u8; 16]),
         BtrfsTreeSearch(BtrfsTreeSearchKey),
+        BtrfsDefragRange(u64, u64, u64),
         BtrfsInoLookup(u64, u64),
         Getattr(InodeNumber),
         Statfs(InodeNumber),
@@ -6254,6 +6288,7 @@ mod tests {
         btrfs_dev_info: Option<Vec<u8>>,
         btrfs_tree_search_result: Option<(u32, Vec<u8>)>,
         btrfs_ino_lookup_result: Option<(u64, Vec<u8>)>,
+        btrfs_defrag_errno: Option<i32>,
         fiemap_fixture: Option<Vec<FiemapExtent>>,
         calls: Arc<Mutex<Vec<IoctlCall>>>,
     }
@@ -6276,6 +6311,7 @@ mod tests {
                 btrfs_dev_info: None,
                 btrfs_tree_search_result: None,
                 btrfs_ino_lookup_result: None,
+                btrfs_defrag_errno: None,
                 fiemap_fixture: None,
                 calls,
             }
@@ -6298,6 +6334,7 @@ mod tests {
                 btrfs_dev_info: None,
                 btrfs_tree_search_result: None,
                 btrfs_ino_lookup_result: None,
+                btrfs_defrag_errno: None,
                 fiemap_fixture: None,
                 calls,
             }
@@ -6323,6 +6360,7 @@ mod tests {
                 btrfs_dev_info: None,
                 btrfs_tree_search_result: None,
                 btrfs_ino_lookup_result: None,
+                btrfs_defrag_errno: None,
                 fiemap_fixture: None,
                 calls,
             }
@@ -6345,6 +6383,7 @@ mod tests {
                 btrfs_dev_info: None,
                 btrfs_tree_search_result: None,
                 btrfs_ino_lookup_result: None,
+                btrfs_defrag_errno: None,
                 fiemap_fixture: None,
                 calls,
             }
@@ -6367,6 +6406,7 @@ mod tests {
                 btrfs_dev_info: None,
                 btrfs_tree_search_result: None,
                 btrfs_ino_lookup_result: None,
+                btrfs_defrag_errno: None,
                 fiemap_fixture: None,
                 calls,
             }
@@ -6395,6 +6435,7 @@ mod tests {
                 btrfs_dev_info: None,
                 btrfs_tree_search_result: None,
                 btrfs_ino_lookup_result: None,
+                btrfs_defrag_errno: None,
                 fiemap_fixture: None,
                 calls,
             }
@@ -6422,6 +6463,7 @@ mod tests {
                 btrfs_dev_info: None,
                 btrfs_tree_search_result: None,
                 btrfs_ino_lookup_result: None,
+                btrfs_defrag_errno: None,
                 fiemap_fixture: None,
                 calls,
             }
@@ -6448,6 +6490,7 @@ mod tests {
                 btrfs_dev_info: None,
                 btrfs_tree_search_result: None,
                 btrfs_ino_lookup_result: None,
+                btrfs_defrag_errno: None,
                 fiemap_fixture: None,
                 calls,
             }
@@ -6470,6 +6513,7 @@ mod tests {
                 btrfs_dev_info: None,
                 btrfs_tree_search_result: None,
                 btrfs_ino_lookup_result: None,
+                btrfs_defrag_errno: None,
                 fiemap_fixture: None,
                 calls,
             }
@@ -6492,6 +6536,7 @@ mod tests {
                 btrfs_dev_info: None,
                 btrfs_tree_search_result: None,
                 btrfs_ino_lookup_result: None,
+                btrfs_defrag_errno: None,
                 fiemap_fixture: None,
                 calls,
             }
@@ -6514,6 +6559,7 @@ mod tests {
                 btrfs_dev_info: Some(payload),
                 btrfs_tree_search_result: None,
                 btrfs_ino_lookup_result: None,
+                btrfs_defrag_errno: None,
                 fiemap_fixture: None,
                 calls,
             }
@@ -6526,6 +6572,12 @@ mod tests {
         ) -> Self {
             let mut fs = Self::new(0, calls);
             fs.btrfs_tree_search_result = Some((nr_items, payload));
+            fs
+        }
+
+        fn with_btrfs_defrag_errno(errno: i32, calls: Arc<Mutex<Vec<IoctlCall>>>) -> Self {
+            let mut fs = Self::new(0, calls);
+            fs.btrfs_defrag_errno = Some(errno);
             fs
         }
 
@@ -6936,6 +6988,27 @@ mod tests {
                     "btrfs_tree_search: recorder not configured with a result".into(),
                 )
             })
+        }
+
+        fn btrfs_defrag_range(
+            &self,
+            _cx: &Cx,
+            _scope: &mut RequestScope,
+            fh: u64,
+            start: u64,
+            len: u64,
+        ) -> ffs_error::Result<()> {
+            self.calls
+                .lock()
+                .expect("lock ioctl calls")
+                .push(IoctlCall::BtrfsDefragRange(fh, start, len));
+            match self.btrfs_defrag_errno {
+                Some(0) => Ok(()),
+                Some(errno) => Err(FfsError::Io(std::io::Error::from_raw_os_error(errno))),
+                None => Err(FfsError::UnsupportedFeature(
+                    "btrfs_defrag_range: recorder not configured with a result".into(),
+                )),
+            }
         }
 
         fn fiemap(
@@ -8124,6 +8197,13 @@ mod tests {
         buf
     }
 
+    fn btrfs_defrag_range_in(start: u64, len: u64) -> Vec<u8> {
+        let mut buf = vec![0_u8; BTRFS_DEFRAG_RANGE_ARGS_SIZE as usize];
+        buf[0..8].copy_from_slice(&start.to_le_bytes());
+        buf[8..16].copy_from_slice(&len.to_le_bytes());
+        buf
+    }
+
     #[test]
     fn dispatch_ioctl_btrfs_dev_info_returns_backend_payload_verbatim() {
         // Canned 4096-byte payload with distinctive marker values at every
@@ -8399,6 +8479,109 @@ mod tests {
                 IoctlCall::Begin(RequestOp::IoctlRead),
                 IoctlCall::BtrfsTreeSearch(search_key),
                 IoctlCall::End(RequestOp::IoctlRead),
+            ]
+        );
+    }
+
+    #[test]
+    fn dispatch_ioctl_btrfs_defrag_range_rejects_short_input() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let fuse = FrankenFuse::new(Box::new(IoctlRecordingFs::with_btrfs_defrag_errno(
+            libc::EROFS,
+            Arc::clone(&calls),
+        )));
+        let input = btrfs_defrag_range_in(4096, 8192);
+
+        let response = dispatch_ioctl_for_testing(
+            &fuse,
+            1,
+            99,
+            BTRFS_IOC_DEFRAG_RANGE,
+            &input[..BTRFS_DEFRAG_RANGE_ARGS_SIZE as usize - 1],
+            0,
+        );
+
+        assert_eq!(response, IoctlResult::Error(libc::EINVAL));
+        assert!(calls.lock().expect("lock ioctl calls").is_empty());
+    }
+
+    #[test]
+    fn dispatch_ioctl_btrfs_defrag_range_forwards_range_and_surfaces_erofs() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let fuse = FrankenFuse::new(Box::new(IoctlRecordingFs::with_btrfs_defrag_errno(
+            libc::EROFS,
+            Arc::clone(&calls),
+        )));
+
+        let response = dispatch_ioctl_for_testing(
+            &fuse,
+            1,
+            99,
+            BTRFS_IOC_DEFRAG_RANGE,
+            &btrfs_defrag_range_in(4096, 8192),
+            0,
+        );
+
+        assert_eq!(response, IoctlResult::Error(libc::EROFS));
+        assert_eq!(
+            calls.lock().expect("lock ioctl calls").as_slice(),
+            &[
+                IoctlCall::Begin(RequestOp::IoctlWrite),
+                IoctlCall::BtrfsDefragRange(99, 4096, 8192),
+                IoctlCall::End(RequestOp::IoctlWrite),
+            ]
+        );
+    }
+
+    #[test]
+    fn dispatch_ioctl_btrfs_defrag_range_surfaces_backend_unsupported_as_eopnotsupp() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let fuse = FrankenFuse::new(Box::new(IoctlRecordingFs::new(0, Arc::clone(&calls))));
+
+        let response = dispatch_ioctl_for_testing(
+            &fuse,
+            1,
+            99,
+            BTRFS_IOC_DEFRAG_RANGE,
+            &btrfs_defrag_range_in(4096, 8192),
+            0,
+        );
+
+        assert_eq!(response, IoctlResult::Error(libc::EOPNOTSUPP));
+        assert_eq!(
+            calls.lock().expect("lock ioctl calls").as_slice(),
+            &[
+                IoctlCall::Begin(RequestOp::IoctlWrite),
+                IoctlCall::BtrfsDefragRange(99, 4096, 8192),
+                IoctlCall::End(RequestOp::IoctlWrite),
+            ]
+        );
+    }
+
+    #[test]
+    fn dispatch_ioctl_btrfs_defrag_range_success_returns_empty_payload() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let fuse = FrankenFuse::new(Box::new(IoctlRecordingFs::with_btrfs_defrag_errno(
+            0,
+            Arc::clone(&calls),
+        )));
+
+        let response = dispatch_ioctl_for_testing(
+            &fuse,
+            1,
+            99,
+            BTRFS_IOC_DEFRAG_RANGE,
+            &btrfs_defrag_range_in(4096, 8192),
+            0,
+        );
+
+        assert_eq!(response, IoctlResult::Data(Vec::new()));
+        assert_eq!(
+            calls.lock().expect("lock ioctl calls").as_slice(),
+            &[
+                IoctlCall::Begin(RequestOp::IoctlWrite),
+                IoctlCall::BtrfsDefragRange(99, 4096, 8192),
+                IoctlCall::End(RequestOp::IoctlWrite),
             ]
         );
     }

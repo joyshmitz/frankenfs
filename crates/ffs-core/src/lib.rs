@@ -19831,6 +19831,40 @@ impl FsOps for OpenFs {
         }
     }
 
+    fn btrfs_snap_create(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _vol_args: &[u8],
+    ) -> ffs_error::Result<()> {
+        match &self.flavor {
+            FsFlavor::Ext4(_) => Err(FfsError::UnsupportedFeature(
+                "BTRFS_IOC_SNAP_CREATE_V2 is not supported on ext4 filesystems".to_owned(),
+            )),
+            FsFlavor::Btrfs(_) => {
+                // Snapshot creation requires ROOT_ITEM creation and tree cloning
+                Err(FfsError::ReadOnly)
+            }
+        }
+    }
+
+    fn btrfs_snap_destroy(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _vol_args: &[u8],
+    ) -> ffs_error::Result<()> {
+        match &self.flavor {
+            FsFlavor::Ext4(_) => Err(FfsError::UnsupportedFeature(
+                "BTRFS_IOC_SNAP_DESTROY is not supported on ext4 filesystems".to_owned(),
+            )),
+            FsFlavor::Btrfs(_) => {
+                // Snapshot deletion requires orphan handling and tree removal
+                Err(FfsError::ReadOnly)
+            }
+        }
+    }
+
     fn btrfs_ino_lookup(
         &self,
         cx: &Cx,
