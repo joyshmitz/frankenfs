@@ -1285,6 +1285,41 @@ pub trait FsOps: Send + Sync {
         ))
     }
 
+    /// Get btrfs subvolume flags for `BTRFS_IOC_SUBVOL_GETFLAGS`.
+    ///
+    /// Returns the u64 flags field from the subvolume's ROOT_ITEM. The only
+    /// user-visible flag is `BTRFS_SUBVOL_RDONLY` (bit 1).
+    ///
+    /// Non-btrfs backends must return `FfsError::UnsupportedFeature`.
+    fn get_subvol_flags(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _ino: InodeNumber,
+    ) -> ffs_error::Result<u64> {
+        Err(FfsError::UnsupportedFeature(
+            "get_subvol_flags is not supported by this backend".to_owned(),
+        ))
+    }
+
+    /// Set btrfs subvolume flags for `BTRFS_IOC_SUBVOL_SETFLAGS`.
+    ///
+    /// Updates the flags field in the subvolume's ROOT_ITEM. The only
+    /// user-settable flag is `BTRFS_SUBVOL_RDONLY` (bit 1).
+    ///
+    /// Non-btrfs backends must return `FfsError::UnsupportedFeature`.
+    fn set_subvol_flags(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _ino: InodeNumber,
+        _flags: u64,
+    ) -> ffs_error::Result<()> {
+        Err(FfsError::UnsupportedFeature(
+            "set_subvol_flags is not supported by this backend".to_owned(),
+        ))
+    }
+
     /// Get quota configuration and status.
     ///
     /// Returns a summary of which quota types are enabled and their

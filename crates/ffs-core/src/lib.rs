@@ -19450,6 +19450,59 @@ impl FsOps for OpenFs {
         }
     }
 
+    fn get_subvol_flags(
+        &self,
+        cx: &Cx,
+        _scope: &mut RequestScope,
+        _ino: InodeNumber,
+    ) -> ffs_error::Result<u64> {
+        match &self.flavor {
+            FsFlavor::Ext4(_) => Err(FfsError::UnsupportedFeature(
+                "BTRFS_IOC_SUBVOL_GETFLAGS is not supported on ext4 filesystems".to_owned(),
+            )),
+            FsFlavor::Btrfs(_) => {
+                let subvol_id = self
+                    .btrfs_context
+                    .as_ref()
+                    .map_or(BTRFS_FS_TREE_OBJECTID, |ctx| ctx.subvol_objectid);
+                let root_items = self.walk_btrfs_root_tree(cx)?;
+                let fs_tree_root = root_items
+                    .iter()
+                    .find(|item| {
+                        item.key.objectid == subvol_id && item.key.item_type == BTRFS_ITEM_ROOT_ITEM
+                    })
+                    .ok_or_else(|| {
+                        FfsError::NotFound(format!(
+                            "btrfs ROOT_ITEM for subvolume objectid {subvol_id}"
+                        ))
+                    })?;
+                let root_item =
+                    parse_root_item(&fs_tree_root.data).map_err(|e| parse_to_ffs_error(&e))?;
+                Ok(root_item.flags)
+            }
+        }
+    }
+
+    fn set_subvol_flags(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _ino: InodeNumber,
+        _flags: u64,
+    ) -> ffs_error::Result<()> {
+        match &self.flavor {
+            FsFlavor::Ext4(_) => Err(FfsError::UnsupportedFeature(
+                "BTRFS_IOC_SUBVOL_SETFLAGS is not supported on ext4 filesystems".to_owned(),
+            )),
+            FsFlavor::Btrfs(_) => {
+                self.require_btrfs_rw_allowed("subvol_setflags")?;
+                Err(FfsError::UnsupportedFeature(
+                    "BTRFS_IOC_SUBVOL_SETFLAGS write path not yet implemented".to_owned(),
+                ))
+            }
+        }
+    }
+
     fn get_encryption_policy_ex(
         &self,
         cx: &Cx,

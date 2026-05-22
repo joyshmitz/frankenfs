@@ -186,6 +186,12 @@ const BTRFS_IOC_DEV_INFO_SIZE: u32 = 4096;
 const BTRFS_IOC_INO_LOOKUP: u32 = 0xD000_9412;
 /// Size of `btrfs_ioctl_ino_lookup_args`: 8 + 8 + 4080 = 4096 bytes.
 const BTRFS_INO_LOOKUP_ARGS_SIZE: u32 = 4096;
+/// `BTRFS_IOC_SUBVOL_GETFLAGS` = `_IOR(0x94, 25, __u64)` on x86_64.
+/// Returns subvolume flags (BTRFS_SUBVOL_RDONLY etc.) as a u64.
+const BTRFS_IOC_SUBVOL_GETFLAGS: u32 = 0x8008_9419;
+/// `BTRFS_IOC_SUBVOL_SETFLAGS` = `_IOW(0x94, 26, __u64)` on x86_64.
+/// Sets subvolume flags (BTRFS_SUBVOL_RDONLY etc.) from a u64.
+const BTRFS_IOC_SUBVOL_SETFLAGS: u32 = 0x4008_941A;
 const FSCRYPT_POLICY_V1_SIZE: usize = 12;
 #[cfg(test)]
 const FSCRYPT_POLICY_V2_VERSION: u8 = 2;
@@ -3527,6 +3533,38 @@ impl FrankenFuse {
                         buf[16..16 + path_len].copy_from_slice(&path[..path_len]);
                         IoctlResult::Data(buf)
                     }
+                    Err(error) => IoctlResult::Error(error.to_errno()),
+                }
+            }
+            BTRFS_IOC_SUBVOL_GETFLAGS => {
+                if out_size < 8 {
+                    return IoctlResult::Error(libc::EINVAL);
+                }
+                let cx = Self::cx_for_request();
+                match self.with_request_scope(&cx, RequestOp::IoctlRead, |cx, scope| {
+                    self.inner
+                        .ops
+                        .get_subvol_flags(cx, scope, InodeNumber(ino))
+                }) {
+                    Ok(flags) => IoctlResult::Data(flags.to_ne_bytes().to_vec()),
+                    Err(error) => IoctlResult::Error(error.to_errno()),
+                }
+            }
+            BTRFS_IOC_SUBVOL_SETFLAGS => {
+                if in_data.len() < 8 {
+                    return IoctlResult::Error(libc::EINVAL);
+                }
+                let mut raw = [0_u8; 8];
+                raw.copy_from_slice(&in_data[0..8]);
+                let flags = u64::from_ne_bytes(raw);
+
+                let cx = Self::cx_for_request();
+                match self.with_request_scope(&cx, RequestOp::IoctlWrite, |cx, scope| {
+                    self.inner
+                        .ops
+                        .set_subvol_flags(cx, scope, InodeNumber(ino), flags)
+                }) {
+                    Ok(()) => IoctlResult::Data(Vec::new()),
                     Err(error) => IoctlResult::Error(error.to_errno()),
                 }
             }
