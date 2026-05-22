@@ -171,7 +171,7 @@ pub enum FsFlavor {
     /// ext4 filesystem with its parsed superblock.
     Ext4(Box<Ext4Superblock>),
     /// btrfs filesystem with its parsed superblock.
-    Btrfs(BtrfsSuperblock),
+    Btrfs(Box<BtrfsSuperblock>),
 }
 
 /// Error from filesystem detection (superblock probing).
@@ -246,7 +246,7 @@ pub fn detect_filesystem(image: &[u8]) -> Result<FsFlavor, DetectionError> {
     }
 
     if let Ok(btrfs) = BtrfsSuperblock::parse_from_image(image) {
-        return Ok(FsFlavor::Btrfs(btrfs));
+        return Ok(FsFlavor::Btrfs(Box::new(btrfs)));
     }
 
     Err(DetectionError::UnsupportedImage)
@@ -280,7 +280,7 @@ pub fn detect_filesystem_on_device(
     if len >= btrfs_end {
         let btrfs_region = read_btrfs_superblock_region(cx, dev)?;
         if let Ok(sb) = BtrfsSuperblock::parse_superblock_region(&btrfs_region) {
-            return Ok(FsFlavor::Btrfs(sb));
+            return Ok(FsFlavor::Btrfs(Box::new(sb)));
         }
     }
 
@@ -2892,7 +2892,7 @@ impl OpenFs {
     #[must_use]
     pub fn ext4_superblock(&self) -> Option<&Ext4Superblock> {
         match &self.flavor {
-            FsFlavor::Ext4(sb) => Some(sb),
+            FsFlavor::Ext4(sb) => Some(sb.as_ref()),
             FsFlavor::Btrfs(_) => None,
         }
     }
@@ -2901,7 +2901,7 @@ impl OpenFs {
     #[must_use]
     pub fn btrfs_superblock(&self) -> Option<&BtrfsSuperblock> {
         match &self.flavor {
-            FsFlavor::Btrfs(sb) => Some(sb),
+            FsFlavor::Btrfs(sb) => Some(sb.as_ref()),
             FsFlavor::Ext4(_) => None,
         }
     }
@@ -3467,10 +3467,8 @@ impl OpenFs {
         // (e.g. s_state cleared). Re-read it into our flavor cache.
         let sb_region = read_ext4_superblock_region(cx, self.dev.as_ref())?;
         if let FsFlavor::Ext4(sb) = &mut self.flavor {
-            *sb = Box::new(
-                Ext4Superblock::parse_superblock_region(&sb_region)
-                    .map_err(|e| parse_to_ffs_error(&e))?,
-            );
+            **sb = Ext4Superblock::parse_superblock_region(&sb_region)
+                .map_err(|e| parse_to_ffs_error(&e))?;
         }
 
         info!(
@@ -3575,10 +3573,8 @@ impl OpenFs {
 
         let sb_region = read_ext4_superblock_region(cx, self.dev.as_ref())?;
         if let FsFlavor::Ext4(cache) = &mut self.flavor {
-            *cache = Box::new(
-                Ext4Superblock::parse_superblock_region(&sb_region)
-                    .map_err(|e| parse_to_ffs_error(&e))?,
-            );
+            **cache = Ext4Superblock::parse_superblock_region(&sb_region)
+                .map_err(|e| parse_to_ffs_error(&e))?;
         }
 
         info!(
@@ -19050,6 +19046,7 @@ impl FsOps for OpenFs {
                     .fs_tree
                     .update(&inode_key, &inode.to_bytes())
                     .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+                drop(alloc);
 
                 Ok(())
             }
@@ -19143,7 +19140,11 @@ impl FsOps for OpenFs {
                         parse_inode_item(&inode_item.data).map_err(|e| parse_to_ffs_error(&e))?;
                     inode.generation
                 };
-                Ok(generation as u32)
+                u32::try_from(generation).map_err(|_| {
+                    FfsError::Format(format!(
+                        "btrfs inode {canonical} generation {generation} does not fit FS_IOC_GETVERSION"
+                    ))
+                })
             }
         }
     }
@@ -19364,10 +19365,10 @@ impl FsOps for OpenFs {
                 Ok(())
             }
             FsFlavor::Btrfs(_) => {
-                self.require_btrfs_rw_allowed("setfslabel")?;
-
                 const BTRFS_LABEL_MAX: usize = 256;
                 const BTRFS_LABEL_OFFSET: usize = 0x12B;
+
+                self.require_btrfs_rw_allowed("setfslabel")?;
 
                 if label.len() >= BTRFS_LABEL_MAX || label.contains(&0) {
                     return Err(FfsError::Io(std::io::Error::from_raw_os_error(
@@ -19705,6 +19706,7 @@ impl FsOps for OpenFs {
                     .fs_tree
                     .update(&inode_key, &inode.to_bytes())
                     .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+                drop(alloc);
 
                 Ok(())
             }
