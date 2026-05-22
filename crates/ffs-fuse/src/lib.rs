@@ -7383,6 +7383,46 @@ mod tests {
     }
 
     #[test]
+    fn parse_fs_label_request_valid() {
+        let mut data = b"my_label\0padding".to_vec();
+        let label = FrankenFuse::parse_fs_label_request(&data).unwrap();
+        assert_eq!(label, b"my_label");
+    }
+
+    #[test]
+    fn parse_fs_label_request_empty_label() {
+        let data = b"\0rest".to_vec();
+        let label = FrankenFuse::parse_fs_label_request(&data).unwrap();
+        assert!(label.is_empty());
+    }
+
+    #[test]
+    fn parse_fs_label_request_no_nul_terminator() {
+        let data = b"label_without_nul".to_vec();
+        let err = FrankenFuse::parse_fs_label_request(&data).unwrap_err();
+        assert_eq!(err, libc::EINVAL);
+    }
+
+    #[test]
+    fn parse_fs_label_request_max_length() {
+        // Label exactly at FSLABEL_MAX-1 bytes + NUL
+        let mut data = vec![b'a'; FSLABEL_MAX - 1];
+        data.push(0);
+        let label = FrankenFuse::parse_fs_label_request(&data).unwrap();
+        assert_eq!(label.len(), FSLABEL_MAX - 1);
+    }
+
+    #[test]
+    fn parse_fs_label_request_truncates_beyond_max() {
+        // Data longer than FSLABEL_MAX, NUL after FSLABEL_MAX
+        let mut data = vec![b'x'; FSLABEL_MAX + 10];
+        data[FSLABEL_MAX + 5] = 0; // NUL beyond the parse window
+        // Should fail because no NUL in first FSLABEL_MAX bytes
+        let err = FrankenFuse::parse_fs_label_request(&data).unwrap_err();
+        assert_eq!(err, libc::EINVAL);
+    }
+
+    #[test]
     fn inode_attr_to_file_attr_conversion() {
         let iattr = InodeAttr {
             ino: InodeNumber(42),
