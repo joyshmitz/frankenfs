@@ -7995,6 +7995,30 @@ mod tests {
     }
 
     #[test]
+    fn validate_move_ext_range_accepts_aligned_offsets() {
+        assert!(FrankenFuse::validate_move_ext_range(4096, 0, 0, 100).is_ok());
+        assert!(FrankenFuse::validate_move_ext_range(4096, 1, 1, 100).is_ok());
+    }
+
+    #[test]
+    fn validate_move_ext_range_rejects_misaligned_offsets() {
+        // With 1024-byte blocks, blocks_per_page = 4096/1024 = 4.
+        // orig_start=0 gives 0%4=0, donor_start=1 gives 1%4=1 -> misaligned
+        assert_eq!(
+            FrankenFuse::validate_move_ext_range(1024, 0, 1, 100),
+            Err(libc::EINVAL)
+        );
+    }
+
+    #[test]
+    fn validate_move_ext_range_rejects_overflow() {
+        assert_eq!(
+            FrankenFuse::validate_move_ext_range(4096, u64::MAX - 10, 0, 100),
+            Err(libc::EINVAL)
+        );
+    }
+
+    #[test]
     fn build_mount_options_includes_ro_when_read_only() {
         let opts = MountOptions::default();
         let mount_opts = build_mount_options(&opts);
