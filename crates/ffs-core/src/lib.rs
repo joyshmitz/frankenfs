@@ -44070,6 +44070,58 @@ mod tests {
         assert_eq!(state.durable_epoch, 2);
     }
 
+    // ── WritebackEpochBarrier unit tests ─────────────────────────────────
+
+    #[test]
+    fn writeback_epoch_barrier_disabled_is_passthrough() {
+        let mut barrier = WritebackEpochBarrier::new();
+        assert!(!barrier.is_enabled());
+        let inode = InodeNumber(1);
+        barrier.stage_write(inode);
+        assert!(barrier.inode_state(inode).is_none()); // not tracked
+        assert!(barrier.is_epoch_visible(inode, 100)); // always visible
+    }
+
+    #[test]
+    fn writeback_epoch_barrier_enabled_tracks_writes() {
+        let mut barrier = WritebackEpochBarrier::enabled();
+        assert!(barrier.is_enabled());
+        assert_eq!(barrier.current_epoch(), 1);
+        let inode = InodeNumber(1);
+        barrier.stage_write(inode);
+        assert!(barrier.inode_state(inode).is_some());
+        assert_eq!(barrier.tracked_inode_count(), 1);
+    }
+
+    #[test]
+    fn writeback_epoch_barrier_advance_epoch() {
+        let mut barrier = WritebackEpochBarrier::enabled();
+        assert_eq!(barrier.current_epoch(), 1);
+        let next = barrier.advance_epoch();
+        assert_eq!(next, 2);
+        assert_eq!(barrier.current_epoch(), 2);
+    }
+
+    #[test]
+    fn writeback_epoch_barrier_fsync_cycle() {
+        let mut barrier = WritebackEpochBarrier::enabled();
+        let inode = InodeNumber(1);
+        barrier.stage_write(inode);
+        let state = barrier.inode_state(inode).unwrap();
+        assert!(state.has_pending_visibility());
+        barrier.fsync_barrier(inode).unwrap();
+        let state = barrier.inode_state(inode).unwrap();
+        assert!(!state.has_pending_visibility());
+        assert!(!state.has_pending_durability());
+    }
+
+    #[test]
+    fn writeback_epoch_barrier_is_epoch_visible_untracked() {
+        let barrier = WritebackEpochBarrier::enabled();
+        let untracked = InodeNumber(999);
+        assert!(barrier.is_epoch_visible(untracked, 100));
+    }
+
     // ── Crash consistency matrix for writeback epoch barrier ─────────────
     //
     // Each scenario simulates a crash at a specific point in the writeback
