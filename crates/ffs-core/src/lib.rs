@@ -20399,6 +20399,25 @@ impl FsOps for OpenFs {
         }
     }
 
+    fn btrfs_set_default_subvol(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _treeid: u64,
+    ) -> ffs_error::Result<()> {
+        match &self.flavor {
+            FsFlavor::Ext4(_) => Err(FfsError::UnsupportedFeature(
+                "BTRFS_IOC_DEFAULT_SUBVOL is not supported on ext4 filesystems".to_owned(),
+            )),
+            FsFlavor::Btrfs(_) => {
+                // Updating the default subvolume requires persistent root-tree
+                // metadata mutation; fail closed while btrfs writeback remains
+                // guarded/non-persistent.
+                Err(FfsError::ReadOnly)
+            }
+        }
+    }
+
     fn get_encryption_policy_ex(
         &self,
         cx: &Cx,

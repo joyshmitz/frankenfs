@@ -187,6 +187,9 @@ const BTRFS_IOC_DEV_INFO_SIZE: u32 = 4096;
 const BTRFS_IOC_INO_LOOKUP: u32 = 0xD000_9412;
 /// Size of `btrfs_ioctl_ino_lookup_args`: 8 + 8 + 4080 = 4096 bytes.
 const BTRFS_INO_LOOKUP_ARGS_SIZE: u32 = 4096;
+/// `BTRFS_IOC_DEFAULT_SUBVOL` = `_IOW(0x94, 19, __u64)` on x86_64.
+/// Sets the filesystem default subvolume tree objectid.
+const BTRFS_IOC_DEFAULT_SUBVOL: u32 = 0x4008_9413;
 /// `BTRFS_IOC_TREE_SEARCH` = `_IOWR(0x94, 17, struct btrfs_ioctl_search_args)`
 /// on x86_64. The args struct is a 104-byte search key followed by a 3992-byte
 /// buffer of `(btrfs_ioctl_search_header, item_payload)` records.
@@ -3706,6 +3709,23 @@ impl FrankenFuse {
                     Err(error) => IoctlResult::Error(error.to_errno()),
                 }
             }
+            BTRFS_IOC_DEFAULT_SUBVOL => {
+                if in_data.len() < 8 {
+                    return IoctlResult::Error(libc::EINVAL);
+                }
+                let mut raw = [0_u8; 8];
+                raw.copy_from_slice(&in_data[0..8]);
+                let treeid = u64::from_ne_bytes(raw);
+                let cx = Self::cx_for_request();
+                match self.with_request_scope(&cx, RequestOp::IoctlWrite, |cx, scope| {
+                    self.inner.ops.btrfs_set_default_subvol(cx, scope, treeid)?;
+                    self.inner.ops.commit_request_scope(scope)?;
+                    Ok(())
+                }) {
+                    Ok(()) => IoctlResult::Data(Vec::new()),
+                    Err(error) => IoctlResult::Error(error.to_errno()),
+                }
+            }
             BTRFS_IOC_SUBVOL_GETFLAGS => {
                 if out_size < 8 {
                     return IoctlResult::Error(libc::EINVAL);
@@ -6498,6 +6518,7 @@ mod tests {
         GetBtrfsFsInfo,
         BtrfsStartSync,
         BtrfsWaitSync(u64),
+        BtrfsSetDefaultSubvol(u64),
         GetBtrfsDevInfo(u64, [u8; 16]),
         BtrfsTreeSearch(BtrfsTreeSearchKey),
         BtrfsInoLookup(u64, u64),
@@ -7185,6 +7206,19 @@ mod tests {
                 .lock()
                 .expect("lock ioctl calls")
                 .push(IoctlCall::BtrfsWaitSync(transid));
+            Ok(())
+        }
+
+        fn btrfs_set_default_subvol(
+            &self,
+            _cx: &Cx,
+            _scope: &mut RequestScope,
+            treeid: u64,
+        ) -> ffs_error::Result<()> {
+            self.calls
+                .lock()
+                .expect("lock ioctl calls")
+                .push(IoctlCall::BtrfsSetDefaultSubvol(treeid));
             Ok(())
         }
 
@@ -8359,6 +8393,43 @@ mod tests {
         let fuse = FrankenFuse::new(Box::new(IoctlRecordingFs::new(0, Arc::clone(&calls))));
 
         let response = dispatch_ioctl_for_testing(&fuse, 1, 0, BTRFS_IOC_WAIT_SYNC, &[0_u8; 7], 0);
+        assert_eq!(response, IoctlResult::Error(libc::EINVAL));
+        assert!(calls.lock().expect("lock ioctl calls").is_empty());
+    }
+
+    #[test]
+    fn dispatch_ioctl_btrfs_default_subvol_passes_treeid_and_commits() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let fuse = FrankenFuse::new(Box::new(IoctlRecordingFs::new(0, Arc::clone(&calls))));
+        let treeid = 0x0102_0304_0506_0708_u64;
+
+        let response = dispatch_ioctl_for_testing(
+            &fuse,
+            1,
+            0,
+            BTRFS_IOC_DEFAULT_SUBVOL,
+            &treeid.to_ne_bytes(),
+            0,
+        );
+        assert_eq!(response, IoctlResult::Data(Vec::new()));
+        assert_eq!(
+            calls.lock().expect("lock ioctl calls").as_slice(),
+            &[
+                IoctlCall::Begin(RequestOp::IoctlWrite),
+                IoctlCall::BtrfsSetDefaultSubvol(treeid),
+                IoctlCall::Commit,
+                IoctlCall::End(RequestOp::IoctlWrite),
+            ]
+        );
+    }
+
+    #[test]
+    fn dispatch_ioctl_btrfs_default_subvol_rejects_short_input_buffer() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let fuse = FrankenFuse::new(Box::new(IoctlRecordingFs::new(0, Arc::clone(&calls))));
+
+        let response =
+            dispatch_ioctl_for_testing(&fuse, 1, 0, BTRFS_IOC_DEFAULT_SUBVOL, &[0_u8; 7], 0);
         assert_eq!(response, IoctlResult::Error(libc::EINVAL));
         assert!(calls.lock().expect("lock ioctl calls").is_empty());
     }

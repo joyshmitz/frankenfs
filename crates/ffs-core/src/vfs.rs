@@ -1351,6 +1351,22 @@ pub trait FsOps: Send + Sync {
         ))
     }
 
+    /// Set the default btrfs subvolume for `BTRFS_IOC_DEFAULT_SUBVOL`.
+    ///
+    /// `treeid` is the target ROOT_ITEM objectid. Non-btrfs backends must
+    /// return `FfsError::UnsupportedFeature`; read-only btrfs backends should
+    /// return `FfsError::ReadOnly`.
+    fn btrfs_set_default_subvol(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _treeid: u64,
+    ) -> ffs_error::Result<()> {
+        Err(FfsError::UnsupportedFeature(
+            "btrfs_set_default_subvol is not supported by this backend".to_owned(),
+        ))
+    }
+
     /// Get quota configuration and status.
     ///
     /// Returns a summary of which quota types are enabled and their
@@ -2321,6 +2337,15 @@ impl<T: FsOps + ?Sized> FsOps for Arc<T> {
         transid: u64,
     ) -> ffs_error::Result<()> {
         self.as_ref().btrfs_wait_sync(cx, scope, transid)
+    }
+
+    fn btrfs_set_default_subvol(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        treeid: u64,
+    ) -> ffs_error::Result<()> {
+        self.as_ref().btrfs_set_default_subvol(cx, scope, treeid)
     }
 
     fn btrfs_ino_lookup(
