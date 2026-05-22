@@ -7902,6 +7902,12 @@ mod tests {
     }
 
     #[test]
+    fn access_predictor_default_uses_max_entries() {
+        let p = AccessPredictor::default();
+        assert_eq!(p.max_entries, MAX_ACCESS_PREDICTOR_ENTRIES);
+    }
+
+    #[test]
     fn access_predictor_fetch_size_returns_requested_for_unknown_inode() {
         let p = AccessPredictor::default();
         let size = p.fetch_size(InodeNumber(999), 0, 4096);
