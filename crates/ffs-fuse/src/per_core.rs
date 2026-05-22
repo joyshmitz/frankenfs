@@ -1060,4 +1060,73 @@ mod tests {
         };
         assert_eq!(cfg.resolved_cores(), 1);
     }
+
+    // ── AggregateMetrics edge cases ─────────────────────────────────────────
+
+    #[test]
+    fn aggregate_metrics_empty_per_core() {
+        let agg = AggregateMetrics {
+            total_requests: 0,
+            total_pending_requests: 0,
+            total_cache_hits: 0,
+            total_cache_misses: 0,
+            aggregate_hit_rate: 0.0,
+            per_core: vec![],
+        };
+        assert_eq!(agg.hottest_core(), None);
+        assert_eq!(agg.coldest_core(), None);
+        assert!((agg.imbalance_ratio() - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn aggregate_metrics_single_core() {
+        let agg = AggregateMetrics {
+            total_requests: 100,
+            total_pending_requests: 5,
+            total_cache_hits: 70,
+            total_cache_misses: 30,
+            aggregate_hit_rate: 0.7,
+            per_core: vec![CoreMetricsSnapshot {
+                requests: 100,
+                pending_requests: 5,
+                cache_hits: 70,
+                cache_misses: 30,
+                stolen_from: 0,
+                stolen_to: 0,
+            }],
+        };
+        assert_eq!(agg.hottest_core(), Some((0, 100)));
+        assert_eq!(agg.coldest_core(), Some((0, 100)));
+        assert!((agg.imbalance_ratio() - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn aggregate_metrics_imbalance_infinity_when_min_zero() {
+        let agg = AggregateMetrics {
+            total_requests: 100,
+            total_pending_requests: 0,
+            total_cache_hits: 0,
+            total_cache_misses: 0,
+            aggregate_hit_rate: 0.0,
+            per_core: vec![
+                CoreMetricsSnapshot {
+                    requests: 100,
+                    pending_requests: 0,
+                    cache_hits: 0,
+                    cache_misses: 0,
+                    stolen_from: 0,
+                    stolen_to: 0,
+                },
+                CoreMetricsSnapshot {
+                    requests: 0,
+                    pending_requests: 0,
+                    cache_hits: 0,
+                    cache_misses: 0,
+                    stolen_from: 0,
+                    stolen_to: 0,
+                },
+            ],
+        };
+        assert!(agg.imbalance_ratio().is_infinite());
+    }
 }
