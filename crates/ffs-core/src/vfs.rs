@@ -39,6 +39,17 @@ pub struct FileCloneRange {
     pub dest_offset: u64,
 }
 
+/// Limit payload supplied by `BTRFS_IOC_QGROUP_LIMIT`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BtrfsQgroupLimitRequest {
+    pub qgroupid: u64,
+    pub flags: u64,
+    pub max_rfer: u64,
+    pub max_excl: u64,
+    pub rsv_rfer: u64,
+    pub rsv_excl: u64,
+}
+
 /// Filesystem-agnostic file type for VFS operations.
 ///
 /// This is the semantics-level file type used by [`FsOps`] methods. It unifies
@@ -1495,6 +1506,20 @@ pub trait FsOps: Send + Sync {
         ))
     }
 
+    /// Set btrfs qgroup limits (`BTRFS_IOC_QGROUP_LIMIT`).
+    ///
+    /// Non-btrfs backends must return `FfsError::UnsupportedFeature`.
+    fn btrfs_limit_qgroup(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _limit: BtrfsQgroupLimitRequest,
+    ) -> ffs_error::Result<()> {
+        Err(FfsError::UnsupportedFeature(
+            "btrfs_limit_qgroup is not supported by this backend".to_owned(),
+        ))
+    }
+
     /// Force filesystem sync/commit (`BTRFS_IOC_SYNC`, `syncfs`).
     ///
     /// For btrfs: commits current transaction if in RW mode.
@@ -2554,6 +2579,15 @@ impl<T: FsOps + ?Sized> FsOps for Arc<T> {
     ) -> ffs_error::Result<()> {
         self.as_ref()
             .btrfs_create_qgroup(cx, scope, create, qgroupid)
+    }
+
+    fn btrfs_limit_qgroup(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        limit: BtrfsQgroupLimitRequest,
+    ) -> ffs_error::Result<()> {
+        self.as_ref().btrfs_limit_qgroup(cx, scope, limit)
     }
 
     fn set_inode_flags(

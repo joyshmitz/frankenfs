@@ -11,10 +11,10 @@ pub mod per_core;
 
 use asupersync::Cx;
 use ffs_core::{
-    BackpressureDecision, BackpressureGate, BtrfsTreeSearchKey, DirEntry as FfsDirEntry,
-    FIEMAP_EXTENT_UNWRITTEN, FiemapExtent, FileCloneRange, FileType as FfsFileType, FsOps, FsStat,
-    FsxattrInfo, InodeAttr, ReleaseRequest, RequestOp, RequestScope, SeekWhence, SetAttrRequest,
-    XattrSetMode,
+    BackpressureDecision, BackpressureGate, BtrfsQgroupLimitRequest, BtrfsTreeSearchKey,
+    DirEntry as FfsDirEntry, FIEMAP_EXTENT_UNWRITTEN, FiemapExtent, FileCloneRange,
+    FileType as FfsFileType, FsOps, FsStat, FsxattrInfo, InodeAttr, ReleaseRequest, RequestOp,
+    RequestScope, SeekWhence, SetAttrRequest, XattrSetMode,
 };
 use ffs_error::FfsError;
 use ffs_types::{EXT4_EXTENTS_FL, InodeNumber};
@@ -272,6 +272,10 @@ const BTRFS_QGROUP_ASSIGN_ARGS_SIZE: u32 = 24;
 /// Creates or removes a btrfs qgroup.
 const BTRFS_IOC_QGROUP_CREATE: u32 = 0x4010_942A;
 const BTRFS_QGROUP_CREATE_ARGS_SIZE: u32 = 16;
+/// `BTRFS_IOC_QGROUP_LIMIT` = `_IOR(0x94, 43, struct btrfs_ioctl_qgroup_limit_args)`.
+/// Sets btrfs qgroup limit fields.
+const BTRFS_IOC_QGROUP_LIMIT: u32 = 0x8030_942B;
+const BTRFS_QGROUP_LIMIT_ARGS_SIZE: u32 = 48;
 /// `BTRFS_IOC_DEFRAG_RANGE` = `_IOW(0x94, 16, struct btrfs_ioctl_defrag_range_args)`.
 /// Defragment a range of a file.
 const BTRFS_IOC_DEFRAG_RANGE: u32 = 0x4030_9410;
@@ -4043,6 +4047,29 @@ impl FrankenFuse {
                     Err(error) => IoctlResult::Error(error.to_errno()),
                 }
             }
+            BTRFS_IOC_QGROUP_LIMIT => {
+                if in_data.len() < BTRFS_QGROUP_LIMIT_ARGS_SIZE as usize {
+                    return IoctlResult::Error(libc::EINVAL);
+                }
+                if self.inner.read_only {
+                    return IoctlResult::Error(libc::EROFS);
+                }
+                let limit = BtrfsQgroupLimitRequest {
+                    qgroupid: u64::from_le_bytes(in_data[0..8].try_into().unwrap_or([0; 8])),
+                    flags: u64::from_le_bytes(in_data[8..16].try_into().unwrap_or([0; 8])),
+                    max_rfer: u64::from_le_bytes(in_data[16..24].try_into().unwrap_or([0; 8])),
+                    max_excl: u64::from_le_bytes(in_data[24..32].try_into().unwrap_or([0; 8])),
+                    rsv_rfer: u64::from_le_bytes(in_data[32..40].try_into().unwrap_or([0; 8])),
+                    rsv_excl: u64::from_le_bytes(in_data[40..48].try_into().unwrap_or([0; 8])),
+                };
+                let cx = Self::cx_for_request();
+                match self.with_request_scope(&cx, RequestOp::IoctlWrite, |cx, scope| {
+                    self.inner.ops.btrfs_limit_qgroup(cx, scope, limit)
+                }) {
+                    Ok(()) => IoctlResult::Data(Vec::new()),
+                    Err(error) => IoctlResult::Error(error.to_errno()),
+                }
+            }
             BTRFS_IOC_DEFRAG_RANGE => {
                 // Input: 48-byte struct with start, len, flags, extent_thresh, compress_type
                 if in_data.len() < BTRFS_DEFRAG_RANGE_ARGS_SIZE as usize {
@@ -6675,6 +6702,7 @@ mod tests {
         BtrfsQuotaControl(u64, u64),
         BtrfsAssignQgroup(u64, u64, u64),
         BtrfsCreateQgroup(u64, u64),
+        BtrfsLimitQgroup(BtrfsQgroupLimitRequest),
         Getattr(InodeNumber),
         Statfs(InodeNumber),
         GetVersion(InodeNumber),
@@ -7497,6 +7525,19 @@ mod tests {
                 .lock()
                 .expect("lock ioctl calls")
                 .push(IoctlCall::BtrfsCreateQgroup(create, qgroupid));
+            Ok(())
+        }
+
+        fn btrfs_limit_qgroup(
+            &self,
+            _cx: &Cx,
+            _scope: &mut RequestScope,
+            limit: BtrfsQgroupLimitRequest,
+        ) -> ffs_error::Result<()> {
+            self.calls
+                .lock()
+                .expect("lock ioctl calls")
+                .push(IoctlCall::BtrfsLimitQgroup(limit));
             Ok(())
         }
 
@@ -9019,6 +9060,82 @@ mod tests {
         let input = vec![0_u8; BTRFS_QGROUP_CREATE_ARGS_SIZE as usize];
 
         let response = dispatch_ioctl_for_testing(&fuse, 1, 0, BTRFS_IOC_QGROUP_CREATE, &input, 0);
+        assert_eq!(response, IoctlResult::Error(libc::EROFS));
+        assert!(calls.lock().expect("lock ioctl calls").is_empty());
+    }
+
+    #[test]
+    fn dispatch_ioctl_btrfs_qgroup_limit_uses_write_scope() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let fuse = FrankenFuse::with_options(
+            Box::new(IoctlRecordingFs::new(0, Arc::clone(&calls))),
+            &MountOptions {
+                read_only: false,
+                ..MountOptions::default()
+            },
+        );
+        let expected = BtrfsQgroupLimitRequest {
+            qgroupid: 256,
+            flags: 0x3,
+            max_rfer: 10,
+            max_excl: 11,
+            rsv_rfer: 12,
+            rsv_excl: 13,
+        };
+        let mut input = Vec::with_capacity(BTRFS_QGROUP_LIMIT_ARGS_SIZE as usize);
+        for field in [
+            expected.qgroupid,
+            expected.flags,
+            expected.max_rfer,
+            expected.max_excl,
+            expected.rsv_rfer,
+            expected.rsv_excl,
+        ] {
+            input.extend_from_slice(&field.to_le_bytes());
+        }
+
+        let response = dispatch_ioctl_for_testing(&fuse, 1, 0, BTRFS_IOC_QGROUP_LIMIT, &input, 0);
+        assert_eq!(response, IoctlResult::Data(Vec::new()));
+        assert_eq!(
+            calls.lock().expect("lock ioctl calls").as_slice(),
+            &[
+                IoctlCall::Begin(RequestOp::IoctlWrite),
+                IoctlCall::BtrfsLimitQgroup(expected),
+                IoctlCall::End(RequestOp::IoctlWrite),
+            ]
+        );
+    }
+
+    #[test]
+    fn dispatch_ioctl_btrfs_qgroup_limit_rejects_short_input() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let fuse = FrankenFuse::with_options(
+            Box::new(IoctlRecordingFs::new(0, Arc::clone(&calls))),
+            &MountOptions {
+                read_only: false,
+                ..MountOptions::default()
+            },
+        );
+
+        let response = dispatch_ioctl_for_testing(
+            &fuse,
+            1,
+            0,
+            BTRFS_IOC_QGROUP_LIMIT,
+            &[0_u8; BTRFS_QGROUP_LIMIT_ARGS_SIZE as usize - 1],
+            0,
+        );
+        assert_eq!(response, IoctlResult::Error(libc::EINVAL));
+        assert!(calls.lock().expect("lock ioctl calls").is_empty());
+    }
+
+    #[test]
+    fn dispatch_ioctl_btrfs_qgroup_limit_read_only_returns_erofs() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let fuse = FrankenFuse::new(Box::new(IoctlRecordingFs::new(0, Arc::clone(&calls))));
+        let input = vec![0_u8; BTRFS_QGROUP_LIMIT_ARGS_SIZE as usize];
+
+        let response = dispatch_ioctl_for_testing(&fuse, 1, 0, BTRFS_IOC_QGROUP_LIMIT, &input, 0);
         assert_eq!(response, IoctlResult::Error(libc::EROFS));
         assert!(calls.lock().expect("lock ioctl calls").is_empty());
     }

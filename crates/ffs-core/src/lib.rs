@@ -12,10 +12,10 @@ pub use degradation::{
     DegradationPolicy, DegradationTransition, PressureMonitor,
 };
 pub use vfs::{
-    BtrfsTreeSearchKey, DirEntry, FIEMAP_EXTENT_LAST, FIEMAP_EXTENT_UNWRITTEN, FiemapExtent,
-    FileCloneRange, FileType, FsOps, FsStat, FsxattrInfo, InodeAttr, QuotaEntry, QuotaInfo,
-    QuotaType, ReleaseRequest, RequestOp, RequestScope, SeekWhence, SetAttrRequest, XattrSetMode,
-    xflags,
+    BtrfsQgroupLimitRequest, BtrfsTreeSearchKey, DirEntry, FIEMAP_EXTENT_LAST,
+    FIEMAP_EXTENT_UNWRITTEN, FiemapExtent, FileCloneRange, FileType, FsOps, FsStat, FsxattrInfo,
+    InodeAttr, QuotaEntry, QuotaInfo, QuotaType, ReleaseRequest, RequestOp, RequestScope,
+    SeekWhence, SetAttrRequest, XattrSetMode, xflags,
 };
 // Re-export repair lifecycle for convenient wiring.
 pub use ffs_block::RepairFlushLifecycle;
@@ -19690,6 +19690,22 @@ impl FsOps for OpenFs {
             )),
             FsFlavor::Btrfs(_) => Err(FfsError::UnsupportedFeature(
                 "btrfs qgroup create is not implemented".to_owned(),
+            )),
+        }
+    }
+
+    fn btrfs_limit_qgroup(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _limit: BtrfsQgroupLimitRequest,
+    ) -> ffs_error::Result<()> {
+        match &self.flavor {
+            FsFlavor::Ext4(_) => Err(FfsError::UnsupportedFeature(
+                "BTRFS_IOC_QGROUP_LIMIT is not supported on ext4 filesystems".to_owned(),
+            )),
+            FsFlavor::Btrfs(_) => Err(FfsError::UnsupportedFeature(
+                "btrfs qgroup limit is not implemented".to_owned(),
             )),
         }
     }
