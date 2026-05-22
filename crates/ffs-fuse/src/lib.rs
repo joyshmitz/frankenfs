@@ -17840,6 +17840,23 @@ CUSTOM("congestion_threshold=3")"#;
     }
 
     #[test]
+    fn mount_option_labels_for_fuzzing_returns_readable_labels() {
+        let opts = MountOptions {
+            read_only: true,
+            allow_other: true,
+            auto_unmount: false,
+            writeback_cache: WritebackCacheMode::Disabled,
+            ioctl_trace_path: None,
+            worker_threads: 0,
+        };
+        let labels = mount_option_labels_for_fuzzing(&opts);
+        assert!(labels.contains(&"ro".to_owned()));
+        assert!(labels.contains(&"allow_other".to_owned()));
+        assert!(labels.contains(&"fsname=frankenfs".to_owned()));
+        assert!(labels.contains(&"subtype=ffs".to_owned()));
+    }
+
+    #[test]
     fn metrics_snapshot_equality() {
         let a = MetricsSnapshot {
             requests_total: 10,
