@@ -7901,6 +7901,39 @@ mod tests {
     }
 
     #[test]
+    fn readahead_manager_new_clamps_max_pending() {
+        let r = ReadaheadManager::new(0);
+        assert_eq!(r.max_pending, 1);
+    }
+
+    #[test]
+    fn readahead_manager_insert_and_take() {
+        let r = ReadaheadManager::new(10);
+        let data = vec![1, 2, 3, 4];
+        r.insert(InodeNumber(1), 0, data.clone());
+        let taken = r.take(InodeNumber(1), 0, 4);
+        assert_eq!(taken, Some(data));
+    }
+
+    #[test]
+    fn readahead_manager_take_removes_entry() {
+        let r = ReadaheadManager::new(10);
+        r.insert(InodeNumber(1), 0, vec![1, 2, 3, 4]);
+        let _ = r.take(InodeNumber(1), 0, 4);
+        let second_take = r.take(InodeNumber(1), 0, 4);
+        assert!(second_take.is_none());
+    }
+
+    #[test]
+    fn readahead_manager_invalidate_removes_entry() {
+        let r = ReadaheadManager::new(10);
+        r.insert(InodeNumber(1), 0, vec![1, 2, 3, 4]);
+        r.invalidate_inode(InodeNumber(1));
+        let taken = r.take(InodeNumber(1), 0, 4);
+        assert!(taken.is_none());
+    }
+
+    #[test]
     fn build_mount_options_includes_ro_when_read_only() {
         let opts = MountOptions::default();
         let mount_opts = build_mount_options(&opts);
