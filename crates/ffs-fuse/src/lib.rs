@@ -184,6 +184,12 @@ const FITHAW: u32 = 0xC004_5878;
 /// `FIGETBSZ` = `_IO(0x00, 2)`.
 /// Get filesystem block size.
 const FIGETBSZ: u32 = 0x0000_0002;
+/// `FS_IOC_GETVERSION` = `_IOR('v', 1, long)`.
+/// Get inode generation number (generic VFS variant).
+const FS_IOC_GETVERSION: u32 = 0x8008_7601;
+/// `FS_IOC_SETVERSION` = `_IOW('v', 2, long)`.
+/// Set inode generation number (generic VFS variant).
+const FS_IOC_SETVERSION: u32 = 0x4008_7602;
 /// `FS_IOC_GETFSLABEL` = `_IOR(0x94, 0x31, char[FSLABEL_MAX])` on x86_64.
 const FS_IOC_GETFSLABEL: u32 = 0x8100_9431;
 /// `FS_IOC_SETFSLABEL` = `_IOW(0x94, 0x32, char[FSLABEL_MAX])` on x86_64.
@@ -3303,7 +3309,7 @@ impl FrankenFuse {
                     Err(error) => IoctlResult::Error(error.to_errno()),
                 }
             }
-            EXT4_IOC_GETVERSION => {
+            cmd if cmd == EXT4_IOC_GETVERSION || cmd == FS_IOC_GETVERSION => {
                 if out_size < u32::try_from(std::mem::size_of::<u32>()).unwrap_or(u32::MAX) {
                     return IoctlResult::Error(libc::EINVAL);
                 }
@@ -3477,7 +3483,7 @@ impl FrankenFuse {
                     Err(error) => IoctlResult::Error(error.to_errno()),
                 }
             }
-            EXT4_IOC_SETVERSION => {
+            cmd if cmd == EXT4_IOC_SETVERSION || cmd == FS_IOC_SETVERSION => {
                 if self.inner.read_only {
                     return IoctlResult::Error(libc::EROFS);
                 }
