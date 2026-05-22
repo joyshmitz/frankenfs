@@ -1480,6 +1480,21 @@ pub trait FsOps: Send + Sync {
         ))
     }
 
+    /// Create or remove a btrfs qgroup (`BTRFS_IOC_QGROUP_CREATE`).
+    ///
+    /// Non-btrfs backends must return `FfsError::UnsupportedFeature`.
+    fn btrfs_create_qgroup(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _create: u64,
+        _qgroupid: u64,
+    ) -> ffs_error::Result<()> {
+        Err(FfsError::UnsupportedFeature(
+            "btrfs_create_qgroup is not supported by this backend".to_owned(),
+        ))
+    }
+
     /// Force filesystem sync/commit (`BTRFS_IOC_SYNC`, `syncfs`).
     ///
     /// For btrfs: commits current transaction if in RW mode.
@@ -2528,6 +2543,17 @@ impl<T: FsOps + ?Sized> FsOps for Arc<T> {
     ) -> ffs_error::Result<()> {
         self.as_ref()
             .btrfs_assign_qgroup(cx, scope, assign, src, dst)
+    }
+
+    fn btrfs_create_qgroup(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        create: u64,
+        qgroupid: u64,
+    ) -> ffs_error::Result<()> {
+        self.as_ref()
+            .btrfs_create_qgroup(cx, scope, create, qgroupid)
     }
 
     fn set_inode_flags(

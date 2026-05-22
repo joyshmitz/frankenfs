@@ -19677,6 +19677,23 @@ impl FsOps for OpenFs {
         }
     }
 
+    fn btrfs_create_qgroup(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _create: u64,
+        _qgroupid: u64,
+    ) -> ffs_error::Result<()> {
+        match &self.flavor {
+            FsFlavor::Ext4(_) => Err(FfsError::UnsupportedFeature(
+                "BTRFS_IOC_QGROUP_CREATE is not supported on ext4 filesystems".to_owned(),
+            )),
+            FsFlavor::Btrfs(_) => Err(FfsError::UnsupportedFeature(
+                "btrfs qgroup create is not implemented".to_owned(),
+            )),
+        }
+    }
+
     fn set_fs_label(
         &self,
         cx: &Cx,
