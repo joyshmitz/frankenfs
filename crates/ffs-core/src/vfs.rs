@@ -2625,6 +2625,17 @@ impl<T: FsOps + ?Sized> FsOps for Arc<T> {
         self.as_ref().btrfs_tree_search(cx, scope, key)
     }
 
+    fn get_btrfs_logical_ino_v2(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        logical: u64,
+        args: &[u8],
+    ) -> ffs_error::Result<Vec<u8>> {
+        self.as_ref()
+            .get_btrfs_logical_ino_v2(cx, scope, logical, args)
+    }
+
     fn get_quota_info(&self, cx: &Cx, scope: &mut RequestScope) -> ffs_error::Result<QuotaInfo> {
         self.as_ref().get_quota_info(cx, scope)
     }
@@ -2699,6 +2710,15 @@ impl<T: FsOps + ?Sized> FsOps for Arc<T> {
         vol_args: &[u8],
     ) -> ffs_error::Result<()> {
         self.as_ref().btrfs_rm_dev_v2(cx, scope, vol_args)
+    }
+
+    fn btrfs_snap_destroy_v2(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        vol_args: &[u8],
+    ) -> ffs_error::Result<()> {
+        self.as_ref().btrfs_snap_destroy_v2(cx, scope, vol_args)
     }
 
     fn btrfs_add_dev(

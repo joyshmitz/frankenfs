@@ -4169,8 +4169,11 @@ impl FrankenFuse {
                 if in_data.len() < BTRFS_VOL_ARGS_SIZE as usize {
                     return IoctlResult::Error(libc::EINVAL);
                 }
+                if self.inner.read_only {
+                    return IoctlResult::Error(libc::EROFS);
+                }
                 let cx = Self::cx_for_request();
-                match self.with_request_scope(&cx, RequestOp::IoctlRead, |cx, scope| {
+                match self.with_request_scope(&cx, RequestOp::IoctlWrite, |cx, scope| {
                     self.inner.ops.btrfs_snap_destroy_v2(cx, scope, in_data)
                 }) {
                     Ok(()) => IoctlResult::Data(Vec::new()),
@@ -6808,6 +6811,7 @@ mod tests {
         GetBtrfsDevInfo(u64, [u8; 16]),
         BtrfsTreeSearch(BtrfsTreeSearchKey),
         BtrfsInoLookup(u64, u64),
+        BtrfsLogicalInoV2(u64, Vec<u8>),
         BtrfsQuotaRescanWait,
         BtrfsQuotaRescanStatus,
         BtrfsStartQuotaRescan(u64),
@@ -6816,6 +6820,7 @@ mod tests {
         BtrfsCreateQgroup(u64, u64),
         BtrfsLimitQgroup(BtrfsQgroupLimitRequest),
         BtrfsRemoveDeviceV2(Vec<u8>),
+        BtrfsSnapDestroyV2(Vec<u8>),
         BtrfsAddDevice(Vec<u8>),
         BtrfsRemoveDevice(Vec<u8>),
         Getattr(InodeNumber),
