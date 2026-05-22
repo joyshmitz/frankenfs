@@ -19882,6 +19882,51 @@ impl FsOps for OpenFs {
         }
     }
 
+    fn clone_file(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _dest_fh: u64,
+        _src_fd: i32,
+    ) -> ffs_error::Result<()> {
+        match &self.flavor {
+            FsFlavor::Ext4(_) => {
+                // ext4 doesn't support reflinks
+                Err(FfsError::UnsupportedFeature(
+                    "FICLONE is not supported on ext4 filesystems".to_owned(),
+                ))
+            }
+            FsFlavor::Btrfs(_) => {
+                // Reflink requires extent sharing in the extent tree
+                Err(FfsError::ReadOnly)
+            }
+        }
+    }
+
+    fn clone_file_range(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _dest_fh: u64,
+        _src_fd: i64,
+        _src_offset: u64,
+        _src_length: u64,
+        _dest_offset: u64,
+    ) -> ffs_error::Result<()> {
+        match &self.flavor {
+            FsFlavor::Ext4(_) => {
+                // ext4 doesn't support reflinks
+                Err(FfsError::UnsupportedFeature(
+                    "FICLONERANGE is not supported on ext4 filesystems".to_owned(),
+                ))
+            }
+            FsFlavor::Btrfs(_) => {
+                // Reflink requires extent sharing in the extent tree
+                Err(FfsError::ReadOnly)
+            }
+        }
+    }
+
     fn btrfs_ino_lookup(
         &self,
         cx: &Cx,

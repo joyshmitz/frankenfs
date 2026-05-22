@@ -1579,6 +1579,41 @@ pub trait FsOps: Send + Sync {
         ))
     }
 
+    /// Clone (reflink) entire file for `FICLONE`.
+    ///
+    /// Creates a CoW copy where dest file shares blocks with source.
+    /// Returns `FfsError::ReadOnly` for read-only mounts.
+    fn clone_file(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _dest_fh: u64,
+        _src_fd: i32,
+    ) -> ffs_error::Result<()> {
+        Err(FfsError::UnsupportedFeature(
+            "clone_file (FICLONE) is not supported by this backend".to_owned(),
+        ))
+    }
+
+    /// Clone a range of blocks for `FICLONERANGE`.
+    ///
+    /// Creates a CoW copy of a range where dest shares blocks with source.
+    /// Returns `FfsError::ReadOnly` for read-only mounts.
+    fn clone_file_range(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _dest_fh: u64,
+        _src_fd: i64,
+        _src_offset: u64,
+        _src_length: u64,
+        _dest_offset: u64,
+    ) -> ffs_error::Result<()> {
+        Err(FfsError::UnsupportedFeature(
+            "clone_file_range (FICLONERANGE) is not supported by this backend".to_owned(),
+        ))
+    }
+
     /// Set filesystem-specific inode flags (ext4 `EXT4_IOC_SETFLAGS`).
     ///
     /// Updates the raw `i_flags` field. The implementation should validate
