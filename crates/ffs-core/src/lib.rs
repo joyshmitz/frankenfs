@@ -19990,6 +19990,27 @@ impl FsOps for OpenFs {
         }
     }
 
+    fn get_btrfs_logical_ino_v2(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _logical: u64,
+        _args: &[u8],
+    ) -> ffs_error::Result<Vec<u8>> {
+        match &self.flavor {
+            FsFlavor::Ext4(_) => Err(FfsError::UnsupportedFeature(
+                "BTRFS_IOC_LOGICAL_INO_V2 is not supported on ext4 filesystems".to_owned(),
+            )),
+            FsFlavor::Btrfs(_) => {
+                // V2 adds flags field but result format is same as v1
+                let mut buf = vec![0_u8; 16];
+                buf[0..8].copy_from_slice(&0_u64.to_le_bytes()); // elem_cnt
+                buf[8..16].copy_from_slice(&0_u64.to_le_bytes()); // elem_missed
+                Ok(buf)
+            }
+        }
+    }
+
     fn btrfs_scrub_start(
         &self,
         _cx: &Cx,
@@ -20093,6 +20114,23 @@ impl FsOps for OpenFs {
         }
     }
 
+    fn btrfs_snap_destroy_v2(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _vol_args: &[u8],
+    ) -> ffs_error::Result<()> {
+        match &self.flavor {
+            FsFlavor::Ext4(_) => Err(FfsError::UnsupportedFeature(
+                "BTRFS_IOC_SNAP_DESTROY_V2 is not supported on ext4 filesystems".to_owned(),
+            )),
+            FsFlavor::Btrfs(_) => {
+                // V2 uses subvolid instead of name but still requires tree removal
+                Err(FfsError::ReadOnly)
+            }
+        }
+    }
+
     fn btrfs_subvol_create(
         &self,
         _cx: &Cx,
@@ -20138,6 +20176,22 @@ impl FsOps for OpenFs {
             )),
             FsFlavor::Btrfs(_) => Err(FfsError::UnsupportedFeature(
                 "btrfs device add is not implemented".to_owned(),
+            )),
+        }
+    }
+
+    fn btrfs_rm_dev(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _vol_args: &[u8],
+    ) -> ffs_error::Result<()> {
+        match &self.flavor {
+            FsFlavor::Ext4(_) => Err(FfsError::UnsupportedFeature(
+                "BTRFS_IOC_RM_DEV is not supported on ext4 filesystems".to_owned(),
+            )),
+            FsFlavor::Btrfs(_) => Err(FfsError::UnsupportedFeature(
+                "btrfs device removal is not implemented".to_owned(),
             )),
         }
     }

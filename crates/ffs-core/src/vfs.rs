@@ -1681,6 +1681,21 @@ pub trait FsOps: Send + Sync {
         ))
     }
 
+    /// Extended logical-to-inode lookup for `BTRFS_IOC_LOGICAL_INO_V2`.
+    ///
+    /// V2 adds flags field (BTRFS_LOGICAL_INO_ARGS_IGNORE_OFFSET).
+    fn get_btrfs_logical_ino_v2(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _logical: u64,
+        _args: &[u8],
+    ) -> ffs_error::Result<Vec<u8>> {
+        Err(FfsError::UnsupportedFeature(
+            "get_btrfs_logical_ino_v2 is not supported by this backend".to_owned(),
+        ))
+    }
+
     /// Start a btrfs scrub operation for `BTRFS_IOC_SCRUB`.
     ///
     /// Returns 1024-byte scrub_args struct with progress filled in.
@@ -1768,6 +1783,21 @@ pub trait FsOps: Send + Sync {
         ))
     }
 
+    /// Delete a snapshot for `BTRFS_IOC_SNAP_DESTROY_V2`.
+    ///
+    /// V2 variant takes vol_args_v2 with subvolid field.
+    /// Non-btrfs backends must return `FfsError::UnsupportedFeature`.
+    fn btrfs_snap_destroy_v2(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _vol_args: &[u8],
+    ) -> ffs_error::Result<()> {
+        Err(FfsError::UnsupportedFeature(
+            "btrfs_snap_destroy_v2 is not supported by this backend".to_owned(),
+        ))
+    }
+
     /// Create a subvolume for `BTRFS_IOC_SUBVOL_CREATE_V2`.
     ///
     /// Takes raw vol_args_v2 struct bytes containing flags and name.
@@ -1811,6 +1841,21 @@ pub trait FsOps: Send + Sync {
     ) -> ffs_error::Result<()> {
         Err(FfsError::UnsupportedFeature(
             "btrfs_add_dev is not supported by this backend".to_owned(),
+        ))
+    }
+
+    /// Remove a btrfs device for `BTRFS_IOC_RM_DEV`.
+    ///
+    /// Takes raw `btrfs_ioctl_vol_args` bytes containing the device path.
+    /// Non-btrfs backends must return `FfsError::UnsupportedFeature`.
+    fn btrfs_rm_dev(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _vol_args: &[u8],
+    ) -> ffs_error::Result<()> {
+        Err(FfsError::UnsupportedFeature(
+            "btrfs_rm_dev is not supported by this backend".to_owned(),
         ))
     }
 
@@ -2663,6 +2708,15 @@ impl<T: FsOps + ?Sized> FsOps for Arc<T> {
         vol_args: &[u8],
     ) -> ffs_error::Result<()> {
         self.as_ref().btrfs_add_dev(cx, scope, vol_args)
+    }
+
+    fn btrfs_rm_dev(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        vol_args: &[u8],
+    ) -> ffs_error::Result<()> {
+        self.as_ref().btrfs_rm_dev(cx, scope, vol_args)
     }
 
     fn set_inode_flags(
