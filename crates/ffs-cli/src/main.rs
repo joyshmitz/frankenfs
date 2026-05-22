@@ -640,7 +640,7 @@ enum Command {
     Info {
         /// Path to the filesystem image.
         image: PathBuf,
-        /// Include ext4 block group table.
+        /// Include block group table (ext4) or chunk map (btrfs).
         #[arg(long)]
         groups: bool,
         /// Include MVCC engine status.
