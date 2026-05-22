@@ -7706,6 +7706,17 @@ mod tests {
     }
 
     #[test]
+    fn encode_move_ext_response_layout() {
+        let buf = FrankenFuse::encode_move_ext_response(7, 4096, 8192, 1024, 512);
+        assert_eq!(buf.len(), MOVE_EXT_SIZE);
+        assert_eq!(u32::from_ne_bytes(buf[MOVE_EXT_DONOR_FD_OFFSET..MOVE_EXT_DONOR_FD_OFFSET + 4].try_into().unwrap()), 7);
+        assert_eq!(u64::from_ne_bytes(buf[MOVE_EXT_ORIG_START_OFFSET..MOVE_EXT_ORIG_START_OFFSET + 8].try_into().unwrap()), 4096);
+        assert_eq!(u64::from_ne_bytes(buf[MOVE_EXT_DONOR_START_OFFSET..MOVE_EXT_DONOR_START_OFFSET + 8].try_into().unwrap()), 8192);
+        assert_eq!(u64::from_ne_bytes(buf[MOVE_EXT_LEN_OFFSET..MOVE_EXT_LEN_OFFSET + 8].try_into().unwrap()), 1024);
+        assert_eq!(u64::from_ne_bytes(buf[MOVE_EXT_MOVED_LEN_OFFSET..MOVE_EXT_MOVED_LEN_OFFSET + 8].try_into().unwrap()), 512);
+    }
+
+    #[test]
     fn clamp_fiemap_extent_count_request_limited() {
         // Request 5 extents but buffer can hold more - limited by request
         let out_size = (FIEMAP_HEADER_SIZE + 10 * FIEMAP_EXTENT_SIZE) as u32;
