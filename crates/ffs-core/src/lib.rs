@@ -19125,9 +19125,22 @@ impl FsOps for OpenFs {
                     self.read_inode_with_scope(cx, scope, Self::ext4_canonical_inode(ino))?;
                 Ok(inode.generation)
             }
-            FsFlavor::Btrfs(_) => Err(FfsError::UnsupportedFeature(
-                "get_inode_generation is not supported for btrfs".to_owned(),
-            )),
+            FsFlavor::Btrfs(_) => {
+                let canonical = self.btrfs_canonical_inode(ino)?;
+                let generation = if let Some(alloc_mutex) = self.btrfs_alloc_state.as_ref() {
+                    let alloc = alloc_mutex.lock();
+                    let inode = self.btrfs_read_inode_from_tree(&alloc, canonical)?;
+                    drop(alloc);
+                    inode.generation
+                } else {
+                    let items = self.walk_btrfs_fs_tree(cx)?;
+                    let inode_item = Self::btrfs_find_inode_item(&items, canonical)?;
+                    let inode =
+                        parse_inode_item(&inode_item.data).map_err(|e| parse_to_ffs_error(&e))?;
+                    inode.generation
+                };
+                Ok(generation as u32)
+            }
         }
     }
 
