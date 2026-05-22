@@ -7456,7 +7456,7 @@ mod tests {
 
     #[test]
     fn parse_fs_label_request_valid() {
-        let mut data = b"my_label\0padding".to_vec();
+        let data = b"my_label\0padding".to_vec();
         let label = FrankenFuse::parse_fs_label_request(&data).unwrap();
         assert_eq!(label, b"my_label");
     }
@@ -8451,6 +8451,7 @@ mod tests {
         blksize: u32,
         move_ext_result: Option<u64>,
         move_ext_errno: Option<i32>,
+        register_move_ext_errno: Option<i32>,
         commit_errno: Option<i32>,
         fs_label: Vec<u8>,
         btrfs_fs_info: Option<Vec<u8>>,
@@ -8474,6 +8475,7 @@ mod tests {
                 blksize: 4096,
                 move_ext_result: None,
                 move_ext_errno: None,
+                register_move_ext_errno: None,
                 commit_errno: None,
                 fs_label: b"test_label\0".to_vec(),
                 btrfs_fs_info: None,
@@ -8497,6 +8499,7 @@ mod tests {
                 blksize: 4096,
                 move_ext_result: None,
                 move_ext_errno: None,
+                register_move_ext_errno: None,
                 commit_errno: None,
                 fs_label: b"test_label\0".to_vec(),
                 btrfs_fs_info: None,
@@ -8523,6 +8526,7 @@ mod tests {
                 blksize: 4096,
                 move_ext_result: None,
                 move_ext_errno: None,
+                register_move_ext_errno: None,
                 commit_errno: None,
                 fs_label: b"test_label\0".to_vec(),
                 btrfs_fs_info: None,
@@ -8546,6 +8550,7 @@ mod tests {
                 blksize: 4096,
                 move_ext_result: None,
                 move_ext_errno: None,
+                register_move_ext_errno: None,
                 commit_errno: None,
                 fs_label: b"test_label\0".to_vec(),
                 btrfs_fs_info: None,
@@ -8569,6 +8574,7 @@ mod tests {
                 blksize: 4096,
                 move_ext_result: Some(moved_len),
                 move_ext_errno: None,
+                register_move_ext_errno: None,
                 commit_errno: None,
                 fs_label: b"test_label\0".to_vec(),
                 btrfs_fs_info: None,
@@ -8583,6 +8589,12 @@ mod tests {
         fn with_move_ext_error(errno: i32, calls: Arc<Mutex<Vec<IoctlCall>>>) -> Self {
             let mut fs = Self::with_move_ext_result(0, calls);
             fs.move_ext_errno = Some(errno);
+            fs
+        }
+
+        fn with_move_ext_register_error(errno: i32, calls: Arc<Mutex<Vec<IoctlCall>>>) -> Self {
+            let mut fs = Self::with_move_ext_result(1, calls);
+            fs.register_move_ext_errno = Some(errno);
             fs
         }
 
@@ -8604,6 +8616,7 @@ mod tests {
                 blksize,
                 move_ext_result: Some(1),
                 move_ext_errno: None,
+                register_move_ext_errno: None,
                 commit_errno: None,
                 fs_label: b"test_label\0".to_vec(),
                 btrfs_fs_info: None,
@@ -8632,6 +8645,7 @@ mod tests {
                 blksize: 4096,
                 move_ext_result: Some(1),
                 move_ext_errno: None,
+                register_move_ext_errno: None,
                 commit_errno: None,
                 fs_label: b"test_label\0".to_vec(),
                 btrfs_fs_info: None,
@@ -8659,6 +8673,7 @@ mod tests {
                 blksize: 4096,
                 move_ext_result: None,
                 move_ext_errno: None,
+                register_move_ext_errno: None,
                 commit_errno: None,
                 fs_label: b"test_label\0".to_vec(),
                 btrfs_fs_info: None,
@@ -8682,6 +8697,7 @@ mod tests {
                 blksize: 4096,
                 move_ext_result: None,
                 move_ext_errno: None,
+                register_move_ext_errno: None,
                 commit_errno: None,
                 fs_label: label.to_vec(),
                 btrfs_fs_info: None,
@@ -8705,6 +8721,7 @@ mod tests {
                 blksize: 4096,
                 move_ext_result: None,
                 move_ext_errno: None,
+                register_move_ext_errno: None,
                 commit_errno: None,
                 fs_label: b"test_label\0".to_vec(),
                 btrfs_fs_info: Some(payload),
@@ -8728,6 +8745,7 @@ mod tests {
                 blksize: 4096,
                 move_ext_result: None,
                 move_ext_errno: None,
+                register_move_ext_errno: None,
                 commit_errno: None,
                 fs_label: b"test_label\0".to_vec(),
                 btrfs_fs_info: None,
@@ -9509,6 +9527,9 @@ mod tests {
                 .lock()
                 .expect("lock ioctl calls")
                 .push(IoctlCall::RegisterMoveExtDonor(donor_fd, donor_ino));
+            if let Some(errno) = self.register_move_ext_errno {
+                return Err(FfsError::Io(std::io::Error::from_raw_os_error(errno)));
+            }
             Ok(())
         }
 
@@ -12961,6 +12982,46 @@ mod tests {
                 IoctlCall::MoveExt(InodeNumber(9), donor_fd, 11, 22, 33),
                 IoctlCall::End(RequestOp::IoctlWrite),
                 IoctlCall::UnregisterMoveExtDonor(donor_fd),
+            ]
+        );
+    }
+
+    #[test]
+    fn dispatch_ioctl_move_ext_does_not_unregister_after_register_error() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let options = MountOptions {
+            read_only: false,
+            ..MountOptions::default()
+        };
+        let fuse = FrankenFuse::with_options(
+            Box::new(IoctlRecordingFs::with_move_ext_register_error(
+                libc::EIO,
+                Arc::clone(&calls),
+            )),
+            &options,
+        );
+        let donor_file = std::fs::File::open("/dev/null").expect("open donor fd");
+        let donor_fd = u32::try_from(donor_file.as_raw_fd()).expect("donor fd fits u32");
+        let donor_ino = InodeNumber(donor_file.metadata().expect("donor metadata").ino());
+        let request = FrankenFuse::encode_move_ext_response(donor_fd, 11, 22, 33, 0);
+
+        let response = dispatch_ioctl_for_testing(
+            &fuse,
+            9,
+            0,
+            EXT4_IOC_MOVE_EXT,
+            &request,
+            u32::try_from(MOVE_EXT_SIZE).expect("move_ext size fits"),
+        );
+        assert_eq!(response, IoctlResult::Error(libc::EIO));
+        assert_eq!(
+            calls.lock().expect("lock ioctl calls").as_slice(),
+            &[
+                IoctlCall::Begin(RequestOp::IoctlWrite),
+                IoctlCall::Getattr(InodeNumber(9)),
+                IoctlCall::GetFlags(InodeNumber(9)),
+                IoctlCall::RegisterMoveExtDonor(donor_fd, donor_ino),
+                IoctlCall::End(RequestOp::IoctlWrite),
             ]
         );
     }
