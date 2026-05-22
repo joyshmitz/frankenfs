@@ -4027,6 +4027,26 @@ impl BtrfsExtentAllocator {
         self.block_groups.get(&start).map(|bg| &bg.item)
     }
 
+    /// Get aggregated space info per profile for `BTRFS_IOC_SPACE_INFO`.
+    ///
+    /// Returns a list of (flags, total_bytes, used_bytes) tuples, one per unique
+    /// block group profile (Data/Metadata/System × Single/DUP/RAID).
+    #[must_use]
+    pub fn space_info(&self) -> Vec<(u64, u64, u64)> {
+        use std::collections::BTreeMap as Map;
+        let mut aggregated: Map<u64, (u64, u64)> = Map::new();
+        for bg in self.block_groups.values() {
+            let flags = bg.item.flags;
+            let entry = aggregated.entry(flags).or_insert((0, 0));
+            entry.0 = entry.0.saturating_add(bg.item.total_bytes);
+            entry.1 = entry.1.saturating_add(bg.item.used_bytes);
+        }
+        aggregated
+            .into_iter()
+            .map(|(flags, (total, used))| (flags, total, used))
+            .collect()
+    }
+
     /// Total free space across all block groups with the given type flags.
     #[must_use]
     pub fn total_free(&self, type_flags: u64) -> u64 {

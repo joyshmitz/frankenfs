@@ -11,9 +11,9 @@ pub mod per_core;
 
 use asupersync::Cx;
 use ffs_core::{
-    BackpressureDecision, BackpressureGate, DirEntry as FfsDirEntry, FIEMAP_EXTENT_UNWRITTEN,
-    FiemapExtent, FileType as FfsFileType, FsOps, FsStat, FsxattrInfo, InodeAttr, ReleaseRequest,
-    RequestOp, RequestScope, SeekWhence, SetAttrRequest, XattrSetMode,
+    BackpressureDecision, BackpressureGate, BtrfsTreeSearchKey, DirEntry as FfsDirEntry,
+    FIEMAP_EXTENT_UNWRITTEN, FiemapExtent, FileType as FfsFileType, FsOps, FsStat, FsxattrInfo,
+    InodeAttr, ReleaseRequest, RequestOp, RequestScope, SeekWhence, SetAttrRequest, XattrSetMode,
 };
 use ffs_error::FfsError;
 use ffs_types::{EXT4_EXTENTS_FL, InodeNumber};
@@ -186,6 +186,13 @@ const BTRFS_IOC_DEV_INFO_SIZE: u32 = 4096;
 const BTRFS_IOC_INO_LOOKUP: u32 = 0xD000_9412;
 /// Size of `btrfs_ioctl_ino_lookup_args`: 8 + 8 + 4080 = 4096 bytes.
 const BTRFS_INO_LOOKUP_ARGS_SIZE: u32 = 4096;
+/// `BTRFS_IOC_TREE_SEARCH` = `_IOWR(0x94, 17, struct btrfs_ioctl_search_args)`
+/// on x86_64. The args struct is a 104-byte search key followed by a 3992-byte
+/// buffer of `(btrfs_ioctl_search_header, item_payload)` records.
+const BTRFS_IOC_TREE_SEARCH: u32 = 0xD000_9411;
+const BTRFS_TREE_SEARCH_KEY_SIZE: usize = 104;
+const BTRFS_TREE_SEARCH_ARGS_SIZE: u32 = 4096;
+const BTRFS_TREE_SEARCH_NR_ITEMS_OFFSET: usize = 64;
 /// `BTRFS_IOC_SUBVOL_GETFLAGS` = `_IOR(0x94, 25, __u64)` on x86_64.
 /// Returns subvolume flags (BTRFS_SUBVOL_RDONLY etc.) as a u64.
 const BTRFS_IOC_SUBVOL_GETFLAGS: u32 = 0x8008_9419;
@@ -203,6 +210,11 @@ const BTRFS_FEATURE_FLAGS_SIZE: u32 = 24;
 /// Returns three 24-byte feature-flag sets: supported, safe-to-set, and safe-to-clear.
 const BTRFS_IOC_GET_SUPPORTED_FEATURES: u32 = 0x8048_9439;
 const BTRFS_SUPPORTED_FEATURE_FLAGS_SIZE: u32 = 72;
+/// `BTRFS_IOC_SPACE_INFO` = `_IOWR(0x94, 20, struct btrfs_ioctl_space_args)`.
+/// Returns per-profile space usage (Data/Metadata/System × Single/DUP/RAID).
+/// Input: 16-byte header with space_slots count. Output: header + space_info array.
+const BTRFS_IOC_SPACE_INFO: u32 = 0xC010_9414;
+const BTRFS_SPACE_ARGS_HEADER_SIZE: u32 = 16;
 const FSCRYPT_POLICY_V1_SIZE: usize = 12;
 #[cfg(test)]
 const FSCRYPT_POLICY_V2_VERSION: u8 = 2;
@@ -2585,6 +2597,40 @@ impl FrankenFuse {
         Ok(u32::from_ne_bytes(bytes))
     }
 
+    fn parse_btrfs_tree_search_key(in_data: &[u8]) -> Result<BtrfsTreeSearchKey, c_int> {
+        if in_data.len() < BTRFS_TREE_SEARCH_KEY_SIZE {
+            return Err(libc::EINVAL);
+        }
+
+        let read_u64 = |offset: usize| -> u64 {
+            u64::from_ne_bytes(
+                in_data[offset..offset + 8]
+                    .try_into()
+                    .expect("validated btrfs search key u64 field"),
+            )
+        };
+        let read_u32 = |offset: usize| -> u32 {
+            u32::from_ne_bytes(
+                in_data[offset..offset + 4]
+                    .try_into()
+                    .expect("validated btrfs search key u32 field"),
+            )
+        };
+
+        Ok(BtrfsTreeSearchKey {
+            tree_id: read_u64(0),
+            min_objectid: read_u64(8),
+            max_objectid: read_u64(16),
+            min_offset: read_u64(24),
+            max_offset: read_u64(32),
+            min_transid: read_u64(40),
+            max_transid: read_u64(48),
+            min_type: read_u32(56),
+            max_type: read_u32(60),
+            nr_items: read_u32(BTRFS_TREE_SEARCH_NR_ITEMS_OFFSET),
+        })
+    }
+
     fn parse_inode_flags(in_data: &[u8]) -> Result<u32, c_int> {
         Self::parse_u32_ioctl_arg(in_data)
     }
@@ -3516,6 +3562,36 @@ impl FrankenFuse {
                     Err(error) => IoctlResult::Error(error.to_errno()),
                 }
             }
+            BTRFS_IOC_TREE_SEARCH => {
+                if out_size < BTRFS_TREE_SEARCH_ARGS_SIZE {
+                    return IoctlResult::Error(libc::EINVAL);
+                }
+                let search_key = match Self::parse_btrfs_tree_search_key(in_data) {
+                    Ok(search_key) => search_key,
+                    Err(errno) => return IoctlResult::Error(errno),
+                };
+
+                let cx = Self::cx_for_request();
+                match self.with_request_scope(&cx, RequestOp::IoctlRead, |cx, scope| {
+                    self.inner.ops.btrfs_tree_search(cx, scope, search_key)
+                }) {
+                    Ok((nr_items, payload)) => {
+                        let mut buf = vec![0_u8; BTRFS_TREE_SEARCH_ARGS_SIZE as usize];
+                        buf[..BTRFS_TREE_SEARCH_KEY_SIZE]
+                            .copy_from_slice(&in_data[..BTRFS_TREE_SEARCH_KEY_SIZE]);
+                        buf[BTRFS_TREE_SEARCH_NR_ITEMS_OFFSET
+                            ..BTRFS_TREE_SEARCH_NR_ITEMS_OFFSET + 4]
+                            .copy_from_slice(&nr_items.to_ne_bytes());
+
+                        let tail_start = BTRFS_TREE_SEARCH_KEY_SIZE;
+                        let copy_len = payload.len().min(buf.len() - tail_start);
+                        buf[tail_start..tail_start + copy_len]
+                            .copy_from_slice(&payload[..copy_len]);
+                        IoctlResult::Data(buf)
+                    }
+                    Err(error) => IoctlResult::Error(error.to_errno()),
+                }
+            }
             BTRFS_IOC_INO_LOOKUP => {
                 // Require full 4096-byte buffer for input and output.
                 if in_data.len() < BTRFS_INO_LOOKUP_ARGS_SIZE as usize
@@ -3607,6 +3683,21 @@ impl FrankenFuse {
                     self.inner.ops.get_btrfs_supported_features(cx, scope)
                 }) {
                     Ok(flags) => IoctlResult::Data(flags),
+                    Err(error) => IoctlResult::Error(error.to_errno()),
+                }
+            }
+            BTRFS_IOC_SPACE_INFO => {
+                // Input: 16-byte header with space_slots (number of entries caller can receive)
+                // Output: header (space_slots ignored, total_spaces set) + array of space_info
+                if in_data.len() < BTRFS_SPACE_ARGS_HEADER_SIZE as usize {
+                    return IoctlResult::Error(libc::EINVAL);
+                }
+                let space_slots = u64::from_le_bytes(in_data[0..8].try_into().unwrap_or([0; 8]));
+                let cx = Self::cx_for_request();
+                match self.with_request_scope(&cx, RequestOp::IoctlRead, |cx, scope| {
+                    self.inner.ops.get_btrfs_space_info(cx, scope, space_slots)
+                }) {
+                    Ok(data) => IoctlResult::Data(data),
                     Err(error) => IoctlResult::Error(error.to_errno()),
                 }
             }
@@ -6022,6 +6113,7 @@ mod tests {
         SetFsLabel(Vec<u8>),
         GetBtrfsFsInfo,
         GetBtrfsDevInfo(u64, [u8; 16]),
+        BtrfsTreeSearch(BtrfsTreeSearchKey),
         BtrfsInoLookup(u64, u64),
         Getattr(InodeNumber),
         Statfs(InodeNumber),
@@ -6056,6 +6148,7 @@ mod tests {
         fs_label: Vec<u8>,
         btrfs_fs_info: Option<Vec<u8>>,
         btrfs_dev_info: Option<Vec<u8>>,
+        btrfs_tree_search_result: Option<(u32, Vec<u8>)>,
         btrfs_ino_lookup_result: Option<(u64, Vec<u8>)>,
         fiemap_fixture: Option<Vec<FiemapExtent>>,
         calls: Arc<Mutex<Vec<IoctlCall>>>,
@@ -6077,6 +6170,7 @@ mod tests {
                 fs_label: b"test_label\0".to_vec(),
                 btrfs_fs_info: None,
                 btrfs_dev_info: None,
+                btrfs_tree_search_result: None,
                 btrfs_ino_lookup_result: None,
                 fiemap_fixture: None,
                 calls,
@@ -6098,6 +6192,7 @@ mod tests {
                 fs_label: b"test_label\0".to_vec(),
                 btrfs_fs_info: None,
                 btrfs_dev_info: None,
+                btrfs_tree_search_result: None,
                 btrfs_ino_lookup_result: None,
                 fiemap_fixture: None,
                 calls,
@@ -6122,6 +6217,7 @@ mod tests {
                 fs_label: b"test_label\0".to_vec(),
                 btrfs_fs_info: None,
                 btrfs_dev_info: None,
+                btrfs_tree_search_result: None,
                 btrfs_ino_lookup_result: None,
                 fiemap_fixture: None,
                 calls,
@@ -6143,6 +6239,7 @@ mod tests {
                 fs_label: b"test_label\0".to_vec(),
                 btrfs_fs_info: None,
                 btrfs_dev_info: None,
+                btrfs_tree_search_result: None,
                 btrfs_ino_lookup_result: None,
                 fiemap_fixture: None,
                 calls,
@@ -6164,6 +6261,7 @@ mod tests {
                 fs_label: b"test_label\0".to_vec(),
                 btrfs_fs_info: None,
                 btrfs_dev_info: None,
+                btrfs_tree_search_result: None,
                 btrfs_ino_lookup_result: None,
                 fiemap_fixture: None,
                 calls,
@@ -6191,6 +6289,7 @@ mod tests {
                 fs_label: b"test_label\0".to_vec(),
                 btrfs_fs_info: None,
                 btrfs_dev_info: None,
+                btrfs_tree_search_result: None,
                 btrfs_ino_lookup_result: None,
                 fiemap_fixture: None,
                 calls,
@@ -6217,6 +6316,7 @@ mod tests {
                 fs_label: b"test_label\0".to_vec(),
                 btrfs_fs_info: None,
                 btrfs_dev_info: None,
+                btrfs_tree_search_result: None,
                 btrfs_ino_lookup_result: None,
                 fiemap_fixture: None,
                 calls,
@@ -6242,6 +6342,7 @@ mod tests {
                 fs_label: b"test_label\0".to_vec(),
                 btrfs_fs_info: None,
                 btrfs_dev_info: None,
+                btrfs_tree_search_result: None,
                 btrfs_ino_lookup_result: None,
                 fiemap_fixture: None,
                 calls,
@@ -6263,6 +6364,7 @@ mod tests {
                 fs_label: label.to_vec(),
                 btrfs_fs_info: None,
                 btrfs_dev_info: None,
+                btrfs_tree_search_result: None,
                 btrfs_ino_lookup_result: None,
                 fiemap_fixture: None,
                 calls,
@@ -6284,6 +6386,7 @@ mod tests {
                 fs_label: b"test_label\0".to_vec(),
                 btrfs_fs_info: Some(payload),
                 btrfs_dev_info: None,
+                btrfs_tree_search_result: None,
                 btrfs_ino_lookup_result: None,
                 fiemap_fixture: None,
                 calls,
@@ -6305,10 +6408,21 @@ mod tests {
                 fs_label: b"test_label\0".to_vec(),
                 btrfs_fs_info: None,
                 btrfs_dev_info: Some(payload),
+                btrfs_tree_search_result: None,
                 btrfs_ino_lookup_result: None,
                 fiemap_fixture: None,
                 calls,
             }
+        }
+
+        fn with_btrfs_tree_search(
+            nr_items: u32,
+            payload: Vec<u8>,
+            calls: Arc<Mutex<Vec<IoctlCall>>>,
+        ) -> Self {
+            let mut fs = Self::new(0, calls);
+            fs.btrfs_tree_search_result = Some((nr_items, payload));
+            fs
         }
 
         fn with_fiemap_fixture(
@@ -6699,6 +6813,23 @@ mod tests {
             self.btrfs_dev_info.clone().ok_or_else(|| {
                 FfsError::UnsupportedFeature(
                     "get_btrfs_dev_info: recorder not configured with a payload".into(),
+                )
+            })
+        }
+
+        fn btrfs_tree_search(
+            &self,
+            _cx: &Cx,
+            _scope: &mut RequestScope,
+            key: BtrfsTreeSearchKey,
+        ) -> ffs_error::Result<(u32, Vec<u8>)> {
+            self.calls
+                .lock()
+                .expect("lock ioctl calls")
+                .push(IoctlCall::BtrfsTreeSearch(key));
+            self.btrfs_tree_search_result.clone().ok_or_else(|| {
+                FfsError::UnsupportedFeature(
+                    "btrfs_tree_search: recorder not configured with a result".into(),
                 )
             })
         }
@@ -7873,6 +8004,22 @@ mod tests {
         buf
     }
 
+    fn btrfs_tree_search_in(key: BtrfsTreeSearchKey) -> Vec<u8> {
+        let mut buf = vec![0_u8; BTRFS_TREE_SEARCH_KEY_SIZE];
+        buf[0..8].copy_from_slice(&key.tree_id.to_ne_bytes());
+        buf[8..16].copy_from_slice(&key.min_objectid.to_ne_bytes());
+        buf[16..24].copy_from_slice(&key.max_objectid.to_ne_bytes());
+        buf[24..32].copy_from_slice(&key.min_offset.to_ne_bytes());
+        buf[32..40].copy_from_slice(&key.max_offset.to_ne_bytes());
+        buf[40..48].copy_from_slice(&key.min_transid.to_ne_bytes());
+        buf[48..56].copy_from_slice(&key.max_transid.to_ne_bytes());
+        buf[56..60].copy_from_slice(&key.min_type.to_ne_bytes());
+        buf[60..64].copy_from_slice(&key.max_type.to_ne_bytes());
+        buf[BTRFS_TREE_SEARCH_NR_ITEMS_OFFSET..BTRFS_TREE_SEARCH_NR_ITEMS_OFFSET + 4]
+            .copy_from_slice(&key.nr_items.to_ne_bytes());
+        buf
+    }
+
     #[test]
     fn dispatch_ioctl_btrfs_dev_info_returns_backend_payload_verbatim() {
         // Canned 4096-byte payload with distinctive marker values at every
@@ -8005,6 +8152,148 @@ mod tests {
             &[
                 IoctlCall::Begin(RequestOp::IoctlRead),
                 IoctlCall::GetBtrfsDevInfo(1, [0_u8; 16]),
+                IoctlCall::End(RequestOp::IoctlRead),
+            ]
+        );
+    }
+
+    #[test]
+    fn dispatch_ioctl_btrfs_tree_search_updates_count_and_appends_payload() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut payload = vec![0_u8; 40];
+        payload[0..8].copy_from_slice(&9_u64.to_ne_bytes()); // transid
+        payload[8..16].copy_from_slice(&256_u64.to_ne_bytes()); // objectid
+        payload[16..24].copy_from_slice(&0_u64.to_ne_bytes()); // offset
+        payload[24..28].copy_from_slice(&1_u32.to_ne_bytes()); // type
+        payload[28..32].copy_from_slice(&8_u32.to_ne_bytes()); // len
+        payload[32..40].copy_from_slice(b"raw-item");
+        let fuse = FrankenFuse::new(Box::new(IoctlRecordingFs::with_btrfs_tree_search(
+            1,
+            payload.clone(),
+            Arc::clone(&calls),
+        )));
+        let search_key = BtrfsTreeSearchKey {
+            tree_id: 5,
+            min_objectid: 256,
+            max_objectid: 256,
+            min_offset: 0,
+            max_offset: u64::MAX,
+            min_transid: 0,
+            max_transid: u64::MAX,
+            min_type: 1,
+            max_type: 1,
+            nr_items: 64,
+        };
+
+        let response = dispatch_ioctl_for_testing(
+            &fuse,
+            1,
+            0,
+            BTRFS_IOC_TREE_SEARCH,
+            &btrfs_tree_search_in(search_key),
+            BTRFS_TREE_SEARCH_ARGS_SIZE,
+        );
+        let IoctlResult::Data(bytes) = response else {
+            panic!("expected tree-search data response, got {response:?}");
+        };
+
+        assert_eq!(bytes.len(), BTRFS_TREE_SEARCH_ARGS_SIZE as usize);
+        assert_eq!(
+            u32::from_ne_bytes(
+                bytes[BTRFS_TREE_SEARCH_NR_ITEMS_OFFSET..BTRFS_TREE_SEARCH_NR_ITEMS_OFFSET + 4]
+                    .try_into()
+                    .expect("nr_items bytes")
+            ),
+            1
+        );
+        assert_eq!(
+            &bytes[BTRFS_TREE_SEARCH_KEY_SIZE..BTRFS_TREE_SEARCH_KEY_SIZE + payload.len()],
+            payload.as_slice()
+        );
+        assert_eq!(
+            calls.lock().expect("lock ioctl calls").as_slice(),
+            &[
+                IoctlCall::Begin(RequestOp::IoctlRead),
+                IoctlCall::BtrfsTreeSearch(search_key),
+                IoctlCall::End(RequestOp::IoctlRead),
+            ]
+        );
+    }
+
+    #[test]
+    fn dispatch_ioctl_btrfs_tree_search_rejects_short_input_or_output() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let fuse = FrankenFuse::new(Box::new(IoctlRecordingFs::with_btrfs_tree_search(
+            0,
+            Vec::new(),
+            Arc::clone(&calls),
+        )));
+        let search_key = BtrfsTreeSearchKey {
+            tree_id: 5,
+            min_objectid: 0,
+            max_objectid: u64::MAX,
+            min_offset: 0,
+            max_offset: u64::MAX,
+            min_transid: 0,
+            max_transid: u64::MAX,
+            min_type: 0,
+            max_type: u32::MAX,
+            nr_items: 1,
+        };
+        let input = btrfs_tree_search_in(search_key);
+
+        let short_input = dispatch_ioctl_for_testing(
+            &fuse,
+            1,
+            0,
+            BTRFS_IOC_TREE_SEARCH,
+            &input[..BTRFS_TREE_SEARCH_KEY_SIZE - 1],
+            BTRFS_TREE_SEARCH_ARGS_SIZE,
+        );
+        assert_eq!(short_input, IoctlResult::Error(libc::EINVAL));
+        let short_output = dispatch_ioctl_for_testing(
+            &fuse,
+            1,
+            0,
+            BTRFS_IOC_TREE_SEARCH,
+            &input,
+            BTRFS_TREE_SEARCH_ARGS_SIZE - 1,
+        );
+        assert_eq!(short_output, IoctlResult::Error(libc::EINVAL));
+        assert!(calls.lock().expect("lock ioctl calls").is_empty());
+    }
+
+    #[test]
+    fn dispatch_ioctl_btrfs_tree_search_surfaces_backend_unsupported_as_eopnotsupp() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let fuse = FrankenFuse::new(Box::new(IoctlRecordingFs::new(0, Arc::clone(&calls))));
+        let search_key = BtrfsTreeSearchKey {
+            tree_id: 1,
+            min_objectid: 0,
+            max_objectid: u64::MAX,
+            min_offset: 0,
+            max_offset: u64::MAX,
+            min_transid: 0,
+            max_transid: u64::MAX,
+            min_type: 0,
+            max_type: u32::MAX,
+            nr_items: 1,
+        };
+
+        let response = dispatch_ioctl_for_testing(
+            &fuse,
+            1,
+            0,
+            BTRFS_IOC_TREE_SEARCH,
+            &btrfs_tree_search_in(search_key),
+            BTRFS_TREE_SEARCH_ARGS_SIZE,
+        );
+        assert_eq!(response, IoctlResult::Error(libc::EOPNOTSUPP));
+        assert_eq!(
+            calls.lock().expect("lock ioctl calls").as_slice(),
+            &[
+                IoctlCall::Begin(RequestOp::IoctlRead),
+                IoctlCall::BtrfsTreeSearch(search_key),
                 IoctlCall::End(RequestOp::IoctlRead),
             ]
         );

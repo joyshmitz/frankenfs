@@ -369,6 +369,28 @@ pub struct FsxattrInfo {
     pub cowextsize: u32,
 }
 
+/// Search bounds supplied by `BTRFS_IOC_TREE_SEARCH`.
+///
+/// The kernel treats btrfs keys as a 136-bit ordered tuple
+/// `(objectid, item_type, offset)` and returns every metadata item whose key
+/// falls inside the inclusive `[min, max]` range, capped by `nr_items` and the
+/// ioctl reply buffer size.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BtrfsTreeSearchKey {
+    /// Tree objectid to search; zero means the mounted subvolume tree.
+    pub tree_id: u64,
+    pub min_objectid: u64,
+    pub max_objectid: u64,
+    pub min_offset: u64,
+    pub max_offset: u64,
+    pub min_transid: u64,
+    pub max_transid: u64,
+    pub min_type: u32,
+    pub max_type: u32,
+    /// Caller-requested item cap; the backend returns the actual count.
+    pub nr_items: u32,
+}
+
 /// xflags bits per `<uapi/linux/fs.h>`. Only the subset that ext4
 /// `i_flags` can map onto is used by the FrankenFS backend; the rest
 /// are XFS- or DAX-specific and stay zero on a getxattr return.
@@ -1379,6 +1401,48 @@ pub trait FsOps: Send + Sync {
         ))
     }
 
+    /// Get btrfs space info for `BTRFS_IOC_SPACE_INFO`.
+    ///
+    /// Returns per-profile space usage (Data/Metadata/System × Single/DUP/RAID).
+    /// Output format: 16-byte header (space_slots=0, total_spaces=N) followed by
+    /// N × 24-byte space_info entries (flags, total_bytes, used_bytes).
+    ///
+    /// `space_slots` is the number of entries the caller can receive. If 0, only
+    /// the header is returned with total_spaces set. Otherwise, min(space_slots,
+    /// total_spaces) entries are returned.
+    ///
+    /// Non-btrfs backends must return `FfsError::UnsupportedFeature`.
+    fn get_btrfs_space_info(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _space_slots: u64,
+    ) -> ffs_error::Result<Vec<u8>> {
+        Err(FfsError::UnsupportedFeature(
+            "get_btrfs_space_info is not supported by this backend".to_owned(),
+        ))
+    }
+
+    /// Search a btrfs metadata tree for `BTRFS_IOC_TREE_SEARCH`.
+    ///
+    /// Returns `(actual_item_count, encoded_headers_and_payloads)`. The byte
+    /// vector is the ioctl `buf` tail only: a sequence of 32-byte
+    /// `btrfs_ioctl_search_header` records, each immediately followed by the
+    /// raw item payload. The FUSE layer writes `actual_item_count` back into
+    /// the caller's search key and appends this tail after the 104-byte key.
+    ///
+    /// Non-btrfs backends must return `FfsError::UnsupportedFeature`.
+    fn btrfs_tree_search(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _key: BtrfsTreeSearchKey,
+    ) -> ffs_error::Result<(u32, Vec<u8>)> {
+        Err(FfsError::UnsupportedFeature(
+            "btrfs_tree_search is not supported by this backend".to_owned(),
+        ))
+    }
+
     /// Set filesystem-specific inode flags (ext4 `EXT4_IOC_SETFLAGS`).
     ///
     /// Updates the raw `i_flags` field. The implementation should validate
@@ -1935,6 +1999,15 @@ impl<T: FsOps + ?Sized> FsOps for Arc<T> {
     ) -> ffs_error::Result<Vec<u8>> {
         self.as_ref()
             .get_btrfs_dev_info(cx, scope, devid_in, uuid_in)
+    }
+
+    fn btrfs_tree_search(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        key: BtrfsTreeSearchKey,
+    ) -> ffs_error::Result<(u32, Vec<u8>)> {
+        self.as_ref().btrfs_tree_search(cx, scope, key)
     }
 
     fn get_quota_info(&self, cx: &Cx, scope: &mut RequestScope) -> ffs_error::Result<QuotaInfo> {

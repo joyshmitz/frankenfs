@@ -12,9 +12,9 @@ pub use degradation::{
     DegradationPolicy, DegradationTransition, PressureMonitor,
 };
 pub use vfs::{
-    DirEntry, FIEMAP_EXTENT_LAST, FIEMAP_EXTENT_UNWRITTEN, FiemapExtent, FileType, FsOps, FsStat,
-    FsxattrInfo, InodeAttr, QuotaEntry, QuotaInfo, QuotaType, ReleaseRequest, RequestOp,
-    RequestScope, SeekWhence, SetAttrRequest, XattrSetMode, xflags,
+    BtrfsTreeSearchKey, DirEntry, FIEMAP_EXTENT_LAST, FIEMAP_EXTENT_UNWRITTEN, FiemapExtent,
+    FileType, FsOps, FsStat, FsxattrInfo, InodeAttr, QuotaEntry, QuotaInfo, QuotaType,
+    ReleaseRequest, RequestOp, RequestScope, SeekWhence, SetAttrRequest, XattrSetMode, xflags,
 };
 // Re-export repair lifecycle for convenient wiring.
 pub use ffs_block::RepairFlushLifecycle;
@@ -30,18 +30,19 @@ use ffs_block::{
     read_ext4_superblock_region,
 };
 use ffs_btrfs::{
-    BTRFS_BLOCK_GROUP_DATA, BTRFS_BLOCK_GROUP_METADATA, BTRFS_FILE_EXTENT_PREALLOC,
-    BTRFS_FILE_EXTENT_REG, BTRFS_FIRST_FREE_OBJECTID, BTRFS_FS_TREE_OBJECTID, BTRFS_FT_BLKDEV,
-    BTRFS_FT_CHRDEV, BTRFS_FT_DIR, BTRFS_FT_FIFO, BTRFS_FT_REG_FILE, BTRFS_FT_SOCK,
-    BTRFS_FT_SYMLINK, BTRFS_ITEM_DIR_INDEX, BTRFS_ITEM_DIR_ITEM, BTRFS_ITEM_EXTENT_DATA,
-    BTRFS_ITEM_INODE_ITEM, BTRFS_ITEM_INODE_REF, BTRFS_ITEM_ROOT_ITEM, BTRFS_ITEM_XATTR_ITEM,
-    BTRFS_USER_SETTABLE_FSFLAGS, BTRFS_USER_SETTABLE_XFLAGS, BtrfsBTree, BtrfsBlockGroupItem,
-    BtrfsCowNode, BtrfsDirItem, BtrfsExtentAllocator, BtrfsExtentData, BtrfsInodeItem, BtrfsKey,
-    BtrfsLeafEntry, BtrfsMutationError, BtrfsNodeSerializeParams, BtrfsTreeItem,
-    InMemoryCowBtrfsTree, btrfs_inode_flags_to_fsflags, btrfs_inode_flags_to_xflags,
-    enumerate_snapshots, enumerate_subvolumes, fsflags_to_btrfs_inode_flags,
-    map_logical_to_physical, parse_dir_items, parse_extent_data, parse_inode_item, parse_root_item,
-    parse_xattr_items, walk_chunk_tree, walk_tree, xflags_to_btrfs_inode_flags,
+    BTRFS_BLOCK_GROUP_DATA, BTRFS_BLOCK_GROUP_METADATA, BTRFS_CHUNK_TREE_OBJECTID,
+    BTRFS_FILE_EXTENT_PREALLOC, BTRFS_FILE_EXTENT_REG, BTRFS_FIRST_FREE_OBJECTID,
+    BTRFS_FS_TREE_OBJECTID, BTRFS_FT_BLKDEV, BTRFS_FT_CHRDEV, BTRFS_FT_DIR, BTRFS_FT_FIFO,
+    BTRFS_FT_REG_FILE, BTRFS_FT_SOCK, BTRFS_FT_SYMLINK, BTRFS_ITEM_DIR_INDEX, BTRFS_ITEM_DIR_ITEM,
+    BTRFS_ITEM_EXTENT_DATA, BTRFS_ITEM_INODE_ITEM, BTRFS_ITEM_INODE_REF, BTRFS_ITEM_ROOT_ITEM,
+    BTRFS_ITEM_XATTR_ITEM, BTRFS_ROOT_TREE_OBJECTID, BTRFS_USER_SETTABLE_FSFLAGS,
+    BTRFS_USER_SETTABLE_XFLAGS, BtrfsBTree, BtrfsBlockGroupItem, BtrfsCowNode, BtrfsDirItem,
+    BtrfsExtentAllocator, BtrfsExtentData, BtrfsInodeItem, BtrfsKey, BtrfsLeafEntry,
+    BtrfsMutationError, BtrfsNodeSerializeParams, BtrfsTreeItem, InMemoryCowBtrfsTree,
+    btrfs_inode_flags_to_fsflags, btrfs_inode_flags_to_xflags, enumerate_snapshots,
+    enumerate_subvolumes, fsflags_to_btrfs_inode_flags, map_logical_to_physical, parse_dir_items,
+    parse_extent_data, parse_inode_item, parse_root_item, parse_xattr_items, walk_chunk_tree,
+    walk_tree, xflags_to_btrfs_inode_flags,
 };
 use ffs_error::FfsError;
 use ffs_journal::{
@@ -5100,6 +5101,65 @@ impl OpenFs {
         items.sort_by(|lhs, rhs| Self::btrfs_key_order(&lhs.key, &rhs.key));
     }
 
+    fn btrfs_tree_search_entries(
+        &self,
+        cx: &Cx,
+        search: &BtrfsTreeSearchKey,
+    ) -> ffs_error::Result<Vec<BtrfsLeafEntry>> {
+        let ctx = self
+            .btrfs_context()
+            .ok_or_else(|| FfsError::Format("not a btrfs filesystem".into()))?;
+        let tree_id = if search.tree_id == 0 {
+            ctx.subvol_objectid
+        } else {
+            search.tree_id
+        };
+
+        if tree_id == ctx.subvol_objectid
+            && let Some(alloc_mutex) = self.btrfs_alloc_state.as_ref()
+        {
+            let start = BtrfsKey {
+                objectid: search.min_objectid,
+                item_type: 0,
+                offset: 0,
+            };
+            let end = BtrfsKey {
+                objectid: search.max_objectid,
+                item_type: u8::MAX,
+                offset: u64::MAX,
+            };
+            if start.objectid > end.objectid {
+                return Ok(Vec::new());
+            }
+            let alloc = alloc_mutex.lock();
+            let mut entries = alloc
+                .fs_tree
+                .range(&start, &end)
+                .map_err(|e| btrfs_mutation_to_ffs(&e))?
+                .into_iter()
+                .map(|(key, data)| BtrfsLeafEntry { key, data })
+                .collect::<Vec<_>>();
+            entries.sort_by(|lhs, rhs| Self::btrfs_key_order(&lhs.key, &rhs.key));
+            return Ok(entries);
+        }
+
+        match tree_id {
+            BTRFS_ROOT_TREE_OBJECTID => self.walk_btrfs_root_tree(cx),
+            BTRFS_CHUNK_TREE_OBJECTID => {
+                let sb = self
+                    .btrfs_superblock()
+                    .ok_or_else(|| FfsError::Format("not a btrfs filesystem".into()))?;
+                if sb.chunk_root == 0 {
+                    return Err(FfsError::NotFound(
+                        "btrfs chunk-tree root is not recorded in this image".into(),
+                    ));
+                }
+                self.walk_btrfs_tree(cx, sb.chunk_root)
+            }
+            _ => self.walk_btrfs_fs_tree_by_objectid(cx, tree_id),
+        }
+    }
+
     /// Resolve a btrfs filesystem tree's root block by walking the ROOT_TREE.
     fn btrfs_fs_tree_root_bytenr(&self, cx: &Cx, subvol_id: u64) -> ffs_error::Result<u64> {
         let root_items = self.walk_btrfs_root_tree(cx)?;
@@ -8848,6 +8908,15 @@ fn extent_root_namespace(inode: &Ext4Inode) -> u64 {
 /// `block_group_tree_generation`, which is forward-compatible with our
 /// zero-initialised output).
 pub const BTRFS_FS_INFO_ARGS_SIZE: usize = 1024;
+/// Encoded size of `struct btrfs_ioctl_search_key` on x86_64.
+pub const BTRFS_TREE_SEARCH_KEY_SIZE: usize = 104;
+/// Encoded size of `struct btrfs_ioctl_search_header` on x86_64.
+pub const BTRFS_TREE_SEARCH_HEADER_SIZE: usize = 32;
+/// Encoded size of `struct btrfs_ioctl_search_args` on x86_64.
+pub const BTRFS_TREE_SEARCH_ARGS_SIZE: usize = 4096;
+/// Bytes available for search headers and item payloads after the search key.
+pub const BTRFS_TREE_SEARCH_BUF_SIZE: usize =
+    BTRFS_TREE_SEARCH_ARGS_SIZE - BTRFS_TREE_SEARCH_KEY_SIZE;
 
 /// Map a btrfs csum_type code to the digest width in bytes advertised by
 /// `btrfs_ioctl_fs_info_args::csum_size`.  Unknown csum types are reported
@@ -8983,6 +9052,67 @@ fn encode_btrfs_supported_feature_flags() -> Vec<u8> {
         &mut buf,
     );
     buf
+}
+
+fn btrfs_search_range_is_valid(search: &BtrfsTreeSearchKey) -> bool {
+    (search.min_objectid, search.min_type, search.min_offset)
+        <= (search.max_objectid, search.max_type, search.max_offset)
+        && search.min_transid <= search.max_transid
+}
+
+fn btrfs_search_item_matches(
+    search: &BtrfsTreeSearchKey,
+    item_key: &BtrfsKey,
+    transid: u64,
+) -> bool {
+    if transid < search.min_transid || transid > search.max_transid {
+        return false;
+    }
+    let item_tuple = (
+        item_key.objectid,
+        u32::from(item_key.item_type),
+        item_key.offset,
+    );
+    item_tuple >= (search.min_objectid, search.min_type, search.min_offset)
+        && item_tuple <= (search.max_objectid, search.max_type, search.max_offset)
+}
+
+fn encode_btrfs_tree_search_results(
+    search: &BtrfsTreeSearchKey,
+    transid: u64,
+    entries: impl IntoIterator<Item = BtrfsLeafEntry>,
+) -> ffs_error::Result<(u32, Vec<u8>)> {
+    if search.nr_items == 0 || !btrfs_search_range_is_valid(search) {
+        return Ok((0, Vec::new()));
+    }
+
+    let mut count = 0_u32;
+    let mut buf = Vec::with_capacity(BTRFS_TREE_SEARCH_BUF_SIZE);
+    for entry in entries {
+        if count >= search.nr_items {
+            break;
+        }
+        if !btrfs_search_item_matches(search, &entry.key, transid) {
+            continue;
+        }
+        let len = u32::try_from(entry.data.len())
+            .map_err(|_| FfsError::Format("btrfs tree-search item too large".into()))?;
+        let needed = BTRFS_TREE_SEARCH_HEADER_SIZE
+            .checked_add(entry.data.len())
+            .ok_or_else(|| FfsError::Format("btrfs tree-search item length overflow".into()))?;
+        if buf.len().saturating_add(needed) > BTRFS_TREE_SEARCH_BUF_SIZE {
+            break;
+        }
+
+        buf.extend_from_slice(&transid.to_ne_bytes());
+        buf.extend_from_slice(&entry.key.objectid.to_ne_bytes());
+        buf.extend_from_slice(&entry.key.offset.to_ne_bytes());
+        buf.extend_from_slice(&u32::from(entry.key.item_type).to_ne_bytes());
+        buf.extend_from_slice(&len.to_ne_bytes());
+        buf.extend_from_slice(&entry.data);
+        count += 1;
+    }
+    Ok((count, buf))
 }
 
 /// Encoded size of `struct btrfs_ioctl_dev_info_args` on x86_64.
@@ -19520,6 +19650,63 @@ impl FsOps for OpenFs {
         }
     }
 
+    fn get_btrfs_space_info(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        space_slots: u64,
+    ) -> ffs_error::Result<Vec<u8>> {
+        match &self.flavor {
+            FsFlavor::Ext4(_) => Err(FfsError::UnsupportedFeature(
+                "BTRFS_IOC_SPACE_INFO is not supported on ext4 filesystems".to_owned(),
+            )),
+            FsFlavor::Btrfs(_) => {
+                let btrfs = self.require_btrfs_alloc_state()?.lock();
+                let space_infos = btrfs.extent_alloc.space_info();
+                let total_spaces = space_infos.len() as u64;
+
+                // Header: space_slots (ignored on output), total_spaces
+                let mut buf = Vec::with_capacity(16 + (total_spaces as usize) * 24);
+                buf.extend_from_slice(&0_u64.to_le_bytes()); // space_slots (unused in output)
+                buf.extend_from_slice(&total_spaces.to_le_bytes());
+
+                // If caller requested entries, add them
+                let slots_to_return = if space_slots == 0 {
+                    0
+                } else {
+                    space_slots.min(total_spaces) as usize
+                };
+
+                for (flags, total_bytes, used_bytes) in
+                    space_infos.into_iter().take(slots_to_return)
+                {
+                    buf.extend_from_slice(&flags.to_le_bytes());
+                    buf.extend_from_slice(&total_bytes.to_le_bytes());
+                    buf.extend_from_slice(&used_bytes.to_le_bytes());
+                }
+
+                Ok(buf)
+            }
+        }
+    }
+
+    fn btrfs_tree_search(
+        &self,
+        cx: &Cx,
+        _scope: &mut RequestScope,
+        key: BtrfsTreeSearchKey,
+    ) -> ffs_error::Result<(u32, Vec<u8>)> {
+        match &self.flavor {
+            FsFlavor::Ext4(_) => Err(FfsError::UnsupportedFeature(
+                "BTRFS_IOC_TREE_SEARCH is not supported on ext4 filesystems".to_owned(),
+            )),
+            FsFlavor::Btrfs(sb) => {
+                let entries = self.btrfs_tree_search_entries(cx, &key)?;
+                encode_btrfs_tree_search_results(&key, sb.generation, entries)
+            }
+        }
+    }
+
     fn btrfs_ino_lookup(
         &self,
         cx: &Cx,
@@ -27462,6 +27649,123 @@ mod tests {
                 BTRFS_FEATURE_INCOMPAT_SAFE_CLEAR,
             ]
         );
+    }
+
+    #[test]
+    fn open_fs_btrfs_tree_search_root_tree_returns_root_item() {
+        let image = build_btrfs_image();
+        let dev = TestDevice::from_vec(image);
+        let cx = Cx::for_testing();
+
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
+        let ops: &dyn FsOps = &fs;
+        let (nr_items, payload) = ops
+            .btrfs_tree_search(
+                &cx,
+                &mut RequestScope::empty(),
+                BtrfsTreeSearchKey {
+                    tree_id: BTRFS_ROOT_TREE_OBJECTID,
+                    min_objectid: BTRFS_FS_TREE_OBJECTID,
+                    max_objectid: BTRFS_FS_TREE_OBJECTID,
+                    min_offset: 0,
+                    max_offset: u64::MAX,
+                    min_transid: 0,
+                    max_transid: u64::MAX,
+                    min_type: u32::from(BTRFS_ITEM_ROOT_ITEM),
+                    max_type: u32::from(BTRFS_ITEM_ROOT_ITEM),
+                    nr_items: 8,
+                },
+            )
+            .expect("root-tree search should return the FS_TREE root item");
+
+        assert_eq!(nr_items, 1);
+        assert!(payload.len() >= BTRFS_TREE_SEARCH_HEADER_SIZE);
+        assert_eq!(u64::from_ne_bytes(payload[0..8].try_into().unwrap()), 1);
+        assert_eq!(
+            u64::from_ne_bytes(payload[8..16].try_into().unwrap()),
+            BTRFS_FS_TREE_OBJECTID
+        );
+        assert_eq!(u64::from_ne_bytes(payload[16..24].try_into().unwrap()), 0);
+        assert_eq!(
+            u32::from_ne_bytes(payload[24..28].try_into().unwrap()),
+            u32::from(BTRFS_ITEM_ROOT_ITEM)
+        );
+        let item_len = u32::from_ne_bytes(payload[28..32].try_into().unwrap()) as usize;
+        assert_eq!(item_len, 239);
+        assert_eq!(payload.len(), BTRFS_TREE_SEARCH_HEADER_SIZE + item_len);
+        let root_item = parse_root_item(&payload[BTRFS_TREE_SEARCH_HEADER_SIZE..])
+            .expect("tree-search ROOT_ITEM payload");
+        assert_eq!(root_item.root_dirid, BTRFS_FIRST_FREE_OBJECTID);
+        assert_eq!(root_item.bytenr, 0x20_000);
+    }
+
+    #[test]
+    fn open_fs_btrfs_tree_search_zero_treeid_uses_mounted_tree() {
+        let image = build_btrfs_image();
+        let dev = TestDevice::from_vec(image);
+        let cx = Cx::for_testing();
+
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
+        let ops: &dyn FsOps = &fs;
+        let (nr_items, payload) = ops
+            .btrfs_tree_search(
+                &cx,
+                &mut RequestScope::empty(),
+                BtrfsTreeSearchKey {
+                    tree_id: 0,
+                    min_objectid: BTRFS_FIRST_FREE_OBJECTID,
+                    max_objectid: BTRFS_FIRST_FREE_OBJECTID,
+                    min_offset: 0,
+                    max_offset: 0,
+                    min_transid: 0,
+                    max_transid: u64::MAX,
+                    min_type: u32::from(BTRFS_ITEM_INODE_ITEM),
+                    max_type: u32::from(BTRFS_ITEM_INODE_ITEM),
+                    nr_items: 1,
+                },
+            )
+            .expect("zero tree-id search should use mounted tree");
+
+        assert_eq!(nr_items, 1);
+        assert_eq!(
+            u64::from_ne_bytes(payload[8..16].try_into().unwrap()),
+            BTRFS_FIRST_FREE_OBJECTID
+        );
+        assert_eq!(
+            u32::from_ne_bytes(payload[24..28].try_into().unwrap()),
+            u32::from(BTRFS_ITEM_INODE_ITEM)
+        );
+        assert_eq!(u32::from_ne_bytes(payload[28..32].try_into().unwrap()), 160);
+    }
+
+    #[test]
+    fn open_fs_btrfs_tree_search_ext4_returns_unsupported() {
+        let image = build_ext4_image(2);
+        let dev = TestDevice::from_vec(image);
+        let cx = Cx::for_testing();
+
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
+        let ops: &dyn FsOps = &fs;
+        let err = ops
+            .btrfs_tree_search(
+                &cx,
+                &mut RequestScope::empty(),
+                BtrfsTreeSearchKey {
+                    tree_id: BTRFS_ROOT_TREE_OBJECTID,
+                    min_objectid: 0,
+                    max_objectid: u64::MAX,
+                    min_offset: 0,
+                    max_offset: u64::MAX,
+                    min_transid: 0,
+                    max_transid: u64::MAX,
+                    min_type: 0,
+                    max_type: u32::MAX,
+                    nr_items: 1,
+                },
+            )
+            .expect_err("ext4 must reject btrfs tree-search");
+
+        assert_eq!(err.to_errno(), libc::EOPNOTSUPP);
     }
 
     #[test]
