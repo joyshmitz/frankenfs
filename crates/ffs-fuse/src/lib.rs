@@ -7423,6 +7423,62 @@ mod tests {
     }
 
     #[test]
+    fn parse_move_ext_request_valid() {
+        let mut data = vec![0u8; MOVE_EXT_SIZE];
+        // reserved at offset 0 (u32) = 0 (already zeros)
+        // donor_fd at offset 4 (i32) = 5
+        data[4..8].copy_from_slice(&5i32.to_ne_bytes());
+        // orig_start at offset 8 (u64) = 4096
+        data[8..16].copy_from_slice(&4096u64.to_ne_bytes());
+        // donor_start at offset 16 (u64) = 8192
+        data[16..24].copy_from_slice(&8192u64.to_ne_bytes());
+        // len at offset 24 (u64) = 1024
+        data[24..32].copy_from_slice(&1024u64.to_ne_bytes());
+
+        let (donor_fd, orig_start, donor_start, len) =
+            FrankenFuse::parse_move_ext_request(&data).unwrap();
+        assert_eq!(donor_fd, 5);
+        assert_eq!(orig_start, 4096);
+        assert_eq!(donor_start, 8192);
+        assert_eq!(len, 1024);
+    }
+
+    #[test]
+    fn parse_move_ext_request_too_short() {
+        let data = vec![0u8; MOVE_EXT_SIZE - 1];
+        let err = FrankenFuse::parse_move_ext_request(&data).unwrap_err();
+        assert_eq!(err, libc::EINVAL);
+    }
+
+    #[test]
+    fn parse_move_ext_request_nonzero_reserved_fails() {
+        let mut data = vec![0u8; MOVE_EXT_SIZE];
+        data[0..4].copy_from_slice(&1u32.to_ne_bytes()); // reserved != 0
+        data[4..8].copy_from_slice(&5i32.to_ne_bytes()); // valid donor_fd
+        let err = FrankenFuse::parse_move_ext_request(&data).unwrap_err();
+        assert_eq!(err, libc::EINVAL);
+    }
+
+    #[test]
+    fn parse_move_ext_request_negative_fd_fails() {
+        let mut data = vec![0u8; MOVE_EXT_SIZE];
+        // reserved = 0 (already zeros)
+        data[4..8].copy_from_slice(&(-1i32).to_ne_bytes()); // negative fd
+        let err = FrankenFuse::parse_move_ext_request(&data).unwrap_err();
+        assert_eq!(err, libc::EBADF);
+    }
+
+    #[test]
+    fn parse_move_ext_request_overflow_fails() {
+        let mut data = vec![0u8; MOVE_EXT_SIZE];
+        data[4..8].copy_from_slice(&5i32.to_ne_bytes()); // valid fd
+        data[8..16].copy_from_slice(&(u64::MAX - 10).to_ne_bytes()); // orig_start
+        data[24..32].copy_from_slice(&100u64.to_ne_bytes()); // len causes overflow
+        let err = FrankenFuse::parse_move_ext_request(&data).unwrap_err();
+        assert_eq!(err, libc::EINVAL);
+    }
+
+    #[test]
     fn inode_attr_to_file_attr_conversion() {
         let iattr = InodeAttr {
             ino: InodeNumber(42),
