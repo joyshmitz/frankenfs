@@ -243,6 +243,9 @@ const BTRFS_IOC_SNAP_CREATE_V2: u32 = 0x5000_9417;
 /// `BTRFS_IOC_SNAP_DESTROY` = `_IOW(0x94, 15, struct btrfs_ioctl_vol_args)`.
 /// Delete a snapshot or subvolume.
 const BTRFS_IOC_SNAP_DESTROY: u32 = 0x5000_940F;
+/// `BTRFS_IOC_SUBVOL_CREATE_V2` = `_IOW(0x94, 24, struct btrfs_ioctl_vol_args_v2)`.
+/// Create a new subvolume.
+const BTRFS_IOC_SUBVOL_CREATE_V2: u32 = 0x5000_9418;
 const BTRFS_VOL_ARGS_SIZE: u32 = 4096;
 const FSCRYPT_POLICY_V1_SIZE: usize = 12;
 #[cfg(test)]
@@ -3833,6 +3836,19 @@ impl FrankenFuse {
                 let cx = Self::cx_for_request();
                 match self.with_request_scope(&cx, RequestOp::IoctlRead, |cx, scope| {
                     self.inner.ops.btrfs_snap_destroy(cx, scope, &in_data)
+                }) {
+                    Ok(()) => IoctlResult::Data(Vec::new()),
+                    Err(error) => IoctlResult::Error(error.to_errno()),
+                }
+            }
+            BTRFS_IOC_SUBVOL_CREATE_V2 => {
+                // Input: 4096-byte vol_args_v2 with flags and name
+                if in_data.len() < BTRFS_VOL_ARGS_SIZE as usize {
+                    return IoctlResult::Error(libc::EINVAL);
+                }
+                let cx = Self::cx_for_request();
+                match self.with_request_scope(&cx, RequestOp::IoctlRead, |cx, scope| {
+                    self.inner.ops.btrfs_subvol_create(cx, scope, &in_data)
                 }) {
                     Ok(()) => IoctlResult::Data(Vec::new()),
                     Err(error) => IoctlResult::Error(error.to_errno()),

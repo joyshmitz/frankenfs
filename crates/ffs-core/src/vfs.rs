@@ -1564,6 +1564,21 @@ pub trait FsOps: Send + Sync {
         ))
     }
 
+    /// Create a subvolume for `BTRFS_IOC_SUBVOL_CREATE_V2`.
+    ///
+    /// Takes raw vol_args_v2 struct bytes containing flags and name.
+    /// Non-btrfs backends must return `FfsError::UnsupportedFeature`.
+    fn btrfs_subvol_create(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _vol_args: &[u8],
+    ) -> ffs_error::Result<()> {
+        Err(FfsError::UnsupportedFeature(
+            "btrfs_subvol_create is not supported by this backend".to_owned(),
+        ))
+    }
+
     /// Set filesystem-specific inode flags (ext4 `EXT4_IOC_SETFLAGS`).
     ///
     /// Updates the raw `i_flags` field. The implementation should validate

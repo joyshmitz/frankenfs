@@ -19865,6 +19865,23 @@ impl FsOps for OpenFs {
         }
     }
 
+    fn btrfs_subvol_create(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _vol_args: &[u8],
+    ) -> ffs_error::Result<()> {
+        match &self.flavor {
+            FsFlavor::Ext4(_) => Err(FfsError::UnsupportedFeature(
+                "BTRFS_IOC_SUBVOL_CREATE_V2 is not supported on ext4 filesystems".to_owned(),
+            )),
+            FsFlavor::Btrfs(_) => {
+                // Subvolume creation requires ROOT_ITEM creation and tree initialization
+                Err(FfsError::ReadOnly)
+            }
+        }
+    }
+
     fn btrfs_ino_lookup(
         &self,
         cx: &Cx,
