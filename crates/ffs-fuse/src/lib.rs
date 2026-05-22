@@ -19,10 +19,10 @@ use ffs_core::{
 use ffs_error::FfsError;
 use ffs_types::{EXT4_EXTENTS_FL, InodeNumber};
 use fuser::{
-    FileAttr, FileType, Filesystem, KernelConfig, MountOption, ReplyAttr, ReplyCreate, ReplyData,
-    ReplyDirectory, ReplyDirectoryPlus, ReplyEmpty, ReplyEntry, ReplyIoctl, ReplyLock, ReplyLseek,
-    ReplyOpen, ReplyStatfs, ReplyStatx, ReplyWrite, ReplyXattr, Request, TimeOrNow,
-    consts as fuse_consts, fuse_forget_one,
+    FileAttr, FileType, Filesystem, KernelConfig, MountOption, PollHandle, ReplyAttr, ReplyCreate,
+    ReplyData, ReplyDirectory, ReplyDirectoryPlus, ReplyEmpty, ReplyEntry, ReplyIoctl, ReplyLock,
+    ReplyLseek, ReplyOpen, ReplyPoll, ReplyStatfs, ReplyStatx, ReplyWrite, ReplyXattr, Request,
+    TimeOrNow, consts as fuse_consts, fuse_forget_one,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -6432,6 +6432,21 @@ impl Filesystem for FrankenFuse {
     ) {
         // opendir returns dummy handles, so releasedir is a no-op.
         reply.ok();
+    }
+
+    fn poll(
+        &mut self,
+        _req: &Request<'_>,
+        _ino: u64,
+        _fh: u64,
+        _ph: PollHandle,
+        events: u32,
+        _flags: u32,
+        reply: ReplyPoll,
+    ) {
+        // Regular files are always ready for I/O. Return the requested events
+        // as the ready events (POLLIN | POLLOUT typically).
+        reply.poll(events);
     }
 
     fn getlk(
