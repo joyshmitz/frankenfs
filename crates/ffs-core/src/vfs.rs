@@ -1588,6 +1588,23 @@ pub trait FsOps: Send + Sync {
         ))
     }
 
+    /// Set btrfs feature flags for `BTRFS_IOC_SET_FEATURES`.
+    ///
+    /// Takes raw `btrfs_ioctl_feature_flags[2]` bytes. The kernel interprets
+    /// the two 24-byte records as feature bits to enable and feature bits to
+    /// clear.
+    /// Non-btrfs backends must return `FfsError::UnsupportedFeature`.
+    fn set_btrfs_features(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _feature_flags: &[u8],
+    ) -> ffs_error::Result<()> {
+        Err(FfsError::UnsupportedFeature(
+            "set_btrfs_features is not supported by this backend".to_owned(),
+        ))
+    }
+
     /// Get btrfs space info for `BTRFS_IOC_SPACE_INFO`.
     ///
     /// Returns per-profile space usage (Data/Metadata/System × Single/DUP/RAID).
@@ -2473,6 +2490,15 @@ impl<T: FsOps + ?Sized> FsOps for Arc<T> {
 
     fn get_btrfs_fs_info(&self, cx: &Cx, scope: &mut RequestScope) -> ffs_error::Result<Vec<u8>> {
         self.as_ref().get_btrfs_fs_info(cx, scope)
+    }
+
+    fn set_btrfs_features(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        feature_flags: &[u8],
+    ) -> ffs_error::Result<()> {
+        self.as_ref().set_btrfs_features(cx, scope, feature_flags)
     }
 
     fn sync_fs(&self, cx: &Cx, scope: &mut RequestScope) -> ffs_error::Result<()> {

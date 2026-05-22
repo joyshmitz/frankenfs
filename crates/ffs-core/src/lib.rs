@@ -19864,6 +19864,22 @@ impl FsOps for OpenFs {
         }
     }
 
+    fn set_btrfs_features(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _feature_flags: &[u8],
+    ) -> ffs_error::Result<()> {
+        match &self.flavor {
+            FsFlavor::Ext4(_) => Err(FfsError::UnsupportedFeature(
+                "BTRFS_IOC_SET_FEATURES is not supported on ext4 filesystems".to_owned(),
+            )),
+            FsFlavor::Btrfs(_) => Err(FfsError::UnsupportedFeature(
+                "btrfs feature flag mutation is not implemented".to_owned(),
+            )),
+        }
+    }
+
     fn get_btrfs_space_info(
         &self,
         _cx: &Cx,
