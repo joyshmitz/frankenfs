@@ -21160,6 +21160,47 @@ impl FsOps for OpenFs {
         }
     }
 
+    fn ext4_migrate(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _ino: u64,
+    ) -> ffs_error::Result<()> {
+        match &self.flavor {
+            FsFlavor::Ext4(_) => Err(FfsError::ReadOnly),
+            FsFlavor::Btrfs(_) => Err(FfsError::UnsupportedFeature(
+                "EXT4_IOC_MIGRATE is not supported on btrfs filesystems".to_owned(),
+            )),
+        }
+    }
+
+    fn ext4_swap_boot(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _ino: u64,
+    ) -> ffs_error::Result<()> {
+        match &self.flavor {
+            FsFlavor::Ext4(_) => Err(FfsError::ReadOnly),
+            FsFlavor::Btrfs(_) => Err(FfsError::UnsupportedFeature(
+                "EXT4_IOC_SWAP_BOOT is not supported on btrfs filesystems".to_owned(),
+            )),
+        }
+    }
+
+    fn fs_shutdown(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _flags: &[u8],
+    ) -> ffs_error::Result<()> {
+        match &self.flavor {
+            FsFlavor::Ext4(_) | FsFlavor::Btrfs(_) => Err(FfsError::UnsupportedFeature(
+                "FS_IOC_SHUTDOWN is not supported (emergency stop requires kernel integration)".to_owned(),
+            )),
+        }
+    }
+
     fn setattr(
         &self,
         cx: &Cx,

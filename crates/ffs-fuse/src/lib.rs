@@ -166,6 +166,15 @@ const EXT4_IOC_GROUP_ADD: u32 = 0x4010_6608;
 /// `EXT4_IOC_ALLOC_DA_BLKS` = `_IO('f', 12)`.
 /// Force allocation of all delayed-allocation blocks.
 const EXT4_IOC_ALLOC_DA_BLKS: u32 = 0x0000_660C;
+/// `EXT4_IOC_MIGRATE` = `_IO('f', 9)`.
+/// Migrate inode from ext3 format to ext4 format (extents).
+const EXT4_IOC_MIGRATE: u32 = 0x0000_6609;
+/// `EXT4_IOC_SWAP_BOOT` = `_IO('f', 17)`.
+/// Swap contents with the boot inode for boot loader installation.
+const EXT4_IOC_SWAP_BOOT: u32 = 0x0000_6611;
+/// `FS_IOC_SHUTDOWN` = `_IOW('X', 125, __u32)`.
+/// Shutdown filesystem (emergency stop, data loss risk).
+const FS_IOC_SHUTDOWN: u32 = 0x4004_587D;
 /// `FS_IOC_GETFSLABEL` = `_IOR(0x94, 0x31, char[FSLABEL_MAX])` on x86_64.
 const FS_IOC_GETFSLABEL: u32 = 0x8100_9431;
 /// `FS_IOC_SETFSLABEL` = `_IOW(0x94, 0x32, char[FSLABEL_MAX])` on x86_64.
@@ -3717,6 +3726,42 @@ impl FrankenFuse {
                 let cx = Self::cx_for_request();
                 match self.with_request_scope(&cx, RequestOp::IoctlWrite, |cx, scope| {
                     self.inner.ops.ext4_alloc_da_blks(cx, scope, ino)
+                }) {
+                    Ok(()) => IoctlResult::Data(Vec::new()),
+                    Err(error) => IoctlResult::Error(error.to_errno()),
+                }
+            }
+            EXT4_IOC_MIGRATE => {
+                if self.inner.read_only {
+                    return IoctlResult::Error(libc::EROFS);
+                }
+                let cx = Self::cx_for_request();
+                match self.with_request_scope(&cx, RequestOp::IoctlWrite, |cx, scope| {
+                    self.inner.ops.ext4_migrate(cx, scope, ino)
+                }) {
+                    Ok(()) => IoctlResult::Data(Vec::new()),
+                    Err(error) => IoctlResult::Error(error.to_errno()),
+                }
+            }
+            EXT4_IOC_SWAP_BOOT => {
+                if self.inner.read_only {
+                    return IoctlResult::Error(libc::EROFS);
+                }
+                let cx = Self::cx_for_request();
+                match self.with_request_scope(&cx, RequestOp::IoctlWrite, |cx, scope| {
+                    self.inner.ops.ext4_swap_boot(cx, scope, ino)
+                }) {
+                    Ok(()) => IoctlResult::Data(Vec::new()),
+                    Err(error) => IoctlResult::Error(error.to_errno()),
+                }
+            }
+            FS_IOC_SHUTDOWN => {
+                if in_data.len() < 4 {
+                    return IoctlResult::Error(libc::EINVAL);
+                }
+                let cx = Self::cx_for_request();
+                match self.with_request_scope(&cx, RequestOp::IoctlWrite, |cx, scope| {
+                    self.inner.ops.fs_shutdown(cx, scope, in_data)
                 }) {
                     Ok(()) => IoctlResult::Data(Vec::new()),
                     Err(error) => IoctlResult::Error(error.to_errno()),

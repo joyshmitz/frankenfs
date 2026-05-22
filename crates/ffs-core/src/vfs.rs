@@ -2283,6 +2283,50 @@ pub trait FsOps: Send + Sync {
         ))
     }
 
+    /// Migrate inode to ext4 extent format for `EXT4_IOC_MIGRATE`.
+    ///
+    /// Converts inode from ext3 indirect blocks to ext4 extent tree.
+    /// Returns `FfsError::ReadOnly` for read-only mounts.
+    fn ext4_migrate(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _ino: u64,
+    ) -> ffs_error::Result<()> {
+        Err(FfsError::UnsupportedFeature(
+            "ext4_migrate is not supported by this backend".to_owned(),
+        ))
+    }
+
+    /// Swap contents with boot inode for `EXT4_IOC_SWAP_BOOT`.
+    ///
+    /// Atomically swaps inode contents with the reserved boot inode.
+    /// Returns `FfsError::ReadOnly` for read-only mounts.
+    fn ext4_swap_boot(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _ino: u64,
+    ) -> ffs_error::Result<()> {
+        Err(FfsError::UnsupportedFeature(
+            "ext4_swap_boot is not supported by this backend".to_owned(),
+        ))
+    }
+
+    /// Shutdown filesystem for `FS_IOC_SHUTDOWN`.
+    ///
+    /// Emergency shutdown; may cause data loss. Takes 4-byte flags.
+    fn fs_shutdown(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _flags: &[u8],
+    ) -> ffs_error::Result<()> {
+        Err(FfsError::UnsupportedFeature(
+            "fs_shutdown is not supported by this backend".to_owned(),
+        ))
+    }
+
     /// Set inode attributes. Returns updated attributes.
     fn setattr(
         &self,
@@ -3095,6 +3139,33 @@ impl<T: FsOps + ?Sized> FsOps for Arc<T> {
         ino: u64,
     ) -> ffs_error::Result<()> {
         self.as_ref().ext4_alloc_da_blks(cx, scope, ino)
+    }
+
+    fn ext4_migrate(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        ino: u64,
+    ) -> ffs_error::Result<()> {
+        self.as_ref().ext4_migrate(cx, scope, ino)
+    }
+
+    fn ext4_swap_boot(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        ino: u64,
+    ) -> ffs_error::Result<()> {
+        self.as_ref().ext4_swap_boot(cx, scope, ino)
+    }
+
+    fn fs_shutdown(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        flags: &[u8],
+    ) -> ffs_error::Result<()> {
+        self.as_ref().fs_shutdown(cx, scope, flags)
     }
 
     fn setattr(
