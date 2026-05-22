@@ -21132,6 +21132,34 @@ impl FsOps for OpenFs {
         }
     }
 
+    fn ext4_group_add(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _args: &[u8],
+    ) -> ffs_error::Result<()> {
+        match &self.flavor {
+            FsFlavor::Ext4(_) => Err(FfsError::ReadOnly),
+            FsFlavor::Btrfs(_) => Err(FfsError::UnsupportedFeature(
+                "EXT4_IOC_GROUP_ADD is not supported on btrfs filesystems".to_owned(),
+            )),
+        }
+    }
+
+    fn ext4_alloc_da_blks(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _ino: u64,
+    ) -> ffs_error::Result<()> {
+        match &self.flavor {
+            FsFlavor::Ext4(_) => Err(FfsError::ReadOnly),
+            FsFlavor::Btrfs(_) => Err(FfsError::UnsupportedFeature(
+                "EXT4_IOC_ALLOC_DA_BLKS is not supported on btrfs filesystems".to_owned(),
+            )),
+        }
+    }
+
     fn setattr(
         &self,
         cx: &Cx,

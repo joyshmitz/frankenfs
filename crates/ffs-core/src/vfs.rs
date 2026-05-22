@@ -2253,6 +2253,36 @@ pub trait FsOps: Send + Sync {
         ))
     }
 
+    /// Add a block group for `EXT4_IOC_GROUP_ADD`.
+    ///
+    /// Takes raw `ext4_new_group_input` struct bytes (16 bytes).
+    /// Returns `FfsError::ReadOnly` for read-only mounts.
+    fn ext4_group_add(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _args: &[u8],
+    ) -> ffs_error::Result<()> {
+        Err(FfsError::UnsupportedFeature(
+            "ext4_group_add is not supported by this backend".to_owned(),
+        ))
+    }
+
+    /// Force allocation of delayed-allocation blocks for `EXT4_IOC_ALLOC_DA_BLKS`.
+    ///
+    /// Flushes all delayed-alloc blocks for the given inode.
+    /// Returns `FfsError::ReadOnly` for read-only mounts.
+    fn ext4_alloc_da_blks(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _ino: u64,
+    ) -> ffs_error::Result<()> {
+        Err(FfsError::UnsupportedFeature(
+            "ext4_alloc_da_blks is not supported by this backend".to_owned(),
+        ))
+    }
+
     /// Set inode attributes. Returns updated attributes.
     fn setattr(
         &self,
@@ -3047,6 +3077,24 @@ impl<T: FsOps + ?Sized> FsOps for Arc<T> {
         args: &[u8],
     ) -> ffs_error::Result<()> {
         self.as_ref().ext4_resize_fs(cx, scope, args)
+    }
+
+    fn ext4_group_add(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        args: &[u8],
+    ) -> ffs_error::Result<()> {
+        self.as_ref().ext4_group_add(cx, scope, args)
+    }
+
+    fn ext4_alloc_da_blks(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        ino: u64,
+    ) -> ffs_error::Result<()> {
+        self.as_ref().ext4_alloc_da_blks(cx, scope, ino)
     }
 
     fn setattr(

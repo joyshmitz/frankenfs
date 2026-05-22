@@ -160,6 +160,12 @@ const EXT4_IOC_GROUP_EXTEND: u32 = 0x4008_6607;
 /// `EXT4_IOC_RESIZE_FS` = `_IOW('f', 16, __u64)` on x86_64.
 /// Resize filesystem to specified number of blocks.
 const EXT4_IOC_RESIZE_FS: u32 = 0x4008_6610;
+/// `EXT4_IOC_GROUP_ADD` = `_IOW('f', 8, struct ext4_new_group_input)` on x86_64.
+/// Add a new block group to the filesystem.
+const EXT4_IOC_GROUP_ADD: u32 = 0x4010_6608;
+/// `EXT4_IOC_ALLOC_DA_BLKS` = `_IO('f', 12)`.
+/// Force allocation of all delayed-allocation blocks.
+const EXT4_IOC_ALLOC_DA_BLKS: u32 = 0x0000_660C;
 /// `FS_IOC_GETFSLABEL` = `_IOR(0x94, 0x31, char[FSLABEL_MAX])` on x86_64.
 const FS_IOC_GETFSLABEL: u32 = 0x8100_9431;
 /// `FS_IOC_SETFSLABEL` = `_IOW(0x94, 0x32, char[FSLABEL_MAX])` on x86_64.
@@ -3684,6 +3690,33 @@ impl FrankenFuse {
                 let cx = Self::cx_for_request();
                 match self.with_request_scope(&cx, RequestOp::IoctlWrite, |cx, scope| {
                     self.inner.ops.ext4_resize_fs(cx, scope, in_data)
+                }) {
+                    Ok(()) => IoctlResult::Data(Vec::new()),
+                    Err(error) => IoctlResult::Error(error.to_errno()),
+                }
+            }
+            EXT4_IOC_GROUP_ADD => {
+                if self.inner.read_only {
+                    return IoctlResult::Error(libc::EROFS);
+                }
+                if in_data.len() < 16 {
+                    return IoctlResult::Error(libc::EINVAL);
+                }
+                let cx = Self::cx_for_request();
+                match self.with_request_scope(&cx, RequestOp::IoctlWrite, |cx, scope| {
+                    self.inner.ops.ext4_group_add(cx, scope, in_data)
+                }) {
+                    Ok(()) => IoctlResult::Data(Vec::new()),
+                    Err(error) => IoctlResult::Error(error.to_errno()),
+                }
+            }
+            EXT4_IOC_ALLOC_DA_BLKS => {
+                if self.inner.read_only {
+                    return IoctlResult::Error(libc::EROFS);
+                }
+                let cx = Self::cx_for_request();
+                match self.with_request_scope(&cx, RequestOp::IoctlWrite, |cx, scope| {
+                    self.inner.ops.ext4_alloc_da_blks(cx, scope, ino)
                 }) {
                     Ok(()) => IoctlResult::Data(Vec::new()),
                     Err(error) => IoctlResult::Error(error.to_errno()),
