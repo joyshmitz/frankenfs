@@ -609,6 +609,7 @@ pub struct Ext4Superblock {
     pub feature_ro_compat: Ext4RoCompatFeatures,
     pub super_flags: Ext4SuperFlags,
     pub default_mount_opts: u32,
+    pub mount_opts: String,
 
     // ── State & error tracking ───────────────────────────────────────────
     pub state: u16,
@@ -624,6 +625,14 @@ pub struct Ext4Superblock {
     pub mkfs_time: u32,
     pub first_error_time: u32,
     pub last_error_time: u32,
+    pub wtime_hi: u8,
+    pub mtime_hi: u8,
+    pub mkfs_time_hi: u8,
+    pub lastcheck_hi: u8,
+    pub first_error_time_hi: u8,
+    pub last_error_time_hi: u8,
+    pub first_error_errcode: u8,
+    pub last_error_errcode: u8,
 
     // ── Journal ──────────────────────────────────────────────────────────
     pub journal_inum: u32,
@@ -642,7 +651,13 @@ pub struct Ext4Superblock {
     pub usr_quota_inum: u32,
     pub grp_quota_inum: u32,
     pub prj_quota_inum: u32,
+    pub overhead_clusters: u32,
     pub backup_bgs: [u32; 2],
+
+    // ── Encryption / lost+found metadata ────────────────────────────────
+    pub encrypt_algos: [u8; 4],
+    pub encrypt_pw_salt: [u8; 16],
+    pub lost_found_ino: u32,
 
     // ── Casefold / orphan file metadata ─────────────────────────────────
     pub encoding: u16,
@@ -732,6 +747,7 @@ impl Ext4Superblock {
         let checksum_type = ensure_slice(region, 0x175, 1)?[0];
         let def_hash_version = ensure_slice(region, 0xFC, 1)?[0];
         let log_groups_per_flex = ensure_slice(region, 0x174, 1)?[0];
+        let time_high_and_error_codes = read_fixed::<8>(region, 0x274)?;
 
         Ok(Self {
             // Core geometry
@@ -770,6 +786,7 @@ impl Ext4Superblock {
             feature_ro_compat: Ext4RoCompatFeatures(read_le_u32(region, 0x64)?),
             super_flags: Ext4SuperFlags(read_le_u32(region, 0x160)?),
             default_mount_opts: read_le_u32(region, 0x100)?,
+            mount_opts: trim_nul_padded(&read_fixed::<64>(region, 0x200)?),
 
             // State & error tracking
             state: read_le_u16(region, 0x3A)?,
@@ -785,6 +802,14 @@ impl Ext4Superblock {
             mkfs_time: read_le_u32(region, 0x108)?,
             first_error_time: read_le_u32(region, 0x198)?,
             last_error_time: read_le_u32(region, 0x1CC)?,
+            wtime_hi: time_high_and_error_codes[0],
+            mtime_hi: time_high_and_error_codes[1],
+            mkfs_time_hi: time_high_and_error_codes[2],
+            lastcheck_hi: time_high_and_error_codes[3],
+            first_error_time_hi: time_high_and_error_codes[4],
+            last_error_time_hi: time_high_and_error_codes[5],
+            first_error_errcode: time_high_and_error_codes[6],
+            last_error_errcode: time_high_and_error_codes[7],
 
             // Journal
             journal_inum: read_le_u32(region, 0xE0)?,
@@ -809,7 +834,13 @@ impl Ext4Superblock {
             usr_quota_inum: read_le_u32(region, 0x240)?,
             grp_quota_inum: read_le_u32(region, 0x244)?,
             prj_quota_inum: read_le_u32(region, 0x26C)?,
+            overhead_clusters: read_le_u32(region, 0x248)?,
             backup_bgs: [read_le_u32(region, 0x24C)?, read_le_u32(region, 0x250)?],
+
+            // Encryption / lost+found metadata
+            encrypt_algos: read_fixed::<4>(region, 0x254)?,
+            encrypt_pw_salt: read_fixed::<16>(region, 0x258)?,
+            lost_found_ino: read_le_u32(region, 0x268)?,
 
             // Casefold / orphan file metadata
             encoding: read_le_u16(region, 0x27C)?,
@@ -5708,12 +5739,18 @@ mod tests {
         sb[0xE8..0xEC].copy_from_slice(&12_u32.to_le_bytes()); // last_orphan
         sb[0xEC..0xF0].copy_from_slice(&0xDEAD_BEEF_u32.to_le_bytes()); // hash_seed[0]
         sb[0xFC] = 1; // def_hash_version=HalfMD4
+        sb[0x200..0x20E].copy_from_slice(b"acl,user_xattr"); // mount_opts
+        sb[0x248..0x24C].copy_from_slice(&222_u32.to_le_bytes()); // overhead_clusters
         sb[0x160..0x164].copy_from_slice(&Ext4SuperFlags::UNSIGNED_HASH.0.to_le_bytes());
         sb[0x174] = 4; // log_groups_per_flex
         sb[0x166..0x168].copy_from_slice(&5_u16.to_le_bytes()); // mmp_update_interval
         sb[0x168..0x170].copy_from_slice(&1234_u64.to_le_bytes()); // mmp_block
         sb[0x24C..0x250].copy_from_slice(&7_u32.to_le_bytes()); // backup_bgs[0]
         sb[0x250..0x254].copy_from_slice(&11_u32.to_le_bytes()); // backup_bgs[1]
+        sb[0x254..0x258].copy_from_slice(&[1, 2, 3, 4]); // encrypt_algos
+        sb[0x258..0x268].copy_from_slice(b"0123456789ABCDEF"); // encrypt_pw_salt
+        sb[0x268..0x26C].copy_from_slice(&99_u32.to_le_bytes()); // lost_found_ino
+        sb[0x274..0x27C].copy_from_slice(&[10, 11, 12, 13, 14, 15, 16, 17]); // time hi / errcodes
         sb[0x27C..0x27E].copy_from_slice(&1_u16.to_le_bytes()); // encoding=UTF-8
         sb[0x27E..0x280].copy_from_slice(&2_u16.to_le_bytes()); // encoding_flags
         sb[0x280..0x284].copy_from_slice(&13_u32.to_le_bytes()); // orphan_file_inum
@@ -5726,6 +5763,7 @@ mod tests {
         assert_eq!(parsed.state, 1);
         assert_eq!(parsed.rev_level, 1);
         assert_eq!(parsed.first_ino, 11);
+        assert_eq!(parsed.mount_opts, "acl,user_xattr");
         assert_eq!(parsed.journal_inum, 8);
         assert_eq!(parsed.last_orphan, 12);
         assert_eq!(parsed.hash_seed[0], 0xDEAD_BEEF);
@@ -5734,7 +5772,24 @@ mod tests {
         assert_eq!(parsed.log_groups_per_flex, 4);
         assert_eq!(parsed.mmp_update_interval, 5);
         assert_eq!(parsed.mmp_block, 1234);
+        assert_eq!(parsed.overhead_clusters, 222);
         assert_eq!(parsed.backup_bgs, [7, 11]);
+        assert_eq!(parsed.encrypt_algos, [1, 2, 3, 4]);
+        assert_eq!(parsed.encrypt_pw_salt, *b"0123456789ABCDEF");
+        assert_eq!(parsed.lost_found_ino, 99);
+        assert_eq!(
+            [
+                parsed.wtime_hi,
+                parsed.mtime_hi,
+                parsed.mkfs_time_hi,
+                parsed.lastcheck_hi,
+                parsed.first_error_time_hi,
+                parsed.last_error_time_hi,
+                parsed.first_error_errcode,
+                parsed.last_error_errcode,
+            ],
+            [10, 11, 12, 13, 14, 15, 16, 17]
+        );
         assert_eq!(parsed.encoding, 1);
         assert_eq!(parsed.encoding_flags, 2);
         assert_eq!(parsed.orphan_file_inum, 13);
