@@ -1766,6 +1766,22 @@ pub trait FsOps: Send + Sync {
         ))
     }
 
+    /// Remove a btrfs device for `BTRFS_IOC_RM_DEV_V2`.
+    ///
+    /// Takes raw `btrfs_ioctl_vol_args_v2` bytes, which can identify the device
+    /// by name or by device id depending on the flags.
+    /// Non-btrfs backends must return `FfsError::UnsupportedFeature`.
+    fn btrfs_rm_dev_v2(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _vol_args: &[u8],
+    ) -> ffs_error::Result<()> {
+        Err(FfsError::UnsupportedFeature(
+            "btrfs_rm_dev_v2 is not supported by this backend".to_owned(),
+        ))
+    }
+
     /// Start a balance operation for `BTRFS_IOC_BALANCE_V2`.
     ///
     /// Takes raw `btrfs_ioctl_balance_args` struct bytes.
@@ -2588,6 +2604,15 @@ impl<T: FsOps + ?Sized> FsOps for Arc<T> {
         limit: BtrfsQgroupLimitRequest,
     ) -> ffs_error::Result<()> {
         self.as_ref().btrfs_limit_qgroup(cx, scope, limit)
+    }
+
+    fn btrfs_rm_dev_v2(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        vol_args: &[u8],
+    ) -> ffs_error::Result<()> {
+        self.as_ref().btrfs_rm_dev_v2(cx, scope, vol_args)
     }
 
     fn set_inode_flags(

@@ -289,6 +289,9 @@ const BTRFS_IOC_SNAP_DESTROY: u32 = 0x5000_940F;
 /// `BTRFS_IOC_SUBVOL_CREATE_V2` = `_IOW(0x94, 24, struct btrfs_ioctl_vol_args_v2)`.
 /// Create a new subvolume.
 const BTRFS_IOC_SUBVOL_CREATE_V2: u32 = 0x5000_9418;
+/// `BTRFS_IOC_RM_DEV_V2` = `_IOW(0x94, 58, struct btrfs_ioctl_vol_args_v2)`.
+/// Remove a btrfs device by name or device id.
+const BTRFS_IOC_RM_DEV_V2: u32 = 0x5000_943A;
 const BTRFS_VOL_ARGS_SIZE: u32 = 4096;
 /// `FICLONE` = `_IOW(0x94, 9, int)`.
 /// Clone (reflink) entire file from source fd.
@@ -4127,6 +4130,22 @@ impl FrankenFuse {
                     Err(error) => IoctlResult::Error(error.to_errno()),
                 }
             }
+            BTRFS_IOC_RM_DEV_V2 => {
+                // Input: 4096-byte vol_args_v2 with flags and name/devid.
+                if in_data.len() < BTRFS_VOL_ARGS_SIZE as usize {
+                    return IoctlResult::Error(libc::EINVAL);
+                }
+                if self.inner.read_only {
+                    return IoctlResult::Error(libc::EROFS);
+                }
+                let cx = Self::cx_for_request();
+                match self.with_request_scope(&cx, RequestOp::IoctlWrite, |cx, scope| {
+                    self.inner.ops.btrfs_rm_dev_v2(cx, scope, in_data)
+                }) {
+                    Ok(()) => IoctlResult::Data(Vec::new()),
+                    Err(error) => IoctlResult::Error(error.to_errno()),
+                }
+            }
             FICLONE => {
                 // Input: 4-byte source fd
                 if in_data.len() < 4 {
@@ -6703,6 +6722,7 @@ mod tests {
         BtrfsAssignQgroup(u64, u64, u64),
         BtrfsCreateQgroup(u64, u64),
         BtrfsLimitQgroup(BtrfsQgroupLimitRequest),
+        BtrfsRemoveDeviceV2(Vec<u8>),
         Getattr(InodeNumber),
         Statfs(InodeNumber),
         GetVersion(InodeNumber),
@@ -7538,6 +7558,19 @@ mod tests {
                 .lock()
                 .expect("lock ioctl calls")
                 .push(IoctlCall::BtrfsLimitQgroup(limit));
+            Ok(())
+        }
+
+        fn btrfs_rm_dev_v2(
+            &self,
+            _cx: &Cx,
+            _scope: &mut RequestScope,
+            vol_args: &[u8],
+        ) -> ffs_error::Result<()> {
+            self.calls
+                .lock()
+                .expect("lock ioctl calls")
+                .push(IoctlCall::BtrfsRemoveDeviceV2(vol_args.to_vec()));
             Ok(())
         }
 
@@ -9136,6 +9169,66 @@ mod tests {
         let input = vec![0_u8; BTRFS_QGROUP_LIMIT_ARGS_SIZE as usize];
 
         let response = dispatch_ioctl_for_testing(&fuse, 1, 0, BTRFS_IOC_QGROUP_LIMIT, &input, 0);
+        assert_eq!(response, IoctlResult::Error(libc::EROFS));
+        assert!(calls.lock().expect("lock ioctl calls").is_empty());
+    }
+
+    #[test]
+    fn dispatch_ioctl_btrfs_rm_dev_v2_uses_write_scope() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let fuse = FrankenFuse::with_options(
+            Box::new(IoctlRecordingFs::new(0, Arc::clone(&calls))),
+            &MountOptions {
+                read_only: false,
+                ..MountOptions::default()
+            },
+        );
+        let mut input = vec![0_u8; BTRFS_VOL_ARGS_SIZE as usize];
+        input[16..24].copy_from_slice(&1_u64.to_le_bytes()); // flags: by-name path
+        input[64..70].copy_from_slice(b"dev-sd");
+
+        let response = dispatch_ioctl_for_testing(&fuse, 1, 0, BTRFS_IOC_RM_DEV_V2, &input, 0);
+        assert_eq!(response, IoctlResult::Data(Vec::new()));
+        assert_eq!(
+            calls.lock().expect("lock ioctl calls").as_slice(),
+            &[
+                IoctlCall::Begin(RequestOp::IoctlWrite),
+                IoctlCall::BtrfsRemoveDeviceV2(input),
+                IoctlCall::End(RequestOp::IoctlWrite),
+            ]
+        );
+    }
+
+    #[test]
+    fn dispatch_ioctl_btrfs_rm_dev_v2_rejects_short_input() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let fuse = FrankenFuse::with_options(
+            Box::new(IoctlRecordingFs::new(0, Arc::clone(&calls))),
+            &MountOptions {
+                read_only: false,
+                ..MountOptions::default()
+            },
+        );
+
+        let response = dispatch_ioctl_for_testing(
+            &fuse,
+            1,
+            0,
+            BTRFS_IOC_RM_DEV_V2,
+            &[0_u8; BTRFS_VOL_ARGS_SIZE as usize - 1],
+            0,
+        );
+        assert_eq!(response, IoctlResult::Error(libc::EINVAL));
+        assert!(calls.lock().expect("lock ioctl calls").is_empty());
+    }
+
+    #[test]
+    fn dispatch_ioctl_btrfs_rm_dev_v2_read_only_returns_erofs() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let fuse = FrankenFuse::new(Box::new(IoctlRecordingFs::new(0, Arc::clone(&calls))));
+        let input = vec![0_u8; BTRFS_VOL_ARGS_SIZE as usize];
+
+        let response = dispatch_ioctl_for_testing(&fuse, 1, 0, BTRFS_IOC_RM_DEV_V2, &input, 0);
         assert_eq!(response, IoctlResult::Error(libc::EROFS));
         assert!(calls.lock().expect("lock ioctl calls").is_empty());
     }
