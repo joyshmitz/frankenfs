@@ -20,8 +20,8 @@ use ffs_error::FfsError;
 use ffs_types::{EXT4_EXTENTS_FL, InodeNumber};
 use fuser::{
     FileAttr, FileType, Filesystem, KernelConfig, MountOption, ReplyAttr, ReplyCreate, ReplyData,
-    ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyIoctl, ReplyLseek, ReplyOpen, ReplyStatfs,
-    ReplyStatx, ReplyWrite, ReplyXattr, Request, TimeOrNow, consts as fuse_consts,
+    ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyIoctl, ReplyLock, ReplyLseek, ReplyOpen,
+    ReplyStatfs, ReplyStatx, ReplyWrite, ReplyXattr, Request, TimeOrNow, consts as fuse_consts,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -6289,6 +6289,42 @@ impl Filesystem for FrankenFuse {
                 );
             }
         }
+    }
+
+    fn getlk(
+        &mut self,
+        _req: &Request<'_>,
+        _ino: u64,
+        _fh: u64,
+        _lock_owner: u64,
+        _start: u64,
+        _end: u64,
+        _typ: i32,
+        _pid: u32,
+        reply: ReplyLock,
+    ) {
+        // Return "no conflicting lock" - the kernel handles local locking anyway.
+        // F_UNLCK = 2 indicates no lock conflict.
+        reply.locked(0, 0, libc::F_UNLCK, 0);
+    }
+
+    fn setlk(
+        &mut self,
+        _req: &Request<'_>,
+        _ino: u64,
+        _fh: u64,
+        _lock_owner: u64,
+        _start: u64,
+        _end: u64,
+        _typ: i32,
+        _pid: u32,
+        _sleep: bool,
+        reply: ReplyEmpty,
+    ) {
+        // Accept all lock requests - POSIX locks are advisory and the kernel
+        // handles local locking. For a FUSE filesystem, implementing these
+        // methods prevents ENOSYS errors from applications that probe locking.
+        reply.ok();
     }
 
     #[allow(clippy::cast_possible_truncation)] // FUSE mode u32 → ext4 u16
