@@ -20214,6 +20214,42 @@ impl FsOps for OpenFs {
         }
     }
 
+    fn btrfs_defrag(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _ino: u64,
+    ) -> ffs_error::Result<()> {
+        match &self.flavor {
+            FsFlavor::Ext4(_) => Err(FfsError::UnsupportedFeature(
+                "BTRFS_IOC_DEFRAG is not supported on ext4 filesystems".to_owned(),
+            )),
+            FsFlavor::Btrfs(_) => {
+                // Defrag requires write access
+                Err(FfsError::ReadOnly)
+            }
+        }
+    }
+
+    fn btrfs_scan_dev(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _args: &[u8],
+    ) -> ffs_error::Result<()> {
+        match &self.flavor {
+            FsFlavor::Ext4(_) => Err(FfsError::UnsupportedFeature(
+                "BTRFS_IOC_SCAN_DEV is not supported on ext4 filesystems".to_owned(),
+            )),
+            FsFlavor::Btrfs(_) => {
+                // Device scanning is not applicable in FUSE context
+                Err(FfsError::UnsupportedFeature(
+                    "BTRFS_IOC_SCAN_DEV not applicable in FUSE context".to_owned(),
+                ))
+            }
+        }
+    }
+
     fn btrfs_subvol_create(
         &self,
         _cx: &Cx,

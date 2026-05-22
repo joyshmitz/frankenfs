@@ -1856,6 +1856,34 @@ pub trait FsOps: Send + Sync {
         ))
     }
 
+    /// Defragment file for `BTRFS_IOC_DEFRAG` (v1).
+    ///
+    /// Legacy defrag ioctl, requires write access.
+    fn btrfs_defrag(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _ino: u64,
+    ) -> ffs_error::Result<()> {
+        Err(FfsError::UnsupportedFeature(
+            "btrfs_defrag is not supported by this backend".to_owned(),
+        ))
+    }
+
+    /// Scan device for `BTRFS_IOC_SCAN_DEV`.
+    ///
+    /// Not applicable in FUSE context.
+    fn btrfs_scan_dev(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _args: &[u8],
+    ) -> ffs_error::Result<()> {
+        Err(FfsError::UnsupportedFeature(
+            "btrfs_scan_dev is not supported by this backend".to_owned(),
+        ))
+    }
+
     /// Create a subvolume for `BTRFS_IOC_SUBVOL_CREATE_V2`.
     ///
     /// Takes raw vol_args_v2 struct bytes containing flags and name.
@@ -2692,6 +2720,24 @@ impl<T: FsOps + ?Sized> FsOps for Arc<T> {
     ) -> ffs_error::Result<Vec<u8>> {
         self.as_ref()
             .get_btrfs_logical_ino_v2(cx, scope, logical, args)
+    }
+
+    fn btrfs_resize(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        args: &[u8],
+    ) -> ffs_error::Result<()> {
+        self.as_ref().btrfs_resize(cx, scope, args)
+    }
+
+    fn btrfs_dev_replace(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        args: &[u8],
+    ) -> ffs_error::Result<Vec<u8>> {
+        self.as_ref().btrfs_dev_replace(cx, scope, args)
     }
 
     fn get_quota_info(&self, cx: &Cx, scope: &mut RequestScope) -> ffs_error::Result<QuotaInfo> {
