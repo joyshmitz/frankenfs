@@ -30133,6 +30133,44 @@ mod tests {
         }
     }
 
+    fn decode_btrfs_ino_paths_test_container(buf: &[u8]) -> (u32, u32, Vec<Vec<u8>>) {
+        assert!(
+            buf.len() >= BTRFS_DATA_CONTAINER_HEADER_SIZE,
+            "btrfs ino-paths buffer must include data-container header"
+        );
+        let read_u32 = |offset: usize| -> u32 {
+            u32::from_ne_bytes(buf[offset..offset + 4].try_into().expect("u32 field"))
+        };
+        let read_u64 = |offset: usize| -> u64 {
+            u64::from_ne_bytes(buf[offset..offset + 8].try_into().expect("u64 field"))
+        };
+
+        let elem_cnt = read_u32(8);
+        let elem_missed = read_u32(12);
+        let count = usize::try_from(elem_cnt).expect("elem_cnt fits usize");
+        assert!(
+            buf.len() >= BTRFS_DATA_CONTAINER_HEADER_SIZE + count * std::mem::size_of::<u64>(),
+            "btrfs ino-paths buffer must include every offset slot"
+        );
+
+        let val_start = BTRFS_DATA_CONTAINER_HEADER_SIZE;
+        let mut paths = Vec::with_capacity(count);
+        for i in 0..count {
+            let rel = usize::try_from(read_u64(val_start + i * std::mem::size_of::<u64>()))
+                .expect("relative path offset fits usize");
+            let start = val_start + rel;
+            assert!(start < buf.len(), "path offset must point into buffer");
+            let end = buf[start..]
+                .iter()
+                .position(|byte| *byte == 0)
+                .map(|nul| start + nul + 1)
+                .expect("path must be NUL terminated");
+            paths.push(buf[start..end].to_vec());
+        }
+
+        (read_u32(4), elem_missed, paths)
+    }
+
     #[test]
     fn btrfs_build_path_from_inode_refs_returns_empty_for_subvolume_root() {
         let entries = Vec::new();
@@ -41044,6 +41082,59 @@ mod tests {
             )
             .unwrap();
         assert_eq!(a.ino, b.ino);
+    }
+
+    #[test]
+    fn btrfs_ino_paths_vfs_reports_all_hard_links() {
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+        let root = InodeNumber(1);
+
+        let dir = ops
+            .mkdir(
+                &cx,
+                &mut RequestScope::empty(),
+                root,
+                OsStr::new("links"),
+                0o755,
+                0,
+                0,
+            )
+            .expect("mkdir links");
+        let attr = ops
+            .create(
+                &cx,
+                &mut RequestScope::empty(),
+                dir.ino,
+                OsStr::new("original.txt"),
+                0o644,
+                0,
+                0,
+            )
+            .expect("create original");
+        ops.link(
+            &cx,
+            &mut RequestScope::empty(),
+            attr.ino,
+            root,
+            OsStr::new("root_alias.txt"),
+        )
+        .expect("hard-link root alias");
+
+        let encoded = ops
+            .get_btrfs_ino_paths(&cx, &mut RequestScope::empty(), attr.ino.0)
+            .expect("BTRFS_IOC_INO_PATHS resolves VFS-created backrefs");
+        let (bytes_missing, elem_missed, paths) = decode_btrfs_ino_paths_test_container(&encoded);
+
+        assert_eq!(bytes_missing, 0);
+        assert_eq!(elem_missed, 0);
+        assert_eq!(
+            paths,
+            vec![
+                b"links/original.txt\0".to_vec(),
+                b"root_alias.txt\0".to_vec(),
+            ]
+        );
     }
 
     #[test]
