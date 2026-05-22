@@ -6422,6 +6422,18 @@ impl Filesystem for FrankenFuse {
         }
     }
 
+    fn releasedir(
+        &mut self,
+        _req: &Request<'_>,
+        _ino: u64,
+        _fh: u64,
+        _flags: i32,
+        reply: ReplyEmpty,
+    ) {
+        // opendir returns dummy handles, so releasedir is a no-op.
+        reply.ok();
+    }
+
     fn getlk(
         &mut self,
         _req: &Request<'_>,
