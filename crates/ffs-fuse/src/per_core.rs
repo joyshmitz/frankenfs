@@ -972,4 +972,60 @@ mod tests {
         // Just ensure it ran (prevent optimization).
         assert!(sum > 0);
     }
+
+    // ── normalized_steal_threshold edge cases ───────────────────────────────
+
+    #[test]
+    fn normalized_steal_threshold_valid_value() {
+        let cfg = PerCoreConfig {
+            steal_threshold: 3.5,
+            ..Default::default()
+        };
+        assert!((cfg.normalized_steal_threshold() - 3.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn normalized_steal_threshold_zero_returns_default() {
+        let cfg = PerCoreConfig {
+            steal_threshold: 0.0,
+            ..Default::default()
+        };
+        assert_eq!(cfg.normalized_steal_threshold(), PerCoreConfig::DEFAULT_STEAL_THRESHOLD);
+    }
+
+    #[test]
+    fn normalized_steal_threshold_negative_returns_default() {
+        let cfg = PerCoreConfig {
+            steal_threshold: -1.0,
+            ..Default::default()
+        };
+        assert_eq!(cfg.normalized_steal_threshold(), PerCoreConfig::DEFAULT_STEAL_THRESHOLD);
+    }
+
+    #[test]
+    fn normalized_steal_threshold_nan_returns_default() {
+        let cfg = PerCoreConfig {
+            steal_threshold: f64::NAN,
+            ..Default::default()
+        };
+        assert_eq!(cfg.normalized_steal_threshold(), PerCoreConfig::DEFAULT_STEAL_THRESHOLD);
+    }
+
+    #[test]
+    fn normalized_steal_threshold_infinity_returns_default() {
+        let cfg = PerCoreConfig {
+            steal_threshold: f64::INFINITY,
+            ..Default::default()
+        };
+        assert_eq!(cfg.normalized_steal_threshold(), PerCoreConfig::DEFAULT_STEAL_THRESHOLD);
+    }
+
+    #[test]
+    fn normalized_steal_threshold_neg_infinity_returns_default() {
+        let cfg = PerCoreConfig {
+            steal_threshold: f64::NEG_INFINITY,
+            ..Default::default()
+        };
+        assert_eq!(cfg.normalized_steal_threshold(), PerCoreConfig::DEFAULT_STEAL_THRESHOLD);
+    }
 }
