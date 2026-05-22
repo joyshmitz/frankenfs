@@ -7479,6 +7479,127 @@ mod tests {
     }
 
     #[test]
+    fn parse_fstrim_range_valid() {
+        let mut data = [0u8; 24];
+        let start = 4096u64;
+        let len = 1024u64;
+        let minlen = 512u64;
+        data[0..8].copy_from_slice(&start.to_ne_bytes());
+        data[8..16].copy_from_slice(&len.to_ne_bytes());
+        data[16..24].copy_from_slice(&minlen.to_ne_bytes());
+        let (s, l, m) = FrankenFuse::parse_fstrim_range(&data).unwrap();
+        assert_eq!(s, start);
+        assert_eq!(l, len);
+        assert_eq!(m, minlen);
+    }
+
+    #[test]
+    fn parse_fstrim_range_too_short() {
+        let data = [0u8; 20];
+        let err = FrankenFuse::parse_fstrim_range(&data).unwrap_err();
+        assert_eq!(err, libc::EINVAL);
+    }
+
+    #[test]
+    fn encode_fstrim_response_layout() {
+        let start = 0x1000u64;
+        let discarded = 0x2000u64;
+        let minlen = 0x100u64;
+        let buf = FrankenFuse::encode_fstrim_response(start, discarded, minlen);
+        assert_eq!(buf.len(), 24);
+        assert_eq!(u64::from_ne_bytes(buf[0..8].try_into().unwrap()), start);
+        assert_eq!(u64::from_ne_bytes(buf[8..16].try_into().unwrap()), discarded);
+        assert_eq!(u64::from_ne_bytes(buf[16..24].try_into().unwrap()), minlen);
+    }
+
+    #[test]
+    fn fstrim_parse_encode_roundtrip() {
+        let start = 8192u64;
+        let len = 65536u64;
+        let minlen = 4096u64;
+        let encoded = FrankenFuse::encode_fstrim_response(start, len, minlen);
+        let (s, l, m) = FrankenFuse::parse_fstrim_range(&encoded).unwrap();
+        assert_eq!(s, start);
+        assert_eq!(l, len);
+        assert_eq!(m, minlen);
+    }
+
+    #[test]
+    fn encode_fsuuid_response_layout() {
+        let uuid: [u8; 16] = [
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
+            0x0f, 0x10,
+        ];
+        let buf = FrankenFuse::encode_fsuuid_response(&uuid);
+        assert_eq!(buf.len(), 17);
+        assert_eq!(buf[0], 16);
+        assert_eq!(&buf[1..], &uuid[..]);
+    }
+
+    #[test]
+    fn parse_fsxattr_request_valid() {
+        let mut data = [0u8; 28];
+        let xflags = 0x00000001u32;
+        let extsize = 4096u32;
+        let projid = 42u32;
+        let cowextsize = 65536u32;
+        data[0..4].copy_from_slice(&xflags.to_ne_bytes());
+        data[4..8].copy_from_slice(&extsize.to_ne_bytes());
+        data[12..16].copy_from_slice(&projid.to_ne_bytes());
+        data[16..20].copy_from_slice(&cowextsize.to_ne_bytes());
+        let fsx = FrankenFuse::parse_fsxattr_request(&data).unwrap();
+        assert_eq!(fsx.xflags, xflags);
+        assert_eq!(fsx.extsize, extsize);
+        assert_eq!(fsx.projid, projid);
+        assert_eq!(fsx.cowextsize, cowextsize);
+        assert_eq!(fsx.nextents, 0);
+    }
+
+    #[test]
+    fn parse_fsxattr_request_too_short() {
+        let data = [0u8; 20];
+        let err = FrankenFuse::parse_fsxattr_request(&data).unwrap_err();
+        assert_eq!(err, libc::EINVAL);
+    }
+
+    #[test]
+    fn encode_fsxattr_response_layout() {
+        let fsx = FsxattrInfo {
+            xflags: 0x00000001,
+            extsize: 4096,
+            nextents: 100,
+            projid: 42,
+            cowextsize: 65536,
+        };
+        let buf = FrankenFuse::encode_fsxattr_response(&fsx);
+        assert_eq!(buf.len(), 28);
+        assert_eq!(u32::from_ne_bytes(buf[0..4].try_into().unwrap()), fsx.xflags);
+        assert_eq!(u32::from_ne_bytes(buf[4..8].try_into().unwrap()), fsx.extsize);
+        assert_eq!(u32::from_ne_bytes(buf[8..12].try_into().unwrap()), fsx.nextents);
+        assert_eq!(u32::from_ne_bytes(buf[12..16].try_into().unwrap()), fsx.projid);
+        assert_eq!(u32::from_ne_bytes(buf[16..20].try_into().unwrap()), fsx.cowextsize);
+    }
+
+    #[test]
+    fn fsxattr_parse_encode_roundtrip() {
+        let mut data = [0u8; 28];
+        let xflags = 0x00000002u32;
+        let extsize = 8192u32;
+        let projid = 100u32;
+        let cowextsize = 131072u32;
+        data[0..4].copy_from_slice(&xflags.to_ne_bytes());
+        data[4..8].copy_from_slice(&extsize.to_ne_bytes());
+        data[12..16].copy_from_slice(&projid.to_ne_bytes());
+        data[16..20].copy_from_slice(&cowextsize.to_ne_bytes());
+        let parsed = FrankenFuse::parse_fsxattr_request(&data).unwrap();
+        let encoded = FrankenFuse::encode_fsxattr_response(&parsed);
+        assert_eq!(u32::from_ne_bytes(encoded[0..4].try_into().unwrap()), xflags);
+        assert_eq!(u32::from_ne_bytes(encoded[4..8].try_into().unwrap()), extsize);
+        assert_eq!(u32::from_ne_bytes(encoded[12..16].try_into().unwrap()), projid);
+        assert_eq!(u32::from_ne_bytes(encoded[16..20].try_into().unwrap()), cowextsize);
+    }
+
+    #[test]
     fn inode_attr_to_file_attr_conversion() {
         let iattr = InodeAttr {
             ino: InodeNumber(42),
