@@ -3812,7 +3812,10 @@ impl FrankenFuse {
                 }) {
                     Ok(bsz) => {
                         let mut buf = [0u8; 4];
-                        buf.copy_from_slice(&(bsz as i32).to_ne_bytes());
+                        // FIGETBSZ returns i32; block sizes are always small (<= 65536)
+                        #[expect(clippy::cast_possible_wrap)]
+                        let bsz_i32 = bsz as i32;
+                        buf.copy_from_slice(&bsz_i32.to_ne_bytes());
                         IoctlResult::Data(buf.to_vec())
                     }
                     Err(error) => IoctlResult::Error(error.to_errno()),
