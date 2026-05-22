@@ -7784,6 +7784,7 @@ mod tests {
         assert!(opts.auto_unmount);
         assert!(!opts.writeback_cache.is_enabled());
         assert!(opts.ioctl_trace_path.is_none());
+        assert_eq!(opts.worker_threads, 0, "default worker_threads should be 0 (auto)");
     }
 
     #[test]
@@ -7878,6 +7879,20 @@ mod tests {
         m.record_bytes_read(2048);
         let s = m.snapshot();
         assert_eq!(s.bytes_read, 3072);
+    }
+
+    #[test]
+    fn atomic_metrics_default_equals_new() {
+        let from_new = AtomicMetrics::new();
+        let from_default = AtomicMetrics::default();
+        let snap_new = from_new.snapshot();
+        let snap_default = from_default.snapshot();
+        assert_eq!(snap_new.requests_total, snap_default.requests_total);
+        assert_eq!(snap_new.requests_ok, snap_default.requests_ok);
+        assert_eq!(snap_new.requests_err, snap_default.requests_err);
+        assert_eq!(snap_new.bytes_read, snap_default.bytes_read);
+        assert_eq!(snap_new.requests_throttled, snap_default.requests_throttled);
+        assert_eq!(snap_new.requests_shed, snap_default.requests_shed);
     }
 
     #[test]
