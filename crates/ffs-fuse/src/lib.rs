@@ -22,7 +22,7 @@ use fuser::{
     FileAttr, FileType, Filesystem, KernelConfig, MountOption, ReplyAttr, ReplyCreate, ReplyData,
     ReplyDirectory, ReplyDirectoryPlus, ReplyEmpty, ReplyEntry, ReplyIoctl, ReplyLock, ReplyLseek,
     ReplyOpen, ReplyStatfs, ReplyStatx, ReplyWrite, ReplyXattr, Request, TimeOrNow,
-    consts as fuse_consts,
+    consts as fuse_consts, fuse_forget_one,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -5263,6 +5263,14 @@ impl Filesystem for FrankenFuse {
         let inode = InodeNumber(ino);
         self.inner.readahead.invalidate_inode(inode);
         self.inner.access_predictor.invalidate_inode(inode);
+    }
+
+    fn batch_forget(&mut self, _req: &Request<'_>, nodes: &[fuse_forget_one]) {
+        for node in nodes {
+            let inode = InodeNumber(node.nodeid);
+            self.inner.readahead.invalidate_inode(inode);
+            self.inner.access_predictor.invalidate_inode(inode);
+        }
     }
 
     fn getattr(&mut self, _req: &Request<'_>, ino: u64, _fh: Option<u64>, reply: ReplyAttr) {
