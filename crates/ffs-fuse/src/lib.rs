@@ -7878,6 +7878,29 @@ mod tests {
     }
 
     #[test]
+    fn access_predictor_new_clamps_max_entries() {
+        let p = AccessPredictor::new(0);
+        assert_eq!(p.max_entries, 1);
+    }
+
+    #[test]
+    fn access_predictor_fetch_size_returns_requested_for_unknown_inode() {
+        let p = AccessPredictor::default();
+        let size = p.fetch_size(InodeNumber(999), 0, 4096);
+        assert_eq!(size, 4096);
+    }
+
+    #[test]
+    fn access_predictor_invalidate_removes_entry() {
+        let p = AccessPredictor::new(100);
+        p.record_read(InodeNumber(1), 0, 4096);
+        p.invalidate_inode(InodeNumber(1));
+        // After invalidation, should return requested size (no history)
+        let size = p.fetch_size(InodeNumber(1), 4096, 4096);
+        assert_eq!(size, 4096);
+    }
+
+    #[test]
     fn build_mount_options_includes_ro_when_read_only() {
         let opts = MountOptions::default();
         let mount_opts = build_mount_options(&opts);
