@@ -17922,6 +17922,58 @@ CUSTOM("congestion_threshold=3")"#;
         assert_eq!(manager.take(ino, 0, 0), None);
     }
 
+    // ── validate_mountpoint tests ───────────────────────────────────────────
+
+    #[test]
+    fn validate_mountpoint_empty_path_rejected() {
+        use std::path::Path;
+        let result = validate_mountpoint(Path::new(""));
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, FuseError::InvalidMountpoint(ref msg) if msg.contains("empty")),
+            "expected empty error, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn validate_mountpoint_nonexistent_rejected() {
+        use std::path::PathBuf;
+        let nonexistent = PathBuf::from("/this/path/does/not/exist/at/all/ever");
+        let result = validate_mountpoint(&nonexistent);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, FuseError::InvalidMountpoint(ref msg) if msg.contains("does not exist")),
+            "expected not-exist error, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn validate_mountpoint_file_rejected() {
+        // /etc/passwd exists on all Linux systems as a regular file.
+        use std::path::Path;
+        let file_path = Path::new("/etc/passwd");
+        if file_path.exists() && !file_path.is_dir() {
+            let result = validate_mountpoint(file_path);
+            assert!(result.is_err());
+            let err = result.unwrap_err();
+            assert!(
+                matches!(err, FuseError::InvalidMountpoint(ref msg) if msg.contains("not a directory")),
+                "expected not-dir error, got: {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_mountpoint_valid_directory_accepted() {
+        use std::path::Path;
+        // /tmp always exists as a directory on Linux.
+        let dir_path = Path::new("/tmp");
+        let result = validate_mountpoint(dir_path);
+        assert!(result.is_ok(), "expected Ok, got: {result:?}");
+    }
+
     #[test]
     fn fuse_error_display_variants() {
         const INVALID_MOUNTPOINT_DISPLAY_GOLDEN: &str = "invalid mountpoint: bad path";

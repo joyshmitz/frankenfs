@@ -3167,21 +3167,11 @@ impl<T: FsOps + ?Sized> FsOps for Arc<T> {
         self.as_ref().ext4_alloc_da_blks(cx, scope, ino)
     }
 
-    fn ext4_migrate(
-        &self,
-        cx: &Cx,
-        scope: &mut RequestScope,
-        ino: u64,
-    ) -> ffs_error::Result<()> {
+    fn ext4_migrate(&self, cx: &Cx, scope: &mut RequestScope, ino: u64) -> ffs_error::Result<()> {
         self.as_ref().ext4_migrate(cx, scope, ino)
     }
 
-    fn ext4_swap_boot(
-        &self,
-        cx: &Cx,
-        scope: &mut RequestScope,
-        ino: u64,
-    ) -> ffs_error::Result<()> {
+    fn ext4_swap_boot(&self, cx: &Cx, scope: &mut RequestScope, ino: u64) -> ffs_error::Result<()> {
         self.as_ref().ext4_swap_boot(cx, scope, ino)
     }
 
@@ -3405,8 +3395,22 @@ mod tests {
     fn request_op_is_write_true_for_mutating_ops() {
         use RequestOp::*;
         let write_ops = [
-            Create, Mkdir, Unlink, Rmdir, Rename, Link, Symlink, Fallocate, Setattr, Setxattr,
-            Removexattr, Write, RepairWriteback, IoctlWrite, Fsync, Fsyncdir,
+            Create,
+            Mkdir,
+            Unlink,
+            Rmdir,
+            Rename,
+            Link,
+            Symlink,
+            Fallocate,
+            Setattr,
+            Setxattr,
+            Removexattr,
+            Write,
+            RepairWriteback,
+            IoctlWrite,
+            Fsync,
+            Fsyncdir,
         ];
         for op in write_ops {
             assert!(op.is_write(), "{op:?} should be a write op");
@@ -3429,7 +3433,16 @@ mod tests {
     fn request_op_is_metadata_write_true_for_metadata_ops() {
         use RequestOp::*;
         let metadata_ops = [
-            Create, Mkdir, Unlink, Rmdir, Rename, Link, Symlink, Setattr, Setxattr, Removexattr,
+            Create,
+            Mkdir,
+            Unlink,
+            Rmdir,
+            Rename,
+            Link,
+            Symlink,
+            Setattr,
+            Setxattr,
+            Removexattr,
             IoctlWrite,
         ];
         for op in metadata_ops {
@@ -3441,7 +3454,10 @@ mod tests {
     fn request_op_is_metadata_write_false_for_data_ops() {
         use RequestOp::*;
         assert!(!Write.is_metadata_write(), "Write is data, not metadata");
-        assert!(!Fallocate.is_metadata_write(), "Fallocate is data, not metadata");
+        assert!(
+            !Fallocate.is_metadata_write(),
+            "Fallocate is data, not metadata"
+        );
         assert!(!RepairWriteback.is_metadata_write());
         assert!(!Fsync.is_metadata_write());
         assert!(!Fsyncdir.is_metadata_write());

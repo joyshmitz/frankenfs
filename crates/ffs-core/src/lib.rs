@@ -803,9 +803,12 @@ pub struct OpenFs {
 /// Keyed on the fs-tree root bytenr observed when the index was built so that
 /// a change in the underlying tree (e.g., a future reload path) invalidates
 /// the cache automatically.
+type BtrfsInodeRefsByChild = BTreeMap<u64, Vec<(u64, Vec<u8>)>>;
+
 struct BtrfsInodePathIndex {
     fs_tree_root_bytenr: u64,
     parent_by_child: BTreeMap<u64, (u64, Vec<u8>)>,
+    refs_by_child: BtrfsInodeRefsByChild,
 }
 
 // Compile-time assertion: OpenFs must be Send + Sync for multi-threaded FUSE dispatch.
@@ -8924,8 +8927,15 @@ pub const BTRFS_TREE_SEARCH_BUF_SIZE: usize =
 pub const BTRFS_TREE_SEARCH_V2_HEADER_SIZE: usize = BTRFS_TREE_SEARCH_KEY_SIZE + 8;
 /// Encoded size of `struct btrfs_ioctl_ino_lookup_user_args` on x86_64.
 pub const BTRFS_INO_LOOKUP_USER_ARGS_SIZE: usize = 4096;
+/// Linux `struct btrfs_data_container` fixed header size.
+const BTRFS_DATA_CONTAINER_HEADER_SIZE: usize = 16;
+/// Linux caps `BTRFS_IOC_INO_PATHS` user buffers to 4096 bytes.
+const BTRFS_INO_PATHS_MAX_BYTES_U64: u64 = 4096;
 /// Encoded size of `struct btrfs_ioctl_get_subvol_rootref_args` on x86_64.
 pub const BTRFS_SUBVOL_ROOTREF_ARGS_SIZE: usize = 4096;
+/// btrfs INODE_EXTREF item key type. `ffs-btrfs` does not expose this V1
+/// constant yet, but the UAPI value is stable.
+const BTRFS_ITEM_INODE_EXTREF: u8 = 13;
 const BTRFS_VOL_NAME_MAX: usize = 255;
 const BTRFS_INO_LOOKUP_USER_NAME_OFFSET: usize = 16;
 const BTRFS_INO_LOOKUP_USER_NAME_SIZE: usize = BTRFS_VOL_NAME_MAX + 1;
@@ -9183,6 +9193,89 @@ fn encode_btrfs_tree_search_results(
         entries,
         BTRFS_TREE_SEARCH_BUF_SIZE,
     )
+}
+
+fn encode_btrfs_ino_paths_container(
+    paths: &[Vec<u8>],
+    requested_size: u64,
+) -> ffs_error::Result<Vec<u8>> {
+    let copy_limit = usize::try_from(requested_size.min(BTRFS_INO_PATHS_MAX_BYTES_U64))
+        .map_err(|_| FfsError::Format("btrfs ino-paths buffer size overflows usize".into()))?;
+    let effective_limit = copy_limit.max(BTRFS_DATA_CONTAINER_HEADER_SIZE);
+    let offset_bytes = paths
+        .len()
+        .checked_mul(std::mem::size_of::<u64>())
+        .ok_or_else(|| FfsError::Format("btrfs ino-paths offset table overflow".into()))?;
+    let path_bytes = paths.iter().try_fold(0_usize, |sum, path| {
+        sum.checked_add(path.len())
+            .ok_or_else(|| FfsError::Format("btrfs ino-paths payload overflow".into()))
+    })?;
+    let full_len = BTRFS_DATA_CONTAINER_HEADER_SIZE
+        .checked_add(offset_bytes)
+        .and_then(|len| len.checked_add(path_bytes))
+        .ok_or_else(|| FfsError::Format("btrfs ino-paths container overflow".into()))?;
+
+    let mut included = 0_usize;
+    let mut included_path_bytes = 0_usize;
+    for path in paths {
+        let next_count = included
+            .checked_add(1)
+            .ok_or_else(|| FfsError::Format("btrfs ino-paths count overflow".into()))?;
+        let next_offsets = next_count
+            .checked_mul(std::mem::size_of::<u64>())
+            .ok_or_else(|| FfsError::Format("btrfs ino-paths offset table overflow".into()))?;
+        let next_path_bytes = included_path_bytes
+            .checked_add(path.len())
+            .ok_or_else(|| FfsError::Format("btrfs ino-paths payload overflow".into()))?;
+        let next_len = BTRFS_DATA_CONTAINER_HEADER_SIZE
+            .checked_add(next_offsets)
+            .and_then(|len| len.checked_add(next_path_bytes))
+            .ok_or_else(|| FfsError::Format("btrfs ino-paths container overflow".into()))?;
+        if next_len > effective_limit {
+            break;
+        }
+        included = next_count;
+        included_path_bytes = next_path_bytes;
+    }
+
+    let elem_cnt = u32::try_from(included)
+        .map_err(|_| FfsError::Format("btrfs ino-paths element count exceeds u32".into()))?;
+    let elem_missed = u32::try_from(paths.len().saturating_sub(included))
+        .map_err(|_| FfsError::Format("btrfs ino-paths missed element count exceeds u32".into()))?;
+    let encoded_len = BTRFS_DATA_CONTAINER_HEADER_SIZE
+        .checked_add(
+            included
+                .checked_mul(std::mem::size_of::<u64>())
+                .ok_or_else(|| FfsError::Format("btrfs ino-paths offset table overflow".into()))?,
+        )
+        .and_then(|len| len.checked_add(included_path_bytes))
+        .ok_or_else(|| FfsError::Format("btrfs ino-paths container overflow".into()))?;
+    let bytes_left = effective_limit.saturating_sub(encoded_len);
+    let bytes_missing = full_len.saturating_sub(effective_limit);
+
+    let mut buf = vec![0_u8; encoded_len.max(BTRFS_DATA_CONTAINER_HEADER_SIZE)];
+    buf[0..4].copy_from_slice(&u32::try_from(bytes_left).unwrap_or(u32::MAX).to_ne_bytes());
+    buf[4..8].copy_from_slice(
+        &u32::try_from(bytes_missing)
+            .unwrap_or(u32::MAX)
+            .to_ne_bytes(),
+    );
+    buf[8..12].copy_from_slice(&elem_cnt.to_ne_bytes());
+    buf[12..16].copy_from_slice(&elem_missed.to_ne_bytes());
+
+    let val_start = BTRFS_DATA_CONTAINER_HEADER_SIZE;
+    let string_start = val_start + included * std::mem::size_of::<u64>();
+    let mut string_cursor = string_start;
+    for (i, path) in paths.iter().take(included).enumerate() {
+        let rel_offset = u64::try_from(string_cursor - val_start)
+            .map_err(|_| FfsError::Format("btrfs ino-paths offset exceeds u64".into()))?;
+        let offset_start = val_start + i * std::mem::size_of::<u64>();
+        buf[offset_start..offset_start + 8].copy_from_slice(&rel_offset.to_ne_bytes());
+        buf[string_cursor..string_cursor + path.len()].copy_from_slice(path);
+        string_cursor += path.len();
+    }
+
+    Ok(buf)
 }
 
 /// Encoded size of `struct btrfs_ioctl_dev_info_args` on x86_64.
@@ -16344,6 +16437,63 @@ impl OpenFs {
         Ok(refs)
     }
 
+    fn btrfs_parse_inode_extref_payload(payload: &[u8]) -> ffs_error::Result<Vec<(u64, Vec<u8>)>> {
+        let mut refs = Vec::new();
+        let mut cursor = 0_usize;
+        while cursor < payload.len() {
+            if cursor + 18 > payload.len() {
+                return Err(FfsError::Corruption {
+                    block: 0,
+                    detail: "truncated inode_extref payload".into(),
+                });
+            }
+            let parent_oid =
+                u64::from_le_bytes(payload[cursor..cursor + 8].try_into().map_err(|_| {
+                    FfsError::Corruption {
+                        block: 0,
+                        detail: "invalid inode_extref parent".into(),
+                    }
+                })?);
+            let _index =
+                u64::from_le_bytes(payload[cursor + 8..cursor + 16].try_into().map_err(|_| {
+                    FfsError::Corruption {
+                        block: 0,
+                        detail: "invalid inode_extref index".into(),
+                    }
+                })?);
+            let name_len = usize::from(u16::from_le_bytes(
+                payload[cursor + 16..cursor + 18]
+                    .try_into()
+                    .map_err(|_| FfsError::Corruption {
+                        block: 0,
+                        detail: "invalid inode_extref name length".into(),
+                    })?,
+            ));
+            if name_len == 0 {
+                return Err(FfsError::Corruption {
+                    block: 0,
+                    detail: "inode_extref name length must be non-zero".into(),
+                });
+            }
+            let name_start = cursor + 18;
+            let Some(name_end) = name_start.checked_add(name_len) else {
+                return Err(FfsError::Corruption {
+                    block: 0,
+                    detail: "inode_extref name length overflow".into(),
+                });
+            };
+            if name_end > payload.len() {
+                return Err(FfsError::Corruption {
+                    block: 0,
+                    detail: "inode_extref name extends past payload".into(),
+                });
+            }
+            refs.push((parent_oid, payload[name_start..name_end].to_vec()));
+            cursor = name_end;
+        }
+        Ok(refs)
+    }
+
     fn btrfs_serialize_inode_ref_payload(entries: &[(u64, Vec<u8>)]) -> ffs_error::Result<Vec<u8>> {
         let mut payload = Vec::new();
         for (index, name) in entries {
@@ -17420,6 +17570,62 @@ impl OpenFs {
         self.btrfs_resolve_inode_path_via_cache(cx, treeid, objectid)
     }
 
+    fn btrfs_resolve_all_inode_paths_in_tree(
+        &self,
+        cx: &Cx,
+        treeid: u64,
+        objectid: u64,
+    ) -> ffs_error::Result<Vec<Vec<u8>>> {
+        if let Some(alloc_mutex) = self.btrfs_alloc_state.as_ref() {
+            let mounted_treeid = self
+                .btrfs_context
+                .as_ref()
+                .map_or(BTRFS_FS_TREE_OBJECTID, |ctx| ctx.subvol_objectid);
+            if treeid == mounted_treeid {
+                let start = BtrfsKey {
+                    objectid: 0,
+                    item_type: 0,
+                    offset: 0,
+                };
+                let end = BtrfsKey {
+                    objectid: u64::MAX,
+                    item_type: u8::MAX,
+                    offset: u64::MAX,
+                };
+                let entries = {
+                    let alloc = alloc_mutex.lock();
+                    alloc
+                        .fs_tree
+                        .range(&start, &end)
+                        .map_err(|e| btrfs_mutation_to_ffs(&e))?
+                        .into_iter()
+                        .map(|(key, data)| BtrfsLeafEntry { key, data })
+                        .collect::<Vec<_>>()
+                };
+                let refs_by_child = Self::btrfs_build_inode_ref_multimap(&entries)?;
+                return Self::btrfs_walk_all_inode_ref_paths(&refs_by_child, objectid);
+            }
+        }
+
+        let fs_tree_root_bytenr = self.btrfs_fs_tree_root_bytenr(cx, treeid)?;
+        let index = {
+            let mut cache = self.btrfs_inode_path_cache.lock();
+            if cache
+                .as_ref()
+                .is_none_or(|idx| idx.fs_tree_root_bytenr != fs_tree_root_bytenr)
+            {
+                let entries = self.walk_btrfs_fs_tree_by_objectid(cx, treeid)?;
+                *cache = Some(Arc::new(BtrfsInodePathIndex {
+                    fs_tree_root_bytenr,
+                    parent_by_child: Self::btrfs_build_inode_ref_index(&entries)?,
+                    refs_by_child: Self::btrfs_build_inode_ref_multimap(&entries)?,
+                }));
+            }
+            Arc::clone(cache.as_ref().expect("populated above"))
+        };
+        Self::btrfs_walk_all_inode_ref_paths(&index.refs_by_child, objectid)
+    }
+
     /// Writable-mode resolution: at each hop, range-query the COW tree for the
     /// INODE_REF items of `current`, take the first back-reference, and chain
     /// up until we hit the subvolume root. Each hop is O(log N) against the
@@ -17504,6 +17710,7 @@ impl OpenFs {
                 *cache = Some(Arc::new(BtrfsInodePathIndex {
                     fs_tree_root_bytenr,
                     parent_by_child: Self::btrfs_build_inode_ref_index(&entries)?,
+                    refs_by_child: Self::btrfs_build_inode_ref_multimap(&entries)?,
                 }));
             }
             Arc::clone(cache.as_ref().expect("populated above"))
@@ -17525,6 +17732,15 @@ impl OpenFs {
     ) -> ffs_error::Result<Vec<u8>> {
         let parent_by_child = Self::btrfs_build_inode_ref_index(entries)?;
         Self::btrfs_walk_inode_ref_index(&parent_by_child, objectid)
+    }
+
+    #[cfg(test)]
+    fn btrfs_build_all_paths_from_inode_refs(
+        entries: &[BtrfsLeafEntry],
+        objectid: u64,
+    ) -> ffs_error::Result<Vec<Vec<u8>>> {
+        let refs_by_child = Self::btrfs_build_inode_ref_multimap(entries)?;
+        Self::btrfs_walk_all_inode_ref_paths(&refs_by_child, objectid)
     }
 
     /// Build the child → (parent, first-back-ref-name) index from a list of
@@ -17549,6 +17765,43 @@ impl OpenFs {
             }
         }
         Ok(parent_by_child)
+    }
+
+    /// Build the child → all(parent, name) index used by `BTRFS_IOC_INO_PATHS`.
+    ///
+    /// Unlike `BTRFS_IOC_INO_LOOKUP`, the INO_PATHS ioctl returns every path
+    /// that references the target inode, so hard links must not collapse to the
+    /// first back-reference. Both classic INODE_REF and extended INODE_EXTREF
+    /// records contribute.
+    fn btrfs_build_inode_ref_multimap(
+        entries: &[BtrfsLeafEntry],
+    ) -> ffs_error::Result<BtrfsInodeRefsByChild> {
+        let mut refs_by_child = BtrfsInodeRefsByChild::new();
+        for entry in entries {
+            match entry.key.item_type {
+                BTRFS_ITEM_INODE_REF => {
+                    let parent_oid = entry.key.offset;
+                    let child_oid = entry.key.objectid;
+                    for (_index, name) in Self::btrfs_parse_inode_ref_payload(&entry.data)? {
+                        refs_by_child
+                            .entry(child_oid)
+                            .or_default()
+                            .push((parent_oid, name));
+                    }
+                }
+                BTRFS_ITEM_INODE_EXTREF => {
+                    let child_oid = entry.key.objectid;
+                    for (parent_oid, name) in Self::btrfs_parse_inode_extref_payload(&entry.data)? {
+                        refs_by_child
+                            .entry(child_oid)
+                            .or_default()
+                            .push((parent_oid, name));
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(refs_by_child)
     }
 
     /// Walk the pre-built INODE_REF index from `objectid` up to the subvolume
@@ -17587,6 +17840,73 @@ impl OpenFs {
         })
     }
 
+    fn btrfs_walk_all_inode_ref_paths(
+        refs_by_child: &BtrfsInodeRefsByChild,
+        objectid: u64,
+    ) -> ffs_error::Result<Vec<Vec<u8>>> {
+        let mut paths = Vec::new();
+        let mut components = Vec::new();
+        let mut visited = std::collections::BTreeSet::new();
+        Self::btrfs_collect_inode_ref_paths(
+            refs_by_child,
+            objectid,
+            &mut components,
+            &mut visited,
+            &mut paths,
+        )?;
+        paths.sort();
+        paths.dedup();
+        Ok(paths)
+    }
+
+    fn btrfs_collect_inode_ref_paths(
+        refs_by_child: &BtrfsInodeRefsByChild,
+        current: u64,
+        components: &mut Vec<Vec<u8>>,
+        visited: &mut std::collections::BTreeSet<u64>,
+        paths: &mut Vec<Vec<u8>>,
+    ) -> ffs_error::Result<()> {
+        const MAX_PATH_DEPTH: usize = 4096;
+        if current == BTRFS_FIRST_FREE_OBJECTID {
+            paths.push(Self::btrfs_assemble_ino_paths_path(components));
+            return Ok(());
+        }
+        if components.len() >= MAX_PATH_DEPTH {
+            return Err(FfsError::Corruption {
+                block: 0,
+                detail: format!(
+                    "INODE_REF chain exceeded depth {MAX_PATH_DEPTH} from objectid {current}"
+                ),
+            });
+        }
+        if !visited.insert(current) {
+            return Err(FfsError::Corruption {
+                block: 0,
+                detail: format!("cycle in INODE_REF chain at objectid {current}"),
+            });
+        }
+        let Some(refs) = refs_by_child.get(&current) else {
+            visited.remove(&current);
+            return Err(FfsError::NotFound(format!(
+                "inode {current} has no INODE_REF back to subvolume root"
+            )));
+        };
+        for (parent_oid, name) in refs {
+            components.push(name.clone());
+            let result = Self::btrfs_collect_inode_ref_paths(
+                refs_by_child,
+                *parent_oid,
+                components,
+                visited,
+                paths,
+            );
+            components.pop();
+            result?;
+        }
+        visited.remove(&current);
+        Ok(())
+    }
+
     /// Assemble path components (collected leaf→root) into the
     /// `BTRFS_IOC_INO_LOOKUP` NUL-terminated path (`a/b/c/\0`, empty for
     /// subvolume-root lookups).
@@ -17601,6 +17921,22 @@ impl OpenFs {
         }
         if !path.is_empty() {
             path.push(b'/');
+        }
+        path.push(0_u8);
+        path
+    }
+
+    /// Assemble path components for `BTRFS_IOC_INO_PATHS`.
+    ///
+    /// Linux's `btrfs_ref_to_path` returns paths relative to the current
+    /// filesystem root, NUL-terminated, and without a trailing slash.
+    fn btrfs_assemble_ino_paths_path(components: &[Vec<u8>]) -> Vec<u8> {
+        let mut path = Vec::new();
+        for (i, name) in components.iter().rev().enumerate() {
+            if i > 0 {
+                path.push(b'/');
+            }
+            path.extend_from_slice(name);
         }
         path.push(0_u8);
         path
@@ -19946,23 +20282,21 @@ impl FsOps for OpenFs {
 
     fn get_btrfs_ino_paths(
         &self,
-        _cx: &Cx,
+        cx: &Cx,
         _scope: &mut RequestScope,
-        _inum: u64,
+        inum: u64,
     ) -> ffs_error::Result<Vec<u8>> {
         match &self.flavor {
             FsFlavor::Ext4(_) => Err(FfsError::UnsupportedFeature(
                 "BTRFS_IOC_INO_PATHS is not supported on ext4 filesystems".to_owned(),
             )),
             FsFlavor::Btrfs(_) => {
-                // Full backref resolution not yet implemented - requires walking
-                // INODE_REF/INODE_EXTREF items and extent back-references.
-                // Return empty result (0 paths found) as a valid stub.
-                // Output format: u64 elem_cnt = 0, u64 elem_missed = 0
-                let mut buf = vec![0_u8; 16];
-                buf[0..8].copy_from_slice(&0_u64.to_le_bytes()); // elem_cnt
-                buf[8..16].copy_from_slice(&0_u64.to_le_bytes()); // elem_missed
-                Ok(buf)
+                let treeid = self
+                    .btrfs_context
+                    .as_ref()
+                    .map_or(BTRFS_FS_TREE_OBJECTID, |ctx| ctx.subvol_objectid);
+                let paths = self.btrfs_resolve_all_inode_paths_in_tree(cx, treeid, inum)?;
+                encode_btrfs_ino_paths_container(&paths, BTRFS_INO_PATHS_MAX_BYTES_U64)
             }
         }
     }
@@ -21196,7 +21530,8 @@ impl FsOps for OpenFs {
     ) -> ffs_error::Result<()> {
         match &self.flavor {
             FsFlavor::Ext4(_) | FsFlavor::Btrfs(_) => Err(FfsError::UnsupportedFeature(
-                "FS_IOC_SHUTDOWN is not supported (emergency stop requires kernel integration)".to_owned(),
+                "FS_IOC_SHUTDOWN is not supported (emergency stop requires kernel integration)"
+                    .to_owned(),
             )),
         }
     }
@@ -29776,6 +30111,28 @@ mod tests {
         }
     }
 
+    fn synth_inode_extref_entry(
+        child_oid: u64,
+        parent_oid: u64,
+        index: u64,
+        name: &[u8],
+    ) -> BtrfsLeafEntry {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&parent_oid.to_le_bytes());
+        payload.extend_from_slice(&index.to_le_bytes());
+        let name_len = u16::try_from(name.len()).expect("name fits u16");
+        payload.extend_from_slice(&name_len.to_le_bytes());
+        payload.extend_from_slice(name);
+        BtrfsLeafEntry {
+            key: BtrfsKey {
+                objectid: child_oid,
+                item_type: BTRFS_ITEM_INODE_EXTREF,
+                offset: 0,
+            },
+            data: payload,
+        }
+    }
+
     #[test]
     fn btrfs_build_path_from_inode_refs_returns_empty_for_subvolume_root() {
         let entries = Vec::new();
@@ -29871,6 +30228,72 @@ mod tests {
         // with `or_insert`, the first seen back-ref wins. For objectid 300, that's the one
         // whose key (300, 12, 257) comes first in the tree walk → "dir_a/linkname/\0".
         assert_eq!(path, b"dir_a/linkname/\0");
+    }
+
+    #[test]
+    fn btrfs_build_all_paths_from_inode_refs_returns_all_hard_links() {
+        let entries = vec![
+            synth_inode_ref_entry(257, 256, 2, b"dir_a"),
+            synth_inode_ref_entry(258, 256, 2, b"dir_b"),
+            synth_inode_ref_entry(300, 257, 3, b"linkname"),
+            synth_inode_ref_entry(300, 258, 4, b"linkname_alias"),
+        ];
+        let paths = OpenFs::btrfs_build_all_paths_from_inode_refs(&entries, 300)
+            .expect("hard-linked inode must resolve all paths");
+        assert_eq!(
+            paths,
+            vec![
+                b"dir_a/linkname\0".to_vec(),
+                b"dir_b/linkname_alias\0".to_vec()
+            ]
+        );
+    }
+
+    #[test]
+    fn btrfs_build_all_paths_from_inode_refs_includes_extrefs() {
+        let entries = vec![
+            synth_inode_ref_entry(257, 256, 2, b"wide_dir"),
+            synth_inode_extref_entry(400, 257, 8, b"many_link_file"),
+        ];
+        let paths = OpenFs::btrfs_build_all_paths_from_inode_refs(&entries, 400)
+            .expect("extended inode ref must resolve");
+        assert_eq!(paths, vec![b"wide_dir/many_link_file\0".to_vec()]);
+    }
+
+    #[test]
+    fn btrfs_encode_ino_paths_container_uses_relative_offsets() {
+        let paths = vec![b"dir_a/linkname\0".to_vec(), b"dir_b/alias\0".to_vec()];
+        let buf = encode_btrfs_ino_paths_container(&paths, 4096).expect("encode ino paths");
+
+        let read_u32 = |offset: usize| -> u32 {
+            u32::from_ne_bytes(buf[offset..offset + 4].try_into().expect("u32 field"))
+        };
+        let read_u64 = |offset: usize| -> u64 {
+            u64::from_ne_bytes(buf[offset..offset + 8].try_into().expect("u64 field"))
+        };
+
+        assert_eq!(
+            usize::try_from(read_u32(0)).expect("bytes_left fits usize"),
+            4096 - buf.len()
+        );
+        assert_eq!(read_u32(4), 0);
+        assert_eq!(read_u32(8), 2);
+        assert_eq!(read_u32(12), 0);
+
+        let first_offset = usize::try_from(read_u64(16)).expect("offset fits usize");
+        let second_offset = usize::try_from(read_u64(24)).expect("offset fits usize");
+        assert_eq!(first_offset, 16);
+        assert_eq!(second_offset, 16 + paths[0].len());
+
+        let val_start = BTRFS_DATA_CONTAINER_HEADER_SIZE;
+        assert_eq!(
+            &buf[val_start + first_offset..val_start + first_offset + paths[0].len()],
+            paths[0].as_slice()
+        );
+        assert_eq!(
+            &buf[val_start + second_offset..val_start + second_offset + paths[1].len()],
+            paths[1].as_slice()
+        );
     }
 
     #[test]
