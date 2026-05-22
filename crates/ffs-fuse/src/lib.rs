@@ -154,6 +154,12 @@ const EXT4_IOC_PRECACHE_EXTENTS: u32 = 0x0000_6626;
 const EXT4_IOC_CLEAR_ES_CACHE: u32 = 0x0000_6628;
 /// `EXT4_IOC_MOVE_EXT` = `_IOWR('f', 15, struct move_extent)` on x86_64.
 const EXT4_IOC_MOVE_EXT: u32 = 0xC028_660F;
+/// `EXT4_IOC_GROUP_EXTEND` = `_IOW('f', 7, unsigned long)` on x86_64.
+/// Extend the filesystem by adding blocks to the last block group.
+const EXT4_IOC_GROUP_EXTEND: u32 = 0x4008_6607;
+/// `EXT4_IOC_RESIZE_FS` = `_IOW('f', 16, __u64)` on x86_64.
+/// Resize filesystem to specified number of blocks.
+const EXT4_IOC_RESIZE_FS: u32 = 0x4008_6610;
 /// `FS_IOC_GETFSLABEL` = `_IOR(0x94, 0x31, char[FSLABEL_MAX])` on x86_64.
 const FS_IOC_GETFSLABEL: u32 = 0x8100_9431;
 /// `FS_IOC_SETFSLABEL` = `_IOW(0x94, 0x32, char[FSLABEL_MAX])` on x86_64.
@@ -3192,6 +3198,11 @@ impl FrankenFuse {
         in_data: &[u8],
         out_size: u32,
     ) -> IoctlResult {
+        let cmd = match cmd {
+            BTRFS_IOC_CLONE => FICLONE,
+            BTRFS_IOC_CLONE_RANGE => FICLONERANGE,
+            other => other,
+        };
         match cmd {
             FS_IOC_FIEMAP => {
                 let (fm_start, fm_length, fm_flags, fm_extent_count) =
@@ -3648,6 +3659,36 @@ impl FrankenFuse {
                     }
                 }
             }
+            EXT4_IOC_GROUP_EXTEND => {
+                if self.inner.read_only {
+                    return IoctlResult::Error(libc::EROFS);
+                }
+                if in_data.len() < 8 {
+                    return IoctlResult::Error(libc::EINVAL);
+                }
+                let cx = Self::cx_for_request();
+                match self.with_request_scope(&cx, RequestOp::IoctlWrite, |cx, scope| {
+                    self.inner.ops.ext4_group_extend(cx, scope, in_data)
+                }) {
+                    Ok(()) => IoctlResult::Data(Vec::new()),
+                    Err(error) => IoctlResult::Error(error.to_errno()),
+                }
+            }
+            EXT4_IOC_RESIZE_FS => {
+                if self.inner.read_only {
+                    return IoctlResult::Error(libc::EROFS);
+                }
+                if in_data.len() < 8 {
+                    return IoctlResult::Error(libc::EINVAL);
+                }
+                let cx = Self::cx_for_request();
+                match self.with_request_scope(&cx, RequestOp::IoctlWrite, |cx, scope| {
+                    self.inner.ops.ext4_resize_fs(cx, scope, in_data)
+                }) {
+                    Ok(()) => IoctlResult::Data(Vec::new()),
+                    Err(error) => IoctlResult::Error(error.to_errno()),
+                }
+            }
             cmd if cmd == FS_IOC_GETFSLABEL || cmd == BTRFS_IOC_GET_FSLABEL => {
                 if out_size < FSLABEL_MAX_U32 {
                     return IoctlResult::Error(libc::EINVAL);
@@ -3669,7 +3710,7 @@ impl FrankenFuse {
                     Err(error) => IoctlResult::Error(error.to_errno()),
                 }
             }
-            FS_IOC_SETFSLABEL => {
+            cmd if cmd == FS_IOC_SETFSLABEL || cmd == BTRFS_IOC_SET_FSLABEL => {
                 if self.inner.read_only {
                     return IoctlResult::Error(libc::EROFS);
                 }
@@ -4348,19 +4389,6 @@ impl FrankenFuse {
                     self.inner.ops.btrfs_set_received_subvol(cx, scope, in_data)
                 }) {
                     Ok(data) => IoctlResult::Data(data),
-                    Err(error) => IoctlResult::Error(error.to_errno()),
-                }
-            }
-            BTRFS_IOC_SET_FSLABEL => {
-                // Set label requires write access
-                if self.inner.read_only {
-                    return IoctlResult::Error(libc::EROFS);
-                }
-                let cx = Self::cx_for_request();
-                match self.with_request_scope(&cx, RequestOp::IoctlWrite, |cx, scope| {
-                    self.inner.ops.btrfs_set_fslabel(cx, scope, in_data)
-                }) {
-                    Ok(()) => IoctlResult::Data(Vec::new()),
                     Err(error) => IoctlResult::Error(error.to_errno()),
                 }
             }

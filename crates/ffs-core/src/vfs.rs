@@ -2223,6 +2223,36 @@ pub trait FsOps: Send + Sync {
     /// Called after `move_ext` returns, regardless of success.
     fn unregister_move_ext_donor_fd(&self, _donor_fd: u32) {}
 
+    /// Extend filesystem by adding blocks for `EXT4_IOC_GROUP_EXTEND`.
+    ///
+    /// Takes raw argument bytes (8 bytes for block count).
+    /// Returns `FfsError::ReadOnly` for read-only mounts.
+    fn ext4_group_extend(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _args: &[u8],
+    ) -> ffs_error::Result<()> {
+        Err(FfsError::UnsupportedFeature(
+            "ext4_group_extend is not supported by this backend".to_owned(),
+        ))
+    }
+
+    /// Resize filesystem for `EXT4_IOC_RESIZE_FS`.
+    ///
+    /// Takes raw argument bytes (8 bytes for new block count).
+    /// Returns `FfsError::ReadOnly` for read-only mounts.
+    fn ext4_resize_fs(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _args: &[u8],
+    ) -> ffs_error::Result<()> {
+        Err(FfsError::UnsupportedFeature(
+            "ext4_resize_fs is not supported by this backend".to_owned(),
+        ))
+    }
+
     /// Set inode attributes. Returns updated attributes.
     fn setattr(
         &self,
@@ -2999,6 +3029,24 @@ impl<T: FsOps + ?Sized> FsOps for Arc<T> {
 
     fn unregister_move_ext_donor_fd(&self, donor_fd: u32) {
         self.as_ref().unregister_move_ext_donor_fd(donor_fd);
+    }
+
+    fn ext4_group_extend(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        args: &[u8],
+    ) -> ffs_error::Result<()> {
+        self.as_ref().ext4_group_extend(cx, scope, args)
+    }
+
+    fn ext4_resize_fs(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        args: &[u8],
+    ) -> ffs_error::Result<()> {
+        self.as_ref().ext4_resize_fs(cx, scope, args)
     }
 
     fn setattr(
