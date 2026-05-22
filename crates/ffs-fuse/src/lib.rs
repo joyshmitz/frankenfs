@@ -8013,6 +8013,44 @@ mod tests {
     }
 
     #[test]
+    fn dispatch_ioctl_btrfs_get_supported_features_rejects_too_small_output_buffer() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let fuse = FrankenFuse::new(Box::new(IoctlRecordingFs::new(0, Arc::clone(&calls))));
+
+        // Buffer smaller than 72 bytes should be rejected with EINVAL before
+        // calling the backend.
+        let response = dispatch_ioctl_for_testing(
+            &fuse,
+            1,
+            0,
+            BTRFS_IOC_GET_SUPPORTED_FEATURES,
+            &[],
+            71, // one byte too small
+        );
+        assert_eq!(response, IoctlResult::Error(libc::EINVAL));
+        // No backend calls should have been made.
+        assert!(calls.lock().expect("lock ioctl calls").is_empty());
+    }
+
+    #[test]
+    fn dispatch_ioctl_btrfs_get_supported_features_surfaces_backend_unsupported_as_eopnotsupp() {
+        // The default trait implementation returns UnsupportedFeature, which
+        // must surface as EOPNOTSUPP for non-btrfs filesystems.
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let fuse = FrankenFuse::new(Box::new(IoctlRecordingFs::new(0, Arc::clone(&calls))));
+
+        let response = dispatch_ioctl_for_testing(
+            &fuse,
+            1,
+            0,
+            BTRFS_IOC_GET_SUPPORTED_FEATURES,
+            &[],
+            BTRFS_SUPPORTED_FEATURE_FLAGS_SIZE,
+        );
+        assert_eq!(response, IoctlResult::Error(libc::EOPNOTSUPP));
+    }
+
+    #[test]
     fn dispatch_ioctl_get_encryption_policy_ex_encodes_v1_policy() {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let policy = [
