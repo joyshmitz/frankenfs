@@ -5284,6 +5284,63 @@ impl Filesystem for FrankenFuse {
         }
     }
 
+    fn access(&mut self, req: &Request<'_>, ino: u64, mask: i32, reply: ReplyEmpty) {
+        // F_OK (existence check) always succeeds if we can get attributes
+        // R_OK/W_OK/X_OK check read/write/execute permissions
+        let cx = Self::cx_for_request();
+        match self.with_request_scope(&cx, RequestOp::Getattr, |cx, scope| {
+            self.inner.ops.getattr(cx, scope, InodeNumber(ino))
+        }) {
+            Ok(attr) => {
+                // Check permissions against the requesting user
+                let perm = u32::from(attr.perm);
+                let uid = req.uid();
+                let gid = req.gid();
+                let is_owner = uid == attr.uid;
+                let is_group = gid == attr.gid;
+
+                let mut allowed = true;
+                if mask & libc::R_OK != 0 {
+                    let can_read = if is_owner {
+                        perm & 0o400 != 0
+                    } else if is_group {
+                        perm & 0o040 != 0
+                    } else {
+                        perm & 0o004 != 0
+                    };
+                    allowed = allowed && can_read;
+                }
+                if mask & libc::W_OK != 0 {
+                    let can_write = if is_owner {
+                        perm & 0o200 != 0
+                    } else if is_group {
+                        perm & 0o020 != 0
+                    } else {
+                        perm & 0o002 != 0
+                    };
+                    allowed = allowed && can_write;
+                }
+                if mask & libc::X_OK != 0 {
+                    let can_exec = if is_owner {
+                        perm & 0o100 != 0
+                    } else if is_group {
+                        perm & 0o010 != 0
+                    } else {
+                        perm & 0o001 != 0
+                    };
+                    allowed = allowed && can_exec;
+                }
+
+                if allowed || uid == 0 {
+                    reply.ok();
+                } else {
+                    reply.error(libc::EACCES);
+                }
+            }
+            Err(_) => reply.error(libc::ENOENT),
+        }
+    }
+
     fn statx(
         &mut self,
         _req: &Request<'_>,
