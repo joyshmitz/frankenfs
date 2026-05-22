@@ -1434,6 +1434,20 @@ pub trait FsOps: Send + Sync {
         ))
     }
 
+    /// Start a btrfs quota rescan (`BTRFS_IOC_QUOTA_RESCAN`).
+    ///
+    /// Non-btrfs backends must return `FfsError::UnsupportedFeature`.
+    fn btrfs_start_quota_rescan(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _flags: u64,
+    ) -> ffs_error::Result<()> {
+        Err(FfsError::UnsupportedFeature(
+            "btrfs_start_quota_rescan is not supported by this backend".to_owned(),
+        ))
+    }
+
     /// Force filesystem sync/commit (`BTRFS_IOC_SYNC`, `syncfs`).
     ///
     /// For btrfs: commits current transaction if in RW mode.
@@ -2451,6 +2465,15 @@ impl<T: FsOps + ?Sized> FsOps for Arc<T> {
         scope: &mut RequestScope,
     ) -> ffs_error::Result<Vec<u8>> {
         self.as_ref().btrfs_quota_rescan_status(cx, scope)
+    }
+
+    fn btrfs_start_quota_rescan(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        flags: u64,
+    ) -> ffs_error::Result<()> {
+        self.as_ref().btrfs_start_quota_rescan(cx, scope, flags)
     }
 
     fn set_inode_flags(
