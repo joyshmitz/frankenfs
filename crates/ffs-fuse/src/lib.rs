@@ -7634,6 +7634,33 @@ mod tests {
     }
 
     #[test]
+    fn clamp_fiemap_extent_count_request_limited() {
+        // Request 5 extents but buffer can hold more - limited by request
+        let out_size = (FIEMAP_HEADER_SIZE + 10 * FIEMAP_EXTENT_SIZE) as u32;
+        assert_eq!(FrankenFuse::clamp_fiemap_extent_count(5, out_size), 5);
+    }
+
+    #[test]
+    fn clamp_fiemap_extent_count_buffer_limited() {
+        // Request 100 extents but buffer can only hold 2
+        let out_size = (FIEMAP_HEADER_SIZE + 2 * FIEMAP_EXTENT_SIZE) as u32;
+        assert_eq!(FrankenFuse::clamp_fiemap_extent_count(100, out_size), 2);
+    }
+
+    #[test]
+    fn clamp_fiemap_extent_count_zero_extents() {
+        // Buffer too small for any extents (only header fits)
+        let out_size = FIEMAP_HEADER_SIZE as u32;
+        assert_eq!(FrankenFuse::clamp_fiemap_extent_count(10, out_size), 0);
+    }
+
+    #[test]
+    fn clamp_fiemap_extent_count_tiny_buffer() {
+        // Buffer smaller than header
+        assert_eq!(FrankenFuse::clamp_fiemap_extent_count(10, 16), 0);
+    }
+
+    #[test]
     fn inode_attr_to_file_attr_conversion() {
         let iattr = InodeAttr {
             ino: InodeNumber(42),
