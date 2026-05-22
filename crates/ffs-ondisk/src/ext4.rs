@@ -633,6 +633,14 @@ pub struct Ext4Superblock {
     pub last_error_time_hi: u8,
     pub first_error_errcode: u8,
     pub last_error_errcode: u8,
+    pub first_error_ino: u32,
+    pub first_error_block: u64,
+    pub first_error_func: String,
+    pub first_error_line: u32,
+    pub last_error_ino: u32,
+    pub last_error_block: u64,
+    pub last_error_func: String,
+    pub last_error_line: u32,
 
     // ── Journal ──────────────────────────────────────────────────────────
     pub journal_inum: u32,
@@ -816,6 +824,16 @@ impl Ext4Superblock {
             last_error_time_hi: time_high_and_error_codes[5],
             first_error_errcode: time_high_and_error_codes[6],
             last_error_errcode: time_high_and_error_codes[7],
+            first_error_ino: read_le_u32(region, 0x19C)?,
+            first_error_block: u64::from(read_le_u32(region, 0x1A0)?)
+                | (u64::from(read_le_u32(region, 0x1A4)?) << 32),
+            first_error_func: trim_nul_padded(&read_fixed::<32>(region, 0x1A8)?),
+            first_error_line: read_le_u32(region, 0x1C8)?,
+            last_error_ino: read_le_u32(region, 0x1D0)?,
+            last_error_line: read_le_u32(region, 0x1D4)?,
+            last_error_block: u64::from(read_le_u32(region, 0x1D8)?)
+                | (u64::from(read_le_u32(region, 0x1DC)?) << 32),
+            last_error_func: trim_nul_padded(&read_fixed::<32>(region, 0x1E0)?),
 
             // Journal
             journal_inum: read_le_u32(region, 0xE0)?,
@@ -5758,6 +5776,14 @@ mod tests {
         sb[0x174] = 4; // log_groups_per_flex
         sb[0x166..0x168].copy_from_slice(&5_u16.to_le_bytes()); // mmp_update_interval
         sb[0x168..0x170].copy_from_slice(&1234_u64.to_le_bytes()); // mmp_block
+        sb[0x19C..0x1A0].copy_from_slice(&35_u32.to_le_bytes()); // first_error_ino
+        sb[0x1A0..0x1A8].copy_from_slice(&36_u64.to_le_bytes()); // first_error_block
+        sb[0x1A8..0x1B1].copy_from_slice(b"first_err"); // first_error_func
+        sb[0x1C8..0x1CC].copy_from_slice(&37_u32.to_le_bytes()); // first_error_line
+        sb[0x1D0..0x1D4].copy_from_slice(&38_u32.to_le_bytes()); // last_error_ino
+        sb[0x1D4..0x1D8].copy_from_slice(&39_u32.to_le_bytes()); // last_error_line
+        sb[0x1D8..0x1E0].copy_from_slice(&40_u64.to_le_bytes()); // last_error_block
+        sb[0x1E0..0x1E8].copy_from_slice(b"last_err"); // last_error_func
         sb[0x180..0x184].copy_from_slice(&31_u32.to_le_bytes()); // snapshot_inum
         sb[0x184..0x188].copy_from_slice(&32_u32.to_le_bytes()); // snapshot_id
         sb[0x188..0x190].copy_from_slice(&33_u64.to_le_bytes()); // snapshot_r_blocks_count
@@ -5789,6 +5815,14 @@ mod tests {
         assert_eq!(parsed.log_groups_per_flex, 4);
         assert_eq!(parsed.mmp_update_interval, 5);
         assert_eq!(parsed.mmp_block, 1234);
+        assert_eq!(parsed.first_error_ino, 35);
+        assert_eq!(parsed.first_error_block, 36);
+        assert_eq!(parsed.first_error_func, "first_err");
+        assert_eq!(parsed.first_error_line, 37);
+        assert_eq!(parsed.last_error_ino, 38);
+        assert_eq!(parsed.last_error_line, 39);
+        assert_eq!(parsed.last_error_block, 40);
+        assert_eq!(parsed.last_error_func, "last_err");
         assert_eq!(parsed.snapshot_inum, 31);
         assert_eq!(parsed.snapshot_id, 32);
         assert_eq!(parsed.snapshot_r_blocks_count, 33);
