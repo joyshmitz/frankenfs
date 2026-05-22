@@ -1477,6 +1477,45 @@ pub trait FsOps: Send + Sync {
         ))
     }
 
+    /// Start a btrfs scrub operation for `BTRFS_IOC_SCRUB`.
+    ///
+    /// Returns 1024-byte scrub_args struct with progress filled in.
+    /// Non-btrfs backends must return `FfsError::UnsupportedFeature`.
+    fn btrfs_scrub_start(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _devid: u64,
+    ) -> ffs_error::Result<Vec<u8>> {
+        Err(FfsError::UnsupportedFeature(
+            "btrfs_scrub_start is not supported by this backend".to_owned(),
+        ))
+    }
+
+    /// Cancel a btrfs scrub operation for `BTRFS_IOC_SCRUB_CANCEL`.
+    ///
+    /// Non-btrfs backends must return `FfsError::UnsupportedFeature`.
+    fn btrfs_scrub_cancel(&self, _cx: &Cx, _scope: &mut RequestScope) -> ffs_error::Result<()> {
+        Err(FfsError::UnsupportedFeature(
+            "btrfs_scrub_cancel is not supported by this backend".to_owned(),
+        ))
+    }
+
+    /// Query btrfs scrub progress for `BTRFS_IOC_SCRUB_PROGRESS`.
+    ///
+    /// Returns 1024-byte scrub_args struct with current progress.
+    /// Non-btrfs backends must return `FfsError::UnsupportedFeature`.
+    fn btrfs_scrub_progress(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _devid: u64,
+    ) -> ffs_error::Result<Vec<u8>> {
+        Err(FfsError::UnsupportedFeature(
+            "btrfs_scrub_progress is not supported by this backend".to_owned(),
+        ))
+    }
+
     /// Set filesystem-specific inode flags (ext4 `EXT4_IOC_SETFLAGS`).
     ///
     /// Updates the raw `i_flags` field. The implementation should validate

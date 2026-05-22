@@ -223,6 +223,16 @@ const BTRFS_INO_PATH_ARGS_SIZE: u32 = 56;
 /// Given a logical byte address, returns inodes that reference it.
 const BTRFS_IOC_LOGICAL_INO: u32 = 0xC038_9424;
 const BTRFS_LOGICAL_INO_ARGS_SIZE: u32 = 56;
+/// `BTRFS_IOC_SCRUB` = `_IOWR(0x94, 27, struct btrfs_ioctl_scrub_args)`.
+/// Start or continue a scrub operation on a device.
+const BTRFS_IOC_SCRUB: u32 = 0xC400_941B;
+/// `BTRFS_IOC_SCRUB_CANCEL` = `_IO(0x94, 28)`.
+/// Cancel a running scrub operation.
+const BTRFS_IOC_SCRUB_CANCEL: u32 = 0x0000_941C;
+/// `BTRFS_IOC_SCRUB_PROGRESS` = `_IOWR(0x94, 29, struct btrfs_ioctl_scrub_args)`.
+/// Query progress of a running scrub operation.
+const BTRFS_IOC_SCRUB_PROGRESS: u32 = 0xC400_941D;
+const BTRFS_SCRUB_ARGS_SIZE: u32 = 1024;
 const FSCRYPT_POLICY_V1_SIZE: usize = 12;
 #[cfg(test)]
 const FSCRYPT_POLICY_V2_VERSION: u8 = 2;
@@ -3734,6 +3744,43 @@ impl FrankenFuse {
                 let cx = Self::cx_for_request();
                 match self.with_request_scope(&cx, RequestOp::IoctlRead, |cx, scope| {
                     self.inner.ops.get_btrfs_logical_ino(cx, scope, logical)
+                }) {
+                    Ok(data) => IoctlResult::Data(data),
+                    Err(error) => IoctlResult::Error(error.to_errno()),
+                }
+            }
+            BTRFS_IOC_SCRUB => {
+                // Input: 1024-byte struct with devid, start, end, flags, progress
+                if in_data.len() < BTRFS_SCRUB_ARGS_SIZE as usize {
+                    return IoctlResult::Error(libc::EINVAL);
+                }
+                let devid = u64::from_le_bytes(in_data[0..8].try_into().unwrap_or([0; 8]));
+                let cx = Self::cx_for_request();
+                match self.with_request_scope(&cx, RequestOp::IoctlRead, |cx, scope| {
+                    self.inner.ops.btrfs_scrub_start(cx, scope, devid)
+                }) {
+                    Ok(data) => IoctlResult::Data(data),
+                    Err(error) => IoctlResult::Error(error.to_errno()),
+                }
+            }
+            BTRFS_IOC_SCRUB_CANCEL => {
+                let cx = Self::cx_for_request();
+                match self.with_request_scope(&cx, RequestOp::IoctlRead, |cx, scope| {
+                    self.inner.ops.btrfs_scrub_cancel(cx, scope)
+                }) {
+                    Ok(()) => IoctlResult::Data(Vec::new()),
+                    Err(error) => IoctlResult::Error(error.to_errno()),
+                }
+            }
+            BTRFS_IOC_SCRUB_PROGRESS => {
+                // Input: 1024-byte struct with devid to query
+                if in_data.len() < BTRFS_SCRUB_ARGS_SIZE as usize {
+                    return IoctlResult::Error(libc::EINVAL);
+                }
+                let devid = u64::from_le_bytes(in_data[0..8].try_into().unwrap_or([0; 8]));
+                let cx = Self::cx_for_request();
+                match self.with_request_scope(&cx, RequestOp::IoctlRead, |cx, scope| {
+                    self.inner.ops.btrfs_scrub_progress(cx, scope, devid)
                 }) {
                     Ok(data) => IoctlResult::Data(data),
                     Err(error) => IoctlResult::Error(error.to_errno()),

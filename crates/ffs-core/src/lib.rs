@@ -5131,14 +5131,16 @@ impl OpenFs {
             if start.objectid > end.objectid {
                 return Ok(Vec::new());
             }
-            let alloc = alloc_mutex.lock();
-            let mut entries = alloc
-                .fs_tree
-                .range(&start, &end)
-                .map_err(|e| btrfs_mutation_to_ffs(&e))?
-                .into_iter()
-                .map(|(key, data)| BtrfsLeafEntry { key, data })
-                .collect::<Vec<_>>();
+            let mut entries = {
+                let alloc = alloc_mutex.lock();
+                alloc
+                    .fs_tree
+                    .range(&start, &end)
+                    .map_err(|e| btrfs_mutation_to_ffs(&e))?
+                    .into_iter()
+                    .map(|(key, data)| BtrfsLeafEntry { key, data })
+                    .collect::<Vec<_>>()
+            };
             entries.sort_by(|lhs, rhs| Self::btrfs_key_order(&lhs.key, &rhs.key));
             return Ok(entries);
         }
@@ -19661,12 +19663,17 @@ impl FsOps for OpenFs {
                 "BTRFS_IOC_SPACE_INFO is not supported on ext4 filesystems".to_owned(),
             )),
             FsFlavor::Btrfs(_) => {
-                let btrfs = self.require_btrfs_alloc_state()?.lock();
-                let space_infos = btrfs.extent_alloc.space_info();
-                let total_spaces = space_infos.len() as u64;
+                let space_infos = self
+                    .require_btrfs_alloc_state()?
+                    .lock()
+                    .extent_alloc
+                    .space_info();
+                let total_spaces = u64::try_from(space_infos.len()).map_err(|_| {
+                    FfsError::Format("BTRFS_IOC_SPACE_INFO entry count exceeds u64".to_owned())
+                })?;
 
                 // Header: space_slots (ignored on output), total_spaces
-                let mut buf = Vec::with_capacity(16 + (total_spaces as usize) * 24);
+                let mut buf = Vec::with_capacity(16 + space_infos.len().saturating_mul(24));
                 buf.extend_from_slice(&0_u64.to_le_bytes()); // space_slots (unused in output)
                 buf.extend_from_slice(&total_spaces.to_le_bytes());
 
@@ -19674,7 +19681,9 @@ impl FsOps for OpenFs {
                 let slots_to_return = if space_slots == 0 {
                     0
                 } else {
-                    space_slots.min(total_spaces) as usize
+                    usize::try_from(space_slots)
+                        .unwrap_or(usize::MAX)
+                        .min(space_infos.len())
                 };
 
                 for (flags, total_bytes, used_bytes) in
@@ -19749,6 +19758,55 @@ impl FsOps for OpenFs {
                 buf[0..8].copy_from_slice(&0_u64.to_le_bytes()); // elem_cnt
                 buf[8..16].copy_from_slice(&0_u64.to_le_bytes()); // elem_missed
                 Ok(buf)
+            }
+        }
+    }
+
+    fn btrfs_scrub_start(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _devid: u64,
+    ) -> ffs_error::Result<Vec<u8>> {
+        match &self.flavor {
+            FsFlavor::Ext4(_) => Err(FfsError::UnsupportedFeature(
+                "BTRFS_IOC_SCRUB is not supported on ext4 filesystems".to_owned(),
+            )),
+            FsFlavor::Btrfs(_) => {
+                // Scrub start not yet integrated with ffs-repair scrub infrastructure.
+                // Return empty progress struct indicating scrub not running.
+                Ok(vec![0_u8; 1024])
+            }
+        }
+    }
+
+    fn btrfs_scrub_cancel(&self, _cx: &Cx, _scope: &mut RequestScope) -> ffs_error::Result<()> {
+        match &self.flavor {
+            FsFlavor::Ext4(_) => Err(FfsError::UnsupportedFeature(
+                "BTRFS_IOC_SCRUB_CANCEL is not supported on ext4 filesystems".to_owned(),
+            )),
+            FsFlavor::Btrfs(_) => {
+                // No scrub running - return ENOTCONN as kernel does
+                Err(FfsError::Io(std::io::Error::from_raw_os_error(
+                    libc::ENOTCONN,
+                )))
+            }
+        }
+    }
+
+    fn btrfs_scrub_progress(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _devid: u64,
+    ) -> ffs_error::Result<Vec<u8>> {
+        match &self.flavor {
+            FsFlavor::Ext4(_) => Err(FfsError::UnsupportedFeature(
+                "BTRFS_IOC_SCRUB_PROGRESS is not supported on ext4 filesystems".to_owned(),
+            )),
+            FsFlavor::Btrfs(_) => {
+                // No scrub running - return empty progress struct
+                Ok(vec![0_u8; 1024])
             }
         }
     }
