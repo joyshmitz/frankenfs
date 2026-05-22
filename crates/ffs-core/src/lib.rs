@@ -20131,6 +20131,45 @@ impl FsOps for OpenFs {
         }
     }
 
+    fn btrfs_encoded_read(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _ino: u64,
+        _args: &[u8],
+    ) -> ffs_error::Result<Vec<u8>> {
+        match &self.flavor {
+            FsFlavor::Ext4(_) => Err(FfsError::UnsupportedFeature(
+                "BTRFS_IOC_ENCODED_READ is not supported on ext4 filesystems".to_owned(),
+            )),
+            FsFlavor::Btrfs(_) => {
+                // Encoded read requires parsing extent compression metadata
+                // and returning raw compressed data. Not yet implemented.
+                Err(FfsError::UnsupportedFeature(
+                    "BTRFS_IOC_ENCODED_READ not yet implemented".to_owned(),
+                ))
+            }
+        }
+    }
+
+    fn btrfs_encoded_write(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _ino: u64,
+        _args: &[u8],
+    ) -> ffs_error::Result<usize> {
+        match &self.flavor {
+            FsFlavor::Ext4(_) => Err(FfsError::UnsupportedFeature(
+                "BTRFS_IOC_ENCODED_WRITE is not supported on ext4 filesystems".to_owned(),
+            )),
+            FsFlavor::Btrfs(_) => {
+                // Write requires read-write mode
+                Err(FfsError::ReadOnly)
+            }
+        }
+    }
+
     fn btrfs_subvol_create(
         &self,
         _cx: &Cx,

@@ -1798,6 +1798,36 @@ pub trait FsOps: Send + Sync {
         ))
     }
 
+    /// Read compressed extents directly for `BTRFS_IOC_ENCODED_READ`.
+    ///
+    /// Returns raw compressed data without kernel decompression.
+    fn btrfs_encoded_read(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _ino: u64,
+        _args: &[u8],
+    ) -> ffs_error::Result<Vec<u8>> {
+        Err(FfsError::UnsupportedFeature(
+            "btrfs_encoded_read is not supported by this backend".to_owned(),
+        ))
+    }
+
+    /// Write pre-compressed data for `BTRFS_IOC_ENCODED_WRITE`.
+    ///
+    /// Returns bytes written. Requires write access.
+    fn btrfs_encoded_write(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _ino: u64,
+        _args: &[u8],
+    ) -> ffs_error::Result<usize> {
+        Err(FfsError::UnsupportedFeature(
+            "btrfs_encoded_write is not supported by this backend".to_owned(),
+        ))
+    }
+
     /// Create a subvolume for `BTRFS_IOC_SUBVOL_CREATE_V2`.
     ///
     /// Takes raw vol_args_v2 struct bytes containing flags and name.
