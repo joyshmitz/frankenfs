@@ -19688,6 +19688,36 @@ impl FsOps for OpenFs {
         }
     }
 
+    fn btrfs_start_sync(&self, cx: &Cx, scope: &mut RequestScope) -> ffs_error::Result<u64> {
+        match &self.flavor {
+            FsFlavor::Ext4(_) => Err(FfsError::UnsupportedFeature(
+                "BTRFS_IOC_START_SYNC is not supported on ext4 filesystems".to_owned(),
+            )),
+            FsFlavor::Btrfs(sb) => {
+                self.sync_fs(cx, scope)?;
+                let generation = self
+                    .btrfs_alloc_state
+                    .as_ref()
+                    .map_or(sb.generation, |alloc_mutex| alloc_mutex.lock().generation);
+                Ok(generation)
+            }
+        }
+    }
+
+    fn btrfs_wait_sync(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        _transid: u64,
+    ) -> ffs_error::Result<()> {
+        match &self.flavor {
+            FsFlavor::Ext4(_) => Err(FfsError::UnsupportedFeature(
+                "BTRFS_IOC_WAIT_SYNC is not supported on ext4 filesystems".to_owned(),
+            )),
+            FsFlavor::Btrfs(_) => self.sync_fs(cx, scope),
+        }
+    }
+
     fn get_btrfs_features(
         &self,
         _cx: &Cx,

@@ -203,6 +203,13 @@ const BTRFS_IOC_SUBVOL_SETFLAGS: u32 = 0x4008_941A;
 /// `BTRFS_IOC_SYNC` = `_IO(0x94, 8)` on x86_64.
 /// Forces filesystem sync/commit.
 const BTRFS_IOC_SYNC: u32 = 0x9408;
+/// `BTRFS_IOC_START_SYNC` = `_IOR(0x94, 24, __u64)` on x86_64.
+/// Starts a transaction sync and returns a generation/transid token.
+const BTRFS_IOC_START_SYNC: u32 = 0x8008_9418;
+/// `BTRFS_IOC_WAIT_SYNC` = `_IOW(0x94, 22, __u64)` on x86_64.
+/// Waits for the supplied generation/transid token to become durable.
+const BTRFS_IOC_WAIT_SYNC: u32 = 0x4008_9416;
+const BTRFS_SYNC_TRANSID_SIZE: u32 = 8;
 /// `BTRFS_IOC_GET_FEATURES` = `_IOR(0x94, 57, struct btrfs_ioctl_feature_flags)`.
 /// Returns compat/compat_ro/incompat feature flags (3 x u64 = 24 bytes).
 const BTRFS_IOC_GET_FEATURES: u32 = 0x8018_9439;
@@ -3738,6 +3745,33 @@ impl FrankenFuse {
                     Err(error) => IoctlResult::Error(error.to_errno()),
                 }
             }
+            BTRFS_IOC_START_SYNC => {
+                if out_size < BTRFS_SYNC_TRANSID_SIZE {
+                    return IoctlResult::Error(libc::EINVAL);
+                }
+                let cx = Self::cx_for_request();
+                match self.with_request_scope(&cx, RequestOp::Fsync, |cx, scope| {
+                    self.inner.ops.btrfs_start_sync(cx, scope)
+                }) {
+                    Ok(transid) => IoctlResult::Data(transid.to_ne_bytes().to_vec()),
+                    Err(error) => IoctlResult::Error(error.to_errno()),
+                }
+            }
+            BTRFS_IOC_WAIT_SYNC => {
+                if in_data.len() < BTRFS_SYNC_TRANSID_SIZE as usize {
+                    return IoctlResult::Error(libc::EINVAL);
+                }
+                let mut raw = [0_u8; 8];
+                raw.copy_from_slice(&in_data[0..8]);
+                let transid = u64::from_ne_bytes(raw);
+                let cx = Self::cx_for_request();
+                match self.with_request_scope(&cx, RequestOp::Fsync, |cx, scope| {
+                    self.inner.ops.btrfs_wait_sync(cx, scope, transid)
+                }) {
+                    Ok(()) => IoctlResult::Data(Vec::new()),
+                    Err(error) => IoctlResult::Error(error.to_errno()),
+                }
+            }
             BTRFS_IOC_GET_FEATURES => {
                 if out_size < BTRFS_FEATURE_FLAGS_SIZE {
                     return IoctlResult::Error(libc::EINVAL);
@@ -6462,6 +6496,8 @@ mod tests {
         GetFsLabel,
         SetFsLabel(Vec<u8>),
         GetBtrfsFsInfo,
+        BtrfsStartSync,
+        BtrfsWaitSync(u64),
         GetBtrfsDevInfo(u64, [u8; 16]),
         BtrfsTreeSearch(BtrfsTreeSearchKey),
         BtrfsInoLookup(u64, u64),
@@ -7129,6 +7165,27 @@ mod tests {
                     "get_btrfs_fs_info: recorder not configured with a payload".into(),
                 )
             })
+        }
+
+        fn btrfs_start_sync(&self, _cx: &Cx, _scope: &mut RequestScope) -> ffs_error::Result<u64> {
+            self.calls
+                .lock()
+                .expect("lock ioctl calls")
+                .push(IoctlCall::BtrfsStartSync);
+            Ok(0xCAFE_BABE_DEAD_BEEF)
+        }
+
+        fn btrfs_wait_sync(
+            &self,
+            _cx: &Cx,
+            _scope: &mut RequestScope,
+            transid: u64,
+        ) -> ffs_error::Result<()> {
+            self.calls
+                .lock()
+                .expect("lock ioctl calls")
+                .push(IoctlCall::BtrfsWaitSync(transid));
+            Ok(())
         }
 
         fn btrfs_ino_lookup(
@@ -8243,6 +8300,65 @@ mod tests {
 
         let response =
             dispatch_ioctl_for_testing(&fuse, 2, 0, FS_IOC_SETFSLABEL, b"not-terminated", 0);
+        assert_eq!(response, IoctlResult::Error(libc::EINVAL));
+        assert!(calls.lock().expect("lock ioctl calls").is_empty());
+    }
+
+    #[test]
+    fn dispatch_ioctl_btrfs_start_sync_returns_transid() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let fuse = FrankenFuse::new(Box::new(IoctlRecordingFs::new(0, Arc::clone(&calls))));
+
+        let response = dispatch_ioctl_for_testing(&fuse, 1, 0, BTRFS_IOC_START_SYNC, &[], 8);
+        assert_eq!(
+            response,
+            IoctlResult::Data(0xCAFE_BABE_DEAD_BEEF_u64.to_ne_bytes().to_vec())
+        );
+        assert_eq!(
+            calls.lock().expect("lock ioctl calls").as_slice(),
+            &[
+                IoctlCall::Begin(RequestOp::Fsync),
+                IoctlCall::BtrfsStartSync,
+                IoctlCall::End(RequestOp::Fsync),
+            ]
+        );
+    }
+
+    #[test]
+    fn dispatch_ioctl_btrfs_start_sync_rejects_short_output_buffer() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let fuse = FrankenFuse::new(Box::new(IoctlRecordingFs::new(0, Arc::clone(&calls))));
+
+        let response = dispatch_ioctl_for_testing(&fuse, 1, 0, BTRFS_IOC_START_SYNC, &[], 7);
+        assert_eq!(response, IoctlResult::Error(libc::EINVAL));
+        assert!(calls.lock().expect("lock ioctl calls").is_empty());
+    }
+
+    #[test]
+    fn dispatch_ioctl_btrfs_wait_sync_passes_transid() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let fuse = FrankenFuse::new(Box::new(IoctlRecordingFs::new(0, Arc::clone(&calls))));
+        let transid = 0x0123_4567_89AB_CDEF_u64;
+
+        let response =
+            dispatch_ioctl_for_testing(&fuse, 1, 0, BTRFS_IOC_WAIT_SYNC, &transid.to_ne_bytes(), 0);
+        assert_eq!(response, IoctlResult::Data(Vec::new()));
+        assert_eq!(
+            calls.lock().expect("lock ioctl calls").as_slice(),
+            &[
+                IoctlCall::Begin(RequestOp::Fsync),
+                IoctlCall::BtrfsWaitSync(transid),
+                IoctlCall::End(RequestOp::Fsync),
+            ]
+        );
+    }
+
+    #[test]
+    fn dispatch_ioctl_btrfs_wait_sync_rejects_short_input_buffer() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let fuse = FrankenFuse::new(Box::new(IoctlRecordingFs::new(0, Arc::clone(&calls))));
+
+        let response = dispatch_ioctl_for_testing(&fuse, 1, 0, BTRFS_IOC_WAIT_SYNC, &[0_u8; 7], 0);
         assert_eq!(response, IoctlResult::Error(libc::EINVAL));
         assert!(calls.lock().expect("lock ioctl calls").is_empty());
     }

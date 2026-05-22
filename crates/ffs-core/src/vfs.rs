@@ -1375,6 +1375,31 @@ pub trait FsOps: Send + Sync {
         Ok(())
     }
 
+    /// Start a btrfs transaction sync for `BTRFS_IOC_START_SYNC`.
+    ///
+    /// Returns the transaction/generation token that callers can later pass to
+    /// `BTRFS_IOC_WAIT_SYNC`. Non-btrfs backends must return
+    /// `FfsError::UnsupportedFeature`.
+    fn btrfs_start_sync(&self, _cx: &Cx, _scope: &mut RequestScope) -> ffs_error::Result<u64> {
+        Err(FfsError::UnsupportedFeature(
+            "btrfs_start_sync is not supported by this backend".to_owned(),
+        ))
+    }
+
+    /// Wait for a btrfs transaction sync token for `BTRFS_IOC_WAIT_SYNC`.
+    ///
+    /// Non-btrfs backends must return `FfsError::UnsupportedFeature`.
+    fn btrfs_wait_sync(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _transid: u64,
+    ) -> ffs_error::Result<()> {
+        Err(FfsError::UnsupportedFeature(
+            "btrfs_wait_sync is not supported by this backend".to_owned(),
+        ))
+    }
+
     /// Get btrfs feature flags for `BTRFS_IOC_GET_FEATURES`.
     ///
     /// Returns 24 bytes: compat_flags (u64) + compat_ro_flags (u64) +
@@ -2279,6 +2304,23 @@ impl<T: FsOps + ?Sized> FsOps for Arc<T> {
 
     fn get_btrfs_fs_info(&self, cx: &Cx, scope: &mut RequestScope) -> ffs_error::Result<Vec<u8>> {
         self.as_ref().get_btrfs_fs_info(cx, scope)
+    }
+
+    fn sync_fs(&self, cx: &Cx, scope: &mut RequestScope) -> ffs_error::Result<()> {
+        self.as_ref().sync_fs(cx, scope)
+    }
+
+    fn btrfs_start_sync(&self, cx: &Cx, scope: &mut RequestScope) -> ffs_error::Result<u64> {
+        self.as_ref().btrfs_start_sync(cx, scope)
+    }
+
+    fn btrfs_wait_sync(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        transid: u64,
+    ) -> ffs_error::Result<()> {
+        self.as_ref().btrfs_wait_sync(cx, scope, transid)
     }
 
     fn btrfs_ino_lookup(
