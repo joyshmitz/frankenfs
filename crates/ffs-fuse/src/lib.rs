@@ -7810,6 +7810,32 @@ mod tests {
     }
 
     #[test]
+    fn resolved_thread_count_zero_uses_auto() {
+        let opts = MountOptions {
+            worker_threads: 0,
+            ..MountOptions::default()
+        };
+        let count = opts.resolved_thread_count();
+        assert!(count >= 1 && count <= 8);
+    }
+
+    #[test]
+    fn resolved_thread_count_explicit_value() {
+        let opts = MountOptions {
+            worker_threads: 4,
+            ..MountOptions::default()
+        };
+        assert_eq!(opts.resolved_thread_count(), 4);
+    }
+
+    #[test]
+    fn resolved_thread_count_clamps_to_minimum_one() {
+        let mut opts = MountOptions::default();
+        opts.worker_threads = 1;
+        assert_eq!(opts.resolved_thread_count(), 1);
+    }
+
+    #[test]
     fn build_mount_options_includes_ro_when_read_only() {
         let opts = MountOptions::default();
         let mount_opts = build_mount_options(&opts);
