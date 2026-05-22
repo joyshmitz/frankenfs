@@ -206,6 +206,12 @@ const BTRFS_IOC_SUBVOL_SETFLAGS: u32 = 0x4008_941A;
 /// `BTRFS_IOC_SYNC` = `_IO(0x94, 8)` on x86_64.
 /// Forces filesystem sync/commit.
 const BTRFS_IOC_SYNC: u32 = 0x9408;
+/// `BTRFS_IOC_TRANS_START` = `_IO(0x94, 6)` on x86_64.
+/// Starts an explicit btrfs transaction.
+const BTRFS_IOC_TRANS_START: u32 = 0x9406;
+/// `BTRFS_IOC_TRANS_END` = `_IO(0x94, 7)` on x86_64.
+/// Ends an explicit btrfs transaction.
+const BTRFS_IOC_TRANS_END: u32 = 0x9407;
 /// `BTRFS_IOC_START_SYNC` = `_IOR(0x94, 24, __u64)` on x86_64.
 /// Starts a transaction sync and returns a generation/transid token.
 const BTRFS_IOC_START_SYNC: u32 = 0x8008_9418;
@@ -3765,6 +3771,28 @@ impl FrankenFuse {
                     Err(error) => IoctlResult::Error(error.to_errno()),
                 }
             }
+            BTRFS_IOC_TRANS_START => {
+                let cx = Self::cx_for_request();
+                match self.with_request_scope(&cx, RequestOp::IoctlWrite, |cx, scope| {
+                    self.inner.ops.btrfs_start_transaction(cx, scope)?;
+                    self.inner.ops.commit_request_scope(scope)?;
+                    Ok(())
+                }) {
+                    Ok(()) => IoctlResult::Data(Vec::new()),
+                    Err(error) => IoctlResult::Error(error.to_errno()),
+                }
+            }
+            BTRFS_IOC_TRANS_END => {
+                let cx = Self::cx_for_request();
+                match self.with_request_scope(&cx, RequestOp::IoctlWrite, |cx, scope| {
+                    self.inner.ops.btrfs_end_transaction(cx, scope)?;
+                    self.inner.ops.commit_request_scope(scope)?;
+                    Ok(())
+                }) {
+                    Ok(()) => IoctlResult::Data(Vec::new()),
+                    Err(error) => IoctlResult::Error(error.to_errno()),
+                }
+            }
             BTRFS_IOC_START_SYNC => {
                 if out_size < BTRFS_SYNC_TRANSID_SIZE {
                     return IoctlResult::Error(libc::EINVAL);
@@ -6516,6 +6544,8 @@ mod tests {
         GetFsLabel,
         SetFsLabel(Vec<u8>),
         GetBtrfsFsInfo,
+        BtrfsStartTransaction,
+        BtrfsEndTransaction,
         BtrfsStartSync,
         BtrfsWaitSync(u64),
         BtrfsSetDefaultSubvol(u64),
@@ -7219,6 +7249,30 @@ mod tests {
                 .lock()
                 .expect("lock ioctl calls")
                 .push(IoctlCall::BtrfsSetDefaultSubvol(treeid));
+            Ok(())
+        }
+
+        fn btrfs_start_transaction(
+            &self,
+            _cx: &Cx,
+            _scope: &mut RequestScope,
+        ) -> ffs_error::Result<()> {
+            self.calls
+                .lock()
+                .expect("lock ioctl calls")
+                .push(IoctlCall::BtrfsStartTransaction);
+            Ok(())
+        }
+
+        fn btrfs_end_transaction(
+            &self,
+            _cx: &Cx,
+            _scope: &mut RequestScope,
+        ) -> ffs_error::Result<()> {
+            self.calls
+                .lock()
+                .expect("lock ioctl calls")
+                .push(IoctlCall::BtrfsEndTransaction);
             Ok(())
         }
 
@@ -8432,6 +8486,42 @@ mod tests {
             dispatch_ioctl_for_testing(&fuse, 1, 0, BTRFS_IOC_DEFAULT_SUBVOL, &[0_u8; 7], 0);
         assert_eq!(response, IoctlResult::Error(libc::EINVAL));
         assert!(calls.lock().expect("lock ioctl calls").is_empty());
+    }
+
+    #[test]
+    fn dispatch_ioctl_btrfs_trans_start_commits_write_scope() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let fuse = FrankenFuse::new(Box::new(IoctlRecordingFs::new(0, Arc::clone(&calls))));
+
+        let response = dispatch_ioctl_for_testing(&fuse, 1, 0, BTRFS_IOC_TRANS_START, &[], 0);
+        assert_eq!(response, IoctlResult::Data(Vec::new()));
+        assert_eq!(
+            calls.lock().expect("lock ioctl calls").as_slice(),
+            &[
+                IoctlCall::Begin(RequestOp::IoctlWrite),
+                IoctlCall::BtrfsStartTransaction,
+                IoctlCall::Commit,
+                IoctlCall::End(RequestOp::IoctlWrite),
+            ]
+        );
+    }
+
+    #[test]
+    fn dispatch_ioctl_btrfs_trans_end_commits_write_scope() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let fuse = FrankenFuse::new(Box::new(IoctlRecordingFs::new(0, Arc::clone(&calls))));
+
+        let response = dispatch_ioctl_for_testing(&fuse, 1, 0, BTRFS_IOC_TRANS_END, &[], 0);
+        assert_eq!(response, IoctlResult::Data(Vec::new()));
+        assert_eq!(
+            calls.lock().expect("lock ioctl calls").as_slice(),
+            &[
+                IoctlCall::Begin(RequestOp::IoctlWrite),
+                IoctlCall::BtrfsEndTransaction,
+                IoctlCall::Commit,
+                IoctlCall::End(RequestOp::IoctlWrite),
+            ]
+        );
     }
 
     #[test]

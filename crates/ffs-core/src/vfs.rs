@@ -1367,6 +1367,30 @@ pub trait FsOps: Send + Sync {
         ))
     }
 
+    /// Start an explicit btrfs transaction for `BTRFS_IOC_TRANS_START`.
+    ///
+    /// Non-btrfs backends must return `FfsError::UnsupportedFeature`;
+    /// read-only btrfs backends should return `FfsError::ReadOnly`.
+    fn btrfs_start_transaction(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+    ) -> ffs_error::Result<()> {
+        Err(FfsError::UnsupportedFeature(
+            "btrfs_start_transaction is not supported by this backend".to_owned(),
+        ))
+    }
+
+    /// End an explicit btrfs transaction for `BTRFS_IOC_TRANS_END`.
+    ///
+    /// Non-btrfs backends must return `FfsError::UnsupportedFeature`;
+    /// read-only btrfs backends should return `FfsError::ReadOnly`.
+    fn btrfs_end_transaction(&self, _cx: &Cx, _scope: &mut RequestScope) -> ffs_error::Result<()> {
+        Err(FfsError::UnsupportedFeature(
+            "btrfs_end_transaction is not supported by this backend".to_owned(),
+        ))
+    }
+
     /// Get quota configuration and status.
     ///
     /// Returns a summary of which quota types are enabled and their
@@ -2346,6 +2370,14 @@ impl<T: FsOps + ?Sized> FsOps for Arc<T> {
         treeid: u64,
     ) -> ffs_error::Result<()> {
         self.as_ref().btrfs_set_default_subvol(cx, scope, treeid)
+    }
+
+    fn btrfs_start_transaction(&self, cx: &Cx, scope: &mut RequestScope) -> ffs_error::Result<()> {
+        self.as_ref().btrfs_start_transaction(cx, scope)
+    }
+
+    fn btrfs_end_transaction(&self, cx: &Cx, scope: &mut RequestScope) -> ffs_error::Result<()> {
+        self.as_ref().btrfs_end_transaction(cx, scope)
     }
 
     fn btrfs_ino_lookup(

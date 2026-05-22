@@ -20418,6 +20418,37 @@ impl FsOps for OpenFs {
         }
     }
 
+    fn btrfs_start_transaction(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+    ) -> ffs_error::Result<()> {
+        match &self.flavor {
+            FsFlavor::Ext4(_) => Err(FfsError::UnsupportedFeature(
+                "BTRFS_IOC_TRANS_START is not supported on ext4 filesystems".to_owned(),
+            )),
+            FsFlavor::Btrfs(_) => {
+                // Explicit transaction lifecycle ioctls require durable btrfs
+                // metadata mutation; fail closed while btrfs writeback remains
+                // guarded/non-persistent.
+                Err(FfsError::ReadOnly)
+            }
+        }
+    }
+
+    fn btrfs_end_transaction(&self, _cx: &Cx, _scope: &mut RequestScope) -> ffs_error::Result<()> {
+        match &self.flavor {
+            FsFlavor::Ext4(_) => Err(FfsError::UnsupportedFeature(
+                "BTRFS_IOC_TRANS_END is not supported on ext4 filesystems".to_owned(),
+            )),
+            FsFlavor::Btrfs(_) => {
+                // See `btrfs_start_transaction`: the matching end ioctl is
+                // still a write-side transaction control surface.
+                Err(FfsError::ReadOnly)
+            }
+        }
+    }
+
     fn get_encryption_policy_ex(
         &self,
         cx: &Cx,
