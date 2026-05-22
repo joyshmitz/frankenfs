@@ -2107,6 +2107,7 @@ missing required: FILETYPE, EXTENTS; rejected: ENCRYPT; unknown incompat: \
     ///
     /// Defaults: 4K blocks, FILETYPE+EXTENTS incompat, 1 group, 256-byte
     /// inodes, 8192 blocks_per_group, 2048 inodes_per_group.
+    #[expect(clippy::too_many_lines)]
     fn make_superblock() -> Ext4Superblock {
         Ext4Superblock {
             inodes_count: 2048,
@@ -2122,10 +2123,15 @@ missing required: FILETYPE, EXTENTS; rejected: ENCRYPT; unknown incompat: \
             clusters_per_group: 8192,
             inodes_per_group: 2048,
             inode_size: 256,
+            min_extra_isize: 0,
+            want_extra_isize: 0,
             first_ino: 11,
             desc_size: 32,
             reserved_gdt_blocks: 0,
             first_meta_bg: 0,
+            raid_stride: 0,
+            raid_stripe_width: 0,
+            kbytes_written: 0,
             magic: 0xEF53,
             uuid: [0; 16],
             volume_name: String::new(),
@@ -2182,6 +2188,7 @@ missing required: FILETYPE, EXTENTS; rejected: ENCRYPT; unknown incompat: \
             journal_dev: 0,
             last_orphan: 0,
             journal_uuid: [0; 16],
+            jnl_blocks: [0; 17],
             snapshot_inum: 0,
             snapshot_id: 0,
             snapshot_r_blocks_count: 0,

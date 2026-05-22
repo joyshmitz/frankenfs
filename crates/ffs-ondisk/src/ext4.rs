@@ -587,10 +587,15 @@ pub struct Ext4Superblock {
     pub clusters_per_group: u32,
     pub inodes_per_group: u32,
     pub inode_size: u16,
+    pub min_extra_isize: u16,
+    pub want_extra_isize: u16,
     pub first_ino: u32,
     pub desc_size: u16,
     pub reserved_gdt_blocks: u16,
     pub first_meta_bg: u32,
+    pub raid_stride: u16,
+    pub raid_stripe_width: u32,
+    pub kbytes_written: u64,
 
     // ── Identity ─────────────────────────────────────────────────────────
     pub magic: u16,
@@ -655,6 +660,7 @@ pub struct Ext4Superblock {
     pub journal_dev: u32,
     pub last_orphan: u32,
     pub journal_uuid: [u8; 16],
+    pub jnl_blocks: [u32; 17],
 
     // ── Snapshot metadata ────────────────────────────────────────────────
     pub snapshot_inum: u32,
@@ -773,6 +779,25 @@ impl Ext4Superblock {
         let prealloc_dir_blocks = ensure_slice(region, 0xCD, 1)?[0];
         let jnl_backup_type = ensure_slice(region, 0xFD, 1)?[0];
         let time_high_and_error_codes = read_fixed::<8>(region, 0x274)?;
+        let jnl_blocks = [
+            read_le_u32(region, 0x10C)?,
+            read_le_u32(region, 0x110)?,
+            read_le_u32(region, 0x114)?,
+            read_le_u32(region, 0x118)?,
+            read_le_u32(region, 0x11C)?,
+            read_le_u32(region, 0x120)?,
+            read_le_u32(region, 0x124)?,
+            read_le_u32(region, 0x128)?,
+            read_le_u32(region, 0x12C)?,
+            read_le_u32(region, 0x130)?,
+            read_le_u32(region, 0x134)?,
+            read_le_u32(region, 0x138)?,
+            read_le_u32(region, 0x13C)?,
+            read_le_u32(region, 0x140)?,
+            read_le_u32(region, 0x144)?,
+            read_le_u32(region, 0x148)?,
+            read_le_u32(region, 0x14C)?,
+        ];
 
         Ok(Self {
             // Core geometry
@@ -789,10 +814,16 @@ impl Ext4Superblock {
             clusters_per_group: read_le_u32(region, 0x24)?,
             inodes_per_group: read_le_u32(region, 0x28)?,
             inode_size: read_le_u16(region, 0x58)?,
+            min_extra_isize: read_le_u16(region, 0x15C)?,
+            want_extra_isize: read_le_u16(region, 0x15E)?,
             first_ino: read_le_u32(region, 0x54)?,
             desc_size: read_le_u16(region, 0xFE)?,
             reserved_gdt_blocks: read_le_u16(region, 0xCE)?,
             first_meta_bg: read_le_u32(region, 0x104)?,
+            raid_stride: read_le_u16(region, 0x164)?,
+            raid_stripe_width: read_le_u32(region, 0x170)?,
+            kbytes_written: u64::from(read_le_u32(region, 0x178)?)
+                | (u64::from(read_le_u32(region, 0x17C)?) << 32),
 
             // Identity
             magic,
@@ -861,6 +892,7 @@ impl Ext4Superblock {
             journal_dev: read_le_u32(region, 0xE4)?,
             last_orphan: read_le_u32(region, 0xE8)?,
             journal_uuid: read_fixed::<16>(region, 0xD0)?,
+            jnl_blocks,
 
             // Snapshot metadata
             snapshot_inum: read_le_u32(region, 0x180)?,
@@ -5798,6 +5830,15 @@ mod tests {
         sb[0xEC..0xF0].copy_from_slice(&0xDEAD_BEEF_u32.to_le_bytes()); // hash_seed[0]
         sb[0xFC] = 1; // def_hash_version=HalfMD4
         sb[0xFD] = 2; // jnl_backup_type
+        for (idx, value) in (0x10_u32..=0x20).enumerate() {
+            let offset = 0x10C + idx * 4;
+            sb[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        sb[0x15C..0x15E].copy_from_slice(&32_u16.to_le_bytes()); // min_extra_isize
+        sb[0x15E..0x160].copy_from_slice(&64_u16.to_le_bytes()); // want_extra_isize
+        sb[0x164..0x166].copy_from_slice(&128_u16.to_le_bytes()); // raid_stride
+        sb[0x170..0x174].copy_from_slice(&256_u32.to_le_bytes()); // raid_stripe_width
+        sb[0x178..0x180].copy_from_slice(&0x0102_0304_0506_0708_u64.to_le_bytes());
         sb[0x200..0x20E].copy_from_slice(b"acl,user_xattr"); // mount_opts
         sb[0x248..0x24C].copy_from_slice(&222_u32.to_le_bytes()); // overhead_clusters
         sb[0x160..0x164].copy_from_slice(&Ext4SuperFlags::UNSIGNED_HASH.0.to_le_bytes());
@@ -5851,6 +5892,13 @@ mod tests {
         assert_eq!(parsed.hash_seed[0], 0xDEAD_BEEF);
         assert_eq!(parsed.def_hash_version, 1);
         assert_eq!(parsed.jnl_backup_type, 2);
+        assert_eq!(parsed.jnl_blocks[0], 0x10);
+        assert_eq!(parsed.jnl_blocks[16], 0x20);
+        assert_eq!(parsed.min_extra_isize, 32);
+        assert_eq!(parsed.want_extra_isize, 64);
+        assert_eq!(parsed.raid_stride, 128);
+        assert_eq!(parsed.raid_stripe_width, 256);
+        assert_eq!(parsed.kbytes_written, 0x0102_0304_0506_0708);
         assert!(parsed.has_super_flag(Ext4SuperFlags::UNSIGNED_HASH));
         assert_eq!(parsed.log_groups_per_flex, 4);
         assert_eq!(parsed.mmp_update_interval, 5);
