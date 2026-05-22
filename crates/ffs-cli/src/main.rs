@@ -5760,7 +5760,7 @@ fn build_mount_background_scrub_plan(
             })
             .collect();
         return Ok(MountBackgroundScrubPlan {
-            flavor: FsFlavor::Ext4(sb.clone()),
+            flavor: FsFlavor::Ext4(Box::new(sb.clone())),
             block_size: sb.block_size,
             fs_uuid: sb.uuid,
             groups,
@@ -5789,7 +5789,7 @@ fn build_mount_background_scrub_plan(
             })
             .collect();
         return Ok(MountBackgroundScrubPlan {
-            flavor: FsFlavor::Btrfs(sb.clone()),
+            flavor: FsFlavor::Btrfs(Box::new(sb.clone())),
             block_size,
             fs_uuid: sb.fsid,
             groups,
@@ -7498,7 +7498,8 @@ mod tests {
         MountMode, MountRuntimeConfig, MountRuntimeMode, MountWritebackCacheConfig,
         RepairCommandOptions, RepairFlags, WRITEBACK_CACHE_KILL_SWITCH_ENV,
         btrfs_chunk_type_flag_names, build_ext4_group_info, build_fsck_output, build_info_output,
-        build_mount_open_options, choose_btrfs_scrub_block_size, ext4_appears_clean_state,
+        build_mount_open_options, choose_btrfs_scrub_block_size, count_blocks_at_severity_or_higher,
+        ext4_appears_clean_state,
         ext4_mount_replay_mode, format_ratio_thousandths, log_mount_runtime_rejected,
         log_mount_runtime_selected, mount_cmd, mount_operation_id, open_filesystem_for_mount,
         parse_btrfs_mount_selection, read_ext4_group_desc_from_path, read_ext4_inode_from_path,
@@ -7532,6 +7533,8 @@ mod tests {
     use ffs_repair::evidence::{EvidenceEventType, EvidenceRecord};
     use ffs_repair::ownership::CoordinationRecord;
     use ffs_repair::pipeline::RepairRuntimeMetricsSnapshot;
+    use ffs_repair::scrub::{CorruptionKind, ScrubFinding, ScrubReport, Severity};
+    use ffs_types::BlockNumber;
     use serde_json::Value;
     use std::io::{self, Seek, SeekFrom, Write};
     use std::os::unix::fs::PermissionsExt;
@@ -8803,6 +8806,7 @@ mod tests {
             gid: 1000,
             mode: 0o040_755,
             rdev: 0,
+            flags: 0,
             atime_sec: 10,
             atime_nsec: 0,
             ctime_sec: 10,
@@ -8945,6 +8949,7 @@ mod tests {
             gid: 1000,
             mode,
             rdev: 0,
+            flags: 0,
             atime_sec: 10,
             atime_nsec: 0,
             ctime_sec: 10,
@@ -9266,6 +9271,7 @@ mod tests {
             gid: 1000,
             mode: 0o040_755,
             rdev: 0,
+            flags: 0,
             atime_sec: 10,
             atime_nsec: 0,
             ctime_sec: 10,
@@ -14942,6 +14948,84 @@ mod tests {
         let block_size = choose_btrfs_scrub_block_size(4096 * 4, 4096, 512)
             .expect("should succeed with 4096 floor");
         assert!(block_size >= 4096);
+    }
+
+    // ── count_blocks_at_severity_or_higher: block deduplication ──────────
+
+    #[test]
+    fn count_blocks_at_severity_or_higher_empty_report() {
+        let report = ScrubReport {
+            findings: vec![],
+            blocks_scanned: 100,
+            blocks_corrupt: 0,
+            blocks_io_error: 0,
+        };
+        assert_eq!(count_blocks_at_severity_or_higher(&report, Severity::Info), 0);
+        assert_eq!(count_blocks_at_severity_or_higher(&report, Severity::Error), 0);
+    }
+
+    #[test]
+    fn count_blocks_at_severity_or_higher_deduplicates_same_block() {
+        let report = ScrubReport {
+            findings: vec![
+                ScrubFinding {
+                    block: BlockNumber(1),
+                    kind: CorruptionKind::ChecksumMismatch,
+                    severity: Severity::Error,
+                    detail: "first error".into(),
+                },
+                ScrubFinding {
+                    block: BlockNumber(1),
+                    kind: CorruptionKind::ChecksumMismatch,
+                    severity: Severity::Error,
+                    detail: "second error same block".into(),
+                },
+            ],
+            blocks_scanned: 100,
+            blocks_corrupt: 1,
+            blocks_io_error: 0,
+        };
+        // Two findings on same block should count as 1 block.
+        assert_eq!(count_blocks_at_severity_or_higher(&report, Severity::Error), 1);
+    }
+
+    #[test]
+    fn count_blocks_at_severity_or_higher_filters_by_severity() {
+        let report = ScrubReport {
+            findings: vec![
+                ScrubFinding {
+                    block: BlockNumber(1),
+                    kind: CorruptionKind::ChecksumMismatch,
+                    severity: Severity::Info,
+                    detail: "info finding".into(),
+                },
+                ScrubFinding {
+                    block: BlockNumber(2),
+                    kind: CorruptionKind::ChecksumMismatch,
+                    severity: Severity::Warning,
+                    detail: "warning finding".into(),
+                },
+                ScrubFinding {
+                    block: BlockNumber(3),
+                    kind: CorruptionKind::ChecksumMismatch,
+                    severity: Severity::Error,
+                    detail: "error finding".into(),
+                },
+                ScrubFinding {
+                    block: BlockNumber(4),
+                    kind: CorruptionKind::ChecksumMismatch,
+                    severity: Severity::Critical,
+                    detail: "critical finding".into(),
+                },
+            ],
+            blocks_scanned: 100,
+            blocks_corrupt: 4,
+            blocks_io_error: 0,
+        };
+        assert_eq!(count_blocks_at_severity_or_higher(&report, Severity::Info), 4);
+        assert_eq!(count_blocks_at_severity_or_higher(&report, Severity::Warning), 3);
+        assert_eq!(count_blocks_at_severity_or_higher(&report, Severity::Error), 2);
+        assert_eq!(count_blocks_at_severity_or_higher(&report, Severity::Critical), 1);
     }
 
     // ── select_ext4_repair_groups: fresh-only path ───────────────────────
