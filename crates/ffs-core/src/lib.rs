@@ -13,8 +13,9 @@ pub use degradation::{
 };
 pub use vfs::{
     BtrfsTreeSearchKey, DirEntry, FIEMAP_EXTENT_LAST, FIEMAP_EXTENT_UNWRITTEN, FiemapExtent,
-    FileType, FsOps, FsStat, FsxattrInfo, InodeAttr, QuotaEntry, QuotaInfo, QuotaType,
-    ReleaseRequest, RequestOp, RequestScope, SeekWhence, SetAttrRequest, XattrSetMode, xflags,
+    FileCloneRange, FileType, FsOps, FsStat, FsxattrInfo, InodeAttr, QuotaEntry, QuotaInfo,
+    QuotaType, ReleaseRequest, RequestOp, RequestScope, SeekWhence, SetAttrRequest, XattrSetMode,
+    xflags,
 };
 // Re-export repair lifecycle for convenient wiring.
 pub use ffs_block::RepairFlushLifecycle;
@@ -19882,6 +19883,56 @@ impl FsOps for OpenFs {
         }
     }
 
+    fn btrfs_balance_start(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _args: &[u8],
+    ) -> ffs_error::Result<Vec<u8>> {
+        match &self.flavor {
+            FsFlavor::Ext4(_) => Err(FfsError::UnsupportedFeature(
+                "BTRFS_IOC_BALANCE_V2 is not supported on ext4 filesystems".to_owned(),
+            )),
+            FsFlavor::Btrfs(_) => {
+                // Balance requires data and metadata block relocation
+                Err(FfsError::ReadOnly)
+            }
+        }
+    }
+
+    fn btrfs_balance_ctl(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _cmd: i32,
+    ) -> ffs_error::Result<()> {
+        match &self.flavor {
+            FsFlavor::Ext4(_) => Err(FfsError::UnsupportedFeature(
+                "BTRFS_IOC_BALANCE_CTL is not supported on ext4 filesystems".to_owned(),
+            )),
+            FsFlavor::Btrfs(_) => {
+                // Balance control requires an active balance operation
+                Err(FfsError::ReadOnly)
+            }
+        }
+    }
+
+    fn btrfs_balance_progress(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+    ) -> ffs_error::Result<Vec<u8>> {
+        match &self.flavor {
+            FsFlavor::Ext4(_) => Err(FfsError::UnsupportedFeature(
+                "BTRFS_IOC_BALANCE_PROGRESS is not supported on ext4 filesystems".to_owned(),
+            )),
+            FsFlavor::Btrfs(_) => {
+                // No balance operation in progress on read-only mount
+                Err(FfsError::Io(std::io::Error::from_raw_os_error(libc::ENOTCONN)))
+            }
+        }
+    }
+
     fn clone_file(
         &self,
         _cx: &Cx,
@@ -19908,10 +19959,7 @@ impl FsOps for OpenFs {
         _cx: &Cx,
         _scope: &mut RequestScope,
         _dest_fh: u64,
-        _src_fd: i64,
-        _src_offset: u64,
-        _src_length: u64,
-        _dest_offset: u64,
+        _range: FileCloneRange,
     ) -> ffs_error::Result<()> {
         match &self.flavor {
             FsFlavor::Ext4(_) => {

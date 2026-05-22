@@ -30,6 +30,15 @@ fn ranges_overlap(a_start: u64, a_len: u64, b_start: u64, b_len: u64) -> bool {
     a_start < b_end && b_start < a_end
 }
 
+/// Byte range parameters for Linux `FICLONERANGE`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileCloneRange {
+    pub src_fd: i64,
+    pub src_offset: u64,
+    pub src_length: u64,
+    pub dest_offset: u64,
+}
+
 /// Filesystem-agnostic file type for VFS operations.
 ///
 /// This is the semantics-level file type used by [`FsOps`] methods. It unifies
@@ -1579,6 +1588,50 @@ pub trait FsOps: Send + Sync {
         ))
     }
 
+    /// Start a balance operation for `BTRFS_IOC_BALANCE_V2`.
+    ///
+    /// Takes raw `btrfs_ioctl_balance_args` struct bytes.
+    /// Returns `FfsError::ReadOnly` for read-only mounts since balance
+    /// requires metadata and data relocation.
+    fn btrfs_balance_start(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _args: &[u8],
+    ) -> ffs_error::Result<Vec<u8>> {
+        Err(FfsError::UnsupportedFeature(
+            "btrfs_balance_start is not supported by this backend".to_owned(),
+        ))
+    }
+
+    /// Control a running balance operation for `BTRFS_IOC_BALANCE_CTL`.
+    ///
+    /// `cmd` is the control command (e.g., pause/cancel).
+    /// Returns `FfsError::ReadOnly` for read-only mounts.
+    fn btrfs_balance_ctl(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _cmd: i32,
+    ) -> ffs_error::Result<()> {
+        Err(FfsError::UnsupportedFeature(
+            "btrfs_balance_ctl is not supported by this backend".to_owned(),
+        ))
+    }
+
+    /// Query balance progress for `BTRFS_IOC_BALANCE_PROGRESS`.
+    ///
+    /// Returns `btrfs_ioctl_balance_args` struct with current progress.
+    fn btrfs_balance_progress(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+    ) -> ffs_error::Result<Vec<u8>> {
+        Err(FfsError::UnsupportedFeature(
+            "btrfs_balance_progress is not supported by this backend".to_owned(),
+        ))
+    }
+
     /// Clone (reflink) entire file for `FICLONE`.
     ///
     /// Creates a CoW copy where dest file shares blocks with source.
@@ -1604,10 +1657,7 @@ pub trait FsOps: Send + Sync {
         _cx: &Cx,
         _scope: &mut RequestScope,
         _dest_fh: u64,
-        _src_fd: i64,
-        _src_offset: u64,
-        _src_length: u64,
-        _dest_offset: u64,
+        _range: FileCloneRange,
     ) -> ffs_error::Result<()> {
         Err(FfsError::UnsupportedFeature(
             "clone_file_range (FICLONERANGE) is not supported by this backend".to_owned(),

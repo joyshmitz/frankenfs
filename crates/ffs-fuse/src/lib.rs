@@ -12,8 +12,9 @@ pub mod per_core;
 use asupersync::Cx;
 use ffs_core::{
     BackpressureDecision, BackpressureGate, BtrfsTreeSearchKey, DirEntry as FfsDirEntry,
-    FIEMAP_EXTENT_UNWRITTEN, FiemapExtent, FileType as FfsFileType, FsOps, FsStat, FsxattrInfo,
-    InodeAttr, ReleaseRequest, RequestOp, RequestScope, SeekWhence, SetAttrRequest, XattrSetMode,
+    FIEMAP_EXTENT_UNWRITTEN, FiemapExtent, FileCloneRange, FileType as FfsFileType, FsOps, FsStat,
+    FsxattrInfo, InodeAttr, ReleaseRequest, RequestOp, RequestScope, SeekWhence, SetAttrRequest,
+    XattrSetMode,
 };
 use ffs_error::FfsError;
 use ffs_types::{EXT4_EXTENTS_FL, InodeNumber};
@@ -254,6 +255,16 @@ const FICLONE: u32 = 0x4004_9409;
 /// Clone a range of blocks between files.
 const FICLONERANGE: u32 = 0x4020_940D;
 const FILE_CLONE_RANGE_SIZE: u32 = 32;
+/// `BTRFS_IOC_BALANCE_V2` = `_IOWR(0x94, 32, struct btrfs_ioctl_balance_args)`.
+/// Start balance operation with filters.
+const BTRFS_IOC_BALANCE_V2: u32 = 0xC400_9420;
+/// `BTRFS_IOC_BALANCE_CTL` = `_IOW(0x94, 33, int)`.
+/// Control balance: pause (1), cancel (2), resume (3).
+const BTRFS_IOC_BALANCE_CTL: u32 = 0x4004_9421;
+/// `BTRFS_IOC_BALANCE_PROGRESS` = `_IOR(0x94, 34, struct btrfs_ioctl_balance_args)`.
+/// Query balance progress.
+const BTRFS_IOC_BALANCE_PROGRESS: u32 = 0x8400_9422;
+const BTRFS_BALANCE_ARGS_SIZE: u32 = 1024;
 const FSCRYPT_POLICY_V1_SIZE: usize = 12;
 #[cfg(test)]
 const FSCRYPT_POLICY_V2_VERSION: u8 = 2;
@@ -3832,7 +3843,7 @@ impl FrankenFuse {
                 }
                 let cx = Self::cx_for_request();
                 match self.with_request_scope(&cx, RequestOp::IoctlRead, |cx, scope| {
-                    self.inner.ops.btrfs_snap_create(cx, scope, &in_data)
+                    self.inner.ops.btrfs_snap_create(cx, scope, in_data)
                 }) {
                     Ok(()) => IoctlResult::Data(Vec::new()),
                     Err(error) => IoctlResult::Error(error.to_errno()),
@@ -3845,7 +3856,7 @@ impl FrankenFuse {
                 }
                 let cx = Self::cx_for_request();
                 match self.with_request_scope(&cx, RequestOp::IoctlRead, |cx, scope| {
-                    self.inner.ops.btrfs_snap_destroy(cx, scope, &in_data)
+                    self.inner.ops.btrfs_snap_destroy(cx, scope, in_data)
                 }) {
                     Ok(()) => IoctlResult::Data(Vec::new()),
                     Err(error) => IoctlResult::Error(error.to_errno()),
@@ -3858,7 +3869,7 @@ impl FrankenFuse {
                 }
                 let cx = Self::cx_for_request();
                 match self.with_request_scope(&cx, RequestOp::IoctlRead, |cx, scope| {
-                    self.inner.ops.btrfs_subvol_create(cx, scope, &in_data)
+                    self.inner.ops.btrfs_subvol_create(cx, scope, in_data)
                 }) {
                     Ok(()) => IoctlResult::Data(Vec::new()),
                     Err(error) => IoctlResult::Error(error.to_errno()),
@@ -3887,19 +3898,53 @@ impl FrankenFuse {
                 let src_offset = u64::from_le_bytes(in_data[8..16].try_into().unwrap_or([0; 8]));
                 let src_length = u64::from_le_bytes(in_data[16..24].try_into().unwrap_or([0; 8]));
                 let dest_offset = u64::from_le_bytes(in_data[24..32].try_into().unwrap_or([0; 8]));
+                let range = FileCloneRange {
+                    src_fd,
+                    src_offset,
+                    src_length,
+                    dest_offset,
+                };
                 let cx = Self::cx_for_request();
                 match self.with_request_scope(&cx, RequestOp::IoctlRead, |cx, scope| {
-                    self.inner.ops.clone_file_range(
-                        cx,
-                        scope,
-                        fh,
-                        src_fd,
-                        src_offset,
-                        src_length,
-                        dest_offset,
-                    )
+                    self.inner.ops.clone_file_range(cx, scope, fh, range)
                 }) {
                     Ok(()) => IoctlResult::Data(Vec::new()),
+                    Err(error) => IoctlResult::Error(error.to_errno()),
+                }
+            }
+            BTRFS_IOC_BALANCE_V2 => {
+                // Input: 1024-byte balance_args with filters
+                if in_data.len() < BTRFS_BALANCE_ARGS_SIZE as usize {
+                    return IoctlResult::Error(libc::EINVAL);
+                }
+                let cx = Self::cx_for_request();
+                match self.with_request_scope(&cx, RequestOp::IoctlRead, |cx, scope| {
+                    self.inner.ops.btrfs_balance_start(cx, scope, &in_data)
+                }) {
+                    Ok(data) => IoctlResult::Data(data),
+                    Err(error) => IoctlResult::Error(error.to_errno()),
+                }
+            }
+            BTRFS_IOC_BALANCE_CTL => {
+                // Input: 4-byte int (1=pause, 2=cancel, 3=resume)
+                if in_data.len() < 4 {
+                    return IoctlResult::Error(libc::EINVAL);
+                }
+                let cmd = i32::from_le_bytes(in_data[0..4].try_into().unwrap_or([0; 4]));
+                let cx = Self::cx_for_request();
+                match self.with_request_scope(&cx, RequestOp::IoctlRead, |cx, scope| {
+                    self.inner.ops.btrfs_balance_ctl(cx, scope, cmd)
+                }) {
+                    Ok(()) => IoctlResult::Data(Vec::new()),
+                    Err(error) => IoctlResult::Error(error.to_errno()),
+                }
+            }
+            BTRFS_IOC_BALANCE_PROGRESS => {
+                let cx = Self::cx_for_request();
+                match self.with_request_scope(&cx, RequestOp::IoctlRead, |cx, scope| {
+                    self.inner.ops.btrfs_balance_progress(cx, scope)
+                }) {
+                    Ok(data) => IoctlResult::Data(data),
                     Err(error) => IoctlResult::Error(error.to_errno()),
                 }
             }
