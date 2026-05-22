@@ -7329,6 +7329,60 @@ mod tests {
     }
 
     #[test]
+    fn parse_btrfs_tree_search_key_valid() {
+        // Build a valid 104-byte btrfs tree search key
+        let mut data = vec![0u8; BTRFS_TREE_SEARCH_KEY_SIZE];
+        // tree_id at offset 0 (u64)
+        data[0..8].copy_from_slice(&5u64.to_ne_bytes()); // FS_TREE
+        // min_objectid at offset 8 (u64)
+        data[8..16].copy_from_slice(&256u64.to_ne_bytes());
+        // max_objectid at offset 16 (u64)
+        data[16..24].copy_from_slice(&u64::MAX.to_ne_bytes());
+        // min_offset at offset 24 (u64)
+        data[24..32].copy_from_slice(&0u64.to_ne_bytes());
+        // max_offset at offset 32 (u64)
+        data[32..40].copy_from_slice(&u64::MAX.to_ne_bytes());
+        // min_transid at offset 40 (u64)
+        data[40..48].copy_from_slice(&0u64.to_ne_bytes());
+        // max_transid at offset 48 (u64)
+        data[48..56].copy_from_slice(&u64::MAX.to_ne_bytes());
+        // min_type at offset 56 (u32)
+        data[56..60].copy_from_slice(&1u32.to_ne_bytes()); // INODE_ITEM
+        // max_type at offset 60 (u32)
+        data[60..64].copy_from_slice(&255u32.to_ne_bytes());
+        // nr_items at offset 64 (u32)
+        data[64..68].copy_from_slice(&100u32.to_ne_bytes());
+
+        let key = FrankenFuse::parse_btrfs_tree_search_key(&data).unwrap();
+        assert_eq!(key.tree_id, 5);
+        assert_eq!(key.min_objectid, 256);
+        assert_eq!(key.max_objectid, u64::MAX);
+        assert_eq!(key.min_offset, 0);
+        assert_eq!(key.max_offset, u64::MAX);
+        assert_eq!(key.min_transid, 0);
+        assert_eq!(key.max_transid, u64::MAX);
+        assert_eq!(key.min_type, 1);
+        assert_eq!(key.max_type, 255);
+        assert_eq!(key.nr_items, 100);
+    }
+
+    #[test]
+    fn parse_btrfs_tree_search_key_too_short() {
+        let data = vec![0u8; BTRFS_TREE_SEARCH_KEY_SIZE - 1];
+        let err = FrankenFuse::parse_btrfs_tree_search_key(&data).unwrap_err();
+        assert_eq!(err, libc::EINVAL);
+    }
+
+    #[test]
+    fn parse_btrfs_tree_search_key_zeros() {
+        let data = vec![0u8; BTRFS_TREE_SEARCH_KEY_SIZE];
+        let key = FrankenFuse::parse_btrfs_tree_search_key(&data).unwrap();
+        assert_eq!(key.tree_id, 0);
+        assert_eq!(key.min_objectid, 0);
+        assert_eq!(key.nr_items, 0);
+    }
+
+    #[test]
     fn inode_attr_to_file_attr_conversion() {
         let iattr = InodeAttr {
             ino: InodeNumber(42),
