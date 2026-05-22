@@ -1828,6 +1828,34 @@ pub trait FsOps: Send + Sync {
         ))
     }
 
+    /// Resize filesystem for `BTRFS_IOC_RESIZE`.
+    ///
+    /// Takes vol_args with device:size string.
+    fn btrfs_resize(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _args: &[u8],
+    ) -> ffs_error::Result<()> {
+        Err(FfsError::UnsupportedFeature(
+            "btrfs_resize is not supported by this backend".to_owned(),
+        ))
+    }
+
+    /// Device replacement control for `BTRFS_IOC_DEV_REPLACE`.
+    ///
+    /// Start/cancel/query device replacement status.
+    fn btrfs_dev_replace(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _args: &[u8],
+    ) -> ffs_error::Result<Vec<u8>> {
+        Err(FfsError::UnsupportedFeature(
+            "btrfs_dev_replace is not supported by this backend".to_owned(),
+        ))
+    }
+
     /// Create a subvolume for `BTRFS_IOC_SUBVOL_CREATE_V2`.
     ///
     /// Takes raw vol_args_v2 struct bytes containing flags and name.

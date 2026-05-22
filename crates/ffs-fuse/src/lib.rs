@@ -315,6 +315,13 @@ const BTRFS_IOC_ENCODED_READ: u32 = 0x8040_9440;
 /// Write pre-compressed data directly.
 const BTRFS_IOC_ENCODED_WRITE: u32 = 0x4040_9441;
 const BTRFS_ENCODED_IO_ARGS_SIZE: u32 = 64;
+/// `BTRFS_IOC_RESIZE` = `_IOW(0x94, 3, struct btrfs_ioctl_vol_args)`.
+/// Resize filesystem (grow or shrink).
+const BTRFS_IOC_RESIZE: u32 = 0x5000_9403;
+/// `BTRFS_IOC_DEV_REPLACE` = `_IOWR(0x94, 53, struct btrfs_ioctl_dev_replace_args)`.
+/// Start/cancel/query device replacement.
+const BTRFS_IOC_DEV_REPLACE: u32 = 0xCA28_9435;
+const BTRFS_DEV_REPLACE_ARGS_SIZE: u32 = 2600;
 const BTRFS_VOL_ARGS_SIZE: u32 = 4096;
 /// `FICLONE` = `_IOW(0x94, 9, int)`.
 /// Clone (reflink) entire file from source fd.
@@ -4214,6 +4221,35 @@ impl FrankenFuse {
                         out[0..8].copy_from_slice(&(len as u64).to_le_bytes());
                         IoctlResult::Data(out)
                     }
+                    Err(error) => IoctlResult::Error(error.to_errno()),
+                }
+            }
+            BTRFS_IOC_RESIZE => {
+                // Resize requires write access
+                if self.inner.read_only {
+                    return IoctlResult::Error(libc::EROFS);
+                }
+                if in_data.len() < BTRFS_VOL_ARGS_SIZE as usize {
+                    return IoctlResult::Error(libc::EINVAL);
+                }
+                let cx = Self::cx_for_request();
+                match self.with_request_scope(&cx, RequestOp::IoctlWrite, |cx, scope| {
+                    self.inner.ops.btrfs_resize(cx, scope, &in_data)
+                }) {
+                    Ok(()) => IoctlResult::Data(Vec::new()),
+                    Err(error) => IoctlResult::Error(error.to_errno()),
+                }
+            }
+            BTRFS_IOC_DEV_REPLACE => {
+                // Input: 2600-byte dev_replace_args with cmd + status
+                if in_data.len() < BTRFS_DEV_REPLACE_ARGS_SIZE as usize {
+                    return IoctlResult::Error(libc::EINVAL);
+                }
+                let cx = Self::cx_for_request();
+                match self.with_request_scope(&cx, RequestOp::IoctlRead, |cx, scope| {
+                    self.inner.ops.btrfs_dev_replace(cx, scope, &in_data)
+                }) {
+                    Ok(data) => IoctlResult::Data(data),
                     Err(error) => IoctlResult::Error(error.to_errno()),
                 }
             }
