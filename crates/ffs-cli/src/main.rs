@@ -923,9 +923,9 @@ enum DumpCommand {
         #[arg(long)]
         hex: bool,
     },
-    /// Dump one ext4 group descriptor.
+    /// Dump one ext4 group descriptor or btrfs chunk.
     Group {
-        /// Block group index.
+        /// Block group index (ext4) or chunk index (btrfs).
         group: u32,
         /// Path to the filesystem image.
         image: PathBuf,
@@ -962,7 +962,7 @@ enum DumpCommand {
         #[arg(long)]
         hex: bool,
     },
-    /// Dump one ext4 directory inode's entries (and htree metadata if indexed).
+    /// Dump one ext4 or btrfs directory inode's entries (and htree metadata if ext4 indexed).
     Dir {
         /// Inode number.
         inode: u64,
