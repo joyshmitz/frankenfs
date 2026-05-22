@@ -7499,7 +7499,7 @@ mod tests {
         RepairCommandOptions, RepairFlags, WRITEBACK_CACHE_KILL_SWITCH_ENV,
         btrfs_chunk_type_flag_names, build_ext4_group_info, build_fsck_output, build_info_output,
         build_mount_open_options, choose_btrfs_scrub_block_size, count_blocks_at_severity_or_higher,
-        ext4_appears_clean_state, ext4_state_flag_names,
+        ext4_appears_clean_state, ext4_group_flag_names, ext4_state_flag_names,
         ext4_mount_replay_mode, format_ratio_thousandths, format_uuid,
         btrfs_checksum_type_name, log_mount_runtime_rejected,
         log_mount_runtime_selected, mount_cmd, mount_operation_id, open_filesystem_for_mount,
@@ -14903,6 +14903,63 @@ mod tests {
     #[test]
     fn ext4_state_flag_names_unknown() {
         let names = ext4_state_flag_names(0x0008);
+        assert_eq!(names, vec!["UNKNOWN(0x0008)"]);
+    }
+
+    // ── ext4_appears_clean_state: filesystem cleanliness check ───────────
+
+    #[test]
+    fn ext4_appears_clean_state_valid_only() {
+        assert!(ext4_appears_clean_state(0x0001)); // VALID_FS only
+    }
+
+    #[test]
+    fn ext4_appears_clean_state_with_error() {
+        assert!(!ext4_appears_clean_state(0x0003)); // VALID | ERROR
+    }
+
+    #[test]
+    fn ext4_appears_clean_state_with_orphan() {
+        assert!(!ext4_appears_clean_state(0x0005)); // VALID | ORPHAN
+    }
+
+    #[test]
+    fn ext4_appears_clean_state_not_valid() {
+        assert!(!ext4_appears_clean_state(0x0000)); // no VALID flag
+    }
+
+    // ── ext4_group_flag_names: block group flag display ───────────────────
+
+    #[test]
+    fn ext4_group_flag_names_inode_uninit() {
+        let names = ext4_group_flag_names(ffs_ondisk::EXT4_BG_INODE_UNINIT);
+        assert_eq!(names, vec!["INODE_UNINIT"]);
+    }
+
+    #[test]
+    fn ext4_group_flag_names_block_uninit() {
+        let names = ext4_group_flag_names(ffs_ondisk::EXT4_BG_BLOCK_UNINIT);
+        assert_eq!(names, vec!["BLOCK_UNINIT"]);
+    }
+
+    #[test]
+    fn ext4_group_flag_names_combined() {
+        let flags = ffs_ondisk::EXT4_BG_INODE_UNINIT
+            | ffs_ondisk::EXT4_BG_BLOCK_UNINIT
+            | ffs_ondisk::EXT4_BG_INODE_ZEROED;
+        let names = ext4_group_flag_names(flags);
+        assert_eq!(names, vec!["INODE_UNINIT", "BLOCK_UNINIT", "INODE_ZEROED"]);
+    }
+
+    #[test]
+    fn ext4_group_flag_names_zero() {
+        let names = ext4_group_flag_names(0);
+        assert_eq!(names, vec!["NONE"]);
+    }
+
+    #[test]
+    fn ext4_group_flag_names_unknown() {
+        let names = ext4_group_flag_names(0x0008);
         assert_eq!(names, vec!["UNKNOWN(0x0008)"]);
     }
 
