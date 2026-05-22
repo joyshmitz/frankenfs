@@ -19359,9 +19359,33 @@ impl FsOps for OpenFs {
                 }
                 Ok(())
             }
-            FsFlavor::Btrfs(_) => Err(FfsError::UnsupportedFeature(
-                "set_fs_label is not supported for btrfs".to_owned(),
-            )),
+            FsFlavor::Btrfs(_) => {
+                self.require_btrfs_rw_allowed("setfslabel")?;
+
+                const BTRFS_LABEL_MAX: usize = 256;
+                const BTRFS_LABEL_OFFSET: usize = 0x12B;
+
+                if label.len() >= BTRFS_LABEL_MAX || label.contains(&0) {
+                    return Err(FfsError::Io(std::io::Error::from_raw_os_error(
+                        libc::EINVAL,
+                    )));
+                }
+
+                let sb_region = read_btrfs_superblock_region(cx, self.dev.as_ref())?;
+                let mut sb_data = sb_region.to_vec();
+
+                sb_data[BTRFS_LABEL_OFFSET..BTRFS_LABEL_OFFSET + BTRFS_LABEL_MAX].fill(0);
+                sb_data[BTRFS_LABEL_OFFSET..BTRFS_LABEL_OFFSET + label.len()]
+                    .copy_from_slice(label);
+
+                let csum = ffs_types::crc32c(&sb_data[0x20..]);
+                sb_data[0..4].copy_from_slice(&csum.to_le_bytes());
+
+                let sb_offset = ByteOffset(u64::try_from(BTRFS_SUPER_INFO_OFFSET).unwrap());
+                self.dev.write_all_at(cx, sb_offset, &sb_data)?;
+
+                Ok(())
+            }
         }
     }
 
