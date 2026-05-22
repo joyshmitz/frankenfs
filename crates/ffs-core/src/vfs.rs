@@ -1336,6 +1336,14 @@ pub trait FsOps: Send + Sync {
         ))
     }
 
+    /// Force filesystem sync/commit (`BTRFS_IOC_SYNC`, `syncfs`).
+    ///
+    /// For btrfs: commits current transaction if in RW mode.
+    /// For ext4: triggers journal checkpoint.
+    fn sync_fs(&self, _cx: &Cx, _scope: &mut RequestScope) -> ffs_error::Result<()> {
+        Ok(())
+    }
+
     /// Set filesystem-specific inode flags (ext4 `EXT4_IOC_SETFLAGS`).
     ///
     /// Updates the raw `i_flags` field. The implementation should validate

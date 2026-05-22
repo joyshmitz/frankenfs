@@ -192,6 +192,9 @@ const BTRFS_IOC_SUBVOL_GETFLAGS: u32 = 0x8008_9419;
 /// `BTRFS_IOC_SUBVOL_SETFLAGS` = `_IOW(0x94, 26, __u64)` on x86_64.
 /// Sets subvolume flags (BTRFS_SUBVOL_RDONLY etc.) from a u64.
 const BTRFS_IOC_SUBVOL_SETFLAGS: u32 = 0x4008_941A;
+/// `BTRFS_IOC_SYNC` = `_IO(0x94, 8)` on x86_64.
+/// Forces filesystem sync/commit.
+const BTRFS_IOC_SYNC: u32 = 0x9408;
 const FSCRYPT_POLICY_V1_SIZE: usize = 12;
 #[cfg(test)]
 const FSCRYPT_POLICY_V2_VERSION: u8 = 2;
@@ -3563,6 +3566,15 @@ impl FrankenFuse {
                     self.inner
                         .ops
                         .set_subvol_flags(cx, scope, InodeNumber(ino), flags)
+                }) {
+                    Ok(()) => IoctlResult::Data(Vec::new()),
+                    Err(error) => IoctlResult::Error(error.to_errno()),
+                }
+            }
+            BTRFS_IOC_SYNC => {
+                let cx = Self::cx_for_request();
+                match self.with_request_scope(&cx, RequestOp::Fsync, |cx, scope| {
+                    self.inner.ops.sync_fs(cx, scope)
                 }) {
                     Ok(()) => IoctlResult::Data(Vec::new()),
                     Err(error) => IoctlResult::Error(error.to_errno()),
