@@ -38,8 +38,9 @@ use ffs_btrfs::{
     BtrfsBTree, BtrfsBlockGroupItem, BtrfsCowNode, BtrfsDirItem, BtrfsExtentAllocator,
     BtrfsExtentData, BtrfsInodeItem, BtrfsKey, BtrfsLeafEntry, BtrfsMutationError,
     BtrfsNodeSerializeParams, BtrfsTreeItem, InMemoryCowBtrfsTree, BTRFS_USER_SETTABLE_FSFLAGS,
-    btrfs_inode_flags_to_fsflags, btrfs_inode_flags_to_xflags, enumerate_snapshots,
-    enumerate_subvolumes, fsflags_to_btrfs_inode_flags, map_logical_to_physical, parse_dir_items,
+    BTRFS_USER_SETTABLE_XFLAGS, btrfs_inode_flags_to_fsflags, btrfs_inode_flags_to_xflags,
+    enumerate_snapshots, enumerate_subvolumes, fsflags_to_btrfs_inode_flags,
+    map_logical_to_physical, parse_dir_items, xflags_to_btrfs_inode_flags,
     parse_extent_data, parse_inode_item, parse_root_item, parse_xattr_items, walk_chunk_tree,
     walk_tree,
 };
@@ -19001,9 +19002,53 @@ impl FsOps for OpenFs {
                 }
                 Ok(())
             }
-            FsFlavor::Btrfs(_) => Err(FfsError::UnsupportedFeature(
-                "set_inode_fsxattr is not supported for btrfs".to_owned(),
-            )),
+            FsFlavor::Btrfs(_) => {
+                self.require_btrfs_rw_allowed("setfsxattr")?;
+
+                if fsx.extsize != 0 || fsx.cowextsize != 0 {
+                    return Err(FfsError::Io(std::io::Error::from_raw_os_error(
+                        libc::EINVAL,
+                    )));
+                }
+                if fsx.projid != 0 {
+                    return Err(FfsError::Io(std::io::Error::from_raw_os_error(
+                        libc::EOPNOTSUPP,
+                    )));
+                }
+
+                let unsupported = fsx.xflags & !BTRFS_USER_SETTABLE_XFLAGS;
+                if unsupported != 0 {
+                    return Err(FfsError::Io(std::io::Error::from_raw_os_error(
+                        libc::EOPNOTSUPP,
+                    )));
+                }
+
+                let alloc_mutex = self.require_btrfs_alloc_state()?;
+                let canonical = self.btrfs_canonical_inode(ino)?;
+
+                let mut alloc = alloc_mutex.lock();
+                let mut inode = self.btrfs_read_inode_from_tree(&alloc, canonical)?;
+
+                let requested_btrfs = xflags_to_btrfs_inode_flags(fsx.xflags);
+                let user_settable_btrfs = xflags_to_btrfs_inode_flags(BTRFS_USER_SETTABLE_XFLAGS);
+                inode.flags = (inode.flags & !user_settable_btrfs) | (requested_btrfs & user_settable_btrfs);
+
+                let (secs, nanos) = Self::btrfs_now_timestamp();
+                inode.ctime_sec = secs;
+                inode.ctime_nsec = nanos;
+
+                let inode_key = BtrfsKey {
+                    objectid: canonical,
+                    item_type: BTRFS_ITEM_INODE_ITEM,
+                    offset: 0,
+                };
+                alloc
+                    .fs_tree
+                    .update(&inode_key, &inode.to_bytes())
+                    .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+
+                Ok(())
+            }
         }
     }
 
