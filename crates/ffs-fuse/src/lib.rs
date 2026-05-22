@@ -5228,6 +5228,74 @@ enum IoctlResult {
     Error(c_int),
 }
 
+/// Check POSIX access permissions for a file.
+///
+/// Returns `true` if the user has all requested permissions.
+/// Root (uid=0) always has access.
+///
+/// # Arguments
+/// * `perm` - File permission bits (e.g., 0o755)
+/// * `file_uid` - Owner UID of the file
+/// * `file_gid` - Owner GID of the file
+/// * `req_uid` - UID of the requesting user
+/// * `req_gid` - Primary GID of the requesting user
+/// * `mask` - Access mask (R_OK | W_OK | X_OK)
+#[must_use]
+fn check_access_permission(
+    perm: u16,
+    file_uid: u32,
+    file_gid: u32,
+    req_uid: u32,
+    req_gid: u32,
+    mask: i32,
+) -> bool {
+    // Root always has access
+    if req_uid == 0 {
+        return true;
+    }
+
+    let perm = u32::from(perm);
+    let is_owner = req_uid == file_uid;
+    let is_group = req_gid == file_gid;
+
+    let mut allowed = true;
+
+    if mask & libc::R_OK != 0 {
+        let can_read = if is_owner {
+            perm & 0o400 != 0
+        } else if is_group {
+            perm & 0o040 != 0
+        } else {
+            perm & 0o004 != 0
+        };
+        allowed = allowed && can_read;
+    }
+
+    if mask & libc::W_OK != 0 {
+        let can_write = if is_owner {
+            perm & 0o200 != 0
+        } else if is_group {
+            perm & 0o020 != 0
+        } else {
+            perm & 0o002 != 0
+        };
+        allowed = allowed && can_write;
+    }
+
+    if mask & libc::X_OK != 0 {
+        let can_exec = if is_owner {
+            perm & 0o100 != 0
+        } else if is_group {
+            perm & 0o010 != 0
+        } else {
+            perm & 0o001 != 0
+        };
+        allowed = allowed && can_exec;
+    }
+
+    allowed
+}
+
 impl Filesystem for FrankenFuse {
     fn init(&mut self, _req: &Request<'_>, config: &mut KernelConfig) -> Result<(), c_int> {
         let splice_caps = fuse_consts::FUSE_SPLICE_READ
@@ -5304,46 +5372,14 @@ impl Filesystem for FrankenFuse {
             self.inner.ops.getattr(cx, scope, InodeNumber(ino))
         }) {
             Ok(attr) => {
-                // Check permissions against the requesting user
-                let perm = u32::from(attr.perm);
-                let uid = req.uid();
-                let gid = req.gid();
-                let is_owner = uid == attr.uid;
-                let is_group = gid == attr.gid;
-
-                let mut allowed = true;
-                if mask & libc::R_OK != 0 {
-                    let can_read = if is_owner {
-                        perm & 0o400 != 0
-                    } else if is_group {
-                        perm & 0o040 != 0
-                    } else {
-                        perm & 0o004 != 0
-                    };
-                    allowed = allowed && can_read;
-                }
-                if mask & libc::W_OK != 0 {
-                    let can_write = if is_owner {
-                        perm & 0o200 != 0
-                    } else if is_group {
-                        perm & 0o020 != 0
-                    } else {
-                        perm & 0o002 != 0
-                    };
-                    allowed = allowed && can_write;
-                }
-                if mask & libc::X_OK != 0 {
-                    let can_exec = if is_owner {
-                        perm & 0o100 != 0
-                    } else if is_group {
-                        perm & 0o010 != 0
-                    } else {
-                        perm & 0o001 != 0
-                    };
-                    allowed = allowed && can_exec;
-                }
-
-                if allowed || uid == 0 {
+                if check_access_permission(
+                    attr.perm,
+                    attr.uid,
+                    attr.gid,
+                    req.uid(),
+                    req.gid(),
+                    mask,
+                ) {
                     reply.ok();
                 } else {
                     reply.error(libc::EACCES);
@@ -6975,6 +7011,124 @@ mod tests {
         for (ffs_ft, expected_fuser_ft) in &cases {
             assert_eq!(to_fuser_file_type(*ffs_ft), *expected_fuser_ft);
         }
+    }
+
+    // ── Access permission tests ─────────────────────────────────────────────
+
+    #[test]
+    fn access_permission_root_always_allowed() {
+        // Root (uid=0) bypasses all permission checks
+        assert!(check_access_permission(0o000, 1000, 1000, 0, 0, libc::R_OK));
+        assert!(check_access_permission(0o000, 1000, 1000, 0, 0, libc::W_OK));
+        assert!(check_access_permission(0o000, 1000, 1000, 0, 0, libc::X_OK));
+        assert!(check_access_permission(
+            0o000,
+            1000,
+            1000,
+            0,
+            0,
+            libc::R_OK | libc::W_OK | libc::X_OK
+        ));
+    }
+
+    #[test]
+    fn access_permission_owner_read() {
+        // Owner can read with 0o400
+        assert!(check_access_permission(0o400, 1000, 1000, 1000, 2000, libc::R_OK));
+        // Owner cannot read with 0o300
+        assert!(!check_access_permission(0o300, 1000, 1000, 1000, 2000, libc::R_OK));
+    }
+
+    #[test]
+    fn access_permission_owner_write() {
+        // Owner can write with 0o200
+        assert!(check_access_permission(0o200, 1000, 1000, 1000, 2000, libc::W_OK));
+        // Owner cannot write with 0o500
+        assert!(!check_access_permission(0o500, 1000, 1000, 1000, 2000, libc::W_OK));
+    }
+
+    #[test]
+    fn access_permission_owner_execute() {
+        // Owner can execute with 0o100
+        assert!(check_access_permission(0o100, 1000, 1000, 1000, 2000, libc::X_OK));
+        // Owner cannot execute with 0o600
+        assert!(!check_access_permission(0o600, 1000, 1000, 1000, 2000, libc::X_OK));
+    }
+
+    #[test]
+    fn access_permission_group_read() {
+        // Group member can read with 0o040
+        assert!(check_access_permission(0o040, 1000, 2000, 3000, 2000, libc::R_OK));
+        // Group member cannot read with 0o030
+        assert!(!check_access_permission(0o030, 1000, 2000, 3000, 2000, libc::R_OK));
+    }
+
+    #[test]
+    fn access_permission_group_write() {
+        // Group member can write with 0o020
+        assert!(check_access_permission(0o020, 1000, 2000, 3000, 2000, libc::W_OK));
+        // Group member cannot write with 0o050
+        assert!(!check_access_permission(0o050, 1000, 2000, 3000, 2000, libc::W_OK));
+    }
+
+    #[test]
+    fn access_permission_group_execute() {
+        // Group member can execute with 0o010
+        assert!(check_access_permission(0o010, 1000, 2000, 3000, 2000, libc::X_OK));
+        // Group member cannot execute with 0o060
+        assert!(!check_access_permission(0o060, 1000, 2000, 3000, 2000, libc::X_OK));
+    }
+
+    #[test]
+    fn access_permission_other_read() {
+        // Other can read with 0o004
+        assert!(check_access_permission(0o004, 1000, 2000, 3000, 4000, libc::R_OK));
+        // Other cannot read with 0o003
+        assert!(!check_access_permission(0o003, 1000, 2000, 3000, 4000, libc::R_OK));
+    }
+
+    #[test]
+    fn access_permission_other_write() {
+        // Other can write with 0o002
+        assert!(check_access_permission(0o002, 1000, 2000, 3000, 4000, libc::W_OK));
+        // Other cannot write with 0o005
+        assert!(!check_access_permission(0o005, 1000, 2000, 3000, 4000, libc::W_OK));
+    }
+
+    #[test]
+    fn access_permission_other_execute() {
+        // Other can execute with 0o001
+        assert!(check_access_permission(0o001, 1000, 2000, 3000, 4000, libc::X_OK));
+        // Other cannot execute with 0o006
+        assert!(!check_access_permission(0o006, 1000, 2000, 3000, 4000, libc::X_OK));
+    }
+
+    #[test]
+    fn access_permission_combined_mask() {
+        // Owner needs all of rwx for mask R_OK|W_OK|X_OK
+        assert!(check_access_permission(
+            0o700,
+            1000,
+            1000,
+            1000,
+            2000,
+            libc::R_OK | libc::W_OK | libc::X_OK
+        ));
+        // Missing execute permission fails the combined check
+        assert!(!check_access_permission(
+            0o600,
+            1000,
+            1000,
+            1000,
+            2000,
+            libc::R_OK | libc::W_OK | libc::X_OK
+        ));
+    }
+
+    #[test]
+    fn access_permission_f_ok_always_succeeds() {
+        // F_OK (existence check, mask=0) always succeeds for non-root
+        assert!(check_access_permission(0o000, 1000, 1000, 2000, 2000, 0));
     }
 
     #[test]
