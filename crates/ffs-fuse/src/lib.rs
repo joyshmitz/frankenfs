@@ -7131,6 +7131,136 @@ mod tests {
         assert!(check_access_permission(0o000, 1000, 1000, 2000, 2000, 0));
     }
 
+    // ── Mount option parsing tests ──────────────────────────────────────────
+
+    #[test]
+    fn parse_mount_option_empty_string_returns_defaults() {
+        let opts = parse_mount_option_text("").unwrap();
+        assert!(opts.read_only); // default is read_only
+        assert!(!opts.allow_other);
+        assert!(opts.auto_unmount);
+    }
+
+    #[test]
+    fn parse_mount_option_whitespace_only_returns_defaults() {
+        let opts = parse_mount_option_text("   ").unwrap();
+        assert!(opts.read_only);
+    }
+
+    #[test]
+    fn parse_mount_option_ro_sets_read_only() {
+        let opts = parse_mount_option_text("ro").unwrap();
+        assert!(opts.read_only);
+    }
+
+    #[test]
+    fn parse_mount_option_rw_clears_read_only() {
+        let opts = parse_mount_option_text("rw").unwrap();
+        assert!(!opts.read_only);
+    }
+
+    #[test]
+    fn parse_mount_option_allow_other_flag() {
+        let opts = parse_mount_option_text("allow_other").unwrap();
+        assert!(opts.allow_other);
+    }
+
+    #[test]
+    fn parse_mount_option_allow_other_equals_true() {
+        let opts = parse_mount_option_text("allow_other=true").unwrap();
+        assert!(opts.allow_other);
+    }
+
+    #[test]
+    fn parse_mount_option_allow_other_equals_false() {
+        let opts = parse_mount_option_text("allow_other=false").unwrap();
+        assert!(!opts.allow_other);
+    }
+
+    #[test]
+    fn parse_mount_option_noallow_other() {
+        // First enable, then disable
+        let opts = parse_mount_option_text("allow_other,noallow_other").unwrap();
+        assert!(!opts.allow_other);
+    }
+
+    #[test]
+    fn parse_mount_option_worker_threads() {
+        let opts = parse_mount_option_text("worker_threads=8").unwrap();
+        assert_eq!(opts.worker_threads, 8);
+    }
+
+    #[test]
+    fn parse_mount_option_threads_alias() {
+        let opts = parse_mount_option_text("threads=4").unwrap();
+        assert_eq!(opts.worker_threads, 4);
+    }
+
+    #[test]
+    fn parse_mount_option_multiple_options() {
+        let opts = parse_mount_option_text("rw,allow_other,worker_threads=16").unwrap();
+        assert!(!opts.read_only);
+        assert!(opts.allow_other);
+        assert_eq!(opts.worker_threads, 16);
+    }
+
+    #[test]
+    fn parse_mount_option_empty_option_in_list_fails() {
+        let err = parse_mount_option_text("ro,,rw").unwrap_err();
+        assert!(matches!(err, MountOptionParseError::EmptyOption));
+    }
+
+    #[test]
+    fn parse_mount_option_unknown_option_fails() {
+        let err = parse_mount_option_text("unknown_option").unwrap_err();
+        assert!(matches!(err, MountOptionParseError::UnknownOption { .. }));
+    }
+
+    #[test]
+    fn parse_mount_option_missing_value_fails() {
+        let err = parse_mount_option_text("worker_threads").unwrap_err();
+        assert!(matches!(err, MountOptionParseError::MissingValue { .. }));
+    }
+
+    #[test]
+    fn parse_mount_option_unexpected_value_fails() {
+        let err = parse_mount_option_text("ro=true").unwrap_err();
+        assert!(matches!(err, MountOptionParseError::UnexpectedValue { .. }));
+    }
+
+    #[test]
+    fn parse_mount_option_invalid_bool_fails() {
+        let err = parse_mount_option_text("allow_other=maybe").unwrap_err();
+        assert!(matches!(err, MountOptionParseError::InvalidValue { .. }));
+    }
+
+    #[test]
+    fn parse_mount_option_invalid_number_fails() {
+        let err = parse_mount_option_text("worker_threads=abc").unwrap_err();
+        assert!(matches!(err, MountOptionParseError::InvalidValue { .. }));
+    }
+
+    #[test]
+    fn split_mount_option_key_only() {
+        let (key, value) = split_mount_option("ro").unwrap();
+        assert_eq!(key, "ro");
+        assert!(value.is_none());
+    }
+
+    #[test]
+    fn split_mount_option_key_value() {
+        let (key, value) = split_mount_option("threads=4").unwrap();
+        assert_eq!(key, "threads");
+        assert_eq!(value, Some("4"));
+    }
+
+    #[test]
+    fn split_mount_option_value_with_equals() {
+        let (key, value) = split_mount_option("fsname=my=fs").unwrap();
+        assert_eq!(key, "fsname");
+        assert_eq!(value, Some("my=fs"));
+    }
+
     #[test]
     fn inode_attr_to_file_attr_conversion() {
         let iattr = InodeAttr {
