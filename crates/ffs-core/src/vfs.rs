@@ -3401,4 +3401,49 @@ mod tests {
         assert_eq!(SeekWhence::from_raw(i32::MIN), None);
     }
 
+    #[test]
+    fn request_op_is_write_true_for_mutating_ops() {
+        use RequestOp::*;
+        let write_ops = [
+            Create, Mkdir, Unlink, Rmdir, Rename, Link, Symlink, Fallocate, Setattr, Setxattr,
+            Removexattr, Write, RepairWriteback, IoctlWrite, Fsync, Fsyncdir,
+        ];
+        for op in write_ops {
+            assert!(op.is_write(), "{op:?} should be a write op");
+        }
+    }
+
+    #[test]
+    fn request_op_is_write_false_for_read_ops() {
+        use RequestOp::*;
+        let read_ops = [
+            Getattr, Statfs, Getxattr, Lookup, Listxattr, Flush, Open, Release, Opendir, Read,
+            Readdir, Readlink, Lseek, IoctlRead,
+        ];
+        for op in read_ops {
+            assert!(!op.is_write(), "{op:?} should NOT be a write op");
+        }
+    }
+
+    #[test]
+    fn request_op_is_metadata_write_true_for_metadata_ops() {
+        use RequestOp::*;
+        let metadata_ops = [
+            Create, Mkdir, Unlink, Rmdir, Rename, Link, Symlink, Setattr, Setxattr, Removexattr,
+            IoctlWrite,
+        ];
+        for op in metadata_ops {
+            assert!(op.is_metadata_write(), "{op:?} should be a metadata write");
+        }
+    }
+
+    #[test]
+    fn request_op_is_metadata_write_false_for_data_ops() {
+        use RequestOp::*;
+        assert!(!Write.is_metadata_write(), "Write is data, not metadata");
+        assert!(!Fallocate.is_metadata_write(), "Fallocate is data, not metadata");
+        assert!(!RepairWriteback.is_metadata_write());
+        assert!(!Fsync.is_metadata_write());
+        assert!(!Fsyncdir.is_metadata_write());
+    }
 }
