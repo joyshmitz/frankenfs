@@ -30,16 +30,17 @@ use ffs_block::{
     read_ext4_superblock_region,
 };
 use ffs_btrfs::{
-    BTRFS_BLOCK_GROUP_DATA, BTRFS_FILE_EXTENT_PREALLOC, BTRFS_FILE_EXTENT_REG,
-    BTRFS_FIRST_FREE_OBJECTID, BTRFS_FS_TREE_OBJECTID, BTRFS_FT_BLKDEV, BTRFS_FT_CHRDEV,
-    BTRFS_FT_DIR, BTRFS_FT_FIFO, BTRFS_FT_REG_FILE, BTRFS_FT_SOCK, BTRFS_FT_SYMLINK,
-    BTRFS_ITEM_DIR_INDEX, BTRFS_ITEM_DIR_ITEM, BTRFS_ITEM_EXTENT_DATA, BTRFS_ITEM_INODE_ITEM,
-    BTRFS_ITEM_INODE_REF, BTRFS_ITEM_ROOT_ITEM, BTRFS_ITEM_XATTR_ITEM, BtrfsBTree,
-    BtrfsBlockGroupItem, BtrfsDirItem, BtrfsExtentAllocator, BtrfsExtentData, BtrfsInodeItem,
-    BtrfsKey, BtrfsLeafEntry, BtrfsMutationError, BtrfsTreeItem, InMemoryCowBtrfsTree,
-    enumerate_snapshots, enumerate_subvolumes, map_logical_to_physical, parse_dir_items,
-    parse_extent_data, parse_inode_item, parse_root_item, parse_xattr_items, walk_chunk_tree,
-    walk_tree,
+    BTRFS_BLOCK_GROUP_DATA, BTRFS_BLOCK_GROUP_METADATA, BTRFS_FILE_EXTENT_PREALLOC,
+    BTRFS_FILE_EXTENT_REG, BTRFS_FIRST_FREE_OBJECTID, BTRFS_FS_TREE_OBJECTID, BTRFS_FT_BLKDEV,
+    BTRFS_FT_CHRDEV, BTRFS_FT_DIR, BTRFS_FT_FIFO, BTRFS_FT_REG_FILE, BTRFS_FT_SOCK,
+    BTRFS_FT_SYMLINK, BTRFS_ITEM_DIR_INDEX, BTRFS_ITEM_DIR_ITEM, BTRFS_ITEM_EXTENT_DATA,
+    BTRFS_ITEM_INODE_ITEM, BTRFS_ITEM_INODE_REF, BTRFS_ITEM_ROOT_ITEM, BTRFS_ITEM_XATTR_ITEM,
+    BtrfsBTree, BtrfsBlockGroupItem, BtrfsCowNode, BtrfsDirItem, BtrfsExtentAllocator,
+    BtrfsExtentData, BtrfsInodeItem, BtrfsKey, BtrfsLeafEntry, BtrfsMutationError,
+    BtrfsNodeSerializeParams, BtrfsTreeItem, InMemoryCowBtrfsTree, btrfs_inode_flags_to_fsflags,
+    enumerate_snapshots,
+    enumerate_subvolumes, map_logical_to_physical, parse_dir_items, parse_extent_data,
+    parse_inode_item, parse_root_item, parse_xattr_items, walk_chunk_tree, walk_tree,
 };
 use ffs_error::FfsError;
 use ffs_journal::{
@@ -56,8 +57,9 @@ use ffs_ondisk::{
     parse_extent_tree, parse_inode_extent_tree, parse_sys_chunk_array,
 };
 use ffs_types::{
-    BlockNumber, ByteOffset, CommitSeq, EXT4_COMPRBLK_FL, EXT4_EXTENTS_FL, EXT4_SB_CHECKSUM_OFFSET,
-    EXT4_SECTOR_SIZE, GroupNumber, InodeNumber, MountMode, ParseError, Snapshot,
+    BTRFS_SUPER_INFO_OFFSET, BlockNumber, ByteOffset, CommitSeq, EXT4_COMPRBLK_FL, EXT4_EXTENTS_FL,
+    EXT4_SB_CHECKSUM_OFFSET, EXT4_SECTOR_SIZE, GroupNumber, InodeNumber, MountMode, ParseError,
+    Snapshot,
 };
 use ffs_xattr::{XattrReadAccess, XattrWriteAccess};
 use parking_lot::{Mutex, RwLock};
@@ -84,6 +86,7 @@ const FSCRYPT_POLICY_V2_VERSION: u8 = 2;
 const FSCRYPT_POLICY_V2_SIZE: usize = 24;
 const FSCRYPT_CONTEXT_V2_SIZE: usize = 40;
 const EXT4_ENCRYPTION_XATTR_NAME: &[u8] = b"c";
+const BTRFS_TREE_LOG_OBJECTID: u64 = u64::MAX - 5;
 
 /// Adler-32 checksum with a 32-bit seed, matching the e2compr convention.
 ///
@@ -586,6 +589,15 @@ enum BtrfsExtentRewriteSegment {
     Prealloc { logical_offset: u64, length: u64 },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BtrfsTreeLogWriteStats {
+    log_root: u64,
+    generation: u64,
+    items_count: usize,
+    allocated_bytes: u64,
+    metadata_allocation: bool,
+}
+
 /// Outcome of crash recovery performed at mount time.
 ///
 /// When an ext4 filesystem is mounted and the superblock `state` field
@@ -743,6 +755,12 @@ pub struct OpenFs {
     /// Protected by a Mutex since write operations need exclusive access.
     /// `None` for ext4 or when opened in read-only mode.
     btrfs_alloc_state: Option<Mutex<BtrfsAllocState>>,
+    /// Items replayed from a btrfs tree-log at mount time.
+    ///
+    /// The write path publishes a single-leaf log tree for fast `fsync`.
+    /// Read-only remounts overlay these items onto the FS tree so the fsynced
+    /// inode is visible without requiring a full transaction commit.
+    btrfs_tree_log_items: Vec<BtrfsLeafEntry>,
     /// LRU cache for extent tree lookups, avoiding repeated tree traversals
     /// for sequential reads. Invalidated on write/truncate/punch_hole.
     extent_cache: ffs_extent::ExtentCache,
@@ -2323,6 +2341,7 @@ impl OpenFs {
             dev
         };
 
+        let mut btrfs_tree_log_items = Vec::new();
         let (ext4_geometry, btrfs_context) = match &flavor {
             FsFlavor::Ext4(sb) => {
                 // Detect standalone journal device: image IS a journal, not a data FS.
@@ -2438,9 +2457,10 @@ impl OpenFs {
                             Ok(result) if result.replayed => {
                                 info!(
                                     items = result.items_count,
-                                    "btrfs tree-log detected ({} items, not applied in read-only mode)",
+                                    "btrfs tree-log detected ({} items, applying read overlay)",
                                     result.items_count
                                 );
+                                btrfs_tree_log_items = result.items;
                             }
                             Ok(_) => {}
                             Err(err) => {
@@ -2519,6 +2539,7 @@ impl OpenFs {
             flavor,
             ext4_geometry,
             btrfs_context,
+            btrfs_tree_log_items,
             ext4_journal_replay: None,
             ext4_fast_commit_replay: None,
             crash_recovery: None,
@@ -4614,12 +4635,19 @@ impl OpenFs {
             } else {
                 0
             };
+            let alloc_flags =
+                chunk.chunk_type & (BTRFS_BLOCK_GROUP_DATA | BTRFS_BLOCK_GROUP_METADATA);
+            let alloc_flags = if alloc_flags == 0 {
+                BTRFS_BLOCK_GROUP_DATA
+            } else {
+                alloc_flags
+            };
             extent_alloc.add_block_group(
                 chunk.key.offset,
                 BtrfsBlockGroupItem {
                     total_bytes: chunk.length,
                     used_bytes: synthetic_used,
-                    flags: BTRFS_BLOCK_GROUP_DATA,
+                    flags: alloc_flags,
                 },
             );
         }
@@ -5048,7 +5076,27 @@ impl OpenFs {
         subvol_id: u64,
     ) -> Result<Vec<BtrfsLeafEntry>, FfsError> {
         let root_bytenr = self.btrfs_fs_tree_root_bytenr(cx, subvol_id)?;
-        self.walk_btrfs_tree(cx, root_bytenr)
+        let mut items = self.walk_btrfs_tree(cx, root_bytenr)?;
+        self.btrfs_apply_tree_log_overlay(subvol_id, &mut items);
+        Ok(items)
+    }
+
+    fn btrfs_apply_tree_log_overlay(&self, subvol_id: u64, items: &mut Vec<BtrfsLeafEntry>) {
+        let Some(ctx) = self.btrfs_context() else {
+            return;
+        };
+        if subvol_id != ctx.subvol_objectid || self.btrfs_tree_log_items.is_empty() {
+            return;
+        }
+
+        for logged in &self.btrfs_tree_log_items {
+            if let Some(existing) = items.iter_mut().find(|item| item.key == logged.key) {
+                *existing = logged.clone();
+            } else {
+                items.push(logged.clone());
+            }
+        }
+        items.sort_by(|lhs, rhs| Self::btrfs_key_order(&lhs.key, &rhs.key));
     }
 
     /// Resolve a btrfs filesystem tree's root block by walking the ROOT_TREE.
@@ -13552,6 +13600,201 @@ impl OpenFs {
         }
     }
 
+    fn btrfs_key_order(lhs: &BtrfsKey, rhs: &BtrfsKey) -> std::cmp::Ordering {
+        lhs.objectid
+            .cmp(&rhs.objectid)
+            .then(lhs.item_type.cmp(&rhs.item_type))
+            .then(lhs.offset.cmp(&rhs.offset))
+    }
+
+    fn btrfs_tree_log_item_matches_inode(
+        key: &BtrfsKey,
+        data: &[u8],
+        canonical: u64,
+    ) -> Result<bool, FfsError> {
+        if key.objectid == canonical {
+            return Ok(true);
+        }
+        if matches!(key.item_type, BTRFS_ITEM_DIR_ITEM | BTRFS_ITEM_DIR_INDEX) {
+            let dir_items = parse_dir_items(data).map_err(|e| parse_to_ffs_error(&e))?;
+            return Ok(dir_items
+                .iter()
+                .any(|entry| entry.child_objectid == canonical));
+        }
+        Ok(false)
+    }
+
+    fn btrfs_collect_tree_log_items(
+        alloc: &BtrfsAllocState,
+        canonical: u64,
+    ) -> Result<Vec<BtrfsTreeItem>, FfsError> {
+        let start = BtrfsKey {
+            objectid: 0,
+            item_type: 0,
+            offset: 0,
+        };
+        let end = BtrfsKey {
+            objectid: u64::MAX,
+            item_type: u8::MAX,
+            offset: u64::MAX,
+        };
+        let mut items = alloc
+            .fs_tree
+            .range(&start, &end)
+            .map_err(|e| btrfs_mutation_to_ffs(&e))?
+            .into_iter()
+            .filter_map(|(key, data)| {
+                match Self::btrfs_tree_log_item_matches_inode(&key, &data, canonical) {
+                    Ok(true) => Some(Ok(BtrfsTreeItem { key, data })),
+                    Ok(false) => None,
+                    Err(err) => Some(Err(err)),
+                }
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        items.sort_by(|lhs, rhs| Self::btrfs_key_order(&lhs.key, &rhs.key));
+        if items.is_empty() {
+            return Err(FfsError::NotFound(format!("btrfs inode {canonical}")));
+        }
+        Ok(items)
+    }
+
+    fn btrfs_allocate_tree_log_block(
+        alloc: &mut BtrfsAllocState,
+    ) -> Result<(u64, u64, bool), FfsError> {
+        let nodesize = u64::from(alloc.nodesize);
+        match alloc
+            .extent_alloc
+            .alloc_metadata_for_tree(nodesize, BTRFS_TREE_LOG_OBJECTID, 0)
+        {
+            Ok(allocation) => Ok((allocation.bytenr, allocation.num_bytes, true)),
+            Err(BtrfsMutationError::NoSpace) => {
+                let fallback_len = nodesize.checked_mul(2).ok_or_else(|| {
+                    FfsError::InvalidGeometry("btrfs tree-log allocation size overflow".into())
+                })?;
+                let allocation = alloc
+                    .extent_alloc
+                    .alloc_data(fallback_len)
+                    .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+                let log_root = Self::btrfs_align_up(allocation.bytenr, nodesize)?;
+                let log_end = log_root.checked_add(nodesize).ok_or_else(|| {
+                    FfsError::InvalidGeometry("btrfs tree-log bytenr overflow".into())
+                })?;
+                let alloc_end = allocation
+                    .bytenr
+                    .checked_add(allocation.num_bytes)
+                    .ok_or_else(|| {
+                        FfsError::InvalidGeometry("btrfs tree-log allocation overflow".into())
+                    })?;
+                if log_end > alloc_end {
+                    return Err(FfsError::Corruption {
+                        block: allocation.bytenr,
+                        detail: "aligned btrfs tree-log block escaped allocation".into(),
+                    });
+                }
+                Ok((log_root, allocation.num_bytes, false))
+            }
+            Err(err) => Err(btrfs_mutation_to_ffs(&err)),
+        }
+    }
+
+    fn btrfs_prepare_tree_log_write(
+        sb: &BtrfsSuperblock,
+        alloc: &mut BtrfsAllocState,
+        canonical: u64,
+    ) -> Result<(Vec<u8>, Vec<u8>, BtrfsTreeLogWriteStats), FfsError> {
+        let items = Self::btrfs_collect_tree_log_items(alloc, canonical)?;
+        let (log_root, allocated_bytes, metadata_allocation) =
+            Self::btrfs_allocate_tree_log_block(alloc)?;
+        alloc.generation = alloc.generation.checked_add(1).ok_or_else(|| {
+            FfsError::InvalidGeometry("btrfs tree-log generation overflow".into())
+        })?;
+        let generation = alloc.generation;
+        let node = BtrfsCowNode::Leaf { items };
+        let node_bytes = node
+            .serialize(&BtrfsNodeSerializeParams {
+                fsid: sb.fsid,
+                chunk_tree_uuid: sb.fsid,
+                bytenr: log_root,
+                flags: 0,
+                generation,
+                owner: BTRFS_TREE_LOG_OBJECTID,
+                nodesize: alloc.nodesize,
+                child_generations: Vec::new(),
+            })
+            .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+
+        let mut logged_sb = sb.clone();
+        logged_sb.log_root = log_root;
+        logged_sb.log_root_level = 0;
+        logged_sb.generation = generation;
+        logged_sb.bytes_used = logged_sb
+            .bytes_used
+            .saturating_add(allocated_bytes)
+            .min(logged_sb.total_bytes);
+        let sb_bytes = logged_sb.to_bytes();
+        let stats = BtrfsTreeLogWriteStats {
+            log_root,
+            generation,
+            items_count: match &node {
+                BtrfsCowNode::Leaf { items } => items.len(),
+                BtrfsCowNode::Internal { .. } => 0,
+            },
+            allocated_bytes,
+            metadata_allocation,
+        };
+        Ok((node_bytes, sb_bytes, stats))
+    }
+
+    fn btrfs_write_tree_log_for_sync(
+        &self,
+        cx: &Cx,
+        ino: InodeNumber,
+    ) -> Result<BtrfsTreeLogWriteStats, FfsError> {
+        let sb = self
+            .btrfs_superblock()
+            .ok_or_else(|| FfsError::Format("not a btrfs filesystem".into()))?
+            .clone();
+        let canonical = self.btrfs_canonical_inode(ino)?;
+        let alloc_mutex = self.require_btrfs_alloc_state()?;
+        let (node_bytes, sb_bytes, stats) = {
+            let mut alloc = alloc_mutex.lock();
+            Self::btrfs_prepare_tree_log_write(&sb, &mut alloc, canonical)?
+        };
+
+        let ctx = self
+            .btrfs_context()
+            .ok_or_else(|| FfsError::Format("not a btrfs filesystem".into()))?;
+        let chunk_end = self.btrfs_logical_chunk_end(stats.log_root)?;
+        let available_in_chunk = Self::btrfs_checked_chunk_available(chunk_end, stats.log_root)?;
+        if available_in_chunk
+            < u64::try_from(node_bytes.len())
+                .map_err(|_| FfsError::InvalidGeometry("tree-log node too large".into()))?
+        {
+            return Err(FfsError::Corruption {
+                block: stats.log_root,
+                detail: "btrfs tree-log node crosses chunk boundary".into(),
+            });
+        }
+        let mapping = map_logical_to_physical(&ctx.chunks, stats.log_root)
+            .map_err(|e| parse_to_ffs_error(&e))?
+            .ok_or_else(|| FfsError::Corruption {
+                block: stats.log_root,
+                detail: "tree-log logical bytenr not covered by any btrfs chunk".into(),
+            })?;
+        Self::btrfs_checked_physical_span(mapping.physical, node_bytes.len())?;
+        self.dev
+            .write_all_at(cx, ByteOffset(mapping.physical), &node_bytes)?;
+        self.dev.write_all_at(
+            cx,
+            ByteOffset(u64::try_from(BTRFS_SUPER_INFO_OFFSET).map_err(|_| {
+                FfsError::InvalidGeometry("btrfs superblock offset does not fit u64".into())
+            })?),
+            &sb_bytes,
+        )?;
+        Ok(stats)
+    }
+
     fn btrfs_sync_with_logging(
         &self,
         cx: &Cx,
@@ -13613,6 +13856,7 @@ impl OpenFs {
                 "mvcc_flush_before_sync"
             );
         }
+        let tree_log = self.btrfs_write_tree_log_for_sync(cx, ino)?;
 
         match self.dev.sync(cx) {
             Ok(()) => {
@@ -13624,6 +13868,13 @@ impl OpenFs {
                     ino = ino.0,
                     datasync,
                     flushed_blocks = flushed,
+                    commit_strategy = "tree_log_fast_fsync",
+                    tree_log_root = tree_log.log_root,
+                    tree_log_generation = tree_log.generation,
+                    tree_log_items = tree_log.items_count,
+                    tree_log_allocated_bytes = tree_log.allocated_bytes,
+                    tree_log_metadata_allocation = tree_log.metadata_allocation,
+                    full_commit_required = false,
                     "btrfs_sync_applied"
                 );
                 Ok(())
@@ -13946,6 +14197,7 @@ impl OpenFs {
             gid,
             mode: u32::from(mode) | 0o100_000, // S_IFREG
             rdev: 0,
+            flags: 0,
             atime_sec: secs,
             atime_nsec: nanos,
             ctime_sec: secs,
@@ -14027,6 +14279,7 @@ impl OpenFs {
             gid,
             mode: u32::from(mode) | 0o040_000, // S_IFDIR
             rdev: 0,
+            flags: 0,
             atime_sec: secs,
             atime_nsec: nanos,
             ctime_sec: secs,
@@ -14399,6 +14652,7 @@ impl OpenFs {
             gid,
             mode: 0o120_777, // S_IFLNK | 0o777
             rdev: 0,
+            flags: 0,
             atime_sec: secs,
             atime_nsec: nanos,
             ctime_sec: secs,
@@ -18558,9 +18812,22 @@ impl FsOps for OpenFs {
                     self.read_inode_with_scope(cx, scope, Self::ext4_canonical_inode(ino))?;
                 Ok(inode.flags)
             }
-            FsFlavor::Btrfs(_) => Err(FfsError::UnsupportedFeature(
-                "get_inode_flags is not supported for btrfs".to_owned(),
-            )),
+            FsFlavor::Btrfs(_) => {
+                let canonical = self.btrfs_canonical_inode(ino)?;
+                let btrfs_flags = if let Some(alloc_mutex) = self.btrfs_alloc_state.as_ref() {
+                    let alloc = alloc_mutex.lock();
+                    let inode = self.btrfs_read_inode_from_tree(&alloc, canonical)?;
+                    drop(alloc);
+                    inode.flags
+                } else {
+                    let items = self.walk_btrfs_fs_tree(cx)?;
+                    let inode_item = Self::btrfs_find_inode_item(&items, canonical)?;
+                    let inode =
+                        parse_inode_item(&inode_item.data).map_err(|e| parse_to_ffs_error(&e))?;
+                    inode.flags
+                };
+                Ok(btrfs_inode_flags_to_fsflags(btrfs_flags))
+            }
         }
     }
 
@@ -21447,6 +21714,7 @@ mod tests {
             gid: 1000,
             mode: 0o100_644,
             rdev: 0,
+            flags: 0,
             atime_sec: 0,
             atime_nsec: 0,
             ctime_sec: 0,
@@ -37163,7 +37431,7 @@ mod tests {
     // ── Btrfs write-path integration tests ────────────────────────────
 
     /// Open a writable btrfs filesystem from the test image.
-    fn open_writable_btrfs() -> (OpenFs, Cx) {
+    fn open_writable_btrfs_with_device() -> (OpenFs, Cx, TestDevice) {
         let image = build_btrfs_fsops_image();
         let dev = TestDevice::from_vec(image);
         let cx = Cx::for_testing();
@@ -37171,10 +37439,39 @@ mod tests {
             btrfs_rw_ephemeral_ok: true, // Enable ephemeral RW for tests
             ..OpenOptions::default()
         };
-        let mut fs = OpenFs::from_device(&cx, Box::new(dev), &opts).unwrap();
+        let mut fs = OpenFs::from_device(&cx, Box::new(dev.clone()), &opts).unwrap();
         fs.enable_writes(&cx).unwrap();
         assert!(fs.is_writable());
+        (fs, cx, dev)
+    }
+
+    fn open_writable_btrfs() -> (OpenFs, Cx) {
+        let (fs, cx, _) = open_writable_btrfs_with_device();
         (fs, cx)
+    }
+
+    fn fsync_btrfs_file_to_tree_log(name: &OsStr, payload: &[u8]) -> (Vec<u8>, u64) {
+        let (fs, cx, dev) = open_writable_btrfs_with_device();
+        let ops: &dyn FsOps = &fs;
+        let attr = ops
+            .create(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                name,
+                0o644,
+                0,
+                0,
+            )
+            .expect("create file for tree-log fsync");
+        ops.write(&cx, &mut RequestScope::empty(), attr.ino, 0, payload)
+            .expect("seed data before fsync");
+        ops.fsync(&cx, &mut RequestScope::empty(), attr.ino, 0, false)
+            .expect("fsync should write tree-log");
+        let canonical = fs
+            .btrfs_canonical_inode(attr.ino)
+            .expect("canonical btrfs inode");
+        (dev.snapshot_bytes(), canonical)
     }
 
     #[test]
@@ -40704,6 +41001,272 @@ mod tests {
                 .and_then(Value::as_str)
                 .is_some_and(|value| value.starts_with("btrfs-fsync-")),
             "missing or malformed fsync operation_id: {applied:?}"
+        );
+        assert_eq!(
+            applied.get("commit_strategy").and_then(Value::as_str),
+            Some("tree_log_fast_fsync")
+        );
+        assert_eq!(
+            applied.get("full_commit_required").and_then(Value::as_bool),
+            Some(false)
+        );
+        assert!(
+            applied
+                .get("tree_log_root")
+                .and_then(Value::as_u64)
+                .is_some_and(|value| value != 0),
+            "missing tree-log root in fsync applied log: {applied:?}"
+        );
+        assert!(
+            applied
+                .get("tree_log_items")
+                .and_then(Value::as_u64)
+                .is_some_and(|value| value >= 2),
+            "missing tree-log item count in fsync applied log: {applied:?}"
+        );
+    }
+
+    #[test]
+    fn btrfs_write_fsync_persists_replayable_tree_log() {
+        let (image, canonical) =
+            fsync_btrfs_file_to_tree_log(OsStr::new("tree-log-fast-fsync.bin"), b"sync-me");
+        let sb = BtrfsSuperblock::parse_from_image(&image).expect("parse updated superblock");
+        assert_ne!(sb.log_root, 0, "fsync must publish a log_root");
+        assert_eq!(sb.log_root_level, 0);
+        ffs_ondisk::verify_btrfs_superblock_checksum(
+            &image[BTRFS_SUPER_INFO_OFFSET..BTRFS_SUPER_INFO_OFFSET + BTRFS_SUPER_INFO_SIZE],
+        )
+        .expect("tree-log fsync must leave a checksummed superblock");
+
+        let chunks = parse_sys_chunk_array(&sb.sys_chunk_array).expect("parse sys_chunk_array");
+        let mut read_physical = |physical: u64| -> Result<Vec<u8>, ParseError> {
+            let start = usize::try_from(physical)
+                .map_err(|_| ParseError::IntegerConversion { field: "physical" })?;
+            let len = usize::try_from(sb.nodesize)
+                .map_err(|_| ParseError::IntegerConversion { field: "nodesize" })?;
+            let end = start.checked_add(len).ok_or(ParseError::InvalidField {
+                field: "physical",
+                reason: "overflow",
+            })?;
+            if end > image.len() {
+                return Err(ParseError::InsufficientData {
+                    needed: len,
+                    offset: start,
+                    actual: image.len().saturating_sub(start),
+                });
+            }
+            Ok(image[start..end].to_vec())
+        };
+        let replayed = ffs_btrfs::replay_tree_log(&mut read_physical, &sb, &chunks)
+            .expect("tree-log must replay from the fsynced image");
+        assert!(replayed.replayed);
+
+        assert!(
+            replayed.items.iter().any(|item| {
+                item.key.objectid == canonical && item.key.item_type == BTRFS_ITEM_INODE_ITEM
+            }),
+            "tree-log missing fsynced inode item: {:?}",
+            replayed.items
+        );
+
+        let extent_item = replayed
+            .items
+            .iter()
+            .find(|item| {
+                item.key.objectid == canonical && item.key.item_type == BTRFS_ITEM_EXTENT_DATA
+            })
+            .expect("tree-log missing fsynced extent item");
+        let extent = parse_extent_data(&extent_item.data).expect("parse logged extent data");
+        match extent {
+            BtrfsExtentData::Inline { data, .. } => assert_eq!(data, b"sync-me"),
+            other @ BtrfsExtentData::Regular { .. } => {
+                panic!("expected inline extent in tree-log, got {other:?}")
+            }
+        }
+
+        assert!(
+            replayed.items.iter().any(|item| {
+                matches!(
+                    item.key.item_type,
+                    BTRFS_ITEM_DIR_ITEM | BTRFS_ITEM_DIR_INDEX
+                ) && parse_dir_items(&item.data).is_ok_and(|entries| {
+                    entries.iter().any(|entry| {
+                        entry.child_objectid == canonical
+                            && entry.name == b"tree-log-fast-fsync.bin"
+                    })
+                })
+            }),
+            "tree-log missing parent directory link for fsynced file: {:?}",
+            replayed.items
+        );
+
+        let cx = Cx::for_testing();
+        let reopened = OpenFs::from_device(
+            &cx,
+            Box::new(TestDevice::from_vec(image)),
+            &OpenOptions::default(),
+        )
+        .expect("reopen fsynced image after simulated crash");
+        let reopened_ops: &dyn FsOps = &reopened;
+        let reopened_attr = reopened_ops
+            .lookup(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("tree-log-fast-fsync.bin"),
+            )
+            .expect("tree-log replay overlay must expose fsynced file after crash");
+        let reopened_data = reopened_ops
+            .read(
+                &cx,
+                &mut RequestScope::empty(),
+                reopened_attr.ino,
+                0,
+                u32::MAX,
+            )
+            .expect("tree-log replay overlay must expose fsynced file data");
+        assert_eq!(reopened_data, b"sync-me");
+    }
+
+    #[test]
+    fn btrfs_tree_log_lab_crash_replay_makes_fsynced_file_visible() {
+        let _guard = log_contract_guard();
+        let mut runtime = asupersync::lab::LabRuntime::new(
+            asupersync::lab::LabConfig::new(0xb7f5_7a6c).max_steps(100_000),
+        );
+        let region = runtime
+            .state
+            .create_root_region(asupersync::types::Budget::INFINITE);
+        let replayed_data = Arc::new(Mutex::new(None::<Vec<u8>>));
+        let task_result = Arc::clone(&replayed_data);
+        let (task_id, _handle) = runtime
+            .state
+            .create_task(region, asupersync::types::Budget::INFINITE, async move {
+                let payload = b"lab-crash-tree-log";
+                let (image, _canonical) =
+                    fsync_btrfs_file_to_tree_log(OsStr::new("lab-tree-log.bin"), payload);
+                let cx = Cx::for_testing();
+                let reopened = OpenFs::from_device(
+                    &cx,
+                    Box::new(TestDevice::from_vec(image)),
+                    &OpenOptions::default(),
+                )
+                .expect("lab crash remount must replay tree-log overlay");
+                let ops: &dyn FsOps = &reopened;
+                let attr = ops
+                    .lookup(
+                        &cx,
+                        &mut RequestScope::empty(),
+                        InodeNumber(1),
+                        OsStr::new("lab-tree-log.bin"),
+                    )
+                    .expect("fsynced tree-log file must survive lab crash remount");
+                let data = ops
+                    .read(&cx, &mut RequestScope::empty(), attr.ino, 0, u32::MAX)
+                    .expect("fsynced tree-log data must survive lab crash remount");
+                info!(
+                    target: "ffs::btrfs::tree_log",
+                    scenario_id = "btrfs_tree_log_lab_crash_replay",
+                    outcome = "durable",
+                    payload_len = data.len(),
+                    "btrfs_tree_log_lab_crash_replay"
+                );
+                *task_result.lock().expect("lab result lock poisoned") = Some(data);
+            })
+            .expect("create lab crash replay task");
+        runtime.scheduler.lock().schedule(task_id, 0);
+        let steps = runtime.run_until_quiescent();
+
+        assert!(steps > 0, "LabRuntime must execute the crash replay task");
+        let data = replayed_data
+            .lock()
+            .expect("lab result lock poisoned")
+            .take()
+            .expect("LabRuntime crash replay task must complete");
+        assert_eq!(data, b"lab-crash-tree-log");
+    }
+
+    #[test]
+    fn btrfs_tree_log_fast_fsync_latency_metric_reports_baseline() {
+        let (fs, cx, _dev) = open_writable_btrfs_with_device();
+        let ops: &dyn FsOps = &fs;
+        let attr = ops
+            .create(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("latency-fast-fsync.bin"),
+                0o644,
+                0,
+                0,
+            )
+            .expect("create file for fast-fsync latency metric");
+        ops.write(
+            &cx,
+            &mut RequestScope::empty(),
+            attr.ino,
+            0,
+            b"latency-measurement",
+        )
+        .expect("seed fast-fsync latency file");
+        let extra = ops
+            .create(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("latency-baseline-extra.bin"),
+                0o644,
+                0,
+                0,
+            )
+            .expect("create extra item for full-commit baseline surface");
+        ops.write(&cx, &mut RequestScope::empty(), extra.ino, 0, b"baseline")
+            .expect("seed extra baseline file");
+
+        let canonical = fs
+            .btrfs_canonical_inode(attr.ino)
+            .expect("canonical btrfs inode");
+        let start = BtrfsKey {
+            objectid: 0,
+            item_type: 0,
+            offset: 0,
+        };
+        let end = BtrfsKey {
+            objectid: u64::MAX,
+            item_type: u8::MAX,
+            offset: u64::MAX,
+        };
+        let sb = fs.btrfs_superblock().expect("btrfs superblock").clone();
+        let alloc_mutex = fs.require_btrfs_alloc_state().expect("btrfs alloc state");
+        let baseline_start = Instant::now();
+        let baseline_item_count = {
+            let alloc = alloc_mutex.lock();
+            alloc
+                .fs_tree
+                .range(&start, &end)
+                .expect("scan full fs tree for A4 baseline surface")
+                .len()
+        };
+        let baseline_elapsed_ns = baseline_start.elapsed().as_nanos().max(1);
+
+        let fast_start = Instant::now();
+        let tree_log_items = {
+            let mut alloc = alloc_mutex.lock();
+            let (_node_bytes, _sb_bytes, stats) =
+                OpenFs::btrfs_prepare_tree_log_write(&sb, &mut alloc, canonical)
+                    .expect("prepare tree-log fast-fsync write");
+            stats.items_count
+        };
+        let fast_elapsed_ns = fast_start.elapsed().as_nanos().max(1);
+
+        assert!(
+            tree_log_items < baseline_item_count,
+            "tree-log should write a strict subset of the full commit item surface: tree_log={tree_log_items} full={baseline_item_count}",
+        );
+        eprintln!(
+            "TREE_LOG_FAST_FSYNC_LATENCY|fast_prepare_ns={fast_elapsed_ns}|full_commit_baseline_scan_ns={baseline_elapsed_ns}|tree_log_items={}|full_commit_items={baseline_item_count}|item_surface_ratio={:.3}",
+            tree_log_items,
+            tree_log_items as f64 / baseline_item_count as f64
         );
     }
 

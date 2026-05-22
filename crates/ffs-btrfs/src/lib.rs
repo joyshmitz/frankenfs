@@ -92,6 +92,75 @@ pub const BTRFS_COMPRESS_ZLIB: u8 = 1;
 pub const BTRFS_COMPRESS_LZO: u8 = 2;
 pub const BTRFS_COMPRESS_ZSTD: u8 = 3;
 
+// ── btrfs inode flags (from fs/btrfs/btrfs_inode.h) ────────────────────────
+/// Do not checksum data.
+pub const BTRFS_INODE_NODATASUM: u64 = 1 << 0;
+/// Do not COW data (implies NODATASUM).
+pub const BTRFS_INODE_NODATACOW: u64 = 1 << 1;
+/// Read-only inode (subvolume-level).
+pub const BTRFS_INODE_READONLY: u64 = 1 << 2;
+/// Do not compress data.
+pub const BTRFS_INODE_NOCOMPRESS: u64 = 1 << 3;
+/// Has preallocated extents.
+pub const BTRFS_INODE_PREALLOC: u64 = 1 << 4;
+/// Sync writes (O_SYNC equivalent).
+pub const BTRFS_INODE_SYNC: u64 = 1 << 5;
+/// Immutable inode.
+pub const BTRFS_INODE_IMMUTABLE: u64 = 1 << 6;
+/// Append-only inode.
+pub const BTRFS_INODE_APPEND: u64 = 1 << 7;
+/// Do not dump (nodump).
+pub const BTRFS_INODE_NODUMP: u64 = 1 << 8;
+/// Do not update atime.
+pub const BTRFS_INODE_NOATIME: u64 = 1 << 9;
+/// Sync directory changes.
+pub const BTRFS_INODE_DIRSYNC: u64 = 1 << 10;
+/// Compress data.
+pub const BTRFS_INODE_COMPRESS: u64 = 1 << 11;
+
+/// Convert btrfs inode flags to generic FS_*_FL flags for `FS_IOC_GETFLAGS`.
+///
+/// Maps kernel `btrfs_inode_flags_to_fsflags()` from `fs/btrfs/ioctl.c`.
+#[must_use]
+pub fn btrfs_inode_flags_to_fsflags(btrfs_flags: u64) -> u32 {
+    use ffs_types::{
+        EXT4_APPEND_FL, EXT4_COMPR_FL, EXT4_DIRSYNC_FL, EXT4_IMMUTABLE_FL,
+        EXT4_NOATIME_FL, EXT4_NOCOMPR_FL, EXT4_NODUMP_FL, EXT4_SYNC_FL,
+    };
+    // FS_NOCOW_FL is btrfs-specific: 0x0080_0000
+    const FS_NOCOW_FL: u32 = 0x0080_0000;
+
+    let mut fs_flags: u32 = 0;
+    if btrfs_flags & BTRFS_INODE_SYNC != 0 {
+        fs_flags |= EXT4_SYNC_FL;
+    }
+    if btrfs_flags & BTRFS_INODE_IMMUTABLE != 0 {
+        fs_flags |= EXT4_IMMUTABLE_FL;
+    }
+    if btrfs_flags & BTRFS_INODE_APPEND != 0 {
+        fs_flags |= EXT4_APPEND_FL;
+    }
+    if btrfs_flags & BTRFS_INODE_NODUMP != 0 {
+        fs_flags |= EXT4_NODUMP_FL;
+    }
+    if btrfs_flags & BTRFS_INODE_NOATIME != 0 {
+        fs_flags |= EXT4_NOATIME_FL;
+    }
+    if btrfs_flags & BTRFS_INODE_DIRSYNC != 0 {
+        fs_flags |= EXT4_DIRSYNC_FL;
+    }
+    if btrfs_flags & BTRFS_INODE_NODATACOW != 0 {
+        fs_flags |= FS_NOCOW_FL;
+    }
+    if btrfs_flags & BTRFS_INODE_COMPRESS != 0 {
+        fs_flags |= EXT4_COMPR_FL;
+    }
+    if btrfs_flags & BTRFS_INODE_NOCOMPRESS != 0 {
+        fs_flags |= EXT4_NOCOMPR_FL;
+    }
+    fs_flags
+}
+
 /// Highest valid btrfs tree level. The kernel's `BTRFS_MAX_LEVEL` is the
 /// level count (8), so valid on-disk levels are `0..=7`.
 pub const BTRFS_MAX_TREE_LEVEL: u8 = 7;
