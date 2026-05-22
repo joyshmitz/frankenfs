@@ -37,10 +37,11 @@ use ffs_btrfs::{
     BTRFS_ITEM_INODE_ITEM, BTRFS_ITEM_INODE_REF, BTRFS_ITEM_ROOT_ITEM, BTRFS_ITEM_XATTR_ITEM,
     BtrfsBTree, BtrfsBlockGroupItem, BtrfsCowNode, BtrfsDirItem, BtrfsExtentAllocator,
     BtrfsExtentData, BtrfsInodeItem, BtrfsKey, BtrfsLeafEntry, BtrfsMutationError,
-    BtrfsNodeSerializeParams, BtrfsTreeItem, InMemoryCowBtrfsTree, btrfs_inode_flags_to_fsflags,
-    enumerate_snapshots,
-    enumerate_subvolumes, map_logical_to_physical, parse_dir_items, parse_extent_data,
-    parse_inode_item, parse_root_item, parse_xattr_items, walk_chunk_tree, walk_tree,
+    BtrfsNodeSerializeParams, BtrfsTreeItem, InMemoryCowBtrfsTree, BTRFS_USER_SETTABLE_FSFLAGS,
+    btrfs_inode_flags_to_fsflags, btrfs_inode_flags_to_xflags, enumerate_snapshots,
+    enumerate_subvolumes, fsflags_to_btrfs_inode_flags, map_logical_to_physical, parse_dir_items,
+    parse_extent_data, parse_inode_item, parse_root_item, parse_xattr_items, walk_chunk_tree,
+    walk_tree,
 };
 use ffs_error::FfsError;
 use ffs_journal::{
@@ -18882,9 +18883,28 @@ impl FsOps for OpenFs {
                     cowextsize: 0,
                 })
             }
-            FsFlavor::Btrfs(_) => Err(FfsError::UnsupportedFeature(
-                "get_inode_fsxattr is not supported for btrfs".to_owned(),
-            )),
+            FsFlavor::Btrfs(_) => {
+                let canonical = self.btrfs_canonical_inode(ino)?;
+                let btrfs_flags = if let Some(alloc_mutex) = self.btrfs_alloc_state.as_ref() {
+                    let alloc = alloc_mutex.lock();
+                    let inode = self.btrfs_read_inode_from_tree(&alloc, canonical)?;
+                    drop(alloc);
+                    inode.flags
+                } else {
+                    let items = self.walk_btrfs_fs_tree(cx)?;
+                    let inode_item = Self::btrfs_find_inode_item(&items, canonical)?;
+                    let inode =
+                        parse_inode_item(&inode_item.data).map_err(|e| parse_to_ffs_error(&e))?;
+                    inode.flags
+                };
+                Ok(FsxattrInfo {
+                    xflags: btrfs_inode_flags_to_xflags(btrfs_flags),
+                    extsize: 0,
+                    nextents: 0,
+                    projid: 0,
+                    cowextsize: 0,
+                })
+            }
         }
     }
 
@@ -19501,9 +19521,35 @@ impl FsOps for OpenFs {
                 }
                 Ok(())
             }
-            FsFlavor::Btrfs(_) => Err(FfsError::UnsupportedFeature(
-                "set_inode_flags is not supported for btrfs".to_owned(),
-            )),
+            FsFlavor::Btrfs(_) => {
+                self.require_btrfs_rw_allowed("setflags")?;
+                let alloc_mutex = self.require_btrfs_alloc_state()?;
+                let canonical = self.btrfs_canonical_inode(ino)?;
+
+                let mut alloc = alloc_mutex.lock();
+                let mut inode = self.btrfs_read_inode_from_tree(&alloc, canonical)?;
+
+                let requested_btrfs = fsflags_to_btrfs_inode_flags(flags);
+                let old_btrfs = inode.flags;
+                let user_settable_btrfs = fsflags_to_btrfs_inode_flags(BTRFS_USER_SETTABLE_FSFLAGS);
+                inode.flags = (old_btrfs & !user_settable_btrfs) | (requested_btrfs & user_settable_btrfs);
+
+                let (secs, nanos) = Self::btrfs_now_timestamp();
+                inode.ctime_sec = secs;
+                inode.ctime_nsec = nanos;
+
+                let inode_key = BtrfsKey {
+                    objectid: canonical,
+                    item_type: BTRFS_ITEM_INODE_ITEM,
+                    offset: 0,
+                };
+                alloc
+                    .fs_tree
+                    .update(&inode_key, &inode.to_bytes())
+                    .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+
+                Ok(())
+            }
         }
     }
 
@@ -41077,12 +41123,10 @@ mod tests {
             })
             .expect("tree-log missing fsynced extent item");
         let extent = parse_extent_data(&extent_item.data).expect("parse logged extent data");
-        match extent {
-            BtrfsExtentData::Inline { data, .. } => assert_eq!(data, b"sync-me"),
-            other @ BtrfsExtentData::Regular { .. } => {
-                panic!("expected inline extent in tree-log, got {other:?}")
-            }
-        }
+        assert!(
+            matches!(&extent, BtrfsExtentData::Inline { data, .. } if data == b"sync-me"),
+            "expected inline extent in tree-log, got {extent:?}"
+        );
 
         assert!(
             replayed.items.iter().any(|item| {
