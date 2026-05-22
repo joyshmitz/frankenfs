@@ -7261,6 +7261,73 @@ mod tests {
         assert_eq!(value, Some("my=fs"));
     }
 
+    // ── Ioctl parsing tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn parse_fiemap_request_valid() {
+        // Build a valid 32-byte FIEMAP header
+        let mut data = vec![0u8; FIEMAP_HEADER_SIZE];
+        // fm_start at offset 0 (u64)
+        data[0..8].copy_from_slice(&100u64.to_ne_bytes());
+        // fm_length at offset 8 (u64)
+        data[8..16].copy_from_slice(&4096u64.to_ne_bytes());
+        // fm_flags at offset 16 (u32)
+        data[16..20].copy_from_slice(&FIEMAP_FLAG_SYNC.to_ne_bytes());
+        // fm_extent_count at offset 24 (u32)
+        data[24..28].copy_from_slice(&10u32.to_ne_bytes());
+
+        let (start, length, flags, count) = FrankenFuse::parse_fiemap_request(&data).unwrap();
+        assert_eq!(start, 100);
+        assert_eq!(length, 4096);
+        assert_eq!(flags, FIEMAP_FLAG_SYNC);
+        assert_eq!(count, 10);
+    }
+
+    #[test]
+    fn parse_fiemap_request_too_short() {
+        let data = vec![0u8; FIEMAP_HEADER_SIZE - 1];
+        let err = FrankenFuse::parse_fiemap_request(&data).unwrap_err();
+        assert_eq!(err, libc::EINVAL);
+    }
+
+    #[test]
+    fn parse_fiemap_request_zeros() {
+        let data = vec![0u8; FIEMAP_HEADER_SIZE];
+        let (start, length, flags, count) = FrankenFuse::parse_fiemap_request(&data).unwrap();
+        assert_eq!(start, 0);
+        assert_eq!(length, 0);
+        assert_eq!(flags, 0);
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn parse_u32_ioctl_arg_valid() {
+        let data = 0x1234_5678u32.to_ne_bytes();
+        let value = FrankenFuse::parse_u32_ioctl_arg(&data).unwrap();
+        assert_eq!(value, 0x1234_5678);
+    }
+
+    #[test]
+    fn parse_u32_ioctl_arg_too_short() {
+        let data = [0u8; 3];
+        let err = FrankenFuse::parse_u32_ioctl_arg(&data).unwrap_err();
+        assert_eq!(err, libc::EINVAL);
+    }
+
+    #[test]
+    fn parse_inode_flags_valid() {
+        let data = 0x0000_0800u32.to_ne_bytes(); // EXT4_ENCRYPT_FL
+        let flags = FrankenFuse::parse_inode_flags(&data).unwrap();
+        assert_eq!(flags, 0x0000_0800);
+    }
+
+    #[test]
+    fn parse_inode_flags_too_short() {
+        let data = [0u8; 3];
+        let err = FrankenFuse::parse_inode_flags(&data).unwrap_err();
+        assert_eq!(err, libc::EINVAL);
+    }
+
     #[test]
     fn inode_attr_to_file_attr_conversion() {
         let iattr = InodeAttr {
