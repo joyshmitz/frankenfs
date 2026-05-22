@@ -698,6 +698,12 @@ pub const EXT4_PROJINHERIT_FL: u32 = 0x2000_0000;
 /// Casefolded directory.
 pub const EXT4_CASEFOLD_FL: u32 = 0x4000_0000;
 
+// ── btrfs-specific FS flags ─────────────────────────────────────────────────
+
+/// No copy-on-write for data (btrfs-specific, implies NODATASUM).
+/// Used in `FS_IOC_GETFLAGS`/`FS_IOC_SETFLAGS` for btrfs inodes.
+pub const FS_NOCOW_FL: u32 = 0x0080_0000;
+
 /// Maximum ext4 fast symlink target size (stored in the inode's `i_block` area).
 pub const EXT4_FAST_SYMLINK_MAX: usize = 60;
 

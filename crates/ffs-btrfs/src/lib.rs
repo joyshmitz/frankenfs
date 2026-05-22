@@ -125,10 +125,8 @@ pub const BTRFS_INODE_COMPRESS: u64 = 1 << 11;
 pub fn btrfs_inode_flags_to_fsflags(btrfs_flags: u64) -> u32 {
     use ffs_types::{
         EXT4_APPEND_FL, EXT4_COMPR_FL, EXT4_DIRSYNC_FL, EXT4_IMMUTABLE_FL,
-        EXT4_NOATIME_FL, EXT4_NOCOMPR_FL, EXT4_NODUMP_FL, EXT4_SYNC_FL,
+        EXT4_NOATIME_FL, EXT4_NOCOMPR_FL, EXT4_NODUMP_FL, EXT4_SYNC_FL, FS_NOCOW_FL,
     };
-    // FS_NOCOW_FL is btrfs-specific: 0x0080_0000
-    const FS_NOCOW_FL: u32 = 0x0080_0000;
 
     let mut fs_flags: u32 = 0;
     if btrfs_flags & BTRFS_INODE_SYNC != 0 {
@@ -169,9 +167,8 @@ pub fn btrfs_inode_flags_to_fsflags(btrfs_flags: u64) -> u32 {
 pub fn fsflags_to_btrfs_inode_flags(fs_flags: u32) -> u64 {
     use ffs_types::{
         EXT4_APPEND_FL, EXT4_COMPR_FL, EXT4_DIRSYNC_FL, EXT4_IMMUTABLE_FL,
-        EXT4_NOATIME_FL, EXT4_NOCOMPR_FL, EXT4_NODUMP_FL, EXT4_SYNC_FL,
+        EXT4_NOATIME_FL, EXT4_NOCOMPR_FL, EXT4_NODUMP_FL, EXT4_SYNC_FL, FS_NOCOW_FL,
     };
-    const FS_NOCOW_FL: u32 = 0x0080_0000;
 
     let mut btrfs_flags: u64 = 0;
     if fs_flags & EXT4_SYNC_FL != 0 {
