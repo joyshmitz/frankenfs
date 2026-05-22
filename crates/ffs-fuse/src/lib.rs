@@ -253,6 +253,10 @@ const BTRFS_SCRUB_ARGS_SIZE: u32 = 1024;
 /// `BTRFS_IOC_QUOTA_RESCAN_WAIT` = `_IO(0x94, 46)` on x86_64.
 /// Waits for an in-progress qgroup quota rescan to finish.
 const BTRFS_IOC_QUOTA_RESCAN_WAIT: u32 = 0x942E;
+/// `BTRFS_IOC_QUOTA_RESCAN_STATUS` = `_IOR(0x94, 45, struct btrfs_ioctl_quota_rescan_args)`.
+/// Queries qgroup quota rescan progress.
+const BTRFS_IOC_QUOTA_RESCAN_STATUS: u32 = 0x8040_942D;
+const BTRFS_QUOTA_RESCAN_ARGS_SIZE: u32 = 64;
 /// `BTRFS_IOC_DEFRAG_RANGE` = `_IOW(0x94, 16, struct btrfs_ioctl_defrag_range_args)`.
 /// Defragment a range of a file.
 const BTRFS_IOC_DEFRAG_RANGE: u32 = 0x4030_9410;
@@ -3938,6 +3942,18 @@ impl FrankenFuse {
                     Err(error) => IoctlResult::Error(error.to_errno()),
                 }
             }
+            BTRFS_IOC_QUOTA_RESCAN_STATUS => {
+                if out_size < BTRFS_QUOTA_RESCAN_ARGS_SIZE {
+                    return IoctlResult::Error(libc::EINVAL);
+                }
+                let cx = Self::cx_for_request();
+                match self.with_request_scope(&cx, RequestOp::IoctlRead, |cx, scope| {
+                    self.inner.ops.btrfs_quota_rescan_status(cx, scope)
+                }) {
+                    Ok(data) => IoctlResult::Data(data),
+                    Err(error) => IoctlResult::Error(error.to_errno()),
+                }
+            }
             BTRFS_IOC_DEFRAG_RANGE => {
                 // Input: 48-byte struct with start, len, flags, extent_thresh, compress_type
                 if in_data.len() < BTRFS_DEFRAG_RANGE_ARGS_SIZE as usize {
@@ -6565,6 +6581,7 @@ mod tests {
         BtrfsTreeSearch(BtrfsTreeSearchKey),
         BtrfsInoLookup(u64, u64),
         BtrfsQuotaRescanWait,
+        BtrfsQuotaRescanStatus,
         Getattr(InodeNumber),
         Statfs(InodeNumber),
         GetVersion(InodeNumber),
@@ -7317,6 +7334,18 @@ mod tests {
                 .expect("lock ioctl calls")
                 .push(IoctlCall::BtrfsQuotaRescanWait);
             Ok(())
+        }
+
+        fn btrfs_quota_rescan_status(
+            &self,
+            _cx: &Cx,
+            _scope: &mut RequestScope,
+        ) -> ffs_error::Result<Vec<u8>> {
+            self.calls
+                .lock()
+                .expect("lock ioctl calls")
+                .push(IoctlCall::BtrfsQuotaRescanStatus);
+            Ok(vec![0xAB; BTRFS_QUOTA_RESCAN_ARGS_SIZE as usize])
         }
 
         fn get_btrfs_dev_info(
@@ -8528,6 +8557,50 @@ mod tests {
                 IoctlCall::End(RequestOp::IoctlRead),
             ]
         );
+    }
+
+    #[test]
+    fn dispatch_ioctl_btrfs_quota_rescan_status_uses_read_scope() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let fuse = FrankenFuse::new(Box::new(IoctlRecordingFs::new(0, Arc::clone(&calls))));
+
+        let response = dispatch_ioctl_for_testing(
+            &fuse,
+            1,
+            0,
+            BTRFS_IOC_QUOTA_RESCAN_STATUS,
+            &[],
+            BTRFS_QUOTA_RESCAN_ARGS_SIZE,
+        );
+        assert_eq!(
+            response,
+            IoctlResult::Data(vec![0xAB; BTRFS_QUOTA_RESCAN_ARGS_SIZE as usize])
+        );
+        assert_eq!(
+            calls.lock().expect("lock ioctl calls").as_slice(),
+            &[
+                IoctlCall::Begin(RequestOp::IoctlRead),
+                IoctlCall::BtrfsQuotaRescanStatus,
+                IoctlCall::End(RequestOp::IoctlRead),
+            ]
+        );
+    }
+
+    #[test]
+    fn dispatch_ioctl_btrfs_quota_rescan_status_rejects_short_output() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let fuse = FrankenFuse::new(Box::new(IoctlRecordingFs::new(0, Arc::clone(&calls))));
+
+        let response = dispatch_ioctl_for_testing(
+            &fuse,
+            1,
+            0,
+            BTRFS_IOC_QUOTA_RESCAN_STATUS,
+            &[],
+            BTRFS_QUOTA_RESCAN_ARGS_SIZE - 1,
+        );
+        assert_eq!(response, IoctlResult::Error(libc::EINVAL));
+        assert!(calls.lock().expect("lock ioctl calls").is_empty());
     }
 
     #[test]

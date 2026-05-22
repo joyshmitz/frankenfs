@@ -19611,6 +19611,21 @@ impl FsOps for OpenFs {
         }
     }
 
+    fn btrfs_quota_rescan_status(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+    ) -> ffs_error::Result<Vec<u8>> {
+        match &self.flavor {
+            FsFlavor::Ext4(_) => Err(FfsError::UnsupportedFeature(
+                "BTRFS_IOC_QUOTA_RESCAN_STATUS is not supported on ext4 filesystems".to_owned(),
+            )),
+            FsFlavor::Btrfs(_) => Err(FfsError::UnsupportedFeature(
+                "btrfs qgroup quota rescan status is not implemented".to_owned(),
+            )),
+        }
+    }
+
     fn set_fs_label(
         &self,
         cx: &Cx,
