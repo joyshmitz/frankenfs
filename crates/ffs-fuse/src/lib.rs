@@ -7934,6 +7934,14 @@ mod tests {
     }
 
     #[test]
+    fn mount_config_default_values() {
+        let cfg = MountConfig::default();
+        assert!(cfg.options.read_only);
+        assert!(cfg.backpressure.is_none());
+        assert_eq!(cfg.unmount_timeout, Duration::from_secs(30));
+    }
+
+    #[test]
     fn build_mount_options_includes_ro_when_read_only() {
         let opts = MountOptions::default();
         let mount_opts = build_mount_options(&opts);
