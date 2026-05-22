@@ -644,6 +644,11 @@ pub struct Ext4Superblock {
     pub prj_quota_inum: u32,
     pub backup_bgs: [u32; 2],
 
+    // ── Casefold / orphan file metadata ─────────────────────────────────
+    pub encoding: u16,
+    pub encoding_flags: u16,
+    pub orphan_file_inum: u32,
+
     // ── Checksums ────────────────────────────────────────────────────────
     pub checksum_type: u8,
     pub checksum_seed: u32,
@@ -805,6 +810,11 @@ impl Ext4Superblock {
             grp_quota_inum: read_le_u32(region, 0x244)?,
             prj_quota_inum: read_le_u32(region, 0x26C)?,
             backup_bgs: [read_le_u32(region, 0x24C)?, read_le_u32(region, 0x250)?],
+
+            // Casefold / orphan file metadata
+            encoding: read_le_u16(region, 0x27C)?,
+            encoding_flags: read_le_u16(region, 0x27E)?,
+            orphan_file_inum: read_le_u32(region, 0x280)?,
 
             // Checksums
             checksum_type,
@@ -1013,6 +1023,13 @@ impl Ext4Superblock {
                 .then_some(self.prj_quota_inum)
                 .filter(|inode| *inode != 0),
         }
+    }
+
+    #[must_use]
+    pub fn orphan_file_inode(&self) -> Option<u32> {
+        self.has_compat(Ext4CompatFeatures::ORPHAN_FILE)
+            .then_some(self.orphan_file_inum)
+            .filter(|inode| *inode != 0)
     }
 
     #[must_use]
@@ -5697,6 +5714,9 @@ mod tests {
         sb[0x168..0x170].copy_from_slice(&1234_u64.to_le_bytes()); // mmp_block
         sb[0x24C..0x250].copy_from_slice(&7_u32.to_le_bytes()); // backup_bgs[0]
         sb[0x250..0x254].copy_from_slice(&11_u32.to_le_bytes()); // backup_bgs[1]
+        sb[0x27C..0x27E].copy_from_slice(&1_u16.to_le_bytes()); // encoding=UTF-8
+        sb[0x27E..0x280].copy_from_slice(&2_u16.to_le_bytes()); // encoding_flags
+        sb[0x280..0x284].copy_from_slice(&13_u32.to_le_bytes()); // orphan_file_inum
         sb[0x175] = 1; // checksum_type=crc32c
 
         let parsed = Ext4Superblock::parse_superblock_region(&sb).unwrap();
@@ -5715,6 +5735,9 @@ mod tests {
         assert_eq!(parsed.mmp_update_interval, 5);
         assert_eq!(parsed.mmp_block, 1234);
         assert_eq!(parsed.backup_bgs, [7, 11]);
+        assert_eq!(parsed.encoding, 1);
+        assert_eq!(parsed.encoding_flags, 2);
+        assert_eq!(parsed.orphan_file_inum, 13);
         assert_eq!(parsed.checksum_type, 1);
         assert_eq!(parsed.groups_count(), 1);
     }
@@ -6125,6 +6148,25 @@ mod tests {
                 project: Some(11),
             }
         );
+    }
+
+    #[test]
+    fn orphan_file_inode_requires_compat_feature() {
+        let mut sb = make_valid_sb();
+        sb[0x280..0x284].copy_from_slice(&13_u32.to_le_bytes());
+
+        let parsed = Ext4Superblock::parse_superblock_region(&sb).expect("parse");
+        assert_eq!(parsed.orphan_file_inode(), None);
+    }
+
+    #[test]
+    fn orphan_file_inode_reports_enabled_superblock_metadata() {
+        let mut sb = make_valid_sb();
+        sb[0x5C..0x60].copy_from_slice(&Ext4CompatFeatures::ORPHAN_FILE.0.to_le_bytes());
+        sb[0x280..0x284].copy_from_slice(&13_u32.to_le_bytes());
+
+        let parsed = Ext4Superblock::parse_superblock_region(&sb).expect("parse");
+        assert_eq!(parsed.orphan_file_inode(), Some(13));
     }
 
     #[test]
