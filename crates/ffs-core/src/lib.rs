@@ -43968,6 +43968,108 @@ mod tests {
         assert!(!result.writeback_enabled);
     }
 
+    // ── InodeEpochState unit tests ────────────────────────────────────────
+
+    #[test]
+    fn inode_epoch_state_is_valid_monotonic() {
+        let valid = InodeEpochState {
+            staged_epoch: 3,
+            visible_epoch: 2,
+            durable_epoch: 1,
+        };
+        assert!(valid.is_valid());
+
+        let invalid = InodeEpochState {
+            staged_epoch: 1,
+            visible_epoch: 2,
+            durable_epoch: 3,
+        };
+        assert!(!invalid.is_valid());
+    }
+
+    #[test]
+    fn inode_epoch_state_has_pending_visibility() {
+        let pending = InodeEpochState {
+            staged_epoch: 2,
+            visible_epoch: 1,
+            durable_epoch: 1,
+        };
+        assert!(pending.has_pending_visibility());
+
+        let no_pending = InodeEpochState {
+            staged_epoch: 2,
+            visible_epoch: 2,
+            durable_epoch: 1,
+        };
+        assert!(!no_pending.has_pending_visibility());
+    }
+
+    #[test]
+    fn inode_epoch_state_has_pending_durability() {
+        let pending = InodeEpochState {
+            staged_epoch: 2,
+            visible_epoch: 2,
+            durable_epoch: 1,
+        };
+        assert!(pending.has_pending_durability());
+
+        let no_pending = InodeEpochState {
+            staged_epoch: 2,
+            visible_epoch: 2,
+            durable_epoch: 2,
+        };
+        assert!(!no_pending.has_pending_durability());
+    }
+
+    #[test]
+    fn inode_epoch_state_stage_write_advances() {
+        let mut state = InodeEpochState {
+            staged_epoch: 1,
+            visible_epoch: 1,
+            durable_epoch: 1,
+        };
+        state.stage_write(3);
+        assert_eq!(state.staged_epoch, 3);
+        state.stage_write(2); // lower epoch is no-op
+        assert_eq!(state.staged_epoch, 3);
+    }
+
+    #[test]
+    fn inode_epoch_state_commit_epoch_clamps_to_staged() {
+        let mut state = InodeEpochState {
+            staged_epoch: 2,
+            visible_epoch: 0,
+            durable_epoch: 0,
+        };
+        state.commit_epoch(5); // higher than staged
+        assert_eq!(state.visible_epoch, 2); // clamped to staged
+    }
+
+    #[test]
+    fn inode_epoch_state_mark_durable_rejects_invisible() {
+        let mut state = InodeEpochState {
+            staged_epoch: 3,
+            visible_epoch: 2,
+            durable_epoch: 1,
+        };
+        let err = state.mark_durable(3).unwrap_err();
+        assert_eq!(err, WritebackBarrierError::EpochNotVisible {
+            requested: 3,
+            visible: 2,
+        });
+    }
+
+    #[test]
+    fn inode_epoch_state_mark_durable_succeeds_for_visible() {
+        let mut state = InodeEpochState {
+            staged_epoch: 3,
+            visible_epoch: 2,
+            durable_epoch: 1,
+        };
+        state.mark_durable(2).unwrap();
+        assert_eq!(state.durable_epoch, 2);
+    }
+
     // ── Crash consistency matrix for writeback epoch barrier ─────────────
     //
     // Each scenario simulates a crash at a specific point in the writeback
