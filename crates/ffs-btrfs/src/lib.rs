@@ -14411,7 +14411,7 @@ mod tests {
             ffs_types::EXT4_NODUMP_FL,
             ffs_types::EXT4_NOATIME_FL,
             ffs_types::EXT4_DIRSYNC_FL,
-            0x0080_0000, // FS_NOCOW_FL
+            ffs_types::FS_NOCOW_FL,
             ffs_types::EXT4_COMPR_FL,
             ffs_types::EXT4_NOCOMPR_FL,
         ];
