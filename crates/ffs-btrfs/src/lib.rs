@@ -220,6 +220,46 @@ pub const BTRFS_USER_SETTABLE_FSFLAGS: u32 = {
         | EXT4_NOCOMPR_FL
 };
 
+/// Convert btrfs inode flags to FS_XFLAG_* for `FS_IOC_FSGETXATTR`.
+///
+/// Maps kernel `btrfs_iflags_to_xflags()` from `fs/btrfs/ioctl.c`.
+/// Unlike [`btrfs_inode_flags_to_fsflags`], this produces FS_XFLAG_* bits
+/// rather than FS_*_FL bits.
+#[must_use]
+pub fn btrfs_inode_flags_to_xflags(btrfs_flags: u64) -> u32 {
+    const FS_XFLAG_SYNC: u32 = 0x0000_0020;
+    const FS_XFLAG_IMMUTABLE: u32 = 0x0000_0008;
+    const FS_XFLAG_APPEND: u32 = 0x0000_0010;
+    const FS_XFLAG_NODUMP: u32 = 0x0000_0080;
+    const FS_XFLAG_NOATIME: u32 = 0x0000_0040;
+    const FS_XFLAG_NODEFRAG: u32 = 0x0000_2000;
+
+    let mut xflags: u32 = 0;
+    if btrfs_flags & BTRFS_INODE_SYNC != 0 {
+        xflags |= FS_XFLAG_SYNC;
+    }
+    if btrfs_flags & BTRFS_INODE_IMMUTABLE != 0 {
+        xflags |= FS_XFLAG_IMMUTABLE;
+    }
+    if btrfs_flags & BTRFS_INODE_APPEND != 0 {
+        xflags |= FS_XFLAG_APPEND;
+    }
+    if btrfs_flags & BTRFS_INODE_NODUMP != 0 {
+        xflags |= FS_XFLAG_NODUMP;
+    }
+    if btrfs_flags & BTRFS_INODE_NOATIME != 0 {
+        xflags |= FS_XFLAG_NOATIME;
+    }
+    if btrfs_flags & BTRFS_INODE_NOCOMPRESS != 0 {
+        xflags |= FS_XFLAG_NODEFRAG;
+    }
+    if xflags != 0 {
+        const FS_XFLAG_HASATTR: u32 = 0x8000_0000;
+        xflags |= FS_XFLAG_HASATTR;
+    }
+    xflags
+}
+
 /// Highest valid btrfs tree level. The kernel's `BTRFS_MAX_LEVEL` is the
 /// level count (8), so valid on-disk levels are `0..=7`.
 pub const BTRFS_MAX_TREE_LEVEL: u8 = 7;
@@ -14435,5 +14475,51 @@ mod tests {
             BTRFS_USER_SETTABLE_FSFLAGS,
             "combined roundtrip preserves all user-settable flags"
         );
+    }
+
+    #[test]
+    fn btrfs_inode_flags_to_xflags_mapping() {
+        use super::{
+            btrfs_inode_flags_to_xflags, BTRFS_INODE_APPEND, BTRFS_INODE_IMMUTABLE,
+            BTRFS_INODE_NOATIME, BTRFS_INODE_NOCOMPRESS, BTRFS_INODE_NODUMP, BTRFS_INODE_SYNC,
+        };
+
+        const FS_XFLAG_SYNC: u32 = 0x0000_0020;
+        const FS_XFLAG_IMMUTABLE: u32 = 0x0000_0008;
+        const FS_XFLAG_APPEND: u32 = 0x0000_0010;
+        const FS_XFLAG_NODUMP: u32 = 0x0000_0080;
+        const FS_XFLAG_NOATIME: u32 = 0x0000_0040;
+        const FS_XFLAG_NODEFRAG: u32 = 0x0000_2000;
+        const FS_XFLAG_HASATTR: u32 = 0x8000_0000;
+
+        assert_eq!(btrfs_inode_flags_to_xflags(0), 0);
+        assert_eq!(
+            btrfs_inode_flags_to_xflags(BTRFS_INODE_SYNC),
+            FS_XFLAG_SYNC | FS_XFLAG_HASATTR
+        );
+        assert_eq!(
+            btrfs_inode_flags_to_xflags(BTRFS_INODE_IMMUTABLE),
+            FS_XFLAG_IMMUTABLE | FS_XFLAG_HASATTR
+        );
+        assert_eq!(
+            btrfs_inode_flags_to_xflags(BTRFS_INODE_APPEND),
+            FS_XFLAG_APPEND | FS_XFLAG_HASATTR
+        );
+        assert_eq!(
+            btrfs_inode_flags_to_xflags(BTRFS_INODE_NODUMP),
+            FS_XFLAG_NODUMP | FS_XFLAG_HASATTR
+        );
+        assert_eq!(
+            btrfs_inode_flags_to_xflags(BTRFS_INODE_NOATIME),
+            FS_XFLAG_NOATIME | FS_XFLAG_HASATTR
+        );
+        assert_eq!(
+            btrfs_inode_flags_to_xflags(BTRFS_INODE_NOCOMPRESS),
+            FS_XFLAG_NODEFRAG | FS_XFLAG_HASATTR
+        );
+
+        let combined = BTRFS_INODE_SYNC | BTRFS_INODE_NODUMP | BTRFS_INODE_NOATIME;
+        let expected = FS_XFLAG_SYNC | FS_XFLAG_NODUMP | FS_XFLAG_NOATIME | FS_XFLAG_HASATTR;
+        assert_eq!(btrfs_inode_flags_to_xflags(combined), expected);
     }
 }
