@@ -7600,6 +7600,40 @@ mod tests {
     }
 
     #[test]
+    fn encode_fs_sysfs_path_response_empty_path() {
+        let buf = FrankenFuse::encode_fs_sysfs_path_response(b"").unwrap();
+        assert_eq!(buf.len(), 129);
+        assert_eq!(buf[0], 0);
+        assert!(buf[1..].iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn encode_fs_sysfs_path_response_short_path() {
+        let path = b"/sys/fs/ext4/sda1";
+        let buf = FrankenFuse::encode_fs_sysfs_path_response(path).unwrap();
+        assert_eq!(buf.len(), 129);
+        assert_eq!(buf[0], path.len() as u8);
+        assert_eq!(&buf[1..1 + path.len()], path);
+        assert!(buf[1 + path.len()..].iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn encode_fs_sysfs_path_response_max_length_path() {
+        let path = [b'a'; 128];
+        let buf = FrankenFuse::encode_fs_sysfs_path_response(&path).unwrap();
+        assert_eq!(buf.len(), 129);
+        assert_eq!(buf[0], 128);
+        assert_eq!(&buf[1..], &path[..]);
+    }
+
+    #[test]
+    fn encode_fs_sysfs_path_response_too_long_path() {
+        let path = [b'x'; 129];
+        let err = FrankenFuse::encode_fs_sysfs_path_response(&path).unwrap_err();
+        assert_eq!(err, libc::EINVAL);
+    }
+
+    #[test]
     fn inode_attr_to_file_attr_conversion() {
         let iattr = InodeAttr {
             ino: InodeNumber(42),
