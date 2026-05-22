@@ -20250,6 +20250,42 @@ impl FsOps for OpenFs {
         }
     }
 
+    fn btrfs_send(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _args: &[u8],
+    ) -> ffs_error::Result<()> {
+        match &self.flavor {
+            FsFlavor::Ext4(_) => Err(FfsError::UnsupportedFeature(
+                "BTRFS_IOC_SEND is not supported on ext4 filesystems".to_owned(),
+            )),
+            FsFlavor::Btrfs(_) => {
+                // Send requires implementing the full btrfs send stream protocol
+                Err(FfsError::UnsupportedFeature(
+                    "BTRFS_IOC_SEND protocol not yet implemented".to_owned(),
+                ))
+            }
+        }
+    }
+
+    fn btrfs_set_received_subvol(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _args: &[u8],
+    ) -> ffs_error::Result<Vec<u8>> {
+        match &self.flavor {
+            FsFlavor::Ext4(_) => Err(FfsError::UnsupportedFeature(
+                "BTRFS_IOC_SET_RECEIVED_SUBVOL is not supported on ext4 filesystems".to_owned(),
+            )),
+            FsFlavor::Btrfs(_) => {
+                // Setting received UUID requires write access
+                Err(FfsError::ReadOnly)
+            }
+        }
+    }
+
     fn btrfs_subvol_create(
         &self,
         _cx: &Cx,

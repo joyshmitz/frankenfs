@@ -328,6 +328,14 @@ const BTRFS_IOC_DEFRAG: u32 = 0x5000_9402;
 /// `BTRFS_IOC_SCAN_DEV` = `_IOW(0x94, 4, struct btrfs_ioctl_vol_args)`.
 /// Scan device for btrfs filesystem.
 const BTRFS_IOC_SCAN_DEV: u32 = 0x5000_9404;
+/// `BTRFS_IOC_SEND` = `_IOW(0x94, 38, struct btrfs_ioctl_send_args)`.
+/// Send subvolume as byte stream for btrfs send/receive.
+const BTRFS_IOC_SEND: u32 = 0x4048_9426;
+const BTRFS_SEND_ARGS_SIZE: u32 = 72;
+/// `BTRFS_IOC_SET_RECEIVED_SUBVOL` = `_IOWR(0x94, 37, struct btrfs_ioctl_received_subvol_args)`.
+/// Set received UUID after btrfs receive.
+const BTRFS_IOC_SET_RECEIVED_SUBVOL: u32 = 0xC040_9425;
+const BTRFS_RECEIVED_SUBVOL_ARGS_SIZE: u32 = 64;
 const BTRFS_VOL_ARGS_SIZE: u32 = 4096;
 /// `FICLONE` = `_IOW(0x94, 9, int)`.
 /// Clone (reflink) entire file from source fd.
@@ -4286,6 +4294,35 @@ impl FrankenFuse {
                     self.inner.ops.btrfs_scan_dev(cx, scope, in_data)
                 }) {
                     Ok(()) => IoctlResult::Data(Vec::new()),
+                    Err(error) => IoctlResult::Error(error.to_errno()),
+                }
+            }
+            BTRFS_IOC_SEND => {
+                // Send requires implementing the full btrfs send stream protocol
+                if in_data.len() < BTRFS_SEND_ARGS_SIZE as usize {
+                    return IoctlResult::Error(libc::EINVAL);
+                }
+                let cx = Self::cx_for_request();
+                match self.with_request_scope(&cx, RequestOp::IoctlRead, |cx, scope| {
+                    self.inner.ops.btrfs_send(cx, scope, &in_data)
+                }) {
+                    Ok(()) => IoctlResult::Data(Vec::new()),
+                    Err(error) => IoctlResult::Error(error.to_errno()),
+                }
+            }
+            BTRFS_IOC_SET_RECEIVED_SUBVOL => {
+                // Set received UUID requires write access
+                if self.inner.read_only {
+                    return IoctlResult::Error(libc::EROFS);
+                }
+                if in_data.len() < BTRFS_RECEIVED_SUBVOL_ARGS_SIZE as usize {
+                    return IoctlResult::Error(libc::EINVAL);
+                }
+                let cx = Self::cx_for_request();
+                match self.with_request_scope(&cx, RequestOp::IoctlWrite, |cx, scope| {
+                    self.inner.ops.btrfs_set_received_subvol(cx, scope, &in_data)
+                }) {
+                    Ok(data) => IoctlResult::Data(data),
                     Err(error) => IoctlResult::Error(error.to_errno()),
                 }
             }

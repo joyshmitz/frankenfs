@@ -1884,6 +1884,34 @@ pub trait FsOps: Send + Sync {
         ))
     }
 
+    /// Send subvolume for `BTRFS_IOC_SEND`.
+    ///
+    /// Implements btrfs send protocol for incremental/full sends.
+    fn btrfs_send(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _args: &[u8],
+    ) -> ffs_error::Result<()> {
+        Err(FfsError::UnsupportedFeature(
+            "btrfs_send is not supported by this backend".to_owned(),
+        ))
+    }
+
+    /// Set received subvol UUID for `BTRFS_IOC_SET_RECEIVED_SUBVOL`.
+    ///
+    /// Used after btrfs receive to set the received UUID.
+    fn btrfs_set_received_subvol(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _args: &[u8],
+    ) -> ffs_error::Result<Vec<u8>> {
+        Err(FfsError::UnsupportedFeature(
+            "btrfs_set_received_subvol is not supported by this backend".to_owned(),
+        ))
+    }
+
     /// Create a subvolume for `BTRFS_IOC_SUBVOL_CREATE_V2`.
     ///
     /// Takes raw vol_args_v2 struct bytes containing flags and name.
