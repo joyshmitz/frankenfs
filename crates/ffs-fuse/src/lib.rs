@@ -7241,6 +7241,51 @@ mod tests {
     }
 
     #[test]
+    fn parse_mount_bool_accepts_true_variants() {
+        for val in ["1", "true", "yes", "on"] {
+            assert!(parse_mount_bool("opt", Some(val)).unwrap(), "'{val}' should be true");
+        }
+    }
+
+    #[test]
+    fn parse_mount_bool_accepts_false_variants() {
+        for val in ["0", "false", "no", "off"] {
+            assert!(!parse_mount_bool("opt", Some(val)).unwrap(), "'{val}' should be false");
+        }
+    }
+
+    #[test]
+    fn parse_mount_bool_rejects_invalid() {
+        let err = parse_mount_bool("opt", Some("maybe")).unwrap_err();
+        assert!(matches!(err, MountOptionParseError::InvalidValue { .. }));
+    }
+
+    #[test]
+    fn parse_mount_bool_requires_value() {
+        let err = parse_mount_bool("opt", None).unwrap_err();
+        assert!(matches!(err, MountOptionParseError::MissingValue { .. }));
+    }
+
+    #[test]
+    fn parse_mount_usize_valid() {
+        assert_eq!(parse_mount_usize("threads", Some("4")).unwrap(), 4);
+        assert_eq!(parse_mount_usize("threads", Some("0")).unwrap(), 0);
+        assert_eq!(parse_mount_usize("threads", Some("1000")).unwrap(), 1000);
+    }
+
+    #[test]
+    fn parse_mount_usize_rejects_negative() {
+        let err = parse_mount_usize("threads", Some("-1")).unwrap_err();
+        assert!(matches!(err, MountOptionParseError::InvalidValue { .. }));
+    }
+
+    #[test]
+    fn parse_mount_usize_rejects_non_numeric() {
+        let err = parse_mount_usize("threads", Some("abc")).unwrap_err();
+        assert!(matches!(err, MountOptionParseError::InvalidValue { .. }));
+    }
+
+    #[test]
     fn split_mount_option_key_only() {
         let (key, value) = split_mount_option("ro").unwrap();
         assert_eq!(key, "ro");
