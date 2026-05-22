@@ -4138,15 +4138,15 @@ impl FrankenFuse {
                 }
             }
             BTRFS_IOC_INO_PATHS => {
-                // Input: 56-byte struct with inum, size, reserved, fspath pointer.
+                // Input: 56-byte struct with inum, size, reserved, fspath pointer
+                // For now, return EOPNOTSUPP as implementing backref resolution is complex
                 if in_data.len() < BTRFS_INO_PATH_ARGS_SIZE as usize {
                     return IoctlResult::Error(libc::EINVAL);
                 }
                 let inum = u64::from_le_bytes(in_data[0..8].try_into().unwrap_or([0; 8]));
-                let size = u64::from_le_bytes(in_data[8..16].try_into().unwrap_or([0; 8]));
                 let cx = Self::cx_for_request();
                 match self.with_request_scope(&cx, RequestOp::IoctlRead, |cx, scope| {
-                    self.inner.ops.get_btrfs_ino_paths(cx, scope, inum, size)
+                    self.inner.ops.get_btrfs_ino_paths(cx, scope, inum)
                 }) {
                     Ok(data) => IoctlResult::Data(data),
                     Err(error) => IoctlResult::Error(error.to_errno()),
@@ -8052,6 +8052,12 @@ mod tests {
             FrankenFuse::classify_move_ext_error(&FfsError::Io(io_err)),
             "bad_donor_fd"
         );
+    }
+
+    #[test]
+    fn move_ext_operation_id_format() {
+        let id = FrankenFuse::move_ext_operation_id(100, 7, 0, 1024, 4096);
+        assert_eq!(id, "fuse-move-ext-100-7-0-1024-4096");
     }
 
     #[test]
