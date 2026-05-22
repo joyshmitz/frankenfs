@@ -1799,6 +1799,21 @@ pub trait FsOps: Send + Sync {
         ))
     }
 
+    /// Add a btrfs device for `BTRFS_IOC_ADD_DEV`.
+    ///
+    /// Takes raw `btrfs_ioctl_vol_args` bytes containing the device path.
+    /// Non-btrfs backends must return `FfsError::UnsupportedFeature`.
+    fn btrfs_add_dev(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _vol_args: &[u8],
+    ) -> ffs_error::Result<()> {
+        Err(FfsError::UnsupportedFeature(
+            "btrfs_add_dev is not supported by this backend".to_owned(),
+        ))
+    }
+
     /// Start a balance operation for `BTRFS_IOC_BALANCE_V2`.
     ///
     /// Takes raw `btrfs_ioctl_balance_args` struct bytes.
@@ -2639,6 +2654,15 @@ impl<T: FsOps + ?Sized> FsOps for Arc<T> {
         vol_args: &[u8],
     ) -> ffs_error::Result<()> {
         self.as_ref().btrfs_rm_dev_v2(cx, scope, vol_args)
+    }
+
+    fn btrfs_add_dev(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        vol_args: &[u8],
+    ) -> ffs_error::Result<()> {
+        self.as_ref().btrfs_add_dev(cx, scope, vol_args)
     }
 
     fn set_inode_flags(

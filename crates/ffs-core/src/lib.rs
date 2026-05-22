@@ -20126,6 +20126,22 @@ impl FsOps for OpenFs {
         }
     }
 
+    fn btrfs_add_dev(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _vol_args: &[u8],
+    ) -> ffs_error::Result<()> {
+        match &self.flavor {
+            FsFlavor::Ext4(_) => Err(FfsError::UnsupportedFeature(
+                "BTRFS_IOC_ADD_DEV is not supported on ext4 filesystems".to_owned(),
+            )),
+            FsFlavor::Btrfs(_) => Err(FfsError::UnsupportedFeature(
+                "btrfs device add is not implemented".to_owned(),
+            )),
+        }
+    }
+
     fn btrfs_balance_start(
         &self,
         _cx: &Cx,
