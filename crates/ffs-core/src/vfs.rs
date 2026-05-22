@@ -1632,6 +1632,43 @@ pub trait FsOps: Send + Sync {
         ))
     }
 
+    /// Get filesystem label for `BTRFS_IOC_GET_FSLABEL`.
+    ///
+    /// Returns the label as raw bytes (max 256 bytes, NUL-terminated).
+    fn btrfs_get_fslabel(&self, _cx: &Cx, _scope: &mut RequestScope) -> ffs_error::Result<Vec<u8>> {
+        Err(FfsError::UnsupportedFeature(
+            "btrfs_get_fslabel is not supported by this backend".to_owned(),
+        ))
+    }
+
+    /// Get device statistics for `BTRFS_IOC_GET_DEV_STATS`.
+    ///
+    /// Returns `btrfs_ioctl_get_dev_stats` struct bytes (1032 bytes).
+    fn btrfs_get_dev_stats(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _devid: u64,
+    ) -> ffs_error::Result<Vec<u8>> {
+        Err(FfsError::UnsupportedFeature(
+            "btrfs_get_dev_stats is not supported by this backend".to_owned(),
+        ))
+    }
+
+    /// Get subvolume info for `BTRFS_IOC_GET_SUBVOL_INFO`.
+    ///
+    /// Returns `btrfs_ioctl_get_subvol_info_args` struct bytes (504 bytes).
+    fn btrfs_get_subvol_info(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _ino: InodeNumber,
+    ) -> ffs_error::Result<Vec<u8>> {
+        Err(FfsError::UnsupportedFeature(
+            "btrfs_get_subvol_info is not supported by this backend".to_owned(),
+        ))
+    }
+
     /// Clone (reflink) entire file for `FICLONE`.
     ///
     /// Creates a CoW copy where dest file shares blocks with source.

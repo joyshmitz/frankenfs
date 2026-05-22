@@ -265,6 +265,18 @@ const BTRFS_IOC_BALANCE_CTL: u32 = 0x4004_9421;
 /// Query balance progress.
 const BTRFS_IOC_BALANCE_PROGRESS: u32 = 0x8400_9422;
 const BTRFS_BALANCE_ARGS_SIZE: u32 = 1024;
+/// `BTRFS_IOC_GET_FSLABEL` = `_IOR(0x94, 49, char[256])`.
+/// Get filesystem label from superblock.
+const BTRFS_IOC_GET_FSLABEL: u32 = 0x8100_9431;
+const BTRFS_FSLABEL_SIZE: u32 = 256;
+/// `BTRFS_IOC_GET_DEV_STATS` = `_IOWR(0x94, 52, struct btrfs_ioctl_get_dev_stats)`.
+/// Get device error statistics (1032 bytes).
+const BTRFS_IOC_GET_DEV_STATS: u32 = 0xC408_9434;
+const BTRFS_DEV_STATS_SIZE: u32 = 1032;
+/// `BTRFS_IOC_GET_SUBVOL_INFO` = `_IOR(0x94, 60, struct btrfs_ioctl_get_subvol_info_args)`.
+/// Get subvolume info for the mounted subvol or specified inode.
+const BTRFS_IOC_GET_SUBVOL_INFO: u32 = 0x81F8_943C;
+const BTRFS_SUBVOL_INFO_SIZE: u32 = 504;
 const FSCRYPT_POLICY_V1_SIZE: usize = 12;
 #[cfg(test)]
 const FSCRYPT_POLICY_V2_VERSION: u8 = 2;
@@ -3520,10 +3532,11 @@ impl FrankenFuse {
                     }
                 }
             }
-            FS_IOC_GETFSLABEL => {
+            cmd if cmd == FS_IOC_GETFSLABEL || cmd == BTRFS_IOC_GET_FSLABEL => {
                 if out_size < FSLABEL_MAX_U32 {
                     return IoctlResult::Error(libc::EINVAL);
                 }
+                debug_assert_eq!(BTRFS_FSLABEL_SIZE, FSLABEL_MAX_U32);
                 let cx = Self::cx_for_request();
                 match self.with_request_scope(&cx, RequestOp::IoctlRead, |cx, scope| {
                     self.inner.ops.get_fs_label(cx, scope)
@@ -3919,7 +3932,7 @@ impl FrankenFuse {
                 }
                 let cx = Self::cx_for_request();
                 match self.with_request_scope(&cx, RequestOp::IoctlRead, |cx, scope| {
-                    self.inner.ops.btrfs_balance_start(cx, scope, &in_data)
+                    self.inner.ops.btrfs_balance_start(cx, scope, in_data)
                 }) {
                     Ok(data) => IoctlResult::Data(data),
                     Err(error) => IoctlResult::Error(error.to_errno()),
@@ -3945,6 +3958,37 @@ impl FrankenFuse {
                     self.inner.ops.btrfs_balance_progress(cx, scope)
                 }) {
                     Ok(data) => IoctlResult::Data(data),
+                    Err(error) => IoctlResult::Error(error.to_errno()),
+                }
+            }
+            BTRFS_IOC_GET_DEV_STATS => {
+                // Input: 1032-byte struct with devid
+                if in_data.len() < BTRFS_DEV_STATS_SIZE as usize {
+                    return IoctlResult::Error(libc::EINVAL);
+                }
+                let devid = u64::from_le_bytes(in_data[0..8].try_into().unwrap_or([0; 8]));
+                let cx = Self::cx_for_request();
+                match self.with_request_scope(&cx, RequestOp::IoctlRead, |cx, scope| {
+                    self.inner.ops.btrfs_get_dev_stats(cx, scope, devid)
+                }) {
+                    Ok(mut data) => {
+                        data.resize(BTRFS_DEV_STATS_SIZE as usize, 0);
+                        IoctlResult::Data(data)
+                    }
+                    Err(error) => IoctlResult::Error(error.to_errno()),
+                }
+            }
+            BTRFS_IOC_GET_SUBVOL_INFO => {
+                let cx = Self::cx_for_request();
+                match self.with_request_scope(&cx, RequestOp::IoctlRead, |cx, scope| {
+                    self.inner
+                        .ops
+                        .btrfs_get_subvol_info(cx, scope, InodeNumber(ino))
+                }) {
+                    Ok(mut data) => {
+                        data.resize(BTRFS_SUBVOL_INFO_SIZE as usize, 0);
+                        IoctlResult::Data(data)
+                    }
                     Err(error) => IoctlResult::Error(error.to_errno()),
                 }
             }

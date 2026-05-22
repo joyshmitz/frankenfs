@@ -19928,7 +19928,69 @@ impl FsOps for OpenFs {
             )),
             FsFlavor::Btrfs(_) => {
                 // No balance operation in progress on read-only mount
-                Err(FfsError::Io(std::io::Error::from_raw_os_error(libc::ENOTCONN)))
+                Err(FfsError::Io(std::io::Error::from_raw_os_error(
+                    libc::ENOTCONN,
+                )))
+            }
+        }
+    }
+
+    fn btrfs_get_fslabel(&self, _cx: &Cx, _scope: &mut RequestScope) -> ffs_error::Result<Vec<u8>> {
+        match &self.flavor {
+            FsFlavor::Ext4(_) => Err(FfsError::UnsupportedFeature(
+                "BTRFS_IOC_GET_FSLABEL is not supported on ext4 filesystems".to_owned(),
+            )),
+            FsFlavor::Btrfs(state) => {
+                let label = state.label.as_bytes();
+                let nul_pos = label.iter().position(|&b| b == 0).unwrap_or(label.len());
+                Ok(label[..nul_pos].to_vec())
+            }
+        }
+    }
+
+    fn btrfs_get_dev_stats(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        devid: u64,
+    ) -> ffs_error::Result<Vec<u8>> {
+        match &self.flavor {
+            FsFlavor::Ext4(_) => Err(FfsError::UnsupportedFeature(
+                "BTRFS_IOC_GET_DEV_STATS is not supported on ext4 filesystems".to_owned(),
+            )),
+            FsFlavor::Btrfs(_) => {
+                // Return zeroed stats struct - FrankenFS is read-only and doesn't track device errors
+                // struct btrfs_ioctl_get_dev_stats = 1032 bytes
+                // Layout: devid(8) + nr_items(8) + flags(8) + values[5](40) + unused[121..](968)
+                let mut out = vec![0u8; 1032];
+                out[0..8].copy_from_slice(&devid.to_le_bytes());
+                out[8..16].copy_from_slice(&5u64.to_le_bytes()); // nr_items = 5 counters
+                Ok(out)
+            }
+        }
+    }
+
+    fn btrfs_get_subvol_info(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _ino: InodeNumber,
+    ) -> ffs_error::Result<Vec<u8>> {
+        match &self.flavor {
+            FsFlavor::Ext4(_) => Err(FfsError::UnsupportedFeature(
+                "BTRFS_IOC_GET_SUBVOL_INFO is not supported on ext4 filesystems".to_owned(),
+            )),
+            FsFlavor::Btrfs(_) => {
+                // struct btrfs_ioctl_get_subvol_info_args = 504 bytes
+                // For now return minimal info for the root subvolume
+                let subvol_id = self
+                    .btrfs_context
+                    .as_ref()
+                    .map_or(BTRFS_FS_TREE_OBJECTID, |ctx| ctx.subvol_objectid);
+                let mut out = vec![0u8; 504];
+                // treeid at offset 0
+                out[0..8].copy_from_slice(&subvol_id.to_le_bytes());
+                Ok(out)
             }
         }
     }
