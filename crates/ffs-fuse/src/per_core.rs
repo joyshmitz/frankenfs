@@ -1155,4 +1155,87 @@ mod tests {
         assert_eq!(snap_new.cache_hits, snap_default.cache_hits);
         assert_eq!(snap_new.cache_misses, snap_default.cache_misses);
     }
+
+    // ── Property-based tests ────────────────────────────────────────────────
+
+    mod proptests {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(256))]
+
+            #[test]
+            fn hit_rate_always_in_zero_one_range(
+                hits in 0_u64..=u64::MAX / 2,
+                misses in 0_u64..=u64::MAX / 2,
+            ) {
+                let snap = CoreMetricsSnapshot {
+                    requests: 0,
+                    pending_requests: 0,
+                    cache_hits: hits,
+                    cache_misses: misses,
+                    stolen_from: 0,
+                    stolen_to: 0,
+                };
+                let rate = snap.hit_rate();
+                prop_assert!(rate >= 0.0 && rate <= 1.0, "hit_rate {rate} out of [0,1]");
+            }
+
+            #[test]
+            fn hit_rate_zero_when_no_accesses(hits in 0_u64..=0, misses in 0_u64..=0) {
+                let snap = CoreMetricsSnapshot {
+                    requests: 0,
+                    pending_requests: 0,
+                    cache_hits: hits,
+                    cache_misses: misses,
+                    stolen_from: 0,
+                    stolen_to: 0,
+                };
+                prop_assert!((snap.hit_rate() - 0.0).abs() < f64::EPSILON);
+            }
+
+            #[test]
+            fn normalized_steal_threshold_always_positive_finite(
+                threshold in -100.0_f64..=100.0,
+            ) {
+                let cfg = PerCoreConfig {
+                    num_cores: 4,
+                    cache_blocks_per_core: 1024,
+                    steal_threshold: threshold,
+                    advisory_affinity: false,
+                };
+                let norm = cfg.normalized_steal_threshold();
+                prop_assert!(norm > 0.0 && norm.is_finite(), "normalized {norm} not positive+finite");
+            }
+
+            #[test]
+            fn resolved_cores_never_zero(
+                cores in 0_u32..=256,
+            ) {
+                let cfg = PerCoreConfig {
+                    num_cores: cores,
+                    cache_blocks_per_core: 1024,
+                    steal_threshold: 2.0,
+                    advisory_affinity: false,
+                };
+                prop_assert!(cfg.resolved_cores() >= 1);
+            }
+
+            #[test]
+            fn normalized_steal_threshold_handles_special_floats(
+                bits in proptest::bits::u64::ANY,
+            ) {
+                let threshold = f64::from_bits(bits);
+                let cfg = PerCoreConfig {
+                    num_cores: 4,
+                    cache_blocks_per_core: 1024,
+                    steal_threshold: threshold,
+                    advisory_affinity: false,
+                };
+                let norm = cfg.normalized_steal_threshold();
+                prop_assert!(norm > 0.0 && norm.is_finite());
+            }
+        }
+    }
 }
