@@ -15478,17 +15478,17 @@ mod tests {
                 denom in 0_usize..=usize::MAX / 2,
             ) {
                 let result = format_ratio_thousandths(num, denom);
-                prop_assert!(result.contains('.'), "missing decimal point: {result}");
+                prop_assert!(result.contains('.'), "missing decimal point: {}", result);
                 let parts: Vec<_> = result.split('.').collect();
-                prop_assert_eq!(parts.len(), 2, "expected exactly one decimal point: {result}");
-                prop_assert_eq!(parts[1].len(), 3, "expected 3 decimal places: {result}");
+                prop_assert_eq!(parts.len(), 2, "expected exactly one decimal point: {}", result);
+                prop_assert_eq!(parts[1].len(), 3, "expected 3 decimal places: {}", result);
             }
 
             #[test]
             fn format_uuid_always_36_chars(uuid in proptest::collection::vec(any::<u8>(), 16..=16)) {
                 let uuid_arr: [u8; 16] = uuid.try_into().unwrap();
                 let result = format_uuid(&uuid_arr);
-                prop_assert_eq!(result.len(), 36, "UUID should be 36 chars: {result}");
+                prop_assert_eq!(result.len(), 36, "UUID should be 36 chars: {}", result);
             }
 
             #[test]
