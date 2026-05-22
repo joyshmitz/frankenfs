@@ -3462,4 +3462,42 @@ mod tests {
         assert!(!Fsync.is_metadata_write());
         assert!(!Fsyncdir.is_metadata_write());
     }
+
+    // ── ranges_overlap: copy_file_range overlap detection ────────────────
+
+    #[test]
+    fn ranges_overlap_disjoint() {
+        assert!(!ranges_overlap(0, 10, 20, 10));
+        assert!(!ranges_overlap(20, 10, 0, 10));
+    }
+
+    #[test]
+    fn ranges_overlap_adjacent() {
+        assert!(!ranges_overlap(0, 10, 10, 10));
+        assert!(!ranges_overlap(10, 10, 0, 10));
+    }
+
+    #[test]
+    fn ranges_overlap_partial() {
+        assert!(ranges_overlap(0, 15, 10, 10));
+        assert!(ranges_overlap(10, 10, 0, 15));
+    }
+
+    #[test]
+    fn ranges_overlap_contained() {
+        assert!(ranges_overlap(0, 100, 10, 10));
+        assert!(ranges_overlap(10, 10, 0, 100));
+    }
+
+    #[test]
+    fn ranges_overlap_zero_length() {
+        assert!(!ranges_overlap(0, 0, 0, 10));
+        assert!(!ranges_overlap(0, 10, 0, 0));
+        assert!(!ranges_overlap(0, 0, 0, 0));
+    }
+
+    #[test]
+    fn ranges_overlap_same() {
+        assert!(ranges_overlap(10, 10, 10, 10));
+    }
 }
