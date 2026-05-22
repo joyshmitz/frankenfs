@@ -1344,6 +1344,20 @@ pub trait FsOps: Send + Sync {
         Ok(())
     }
 
+    /// Get btrfs feature flags for `BTRFS_IOC_GET_FEATURES`.
+    ///
+    /// Returns 24 bytes: compat_flags (u64) + compat_ro_flags (u64) +
+    /// incompat_flags (u64) from the superblock.
+    fn get_btrfs_features(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+    ) -> ffs_error::Result<Vec<u8>> {
+        Err(FfsError::UnsupportedFeature(
+            "get_btrfs_features is not supported by this backend".to_owned(),
+        ))
+    }
+
     /// Set filesystem-specific inode flags (ext4 `EXT4_IOC_SETFLAGS`).
     ///
     /// Updates the raw `i_flags` field. The implementation should validate

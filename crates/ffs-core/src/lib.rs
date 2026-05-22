@@ -169,7 +169,7 @@ impl E2ComprCodec {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FsFlavor {
     /// ext4 filesystem with its parsed superblock.
-    Ext4(Ext4Superblock),
+    Ext4(Box<Ext4Superblock>),
     /// btrfs filesystem with its parsed superblock.
     Btrfs(BtrfsSuperblock),
 }
@@ -242,7 +242,7 @@ impl Ext4OrphanRecoveryStats {
 /// Tries ext4 first, then btrfs. Returns the first successful parse.
 pub fn detect_filesystem(image: &[u8]) -> Result<FsFlavor, DetectionError> {
     if let Ok(ext4) = Ext4Superblock::parse_from_image(image) {
-        return Ok(FsFlavor::Ext4(ext4));
+        return Ok(FsFlavor::Ext4(Box::new(ext4)));
     }
 
     if let Ok(btrfs) = BtrfsSuperblock::parse_from_image(image) {
@@ -268,7 +268,7 @@ pub fn detect_filesystem_on_device(
     if len >= ext4_end {
         let ext4_region = read_ext4_superblock_region(cx, dev)?;
         if let Ok(sb) = Ext4Superblock::parse_superblock_region(&ext4_region) {
-            return Ok(FsFlavor::Ext4(sb));
+            return Ok(FsFlavor::Ext4(Box::new(sb)));
         }
     }
 
@@ -3467,8 +3467,10 @@ impl OpenFs {
         // (e.g. s_state cleared). Re-read it into our flavor cache.
         let sb_region = read_ext4_superblock_region(cx, self.dev.as_ref())?;
         if let FsFlavor::Ext4(sb) = &mut self.flavor {
-            *sb = Ext4Superblock::parse_superblock_region(&sb_region)
-                .map_err(|e| parse_to_ffs_error(&e))?;
+            *sb = Box::new(
+                Ext4Superblock::parse_superblock_region(&sb_region)
+                    .map_err(|e| parse_to_ffs_error(&e))?,
+            );
         }
 
         info!(
@@ -3573,8 +3575,10 @@ impl OpenFs {
 
         let sb_region = read_ext4_superblock_region(cx, self.dev.as_ref())?;
         if let FsFlavor::Ext4(cache) = &mut self.flavor {
-            *cache = Ext4Superblock::parse_superblock_region(&sb_region)
-                .map_err(|e| parse_to_ffs_error(&e))?;
+            *cache = Box::new(
+                Ext4Superblock::parse_superblock_region(&sb_region)
+                    .map_err(|e| parse_to_ffs_error(&e))?,
+            );
         }
 
         info!(
@@ -19395,6 +19399,25 @@ impl FsOps for OpenFs {
                 "BTRFS_IOC_FS_INFO is not supported on ext4 filesystems".to_owned(),
             )),
             FsFlavor::Btrfs(sb) => Ok(encode_btrfs_fs_info_args(sb)),
+        }
+    }
+
+    fn get_btrfs_features(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+    ) -> ffs_error::Result<Vec<u8>> {
+        match &self.flavor {
+            FsFlavor::Ext4(_) => Err(FfsError::UnsupportedFeature(
+                "BTRFS_IOC_GET_FEATURES is not supported on ext4 filesystems".to_owned(),
+            )),
+            FsFlavor::Btrfs(sb) => {
+                let mut buf = vec![0_u8; 24];
+                buf[0..8].copy_from_slice(&sb.compat_flags.to_le_bytes());
+                buf[8..16].copy_from_slice(&sb.compat_ro_flags.to_le_bytes());
+                buf[16..24].copy_from_slice(&sb.incompat_flags.to_le_bytes());
+                Ok(buf)
+            }
         }
     }
 

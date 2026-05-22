@@ -195,6 +195,10 @@ const BTRFS_IOC_SUBVOL_SETFLAGS: u32 = 0x4008_941A;
 /// `BTRFS_IOC_SYNC` = `_IO(0x94, 8)` on x86_64.
 /// Forces filesystem sync/commit.
 const BTRFS_IOC_SYNC: u32 = 0x9408;
+/// `BTRFS_IOC_GET_FEATURES` = `_IOR(0x94, 57, struct btrfs_ioctl_feature_flags)`.
+/// Returns compat/compat_ro/incompat feature flags (3 x u64 = 24 bytes).
+const BTRFS_IOC_GET_FEATURES: u32 = 0x8018_9439;
+const BTRFS_FEATURE_FLAGS_SIZE: u32 = 24;
 const FSCRYPT_POLICY_V1_SIZE: usize = 12;
 #[cfg(test)]
 const FSCRYPT_POLICY_V2_VERSION: u8 = 2;
@@ -3577,6 +3581,18 @@ impl FrankenFuse {
                     self.inner.ops.sync_fs(cx, scope)
                 }) {
                     Ok(()) => IoctlResult::Data(Vec::new()),
+                    Err(error) => IoctlResult::Error(error.to_errno()),
+                }
+            }
+            BTRFS_IOC_GET_FEATURES => {
+                if out_size < BTRFS_FEATURE_FLAGS_SIZE {
+                    return IoctlResult::Error(libc::EINVAL);
+                }
+                let cx = Self::cx_for_request();
+                match self.with_request_scope(&cx, RequestOp::IoctlRead, |cx, scope| {
+                    self.inner.ops.get_btrfs_features(cx, scope)
+                }) {
+                    Ok(flags) => IoctlResult::Data(flags),
                     Err(error) => IoctlResult::Error(error.to_errno()),
                 }
             }
