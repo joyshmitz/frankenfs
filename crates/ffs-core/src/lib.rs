@@ -44246,6 +44246,29 @@ mod tests {
         assert!(dirty.recovery_performed());
     }
 
+    // ── BtrfsMountSelection unit tests ──────────────────────────────────────
+
+    #[test]
+    fn btrfs_mount_selection_default_root_kind() {
+        let sel = BtrfsMountSelection::DefaultRoot;
+        assert_eq!(sel.kind(), "default_root");
+        assert!(sel.requested_name().is_none());
+    }
+
+    #[test]
+    fn btrfs_mount_selection_subvolume_kind() {
+        let sel = BtrfsMountSelection::Subvolume("home".to_owned());
+        assert_eq!(sel.kind(), "subvolume");
+        assert_eq!(sel.requested_name(), Some("home"));
+    }
+
+    #[test]
+    fn btrfs_mount_selection_snapshot_kind() {
+        let sel = BtrfsMountSelection::Snapshot("backup-2026-01-01".to_owned());
+        assert_eq!(sel.kind(), "snapshot");
+        assert_eq!(sel.requested_name(), Some("backup-2026-01-01"));
+    }
+
     // ── Crash consistency matrix for writeback epoch barrier ─────────────
     //
     // Each scenario simulates a crash at a specific point in the writeback
