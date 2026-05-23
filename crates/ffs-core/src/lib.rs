@@ -14610,14 +14610,14 @@ impl OpenFs {
             .update(&fs_root_key, &root_item_data)
             .map_err(|e| btrfs_mutation_to_ffs(&e))?;
 
-        // ── EXTENT_TREE commit (bd-f8jk7) ───────────────────────────────────────
+        // ── EXTENT_TREE commit (bd-4nz82) ───────────────────────────────────────
         //
         // The fs_tree allocations above have added EXTENT_ITEMs to extent_tree.
         // We must commit extent_tree to disk and update ROOT_TREE's EXTENT_TREE
         // ROOT_ITEM before committing root_tree, so that btrfs check finds a
         // consistent extent tree.
         //
-        // Known gap (tracked in bd-f8jk7): root_tree's own allocations (below)
+        // Known gap (tracked in bd-4nz82): root_tree's own allocations (below)
         // happen AFTER extent_tree is serialized, so the EXTENT_ITEMs root_tree
         // inserts into extent_tree live only in memory and never reach disk.
         // A fully correct fix needs to either (a) iterate the commit to
@@ -14629,7 +14629,7 @@ impl OpenFs {
         // pre-computed root_tree allocation map. For now, mounted-FUSE
         // durability is correct (our resolver doesn't depend on extent_tree
         // consistency) but `btrfs check` will continue to flag root_tree
-        // tree blocks as missing extent_items until bd-f8jk7 lands.
+        // tree blocks as missing extent_items until bd-4nz82 lands.
 
         // Build WriteDependencyDag for extent_tree
         let extent_dag = WriteDependencyDag::from_cow_tree(
