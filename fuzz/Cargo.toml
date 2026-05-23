@@ -383,3 +383,8 @@ doc = false
 name = "fuzz_perf_baseline"
 path = "fuzz_targets/fuzz_perf_baseline.rs"
 doc = false
+
+[[bin]]
+name = "fuzz_send_stream_builder_roundtrip"
+path = "fuzz_targets/fuzz_send_stream_builder_roundtrip.rs"
+doc = false

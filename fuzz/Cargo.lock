@@ -547,7 +547,10 @@ name = "ffs-harness"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "asupersync",
+ "ffs-btrfs",
  "ffs-core",
+ "ffs-fuse",
  "ffs-ondisk",
  "ffs-types",
  "hex",
