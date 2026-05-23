@@ -7500,7 +7500,7 @@ mod tests {
         btrfs_chunk_type_flag_names, build_ext4_group_info, build_fsck_output, build_info_output,
         build_mount_open_options, choose_btrfs_scrub_block_size, count_blocks_at_severity_or_higher,
         ext4_appears_clean_state, ext4_group_flag_names, ext4_state_flag_names,
-        ext4_mount_replay_mode, format_ratio_thousandths, format_uuid,
+        ext4_mount_replay_mode, filesystem_name, format_ratio_thousandths, format_uuid,
         btrfs_checksum_type_name, log_mount_runtime_rejected,
         log_mount_runtime_selected, mount_cmd, mount_operation_id, open_filesystem_for_mount,
         parse_btrfs_mount_selection, read_ext4_group_desc_from_path, read_ext4_inode_from_path,
@@ -15037,6 +15037,29 @@ mod tests {
             format_uuid(&uuid),
             "12345678-9abc-def0-1122-334455667788"
         );
+    }
+
+    // ── filesystem_name: fs flavor to display string ──────────────────────
+
+    #[test]
+    fn filesystem_name_ext4() {
+        use ffs_core::FsFlavor;
+        const EXT4_VALID_FS: u16 = 0x0001;
+        let image = build_test_ext4_image_with_state(EXT4_VALID_FS);
+        let ext4_sb = ffs_ondisk::Ext4Superblock::parse_from_image(&image)
+            .expect("parse test ext4 superblock");
+        let flavor = FsFlavor::Ext4(Box::new(ext4_sb));
+        assert_eq!(filesystem_name(&flavor), "ext4");
+    }
+
+    #[test]
+    fn filesystem_name_btrfs() {
+        use ffs_core::FsFlavor;
+        let image = build_test_btrfs_superblock(ffs_types::BTRFS_SUPER_INFO_OFFSET as u64, 1);
+        let btrfs_sb = ffs_ondisk::BtrfsSuperblock::parse_superblock_region(&image)
+            .expect("parse test btrfs superblock");
+        let flavor = FsFlavor::Btrfs(Box::new(btrfs_sb));
+        assert_eq!(filesystem_name(&flavor), "btrfs");
     }
 
     // ── format_ratio_thousandths: metrics display helper ──────────────────
