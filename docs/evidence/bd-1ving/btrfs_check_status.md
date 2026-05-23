@@ -31,9 +31,15 @@ extents:
 
 That's a real but separate gap: the new generation's metadata extents need
 to be advertised in EXTENT_TREE, and EXTENT_TREE itself needs to be CoW'd
-and committed in the same transaction. Tracked as a follow-up bead.
+and committed in the same transaction.
+
+**Update (bd-is7m1, 2026-05-23):** The root cause was identified and fixed.
+`load_btrfs_alloc_state()` now walks the on-disk EXTENT_TREE during mount
+and populates the in-memory extent_tree with all existing entries. This
+ensures commit preserves existing extent accounting rather than creating
+a fresh extent_tree containing only new allocations. See commit a803f363.
 
 The durability acceptance criterion is unaffected: every mutation made
 through the mounted FUSE path survives umount → remount via FrankenFS, and
-the image opens cleanly in btrfs-progs. What btrfs check flags is
-structural inconsistency in extent accounting, not data loss.
+the image opens cleanly in btrfs-progs. The `btrfs check` failures should
+now be resolved.
