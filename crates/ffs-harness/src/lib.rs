@@ -2252,15 +2252,13 @@ mod tests {
 
         assert!(
             citations.contains(&"ext4_kernel_vs_ffs_superblock".to_string()),
-            "Should extract test name: {:?}",
-            citations
+            "Should extract test name: {citations:?}"
         );
         assert!(
             citations
                 .iter()
                 .any(|c| c.contains("kernel_reference::ext4_kernel_vs_ffs_superblock")),
-            "Should extract file::test pattern: {:?}",
-            citations
+            "Should extract file::test pattern: {citations:?}"
         );
     }
 
@@ -2272,8 +2270,7 @@ mod tests {
 
         assert!(
             citations.contains(&"merge_proof_mechanism_collapses_labels".to_string()),
-            "Should extract unit test name: {:?}",
-            citations
+            "Should extract unit test name: {citations:?}"
         );
     }
 
@@ -2303,9 +2300,7 @@ mod tests {
 
         // The evidence map should contain entries for tests that match citations
         // Exact matches depend on what's in FEATURE_PARITY.md
-        assert!(
-            !evidence.is_empty() || true,
-            "Evidence map may be empty if no citations match - that's OK for this test"
-        );
+        // Evidence map may be empty if no citations match - that's OK for this test
+        let _ = evidence;
     }
 }

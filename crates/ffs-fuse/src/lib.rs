@@ -7612,7 +7612,7 @@ mod tests {
     #[test]
     fn parse_fsxattr_request_valid() {
         let mut data = [0u8; 28];
-        let xflags = 0x00000001u32;
+        let xflags = 0x0000_0001_u32;
         let extsize = 4096u32;
         let projid = 42u32;
         let cowextsize = 65536u32;
@@ -7638,7 +7638,7 @@ mod tests {
     #[test]
     fn encode_fsxattr_response_layout() {
         let fsx = FsxattrInfo {
-            xflags: 0x00000001,
+            xflags: 0x0000_0001,
             extsize: 4096,
             nextents: 100,
             projid: 42,
@@ -7656,10 +7656,10 @@ mod tests {
     #[test]
     fn fsxattr_parse_encode_roundtrip() {
         let mut data = [0u8; 28];
-        let xflags = 0x00000002u32;
+        let xflags = 0x0000_0002_u32;
         let extsize = 8192u32;
         let projid = 100u32;
-        let cowextsize = 131072u32;
+        let cowextsize = 131_072_u32;
         data[0..4].copy_from_slice(&xflags.to_ne_bytes());
         data[4..8].copy_from_slice(&extsize.to_ne_bytes());
         data[12..16].copy_from_slice(&projid.to_ne_bytes());
@@ -7681,12 +7681,13 @@ mod tests {
     }
 
     #[test]
+    #[expect(clippy::cast_possible_truncation)] // path.len() < 128 by construction
     fn encode_fs_sysfs_path_response_short_path() {
         let path = b"/sys/fs/ext4/sda1";
         let buf = FrankenFuse::encode_fs_sysfs_path_response(path).unwrap();
         assert_eq!(buf.len(), 129);
         assert_eq!(buf[0], path.len() as u8);
-        assert_eq!(&buf[1..1 + path.len()], path);
+        assert_eq!(&buf[1..=path.len()], path);
         assert!(buf[1 + path.len()..].iter().all(|&b| b == 0));
     }
 
@@ -7718,6 +7719,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(clippy::cast_possible_truncation)] // test buffer size fits u32
     fn clamp_fiemap_extent_count_request_limited() {
         // Request 5 extents but buffer can hold more - limited by request
         let out_size = (FIEMAP_HEADER_SIZE + 10 * FIEMAP_EXTENT_SIZE) as u32;
@@ -7725,6 +7727,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(clippy::cast_possible_truncation)] // test buffer size fits u32
     fn clamp_fiemap_extent_count_buffer_limited() {
         // Request 100 extents but buffer can only hold 2
         let out_size = (FIEMAP_HEADER_SIZE + 2 * FIEMAP_EXTENT_SIZE) as u32;
@@ -7732,6 +7735,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(clippy::cast_possible_truncation)] // FIEMAP_HEADER_SIZE fits u32
     fn clamp_fiemap_extent_count_zero_extents() {
         // Buffer too small for any extents (only header fits)
         let out_size = FIEMAP_HEADER_SIZE as u32;
@@ -7832,7 +7836,7 @@ mod tests {
             ..MountOptions::default()
         };
         let count = opts.resolved_thread_count();
-        assert!(count >= 1 && count <= 8);
+        assert!((1..=8).contains(&count));
     }
 
     #[test]
@@ -7846,8 +7850,10 @@ mod tests {
 
     #[test]
     fn resolved_thread_count_clamps_to_minimum_one() {
-        let mut opts = MountOptions::default();
-        opts.worker_threads = 1;
+        let opts = MountOptions {
+            worker_threads: 1,
+            ..MountOptions::default()
+        };
         assert_eq!(opts.resolved_thread_count(), 1);
     }
 
@@ -13566,8 +13572,10 @@ mod tests {
 
     #[test]
     fn dispatch_ioctl_btrfs_encoded_write_rejects_on_read_only() {
-        let mut opts = MountOptions::default();
-        opts.read_only = true;
+        let opts = MountOptions {
+            read_only: true,
+            ..MountOptions::default()
+        };
         let fuse = FrankenFuse::with_options(
             Box::new(IoctlRecordingFs::new(
                 0,

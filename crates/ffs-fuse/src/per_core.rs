@@ -985,6 +985,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(clippy::float_cmp)] // exact constant comparison
     fn normalized_steal_threshold_zero_returns_default() {
         let cfg = PerCoreConfig {
             steal_threshold: 0.0,
@@ -994,6 +995,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(clippy::float_cmp)] // exact constant comparison
     fn normalized_steal_threshold_negative_returns_default() {
         let cfg = PerCoreConfig {
             steal_threshold: -1.0,
@@ -1003,6 +1005,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(clippy::float_cmp)] // exact constant comparison
     fn normalized_steal_threshold_nan_returns_default() {
         let cfg = PerCoreConfig {
             steal_threshold: f64::NAN,
@@ -1012,6 +1015,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(clippy::float_cmp)] // exact constant comparison
     fn normalized_steal_threshold_infinity_returns_default() {
         let cfg = PerCoreConfig {
             steal_threshold: f64::INFINITY,
@@ -1021,6 +1025,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(clippy::float_cmp)] // exact constant comparison
     fn normalized_steal_threshold_neg_infinity_returns_default() {
         let cfg = PerCoreConfig {
             steal_threshold: f64::NEG_INFINITY,
@@ -1049,7 +1054,7 @@ mod tests {
         let resolved = cfg.resolved_cores();
         // When num_cores is 0, resolved_cores() uses available_parallelism
         // capped at 16, or falls back to 4.
-        assert!(resolved >= 1 && resolved <= 16);
+        assert!((1..=16).contains(&resolved));
     }
 
     #[test]
@@ -1179,7 +1184,7 @@ mod tests {
                     stolen_to: 0,
                 };
                 let rate = snap.hit_rate();
-                prop_assert!(rate >= 0.0 && rate <= 1.0, "hit_rate {rate} out of [0,1]");
+                prop_assert!((0.0..=1.0).contains(&rate), "hit_rate {rate} out of [0,1]");
             }
 
             #[test]
