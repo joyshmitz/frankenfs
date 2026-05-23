@@ -18629,6 +18629,43 @@ CUSTOM("congestion_threshold=3")"#;
         );
     }
 
+    // ── to_fuser_file_type: file type conversion ────────────────────────────
+
+    #[test]
+    fn to_fuser_file_type_regular_file() {
+        use super::{to_fuser_file_type, FfsFileType};
+        use fuser::FileType;
+        assert!(matches!(to_fuser_file_type(FfsFileType::RegularFile), FileType::RegularFile));
+    }
+
+    #[test]
+    fn to_fuser_file_type_directory() {
+        use super::{to_fuser_file_type, FfsFileType};
+        use fuser::FileType;
+        assert!(matches!(to_fuser_file_type(FfsFileType::Directory), FileType::Directory));
+    }
+
+    #[test]
+    fn to_fuser_file_type_symlink() {
+        use super::{to_fuser_file_type, FfsFileType};
+        use fuser::FileType;
+        assert!(matches!(to_fuser_file_type(FfsFileType::Symlink), FileType::Symlink));
+    }
+
+    #[test]
+    fn to_fuser_file_type_fifo_to_named_pipe() {
+        use super::{to_fuser_file_type, FfsFileType};
+        use fuser::FileType;
+        assert!(matches!(to_fuser_file_type(FfsFileType::Fifo), FileType::NamedPipe));
+    }
+
+    #[test]
+    fn to_fuser_file_type_socket() {
+        use super::{to_fuser_file_type, FfsFileType};
+        use fuser::FileType;
+        assert!(matches!(to_fuser_file_type(FfsFileType::Socket), FileType::Socket));
+    }
+
     // ── split_mount_option: additional edge cases ──────────────────────────
 
     #[test]
