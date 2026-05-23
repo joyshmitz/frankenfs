@@ -1,0 +1,11 @@
+{
+  "scenario": "btrfs_rw_durable_remount_persistence",
+  "git_sha": "316e9ec3c7a6df2681cd9ab122dcb18ffa63a1dc",
+  "ran_at": "2026-05-23T08:00:13Z",
+  "command": "ffs-cli mount --rw <img> <mnt>",
+  "mutations_attempted": 6,
+  "mutations_survived": 6,
+  "mutations_lost": 0,
+  "verdict": "PASS",
+  "btrfs_check_exit": 1
+}
