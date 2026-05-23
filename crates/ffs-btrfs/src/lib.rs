@@ -5410,6 +5410,46 @@ mod tests {
     }
 
     #[test]
+    fn get_returns_existing_key_data() {
+        let mut tree = InMemoryCowBtrfsTree::new(5).expect("tree");
+        tree.insert(test_key(10), b"hello").expect("insert");
+        tree.insert(test_key(20), b"world").expect("insert");
+        tree.insert(test_key(30), b"test").expect("insert");
+
+        assert_eq!(tree.get(&test_key(10)), Some(b"hello".to_vec()));
+        assert_eq!(tree.get(&test_key(20)), Some(b"world".to_vec()));
+        assert_eq!(tree.get(&test_key(30)), Some(b"test".to_vec()));
+        assert_eq!(tree.get(&test_key(15)), None);
+        assert_eq!(tree.get(&test_key(0)), None);
+        assert_eq!(tree.get(&test_key(100)), None);
+    }
+
+    #[test]
+    fn root_level_is_zero_for_leaf_only_tree() {
+        let tree = InMemoryCowBtrfsTree::new(5).expect("tree");
+        assert_eq!(tree.root_level(), 0);
+    }
+
+    #[test]
+    fn root_level_increases_with_splits() {
+        let mut tree = InMemoryCowBtrfsTree::new(3).expect("tree");
+        assert_eq!(tree.root_level(), 0);
+
+        // Insert enough keys to force a split
+        for objectid in 1_u64..=10 {
+            tree.insert(test_key(objectid), &test_payload(objectid))
+                .expect("insert");
+        }
+
+        // After splits, root level should be at least 1
+        assert!(
+            tree.root_level() >= 1,
+            "expected root_level >= 1 after splits, got {}",
+            tree.root_level()
+        );
+    }
+
+    #[test]
     fn delete_shrinks_to_leaf_root() {
         let mut tree = InMemoryCowBtrfsTree::new(3).expect("tree");
         for objectid in 1_u64..=8 {
