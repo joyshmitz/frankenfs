@@ -4983,6 +4983,227 @@ pub fn parse_send_stream(data: &[u8]) -> Result<SendStreamParseResult, ffs_types
     Ok(SendStreamParseResult { version, commands })
 }
 
+/// Builder for generating btrfs send streams.
+///
+/// Constructs a valid send stream that can be consumed by `btrfs receive`.
+/// The builder automatically handles the stream header, command framing,
+/// and CRC32C computation.
+#[derive(Debug, Clone, Default)]
+pub struct SendStreamBuilder {
+    buffer: Vec<u8>,
+    has_header: bool,
+    finalized: bool,
+}
+
+impl SendStreamBuilder {
+    /// Create a new send stream builder.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            buffer: Vec::new(),
+            has_header: false,
+            finalized: false,
+        }
+    }
+
+    /// Write the stream header (magic + version).
+    /// Must be called before adding any commands.
+    pub fn write_header(&mut self) {
+        assert!(!self.has_header, "header already written");
+        self.buffer.extend_from_slice(BTRFS_SEND_STREAM_MAGIC);
+        self.buffer.extend_from_slice(&BTRFS_SEND_STREAM_VERSION.to_le_bytes());
+        self.has_header = true;
+    }
+
+    /// Add a command with attributes.
+    /// Each attribute is (type, data).
+    #[expect(clippy::cast_possible_truncation)]
+    pub fn add_command(&mut self, cmd: SendCommand, attrs: &[(SendAttr, &[u8])]) {
+        assert!(self.has_header, "must write header first");
+        assert!(!self.finalized, "stream already finalized");
+
+        let mut payload = Vec::new();
+        for (atype, adata) in attrs {
+            payload.extend_from_slice(&(*atype as u16).to_le_bytes());
+            payload.extend_from_slice(&(adata.len() as u16).to_le_bytes());
+            payload.extend_from_slice(adata);
+        }
+
+        let payload_len = payload.len() as u32;
+        let full_len = 10 + payload.len();
+
+        let mut frame = Vec::with_capacity(full_len);
+        frame.extend_from_slice(&payload_len.to_le_bytes());
+        frame.extend_from_slice(&(cmd as u16).to_le_bytes());
+        frame.extend_from_slice(&[0_u8; 4]); // CRC placeholder
+        frame.extend_from_slice(&payload);
+
+        let crc = send_stream_command_crc32c(&frame);
+        frame[6..10].copy_from_slice(&crc.to_le_bytes());
+
+        self.buffer.extend_from_slice(&frame);
+    }
+
+    /// Add the End command and finalize the stream.
+    pub fn finalize(&mut self) {
+        assert!(!self.finalized, "stream already finalized");
+        self.add_command(SendCommand::End, &[]);
+        self.finalized = true;
+    }
+
+    /// Get the complete send stream bytes.
+    #[must_use]
+    pub fn finish(self) -> Vec<u8> {
+        assert!(self.finalized, "must call finalize() before finish()");
+        self.buffer
+    }
+
+    /// Check if the builder has been finalized.
+    #[must_use]
+    pub fn is_finalized(&self) -> bool {
+        self.finalized
+    }
+}
+
+/// Helper to build a Subvol command (start of a full send).
+#[must_use]
+pub fn build_subvol_command(path: &[u8], uuid: &[u8; 16], ctransid: u64) -> (SendCommand, Vec<(SendAttr, Vec<u8>)>) {
+    (
+        SendCommand::Subvol,
+        vec![
+            (SendAttr::Path, path.to_vec()),
+            (SendAttr::Uuid, uuid.to_vec()),
+            (SendAttr::Ctransid, ctransid.to_le_bytes().to_vec()),
+        ],
+    )
+}
+
+/// Helper to build a Mkdir command.
+#[must_use]
+pub fn build_mkdir_command(path: &[u8], ino: u64) -> (SendCommand, Vec<(SendAttr, Vec<u8>)>) {
+    (
+        SendCommand::Mkdir,
+        vec![
+            (SendAttr::Path, path.to_vec()),
+            (SendAttr::Ino, ino.to_le_bytes().to_vec()),
+        ],
+    )
+}
+
+/// Helper to build a Mkfile command.
+#[must_use]
+pub fn build_mkfile_command(path: &[u8], ino: u64) -> (SendCommand, Vec<(SendAttr, Vec<u8>)>) {
+    (
+        SendCommand::Mkfile,
+        vec![
+            (SendAttr::Path, path.to_vec()),
+            (SendAttr::Ino, ino.to_le_bytes().to_vec()),
+        ],
+    )
+}
+
+/// Helper to build a Write command.
+#[must_use]
+pub fn build_write_command(path: &[u8], offset: u64, data: &[u8]) -> (SendCommand, Vec<(SendAttr, Vec<u8>)>) {
+    (
+        SendCommand::Write,
+        vec![
+            (SendAttr::Path, path.to_vec()),
+            (SendAttr::FileOffset, offset.to_le_bytes().to_vec()),
+            (SendAttr::Data, data.to_vec()),
+        ],
+    )
+}
+
+/// Helper to build a Chmod command.
+#[must_use]
+pub fn build_chmod_command(path: &[u8], mode: u64) -> (SendCommand, Vec<(SendAttr, Vec<u8>)>) {
+    (
+        SendCommand::Chmod,
+        vec![
+            (SendAttr::Path, path.to_vec()),
+            (SendAttr::Mode, mode.to_le_bytes().to_vec()),
+        ],
+    )
+}
+
+/// Helper to build a Chown command.
+#[must_use]
+pub fn build_chown_command(path: &[u8], uid: u64, gid: u64) -> (SendCommand, Vec<(SendAttr, Vec<u8>)>) {
+    (
+        SendCommand::Chown,
+        vec![
+            (SendAttr::Path, path.to_vec()),
+            (SendAttr::Uid, uid.to_le_bytes().to_vec()),
+            (SendAttr::Gid, gid.to_le_bytes().to_vec()),
+        ],
+    )
+}
+
+/// Helper to build a Utimes command.
+#[must_use]
+#[expect(clippy::similar_names)]
+pub fn build_utimes_command(
+    path: &[u8],
+    atime_sec: i64, atime_nsec: i32,
+    mtime_sec: i64, mtime_nsec: i32,
+    ctime_sec: i64, ctime_nsec: i32,
+) -> (SendCommand, Vec<(SendAttr, Vec<u8>)>) {
+    fn timespec_bytes(sec: i64, nsec: i32) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(12);
+        buf.extend_from_slice(&sec.to_le_bytes());
+        buf.extend_from_slice(&nsec.to_le_bytes());
+        buf
+    }
+    (
+        SendCommand::Utimes,
+        vec![
+            (SendAttr::Path, path.to_vec()),
+            (SendAttr::Atime, timespec_bytes(atime_sec, atime_nsec)),
+            (SendAttr::Mtime, timespec_bytes(mtime_sec, mtime_nsec)),
+            (SendAttr::Ctime, timespec_bytes(ctime_sec, ctime_nsec)),
+        ],
+    )
+}
+
+/// Helper to build a Truncate command.
+#[must_use]
+pub fn build_truncate_command(path: &[u8], size: u64) -> (SendCommand, Vec<(SendAttr, Vec<u8>)>) {
+    (
+        SendCommand::Truncate,
+        vec![
+            (SendAttr::Path, path.to_vec()),
+            (SendAttr::Size, size.to_le_bytes().to_vec()),
+        ],
+    )
+}
+
+/// Helper to build a Symlink command.
+#[must_use]
+pub fn build_symlink_command(path: &[u8], ino: u64, link_target: &[u8]) -> (SendCommand, Vec<(SendAttr, Vec<u8>)>) {
+    (
+        SendCommand::Symlink,
+        vec![
+            (SendAttr::Path, path.to_vec()),
+            (SendAttr::Ino, ino.to_le_bytes().to_vec()),
+            (SendAttr::PathLink, link_target.to_vec()),
+        ],
+    )
+}
+
+/// Helper to build a SetXattr command.
+#[must_use]
+pub fn build_setxattr_command(path: &[u8], name: &[u8], data: &[u8]) -> (SendCommand, Vec<(SendAttr, Vec<u8>)>) {
+    (
+        SendCommand::SetXattr,
+        vec![
+            (SendAttr::Path, path.to_vec()),
+            (SendAttr::XattrName, name.to_vec()),
+            (SendAttr::XattrData, data.to_vec()),
+        ],
+    )
+}
+
 // ── btrfs tree-log replay ─────────────────────────────────────────────────
 
 /// Result of scanning the btrfs tree-log.
@@ -14886,5 +15107,56 @@ mod tests {
         let all_btrfs = xflags_to_btrfs_inode_flags(all_xflags);
         let back_xflags = btrfs_inode_flags_to_xflags(all_btrfs) & !FS_XFLAG_HASATTR;
         assert_eq!(back_xflags, all_xflags, "all settable xflags roundtrip");
+    }
+
+    #[test]
+    fn send_stream_builder_roundtrip() {
+        use super::{
+            SendAttr, SendCommand, SendStreamBuilder, build_chmod_command, build_chown_command,
+            build_mkdir_command, build_mkfile_command, build_subvol_command, build_write_command,
+            parse_send_stream,
+        };
+
+        let mut builder = SendStreamBuilder::new();
+        builder.write_header();
+
+        let uuid = [0x11_u8; 16];
+        let (cmd, attrs) = build_subvol_command(b"test_subvol", &uuid, 1);
+        let attr_refs: Vec<(SendAttr, &[u8])> = attrs.iter().map(|(a, d)| (*a, d.as_slice())).collect();
+        builder.add_command(cmd, &attr_refs);
+
+        let (cmd, attrs) = build_mkdir_command(b"test_subvol/dir1", 257);
+        let attr_refs: Vec<(SendAttr, &[u8])> = attrs.iter().map(|(a, d)| (*a, d.as_slice())).collect();
+        builder.add_command(cmd, &attr_refs);
+
+        let (cmd, attrs) = build_mkfile_command(b"test_subvol/file1.txt", 258);
+        let attr_refs: Vec<(SendAttr, &[u8])> = attrs.iter().map(|(a, d)| (*a, d.as_slice())).collect();
+        builder.add_command(cmd, &attr_refs);
+
+        let (cmd, attrs) = build_write_command(b"test_subvol/file1.txt", 0, b"hello world");
+        let attr_refs: Vec<(SendAttr, &[u8])> = attrs.iter().map(|(a, d)| (*a, d.as_slice())).collect();
+        builder.add_command(cmd, &attr_refs);
+
+        let (cmd, attrs) = build_chmod_command(b"test_subvol/file1.txt", 0o644);
+        let attr_refs: Vec<(SendAttr, &[u8])> = attrs.iter().map(|(a, d)| (*a, d.as_slice())).collect();
+        builder.add_command(cmd, &attr_refs);
+
+        let (cmd, attrs) = build_chown_command(b"test_subvol/file1.txt", 1000, 1000);
+        let attr_refs: Vec<(SendAttr, &[u8])> = attrs.iter().map(|(a, d)| (*a, d.as_slice())).collect();
+        builder.add_command(cmd, &attr_refs);
+
+        builder.finalize();
+        let stream = builder.finish();
+
+        let parsed = parse_send_stream(&stream).expect("parse roundtrip");
+        assert_eq!(parsed.version, 1);
+        assert_eq!(parsed.commands.len(), 7); // subvol, mkdir, mkfile, write, chmod, chown, end
+        assert_eq!(parsed.commands[0].cmd, SendCommand::Subvol);
+        assert_eq!(parsed.commands[1].cmd, SendCommand::Mkdir);
+        assert_eq!(parsed.commands[2].cmd, SendCommand::Mkfile);
+        assert_eq!(parsed.commands[3].cmd, SendCommand::Write);
+        assert_eq!(parsed.commands[4].cmd, SendCommand::Chmod);
+        assert_eq!(parsed.commands[5].cmd, SendCommand::Chown);
+        assert_eq!(parsed.commands[6].cmd, SendCommand::End);
     }
 }

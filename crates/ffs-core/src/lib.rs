@@ -40,10 +40,11 @@ use ffs_btrfs::{
     BTRFS_USER_SETTABLE_FSFLAGS, BTRFS_USER_SETTABLE_XFLAGS, BtrfsBTree, BtrfsBlockGroupItem,
     BtrfsCowNode, BtrfsDirItem, BtrfsExtentAllocator, BtrfsExtentData, BtrfsInodeItem, BtrfsKey,
     BtrfsLeafEntry, BtrfsMutationError, BtrfsNodeSerializeParams, BtrfsRootItem, BtrfsTreeItem,
-    InMemoryCowBtrfsTree, btrfs_inode_flags_to_fsflags, btrfs_inode_flags_to_xflags,
-    enumerate_snapshots, enumerate_subvolumes, fsflags_to_btrfs_inode_flags,
-    map_logical_to_physical, parse_dir_items, parse_extent_data, parse_inode_item, parse_root_item,
-    parse_xattr_items, walk_chunk_tree, walk_tree, xflags_to_btrfs_inode_flags,
+    InMemoryCowBtrfsTree, btrfs_inode_flags_to_fsflags,
+    btrfs_inode_flags_to_xflags, enumerate_snapshots, enumerate_subvolumes,
+    fsflags_to_btrfs_inode_flags, map_logical_to_physical, parse_dir_items, parse_extent_data,
+    parse_inode_item, parse_root_item, parse_xattr_items, walk_chunk_tree, walk_tree,
+    xflags_to_btrfs_inode_flags,
     writeback::{DiskWritebackContext, WriteDependencyDag, WritebackExecutor},
 };
 use ffs_error::FfsError;
@@ -21269,16 +21270,50 @@ impl FsOps for OpenFs {
         &self,
         _cx: &Cx,
         _scope: &mut RequestScope,
-        _args: &[u8],
+        args: &[u8],
     ) -> ffs_error::Result<()> {
         match &self.flavor {
             FsFlavor::Ext4(_) => Err(FfsError::UnsupportedFeature(
                 "BTRFS_IOC_SEND is not supported on ext4 filesystems".to_owned(),
             )),
             FsFlavor::Btrfs(_) => {
-                // Send requires implementing the full btrfs send stream protocol
+                // Parse btrfs_ioctl_send_args:
+                //   __s64 send_fd           (0-7)
+                //   __u64 clone_sources_count (8-15)
+                //   __u64 *clone_sources    (16-23, userspace ptr - not usable in FUSE)
+                //   __u64 parent_root       (24-31)
+                //   __u64 flags             (32-39)
+                //   __u32 version           (40-43)
+                //   __u8 reserved[28]       (44-71)
+                if args.len() < 72 {
+                    return Err(FfsError::Format(
+                        "BTRFS_IOC_SEND args too short".to_owned(),
+                    ));
+                }
+                let _send_fd = i64::from_le_bytes(args[0..8].try_into().unwrap());
+                let clone_sources_count = u64::from_le_bytes(args[8..16].try_into().unwrap());
+                let parent_root = u64::from_le_bytes(args[24..32].try_into().unwrap());
+                let _flags = u64::from_le_bytes(args[32..40].try_into().unwrap());
+
+                // Incremental sends (with parent or clone sources) are not supported
+                if parent_root != 0 {
+                    return Err(FfsError::UnsupportedFeature(
+                        "BTRFS_IOC_SEND: incremental sends (parent_root != 0) not supported"
+                            .to_owned(),
+                    ));
+                }
+                if clone_sources_count != 0 {
+                    return Err(FfsError::UnsupportedFeature(
+                        "BTRFS_IOC_SEND: clone sources not supported".to_owned(),
+                    ));
+                }
+
+                // Full send stream generation infrastructure exists (SendStreamBuilder)
+                // but requires walking the entire FS tree and writing to send_fd.
+                // The fd from userspace is not directly usable in FUSE context.
                 Err(FfsError::UnsupportedFeature(
-                    "BTRFS_IOC_SEND protocol not yet implemented".to_owned(),
+                    "BTRFS_IOC_SEND: full send tree walk not yet implemented (use btrfs-progs on host)"
+                        .to_owned(),
                 ))
             }
         }
