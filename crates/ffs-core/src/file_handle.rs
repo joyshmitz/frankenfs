@@ -18,13 +18,13 @@
 //! 8       4     NFS generation cookie (little-endian u32)
 //! ```
 //!
-//! Total: [`FILE_HANDLE_LEN`] = 12 bytes. `FUSE_FILEHANDLE_LEN` is 128 bytes
+//! Total: `FILE_HANDLE_LEN` = 12 bytes. `FUSE_FILEHANDLE_LEN` is 128 bytes
 //! so this comfortably fits inside the kernel's `f_handle.f_handle[]`. An
 //! `open_by_handle_at` caller decodes the bytes, looks up the inode, and
 //! verifies that the on-disk generation still matches — if the inode has
 //! been freed and reused, the generation cookie has been bumped (see
 //! [`ffs_inode::create_inode`]) and the lookup returns
-//! [`HandleError::Stale`] rather than silently resolving to the new inode.
+//! `HandleError::Stale` rather than silently resolving to the new inode.
 
 use ffs_error::FfsError;
 use ffs_types::InodeNumber;
@@ -76,7 +76,7 @@ pub fn encode(ino: InodeNumber, generation: u32) -> [u8; FILE_HANDLE_LEN] {
 /// Decode a handle buffer back into `(ino, generation)`.
 ///
 /// Returns [`HandleError::BadLength`] if the buffer is not exactly
-/// [`FILE_HANDLE_LEN`] bytes. Generation validation is the caller's
+/// `FILE_HANDLE_LEN` bytes. Generation validation is the caller's
 /// responsibility — use [`verify`] once the current inode attrs are known.
 pub fn decode(bytes: &[u8]) -> Result<(InodeNumber, u32), HandleError> {
     if bytes.len() != FILE_HANDLE_LEN {

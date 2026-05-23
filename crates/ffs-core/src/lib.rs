@@ -17389,7 +17389,7 @@ impl OpenFs {
 
     /// Encode a `name_to_handle_at(2)`-style file handle for `ino`.
     ///
-    /// Returns the [`file_handle::FILE_HANDLE_LEN`]-byte handle that pairs
+    /// Returns the `file_handle::FILE_HANDLE_LEN`-byte handle that pairs
     /// the inode number with its current NFS generation cookie. A future
     /// [`Self::open_by_handle`] call will reject the handle with `ESTALE`
     /// if the inode has since been freed and reused (its generation will
@@ -22610,7 +22610,7 @@ impl FsOps for OpenFs {
 /// Verdict for a single integrity check.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CheckVerdict {
-    /// What was checked (e.g., "superblock", "group_desc[3]", "inode[142]").
+    /// What was checked (e.g., `superblock`, `group_desc[3]`, `inode[142]`).
     pub component: String,
     /// Whether the check passed.
     pub passed: bool,
@@ -22646,7 +22646,7 @@ pub struct IntegrityReport {
     pub posterior_alpha: f64,
     /// Posterior β (prior + observed clean).
     pub posterior_beta: f64,
-    /// E[p] = expected corruption rate.
+    /// `E[p]` = expected corruption rate.
     pub expected_corruption_rate: f64,
     /// Upper credible bound on corruption rate (z=3 by default).
     pub upper_bound_corruption_rate: f64,
@@ -22659,7 +22659,7 @@ impl IntegrityReport {
     ///
     /// Uses the regularized incomplete beta function approximation:
     /// for large sample sizes, the Beta posterior is approximately Normal,
-    /// so P(p < t) ≈ Φ((t - μ) / σ) where μ = E[p], σ = √Var[p].
+    /// so `P(p < t) ≈ Φ((t - μ) / σ)` where `μ = E[p]`, `σ = √Var[p]`.
     #[must_use]
     pub fn prob_healthy(&self, threshold: f64) -> f64 {
         let a = self.posterior_alpha;
