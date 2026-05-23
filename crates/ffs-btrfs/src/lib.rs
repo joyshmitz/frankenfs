@@ -5296,6 +5296,65 @@ pub fn build_mksock_command(path: &[u8], ino: u64) -> (SendCommand, Vec<(SendAtt
     )
 }
 
+/// Helper to build a Snapshot command (start of an incremental send).
+#[must_use]
+pub fn build_snapshot_command(
+    path: &[u8],
+    uuid: &[u8; 16],
+    ctransid: u64,
+    clone_uuid: &[u8; 16],
+    clone_ctransid: u64,
+) -> (SendCommand, Vec<(SendAttr, Vec<u8>)>) {
+    (
+        SendCommand::Snapshot,
+        vec![
+            (SendAttr::Path, path.to_vec()),
+            (SendAttr::Uuid, uuid.to_vec()),
+            (SendAttr::Ctransid, ctransid.to_le_bytes().to_vec()),
+            (SendAttr::CloneUuid, clone_uuid.to_vec()),
+            (SendAttr::CloneCtransid, clone_ctransid.to_le_bytes().to_vec()),
+        ],
+    )
+}
+
+/// Helper to build a Clone command (extent reflink).
+#[must_use]
+pub fn build_clone_command(
+    path: &[u8],
+    offset: u64,
+    len: u64,
+    clone_uuid: &[u8; 16],
+    clone_ctransid: u64,
+    clone_path: &[u8],
+    clone_offset: u64,
+) -> (SendCommand, Vec<(SendAttr, Vec<u8>)>) {
+    (
+        SendCommand::Clone,
+        vec![
+            (SendAttr::Path, path.to_vec()),
+            (SendAttr::FileOffset, offset.to_le_bytes().to_vec()),
+            (SendAttr::CloneLen, len.to_le_bytes().to_vec()),
+            (SendAttr::CloneUuid, clone_uuid.to_vec()),
+            (SendAttr::CloneCtransid, clone_ctransid.to_le_bytes().to_vec()),
+            (SendAttr::ClonePath, clone_path.to_vec()),
+            (SendAttr::CloneOffset, clone_offset.to_le_bytes().to_vec()),
+        ],
+    )
+}
+
+/// Helper to build an UpdateExtent command.
+#[must_use]
+pub fn build_update_extent_command(path: &[u8], offset: u64, len: u64) -> (SendCommand, Vec<(SendAttr, Vec<u8>)>) {
+    (
+        SendCommand::UpdateExtent,
+        vec![
+            (SendAttr::Path, path.to_vec()),
+            (SendAttr::FileOffset, offset.to_le_bytes().to_vec()),
+            (SendAttr::Size, len.to_le_bytes().to_vec()),
+        ],
+    )
+}
+
 // ── btrfs tree-log replay ─────────────────────────────────────────────────
 
 /// Result of scanning the btrfs tree-log.
