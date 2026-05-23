@@ -267,7 +267,7 @@ Real xfstests pass/fail evidence remains blocked on permissioned execution. The 
 ~~The FUSE write path still stages `MergeProof::Unsafe`.~~ **DONE (bd-5lyoy).** The ext4 write path now stages `MergeProof::NonOverlappingExtents` with actual byte ranges for data writes, and `MergeProof::DisjointBlocks` for metadata/allocation writes. The adaptive merge policy can now make informed decisions based on real write patterns. The "9.5× lower expected loss" is now achievable in production, not just benchmarks.
 
 **Real FUSE crash injection.**
-The crash matrix tests in-memory simulation. Real kernel-level crash injection (like xfstests/fstests) is not exercised.
+~~The crash matrix tests in-memory simulation. Real kernel-level crash injection (like xfstests/fstests) is not exercised.~~ **DONE (bd-88kiu).** `scripts/e2e/ffs_btrfs_fuse_crash_injection_e2e.sh` now tests real FUSE mount crash injection: mounts btrfs image via FUSE, runs write workload, sends SIGKILL at configurable crash points, remounts in RO mode, and validates via `btrfs check`. Tests WB-I1/WB-I2 invariants on real I/O, not just DPOR simulation.
 
 ---
 
