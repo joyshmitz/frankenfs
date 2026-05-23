@@ -15599,6 +15599,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(clippy::too_many_lines)]
     fn generate_send_stream_from_fs_tree_items() {
         // Create a minimal FS tree with:
         // - Root directory (inode 256)
@@ -15619,6 +15620,7 @@ mod tests {
         }
 
         // Helper to create an inode ref payload
+        #[expect(clippy::cast_possible_truncation)]
         fn make_inode_ref(index: u64, name: &[u8]) -> Vec<u8> {
             let mut buf = Vec::new();
             buf.extend_from_slice(&index.to_le_bytes());
@@ -15628,6 +15630,7 @@ mod tests {
         }
 
         // Helper to create an inline extent (type 0)
+        #[expect(clippy::cast_possible_truncation)]
         fn make_inline_extent(data: &[u8]) -> Vec<u8> {
             let mut buf = vec![0u8; 21];
             // First 21 bytes: generation(8) + ram_bytes(8) + compression(1) +
@@ -15664,7 +15667,7 @@ mod tests {
                     item_type: BTRFS_ITEM_INODE_ITEM,
                     offset: 0,
                 },
-                data: make_inode_item(0o100644, 13, 1000, 1000), // S_IFREG | 0644
+                data: make_inode_item(0o10_0644, 13, 1000, 1000), // S_IFREG | 0644
             },
             // File inode ref (parent = 256, name = "hello.txt")
             BtrfsLeafEntry {
