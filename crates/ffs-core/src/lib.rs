@@ -53,7 +53,7 @@ use ffs_journal::{
 };
 use ffs_mvcc::persist::WalRecoveryReport;
 use ffs_mvcc::wal_replay::{ReplayOutcome as MvccReplayOutcome, TailPolicy, WalReplayEngine};
-use ffs_mvcc::{CommitError, MvccBlockDevice, MvccStore, Transaction};
+use ffs_mvcc::{CommitError, MergeByteRange, MergeProof, MvccBlockDevice, MvccStore, Transaction};
 use ffs_ondisk::{
     BtrfsChunkEntry, BtrfsSuperblock, EXT4_ERROR_FS, EXT4_ORPHAN_FS, EXT4_VALID_FS, Ext4DirEntry,
     Ext4Extent, Ext4FileType, Ext4GroupDesc, Ext4ImageReader, Ext4Inode, Ext4Superblock, Ext4Xattr,
@@ -8183,7 +8183,8 @@ impl OpenFs {
                 // Zero-fill the new indirect block.
                 let zeros = vec![0_u8; bs as usize];
                 if let Some(tx) = &mut scope.tx {
-                    tx.stage_write(new_block, zeros);
+                    // Newly allocated indirect block: no concurrent txn writes expected.
+                    tx.stage_write_with_proof(new_block, zeros, MergeProof::DisjointBlocks);
                 } else {
                     block_dev.write_block(cx, new_block, &zeros)?;
                 }
@@ -8211,7 +8212,8 @@ impl OpenFs {
                 "indirect block too small for pointer write",
             )?;
             if let Some(tx) = &mut scope.tx {
-                tx.stage_write(ind_block_num, ind_data);
+                // Indirect block pointer update: disjoint from other concurrent txns.
+                tx.stage_write_with_proof(ind_block_num, ind_data, MergeProof::DisjointBlocks);
             } else {
                 block_dev.write_block(cx, ind_block_num, &ind_data)?;
             }
@@ -8244,7 +8246,8 @@ impl OpenFs {
                 "double-indirect leaf block too small for pointer write",
             )?;
             if let Some(tx) = &mut scope.tx {
-                tx.stage_write(level1, data);
+                // Double-indirect pointer update: disjoint from other concurrent txns.
+                tx.stage_write_with_proof(level1, data, MergeProof::DisjointBlocks);
             } else {
                 block_dev.write_block(cx, level1, &data)?;
             }
@@ -8278,7 +8281,8 @@ impl OpenFs {
                 "triple-indirect leaf block too small for pointer write",
             )?;
             if let Some(tx) = &mut scope.tx {
-                tx.stage_write(ind_block, data);
+                // Triple-indirect pointer update: disjoint from other concurrent txns.
+                tx.stage_write_with_proof(ind_block, data, MergeProof::DisjointBlocks);
             } else {
                 block_dev.write_block(cx, ind_block, &data)?;
             }
@@ -8366,7 +8370,8 @@ impl OpenFs {
         let new_block = result.start;
         let zeros = vec![0_u8; bs as usize];
         if let Some(tx) = &mut scope.tx {
-            tx.stage_write(new_block, zeros);
+            // Newly allocated indirect block: no concurrent txn writes expected.
+            tx.stage_write_with_proof(new_block, zeros, MergeProof::DisjointBlocks);
         } else {
             block_dev.write_block(cx, new_block, &zeros)?;
         }
@@ -8424,7 +8429,8 @@ impl OpenFs {
         let new_block = result.start;
         let zeros = vec![0_u8; bs as usize];
         if let Some(tx) = &mut scope.tx {
-            tx.stage_write(new_block, zeros);
+            // Newly allocated indirect block: no concurrent txn writes expected.
+            tx.stage_write_with_proof(new_block, zeros, MergeProof::DisjointBlocks);
         } else {
             let z = vec![0_u8; bs as usize];
             block_dev.write_block(cx, new_block, &z)?;
@@ -8443,7 +8449,8 @@ impl OpenFs {
             "indirect block too small for pointer",
         )?;
         if let Some(tx) = &mut scope.tx {
-            tx.stage_write(parent_block, data);
+            // Parent indirect block pointer update: disjoint from other concurrent txns.
+            tx.stage_write_with_proof(parent_block, data, MergeProof::DisjointBlocks);
         } else {
             block_dev.write_block(cx, parent_block, &data)?;
         }
@@ -8729,7 +8736,8 @@ impl OpenFs {
             let block_data = &cluster_raw[start..start + bs_usize];
 
             if let Some(tx) = &mut scope.tx {
-                tx.stage_write(phys_block, block_data.to_vec());
+                // Newly allocated block for compressed cluster: no concurrent txn writes expected.
+                tx.stage_write_with_proof(phys_block, block_data.to_vec(), MergeProof::DisjointBlocks);
             } else {
                 block_dev.write_block(cx, phys_block, block_data)?;
             }
@@ -8851,7 +8859,8 @@ impl OpenFs {
             new_blocks.push(phys_block);
 
             if let Some(tx) = &mut scope.tx {
-                tx.stage_write(phys_block, block_data);
+                // Newly allocated block for uncompressed cluster: no concurrent txn writes expected.
+                tx.stage_write_with_proof(phys_block, block_data, MergeProof::DisjointBlocks);
             } else {
                 block_dev.write_block(cx, phys_block, &block_data)?;
             }
@@ -11626,7 +11635,12 @@ impl OpenFs {
                     for rel in 0..alloc_mapping.count {
                         let phys_block = BlockNumber(alloc_mapping.physical_start + u64::from(rel));
                         if let Some(tx) = &mut scope.tx {
-                            tx.stage_write(phys_block, zero_block.clone());
+                            // Newly allocated zero-fill block: no concurrent txn writes expected.
+                            tx.stage_write_with_proof(
+                                phys_block,
+                                zero_block.clone(),
+                                MergeProof::DisjointBlocks,
+                            );
                         } else {
                             block_dev.write_block(cx, phys_block, &zero_block)?;
                         }
@@ -11873,7 +11887,11 @@ impl OpenFs {
                 .copy_from_slice(&data[data_start..data_start + chunk_len]);
 
             if let Some(tx) = &mut scope.tx {
-                tx.stage_write(phys_block, block_data);
+                // Provide byte-range proof for adaptive merge policy.
+                let proof = MergeProof::NonOverlappingExtents {
+                    touched_ranges: vec![MergeByteRange::new(block_offset, chunk_len)],
+                };
+                tx.stage_write_with_proof(phys_block, block_data, proof);
             } else {
                 block_dev.write_block(cx, phys_block, &block_data)?;
             }
