@@ -7501,7 +7501,8 @@ mod tests {
         build_mount_open_options, choose_btrfs_scrub_block_size, count_blocks_at_severity_or_higher,
         ext4_appears_clean_state, ext4_group_flag_names, ext4_group_scrub_scope,
         ext4_recovery_detail, ext4_state_flag_names, ext4_mount_replay_mode, filesystem_name,
-        format_ratio_thousandths, format_uuid, btrfs_checksum_type_name, log_mount_runtime_rejected,
+        format_ext4_quota_inodes, format_ratio_thousandths, format_uuid, btrfs_checksum_type_name,
+        log_mount_runtime_rejected,
         log_mount_runtime_selected, mount_cmd, mount_operation_id, open_filesystem_for_mount,
         parse_btrfs_mount_selection, read_ext4_group_desc_from_path, read_ext4_inode_from_path,
         read_file_region, start_mount_background_scrub, summarize_repair_staleness,
@@ -15092,6 +15093,48 @@ mod tests {
         let result = format_ratio_thousandths(usize::MAX, 1);
         assert!(!result.is_empty());
         assert!(result.contains('.'));
+    }
+
+    // ── format_ext4_quota_inodes: quota display formatting ───────────────
+
+    #[test]
+    fn format_ext4_quota_inodes_all_present() {
+        use ffs_ondisk::ext4::Ext4QuotaInodes;
+        let quota = Ext4QuotaInodes {
+            user: Some(3),
+            group: Some(4),
+            project: Some(11),
+        };
+        let result = format_ext4_quota_inodes(&quota);
+        assert!(result.contains("user=3"));
+        assert!(result.contains("group=4"));
+        assert!(result.contains("project=11"));
+    }
+
+    #[test]
+    fn format_ext4_quota_inodes_partial() {
+        use ffs_ondisk::ext4::Ext4QuotaInodes;
+        let quota = Ext4QuotaInodes {
+            user: Some(3),
+            group: None,
+            project: Some(11),
+        };
+        let result = format_ext4_quota_inodes(&quota);
+        assert!(result.contains("user=3"));
+        assert!(!result.contains("group"));
+        assert!(result.contains("project=11"));
+    }
+
+    #[test]
+    fn format_ext4_quota_inodes_empty() {
+        use ffs_ondisk::ext4::Ext4QuotaInodes;
+        let quota = Ext4QuotaInodes {
+            user: None,
+            group: None,
+            project: None,
+        };
+        let result = format_ext4_quota_inodes(&quota);
+        assert!(result.is_empty());
     }
 
     // ── choose_btrfs_scrub_block_size: geometry validation ───────────────
