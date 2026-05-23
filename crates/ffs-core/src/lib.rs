@@ -4694,12 +4694,78 @@ impl OpenFs {
             );
         }
 
+        // ── Load on-disk EXTENT_TREE entries (bd-is7m1) ─────────────────────────
+        //
+        // Find the EXTENT_TREE ROOT_ITEM in root_tree and walk the extent tree
+        // to populate the in-memory extent_tree. Without this, commit would
+        // create a fresh extent_tree containing only NEW allocations, losing
+        // all existing extent accounting and causing `btrfs check` failures.
+        #[expect(clippy::option_if_let_else)]
+        let extent_tree_items_loaded = if let Some(extent_root_entry) = root_items.iter().find(|e| {
+            e.key.objectid == BTRFS_EXTENT_TREE_OBJECTID && e.key.item_type == BTRFS_ITEM_ROOT_ITEM
+        }) {
+            match parse_root_item(&extent_root_entry.data) {
+                Ok(root_item) if root_item.bytenr != 0 => {
+                    match self.walk_btrfs_tree(cx, root_item.bytenr) {
+                        Ok(extent_items) => {
+                            let mut loaded = 0usize;
+                            for item in extent_items {
+                                let key = BtrfsKey {
+                                    objectid: item.key.objectid,
+                                    item_type: item.key.item_type,
+                                    offset: item.key.offset,
+                                };
+                                if extent_alloc
+                                    .extent_tree_mut()
+                                    .insert(key, &item.data)
+                                    .is_ok()
+                                {
+                                    loaded += 1;
+                                }
+                            }
+                            debug!(
+                                target: "ffs::write",
+                                loaded,
+                                extent_root_bytenr = root_item.bytenr,
+                                "loaded on-disk extent_tree entries"
+                            );
+                            loaded
+                        }
+                        Err(e) => {
+                            warn!(
+                                target: "ffs::write",
+                                error = %e,
+                                "failed to walk extent_tree; starting with empty extent_tree"
+                            );
+                            0
+                        }
+                    }
+                }
+                Ok(_) => {
+                    debug!(target: "ffs::write", "EXTENT_TREE ROOT_ITEM has zero bytenr");
+                    0
+                }
+                Err(e) => {
+                    warn!(
+                        target: "ffs::write",
+                        error = %e,
+                        "failed to parse EXTENT_TREE ROOT_ITEM"
+                    );
+                    0
+                }
+            }
+        } else {
+            debug!(target: "ffs::write", "no EXTENT_TREE ROOT_ITEM found in root_tree");
+            0
+        };
+
         info!(
             target: "ffs::write",
             nodesize,
             generation,
             fs_tree_items = items.len(),
             root_tree_items = root_items.len(),
+            extent_tree_items = extent_tree_items_loaded,
             next_objectid = max_objectid + 1,
             "btrfs write state initialized"
         );

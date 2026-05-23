@@ -4324,6 +4324,11 @@ impl BtrfsExtentAllocator {
         &self.extent_tree
     }
 
+    /// Mutable access to the extent tree (for loading on-disk entries at mount).
+    pub fn extent_tree_mut(&mut self) -> &mut InMemoryCowBtrfsTree {
+        &mut self.extent_tree
+    }
+
     /// Get all data extent back-references for a given logical address.
     ///
     /// Returns a list of (root, objectid, offset) tuples representing all
