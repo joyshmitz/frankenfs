@@ -20890,11 +20890,12 @@ impl FsOps for OpenFs {
             FsFlavor::Ext4(_) => Err(FfsError::UnsupportedFeature(
                 "BTRFS_IOC_SCRUB is not supported on ext4 filesystems".to_owned(),
             )),
-            FsFlavor::Btrfs(_) => {
-                // Scrub start not yet integrated with ffs-repair scrub infrastructure.
-                // Return empty progress struct indicating scrub not running.
-                Ok(vec![0_u8; 1024])
-            }
+            // Scrub via ioctl requires async task infrastructure to run the scrub
+            // daemon in the background. The ffs-repair crate has ScrubDaemon which
+            // can verify checksums and attempt recovery, but it runs synchronously.
+            // Wiring to async task runner is deferred (P3 enhancement).
+            // For now, return empty progress struct indicating no scrub running.
+            FsFlavor::Btrfs(_) => Ok(vec![0_u8; 1024]),
         }
     }
 
@@ -20903,12 +20904,10 @@ impl FsOps for OpenFs {
             FsFlavor::Ext4(_) => Err(FfsError::UnsupportedFeature(
                 "BTRFS_IOC_SCRUB_CANCEL is not supported on ext4 filesystems".to_owned(),
             )),
-            FsFlavor::Btrfs(_) => {
-                // No scrub running - return ENOTCONN as kernel does
-                Err(FfsError::Io(std::io::Error::from_raw_os_error(
-                    libc::ENOTCONN,
-                )))
-            }
+            // No async scrub running via ioctl - return ENOTCONN as kernel does
+            FsFlavor::Btrfs(_) => Err(FfsError::Io(std::io::Error::from_raw_os_error(
+                libc::ENOTCONN,
+            ))),
         }
     }
 
@@ -20922,10 +20921,10 @@ impl FsOps for OpenFs {
             FsFlavor::Ext4(_) => Err(FfsError::UnsupportedFeature(
                 "BTRFS_IOC_SCRUB_PROGRESS is not supported on ext4 filesystems".to_owned(),
             )),
-            FsFlavor::Btrfs(_) => {
-                // No scrub running - return empty progress struct
-                Ok(vec![0_u8; 1024])
-            }
+            // No async scrub running via ioctl - return empty progress struct.
+            // Note: ScrubDaemon in ffs-repair can still verify/repair checksums,
+            // just not via this ioctl interface yet.
+            FsFlavor::Btrfs(_) => Ok(vec![0_u8; 1024]),
         }
     }
 
