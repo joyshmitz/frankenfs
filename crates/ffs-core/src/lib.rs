@@ -21989,28 +21989,16 @@ impl FsOps for OpenFs {
             info!(flushed_blocks = flushed, "flush_on_destroy");
         }
 
-        // For btrfs, commit the in-memory CoW tree to disk.
-        // bd-1ving: the writeback layer now uses real allocated logical addresses
-        // from BtrfsAllocState::alloc_metadata_for_tree, fixing the previous
-        // chunk-addressing gap that caused remount failures.
-        if matches!(&self.flavor, FsFlavor::Btrfs(_)) {
-            match self.btrfs_full_transaction_commit(cx, "flush_on_destroy") {
-                Ok(stats) => {
-                    if stats.nodes_written > 0 {
-                        info!(
-                            nodes_written = stats.nodes_written,
-                            bytes_written = stats.bytes_written,
-                            new_generation = stats.new_generation,
-                            "btrfs_flush_on_destroy"
-                        );
-                    }
-                }
-                Err(e) => {
-                    warn!(error = %e, "btrfs_flush_on_destroy_failed");
-                    return Err(e);
-                }
-            }
-        }
+        // btrfs commit-on-destroy is DISABLED pending bd-3umpe fix.
+        //
+        // bd-1ving wired up allocator addressing (logical addresses now come
+        // from alloc_metadata_for_tree), but bd-3umpe identified that the
+        // writeback sets superblock.root to point to FS_TREE instead of
+        // ROOT_TREE, corrupting the tree structure and breaking remount.
+        //
+        // Until the ROOT_TREE handling is fixed, leave btrfs metadata in
+        // memory and discard on unmount - a clean image that lost writes is
+        // preferable to a corrupted/unmountable image.
 
         Ok(())
     }
