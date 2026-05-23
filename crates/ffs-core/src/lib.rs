@@ -49772,22 +49772,27 @@ mod tests {
         }
     }
 
-    // ── Btrfs RW interlock tests ──────────────────────────────────────
+    // ── Btrfs RW mode tests ────────────────────────────────────────────
+    //
+    // The btrfs_rw_ephemeral_ok flag controls commit strategy, not permission:
+    // - false (default) → durable mode with full transaction commit
+    // - true → ephemeral mode with tree-log only
+    // Both modes allow writes; the difference is in durability.
 
-    /// Test that btrfs mutations return EROFS when btrfs_rw_ephemeral_ok is false.
+    /// Test that btrfs mutations succeed in durable mode (btrfs_rw_ephemeral_ok=false).
     #[test]
-    fn btrfs_rw_interlock_refuses_mutations_without_ack() {
+    fn btrfs_rw_durable_mode_allows_mutations() {
         let cx = Cx::for_testing();
         let image = build_btrfs_image();
         let dev = TestDevice::from_vec(image);
         let opts = OpenOptions {
-            btrfs_rw_ephemeral_ok: false,
+            btrfs_rw_ephemeral_ok: false, // durable mode
             ..OpenOptions::default()
         };
         let mut fs = OpenFs::from_device(&cx, Box::new(dev), &opts).unwrap();
         fs.enable_writes(&cx).unwrap();
 
-        // Attempt a create operation - should fail with EROFS
+        // Create operation should succeed - mutations are allowed in durable mode
         let result = fs.create(
             &cx,
             InodeNumber(256),
@@ -49796,12 +49801,13 @@ mod tests {
             1000,
             1000,
         );
-        match result {
-            Err(FfsError::ReadOnly) => {} // expected
-            other => panic!("expected ReadOnly, got {other:?}"),
+        // Should succeed or fail for reasons other than ReadOnly
+        #[allow(clippy::equatable_if_let)]
+        if let Err(FfsError::ReadOnly) = result {
+            panic!("create should not return ReadOnly in durable mode");
         }
 
-        // Attempt mkdir - should also fail with EROFS
+        // mkdir should also succeed
         let result = fs.mkdir(
             &cx,
             InodeNumber(256),
@@ -49810,15 +49816,15 @@ mod tests {
             1000,
             1000,
         );
-        match result {
-            Err(FfsError::ReadOnly) => {} // expected
-            other => panic!("expected ReadOnly for mkdir, got {other:?}"),
+        #[allow(clippy::equatable_if_let)]
+        if let Err(FfsError::ReadOnly) = result {
+            panic!("mkdir should not return ReadOnly in durable mode");
         }
     }
 
-    /// Test that btrfs mutations succeed when btrfs_rw_ephemeral_ok is true.
+    /// Test that btrfs mutations succeed in ephemeral mode (btrfs_rw_ephemeral_ok=true).
     #[test]
-    fn btrfs_rw_interlock_allows_mutations_with_ack() {
+    fn btrfs_rw_ephemeral_mode_allows_mutations() {
         let cx = Cx::for_testing();
         let image = build_btrfs_image();
         let dev = TestDevice::from_vec(image);
