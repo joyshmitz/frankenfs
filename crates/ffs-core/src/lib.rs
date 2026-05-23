@@ -45043,8 +45043,8 @@ mod tests {
             visible: 3,
         };
         let msg = err.to_string();
-        assert!(msg.contains("5"), "should contain requested epoch");
-        assert!(msg.contains("3"), "should contain visible epoch");
+        assert!(msg.contains('5'), "should contain requested epoch");
+        assert!(msg.contains('3'), "should contain visible epoch");
     }
 
     #[test]
@@ -50514,7 +50514,7 @@ mod tests {
 
         // Query a non-existent logical address - should return empty result
         let result = fs
-            .get_btrfs_logical_ino(&cx, &mut RequestScope::empty(), 0x100000)
+            .get_btrfs_logical_ino(&cx, &mut RequestScope::empty(), 0x0010_0000)
             .expect("logical_ino should not error on nonexistent address");
 
         // Verify btrfs_data_container header format:

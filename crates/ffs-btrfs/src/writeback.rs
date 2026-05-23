@@ -1412,8 +1412,8 @@ mod tests {
     fn disk_writeback_context_block_to_bytenr() {
         let ctx = make_disk_context(100);
         assert_eq!(ctx.block_to_bytenr(0), 0);
-        assert_eq!(ctx.block_to_bytenr(1), 16384);
-        assert_eq!(ctx.block_to_bytenr(10), 163840);
+        assert_eq!(ctx.block_to_bytenr(1), 16_384);
+        assert_eq!(ctx.block_to_bytenr(10), 163_840);
     }
 
     #[test]
@@ -1448,6 +1448,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(clippy::cast_possible_truncation)]
     fn disk_writeback_executor_writes_to_buffer() {
         let tree = make_test_tree();
         let ctx = make_disk_context(100);
@@ -1740,7 +1741,7 @@ mod tests {
         // Create a minimal valid superblock buffer
         let mut superblock = vec![0u8; 4096];
         // Set magic at 0x40
-        superblock[0x40..0x48].copy_from_slice(&0x4D5F53665248425F_u64.to_le_bytes()); // btrfs magic
+        superblock[0x40..0x48].copy_from_slice(&0x4D5F_5366_5248_425F_u64.to_le_bytes()); // btrfs magic
 
         arc.patch_superblock(&mut superblock, &params)
             .expect("patch");
@@ -1810,9 +1811,10 @@ mod tests {
         let mut last_committed = false;
 
         for crash_point in arc.crash_points() {
-            if last_committed && !crash_point.superblock_committed {
-                panic!("commit state should never transition back to uncommitted");
-            }
+            assert!(
+                !last_committed || crash_point.superblock_committed,
+                "commit state should never transition back to uncommitted"
+            );
             if !last_committed && crash_point.superblock_committed {
                 // This is the linearization point
                 assert!(!saw_transition, "linearization should happen exactly once");
