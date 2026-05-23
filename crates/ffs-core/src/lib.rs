@@ -14549,16 +14549,58 @@ impl OpenFs {
         // Get root_tree root location for superblock
         let root_tree_root = alloc.root_tree.root_block();
         let root_tree_bytenr = root_disk_ctx.block_to_bytenr(root_tree_root);
+        // Capture root_tree level before releasing the alloc lock so the
+        // superblock's `root_level` stays consistent with the new root_tree
+        // we just wrote.
+        let root_tree_level = alloc.root_tree.root_level();
 
         // Update alloc state generation
         alloc.generation = new_gen;
         drop(alloc);
 
-        // Write the superblock with updated generation and root pointing to ROOT_TREE
-        let mut new_sb = sb.clone();
-        new_sb.generation = new_gen;
-        new_sb.root = root_tree_bytenr;
-        let sb_bytes = new_sb.to_bytes();
+        // Read the existing on-disk superblock and patch it in place rather
+        // than rebuilding from `BtrfsSuperblock::to_bytes`. The struct only
+        // models the fields the parser needs, so `to_bytes` would zero out
+        // the embedded `dev_item` region (offsets ~0xCB..0x12B), the
+        // backup-root ring, and any future fields we haven't taught the
+        // struct about — which `btrfs check` rejects as
+        // "dev_item UUID does not match fsid". `patch_commit` only mutates
+        // the four fields that the new transaction actually changes
+        // (root, root_level, generation, chunk_root_generation) and
+        // recomputes the checksum.
+        let mut sb_bytes = vec![0u8; 4096];
+        self.dev
+            .read_exact_at(
+                cx,
+                ByteOffset(BTRFS_SUPER_INFO_OFFSET as u64),
+                &mut sb_bytes,
+            )
+            .map_err(|e| {
+                FfsError::Io(std::io::Error::other(format!(
+                    "superblock read for in-place patch failed: {e}"
+                )))
+            })?;
+        // Patch only the three fields whose underlying tree we actually
+        // rewrote in this commit:
+        //   - generation (0x48, u64): new transaction generation
+        //   - root (0x50, u64): new root_tree logical address
+        //   - root_level (0xC6, u8): level of the new root_tree
+        //
+        // We deliberately do NOT bump `chunk_root_generation` here (the way
+        // `BtrfsSuperblock::patch_commit` does): our transaction does not
+        // rewrite the chunk_tree, so the chunk_root node on disk still
+        // carries its original generation. If we advertised a newer
+        // chunk_root_generation in the superblock while the chunk_root
+        // header still showed the old generation, btrfs-progs would
+        // (correctly) reject the image with "parent transid verify failed
+        // on <chunk_root> wanted <new_gen> found <old_gen>". The
+        // dev_item / sys_chunk_array / label / backup-root-ring regions are
+        // preserved verbatim by virtue of patching in place.
+        sb_bytes[0x48..0x50].copy_from_slice(&new_gen.to_le_bytes());
+        sb_bytes[0x50..0x58].copy_from_slice(&root_tree_bytenr.to_le_bytes());
+        sb_bytes[0xC6] = root_tree_level;
+        let csum = ffs_types::crc32c(&sb_bytes[0x20..]);
+        sb_bytes[0..4].copy_from_slice(&csum.to_le_bytes());
 
         // Write superblock to primary location (0x10000 = 64 KiB)
         self.dev
@@ -50235,5 +50277,57 @@ mod tests {
         use super::ext4_mmp_status_class;
         use ffs_ondisk::ext4::Ext4MmpStatus;
         assert_eq!(ext4_mmp_status_class(Ext4MmpStatus::UnsafeUnknown(0xDEAD)), "unsafe_unknown");
+    }
+
+    #[test]
+    fn btrfs_encoded_read_returns_inline_extent_data() {
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+
+        // Create a small file that will use inline extent
+        let attr = ops
+            .create(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                std::ffi::OsStr::new("inline.txt"),
+                0o644,
+                0,
+                0,
+            )
+            .expect("create");
+
+        let content = b"hello inline extent";
+        let written = ops
+            .write(&cx, &mut RequestScope::empty(), attr.ino, 0, content)
+            .expect("write");
+        assert_eq!(written as usize, content.len());
+
+        // Build encoded_io_args: 40+ bytes with offset=0, flags=0, len=4096
+        let mut args = vec![0u8; 64];
+        // iov pointer (8) + iovcnt (8) = 16 bytes (ignored)
+        // offset at byte 16
+        args[16..24].copy_from_slice(&0_u64.to_le_bytes());
+        // flags at byte 24
+        args[24..32].copy_from_slice(&0_u64.to_le_bytes());
+        // max_len at byte 32
+        args[32..40].copy_from_slice(&4096_u64.to_le_bytes());
+
+        let result = fs
+            .btrfs_encoded_read(&cx, &mut RequestScope::empty(), attr.ino.0, &args)
+            .expect("encoded_read");
+
+        // Result should have 32-byte header + data
+        assert!(result.len() >= 32, "result too short: {}", result.len());
+
+        // Parse header
+        let len = u64::from_le_bytes(result[0..8].try_into().unwrap());
+        let unencoded_len = u64::from_le_bytes(result[8..16].try_into().unwrap());
+        let _unencoded_offset = u64::from_le_bytes(result[16..24].try_into().unwrap());
+        let compression = u32::from_le_bytes(result[24..28].try_into().unwrap());
+
+        assert!(len > 0, "encoded length should be > 0");
+        assert_eq!(unencoded_len, content.len() as u64);
+        assert_eq!(compression, 0, "inline extent should be uncompressed");
     }
 }
