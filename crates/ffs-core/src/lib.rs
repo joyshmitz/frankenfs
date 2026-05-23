@@ -36,7 +36,7 @@ use ffs_btrfs::{
     BTRFS_FIRST_FREE_OBJECTID, BTRFS_FS_TREE_OBJECTID, BTRFS_FT_BLKDEV, BTRFS_FT_CHRDEV, BTRFS_FT_DIR, BTRFS_FT_FIFO,
     BTRFS_FT_REG_FILE, BTRFS_FT_SOCK, BTRFS_FT_SYMLINK, BTRFS_ITEM_DIR_INDEX, BTRFS_ITEM_DIR_ITEM,
     BTRFS_ITEM_EXTENT_DATA, BTRFS_ITEM_INODE_ITEM, BTRFS_ITEM_INODE_REF, BTRFS_ITEM_ROOT_ITEM,
-    BTRFS_ITEM_ROOT_REF, BTRFS_ITEM_XATTR_ITEM, BTRFS_ROOT_TREE_OBJECTID,
+    BTRFS_ITEM_ROOT_REF, BTRFS_ITEM_XATTR_ITEM, BTRFS_ROOT_SUBVOL_RDONLY, BTRFS_ROOT_TREE_OBJECTID,
     BTRFS_USER_SETTABLE_FSFLAGS, BTRFS_USER_SETTABLE_XFLAGS, BtrfsBTree, BtrfsBlockGroupItem,
     BtrfsCowNode, BtrfsDirItem, BtrfsExtentAllocator, BtrfsExtentData, BtrfsInodeItem, BtrfsKey,
     BtrfsLeafEntry, BtrfsMutationError, BtrfsNodeSerializeParams, BtrfsRootItem, BtrfsTreeItem,
@@ -21801,7 +21801,7 @@ impl FsOps for OpenFs {
         _cx: &Cx,
         _scope: &mut RequestScope,
         _ino: InodeNumber,
-        _flags: u64,
+        flags: u64,
     ) -> ffs_error::Result<()> {
         match &self.flavor {
             FsFlavor::Ext4(_) => Err(FfsError::UnsupportedFeature(
@@ -21809,9 +21809,45 @@ impl FsOps for OpenFs {
             )),
             FsFlavor::Btrfs(_) => {
                 self.require_btrfs_rw_allowed("subvol_setflags")?;
-                Err(FfsError::UnsupportedFeature(
-                    "BTRFS_IOC_SUBVOL_SETFLAGS write path not yet implemented".to_owned(),
-                ))
+
+                // Only BTRFS_ROOT_SUBVOL_RDONLY (bit 0) is user-settable
+                if flags & !BTRFS_ROOT_SUBVOL_RDONLY != 0 {
+                    return Err(FfsError::UnsupportedFeature(format!(
+                        "invalid subvol flags 0x{flags:x}: only RDONLY (0x1) is settable"
+                    )));
+                }
+
+                let subvol_id = self
+                    .btrfs_context
+                    .as_ref()
+                    .map_or(BTRFS_FS_TREE_OBJECTID, |ctx| ctx.subvol_objectid);
+
+                let root_key = BtrfsKey {
+                    objectid: subvol_id,
+                    item_type: BTRFS_ITEM_ROOT_ITEM,
+                    offset: 0,
+                };
+
+                let alloc_mutex = self.require_btrfs_alloc_state()?;
+                {
+                    let mut alloc = alloc_mutex.lock();
+
+                    let mut root_item_data = alloc.root_tree.get(&root_key).ok_or_else(|| {
+                        FfsError::NotFound(format!(
+                            "btrfs ROOT_ITEM for subvolume objectid {subvol_id}"
+                        ))
+                    })?;
+
+                    BtrfsRootItem::patch_flags(&mut root_item_data, flags)
+                        .map_err(|e| FfsError::Parse(format!("ROOT_ITEM flags patch failed: {e}")))?;
+
+                    alloc
+                        .root_tree
+                        .update(&root_key, &root_item_data)
+                        .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+                }
+
+                Ok(())
             }
         }
     }

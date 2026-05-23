@@ -398,6 +398,24 @@ impl BtrfsRootItem {
         Ok(())
     }
 
+    /// Update the flags field in a ROOT_ITEM blob in-place.
+    ///
+    /// # Arguments
+    /// * `data` - Mutable ROOT_ITEM data (must be at least 279 bytes)
+    /// * `flags` - New flags value
+    pub fn patch_flags(data: &mut [u8], flags: u64) -> Result<(), ParseError> {
+        if data.len() < BTRFS_ROOT_ITEM_SIZE {
+            return Err(ParseError::InsufficientData {
+                needed: BTRFS_ROOT_ITEM_SIZE,
+                offset: 0,
+                actual: data.len(),
+            });
+        }
+        data[BTRFS_ROOT_ITEM_FLAGS_OFFSET..BTRFS_ROOT_ITEM_FLAGS_OFFSET + 8]
+            .copy_from_slice(&flags.to_le_bytes());
+        Ok(())
+    }
+
     /// Create a minimal ROOT_ITEM blob suitable for new trees.
     ///
     /// Sets essential fields (bytenr, level, generation, root_dirid, refs)
@@ -570,7 +588,7 @@ pub const BTRFS_ITEM_ROOT_REF: u8 = 156;
 /// btrfs ROOT_BACKREF item type (child → parent subvolume link).
 pub const BTRFS_ITEM_ROOT_BACKREF: u8 = 144;
 /// Flag bit in `BtrfsRootItem::flags` indicating a read-only subvolume.
-const BTRFS_ROOT_SUBVOL_RDONLY: u64 = 1 << 0;
+pub const BTRFS_ROOT_SUBVOL_RDONLY: u64 = 1 << 0;
 /// First free objectid for user subvolumes.
 pub const BTRFS_FIRST_FREE_OBJECTID: u64 = 256;
 
@@ -7444,6 +7462,33 @@ mod tests {
         assert_eq!(patched.level, 1);
         assert_eq!(patched.generation, 200);
         assert_eq!(patched.root_dirid, 256);
+    }
+
+    #[test]
+    fn root_item_patch_flags_updates_field() {
+        let item = BtrfsRootItem {
+            bytenr: 0x1000,
+            level: 0,
+            generation: 100,
+            root_dirid: 256,
+            flags: 0,
+            refs: 1,
+            uuid: [0; 16],
+            parent_uuid: [0; 16],
+        };
+        let mut data = item.to_bytes();
+
+        // Set RDONLY flag
+        BtrfsRootItem::patch_flags(&mut data, BTRFS_ROOT_SUBVOL_RDONLY).expect("patch");
+        let patched = parse_root_item(&data).expect("parse patched");
+        assert_eq!(patched.flags, BTRFS_ROOT_SUBVOL_RDONLY);
+        assert_eq!(patched.bytenr, 0x1000); // unchanged
+        assert_eq!(patched.generation, 100); // unchanged
+
+        // Clear RDONLY flag
+        BtrfsRootItem::patch_flags(&mut data, 0).expect("patch");
+        let cleared = parse_root_item(&data).expect("parse cleared");
+        assert_eq!(cleared.flags, 0);
     }
 
     #[test]
