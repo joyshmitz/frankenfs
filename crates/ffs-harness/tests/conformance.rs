@@ -5,8 +5,10 @@ use ffs_btrfs::{
     BTRFS_CHUNK_TREE_OBJECTID, BTRFS_DEV_TREE_OBJECTID, BTRFS_FILE_EXTENT_REG,
     BTRFS_FS_TREE_OBJECTID, BTRFS_FT_REG_FILE, BTRFS_ITEM_CHUNK, BTRFS_ITEM_DEV_ITEM,
     BTRFS_ITEM_DIR_INDEX, BTRFS_ITEM_EXTENT_DATA, BTRFS_ITEM_INODE_ITEM, BTRFS_SEND_STREAM_MAGIC,
-    BtrfsDeviceSet, SendCommand, parse_send_stream, replay_tree_log, walk_chunk_tree,
-    walk_device_tree,
+    BtrfsDeviceSet, SendAttr, SendCommand, SendStreamBuilder, build_chmod_command,
+    build_chown_command, build_mkdir_command, build_mkfile_command, build_setxattr_command,
+    build_subvol_command, build_symlink_command, build_truncate_command, build_utimes_command,
+    build_write_command, parse_send_stream, replay_tree_log, walk_chunk_tree, walk_device_tree,
 };
 use ffs_core::{
     Ext4JournalReplayMode, FIEMAP_EXTENT_UNWRITTEN, FileType, FsOps, OpenFs, OpenOptions,
@@ -4366,6 +4368,73 @@ fn btrfs_send_stream_rejects_missing_end_command() {
 
     let err = parse_send_stream(&data).unwrap_err();
     assert!(matches!(err, ffs_types::ParseError::InvalidField { .. }));
+}
+
+#[test]
+fn send_stream_builder_all_command_types_roundtrip() {
+    let mut builder = SendStreamBuilder::new();
+    builder.write_header();
+
+    let uuid = [0xAB_u8; 16];
+
+    let (cmd, attrs) = build_subvol_command(b"mysubvol", &uuid, 42);
+    let refs: Vec<(SendAttr, &[u8])> = attrs.iter().map(|(a, d)| (*a, d.as_slice())).collect();
+    builder.add_command(cmd, &refs);
+
+    let (cmd, attrs) = build_mkdir_command(b"mysubvol/dir", 257);
+    let refs: Vec<(SendAttr, &[u8])> = attrs.iter().map(|(a, d)| (*a, d.as_slice())).collect();
+    builder.add_command(cmd, &refs);
+
+    let (cmd, attrs) = build_mkfile_command(b"mysubvol/file.txt", 258);
+    let refs: Vec<(SendAttr, &[u8])> = attrs.iter().map(|(a, d)| (*a, d.as_slice())).collect();
+    builder.add_command(cmd, &refs);
+
+    let (cmd, attrs) = build_write_command(b"mysubvol/file.txt", 0, b"content");
+    let refs: Vec<(SendAttr, &[u8])> = attrs.iter().map(|(a, d)| (*a, d.as_slice())).collect();
+    builder.add_command(cmd, &refs);
+
+    let (cmd, attrs) = build_truncate_command(b"mysubvol/file.txt", 7);
+    let refs: Vec<(SendAttr, &[u8])> = attrs.iter().map(|(a, d)| (*a, d.as_slice())).collect();
+    builder.add_command(cmd, &refs);
+
+    let (cmd, attrs) = build_chmod_command(b"mysubvol/file.txt", 0o644);
+    let refs: Vec<(SendAttr, &[u8])> = attrs.iter().map(|(a, d)| (*a, d.as_slice())).collect();
+    builder.add_command(cmd, &refs);
+
+    let (cmd, attrs) = build_chown_command(b"mysubvol/file.txt", 1000, 1000);
+    let refs: Vec<(SendAttr, &[u8])> = attrs.iter().map(|(a, d)| (*a, d.as_slice())).collect();
+    builder.add_command(cmd, &refs);
+
+    let (cmd, attrs) = build_utimes_command(b"mysubvol/file.txt", 1000, 0, 2000, 0, 3000, 0);
+    let refs: Vec<(SendAttr, &[u8])> = attrs.iter().map(|(a, d)| (*a, d.as_slice())).collect();
+    builder.add_command(cmd, &refs);
+
+    let (cmd, attrs) = build_symlink_command(b"mysubvol/link", 259, b"file.txt");
+    let refs: Vec<(SendAttr, &[u8])> = attrs.iter().map(|(a, d)| (*a, d.as_slice())).collect();
+    builder.add_command(cmd, &refs);
+
+    let (cmd, attrs) = build_setxattr_command(b"mysubvol/file.txt", b"user.test", b"value");
+    let refs: Vec<(SendAttr, &[u8])> = attrs.iter().map(|(a, d)| (*a, d.as_slice())).collect();
+    builder.add_command(cmd, &refs);
+
+    builder.finalize();
+    let stream = builder.finish();
+
+    let parsed = parse_send_stream(&stream).expect("parse builder-generated stream");
+    assert_eq!(parsed.version, 1);
+    assert_eq!(parsed.commands.len(), 11); // subvol, mkdir, mkfile, write, truncate, chmod, chown, utimes, symlink, setxattr, end
+
+    assert_eq!(parsed.commands[0].cmd, SendCommand::Subvol);
+    assert_eq!(parsed.commands[1].cmd, SendCommand::Mkdir);
+    assert_eq!(parsed.commands[2].cmd, SendCommand::Mkfile);
+    assert_eq!(parsed.commands[3].cmd, SendCommand::Write);
+    assert_eq!(parsed.commands[4].cmd, SendCommand::Truncate);
+    assert_eq!(parsed.commands[5].cmd, SendCommand::Chmod);
+    assert_eq!(parsed.commands[6].cmd, SendCommand::Chown);
+    assert_eq!(parsed.commands[7].cmd, SendCommand::Utimes);
+    assert_eq!(parsed.commands[8].cmd, SendCommand::Symlink);
+    assert_eq!(parsed.commands[9].cmd, SendCommand::SetXattr);
+    assert_eq!(parsed.commands[10].cmd, SendCommand::End);
 }
 
 #[test]
