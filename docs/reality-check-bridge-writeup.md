@@ -75,7 +75,7 @@ This workstream is the core fix for the headline problem. **All A-workstream ite
 - **WB-I1:** At every crash point, the set of durable nodes is prefix-closed under "references"
 - **WB-I2:** A reader after crash observes generation `g` or `g+1`, never torn
 
-**A5-A6 Remount/Differential Tests.** *Mounted E2E shipped.* `crates/ffs-harness/tests/fuse_e2e.rs` now includes `btrfs_rw_durable_remount_persistence_test` (cba43b6a): mounts btrfs image, creates file, writes data, unmounts, remounts, verifies data persists. btrfs-progs differential (`btrfs check` on FrankenFS-written images) in progress (pane 2).
+**A5-A6 Remount/Differential Tests.** *Shipped.* `scripts/e2e/ffs_btrfs_rw_durable_remount_e2e.sh` mounts btrfs image, creates file, writes data, unmounts, remounts, verifies data persists. btrfs-progs differential (`btrfs check` on FrankenFS-written images) is implemented in `scripts/e2e/ffs_btrfs_progs_differential_e2e.sh` and `scripts/e2e/ffs_btrfs_fuse_crash_injection_e2e.sh`.
 
 ### Workstream B: Honest, Test-Derived Parity (P1)
 
@@ -252,13 +252,10 @@ Both are now fixed: `BtrfsAllocState::alloc_metadata_for_tree` hands out logical
 
 **Harness ratio:** Meta-machinery relocated to `tools/ffs-ops`. The `ffs-*` workspace filesystem LOC is no longer inflated by it.
 
-### What Is Still Deferred or In Progress
-
-**btrfs-progs differential (in progress, pane 2).**
-`btrfs check` on FrankenFS-written images to prove on-disk format correctness. Mounted E2E remount-persistence test (cba43b6a) validates functional durability; btrfs-progs differential will validate structural correctness.
+### What Is Still Deferred
 
 **bd-xuo95.39, btrfs tree-log fast-fsync (V1.x deferred).**
-The btrfs tree-log write path makes a single-file `fsync` durable without a full transaction commit. The read/replay path already exists (`replay_tree_log`). The write path is explicitly tracked as V1.x future scope so the capability is NOT silently dropped. This is a performance optimization, not a correctness gap; once A1-A6 land, btrfs `fsync` will do a full transaction commit (correct, but slower than kernel btrfs).
+The btrfs tree-log write path makes a single-file `fsync` durable without a full transaction commit. The read/replay path already exists (`replay_tree_log`). The write path is explicitly tracked as V1.x future scope so the capability is NOT silently dropped. This is a performance optimization, not a correctness gap; btrfs `fsync` currently does a full transaction commit (correct, but slower than kernel btrfs).
 
 **xfstests baseline.**
 Real xfstests pass/fail evidence remains blocked on permissioned execution. The infrastructure exists; the evidence does not.
@@ -298,9 +295,8 @@ The bd-xuo95 reality-check-bridge work is solid engineering, not theater.
 - Real verification: DPOR enumeration plus WB-I1/WB-I2 oracles actually execute
 
 **What needs attention:**
-- A1-A6 (btrfs serialization) still in progress: infrastructure ready, implementation pending
-- Documentation staleness: `FEATURE_PARITY.md` underclaims some completed work
-- The crash matrix is simulation, not real FUSE crashes
+- Documentation staleness: `FEATURE_PARITY.md` may underclaim some completed work
+- btrfs tree-log write path remains V1.x future scope (performance optimization)
 
 **No overclaims found** in the post-bridge state:
 - btrfs RW says "in-memory", not "durable"
