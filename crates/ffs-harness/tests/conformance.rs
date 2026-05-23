@@ -6,8 +6,10 @@ use ffs_btrfs::{
     BTRFS_FS_TREE_OBJECTID, BTRFS_FT_REG_FILE, BTRFS_ITEM_CHUNK, BTRFS_ITEM_DEV_ITEM,
     BTRFS_ITEM_DIR_INDEX, BTRFS_ITEM_EXTENT_DATA, BTRFS_ITEM_INODE_ITEM, BTRFS_SEND_STREAM_MAGIC,
     BtrfsDeviceSet, SendAttr, SendCommand, SendStreamBuilder, build_chmod_command,
-    build_chown_command, build_mkdir_command, build_mkfile_command, build_setxattr_command,
-    build_subvol_command, build_symlink_command, build_truncate_command, build_utimes_command,
+    build_chown_command, build_link_command, build_mkdir_command, build_mkfifo_command,
+    build_mkfile_command, build_mknod_command, build_mksock_command, build_removexattr_command,
+    build_rename_command, build_rmdir_command, build_setxattr_command, build_subvol_command,
+    build_symlink_command, build_truncate_command, build_unlink_command, build_utimes_command,
     build_write_command, parse_send_stream, replay_tree_log, walk_chunk_tree, walk_device_tree,
 };
 use ffs_core::{
@@ -4435,6 +4437,105 @@ fn send_stream_builder_all_command_types_roundtrip() {
     assert_eq!(parsed.commands[8].cmd, SendCommand::Symlink);
     assert_eq!(parsed.commands[9].cmd, SendCommand::SetXattr);
     assert_eq!(parsed.commands[10].cmd, SendCommand::End);
+}
+
+#[test]
+fn send_stream_builder_mutation_commands_roundtrip() {
+    let mut builder = SendStreamBuilder::new();
+    builder.write_header();
+
+    let uuid = [0xCD_u8; 16];
+
+    let (cmd, attrs) = build_subvol_command(b"mutations", &uuid, 1);
+    let refs: Vec<(SendAttr, &[u8])> = attrs.iter().map(|(a, d)| (*a, d.as_slice())).collect();
+    builder.add_command(cmd, &refs);
+
+    let (cmd, attrs) = build_mkfile_command(b"mutations/old.txt", 257);
+    let refs: Vec<(SendAttr, &[u8])> = attrs.iter().map(|(a, d)| (*a, d.as_slice())).collect();
+    builder.add_command(cmd, &refs);
+
+    let (cmd, attrs) = build_rename_command(b"mutations/old.txt", b"mutations/new.txt");
+    let refs: Vec<(SendAttr, &[u8])> = attrs.iter().map(|(a, d)| (*a, d.as_slice())).collect();
+    builder.add_command(cmd, &refs);
+
+    let (cmd, attrs) = build_link_command(b"mutations/new.txt", b"mutations/hardlink.txt");
+    let refs: Vec<(SendAttr, &[u8])> = attrs.iter().map(|(a, d)| (*a, d.as_slice())).collect();
+    builder.add_command(cmd, &refs);
+
+    let (cmd, attrs) = build_setxattr_command(b"mutations/new.txt", b"user.attr", b"val");
+    let refs: Vec<(SendAttr, &[u8])> = attrs.iter().map(|(a, d)| (*a, d.as_slice())).collect();
+    builder.add_command(cmd, &refs);
+
+    let (cmd, attrs) = build_removexattr_command(b"mutations/new.txt", b"user.attr");
+    let refs: Vec<(SendAttr, &[u8])> = attrs.iter().map(|(a, d)| (*a, d.as_slice())).collect();
+    builder.add_command(cmd, &refs);
+
+    let (cmd, attrs) = build_unlink_command(b"mutations/hardlink.txt");
+    let refs: Vec<(SendAttr, &[u8])> = attrs.iter().map(|(a, d)| (*a, d.as_slice())).collect();
+    builder.add_command(cmd, &refs);
+
+    let (cmd, attrs) = build_mkdir_command(b"mutations/subdir", 258);
+    let refs: Vec<(SendAttr, &[u8])> = attrs.iter().map(|(a, d)| (*a, d.as_slice())).collect();
+    builder.add_command(cmd, &refs);
+
+    let (cmd, attrs) = build_rmdir_command(b"mutations/subdir");
+    let refs: Vec<(SendAttr, &[u8])> = attrs.iter().map(|(a, d)| (*a, d.as_slice())).collect();
+    builder.add_command(cmd, &refs);
+
+    builder.finalize();
+    let stream = builder.finish();
+
+    let parsed = parse_send_stream(&stream).expect("parse mutation stream");
+    assert_eq!(parsed.version, 1);
+    assert_eq!(parsed.commands.len(), 10);
+
+    assert_eq!(parsed.commands[0].cmd, SendCommand::Subvol);
+    assert_eq!(parsed.commands[1].cmd, SendCommand::Mkfile);
+    assert_eq!(parsed.commands[2].cmd, SendCommand::Rename);
+    assert_eq!(parsed.commands[3].cmd, SendCommand::Link);
+    assert_eq!(parsed.commands[4].cmd, SendCommand::SetXattr);
+    assert_eq!(parsed.commands[5].cmd, SendCommand::RemoveXattr);
+    assert_eq!(parsed.commands[6].cmd, SendCommand::Unlink);
+    assert_eq!(parsed.commands[7].cmd, SendCommand::Mkdir);
+    assert_eq!(parsed.commands[8].cmd, SendCommand::Rmdir);
+    assert_eq!(parsed.commands[9].cmd, SendCommand::End);
+}
+
+#[test]
+fn send_stream_builder_special_files_roundtrip() {
+    let mut builder = SendStreamBuilder::new();
+    builder.write_header();
+
+    let uuid = [0xEF_u8; 16];
+
+    let (cmd, attrs) = build_subvol_command(b"specials", &uuid, 1);
+    let refs: Vec<(SendAttr, &[u8])> = attrs.iter().map(|(a, d)| (*a, d.as_slice())).collect();
+    builder.add_command(cmd, &refs);
+
+    let (cmd, attrs) = build_mknod_command(b"specials/blockdev", 257, 0o660 | 0o60000, 0x0801);
+    let refs: Vec<(SendAttr, &[u8])> = attrs.iter().map(|(a, d)| (*a, d.as_slice())).collect();
+    builder.add_command(cmd, &refs);
+
+    let (cmd, attrs) = build_mkfifo_command(b"specials/fifo", 258);
+    let refs: Vec<(SendAttr, &[u8])> = attrs.iter().map(|(a, d)| (*a, d.as_slice())).collect();
+    builder.add_command(cmd, &refs);
+
+    let (cmd, attrs) = build_mksock_command(b"specials/socket", 259);
+    let refs: Vec<(SendAttr, &[u8])> = attrs.iter().map(|(a, d)| (*a, d.as_slice())).collect();
+    builder.add_command(cmd, &refs);
+
+    builder.finalize();
+    let stream = builder.finish();
+
+    let parsed = parse_send_stream(&stream).expect("parse special files stream");
+    assert_eq!(parsed.version, 1);
+    assert_eq!(parsed.commands.len(), 5);
+
+    assert_eq!(parsed.commands[0].cmd, SendCommand::Subvol);
+    assert_eq!(parsed.commands[1].cmd, SendCommand::Mknod);
+    assert_eq!(parsed.commands[2].cmd, SendCommand::Mkfifo);
+    assert_eq!(parsed.commands[3].cmd, SendCommand::Mksock);
+    assert_eq!(parsed.commands[4].cmd, SendCommand::End);
 }
 
 #[test]
