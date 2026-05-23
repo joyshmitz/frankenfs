@@ -39,7 +39,7 @@ use ffs_btrfs::{
     BTRFS_ITEM_ROOT_REF, BTRFS_ITEM_XATTR_ITEM, BTRFS_ROOT_TREE_OBJECTID,
     BTRFS_USER_SETTABLE_FSFLAGS, BTRFS_USER_SETTABLE_XFLAGS, BtrfsBTree, BtrfsBlockGroupItem,
     BtrfsCowNode, BtrfsDirItem, BtrfsExtentAllocator, BtrfsExtentData, BtrfsInodeItem, BtrfsKey,
-    BtrfsLeafEntry, BtrfsMutationError, BtrfsNodeSerializeParams, BtrfsTreeItem,
+    BtrfsLeafEntry, BtrfsMutationError, BtrfsNodeSerializeParams, BtrfsRootItem, BtrfsTreeItem,
     InMemoryCowBtrfsTree, btrfs_inode_flags_to_fsflags, btrfs_inode_flags_to_xflags,
     enumerate_snapshots, enumerate_subvolumes, fsflags_to_btrfs_inode_flags,
     map_logical_to_physical, parse_dir_items, parse_extent_data, parse_inode_item, parse_root_item,
@@ -572,6 +572,8 @@ struct Ext4AllocState {
 /// tracks all FS-tree items, an extent allocator for data/metadata blocks,
 /// and a monotonically-increasing objectid counter for new inodes.
 struct BtrfsAllocState {
+    /// In-memory COW B-tree holding ROOT_TREE items (ROOT_ITEMs pointing to each tree).
+    root_tree: InMemoryCowBtrfsTree,
     /// In-memory COW B-tree holding all FS-tree items (inodes, dirs, extents).
     fs_tree: InMemoryCowBtrfsTree,
     /// Extent allocator for data and metadata block allocation.
@@ -4581,8 +4583,8 @@ impl OpenFs {
         }
     }
 
-    /// Load btrfs allocation state by walking the FS tree and populating
-    /// the in-memory COW tree and extent allocator.
+    /// Load btrfs allocation state by walking the ROOT tree and FS tree,
+    /// populating the in-memory COW trees and extent allocator.
     fn load_btrfs_alloc_state(&self, cx: &Cx) -> Result<BtrfsAllocState, FfsError> {
         let sb = match &self.flavor {
             FsFlavor::Btrfs(sb) => sb,
@@ -4594,11 +4596,37 @@ impl OpenFs {
         let sectorsize = sb.sectorsize;
         let generation = sb.generation;
 
-        // Walk the FS tree to populate the in-memory COW tree.
-        let items = self.walk_btrfs_fs_tree(cx)?;
         // btrfs leaf: header (BTRFS_HEADER_SIZE=101 bytes) + N items (BTRFS_ITEM_SIZE=25 bytes each)
         let max_items_per_node = (nodesize as usize).saturating_sub(101) / 25;
         let max_items = max_items_per_node.max(3);
+
+        // Walk the ROOT tree (tree 1) to populate the in-memory COW tree.
+        // This tree contains ROOT_ITEMs pointing to each subvolume tree.
+        let root_items = self.walk_btrfs_root_tree(cx)?;
+        let mut root_tree =
+            InMemoryCowBtrfsTree::new(max_items).map_err(|e| btrfs_mutation_to_ffs(&e))?;
+        for item in &root_items {
+            let tree_item = BtrfsTreeItem {
+                key: BtrfsKey {
+                    objectid: item.key.objectid,
+                    item_type: item.key.item_type,
+                    offset: item.key.offset,
+                },
+                data: item.data.clone(),
+            };
+            root_tree
+                .update(&tree_item.key, &tree_item.data)
+                .or_else(|err| match err {
+                    BtrfsMutationError::KeyNotFound => {
+                        root_tree.insert(tree_item.key, &tree_item.data)
+                    }
+                    other => Err(other),
+                })
+                .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+        }
+
+        // Walk the FS tree to populate the in-memory COW tree.
+        let items = self.walk_btrfs_fs_tree(cx)?;
         let mut fs_tree =
             InMemoryCowBtrfsTree::new(max_items).map_err(|e| btrfs_mutation_to_ffs(&e))?;
 
@@ -4668,12 +4696,14 @@ impl OpenFs {
             target: "ffs::write",
             nodesize,
             generation,
-            items_loaded = items.len(),
+            fs_tree_items = items.len(),
+            root_tree_items = root_items.len(),
             next_objectid = max_objectid + 1,
             "btrfs write state initialized"
         );
 
         Ok(BtrfsAllocState {
+            root_tree,
             fs_tree,
             extent_alloc,
             next_objectid: max_objectid + 1,
@@ -14416,22 +14446,88 @@ impl OpenFs {
 
         flush_result.map_err(|e| btrfs_mutation_to_ffs(&e))?;
 
-        // Issue fsync barrier before superblock write
-        executor.fsync_barrier();
-        self.dev.sync(cx)?;
-
-        // Get fs_tree root location for superblock update
+        // Get fs_tree root location for ROOT_ITEM update
         let fs_tree_root = alloc.fs_tree.root_block();
         let fs_tree_bytenr = disk_ctx.block_to_bytenr(fs_tree_root);
+        let fs_tree_level = alloc.fs_tree.root_level();
+
+        // Update ROOT_ITEM for FS_TREE in root_tree with new location
+        let fs_root_key = BtrfsKey {
+            objectid: BTRFS_FS_TREE_OBJECTID,
+            item_type: BTRFS_ITEM_ROOT_ITEM,
+            offset: 0,
+        };
+        if let Some(mut root_item_data) = alloc.root_tree.get(&fs_root_key) {
+            BtrfsRootItem::patch_root_commit(
+                &mut root_item_data,
+                fs_tree_bytenr,
+                fs_tree_level,
+                new_gen,
+            )
+            .map_err(|e| FfsError::Parse(format!("ROOT_ITEM patch failed: {e}")))?;
+            alloc
+                .root_tree
+                .update(&fs_root_key, &root_item_data)
+                .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+        }
+
+        // Build WriteDependencyDag for root_tree and commit it
+        let root_dag = WriteDependencyDag::from_cow_tree(&alloc.root_tree, new_gen)
+            .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+
+        // Pre-allocate logical addresses for root_tree nodes
+        let mut root_allocated_addrs = std::collections::BTreeMap::new();
+        for block in root_dag.all_blocks() {
+            let level = root_dag.node_level(block).unwrap_or(0);
+            let allocation = alloc
+                .extent_alloc
+                .alloc_metadata_for_tree(u64::from(nodesize), BTRFS_ROOT_TREE_OBJECTID, level)
+                .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+            root_allocated_addrs.insert(block, allocation.bytenr);
+        }
+
+        // Create disk context for root_tree
+        let root_disk_ctx = DiskWritebackContext::with_allocated_addresses(
+            sb.fsid,
+            sb.fsid,
+            new_gen,
+            BTRFS_ROOT_TREE_OBJECTID,
+            nodesize,
+            alloc.sectorsize,
+            root_allocated_addrs,
+        );
+
+        // Write root_tree nodes
+        let mut root_executor = WritebackExecutor::new(root_dag);
+        let root_flush_result = root_executor.execute(|block| {
+            let serialized = root_disk_ctx.serialize_node(&alloc.root_tree, block)?;
+            let node_bytes = serialized.len() as u64;
+            let bytenr = root_disk_ctx.block_to_bytenr(block);
+            self.dev
+                .write_all_at(cx, ByteOffset(bytenr), &serialized)
+                .map_err(|_| BtrfsMutationError::InvalidConfig("disk write failed"))?;
+            bytes_written = bytes_written.saturating_add(node_bytes);
+            nodes_written = nodes_written.saturating_add(1);
+            Ok(())
+        });
+        root_flush_result.map_err(|e| btrfs_mutation_to_ffs(&e))?;
+
+        // Issue fsync barrier before superblock write
+        root_executor.fsync_barrier();
+        self.dev.sync(cx)?;
+
+        // Get root_tree root location for superblock
+        let root_tree_root = alloc.root_tree.root_block();
+        let root_tree_bytenr = root_disk_ctx.block_to_bytenr(root_tree_root);
 
         // Update alloc state generation
         alloc.generation = new_gen;
         drop(alloc);
 
-        // Write the superblock with updated generation and root
+        // Write the superblock with updated generation and root pointing to ROOT_TREE
         let mut new_sb = sb.clone();
         new_sb.generation = new_gen;
-        new_sb.root = fs_tree_bytenr;
+        new_sb.root = root_tree_bytenr;
         let sb_bytes = new_sb.to_bytes();
 
         // Write superblock to primary location (0x10000 = 64 KiB)
@@ -21989,16 +22085,14 @@ impl FsOps for OpenFs {
             info!(flushed_blocks = flushed, "flush_on_destroy");
         }
 
-        // btrfs commit-on-destroy is DISABLED pending bd-3umpe fix.
-        //
-        // bd-1ving wired up allocator addressing (logical addresses now come
-        // from alloc_metadata_for_tree), but bd-3umpe identified that the
-        // writeback sets superblock.root to point to FS_TREE instead of
-        // ROOT_TREE, corrupting the tree structure and breaking remount.
-        //
-        // Until the ROOT_TREE handling is fixed, leave btrfs metadata in
-        // memory and discard on unmount - a clean image that lost writes is
-        // preferable to a corrupted/unmountable image.
+        // btrfs commit-on-destroy: flush dirty COW trees to disk.
+        // bd-3umpe fixed: ROOT_TREE is now properly committed and superblock.root
+        // points to ROOT_TREE (not FS_TREE), enabling clean remount.
+        if self.btrfs_alloc_state.is_some() {
+            if let Err(e) = self.btrfs_full_transaction_commit(cx, "flush_on_destroy") {
+                warn!(error = %e, "btrfs commit-on-destroy failed");
+            }
+        }
 
         Ok(())
     }

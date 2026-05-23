@@ -2034,6 +2034,38 @@ impl InMemoryCowBtrfsTree {
         self.root
     }
 
+    /// Root node level (0 for leaf, higher for internal).
+    #[must_use]
+    pub fn root_level(&self) -> u8 {
+        match self.height() {
+            Ok(h) if h > 0 => (h - 1) as u8,
+            _ => 0,
+        }
+    }
+
+    /// Look up an item by exact key, returning its data if found.
+    #[must_use]
+    pub fn get(&self, key: &BtrfsKey) -> Option<Vec<u8>> {
+        self.search(self.root, key).ok()
+    }
+
+    fn search(&self, node_id: u64, key: &BtrfsKey) -> Result<Vec<u8>, BtrfsMutationError> {
+        match self.node_ref(node_id)? {
+            BtrfsCowNode::Leaf { items } => {
+                for item in items {
+                    if key_cmp(&item.key, key) == Ordering::Equal {
+                        return Ok(item.data.clone());
+                    }
+                }
+                Err(BtrfsMutationError::KeyNotFound)
+            }
+            BtrfsCowNode::Internal { keys, children } => {
+                let idx = keys.partition_point(|k| key_cmp(k, key) != Ordering::Greater);
+                self.search(children[idx], key)
+            }
+        }
+    }
+
     /// Snapshot a node by block number.
     pub fn node_snapshot(&self, block: u64) -> Result<BtrfsCowNode, BtrfsMutationError> {
         self.nodes
