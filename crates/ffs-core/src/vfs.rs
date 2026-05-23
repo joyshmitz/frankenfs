@@ -3518,4 +3518,41 @@ mod tests {
         assert!(SeekWhence::from_raw(5).is_none());
         assert!(SeekWhence::from_raw(999).is_none());
     }
+
+    // ── DirEntry::name_str: lossy UTF-8 conversion ───────────────────────
+
+    #[test]
+    fn dir_entry_name_str_ascii() {
+        let entry = DirEntry {
+            ino: InodeNumber(2),
+            offset: 0,
+            kind: FileType::RegularFile,
+            name: b"hello.txt".to_vec(),
+        };
+        assert_eq!(entry.name_str(), "hello.txt");
+    }
+
+    #[test]
+    fn dir_entry_name_str_utf8() {
+        let entry = DirEntry {
+            ino: InodeNumber(3),
+            offset: 0,
+            kind: FileType::Directory,
+            name: "日本語.dir".as_bytes().to_vec(),
+        };
+        assert_eq!(entry.name_str(), "日本語.dir");
+    }
+
+    #[test]
+    fn dir_entry_name_str_invalid_utf8_lossy() {
+        let entry = DirEntry {
+            ino: InodeNumber(4),
+            offset: 0,
+            kind: FileType::RegularFile,
+            name: vec![0xFF, 0xFE, b'.', b't', b'x', b't'],
+        };
+        let name = entry.name_str();
+        assert!(name.contains(".txt"), "should preserve valid suffix");
+        assert!(name.contains('\u{FFFD}'), "should contain replacement char");
+    }
 }
