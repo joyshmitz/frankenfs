@@ -124,8 +124,8 @@ pub const BTRFS_INODE_COMPRESS: u64 = 1 << 11;
 #[must_use]
 pub fn btrfs_inode_flags_to_fsflags(btrfs_flags: u64) -> u32 {
     use ffs_types::{
-        EXT4_APPEND_FL, EXT4_COMPR_FL, EXT4_DIRSYNC_FL, EXT4_IMMUTABLE_FL,
-        EXT4_NOATIME_FL, EXT4_NOCOMPR_FL, EXT4_NODUMP_FL, EXT4_SYNC_FL, FS_NOCOW_FL,
+        EXT4_APPEND_FL, EXT4_COMPR_FL, EXT4_DIRSYNC_FL, EXT4_IMMUTABLE_FL, EXT4_NOATIME_FL,
+        EXT4_NOCOMPR_FL, EXT4_NODUMP_FL, EXT4_SYNC_FL, FS_NOCOW_FL,
     };
 
     let mut fs_flags: u32 = 0;
@@ -166,8 +166,8 @@ pub fn btrfs_inode_flags_to_fsflags(btrfs_flags: u64) -> u32 {
 #[must_use]
 pub fn fsflags_to_btrfs_inode_flags(fs_flags: u32) -> u64 {
     use ffs_types::{
-        EXT4_APPEND_FL, EXT4_COMPR_FL, EXT4_DIRSYNC_FL, EXT4_IMMUTABLE_FL,
-        EXT4_NOATIME_FL, EXT4_NOCOMPR_FL, EXT4_NODUMP_FL, EXT4_SYNC_FL, FS_NOCOW_FL,
+        EXT4_APPEND_FL, EXT4_COMPR_FL, EXT4_DIRSYNC_FL, EXT4_IMMUTABLE_FL, EXT4_NOATIME_FL,
+        EXT4_NOCOMPR_FL, EXT4_NODUMP_FL, EXT4_SYNC_FL, FS_NOCOW_FL,
     };
 
     let mut btrfs_flags: u64 = 0;
@@ -205,8 +205,8 @@ pub fn fsflags_to_btrfs_inode_flags(fs_flags: u32) -> u64 {
 /// Mask of FS_*_FL flags that are user-settable on btrfs inodes.
 pub const BTRFS_USER_SETTABLE_FSFLAGS: u32 = {
     use ffs_types::{
-        EXT4_APPEND_FL, EXT4_COMPR_FL, EXT4_DIRSYNC_FL, EXT4_IMMUTABLE_FL,
-        EXT4_NOATIME_FL, EXT4_NOCOMPR_FL, EXT4_NODUMP_FL, EXT4_SYNC_FL,
+        EXT4_APPEND_FL, EXT4_COMPR_FL, EXT4_DIRSYNC_FL, EXT4_IMMUTABLE_FL, EXT4_NOATIME_FL,
+        EXT4_NOCOMPR_FL, EXT4_NODUMP_FL, EXT4_SYNC_FL,
     };
     const FS_NOCOW_FL: u32 = 0x0080_0000;
     EXT4_SYNC_FL
@@ -14510,8 +14510,7 @@ mod tests {
     #[test]
     fn inode_flags_roundtrip_preserves_user_settable() {
         use crate::{
-            btrfs_inode_flags_to_fsflags, fsflags_to_btrfs_inode_flags,
-            BTRFS_USER_SETTABLE_FSFLAGS,
+            BTRFS_USER_SETTABLE_FSFLAGS, btrfs_inode_flags_to_fsflags, fsflags_to_btrfs_inode_flags,
         };
 
         // Test individual flags
@@ -14531,10 +14530,7 @@ mod tests {
             let btrfs = fsflags_to_btrfs_inode_flags(flag);
             let back = btrfs_inode_flags_to_fsflags(btrfs);
             // NOCOW sets both NODATACOW and NODATASUM, but only NOCOW comes back
-            assert_eq!(
-                back & flag, flag,
-                "roundtrip preserves flag 0x{flag:08x}"
-            );
+            assert_eq!(back & flag, flag, "roundtrip preserves flag 0x{flag:08x}");
         }
 
         // Test combined flags
@@ -14551,8 +14547,8 @@ mod tests {
     #[test]
     fn btrfs_inode_flags_to_xflags_mapping() {
         use super::{
-            btrfs_inode_flags_to_xflags, BTRFS_INODE_APPEND, BTRFS_INODE_IMMUTABLE,
-            BTRFS_INODE_NOATIME, BTRFS_INODE_NOCOMPRESS, BTRFS_INODE_NODUMP, BTRFS_INODE_SYNC,
+            BTRFS_INODE_APPEND, BTRFS_INODE_IMMUTABLE, BTRFS_INODE_NOATIME, BTRFS_INODE_NOCOMPRESS,
+            BTRFS_INODE_NODUMP, BTRFS_INODE_SYNC, btrfs_inode_flags_to_xflags,
         };
 
         const FS_XFLAG_SYNC: u32 = 0x0000_0020;
@@ -14597,10 +14593,9 @@ mod tests {
     #[test]
     fn xflags_to_btrfs_inode_flags_roundtrip() {
         use super::{
+            BTRFS_INODE_APPEND, BTRFS_INODE_IMMUTABLE, BTRFS_INODE_NOATIME, BTRFS_INODE_NOCOMPRESS,
+            BTRFS_INODE_NODUMP, BTRFS_INODE_SYNC, BTRFS_USER_SETTABLE_XFLAGS,
             btrfs_inode_flags_to_xflags, xflags_to_btrfs_inode_flags,
-            BTRFS_INODE_APPEND, BTRFS_INODE_IMMUTABLE, BTRFS_INODE_NOATIME,
-            BTRFS_INODE_NOCOMPRESS, BTRFS_INODE_NODUMP, BTRFS_INODE_SYNC,
-            BTRFS_USER_SETTABLE_XFLAGS,
         };
 
         const FS_XFLAG_HASATTR: u32 = 0x8000_0000;
@@ -14618,7 +14613,10 @@ mod tests {
             let xflags = btrfs_inode_flags_to_xflags(btrfs_flag);
             let xflags_clean = xflags & !FS_XFLAG_HASATTR;
             let back = xflags_to_btrfs_inode_flags(xflags_clean);
-            assert_eq!(back, btrfs_flag, "xflags roundtrip for btrfs flag 0x{btrfs_flag:016x}");
+            assert_eq!(
+                back, btrfs_flag,
+                "xflags roundtrip for btrfs flag 0x{btrfs_flag:016x}"
+            );
         }
 
         let combined_btrfs = BTRFS_INODE_SYNC | BTRFS_INODE_NODUMP | BTRFS_INODE_NOATIME;

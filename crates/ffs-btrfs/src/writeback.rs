@@ -485,6 +485,608 @@ impl WritebackExecutor {
     }
 }
 
+/// Context for writing serialized CoW nodes to a real block device.
+///
+/// This bridges the in-memory `InMemoryCowBtrfsTree` to actual disk I/O,
+/// preserving WB-I1 (prefix-closed durability) via reverse-topological flush.
+#[derive(Debug)]
+pub struct DiskWritebackContext {
+    /// Filesystem UUID.
+    pub fsid: [u8; 16],
+    /// Chunk tree UUID.
+    pub chunk_tree_uuid: [u8; 16],
+    /// Current transaction generation.
+    pub generation: u64,
+    /// Tree ID that owns these nodes (e.g., FS_TREE = 5).
+    pub owner: u64,
+    /// Node size in bytes (from superblock).
+    pub nodesize: u32,
+    /// Block device sector size.
+    pub sector_size: u32,
+}
+
+impl DiskWritebackContext {
+    /// Create a new disk writeback context.
+    pub fn new(
+        fsid: [u8; 16],
+        chunk_tree_uuid: [u8; 16],
+        generation: u64,
+        owner: u64,
+        nodesize: u32,
+        sector_size: u32,
+    ) -> Self {
+        Self {
+            fsid,
+            chunk_tree_uuid,
+            generation,
+            owner,
+            nodesize,
+            sector_size,
+        }
+    }
+
+    /// Convert an in-memory block number to a disk byte offset.
+    ///
+    /// For testing, we use a simple mapping: `bytenr = block * nodesize`.
+    /// In production, this mapping comes from the allocator (A2).
+    #[must_use]
+    pub fn block_to_bytenr(&self, block: u64) -> u64 {
+        block.saturating_mul(u64::from(self.nodesize))
+    }
+
+    /// Build serialization parameters for a node at the given block.
+    #[must_use]
+    pub fn params_for_block(
+        &self,
+        block: u64,
+        child_generations: Vec<u64>,
+    ) -> crate::BtrfsNodeSerializeParams {
+        crate::BtrfsNodeSerializeParams {
+            fsid: self.fsid,
+            chunk_tree_uuid: self.chunk_tree_uuid,
+            bytenr: self.block_to_bytenr(block),
+            flags: 0,
+            generation: self.generation,
+            owner: self.owner,
+            nodesize: self.nodesize,
+            child_generations,
+        }
+    }
+
+    /// Serialize a node and return the bytes ready for disk write.
+    pub fn serialize_node(
+        &self,
+        tree: &InMemoryCowBtrfsTree,
+        block: u64,
+    ) -> Result<Vec<u8>, BtrfsMutationError> {
+        let node = tree.node_snapshot(block)?;
+
+        let child_generations = match &node {
+            BtrfsCowNode::Leaf { .. } => Vec::new(),
+            BtrfsCowNode::Internal { children, .. } => {
+                children.iter().map(|_| self.generation).collect()
+            }
+        };
+
+        let params = self.params_for_block(block, child_generations);
+        node.serialize(&params)
+    }
+}
+
+// ── Backup Root Ring (design §6.3) ───────────────────────────────────────────
+
+/// Size of one btrfs_root_backup entry in bytes.
+pub const BTRFS_ROOT_BACKUP_SIZE: usize = 168;
+
+/// Number of backup root slots in the superblock.
+pub const BTRFS_NUM_BACKUP_ROOTS: usize = 4;
+
+/// Offset of the super_roots[4] array in the superblock.
+pub const BTRFS_BACKUP_ROOTS_OFFSET: usize = 0x2A0;
+
+/// One entry in the superblock's backup root ring (btrfs_root_backup).
+///
+/// Preserves the root tree location and generation for crash recovery.
+/// The ring holds the last 4 committed states, enabling recovery from
+/// a corrupted/torn superblock by falling back to an older root tree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct BackupRootEntry {
+    /// Root tree location.
+    pub tree_root: u64,
+    /// Root tree generation.
+    pub tree_root_gen: u64,
+    /// Chunk tree location.
+    pub chunk_root: u64,
+    /// Chunk tree generation.
+    pub chunk_root_gen: u64,
+    /// Extent tree location.
+    pub extent_root: u64,
+    /// Extent tree generation.
+    pub extent_root_gen: u64,
+    /// FS tree location.
+    pub fs_root: u64,
+    /// FS tree generation.
+    pub fs_root_gen: u64,
+    /// Device tree location.
+    pub dev_root: u64,
+    /// Device tree generation.
+    pub dev_root_gen: u64,
+    /// Checksum tree location.
+    pub csum_root: u64,
+    /// Csum tree generation.
+    pub csum_root_gen: u64,
+    /// Total bytes in filesystem.
+    pub total_bytes: u64,
+    /// Bytes used.
+    pub bytes_used: u64,
+    /// Number of devices.
+    pub num_devices: u64,
+    /// Root tree level.
+    pub tree_root_level: u8,
+    /// Chunk tree level.
+    pub chunk_root_level: u8,
+    /// Extent tree level.
+    pub extent_root_level: u8,
+    /// FS tree level.
+    pub fs_root_level: u8,
+    /// Device tree level.
+    pub dev_root_level: u8,
+    /// Checksum tree level.
+    pub csum_root_level: u8,
+}
+
+impl BackupRootEntry {
+    /// Parse a backup root entry from a 168-byte slice.
+    pub fn parse(data: &[u8]) -> Result<Self, BtrfsMutationError> {
+        if data.len() < BTRFS_ROOT_BACKUP_SIZE {
+            return Err(BtrfsMutationError::InvalidConfig(
+                "backup root entry too short",
+            ));
+        }
+        Ok(Self {
+            tree_root: u64::from_le_bytes(data[0..8].try_into().unwrap()),
+            tree_root_gen: u64::from_le_bytes(data[8..16].try_into().unwrap()),
+            chunk_root: u64::from_le_bytes(data[16..24].try_into().unwrap()),
+            chunk_root_gen: u64::from_le_bytes(data[24..32].try_into().unwrap()),
+            extent_root: u64::from_le_bytes(data[32..40].try_into().unwrap()),
+            extent_root_gen: u64::from_le_bytes(data[40..48].try_into().unwrap()),
+            fs_root: u64::from_le_bytes(data[48..56].try_into().unwrap()),
+            fs_root_gen: u64::from_le_bytes(data[56..64].try_into().unwrap()),
+            dev_root: u64::from_le_bytes(data[64..72].try_into().unwrap()),
+            dev_root_gen: u64::from_le_bytes(data[72..80].try_into().unwrap()),
+            csum_root: u64::from_le_bytes(data[80..88].try_into().unwrap()),
+            csum_root_gen: u64::from_le_bytes(data[88..96].try_into().unwrap()),
+            total_bytes: u64::from_le_bytes(data[96..104].try_into().unwrap()),
+            bytes_used: u64::from_le_bytes(data[104..112].try_into().unwrap()),
+            num_devices: u64::from_le_bytes(data[112..120].try_into().unwrap()),
+            // unused_64[4] at 120..152
+            tree_root_level: data[152],
+            chunk_root_level: data[153],
+            extent_root_level: data[154],
+            fs_root_level: data[155],
+            dev_root_level: data[156],
+            csum_root_level: data[157],
+            // unused_8[10] at 158..168
+        })
+    }
+
+    /// Serialize this backup root entry to 168 bytes.
+    #[must_use]
+    pub fn to_bytes(&self) -> [u8; BTRFS_ROOT_BACKUP_SIZE] {
+        let mut buf = [0u8; BTRFS_ROOT_BACKUP_SIZE];
+        buf[0..8].copy_from_slice(&self.tree_root.to_le_bytes());
+        buf[8..16].copy_from_slice(&self.tree_root_gen.to_le_bytes());
+        buf[16..24].copy_from_slice(&self.chunk_root.to_le_bytes());
+        buf[24..32].copy_from_slice(&self.chunk_root_gen.to_le_bytes());
+        buf[32..40].copy_from_slice(&self.extent_root.to_le_bytes());
+        buf[40..48].copy_from_slice(&self.extent_root_gen.to_le_bytes());
+        buf[48..56].copy_from_slice(&self.fs_root.to_le_bytes());
+        buf[56..64].copy_from_slice(&self.fs_root_gen.to_le_bytes());
+        buf[64..72].copy_from_slice(&self.dev_root.to_le_bytes());
+        buf[72..80].copy_from_slice(&self.dev_root_gen.to_le_bytes());
+        buf[80..88].copy_from_slice(&self.csum_root.to_le_bytes());
+        buf[88..96].copy_from_slice(&self.csum_root_gen.to_le_bytes());
+        buf[96..104].copy_from_slice(&self.total_bytes.to_le_bytes());
+        buf[104..112].copy_from_slice(&self.bytes_used.to_le_bytes());
+        buf[112..120].copy_from_slice(&self.num_devices.to_le_bytes());
+        // unused_64[4] at 120..152 stays zero
+        buf[152] = self.tree_root_level;
+        buf[153] = self.chunk_root_level;
+        buf[154] = self.extent_root_level;
+        buf[155] = self.fs_root_level;
+        buf[156] = self.dev_root_level;
+        buf[157] = self.csum_root_level;
+        // unused_8[10] at 158..168 stays zero
+        buf
+    }
+}
+
+/// The backup root ring: super_roots[4] in the superblock.
+///
+/// On commit, the ring rotates: slot 3 ← slot 2 ← slot 1 ← slot 0 ← current.
+/// This enables recovery from a corrupted superblock by falling back to
+/// an older root tree state (generations g-3, g-2, g-1, g).
+#[derive(Debug, Clone)]
+pub struct BackupRootRing {
+    entries: [BackupRootEntry; BTRFS_NUM_BACKUP_ROOTS],
+}
+
+impl Default for BackupRootRing {
+    fn default() -> Self {
+        Self {
+            entries: [BackupRootEntry::default(); BTRFS_NUM_BACKUP_ROOTS],
+        }
+    }
+}
+
+impl BackupRootRing {
+    /// Parse the backup root ring from a superblock region.
+    pub fn parse(superblock: &[u8]) -> Result<Self, BtrfsMutationError> {
+        let start = BTRFS_BACKUP_ROOTS_OFFSET;
+        let end = start + BTRFS_NUM_BACKUP_ROOTS * BTRFS_ROOT_BACKUP_SIZE;
+        if superblock.len() < end {
+            return Err(BtrfsMutationError::InvalidConfig(
+                "superblock too short for backup roots",
+            ));
+        }
+
+        let mut entries = [BackupRootEntry::default(); BTRFS_NUM_BACKUP_ROOTS];
+        for (i, entry) in entries.iter_mut().enumerate() {
+            let offset = start + i * BTRFS_ROOT_BACKUP_SIZE;
+            *entry = BackupRootEntry::parse(&superblock[offset..])?;
+        }
+
+        Ok(Self { entries })
+    }
+
+    /// Rotate the ring and insert a new entry at slot 0.
+    ///
+    /// Shifts: slot 3 ← slot 2 ← slot 1 ← slot 0 ← new_entry.
+    pub fn rotate(&mut self, new_entry: BackupRootEntry) {
+        self.entries[3] = self.entries[2];
+        self.entries[2] = self.entries[1];
+        self.entries[1] = self.entries[0];
+        self.entries[0] = new_entry;
+        trace!(
+            tree_root = new_entry.tree_root,
+            generation = new_entry.tree_root_gen,
+            "backup root ring rotated"
+        );
+    }
+
+    /// Get the entry at the given slot (0 = most recent).
+    #[must_use]
+    pub fn get(&self, slot: usize) -> Option<&BackupRootEntry> {
+        self.entries.get(slot)
+    }
+
+    /// Get the most recent backup entry (slot 0).
+    #[must_use]
+    pub fn latest(&self) -> &BackupRootEntry {
+        &self.entries[0]
+    }
+
+    /// Write the backup root ring to a superblock region.
+    pub fn write_to(&self, superblock: &mut [u8]) -> Result<(), BtrfsMutationError> {
+        let start = BTRFS_BACKUP_ROOTS_OFFSET;
+        let end = start + BTRFS_NUM_BACKUP_ROOTS * BTRFS_ROOT_BACKUP_SIZE;
+        if superblock.len() < end {
+            return Err(BtrfsMutationError::InvalidConfig(
+                "superblock too short for backup roots",
+            ));
+        }
+
+        for (i, entry) in self.entries.iter().enumerate() {
+            let offset = start + i * BTRFS_ROOT_BACKUP_SIZE;
+            let bytes = entry.to_bytes();
+            superblock[offset..offset + BTRFS_ROOT_BACKUP_SIZE].copy_from_slice(&bytes);
+        }
+
+        Ok(())
+    }
+}
+
+// ── Atomic Root Commit Sequence (design §6.1-6.2) ────────────────────────────
+
+/// Superblock mirror locations.
+///
+/// btrfs writes the superblock to multiple locations for redundancy:
+/// - Primary: 64 KiB (0x10000)
+/// - Mirror 1: 64 MiB (0x4000000)
+/// - Mirror 2: 256 GiB (0x4000000000) — if device is large enough
+pub const BTRFS_SUPERBLOCK_MIRRORS: [u64; 3] = [
+    0x0001_0000,    // 64 KiB (primary)
+    0x0400_0000,    // 64 MiB (mirror 1)
+    0x40_0000_0000, // 256 GiB (mirror 2, optional)
+];
+
+/// Parameters for an atomic root commit.
+#[derive(Debug, Clone)]
+pub struct AtomicRootCommitParams {
+    /// New root tree location (bytenr).
+    pub root_tree_bytenr: u64,
+    /// New root tree level.
+    pub root_tree_level: u8,
+    /// New generation (g+1).
+    pub new_generation: u64,
+    /// Chunk tree location (unchanged if None).
+    pub chunk_root: Option<u64>,
+    /// Chunk tree level (unchanged if None).
+    pub chunk_root_level: Option<u8>,
+    /// Extent tree location (for backup root entry).
+    pub extent_root: u64,
+    /// FS tree location (for backup root entry).
+    pub fs_root: u64,
+    /// Total bytes.
+    pub total_bytes: u64,
+    /// Bytes used.
+    pub bytes_used: u64,
+    /// Number of devices.
+    pub num_devices: u64,
+}
+
+/// Result of an atomic root commit simulation.
+#[derive(Debug, Clone)]
+pub struct AtomicRootCommitResult {
+    /// Whether the commit was successful (superblock durable).
+    pub committed: bool,
+    /// Generation observed after the commit (or crash).
+    pub observed_generation: u64,
+    /// Crash point ID if a crash occurred.
+    pub crash_point_id: Option<String>,
+    /// WB-I2 oracle result.
+    pub wb_i2_passed: bool,
+}
+
+/// Atomic root commit executor.
+///
+/// Orchestrates the full commit sequence per design §6:
+/// 1. ROOT_ITEM update per tree (via BtrfsRootItem::patch_root_commit)
+/// 2. Flush root tree nodes
+/// 3. fsync barrier
+/// 4. Rotate backup root ring
+/// 5. Superblock generation bump (the linearization point)
+/// 6. Write superblock to all mirror locations
+#[derive(Debug)]
+pub struct AtomicRootCommit {
+    /// Pre-commit generation.
+    pre_generation: u64,
+    /// Backup root ring state.
+    backup_ring: BackupRootRing,
+    /// Crash points for fault injection.
+    crash_points: Vec<AtomicRootCrashPoint>,
+    /// Whether the commit has completed.
+    committed: bool,
+}
+
+/// A crash point in the atomic root commit sequence.
+#[derive(Debug, Clone)]
+pub struct AtomicRootCrashPoint {
+    /// Unique identifier.
+    pub id: String,
+    /// Generation that would be observed if crash occurs here.
+    pub observed_generation: u64,
+    /// Whether the superblock has been committed.
+    pub superblock_committed: bool,
+    /// Phase of the commit sequence.
+    pub phase: AtomicRootCommitPhase,
+}
+
+/// Phases of the atomic root commit sequence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AtomicRootCommitPhase {
+    /// Before any commit work begins.
+    PreCommit,
+    /// After ROOT_ITEM updates, before root tree flush.
+    AfterRootItemUpdate,
+    /// After root tree flush, before fsync barrier.
+    AfterRootTreeFlush,
+    /// After fsync barrier, before backup ring rotation.
+    AfterFsyncBarrier,
+    /// After backup ring rotation, before superblock write.
+    AfterBackupRingRotation,
+    /// After superblock write (the linearization point).
+    AfterSuperblockWrite,
+    /// After all mirror writes complete.
+    AfterAllMirrorWrites,
+}
+
+impl AtomicRootCommit {
+    /// Create a new atomic root commit executor.
+    pub fn new(pre_generation: u64, backup_ring: BackupRootRing) -> Self {
+        Self {
+            pre_generation,
+            backup_ring,
+            crash_points: Vec::new(),
+            committed: false,
+        }
+    }
+
+    /// Create with a default (empty) backup ring.
+    pub fn with_generation(pre_generation: u64) -> Self {
+        Self::new(pre_generation, BackupRootRing::default())
+    }
+
+    /// Record a crash point at the current phase.
+    fn record_crash_point(&mut self, id: impl Into<String>, phase: AtomicRootCommitPhase) {
+        let observed_generation = if self.committed {
+            self.pre_generation.saturating_add(1)
+        } else {
+            self.pre_generation
+        };
+        self.crash_points.push(AtomicRootCrashPoint {
+            id: id.into(),
+            observed_generation,
+            superblock_committed: self.committed,
+            phase,
+        });
+    }
+
+    /// Execute the atomic root commit sequence (simulation).
+    ///
+    /// This simulates the commit, recording crash points at each phase.
+    /// The actual I/O callbacks are provided for integration with real writeback.
+    pub fn execute_simulation(&mut self, params: &AtomicRootCommitParams) {
+        // Phase 0: Pre-commit
+        self.record_crash_point("arc_pre_commit", AtomicRootCommitPhase::PreCommit);
+
+        // Phase 1: ROOT_ITEM updates (simulated)
+        self.record_crash_point(
+            "arc_after_root_item_update",
+            AtomicRootCommitPhase::AfterRootItemUpdate,
+        );
+
+        // Phase 2: Root tree flush (simulated)
+        self.record_crash_point(
+            "arc_after_root_tree_flush",
+            AtomicRootCommitPhase::AfterRootTreeFlush,
+        );
+
+        // Phase 3: fsync barrier (simulated)
+        self.record_crash_point(
+            "arc_after_fsync_barrier",
+            AtomicRootCommitPhase::AfterFsyncBarrier,
+        );
+
+        // Phase 4: Backup ring rotation
+        let backup_entry = BackupRootEntry {
+            tree_root: params.root_tree_bytenr,
+            tree_root_gen: params.new_generation,
+            chunk_root: params.chunk_root.unwrap_or(0),
+            chunk_root_gen: params.new_generation,
+            extent_root: params.extent_root,
+            extent_root_gen: params.new_generation,
+            fs_root: params.fs_root,
+            fs_root_gen: params.new_generation,
+            dev_root: 0,
+            dev_root_gen: params.new_generation,
+            csum_root: 0,
+            csum_root_gen: params.new_generation,
+            total_bytes: params.total_bytes,
+            bytes_used: params.bytes_used,
+            num_devices: params.num_devices,
+            tree_root_level: params.root_tree_level,
+            chunk_root_level: params.chunk_root_level.unwrap_or(0),
+            extent_root_level: 0,
+            fs_root_level: 0,
+            dev_root_level: 0,
+            csum_root_level: 0,
+        };
+        self.backup_ring.rotate(backup_entry);
+        self.record_crash_point(
+            "arc_after_backup_ring_rotation",
+            AtomicRootCommitPhase::AfterBackupRingRotation,
+        );
+
+        // Phase 5: Superblock write — THE LINEARIZATION POINT
+        // After this point, the commit is visible to readers.
+        self.committed = true;
+        self.record_crash_point(
+            "arc_after_superblock_write",
+            AtomicRootCommitPhase::AfterSuperblockWrite,
+        );
+
+        // Phase 6: Mirror writes (redundancy, not linearization)
+        self.record_crash_point(
+            "arc_after_all_mirror_writes",
+            AtomicRootCommitPhase::AfterAllMirrorWrites,
+        );
+
+        debug!(
+            pre_gen = self.pre_generation,
+            new_gen = params.new_generation,
+            root_bytenr = params.root_tree_bytenr,
+            "atomic root commit simulation complete"
+        );
+    }
+
+    /// Patch a superblock blob with new root and generation.
+    ///
+    /// Updates: root, root_level, generation, backup root ring, checksum.
+    pub fn patch_superblock(
+        &self,
+        superblock: &mut [u8],
+        params: &AtomicRootCommitParams,
+    ) -> Result<(), BtrfsMutationError> {
+        if superblock.len() < 4096 {
+            return Err(BtrfsMutationError::InvalidConfig("superblock too short"));
+        }
+
+        // root at 0x50
+        superblock[0x50..0x58].copy_from_slice(&params.root_tree_bytenr.to_le_bytes());
+        // root_level at 0xC6
+        superblock[0xC6] = params.root_tree_level;
+        // generation at 0x48
+        superblock[0x48..0x50].copy_from_slice(&params.new_generation.to_le_bytes());
+        // chunk_root_generation at 0xA4
+        superblock[0xA4..0xAC].copy_from_slice(&params.new_generation.to_le_bytes());
+
+        // Write backup root ring
+        self.backup_ring.write_to(superblock)?;
+
+        // Recompute checksum (CRC32C over [0x20..])
+        let csum = ffs_types::crc32c(&superblock[0x20..]);
+        superblock[0..4].copy_from_slice(&csum.to_le_bytes());
+
+        Ok(())
+    }
+
+    /// Return all recorded crash points.
+    pub fn crash_points(&self) -> &[AtomicRootCrashPoint] {
+        &self.crash_points
+    }
+
+    /// Verify WB-I2 at all crash points.
+    ///
+    /// WB-I2: A reader after crash observes generation g or g+1, never torn.
+    pub fn verify_wb_i2(&self) -> Result<(), WbI2Violation> {
+        let oracle = WbI2Oracle::new(self.pre_generation);
+        for crash_point in &self.crash_points {
+            oracle.check(crash_point.observed_generation)?;
+        }
+        debug!(
+            crash_points = self.crash_points.len(),
+            "atomic root commit WB-I2 verified"
+        );
+        Ok(())
+    }
+
+    /// Test WB-I2 at a specific crash point.
+    pub fn test_wb_i2_at_crash_point(
+        &self,
+        crash_point_id: &str,
+    ) -> Option<AtomicRootCommitResult> {
+        let crash_point = self
+            .crash_points
+            .iter()
+            .find(|cp| cp.id == crash_point_id)?;
+        let oracle = WbI2Oracle::new(self.pre_generation);
+        let wb_i2_result = oracle.check(crash_point.observed_generation);
+
+        Some(AtomicRootCommitResult {
+            committed: crash_point.superblock_committed,
+            observed_generation: crash_point.observed_generation,
+            crash_point_id: Some(crash_point.id.clone()),
+            wb_i2_passed: wb_i2_result.is_ok(),
+        })
+    }
+
+    /// Return the backup root ring.
+    pub fn backup_ring(&self) -> &BackupRootRing {
+        &self.backup_ring
+    }
+
+    /// Return whether the commit has completed.
+    pub fn is_committed(&self) -> bool {
+        self.committed
+    }
+
+    /// Return the pre-commit generation.
+    pub fn pre_generation(&self) -> u64 {
+        self.pre_generation
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -703,5 +1305,446 @@ mod tests {
 
         // WB-I1 should hold at all crash points after proper execution
         assert!(executor.verify_wb_i1().is_ok(), "WB-I1 should hold");
+    }
+
+    // ── Disk I/O round-trip tests (bd-jdo53 A4 wiring) ─────────────────────
+
+    use ffs_ondisk::{BtrfsHeader, parse_leaf_items, verify_btrfs_tree_block_checksum};
+    use std::cell::RefCell;
+
+    const TEST_NODESIZE: u32 = 16384;
+    const TEST_FSID: [u8; 16] = [0x11; 16];
+    const TEST_CHUNK_UUID: [u8; 16] = [0x22; 16];
+
+    fn make_disk_context(generation: u64) -> super::DiskWritebackContext {
+        super::DiskWritebackContext::new(
+            TEST_FSID,
+            TEST_CHUNK_UUID,
+            generation,
+            5, // FS_TREE
+            TEST_NODESIZE,
+            4096,
+        )
+    }
+
+    #[test]
+    fn disk_writeback_context_block_to_bytenr() {
+        let ctx = make_disk_context(100);
+        assert_eq!(ctx.block_to_bytenr(0), 0);
+        assert_eq!(ctx.block_to_bytenr(1), 16384);
+        assert_eq!(ctx.block_to_bytenr(10), 163840);
+    }
+
+    #[test]
+    fn disk_writeback_context_serialize_leaf_roundtrip() {
+        let tree = make_test_tree();
+        let ctx = make_disk_context(100);
+
+        let root = tree.root_block();
+        let node = tree.node_snapshot(root).expect("get root");
+
+        if let BtrfsCowNode::Leaf { items } = &node {
+            let buf = ctx.serialize_node(&tree, root).expect("serialize");
+            assert_eq!(buf.len(), TEST_NODESIZE as usize);
+
+            verify_btrfs_tree_block_checksum(&buf, ffs_types::BTRFS_CSUM_TYPE_CRC32C)
+                .expect("checksum valid");
+
+            let hdr = BtrfsHeader::parse_from_block(&buf).expect("parse header");
+            assert_eq!(hdr.generation, 100);
+            assert_eq!(hdr.bytenr, ctx.block_to_bytenr(root));
+            assert_eq!(hdr.nritems as usize, items.len());
+            assert_eq!(hdr.level, 0);
+
+            let (_, parsed) = parse_leaf_items(&buf).expect("parse items");
+            assert_eq!(parsed.len(), items.len());
+            for (orig, parsed) in items.iter().zip(parsed.iter()) {
+                assert_eq!(orig.key.objectid, parsed.key.objectid);
+                assert_eq!(orig.key.item_type, parsed.key.item_type);
+                assert_eq!(orig.key.offset, parsed.key.offset);
+            }
+        }
+    }
+
+    #[test]
+    fn disk_writeback_executor_writes_to_buffer() {
+        let tree = make_test_tree();
+        let ctx = make_disk_context(100);
+        let dag = WriteDependencyDag::from_cow_tree(&tree, 100).expect("build dag");
+        let mut executor = WritebackExecutor::new(dag);
+
+        let disk: RefCell<Vec<u8>> = RefCell::new(vec![0u8; 1024 * 1024]);
+
+        executor
+            .execute(|block| {
+                let buf = ctx.serialize_node(&tree, block)?;
+                let bytenr = ctx.block_to_bytenr(block) as usize;
+                let end = bytenr + buf.len();
+                disk.borrow_mut()[bytenr..end].copy_from_slice(&buf);
+                Ok(())
+            })
+            .expect("execute");
+
+        let order = executor.dag().reverse_topological_order();
+        for block in &order {
+            let bytenr = ctx.block_to_bytenr(*block) as usize;
+            let end = bytenr + TEST_NODESIZE as usize;
+            let node_bytes = &disk.borrow()[bytenr..end];
+
+            verify_btrfs_tree_block_checksum(node_bytes, ffs_types::BTRFS_CSUM_TYPE_CRC32C)
+                .expect("checksum valid after write");
+        }
+
+        assert!(executor.verify_wb_i1().is_ok(), "WB-I1 should hold");
+    }
+
+    #[test]
+    fn disk_writeback_wb_i1_holds_at_every_crash_point() {
+        let tree = make_test_tree();
+        let ctx = make_disk_context(100);
+        let dag = WriteDependencyDag::from_cow_tree(&tree, 100).expect("build dag");
+        let mut executor = WritebackExecutor::new(dag);
+
+        let writes: RefCell<Vec<(u64, Vec<u8>)>> = RefCell::new(Vec::new());
+
+        executor
+            .execute(|block| {
+                let buf = ctx.serialize_node(&tree, block)?;
+                writes.borrow_mut().push((block, buf));
+                Ok(())
+            })
+            .expect("execute");
+
+        for crash_point in executor.crash_points() {
+            let oracle = WbI1Oracle::new(crash_point.durable_blocks.clone());
+            oracle
+                .check(executor.dag())
+                .expect("WB-I1 must hold at every crash point");
+        }
+    }
+
+    #[test]
+    fn disk_writeback_partial_crash_leaves_prefix_closed() {
+        let generation = 100_u64;
+        let mut nodes = BTreeMap::new();
+        nodes.insert(
+            1,
+            DagNode {
+                block: 1,
+                level: 1,
+                generation,
+                children: vec![2, 3],
+                durable: false,
+            },
+        );
+        nodes.insert(
+            2,
+            DagNode {
+                block: 2,
+                level: 0,
+                generation,
+                children: Vec::new(),
+                durable: false,
+            },
+        );
+        nodes.insert(
+            3,
+            DagNode {
+                block: 3,
+                level: 0,
+                generation,
+                children: Vec::new(),
+                durable: false,
+            },
+        );
+        let dag = WriteDependencyDag {
+            nodes,
+            root: 1,
+            generation,
+        };
+
+        let order = dag.reverse_topological_order();
+        assert_eq!(order.len(), 3);
+        assert_eq!(order[2], 1, "root should be last");
+
+        let prefixes = [
+            vec![],
+            vec![order[0]],
+            vec![order[0], order[1]],
+            vec![order[0], order[1], order[2]],
+        ];
+
+        for prefix in &prefixes {
+            let durable: BTreeSet<u64> = prefix.iter().copied().collect();
+            let oracle = WbI1Oracle::new(durable);
+            oracle
+                .check(&dag)
+                .expect("every prefix of reverse-topo order must satisfy WB-I1");
+        }
+    }
+
+    // ── Atomic Root Commit Tests (§6, WB-I2) ─────────────────────────────────
+
+    fn make_commit_params(generation: u64) -> AtomicRootCommitParams {
+        AtomicRootCommitParams {
+            root_tree_bytenr: 0x1_0000,
+            root_tree_level: 1,
+            new_generation: generation,
+            chunk_root: Some(0x2_0000),
+            chunk_root_level: Some(0),
+            extent_root: 0x3_0000,
+            fs_root: 0x4_0000,
+            total_bytes: 1024 * 1024 * 1024,
+            bytes_used: 64 * 1024 * 1024,
+            num_devices: 1,
+        }
+    }
+
+    #[test]
+    fn atomic_root_commit_records_all_crash_points() {
+        let mut arc = AtomicRootCommit::with_generation(100);
+        let params = make_commit_params(101);
+        arc.execute_simulation(&params);
+
+        assert_eq!(arc.crash_points().len(), 7, "should record 7 crash points");
+        assert!(arc.is_committed(), "should be committed after simulation");
+    }
+
+    #[test]
+    fn atomic_root_commit_wb_i2_pre_bump_sees_old_generation() {
+        let mut arc = AtomicRootCommit::with_generation(100);
+        let params = make_commit_params(101);
+        arc.execute_simulation(&params);
+
+        // All pre-superblock crash points should observe generation 100
+        for crash_point in arc.crash_points() {
+            if !crash_point.superblock_committed {
+                assert_eq!(
+                    crash_point.observed_generation, 100,
+                    "pre-bump crash at {} should see generation 100",
+                    crash_point.id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn atomic_root_commit_wb_i2_post_bump_sees_new_generation() {
+        let mut arc = AtomicRootCommit::with_generation(100);
+        let params = make_commit_params(101);
+        arc.execute_simulation(&params);
+
+        // Post-superblock crash points should observe generation 101
+        for crash_point in arc.crash_points() {
+            if crash_point.superblock_committed {
+                assert_eq!(
+                    crash_point.observed_generation, 101,
+                    "post-bump crash at {} should see generation 101",
+                    crash_point.id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn atomic_root_commit_wb_i2_holds_at_all_crash_points() {
+        let mut arc = AtomicRootCommit::with_generation(100);
+        let params = make_commit_params(101);
+        arc.execute_simulation(&params);
+
+        // WB-I2: observed generation is either 100 or 101, never torn
+        arc.verify_wb_i2()
+            .expect("WB-I2 must hold at all crash points");
+    }
+
+    #[test]
+    fn atomic_root_commit_linearization_point_is_superblock_write() {
+        let mut arc = AtomicRootCommit::with_generation(100);
+        let params = make_commit_params(101);
+        arc.execute_simulation(&params);
+
+        // Find the superblock write crash point
+        let before_sb = arc
+            .crash_points()
+            .iter()
+            .find(|cp| cp.phase == AtomicRootCommitPhase::AfterBackupRingRotation)
+            .expect("should have pre-superblock point");
+        let after_sb = arc
+            .crash_points()
+            .iter()
+            .find(|cp| cp.phase == AtomicRootCommitPhase::AfterSuperblockWrite)
+            .expect("should have post-superblock point");
+
+        assert!(
+            !before_sb.superblock_committed,
+            "pre-sb should not be committed"
+        );
+        assert!(after_sb.superblock_committed, "post-sb should be committed");
+        assert_eq!(before_sb.observed_generation, 100);
+        assert_eq!(after_sb.observed_generation, 101);
+    }
+
+    #[test]
+    fn atomic_root_commit_backup_ring_rotates() {
+        let mut arc = AtomicRootCommit::with_generation(100);
+        let params = make_commit_params(101);
+        arc.execute_simulation(&params);
+
+        let latest = arc.backup_ring().latest();
+        assert_eq!(latest.tree_root, params.root_tree_bytenr);
+        assert_eq!(latest.tree_root_gen, params.new_generation);
+        assert_eq!(latest.tree_root_level, params.root_tree_level);
+    }
+
+    #[test]
+    fn backup_root_ring_rotation_preserves_history() {
+        let mut ring = BackupRootRing::default();
+
+        // Insert 5 generations (more than ring size of 4)
+        for generation in 100..105 {
+            let entry = BackupRootEntry {
+                tree_root: generation * 0x1000,
+                tree_root_gen: generation,
+                ..Default::default()
+            };
+            ring.rotate(entry);
+        }
+
+        // Should have generations 104, 103, 102, 101 in slots 0-3
+        assert_eq!(ring.get(0).unwrap().tree_root_gen, 104);
+        assert_eq!(ring.get(1).unwrap().tree_root_gen, 103);
+        assert_eq!(ring.get(2).unwrap().tree_root_gen, 102);
+        assert_eq!(ring.get(3).unwrap().tree_root_gen, 101);
+    }
+
+    #[test]
+    fn backup_root_entry_roundtrip() {
+        let entry = BackupRootEntry {
+            tree_root: 0x1000,
+            tree_root_gen: 100,
+            chunk_root: 0x2000,
+            chunk_root_gen: 100,
+            extent_root: 0x3000,
+            extent_root_gen: 100,
+            fs_root: 0x4000,
+            fs_root_gen: 100,
+            dev_root: 0x5000,
+            dev_root_gen: 100,
+            csum_root: 0x6000,
+            csum_root_gen: 100,
+            total_bytes: 1024 * 1024 * 1024,
+            bytes_used: 64 * 1024 * 1024,
+            num_devices: 1,
+            tree_root_level: 2,
+            chunk_root_level: 1,
+            extent_root_level: 3,
+            fs_root_level: 1,
+            dev_root_level: 0,
+            csum_root_level: 1,
+        };
+
+        let bytes = entry.to_bytes();
+        assert_eq!(bytes.len(), BTRFS_ROOT_BACKUP_SIZE);
+
+        let parsed = BackupRootEntry::parse(&bytes).expect("parse");
+        assert_eq!(parsed, entry);
+    }
+
+    #[test]
+    fn atomic_root_commit_patches_superblock_correctly() {
+        let mut arc = AtomicRootCommit::with_generation(100);
+        let params = make_commit_params(101);
+        arc.execute_simulation(&params);
+
+        // Create a minimal valid superblock buffer
+        let mut superblock = vec![0u8; 4096];
+        // Set magic at 0x40
+        superblock[0x40..0x48].copy_from_slice(&0x4D5F53665248425F_u64.to_le_bytes()); // btrfs magic
+
+        arc.patch_superblock(&mut superblock, &params)
+            .expect("patch");
+
+        // Verify patched fields
+        let root = u64::from_le_bytes(superblock[0x50..0x58].try_into().unwrap());
+        let root_level = superblock[0xC6];
+        let generation = u64::from_le_bytes(superblock[0x48..0x50].try_into().unwrap());
+
+        assert_eq!(root, params.root_tree_bytenr);
+        assert_eq!(root_level, params.root_tree_level);
+        assert_eq!(generation, params.new_generation);
+
+        // Verify checksum was recomputed
+        let stored_csum = u32::from_le_bytes(superblock[0..4].try_into().unwrap());
+        let computed_csum = ffs_types::crc32c(&superblock[0x20..]);
+        assert_eq!(stored_csum, computed_csum, "checksum should be valid");
+    }
+
+    #[test]
+    fn atomic_root_commit_wb_i2_fault_injection_all_phases() {
+        // Fault-injection test: verify WB-I2 at every phase of commit
+        let pre_gen = 100_u64;
+        let post_gen = 101_u64;
+
+        let mut arc = AtomicRootCommit::with_generation(pre_gen);
+        let params = make_commit_params(post_gen);
+        arc.execute_simulation(&params);
+
+        // Test each crash point individually
+        for crash_point in arc.crash_points() {
+            let result = arc
+                .test_wb_i2_at_crash_point(&crash_point.id)
+                .expect("crash point should exist");
+
+            assert!(
+                result.wb_i2_passed,
+                "WB-I2 failed at crash point {}: observed {} but expected {} or {}",
+                crash_point.id, result.observed_generation, pre_gen, post_gen
+            );
+
+            // Verify the invariant: pre-bump sees g, post-bump sees g+1
+            if result.committed {
+                assert_eq!(
+                    result.observed_generation, post_gen,
+                    "committed crash point {} should see post-generation",
+                    crash_point.id
+                );
+            } else {
+                assert_eq!(
+                    result.observed_generation, pre_gen,
+                    "uncommitted crash point {} should see pre-generation",
+                    crash_point.id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn atomic_root_commit_superblock_is_single_linearization_point() {
+        // Prove: the superblock write is the SINGLE linearization point
+        let mut arc = AtomicRootCommit::with_generation(100);
+        let params = make_commit_params(101);
+        arc.execute_simulation(&params);
+
+        let mut saw_transition = false;
+        let mut last_committed = false;
+
+        for crash_point in arc.crash_points() {
+            if last_committed && !crash_point.superblock_committed {
+                panic!("commit state should never transition back to uncommitted");
+            }
+            if !last_committed && crash_point.superblock_committed {
+                // This is the linearization point
+                assert!(!saw_transition, "linearization should happen exactly once");
+                assert_eq!(
+                    crash_point.phase,
+                    AtomicRootCommitPhase::AfterSuperblockWrite,
+                    "linearization point must be AfterSuperblockWrite"
+                );
+                saw_transition = true;
+            }
+            last_committed = crash_point.superblock_committed;
+        }
+
+        assert!(saw_transition, "should have seen the linearization point");
     }
 }

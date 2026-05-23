@@ -713,11 +713,13 @@ name = "ffs-btrfs"
 version = "0.1.0"
 dependencies = [
  "asupersync",
+ "ffs-block",
  "ffs-mvcc",
  "ffs-ondisk",
  "ffs-types",
  "proptest",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.18",
  "tracing",
 ]
