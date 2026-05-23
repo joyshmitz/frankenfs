@@ -18629,23 +18629,7 @@ CUSTOM("congestion_threshold=3")"#;
         );
     }
 
-    // ── split_mount_option: key=value parsing ─────────────────────────────
-
-    #[test]
-    fn split_mount_option_key_value() {
-        use super::split_mount_option;
-        let (key, val) = split_mount_option("foo=bar").unwrap();
-        assert_eq!(key, "foo");
-        assert_eq!(val, Some("bar"));
-    }
-
-    #[test]
-    fn split_mount_option_key_only() {
-        use super::split_mount_option;
-        let (key, val) = split_mount_option("flag").unwrap();
-        assert_eq!(key, "flag");
-        assert_eq!(val, None);
-    }
+    // ── split_mount_option: additional edge cases ──────────────────────────
 
     #[test]
     fn split_mount_option_trims_whitespace() {
@@ -18660,50 +18644,6 @@ CUSTOM("congestion_threshold=3")"#;
         use super::split_mount_option;
         assert!(split_mount_option("=value").is_err());
         assert!(split_mount_option("   =value").is_err());
-    }
-
-    // ── parse_mount_bool: boolean value parsing ───────────────────────────
-
-    #[test]
-    fn parse_mount_bool_accepts_true_variants() {
-        use super::parse_mount_bool;
-        assert!(parse_mount_bool("opt", Some("true")).unwrap());
-        assert!(parse_mount_bool("opt", Some("yes")).unwrap());
-        assert!(parse_mount_bool("opt", Some("on")).unwrap());
-        assert!(parse_mount_bool("opt", Some("1")).unwrap());
-    }
-
-    #[test]
-    fn parse_mount_bool_accepts_false_variants() {
-        use super::parse_mount_bool;
-        assert!(!parse_mount_bool("opt", Some("false")).unwrap());
-        assert!(!parse_mount_bool("opt", Some("no")).unwrap());
-        assert!(!parse_mount_bool("opt", Some("off")).unwrap());
-        assert!(!parse_mount_bool("opt", Some("0")).unwrap());
-    }
-
-    #[test]
-    fn parse_mount_bool_rejects_invalid() {
-        use super::parse_mount_bool;
-        assert!(parse_mount_bool("opt", Some("maybe")).is_err());
-        assert!(parse_mount_bool("opt", None).is_err());
-    }
-
-    // ── parse_mount_usize: numeric value parsing ──────────────────────────
-
-    #[test]
-    fn parse_mount_usize_valid() {
-        use super::parse_mount_usize;
-        assert_eq!(parse_mount_usize("opt", Some("42")).unwrap(), 42);
-        assert_eq!(parse_mount_usize("opt", Some("0")).unwrap(), 0);
-    }
-
-    #[test]
-    fn parse_mount_usize_rejects_invalid() {
-        use super::parse_mount_usize;
-        assert!(parse_mount_usize("opt", Some("abc")).is_err());
-        assert!(parse_mount_usize("opt", Some("-1")).is_err());
-        assert!(parse_mount_usize("opt", None).is_err());
     }
 
     // ── Proptest property-based tests ─────────────────────────────────────
