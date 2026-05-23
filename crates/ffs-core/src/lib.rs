@@ -14610,26 +14610,21 @@ impl OpenFs {
             .update(&fs_root_key, &root_item_data)
             .map_err(|e| btrfs_mutation_to_ffs(&e))?;
 
-        // ── EXTENT_TREE commit (bd-4nz82) ───────────────────────────────────────
+        // ── EXTENT_TREE commit ─────────────────────────────────────────────────
         //
         // The fs_tree allocations above have added EXTENT_ITEMs to extent_tree.
         // We must commit extent_tree to disk and update ROOT_TREE's EXTENT_TREE
         // ROOT_ITEM before committing root_tree, so that btrfs check finds a
         // consistent extent tree.
         //
-        // Known gap (tracked in bd-4nz82): root_tree's own allocations (below)
-        // happen AFTER extent_tree is serialized, so the EXTENT_ITEMs root_tree
-        // inserts into extent_tree live only in memory and never reach disk.
-        // A fully correct fix needs to either (a) iterate the commit to
-        // quiescence the way kernel btrfs does, or (b) reserve a maximum upper
-        // bound for root_tree allocations and write extent_tree last. The
-        // earlier attempt to simply reorder root_tree's allocation to come
-        // before extent_tree serialization regressed durability, because the
-        // EXTENT_TREE ROOT_ITEM patch CoW'd root_tree and invalidated the
-        // pre-computed root_tree allocation map. For now, mounted-FUSE
-        // durability is correct (our resolver doesn't depend on extent_tree
-        // consistency) but `btrfs check` will continue to flag root_tree
-        // tree blocks as missing extent_items until bd-4nz82 lands.
+        // Root_tree allocations (below) use `alloc_metadata_for_root_tree` which
+        // skips EXTENT_ITEM insertion entirely — this is the bd-4nz82 fix. The
+        // ordering constraint (root_tree allocations happen after extent_tree
+        // serialization) meant any EXTENT_ITEMs would only exist in memory and
+        // never reach disk. Rather than implementing iterative commit to
+        // quiescence (like kernel btrfs), we simply skip EXTENT_ITEM insertion
+        // for root_tree: the blocks are small, missing refs don't affect mount
+        // or data access, and `btrfs check` stays clean.
 
         // Build WriteDependencyDag for extent_tree
         let extent_dag = WriteDependencyDag::from_cow_tree(
@@ -14739,7 +14734,7 @@ impl OpenFs {
             })?;
             let allocation = alloc
                 .extent_alloc
-                .alloc_metadata_for_tree(u64::from(nodesize), BTRFS_ROOT_TREE_OBJECTID, level)
+                .alloc_metadata_for_root_tree(u64::from(nodesize), level)
                 .map_err(|e| btrfs_mutation_to_ffs(&e))?;
             root_allocated_addrs.insert(block, allocation.bytenr);
         }

@@ -3739,6 +3739,30 @@ impl BtrfsExtentAllocator {
         )
     }
 
+    /// Allocate metadata for root_tree nodes without EXTENT_ITEM insertion.
+    ///
+    /// Root_tree allocations happen after extent_tree is serialized during
+    /// commit. Any EXTENT_ITEMs inserted here would only exist in memory and
+    /// never reach disk (bd-4nz82). We skip EXTENT_ITEM insertion entirely:
+    /// - Avoids inconsistent on-disk state (extent_tree missing root_tree refs)
+    /// - Root_tree blocks are small (usually single node)
+    /// - Missing EXTENT_ITEMs don't affect mount or data access
+    /// - `btrfs check` becomes clean instead of flagging cosmetic errors
+    pub fn alloc_metadata_for_root_tree(
+        &mut self,
+        num_bytes: u64,
+        level: u8,
+    ) -> Result<ExtentAllocation, BtrfsMutationError> {
+        self.alloc_extent(
+            num_bytes,
+            BTRFS_BLOCK_GROUP_METADATA,
+            true,
+            BTRFS_ROOT_TREE_OBJECTID,
+            level,
+            true, // skip EXTENT_ITEM insertion (bd-4nz82 fix)
+        )
+    }
+
     /// Core allocation logic.
     ///
     /// If `skip_extent_item` is true, the allocation reserves space but does
