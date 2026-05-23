@@ -187,9 +187,19 @@ impl WriteDependencyDag {
         self.nodes.keys().copied()
     }
 
+    /// Return all block numbers as a collected Vec.
+    pub fn all_blocks(&self) -> Vec<u64> {
+        self.nodes.keys().copied().collect()
+    }
+
     /// Get a node by block number.
     pub fn get(&self, block: u64) -> Option<&DagNode> {
         self.nodes.get(&block)
+    }
+
+    /// Get the tree level of a node (0 = leaf).
+    pub fn node_level(&self, block: u64) -> Option<u8> {
+        self.nodes.get(&block).map(|n| n.level)
     }
 }
 

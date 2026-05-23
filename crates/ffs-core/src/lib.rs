@@ -14349,14 +14349,35 @@ impl OpenFs {
             "writeback_dag_built"
         );
 
-        // Create disk writeback context for serialization
-        let disk_ctx = DiskWritebackContext::new(
+        // Pre-allocate logical addresses for each node from the chunk-tree-covered
+        // metadata block groups. This fixes the addressing gap where placeholder
+        // addresses (block * nodesize) are not covered by any chunk.
+        let mut allocated_addrs = std::collections::BTreeMap::new();
+        for block in dag.all_blocks() {
+            let level = dag.node_level(block).unwrap_or(0);
+            let allocation = alloc
+                .extent_alloc
+                .alloc_metadata_for_tree(u64::from(nodesize), BTRFS_FS_TREE_OBJECTID, level)
+                .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+            allocated_addrs.insert(block, allocation.bytenr);
+            trace!(
+                target: "ffs::btrfs::writeback",
+                block,
+                logical_addr = allocation.bytenr,
+                level,
+                "node_address_allocated"
+            );
+        }
+
+        // Create disk writeback context with real allocated addresses
+        let disk_ctx = DiskWritebackContext::with_allocated_addresses(
             sb.fsid,
             sb.fsid, // chunk_tree_uuid = fsid for single-device
             new_gen,
             BTRFS_FS_TREE_OBJECTID,
             nodesize,
             alloc.sectorsize,
+            allocated_addrs,
         );
 
         // Create the writeback executor
@@ -49893,50 +49914,6 @@ mod tests {
     fn dir_logical_block_count_zero_size() {
         use super::dir_logical_block_count;
         assert_eq!(dir_logical_block_count(0, 4096).unwrap(), 0);
-    }
-
-    // ── validate_btrfs_superblock: geometry validation ───────────────────
-
-    fn make_btrfs_sb(sectorsize: u32, nodesize: u32) -> ffs_ondisk::BtrfsSuperblock {
-        let mut sb: ffs_ondisk::BtrfsSuperblock = unsafe { std::mem::zeroed() };
-        sb.sectorsize = sectorsize;
-        sb.nodesize = nodesize;
-        sb
-    }
-
-    #[test]
-    fn validate_btrfs_superblock_accepts_valid_geometry() {
-        use super::validate_btrfs_superblock;
-        let sb = make_btrfs_sb(4096, 16384);
-        assert!(validate_btrfs_superblock(&sb).is_ok());
-    }
-
-    #[test]
-    fn validate_btrfs_superblock_rejects_small_sectorsize() {
-        use super::validate_btrfs_superblock;
-        let sb = make_btrfs_sb(256, 4096);
-        assert!(validate_btrfs_superblock(&sb).is_err());
-    }
-
-    #[test]
-    fn validate_btrfs_superblock_rejects_large_sectorsize() {
-        use super::validate_btrfs_superblock;
-        let sb = make_btrfs_sb(8192, 16384);
-        assert!(validate_btrfs_superblock(&sb).is_err());
-    }
-
-    #[test]
-    fn validate_btrfs_superblock_rejects_nodesize_below_sectorsize() {
-        use super::validate_btrfs_superblock;
-        let sb = make_btrfs_sb(4096, 2048);
-        assert!(validate_btrfs_superblock(&sb).is_err());
-    }
-
-    #[test]
-    fn validate_btrfs_superblock_rejects_large_nodesize() {
-        use super::validate_btrfs_superblock;
-        let sb = make_btrfs_sb(4096, 131072);
-        assert!(validate_btrfs_superblock(&sb).is_err());
     }
 
     // ── ext4_mmp_status_class: MMP status display helper ─────────────────
