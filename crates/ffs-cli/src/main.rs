@@ -15137,6 +15137,55 @@ mod tests {
         assert!(result.is_empty());
     }
 
+    // ── bytes_to_hex_dump: raw data display helper ───────────────────────
+
+    #[test]
+    fn bytes_to_hex_dump_empty_input() {
+        use super::bytes_to_hex_dump;
+        let result = bytes_to_hex_dump(&[]);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn bytes_to_hex_dump_single_byte() {
+        use super::bytes_to_hex_dump;
+        let result = bytes_to_hex_dump(&[0xab]);
+        assert_eq!(result, "00000000: ab\n");
+    }
+
+    #[test]
+    fn bytes_to_hex_dump_full_line() {
+        use super::bytes_to_hex_dump;
+        let input: Vec<u8> = (0u8..16).collect();
+        let result = bytes_to_hex_dump(&input);
+        assert!(result.starts_with("00000000:"));
+        assert!(result.contains(" 00 01 02 03"));
+        assert!(result.contains(" 0f"));
+        assert_eq!(result.lines().count(), 1);
+    }
+
+    #[test]
+    fn bytes_to_hex_dump_multiple_lines() {
+        use super::bytes_to_hex_dump;
+        let input: Vec<u8> = (0u8..32).collect();
+        let result = bytes_to_hex_dump(&input);
+        let lines: Vec<_> = result.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].starts_with("00000000:"));
+        assert!(lines[1].starts_with("00000010:"));
+    }
+
+    #[test]
+    fn bytes_to_hex_dump_partial_last_line() {
+        use super::bytes_to_hex_dump;
+        let input: Vec<u8> = (0u8..20).collect();
+        let result = bytes_to_hex_dump(&input);
+        let lines: Vec<_> = result.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[1].starts_with("00000010:"));
+        assert!(lines[1].contains(" 10 11 12 13"));
+    }
+
     // ── choose_btrfs_scrub_block_size: geometry validation ───────────────
 
     #[test]
