@@ -302,7 +302,7 @@ impl WalWriter {
     /// * **Append-only**: writes always go to `self.write_pos`; the
     ///   file is never overwritten in place. The only function that
     ///   reduces `write_pos` is rollback (here and in
-    ///   [`Self::rollback_failed_append`]) or the explicit
+    ///   `rollback_failed_append`) or the explicit
     ///   `truncate_wal` after a successful checkpoint.
     /// * **Strict monotonic**: D1 below — `commit_seq` MUST be
     ///   strictly greater than `last_commit_seq`. Equality is a
@@ -321,7 +321,7 @@ impl WalWriter {
     ///        increment, you MUST reset the counter here too.
     ///     2. **Sync failure** (after
     ///        `increment_pending_sync_count`): delegates to
-    ///        [`Self::rollback_failed_append`], which reverts
+    ///        `rollback_failed_append`, which reverts
     ///        `write_pos`, truncates the file, AND restores
     ///        `appends_since_sync` to its pre-increment value.
     ///

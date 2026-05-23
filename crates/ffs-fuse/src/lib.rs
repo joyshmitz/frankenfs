@@ -6754,14 +6754,14 @@ impl Default for MountConfig {
 
 /// Handle for a live FUSE mount with lifecycle control.
 ///
-/// Dropping the handle triggers a clean unmount.  Call [`wait`] to block
+/// Dropping the handle triggers a clean unmount.  Call [`Self::wait`] to block
 /// until external shutdown (Ctrl+C / programmatic `shutdown()`).
 ///
 /// # Signal Handling
 ///
 /// `MountHandle` exposes a shared `shutdown` flag (`Arc<AtomicBool>`).
 /// The CLI (or any owner) should wire SIGTERM / SIGINT handlers that set
-/// this flag.  [`wait`] polls the flag and triggers unmount when set.
+/// this flag.  [`Self::wait`] polls the flag and triggers unmount when set.
 /// The `AutoUnmount` fuser option provides a safety net: the kernel
 /// unmounts the filesystem if the process exits without a clean unmount.
 pub struct MountHandle {

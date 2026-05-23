@@ -690,8 +690,8 @@ pub trait WalWriter: Send + Sync {
 ///
 /// # Concurrency invariants (bd-lebu5)
 ///
-/// **Invariant 1 — notify outside the lock.** Both [`notify_durable`] and
-/// [`notify_failed`] acquire `state`, mutate, drop the guard at the inner
+/// **Invariant 1 — notify outside the lock.** Both `notify_durable` and
+/// `notify_failed` acquire `state`, mutate, drop the guard at the inner
 /// block scope, THEN call `condvar.notify_all()`. Notifying *while*
 /// holding `state` would force every woken waiter to re-block on the
 /// same mutex on the very next instruction — a subtle perf regression
@@ -699,8 +699,8 @@ pub trait WalWriter: Send + Sync {
 /// refactors that hoist the `notify_all` inside the inner block must
 /// be rejected.
 ///
-/// **Invariant 2 — predicate-loop on every wake.** [`await_epoch`] and
-/// [`await_epoch_timeout`] re-check the `durable_epoch` and `failed`
+/// **Invariant 2 — predicate-loop on every wake.** `await_epoch` and
+/// `await_epoch_timeout` re-check the `durable_epoch` and `failed`
 /// predicates on EVERY condvar wake — both spurious wakes (allowed by
 /// the OS) and notify_all-induced wakes for unrelated lower epochs. A
 /// regression that drops the surrounding `loop { ... }` — converting

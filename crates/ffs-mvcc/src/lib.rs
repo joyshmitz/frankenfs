@@ -3395,7 +3395,7 @@ impl SnapshotRegistry {
 
 /// RAII handle that releases a snapshot when dropped.
 ///
-/// Acquire via [`SnapshotRegistry::acquire_from`].  The snapshot remains
+/// Acquire via [`SnapshotRegistry::acquire`].  The snapshot remains
 /// active (preventing GC of versions at or after its commit sequence)
 /// until this handle is dropped.  Panic-safe: `Drop` is always called.
 #[derive(Debug)]

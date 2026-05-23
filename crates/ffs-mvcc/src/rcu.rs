@@ -5,7 +5,7 @@
 //!
 //! # Design
 //!
-//! - **Readers**: Call [`RcuCell::load`] to get a [`Guard`] — a zero-cost handle
+//! - **Readers**: Call [`RcuCell::load`] to get a `Guard` — a zero-cost handle
 //!   that borrows the current value without any atomic increment. Multiple
 //!   concurrent readers never block each other or writers.
 //!

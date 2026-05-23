@@ -48,7 +48,7 @@ pub mod field {
     /// Format: `snake_case`, e.g., `"btrfs_rw_fallocate_prealloc"`.
     pub const SCENARIO_ID: &str = "scenario_id";
 
-    /// Operation outcome. Values MUST come from the [`outcome`] vocabulary.
+    /// Operation outcome. Values MUST come from the [`super::outcome`] vocabulary.
     pub const OUTCOME: &str = "outcome";
 
     /// Error classification when outcome is a failure.

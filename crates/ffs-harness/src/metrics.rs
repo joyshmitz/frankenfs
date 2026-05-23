@@ -2,7 +2,7 @@
 
 //! Lightweight runtime metrics framework using atomics.
 //!
-//! Provides [`Counter`], [`Gauge`], and [`Histogram`] metric types with
+//! Provides [`MetricKind::Counter`], [`MetricKind::Gauge`], and [`MetricKind::Histogram`] metric types with
 //! zero-contention atomic updates. A global [`MetricsRegistry`] manages
 //! registration and snapshot collection.
 //!

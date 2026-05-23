@@ -1028,9 +1028,9 @@ const DEFAULT_EXTENT_CACHE_CAPACITY: usize = 1024;
 ///
 /// # Invalidation
 ///
-/// Callers must invoke [`invalidate_range`] when the extent tree is mutated
+/// Callers must invoke [`Self::invalidate_range`] when the extent tree is mutated
 /// (write, truncate, punch hole, mark written). A monotonic generation counter
-/// allows cheap bulk invalidation via [`invalidate_all`].
+/// allows cheap bulk invalidation via [`Self::invalidate_all`].
 ///
 /// # Thread safety
 ///
