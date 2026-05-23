@@ -21361,8 +21361,13 @@ impl FsOps for OpenFs {
             FsFlavor::Ext4(_) => Err(FfsError::UnsupportedFeature(
                 "BTRFS_IOC_FILE_EXTENT_SAME is not supported on ext4 filesystems".to_owned(),
             )),
+            // FILE_EXTENT_SAME requires reading from destination fds passed by the
+            // caller. In FUSE context, we cannot access these fds (they belong to
+            // the caller's process). Additionally, this is a read-only mount so
+            // actual deduplication (CoW sharing) cannot occur.
             FsFlavor::Btrfs(_) => Err(FfsError::UnsupportedFeature(
-                "BTRFS_IOC_FILE_EXTENT_SAME protocol not yet implemented".to_owned(),
+                "BTRFS_IOC_FILE_EXTENT_SAME: cannot access caller fds in FUSE context (read-only mount cannot dedupe)"
+                    .to_owned(),
             )),
         }
     }
