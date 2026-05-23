@@ -44216,6 +44216,36 @@ mod tests {
         assert!((cmp.latency_p50_ratio - 0.5).abs() < 0.001);
     }
 
+    // ── CrashRecoveryOutcome unit tests ─────────────────────────────────────
+
+    #[test]
+    fn crash_recovery_outcome_clean_means_no_recovery() {
+        let clean = CrashRecoveryOutcome {
+            was_clean: true,
+            raw_state: 0x0001, // EXT4_VALID_FS
+            had_errors: false,
+            had_orphans: false,
+            journal_txns_replayed: 0,
+            journal_blocks_replayed: 0,
+            mvcc_reset: false,
+        };
+        assert!(!clean.recovery_performed());
+    }
+
+    #[test]
+    fn crash_recovery_outcome_dirty_means_recovery() {
+        let dirty = CrashRecoveryOutcome {
+            was_clean: false,
+            raw_state: 0x0000, // not EXT4_VALID_FS
+            had_errors: false,
+            had_orphans: true,
+            journal_txns_replayed: 5,
+            journal_blocks_replayed: 100,
+            mvcc_reset: true,
+        };
+        assert!(dirty.recovery_performed());
+    }
+
     // ── Crash consistency matrix for writeback epoch barrier ─────────────
     //
     // Each scenario simulates a crash at a specific point in the writeback
