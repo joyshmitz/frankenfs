@@ -7907,6 +7907,23 @@ mod tests {
     }
 
     #[test]
+    fn atomic_metrics_record_throttled() {
+        let m = AtomicMetrics::new();
+        assert_eq!(m.snapshot().requests_throttled, 0);
+        m.record_throttled();
+        m.record_throttled();
+        assert_eq!(m.snapshot().requests_throttled, 2);
+    }
+
+    #[test]
+    fn atomic_metrics_record_shed() {
+        let m = AtomicMetrics::new();
+        assert_eq!(m.snapshot().requests_shed, 0);
+        m.record_shed();
+        assert_eq!(m.snapshot().requests_shed, 1);
+    }
+
+    #[test]
     fn access_predictor_new_clamps_max_entries() {
         let p = AccessPredictor::new(0);
         assert_eq!(p.max_entries, 1);
