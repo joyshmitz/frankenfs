@@ -4507,7 +4507,7 @@ impl OpenFs {
             FsFlavor::Ext4(sb) => sb,
             FsFlavor::Btrfs(_) => {
                 return Err(FfsError::UnsupportedFeature(
-                    "btrfs write operations not yet supported".into(),
+                    "ext4 allocation state is only available for ext4 filesystems".into(),
                 ));
             }
         };
