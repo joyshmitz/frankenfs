@@ -5355,6 +5355,296 @@ pub fn build_update_extent_command(path: &[u8], offset: u64, len: u64) -> (SendC
     )
 }
 
+// ── send stream generation from FS tree ───────────────────────────────────
+
+/// Generate a btrfs send stream from FS tree items.
+///
+/// This function walks the given FS tree items and produces a valid send stream
+/// that can be consumed by `btrfs receive`. The stream contains:
+/// - Subvol command (root)
+/// - Create commands for directories, files, symlinks, special files
+/// - Write commands for file data
+/// - SetXattr commands for extended attributes
+/// - Chmod/Chown/Utimes for metadata
+/// - End command
+///
+/// # Arguments
+/// * `items` - FS tree leaf entries from `walk_btrfs_fs_tree`
+/// * `subvol_name` - Name for the subvolume in the stream
+/// * `subvol_uuid` - UUID for the subvolume (16 bytes)
+/// * `ctransid` - Creation transaction ID
+/// * `read_extent` - Closure to read extent data: (disk_bytenr, disk_num_bytes) -> data
+///
+/// # Returns
+/// The complete send stream bytes on success.
+#[expect(clippy::too_many_lines)]
+pub fn generate_send_stream<F>(
+    items: &[BtrfsLeafEntry],
+    subvol_name: &[u8],
+    subvol_uuid: &[u8; 16],
+    ctransid: u64,
+    mut read_extent: F,
+) -> Result<Vec<u8>, ParseError>
+where
+    F: FnMut(u64, u64) -> Result<Vec<u8>, ParseError>,
+{
+    let mut builder = SendStreamBuilder::new();
+    builder.write_header();
+
+    // Emit subvol command
+    let (cmd, attrs) = build_subvol_command(subvol_name, subvol_uuid, ctransid);
+    let refs: Vec<(SendAttr, &[u8])> = attrs.iter().map(|(a, d)| (*a, d.as_slice())).collect();
+    builder.add_command(cmd, &refs);
+
+    // Build inode -> parent mapping from INODE_REF items
+    // key.objectid = child inode, key.offset = parent inode
+    let mut inode_parents: BTreeMap<u64, (u64, Vec<u8>)> = BTreeMap::new();
+    for entry in items {
+        if entry.key.item_type == BTRFS_ITEM_INODE_REF {
+            if let Ok(refs) = parse_inode_refs(&entry.data) {
+                if let Some(first_ref) = refs.first() {
+                    inode_parents.insert(
+                        entry.key.objectid,
+                        (entry.key.offset, first_ref.name.clone()),
+                    );
+                }
+            }
+        }
+    }
+
+    // Build path for an inode by walking up the parent chain
+    let build_path = |ino: u64| -> Vec<u8> {
+        let mut components = Vec::new();
+        let mut current = ino;
+
+        while let Some((parent, name)) = inode_parents.get(&current) {
+            components.push(name.clone());
+            if *parent == current || *parent == BTRFS_FIRST_FREE_OBJECTID {
+                break;
+            }
+            current = *parent;
+        }
+
+        components.reverse();
+        let mut path = subvol_name.to_vec();
+        for comp in components {
+            path.push(b'/');
+            path.extend_from_slice(&comp);
+        }
+        path
+    };
+
+    // Group items by objectid (inode)
+    let mut inodes: BTreeMap<u64, Vec<&BtrfsLeafEntry>> = BTreeMap::new();
+    for entry in items {
+        inodes.entry(entry.key.objectid).or_default().push(entry);
+    }
+
+    // Process each inode
+    for (&ino, entries) in &inodes {
+        // Skip special inodes (< BTRFS_FIRST_FREE_OBJECTID)
+        if ino < BTRFS_FIRST_FREE_OBJECTID {
+            continue;
+        }
+
+        // Find inode item
+        let inode_entry = entries
+            .iter()
+            .find(|e| e.key.item_type == BTRFS_ITEM_INODE_ITEM);
+        let Some(inode_entry) = inode_entry else {
+            continue;
+        };
+
+        let inode = match parse_inode_item(&inode_entry.data) {
+            Ok(i) => i,
+            Err(_) => continue,
+        };
+
+        let path = build_path(ino);
+        // Truncate mode to u16 for S_IF* comparisons (upper bits are flags)
+        #[expect(clippy::cast_possible_truncation)]
+        let file_type = (inode.mode as u16) & ffs_types::S_IFMT;
+
+        // Emit create command based on type
+        match file_type {
+            ffs_types::S_IFDIR => {
+                // Skip root directory (already created by subvol)
+                if ino != BTRFS_FIRST_FREE_OBJECTID {
+                    let (cmd, attrs) = build_mkdir_command(&path, ino);
+                    let refs: Vec<(SendAttr, &[u8])> =
+                        attrs.iter().map(|(a, d)| (*a, d.as_slice())).collect();
+                    builder.add_command(cmd, &refs);
+                }
+            }
+            ffs_types::S_IFREG => {
+                let (cmd, attrs) = build_mkfile_command(&path, ino);
+                let refs: Vec<(SendAttr, &[u8])> =
+                    attrs.iter().map(|(a, d)| (*a, d.as_slice())).collect();
+                builder.add_command(cmd, &refs);
+
+                // Emit write commands for file data
+                for entry in entries
+                    .iter()
+                    .filter(|e| e.key.item_type == BTRFS_ITEM_EXTENT_DATA)
+                {
+                    if entry.data.len() < 21 {
+                        continue;
+                    }
+                    let extent_type = entry.data[20];
+                    let file_offset = entry.key.offset;
+
+                    if extent_type == 0 {
+                        // Inline extent: data follows header
+                        let data = &entry.data[21..];
+                        let (cmd, attrs) = build_write_command(&path, file_offset, data);
+                        let refs: Vec<(SendAttr, &[u8])> =
+                            attrs.iter().map(|(a, d)| (*a, d.as_slice())).collect();
+                        builder.add_command(cmd, &refs);
+                    } else if extent_type == 1 && entry.data.len() >= 53 {
+                        // Regular extent: read from disk
+                        let disk_bytenr = u64::from_le_bytes(
+                            entry.data[21..29].try_into().unwrap_or([0; 8]),
+                        );
+                        let disk_num_bytes = u64::from_le_bytes(
+                            entry.data[29..37].try_into().unwrap_or([0; 8]),
+                        );
+                        let extent_offset = u64::from_le_bytes(
+                            entry.data[37..45].try_into().unwrap_or([0; 8]),
+                        );
+                        let num_bytes = u64::from_le_bytes(
+                            entry.data[45..53].try_into().unwrap_or([0; 8]),
+                        );
+
+                        if disk_bytenr == 0 {
+                            // Sparse hole - emit update_extent instead
+                            let (cmd, attrs) =
+                                build_update_extent_command(&path, file_offset, num_bytes);
+                            let refs: Vec<(SendAttr, &[u8])> =
+                                attrs.iter().map(|(a, d)| (*a, d.as_slice())).collect();
+                            builder.add_command(cmd, &refs);
+                        } else if disk_num_bytes > 0 {
+                            // Read extent data and emit write
+                            match read_extent(disk_bytenr, disk_num_bytes) {
+                                Ok(full_data) => {
+                                    let start = extent_offset as usize;
+                                    let end = start.saturating_add(num_bytes as usize);
+                                    let data = if end <= full_data.len() {
+                                        &full_data[start..end]
+                                    } else if start < full_data.len() {
+                                        &full_data[start..]
+                                    } else {
+                                        &[]
+                                    };
+                                    if !data.is_empty() {
+                                        let (cmd, attrs) =
+                                            build_write_command(&path, file_offset, data);
+                                        let refs: Vec<(SendAttr, &[u8])> = attrs
+                                            .iter()
+                                            .map(|(a, d)| (*a, d.as_slice()))
+                                            .collect();
+                                        builder.add_command(cmd, &refs);
+                                    }
+                                }
+                                Err(_) => {
+                                    // Skip extent on read error
+                                }
+                            }
+                        }
+                    }
+                    // type 2 = prealloc, skip for now
+                }
+
+                // Truncate to exact size
+                let (cmd, attrs) = build_truncate_command(&path, inode.size);
+                let refs: Vec<(SendAttr, &[u8])> =
+                    attrs.iter().map(|(a, d)| (*a, d.as_slice())).collect();
+                builder.add_command(cmd, &refs);
+            }
+            ffs_types::S_IFLNK => {
+                // For symlinks, the target is in the inline extent
+                let target = entries
+                    .iter()
+                    .find(|e| e.key.item_type == BTRFS_ITEM_EXTENT_DATA)
+                    .and_then(|e| {
+                        if e.data.len() > 21 && e.data[20] == 0 {
+                            Some(&e.data[21..])
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or(b"");
+                let (cmd, attrs) = build_symlink_command(&path, ino, target);
+                let refs: Vec<(SendAttr, &[u8])> =
+                    attrs.iter().map(|(a, d)| (*a, d.as_slice())).collect();
+                builder.add_command(cmd, &refs);
+            }
+            ffs_types::S_IFIFO => {
+                let (cmd, attrs) = build_mkfifo_command(&path, ino);
+                let refs: Vec<(SendAttr, &[u8])> =
+                    attrs.iter().map(|(a, d)| (*a, d.as_slice())).collect();
+                builder.add_command(cmd, &refs);
+            }
+            ffs_types::S_IFSOCK => {
+                let (cmd, attrs) = build_mksock_command(&path, ino);
+                let refs: Vec<(SendAttr, &[u8])> =
+                    attrs.iter().map(|(a, d)| (*a, d.as_slice())).collect();
+                builder.add_command(cmd, &refs);
+            }
+            ffs_types::S_IFCHR | ffs_types::S_IFBLK => {
+                let mode_with_type = u64::from(inode.mode);
+                let (cmd, attrs) = build_mknod_command(&path, ino, mode_with_type, inode.rdev);
+                let refs: Vec<(SendAttr, &[u8])> =
+                    attrs.iter().map(|(a, d)| (*a, d.as_slice())).collect();
+                builder.add_command(cmd, &refs);
+            }
+            _ => continue,
+        }
+
+        // Emit xattrs
+        for entry in entries
+            .iter()
+            .filter(|e| e.key.item_type == BTRFS_ITEM_XATTR_ITEM)
+        {
+            if let Ok(xattr_items) = parse_xattr_items(&entry.data) {
+                for xattr in xattr_items {
+                    let (cmd, attrs) = build_setxattr_command(&path, &xattr.name, &xattr.value);
+                    let refs: Vec<(SendAttr, &[u8])> =
+                        attrs.iter().map(|(a, d)| (*a, d.as_slice())).collect();
+                    builder.add_command(cmd, &refs);
+                }
+            }
+        }
+
+        // Emit chmod
+        let mode_bits = u64::from(inode.mode & 0o7777);
+        let (cmd, attrs) = build_chmod_command(&path, mode_bits);
+        let refs: Vec<(SendAttr, &[u8])> = attrs.iter().map(|(a, d)| (*a, d.as_slice())).collect();
+        builder.add_command(cmd, &refs);
+
+        // Emit chown
+        let (cmd, attrs) = build_chown_command(&path, u64::from(inode.uid), u64::from(inode.gid));
+        let refs: Vec<(SendAttr, &[u8])> = attrs.iter().map(|(a, d)| (*a, d.as_slice())).collect();
+        builder.add_command(cmd, &refs);
+
+        // Emit utimes
+        #[expect(clippy::cast_possible_wrap)]
+        let (cmd, attrs) = build_utimes_command(
+            &path,
+            inode.atime_sec as i64,
+            inode.atime_nsec as i32,
+            inode.mtime_sec as i64,
+            inode.mtime_nsec as i32,
+            inode.ctime_sec as i64,
+            inode.ctime_nsec as i32,
+        );
+        let refs: Vec<(SendAttr, &[u8])> = attrs.iter().map(|(a, d)| (*a, d.as_slice())).collect();
+        builder.add_command(cmd, &refs);
+    }
+
+    builder.finalize();
+    Ok(builder.finish())
+}
+
 // ── btrfs tree-log replay ─────────────────────────────────────────────────
 
 /// Result of scanning the btrfs tree-log.
@@ -15309,5 +15599,164 @@ mod tests {
         assert_eq!(parsed.commands[4].cmd, SendCommand::Chmod);
         assert_eq!(parsed.commands[5].cmd, SendCommand::Chown);
         assert_eq!(parsed.commands[6].cmd, SendCommand::End);
+    }
+
+    #[test]
+    fn generate_send_stream_from_fs_tree_items() {
+        // Create a minimal FS tree with:
+        // - Root directory (inode 256)
+        // - A regular file "hello.txt" (inode 257) with inline content
+        // - A subdirectory "subdir" (inode 258)
+
+        // Helper to create an inode item payload (160 bytes)
+        fn make_inode_item(mode: u32, size: u64, uid: u32, gid: u32) -> Vec<u8> {
+            let mut buf = vec![0u8; 160];
+            buf[0..8].copy_from_slice(&1_u64.to_le_bytes()); // generation
+            buf[16..24].copy_from_slice(&size.to_le_bytes()); // size
+            buf[24..32].copy_from_slice(&size.to_le_bytes()); // nbytes
+            buf[40..44].copy_from_slice(&1_u32.to_le_bytes()); // nlink
+            buf[44..48].copy_from_slice(&uid.to_le_bytes());
+            buf[48..52].copy_from_slice(&gid.to_le_bytes());
+            buf[52..56].copy_from_slice(&mode.to_le_bytes());
+            buf
+        }
+
+        // Helper to create an inode ref payload
+        fn make_inode_ref(index: u64, name: &[u8]) -> Vec<u8> {
+            let mut buf = Vec::new();
+            buf.extend_from_slice(&index.to_le_bytes());
+            buf.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            buf.extend_from_slice(name);
+            buf
+        }
+
+        // Helper to create an inline extent (type 0)
+        fn make_inline_extent(data: &[u8]) -> Vec<u8> {
+            let mut buf = vec![0u8; 21];
+            // First 21 bytes: generation(8) + ram_bytes(8) + compression(1) +
+            // encryption(1) + other_encoding(2) + type(1)
+            buf[16..20].copy_from_slice(&(data.len() as u32).to_le_bytes()); // ram_bytes (lower 32 bits)
+            buf[20] = 0; // inline type
+            buf.extend_from_slice(data);
+            buf
+        }
+
+        let items = vec![
+            // Root directory inode (256)
+            BtrfsLeafEntry {
+                key: BtrfsKey {
+                    objectid: 256,
+                    item_type: BTRFS_ITEM_INODE_ITEM,
+                    offset: 0,
+                },
+                data: make_inode_item(0o40755, 0, 0, 0), // S_IFDIR | 0755
+            },
+            // Root directory self-ref (parent is itself for root)
+            BtrfsLeafEntry {
+                key: BtrfsKey {
+                    objectid: 256,
+                    item_type: BTRFS_ITEM_INODE_REF,
+                    offset: 256,
+                },
+                data: make_inode_ref(0, b".."),
+            },
+            // Regular file inode (257)
+            BtrfsLeafEntry {
+                key: BtrfsKey {
+                    objectid: 257,
+                    item_type: BTRFS_ITEM_INODE_ITEM,
+                    offset: 0,
+                },
+                data: make_inode_item(0o100644, 13, 1000, 1000), // S_IFREG | 0644
+            },
+            // File inode ref (parent = 256, name = "hello.txt")
+            BtrfsLeafEntry {
+                key: BtrfsKey {
+                    objectid: 257,
+                    item_type: BTRFS_ITEM_INODE_REF,
+                    offset: 256,
+                },
+                data: make_inode_ref(1, b"hello.txt"),
+            },
+            // File inline extent with content
+            BtrfsLeafEntry {
+                key: BtrfsKey {
+                    objectid: 257,
+                    item_type: BTRFS_ITEM_EXTENT_DATA,
+                    offset: 0,
+                },
+                data: make_inline_extent(b"Hello, World!"),
+            },
+            // Subdirectory inode (258)
+            BtrfsLeafEntry {
+                key: BtrfsKey {
+                    objectid: 258,
+                    item_type: BTRFS_ITEM_INODE_ITEM,
+                    offset: 0,
+                },
+                data: make_inode_item(0o40755, 0, 0, 0), // S_IFDIR | 0755
+            },
+            // Subdirectory inode ref (parent = 256, name = "subdir")
+            BtrfsLeafEntry {
+                key: BtrfsKey {
+                    objectid: 258,
+                    item_type: BTRFS_ITEM_INODE_REF,
+                    offset: 256,
+                },
+                data: make_inode_ref(2, b"subdir"),
+            },
+        ];
+
+        let uuid = [0u8; 16];
+        let stream = generate_send_stream(
+            &items,
+            b"test_subvol",
+            &uuid,
+            1,
+            |_bytenr, _len| Err(ffs_types::ParseError::InvalidField {
+                field: "test",
+                reason: "no disk extents in test",
+            }),
+        )
+        .expect("generate send stream");
+
+        // Parse the generated stream
+        let parsed = parse_send_stream(&stream).expect("parse generated stream");
+        assert_eq!(parsed.version, 1);
+
+        // Find command types
+        let cmd_types: Vec<_> = parsed.commands.iter().map(|c| c.cmd).collect();
+
+        // Must start with Subvol
+        assert_eq!(cmd_types[0], SendCommand::Subvol);
+
+        // Must end with End
+        assert_eq!(*cmd_types.last().unwrap(), SendCommand::End);
+
+        // Should contain mkdir (for subdir), mkfile (for hello.txt)
+        assert!(
+            cmd_types.contains(&SendCommand::Mkdir),
+            "should have mkdir command"
+        );
+        assert!(
+            cmd_types.contains(&SendCommand::Mkfile),
+            "should have mkfile command"
+        );
+        assert!(
+            cmd_types.contains(&SendCommand::Write),
+            "should have write command for inline extent"
+        );
+        assert!(
+            cmd_types.contains(&SendCommand::Chmod),
+            "should have chmod command"
+        );
+        assert!(
+            cmd_types.contains(&SendCommand::Chown),
+            "should have chown command"
+        );
+        assert!(
+            cmd_types.contains(&SendCommand::Utimes),
+            "should have utimes command"
+        );
     }
 }
