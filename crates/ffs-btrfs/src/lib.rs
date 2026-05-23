@@ -1758,6 +1758,10 @@ pub struct BtrfsNodeSerializeParams {
     pub owner: u64,
     /// Node size in bytes (from superblock, default 16384).
     pub nodesize: u32,
+    /// Level of this node in the tree (0 = leaf, 1+ = internal).
+    /// For leaves this is ignored (always 0). For internal nodes
+    /// this must be > 0 and represent the actual tree depth.
+    pub level: u8,
     /// Child generation values for internal nodes (indexed by child position).
     pub child_generations: Vec<u64>,
     /// On-disk byte offsets (typically btrfs *logical* addresses) for the
@@ -1864,8 +1868,13 @@ impl BtrfsCowNode {
                 let nritems = u32::try_from(children.len())
                     .map_err(|_| BtrfsMutationError::InvalidConfig("too many children"))?;
                 buf[0x60..0x64].copy_from_slice(&nritems.to_le_bytes());
-                // level at 0x64 > 0 for internal (we use 1 as default)
-                buf[0x64] = 1;
+                // level at 0x64 > 0 for internal nodes
+                if params.level == 0 {
+                    return Err(BtrfsMutationError::BrokenInvariant(
+                        "internal node level must be > 0",
+                    ));
+                }
+                buf[0x64] = params.level;
 
                 // Serialize key-pointers (33 bytes each)
                 let mut kp_offset = BTRFS_HEADER_SIZE;
@@ -14526,6 +14535,7 @@ mod tests {
             generation: 100,
             owner: 5,
             nodesize: 16384,
+            level: 0, // leaf
             child_generations: vec![],
             child_bytenrs: vec![],
         };
@@ -14578,6 +14588,7 @@ mod tests {
             generation: 200,
             owner: 1,
             nodesize: 16384,
+            level: 1, // internal node, level 1
             child_generations: vec![190, 195, 200],
             child_bytenrs: vec![],
         };

@@ -14129,6 +14129,7 @@ impl OpenFs {
                 generation,
                 owner: BTRFS_TREE_LOG_OBJECTID,
                 nodesize: alloc.nodesize,
+                level: 0, // tree-log leaf
                 child_generations: Vec::new(),
                 child_bytenrs: Vec::new(),
             })
@@ -14442,11 +14443,11 @@ impl OpenFs {
             Ok(mapping.physical)
         };
 
-        let flush_result = executor.execute(|block| {
+        let flush_result = executor.execute(|block, level| {
             // Serialize the node using DiskWritebackContext. For internal
             // nodes this resolves child block numbers to their allocated
             // logical addresses (see `DiskWritebackContext::serialize_node`).
-            let serialized = disk_ctx.serialize_node(&alloc.fs_tree, block)?;
+            let serialized = disk_ctx.serialize_node(&alloc.fs_tree, block, level)?;
             let node_bytes = serialized.len() as u64;
 
             let logical = disk_ctx.block_to_bytenr(block);
@@ -14461,6 +14462,7 @@ impl OpenFs {
             trace!(
                 target: "ffs::btrfs::writeback",
                 block,
+                level,
                 logical,
                 physical,
                 node_bytes,
@@ -14552,10 +14554,11 @@ impl OpenFs {
 
         // Write extent_tree nodes
         let mut extent_executor = WritebackExecutor::new(extent_dag);
-        let extent_flush_result = extent_executor.execute(|block| {
+        let extent_flush_result = extent_executor.execute(|block, level| {
             let serialized = extent_disk_ctx.serialize_node(
                 alloc.extent_alloc.extent_tree(),
                 block,
+                level,
             )?;
             let node_bytes = serialized.len() as u64;
             let logical = extent_disk_ctx.block_to_bytenr(block);
@@ -14627,8 +14630,8 @@ impl OpenFs {
         // above, so that the next mount's resolver finds them via the
         // chunk tree.
         let mut root_executor = WritebackExecutor::new(root_dag);
-        let root_flush_result = root_executor.execute(|block| {
-            let serialized = root_disk_ctx.serialize_node(&alloc.root_tree, block)?;
+        let root_flush_result = root_executor.execute(|block, level| {
+            let serialized = root_disk_ctx.serialize_node(&alloc.root_tree, block, level)?;
             let node_bytes = serialized.len() as u64;
             let logical = root_disk_ctx.block_to_bytenr(block);
             let physical = resolve_physical(logical)?;

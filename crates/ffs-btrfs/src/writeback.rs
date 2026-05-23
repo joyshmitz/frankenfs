@@ -417,7 +417,7 @@ impl WritebackExecutor {
     /// Crash points are recorded after each flush for DPOR enumeration.
     pub fn execute<F>(&mut self, mut flush_node: F) -> Result<(), BtrfsMutationError>
     where
-        F: FnMut(u64) -> Result<(), BtrfsMutationError>,
+        F: FnMut(u64, u8) -> Result<(), BtrfsMutationError>,
     {
         let order = self.dag.reverse_topological_order();
         let total = order.len();
@@ -428,8 +428,11 @@ impl WritebackExecutor {
             self.crash_points
                 .push(CrashPoint::from_dag(&self.dag, pre_crash_id, false));
 
+            // Get the level for this block from the DAG
+            let level = self.dag.node_level(block).unwrap_or(0);
+
             // Flush the node
-            flush_node(block)?;
+            flush_node(block, level)?;
             self.dag.mark_durable(block)?;
 
             // Record crash point after this flush
@@ -587,6 +590,7 @@ impl DiskWritebackContext {
 
     /// Build serialization parameters for a node at the given block.
     ///
+    /// `level` is the tree level (0 for leaves, 1+ for internal nodes).
     /// `child_bytenrs` should be the allocated on-disk addresses of each
     /// child (for internal nodes) when this context was constructed with a
     /// real allocation map. Pass an empty vector for leaves or when the
@@ -596,6 +600,7 @@ impl DiskWritebackContext {
     pub fn params_for_block(
         &self,
         block: u64,
+        level: u8,
         child_generations: Vec<u64>,
         child_bytenrs: Vec<u64>,
     ) -> crate::BtrfsNodeSerializeParams {
@@ -607,12 +612,15 @@ impl DiskWritebackContext {
             generation: self.generation,
             owner: self.owner,
             nodesize: self.nodesize,
+            level,
             child_generations,
             child_bytenrs,
         }
     }
 
     /// Serialize a node and return the bytes ready for disk write.
+    ///
+    /// `level` is the node's level in the tree (0 for leaf, 1+ for internal).
     ///
     /// For internal nodes, child blockptrs in the serialized bytes are
     /// resolved through the allocation map (when present) so that the
@@ -625,6 +633,7 @@ impl DiskWritebackContext {
         &self,
         tree: &InMemoryCowBtrfsTree,
         block: u64,
+        level: u8,
     ) -> Result<Vec<u8>, BtrfsMutationError> {
         let node = tree.node_snapshot(block)?;
 
@@ -640,7 +649,7 @@ impl DiskWritebackContext {
             }
         };
 
-        let params = self.params_for_block(block, child_generations, child_bytenrs);
+        let params = self.params_for_block(block, level, child_generations, child_bytenrs);
         node.serialize(&params)
     }
 }
@@ -1355,7 +1364,7 @@ mod tests {
         let mut executor = WritebackExecutor::new(dag);
 
         // Execute with no-op flush
-        executor.execute(|_| Ok(())).expect("execute");
+        executor.execute(|_, _| Ok(())).expect("execute");
         executor.fsync_barrier();
         executor.commit_superblock();
 
@@ -1373,7 +1382,7 @@ mod tests {
         let dag = WriteDependencyDag::from_cow_tree(&tree, 100).expect("build dag");
         let mut executor = WritebackExecutor::new(dag);
 
-        executor.execute(|_| Ok(())).expect("execute");
+        executor.execute(|_, _| Ok(())).expect("execute");
 
         // WB-I1 should hold at all crash points after proper execution
         assert!(executor.verify_wb_i1().is_ok(), "WB-I1 should hold");
@@ -1416,7 +1425,7 @@ mod tests {
         let node = tree.node_snapshot(root).expect("get root");
 
         if let BtrfsCowNode::Leaf { items } = &node {
-            let buf = ctx.serialize_node(&tree, root).expect("serialize");
+            let buf = ctx.serialize_node(&tree, root, 0).expect("serialize");
             assert_eq!(buf.len(), TEST_NODESIZE as usize);
 
             verify_btrfs_tree_block_checksum(&buf, ffs_types::BTRFS_CSUM_TYPE_CRC32C)
@@ -1448,8 +1457,8 @@ mod tests {
         let disk: RefCell<Vec<u8>> = RefCell::new(vec![0u8; 1024 * 1024]);
 
         executor
-            .execute(|block| {
-                let buf = ctx.serialize_node(&tree, block)?;
+            .execute(|block, level| {
+                let buf = ctx.serialize_node(&tree, block, level)?;
                 let bytenr = ctx.block_to_bytenr(block) as usize;
                 let end = bytenr + buf.len();
                 disk.borrow_mut()[bytenr..end].copy_from_slice(&buf);
@@ -1480,8 +1489,8 @@ mod tests {
         let writes: RefCell<Vec<(u64, Vec<u8>)>> = RefCell::new(Vec::new());
 
         executor
-            .execute(|block| {
-                let buf = ctx.serialize_node(&tree, block)?;
+            .execute(|block, level| {
+                let buf = ctx.serialize_node(&tree, block, level)?;
                 writes.borrow_mut().push((block, buf));
                 Ok(())
             })
