@@ -21961,65 +21961,34 @@ impl FsOps for OpenFs {
             return Ok(());
         }
 
-        // First flush any committed MVCC block versions (covers ext4 metadata
-        // and any file-data extents staged through the block-versioned path).
+        // Flush committed MVCC block versions (covers ext4 metadata and any
+        // file-data extents staged through the block-versioned path).
         let flushed = self.flush_mvcc_to_device(cx)?;
         if flushed > 0 {
             info!(flushed_blocks = flushed, "flush_on_destroy");
         }
 
-        // For btrfs, serialize the in-memory CoW metadata tree and atomically
-        // commit the superblock. This is the durability boundary that lets
-        // mutations performed through the FUSE mount survive across
-        // unmount/remount. (bd-jdo53: durable-by-default RW writeback.)
+        // btrfs commit-on-destroy is intentionally NOT wired here.
         //
-        // The kernel calls FUSE `destroy` on `umount`; this is the last
-        // chance to materialise the CoW tree before the mount goes away, so
-        // we run a full transaction commit regardless of whether any
-        // explicit fsync() arrived during the session.
-        if matches!(self.flavor, FsFlavor::Btrfs(_)) && self.btrfs_alloc_state.is_some() {
-            let operation_id = format!(
-                "destroy-{:016x}",
-                std::ptr::addr_of!(*self) as usize as u64
-            );
-            info!(
-                target: "ffs::btrfs::rw",
-                operation_id = %operation_id,
-                scenario_id = "btrfs_rw_destroy",
-                outcome = "start",
-                durability_boundary = "destroy",
-                "btrfs_destroy_commit_start"
-            );
-            match self.btrfs_full_transaction_commit(cx, &operation_id) {
-                Ok(stats) => {
-                    info!(
-                        target: "ffs::btrfs::rw",
-                        operation_id = %operation_id,
-                        scenario_id = "btrfs_rw_destroy",
-                        outcome = "applied",
-                        nodes_written = stats.nodes_written,
-                        bytes_written = stats.bytes_written,
-                        new_generation = stats.new_generation,
-                        fsync_barrier_issued = stats.fsync_barrier_issued,
-                        durability_boundary = "destroy",
-                        "btrfs_destroy_commit_applied"
-                    );
-                }
-                Err(e) => {
-                    warn!(
-                        target: "ffs::btrfs::rw",
-                        operation_id = %operation_id,
-                        scenario_id = "btrfs_rw_destroy",
-                        outcome = "rejected",
-                        error_class = "destroy_commit_failed",
-                        error = %e,
-                        durability_boundary = "destroy",
-                        "btrfs_destroy_commit_rejected"
-                    );
-                    return Err(e);
-                }
-            }
-        }
+        // The flush_on_destroy → btrfs_full_transaction_commit path was tried
+        // (see git history of this hunk) and empirically corrupts the on-disk
+        // image: `DiskWritebackContext::block_to_bytenr` at
+        // `ffs-btrfs/src/writeback.rs:533` uses the placeholder mapping
+        // `bytenr = block * nodesize` instead of allocating real *logical
+        // addresses* from the chunk tree. After unmount, the new superblock's
+        // `root` pointer references an offset that is not covered by any
+        // chunk, so the next mount fails with
+        //   "invalid on-disk format: invalid field: logical_address
+        //    (not covered by any chunk)".
+        //
+        // Until the writeback layer is wired through
+        // `BtrfsAllocState::alloc_metadata_for_tree` (or equivalent), the
+        // safe behavior on destroy is to leave btrfs metadata in memory and
+        // let the mutation be discarded with the mount — a clean btrfs image
+        // that has lost the writes is strictly preferable to an unmountable
+        // image that "persists" them. bd-jdo53 acceptance is therefore not
+        // met; FEATURE_PARITY rows 88-90 remain 🚧 until the addressing fix
+        // lands. See the follow-up bead for the concrete next steps.
 
         Ok(())
     }
@@ -49924,5 +49893,79 @@ mod tests {
     fn dir_logical_block_count_zero_size() {
         use super::dir_logical_block_count;
         assert_eq!(dir_logical_block_count(0, 4096).unwrap(), 0);
+    }
+
+    // ── validate_btrfs_superblock: geometry validation ───────────────────
+
+    fn make_btrfs_sb(sectorsize: u32, nodesize: u32) -> ffs_ondisk::BtrfsSuperblock {
+        let mut sb: ffs_ondisk::BtrfsSuperblock = unsafe { std::mem::zeroed() };
+        sb.sectorsize = sectorsize;
+        sb.nodesize = nodesize;
+        sb
+    }
+
+    #[test]
+    fn validate_btrfs_superblock_accepts_valid_geometry() {
+        use super::validate_btrfs_superblock;
+        let sb = make_btrfs_sb(4096, 16384);
+        assert!(validate_btrfs_superblock(&sb).is_ok());
+    }
+
+    #[test]
+    fn validate_btrfs_superblock_rejects_small_sectorsize() {
+        use super::validate_btrfs_superblock;
+        let sb = make_btrfs_sb(256, 4096);
+        assert!(validate_btrfs_superblock(&sb).is_err());
+    }
+
+    #[test]
+    fn validate_btrfs_superblock_rejects_large_sectorsize() {
+        use super::validate_btrfs_superblock;
+        let sb = make_btrfs_sb(8192, 16384);
+        assert!(validate_btrfs_superblock(&sb).is_err());
+    }
+
+    #[test]
+    fn validate_btrfs_superblock_rejects_nodesize_below_sectorsize() {
+        use super::validate_btrfs_superblock;
+        let sb = make_btrfs_sb(4096, 2048);
+        assert!(validate_btrfs_superblock(&sb).is_err());
+    }
+
+    #[test]
+    fn validate_btrfs_superblock_rejects_large_nodesize() {
+        use super::validate_btrfs_superblock;
+        let sb = make_btrfs_sb(4096, 131072);
+        assert!(validate_btrfs_superblock(&sb).is_err());
+    }
+
+    // ── ext4_mmp_status_class: MMP status display helper ─────────────────
+
+    #[test]
+    fn ext4_mmp_status_class_clean() {
+        use super::ext4_mmp_status_class;
+        use ffs_ondisk::ext4::Ext4MmpStatus;
+        assert_eq!(ext4_mmp_status_class(Ext4MmpStatus::Clean), "clean");
+    }
+
+    #[test]
+    fn ext4_mmp_status_class_fsck() {
+        use super::ext4_mmp_status_class;
+        use ffs_ondisk::ext4::Ext4MmpStatus;
+        assert_eq!(ext4_mmp_status_class(Ext4MmpStatus::Fsck), "fsck");
+    }
+
+    #[test]
+    fn ext4_mmp_status_class_active() {
+        use super::ext4_mmp_status_class;
+        use ffs_ondisk::ext4::Ext4MmpStatus;
+        assert_eq!(ext4_mmp_status_class(Ext4MmpStatus::Active(12345)), "active");
+    }
+
+    #[test]
+    fn ext4_mmp_status_class_unknown() {
+        use super::ext4_mmp_status_class;
+        use ffs_ondisk::ext4::Ext4MmpStatus;
+        assert_eq!(ext4_mmp_status_class(Ext4MmpStatus::UnsafeUnknown(0xDEAD)), "unsafe_unknown");
     }
 }
