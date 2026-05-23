@@ -503,10 +503,15 @@ pub struct DiskWritebackContext {
     pub nodesize: u32,
     /// Block device sector size.
     pub sector_size: u32,
+    /// Mapping from in-memory block numbers to allocated logical addresses.
+    ///
+    /// When `Some`, these are real chunk-covered addresses from the allocator.
+    /// When `None`, falls back to test-mode placeholder `block * nodesize`.
+    allocated_addrs: Option<BTreeMap<u64, u64>>,
 }
 
 impl DiskWritebackContext {
-    /// Create a new disk writeback context.
+    /// Create a new disk writeback context for testing (placeholder addresses).
     pub fn new(
         fsid: [u8; 16],
         chunk_tree_uuid: [u8; 16],
@@ -522,16 +527,52 @@ impl DiskWritebackContext {
             owner,
             nodesize,
             sector_size,
+            allocated_addrs: None,
+        }
+    }
+
+    /// Create a disk writeback context with pre-allocated logical addresses.
+    ///
+    /// The `allocated_addrs` map provides real chunk-covered logical addresses
+    /// for each in-memory block number. These addresses must be obtained from
+    /// `BtrfsAllocState::alloc_metadata_for_tree` before calling this.
+    pub fn with_allocated_addresses(
+        fsid: [u8; 16],
+        chunk_tree_uuid: [u8; 16],
+        generation: u64,
+        owner: u64,
+        nodesize: u32,
+        sector_size: u32,
+        allocated_addrs: BTreeMap<u64, u64>,
+    ) -> Self {
+        Self {
+            fsid,
+            chunk_tree_uuid,
+            generation,
+            owner,
+            nodesize,
+            sector_size,
+            allocated_addrs: Some(allocated_addrs),
         }
     }
 
     /// Convert an in-memory block number to a disk byte offset.
     ///
-    /// For testing, we use a simple mapping: `bytenr = block * nodesize`.
-    /// In production, this mapping comes from the allocator (A2).
+    /// If allocated addresses are provided, returns the real logical address.
+    /// Otherwise, falls back to test-mode placeholder `bytenr = block * nodesize`.
     #[must_use]
     pub fn block_to_bytenr(&self, block: u64) -> u64 {
-        block.saturating_mul(u64::from(self.nodesize))
+        if let Some(ref addrs) = self.allocated_addrs {
+            *addrs.get(&block).unwrap_or(&block.saturating_mul(u64::from(self.nodesize)))
+        } else {
+            block.saturating_mul(u64::from(self.nodesize))
+        }
+    }
+
+    /// Returns true if this context uses real allocated addresses (not test placeholders).
+    #[must_use]
+    pub fn has_allocated_addresses(&self) -> bool {
+        self.allocated_addrs.is_some()
     }
 
     /// Build serialization parameters for a node at the given block.
