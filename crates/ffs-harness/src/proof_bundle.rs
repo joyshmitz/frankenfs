@@ -534,7 +534,11 @@ pub fn validate_proof_bundle(
         config.max_age_days,
     );
     if config.execute_configured_lanes {
-        attach_configured_lane_executed_evidence(&manifest, &mut report);
+        attach_configured_lane_executed_evidence(
+            &manifest,
+            &mut report,
+            config.current_git_sha.as_deref(),
+        );
     }
     Ok(report)
 }
@@ -574,7 +578,7 @@ pub fn validate_proof_bundle_manifest_with_execution(
         current_git_sha,
         max_age_days,
     );
-    attach_configured_lane_executed_evidence(manifest, &mut report);
+    attach_configured_lane_executed_evidence(manifest, &mut report, current_git_sha);
     report
 }
 
@@ -1951,6 +1955,7 @@ fn lane_metadata_first<'a>(
 fn attach_configured_lane_executed_evidence(
     manifest: &ProofBundleManifest,
     report: &mut ProofBundleValidationReport,
+    expected_git_sha: Option<&str>,
 ) {
     for lane_id in EXECUTABLE_PROOF_BUNDLE_LANES {
         let Some(lane) = manifest.lanes.iter().find(|lane| lane.lane_id == lane_id) else {
@@ -1975,19 +1980,22 @@ fn attach_configured_lane_executed_evidence(
             Err(error) => report.errors.push(error),
         }
     }
-    // C2: validate that pass lanes have green executed evidence
-    validate_executable_lane_pass_requires_evidence(manifest, report);
+    // C2: validate that pass lanes have green executed evidence at expected git SHA
+    let expected_sha = expected_git_sha.unwrap_or(&manifest.git_sha);
+    validate_executable_lane_pass_requires_evidence(manifest, report, expected_sha);
     report.valid = report.errors.is_empty();
 }
 
-/// C2: A lane can only be 'pass' if backed by ExecutedEvidence with exit_code==0.
+/// C2: A lane can only be 'pass' if backed by ExecutedEvidence with exit_code==0 and git_sha==HEAD.
 ///
 /// For executable proof bundle lanes:
 /// - A lane marked Pass MUST have executed evidence with outcome Success (exit_code 0)
+/// - A lane marked Pass MUST have executed evidence with git_sha matching expected HEAD
 /// - A lane backed only by checked-in artifact hashes (no evidence) fails validation
 fn validate_executable_lane_pass_requires_evidence(
     manifest: &ProofBundleManifest,
     report: &mut ProofBundleValidationReport,
+    expected_git_sha: &str,
 ) {
     for lane_id in EXECUTABLE_PROOF_BUNDLE_LANES {
         let Some(lane) = manifest.lanes.iter().find(|l| l.lane_id == lane_id) else {
@@ -2013,6 +2021,14 @@ fn validate_executable_lane_pass_requires_evidence(
                         "lane {} is marked pass but ExecutedEvidence exit_code={:?} (expected 0). \
                          A pass lane requires exit_code==0.",
                         lane_id, ev.exit_code
+                    ));
+                }
+                // Check git_sha matches expected HEAD
+                if ev.git_sha != expected_git_sha {
+                    report.errors.push(format!(
+                        "lane {} is marked pass but ExecutedEvidence git_sha={} does not match \
+                         expected HEAD {}. A pass lane requires evidence from the current commit.",
+                        lane_id, ev.git_sha, expected_git_sha
                     ));
                 }
             }
@@ -2533,11 +2549,29 @@ fn escape_markdown_table_cell(raw: &str) -> String {
 mod tests {
     use super::*;
     use std::fs;
+    use std::process::Command;
     use tempfile::TempDir;
 
     struct SampleBundle {
         root: TempDir,
         manifest: ProofBundleManifest,
+    }
+
+    fn current_git_sha_for_test() -> String {
+        Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .ok()
+            .and_then(|o| {
+                if o.status.success() {
+                    String::from_utf8(o.stdout)
+                        .ok()
+                        .map(|s| s.trim().to_string())
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| "test-fixture-sha".to_string())
     }
 
     fn sample_bundle() -> Result<SampleBundle> {
@@ -2765,11 +2799,17 @@ mod tests {
     }
 
     fn validate_sample_with_execution(sample: &SampleBundle) -> ProofBundleValidationReport {
+        // For execution tests, use the real git SHA so evidence matches
+        let current_sha = current_git_sha_for_test();
+        let mut manifest = sample.manifest.clone();
+        manifest.git_sha = current_sha.clone();
+        // Recalculate integrity since git_sha changed
+        manifest.integrity = Some(integrity_for(&manifest));
         validate_proof_bundle_manifest_with_execution(
-            &sample.manifest,
+            &manifest,
             sample.root.path(),
             &sample.root.path().join("manifest.json"),
-            Some("abcdef1"),
+            Some(&current_sha),
             Some(10_000),
         )
     }
@@ -4106,7 +4146,7 @@ mod tests {
         });
 
         // Run the validation
-        validate_executable_lane_pass_requires_evidence(&manifest, &mut report);
+        validate_executable_lane_pass_requires_evidence(&manifest, &mut report, "abc123");
 
         // Should have an error about missing evidence
         assert!(
@@ -4194,7 +4234,7 @@ mod tests {
             metadata: BTreeMap::new(),
         });
 
-        validate_executable_lane_pass_requires_evidence(&manifest, &mut report);
+        validate_executable_lane_pass_requires_evidence(&manifest, &mut report, "abc");
 
         assert!(
             !report.errors.is_empty(),
@@ -4206,6 +4246,98 @@ mod tests {
                 .iter()
                 .any(|e| e.contains("exit_code") && e.contains("expected 0")),
             "error should mention exit_code mismatch: {:?}",
+            report.errors
+        );
+    }
+
+    #[test]
+    fn c2_pass_lane_with_mismatched_git_sha_is_rejected() {
+        // C2: A pass lane with evidence from wrong git SHA should fail
+        let mut report = ProofBundleValidationReport {
+            schema_version: PROOF_BUNDLE_SCHEMA_VERSION,
+            bundle_id: "test".to_owned(),
+            manifest_path: "test.json".to_owned(),
+            valid: true,
+            totals: ProofBundleTotals::default(),
+            missing_required_lanes: Vec::new(),
+            duplicate_lane_ids: Vec::new(),
+            duplicate_scenario_ids: Vec::new(),
+            stale_git_sha: None,
+            stale_timestamp: None,
+            broken_links: Vec::new(),
+            raw_log_hash_mismatches: Vec::new(),
+            artifact_hash_mismatches: Vec::new(),
+            artifact_hash_chain: None,
+            artifact_reports: Vec::new(),
+            redaction_errors: Vec::new(),
+            redaction_leaks: Vec::new(),
+            integrity_errors: Vec::new(),
+            lanes: Vec::new(),
+            lane_provenance: Vec::new(),
+            executed_evidence: vec![ProofBundleExecutedEvidenceReport {
+                lane_id: "conformance".to_owned(),
+                command: "true".to_owned(),
+                args: vec![],
+                exit_code: Some(0), // exit_code is good
+                stdout_sha256: String::new(),
+                stderr_sha256: String::new(),
+                duration_ms: 0,
+                ran_at: 0,
+                git_sha: "stale_abc123".to_owned(), // WRONG GIT SHA
+                host_class: "ci".to_owned(),
+                outcome: "success".to_owned(),
+                outcome_detail: None,
+            }],
+            swarm_evidence: Vec::new(),
+            adaptive_runtime_evidence: Vec::new(),
+            errors: Vec::new(),
+            warnings: Vec::new(),
+            reproduction_command: String::new(),
+        };
+
+        let mut manifest = ProofBundleManifest {
+            schema_version: PROOF_BUNDLE_SCHEMA_VERSION,
+            bundle_id: "test".to_owned(),
+            generated_at: "2026-01-01T00:00:00Z".to_owned(),
+            git_sha: "current_head_sha".to_owned(),
+            toolchain: "test".to_owned(),
+            kernel: "test".to_owned(),
+            mount_capability: "test".to_owned(),
+            required_lanes: Vec::new(),
+            lanes: Vec::new(),
+            redaction: ProofBundleRedactionPolicy::default(),
+            integrity: None,
+        };
+
+        manifest.lanes.push(ProofBundleLane {
+            lane_id: "conformance".to_owned(),
+            status: ProofBundleOutcome::Pass,
+            raw_log_path: "log.txt".to_owned(),
+            raw_log_sha256: String::new(),
+            summary_path: "summary.txt".to_owned(),
+            scenario_ids: vec!["s1".to_owned()],
+            gate_inputs: vec!["g1".to_owned()],
+            artifacts: Vec::new(),
+            metadata: BTreeMap::new(),
+        });
+
+        // Validate with expected git SHA that differs from evidence
+        validate_executable_lane_pass_requires_evidence(
+            &manifest,
+            &mut report,
+            "current_head_sha",
+        );
+
+        assert!(
+            !report.errors.is_empty(),
+            "pass lane with mismatched git_sha should generate an error"
+        );
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|e| e.contains("git_sha") && e.contains("does not match")),
+            "error should mention git_sha mismatch: {:?}",
             report.errors
         );
     }
