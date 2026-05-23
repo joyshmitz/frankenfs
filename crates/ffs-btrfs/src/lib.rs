@@ -3663,7 +3663,7 @@ impl BtrfsExtentAllocator {
     /// Scans block groups with `BTRFS_BLOCK_GROUP_DATA` flag for a gap
     /// large enough to hold `num_bytes`.
     pub fn alloc_data(&mut self, num_bytes: u64) -> Result<ExtentAllocation, BtrfsMutationError> {
-        self.alloc_extent(num_bytes, BTRFS_BLOCK_GROUP_DATA, false, 0, 0)
+        self.alloc_extent(num_bytes, BTRFS_BLOCK_GROUP_DATA, false, 0, 0, false)
     }
 
     /// Allocate a metadata extent (tree block).
@@ -3686,10 +3686,35 @@ impl BtrfsExtentAllocator {
         root: u64,
         level: u8,
     ) -> Result<ExtentAllocation, BtrfsMutationError> {
-        self.alloc_extent(num_bytes, BTRFS_BLOCK_GROUP_METADATA, true, root, level)
+        self.alloc_extent(num_bytes, BTRFS_BLOCK_GROUP_METADATA, true, root, level, false)
+    }
+
+    /// Allocate metadata for extent_tree nodes without self-referential
+    /// EXTENT_ITEM insertion.
+    ///
+    /// When allocating space for extent_tree's own nodes during commit, we
+    /// must break the recursion: extent_tree node allocations don't add new
+    /// EXTENT_ITEMs (those are deferred to the next transaction).
+    pub fn alloc_metadata_for_extent_tree(
+        &mut self,
+        num_bytes: u64,
+        level: u8,
+    ) -> Result<ExtentAllocation, BtrfsMutationError> {
+        self.alloc_extent(
+            num_bytes,
+            BTRFS_BLOCK_GROUP_METADATA,
+            true,
+            BTRFS_EXTENT_TREE_OBJECTID,
+            level,
+            true, // skip EXTENT_ITEM insertion
+        )
     }
 
     /// Core allocation logic.
+    ///
+    /// If `skip_extent_item` is true, the allocation reserves space but does
+    /// NOT insert EXTENT_ITEM/METADATA_ITEM into the extent tree. This breaks
+    /// the recursion when allocating extent_tree's own nodes during commit.
     #[allow(clippy::too_many_lines)]
     fn alloc_extent(
         &mut self,
@@ -3698,6 +3723,7 @@ impl BtrfsExtentAllocator {
         is_metadata: bool,
         ref_root: u64,
         ref_level: u8,
+        skip_extent_item: bool,
     ) -> Result<ExtentAllocation, BtrfsMutationError> {
         if num_bytes == 0 {
             return Err(BtrfsMutationError::InvalidConfig(
@@ -3817,50 +3843,52 @@ impl BtrfsExtentAllocator {
             "alloc_found"
         );
 
-        // Insert EXTENT_ITEM into extent tree.
-        let extent_item = BtrfsExtentItem {
-            refs: 1,
-            generation: self.generation,
-            flags: if is_metadata {
-                BtrfsExtentItem::FLAG_TREE_BLOCK
-            } else {
-                0
-            },
-        };
-        let key = BtrfsKey {
-            objectid: bytenr,
-            item_type: if is_metadata {
-                BTRFS_ITEM_METADATA_ITEM
-            } else {
-                BTRFS_ITEM_EXTENT_ITEM
-            },
-            offset: num_bytes,
-        };
-        self.extent_tree.insert(key, &extent_item.to_bytes())?;
-
-        if is_metadata {
-            let ref_key = BtrfsKey {
-                objectid: bytenr,
-                item_type: BTRFS_ITEM_TREE_BLOCK_REF,
-                offset: ref_root,
+        // Insert EXTENT_ITEM into extent tree (unless skipped for self-allocation).
+        if !skip_extent_item {
+            let extent_item = BtrfsExtentItem {
+                refs: 1,
+                generation: self.generation,
+                flags: if is_metadata {
+                    BtrfsExtentItem::FLAG_TREE_BLOCK
+                } else {
+                    0
+                },
             };
-            self.extent_tree.insert(ref_key, &[])?;
+            let key = BtrfsKey {
+                objectid: bytenr,
+                item_type: if is_metadata {
+                    BTRFS_ITEM_METADATA_ITEM
+                } else {
+                    BTRFS_ITEM_EXTENT_ITEM
+                },
+                offset: num_bytes,
+            };
+            self.extent_tree.insert(key, &extent_item.to_bytes())?;
+
+            if is_metadata {
+                let ref_key = BtrfsKey {
+                    objectid: bytenr,
+                    item_type: BTRFS_ITEM_TREE_BLOCK_REF,
+                    offset: ref_root,
+                };
+                self.extent_tree.insert(ref_key, &[])?;
+                trace!(
+                    target: "ffs::btrfs::alloc",
+                    bytenr,
+                    root = ref_root,
+                    level = ref_level,
+                    "tree_block_ref_insert"
+                );
+            }
+
             trace!(
                 target: "ffs::btrfs::alloc",
                 bytenr,
-                root = ref_root,
-                level = ref_level,
-                "tree_block_ref_insert"
+                size = num_bytes,
+                refs = 1,
+                "extent_item_insert"
             );
         }
-
-        trace!(
-            target: "ffs::btrfs::alloc",
-            bytenr,
-            size = num_bytes,
-            refs = 1,
-            "extent_item_insert"
-        );
 
         // Update block group accounting.
         if let Some(bg) = self.block_groups.get_mut(&bg_start) {
@@ -4259,6 +4287,12 @@ impl BtrfsExtentAllocator {
         self.block_groups
             .values()
             .fold(0_u64, |total, bg| total.saturating_add(bg.item.total_bytes))
+    }
+
+    /// Access the underlying extent tree (for commit/writeback).
+    #[must_use]
+    pub fn extent_tree(&self) -> &InMemoryCowBtrfsTree {
+        &self.extent_tree
     }
 
     /// Get all data extent back-references for a given logical address.

@@ -32,8 +32,8 @@ use ffs_block::{
 };
 use ffs_btrfs::{
     BTRFS_BLOCK_GROUP_DATA, BTRFS_BLOCK_GROUP_METADATA, BTRFS_CHUNK_TREE_OBJECTID,
-    BTRFS_FILE_EXTENT_PREALLOC, BTRFS_FILE_EXTENT_REG, BTRFS_FIRST_FREE_OBJECTID,
-    BTRFS_FS_TREE_OBJECTID, BTRFS_FT_BLKDEV, BTRFS_FT_CHRDEV, BTRFS_FT_DIR, BTRFS_FT_FIFO,
+    BTRFS_EXTENT_TREE_OBJECTID, BTRFS_FILE_EXTENT_PREALLOC, BTRFS_FILE_EXTENT_REG,
+    BTRFS_FIRST_FREE_OBJECTID, BTRFS_FS_TREE_OBJECTID, BTRFS_FT_BLKDEV, BTRFS_FT_CHRDEV, BTRFS_FT_DIR, BTRFS_FT_FIFO,
     BTRFS_FT_REG_FILE, BTRFS_FT_SOCK, BTRFS_FT_SYMLINK, BTRFS_ITEM_DIR_INDEX, BTRFS_ITEM_DIR_ITEM,
     BTRFS_ITEM_EXTENT_DATA, BTRFS_ITEM_INODE_ITEM, BTRFS_ITEM_INODE_REF, BTRFS_ITEM_ROOT_ITEM,
     BTRFS_ITEM_ROOT_REF, BTRFS_ITEM_XATTR_ITEM, BTRFS_ROOT_TREE_OBJECTID,
@@ -14511,6 +14511,91 @@ impl OpenFs {
             .root_tree
             .update(&fs_root_key, &root_item_data)
             .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+
+        // ── EXTENT_TREE commit (bd-f8jk7) ───────────────────────────────────────
+        //
+        // The fs_tree allocations above have added EXTENT_ITEMs to extent_tree.
+        // We must commit extent_tree to disk and update ROOT_TREE's EXTENT_TREE
+        // ROOT_ITEM before committing root_tree, so that btrfs check finds a
+        // consistent extent tree.
+
+        // Build WriteDependencyDag for extent_tree
+        let extent_dag = WriteDependencyDag::from_cow_tree(
+            alloc.extent_alloc.extent_tree(),
+            new_gen,
+        )
+        .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+
+        // Pre-allocate logical addresses for extent_tree nodes.
+        // Use alloc_metadata_for_extent_tree to avoid recursive EXTENT_ITEM
+        // insertion (extent_tree's own nodes don't add to extent_tree here).
+        let mut extent_allocated_addrs = std::collections::BTreeMap::new();
+        for block in extent_dag.all_blocks() {
+            let level = extent_dag.node_level(block).unwrap_or(0);
+            let allocation = alloc
+                .extent_alloc
+                .alloc_metadata_for_extent_tree(u64::from(nodesize), level)
+                .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+            extent_allocated_addrs.insert(block, allocation.bytenr);
+        }
+
+        // Create disk context for extent_tree
+        let extent_disk_ctx = DiskWritebackContext::with_allocated_addresses(
+            sb.fsid,
+            sb.fsid,
+            new_gen,
+            BTRFS_EXTENT_TREE_OBJECTID,
+            nodesize,
+            alloc.sectorsize,
+            extent_allocated_addrs,
+        );
+
+        // Write extent_tree nodes
+        let mut extent_executor = WritebackExecutor::new(extent_dag);
+        let extent_flush_result = extent_executor.execute(|block| {
+            let serialized = extent_disk_ctx.serialize_node(
+                alloc.extent_alloc.extent_tree(),
+                block,
+            )?;
+            let node_bytes = serialized.len() as u64;
+            let logical = extent_disk_ctx.block_to_bytenr(block);
+            let physical = resolve_physical(logical)?;
+            self.dev
+                .write_all_at(cx, ByteOffset(physical), &serialized)
+                .map_err(|_| BtrfsMutationError::InvalidConfig("disk write failed"))?;
+            bytes_written = bytes_written.saturating_add(node_bytes);
+            nodes_written = nodes_written.saturating_add(1);
+            Ok(())
+        });
+        extent_flush_result.map_err(|e| btrfs_mutation_to_ffs(&e))?;
+
+        // Update ROOT_ITEM for EXTENT_TREE in root_tree
+        let extent_tree_root = alloc.extent_alloc.extent_tree().root_block();
+        let extent_tree_bytenr = extent_disk_ctx.block_to_bytenr(extent_tree_root);
+        let extent_tree_level = alloc.extent_alloc.extent_tree().root_level();
+
+        let extent_root_key = BtrfsKey {
+            objectid: BTRFS_EXTENT_TREE_OBJECTID,
+            item_type: BTRFS_ITEM_ROOT_ITEM,
+            offset: 0,
+        };
+        if let Some(mut extent_root_item_data) = alloc.root_tree.get(&extent_root_key) {
+            BtrfsRootItem::patch_root_commit(
+                &mut extent_root_item_data,
+                extent_tree_bytenr,
+                extent_tree_level,
+                new_gen,
+            )
+            .map_err(|e| FfsError::Parse(format!("EXTENT_TREE ROOT_ITEM patch failed: {e}")))?;
+            alloc
+                .root_tree
+                .update(&extent_root_key, &extent_root_item_data)
+                .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+        }
+        // If EXTENT_TREE ROOT_ITEM is missing, skip rather than error — some images
+        // may not have it, and the superblock doesn't directly reference extent_tree.
+
+        // ── End EXTENT_TREE commit ─────────────────────────────────────────────
 
         // Build WriteDependencyDag for root_tree and commit it
         let root_dag = WriteDependencyDag::from_cow_tree(&alloc.root_tree, new_gen)
