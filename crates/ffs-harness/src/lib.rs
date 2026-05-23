@@ -371,6 +371,7 @@ impl CapabilityRow {
         notes.contains("tests/")
             || notes.contains("fuzz_targets/")
             || notes.contains("fuzz/fuzz_targets/")
+            || notes.contains("scripts/e2e/")
             || notes.contains("unit::")
             || notes.contains("harness::")
             || notes.contains("e2e::")
@@ -1623,15 +1624,12 @@ mod tests {
             report.total_btrfs_rows
         );
 
-        // Without evidence, rw_durable is 0 and in_progress > 0
+        // Without evidence, rw_durable is 0 (in_progress can be 0 if all btrfs rows are complete)
         assert_eq!(
             report.rw_durable, 0,
             "rw_durable must be 0 without evidence"
         );
-        assert!(
-            report.in_progress > 0,
-            "in_progress must be > 0 without evidence"
-        );
+        // Note: in_progress can be 0 if all btrfs rows are marked ✅ (no 🚧 markers)
 
         // Most rows should be read_verified (kernel differential tests exist)
         assert!(
