@@ -44269,6 +44269,37 @@ mod tests {
         assert_eq!(sel.requested_name(), Some("backup-2026-01-01"));
     }
 
+    // ── WritebackBarrierError unit tests ────────────────────────────────────
+
+    #[test]
+    fn writeback_barrier_error_display_format() {
+        let err = WritebackBarrierError::EpochNotVisible {
+            requested: 5,
+            visible: 3,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("5"), "should contain requested epoch");
+        assert!(msg.contains("3"), "should contain visible epoch");
+    }
+
+    #[test]
+    fn writeback_barrier_error_equality() {
+        let a = WritebackBarrierError::EpochNotVisible {
+            requested: 10,
+            visible: 5,
+        };
+        let b = WritebackBarrierError::EpochNotVisible {
+            requested: 10,
+            visible: 5,
+        };
+        let c = WritebackBarrierError::EpochNotVisible {
+            requested: 10,
+            visible: 6,
+        };
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+    }
+
     // ── Crash consistency matrix for writeback epoch barrier ─────────────
     //
     // Each scenario simulates a crash at a specific point in the writeback
