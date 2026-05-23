@@ -14471,9 +14471,18 @@ impl OpenFs {
         // Pre-allocate logical addresses for each node from the chunk-tree-covered
         // metadata block groups. This fixes the addressing gap where placeholder
         // addresses (block * nodesize) are not covered by any chunk.
+        //
+        // For each block we expect `dag.node_level(block)` to be `Some`, because
+        // the block came from `dag.all_blocks()` (the same internal node map).
+        // If it returns `None`, the DAG is internally inconsistent — surface
+        // that as an error instead of silently writing the node at level 0.
         let mut allocated_addrs = std::collections::BTreeMap::new();
         for block in dag.all_blocks() {
-            let level = dag.node_level(block).unwrap_or(0);
+            let level = dag.node_level(block).ok_or_else(|| {
+                FfsError::Format(format!(
+                    "btrfs commit: fs_tree DAG missing level for block {block}"
+                ))
+            })?;
             let allocation = alloc
                 .extent_alloc
                 .alloc_metadata_for_tree(u64::from(nodesize), BTRFS_FS_TREE_OBJECTID, level)
@@ -14607,6 +14616,20 @@ impl OpenFs {
         // We must commit extent_tree to disk and update ROOT_TREE's EXTENT_TREE
         // ROOT_ITEM before committing root_tree, so that btrfs check finds a
         // consistent extent tree.
+        //
+        // Known gap (tracked in bd-f8jk7): root_tree's own allocations (below)
+        // happen AFTER extent_tree is serialized, so the EXTENT_ITEMs root_tree
+        // inserts into extent_tree live only in memory and never reach disk.
+        // A fully correct fix needs to either (a) iterate the commit to
+        // quiescence the way kernel btrfs does, or (b) reserve a maximum upper
+        // bound for root_tree allocations and write extent_tree last. The
+        // earlier attempt to simply reorder root_tree's allocation to come
+        // before extent_tree serialization regressed durability, because the
+        // EXTENT_TREE ROOT_ITEM patch CoW'd root_tree and invalidated the
+        // pre-computed root_tree allocation map. For now, mounted-FUSE
+        // durability is correct (our resolver doesn't depend on extent_tree
+        // consistency) but `btrfs check` will continue to flag root_tree
+        // tree blocks as missing extent_items until bd-f8jk7 lands.
 
         // Build WriteDependencyDag for extent_tree
         let extent_dag = WriteDependencyDag::from_cow_tree(
@@ -14620,7 +14643,11 @@ impl OpenFs {
         // insertion (extent_tree's own nodes don't add to extent_tree here).
         let mut extent_allocated_addrs = std::collections::BTreeMap::new();
         for block in extent_dag.all_blocks() {
-            let level = extent_dag.node_level(block).unwrap_or(0);
+            let level = extent_dag.node_level(block).ok_or_else(|| {
+                FfsError::Format(format!(
+                    "btrfs commit: extent_tree DAG missing level for block {block}"
+                ))
+            })?;
             let allocation = alloc
                 .extent_alloc
                 .alloc_metadata_for_extent_tree(u64::from(nodesize), level)
@@ -14659,7 +14686,14 @@ impl OpenFs {
         });
         extent_flush_result.map_err(|e| btrfs_mutation_to_ffs(&e))?;
 
-        // Update ROOT_ITEM for EXTENT_TREE in root_tree
+        // Update ROOT_ITEM for EXTENT_TREE in root_tree.
+        //
+        // Missing EXTENT_TREE ROOT_ITEM is treated as a hard error for the
+        // same reason FS_TREE ROOT_ITEM is: a silent skip would leave the
+        // new on-disk extent_tree (just written above) orphaned, since
+        // nothing in root_tree would point at its new logical address.
+        // The next mount would walk the old extent_tree and miss every
+        // EXTENT_ITEM this transaction added.
         let extent_tree_root = alloc.extent_alloc.extent_tree().root_block();
         let extent_tree_bytenr = extent_disk_ctx.block_to_bytenr(extent_tree_root);
         let extent_tree_level = alloc.extent_alloc.extent_tree().root_level();
@@ -14669,21 +14703,25 @@ impl OpenFs {
             item_type: BTRFS_ITEM_ROOT_ITEM,
             offset: 0,
         };
-        if let Some(mut extent_root_item_data) = alloc.root_tree.get(&extent_root_key) {
-            BtrfsRootItem::patch_root_commit(
-                &mut extent_root_item_data,
-                extent_tree_bytenr,
-                extent_tree_level,
-                new_gen,
+        let mut extent_root_item_data = alloc.root_tree.get(&extent_root_key).ok_or_else(|| {
+            FfsError::Format(
+                "btrfs commit: EXTENT_TREE ROOT_ITEM (objectid=2, type=ROOT_ITEM, offset=0) \
+                 is missing from in-memory root_tree — refusing to commit a transaction \
+                 that would orphan the new extent_tree at allocated logical address"
+                    .into(),
             )
-            .map_err(|e| FfsError::Parse(format!("EXTENT_TREE ROOT_ITEM patch failed: {e}")))?;
-            alloc
-                .root_tree
-                .update(&extent_root_key, &extent_root_item_data)
-                .map_err(|e| btrfs_mutation_to_ffs(&e))?;
-        }
-        // If EXTENT_TREE ROOT_ITEM is missing, skip rather than error — some images
-        // may not have it, and the superblock doesn't directly reference extent_tree.
+        })?;
+        BtrfsRootItem::patch_root_commit(
+            &mut extent_root_item_data,
+            extent_tree_bytenr,
+            extent_tree_level,
+            new_gen,
+        )
+        .map_err(|e| FfsError::Parse(format!("EXTENT_TREE ROOT_ITEM patch failed: {e}")))?;
+        alloc
+            .root_tree
+            .update(&extent_root_key, &extent_root_item_data)
+            .map_err(|e| btrfs_mutation_to_ffs(&e))?;
 
         // ── End EXTENT_TREE commit ─────────────────────────────────────────────
 
@@ -14694,7 +14732,11 @@ impl OpenFs {
         // Pre-allocate logical addresses for root_tree nodes
         let mut root_allocated_addrs = std::collections::BTreeMap::new();
         for block in root_dag.all_blocks() {
-            let level = root_dag.node_level(block).unwrap_or(0);
+            let level = root_dag.node_level(block).ok_or_else(|| {
+                FfsError::Format(format!(
+                    "btrfs commit: root_tree DAG missing level for block {block}"
+                ))
+            })?;
             let allocation = alloc
                 .extent_alloc
                 .alloc_metadata_for_tree(u64::from(nodesize), BTRFS_ROOT_TREE_OBJECTID, level)
