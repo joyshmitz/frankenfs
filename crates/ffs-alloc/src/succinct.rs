@@ -12,9 +12,9 @@
 //!
 //! Two-level structure following Jacobson (1989) / Clark (1996):
 //!
-//! - **Level 1 (superblocks)**: every [`SUPERBLOCK_BITS`] bits, store cumulative
+//! - **Level 1 (superblocks)**: every `SUPERBLOCK_BITS` bits, store cumulative
 //!   popcount of *all* preceding bits.
-//! - **Level 2 (blocks)**: every [`BLOCK_BITS`] bits within a superblock, store
+//! - **Level 2 (blocks)**: every `BLOCK_BITS` bits within a superblock, store
 //!   the local popcount since the start of that superblock.
 //!
 //! ## Space overhead

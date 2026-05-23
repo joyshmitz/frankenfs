@@ -1424,7 +1424,7 @@ impl Ext4Superblock {
     ///
     /// Checks geometry, block size, and feature flags. Returns `ParseError`
     /// with a static `field` + `reason` pair. Callers needing the specific
-    /// flag names for UX should also call [`feature_diagnostics_v1()`] on
+    /// flag names for UX should also call [`Self::feature_diagnostics_v1`] on
     /// failure to enrich the error message.
     pub fn validate_v1(&self) -> Result<(), ParseError> {
         self.validate_geometry()?;
