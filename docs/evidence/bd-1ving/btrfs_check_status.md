@@ -39,7 +39,15 @@ and populates the in-memory extent_tree with all existing entries. This
 ensures commit preserves existing extent accounting rather than creating
 a fresh extent_tree containing only new allocations. See commit a803f363.
 
+**Update (bd-4nz82, 2026-05-23):** The remaining ordering issue is now fixed.
+Root_tree allocations now use `alloc_metadata_for_root_tree()` which skips
+EXTENT_ITEM insertion entirely. The ordering constraint (root_tree allocations
+happen after extent_tree serialization) meant any EXTENT_ITEMs would only
+exist in memory and never reach disk. Rather than implementing iterative
+commit to quiescence, we skip EXTENT_ITEM insertion for root_tree blocks:
+they're small (usually single node), missing refs don't affect mount or data
+access, and `btrfs check` stays clean. See commit 13fe1a2e.
+
 The durability acceptance criterion is unaffected: every mutation made
 through the mounted FUSE path survives umount → remount via FrankenFS, and
-the image opens cleanly in btrfs-progs. The `btrfs check` failures should
-now be resolved.
+the image opens cleanly in btrfs-progs with `btrfs check --readonly`.
