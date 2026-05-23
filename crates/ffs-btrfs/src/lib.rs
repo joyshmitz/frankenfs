@@ -5455,9 +5455,8 @@ where
             continue;
         };
 
-        let inode = match parse_inode_item(&inode_entry.data) {
-            Ok(i) => i,
-            Err(_) => continue,
+        let Ok(inode) = parse_inode_item(&inode_entry.data) else {
+            continue;
         };
 
         let path = build_path(ino);
@@ -5524,31 +5523,29 @@ where
                             builder.add_command(cmd, &refs);
                         } else if disk_num_bytes > 0 {
                             // Read extent data and emit write
-                            match read_extent(disk_bytenr, disk_num_bytes) {
-                                Ok(full_data) => {
-                                    let start = extent_offset as usize;
-                                    let end = start.saturating_add(num_bytes as usize);
-                                    let data = if end <= full_data.len() {
-                                        &full_data[start..end]
-                                    } else if start < full_data.len() {
-                                        &full_data[start..]
-                                    } else {
-                                        &[]
-                                    };
-                                    if !data.is_empty() {
-                                        let (cmd, attrs) =
-                                            build_write_command(&path, file_offset, data);
-                                        let refs: Vec<(SendAttr, &[u8])> = attrs
-                                            .iter()
-                                            .map(|(a, d)| (*a, d.as_slice()))
-                                            .collect();
-                                        builder.add_command(cmd, &refs);
-                                    }
-                                }
-                                Err(_) => {
-                                    // Skip extent on read error
+                            if let Ok(full_data) = read_extent(disk_bytenr, disk_num_bytes) {
+                                #[expect(clippy::cast_possible_truncation)]
+                                let start = extent_offset as usize;
+                                #[expect(clippy::cast_possible_truncation)]
+                                let end = start.saturating_add(num_bytes as usize);
+                                let data = if end <= full_data.len() {
+                                    &full_data[start..end]
+                                } else if start < full_data.len() {
+                                    &full_data[start..]
+                                } else {
+                                    &[]
+                                };
+                                if !data.is_empty() {
+                                    let (cmd, attrs) =
+                                        build_write_command(&path, file_offset, data);
+                                    let refs: Vec<(SendAttr, &[u8])> = attrs
+                                        .iter()
+                                        .map(|(a, d)| (*a, d.as_slice()))
+                                        .collect();
+                                    builder.add_command(cmd, &refs);
                                 }
                             }
+                            // Skip extent on read error
                         }
                     }
                     // type 2 = prealloc, skip for now
