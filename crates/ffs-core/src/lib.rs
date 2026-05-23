@@ -4585,6 +4585,7 @@ impl OpenFs {
 
     /// Load btrfs allocation state by walking the ROOT tree and FS tree,
     /// populating the in-memory COW trees and extent allocator.
+    #[expect(clippy::too_many_lines)]
     fn load_btrfs_alloc_state(&self, cx: &Cx) -> Result<BtrfsAllocState, FfsError> {
         let sb = match &self.flavor {
             FsFlavor::Btrfs(sb) => sb,
@@ -14354,6 +14355,7 @@ impl OpenFs {
     /// - **WB-I1:** At every crash point, the set of durable nodes is prefix-closed
     ///   under references (no durable parent points at a non-durable child).
     /// - **WB-I2:** After crash, a reader observes generation `g` or `g+1`, never torn.
+    #[expect(clippy::too_many_lines)]
     fn btrfs_full_transaction_commit(
         &self,
         cx: &Cx,
@@ -20795,32 +20797,34 @@ impl FsOps for OpenFs {
                 // Look up extent back-references for the given logical address.
                 // Returns all (ino, offset, root) tuples that reference this extent.
                 let alloc = self.require_btrfs_alloc_state()?;
-                let alloc = alloc.lock();
-                let data_refs = alloc
-                    .extent_alloc
-                    .get_extent_data_refs(logical)
-                    .map_err(|e| FfsError::Parse(format!("extent lookup failed: {e}")))?;
+                let data_refs = {
+                    let alloc_guard = alloc.lock();
+                    alloc_guard
+                        .extent_alloc
+                        .get_extent_data_refs(logical)
+                        .map_err(|e| FfsError::Parse(format!("extent lookup failed: {e}")))?
+                };
 
                 // Output format: struct btrfs_data_container
                 // u32 bytes_left (0), u32 bytes_missing (0),
                 // u64 elem_cnt, u64 elem_missed (0),
                 // u64 val[] — (ino, offset, root) per entry
-                let elem_cnt = data_refs.len() as u64;
+                let elem_cnt = data_refs.len();
                 let header_size = 4 + 4 + 8 + 8; // 24 bytes
                 let entry_size = 24; // 3 * u64
-                let mut buf = Vec::with_capacity(header_size + elem_cnt as usize * entry_size);
+                let mut buf = Vec::with_capacity(header_size + elem_cnt * entry_size);
 
                 // bytes_left (u32) — 0, no preceding data
                 buf.extend_from_slice(&0_u32.to_le_bytes());
                 // bytes_missing (u32) — 0, all fits
                 buf.extend_from_slice(&0_u32.to_le_bytes());
                 // elem_cnt (u64)
-                buf.extend_from_slice(&elem_cnt.to_le_bytes());
+                buf.extend_from_slice(&(elem_cnt as u64).to_le_bytes());
                 // elem_missed (u64)
                 buf.extend_from_slice(&0_u64.to_le_bytes());
 
                 // val[] — (ino, offset, root) tuples
-                for data_ref in data_refs {
+                for data_ref in &data_refs {
                     buf.extend_from_slice(&data_ref.objectid.to_le_bytes()); // ino
                     buf.extend_from_slice(&data_ref.offset.to_le_bytes()); // offset
                     buf.extend_from_slice(&data_ref.root.to_le_bytes()); // root
@@ -20846,20 +20850,22 @@ impl FsOps for OpenFs {
                 // V2 adds flags field (ignore_offset, etc) but core logic is same.
                 // Flags are in _args but we ignore them for now.
                 let alloc = self.require_btrfs_alloc_state()?;
-                let alloc = alloc.lock();
-                let data_refs = alloc
-                    .extent_alloc
-                    .get_extent_data_refs(logical)
-                    .map_err(|e| FfsError::Parse(format!("extent lookup failed: {e}")))?;
+                let data_refs = {
+                    let alloc_guard = alloc.lock();
+                    alloc_guard
+                        .extent_alloc
+                        .get_extent_data_refs(logical)
+                        .map_err(|e| FfsError::Parse(format!("extent lookup failed: {e}")))?
+                };
 
-                let elem_cnt = data_refs.len() as u64;
+                let elem_cnt = data_refs.len();
                 let header_size = 4 + 4 + 8 + 8;
                 let entry_size = 24;
-                let mut buf = Vec::with_capacity(header_size + elem_cnt as usize * entry_size);
+                let mut buf = Vec::with_capacity(header_size + elem_cnt * entry_size);
 
                 buf.extend_from_slice(&0_u32.to_le_bytes()); // bytes_left
                 buf.extend_from_slice(&0_u32.to_le_bytes()); // bytes_missing
-                buf.extend_from_slice(&elem_cnt.to_le_bytes());
+                buf.extend_from_slice(&(elem_cnt as u64).to_le_bytes());
                 buf.extend_from_slice(&0_u64.to_le_bytes()); // elem_missed
 
                 for data_ref in data_refs {
@@ -20993,6 +20999,7 @@ impl FsOps for OpenFs {
         }
     }
 
+    #[expect(clippy::too_many_lines)]
     fn btrfs_encoded_read(
         &self,
         cx: &Cx,
@@ -21103,6 +21110,7 @@ impl FsOps for OpenFs {
                     } => {
                         if *disk_bytenr == 0 {
                             // Hole - return zeros
+                            #[expect(clippy::cast_possible_truncation)]
                             let len = (*num_bytes).min(max_len) as usize;
                             (vec![0u8; len], 0, *num_bytes, file_offset - extent_start)
                         } else {
@@ -21115,8 +21123,8 @@ impl FsOps for OpenFs {
                             .ok_or_else(|| {
                                 FfsError::Format("extent not covered by chunk".into())
                             })?;
-                            let read_len =
-                                (*disk_num_bytes).min(max_len) as usize;
+                            #[expect(clippy::cast_possible_truncation)]
+                            let read_len = (*disk_num_bytes).min(max_len) as usize;
                             let mut buf = vec![0u8; read_len];
                             self.dev.read_exact_at(cx, ByteOffset(mapping.physical), &mut buf)?;
                             let offset_in_extent =
@@ -21128,12 +21136,13 @@ impl FsOps for OpenFs {
 
                 // Build output: 32-byte metadata header + encoded data
                 // len(8) + unencoded_len(8) + unencoded_offset(8) + compression(4) + encryption(4)
+                #[expect(clippy::cast_possible_truncation)]
                 let actual_len = encoded_data.len().min(max_len as usize);
                 let mut result = Vec::with_capacity(32 + actual_len);
                 result.extend_from_slice(&(actual_len as u64).to_le_bytes()); // len
                 result.extend_from_slice(&unencoded_len.to_le_bytes()); // unencoded_len
                 result.extend_from_slice(&unencoded_offset.to_le_bytes()); // unencoded_offset
-                result.extend_from_slice(&(compression as u32).to_le_bytes()); // compression
+                result.extend_from_slice(&u32::from(compression).to_le_bytes()); // compression
                 result.extend_from_slice(&0_u32.to_le_bytes()); // encryption (always 0)
                 result.extend_from_slice(&encoded_data[..actual_len]);
 
