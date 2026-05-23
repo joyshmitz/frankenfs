@@ -4008,6 +4008,9 @@ impl FrankenFuse {
                 }
             }
             BTRFS_IOC_SUBVOL_SETFLAGS => {
+                if self.inner.read_only {
+                    return IoctlResult::Error(libc::EROFS);
+                }
                 if in_data.len() < 8 {
                     return IoctlResult::Error(libc::EINVAL);
                 }
@@ -13591,6 +13594,55 @@ mod tests {
             response,
             IoctlResult::Error(libc::EROFS),
             "BTRFS_IOC_ENCODED_WRITE on read-only must return EROFS"
+        );
+    }
+
+    #[test]
+    fn dispatch_ioctl_btrfs_subvol_setflags_rejects_short_input() {
+        let opts = MountOptions {
+            read_only: false,
+            ..MountOptions::default()
+        };
+        let fuse = FrankenFuse::with_options(
+            Box::new(IoctlRecordingFs::new(
+                0,
+                Arc::new(Mutex::new(Vec::new())),
+            )),
+            &opts,
+        );
+
+        // BTRFS_IOC_SUBVOL_SETFLAGS requires 8-byte input (u64 flags)
+        let short_input = vec![0_u8; 4];
+        let response =
+            dispatch_ioctl_for_testing(&fuse, 2, 0, BTRFS_IOC_SUBVOL_SETFLAGS, &short_input, 0);
+        assert_eq!(
+            response,
+            IoctlResult::Error(libc::EINVAL),
+            "BTRFS_IOC_SUBVOL_SETFLAGS with short input must return EINVAL"
+        );
+    }
+
+    #[test]
+    fn dispatch_ioctl_btrfs_subvol_setflags_rejects_on_read_only() {
+        let opts = MountOptions {
+            read_only: true,
+            ..MountOptions::default()
+        };
+        let fuse = FrankenFuse::with_options(
+            Box::new(IoctlRecordingFs::new(
+                0,
+                Arc::new(Mutex::new(Vec::new())),
+            )),
+            &opts,
+        );
+
+        let input = 0_u64.to_ne_bytes().to_vec();
+        let response =
+            dispatch_ioctl_for_testing(&fuse, 2, 0, BTRFS_IOC_SUBVOL_SETFLAGS, &input, 0);
+        assert_eq!(
+            response,
+            IoctlResult::Error(libc::EROFS),
+            "BTRFS_IOC_SUBVOL_SETFLAGS on read-only must return EROFS"
         );
     }
 
