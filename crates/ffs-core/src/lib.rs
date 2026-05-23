@@ -20665,20 +20665,47 @@ impl FsOps for OpenFs {
         &self,
         _cx: &Cx,
         _scope: &mut RequestScope,
-        _logical: u64,
+        logical: u64,
     ) -> ffs_error::Result<Vec<u8>> {
         match &self.flavor {
             FsFlavor::Ext4(_) => Err(FfsError::UnsupportedFeature(
                 "BTRFS_IOC_LOGICAL_INO is not supported on ext4 filesystems".to_owned(),
             )),
             FsFlavor::Btrfs(_) => {
-                // Full logical-to-inode resolution not yet implemented - requires
-                // walking extent back-references in the extent tree.
-                // Return empty result (0 inodes found) as a valid stub.
-                // Output format: u64 elem_cnt = 0, u64 elem_missed = 0
-                let mut buf = vec![0_u8; 16];
-                buf[0..8].copy_from_slice(&0_u64.to_le_bytes()); // elem_cnt
-                buf[8..16].copy_from_slice(&0_u64.to_le_bytes()); // elem_missed
+                // Look up extent back-references for the given logical address.
+                // Returns all (ino, offset, root) tuples that reference this extent.
+                let alloc = self.require_btrfs_alloc_state()?;
+                let alloc = alloc.lock();
+                let data_refs = alloc
+                    .extent_alloc
+                    .get_extent_data_refs(logical)
+                    .map_err(|e| FfsError::Parse(format!("extent lookup failed: {e}")))?;
+
+                // Output format: struct btrfs_data_container
+                // u32 bytes_left (0), u32 bytes_missing (0),
+                // u64 elem_cnt, u64 elem_missed (0),
+                // u64 val[] — (ino, offset, root) per entry
+                let elem_cnt = data_refs.len() as u64;
+                let header_size = 4 + 4 + 8 + 8; // 24 bytes
+                let entry_size = 24; // 3 * u64
+                let mut buf = Vec::with_capacity(header_size + elem_cnt as usize * entry_size);
+
+                // bytes_left (u32) — 0, no preceding data
+                buf.extend_from_slice(&0_u32.to_le_bytes());
+                // bytes_missing (u32) — 0, all fits
+                buf.extend_from_slice(&0_u32.to_le_bytes());
+                // elem_cnt (u64)
+                buf.extend_from_slice(&elem_cnt.to_le_bytes());
+                // elem_missed (u64)
+                buf.extend_from_slice(&0_u64.to_le_bytes());
+
+                // val[] — (ino, offset, root) tuples
+                for data_ref in data_refs {
+                    buf.extend_from_slice(&data_ref.objectid.to_le_bytes()); // ino
+                    buf.extend_from_slice(&data_ref.offset.to_le_bytes()); // offset
+                    buf.extend_from_slice(&data_ref.root.to_le_bytes()); // root
+                }
+
                 Ok(buf)
             }
         }
@@ -20688,7 +20715,7 @@ impl FsOps for OpenFs {
         &self,
         _cx: &Cx,
         _scope: &mut RequestScope,
-        _logical: u64,
+        logical: u64,
         _args: &[u8],
     ) -> ffs_error::Result<Vec<u8>> {
         match &self.flavor {
@@ -20696,10 +20723,31 @@ impl FsOps for OpenFs {
                 "BTRFS_IOC_LOGICAL_INO_V2 is not supported on ext4 filesystems".to_owned(),
             )),
             FsFlavor::Btrfs(_) => {
-                // V2 adds flags field but result format is same as v1
-                let mut buf = vec![0_u8; 16];
-                buf[0..8].copy_from_slice(&0_u64.to_le_bytes()); // elem_cnt
-                buf[8..16].copy_from_slice(&0_u64.to_le_bytes()); // elem_missed
+                // V2 adds flags field (ignore_offset, etc) but core logic is same.
+                // Flags are in _args but we ignore them for now.
+                let alloc = self.require_btrfs_alloc_state()?;
+                let alloc = alloc.lock();
+                let data_refs = alloc
+                    .extent_alloc
+                    .get_extent_data_refs(logical)
+                    .map_err(|e| FfsError::Parse(format!("extent lookup failed: {e}")))?;
+
+                let elem_cnt = data_refs.len() as u64;
+                let header_size = 4 + 4 + 8 + 8;
+                let entry_size = 24;
+                let mut buf = Vec::with_capacity(header_size + elem_cnt as usize * entry_size);
+
+                buf.extend_from_slice(&0_u32.to_le_bytes()); // bytes_left
+                buf.extend_from_slice(&0_u32.to_le_bytes()); // bytes_missing
+                buf.extend_from_slice(&elem_cnt.to_le_bytes());
+                buf.extend_from_slice(&0_u64.to_le_bytes()); // elem_missed
+
+                for data_ref in data_refs {
+                    buf.extend_from_slice(&data_ref.objectid.to_le_bytes());
+                    buf.extend_from_slice(&data_ref.offset.to_le_bytes());
+                    buf.extend_from_slice(&data_ref.root.to_le_bytes());
+                }
+
                 Ok(buf)
             }
         }

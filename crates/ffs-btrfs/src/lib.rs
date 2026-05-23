@@ -3036,6 +3036,48 @@ impl BtrfsExtentItem {
     }
 }
 
+/// On-disk structure for data extent back-references.
+///
+/// This corresponds to `struct btrfs_extent_data_ref` from the kernel.
+/// Key: (bytenr, EXTENT_DATA_REF, hash), Value: this 28-byte struct.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BtrfsExtentDataRef {
+    /// Root tree containing the referencing inode.
+    pub root: u64,
+    /// Inode number of the referencing file.
+    pub objectid: u64,
+    /// Offset within the file where this extent is referenced.
+    pub offset: u64,
+    /// Reference count (usually 1, >1 for shared extents).
+    pub count: u32,
+}
+
+impl BtrfsExtentDataRef {
+    /// Parse from on-disk format (28 bytes LE).
+    pub fn from_bytes(data: &[u8]) -> Option<Self> {
+        if data.len() < 28 {
+            return None;
+        }
+        Some(Self {
+            root: u64::from_le_bytes(data[0..8].try_into().ok()?),
+            objectid: u64::from_le_bytes(data[8..16].try_into().ok()?),
+            offset: u64::from_le_bytes(data[16..24].try_into().ok()?),
+            count: u32::from_le_bytes(data[24..28].try_into().ok()?),
+        })
+    }
+
+    /// Serialize to on-disk format (28 bytes LE).
+    #[must_use]
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(28);
+        buf.extend_from_slice(&self.root.to_le_bytes());
+        buf.extend_from_slice(&self.objectid.to_le_bytes());
+        buf.extend_from_slice(&self.offset.to_le_bytes());
+        buf.extend_from_slice(&self.count.to_le_bytes());
+        buf
+    }
+}
+
 /// Logical key for a physical extent in delayed reference bookkeeping.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ExtentKey {
@@ -4217,6 +4259,34 @@ impl BtrfsExtentAllocator {
         self.block_groups
             .values()
             .fold(0_u64, |total, bg| total.saturating_add(bg.item.total_bytes))
+    }
+
+    /// Get all data extent back-references for a given logical address.
+    ///
+    /// Returns a list of (root, objectid, offset) tuples representing all
+    /// files that reference the extent at `bytenr`. Used by `BTRFS_IOC_LOGICAL_INO`.
+    pub fn get_extent_data_refs(
+        &self,
+        bytenr: u64,
+    ) -> Result<Vec<BtrfsExtentDataRef>, BtrfsMutationError> {
+        let range_start = BtrfsKey {
+            objectid: bytenr,
+            item_type: BTRFS_ITEM_EXTENT_DATA_REF,
+            offset: 0,
+        };
+        let range_end = BtrfsKey {
+            objectid: bytenr,
+            item_type: BTRFS_ITEM_EXTENT_DATA_REF,
+            offset: u64::MAX,
+        };
+        let refs = self.extent_tree.range(&range_start, &range_end)?;
+        let mut result = Vec::new();
+        for (_key, value) in refs {
+            if let Some(data_ref) = BtrfsExtentDataRef::from_bytes(&value) {
+                result.push(data_ref);
+            }
+        }
+        Ok(result)
     }
 
     fn delete_backrefs_for_extent(
