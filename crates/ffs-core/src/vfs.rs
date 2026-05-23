@@ -3500,4 +3500,22 @@ mod tests {
     fn ranges_overlap_same() {
         assert!(ranges_overlap(10, 10, 10, 10));
     }
+
+    // ── SeekWhence::from_raw: whence value parsing ───────────────────────
+
+    #[test]
+    fn seek_whence_from_raw_known_values() {
+        assert_eq!(SeekWhence::from_raw(0), Some(SeekWhence::Set));
+        assert_eq!(SeekWhence::from_raw(1), Some(SeekWhence::Cur));
+        assert_eq!(SeekWhence::from_raw(2), Some(SeekWhence::End));
+        assert_eq!(SeekWhence::from_raw(3), Some(SeekWhence::Data));
+        assert_eq!(SeekWhence::from_raw(4), Some(SeekWhence::Hole));
+    }
+
+    #[test]
+    fn seek_whence_from_raw_unknown_returns_none() {
+        assert!(SeekWhence::from_raw(-1).is_none());
+        assert!(SeekWhence::from_raw(5).is_none());
+        assert!(SeekWhence::from_raw(999).is_none());
+    }
 }
