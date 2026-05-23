@@ -586,11 +586,18 @@ impl DiskWritebackContext {
     }
 
     /// Build serialization parameters for a node at the given block.
+    ///
+    /// `child_bytenrs` should be the allocated on-disk addresses of each
+    /// child (for internal nodes) when this context was constructed with a
+    /// real allocation map. Pass an empty vector for leaves or when the
+    /// caller wants the legacy "children are in-memory block numbers"
+    /// behavior (simulator / standalone serializer tests).
     #[must_use]
     pub fn params_for_block(
         &self,
         block: u64,
         child_generations: Vec<u64>,
+        child_bytenrs: Vec<u64>,
     ) -> crate::BtrfsNodeSerializeParams {
         crate::BtrfsNodeSerializeParams {
             fsid: self.fsid,
@@ -601,10 +608,19 @@ impl DiskWritebackContext {
             owner: self.owner,
             nodesize: self.nodesize,
             child_generations,
+            child_bytenrs,
         }
     }
 
     /// Serialize a node and return the bytes ready for disk write.
+    ///
+    /// For internal nodes, child blockptrs in the serialized bytes are
+    /// resolved through the allocation map (when present) so that the
+    /// on-disk node references its children by their allocated logical
+    /// addresses — not by the in-memory block numbers the CoW tree uses
+    /// internally. When the context has no allocation map (test mode),
+    /// children fall back to the legacy `block * nodesize` mapping via
+    /// `block_to_bytenr`, which is what the simulator expects.
     pub fn serialize_node(
         &self,
         tree: &InMemoryCowBtrfsTree,
@@ -612,14 +628,19 @@ impl DiskWritebackContext {
     ) -> Result<Vec<u8>, BtrfsMutationError> {
         let node = tree.node_snapshot(block)?;
 
-        let child_generations = match &node {
-            BtrfsCowNode::Leaf { .. } => Vec::new(),
+        let (child_generations, child_bytenrs) = match &node {
+            BtrfsCowNode::Leaf { .. } => (Vec::new(), Vec::new()),
             BtrfsCowNode::Internal { children, .. } => {
-                children.iter().map(|_| self.generation).collect()
+                let gens = children.iter().map(|_| self.generation).collect();
+                let bytenrs = children
+                    .iter()
+                    .map(|c| self.block_to_bytenr(*c))
+                    .collect();
+                (gens, bytenrs)
             }
         };
 
-        let params = self.params_for_block(block, child_generations);
+        let params = self.params_for_block(block, child_generations, child_bytenrs);
         node.serialize(&params)
     }
 }

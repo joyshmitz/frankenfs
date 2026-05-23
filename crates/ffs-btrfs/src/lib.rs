@@ -1760,6 +1760,18 @@ pub struct BtrfsNodeSerializeParams {
     pub nodesize: u32,
     /// Child generation values for internal nodes (indexed by child position).
     pub child_generations: Vec<u64>,
+    /// On-disk byte offsets (typically btrfs *logical* addresses) for the
+    /// internal-node children, when those differ from the in-memory block
+    /// numbers carried by `BtrfsCowNode::Internal { children, .. }`.
+    ///
+    /// During production writeback the in-memory block numbers are not
+    /// addresses btrfs can resolve through the chunk tree, so the
+    /// destination is the address that `BtrfsAllocState::alloc_metadata_for_tree`
+    /// handed out for that child node. When this vector is empty (its
+    /// default), serialization falls back to writing the in-memory
+    /// `children[i]` value verbatim — that path is preserved for the
+    /// simulator and standalone serializer tests.
+    pub child_bytenrs: Vec<u64>,
 }
 
 impl BtrfsCowNode {
@@ -1877,8 +1889,17 @@ impl BtrfsCowNode {
                     buf[kp_offset..kp_offset + 8].copy_from_slice(&key.objectid.to_le_bytes());
                     buf[kp_offset + 8] = key.item_type;
                     buf[kp_offset + 9..kp_offset + 17].copy_from_slice(&key.offset.to_le_bytes());
-                    // blockptr at 0x11
-                    buf[kp_offset + 17..kp_offset + 25].copy_from_slice(&child_ptr.to_le_bytes());
+                    // blockptr at 0x11 — prefer the explicit override (the
+                    // child's allocated logical address) when present; fall
+                    // back to the in-memory child block number for legacy
+                    // and simulator callers.
+                    let child_blockptr = params
+                        .child_bytenrs
+                        .get(i)
+                        .copied()
+                        .unwrap_or(*child_ptr);
+                    buf[kp_offset + 17..kp_offset + 25]
+                        .copy_from_slice(&child_blockptr.to_le_bytes());
                     // generation at 0x19
                     let child_gen = params
                         .child_generations
@@ -14402,6 +14423,7 @@ mod tests {
             owner: 5,
             nodesize: 16384,
             child_generations: vec![],
+            child_bytenrs: vec![],
         };
 
         let buf = node.serialize(&params).expect("serialize should succeed");
@@ -14453,6 +14475,7 @@ mod tests {
             owner: 1,
             nodesize: 16384,
             child_generations: vec![190, 195, 200],
+            child_bytenrs: vec![],
         };
 
         let buf = node.serialize(&params).expect("serialize should succeed");
