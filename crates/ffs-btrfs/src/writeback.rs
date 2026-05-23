@@ -662,7 +662,7 @@ pub const BTRFS_ROOT_BACKUP_SIZE: usize = 168;
 /// Number of backup root slots in the superblock.
 pub const BTRFS_NUM_BACKUP_ROOTS: usize = 4;
 
-/// Offset of the super_roots[4] array in the superblock.
+/// Offset of the `super_roots[4]` array in the superblock.
 pub const BTRFS_BACKUP_ROOTS_OFFSET: usize = 0x2A0;
 
 /// One entry in the superblock's backup root ring (btrfs_root_backup).
@@ -782,7 +782,7 @@ impl BackupRootEntry {
     }
 }
 
-/// The backup root ring: super_roots[4] in the superblock.
+/// The backup root ring: `super_roots[4]` in the superblock.
 ///
 /// On commit, the ring rotates: slot 3 ← slot 2 ← slot 1 ← slot 0 ← current.
 /// This enables recovery from a corrupted superblock by falling back to
