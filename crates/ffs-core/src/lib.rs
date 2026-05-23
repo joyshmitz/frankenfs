@@ -21989,27 +21989,28 @@ impl FsOps for OpenFs {
             info!(flushed_blocks = flushed, "flush_on_destroy");
         }
 
-        // btrfs commit-on-destroy is intentionally NOT wired here.
-        //
-        // The flush_on_destroy → btrfs_full_transaction_commit path was tried
-        // (see git history of this hunk) and empirically corrupts the on-disk
-        // image: `DiskWritebackContext::block_to_bytenr` at
-        // `ffs-btrfs/src/writeback.rs:533` uses the placeholder mapping
-        // `bytenr = block * nodesize` instead of allocating real *logical
-        // addresses* from the chunk tree. After unmount, the new superblock's
-        // `root` pointer references an offset that is not covered by any
-        // chunk, so the next mount fails with
-        //   "invalid on-disk format: invalid field: logical_address
-        //    (not covered by any chunk)".
-        //
-        // Until the writeback layer is wired through
-        // `BtrfsAllocState::alloc_metadata_for_tree` (or equivalent), the
-        // safe behavior on destroy is to leave btrfs metadata in memory and
-        // let the mutation be discarded with the mount — a clean btrfs image
-        // that has lost the writes is strictly preferable to an unmountable
-        // image that "persists" them. bd-jdo53 acceptance is therefore not
-        // met; FEATURE_PARITY rows 88-90 remain 🚧 until the addressing fix
-        // lands. See the follow-up bead for the concrete next steps.
+        // For btrfs, commit the in-memory CoW tree to disk.
+        // bd-1ving: the writeback layer now uses real allocated logical addresses
+        // from BtrfsAllocState::alloc_metadata_for_tree, fixing the previous
+        // chunk-addressing gap that caused remount failures.
+        if matches!(&self.flavor, FsFlavor::Btrfs(_)) {
+            match self.btrfs_full_transaction_commit(cx, "flush_on_destroy") {
+                Ok(stats) => {
+                    if stats.nodes_written > 0 {
+                        info!(
+                            nodes_written = stats.nodes_written,
+                            bytes_written = stats.bytes_written,
+                            new_generation = stats.new_generation,
+                            "btrfs_flush_on_destroy"
+                        );
+                    }
+                }
+                Err(e) => {
+                    warn!(error = %e, "btrfs_flush_on_destroy_failed");
+                    return Err(e);
+                }
+            }
+        }
 
         Ok(())
     }
