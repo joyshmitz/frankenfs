@@ -5,14 +5,14 @@
 #
 # Validates:
 #   1. btrfs image can be created with mkfs.btrfs
-#   2. Image mounts via FUSE with --rw --btrfs-rw-ephemeral-ok
+#   2. Image mounts via FUSE with --rw (durable mode by default)
 #   3. Standard mutation set executes: create, mkdir, write, unlink, rename, setattr, xattr
-#   4. Unmount succeeds
+#   4. Unmount succeeds (flush_on_destroy commits btrfs transactions)
 #   5. Remount in RO mode succeeds
-#   6. All mutations visible via read paths (XFAIL until A1-A6 writeback integration lands)
+#   6. All mutations visible via read paths
 #
-# Until pane 1's final integration lands, the persistence check will XFAIL.
-# The script builds scaffolding so it is ready when durable writeback ships.
+# Durable writeback (bd-3umpe + bd-1ving) is now implemented: ROOT_TREE is properly
+# committed and superblock.root points to ROOT_TREE, enabling clean remount.
 #
 # Usage: scripts/e2e/ffs_btrfs_rw_durable_remount_e2e.sh
 # Exit:  0 = all gates pass (or expected XFAIL), non-zero = unexpected failure
@@ -37,15 +37,15 @@ e2e_rch_add_env_allowlist CARGO_TARGET_DIR
 RCH_COMMAND_TIMEOUT_SECS="${RCH_COMMAND_TIMEOUT_SECS:-600}"
 RCH_CAPTURE_VISIBILITY="${FFS_BTRFS_DURABLE_REMOUNT_RCH_VISIBILITY:-${RCH_VISIBILITY:-summary}}"
 
-# When durable writeback lands, set this to 1
-EXPECT_PERSISTENCE="${FFS_BTRFS_DURABLE_EXPECT_PASS:-0}"
+# Durable writeback is implemented (bd-3umpe + bd-1ving) - expect persistence by default
+EXPECT_PERSISTENCE="${FFS_BTRFS_DURABLE_EXPECT_PASS:-1}"
 
 PASS_COUNT=0
 FAIL_COUNT=0
 XFAIL_COUNT=0
 TOTAL=0
 
-FFS_CLI_BIN="${FFS_CLI_BIN:-$PROJECT_ROOT/target/release/ffs-cli}"
+FFS_CLI_BIN="${FFS_CLI_BIN:-${CARGO_TARGET_DIR:-$PROJECT_ROOT/target}/release/ffs-cli}"
 TEST_IMAGE=""
 MOUNT_POINT=""
 MOUNT_PID=""
@@ -133,7 +133,7 @@ start_mount() {
 
     local cmd=("$FFS_CLI_BIN" mount "$image" "$mount_point")
     if [[ "$mode" == "rw" ]]; then
-        cmd+=(--rw --btrfs-rw-ephemeral-ok)
+        cmd+=(--rw)  # Durable mode by default (no --btrfs-rw-ephemeral-ok)
     fi
 
     e2e_log "Starting mount: ${cmd[*]}"
@@ -240,7 +240,7 @@ scenario_result "ffs_cli_binary_exists" "PASS" "Binary exists"
 e2e_step "Phase 3: Create btrfs test image"
 
 TEST_IMAGE="$E2E_TEMP_DIR/test.btrfs"
-IMAGE_SIZE_MB=64
+IMAGE_SIZE_MB=128
 
 # Create sparse image
 truncate -s "${IMAGE_SIZE_MB}M" "$TEST_IMAGE"
@@ -456,8 +456,8 @@ if [[ $FAIL_COUNT -gt 0 ]]; then
     echo "OVERALL: FAIL"
     scenario_result "btrfs_durable_remount_overall" "FAIL" "$FAIL_COUNT failures"
 elif [[ $XFAIL_COUNT -gt 0 ]]; then
-    echo "OVERALL: XFAIL (expected failure - durable writeback not yet wired)"
-    scenario_result "btrfs_durable_remount_overall" "XFAIL" "persistence not yet implemented"
+    echo "OVERALL: XFAIL (expected failure - check logs)"
+    scenario_result "btrfs_durable_remount_overall" "XFAIL" "unexpected persistence failure"
 else
     echo "OVERALL: PASS"
     scenario_result "btrfs_durable_remount_overall" "PASS" "all checks passed"
