@@ -5244,6 +5244,7 @@ enum IoctlResult {
 /// * `req_gid` - Primary GID of the requesting user
 /// * `mask` - Access mask (R_OK | W_OK | X_OK)
 #[must_use]
+#[expect(clippy::similar_names)]
 fn check_access_permission(
     perm: u16,
     file_uid: u32,

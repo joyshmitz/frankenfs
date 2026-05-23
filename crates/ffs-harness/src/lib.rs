@@ -463,44 +463,41 @@ pub fn extract_test_citations(notes: &str) -> Vec<String> {
     // Pattern: crates/crate-name/src/module.rs::test_name
     // Pattern: fuzz/fuzz_targets/target_name
 
-    let mut chars = notes.chars().peekable();
     let mut current_word = String::new();
 
-    while let Some(ch) = chars.next() {
+    for ch in notes.chars() {
         if ch.is_alphanumeric() || ch == '_' || ch == '-' || ch == '/' || ch == ':' || ch == '.' {
             current_word.push(ch);
-        } else {
-            if !current_word.is_empty() {
-                // Check if this looks like a test citation
-                if current_word.contains("::") && current_word.contains('/') {
-                    // Extract the test name part after ::
-                    if let Some(idx) = current_word.rfind("::") {
-                        let test_name = &current_word[idx + 2..];
-                        if !test_name.is_empty()
-                            && test_name
-                                .chars()
-                                .all(|c| c.is_alphanumeric() || c == '_')
-                        {
-                            citations.push(test_name.to_string());
-                        }
-                    }
-                    // Also extract file::test pattern
-                    if let Some((file_part, test_part)) = current_word.rsplit_once("::") {
-                        if let Some(file_name) = file_part.rsplit('/').next() {
-                            let file_name = file_name.trim_end_matches(".rs");
-                            citations.push(format!("{file_name}::{test_part}"));
-                        }
+        } else if !current_word.is_empty() {
+            // Check if this looks like a test citation
+            if current_word.contains("::") && current_word.contains('/') {
+                // Extract the test name part after ::
+                if let Some(idx) = current_word.rfind("::") {
+                    let test_name = &current_word[idx + 2..];
+                    if !test_name.is_empty()
+                        && test_name
+                            .chars()
+                            .all(|c| c.is_alphanumeric() || c == '_')
+                    {
+                        citations.push(test_name.to_string());
                     }
                 }
-                // Check for fuzz target patterns
-                if current_word.starts_with("fuzz/fuzz_targets/") {
-                    let target = current_word.trim_start_matches("fuzz/fuzz_targets/");
-                    if !target.is_empty() {
-                        citations.push(target.to_string());
+                // Also extract file::test pattern
+                if let Some((file_part, test_part)) = current_word.rsplit_once("::") {
+                    if let Some(file_name) = file_part.rsplit('/').next() {
+                        let file_name = file_name.trim_end_matches(".rs");
+                        citations.push(format!("{file_name}::{test_part}"));
                     }
                 }
-                current_word.clear();
             }
+            // Check for fuzz target patterns
+            if current_word.starts_with("fuzz/fuzz_targets/") {
+                let target = current_word.trim_start_matches("fuzz/fuzz_targets/");
+                if !target.is_empty() {
+                    citations.push(target.to_string());
+                }
+            }
+            current_word.clear();
         }
     }
 
@@ -576,6 +573,7 @@ pub fn parse_cargo_test_json_output(output: &str) -> std::collections::HashMap<S
 /// 3. Maps test results back to parity row citations
 ///
 /// Returns a map where keys are test citation patterns and values are pass/fail.
+#[must_use]
 pub fn build_parity_evidence_map(
     cargo_test_output: &str,
 ) -> std::collections::HashMap<String, bool> {
