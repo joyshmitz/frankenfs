@@ -7491,17 +7491,17 @@ mod tests {
     use super::{
         BTRFS_FS_TREE_OBJECTID, BTRFS_ITEM_INODE_ITEM, BTRFS_ITEM_ROOT_ITEM, BtrfsInodeItem,
         BtrfsMountSelection, Cli, Command, DumpCommand, Ext4DataErrPolicy, Ext4JournalReplayMode,
-        FsckCommandOptions, FsckFlags, InfoCommandOptions, InfoSections, LogFormat,
-        MAX_EXT4_INFO_GROUPS, MountAccessMode, MountAdaptiveRuntimeConfig,
+        Ext4RecoveryOutput, FsckCommandOptions, FsckFlags, InfoCommandOptions, InfoSections,
+        LogFormat, MAX_EXT4_INFO_GROUPS, MountAccessMode, MountAdaptiveRuntimeConfig,
         MountAdaptiveRuntimeSummaryConfig, MountBackgroundRepairMode, MountBackgroundScrubConfig,
         MountBackgroundScrubMode, MountBackgroundScrubRequest, MountCmdOptions, MountConsoleConfig,
         MountMode, MountRuntimeConfig, MountRuntimeMode, MountWritebackCacheConfig,
         RepairCommandOptions, RepairFlags, WRITEBACK_CACHE_KILL_SWITCH_ENV,
         btrfs_chunk_type_flag_names, build_ext4_group_info, build_fsck_output, build_info_output,
         build_mount_open_options, choose_btrfs_scrub_block_size, count_blocks_at_severity_or_higher,
-        ext4_appears_clean_state, ext4_group_flag_names, ext4_state_flag_names,
-        ext4_mount_replay_mode, filesystem_name, format_ratio_thousandths, format_uuid,
-        btrfs_checksum_type_name, log_mount_runtime_rejected,
+        ext4_appears_clean_state, ext4_group_flag_names, ext4_group_scrub_scope,
+        ext4_recovery_detail, ext4_state_flag_names, ext4_mount_replay_mode, filesystem_name,
+        format_ratio_thousandths, format_uuid, btrfs_checksum_type_name, log_mount_runtime_rejected,
         log_mount_runtime_selected, mount_cmd, mount_operation_id, open_filesystem_for_mount,
         parse_btrfs_mount_selection, read_ext4_group_desc_from_path, read_ext4_inode_from_path,
         read_file_region, start_mount_background_scrub, summarize_repair_staleness,
@@ -15215,6 +15215,75 @@ mod tests {
         assert_eq!(count_blocks_at_severity_or_higher(&report, Severity::Warning), 3);
         assert_eq!(count_blocks_at_severity_or_higher(&report, Severity::Error), 2);
         assert_eq!(count_blocks_at_severity_or_higher(&report, Severity::Critical), 1);
+    }
+
+    // ── ext4_group_scrub_scope: block group geometry ─────────────────────
+
+    #[test]
+    fn ext4_group_scrub_scope_first_group() {
+        const EXT4_VALID_FS: u16 = 0x0001;
+        let image = build_test_ext4_image_with_state(EXT4_VALID_FS);
+        let sb = ffs_ondisk::Ext4Superblock::parse_from_image(&image)
+            .expect("parse test ext4 superblock");
+        let (start, count) = ext4_group_scrub_scope(&sb, 0).expect("group 0 should be valid");
+        assert_eq!(start.0, u64::from(sb.first_data_block));
+        assert!(count > 0);
+    }
+
+    #[test]
+    fn ext4_group_scrub_scope_out_of_range() {
+        const EXT4_VALID_FS: u16 = 0x0001;
+        let image = build_test_ext4_image_with_state(EXT4_VALID_FS);
+        let sb = ffs_ondisk::Ext4Superblock::parse_from_image(&image)
+            .expect("parse test ext4 superblock");
+        let err = ext4_group_scrub_scope(&sb, 9999);
+        assert!(err.is_err(), "group 9999 should be out of range");
+    }
+
+    // ── ext4_recovery_detail: formatting output ──────────────────────────
+
+    #[test]
+    fn ext4_recovery_detail_formats_all_fields() {
+        let recovery = Ext4RecoveryOutput {
+            recovery_performed: true,
+            crash_recovery: ffs_core::CrashRecoveryOutcome {
+                was_clean: false,
+                raw_state: 0x0002,
+                had_errors: true,
+                had_orphans: true,
+                journal_txns_replayed: 5,
+                journal_blocks_replayed: 10,
+                mvcc_reset: true,
+            },
+        };
+        let detail = ext4_recovery_detail(&recovery);
+        assert!(detail.contains("recovery_performed=true"));
+        assert!(detail.contains("clean=false"));
+        assert!(detail.contains("had_errors=true"));
+        assert!(detail.contains("had_orphans=true"));
+        assert!(detail.contains("journal_txns_replayed=5"));
+        assert!(detail.contains("journal_blocks_replayed=10"));
+    }
+
+    #[test]
+    fn ext4_recovery_detail_clean_filesystem() {
+        let recovery = Ext4RecoveryOutput {
+            recovery_performed: false,
+            crash_recovery: ffs_core::CrashRecoveryOutcome {
+                was_clean: true,
+                raw_state: 0x0001,
+                had_errors: false,
+                had_orphans: false,
+                journal_txns_replayed: 0,
+                journal_blocks_replayed: 0,
+                mvcc_reset: false,
+            },
+        };
+        let detail = ext4_recovery_detail(&recovery);
+        assert!(detail.contains("recovery_performed=false"));
+        assert!(detail.contains("clean=true"));
+        assert!(detail.contains("had_errors=false"));
+        assert!(detail.contains("had_orphans=false"));
     }
 
     // ── select_ext4_repair_groups: fresh-only path ───────────────────────
