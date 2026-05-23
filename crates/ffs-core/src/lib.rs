@@ -44122,6 +44122,40 @@ mod tests {
         assert!(barrier.is_epoch_visible(untracked, 100));
     }
 
+    // ── percentile_value helper unit tests ─────────────────────────────────
+
+    #[test]
+    fn percentile_value_empty_returns_zero() {
+        let empty: Vec<u64> = vec![];
+        assert_eq!(percentile_value(&empty, 0.5), 0);
+    }
+
+    #[test]
+    fn percentile_value_single_element() {
+        let single = vec![42];
+        assert_eq!(percentile_value(&single, 0.0), 42);
+        assert_eq!(percentile_value(&single, 0.5), 42);
+        assert_eq!(percentile_value(&single, 1.0), 42);
+    }
+
+    #[test]
+    fn percentile_value_sorted_p50() {
+        let sorted = vec![10, 20, 30, 40, 50];
+        assert_eq!(percentile_value(&sorted, 0.5), 30);
+    }
+
+    #[test]
+    fn percentile_value_sorted_p95() {
+        let sorted: Vec<u64> = (1..=100).collect();
+        assert_eq!(percentile_value(&sorted, 0.95), 95);
+    }
+
+    #[test]
+    fn percentile_value_sorted_p99() {
+        let sorted: Vec<u64> = (1..=100).collect();
+        assert_eq!(percentile_value(&sorted, 0.99), 99);
+    }
+
     // ── Crash consistency matrix for writeback epoch barrier ─────────────
     //
     // Each scenario simulates a crash at a specific point in the writeback
