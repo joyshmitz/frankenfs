@@ -2066,6 +2066,7 @@ impl InMemoryCowBtrfsTree {
 
     /// Root node level (0 for leaf, higher for internal).
     #[must_use]
+    #[expect(clippy::cast_possible_truncation, reason = "btrfs tree level is limited to BTRFS_MAX_LEVEL (8)")]
     pub fn root_level(&self) -> u8 {
         match self.height() {
             Ok(h) if h > 0 => (h - 1) as u8,
@@ -3063,6 +3064,7 @@ pub struct BtrfsExtentDataRef {
 
 impl BtrfsExtentDataRef {
     /// Parse from on-disk format (28 bytes LE).
+    #[must_use]
     pub fn from_bytes(data: &[u8]) -> Option<Self> {
         if data.len() < 28 {
             return None;

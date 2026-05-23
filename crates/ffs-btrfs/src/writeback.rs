@@ -575,11 +575,11 @@ impl DiskWritebackContext {
     /// Otherwise, falls back to test-mode placeholder `bytenr = block * nodesize`.
     #[must_use]
     pub fn block_to_bytenr(&self, block: u64) -> u64 {
-        if let Some(ref addrs) = self.allocated_addrs {
-            *addrs.get(&block).unwrap_or(&block.saturating_mul(u64::from(self.nodesize)))
-        } else {
-            block.saturating_mul(u64::from(self.nodesize))
-        }
+        let fallback = block.saturating_mul(u64::from(self.nodesize));
+        self.allocated_addrs
+            .as_ref()
+            .and_then(|addrs| addrs.get(&block).copied())
+            .unwrap_or(fallback)
     }
 
     /// Returns true if this context uses real allocated addresses (not test placeholders).
