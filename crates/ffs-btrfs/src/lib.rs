@@ -5204,6 +5204,98 @@ pub fn build_setxattr_command(path: &[u8], name: &[u8], data: &[u8]) -> (SendCom
     )
 }
 
+/// Helper to build a RemoveXattr command.
+#[must_use]
+pub fn build_removexattr_command(path: &[u8], name: &[u8]) -> (SendCommand, Vec<(SendAttr, Vec<u8>)>) {
+    (
+        SendCommand::RemoveXattr,
+        vec![
+            (SendAttr::Path, path.to_vec()),
+            (SendAttr::XattrName, name.to_vec()),
+        ],
+    )
+}
+
+/// Helper to build a Rename command.
+#[must_use]
+pub fn build_rename_command(path: &[u8], path_to: &[u8]) -> (SendCommand, Vec<(SendAttr, Vec<u8>)>) {
+    (
+        SendCommand::Rename,
+        vec![
+            (SendAttr::Path, path.to_vec()),
+            (SendAttr::PathTo, path_to.to_vec()),
+        ],
+    )
+}
+
+/// Helper to build a Link command (hardlink).
+#[must_use]
+pub fn build_link_command(path: &[u8], path_link: &[u8]) -> (SendCommand, Vec<(SendAttr, Vec<u8>)>) {
+    (
+        SendCommand::Link,
+        vec![
+            (SendAttr::Path, path.to_vec()),
+            (SendAttr::PathLink, path_link.to_vec()),
+        ],
+    )
+}
+
+/// Helper to build an Unlink command.
+#[must_use]
+pub fn build_unlink_command(path: &[u8]) -> (SendCommand, Vec<(SendAttr, Vec<u8>)>) {
+    (
+        SendCommand::Unlink,
+        vec![(SendAttr::Path, path.to_vec())],
+    )
+}
+
+/// Helper to build an Rmdir command.
+#[must_use]
+pub fn build_rmdir_command(path: &[u8]) -> (SendCommand, Vec<(SendAttr, Vec<u8>)>) {
+    (
+        SendCommand::Rmdir,
+        vec![(SendAttr::Path, path.to_vec())],
+    )
+}
+
+/// Helper to build a Mknod command (block/char device).
+#[must_use]
+pub fn build_mknod_command(path: &[u8], ino: u64, mode: u64, rdev: u64) -> (SendCommand, Vec<(SendAttr, Vec<u8>)>) {
+    (
+        SendCommand::Mknod,
+        vec![
+            (SendAttr::Path, path.to_vec()),
+            (SendAttr::Ino, ino.to_le_bytes().to_vec()),
+            (SendAttr::Mode, mode.to_le_bytes().to_vec()),
+            (SendAttr::Rdev, rdev.to_le_bytes().to_vec()),
+        ],
+    )
+}
+
+/// Helper to build a Mkfifo command.
+#[must_use]
+pub fn build_mkfifo_command(path: &[u8], ino: u64) -> (SendCommand, Vec<(SendAttr, Vec<u8>)>) {
+    (
+        SendCommand::Mkfifo,
+        vec![
+            (SendAttr::Path, path.to_vec()),
+            (SendAttr::Ino, ino.to_le_bytes().to_vec()),
+        ],
+    )
+}
+
+/// Helper to build a Mksock command.
+#[must_use]
+pub fn build_mksock_command(path: &[u8], ino: u64) -> (SendCommand, Vec<(SendAttr, Vec<u8>)>) {
+    (
+        SendCommand::Mksock,
+        vec![
+            (SendAttr::Path, path.to_vec()),
+            (SendAttr::Ino, ino.to_le_bytes().to_vec()),
+        ],
+    )
+}
+
 // ── btrfs tree-log replay ─────────────────────────────────────────────────
 
 /// Result of scanning the btrfs tree-log.
