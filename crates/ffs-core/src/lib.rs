@@ -14478,25 +14478,39 @@ impl OpenFs {
         let fs_tree_bytenr = disk_ctx.block_to_bytenr(fs_tree_root);
         let fs_tree_level = alloc.fs_tree.root_level();
 
-        // Update ROOT_ITEM for FS_TREE in root_tree with new location
+        // Update ROOT_ITEM for FS_TREE in root_tree with new location.
+        //
+        // Missing FS_TREE ROOT_ITEM is a hard error, not a silent skip: if we
+        // wrote a new fs_tree at `fs_tree_bytenr` but no entry in root_tree
+        // points at it, the superblock would commit a root_tree that
+        // references the *old* fs_tree (or nothing), and the new fs_tree
+        // blocks would be orphaned — every mutation in this transaction
+        // would silently revert on the next mount. Refuse the commit
+        // instead so the caller (and the operator) sees the inconsistency.
         let fs_root_key = BtrfsKey {
             objectid: BTRFS_FS_TREE_OBJECTID,
             item_type: BTRFS_ITEM_ROOT_ITEM,
             offset: 0,
         };
-        if let Some(mut root_item_data) = alloc.root_tree.get(&fs_root_key) {
-            BtrfsRootItem::patch_root_commit(
-                &mut root_item_data,
-                fs_tree_bytenr,
-                fs_tree_level,
-                new_gen,
+        let mut root_item_data = alloc.root_tree.get(&fs_root_key).ok_or_else(|| {
+            FfsError::Format(
+                "btrfs commit: FS_TREE ROOT_ITEM (objectid=5, type=ROOT_ITEM, offset=0) \
+                 is missing from in-memory root_tree — refusing to commit a transaction \
+                 that would orphan the new fs_tree at allocated logical address"
+                    .into(),
             )
-            .map_err(|e| FfsError::Parse(format!("ROOT_ITEM patch failed: {e}")))?;
-            alloc
-                .root_tree
-                .update(&fs_root_key, &root_item_data)
-                .map_err(|e| btrfs_mutation_to_ffs(&e))?;
-        }
+        })?;
+        BtrfsRootItem::patch_root_commit(
+            &mut root_item_data,
+            fs_tree_bytenr,
+            fs_tree_level,
+            new_gen,
+        )
+        .map_err(|e| FfsError::Parse(format!("ROOT_ITEM patch failed: {e}")))?;
+        alloc
+            .root_tree
+            .update(&fs_root_key, &root_item_data)
+            .map_err(|e| btrfs_mutation_to_ffs(&e))?;
 
         // Build WriteDependencyDag for root_tree and commit it
         let root_dag = WriteDependencyDag::from_cow_tree(&alloc.root_tree, new_gen)
