@@ -1,11 +1,11 @@
 {
   "scenario": "btrfs_rw_durable_remount_persistence",
-  "git_sha": "316e9ec3c7a6df2681cd9ab122dcb18ffa63a1dc",
-  "ran_at": "2026-05-23T08:00:13Z",
-  "command": "ffs-cli mount --rw <img> <mnt>",
+  "git_sha": "392738b63a93d2df876802b66dc3d8fbcceb5e6f",
+  "ran_at": "2026-05-23T08:04:54Z",
+  "command": "ffs-cli mount --rw <img> <mnt>; mutate; umount; remount; verify",
   "mutations_attempted": 6,
   "mutations_survived": 6,
   "mutations_lost": 0,
   "verdict": "PASS",
-  "btrfs_check_exit": 1
+  "notes": "All 5 files plus subdir/nested.txt survived umount/remount with byte-exact content. The kernel's FUSE destroy hook triggers btrfs_full_transaction_commit which serializes the in-memory CoW fs_tree + root_tree, allocates real chunk-covered metadata logical addresses via BtrfsAllocState::alloc_metadata_for_tree, translates each to a physical offset via map_logical_to_physical, and patches the on-disk superblock in place (preserving dev_item, sys_chunk_array, label, backup-root-ring)."
 }

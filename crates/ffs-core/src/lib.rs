@@ -50378,4 +50378,28 @@ mod tests {
         assert_eq!(unencoded_len, content.len() as u64);
         assert_eq!(compression, 0, "inline extent should be uncompressed");
     }
+
+    #[test]
+    fn btrfs_logical_ino_returns_valid_container() {
+        let (fs, cx) = open_writable_btrfs();
+
+        // Query a non-existent logical address - should return empty result
+        let result = fs
+            .get_btrfs_logical_ino(&cx, &mut RequestScope::empty(), 0x100000)
+            .expect("logical_ino should not error on nonexistent address");
+
+        // Verify btrfs_data_container header format:
+        // u32 bytes_left, u32 bytes_missing, u64 elem_cnt, u64 elem_missed
+        assert!(result.len() >= 24, "result too short: {}", result.len());
+
+        let bytes_left = u32::from_le_bytes(result[0..4].try_into().unwrap());
+        let bytes_missing = u32::from_le_bytes(result[4..8].try_into().unwrap());
+        let elem_cnt = u64::from_le_bytes(result[8..16].try_into().unwrap());
+        let elem_missed = u64::from_le_bytes(result[16..24].try_into().unwrap());
+
+        assert_eq!(bytes_left, 0);
+        assert_eq!(bytes_missing, 0);
+        assert_eq!(elem_cnt, 0, "no inodes should reference non-existent extent");
+        assert_eq!(elem_missed, 0);
+    }
 }
