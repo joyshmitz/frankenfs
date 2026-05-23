@@ -21957,12 +21957,70 @@ impl FsOps for OpenFs {
     }
 
     fn flush_on_destroy(&self, cx: &Cx) -> ffs_error::Result<()> {
-        if self.is_writable() {
-            let flushed = self.flush_mvcc_to_device(cx)?;
-            if flushed > 0 {
-                info!(flushed_blocks = flushed, "flush_on_destroy");
+        if !self.is_writable() {
+            return Ok(());
+        }
+
+        // First flush any committed MVCC block versions (covers ext4 metadata
+        // and any file-data extents staged through the block-versioned path).
+        let flushed = self.flush_mvcc_to_device(cx)?;
+        if flushed > 0 {
+            info!(flushed_blocks = flushed, "flush_on_destroy");
+        }
+
+        // For btrfs, serialize the in-memory CoW metadata tree and atomically
+        // commit the superblock. This is the durability boundary that lets
+        // mutations performed through the FUSE mount survive across
+        // unmount/remount. (bd-jdo53: durable-by-default RW writeback.)
+        //
+        // The kernel calls FUSE `destroy` on `umount`; this is the last
+        // chance to materialise the CoW tree before the mount goes away, so
+        // we run a full transaction commit regardless of whether any
+        // explicit fsync() arrived during the session.
+        if matches!(self.flavor, FsFlavor::Btrfs(_)) && self.btrfs_alloc_state.is_some() {
+            let operation_id = format!(
+                "destroy-{:016x}",
+                std::ptr::addr_of!(*self) as usize as u64
+            );
+            info!(
+                target: "ffs::btrfs::rw",
+                operation_id = %operation_id,
+                scenario_id = "btrfs_rw_destroy",
+                outcome = "start",
+                durability_boundary = "destroy",
+                "btrfs_destroy_commit_start"
+            );
+            match self.btrfs_full_transaction_commit(cx, &operation_id) {
+                Ok(stats) => {
+                    info!(
+                        target: "ffs::btrfs::rw",
+                        operation_id = %operation_id,
+                        scenario_id = "btrfs_rw_destroy",
+                        outcome = "applied",
+                        nodes_written = stats.nodes_written,
+                        bytes_written = stats.bytes_written,
+                        new_generation = stats.new_generation,
+                        fsync_barrier_issued = stats.fsync_barrier_issued,
+                        durability_boundary = "destroy",
+                        "btrfs_destroy_commit_applied"
+                    );
+                }
+                Err(e) => {
+                    warn!(
+                        target: "ffs::btrfs::rw",
+                        operation_id = %operation_id,
+                        scenario_id = "btrfs_rw_destroy",
+                        outcome = "rejected",
+                        error_class = "destroy_commit_failed",
+                        error = %e,
+                        durability_boundary = "destroy",
+                        "btrfs_destroy_commit_rejected"
+                    );
+                    return Err(e);
+                }
             }
         }
+
         Ok(())
     }
 }
@@ -49812,5 +49870,59 @@ mod tests {
 
         // check_btrfs_mutation_allowed should return Ok for ext4
         assert!(fs.check_btrfs_mutation_allowed("test_op").is_ok());
+    }
+
+    // ── btrfs_csum_size_for_type: checksum size lookup ───────────────────
+
+    #[test]
+    fn btrfs_csum_size_for_type_crc32c() {
+        use super::btrfs_csum_size_for_type;
+        assert_eq!(btrfs_csum_size_for_type(ffs_types::BTRFS_CSUM_TYPE_CRC32C), 4);
+    }
+
+    #[test]
+    fn btrfs_csum_size_for_type_xxhash64() {
+        use super::btrfs_csum_size_for_type;
+        assert_eq!(btrfs_csum_size_for_type(ffs_types::BTRFS_CSUM_TYPE_XXHASH64), 8);
+    }
+
+    #[test]
+    fn btrfs_csum_size_for_type_sha256() {
+        use super::btrfs_csum_size_for_type;
+        assert_eq!(btrfs_csum_size_for_type(ffs_types::BTRFS_CSUM_TYPE_SHA256), 32);
+    }
+
+    #[test]
+    fn btrfs_csum_size_for_type_blake2b() {
+        use super::btrfs_csum_size_for_type;
+        assert_eq!(btrfs_csum_size_for_type(ffs_types::BTRFS_CSUM_TYPE_BLAKE2B), 32);
+    }
+
+    #[test]
+    fn btrfs_csum_size_for_type_unknown() {
+        use super::btrfs_csum_size_for_type;
+        assert_eq!(btrfs_csum_size_for_type(0xFF), 0);
+    }
+
+    // ── dir_logical_block_count: directory block count calculation ───────
+
+    #[test]
+    fn dir_logical_block_count_exact_multiple() {
+        use super::dir_logical_block_count;
+        assert_eq!(dir_logical_block_count(4096, 4096).unwrap(), 1);
+        assert_eq!(dir_logical_block_count(8192, 4096).unwrap(), 2);
+    }
+
+    #[test]
+    fn dir_logical_block_count_rounds_up() {
+        use super::dir_logical_block_count;
+        assert_eq!(dir_logical_block_count(4097, 4096).unwrap(), 2);
+        assert_eq!(dir_logical_block_count(1, 4096).unwrap(), 1);
+    }
+
+    #[test]
+    fn dir_logical_block_count_zero_size() {
+        use super::dir_logical_block_count;
+        assert_eq!(dir_logical_block_count(0, 4096).unwrap(), 0);
     }
 }
