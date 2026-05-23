@@ -44,6 +44,7 @@ use ffs_btrfs::{
     enumerate_snapshots, enumerate_subvolumes, fsflags_to_btrfs_inode_flags,
     map_logical_to_physical, parse_dir_items, parse_extent_data, parse_inode_item, parse_root_item,
     parse_xattr_items, walk_chunk_tree, walk_tree, xflags_to_btrfs_inode_flags,
+    writeback::{WriteDependencyDag, WritebackExecutor},
 };
 use ffs_error::FfsError;
 use ffs_journal::{
@@ -599,6 +600,19 @@ struct BtrfsTreeLogWriteStats {
     items_count: usize,
     allocated_bytes: u64,
     metadata_allocation: bool,
+}
+
+/// Statistics returned by full btrfs transaction commit (bd-jdo53).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct BtrfsWritebackStats {
+    /// Number of CoW nodes serialized and written.
+    nodes_written: usize,
+    /// Total bytes written (nodes + superblock).
+    bytes_written: u64,
+    /// New generation after commit.
+    new_generation: u64,
+    /// Whether fsync barrier was issued.
+    fsync_barrier_issued: bool,
 }
 
 /// Outcome of crash recovery performed at mount time.
@@ -14273,6 +14287,158 @@ impl OpenFs {
                 Err(err)
             }
         }
+    }
+
+    // ── Btrfs durable writeback (bd-jdo53) ───────────────────────────────
+
+    /// Drive the full btrfs writeback pipeline: serialize CoW nodes, allocate
+    /// metadata blocks, write in dependency order, and atomically commit the
+    /// superblock.
+    ///
+    /// This is the integration point for bd-jdo53 (Workstream A). The design
+    /// spec is in `docs/design-btrfs-metadata-writeback.md`.
+    ///
+    /// # Crash Consistency Invariants
+    ///
+    /// - **WB-I1:** At every crash point, the set of durable nodes is prefix-closed
+    ///   under references (no durable parent points at a non-durable child).
+    /// - **WB-I2:** After crash, a reader observes generation `g` or `g+1`, never torn.
+    ///
+    /// # Current Status
+    ///
+    /// This method provides the integration scaffolding. Full implementation
+    /// requires pane 2 (BlockDevice write) and pane 3 (atomic root commit).
+    #[allow(dead_code)] // Integration scaffolding for bd-jdo53
+    fn btrfs_full_transaction_commit(
+        &self,
+        cx: &Cx,
+        operation_id: &str,
+    ) -> ffs_error::Result<BtrfsWritebackStats> {
+        let alloc_mutex = self.require_btrfs_alloc_state()?;
+        let mut alloc = alloc_mutex.lock();
+
+        // Extract superblock for serialization parameters
+        let sb: &BtrfsSuperblock = match &self.flavor {
+            FsFlavor::Btrfs(boxed_sb) => boxed_sb.as_ref(),
+            FsFlavor::Ext4(_) => {
+                return Err(FfsError::UnsupportedFeature(
+                    "btrfs writeback requires btrfs filesystem".into(),
+                ))
+            }
+        };
+
+        let current_gen = alloc.generation;
+        let new_gen = current_gen.saturating_add(1);
+        let nodesize = alloc.nodesize;
+
+        // Build the write-dependency DAG from the in-memory FS tree
+        let dag = WriteDependencyDag::from_cow_tree(&alloc.fs_tree, new_gen)
+            .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+
+        let node_count = dag.node_count();
+        if node_count == 0 {
+            debug!(
+                target: "ffs::btrfs::writeback",
+                operation_id,
+                "no_dirty_nodes"
+            );
+            return Ok(BtrfsWritebackStats::default());
+        }
+
+        debug!(
+            target: "ffs::btrfs::writeback",
+            operation_id,
+            node_count,
+            current_gen,
+            new_gen,
+            "writeback_dag_built"
+        );
+
+        // Create the writeback executor
+        let mut executor = WritebackExecutor::new(dag);
+
+        // Serialize and write each node in reverse topological order
+        let mut bytes_written = 0u64;
+        let mut nodes_written = 0usize;
+
+        let flush_result = executor.execute(|block| {
+            // Get the node snapshot
+            let node = alloc.fs_tree.node_snapshot(block)?;
+
+            // Build serialization parameters
+            let child_gens = match &node {
+                BtrfsCowNode::Internal { children, .. } => {
+                    children.iter().map(|_| new_gen).collect()
+                }
+                BtrfsCowNode::Leaf { .. } => Vec::new(),
+            };
+
+            let params = BtrfsNodeSerializeParams {
+                fsid: sb.fsid,
+                bytenr: block,
+                flags: 0,
+                // For single-device btrfs, chunk_tree_uuid equals fsid
+                chunk_tree_uuid: sb.fsid,
+                generation: new_gen,
+                owner: BTRFS_FS_TREE_OBJECTID,
+                nodesize,
+                child_generations: child_gens,
+            };
+
+            // Serialize the node
+            let serialized = node.serialize(&params)?;
+            let node_bytes = serialized.len() as u64;
+
+            // TODO(pane-2): Map logical bytenr to physical location via chunk tree
+            // For now, assume identity mapping and write directly to device.
+            // Real implementation needs: map_logical_to_physical(sb, chunks, block)
+            self.dev
+                .write_all_at(cx, ByteOffset(block), &serialized)
+                .map_err(|_| BtrfsMutationError::InvalidConfig("disk write failed"))?;
+
+            bytes_written = bytes_written.saturating_add(node_bytes);
+            nodes_written = nodes_written.saturating_add(1);
+
+            trace!(
+                target: "ffs::btrfs::writeback",
+                block,
+                node_bytes,
+                nodes_written,
+                "node_serialized"
+            );
+
+            Ok(())
+        });
+
+        flush_result.map_err(|e| btrfs_mutation_to_ffs(&e))?;
+
+        // Issue fsync barrier before superblock write
+        executor.fsync_barrier();
+        self.dev.sync(cx)?;
+
+        // TODO(pane-3): Update ROOT_ITEM in root tree and write atomic superblock
+        // For now, bump generation in alloc state
+        alloc.generation = new_gen;
+        drop(alloc);
+
+        // Record superblock commit (for crash point tracking)
+        executor.commit_superblock();
+
+        info!(
+            target: "ffs::btrfs::writeback",
+            operation_id,
+            nodes_written,
+            bytes_written,
+            new_gen,
+            "full_transaction_committed"
+        );
+
+        Ok(BtrfsWritebackStats {
+            nodes_written,
+            bytes_written,
+            new_generation: new_gen,
+            fsync_barrier_issued: true,
+        })
     }
 
     // ── Btrfs write path ─────────────────────────────────────────────────
@@ -44120,6 +44286,48 @@ mod tests {
         let barrier = WritebackEpochBarrier::enabled();
         let untracked = InodeNumber(999);
         assert!(barrier.is_epoch_visible(untracked, 100));
+    }
+
+    // ── E2ComprCodec unit tests ────────────────────────────────────────────
+
+    #[test]
+    fn e2compr_codec_from_method_index_known_methods() {
+        assert!(matches!(E2ComprCodec::from_method_index(0), Ok(E2ComprCodec::Lzv1)));
+        assert!(matches!(E2ComprCodec::from_method_index(4), Ok(E2ComprCodec::Bzip2)));
+        assert!(matches!(E2ComprCodec::from_method_index(8), Ok(E2ComprCodec::Lzrw3a)));
+        assert!(matches!(E2ComprCodec::from_method_index(10), Ok(E2ComprCodec::Lzo1x1)));
+    }
+
+    #[test]
+    fn e2compr_codec_from_method_index_gzip_levels() {
+        for (idx, level) in (16..=24).zip(1..=9) {
+            match E2ComprCodec::from_method_index(idx) {
+                Ok(E2ComprCodec::Gzip { level: l }) => assert_eq!(l, level),
+                other => panic!("expected Gzip level {level}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn e2compr_codec_from_method_index_none_passthrough() {
+        for idx in 1..=3 {
+            assert!(matches!(E2ComprCodec::from_method_index(idx), Ok(E2ComprCodec::None)));
+        }
+    }
+
+    #[test]
+    fn e2compr_codec_from_method_index_unsupported() {
+        assert!(E2ComprCodec::from_method_index(255).is_err());
+        assert!(E2ComprCodec::from_method_index(100).is_err());
+    }
+
+    #[test]
+    fn e2compr_codec_name() {
+        assert_eq!(E2ComprCodec::Lzv1.name(), "lzv1");
+        assert_eq!(E2ComprCodec::Bzip2.name(), "bzip2");
+        assert_eq!(E2ComprCodec::Lzo1x1.name(), "LZO");
+        assert_eq!(E2ComprCodec::Gzip { level: 6 }.name(), "gzip");
+        assert_eq!(E2ComprCodec::None.name(), "none");
     }
 
     // ── percentile_value helper unit tests ─────────────────────────────────
