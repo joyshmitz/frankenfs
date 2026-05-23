@@ -13546,6 +13546,46 @@ mod tests {
     }
 
     #[test]
+    fn dispatch_ioctl_btrfs_encoded_read_rejects_short_input() {
+        let fuse = FrankenFuse::new(Box::new(IoctlRecordingFs::new(
+            0,
+            Arc::new(Mutex::new(Vec::new())),
+        )));
+
+        // BTRFS_IOC_ENCODED_READ requires 64-byte input (encoded_io_args)
+        let short_input = vec![0_u8; 32];
+        let response =
+            dispatch_ioctl_for_testing(&fuse, 2, 0, BTRFS_IOC_ENCODED_READ, &short_input, 0);
+        assert_eq!(
+            response,
+            IoctlResult::Error(libc::EINVAL),
+            "BTRFS_IOC_ENCODED_READ with short input must return EINVAL"
+        );
+    }
+
+    #[test]
+    fn dispatch_ioctl_btrfs_encoded_write_rejects_on_read_only() {
+        let mut opts = MountOptions::default();
+        opts.read_only = true;
+        let fuse = FrankenFuse::with_options(
+            Box::new(IoctlRecordingFs::new(
+                0,
+                Arc::new(Mutex::new(Vec::new())),
+            )),
+            &opts,
+        );
+
+        let input = vec![0_u8; 64];
+        let response =
+            dispatch_ioctl_for_testing(&fuse, 2, 0, BTRFS_IOC_ENCODED_WRITE, &input, 0);
+        assert_eq!(
+            response,
+            IoctlResult::Error(libc::EROFS),
+            "BTRFS_IOC_ENCODED_WRITE on read-only must return EROFS"
+        );
+    }
+
+    #[test]
     fn access_predictor_doubles_fetch_size_for_forward_sequence() {
         let predictor = AccessPredictor::default();
         let ino = InodeNumber(11);
