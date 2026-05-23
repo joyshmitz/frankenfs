@@ -14130,6 +14130,7 @@ impl OpenFs {
                 owner: BTRFS_TREE_LOG_OBJECTID,
                 nodesize: alloc.nodesize,
                 child_generations: Vec::new(),
+                child_bytenrs: Vec::new(),
             })
             .map_err(|e| btrfs_mutation_to_ffs(&e))?;
 
@@ -14417,16 +14418,41 @@ impl OpenFs {
         let mut bytes_written = 0u64;
         let mut nodes_written = 0usize;
 
+        // Cache chunk map for logical→physical translation during writeback.
+        // The DiskWritebackContext hands out btrfs *logical* addresses (those
+        // are what the chunk tree resolves and what `sb.root` / internal
+        // blockptrs reference). The block device, however, is physical: each
+        // write_all_at must use the chunk-mapped physical offset, otherwise
+        // the bytes land somewhere unrelated to where the next mount's
+        // resolver will look for them.
+        let chunks_for_writeback: Vec<_> = self
+            .btrfs_context()
+            .ok_or_else(|| FfsError::Format("no btrfs context for writeback".into()))?
+            .chunks
+            .clone();
+
+        let resolve_physical = |logical: u64| -> Result<u64, BtrfsMutationError> {
+            let mapping = map_logical_to_physical(&chunks_for_writeback, logical)
+                .map_err(|_| {
+                    BtrfsMutationError::InvalidConfig("chunk map lookup failed for writeback")
+                })?
+                .ok_or(BtrfsMutationError::InvalidConfig(
+                    "writeback logical address not covered by any chunk",
+                ))?;
+            Ok(mapping.physical)
+        };
+
         let flush_result = executor.execute(|block| {
-            // Serialize the node using DiskWritebackContext
+            // Serialize the node using DiskWritebackContext. For internal
+            // nodes this resolves child block numbers to their allocated
+            // logical addresses (see `DiskWritebackContext::serialize_node`).
             let serialized = disk_ctx.serialize_node(&alloc.fs_tree, block)?;
             let node_bytes = serialized.len() as u64;
 
-            // Write to disk at the node's byte offset
-            // Note: For real production, use map_logical_to_physical for multi-device
-            let bytenr = disk_ctx.block_to_bytenr(block);
+            let logical = disk_ctx.block_to_bytenr(block);
+            let physical = resolve_physical(logical)?;
             self.dev
-                .write_all_at(cx, ByteOffset(bytenr), &serialized)
+                .write_all_at(cx, ByteOffset(physical), &serialized)
                 .map_err(|_| BtrfsMutationError::InvalidConfig("disk write failed"))?;
 
             bytes_written = bytes_written.saturating_add(node_bytes);
@@ -14435,7 +14461,8 @@ impl OpenFs {
             trace!(
                 target: "ffs::btrfs::writeback",
                 block,
-                bytenr,
+                logical,
+                physical,
                 node_bytes,
                 nodes_written,
                 "node_written_to_disk"
@@ -14497,14 +14524,17 @@ impl OpenFs {
             root_allocated_addrs,
         );
 
-        // Write root_tree nodes
+        // Write root_tree nodes — same logical→physical translation as
+        // above, so that the next mount's resolver finds them via the
+        // chunk tree.
         let mut root_executor = WritebackExecutor::new(root_dag);
         let root_flush_result = root_executor.execute(|block| {
             let serialized = root_disk_ctx.serialize_node(&alloc.root_tree, block)?;
             let node_bytes = serialized.len() as u64;
-            let bytenr = root_disk_ctx.block_to_bytenr(block);
+            let logical = root_disk_ctx.block_to_bytenr(block);
+            let physical = resolve_physical(logical)?;
             self.dev
-                .write_all_at(cx, ByteOffset(bytenr), &serialized)
+                .write_all_at(cx, ByteOffset(physical), &serialized)
                 .map_err(|_| BtrfsMutationError::InvalidConfig("disk write failed"))?;
             bytes_written = bytes_written.saturating_add(node_bytes);
             nodes_written = nodes_written.saturating_add(1);
@@ -20755,21 +20785,149 @@ impl FsOps for OpenFs {
 
     fn btrfs_encoded_read(
         &self,
-        _cx: &Cx,
+        cx: &Cx,
         _scope: &mut RequestScope,
-        _ino: u64,
-        _args: &[u8],
+        ino: u64,
+        args: &[u8],
     ) -> ffs_error::Result<Vec<u8>> {
         match &self.flavor {
             FsFlavor::Ext4(_) => Err(FfsError::UnsupportedFeature(
                 "BTRFS_IOC_ENCODED_READ is not supported on ext4 filesystems".to_owned(),
             )),
             FsFlavor::Btrfs(_) => {
-                // Encoded read requires parsing extent compression metadata
-                // and returning raw compressed data. Not yet implemented.
-                Err(FfsError::UnsupportedFeature(
-                    "BTRFS_IOC_ENCODED_READ not yet implemented".to_owned(),
-                ))
+                // Parse btrfs_ioctl_encoded_io_args (64 bytes minimum):
+                // - iov pointer (8) + iovcnt (8) = 16 bytes (ignored for FUSE, data returned directly)
+                // - offset: u64 at byte 16
+                // - flags: u64 at byte 24
+                // - len: u64 at byte 32 (max length to return)
+                if args.len() < 40 {
+                    return Err(FfsError::Format("encoded_io_args too short".into()));
+                }
+                let file_offset = u64::from_le_bytes(args[16..24].try_into().unwrap());
+                let _flags = u64::from_le_bytes(args[24..32].try_into().unwrap());
+                let max_len = u64::from_le_bytes(args[32..40].try_into().unwrap());
+
+                let canonical = self.btrfs_canonical_inode(InodeNumber(ino))?;
+
+                // Find extent at the requested offset
+                let extent_opt: Option<(u64, BtrfsExtentData)> =
+                    if let Some(alloc_mutex) = self.btrfs_alloc_state.as_ref() {
+                        let alloc = alloc_mutex.lock();
+                        let ext_start = BtrfsKey {
+                            objectid: canonical,
+                            item_type: BTRFS_ITEM_EXTENT_DATA,
+                            offset: 0,
+                        };
+                        let ext_end = BtrfsKey {
+                            objectid: canonical,
+                            item_type: BTRFS_ITEM_EXTENT_DATA,
+                            offset: u64::MAX,
+                        };
+                        let ext_items = alloc
+                            .fs_tree
+                            .range(&ext_start, &ext_end)
+                            .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+                        drop(alloc);
+                        ext_items
+                            .into_iter()
+                            .filter_map(|(k, v)| {
+                                parse_extent_data(&v).ok().map(|e| (k.offset, e))
+                            })
+                            .find(|(start, ext)| {
+                                let end = match ext {
+                                    BtrfsExtentData::Inline { data, .. } => {
+                                        start.saturating_add(data.len() as u64)
+                                    }
+                                    BtrfsExtentData::Regular { num_bytes, .. } => {
+                                        start.saturating_add(*num_bytes)
+                                    }
+                                };
+                                file_offset >= *start && file_offset < end
+                            })
+                    } else {
+                        let items = self.walk_btrfs_fs_tree(cx)?;
+                        items
+                            .iter()
+                            .filter(|item| {
+                                item.key.objectid == canonical
+                                    && item.key.item_type == BTRFS_ITEM_EXTENT_DATA
+                            })
+                            .filter_map(|item| {
+                                parse_extent_data(&item.data)
+                                    .ok()
+                                    .map(|e| (item.key.offset, e))
+                            })
+                            .find(|(start, ext)| {
+                                let end = match ext {
+                                    BtrfsExtentData::Inline { data, .. } => {
+                                        start.saturating_add(data.len() as u64)
+                                    }
+                                    BtrfsExtentData::Regular { num_bytes, .. } => {
+                                        start.saturating_add(*num_bytes)
+                                    }
+                                };
+                                file_offset >= *start && file_offset < end
+                            })
+                    };
+
+                let (extent_start, extent) = extent_opt
+                    .ok_or_else(|| FfsError::NotFound("no extent at offset".into()))?;
+
+                // Build response: encoded data + metadata
+                // Output format (after encoded data): metadata header
+                // len(8) + unencoded_len(8) + unencoded_offset(8) + compression(4) + encryption(4)
+                let (encoded_data, compression, unencoded_len, unencoded_offset) = match &extent {
+                    BtrfsExtentData::Inline {
+                        data, compression, ..
+                    } => {
+                        let offset_in_extent = file_offset.saturating_sub(extent_start);
+                        (data.clone(), *compression, data.len() as u64, offset_in_extent)
+                    }
+                    BtrfsExtentData::Regular {
+                        compression,
+                        disk_bytenr,
+                        disk_num_bytes,
+                        extent_offset,
+                        num_bytes,
+                        ..
+                    } => {
+                        if *disk_bytenr == 0 {
+                            // Hole - return zeros
+                            let len = (*num_bytes).min(max_len) as usize;
+                            (vec![0u8; len], 0, *num_bytes, file_offset - extent_start)
+                        } else {
+                            // Read raw extent data from disk
+                            let mapping = map_logical_to_physical(
+                                &self.btrfs_context().unwrap().chunks,
+                                *disk_bytenr,
+                            )
+                            .map_err(|e| FfsError::Parse(format!("{e}")))?
+                            .ok_or_else(|| {
+                                FfsError::Format("extent not covered by chunk".into())
+                            })?;
+                            let read_len =
+                                (*disk_num_bytes).min(max_len) as usize;
+                            let mut buf = vec![0u8; read_len];
+                            self.dev.read_exact_at(cx, ByteOffset(mapping.physical), &mut buf)?;
+                            let offset_in_extent =
+                                file_offset.saturating_sub(extent_start) + *extent_offset;
+                            (buf, *compression, *num_bytes, offset_in_extent)
+                        }
+                    }
+                };
+
+                // Build output: 32-byte metadata header + encoded data
+                // len(8) + unencoded_len(8) + unencoded_offset(8) + compression(4) + encryption(4)
+                let actual_len = encoded_data.len().min(max_len as usize);
+                let mut result = Vec::with_capacity(32 + actual_len);
+                result.extend_from_slice(&(actual_len as u64).to_le_bytes()); // len
+                result.extend_from_slice(&unencoded_len.to_le_bytes()); // unencoded_len
+                result.extend_from_slice(&unencoded_offset.to_le_bytes()); // unencoded_offset
+                result.extend_from_slice(&(compression as u32).to_le_bytes()); // compression
+                result.extend_from_slice(&0_u32.to_le_bytes()); // encryption (always 0)
+                result.extend_from_slice(&encoded_data[..actual_len]);
+
+                Ok(result)
             }
         }
     }
@@ -22085,12 +22243,56 @@ impl FsOps for OpenFs {
             info!(flushed_blocks = flushed, "flush_on_destroy");
         }
 
-        // btrfs commit-on-destroy: flush dirty COW trees to disk.
-        // bd-3umpe fixed: ROOT_TREE is now properly committed and superblock.root
-        // points to ROOT_TREE (not FS_TREE), enabling clean remount.
-        if self.btrfs_alloc_state.is_some() {
-            if let Err(e) = self.btrfs_full_transaction_commit(cx, "flush_on_destroy") {
-                warn!(error = %e, "btrfs commit-on-destroy failed");
+        // btrfs commit-on-destroy: flush dirty COW trees to disk so
+        // mutations performed through the mounted FUSE path survive
+        // unmount/remount. The full transaction commit allocates real
+        // chunk-covered logical addresses for each node, rewrites internal
+        // blockptrs to those addresses, translates them through
+        // `map_logical_to_physical` for the device write, patches the
+        // FS_TREE ROOT_ITEM in root_tree, and finally writes a new
+        // superblock pointing at the root_tree's allocated logical address.
+        // (bd-jdo53 / bd-1ving.)
+        if matches!(self.flavor, FsFlavor::Btrfs(_)) && self.btrfs_alloc_state.is_some() {
+            let operation_id = format!(
+                "destroy-{:016x}",
+                std::ptr::addr_of!(*self) as usize as u64
+            );
+            info!(
+                target: "ffs::btrfs::rw",
+                operation_id = %operation_id,
+                scenario_id = "btrfs_rw_destroy",
+                outcome = "start",
+                durability_boundary = "destroy",
+                "btrfs_destroy_commit_start"
+            );
+            match self.btrfs_full_transaction_commit(cx, &operation_id) {
+                Ok(stats) => {
+                    info!(
+                        target: "ffs::btrfs::rw",
+                        operation_id = %operation_id,
+                        scenario_id = "btrfs_rw_destroy",
+                        outcome = "applied",
+                        nodes_written = stats.nodes_written,
+                        bytes_written = stats.bytes_written,
+                        new_generation = stats.new_generation,
+                        fsync_barrier_issued = stats.fsync_barrier_issued,
+                        durability_boundary = "destroy",
+                        "btrfs_destroy_commit_applied"
+                    );
+                }
+                Err(e) => {
+                    warn!(
+                        target: "ffs::btrfs::rw",
+                        operation_id = %operation_id,
+                        scenario_id = "btrfs_rw_destroy",
+                        outcome = "rejected",
+                        error_class = "destroy_commit_failed",
+                        error = %e,
+                        durability_boundary = "destroy",
+                        "btrfs_destroy_commit_rejected"
+                    );
+                    return Err(e);
+                }
             }
         }
 
