@@ -118,6 +118,7 @@ fn build_inode_item(cursor: &mut ByteCursor<'_>) -> BtrfsInodeItem {
         gid: cursor.next_u32(),
         mode: cursor.next_u32(),
         rdev: cursor.next_u64(),
+        flags: cursor.next_u64(),
         atime_sec: cursor.next_u64(),
         atime_nsec: next_nsec(cursor),
         ctime_sec: cursor.next_u64(),

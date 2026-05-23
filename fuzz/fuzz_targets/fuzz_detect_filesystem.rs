@@ -378,7 +378,7 @@ fuzz_target!(|data: &[u8]| {
         Ok(FsFlavor::Ext4(superblock)) => {
             assert_eq!(
                 ext4_first.as_ref(),
-                Ok(&superblock),
+                Ok(&*superblock),
                 "inspect_image ext4 classifications must carry the same superblock as parse_ext4"
             );
         }
@@ -389,7 +389,7 @@ fuzz_target!(|data: &[u8]| {
             );
             assert_eq!(
                 btrfs_first.as_ref(),
-                Ok(&superblock),
+                Ok(&*superblock),
                 "inspect_image btrfs classifications must carry the same superblock as parse_btrfs"
             );
         }
