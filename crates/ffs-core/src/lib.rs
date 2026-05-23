@@ -44156,6 +44156,66 @@ mod tests {
         assert_eq!(percentile_value(&sorted, 0.99), 99);
     }
 
+    // ── WritebackWorkload unit tests ─────────────────────────────────────
+
+    #[test]
+    fn writeback_workload_all_variants_covered() {
+        assert_eq!(WritebackWorkload::ALL.len(), 4);
+        let names: Vec<_> = WritebackWorkload::ALL.iter().map(|w| w.name()).collect();
+        assert!(names.contains(&"small_writes_4k"));
+        assert!(names.contains(&"sequential_large_100mb"));
+        assert!(names.contains(&"random_writes_4k"));
+        assert!(names.contains(&"mixed_rw_80_20"));
+    }
+
+    #[test]
+    fn writeback_workload_operation_counts_positive() {
+        for workload in WritebackWorkload::ALL {
+            assert!(workload.operation_count() > 0, "{} has zero ops", workload.name());
+            assert!(workload.write_count() > 0, "{} has zero writes", workload.name());
+            assert!(
+                workload.write_count() <= workload.operation_count(),
+                "{} has more writes than ops",
+                workload.name()
+            );
+        }
+    }
+
+    #[test]
+    fn writeback_workload_mixed_rw_has_fewer_writes() {
+        let mixed = WritebackWorkload::MixedReadWrite;
+        assert!(mixed.write_count() < mixed.operation_count());
+    }
+
+    #[test]
+    fn writeback_comparison_throughput_ratio() {
+        let baseline = WritebackBenchmarkResult {
+            workload: WritebackWorkload::SmallWrites,
+            writeback_enabled: false,
+            total_duration_us: 1000,
+            latency_p50_us: 10,
+            latency_p95_us: 20,
+            latency_p99_us: 30,
+            operations: 100,
+            epoch_transitions: 0,
+            fsync_barriers: 0,
+        };
+        let writeback = WritebackBenchmarkResult {
+            workload: WritebackWorkload::SmallWrites,
+            writeback_enabled: true,
+            total_duration_us: 500,
+            latency_p50_us: 5,
+            latency_p95_us: 10,
+            latency_p99_us: 15,
+            operations: 100,
+            epoch_transitions: 10,
+            fsync_barriers: 10,
+        };
+        let cmp = WritebackComparison::compare(baseline, writeback);
+        assert!((cmp.throughput_ratio - 2.0).abs() < 0.001);
+        assert!((cmp.latency_p50_ratio - 0.5).abs() < 0.001);
+    }
+
     // ── Crash consistency matrix for writeback epoch barrier ─────────────
     //
     // Each scenario simulates a crash at a specific point in the writeback
