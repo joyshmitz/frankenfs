@@ -15286,6 +15286,103 @@ impl OpenFs {
         Ok(self.btrfs_inode_to_attr(new_oid, &inode))
     }
 
+    /// Create a device node, FIFO, or socket in a btrfs filesystem.
+    #[allow(clippy::too_many_arguments)]
+    fn btrfs_mknod(
+        &self,
+        _cx: &Cx,
+        parent: InodeNumber,
+        name: &[u8],
+        mode: u16,
+        rdev: u32,
+        uid: u32,
+        gid: u32,
+    ) -> ffs_error::Result<InodeAttr> {
+        self.require_btrfs_rw_allowed("mknod")?;
+        let alloc_mutex = self.require_btrfs_alloc_state()?;
+        let parent_oid = self.btrfs_canonical_inode(parent)?;
+        let (secs, nanos) = Self::btrfs_now_timestamp();
+
+        Self::validate_single_path_component(name)?;
+
+        let s_ifmt = mode & ffs_types::S_IFMT;
+        let (btrfs_ft, accepts_rdev) = match s_ifmt {
+            ffs_types::S_IFCHR => (ffs_btrfs::BTRFS_FT_CHRDEV, true),
+            ffs_types::S_IFBLK => (ffs_btrfs::BTRFS_FT_BLKDEV, true),
+            ffs_types::S_IFIFO => (ffs_btrfs::BTRFS_FT_FIFO, false),
+            ffs_types::S_IFSOCK => (ffs_btrfs::BTRFS_FT_SOCK, false),
+            _ => {
+                return Err(FfsError::Io(std::io::Error::from_raw_os_error(
+                    libc::EINVAL,
+                )));
+            }
+        };
+        if !accepts_rdev && rdev != 0 {
+            return Err(FfsError::Io(std::io::Error::from_raw_os_error(
+                libc::EINVAL,
+            )));
+        }
+
+        let mut alloc = alloc_mutex.lock();
+        self.btrfs_require_directory_inode(&alloc, parent_oid)?;
+        Self::btrfs_preflight_dir_entry_insert(&alloc, parent_oid, name, alloc.next_objectid)?;
+
+        if self
+            .btrfs_lookup_dir_entry(&alloc, parent_oid, name)
+            .is_ok()
+        {
+            return Err(FfsError::Exists);
+        }
+
+        let new_oid = alloc.next_objectid;
+        alloc.next_objectid = alloc.next_objectid.saturating_add(1);
+
+        let inode = BtrfsInodeItem {
+            generation: alloc.generation,
+            size: 0,
+            nbytes: 0,
+            nlink: 1,
+            uid,
+            gid,
+            mode: u32::from(mode),
+            rdev: u64::from(rdev),
+            flags: 0,
+            atime_sec: secs,
+            atime_nsec: nanos,
+            ctime_sec: secs,
+            ctime_nsec: nanos,
+            mtime_sec: secs,
+            mtime_nsec: nanos,
+            otime_sec: secs,
+            otime_nsec: nanos,
+        };
+        let inode_key = BtrfsKey {
+            objectid: new_oid,
+            item_type: BTRFS_ITEM_INODE_ITEM,
+            offset: 0,
+        };
+        alloc
+            .fs_tree
+            .insert(inode_key, &inode.to_bytes())
+            .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+
+        let dir_item = BtrfsDirItem {
+            child_objectid: new_oid,
+            child_key_type: BTRFS_ITEM_INODE_ITEM,
+            child_key_offset: 0,
+            file_type: btrfs_ft,
+            name: name.to_vec(),
+        };
+        self.btrfs_insert_dir_entry(&mut alloc, parent_oid, &dir_item)?;
+
+        Self::btrfs_insert_inode_ref(&mut alloc, new_oid, parent_oid, name, new_oid)?;
+
+        self.btrfs_touch_inode_times(&mut alloc, parent_oid, secs, nanos)?;
+        drop(alloc);
+
+        Ok(self.btrfs_inode_to_attr(new_oid, &inode))
+    }
+
     /// Unlink a file or directory from a btrfs filesystem.
     fn btrfs_unlink_impl(
         &self,
@@ -19690,9 +19787,10 @@ impl FsOps for OpenFs {
                     gid,
                 )
                 .map(Self::ext4_present_attr),
-            FsFlavor::Btrfs(_) => Err(FfsError::Io(std::io::Error::from_raw_os_error(
-                libc::ENOTSUP,
-            ))),
+            FsFlavor::Btrfs(_) => {
+                self.check_btrfs_mutation_allowed("mknod")?;
+                self.btrfs_mknod(cx, parent, name.as_encoded_bytes(), mode, rdev, uid, gid)
+            }
         }
     }
 
@@ -40912,6 +41010,184 @@ mod tests {
             matches!(err, FfsError::Exists),
             "expected Exists, got {err:?}"
         );
+    }
+
+    #[test]
+    fn btrfs_mknod_fifo_creates_named_pipe() {
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+        let root = InodeNumber(1);
+
+        let attr = ops
+            .mknod(
+                &cx,
+                &mut RequestScope::empty(),
+                root,
+                OsStr::new("my_fifo"),
+                ffs_types::S_IFIFO | 0o644,
+                0,
+                1000,
+                1000,
+            )
+            .expect("mknod FIFO should succeed");
+
+        assert_eq!(attr.kind, FileType::Fifo);
+        assert_eq!(attr.nlink, 1);
+        assert_eq!(attr.uid, 1000);
+        assert_eq!(attr.gid, 1000);
+    }
+
+    #[test]
+    fn btrfs_mknod_socket_creates_unix_socket() {
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+        let root = InodeNumber(1);
+
+        let attr = ops
+            .mknod(
+                &cx,
+                &mut RequestScope::empty(),
+                root,
+                OsStr::new("my_sock"),
+                ffs_types::S_IFSOCK | 0o755,
+                0,
+                0,
+                0,
+            )
+            .expect("mknod socket should succeed");
+
+        assert_eq!(attr.kind, FileType::Socket);
+        assert_eq!(attr.nlink, 1);
+    }
+
+    #[test]
+    fn btrfs_mknod_chrdev_stores_rdev() {
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+        let root = InodeNumber(1);
+
+        // makedev(1, 3) for /dev/null: major 1 in bits[15:8], minor 3 in bits[7:0]
+        let rdev = (1_u32 << 8) | 3;
+        let attr = ops
+            .mknod(
+                &cx,
+                &mut RequestScope::empty(),
+                root,
+                OsStr::new("null"),
+                ffs_types::S_IFCHR | 0o666,
+                rdev,
+                0,
+                0,
+            )
+            .expect("mknod char device should succeed");
+
+        assert_eq!(attr.kind, FileType::CharDevice);
+        assert_eq!(attr.rdev, rdev);
+        assert_eq!(attr.nlink, 1);
+    }
+
+    #[test]
+    fn btrfs_mknod_blkdev_stores_rdev() {
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+        let root = InodeNumber(1);
+
+        // makedev(8, 0) for /dev/sda: major 8 in bits[15:8], minor 0 in bits[7:0]
+        let rdev = (8_u32 << 8) | 0;
+        let attr = ops
+            .mknod(
+                &cx,
+                &mut RequestScope::empty(),
+                root,
+                OsStr::new("sda"),
+                ffs_types::S_IFBLK | 0o660,
+                rdev,
+                0,
+                0,
+            )
+            .expect("mknod block device should succeed");
+
+        assert_eq!(attr.kind, FileType::BlockDevice);
+        assert_eq!(attr.rdev, rdev);
+        assert_eq!(attr.nlink, 1);
+    }
+
+    #[test]
+    fn btrfs_mknod_duplicate_name_returns_eexist() {
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+        let root = InodeNumber(1);
+
+        ops.mknod(
+            &cx,
+            &mut RequestScope::empty(),
+            root,
+            OsStr::new("fifo1"),
+            ffs_types::S_IFIFO | 0o644,
+            0,
+            0,
+            0,
+        )
+        .expect("first mknod");
+
+        let err = ops
+            .mknod(
+                &cx,
+                &mut RequestScope::empty(),
+                root,
+                OsStr::new("fifo1"),
+                ffs_types::S_IFIFO | 0o644,
+                0,
+                0,
+                0,
+            )
+            .expect_err("duplicate mknod should fail");
+        assert!(
+            matches!(err, FfsError::Exists),
+            "expected Exists, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn btrfs_mknod_fifo_with_nonzero_rdev_returns_einval() {
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+        let root = InodeNumber(1);
+
+        let err = ops
+            .mknod(
+                &cx,
+                &mut RequestScope::empty(),
+                root,
+                OsStr::new("bad_fifo"),
+                ffs_types::S_IFIFO | 0o644,
+                123, // FIFOs should have rdev=0
+                0,
+                0,
+            )
+            .expect_err("FIFO with nonzero rdev should fail");
+        assert_eq!(err.to_errno(), libc::EINVAL);
+    }
+
+    #[test]
+    fn btrfs_mknod_regular_file_type_returns_einval() {
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+        let root = InodeNumber(1);
+
+        let err = ops
+            .mknod(
+                &cx,
+                &mut RequestScope::empty(),
+                root,
+                OsStr::new("not_a_file"),
+                ffs_types::S_IFREG | 0o644, // Regular files go through create()
+                0,
+                0,
+                0,
+            )
+            .expect_err("mknod with S_IFREG should fail");
+        assert_eq!(err.to_errno(), libc::EINVAL);
     }
 
     #[test]
