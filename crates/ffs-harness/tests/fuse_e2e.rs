@@ -24,7 +24,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
@@ -15631,4 +15631,168 @@ fn btrfs_fuse_mount_default_root_shows_subvolumes_as_directories() {
         "PASS",
         Some("default root shows subvolumes as directories"),
     );
+}
+
+// ── bd-745yr: btrfs mknod E2E coverage ─────────────────────────────────────
+
+#[test]
+fn fuse_btrfs_mknod_fifo_creates_named_pipe() {
+    use nix::sys::stat::{Mode, SFlag, mknod};
+
+    with_btrfs_rw_mount(|mnt| {
+        let fifo_path = mnt.join("test_fifo");
+
+        mknod(
+            &fifo_path,
+            SFlag::S_IFIFO,
+            Mode::from_bits_truncate(0o644),
+            0,
+        )
+        .expect("mknod FIFO should succeed");
+
+        let meta = fs::symlink_metadata(&fifo_path).expect("stat FIFO");
+        assert!(
+            meta.file_type().is_fifo(),
+            "created file should be a FIFO, got {:?}",
+            meta.file_type()
+        );
+
+        emit_scenario_result(
+            "btrfs_rw_mknod_fifo",
+            "PASS",
+            Some("FIFO created successfully via mounted btrfs"),
+        );
+    });
+}
+
+#[test]
+fn fuse_btrfs_mknod_socket_creates_unix_socket() {
+    use nix::sys::stat::{Mode, SFlag, mknod};
+
+    with_btrfs_rw_mount(|mnt| {
+        let sock_path = mnt.join("test_socket");
+
+        mknod(
+            &sock_path,
+            SFlag::S_IFSOCK,
+            Mode::from_bits_truncate(0o755),
+            0,
+        )
+        .expect("mknod socket should succeed");
+
+        let meta = fs::symlink_metadata(&sock_path).expect("stat socket");
+        assert!(
+            meta.file_type().is_socket(),
+            "created file should be a socket, got {:?}",
+            meta.file_type()
+        );
+
+        emit_scenario_result(
+            "btrfs_rw_mknod_socket",
+            "PASS",
+            Some("Unix socket created successfully via mounted btrfs"),
+        );
+    });
+}
+
+#[test]
+fn fuse_btrfs_mknod_duplicate_name_returns_eexist() {
+    use nix::sys::stat::{Mode, SFlag, mknod};
+
+    with_btrfs_rw_mount(|mnt| {
+        let fifo_path = mnt.join("dup_fifo");
+
+        mknod(
+            &fifo_path,
+            SFlag::S_IFIFO,
+            Mode::from_bits_truncate(0o644),
+            0,
+        )
+        .expect("first mknod should succeed");
+
+        let result = mknod(
+            &fifo_path,
+            SFlag::S_IFIFO,
+            Mode::from_bits_truncate(0o644),
+            0,
+        );
+        assert!(result.is_err(), "duplicate mknod should fail");
+
+        let err = result.unwrap_err();
+        assert_eq!(
+            err,
+            nix::errno::Errno::EEXIST,
+            "duplicate mknod should return EEXIST, got {err:?}"
+        );
+
+        emit_scenario_result(
+            "btrfs_rw_mknod_duplicate_eexist",
+            "PASS",
+            Some("duplicate mknod correctly returns EEXIST"),
+        );
+    });
+}
+
+#[test]
+#[ignore = "requires CAP_MKNOD/root for device creation"]
+fn fuse_btrfs_mknod_chardev_stores_rdev() {
+    use nix::sys::stat::{Mode, SFlag, makedev, mknod};
+
+    with_btrfs_rw_mount(|mnt| {
+        let dev_path = mnt.join("null_clone");
+
+        // /dev/null is major 1, minor 3
+        let rdev = makedev(1, 3);
+        mknod(
+            &dev_path,
+            SFlag::S_IFCHR,
+            Mode::from_bits_truncate(0o666),
+            rdev,
+        )
+        .expect("mknod char device should succeed");
+
+        let meta = fs::symlink_metadata(&dev_path).expect("stat char device");
+        assert!(
+            meta.file_type().is_char_device(),
+            "created file should be a char device"
+        );
+
+        emit_scenario_result(
+            "btrfs_rw_mknod_chardev",
+            "PASS",
+            Some("char device created successfully via mounted btrfs"),
+        );
+    });
+}
+
+#[test]
+#[ignore = "requires CAP_MKNOD/root for device creation"]
+fn fuse_btrfs_mknod_blockdev_stores_rdev() {
+    use nix::sys::stat::{Mode, SFlag, makedev, mknod};
+
+    with_btrfs_rw_mount(|mnt| {
+        let dev_path = mnt.join("sda_clone");
+
+        // /dev/sda is major 8, minor 0
+        let rdev = makedev(8, 0);
+        mknod(
+            &dev_path,
+            SFlag::S_IFBLK,
+            Mode::from_bits_truncate(0o660),
+            rdev,
+        )
+        .expect("mknod block device should succeed");
+
+        let meta = fs::symlink_metadata(&dev_path).expect("stat block device");
+        assert!(
+            meta.file_type().is_block_device(),
+            "created file should be a block device"
+        );
+
+        emit_scenario_result(
+            "btrfs_rw_mknod_blockdev",
+            "PASS",
+            Some("block device created successfully via mounted btrfs"),
+        );
+    });
 }

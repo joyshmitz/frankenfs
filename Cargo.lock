@@ -877,6 +877,7 @@ dependencies = [
  "insta",
  "libc",
  "lzokay-native",
+ "nix 0.29.0",
  "parking_lot",
  "proptest",
  "serde",
