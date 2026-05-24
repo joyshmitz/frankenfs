@@ -1901,11 +1901,14 @@ pub trait FsOps: Send + Sync {
     /// Send subvolume for `BTRFS_IOC_SEND`.
     ///
     /// Implements btrfs send protocol for incremental/full sends.
+    /// `caller_pid` is the PID of the calling process, used to resolve
+    /// the `send_fd` via `/proc/<pid>/fd/<fd>`.
     fn btrfs_send(
         &self,
         _cx: &Cx,
         _scope: &mut RequestScope,
         _args: &[u8],
+        _caller_pid: u32,
     ) -> ffs_error::Result<()> {
         Err(FfsError::UnsupportedFeature(
             "btrfs_send is not supported by this backend".to_owned(),

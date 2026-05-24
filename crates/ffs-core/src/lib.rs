@@ -42,7 +42,7 @@ use ffs_btrfs::{
     BtrfsExtentAllocator, BtrfsExtentData, BtrfsInodeItem, BtrfsKey, BtrfsLeafEntry,
     BtrfsMutationError, BtrfsNodeSerializeParams, BtrfsRootItem, BtrfsTreeItem,
     InMemoryCowBtrfsTree, btrfs_inode_flags_to_fsflags, btrfs_inode_flags_to_xflags,
-    enumerate_snapshots, enumerate_subvolumes, fsflags_to_btrfs_inode_flags,
+    enumerate_snapshots, enumerate_subvolumes, fsflags_to_btrfs_inode_flags, generate_send_stream,
     map_logical_to_physical, parse_dir_items, parse_extent_data, parse_inode_item, parse_root_item,
     parse_xattr_items, walk_chunk_tree, walk_tree,
     writeback::{DiskWritebackContext, WriteDependencyDag, WritebackExecutor},
@@ -21376,15 +21376,16 @@ impl FsOps for OpenFs {
 
     fn btrfs_send(
         &self,
-        _cx: &Cx,
+        cx: &Cx,
         _scope: &mut RequestScope,
         args: &[u8],
+        caller_pid: u32,
     ) -> ffs_error::Result<()> {
         match &self.flavor {
             FsFlavor::Ext4(_) => Err(FfsError::UnsupportedFeature(
                 "BTRFS_IOC_SEND is not supported on ext4 filesystems".to_owned(),
             )),
-            FsFlavor::Btrfs(_) => {
+            FsFlavor::Btrfs(sb) => {
                 // Parse btrfs_ioctl_send_args:
                 //   __s64 send_fd           (0-7)
                 //   __u64 clone_sources_count (8-15)
@@ -21396,7 +21397,7 @@ impl FsOps for OpenFs {
                 if args.len() < 72 {
                     return Err(FfsError::Format("BTRFS_IOC_SEND args too short".to_owned()));
                 }
-                let _send_fd = i64::from_le_bytes(args[0..8].try_into().unwrap());
+                let send_fd = i64::from_le_bytes(args[0..8].try_into().unwrap());
                 let clone_sources_count = u64::from_le_bytes(args[8..16].try_into().unwrap());
                 let parent_root = u64::from_le_bytes(args[24..32].try_into().unwrap());
                 let _flags = u64::from_le_bytes(args[32..40].try_into().unwrap());
@@ -21414,13 +21415,80 @@ impl FsOps for OpenFs {
                     ));
                 }
 
-                // Full send stream generation infrastructure exists (SendStreamBuilder)
-                // but requires walking the entire FS tree and writing to send_fd.
-                // The fd from userspace is not directly usable in FUSE context.
-                Err(FfsError::UnsupportedFeature(
-                    "BTRFS_IOC_SEND: full send tree walk not yet implemented (use btrfs-progs on host)"
-                        .to_owned(),
-                ))
+                // Validate send_fd
+                if send_fd < 0 {
+                    return Err(FfsError::Io(std::io::Error::from_raw_os_error(libc::EBADF)));
+                }
+
+                // Resolve the send_fd via /proc/<pid>/fd/<fd>
+                let proc_fd_path =
+                    std::path::PathBuf::from(format!("/proc/{caller_pid}/fd/{send_fd}"));
+                let mut output_file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(&proc_fd_path)
+                    .map_err(|e| {
+                        if e.kind() == std::io::ErrorKind::NotFound {
+                            FfsError::Io(std::io::Error::from_raw_os_error(libc::EBADF))
+                        } else {
+                            FfsError::Io(e)
+                        }
+                    })?;
+
+                // Get the mounted subvolume info from BtrfsContext
+                let ctx = self
+                    .btrfs_context()
+                    .ok_or_else(|| FfsError::Format("btrfs context not available".to_owned()))?;
+                let subvol_objectid = ctx.subvol_objectid;
+                let subvol_name = format!("subvol_{subvol_objectid}");
+                let subvol_uuid = sb.fsid;
+                let ctransid = sb.generation;
+
+                // Walk the FS tree to collect all items
+                let fs_tree_items = self.walk_btrfs_fs_tree(cx)?;
+
+                // Generate the send stream
+                let ctx_for_chunks = self
+                    .btrfs_context()
+                    .ok_or_else(|| FfsError::Format("btrfs context not available".to_owned()))?;
+                let chunks = &ctx_for_chunks.chunks;
+                let block_dev = self.device();
+                let stream = generate_send_stream(
+                    &fs_tree_items,
+                    subvol_name.as_bytes(),
+                    &subvol_uuid,
+                    ctransid,
+                    |offset, len| {
+                        // Read extent data from the block device
+                        let mapping = map_logical_to_physical(chunks, offset)
+                            .map_err(|_| ffs_types::ParseError::InvalidField {
+                                field: "logical_offset",
+                                reason: "chunk map parse failed",
+                            })?
+                            .ok_or(ffs_types::ParseError::InvalidField {
+                                field: "logical_offset",
+                                reason: "not mapped in chunk array",
+                            })?;
+                        let buf_len = usize::try_from(len).map_err(|_| {
+                            ffs_types::ParseError::IntegerConversion {
+                                field: "extent_length",
+                            }
+                        })?;
+                        let mut buf = vec![0u8; buf_len];
+                        block_dev
+                            .read_exact_at(cx, ByteOffset(mapping.physical), &mut buf)
+                            .map_err(|_| ffs_types::ParseError::InvalidField {
+                                field: "extent_data",
+                                reason: "block read failed",
+                            })?;
+                        Ok(buf)
+                    },
+                )
+                .map_err(|e| FfsError::Format(format!("generate_send_stream: {e}")))?;
+
+                // Write the stream to the output fd
+                std::io::Write::write_all(&mut output_file, &stream).map_err(FfsError::Io)?;
+
+                Ok(())
             }
         }
     }
