@@ -20995,11 +20995,11 @@ impl FsOps for OpenFs {
             FsFlavor::Ext4(_) => Err(FfsError::UnsupportedFeature(
                 "BTRFS_IOC_SCRUB is not supported on ext4 filesystems".to_owned(),
             )),
-            // Scrub via ioctl requires async task infrastructure to run the scrub
-            // daemon in the background. The ffs-repair crate has ScrubDaemon which
-            // can verify checksums and attempt recovery, but it runs synchronously.
-            // Wiring to async task runner is deferred (P3 enhancement).
-            // For now, return empty progress struct indicating no scrub running.
+            // V1.x: ioctl-based scrub is not implemented. The kernel btrfs scrub
+            // reads every block which can take hours on large filesystems.
+            // FrankenFS provides scrub/recovery via `ffs repair` command instead.
+            // Return empty progress struct = no ioctl-based scrub running (correct).
+            // See bd-f37vs for rationale (closed as wont_fix).
             FsFlavor::Btrfs(_) => Ok(vec![0_u8; 1024]),
         }
     }
