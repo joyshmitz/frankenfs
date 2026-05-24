@@ -7497,16 +7497,17 @@ mod tests {
         MountBackgroundScrubMode, MountBackgroundScrubRequest, MountCmdOptions, MountConsoleConfig,
         MountMode, MountRuntimeConfig, MountRuntimeMode, MountWritebackCacheConfig,
         RepairCommandOptions, RepairFlags, WRITEBACK_CACHE_KILL_SWITCH_ENV,
-        btrfs_chunk_type_flag_names, build_ext4_group_info, build_fsck_output, build_info_output,
-        build_mount_open_options, choose_btrfs_scrub_block_size, count_blocks_at_severity_or_higher,
+        btrfs_checksum_type_name, btrfs_chunk_type_flag_names, build_ext4_group_info,
+        build_fsck_output, build_info_output, build_mount_open_options,
+        choose_btrfs_scrub_block_size, count_blocks_at_severity_or_higher,
         ext4_appears_clean_state, ext4_group_flag_names, ext4_group_scrub_scope,
-        ext4_recovery_detail, ext4_state_flag_names, ext4_mount_replay_mode, filesystem_name,
-        format_ext4_quota_inodes, format_ratio_thousandths, format_uuid, btrfs_checksum_type_name,
-        log_mount_runtime_rejected,
-        log_mount_runtime_selected, mount_cmd, mount_operation_id, open_filesystem_for_mount,
-        parse_btrfs_mount_selection, read_ext4_group_desc_from_path, read_ext4_inode_from_path,
-        read_file_region, start_mount_background_scrub, summarize_repair_staleness,
-        unavailable_repair_info, validate_mount_adaptive_runtime_request_with_config,
+        ext4_mount_replay_mode, ext4_recovery_detail, ext4_state_flag_names, filesystem_name,
+        format_ext4_quota_inodes, format_ratio_thousandths, format_uuid,
+        log_mount_runtime_rejected, log_mount_runtime_selected, mount_cmd, mount_operation_id,
+        open_filesystem_for_mount, parse_btrfs_mount_selection, read_ext4_group_desc_from_path,
+        read_ext4_inode_from_path, read_file_region, start_mount_background_scrub,
+        summarize_repair_staleness, unavailable_repair_info,
+        validate_mount_adaptive_runtime_request_with_config,
         validate_mount_writeback_cache_request,
     };
     use crate::cmd_evidence::{
@@ -15000,7 +15001,10 @@ mod tests {
 
     #[test]
     fn btrfs_checksum_type_name_crc32c() {
-        assert_eq!(btrfs_checksum_type_name(ffs_types::BTRFS_CSUM_TYPE_CRC32C), "crc32c");
+        assert_eq!(
+            btrfs_checksum_type_name(ffs_types::BTRFS_CSUM_TYPE_CRC32C),
+            "crc32c"
+        );
     }
 
     #[test]
@@ -15013,31 +15017,22 @@ mod tests {
     #[test]
     fn format_uuid_all_zeros() {
         let uuid = [0u8; 16];
-        assert_eq!(
-            format_uuid(&uuid),
-            "00000000-0000-0000-0000-000000000000"
-        );
+        assert_eq!(format_uuid(&uuid), "00000000-0000-0000-0000-000000000000");
     }
 
     #[test]
     fn format_uuid_all_ff() {
         let uuid = [0xffu8; 16];
-        assert_eq!(
-            format_uuid(&uuid),
-            "ffffffff-ffff-ffff-ffff-ffffffffffff"
-        );
+        assert_eq!(format_uuid(&uuid), "ffffffff-ffff-ffff-ffff-ffffffffffff");
     }
 
     #[test]
     fn format_uuid_typical() {
         let uuid = [
-            0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0,
-            0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
+            0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66,
+            0x77, 0x88,
         ];
-        assert_eq!(
-            format_uuid(&uuid),
-            "12345678-9abc-def0-1122-334455667788"
-        );
+        assert_eq!(format_uuid(&uuid), "12345678-9abc-def0-1122-334455667788");
     }
 
     // ── filesystem_name: fs flavor to display string ──────────────────────
@@ -15241,8 +15236,14 @@ mod tests {
             blocks_corrupt: 0,
             blocks_io_error: 0,
         };
-        assert_eq!(count_blocks_at_severity_or_higher(&report, Severity::Info), 0);
-        assert_eq!(count_blocks_at_severity_or_higher(&report, Severity::Error), 0);
+        assert_eq!(
+            count_blocks_at_severity_or_higher(&report, Severity::Info),
+            0
+        );
+        assert_eq!(
+            count_blocks_at_severity_or_higher(&report, Severity::Error),
+            0
+        );
     }
 
     #[test]
@@ -15267,7 +15268,10 @@ mod tests {
             blocks_io_error: 0,
         };
         // Two findings on same block should count as 1 block.
-        assert_eq!(count_blocks_at_severity_or_higher(&report, Severity::Error), 1);
+        assert_eq!(
+            count_blocks_at_severity_or_higher(&report, Severity::Error),
+            1
+        );
     }
 
     #[test]
@@ -15303,10 +15307,22 @@ mod tests {
             blocks_corrupt: 4,
             blocks_io_error: 0,
         };
-        assert_eq!(count_blocks_at_severity_or_higher(&report, Severity::Info), 4);
-        assert_eq!(count_blocks_at_severity_or_higher(&report, Severity::Warning), 3);
-        assert_eq!(count_blocks_at_severity_or_higher(&report, Severity::Error), 2);
-        assert_eq!(count_blocks_at_severity_or_higher(&report, Severity::Critical), 1);
+        assert_eq!(
+            count_blocks_at_severity_or_higher(&report, Severity::Info),
+            4
+        );
+        assert_eq!(
+            count_blocks_at_severity_or_higher(&report, Severity::Warning),
+            3
+        );
+        assert_eq!(
+            count_blocks_at_severity_or_higher(&report, Severity::Error),
+            2
+        );
+        assert_eq!(
+            count_blocks_at_severity_or_higher(&report, Severity::Critical),
+            1
+        );
     }
 
     // ── ext4_group_scrub_scope: block group geometry ─────────────────────

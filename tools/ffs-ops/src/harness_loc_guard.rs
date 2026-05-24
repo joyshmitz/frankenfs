@@ -283,13 +283,8 @@ fn parse_numstat(raw: &str) -> Vec<NumstatDelta> {
         .collect()
 }
 
-fn conformance_test_count_at_ref(
-    workspace_root: &Path,
-    git_ref: &str,
-    path: &str,
-) -> usize {
-    let blob = run_git(workspace_root, &["show", &format!("{git_ref}:{path}")])
-        .unwrap_or_default();
+fn conformance_test_count_at_ref(workspace_root: &Path, git_ref: &str, path: &str) -> usize {
+    let blob = run_git(workspace_root, &["show", &format!("{git_ref}:{path}")]).unwrap_or_default();
     count_non_ignored_tests(&blob)
 }
 

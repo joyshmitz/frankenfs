@@ -641,10 +641,7 @@ impl DiskWritebackContext {
             BtrfsCowNode::Leaf { .. } => (Vec::new(), Vec::new()),
             BtrfsCowNode::Internal { children, .. } => {
                 let gens = children.iter().map(|_| self.generation).collect();
-                let bytenrs = children
-                    .iter()
-                    .map(|c| self.block_to_bytenr(*c))
-                    .collect();
+                let bytenrs = children.iter().map(|c| self.block_to_bytenr(*c)).collect();
                 (gens, bytenrs)
             }
         };

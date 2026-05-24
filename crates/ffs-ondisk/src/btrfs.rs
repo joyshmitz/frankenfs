@@ -314,12 +314,7 @@ impl BtrfsSuperblock {
     /// Update an existing superblock blob in-place for a new commit.
     ///
     /// Patches root, root_level, generation, and recomputes checksum.
-    pub fn patch_commit(
-        data: &mut [u8],
-        root: u64,
-        root_level: u8,
-        generation: u64,
-    ) {
+    pub fn patch_commit(data: &mut [u8], root: u64, root_level: u8, generation: u64) {
         // root at 0x50
         data[0x50..0x58].copy_from_slice(&root.to_le_bytes());
         // root_level at 0xC6
@@ -1693,7 +1688,8 @@ mod tests {
         assert_eq!(serialized.len(), BTRFS_SUPER_INFO_SIZE);
 
         verify_superblock_checksum(&serialized).expect("checksum valid");
-        let parsed = BtrfsSuperblock::parse_superblock_region(&serialized).expect("roundtrip parse");
+        let parsed =
+            BtrfsSuperblock::parse_superblock_region(&serialized).expect("roundtrip parse");
         assert_eq!(parsed.fsid, sb.fsid);
         assert_eq!(parsed.generation, sb.generation);
         assert_eq!(parsed.root, sb.root);

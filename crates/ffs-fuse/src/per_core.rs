@@ -991,7 +991,10 @@ mod tests {
             steal_threshold: 0.0,
             ..Default::default()
         };
-        assert_eq!(cfg.normalized_steal_threshold(), PerCoreConfig::DEFAULT_STEAL_THRESHOLD);
+        assert_eq!(
+            cfg.normalized_steal_threshold(),
+            PerCoreConfig::DEFAULT_STEAL_THRESHOLD
+        );
     }
 
     #[test]
@@ -1001,7 +1004,10 @@ mod tests {
             steal_threshold: -1.0,
             ..Default::default()
         };
-        assert_eq!(cfg.normalized_steal_threshold(), PerCoreConfig::DEFAULT_STEAL_THRESHOLD);
+        assert_eq!(
+            cfg.normalized_steal_threshold(),
+            PerCoreConfig::DEFAULT_STEAL_THRESHOLD
+        );
     }
 
     #[test]
@@ -1011,7 +1017,10 @@ mod tests {
             steal_threshold: f64::NAN,
             ..Default::default()
         };
-        assert_eq!(cfg.normalized_steal_threshold(), PerCoreConfig::DEFAULT_STEAL_THRESHOLD);
+        assert_eq!(
+            cfg.normalized_steal_threshold(),
+            PerCoreConfig::DEFAULT_STEAL_THRESHOLD
+        );
     }
 
     #[test]
@@ -1021,7 +1030,10 @@ mod tests {
             steal_threshold: f64::INFINITY,
             ..Default::default()
         };
-        assert_eq!(cfg.normalized_steal_threshold(), PerCoreConfig::DEFAULT_STEAL_THRESHOLD);
+        assert_eq!(
+            cfg.normalized_steal_threshold(),
+            PerCoreConfig::DEFAULT_STEAL_THRESHOLD
+        );
     }
 
     #[test]
@@ -1031,7 +1043,10 @@ mod tests {
             steal_threshold: f64::NEG_INFINITY,
             ..Default::default()
         };
-        assert_eq!(cfg.normalized_steal_threshold(), PerCoreConfig::DEFAULT_STEAL_THRESHOLD);
+        assert_eq!(
+            cfg.normalized_steal_threshold(),
+            PerCoreConfig::DEFAULT_STEAL_THRESHOLD
+        );
     }
 
     // ── resolved_cores edge cases ───────────────────────────────────────────

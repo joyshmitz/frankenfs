@@ -448,7 +448,8 @@ fn validate_docs_status_drift_cmd(args: &[String]) -> Result<()> {
             other => bail!("unknown validate-docs-status-drift argument: {other}"),
         }
     }
-    config.generated_artifact_paths = generated_paths(out_path.as_deref(), summary_out_path.as_deref());
+    config.generated_artifact_paths =
+        generated_paths(out_path.as_deref(), summary_out_path.as_deref());
 
     let report = run_docs_status_drift(&config)?;
     let json = serde_json::to_string_pretty(&report)?;
@@ -1096,9 +1097,10 @@ fn write_text_file(path: &Path, text: &str) -> Result<()> {
 }
 
 fn current_unix_timestamp_label() -> String {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or_else(|_| "0".to_owned(), |duration| duration.as_secs().to_string())
+    SystemTime::now().duration_since(UNIX_EPOCH).map_or_else(
+        |_| "0".to_owned(),
+        |duration| duration.as_secs().to_string(),
+    )
 }
 
 fn open_ended_note_scanner_reproduction_command(

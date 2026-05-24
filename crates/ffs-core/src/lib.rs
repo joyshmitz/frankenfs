@@ -33,19 +33,20 @@ use ffs_block::{
 use ffs_btrfs::{
     BTRFS_BLOCK_GROUP_DATA, BTRFS_BLOCK_GROUP_METADATA, BTRFS_CHUNK_TREE_OBJECTID,
     BTRFS_EXTENT_TREE_OBJECTID, BTRFS_FILE_EXTENT_PREALLOC, BTRFS_FILE_EXTENT_REG,
-    BTRFS_FIRST_FREE_OBJECTID, BTRFS_FS_TREE_OBJECTID, BTRFS_FT_BLKDEV, BTRFS_FT_CHRDEV, BTRFS_FT_DIR, BTRFS_FT_FIFO,
-    BTRFS_FT_REG_FILE, BTRFS_FT_SOCK, BTRFS_FT_SYMLINK, BTRFS_ITEM_DIR_INDEX, BTRFS_ITEM_DIR_ITEM,
-    BTRFS_ITEM_EXTENT_DATA, BTRFS_ITEM_INODE_ITEM, BTRFS_ITEM_INODE_REF, BTRFS_ITEM_ROOT_ITEM,
-    BTRFS_ITEM_ROOT_REF, BTRFS_ITEM_XATTR_ITEM, BTRFS_ROOT_SUBVOL_RDONLY, BTRFS_ROOT_TREE_OBJECTID,
-    BTRFS_USER_SETTABLE_FSFLAGS, BTRFS_USER_SETTABLE_XFLAGS, BtrfsBTree, BtrfsBlockGroupItem,
-    BtrfsCowNode, BtrfsDirItem, BtrfsExtentAllocator, BtrfsExtentData, BtrfsInodeItem, BtrfsKey,
-    BtrfsLeafEntry, BtrfsMutationError, BtrfsNodeSerializeParams, BtrfsRootItem, BtrfsTreeItem,
-    InMemoryCowBtrfsTree, btrfs_inode_flags_to_fsflags,
-    btrfs_inode_flags_to_xflags, enumerate_snapshots, enumerate_subvolumes,
-    fsflags_to_btrfs_inode_flags, map_logical_to_physical, parse_dir_items, parse_extent_data,
-    parse_inode_item, parse_root_item, parse_xattr_items, walk_chunk_tree, walk_tree,
-    xflags_to_btrfs_inode_flags,
+    BTRFS_FIRST_FREE_OBJECTID, BTRFS_FS_TREE_OBJECTID, BTRFS_FT_BLKDEV, BTRFS_FT_CHRDEV,
+    BTRFS_FT_DIR, BTRFS_FT_FIFO, BTRFS_FT_REG_FILE, BTRFS_FT_SOCK, BTRFS_FT_SYMLINK,
+    BTRFS_ITEM_DIR_INDEX, BTRFS_ITEM_DIR_ITEM, BTRFS_ITEM_EXTENT_DATA, BTRFS_ITEM_INODE_ITEM,
+    BTRFS_ITEM_INODE_REF, BTRFS_ITEM_ROOT_ITEM, BTRFS_ITEM_ROOT_REF, BTRFS_ITEM_XATTR_ITEM,
+    BTRFS_ROOT_SUBVOL_RDONLY, BTRFS_ROOT_TREE_OBJECTID, BTRFS_USER_SETTABLE_FSFLAGS,
+    BTRFS_USER_SETTABLE_XFLAGS, BtrfsBTree, BtrfsBlockGroupItem, BtrfsCowNode, BtrfsDirItem,
+    BtrfsExtentAllocator, BtrfsExtentData, BtrfsInodeItem, BtrfsKey, BtrfsLeafEntry,
+    BtrfsMutationError, BtrfsNodeSerializeParams, BtrfsRootItem, BtrfsTreeItem,
+    InMemoryCowBtrfsTree, btrfs_inode_flags_to_fsflags, btrfs_inode_flags_to_xflags,
+    enumerate_snapshots, enumerate_subvolumes, fsflags_to_btrfs_inode_flags,
+    map_logical_to_physical, parse_dir_items, parse_extent_data, parse_inode_item, parse_root_item,
+    parse_xattr_items, walk_chunk_tree, walk_tree,
     writeback::{DiskWritebackContext, WriteDependencyDag, WritebackExecutor},
+    xflags_to_btrfs_inode_flags,
 };
 use ffs_error::FfsError;
 use ffs_journal::{
@@ -4701,9 +4702,11 @@ impl OpenFs {
         // create a fresh extent_tree containing only NEW allocations, losing
         // all existing extent accounting and causing `btrfs check` failures.
         #[expect(clippy::option_if_let_else)]
-        let extent_tree_items_loaded = if let Some(extent_root_entry) = root_items.iter().find(|e| {
-            e.key.objectid == BTRFS_EXTENT_TREE_OBJECTID && e.key.item_type == BTRFS_ITEM_ROOT_ITEM
-        }) {
+        let extent_tree_items_loaded = if let Some(extent_root_entry) =
+            root_items.iter().find(|e| {
+                e.key.objectid == BTRFS_EXTENT_TREE_OBJECTID
+                    && e.key.item_type == BTRFS_ITEM_ROOT_ITEM
+            }) {
             match parse_root_item(&extent_root_entry.data) {
                 Ok(root_item) if root_item.bytenr != 0 => {
                     match self.walk_btrfs_tree(cx, root_item.bytenr) {
@@ -8805,7 +8808,11 @@ impl OpenFs {
 
             if let Some(tx) = &mut scope.tx {
                 // Newly allocated block for compressed cluster: no concurrent txn writes expected.
-                tx.stage_write_with_proof(phys_block, block_data.to_vec(), MergeProof::DisjointBlocks);
+                tx.stage_write_with_proof(
+                    phys_block,
+                    block_data.to_vec(),
+                    MergeProof::DisjointBlocks,
+                );
             } else {
                 block_dev.write_block(cx, phys_block, block_data)?;
             }
@@ -14437,7 +14444,7 @@ impl OpenFs {
             FsFlavor::Ext4(_) => {
                 return Err(FfsError::UnsupportedFeature(
                     "btrfs writeback requires btrfs filesystem".into(),
-                ))
+                ));
             }
         };
 
@@ -14627,11 +14634,9 @@ impl OpenFs {
         // or data access, and `btrfs check` stays clean.
 
         // Build WriteDependencyDag for extent_tree
-        let extent_dag = WriteDependencyDag::from_cow_tree(
-            alloc.extent_alloc.extent_tree(),
-            new_gen,
-        )
-        .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+        let extent_dag =
+            WriteDependencyDag::from_cow_tree(alloc.extent_alloc.extent_tree(), new_gen)
+                .map_err(|e| btrfs_mutation_to_ffs(&e))?;
 
         // Pre-allocate logical addresses for extent_tree nodes.
         // Use alloc_metadata_for_extent_tree to avoid recursive EXTENT_ITEM
@@ -14664,11 +14669,8 @@ impl OpenFs {
         // Write extent_tree nodes
         let mut extent_executor = WritebackExecutor::new(extent_dag);
         let extent_flush_result = extent_executor.execute(|block, level| {
-            let serialized = extent_disk_ctx.serialize_node(
-                alloc.extent_alloc.extent_tree(),
-                block,
-                level,
-            )?;
+            let serialized =
+                extent_disk_ctx.serialize_node(alloc.extent_alloc.extent_tree(), block, level)?;
             let node_bytes = serialized.len() as u64;
             let logical = extent_disk_ctx.block_to_bytenr(block);
             let physical = resolve_physical(logical)?;
@@ -21150,9 +21152,7 @@ impl FsOps for OpenFs {
                         drop(alloc);
                         ext_items
                             .into_iter()
-                            .filter_map(|(k, v)| {
-                                parse_extent_data(&v).ok().map(|e| (k.offset, e))
-                            })
+                            .filter_map(|(k, v)| parse_extent_data(&v).ok().map(|e| (k.offset, e)))
                             .find(|(start, ext)| {
                                 let end = match ext {
                                     BtrfsExtentData::Inline { data, .. } => {
@@ -21190,8 +21190,8 @@ impl FsOps for OpenFs {
                             })
                     };
 
-                let (extent_start, extent) = extent_opt
-                    .ok_or_else(|| FfsError::NotFound("no extent at offset".into()))?;
+                let (extent_start, extent) =
+                    extent_opt.ok_or_else(|| FfsError::NotFound("no extent at offset".into()))?;
 
                 // Build response: encoded data + metadata
                 // Output format (after encoded data): metadata header
@@ -21201,7 +21201,12 @@ impl FsOps for OpenFs {
                         data, compression, ..
                     } => {
                         let offset_in_extent = file_offset.saturating_sub(extent_start);
-                        (data.clone(), *compression, data.len() as u64, offset_in_extent)
+                        (
+                            data.clone(),
+                            *compression,
+                            data.len() as u64,
+                            offset_in_extent,
+                        )
                     }
                     BtrfsExtentData::Regular {
                         compression,
@@ -21229,7 +21234,8 @@ impl FsOps for OpenFs {
                             #[expect(clippy::cast_possible_truncation)]
                             let read_len = (*disk_num_bytes).min(max_len) as usize;
                             let mut buf = vec![0u8; read_len];
-                            self.dev.read_exact_at(cx, ByteOffset(mapping.physical), &mut buf)?;
+                            self.dev
+                                .read_exact_at(cx, ByteOffset(mapping.physical), &mut buf)?;
                             let offset_in_extent =
                                 file_offset.saturating_sub(extent_start) + *extent_offset;
                             (buf, *compression, *num_bytes, offset_in_extent)
@@ -21388,9 +21394,7 @@ impl FsOps for OpenFs {
                 //   __u32 version           (40-43)
                 //   __u8 reserved[28]       (44-71)
                 if args.len() < 72 {
-                    return Err(FfsError::Format(
-                        "BTRFS_IOC_SEND args too short".to_owned(),
-                    ));
+                    return Err(FfsError::Format("BTRFS_IOC_SEND args too short".to_owned()));
                 }
                 let _send_fd = i64::from_le_bytes(args[0..8].try_into().unwrap());
                 let clone_sources_count = u64::from_le_bytes(args[8..16].try_into().unwrap());
@@ -21980,8 +21984,9 @@ impl FsOps for OpenFs {
                         ))
                     })?;
 
-                    BtrfsRootItem::patch_flags(&mut root_item_data, flags)
-                        .map_err(|e| FfsError::Parse(format!("ROOT_ITEM flags patch failed: {e}")))?;
+                    BtrfsRootItem::patch_flags(&mut root_item_data, flags).map_err(|e| {
+                        FfsError::Parse(format!("ROOT_ITEM flags patch failed: {e}"))
+                    })?;
 
                     alloc
                         .root_tree
@@ -22650,10 +22655,8 @@ impl FsOps for OpenFs {
         // superblock pointing at the root_tree's allocated logical address.
         // (bd-jdo53 / bd-1ving.)
         if matches!(self.flavor, FsFlavor::Btrfs(_)) && self.btrfs_alloc_state.is_some() {
-            let operation_id = format!(
-                "destroy-{:016x}",
-                std::ptr::addr_of!(*self) as usize as u64
-            );
+            let operation_id =
+                format!("destroy-{:016x}", std::ptr::addr_of!(*self) as usize as u64);
             info!(
                 target: "ffs::btrfs::rw",
                 operation_id = %operation_id,
@@ -44954,10 +44957,13 @@ mod tests {
             durable_epoch: 1,
         };
         let err = state.mark_durable(3).unwrap_err();
-        assert_eq!(err, WritebackBarrierError::EpochNotVisible {
-            requested: 3,
-            visible: 2,
-        });
+        assert_eq!(
+            err,
+            WritebackBarrierError::EpochNotVisible {
+                requested: 3,
+                visible: 2,
+            }
+        );
     }
 
     #[test]
@@ -45027,10 +45033,22 @@ mod tests {
 
     #[test]
     fn e2compr_codec_from_method_index_known_methods() {
-        assert!(matches!(E2ComprCodec::from_method_index(0), Ok(E2ComprCodec::Lzv1)));
-        assert!(matches!(E2ComprCodec::from_method_index(4), Ok(E2ComprCodec::Bzip2)));
-        assert!(matches!(E2ComprCodec::from_method_index(8), Ok(E2ComprCodec::Lzrw3a)));
-        assert!(matches!(E2ComprCodec::from_method_index(10), Ok(E2ComprCodec::Lzo1x1)));
+        assert!(matches!(
+            E2ComprCodec::from_method_index(0),
+            Ok(E2ComprCodec::Lzv1)
+        ));
+        assert!(matches!(
+            E2ComprCodec::from_method_index(4),
+            Ok(E2ComprCodec::Bzip2)
+        ));
+        assert!(matches!(
+            E2ComprCodec::from_method_index(8),
+            Ok(E2ComprCodec::Lzrw3a)
+        ));
+        assert!(matches!(
+            E2ComprCodec::from_method_index(10),
+            Ok(E2ComprCodec::Lzo1x1)
+        ));
     }
 
     #[test]
@@ -45046,7 +45064,10 @@ mod tests {
     #[test]
     fn e2compr_codec_from_method_index_none_passthrough() {
         for idx in 1..=3 {
-            assert!(matches!(E2ComprCodec::from_method_index(idx), Ok(E2ComprCodec::None)));
+            assert!(matches!(
+                E2ComprCodec::from_method_index(idx),
+                Ok(E2ComprCodec::None)
+            ));
         }
     }
 
@@ -45114,8 +45135,16 @@ mod tests {
     #[test]
     fn writeback_workload_operation_counts_positive() {
         for workload in WritebackWorkload::ALL {
-            assert!(workload.operation_count() > 0, "{} has zero ops", workload.name());
-            assert!(workload.write_count() > 0, "{} has zero writes", workload.name());
+            assert!(
+                workload.operation_count() > 0,
+                "{} has zero ops",
+                workload.name()
+            );
+            assert!(
+                workload.write_count() > 0,
+                "{} has zero writes",
+                workload.name()
+            );
             assert!(
                 workload.write_count() <= workload.operation_count(),
                 "{} has more writes than ops",
@@ -50555,25 +50584,37 @@ mod tests {
     #[test]
     fn btrfs_csum_size_for_type_crc32c() {
         use super::btrfs_csum_size_for_type;
-        assert_eq!(btrfs_csum_size_for_type(ffs_types::BTRFS_CSUM_TYPE_CRC32C), 4);
+        assert_eq!(
+            btrfs_csum_size_for_type(ffs_types::BTRFS_CSUM_TYPE_CRC32C),
+            4
+        );
     }
 
     #[test]
     fn btrfs_csum_size_for_type_xxhash64() {
         use super::btrfs_csum_size_for_type;
-        assert_eq!(btrfs_csum_size_for_type(ffs_types::BTRFS_CSUM_TYPE_XXHASH64), 8);
+        assert_eq!(
+            btrfs_csum_size_for_type(ffs_types::BTRFS_CSUM_TYPE_XXHASH64),
+            8
+        );
     }
 
     #[test]
     fn btrfs_csum_size_for_type_sha256() {
         use super::btrfs_csum_size_for_type;
-        assert_eq!(btrfs_csum_size_for_type(ffs_types::BTRFS_CSUM_TYPE_SHA256), 32);
+        assert_eq!(
+            btrfs_csum_size_for_type(ffs_types::BTRFS_CSUM_TYPE_SHA256),
+            32
+        );
     }
 
     #[test]
     fn btrfs_csum_size_for_type_blake2b() {
         use super::btrfs_csum_size_for_type;
-        assert_eq!(btrfs_csum_size_for_type(ffs_types::BTRFS_CSUM_TYPE_BLAKE2B), 32);
+        assert_eq!(
+            btrfs_csum_size_for_type(ffs_types::BTRFS_CSUM_TYPE_BLAKE2B),
+            32
+        );
     }
 
     #[test]
@@ -50624,14 +50665,20 @@ mod tests {
     fn ext4_mmp_status_class_active() {
         use super::ext4_mmp_status_class;
         use ffs_ondisk::ext4::Ext4MmpStatus;
-        assert_eq!(ext4_mmp_status_class(Ext4MmpStatus::Active(12345)), "active");
+        assert_eq!(
+            ext4_mmp_status_class(Ext4MmpStatus::Active(12345)),
+            "active"
+        );
     }
 
     #[test]
     fn ext4_mmp_status_class_unknown() {
         use super::ext4_mmp_status_class;
         use ffs_ondisk::ext4::Ext4MmpStatus;
-        assert_eq!(ext4_mmp_status_class(Ext4MmpStatus::UnsafeUnknown(0xDEAD)), "unsafe_unknown");
+        assert_eq!(
+            ext4_mmp_status_class(Ext4MmpStatus::UnsafeUnknown(0xDEAD)),
+            "unsafe_unknown"
+        );
     }
 
     #[test]
@@ -50706,7 +50753,10 @@ mod tests {
 
         assert_eq!(bytes_left, 0);
         assert_eq!(bytes_missing, 0);
-        assert_eq!(elem_cnt, 0, "no inodes should reference non-existent extent");
+        assert_eq!(
+            elem_cnt, 0,
+            "no inodes should reference non-existent extent"
+        );
         assert_eq!(elem_missed, 0);
     }
 }

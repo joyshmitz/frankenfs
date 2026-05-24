@@ -476,9 +476,7 @@ pub fn extract_test_citations(notes: &str) -> Vec<String> {
                 if let Some(idx) = current_word.rfind("::") {
                     let test_name = &current_word[idx + 2..];
                     if !test_name.is_empty()
-                        && test_name
-                            .chars()
-                            .all(|c| c.is_alphanumeric() || c == '_')
+                        && test_name.chars().all(|c| c.is_alphanumeric() || c == '_')
                     {
                         citations.push(test_name.to_string());
                     }
@@ -506,11 +504,7 @@ pub fn extract_test_citations(notes: &str) -> Vec<String> {
     if !current_word.is_empty() && current_word.contains("::") {
         if let Some(idx) = current_word.rfind("::") {
             let test_name = &current_word[idx + 2..];
-            if !test_name.is_empty()
-                && test_name
-                    .chars()
-                    .all(|c| c.is_alphanumeric() || c == '_')
-            {
+            if !test_name.is_empty() && test_name.chars().all(|c| c.is_alphanumeric() || c == '_') {
                 citations.push(test_name.to_string());
             }
         }
@@ -595,9 +589,9 @@ pub fn build_parity_evidence_map(
             });
 
             // Also check if the test ran at all (even if failed)
-            let ran = test_results
-                .iter()
-                .any(|(test_name, _)| test_name.contains(&citation) || citation.contains(test_name));
+            let ran = test_results.iter().any(|(test_name, _)| {
+                test_name.contains(&citation) || citation.contains(test_name)
+            });
 
             if ran {
                 evidence_map.insert(citation, passed);

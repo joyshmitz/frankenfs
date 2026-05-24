@@ -5624,15 +5624,16 @@ impl Filesystem for FrankenFuse {
                     let name = OsStr::new(&owned_name);
 
                     // Get attributes for each entry
-                    let attr = match self.with_request_scope(&cx, RequestOp::Getattr, |cx, scope| {
-                        self.inner.ops.getattr(cx, scope, entry.ino)
-                    }) {
-                        Ok(attr) => to_file_attr(&attr),
-                        Err(_) => {
-                            // If we can't get attrs, skip this entry
-                            continue;
-                        }
-                    };
+                    let attr =
+                        match self.with_request_scope(&cx, RequestOp::Getattr, |cx, scope| {
+                            self.inner.ops.getattr(cx, scope, entry.ino)
+                        }) {
+                            Ok(attr) => to_file_attr(&attr),
+                            Err(_) => {
+                                // If we can't get attrs, skip this entry
+                                continue;
+                            }
+                        };
 
                     let full = reply.add(
                         entry.ino.0,
@@ -7041,73 +7042,199 @@ mod tests {
     #[test]
     fn access_permission_owner_read() {
         // Owner can read with 0o400
-        assert!(check_access_permission(0o400, 1000, 1000, 1000, 2000, libc::R_OK));
+        assert!(check_access_permission(
+            0o400,
+            1000,
+            1000,
+            1000,
+            2000,
+            libc::R_OK
+        ));
         // Owner cannot read with 0o300
-        assert!(!check_access_permission(0o300, 1000, 1000, 1000, 2000, libc::R_OK));
+        assert!(!check_access_permission(
+            0o300,
+            1000,
+            1000,
+            1000,
+            2000,
+            libc::R_OK
+        ));
     }
 
     #[test]
     fn access_permission_owner_write() {
         // Owner can write with 0o200
-        assert!(check_access_permission(0o200, 1000, 1000, 1000, 2000, libc::W_OK));
+        assert!(check_access_permission(
+            0o200,
+            1000,
+            1000,
+            1000,
+            2000,
+            libc::W_OK
+        ));
         // Owner cannot write with 0o500
-        assert!(!check_access_permission(0o500, 1000, 1000, 1000, 2000, libc::W_OK));
+        assert!(!check_access_permission(
+            0o500,
+            1000,
+            1000,
+            1000,
+            2000,
+            libc::W_OK
+        ));
     }
 
     #[test]
     fn access_permission_owner_execute() {
         // Owner can execute with 0o100
-        assert!(check_access_permission(0o100, 1000, 1000, 1000, 2000, libc::X_OK));
+        assert!(check_access_permission(
+            0o100,
+            1000,
+            1000,
+            1000,
+            2000,
+            libc::X_OK
+        ));
         // Owner cannot execute with 0o600
-        assert!(!check_access_permission(0o600, 1000, 1000, 1000, 2000, libc::X_OK));
+        assert!(!check_access_permission(
+            0o600,
+            1000,
+            1000,
+            1000,
+            2000,
+            libc::X_OK
+        ));
     }
 
     #[test]
     fn access_permission_group_read() {
         // Group member can read with 0o040
-        assert!(check_access_permission(0o040, 1000, 2000, 3000, 2000, libc::R_OK));
+        assert!(check_access_permission(
+            0o040,
+            1000,
+            2000,
+            3000,
+            2000,
+            libc::R_OK
+        ));
         // Group member cannot read with 0o030
-        assert!(!check_access_permission(0o030, 1000, 2000, 3000, 2000, libc::R_OK));
+        assert!(!check_access_permission(
+            0o030,
+            1000,
+            2000,
+            3000,
+            2000,
+            libc::R_OK
+        ));
     }
 
     #[test]
     fn access_permission_group_write() {
         // Group member can write with 0o020
-        assert!(check_access_permission(0o020, 1000, 2000, 3000, 2000, libc::W_OK));
+        assert!(check_access_permission(
+            0o020,
+            1000,
+            2000,
+            3000,
+            2000,
+            libc::W_OK
+        ));
         // Group member cannot write with 0o050
-        assert!(!check_access_permission(0o050, 1000, 2000, 3000, 2000, libc::W_OK));
+        assert!(!check_access_permission(
+            0o050,
+            1000,
+            2000,
+            3000,
+            2000,
+            libc::W_OK
+        ));
     }
 
     #[test]
     fn access_permission_group_execute() {
         // Group member can execute with 0o010
-        assert!(check_access_permission(0o010, 1000, 2000, 3000, 2000, libc::X_OK));
+        assert!(check_access_permission(
+            0o010,
+            1000,
+            2000,
+            3000,
+            2000,
+            libc::X_OK
+        ));
         // Group member cannot execute with 0o060
-        assert!(!check_access_permission(0o060, 1000, 2000, 3000, 2000, libc::X_OK));
+        assert!(!check_access_permission(
+            0o060,
+            1000,
+            2000,
+            3000,
+            2000,
+            libc::X_OK
+        ));
     }
 
     #[test]
     fn access_permission_other_read() {
         // Other can read with 0o004
-        assert!(check_access_permission(0o004, 1000, 2000, 3000, 4000, libc::R_OK));
+        assert!(check_access_permission(
+            0o004,
+            1000,
+            2000,
+            3000,
+            4000,
+            libc::R_OK
+        ));
         // Other cannot read with 0o003
-        assert!(!check_access_permission(0o003, 1000, 2000, 3000, 4000, libc::R_OK));
+        assert!(!check_access_permission(
+            0o003,
+            1000,
+            2000,
+            3000,
+            4000,
+            libc::R_OK
+        ));
     }
 
     #[test]
     fn access_permission_other_write() {
         // Other can write with 0o002
-        assert!(check_access_permission(0o002, 1000, 2000, 3000, 4000, libc::W_OK));
+        assert!(check_access_permission(
+            0o002,
+            1000,
+            2000,
+            3000,
+            4000,
+            libc::W_OK
+        ));
         // Other cannot write with 0o005
-        assert!(!check_access_permission(0o005, 1000, 2000, 3000, 4000, libc::W_OK));
+        assert!(!check_access_permission(
+            0o005,
+            1000,
+            2000,
+            3000,
+            4000,
+            libc::W_OK
+        ));
     }
 
     #[test]
     fn access_permission_other_execute() {
         // Other can execute with 0o001
-        assert!(check_access_permission(0o001, 1000, 2000, 3000, 4000, libc::X_OK));
+        assert!(check_access_permission(
+            0o001,
+            1000,
+            2000,
+            3000,
+            4000,
+            libc::X_OK
+        ));
         // Other cannot execute with 0o006
-        assert!(!check_access_permission(0o006, 1000, 2000, 3000, 4000, libc::X_OK));
+        assert!(!check_access_permission(
+            0o006,
+            1000,
+            2000,
+            3000,
+            4000,
+            libc::X_OK
+        ));
     }
 
     #[test]
@@ -7250,14 +7377,20 @@ mod tests {
     #[test]
     fn parse_mount_bool_accepts_true_variants() {
         for val in ["1", "true", "yes", "on"] {
-            assert!(parse_mount_bool("opt", Some(val)).unwrap(), "'{val}' should be true");
+            assert!(
+                parse_mount_bool("opt", Some(val)).unwrap(),
+                "'{val}' should be true"
+            );
         }
     }
 
     #[test]
     fn parse_mount_bool_accepts_false_variants() {
         for val in ["0", "false", "no", "off"] {
-            assert!(!parse_mount_bool("opt", Some(val)).unwrap(), "'{val}' should be false");
+            assert!(
+                !parse_mount_bool("opt", Some(val)).unwrap(),
+                "'{val}' should be false"
+            );
         }
     }
 
@@ -7322,7 +7455,10 @@ mod tests {
 
     #[test]
     fn require_mount_option_value_returns_value() {
-        assert_eq!(require_mount_option_value("opt", Some("val")).unwrap(), "val");
+        assert_eq!(
+            require_mount_option_value("opt", Some("val")).unwrap(),
+            "val"
+        );
     }
 
     #[test]
@@ -7584,7 +7720,10 @@ mod tests {
         let buf = FrankenFuse::encode_fstrim_response(start, discarded, minlen);
         assert_eq!(buf.len(), 24);
         assert_eq!(u64::from_ne_bytes(buf[0..8].try_into().unwrap()), start);
-        assert_eq!(u64::from_ne_bytes(buf[8..16].try_into().unwrap()), discarded);
+        assert_eq!(
+            u64::from_ne_bytes(buf[8..16].try_into().unwrap()),
+            discarded
+        );
         assert_eq!(u64::from_ne_bytes(buf[16..24].try_into().unwrap()), minlen);
     }
 
@@ -7649,11 +7788,26 @@ mod tests {
         };
         let buf = FrankenFuse::encode_fsxattr_response(&fsx);
         assert_eq!(buf.len(), 28);
-        assert_eq!(u32::from_ne_bytes(buf[0..4].try_into().unwrap()), fsx.xflags);
-        assert_eq!(u32::from_ne_bytes(buf[4..8].try_into().unwrap()), fsx.extsize);
-        assert_eq!(u32::from_ne_bytes(buf[8..12].try_into().unwrap()), fsx.nextents);
-        assert_eq!(u32::from_ne_bytes(buf[12..16].try_into().unwrap()), fsx.projid);
-        assert_eq!(u32::from_ne_bytes(buf[16..20].try_into().unwrap()), fsx.cowextsize);
+        assert_eq!(
+            u32::from_ne_bytes(buf[0..4].try_into().unwrap()),
+            fsx.xflags
+        );
+        assert_eq!(
+            u32::from_ne_bytes(buf[4..8].try_into().unwrap()),
+            fsx.extsize
+        );
+        assert_eq!(
+            u32::from_ne_bytes(buf[8..12].try_into().unwrap()),
+            fsx.nextents
+        );
+        assert_eq!(
+            u32::from_ne_bytes(buf[12..16].try_into().unwrap()),
+            fsx.projid
+        );
+        assert_eq!(
+            u32::from_ne_bytes(buf[16..20].try_into().unwrap()),
+            fsx.cowextsize
+        );
     }
 
     #[test]
@@ -7669,10 +7823,22 @@ mod tests {
         data[16..20].copy_from_slice(&cowextsize.to_ne_bytes());
         let parsed = FrankenFuse::parse_fsxattr_request(&data).unwrap();
         let encoded = FrankenFuse::encode_fsxattr_response(&parsed);
-        assert_eq!(u32::from_ne_bytes(encoded[0..4].try_into().unwrap()), xflags);
-        assert_eq!(u32::from_ne_bytes(encoded[4..8].try_into().unwrap()), extsize);
-        assert_eq!(u32::from_ne_bytes(encoded[12..16].try_into().unwrap()), projid);
-        assert_eq!(u32::from_ne_bytes(encoded[16..20].try_into().unwrap()), cowextsize);
+        assert_eq!(
+            u32::from_ne_bytes(encoded[0..4].try_into().unwrap()),
+            xflags
+        );
+        assert_eq!(
+            u32::from_ne_bytes(encoded[4..8].try_into().unwrap()),
+            extsize
+        );
+        assert_eq!(
+            u32::from_ne_bytes(encoded[12..16].try_into().unwrap()),
+            projid
+        );
+        assert_eq!(
+            u32::from_ne_bytes(encoded[16..20].try_into().unwrap()),
+            cowextsize
+        );
     }
 
     #[test]
@@ -7714,11 +7880,46 @@ mod tests {
     fn encode_move_ext_response_layout() {
         let buf = FrankenFuse::encode_move_ext_response(7, 4096, 8192, 1024, 512);
         assert_eq!(buf.len(), MOVE_EXT_SIZE);
-        assert_eq!(u32::from_ne_bytes(buf[MOVE_EXT_DONOR_FD_OFFSET..MOVE_EXT_DONOR_FD_OFFSET + 4].try_into().unwrap()), 7);
-        assert_eq!(u64::from_ne_bytes(buf[MOVE_EXT_ORIG_START_OFFSET..MOVE_EXT_ORIG_START_OFFSET + 8].try_into().unwrap()), 4096);
-        assert_eq!(u64::from_ne_bytes(buf[MOVE_EXT_DONOR_START_OFFSET..MOVE_EXT_DONOR_START_OFFSET + 8].try_into().unwrap()), 8192);
-        assert_eq!(u64::from_ne_bytes(buf[MOVE_EXT_LEN_OFFSET..MOVE_EXT_LEN_OFFSET + 8].try_into().unwrap()), 1024);
-        assert_eq!(u64::from_ne_bytes(buf[MOVE_EXT_MOVED_LEN_OFFSET..MOVE_EXT_MOVED_LEN_OFFSET + 8].try_into().unwrap()), 512);
+        assert_eq!(
+            u32::from_ne_bytes(
+                buf[MOVE_EXT_DONOR_FD_OFFSET..MOVE_EXT_DONOR_FD_OFFSET + 4]
+                    .try_into()
+                    .unwrap()
+            ),
+            7
+        );
+        assert_eq!(
+            u64::from_ne_bytes(
+                buf[MOVE_EXT_ORIG_START_OFFSET..MOVE_EXT_ORIG_START_OFFSET + 8]
+                    .try_into()
+                    .unwrap()
+            ),
+            4096
+        );
+        assert_eq!(
+            u64::from_ne_bytes(
+                buf[MOVE_EXT_DONOR_START_OFFSET..MOVE_EXT_DONOR_START_OFFSET + 8]
+                    .try_into()
+                    .unwrap()
+            ),
+            8192
+        );
+        assert_eq!(
+            u64::from_ne_bytes(
+                buf[MOVE_EXT_LEN_OFFSET..MOVE_EXT_LEN_OFFSET + 8]
+                    .try_into()
+                    .unwrap()
+            ),
+            1024
+        );
+        assert_eq!(
+            u64::from_ne_bytes(
+                buf[MOVE_EXT_MOVED_LEN_OFFSET..MOVE_EXT_MOVED_LEN_OFFSET + 8]
+                    .try_into()
+                    .unwrap()
+            ),
+            512
+        );
     }
 
     #[test]
@@ -7786,11 +7987,23 @@ mod tests {
 
     #[test]
     fn to_fuser_file_type_all_variants() {
-        assert_eq!(to_fuser_file_type(FfsFileType::RegularFile), FileType::RegularFile);
-        assert_eq!(to_fuser_file_type(FfsFileType::Directory), FileType::Directory);
+        assert_eq!(
+            to_fuser_file_type(FfsFileType::RegularFile),
+            FileType::RegularFile
+        );
+        assert_eq!(
+            to_fuser_file_type(FfsFileType::Directory),
+            FileType::Directory
+        );
         assert_eq!(to_fuser_file_type(FfsFileType::Symlink), FileType::Symlink);
-        assert_eq!(to_fuser_file_type(FfsFileType::BlockDevice), FileType::BlockDevice);
-        assert_eq!(to_fuser_file_type(FfsFileType::CharDevice), FileType::CharDevice);
+        assert_eq!(
+            to_fuser_file_type(FfsFileType::BlockDevice),
+            FileType::BlockDevice
+        );
+        assert_eq!(
+            to_fuser_file_type(FfsFileType::CharDevice),
+            FileType::CharDevice
+        );
         assert_eq!(to_fuser_file_type(FfsFileType::Fifo), FileType::NamedPipe);
         assert_eq!(to_fuser_file_type(FfsFileType::Socket), FileType::Socket);
     }
@@ -7803,7 +8016,10 @@ mod tests {
         assert!(opts.auto_unmount);
         assert!(!opts.writeback_cache.is_enabled());
         assert!(opts.ioctl_trace_path.is_none());
-        assert_eq!(opts.worker_threads, 0, "default worker_threads should be 0 (auto)");
+        assert_eq!(
+            opts.worker_threads, 0,
+            "default worker_threads should be 0 (auto)"
+        );
     }
 
     #[test]
@@ -13580,16 +13796,12 @@ mod tests {
             ..MountOptions::default()
         };
         let fuse = FrankenFuse::with_options(
-            Box::new(IoctlRecordingFs::new(
-                0,
-                Arc::new(Mutex::new(Vec::new())),
-            )),
+            Box::new(IoctlRecordingFs::new(0, Arc::new(Mutex::new(Vec::new())))),
             &opts,
         );
 
         let input = vec![0_u8; 64];
-        let response =
-            dispatch_ioctl_for_testing(&fuse, 2, 0, BTRFS_IOC_ENCODED_WRITE, &input, 0);
+        let response = dispatch_ioctl_for_testing(&fuse, 2, 0, BTRFS_IOC_ENCODED_WRITE, &input, 0);
         assert_eq!(
             response,
             IoctlResult::Error(libc::EROFS),
@@ -13604,10 +13816,7 @@ mod tests {
             ..MountOptions::default()
         };
         let fuse = FrankenFuse::with_options(
-            Box::new(IoctlRecordingFs::new(
-                0,
-                Arc::new(Mutex::new(Vec::new())),
-            )),
+            Box::new(IoctlRecordingFs::new(0, Arc::new(Mutex::new(Vec::new())))),
             &opts,
         );
 
@@ -13629,10 +13838,7 @@ mod tests {
             ..MountOptions::default()
         };
         let fuse = FrankenFuse::with_options(
-            Box::new(IoctlRecordingFs::new(
-                0,
-                Arc::new(Mutex::new(Vec::new())),
-            )),
+            Box::new(IoctlRecordingFs::new(0, Arc::new(Mutex::new(Vec::new())))),
             &opts,
         );
 
@@ -18694,37 +18900,52 @@ CUSTOM("congestion_threshold=3")"#;
 
     #[test]
     fn to_fuser_file_type_regular_file() {
-        use super::{to_fuser_file_type, FfsFileType};
+        use super::{FfsFileType, to_fuser_file_type};
         use fuser::FileType;
-        assert!(matches!(to_fuser_file_type(FfsFileType::RegularFile), FileType::RegularFile));
+        assert!(matches!(
+            to_fuser_file_type(FfsFileType::RegularFile),
+            FileType::RegularFile
+        ));
     }
 
     #[test]
     fn to_fuser_file_type_directory() {
-        use super::{to_fuser_file_type, FfsFileType};
+        use super::{FfsFileType, to_fuser_file_type};
         use fuser::FileType;
-        assert!(matches!(to_fuser_file_type(FfsFileType::Directory), FileType::Directory));
+        assert!(matches!(
+            to_fuser_file_type(FfsFileType::Directory),
+            FileType::Directory
+        ));
     }
 
     #[test]
     fn to_fuser_file_type_symlink() {
-        use super::{to_fuser_file_type, FfsFileType};
+        use super::{FfsFileType, to_fuser_file_type};
         use fuser::FileType;
-        assert!(matches!(to_fuser_file_type(FfsFileType::Symlink), FileType::Symlink));
+        assert!(matches!(
+            to_fuser_file_type(FfsFileType::Symlink),
+            FileType::Symlink
+        ));
     }
 
     #[test]
     fn to_fuser_file_type_fifo_to_named_pipe() {
-        use super::{to_fuser_file_type, FfsFileType};
+        use super::{FfsFileType, to_fuser_file_type};
         use fuser::FileType;
-        assert!(matches!(to_fuser_file_type(FfsFileType::Fifo), FileType::NamedPipe));
+        assert!(matches!(
+            to_fuser_file_type(FfsFileType::Fifo),
+            FileType::NamedPipe
+        ));
     }
 
     #[test]
     fn to_fuser_file_type_socket() {
-        use super::{to_fuser_file_type, FfsFileType};
+        use super::{FfsFileType, to_fuser_file_type};
         use fuser::FileType;
-        assert!(matches!(to_fuser_file_type(FfsFileType::Socket), FileType::Socket));
+        assert!(matches!(
+            to_fuser_file_type(FfsFileType::Socket),
+            FileType::Socket
+        ));
     }
 
     // ── split_mount_option: additional edge cases ──────────────────────────

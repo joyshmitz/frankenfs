@@ -4322,11 +4322,7 @@ mod tests {
         });
 
         // Validate with expected git SHA that differs from evidence
-        validate_executable_lane_pass_requires_evidence(
-            &manifest,
-            &mut report,
-            "current_head_sha",
-        );
+        validate_executable_lane_pass_requires_evidence(&manifest, &mut report, "current_head_sha");
 
         assert!(
             !report.errors.is_empty(),

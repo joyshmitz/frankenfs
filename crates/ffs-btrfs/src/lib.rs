@@ -1920,11 +1920,7 @@ impl BtrfsCowNode {
                     // child's allocated logical address) when present; fall
                     // back to the in-memory child block number for legacy
                     // and simulator callers.
-                    let child_blockptr = params
-                        .child_bytenrs
-                        .get(i)
-                        .copied()
-                        .unwrap_or(*child_ptr);
+                    let child_blockptr = params.child_bytenrs.get(i).copied().unwrap_or(*child_ptr);
                     buf[kp_offset + 17..kp_offset + 25]
                         .copy_from_slice(&child_blockptr.to_le_bytes());
                     // generation at 0x19
@@ -2084,7 +2080,10 @@ impl InMemoryCowBtrfsTree {
 
     /// Root node level (0 for leaf, higher for internal).
     #[must_use]
-    #[expect(clippy::cast_possible_truncation, reason = "btrfs tree level is limited to BTRFS_MAX_LEVEL (8)")]
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "btrfs tree level is limited to BTRFS_MAX_LEVEL (8)"
+    )]
     pub fn root_level(&self) -> u8 {
         match self.height() {
             Ok(h) if h > 0 => (h - 1) as u8,
@@ -3715,7 +3714,14 @@ impl BtrfsExtentAllocator {
         root: u64,
         level: u8,
     ) -> Result<ExtentAllocation, BtrfsMutationError> {
-        self.alloc_extent(num_bytes, BTRFS_BLOCK_GROUP_METADATA, true, root, level, false)
+        self.alloc_extent(
+            num_bytes,
+            BTRFS_BLOCK_GROUP_METADATA,
+            true,
+            root,
+            level,
+            false,
+        )
     }
 
     /// Allocate metadata for extent_tree nodes without self-referential
@@ -5040,7 +5046,8 @@ impl SendStreamBuilder {
     pub fn write_header(&mut self) {
         assert!(!self.has_header, "header already written");
         self.buffer.extend_from_slice(BTRFS_SEND_STREAM_MAGIC);
-        self.buffer.extend_from_slice(&BTRFS_SEND_STREAM_VERSION.to_le_bytes());
+        self.buffer
+            .extend_from_slice(&BTRFS_SEND_STREAM_VERSION.to_le_bytes());
         self.has_header = true;
     }
 
@@ -5096,7 +5103,11 @@ impl SendStreamBuilder {
 
 /// Helper to build a Subvol command (start of a full send).
 #[must_use]
-pub fn build_subvol_command(path: &[u8], uuid: &[u8; 16], ctransid: u64) -> (SendCommand, Vec<(SendAttr, Vec<u8>)>) {
+pub fn build_subvol_command(
+    path: &[u8],
+    uuid: &[u8; 16],
+    ctransid: u64,
+) -> (SendCommand, Vec<(SendAttr, Vec<u8>)>) {
     (
         SendCommand::Subvol,
         vec![
@@ -5133,7 +5144,11 @@ pub fn build_mkfile_command(path: &[u8], ino: u64) -> (SendCommand, Vec<(SendAtt
 
 /// Helper to build a Write command.
 #[must_use]
-pub fn build_write_command(path: &[u8], offset: u64, data: &[u8]) -> (SendCommand, Vec<(SendAttr, Vec<u8>)>) {
+pub fn build_write_command(
+    path: &[u8],
+    offset: u64,
+    data: &[u8],
+) -> (SendCommand, Vec<(SendAttr, Vec<u8>)>) {
     (
         SendCommand::Write,
         vec![
@@ -5158,7 +5173,11 @@ pub fn build_chmod_command(path: &[u8], mode: u64) -> (SendCommand, Vec<(SendAtt
 
 /// Helper to build a Chown command.
 #[must_use]
-pub fn build_chown_command(path: &[u8], uid: u64, gid: u64) -> (SendCommand, Vec<(SendAttr, Vec<u8>)>) {
+pub fn build_chown_command(
+    path: &[u8],
+    uid: u64,
+    gid: u64,
+) -> (SendCommand, Vec<(SendAttr, Vec<u8>)>) {
     (
         SendCommand::Chown,
         vec![
@@ -5174,9 +5193,12 @@ pub fn build_chown_command(path: &[u8], uid: u64, gid: u64) -> (SendCommand, Vec
 #[expect(clippy::similar_names)]
 pub fn build_utimes_command(
     path: &[u8],
-    atime_sec: i64, atime_nsec: i32,
-    mtime_sec: i64, mtime_nsec: i32,
-    ctime_sec: i64, ctime_nsec: i32,
+    atime_sec: i64,
+    atime_nsec: i32,
+    mtime_sec: i64,
+    mtime_nsec: i32,
+    ctime_sec: i64,
+    ctime_nsec: i32,
 ) -> (SendCommand, Vec<(SendAttr, Vec<u8>)>) {
     fn timespec_bytes(sec: i64, nsec: i32) -> Vec<u8> {
         let mut buf = Vec::with_capacity(12);
@@ -5209,7 +5231,11 @@ pub fn build_truncate_command(path: &[u8], size: u64) -> (SendCommand, Vec<(Send
 
 /// Helper to build a Symlink command.
 #[must_use]
-pub fn build_symlink_command(path: &[u8], ino: u64, link_target: &[u8]) -> (SendCommand, Vec<(SendAttr, Vec<u8>)>) {
+pub fn build_symlink_command(
+    path: &[u8],
+    ino: u64,
+    link_target: &[u8],
+) -> (SendCommand, Vec<(SendAttr, Vec<u8>)>) {
     (
         SendCommand::Symlink,
         vec![
@@ -5222,7 +5248,11 @@ pub fn build_symlink_command(path: &[u8], ino: u64, link_target: &[u8]) -> (Send
 
 /// Helper to build a SetXattr command.
 #[must_use]
-pub fn build_setxattr_command(path: &[u8], name: &[u8], data: &[u8]) -> (SendCommand, Vec<(SendAttr, Vec<u8>)>) {
+pub fn build_setxattr_command(
+    path: &[u8],
+    name: &[u8],
+    data: &[u8],
+) -> (SendCommand, Vec<(SendAttr, Vec<u8>)>) {
     (
         SendCommand::SetXattr,
         vec![
@@ -5235,7 +5265,10 @@ pub fn build_setxattr_command(path: &[u8], name: &[u8], data: &[u8]) -> (SendCom
 
 /// Helper to build a RemoveXattr command.
 #[must_use]
-pub fn build_removexattr_command(path: &[u8], name: &[u8]) -> (SendCommand, Vec<(SendAttr, Vec<u8>)>) {
+pub fn build_removexattr_command(
+    path: &[u8],
+    name: &[u8],
+) -> (SendCommand, Vec<(SendAttr, Vec<u8>)>) {
     (
         SendCommand::RemoveXattr,
         vec![
@@ -5247,7 +5280,10 @@ pub fn build_removexattr_command(path: &[u8], name: &[u8]) -> (SendCommand, Vec<
 
 /// Helper to build a Rename command.
 #[must_use]
-pub fn build_rename_command(path: &[u8], path_to: &[u8]) -> (SendCommand, Vec<(SendAttr, Vec<u8>)>) {
+pub fn build_rename_command(
+    path: &[u8],
+    path_to: &[u8],
+) -> (SendCommand, Vec<(SendAttr, Vec<u8>)>) {
     (
         SendCommand::Rename,
         vec![
@@ -5259,7 +5295,10 @@ pub fn build_rename_command(path: &[u8], path_to: &[u8]) -> (SendCommand, Vec<(S
 
 /// Helper to build a Link command (hardlink).
 #[must_use]
-pub fn build_link_command(path: &[u8], path_link: &[u8]) -> (SendCommand, Vec<(SendAttr, Vec<u8>)>) {
+pub fn build_link_command(
+    path: &[u8],
+    path_link: &[u8],
+) -> (SendCommand, Vec<(SendAttr, Vec<u8>)>) {
     (
         SendCommand::Link,
         vec![
@@ -5272,24 +5311,23 @@ pub fn build_link_command(path: &[u8], path_link: &[u8]) -> (SendCommand, Vec<(S
 /// Helper to build an Unlink command.
 #[must_use]
 pub fn build_unlink_command(path: &[u8]) -> (SendCommand, Vec<(SendAttr, Vec<u8>)>) {
-    (
-        SendCommand::Unlink,
-        vec![(SendAttr::Path, path.to_vec())],
-    )
+    (SendCommand::Unlink, vec![(SendAttr::Path, path.to_vec())])
 }
 
 /// Helper to build an Rmdir command.
 #[must_use]
 pub fn build_rmdir_command(path: &[u8]) -> (SendCommand, Vec<(SendAttr, Vec<u8>)>) {
-    (
-        SendCommand::Rmdir,
-        vec![(SendAttr::Path, path.to_vec())],
-    )
+    (SendCommand::Rmdir, vec![(SendAttr::Path, path.to_vec())])
 }
 
 /// Helper to build a Mknod command (block/char device).
 #[must_use]
-pub fn build_mknod_command(path: &[u8], ino: u64, mode: u64, rdev: u64) -> (SendCommand, Vec<(SendAttr, Vec<u8>)>) {
+pub fn build_mknod_command(
+    path: &[u8],
+    ino: u64,
+    mode: u64,
+    rdev: u64,
+) -> (SendCommand, Vec<(SendAttr, Vec<u8>)>) {
     (
         SendCommand::Mknod,
         vec![
@@ -5341,7 +5379,10 @@ pub fn build_snapshot_command(
             (SendAttr::Uuid, uuid.to_vec()),
             (SendAttr::Ctransid, ctransid.to_le_bytes().to_vec()),
             (SendAttr::CloneUuid, clone_uuid.to_vec()),
-            (SendAttr::CloneCtransid, clone_ctransid.to_le_bytes().to_vec()),
+            (
+                SendAttr::CloneCtransid,
+                clone_ctransid.to_le_bytes().to_vec(),
+            ),
         ],
     )
 }
@@ -5364,7 +5405,10 @@ pub fn build_clone_command(
             (SendAttr::FileOffset, offset.to_le_bytes().to_vec()),
             (SendAttr::CloneLen, len.to_le_bytes().to_vec()),
             (SendAttr::CloneUuid, clone_uuid.to_vec()),
-            (SendAttr::CloneCtransid, clone_ctransid.to_le_bytes().to_vec()),
+            (
+                SendAttr::CloneCtransid,
+                clone_ctransid.to_le_bytes().to_vec(),
+            ),
             (SendAttr::ClonePath, clone_path.to_vec()),
             (SendAttr::CloneOffset, clone_offset.to_le_bytes().to_vec()),
         ],
@@ -5373,7 +5417,11 @@ pub fn build_clone_command(
 
 /// Helper to build an UpdateExtent command.
 #[must_use]
-pub fn build_update_extent_command(path: &[u8], offset: u64, len: u64) -> (SendCommand, Vec<(SendAttr, Vec<u8>)>) {
+pub fn build_update_extent_command(
+    path: &[u8],
+    offset: u64,
+    len: u64,
+) -> (SendCommand, Vec<(SendAttr, Vec<u8>)>) {
     (
         SendCommand::UpdateExtent,
         vec![
@@ -5530,18 +5578,14 @@ where
                         builder.add_command(cmd, &refs);
                     } else if extent_type == 1 && entry.data.len() >= 53 {
                         // Regular extent: read from disk
-                        let disk_bytenr = u64::from_le_bytes(
-                            entry.data[21..29].try_into().unwrap_or([0; 8]),
-                        );
-                        let disk_num_bytes = u64::from_le_bytes(
-                            entry.data[29..37].try_into().unwrap_or([0; 8]),
-                        );
-                        let extent_offset = u64::from_le_bytes(
-                            entry.data[37..45].try_into().unwrap_or([0; 8]),
-                        );
-                        let num_bytes = u64::from_le_bytes(
-                            entry.data[45..53].try_into().unwrap_or([0; 8]),
-                        );
+                        let disk_bytenr =
+                            u64::from_le_bytes(entry.data[21..29].try_into().unwrap_or([0; 8]));
+                        let disk_num_bytes =
+                            u64::from_le_bytes(entry.data[29..37].try_into().unwrap_or([0; 8]));
+                        let extent_offset =
+                            u64::from_le_bytes(entry.data[37..45].try_into().unwrap_or([0; 8]));
+                        let num_bytes =
+                            u64::from_le_bytes(entry.data[45..53].try_into().unwrap_or([0; 8]));
 
                         if disk_bytenr == 0 {
                             // Sparse hole - emit update_extent instead
@@ -5567,10 +5611,8 @@ where
                                 if !data.is_empty() {
                                     let (cmd, attrs) =
                                         build_write_command(&path, file_offset, data);
-                                    let refs: Vec<(SendAttr, &[u8])> = attrs
-                                        .iter()
-                                        .map(|(a, d)| (*a, d.as_slice()))
-                                        .collect();
+                                    let refs: Vec<(SendAttr, &[u8])> =
+                                        attrs.iter().map(|(a, d)| (*a, d.as_slice())).collect();
                                     builder.add_command(cmd, &refs);
                                 }
                             }
@@ -15589,27 +15631,33 @@ mod tests {
 
         let uuid = [0x11_u8; 16];
         let (cmd, attrs) = build_subvol_command(b"test_subvol", &uuid, 1);
-        let attr_refs: Vec<(SendAttr, &[u8])> = attrs.iter().map(|(a, d)| (*a, d.as_slice())).collect();
+        let attr_refs: Vec<(SendAttr, &[u8])> =
+            attrs.iter().map(|(a, d)| (*a, d.as_slice())).collect();
         builder.add_command(cmd, &attr_refs);
 
         let (cmd, attrs) = build_mkdir_command(b"test_subvol/dir1", 257);
-        let attr_refs: Vec<(SendAttr, &[u8])> = attrs.iter().map(|(a, d)| (*a, d.as_slice())).collect();
+        let attr_refs: Vec<(SendAttr, &[u8])> =
+            attrs.iter().map(|(a, d)| (*a, d.as_slice())).collect();
         builder.add_command(cmd, &attr_refs);
 
         let (cmd, attrs) = build_mkfile_command(b"test_subvol/file1.txt", 258);
-        let attr_refs: Vec<(SendAttr, &[u8])> = attrs.iter().map(|(a, d)| (*a, d.as_slice())).collect();
+        let attr_refs: Vec<(SendAttr, &[u8])> =
+            attrs.iter().map(|(a, d)| (*a, d.as_slice())).collect();
         builder.add_command(cmd, &attr_refs);
 
         let (cmd, attrs) = build_write_command(b"test_subvol/file1.txt", 0, b"hello world");
-        let attr_refs: Vec<(SendAttr, &[u8])> = attrs.iter().map(|(a, d)| (*a, d.as_slice())).collect();
+        let attr_refs: Vec<(SendAttr, &[u8])> =
+            attrs.iter().map(|(a, d)| (*a, d.as_slice())).collect();
         builder.add_command(cmd, &attr_refs);
 
         let (cmd, attrs) = build_chmod_command(b"test_subvol/file1.txt", 0o644);
-        let attr_refs: Vec<(SendAttr, &[u8])> = attrs.iter().map(|(a, d)| (*a, d.as_slice())).collect();
+        let attr_refs: Vec<(SendAttr, &[u8])> =
+            attrs.iter().map(|(a, d)| (*a, d.as_slice())).collect();
         builder.add_command(cmd, &attr_refs);
 
         let (cmd, attrs) = build_chown_command(b"test_subvol/file1.txt", 1000, 1000);
-        let attr_refs: Vec<(SendAttr, &[u8])> = attrs.iter().map(|(a, d)| (*a, d.as_slice())).collect();
+        let attr_refs: Vec<(SendAttr, &[u8])> =
+            attrs.iter().map(|(a, d)| (*a, d.as_slice())).collect();
         builder.add_command(cmd, &attr_refs);
 
         builder.finalize();
@@ -15737,16 +15785,12 @@ mod tests {
         ];
 
         let uuid = [0u8; 16];
-        let stream = generate_send_stream(
-            &items,
-            b"test_subvol",
-            &uuid,
-            1,
-            |_bytenr, _len| Err(ffs_types::ParseError::InvalidField {
+        let stream = generate_send_stream(&items, b"test_subvol", &uuid, 1, |_bytenr, _len| {
+            Err(ffs_types::ParseError::InvalidField {
                 field: "test",
                 reason: "no disk extents in test",
-            }),
-        )
+            })
+        })
         .expect("generate send stream");
 
         // Parse the generated stream
