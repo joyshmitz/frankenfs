@@ -66,10 +66,8 @@ sudo cargo run -p ffs-cli -- mount /path/to/fs.img /mnt/ffs
 sudo cargo run -p ffs-cli -- mount /path/to/fs.img /mnt/ffs \
     --rw --background-repair --background-scrub-ledger repair.jsonl
 
-# btrfs metadata mutation is fail-closed unless you explicitly acknowledge
-# the current non-durable, in-memory experimental path on a disposable image.
-sudo cargo run -p ffs-cli -- mount /path/to/btrfs.img /mnt/ffs \
-    --rw --btrfs-rw-ephemeral-ok
+# btrfs read-write mount (durable by default via full transaction commit)
+sudo cargo run -p ffs-cli -- mount /path/to/btrfs.img /mnt/ffs --rw
 
 # Conformance + parity reports
 cargo run -p ffs-harness -- check-fixtures
@@ -3222,11 +3220,8 @@ cargo run -p ffs-cli -- dump dir 2 <image-path> --json
 # Mount (default read-only, FUSE)
 cargo run -p ffs-cli -- mount <image-path> <mountpoint>
 
-# Mount with experimental read-write. btrfs metadata mutation still fails
-# closed unless --btrfs-rw-ephemeral-ok acknowledges non-durable, in-memory RW.
+# Mount with experimental read-write (durable by default for both ext4 and btrfs)
 cargo run -p ffs-cli -- mount <image-path> <mountpoint> --rw
-cargo run -p ffs-cli -- mount <btrfs-image-path> <mountpoint> \
-    --rw --btrfs-rw-ephemeral-ok
 
 # Mount with mounted automatic repair + evidence ledger
 cargo run -p ffs-cli -- mount <image-path> <mountpoint> \
@@ -3414,7 +3409,7 @@ Rows in the btrfs experimental RW contract can still be `partially supported` or
 ### What works today
 
 - **ext4.** Superblock, inode, extent header/entry, group descriptor, feature flag decoding, mount-time journal recovery (JBD2 + fast-commit + external-journal pairing), FUSE mount (RO default, experimental RW), `e2compr` read+write for gzip/LZO/none, casefold, encryption nokey mode, inline data, indirect block addressing, fallocate (KEEP_SIZE / PUNCH_HOLE / ZERO_RANGE / COLLAPSE_RANGE / INSERT_RANGE), POSIX ACL xattrs, MMP conservative rejection.
-- **btrfs.** Superblock, B-tree header, leaf item metadata, geometry validation, RAID stripe mapping (single/DUP/RAID0/1/5/6/10), FUSE mount (RO default; metadata mutation and `fsync`/`fsyncdir` fail closed with `EROFS` unless `--btrfs-rw-ephemeral-ok` acknowledges the current non-durable, in-memory experimental path), transparent ZLIB/LZO/ZSTD decompression, named subvolume/snapshot selection, tree-log replay, send/receive stream parsing, btrfs fallocate (KEEP_SIZE / PUNCH_HOLE / ZERO_RANGE / COLLAPSE_RANGE / INSERT_RANGE), backup superblock mirror repair, fragmentation-aware free-run reporting.
+- **btrfs.** Superblock, B-tree header, leaf item metadata, geometry validation, RAID stripe mapping (single/DUP/RAID0/1/5/6/10), FUSE mount (RO default; experimental RW with durable writeback via `btrfs_full_transaction_commit`), transparent ZLIB/LZO/ZSTD decompression, named subvolume/snapshot selection, tree-log replay, send/receive stream parsing, btrfs fallocate (KEEP_SIZE / PUNCH_HOLE / ZERO_RANGE / COLLAPSE_RANGE / INSERT_RANGE), backup superblock mirror repair, fragmentation-aware free-run reporting.
 - **MVCC.** Snapshot visibility, commit sequencing, FCW conflict detection, two same-block merge mechanisms behind semantic `MergeProof` labels, three conflict policies with adaptive expected-loss selection, EMA contention tracking, sharded concurrent store, Zstd/Brotli version compression, WAL persistence + crash recovery, SSI two-edge rw-antidependency detection.
 - **Self-healing.** Bayesian durability autopilot, RaptorQ symbol generation/recovery, four refresh policies (Eager/Lazy/Adaptive/Hybrid), stale-window SLO with percentile-based breach detection, multi-host repair-ownership coordination, expected-loss policy comparison, mounted automatic repair contract (read-only + read-write via MVCC repair-writeback serializer).
 - **Writeback-cache.** Epoch-based commit barriers with per-inode staged/visible/durable tracking, deferred visibility for MVCC isolation, dirty-page ordering oracle, 12-point crash/replay matrix artifact gate, runtime guard, and host/lane manifest checks. Kernel option default-off; explicit opt-in is evidence-gated.
@@ -3444,21 +3439,21 @@ See [`FEATURE_PARITY.md`](FEATURE_PARITY.md) for the full capability matrix and 
 
 **ext4.** Single-device images with block sizes 1K/2K/4K. Requires `FILETYPE`; `EXTENTS` is optional (indirect-block addressing is supported). FUSE mount defaults to read-only; `--rw` is available but experimental. All known incompat feature flags are accepted at mount time. `COMPRESSION` covers ext4 e2compr read/write for the implemented gzip/LZO/"none" method-table paths; rare legacy codecs (`lzv1`, `bzip2`, `lzrw3a`) reject deterministically with `EOPNOTSUPP`. `JOURNAL_DEV` images are detected; data filesystems referencing an external journal support paired-open replay through `OpenOptions::external_journal_path` (library API) with UUID/block-size validation. `ENCRYPT` shows filenames as raw bytes (nokey mode). `CASEFOLD` provides case-insensitive directory lookup. `INLINE_DATA` reads from inode block area + `system.data` xattr. MMP unsafe states are rejected with `EOPNOTSUPP`.
 
-**btrfs.** Single- and multi-device images with single / DUP / RAID 0/1/5/6/10 support. Metadata parsing + validation (superblock, leaf items, sys_chunk_array, chunk tree walking, device tree walking). FUSE mount/runtime contract fully tracked; the operator-facing mount path is experimental and defaults to read-only. `--rw` alone does not authorize btrfs metadata mutation: mutators and `fsync`/`fsyncdir` fail closed with `EROFS` unless `--btrfs-rw-ephemeral-ok` explicitly acknowledges the current non-durable, in-memory path. Transparent ZLIB/LZO/ZSTD decompression, named subvolume/snapshot selection (`--subvol`, `--snapshot`), tree-log replay, and send/receive stream parsing all implemented.
+**btrfs.** Single- and multi-device images with single / DUP / RAID 0/1/5/6/10 support. Metadata parsing + validation (superblock, leaf items, sys_chunk_array, chunk tree walking, device tree walking). FUSE mount/runtime contract fully tracked; the operator-facing mount path is experimental and defaults to read-only. `--rw` enables durable btrfs metadata mutation via `btrfs_full_transaction_commit()`. The `--btrfs-rw-ephemeral-ok` flag now controls commit strategy (ephemeral tree-log vs full durable commit), not permission. Transparent ZLIB/LZO/ZSTD decompression, named subvolume/snapshot selection (`--subvol`, `--snapshot`), tree-log replay, and send/receive stream parsing all implemented.
 
-### btrfs experimental RW contract
+### btrfs RW contract
 
-Current evidence covers the writeback DAG, crash-matrix/MR-WB oracles, and btrfs-progs differential smoke. It does not upgrade btrfs metadata RW to a durable production contract: with `--rw` alone, btrfs metadata mutators and `fsync`/`fsyncdir` return `EROFS`; adding `--btrfs-rw-ephemeral-ok` enables only the acknowledged non-durable, in-memory experimental path for disposable images.
+Btrfs RW is **durable by default** as of bd-jdo53. The commit sequence allocates real logical addresses from chunk-covered metadata block groups, rewrites internal child blockptrs, translates logical→physical via `map_logical_to_physical` for each device write, updates the FS_TREE ROOT_ITEM, commits EXTENT_TREE and ROOT_TREE, and patches the on-disk superblock in place. Coverage in `scripts/e2e/ffs_btrfs_rw_durable_remount_e2e.sh` proves 6/6 mutations survive unmount/remount with byte-exact content.
 
 | Operation class | Status | Contract |
 |---|---|---|
-| Core mutations (`create`, `mkdir`, `unlink`, `rmdir`, `rename`, `write`, `setattr`, `link`, `symlink`, xattrs) | Guarded experimental | `EROFS` unless `--btrfs-rw-ephemeral-ok` is set; with the flag, deterministic success/error under `ffs-core` + FUSE tests, including explicit xattr mode semantics (`Create`/`Replace`), but mutation remains non-durable/in-memory |
-| `fallocate(mode=0, FALLOC_FL_KEEP_SIZE)` | Guarded partial | Btrfs mutation guard applies; with `--btrfs-rw-ephemeral-ok`, preallocation paths are supported and validated |
-| `fallocate(PUNCH_HOLE\|KEEP_SIZE)` | Guarded experimental | Btrfs mutation guard applies; with `--btrfs-rw-ephemeral-ok`, zero-fills the requested range while preserving file size and unaffected bytes |
-| `fallocate(ZERO_RANGE [\|KEEP_SIZE])` | Guarded experimental | Btrfs mutation guard applies; with `--btrfs-rw-ephemeral-ok`, zero-fills; `KEEP_SIZE` preserves EOF; non-`KEEP_SIZE` can extend file size |
-| `fallocate(COLLAPSE_RANGE)` | Guarded experimental | Btrfs mutation guard applies; with `--btrfs-rw-ephemeral-ok`, removes aligned range, shifts tail left, shrinks file size, and preserves shifted prealloc extents as FIEMAP `UNWRITTEN` |
-| `fallocate(INSERT_RANGE)` | Guarded experimental | Btrfs mutation guard applies; with `--btrfs-rw-ephemeral-ok`, inserts aligned hole, shifts tail right, grows file size, and preserves shifted prealloc extents as FIEMAP `UNWRITTEN` |
-| `fallocate(unknown/extra mode bits)` | Unsupported | Returns `EOPNOTSUPP` (`FfsError::UnsupportedFeature`) with no partial mutation before rejection |
+| Core mutations (`create`, `mkdir`, `mknod`, `unlink`, `rmdir`, `rename`, `write`, `setattr`, `link`, `symlink`, xattrs) | Durable experimental | Deterministic success/error under `ffs-core` + FUSE tests; mutations are durable via full transaction commit on fsync/unmount |
+| `fallocate(mode=0, FALLOC_FL_KEEP_SIZE)` | Durable | Preallocation paths supported and validated |
+| `fallocate(PUNCH_HOLE\|KEEP_SIZE)` | Durable | Zero-fills the requested range while preserving file size and unaffected bytes |
+| `fallocate(ZERO_RANGE [\|KEEP_SIZE])` | Durable | Zero-fills; `KEEP_SIZE` preserves EOF; non-`KEEP_SIZE` can extend file size |
+| `fallocate(COLLAPSE_RANGE)` | Durable | Removes aligned range, shifts tail left, shrinks file size, preserves shifted prealloc extents as FIEMAP `UNWRITTEN` |
+| `fallocate(INSERT_RANGE)` | Durable | Inserts aligned hole, shifts tail right, grows file size, preserves shifted prealloc extents as FIEMAP `UNWRITTEN` |
+| `fallocate(unknown/extra mode bits)` | Unsupported | Returns `EOPNOTSUPP` with no partial mutation before rejection |
 | Unsupported-path observability | Required | Structured logs include `operation_id`, `scenario_id`, `outcome`, and `error_class` |
 
 Full normative scope: [`COMPREHENSIVE_SPEC_FOR_FRANKENFS_V1.md`](COMPREHENSIVE_SPEC_FOR_FRANKENFS_V1.md).
@@ -3486,7 +3481,7 @@ Full normative scope: [`COMPREHENSIVE_SPEC_FOR_FRANKENFS_V1.md`](COMPREHENSIVE_S
 - **Linux only.** FUSE is the sole mount target. No macOS or Windows support planned.
 - **Nightly Rust required.** Edition 2024 features require the nightly toolchain.
 - **Runtime is experimental.** Tracked feature-denominator completion means the V1 matrix is implemented and tested; it does not mean operational hardening, performance tuning, kernel verification, or future-scope features are finished. Mount / write paths should be treated as experimental in operational environments.
-- **btrfs read-write is guarded and non-durable today.** `--rw` alone does not allow btrfs metadata mutation; mutators and `fsync`/`fsyncdir` fail with `EROFS` unless `--btrfs-rw-ephemeral-ok` is also set. That flag acknowledges the current in-memory/ephemeral path; use disposable images only.
+- **btrfs read-write is experimental but durable.** `--rw` enables full durable metadata writeback via `btrfs_full_transaction_commit()`. The `--btrfs-rw-ephemeral-ok` flag now controls commit strategy (ephemeral tree-log-only vs full durable commit), not permission.
 - **Kernel FUSE writeback-cache mode is default-off and release-gated in V1.x.** The `--writeback-cache` opt-in requires `--rw`, an accepted audit gate, an accepted ordering oracle, fresh runtime-guard evidence, an accepted crash/replay oracle, a matching host/lane manifest, and a disarmed `FFS_WRITEBACK_CACHE_KILL_SWITCH`. `flush` is non-durable; `fsync` / `fsyncdir` are the explicit durability boundaries.
 - **Swarm responsiveness claims require permissioned large-host evidence.** Local swarm workload and tail-latency smoke lanes are downgrade artifacts; only fresh `authoritative_large_host` proof-bundle lanes strengthen `swarm.responsiveness`.
 - **Default CLI mount path does not enable optional backpressure / per-core scheduling hooks.** `ffs-cli mount` defaults to the `standard` runtime mode without wiring `BackpressureGate` controls.
@@ -3504,7 +3499,7 @@ Full normative scope: [`COMPREHENSIVE_SPEC_FOR_FRANKENFS_V1.md`](COMPREHENSIVE_S
 A: Kernel filesystems can't be extended with MVCC or self-healing from userspace. FrankenFS is a research vehicle for exploring what ext4/btrfs could look like with modern concurrency control and erasure coding, while remaining mount-compatible with existing images.
 
 **Q: Can I mount real ext4/btrfs data with this today?**
-A: `ffs mount` supports both ext4 and btrfs images under the tracked V1 feature contract, but the runtime is operationally experimental. Default behavior is read-only. Ext4 `--rw` paths are experimental; on btrfs, `--rw` alone is guarded and metadata mutators plus `fsync`/`fsyncdir` return `EROFS` unless `--btrfs-rw-ephemeral-ok` explicitly acknowledges non-durable, in-memory RW. Do not rely on it for production data.
+A: `ffs mount` supports both ext4 and btrfs images under the tracked V1 feature contract, but the runtime is operationally experimental. Default behavior is read-only. Both ext4 and btrfs `--rw` paths are experimental but durable - writes survive unmount and remount. Do not rely on it for production data.
 
 **Q: What does "spec-first" mean?**
 A: Instead of translating C to Rust line by line, we first extract the *behavioral contract* of each kernel subsystem into specification documents (~600 KB of structured Markdown across the canonical spec, the behavioral-extraction document, the architecture document, the porting plan, and the parity matrix). Then we implement from the spec in idiomatic Rust. This avoids carrying over C-isms and allows architectural improvements.
