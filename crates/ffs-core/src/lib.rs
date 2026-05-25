@@ -374,13 +374,16 @@ pub struct OpenOptions {
     /// request and only influences advisory group ordering; explicit
     /// `goal_group` / `goal_block` hints retain compatibility precedence.
     pub numa_allocation_policy: NumaAllocationPolicy,
-    /// Allow btrfs metadata mutations even though they are not durable.
+    /// Control btrfs metadata commit strategy.
     ///
-    /// **WARNING:** btrfs metadata writeback is not yet implemented. Mutations
-    /// execute against an in-memory COW tree that is **not serialized to disk**.
-    /// Setting this flag acknowledges that btrfs RW changes will be lost on
-    /// unmount. Without this flag, btrfs metadata-mutating operations return
-    /// `EROFS` to prevent silent data loss.
+    /// This flag controls how btrfs metadata mutations are persisted:
+    /// - **FALSE (default):** Durable mode. Full transaction commit on fsync/unmount
+    ///   via `btrfs_full_transaction_commit()`. Writes survive unmount and remount.
+    /// - **TRUE:** Ephemeral mode. Tree-log only (faster, but changes may be lost
+    ///   if the process crashes before unmount completes the final commit).
+    ///
+    /// With durable writeback implemented (bd-jdo53), mutations are always allowed
+    /// regardless of this flag. The flag only affects commit behavior, not permission.
     pub btrfs_rw_ephemeral_ok: bool,
 }
 
@@ -4789,10 +4792,7 @@ impl OpenFs {
         self.btrfs_alloc_state.as_ref().ok_or(FfsError::ReadOnly)
     }
 
-    /// Safety interlock: reject btrfs metadata mutations unless ephemeral-ok is set.
-    ///
-    /// Btrfs metadata writeback is not yet implemented: mutations execute against
-    /// an in-memory COW tree that is **never serialized to disk**. This interlock
+    /// Map a JBD2 commit error to an `FfsError` with context.
     fn map_journal_commit_error(
         txn_id: u64,
         error: CommitError,
