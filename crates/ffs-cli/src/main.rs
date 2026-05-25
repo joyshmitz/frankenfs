@@ -529,7 +529,7 @@ struct MountCmdOptions {
     btrfs_mount_selection: BtrfsMountSelection,
     ext4_data_err_policy: Ext4DataErrPolicy,
     ext4_verify_journal_checksums: bool,
-    /// Allow btrfs RW operations despite being non-durable (in-memory only).
+    /// Use ephemeral (tree-log only) commit strategy instead of full durable commit.
     btrfs_rw_ephemeral_ok: bool,
     runtime: MountRuntimeConfig,
     adaptive_runtime: MountAdaptiveRuntimeConfig,
@@ -839,13 +839,12 @@ enum Command {
         /// Mount a specific btrfs snapshot by name.
         #[arg(long)]
         snapshot: Option<String>,
-        /// Allow btrfs metadata mutations despite being non-durable.
+        /// Use ephemeral (tree-log only) commit strategy for btrfs.
         ///
-        /// WARNING: btrfs metadata writeback is not yet implemented. Mutations
-        /// execute against an in-memory COW tree that is NOT serialized to disk.
-        /// Without this flag, btrfs metadata-mutating operations return EROFS
-        /// to prevent silent data loss. Setting this flag acknowledges that
-        /// btrfs RW changes will be lost on unmount.
+        /// By default, btrfs RW is durable: full transaction commit on fsync/unmount
+        /// via btrfs_full_transaction_commit(). This flag switches to tree-log only
+        /// commits for faster fsync at the cost of durability - changes may be lost
+        /// if the process crashes before unmount completes the final commit.
         #[arg(long = "btrfs-rw-ephemeral-ok")]
         btrfs_rw_ephemeral_ok: bool,
     },
