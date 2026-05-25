@@ -1,0 +1,38 @@
+---
+source: crates/ffs-harness/src/permissioned_campaign_broker.rs
+expression: markdown
+---
+# Swarm Capability Calibration
+
+- Packet: `bd-4v16z.9-large-host-calibration-20260509`
+- Valid: `true`
+- Classification: `authoritative_large_host_candidate`
+- Candidate for authorized run: `true`
+- Product evidence claim: `none`
+- Release gate effect: swarm.responsiveness remains hidden or blocked until bd-rchk0.53.8 records executed large-host proof-bundle lanes and release-gate output
+- Real campaign bead: `bd-rchk0.53.8`
+- Worker: `rch:large-host-01`
+- Worker fingerprint age days: `0`
+- Queue isolation: `dedicated`
+- Target dir isolated: `true`
+- Artifact root: expected `artifacts/swarm/large-host` observed `artifacts/swarm/large-host`
+
+## Host Facts
+
+| Fact | Observed | Required | Proof |
+|---|---|---|---|
+| `logical_cpus` | `96` | `>=64` | `swarm_capability_calibration_manifest` |
+| `ram_total_gib` | `512.0` | `>=256` | `swarm_capability_calibration_manifest` |
+| `ram_available_gib` | `384.0` | `recorded` | `swarm_capability_calibration_manifest` |
+| `numa_topology_visible` | `true` | `true` | `swarm_capability_calibration_manifest` |
+| `numa_nodes` | `2` | `>=2` | `swarm_capability_calibration_manifest` |
+| `storage_class` | `local_nvme` | `recorded` | `swarm_capability_calibration_manifest` |
+| `fuse_capability` | `available` | `available` | `swarm_capability_calibration_manifest` |
+
+## Resource Caps
+
+- Duration: `7200` seconds
+- Threads: `96`
+- Memory: `384.0` GiB
+- Temp storage: `512.0` GiB
+- Queue depth: `4096`

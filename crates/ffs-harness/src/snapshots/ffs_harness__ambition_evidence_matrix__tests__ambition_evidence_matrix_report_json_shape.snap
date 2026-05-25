@@ -1,0 +1,3805 @@
+---
+source: crates/ffs-harness/src/ambition_evidence_matrix.rs
+expression: json
+---
+{
+  "matrix_version": "bd-rchk0.5.10-ambition-evidence-matrix-v3",
+  "tracker_limitation": "Current br dependency edges for dotted child IDs are unreliable in this checkout, so this matrix records the intended cross-workstream gate order as data and validates every referenced bead directly from issues.jsonl.",
+  "source_issue_count": 16,
+  "row_count": 15,
+  "source_bead_ids": [
+    "bd-rchk0.1.3",
+    "bd-rchk0.2.3",
+    "bd-rchk0.3.3",
+    "bd-rchk0.4.1",
+    "bd-rchk0.4.2",
+    "bd-rchk0.4.3",
+    "bd-rchk0.5.10",
+    "bd-rchk0.5.10.1",
+    "bd-rchk0.5.11",
+    "bd-rchk0.5.12",
+    "bd-rchk0.5.13",
+    "bd-rchk0.5.14",
+    "bd-rchk4.2",
+    "bd-rchk4.3",
+    "bd-rchk7.2"
+  ],
+  "required_source_beads": [
+    "bd-rchk0.5.10",
+    "bd-rchk0.5.10.1",
+    "bd-rchk0.5.11",
+    "bd-rchk0.5.12",
+    "bd-rchk0.5.13",
+    "bd-rchk0.5.14",
+    "bd-rchk0.4.1",
+    "bd-rchk0.4.2",
+    "bd-rchk0.4.3",
+    "bd-rchk4.2",
+    "bd-rchk4.3",
+    "bd-rchk7.2",
+    "bd-rchk0.1.3",
+    "bd-rchk0.2.3",
+    "bd-rchk0.3.3"
+  ],
+  "allowed_consumers": [
+    "proof-bundle",
+    "release-gates",
+    "remediation-catalog",
+    "README/FEATURE_PARITY",
+    "follow-up-bead",
+    "readiness-report"
+  ],
+  "rows": [
+    {
+      "source_bead_id": "bd-rchk0.1.3",
+      "source_status": "closed",
+      "title": "Add deterministic race tests for repair versus client writes",
+      "prerequisites": [
+        "none:root-operational-prerequisite"
+      ],
+      "owning_proof_lane": "operational-prerequisite",
+      "unit_test_contract": "schema validates status vocabulary, required fields, consumer contract, artifact path, log tokens, and stale-reference checks",
+      "e2e_contract": "scripts/e2e/ffs_ambition_evidence_matrix_e2e.sh includes this row in generated JSON and fail-closed stale-reference probes",
+      "logging_fields": [
+        "matrix_version",
+        "source_bead_ids",
+        "tracker_limitation",
+        "dependency_gate_map",
+        "operational_prerequisites",
+        "consumer_versions",
+        "stale_reference_checks",
+        "missing_field_diagnostics",
+        "downgrade_decisions",
+        "generated_artifact_paths",
+        "reproduction_command"
+      ],
+      "artifacts_emitted": [
+        "artifacts/ambition/evidence_matrix.json"
+      ],
+      "capability_skips": [
+        "not-applicable"
+      ],
+      "feature_gates_consumed": [
+        "readiness-report"
+      ],
+      "downstream_release_claim": "block public claim and require owning follow-up bead",
+      "matrix_status": "blocked",
+      "user_risk": "release claim drift",
+      "threat_class": "matrix-omission",
+      "threat_model_status": "blocked",
+      "threat_model_follow_up": "bd-rchk0.5.11",
+      "expected_safe_behavior": "fail closed before release claims strengthen when coverage is missing",
+      "hostile_artifact_handling": "blocked-by-bd-rchk0.5.11 before security claims can strengthen",
+      "remediation_status": "blocked",
+      "remediation_id": "bd-rchk0.5.12",
+      "remediation_follow_up": "bd-rchk0.5.12",
+      "demo_profile": "blocked-by-bd-rchk0.5.13",
+      "proof_demo_status": "blocked",
+      "proof_demo_follow_up": "bd-rchk0.5.13",
+      "low_privilege_proof_status": "blocked",
+      "low_privilege_proof_follow_up": "bd-rchk0.5.13",
+      "overhead_budget_status": "blocked",
+      "overhead_budget_follow_up": "bd-rchk0.5.14",
+      "budget_profile": "blocked-by-bd-rchk0.5.14",
+      "measured_overhead": "blocked-by-bd-rchk0.5.14",
+      "exception_expiry": "not-applicable: no exception granted",
+      "non_applicability_rationale": "all required dimensions are applicable or blocked by an owning follow-up",
+      "deferred_reason": "deferred fields name their owning follow-up before release-gate consumption",
+      "release_gate_consumer": "readiness-report",
+      "consumer_contracts": [
+        "follow-up-bead",
+        "readiness-report"
+      ],
+      "release_claim_effect": "block public claim and require owning follow-up bead",
+      "downgrade_decision": "fail-closed-blocked",
+      "artifact_path": "artifacts/ambition/evidence_matrix.json",
+      "required_logs": "matrix_version,source_bead_ids,tracker_limitation,dependency_gate_map,operational_prerequisites,consumer_versions,stale_reference_checks,missing_field_diagnostics,downgrade_decisions,generated_artifact_paths,reproduction_command",
+      "reproduction_command": "ffs-harness validate-ambition-evidence-matrix --issues .beads/issues.jsonl --out artifacts/ambition/evidence_matrix.json"
+    },
+    {
+      "source_bead_id": "bd-rchk0.2.3",
+      "source_status": "open",
+      "title": "Add writeback-cache crash/replay and fsync integration tests",
+      "prerequisites": [
+        "bd-rchk0.2.3",
+        "none:root-operational-prerequisite"
+      ],
+      "owning_proof_lane": "operational-prerequisite",
+      "unit_test_contract": "schema validates status vocabulary, required fields, consumer contract, artifact path, log tokens, and stale-reference checks",
+      "e2e_contract": "scripts/e2e/ffs_ambition_evidence_matrix_e2e.sh includes this row in generated JSON and fail-closed stale-reference probes",
+      "logging_fields": [
+        "matrix_version",
+        "source_bead_ids",
+        "tracker_limitation",
+        "dependency_gate_map",
+        "operational_prerequisites",
+        "consumer_versions",
+        "stale_reference_checks",
+        "missing_field_diagnostics",
+        "downgrade_decisions",
+        "generated_artifact_paths",
+        "reproduction_command"
+      ],
+      "artifacts_emitted": [
+        "artifacts/ambition/evidence_matrix.json"
+      ],
+      "capability_skips": [
+        "not-applicable"
+      ],
+      "feature_gates_consumed": [
+        "readiness-report",
+        "writeback_cache"
+      ],
+      "downstream_release_claim": "block public claim and require owning follow-up bead",
+      "matrix_status": "blocked",
+      "user_risk": "release claim drift",
+      "threat_class": "matrix-omission",
+      "threat_model_status": "blocked",
+      "threat_model_follow_up": "bd-rchk0.5.11",
+      "expected_safe_behavior": "fail closed before release claims strengthen when coverage is missing",
+      "hostile_artifact_handling": "blocked-by-bd-rchk0.5.11 before security claims can strengthen",
+      "remediation_status": "blocked",
+      "remediation_id": "bd-rchk0.5.12",
+      "remediation_follow_up": "bd-rchk0.5.12",
+      "demo_profile": "blocked-by-bd-rchk0.5.13",
+      "proof_demo_status": "blocked",
+      "proof_demo_follow_up": "bd-rchk0.5.13",
+      "low_privilege_proof_status": "blocked",
+      "low_privilege_proof_follow_up": "bd-rchk0.5.13",
+      "overhead_budget_status": "blocked",
+      "overhead_budget_follow_up": "bd-rchk0.5.14",
+      "budget_profile": "blocked-by-bd-rchk0.5.14",
+      "measured_overhead": "blocked-by-bd-rchk0.5.14",
+      "exception_expiry": "not-applicable: no exception granted",
+      "non_applicability_rationale": "all required dimensions are applicable or blocked by an owning follow-up",
+      "deferred_reason": "deferred fields name their owning follow-up before release-gate consumption",
+      "release_gate_consumer": "readiness-report",
+      "consumer_contracts": [
+        "follow-up-bead",
+        "readiness-report"
+      ],
+      "release_claim_effect": "block public claim and require owning follow-up bead",
+      "downgrade_decision": "fail-closed-blocked",
+      "artifact_path": "artifacts/ambition/evidence_matrix.json",
+      "required_logs": "matrix_version,source_bead_ids,tracker_limitation,dependency_gate_map,operational_prerequisites,consumer_versions,stale_reference_checks,missing_field_diagnostics,downgrade_decisions,generated_artifact_paths,reproduction_command",
+      "reproduction_command": "ffs-harness validate-ambition-evidence-matrix --issues .beads/issues.jsonl --out artifacts/ambition/evidence_matrix.json"
+    },
+    {
+      "source_bead_id": "bd-rchk0.3.3",
+      "source_status": "closed",
+      "title": "Exercise crash, unmount, and reopen recovery for mounted writes",
+      "prerequisites": [
+        "bd-rchk0.3.3",
+        "none:root-operational-prerequisite"
+      ],
+      "owning_proof_lane": "operational-prerequisite",
+      "unit_test_contract": "schema validates status vocabulary, required fields, consumer contract, artifact path, log tokens, and stale-reference checks",
+      "e2e_contract": "scripts/e2e/ffs_ambition_evidence_matrix_e2e.sh includes this row in generated JSON and fail-closed stale-reference probes",
+      "logging_fields": [
+        "matrix_version",
+        "source_bead_ids",
+        "tracker_limitation",
+        "dependency_gate_map",
+        "operational_prerequisites",
+        "consumer_versions",
+        "stale_reference_checks",
+        "missing_field_diagnostics",
+        "downgrade_decisions",
+        "generated_artifact_paths",
+        "reproduction_command"
+      ],
+      "artifacts_emitted": [
+        "artifacts/ambition/evidence_matrix.json"
+      ],
+      "capability_skips": [
+        "host-fuse-capability-skip"
+      ],
+      "feature_gates_consumed": [
+        "readiness-report"
+      ],
+      "downstream_release_claim": "block public claim and require owning follow-up bead",
+      "matrix_status": "blocked",
+      "user_risk": "release claim drift",
+      "threat_class": "matrix-omission",
+      "threat_model_status": "blocked",
+      "threat_model_follow_up": "bd-rchk0.5.11",
+      "expected_safe_behavior": "fail closed before release claims strengthen when coverage is missing",
+      "hostile_artifact_handling": "blocked-by-bd-rchk0.5.11 before security claims can strengthen",
+      "remediation_status": "blocked",
+      "remediation_id": "bd-rchk0.5.12",
+      "remediation_follow_up": "bd-rchk0.5.12",
+      "demo_profile": "blocked-by-bd-rchk0.5.13",
+      "proof_demo_status": "blocked",
+      "proof_demo_follow_up": "bd-rchk0.5.13",
+      "low_privilege_proof_status": "blocked",
+      "low_privilege_proof_follow_up": "bd-rchk0.5.13",
+      "overhead_budget_status": "blocked",
+      "overhead_budget_follow_up": "bd-rchk0.5.14",
+      "budget_profile": "blocked-by-bd-rchk0.5.14",
+      "measured_overhead": "blocked-by-bd-rchk0.5.14",
+      "exception_expiry": "not-applicable: no exception granted",
+      "non_applicability_rationale": "all required dimensions are applicable or blocked by an owning follow-up",
+      "deferred_reason": "deferred fields name their owning follow-up before release-gate consumption",
+      "release_gate_consumer": "readiness-report",
+      "consumer_contracts": [
+        "follow-up-bead",
+        "readiness-report"
+      ],
+      "release_claim_effect": "block public claim and require owning follow-up bead",
+      "downgrade_decision": "fail-closed-blocked",
+      "artifact_path": "artifacts/ambition/evidence_matrix.json",
+      "required_logs": "matrix_version,source_bead_ids,tracker_limitation,dependency_gate_map,operational_prerequisites,consumer_versions,stale_reference_checks,missing_field_diagnostics,downgrade_decisions,generated_artifact_paths,reproduction_command",
+      "reproduction_command": "ffs-harness validate-ambition-evidence-matrix --issues .beads/issues.jsonl --out artifacts/ambition/evidence_matrix.json"
+    },
+    {
+      "source_bead_id": "bd-rchk0.4.1",
+      "source_status": "closed",
+      "title": "Define the operational artifact schema and logging vocabulary",
+      "prerequisites": [
+        "none:root-operational-prerequisite"
+      ],
+      "owning_proof_lane": "operational-prerequisite",
+      "unit_test_contract": "schema validates status vocabulary, required fields, consumer contract, artifact path, log tokens, and stale-reference checks",
+      "e2e_contract": "scripts/e2e/ffs_ambition_evidence_matrix_e2e.sh includes this row in generated JSON and fail-closed stale-reference probes",
+      "logging_fields": [
+        "matrix_version",
+        "source_bead_ids",
+        "tracker_limitation",
+        "dependency_gate_map",
+        "operational_prerequisites",
+        "consumer_versions",
+        "stale_reference_checks",
+        "missing_field_diagnostics",
+        "downgrade_decisions",
+        "generated_artifact_paths",
+        "reproduction_command"
+      ],
+      "artifacts_emitted": [
+        "artifacts/ambition/evidence_matrix.json"
+      ],
+      "capability_skips": [
+        "not-applicable"
+      ],
+      "feature_gates_consumed": [
+        "README/FEATURE_PARITY"
+      ],
+      "downstream_release_claim": "block public claim and require owning follow-up bead",
+      "matrix_status": "blocked",
+      "user_risk": "release claim drift",
+      "threat_class": "matrix-omission",
+      "threat_model_status": "blocked",
+      "threat_model_follow_up": "bd-rchk0.5.11",
+      "expected_safe_behavior": "fail closed before release claims strengthen when coverage is missing",
+      "hostile_artifact_handling": "blocked-by-bd-rchk0.5.11 before security claims can strengthen",
+      "remediation_status": "blocked",
+      "remediation_id": "bd-rchk0.5.12",
+      "remediation_follow_up": "bd-rchk0.5.12",
+      "demo_profile": "blocked-by-bd-rchk0.5.13",
+      "proof_demo_status": "blocked",
+      "proof_demo_follow_up": "bd-rchk0.5.13",
+      "low_privilege_proof_status": "blocked",
+      "low_privilege_proof_follow_up": "bd-rchk0.5.13",
+      "overhead_budget_status": "blocked",
+      "overhead_budget_follow_up": "bd-rchk0.5.14",
+      "budget_profile": "blocked-by-bd-rchk0.5.14",
+      "measured_overhead": "blocked-by-bd-rchk0.5.14",
+      "exception_expiry": "not-applicable: no exception granted",
+      "non_applicability_rationale": "all required dimensions are applicable or blocked by an owning follow-up",
+      "deferred_reason": "deferred fields name their owning follow-up before release-gate consumption",
+      "release_gate_consumer": "README/FEATURE_PARITY",
+      "consumer_contracts": [
+        "README/FEATURE_PARITY",
+        "follow-up-bead"
+      ],
+      "release_claim_effect": "block public claim and require owning follow-up bead",
+      "downgrade_decision": "fail-closed-blocked",
+      "artifact_path": "artifacts/ambition/evidence_matrix.json",
+      "required_logs": "matrix_version,source_bead_ids,tracker_limitation,dependency_gate_map,operational_prerequisites,consumer_versions,stale_reference_checks,missing_field_diagnostics,downgrade_decisions,generated_artifact_paths,reproduction_command",
+      "reproduction_command": "ffs-harness validate-ambition-evidence-matrix --issues .beads/issues.jsonl --out artifacts/ambition/evidence_matrix.json"
+    },
+    {
+      "source_bead_id": "bd-rchk0.4.2",
+      "source_status": "closed",
+      "title": "Build the shared E2E runner harness with unit-tested artifact validation",
+      "prerequisites": [
+        "none:root-operational-prerequisite"
+      ],
+      "owning_proof_lane": "operational-prerequisite",
+      "unit_test_contract": "schema validates status vocabulary, required fields, consumer contract, artifact path, log tokens, and stale-reference checks",
+      "e2e_contract": "scripts/e2e/ffs_ambition_evidence_matrix_e2e.sh includes this row in generated JSON and fail-closed stale-reference probes",
+      "logging_fields": [
+        "matrix_version",
+        "source_bead_ids",
+        "tracker_limitation",
+        "dependency_gate_map",
+        "operational_prerequisites",
+        "consumer_versions",
+        "stale_reference_checks",
+        "missing_field_diagnostics",
+        "downgrade_decisions",
+        "generated_artifact_paths",
+        "reproduction_command"
+      ],
+      "artifacts_emitted": [
+        "artifacts/ambition/evidence_matrix.json"
+      ],
+      "capability_skips": [
+        "not-applicable"
+      ],
+      "feature_gates_consumed": [
+        "readiness-report"
+      ],
+      "downstream_release_claim": "block public claim and require owning follow-up bead",
+      "matrix_status": "blocked",
+      "user_risk": "release claim drift",
+      "threat_class": "matrix-omission",
+      "threat_model_status": "blocked",
+      "threat_model_follow_up": "bd-rchk0.5.11",
+      "expected_safe_behavior": "fail closed before release claims strengthen when coverage is missing",
+      "hostile_artifact_handling": "blocked-by-bd-rchk0.5.11 before security claims can strengthen",
+      "remediation_status": "blocked",
+      "remediation_id": "bd-rchk0.5.12",
+      "remediation_follow_up": "bd-rchk0.5.12",
+      "demo_profile": "blocked-by-bd-rchk0.5.13",
+      "proof_demo_status": "blocked",
+      "proof_demo_follow_up": "bd-rchk0.5.13",
+      "low_privilege_proof_status": "blocked",
+      "low_privilege_proof_follow_up": "bd-rchk0.5.13",
+      "overhead_budget_status": "blocked",
+      "overhead_budget_follow_up": "bd-rchk0.5.14",
+      "budget_profile": "blocked-by-bd-rchk0.5.14",
+      "measured_overhead": "blocked-by-bd-rchk0.5.14",
+      "exception_expiry": "not-applicable: no exception granted",
+      "non_applicability_rationale": "all required dimensions are applicable or blocked by an owning follow-up",
+      "deferred_reason": "deferred fields name their owning follow-up before release-gate consumption",
+      "release_gate_consumer": "readiness-report",
+      "consumer_contracts": [
+        "follow-up-bead",
+        "readiness-report"
+      ],
+      "release_claim_effect": "block public claim and require owning follow-up bead",
+      "downgrade_decision": "fail-closed-blocked",
+      "artifact_path": "artifacts/ambition/evidence_matrix.json",
+      "required_logs": "matrix_version,source_bead_ids,tracker_limitation,dependency_gate_map,operational_prerequisites,consumer_versions,stale_reference_checks,missing_field_diagnostics,downgrade_decisions,generated_artifact_paths,reproduction_command",
+      "reproduction_command": "ffs-harness validate-ambition-evidence-matrix --issues .beads/issues.jsonl --out artifacts/ambition/evidence_matrix.json"
+    },
+    {
+      "source_bead_id": "bd-rchk0.4.3",
+      "source_status": "closed",
+      "title": "Create a one-command operational readiness report aggregator",
+      "prerequisites": [
+        "none:root-operational-prerequisite"
+      ],
+      "owning_proof_lane": "operational-prerequisite",
+      "unit_test_contract": "schema validates status vocabulary, required fields, consumer contract, artifact path, log tokens, and stale-reference checks",
+      "e2e_contract": "scripts/e2e/ffs_ambition_evidence_matrix_e2e.sh includes this row in generated JSON and fail-closed stale-reference probes",
+      "logging_fields": [
+        "matrix_version",
+        "source_bead_ids",
+        "tracker_limitation",
+        "dependency_gate_map",
+        "operational_prerequisites",
+        "consumer_versions",
+        "stale_reference_checks",
+        "missing_field_diagnostics",
+        "downgrade_decisions",
+        "generated_artifact_paths",
+        "reproduction_command"
+      ],
+      "artifacts_emitted": [
+        "artifacts/ambition/evidence_matrix.json"
+      ],
+      "capability_skips": [
+        "not-applicable"
+      ],
+      "feature_gates_consumed": [
+        "readiness-report"
+      ],
+      "downstream_release_claim": "block public claim and require owning follow-up bead",
+      "matrix_status": "blocked",
+      "user_risk": "release claim drift",
+      "threat_class": "matrix-omission",
+      "threat_model_status": "blocked",
+      "threat_model_follow_up": "bd-rchk0.5.11",
+      "expected_safe_behavior": "fail closed before release claims strengthen when coverage is missing",
+      "hostile_artifact_handling": "blocked-by-bd-rchk0.5.11 before security claims can strengthen",
+      "remediation_status": "blocked",
+      "remediation_id": "bd-rchk0.5.12",
+      "remediation_follow_up": "bd-rchk0.5.12",
+      "demo_profile": "blocked-by-bd-rchk0.5.13",
+      "proof_demo_status": "blocked",
+      "proof_demo_follow_up": "bd-rchk0.5.13",
+      "low_privilege_proof_status": "blocked",
+      "low_privilege_proof_follow_up": "bd-rchk0.5.13",
+      "overhead_budget_status": "blocked",
+      "overhead_budget_follow_up": "bd-rchk0.5.14",
+      "budget_profile": "blocked-by-bd-rchk0.5.14",
+      "measured_overhead": "blocked-by-bd-rchk0.5.14",
+      "exception_expiry": "not-applicable: no exception granted",
+      "non_applicability_rationale": "all required dimensions are applicable or blocked by an owning follow-up",
+      "deferred_reason": "deferred fields name their owning follow-up before release-gate consumption",
+      "release_gate_consumer": "readiness-report",
+      "consumer_contracts": [
+        "follow-up-bead",
+        "readiness-report"
+      ],
+      "release_claim_effect": "block public claim and require owning follow-up bead",
+      "downgrade_decision": "fail-closed-blocked",
+      "artifact_path": "artifacts/ambition/evidence_matrix.json",
+      "required_logs": "matrix_version,source_bead_ids,tracker_limitation,dependency_gate_map,operational_prerequisites,consumer_versions,stale_reference_checks,missing_field_diagnostics,downgrade_decisions,generated_artifact_paths,reproduction_command",
+      "reproduction_command": "ffs-harness validate-ambition-evidence-matrix --issues .beads/issues.jsonl --out artifacts/ambition/evidence_matrix.json"
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.10",
+      "source_status": "open",
+      "title": "Create ambition evidence matrix and dependency gate map",
+      "prerequisites": [
+        "bd-rchk0.1.3",
+        "bd-rchk0.2.3",
+        "bd-rchk0.3.3",
+        "bd-rchk0.4.1",
+        "bd-rchk0.4.2",
+        "bd-rchk0.4.3",
+        "bd-rchk4.2",
+        "bd-rchk4.3",
+        "bd-rchk7.2"
+      ],
+      "owning_proof_lane": "ambition-evidence-matrix",
+      "unit_test_contract": "schema rejects missing user risk, prerequisites, unit test contract, E2E contract, log fields, artifact consumers, and stale bead references",
+      "e2e_contract": "scripts/e2e/ffs_ambition_evidence_matrix_e2e.sh renders the matrix, verifies real bead references, and checks dependency gate order",
+      "logging_fields": [
+        "matrix_version",
+        "source_bead_ids",
+        "tracker_limitation",
+        "dependency_gate_map",
+        "operational_prerequisites",
+        "consumer_versions",
+        "stale_reference_checks",
+        "missing_field_diagnostics",
+        "downgrade_decisions",
+        "generated_artifact_paths",
+        "reproduction_command"
+      ],
+      "artifacts_emitted": [
+        "artifacts/ambition/dependency_gate_map.json",
+        "artifacts/ambition/evidence_matrix.json"
+      ],
+      "capability_skips": [
+        "not-applicable"
+      ],
+      "feature_gates_consumed": [
+        "release-gates"
+      ],
+      "downstream_release_claim": "block public claim and require owning follow-up bead",
+      "matrix_status": "blocked",
+      "user_risk": "release claim drift",
+      "threat_class": "matrix-omission",
+      "threat_model_status": "blocked",
+      "threat_model_follow_up": "bd-rchk0.5.11",
+      "expected_safe_behavior": "fail closed before release claims strengthen when coverage is missing",
+      "hostile_artifact_handling": "blocked-by-bd-rchk0.5.11 before security claims can strengthen",
+      "remediation_status": "blocked",
+      "remediation_id": "bd-rchk0.5.12",
+      "remediation_follow_up": "bd-rchk0.5.12",
+      "demo_profile": "blocked-by-bd-rchk0.5.13",
+      "proof_demo_status": "blocked",
+      "proof_demo_follow_up": "bd-rchk0.5.13",
+      "low_privilege_proof_status": "blocked",
+      "low_privilege_proof_follow_up": "bd-rchk0.5.13",
+      "overhead_budget_status": "blocked",
+      "overhead_budget_follow_up": "bd-rchk0.5.14",
+      "budget_profile": "blocked-by-bd-rchk0.5.14",
+      "measured_overhead": "blocked-by-bd-rchk0.5.14",
+      "exception_expiry": "not-applicable: no exception granted",
+      "non_applicability_rationale": "all required dimensions are applicable or blocked by an owning follow-up",
+      "deferred_reason": "deferred fields name their owning follow-up before release-gate consumption",
+      "release_gate_consumer": "release-gates",
+      "consumer_contracts": [
+        "README/FEATURE_PARITY",
+        "follow-up-bead",
+        "release-gates"
+      ],
+      "release_claim_effect": "block public claim and require owning follow-up bead",
+      "downgrade_decision": "fail-closed-blocked",
+      "artifact_path": "artifacts/ambition/evidence_matrix.json",
+      "required_logs": "matrix_version,source_bead_ids,tracker_limitation,dependency_gate_map,operational_prerequisites,consumer_versions,stale_reference_checks,missing_field_diagnostics,downgrade_decisions,generated_artifact_paths,reproduction_command",
+      "reproduction_command": "ffs-harness validate-ambition-evidence-matrix --issues .beads/issues.jsonl --out artifacts/ambition/evidence_matrix.json"
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.10.1",
+      "source_status": "closed",
+      "title": "Refine ambition evidence matrix for safety remediation demos and budgets",
+      "prerequisites": [
+        "bd-rchk0.1.3",
+        "bd-rchk0.4.1",
+        "bd-rchk0.4.2",
+        "bd-rchk0.4.3",
+        "bd-rchk4.2",
+        "bd-rchk4.3",
+        "bd-rchk7.2"
+      ],
+      "owning_proof_lane": "ambition-evidence-matrix",
+      "unit_test_contract": "schema validates status vocabulary, required fields, consumer contract, artifact path, log tokens, and stale-reference checks",
+      "e2e_contract": "scripts/e2e/ffs_ambition_evidence_matrix_e2e.sh includes this row in generated JSON and fail-closed stale-reference probes",
+      "logging_fields": [
+        "matrix_version",
+        "source_bead_ids",
+        "tracker_limitation",
+        "dependency_gate_map",
+        "operational_prerequisites",
+        "consumer_versions",
+        "stale_reference_checks",
+        "missing_field_diagnostics",
+        "downgrade_decisions",
+        "generated_artifact_paths",
+        "reproduction_command"
+      ],
+      "artifacts_emitted": [
+        "artifacts/ambition/evidence_matrix.json",
+        "artifacts/proof/bundle/manifest.json",
+        "artifacts/remediation/catalog.json",
+        "security/adversarial_image_threat_model.json"
+      ],
+      "capability_skips": [
+        "not-applicable"
+      ],
+      "feature_gates_consumed": [
+        "errors.evidence",
+        "performance.baseline",
+        "proof.low_privilege_demo",
+        "release-gates",
+        "repair.rw.writeback",
+        "security.hostile_image"
+      ],
+      "downstream_release_claim": "allow matrix-backed claim only for declared consumer lanes",
+      "matrix_status": "validated",
+      "user_risk": "hostile-image or hostile-artifact safety",
+      "threat_class": "hostile-image-or-artifact",
+      "threat_model_status": "validated",
+      "threat_model_follow_up": "",
+      "expected_safe_behavior": "fail closed before release claims strengthen when coverage is missing",
+      "hostile_artifact_handling": "classify hostile artifacts, refuse traversal or tamper, preserve reproduction data",
+      "remediation_status": "validated",
+      "remediation_id": "remediation:ambition-matrix",
+      "remediation_follow_up": "",
+      "demo_profile": "low-privilege-smoke",
+      "proof_demo_status": "validated",
+      "proof_demo_follow_up": "",
+      "low_privilege_proof_status": "validated",
+      "low_privilege_proof_follow_up": "",
+      "overhead_budget_status": "validated",
+      "overhead_budget_follow_up": "",
+      "budget_profile": "developer-smoke",
+      "measured_overhead": "required-before-budget-gate-promotion",
+      "exception_expiry": "not-applicable: no exception granted",
+      "non_applicability_rationale": "all required dimensions are applicable or blocked by an owning follow-up",
+      "deferred_reason": "deferred fields name their owning follow-up before release-gate consumption",
+      "release_gate_consumer": "release-gates",
+      "consumer_contracts": [
+        "README/FEATURE_PARITY",
+        "proof-bundle",
+        "release-gates",
+        "remediation-catalog"
+      ],
+      "release_claim_effect": "allow matrix-backed claim only for declared consumer lanes",
+      "downgrade_decision": "no downgrade for covered consumer lane",
+      "artifact_path": "artifacts/ambition/evidence_matrix.json",
+      "required_logs": "matrix_version,source_bead_ids,tracker_limitation,dependency_gate_map,operational_prerequisites,consumer_versions,stale_reference_checks,missing_field_diagnostics,downgrade_decisions,generated_artifact_paths,reproduction_command",
+      "reproduction_command": "ffs-harness validate-ambition-evidence-matrix --issues .beads/issues.jsonl --out artifacts/ambition/evidence_matrix.json"
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.11",
+      "source_status": "open",
+      "title": "Add adversarial image security and safety threat model for ambition gates",
+      "prerequisites": [
+        "bd-rchk0.4.1",
+        "bd-rchk0.4.2",
+        "bd-rchk0.4.3",
+        "bd-rchk4.2",
+        "bd-rchk4.3",
+        "bd-rchk7.2"
+      ],
+      "owning_proof_lane": "security-hostile-artifact",
+      "unit_test_contract": "schema validates status vocabulary, required fields, consumer contract, artifact path, log tokens, and stale-reference checks",
+      "e2e_contract": "scripts/e2e/ffs_ambition_evidence_matrix_e2e.sh includes this row in generated JSON and fail-closed stale-reference probes",
+      "logging_fields": [
+        "matrix_version",
+        "source_bead_ids",
+        "tracker_limitation",
+        "dependency_gate_map",
+        "operational_prerequisites",
+        "consumer_versions",
+        "stale_reference_checks",
+        "missing_field_diagnostics",
+        "downgrade_decisions",
+        "generated_artifact_paths",
+        "reproduction_command"
+      ],
+      "artifacts_emitted": [
+        "artifacts/ambition/evidence_matrix.json",
+        "security/adversarial_image_threat_model.json"
+      ],
+      "capability_skips": [
+        "not-applicable"
+      ],
+      "feature_gates_consumed": [
+        "release-gates",
+        "security.hostile_image"
+      ],
+      "downstream_release_claim": "downgrade public claim until missing consumer evidence is represented",
+      "matrix_status": "partial",
+      "user_risk": "hostile-image or hostile-artifact safety",
+      "threat_class": "hostile-image-or-artifact",
+      "threat_model_status": "partial",
+      "threat_model_follow_up": "",
+      "expected_safe_behavior": "fail closed before release claims strengthen when coverage is missing",
+      "hostile_artifact_handling": "classify hostile artifacts, refuse traversal or tamper, preserve reproduction data",
+      "remediation_status": "blocked",
+      "remediation_id": "bd-rchk0.5.12",
+      "remediation_follow_up": "bd-rchk0.5.12",
+      "demo_profile": "blocked-by-bd-rchk0.5.13",
+      "proof_demo_status": "blocked",
+      "proof_demo_follow_up": "bd-rchk0.5.13",
+      "low_privilege_proof_status": "blocked",
+      "low_privilege_proof_follow_up": "bd-rchk0.5.13",
+      "overhead_budget_status": "blocked",
+      "overhead_budget_follow_up": "bd-rchk0.5.14",
+      "budget_profile": "blocked-by-bd-rchk0.5.14",
+      "measured_overhead": "blocked-by-bd-rchk0.5.14",
+      "exception_expiry": "not-applicable: no exception granted",
+      "non_applicability_rationale": "all required dimensions are applicable or blocked by an owning follow-up",
+      "deferred_reason": "deferred fields name their owning follow-up before release-gate consumption",
+      "release_gate_consumer": "release-gates",
+      "consumer_contracts": [
+        "follow-up-bead",
+        "release-gates"
+      ],
+      "release_claim_effect": "downgrade public claim until missing consumer evidence is represented",
+      "downgrade_decision": "downgrade-to-experimental",
+      "artifact_path": "artifacts/ambition/evidence_matrix.json",
+      "required_logs": "matrix_version,source_bead_ids,tracker_limitation,dependency_gate_map,operational_prerequisites,consumer_versions,stale_reference_checks,missing_field_diagnostics,downgrade_decisions,generated_artifact_paths,reproduction_command",
+      "reproduction_command": "ffs-harness validate-ambition-evidence-matrix --issues .beads/issues.jsonl --out artifacts/ambition/evidence_matrix.json"
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.12",
+      "source_status": "open",
+      "title": "Create user remediation catalog for proof failures and readiness blockers",
+      "prerequisites": [
+        "bd-rchk0.1.3",
+        "bd-rchk0.4.1",
+        "bd-rchk0.4.2",
+        "bd-rchk0.4.3",
+        "bd-rchk4.2",
+        "bd-rchk4.3",
+        "bd-rchk7.2"
+      ],
+      "owning_proof_lane": "operator-remediation",
+      "unit_test_contract": "schema validates status vocabulary, required fields, consumer contract, artifact path, log tokens, and stale-reference checks",
+      "e2e_contract": "scripts/e2e/ffs_ambition_evidence_matrix_e2e.sh includes this row in generated JSON and fail-closed stale-reference probes",
+      "logging_fields": [
+        "matrix_version",
+        "source_bead_ids",
+        "tracker_limitation",
+        "dependency_gate_map",
+        "operational_prerequisites",
+        "consumer_versions",
+        "stale_reference_checks",
+        "missing_field_diagnostics",
+        "downgrade_decisions",
+        "generated_artifact_paths",
+        "reproduction_command"
+      ],
+      "artifacts_emitted": [
+        "artifacts/ambition/evidence_matrix.json",
+        "artifacts/proof/bundle/manifest.json",
+        "artifacts/remediation/catalog.json"
+      ],
+      "capability_skips": [
+        "not-applicable"
+      ],
+      "feature_gates_consumed": [
+        "errors.evidence",
+        "proof-bundle",
+        "proof.low_privilege_demo",
+        "repair.rw.writeback"
+      ],
+      "downstream_release_claim": "downgrade public claim until missing consumer evidence is represented",
+      "matrix_status": "partial",
+      "user_risk": "operator recovery after proof failure",
+      "threat_class": "unproven-demo-claim",
+      "threat_model_status": "blocked",
+      "threat_model_follow_up": "bd-rchk0.5.11",
+      "expected_safe_behavior": "fail closed before release claims strengthen when coverage is missing",
+      "hostile_artifact_handling": "blocked-by-bd-rchk0.5.11 before security claims can strengthen",
+      "remediation_status": "partial",
+      "remediation_id": "remediation:ambition-matrix",
+      "remediation_follow_up": "",
+      "demo_profile": "low-privilege-smoke",
+      "proof_demo_status": "partial",
+      "proof_demo_follow_up": "",
+      "low_privilege_proof_status": "partial",
+      "low_privilege_proof_follow_up": "",
+      "overhead_budget_status": "blocked",
+      "overhead_budget_follow_up": "bd-rchk0.5.14",
+      "budget_profile": "blocked-by-bd-rchk0.5.14",
+      "measured_overhead": "blocked-by-bd-rchk0.5.14",
+      "exception_expiry": "not-applicable: no exception granted",
+      "non_applicability_rationale": "all required dimensions are applicable or blocked by an owning follow-up",
+      "deferred_reason": "deferred fields name their owning follow-up before release-gate consumption",
+      "release_gate_consumer": "proof-bundle",
+      "consumer_contracts": [
+        "follow-up-bead",
+        "proof-bundle",
+        "remediation-catalog"
+      ],
+      "release_claim_effect": "downgrade public claim until missing consumer evidence is represented",
+      "downgrade_decision": "downgrade-to-experimental",
+      "artifact_path": "artifacts/ambition/evidence_matrix.json",
+      "required_logs": "matrix_version,source_bead_ids,tracker_limitation,dependency_gate_map,operational_prerequisites,consumer_versions,stale_reference_checks,missing_field_diagnostics,downgrade_decisions,generated_artifact_paths,reproduction_command",
+      "reproduction_command": "ffs-harness validate-ambition-evidence-matrix --issues .beads/issues.jsonl --out artifacts/ambition/evidence_matrix.json"
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.13",
+      "source_status": "open",
+      "title": "Build low-privilege local trust demo and sample proof bundle",
+      "prerequisites": [
+        "bd-rchk0.4.1",
+        "bd-rchk0.4.2",
+        "bd-rchk0.4.3",
+        "bd-rchk4.2",
+        "bd-rchk4.3",
+        "bd-rchk7.2"
+      ],
+      "owning_proof_lane": "low-privilege-proof-demo",
+      "unit_test_contract": "schema validates status vocabulary, required fields, consumer contract, artifact path, log tokens, and stale-reference checks",
+      "e2e_contract": "scripts/e2e/ffs_ambition_evidence_matrix_e2e.sh includes this row in generated JSON and fail-closed stale-reference probes",
+      "logging_fields": [
+        "matrix_version",
+        "source_bead_ids",
+        "tracker_limitation",
+        "dependency_gate_map",
+        "operational_prerequisites",
+        "consumer_versions",
+        "stale_reference_checks",
+        "missing_field_diagnostics",
+        "downgrade_decisions",
+        "generated_artifact_paths",
+        "reproduction_command"
+      ],
+      "artifacts_emitted": [
+        "artifacts/ambition/evidence_matrix.json",
+        "artifacts/proof/bundle/manifest.json"
+      ],
+      "capability_skips": [
+        "not-applicable"
+      ],
+      "feature_gates_consumed": [
+        "proof-bundle",
+        "proof.low_privilege_demo"
+      ],
+      "downstream_release_claim": "downgrade public claim until missing consumer evidence is represented",
+      "matrix_status": "partial",
+      "user_risk": "low-privilege trust proof coverage",
+      "threat_class": "unproven-demo-claim",
+      "threat_model_status": "blocked",
+      "threat_model_follow_up": "bd-rchk0.5.11",
+      "expected_safe_behavior": "fail closed before release claims strengthen when coverage is missing",
+      "hostile_artifact_handling": "blocked-by-bd-rchk0.5.11 before security claims can strengthen",
+      "remediation_status": "blocked",
+      "remediation_id": "bd-rchk0.5.12",
+      "remediation_follow_up": "bd-rchk0.5.12",
+      "demo_profile": "low-privilege-smoke",
+      "proof_demo_status": "partial",
+      "proof_demo_follow_up": "",
+      "low_privilege_proof_status": "partial",
+      "low_privilege_proof_follow_up": "",
+      "overhead_budget_status": "blocked",
+      "overhead_budget_follow_up": "bd-rchk0.5.14",
+      "budget_profile": "blocked-by-bd-rchk0.5.14",
+      "measured_overhead": "blocked-by-bd-rchk0.5.14",
+      "exception_expiry": "not-applicable: no exception granted",
+      "non_applicability_rationale": "all required dimensions are applicable or blocked by an owning follow-up",
+      "deferred_reason": "deferred fields name their owning follow-up before release-gate consumption",
+      "release_gate_consumer": "proof-bundle",
+      "consumer_contracts": [
+        "README/FEATURE_PARITY",
+        "follow-up-bead",
+        "proof-bundle"
+      ],
+      "release_claim_effect": "downgrade public claim until missing consumer evidence is represented",
+      "downgrade_decision": "downgrade-to-experimental",
+      "artifact_path": "artifacts/ambition/evidence_matrix.json",
+      "required_logs": "matrix_version,source_bead_ids,tracker_limitation,dependency_gate_map,operational_prerequisites,consumer_versions,stale_reference_checks,missing_field_diagnostics,downgrade_decisions,generated_artifact_paths,reproduction_command",
+      "reproduction_command": "ffs-harness validate-ambition-evidence-matrix --issues .beads/issues.jsonl --out artifacts/ambition/evidence_matrix.json"
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.14",
+      "source_status": "closed",
+      "title": "Set overhead budgets for proof instrumentation repair and logging",
+      "prerequisites": [
+        "bd-rchk0.4.1",
+        "bd-rchk0.4.2",
+        "bd-rchk0.4.3"
+      ],
+      "owning_proof_lane": "proof-overhead-budget",
+      "unit_test_contract": "schema validates status vocabulary, required fields, consumer contract, artifact path, log tokens, and stale-reference checks",
+      "e2e_contract": "scripts/e2e/ffs_ambition_evidence_matrix_e2e.sh includes this row in generated JSON and fail-closed stale-reference probes",
+      "logging_fields": [
+        "matrix_version",
+        "source_bead_ids",
+        "tracker_limitation",
+        "dependency_gate_map",
+        "operational_prerequisites",
+        "consumer_versions",
+        "stale_reference_checks",
+        "missing_field_diagnostics",
+        "downgrade_decisions",
+        "generated_artifact_paths",
+        "reproduction_command"
+      ],
+      "artifacts_emitted": [
+        "artifacts/ambition/evidence_matrix.json"
+      ],
+      "capability_skips": [
+        "not-applicable"
+      ],
+      "feature_gates_consumed": [
+        "performance.baseline",
+        "release-gates"
+      ],
+      "downstream_release_claim": "downgrade public claim until missing consumer evidence is represented",
+      "matrix_status": "partial",
+      "user_risk": "proof overhead and artifact cost",
+      "threat_class": "resource-exhaustion",
+      "threat_model_status": "blocked",
+      "threat_model_follow_up": "bd-rchk0.5.11",
+      "expected_safe_behavior": "fail closed before release claims strengthen when coverage is missing",
+      "hostile_artifact_handling": "blocked-by-bd-rchk0.5.11 before security claims can strengthen",
+      "remediation_status": "blocked",
+      "remediation_id": "bd-rchk0.5.12",
+      "remediation_follow_up": "bd-rchk0.5.12",
+      "demo_profile": "blocked-by-bd-rchk0.5.13",
+      "proof_demo_status": "blocked",
+      "proof_demo_follow_up": "bd-rchk0.5.13",
+      "low_privilege_proof_status": "blocked",
+      "low_privilege_proof_follow_up": "bd-rchk0.5.13",
+      "overhead_budget_status": "validated",
+      "overhead_budget_follow_up": "",
+      "budget_profile": "developer-smoke",
+      "measured_overhead": "required-before-budget-gate-promotion",
+      "exception_expiry": "not-applicable: no exception granted",
+      "non_applicability_rationale": "all required dimensions are applicable or blocked by an owning follow-up",
+      "deferred_reason": "deferred fields name their owning follow-up before release-gate consumption",
+      "release_gate_consumer": "release-gates",
+      "consumer_contracts": [
+        "follow-up-bead",
+        "release-gates"
+      ],
+      "release_claim_effect": "downgrade public claim until missing consumer evidence is represented",
+      "downgrade_decision": "downgrade-to-experimental",
+      "artifact_path": "artifacts/ambition/evidence_matrix.json",
+      "required_logs": "matrix_version,source_bead_ids,tracker_limitation,dependency_gate_map,operational_prerequisites,consumer_versions,stale_reference_checks,missing_field_diagnostics,downgrade_decisions,generated_artifact_paths,reproduction_command",
+      "reproduction_command": "ffs-harness validate-ambition-evidence-matrix --issues .beads/issues.jsonl --out artifacts/ambition/evidence_matrix.json"
+    },
+    {
+      "source_bead_id": "bd-rchk4.2",
+      "source_status": "closed",
+      "title": "Provision or document a permissioned CI/RCH FUSE lane",
+      "prerequisites": [
+        "none:root-operational-prerequisite"
+      ],
+      "owning_proof_lane": "operational-prerequisite",
+      "unit_test_contract": "schema validates status vocabulary, required fields, consumer contract, artifact path, log tokens, and stale-reference checks",
+      "e2e_contract": "scripts/e2e/ffs_ambition_evidence_matrix_e2e.sh includes this row in generated JSON and fail-closed stale-reference probes",
+      "logging_fields": [
+        "matrix_version",
+        "source_bead_ids",
+        "tracker_limitation",
+        "dependency_gate_map",
+        "operational_prerequisites",
+        "consumer_versions",
+        "stale_reference_checks",
+        "missing_field_diagnostics",
+        "downgrade_decisions",
+        "generated_artifact_paths",
+        "reproduction_command"
+      ],
+      "artifacts_emitted": [
+        "artifacts/ambition/evidence_matrix.json"
+      ],
+      "capability_skips": [
+        "host-fuse-capability-skip"
+      ],
+      "feature_gates_consumed": [
+        "readiness-report"
+      ],
+      "downstream_release_claim": "block public claim and require owning follow-up bead",
+      "matrix_status": "blocked",
+      "user_risk": "release claim drift",
+      "threat_class": "matrix-omission",
+      "threat_model_status": "blocked",
+      "threat_model_follow_up": "bd-rchk0.5.11",
+      "expected_safe_behavior": "fail closed before release claims strengthen when coverage is missing",
+      "hostile_artifact_handling": "blocked-by-bd-rchk0.5.11 before security claims can strengthen",
+      "remediation_status": "blocked",
+      "remediation_id": "bd-rchk0.5.12",
+      "remediation_follow_up": "bd-rchk0.5.12",
+      "demo_profile": "blocked-by-bd-rchk0.5.13",
+      "proof_demo_status": "blocked",
+      "proof_demo_follow_up": "bd-rchk0.5.13",
+      "low_privilege_proof_status": "blocked",
+      "low_privilege_proof_follow_up": "bd-rchk0.5.13",
+      "overhead_budget_status": "blocked",
+      "overhead_budget_follow_up": "bd-rchk0.5.14",
+      "budget_profile": "blocked-by-bd-rchk0.5.14",
+      "measured_overhead": "blocked-by-bd-rchk0.5.14",
+      "exception_expiry": "not-applicable: no exception granted",
+      "non_applicability_rationale": "all required dimensions are applicable or blocked by an owning follow-up",
+      "deferred_reason": "deferred fields name their owning follow-up before release-gate consumption",
+      "release_gate_consumer": "readiness-report",
+      "consumer_contracts": [
+        "follow-up-bead",
+        "readiness-report"
+      ],
+      "release_claim_effect": "block public claim and require owning follow-up bead",
+      "downgrade_decision": "fail-closed-blocked",
+      "artifact_path": "artifacts/ambition/evidence_matrix.json",
+      "required_logs": "matrix_version,source_bead_ids,tracker_limitation,dependency_gate_map,operational_prerequisites,consumer_versions,stale_reference_checks,missing_field_diagnostics,downgrade_decisions,generated_artifact_paths,reproduction_command",
+      "reproduction_command": "ffs-harness validate-ambition-evidence-matrix --issues .beads/issues.jsonl --out artifacts/ambition/evidence_matrix.json"
+    },
+    {
+      "source_bead_id": "bd-rchk4.3",
+      "source_status": "closed",
+      "title": "Run the critical mounted ext4 and btrfs scenario matrix",
+      "prerequisites": [
+        "bd-rchk0.3.3",
+        "none:root-operational-prerequisite"
+      ],
+      "owning_proof_lane": "operational-prerequisite",
+      "unit_test_contract": "schema validates status vocabulary, required fields, consumer contract, artifact path, log tokens, and stale-reference checks",
+      "e2e_contract": "scripts/e2e/ffs_ambition_evidence_matrix_e2e.sh includes this row in generated JSON and fail-closed stale-reference probes",
+      "logging_fields": [
+        "matrix_version",
+        "source_bead_ids",
+        "tracker_limitation",
+        "dependency_gate_map",
+        "operational_prerequisites",
+        "consumer_versions",
+        "stale_reference_checks",
+        "missing_field_diagnostics",
+        "downgrade_decisions",
+        "generated_artifact_paths",
+        "reproduction_command"
+      ],
+      "artifacts_emitted": [
+        "artifacts/ambition/evidence_matrix.json"
+      ],
+      "capability_skips": [
+        "host-fuse-capability-skip"
+      ],
+      "feature_gates_consumed": [
+        "readiness-report"
+      ],
+      "downstream_release_claim": "block public claim and require owning follow-up bead",
+      "matrix_status": "blocked",
+      "user_risk": "release claim drift",
+      "threat_class": "matrix-omission",
+      "threat_model_status": "blocked",
+      "threat_model_follow_up": "bd-rchk0.5.11",
+      "expected_safe_behavior": "fail closed before release claims strengthen when coverage is missing",
+      "hostile_artifact_handling": "blocked-by-bd-rchk0.5.11 before security claims can strengthen",
+      "remediation_status": "blocked",
+      "remediation_id": "bd-rchk0.5.12",
+      "remediation_follow_up": "bd-rchk0.5.12",
+      "demo_profile": "blocked-by-bd-rchk0.5.13",
+      "proof_demo_status": "blocked",
+      "proof_demo_follow_up": "bd-rchk0.5.13",
+      "low_privilege_proof_status": "blocked",
+      "low_privilege_proof_follow_up": "bd-rchk0.5.13",
+      "overhead_budget_status": "blocked",
+      "overhead_budget_follow_up": "bd-rchk0.5.14",
+      "budget_profile": "blocked-by-bd-rchk0.5.14",
+      "measured_overhead": "blocked-by-bd-rchk0.5.14",
+      "exception_expiry": "not-applicable: no exception granted",
+      "non_applicability_rationale": "all required dimensions are applicable or blocked by an owning follow-up",
+      "deferred_reason": "deferred fields name their owning follow-up before release-gate consumption",
+      "release_gate_consumer": "readiness-report",
+      "consumer_contracts": [
+        "follow-up-bead",
+        "readiness-report"
+      ],
+      "release_claim_effect": "block public claim and require owning follow-up bead",
+      "downgrade_decision": "fail-closed-blocked",
+      "artifact_path": "artifacts/ambition/evidence_matrix.json",
+      "required_logs": "matrix_version,source_bead_ids,tracker_limitation,dependency_gate_map,operational_prerequisites,consumer_versions,stale_reference_checks,missing_field_diagnostics,downgrade_decisions,generated_artifact_paths,reproduction_command",
+      "reproduction_command": "ffs-harness validate-ambition-evidence-matrix --issues .beads/issues.jsonl --out artifacts/ambition/evidence_matrix.json"
+    },
+    {
+      "source_bead_id": "bd-rchk7.2",
+      "source_status": "closed",
+      "title": "Add repair and ledger corruption corpus fixtures",
+      "prerequisites": [
+        "none:root-operational-prerequisite"
+      ],
+      "owning_proof_lane": "operational-prerequisite",
+      "unit_test_contract": "schema validates status vocabulary, required fields, consumer contract, artifact path, log tokens, and stale-reference checks",
+      "e2e_contract": "scripts/e2e/ffs_ambition_evidence_matrix_e2e.sh includes this row in generated JSON and fail-closed stale-reference probes",
+      "logging_fields": [
+        "matrix_version",
+        "source_bead_ids",
+        "tracker_limitation",
+        "dependency_gate_map",
+        "operational_prerequisites",
+        "consumer_versions",
+        "stale_reference_checks",
+        "missing_field_diagnostics",
+        "downgrade_decisions",
+        "generated_artifact_paths",
+        "reproduction_command"
+      ],
+      "artifacts_emitted": [
+        "artifacts/ambition/evidence_matrix.json"
+      ],
+      "capability_skips": [
+        "not-applicable"
+      ],
+      "feature_gates_consumed": [
+        "readiness-report"
+      ],
+      "downstream_release_claim": "block public claim and require owning follow-up bead",
+      "matrix_status": "blocked",
+      "user_risk": "release claim drift",
+      "threat_class": "matrix-omission",
+      "threat_model_status": "blocked",
+      "threat_model_follow_up": "bd-rchk0.5.11",
+      "expected_safe_behavior": "fail closed before release claims strengthen when coverage is missing",
+      "hostile_artifact_handling": "blocked-by-bd-rchk0.5.11 before security claims can strengthen",
+      "remediation_status": "blocked",
+      "remediation_id": "bd-rchk0.5.12",
+      "remediation_follow_up": "bd-rchk0.5.12",
+      "demo_profile": "blocked-by-bd-rchk0.5.13",
+      "proof_demo_status": "blocked",
+      "proof_demo_follow_up": "bd-rchk0.5.13",
+      "low_privilege_proof_status": "blocked",
+      "low_privilege_proof_follow_up": "bd-rchk0.5.13",
+      "overhead_budget_status": "blocked",
+      "overhead_budget_follow_up": "bd-rchk0.5.14",
+      "budget_profile": "blocked-by-bd-rchk0.5.14",
+      "measured_overhead": "blocked-by-bd-rchk0.5.14",
+      "exception_expiry": "not-applicable: no exception granted",
+      "non_applicability_rationale": "all required dimensions are applicable or blocked by an owning follow-up",
+      "deferred_reason": "deferred fields name their owning follow-up before release-gate consumption",
+      "release_gate_consumer": "readiness-report",
+      "consumer_contracts": [
+        "follow-up-bead",
+        "readiness-report"
+      ],
+      "release_claim_effect": "block public claim and require owning follow-up bead",
+      "downgrade_decision": "fail-closed-blocked",
+      "artifact_path": "artifacts/ambition/evidence_matrix.json",
+      "required_logs": "matrix_version,source_bead_ids,tracker_limitation,dependency_gate_map,operational_prerequisites,consumer_versions,stale_reference_checks,missing_field_diagnostics,downgrade_decisions,generated_artifact_paths,reproduction_command",
+      "reproduction_command": "ffs-harness validate-ambition-evidence-matrix --issues .beads/issues.jsonl --out artifacts/ambition/evidence_matrix.json"
+    }
+  ],
+  "dependency_gate_map": [
+    {
+      "source_bead_id": "bd-rchk0.1.3",
+      "prerequisite_bead_ids": [
+        "none:root-operational-prerequisite"
+      ],
+      "intended_order": 70,
+      "owning_proof_lane": "operational-prerequisite",
+      "release_gate_consumer": "readiness-report",
+      "downstream_release_claim": "block public claim and require owning follow-up bead",
+      "tracker_limitation": "Current br dependency edges for dotted child IDs are unreliable in this checkout, so this matrix records the intended cross-workstream gate order as data and validates every referenced bead directly from issues.jsonl."
+    },
+    {
+      "source_bead_id": "bd-rchk0.2.3",
+      "prerequisite_bead_ids": [
+        "bd-rchk0.2.3",
+        "none:root-operational-prerequisite"
+      ],
+      "intended_order": 80,
+      "owning_proof_lane": "operational-prerequisite",
+      "release_gate_consumer": "readiness-report",
+      "downstream_release_claim": "block public claim and require owning follow-up bead",
+      "tracker_limitation": "Current br dependency edges for dotted child IDs are unreliable in this checkout, so this matrix records the intended cross-workstream gate order as data and validates every referenced bead directly from issues.jsonl."
+    },
+    {
+      "source_bead_id": "bd-rchk0.3.3",
+      "prerequisite_bead_ids": [
+        "bd-rchk0.3.3",
+        "none:root-operational-prerequisite"
+      ],
+      "intended_order": 90,
+      "owning_proof_lane": "operational-prerequisite",
+      "release_gate_consumer": "readiness-report",
+      "downstream_release_claim": "block public claim and require owning follow-up bead",
+      "tracker_limitation": "Current br dependency edges for dotted child IDs are unreliable in this checkout, so this matrix records the intended cross-workstream gate order as data and validates every referenced bead directly from issues.jsonl."
+    },
+    {
+      "source_bead_id": "bd-rchk0.4.1",
+      "prerequisite_bead_ids": [
+        "none:root-operational-prerequisite"
+      ],
+      "intended_order": 10,
+      "owning_proof_lane": "operational-prerequisite",
+      "release_gate_consumer": "README/FEATURE_PARITY",
+      "downstream_release_claim": "block public claim and require owning follow-up bead",
+      "tracker_limitation": "Current br dependency edges for dotted child IDs are unreliable in this checkout, so this matrix records the intended cross-workstream gate order as data and validates every referenced bead directly from issues.jsonl."
+    },
+    {
+      "source_bead_id": "bd-rchk0.4.2",
+      "prerequisite_bead_ids": [
+        "none:root-operational-prerequisite"
+      ],
+      "intended_order": 20,
+      "owning_proof_lane": "operational-prerequisite",
+      "release_gate_consumer": "readiness-report",
+      "downstream_release_claim": "block public claim and require owning follow-up bead",
+      "tracker_limitation": "Current br dependency edges for dotted child IDs are unreliable in this checkout, so this matrix records the intended cross-workstream gate order as data and validates every referenced bead directly from issues.jsonl."
+    },
+    {
+      "source_bead_id": "bd-rchk0.4.3",
+      "prerequisite_bead_ids": [
+        "none:root-operational-prerequisite"
+      ],
+      "intended_order": 30,
+      "owning_proof_lane": "operational-prerequisite",
+      "release_gate_consumer": "readiness-report",
+      "downstream_release_claim": "block public claim and require owning follow-up bead",
+      "tracker_limitation": "Current br dependency edges for dotted child IDs are unreliable in this checkout, so this matrix records the intended cross-workstream gate order as data and validates every referenced bead directly from issues.jsonl."
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.10",
+      "prerequisite_bead_ids": [
+        "bd-rchk0.1.3",
+        "bd-rchk0.2.3",
+        "bd-rchk0.3.3",
+        "bd-rchk0.4.1",
+        "bd-rchk0.4.2",
+        "bd-rchk0.4.3",
+        "bd-rchk4.2",
+        "bd-rchk4.3",
+        "bd-rchk7.2"
+      ],
+      "intended_order": 1006,
+      "owning_proof_lane": "ambition-evidence-matrix",
+      "release_gate_consumer": "release-gates",
+      "downstream_release_claim": "block public claim and require owning follow-up bead",
+      "tracker_limitation": "Current br dependency edges for dotted child IDs are unreliable in this checkout, so this matrix records the intended cross-workstream gate order as data and validates every referenced bead directly from issues.jsonl."
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.10.1",
+      "prerequisite_bead_ids": [
+        "bd-rchk0.1.3",
+        "bd-rchk0.4.1",
+        "bd-rchk0.4.2",
+        "bd-rchk0.4.3",
+        "bd-rchk4.2",
+        "bd-rchk4.3",
+        "bd-rchk7.2"
+      ],
+      "intended_order": 1007,
+      "owning_proof_lane": "ambition-evidence-matrix",
+      "release_gate_consumer": "release-gates",
+      "downstream_release_claim": "allow matrix-backed claim only for declared consumer lanes",
+      "tracker_limitation": "Current br dependency edges for dotted child IDs are unreliable in this checkout, so this matrix records the intended cross-workstream gate order as data and validates every referenced bead directly from issues.jsonl."
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.11",
+      "prerequisite_bead_ids": [
+        "bd-rchk0.4.1",
+        "bd-rchk0.4.2",
+        "bd-rchk0.4.3",
+        "bd-rchk4.2",
+        "bd-rchk4.3",
+        "bd-rchk7.2"
+      ],
+      "intended_order": 1008,
+      "owning_proof_lane": "security-hostile-artifact",
+      "release_gate_consumer": "release-gates",
+      "downstream_release_claim": "downgrade public claim until missing consumer evidence is represented",
+      "tracker_limitation": "Current br dependency edges for dotted child IDs are unreliable in this checkout, so this matrix records the intended cross-workstream gate order as data and validates every referenced bead directly from issues.jsonl."
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.12",
+      "prerequisite_bead_ids": [
+        "bd-rchk0.1.3",
+        "bd-rchk0.4.1",
+        "bd-rchk0.4.2",
+        "bd-rchk0.4.3",
+        "bd-rchk4.2",
+        "bd-rchk4.3",
+        "bd-rchk7.2"
+      ],
+      "intended_order": 1009,
+      "owning_proof_lane": "operator-remediation",
+      "release_gate_consumer": "proof-bundle",
+      "downstream_release_claim": "downgrade public claim until missing consumer evidence is represented",
+      "tracker_limitation": "Current br dependency edges for dotted child IDs are unreliable in this checkout, so this matrix records the intended cross-workstream gate order as data and validates every referenced bead directly from issues.jsonl."
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.13",
+      "prerequisite_bead_ids": [
+        "bd-rchk0.4.1",
+        "bd-rchk0.4.2",
+        "bd-rchk0.4.3",
+        "bd-rchk4.2",
+        "bd-rchk4.3",
+        "bd-rchk7.2"
+      ],
+      "intended_order": 1010,
+      "owning_proof_lane": "low-privilege-proof-demo",
+      "release_gate_consumer": "proof-bundle",
+      "downstream_release_claim": "downgrade public claim until missing consumer evidence is represented",
+      "tracker_limitation": "Current br dependency edges for dotted child IDs are unreliable in this checkout, so this matrix records the intended cross-workstream gate order as data and validates every referenced bead directly from issues.jsonl."
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.14",
+      "prerequisite_bead_ids": [
+        "bd-rchk0.4.1",
+        "bd-rchk0.4.2",
+        "bd-rchk0.4.3"
+      ],
+      "intended_order": 1011,
+      "owning_proof_lane": "proof-overhead-budget",
+      "release_gate_consumer": "release-gates",
+      "downstream_release_claim": "downgrade public claim until missing consumer evidence is represented",
+      "tracker_limitation": "Current br dependency edges for dotted child IDs are unreliable in this checkout, so this matrix records the intended cross-workstream gate order as data and validates every referenced bead directly from issues.jsonl."
+    },
+    {
+      "source_bead_id": "bd-rchk4.2",
+      "prerequisite_bead_ids": [
+        "none:root-operational-prerequisite"
+      ],
+      "intended_order": 40,
+      "owning_proof_lane": "operational-prerequisite",
+      "release_gate_consumer": "readiness-report",
+      "downstream_release_claim": "block public claim and require owning follow-up bead",
+      "tracker_limitation": "Current br dependency edges for dotted child IDs are unreliable in this checkout, so this matrix records the intended cross-workstream gate order as data and validates every referenced bead directly from issues.jsonl."
+    },
+    {
+      "source_bead_id": "bd-rchk4.3",
+      "prerequisite_bead_ids": [
+        "bd-rchk0.3.3",
+        "none:root-operational-prerequisite"
+      ],
+      "intended_order": 50,
+      "owning_proof_lane": "operational-prerequisite",
+      "release_gate_consumer": "readiness-report",
+      "downstream_release_claim": "block public claim and require owning follow-up bead",
+      "tracker_limitation": "Current br dependency edges for dotted child IDs are unreliable in this checkout, so this matrix records the intended cross-workstream gate order as data and validates every referenced bead directly from issues.jsonl."
+    },
+    {
+      "source_bead_id": "bd-rchk7.2",
+      "prerequisite_bead_ids": [
+        "none:root-operational-prerequisite"
+      ],
+      "intended_order": 60,
+      "owning_proof_lane": "operational-prerequisite",
+      "release_gate_consumer": "readiness-report",
+      "downstream_release_claim": "block public claim and require owning follow-up bead",
+      "tracker_limitation": "Current br dependency edges for dotted child IDs are unreliable in this checkout, so this matrix records the intended cross-workstream gate order as data and validates every referenced bead directly from issues.jsonl."
+    }
+  ],
+  "operational_prerequisites": [
+    {
+      "prerequisite_bead_id": "bd-rchk0.4.1",
+      "title": "Define the operational artifact schema and logging vocabulary",
+      "status": "closed",
+      "gate_role": "artifact schema and logging vocabulary",
+      "intended_order": 10,
+      "exists": true,
+      "consumed_by": [
+        "bd-rchk0.5.10",
+        "proof-bundle",
+        "release-gates",
+        "readiness-report"
+      ]
+    },
+    {
+      "prerequisite_bead_id": "bd-rchk0.4.2",
+      "title": "Build the shared E2E runner harness with unit-tested artifact validation",
+      "status": "closed",
+      "gate_role": "shared E2E runner and artifact validation",
+      "intended_order": 20,
+      "exists": true,
+      "consumed_by": [
+        "bd-rchk0.5.10",
+        "proof-bundle",
+        "release-gates",
+        "readiness-report"
+      ]
+    },
+    {
+      "prerequisite_bead_id": "bd-rchk0.4.3",
+      "title": "Create a one-command operational readiness report aggregator",
+      "status": "closed",
+      "gate_role": "one-command readiness report consumer",
+      "intended_order": 30,
+      "exists": true,
+      "consumed_by": [
+        "bd-rchk0.5.10",
+        "proof-bundle",
+        "release-gates",
+        "readiness-report"
+      ]
+    },
+    {
+      "prerequisite_bead_id": "bd-rchk4.2",
+      "title": "Provision or document a permissioned CI/RCH FUSE lane",
+      "status": "closed",
+      "gate_role": "permissioned FUSE lane and capability artifacts",
+      "intended_order": 40,
+      "exists": true,
+      "consumed_by": [
+        "bd-rchk0.5.10",
+        "proof-bundle",
+        "release-gates",
+        "readiness-report"
+      ]
+    },
+    {
+      "prerequisite_bead_id": "bd-rchk4.3",
+      "title": "Run the critical mounted ext4 and btrfs scenario matrix",
+      "status": "closed",
+      "gate_role": "critical mounted scenario matrix",
+      "intended_order": 50,
+      "exists": true,
+      "consumed_by": [
+        "bd-rchk0.5.10",
+        "proof-bundle",
+        "release-gates",
+        "readiness-report"
+      ]
+    },
+    {
+      "prerequisite_bead_id": "bd-rchk7.2",
+      "title": "Add repair and ledger corruption corpus fixtures",
+      "status": "closed",
+      "gate_role": "repair and ledger corruption corpus",
+      "intended_order": 60,
+      "exists": true,
+      "consumed_by": [
+        "bd-rchk0.5.10",
+        "proof-bundle",
+        "release-gates",
+        "readiness-report"
+      ]
+    },
+    {
+      "prerequisite_bead_id": "bd-rchk0.1.3",
+      "title": "Add deterministic race tests for repair versus client writes",
+      "status": "closed",
+      "gate_role": "repair/client-write race proof",
+      "intended_order": 70,
+      "exists": true,
+      "consumed_by": [
+        "bd-rchk0.5.10",
+        "proof-bundle",
+        "release-gates",
+        "readiness-report"
+      ]
+    },
+    {
+      "prerequisite_bead_id": "bd-rchk0.2.3",
+      "title": "Add writeback-cache crash/replay and fsync integration tests",
+      "status": "open",
+      "gate_role": "writeback-cache crash and fsync proof",
+      "intended_order": 80,
+      "exists": true,
+      "consumed_by": [
+        "bd-rchk0.5.10",
+        "proof-bundle",
+        "release-gates",
+        "readiness-report"
+      ]
+    },
+    {
+      "prerequisite_bead_id": "bd-rchk0.3.3",
+      "title": "Exercise crash, unmount, and reopen recovery for mounted writes",
+      "status": "closed",
+      "gate_role": "mounted crash, unmount, and reopen proof",
+      "intended_order": 90,
+      "exists": true,
+      "consumed_by": [
+        "bd-rchk0.5.10",
+        "proof-bundle",
+        "release-gates",
+        "readiness-report"
+      ]
+    }
+  ],
+  "grouped_by_user_risk": {
+    "hostile-image or hostile-artifact safety": [
+      "bd-rchk0.5.10.1",
+      "bd-rchk0.5.11"
+    ],
+    "low-privilege trust proof coverage": [
+      "bd-rchk0.5.13"
+    ],
+    "operator recovery after proof failure": [
+      "bd-rchk0.5.12"
+    ],
+    "proof overhead and artifact cost": [
+      "bd-rchk0.5.14"
+    ],
+    "release claim drift": [
+      "bd-rchk0.1.3",
+      "bd-rchk0.2.3",
+      "bd-rchk0.3.3",
+      "bd-rchk0.4.1",
+      "bd-rchk0.4.2",
+      "bd-rchk0.4.3",
+      "bd-rchk0.5.10",
+      "bd-rchk4.2",
+      "bd-rchk4.3",
+      "bd-rchk7.2"
+    ]
+  },
+  "grouped_by_security_coverage": {
+    "blocked": [
+      "bd-rchk0.1.3",
+      "bd-rchk0.2.3",
+      "bd-rchk0.3.3",
+      "bd-rchk0.4.1",
+      "bd-rchk0.4.2",
+      "bd-rchk0.4.3",
+      "bd-rchk0.5.10",
+      "bd-rchk0.5.12",
+      "bd-rchk0.5.13",
+      "bd-rchk0.5.14",
+      "bd-rchk4.2",
+      "bd-rchk4.3",
+      "bd-rchk7.2"
+    ],
+    "partial": [
+      "bd-rchk0.5.11"
+    ],
+    "validated": [
+      "bd-rchk0.5.10.1"
+    ]
+  },
+  "grouped_by_remediation_coverage": {
+    "blocked": [
+      "bd-rchk0.1.3",
+      "bd-rchk0.2.3",
+      "bd-rchk0.3.3",
+      "bd-rchk0.4.1",
+      "bd-rchk0.4.2",
+      "bd-rchk0.4.3",
+      "bd-rchk0.5.10",
+      "bd-rchk0.5.11",
+      "bd-rchk0.5.13",
+      "bd-rchk0.5.14",
+      "bd-rchk4.2",
+      "bd-rchk4.3",
+      "bd-rchk7.2"
+    ],
+    "partial": [
+      "bd-rchk0.5.12"
+    ],
+    "validated": [
+      "bd-rchk0.5.10.1"
+    ]
+  },
+  "grouped_by_demo_coverage": {
+    "blocked": [
+      "bd-rchk0.1.3",
+      "bd-rchk0.2.3",
+      "bd-rchk0.3.3",
+      "bd-rchk0.4.1",
+      "bd-rchk0.4.2",
+      "bd-rchk0.4.3",
+      "bd-rchk0.5.10",
+      "bd-rchk0.5.11",
+      "bd-rchk0.5.14",
+      "bd-rchk4.2",
+      "bd-rchk4.3",
+      "bd-rchk7.2"
+    ],
+    "partial": [
+      "bd-rchk0.5.12",
+      "bd-rchk0.5.13"
+    ],
+    "validated": [
+      "bd-rchk0.5.10.1"
+    ]
+  },
+  "grouped_by_budget_status": {
+    "blocked": [
+      "bd-rchk0.1.3",
+      "bd-rchk0.2.3",
+      "bd-rchk0.3.3",
+      "bd-rchk0.4.1",
+      "bd-rchk0.4.2",
+      "bd-rchk0.4.3",
+      "bd-rchk0.5.10",
+      "bd-rchk0.5.11",
+      "bd-rchk0.5.12",
+      "bd-rchk0.5.13",
+      "bd-rchk4.2",
+      "bd-rchk4.3",
+      "bd-rchk7.2"
+    ],
+    "validated": [
+      "bd-rchk0.5.10.1",
+      "bd-rchk0.5.14"
+    ]
+  },
+  "grouped_by_release_gate_consumer": {
+    "README/FEATURE_PARITY": [
+      "bd-rchk0.4.1"
+    ],
+    "proof-bundle": [
+      "bd-rchk0.5.12",
+      "bd-rchk0.5.13"
+    ],
+    "readiness-report": [
+      "bd-rchk0.1.3",
+      "bd-rchk0.2.3",
+      "bd-rchk0.3.3",
+      "bd-rchk0.4.2",
+      "bd-rchk0.4.3",
+      "bd-rchk4.2",
+      "bd-rchk4.3",
+      "bd-rchk7.2"
+    ],
+    "release-gates": [
+      "bd-rchk0.5.10",
+      "bd-rchk0.5.10.1",
+      "bd-rchk0.5.11",
+      "bd-rchk0.5.14"
+    ]
+  },
+  "grouped_by_matrix_status": {
+    "blocked": [
+      "bd-rchk0.1.3",
+      "bd-rchk0.2.3",
+      "bd-rchk0.3.3",
+      "bd-rchk0.4.1",
+      "bd-rchk0.4.2",
+      "bd-rchk0.4.3",
+      "bd-rchk0.5.10",
+      "bd-rchk4.2",
+      "bd-rchk4.3",
+      "bd-rchk7.2"
+    ],
+    "partial": [
+      "bd-rchk0.5.11",
+      "bd-rchk0.5.12",
+      "bd-rchk0.5.13",
+      "bd-rchk0.5.14"
+    ],
+    "validated": [
+      "bd-rchk0.5.10.1"
+    ]
+  },
+  "consumer_contracts": [
+    {
+      "source_bead_id": "bd-rchk0.1.3",
+      "consumer_name": "follow-up-bead",
+      "consumer_version": "follow-up-bead-creator-v1",
+      "matrix_status": "blocked",
+      "required_artifact_path": "artifacts/ambition/evidence_matrix.json",
+      "release_claim_effect": "block public claim and require owning follow-up bead",
+      "downgrade_decision": "fail-closed-blocked",
+      "follow_up_bead_id": "bd-rchk0.5.11",
+      "log_fields": [
+        "matrix_version",
+        "source_bead_ids",
+        "tracker_limitation",
+        "dependency_gate_map",
+        "operational_prerequisites",
+        "consumer_versions",
+        "stale_reference_checks",
+        "missing_field_diagnostics",
+        "downgrade_decisions",
+        "generated_artifact_paths",
+        "reproduction_command"
+      ],
+      "reproduction_command": "ffs-harness validate-ambition-evidence-matrix --issues .beads/issues.jsonl --out artifacts/ambition/evidence_matrix.json"
+    },
+    {
+      "source_bead_id": "bd-rchk0.1.3",
+      "consumer_name": "readiness-report",
+      "consumer_version": "readiness-report-v1",
+      "matrix_status": "blocked",
+      "required_artifact_path": "artifacts/ambition/evidence_matrix.json",
+      "release_claim_effect": "block public claim and require owning follow-up bead",
+      "downgrade_decision": "fail-closed-blocked",
+      "follow_up_bead_id": "bd-rchk0.5.11",
+      "log_fields": [
+        "matrix_version",
+        "source_bead_ids",
+        "tracker_limitation",
+        "dependency_gate_map",
+        "operational_prerequisites",
+        "consumer_versions",
+        "stale_reference_checks",
+        "missing_field_diagnostics",
+        "downgrade_decisions",
+        "generated_artifact_paths",
+        "reproduction_command"
+      ],
+      "reproduction_command": "ffs-harness validate-ambition-evidence-matrix --issues .beads/issues.jsonl --out artifacts/ambition/evidence_matrix.json"
+    },
+    {
+      "source_bead_id": "bd-rchk0.2.3",
+      "consumer_name": "follow-up-bead",
+      "consumer_version": "follow-up-bead-creator-v1",
+      "matrix_status": "blocked",
+      "required_artifact_path": "artifacts/ambition/evidence_matrix.json",
+      "release_claim_effect": "block public claim and require owning follow-up bead",
+      "downgrade_decision": "fail-closed-blocked",
+      "follow_up_bead_id": "bd-rchk0.5.11",
+      "log_fields": [
+        "matrix_version",
+        "source_bead_ids",
+        "tracker_limitation",
+        "dependency_gate_map",
+        "operational_prerequisites",
+        "consumer_versions",
+        "stale_reference_checks",
+        "missing_field_diagnostics",
+        "downgrade_decisions",
+        "generated_artifact_paths",
+        "reproduction_command"
+      ],
+      "reproduction_command": "ffs-harness validate-ambition-evidence-matrix --issues .beads/issues.jsonl --out artifacts/ambition/evidence_matrix.json"
+    },
+    {
+      "source_bead_id": "bd-rchk0.2.3",
+      "consumer_name": "readiness-report",
+      "consumer_version": "readiness-report-v1",
+      "matrix_status": "blocked",
+      "required_artifact_path": "artifacts/ambition/evidence_matrix.json",
+      "release_claim_effect": "block public claim and require owning follow-up bead",
+      "downgrade_decision": "fail-closed-blocked",
+      "follow_up_bead_id": "bd-rchk0.5.11",
+      "log_fields": [
+        "matrix_version",
+        "source_bead_ids",
+        "tracker_limitation",
+        "dependency_gate_map",
+        "operational_prerequisites",
+        "consumer_versions",
+        "stale_reference_checks",
+        "missing_field_diagnostics",
+        "downgrade_decisions",
+        "generated_artifact_paths",
+        "reproduction_command"
+      ],
+      "reproduction_command": "ffs-harness validate-ambition-evidence-matrix --issues .beads/issues.jsonl --out artifacts/ambition/evidence_matrix.json"
+    },
+    {
+      "source_bead_id": "bd-rchk0.3.3",
+      "consumer_name": "follow-up-bead",
+      "consumer_version": "follow-up-bead-creator-v1",
+      "matrix_status": "blocked",
+      "required_artifact_path": "artifacts/ambition/evidence_matrix.json",
+      "release_claim_effect": "block public claim and require owning follow-up bead",
+      "downgrade_decision": "fail-closed-blocked",
+      "follow_up_bead_id": "bd-rchk0.5.11",
+      "log_fields": [
+        "matrix_version",
+        "source_bead_ids",
+        "tracker_limitation",
+        "dependency_gate_map",
+        "operational_prerequisites",
+        "consumer_versions",
+        "stale_reference_checks",
+        "missing_field_diagnostics",
+        "downgrade_decisions",
+        "generated_artifact_paths",
+        "reproduction_command"
+      ],
+      "reproduction_command": "ffs-harness validate-ambition-evidence-matrix --issues .beads/issues.jsonl --out artifacts/ambition/evidence_matrix.json"
+    },
+    {
+      "source_bead_id": "bd-rchk0.3.3",
+      "consumer_name": "readiness-report",
+      "consumer_version": "readiness-report-v1",
+      "matrix_status": "blocked",
+      "required_artifact_path": "artifacts/ambition/evidence_matrix.json",
+      "release_claim_effect": "block public claim and require owning follow-up bead",
+      "downgrade_decision": "fail-closed-blocked",
+      "follow_up_bead_id": "bd-rchk0.5.11",
+      "log_fields": [
+        "matrix_version",
+        "source_bead_ids",
+        "tracker_limitation",
+        "dependency_gate_map",
+        "operational_prerequisites",
+        "consumer_versions",
+        "stale_reference_checks",
+        "missing_field_diagnostics",
+        "downgrade_decisions",
+        "generated_artifact_paths",
+        "reproduction_command"
+      ],
+      "reproduction_command": "ffs-harness validate-ambition-evidence-matrix --issues .beads/issues.jsonl --out artifacts/ambition/evidence_matrix.json"
+    },
+    {
+      "source_bead_id": "bd-rchk0.4.1",
+      "consumer_name": "README/FEATURE_PARITY",
+      "consumer_version": "docs-status-renderer-v1",
+      "matrix_status": "blocked",
+      "required_artifact_path": "artifacts/ambition/evidence_matrix.json",
+      "release_claim_effect": "block public claim and require owning follow-up bead",
+      "downgrade_decision": "fail-closed-blocked",
+      "follow_up_bead_id": "bd-rchk0.5.11",
+      "log_fields": [
+        "matrix_version",
+        "source_bead_ids",
+        "tracker_limitation",
+        "dependency_gate_map",
+        "operational_prerequisites",
+        "consumer_versions",
+        "stale_reference_checks",
+        "missing_field_diagnostics",
+        "downgrade_decisions",
+        "generated_artifact_paths",
+        "reproduction_command"
+      ],
+      "reproduction_command": "ffs-harness validate-ambition-evidence-matrix --issues .beads/issues.jsonl --out artifacts/ambition/evidence_matrix.json"
+    },
+    {
+      "source_bead_id": "bd-rchk0.4.1",
+      "consumer_name": "follow-up-bead",
+      "consumer_version": "follow-up-bead-creator-v1",
+      "matrix_status": "blocked",
+      "required_artifact_path": "artifacts/ambition/evidence_matrix.json",
+      "release_claim_effect": "block public claim and require owning follow-up bead",
+      "downgrade_decision": "fail-closed-blocked",
+      "follow_up_bead_id": "bd-rchk0.5.11",
+      "log_fields": [
+        "matrix_version",
+        "source_bead_ids",
+        "tracker_limitation",
+        "dependency_gate_map",
+        "operational_prerequisites",
+        "consumer_versions",
+        "stale_reference_checks",
+        "missing_field_diagnostics",
+        "downgrade_decisions",
+        "generated_artifact_paths",
+        "reproduction_command"
+      ],
+      "reproduction_command": "ffs-harness validate-ambition-evidence-matrix --issues .beads/issues.jsonl --out artifacts/ambition/evidence_matrix.json"
+    },
+    {
+      "source_bead_id": "bd-rchk0.4.2",
+      "consumer_name": "follow-up-bead",
+      "consumer_version": "follow-up-bead-creator-v1",
+      "matrix_status": "blocked",
+      "required_artifact_path": "artifacts/ambition/evidence_matrix.json",
+      "release_claim_effect": "block public claim and require owning follow-up bead",
+      "downgrade_decision": "fail-closed-blocked",
+      "follow_up_bead_id": "bd-rchk0.5.11",
+      "log_fields": [
+        "matrix_version",
+        "source_bead_ids",
+        "tracker_limitation",
+        "dependency_gate_map",
+        "operational_prerequisites",
+        "consumer_versions",
+        "stale_reference_checks",
+        "missing_field_diagnostics",
+        "downgrade_decisions",
+        "generated_artifact_paths",
+        "reproduction_command"
+      ],
+      "reproduction_command": "ffs-harness validate-ambition-evidence-matrix --issues .beads/issues.jsonl --out artifacts/ambition/evidence_matrix.json"
+    },
+    {
+      "source_bead_id": "bd-rchk0.4.2",
+      "consumer_name": "readiness-report",
+      "consumer_version": "readiness-report-v1",
+      "matrix_status": "blocked",
+      "required_artifact_path": "artifacts/ambition/evidence_matrix.json",
+      "release_claim_effect": "block public claim and require owning follow-up bead",
+      "downgrade_decision": "fail-closed-blocked",
+      "follow_up_bead_id": "bd-rchk0.5.11",
+      "log_fields": [
+        "matrix_version",
+        "source_bead_ids",
+        "tracker_limitation",
+        "dependency_gate_map",
+        "operational_prerequisites",
+        "consumer_versions",
+        "stale_reference_checks",
+        "missing_field_diagnostics",
+        "downgrade_decisions",
+        "generated_artifact_paths",
+        "reproduction_command"
+      ],
+      "reproduction_command": "ffs-harness validate-ambition-evidence-matrix --issues .beads/issues.jsonl --out artifacts/ambition/evidence_matrix.json"
+    },
+    {
+      "source_bead_id": "bd-rchk0.4.3",
+      "consumer_name": "follow-up-bead",
+      "consumer_version": "follow-up-bead-creator-v1",
+      "matrix_status": "blocked",
+      "required_artifact_path": "artifacts/ambition/evidence_matrix.json",
+      "release_claim_effect": "block public claim and require owning follow-up bead",
+      "downgrade_decision": "fail-closed-blocked",
+      "follow_up_bead_id": "bd-rchk0.5.11",
+      "log_fields": [
+        "matrix_version",
+        "source_bead_ids",
+        "tracker_limitation",
+        "dependency_gate_map",
+        "operational_prerequisites",
+        "consumer_versions",
+        "stale_reference_checks",
+        "missing_field_diagnostics",
+        "downgrade_decisions",
+        "generated_artifact_paths",
+        "reproduction_command"
+      ],
+      "reproduction_command": "ffs-harness validate-ambition-evidence-matrix --issues .beads/issues.jsonl --out artifacts/ambition/evidence_matrix.json"
+    },
+    {
+      "source_bead_id": "bd-rchk0.4.3",
+      "consumer_name": "readiness-report",
+      "consumer_version": "readiness-report-v1",
+      "matrix_status": "blocked",
+      "required_artifact_path": "artifacts/ambition/evidence_matrix.json",
+      "release_claim_effect": "block public claim and require owning follow-up bead",
+      "downgrade_decision": "fail-closed-blocked",
+      "follow_up_bead_id": "bd-rchk0.5.11",
+      "log_fields": [
+        "matrix_version",
+        "source_bead_ids",
+        "tracker_limitation",
+        "dependency_gate_map",
+        "operational_prerequisites",
+        "consumer_versions",
+        "stale_reference_checks",
+        "missing_field_diagnostics",
+        "downgrade_decisions",
+        "generated_artifact_paths",
+        "reproduction_command"
+      ],
+      "reproduction_command": "ffs-harness validate-ambition-evidence-matrix --issues .beads/issues.jsonl --out artifacts/ambition/evidence_matrix.json"
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.10",
+      "consumer_name": "README/FEATURE_PARITY",
+      "consumer_version": "docs-status-renderer-v1",
+      "matrix_status": "blocked",
+      "required_artifact_path": "artifacts/ambition/evidence_matrix.json",
+      "release_claim_effect": "block public claim and require owning follow-up bead",
+      "downgrade_decision": "fail-closed-blocked",
+      "follow_up_bead_id": "bd-rchk0.5.11",
+      "log_fields": [
+        "matrix_version",
+        "source_bead_ids",
+        "tracker_limitation",
+        "dependency_gate_map",
+        "operational_prerequisites",
+        "consumer_versions",
+        "stale_reference_checks",
+        "missing_field_diagnostics",
+        "downgrade_decisions",
+        "generated_artifact_paths",
+        "reproduction_command"
+      ],
+      "reproduction_command": "ffs-harness validate-ambition-evidence-matrix --issues .beads/issues.jsonl --out artifacts/ambition/evidence_matrix.json"
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.10",
+      "consumer_name": "follow-up-bead",
+      "consumer_version": "follow-up-bead-creator-v1",
+      "matrix_status": "blocked",
+      "required_artifact_path": "artifacts/ambition/evidence_matrix.json",
+      "release_claim_effect": "block public claim and require owning follow-up bead",
+      "downgrade_decision": "fail-closed-blocked",
+      "follow_up_bead_id": "bd-rchk0.5.11",
+      "log_fields": [
+        "matrix_version",
+        "source_bead_ids",
+        "tracker_limitation",
+        "dependency_gate_map",
+        "operational_prerequisites",
+        "consumer_versions",
+        "stale_reference_checks",
+        "missing_field_diagnostics",
+        "downgrade_decisions",
+        "generated_artifact_paths",
+        "reproduction_command"
+      ],
+      "reproduction_command": "ffs-harness validate-ambition-evidence-matrix --issues .beads/issues.jsonl --out artifacts/ambition/evidence_matrix.json"
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.10",
+      "consumer_name": "release-gates",
+      "consumer_version": "release-gate-evaluator-v1",
+      "matrix_status": "blocked",
+      "required_artifact_path": "artifacts/ambition/evidence_matrix.json",
+      "release_claim_effect": "block public claim and require owning follow-up bead",
+      "downgrade_decision": "fail-closed-blocked",
+      "follow_up_bead_id": "bd-rchk0.5.11",
+      "log_fields": [
+        "matrix_version",
+        "source_bead_ids",
+        "tracker_limitation",
+        "dependency_gate_map",
+        "operational_prerequisites",
+        "consumer_versions",
+        "stale_reference_checks",
+        "missing_field_diagnostics",
+        "downgrade_decisions",
+        "generated_artifact_paths",
+        "reproduction_command"
+      ],
+      "reproduction_command": "ffs-harness validate-ambition-evidence-matrix --issues .beads/issues.jsonl --out artifacts/ambition/evidence_matrix.json"
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.10.1",
+      "consumer_name": "README/FEATURE_PARITY",
+      "consumer_version": "docs-status-renderer-v1",
+      "matrix_status": "validated",
+      "required_artifact_path": "artifacts/ambition/evidence_matrix.json",
+      "release_claim_effect": "allow matrix-backed claim only for declared consumer lanes",
+      "downgrade_decision": "no downgrade for covered consumer lane",
+      "follow_up_bead_id": "",
+      "log_fields": [
+        "matrix_version",
+        "source_bead_ids",
+        "tracker_limitation",
+        "dependency_gate_map",
+        "operational_prerequisites",
+        "consumer_versions",
+        "stale_reference_checks",
+        "missing_field_diagnostics",
+        "downgrade_decisions",
+        "generated_artifact_paths",
+        "reproduction_command"
+      ],
+      "reproduction_command": "ffs-harness validate-ambition-evidence-matrix --issues .beads/issues.jsonl --out artifacts/ambition/evidence_matrix.json"
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.10.1",
+      "consumer_name": "proof-bundle",
+      "consumer_version": "proof-bundle-ingestion-v1",
+      "matrix_status": "validated",
+      "required_artifact_path": "artifacts/ambition/evidence_matrix.json",
+      "release_claim_effect": "allow matrix-backed claim only for declared consumer lanes",
+      "downgrade_decision": "no downgrade for covered consumer lane",
+      "follow_up_bead_id": "",
+      "log_fields": [
+        "matrix_version",
+        "source_bead_ids",
+        "tracker_limitation",
+        "dependency_gate_map",
+        "operational_prerequisites",
+        "consumer_versions",
+        "stale_reference_checks",
+        "missing_field_diagnostics",
+        "downgrade_decisions",
+        "generated_artifact_paths",
+        "reproduction_command"
+      ],
+      "reproduction_command": "ffs-harness validate-ambition-evidence-matrix --issues .beads/issues.jsonl --out artifacts/ambition/evidence_matrix.json"
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.10.1",
+      "consumer_name": "release-gates",
+      "consumer_version": "release-gate-evaluator-v1",
+      "matrix_status": "validated",
+      "required_artifact_path": "artifacts/ambition/evidence_matrix.json",
+      "release_claim_effect": "allow matrix-backed claim only for declared consumer lanes",
+      "downgrade_decision": "no downgrade for covered consumer lane",
+      "follow_up_bead_id": "",
+      "log_fields": [
+        "matrix_version",
+        "source_bead_ids",
+        "tracker_limitation",
+        "dependency_gate_map",
+        "operational_prerequisites",
+        "consumer_versions",
+        "stale_reference_checks",
+        "missing_field_diagnostics",
+        "downgrade_decisions",
+        "generated_artifact_paths",
+        "reproduction_command"
+      ],
+      "reproduction_command": "ffs-harness validate-ambition-evidence-matrix --issues .beads/issues.jsonl --out artifacts/ambition/evidence_matrix.json"
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.10.1",
+      "consumer_name": "remediation-catalog",
+      "consumer_version": "remediation-catalog-v1",
+      "matrix_status": "validated",
+      "required_artifact_path": "artifacts/ambition/evidence_matrix.json",
+      "release_claim_effect": "allow matrix-backed claim only for declared consumer lanes",
+      "downgrade_decision": "no downgrade for covered consumer lane",
+      "follow_up_bead_id": "",
+      "log_fields": [
+        "matrix_version",
+        "source_bead_ids",
+        "tracker_limitation",
+        "dependency_gate_map",
+        "operational_prerequisites",
+        "consumer_versions",
+        "stale_reference_checks",
+        "missing_field_diagnostics",
+        "downgrade_decisions",
+        "generated_artifact_paths",
+        "reproduction_command"
+      ],
+      "reproduction_command": "ffs-harness validate-ambition-evidence-matrix --issues .beads/issues.jsonl --out artifacts/ambition/evidence_matrix.json"
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.11",
+      "consumer_name": "follow-up-bead",
+      "consumer_version": "follow-up-bead-creator-v1",
+      "matrix_status": "partial",
+      "required_artifact_path": "artifacts/ambition/evidence_matrix.json",
+      "release_claim_effect": "downgrade public claim until missing consumer evidence is represented",
+      "downgrade_decision": "downgrade-to-experimental",
+      "follow_up_bead_id": "bd-rchk0.5.12",
+      "log_fields": [
+        "matrix_version",
+        "source_bead_ids",
+        "tracker_limitation",
+        "dependency_gate_map",
+        "operational_prerequisites",
+        "consumer_versions",
+        "stale_reference_checks",
+        "missing_field_diagnostics",
+        "downgrade_decisions",
+        "generated_artifact_paths",
+        "reproduction_command"
+      ],
+      "reproduction_command": "ffs-harness validate-ambition-evidence-matrix --issues .beads/issues.jsonl --out artifacts/ambition/evidence_matrix.json"
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.11",
+      "consumer_name": "release-gates",
+      "consumer_version": "release-gate-evaluator-v1",
+      "matrix_status": "partial",
+      "required_artifact_path": "artifacts/ambition/evidence_matrix.json",
+      "release_claim_effect": "downgrade public claim until missing consumer evidence is represented",
+      "downgrade_decision": "downgrade-to-experimental",
+      "follow_up_bead_id": "bd-rchk0.5.12",
+      "log_fields": [
+        "matrix_version",
+        "source_bead_ids",
+        "tracker_limitation",
+        "dependency_gate_map",
+        "operational_prerequisites",
+        "consumer_versions",
+        "stale_reference_checks",
+        "missing_field_diagnostics",
+        "downgrade_decisions",
+        "generated_artifact_paths",
+        "reproduction_command"
+      ],
+      "reproduction_command": "ffs-harness validate-ambition-evidence-matrix --issues .beads/issues.jsonl --out artifacts/ambition/evidence_matrix.json"
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.12",
+      "consumer_name": "follow-up-bead",
+      "consumer_version": "follow-up-bead-creator-v1",
+      "matrix_status": "partial",
+      "required_artifact_path": "artifacts/ambition/evidence_matrix.json",
+      "release_claim_effect": "downgrade public claim until missing consumer evidence is represented",
+      "downgrade_decision": "downgrade-to-experimental",
+      "follow_up_bead_id": "bd-rchk0.5.11",
+      "log_fields": [
+        "matrix_version",
+        "source_bead_ids",
+        "tracker_limitation",
+        "dependency_gate_map",
+        "operational_prerequisites",
+        "consumer_versions",
+        "stale_reference_checks",
+        "missing_field_diagnostics",
+        "downgrade_decisions",
+        "generated_artifact_paths",
+        "reproduction_command"
+      ],
+      "reproduction_command": "ffs-harness validate-ambition-evidence-matrix --issues .beads/issues.jsonl --out artifacts/ambition/evidence_matrix.json"
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.12",
+      "consumer_name": "proof-bundle",
+      "consumer_version": "proof-bundle-ingestion-v1",
+      "matrix_status": "partial",
+      "required_artifact_path": "artifacts/ambition/evidence_matrix.json",
+      "release_claim_effect": "downgrade public claim until missing consumer evidence is represented",
+      "downgrade_decision": "downgrade-to-experimental",
+      "follow_up_bead_id": "bd-rchk0.5.11",
+      "log_fields": [
+        "matrix_version",
+        "source_bead_ids",
+        "tracker_limitation",
+        "dependency_gate_map",
+        "operational_prerequisites",
+        "consumer_versions",
+        "stale_reference_checks",
+        "missing_field_diagnostics",
+        "downgrade_decisions",
+        "generated_artifact_paths",
+        "reproduction_command"
+      ],
+      "reproduction_command": "ffs-harness validate-ambition-evidence-matrix --issues .beads/issues.jsonl --out artifacts/ambition/evidence_matrix.json"
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.12",
+      "consumer_name": "remediation-catalog",
+      "consumer_version": "remediation-catalog-v1",
+      "matrix_status": "partial",
+      "required_artifact_path": "artifacts/ambition/evidence_matrix.json",
+      "release_claim_effect": "downgrade public claim until missing consumer evidence is represented",
+      "downgrade_decision": "downgrade-to-experimental",
+      "follow_up_bead_id": "bd-rchk0.5.11",
+      "log_fields": [
+        "matrix_version",
+        "source_bead_ids",
+        "tracker_limitation",
+        "dependency_gate_map",
+        "operational_prerequisites",
+        "consumer_versions",
+        "stale_reference_checks",
+        "missing_field_diagnostics",
+        "downgrade_decisions",
+        "generated_artifact_paths",
+        "reproduction_command"
+      ],
+      "reproduction_command": "ffs-harness validate-ambition-evidence-matrix --issues .beads/issues.jsonl --out artifacts/ambition/evidence_matrix.json"
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.13",
+      "consumer_name": "README/FEATURE_PARITY",
+      "consumer_version": "docs-status-renderer-v1",
+      "matrix_status": "partial",
+      "required_artifact_path": "artifacts/ambition/evidence_matrix.json",
+      "release_claim_effect": "downgrade public claim until missing consumer evidence is represented",
+      "downgrade_decision": "downgrade-to-experimental",
+      "follow_up_bead_id": "bd-rchk0.5.11",
+      "log_fields": [
+        "matrix_version",
+        "source_bead_ids",
+        "tracker_limitation",
+        "dependency_gate_map",
+        "operational_prerequisites",
+        "consumer_versions",
+        "stale_reference_checks",
+        "missing_field_diagnostics",
+        "downgrade_decisions",
+        "generated_artifact_paths",
+        "reproduction_command"
+      ],
+      "reproduction_command": "ffs-harness validate-ambition-evidence-matrix --issues .beads/issues.jsonl --out artifacts/ambition/evidence_matrix.json"
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.13",
+      "consumer_name": "follow-up-bead",
+      "consumer_version": "follow-up-bead-creator-v1",
+      "matrix_status": "partial",
+      "required_artifact_path": "artifacts/ambition/evidence_matrix.json",
+      "release_claim_effect": "downgrade public claim until missing consumer evidence is represented",
+      "downgrade_decision": "downgrade-to-experimental",
+      "follow_up_bead_id": "bd-rchk0.5.11",
+      "log_fields": [
+        "matrix_version",
+        "source_bead_ids",
+        "tracker_limitation",
+        "dependency_gate_map",
+        "operational_prerequisites",
+        "consumer_versions",
+        "stale_reference_checks",
+        "missing_field_diagnostics",
+        "downgrade_decisions",
+        "generated_artifact_paths",
+        "reproduction_command"
+      ],
+      "reproduction_command": "ffs-harness validate-ambition-evidence-matrix --issues .beads/issues.jsonl --out artifacts/ambition/evidence_matrix.json"
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.13",
+      "consumer_name": "proof-bundle",
+      "consumer_version": "proof-bundle-ingestion-v1",
+      "matrix_status": "partial",
+      "required_artifact_path": "artifacts/ambition/evidence_matrix.json",
+      "release_claim_effect": "downgrade public claim until missing consumer evidence is represented",
+      "downgrade_decision": "downgrade-to-experimental",
+      "follow_up_bead_id": "bd-rchk0.5.11",
+      "log_fields": [
+        "matrix_version",
+        "source_bead_ids",
+        "tracker_limitation",
+        "dependency_gate_map",
+        "operational_prerequisites",
+        "consumer_versions",
+        "stale_reference_checks",
+        "missing_field_diagnostics",
+        "downgrade_decisions",
+        "generated_artifact_paths",
+        "reproduction_command"
+      ],
+      "reproduction_command": "ffs-harness validate-ambition-evidence-matrix --issues .beads/issues.jsonl --out artifacts/ambition/evidence_matrix.json"
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.14",
+      "consumer_name": "follow-up-bead",
+      "consumer_version": "follow-up-bead-creator-v1",
+      "matrix_status": "partial",
+      "required_artifact_path": "artifacts/ambition/evidence_matrix.json",
+      "release_claim_effect": "downgrade public claim until missing consumer evidence is represented",
+      "downgrade_decision": "downgrade-to-experimental",
+      "follow_up_bead_id": "bd-rchk0.5.11",
+      "log_fields": [
+        "matrix_version",
+        "source_bead_ids",
+        "tracker_limitation",
+        "dependency_gate_map",
+        "operational_prerequisites",
+        "consumer_versions",
+        "stale_reference_checks",
+        "missing_field_diagnostics",
+        "downgrade_decisions",
+        "generated_artifact_paths",
+        "reproduction_command"
+      ],
+      "reproduction_command": "ffs-harness validate-ambition-evidence-matrix --issues .beads/issues.jsonl --out artifacts/ambition/evidence_matrix.json"
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.14",
+      "consumer_name": "release-gates",
+      "consumer_version": "release-gate-evaluator-v1",
+      "matrix_status": "partial",
+      "required_artifact_path": "artifacts/ambition/evidence_matrix.json",
+      "release_claim_effect": "downgrade public claim until missing consumer evidence is represented",
+      "downgrade_decision": "downgrade-to-experimental",
+      "follow_up_bead_id": "bd-rchk0.5.11",
+      "log_fields": [
+        "matrix_version",
+        "source_bead_ids",
+        "tracker_limitation",
+        "dependency_gate_map",
+        "operational_prerequisites",
+        "consumer_versions",
+        "stale_reference_checks",
+        "missing_field_diagnostics",
+        "downgrade_decisions",
+        "generated_artifact_paths",
+        "reproduction_command"
+      ],
+      "reproduction_command": "ffs-harness validate-ambition-evidence-matrix --issues .beads/issues.jsonl --out artifacts/ambition/evidence_matrix.json"
+    },
+    {
+      "source_bead_id": "bd-rchk4.2",
+      "consumer_name": "follow-up-bead",
+      "consumer_version": "follow-up-bead-creator-v1",
+      "matrix_status": "blocked",
+      "required_artifact_path": "artifacts/ambition/evidence_matrix.json",
+      "release_claim_effect": "block public claim and require owning follow-up bead",
+      "downgrade_decision": "fail-closed-blocked",
+      "follow_up_bead_id": "bd-rchk0.5.11",
+      "log_fields": [
+        "matrix_version",
+        "source_bead_ids",
+        "tracker_limitation",
+        "dependency_gate_map",
+        "operational_prerequisites",
+        "consumer_versions",
+        "stale_reference_checks",
+        "missing_field_diagnostics",
+        "downgrade_decisions",
+        "generated_artifact_paths",
+        "reproduction_command"
+      ],
+      "reproduction_command": "ffs-harness validate-ambition-evidence-matrix --issues .beads/issues.jsonl --out artifacts/ambition/evidence_matrix.json"
+    },
+    {
+      "source_bead_id": "bd-rchk4.2",
+      "consumer_name": "readiness-report",
+      "consumer_version": "readiness-report-v1",
+      "matrix_status": "blocked",
+      "required_artifact_path": "artifacts/ambition/evidence_matrix.json",
+      "release_claim_effect": "block public claim and require owning follow-up bead",
+      "downgrade_decision": "fail-closed-blocked",
+      "follow_up_bead_id": "bd-rchk0.5.11",
+      "log_fields": [
+        "matrix_version",
+        "source_bead_ids",
+        "tracker_limitation",
+        "dependency_gate_map",
+        "operational_prerequisites",
+        "consumer_versions",
+        "stale_reference_checks",
+        "missing_field_diagnostics",
+        "downgrade_decisions",
+        "generated_artifact_paths",
+        "reproduction_command"
+      ],
+      "reproduction_command": "ffs-harness validate-ambition-evidence-matrix --issues .beads/issues.jsonl --out artifacts/ambition/evidence_matrix.json"
+    },
+    {
+      "source_bead_id": "bd-rchk4.3",
+      "consumer_name": "follow-up-bead",
+      "consumer_version": "follow-up-bead-creator-v1",
+      "matrix_status": "blocked",
+      "required_artifact_path": "artifacts/ambition/evidence_matrix.json",
+      "release_claim_effect": "block public claim and require owning follow-up bead",
+      "downgrade_decision": "fail-closed-blocked",
+      "follow_up_bead_id": "bd-rchk0.5.11",
+      "log_fields": [
+        "matrix_version",
+        "source_bead_ids",
+        "tracker_limitation",
+        "dependency_gate_map",
+        "operational_prerequisites",
+        "consumer_versions",
+        "stale_reference_checks",
+        "missing_field_diagnostics",
+        "downgrade_decisions",
+        "generated_artifact_paths",
+        "reproduction_command"
+      ],
+      "reproduction_command": "ffs-harness validate-ambition-evidence-matrix --issues .beads/issues.jsonl --out artifacts/ambition/evidence_matrix.json"
+    },
+    {
+      "source_bead_id": "bd-rchk4.3",
+      "consumer_name": "readiness-report",
+      "consumer_version": "readiness-report-v1",
+      "matrix_status": "blocked",
+      "required_artifact_path": "artifacts/ambition/evidence_matrix.json",
+      "release_claim_effect": "block public claim and require owning follow-up bead",
+      "downgrade_decision": "fail-closed-blocked",
+      "follow_up_bead_id": "bd-rchk0.5.11",
+      "log_fields": [
+        "matrix_version",
+        "source_bead_ids",
+        "tracker_limitation",
+        "dependency_gate_map",
+        "operational_prerequisites",
+        "consumer_versions",
+        "stale_reference_checks",
+        "missing_field_diagnostics",
+        "downgrade_decisions",
+        "generated_artifact_paths",
+        "reproduction_command"
+      ],
+      "reproduction_command": "ffs-harness validate-ambition-evidence-matrix --issues .beads/issues.jsonl --out artifacts/ambition/evidence_matrix.json"
+    },
+    {
+      "source_bead_id": "bd-rchk7.2",
+      "consumer_name": "follow-up-bead",
+      "consumer_version": "follow-up-bead-creator-v1",
+      "matrix_status": "blocked",
+      "required_artifact_path": "artifacts/ambition/evidence_matrix.json",
+      "release_claim_effect": "block public claim and require owning follow-up bead",
+      "downgrade_decision": "fail-closed-blocked",
+      "follow_up_bead_id": "bd-rchk0.5.11",
+      "log_fields": [
+        "matrix_version",
+        "source_bead_ids",
+        "tracker_limitation",
+        "dependency_gate_map",
+        "operational_prerequisites",
+        "consumer_versions",
+        "stale_reference_checks",
+        "missing_field_diagnostics",
+        "downgrade_decisions",
+        "generated_artifact_paths",
+        "reproduction_command"
+      ],
+      "reproduction_command": "ffs-harness validate-ambition-evidence-matrix --issues .beads/issues.jsonl --out artifacts/ambition/evidence_matrix.json"
+    },
+    {
+      "source_bead_id": "bd-rchk7.2",
+      "consumer_name": "readiness-report",
+      "consumer_version": "readiness-report-v1",
+      "matrix_status": "blocked",
+      "required_artifact_path": "artifacts/ambition/evidence_matrix.json",
+      "release_claim_effect": "block public claim and require owning follow-up bead",
+      "downgrade_decision": "fail-closed-blocked",
+      "follow_up_bead_id": "bd-rchk0.5.11",
+      "log_fields": [
+        "matrix_version",
+        "source_bead_ids",
+        "tracker_limitation",
+        "dependency_gate_map",
+        "operational_prerequisites",
+        "consumer_versions",
+        "stale_reference_checks",
+        "missing_field_diagnostics",
+        "downgrade_decisions",
+        "generated_artifact_paths",
+        "reproduction_command"
+      ],
+      "reproduction_command": "ffs-harness validate-ambition-evidence-matrix --issues .beads/issues.jsonl --out artifacts/ambition/evidence_matrix.json"
+    }
+  ],
+  "consumer_summaries": [
+    {
+      "consumer_name": "README/FEATURE_PARITY",
+      "consumer_version": "docs-status-renderer-v1",
+      "source_bead_ids": [
+        "bd-rchk0.4.1",
+        "bd-rchk0.5.10",
+        "bd-rchk0.5.10.1",
+        "bd-rchk0.5.13"
+      ],
+      "validated_count": 1,
+      "partial_count": 1,
+      "blocked_count": 2,
+      "stale_count": 0,
+      "not_applicable_count": 0,
+      "intentionally_deferred_count": 0,
+      "downgrade_count": 3,
+      "generated_artifact_paths": [
+        "artifacts/ambition/evidence_matrix.json"
+      ]
+    },
+    {
+      "consumer_name": "follow-up-bead",
+      "consumer_version": "follow-up-bead-creator-v1",
+      "source_bead_ids": [
+        "bd-rchk0.1.3",
+        "bd-rchk0.2.3",
+        "bd-rchk0.3.3",
+        "bd-rchk0.4.1",
+        "bd-rchk0.4.2",
+        "bd-rchk0.4.3",
+        "bd-rchk0.5.10",
+        "bd-rchk0.5.11",
+        "bd-rchk0.5.12",
+        "bd-rchk0.5.13",
+        "bd-rchk0.5.14",
+        "bd-rchk4.2",
+        "bd-rchk4.3",
+        "bd-rchk7.2"
+      ],
+      "validated_count": 0,
+      "partial_count": 4,
+      "blocked_count": 10,
+      "stale_count": 0,
+      "not_applicable_count": 0,
+      "intentionally_deferred_count": 0,
+      "downgrade_count": 14,
+      "generated_artifact_paths": [
+        "artifacts/ambition/evidence_matrix.json"
+      ]
+    },
+    {
+      "consumer_name": "proof-bundle",
+      "consumer_version": "proof-bundle-ingestion-v1",
+      "source_bead_ids": [
+        "bd-rchk0.5.10.1",
+        "bd-rchk0.5.12",
+        "bd-rchk0.5.13"
+      ],
+      "validated_count": 1,
+      "partial_count": 2,
+      "blocked_count": 0,
+      "stale_count": 0,
+      "not_applicable_count": 0,
+      "intentionally_deferred_count": 0,
+      "downgrade_count": 2,
+      "generated_artifact_paths": [
+        "artifacts/ambition/evidence_matrix.json"
+      ]
+    },
+    {
+      "consumer_name": "readiness-report",
+      "consumer_version": "readiness-report-v1",
+      "source_bead_ids": [
+        "bd-rchk0.1.3",
+        "bd-rchk0.2.3",
+        "bd-rchk0.3.3",
+        "bd-rchk0.4.2",
+        "bd-rchk0.4.3",
+        "bd-rchk4.2",
+        "bd-rchk4.3",
+        "bd-rchk7.2"
+      ],
+      "validated_count": 0,
+      "partial_count": 0,
+      "blocked_count": 8,
+      "stale_count": 0,
+      "not_applicable_count": 0,
+      "intentionally_deferred_count": 0,
+      "downgrade_count": 8,
+      "generated_artifact_paths": [
+        "artifacts/ambition/evidence_matrix.json"
+      ]
+    },
+    {
+      "consumer_name": "release-gates",
+      "consumer_version": "release-gate-evaluator-v1",
+      "source_bead_ids": [
+        "bd-rchk0.5.10",
+        "bd-rchk0.5.10.1",
+        "bd-rchk0.5.11",
+        "bd-rchk0.5.14"
+      ],
+      "validated_count": 1,
+      "partial_count": 2,
+      "blocked_count": 1,
+      "stale_count": 0,
+      "not_applicable_count": 0,
+      "intentionally_deferred_count": 0,
+      "downgrade_count": 3,
+      "generated_artifact_paths": [
+        "artifacts/ambition/evidence_matrix.json"
+      ]
+    },
+    {
+      "consumer_name": "remediation-catalog",
+      "consumer_version": "remediation-catalog-v1",
+      "source_bead_ids": [
+        "bd-rchk0.5.10.1",
+        "bd-rchk0.5.12"
+      ],
+      "validated_count": 1,
+      "partial_count": 1,
+      "blocked_count": 0,
+      "stale_count": 0,
+      "not_applicable_count": 0,
+      "intentionally_deferred_count": 0,
+      "downgrade_count": 1,
+      "generated_artifact_paths": [
+        "artifacts/ambition/evidence_matrix.json"
+      ]
+    }
+  ],
+  "downgrade_decisions": [
+    {
+      "source_bead_id": "bd-rchk0.1.3",
+      "consumer_name": "follow-up-bead",
+      "matrix_status": "blocked",
+      "release_claim_effect": "block public claim and require owning follow-up bead",
+      "downgrade_decision": "fail-closed-blocked",
+      "follow_up_bead_id": "bd-rchk0.5.11"
+    },
+    {
+      "source_bead_id": "bd-rchk0.1.3",
+      "consumer_name": "readiness-report",
+      "matrix_status": "blocked",
+      "release_claim_effect": "block public claim and require owning follow-up bead",
+      "downgrade_decision": "fail-closed-blocked",
+      "follow_up_bead_id": "bd-rchk0.5.11"
+    },
+    {
+      "source_bead_id": "bd-rchk0.2.3",
+      "consumer_name": "follow-up-bead",
+      "matrix_status": "blocked",
+      "release_claim_effect": "block public claim and require owning follow-up bead",
+      "downgrade_decision": "fail-closed-blocked",
+      "follow_up_bead_id": "bd-rchk0.5.11"
+    },
+    {
+      "source_bead_id": "bd-rchk0.2.3",
+      "consumer_name": "readiness-report",
+      "matrix_status": "blocked",
+      "release_claim_effect": "block public claim and require owning follow-up bead",
+      "downgrade_decision": "fail-closed-blocked",
+      "follow_up_bead_id": "bd-rchk0.5.11"
+    },
+    {
+      "source_bead_id": "bd-rchk0.3.3",
+      "consumer_name": "follow-up-bead",
+      "matrix_status": "blocked",
+      "release_claim_effect": "block public claim and require owning follow-up bead",
+      "downgrade_decision": "fail-closed-blocked",
+      "follow_up_bead_id": "bd-rchk0.5.11"
+    },
+    {
+      "source_bead_id": "bd-rchk0.3.3",
+      "consumer_name": "readiness-report",
+      "matrix_status": "blocked",
+      "release_claim_effect": "block public claim and require owning follow-up bead",
+      "downgrade_decision": "fail-closed-blocked",
+      "follow_up_bead_id": "bd-rchk0.5.11"
+    },
+    {
+      "source_bead_id": "bd-rchk0.4.1",
+      "consumer_name": "README/FEATURE_PARITY",
+      "matrix_status": "blocked",
+      "release_claim_effect": "block public claim and require owning follow-up bead",
+      "downgrade_decision": "fail-closed-blocked",
+      "follow_up_bead_id": "bd-rchk0.5.11"
+    },
+    {
+      "source_bead_id": "bd-rchk0.4.1",
+      "consumer_name": "follow-up-bead",
+      "matrix_status": "blocked",
+      "release_claim_effect": "block public claim and require owning follow-up bead",
+      "downgrade_decision": "fail-closed-blocked",
+      "follow_up_bead_id": "bd-rchk0.5.11"
+    },
+    {
+      "source_bead_id": "bd-rchk0.4.2",
+      "consumer_name": "follow-up-bead",
+      "matrix_status": "blocked",
+      "release_claim_effect": "block public claim and require owning follow-up bead",
+      "downgrade_decision": "fail-closed-blocked",
+      "follow_up_bead_id": "bd-rchk0.5.11"
+    },
+    {
+      "source_bead_id": "bd-rchk0.4.2",
+      "consumer_name": "readiness-report",
+      "matrix_status": "blocked",
+      "release_claim_effect": "block public claim and require owning follow-up bead",
+      "downgrade_decision": "fail-closed-blocked",
+      "follow_up_bead_id": "bd-rchk0.5.11"
+    },
+    {
+      "source_bead_id": "bd-rchk0.4.3",
+      "consumer_name": "follow-up-bead",
+      "matrix_status": "blocked",
+      "release_claim_effect": "block public claim and require owning follow-up bead",
+      "downgrade_decision": "fail-closed-blocked",
+      "follow_up_bead_id": "bd-rchk0.5.11"
+    },
+    {
+      "source_bead_id": "bd-rchk0.4.3",
+      "consumer_name": "readiness-report",
+      "matrix_status": "blocked",
+      "release_claim_effect": "block public claim and require owning follow-up bead",
+      "downgrade_decision": "fail-closed-blocked",
+      "follow_up_bead_id": "bd-rchk0.5.11"
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.10",
+      "consumer_name": "README/FEATURE_PARITY",
+      "matrix_status": "blocked",
+      "release_claim_effect": "block public claim and require owning follow-up bead",
+      "downgrade_decision": "fail-closed-blocked",
+      "follow_up_bead_id": "bd-rchk0.5.11"
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.10",
+      "consumer_name": "follow-up-bead",
+      "matrix_status": "blocked",
+      "release_claim_effect": "block public claim and require owning follow-up bead",
+      "downgrade_decision": "fail-closed-blocked",
+      "follow_up_bead_id": "bd-rchk0.5.11"
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.10",
+      "consumer_name": "release-gates",
+      "matrix_status": "blocked",
+      "release_claim_effect": "block public claim and require owning follow-up bead",
+      "downgrade_decision": "fail-closed-blocked",
+      "follow_up_bead_id": "bd-rchk0.5.11"
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.11",
+      "consumer_name": "follow-up-bead",
+      "matrix_status": "partial",
+      "release_claim_effect": "downgrade public claim until missing consumer evidence is represented",
+      "downgrade_decision": "downgrade-to-experimental",
+      "follow_up_bead_id": "bd-rchk0.5.12"
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.11",
+      "consumer_name": "release-gates",
+      "matrix_status": "partial",
+      "release_claim_effect": "downgrade public claim until missing consumer evidence is represented",
+      "downgrade_decision": "downgrade-to-experimental",
+      "follow_up_bead_id": "bd-rchk0.5.12"
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.12",
+      "consumer_name": "follow-up-bead",
+      "matrix_status": "partial",
+      "release_claim_effect": "downgrade public claim until missing consumer evidence is represented",
+      "downgrade_decision": "downgrade-to-experimental",
+      "follow_up_bead_id": "bd-rchk0.5.11"
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.12",
+      "consumer_name": "proof-bundle",
+      "matrix_status": "partial",
+      "release_claim_effect": "downgrade public claim until missing consumer evidence is represented",
+      "downgrade_decision": "downgrade-to-experimental",
+      "follow_up_bead_id": "bd-rchk0.5.11"
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.12",
+      "consumer_name": "remediation-catalog",
+      "matrix_status": "partial",
+      "release_claim_effect": "downgrade public claim until missing consumer evidence is represented",
+      "downgrade_decision": "downgrade-to-experimental",
+      "follow_up_bead_id": "bd-rchk0.5.11"
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.13",
+      "consumer_name": "README/FEATURE_PARITY",
+      "matrix_status": "partial",
+      "release_claim_effect": "downgrade public claim until missing consumer evidence is represented",
+      "downgrade_decision": "downgrade-to-experimental",
+      "follow_up_bead_id": "bd-rchk0.5.11"
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.13",
+      "consumer_name": "follow-up-bead",
+      "matrix_status": "partial",
+      "release_claim_effect": "downgrade public claim until missing consumer evidence is represented",
+      "downgrade_decision": "downgrade-to-experimental",
+      "follow_up_bead_id": "bd-rchk0.5.11"
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.13",
+      "consumer_name": "proof-bundle",
+      "matrix_status": "partial",
+      "release_claim_effect": "downgrade public claim until missing consumer evidence is represented",
+      "downgrade_decision": "downgrade-to-experimental",
+      "follow_up_bead_id": "bd-rchk0.5.11"
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.14",
+      "consumer_name": "follow-up-bead",
+      "matrix_status": "partial",
+      "release_claim_effect": "downgrade public claim until missing consumer evidence is represented",
+      "downgrade_decision": "downgrade-to-experimental",
+      "follow_up_bead_id": "bd-rchk0.5.11"
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.14",
+      "consumer_name": "release-gates",
+      "matrix_status": "partial",
+      "release_claim_effect": "downgrade public claim until missing consumer evidence is represented",
+      "downgrade_decision": "downgrade-to-experimental",
+      "follow_up_bead_id": "bd-rchk0.5.11"
+    },
+    {
+      "source_bead_id": "bd-rchk4.2",
+      "consumer_name": "follow-up-bead",
+      "matrix_status": "blocked",
+      "release_claim_effect": "block public claim and require owning follow-up bead",
+      "downgrade_decision": "fail-closed-blocked",
+      "follow_up_bead_id": "bd-rchk0.5.11"
+    },
+    {
+      "source_bead_id": "bd-rchk4.2",
+      "consumer_name": "readiness-report",
+      "matrix_status": "blocked",
+      "release_claim_effect": "block public claim and require owning follow-up bead",
+      "downgrade_decision": "fail-closed-blocked",
+      "follow_up_bead_id": "bd-rchk0.5.11"
+    },
+    {
+      "source_bead_id": "bd-rchk4.3",
+      "consumer_name": "follow-up-bead",
+      "matrix_status": "blocked",
+      "release_claim_effect": "block public claim and require owning follow-up bead",
+      "downgrade_decision": "fail-closed-blocked",
+      "follow_up_bead_id": "bd-rchk0.5.11"
+    },
+    {
+      "source_bead_id": "bd-rchk4.3",
+      "consumer_name": "readiness-report",
+      "matrix_status": "blocked",
+      "release_claim_effect": "block public claim and require owning follow-up bead",
+      "downgrade_decision": "fail-closed-blocked",
+      "follow_up_bead_id": "bd-rchk0.5.11"
+    },
+    {
+      "source_bead_id": "bd-rchk7.2",
+      "consumer_name": "follow-up-bead",
+      "matrix_status": "blocked",
+      "release_claim_effect": "block public claim and require owning follow-up bead",
+      "downgrade_decision": "fail-closed-blocked",
+      "follow_up_bead_id": "bd-rchk0.5.11"
+    },
+    {
+      "source_bead_id": "bd-rchk7.2",
+      "consumer_name": "readiness-report",
+      "matrix_status": "blocked",
+      "release_claim_effect": "block public claim and require owning follow-up bead",
+      "downgrade_decision": "fail-closed-blocked",
+      "follow_up_bead_id": "bd-rchk0.5.11"
+    }
+  ],
+  "stale_reference_checks": [
+    {
+      "source_bead_id": "matrix",
+      "referenced_bead_id": "bd-rchk0.5.10",
+      "field": "required_source_beads",
+      "exists": true
+    },
+    {
+      "source_bead_id": "matrix",
+      "referenced_bead_id": "bd-rchk0.5.10.1",
+      "field": "required_source_beads",
+      "exists": true
+    },
+    {
+      "source_bead_id": "matrix",
+      "referenced_bead_id": "bd-rchk0.5.11",
+      "field": "required_source_beads",
+      "exists": true
+    },
+    {
+      "source_bead_id": "matrix",
+      "referenced_bead_id": "bd-rchk0.5.12",
+      "field": "required_source_beads",
+      "exists": true
+    },
+    {
+      "source_bead_id": "matrix",
+      "referenced_bead_id": "bd-rchk0.5.13",
+      "field": "required_source_beads",
+      "exists": true
+    },
+    {
+      "source_bead_id": "matrix",
+      "referenced_bead_id": "bd-rchk0.5.14",
+      "field": "required_source_beads",
+      "exists": true
+    },
+    {
+      "source_bead_id": "matrix",
+      "referenced_bead_id": "bd-rchk0.4.1",
+      "field": "required_source_beads",
+      "exists": true
+    },
+    {
+      "source_bead_id": "matrix",
+      "referenced_bead_id": "bd-rchk0.4.2",
+      "field": "required_source_beads",
+      "exists": true
+    },
+    {
+      "source_bead_id": "matrix",
+      "referenced_bead_id": "bd-rchk0.4.3",
+      "field": "required_source_beads",
+      "exists": true
+    },
+    {
+      "source_bead_id": "matrix",
+      "referenced_bead_id": "bd-rchk4.2",
+      "field": "required_source_beads",
+      "exists": true
+    },
+    {
+      "source_bead_id": "matrix",
+      "referenced_bead_id": "bd-rchk4.3",
+      "field": "required_source_beads",
+      "exists": true
+    },
+    {
+      "source_bead_id": "matrix",
+      "referenced_bead_id": "bd-rchk7.2",
+      "field": "required_source_beads",
+      "exists": true
+    },
+    {
+      "source_bead_id": "matrix",
+      "referenced_bead_id": "bd-rchk0.1.3",
+      "field": "required_source_beads",
+      "exists": true
+    },
+    {
+      "source_bead_id": "matrix",
+      "referenced_bead_id": "bd-rchk0.2.3",
+      "field": "required_source_beads",
+      "exists": true
+    },
+    {
+      "source_bead_id": "matrix",
+      "referenced_bead_id": "bd-rchk0.3.3",
+      "field": "required_source_beads",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.1.3",
+      "referenced_bead_id": "bd-rchk0.1.3",
+      "field": "source_bead_id",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.1.3",
+      "referenced_bead_id": "bd-rchk0.5.11",
+      "field": "threat_model_follow_up",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.1.3",
+      "referenced_bead_id": "bd-rchk0.5.12",
+      "field": "remediation_id",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.1.3",
+      "referenced_bead_id": "bd-rchk0.5.12",
+      "field": "remediation_follow_up",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.1.3",
+      "referenced_bead_id": "bd-rchk0.5.13",
+      "field": "proof_demo_follow_up",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.1.3",
+      "referenced_bead_id": "bd-rchk0.5.13",
+      "field": "low_privilege_proof_follow_up",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.1.3",
+      "referenced_bead_id": "bd-rchk0.5.14",
+      "field": "overhead_budget_follow_up",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.2.3",
+      "referenced_bead_id": "bd-rchk0.2.3",
+      "field": "source_bead_id",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.2.3",
+      "referenced_bead_id": "bd-rchk0.5.11",
+      "field": "threat_model_follow_up",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.2.3",
+      "referenced_bead_id": "bd-rchk0.5.12",
+      "field": "remediation_id",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.2.3",
+      "referenced_bead_id": "bd-rchk0.5.12",
+      "field": "remediation_follow_up",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.2.3",
+      "referenced_bead_id": "bd-rchk0.5.13",
+      "field": "proof_demo_follow_up",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.2.3",
+      "referenced_bead_id": "bd-rchk0.5.13",
+      "field": "low_privilege_proof_follow_up",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.2.3",
+      "referenced_bead_id": "bd-rchk0.5.14",
+      "field": "overhead_budget_follow_up",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.2.3",
+      "referenced_bead_id": "bd-rchk0.2.3",
+      "field": "prerequisites",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.3.3",
+      "referenced_bead_id": "bd-rchk0.3.3",
+      "field": "source_bead_id",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.3.3",
+      "referenced_bead_id": "bd-rchk0.5.11",
+      "field": "threat_model_follow_up",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.3.3",
+      "referenced_bead_id": "bd-rchk0.5.12",
+      "field": "remediation_id",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.3.3",
+      "referenced_bead_id": "bd-rchk0.5.12",
+      "field": "remediation_follow_up",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.3.3",
+      "referenced_bead_id": "bd-rchk0.5.13",
+      "field": "proof_demo_follow_up",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.3.3",
+      "referenced_bead_id": "bd-rchk0.5.13",
+      "field": "low_privilege_proof_follow_up",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.3.3",
+      "referenced_bead_id": "bd-rchk0.5.14",
+      "field": "overhead_budget_follow_up",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.3.3",
+      "referenced_bead_id": "bd-rchk0.3.3",
+      "field": "prerequisites",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.4.1",
+      "referenced_bead_id": "bd-rchk0.4.1",
+      "field": "source_bead_id",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.4.1",
+      "referenced_bead_id": "bd-rchk0.5.11",
+      "field": "threat_model_follow_up",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.4.1",
+      "referenced_bead_id": "bd-rchk0.5.12",
+      "field": "remediation_id",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.4.1",
+      "referenced_bead_id": "bd-rchk0.5.12",
+      "field": "remediation_follow_up",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.4.1",
+      "referenced_bead_id": "bd-rchk0.5.13",
+      "field": "proof_demo_follow_up",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.4.1",
+      "referenced_bead_id": "bd-rchk0.5.13",
+      "field": "low_privilege_proof_follow_up",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.4.1",
+      "referenced_bead_id": "bd-rchk0.5.14",
+      "field": "overhead_budget_follow_up",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.4.2",
+      "referenced_bead_id": "bd-rchk0.4.2",
+      "field": "source_bead_id",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.4.2",
+      "referenced_bead_id": "bd-rchk0.5.11",
+      "field": "threat_model_follow_up",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.4.2",
+      "referenced_bead_id": "bd-rchk0.5.12",
+      "field": "remediation_id",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.4.2",
+      "referenced_bead_id": "bd-rchk0.5.12",
+      "field": "remediation_follow_up",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.4.2",
+      "referenced_bead_id": "bd-rchk0.5.13",
+      "field": "proof_demo_follow_up",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.4.2",
+      "referenced_bead_id": "bd-rchk0.5.13",
+      "field": "low_privilege_proof_follow_up",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.4.2",
+      "referenced_bead_id": "bd-rchk0.5.14",
+      "field": "overhead_budget_follow_up",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.4.3",
+      "referenced_bead_id": "bd-rchk0.4.3",
+      "field": "source_bead_id",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.4.3",
+      "referenced_bead_id": "bd-rchk0.5.11",
+      "field": "threat_model_follow_up",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.4.3",
+      "referenced_bead_id": "bd-rchk0.5.12",
+      "field": "remediation_id",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.4.3",
+      "referenced_bead_id": "bd-rchk0.5.12",
+      "field": "remediation_follow_up",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.4.3",
+      "referenced_bead_id": "bd-rchk0.5.13",
+      "field": "proof_demo_follow_up",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.4.3",
+      "referenced_bead_id": "bd-rchk0.5.13",
+      "field": "low_privilege_proof_follow_up",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.4.3",
+      "referenced_bead_id": "bd-rchk0.5.14",
+      "field": "overhead_budget_follow_up",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.10",
+      "referenced_bead_id": "bd-rchk0.5.10",
+      "field": "source_bead_id",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.10",
+      "referenced_bead_id": "bd-rchk0.5.11",
+      "field": "threat_model_follow_up",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.10",
+      "referenced_bead_id": "bd-rchk0.5.12",
+      "field": "remediation_id",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.10",
+      "referenced_bead_id": "bd-rchk0.5.12",
+      "field": "remediation_follow_up",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.10",
+      "referenced_bead_id": "bd-rchk0.5.13",
+      "field": "proof_demo_follow_up",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.10",
+      "referenced_bead_id": "bd-rchk0.5.13",
+      "field": "low_privilege_proof_follow_up",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.10",
+      "referenced_bead_id": "bd-rchk0.5.14",
+      "field": "overhead_budget_follow_up",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.10",
+      "referenced_bead_id": "bd-rchk0.1.3",
+      "field": "prerequisites",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.10",
+      "referenced_bead_id": "bd-rchk0.2.3",
+      "field": "prerequisites",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.10",
+      "referenced_bead_id": "bd-rchk0.3.3",
+      "field": "prerequisites",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.10",
+      "referenced_bead_id": "bd-rchk0.4.1",
+      "field": "prerequisites",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.10",
+      "referenced_bead_id": "bd-rchk0.4.2",
+      "field": "prerequisites",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.10",
+      "referenced_bead_id": "bd-rchk0.4.3",
+      "field": "prerequisites",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.10",
+      "referenced_bead_id": "bd-rchk4.2",
+      "field": "prerequisites",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.10",
+      "referenced_bead_id": "bd-rchk4.3",
+      "field": "prerequisites",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.10",
+      "referenced_bead_id": "bd-rchk7.2",
+      "field": "prerequisites",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.10.1",
+      "referenced_bead_id": "bd-rchk0.5.10.1",
+      "field": "source_bead_id",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.10.1",
+      "referenced_bead_id": "bd-rchk0.1.3",
+      "field": "prerequisites",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.10.1",
+      "referenced_bead_id": "bd-rchk0.4.1",
+      "field": "prerequisites",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.10.1",
+      "referenced_bead_id": "bd-rchk0.4.2",
+      "field": "prerequisites",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.10.1",
+      "referenced_bead_id": "bd-rchk0.4.3",
+      "field": "prerequisites",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.10.1",
+      "referenced_bead_id": "bd-rchk4.2",
+      "field": "prerequisites",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.10.1",
+      "referenced_bead_id": "bd-rchk4.3",
+      "field": "prerequisites",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.10.1",
+      "referenced_bead_id": "bd-rchk7.2",
+      "field": "prerequisites",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.11",
+      "referenced_bead_id": "bd-rchk0.5.11",
+      "field": "source_bead_id",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.11",
+      "referenced_bead_id": "bd-rchk0.5.12",
+      "field": "remediation_id",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.11",
+      "referenced_bead_id": "bd-rchk0.5.12",
+      "field": "remediation_follow_up",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.11",
+      "referenced_bead_id": "bd-rchk0.5.13",
+      "field": "proof_demo_follow_up",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.11",
+      "referenced_bead_id": "bd-rchk0.5.13",
+      "field": "low_privilege_proof_follow_up",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.11",
+      "referenced_bead_id": "bd-rchk0.5.14",
+      "field": "overhead_budget_follow_up",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.11",
+      "referenced_bead_id": "bd-rchk0.4.1",
+      "field": "prerequisites",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.11",
+      "referenced_bead_id": "bd-rchk0.4.2",
+      "field": "prerequisites",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.11",
+      "referenced_bead_id": "bd-rchk0.4.3",
+      "field": "prerequisites",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.11",
+      "referenced_bead_id": "bd-rchk4.2",
+      "field": "prerequisites",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.11",
+      "referenced_bead_id": "bd-rchk4.3",
+      "field": "prerequisites",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.11",
+      "referenced_bead_id": "bd-rchk7.2",
+      "field": "prerequisites",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.12",
+      "referenced_bead_id": "bd-rchk0.5.12",
+      "field": "source_bead_id",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.12",
+      "referenced_bead_id": "bd-rchk0.5.11",
+      "field": "threat_model_follow_up",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.12",
+      "referenced_bead_id": "bd-rchk0.5.14",
+      "field": "overhead_budget_follow_up",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.12",
+      "referenced_bead_id": "bd-rchk0.1.3",
+      "field": "prerequisites",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.12",
+      "referenced_bead_id": "bd-rchk0.4.1",
+      "field": "prerequisites",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.12",
+      "referenced_bead_id": "bd-rchk0.4.2",
+      "field": "prerequisites",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.12",
+      "referenced_bead_id": "bd-rchk0.4.3",
+      "field": "prerequisites",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.12",
+      "referenced_bead_id": "bd-rchk4.2",
+      "field": "prerequisites",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.12",
+      "referenced_bead_id": "bd-rchk4.3",
+      "field": "prerequisites",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.12",
+      "referenced_bead_id": "bd-rchk7.2",
+      "field": "prerequisites",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.13",
+      "referenced_bead_id": "bd-rchk0.5.13",
+      "field": "source_bead_id",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.13",
+      "referenced_bead_id": "bd-rchk0.5.11",
+      "field": "threat_model_follow_up",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.13",
+      "referenced_bead_id": "bd-rchk0.5.12",
+      "field": "remediation_id",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.13",
+      "referenced_bead_id": "bd-rchk0.5.12",
+      "field": "remediation_follow_up",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.13",
+      "referenced_bead_id": "bd-rchk0.5.14",
+      "field": "overhead_budget_follow_up",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.13",
+      "referenced_bead_id": "bd-rchk0.4.1",
+      "field": "prerequisites",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.13",
+      "referenced_bead_id": "bd-rchk0.4.2",
+      "field": "prerequisites",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.13",
+      "referenced_bead_id": "bd-rchk0.4.3",
+      "field": "prerequisites",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.13",
+      "referenced_bead_id": "bd-rchk4.2",
+      "field": "prerequisites",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.13",
+      "referenced_bead_id": "bd-rchk4.3",
+      "field": "prerequisites",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.13",
+      "referenced_bead_id": "bd-rchk7.2",
+      "field": "prerequisites",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.14",
+      "referenced_bead_id": "bd-rchk0.5.14",
+      "field": "source_bead_id",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.14",
+      "referenced_bead_id": "bd-rchk0.5.11",
+      "field": "threat_model_follow_up",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.14",
+      "referenced_bead_id": "bd-rchk0.5.12",
+      "field": "remediation_id",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.14",
+      "referenced_bead_id": "bd-rchk0.5.12",
+      "field": "remediation_follow_up",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.14",
+      "referenced_bead_id": "bd-rchk0.5.13",
+      "field": "proof_demo_follow_up",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.14",
+      "referenced_bead_id": "bd-rchk0.5.13",
+      "field": "low_privilege_proof_follow_up",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.14",
+      "referenced_bead_id": "bd-rchk0.4.1",
+      "field": "prerequisites",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.14",
+      "referenced_bead_id": "bd-rchk0.4.2",
+      "field": "prerequisites",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.14",
+      "referenced_bead_id": "bd-rchk0.4.3",
+      "field": "prerequisites",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk4.2",
+      "referenced_bead_id": "bd-rchk4.2",
+      "field": "source_bead_id",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk4.2",
+      "referenced_bead_id": "bd-rchk0.5.11",
+      "field": "threat_model_follow_up",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk4.2",
+      "referenced_bead_id": "bd-rchk0.5.12",
+      "field": "remediation_id",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk4.2",
+      "referenced_bead_id": "bd-rchk0.5.12",
+      "field": "remediation_follow_up",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk4.2",
+      "referenced_bead_id": "bd-rchk0.5.13",
+      "field": "proof_demo_follow_up",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk4.2",
+      "referenced_bead_id": "bd-rchk0.5.13",
+      "field": "low_privilege_proof_follow_up",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk4.2",
+      "referenced_bead_id": "bd-rchk0.5.14",
+      "field": "overhead_budget_follow_up",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk4.3",
+      "referenced_bead_id": "bd-rchk4.3",
+      "field": "source_bead_id",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk4.3",
+      "referenced_bead_id": "bd-rchk0.5.11",
+      "field": "threat_model_follow_up",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk4.3",
+      "referenced_bead_id": "bd-rchk0.5.12",
+      "field": "remediation_id",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk4.3",
+      "referenced_bead_id": "bd-rchk0.5.12",
+      "field": "remediation_follow_up",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk4.3",
+      "referenced_bead_id": "bd-rchk0.5.13",
+      "field": "proof_demo_follow_up",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk4.3",
+      "referenced_bead_id": "bd-rchk0.5.13",
+      "field": "low_privilege_proof_follow_up",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk4.3",
+      "referenced_bead_id": "bd-rchk0.5.14",
+      "field": "overhead_budget_follow_up",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk4.3",
+      "referenced_bead_id": "bd-rchk0.3.3",
+      "field": "prerequisites",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk7.2",
+      "referenced_bead_id": "bd-rchk7.2",
+      "field": "source_bead_id",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk7.2",
+      "referenced_bead_id": "bd-rchk0.5.11",
+      "field": "threat_model_follow_up",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk7.2",
+      "referenced_bead_id": "bd-rchk0.5.12",
+      "field": "remediation_id",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk7.2",
+      "referenced_bead_id": "bd-rchk0.5.12",
+      "field": "remediation_follow_up",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk7.2",
+      "referenced_bead_id": "bd-rchk0.5.13",
+      "field": "proof_demo_follow_up",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk7.2",
+      "referenced_bead_id": "bd-rchk0.5.13",
+      "field": "low_privilege_proof_follow_up",
+      "exists": true
+    },
+    {
+      "source_bead_id": "bd-rchk7.2",
+      "referenced_bead_id": "bd-rchk0.5.14",
+      "field": "overhead_budget_follow_up",
+      "exists": true
+    }
+  ],
+  "required_output_coverage": [
+    {
+      "source_bead_id": "bd-rchk0.5.10",
+      "expected_output": "parent ambition evidence matrix and dependency gate map",
+      "matrix_fields": [
+        "prerequisites",
+        "owning_proof_lane",
+        "unit_test_contract",
+        "e2e_contract",
+        "logging_fields",
+        "feature_gates_consumed"
+      ],
+      "release_gate_consumer": "release-gates",
+      "represented": true,
+      "diagnostic": "required output is represented in matrix row"
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.10.1",
+      "expected_output": "versioned ambition evidence matrix control plane",
+      "matrix_fields": [
+        "matrix_version",
+        "generated_artifact_paths",
+        "reproduction_command"
+      ],
+      "release_gate_consumer": "release-gates",
+      "represented": true,
+      "diagnostic": "required output is represented in matrix row"
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.11",
+      "expected_output": "adversarial image security and safety threat model",
+      "matrix_fields": [
+        "threat_class",
+        "threat_model_status",
+        "expected_safe_behavior",
+        "hostile_artifact_handling"
+      ],
+      "release_gate_consumer": "release-gates",
+      "represented": true,
+      "diagnostic": "required output is represented in matrix row"
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.12",
+      "expected_output": "user remediation catalog mapping for proof failures",
+      "matrix_fields": [
+        "remediation_status",
+        "remediation_id",
+        "remediation_follow_up"
+      ],
+      "release_gate_consumer": "proof-bundle",
+      "represented": true,
+      "diagnostic": "required output is represented in matrix row"
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.13",
+      "expected_output": "low-privilege local trust demo proof status",
+      "matrix_fields": [
+        "demo_profile",
+        "proof_demo_status",
+        "low_privilege_proof_status"
+      ],
+      "release_gate_consumer": "proof-bundle",
+      "represented": true,
+      "diagnostic": "required output is represented in matrix row"
+    },
+    {
+      "source_bead_id": "bd-rchk0.5.14",
+      "expected_output": "proof instrumentation overhead budget evidence",
+      "matrix_fields": [
+        "overhead_budget_status",
+        "budget_profile",
+        "measured_overhead"
+      ],
+      "release_gate_consumer": "release-gates",
+      "represented": true,
+      "diagnostic": "required output is represented in matrix row"
+    }
+  ],
+  "missing_field_diagnostics": [],
+  "generated_artifact_paths": [
+    "artifacts/ambition/evidence_matrix.json"
+  ],
+  "required_log_fields": [
+    "matrix_version",
+    "source_bead_ids",
+    "tracker_limitation",
+    "dependency_gate_map",
+    "operational_prerequisites",
+    "consumer_versions",
+    "stale_reference_checks",
+    "missing_field_diagnostics",
+    "downgrade_decisions",
+    "generated_artifact_paths",
+    "reproduction_command"
+  ],
+  "errors": [],
+  "reproduction_command": "ffs-harness validate-ambition-evidence-matrix --issues .beads/issues.jsonl --out artifacts/ambition/evidence_matrix.json"
+}

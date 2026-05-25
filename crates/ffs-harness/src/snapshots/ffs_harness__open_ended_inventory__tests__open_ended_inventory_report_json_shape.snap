@@ -1,0 +1,62 @@
+---
+source: crates/ffs-harness/src/open_ended_inventory.rs
+expression: "serde_json::to_string_pretty(&shape)?"
+---
+{
+  "row_count": 14,
+  "proof_types": [
+    "parser-unit",
+    "mounted-e2e",
+    "corpus-seed",
+    "golden-fixture",
+    "long-campaign",
+    "property-test",
+    "security-audit",
+    "docs-non-goal"
+  ],
+  "decisions": [
+    "active-bead",
+    "artifact-covered",
+    "explicit-non-goal",
+    "needs-follow-up"
+  ],
+  "error_count": 0,
+  "row_samples": [
+    {
+      "id": "A1",
+      "source_location": "fuzz/fuzz_targets/fuzz_fuse_splice_mount.rs; fuzz/fuzz_targets/fuzz_ioctl_dispatch.rs",
+      "required_proof_type": "long-campaign",
+      "decision": "artifact-covered",
+      "linked_bead_or_artifact": "bd-rchk0.59; artifacts/fuzz/20260506_bd-rchk0_59_high_cursor_warm/campaign_summary.json",
+      "owner_status": "covered by bounded copied-corpus campaign on thinkstation1; logs and repro command in artifacts/fuzz/20260506_bd-rchk0_59_high_cursor_warm/",
+      "has_non_applicability_rationale": false
+    },
+    {
+      "id": "A2",
+      "source_location": "fuzz/fuzz_targets/fuzz_inode_roundtrip.rs",
+      "required_proof_type": "corpus-seed",
+      "decision": "artifact-covered",
+      "linked_bead_or_artifact": "bd-rchk0.21; fuzz/fuzz_targets/fuzz_inode_roundtrip.rs",
+      "owner_status": "covered by closed targeted fuzz artifact",
+      "has_non_applicability_rationale": false
+    },
+    {
+      "id": "B1",
+      "source_location": "crates/ffs-dir/src/lib.rs; crates/ffs-harness/tests/ext4_dir_rec_len_kernel_reference.rs",
+      "required_proof_type": "golden-fixture",
+      "decision": "artifact-covered",
+      "linked_bead_or_artifact": "crates/ffs-harness/tests/ext4_dir_rec_len_kernel_reference.rs::ext4_dir_rec_len_kernel_reference_coalesces_after_unlink",
+      "owner_status": "covered by kernel-reference harness",
+      "has_non_applicability_rationale": false
+    },
+    {
+      "id": "B2",
+      "source_location": "conformance/fixtures/ext4_inode_inline_data.json; conformance/fixtures/ext4_inode_inline_data_with_continuation.json; crates/ffs-harness/tests/kernel_reference.rs",
+      "required_proof_type": "golden-fixture",
+      "decision": "artifact-covered",
+      "linked_bead_or_artifact": "crates/ffs-harness/tests/kernel_reference.rs::ext4_inline_data_continuation_kernel_reference",
+      "owner_status": "covered by kernel-reference harness",
+      "has_non_applicability_rationale": false
+    }
+  ]
+}

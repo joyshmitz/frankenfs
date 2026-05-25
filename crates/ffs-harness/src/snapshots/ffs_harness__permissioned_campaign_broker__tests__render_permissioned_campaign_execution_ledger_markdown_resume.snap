@@ -1,0 +1,31 @@
+---
+source: crates/ffs-harness/src/permissioned_campaign_broker.rs
+expression: markdown
+---
+# Permissioned Campaign Execution Ledger
+
+- Campaign: `bd-rchk3.3-xfstests-real-20260507`
+- Lane: `xfstests_real_baseline`
+- Valid: `true`
+- Final status: `resumed`
+- Cleanup status: `not_started`
+- Product evidence claim: `none`
+- Git SHA: `abcdef123456`
+- Command plan hash: `sha256:a6f1f422a5a9a1adb0fc79550ae8aebca33e4614fff2029bded48014ea6016f9`
+- Expected command plan hash: `sha256:a6f1f422a5a9a1adb0fc79550ae8aebca33e4614fff2029bded48014ea6016f9`
+- Artifact count: `3`
+
+## Target Beads
+
+- `bd-rchk3.3`
+- `bd-rchk3`
+
+## Proof Bundle Lane Candidates
+
+| Lane | Promotion status | Artifact | Note |
+|---|---|---|---|
+| `xfstests` | `blocked` | `artifacts/xfstests/real-run/proof/xfstests.json` | resume_checkpoint lane candidate retained for proof-bundle assembly |
+
+## Issues
+
+none

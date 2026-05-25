@@ -1,0 +1,40 @@
+---
+source: crates/ffs-harness/src/open_ended_inventory.rs
+expression: json
+---
+{
+  "schema_version": 1,
+  "manifest_id": "open_ended_inventory_source_scope_v1",
+  "bead_id": "bd-lm0g9",
+  "source_count": 24,
+  "source_families": [
+    "agent_workflow_docs",
+    "architecture_design_docs",
+    "canonical_spec_docs",
+    "checked_in_evidence_artifacts",
+    "conformance_docs",
+    "conformance_fixture_artifacts",
+    "crate_manifest_and_benchmark_sources",
+    "feature_parity_doc",
+    "fixture_manifests",
+    "fuzz_campaign_artifacts",
+    "fuzz_corpus_notes",
+    "fuzz_orchestration",
+    "fuzz_targets",
+    "harness_scripts",
+    "mounted_lane_docs",
+    "operational_evidence_artifacts",
+    "operational_scripts",
+    "operator_runbook_docs",
+    "performance_control_artifacts",
+    "performance_xfstests_notes",
+    "readme_status_docs",
+    "repair_docs",
+    "test_control_artifacts",
+    "tests"
+  ],
+  "non_applicable_families": [],
+  "stale_sources": [],
+  "valid": true,
+  "errors": []
+}

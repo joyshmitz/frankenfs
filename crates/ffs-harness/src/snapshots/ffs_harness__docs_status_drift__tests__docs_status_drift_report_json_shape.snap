@@ -1,0 +1,233 @@
+---
+source: crates/ffs-harness/src/docs_status_drift.rs
+expression: json
+---
+{
+  "docs_status_drift_version": "bd-jtu4q-docs-status-drift-v1",
+  "release_gate_contract": "release-gates:bd-rchk0.5.6.1 fail-closed docs-status drift consumer",
+  "release_gate_pass": true,
+  "source_issue_count": 32,
+  "rule_count": 12,
+  "observation_count": 12,
+  "release_gate_wording_contract_count": 6,
+  "release_gate_wording_observation_count": 6,
+  "required_doc_targets": [
+    "README.md",
+    "FEATURE_PARITY.md",
+    "COMPREHENSIVE_SPEC_FOR_FRANKENFS_V1.md",
+    "PLAN_TO_PORT_FRANKENFS_TO_RUST.md",
+    "EXISTING_EXT4_BTRFS_STRUCTURE.md",
+    "PROPOSED_ARCHITECTURE.md",
+    "CLI help/status text",
+    "scripts/e2e/README.md",
+    "proof-bundle summaries"
+  ],
+  "allowed_status_vocabulary": [
+    "validated",
+    "experimental",
+    "detection-only",
+    "dry-run-only",
+    "parse-only",
+    "opt-in mutating",
+    "disabled",
+    "unsupported",
+    "deferred",
+    "stale-evidence",
+    "host-blocked",
+    "security-refused"
+  ],
+  "generated_artifact_paths": [
+    "artifacts/docs-status/docs_status_drift.json",
+    "artifacts/docs-status/docs_status_drift.md"
+  ],
+  "rule_fields": [
+    "feature_id",
+    "source_support_state_feature_id",
+    "evidence_matrix_row",
+    "gate_consumer",
+    "allowed_status_vocabulary",
+    "public_status",
+    "docs_target",
+    "spec_anchor",
+    "generated_wording_id",
+    "downgrade_wording",
+    "remediation_id",
+    "freshness_requirement",
+    "owning_bead",
+    "explicit_non_goal"
+  ],
+  "observation_fields": [
+    "feature_id",
+    "docs_target",
+    "section_anchor",
+    "expected_public_status",
+    "strongest_observed_status",
+    "source_support_state_row",
+    "evidence_matrix_row",
+    "gate_consumer",
+    "gate_artifact_hash",
+    "generated_wording_id",
+    "generated_wording",
+    "observed_wording_hash",
+    "drift_classification",
+    "remediation_id",
+    "output_path",
+    "reproduction_command"
+  ],
+  "release_gate_wording_contract_fields": [
+    "feature_id",
+    "docs_wording_id",
+    "docs_target",
+    "section_anchor",
+    "target_state",
+    "final_state",
+    "authoritative",
+    "downgraded",
+    "controlling_lane",
+    "missing_artifact",
+    "remediation_id",
+    "source_policy",
+    "source_proof_bundle",
+    "generated_wording"
+  ],
+  "release_gate_wording_observation_fields": [
+    "feature_id",
+    "docs_wording_id",
+    "docs_target",
+    "section_anchor",
+    "target_state",
+    "final_state",
+    "authoritative",
+    "downgraded",
+    "strongest_observed_state",
+    "controlling_lane",
+    "missing_artifact",
+    "remediation_id",
+    "generated_wording",
+    "observed_wording_hash",
+    "drift_classification",
+    "output_path",
+    "reproduction_command"
+  ],
+  "structured_log_fields": [
+    "docs_target",
+    "section_anchor",
+    "feature_id",
+    "source_support_state_row",
+    "gate_artifact_hash",
+    "generated_wording_id",
+    "observed_wording_hash",
+    "drift_classification",
+    "remediation_id",
+    "output_path",
+    "reproduction_command"
+  ],
+  "grouped_by_docs_target": {
+    "CLI help/status text": [
+      "fuse_writeback_cache"
+    ],
+    "COMPREHENSIVE_SPEC_FOR_FRANKENFS_V1.md": [
+      "background_scrub"
+    ],
+    "EXISTING_EXT4_BTRFS_STRUCTURE.md": [
+      "btrfs_send_receive_streams"
+    ],
+    "FEATURE_PARITY.md": [
+      "readonly_ext4_btrfs_inspection",
+      "hostile_image_safety"
+    ],
+    "PLAN_TO_PORT_FRANKENFS_TO_RUST.md": [
+      "performance_claim_budget"
+    ],
+    "PROPOSED_ARCHITECTURE.md": [
+      "readonly_repair_with_ledger"
+    ],
+    "README.md": [
+      "mounted_write_paths",
+      "performance_baseline_freshness",
+      "rw_background_repair"
+    ],
+    "proof-bundle summaries": [
+      "writeback_cache_negative_option"
+    ],
+    "scripts/e2e/README.md": [
+      "unsupported_legacy_ext4_codecs"
+    ]
+  },
+  "grouped_by_public_status": {
+    "deferred": [
+      "writeback_cache_negative_option"
+    ],
+    "detection-only": [
+      "background_scrub"
+    ],
+    "disabled": [
+      "fuse_writeback_cache"
+    ],
+    "dry-run-only": [
+      "performance_claim_budget"
+    ],
+    "experimental": [
+      "mounted_write_paths"
+    ],
+    "host-blocked": [
+      "rw_background_repair"
+    ],
+    "opt-in mutating": [
+      "readonly_repair_with_ledger"
+    ],
+    "parse-only": [
+      "btrfs_send_receive_streams"
+    ],
+    "security-refused": [
+      "hostile_image_safety"
+    ],
+    "stale-evidence": [
+      "performance_baseline_freshness"
+    ],
+    "unsupported": [
+      "unsupported_legacy_ext4_codecs"
+    ],
+    "validated": [
+      "readonly_ext4_btrfs_inspection"
+    ]
+  },
+  "drift_classification_counts": {
+    "matches": 12
+  },
+  "release_gate_wording_drift_classification_counts": {
+    "matches": 6
+  },
+  "required_log_fields": [
+    "docs_target",
+    "section_anchor",
+    "feature_id",
+    "source_support_state_row",
+    "gate_artifact_hash",
+    "generated_wording_id",
+    "observed_wording_hash",
+    "drift_classification",
+    "remediation_id",
+    "output_path",
+    "reproduction_command"
+  ],
+  "required_release_gate_wording_fields": [
+    "feature_id",
+    "docs_wording_id",
+    "docs_target",
+    "section_anchor",
+    "target_state",
+    "final_state",
+    "authoritative",
+    "downgraded",
+    "controlling_lane",
+    "missing_artifact",
+    "remediation_id",
+    "generated_wording",
+    "observed_wording_hash",
+    "drift_classification",
+    "reproduction_command"
+  ],
+  "errors": [],
+  "reproduction_command": "ffs-harness validate-docs-status-drift --issues .beads/issues.jsonl --feature-parity FEATURE_PARITY.md --out artifacts/docs-status/docs_status_drift.json --summary-out artifacts/docs-status/docs_status_drift.md"
+}

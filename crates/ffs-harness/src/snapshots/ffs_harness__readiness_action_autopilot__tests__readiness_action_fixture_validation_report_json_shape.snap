@@ -1,0 +1,38 @@
+---
+source: crates/ffs-harness/src/readiness_action_autopilot.rs
+expression: "serde_json::to_string_pretty(&shape)?"
+---
+{
+  "schema_version": 1,
+  "validator_version": 1,
+  "fixture_set_id": "frankenfs_readiness_action_autopilot_fixtures_v1",
+  "fixture_count": 5,
+  "valid": true,
+  "classifications_seen": [
+    "local_safe",
+    "permissioned_blocked",
+    "stale_evidence",
+    "contradictory_evidence"
+  ],
+  "input_kinds_seen": [
+    "beads_jsonl",
+    "release_gate_policy",
+    "proof_bundle_report",
+    "operational_readiness_report",
+    "host_capability_artifact",
+    "claimability_plan_report",
+    "rch_proof_ledger"
+  ],
+  "safety_classes_seen": [
+    "local_safe",
+    "permissioned",
+    "impossible"
+  ],
+  "evidence_tiers_seen": [
+    "tracker_only",
+    "proof_bundle",
+    "operational_readiness",
+    "authoritative"
+  ],
+  "error_count": 0
+}
