@@ -41093,7 +41093,7 @@ mod tests {
         let root = InodeNumber(1);
 
         // makedev(8, 0) for /dev/sda: major 8 in bits[15:8], minor 0 in bits[7:0]
-        let rdev = (8_u32 << 8) | 0;
+        let rdev = 8_u32 << 8;
         let attr = ops
             .mknod(
                 &cx,
