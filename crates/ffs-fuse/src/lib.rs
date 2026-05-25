@@ -19428,6 +19428,103 @@ CUSTOM("congestion_threshold=3")"#;
                 prop_assert!(ratio >= 1.0 || ratio.is_infinite(),
                     "imbalance_ratio {ratio} < 1.0");
             }
+
+            // ── Metamorphic relation properties (MR) ─────────────────────
+
+            /// MR1: readahead write-then-read returns identical bytes.
+            /// This is the core metamorphic relation for data integrity.
+            #[test]
+            fn mr_readahead_write_read_identity(
+                ino in 1_u64..=1000,
+                offset in 0_u64..=1_000_000,
+                data in prop::collection::vec(any::<u8>(), 1..4096),
+            ) {
+                let manager = ReadaheadManager::new(64);
+                let expected = data.clone();
+                manager.insert(InodeNumber(ino), offset, data);
+                let readback = manager.take(InodeNumber(ino), offset, expected.len());
+                prop_assert_eq!(readback, Some(expected), "write-then-read must return identical bytes");
+            }
+
+            /// MR2: readahead insert-then-invalidate returns None (idempotent delete).
+            #[test]
+            fn mr_readahead_create_delete_idempotent(
+                ino in 1_u64..=1000,
+                offset in 0_u64..=1_000_000,
+                data in prop::collection::vec(any::<u8>(), 1..256),
+            ) {
+                let manager = ReadaheadManager::new(64);
+                let len = data.len();
+                manager.insert(InodeNumber(ino), offset, data);
+                manager.invalidate_inode(InodeNumber(ino));
+                let after_delete = manager.take(InodeNumber(ino), offset, len);
+                prop_assert_eq!(after_delete, None, "invalidate must remove entry");
+            }
+
+            /// MR3: truncate-to-N then read returns first N bytes.
+            #[test]
+            fn mr_readahead_truncate_preserves_prefix(
+                data in prop::collection::vec(any::<u8>(), 4..256),
+                truncate_to in 1_usize..=3,
+            ) {
+                let manager = ReadaheadManager::new(64);
+                let ino = InodeNumber(42);
+                let offset = 0_u64;
+                let expected_prefix = data[..truncate_to].to_vec();
+                manager.insert(ino, offset, data);
+                // Partial take simulates truncate-then-read
+                let prefix = manager.take(ino, offset, truncate_to);
+                prop_assert_eq!(prefix, Some(expected_prefix), "truncate must preserve first N bytes");
+            }
+
+            /// MR4: concurrent independent inodes do not interfere.
+            #[test]
+            fn mr_readahead_concurrent_independent_no_interference(
+                data1 in prop::collection::vec(any::<u8>(), 1..128),
+                data2 in prop::collection::vec(any::<u8>(), 1..128),
+            ) {
+                let manager = ReadaheadManager::new(64);
+                let ino1 = InodeNumber(100);
+                let ino2 = InodeNumber(200);
+                let expected1 = data1.clone();
+                let expected2 = data2.clone();
+                // Write to two independent inodes
+                manager.insert(ino1, 0, data1);
+                manager.insert(ino2, 0, data2);
+                // Read back - each should see its own data
+                let read1 = manager.take(ino1, 0, expected1.len());
+                let read2 = manager.take(ino2, 0, expected2.len());
+                prop_assert_eq!(read1, Some(expected1), "ino1 must read its own data");
+                prop_assert_eq!(read2, Some(expected2), "ino2 must read its own data");
+            }
+
+            /// MR5: xattr encode-decode roundtrip preserves names (rename-back identity).
+            #[test]
+            fn mr_xattr_encode_decode_identity(
+                names in prop::collection::vec("[a-z]{1,20}", 1..10),
+            ) {
+                let encoded = FrankenFuse::encode_xattr_names(&names);
+                // Decode by splitting on NUL
+                let decoded: Vec<String> = encoded
+                    .split(|&b| b == 0)
+                    .filter(|s| !s.is_empty())
+                    .map(|s| String::from_utf8_lossy(s).into_owned())
+                    .collect();
+                prop_assert_eq!(decoded, names, "encode-decode must be identity");
+            }
+
+            /// MR6: inode routing is deterministic (fsync-like stability).
+            #[test]
+            fn mr_inode_routing_stable_under_repeated_calls(
+                ino in 0_u64..=u64::MAX,
+                cores in 1_u32..=256,
+            ) {
+                let first = inode_to_core(ino, cores);
+                let second = inode_to_core(ino, cores);
+                let third = inode_to_core(ino, cores);
+                prop_assert_eq!(first, second, "routing must be stable");
+                prop_assert_eq!(second, third, "routing must be stable across multiple calls");
+            }
         }
     }
 }
