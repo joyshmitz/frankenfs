@@ -1,0 +1,4 @@
+# fsck -f read() size distribution (pread64), 8MB image (2048 blocks)
+count   size_bytes
+
+total read+pread calls: 2064

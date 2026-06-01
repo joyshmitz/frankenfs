@@ -1,0 +1,17 @@
+{
+  "run_id": "2026-06-01_plumfern",
+  "git_sha": "12c367885d18df12d27839993f85866bb150d72f",
+  "timestamp_utc": "2026-06-01T23:23:13Z",
+  "cpu_model": "AMD Ryzen Threadripper PRO 5975WX 32-Cores",
+  "cpu_threads": 64,
+  "smt": "1",
+  "governor": "powersave",
+  "no_turbo": "n/a",
+  "ram_total": "215Gi",
+  "kernel": "6.17.0-29-generic",
+  "rustc": "rustc 1.98.0-nightly (14210df0e 2026-05-31)",
+  "cargo": "cargo 1.98.0-nightly (fbb61be30 2026-05-26)",
+  "perf_event_paranoid": 1,
+  "build_profile": "release-perf (opt-level=3, lto=thin, codegen-units=1-inherited, debug=line-tables-only, strip=false, RUSTFLAGS=-C force-frame-pointers=yes)",
+  "fs": "ext2/ext3"
+}

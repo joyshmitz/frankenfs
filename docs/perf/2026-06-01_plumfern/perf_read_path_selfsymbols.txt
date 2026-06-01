@@ -1,0 +1,32 @@
+# Fresh CPU profile attempt — ffs-harness profile-read-path --mode direct-read
+# host: Threadripper 5975WX, HEAD 12c36788, release-perf + force-frame-pointers, perf_event_paranoid=1
+
+## STATUS: fresh symbolicated CPU self-symbols BLOCKED by host profiler misconfig
+- `perf record` produces sample data (1.4-1.7 MB) but the host's
+  `perf_event_mlock_kb` is misconfigured (value 4294967295,0), forcing `-m 8`
+  and leaving the perf.data header `data size field = 0`, so `perf report`
+  refuses to symbolicate ("Was the perf record command properly terminated?").
+- `samply record` succeeds (10120 leaf samples) but in headless/save-only mode
+  the addresses are NOT symbolicated (see samply_direct_read_top_unsymbolized.txt).
+
+## What the samply capture DOES show (unsymbolized but structural)
+- direct-read is NOT flat: 63.8% of leaf samples fall in a SINGLE routine
+  (addr 0xa0186), with a long tail of ~1-2% entries. This contrasts with the
+  cli-inspect read path (flat, top self ~2%) and is consistent with the
+  in-process direct-read loop being dominated by one hot read/copy/checksum
+  routine. Raw top in samply_direct_read_top_unsymbolized.txt.
+
+## Authoritative CPU self-symbols (same CPU, same code path, 2026-05-10)
+Sourced from docs/reports/PROFILE_ANALYSIS.md (Threadripper 5975WX, symbolicated
+linux-perf -F 4999 --call-graph fp). Used for ranks 2-4 of HOTSPOT_TABLE.md:
+  CLI read path self%:  __memmove 2.42 | ensure_slice 1.97 | Cx::checkpoint 1.84 |
+                        __memset 1.50 | Result::branch 1.25 | read_le_u32 1.10 |
+                        Ext4Superblock::parse_superblock_region 1.00
+  FUSE read path self%: __memmove 2.73 | Cx::checkpoint 1.98 | ensure_slice 1.92 |
+                        __memset 1.78 | Result::branch 1.45 | Ext4Inode::parse_from_bytes 1.27
+  Cumulative file-read stack: 13.53% (CLI) / 22.83% (FUSE).
+
+## Primary FRESH evidence for this pass (this host, current HEAD)
+The headline (rank 1) rests on fresh strace + macro baseline, NOT on the CPU
+flamegraph: strace_fsck_syscalls.txt (2051 pread64, 58.45% syscall time) and
+baseline_fsck.json (User 4.3ms / System 10.9ms). Those do not depend on perf.
