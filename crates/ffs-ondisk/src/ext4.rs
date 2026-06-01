@@ -3299,6 +3299,26 @@ fn is_malformed_dir_checksum_tail(
     inode == 0 && name_len != 0 && file_type_raw == EXT4_FT_DIR_CSUM && rec_len == 12
 }
 
+fn validate_dir_block_slice_len(block: &[u8], block_size: u32) -> Result<(), ParseError> {
+    let block_size = usize::try_from(block_size).map_err(|_| ParseError::InvalidField {
+        field: "block_size",
+        reason: "block_size exceeds addressable range",
+    })?;
+    if block_size == 0 {
+        return Err(ParseError::InvalidField {
+            field: "block_size",
+            reason: "block_size must be non-zero",
+        });
+    }
+    if block.len() > block_size {
+        return Err(ParseError::InvalidField {
+            field: "dir_block",
+            reason: "directory block slice exceeds declared block_size",
+        });
+    }
+    Ok(())
+}
+
 /// Parse all directory entries from a single directory data block.
 ///
 /// Returns the entries (excluding checksum tails) and an optional
@@ -3307,6 +3327,8 @@ pub fn parse_dir_block(
     block: &[u8],
     block_size: u32,
 ) -> Result<(Vec<Ext4DirEntry>, Option<Ext4DirEntryTail>), ParseError> {
+    validate_dir_block_slice_len(block, block_size)?;
+
     let mut entries = Vec::new();
     let mut tail = None;
     let mut offset = 0_usize;
@@ -3755,6 +3777,10 @@ impl<'a> Iterator for DirBlockIter<'a> {
         loop {
             if self.done {
                 return None;
+            }
+            if let Err(err) = validate_dir_block_slice_len(self.block, self.block_size) {
+                self.done = true;
+                return Some(Err(err));
             }
             if self.offset + 8 > self.block.len() {
                 self.done = true;
@@ -6826,6 +6852,24 @@ mod tests {
         assert_eq!(entries[2].file_type, Ext4FileType::RegFile);
     }
 
+    #[test]
+    fn parse_dir_block_rejects_slice_larger_than_declared_block_size() {
+        let block_size = 1024_u32;
+        let mut block = vec![0_u8; 1036];
+
+        write_dir_entry(&mut block, 0, 2, 2, b".", 1024);
+        write_dir_entry(&mut block, 1024, 99, 1, b"x", 12);
+
+        let err = parse_dir_block(&block, block_size).unwrap_err();
+        assert!(matches!(
+            err,
+            ParseError::InvalidField {
+                field: "dir_block",
+                ..
+            }
+        ));
+    }
+
     /// bd-7stug — Kernel-conformance pin for the 3 Ext4SuperFlags
     /// bit values per fs/ext4/ext4.h EXT4_FLAGS_*. These are read
     /// from the superblock @ s_flags (0x160). SIGNED_HASH /
@@ -7882,6 +7926,26 @@ mod tests {
 
         assert!(iter.next().is_none());
         assert!(iter.checksum_tail().is_none());
+    }
+
+    #[test]
+    fn dir_iter_rejects_slice_larger_than_declared_block_size() {
+        let block_size = 1024_u32;
+        let mut block = vec![0_u8; 1036];
+
+        write_dir_entry(&mut block, 0, 2, 2, b".", 1024);
+        write_dir_entry(&mut block, 1024, 99, 1, b"x", 12);
+
+        let mut iter = iter_dir_block(&block, block_size);
+        let err = iter.next().unwrap().unwrap_err();
+        assert!(matches!(
+            err,
+            ParseError::InvalidField {
+                field: "dir_block",
+                ..
+            }
+        ));
+        assert!(iter.next().is_none());
     }
 
     #[test]
