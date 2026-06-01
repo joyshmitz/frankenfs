@@ -661,21 +661,15 @@ fn split_insert_range_straddler(
     let right_len_u32 = u32::try_from(ext_end - cut)
         .map_err(|_| ffs_error::FfsError::Format("insert_range: split tail exceeds u32".into()))?;
     let unwritten = ext.is_unwritten();
-    let make_raw_len = |len: u32, unwritten: bool| -> Result<u16> {
-        let len16 = u16::try_from(len).map_err(|_| {
-            ffs_error::FfsError::Format("insert_range: extent split exceeds u16".into())
-        })?;
-        Ok(if unwritten { len16 | (1 << 15) } else { len16 })
-    };
     let left = Ext4Extent {
         logical_block: ext.logical_block,
-        raw_len: make_raw_len(left_len_u32, unwritten)?,
+        raw_len: encode_split_extent_len("insert_range split left", left_len_u32, unwritten)?,
         physical_start: ext.physical_start,
     };
     let right = Ext4Extent {
         logical_block: u32::try_from(cut)
             .map_err(|_| ffs_error::FfsError::Format("insert_range: cut exceeds u32".into()))?,
-        raw_len: make_raw_len(right_len_u32, unwritten)?,
+        raw_len: encode_split_extent_len("insert_range split right", right_len_u32, unwritten)?,
         physical_start: checked_physical_add(
             "insert_range split tail",
             ext.physical_start,
@@ -934,6 +928,14 @@ fn encode_unwritten_len(label: &str, len: u64) -> Result<u16> {
         ))
     })?;
     Ok(len | UNWRITTEN_FLAG)
+}
+
+fn encode_split_extent_len(label: &str, len: u32, unwritten: bool) -> Result<u16> {
+    if unwritten {
+        encode_unwritten_len(label, u64::from(len))
+    } else {
+        encode_written_len(label, u64::from(len))
+    }
 }
 
 fn cx_checkpoint(cx: &Cx) -> Result<()> {
@@ -3613,6 +3615,44 @@ ExtentMapping { logical_start: 5, physical_start: 134, count: 2, unwritten: true
     #[test]
     fn encode_unwritten_len_rejects_written_boundary() {
         let err = encode_unwritten_len("test", u64::from(EXT_INIT_MAX_LEN)).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("32767"),
+            "error should explain the unwritten extent limit: {msg}"
+        );
+    }
+
+    #[test]
+    fn encode_split_extent_len_preserves_written_boundary() {
+        let raw_len = encode_split_extent_len("test", u32::from(EXT_INIT_MAX_LEN), false).unwrap();
+        let ext = Ext4Extent {
+            logical_block: 0,
+            raw_len,
+            physical_start: 100,
+        };
+
+        assert_eq!(raw_len, EXT_INIT_MAX_LEN);
+        assert_eq!(ext.actual_len(), EXT_INIT_MAX_LEN);
+        assert!(!ext.is_unwritten());
+    }
+
+    #[test]
+    fn encode_split_extent_len_preserves_unwritten_lengths() {
+        let raw_len = encode_split_extent_len("test", 1, true).unwrap();
+        let ext = Ext4Extent {
+            logical_block: 0,
+            raw_len,
+            physical_start: 100,
+        };
+
+        assert!(raw_len > EXT_INIT_MAX_LEN);
+        assert_eq!(ext.actual_len(), 1);
+        assert!(ext.is_unwritten());
+    }
+
+    #[test]
+    fn encode_split_extent_len_rejects_unwritten_boundary() {
+        let err = encode_split_extent_len("test", u32::from(EXT_INIT_MAX_LEN), true).unwrap_err();
         let msg = format!("{err}");
         assert!(
             msg.contains("32767"),
