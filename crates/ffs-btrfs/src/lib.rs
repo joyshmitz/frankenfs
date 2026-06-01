@@ -5060,6 +5060,17 @@ impl SendStreamBuilder {
 
         let mut payload = Vec::new();
         for (atype, adata) in attrs {
+            // The btrfs send TLV length field is a u16. Casting a longer
+            // attribute would silently wrap the declared length and emit a
+            // corrupt, unparseable stream. Callers that carry bulk data (file
+            // writes) MUST chunk to `BTRFS_SEND_WRITE_CHUNK`; assert here so any
+            // future caller that forgets fails loudly instead of corrupting.
+            assert!(
+                u16::try_from(adata.len()).is_ok(),
+                "send-stream attribute data exceeds u16 TLV limit ({} > {})",
+                adata.len(),
+                u16::MAX
+            );
             payload.extend_from_slice(&(*atype as u16).to_le_bytes());
             payload.extend_from_slice(&(adata.len() as u16).to_le_bytes());
             payload.extend_from_slice(adata);
@@ -5434,6 +5445,28 @@ pub fn build_update_extent_command(
 
 // ── send stream generation from FS tree ───────────────────────────────────
 
+/// Maximum payload bytes per send-stream `DATA` attribute.
+///
+/// The btrfs send TLV length field is a `u16`, so a single attribute can carry
+/// at most 65535 bytes. The kernel chunks file data at `BTRFS_SEND_READ_SIZE`
+/// (48 KiB); matching that keeps generated `Write` commands well under the u16
+/// ceiling and interoperable with `btrfs receive`.
+const BTRFS_SEND_WRITE_CHUNK: usize = 48 * 1024;
+
+/// Emit one or more `Write` commands for `data`, splitting it into
+/// [`BTRFS_SEND_WRITE_CHUNK`]-sized pieces so no `DATA` attribute exceeds the
+/// u16 TLV length limit. Each chunk carries its own incrementing file offset,
+/// exactly as the kernel's send implementation does.
+fn emit_write_chunks(builder: &mut SendStreamBuilder, path: &[u8], file_offset: u64, data: &[u8]) {
+    let mut chunk_offset = file_offset;
+    for chunk in data.chunks(BTRFS_SEND_WRITE_CHUNK) {
+        let (cmd, attrs) = build_write_command(path, chunk_offset, chunk);
+        let refs: Vec<(SendAttr, &[u8])> = attrs.iter().map(|(a, d)| (*a, d.as_slice())).collect();
+        builder.add_command(cmd, &refs);
+        chunk_offset = chunk_offset.saturating_add(chunk.len() as u64);
+    }
+}
+
 /// Generate a btrfs send stream from FS tree items.
 ///
 /// This function walks the given FS tree items and produces a valid send stream
@@ -5572,10 +5605,7 @@ where
                     if extent_type == 0 {
                         // Inline extent: data follows header
                         let data = &entry.data[21..];
-                        let (cmd, attrs) = build_write_command(&path, file_offset, data);
-                        let refs: Vec<(SendAttr, &[u8])> =
-                            attrs.iter().map(|(a, d)| (*a, d.as_slice())).collect();
-                        builder.add_command(cmd, &refs);
+                        emit_write_chunks(&mut builder, &path, file_offset, data);
                     } else if extent_type == 1 && entry.data.len() >= 53 {
                         // Regular extent: read from disk
                         let disk_bytenr =
@@ -5608,13 +5638,7 @@ where
                                 } else {
                                     &[]
                                 };
-                                if !data.is_empty() {
-                                    let (cmd, attrs) =
-                                        build_write_command(&path, file_offset, data);
-                                    let refs: Vec<(SendAttr, &[u8])> =
-                                        attrs.iter().map(|(a, d)| (*a, d.as_slice())).collect();
-                                    builder.add_command(cmd, &refs);
-                                }
+                                emit_write_chunks(&mut builder, &path, file_offset, data);
                             }
                             // Skip extent on read error
                         }
@@ -15830,6 +15854,149 @@ mod tests {
         assert!(
             cmd_types.contains(&SendCommand::Utimes),
             "should have utimes command"
+        );
+    }
+
+    /// Regression: a file extent larger than the u16 TLV limit must be split
+    /// into multiple `Write` commands, each carrying a `DATA` attribute within
+    /// the 65535-byte ceiling, and the reassembled payload must equal the
+    /// original extent bytes. Before chunking, the whole extent went into a
+    /// single attribute whose length silently wrapped mod 65536, producing a
+    /// corrupt, unparseable stream for any file with a >64 KiB extent.
+    #[test]
+    #[expect(clippy::too_many_lines)]
+    fn generate_send_stream_chunks_large_writes() {
+        const ATTR_DATA: u16 = SendAttr::Data as u16;
+        const ATTR_FILE_OFFSET: u16 = SendAttr::FileOffset as u16;
+
+        fn make_inode_item(mode: u32, size: u64, uid: u32, gid: u32) -> Vec<u8> {
+            let mut buf = vec![0u8; 160];
+            buf[0..8].copy_from_slice(&1_u64.to_le_bytes());
+            buf[16..24].copy_from_slice(&size.to_le_bytes());
+            buf[24..32].copy_from_slice(&size.to_le_bytes());
+            buf[40..44].copy_from_slice(&1_u32.to_le_bytes());
+            buf[44..48].copy_from_slice(&uid.to_le_bytes());
+            buf[48..52].copy_from_slice(&gid.to_le_bytes());
+            buf[52..56].copy_from_slice(&mode.to_le_bytes());
+            buf
+        }
+
+        #[expect(clippy::cast_possible_truncation)]
+        fn make_inode_ref(index: u64, name: &[u8]) -> Vec<u8> {
+            let mut buf = Vec::new();
+            buf.extend_from_slice(&index.to_le_bytes());
+            buf.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            buf.extend_from_slice(name);
+            buf
+        }
+
+        // Regular (non-inline) EXTENT_DATA item (type 1) header layout consumed
+        // by `generate_send_stream`: byte 20 = type, 21..29 disk_bytenr,
+        // 29..37 disk_num_bytes, 37..45 extent_offset, 45..53 num_bytes.
+        fn make_regular_extent(disk_bytenr: u64, num_bytes: u64) -> Vec<u8> {
+            let mut buf = vec![0u8; 53];
+            buf[20] = 1;
+            buf[21..29].copy_from_slice(&disk_bytenr.to_le_bytes());
+            buf[29..37].copy_from_slice(&num_bytes.to_le_bytes());
+            buf[37..45].copy_from_slice(&0u64.to_le_bytes());
+            buf[45..53].copy_from_slice(&num_bytes.to_le_bytes());
+            buf
+        }
+
+        // 100_000 bytes spans three 48 KiB chunks (48K + 48K + ~4K) and exceeds
+        // the u16 ceiling, so a single-attribute encoding would corrupt.
+        const EXTENT_LEN: u64 = 100_000;
+        const DISK_BYTENR: u64 = 0x1_0000;
+        let original: Vec<u8> = (0..EXTENT_LEN).map(|i| (i % 251) as u8).collect();
+
+        let items = vec![
+            BtrfsLeafEntry {
+                key: BtrfsKey {
+                    objectid: 256,
+                    item_type: BTRFS_ITEM_INODE_ITEM,
+                    offset: 0,
+                },
+                data: make_inode_item(0o40755, 0, 0, 0),
+            },
+            BtrfsLeafEntry {
+                key: BtrfsKey {
+                    objectid: 257,
+                    item_type: BTRFS_ITEM_INODE_ITEM,
+                    offset: 0,
+                },
+                data: make_inode_item(0o100_644, EXTENT_LEN, 0, 0),
+            },
+            BtrfsLeafEntry {
+                key: BtrfsKey {
+                    objectid: 257,
+                    item_type: BTRFS_ITEM_INODE_REF,
+                    offset: 256,
+                },
+                data: make_inode_ref(2, b"big.bin"),
+            },
+            BtrfsLeafEntry {
+                key: BtrfsKey {
+                    objectid: 257,
+                    item_type: BTRFS_ITEM_EXTENT_DATA,
+                    offset: 0,
+                },
+                data: make_regular_extent(DISK_BYTENR, EXTENT_LEN),
+            },
+        ];
+
+        let uuid = [0u8; 16];
+        let original_for_read = original.clone();
+        let stream = generate_send_stream(&items, b"test_subvol", &uuid, 1, |bytenr, len| {
+            assert_eq!(bytenr, DISK_BYTENR, "unexpected extent read");
+            let len = usize::try_from(len).expect("len fits usize");
+            Ok(original_for_read[..len].to_vec())
+        })
+        .expect("generate send stream");
+
+        // The stream must round-trip through the parser (it would not if any
+        // attribute length had wrapped).
+        let parsed = parse_send_stream(&stream).expect("parse chunked stream");
+
+        let writes: Vec<&SendStreamCommand> = parsed
+            .commands
+            .iter()
+            .filter(|c| c.cmd == SendCommand::Write)
+            .collect();
+        assert!(
+            writes.len() >= 2,
+            "large extent must split into multiple writes, got {}",
+            writes.len()
+        );
+
+        // Reassemble the file from the Write commands, keyed by file offset, and
+        // confirm every DATA attribute respects the u16 TLV ceiling.
+        let mut reassembled = vec![0u8; original.len()];
+        for w in &writes {
+            let mut offset: Option<u64> = None;
+            let mut data: Option<&[u8]> = None;
+            for (atype, adata) in &w.attrs {
+                if *atype == ATTR_FILE_OFFSET {
+                    offset = Some(u64::from_le_bytes(
+                        adata.as_slice().try_into().expect("8-byte file offset"),
+                    ));
+                } else if *atype == ATTR_DATA {
+                    assert!(
+                        u16::try_from(adata.len()).is_ok(),
+                        "DATA attribute exceeds u16 TLV limit: {}",
+                        adata.len()
+                    );
+                    data = Some(adata);
+                }
+            }
+            let offset =
+                usize::try_from(offset.expect("write has file offset")).expect("offset fits usize");
+            let data = data.expect("write has data");
+            reassembled[offset..offset + data.len()].copy_from_slice(data);
+        }
+
+        assert_eq!(
+            reassembled, original,
+            "reassembled file must match original"
         );
     }
 }
