@@ -72,6 +72,7 @@ use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
+use std::io::IoSliceMut;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -1043,6 +1044,50 @@ impl BlockDevice for ByteDeviceBlockAdapter<'_> {
         let mut bytes = vec![0_u8; block_size];
         self.dev.read_exact_at(cx, ByteOffset(offset), &mut bytes)?;
         Ok(BlockBuf::new(bytes))
+    }
+
+    fn supports_contiguous_reads(&self) -> bool {
+        self.dev.supports_vectored_reads()
+    }
+
+    fn read_contiguous_blocks(
+        &self,
+        cx: &Cx,
+        start: BlockNumber,
+        bufs: &mut [BlockBuf],
+    ) -> Result<(), FfsError> {
+        if bufs.is_empty() {
+            return Ok(());
+        }
+
+        let count = u64::try_from(bufs.len())
+            .map_err(|_| FfsError::Format("block count does not fit u64".to_owned()))?;
+        let end = start
+            .0
+            .checked_add(count)
+            .ok_or_else(|| FfsError::Format("block range overflow".to_owned()))?;
+        if end > self.block_count() {
+            return Err(FfsError::Format(format!(
+                "block range out of range: start={} count={} block_count={}",
+                start.0,
+                count,
+                self.block_count()
+            )));
+        }
+
+        let block_size = usize::try_from(self.block_size)
+            .map_err(|_| FfsError::Format("block_size does not fit usize".to_owned()))?;
+        let offset = self.block_offset(start)?;
+
+        for buf in bufs.iter_mut() {
+            *buf = BlockBuf::zeroed(block_size);
+        }
+        let mut slices: Vec<IoSliceMut<'_>> = bufs
+            .iter_mut()
+            .map(|buf| IoSliceMut::new(buf.make_mut()))
+            .collect();
+        self.dev
+            .read_vectored_exact_at(cx, ByteOffset(offset), &mut slices)
     }
 
     fn write_block(&self, cx: &Cx, block: BlockNumber, data: &[u8]) -> Result<(), FfsError> {
@@ -6767,6 +6812,18 @@ impl OpenFs {
         self.with_latest_scope(|scope| self.read_block_with_scope(cx, scope, block))
     }
 
+    /// Read a contiguous range of full filesystem blocks, respecting MVCC visibility.
+    pub fn read_contiguous_block_vecs(
+        &self,
+        cx: &Cx,
+        start: BlockNumber,
+        count: usize,
+    ) -> Result<Vec<Vec<u8>>, FfsError> {
+        self.with_latest_scope(|scope| {
+            self.read_contiguous_blocks_with_scope(cx, scope, start, count)
+        })
+    }
+
     /// Read a full filesystem block from the device, respecting MVCC isolation if a scope is provided.
     #[allow(clippy::cast_possible_truncation)] // block_size is u32, always fits usize
     pub fn read_block_with_scope(
@@ -6792,6 +6849,59 @@ impl OpenFs {
         // 3. Fall back to the device's default adapter (which uses the current snapshot).
         let dev = self.block_device_adapter();
         Ok(dev.read_block(cx, block)?.as_slice().to_vec())
+    }
+
+    fn read_contiguous_blocks_with_scope(
+        &self,
+        cx: &Cx,
+        scope: &RequestScope,
+        start: BlockNumber,
+        count: usize,
+    ) -> Result<Vec<Vec<u8>>, FfsError> {
+        if count == 0 {
+            return Ok(Vec::new());
+        }
+
+        let count_u64 = u64::try_from(count)
+            .map_err(|_| FfsError::Format("block count does not fit u64".to_owned()))?;
+        let end = start
+            .0
+            .checked_add(count_u64)
+            .ok_or_else(|| FfsError::Format("block range overflow".to_owned()))?;
+        for block_num in start.0..end {
+            let block = BlockNumber(block_num);
+            if scope
+                .tx
+                .as_ref()
+                .and_then(|tx| tx.staged_write(block))
+                .is_some()
+            {
+                return (start.0..end)
+                    .map(|num| self.read_block_with_scope(cx, scope, BlockNumber(num)))
+                    .collect();
+            }
+        }
+
+        if let Some(snapshot) = scope.snapshot {
+            let store = self.mvcc_store.read();
+            let has_visible = (start.0..end)
+                .map(BlockNumber)
+                .any(|block| store.read_visible(block, snapshot).is_some());
+            drop(store);
+            if has_visible {
+                return (start.0..end)
+                    .map(|num| self.read_block_with_scope(cx, scope, BlockNumber(num)))
+                    .collect();
+            }
+        }
+
+        let dev = self.block_device_adapter();
+        let mut bufs: Vec<BlockBuf> = (0..count).map(|_| BlockBuf::new(Vec::new())).collect();
+        dev.read_contiguous_blocks(cx, start, &mut bufs)?;
+        Ok(bufs
+            .into_iter()
+            .map(|buf| buf.as_slice().to_vec())
+            .collect())
     }
 
     fn write_block_with_scope(

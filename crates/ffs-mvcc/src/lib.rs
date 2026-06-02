@@ -3709,6 +3709,50 @@ impl<D: BlockDevice> BlockDevice for MvccBlockDevice<D> {
         self.base.read_block(cx, block)
     }
 
+    fn supports_contiguous_reads(&self) -> bool {
+        self.base.supports_contiguous_reads()
+    }
+
+    fn read_contiguous_blocks(
+        &self,
+        cx: &Cx,
+        start: BlockNumber,
+        bufs: &mut [BlockBuf],
+    ) -> ffs_error::Result<()> {
+        if bufs.is_empty() {
+            return Ok(());
+        }
+
+        let count = u64::try_from(bufs.len())
+            .map_err(|_| FfsError::Format("block count does not fit u64".to_owned()))?;
+        let end = start
+            .0
+            .checked_add(count)
+            .ok_or_else(|| FfsError::Format("block range overflow".to_owned()))?;
+        let snap = self.snapshot();
+
+        {
+            let guard = self.store.read();
+            let has_visible = (start.0..end)
+                .map(BlockNumber)
+                .any(|block| guard.read_visible(block, snap).is_some());
+            if !has_visible {
+                drop(guard);
+                return self.base.read_contiguous_blocks(cx, start, bufs);
+            }
+        }
+
+        for (idx, buf) in bufs.iter_mut().enumerate() {
+            let delta = u64::try_from(idx)
+                .map_err(|_| FfsError::Format("block index does not fit u64".to_owned()))?;
+            let block = BlockNumber(start.0.checked_add(delta).ok_or_else(|| {
+                FfsError::Format("contiguous read block range overflow".to_owned())
+            })?);
+            *buf = self.read_block(cx, block)?;
+        }
+        Ok(())
+    }
+
     fn write_block(&self, _cx: &Cx, block: BlockNumber, data: &[u8]) -> ffs_error::Result<()> {
         // Stage into a new single-block transaction and commit immediately.
         // For batched writes, callers should use the MvccStore API directly.

@@ -844,8 +844,9 @@ fn profile_read_path_iteration(
             let summary = fs.free_space_summary(cx)?;
             let orphans = fs.read_ext4_orphan_list(cx)?;
             let root_inode = fs.read_inode(cx, InodeNumber(2))?;
-            let superblock = fs.read_block_vec(cx, BlockNumber(0))?;
-            let group_descriptor = fs.read_block_vec(cx, BlockNumber(1))?;
+            let mut metadata = fs.read_contiguous_block_vecs(cx, BlockNumber(0), 2)?;
+            let group_descriptor = metadata.pop().context("group descriptor block missing")?;
+            let superblock = metadata.pop().context("superblock block missing")?;
             black_box(summary.free_blocks_total)
                 ^ black_box(summary.free_inodes_total)
                 ^ u64::from(black_box(root_inode.mode))
@@ -862,8 +863,9 @@ fn profile_read_path_iteration(
             }
             let fs = cached_fs.as_ref().context("cached filesystem missing")?;
             let root_inode = fs.read_inode(cx, InodeNumber(2))?;
-            let superblock = fs.read_block_vec(cx, BlockNumber(0))?;
-            let group_descriptor = fs.read_block_vec(cx, BlockNumber(1))?;
+            let mut metadata = fs.read_contiguous_block_vecs(cx, BlockNumber(0), 2)?;
+            let group_descriptor = metadata.pop().context("group descriptor block missing")?;
+            let superblock = metadata.pop().context("superblock block missing")?;
             u64::from(black_box(root_inode.mode))
                 ^ u64::try_from(black_box(superblock.len())).unwrap_or(u64::MAX)
                 ^ u64::try_from(black_box(group_descriptor.len())).unwrap_or(u64::MAX)
