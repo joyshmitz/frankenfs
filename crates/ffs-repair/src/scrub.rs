@@ -254,6 +254,12 @@ impl<'a> Scrubber<'a> {
         let mut blocks_corrupt: u64 = 0;
         let mut blocks_io_error: u64 = 0;
 
+        // Reused across batches: read_contiguous_blocks fills every buffer
+        // (or errors and leaves them unused), so a single allocation that is
+        // re-overwritten each batch avoids re-allocating + re-zeroing ~one
+        // block per scanned block on the hot scrub loop (bd-xmh5g.7).
+        let mut bufs: Vec<BlockBuf> = Vec::new();
+
         let mut next_block = start.0;
         while next_block < end {
             if blocks_scanned % 256 == 0 {
@@ -292,15 +298,18 @@ impl<'a> Scrubber<'a> {
                 .checked_add(batch_len_u64)
                 .ok_or_else(|| FfsError::Format("scrub batch range overflow".to_owned()))?;
             let batch_blocks: Vec<BlockNumber> = (next_block..batch_end).map(BlockNumber).collect();
-            let mut bufs: Vec<BlockBuf> =
-                (0..batch_len).map(|_| BlockBuf::new(Vec::new())).collect();
+            // Grow the reusable buffer pool to cover this batch; existing
+            // entries keep their block-sized allocations and are reused.
+            if bufs.len() < batch_len {
+                bufs.resize_with(batch_len, || BlockBuf::new(Vec::new()));
+            }
 
             if self
                 .device
-                .read_contiguous_blocks(cx, batch_start, &mut bufs)
+                .read_contiguous_blocks(cx, batch_start, &mut bufs[..batch_len])
                 .is_ok()
             {
-                for (block, buf) in batch_blocks.iter().copied().zip(bufs.iter()) {
+                for (block, buf) in batch_blocks.iter().copied().zip(bufs[..batch_len].iter()) {
                     blocks_scanned += 1;
                     Self::record_verdict(
                         &mut findings,

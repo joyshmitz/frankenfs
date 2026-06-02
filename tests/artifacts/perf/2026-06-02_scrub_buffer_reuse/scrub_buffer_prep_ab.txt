@@ -1,0 +1,18 @@
+Benchmarking scrub_buffer_prep/old_zero_per_batch
+Benchmarking scrub_buffer_prep/old_zero_per_batch: Warming up for 1.0000 s
+Benchmarking scrub_buffer_prep/old_zero_per_batch: Collecting 100 samples in estimated 3.4637 s (10k iterations)
+Benchmarking scrub_buffer_prep/old_zero_per_batch: Analyzing
+scrub_buffer_prep/old_zero_per_batch
+                        time:   [345.14 µs 350.16 µs 355.04 µs]
+Found 20 outliers among 100 measurements (20.00%)
+Benchmarking scrub_buffer_prep/new_reuse_pool
+Benchmarking scrub_buffer_prep/new_reuse_pool: Warming up for 1.0000 s
+Benchmarking scrub_buffer_prep/new_reuse_pool: Collecting 100 samples in estimated 3.0418 s (111k iterations)
+Benchmarking scrub_buffer_prep/new_reuse_pool: Analyzing
+scrub_buffer_prep/new_reuse_pool
+                        time:   [26.644 µs 26.851 µs 27.113 µs]
+Found 16 outliers among 100 measurements (16.00%)
+e_pool: Analyzing
+scrub_buffer_prep/new_reuse_pool
+                        time:   [25.648 µs 25.798 µs 26.001 µs]
+Found 2 outliers among 100 measurements (2.00%)

@@ -301,9 +301,69 @@ fn bench_refresh_policy_staleness(c: &mut Criterion) {
     });
 }
 
+// ── A/B: scrub buffer preparation (bd-xmh5g.7) ──────────────────────────────
+//
+// Same-binary A/B isolating the buffer-prep cost the lever changed. The scrub
+// loop reads SCRUB_READ_BATCH_BLOCKS (64) blocks per batched preadv; an 8 MiB
+// scrub is 32 batches. `old_zero_per_batch` allocates + zeroes 64 fresh
+// BlockBufs every batch (the previous behaviour: BlockBuf::new(Vec::new()) per
+// batch, then read_contiguous_blocks zeroed each). `new_reuse_pool` allocates
+// the pool once and skips re-zeroing already-sized buffers — preadv overwrites
+// every byte, so the zero is pure waste. `simulate_read_fill` stands in for the
+// preadv overwrite so both arms touch every byte identically.
+const PREP_BATCH: usize = 64;
+const PREP_BATCHES: usize = 32;
+
+fn simulate_read_fill(bufs: &mut [BlockBuf]) {
+    for buf in bufs.iter_mut() {
+        let slice = buf.make_mut();
+        let n = slice.len();
+        slice[0] = black_box(0xAB);
+        slice[n / 2] = black_box(0xCD);
+        slice[n - 1] = black_box(0xEF);
+    }
+}
+
+fn bench_scrub_buffer_prep(c: &mut Criterion) {
+    let block = BLOCK_SIZE as usize;
+    let mut group = c.benchmark_group("scrub_buffer_prep");
+
+    group.bench_function("old_zero_per_batch", |b| {
+        b.iter(|| {
+            for _ in 0..PREP_BATCHES {
+                let mut bufs: Vec<BlockBuf> =
+                    (0..PREP_BATCH).map(|_| BlockBuf::zeroed(block)).collect();
+                simulate_read_fill(&mut bufs);
+                black_box(&bufs);
+            }
+        });
+    });
+
+    group.bench_function("new_reuse_pool", |b| {
+        b.iter(|| {
+            let mut bufs: Vec<BlockBuf> = Vec::new();
+            for _ in 0..PREP_BATCHES {
+                if bufs.len() < PREP_BATCH {
+                    bufs.resize_with(PREP_BATCH, || BlockBuf::new(Vec::new()));
+                }
+                for buf in bufs.iter_mut() {
+                    if buf.len() != block {
+                        *buf = BlockBuf::zeroed(block);
+                    }
+                }
+                simulate_read_fill(&mut bufs[..PREP_BATCH]);
+                black_box(&bufs);
+            }
+        });
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     repair_benches,
     bench_scrub,
+    bench_scrub_buffer_prep,
     bench_raptorq_codec,
     bench_lrc_codec,
     bench_refresh_policy_staleness

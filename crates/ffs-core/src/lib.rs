@@ -1102,7 +1102,15 @@ impl BlockDevice for ByteDeviceBlockAdapter<'_> {
         let offset = self.block_offset(start)?;
 
         for buf in bufs.iter_mut() {
-            *buf = BlockBuf::zeroed(block_size);
+            // Only (re)allocate+zero when the buffer is not already a
+            // correctly-sized block. Already-sized buffers are reused as-is:
+            // read_vectored_exact_at below overwrites every byte, or returns
+            // Err (UnexpectedEof) and the buffers go unused — so re-zeroing
+            // them is pure waste on the hot scrub batch loop (the buffers can
+            // be reused across batches by the caller).
+            if buf.len() != block_size {
+                *buf = BlockBuf::zeroed(block_size);
+            }
         }
         let mut slices: Vec<IoSliceMut<'_>> = bufs
             .iter_mut()

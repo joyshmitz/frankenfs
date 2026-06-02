@@ -1,0 +1,41 @@
+cargo build --release -p ffs-cli >/dev/null 2>&1
+echo "CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-unset}"
+BIN=$(cargo build --release -p ffs-cli --message-format=json 2>/dev/null | grep -o "\"executable\":\"[^\"]*ffs-cli\"" | head -1 | sed "s/.*\"\\(\/[^\"]*\\)\"/\\1/")
+echo "BIN=$BIN"
+IMG=conformance/golden/ext4_8mb_reference.ext4
+strace -f -c "$BIN" fsck -f --json "$IMG" >/dev/null 2>/tmp/sc_all.txt || true
+cat /tmp/sc_all.txt
+'[0m
+CARGO_TARGET_DIR=/data/tmp/cargo-target
+BIN=/data/tmp/cargo-target/release/ffs-cli
+% time     seconds  usecs/call     calls    errors syscall
+------ ----------- ----------- --------- --------- ------------------
+ 20.62    0.000442         442         1           execve
+ 18.19    0.000390          43         9           openat
+ 16.09    0.000345          10        32           preadv
+ 13.06    0.000280          14        19           mmap
+  8.49    0.000182          10        18           brk
+  4.57    0.000098           8        11           read
+  3.40    0.000073          12         6           mprotect
+  2.38    0.000051           5         9           close
+  1.77    0.000038          19         2           lseek
+  1.40    0.000030           6         5           fstat
+  1.26    0.000027           6         4           pread64
+  1.21    0.000026           5         5           rt_sigaction
+  1.12    0.000024           6         4           statx
+  1.03    0.000022           2         8           write
+  0.75    0.000016           8         2           munmap
+  0.75    0.000016           8         2           rt_sigprocmask
+  0.61    0.000013           6         2           prlimit64
+  0.61    0.000013           6         2           getrandom
+  0.47    0.000010           3         3           sigaltstack
+  0.42    0.000009           9         1         1 access
+  0.28    0.000006           6         1           poll
+  0.28    0.000006           6         1           arch_prctl
+  0.28    0.000006           6         1           sched_getaffinity
+  0.28    0.000006           6         1           set_tid_address
+  0.23    0.000005           5         1           gettid
+  0.23    0.000005           5         1           set_robust_list
+  0.23    0.000005           5         1           rseq
+------ ----------- ----------- --------- --------- ------------------
+100.00    0.002144          14       152         1 total
