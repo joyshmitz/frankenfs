@@ -30,6 +30,18 @@ const SMALL_IMAGE_BYTES: u64 = 128 * 1024 * 1024;
 const MEDIUM_IMAGE_BYTES: u64 = 160 * 1024 * 1024;
 const LARGE_IMAGE_BYTES: u64 = 192 * 1024 * 1024;
 const GOLDEN_VERSION: u32 = 1;
+/// btrfs-progs version the committed goldens were captured with.
+///
+/// The btrfs on-disk layout these tests compare byte-for-byte (generation
+/// numbers, chunk placement, compressed extents) and the mkfs flags they rely
+/// on (e.g. `--compress`, only present in newer releases) vary across
+/// btrfs-progs versions. The golden comparisons therefore only hold for this
+/// exact version; running against any other version produces spurious
+/// mismatches (or outright `mkfs.btrfs` failures on missing flags). CI runners
+/// ship an older btrfs-progs, which is why these tests must self-skip there
+/// rather than fail. Regenerate the goldens with `FFS_REGEN_BTRFS_GOLDENS=1`
+/// on the anchor version and bump this constant when intentionally upgrading.
+const GOLDEN_BTRFS_PROGS_VERSION: (u32, u32) = (6, 16);
 const REGEN_ENV: &str = "FFS_REGEN_BTRFS_GOLDENS";
 const CONTENT_HEX_LIMIT: usize = 4096;
 const CONTENT_PREVIEW_BYTES: usize = 64;
@@ -238,12 +250,50 @@ fn btrfs_tools_available() -> bool {
     has_command("mkfs.btrfs") && has_command("btrfs")
 }
 
+/// Parse the `(major, minor)` of the installed btrfs-progs from
+/// `btrfs --version` output (e.g. `btrfs-progs v6.16`). Returns `None` if the
+/// command is missing or its output cannot be parsed.
+fn btrfs_progs_version() -> Option<(u32, u32)> {
+    let output = Command::new("btrfs").arg("--version").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    // Find the `vX.Y[.Z]` token and take the leading major.minor.
+    let token = text
+        .split_whitespace()
+        .find(|word| word.starts_with('v') && word[1..].starts_with(|c: char| c.is_ascii_digit()))?;
+    let mut parts = token.trim_start_matches('v').split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
+    Some((major, minor))
+}
+
 fn skip_without_btrfs_tools() -> bool {
-    if btrfs_tools_available() {
-        false
-    } else {
+    if !btrfs_tools_available() {
         eprintln!("btrfs tools unavailable, skipping");
-        true
+        return true;
+    }
+    // When explicitly regenerating, run on whatever version is installed so the
+    // refreshed goldens (and GOLDEN_BTRFS_PROGS_VERSION) can be updated.
+    if regen_requested() {
+        return false;
+    }
+    match btrfs_progs_version() {
+        Some(version) if version == GOLDEN_BTRFS_PROGS_VERSION => false,
+        Some((major, minor)) => {
+            eprintln!(
+                "btrfs-progs v{major}.{minor} != golden anchor v{}.{}; the byte-exact \
+                 reference comparison is version-pinned, skipping. Regenerate with \
+                 {REGEN_ENV}=1 on the anchor version to update.",
+                GOLDEN_BTRFS_PROGS_VERSION.0, GOLDEN_BTRFS_PROGS_VERSION.1
+            );
+            true
+        }
+        None => {
+            eprintln!("could not determine btrfs-progs version; skipping version-pinned goldens");
+            true
+        }
     }
 }
 
