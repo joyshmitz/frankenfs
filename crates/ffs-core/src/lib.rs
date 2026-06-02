@@ -12443,7 +12443,14 @@ impl OpenFs {
                 let write_len = write_end_in_cluster - write_start_in_cluster;
                 cluster_data[write_start_in_cluster..write_end_in_cluster]
                     .copy_from_slice(&data[data_offset..data_offset + write_len]);
-                let cluster_data_len = usize::try_from(existing_end - cluster_file_offset)
+                // `existing_end` (= inode.size capped to this cluster) can be
+                // BELOW `cluster_file_offset` when a new/short file is extended
+                // into a later cluster — the read-existing block above is
+                // guarded for exactly that case. Use saturating_sub so the
+                // amount of pre-existing data in this cluster floors at 0
+                // instead of underflowing (debug panic / release wrap masked
+                // only by the later `.min`).
+                let cluster_data_len = usize::try_from(existing_end.saturating_sub(cluster_file_offset))
                     .unwrap_or(cluster_bytes)
                     .max(write_end_in_cluster)
                     .min(cluster_bytes);
@@ -28849,6 +28856,63 @@ mod tests {
             inode_after_write.flags & ffs_types::EXT4_COMPRBLK_FL,
             0,
             "compressed write should mark COMPRBLK after COMPR enable via setflags"
+        );
+    }
+
+    #[test]
+    fn compressed_write_spanning_indirect_blocks_roundtrips_ext4() {
+        // The existing compressed-write test writes a single 4K block (logical
+        // block 0 → direct pointer). This drives a multi-cluster compressed
+        // write past logical block 12, exercising write_block_ptr's
+        // single-indirect branch (allocate the i_block[12] indirect block and
+        // set its pointers) plus the matching indirect read assembly — the
+        // e2compr indirect-mapped mutation path had no test coverage.
+        let Some((fs, _tmp)) = open_writable_ext4_mkfs_with_incompat_features(
+            64,
+            ffs_ondisk::Ext4IncompatFeatures::COMPRESSION.0,
+        ) else {
+            eprintln!("mkfs.ext4 not available, skipping");
+            return;
+        };
+
+        let cx = Cx::for_testing();
+        let created = fs
+            .create(
+                &cx,
+                InodeNumber(2),
+                OsStr::new("compr-indirect.bin"),
+                0o644,
+                0,
+                0,
+            )
+            .expect("create compr-indirect.bin");
+
+        let mut write_scope = fs
+            .begin_request_scope(&cx, RequestOp::IoctlWrite)
+            .expect("begin ioctl write scope");
+        fs.set_inode_flags(&cx, &mut write_scope, created.ino, ffs_types::EXT4_COMPR_FL)
+            .expect("enable COMPR flag");
+        fs.commit_request_scope(&mut write_scope)
+            .expect("commit ioctl write scope");
+        fs.end_request_scope(&cx, RequestOp::IoctlWrite, write_scope)
+            .expect("end ioctl write scope");
+
+        // 128 KiB = 32 logical 4K blocks → blocks 12..=31 are reached via the
+        // single-indirect pointer block. A varied (non-constant) pattern avoids
+        // degenerate all-hole compression so real data pointers get written.
+        let payload: Vec<u8> = (0..128 * 1024).map(|i| (i % 251) as u8).collect();
+        let written = fs
+            .write(&cx, created.ino, 0, &payload)
+            .expect("compressed write spanning indirect blocks");
+        assert_eq!(written as usize, payload.len(), "all bytes must be written");
+
+        let readback = fs
+            .read(&cx, created.ino, 0, payload.len() as u32)
+            .expect("readback");
+        assert_eq!(readback.len(), payload.len(), "read length must match write");
+        assert_eq!(
+            readback, payload,
+            "compressed indirect-mapped write must round-trip byte-identically"
         );
     }
 
