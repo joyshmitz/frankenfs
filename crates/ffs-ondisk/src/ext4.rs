@@ -7856,6 +7856,30 @@ mod tests {
     }
 
     #[test]
+    fn ext4_casefold_key_capital_sigma_folds_like_lowercase_sigma() {
+        // Regression guard (bd-m7adx): the valid-UTF-8 fast path must NOT route
+        // capital sigma through str::to_lowercase, which applies the Final_Sigma
+        // context rule (Σ→ς word-finally) and would diverge from the per-char
+        // loop (Σ→σ). A capital sigma must casefold-match its lowercase form.
+        let upper = "ΑΣ"; // alpha + capital sigma (sigma is word-final here)
+        let lower = "ασ"; // alpha + lowercase (non-final) sigma
+        assert_eq!(
+            ext4_casefold_key(upper.as_bytes()),
+            ext4_casefold_key(lower.as_bytes()),
+            "capital sigma must fold to the same key as lowercase sigma (no Final_Sigma divergence)"
+        );
+        assert!(
+            ext4_casefold_names_collide(upper.as_bytes(), lower.as_bytes()),
+            "Σ and σ must be treated as a case-insensitive match"
+        );
+        // Lone capital sigma vs lowercase sigma (the word-final trigger case).
+        assert_eq!(
+            ext4_casefold_key("Σ".as_bytes()),
+            ext4_casefold_key("σ".as_bytes()),
+        );
+    }
+
+    #[test]
     fn ext4_casefold_key_exposes_collision_contract() {
         assert!(ext4_casefold_names_collide(
             "Straße.TXT".as_bytes(),
