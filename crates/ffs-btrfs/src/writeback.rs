@@ -519,12 +519,13 @@ pub struct DiskWritebackContext {
     /// Mapping from in-memory block numbers to allocated logical addresses.
     ///
     /// When `Some`, these are real chunk-covered addresses from the allocator.
-    /// When `None`, falls back to test-mode placeholder `block * nodesize`.
+    /// When `None`, falls back to the simulator-only synthetic
+    /// `block * nodesize` mapping.
     allocated_addrs: Option<BTreeMap<u64, u64>>,
 }
 
 impl DiskWritebackContext {
-    /// Create a new disk writeback context for testing (placeholder addresses).
+    /// Create a disk writeback context that uses the simulator-only synthetic mapping.
     pub fn new(
         fsid: [u8; 16],
         chunk_tree_uuid: [u8; 16],
@@ -572,7 +573,8 @@ impl DiskWritebackContext {
     /// Convert an in-memory block number to a disk byte offset.
     ///
     /// If allocated addresses are provided, returns the real logical address.
-    /// Otherwise, falls back to test-mode placeholder `bytenr = block * nodesize`.
+    /// Otherwise, falls back to the simulator-only synthetic
+    /// `bytenr = block * nodesize` mapping.
     #[must_use]
     pub fn block_to_bytenr(&self, block: u64) -> u64 {
         let fallback = block.saturating_mul(u64::from(self.nodesize));
@@ -582,7 +584,7 @@ impl DiskWritebackContext {
             .unwrap_or(fallback)
     }
 
-    /// Returns true if this context uses real allocated addresses (not test placeholders).
+    /// Returns true if this context uses real allocated addresses.
     #[must_use]
     pub fn has_allocated_addresses(&self) -> bool {
         self.allocated_addrs.is_some()
@@ -1408,9 +1410,31 @@ mod tests {
     #[test]
     fn disk_writeback_context_block_to_bytenr() {
         let ctx = make_disk_context(100);
+        assert!(!ctx.has_allocated_addresses());
         assert_eq!(ctx.block_to_bytenr(0), 0);
         assert_eq!(ctx.block_to_bytenr(1), 16_384);
         assert_eq!(ctx.block_to_bytenr(10), 163_840);
+    }
+
+    #[test]
+    fn disk_writeback_context_allocated_addresses_override_synthetic_mapping() {
+        let mut allocated_addrs = BTreeMap::new();
+        allocated_addrs.insert(1, 0x4000_0000);
+        allocated_addrs.insert(10, 0x4001_0000);
+
+        let ctx = super::DiskWritebackContext::with_allocated_addresses(
+            TEST_FSID,
+            TEST_CHUNK_UUID,
+            100,
+            5,
+            TEST_NODESIZE,
+            4096,
+            allocated_addrs,
+        );
+
+        assert!(ctx.has_allocated_addresses());
+        assert_eq!(ctx.block_to_bytenr(1), 0x4000_0000);
+        assert_eq!(ctx.block_to_bytenr(10), 0x4001_0000);
     }
 
     #[test]
