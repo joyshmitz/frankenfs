@@ -5847,19 +5847,42 @@ impl OpenFs {
             let physical_offset = mapping.physical;
             Self::btrfs_checked_physical_span(physical_offset, to_read_usize)?;
 
-            // Handle unaligned start/end via block reads.
+            // Read the contiguous physical span. For the run of fully-aligned
+            // blocks, coalesce into a single vectored device read (one preadv
+            // instead of one pread per block) — this is the rank-1 cost on the
+            // direct-read path (bd-a384r). `MvccBlockDevice::read_contiguous_blocks`
+            // keeps this overlay-correct: it only collapses ranges with no
+            // version-visible block and otherwise falls back to scalar reads.
+            // Unaligned head/tail bytes always use scalar `read_block`.
             let mut pos = 0_usize;
             while pos < to_read_usize {
                 let current_phys = Self::btrfs_checked_physical_offset(physical_offset, pos)?;
                 let block_num = BlockNumber(current_phys / block_size);
                 let block_offset = (current_phys % block_size) as usize;
-                let chunk_in_block = (to_read_usize - pos).min(bs_usize - block_offset);
+                let remaining = to_read_usize - pos;
 
-                let block_data = block_dev.read_block(cx, block_num)?;
-                out[pos..pos + chunk_in_block].copy_from_slice(
-                    &block_data.as_slice()[block_offset..block_offset + chunk_in_block],
-                );
-                pos += chunk_in_block;
+                if block_offset == 0
+                    && remaining >= bs_usize
+                    && block_dev.supports_contiguous_reads()
+                {
+                    let full_blocks = remaining / bs_usize;
+                    let mut bufs: Vec<BlockBuf> = (0..full_blocks)
+                        .map(|_| BlockBuf::zeroed(bs_usize))
+                        .collect();
+                    block_dev.read_contiguous_blocks(cx, block_num, &mut bufs)?;
+                    for (idx, buf) in bufs.iter().enumerate() {
+                        let dst = pos + idx * bs_usize;
+                        out[dst..dst + bs_usize].copy_from_slice(buf.as_slice());
+                    }
+                    pos += full_blocks * bs_usize;
+                } else {
+                    let chunk_in_block = remaining.min(bs_usize - block_offset);
+                    let block_data = block_dev.read_block(cx, block_num)?;
+                    out[pos..pos + chunk_in_block].copy_from_slice(
+                        &block_data.as_slice()[block_offset..block_offset + chunk_in_block],
+                    );
+                    pos += chunk_in_block;
+                }
             }
 
             logical = Self::btrfs_checked_logical_advance(logical, to_read)?;
@@ -24189,6 +24212,71 @@ mod tests {
         }
     }
 
+    /// Test device that advertises vectored reads and counts scalar vs vectored
+    /// device operations. Used to prove the file-read path coalesces contiguous
+    /// block reads into a single vectored device op (bd-a384r) rather than one
+    /// scalar read per block.
+    struct VectoredCountingDevice {
+        inner: TestDevice,
+        scalar_reads: Arc<AtomicUsize>,
+        vectored_reads: Arc<AtomicUsize>,
+    }
+
+    impl VectoredCountingDevice {
+        fn new(inner: TestDevice) -> Self {
+            Self {
+                inner,
+                scalar_reads: Arc::new(AtomicUsize::new(0)),
+                vectored_reads: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+    }
+
+    impl ByteDevice for VectoredCountingDevice {
+        fn len_bytes(&self) -> u64 {
+            self.inner.len_bytes()
+        }
+
+        fn supports_vectored_reads(&self) -> bool {
+            true
+        }
+
+        fn read_exact_at(
+            &self,
+            cx: &Cx,
+            offset: ByteOffset,
+            buf: &mut [u8],
+        ) -> ffs_error::Result<()> {
+            self.scalar_reads.fetch_add(1, AtomicOrdering::SeqCst);
+            self.inner.read_exact_at(cx, offset, buf)
+        }
+
+        fn read_vectored_exact_at(
+            &self,
+            cx: &Cx,
+            offset: ByteOffset,
+            bufs: &mut [std::io::IoSliceMut<'_>],
+        ) -> ffs_error::Result<()> {
+            // Models a single preadv: one device op fills every buffer.
+            self.vectored_reads.fetch_add(1, AtomicOrdering::SeqCst);
+            let mut off = offset.0;
+            for buf in bufs.iter_mut() {
+                self.inner
+                    .read_exact_at(cx, ByteOffset(off), &mut buf[..])?;
+                off += buf.len() as u64;
+            }
+            Ok(())
+        }
+
+        fn write_all_at(&self, cx: &Cx, offset: ByteOffset, buf: &[u8]) -> ffs_error::Result<()> {
+            self.inner.write_all_at(cx, offset, buf)
+        }
+
+        fn sync(&self, cx: &Cx) -> ffs_error::Result<()> {
+            self.inner.sync(cx)
+        }
+    }
+
     #[derive(Clone, Default)]
     struct SharedLogBuffer {
         inner: Arc<Mutex<Vec<u8>>>,
@@ -29515,6 +29603,44 @@ mod tests {
             .read(&cx, &mut RequestScope::empty(), InodeNumber(257), 0, 7000)
             .unwrap();
         assert_eq!(data, expected);
+    }
+
+    #[test]
+    fn btrfs_read_coalesces_contiguous_block_reads_into_vectored_io() {
+        // bd-a384r behaviour proof: a multi-block contiguous file read must be
+        // served by a single coalesced vectored device op, not one scalar read
+        // per block — and remain byte-identical.
+        let mut image = build_btrfs_fsops_image();
+        let expected: Vec<u8> = (0..16_384)
+            .map(|i| u8::try_from(i % 251).expect("value should fit in u8"))
+            .collect();
+        set_btrfs_test_file_size(&mut image, expected.len() as u64);
+        set_btrfs_test_extent_lengths(&mut image, expected.len() as u64);
+        write_btrfs_test_file_data(&mut image, &expected);
+
+        let dev = VectoredCountingDevice::new(TestDevice::from_vec(image));
+        let scalar = Arc::clone(&dev.scalar_reads);
+        let vectored = Arc::clone(&dev.vectored_reads);
+        let cx = Cx::for_testing();
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
+        let ops: &dyn FsOps = &fs;
+
+        // Discount open-time metadata reads; measure only the file-data read.
+        scalar.store(0, AtomicOrdering::SeqCst);
+        vectored.store(0, AtomicOrdering::SeqCst);
+
+        let data = ops
+            .read(&cx, &mut RequestScope::empty(), InodeNumber(257), 0, 16_384)
+            .unwrap();
+
+        assert_eq!(data, expected, "coalesced read must be byte-identical");
+        assert!(
+            vectored.load(AtomicOrdering::SeqCst) >= 1,
+            "4 contiguous data blocks must use a coalesced vectored device op; \
+             got {} vectored + {} scalar",
+            vectored.load(AtomicOrdering::SeqCst),
+            scalar.load(AtomicOrdering::SeqCst),
+        );
     }
 
     #[test]
