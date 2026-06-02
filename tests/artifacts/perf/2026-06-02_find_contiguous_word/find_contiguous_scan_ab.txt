@@ -1,0 +1,15 @@
+# Archived one-time A/B (bd-xmh5g.4). The find_contiguous_scan bench arm and the
+# word-path lever were REVERTED after this run: 66.332 ns -> 40.614 ns = 1.63x < 2.0.
+Benchmarking find_contiguous_scan/old_byte_scan
+Benchmarking find_contiguous_scan/old_byte_scan: Warming up for 1.0000 s
+Benchmarking find_contiguous_scan/old_byte_scan: Collecting 100 samples in estimated 3.0002 s (43M iterations)
+Benchmarking find_contiguous_scan/old_byte_scan: Analyzing
+find_contiguous_scan/old_byte_scan
+                        time:   [63.870 ns 66.332 ns 68.850 ns]
+Found 2 outliers among 100 measurements (2.00%)
+Benchmarking find_contiguous_scan/new_word_scan
+Benchmarking find_contiguous_scan/new_word_scan: Warming up for 1.0000 s
+Benchmarking find_contiguous_scan/new_word_scan: Collecting 100 samples in estimated 3.0002 s (74M iterations)
+Benchmarking find_contiguous_scan/new_word_scan: Analyzing
+find_contiguous_scan/new_word_scan
+                        time:   [38.907 ns 40.614 ns 42.259 ns]
