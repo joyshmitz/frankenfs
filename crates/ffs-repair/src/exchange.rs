@@ -53,6 +53,32 @@ impl Default for Config {
     }
 }
 
+impl Config {
+    fn validate(self) -> Result<Self> {
+        if self.connect_timeout.is_zero() {
+            return Err(FfsError::Format(
+                "exchange connect_timeout must be > 0".to_owned(),
+            ));
+        }
+        if self.io_timeout.is_zero() {
+            return Err(FfsError::Format(
+                "exchange io_timeout must be > 0".to_owned(),
+            ));
+        }
+        if self.accept_poll_interval.is_zero() {
+            return Err(FfsError::Format(
+                "exchange accept_poll_interval must be > 0".to_owned(),
+            ));
+        }
+        if self.max_frame_bytes == 0 {
+            return Err(FfsError::Format(
+                "exchange max_frame_bytes must be > 0".to_owned(),
+            ));
+        }
+        Ok(self)
+    }
+}
+
 /// One transport-level symbol payload.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WireSymbol {
@@ -265,6 +291,7 @@ pub struct Client {
 
 impl Client {
     pub fn new(remote_addr: impl ToSocketAddrs, config: Config) -> Result<Self> {
+        let config = config.validate()?;
         let addr = remote_addr
             .to_socket_addrs()
             .map_err(FfsError::from)?
@@ -351,11 +378,13 @@ pub struct Server<S> {
 
 impl<S: Store> Server<S> {
     pub fn bind(bind_addr: impl ToSocketAddrs, store: S, config: Config) -> Result<Self> {
+        let config = config.validate()?;
         let listener = TcpListener::bind(bind_addr).map_err(FfsError::from)?;
         Self::from_listener(listener, store, config)
     }
 
     pub fn from_listener(listener: TcpListener, store: S, config: Config) -> Result<Self> {
+        let config = config.validate()?;
         listener.set_nonblocking(true).map_err(FfsError::from)?;
         Ok(Self {
             listener,
@@ -823,6 +852,72 @@ mod tests {
 
         assert_eq!(result, "ok");
         assert_eq!(attempts, 3);
+    }
+
+    #[test]
+    fn server_rejects_zero_accept_poll_interval() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind loopback listener");
+        let store = Arc::new(InMemoryStore::new());
+        let config = Config {
+            accept_poll_interval: Duration::ZERO,
+            ..Config::default()
+        };
+
+        let err = Server::from_listener(listener, store, config)
+            .expect_err("zero accept poll interval should be rejected");
+
+        assert!(format!("{err}").contains("accept_poll_interval must be > 0"));
+    }
+
+    #[test]
+    fn client_rejects_zero_transport_timeouts() {
+        let zero_connect = Config {
+            connect_timeout: Duration::ZERO,
+            ..Config::default()
+        };
+        let err = Client::new("127.0.0.1:1", zero_connect)
+            .expect_err("zero connect timeout should be rejected");
+        assert!(format!("{err}").contains("connect_timeout must be > 0"));
+
+        let zero_io = Config {
+            io_timeout: Duration::ZERO,
+            ..Config::default()
+        };
+        let err =
+            Client::new("127.0.0.1:1", zero_io).expect_err("zero I/O timeout should be rejected");
+        assert!(format!("{err}").contains("io_timeout must be > 0"));
+    }
+
+    #[test]
+    fn exchange_rejects_zero_max_frame_bytes() {
+        let server_listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind loopback listener");
+        let store = Arc::new(InMemoryStore::new());
+        let config = Config {
+            max_frame_bytes: 0,
+            ..Config::default()
+        };
+        let server_err = Server::from_listener(server_listener, store, config)
+            .expect_err("zero max frame bytes should be rejected by server");
+        assert!(format!("{server_err}").contains("max_frame_bytes must be > 0"));
+
+        let client_err = Client::new("127.0.0.1:1", config)
+            .expect_err("zero max frame bytes should be rejected by client");
+        assert!(format!("{client_err}").contains("max_frame_bytes must be > 0"));
+    }
+
+    #[test]
+    fn default_exchange_config_is_accepted() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind loopback listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let store = Arc::new(InMemoryStore::new());
+
+        let server = Server::from_listener(listener, store, Config::default())
+            .expect("default server config should be accepted");
+        let client =
+            Client::new(addr, Config::default()).expect("default client config should be accepted");
+
+        assert_eq!(server.local_addr().expect("server addr"), addr);
+        assert_eq!(client.remote_addr(), addr);
     }
 
     #[test]
