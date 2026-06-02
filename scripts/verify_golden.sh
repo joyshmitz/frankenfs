@@ -59,7 +59,10 @@ write_json_checksums() {
     local out="$2"
     (
         cd "$dir"
-        mapfile -t files < <(find . -maxdepth 1 -type f -name '*.json' -printf '%f\n' | sort)
+        # Recurse into nested fixture subdirectories (`%P` = path relative to
+        # the start dir) so the manifest covers every tracked .json, matching
+        # the recursive `git ls-files` coverage contract enforced below.
+        mapfile -t files < <(find . -type f -name '*.json' -printf '%P\n' | sort)
         if [[ ${#files[@]} -eq 0 ]]; then
             echo "no JSON checksum inputs found in $dir" >&2
             return 1
@@ -71,8 +74,10 @@ write_json_checksums() {
 write_conformance_golden_checksums() {
     (
         cd conformance/golden
+        # Recurse (path-relative `%P`) so nested golden artifacts stay covered,
+        # consistent with the recursive coverage check.
         mapfile -t files < <(
-            find . -maxdepth 1 -type f \( -name '*.json' -o -name '*.txt' \) -printf '%f\n' | sort
+            find . -type f \( -name '*.json' -o -name '*.txt' \) -printf '%P\n' | sort
         )
         if [[ ${#files[@]} -eq 0 ]]; then
             echo "no conformance golden checksum inputs found" >&2
