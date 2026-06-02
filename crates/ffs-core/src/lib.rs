@@ -12450,10 +12450,11 @@ impl OpenFs {
                 // amount of pre-existing data in this cluster floors at 0
                 // instead of underflowing (debug panic / release wrap masked
                 // only by the later `.min`).
-                let cluster_data_len = usize::try_from(existing_end.saturating_sub(cluster_file_offset))
-                    .unwrap_or(cluster_bytes)
-                    .max(write_end_in_cluster)
-                    .min(cluster_bytes);
+                let cluster_data_len =
+                    usize::try_from(existing_end.saturating_sub(cluster_file_offset))
+                        .unwrap_or(cluster_bytes)
+                        .max(write_end_in_cluster)
+                        .min(cluster_bytes);
 
                 // Compress and write the cluster.
                 let mut alloc = alloc_mutex.lock();
@@ -25174,7 +25175,7 @@ mod tests {
     #[test]
     fn resolve_indirect_block_single_double_triple_levels() {
         const BS: usize = 4096;
-        const PPB: u32 = (BS / 4) as u32; // pointers per 4K block = 1024
+        const PPB: u32 = 1024; // pointers per 4K block
 
         let mut image = build_ext4_image_with_extents();
         // Write a u32 pointer at slot `idx` within block `blk` (blocks 20..=32
@@ -25194,8 +25195,12 @@ mod tests {
         put(&mut image, 25, 0, 32);
 
         let cx = Cx::for_testing();
-        let fs = OpenFs::from_device(&cx, Box::new(TestDevice::from_vec(image)), &OpenOptions::default())
-            .expect("open crafted ext4 image");
+        let fs = OpenFs::from_device(
+            &cx,
+            Box::new(TestDevice::from_vec(image)),
+            &OpenOptions::default(),
+        )
+        .expect("open crafted ext4 image");
         let scope = RequestScope::empty();
 
         // Non-extent inode: 15 u32 pointers, with the indirect roots set.
@@ -25213,13 +25218,15 @@ mod tests {
             "single indirect (logical block 12)"
         );
         assert_eq!(
-            fs.resolve_indirect_block(&cx, &scope, &inode, 12 + PPB).unwrap(),
+            fs.resolve_indirect_block(&cx, &scope, &inode, 12 + PPB)
+                .unwrap(),
             Some(31),
             "double indirect (logical block 12 + ppb)"
         );
         let triple_lb = 12 + PPB + PPB * PPB;
         assert_eq!(
-            fs.resolve_indirect_block(&cx, &scope, &inode, triple_lb).unwrap(),
+            fs.resolve_indirect_block(&cx, &scope, &inode, triple_lb)
+                .unwrap(),
             Some(32),
             "triple indirect (logical block 12 + ppb + ppb^2)"
         );
@@ -25248,12 +25255,18 @@ mod tests {
 
         let mut image = build_ext4_image_with_extents();
         // Fill free data block 30 with a recognizable, non-trivial pattern.
-        let pattern: Vec<u8> = (0..BS).map(|i| (i % 251) as u8).collect();
+        let pattern: Vec<u8> = (0..BS)
+            .map(|i| u8::try_from(i % 251).expect("pattern byte fits u8"))
+            .collect();
         image[30 * BS..31 * BS].copy_from_slice(&pattern);
 
         let cx = Cx::for_testing();
-        let fs = OpenFs::from_device(&cx, Box::new(TestDevice::from_vec(image)), &OpenOptions::default())
-            .expect("open crafted ext4 image");
+        let fs = OpenFs::from_device(
+            &cx,
+            Box::new(TestDevice::from_vec(image)),
+            &OpenOptions::default(),
+        )
+        .expect("open crafted ext4 image");
         let scope = RequestScope::empty();
 
         // Non-extent inode, 2 logical blocks: block 0 → data(30), block 1 → hole.
@@ -25265,10 +25278,20 @@ mod tests {
         inode.size = (2 * BS) as u64;
 
         let out = fs
-            .read_ext4_indirect(&cx, &scope, &inode, 0, (2 * BS) as u32)
+            .read_ext4_indirect(
+                &cx,
+                &scope,
+                &inode,
+                0,
+                u32::try_from(2 * BS).expect("test read length fits u32"),
+            )
             .expect("indirect read");
         assert_eq!(out.len(), 2 * BS, "reads the full file size");
-        assert_eq!(&out[..BS], &pattern[..], "mapped block reads through verbatim");
+        assert_eq!(
+            &out[..BS],
+            &pattern[..],
+            "mapped block reads through verbatim"
+        );
         assert!(
             out[BS..].iter().all(|&b| b == 0),
             "sparse hole must zero-fill"
@@ -28900,16 +28923,27 @@ mod tests {
         // 128 KiB = 32 logical 4K blocks → blocks 12..=31 are reached via the
         // single-indirect pointer block. A varied (non-constant) pattern avoids
         // degenerate all-hole compression so real data pointers get written.
-        let payload: Vec<u8> = (0..128 * 1024).map(|i| (i % 251) as u8).collect();
+        let payload: Vec<u8> = (0_usize..128 * 1024)
+            .map(|i| u8::try_from(i % 251).expect("pattern byte fits u8"))
+            .collect();
         let written = fs
             .write(&cx, created.ino, 0, &payload)
             .expect("compressed write spanning indirect blocks");
         assert_eq!(written as usize, payload.len(), "all bytes must be written");
 
         let readback = fs
-            .read(&cx, created.ino, 0, payload.len() as u32)
+            .read(
+                &cx,
+                created.ino,
+                0,
+                u32::try_from(payload.len()).expect("test read length fits u32"),
+            )
             .expect("readback");
-        assert_eq!(readback.len(), payload.len(), "read length must match write");
+        assert_eq!(
+            readback.len(),
+            payload.len(),
+            "read length must match write"
+        );
         assert_eq!(
             readback, payload,
             "compressed indirect-mapped write must round-trip byte-identically"
@@ -28918,6 +28952,8 @@ mod tests {
 
     #[test]
     fn compressed_partial_cluster_overwrite_rmw_roundtrips_ext4() {
+        const CLUSTER: usize = 16 * 1024;
+
         // Overwriting the middle of an already-written compressed cluster
         // exercises the read-modify-write branch (existing_end >
         // cluster_file_offset): the existing cluster is decompressed, the new
@@ -28954,8 +28990,9 @@ mod tests {
             .expect("end ioctl write scope");
 
         // One full 16 KiB cluster (cluster shift 2 → 4 × 4K blocks).
-        const CLUSTER: usize = 16 * 1024;
-        let base: Vec<u8> = (0..CLUSTER).map(|i| (i % 251) as u8).collect();
+        let base: Vec<u8> = (0..CLUSTER)
+            .map(|i| u8::try_from(i % 251).expect("pattern byte fits u8"))
+            .collect();
         assert_eq!(
             fs.write(&cx, created.ino, 0, &base).expect("initial write") as usize,
             base.len()
@@ -28964,17 +29001,27 @@ mod tests {
         // Overwrite the middle [4K, 12K) with a distinct constant pattern.
         let patch = vec![0xBB_u8; 8 * 1024];
         assert_eq!(
-            fs.write(&cx, created.ino, 4096, &patch).expect("overwrite middle") as usize,
+            fs.write(&cx, created.ino, 4096, &patch)
+                .expect("overwrite middle") as usize,
             patch.len()
         );
 
-        let mut expected = base.clone();
+        let mut expected = base;
         expected[4096..4096 + patch.len()].copy_from_slice(&patch);
 
         let readback = fs
-            .read(&cx, created.ino, 0, CLUSTER as u32)
+            .read(
+                &cx,
+                created.ino,
+                0,
+                u32::try_from(CLUSTER).expect("test read length fits u32"),
+            )
             .expect("readback after rmw");
-        assert_eq!(readback.len(), CLUSTER, "size unchanged by middle overwrite");
+        assert_eq!(
+            readback.len(),
+            CLUSTER,
+            "size unchanged by middle overwrite"
+        );
         assert_eq!(
             readback, expected,
             "partial-cluster overwrite must preserve unwritten prefix/suffix and apply the patch"
@@ -29018,14 +29065,22 @@ mod tests {
             .expect("end ioctl write scope");
 
         // 24 KiB: one full cluster (16K) + a half-filled trailing cluster.
-        let payload: Vec<u8> = (0..24 * 1024).map(|i| ((i * 7) % 251) as u8).collect();
+        let payload: Vec<u8> = (0_usize..24 * 1024)
+            .map(|i| u8::try_from((i * 7) % 251).expect("pattern byte fits u8"))
+            .collect();
         assert_eq!(
-            fs.write(&cx, created.ino, 0, &payload).expect("partial-tail write") as usize,
+            fs.write(&cx, created.ino, 0, &payload)
+                .expect("partial-tail write") as usize,
             payload.len()
         );
 
         let readback = fs
-            .read(&cx, created.ino, 0, payload.len() as u32)
+            .read(
+                &cx,
+                created.ino,
+                0,
+                u32::try_from(payload.len()).expect("test read length fits u32"),
+            )
             .expect("readback");
         assert_eq!(
             readback, payload,
@@ -34455,7 +34510,9 @@ mod tests {
             .expect("create");
 
         // 16 KiB of non-zero data (so the punched hole's zeros are unambiguous).
-        let payload: Vec<u8> = (0..16 * 1024).map(|i| ((i % 250) + 1) as u8).collect();
+        let payload: Vec<u8> = (0_usize..16 * 1024)
+            .map(|i| u8::try_from((i % 250) + 1).expect("pattern byte fits u8"))
+            .collect();
         fs.write(&cx, attr.ino, 0, &payload).expect("write 16K");
         let before = fs.getattr(&cx, attr.ino).expect("getattr before punch");
 
@@ -34470,7 +34527,11 @@ mod tests {
         .expect("punch middle hole");
 
         let after = fs.getattr(&cx, attr.ino).expect("getattr after punch");
-        assert_eq!(after.size, payload.len() as u64, "punch_hole keeps file size");
+        assert_eq!(
+            after.size,
+            payload.len() as u64,
+            "punch_hole keeps file size"
+        );
         assert!(
             after.blocks < before.blocks,
             "punching the middle must free the punched blocks (before={}, after={})",
@@ -34478,9 +34539,20 @@ mod tests {
             after.blocks
         );
 
-        let readback = fs.read(&cx, attr.ino, 0, payload.len() as u32).expect("read after punch");
+        let readback = fs
+            .read(
+                &cx,
+                attr.ino,
+                0,
+                u32::try_from(payload.len()).expect("test read length fits u32"),
+            )
+            .expect("read after punch");
         assert_eq!(readback.len(), payload.len());
-        assert_eq!(&readback[..4096], &payload[..4096], "head before hole intact");
+        assert_eq!(
+            &readback[..4096],
+            &payload[..4096],
+            "head before hole intact"
+        );
         assert!(
             readback[4096..12288].iter().all(|&b| b == 0),
             "punched middle reads as zeros"
@@ -37384,6 +37456,8 @@ mod tests {
 
     #[test]
     fn write_compressed_partial_truncate_down_keeps_head_frees_tail_ext4() {
+        const KEPT: usize = 32 * 1024;
+
         // Truncate-to-zero is covered; PARTIAL truncate-down of a multi-cluster
         // compressed file (spanning the single-indirect range) is not. It must
         // free the tail clusters + now-unused indirect blocks while leaving the
@@ -37408,15 +37482,17 @@ mod tests {
         enable_e2compr_for_inode(&fs, &cx, attr.ino, 2, 20); // cluster shift 2 → 16K clusters
 
         // 128 KiB = 32 logical 4K blocks → blocks 12..=31 are indirect-mapped.
-        let payload: Vec<u8> = (0..128 * 1024).map(|i| ((i * 7 + 3) % 251) as u8).collect();
+        let payload: Vec<u8> = (0_usize..128 * 1024)
+            .map(|i| u8::try_from((i * 7 + 3) % 251).expect("pattern byte fits u8"))
+            .collect();
         assert_eq!(
-            fs.write(&cx, attr.ino, 0, &payload).expect("compressed write") as usize,
+            fs.write(&cx, attr.ino, 0, &payload)
+                .expect("compressed write") as usize,
             payload.len()
         );
         let after_write = fs.free_space_summary(&cx).expect("free after write");
 
         // Truncate down to 32 KiB (2 full clusters, blocks 0..=7, all direct).
-        const KEPT: usize = 32 * 1024;
         let trunc = SetAttrRequest {
             size: Some(KEPT as u64),
             ..SetAttrRequest::default()
@@ -37424,12 +37500,22 @@ mod tests {
         fs.setattr(&cx, attr.ino, &trunc)
             .expect("partial truncate down");
 
-        let inode_after = fs.read_inode(&cx, attr.ino).expect("read inode after truncate");
-        assert_eq!(inode_after.size, KEPT as u64, "size reflects the partial truncate");
+        let inode_after = fs
+            .read_inode(&cx, attr.ino)
+            .expect("read inode after truncate");
+        assert_eq!(
+            inode_after.size, KEPT as u64,
+            "size reflects the partial truncate"
+        );
 
         // Retained head must be byte-identical.
         let head = fs
-            .read(&cx, attr.ino, 0, KEPT as u32)
+            .read(
+                &cx,
+                attr.ino,
+                0,
+                u32::try_from(KEPT).expect("test read length fits u32"),
+            )
             .expect("read retained head");
         assert_eq!(head.len(), KEPT, "retained head length");
         assert_eq!(
@@ -37466,19 +37552,14 @@ mod tests {
         let root = InodeNumber(2);
 
         let attr = fs
-            .create(
-                &cx,
-                root,
-                OsStr::new("e2compr_append.bin"),
-                0o644,
-                0,
-                0,
-            )
+            .create(&cx, root, OsStr::new("e2compr_append.bin"), 0o644, 0, 0)
             .expect("create");
         enable_e2compr_for_inode(&fs, &cx, attr.ino, 2, 20); // 16K clusters
 
         // First write: 8 KiB → half of cluster 0.
-        let first: Vec<u8> = (0..8 * 1024).map(|i| (i % 251) as u8).collect();
+        let first: Vec<u8> = (0_usize..8 * 1024)
+            .map(|i| u8::try_from(i % 251).expect("pattern byte fits u8"))
+            .collect();
         assert_eq!(
             fs.write(&cx, attr.ino, 0, &first).expect("first write") as usize,
             first.len()
@@ -37486,17 +37567,25 @@ mod tests {
 
         // Append 16 KiB at offset 8 KiB → fills the rest of cluster 0 and all of
         // cluster 1 (crosses the 16K cluster boundary).
-        let second: Vec<u8> = (0..16 * 1024).map(|i| ((i * 5 + 1) % 251) as u8).collect();
+        let second: Vec<u8> = (0_usize..16 * 1024)
+            .map(|i| u8::try_from((i * 5 + 1) % 251).expect("pattern byte fits u8"))
+            .collect();
         assert_eq!(
-            fs.write(&cx, attr.ino, 8 * 1024, &second).expect("append write") as usize,
+            fs.write(&cx, attr.ino, 8 * 1024, &second)
+                .expect("append write") as usize,
             second.len()
         );
 
-        let mut expected = first.clone();
+        let mut expected = first;
         expected.extend_from_slice(&second);
 
         let readback = fs
-            .read(&cx, attr.ino, 0, expected.len() as u32)
+            .read(
+                &cx,
+                attr.ino,
+                0,
+                u32::try_from(expected.len()).expect("test read length fits u32"),
+            )
             .expect("readback");
         assert_eq!(
             readback, expected,

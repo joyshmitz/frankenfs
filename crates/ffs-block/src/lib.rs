@@ -3043,6 +3043,7 @@ pub const MAX_HOST_PARALLEL_CACHE_SHARDS: usize = 64;
 pub struct ShardedArcCache<D: BlockDevice> {
     inner: Arc<D>,
     shards: Vec<ArcCache<Arc<D>>>,
+    shard_mask: Option<u64>,
 }
 
 impl<D: BlockDevice> ShardedArcCache<D> {
@@ -3098,7 +3099,15 @@ impl<D: BlockDevice> ShardedArcCache<D> {
             )?);
         }
 
-        Ok(Self { inner, shards })
+        let shard_mask = shard_count
+            .is_power_of_two()
+            .then_some(u64::try_from(shard_count - 1).unwrap_or(u64::MAX));
+
+        Ok(Self {
+            inner,
+            shards,
+            shard_mask,
+        })
     }
 
     /// Return the underlying block device shared by all shards.
@@ -3116,6 +3125,9 @@ impl<D: BlockDevice> ShardedArcCache<D> {
     /// Deterministic owner shard for `block`.
     #[must_use]
     pub fn shard_index_for(&self, block: BlockNumber) -> usize {
+        if let Some(mask) = self.shard_mask {
+            return usize::try_from(block.0 & mask).unwrap_or(0);
+        }
         let shard_count = u64::try_from(self.shards.len()).unwrap_or(u64::MAX);
         usize::try_from(block.0 % shard_count).unwrap_or(0)
     }
@@ -7886,6 +7898,29 @@ mod tests {
                 .iter()
                 .all(|shard| shard.capacity == 2)
         );
+    }
+
+    #[test]
+    fn sharded_arc_cache_power_of_two_mask_matches_modulo_routing() {
+        let power_two_dev = ByteBlockDevice::new(MemoryByteDevice::new(4096 * 64), 4096)
+            .expect("power-of-two device");
+        let power_two_cache =
+            ShardedArcCache::new(power_two_dev, 16, 8).expect("power-of-two sharded cache");
+        let non_power_two_dev = ByteBlockDevice::new(MemoryByteDevice::new(4096 * 64), 4096)
+            .expect("non-power-of-two device");
+        let non_power_two_cache = ShardedArcCache::new(non_power_two_dev, 15, 5)
+            .expect("non-power-of-two sharded cache");
+
+        for block in 0..128_u64 {
+            assert_eq!(
+                power_two_cache.shard_index_for(BlockNumber(block)),
+                usize::try_from(block % 8).expect("modulo shard fits usize"),
+            );
+            assert_eq!(
+                non_power_two_cache.shard_index_for(BlockNumber(block)),
+                usize::try_from(block % 5).expect("modulo shard fits usize"),
+            );
+        }
     }
 
     #[test]
