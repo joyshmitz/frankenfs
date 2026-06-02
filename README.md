@@ -32,7 +32,7 @@
 
 **The approach.** FrankenFS extracts ext4 and btrfs behavior from ~205K lines of Linux kernel C (v6.19), re-implements that behavior in Rust with `#![forbid(unsafe_code)]`, and adds experimental layers for block-level MVCC, RaptorQ repair symbols, and explicit-opt-in FUSE writeback-cache barriers.
 
-It runs as a normal Linux process via FUSE. The current `ParityReport::current()` printout is 97/97 rows in the tracked feature denominator, while the B-series accounting keeps implemented, kernel-verified, and rejection-only rows separate instead of treating the table as a blanket readiness score. Public readiness wording is gated by a checked-in release-gate policy with structured proof bundles, and the workspace ships **21 crates, a source-derived test inventory, 63 fuzz targets, 11 criterion benchmarks, 125 tracked end-to-end gate scripts, and 23 evidence-event types** under `#![forbid(unsafe_code)]`. The README count guard `readme_quantitative_claims_match_code` re-derives these inventory numbers from source so fast-moving test counts are not hand-pinned here.
+It runs as a normal Linux process via FUSE. The current `ParityReport::current()` printout is 97/97 rows in the tracked feature denominator, while the B-series accounting keeps implemented, kernel-verified, and rejection-only rows separate instead of treating the table as a blanket readiness score. Public readiness wording is gated by a checked-in release-gate policy with structured proof bundles, and the workspace ships **21 crates, a source-derived test inventory, 63 fuzz targets, 12 criterion benchmarks, 125 tracked end-to-end gate scripts, and 23 evidence-event types** under `#![forbid(unsafe_code)]`. The README count guard `readme_quantitative_claims_match_code` re-derives these inventory numbers from source so fast-moving test counts are not hand-pinned here.
 
 | Pillar | What it does | Why it matters |
 |---|---|---|
@@ -1128,7 +1128,7 @@ The full enumerated catalog is snapshot-pinned as a "metamorphic seed catalog" s
 
 ### Schema inventory
 
-Every machine-readable artifact (release-gate, writeback-cache audit/ordering/crash-replay, repair confidence, repair corpus, soak/canary campaign, swarm operator/cache/tail latency, readiness lab truth graph, ambition evidence matrix, fuzz dashboard, mounted lane decision, agent mail reservation, hysteresis, reservation snapshot, authoritative manifest, parity audit) has its JSON shape pinned in a checked-in inventory with structural validators and drift detectors. 205 tracked insta snapshot pins protect the markdown/JSON of every emitted report.
+Every machine-readable artifact (release-gate, writeback-cache audit/ordering/crash-replay, repair confidence, repair corpus, soak/canary campaign, swarm operator/cache/tail latency, readiness lab truth graph, ambition evidence matrix, fuzz dashboard, mounted lane decision, agent mail reservation, hysteresis, reservation snapshot, authoritative manifest, parity audit) has its JSON shape pinned in a checked-in inventory with structural validators and drift detectors. 226 tracked insta snapshot pins protect the markdown/JSON of every emitted report.
 
 ### Parity tracking
 
@@ -1257,7 +1257,7 @@ Treating evidence as a first-class output buys us:
 - Post-mortem reproducibility (every decision is timestamped and parameterized).
 - Independent verification (a third party can read the ledger without trusting FrankenFS code).
 
-This is why the schema inventory and 205 tracked insta snapshots exist: an evidence shape that drifts silently is a regression as serious as a parser bug.
+This is why the schema inventory and 226 tracked insta snapshots exist: an evidence shape that drifts silently is a regression as serious as a parser bug.
 
 ### Decision 5: Bayesian / expected-loss decision models, not heuristics
 
@@ -3415,7 +3415,7 @@ Rows in the btrfs experimental RW contract can still be `partially supported` or
 - **Writeback-cache.** Epoch-based commit barriers with per-inode staged/visible/durable tracking, deferred visibility for MVCC isolation, dirty-page ordering oracle, 12-point crash/replay matrix artifact gate, runtime guard, and host/lane manifest checks. Kernel option default-off; explicit opt-in is evidence-gated.
 - **Observability.** Evidence ledger with 23 event types and 8 operator presets (`replay-anomalies`, `repair-failures`, `pressure-transitions`, `contention`, `metrics`, `cache`, `mvcc`, `repair-live`), contention metrics, policy-switch detection, structured logging across all subsystems, JSONL audit trail.
 - **CLI.** `inspect`, `mvcc-stats`, `info`, `dump`, `fsck`, `repair`, `mount` (22 flags), `scrub`, `parity`, `evidence`, `mkfs`.
-- **Testing.** Source-derived `#[test]` / `proptest!` inventory across 21 crates, 63 fuzz targets, 11 criterion benchmarks, 125 tracked end-to-end gate scripts, metamorphic-relation proptests across the checksum/parser surface, and 205 tracked insta snapshots covering every emitted report shape.
+- **Testing.** Source-derived `#[test]` / `proptest!` inventory across 21 crates, 63 fuzz targets, 12 criterion benchmarks, 125 tracked end-to-end gate scripts, metamorphic-relation proptests across the checksum/parser surface, and 226 tracked insta snapshots covering every emitted report shape.
 
 ### What's next
 
