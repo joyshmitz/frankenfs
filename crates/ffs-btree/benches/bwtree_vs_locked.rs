@@ -314,11 +314,78 @@ fn run_locked_workload(
     }
 }
 
+// ── Scenario 6: Point-lookup A/B (materialize vs direct chain walk) ─────
+//
+// Same-binary, same-worker A/B isolating the bd-xmh5g.2 lever: a single
+// point query against a consolidated base page carrying a short post-
+// consolidation delta chain. The OLD path clones the whole base BTreeMap
+// and replays the chain before probing one key (`materialize_page` + get);
+// the NEW path (`lookup`) walks newest→oldest deltas and short-circuits.
+// Both arms run in the same binary so the ratio is machine-independent.
+
+fn build_chained_page() -> (MappingTable, PageId) {
+    let table = MappingTable::with_capacity(PAGE_CAPACITY);
+    let page = table.allocate_page().expect("alloc");
+    for i in 0..PREPOPULATE {
+        table.insert(page, BwKey(i), BwValue(i)).expect("insert");
+    }
+    // Collapse the prepopulate chain into a single Base delta.
+    let cfg = ConsolidationConfig::default();
+    let _ = table.consolidate_page(page, &cfg);
+    // Short realistic post-consolidation delta chain on top of the base.
+    for i in 0..8u64 {
+        table
+            .insert(page, BwKey(i * 1000), BwValue(i * 1000 + 7))
+            .expect("post insert");
+        table
+            .delete(page, BwKey(i * 1000 + 1))
+            .expect("post delete");
+    }
+    (table, page)
+}
+
+fn bench_point_lookup_ab(c: &mut Criterion) {
+    let mut group = c.benchmark_group("point_lookup");
+    group.sample_size(50);
+
+    let (table, page) = build_chained_page();
+    // Spread of probe keys: base hits, deleted keys, and chain-shadowed keys.
+    let probes: Vec<BwKey> = (0..64u64).map(|i| BwKey(i * 157 % PREPOPULATE)).collect();
+
+    group.bench_function("old_materialize_then_get", |b| {
+        b.iter(|| {
+            let mut sum = 0u64;
+            for &key in &probes {
+                let state = table.materialize_page(page).expect("materialize");
+                if let Some(v) = state.get(&key) {
+                    sum = sum.wrapping_add(v.0);
+                }
+            }
+            std::hint::black_box(sum)
+        });
+    });
+
+    group.bench_function("new_direct_lookup", |b| {
+        b.iter(|| {
+            let mut sum = 0u64;
+            for &key in &probes {
+                if let Some(v) = table.lookup(page, key).expect("lookup") {
+                    sum = sum.wrapping_add(v.0);
+                }
+            }
+            std::hint::black_box(sum)
+        });
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_read_heavy,
     bench_write_heavy,
     bench_mixed,
     bench_consolidation_overhead,
+    bench_point_lookup_ab,
 );
 criterion_main!(benches);

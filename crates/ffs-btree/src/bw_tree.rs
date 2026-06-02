@@ -329,8 +329,16 @@ impl MappingTable {
     }
 
     pub fn lookup(&self, page_id: PageId, key: BwKey) -> Result<Option<BwValue>> {
-        let state = self.materialize_page(page_id)?;
-        Ok(state.get(&key).copied())
+        let snapshot = self.get_page(page_id)?;
+        let (value, chain_len) = lookup_from_head(&snapshot.head, key)?;
+        debug!(
+            target: "ffs::bwtree",
+            event = "bw_lookup_chain_stats",
+            page_id = page_id.0,
+            chain_len,
+            epoch = snapshot.epoch
+        );
+        Ok(value)
     }
 
     pub fn materialize_page(&self, page_id: PageId) -> Result<BTreeMap<BwKey, BwValue>> {
@@ -657,6 +665,57 @@ fn materialize_from_head(head: &Arc<PageDelta>) -> Result<(BTreeMap<BwKey, BwVal
             }
             PageDelta::Merge { next, .. } => {
                 cursor = Arc::clone(next);
+            }
+        }
+    }
+}
+
+fn lookup_from_head(head: &Arc<PageDelta>, key: BwKey) -> Result<(Option<BwValue>, usize)> {
+    let mut cursor = head.as_ref();
+    let mut chain_len = 0_usize;
+
+    loop {
+        chain_len = chain_len.saturating_add(1);
+        if chain_len > MAX_CHAIN_WALK {
+            return Err(FfsError::Corruption {
+                block: 0,
+                detail: format!(
+                    "bw-tree delta chain exceeded walk limit ({MAX_CHAIN_WALK}) without base page"
+                ),
+            });
+        }
+
+        match cursor {
+            PageDelta::Base { entries } => return Ok((entries.get(&key).copied(), chain_len)),
+            PageDelta::Insert {
+                key: delta_key,
+                value,
+                next,
+            } => {
+                if *delta_key == key {
+                    return Ok((Some(*value), chain_len));
+                }
+                cursor = next.as_ref();
+            }
+            PageDelta::Delete {
+                key: delta_key,
+                next,
+            } => {
+                if *delta_key == key {
+                    return Ok((None, chain_len));
+                }
+                cursor = next.as_ref();
+            }
+            PageDelta::Split {
+                separator, next, ..
+            } => {
+                if key >= *separator {
+                    return Ok((None, chain_len));
+                }
+                cursor = next.as_ref();
+            }
+            PageDelta::Merge { next, .. } => {
+                cursor = next.as_ref();
             }
         }
     }
@@ -1754,6 +1813,114 @@ mod tests {
             assert!(
                 !main_state.contains_key(&BwKey(i)),
                 "key {i} should be split away from main page"
+            );
+        }
+        for i in 1..=10 {
+            assert_eq!(
+                table.lookup(page, BwKey(i)).expect("lookup after split"),
+                main_state.get(&BwKey(i)).copied(),
+                "lookup should match materialized split state for key {i}"
+            );
+        }
+
+        table
+            .insert(page, BwKey(7), BwValue(7000))
+            .expect("newer insert after split");
+        table
+            .delete(page, BwKey(5))
+            .expect("newer delete after split");
+
+        let shadowed_state = table
+            .materialize_page(page)
+            .expect("materialize shadowed split state");
+        for i in 1..=10 {
+            assert_eq!(
+                table
+                    .lookup(page, BwKey(i))
+                    .expect("lookup after split shadowing"),
+                shadowed_state.get(&BwKey(i)).copied(),
+                "lookup should match materialized split-shadow state for key {i}"
+            );
+        }
+    }
+
+    #[test]
+    fn direct_lookup_matches_materialized_state_for_golden_trace() {
+        let table = MappingTable::with_capacity(4);
+        let page = table.allocate_page().expect("alloc");
+        let sibling = table.allocate_page().expect("alloc sibling");
+
+        for i in 1..=12 {
+            table
+                .insert(page, BwKey(i), BwValue(i * 100))
+                .expect("seed insert");
+        }
+        table
+            .insert(page, BwKey(3), BwValue(3333))
+            .expect("overwrite before split");
+        table
+            .insert(page, BwKey(9), BwValue(9999))
+            .expect("overwrite split-tail key before split");
+        table.delete(page, BwKey(2)).expect("delete before split");
+        table
+            .append_split_delta(page, BwKey(8), sibling)
+            .expect("split");
+        table
+            .insert(page, BwKey(9), BwValue(9000))
+            .expect("newer insert shadows split");
+        table
+            .delete(page, BwKey(6))
+            .expect("newer delete shadows base");
+        table.append_merge_delta(page, sibling).expect("merge");
+        table
+            .insert(page, BwKey(7), BwValue(7000))
+            .expect("newer insert under split separator");
+        table
+            .delete(page, BwKey(9))
+            .expect("newer delete shadows post-split insert");
+
+        let materialized = table.materialize_page(page).expect("materialize");
+        for key in 0..=13 {
+            let lookup = table.lookup(page, BwKey(key)).expect("lookup");
+            let expected = materialized.get(&BwKey(key)).copied();
+            assert_eq!(
+                lookup, expected,
+                "direct lookup should match materialized state for key {key}"
+            );
+            let rendered = lookup.map_or_else(|| String::from("-"), |value| value.0.to_string());
+            println!("BWTREE_GOLDEN\t{key}\t{rendered}");
+        }
+    }
+
+    #[test]
+    fn bwtree_lookup_golden_report() {
+        let table = MappingTable::with_capacity(4);
+        let page = table.allocate_page().expect("alloc");
+        let sibling = table.allocate_page().expect("alloc sibling");
+
+        for (key, value) in [(1, 10), (2, 20), (3, 30), (4, 40), (5, 50)] {
+            table
+                .insert(page, BwKey(key), BwValue(value))
+                .expect("insert");
+        }
+        table.delete(page, BwKey(2)).expect("delete");
+        table
+            .append_split_delta(page, BwKey(4), sibling)
+            .expect("split");
+        table
+            .insert(page, BwKey(5), BwValue(500))
+            .expect("newer insert");
+
+        let materialized = table.materialize_page(page).expect("materialize");
+        for key in [1, 2, 3, 4, 5, 6] {
+            let key = BwKey(key);
+            let lookup = table.lookup(page, key).expect("lookup");
+            let expected = materialized.get(&key).copied();
+            assert_eq!(lookup, expected);
+            println!(
+                "BWTREE_LOOKUP_GOLDEN\t{}\t{}",
+                key.0,
+                lookup.map_or_else(|| "None".to_owned(), |value| value.0.to_string())
             );
         }
     }
