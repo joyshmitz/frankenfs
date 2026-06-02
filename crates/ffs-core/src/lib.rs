@@ -775,6 +775,11 @@ pub struct OpenFs {
     /// Protected by a Mutex since write operations need exclusive access.
     /// `None` for btrfs or when opened in read-only mode.
     ext4_alloc_state: Option<Mutex<Ext4AllocState>>,
+    /// Read-only ext4 group descriptor cache.
+    ///
+    /// The writable path bypasses this cache because group descriptor counters
+    /// can change during allocation/free operations.
+    ext4_group_desc_cache: Mutex<BTreeMap<GroupNumber, Ext4GroupDesc>>,
     /// Mutable btrfs allocation state (COW FS tree, extent allocator).
     ///
     /// Protected by a Mutex since write operations need exclusive access.
@@ -2625,6 +2630,7 @@ impl OpenFs {
             mvcc_store,
             jbd2_writer: None,
             ext4_alloc_state: None,
+            ext4_group_desc_cache: Mutex::new(BTreeMap::new()),
             btrfs_alloc_state: None,
             extent_cache: ffs_extent::ExtentCache::new(),
             repair_flush_lifecycle: None,
@@ -6377,6 +6383,28 @@ impl OpenFs {
         self.with_latest_scope(|scope| self.read_group_desc_with_scope(cx, scope, group))
     }
 
+    fn can_cache_ext4_group_desc(&self, scope: &RequestScope, block: BlockNumber) -> bool {
+        if self.is_writable() {
+            return false;
+        }
+        if scope
+            .tx
+            .as_ref()
+            .and_then(|tx| tx.staged_write(block))
+            .is_some()
+        {
+            return false;
+        }
+        if let Some(snapshot) = scope.snapshot {
+            return self
+                .mvcc_store
+                .read()
+                .read_visible(block, snapshot)
+                .is_none();
+        }
+        true
+    }
+
     pub fn read_group_desc_with_scope(
         &self,
         cx: &Cx,
@@ -6399,6 +6427,14 @@ impl OpenFs {
             )
         })?;
         let desc_len = usize::from(desc_size);
+
+        let cacheable = self.can_cache_ext4_group_desc(scope, block_num);
+        if cacheable {
+            let cached = self.ext4_group_desc_cache.lock().get(&group).cloned();
+            if let Some(cached) = cached {
+                return Ok(cached);
+            }
+        }
 
         let block_data = self.read_block_with_scope(cx, scope, block_num)?;
         if offset_in_block + desc_len > block_data.len() {
@@ -6425,7 +6461,14 @@ impl OpenFs {
             }
         }
 
-        Ext4GroupDesc::parse_from_bytes(buf, desc_size).map_err(|e| parse_to_ffs_error(&e))
+        let desc =
+            Ext4GroupDesc::parse_from_bytes(buf, desc_size).map_err(|e| parse_to_ffs_error(&e))?;
+        if cacheable {
+            self.ext4_group_desc_cache
+                .lock()
+                .insert(group, desc.clone());
+        }
+        Ok(desc)
     }
 
     /// Read an ext4 inode by number via the device, respecting MVCC isolation.
@@ -23968,6 +24011,7 @@ mod tests {
     use serde_json::Value;
     use std::io::{self, Write};
     use std::os::unix::ffi::OsStrExt;
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
     use std::sync::{Arc, Mutex};
     use tracing_subscriber::fmt::MakeWriter;
 
@@ -24036,6 +24080,57 @@ mod tests {
 
         fn sync(&self, _cx: &Cx) -> ffs_error::Result<()> {
             Ok(())
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    struct CountingDevice {
+        inner: TestDevice,
+        counted_offset: ByteOffset,
+        read_count: Arc<AtomicUsize>,
+    }
+
+    impl CountingDevice {
+        fn new(inner: TestDevice, counted_offset: ByteOffset) -> Self {
+            Self {
+                inner,
+                counted_offset,
+                read_count: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+
+        fn reset_count(&self) {
+            self.read_count.store(0, AtomicOrdering::SeqCst);
+        }
+
+        fn read_count(&self) -> usize {
+            self.read_count.load(AtomicOrdering::SeqCst)
+        }
+    }
+
+    impl ByteDevice for CountingDevice {
+        fn len_bytes(&self) -> u64 {
+            self.inner.len_bytes()
+        }
+
+        fn read_exact_at(
+            &self,
+            cx: &Cx,
+            offset: ByteOffset,
+            buf: &mut [u8],
+        ) -> ffs_error::Result<()> {
+            if offset == self.counted_offset {
+                self.read_count.fetch_add(1, AtomicOrdering::SeqCst);
+            }
+            self.inner.read_exact_at(cx, offset, buf)
+        }
+
+        fn write_all_at(&self, cx: &Cx, offset: ByteOffset, buf: &[u8]) -> ffs_error::Result<()> {
+            self.inner.write_all_at(cx, offset, buf)
+        }
+
+        fn sync(&self, cx: &Cx) -> ffs_error::Result<()> {
+            self.inner.sync(cx)
         }
     }
 
@@ -27450,6 +27545,29 @@ mod tests {
         assert_eq!(gd.block_bitmap, 2);
         assert_eq!(gd.inode_bitmap, 3);
         assert_eq!(gd.inode_table, 4);
+    }
+
+    #[test]
+    fn read_group_desc_cache_hits_in_read_only_mode() {
+        let image = build_ext4_image_with_inode();
+        let dev = CountingDevice::new(TestDevice::from_vec(image), ByteOffset(4096));
+        let cx = Cx::for_testing();
+
+        let fs = OpenFs::from_device(&cx, Box::new(dev.clone()), &OpenOptions::default()).unwrap();
+        dev.reset_count();
+
+        let first = fs.read_group_desc(&cx, GroupNumber(0)).unwrap();
+        let second = fs.read_group_desc(&cx, GroupNumber(0)).unwrap();
+
+        assert_eq!(first, second);
+        assert_eq!(first.block_bitmap, 2);
+        assert_eq!(first.inode_bitmap, 3);
+        assert_eq!(first.inode_table, 4);
+        assert_eq!(
+            dev.read_count(),
+            1,
+            "the read-only cache should suppress the second descriptor-block read"
+        );
     }
 
     #[test]
