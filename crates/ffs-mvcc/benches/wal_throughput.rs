@@ -1471,8 +1471,63 @@ fn bench_truncate_wal_throughput(c: &mut Criterion) {
     });
 }
 
+/// Long-lived reader resolving a hot block whose version chain has grown deep.
+///
+/// Models the `run_long_running_reader_pinning` access pattern at read latency:
+/// a write-heavy workload grows a block's chain while an old reader keeps GC
+/// pinned, then that reader repeatedly resolves the version visible at its old
+/// snapshot. `read_visible` must locate the newest version at or before the
+/// reader's snapshot. Two access shapes are measured per depth:
+/// - `old_snap`: read at an old snapshot (the long-lived-reader pathology).
+/// - `latest`: read at the newest snapshot (the common case; must not regress).
+fn bench_read_visible_deep_chain(c: &mut Criterion) {
+    let block = BlockNumber(0);
+
+    for &depth in &[256_u64, 4096_u64] {
+        // No dedup / no chain cap so the chain actually grows to `depth`
+        // (mirrors `run_long_running_reader_pinning`'s policy). Each version
+        // carries distinct bytes so identical-write dedup cannot collapse it.
+        let mut store = MvccStore::with_compression_policy(CompressionPolicy {
+            dedup_identical: false,
+            max_chain_length: None,
+            algo: CompressionAlgo::None,
+        });
+        let mut old_snapshot = None;
+        for v in 0..depth {
+            let mut data = vec![0xCD_u8; 256];
+            data[0..8].copy_from_slice(&v.to_le_bytes());
+            let mut txn = store.begin();
+            txn.stage_write(block, data);
+            store.commit(txn).expect("commit");
+            if v == 1 {
+                old_snapshot = Some(store.current_snapshot());
+            }
+        }
+        let old_snapshot = old_snapshot.expect("snapshot captured");
+        let latest = store.current_snapshot();
+
+        c.bench_function(
+            &format!("read_visible_deep_chain_old_snap_depth{depth}"),
+            |b| {
+                b.iter(|| {
+                    black_box(store.read_visible(black_box(block), black_box(old_snapshot)));
+                });
+            },
+        );
+        c.bench_function(
+            &format!("read_visible_deep_chain_latest_depth{depth}"),
+            |b| {
+                b.iter(|| {
+                    black_box(store.read_visible(black_box(block), black_box(latest)));
+                });
+            },
+        );
+    }
+}
+
 criterion_group!(
     wal_benches,
+    bench_read_visible_deep_chain,
     bench_wal_commit_throughput,
     bench_ssi_overhead,
     bench_ebr_memory_report,

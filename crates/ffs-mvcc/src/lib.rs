@@ -302,13 +302,37 @@ fn ranges_are_pairwise_disjoint(touched_ranges: &[MergeByteRange]) -> bool {
     })
 }
 
+/// Index of the newest version with `commit_seq <= visible_high`, or `None` if
+/// no version is visible at that snapshot.
+///
+/// Version chains are maintained in ascending `commit_seq` order (commits append
+/// monotonically increasing sequences and pruning only trims the front), so
+/// `commit_seq <= visible_high` is monotonic across the slice. This checks the
+/// newest version first — O(1) for the common case of a reader at or near the
+/// latest snapshot, identical to the prior reverse scan's best case — and
+/// otherwise binary-searches in O(log n) instead of the previous O(n) reverse
+/// linear scan. The returned index is identical to
+/// `versions.iter().rposition(|v| v.commit_seq <= visible_high)` for any
+/// ascending-ordered chain.
+#[inline]
+pub(crate) fn newest_visible_index(
+    versions: &[BlockVersion],
+    visible_high: CommitSeq,
+) -> Option<usize> {
+    let last = versions.len().checked_sub(1)?;
+    if versions[last].commit_seq <= visible_high {
+        return Some(last);
+    }
+    versions
+        .partition_point(|version| version.commit_seq <= visible_high)
+        .checked_sub(1)
+}
+
 pub(crate) fn resolve_version_bytes_at_or_before(
     versions: &[BlockVersion],
     visible_high: CommitSeq,
 ) -> Option<Vec<u8>> {
-    let idx = versions
-        .iter()
-        .rposition(|version| version.commit_seq <= visible_high)?;
+    let idx = newest_visible_index(versions, visible_high)?;
     compression::resolve_data_with(versions, idx, |version| &version.data)
         .map(std::borrow::Cow::into_owned)
 }
@@ -2817,9 +2841,7 @@ impl MvccStore {
         snapshot: Snapshot,
     ) -> Option<std::borrow::Cow<'_, [u8]>> {
         self.versions.get(&block).and_then(|versions| {
-            let idx = versions
-                .iter()
-                .rposition(|v| v.commit_seq <= snapshot.high)?;
+            let idx = newest_visible_index(versions, snapshot.high)?;
             compression::resolve_data_with(versions, idx, |v| &v.data)
         })
     }
