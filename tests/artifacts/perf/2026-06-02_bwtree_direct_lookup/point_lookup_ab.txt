@@ -1,0 +1,13 @@
+Benchmarking point_lookup/old_materialize_then_get
+Benchmarking point_lookup/old_materialize_then_get: Warming up for 1.0000 s
+Benchmarking point_lookup/old_materialize_then_get: Collecting 50 samples in estimated 3.2356 s (300 iterations)
+Benchmarking point_lookup/old_materialize_then_get: Analyzing
+point_lookup/old_materialize_then_get
+                        time:   [10.712 ms 11.017 ms 11.340 ms]
+Found 3 outliers among 50 measurements (6.00%)
+Benchmarking point_lookup/new_direct_lookup
+Benchmarking point_lookup/new_direct_lookup: Warming up for 1.0000 s
+Benchmarking point_lookup/new_direct_lookup: Collecting 50 samples in estimated 3.0063 s (347k iterations)
+Benchmarking point_lookup/new_direct_lookup: Analyzing
+point_lookup/new_direct_lookup
+                        time:   [8.7030 µs 8.8538 µs 9.0118 µs]
