@@ -37831,6 +37831,45 @@ mod tests {
     }
 
     #[test]
+    fn write_symlink_readlink_slow_path_ext4() {
+        // A target longer than the inline capacity forces the SLOW symlink path:
+        // the target is written to a data block and read back via read_file_data
+        // (read_symlink's `inode.size`-bounded slow branch + NUL trim). The
+        // existing roundtrip only exercises the fast/inline path.
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        let long_target = "/".to_string() + &"abcdefghijklmnopqrst/".repeat(6) + "final";
+        assert!(
+            long_target.len() > ffs_types::EXT4_FAST_SYMLINK_MAX,
+            "target must exceed inline capacity ({} bytes) to hit the slow path",
+            ffs_types::EXT4_FAST_SYMLINK_MAX
+        );
+
+        let attr = fs
+            .symlink(
+                &cx,
+                root,
+                OsStr::new("slow_sym"),
+                Path::new(&long_target),
+                0,
+                0,
+            )
+            .expect("slow symlink create");
+        assert_eq!(attr.kind, FileType::Symlink);
+
+        let read_back = fs.readlink(&cx, attr.ino).expect("readlink slow");
+        assert_eq!(
+            read_back,
+            long_target.as_bytes(),
+            "slow symlink target must round-trip byte-identically"
+        );
+    }
+
+    #[test]
     fn write_symlink_readlink_rejects_encrypted_targets() {
         let Some(fs) = open_writable_ext4() else {
             return;
