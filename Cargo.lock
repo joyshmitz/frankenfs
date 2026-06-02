@@ -953,6 +953,7 @@ name = "ffs-ondisk"
 version = "0.1.0"
 dependencies = [
  "crc32c",
+ "criterion",
  "ffs-types",
  "proptest",
  "serde",

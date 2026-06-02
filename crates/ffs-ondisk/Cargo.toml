@@ -12,7 +12,12 @@ crc32c = { workspace = true }
 serde = { workspace = true }
 
 [dev-dependencies]
+criterion = { workspace = true }
 proptest = { workspace = true }
+
+[[bench]]
+name = "casefold_key"
+harness = false
 
 [lints]
 workspace = true

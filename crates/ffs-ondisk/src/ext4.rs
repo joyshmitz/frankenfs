@@ -3551,6 +3551,12 @@ pub fn ext4_casefold_name_diagnostics(name: &[u8]) -> Ext4CasefoldNameDiagnostic
 /// casefold directories rely on for stable case-insensitive lookup. Non-UTF-8
 /// filenames are compared byte-by-byte with ASCII case folding only.
 fn casefold_name(name: &[u8]) -> Vec<u8> {
+    if name.is_ascii() {
+        let mut folded = name.to_vec();
+        folded.make_ascii_lowercase();
+        return folded;
+    }
+
     std::str::from_utf8(name).map_or_else(
         |_| {
             // Non-UTF-8: ASCII case fold only.
@@ -7860,6 +7866,19 @@ mod tests {
             b"strasse.TXT",
         ));
         assert!(!ext4_casefold_names_collide(b"strasse-a", b"strasse-b"));
+    }
+
+    #[test]
+    fn ext4_casefold_key_ascii_lowercases_bytes() {
+        assert_eq!(ext4_casefold_key(b"README.md"), b"readme.md");
+        assert_eq!(
+            ext4_casefold_key(b"DOCUMENTATION_AND_NOTES.txt"),
+            b"documentation_and_notes.txt"
+        );
+        assert_eq!(
+            ext4_casefold_key(b"some_quite_long_filename_with_many_characters_to_exercise.dat"),
+            b"some_quite_long_filename_with_many_characters_to_exercise.dat"
+        );
     }
 
     #[test]
