@@ -124,6 +124,59 @@ fn bench_build(c: &mut Criterion) {
     });
 }
 
+/// Pre-optimization byte-at-a-time find-free scan (the shape `bitmap_find_free`
+/// had before the word-at-a-time fast path). Kept here only to A/B the lever in
+/// one binary on one CPU (so the ratio is valid despite rch worker variance).
+fn find_free_byte_scan(bitmap: &[u8], count: u32, start: u32) -> Option<u32> {
+    fn range(bitmap: &[u8], mut idx: u32, end: u32) -> Option<u32> {
+        while idx < end && idx % 8 != 0 {
+            let &byte = bitmap.get((idx / 8) as usize)?;
+            if (byte >> (idx % 8)) & 1 == 0 {
+                return Some(idx);
+            }
+            idx += 1;
+        }
+        while end.saturating_sub(idx) >= 8 {
+            let &byte = bitmap.get((idx / 8) as usize)?;
+            if byte != 0xFF {
+                return Some(idx + (!byte).trailing_zeros());
+            }
+            idx += 8;
+        }
+        while idx < end {
+            let &byte = bitmap.get((idx / 8) as usize)?;
+            if (byte >> (idx % 8)) & 1 == 0 {
+                return Some(idx);
+            }
+            idx += 1;
+        }
+        None
+    }
+    let start = start.min(count);
+    range(bitmap, start, count).or_else(|| range(bitmap, 0, start))
+}
+
+/// A/B the word-at-a-time lever against the old byte scan over a fully
+/// allocated (all-0xFF) 4 KiB block bitmap — the worst case that forces a full
+/// scan to the end (returns None). Both run in this one binary on one CPU.
+fn bench_find_free_full_scan_word_vs_byte(c: &mut Criterion) {
+    let bm = vec![0xFF_u8; 4096]; // 32768 bits, no free bit → full scan
+    debug_assert_eq!(
+        find_free_byte_scan(&bm, 32768, 0),
+        bitmap_find_free(&bm, 32768, 0),
+        "byte and word scans must agree"
+    );
+
+    let mut group = c.benchmark_group("find_free_full_scan");
+    group.bench_function("byte_at_a_time", |b| {
+        b.iter(|| black_box(find_free_byte_scan(black_box(&bm), 32768, 0)));
+    });
+    group.bench_function("word_at_a_time", |b| {
+        b.iter(|| black_box(bitmap_find_free(black_box(&bm), 32768, 0)));
+    });
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_count_free,
@@ -133,5 +186,6 @@ criterion_group!(
     bench_rank,
     bench_select,
     bench_build,
+    bench_find_free_full_scan_word_vs_byte,
 );
 criterion_main!(benches);

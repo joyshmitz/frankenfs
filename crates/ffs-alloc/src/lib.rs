@@ -168,6 +168,23 @@ fn bitmap_find_free_range(bitmap: &[u8], mut idx: u32, end: u32) -> Option<u32> 
         idx += 1;
     }
 
+    // Word-at-a-time fast path: scan 64 bits per iteration. `idx` is byte-
+    // aligned here (the leading loop advanced to a byte boundary), so the 8
+    // bytes at `idx / 8` cover bits [idx, idx + 64). `(!word).trailing_zeros()`
+    // is the first free (zero) bit relative to `idx` — bit-identical to the
+    // byte loop below, just 8× fewer iterations on a full bitmap scan.
+    while end.saturating_sub(idx) >= 64 {
+        let byte_idx = (idx / 8) as usize;
+        let chunk = bitmap.get(byte_idx..byte_idx + 8)?;
+        let word = u64::from_le_bytes([
+            chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
+        ]);
+        if word != u64::MAX {
+            return Some(idx + (!word).trailing_zeros());
+        }
+        idx += 64;
+    }
+
     while end.saturating_sub(idx) >= 8 {
         let byte_idx = (idx / 8) as usize;
         let &byte = bitmap.get(byte_idx)?;
