@@ -800,7 +800,13 @@ fn fixture_provenance_sections(markdown: &str) -> Vec<FixtureProvenanceSection<'
     for line in markdown.lines() {
         if let Some(header) = line.strip_prefix("## ") {
             push_fixture_provenance_section(&mut sections, current.take());
-            in_fixture_block = matches!(header.trim(), "ext4 Fixtures" | "btrfs Fixtures");
+            in_fixture_block = matches!(
+                header.trim(),
+                "ext4 Fixtures"
+                    | "btrfs Fixtures"
+                    | "NUMA Allocation Fixtures"
+                    | "Runtime Console Fixtures"
+            );
             continue;
         }
 
@@ -5745,12 +5751,13 @@ fn validate_checksum_manifest_artifacts(
         );
     }
 
-    let actual_artifacts = fs::read_dir(artifacts_dir)
-        .unwrap_or_else(|e| panic!("read {}: {e}", artifacts_dir.display()))
-        .filter_map(Result::ok)
-        .filter(|e| has_tracked_extension(&e.path(), tracked_extensions))
-        .map(|e| e.file_name().to_string_lossy().to_string())
-        .collect::<Vec<_>>();
+    let mut actual_artifacts = Vec::new();
+    collect_tracked_artifacts(
+        artifacts_dir,
+        artifacts_dir,
+        tracked_extensions,
+        &mut actual_artifacts,
+    );
 
     for artifact_file in &actual_artifacts {
         assert!(
@@ -5758,6 +5765,35 @@ fn validate_checksum_manifest_artifacts(
             "{artifact_kind} {artifact_file} exists but is not listed in {}",
             manifest_path.display()
         );
+    }
+}
+
+/// Recursively collect tracked artifact files under `dir`, naming each by its
+/// path relative to `base` with `/` separators so the name matches the
+/// committed checksum manifest (which lists nested fixtures by path-relative
+/// name; see bd-3vink). Subdirectories are descended into; non-tracked files
+/// (e.g. the manifest itself) are skipped.
+fn collect_tracked_artifacts(
+    dir: &Path,
+    base: &Path,
+    tracked_extensions: &[&str],
+    out: &mut Vec<String>,
+) {
+    let entries = fs::read_dir(dir).unwrap_or_else(|e| panic!("read {}: {e}", dir.display()));
+    for entry in entries {
+        let path = entry
+            .unwrap_or_else(|e| panic!("read dir entry in {}: {e}", dir.display()))
+            .path();
+        if path.is_dir() {
+            collect_tracked_artifacts(&path, base, tracked_extensions, out);
+        } else if has_tracked_extension(&path, tracked_extensions) {
+            let relative = path
+                .strip_prefix(base)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            out.push(relative);
+        }
     }
 }
 
@@ -5821,15 +5857,11 @@ fn checksum_manifest_negative_cases_fail_closed() {
     );
     assert_panics_with(
         checksum_manifest_rejects_parent_directory_escape,
-        "top-level relative artifact path",
+        "relative artifact path without absolute or parent-directory components",
     );
     assert_panics_with(
         checksum_manifest_rejects_absolute_paths,
-        "top-level relative artifact path",
-    );
-    assert_panics_with(
-        checksum_manifest_rejects_nested_paths,
-        "top-level relative artifact path",
+        "relative artifact path without absolute or parent-directory components",
     );
 }
 
@@ -5906,7 +5938,7 @@ fn checksum_manifest_rejects_duplicate_entries() {
 }
 
 #[test]
-#[should_panic(expected = "top-level relative artifact path")]
+#[should_panic(expected = "relative artifact path without absolute or parent-directory components")]
 fn checksum_manifest_rejects_parent_directory_escape() {
     let tmp = tempfile::TempDir::new().expect("tmpdir for path escape manifest test");
     let manifest = tmp.path().join("checksums.sha256");
@@ -5917,7 +5949,7 @@ fn checksum_manifest_rejects_parent_directory_escape() {
 }
 
 #[test]
-#[should_panic(expected = "top-level relative artifact path")]
+#[should_panic(expected = "relative artifact path without absolute or parent-directory components")]
 fn checksum_manifest_rejects_absolute_paths() {
     let tmp = tempfile::TempDir::new().expect("tmpdir for absolute path manifest test");
     let manifest = tmp.path().join("checksums.sha256");
@@ -5928,15 +5960,22 @@ fn checksum_manifest_rejects_absolute_paths() {
 }
 
 #[test]
-#[should_panic(expected = "top-level relative artifact path")]
-fn checksum_manifest_rejects_nested_paths() {
+fn checksum_manifest_accepts_nested_paths() {
+    // Nested relative paths are legitimate — fixtures live in subdirectories
+    // such as conformance/fixtures/numa_allocation_placement/ (bd-3vink). The
+    // manifest must track them by their path-relative name.
     let tmp = tempfile::TempDir::new().expect("tmpdir for nested path manifest test");
     let manifest = tmp.path().join("checksums.sha256");
     let digest = sha256_hex(b"{}");
     fs::write(&manifest, format!("{digest}  nested/listed.json\n"))
         .expect("write checksum manifest");
 
-    parse_checksum_inventory(&manifest);
+    let inventory = parse_checksum_inventory(&manifest);
+    assert_eq!(
+        inventory.get("nested/listed.json").map(String::as_str),
+        Some(digest.as_str()),
+        "nested manifest entry should parse to its path-relative name"
+    );
 }
 
 /// CI gate: verify that every fixture listed in checksums.sha256 exists,
@@ -6182,7 +6221,7 @@ fn parse_checksum_inventory_line(line: &str) -> (&str, &str) {
     );
     assert!(
         valid_checksum_manifest_filename(file_name),
-        "checksum line file name must be a top-level relative artifact path: {line}"
+        "checksum line file name must be a relative artifact path without absolute or parent-directory components: {line}"
     );
     (digest, file_name)
 }
@@ -6197,11 +6236,14 @@ fn valid_checksum_digest(digest: &str) -> bool {
 
 fn valid_checksum_manifest_filename(file_name: &str) -> bool {
     let path = Path::new(file_name);
+    // Allow nested relative paths (e.g. `numa_allocation_placement/foo.json`) so
+    // the manifest can track fixtures in subdirectories (bd-3vink), while still
+    // rejecting absolute paths and `..`/`.` traversal — every component must be
+    // a plain `Normal` segment.
+    let mut components = path.components().peekable();
     !path.is_absolute()
-        && path
-            .components()
-            .all(|component| matches!(component, Component::Normal(_)))
-        && path.components().count() == 1
+        && components.peek().is_some()
+        && components.all(|component| matches!(component, Component::Normal(_)))
 }
 
 fn sorted_names(names: impl IntoIterator<Item = String>) -> Vec<String> {

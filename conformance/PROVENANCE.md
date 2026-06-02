@@ -107,6 +107,24 @@ All fixtures are hand-crafted JSON files that encode sparse binary data using th
 - **Description:** Device item for 1TB device with 512GB used
 - **Verification:** devid, total_bytes, bytes_used, sector_size, dev_group, seek_speed, bandwidth, uuid, and fsid verified
 
+## NUMA Allocation Fixtures
+
+### numa_allocation_placement*.json (8 variants)
+- **Created:** 2026-05-20
+- **Author:** Claude Opus 4.5
+- **Reference:** bd-53b28.4 NUMA allocation placement evidence contract; `ffs_alloc` NUMA topology consumers
+- **Description:** Synthetic NUMA allocation-placement evidence reports (balanced, cross-node fallback, preferred-node exhaustion, repair/scrub interference, skewed metadata hotshards, stale/unknown topology, swarm promotion) exercising the placement validator lane
+- **Verification:** schema_version, topology_source, group_node_map, and classification fields validated by the NUMA allocation placement validator
+
+## Runtime Console Fixtures
+
+### runtime_console*.json (7 variants)
+- **Created:** 2026-05-20
+- **Author:** Claude Opus 4.5
+- **Reference:** bd-wtyxs.3/.4 runtime console snapshot builder + non-permissioned validator lane
+- **Description:** Synthetic runtime-console snapshot reports (backpressure-critical, future/stale timestamp, malformed advisory promotion, managed clean shutdown, oversized capture, per-core skewed) exercising the console evidence validator
+- **Verification:** schema_version, runtime_mode, counters, and timestamp fields validated by the runtime console validator
+
 ## Golden Files
 
 Golden files in `conformance/golden/` are generated from real filesystem images:
