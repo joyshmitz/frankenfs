@@ -1296,7 +1296,7 @@ impl std::fmt::Debug for FuseInner {
 /// |-------------------------------|-------|-------------------|--------------------|
 /// | `acquire`                     | W     | W (sorted, after table dropped) | Condvar-wait on contention |
 /// | `try_acquire`                 | W     | W (sorted, short-circuit on contention) | Returns None on contention |
-/// | `FuseInodeGuard::Drop`        | W     | W (nested)        | Notifies, then evicts entry on strong_count==2 |
+/// | `FuseInodeGuard::Drop`        | W     | W (nested)        | Notifies, then drops one `users` ref and evicts at 0 |
 ///
 /// Acquiring a per-inode `held` lock BEFORE the table mutex (e.g., a
 /// hypothetical `release_without_table_check` that took held first
