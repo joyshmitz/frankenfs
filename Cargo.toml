@@ -80,7 +80,7 @@ zstd = "0.13.3"
 brotli = "8.0.2"
 flate2 = "1.1.9"
 lzokay-native = "0.1"
-nix = { version = "0.29", features = ["fs"] }
+nix = { version = "0.29", features = ["fs", "uio"] }
 
 # Sibling project dependencies (crates.io; local path overrides via [patch] if needed)
 asupersync = "0.3.1"

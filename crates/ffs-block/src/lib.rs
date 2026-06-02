@@ -16,11 +16,14 @@ use ffs_types::{
     BTRFS_SUPER_INFO_OFFSET, BTRFS_SUPER_INFO_SIZE, BlockNumber, ByteOffset, CommitSeq,
     EXT4_SUPERBLOCK_OFFSET, EXT4_SUPERBLOCK_SIZE, TxnId,
 };
+use nix::sys::uio::preadv;
 use parking_lot::{Condvar, Mutex};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs::File;
 use std::fs::OpenOptions;
+use std::io::{self, IoSliceMut};
+use std::os::fd::AsFd;
 use std::os::unix::fs::FileExt;
 use std::path::Path;
 use std::sync::Arc;
@@ -305,8 +308,38 @@ pub trait ByteDevice: Send + Sync {
     /// Total length in bytes.
     fn len_bytes(&self) -> u64;
 
+    /// Returns true when `read_vectored_exact_at` can collapse contiguous
+    /// buffers into fewer device I/O operations than scalar reads.
+    fn supports_vectored_reads(&self) -> bool {
+        false
+    }
+
     /// Read exactly `buf.len()` bytes from `offset` into `buf`.
     fn read_exact_at(&self, cx: &Cx, offset: ByteOffset, buf: &mut [u8]) -> Result<()>;
+
+    /// Read a contiguous byte range into multiple buffers.
+    ///
+    /// The default preserves scalar `read_exact_at` semantics. File-backed
+    /// implementations can override this with `preadv`-style I/O.
+    fn read_vectored_exact_at(
+        &self,
+        cx: &Cx,
+        offset: ByteOffset,
+        bufs: &mut [IoSliceMut<'_>],
+    ) -> Result<()> {
+        cx_checkpoint(cx)?;
+        let mut next_offset = offset.0;
+        for buf in bufs {
+            let len = u64::try_from(buf.len())
+                .map_err(|_| FfsError::Format("read length overflows u64".to_owned()))?;
+            self.read_exact_at(cx, ByteOffset(next_offset), buf)?;
+            next_offset = next_offset
+                .checked_add(len)
+                .ok_or_else(|| FfsError::Format("read range overflows u64".to_owned()))?;
+        }
+        cx_checkpoint(cx)?;
+        Ok(())
+    }
 
     /// Write all bytes in `buf` to `offset`.
     fn write_all_at(&self, cx: &Cx, offset: ByteOffset, buf: &[u8]) -> Result<()>;
@@ -358,6 +391,10 @@ impl ByteDevice for FileByteDevice {
         self.len
     }
 
+    fn supports_vectored_reads(&self) -> bool {
+        true
+    }
+
     fn read_exact_at(&self, cx: &Cx, offset: ByteOffset, buf: &mut [u8]) -> Result<()> {
         cx_checkpoint(cx)?;
         let end = offset
@@ -376,6 +413,63 @@ impl ByteDevice for FileByteDevice {
         }
 
         self.file.read_exact_at(buf, offset.0)?;
+        cx_checkpoint(cx)?;
+        Ok(())
+    }
+
+    fn read_vectored_exact_at(
+        &self,
+        cx: &Cx,
+        offset: ByteOffset,
+        bufs: &mut [IoSliceMut<'_>],
+    ) -> Result<()> {
+        cx_checkpoint(cx)?;
+        let total_len = bufs.iter().try_fold(0_usize, |total, buf| {
+            total
+                .checked_add(buf.len())
+                .ok_or_else(|| FfsError::Format("read length overflows usize".to_owned()))
+        })?;
+        let end = offset
+            .0
+            .checked_add(
+                u64::try_from(total_len)
+                    .map_err(|_| FfsError::Format("read length overflows u64".to_owned()))?,
+            )
+            .ok_or_else(|| FfsError::Format("read range overflows u64".to_owned()))?;
+        if end > self.len {
+            return Err(FfsError::Format(format!(
+                "read out of bounds: offset={offset} len={total_len} file_len={}",
+                self.len
+            )));
+        }
+
+        let mut total_read = 0_usize;
+        let mut remaining = bufs;
+        while !remaining.is_empty() {
+            let next_offset = offset
+                .0
+                .checked_add(
+                    u64::try_from(total_read)
+                        .map_err(|_| FfsError::Format("read length overflows u64".to_owned()))?,
+                )
+                .ok_or_else(|| FfsError::Format("read range overflows u64".to_owned()))?;
+            let next_offset = i64::try_from(next_offset)
+                .map_err(|_| FfsError::Format("read offset does not fit off_t".to_owned()))?;
+            let n = preadv(self.file.as_ref().as_fd(), remaining, next_offset)
+                .map_err(|errno| io::Error::from_raw_os_error(errno as i32))?;
+            if n == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "failed to fill whole buffer",
+                )
+                .into());
+            }
+            total_read = total_read
+                .checked_add(n)
+                .ok_or_else(|| FfsError::Format("read length overflows usize".to_owned()))?;
+            IoSliceMut::advance_slices(&mut remaining, n);
+        }
+
         cx_checkpoint(cx)?;
         Ok(())
     }
@@ -418,6 +512,35 @@ pub trait BlockDevice: Send + Sync {
     /// Read a block by number.
     fn read_block(&self, cx: &Cx, block: BlockNumber) -> Result<BlockBuf>;
 
+    /// Returns true when `read_contiguous_blocks` is expected to reduce device
+    /// I/O operations compared with scalar `read_block` calls.
+    fn supports_contiguous_reads(&self) -> bool {
+        false
+    }
+
+    /// Read a contiguous block range starting at `start` into `bufs`.
+    ///
+    /// Implementations may override this to collapse adjacent block reads into
+    /// one device I/O. The default preserves scalar `read_block` semantics.
+    fn read_contiguous_blocks(
+        &self,
+        cx: &Cx,
+        start: BlockNumber,
+        bufs: &mut [BlockBuf],
+    ) -> Result<()> {
+        cx_checkpoint(cx)?;
+        for (idx, buf) in bufs.iter_mut().enumerate() {
+            let delta = u64::try_from(idx)
+                .map_err(|_| FfsError::Format("block index does not fit u64".to_owned()))?;
+            let block = BlockNumber(start.0.checked_add(delta).ok_or_else(|| {
+                FfsError::Format("contiguous read block range overflow".to_owned())
+            })?);
+            *buf = self.read_block(cx, block)?;
+        }
+        cx_checkpoint(cx)?;
+        Ok(())
+    }
+
     /// Write a block by number. `data.len()` MUST equal `block_size()`.
     fn write_block(&self, cx: &Cx, block: BlockNumber, data: &[u8]) -> Result<()>;
 
@@ -434,6 +557,19 @@ pub trait BlockDevice: Send + Sync {
 impl<D: BlockDevice + ?Sized> BlockDevice for Arc<D> {
     fn read_block(&self, cx: &Cx, block: BlockNumber) -> Result<BlockBuf> {
         (**self).read_block(cx, block)
+    }
+
+    fn supports_contiguous_reads(&self) -> bool {
+        (**self).supports_contiguous_reads()
+    }
+
+    fn read_contiguous_blocks(
+        &self,
+        cx: &Cx,
+        start: BlockNumber,
+        bufs: &mut [BlockBuf],
+    ) -> Result<()> {
+        (**self).read_contiguous_blocks(cx, start, bufs)
     }
 
     fn write_block(&self, cx: &Cx, block: BlockNumber, data: &[u8]) -> Result<()> {
@@ -647,6 +783,54 @@ impl<D: ByteDevice> BlockDevice for ByteBlockDevice<D> {
             .read_exact_at(cx, ByteOffset(offset), buf.make_mut())?;
         cx_checkpoint(cx)?;
         Ok(buf)
+    }
+
+    fn supports_contiguous_reads(&self) -> bool {
+        self.inner.supports_vectored_reads()
+    }
+
+    fn read_contiguous_blocks(
+        &self,
+        cx: &Cx,
+        start: BlockNumber,
+        bufs: &mut [BlockBuf],
+    ) -> Result<()> {
+        cx_checkpoint(cx)?;
+        if bufs.is_empty() {
+            return Ok(());
+        }
+
+        let count = u64::try_from(bufs.len())
+            .map_err(|_| FfsError::Format("block count does not fit u64".to_owned()))?;
+        let end = start
+            .0
+            .checked_add(count)
+            .ok_or_else(|| FfsError::Format("block range overflow".to_owned()))?;
+        if end > self.block_count {
+            return Err(FfsError::Format(format!(
+                "block range out of range: start={} count={} block_count={}",
+                start.0, count, self.block_count
+            )));
+        }
+
+        let block_size = usize::try_from(self.block_size)
+            .map_err(|_| FfsError::Format("block_size does not fit usize".to_owned()))?;
+        let offset = start
+            .0
+            .checked_mul(u64::from(self.block_size))
+            .ok_or_else(|| FfsError::Format("block offset overflow".to_owned()))?;
+
+        for buf in bufs.iter_mut() {
+            *buf = BlockBuf::zeroed(block_size);
+        }
+        let mut slices: Vec<IoSliceMut<'_>> = bufs
+            .iter_mut()
+            .map(|buf| IoSliceMut::new(buf.make_mut()))
+            .collect();
+        self.inner
+            .read_vectored_exact_at(cx, ByteOffset(offset), &mut slices)?;
+        cx_checkpoint(cx)?;
+        Ok(())
     }
 
     fn write_block(&self, cx: &Cx, block: BlockNumber, data: &[u8]) -> Result<()> {
@@ -4916,13 +5100,19 @@ mod tests {
     #[derive(Debug)]
     struct MemoryByteDevice {
         bytes: Mutex<Vec<u8>>,
+        read_count: AtomicUsize,
     }
 
     impl MemoryByteDevice {
         fn new(len: usize) -> Self {
             Self {
                 bytes: Mutex::new(vec![0_u8; len]),
+                read_count: AtomicUsize::new(0),
             }
+        }
+
+        fn read_count(&self) -> usize {
+            self.read_count.load(Ordering::Relaxed)
         }
     }
 
@@ -4932,6 +5122,7 @@ mod tests {
         }
 
         fn read_exact_at(&self, _cx: &Cx, offset: ByteOffset, buf: &mut [u8]) -> Result<()> {
+            self.read_count.fetch_add(1, Ordering::Relaxed);
             let offset = usize::try_from(offset.0)
                 .map_err(|_| FfsError::Format("offset overflow".into()))?;
             let end = offset
@@ -4942,6 +5133,30 @@ mod tests {
                 return Err(FfsError::Format("oob".into()));
             }
             buf.copy_from_slice(&bytes[offset..end]);
+            drop(bytes);
+            Ok(())
+        }
+
+        fn read_vectored_exact_at(
+            &self,
+            _cx: &Cx,
+            offset: ByteOffset,
+            bufs: &mut [IoSliceMut<'_>],
+        ) -> Result<()> {
+            self.read_count.fetch_add(1, Ordering::Relaxed);
+            let mut offset = usize::try_from(offset.0)
+                .map_err(|_| FfsError::Format("offset overflow".into()))?;
+            let bytes = self.bytes.lock();
+            for buf in bufs {
+                let end = offset
+                    .checked_add(buf.len())
+                    .ok_or_else(|| FfsError::Format("range overflow".into()))?;
+                if end > bytes.len() {
+                    return Err(FfsError::Format("oob".into()));
+                }
+                (**buf).copy_from_slice(&bytes[offset..end]);
+                offset = end;
+            }
             drop(bytes);
             Ok(())
         }
@@ -5154,6 +5369,28 @@ mod tests {
             .expect("write");
         let read = dev.read_block(&cx, BlockNumber(2)).expect("read");
         assert_eq!(read.as_slice(), &[7_u8; 4096]);
+    }
+
+    #[test]
+    fn byte_block_device_reads_contiguous_blocks_with_one_byte_read() {
+        let cx = Cx::for_testing();
+        let mem = MemoryByteDevice::new(16);
+        let dev = ByteBlockDevice::new(mem, 4).expect("device");
+
+        dev.write_block(&cx, BlockNumber(0), &[0, 1, 2, 3])
+            .expect("write block 0");
+        dev.write_block(&cx, BlockNumber(1), &[4, 5, 6, 7])
+            .expect("write block 1");
+        dev.write_block(&cx, BlockNumber(2), &[8, 9, 10, 11])
+            .expect("write block 2");
+
+        let mut bufs = vec![BlockBuf::new(Vec::new()), BlockBuf::new(Vec::new())];
+        dev.read_contiguous_blocks(&cx, BlockNumber(1), &mut bufs)
+            .expect("contiguous read");
+
+        assert_eq!(bufs[0].as_slice(), &[4, 5, 6, 7]);
+        assert_eq!(bufs[1].as_slice(), &[8, 9, 10, 11]);
+        assert_eq!(dev.inner().read_count(), 1);
     }
 
     #[test]

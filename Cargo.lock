@@ -685,6 +685,7 @@ dependencies = [
  "criterion",
  "ffs-error",
  "ffs-types",
+ "nix 0.29.0",
  "parking_lot",
  "proptest",
  "serde",

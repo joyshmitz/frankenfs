@@ -35,6 +35,8 @@ use ffs_types::{
 };
 use std::fmt;
 
+const SCRUB_READ_BATCH_BLOCKS: usize = 64;
+
 // ── Corruption taxonomy ─────────────────────────────────────────────────────
 
 /// Category of corruption detected during a scrub pass.
@@ -200,6 +202,45 @@ impl<'a> Scrubber<'a> {
         Self { device, validator }
     }
 
+    fn record_verdict(
+        findings: &mut Vec<ScrubFinding>,
+        blocks_corrupt: &mut u64,
+        block: BlockNumber,
+        verdict: BlockVerdict,
+    ) {
+        match verdict {
+            BlockVerdict::Clean | BlockVerdict::Skip => {}
+            BlockVerdict::Corrupt(issues) => {
+                *blocks_corrupt += 1;
+                for (kind, severity, detail) in issues {
+                    findings.push(ScrubFinding {
+                        block,
+                        kind,
+                        severity,
+                        detail,
+                    });
+                }
+            }
+        }
+    }
+
+    fn record_io_error(
+        findings: &mut Vec<ScrubFinding>,
+        blocks_corrupt: &mut u64,
+        blocks_io_error: &mut u64,
+        block: BlockNumber,
+        error: &FfsError,
+    ) {
+        *blocks_corrupt += 1;
+        *blocks_io_error += 1;
+        findings.push(ScrubFinding {
+            block,
+            kind: CorruptionKind::IoError,
+            severity: Severity::Error,
+            detail: format!("read failed: {error}"),
+        });
+    }
+
     /// Scrub a range of blocks `[start, start + count)`.
     ///
     /// Returns a report with all findings. Does not panic on I/O errors or
@@ -213,45 +254,83 @@ impl<'a> Scrubber<'a> {
         let mut blocks_corrupt: u64 = 0;
         let mut blocks_io_error: u64 = 0;
 
-        let mut block_num = start.0;
-        while block_num < end {
-            let block = BlockNumber(block_num);
-
-            // Cooperative cancellation check every 256 blocks.
+        let mut next_block = start.0;
+        while next_block < end {
             if blocks_scanned % 256 == 0 {
                 cx.checkpoint().map_err(|_| FfsError::Cancelled)?;
             }
 
-            blocks_scanned += 1;
-
-            match self.device.read_block(cx, block) {
-                Ok(buf) => match self.validator.validate(block, &buf) {
-                    BlockVerdict::Clean | BlockVerdict::Skip => {}
-                    BlockVerdict::Corrupt(issues) => {
-                        blocks_corrupt += 1;
-                        for (kind, severity, detail) in issues {
-                            findings.push(ScrubFinding {
-                                block,
-                                kind,
-                                severity,
-                                detail,
-                            });
-                        }
-                    }
-                },
-                Err(e) => {
-                    blocks_corrupt += 1;
-                    blocks_io_error += 1;
-                    findings.push(ScrubFinding {
+            if !self.device.supports_contiguous_reads() {
+                let block = BlockNumber(next_block);
+                blocks_scanned += 1;
+                match self.device.read_block(cx, block) {
+                    Ok(buf) => Self::record_verdict(
+                        &mut findings,
+                        &mut blocks_corrupt,
                         block,
-                        kind: CorruptionKind::IoError,
-                        severity: Severity::Error,
-                        detail: format!("read failed: {e}"),
-                    });
+                        self.validator.validate(block, &buf),
+                    ),
+                    Err(error) => Self::record_io_error(
+                        &mut findings,
+                        &mut blocks_corrupt,
+                        &mut blocks_io_error,
+                        block,
+                        &error,
+                    ),
+                }
+                next_block += 1;
+                continue;
+            }
+
+            let remaining_blocks = end - next_block;
+            let remaining = usize::try_from(remaining_blocks).unwrap_or(usize::MAX);
+            let batch_len = remaining.min(SCRUB_READ_BATCH_BLOCKS);
+            let batch_len_u64 = u64::try_from(batch_len)
+                .map_err(|_| FfsError::Format("scrub batch length does not fit u64".to_owned()))?;
+            let batch_start = BlockNumber(next_block);
+            let batch_end = next_block
+                .checked_add(batch_len_u64)
+                .ok_or_else(|| FfsError::Format("scrub batch range overflow".to_owned()))?;
+            let batch_blocks: Vec<BlockNumber> = (next_block..batch_end).map(BlockNumber).collect();
+            let mut bufs: Vec<BlockBuf> =
+                (0..batch_len).map(|_| BlockBuf::new(Vec::new())).collect();
+
+            if self
+                .device
+                .read_contiguous_blocks(cx, batch_start, &mut bufs)
+                .is_ok()
+            {
+                for (block, buf) in batch_blocks.iter().copied().zip(bufs.iter()) {
+                    blocks_scanned += 1;
+                    Self::record_verdict(
+                        &mut findings,
+                        &mut blocks_corrupt,
+                        block,
+                        self.validator.validate(block, buf),
+                    );
+                }
+            } else {
+                for block in batch_blocks {
+                    blocks_scanned += 1;
+                    match self.device.read_block(cx, block) {
+                        Ok(buf) => Self::record_verdict(
+                            &mut findings,
+                            &mut blocks_corrupt,
+                            block,
+                            self.validator.validate(block, &buf),
+                        ),
+                        Err(error) => Self::record_io_error(
+                            &mut findings,
+                            &mut blocks_corrupt,
+                            &mut blocks_io_error,
+                            block,
+                            &error,
+                        ),
+                    }
                 }
             }
 
-            block_num += 1;
+            next_block = batch_end;
         }
 
         Ok(ScrubReport {
@@ -561,6 +640,7 @@ mod tests {
     use ffs_types::EXT4_SB_CHECKSUM_OFFSET;
     use parking_lot::RwLock;
     use std::collections::HashMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     // ── Test block device ───────────────────────────────────────────────
 
@@ -641,6 +721,95 @@ mod tests {
             } else {
                 self.inner.read_block(cx, block)
             }
+        }
+
+        fn write_block(&self, cx: &Cx, block: BlockNumber, data: &[u8]) -> Result<()> {
+            self.inner.write_block(cx, block, data)
+        }
+
+        fn block_size(&self) -> u32 {
+            self.inner.block_size()
+        }
+
+        fn block_count(&self) -> u64 {
+            self.inner.block_count()
+        }
+
+        fn sync(&self, cx: &Cx) -> Result<()> {
+            self.inner.sync(cx)
+        }
+    }
+
+    #[derive(Debug)]
+    struct BatchCountingBlockDevice {
+        inner: MemBlockDevice,
+        batch_reads: AtomicUsize,
+        scalar_reads: AtomicUsize,
+        fail_batches: bool,
+    }
+
+    impl BatchCountingBlockDevice {
+        fn new(block_size: u32, block_count: u64) -> Self {
+            Self {
+                inner: MemBlockDevice::new(block_size, block_count),
+                batch_reads: AtomicUsize::new(0),
+                scalar_reads: AtomicUsize::new(0),
+                fail_batches: false,
+            }
+        }
+
+        fn with_failing_batches(mut self) -> Self {
+            self.fail_batches = true;
+            self
+        }
+
+        fn write(&self, block: BlockNumber, data: Vec<u8>) {
+            self.inner.write(block, data);
+        }
+
+        fn batch_read_count(&self) -> usize {
+            self.batch_reads.load(Ordering::Relaxed)
+        }
+
+        fn scalar_read_count(&self) -> usize {
+            self.scalar_reads.load(Ordering::Relaxed)
+        }
+    }
+
+    impl BlockDevice for BatchCountingBlockDevice {
+        fn read_block(&self, cx: &Cx, block: BlockNumber) -> Result<BlockBuf> {
+            self.scalar_reads.fetch_add(1, Ordering::Relaxed);
+            self.inner.read_block(cx, block)
+        }
+
+        fn supports_contiguous_reads(&self) -> bool {
+            true
+        }
+
+        fn read_contiguous_blocks(
+            &self,
+            cx: &Cx,
+            start: BlockNumber,
+            bufs: &mut [BlockBuf],
+        ) -> Result<()> {
+            self.batch_reads.fetch_add(1, Ordering::Relaxed);
+            if self.fail_batches {
+                return Err(FfsError::Io(std::io::Error::other(
+                    "simulated batch read failure",
+                )));
+            }
+            for (idx, buf) in bufs.iter_mut().enumerate() {
+                let delta = u64::try_from(idx)
+                    .map_err(|_| FfsError::Format("batch index overflow".into()))?;
+                let block = BlockNumber(
+                    start
+                        .0
+                        .checked_add(delta)
+                        .ok_or_else(|| FfsError::Format("batch range overflow".into()))?,
+                );
+                *buf = self.inner.read_block(cx, block)?;
+            }
+            Ok(())
         }
 
         fn write_block(&self, cx: &Cx, block: BlockNumber, data: &[u8]) -> Result<()> {
@@ -911,6 +1080,42 @@ mod tests {
             .expect("scrub should succeed");
         assert_eq!(report.blocks_scanned, 8);
         assert!(report.is_clean());
+    }
+
+    #[test]
+    fn scrub_range_uses_contiguous_read_batches() {
+        let cx = test_cx();
+        let dev = BatchCountingBlockDevice::new(4096, 130);
+        for i in 0..130 {
+            dev.write(BlockNumber(i), make_checksummed_block(4096, 0x42));
+        }
+
+        let report = Scrubber::new(&dev, &Crc32cBlockValidator)
+            .scrub_all(&cx)
+            .expect("scrub should succeed");
+
+        assert!(report.is_clean());
+        assert_eq!(report.blocks_scanned, 130);
+        assert_eq!(dev.batch_read_count(), 3);
+        assert_eq!(dev.scalar_read_count(), 0);
+    }
+
+    #[test]
+    fn scrub_range_falls_back_to_scalar_reads_after_batch_error() {
+        let cx = test_cx();
+        let dev = BatchCountingBlockDevice::new(4096, 4).with_failing_batches();
+        for i in 0..4 {
+            dev.write(BlockNumber(i), make_checksummed_block(4096, 0x24));
+        }
+
+        let report = Scrubber::new(&dev, &Crc32cBlockValidator)
+            .scrub_all(&cx)
+            .expect("scrub should succeed");
+
+        assert!(report.is_clean());
+        assert_eq!(report.blocks_scanned, 4);
+        assert_eq!(dev.batch_read_count(), 1);
+        assert_eq!(dev.scalar_read_count(), 4);
     }
 
     #[test]

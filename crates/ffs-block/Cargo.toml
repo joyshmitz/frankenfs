@@ -14,6 +14,7 @@ s3fifo = []
 ffs-types = { workspace = true }
 ffs-error = { workspace = true }
 asupersync = { workspace = true }
+nix = { workspace = true }
 parking_lot = { workspace = true }
 serde = { workspace = true }
 tracing = { workspace = true }
