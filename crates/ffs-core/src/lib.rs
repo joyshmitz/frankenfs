@@ -28959,9 +28959,10 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "bd-kck88: large single-snapshot write reaching double-indirect aborts with \
-                version-chain backpressure (pointer block rewritten >cap times under the \
-                write's own pinned snapshot); re-enable once bd-kck88 is fixed"]
+    #[ignore = "bd-bw90c: sequential multi-chunk e2compr writes corrupt a cluster on \
+                readback ('compressed cluster too small for header'); a single fs.write of \
+                the same data roundtrips. Re-enable once bd-bw90c is fixed (this then also \
+                covers the i_block[13] double-indirect path)."]
     fn compressed_write_reaching_double_indirect_roundtrips_ext4() {
         // The single-indirect test above stops at logical block 31. With 4K
         // blocks the layout is: 12 direct + 1024 single-indirect (blocks
@@ -28972,6 +28973,15 @@ mod tests {
         // the write and the read-assembly side — previously untested (the
         // idx1/idx2 pointer math is a classic off-by-one/overflow locus, cf.
         // the e2compr underflow fixed in bd-ds7fy).
+        //
+        // The payload is written in 128 KiB chunks, mirroring how the FUSE
+        // kernel layer splits a large userspace write into bounded write
+        // requests (FrankenFS does not raise max_write, so each request is a
+        // separate fs.write / request scope / read snapshot). Issuing one giant
+        // single-snapshot fs.write instead would rewrite the pointer block far
+        // past the version-chain cap under one pinned snapshot and abort with
+        // ChainBackpressure — a single-call-API limit tracked separately as
+        // bd-kck88, not the double-indirect data path under test here.
         let Some((fs, _tmp)) = open_writable_ext4_mkfs_with_incompat_features(
             64,
             ffs_ondisk::Ext4IncompatFeatures::COMPRESSION.0,
@@ -29010,10 +29020,28 @@ mod tests {
         let payload: Vec<u8> = (0_usize..len)
             .map(|i| u8::try_from((i * 31 + (i / 4096)) % 251).expect("pattern byte fits u8"))
             .collect();
-        let written = fs
-            .write(&cx, created.ino, 0, &payload)
-            .expect("compressed write reaching double-indirect");
-        assert_eq!(written as usize, payload.len(), "all bytes must be written");
+        // 128 KiB chunks (FUSE-style bounded write requests); each is its own
+        // scope/snapshot so the pointer-block version chain trims between
+        // chunks and stays under the cap.
+        let chunk = 128 * 1024;
+        let mut off = 0usize;
+        while off < payload.len() {
+            let end = (off + chunk).min(payload.len());
+            let written = fs
+                .write(
+                    &cx,
+                    created.ino,
+                    off as u64,
+                    &payload[off..end],
+                )
+                .expect("compressed chunk write reaching double-indirect");
+            assert_eq!(
+                written as usize,
+                end - off,
+                "all bytes in chunk at offset {off} must be written"
+            );
+            off = end;
+        }
 
         let readback = fs
             .read(
