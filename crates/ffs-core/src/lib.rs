@@ -29675,9 +29675,14 @@ mod tests {
             .unwrap();
 
         assert_eq!(data, expected, "coalesced read must be byte-identical");
-        assert!(
-            vectored.load(AtomicOrdering::SeqCst) >= 1,
-            "4 contiguous data blocks must use a coalesced vectored device op; \
+        // Quantified syscall reduction: the 4 contiguous data blocks are served
+        // by exactly ONE vectored device op (preadv) — pre-coalescing this path
+        // issued 4 scalar reads (4 pread). The extent-tree metadata reads remain
+        // scalar, so `scalar` here counts only those, never the 4 data blocks.
+        assert_eq!(
+            vectored.load(AtomicOrdering::SeqCst),
+            1,
+            "4 contiguous data blocks must collapse to one vectored device op; \
              got {} vectored + {} scalar",
             vectored.load(AtomicOrdering::SeqCst),
             scalar.load(AtomicOrdering::SeqCst),
