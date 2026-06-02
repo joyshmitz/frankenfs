@@ -1058,9 +1058,14 @@ impl BlockDevice for ByteDeviceBlockAdapter<'_> {
                 self.dev.len_bytes()
             )));
         }
-        let mut bytes = vec![0_u8; block_size];
-        self.dev.read_exact_at(cx, ByteOffset(offset), &mut bytes)?;
-        Ok(BlockBuf::new(bytes))
+        // Read directly into an aligned BlockBuf (matching read_contiguous_blocks)
+        // so the buffer is block-aligned at construction. This skips the realign
+        // alloc+copy that BlockBuf::new(vec![..]) would otherwise pay for an
+        // unaligned Vec on every scalar read (bd-kq3b4: per-block memmove/memset).
+        let mut buf = BlockBuf::zeroed(block_size);
+        self.dev
+            .read_exact_at(cx, ByteOffset(offset), buf.make_mut())?;
+        Ok(buf)
     }
 
     fn supports_contiguous_reads(&self) -> bool {
@@ -1153,7 +1158,9 @@ impl BlockDevice for ExternalJournalReplayAdapter<'_> {
         let end = offset
             .checked_add(u64::from(self.block_size))
             .ok_or_else(|| FfsError::Format("block range overflow".to_owned()))?;
-        let mut bytes = vec![0_u8; expected];
+        // Aligned-at-construction buffer avoids the realign alloc+copy of
+        // BlockBuf::new(vec![..]) on the replay read path (bd-kq3b4).
+        let mut buf = BlockBuf::zeroed(expected);
 
         if block.0 < self.journal_blocks {
             if end > self.journal_dev.len_bytes() {
@@ -1164,7 +1171,7 @@ impl BlockDevice for ExternalJournalReplayAdapter<'_> {
                 )));
             }
             self.journal_dev
-                .read_exact_at(cx, ByteOffset(offset), &mut bytes)?;
+                .read_exact_at(cx, ByteOffset(offset), buf.make_mut())?;
         } else {
             if end > self.data_dev.len_bytes() {
                 return Err(FfsError::Format(format!(
@@ -1174,10 +1181,10 @@ impl BlockDevice for ExternalJournalReplayAdapter<'_> {
                 )));
             }
             self.data_dev
-                .read_exact_at(cx, ByteOffset(offset), &mut bytes)?;
+                .read_exact_at(cx, ByteOffset(offset), buf.make_mut())?;
         }
 
-        Ok(BlockBuf::new(bytes))
+        Ok(buf)
     }
 
     fn write_block(&self, cx: &Cx, block: BlockNumber, data: &[u8]) -> Result<(), FfsError> {
