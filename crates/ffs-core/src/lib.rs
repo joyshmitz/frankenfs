@@ -7296,6 +7296,47 @@ impl OpenFs {
             let chunk_size = remaining_in_block.min(to_read - bytes_read);
 
             match self.resolve_extent(cx, scope, inode, logical_block)? {
+                Some((phys_block, false)) if offset_in_block == 0 && chunk_size == bs_usize => {
+                    // Aligned full written block: coalesce the run of
+                    // logically-consecutive, physically-consecutive written
+                    // blocks into one vectored device read (bd-a384r) instead
+                    // of one read per block. `read_contiguous_blocks_with_scope`
+                    // keeps this overlay-correct (scalar fallback when any block
+                    // is tx-staged or snapshot-visible).
+                    let mut run_blocks = 1_usize;
+                    loop {
+                        let next_start = bytes_read + run_blocks * bs_usize;
+                        if to_read - next_start < bs_usize {
+                            break;
+                        }
+                        let Ok(delta) = u32::try_from(run_blocks) else {
+                            break;
+                        };
+                        let Some(next_logical) = logical_block.checked_add(delta) else {
+                            break;
+                        };
+                        match self.resolve_extent(cx, scope, inode, next_logical)? {
+                            Some((next_phys, false))
+                                if next_phys == phys_block + run_blocks as u64 =>
+                            {
+                                run_blocks += 1;
+                            }
+                            _ => break,
+                        }
+                    }
+
+                    let datas = self.read_contiguous_blocks_with_scope(
+                        cx,
+                        scope,
+                        BlockNumber(phys_block),
+                        run_blocks,
+                    )?;
+                    for (idx, block_data) in datas.iter().enumerate() {
+                        let dst = bytes_read + idx * bs_usize;
+                        buf[dst..dst + bs_usize].copy_from_slice(&block_data[..bs_usize]);
+                    }
+                    bytes_read += run_blocks * bs_usize;
+                }
                 Some((phys_block, unwritten)) => {
                     if unwritten {
                         buf[bytes_read..bytes_read + chunk_size].fill(0);
@@ -7306,13 +7347,13 @@ impl OpenFs {
                             &block_data[offset_in_block..offset_in_block + chunk_size],
                         );
                     }
+                    bytes_read += chunk_size;
                 }
                 None => {
                     buf[bytes_read..bytes_read + chunk_size].fill(0);
+                    bytes_read += chunk_size;
                 }
             }
-
-            bytes_read += chunk_size;
         }
 
         Ok(bytes_read)
