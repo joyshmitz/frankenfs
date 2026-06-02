@@ -1,0 +1,14 @@
+Benchmarking select0_in_block/old_bit_scan
+Benchmarking select0_in_block/old_bit_scan: Warming up for 1.0000 s
+Benchmarking select0_in_block/old_bit_scan: Collecting 100 samples in estimated 3.0002 s (48M iterations)
+Benchmarking select0_in_block/old_bit_scan: Analyzing
+select0_in_block/old_bit_scan
+                        time:   [57.984 ns 60.925 ns 65.197 ns]
+Found 6 outliers among 100 measurements (6.00%)
+Benchmarking select0_in_block/new_broadword
+Benchmarking select0_in_block/new_broadword: Warming up for 1.0000 s
+Benchmarking select0_in_block/new_broadword: Collecting 100 samples in estimated 3.0000 s (117M iterations)
+Benchmarking select0_in_block/new_broadword: Analyzing
+select0_in_block/new_broadword
+                        time:   [25.013 ns 25.820 ns 26.731 ns]
+Found 7 outliers among 100 measurements (7.00%)
