@@ -218,12 +218,25 @@ impl Store for InMemoryStore {
         symbols: &[(u32, Vec<u8>)],
     ) -> Result<StoreResult> {
         cx.checkpoint().map_err(|_| FfsError::Cancelled)?;
+        let symbol_count = u32::try_from(symbols.len())
+            .map_err(|_| FfsError::RepairFailed("symbol count does not fit u32".to_owned()))?;
         let mut groups = self.lock_groups()?;
         if let Some(current) = groups.get(&group_id) {
             if current.generation > generation {
                 return Ok(StoreResult::Stale {
                     current_generation: current.generation,
                 });
+            }
+            if current.generation == generation {
+                if current.symbols.as_slice() == symbols {
+                    return Ok(StoreResult::Stored {
+                        generation,
+                        symbol_count,
+                    });
+                }
+                return Err(FfsError::RepairFailed(format!(
+                    "exchange store refusing same-generation symbol rewrite for group {group_id}: generation {generation}"
+                )));
             }
         }
 
@@ -238,8 +251,7 @@ impl Store for InMemoryStore {
 
         Ok(StoreResult::Stored {
             generation,
-            symbol_count: u32::try_from(symbols.len())
-                .map_err(|_| FfsError::RepairFailed("symbol count does not fit u32".to_owned()))?,
+            symbol_count,
         })
     }
 }
@@ -733,6 +745,60 @@ mod tests {
                 generation: 19,
                 symbol_count: 4,
             }
+        );
+    }
+
+    #[test]
+    fn in_memory_store_repeated_same_generation_put_is_idempotent() {
+        let cx = Cx::for_testing();
+        let store = InMemoryStore::new();
+        let symbols = vec![(4, vec![0xaa, 0xbb]), (5, vec![0xcc, 0xdd])];
+
+        let first = store
+            .put_symbols(&cx, 11, 7, &symbols)
+            .expect("initial put");
+        let second = store
+            .put_symbols(&cx, 11, 7, &symbols)
+            .expect("idempotent put");
+
+        assert_eq!(
+            first,
+            StoreResult::Stored {
+                generation: 7,
+                symbol_count: 2,
+            }
+        );
+        assert_eq!(second, first);
+        assert_eq!(
+            store.get_symbols(&cx, 11, 7).expect("get symbols"),
+            LookupResult::Found(StoredSymbols {
+                generation: 7,
+                symbols,
+            })
+        );
+    }
+
+    #[test]
+    fn in_memory_store_rejects_same_generation_symbol_rewrite() {
+        let cx = Cx::for_testing();
+        let store = InMemoryStore::new();
+        let original_symbols = vec![(4, vec![0xaa, 0xbb]), (5, vec![0xcc, 0xdd])];
+        let conflicting_symbols = vec![(4, vec![0xaa, 0xbb]), (5, vec![0x10, 0x20])];
+
+        store
+            .put_symbols(&cx, 11, 7, &original_symbols)
+            .expect("initial put");
+        let err = store
+            .put_symbols(&cx, 11, 7, &conflicting_symbols)
+            .expect_err("conflicting rewrite must fail");
+
+        assert!(format!("{err}").contains("same-generation symbol rewrite"));
+        assert_eq!(
+            store.get_symbols(&cx, 11, 7).expect("get symbols"),
+            LookupResult::Found(StoredSymbols {
+                generation: 7,
+                symbols: original_symbols,
+            })
         );
     }
 
