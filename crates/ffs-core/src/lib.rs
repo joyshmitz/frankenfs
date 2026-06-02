@@ -25157,6 +25157,79 @@ mod tests {
         Ext4Inode::parse_from_bytes(&buf).expect("test inode")
     }
 
+    /// Exercises the legacy ext4 indirect-block addressing
+    /// (`resolve_indirect_block`) across all three indirection levels plus
+    /// sparse (zero-pointer) holes. This untrusted-input read path had no
+    /// direct test coverage; the build helper only produces extent-mapped
+    /// inodes. Pointer blocks are crafted at small block numbers and the
+    /// logical block is set past each level's threshold, so no large file
+    /// needs to be materialised.
+    #[test]
+    fn resolve_indirect_block_single_double_triple_levels() {
+        const BS: usize = 4096;
+        const PPB: u32 = (BS / 4) as u32; // pointers per 4K block = 1024
+
+        let mut image = build_ext4_image_with_extents();
+        // Write a u32 pointer at slot `idx` within block `blk` (blocks 20..=32
+        // are free in the 64-block image; 0..=4 and 13 are in use).
+        let put = |image: &mut [u8], blk: u32, idx: u32, val: u32| {
+            let off = blk as usize * BS + idx as usize * 4;
+            image[off..off + 4].copy_from_slice(&val.to_le_bytes());
+        };
+        // Single indirect: ind block 20, slot 0 → data block 30.
+        put(&mut image, 20, 0, 30);
+        // Double indirect: dind 21[0] → ind 22; ind 22[0] → data 31.
+        put(&mut image, 21, 0, 22);
+        put(&mut image, 22, 0, 31);
+        // Triple indirect: tind 23[0] → dind 24; dind 24[0] → ind 25; ind 25[0] → data 32.
+        put(&mut image, 23, 0, 24);
+        put(&mut image, 24, 0, 25);
+        put(&mut image, 25, 0, 32);
+
+        let cx = Cx::for_testing();
+        let fs = OpenFs::from_device(&cx, Box::new(TestDevice::from_vec(image)), &OpenOptions::default())
+            .expect("open crafted ext4 image");
+        let scope = RequestScope::empty();
+
+        // Non-extent inode: 15 u32 pointers, with the indirect roots set.
+        let mut inode = make_test_inode(ffs_types::S_IFREG | 0o644, 0, 0);
+        let mut ptrs = vec![0_u8; 15 * 4];
+        ptrs[12 * 4..12 * 4 + 4].copy_from_slice(&20_u32.to_le_bytes()); // i_block[12] = single
+        ptrs[13 * 4..13 * 4 + 4].copy_from_slice(&21_u32.to_le_bytes()); // i_block[13] = double
+        ptrs[14 * 4..14 * 4 + 4].copy_from_slice(&23_u32.to_le_bytes()); // i_block[14] = triple
+        inode.extent_bytes = ptrs;
+
+        // First logical block reached via each indirection level.
+        assert_eq!(
+            fs.resolve_indirect_block(&cx, &scope, &inode, 12).unwrap(),
+            Some(30),
+            "single indirect (logical block 12)"
+        );
+        assert_eq!(
+            fs.resolve_indirect_block(&cx, &scope, &inode, 12 + PPB).unwrap(),
+            Some(31),
+            "double indirect (logical block 12 + ppb)"
+        );
+        let triple_lb = 12 + PPB + PPB * PPB;
+        assert_eq!(
+            fs.resolve_indirect_block(&cx, &scope, &inode, triple_lb).unwrap(),
+            Some(32),
+            "triple indirect (logical block 12 + ppb + ppb^2)"
+        );
+
+        // Sparse holes resolve to None, not a bogus physical block.
+        assert_eq!(
+            fs.resolve_indirect_block(&cx, &scope, &inode, 13).unwrap(),
+            None,
+            "unset single-indirect slot is a hole"
+        );
+        assert_eq!(
+            fs.resolve_indirect_block(&cx, &scope, &inode, 0).unwrap(),
+            None,
+            "unset direct pointer is a hole"
+        );
+    }
+
     fn malformed_inline_data_xattr_ibody() -> Vec<u8> {
         let mut ibody = Vec::new();
         ibody.extend_from_slice(&ffs_types::EXT4_XATTR_MAGIC.to_le_bytes());
