@@ -224,6 +224,10 @@ impl DurabilityAutopilot {
     }
 
     fn optimize_overhead(&self, source_block_count: u32, loss_cost: f64) -> f64 {
+        if source_block_count == 0 {
+            return 0.0;
+        }
+
         let (min_overhead, max_overhead) = self.normalized_bounds();
         if self.posterior_mean() >= max_overhead {
             return max_overhead;
@@ -795,6 +799,32 @@ mod tests {
         assert!(decision.expected_loss.is_finite());
         assert!(decision.risk_bound.is_finite());
         assert!(decision.symbols_selected <= 1);
+    }
+
+    fn assert_zero(value: f64) {
+        assert_eq!(value.to_bits(), 0.0_f64.to_bits());
+    }
+
+    #[test]
+    fn zero_block_group_selects_zero_overhead() {
+        let ap = DurabilityAutopilot::default();
+
+        assert_zero(ap.optimal_overhead(0));
+        assert_zero(ap.optimal_overhead_metadata(0));
+    }
+
+    #[test]
+    fn zero_block_group_decision_is_empty() {
+        let ap = DurabilityAutopilot::default();
+
+        for metadata_group in [false, true] {
+            let decision = ap.decision_for_group(0, metadata_group);
+            assert_zero(decision.overhead_ratio);
+            assert_zero(decision.risk_bound);
+            assert_zero(decision.expected_loss);
+            assert_eq!(decision.symbols_selected, 0);
+            assert_eq!(decision.metadata_group, metadata_group);
+        }
     }
 
     #[test]
