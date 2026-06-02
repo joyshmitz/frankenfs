@@ -1656,6 +1656,13 @@ mod tests {
             .join(relative)
     }
 
+    /// Replace the machine-absolute crate manifest prefix with a stable
+    /// placeholder so snapshots do not embed the checkout path (which differs
+    /// between local `/data/projects/frankenfs` and CI `/home/runner/work/...`).
+    fn normalize_manifest_dir(value: &str) -> String {
+        value.replace(env!("CARGO_MANIFEST_DIR"), "{MANIFEST_DIR}")
+    }
+
     fn absolutize_paths(
         mut config: PerformanceDeltaCloseoutConfig,
     ) -> PerformanceDeltaCloseoutConfig {
@@ -1954,7 +1961,7 @@ mod tests {
             .take(4)
             .map(|row| {
                 serde_json::json!({
-                    "row_id": &row.row_id,
+                    "row_id": normalize_manifest_dir(&row.row_id),
                     "row_kind": &row.row_kind,
                     "operation": &row.operation,
                     "classification": row.classification,
