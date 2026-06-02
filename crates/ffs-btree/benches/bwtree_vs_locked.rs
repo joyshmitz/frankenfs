@@ -264,8 +264,7 @@ fn run_bwtree_workload(
                 } else if op < lookup_pct + insert_pct + delete_pct {
                     let _ = table.delete(page, BwKey(key));
                 } else {
-                    // Range scan: materialize and check a few entries
-                    let _ = table.materialize_page(page);
+                    let _ = table.range_scan(page, BwKey(key), 10);
                 }
             }
         }));

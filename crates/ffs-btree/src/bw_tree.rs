@@ -346,6 +346,20 @@ impl MappingTable {
         Ok(state)
     }
 
+    pub fn range_scan(
+        &self,
+        page_id: PageId,
+        start: BwKey,
+        count: usize,
+    ) -> Result<Vec<(BwKey, BwValue)>> {
+        let state = self.materialize_page(page_id)?;
+        Ok(state
+            .range(start..)
+            .take(count)
+            .map(|(&key, &value)| (key, value))
+            .collect())
+    }
+
     /// Consolidate a page's delta chain into a fresh base page.
     ///
     /// Materializes the current chain, creates a new `PageDelta::Base`,
@@ -1250,6 +1264,77 @@ mod tests {
                 pair[1]
             );
         }
+    }
+
+    #[test]
+    fn range_scan_returns_sorted_bounded_entries_from_start_key() {
+        let table = MappingTable::with_capacity(1);
+        let page = table.allocate_page().expect("alloc");
+
+        for i in (0..10_u64).rev() {
+            table
+                .insert(page, BwKey(i * 10), BwValue(i))
+                .expect("insert");
+        }
+
+        let rows = table
+            .range_scan(page, BwKey(25), 4)
+            .expect("range scan should succeed");
+        assert_eq!(
+            rows,
+            vec![
+                (BwKey(30), BwValue(3)),
+                (BwKey(40), BwValue(4)),
+                (BwKey(50), BwValue(5)),
+                (BwKey(60), BwValue(6)),
+            ]
+        );
+    }
+
+    #[test]
+    fn range_scan_filters_deletes_and_split_removed_tail() {
+        let table = MappingTable::with_capacity(2);
+        let page = table.allocate_page().expect("alloc");
+        let sibling = table.allocate_page().expect("alloc sibling");
+
+        for i in 0..10_u64 {
+            table.insert(page, BwKey(i), BwValue(i)).expect("insert");
+        }
+        table.delete(page, BwKey(4)).expect("delete");
+        table
+            .append_split_delta(page, BwKey(7), sibling)
+            .expect("split");
+
+        let rows = table
+            .range_scan(page, BwKey(3), 10)
+            .expect("range scan should succeed");
+        assert_eq!(
+            rows,
+            vec![
+                (BwKey(3), BwValue(3)),
+                (BwKey(5), BwValue(5)),
+                (BwKey(6), BwValue(6)),
+            ]
+        );
+    }
+
+    #[test]
+    fn range_scan_zero_count_returns_empty_after_page_validation() {
+        let table = MappingTable::with_capacity(1);
+        let page = table.allocate_page().expect("alloc");
+
+        table.insert(page, BwKey(1), BwValue(1)).expect("insert");
+
+        assert_eq!(
+            table
+                .range_scan(page, BwKey(0), 0)
+                .expect("range scan should succeed"),
+            Vec::<(BwKey, BwValue)>::new()
+        );
+        assert!(matches!(
+            table.range_scan(PageId(99), BwKey(0), 0),
+            Err(FfsError::NotFound(_))
+        ));
     }
 
     #[test]
