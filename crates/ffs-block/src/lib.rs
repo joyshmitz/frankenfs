@@ -7908,8 +7908,8 @@ mod tests {
             ShardedArcCache::new(power_two_dev, 16, 8).expect("power-of-two sharded cache");
         let non_power_two_dev = ByteBlockDevice::new(MemoryByteDevice::new(4096 * 64), 4096)
             .expect("non-power-of-two device");
-        let non_power_two_cache = ShardedArcCache::new(non_power_two_dev, 15, 5)
-            .expect("non-power-of-two sharded cache");
+        let non_power_two_cache =
+            ShardedArcCache::new(non_power_two_dev, 15, 5).expect("non-power-of-two sharded cache");
 
         for block in 0..128_u64 {
             assert_eq!(
