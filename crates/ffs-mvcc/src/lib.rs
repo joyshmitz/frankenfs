@@ -1321,6 +1321,14 @@ pub struct MvccStore {
     /// version store lock.  These inline methods are retained for backward
     /// compatibility and for use in single-threaded / test contexts.
     active_snapshots: BTreeMap<CommitSeq, u64>,
+    /// Device-references whose snapshot was force-aged-out by chain-pressure
+    /// relief (`force_advance_oldest_snapshot`) while still held by a live
+    /// inline reader. Each such forced advance consumes one ref that no real
+    /// `release_snapshot` will provide via `active_snapshots`; recording it
+    /// here lets the eventual reader Drop release succeed instead of tripping
+    /// the unregistered-release invariant, while genuine double-frees (absent
+    /// from both maps) still return `false`.
+    force_advanced_releases: BTreeMap<CommitSeq, u64>,
     /// Recent committed transactions retained for SSI antidependency
     /// checking.  Pruned by `prune_ssi_log`.
     pub(crate) ssi_log: Vec<CommittedTxnRecord>,
@@ -1361,6 +1369,7 @@ impl MvccStore {
             versions: BTreeMap::new(),
             physical_versions: BTreeMap::new(),
             active_snapshots: BTreeMap::new(),
+            force_advanced_releases: BTreeMap::new(),
             ssi_log: Vec::new(),
             compression_policy: CompressionPolicy::default(),
             ebr_reclaimer: EbrVersionReclaimer::default(),
@@ -2573,6 +2582,13 @@ impl MvccStore {
     fn force_advance_oldest_snapshot(&mut self) -> Option<(CommitSeq, u64)> {
         let oldest = self.active_snapshots.keys().next().copied()?;
         let refs = self.active_snapshots.get_mut(&oldest)?;
+        // This consumes one live device-reference without a real Drop: in both
+        // branches `active_snapshots` ends up one short of the live inline
+        // readers at `oldest`. Record the forced release so the eventual reader
+        // Drop's `release_snapshot` succeeds (the invariant is "every register
+        // is matched by a release OR a forced advance"), not so a genuine
+        // double-free escapes detection.
+        *self.force_advanced_releases.entry(oldest).or_insert(0) += 1;
         if *refs > 1 {
             *refs -= 1;
             return Some((oldest, *refs));
@@ -3062,6 +3078,19 @@ impl MvccStore {
                     );
                 }
             }
+            true
+        } else if let Some(pending) = self.force_advanced_releases.get_mut(&snapshot.high) {
+            // The snapshot was force-aged-out by chain-pressure relief while
+            // this reader still held it; this Drop is the expected late
+            // release, not a double-free.
+            *pending -= 1;
+            if *pending == 0 {
+                self.force_advanced_releases.remove(&snapshot.high);
+            }
+            trace!(
+                commit_seq = snapshot.high.0,
+                "snapshot_release (inline): matched a prior chain-pressure force-advance"
+            );
             true
         } else {
             error!(
@@ -4395,6 +4424,43 @@ mod tests {
 
         let buf = dev.read_block(&cx, BlockNumber(3)).expect("read block 3");
         assert_eq!(buf.as_slice(), &[0xAB; 512]);
+    }
+
+    #[test]
+    fn force_advanced_inline_snapshot_drop_does_not_trip_release_invariant() {
+        // Regression for bd-6oolk: chain-pressure relief
+        // (force_advance_oldest_snapshot) can age a snapshot out of
+        // active_snapshots while a live inline MvccBlockDevice still holds it.
+        // The device's Drop must then release cleanly (matching the recorded
+        // forced advance) rather than tripping the unregistered-release
+        // debug_assert. Surfaced by a >4 MiB e2compr double-indirect write
+        // (ffs-core compressed_write_reaching_double_indirect_roundtrips_ext4).
+        let base = MemBlockDevice::new(512, 16);
+        let store = Arc::new(RwLock::new(MvccStore::new()));
+        let snap = store.read().current_snapshot();
+        // Live inline reader holds `snap` (register_snapshot via ::new).
+        let dev = MvccBlockDevice::new(base, Arc::clone(&store), snap);
+        assert_eq!(store.read().active_snapshot_count(), 1);
+
+        // Force the oldest snapshot out from under the live reader.
+        let advanced = store.write().force_advance_oldest_snapshot();
+        assert!(advanced.is_some(), "expected an oldest snapshot to advance");
+        assert_eq!(
+            store.read().active_snapshot_count(),
+            0,
+            "forced advance should remove the sole snapshot ref"
+        );
+
+        // Dropping the live reader must not panic on the release invariant,
+        // and must drain the recorded forced-release credit.
+        drop(dev);
+
+        // A genuinely-unregistered release still reports false (invariant
+        // detection preserved): the forced credit was consumed by the Drop.
+        assert!(
+            !store.write().release_snapshot(snap),
+            "no forced-release credit should remain after the matching Drop"
+        );
     }
 
     #[test]
