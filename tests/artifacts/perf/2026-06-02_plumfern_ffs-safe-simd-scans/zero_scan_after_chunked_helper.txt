@@ -1,0 +1,122 @@
+  [2m2026-06-02T18:11:43.991478Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSelected worker: vmi1156319 at ubuntu@178.18.254.243 (0 slots remaining after reservation, speed 50.0)[0m
+    [2;3mat[0m rch/src/hook.rs:514 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-02T18:11:44.288691Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mStarting remote compilation pipeline for frankenfs (hash: 5f7794b234b08924)[0m
+    [2;3mat[0m rch/src/hook.rs:5987 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-02T18:11:44.288733Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mPrepared dependency sync manifest for 24 roots[0m
+    [2;3mat[0m rch/src/hook.rs:6009 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-02T18:11:46.504102Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSyncing project to worker vmi1156319...[0m
+    [2;3mat[0m rch/src/hook.rs:6039 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-02T18:11:46.504157Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mLoaded 2 pattern(s) from .rchignore (total: 40)[0m
+    [2;3mat[0m rch/src/transfer.rs:799 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-02T18:11:46.504165Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenfs -> /data/projects/frankenfs on vmi1156319[0m
+    [2;3mat[0m rch/src/transfer.rs:1400 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-02T18:11:52.242783Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 5738ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1469 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-02T18:11:52.242847Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenfs/crates/ffs -> /data/projects/frankenfs/crates/ffs on vmi1156319[0m
+    [2;3mat[0m rch/src/transfer.rs:1400 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-02T18:11:54.162029Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1919ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1469 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-02T18:11:54.162095Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenfs/crates/ffs-alloc -> /data/projects/frankenfs/crates/ffs-alloc on vmi1156319[0m
+    [2;3mat[0m rch/src/transfer.rs:1400 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-02T18:11:54.360469Z[0m [33m WARN[0m [1;33mrch::transfer[0m[33m: [33mrsync failed with retryable error (retries exhausted): kex_exchange_identification: read: Connection reset by peer
+Connection reset by 178.18.254.243 port 22
+rsync: connection unexpectedly closed (0 bytes received so far) [sender]
+rsync error: unexplained error (code 255) at io.c(232) [sender=3.4.1]
+[0m
+    [2;3mat[0m rch/src/transfer.rs:1430 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-02T18:11:54.413231Z[0m [33m WARN[0m [1;33mrch::hook[0m[33m: [33mRemote execution failed: Project sync failed: rsync failed, running locally[0m
+    [2;3mat[0m rch/src/hook.rs:658 [2;3mon[0m ThreadId(1)
+
+[RCH] local (remote execution failed)
+   Compiling libc v0.2.185
+   Compiling rustix v1.1.4
+   Compiling linux-raw-sys v0.12.1
+   Compiling memchr v2.8.0
+   Compiling syn v2.0.117
+   Compiling serde_core v1.0.228
+   Compiling tracing-core v0.1.36
+   Compiling getrandom v0.3.4
+   Compiling getrandom v0.4.2
+   Compiling wait-timeout v0.2.1
+   Compiling page_size v0.6.0
+   Compiling rand_core v0.9.5
+   Compiling rand_xorshift v0.4.0
+   Compiling rand v0.9.4
+   Compiling tempfile v3.27.0
+   Compiling rusty-fork v0.3.1
+   Compiling serde_json v1.0.149
+   Compiling zerocopy-derive v0.8.48
+   Compiling serde_derive v1.0.228
+   Compiling tracing-attributes v0.1.31
+   Compiling thiserror-impl v2.0.18
+   Compiling tracing v0.1.44
+   Compiling thiserror v2.0.18
+   Compiling zerocopy v0.8.48
+   Compiling serde v1.0.228
+   Compiling ffs-types v0.1.0 (/data/projects/frankenfs/crates/ffs-types)
+   Compiling tinytemplate v1.2.1
+   Compiling ffs-ondisk v0.1.0 (/data/projects/frankenfs/crates/ffs-ondisk)
+   Compiling half v2.7.1
+   Compiling ppv-lite86 v0.2.21
+   Compiling ciborium-ll v0.2.2
+   Compiling rand_chacha v0.9.0
+   Compiling ciborium v0.2.2
+   Compiling proptest v1.11.0
+   Compiling criterion v0.8.2
+    Finished `release-perf` profile [optimized + debuginfo] target(s) in 26.29s
+     Running benches/casefold_key.rs (/data/tmp/cargo-target/release-perf/deps/casefold_key-80ce13d8b0c0eb34)
+Gnuplot not found, using plotters backend
+Benchmarking zero_scan_scalar_all_zero_4k
+Benchmarking zero_scan_scalar_all_zero_4k: Warming up for 3.0000 s
+Benchmarking zero_scan_scalar_all_zero_4k: Collecting 100 samples in estimated 5.0031 s (4.9M iterations)
+Benchmarking zero_scan_scalar_all_zero_4k: Analyzing
+zero_scan_scalar_all_zero_4k
+                        time:   [998.47 ns 1.0094 µs 1.0218 µs]
+                        change: [−42.242% −40.221% −38.179%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 4 outliers among 100 measurements (4.00%)
+  3 (3.00%) high mild
+  1 (1.00%) high severe
+
+Benchmarking zero_scan_chunked_all_zero_4k
+Benchmarking zero_scan_chunked_all_zero_4k: Warming up for 3.0000 s
+Benchmarking zero_scan_chunked_all_zero_4k: Collecting 100 samples in estimated 5.0000 s (74M iterations)
+Benchmarking zero_scan_chunked_all_zero_4k: Analyzing
+zero_scan_chunked_all_zero_4k
+                        time:   [66.641 ns 67.216 ns 67.931 ns]
+Found 9 outliers among 100 measurements (9.00%)
+  6 (6.00%) high mild
+  3 (3.00%) high severe
+
+Benchmarking zero_scan_scalar_late_nonzero_4k
+Benchmarking zero_scan_scalar_late_nonzero_4k: Warming up for 3.0000 s
+Benchmarking zero_scan_scalar_late_nonzero_4k: Collecting 100 samples in estimated 5.0043 s (4.9M iterations)
+Benchmarking zero_scan_scalar_late_nonzero_4k: Analyzing
+zero_scan_scalar_late_nonzero_4k
+                        time:   [987.82 ns 998.01 ns 1.0102 µs]
+                        change: [−27.674% −25.328% −23.008%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 10 outliers among 100 measurements (10.00%)
+  2 (2.00%) high mild
+  8 (8.00%) high severe
+
+Benchmarking zero_scan_chunked_late_nonzero_4k
+Benchmarking zero_scan_chunked_late_nonzero_4k: Warming up for 3.0000 s
+Benchmarking zero_scan_chunked_late_nonzero_4k: Collecting 100 samples in estimated 5.0001 s (74M iterations)
+Benchmarking zero_scan_chunked_late_nonzero_4k: Analyzing
+zero_scan_chunked_late_nonzero_4k
+                        time:   [68.145 ns 68.863 ns 69.665 ns]
+Found 11 outliers among 100 measurements (11.00%)
+  5 (5.00%) high mild
+  6 (6.00%) high severe
