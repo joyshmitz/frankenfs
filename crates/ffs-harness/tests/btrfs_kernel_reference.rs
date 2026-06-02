@@ -260,9 +260,9 @@ fn btrfs_progs_version() -> Option<(u32, u32)> {
     }
     let text = String::from_utf8_lossy(&output.stdout);
     // Find the `vX.Y[.Z]` token and take the leading major.minor.
-    let token = text
-        .split_whitespace()
-        .find(|word| word.starts_with('v') && word[1..].starts_with(|c: char| c.is_ascii_digit()))?;
+    let token = text.split_whitespace().find(|word| {
+        word.starts_with('v') && word[1..].starts_with(|c: char| c.is_ascii_digit())
+    })?;
     let mut parts = token.trim_start_matches('v').split('.');
     let major = parts.next()?.parse().ok()?;
     let minor = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
