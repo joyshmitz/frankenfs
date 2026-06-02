@@ -408,8 +408,18 @@ pub fn repair_local_single(
     available_blocks: &[Option<&[u8]>],
     local_parity: &[u8],
 ) -> Option<Vec<u8>> {
+    if config.data_blocks == 0
+        || config.local_group_size == 0
+        || config.data_blocks % config.local_group_size != 0
+    {
+        return None;
+    }
+
     let group_size = config.local_group_size as usize;
-    assert_eq!(available_blocks.len(), group_size);
+    if available_blocks.len() != group_size {
+        return None;
+    }
+
     let missing_idx = usize::try_from(missing_idx_in_group).ok()?;
     if missing_idx >= group_size || group_idx >= config.num_groups() {
         return None;
@@ -427,12 +437,19 @@ pub fn repair_local_single(
     }
 
     let block_size = local_parity.len();
+    if available_blocks
+        .iter()
+        .flatten()
+        .any(|block| block.len() != block_size)
+    {
+        return None;
+    }
+
     let mut recovered = local_parity.to_vec();
 
     // XOR all available blocks into the parity to isolate the missing block.
     for (i, block) in available_blocks.iter().enumerate() {
         if let Some(b) = block {
-            assert_eq!(b.len(), block_size, "block size mismatch");
             if i != missing_idx {
                 xor_into(&mut recovered, b);
             }
@@ -738,6 +755,43 @@ mod tests {
 
         let recovered = repair_local_single(&cfg, 0, 1, &available, &local[0]);
         assert!(recovered.is_none());
+    }
+
+    #[test]
+    fn local_repair_rejects_malformed_available_count_without_panic() {
+        let cfg = LrcConfig::new(8, 4, 2);
+        let data = make_data(8, 64);
+        let local = encode_local(&cfg, &data);
+
+        let short_available: Vec<Option<&[u8]>> = vec![Some(&data[0]), None, Some(&data[2])];
+        let long_available: Vec<Option<&[u8]>> = vec![
+            Some(&data[0]),
+            Some(&data[1]),
+            None,
+            Some(&data[3]),
+            Some(&data[4]),
+        ];
+
+        assert!(repair_local_single(&cfg, 0, 1, &short_available, &local[0]).is_none());
+        assert!(repair_local_single(&cfg, 0, 2, &long_available, &local[0]).is_none());
+    }
+
+    #[test]
+    fn local_repair_rejects_block_size_mismatch_without_panic() {
+        let cfg = LrcConfig::new(8, 4, 2);
+        let data = make_data(8, 64);
+        let local = encode_local(&cfg, &data);
+        let short_block = data[1][..63].to_vec();
+
+        let available: Vec<Option<&[u8]>> = vec![
+            Some(&data[0]),
+            Some(short_block.as_slice()),
+            None,
+            Some(&data[3]),
+        ];
+
+        assert!(repair_local_single(&cfg, 0, 2, &available, &local[0]).is_none());
+        assert!(repair_local_single(&cfg, 0, 2, &available, &local[0][..63]).is_none());
     }
 
     #[test]
