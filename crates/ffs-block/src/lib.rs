@@ -821,7 +821,11 @@ impl<D: ByteDevice> BlockDevice for ByteBlockDevice<D> {
             .ok_or_else(|| FfsError::Format("block offset overflow".to_owned()))?;
 
         for buf in bufs.iter_mut() {
-            *buf = BlockBuf::zeroed(block_size);
+            // A successful exact vectored read overwrites every byte below; on
+            // error the caller observes Err and must not consume partial data.
+            if buf.len() != block_size {
+                *buf = BlockBuf::zeroed(block_size);
+            }
         }
         let mut slices: Vec<IoSliceMut<'_>> = bufs
             .iter_mut()
@@ -5397,6 +5401,26 @@ mod tests {
             .expect("write block 2");
 
         let mut bufs = vec![BlockBuf::new(Vec::new()), BlockBuf::new(Vec::new())];
+        dev.read_contiguous_blocks(&cx, BlockNumber(1), &mut bufs)
+            .expect("contiguous read");
+
+        assert_eq!(bufs[0].as_slice(), &[4, 5, 6, 7]);
+        assert_eq!(bufs[1].as_slice(), &[8, 9, 10, 11]);
+        assert_eq!(dev.inner().read_count(), 1);
+    }
+
+    #[test]
+    fn byte_block_device_reuses_sized_contiguous_buffers() {
+        let cx = Cx::for_testing();
+        let mem = MemoryByteDevice::new(16);
+        let dev = ByteBlockDevice::new(mem, 4).expect("device");
+
+        dev.write_block(&cx, BlockNumber(1), &[4, 5, 6, 7])
+            .expect("write block 1");
+        dev.write_block(&cx, BlockNumber(2), &[8, 9, 10, 11])
+            .expect("write block 2");
+
+        let mut bufs = vec![BlockBuf::new(vec![0xAA; 4]), BlockBuf::new(vec![0xBB; 4])];
         dev.read_contiguous_blocks(&cx, BlockNumber(1), &mut bufs)
             .expect("contiguous read");
 
