@@ -51,10 +51,14 @@ impl CommitPublicationGate {
     fn publish(&self, commit_seq: CommitSeq) {
         let predecessor = commit_seq.0.saturating_sub(1);
         let mut guard = self.wait_lock.lock();
-        while self.completed() != predecessor {
+        while self.completed() < predecessor {
             self.waiters.fetch_add(1, Ordering::AcqRel);
             self.ready.wait(&mut guard);
             self.waiters.fetch_sub(1, Ordering::AcqRel);
+        }
+
+        if self.completed() >= commit_seq.0 {
+            return;
         }
 
         self.completed_commit.store(commit_seq.0, Ordering::Release);
@@ -1006,6 +1010,29 @@ mod tests {
             .expect("commit 2 published after predecessor");
         worker.join().expect("worker joined");
         assert_eq!(gate.completed(), 2);
+    }
+
+    #[test]
+    fn commit_publication_gate_duplicate_publish_returns_promptly() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let gate = Arc::new(CommitPublicationGate::new());
+        gate.publish(CommitSeq(1));
+        assert_eq!(gate.completed(), 1);
+
+        let (done_tx, done_rx) = mpsc::channel();
+        let worker_gate = Arc::clone(&gate);
+        let worker = std::thread::spawn(move || {
+            worker_gate.publish(CommitSeq(1));
+            done_tx.send(()).expect("send duplicate publish done");
+        });
+
+        done_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("duplicate publish should not wait for an impossible predecessor");
+        worker.join().expect("worker joined");
+        assert_eq!(gate.completed(), 1);
     }
 
     #[test]
