@@ -780,6 +780,11 @@ pub struct OpenFs {
     /// The writable path bypasses this cache because group descriptor counters
     /// can change during allocation/free operations.
     ext4_group_desc_cache: Mutex<BTreeMap<GroupNumber, Ext4GroupDesc>>,
+    /// Read-only ext4 inode-table block cache.
+    ///
+    /// The writable path bypasses this cache because inode metadata changes
+    /// are published through MVCC and eventually persisted to these blocks.
+    ext4_inode_table_block_cache: Mutex<BTreeMap<BlockNumber, Arc<[u8]>>>,
     /// Mutable btrfs allocation state (COW FS tree, extent allocator).
     ///
     /// Protected by a Mutex since write operations need exclusive access.
@@ -2631,6 +2636,7 @@ impl OpenFs {
             jbd2_writer: None,
             ext4_alloc_state: None,
             ext4_group_desc_cache: Mutex::new(BTreeMap::new()),
+            ext4_inode_table_block_cache: Mutex::new(BTreeMap::new()),
             btrfs_alloc_state: None,
             extent_cache: ffs_extent::ExtentCache::new(),
             repair_flush_lifecycle: None,
@@ -6383,7 +6389,7 @@ impl OpenFs {
         self.with_latest_scope(|scope| self.read_group_desc_with_scope(cx, scope, group))
     }
 
-    fn can_cache_ext4_group_desc(&self, scope: &RequestScope, block: BlockNumber) -> bool {
+    fn can_cache_ext4_read_only_block(&self, scope: &RequestScope, block: BlockNumber) -> bool {
         if self.is_writable() {
             return false;
         }
@@ -6428,7 +6434,7 @@ impl OpenFs {
         })?;
         let desc_len = usize::from(desc_size);
 
-        let cacheable = self.can_cache_ext4_group_desc(scope, block_num);
+        let cacheable = self.can_cache_ext4_read_only_block(scope, block_num);
         if cacheable {
             let cached = self.ext4_group_desc_cache.lock().get(&group).cloned();
             if let Some(cached) = cached {
@@ -6469,6 +6475,33 @@ impl OpenFs {
                 .insert(group, desc.clone());
         }
         Ok(desc)
+    }
+
+    fn read_ext4_inode_table_block_with_scope(
+        &self,
+        cx: &Cx,
+        scope: &RequestScope,
+        block: BlockNumber,
+    ) -> Result<Arc<[u8]>, FfsError> {
+        let cacheable = self.can_cache_ext4_read_only_block(scope, block);
+        if cacheable {
+            let cached = self
+                .ext4_inode_table_block_cache
+                .lock()
+                .get(&block)
+                .cloned();
+            if let Some(cached) = cached {
+                return Ok(cached);
+            }
+        }
+
+        let block_data = Arc::<[u8]>::from(self.read_block_with_scope(cx, scope, block)?);
+        if cacheable {
+            self.ext4_inode_table_block_cache
+                .lock()
+                .insert(block, Arc::clone(&block_data));
+        }
+        Ok(block_data)
     }
 
     /// Read an ext4 inode by number via the device, respecting MVCC isolation.
@@ -6556,7 +6589,7 @@ impl OpenFs {
         })?;
         let inode_size = usize::from(sb.inode_size);
 
-        let block_data = self.read_block_with_scope(cx, scope, block_num)?;
+        let block_data = self.read_ext4_inode_table_block_with_scope(cx, scope, block_num)?;
         if offset_in_block + inode_size > block_data.len() {
             return Err(FfsError::Corruption {
                 block: block_num.0,
@@ -27567,6 +27600,28 @@ mod tests {
             dev.read_count(),
             1,
             "the read-only cache should suppress the second descriptor-block read"
+        );
+    }
+
+    #[test]
+    fn read_inode_table_block_cache_hits_in_read_only_mode() {
+        let image = build_ext4_image_with_inode();
+        let dev = CountingDevice::new(TestDevice::from_vec(image), ByteOffset(4 * 4096));
+        let cx = Cx::for_testing();
+
+        let fs = OpenFs::from_device(&cx, Box::new(dev.clone()), &OpenOptions::default()).unwrap();
+        dev.reset_count();
+
+        let first = fs.read_inode(&cx, InodeNumber(2)).unwrap();
+        let second = fs.read_inode(&cx, InodeNumber(2)).unwrap();
+
+        assert_eq!(first, second);
+        assert!(first.is_dir());
+        assert_eq!(first.size, 4096);
+        assert_eq!(
+            dev.read_count(),
+            1,
+            "the read-only cache should suppress the second inode-table block read"
         );
     }
 
