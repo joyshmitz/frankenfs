@@ -28917,6 +28917,123 @@ mod tests {
     }
 
     #[test]
+    fn compressed_partial_cluster_overwrite_rmw_roundtrips_ext4() {
+        // Overwriting the middle of an already-written compressed cluster
+        // exercises the read-modify-write branch (existing_end >
+        // cluster_file_offset): the existing cluster is decompressed, the new
+        // bytes overlaid, and the cluster recompressed. Previously only fresh
+        // writes were tested; the unwritten prefix/suffix must survive.
+        let Some((fs, _tmp)) = open_writable_ext4_mkfs_with_incompat_features(
+            64,
+            ffs_ondisk::Ext4IncompatFeatures::COMPRESSION.0,
+        ) else {
+            eprintln!("mkfs.ext4 not available, skipping");
+            return;
+        };
+
+        let cx = Cx::for_testing();
+        let created = fs
+            .create(
+                &cx,
+                InodeNumber(2),
+                OsStr::new("compr-rmw.bin"),
+                0o644,
+                0,
+                0,
+            )
+            .expect("create compr-rmw.bin");
+
+        let mut write_scope = fs
+            .begin_request_scope(&cx, RequestOp::IoctlWrite)
+            .expect("begin ioctl write scope");
+        fs.set_inode_flags(&cx, &mut write_scope, created.ino, ffs_types::EXT4_COMPR_FL)
+            .expect("enable COMPR flag");
+        fs.commit_request_scope(&mut write_scope)
+            .expect("commit ioctl write scope");
+        fs.end_request_scope(&cx, RequestOp::IoctlWrite, write_scope)
+            .expect("end ioctl write scope");
+
+        // One full 16 KiB cluster (cluster shift 2 → 4 × 4K blocks).
+        const CLUSTER: usize = 16 * 1024;
+        let base: Vec<u8> = (0..CLUSTER).map(|i| (i % 251) as u8).collect();
+        assert_eq!(
+            fs.write(&cx, created.ino, 0, &base).expect("initial write") as usize,
+            base.len()
+        );
+
+        // Overwrite the middle [4K, 12K) with a distinct constant pattern.
+        let patch = vec![0xBB_u8; 8 * 1024];
+        assert_eq!(
+            fs.write(&cx, created.ino, 4096, &patch).expect("overwrite middle") as usize,
+            patch.len()
+        );
+
+        let mut expected = base.clone();
+        expected[4096..4096 + patch.len()].copy_from_slice(&patch);
+
+        let readback = fs
+            .read(&cx, created.ino, 0, CLUSTER as u32)
+            .expect("readback after rmw");
+        assert_eq!(readback.len(), CLUSTER, "size unchanged by middle overwrite");
+        assert_eq!(
+            readback, expected,
+            "partial-cluster overwrite must preserve unwritten prefix/suffix and apply the patch"
+        );
+    }
+
+    #[test]
+    fn compressed_partial_tail_cluster_write_roundtrips_ext4() {
+        // A write whose final cluster is only partially filled (24 KiB = one
+        // full 16K cluster + a half cluster) exercises the partial-tail
+        // compression path where cluster_data_len < cluster_bytes, distinct
+        // from the all-full-clusters spanning write.
+        let Some((fs, _tmp)) = open_writable_ext4_mkfs_with_incompat_features(
+            64,
+            ffs_ondisk::Ext4IncompatFeatures::COMPRESSION.0,
+        ) else {
+            eprintln!("mkfs.ext4 not available, skipping");
+            return;
+        };
+
+        let cx = Cx::for_testing();
+        let created = fs
+            .create(
+                &cx,
+                InodeNumber(2),
+                OsStr::new("compr-tail.bin"),
+                0o644,
+                0,
+                0,
+            )
+            .expect("create compr-tail.bin");
+
+        let mut write_scope = fs
+            .begin_request_scope(&cx, RequestOp::IoctlWrite)
+            .expect("begin ioctl write scope");
+        fs.set_inode_flags(&cx, &mut write_scope, created.ino, ffs_types::EXT4_COMPR_FL)
+            .expect("enable COMPR flag");
+        fs.commit_request_scope(&mut write_scope)
+            .expect("commit ioctl write scope");
+        fs.end_request_scope(&cx, RequestOp::IoctlWrite, write_scope)
+            .expect("end ioctl write scope");
+
+        // 24 KiB: one full cluster (16K) + a half-filled trailing cluster.
+        let payload: Vec<u8> = (0..24 * 1024).map(|i| ((i * 7) % 251) as u8).collect();
+        assert_eq!(
+            fs.write(&cx, created.ino, 0, &payload).expect("partial-tail write") as usize,
+            payload.len()
+        );
+
+        let readback = fs
+            .read(&cx, created.ino, 0, payload.len() as u32)
+            .expect("readback");
+        assert_eq!(
+            readback, payload,
+            "partial-tail compressed write must round-trip byte-identically"
+        );
+    }
+
+    #[test]
     fn set_inode_flags_enabling_compr_rejects_nonempty_file() {
         let Some((fs, _tmp)) = open_writable_ext4_mkfs_with_incompat_features(
             64,
