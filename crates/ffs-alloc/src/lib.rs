@@ -5295,6 +5295,20 @@ InodeAlloc { ino: InodeNumber(17), group: GroupNumber(1) }
         }
 
         #[test]
+        fn proptest_bitmap_find_free_matches_naive(
+            (ref bm, count) in bitmap_strat(),
+            start_seed in any::<u32>(),
+        ) {
+            // Ground-truth for the word-at-a-time find-free scan: first free bit
+            // in [start, count), else in [0, start).
+            let start = start_seed % count;
+            let naive = (start..count)
+                .find(|&i| !bitmap_get(bm, i))
+                .or_else(|| (0..start).find(|&i| !bitmap_get(bm, i)));
+            prop_assert_eq!(bitmap_find_free(bm, count, start), naive);
+        }
+
+        #[test]
         fn proptest_bitmap_find_free_returns_zero_bit(
             (ref bm, count) in bitmap_strat(),
             start_seed in any::<u32>(),
