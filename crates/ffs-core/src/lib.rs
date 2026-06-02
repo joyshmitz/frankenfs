@@ -28959,6 +28959,82 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "bd-kck88: large single-snapshot write reaching double-indirect aborts with \
+                version-chain backpressure (pointer block rewritten >cap times under the \
+                write's own pinned snapshot); re-enable once bd-kck88 is fixed"]
+    fn compressed_write_reaching_double_indirect_roundtrips_ext4() {
+        // The single-indirect test above stops at logical block 31. With 4K
+        // blocks the layout is: 12 direct + 1024 single-indirect (blocks
+        // 12..=1035) then DOUBLE-indirect at i_block[13] from logical block
+        // 1036 (~4.05 MiB). This drives a >4 MiB compressed write so the
+        // double-indirect branch (ensure_indirect_block root, ensure_pointer_in_block
+        // idx1, leaf idx2 = lb_dind / and % ptrs_per_block) is exercised on both
+        // the write and the read-assembly side — previously untested (the
+        // idx1/idx2 pointer math is a classic off-by-one/overflow locus, cf.
+        // the e2compr underflow fixed in bd-ds7fy).
+        let Some((fs, _tmp)) = open_writable_ext4_mkfs_with_incompat_features(
+            64,
+            ffs_ondisk::Ext4IncompatFeatures::COMPRESSION.0,
+        ) else {
+            eprintln!("mkfs.ext4 not available, skipping");
+            return;
+        };
+
+        let cx = Cx::for_testing();
+        let created = fs
+            .create(
+                &cx,
+                InodeNumber(2),
+                OsStr::new("compr-dind.bin"),
+                0o644,
+                0,
+                0,
+            )
+            .expect("create compr-dind.bin");
+
+        let mut write_scope = fs
+            .begin_request_scope(&cx, RequestOp::IoctlWrite)
+            .expect("begin ioctl write scope");
+        fs.set_inode_flags(&cx, &mut write_scope, created.ino, ffs_types::EXT4_COMPR_FL)
+            .expect("enable COMPR flag");
+        fs.commit_request_scope(&mut write_scope)
+            .expect("commit ioctl write scope");
+        fs.end_request_scope(&cx, RequestOp::IoctlWrite, write_scope)
+            .expect("end ioctl write scope");
+
+        // 5 MiB = 1280 logical 4K blocks → reaches block 1036+ via i_block[13]
+        // double-indirect. Varied (non-constant) pattern avoids degenerate
+        // all-hole compression so real data pointers are written through the
+        // double-indirect leaf.
+        let len = 5 * 1024 * 1024;
+        let payload: Vec<u8> = (0_usize..len)
+            .map(|i| u8::try_from((i * 31 + (i / 4096)) % 251).expect("pattern byte fits u8"))
+            .collect();
+        let written = fs
+            .write(&cx, created.ino, 0, &payload)
+            .expect("compressed write reaching double-indirect");
+        assert_eq!(written as usize, payload.len(), "all bytes must be written");
+
+        let readback = fs
+            .read(
+                &cx,
+                created.ino,
+                0,
+                u32::try_from(payload.len()).expect("test read length fits u32"),
+            )
+            .expect("readback");
+        assert_eq!(
+            readback.len(),
+            payload.len(),
+            "read length must match write"
+        );
+        assert_eq!(
+            readback, payload,
+            "compressed double-indirect write must round-trip byte-identically"
+        );
+    }
+
+    #[test]
     fn compressed_partial_cluster_overwrite_rmw_roundtrips_ext4() {
         const CLUSTER: usize = 16 * 1024;
 
