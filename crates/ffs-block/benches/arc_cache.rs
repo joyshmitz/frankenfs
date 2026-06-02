@@ -567,6 +567,35 @@ fn bench_sharded_concurrent_hot_read_64threads(c: &mut Criterion) {
     });
 }
 
+fn bench_shard_route_power2_modulo_baseline(c: &mut Criterion) {
+    const SHARDS: usize = 64;
+    let cache = make_sharded_cache(BLOCK_SIZE_4K, 4_096, 512, SHARDS);
+    let mut block = 0_u64;
+
+    c.bench_function("shard_route_power2_modulo_baseline", |b| {
+        b.iter(|| {
+            block = block.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let shard_count =
+                u64::try_from(black_box(cache.shard_count())).expect("shard count fits u64");
+            let shard = usize::try_from(black_box(block) % shard_count).expect("shard fits usize");
+            black_box(shard);
+        });
+    });
+}
+
+fn bench_shard_route_power2_mask_production(c: &mut Criterion) {
+    const SHARDS: usize = 64;
+    let cache = make_sharded_cache(BLOCK_SIZE_4K, 4_096, 512, SHARDS);
+    let mut block = 0_u64;
+
+    c.bench_function("shard_route_power2_mask_production", |b| {
+        b.iter(|| {
+            block = block.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            black_box(cache.shard_index_for(BlockNumber(black_box(block))));
+        });
+    });
+}
+
 // ── Benchmarks ──────────────────────────────────────────────────────────
 
 fn bench_cache_hit(c: &mut Criterion) {
@@ -747,6 +776,8 @@ criterion_group!(
     bench_workload_database_like,
     bench_concurrent_hot_read_64threads,
     bench_sharded_concurrent_hot_read_64threads,
+    bench_shard_route_power2_modulo_baseline,
+    bench_shard_route_power2_mask_production,
 );
 
 fn main() {

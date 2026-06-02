@@ -53,6 +53,34 @@ After sharded/control ratio: `0.209`.
 - Worker skew note: the unsharded control also improved on the after worker (`99.849 ms -> 74.277 ms`), so the normalized ratio is the conservative comparison.
 - Score: `15.0 = Impact 5 x Confidence 3 / Effort 1`; keep threshold `>= 2.0` satisfied.
 
+## Direct Routing A/B
+
+The initial direct A/B probe used `% 64` as a compile-time constant and was
+rejected because rustc can strength-reduce that expression to the same operation
+as the mask path. The accepted direct probe reads the runtime shard count from
+the cache and then performs `% shard_count`, matching the old production control
+path.
+
+Command:
+
+```text
+RCH_FORCE_REMOTE=true RCH_VISIBILITY=summary TMPDIR=/data/tmp timeout 900 rch exec -- cargo bench --profile release-perf -p ffs-block --bench arc_cache -- shard_route_power2 --sample-size 20 --measurement-time 3 --noplot
+```
+
+Artifact:
+`tests/artifacts/perf/2026-06-02_plumfern_ffs-block-shard-mask/shard_route_power2_runtime_ab.txt`
+
+Worker: `vmi1149989`
+
+Criterion means:
+
+| row | mean | interval |
+| --- | ---: | --- |
+| `shard_route_power2_modulo_baseline` | 2.3974 ns | [2.3435, 2.4722] ns |
+| `shard_route_power2_mask_production` | 530.46 ps | [512.80, 549.86] ps |
+
+Direct routed-expression ratio: `4.52x` faster for the production mask path.
+
 ## Alien Recommendation Card
 
 - Symptom: hot routing path pays integer modulo for every block under high-core sharded cache read bursts.
@@ -74,13 +102,21 @@ After sharded/control ratio: `0.209`.
 Command:
 
 ```text
-RCH_FORCE_REMOTE=true rch exec -- bash -lc 'set -euo pipefail; FFS_BLOCK_CACHE_WORKLOAD_REPORT=- cargo bench --profile release-perf -p ffs-block --bench arc_cache 2>/dev/null | tee >(sha256sum >&2)'
+RCH_FORCE_REMOTE=true RCH_VISIBILITY=summary TMPDIR=/data/tmp timeout 900 rch exec -- env FFS_BLOCK_CACHE_WORKLOAD_REPORT=- cargo bench --profile release-perf -p ffs-block --bench arc_cache -- block_cache_arc_sequential_scan
 ```
 
-Stream sha256:
+Worker: `vmi1149989`
+
+Raw artifact:
+`tests/artifacts/perf/2026-06-02_plumfern_ffs-block-shard-mask/workload_report_remote_raw.txt`
+
+Extracted rows:
+`tests/artifacts/perf/2026-06-02_plumfern_ffs-block-shard-mask/workload_report_remote_rows.tsv`
+
+Rows sha256:
 
 ```text
-3f8b444b755bbaf74b7287be6a70840d68bcb974b7483a1e948faf3f8294ac74  -
+3f8b444b755bbaf74b7287be6a70840d68bcb974b7483a1e948faf3f8294ac74  tests/artifacts/perf/2026-06-02_plumfern_ffs-block-shard-mask/workload_report_remote_rows.tsv
 ```
 
 Report rows:
@@ -94,18 +130,16 @@ arc	compile_like	14848	2285	12563	0.153893	640	640	421	219	1.000000	2711683076
 arc	database_like	38880	33132	5748	0.852160	768	768	715	53	1.000000	2711683077
 ```
 
-Note: writing the report to remote `/tmp` failed with ENOSPC, so the accepted golden check hashes the report stream instead of a remote file. A later direct `rch exec -- cargo bench` env-forward attempt was rejected as evidence because the report env did not reach the remote command and it entered full Criterion sampling.
-
 ## Validation
 
-- `RCH_FORCE_REMOTE=true timeout 700 rch exec -- cargo test -p ffs-block --lib sharded_arc_cache -- --nocapture`
-  - Worker: `vmi1293453`
-  - Result: `3 passed; 0 failed; 255 filtered out`
-- `RCH_FORCE_REMOTE=true timeout 700 rch exec -- cargo check -p ffs-block --all-targets`
-  - Worker: `vmi1293453`
+- `RCH_FORCE_REMOTE=true TMPDIR=/data/tmp timeout 500 rch exec -- cargo fmt --package ffs-block --check`
   - Result: pass
-- `RCH_FORCE_REMOTE=true timeout 900 rch exec -- cargo clippy -p ffs-block --all-targets -- -D warnings`
-  - Worker: `vmi1227854`
+- `RCH_FORCE_REMOTE=true TMPDIR=/data/tmp timeout 900 rch exec -- cargo test -p ffs-block --lib sharded_arc_cache_power_of_two_mask_matches_modulo_routing -- --nocapture`
+  - Worker: `vmi1149989`
+  - Result: `1 passed; 0 failed; 257 filtered out`
+- `RCH_FORCE_REMOTE=true TMPDIR=/data/tmp timeout 1000 rch exec -- cargo check -p ffs-block --all-targets`
+  - Worker: `vmi1149989`
   - Result: pass
-- `RCH_FORCE_REMOTE=true timeout 300 rch exec -- cargo fmt --package ffs-block --check`
+- `RCH_FORCE_REMOTE=true TMPDIR=/data/tmp timeout 1200 rch exec -- cargo clippy -p ffs-block --all-targets -- -D warnings`
+  - Worker: `vmi1153651`
   - Result: pass
