@@ -24194,35 +24194,6 @@ mod tests {
         inner: Arc<Mutex<Vec<u8>>>,
     }
 
-    #[derive(Clone)]
-    struct SharedLogWriter {
-        inner: Arc<Mutex<Vec<u8>>>,
-    }
-
-    impl Write for SharedLogWriter {
-        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            self.inner
-                .lock()
-                .expect("log buffer lock poisoned")
-                .extend_from_slice(buf);
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-
-    impl<'a> MakeWriter<'a> for SharedLogBuffer {
-        type Writer = SharedLogWriter;
-
-        fn make_writer(&'a self) -> Self::Writer {
-            SharedLogWriter {
-                inner: Arc::clone(&self.inner),
-            }
-        }
-    }
-
     fn parse_json_logs(buffer: &SharedLogBuffer) -> Vec<Value> {
         let bytes = buffer
             .inner
@@ -24244,22 +24215,101 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// Install a JSON tracing subscriber that captures to `buffer`, using
-    /// `Dispatch::new` + `set_default` + `rebuild_interest_cache` to avoid
-    /// callsite interest cache poisoning in multi-threaded test runs.
-    fn install_json_subscriber(buffer: &SharedLogBuffer) -> tracing::dispatcher::DefaultGuard {
-        let subscriber = tracing_subscriber::fmt()
-            .json()
-            .flatten_event(true)
-            .with_current_span(true)
-            .with_span_list(true)
-            .with_max_level(tracing::Level::INFO)
-            .with_writer(buffer.clone())
-            .finish();
-        let dispatch = tracing::Dispatch::new(subscriber);
-        let guard = tracing::dispatcher::set_default(&dispatch);
-        tracing::callsite::rebuild_interest_cache();
-        guard
+    /// Slot holding the currently active log-capture sink, keyed by the
+    /// installing thread so cross-test events emitted on other threads (e.g.
+    /// a parallel test exercising the same callsite) are never mixed in.
+    type ActiveLogCapture = Option<(std::thread::ThreadId, Arc<Mutex<Vec<u8>>>)>;
+    static ACTIVE_LOG_CAPTURE: std::sync::Mutex<ActiveLogCapture> = std::sync::Mutex::new(None);
+
+    /// `MakeWriter` for the single process-global capture subscriber. Each
+    /// write checks the active slot and only records bytes for events emitted
+    /// on the thread that installed the current capture buffer.
+    #[derive(Clone, Copy, Default)]
+    struct GlobalCaptureMakeWriter;
+
+    struct GlobalCaptureWriter;
+
+    impl Write for GlobalCaptureWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            // Resolve the target sink and release the registry lock before
+            // touching the sink, so the global slot is never held across the
+            // (potentially contended) buffer append.
+            let sink = {
+                let active = ACTIVE_LOG_CAPTURE
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                match active.as_ref() {
+                    Some((thread_id, sink)) if *thread_id == std::thread::current().id() => {
+                        Some(Arc::clone(sink))
+                    }
+                    _ => None,
+                }
+            };
+            if let Some(sink) = sink {
+                sink.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .extend_from_slice(buf);
+            }
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> MakeWriter<'a> for GlobalCaptureMakeWriter {
+        type Writer = GlobalCaptureWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            GlobalCaptureWriter
+        }
+    }
+
+    /// Reset the active capture slot when an installed subscriber goes out of
+    /// scope, restoring the no-capture state for subsequent tests.
+    struct LogCaptureGuard;
+
+    impl Drop for LogCaptureGuard {
+        fn drop(&mut self) {
+            *ACTIVE_LOG_CAPTURE
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        }
+    }
+
+    /// Install (once) a process-global JSON subscriber and route capture to
+    /// `buffer` for the current thread.
+    ///
+    /// The previous implementation used a thread-local `set_default` plus
+    /// `rebuild_interest_cache`. Because tracing's callsite interest cache is
+    /// global, a parallel test that first registered the `ffs::btrfs::rw`
+    /// callsite against the no-op subscriber could cache it as `never`, and a
+    /// racing `rebuild_interest_cache` from another thread could re-poison it,
+    /// intermittently dropping the `btrfs_sync_applied` event in CI (bd-wh0bd).
+    /// A single always-on INFO subscriber installed at process start registers
+    /// every callsite against a real subscriber exactly once, so interest is
+    /// stably `always` and capture is gated solely by the active-buffer slot.
+    fn install_json_subscriber(buffer: &SharedLogBuffer) -> LogCaptureGuard {
+        static INSTALLED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+        INSTALLED.get_or_init(|| {
+            let subscriber = tracing_subscriber::fmt()
+                .json()
+                .flatten_event(true)
+                .with_current_span(true)
+                .with_span_list(true)
+                .with_max_level(tracing::Level::INFO)
+                .with_writer(GlobalCaptureMakeWriter)
+                .finish();
+            // Best-effort: if another global default is already installed we
+            // keep going; capture is still gated by the active-buffer slot.
+            let _ = tracing::subscriber::set_global_default(subscriber);
+        });
+        *ACTIVE_LOG_CAPTURE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some((std::thread::current().id(), Arc::clone(&buffer.inner)));
+        LogCaptureGuard
     }
 
     fn numa_test_geometry() -> FsGeometry {
