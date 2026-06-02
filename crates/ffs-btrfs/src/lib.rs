@@ -5606,8 +5606,13 @@ where
                         // Inline extent: data follows header
                         let data = &entry.data[21..];
                         emit_write_chunks(&mut builder, &path, file_offset, data);
-                    } else if extent_type == 1 && entry.data.len() >= 53 {
-                        // Regular extent: read from disk
+                    } else if (extent_type == BTRFS_FILE_EXTENT_REG
+                        || extent_type == BTRFS_FILE_EXTENT_PREALLOC)
+                        && entry.data.len() >= 53
+                    {
+                        // Regular extents carry initialized data; preallocated
+                        // extents are unwritten and must be represented as an
+                        // extent update, not as bytes read from disk.
                         let disk_bytenr =
                             u64::from_le_bytes(entry.data[21..29].try_into().unwrap_or([0; 8]));
                         let disk_num_bytes =
@@ -5617,8 +5622,7 @@ where
                         let num_bytes =
                             u64::from_le_bytes(entry.data[45..53].try_into().unwrap_or([0; 8]));
 
-                        if disk_bytenr == 0 {
-                            // Sparse hole - emit update_extent instead
+                        if extent_type == BTRFS_FILE_EXTENT_PREALLOC || disk_bytenr == 0 {
                             let (cmd, attrs) =
                                 build_update_extent_command(&path, file_offset, num_bytes);
                             let refs: Vec<(SendAttr, &[u8])> =
@@ -5643,7 +5647,6 @@ where
                             // Skip extent on read error
                         }
                     }
-                    // type 2 = prealloc, skip for now
                 }
 
                 // Truncate to exact size
@@ -15998,5 +16001,130 @@ mod tests {
             reassembled, original,
             "reassembled file must match original"
         );
+    }
+
+    #[test]
+    #[expect(clippy::too_many_lines)]
+    fn generate_send_stream_prealloc_extent_emits_update_extent() {
+        const ATTR_PATH: u16 = SendAttr::Path as u16;
+        const ATTR_FILE_OFFSET: u16 = SendAttr::FileOffset as u16;
+        const ATTR_SIZE: u16 = SendAttr::Size as u16;
+        const FILE_OFFSET: u64 = 8192;
+        const PREALLOC_LEN: u64 = 16_384;
+
+        fn make_inode_item(mode: u32, size: u64, uid: u32, gid: u32) -> Vec<u8> {
+            let mut buf = vec![0u8; 160];
+            buf[0..8].copy_from_slice(&1_u64.to_le_bytes());
+            buf[16..24].copy_from_slice(&size.to_le_bytes());
+            buf[24..32].copy_from_slice(&size.to_le_bytes());
+            buf[40..44].copy_from_slice(&1_u32.to_le_bytes());
+            buf[44..48].copy_from_slice(&uid.to_le_bytes());
+            buf[48..52].copy_from_slice(&gid.to_le_bytes());
+            buf[52..56].copy_from_slice(&mode.to_le_bytes());
+            buf
+        }
+
+        #[expect(clippy::cast_possible_truncation)]
+        fn make_inode_ref(index: u64, name: &[u8]) -> Vec<u8> {
+            let mut buf = Vec::new();
+            buf.extend_from_slice(&index.to_le_bytes());
+            buf.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            buf.extend_from_slice(name);
+            buf
+        }
+
+        fn make_prealloc_extent(disk_bytenr: u64, disk_num_bytes: u64, num_bytes: u64) -> Vec<u8> {
+            let mut buf = vec![0u8; 53];
+            buf[20] = BTRFS_FILE_EXTENT_PREALLOC;
+            buf[21..29].copy_from_slice(&disk_bytenr.to_le_bytes());
+            buf[29..37].copy_from_slice(&disk_num_bytes.to_le_bytes());
+            buf[37..45].copy_from_slice(&0_u64.to_le_bytes());
+            buf[45..53].copy_from_slice(&num_bytes.to_le_bytes());
+            buf
+        }
+
+        fn attr_u64(command: &SendStreamCommand, attr: u16) -> u64 {
+            let raw = command
+                .attrs
+                .iter()
+                .find_map(|(candidate, value)| (*candidate == attr).then_some(value.as_slice()))
+                .expect("attribute should exist");
+            u64::from_le_bytes(raw.try_into().expect("attribute should be u64"))
+        }
+
+        let items = vec![
+            BtrfsLeafEntry {
+                key: BtrfsKey {
+                    objectid: 257,
+                    item_type: BTRFS_ITEM_INODE_ITEM,
+                    offset: 0,
+                },
+                data: make_inode_item(0o100_644, FILE_OFFSET + PREALLOC_LEN, 0, 0),
+            },
+            BtrfsLeafEntry {
+                key: BtrfsKey {
+                    objectid: 257,
+                    item_type: BTRFS_ITEM_INODE_REF,
+                    offset: BTRFS_FIRST_FREE_OBJECTID,
+                },
+                data: make_inode_ref(1, b"prealloc.bin"),
+            },
+            BtrfsLeafEntry {
+                key: BtrfsKey {
+                    objectid: 257,
+                    item_type: BTRFS_ITEM_EXTENT_DATA,
+                    offset: FILE_OFFSET,
+                },
+                data: make_prealloc_extent(0x40_0000, PREALLOC_LEN, PREALLOC_LEN),
+            },
+        ];
+
+        let uuid = [0_u8; 16];
+        let mut read_extent_called = false;
+        let stream = generate_send_stream(&items, b"test_subvol", &uuid, 1, |_bytenr, _len| {
+            read_extent_called = true;
+            Err(ffs_types::ParseError::InvalidField {
+                field: "test",
+                reason: "prealloc extents must not read disk bytes",
+            })
+        })
+        .expect("generate send stream");
+
+        assert!(
+            !read_extent_called,
+            "preallocated extents are unwritten and must not call read_extent"
+        );
+
+        let parsed = parse_send_stream(&stream).expect("parse generated stream");
+        let cmd_types: Vec<_> = parsed.commands.iter().map(|c| c.cmd).collect();
+        assert!(
+            cmd_types.contains(&SendCommand::Mkfile),
+            "regular file should still be created"
+        );
+        assert!(
+            !cmd_types.contains(&SendCommand::Write),
+            "preallocated unwritten extent must not emit file data"
+        );
+
+        let update_extents: Vec<_> = parsed
+            .commands
+            .iter()
+            .filter(|command| command.cmd == SendCommand::UpdateExtent)
+            .collect();
+        assert_eq!(
+            update_extents.len(),
+            1,
+            "exactly one UpdateExtent command should preserve the prealloc range"
+        );
+
+        let update = update_extents[0];
+        let path = update
+            .attrs
+            .iter()
+            .find_map(|(candidate, value)| (*candidate == ATTR_PATH).then_some(value.as_slice()))
+            .expect("UpdateExtent should carry path");
+        assert_eq!(path, b"test_subvol/prealloc.bin");
+        assert_eq!(attr_u64(update, ATTR_FILE_OFFSET), FILE_OFFSET);
+        assert_eq!(attr_u64(update, ATTR_SIZE), PREALLOC_LEN);
     }
 }
