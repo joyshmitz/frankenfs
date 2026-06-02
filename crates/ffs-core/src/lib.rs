@@ -6544,7 +6544,7 @@ impl OpenFs {
             }
         }
 
-        let block_data = Arc::<[u8]>::from(self.read_block_with_scope(cx, scope, block)?);
+        let block_data = self.read_block_arc_with_scope(cx, scope, block)?;
         if cacheable {
             self.ext4_inode_table_block_cache
                 .lock()
@@ -6567,7 +6567,7 @@ impl OpenFs {
             }
         }
 
-        let block_data = Arc::<[u8]>::from(self.read_block_with_scope(cx, scope, block)?);
+        let block_data = self.read_block_arc_with_scope(cx, scope, block)?;
         if cacheable {
             let mut cache = self.ext4_file_data_block_cache.lock();
             if cache.len() < EXT4_FILE_DATA_BLOCK_CACHE_LIMIT {
@@ -6998,6 +6998,38 @@ impl OpenFs {
         // 3. Fall back to the device's default adapter (which uses the current snapshot).
         let dev = self.block_device_adapter();
         Ok(dev.read_block(cx, block)?.as_slice().to_vec())
+    }
+
+    /// Like [`Self::read_block_with_scope`] but materialises the block straight
+    /// into an `Arc<[u8]>` with a single copy, for the block-cache callers that
+    /// need shared ownership. Routing those through `read_block_with_scope`
+    /// copies twice (device buffer → `Vec`, then `Vec` → `Arc<[u8]>`); building
+    /// the `Arc` directly from the source slice collapses that to one copy on
+    /// the cache-miss path. Keep the branch logic in sync with
+    /// `read_block_with_scope`.
+    fn read_block_arc_with_scope(
+        &self,
+        cx: &Cx,
+        scope: &RequestScope,
+        block: BlockNumber,
+    ) -> Result<Arc<[u8]>, FfsError> {
+        // 1. Staged write in the active transaction.
+        if let Some(tx) = &scope.tx {
+            if let Some(staged) = tx.staged_write(block) {
+                return Ok(Arc::<[u8]>::from(staged));
+            }
+        }
+
+        // 2. Snapshot-visible MVCC version.
+        if let Some(snapshot) = scope.snapshot {
+            if let Some(visible) = self.mvcc_store.read().read_visible(block, snapshot) {
+                return Ok(Arc::<[u8]>::from(visible.as_ref()));
+            }
+        }
+
+        // 3. Device default adapter.
+        let dev = self.block_device_adapter();
+        Ok(Arc::<[u8]>::from(dev.read_block(cx, block)?.as_slice()))
     }
 
     fn read_contiguous_blocks_with_scope(

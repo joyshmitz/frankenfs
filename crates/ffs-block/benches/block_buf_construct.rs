@@ -46,6 +46,27 @@ fn bench_block_buf_construct(c: &mut Criterion) {
             black_box(buf.as_slice().to_vec())
         });
     });
+
+    // ── Arc<[u8]> materialisation on the block-cache miss path ───────────────
+    // The cache wrappers in ffs-core need an Arc<[u8]>. Building it through a
+    // Vec (`Arc::from(buf.as_slice().to_vec())`) copies twice; building it from
+    // the slice directly (`Arc::from(buf.as_slice())`) copies once.
+    let mut filled = BlockBuf::zeroed(BLOCK_SIZE);
+    filled.make_mut().copy_from_slice(&src);
+
+    c.bench_function("block_arc_via_vec_two_copies", |b| {
+        b.iter(|| {
+            let buf = black_box(&filled);
+            black_box(std::sync::Arc::<[u8]>::from(buf.as_slice().to_vec()))
+        });
+    });
+
+    c.bench_function("block_arc_via_slice_one_copy", |b| {
+        b.iter(|| {
+            let buf = black_box(&filled);
+            black_box(std::sync::Arc::<[u8]>::from(buf.as_slice()))
+        });
+    });
 }
 
 criterion_group!(benches, bench_block_buf_construct);
