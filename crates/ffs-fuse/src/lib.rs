@@ -4858,6 +4858,22 @@ impl FrankenFuse {
         }
     }
 
+    fn dispatch_opendir(&self, cx: &Cx, ino: InodeNumber) -> ffs_error::Result<(u64, u32)> {
+        self.with_request_scope(cx, RequestOp::Opendir, |cx, scope| {
+            let attr = self.inner.ops.getattr(cx, scope, ino)?;
+            Self::validate_opendir_attr(&attr)?;
+            Ok((0, 0))
+        })
+    }
+
+    fn validate_opendir_attr(attr: &InodeAttr) -> ffs_error::Result<()> {
+        if attr.kind == FfsFileType::Directory {
+            Ok(())
+        } else {
+            Err(FfsError::NotDirectory)
+        }
+    }
+
     fn enforce_mutation_guards(
         &self,
         cx: &Cx,
@@ -5540,8 +5556,8 @@ impl Filesystem for FrankenFuse {
 
     fn opendir(&mut self, _req: &Request<'_>, ino: u64, _flags: i32, reply: ReplyOpen) {
         let cx = Self::cx_for_request();
-        match self.with_request_scope(&cx, RequestOp::Opendir, |_cx, _scope| Ok(())) {
-            Ok(()) => reply.opened(0, 0),
+        match self.dispatch_opendir(&cx, InodeNumber(ino)) {
+            Ok((fh, open_flags)) => reply.opened(fh, open_flags),
             Err(e) => {
                 let ctx = FuseErrorContext {
                     error: &e,
@@ -6528,7 +6544,8 @@ impl Filesystem for FrankenFuse {
         _flags: i32,
         reply: ReplyEmpty,
     ) {
-        // opendir returns dummy handles, so releasedir is a no-op.
+        // Directory handles are stateless in this adapter, so there is no
+        // backend resource to release.
         reply.ok();
     }
 
@@ -8288,6 +8305,108 @@ mod tests {
             blksize: 4096,
             generation: 1,
         }
+    }
+
+    struct OpendirAttrFs {
+        kind: Option<FfsFileType>,
+    }
+
+    impl FsOps for OpendirAttrFs {
+        fn getattr(
+            &self,
+            _cx: &Cx,
+            _scope: &mut RequestScope,
+            ino: InodeNumber,
+        ) -> ffs_error::Result<InodeAttr> {
+            let Some(kind) = self.kind else {
+                return Err(FfsError::NotFound(format!("inode {ino}")));
+            };
+            let mut attr = make_test_attr(kind, 4096);
+            attr.ino = ino;
+            Ok(attr)
+        }
+
+        fn lookup(
+            &self,
+            _cx: &Cx,
+            _scope: &mut RequestScope,
+            _parent: InodeNumber,
+            _name: &OsStr,
+        ) -> ffs_error::Result<InodeAttr> {
+            unreachable!("opendir validation only calls getattr")
+        }
+
+        fn readdir(
+            &self,
+            _cx: &Cx,
+            _scope: &mut RequestScope,
+            _ino: InodeNumber,
+            _offset: u64,
+        ) -> ffs_error::Result<Vec<FfsDirEntry>> {
+            unreachable!("opendir validation only calls getattr")
+        }
+
+        fn read(
+            &self,
+            _cx: &Cx,
+            _scope: &mut RequestScope,
+            _ino: InodeNumber,
+            _offset: u64,
+            _size: u32,
+        ) -> ffs_error::Result<Vec<u8>> {
+            unreachable!("opendir validation only calls getattr")
+        }
+
+        fn readlink(
+            &self,
+            _cx: &Cx,
+            _scope: &mut RequestScope,
+            _ino: InodeNumber,
+        ) -> ffs_error::Result<Vec<u8>> {
+            unreachable!("opendir validation only calls getattr")
+        }
+    }
+
+    #[test]
+    fn opendir_dispatch_accepts_directory_inode() {
+        let fuse = FrankenFuse::new(Box::new(OpendirAttrFs {
+            kind: Some(FfsFileType::Directory),
+        }));
+        let cx = Cx::for_testing();
+
+        let result = fuse
+            .dispatch_opendir(&cx, InodeNumber(7))
+            .expect("directory opendir");
+
+        assert_eq!(result, (0, 0));
+    }
+
+    #[test]
+    fn opendir_dispatch_rejects_regular_file_inode() {
+        let fuse = FrankenFuse::new(Box::new(OpendirAttrFs {
+            kind: Some(FfsFileType::RegularFile),
+        }));
+        let cx = Cx::for_testing();
+
+        let err = fuse
+            .dispatch_opendir(&cx, InodeNumber(7))
+            .expect_err("regular file opendir should fail");
+
+        assert!(matches!(err, FfsError::NotDirectory));
+        assert_eq!(err.to_errno(), libc::ENOTDIR);
+    }
+
+    #[test]
+    fn opendir_dispatch_preserves_missing_inode_error() {
+        let fuse = FrankenFuse::new(Box::new(OpendirAttrFs { kind: None }));
+        let cx = Cx::for_testing();
+
+        let err = fuse
+            .dispatch_opendir(&cx, InodeNumber(999))
+            .expect_err("missing inode opendir should fail");
+
+        assert!(matches!(err, FfsError::NotFound(_)));
+        assert_eq!(err.to_errno(), libc::ENOENT);
     }
 
     #[test]
