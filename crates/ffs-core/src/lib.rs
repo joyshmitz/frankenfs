@@ -34438,6 +34438,61 @@ mod tests {
     }
 
     #[test]
+    fn write_fallocate_punch_hole_in_middle_of_extent_splits_and_frees() {
+        // The existing punch test removes the trailing block (extent
+        // truncation). Punching the MIDDLE of a larger contiguous region forces
+        // the extent to be split into a head and a tail with a hole between —
+        // the subtle case. The surrounding data must survive, the hole must
+        // read as zeros, size must be preserved, and the punched blocks freed.
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        let attr = fs
+            .create(&cx, root, OsStr::new("punch-mid.bin"), 0o644, 0, 0)
+            .expect("create");
+
+        // 16 KiB of non-zero data (so the punched hole's zeros are unambiguous).
+        let payload: Vec<u8> = (0..16 * 1024).map(|i| ((i % 250) + 1) as u8).collect();
+        fs.write(&cx, attr.ino, 0, &payload).expect("write 16K");
+        let before = fs.getattr(&cx, attr.ino).expect("getattr before punch");
+
+        // Punch the middle two blocks: [4K, 12K).
+        fs.fallocate(
+            &cx,
+            attr.ino,
+            4096,
+            8192,
+            libc::FALLOC_FL_KEEP_SIZE | libc::FALLOC_FL_PUNCH_HOLE,
+        )
+        .expect("punch middle hole");
+
+        let after = fs.getattr(&cx, attr.ino).expect("getattr after punch");
+        assert_eq!(after.size, payload.len() as u64, "punch_hole keeps file size");
+        assert!(
+            after.blocks < before.blocks,
+            "punching the middle must free the punched blocks (before={}, after={})",
+            before.blocks,
+            after.blocks
+        );
+
+        let readback = fs.read(&cx, attr.ino, 0, payload.len() as u32).expect("read after punch");
+        assert_eq!(readback.len(), payload.len());
+        assert_eq!(&readback[..4096], &payload[..4096], "head before hole intact");
+        assert!(
+            readback[4096..12288].iter().all(|&b| b == 0),
+            "punched middle reads as zeros"
+        );
+        assert_eq!(
+            &readback[12288..],
+            &payload[12288..],
+            "tail after hole intact (extent split preserved)"
+        );
+    }
+
+    #[test]
     fn write_setattr_truncate() {
         let Some(fs) = open_writable_ext4() else {
             return;
