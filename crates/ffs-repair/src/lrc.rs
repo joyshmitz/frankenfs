@@ -694,6 +694,16 @@ mod tests {
             .collect()
     }
 
+    fn hex_encode(bytes: &[u8]) -> String {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let mut out = String::with_capacity(bytes.len() * 2);
+        for &byte in bytes {
+            out.push(HEX[(byte >> 4) as usize] as char);
+            out.push(HEX[(byte & 0x0f) as usize] as char);
+        }
+        out
+    }
+
     #[test]
     fn config_basics() {
         let cfg = LrcConfig::new(12, 4, 2);
@@ -1058,6 +1068,26 @@ mod tests {
         let data = make_data(8, 16);
         let global = encode_global(&cfg, &data);
         assert_eq!(global.len(), 2);
+    }
+
+    #[test]
+    fn lrc_global_parity_golden_report() {
+        let cfg = LrcConfig::new(16, 4, 4);
+        let data = make_data(16, 96);
+        let global = encode_global(&cfg, &data);
+
+        assert_eq!(global.len(), cfg.global_parity_count as usize);
+        assert!(global.iter().all(|block| block.len() == 96));
+
+        println!("LRC_GLOBAL_PARITY_GOLDEN_BEGIN");
+        println!(
+            "config data_blocks={} local_group_size={} global_parity_count={} block_size=96",
+            cfg.data_blocks, cfg.local_group_size, cfg.global_parity_count
+        );
+        for (idx, parity) in global.iter().enumerate() {
+            println!("parity[{idx}]={}", hex_encode(parity));
+        }
+        println!("LRC_GLOBAL_PARITY_GOLDEN_END");
     }
 
     #[test]

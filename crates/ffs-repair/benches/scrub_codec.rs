@@ -315,7 +315,7 @@ const PREP_BATCH: usize = 64;
 const PREP_BATCHES: usize = 32;
 
 fn simulate_read_fill(bufs: &mut [BlockBuf]) {
-    for buf in bufs.iter_mut() {
+    for buf in &mut *bufs {
         let slice = buf.make_mut();
         let n = slice.len();
         slice[0] = black_box(0xAB);
@@ -346,7 +346,7 @@ fn bench_scrub_buffer_prep(c: &mut Criterion) {
                 if bufs.len() < PREP_BATCH {
                     bufs.resize_with(PREP_BATCH, || BlockBuf::new(Vec::new()));
                 }
-                for buf in bufs.iter_mut() {
+                for buf in &mut bufs {
                     if buf.len() != block {
                         *buf = BlockBuf::zeroed(block);
                     }
