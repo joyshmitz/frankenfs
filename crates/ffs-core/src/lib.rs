@@ -9593,7 +9593,7 @@ fn encode_btrfs_ino_paths_container(
 pub const BTRFS_DEV_INFO_ARGS_SIZE: usize = 4096;
 
 /// Offset of the trailing `path[1024]` field inside `btrfs_ioctl_dev_info_args`.
-const BTRFS_DEV_INFO_PATH_OFFSET: usize = 0x0C08;
+const BTRFS_DEV_INFO_PATH_OFFSET: usize = 0x0C00;
 /// Maximum device-path length in the reply (= `BTRFS_DEVICE_PATH_NAME_MAX`).
 const BTRFS_DEV_INFO_PATH_MAX: usize = 1024;
 
@@ -9627,7 +9627,7 @@ fn btrfs_dev_info_enodev() -> FfsError {
 ///   0x0018  __u64     bytes_used
 ///   0x0020  __u64     total_bytes
 ///   0x0028  __u64[379] unused          (zero)
-///   0x0C08  __u8[1024] path            (empty on FUSE — we have no
+///   0x0C00  __u8[1024] path            (empty on FUSE — we have no
 ///                                      backing block-device path to report)
 /// ```
 fn encode_btrfs_dev_info_args(
@@ -9649,7 +9649,7 @@ fn encode_btrfs_dev_info_args(
     buf[0x08..0x18].copy_from_slice(&sb.fsid);
     buf[0x18..0x20].copy_from_slice(&sb.bytes_used.to_ne_bytes());
     buf[0x20..0x28].copy_from_slice(&sb.total_bytes.to_ne_bytes());
-    // `unused[379]` (0x28..0x0C08) stays zeroed.  `path[1024]` (0x0C08..4096)
+    // `unused[379]` (0x28..0x0C00) stays zeroed.  `path[1024]` (0x0C00..4096)
     // also stays zeroed — FrankenFS serves btrfs images out of a backing
     // file, not a /dev/* node, so there is no meaningful device path to
     // report and the kernel itself zeroes this field on filesystems that
@@ -13055,9 +13055,10 @@ impl OpenFs {
                             ino,
                             -(i128::from(removed_sectors)),
                         )?;
+                        let rollback_block_dev = self.block_device_adapter();
                         ffs_alloc::free_blocks_persist(
                             cx,
-                            &block_dev,
+                            &rollback_block_dev,
                             geo,
                             groups,
                             block_alloc.start,
@@ -13146,9 +13147,10 @@ impl OpenFs {
                     groups,
                     persist_ctx,
                 } = &mut *alloc;
+                let rollback_block_dev = self.block_device_adapter();
                 ffs_alloc::free_blocks_persist(
                     cx,
-                    &block_dev,
+                    &rollback_block_dev,
                     geo,
                     groups,
                     new_block,
@@ -13348,9 +13350,10 @@ impl OpenFs {
                     groups,
                     persist_ctx,
                 } = &mut *alloc;
+                let rollback_block_dev = self.block_device_adapter();
                 ffs_alloc::free_blocks_persist(
                     cx,
-                    &block_dev,
+                    &rollback_block_dev,
                     geo,
                     groups,
                     new_block,
@@ -17592,6 +17595,15 @@ impl OpenFs {
             let Some(parent) = Self::btrfs_lookup_parent_checked(alloc, current)? else {
                 return Ok(false);
             };
+            if parent == current {
+                if current == BTRFS_FIRST_FREE_OBJECTID {
+                    return Ok(false);
+                }
+                return Err(FfsError::Corruption {
+                    block: 0,
+                    detail: format!("cycle in btrfs parent chain at objectid {current}"),
+                });
+            }
             current = parent;
         }
 

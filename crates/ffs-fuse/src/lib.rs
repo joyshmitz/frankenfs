@@ -15451,6 +15451,47 @@ mod tests {
     }
 
     #[test]
+    fn conformance_fuse_symlink_path_max_minus_one_target_round_trip() {
+        const LINUX_PATH_MAX: usize = 4096;
+
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let options = MountOptions {
+            read_only: false,
+            ..MountOptions::default()
+        };
+        let fuse = FrankenFuse::with_options(
+            Box::new(MutationRecordingFs::new(Arc::clone(&calls))),
+            &options,
+        );
+        let target = "a".repeat(LINUX_PATH_MAX - 1);
+
+        let attr = fuse
+            .symlink_for_fuzzing(2, b"max_link", target.as_bytes(), 1001, 1002)
+            .expect("PATH_MAX-1 symlink target should reach backend");
+
+        assert_eq!(attr.kind, FfsFileType::Symlink);
+        let observed = calls.lock().expect("lock mutation calls");
+        assert_eq!(observed.len(), 1);
+        let observed_call = observed[0].clone();
+        drop(observed);
+        let MutationCall::Symlink {
+            parent,
+            name,
+            target: observed_target,
+            uid,
+            gid,
+        } = observed_call
+        else {
+            panic!("expected symlink call, got {observed_call:?}");
+        };
+        assert_eq!(parent, InodeNumber(2));
+        assert_eq!(name, "max_link");
+        assert_eq!(observed_target.len(), target.len());
+        assert_eq!(observed_target, target);
+        assert_eq!((uid, gid), (1001, 1002));
+    }
+
+    #[test]
     fn conformance_fuse_open_file_lifecycle_round_trip() {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let fuse = FrankenFuse::new(Box::new(MutationRecordingFs::with_scope_recording(

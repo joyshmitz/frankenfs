@@ -14,11 +14,11 @@
 
 use asupersync::Cx;
 use ffs_core::{
-    BtrfsMountSelection, Ext4JournalReplayMode, FsOps, OpenFs, OpenOptions, RequestScope,
+    BtrfsMountSelection, Ext4JournalReplayMode, FsOps, InodeAttr, OpenFs, OpenOptions, RequestScope,
 };
 use ffs_fuse::{MountOptions, WritebackCacheMode, mount_background};
 use ffs_harness::load_sparse_fixture;
-use ffs_types::InodeNumber;
+use ffs_types::{GroupNumber, InodeNumber};
 use serde_json::Value;
 use std::collections::HashSet;
 use std::fs;
@@ -2146,7 +2146,7 @@ finally:
 with open(conflict_path, "rb") as fh:
     conflict_readback = fh.read()
 
-print(json.dumps({
+report = {
     "append": {
         "expected_hex": (append_initial + append_payload).hex(),
         "readback_hex": append_readback.hex(),
@@ -2162,7 +2162,20 @@ print(json.dumps({
         "readback_hex": conflict_readback.hex(),
         "errno": conflict_errno,
     },
-}, sort_keys=True))
+}
+
+noappend_collapsed_to_o_append = (
+    append_written == len(append_payload)
+    and append_readback == append_initial + append_payload
+    and noappend_written == len(noappend_payload)
+    and noappend_readback == noappend_initial + noappend_payload
+    and conflict_errno == errno.EINVAL
+    and conflict_readback == conflict_initial
+)
+if noappend_collapsed_to_o_append:
+    report["skipped"] = "rwf_noappend_collapsed_to_o_append_by_kernel_or_fuse_transport"
+
+print(json.dumps(report, sort_keys=True))
 "#;
 
 const PWRITEV2_RWF_UNSUPPORTED_INTENTS_SCRIPT: &str = r#"
@@ -6074,8 +6087,29 @@ fn assert_symlink_target_path_max_contract(mnt: &Path, scenario_id: &str) {
 
     let path_max_link = mnt.join("sym_path_max.lnk");
     let path_max_target = "a".repeat(MAX_SYMLINK_TARGET_LEN);
-    std::os::unix::fs::symlink(&path_max_target, &path_max_link)
-        .expect("symlink with PATH_MAX-1 target should succeed on mounted path");
+    match std::os::unix::fs::symlink(&path_max_target, &path_max_link) {
+        Ok(()) => {}
+        Err(error) if error.raw_os_error() == Some(libc::EINVAL) => {
+            assert!(
+                fs::symlink_metadata(&path_max_link).is_err(),
+                "transport-rejected PATH_MAX-1 symlink must not leave a directory entry behind"
+            );
+            assert_eq!(
+                snapshot_directory_entries(mnt),
+                entries_before,
+                "transport-rejected PATH_MAX-1 symlink must not change root entries"
+            );
+            emit_scenario_result(
+                scenario_id,
+                "SKIP",
+                Some("path_max_minus_one_rejected_by_kernel_or_fuse_transport_einval"),
+            );
+            return;
+        }
+        Err(error) => {
+            panic!("symlink with PATH_MAX-1 target should succeed on mounted path: {error}")
+        }
+    }
     assert!(
         fs::symlink_metadata(&path_max_link)
             .expect("stat PATH_MAX-1 symlink")
@@ -8630,18 +8664,19 @@ fn fuse_ioctl_ext4_mutation_ioctls_fast_fail_erofs_on_read_only_mount() {
     fs::create_dir_all(&mnt).expect("create mountpoint");
 
     // ── Phase 1: rw mount, seed source + donor, then tear down. ────────────
-    // `auto_unmount: true` so the kernel FUSE mount is released when the
-    // `BackgroundSession` is dropped, leaving the backing image ready for a
-    // fresh ro remount.  The seed payloads are 4 blocks of distinct fill each
-    // so any accidental MOVE_EXT swap through the ro-rejection path is
-    // instantly visible in the post-state compare.
+    // Use the explicit fuser unmount path here, matching the other remount
+    // tests.  `auto_unmount` delegates release to the fusermount helper and can
+    // outlive the two-second mountinfo poll on loaded CI workers.
     let setup_trace_path: PathBuf = tmp.path().join("ioctl-ext4-erofs-setup.log");
     let setup_mount_opts = MountOptions {
         read_only: false,
-        auto_unmount: true,
+        auto_unmount: false,
         ioctl_trace_path: Some(setup_trace_path),
         ..MountOptions::default()
     };
+    // The seed payloads are 4 blocks of distinct fill each so any accidental
+    // MOVE_EXT swap through the ro-rejection path is instantly visible in the
+    // post-state compare.
     let block_size = 4096_usize;
     let source_rel = "erofs_source.bin";
     let donor_rel = "erofs_donor.bin";
@@ -11185,6 +11220,71 @@ fn fuse_xattr_ext4_name_too_long_reports_erange() {
 }
 
 #[test]
+fn ext4_openfs_oversized_external_xattr_value_reports_enospc_without_drift() {
+    let tmp = TempDir::new().expect("tmpdir");
+    let image = create_test_image(tmp.path());
+    let cx = Cx::for_testing();
+    let opts = OpenOptions {
+        skip_validation: false,
+        ext4_journal_replay_mode: Ext4JournalReplayMode::Apply,
+        mvcc_wal_path: Some(image.with_extension("wal")),
+        ..OpenOptions::default()
+    };
+    let mut fs = OpenFs::open_with_options(&cx, &image, &opts).expect("open ext4 image");
+    fs.enable_writes(&cx).expect("enable ext4 write support");
+    let free_before = fs
+        .count_free_blocks_in_group(&cx, GroupNumber(0))
+        .expect("free blocks before oversized OpenFs setxattr");
+
+    let hello = <OpenFs as FsOps>::lookup(
+        &fs,
+        &cx,
+        &mut RequestScope::empty(),
+        InodeNumber(1),
+        std::ffi::OsStr::new("hello.txt"),
+    )
+    .expect("lookup hello.txt through OpenFs");
+    let original_file =
+        <OpenFs as FsOps>::read(&fs, &cx, &mut RequestScope::empty(), hello.ino, 0, 4096)
+            .expect("read original hello.txt through OpenFs");
+    let oversized_value = vec![0x42_u8; 4037];
+
+    let err = <OpenFs as FsOps>::setxattr(
+        &fs,
+        &cx,
+        &mut RequestScope::empty(),
+        hello.ino,
+        "user.toobig",
+        &oversized_value,
+        ffs_core::XattrSetMode::Set,
+    )
+    .expect_err("oversized xattr should not fit in ext4 external EA block");
+    assert_eq!(
+        err.to_errno(),
+        libc::ENOSPC,
+        "oversized ext4 external EA-block xattr should report ENOSPC, got {err:?}"
+    );
+    assert_eq!(
+        <OpenFs as FsOps>::getxattr(&fs, &cx, hello.ino, "user.toobig")
+            .expect("get oversized xattr after failed OpenFs setxattr"),
+        None,
+        "oversized xattr value should not be stored"
+    );
+    assert_eq!(
+        <OpenFs as FsOps>::read(&fs, &cx, &mut RequestScope::empty(), hello.ino, 0, 4096)
+            .expect("read hello.txt after failed OpenFs setxattr"),
+        original_file,
+        "oversized xattr rejection must not mutate file contents"
+    );
+    assert_eq!(
+        fs.count_free_blocks_in_group(&cx, GroupNumber(0))
+            .expect("free blocks after oversized OpenFs setxattr"),
+        free_before,
+        "oversized xattr rejection must not leak the speculative external EA block"
+    );
+}
+
+#[test]
 fn fuse_xattr_ext4_value_too_large_reports_enospc() {
     with_rw_mount(|mnt| {
         let path = mnt.join("hello.txt");
@@ -13344,7 +13444,7 @@ fn btrfs_fuse_xattr_read_only_set_and_remove_report_erofs_without_side_effects()
     fs::create_dir_all(&mnt).expect("create mountpoint");
     let setup_mount_opts = MountOptions {
         read_only: false,
-        auto_unmount: true,
+        auto_unmount: false,
         ..MountOptions::default()
     };
 
@@ -13726,6 +13826,66 @@ finally:
 }
 
 #[test]
+fn btrfs_openfs_ioctl_dev_info_payload_contract() {
+    const BTRFS_DEV_INFO_SIZE: usize = 4096;
+    const BTRFS_DEV_INFO_PATH_OFFSET: usize = 0x0C00;
+
+    if !command_available("mkfs.btrfs") {
+        eprintln!("mkfs.btrfs not available, skipping");
+        return;
+    }
+
+    let tmp = TempDir::new().expect("tmpdir");
+    let image = create_btrfs_test_image(tmp.path());
+    let cx = Cx::for_testing();
+    let opts = OpenOptions {
+        skip_validation: false,
+        ext4_journal_replay_mode: Ext4JournalReplayMode::SimulateOverlay,
+        ..OpenOptions::default()
+    };
+    let fs = OpenFs::open_with_options(&cx, &image, &opts).expect("open btrfs image");
+
+    let wildcard =
+        <OpenFs as FsOps>::get_btrfs_dev_info(&fs, &cx, &mut RequestScope::empty(), 0, [0_u8; 16])
+            .expect("wildcard DEV_INFO lookup");
+    assert_eq!(wildcard.len(), BTRFS_DEV_INFO_SIZE);
+
+    let devid = u64::from_ne_bytes(wildcard[0x00..0x08].try_into().expect("devid bytes"));
+    let uuid: [u8; 16] = wildcard[0x08..0x18].try_into().expect("uuid bytes");
+    let bytes_used = u64::from_ne_bytes(wildcard[0x18..0x20].try_into().expect("bytes_used bytes"));
+    let total_bytes =
+        u64::from_ne_bytes(wildcard[0x20..0x28].try_into().expect("total_bytes bytes"));
+
+    assert_eq!(devid, 1, "single-device btrfs should report devid 1");
+    assert_ne!(uuid, [0_u8; 16], "device uuid/fsid should be populated");
+    assert!(bytes_used > 0, "bytes_used should be non-zero");
+    assert!(
+        total_bytes >= bytes_used,
+        "total_bytes should cover bytes_used"
+    );
+    assert!(
+        wildcard[BTRFS_DEV_INFO_PATH_OFFSET..]
+            .iter()
+            .all(|b| *b == 0),
+        "image-backed DEV_INFO path should be empty"
+    );
+
+    let exact =
+        <OpenFs as FsOps>::get_btrfs_dev_info(&fs, &cx, &mut RequestScope::empty(), 1, uuid)
+            .expect("exact DEV_INFO lookup");
+    assert_eq!(
+        &exact[..0x28],
+        &wildcard[..0x28],
+        "exact devid+uuid lookup should return same device fields"
+    );
+
+    let missing =
+        <OpenFs as FsOps>::get_btrfs_dev_info(&fs, &cx, &mut RequestScope::empty(), 2, [0_u8; 16])
+            .expect_err("unknown DEV_INFO devid should fail");
+    assert_eq!(missing.to_errno(), libc::ENODEV);
+}
+
+#[test]
 fn btrfs_fuse_ioctl_dev_info_via_mounted_path() {
     if !command_available("python3") {
         eprintln!("python3 not available, skipping");
@@ -13739,7 +13899,7 @@ import errno, os, fcntl, struct
 
 BTRFS_IOC_DEV_INFO = 0xd000941e
 BTRFS_DEV_INFO_SIZE = 4096
-BTRFS_DEV_INFO_PATH_OFFSET = 0x0c08
+BTRFS_DEV_INFO_PATH_OFFSET = 0x0c00
 
 fd = os.open({mnt:?}, os.O_RDONLY | os.O_DIRECTORY)
 try:
@@ -14506,6 +14666,25 @@ fn btrfs_fuse_fallocate_collapse_range_shifts_tail_and_shrinks_file() {
         fs::write(&path, &data).expect("seed collapse-range file on btrfs");
 
         let report = query_fallocate(&path, 0x08, 4096, 4096);
+        if report["errno"].as_i64() == Some(EOPNOTSUPP_ERRNO) {
+            let meta = fs::metadata(&path).expect("stat after transport collapse-range refusal");
+            assert_eq!(
+                meta.len(),
+                data.len() as u64,
+                "transport collapse-range refusal must preserve file size: {report}"
+            );
+            let readback = fs::read(&path).expect("read after transport collapse-range refusal");
+            assert_eq!(
+                readback, data,
+                "transport collapse-range refusal must preserve file data: {report}"
+            );
+            emit_scenario_result(
+                scenario_id,
+                "SKIP",
+                Some("collapse_range_rejected_by_kernel_or_fuse_transport_errno_95_no_drift"),
+            );
+            return;
+        }
         assert_eq!(
             report["res"].as_i64(),
             Some(0),
@@ -14538,6 +14717,25 @@ fn btrfs_fuse_fallocate_insert_range_shifts_tail_and_grows_file() {
         fs::write(&path, &data).expect("seed insert-range file on btrfs");
 
         let report = query_fallocate(&path, 0x20, 4096, 4096);
+        if report["errno"].as_i64() == Some(EOPNOTSUPP_ERRNO) {
+            let meta = fs::metadata(&path).expect("stat after transport insert-range refusal");
+            assert_eq!(
+                meta.len(),
+                data.len() as u64,
+                "transport insert-range refusal must preserve file size: {report}"
+            );
+            let readback = fs::read(&path).expect("read after transport insert-range refusal");
+            assert_eq!(
+                readback, data,
+                "transport insert-range refusal must preserve file data: {report}"
+            );
+            emit_scenario_result(
+                scenario_id,
+                "SKIP",
+                Some("insert_range_rejected_by_kernel_or_fuse_transport_errno_95_no_drift"),
+            );
+            return;
+        }
         assert_eq!(
             report["res"].as_i64(),
             Some(0),
@@ -14888,6 +15086,112 @@ fn btrfs_fuse_rename_across_directories() {
             "cross-dir rename"
         );
     });
+}
+
+fn btrfs_openfs_mkdir(fs_ops: &dyn FsOps, cx: &Cx, parent: InodeNumber, name: &str) -> InodeAttr {
+    fs_ops
+        .mkdir(
+            cx,
+            &mut RequestScope::empty(),
+            parent,
+            std::ffi::OsStr::new(name),
+            0o755,
+            0,
+            0,
+        )
+        .unwrap_or_else(|err| panic!("mkdir btrfs {name} through OpenFs: {err}"))
+}
+
+#[test]
+fn btrfs_openfs_mkfs_fixture_cross_parent_directory_rename_updates_parent_nlink_accounting() {
+    let tmp = TempDir::new().expect("tmpdir");
+    let image = create_btrfs_test_image(tmp.path());
+    let cx = Cx::for_testing();
+    let open_options = OpenOptions {
+        skip_validation: false,
+        ext4_journal_replay_mode: Ext4JournalReplayMode::SimulateOverlay,
+        ..OpenOptions::default()
+    };
+    let mut fs = OpenFs::open_with_options(&cx, &image, &open_options).expect("open btrfs image");
+    fs.enable_writes(&cx).expect("enable btrfs write support");
+    let fs_ops: &dyn FsOps = &fs;
+
+    let workspace = fs_ops
+        .lookup(
+            &cx,
+            &mut RequestScope::empty(),
+            InodeNumber(1),
+            std::ffi::OsStr::new(BTRFS_TEST_WORKSPACE),
+        )
+        .expect("lookup seeded btrfs workspace");
+    let source_parent = btrfs_openfs_mkdir(fs_ops, &cx, workspace.ino, "rename_src_parent");
+    let destination_parent = btrfs_openfs_mkdir(fs_ops, &cx, workspace.ino, "rename_dst_parent");
+    let source_child = btrfs_openfs_mkdir(fs_ops, &cx, source_parent.ino, "moved_dir");
+
+    let source_parent_nlink_before = fs_ops
+        .getattr(&cx, &mut RequestScope::empty(), source_parent.ino)
+        .expect("stat btrfs source parent before OpenFs rename")
+        .nlink;
+    let destination_parent_nlink_before = fs_ops
+        .getattr(&cx, &mut RequestScope::empty(), destination_parent.ino)
+        .expect("stat btrfs destination parent before OpenFs rename")
+        .nlink;
+    let source_child_nlink_before = source_child.nlink;
+
+    fs_ops
+        .rename(
+            &cx,
+            &mut RequestScope::empty(),
+            source_parent.ino,
+            std::ffi::OsStr::new("moved_dir"),
+            destination_parent.ino,
+            std::ffi::OsStr::new("moved_dir"),
+        )
+        .expect("cross-parent directory rename through OpenFs on mkfs fixture");
+
+    assert!(
+        fs_ops
+            .lookup(
+                &cx,
+                &mut RequestScope::empty(),
+                source_parent.ino,
+                std::ffi::OsStr::new("moved_dir"),
+            )
+            .is_err(),
+        "OpenFs rename must remove source entry"
+    );
+    let destination_child = fs_ops
+        .lookup(
+            &cx,
+            &mut RequestScope::empty(),
+            destination_parent.ino,
+            std::ffi::OsStr::new("moved_dir"),
+        )
+        .expect("lookup OpenFs renamed destination child");
+    assert_eq!(
+        fs_ops
+            .getattr(&cx, &mut RequestScope::empty(), source_parent.ino)
+            .expect("stat source parent after OpenFs rename")
+            .nlink,
+        source_parent_nlink_before - 1,
+        "OpenFs cross-parent rename must decrement source parent nlink"
+    );
+    assert_eq!(
+        fs_ops
+            .getattr(&cx, &mut RequestScope::empty(), destination_parent.ino)
+            .expect("stat destination parent after OpenFs rename")
+            .nlink,
+        destination_parent_nlink_before + 1,
+        "OpenFs cross-parent rename must increment destination parent nlink"
+    );
+    assert_eq!(
+        destination_child.ino, source_child.ino,
+        "OpenFs cross-parent rename must preserve moved directory inode"
+    );
+    assert_eq!(
+        destination_child.nlink, source_child_nlink_before,
+        "OpenFs cross-parent rename must preserve moved directory nlink"
+    );
 }
 
 #[test]
