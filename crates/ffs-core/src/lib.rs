@@ -37328,6 +37328,128 @@ mod tests {
     }
 
     #[test]
+    fn write_compressed_partial_truncate_down_keeps_head_frees_tail_ext4() {
+        // Truncate-to-zero is covered; PARTIAL truncate-down of a multi-cluster
+        // compressed file (spanning the single-indirect range) is not. It must
+        // free the tail clusters + now-unused indirect blocks while leaving the
+        // retained head intact and still readable — a distinct, subtle
+        // block-freeing path from truncate-to-zero.
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        let attr = fs
+            .create(
+                &cx,
+                root,
+                OsStr::new("e2compr_partial_truncate.bin"),
+                0o644,
+                0,
+                0,
+            )
+            .expect("create");
+        enable_e2compr_for_inode(&fs, &cx, attr.ino, 2, 20); // cluster shift 2 → 16K clusters
+
+        // 128 KiB = 32 logical 4K blocks → blocks 12..=31 are indirect-mapped.
+        let payload: Vec<u8> = (0..128 * 1024).map(|i| ((i * 7 + 3) % 251) as u8).collect();
+        assert_eq!(
+            fs.write(&cx, attr.ino, 0, &payload).expect("compressed write") as usize,
+            payload.len()
+        );
+        let after_write = fs.free_space_summary(&cx).expect("free after write");
+
+        // Truncate down to 32 KiB (2 full clusters, blocks 0..=7, all direct).
+        const KEPT: usize = 32 * 1024;
+        let trunc = SetAttrRequest {
+            size: Some(KEPT as u64),
+            ..SetAttrRequest::default()
+        };
+        fs.setattr(&cx, attr.ino, &trunc)
+            .expect("partial truncate down");
+
+        let inode_after = fs.read_inode(&cx, attr.ino).expect("read inode after truncate");
+        assert_eq!(inode_after.size, KEPT as u64, "size reflects the partial truncate");
+
+        // Retained head must be byte-identical.
+        let head = fs
+            .read(&cx, attr.ino, 0, KEPT as u32)
+            .expect("read retained head");
+        assert_eq!(head.len(), KEPT, "retained head length");
+        assert_eq!(
+            head,
+            payload[..KEPT],
+            "partial truncate must leave the retained head byte-identical"
+        );
+
+        // Reading at/after the new size yields nothing.
+        let past = fs
+            .read(&cx, attr.ino, KEPT as u64, 4096)
+            .expect("read past truncated EOF");
+        assert!(past.is_empty(), "no data beyond the truncated size");
+
+        // The tail clusters + their indirect blocks must have been freed.
+        let after_truncate = fs.free_space_summary(&cx).expect("free after truncate");
+        assert!(
+            after_truncate.free_blocks_total > after_write.free_blocks_total,
+            "partial truncate must free the tail clusters and unused indirect blocks"
+        );
+    }
+
+    #[test]
+    fn write_compressed_append_across_cluster_boundary_roundtrips_ext4() {
+        // Appending past a partially-filled compressed cluster mixes a
+        // read-modify-write of the partial first cluster (its existing prefix
+        // must be preserved) with a fresh second cluster — in a single write.
+        // Prior tests overwrote a FULL cluster or wrote fresh; the
+        // partial-existing-cluster extend RMW was uncovered.
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        let attr = fs
+            .create(
+                &cx,
+                root,
+                OsStr::new("e2compr_append.bin"),
+                0o644,
+                0,
+                0,
+            )
+            .expect("create");
+        enable_e2compr_for_inode(&fs, &cx, attr.ino, 2, 20); // 16K clusters
+
+        // First write: 8 KiB → half of cluster 0.
+        let first: Vec<u8> = (0..8 * 1024).map(|i| (i % 251) as u8).collect();
+        assert_eq!(
+            fs.write(&cx, attr.ino, 0, &first).expect("first write") as usize,
+            first.len()
+        );
+
+        // Append 16 KiB at offset 8 KiB → fills the rest of cluster 0 and all of
+        // cluster 1 (crosses the 16K cluster boundary).
+        let second: Vec<u8> = (0..16 * 1024).map(|i| ((i * 5 + 1) % 251) as u8).collect();
+        assert_eq!(
+            fs.write(&cx, attr.ino, 8 * 1024, &second).expect("append write") as usize,
+            second.len()
+        );
+
+        let mut expected = first.clone();
+        expected.extend_from_slice(&second);
+
+        let readback = fs
+            .read(&cx, attr.ino, 0, expected.len() as u32)
+            .expect("readback");
+        assert_eq!(
+            readback, expected,
+            "append across a cluster boundary must preserve the partial first cluster's prefix"
+        );
+    }
+
+    #[test]
     fn write_multiple_files_readdir_shows_all() {
         let Some(fs) = open_writable_ext4() else {
             return;
