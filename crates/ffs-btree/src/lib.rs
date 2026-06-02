@@ -227,6 +227,41 @@ where
     Ok(count)
 }
 
+/// Walk extents whose logical ranges overlap
+/// `[logical_start, logical_start + count)` in logical order.
+///
+/// Unlike repeated [`search`] calls, each relevant subtree is read at most once.
+/// This preserves the same leaf ordering as [`walk`] while allowing callers to
+/// map sequential ranges without rereading the same extent leaf per block.
+pub fn walk_range<F>(
+    cx: &Cx,
+    dev: &dyn BlockDevice,
+    root_bytes: &[u8; 60],
+    logical_start: u32,
+    count: u64,
+    visitor: &mut F,
+) -> Result<usize>
+where
+    F: FnMut(&Ext4Extent) -> Result<()>,
+{
+    if count == 0 {
+        return Ok(0);
+    }
+    let start = u64::from(logical_start);
+    let end = checked_logical_range_end("walk_range", logical_start, count)?;
+
+    let (header, _) = parse_header(root_bytes)?;
+    validate_header(&header, ROOT_MAX_ENTRIES)?;
+
+    if header.depth == 0 {
+        let extents = parse_leaf_entries(root_bytes, &header)?;
+        return visit_leaf_range(&extents, start, end, visitor);
+    }
+
+    let indexes = parse_index_entries(root_bytes, &header)?;
+    walk_index_range(cx, dev, &indexes, header.depth - 1, start, end, visitor)
+}
+
 fn walk_subtree<F>(
     cx: &Cx,
     dev: &dyn BlockDevice,
@@ -269,6 +304,107 @@ where
         }
         Ok(count)
     }
+}
+
+fn walk_range_subtree<F>(
+    cx: &Cx,
+    dev: &dyn BlockDevice,
+    block: u64,
+    depth: u16,
+    start: u64,
+    end: u64,
+    visitor: &mut F,
+) -> Result<usize>
+where
+    F: FnMut(&Ext4Extent) -> Result<()>,
+{
+    cx_checkpoint(cx)?;
+
+    let buf = dev.read_block(cx, BlockNumber(block))?;
+    let data = buf.as_slice();
+    let max_entries = max_entries_external(dev.block_size());
+    let (header, _) = parse_header(data)?;
+    validate_header(&header, max_entries)?;
+
+    if header.depth != depth {
+        return Err(FfsError::Corruption {
+            block,
+            detail: format!(
+                "walk_range: depth mismatch: expected {depth}, got {}",
+                header.depth
+            ),
+        });
+    }
+
+    if depth == 0 {
+        let extents = parse_leaf_entries(data, &header)?;
+        visit_leaf_range(&extents, start, end, visitor)
+    } else {
+        let indexes = parse_index_entries(data, &header)?;
+        walk_index_range(cx, dev, &indexes, depth - 1, start, end, visitor)
+    }
+}
+
+fn walk_index_range<F>(
+    cx: &Cx,
+    dev: &dyn BlockDevice,
+    indexes: &[Ext4ExtentIndex],
+    child_depth: u16,
+    start: u64,
+    end: u64,
+    visitor: &mut F,
+) -> Result<usize>
+where
+    F: FnMut(&Ext4Extent) -> Result<()>,
+{
+    if indexes.is_empty() {
+        return Err(FfsError::Corruption {
+            block: 0,
+            detail: "walk_range: extent tree index node has no entries".into(),
+        });
+    }
+
+    let mut count = 0;
+    for (pos, idx) in indexes.iter().enumerate() {
+        let child_start = u64::from(idx.logical_block);
+        let child_end = indexes
+            .get(pos + 1)
+            .map_or(1_u64 << 32, |next| u64::from(next.logical_block));
+
+        if child_end <= start {
+            continue;
+        }
+        if child_start >= end {
+            break;
+        }
+
+        count += walk_range_subtree(cx, dev, idx.leaf_block, child_depth, start, end, visitor)?;
+    }
+    Ok(count)
+}
+
+fn visit_leaf_range<F>(
+    extents: &[Ext4Extent],
+    start: u64,
+    end: u64,
+    visitor: &mut F,
+) -> Result<usize>
+where
+    F: FnMut(&Ext4Extent) -> Result<()>,
+{
+    let mut count = 0;
+    for ext in extents {
+        let (ext_start, ext_end) = extent_logical_range(ext);
+        if ext_end <= start {
+            continue;
+        }
+        if ext_start >= end {
+            break;
+        }
+        visitor(ext)?;
+        count += 1;
+    }
+    Ok(count)
 }
 
 // ── Insert ──────────────────────────────────────────────────────────────────
@@ -1055,6 +1191,21 @@ fn checked_physical_add(op: &str, physical_start: u64, offset: u64) -> Result<u6
             "{op}: physical block {physical_start}+{offset} overflows u64"
         ))
     })
+}
+
+fn checked_logical_range_end(op: &str, logical_start: u32, count: u64) -> Result<u64> {
+    let start = u64::from(logical_start);
+    let end = start.checked_add(count).ok_or_else(|| {
+        FfsError::InvalidGeometry(format!(
+            "{op}: logical range start {logical_start} + count {count} overflows u64"
+        ))
+    })?;
+    if end > (1_u64 << 32) {
+        return Err(FfsError::InvalidGeometry(format!(
+            "{op}: logical range [{logical_start}, {end}) exceeds ext4 32-bit block space"
+        )));
+    }
+    Ok(end)
 }
 
 /// Safely clamp a u64 to u16, saturating at `u16::MAX`.

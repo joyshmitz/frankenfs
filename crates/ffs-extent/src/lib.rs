@@ -60,6 +60,171 @@ pub fn map_logical_to_physical(
     }
     validate_root_header("map_logical_to_physical", root_bytes)?;
 
+    let end = checked_logical_range_end("map_logical_to_physical", logical_start, count)?;
+
+    if count == 1 {
+        return map_single_logical_to_physical(cx, dev, root_bytes, logical_start);
+    }
+
+    map_logical_range_by_walk(cx, dev, root_bytes, logical_start, end)
+}
+
+fn map_single_logical_to_physical(
+    cx: &Cx,
+    dev: &dyn BlockDevice,
+    root_bytes: &[u8; 60],
+    logical_block: u32,
+) -> Result<Vec<ExtentMapping>> {
+    cx_checkpoint(cx)?;
+    let result = ffs_btree::search(cx, dev, root_bytes, logical_block)?;
+    match result {
+        SearchResult::Found {
+            extent,
+            offset_in_extent,
+        } => {
+            let actual_len = u32::from(extent.actual_len());
+            validate_physical_span("map_logical_to_physical", extent.physical_start, actual_len)?;
+            Ok(vec![ExtentMapping {
+                logical_start: logical_block,
+                physical_start: checked_physical_add(
+                    "map_logical_to_physical",
+                    extent.physical_start,
+                    u64::from(offset_in_extent),
+                )?,
+                count: 1,
+                unwritten: extent.is_unwritten(),
+            }])
+        }
+        SearchResult::Hole { .. } => Ok(vec![ExtentMapping {
+            logical_start: logical_block,
+            physical_start: 0,
+            count: 1,
+            unwritten: false,
+        }]),
+    }
+}
+
+fn map_logical_range_by_walk(
+    cx: &Cx,
+    dev: &dyn BlockDevice,
+    root_bytes: &[u8; 60],
+    logical_start: u32,
+    end: u64,
+) -> Result<Vec<ExtentMapping>> {
+    let mut mappings = Vec::new();
+    let mut pos = u64::from(logical_start);
+
+    ffs_btree::walk_range(
+        cx,
+        dev,
+        root_bytes,
+        logical_start,
+        end.saturating_sub(pos),
+        &mut |extent: &Ext4Extent| {
+            if pos >= end {
+                return Ok(());
+            }
+
+            let actual_len = u32::from(extent.actual_len());
+            let extent_start = u64::from(extent.logical_block);
+            let extent_end = extent_start.saturating_add(u64::from(actual_len));
+            if extent_end <= pos {
+                return Ok(());
+            }
+
+            if extent_start > pos {
+                let hole_end = extent_start.min(end);
+                append_hole_mappings(cx, &mut mappings, pos, hole_end)?;
+                pos = hole_end;
+                if pos >= end {
+                    return Ok(());
+                }
+            }
+
+            let map_start = pos.max(extent_start);
+            let map_end = extent_end.min(end);
+            if map_start >= map_end {
+                return Ok(());
+            }
+
+            cx_checkpoint(cx)?;
+            validate_physical_span("map_logical_to_physical", extent.physical_start, actual_len)?;
+            let mapping_count = u32::try_from(map_end - map_start).map_err(|_| {
+                FfsError::InvalidGeometry(format!(
+                    "map_logical_to_physical: extent chunk length {} exceeds u32",
+                    map_end - map_start
+                ))
+            })?;
+            let mapping_start = u32::try_from(map_start).map_err(|_| {
+                FfsError::InvalidGeometry(format!(
+                    "map_logical_to_physical: logical position {map_start} exceeds u32 block range"
+                ))
+            })?;
+            mappings.push(ExtentMapping {
+                logical_start: mapping_start,
+                physical_start: checked_physical_add(
+                    "map_logical_to_physical",
+                    extent.physical_start,
+                    map_start - extent_start,
+                )?,
+                count: mapping_count,
+                unwritten: extent.is_unwritten(),
+            });
+            pos = map_end;
+            Ok(())
+        },
+    )?;
+
+    append_hole_mappings(cx, &mut mappings, pos, end)?;
+    Ok(mappings)
+}
+
+fn append_hole_mappings(
+    cx: &Cx,
+    mappings: &mut Vec<ExtentMapping>,
+    mut start: u64,
+    end: u64,
+) -> Result<()> {
+    while start < end {
+        cx_checkpoint(cx)?;
+        let to_map = (end - start).min(u64::from(u32::MAX));
+        if to_map == 0 {
+            return Err(FfsError::Corruption {
+                block: 0,
+                detail: format!(
+                    "map_logical_to_physical: zero-length hole traversal at logical block {start}"
+                ),
+            });
+        }
+        let logical_start = u32::try_from(start).map_err(|_| {
+            FfsError::InvalidGeometry(format!(
+                "map_logical_to_physical: hole position {start} exceeds u32 block range"
+            ))
+        })?;
+        let hole_count = u32::try_from(to_map).map_err(|_| {
+            FfsError::InvalidGeometry(format!(
+                "map_logical_to_physical: hole chunk length {to_map} exceeds u32"
+            ))
+        })?;
+        mappings.push(ExtentMapping {
+            logical_start,
+            physical_start: 0,
+            count: hole_count,
+            unwritten: false,
+        });
+        start += to_map;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn map_logical_range_by_search(
+    cx: &Cx,
+    dev: &dyn BlockDevice,
+    root_bytes: &[u8; 60],
+    logical_start: u32,
+    count: u64,
+) -> Result<Vec<ExtentMapping>> {
     let mut mappings = Vec::new();
     let mut pos = u64::from(logical_start);
     let end = checked_logical_range_end("map_logical_to_physical", logical_start, count)?;
@@ -1333,6 +1498,7 @@ mod tests {
     struct MemBlockDevice {
         block_size: u32,
         blocks: Mutex<HashMap<u64, Vec<u8>>>,
+        read_counts: Mutex<HashMap<u64, u64>>,
     }
 
     impl MemBlockDevice {
@@ -1340,12 +1506,22 @@ mod tests {
             Self {
                 block_size,
                 blocks: Mutex::new(HashMap::new()),
+                read_counts: Mutex::new(HashMap::new()),
             }
+        }
+
+        fn clear_read_counts(&self) {
+            self.read_counts.lock().clear();
+        }
+
+        fn total_reads(&self) -> u64 {
+            self.read_counts.lock().values().sum()
         }
     }
 
     impl BlockDevice for MemBlockDevice {
         fn read_block(&self, _cx: &Cx, block: BlockNumber) -> Result<BlockBuf> {
+            *self.read_counts.lock().entry(block.0).or_insert(0) += 1;
             let blocks = self.blocks.lock();
             blocks.get(&block.0).map_or_else(
                 || Ok(BlockBuf::new(vec![0u8; self.block_size as usize])),
@@ -2210,6 +2386,43 @@ ExtentMapping { logical_start: 5, physical_start: 134, count: 2, unwritten: true
         assert_eq!(mappings[1].count, 5); // hole
         assert_eq!(mappings[2].physical_start, m2.physical_start);
         assert_eq!(mappings[2].count, 5);
+    }
+
+    #[test]
+    fn map_depth1_range_matches_repeated_search_and_reads_leaf_once() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let geo = make_geometry();
+        let mut groups = make_groups(&geo);
+        let mut root = empty_root();
+        let pctx = mock_pctx();
+
+        for logical in 0..100_u32 {
+            allocate_extent(
+                &cx,
+                &dev,
+                &mut root,
+                &geo,
+                &mut groups,
+                logical,
+                1,
+                &AllocHint::default(),
+                &pctx,
+            )
+            .unwrap();
+        }
+
+        dev.clear_read_counts();
+        let expected = map_logical_range_by_search(&cx, &dev, &root, 10, 50).unwrap();
+        let repeated_search_reads = dev.total_reads();
+
+        dev.clear_read_counts();
+        let actual = map_logical_to_physical(&cx, &dev, &root, 10, 50).unwrap();
+        let range_walk_reads = dev.total_reads();
+
+        assert_eq!(actual, expected);
+        assert_eq!(range_walk_reads, 1);
+        assert!(repeated_search_reads > range_walk_reads);
     }
 
     #[test]
