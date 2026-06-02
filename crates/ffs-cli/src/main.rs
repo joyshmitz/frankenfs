@@ -61,8 +61,8 @@ use ffs_repair::scrub::{
     Ext4SuperblockValidator, ScrubReport, Scrubber, Severity, ZeroCheckValidator,
 };
 use ffs_types::{
-    BTRFS_SUPER_INFO_OFFSET, BTRFS_SUPER_INFO_SIZE, BlockNumber, EXT4_SUPERBLOCK_OFFSET,
-    EXT4_SUPERBLOCK_SIZE, GroupNumber, InodeNumber, MountMode,
+    BTRFS_SUPER_INFO_OFFSET, BTRFS_SUPER_INFO_SIZE, BlockNumber, ByteOffset,
+    EXT4_SUPERBLOCK_OFFSET, EXT4_SUPERBLOCK_SIZE, GroupNumber, InodeNumber, MountMode,
 };
 use mount_console::{
     MountConsoleConfig, MountConsoleCore, MountConsoleObservation, emit_mount_console,
@@ -6611,14 +6611,30 @@ fn build_fsck_output(path: &PathBuf, options: FsckCommandOptions) -> Result<Fsck
         },
     });
 
-    let image = std::fs::read(path)
-        .with_context(|| format!("failed to read filesystem image: {}", path.display()))?;
     let byte_dev = FileByteDevice::open(path)
         .with_context(|| format!("failed to open image: {}", path.display()))?;
     let image_len = byte_dev.len_bytes();
 
     let (scope, report, block_size, scrub_skipped_detail) = match &flavor {
         FsFlavor::Ext4(sb) => {
+            // ext4 fsck's in-memory reader only parses the superblock + group
+            // descriptor table (validate_ext4_group_descriptors -> read_group_desc);
+            // it never touches inodes or data blocks, and the Scrubber re-reads the
+            // rest via batched vectored I/O (bd-a384r). Read only the [0, gdt_end)
+            // prefix instead of the whole device. Clamp to the device length so a
+            // truncated / malformed descriptor table yields the identical
+            // descriptor-validation error as the previous full-image read; fall
+            // back to the full length if the offset cannot be computed.
+            let prefix_len = sb
+                .group_desc_offset(GroupNumber(sb.groups_count().saturating_sub(1)))
+                .and_then(|off| off.checked_add(u64::from(sb.group_desc_size())))
+                .map_or(image_len, |gdt_end| gdt_end.min(image_len));
+            let prefix_len = usize::try_from(prefix_len)
+                .context("ext4 group-descriptor prefix length does not fit usize")?;
+            let mut image = vec![0u8; prefix_len];
+            byte_dev
+                .read_exact_at(&cx, ByteOffset(0), &mut image)
+                .context("failed to read ext4 superblock + group descriptor prefix")?;
             let reader = Ext4ImageReader::new(&image).context("failed to parse ext4 superblock")?;
             let desc_status = validate_ext4_group_descriptors(&reader, &image, options.block_group);
             phases.push(desc_status);
