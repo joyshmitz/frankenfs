@@ -1315,10 +1315,21 @@ impl std::fmt::Debug for FuseInner {
 /// them under contention with a watchdog timeout.
 #[derive(Default)]
 struct FuseInodeLocks {
-    /// Inode → per-inode-lock map. **Lock-rank 0** — must be acquired
+    /// Inode → per-inode-lock slot. **Lock-rank 0** — must be acquired
     /// before any per-inode `held` lock. Multi-inode batches must
     /// acquire in sorted-by-inode-number order.
-    table: Mutex<BTreeMap<InodeNumber, Arc<FuseInodeLock>>>,
+    table: Mutex<BTreeMap<InodeNumber, LockSlot>>,
+}
+
+/// Table entry for one inode: the shared per-inode lock plus an explicit
+/// `users` count (live guards + in-flight acquirers + waiters). The entry is
+/// evicted exactly when `users` reaches 0, all under the `table` mutex — this
+/// is deterministic, unlike an `Arc::strong_count` heuristic which could skip
+/// eviction whenever a transient clone (e.g. a failed `try_acquire`) inflated
+/// the count, permanently leaking the entry.
+struct LockSlot {
+    lock: Arc<FuseInodeLock>,
+    users: usize,
 }
 
 impl FuseInodeLocks {
@@ -1338,12 +1349,15 @@ impl FuseInodeLocks {
             ordered
                 .into_iter()
                 .map(|ino| {
-                    let lock = Arc::clone(
-                        table
-                            .entry(ino)
-                            .or_insert_with(|| Arc::new(FuseInodeLock::default())),
-                    );
-                    (ino, lock)
+                    let slot = table.entry(ino).or_insert_with(|| LockSlot {
+                        lock: Arc::new(FuseInodeLock::default()),
+                        users: 0,
+                    });
+                    // Count this in-flight acquirer before releasing the table
+                    // lock so the entry cannot be evicted while we block on
+                    // `held`.
+                    slot.users += 1;
+                    (ino, Arc::clone(&slot.lock))
                 })
                 .collect()
         };
@@ -1353,6 +1367,28 @@ impl FuseInodeLocks {
                 .into_iter()
                 .map(|(ino, lock)| lock.acquire(ino, Arc::clone(self)))
                 .collect(),
+        }
+    }
+
+    /// Drop one `users` reference for `ino` (held under the table mutex) and
+    /// evict the entry when it reaches 0. Used by the guard `Drop` and by the
+    /// `try_acquire` abandon path; `ptr_eq` guards against decrementing a newer
+    /// slot that replaced an already-evicted one.
+    fn release_slot_user(&self, ino: InodeNumber, lock: &Arc<FuseInodeLock>) {
+        let mut table = match self.table.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                warn!("FuseInodeLocks table poisoned during slot release, recovering");
+                poisoned.into_inner()
+            }
+        };
+        if let Some(slot) = table.get_mut(&ino)
+            && Arc::ptr_eq(&slot.lock, lock)
+        {
+            slot.users -= 1;
+            if slot.users == 0 {
+                table.remove(&ino);
+            }
         }
     }
 
@@ -1372,13 +1408,25 @@ impl FuseInodeLocks {
                     }
                     Err(TryLockError::WouldBlock) => return None,
                 };
-                Arc::clone(
-                    table
-                        .entry(ino)
-                        .or_insert_with(|| Arc::new(FuseInodeLock::default())),
-                )
+                let slot = table.entry(ino).or_insert_with(|| LockSlot {
+                    lock: Arc::new(FuseInodeLock::default()),
+                    users: 0,
+                });
+                slot.users += 1;
+                let lock = Arc::clone(&slot.lock);
+                drop(table);
+                lock
             };
-            guards.push(lock.try_acquire(ino, Arc::clone(self))?);
+            if let Some(guard) = lock.try_acquire(ino, Arc::clone(self)) {
+                guards.push(guard);
+            } else {
+                // Contended: this clone never became a holder, so drop its
+                // `users` reference (and evict if it was the last) before
+                // bailing. The guards already pushed release their own
+                // references via their `Drop`.
+                self.release_slot_user(ino, &lock);
+                return None;
+            }
         }
 
         Some(FuseInodeGuards { _guards: guards })
@@ -1484,16 +1532,19 @@ impl Drop for FuseInodeGuard {
             self.lock.ready.notify_one();
         }
 
-        // strong_count == 2 means the table's Arc and this guard's Arc are the
-        // only references; no other guard or pending acquire holds a clone, so
-        // removing the entry is safe. Any value > 2 means a sibling guard (or a
-        // waiter that already cloned the Arc before taking the condvar) still
-        // needs it — leave the entry in place.
-        if Arc::strong_count(&self.lock) == 2
-            && let Some(existing) = table.get(&self.ino)
-            && Arc::ptr_eq(existing, &self.lock)
+        // Drop this guard's `users` reference and evict the entry only when no
+        // live guard, in-flight acquirer, or waiter remains (users == 0). This
+        // is decided entirely under the table mutex, so — unlike an
+        // `Arc::strong_count` snapshot — a concurrent failed `try_acquire`
+        // clone can never trick us into skipping (and thus permanently leaking)
+        // the final eviction. `ptr_eq` guards against a newer slot.
+        if let Some(slot) = table.get_mut(&self.ino)
+            && Arc::ptr_eq(&slot.lock, &self.lock)
         {
-            table.remove(&self.ino);
+            slot.users -= 1;
+            if slot.users == 0 {
+                table.remove(&self.ino);
+            }
         }
     }
 }
@@ -18783,7 +18834,10 @@ CUSTOM("congestion_threshold=3")"#;
         loop {
             let entries: Vec<(InodeNumber, Arc<FuseInodeLock>)> = {
                 let table = locks.table.lock().unwrap();
-                table.iter().map(|(k, v)| (*k, Arc::clone(v))).collect()
+                table
+                    .iter()
+                    .map(|(k, v)| (*k, Arc::clone(&v.lock)))
+                    .collect()
             };
             assert_eq!(entries.len(), 1);
             let waiter_cloned_entry = Arc::strong_count(&entries[0].1) >= 4;
