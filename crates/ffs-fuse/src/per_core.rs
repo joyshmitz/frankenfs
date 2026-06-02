@@ -295,12 +295,6 @@ impl PerCoreDispatcher {
             .max(0)
     }
 
-    fn pending_depths(&self) -> Vec<i64> {
-        (0..self.core_metrics.len())
-            .map(|idx| self.pending_depth(idx))
-            .collect()
-    }
-
     /// Create a new dispatcher with the given configuration.
     #[must_use]
     pub fn new(config: PerCoreConfig) -> Self {
@@ -364,21 +358,37 @@ impl PerCoreDispatcher {
             return None;
         }
 
-        let pending = self.pending_depths();
-        let total: i64 = pending.iter().copied().fold(0, i64::saturating_add);
+        let Ok(core_count) = i64::try_from(n) else {
+            return None;
+        };
+
+        let mut total = 0_i64;
+        let mut receiver_pending = 0_i64;
+        let mut donor: Option<(usize, i64)> = None;
+
+        for idx in 0..n {
+            let depth = self.pending_depth(idx);
+            total = total.saturating_add(depth);
+            if idx == receiver_idx {
+                receiver_pending = depth;
+                continue;
+            }
+
+            match donor {
+                Some((donor_idx, donor_pending))
+                    if donor_pending > depth || (donor_pending == depth && donor_idx < idx) => {}
+                _ => donor = Some((idx, depth)),
+            }
+        }
 
         // Do not steal if the system is essentially idle.
         // We need at least an average of 1 request per core to justify the
         // cross-core synchronization overhead of stealing.
-        let Ok(core_count) = i64::try_from(n) else {
-            return None;
-        };
         if total < core_count {
             return None;
         }
 
         let avg = total as f64 / n as f64;
-        let receiver_pending = pending[receiver_idx];
         let mine = receiver_pending as f64;
 
         // This core is idle relative to average queue depth — try to steal work.
@@ -386,11 +396,7 @@ impl PerCoreDispatcher {
             return None;
         }
 
-        let (donor_idx, &donor_pending) = pending
-            .iter()
-            .enumerate()
-            .filter(|(idx, _)| *idx != receiver_idx)
-            .max_by_key(|(idx, depth)| (**depth, std::cmp::Reverse(*idx)))?;
+        let (donor_idx, donor_pending) = donor?;
 
         if donor_pending <= receiver_pending {
             return None;
@@ -526,6 +532,7 @@ impl AggregateMetrics {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fmt::Write as _;
 
     #[test]
     fn inode_routing_deterministic() {
@@ -922,6 +929,148 @@ mod tests {
         };
         let disp = PerCoreDispatcher::new(cfg);
         assert!(!disp.should_steal(9));
+    }
+
+    fn steal_plan_reference_from_pending(
+        num_cores: u32,
+        steal_threshold: f64,
+        pending_raw: &[i64],
+        receiver_core: u32,
+    ) -> Option<StealPlan> {
+        let n = usize::try_from(num_cores).ok()?;
+        if n < 2 || pending_raw.len() != n {
+            return None;
+        }
+        let receiver_idx = receiver_core as usize;
+        if receiver_idx >= n {
+            return None;
+        }
+
+        let pending = pending_raw
+            .iter()
+            .copied()
+            .map(|depth| depth.max(0))
+            .collect::<Vec<_>>();
+        let total = pending.iter().copied().fold(0, i64::saturating_add);
+        let Ok(core_count) = i64::try_from(n) else {
+            return None;
+        };
+        if total < core_count {
+            return None;
+        }
+
+        let avg = total as f64 / n as f64;
+        let receiver_pending = pending[receiver_idx];
+        let threshold = if steal_threshold.is_finite() && steal_threshold > 0.0 {
+            steal_threshold
+        } else {
+            PerCoreConfig::DEFAULT_STEAL_THRESHOLD
+        };
+        if receiver_pending as f64 >= avg / threshold {
+            return None;
+        }
+
+        let (donor_idx, &donor_pending) = pending
+            .iter()
+            .enumerate()
+            .filter(|(idx, _)| *idx != receiver_idx)
+            .max_by_key(|(idx, depth)| (**depth, std::cmp::Reverse(*idx)))?;
+
+        if donor_pending <= receiver_pending {
+            return None;
+        }
+
+        let pending_gap = donor_pending.saturating_sub(receiver_pending);
+        let transfer_count = u64::try_from((pending_gap / 2).max(1)).ok()?;
+        let donor_core = u32::try_from(donor_idx).ok()?;
+
+        Some(StealPlan {
+            receiver_core,
+            donor_core,
+            receiver_pending,
+            donor_pending,
+            average_pending: avg,
+            transfer_count,
+        })
+    }
+
+    #[test]
+    fn steal_plan_golden_report() {
+        fn set_pending(dispatcher: &PerCoreDispatcher, pending: &[i64]) {
+            for (core, depth) in pending.iter().copied().enumerate() {
+                dispatcher
+                    .core_metrics(u32::try_from(core).expect("core fits u32"))
+                    .expect("core exists")
+                    .pending_requests
+                    .store(depth, Ordering::Relaxed);
+            }
+        }
+
+        fn render_plan(plan: Option<StealPlan>) -> String {
+            plan.map_or_else(
+                || String::from("None"),
+                |plan| {
+                    format!(
+                        "Some(receiver={},donor={},receiver_pending={},donor_pending={},avg={:.3},transfer={})",
+                        plan.receiver_core,
+                        plan.donor_core,
+                        plan.receiver_pending,
+                        plan.donor_pending,
+                        plan.average_pending,
+                        plan.transfer_count
+                    )
+                },
+            )
+        }
+
+        let cases: [(&str, u32, f64, &[i64], u32); 6] = [
+            ("idle_total", 4, 2.0, &[0, 1, 0, 0], 0),
+            ("balanced", 4, 2.0, &[4, 4, 4, 4], 0),
+            ("lowest_tie", 4, 2.0, &[0, 9, 4, 9], 0),
+            ("receiver_busy", 4, 2.0, &[9, 0, 9, 9], 0),
+            ("negative_depths", 4, 2.0, &[-7, 0, 8, 8], 1),
+            ("invalid_threshold", 2, f64::NAN, &[1, 9], 0),
+        ];
+
+        let mut report = String::new();
+        for (name, num_cores, steal_threshold, pending, receiver) in cases {
+            let dispatcher = PerCoreDispatcher::new(PerCoreConfig {
+                num_cores,
+                cache_blocks_per_core: 1,
+                steal_threshold,
+                advisory_affinity: false,
+            });
+            set_pending(&dispatcher, pending);
+            let rendered = render_plan(dispatcher.steal_plan_for(receiver));
+            let expected = render_plan(steal_plan_reference_from_pending(
+                num_cores,
+                steal_threshold,
+                pending,
+                receiver,
+            ));
+            assert_eq!(rendered, expected, "{name}");
+            writeln!(report, "STEAL_PLAN_GOLDEN\t{name}\t{rendered}")
+                .expect("write golden report row");
+        }
+
+        let out_of_range = PerCoreDispatcher::new(PerCoreConfig {
+            num_cores: 2,
+            cache_blocks_per_core: 1,
+            steal_threshold: 2.0,
+            advisory_affinity: false,
+        });
+        assert_eq!(
+            out_of_range.steal_plan_for(9),
+            steal_plan_reference_from_pending(2, 2.0, &[0, 0], 9)
+        );
+        writeln!(
+            report,
+            "STEAL_PLAN_GOLDEN\tout_of_range\t{}",
+            render_plan(out_of_range.steal_plan_for(9))
+        )
+        .expect("write golden report row");
+
+        print!("{report}");
     }
 
     #[test]
