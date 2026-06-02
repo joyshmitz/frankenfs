@@ -1,0 +1,35 @@
+{
+  "filesystem": "ext4",
+  "scope": {
+    "kind": "full"
+  },
+  "phases": [
+    {
+      "phase": "superblock_validation",
+      "status": "ok",
+      "detail": "ext4 superblock parsed (block_size=4096, blocks=2048, inodes=2048)"
+    },
+    {
+      "phase": "group_descriptor_validation",
+      "status": "ok",
+      "detail": "validated 1 ext4 group descriptors"
+    },
+    {
+      "phase": "checksum_scrub",
+      "status": "ok",
+      "detail": "scanned=2048 corrupt=2002 error_or_higher=0 io_errors=0"
+    }
+  ],
+  "scrub": {
+    "scanned": 2048,
+    "corrupt": 2002,
+    "error_or_higher": 0,
+    "io_error": 0
+  },
+  "repair_status": "not_requested",
+  "outcome": "clean",
+  "exit_code": 0,
+  "limitations": [
+    "fsck currently covers superblock/group-descriptor validation plus block-level scrub checks (block_size=4096)"
+  ]
+}
