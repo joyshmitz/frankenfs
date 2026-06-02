@@ -40,6 +40,7 @@ pub struct BtrfsSuperblock {
     pub generation: u64,
     pub root: u64,
     pub chunk_root: u64,
+    pub chunk_root_generation: u64,
     pub log_root: u64,
     pub total_bytes: u64,
     pub bytes_used: u64,
@@ -192,6 +193,7 @@ impl BtrfsSuperblock {
             generation: read_le_u64(region, 0x48)?,
             root: read_le_u64(region, 0x50)?,
             chunk_root: read_le_u64(region, 0x58)?,
+            chunk_root_generation: read_le_u64(region, 0xA4)?,
             log_root: read_le_u64(region, 0x60)?,
             total_bytes,
             bytes_used,
@@ -277,8 +279,8 @@ impl BtrfsSuperblock {
         buf[0x9C..0xA0].copy_from_slice(&self.stripesize.to_le_bytes());
         // sys_chunk_array_size at 0xA0
         buf[0xA0..0xA4].copy_from_slice(&self.sys_chunk_array_size.to_le_bytes());
-        // chunk_root_generation at 0xA4 (same as generation for now)
-        buf[0xA4..0xAC].copy_from_slice(&self.generation.to_le_bytes());
+        // chunk_root_generation at 0xA4
+        buf[0xA4..0xAC].copy_from_slice(&self.chunk_root_generation.to_le_bytes());
         // compat_flags at 0xAC
         buf[0xAC..0xB4].copy_from_slice(&self.compat_flags.to_le_bytes());
         // compat_ro_flags at 0xB4
@@ -1633,6 +1635,7 @@ mod tests {
         sb[0x50..0x58].copy_from_slice(&4096_u64.to_le_bytes());
         sb[0x58..0x60].copy_from_slice(&8192_u64.to_le_bytes());
         sb[0x60..0x68].copy_from_slice(&12288_u64.to_le_bytes());
+        sb[0xA4..0xAC].copy_from_slice(&11_u64.to_le_bytes());
         sb[0x70..0x78].copy_from_slice(&1_000_000_u64.to_le_bytes());
         sb[0x78..0x80].copy_from_slice(&123_456_u64.to_le_bytes());
         sb[0x80..0x88].copy_from_slice(&6_u64.to_le_bytes());
@@ -1648,6 +1651,8 @@ mod tests {
 
         let parsed = BtrfsSuperblock::parse_superblock_region(&sb).expect("superblock parse");
         assert_eq!(parsed.magic, BTRFS_MAGIC);
+        assert_eq!(parsed.generation, 9);
+        assert_eq!(parsed.chunk_root_generation, 11);
         assert_eq!(parsed.sectorsize, 4096);
         assert_eq!(parsed.nodesize, 16384);
         assert_eq!(parsed.csum_type, ffs_types::BTRFS_CSUM_TYPE_CRC32C);
@@ -1655,7 +1660,7 @@ mod tests {
     }
 
     #[test]
-    fn superblock_to_bytes_roundtrip() {
+    fn superblock_to_bytes_roundtrip_preserves_chunk_root_generation() {
         let sb = BtrfsSuperblock {
             csum: [0; 32],
             fsid: [0x11; 16],
@@ -1665,6 +1670,7 @@ mod tests {
             generation: 100,
             root: 0x10000,
             chunk_root: 0x20000,
+            chunk_root_generation: 77,
             log_root: 0,
             total_bytes: 1_000_000_000,
             bytes_used: 500_000,
@@ -1694,6 +1700,11 @@ mod tests {
         assert_eq!(parsed.generation, sb.generation);
         assert_eq!(parsed.root, sb.root);
         assert_eq!(parsed.chunk_root, sb.chunk_root);
+        assert_eq!(parsed.chunk_root_generation, sb.chunk_root_generation);
+        assert_eq!(
+            u64::from_le_bytes(serialized[0xA4..0xAC].try_into().expect("chunk root gen")),
+            sb.chunk_root_generation
+        );
         assert_eq!(parsed.sectorsize, sb.sectorsize);
         assert_eq!(parsed.nodesize, sb.nodesize);
         assert_eq!(parsed.label, sb.label);
@@ -1710,6 +1721,7 @@ mod tests {
             generation: 50,
             root: 0x1000,
             chunk_root: 0x2000,
+            chunk_root_generation: 50,
             log_root: 0,
             total_bytes: 1_000_000_000,
             bytes_used: 100_000,
@@ -1737,6 +1749,7 @@ mod tests {
         assert_eq!(patched.root, 0x3000);
         assert_eq!(patched.root_level, 1);
         assert_eq!(patched.generation, 100);
+        assert_eq!(patched.chunk_root_generation, 100);
         assert_eq!(patched.fsid, sb.fsid);
     }
 
@@ -3558,7 +3571,7 @@ mod tests {
         "BtrfsSuperblock { csum: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], ",
         "fsid: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], ",
         "bytenr: 0, flags: 0, magic: 5575266562640200287, generation: 0, root: 0, chunk_root: 0, ",
-        "log_root: 0, total_bytes: 1000000, bytes_used: 123456, root_dir_objectid: 0, num_devices: 1, ",
+        "chunk_root_generation: 0, log_root: 0, total_bytes: 1000000, bytes_used: 123456, root_dir_objectid: 0, num_devices: 1, ",
         "sectorsize: 4096, nodesize: 16384, stripesize: 4096, compat_flags: 0, compat_ro_flags: 0, ",
         "incompat_flags: 0, csum_type: 0, root_level: 0, chunk_root_level: 0, log_root_level: 0, ",
         "label: \"\", sys_chunk_array_size: 0, sys_chunk_array: [] }",
