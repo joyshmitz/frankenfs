@@ -234,10 +234,10 @@ pub fn bitmap_find_contiguous(bitmap: &[u8], count: u32, n: u32, start: u32) -> 
 /// aware available-space numbers for `statvfs(3)` callers and the
 /// fallocate/free-space-FIEMAP fast paths.
 ///
-/// Whole-byte 0x00 bytes contribute 8 each via a fast skip; 0xFF bytes
-/// terminate the current run. Partial-byte boundaries (non-zero non-FF
-/// bytes, plus the trailing remainder when `count % 8 != 0`) fall back to
-/// per-bit inspection.
+/// Full 64-bit words are summarized with bit-parallel zero-run operations;
+/// remaining bytes use the byte summary table. Partial-byte boundaries (the
+/// trailing remainder when `count % 8 != 0`) are masked to preserve the exact
+/// LSB-first bitmap semantics.
 #[must_use]
 pub fn bitmap_largest_free_run(bitmap: &[u8], count: u32) -> u32 {
     if count == 0 {
@@ -249,15 +249,24 @@ pub fn bitmap_largest_free_run(bitmap: &[u8], count: u32) -> u32 {
     let mut best = 0_u32;
     let mut run = 0_u32;
 
-    for byte_idx in 0..full_bytes {
-        // Mirror `bitmap_count_free`: bytes past the end of the slice
-        // contribute zero to the free count and break any in-flight run.
-        // This is the conservative answer when the bitmap was truncated.
-        let Some(&byte) = bitmap.get(byte_idx) else {
-            run = 0;
-            continue;
-        };
+    let available_full_bytes = full_bytes.min(bitmap.len());
+    let word_bytes = available_full_bytes - (available_full_bytes % 8);
+
+    for chunk in bitmap[..word_bytes].chunks_exact(8) {
+        let word = u64::from_le_bytes([
+            chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
+        ]);
+        apply_word_zero_run(word, &mut run, &mut best);
+    }
+
+    for &byte in &bitmap[word_bytes..available_full_bytes] {
         apply_byte_zero_run(BYTE_ZERO_RUNS[byte as usize], &mut run, &mut best);
+    }
+
+    // Mirror `bitmap_count_free`: bytes past the end of the slice contribute
+    // zero to the free count and break any in-flight run.
+    if full_bytes > available_full_bytes {
+        run = 0;
     }
 
     if remainder > 0 {
@@ -270,6 +279,35 @@ pub fn bitmap_largest_free_run(bitmap: &[u8], count: u32) -> u32 {
     }
 
     best
+}
+
+fn apply_word_zero_run(word: u64, run: &mut u32, best: &mut u32) {
+    if word == 0 {
+        *run = run.saturating_add(64);
+        *best = (*best).max(*run);
+        return;
+    }
+    if word == u64::MAX {
+        *run = 0;
+        return;
+    }
+
+    let prefix = word.trailing_zeros();
+    if prefix > 0 {
+        *best = (*best).max(run.saturating_add(prefix));
+    }
+    *best = (*best).max(longest_zero_run_in_mixed_word(word));
+    *run = word.leading_zeros();
+}
+
+fn longest_zero_run_in_mixed_word(word: u64) -> u32 {
+    let mut free = !word;
+    let mut len = 0;
+    while free != 0 {
+        len += 1;
+        free &= free << 1;
+    }
+    len
 }
 
 fn apply_byte_zero_run(stats: ByteZeroRun, run: &mut u32, best: &mut u32) {
@@ -6602,5 +6640,31 @@ InodeAlloc { ino: InodeNumber(17), group: GroupNumber(1) }
             bitmap_largest_free_run(&bitmap, count),
             bitmap_count_free(&bitmap, count)
         );
+    }
+
+    #[test]
+    fn bitmap_largest_free_run_golden_report() {
+        let cases: &[(&str, &[u8], u32)] = &[
+            ("empty_zero", &[], 0),
+            ("missing_byte_nonzero_count", &[], 8),
+            ("all_used", &[0xFF, 0xFF, 0xFF, 0xFF], 32),
+            ("all_free_partial", &[0x00, 0x00, 0x00], 20),
+            ("lsb_prefix", &[0xF0], 8),
+            ("spans_byte", &[0x80, 0x01], 16),
+            ("full_zero_extends", &[0x80, 0x00, 0x00, 0xFF], 32),
+            (
+                "fragmented",
+                &[0x55, 0x33, 0xF0, 0x00, 0x7F, 0xFF, 0x01],
+                53,
+            ),
+            ("truncated_mid_run", &[0x00, 0x00], 24),
+        ];
+
+        println!("LARGEST_FREE_RUN_GOLDEN_BEGIN");
+        for (name, bitmap, count) in cases {
+            let result = bitmap_largest_free_run(bitmap, *count);
+            println!("case={name}\tcount={count}\tresult={result}");
+        }
+        println!("LARGEST_FREE_RUN_GOLDEN_END");
     }
 }
