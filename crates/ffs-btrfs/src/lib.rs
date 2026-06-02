@@ -747,8 +747,8 @@ pub fn parse_xattr_items(data: &[u8]) -> Result<Vec<BtrfsXattrItem>, ParseError>
                 actual: data.len() - cur,
             });
         }
-        let data_len = usize::from(read_u16(data, cur + 25, "xattr.data_len")?);
-        let name_len = usize::from(read_u16(data, cur + 27, "xattr.name_len")?);
+        let data_len = usize::from(u16::from_le_bytes([data[cur + 25], data[cur + 26]]));
+        let name_len = usize::from(u16::from_le_bytes([data[cur + 27], data[cur + 28]]));
         if name_len == 0 {
             return Err(ParseError::InvalidField {
                 field: "xattr.name_len",
