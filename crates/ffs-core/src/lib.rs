@@ -25230,6 +25230,44 @@ mod tests {
         );
     }
 
+    /// Complements `resolve_indirect_block_single_double_triple_levels` by
+    /// exercising `read_ext4_indirect`'s byte assembly on the legacy
+    /// indirect-mapped path: a mapped block must read through verbatim while a
+    /// sparse hole (zero pointer) must zero-fill. Only the addressing was
+    /// covered before; the read/assemble + hole-fill loop was not.
+    #[test]
+    fn read_ext4_indirect_assembles_data_and_zero_fills_holes() {
+        const BS: usize = 4096;
+
+        let mut image = build_ext4_image_with_extents();
+        // Fill free data block 30 with a recognizable, non-trivial pattern.
+        let pattern: Vec<u8> = (0..BS).map(|i| (i % 251) as u8).collect();
+        image[30 * BS..31 * BS].copy_from_slice(&pattern);
+
+        let cx = Cx::for_testing();
+        let fs = OpenFs::from_device(&cx, Box::new(TestDevice::from_vec(image)), &OpenOptions::default())
+            .expect("open crafted ext4 image");
+        let scope = RequestScope::empty();
+
+        // Non-extent inode, 2 logical blocks: block 0 → data(30), block 1 → hole.
+        let mut inode = make_test_inode(ffs_types::S_IFREG | 0o644, 0, 0);
+        let mut ptrs = vec![0_u8; 15 * 4];
+        ptrs[0..4].copy_from_slice(&30_u32.to_le_bytes()); // i_block[0] = data block 30
+        // i_block[1] left zero → sparse hole.
+        inode.extent_bytes = ptrs;
+        inode.size = (2 * BS) as u64;
+
+        let out = fs
+            .read_ext4_indirect(&cx, &scope, &inode, 0, (2 * BS) as u32)
+            .expect("indirect read");
+        assert_eq!(out.len(), 2 * BS, "reads the full file size");
+        assert_eq!(&out[..BS], &pattern[..], "mapped block reads through verbatim");
+        assert!(
+            out[BS..].iter().all(|&b| b == 0),
+            "sparse hole must zero-fill"
+        );
+    }
+
     fn malformed_inline_data_xattr_ibody() -> Vec<u8> {
         let mut ibody = Vec::new();
         ibody.extend_from_slice(&ffs_types::EXT4_XATTR_MAGIC.to_le_bytes());
