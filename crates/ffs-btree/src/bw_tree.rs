@@ -129,6 +129,7 @@ impl Drop for PageDelta {
 pub struct PageSnapshot {
     pub epoch: u64,
     pub head: Arc<PageDelta>,
+    pub chain_len: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -150,15 +151,34 @@ pub enum DeltaMutation {
 }
 
 #[derive(Debug)]
+struct PageHead {
+    delta: Arc<PageDelta>,
+    chain_len: usize,
+}
+
+impl PageHead {
+    fn empty() -> Self {
+        Self {
+            delta: PageDelta::empty_base(),
+            chain_len: 1,
+        }
+    }
+
+    fn new(delta: Arc<PageDelta>, chain_len: usize) -> Self {
+        Self { delta, chain_len }
+    }
+}
+
+#[derive(Debug)]
 struct MappingEntry {
-    head: RwLock<Arc<PageDelta>>,
+    head: RwLock<PageHead>,
     epoch: AtomicU64,
 }
 
 impl MappingEntry {
     fn new() -> Self {
         Self {
-            head: RwLock::new(PageDelta::empty_base()),
+            head: RwLock::new(PageHead::empty()),
             epoch: AtomicU64::new(0),
         }
     }
@@ -215,8 +235,12 @@ impl MappingTable {
     pub fn get_page(&self, page_id: PageId) -> Result<PageSnapshot> {
         let entry = self.entry(page_id)?;
         let epoch = entry.epoch.load(Ordering::Acquire);
-        let head = Arc::clone(&read_lock(&entry.head));
-        Ok(PageSnapshot { epoch, head })
+        let head_guard = read_lock(&entry.head);
+        Ok(PageSnapshot {
+            epoch,
+            head: Arc::clone(&head_guard.delta),
+            chain_len: head_guard.chain_len,
+        })
     }
 
     pub fn cas_page(
@@ -224,6 +248,7 @@ impl MappingTable {
         page_id: PageId,
         expected_epoch: u64,
         new_head: Arc<PageDelta>,
+        new_chain_len: usize,
     ) -> Result<bool> {
         let entry = self.entry(page_id)?;
         trace!(
@@ -240,8 +265,9 @@ impl MappingTable {
             Ordering::Acquire,
         ) {
             Ok(_) => {
-                let old_head = Arc::clone(&head_guard);
-                *head_guard = new_head;
+                debug_assert_eq!(chain_length(&new_head), new_chain_len);
+                let old_head = Arc::clone(&head_guard.delta);
+                *head_guard = PageHead::new(new_head, new_chain_len);
                 defer_reclaim(old_head);
                 debug!(
                     target: "ffs::bwtree",
@@ -270,11 +296,11 @@ impl MappingTable {
             let snapshot = self.get_page(page_id)?;
             let _guard = epoch::pin();
 
-            let chain_len = chain_length(&snapshot.head);
+            let chain_len = snapshot.chain_len;
             if chain_len >= MAX_CHAIN_DEPTH {
                 let (state, _) = materialize_from_head(&snapshot.head)?;
                 let new_base = Arc::new(PageDelta::Base { entries: state });
-                if self.cas_page(page_id, snapshot.epoch, new_base)? {
+                if self.cas_page(page_id, snapshot.epoch, new_base, 1)? {
                     debug!(
                         target: "ffs::bwtree",
                         event = "bw_append_preconsolidate",
@@ -286,7 +312,7 @@ impl MappingTable {
             }
 
             let new_head = Arc::new(mutation.to_delta(snapshot.head));
-            if self.cas_page(page_id, snapshot.epoch, new_head)? {
+            if self.cas_page(page_id, snapshot.epoch, new_head, snapshot.chain_len + 1)? {
                 return Ok(attempt);
             }
         }
@@ -383,7 +409,7 @@ impl MappingTable {
     ) -> Result<ConsolidationResult> {
         for attempt in 1..=config.max_retries {
             let snapshot = self.get_page(page_id)?;
-            let chain_len_before = chain_length(&snapshot.head);
+            let chain_len_before = snapshot.chain_len;
 
             if chain_len_before <= 1 {
                 // Already a base page (or single delta on base); nothing to do.
@@ -415,7 +441,7 @@ impl MappingTable {
             let entries_count = state.len();
             let new_base = Arc::new(PageDelta::Base { entries: state });
 
-            if self.cas_page(page_id, snapshot.epoch, new_base)? {
+            if self.cas_page(page_id, snapshot.epoch, new_base, 1)? {
                 debug!(
                     target: "ffs::bwtree",
                     event = "bw_consolidate_done",
@@ -461,8 +487,7 @@ impl MappingTable {
         for raw_id in 0..allocated {
             let page_id = PageId(raw_id);
             if let Ok(snapshot) = self.get_page(page_id) {
-                let len = chain_length(&snapshot.head);
-                if len > threshold {
+                if snapshot.chain_len > threshold {
                     candidates.push(page_id);
                 }
             }
@@ -747,7 +772,7 @@ fn defer_reclaim(delta: Arc<PageDelta>) {
 mod tests {
     use super::{
         BwKey, BwValue, ConsolidationConfig, FfsError, MAX_CHAIN_DEPTH, MAX_CHAIN_WALK,
-        MappingTable, PageDelta, PageId, chain_length, materialize_from_head, write_lock,
+        MappingTable, PageDelta, PageHead, PageId, chain_length, materialize_from_head, write_lock,
     };
     use std::collections::BTreeMap;
     use std::sync::{Arc, Barrier, atomic::Ordering};
@@ -900,6 +925,13 @@ mod tests {
         }
     }
 
+    fn assert_cached_chain_len_matches(table: &MappingTable, page: PageId) -> usize {
+        let snapshot = table.get_page(page).expect("snapshot");
+        let computed = chain_length(&snapshot.head);
+        assert_eq!(snapshot.chain_len, computed);
+        computed
+    }
+
     #[test]
     fn chain_length_of_empty_base_is_one() {
         let base = PageDelta::empty_base();
@@ -913,8 +945,7 @@ mod tests {
         for i in 0..10 {
             table.insert(page, BwKey(i), BwValue(i)).expect("insert");
         }
-        let snap = table.get_page(page).expect("get");
-        assert_eq!(chain_length(&snap.head), 11); // 10 inserts + 1 base
+        assert_eq!(assert_cached_chain_len_matches(&table, page), 11); // 10 inserts + 1 base
     }
 
     #[test]
@@ -927,8 +958,7 @@ mod tests {
                 .insert(page, BwKey(i), BwValue(i * 10))
                 .expect("insert");
         }
-        let snap_before = table.get_page(page).expect("get");
-        assert_eq!(chain_length(&snap_before.head), 21);
+        assert_eq!(assert_cached_chain_len_matches(&table, page), 21);
 
         let config = default_config();
         let result = table.consolidate_page(page, &config).expect("consolidate");
@@ -937,8 +967,7 @@ mod tests {
         assert_eq!(result.entries_count, 20);
         assert!(result.cas_attempts >= 1);
 
-        let snap_after = table.get_page(page).expect("get");
-        assert_eq!(chain_length(&snap_after.head), 1);
+        assert_eq!(assert_cached_chain_len_matches(&table, page), 1);
     }
 
     #[test]
@@ -1029,14 +1058,11 @@ mod tests {
         assert_eq!(count, 2); // p1 and p2
 
         // p0 should still have chain length > 1
-        let snap0 = table.get_page(p0).expect("get");
-        assert_eq!(chain_length(&snap0.head), 3);
+        assert_eq!(assert_cached_chain_len_matches(&table, p0), 3);
 
         // p1 and p2 should be consolidated
-        let snap1 = table.get_page(p1).expect("get");
-        assert_eq!(chain_length(&snap1.head), 1);
-        let snap2 = table.get_page(p2).expect("get");
-        assert_eq!(chain_length(&snap2.head), 1);
+        assert_eq!(assert_cached_chain_len_matches(&table, p1), 1);
+        assert_eq!(assert_cached_chain_len_matches(&table, p2), 1);
     }
 
     #[test]
@@ -1108,6 +1134,7 @@ mod tests {
                 );
             }
         }
+        assert_cached_chain_len_matches(&table, page);
     }
 
     #[test]
@@ -1189,13 +1216,13 @@ mod tests {
 
         let config = default_config();
         table.consolidate_page(page, &config).expect("consolidate");
-        assert_eq!(chain_length(&table.get_page(page).expect("get").head), 1);
+        assert_eq!(assert_cached_chain_len_matches(&table, page), 1);
 
         // New inserts build on consolidated base
         for i in 10..15 {
             table.insert(page, BwKey(i), BwValue(i)).expect("insert");
         }
-        assert_eq!(chain_length(&table.get_page(page).expect("get").head), 6);
+        assert_eq!(assert_cached_chain_len_matches(&table, page), 6);
 
         // All data still accessible
         for i in 0..15 {
@@ -1217,8 +1244,10 @@ mod tests {
             table.insert(page, BwKey(i), BwValue(i)).expect("insert");
         }
 
-        let snap_before = table.get_page(page).expect("get before");
-        assert_eq!(chain_length(&snap_before.head), MAX_CHAIN_DEPTH);
+        assert_eq!(
+            assert_cached_chain_len_matches(&table, page),
+            MAX_CHAIN_DEPTH
+        );
 
         table
             .insert(page, BwKey(u64::MAX), BwValue(99))
@@ -1228,8 +1257,7 @@ mod tests {
         assert_eq!(state.len(), MAX_CHAIN_DEPTH);
         assert_eq!(state.get(&BwKey(u64::MAX)).copied(), Some(BwValue(99)));
 
-        let snap_after = table.get_page(page).expect("get after");
-        assert_eq!(chain_length(&snap_after.head), 2);
+        assert_eq!(assert_cached_chain_len_matches(&table, page), 2);
     }
 
     // ── Comprehensive unit tests (bd-1mdk.3) ─────────────────────
@@ -2131,7 +2159,7 @@ mod tests {
         }
 
         let entry = table.entry(page).expect("entry");
-        *write_lock(&entry.head) = head;
+        *write_lock(&entry.head) = PageHead::new(head, MAX_CHAIN_WALK + 1);
 
         let cfg = ConsolidationConfig {
             chain_threshold: 1,

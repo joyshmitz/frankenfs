@@ -1,0 +1,55 @@
+read_heavy/bwtree/1     time:   [4.9681 ms 6.8233 ms 9.1463 ms]
+                        time:   [1.8869 ms 2.1592 ms 2.7762 ms]
+read_heavy/bwtree/2     time:   [8.1370 ms 8.3107 ms 8.6324 ms]
+                        time:   [3.3215 ms 3.5064 ms 3.6941 ms]
+read_heavy/bwtree/4     time:   [14.970 ms 15.637 ms 16.417 ms]
+                        time:   [7.0728 ms 7.1889 ms 7.2538 ms]
+Benchmarking read_heavy/bwtree/8
+Benchmarking read_heavy/bwtree/8: Warming up for 1.0000 s
+Benchmarking read_heavy/bwtree/8: Collecting 10 samples in estimated 3.3099 s (110 iterations)
+Benchmarking read_heavy/bwtree/8: Analyzing
+read_heavy/bwtree/8     time:   [28.458 ms 29.001 ms 29.833 ms]
+Benchmarking read_heavy/locked_btree/8
+Benchmarking read_heavy/locked_btree/8: Warming up for 1.0000 s
+Benchmarking read_heavy/locked_btree/8: Collecting 10 samples in estimated 2.6092 s (165 iterations)
+Benchmarking read_heavy/locked_btree/8: Analyzing
+read_heavy/locked_btree/8
+                        time:   [15.924 ms 16.227 ms 16.528 ms]
+write_heavy/bwtree/1    time:   [16.362 ms 16.813 ms 17.240 ms]
+                        time:   [1.5833 ms 1.6261 ms 1.6767 ms]
+write_heavy/bwtree/2    time:   [34.662 ms 35.512 ms 36.075 ms]
+                        time:   [3.8909 ms 4.1327 ms 4.2887 ms]
+write_heavy/bwtree/4    time:   [66.565 ms 68.233 ms 70.118 ms]
+                        time:   [10.833 ms 10.932 ms 11.123 ms]
+Benchmarking write_heavy/bwtree/8
+Benchmarking write_heavy/bwtree/8: Warming up for 1.0000 s
+Benchmarking write_heavy/bwtree/8: Collecting 10 samples in estimated 2.5083 s (30 iterations)
+Benchmarking write_heavy/bwtree/8: Analyzing
+write_heavy/bwtree/8    time:   [80.056 ms 81.747 ms 83.823 ms]
+Benchmarking write_heavy/locked_btree/8
+Benchmarking write_heavy/locked_btree/8: Warming up for 1.0000 s
+Benchmarking write_heavy/locked_btree/8: Collecting 10 samples in estimated 2.9389 s (110 iterations)
+Benchmarking write_heavy/locked_btree/8: Analyzing
+write_heavy/locked_btree/8
+                        time:   [25.657 ms 26.242 ms 26.607 ms]
+mixed/bwtree/1          time:   [83.828 ms 85.228 ms 86.640 ms]
+mixed/locked_btree/1    time:   [1.8059 ms 1.8498 ms 1.8838 ms]
+mixed/bwtree/2          time:   [171.02 ms 181.54 ms 190.80 ms]
+mixed/locked_btree/2    time:   [4.3540 ms 4.4110 ms 4.4981 ms]
+mixed/bwtree/4          time:   [393.90 ms 414.10 ms 432.41 ms]
+mixed/locked_btree/4    time:   [10.900 ms 11.178 ms 11.323 ms]
+Benchmarking mixed/bwtree/8
+Benchmarking mixed/bwtree/8: Warming up for 1.0000 s
+Benchmarking mixed/bwtree/8: Collecting 10 samples in estimated 10.594 s (10 iterations)
+Benchmarking mixed/bwtree/8: Analyzing
+mixed/bwtree/8          time:   [1.0173 s 1.0349 s 1.0515 s]
+Benchmarking mixed/locked_btree/8
+Benchmarking mixed/locked_btree/8: Warming up for 1.0000 s
+Benchmarking mixed/locked_btree/8: Collecting 10 samples in estimated 2.8898 s (110 iterations)
+Benchmarking mixed/locked_btree/8: Analyzing
+mixed/locked_btree/8    time:   [26.423 ms 26.750 ms 26.916 ms]
+                        time:   [1.6333 µs 1.6763 µs 1.7445 µs]
+                        time:   [7.8492 µs 7.9818 µs 8.1512 µs]
+                        time:   [32.537 µs 33.447 µs 34.312 µs]
+                        time:   [4.9489 ms 4.9938 ms 5.0429 ms]
+                        time:   [3.8052 µs 3.8741 µs 3.9452 µs]
