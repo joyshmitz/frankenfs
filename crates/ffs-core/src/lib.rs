@@ -785,6 +785,11 @@ pub struct OpenFs {
     /// The writable path bypasses this cache because inode metadata changes
     /// are published through MVCC and eventually persisted to these blocks.
     ext4_inode_table_block_cache: Mutex<BTreeMap<BlockNumber, Arc<[u8]>>>,
+    /// Bounded read-only ext4 file-data block cache for scalar tail reads.
+    ///
+    /// The writable path bypasses this cache because file data changes are
+    /// published through MVCC and eventually persisted to these blocks.
+    ext4_file_data_block_cache: Mutex<BTreeMap<BlockNumber, Arc<[u8]>>>,
     /// Mutable btrfs allocation state (COW FS tree, extent allocator).
     ///
     /// Protected by a Mutex since write operations need exclusive access.
@@ -829,6 +834,8 @@ pub struct OpenFs {
     /// against the in-memory COW tree but will be lost on unmount.
     btrfs_rw_ephemeral_ok: bool,
 }
+
+const EXT4_FILE_DATA_BLOCK_CACHE_LIMIT: usize = 256;
 
 /// Back-reference index used by `btrfs_resolve_inode_path` in read-only mode.
 ///
@@ -2637,6 +2644,7 @@ impl OpenFs {
             ext4_alloc_state: None,
             ext4_group_desc_cache: Mutex::new(BTreeMap::new()),
             ext4_inode_table_block_cache: Mutex::new(BTreeMap::new()),
+            ext4_file_data_block_cache: Mutex::new(BTreeMap::new()),
             btrfs_alloc_state: None,
             extent_cache: ffs_extent::ExtentCache::new(),
             repair_flush_lifecycle: None,
@@ -3274,6 +3282,7 @@ impl OpenFs {
         // observe the mutated on-disk state instead of stale pre-recovery copies.
         self.ext4_inode_table_block_cache.lock().clear();
         self.ext4_group_desc_cache.lock().clear();
+        self.ext4_file_data_block_cache.lock().clear();
 
         info!(
             orphan_head = head,
@@ -6537,6 +6546,30 @@ impl OpenFs {
         Ok(block_data)
     }
 
+    fn read_ext4_file_data_block_with_scope(
+        &self,
+        cx: &Cx,
+        scope: &RequestScope,
+        block: BlockNumber,
+    ) -> Result<Arc<[u8]>, FfsError> {
+        let cacheable = self.can_cache_ext4_read_only_block(scope, block);
+        if cacheable {
+            let cached = self.ext4_file_data_block_cache.lock().get(&block).cloned();
+            if let Some(cached) = cached {
+                return Ok(cached);
+            }
+        }
+
+        let block_data = Arc::<[u8]>::from(self.read_block_with_scope(cx, scope, block)?);
+        if cacheable {
+            let mut cache = self.ext4_file_data_block_cache.lock();
+            if cache.len() < EXT4_FILE_DATA_BLOCK_CACHE_LIMIT {
+                cache.insert(block, Arc::clone(&block_data));
+            }
+        }
+        Ok(block_data)
+    }
+
     /// Read an ext4 inode by number via the device, respecting MVCC isolation.
     pub fn read_inode(&self, cx: &Cx, ino: InodeNumber) -> Result<Ext4Inode, FfsError> {
         self.with_latest_scope(|scope| self.read_inode_with_scope(cx, scope, ino))
@@ -7341,8 +7374,11 @@ impl OpenFs {
                     if unwritten {
                         buf[bytes_read..bytes_read + chunk_size].fill(0);
                     } else {
-                        let block_data =
-                            self.read_block_with_scope(cx, scope, BlockNumber(phys_block))?;
+                        let block_data = self.read_ext4_file_data_block_with_scope(
+                            cx,
+                            scope,
+                            BlockNumber(phys_block),
+                        )?;
                         buf[bytes_read..bytes_read + chunk_size].copy_from_slice(
                             &block_data[offset_in_block..offset_in_block + chunk_size],
                         );
@@ -29185,6 +29221,34 @@ mod tests {
             .read_file(&cx, &RequestScope::empty(), InodeNumber(11), 7, 100)
             .unwrap();
         assert_eq!(&data, b"extent!");
+    }
+
+    #[test]
+    fn read_file_scalar_data_block_cache_hits_in_read_only_mode() {
+        let image = build_ext4_image_with_extents();
+        let dev = CountingDevice::new(TestDevice::from_vec(image), ByteOffset(13 * 4096));
+        let cx = Cx::for_testing();
+
+        let fs = OpenFs::from_device(&cx, Box::new(dev.clone()), &OpenOptions::default()).unwrap();
+        dev.reset_count();
+
+        let first = fs
+            .read_file(&cx, &RequestScope::empty(), InodeNumber(11), 0, 100)
+            .unwrap();
+        let second = fs
+            .read_file(&cx, &RequestScope::empty(), InodeNumber(11), 0, 100)
+            .unwrap();
+
+        assert_eq!(&first, b"Hello, extent!");
+        assert_eq!(
+            first, second,
+            "cached file-data read must be byte-identical"
+        );
+        assert_eq!(
+            dev.read_count(),
+            1,
+            "the read-only scalar file-data cache should suppress the second data-block read"
+        );
     }
 
     #[test]
