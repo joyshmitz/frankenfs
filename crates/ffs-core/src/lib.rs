@@ -3265,6 +3265,16 @@ impl OpenFs {
         }
 
         self.clear_ext4_orphan_state(cx)?;
+
+        // Orphan recovery reads inodes through the read-only inode-table /
+        // group-descriptor caches (the fs is not yet writable during open, so
+        // `can_cache_ext4_read_only_block` returns true), then writes the
+        // recovered inodes and group descriptors directly to the device,
+        // bypassing those caches. Drop the cached blocks so post-recovery reads
+        // observe the mutated on-disk state instead of stale pre-recovery copies.
+        self.ext4_inode_table_block_cache.lock().clear();
+        self.ext4_group_desc_cache.lock().clear();
+
         info!(
             orphan_head = head,
             scanned = stats.scanned,
