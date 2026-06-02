@@ -332,21 +332,7 @@ impl SuccinctBitmap {
             }
         }
 
-        // Scan within the block.
-        let bit_base = (block_idx as u32) * BLOCK_BITS;
-        let bits_in_block = BLOCK_BITS.min(self.len - bit_base);
-
-        for bit in 0..bits_in_block {
-            let pos = bit_base + bit;
-            if !self.get_bit(pos) {
-                if remaining == 0 {
-                    return Some(pos);
-                }
-                remaining -= 1;
-            }
-        }
-
-        None
+        self.select0_in_block(block_idx, remaining)
     }
 
     /// Find the first zero bit at or after `start`, wrapping around.
@@ -431,6 +417,30 @@ impl SuccinctBitmap {
                     return Some(run_start);
                 }
             }
+        }
+
+        None
+    }
+
+    fn select0_in_block(&self, block_idx: usize, mut remaining: u32) -> Option<u32> {
+        let block_idx =
+            u32::try_from(block_idx).expect("block index is bounded by the u32 bitmap length");
+        let mut word_base = block_idx * BLOCK_BITS;
+        let block_end = word_base.saturating_add(BLOCK_BITS).min(self.len);
+
+        while word_base < block_end {
+            let bits_in_word = (block_end - word_base).min(64);
+            let mut zero_mask = !self.read_word(word_base / 64);
+            if bits_in_word < 64 {
+                zero_mask &= (1_u64 << bits_in_word) - 1;
+            }
+
+            let zeros_in_word = zero_mask.count_ones();
+            if remaining < zeros_in_word {
+                return Some(word_base + select_nth_set_bit(zero_mask, remaining));
+            }
+            remaining -= zeros_in_word;
+            word_base += 64;
         }
 
         None
@@ -521,6 +531,19 @@ fn popcount_full_bytes(bytes: &[u8]) -> u32 {
         total += byte.count_ones();
     }
     total
+}
+
+fn select_nth_set_bit(mut word: u64, mut n: u32) -> u32 {
+    debug_assert!(n < word.count_ones());
+
+    loop {
+        let bit = word.trailing_zeros();
+        if n == 0 {
+            return bit;
+        }
+        word &= word - 1;
+        n -= 1;
+    }
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────
@@ -730,6 +753,33 @@ mod tests {
         assert_eq!(sb.select0(0), Some(0));
         assert_eq!(sb.select0(1), Some(3));
         assert_eq!(sb.select0(2), None); // only 2 zeros in 5 bits
+    }
+
+    #[test]
+    fn select0_golden_report() {
+        let mut bitmap = vec![0xFF_u8; 40]; // 320 bits, crosses a 256-bit block.
+        for pos in [
+            0_u32, 3, 8, 63, 64, 65, 127, 128, 190, 191, 192, 250, 255, 256, 257, 258, 300, 301,
+            302, 303, 304,
+        ] {
+            bitmap[(pos / 8) as usize] &= !(1 << (pos % 8));
+        }
+
+        let len = 305;
+        let sb = SuccinctBitmap::build(&bitmap, len);
+        let expected: Vec<u32> = (0..len).filter(|&pos| !sb.get_bit(pos)).collect();
+        let expected_len = u32::try_from(expected.len()).expect("golden length fits u32");
+        assert_eq!(sb.count_zeros(), expected_len);
+
+        for k in 0..=expected_len {
+            let actual = sb.select0(k);
+            let expected = expected.get(k as usize).copied();
+            assert_eq!(actual, expected, "select0({k})");
+            println!(
+                "SUCCINCT_SELECT0_GOLDEN\t{k}\t{}",
+                actual.map_or_else(|| String::from("None"), |pos| pos.to_string())
+            );
+        }
     }
 
     #[test]
