@@ -1171,10 +1171,10 @@ fn is_reserved(reserved: &[u32], rel_block: u32) -> bool {
 pub fn reserved_inodes_in_group(geo: &FsGeometry, group: GroupNumber) -> Vec<u32> {
     // Total number of reserved inodes across the entire filesystem
     // s_first_ino is 1-based. Reserved are [1, first_inode).
-    let total_reserved = geo.first_inode.saturating_sub(1);
+    let total_reserved = u64::from(geo.first_inode.saturating_sub(1));
 
     // The number of inodes before this group.
-    let inodes_before = group.0 * geo.inodes_per_group;
+    let inodes_before = u64::from(group.0).saturating_mul(u64::from(geo.inodes_per_group));
 
     if inodes_before >= total_reserved {
         return Vec::new();
@@ -1183,7 +1183,8 @@ pub fn reserved_inodes_in_group(geo: &FsGeometry, group: GroupNumber) -> Vec<u32
     // The number of reserved inodes that fall into this group.
     let remaining_reserved = total_reserved - inodes_before;
 
-    let limit = remaining_reserved.min(geo.inodes_in_group(group));
+    let limit = remaining_reserved.min(u64::from(geo.inodes_in_group(group)));
+    let limit = u32::try_from(limit).unwrap_or(u32::MAX);
     let mut reserved = Vec::with_capacity(limit as usize);
     for i in 0..limit {
         reserved.push(i);
@@ -1195,12 +1196,14 @@ pub fn reserved_inodes_in_group(geo: &FsGeometry, group: GroupNumber) -> Vec<u32
 ///
 /// Reads the GDT block containing `group`, patches the free_blocks/inodes/dirs
 /// fields, recomputes the checksum (if enabled), and writes the block back.
-fn persist_group_desc(
+fn persist_group_desc_with_bitmap_overrides(
     cx: &Cx,
     dev: &dyn BlockDevice,
     pctx: &PersistCtx,
     group: GroupNumber,
     stats: &GroupStats,
+    block_bitmap_override: Option<&[u8]>,
+    inode_bitmap_override: Option<&[u8]>,
 ) -> Result<()> {
     let ds = usize::from(pctx.desc_size);
     if ds == 0 {
@@ -1237,17 +1240,29 @@ fn persist_group_desc(
     };
 
     if pctx.has_metadata_csum {
-        let block_bitmap = dev.read_block(cx, stats.block_bitmap_block)?;
-        let inode_bitmap = dev.read_block(cx, stats.inode_bitmap_block)?;
+        let block_bitmap_buf;
+        let block_bitmap = if let Some(bitmap) = block_bitmap_override {
+            bitmap
+        } else {
+            block_bitmap_buf = dev.read_block(cx, stats.block_bitmap_block)?;
+            block_bitmap_buf.as_slice()
+        };
+        let inode_bitmap_buf;
+        let inode_bitmap = if let Some(bitmap) = inode_bitmap_override {
+            bitmap
+        } else {
+            inode_bitmap_buf = dev.read_block(cx, stats.inode_bitmap_block)?;
+            inode_bitmap_buf.as_slice()
+        };
         ffs_ondisk::ext4::stamp_block_bitmap_checksum(
-            block_bitmap.as_slice(),
+            block_bitmap,
             pctx.csum_seed,
             pctx.blocks_per_group,
             &mut updated,
             pctx.desc_size,
         );
         ffs_ondisk::ext4::stamp_inode_bitmap_checksum(
-            inode_bitmap.as_slice(),
+            inode_bitmap,
             pctx.csum_seed,
             pctx.inodes_per_group,
             &mut updated,
@@ -1556,7 +1571,15 @@ fn try_alloc_safe(
         groups[gidx].free_blocks = previous_free_blocks.saturating_sub(alloc_count);
 
         // Persist group descriptor (includes bitmap checksum stamping if metadata_csum).
-        if let Err(error) = persist_group_desc(cx, dev, pctx, group, &groups[gidx]) {
+        if let Err(error) = persist_group_desc_with_bitmap_overrides(
+            cx,
+            dev,
+            pctx,
+            group,
+            &groups[gidx],
+            Some(&bitmap),
+            None,
+        ) {
             groups[gidx].free_blocks = previous_free_blocks;
             restore_bitmap_after_group_desc_error(
                 cx,
@@ -1660,7 +1683,15 @@ pub fn free_blocks_persist(
         groups[gidx].free_blocks = groups[gidx].free_blocks.saturating_add(segment.count);
 
         // Persist group descriptor.
-        if let Err(error) = persist_group_desc(cx, dev, pctx, segment.group, &groups[gidx]) {
+        if let Err(error) = persist_group_desc_with_bitmap_overrides(
+            cx,
+            dev,
+            pctx,
+            segment.group,
+            &groups[gidx],
+            Some(&bitmap),
+            None,
+        ) {
             groups[gidx].free_blocks = previous_free_blocks;
             restore_bitmap_after_group_desc_error(
                 cx,
@@ -1825,7 +1856,15 @@ fn try_alloc_batch_in_group(
     groups[gidx].free_blocks = previous_free_blocks.saturating_sub(count_allocated);
 
     // Single GDT persist for all allocations in this group.
-    if let Err(error) = persist_group_desc(cx, dev, pctx, group, &groups[gidx]) {
+    if let Err(error) = persist_group_desc_with_bitmap_overrides(
+        cx,
+        dev,
+        pctx,
+        group,
+        &groups[gidx],
+        Some(&bitmap),
+        None,
+    ) {
         groups[gidx].free_blocks = previous_free_blocks;
         restore_bitmap_after_group_desc_error(
             cx,
@@ -2068,25 +2107,55 @@ fn try_alloc_inode_in_group_persist(
 
     let bitmap_block = groups[gidx].inode_bitmap_block;
     let original_bitmap = dev.read_block(cx, bitmap_block)?.as_slice().to_vec();
+    let mut bitmap = original_bitmap.clone();
     let previous_free_inodes = groups[gidx].free_inodes;
 
-    let alloc = try_alloc_inode_in_group(cx, dev, geo, groups, group)?;
-    if let Some(a) = alloc {
-        if let Err(error) = persist_group_desc(cx, dev, pctx, group, &groups[gidx]) {
-            groups[gidx].free_inodes = previous_free_inodes;
-            restore_bitmap_after_group_desc_error(
-                cx,
-                dev,
-                bitmap_block,
-                &original_bitmap,
-                "inode bitmap allocation",
-                error,
-            )?;
-        }
-        Ok(Some(a))
-    } else {
-        Ok(None)
+    let inodes_in_group = geo.inodes_in_group(group);
+    let reserved = reserved_inodes_in_group(geo, group);
+    for &r in &reserved {
+        bitmap_set(&mut bitmap, r);
     }
+
+    let Some(idx) = bitmap_find_free(&bitmap, inodes_in_group, 0) else {
+        return Ok(None);
+    };
+
+    let ino = u64::from(group.0) * u64::from(geo.inodes_per_group) + u64::from(idx) + 1;
+    if ino > u64::from(geo.total_inodes) {
+        return Err(FfsError::Corruption {
+            block: 0,
+            detail: format!("allocated inode {ino} exceeds total inode count"),
+        });
+    }
+
+    bitmap_set(&mut bitmap, idx);
+    dev.write_block(cx, bitmap_block, &bitmap)?;
+    groups[gidx].free_inodes = groups[gidx].free_inodes.saturating_sub(1);
+
+    if let Err(error) = persist_group_desc_with_bitmap_overrides(
+        cx,
+        dev,
+        pctx,
+        group,
+        &groups[gidx],
+        None,
+        Some(&bitmap),
+    ) {
+        groups[gidx].free_inodes = previous_free_inodes;
+        restore_bitmap_after_group_desc_error(
+            cx,
+            dev,
+            bitmap_block,
+            &original_bitmap,
+            "inode bitmap allocation",
+            error,
+        )?;
+    }
+
+    Ok(Some(InodeAlloc {
+        ino: InodeNumber(ino),
+        group,
+    }))
 }
 
 /// Free an inode.
@@ -2204,10 +2273,52 @@ pub fn free_inode_persist(
     }
     let bitmap_block = groups[gidx].inode_bitmap_block;
     let original_bitmap = dev.read_block(cx, bitmap_block)?.as_slice().to_vec();
+    let mut bitmap = original_bitmap.clone();
     let previous_free_inodes = groups[gidx].free_inodes;
+    let group = GroupNumber(group_idx);
+    let bit_idx = u32::try_from(ino_zero % u64::from(geo.inodes_per_group)).map_err(|_| {
+        FfsError::Corruption {
+            block: 0,
+            detail: format!("free_inode_persist: inode {} bit index exceeds u32", ino.0),
+        }
+    })?;
+    let inodes_in_group = geo.inodes_in_group(group);
+    if bit_idx >= inodes_in_group {
+        return Err(FfsError::Corruption {
+            block: 0,
+            detail: format!(
+                "inode {} is outside group {group_idx} inode capacity",
+                ino.0
+            ),
+        });
+    }
+    if !bitmap_get(&bitmap, bit_idx) {
+        return Err(FfsError::Corruption {
+            block: 0,
+            detail: format!("double-free: inode {} already free in bitmap", ino.0),
+        });
+    }
+    let reserved = reserved_inodes_in_group(geo, group);
+    if is_reserved(&reserved, bit_idx) {
+        return Err(FfsError::Corruption {
+            block: 0,
+            detail: format!("attempt to free reserved inode {}", ino.0),
+        });
+    }
 
-    free_inode(cx, dev, geo, groups, ino)?;
-    if let Err(error) = persist_group_desc(cx, dev, pctx, GroupNumber(group_idx), &groups[gidx]) {
+    bitmap_clear(&mut bitmap, bit_idx);
+    dev.write_block(cx, bitmap_block, &bitmap)?;
+    groups[gidx].free_inodes = groups[gidx].free_inodes.saturating_add(1);
+
+    if let Err(error) = persist_group_desc_with_bitmap_overrides(
+        cx,
+        dev,
+        pctx,
+        group,
+        &groups[gidx],
+        None,
+        Some(&bitmap),
+    ) {
         groups[gidx].free_inodes = previous_free_inodes;
         restore_bitmap_after_group_desc_error(
             cx,
@@ -2583,6 +2694,18 @@ mod tests {
         assert_eq!(geo.inodes_in_group(GroupNumber(0)), 2048);
         assert_eq!(geo.inodes_in_group(GroupNumber(2)), 2048);
         assert_eq!(geo.inodes_in_group(GroupNumber(3)), 856);
+    }
+
+    #[test]
+    fn reserved_inodes_large_group_index_does_not_overflow() {
+        let mut geo = make_geometry();
+        geo.inodes_per_group = 65_536;
+        geo.total_inodes = u32::MAX;
+        geo.group_count = u32::MAX;
+        geo.first_inode = 32;
+
+        let reserved = reserved_inodes_in_group(&geo, GroupNumber(65_536));
+        assert!(reserved.is_empty());
     }
 
     // ── Block allocation tests ──────────────────────────────────────────
