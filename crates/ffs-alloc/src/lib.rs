@@ -2673,6 +2673,73 @@ mod tests {
         assert_eq!(bitmap_find_contiguous(&bm, 16, 2, 0), None);
     }
 
+    /// Naive first-fit reference: pure per-bit scan, no word/byte fast paths.
+    /// `bitmap_get` reports out-of-range positions as allocated, matching the
+    /// production scan's treatment of a truncated bitmap.
+    fn find_contiguous_linear_naive(bitmap: &[u8], count: u32, n: u32, start: u32) -> Option<u32> {
+        let mut run_start = start;
+        let mut run_len = 0u32;
+        for idx in start..count {
+            if bitmap_get(bitmap, idx) {
+                run_start = idx + 1;
+                run_len = 0;
+            } else {
+                run_len += 1;
+                if run_len >= n {
+                    return Some(run_start);
+                }
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn bitmap_find_contiguous_golden_report() {
+        use std::fmt::Write as _;
+        // 320 bits crossing multiple 64-bit word boundaries: all-used words,
+        // an all-free word, and mixed words.
+        let mut bm = vec![0xFF_u8; 40];
+        for pos in [70_u32, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80] {
+            bm[(pos / 8) as usize] &= !(1 << (pos % 8));
+        }
+        for byte in bm.iter_mut().take(24).skip(16) {
+            *byte = 0x00; // bits 128..192 all free (a full aligned word)
+        }
+        let count = 320;
+        let mut report = String::new();
+        for n in [1_u32, 8, 11, 12, 32, 64, 65, 128] {
+            for start in [0_u32, 1, 64, 65, 128, 200, 256] {
+                let actual = bitmap_find_contiguous_linear(&bm, count, n, start);
+                let expected = find_contiguous_linear_naive(&bm, count, n, start);
+                assert_eq!(actual, expected, "n={n} start={start}");
+                writeln!(
+                    report,
+                    "FIND_CONTIG_GOLDEN\t{n}\t{start}\t{}",
+                    actual.map_or_else(|| String::from("None"), |p| p.to_string())
+                )
+                .expect("write to String");
+            }
+        }
+        print!("{report}");
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(512))]
+
+        #[test]
+        fn proptest_find_contiguous_matches_naive(
+            bytes in proptest::collection::vec(proptest::prelude::any::<u8>(), 1..48),
+            n in 1u32..80,
+            start_frac in 0u32..200,
+        ) {
+            let count = u32::try_from(bytes.len()).expect("len fits u32") * 8;
+            let start = (start_frac % (count + 1)).min(count);
+            let got = bitmap_find_contiguous_linear(&bytes, count, n, start);
+            let want = find_contiguous_linear_naive(&bytes, count, n, start);
+            proptest::prop_assert_eq!(got, want, "n={} start={}", n, start);
+        }
+    }
+
     // ── Geometry tests ──────────────────────────────────────────────────
 
     #[test]
