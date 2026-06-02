@@ -5,8 +5,8 @@ use ffs_types::{
     EXT4_EXTENTS_FL, EXT4_FAST_SYMLINK_MAX, EXT4_HUGE_FILE_FL, EXT4_INDEX_FL,
     EXT4_SB_CHECKSUM_OFFSET, EXT4_SUPER_MAGIC, EXT4_SUPERBLOCK_OFFSET, EXT4_SUPERBLOCK_SIZE,
     EXT4_XATTR_MAGIC, GroupNumber, InodeNumber, ParseError, S_IFBLK, S_IFCHR, S_IFDIR, S_IFIFO,
-    S_IFLNK, S_IFMT, S_IFREG, S_IFSOCK, ensure_slice, ext4_block_size_from_log, read_fixed,
-    read_le_u16, read_le_u32, trim_nul_padded,
+    S_IFLNK, S_IFMT, S_IFREG, S_IFSOCK, all_zero_bytes, ensure_slice, ext4_block_size_from_log,
+    read_fixed, read_le_u16, read_le_u32, trim_nul_padded,
 };
 use serde::{Deserialize, Serialize};
 
@@ -3360,8 +3360,7 @@ pub fn parse_dir_block(
                 field: "de_rec_len",
                 reason: "overflow",
             })?;
-        let is_tail_position =
-            entry_end <= block.len() && block[entry_end..].iter().all(|&b| b == 0);
+        let is_tail_position = entry_end <= block.len() && all_zero_bytes(&block[entry_end..]);
         if is_tail_position
             && is_malformed_dir_checksum_tail(inode, name_len, file_type_raw, rec_len)
         {
@@ -3385,7 +3384,7 @@ pub fn parse_dir_block(
                 field: "dir_block_tail",
                 reason: "overflow",
             })?;
-            if tail_end < block.len() && block[tail_end..].iter().any(|&b| b != 0) {
+            if tail_end < block.len() && !all_zero_bytes(&block[tail_end..]) {
                 return Err(ParseError::InvalidField {
                     field: "dir_block_tail",
                     reason: "non-zero padding after checksum tail",
@@ -3763,7 +3762,7 @@ impl<'a> DirBlockIter<'a> {
                 actual: self.block.len().saturating_sub(self.offset),
             });
         }
-        if tail_end < self.block.len() && self.block[tail_end..].iter().any(|&b| b != 0) {
+        if tail_end < self.block.len() && !all_zero_bytes(&self.block[tail_end..]) {
             return Err(ParseError::InvalidField {
                 field: "dir_block_tail",
                 reason: "non-zero padding after checksum tail",
@@ -3817,7 +3816,7 @@ impl<'a> Iterator for DirBlockIter<'a> {
                 return None;
             }
             let is_tail_position = header.entry_end <= self.block.len()
-                && self.block[header.entry_end..].iter().all(|&b| b == 0);
+                && all_zero_bytes(&self.block[header.entry_end..]);
             if is_tail_position && Self::is_malformed_checksum_tail(header) {
                 self.done = true;
                 return Some(Err(ParseError::InvalidField {

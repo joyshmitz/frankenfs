@@ -2,7 +2,14 @@
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use ffs_ondisk::ext4_casefold_key;
+use ffs_types::all_zero_bytes;
 use std::hint::black_box;
+
+const ZERO_SCAN_BLOCK_LEN: usize = 4096;
+
+fn scalar_all_zero(bytes: &[u8]) -> bool {
+    bytes.iter().all(|&byte| byte == 0)
+}
 
 fn bench_ext4_casefold_key_ascii(c: &mut Criterion) {
     let names: Vec<&[u8]> = vec![
@@ -76,11 +83,49 @@ fn bench_ext4_casefold_key_invalid_utf8(c: &mut Criterion) {
     });
 }
 
+fn bench_zero_scan_scalar_all_zero_4k(c: &mut Criterion) {
+    let block = vec![0_u8; ZERO_SCAN_BLOCK_LEN];
+
+    c.bench_function("zero_scan_scalar_all_zero_4k", |b| {
+        b.iter(|| black_box(scalar_all_zero(black_box(&block))));
+    });
+}
+
+fn bench_zero_scan_chunked_all_zero_4k(c: &mut Criterion) {
+    let block = vec![0_u8; ZERO_SCAN_BLOCK_LEN];
+
+    c.bench_function("zero_scan_chunked_all_zero_4k", |b| {
+        b.iter(|| black_box(all_zero_bytes(black_box(&block))));
+    });
+}
+
+fn bench_zero_scan_scalar_late_nonzero_4k(c: &mut Criterion) {
+    let mut block = vec![0_u8; ZERO_SCAN_BLOCK_LEN];
+    *block.last_mut().expect("non-empty block") = 1;
+
+    c.bench_function("zero_scan_scalar_late_nonzero_4k", |b| {
+        b.iter(|| black_box(scalar_all_zero(black_box(&block))));
+    });
+}
+
+fn bench_zero_scan_chunked_late_nonzero_4k(c: &mut Criterion) {
+    let mut block = vec![0_u8; ZERO_SCAN_BLOCK_LEN];
+    *block.last_mut().expect("non-empty block") = 1;
+
+    c.bench_function("zero_scan_chunked_late_nonzero_4k", |b| {
+        b.iter(|| black_box(all_zero_bytes(black_box(&block))));
+    });
+}
+
 criterion_group!(
     casefold,
     bench_ext4_casefold_key_ascii,
     bench_ext4_casefold_key_mixed_utf8,
     bench_ext4_casefold_key_long_utf8,
     bench_ext4_casefold_key_invalid_utf8,
+    bench_zero_scan_scalar_all_zero_4k,
+    bench_zero_scan_chunked_all_zero_4k,
+    bench_zero_scan_scalar_late_nonzero_4k,
+    bench_zero_scan_chunked_late_nonzero_4k,
 );
 criterion_main!(casefold);

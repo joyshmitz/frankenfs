@@ -428,6 +428,18 @@ pub fn trim_nul_padded(bytes: &[u8]) -> String {
 }
 
 #[must_use]
+pub fn all_zero_bytes(bytes: &[u8]) -> bool {
+    let mut chunks = bytes.chunks_exact(16);
+    for chunk in &mut chunks {
+        let word = u128::from_ne_bytes(chunk.try_into().expect("16-byte chunk"));
+        if word != 0 {
+            return false;
+        }
+    }
+    chunks.remainder().iter().all(|&byte| byte == 0)
+}
+
+#[must_use]
 pub const fn is_power_of_two_u32(value: u32) -> bool {
     value.is_power_of_two()
 }
@@ -915,6 +927,22 @@ mod tests {
     fn test_trim_nul_padded() {
         let raw = b"ffs\0\0\0\0";
         assert_eq!(trim_nul_padded(raw), "ffs");
+    }
+
+    #[test]
+    fn all_zero_bytes_matches_scalar_scan() {
+        for len in 0_usize..80 {
+            let mut bytes = vec![0_u8; len];
+            assert!(all_zero_bytes(&bytes), "all-zero len {len}");
+            for pos in 0..len {
+                bytes[pos] = 1;
+                assert!(
+                    !all_zero_bytes(&bytes),
+                    "nonzero byte at {pos} in len {len}"
+                );
+                bytes[pos] = 0;
+            }
+        }
     }
 
     #[test]
