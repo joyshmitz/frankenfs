@@ -2312,6 +2312,56 @@ pub fn stamp_extent_block_checksum(
     extent_block[tail_off..tail_off + 4].copy_from_slice(&computed.to_le_bytes());
 }
 
+/// Byte offset of `ext4_xattr_header.h_checksum` within an external xattr block.
+const XATTR_HEADER_CHECKSUM_OFFSET: usize = 16;
+
+/// Compute the CRC32C checksum of an external ext4 xattr block.
+///
+/// Mirrors the kernel's `ext4_xattr_block_csum()`: seed with the filesystem
+/// checksum seed, fold in the block's physical number as a little-endian `u64`,
+/// then checksum the entire block with the 4-byte `h_checksum` field (offset
+/// 16..20) treated as zero. Required on filesystems with `metadata_csum`;
+/// without a valid value `e2fsck` reports the xattr block as corrupt.
+///
+/// The validated formula is pinned by `xattr_block_csum_matches_e2fsprogs_oracle`,
+/// which checks this against a real block written by e2fsprogs/debugfs.
+#[must_use]
+pub fn ext4_xattr_block_csum(csum_seed: u32, block_nr: u64, block: &[u8]) -> u32 {
+    let off = XATTR_HEADER_CHECKSUM_OFFSET;
+    let seed = ext4_chksum(csum_seed, &block_nr.to_le_bytes());
+    let seed = ext4_chksum(seed, &block[..off]);
+    let seed = ext4_chksum(seed, &0_u32.to_le_bytes());
+    ext4_chksum(seed, &block[off + 4..])
+}
+
+/// Stamp the CRC32C checksum into an external xattr block's `h_checksum` field.
+///
+/// No-op for blocks too short to hold the header checksum field. The current
+/// contents of the `h_checksum` field do not affect the result (it is treated
+/// as zero), so this is safe to call repeatedly or after mutating other header
+/// fields such as `h_refcount`.
+pub fn stamp_xattr_block_checksum(block: &mut [u8], csum_seed: u32, block_nr: u64) {
+    let off = XATTR_HEADER_CHECKSUM_OFFSET;
+    if block.len() < off + 4 {
+        return;
+    }
+    let computed = ext4_xattr_block_csum(csum_seed, block_nr, block);
+    block[off..off + 4].copy_from_slice(&computed.to_le_bytes());
+}
+
+/// Verify the CRC32C checksum stored in an external xattr block's header.
+///
+/// Returns `false` for blocks too short to hold the field.
+#[must_use]
+pub fn verify_xattr_block_checksum(block: &[u8], csum_seed: u32, block_nr: u64) -> bool {
+    let off = XATTR_HEADER_CHECKSUM_OFFSET;
+    if block.len() < off + 4 {
+        return false;
+    }
+    let stored = u32::from_le_bytes([block[off], block[off + 1], block[off + 2], block[off + 3]]);
+    ext4_xattr_block_csum(csum_seed, block_nr, block) == stored
+}
+
 /// Verify that an inode bitmap's free-bit count matches the group descriptor.
 ///
 /// `inodes_per_group` is `s_inodes_per_group` from the superblock.
@@ -11402,6 +11452,46 @@ mod tests {
         let small = [0_u8; 12];
         let err = verify_extent_block_checksum(&small, 0, 1, 1).unwrap_err();
         assert!(matches!(err, ParseError::InsufficientData { .. }));
+    }
+
+    /// Oracle test (bd-fwph3): pin `ext4_xattr_block_csum` against a real
+    /// external xattr block written by e2fsprogs/debugfs on a metadata_csum
+    /// image, then verified clean by `e2fsck -fn`. The fixture is block 1363 of
+    /// a 1 KiB-block image (csum seed 0xedadf038); e2fsprogs stamped
+    /// h_checksum = 0x4763fce2. This proves our formula matches the on-disk
+    /// spec — not just our own re-derivation.
+    #[test]
+    fn xattr_block_csum_matches_e2fsprogs_oracle() {
+        const SEED: u32 = 0xedad_f038;
+        const BLOCK_NR: u64 = 1363;
+        const ORACLE_H_CHECKSUM: u32 = 0x4763_fce2;
+        let block: &[u8] =
+            include_bytes!("../../../conformance/golden/xattr_block_oracle_metadata_csum.bin");
+        assert_eq!(block.len(), 1024);
+
+        // The fixture already carries e2fsprogs' stored checksum.
+        let stored = u32::from_le_bytes([block[16], block[17], block[18], block[19]]);
+        assert_eq!(stored, ORACLE_H_CHECKSUM, "fixture h_checksum drifted");
+
+        // Our computation must reproduce exactly what e2fsprogs wrote.
+        assert_eq!(
+            ext4_xattr_block_csum(SEED, BLOCK_NR, block),
+            ORACLE_H_CHECKSUM,
+            "ext4_xattr_block_csum disagrees with e2fsprogs oracle"
+        );
+        assert!(verify_xattr_block_checksum(block, SEED, BLOCK_NR));
+
+        // Stamping a copy whose checksum field has been clobbered restores the
+        // exact oracle value, and stamping is idempotent.
+        let mut clobbered = block.to_vec();
+        clobbered[16..20].copy_from_slice(&0xDEAD_BEEF_u32.to_le_bytes());
+        assert!(!verify_xattr_block_checksum(&clobbered, SEED, BLOCK_NR));
+        stamp_xattr_block_checksum(&mut clobbered, SEED, BLOCK_NR);
+        assert_eq!(&clobbered[16..20], &ORACLE_H_CHECKSUM.to_le_bytes());
+        assert!(verify_xattr_block_checksum(&clobbered, SEED, BLOCK_NR));
+
+        // A wrong block number must not verify (the physical block is folded in).
+        assert!(!verify_xattr_block_checksum(block, SEED, BLOCK_NR + 1));
     }
 
     // ── Device number tests ──────────────────────────────────────────
