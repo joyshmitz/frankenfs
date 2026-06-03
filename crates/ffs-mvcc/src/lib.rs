@@ -4605,7 +4605,10 @@ mod tests {
         want[4..8].copy_from_slice(&101u32.to_le_bytes());
         want[8..12].copy_from_slice(&2113u32.to_le_bytes());
         want[12..16].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
-        assert_eq!(got, want, "all slots incl slot 2 (2113) must survive readback");
+        assert_eq!(
+            got, want,
+            "all slots incl slot 2 (2113) must survive readback"
+        );
     }
 
     /// bd-bw90c at scale: the real e2compr path RMWs the same indirect block
@@ -4629,13 +4632,10 @@ mod tests {
 
         // Later txn (chunk 2): RMW the same block once per slot 1..40.
         let snap1 = store.current_snapshot();
-        let mut cur = store
-            .read_visible(block, snap1)
-            .expect("base")
-            .into_owned();
+        let mut cur = store.read_visible(block, snap1).expect("base").into_owned();
         let mut t2 = store.begin();
         for slot in 1..nslots {
-            let val = 2000u32 + slot as u32;
+            let val = 2000u32 + u32::try_from(slot).expect("slot fits u32");
             cur[slot * 4..slot * 4 + 4].copy_from_slice(&val.to_le_bytes());
             t2.stage_write_with_proof(block, cur.clone(), MergeProof::DisjointBlocks);
             cur = t2.staged_write(block).expect("staged").to_vec();
@@ -4658,7 +4658,11 @@ mod tests {
                 got[slot * 4 + 2],
                 got[slot * 4 + 3],
             ]);
-            assert_eq!(v, 2000u32 + slot as u32, "slot {slot} must survive readback");
+            assert_eq!(
+                v,
+                2000u32 + u32::try_from(slot).expect("slot fits u32"),
+                "slot {slot} must survive readback"
+            );
         }
     }
 
