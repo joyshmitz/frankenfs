@@ -99,9 +99,7 @@ struct CommitInstallContext {
 
 /// Thread-safe, sharded MVCC version store.
 ///
-/// Blocks are assigned to shards via `block_number.0 & shard_mask`.
-/// `shard_count` is normalized to a power of two at construction, so this is
-/// equivalent to modulo routing.
+/// Blocks are assigned to shards via `block_number.0 as usize % shard_count`.
 /// Each shard has its own `RwLock`, so writers to different block ranges
 /// proceed without contention.
 ///
@@ -162,7 +160,6 @@ pub struct ShardedMvccStore {
     /// (enforced by `lock_shards`).
     shards: Vec<RwLock<MvccShard>>,
     shard_count: usize,
-    shard_mask: u64,
     next_txn: AtomicU64,
     next_commit: AtomicU64,
     publication_gate: CommitPublicationGate,
@@ -223,7 +220,6 @@ impl ShardedMvccStore {
         Self {
             shards,
             shard_count,
-            shard_mask: u64::try_from(shard_count - 1).expect("shard mask fits in u64"),
             next_txn: AtomicU64::new(1),
             next_commit: AtomicU64::new(1),
             publication_gate: CommitPublicationGate::new(),
@@ -275,7 +271,9 @@ impl ShardedMvccStore {
     /// Map a block number to its shard index.
     #[inline]
     fn shard_index(&self, block: BlockNumber) -> usize {
-        usize::try_from(block.0 & self.shard_mask).expect("masked shard index fits in usize")
+        let shard_count_u64 = u64::try_from(self.shard_count).unwrap_or(u64::MAX);
+        let rem = block.0 % shard_count_u64;
+        usize::try_from(rem).unwrap_or(0)
     }
 
     fn latest_payload_matches(versions: &[BlockVersion], bytes: &[u8]) -> bool {
@@ -1676,17 +1674,12 @@ mod tests {
             let store = make_store(shard_count);
             let effective_shard_count = store.shard_count();
             let idx = store.shard_index(BlockNumber(block_num));
-            let expected = usize::try_from(
-                block_num % u64::try_from(effective_shard_count).expect("fits"),
-            )
-            .expect("modulo result fits");
             prop_assert!(
                 idx < effective_shard_count,
                 "shard_index {} >= effective shard count {}",
                 idx,
                 effective_shard_count
             );
-            prop_assert_eq!(idx, expected);
         }
 
         /// Committed writes are visible in ShardedMvccStore.
