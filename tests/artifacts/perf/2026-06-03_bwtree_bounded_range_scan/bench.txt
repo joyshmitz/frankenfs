@@ -1,1 +1,43 @@
-mixed/bwtree/8: 3.2144 s -> 1.3914 s = ~2.31x (cross-worker baseline; algorithmic: bounded range vs full-page materialize)
+bd-xmh5g.15 bounded Bw-tree range_scan delta replay -- KEPT on corrected same-binary evidence
+
+WHY THIS FILE WAS REWRITTEN
+---------------------------
+Two earlier criterion figures for this lever were CROSS-WORKER and therefore
+invalid (rch assigns a different worker per job; absolute times are not
+comparable across jobs):
+  - "3.2144 s -> 1.3914 s = 2.31x" (original landing): baseline and after ran
+    on different workers. NOT accepted evidence.
+  - "3.2144 s -> 4.7523 s = 47.8% slower" (pass-17 corrective): baseline
+    vmi1264463 vs after vmi1227854, also different workers. Equally invalid;
+    it drove a revert that was never applied.
+
+Neither established the direction. Settled it with a same-binary A/B instead.
+
+SAME-BINARY A/B (machine-independent)
+-------------------------------------
+Test: crates/ffs-btree/src/bw_tree.rs :: bd_xmh5g_15_range_scan_same_binary_ab
+Method: build the mixed bench page (PREPOPULATE=10_000, consolidated base),
+  then replay an IDENTICAL seeded op stream (5_000 ops, 50% lookup / 30% insert
+  / 10% delete / 10% range_scan(count=10)) TWICE in ONE process -- once with
+  range_scan materializing the whole page (old path), once with the bounded
+  delta replay. min-of-5, alternating. Only the scan implementation differs, so
+  both halves share the worker/binary and the RATIO is comparable.
+
+Results (cargo test --release, --nocapture; 3 independent rch invocations):
+  run A: materialize=120.079ms  bounded=110.901ms  speedup=1.083x
+  run B: materialize=203.808ms  bounded=135.317ms  speedup=1.506x
+  run C: materialize= 82.654ms  bounded= 76.611ms  speedup=1.079x
+
+Absolute times vary with per-invocation worker load, but the DIRECTION is
+robust: bounded is faster in every run, never slower. Conservative claim:
+>= 1.08x (>= ~8%) on the mixed workload; larger under memory/cache pressure
+(materialize clones the full 10_000-entry base per scan; bounded does not).
+
+Isomorphism: the scan-row checksum is identical (48777174) across all runs and
+both paths -- the bounded replay returns exactly the same rows as
+materialize().range(start..).take(count) over the full workload-generated
+chain state. Also covered by range_scan_matches_materialized_range_with_
+shadowing_deltas and the full 144-test ffs-btree suite.
+
+VERDICT: KEPT. A real, rigorously-proven, isomorphic hot-path win. The earlier
+cross-worker numbers (2.31x and 47.8%-slower) are both rejected as invalid.

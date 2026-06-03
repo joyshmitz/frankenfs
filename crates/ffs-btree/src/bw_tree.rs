@@ -914,7 +914,8 @@ fn defer_reclaim(delta: Arc<PageDelta>) {
 mod tests {
     use super::{
         BwKey, BwValue, ConsolidationConfig, FfsError, MAX_CHAIN_DEPTH, MAX_CHAIN_WALK,
-        MappingTable, PageDelta, PageHead, PageId, chain_length, materialize_from_head, write_lock,
+        MappingTable, PageDelta, PageHead, PageId, chain_length, materialize_from_head,
+        range_scan_from_head, write_lock,
     };
     use std::collections::BTreeMap;
     use std::sync::{Arc, Barrier, atomic::Ordering};
@@ -2518,5 +2519,118 @@ mod tests {
             prop_assert_eq!(second.cas_attempts, 0,
                 "second consolidate must not perform any CAS attempts");
         }
+    }
+
+    /// Same-binary A/B for bd-xmh5g.15: run the mixed bench workload
+    /// (50% lookup / 30% insert / 10% delete / 10% range_scan, PREPOPULATE
+    /// 10_000, 5_000 ops) twice in ONE process over an IDENTICAL seeded op
+    /// sequence — once with `range_scan` materializing the whole page (the old
+    /// path) and once with the bounded delta replay. Only the scan
+    /// implementation differs; both runs share the worker and binary, so the
+    /// relative comparison is machine-independent. This is the rigorous proof
+    /// the cross-worker criterion figures (bogus 2.31x / 4.75s) could not give.
+    /// The scan-row checksums must match (isomorphism on workload-generated
+    /// states). Prints the speedup with `--nocapture`.
+    #[test]
+    fn bd_xmh5g_15_range_scan_same_binary_ab() {
+        const PREPOPULATE: u64 = 10_000;
+        const OPS: u64 = 5_000;
+        const REPS: usize = 5;
+        const SCAN_COUNT: usize = 10;
+
+        fn xorshift64(s: &mut u64) -> u64 {
+            let mut x = *s;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            *s = x;
+            x
+        }
+
+        // Old path: materialize the full page, then range(start..).take(count).
+        fn scan_materialize(
+            table: &MappingTable,
+            page: PageId,
+            start: BwKey,
+        ) -> Vec<(BwKey, BwValue)> {
+            let snap = table.get_page(page).expect("get_page");
+            let (state, _) = materialize_from_head(&snap.head).expect("materialize");
+            state
+                .range(start..)
+                .take(SCAN_COUNT)
+                .map(|(&k, &v)| (k, v))
+                .collect()
+        }
+        // New path: bounded delta replay (the committed range_scan body).
+        fn scan_bounded(table: &MappingTable, page: PageId, start: BwKey) -> Vec<(BwKey, BwValue)> {
+            let snap = table.get_page(page).expect("get_page");
+            range_scan_from_head(&snap.head, start, SCAN_COUNT)
+                .expect("bounded range scan")
+                .0
+        }
+
+        // Replay the identical workload with the chosen scan path; return
+        // (elapsed, checksum-of-scan-rows). A fresh table + fixed seed make the
+        // mutation stream — and therefore the chain state at every scan —
+        // identical across both variants.
+        let run = |use_bounded: bool| -> (std::time::Duration, u64) {
+            let table = MappingTable::with_capacity(16);
+            let page = table.allocate_page().expect("alloc");
+            for i in 0..PREPOPULATE {
+                table.insert(page, BwKey(i), BwValue(i)).expect("insert");
+            }
+            let cfg = ConsolidationConfig::default();
+            let _ = table.consolidate_page(page, &cfg);
+
+            let mut rng = 0x9E37_79B9_7F4A_7C15_u64;
+            let mut checksum = 0_u64;
+            let begin = std::time::Instant::now();
+            for _ in 0..OPS {
+                let op = xorshift64(&mut rng) % 100;
+                let key = xorshift64(&mut rng) % (PREPOPULATE * 2);
+                if op < 50 {
+                    let _ = table.lookup(page, BwKey(key));
+                } else if op < 80 {
+                    let _ = table.insert(page, BwKey(key), BwValue(key + 1));
+                } else if op < 90 {
+                    let _ = table.delete(page, BwKey(key));
+                } else {
+                    let rows = if use_bounded {
+                        scan_bounded(&table, page, BwKey(key))
+                    } else {
+                        scan_materialize(&table, page, BwKey(key))
+                    };
+                    for (k, _) in &rows {
+                        checksum = checksum.wrapping_add(k.0);
+                    }
+                }
+            }
+            (begin.elapsed(), checksum)
+        };
+
+        let mut best_mat = std::time::Duration::MAX;
+        let mut best_bnd = std::time::Duration::MAX;
+        let mut cks_mat = 0_u64;
+        let mut cks_bnd = 0_u64;
+        for _ in 0..REPS {
+            let (d, c) = run(false);
+            best_mat = best_mat.min(d);
+            cks_mat = c;
+            let (d, c) = run(true);
+            best_bnd = best_bnd.min(d);
+            cks_bnd = c;
+        }
+
+        assert_eq!(
+            cks_mat, cks_bnd,
+            "bounded range_scan must return identical rows to materialize \
+             across the whole workload (isomorphism)"
+        );
+
+        let speedup = best_mat.as_secs_f64() / best_bnd.as_secs_f64();
+        eprintln!(
+            "bd-xmh5g.15 same-binary A/B (mixed, 1 thread): materialize={best_mat:?} \
+             bounded={best_bnd:?} speedup={speedup:.3}x checksum={cks_bnd}"
+        );
     }
 }
