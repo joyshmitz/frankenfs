@@ -1211,6 +1211,53 @@ fn bench_sharded_mvcc_contention(c: &mut Criterion) {
     }
 }
 
+fn bench_shard_index_routing_ab(c: &mut Criterion) {
+    let shard_count = 1024_u64;
+    let shard_mask = shard_count - 1;
+    let blocks_per_writer = 4096_u64;
+    let ops_per_writer = 64_u64;
+    let blocks: Vec<u64> = (0..32_u64)
+        .flat_map(|writer_id| {
+            let block_base = writer_id.saturating_mul(blocks_per_writer);
+            (0..ops_per_writer).map(move |i| block_base + (i % blocks_per_writer))
+        })
+        .collect();
+
+    let modulo_checksum = blocks.iter().fold(0_usize, |sum, block| {
+        let idx = usize::try_from(*block % shard_count).expect("modulo shard index fits");
+        sum.wrapping_add(idx)
+    });
+    let mask_checksum = blocks.iter().fold(0_usize, |sum, block| {
+        let idx = usize::try_from(*block & shard_mask).expect("masked shard index fits");
+        sum.wrapping_add(idx)
+    });
+    assert_eq!(modulo_checksum, mask_checksum);
+
+    c.bench_function("shard_index_routing_modulo_ab", |b| {
+        b.iter(|| {
+            let shard_count = black_box(shard_count);
+            let mut checksum = 0_usize;
+            for &block in &blocks {
+                let idx = usize::try_from(black_box(block) % shard_count).expect("fits");
+                checksum = checksum.wrapping_add(idx);
+            }
+            black_box(checksum)
+        });
+    });
+
+    c.bench_function("shard_index_routing_mask_ab", |b| {
+        b.iter(|| {
+            let shard_mask = black_box(shard_mask);
+            let mut checksum = 0_usize;
+            for &block in &blocks {
+                let idx = usize::try_from(black_box(block) & shard_mask).expect("fits");
+                checksum = checksum.wrapping_add(idx);
+            }
+            black_box(checksum)
+        });
+    });
+}
+
 fn bench_pruning_throughput(c: &mut Criterion) {
     let block_data = vec![0xAB_u8; 4096];
     let num_blocks = 256_u64;
@@ -1536,6 +1583,7 @@ criterion_group!(
     bench_mvcc_contention,
     bench_merge_proof_success_rate,
     bench_sharded_mvcc_contention,
+    bench_shard_index_routing_ab,
     bench_pruning_throughput,
     bench_coalesced_append,
     bench_checkpoint_throughput,
