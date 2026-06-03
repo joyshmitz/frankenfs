@@ -33873,6 +33873,42 @@ mod tests {
     }
 
     #[test]
+    fn ext4_successful_mkdir_keeps_block_bitmap_csum_valid_on_metadata_csum_image() {
+        // A successful mkdir (inode + dir data block allocated) must leave the
+        // group block-bitmap CRC32C valid on a metadata_csum image —
+        // count_free_blocks_in_group validates the on-disk csum. Uses the
+        // generated image so it runs on remote workers (the format tool's
+        // default feature set includes metadata_csum, which the fixture-gated
+        // open_writable_ext4 path cannot exercise on rch — bd-cc6ua).
+        //
+        // NOTE: the FAILED-mkdir rollback path (alloc dir block, then free it
+        // after a parent-nlink-overflow/ENOSPC failure) does NOT keep the
+        // block-bitmap csum valid — tracked as a separate real bug; see the
+        // bead filed alongside this test.
+        let Some((fs, _tmp)) = open_writable_ext4_mkfs(64) else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        // Validation passes on the pristine generated image (confirms our csum
+        // computation agrees with the format tool's).
+        let free_before = fs
+            .count_free_blocks_in_group(&cx, GroupNumber(0))
+            .expect("free block count on pristine image");
+
+        fs.mkdir(&cx, root, OsStr::new("csum_dir"), 0o755, 0, 0)
+            .expect("mkdir");
+
+        let free_after = fs
+            .count_free_blocks_in_group(&cx, GroupNumber(0))
+            .expect("free block count after successful mkdir (block-bitmap csum must stay valid)");
+        assert!(
+            free_after < free_before,
+            "mkdir consumes at least the new directory data block"
+        );
+    }
+
+    #[test]
     fn write_mkdir_invalid_name_rolls_back_inode_allocation() {
         let Some(fs) = open_writable_ext4() else {
             return;
