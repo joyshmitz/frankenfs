@@ -5063,6 +5063,51 @@ pub fn write_dx_root(
     Ok(())
 }
 
+/// Choose where to split a full htree leaf during directory growth (write-half
+/// STEP 2 of bd-gauub).
+///
+/// `entries` is the leaf's contents as `(name_hash, on_disk_record_len)` in
+/// ascending hash order (the caller hashes each name with the directory's hash
+/// version + seed and sorts). Returns `(split_index, split_hash)` where:
+/// `entries[..split_index]` stay in the original leaf and
+/// `entries[split_index..]` move to the new leaf, and `split_hash =
+/// entries[split_index].hash` is inserted into the DX index. Because
+/// `dx_find_leaf_idx` routes a lookup to the rightmost entry with
+/// `hash <= target`, the new (right) leaf must hold exactly the hashes
+/// `>= split_hash`; therefore the split MUST fall on a clean hash boundary
+/// (`entries[i].hash != entries[i-1].hash`) so that no run of equal-hash names
+/// is straddled across two leaves (which dx navigation would then miss).
+///
+/// Among the clean boundaries, the one whose byte split is closest to 50/50 is
+/// chosen for balance. Returns `None` when no clean boundary exists (fewer than
+/// two distinct hashes) — the caller must then fall back (hash-collision
+/// continuation is a separate, deferred concern; a linear leaf stays correct).
+///
+/// A subset of a single block's entries always re-fits in one block, so no
+/// size-overflow check is needed beyond the caller's normal packing.
+#[must_use]
+pub fn choose_htree_leaf_split(entries: &[(u32, usize)]) -> Option<(usize, u32)> {
+    if entries.len() < 2 {
+        return None;
+    }
+    let total: usize = entries.iter().map(|&(_, len)| len).sum();
+    let target = total / 2;
+
+    let mut bytes_before = 0_usize; // sum of entries[..i] record lengths
+    let mut best: Option<(usize, usize)> = None; // (split_index, |bytes_before - target|)
+    for i in 1..entries.len() {
+        bytes_before += entries[i - 1].1;
+        // A clean boundary: the hash strictly increases here (entries sorted).
+        if entries[i].0 != entries[i - 1].0 {
+            let dist = bytes_before.abs_diff(target);
+            if best.is_none_or(|(_, best_dist)| dist < best_dist) {
+                best = Some((i, dist));
+            }
+        }
+    }
+    best.map(|(i, _)| (i, entries[i].0))
+}
+
 /// Find the rightmost entry index whose hash is <= target_hash.
 fn dx_find_leaf_idx(entries: &[Ext4DxEntry], hash: u32) -> usize {
     // Binary search: find rightmost entry where entry.hash <= hash
@@ -7760,6 +7805,57 @@ mod tests {
         // count > limit is rejected.
         let mut tiny = vec![0_u8; 0x40];
         assert!(write_dx_root(&mut tiny, 1, 0, 1, &entries).is_err());
+    }
+
+    /// bd-gauub (write-half STEP 2): leaf-split point selection invariants.
+    #[test]
+    fn choose_htree_leaf_split_invariants() {
+        // Too few / unsplittable inputs.
+        assert_eq!(choose_htree_leaf_split(&[]), None);
+        assert_eq!(choose_htree_leaf_split(&[(5, 16)]), None);
+        // All entries collide on one hash -> no clean boundary.
+        assert_eq!(choose_htree_leaf_split(&[(7, 16), (7, 16), (7, 16)]), None);
+
+        // Two distinct hashes split at the boundary.
+        assert_eq!(choose_htree_leaf_split(&[(3, 16), (9, 16)]), Some((1, 9)));
+
+        // Balanced split picks the boundary closest to the byte midpoint.
+        // Uniform 16-byte entries, hashes 10,20,30,40 -> midpoint at index 2.
+        let uniform = [(10, 16), (20, 16), (30, 16), (40, 16)];
+        assert_eq!(choose_htree_leaf_split(&uniform), Some((2, 30)));
+
+        // An equal-hash run must NEVER be split inside the run, no matter where
+        // the byte midpoint falls: hashes [10,20,20,20,90] only have clean
+        // boundaries at index 1 and index 4, so the split is one of those.
+        let run = [(10, 16), (20, 16), (20, 16), (20, 16), (90, 16)];
+        let (idx, _) = choose_htree_leaf_split(&run).expect("splittable");
+        assert!(
+            idx == 1 || idx == 4,
+            "split must not land inside the 20-run"
+        );
+        // With a large trailing entry the midpoint lands past the run -> index 4.
+        let run_heavy = [(10, 16), (20, 16), (20, 16), (20, 16), (90, 64)];
+        assert_eq!(choose_htree_leaf_split(&run_heavy), Some((4, 90)));
+
+        // General invariant check across a randomized-ish set.
+        let mut state = 0x9E37_79B9_u32;
+        let mut entries: Vec<(u32, usize)> = (0..40)
+            .map(|_| {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                (state >> 20, 12 + ((state as usize) % 5) * 4)
+            })
+            .collect();
+        entries.sort_by_key(|&(h, _)| h);
+        if let Some((i, h)) = choose_htree_leaf_split(&entries) {
+            assert!(i >= 1 && i < entries.len());
+            assert_eq!(entries[i].0, h);
+            assert!(entries[..i].iter().all(|&(eh, _)| eh < h), "lower < split");
+            assert!(
+                entries[i..].iter().all(|&(eh, _)| eh >= h),
+                "upper >= split"
+            );
+            assert!(entries[i - 1].0 < h, "split is on a clean boundary");
+        }
     }
 
     /// bd-12nk4 — Kernel-conformance pin for the ext4_dir_entry_2
