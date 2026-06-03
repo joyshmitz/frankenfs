@@ -29039,12 +29039,7 @@ mod tests {
         while off < payload.len() {
             let end = (off + chunk).min(payload.len());
             let written = fs
-                .write(
-                    &cx,
-                    created.ino,
-                    off as u64,
-                    &payload[off..end],
-                )
+                .write(&cx, created.ino, off as u64, &payload[off..end])
                 .expect("compressed chunk write reaching double-indirect");
             assert_eq!(
                 written as usize,
@@ -34972,6 +34967,58 @@ mod tests {
         // Read it back and verify.
         let readback = fs.getxattr(&cx, attr.ino, "user.large").expect("getxattr");
         assert_eq!(readback.as_deref(), Some(large_value.as_slice()));
+    }
+
+    #[test]
+    fn write_setxattr_sequential_external_block_rmw_across_ops_roundtrips() {
+        // bd-bw90c regression / generalization: each setxattr is a SEPARATE
+        // no-tx request scope, and after the first forces an external xattr
+        // block, the subsequent ones read-modify-write that same already-
+        // committed block. Before the read-your-writes fix (no-tx scopes read
+        // at the current snapshot, not a fixed begin snapshot), the RMW of a
+        // block committed by a prior op read a stale version and dropped
+        // earlier entries — the same class as the e2compr indirect-block
+        // corruption. All entries must survive readback.
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let attr = fs
+            .create(&cx, root, OsStr::new("xattr_seq_external.txt"), 0o644, 0, 0)
+            .expect("create");
+
+        // Distinct large-ish values so each lands in the external block and
+        // carries a recognizable payload.
+        let entries: [(&str, Vec<u8>); 4] = [
+            ("user.alpha", vec![0x11_u8; 300]),
+            ("user.bravo", vec![0x22_u8; 300]),
+            ("user.charlie", vec![0x33_u8; 300]),
+            ("user.delta", vec![0x44_u8; 300]),
+        ];
+        for (name, value) in &entries {
+            fs.setxattr(&cx, attr.ino, name, value, XattrSetMode::Set)
+                .unwrap_or_else(|e| panic!("setxattr {name}: {e}"));
+        }
+
+        // Every entry written across the separate ops must read back intact.
+        for (name, value) in &entries {
+            let got = fs
+                .getxattr(&cx, attr.ino, name)
+                .unwrap_or_else(|e| panic!("getxattr {name}: {e}"));
+            assert_eq!(
+                got.as_deref(),
+                Some(value.as_slice()),
+                "xattr {name} written in its own op must survive the later external-block RMWs"
+            );
+        }
+        let names = fs.listxattr(&cx, attr.ino).expect("listxattr");
+        for (name, _) in &entries {
+            assert!(
+                names.iter().any(|n| n == name),
+                "listxattr must include {name}; got {names:?}"
+            );
+        }
     }
 
     #[test]
