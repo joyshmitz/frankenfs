@@ -4608,6 +4608,60 @@ mod tests {
         assert_eq!(got, want, "all slots incl slot 2 (2113) must survive readback");
     }
 
+    /// bd-bw90c at scale: the real e2compr path RMWs the same indirect block
+    /// ~32 times within one txn (4 pointer writes per cluster across 8
+    /// clusters). Replicate with 40 sequential read-your-writes full-block
+    /// overwrites of one block, each setting a distinct u32 slot, all staged
+    /// with MergeProof::DisjointBlocks, after a prior commit. Every slot must
+    /// survive readback.
+    #[test]
+    fn disjoint_proof_many_same_block_rmws_after_prior_commit_roundtrips() {
+        let mut store = MvccStore::new();
+        let block = BlockNumber(2101);
+        let nslots = 40usize;
+        let mut buf = vec![0u8; nslots * 4];
+
+        // Prior commit (chunk 1): set slot 0.
+        buf[0..4].copy_from_slice(&100u32.to_le_bytes());
+        let mut t1 = store.begin();
+        t1.stage_write_with_proof(block, buf.clone(), MergeProof::DisjointBlocks);
+        store.commit(t1).expect("t1");
+
+        // Later txn (chunk 2): RMW the same block once per slot 1..40.
+        let snap1 = store.current_snapshot();
+        let mut cur = store
+            .read_visible(block, snap1)
+            .expect("base")
+            .into_owned();
+        let mut t2 = store.begin();
+        for slot in 1..nslots {
+            let val = 2000u32 + slot as u32;
+            cur[slot * 4..slot * 4 + 4].copy_from_slice(&val.to_le_bytes());
+            t2.stage_write_with_proof(block, cur.clone(), MergeProof::DisjointBlocks);
+            cur = t2.staged_write(block).expect("staged").to_vec();
+        }
+        store.commit(t2).expect("t2");
+
+        let got = store
+            .read_visible(block, store.current_snapshot())
+            .expect("visible")
+            .into_owned();
+        assert_eq!(
+            u32::from_le_bytes([got[0], got[1], got[2], got[3]]),
+            100,
+            "prior-commit slot 0 survives"
+        );
+        for slot in 1..nslots {
+            let v = u32::from_le_bytes([
+                got[slot * 4],
+                got[slot * 4 + 1],
+                got[slot * 4 + 2],
+                got[slot * 4 + 3],
+            ]);
+            assert_eq!(v, 2000u32 + slot as u32, "slot {slot} must survive readback");
+        }
+    }
+
     /// Commits v1..v5 to the same block, captures a snapshot after each.
     /// Each snapshot sees exactly the version committed at or before it.
     #[test]
