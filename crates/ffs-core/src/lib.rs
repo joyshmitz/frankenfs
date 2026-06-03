@@ -34326,6 +34326,81 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "bd-vdi91: rename-over-existing leaves block-bitmap CRC32C stale on \
+                metadata_csum images (count_free_blocks_in_group then errors). Runnable \
+                repro via `cargo test -- --ignored`; un-ignore once bd-vdi91 is fixed."]
+    fn write_rename_over_existing_file_reclaims_target_inode_and_blocks() {
+        // The replaced target's inode (nlink -> 0) and its data blocks must be
+        // freed by rename — not leaked. The existing replaces_target test only
+        // checks the result name/data, not reclamation. EXPOSES bd-vdi91: on a
+        // metadata_csum image rename-over-existing leaves the block-bitmap csum
+        // stale (same root cause as the failed-mkdir rollback — a free during an
+        // MVCC-txn op reads stale GDT/bitmap and re-stamps a stale csum), so the
+        // count_free_blocks_in_group check below currently fails. Runs on remote
+        // workers via the generated image (open_writable_ext4 skips — bd-cc6ua).
+        let Some((fs, _tmp)) = open_writable_ext4_mkfs(64) else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        let src = fs
+            .create(&cx, root, OsStr::new("rn_src.txt"), 0o644, 0, 0)
+            .expect("create source");
+        fs.write(&cx, src.ino, 0, b"source payload")
+            .expect("write source");
+        let dst = fs
+            .create(&cx, root, OsStr::new("rn_dst.txt"), 0o644, 0, 0)
+            .expect("create destination");
+        // Give the target a full data block so block reclamation is observable.
+        fs.write(&cx, dst.ino, 0, &vec![0xDD_u8; 4096])
+            .expect("write destination");
+        let dst_group = GroupNumber(0);
+
+        let free_inodes_before = fs
+            .count_free_inodes_in_group(&cx, dst_group)
+            .expect("free inodes before");
+        let free_blocks_before = fs
+            .count_free_blocks_in_group(&cx, dst_group)
+            .expect("free blocks before");
+
+        fs.rename(
+            &cx,
+            root,
+            OsStr::new("rn_src.txt"),
+            root,
+            OsStr::new("rn_dst.txt"),
+        )
+        .expect("rename over existing file");
+
+        // src.ino now lives under the dst name; the OLD dst inode must be freed.
+        let renamed = fs
+            .lookup(&cx, root, OsStr::new("rn_dst.txt"))
+            .expect("lookup renamed");
+        assert_eq!(
+            renamed.ino, src.ino,
+            "dst name now resolves to source inode"
+        );
+
+        let free_inodes_after = fs
+            .count_free_inodes_in_group(&cx, dst_group)
+            .expect("free inodes after");
+        let free_blocks_after = fs
+            .count_free_blocks_in_group(&cx, dst_group)
+            .expect("free blocks after");
+        assert_eq!(
+            free_inodes_after,
+            free_inodes_before + 1,
+            "replaced target inode must be reclaimed (not leaked)"
+        );
+        assert_eq!(
+            free_blocks_after,
+            free_blocks_before + 1,
+            "replaced target's data block must be reclaimed (not leaked)"
+        );
+    }
+
+    #[test]
     fn write_rename_invalid_new_name_preserves_source() {
         let Some(fs) = open_writable_ext4() else {
             return;
