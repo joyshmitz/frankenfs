@@ -28,6 +28,8 @@ use ffs_types::{BlockNumber, GroupNumber};
 
 use crate::symbol::repair_seed;
 
+const RQ_DECODE_WAVEFRONT_BATCH: usize = 4;
+
 // ── Encode ──────────────────────────────────────────────────────────────────
 
 /// Result of encoding repair symbols for a block group.
@@ -370,13 +372,19 @@ fn decode_group_impl(
     }
 
     // Attempt decode.
-    let result: DecodeResult = decoder.decode(&received).map_err(|error| match error {
-        DecodeError::InsufficientSymbols { received, required } => FfsError::RepairFailed(format!(
-            "insufficient symbols for group {}: have {received}, need {required}",
-            group.0
-        )),
-        other => FfsError::RepairFailed(format!("decode failed for group {}: {other:?}", group.0)),
-    })?;
+    let result: DecodeResult = decoder
+        .decode_wavefront(&received, RQ_DECODE_WAVEFRONT_BATCH)
+        .map_err(|error| match error {
+            DecodeError::InsufficientSymbols { received, required } => {
+                FfsError::RepairFailed(format!(
+                    "insufficient symbols for group {}: have {received}, need {required}",
+                    group.0
+                ))
+            }
+            other => {
+                FfsError::RepairFailed(format!("decode failed for group {}: {other:?}", group.0))
+            }
+        })?;
 
     // Extract recovered blocks for the corrupt indices.
     let mut recovered = Vec::with_capacity(corrupt_indices.len());
