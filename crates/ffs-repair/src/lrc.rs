@@ -341,12 +341,17 @@ pub fn encode_global(config: &LrcConfig, data: &[Vec<u8>]) -> Vec<Vec<u8>> {
     let block_size = data[0].len();
     let p = config.global_parity_count as usize;
 
+    if p > 0 {
+        for block in data {
+            assert_eq!(block.len(), block_size, "block size mismatch");
+        }
+    }
+
     let mut global_parities = Vec::with_capacity(p);
 
     for j in 0..p {
         let mut parity = vec![0_u8; block_size];
         for (i, block) in data.iter().enumerate() {
-            assert_eq!(block.len(), block_size, "block size mismatch");
             let coeff = global_parity_coeff(i, j);
             gf256_mul_xor_into(&mut parity, block, coeff);
         }
@@ -1068,6 +1073,15 @@ mod tests {
         let data = make_data(8, 16);
         let global = encode_global(&cfg, &data);
         assert_eq!(global.len(), 2);
+    }
+
+    #[test]
+    fn encode_global_zero_parity_preserves_no_extra_block_size_validation() {
+        let cfg = LrcConfig::new(4, 2, 0);
+        let mut data = make_data(4, 16);
+        data[2].truncate(8);
+        let global = encode_global(&cfg, &data);
+        assert!(global.is_empty());
     }
 
     #[test]
