@@ -12077,13 +12077,6 @@ impl OpenFs {
             } else {
                 None
             };
-            let zero_block = vec![
-                0_u8;
-                usize::try_from(block_size).map_err(|_| {
-                    FfsError::Format("block_size does not fit usize".to_owned())
-                })?
-            ];
-
             let mut goal_block = None;
             let mut newly_allocated_blocks = 0_u64;
             for mapping in mappings {
@@ -12118,7 +12111,7 @@ impl OpenFs {
                                 base: &block_dev,
                                 tx: Mutex::new(tx),
                             };
-                            ffs_extent::allocate_extent(
+                            ffs_extent::allocate_unwritten_extent(
                                 cx,
                                 &tx_dev,
                                 &mut root_bytes,
@@ -12130,7 +12123,7 @@ impl OpenFs {
                                 persist_ctx,
                             )?
                         } else {
-                            ffs_extent::allocate_extent(
+                            ffs_extent::allocate_unwritten_extent(
                                 cx,
                                 &block_dev,
                                 &mut root_bytes,
@@ -12145,19 +12138,6 @@ impl OpenFs {
                     };
                     self.extent_cache.invalidate_all();
 
-                    for rel in 0..alloc_mapping.count {
-                        let phys_block = BlockNumber(alloc_mapping.physical_start + u64::from(rel));
-                        if let Some(tx) = &mut scope.tx {
-                            // Newly allocated zero-fill block: no concurrent txn writes expected.
-                            tx.stage_write_with_proof(
-                                phys_block,
-                                zero_block.clone(),
-                                MergeProof::DisjointBlocks,
-                            );
-                        } else {
-                            block_dev.write_block(cx, phys_block, &zero_block)?;
-                        }
-                    }
                     newly_allocated_blocks += u64::from(alloc_mapping.count);
                     goal_block = Some(BlockNumber(
                         alloc_mapping.physical_start + u64::from(alloc_mapping.count),
@@ -12307,20 +12287,21 @@ impl OpenFs {
 
             // Resolve or allocate the physical block.
             let extents = self.collect_extents_with_scope(cx, scope, &inode)?;
-            let phys = extents.iter().find_map(|e| {
+            let resolved = extents.iter().find_map(|e| {
                 if logical_block >= e.logical_block
                     && logical_block < e.logical_block + u32::from(e.actual_len())
                 {
-                    Some(BlockNumber(
-                        e.physical_start + u64::from(logical_block - e.logical_block),
+                    Some((
+                        BlockNumber(e.physical_start + u64::from(logical_block - e.logical_block)),
+                        e.is_unwritten(),
                     ))
                 } else {
                     None
                 }
             });
 
-            let phys_block = match phys {
-                Some(b) => b,
+            let (phys_block, zero_fill_before_write, mark_unwritten_written) = match resolved {
+                Some((b, unwritten)) => (b, unwritten, unwritten),
                 None => {
                     // Allocate new extent for this block.
                     let added_sectors = if inode.is_huge_file() {
@@ -12391,16 +12372,17 @@ impl OpenFs {
                     );
                     Self::set_extent_root(&mut inode, &root_bytes);
                     inode.blocks = blocks_after_alloc;
-                    BlockNumber(mapping.physical_start)
+                    (BlockNumber(mapping.physical_start), true, false)
                 }
             };
 
             // Read-modify-write the block.
-            let mut block_data = if block_offset == 0 && chunk_len == bs_usize {
-                vec![0u8; bs_usize]
-            } else {
-                self.read_block_with_scope(cx, scope, phys_block)?
-            };
+            let mut block_data =
+                if zero_fill_before_write || (block_offset == 0 && chunk_len == bs_usize) {
+                    vec![0u8; bs_usize]
+                } else {
+                    self.read_block_with_scope(cx, scope, phys_block)?
+                };
             let data_start = usize::try_from(pos - offset)
                 .map_err(|_| FfsError::Format("write offset does not fit usize".into()))?;
             block_data[block_offset..block_offset + chunk_len]
@@ -12414,6 +12396,49 @@ impl OpenFs {
                 tx.stage_write_with_proof(phys_block, block_data, proof);
             } else {
                 block_dev.write_block(cx, phys_block, &block_data)?;
+            }
+
+            if mark_unwritten_written {
+                let mut root_bytes = Self::extent_root(&inode);
+                if let Some(tx) = &mut scope.tx {
+                    let tx_dev = TransactionBlockAdapter {
+                        base: &block_dev,
+                        tx: Mutex::new(tx),
+                    };
+                    let Ext4AllocState {
+                        geo,
+                        groups,
+                        persist_ctx,
+                    } = &mut *alloc;
+                    ffs_extent::mark_written(
+                        cx,
+                        &tx_dev,
+                        &mut root_bytes,
+                        geo,
+                        groups,
+                        logical_block,
+                        1,
+                        persist_ctx,
+                    )?;
+                } else {
+                    let Ext4AllocState {
+                        geo,
+                        groups,
+                        persist_ctx,
+                    } = &mut *alloc;
+                    ffs_extent::mark_written(
+                        cx,
+                        &block_dev,
+                        &mut root_bytes,
+                        geo,
+                        groups,
+                        logical_block,
+                        1,
+                        persist_ctx,
+                    )?;
+                }
+                self.extent_cache.invalidate_all();
+                Self::set_extent_root(&mut inode, &root_bytes);
             }
 
             let chunk_u64 = u64::try_from(chunk_len)
@@ -40912,6 +40937,208 @@ mod tests {
             after.blocks,
             before.blocks
         );
+    }
+
+    #[test]
+    fn write_fallocate_prealloc_creates_unwritten_extents_and_reads_zero() {
+        let Some((fs, _tmp)) = open_writable_ext4_mkfs(64) else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let block = 4096_u64;
+        let attr = fs
+            .create(&cx, root, OsStr::new("falloc_unwritten.bin"), 0o644, 0, 0)
+            .expect("create");
+
+        fs.fallocate(&cx, attr.ino, 0, 2 * block, 0)
+            .expect("fallocate");
+
+        let inode = fs.read_inode(&cx, attr.ino).expect("read inode");
+        let extents = fs.collect_extents(&cx, &inode).expect("collect extents");
+        assert!(
+            extents.iter().any(|extent| extent.is_unwritten()),
+            "fallocate preallocation should use unwritten extents: {extents:?}"
+        );
+
+        let data = fs
+            .read(&cx, attr.ino, 0, u32::try_from(2 * block).unwrap())
+            .expect("read preallocated range");
+        assert_eq!(data.len(), usize::try_from(2 * block).unwrap());
+        assert!(
+            data.iter().all(|&b| b == 0),
+            "unwritten preallocation must read as zeros"
+        );
+    }
+
+    #[test]
+    fn write_into_unwritten_prealloc_zero_fills_and_marks_written_block() {
+        let Some((fs, _tmp)) = open_writable_ext4_mkfs(64) else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let block = 4096_u64;
+        let attr = fs
+            .create(
+                &cx,
+                root,
+                OsStr::new("falloc_unwritten_partial.bin"),
+                0o644,
+                0,
+                0,
+            )
+            .expect("create");
+
+        fs.fallocate(&cx, attr.ino, 0, 3 * block, 0)
+            .expect("fallocate");
+        let write_offset = block + 17;
+        fs.write(&cx, attr.ino, write_offset, b"abc")
+            .expect("partial write into unwritten block");
+
+        let data = fs
+            .read(&cx, attr.ino, 0, u32::try_from(3 * block).unwrap())
+            .expect("read after partial write");
+        let write_start = usize::try_from(write_offset).unwrap();
+        assert!(
+            data[..write_start].iter().all(|&b| b == 0),
+            "bytes before partial write must remain zero-filled"
+        );
+        assert_eq!(&data[write_start..write_start + 3], b"abc");
+        assert!(
+            data[write_start + 3..].iter().all(|&b| b == 0),
+            "bytes after partial write must remain zero-filled"
+        );
+
+        let inode = fs.read_inode(&cx, attr.ino).expect("read inode");
+        let extents = fs.collect_extents(&cx, &inode).expect("collect extents");
+        let extent_for = |logical: u32| {
+            extents
+                .iter()
+                .find(|extent| {
+                    logical >= extent.logical_block
+                        && logical < extent.logical_block + u32::from(extent.actual_len())
+                })
+                .expect("logical block remains allocated")
+        };
+        assert!(
+            extent_for(0).is_unwritten(),
+            "unwritten prefix block should remain unwritten: {extents:?}"
+        );
+        assert!(
+            !extent_for(1).is_unwritten(),
+            "partially written block should be marked written: {extents:?}"
+        );
+        assert!(
+            extent_for(2).is_unwritten(),
+            "unwritten suffix block should remain unwritten: {extents:?}"
+        );
+    }
+
+    #[test]
+    fn write_into_reused_unwritten_block_does_not_expose_recycled_data() {
+        // Gold-standard exposure guard for bd-y6h03 (avoids zero-masking): write
+        // NON-ZERO data to a block, free it, then fallocate — which reuses the
+        // freed, still-dirty physical block as an UNWRITTEN extent — and partial
+        // -write into it. The non-written bytes must read as ZERO, never the
+        // recycled 0xAB content, proving the unwritten RMW zero-fills instead of
+        // reading stale physical.
+        let Some((fs, _tmp)) = open_writable_ext4_mkfs(64) else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let block = 4096_u64;
+        let blen = usize::try_from(block).unwrap();
+
+        let phys_of_lb0 = |ino: InodeNumber| -> Option<u64> {
+            let inode = fs.read_inode(&cx, ino).ok()?;
+            fs.collect_extents(&cx, &inode)
+                .ok()?
+                .iter()
+                .find(|e| e.logical_block == 0)
+                .map(|e| e.physical_start)
+        };
+
+        // A: a file whose first block is full of 0xAB.
+        let a = fs
+            .create(&cx, root, OsStr::new("dirty_a.bin"), 0o644, 0, 0)
+            .expect("create A");
+        fs.write(&cx, a.ino, 0, &vec![0xAB_u8; blen])
+            .expect("write A");
+        let a_phys = phys_of_lb0(a.ino);
+        fs.unlink(&cx, root, OsStr::new("dirty_a.bin"))
+            .expect("unlink A frees its dirty block");
+
+        // B: fallocate one block — the allocator should reuse A's freed block.
+        let b = fs
+            .create(&cx, root, OsStr::new("reuse_b.bin"), 0o644, 0, 0)
+            .expect("create B");
+        fs.fallocate(&cx, b.ino, 0, block, 0).expect("fallocate B");
+        let b_phys = phys_of_lb0(b.ino);
+        let reused = a_phys.is_some() && a_phys == b_phys;
+        eprintln!("bd-y6h03 recycled test: a_phys={a_phys:?} b_phys={b_phys:?} reused={reused}");
+
+        // Partial write into B's (unwritten, possibly recycled-0xAB) block.
+        let off = 100_u64;
+        fs.write(&cx, b.ino, off, b"xyz")
+            .expect("partial write into reused unwritten block");
+        let data = fs
+            .read(&cx, b.ino, 0, u32::try_from(block).unwrap())
+            .expect("read B");
+        let o = usize::try_from(off).unwrap();
+        assert!(
+            data[..o].iter().all(|&x| x == 0),
+            "bytes before the partial write must be zero, never recycled 0xAB"
+        );
+        assert_eq!(&data[o..o + 3], b"xyz");
+        assert!(
+            data[o + 3..].iter().all(|&x| x == 0),
+            "bytes after the partial write must be zero, never recycled 0xAB"
+        );
+    }
+
+    #[test]
+    #[ignore = "profiling tool for bd-y6h03: current ext4 preallocate cost and unwritten extent state"]
+    fn profile_ext4_fallocate_prealloc_bd_y6h03() {
+        let Some((fs, _tmp)) = open_writable_ext4_mkfs(256) else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let block = 4096_u64;
+
+        for blocks in [128_u64, 512, 2048] {
+            let name = format!("falloc_profile_{blocks}.bin");
+            let attr = fs
+                .create(&cx, root, OsStr::new(&name), 0o644, 0, 0)
+                .expect("create profile file");
+            let length = blocks.checked_mul(block).expect("profile length fits");
+
+            let start = std::time::Instant::now();
+            fs.fallocate(&cx, attr.ino, 0, length, libc::FALLOC_FL_KEEP_SIZE)
+                .expect("profile fallocate");
+            let elapsed = start.elapsed();
+
+            let inode = fs.read_inode(&cx, attr.ino).expect("read profile inode");
+            let extents = fs
+                .collect_extents(&cx, &inode)
+                .expect("collect profile extents");
+            let unwritten_extents = extents
+                .iter()
+                .filter(|extent| extent.is_unwritten())
+                .count();
+            std::hint::black_box(&extents);
+
+            let per_block_ns = elapsed.as_nanos() / u128::from(blocks);
+            eprintln!(
+                "bd-y6h03 ext4_fallocate_prealloc blocks={blocks} elapsed={elapsed:?} \
+                 per_block_ns={per_block_ns} extents={} unwritten_extents={} inode_blocks={}",
+                extents.len(),
+                unwritten_extents,
+                inode.blocks
+            );
+        }
     }
 
     #[test]
