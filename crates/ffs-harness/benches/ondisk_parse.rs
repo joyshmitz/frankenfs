@@ -1,17 +1,24 @@
 #![forbid(unsafe_code)]
 
+use asupersync::Cx;
 use criterion::{Criterion, criterion_group, criterion_main};
 use ffs_btrfs::{BtrfsDirItem, BtrfsInodeItem, BtrfsInodeRef};
+use ffs_core::{Ext4JournalReplayMode, OpenFs, OpenOptions, RequestScope};
 use ffs_harness::load_sparse_fixture;
 use ffs_ondisk::{
-    BtrfsHeader, BtrfsRaidProfile, BtrfsSuperblock, EXT_INIT_MAX_LEN, Ext4Extent, Ext4GroupDesc,
-    Ext4Inode, chunk_type_flags, dx_hash, ext4_casefold_key, ext4_chksum, parse_dev_item,
-    parse_dir_block, parse_dx_root, parse_extent_tree, parse_internal_items, parse_leaf_items,
-    parse_sys_chunk_array, parse_xattr_block, verify_btrfs_superblock_checksum,
-    verify_btrfs_tree_block_checksum,
+    BtrfsHeader, BtrfsRaidProfile, BtrfsSuperblock, EXT_INIT_MAX_LEN, Ext4DirEntry, Ext4Extent,
+    Ext4GroupDesc, Ext4Inode, chunk_type_flags, dx_hash, ext4_casefold_key, ext4_chksum,
+    lookup_in_dir_block, parse_dev_item, parse_dir_block, parse_dx_root, parse_extent_tree,
+    parse_internal_items, parse_leaf_items, parse_sys_chunk_array, parse_xattr_block,
+    verify_btrfs_superblock_checksum, verify_btrfs_tree_block_checksum,
 };
+use ffs_types::{BlockNumber, InodeNumber};
+use std::ffi::OsStr;
+use std::fs::File;
 use std::hint::black_box;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use tempfile::NamedTempFile;
 
 const BTRFS_BENCH_BLOCK_SIZE: usize = 4096;
 const BTRFS_HEADER_SIZE: usize = 101;
@@ -24,6 +31,175 @@ fn fixture_path(name: &str) -> std::path::PathBuf {
         .expect("workspace root")
         .join("conformance/fixtures")
         .join(name)
+}
+
+fn golden_path(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root")
+        .join("conformance/golden")
+        .join(name)
+}
+
+const RUNTIME_HTREE_FILE_CONTENT: &[u8] = b"hello from FrankenFS runtime htree bench\n";
+const RUNTIME_HTREE_FILE_COUNT: usize = 256;
+const RUNTIME_HTREE_HASH_SEED: &str = "11111111-2222-3333-4444-555555555555";
+
+fn trace_ext4_tools() -> bool {
+    std::env::var_os("FFS_TRACE_EXT4_TOOLS").is_some()
+}
+
+fn run_debugfs_w(image: &Path, cmd: &str) {
+    if trace_ext4_tools() {
+        eprintln!("debugfs params: -w -R {cmd:?} {}", image.display());
+    }
+    let status = Command::new("debugfs")
+        .args(["-w", "-R", cmd])
+        .arg(image)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .expect("run debugfs");
+    assert!(status.success(), "debugfs -w -R {cmd:?} failed");
+}
+
+fn run_e2fsck_dir_index(image: &Path) {
+    if trace_ext4_tools() {
+        eprintln!("e2fsck params: -fyD {}", image.display());
+    }
+    let status = Command::new("e2fsck")
+        .args(["-fyD"])
+        .arg(image)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .expect("run e2fsck");
+
+    let code = status.code().unwrap_or(-1);
+    assert!(
+        matches!(code, 0 | 1),
+        "e2fsck -fyD failed with exit code {code}"
+    );
+}
+
+fn create_runtime_htree_image(image: &Path) {
+    let file = File::create(image).expect("create runtime htree image file");
+    file.set_len(64 * 1024 * 1024)
+        .expect("set runtime htree image length");
+    drop(file);
+
+    if trace_ext4_tools() {
+        eprintln!(
+            "mkfs.ext4 params: -L ffs-runtime-dx -b 4096 -q -O dir_index {}",
+            image.display()
+        );
+    }
+    let status = Command::new("mkfs.ext4")
+        .args([
+            "-L",
+            "ffs-runtime-dx",
+            "-b",
+            "4096",
+            "-q",
+            "-O",
+            "dir_index",
+        ])
+        .arg(image)
+        .stderr(std::process::Stdio::null())
+        .status()
+        .expect("run mkfs.ext4");
+    assert!(status.success(), "mkfs.ext4 -O dir_index failed");
+
+    run_debugfs_w(
+        image,
+        &format!("set_super_value hash_seed {RUNTIME_HTREE_HASH_SEED}"),
+    );
+    run_debugfs_w(image, "mkdir /htree");
+
+    let content = NamedTempFile::new().expect("create runtime htree content file");
+    std::fs::write(content.path(), RUNTIME_HTREE_FILE_CONTENT)
+        .expect("write runtime htree content file");
+    for idx in 0..RUNTIME_HTREE_FILE_COUNT {
+        run_debugfs_w(
+            image,
+            &format!(
+                "write {} /htree/file_{idx:03}.txt",
+                content.path().display()
+            ),
+        );
+    }
+    run_debugfs_w(
+        image,
+        &format!("write {} /readme-dx.txt", content.path().display()),
+    );
+
+    run_e2fsck_dir_index(image);
+}
+
+fn runtime_htree_image_path() -> (PathBuf, Option<NamedTempFile>) {
+    let local_golden = golden_path("ext4_dir_index_reference.ext4");
+    if local_golden.exists() {
+        return (local_golden, None);
+    }
+
+    let image = NamedTempFile::new().expect("create generated runtime htree image");
+    create_runtime_htree_image(image.path());
+    (image.path().to_path_buf(), Some(image))
+}
+
+fn open_runtime_htree_fixture() -> (OpenFs, Cx, Ext4Inode, Option<NamedTempFile>) {
+    let (path, image_guard) = runtime_htree_image_path();
+    let cx = Cx::for_testing();
+    let opts = OpenOptions {
+        ext4_journal_replay_mode: Ext4JournalReplayMode::Skip,
+        ..OpenOptions::default()
+    };
+    let fs = OpenFs::open_with_options(&cx, &path, &opts).expect("open runtime htree image");
+    let htree = fs
+        .lookup(&cx, InodeNumber(2), OsStr::new("htree"))
+        .expect("lookup /htree");
+    let htree_inode = fs.read_inode(&cx, htree.ino).expect("read /htree inode");
+    assert!(
+        htree_inode.has_htree_index(),
+        "/htree must be backed by a real ext4 htree index"
+    );
+    (fs, cx, htree_inode, image_guard)
+}
+
+fn linear_runtime_htree_lookup(
+    fs: &OpenFs,
+    cx: &Cx,
+    scope: &RequestScope,
+    dir_inode: &Ext4Inode,
+    name: &[u8],
+) -> Option<Ext4DirEntry> {
+    let block_size = u64::from(fs.block_size());
+    let num_blocks = dir_inode.size.div_ceil(block_size);
+
+    for logical_block in 0..num_blocks {
+        let logical_block =
+            u32::try_from(logical_block).expect("runtime htree logical block fits u32");
+        let Some((physical_block, unwritten)) = fs
+            .resolve_extent(cx, scope, dir_inode, logical_block)
+            .expect("resolve runtime htree directory block")
+        else {
+            continue;
+        };
+        if unwritten {
+            continue;
+        }
+        let block = fs
+            .read_block_with_scope(cx, scope, BlockNumber(physical_block))
+            .expect("read runtime htree directory block");
+        if let Some(entry) =
+            lookup_in_dir_block(&block, fs.block_size(), name).expect("scan directory block")
+        {
+            return Some(entry);
+        }
+    }
+
+    None
 }
 
 fn btrfs_internal_node_block() -> Vec<u8> {
@@ -1054,6 +1230,62 @@ fn bench_ext4_chksum_4kb(c: &mut Criterion) {
     });
 }
 
+/// bd-gauub — same-binary A/B for runtime ext4 htree lookup wiring.
+///
+/// `old_linear_scan` preserves the previous production behavior: resolve every
+/// directory block and scan entries linearly. `htree_with_linear_fallback` calls
+/// the production `OpenFs::lookup_name_with_scope`, which now tries the ext4
+/// DX/htree index first and falls back to that same linear scan on misses or
+/// invalid indexes. Setup may generate a temporary ext4 dir_index image when
+/// the ignored local golden image is unavailable on remote workers; generation
+/// is outside Criterion's measured loop.
+fn bench_ext4_runtime_htree_lookup_ab(c: &mut Criterion) {
+    let (fs, cx, htree_inode, _image_guard) = open_runtime_htree_fixture();
+    let scope = RequestScope::empty();
+    let target = b"file_179.txt";
+
+    let linear = linear_runtime_htree_lookup(&fs, &cx, &scope, &htree_inode, target)
+        .expect("linear runtime htree lookup target");
+    let htree = fs
+        .lookup_name_with_scope(&cx, &scope, &htree_inode, target)
+        .expect("runtime htree lookup")
+        .expect("runtime htree lookup target");
+    assert_eq!(
+        htree, linear,
+        "runtime htree lookup must match old linear scan for the target"
+    );
+
+    let mut group = c.benchmark_group("ext4_runtime_htree_lookup_ab");
+    group.bench_function("old_linear_scan", |b| {
+        b.iter(|| {
+            let entry = linear_runtime_htree_lookup(
+                black_box(&fs),
+                black_box(&cx),
+                black_box(&scope),
+                black_box(&htree_inode),
+                black_box(target),
+            )
+            .expect("linear runtime htree lookup target");
+            black_box(entry);
+        });
+    });
+    group.bench_function("htree_with_linear_fallback", |b| {
+        b.iter(|| {
+            let entry = fs
+                .lookup_name_with_scope(
+                    black_box(&cx),
+                    black_box(&scope),
+                    black_box(&htree_inode),
+                    black_box(target),
+                )
+                .expect("runtime htree lookup")
+                .expect("runtime htree lookup target");
+            black_box(entry);
+        });
+    });
+    group.finish();
+}
+
 criterion_group!(
     ondisk,
     bench_ext4_inode_parse,
@@ -1102,5 +1334,6 @@ criterion_group!(
     bench_btrfs_extent_data_regular_to_bytes,
     bench_btrfs_extent_data_inline_to_bytes,
     bench_ext4_chksum_4kb,
+    bench_ext4_runtime_htree_lookup_ab,
 );
 criterion_main!(ondisk);
