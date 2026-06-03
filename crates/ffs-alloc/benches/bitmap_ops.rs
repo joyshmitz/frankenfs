@@ -32,13 +32,33 @@ fn make_fragmented_bitmap() -> Vec<u8> {
     pattern.into_iter().cycle().take(4096).collect()
 }
 
-fn count_free_chunks8(bitmap: &[u8], count: u32) -> u32 {
+fn count_free_unrolled_chunks32(bitmap: &[u8], count: u32) -> u32 {
     let requested_full_bytes = (count / 8) as usize;
     let full_bytes = requested_full_bytes.min(bitmap.len());
     let remainder = count % 8;
     let mut free = 0_u32;
 
-    let mut chunks = bitmap[..full_bytes].chunks_exact(8);
+    let mut blocks = bitmap[..full_bytes].chunks_exact(32);
+    for block in &mut blocks {
+        free += (!u64::from_le_bytes([
+            block[0], block[1], block[2], block[3], block[4], block[5], block[6], block[7],
+        ]))
+        .count_ones();
+        free += (!u64::from_le_bytes([
+            block[8], block[9], block[10], block[11], block[12], block[13], block[14], block[15],
+        ]))
+        .count_ones();
+        free += (!u64::from_le_bytes([
+            block[16], block[17], block[18], block[19], block[20], block[21], block[22], block[23],
+        ]))
+        .count_ones();
+        free += (!u64::from_le_bytes([
+            block[24], block[25], block[26], block[27], block[28], block[29], block[30], block[31],
+        ]))
+        .count_ones();
+    }
+
+    let mut chunks = blocks.remainder().chunks_exact(8);
     for chunk in &mut chunks {
         let word = u64::from_le_bytes([
             chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
@@ -79,16 +99,21 @@ fn bench_count_free_unroll_vs_chunks8(c: &mut Criterion) {
     let bm = make_bitmap();
     let count = 32768;
     debug_assert_eq!(
-        count_free_chunks8(&bm, count),
+        count_free_unrolled_chunks32(&bm, count),
         bitmap_count_free(&bm, count),
         "8-byte and 32-byte popcount paths must agree"
     );
 
     let mut group = c.benchmark_group("count_free_ab");
-    group.bench_function("old_chunks8", |b| {
-        b.iter(|| black_box(count_free_chunks8(black_box(&bm), black_box(count))));
+    group.bench_function("old_unrolled_chunks32", |b| {
+        b.iter(|| {
+            black_box(count_free_unrolled_chunks32(
+                black_box(&bm),
+                black_box(count),
+            ))
+        });
     });
-    group.bench_function("unrolled_chunks32", |b| {
+    group.bench_function("restored_chunks8", |b| {
         b.iter(|| black_box(bitmap_count_free(black_box(&bm), black_box(count))));
     });
     group.finish();
