@@ -6689,6 +6689,15 @@ InodeAlloc { ino: InodeNumber(17), group: GroupNumber(1) }
     }
 
     #[test]
+    fn largest_free_run_spans_word_boundary_bit128() {
+        let mut bitmap = [0xFFu8; 40];
+        for bit in 120..136 {
+            bitmap_clear(&mut bitmap, bit);
+        }
+        assert_eq!(bitmap_largest_free_run(&bitmap, 320), 16);
+    }
+
+    #[test]
     fn largest_free_run_count_smaller_than_byte_remainder() {
         // 1 byte with bits 0..3 free, bits 4..7 used. count=8 → run=4.
         let bitmap = [0xF0u8];
