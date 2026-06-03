@@ -330,6 +330,40 @@ fn bitmap_find_contiguous_linear(bitmap: &[u8], count: u32, n: u32, start: u32) 
     let mut run_len = 0u32;
     let mut idx = start;
 
+    while idx < count && idx % 8 != 0 {
+        if bitmap_get(bitmap, idx) {
+            idx += 1;
+            run_start = idx;
+            run_len = 0;
+        } else {
+            run_len += 1;
+            if run_len >= n {
+                return Some(run_start);
+            }
+            idx += 1;
+        }
+    }
+
+    while count.saturating_sub(idx) >= 64 {
+        let byte_idx = (idx / 8) as usize;
+        let Some(chunk) = bitmap.get(byte_idx..byte_idx + 8) else {
+            break;
+        };
+        let word = u64::from_le_bytes([
+            chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
+        ]);
+
+        if word == u64::MAX {
+            run_start = idx + 64;
+            run_len = 0;
+        } else if let Some(found) =
+            apply_contiguous_word_zero_run(word, idx, n, &mut run_start, &mut run_len)
+        {
+            return Some(found);
+        }
+        idx += 64;
+    }
+
     while idx < count {
         if idx % 8 == 0 && (idx + 8) <= count {
             let byte_idx = (idx / 8) as usize;
@@ -381,6 +415,36 @@ fn bitmap_find_contiguous_linear(bitmap: &[u8], count: u32, n: u32, start: u32) 
                 return Some(run_start);
             }
             idx += 1;
+        }
+    }
+    None
+}
+
+fn apply_contiguous_word_zero_run(
+    word: u64,
+    base: u32,
+    n: u32,
+    run_start: &mut u32,
+    run_len: &mut u32,
+) -> Option<u32> {
+    if word == 0 {
+        if *run_len == 0 {
+            *run_start = base;
+        }
+        *run_len = run_len.saturating_add(64);
+        return (*run_len >= n).then_some(*run_start);
+    }
+
+    for bit in 0..64 {
+        let pos = base + bit;
+        if (word >> bit) & 1 == 1 {
+            *run_start = pos + 1;
+            *run_len = 0;
+        } else {
+            *run_len += 1;
+            if *run_len >= n {
+                return Some(*run_start);
+            }
         }
     }
     None
@@ -5446,6 +5510,30 @@ InodeAlloc { ino: InodeNumber(17), group: GroupNumber(1) }
                     );
                 }
             }
+        }
+
+        #[test]
+        fn proptest_bitmap_find_contiguous_matches_naive_wraparound(
+            (ref bm, count) in bitmap_strat(),
+            n in 1_u32..32,
+            start_seed in any::<u32>(),
+        ) {
+            let start = start_seed % count;
+            let naive_range = |range: std::ops::Range<u32>| {
+                range.into_iter().find(|&pos| {
+                    pos.checked_add(n)
+                        .is_some_and(|end| end <= count && (pos..end).all(|bit| !bitmap_get(bm, bit)))
+                })
+            };
+            let expected = if n > count {
+                None
+            } else {
+                naive_range(start..count).or_else(|| {
+                    let pass2_end = start.saturating_add(n).saturating_sub(1).min(count);
+                    naive_range(0..pass2_end)
+                })
+            };
+            prop_assert_eq!(bitmap_find_contiguous(bm, count, n, start), expected);
         }
 
         #[test]

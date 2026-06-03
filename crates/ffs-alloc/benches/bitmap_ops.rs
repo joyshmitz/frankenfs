@@ -272,6 +272,82 @@ fn find_free_byte_scan(bitmap: &[u8], count: u32, start: u32) -> Option<u32> {
     range(bitmap, start, count).or_else(|| range(bitmap, 0, start))
 }
 
+/// Pre-optimization contiguous free-run scan. Kept only for same-binary A/B
+/// proof of the word-at-a-time production path.
+fn find_contiguous_byte_scan(bitmap: &[u8], count: u32, n: u32, start: u32) -> Option<u32> {
+    fn range(bitmap: &[u8], count: u32, n: u32, start: u32) -> Option<u32> {
+        let mut run_start = start;
+        let mut run_len = 0_u32;
+        let mut idx = start;
+
+        while idx < count {
+            if idx % 8 == 0 && (idx + 8) <= count {
+                let byte_idx = (idx / 8) as usize;
+                match bitmap.get(byte_idx).copied() {
+                    None | Some(0xFF) => {
+                        idx += 8;
+                        run_start = idx;
+                        run_len = 0;
+                        continue;
+                    }
+                    Some(0x00) => {
+                        if run_len == 0 {
+                            run_start = idx;
+                        }
+                        run_len = run_len.saturating_add(8);
+                        if run_len >= n {
+                            return Some(run_start);
+                        }
+                        idx += 8;
+                        continue;
+                    }
+                    Some(byte) => {
+                        let base = idx;
+                        for bit in 0..8 {
+                            let pos = base + bit;
+                            if (byte >> bit) & 1 == 1 {
+                                run_start = pos + 1;
+                                run_len = 0;
+                            } else {
+                                run_len += 1;
+                                if run_len >= n {
+                                    return Some(run_start);
+                                }
+                            }
+                        }
+                        idx += 8;
+                        continue;
+                    }
+                }
+            }
+
+            if raw_get_bit(bitmap, idx) {
+                idx += 1;
+                run_start = idx;
+                run_len = 0;
+            } else {
+                run_len += 1;
+                if run_len >= n {
+                    return Some(run_start);
+                }
+                idx += 1;
+            }
+        }
+        None
+    }
+
+    if n == 0 {
+        return Some(0);
+    }
+    if n > count {
+        return None;
+    }
+    range(bitmap, count, n, start).or_else(|| {
+        let pass2_end = start.saturating_add(n).saturating_sub(1).min(count);
+        range(bitmap, pass2_end, n, 0)
+    })
+}
+
 /// A/B the word-at-a-time lever against the old byte scan over a fully
 /// allocated (all-0xFF) 4 KiB block bitmap — the worst case that forces a full
 /// scan to the end (returns None). Both run in this one binary on one CPU.
@@ -293,6 +369,44 @@ fn bench_find_free_full_scan_word_vs_byte(c: &mut Criterion) {
     group.finish();
 }
 
+/// A/B contiguous free-run search on the same ext4-like bitmap used by the
+/// production benchmark. This isolates the 64-bit skip path from rch worker
+/// variance.
+fn bench_find_contiguous_word_vs_byte(c: &mut Criterion) {
+    let bm = make_bitmap();
+    let count = 32768;
+    let n = 32;
+    let start = 16000;
+    debug_assert_eq!(
+        find_contiguous_byte_scan(&bm, count, n, start),
+        bitmap_find_contiguous(&bm, count, n, start),
+        "byte and word contiguous scans must agree"
+    );
+
+    let mut group = c.benchmark_group("find_contiguous_ab");
+    group.bench_function("old_byte_scan", |b| {
+        b.iter(|| {
+            black_box(find_contiguous_byte_scan(
+                black_box(&bm),
+                count,
+                black_box(n),
+                black_box(start),
+            ))
+        });
+    });
+    group.bench_function("word_at_a_time", |b| {
+        b.iter(|| {
+            black_box(bitmap_find_contiguous(
+                black_box(&bm),
+                count,
+                black_box(n),
+                black_box(start),
+            ))
+        });
+    });
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_count_free,
@@ -304,5 +418,6 @@ criterion_group!(
     bench_select0_in_block_bit_scan_vs_broadword,
     bench_build,
     bench_find_free_full_scan_word_vs_byte,
+    bench_find_contiguous_word_vs_byte,
 );
 criterion_main!(benches);
