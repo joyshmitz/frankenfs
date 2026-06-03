@@ -5207,6 +5207,121 @@ pub fn pack_dir_block_entries(
     Ok(block)
 }
 
+/// Build a complete single-level hash-indexed (htree) directory from a set of
+/// entries (write-half STEP 4 of bd-gauub).
+///
+/// Composes the write-half building blocks: hashes each name (`dx_hash`), sorts
+/// by major hash, distributes entries into leaf blocks at clean hash boundaries,
+/// packs each leaf ([`pack_dir_block_entries`]), and builds the DX root in block
+/// 0 ([`write_dx_root`]) inside the space owned by the fake ".."/"." entries.
+///
+/// Returns the directory's logical blocks `[dx_root, leaf_0, leaf_1, ...]`
+/// (leaf *i* is logical block `i + 1`). Checksums are NOT stamped (the caller
+/// stamps leaf + dx_tail CRC32C when `metadata_csum` is enabled); pass
+/// `with_csum_tail` to reserve the per-leaf tail slot so sizes are accounted.
+///
+/// Returns `None` when the directory cannot be represented as a single-level
+/// htree: more leaves than the DX root can index (needs indirect levels), or a
+/// single hash value whose entries overflow one leaf (needs collision-chain
+/// continuation). Both are deferred; the caller falls back to a linear directory
+/// (which stays correct). The produced index is navigable by the read-half
+/// [`htree_find_entry`] — pinned by `build_htree_directory_is_navigable`.
+#[must_use]
+#[allow(clippy::type_complexity)] // local (hash, entry) staging tuples
+pub fn build_htree_directory(
+    dot_inode: u32,
+    dotdot_inode: u32,
+    entries: &[(u32, u8, &[u8])],
+    block_size: usize,
+    hash_version: u8,
+    hash_seed: &[u32; 4],
+    with_csum_tail: bool,
+) -> Option<Vec<Vec<u8>>> {
+    if !(64..=65536).contains(&block_size) || entries.is_empty() {
+        return None;
+    }
+    let usable = if with_csum_tail {
+        block_size - 12
+    } else {
+        block_size
+    };
+
+    // Hash every name and sort by major hash (the value stored in DX entries).
+    let mut hashed: Vec<(u32, (u32, u8, &[u8]))> = entries
+        .iter()
+        .map(|&(ino, ft, name)| (dx_hash(hash_version, name, hash_seed).0, (ino, ft, name)))
+        .collect();
+    hashed.sort_by_key(|&(h, _)| h);
+
+    // Distribute into leaves, only ever starting a new leaf on a clean hash
+    // boundary (so the read-half routes every name to the leaf that holds it).
+    let mut leaves: Vec<Vec<(u32, u8, &[u8])>> = Vec::new();
+    let mut current: Vec<(u32, u8, &[u8])> = Vec::new();
+    let mut current_bytes = 0_usize;
+    let mut last_hash: Option<u32> = None;
+    for (hash, entry) in hashed {
+        let rec = dir_entry_rec_len(entry.2.len());
+        if rec > usable {
+            return None; // a single entry cannot fit a block
+        }
+        let same_hash_as_prev = last_hash == Some(hash);
+        if !current.is_empty() && current_bytes + rec > usable {
+            if same_hash_as_prev {
+                return None; // equal-hash run overflows one leaf — needs collision chain
+            }
+            leaves.push(std::mem::take(&mut current));
+            current_bytes = 0;
+        }
+        current.push(entry);
+        current_bytes += rec;
+        last_hash = Some(hash);
+    }
+    leaves.push(current);
+
+    let limit = dx_root_entry_limit(block_size, with_csum_tail);
+    if leaves.len() > usize::from(limit) {
+        return None; // needs a two-level index (indirect_levels >= 1) — deferred
+    }
+
+    // DX entries: entry 0 has implicit hash 0 -> first leaf (logical block 1);
+    // each later entry maps the leaf's minimum hash to its logical block.
+    let mut dx_entries = Vec::with_capacity(leaves.len());
+    for (i, leaf) in leaves.iter().enumerate() {
+        let block_no = u32::try_from(i + 1).ok()?;
+        let min_hash = if i == 0 {
+            0
+        } else {
+            dx_hash(hash_version, leaf.first()?.2, hash_seed).0
+        };
+        dx_entries.push(Ext4DxEntry {
+            hash: min_hash,
+            block: block_no,
+        });
+    }
+
+    // Block 0: fake "." and ".." entries; the ".." rec_len spans the DX area.
+    let mut root = vec![0_u8; block_size];
+    root[0..4].copy_from_slice(&dot_inode.to_le_bytes());
+    root[4..6].copy_from_slice(&12_u16.to_le_bytes());
+    root[6] = 1; // name_len
+    root[7] = EXT4_FT_DIR;
+    root[8] = b'.';
+    root[12..16].copy_from_slice(&dotdot_inode.to_le_bytes());
+    root[16..18].copy_from_slice(&rec_len_to_disk(block_size - 12).to_le_bytes());
+    root[18] = 2; // name_len
+    root[19] = EXT4_FT_DIR;
+    root[20] = b'.';
+    root[21] = b'.';
+    write_dx_root(&mut root, hash_version, 0, limit, &dx_entries).ok()?;
+
+    let mut blocks = Vec::with_capacity(leaves.len() + 1);
+    blocks.push(root);
+    for leaf in &leaves {
+        blocks.push(pack_dir_block_entries(leaf, block_size, with_csum_tail).ok()?);
+    }
+    Some(blocks)
+}
+
 /// Find the rightmost entry index whose hash is <= target_hash.
 fn dx_find_leaf_idx(entries: &[Ext4DxEntry], hash: u32) -> usize {
     // Binary search: find rightmost entry where entry.hash <= hash
@@ -8000,6 +8115,71 @@ mod tests {
         assert_eq!(dir_entry_rec_len(4), 12);
         assert_eq!(dir_entry_rec_len(5), 16);
         assert_eq!(dir_entry_rec_len(255), 264);
+    }
+
+    /// bd-gauub (write-half STEP 4): a freshly built htree directory must be
+    /// navigable by the read-half — htree_find_entry locates every entry through
+    /// the index. This closes the write<->read loop (the read-half is itself
+    /// validated against a real kernel htree image).
+    #[test]
+    fn build_htree_directory_is_navigable() {
+        let bs = 4096_usize;
+        let seed = [0x1234_5678_u32, 0x9abc_def0, 0x0f0f_0f0f, 0xa5a5_a5a5];
+        let hash_version = 1_u8; // half_md4
+
+        // Enough entries to force several leaf blocks under the dx_root.
+        let names: Vec<Vec<u8>> = (0..300)
+            .map(|i| format!("file_{i:05}").into_bytes())
+            .collect();
+        let entries: Vec<(u32, u8, &[u8])> = names
+            .iter()
+            .enumerate()
+            .map(|(i, n)| {
+                (
+                    100 + u32::try_from(i).unwrap(),
+                    EXT4_FT_REG_FILE,
+                    n.as_slice(),
+                )
+            })
+            .collect();
+
+        let blocks = build_htree_directory(2, 2, &entries, bs, hash_version, &seed, false)
+            .expect("single-level htree should build");
+        assert!(
+            blocks.len() >= 3,
+            "should span dx_root + multiple leaves, got {}",
+            blocks.len()
+        );
+
+        let read = |blocks: &[Vec<u8>], name: &[u8]| {
+            htree_find_entry(
+                u32::try_from(bs).unwrap(),
+                &seed,
+                false,
+                name,
+                |v| v,
+                |lb| blocks.get(lb as usize).cloned(),
+            )
+        };
+
+        for (i, name) in names.iter().enumerate() {
+            match read(&blocks, name) {
+                HtreeFindResult::Found(e) => {
+                    assert_eq!(
+                        e.inode,
+                        100 + u32::try_from(i).unwrap(),
+                        "wrong inode {name:?}"
+                    );
+                }
+                other => panic!("entry {name:?} not reachable via index: {other:?}"),
+            }
+        }
+
+        // Absent name must not yield a false positive.
+        assert!(
+            !matches!(read(&blocks, b"does_not_exist"), HtreeFindResult::Found(_)),
+            "false positive for an absent name"
+        );
     }
 
     /// bd-12nk4 — Kernel-conformance pin for the ext4_dir_entry_2
