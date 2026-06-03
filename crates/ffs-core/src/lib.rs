@@ -6996,10 +6996,21 @@ impl OpenFs {
             }
         }
 
-        // 2. Check if the block is visible in the provided snapshot.
-        if let Some(snapshot) = scope.snapshot {
-            if let Some(visible) = self.mvcc_store.read().read_visible(block, snapshot) {
-                return Ok(visible.into_owned());
+        // 2. Transaction-backed scopes read at their fixed snapshot for
+        //    isolation. A no-tx scope's in-scope writes go to the MVCC store
+        //    via `block_device_adapter` (committed at the *current* snapshot,
+        //    i.e. seqs newer than the scope's begin snapshot); reading at the
+        //    fixed begin snapshot would shadow them, breaking read-your-writes
+        //    for a block that already existed at scope begin — e.g. an indirect
+        //    block reused across sequential e2compr writes, which dropped
+        //    pointer slots and corrupted clusters on readback (bd-bw90c). No-tx
+        //    scopes therefore fall through to the current-snapshot device
+        //    adapter below.
+        if scope.tx.is_some() {
+            if let Some(snapshot) = scope.snapshot {
+                if let Some(visible) = self.mvcc_store.read().read_visible(block, snapshot) {
+                    return Ok(visible.into_owned());
+                }
             }
         }
 
@@ -7028,10 +7039,14 @@ impl OpenFs {
             }
         }
 
-        // 2. Snapshot-visible MVCC version.
-        if let Some(snapshot) = scope.snapshot {
-            if let Some(visible) = self.mvcc_store.read().read_visible(block, snapshot) {
-                return Ok(Arc::<[u8]>::from(visible.as_ref()));
+        // 2. Snapshot-visible MVCC version (transaction-backed scopes only —
+        //    no-tx scopes must read at the current snapshot for read-your-writes;
+        //    see read_block_with_scope and bd-bw90c).
+        if scope.tx.is_some() {
+            if let Some(snapshot) = scope.snapshot {
+                if let Some(visible) = self.mvcc_store.read().read_visible(block, snapshot) {
+                    return Ok(Arc::<[u8]>::from(visible.as_ref()));
+                }
             }
         }
 
@@ -28959,10 +28974,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "bd-bw90c: sequential multi-chunk e2compr writes corrupt a cluster on \
-                readback ('compressed cluster too small for header'); a single fs.write of \
-                the same data roundtrips. Re-enable once bd-bw90c is fixed (this then also \
-                covers the i_block[13] double-indirect path)."]
     fn compressed_write_reaching_double_indirect_roundtrips_ext4() {
         // The single-indirect test above stops at logical block 31. With 4K
         // blocks the layout is: 12 direct + 1024 single-indirect (blocks
