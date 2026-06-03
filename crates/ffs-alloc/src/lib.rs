@@ -126,7 +126,27 @@ pub fn bitmap_count_free(bitmap: &[u8], count: u32) -> u32 {
     let remainder = count % 8;
     let mut free = 0u32;
 
-    let mut chunks = bitmap[..full_bytes].chunks_exact(8);
+    let mut blocks = bitmap[..full_bytes].chunks_exact(32);
+    for block in &mut blocks {
+        free += (!u64::from_le_bytes([
+            block[0], block[1], block[2], block[3], block[4], block[5], block[6], block[7],
+        ]))
+        .count_ones();
+        free += (!u64::from_le_bytes([
+            block[8], block[9], block[10], block[11], block[12], block[13], block[14], block[15],
+        ]))
+        .count_ones();
+        free += (!u64::from_le_bytes([
+            block[16], block[17], block[18], block[19], block[20], block[21], block[22], block[23],
+        ]))
+        .count_ones();
+        free += (!u64::from_le_bytes([
+            block[24], block[25], block[26], block[27], block[28], block[29], block[30], block[31],
+        ]))
+        .count_ones();
+    }
+
+    let mut chunks = blocks.remainder().chunks_exact(8);
     for chunk in &mut chunks {
         let word = u64::from_le_bytes([
             chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],

@@ -32,6 +32,32 @@ fn make_fragmented_bitmap() -> Vec<u8> {
     pattern.into_iter().cycle().take(4096).collect()
 }
 
+fn count_free_chunks8(bitmap: &[u8], count: u32) -> u32 {
+    let requested_full_bytes = (count / 8) as usize;
+    let full_bytes = requested_full_bytes.min(bitmap.len());
+    let remainder = count % 8;
+    let mut free = 0_u32;
+
+    let mut chunks = bitmap[..full_bytes].chunks_exact(8);
+    for chunk in &mut chunks {
+        let word = u64::from_le_bytes([
+            chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
+        ]);
+        free += (!word).count_ones();
+    }
+    for &byte in chunks.remainder() {
+        free += byte.count_zeros();
+    }
+
+    if remainder > 0 && requested_full_bytes < bitmap.len() {
+        let byte = bitmap[requested_full_bytes];
+        let mask = u8::MAX >> (8 - remainder);
+        free += ((!byte) & mask).count_ones();
+    }
+
+    free
+}
+
 fn bench_count_free(c: &mut Criterion) {
     let bm = make_bitmap();
     let sb = SuccinctBitmap::build(&bm, 32768);
@@ -46,6 +72,25 @@ fn bench_count_free(c: &mut Criterion) {
         b.iter(|| black_box(sb.count_zeros()));
     });
 
+    group.finish();
+}
+
+fn bench_count_free_unroll_vs_chunks8(c: &mut Criterion) {
+    let bm = make_bitmap();
+    let count = 32768;
+    debug_assert_eq!(
+        count_free_chunks8(&bm, count),
+        bitmap_count_free(&bm, count),
+        "8-byte and 32-byte popcount paths must agree"
+    );
+
+    let mut group = c.benchmark_group("count_free_ab");
+    group.bench_function("old_chunks8", |b| {
+        b.iter(|| black_box(count_free_chunks8(black_box(&bm), black_box(count))));
+    });
+    group.bench_function("unrolled_chunks32", |b| {
+        b.iter(|| black_box(bitmap_count_free(black_box(&bm), black_box(count))));
+    });
     group.finish();
 }
 
@@ -410,6 +455,7 @@ fn bench_find_contiguous_word_vs_byte(c: &mut Criterion) {
 criterion_group!(
     benches,
     bench_count_free,
+    bench_count_free_unroll_vs_chunks8,
     bench_find_free,
     bench_find_contiguous,
     bench_largest_free_run,
