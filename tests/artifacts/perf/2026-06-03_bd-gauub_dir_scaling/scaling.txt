@@ -1,0 +1,15 @@
+bd-gauub: ext4 linear-directory scaling (no htree) — profile evidence
+Test: ffs-core profile_linear_directory_scaling_bd_gauub (cargo test --release -- --ignored --nocapture)
+In-memory generated ext4 image (open_writable_ext4_mkfs(256)).
+
+N      populate        per_create   per_lookup_last
+200    34.281 ms       171.4 us     39.4 us
+800    168.375 ms      210.5 us     78.9 us
+3200   1.1369 s        355.3 us     245.6 us
+
+Reading: per_lookup_last scales ~linearly with N (39->79->246 us for 200->800->3200),
+confirming the O(n) linear directory scan in lookup_name_with_scope (no htree O(log n)).
+At 3200 entries one lookup is already 246 us; extrapolating, a 50k-entry directory
+lookup is ~milliseconds vs ~microseconds for htree. populate is super-linear (each
+create does a duplicate-check lookup over the growing directory -> O(N^2) component).
+This is the profile backing for the bd-gauub htree feature.

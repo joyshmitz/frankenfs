@@ -33966,6 +33966,46 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "profiling tool for bd-gauub: measures the linear-directory O(n^2) population / \
+                O(n) lookup scaling (no htree). Run via `cargo test -- --ignored --nocapture \
+                profile_linear_directory_scaling_bd_gauub`."]
+    fn profile_linear_directory_scaling_bd_gauub() {
+        // Quantifies the bd-gauub gap: directory create/lookup are linear scans
+        // (no htree), so populating a directory of N entries is O(N^2) and a
+        // lookup is O(N). Doubling-ish steps (4x) make the scaling visible:
+        // O(N^2) populate -> ~16x per step; O(N) per-create / lookup -> ~4x.
+        let Some((fs, _tmp)) = open_writable_ext4_mkfs(256) else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        for &n in &[200_u32, 800, 3200] {
+            let dir = fs
+                .mkdir(&cx, root, OsStr::new(&format!("dir_{n}")), 0o755, 0, 0)
+                .expect("mkdir");
+            let t0 = std::time::Instant::now();
+            for i in 0..n {
+                fs.create(&cx, dir.ino, OsStr::new(&format!("f{i:05}")), 0o644, 0, 0)
+                    .expect("create");
+            }
+            let populate = t0.elapsed();
+
+            let reps = 50_u32;
+            let last = format!("f{:05}", n - 1);
+            let t1 = std::time::Instant::now();
+            for _ in 0..reps {
+                let _ = fs.lookup(&cx, dir.ino, OsStr::new(&last)).expect("lookup");
+            }
+            let per_lookup = t1.elapsed() / reps;
+
+            eprintln!(
+                "bd-gauub N={n}: populate={populate:?} (per_create={:?}), per_lookup_last={per_lookup:?}",
+                populate / n
+            );
+        }
+    }
+
+    #[test]
     fn write_mkdir_and_lookup() {
         let Some(fs) = open_writable_ext4() else {
             return;
