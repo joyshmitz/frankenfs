@@ -4976,6 +4976,93 @@ fn parse_dx_entries(
     Ok(entries)
 }
 
+/// Maximum number of DX entries (including the implicit entry 0) that fit in a
+/// DX root block of `block_size` bytes.
+///
+/// The DX entry area begins at offset `0x20` (the `dx_countlimit`, which doubles
+/// as entry 0) and each slot is 8 bytes. When `metadata_csum` is enabled the
+/// final 8-byte slot holds a `dx_tail` (reserved + CRC32C), so one slot is
+/// reserved. This is the value the kernel stores in the `limit` field.
+#[must_use]
+pub fn dx_root_entry_limit(block_size: usize, has_metadata_csum: bool) -> u16 {
+    let slots = block_size.saturating_sub(0x20) / 8;
+    let usable = if has_metadata_csum {
+        slots.saturating_sub(1)
+    } else {
+        slots
+    };
+    u16::try_from(usable).unwrap_or(u16::MAX)
+}
+
+/// Serialize the DX root index structures into directory block 0, in place.
+///
+/// Writes the `dx_root_info` (`0x18..0x20`), the `dx_countlimit` (`0x20`), and
+/// the DX entry array. Entry 0 is the implicit-hash-0 sentinel whose block is
+/// stored in the `dx_countlimit` slot at `0x24`; subsequent entries follow as
+/// `(hash, block)` pairs at `0x28+`. The caller must have already written the
+/// fake "." and ".." directory entries into `0x00..0x18` (and, when
+/// `metadata_csum` is enabled, must stamp the `dx_tail` after this call). This
+/// is the exact inverse of [`parse_dx_root`]; the byte layout is pinned against
+/// the kernel by `write_dx_root_round_trips_with_parse`.
+///
+/// `entries[0].hash` is ignored (the kernel stores no hash for entry 0).
+pub fn write_dx_root(
+    block: &mut [u8],
+    hash_version: u8,
+    indirect_levels: u8,
+    limit: u16,
+    entries: &[Ext4DxEntry],
+) -> Result<(), ParseError> {
+    if entries.is_empty() {
+        return Err(ParseError::InvalidField {
+            field: "dx_entries",
+            reason: "must contain at least the implicit entry 0",
+        });
+    }
+    let count = u16::try_from(entries.len()).map_err(|_| ParseError::InvalidField {
+        field: "dx_count",
+        reason: "entry count does not fit in u16",
+    })?;
+    if count > limit {
+        return Err(ParseError::InvalidField {
+            field: "dx_count",
+            reason: "entry count exceeds limit",
+        });
+    }
+    // Bytes consumed: dx_root_info ends at 0x20; countlimit+entry0 occupy
+    // 0x20..0x28; each remaining entry is 8 bytes from 0x28.
+    let needed = 0x28 + (entries.len() - 1) * 8;
+    if needed > block.len() {
+        return Err(ParseError::InsufficientData {
+            needed,
+            offset: 0,
+            actual: block.len(),
+        });
+    }
+
+    // dx_root_info @ 0x18..0x20
+    block[0x18..0x1C].copy_from_slice(&0_u32.to_le_bytes()); // reserved_zero
+    block[0x1C] = hash_version;
+    block[0x1D] = 8; // info_length (parser-required)
+    block[0x1E] = indirect_levels;
+    block[0x1F] = 0; // unused_flags
+
+    // dx_countlimit @ 0x20: limit(u16), count(u16); doubles as entry 0.
+    block[0x20..0x22].copy_from_slice(&limit.to_le_bytes());
+    block[0x22..0x24].copy_from_slice(&count.to_le_bytes());
+    block[0x24..0x28].copy_from_slice(&entries[0].block.to_le_bytes());
+
+    // Entries 1.. @ 0x28: (hash, block) pairs.
+    let mut off = 0x28;
+    for entry in &entries[1..] {
+        block[off..off + 4].copy_from_slice(&entry.hash.to_le_bytes());
+        block[off + 4..off + 8].copy_from_slice(&entry.block.to_le_bytes());
+        off += 8;
+    }
+
+    Ok(())
+}
+
 /// Find the rightmost entry index whose hash is <= target_hash.
 fn dx_find_leaf_idx(entries: &[Ext4DxEntry], hash: u32) -> usize {
     // Binary search: find rightmost entry where entry.hash <= hash
@@ -7619,6 +7706,60 @@ mod tests {
         // Entry 2.
         assert_eq!(root.entries[2].hash, entry2_hash, "entry[2].hash @ 0x30");
         assert_eq!(root.entries[2].block, entry2_block, "entry[2].block @ 0x34");
+    }
+
+    /// bd-gauub (write-half STEP 1): `write_dx_root` is the exact inverse of
+    /// `parse_dx_root`. Pins the serializer byte-for-byte against the same
+    /// kernel layout the offset test above hand-builds, then round-trips.
+    #[test]
+    fn write_dx_root_round_trips_with_parse() {
+        let entries = vec![
+            Ext4DxEntry {
+                hash: 0,
+                block: 0x6666_6666,
+            }, // entry 0 (implicit hash 0)
+            Ext4DxEntry {
+                hash: 0x7777_7777,
+                block: 0x8888_8888,
+            },
+            Ext4DxEntry {
+                hash: 0x9999_9999,
+                block: 0xAAAA_AAAA,
+            },
+        ];
+        let mut block = vec![0_u8; 0x40];
+        write_dx_root(&mut block, 0x33, 0x02, 0x4444, &entries).expect("write_dx_root");
+
+        // Byte-identity vs the hand-built kernel layout (cf. the offset pin).
+        let mut expected = vec![0_u8; 0x40];
+        expected[0x1C] = 0x33;
+        expected[0x1D] = 8;
+        expected[0x1E] = 0x02;
+        expected[0x20..0x22].copy_from_slice(&0x4444_u16.to_le_bytes());
+        expected[0x22..0x24].copy_from_slice(&3_u16.to_le_bytes());
+        expected[0x24..0x28].copy_from_slice(&0x6666_6666_u32.to_le_bytes());
+        expected[0x28..0x2C].copy_from_slice(&0x7777_7777_u32.to_le_bytes());
+        expected[0x2C..0x30].copy_from_slice(&0x8888_8888_u32.to_le_bytes());
+        expected[0x30..0x34].copy_from_slice(&0x9999_9999_u32.to_le_bytes());
+        expected[0x34..0x38].copy_from_slice(&0xAAAA_AAAA_u32.to_le_bytes());
+        assert_eq!(
+            block, expected,
+            "write_dx_root must match the kernel layout"
+        );
+
+        // Inverse round-trip recovers exactly what we wrote.
+        let parsed = parse_dx_root(&block).expect("parse round-trip");
+        assert_eq!(parsed.hash_version, 0x33);
+        assert_eq!(parsed.indirect_levels, 0x02);
+        assert_eq!(parsed.entries, entries);
+
+        // Limit helper: 1 KiB block => (1024-0x20)/8 = 124 slots; csum reserves 1.
+        assert_eq!(dx_root_entry_limit(1024, false), 124);
+        assert_eq!(dx_root_entry_limit(1024, true), 123);
+
+        // count > limit is rejected.
+        let mut tiny = vec![0_u8; 0x40];
+        assert!(write_dx_root(&mut tiny, 1, 0, 1, &entries).is_err());
     }
 
     /// bd-12nk4 — Kernel-conformance pin for the ext4_dir_entry_2
