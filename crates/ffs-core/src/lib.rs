@@ -34116,6 +34116,57 @@ mod tests {
     }
 
     #[test]
+    fn write_unlink_last_link_reclaims_inode_and_blocks_keeps_csum_valid() {
+        // Unlinking a file's last link frees its inode and data blocks via
+        // delete_inode — the same MVCC-txn-op free path as rename-over-existing.
+        // Regression for bd-vdi91 (now fixed by no-tx read-your-writes): the
+        // group block-bitmap CRC32C must stay valid on a metadata_csum image,
+        // and the inode + data block must be reclaimed (not leaked). Runs on
+        // remote workers via the generated image (bd-cc6ua).
+        let Some((fs, _tmp)) = open_writable_ext4_mkfs(64) else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let group = GroupNumber(0);
+
+        let attr = fs
+            .create(&cx, root, OsStr::new("unlink_reclaim.bin"), 0o644, 0, 0)
+            .expect("create");
+        fs.write(&cx, attr.ino, 0, &vec![0xEE_u8; 4096])
+            .expect("write a full data block");
+
+        let free_inodes_before = fs
+            .count_free_inodes_in_group(&cx, group)
+            .expect("free inodes before");
+        let free_blocks_before = fs
+            .count_free_blocks_in_group(&cx, group)
+            .expect("free blocks before");
+
+        fs.unlink(&cx, root, OsStr::new("unlink_reclaim.bin"))
+            .expect("unlink last link");
+
+        // count_* validate the on-disk bitmap CRC32C; before bd-vdi91 they would
+        // have errored here with a stale block-bitmap csum.
+        let free_inodes_after = fs
+            .count_free_inodes_in_group(&cx, group)
+            .expect("free inodes after (inode-bitmap csum must stay valid)");
+        let free_blocks_after = fs
+            .count_free_blocks_in_group(&cx, group)
+            .expect("free blocks after (block-bitmap csum must stay valid)");
+        assert_eq!(
+            free_inodes_after,
+            free_inodes_before + 1,
+            "unlink of last link must reclaim the inode"
+        );
+        assert_eq!(
+            free_blocks_after,
+            free_blocks_before + 1,
+            "unlink of last link must reclaim the data block"
+        );
+    }
+
+    #[test]
     fn write_rename_moves_entry() {
         let Some(fs) = open_writable_ext4() else {
             return;
