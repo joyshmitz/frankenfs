@@ -41099,6 +41099,73 @@ mod tests {
     }
 
     #[test]
+    fn fallocate_over_mixed_written_and_hole_preserves_written_data() {
+        // bd-y6h03 edge: a fallocate range that spans an already-WRITTEN block
+        // plus following holes must leave the written block's data intact (never
+        // re-mark it unwritten or clobber it) while turning only the holes into
+        // unwritten/zero extents.
+        let Some((fs, _tmp)) = open_writable_ext4_mkfs(64) else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let block = 4096_u64;
+        let blen = usize::try_from(block).unwrap();
+
+        let f = fs
+            .create(&cx, root, OsStr::new("mixed_falloc.bin"), 0o644, 0, 0)
+            .expect("create");
+        // Block 0 becomes WRITTEN (full block of 0xCC).
+        fs.write(&cx, f.ino, 0, &vec![0xCC_u8; blen])
+            .expect("write block 0");
+
+        // fallocate the first three blocks: block 0 already written, 1+2 holes.
+        fs.fallocate(&cx, f.ino, 0, block * 3, 0)
+            .expect("fallocate");
+
+        // Block 0's data must survive untouched.
+        let b0 = fs
+            .read(&cx, f.ino, 0, u32::try_from(block).unwrap())
+            .expect("read block 0");
+        assert!(
+            b0.iter().all(|&x| x == 0xCC),
+            "already-written block must keep its 0xCC data after fallocate"
+        );
+        // Blocks 1 and 2 (newly preallocated holes) must read as zeros.
+        let b12 = fs
+            .read(&cx, f.ino, block, u32::try_from(block * 2).unwrap())
+            .expect("read blocks 1+2");
+        assert!(
+            b12.iter().all(|&x| x == 0),
+            "preallocated holes must read as zeros"
+        );
+
+        let inode = fs.read_inode(&cx, f.ino).expect("read inode");
+        let extents = fs.collect_extents(&cx, &inode).expect("collect extents");
+        let extent_for = |logical: u32| {
+            extents
+                .iter()
+                .find(|extent| {
+                    logical >= extent.logical_block
+                        && logical < extent.logical_block + u32::from(extent.actual_len())
+                })
+                .expect("logical block remains allocated")
+        };
+        assert!(
+            !extent_for(0).is_unwritten(),
+            "block 0 must stay a WRITTEN extent across fallocate: {extents:?}"
+        );
+        assert!(
+            extent_for(1).is_unwritten(),
+            "preallocated hole block 1 must become unwritten: {extents:?}"
+        );
+        assert!(
+            extent_for(2).is_unwritten(),
+            "preallocated hole block 2 must become unwritten: {extents:?}"
+        );
+    }
+
+    #[test]
     #[ignore = "profiling tool for bd-y6h03: current ext4 preallocate cost and unwritten extent state"]
     fn profile_ext4_fallocate_prealloc_bd_y6h03() {
         let Some((fs, _tmp)) = open_writable_ext4_mkfs(256) else {
