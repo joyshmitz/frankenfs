@@ -522,6 +522,29 @@ pub trait BlockAllocator {
 
     /// Free a previously allocated tree block.
     fn free_block(&mut self, cx: &Cx, block: BlockNumber) -> Result<()>;
+
+    /// Finalize an external extent-tree node block immediately before it is
+    /// written to disk. On a `metadata_csum` filesystem the implementation
+    /// stamps the CRC32C tail (keyed on the owning inode's number +
+    /// generation); the default is a no-op for non-csum filesystems and test
+    /// allocators. Only external index/leaf nodes are passed here — the inode
+    /// `i_block` root is covered by the inode checksum, not the extent tail.
+    fn finalize_node(&self, _block: &mut [u8]) {}
+}
+
+/// Write an external extent-tree node, stamping its checksum tail (if the
+/// allocator requires it) just before the device write. Routing every
+/// external-node write through this helper guarantees no write site can skip
+/// the `metadata_csum` extent-block checksum.
+fn write_node(
+    cx: &Cx,
+    dev: &dyn BlockDevice,
+    alloc: &dyn BlockAllocator,
+    block: BlockNumber,
+    mut data: Vec<u8>,
+) -> Result<()> {
+    alloc.finalize_node(&mut data);
+    dev.write_block(cx, block, &data)
 }
 
 /// Insert a new extent into the tree rooted at `root_bytes`.
@@ -639,7 +662,7 @@ fn insert_descend(
             // Space available.
             extents.insert(insert_pos, extent);
             let new_data = serialize_leaf_block(block_size, &extents);
-            dev.write_block(cx, BlockNumber(block), &new_data)?;
+            write_node(cx, dev, &*alloc, BlockNumber(block), new_data)?;
             return Ok(None);
         }
 
@@ -657,11 +680,11 @@ fn insert_descend(
             "extent_block_alloc"
         );
         let right_data = serialize_leaf_block(block_size, &right_extents);
-        dev.write_block(cx, new_block, &right_data)?;
+        write_node(cx, dev, &*alloc, new_block, right_data)?;
 
         // Write left half back to original block.
         let left_data = serialize_leaf_block(block_size, &left_extents);
-        dev.write_block(cx, BlockNumber(block), &left_data)?;
+        write_node(cx, dev, &*alloc, BlockNumber(block), left_data)?;
         debug!(
             old_node = block,
             new_node = new_block.0,
@@ -698,7 +721,7 @@ fn insert_descend(
                 let pos = indexes.partition_point(|e| e.logical_block < new_entry.logical_block);
                 indexes.insert(pos, new_entry);
                 let new_data = serialize_index_block(block_size, depth, &indexes);
-                dev.write_block(cx, BlockNumber(block), &new_data)?;
+                write_node(cx, dev, &*alloc, BlockNumber(block), new_data)?;
                 Ok(None)
             } else {
                 // This node is also full: split it.
@@ -715,10 +738,10 @@ fn insert_descend(
                     "extent_block_alloc"
                 );
                 let right_data = serialize_index_block(block_size, depth, &right_indexes);
-                dev.write_block(cx, new_block, &right_data)?;
+                write_node(cx, dev, &*alloc, new_block, right_data)?;
 
                 let left_data = serialize_index_block(block_size, depth, &left_indexes);
-                dev.write_block(cx, BlockNumber(block), &left_data)?;
+                write_node(cx, dev, &*alloc, BlockNumber(block), left_data)?;
                 debug!(
                     old_node = block,
                     new_node = new_block.0,
@@ -735,7 +758,7 @@ fn insert_descend(
             let mut indexes = parse_index_entries(data, &header)?;
             indexes[child_pos].logical_block = extent.logical_block;
             let new_data = serialize_index_block(block_size, depth, &indexes);
-            dev.write_block(cx, BlockNumber(block), &new_data)?;
+            write_node(cx, dev, &*alloc, BlockNumber(block), new_data)?;
             Ok(None)
         } else {
             Ok(None)
@@ -766,7 +789,7 @@ fn grow_root_leaf(
         "extent_block_alloc"
     );
     let left_data = serialize_leaf_block(block_size, left);
-    dev.write_block(cx, left_block, &left_data)?;
+    write_node(cx, dev, &*alloc, left_block, left_data)?;
 
     let right_block = alloc.alloc_block(cx)?;
     trace!(
@@ -775,7 +798,7 @@ fn grow_root_leaf(
         "extent_block_alloc"
     );
     let right_data = serialize_leaf_block(block_size, right);
-    dev.write_block(cx, right_block, &right_data)?;
+    write_node(cx, dev, &*alloc, right_block, right_data)?;
 
     let indexes = vec![
         Ext4ExtentIndex {
@@ -832,7 +855,7 @@ fn grow_root_index(
         "extent_block_alloc"
     );
     let left_data = serialize_index_block(block_size, header.depth, left);
-    dev.write_block(cx, left_block, &left_data)?;
+    write_node(cx, dev, &*alloc, left_block, left_data)?;
 
     let right_block = alloc.alloc_block(cx)?;
     trace!(
@@ -841,7 +864,7 @@ fn grow_root_index(
         "extent_block_alloc"
     );
     let right_data = serialize_index_block(block_size, header.depth, right);
-    dev.write_block(cx, right_block, &right_data)?;
+    write_node(cx, dev, &*alloc, right_block, right_data)?;
 
     let new_indexes = vec![
         Ext4ExtentIndex {
@@ -1045,7 +1068,7 @@ fn delete_range_subtree(
         let extents = parse_leaf_entries(data, &header)?;
         let (remaining, freed) = trim_extents(extents, logical_start, logical_end)?;
         let new_data = serialize_leaf_block(block_size, &remaining);
-        dev.write_block(cx, BlockNumber(block), &new_data)?;
+        write_node(cx, dev, &*alloc, BlockNumber(block), new_data)?;
         Ok(DeleteSubtreeResult {
             freed_ranges: freed,
             first_logical: remaining.first().map(|ext| ext.logical_block),
@@ -1104,7 +1127,7 @@ fn delete_range_subtree(
 
         if !indexes.is_empty() {
             let new_data = serialize_index_block(block_size, depth, &indexes);
-            dev.write_block(cx, BlockNumber(block), &new_data)?;
+            write_node(cx, dev, &*alloc, BlockNumber(block), new_data)?;
         }
 
         for child_block in empty_children {

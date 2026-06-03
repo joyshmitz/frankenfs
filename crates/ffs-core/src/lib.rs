@@ -3241,6 +3241,10 @@ impl OpenFs {
                         &mut alloc.groups,
                         logical_end,
                         &alloc.persist_ctx,
+                        ffs_extent::ExtentOwner {
+                            ino: u32::try_from(ino.0).unwrap_or(u32::MAX),
+                            generation: inode.generation,
+                        },
                     )?;
                     self.extent_cache.invalidate_range(
                         extent_ns,
@@ -10842,6 +10846,8 @@ impl OpenFs {
                     Some(ino),
                 ),
                 pctx: persist_ctx,
+                ino: u32::try_from(ino.0).unwrap_or(u32::MAX),
+                generation: new_inode.generation,
             };
             ffs_btree::insert(cx, &block_dev, &mut root_bytes, extent, &mut tree_alloc)?;
         }
@@ -11114,6 +11120,8 @@ impl OpenFs {
                 groups: &mut alloc.groups,
                 hint: tree_hint,
                 pctx: &alloc.persist_ctx,
+                ino: u32::try_from(parent.0).unwrap_or(u32::MAX),
+                generation: parent_upd.generation,
             };
             ffs_btree::insert(cx, dev, &mut root_bytes, extent, &mut tree_alloc)?;
             Self::set_extent_root(&mut parent_upd, &root_bytes);
@@ -11855,6 +11863,10 @@ impl OpenFs {
                         logical_start,
                         u64::from(logical_count),
                         persist_ctx,
+                        ffs_extent::ExtentOwner {
+                            ino: u32::try_from(ino.0).unwrap_or(u32::MAX),
+                            generation: inode.generation,
+                        },
                     )?
                 };
                 self.extent_cache.invalidate_range(
@@ -11938,6 +11950,10 @@ impl OpenFs {
                         logical_start,
                         logical_count,
                         persist_ctx,
+                        ffs_extent::ExtentOwner {
+                            ino: u32::try_from(ino.0).unwrap_or(u32::MAX),
+                            generation: inode.generation,
+                        },
                     )?;
                 }
                 // collapse moves logical blocks; the tail of the extent
@@ -11987,6 +12003,10 @@ impl OpenFs {
                         logical_start,
                         logical_count,
                         persist_ctx,
+                        ffs_extent::ExtentOwner {
+                            ino: u32::try_from(ino.0).unwrap_or(u32::MAX),
+                            generation: inode.generation,
+                        },
                     )?;
                 }
                 self.extent_cache.invalidate_all();
@@ -12146,6 +12166,10 @@ impl OpenFs {
                                 chunk,
                                 &hint,
                                 persist_ctx,
+                                ffs_extent::ExtentOwner {
+                                    ino: u32::try_from(ino.0).unwrap_or(u32::MAX),
+                                    generation: inode.generation,
+                                },
                             )?
                         } else {
                             ffs_extent::allocate_unwritten_extent(
@@ -12158,6 +12182,10 @@ impl OpenFs {
                                 chunk,
                                 &hint,
                                 persist_ctx,
+                                ffs_extent::ExtentOwner {
+                                    ino: u32::try_from(ino.0).unwrap_or(u32::MAX),
+                                    generation: inode.generation,
+                                },
                             )?
                         }
                     };
@@ -12369,6 +12397,10 @@ impl OpenFs {
                             1,
                             &hint,
                             persist_ctx,
+                            ffs_extent::ExtentOwner {
+                                ino: u32::try_from(ino.0).unwrap_or(u32::MAX),
+                                generation: inode.generation,
+                            },
                         )?
                     } else {
                         let Ext4AllocState {
@@ -12386,6 +12418,10 @@ impl OpenFs {
                             1,
                             &hint,
                             persist_ctx,
+                            ffs_extent::ExtentOwner {
+                                ino: u32::try_from(ino.0).unwrap_or(u32::MAX),
+                                generation: inode.generation,
+                            },
                         )?
                     };
                     // Re-acquire block_dev so subsequent bitmap reads see the allocation (if not staged)!
@@ -12444,6 +12480,10 @@ impl OpenFs {
                         logical_block,
                         1,
                         persist_ctx,
+                        ffs_extent::ExtentOwner {
+                            ino: u32::try_from(ino.0).unwrap_or(u32::MAX),
+                            generation: inode.generation,
+                        },
                     )?;
                 } else {
                     let Ext4AllocState {
@@ -12460,6 +12500,10 @@ impl OpenFs {
                         logical_block,
                         1,
                         persist_ctx,
+                        ffs_extent::ExtentOwner {
+                            ino: u32::try_from(ino.0).unwrap_or(u32::MAX),
+                            generation: inode.generation,
+                        },
                     )?;
                 }
                 self.extent_cache.invalidate_all();
@@ -13122,6 +13166,10 @@ impl OpenFs {
                             groups,
                             new_logical_end,
                             persist_ctx,
+                            ffs_extent::ExtentOwner {
+                                ino: u32::try_from(ino.0).unwrap_or(u32::MAX),
+                                generation: inode.generation,
+                            },
                         )?
                     } else {
                         let Ext4AllocState {
@@ -13137,6 +13185,10 @@ impl OpenFs {
                             groups,
                             new_logical_end,
                             persist_ctx,
+                            ffs_extent::ExtentOwner {
+                                ino: u32::try_from(ino.0).unwrap_or(u32::MAX),
+                                generation: inode.generation,
+                            },
                         )?
                     };
                     self.extent_cache.invalidate_range(
@@ -19634,6 +19686,7 @@ impl OpenFs {
             .collect()
     }
 
+    #[expect(clippy::too_many_arguments)]
     fn ext4_move_ext_exchange_ranges(
         cx: &Cx,
         dev: &dyn BlockDevice,
@@ -19641,6 +19694,8 @@ impl OpenFs {
         orig_root: &mut [u8; 60],
         donor_root: &mut [u8; 60],
         range: Ext4MoveExtRange,
+        orig_owner: ffs_extent::ExtentOwner,
+        donor_owner: ffs_extent::ExtentOwner,
     ) -> ffs_error::Result<()> {
         let orig_extents = Self::ext4_move_ext_collect_range(
             cx,
@@ -19669,6 +19724,8 @@ impl OpenFs {
                 groups: &mut alloc.groups,
                 hint: AllocHint::default(),
                 pctx: &alloc.persist_ctx,
+                ino: orig_owner.ino,
+                generation: orig_owner.generation,
             };
             let _ = ffs_btree::delete_range(
                 cx,
@@ -19687,6 +19744,8 @@ impl OpenFs {
                 groups: &mut alloc.groups,
                 hint: AllocHint::default(),
                 pctx: &alloc.persist_ctx,
+                ino: donor_owner.ino,
+                generation: donor_owner.generation,
             };
             let _ = ffs_btree::delete_range(
                 cx,
@@ -19705,6 +19764,8 @@ impl OpenFs {
                 groups: &mut alloc.groups,
                 hint: AllocHint::default(),
                 pctx: &alloc.persist_ctx,
+                ino: orig_owner.ino,
+                generation: orig_owner.generation,
             };
             for extent in donor_extents {
                 ffs_btree::insert(cx, dev, orig_root, extent, &mut tree_alloc)?;
@@ -19718,6 +19779,8 @@ impl OpenFs {
                 groups: &mut alloc.groups,
                 hint: AllocHint::default(),
                 pctx: &alloc.persist_ctx,
+                ino: donor_owner.ino,
+                generation: donor_owner.generation,
             };
             for extent in orig_extents {
                 ffs_btree::insert(cx, dev, donor_root, extent, &mut tree_alloc)?;
@@ -19751,6 +19814,7 @@ impl OpenFs {
             .min(donor_blocks.saturating_sub(request.donor_start))
     }
 
+    #[expect(clippy::too_many_lines)]
     fn ext4_move_ext(
         &self,
         cx: &Cx,
@@ -19792,6 +19856,14 @@ impl OpenFs {
 
         let mut orig_root = Self::extent_root(&orig_inode);
         let mut donor_root = Self::extent_root(&donor_inode);
+        let orig_owner = ffs_extent::ExtentOwner {
+            ino: u32::try_from(orig_ino.0).unwrap_or(u32::MAX),
+            generation: orig_inode.generation,
+        };
+        let donor_owner = ffs_extent::ExtentOwner {
+            ino: u32::try_from(donor_ino.0).unwrap_or(u32::MAX),
+            generation: donor_inode.generation,
+        };
         let (tstamp_secs, tstamp_nanos) = Self::now_timestamp();
         let range = Ext4MoveExtRange {
             orig_start: orig_start_u32,
@@ -19809,6 +19881,8 @@ impl OpenFs {
                     &mut orig_root,
                     &mut donor_root,
                     range,
+                    orig_owner,
+                    donor_owner,
                 )?;
 
                 Self::set_extent_root(&mut orig_inode, &orig_root);
@@ -33624,6 +33698,94 @@ mod tests {
         check(a.ino).expect("source parent dir block checksum valid after rename");
         check(b.ino).expect("target parent dir block checksum valid after rename");
         check(sub.ino).expect("moved dir '..' block checksum valid after rename");
+    }
+
+    #[test]
+    fn external_extent_blocks_carry_valid_crc32c_bd_o3wif() {
+        // A file whose extent tree spills out of the inode (>4 discontiguous
+        // extents -> depth >= 1) writes external index/leaf blocks. On a
+        // metadata_csum image each external block must carry a valid CRC32C
+        // tail keyed on the owning inode's number + generation, or e2fsck
+        // reports the extent block as corrupt (bd-o3wif).
+        let Some((fs, _tmp)) = open_writable_ext4_mkfs(16) else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let (has_csum, seed, block_size) = {
+            let sb = fs.ext4_superblock().expect("sb");
+            (
+                sb.has_metadata_csum(),
+                sb.csum_seed(),
+                u64::from(sb.block_size),
+            )
+        };
+        assert!(has_csum, "generated image expected to have metadata_csum");
+
+        let attr = fs
+            .create(&cx, root, OsStr::new("frag.bin"), 0o644, 0, 0)
+            .expect("create");
+        let file_ino = attr.ino;
+        let block = vec![0xAB_u8; usize::try_from(block_size).expect("bs fits usize")];
+        // Write 24 single blocks each separated by a one-block hole, forcing 24
+        // discontiguous extents — far past the inline root capacity of 4, so the
+        // extent tree must grow to depth >= 1 and allocate external blocks.
+        for i in 0..24_u64 {
+            fs.write(&cx, file_ino, i * 2 * block_size, &block)
+                .expect("discontiguous block write");
+        }
+
+        let inode = fs.read_inode(&cx, file_ino).expect("read inode");
+        let root_bytes = OpenFs::extent_root(&inode);
+        let root_depth = u16::from_le_bytes([root_bytes[6], root_bytes[7]]);
+        assert!(
+            root_depth >= 1,
+            "test must exercise an external (depth>=1) extent tree, got depth {root_depth}"
+        );
+
+        // Collect the physical block numbers of every external node reachable
+        // from the inline root, walking index nodes recursively.
+        let child_block = |node: &[u8], i: usize| -> u64 {
+            let off = 12 + i * 12;
+            let lo =
+                u32::from_le_bytes([node[off + 4], node[off + 5], node[off + 6], node[off + 7]]);
+            let hi = u16::from_le_bytes([node[off + 8], node[off + 9]]);
+            u64::from(lo) | (u64::from(hi) << 32)
+        };
+        let entries_of =
+            |node: &[u8]| -> usize { usize::from(u16::from_le_bytes([node[2], node[3]])) };
+
+        let mut stack: Vec<u64> = (0..entries_of(&root_bytes))
+            .map(|i| child_block(&root_bytes, i))
+            .collect();
+        let mut external = Vec::new();
+        while let Some(blk) = stack.pop() {
+            external.push(blk);
+            let bytes = fs
+                .read_block_vec(&cx, BlockNumber(blk))
+                .expect("read external block");
+            let depth = u16::from_le_bytes([bytes[6], bytes[7]]);
+            if depth >= 1 {
+                for i in 0..entries_of(&bytes) {
+                    stack.push(child_block(&bytes, i));
+                }
+            }
+        }
+        assert!(
+            !external.is_empty(),
+            "depth>=1 tree must reference at least one external block"
+        );
+
+        let file_ino_u32 = u32::try_from(file_ino.0).expect("ino fits u32");
+        for blk in external {
+            let bytes = fs
+                .read_block_vec(&cx, BlockNumber(blk))
+                .expect("read external block");
+            ffs_ondisk::verify_extent_block_checksum(&bytes, seed, file_ino_u32, inode.generation)
+                .unwrap_or_else(|e| {
+                    panic!("external extent block {blk} has invalid CRC32C tail: {e:?}")
+                });
+        }
     }
 
     fn open_writable_ext4_mkfs(size_mb: u64) -> Option<(OpenFs, tempfile::TempDir)> {

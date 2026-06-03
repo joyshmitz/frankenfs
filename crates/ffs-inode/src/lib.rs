@@ -412,7 +412,19 @@ pub fn delete_inode(
     if inode.flags & EXT4_EXTENTS_FL != 0 && inode.extent_bytes.len() >= 60 {
         let mut root_buf = [0u8; 60];
         root_buf.copy_from_slice(&inode.extent_bytes[..60]);
-        ffs_extent::truncate_extents(cx, dev, &mut root_buf, geo, groups, 0, pctx)?;
+        ffs_extent::truncate_extents(
+            cx,
+            dev,
+            &mut root_buf,
+            geo,
+            groups,
+            0,
+            pctx,
+            ffs_extent::ExtentOwner {
+                ino: u32::try_from(ino.0).unwrap_or(u32::MAX),
+                generation: inode.generation,
+            },
+        )?;
         inode.extent_bytes[..60].copy_from_slice(&root_buf);
     }
 
