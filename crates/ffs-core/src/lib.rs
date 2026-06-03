@@ -59,8 +59,9 @@ use ffs_mvcc::{CommitError, MergeByteRange, MergeProof, MvccBlockDevice, MvccSto
 use ffs_ondisk::{
     BtrfsChunkEntry, BtrfsSuperblock, EXT4_ERROR_FS, EXT4_ORPHAN_FS, EXT4_VALID_FS, Ext4DirEntry,
     Ext4Extent, Ext4FileType, Ext4GroupDesc, Ext4ImageReader, Ext4Inode, Ext4Superblock, Ext4Xattr,
-    ExtentTree, lookup_in_dir_block, lookup_in_dir_block_casefold, parse_dir_block,
-    parse_extent_tree, parse_inode_extent_tree, parse_sys_chunk_array,
+    ExtentTree, HtreeFindResult, htree_find_entry, lookup_in_dir_block,
+    lookup_in_dir_block_casefold, parse_dir_block, parse_extent_tree, parse_inode_extent_tree,
+    parse_sys_chunk_array,
 };
 use ffs_types::{
     BTRFS_SUPER_INFO_OFFSET, BlockNumber, ByteOffset, CommitSeq, EXT4_COMPRBLK_FL, EXT4_EXTENTS_FL,
@@ -7511,6 +7512,10 @@ impl OpenFs {
         dir_inode: &Ext4Inode,
         name: &[u8],
     ) -> Result<Option<Ext4DirEntry>, FfsError> {
+        if let Some(entry) = self.htree_lookup_name_with_scope(cx, scope, dir_inode, name) {
+            return Ok(Some(entry));
+        }
+
         let bs = u64::from(self.block_size());
         let num_blocks = dir_logical_block_count(dir_inode.size, bs)?;
 
@@ -7534,6 +7539,49 @@ impl OpenFs {
         }
 
         Ok(None)
+    }
+
+    fn htree_lookup_name_with_scope(
+        &self,
+        cx: &Cx,
+        scope: &RequestScope,
+        dir_inode: &Ext4Inode,
+        name: &[u8],
+    ) -> Option<Ext4DirEntry> {
+        // Never returns Err: any resolve/read/parse failure is swallowed to None
+        // so the caller falls back to the linear scan (the source of truth). The
+        // htree index may also be stale relative to linearly-appended entries.
+        if !dir_inode.has_htree_index() || dir_inode.flags & ffs_types::EXT4_CASEFOLD_FL != 0 {
+            return None;
+        }
+
+        let sb = self.ext4_superblock()?;
+
+        let found = htree_find_entry(
+            sb.block_size,
+            &sb.hash_seed,
+            sb.has_large_dir(),
+            name,
+            |v| sb.effective_dirhash_version(v),
+            |logical_block| {
+                self.resolve_extent(cx, scope, dir_inode, logical_block)
+                    .ok()
+                    .flatten()
+                    .and_then(|(phys, unwritten)| {
+                        if unwritten {
+                            return None;
+                        }
+                        self.read_block_with_scope(cx, scope, BlockNumber(phys))
+                            .ok()
+                            .map(|block| block.as_slice().to_vec())
+                    })
+            },
+        );
+
+        match found {
+            HtreeFindResult::Found(entry) => Some(entry),
+            HtreeFindResult::NotFoundInIndex | HtreeFindResult::IndexInvalid => None,
+        }
     }
 
     // ── High-level file read ──────────────────────────────────────────
@@ -34003,6 +34051,244 @@ mod tests {
                 populate / n
             );
         }
+    }
+
+    const DIR_INDEX_RUNTIME_TEST_FILE_COUNT: usize = 256;
+    const DIR_INDEX_RUNTIME_TEST_CONTENT: &[u8] = b"hello from FrankenFS runtime htree test\n";
+    const DIR_INDEX_RUNTIME_TEST_HASH_SEED: &str = "11111111-2222-3333-4444-555555555555";
+
+    fn ext4_dir_index_golden_path() -> Option<std::path::PathBuf> {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("crate has workspace parent")
+            .parent()
+            .expect("workspace parent exists")
+            .join("conformance/golden/ext4_dir_index_reference.ext4");
+        path.exists().then_some(path)
+    }
+
+    fn run_dir_index_debugfs(image: &std::path::Path, cmd: &str) -> bool {
+        std::process::Command::new("debugfs")
+            .args(["-w", "-R", cmd])
+            .arg(image)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    }
+
+    fn run_dir_index_e2fsck(image: &std::path::Path) -> bool {
+        let Ok(status) = std::process::Command::new("e2fsck")
+            .args(["-fyD"])
+            .arg(image)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+        else {
+            return false;
+        };
+        matches!(status.code().unwrap_or(-1), 0 | 1)
+    }
+
+    fn generated_ext4_dir_index_image_bytes() -> Option<Vec<u8>> {
+        let tmp = tempfile::TempDir::new().expect("tmpdir");
+        let image = tmp.path().join("dir_index.ext4");
+        let file = std::fs::File::create(&image).expect("create dir_index image");
+        file.set_len(64 * 1024 * 1024)
+            .expect("set dir_index image size");
+        drop(file);
+
+        let Ok(status) = std::process::Command::new("mkfs.ext4")
+            .args([
+                "-F",
+                "-L",
+                "ffs-runtime-dx",
+                "-b",
+                "4096",
+                "-q",
+                "-O",
+                "dir_index",
+            ])
+            .arg(&image)
+            .stderr(std::process::Stdio::null())
+            .status()
+        else {
+            return None;
+        };
+        if !status.success() {
+            return None;
+        }
+
+        if !run_dir_index_debugfs(
+            &image,
+            &format!("set_super_value hash_seed {DIR_INDEX_RUNTIME_TEST_HASH_SEED}"),
+        ) {
+            return None;
+        }
+        if !run_dir_index_debugfs(&image, "mkdir /htree") {
+            return None;
+        }
+
+        let content = tmp.path().join("content.txt");
+        std::fs::write(&content, DIR_INDEX_RUNTIME_TEST_CONTENT).expect("write content file");
+        for idx in 0..DIR_INDEX_RUNTIME_TEST_FILE_COUNT {
+            if !run_dir_index_debugfs(
+                &image,
+                &format!("write {} /htree/file_{idx:03}.txt", content.display()),
+            ) {
+                return None;
+            }
+        }
+        if !run_dir_index_debugfs(
+            &image,
+            &format!("write {} /readme-dx.txt", content.display()),
+        ) {
+            return None;
+        }
+        if !run_dir_index_e2fsck(&image) {
+            return None;
+        }
+
+        Some(std::fs::read(&image).expect("read generated dir_index image"))
+    }
+
+    fn ext4_dir_index_image_bytes() -> Option<Vec<u8>> {
+        if let Some(path) = ext4_dir_index_golden_path() {
+            return Some(std::fs::read(path).expect("read dir_index golden image"));
+        }
+
+        let generated = generated_ext4_dir_index_image_bytes();
+        if generated.is_none() {
+            eprintln!(
+                "SKIPPED: ext4_dir_index_reference.ext4 fixture not present and ext4 tools unavailable"
+            );
+        }
+        generated
+    }
+
+    fn open_ext4_dir_index_golden() -> Option<(OpenFs, Cx, Ext4Inode)> {
+        let data = ext4_dir_index_image_bytes()?;
+        let cx = Cx::for_testing();
+        let opts = OpenOptions {
+            ext4_journal_replay_mode: Ext4JournalReplayMode::Skip,
+            ..OpenOptions::default()
+        };
+        let fs = OpenFs::from_device(&cx, Box::new(TestDevice::from_vec(data)), &opts)
+            .expect("open dir_index image");
+        let htree_attr = fs
+            .lookup(&cx, InodeNumber(2), OsStr::new("htree"))
+            .expect("lookup /htree");
+        let htree_inode = fs
+            .read_inode(&cx, htree_attr.ino)
+            .expect("read /htree inode");
+        assert!(
+            htree_inode.has_htree_index(),
+            "/htree must be backed by a real ext4 htree index"
+        );
+        Some((fs, cx, htree_inode))
+    }
+
+    fn linear_lookup_name_reference(
+        fs: &OpenFs,
+        cx: &Cx,
+        scope: &RequestScope,
+        dir_inode: &Ext4Inode,
+        name: &[u8],
+    ) -> Result<Option<Ext4DirEntry>, FfsError> {
+        let bs = u64::from(fs.block_size());
+        let num_blocks = dir_logical_block_count(dir_inode.size, bs)?;
+
+        for lb in 0..num_blocks {
+            if let Some((phys, unwritten)) = fs.resolve_extent(cx, scope, dir_inode, lb)? {
+                if unwritten {
+                    continue;
+                }
+                let block_data = fs.read_block_with_scope(cx, scope, BlockNumber(phys))?;
+                let found = lookup_in_dir_block(&block_data, fs.block_size(), name)
+                    .map_err(|e| parse_to_ffs_error(&e))?;
+                if let Some(entry) = found {
+                    return Ok(Some(entry));
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
+    #[test]
+    fn ext4_runtime_htree_lookup_matches_linear_scan_reference() {
+        let Some((fs, cx, htree_inode)) = open_ext4_dir_index_golden() else {
+            return;
+        };
+        let scope = RequestScope::empty();
+
+        for name in ["file_000.txt", "file_090.txt", "file_179.txt"] {
+            let fast = fs
+                .lookup_name_with_scope(&cx, &scope, &htree_inode, name.as_bytes())
+                .unwrap_or_else(|err| panic!("htree runtime lookup {name}: {err}"));
+            let linear =
+                linear_lookup_name_reference(&fs, &cx, &scope, &htree_inode, name.as_bytes())
+                    .unwrap_or_else(|err| panic!("linear reference lookup {name}: {err}"));
+            assert_eq!(
+                fast, linear,
+                "htree lookup must match linear reference for {name}"
+            );
+            // Prove the htree index path is actually exercised (not silently
+            // always falling back to the linear scan, which would make the
+            // equality above vacuous): the index alone must locate the entry.
+            let via_index =
+                fs.htree_lookup_name_with_scope(&cx, &scope, &htree_inode, name.as_bytes());
+            assert!(
+                via_index.is_some(),
+                "htree index must locate {name} directly, not via the linear fallback"
+            );
+            assert_eq!(
+                via_index, fast,
+                "htree index entry must equal the full lookup"
+            );
+        }
+
+        let missing = fs
+            .lookup_name_with_scope(&cx, &scope, &htree_inode, b"missing.txt")
+            .expect("missing htree lookup should fall back safely");
+        let linear_missing =
+            linear_lookup_name_reference(&fs, &cx, &scope, &htree_inode, b"missing.txt")
+                .expect("missing linear lookup");
+        assert_eq!(missing, linear_missing);
+    }
+
+    #[test]
+    #[ignore = "profiling tool for bd-gauub: same-binary htree lookup vs old linear scan on the committed dir_index golden."]
+    fn profile_htree_lookup_bd_gauub_ab() {
+        let Some((fs, cx, htree_inode)) = open_ext4_dir_index_golden() else {
+            return;
+        };
+        let scope = RequestScope::empty();
+        let target = b"file_179.txt";
+        let reps = 5_000_u32;
+
+        let linear_start = std::time::Instant::now();
+        for _ in 0..reps {
+            let entry = linear_lookup_name_reference(&fs, &cx, &scope, &htree_inode, target)
+                .expect("linear lookup")
+                .expect("linear target");
+            std::hint::black_box(entry);
+        }
+        let linear = linear_start.elapsed() / reps;
+
+        let htree_start = std::time::Instant::now();
+        for _ in 0..reps {
+            let entry = fs
+                .lookup_name_with_scope(&cx, &scope, &htree_inode, target)
+                .expect("htree lookup")
+                .expect("htree target");
+            std::hint::black_box(entry);
+        }
+        let htree = htree_start.elapsed() / reps;
+
+        eprintln!(
+            "bd-gauub htree_ab target=file_179.txt reps={reps}: linear={linear:?}, htree={htree:?}"
+        );
     }
 
     #[test]
