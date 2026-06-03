@@ -5633,6 +5633,54 @@ where
     }
 }
 
+/// Resolve the htree/DX leaf block that *covers* `name`'s hash — i.e. the leaf a
+/// new entry with that name must be inserted into to keep the index consistent.
+///
+/// This descends the same DX index frames as [`htree_find_entry`] (root, then any
+/// indirect levels) using [`dx_find_leaf_idx`] at each level, but stops at the
+/// target leaf instead of searching it / following the collision chain. It is the
+/// insert-side counterpart to the lookup walk: adding the entry to this block and
+/// nowhere else preserves the invariant that `htree_find_entry` checks (the entry
+/// lives in the leaf whose hash range contains `dx_hash(name)`). Returns `None` if
+/// the index cannot be parsed/read, so callers must refuse to mutate rather than
+/// fall back to a linear write into the DX root.
+pub fn htree_target_leaf_block<F, H>(
+    hash_seed: &[u32; 4],
+    has_large_dir: bool,
+    name: &[u8],
+    effective_hash_version: H,
+    mut read_logical_dir_block: F,
+) -> Option<u32>
+where
+    F: FnMut(u32) -> Option<Vec<u8>>,
+    H: Fn(u8) -> u8,
+{
+    let block0 = read_logical_dir_block(0)?;
+    let dx_root = parse_dx_root_with_large_dir(&block0, has_large_dir).ok()?;
+    if dx_root.entries.is_empty() {
+        return None;
+    }
+
+    let hash_version = effective_hash_version(dx_root.hash_version);
+    let (hash, _minor) = dx_hash(hash_version, name, hash_seed);
+
+    let indirect_levels = usize::from(dx_root.indirect_levels);
+    let mut entries = dx_root.entries;
+    let mut idx = dx_find_leaf_idx(&entries, hash);
+
+    for _ in 0..indirect_levels {
+        let child_block = entries.get(idx)?.block;
+        let child_data = read_logical_dir_block(child_block)?;
+        entries = parse_dx_entries(&child_data, 8).ok()?;
+        if entries.is_empty() {
+            return None;
+        }
+        idx = dx_find_leaf_idx(&entries, hash);
+    }
+
+    Some(entries.get(idx)?.block)
+}
+
 // ── ext4 directory hash functions ───────────────────────────────────────────
 
 /// Hash version constants from the ext4 DX root.
@@ -8456,6 +8504,70 @@ mod tests {
                 }
                 other => panic!("entry {name:?} not reachable: {other:?}"),
             }
+        }
+    }
+
+    #[test]
+    fn htree_target_leaf_block_routes_each_name_to_its_owning_leaf_bd_wb4cd() {
+        // The insert-side leaf locator must return, for every name, exactly the
+        // leaf block that already holds that name — the same leaf
+        // htree_find_entry navigates to. This is the invariant that lets
+        // ext4_add_dir_entry insert into the hash-correct leaf without ever
+        // linear-writing (and thus corrupting) the dx_root (bd-wb4cd).
+        let bs = 4096_usize;
+        let seed = [0x1111_1111_u32, 0x2222_2222, 0x3333_3333, 0x4444_4444];
+        let csum_seed = 0xabcd_1234_u32;
+        let dir_ino = 77_u32;
+        let generation = 5_u32;
+        let hash_version = 1_u8;
+
+        let names: Vec<Vec<u8>> = (0..250)
+            .map(|i| format!("entry_{i:04}").into_bytes())
+            .collect();
+        let entries: Vec<(u32, u8, &[u8])> = names
+            .iter()
+            .enumerate()
+            .map(|(i, n)| {
+                (
+                    200 + u32::try_from(i).unwrap(),
+                    EXT4_FT_REG_FILE,
+                    n.as_slice(),
+                )
+            })
+            .collect();
+        let blocks = build_htree_directory_stamped(
+            2,
+            2,
+            &entries,
+            bs,
+            hash_version,
+            &seed,
+            csum_seed,
+            dir_ino,
+            generation,
+        )
+        .expect("stamped htree build");
+        assert!(blocks.len() >= 3, "needs dx_root + multiple leaves");
+
+        for name in &names {
+            let target = htree_target_leaf_block(
+                &seed,
+                false,
+                name,
+                |v| v,
+                |lb| blocks.get(lb as usize).cloned(),
+            )
+            .unwrap_or_else(|| panic!("no target leaf for {name:?}"));
+            assert_ne!(target, 0, "target leaf must never be the dx_root (block 0)");
+            let leaf = blocks
+                .get(target as usize)
+                .unwrap_or_else(|| panic!("target leaf {target} out of range"));
+            let (leaf_entries, _) =
+                parse_dir_block(leaf, u32::try_from(bs).unwrap()).expect("parse leaf");
+            assert!(
+                leaf_entries.iter().any(|e| e.name == *name),
+                "name {name:?} must live in its hash-target leaf {target}"
+            );
         }
     }
 

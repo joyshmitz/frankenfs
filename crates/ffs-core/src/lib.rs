@@ -10965,6 +10965,108 @@ impl OpenFs {
                 .map_err(|_| FfsError::Format("inode number exceeds ext4 32-bit limit".into()))?;
             let parent_generation = parent_inode.generation;
             let reserved_tail = self.ext4_dir_reserved_tail();
+
+            // htree (dx-indexed) directories: logical block 0 is the dx_root,
+            // whose '..' rec_len slack hides the index. A linear add_entry would
+            // split that slack and overwrite the dx index (bd-wb4cd). Instead,
+            // route the entry to the hash-correct leaf — the same leaf
+            // htree_find_entry navigates to — so the index stays consistent and
+            // the dx_root is never linear-written.
+            if parent_inode.has_htree_index() {
+                // Casefold htree directories hash the case-folded name; the
+                // plain dx_hash leaf locator would target the wrong leaf, so
+                // refuse rather than misplace (unreachable entry) or fall
+                // through to the dx_root-corrupting linear path.
+                if parent_inode.flags & ffs_types::EXT4_CASEFOLD_FL != 0 {
+                    return Err(FfsError::UnsupportedFeature(format!(
+                        "casefold htree directory inode {} insert is not yet supported (bd-wb4cd follow-on)",
+                        parent.0
+                    )));
+                }
+                let resolve_logical = |logical: u32| -> Option<BlockNumber> {
+                    for ext in &extents {
+                        if ext.is_unwritten() {
+                            continue;
+                        }
+                        let start = ext.logical_block;
+                        let len = u32::from(ext.actual_len());
+                        if logical >= start && logical < start.saturating_add(len) {
+                            return Some(BlockNumber(
+                                ext.physical_start + u64::from(logical - start),
+                            ));
+                        }
+                    }
+                    None
+                };
+
+                let sb = self
+                    .ext4_superblock()
+                    .ok_or_else(|| FfsError::Format("htree directory on non-ext4 fs".into()))?;
+                let target_logical = ffs_ondisk::htree_target_leaf_block(
+                    &sb.hash_seed,
+                    sb.has_large_dir(),
+                    name,
+                    |v| sb.effective_dirhash_version(v),
+                    |lb| resolve_logical(lb).and_then(|phys| self.read_block_vec(cx, phys).ok()),
+                )
+                .ok_or_else(|| FfsError::Corruption {
+                    block: 0,
+                    detail: format!(
+                        "htree directory inode {} index is unreadable; refusing to insert (would corrupt dx_root, bd-wb4cd)",
+                        parent.0
+                    ),
+                })?;
+                let target_phys = resolve_logical(target_logical).ok_or_else(|| {
+                    FfsError::Corruption {
+                        block: 0,
+                        detail: format!(
+                            "htree directory inode {} dx index references unmapped leaf block {target_logical}",
+                            parent.0
+                        ),
+                    }
+                })?;
+
+                let mut data = self.read_block_vec(cx, target_phys)?;
+                match ffs_dir::add_entry(&mut data, child_ino_u32, name, file_type, reserved_tail) {
+                    Ok(_) => {
+                        self.stamp_ext4_dir_block(&mut data, parent_ino_u32, parent_generation);
+                        dev.write_block(cx, target_phys, &data)?;
+
+                        let mut parent_upd = parent_inode.clone();
+                        ffs_inode::touch_mtime_ctime(&mut parent_upd, tstamp_secs, tstamp_nanos);
+                        if file_type == Ext4FileType::Dir {
+                            parent_upd.links_count = Self::ext4_checked_links_count_delta(
+                                parent_upd.links_count,
+                                parent,
+                                1,
+                            )?;
+                        }
+                        ffs_inode::write_inode(
+                            cx,
+                            dev,
+                            &alloc.geo,
+                            &alloc.groups,
+                            parent,
+                            &parent_upd,
+                            csum_seed,
+                        )?;
+                        return Ok(());
+                    }
+                    // The hash-correct leaf is full: a real htree leaf split +
+                    // dx-node update is required (bd-wb4cd follow-on). Refuse
+                    // rather than misplace the entry (an entry in the wrong leaf
+                    // is unreachable via the index → ENOENT) or corrupt the root.
+                    Err(FfsError::NoSpace) => {
+                        return Err(FfsError::UnsupportedFeature(format!(
+                            "htree directory inode {} needs a leaf split to insert {:?}; htree leaf-split not yet implemented (bd-wb4cd follow-on)",
+                            parent.0,
+                            String::from_utf8_lossy(name)
+                        )));
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+
             for ext in &extents {
                 if ext.is_unwritten() {
                     continue;
