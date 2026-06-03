@@ -13212,6 +13212,20 @@ impl OpenFs {
         Ok(attr)
     }
 
+    /// Stamp the ext4 external xattr block CRC32C checksum in place when the
+    /// filesystem uses `metadata_csum`. No-op otherwise (the `h_checksum` field
+    /// is ignored by `e2fsck` on filesystems without the feature). Must be
+    /// called immediately before writing any external xattr block — and after
+    /// any in-place header mutation (e.g. `h_refcount`) — so the on-disk block
+    /// is `e2fsck`-clean (bd-fwph3).
+    fn stamp_ext4_xattr_block_csum(&self, block: &mut [u8], block_no: BlockNumber) {
+        if let Some(sb) = self.ext4_superblock() {
+            if sb.has_metadata_csum() {
+                ffs_ondisk::stamp_xattr_block_checksum(block, sb.csum_seed(), block_no.0);
+            }
+        }
+    }
+
     /// Set or replace one ext4 xattr.
     #[allow(clippy::significant_drop_tightening, clippy::too_many_lines)]
     fn ext4_setxattr(
@@ -13396,6 +13410,7 @@ impl OpenFs {
                 )?;
                 inode.file_acl = block_alloc.start.0;
                 block[4..8].copy_from_slice(&1_u32.to_le_bytes()); // new block has refcount 1
+                self.stamp_ext4_xattr_block_csum(&mut block, block_alloc.start);
                 block_dev.write_block(cx, block_alloc.start, &block)?;
                 allocated_external_block = Some(block_alloc.start);
                 post_inode_actions.push(Ext4XattrPostInodeAction::UpdateRefcount {
@@ -13411,6 +13426,7 @@ impl OpenFs {
             } else {
                 // New block
                 let new_block = BlockNumber(inode.file_acl);
+                self.stamp_ext4_xattr_block_csum(&mut block, new_block);
                 block_dev.write_block(cx, new_block, &block)?;
                 allocated_external_block = Some(new_block);
             }
@@ -13483,6 +13499,7 @@ impl OpenFs {
                 } => {
                     let mut block = self.read_block_vec(cx, *block_no)?;
                     block[4..8].copy_from_slice(&new_refcount.to_le_bytes());
+                    self.stamp_ext4_xattr_block_csum(&mut block, *block_no);
                     block_dev.write_block(cx, *block_no, &block)?;
                 }
                 Ext4XattrPostInodeAction::FreeBlock(block_no) => {
@@ -13504,7 +13521,9 @@ impl OpenFs {
                     )?;
                 }
                 Ext4XattrPostInodeAction::WriteBlock { block_no, data } => {
-                    block_dev.write_block(cx, *block_no, data)?;
+                    let mut data = data.clone();
+                    self.stamp_ext4_xattr_block_csum(&mut data, *block_no);
+                    block_dev.write_block(cx, *block_no, &data)?;
                 }
             }
         }
@@ -13606,6 +13625,7 @@ impl OpenFs {
                 )?;
                 inode.file_acl = block_alloc.start.0;
                 block[4..8].copy_from_slice(&1_u32.to_le_bytes());
+                self.stamp_ext4_xattr_block_csum(&mut block, block_alloc.start);
                 block_dev.write_block(cx, block_alloc.start, &block)?;
                 allocated_external_block = Some(block_alloc.start);
                 post_inode_actions.push(Ext4XattrPostInodeAction::UpdateRefcount {
@@ -41162,6 +41182,71 @@ mod tests {
         assert!(
             extent_for(2).is_unwritten(),
             "preallocated hole block 2 must become unwritten: {extents:?}"
+        );
+    }
+
+    #[test]
+    fn setxattr_external_block_is_metadata_csum_clean_bd_fwph3() {
+        // bd-fwph3: a setxattr that spills into an EXTERNAL xattr block must
+        // leave that block with a valid ext4 h_checksum on a metadata_csum
+        // filesystem, or e2fsck reports corruption. Pairs with the ffs-ondisk
+        // oracle test (formula == e2fsprogs) to prove e2fsck-cleanliness.
+        let Some((fs, _tmp)) = open_writable_ext4_mkfs(8) else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let (has_csum, seed) = {
+            let sb = fs.ext4_superblock().expect("ext4 superblock");
+            (sb.has_metadata_csum(), sb.csum_seed())
+        };
+        assert!(
+            has_csum,
+            "the generated test image is expected to enable metadata_csum"
+        );
+
+        let f = fs
+            .create(&cx, root, OsStr::new("xattr_csum.bin"), 0o644, 0, 0)
+            .expect("create");
+        // A large value forces the xattr out of the inode ibody into an
+        // external block (file_acl != 0).
+        let big = vec![0x5A_u8; 2000];
+        fs.setxattr(&cx, f.ino, "user.big", &big, XattrSetMode::Set)
+            .expect("setxattr");
+
+        let inode = fs.read_inode(&cx, f.ino).expect("read inode");
+        assert_ne!(
+            inode.file_acl, 0,
+            "large value should have spilled to an external xattr block"
+        );
+        let block = fs
+            .read_block_vec(&cx, BlockNumber(inode.file_acl))
+            .expect("read external xattr block");
+        let stored = u32::from_le_bytes([block[16], block[17], block[18], block[19]]);
+        assert_ne!(
+            stored, 0,
+            "h_checksum must be stamped (was always 0 before bd-fwph3)"
+        );
+        assert!(
+            ffs_ondisk::verify_xattr_block_checksum(&block, seed, inode.file_acl),
+            "external xattr block must carry a valid metadata_csum h_checksum"
+        );
+
+        // Removing one of several entries rewrites the block in place — its
+        // checksum must stay valid too.
+        fs.setxattr(&cx, f.ino, "user.second", b"x", XattrSetMode::Set)
+            .expect("second setxattr");
+        let removed = fs
+            .removexattr(&cx, f.ino, "user.second")
+            .expect("removexattr");
+        assert!(removed);
+        let inode2 = fs.read_inode(&cx, f.ino).expect("re-read inode");
+        let block2 = fs
+            .read_block_vec(&cx, BlockNumber(inode2.file_acl))
+            .expect("re-read external xattr block");
+        assert!(
+            ffs_ondisk::verify_xattr_block_checksum(&block2, seed, inode2.file_acl),
+            "external xattr block must stay metadata_csum-clean after removexattr"
         );
     }
 
