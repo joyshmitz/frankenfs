@@ -11552,7 +11552,7 @@ impl OpenFs {
         };
 
         if !fast_storage {
-            if let Err(err) = self.ext4_write(cx, scope, ino, 0, target_bytes) {
+            if let Err(err) = self.ext4_write(cx, scope, ino, 0, target_bytes, false) {
                 let mut rollback_inode = self.read_inode(cx, ino)?;
                 let mut alloc = alloc_mutex.lock();
                 let block_dev = self.block_device_adapter();
@@ -12168,6 +12168,7 @@ impl OpenFs {
         ino: InodeNumber,
         offset: u64,
         data: &[u8],
+        reject_symlink: bool,
     ) -> ffs_error::Result<u32> {
         if data.is_empty() {
             return Ok(0);
@@ -12188,7 +12189,13 @@ impl OpenFs {
         if inode.is_dir() {
             return Err(FfsError::IsDirectory);
         }
-        if inode.is_symlink() {
+        // Reject writes to an existing symlink from the public write path, but
+        // allow the slow-symlink creation path (which legitimately writes the
+        // target into the symlink inode's data blocks) to pass `reject_symlink
+        // = false`. The guard previously fired unconditionally here, which made
+        // creating any symlink with a target longer than EXT4_FAST_SYMLINK_MAX
+        // impossible — the slow-symlink writer routes through ext4_write.
+        if reject_symlink && inode.is_symlink() {
             return Err(FfsError::Format("cannot write to a symlink".into()));
         }
         // e2compr compressed write: route to cluster-based write path.
@@ -20374,9 +20381,14 @@ impl FsOps for OpenFs {
         data: &[u8],
     ) -> ffs_error::Result<u32> {
         match &self.flavor {
-            FsFlavor::Ext4(_) => {
-                self.ext4_write(cx, scope, Self::ext4_canonical_inode(ino), offset, data)
-            }
+            FsFlavor::Ext4(_) => self.ext4_write(
+                cx,
+                scope,
+                Self::ext4_canonical_inode(ino),
+                offset,
+                data,
+                true,
+            ),
             FsFlavor::Btrfs(_) => {
                 self.check_btrfs_mutation_allowed("write")?;
                 self.btrfs_write(cx, ino, offset, data)
@@ -33353,6 +33365,13 @@ mod tests {
             if ws.exists() {
                 ws
             } else {
+                // No committed fixture. NOTE (bd-cc6ua): generating an in-memory
+                // image here un-skips ~50 write-path tests on remote workers,
+                // but 17 of them currently fail (slow-symlink creation, inode
+                // .blocks-overflow detection, compressed/indirect truncate, a
+                // block-bitmap CRC32C mismatch on mkdir, etc.) — each needs
+                // individual triage before this fallback can be enabled without
+                // turning the suite red. Tracked in bd-cc6ua.
                 return None;
             }
         };
@@ -34404,6 +34423,54 @@ mod tests {
 
         let inode = fs.read_inode(&cx, attr.ino).expect("inode");
         assert!(inode.is_fast_symlink());
+    }
+
+    #[test]
+    fn write_symlink_slow_target_create_and_public_write_guard_ext4() {
+        // Regression for bd-o6uha: slow-symlink creation (target longer than
+        // EXT4_FAST_SYMLINK_MAX) writes the target into data blocks via
+        // ext4_write, which unconditionally rejected symlink inodes — so every
+        // slow symlink failed to create with "cannot write to a symlink". Uses
+        // the in-memory generated image so it actually runs on remote workers
+        // (the fixture-based open_writable_ext4 skips there; bd-cc6ua).
+        let Some((fs, _tmp)) = open_writable_ext4_mkfs(64) else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let long_target = "/var/lib/frankenfs/some/really/long/path/that/exceeds/sixty/bytes/for/slow/symlink-target.txt";
+        assert!(long_target.len() > ffs_types::EXT4_FAST_SYMLINK_MAX);
+
+        let attr = fs
+            .symlink(
+                &cx,
+                root,
+                OsStr::new("slow_link"),
+                Path::new(long_target),
+                1000,
+                1000,
+            )
+            .expect("slow symlink creation must succeed");
+        assert_eq!(attr.kind, FileType::Symlink);
+
+        let target = fs.readlink(&cx, attr.ino).expect("readlink slow target");
+        assert_eq!(target, long_target.as_bytes());
+
+        let inode = fs.read_inode(&cx, attr.ino).expect("inode");
+        assert!(
+            !inode.is_fast_symlink(),
+            "a target this long must be a slow (block-mapped) symlink"
+        );
+
+        // The public write path must STILL reject writing to a symlink inode
+        // (the guard moved to the caller, it was not removed).
+        let err = fs
+            .write(&cx, attr.ino, 0, b"clobber")
+            .expect_err("public write to a symlink must be rejected");
+        assert!(
+            matches!(err, FfsError::Format(ref m) if m.contains("cannot write to a symlink")),
+            "unexpected error writing to symlink: {err:?}"
+        );
     }
 
     #[test]
