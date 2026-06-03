@@ -20,7 +20,7 @@ use ffs_alloc::{AllocHint, BlockAlloc, FsGeometry, GroupStats};
 use ffs_block::BlockDevice;
 use ffs_btree::{BlockAllocator, SearchResult};
 use ffs_error::{FfsError, Result};
-use ffs_ondisk::{EXT_INIT_MAX_LEN, Ext4Extent, ExtentTree, parse_extent_tree};
+use ffs_ondisk::{EXT_INIT_MAX_LEN, Ext4Extent, Ext4ExtentHeader, ExtentTree, parse_extent_tree};
 use ffs_types::BlockNumber;
 use parking_lot::RwLock;
 
@@ -58,12 +58,13 @@ pub fn map_logical_to_physical(
     if count == 0 {
         return Ok(Vec::new());
     }
-    validate_root_header("map_logical_to_physical", root_bytes)?;
+    let (root_header, root_tree) =
+        parse_and_validate_root_header("map_logical_to_physical", root_bytes)?;
 
     let end = checked_logical_range_end("map_logical_to_physical", logical_start, count)?;
 
     if count == 1 {
-        return map_single_logical_to_physical(cx, dev, root_bytes, logical_start);
+        return map_single_logical_to_physical(cx, dev, &root_header, &root_tree, logical_start);
     }
 
     map_logical_range_by_walk(cx, dev, root_bytes, logical_start, end)
@@ -72,36 +73,17 @@ pub fn map_logical_to_physical(
 fn map_single_logical_to_physical(
     cx: &Cx,
     dev: &dyn BlockDevice,
-    root_bytes: &[u8; 60],
+    root_header: &Ext4ExtentHeader,
+    root_tree: &ExtentTree,
     logical_block: u32,
 ) -> Result<Vec<ExtentMapping>> {
     cx_checkpoint(cx)?;
-    let result = ffs_btree::search(cx, dev, root_bytes, logical_block)?;
-    match result {
-        SearchResult::Found {
-            extent,
-            offset_in_extent,
-        } => {
-            let actual_len = u32::from(extent.actual_len());
-            validate_physical_span("map_logical_to_physical", extent.physical_start, actual_len)?;
-            Ok(vec![ExtentMapping {
-                logical_start: logical_block,
-                physical_start: checked_physical_add(
-                    "map_logical_to_physical",
-                    extent.physical_start,
-                    u64::from(offset_in_extent),
-                )?,
-                count: 1,
-                unwritten: extent.is_unwritten(),
-            }])
-        }
-        SearchResult::Hole { .. } => Ok(vec![ExtentMapping {
-            logical_start: logical_block,
-            physical_start: 0,
-            count: 1,
-            unwritten: false,
-        }]),
-    }
+    let result = ffs_btree::search_parsed_root(cx, dev, root_header, root_tree, logical_block)?;
+    Ok(vec![single_mapping_from_search_result(
+        "map_logical_to_physical",
+        logical_block,
+        &result,
+    )?])
 }
 
 fn map_logical_range_by_walk(
@@ -1151,7 +1133,10 @@ fn validate_shifted_extent_fits_logical_space(
     Ok(())
 }
 
-fn validate_root_header(op: &str, root_bytes: &[u8; 60]) -> Result<()> {
+fn parse_and_validate_root_header(
+    op: &str,
+    root_bytes: &[u8; 60],
+) -> Result<(Ext4ExtentHeader, ExtentTree)> {
     let (header, tree) = parse_extent_tree(root_bytes).map_err(|err| FfsError::Corruption {
         block: 0,
         detail: format!("{op}: invalid root extent header: {err}"),
@@ -1171,7 +1156,7 @@ fn validate_root_header(op: &str, root_bytes: &[u8; 60]) -> Result<()> {
             detail: format!("{op}: non-leaf extent root has zero entries"),
         });
     }
-    if let ExtentTree::Leaf(extents) = tree {
+    if let ExtentTree::Leaf(extents) = &tree {
         if extents.iter().any(|ext| ext.actual_len() == 0) {
             return Err(FfsError::Corruption {
                 block: 0,
@@ -1179,7 +1164,11 @@ fn validate_root_header(op: &str, root_bytes: &[u8; 60]) -> Result<()> {
             });
         }
     }
-    Ok(())
+    Ok((header, tree))
+}
+
+fn validate_root_header(op: &str, root_bytes: &[u8; 60]) -> Result<()> {
+    parse_and_validate_root_header(op, root_bytes).map(|_| ())
 }
 
 // ── Extent cache ────────────────────────────────────────────────────────────

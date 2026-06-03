@@ -10,7 +10,9 @@
 use asupersync::Cx;
 use criterion::{Criterion, criterion_group, criterion_main};
 use ffs_block::{BlockBuf, BlockDevice};
+use ffs_btree::SearchResult;
 use ffs_error::Result as FfsResult;
+use ffs_ondisk::ExtentTree;
 use ffs_types::BlockNumber;
 use parking_lot::Mutex;
 use std::hint::black_box;
@@ -328,6 +330,90 @@ fn bench_extent_sequential_uncached(c: &mut Criterion) {
     });
 }
 
+fn map_single_old_double_parse(
+    cx: &Cx,
+    dev: &dyn BlockDevice,
+    root: &[u8; 60],
+    logical_start: u32,
+) -> FfsResult<Vec<ffs_extent::ExtentMapping>> {
+    let (header, tree) = ffs_ondisk::parse_extent_tree(root).expect("valid root extent tree");
+    assert!(header.depth <= 5, "valid ext4 root depth");
+    assert!(
+        !(header.depth > 0 && header.entries == 0),
+        "non-leaf root has entries"
+    );
+    if let ExtentTree::Leaf(extents) = &tree {
+        assert!(
+            extents.iter().all(|ext| ext.actual_len() != 0),
+            "leaf extents have nonzero length"
+        );
+    }
+
+    let result = ffs_btree::search(cx, dev, root, logical_start)?;
+    Ok(vec![mapping_from_search_result(logical_start, &result)])
+}
+
+fn mapping_from_search_result(
+    logical_start: u32,
+    result: &SearchResult,
+) -> ffs_extent::ExtentMapping {
+    match result {
+        SearchResult::Found {
+            extent,
+            offset_in_extent,
+        } => ffs_extent::ExtentMapping {
+            logical_start,
+            physical_start: extent.physical_start + u64::from(*offset_in_extent),
+            count: 1,
+            unwritten: extent.is_unwritten(),
+        },
+        SearchResult::Hole { .. } => ffs_extent::ExtentMapping {
+            logical_start,
+            physical_start: 0,
+            count: 1,
+            unwritten: false,
+        },
+    }
+}
+
+fn bench_extent_single_block_parse_root_ab(c: &mut Criterion) {
+    let cx = Cx::for_testing();
+    let (dev, root) = build_depth1_tree();
+
+    assert_eq!(
+        map_single_old_double_parse(&cx, &dev, &root, 700).expect("old resolve"),
+        ffs_extent::map_logical_to_physical(&cx, &dev, &root, 700, 1).expect("new resolve")
+    );
+
+    let mut group = c.benchmark_group("extent_single_block_parse_root_ab");
+    group.bench_function("old_double_parse", |b| {
+        b.iter(|| {
+            let result = map_single_old_double_parse(
+                black_box(&cx),
+                black_box(&dev),
+                black_box(&root),
+                black_box(700),
+            )
+            .expect("resolve");
+            black_box(result);
+        });
+    });
+    group.bench_function("parsed_root", |b| {
+        b.iter(|| {
+            let result = ffs_extent::map_logical_to_physical(
+                black_box(&cx),
+                black_box(&dev),
+                black_box(&root),
+                black_box(700),
+                black_box(1),
+            )
+            .expect("resolve");
+            black_box(result);
+        });
+    });
+    group.finish();
+}
+
 fn bench_extent_sequential_cached(c: &mut Criterion) {
     let cx = Cx::for_testing();
     let (dev, root) = build_depth1_tree();
@@ -542,6 +628,7 @@ criterion_group!(
     bench_extent_resolve_repeated,
     bench_extent_resolve_cached_repeated,
     bench_extent_sequential_uncached,
+    bench_extent_single_block_parse_root_ab,
     bench_extent_sequential_cached,
     bench_extent_sequential_cached_cold_leaf_window,
     bench_extent_cache_insert_cold,

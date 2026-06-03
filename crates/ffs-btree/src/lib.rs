@@ -18,7 +18,7 @@ pub mod bw_tree;
 use asupersync::Cx;
 use ffs_block::BlockDevice;
 use ffs_error::{FfsError, Result};
-use ffs_ondisk::{Ext4Extent, Ext4ExtentHeader, Ext4ExtentIndex};
+use ffs_ondisk::{Ext4Extent, Ext4ExtentHeader, Ext4ExtentIndex, ExtentTree};
 use ffs_types::BlockNumber;
 use tracing::{debug, error, trace};
 
@@ -103,6 +103,37 @@ pub fn search(
     let child_block = find_index_child(&indexes, target)?;
 
     descend_search(cx, dev, child_block, header.depth - 1, target)
+}
+
+/// Search using a root extent tree that has already been parsed.
+///
+/// This preserves the same root header validation and descent behavior as
+/// [`search`] while avoiding a second parse of inode `i_block` bytes in callers
+/// that must validate the root before search.
+pub fn search_parsed_root(
+    cx: &Cx,
+    dev: &dyn BlockDevice,
+    header: &Ext4ExtentHeader,
+    tree: &ExtentTree,
+    target: u32,
+) -> Result<SearchResult> {
+    validate_header(header, ROOT_MAX_ENTRIES)?;
+
+    match (header.depth, tree) {
+        (0, ExtentTree::Leaf(extents)) => search_leaf(extents, target),
+        (0, ExtentTree::Index(_)) => Err(FfsError::Corruption {
+            block: 0,
+            detail: "extent root depth 0 contains index entries".into(),
+        }),
+        (_, ExtentTree::Index(indexes)) => {
+            let child_block = find_index_child(indexes, target)?;
+            descend_search(cx, dev, child_block, header.depth - 1, target)
+        }
+        (_, ExtentTree::Leaf(_)) => Err(FfsError::Corruption {
+            block: 0,
+            detail: format!("extent root depth {} contains leaf extents", header.depth),
+        }),
+    }
 }
 
 /// Search and return the parsed leaf entries from the leaf that answered it.
@@ -1910,6 +1941,37 @@ mod tests {
                 hole_len: 1_u64 << 32
             }
         );
+    }
+
+    #[test]
+    fn search_parsed_root_matches_byte_search() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let mut root = make_root();
+        let mut alloc = SeqAllocator::new(100);
+
+        for extent in [
+            Ext4Extent {
+                logical_block: 0,
+                raw_len: 4,
+                physical_start: 1000,
+            },
+            Ext4Extent {
+                logical_block: 8,
+                raw_len: 3,
+                physical_start: 2000,
+            },
+        ] {
+            insert(&cx, &dev, &mut root, extent, &mut alloc).unwrap();
+        }
+
+        let (header, tree) = ffs_ondisk::parse_extent_tree(&root).unwrap();
+        for target in [0, 3, 4, 8, 10, 11, u32::MAX] {
+            assert_eq!(
+                search(&cx, &dev, &root, target).unwrap(),
+                search_parsed_root(&cx, &dev, &header, &tree, target).unwrap()
+            );
+        }
     }
 
     #[test]
