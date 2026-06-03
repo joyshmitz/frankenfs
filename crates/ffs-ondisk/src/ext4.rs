@@ -5108,6 +5108,105 @@ pub fn choose_htree_leaf_split(entries: &[(u32, usize)]) -> Option<(usize, u32)>
     best.map(|(i, _)| (i, entries[i].0))
 }
 
+/// On-disk record length of a directory entry with `name_len` bytes of name:
+/// the 8-byte header plus the name, rounded up to 4-byte alignment
+/// (`EXT4_DIR_REC_LEN`).
+#[must_use]
+pub fn dir_entry_rec_len(name_len: usize) -> usize {
+    (8 + name_len + 3) & !3
+}
+
+/// Encode a 4-byte-aligned `rec_len` into the on-disk `u16` field (inverse of
+/// `rec_len_from_disk` for `block_size <= 65536`). A length equal to a 64 KiB
+/// block is stored as 0 per the kernel convention.
+fn rec_len_to_disk(rec_len: usize) -> u16 {
+    // Exactly 64 KiB does not fit u16 and is encoded as 0 (kernel convention);
+    // all other 4-byte-aligned, < 64 KiB lengths store directly.
+    u16::try_from(rec_len).unwrap_or(0)
+}
+
+/// Pack directory entries into a fresh directory/leaf block (write-half STEP 3
+/// of bd-gauub).
+///
+/// Entries `(inode, file_type_raw, name)` are laid out from offset 0, each with
+/// `rec_len = dir_entry_rec_len(name_len)`; the final entry's `rec_len` is
+/// extended to span the remaining free space up to the checksum tail. When
+/// `with_csum_tail` is set, the last 12 bytes hold a dirent checksum tail
+/// (inode=0, rec_len=12, file_type=`EXT4_FT_DIR_CSUM`) whose CRC32C field is left
+/// zero for the caller to stamp via [`stamp_dir_block_checksum`]. An empty entry
+/// list yields a single empty filler entry spanning the usable area. This is the
+/// inverse of the entry walk in [`parse_dir_block`]; round-trip pinned by
+/// `pack_dir_block_entries_round_trips`.
+pub fn pack_dir_block_entries(
+    entries: &[(u32, u8, &[u8])],
+    block_size: usize,
+    with_csum_tail: bool,
+) -> Result<Vec<u8>, ParseError> {
+    if !(12..=65536).contains(&block_size) {
+        return Err(ParseError::InvalidField {
+            field: "block_size",
+            reason: "directory block size must be in 12..=65536",
+        });
+    }
+    let usable_end = if with_csum_tail {
+        block_size - 12
+    } else {
+        block_size
+    };
+
+    let mut block = vec![0_u8; block_size];
+
+    if entries.is_empty() {
+        // One empty filler entry spanning the usable area (inode 0, name_len 0).
+        block[4..6].copy_from_slice(&rec_len_to_disk(usable_end).to_le_bytes());
+    } else {
+        let mut offset = 0_usize;
+        for (i, &(inode, file_type_raw, name)) in entries.iter().enumerate() {
+            let name_len = name.len();
+            if name_len == 0 || name_len > EXT4_MAX_NAME_BYTES {
+                return Err(ParseError::InvalidField {
+                    field: "name_len",
+                    reason: "directory entry name length must be 1..=255",
+                });
+            }
+            let min_rec = dir_entry_rec_len(name_len);
+            if offset + min_rec > usable_end {
+                return Err(ParseError::InvalidField {
+                    field: "dir_block",
+                    reason: "entries do not fit in the directory block",
+                });
+            }
+            let is_last = i == entries.len() - 1;
+            let rec_len = if is_last {
+                usable_end - offset
+            } else {
+                min_rec
+            };
+
+            block[offset..offset + 4].copy_from_slice(&inode.to_le_bytes());
+            block[offset + 4..offset + 6].copy_from_slice(&rec_len_to_disk(rec_len).to_le_bytes());
+            block[offset + 6] = u8::try_from(name_len).map_err(|_| ParseError::InvalidField {
+                field: "name_len",
+                reason: "directory entry name length exceeds 255",
+            })?;
+            block[offset + 7] = file_type_raw;
+            block[offset + 8..offset + 8 + name_len].copy_from_slice(name);
+
+            offset += rec_len;
+        }
+    }
+
+    if with_csum_tail {
+        let t = usable_end;
+        // inode (0) already zero; rec_len = 12; name_len (0) already zero.
+        block[t + 4..t + 6].copy_from_slice(&12_u16.to_le_bytes());
+        block[t + 7] = EXT4_FT_DIR_CSUM;
+        // CRC32C field at t+8..t+12 stays zero for the caller to stamp.
+    }
+
+    Ok(block)
+}
+
 /// Find the rightmost entry index whose hash is <= target_hash.
 fn dx_find_leaf_idx(entries: &[Ext4DxEntry], hash: u32) -> usize {
     // Binary search: find rightmost entry where entry.hash <= hash
@@ -7856,6 +7955,51 @@ mod tests {
             );
             assert!(entries[i - 1].0 < h, "split is on a clean boundary");
         }
+    }
+
+    /// bd-gauub (write-half STEP 3): pack_dir_block_entries is the inverse of the
+    /// parse_dir_block entry walk, with and without a checksum tail.
+    #[test]
+    fn pack_dir_block_entries_round_trips() {
+        let bs = 4096_usize;
+        let entries: Vec<(u32, u8, &[u8])> = vec![
+            (11, EXT4_FT_REG_FILE, b"alpha".as_slice()),
+            (12, EXT4_FT_DIR, b"beta".as_slice()),
+            (
+                13,
+                EXT4_FT_REG_FILE,
+                b"a_much_longer_file_name_here.txt".as_slice(),
+            ),
+        ];
+        for &with_csum in &[false, true] {
+            let block = pack_dir_block_entries(&entries, bs, with_csum).expect("pack");
+            let (parsed, tail) =
+                parse_dir_block(&block, u32::try_from(bs).unwrap()).expect("parse");
+            assert_eq!(parsed.len(), entries.len(), "with_csum={with_csum}");
+            for (p, e) in parsed.iter().zip(entries.iter()) {
+                assert_eq!(p.inode, e.0);
+                assert_eq!(p.name.as_slice(), e.2);
+                assert_eq!(p.name_len as usize, e.2.len());
+            }
+            assert_eq!(tail.is_some(), with_csum, "tail presence tracks with_csum");
+        }
+
+        // Empty block: no real (non-zero-inode) entries.
+        let empty = pack_dir_block_entries(&[], bs, false).expect("pack empty");
+        let (parsed, _) = parse_dir_block(&empty, u32::try_from(bs).unwrap()).expect("parse empty");
+        assert!(parsed.iter().all(|e| e.inode == 0));
+
+        // Overflow is rejected.
+        let huge: Vec<(u32, u8, &[u8])> = (0..300)
+            .map(|_| (1_u32, EXT4_FT_REG_FILE, b"x".as_slice()))
+            .collect();
+        assert!(pack_dir_block_entries(&huge, 1024, false).is_err());
+
+        // Record-length helper matches the kernel EXT4_DIR_REC_LEN rounding.
+        assert_eq!(dir_entry_rec_len(1), 12);
+        assert_eq!(dir_entry_rec_len(4), 12);
+        assert_eq!(dir_entry_rec_len(5), 16);
+        assert_eq!(dir_entry_rec_len(255), 264);
     }
 
     /// bd-12nk4 — Kernel-conformance pin for the ext4_dir_entry_2
