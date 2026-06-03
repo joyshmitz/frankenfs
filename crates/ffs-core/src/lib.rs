@@ -33852,6 +33852,162 @@ mod tests {
     }
 
     #[test]
+    fn ext4_collapse_range_preserves_unwritten_extents_and_data() {
+        // Reachable untested edge: collapse_range over a preallocated
+        // (unwritten) region must (a) keep written data correct after the
+        // shift and (b) preserve the unwritten flag of shifted extents — a lost
+        // flag would expose stale physical data as file contents. Structural
+        // check via map_logical_to_physical plus a data round-trip. Runs on
+        // remote workers via the generated image.
+        let Some((fs, _tmp)) = open_writable_ext4_mkfs(64) else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let block = 4096_u64;
+        let blen = usize::try_from(block).unwrap();
+        let attr = fs
+            .create(&cx, root, OsStr::new("collapse_unwritten.bin"), 0o644, 0, 0)
+            .expect("create");
+        let ino = attr.ino;
+
+        // Preallocate 6 blocks (mode 0 extends size). ext4 preallocation is
+        // unwritten.
+        fs.fallocate(&cx, ino, 0, 6 * block, 0)
+            .expect("preallocate 6 blocks");
+
+        // Confirm preallocation produced an unwritten mapping that reads zeros.
+        let unwritten_before = {
+            let inode = fs.read_inode(&cx, ino).expect("inode");
+            let root_bytes = OpenFs::extent_root(&inode);
+            let dev = fs.block_device_adapter();
+            let m = ffs_extent::map_logical_to_physical(&cx, &dev, &root_bytes, 5, 1)
+                .expect("map blk5");
+            m.first().is_some_and(|e| e.unwritten)
+        };
+        let z = fs.read(&cx, ino, 0, 4096).expect("read b0");
+        assert!(z.iter().all(|&b| b == 0), "unwritten prealloc reads zeros");
+
+        // Write a marker into block 4.
+        let marker = vec![0xCC_u8; blen];
+        fs.write(&cx, ino, 4 * block, &marker)
+            .expect("write marker");
+
+        // Collapse block 1 (unwritten): tail [2,6) shifts left to [1,5);
+        // the marker block 4 -> 3. FALLOC_FL_COLLAPSE_RANGE = 0x08.
+        fs.fallocate(&cx, ino, block, block, 0x08)
+            .expect("collapse_range over unwritten block");
+        assert_eq!(
+            fs.getattr(&cx, ino).expect("ga").size,
+            5 * block,
+            "file shrinks by the collapsed block"
+        );
+
+        // Written data shifted correctly.
+        let m = fs
+            .read(&cx, ino, 3 * block, 4096)
+            .expect("read marker after");
+        assert_eq!(m, marker, "written block shifted left across collapse");
+
+        // Remaining unwritten blocks still read zeros (flag preserved → no
+        // stale physical data exposure).
+        for b in [0_u64, 1, 2, 4] {
+            let d = fs
+                .read(&cx, ino, b * block, 4096)
+                .expect("read unwritten after");
+            assert!(
+                d.iter().all(|&x| x == 0),
+                "block {b} must still read zeros after collapse (unwritten preserved)"
+            );
+        }
+
+        // Structural: a shifted unwritten extent is still flagged unwritten.
+        if unwritten_before {
+            let inode = fs.read_inode(&cx, ino).expect("inode after");
+            let root_bytes = OpenFs::extent_root(&inode);
+            let dev = fs.block_device_adapter();
+            let m = ffs_extent::map_logical_to_physical(&cx, &dev, &root_bytes, 4, 1)
+                .expect("map blk4 after");
+            assert!(
+                m.first().is_some_and(|e| e.unwritten),
+                "shifted preallocated extent must remain unwritten"
+            );
+        }
+    }
+
+    #[test]
+    fn ext4_insert_range_preserves_unwritten_extents_and_data() {
+        // Mirror of the collapse test for insert_range: inserting a hole into a
+        // preallocated (unwritten) region must shift written data right, leave
+        // the inserted hole and the surrounding unwritten blocks reading zeros,
+        // and keep shifted extents flagged unwritten.
+        let Some((fs, _tmp)) = open_writable_ext4_mkfs(64) else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let block = 4096_u64;
+        let blen = usize::try_from(block).unwrap();
+        let attr = fs
+            .create(&cx, root, OsStr::new("insert_unwritten.bin"), 0o644, 0, 0)
+            .expect("create");
+        let ino = attr.ino;
+
+        fs.fallocate(&cx, ino, 0, 5 * block, 0)
+            .expect("preallocate 5 blocks");
+        let unwritten_before = {
+            let inode = fs.read_inode(&cx, ino).expect("inode");
+            let root_bytes = OpenFs::extent_root(&inode);
+            let dev = fs.block_device_adapter();
+            ffs_extent::map_logical_to_physical(&cx, &dev, &root_bytes, 3, 1)
+                .expect("map blk3")
+                .first()
+                .is_some_and(|e| e.unwritten)
+        };
+
+        // Write a marker into block 3.
+        let marker = vec![0x5A_u8; blen];
+        fs.write(&cx, ino, 3 * block, &marker)
+            .expect("write marker");
+
+        // Insert a hole at block 1: tail [1,5) shifts right to [2,6); marker
+        // block 3 -> 4. FALLOC_FL_INSERT_RANGE = 0x20.
+        fs.fallocate(&cx, ino, block, block, 0x20)
+            .expect("insert_range into unwritten region");
+        assert_eq!(
+            fs.getattr(&cx, ino).expect("ga").size,
+            6 * block,
+            "file grows by the inserted block"
+        );
+
+        let m = fs
+            .read(&cx, ino, 4 * block, 4096)
+            .expect("read marker after");
+        assert_eq!(m, marker, "written block shifted right across insert");
+
+        // Inserted hole (block 1) + surrounding unwritten blocks read zeros.
+        for b in [0_u64, 1, 2, 3, 5] {
+            let d = fs.read(&cx, ino, b * block, 4096).expect("read zero after");
+            assert!(
+                d.iter().all(|&x| x == 0),
+                "block {b} must read zeros after insert (hole/unwritten)"
+            );
+        }
+
+        if unwritten_before {
+            let inode = fs.read_inode(&cx, ino).expect("inode after");
+            let root_bytes = OpenFs::extent_root(&inode);
+            let dev = fs.block_device_adapter();
+            let m = ffs_extent::map_logical_to_physical(&cx, &dev, &root_bytes, 5, 1)
+                .expect("map blk5 after");
+            assert!(
+                m.first().is_some_and(|e| e.unwritten),
+                "shifted preallocated extent must remain unwritten after insert"
+            );
+        }
+    }
+
+    #[test]
     fn write_mkdir_and_lookup() {
         let Some(fs) = open_writable_ext4() else {
             return;
