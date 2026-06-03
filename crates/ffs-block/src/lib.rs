@@ -1902,6 +1902,10 @@ struct ArcState {
     #[cfg(feature = "s3fifo")]
     ghost_capacity: usize,
     #[cfg(feature = "s3fifo")]
+    last_read_miss: Option<BlockNumber>,
+    #[cfg(feature = "s3fifo")]
+    sequential_read_miss_streak: u8,
+    #[cfg(feature = "s3fifo")]
     access_count: HashMap<BlockNumber, u8>,
 }
 
@@ -1960,6 +1964,10 @@ impl ArcState {
             main_capacity,
             #[cfg(feature = "s3fifo")]
             ghost_capacity,
+            #[cfg(feature = "s3fifo")]
+            last_read_miss: None,
+            #[cfg(feature = "s3fifo")]
+            sequential_read_miss_streak: 0,
             #[cfg(feature = "s3fifo")]
             access_count: HashMap::new(),
         }
@@ -2225,6 +2233,7 @@ impl ArcState {
         Self::increment_counter(&mut self.hits);
         #[cfg(feature = "s3fifo")]
         {
+            self.reset_s3_read_scan_detector();
             self.s3_on_hit(key);
         }
         #[cfg(not(feature = "s3fifo"))]
@@ -2305,6 +2314,60 @@ impl ArcState {
             self.t1.push_back(key);
             self.loc.insert(key, ArcList::T1);
         }
+    }
+
+    #[cfg(feature = "s3fifo")]
+    fn reset_s3_read_scan_detector(&mut self) {
+        self.last_read_miss = None;
+        self.sequential_read_miss_streak = 0;
+    }
+
+    #[cfg(feature = "s3fifo")]
+    fn on_read_miss_or_scan_bypass(&mut self, key: BlockNumber) -> bool {
+        Self::increment_counter(&mut self.misses);
+
+        let is_sequential = self
+            .last_read_miss
+            .is_some_and(|previous| previous.0.wrapping_add(1) == key.0);
+        self.last_read_miss = Some(key);
+        if is_sequential {
+            self.sequential_read_miss_streak = self.sequential_read_miss_streak.saturating_add(1);
+        } else {
+            self.sequential_read_miss_streak = 0;
+        }
+
+        let has_cache_history = self.loc.contains_key(&key);
+        let bypass = self.sequential_read_miss_streak >= 2 && !has_cache_history;
+        if bypass {
+            self.loc.insert(key, ArcList::B1);
+            self.b1.push_back(key);
+            while self.b1.len() > self.ghost_capacity {
+                if let Some(victim) = self.b1.pop_front() {
+                    let _ = self.loc.remove(&victim);
+                }
+            }
+            trace!(
+                target: "ffs::block::s3fifo",
+                event = "admission_decision",
+                block = key.0,
+                reason = "sequential_scan_ghost_only",
+                sequential_read_miss_streak = self.sequential_read_miss_streak,
+                small_len = self.t1.len(),
+                main_len = self.t2.len(),
+                ghost_len = self.b1.len()
+            );
+            self.s3_emit_summary_if_due();
+            true
+        } else {
+            self.s3_on_miss_or_ghost_hit(key);
+            false
+        }
+    }
+
+    #[cfg(not(feature = "s3fifo"))]
+    fn on_read_miss_or_scan_bypass(&mut self, key: BlockNumber) -> bool {
+        self.on_miss_or_ghost_hit(key);
+        false
     }
 
     #[cfg(feature = "s3fifo")]
@@ -4120,8 +4183,10 @@ impl<D: BlockDevice> BlockDevice for ArcCache<D> {
             guard.on_hit(block);
             existing
         } else {
-            guard.on_miss_or_ghost_hit(block);
-            guard.resident.insert(block, buf.clone_ref());
+            let bypass_cache = guard.on_read_miss_or_scan_bypass(block);
+            if !bypass_cache {
+                guard.resident.insert(block, buf.clone_ref());
+            }
             buf
         };
         let pending_flush = guard.take_pending_flush();
@@ -6028,6 +6093,41 @@ mod tests {
 
         let metrics = cache.metrics();
         assert!(metrics.resident <= metrics.capacity);
+    }
+
+    #[cfg(feature = "s3fifo")]
+    #[test]
+    fn s3fifo_arc_cache_scan_bypass_leaves_one_pass_scan_uncached() {
+        let cx = Cx::for_testing();
+        let mem = MemoryByteDevice::new(4096 * 256);
+        let dev = ByteBlockDevice::new(mem, 4096).expect("device");
+        let cache = ArcCache::new(dev, 32).expect("cache");
+
+        for block in 0_u64..128_u64 {
+            let buf = cache
+                .read_block(&cx, BlockNumber(block))
+                .expect("scan read");
+            assert_eq!(buf.len(), 4096);
+        }
+
+        let metrics = cache.metrics();
+        assert_eq!(metrics.hits, 0);
+        assert_eq!(metrics.misses, 128);
+        assert!(
+            metrics.resident <= 2,
+            "scan bypass should avoid filling resident queue, got {}",
+            metrics.resident
+        );
+        assert_eq!(
+            metrics.b1_len, 32,
+            "bypassed scan should keep only bounded ghost history"
+        );
+
+        let guard = cache.state.lock();
+        assert!(guard.resident.contains_key(&BlockNumber(0)));
+        assert!(guard.resident.contains_key(&BlockNumber(1)));
+        assert!(!guard.resident.contains_key(&BlockNumber(127)));
+        drop(guard);
     }
 
     #[cfg(feature = "s3fifo")]
