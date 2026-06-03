@@ -34567,6 +34567,97 @@ mod tests {
     }
 
     #[test]
+    fn write_unlink_one_of_two_links_keeps_inode_data_and_csum() {
+        // Unlinking ONE of two hard links must decrement nlink and must NOT
+        // reclaim the inode or its data blocks (links remain) — the surviving
+        // link must still read the data. Only when the last link is removed do
+        // they get reclaimed. A premature free here would be silent data loss
+        // for the surviving link. Also guards block-bitmap csum validity on a
+        // metadata_csum image across both the no-reclaim and the reclaim step.
+        // Runs on remote workers via the generated image (bd-cc6ua).
+        let Some((fs, _tmp)) = open_writable_ext4_mkfs(64) else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let group = GroupNumber(0);
+        let payload = vec![0x3C_u8; 4096];
+
+        let src = fs
+            .create(&cx, root, OsStr::new("two_links_a.bin"), 0o644, 0, 0)
+            .expect("create");
+        fs.write(&cx, src.ino, 0, &payload)
+            .expect("write a full block");
+        fs.link(&cx, src.ino, root, OsStr::new("two_links_b.bin"))
+            .expect("hard link");
+        assert_eq!(fs.getattr(&cx, src.ino).expect("ga").nlink, 2);
+
+        let free_inodes_before = fs
+            .count_free_inodes_in_group(&cx, group)
+            .expect("free inodes before");
+        let free_blocks_before = fs
+            .count_free_blocks_in_group(&cx, group)
+            .expect("free blocks before");
+
+        // Remove the first name. nlink -> 1; nothing reclaimed.
+        fs.unlink(&cx, root, OsStr::new("two_links_a.bin"))
+            .expect("unlink one link");
+
+        assert!(
+            fs.lookup(&cx, root, OsStr::new("two_links_a.bin")).is_err(),
+            "removed name must be gone"
+        );
+        let surviving = fs
+            .lookup(&cx, root, OsStr::new("two_links_b.bin"))
+            .expect("surviving link still resolves");
+        assert_eq!(surviving.ino, src.ino);
+        assert_eq!(
+            fs.getattr(&cx, src.ino).expect("ga").nlink,
+            1,
+            "nlink decremented to 1"
+        );
+        let readback = fs
+            .read(&cx, surviving.ino, 0, 4096)
+            .expect("read via surviving link");
+        assert_eq!(readback, payload, "data preserved via surviving link");
+
+        let free_inodes_mid = fs
+            .count_free_inodes_in_group(&cx, group)
+            .expect("free inodes after one unlink (csum must stay valid)");
+        let free_blocks_mid = fs
+            .count_free_blocks_in_group(&cx, group)
+            .expect("free blocks after one unlink (csum must stay valid)");
+        assert_eq!(
+            free_inodes_mid, free_inodes_before,
+            "inode must NOT be reclaimed while a link remains"
+        );
+        assert_eq!(
+            free_blocks_mid, free_blocks_before,
+            "data block must NOT be reclaimed while a link remains"
+        );
+
+        // Remove the last name. Now inode + block are reclaimed.
+        fs.unlink(&cx, root, OsStr::new("two_links_b.bin"))
+            .expect("unlink last link");
+        let free_inodes_after = fs
+            .count_free_inodes_in_group(&cx, group)
+            .expect("free inodes after last unlink");
+        let free_blocks_after = fs
+            .count_free_blocks_in_group(&cx, group)
+            .expect("free blocks after last unlink");
+        assert_eq!(
+            free_inodes_after,
+            free_inodes_before + 1,
+            "last unlink reclaims the inode"
+        );
+        assert_eq!(
+            free_blocks_after,
+            free_blocks_before + 1,
+            "last unlink reclaims the data block"
+        );
+    }
+
+    #[test]
     fn write_link_directory_rejected_with_eperm() {
         let Some(fs) = open_writable_ext4() else {
             return;
