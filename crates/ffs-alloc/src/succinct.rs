@@ -345,20 +345,9 @@ impl SuccinctBitmap {
             return None;
         }
 
-        // Count zeros before `start` to determine which zero-bit index to seek.
-        let zeros_before = self.rank0(start);
-        let total_zeros = self.count_zeros();
-
-        // First try: find the `zeros_before`-th zero bit (0-indexed).
-        if zeros_before < total_zeros {
-            let pos = self.select0(zeros_before)?;
-            if pos >= start {
-                return Some(pos);
-            }
-        }
-
-        // Wrap around: find the 0th zero bit.
-        self.select0(0)
+        let start = start.min(self.len);
+        self.find_zero_in_range(start, self.len)
+            .or_else(|| self.find_zero_in_range(0, start))
     }
 
     /// Find `n` contiguous zero bits in the bitmap.
@@ -441,6 +430,35 @@ impl SuccinctBitmap {
             }
             remaining -= zeros_in_word;
             word_base += 64;
+        }
+
+        None
+    }
+
+    fn find_zero_in_range(&self, start: u32, end: u32) -> Option<u32> {
+        if start >= end {
+            return None;
+        }
+
+        let mut word_base = start - (start % 64);
+        while word_base < end {
+            let word_end = word_base.saturating_add(64).min(end);
+            let mut zero_mask = !self.read_word(word_base / 64);
+
+            let low_bits = start.saturating_sub(word_base);
+            if low_bits > 0 {
+                zero_mask &= u64::MAX << low_bits;
+            }
+
+            let bits_in_word = word_end - word_base;
+            if bits_in_word < 64 {
+                zero_mask &= (1_u64 << bits_in_word) - 1;
+            }
+
+            if zero_mask != 0 {
+                return Some(word_base + zero_mask.trailing_zeros());
+            }
+            word_base = word_base.saturating_add(64);
         }
 
         None
@@ -928,6 +946,13 @@ mod tests {
         bitmap.iter().map(|byte| !byte).collect()
     }
 
+    fn naive_find_free(sb: &SuccinctBitmap, start: u32) -> Option<u32> {
+        let start = start.min(sb.len());
+        (start..sb.len())
+            .chain(0..start)
+            .find(|&pos| !sb.get_bit(pos))
+    }
+
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(128))]
 
@@ -1034,6 +1059,15 @@ mod tests {
             } else {
                 prop_assert_eq!(sb.count_zeros(), 0, "find_free returned None but there are free bits");
             }
+        }
+
+        #[test]
+        fn proptest_find_free_matches_naive_wraparound(
+            (ref bitmap, len) in bitmap_strategy(),
+            start in 0_u32..8192,
+        ) {
+            let sb = SuccinctBitmap::build(bitmap, len);
+            prop_assert_eq!(sb.find_free(start), naive_find_free(&sb, start));
         }
 
         #[test]

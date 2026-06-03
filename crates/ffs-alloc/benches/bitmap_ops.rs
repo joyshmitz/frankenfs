@@ -111,6 +111,48 @@ fn bench_find_free(c: &mut Criterion) {
     group.finish();
 }
 
+fn succinct_find_free_rank_select(sb: &SuccinctBitmap, start: u32) -> Option<u32> {
+    if sb.count_zeros() == 0 {
+        return None;
+    }
+
+    let zeros_before = sb.rank0(start);
+    let total_zeros = sb.count_zeros();
+    if zeros_before < total_zeros {
+        let pos = sb.select0(zeros_before)?;
+        if pos >= start {
+            return Some(pos);
+        }
+    }
+
+    sb.select0(0)
+}
+
+fn bench_succinct_find_free_direct_vs_rank_select(c: &mut Criterion) {
+    let bm = make_bitmap();
+    let sb = SuccinctBitmap::build(&bm, 32768);
+    let start = 16000;
+    debug_assert_eq!(
+        succinct_find_free_rank_select(&sb, start),
+        sb.find_free(start),
+        "rank/select and direct-word find_free must agree"
+    );
+
+    let mut group = c.benchmark_group("succinct_find_free_ab");
+    group.bench_function("old_rank_select", |b| {
+        b.iter(|| {
+            black_box(succinct_find_free_rank_select(
+                black_box(&sb),
+                black_box(start),
+            ))
+        });
+    });
+    group.bench_function("direct_word_scan", |b| {
+        b.iter(|| black_box(sb.find_free(black_box(start))));
+    });
+    group.finish();
+}
+
 fn bench_find_contiguous(c: &mut Criterion) {
     let bm = make_bitmap();
 
@@ -457,6 +499,7 @@ criterion_group!(
     bench_count_free,
     bench_count_free_unroll_vs_chunks8,
     bench_find_free,
+    bench_succinct_find_free_direct_vs_rank_select,
     bench_find_contiguous,
     bench_largest_free_run,
     bench_rank,
