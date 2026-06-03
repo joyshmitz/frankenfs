@@ -39302,6 +39302,53 @@ mod tests {
     }
 
     #[test]
+    fn write_rmdir_reclaims_inode_and_block_keeps_csum_valid() {
+        // rmdir of an empty directory frees its inode and its single data block
+        // (the "." / ".." block) via delete_inode — the same MVCC-txn-op free
+        // path as unlink/rename. Regression for bd-vdi91 (no-tx read-your-writes
+        // fix): the group block-bitmap CRC32C must stay valid on a metadata_csum
+        // image and the inode + block must be reclaimed. Completes the
+        // delete_inode-trigger regression coverage (rename / unlink / rmdir).
+        // Runs on remote workers via the generated image (bd-cc6ua).
+        let Some((fs, _tmp)) = open_writable_ext4_mkfs(64) else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let group = GroupNumber(0);
+
+        fs.mkdir(&cx, root, OsStr::new("rmdir_reclaim"), 0o755, 0, 0)
+            .expect("mkdir");
+
+        let free_inodes_before = fs
+            .count_free_inodes_in_group(&cx, group)
+            .expect("free inodes before");
+        let free_blocks_before = fs
+            .count_free_blocks_in_group(&cx, group)
+            .expect("free blocks before");
+
+        fs.rmdir(&cx, root, OsStr::new("rmdir_reclaim"))
+            .expect("rmdir empty");
+
+        let free_inodes_after = fs
+            .count_free_inodes_in_group(&cx, group)
+            .expect("free inodes after (inode-bitmap csum must stay valid)");
+        let free_blocks_after = fs
+            .count_free_blocks_in_group(&cx, group)
+            .expect("free blocks after (block-bitmap csum must stay valid)");
+        assert_eq!(
+            free_inodes_after,
+            free_inodes_before + 1,
+            "rmdir must reclaim the directory inode"
+        );
+        assert_eq!(
+            free_blocks_after,
+            free_blocks_before + 1,
+            "rmdir must reclaim the directory data block"
+        );
+    }
+
+    #[test]
     fn write_rmdir_rejects_nul_name_without_mutating_source() {
         let Some(fs) = open_writable_ext4() else {
             return;
