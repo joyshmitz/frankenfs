@@ -11939,13 +11939,40 @@ impl OpenFs {
             )?;
 
             for mapping in &mappings {
-                if mapping.physical_start != 0 && !mapping.unwritten {
-                    for blk_offset in 0..u64::from(mapping.count) {
-                        block_dev.write_block(
-                            cx,
-                            BlockNumber(mapping.physical_start + blk_offset),
-                            &zero_block,
-                        )?;
+                // Holes (physical_start == 0) and unwritten extents already
+                // read back as zero for the whole block, so neither full nor
+                // partial coverage requires any write.
+                if mapping.physical_start == 0 || mapping.unwritten {
+                    continue;
+                }
+                for blk_offset in 0..u64::from(mapping.count) {
+                    let logical_block = u64::from(mapping.logical_start) + blk_offset;
+                    let block_byte_start = logical_block * block_size;
+                    // Intersect this block's byte span with the requested
+                    // [offset, end) range. map_logical_to_physical only returns
+                    // blocks inside the request, so the intersection is
+                    // non-empty.
+                    let zero_from = offset.max(block_byte_start);
+                    let zero_to = end.min(block_byte_start + block_size);
+                    let phys = BlockNumber(mapping.physical_start + blk_offset);
+                    if zero_from == block_byte_start && zero_to == block_byte_start + block_size {
+                        // Whole block falls inside the range.
+                        block_dev.write_block(cx, phys, &zero_block)?;
+                    } else {
+                        // Partial head/tail block: read-modify-write so the
+                        // bytes outside [offset, end) are preserved. ZERO_RANGE
+                        // is byte-granular (mirrors ext4_zero_range, which
+                        // zeroes only the in-range bytes of edge blocks);
+                        // rounding out to whole blocks here corrupts neighbors.
+                        let mut buf = block_dev.read_block(cx, phys)?.as_slice().to_vec();
+                        let from = usize::try_from(zero_from - block_byte_start).map_err(|_| {
+                            FfsError::Format("zero_range partial head offset overflow".into())
+                        })?;
+                        let to = usize::try_from(zero_to - block_byte_start).map_err(|_| {
+                            FfsError::Format("zero_range partial tail offset overflow".into())
+                        })?;
+                        buf[from..to].fill(0);
+                        block_dev.write_block(cx, phys, &buf)?;
                     }
                 }
             }
@@ -28692,8 +28719,7 @@ mod tests {
                 .expect("read updated inode generation");
             assert_eq!(current, requested);
 
-            fs.flush_mvcc_to_device(&cx)
-                .expect("flush mvcc to device");
+            fs.flush_mvcc_to_device(&cx).expect("flush mvcc to device");
         }
 
         let reopened = OpenFs::open_with_options(&cx, &tmp_path, &opts)
@@ -39319,6 +39345,99 @@ mod tests {
     }
 
     #[test]
+    fn write_fallocate_zero_range_unaligned_within_one_block_preserves_neighbors() {
+        // ZERO_RANGE permits byte-granular (unaligned) ranges. Zeroing a
+        // sub-block range must not clobber the bytes outside it in the same
+        // block (regression: the range was rounded out to whole blocks).
+        let Some((fs, _tmp)) = open_writable_ext4_mkfs(64) else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let attr = fs
+            .create(
+                &cx,
+                root,
+                OsStr::new("zero_range_unaligned1.bin"),
+                0o644,
+                0,
+                0,
+            )
+            .expect("create");
+        let ino = attr.ino;
+
+        let fill = vec![0x7A_u8; 4096];
+        fs.write(&cx, ino, 0, &fill).expect("fill");
+
+        // Zero [100, 200) — entirely inside block 0, both ends unaligned.
+        fs.fallocate(&cx, ino, 100, 100, libc::FALLOC_FL_ZERO_RANGE)
+            .expect("unaligned zero range");
+
+        let data = fs.read(&cx, ino, 0, 4096).expect("read");
+        assert!(
+            data[..100].iter().all(|&b| b == 0x7A),
+            "bytes before the zeroed range must be preserved"
+        );
+        assert!(
+            data[100..200].iter().all(|&b| b == 0),
+            "the unaligned range must be zeroed"
+        );
+        assert!(
+            data[200..].iter().all(|&b| b == 0x7A),
+            "bytes after the zeroed range must be preserved"
+        );
+    }
+
+    #[test]
+    fn write_fallocate_zero_range_unaligned_across_block_boundary_preserves_neighbors() {
+        // Spans the tail of block 0, all of block 1, and the head of block 2:
+        // interior block fully zeroed, both partial edge blocks zeroed only in
+        // range, neighbor bytes preserved.
+        let Some((fs, _tmp)) = open_writable_ext4_mkfs(64) else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let attr = fs
+            .create(
+                &cx,
+                root,
+                OsStr::new("zero_range_unaligned2.bin"),
+                0o644,
+                0,
+                0,
+            )
+            .expect("create");
+        let ino = attr.ino;
+
+        let fill = vec![0x7A_u8; 12288];
+        fs.write(&cx, ino, 0, &fill).expect("fill");
+
+        // [3996, 8292): from 100 bytes before the block0/1 boundary to 100
+        // bytes past the block1/2 boundary.
+        let start = 3996_u64;
+        let end = 8292_u64;
+        fs.fallocate(&cx, ino, start, end - start, libc::FALLOC_FL_ZERO_RANGE)
+            .expect("unaligned cross-block zero range");
+
+        let data = fs.read(&cx, ino, 0, 12288).expect("read");
+        let start_us = usize::try_from(start).unwrap();
+        let end_us = usize::try_from(end).unwrap();
+        assert!(
+            data[..start_us].iter().all(|&b| b == 0x7A),
+            "bytes before the zeroed range must be preserved"
+        );
+        assert!(
+            data[start_us..end_us].iter().all(|&b| b == 0),
+            "the entire unaligned range (both partial edges + interior) must be zeroed"
+        );
+        assert!(
+            data[end_us..].iter().all(|&b| b == 0x7A),
+            "bytes after the zeroed range must be preserved"
+        );
+    }
+
+    #[test]
     fn write_fallocate_zero_range_keep_size_does_not_extend_file() {
         let Some(fs) = open_writable_ext4() else {
             return;
@@ -41064,8 +41183,7 @@ mod tests {
             // Checkpoint the in-memory MVCC versions to the backing device.
             // The FS buffers writes in the MVCC store; durability requires an
             // explicit flush (Drop alone does not persist).
-            fs.flush_mvcc_to_device(&cx)
-                .expect("flush mvcc to device");
+            fs.flush_mvcc_to_device(&cx).expect("flush mvcc to device");
         }
 
         // ── Phase 2: Reopen and verify ──────────────────────────────
@@ -41151,8 +41269,7 @@ mod tests {
                 fs.write(&cx, attr.ino, 0, content.as_bytes())
                     .expect("write");
             }
-            fs.flush_mvcc_to_device(&cx)
-                .expect("flush mvcc to device");
+            fs.flush_mvcc_to_device(&cx).expect("flush mvcc to device");
         }
 
         // Phase 2: Modify some, delete some, create new
@@ -41197,8 +41314,7 @@ mod tests {
                 fs.write(&cx, attr.ino, 0, content.as_bytes())
                     .expect("write");
             }
-            fs.flush_mvcc_to_device(&cx)
-                .expect("flush mvcc to device");
+            fs.flush_mvcc_to_device(&cx).expect("flush mvcc to device");
         }
 
         // Phase 3: Verify
