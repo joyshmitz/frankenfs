@@ -1,0 +1,1 @@
+mixed/bwtree/8: 3.2144 s -> 1.3914 s = ~2.31x (cross-worker baseline; algorithmic: bounded range vs full-page materialize)

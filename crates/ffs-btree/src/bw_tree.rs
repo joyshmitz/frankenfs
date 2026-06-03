@@ -12,7 +12,7 @@
 
 use crossbeam_epoch as epoch;
 use ffs_error::{FfsError, Result};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Error as IoError, ErrorKind};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
@@ -386,12 +386,16 @@ impl MappingTable {
         start: BwKey,
         count: usize,
     ) -> Result<Vec<(BwKey, BwValue)>> {
-        let state = self.materialize_page(page_id)?;
-        Ok(state
-            .range(start..)
-            .take(count)
-            .map(|(&key, &value)| (key, value))
-            .collect())
+        let snapshot = self.get_page(page_id)?;
+        let (rows, chain_len) = range_scan_from_head(&snapshot.head, start, count)?;
+        debug!(
+            target: "ffs::bwtree",
+            event = "bw_lookup_chain_stats",
+            page_id = page_id.0,
+            chain_len,
+            epoch = snapshot.epoch
+        );
+        Ok(rows)
     }
 
     /// Consolidate a page's delta chain into a fresh base page.
@@ -693,6 +697,144 @@ fn materialize_from_head(head: &Arc<PageDelta>) -> Result<(BTreeMap<BwKey, BwVal
             }
         }
     }
+}
+
+fn range_scan_from_head(
+    head: &Arc<PageDelta>,
+    start: BwKey,
+    count: usize,
+) -> Result<(Vec<(BwKey, BwValue)>, usize)> {
+    let mut ops: Vec<MaterializeOp> = Vec::new();
+    let mut cursor = Arc::clone(head);
+    let mut chain_len = 0_usize;
+
+    loop {
+        chain_len = chain_len.saturating_add(1);
+        if chain_len > MAX_CHAIN_WALK {
+            return Err(FfsError::Corruption {
+                block: 0,
+                detail: format!(
+                    "bw-tree delta chain exceeded walk limit ({MAX_CHAIN_WALK}) without base page"
+                ),
+            });
+        }
+
+        match cursor.as_ref() {
+            PageDelta::Base { entries } => {
+                let rows = bounded_range_from_base(entries, &ops, start, count);
+                return Ok((rows, chain_len));
+            }
+            PageDelta::Insert { key, value, next } => {
+                ops.push(MaterializeOp::Insert {
+                    key: *key,
+                    value: *value,
+                });
+                cursor = Arc::clone(next);
+            }
+            PageDelta::Delete { key, next } => {
+                ops.push(MaterializeOp::Delete { key: *key });
+                cursor = Arc::clone(next);
+            }
+            PageDelta::Split {
+                separator, next, ..
+            } => {
+                ops.push(MaterializeOp::Split {
+                    separator: *separator,
+                });
+                cursor = Arc::clone(next);
+            }
+            PageDelta::Merge { next, .. } => {
+                cursor = Arc::clone(next);
+            }
+        }
+    }
+}
+
+fn bounded_range_from_base(
+    entries: &BTreeMap<BwKey, BwValue>,
+    ops: &[MaterializeOp],
+    start: BwKey,
+    count: usize,
+) -> Vec<(BwKey, BwValue)> {
+    if count == 0 {
+        return Vec::new();
+    }
+
+    let mut delta_values = BTreeMap::new();
+    let mut shadowed_keys = BTreeSet::new();
+    let mut base_upper_bound: Option<BwKey> = None;
+
+    for op in ops {
+        match *op {
+            MaterializeOp::Insert { key, value } => {
+                if key >= start
+                    && !shadowed_keys.contains(&key)
+                    && key_before_bound(key, base_upper_bound)
+                {
+                    delta_values.insert(key, value);
+                }
+                shadowed_keys.insert(key);
+            }
+            MaterializeOp::Delete { key } => {
+                shadowed_keys.insert(key);
+            }
+            MaterializeOp::Split { separator } => {
+                base_upper_bound =
+                    Some(base_upper_bound.map_or(separator, |bound| bound.min(separator)));
+            }
+        }
+    }
+
+    let mut rows = Vec::with_capacity(count);
+    let mut base_iter = entries.range(start..).peekable();
+    let mut delta_iter = delta_values.iter().peekable();
+
+    while rows.len() < count {
+        let next_base = base_iter
+            .peek()
+            .map(|&(&key, &value)| (key, value))
+            .filter(|&(key, _)| key_before_bound(key, base_upper_bound));
+        let next_delta = delta_iter.peek().map(|&(&key, &value)| (key, value));
+
+        match (next_base, next_delta) {
+            (Some((base_key, base_value)), Some((delta_key, delta_value))) => {
+                match base_key.cmp(&delta_key) {
+                    std::cmp::Ordering::Less => {
+                        base_iter.next();
+                        if !shadowed_keys.contains(&base_key) {
+                            rows.push((base_key, base_value));
+                        }
+                    }
+                    std::cmp::Ordering::Greater => {
+                        delta_iter.next();
+                        rows.push((delta_key, delta_value));
+                    }
+                    std::cmp::Ordering::Equal => {
+                        base_iter.next();
+                        delta_iter.next();
+                        rows.push((delta_key, delta_value));
+                    }
+                }
+            }
+            (Some((base_key, base_value)), None) => {
+                base_iter.next();
+                if !shadowed_keys.contains(&base_key) {
+                    rows.push((base_key, base_value));
+                }
+            }
+            (None, Some((delta_key, delta_value))) => {
+                delta_iter.next();
+                rows.push((delta_key, delta_value));
+            }
+            (None, None) => break,
+        }
+    }
+
+    rows
+}
+
+fn key_before_bound(key: BwKey, bound: Option<BwKey>) -> bool {
+    bound.is_none_or(|bound| key < bound)
 }
 
 fn lookup_from_head(head: &Arc<PageDelta>, key: BwKey) -> Result<(Option<BwValue>, usize)> {
@@ -1402,6 +1544,46 @@ mod tests {
                 (BwKey(5), BwValue(5)),
                 (BwKey(6), BwValue(6)),
             ]
+        );
+    }
+
+    #[test]
+    fn range_scan_matches_materialized_range_with_shadowing_deltas() {
+        let table = MappingTable::with_capacity(2);
+        let page = table.allocate_page().expect("alloc");
+        let sibling = table.allocate_page().expect("alloc sibling");
+
+        for i in 0..12_u64 {
+            table.insert(page, BwKey(i), BwValue(i)).expect("insert");
+        }
+        table
+            .consolidate_page(page, &default_config())
+            .expect("consolidate");
+
+        table.insert(page, BwKey(9), BwValue(90)).expect("insert");
+        table
+            .append_split_delta(page, BwKey(8), sibling)
+            .expect("split");
+        table
+            .insert(page, BwKey(8), BwValue(800))
+            .expect("insert after split");
+        table.delete(page, BwKey(3)).expect("delete");
+        table
+            .insert(page, BwKey(5), BwValue(500))
+            .expect("shadow base");
+
+        let materialized = table.materialize_page(page).expect("materialize");
+        let expected: Vec<_> = materialized
+            .range(BwKey(2)..)
+            .take(10)
+            .map(|(&key, &value)| (key, value))
+            .collect();
+
+        assert_eq!(
+            table
+                .range_scan(page, BwKey(2), 10)
+                .expect("range scan should succeed"),
+            expected
         );
     }
 
