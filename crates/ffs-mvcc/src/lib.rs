@@ -4666,6 +4666,79 @@ mod tests {
         }
     }
 
+    /// bd-bw90c exact-pattern: a 4096-byte indirect block, prior-committed with
+    /// slots 0..20 set, then a later txn RMWs slots 20..52 in the e2compr
+    /// cluster pattern (slot%4==0 -> data ptr (non-zero), %4 in {1,2} -> hole
+    /// (0), %4==3 -> sentinel), each a full-block overwrite staged with
+    /// DisjointBlocks. Every non-zero slot must survive readback.
+    #[test]
+    fn disjoint_proof_cluster_pattern_rmw_after_prior_commit_roundtrips() {
+        let mut store = MvccStore::new();
+        let block = BlockNumber(2101);
+        let put = |buf: &mut [u8], slot: usize, val: u32| {
+            buf[slot * 4..slot * 4 + 4].copy_from_slice(&val.to_le_bytes());
+        };
+        let get = |buf: &[u8], slot: usize| -> u32 {
+            u32::from_le_bytes([
+                buf[slot * 4],
+                buf[slot * 4 + 1],
+                buf[slot * 4 + 2],
+                buf[slot * 4 + 3],
+            ])
+        };
+
+        // Prior commit: slots 0..20 = data pointers.
+        let mut base = vec![0u8; 4096];
+        for slot in 0..20 {
+            put(&mut base, slot, 3000 + u32::try_from(slot).expect("fits"));
+        }
+        let mut t1 = store.begin();
+        t1.stage_write_with_proof(block, base, MergeProof::DisjointBlocks);
+        store.commit(t1).expect("t1");
+
+        // Later txn: RMW slots 20..52 in the cluster (data/hole/sentinel) shape.
+        let mut cur = store
+            .read_visible(block, store.current_snapshot())
+            .expect("base")
+            .into_owned();
+        let mut t2 = store.begin();
+        for slot in 20..52 {
+            let val = match slot % 4 {
+                0 => 2000 + u32::try_from(slot).expect("fits"), // data ptr (non-zero)
+                3 => 0xFFFF_FFFF,                               // sentinel
+                _ => 0,                                         // hole
+            };
+            put(&mut cur, slot, val);
+            t2.stage_write_with_proof(block, cur.clone(), MergeProof::DisjointBlocks);
+            cur = t2.staged_write(block).expect("staged").to_vec();
+        }
+        store.commit(t2).expect("t2");
+
+        // Force version-chain consolidation (the real path prunes once snapshots
+        // are released between request scopes and the watermark advances).
+        let wm = store.current_snapshot().high;
+        store.prune_versions_older_than(wm);
+
+        let got = store
+            .read_visible(block, store.current_snapshot())
+            .expect("visible")
+            .into_owned();
+        for slot in 0..20 {
+            assert_eq!(
+                get(&got, slot),
+                3000 + u32::try_from(slot).expect("fits"),
+                "prior slot {slot}"
+            );
+        }
+        for slot in (20..52).filter(|s| s % 4 == 0) {
+            assert_eq!(
+                get(&got, slot),
+                2000 + u32::try_from(slot).expect("fits"),
+                "data slot {slot} (a hole-flanked non-zero write) must survive"
+            );
+        }
+    }
+
     /// Commits v1..v5 to the same block, captures a snapshot after each.
     /// Each snapshot sees exactly the version committed at or before it.
     #[test]
