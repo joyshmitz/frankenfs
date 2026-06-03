@@ -625,6 +625,44 @@ mod tests {
     }
 
     #[test]
+    fn decode_duplicate_corrupt_indices_duplicate_recovered_output() {
+        let cx = Cx::for_testing();
+        let k = 8;
+        let block_size = 64;
+        let device = setup_device(k, block_size);
+        let uuid = test_uuid();
+        let group = GroupNumber(0);
+
+        let encoded = encode_group(&cx, &device, &uuid, group, BlockNumber(0), k, k)
+            .expect("encode should succeed");
+        let repair_data: Vec<(u32, Vec<u8>)> = encoded
+            .repair_symbols
+            .iter()
+            .map(|s| (s.esi, s.data.clone()))
+            .collect();
+
+        let original = make_deterministic_block(3, block_size);
+        let outcome = decode_group(
+            &cx,
+            &device,
+            &uuid,
+            group,
+            BlockNumber(0),
+            k,
+            &[3, 3],
+            &repair_data,
+        )
+        .expect("decode should succeed");
+
+        assert!(outcome.complete);
+        assert_eq!(outcome.recovered.len(), 2);
+        assert_eq!(outcome.recovered[0].block, BlockNumber(3));
+        assert_eq!(outcome.recovered[1].block, BlockNumber(3));
+        assert_eq!(outcome.recovered[0].data, original);
+        assert_eq!(outcome.recovered[1].data, outcome.recovered[0].data);
+    }
+
+    #[test]
     fn decode_recovers_multiple_corrupt_blocks() {
         let cx = Cx::for_testing();
         let k = 16;
