@@ -4562,6 +4562,52 @@ mod tests {
 
     /// Invariant: snapshot visibility across a chain of commits.
     ///
+    /// bd-bw90c isolation: a block committed by an earlier txn, then read +
+    /// RMW'd multiple times within a LATER txn (each a full-block overwrite
+    /// staged with MergeProof::DisjointBlocks — exactly what the e2compr
+    /// indirect-pointer writes do across sequential chunked writes). The final
+    /// committed bytes must read back verbatim; the corruption symptom is an
+    /// intermediate full-block write (here slot 2 = 2113) being dropped.
+    #[test]
+    fn disjoint_proof_repeated_full_overwrite_after_prior_commit_roundtrips() {
+        let mut store = MvccStore::new();
+        let block = BlockNumber(2101);
+
+        // Tx1 (chunk 1): commit a block with its first two u32 slots set.
+        let mut base = vec![0u8; 16];
+        base[0..4].copy_from_slice(&100u32.to_le_bytes());
+        base[4..8].copy_from_slice(&101u32.to_le_bytes());
+        let mut t1 = store.begin();
+        t1.stage_write_with_proof(block, base, MergeProof::DisjointBlocks);
+        store.commit(t1).expect("t1 commit");
+
+        // Tx2 (chunk 2): read the committed block, then RMW it twice in one txn.
+        let snap1 = store.current_snapshot();
+        let mut cur = store
+            .read_visible(block, snap1)
+            .expect("base visible")
+            .into_owned();
+        let mut t2 = store.begin();
+        cur[8..12].copy_from_slice(&2113u32.to_le_bytes()); // slot 2 (data ptr)
+        t2.stage_write_with_proof(block, cur, MergeProof::DisjointBlocks);
+        let mut cur2 = t2.staged_write(block).expect("staged").to_vec();
+        cur2[12..16].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes()); // slot 3 (sentinel)
+        t2.stage_write_with_proof(block, cur2, MergeProof::DisjointBlocks);
+        store.commit(t2).expect("t2 commit");
+
+        let snap2 = store.current_snapshot();
+        let got = store
+            .read_visible(block, snap2)
+            .expect("visible")
+            .into_owned();
+        let mut want = vec![0u8; 16];
+        want[0..4].copy_from_slice(&100u32.to_le_bytes());
+        want[4..8].copy_from_slice(&101u32.to_le_bytes());
+        want[8..12].copy_from_slice(&2113u32.to_le_bytes());
+        want[12..16].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+        assert_eq!(got, want, "all slots incl slot 2 (2113) must survive readback");
+    }
+
     /// Commits v1..v5 to the same block, captures a snapshot after each.
     /// Each snapshot sees exactly the version committed at or before it.
     #[test]
