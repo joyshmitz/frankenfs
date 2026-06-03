@@ -189,8 +189,7 @@ fn descend_search(
     }
 
     if depth == 0 {
-        let extents = parse_leaf_entries(data, &header)?;
-        search_leaf(&extents, target)
+        search_leaf_raw(data, &header, target)
     } else {
         let indexes = parse_index_entries(data, &header)?;
         let child = find_index_child(&indexes, target)?;
@@ -278,6 +277,93 @@ fn search_leaf(extents: &[Ext4Extent], target: u32) -> Result<SearchResult> {
     };
     let hole_len = next_start.saturating_sub(u64::from(target));
     Ok(SearchResult::Hole { hole_len })
+}
+
+fn search_leaf_raw(data: &[u8], header: &Ext4ExtentHeader, target: u32) -> Result<SearchResult> {
+    let count = usize::from(header.entries);
+    if count == 0 {
+        return Ok(SearchResult::Hole {
+            hole_len: 1_u64 << 32,
+        });
+    }
+
+    let mut previous_end = None;
+    let mut candidate = None;
+    let mut next_start = 1_u64 << 32;
+    let target_u64 = u64::from(target);
+
+    for i in 0..count {
+        let extent = read_leaf_entry(data, i)?;
+        let len = actual_len(extent.raw_len);
+        if len == 0 {
+            return Err(FfsError::Corruption {
+                block: 0,
+                detail: format!(
+                    "zero-length extent traversal at leaf entry {i} (logical_block {})",
+                    extent.logical_block
+                ),
+            });
+        }
+
+        let extent_start = u64::from(extent.logical_block);
+        if let Some(prev_end) = previous_end {
+            if extent_start < prev_end {
+                return Err(FfsError::Corruption {
+                    block: 0,
+                    detail: format!(
+                        "extent leaf entries not sorted or overlap at entry {i} \
+                         (logical_block {})",
+                        extent.logical_block
+                    ),
+                });
+            }
+        }
+        let extent_end = extent_start + u64::from(len);
+        previous_end = Some(extent_end);
+
+        if extent.logical_block <= target {
+            candidate = Some((extent, len));
+        } else if next_start == (1_u64 << 32) {
+            next_start = extent_start;
+        }
+    }
+
+    if let Some((extent, len)) = candidate {
+        let end = u64::from(extent.logical_block) + u64::from(len);
+        if target_u64 < end {
+            return Ok(SearchResult::Found {
+                extent,
+                offset_in_extent: target - extent.logical_block,
+            });
+        }
+    }
+
+    let hole_len = next_start.saturating_sub(target_u64);
+    Ok(SearchResult::Hole { hole_len })
+}
+
+fn read_leaf_entry(data: &[u8], index: usize) -> Result<Ext4Extent> {
+    let off = HEADER_SIZE + index * ENTRY_SIZE;
+    if off + ENTRY_SIZE > data.len() {
+        return Err(FfsError::Corruption {
+            block: 0,
+            detail: "leaf entry out of bounds".into(),
+        });
+    }
+
+    let logical_block =
+        u32::from_le_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]]);
+    let raw_len = u16::from_le_bytes([data[off + 4], data[off + 5]]);
+    let start_hi = u16::from_le_bytes([data[off + 6], data[off + 7]]);
+    let start_lo =
+        u32::from_le_bytes([data[off + 8], data[off + 9], data[off + 10], data[off + 11]]);
+    let physical_start = u64::from(start_lo) | (u64::from(start_hi) << 32);
+
+    Ok(Ext4Extent {
+        logical_block,
+        raw_len,
+        physical_start,
+    })
 }
 
 /// Find the child block to descend into for the given target.
@@ -1972,6 +2058,112 @@ mod tests {
                 search_parsed_root(&cx, &dev, &header, &tree, target).unwrap()
             );
         }
+    }
+
+    #[test]
+    fn raw_child_leaf_search_matches_parsed_leaf_window() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let mut root = make_root();
+        let mut alloc = SeqAllocator::new(100);
+
+        for extent in [
+            Ext4Extent {
+                logical_block: 0,
+                raw_len: 2,
+                physical_start: 1000,
+            },
+            Ext4Extent {
+                logical_block: 5,
+                raw_len: 2,
+                physical_start: 2000,
+            },
+            Ext4Extent {
+                logical_block: 10,
+                raw_len: 3,
+                physical_start: 3000,
+            },
+            Ext4Extent {
+                logical_block: 20,
+                raw_len: 4,
+                physical_start: 4000,
+            },
+            Ext4Extent {
+                logical_block: 40,
+                raw_len: 5,
+                physical_start: 5000,
+            },
+            Ext4Extent {
+                logical_block: 80,
+                raw_len: 6,
+                physical_start: 6000,
+            },
+        ] {
+            insert(&cx, &dev, &mut root, extent, &mut alloc).unwrap();
+        }
+
+        let (header, _) = parse_header(&root).unwrap();
+        assert_eq!(header.depth, 1, "test tree must exercise child leaves");
+
+        for target in [0, 1, 2, 5, 7, 10, 12, 19, 20, 39, 40, 85, 86, u32::MAX] {
+            assert_eq!(
+                search(&cx, &dev, &root, target).unwrap(),
+                search_with_leaf_window(&cx, &dev, &root, target)
+                    .unwrap()
+                    .result
+            );
+        }
+    }
+
+    #[test]
+    fn raw_child_leaf_search_rejects_later_corruption_before_returning() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let mut root = make_root();
+        let mut alloc = SeqAllocator::new(100);
+
+        for logical_block in [0, 5, 10, 20, 40, 80] {
+            insert(
+                &cx,
+                &dev,
+                &mut root,
+                Ext4Extent {
+                    logical_block,
+                    raw_len: 2,
+                    physical_start: 1000 + u64::from(logical_block),
+                },
+                &mut alloc,
+            )
+            .unwrap();
+        }
+
+        let (root_header, _) = parse_header(&root).unwrap();
+        assert_eq!(root_header.depth, 1, "test tree must exercise child leaves");
+        let indexes = parse_index_entries(&root, &root_header).unwrap();
+        let first_child = indexes[0].leaf_block;
+        let mut child = dev
+            .read_block(&cx, BlockNumber(first_child))
+            .unwrap()
+            .as_slice()
+            .to_vec();
+        let (child_header, _) = parse_header(&child).unwrap();
+        assert!(
+            child_header.entries > 1,
+            "test child must have a later entry to corrupt"
+        );
+
+        let second_entry_len = HEADER_SIZE + ENTRY_SIZE + 4;
+        child[second_entry_len..second_entry_len + 2].copy_from_slice(&0_u16.to_le_bytes());
+        dev.write_block(&cx, BlockNumber(first_child), &child)
+            .unwrap();
+
+        let err = search(&cx, &dev, &root, 0)
+            .expect_err("raw search must reject corruption after the matching extent");
+        assert_corruption_contains(&err, "zero-length extent traversal at leaf entry 1");
+
+        let window_err = search_with_leaf_window(&cx, &dev, &root, 0)
+            .expect_err("parsed window path must reject the same corruption");
+        assert_corruption_contains(&window_err, "zero-length extent traversal at leaf entry 1");
     }
 
     #[test]

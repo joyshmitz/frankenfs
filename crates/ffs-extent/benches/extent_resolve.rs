@@ -12,7 +12,7 @@ use criterion::{Criterion, criterion_group, criterion_main};
 use ffs_block::{BlockBuf, BlockDevice};
 use ffs_btree::SearchResult;
 use ffs_error::Result as FfsResult;
-use ffs_ondisk::ExtentTree;
+use ffs_ondisk::{Ext4Extent, ExtentTree};
 use ffs_types::BlockNumber;
 use parking_lot::Mutex;
 use std::hint::black_box;
@@ -376,6 +376,108 @@ fn mapping_from_search_result(
     }
 }
 
+fn map_single_old_leaf_vec_parse(
+    cx: &Cx,
+    dev: &dyn BlockDevice,
+    root: &[u8; 60],
+    logical_start: u32,
+) -> FfsResult<Vec<ffs_extent::ExtentMapping>> {
+    let (root_header, root_tree) =
+        ffs_ondisk::parse_extent_tree(root).expect("valid root extent tree");
+    assert_eq!(root_header.depth, 1, "depth-1 benchmark root");
+    let ExtentTree::Index(indexes) = root_tree else {
+        panic!("depth-1 root must contain index entries");
+    };
+    let pos = indexes.partition_point(|idx| idx.logical_block <= logical_start);
+    let child_pos = if pos > 0 { pos - 1 } else { 0 };
+    let child_block = indexes[child_pos].leaf_block;
+
+    let block = dev.read_block(cx, BlockNumber(child_block))?;
+    let (leaf_header, leaf_tree) =
+        ffs_ondisk::parse_extent_tree(block.as_slice()).expect("valid child leaf");
+    assert_eq!(leaf_header.depth, 0, "depth-1 child must be a leaf");
+    let ExtentTree::Leaf(extents) = leaf_tree else {
+        panic!("depth-0 child must contain leaf extents");
+    };
+    let result = old_vec_search_leaf(&extents, logical_start);
+    Ok(vec![mapping_from_search_result(logical_start, &result)])
+}
+
+fn old_vec_search_leaf(extents: &[Ext4Extent], target: u32) -> SearchResult {
+    if extents.is_empty() {
+        return SearchResult::Hole {
+            hole_len: 1_u64 << 32,
+        };
+    }
+
+    for ext in extents {
+        assert_ne!(
+            ext.actual_len(),
+            0,
+            "valid leaf extents have nonzero length"
+        );
+    }
+
+    let pos = extents.partition_point(|extent| extent.logical_block <= target);
+    if pos > 0 {
+        let extent = extents[pos - 1];
+        let end = u64::from(extent.logical_block) + u64::from(extent.actual_len());
+        if u64::from(target) < end {
+            return SearchResult::Found {
+                extent,
+                offset_in_extent: target - extent.logical_block,
+            };
+        }
+    }
+
+    let next_start = if pos < extents.len() {
+        u64::from(extents[pos].logical_block)
+    } else {
+        1_u64 << 32
+    };
+    SearchResult::Hole {
+        hole_len: next_start.saturating_sub(u64::from(target)),
+    }
+}
+
+fn bench_extent_single_block_leaf_search_ab(c: &mut Criterion) {
+    let cx = Cx::for_testing();
+    let (dev, root) = build_depth1_tree();
+
+    assert_eq!(
+        map_single_old_leaf_vec_parse(&cx, &dev, &root, 700).expect("old resolve"),
+        ffs_extent::map_logical_to_physical(&cx, &dev, &root, 700, 1).expect("new resolve")
+    );
+
+    let mut group = c.benchmark_group("extent_single_block_leaf_search_ab");
+    group.bench_function("old_leaf_vec_parse", |b| {
+        b.iter(|| {
+            let result = map_single_old_leaf_vec_parse(
+                black_box(&cx),
+                black_box(&dev),
+                black_box(&root),
+                black_box(700),
+            )
+            .expect("resolve");
+            black_box(result);
+        });
+    });
+    group.bench_function("raw_leaf_search", |b| {
+        b.iter(|| {
+            let result = ffs_extent::map_logical_to_physical(
+                black_box(&cx),
+                black_box(&dev),
+                black_box(&root),
+                black_box(700),
+                black_box(1),
+            )
+            .expect("resolve");
+            black_box(result);
+        });
+    });
+    group.finish();
+}
+
 fn bench_extent_single_block_parse_root_ab(c: &mut Criterion) {
     let cx = Cx::for_testing();
     let (dev, root) = build_depth1_tree();
@@ -629,6 +731,7 @@ criterion_group!(
     bench_extent_resolve_cached_repeated,
     bench_extent_sequential_uncached,
     bench_extent_single_block_parse_root_ab,
+    bench_extent_single_block_leaf_search_ab,
     bench_extent_sequential_cached,
     bench_extent_sequential_cached_cold_leaf_window,
     bench_extent_cache_insert_cold,
