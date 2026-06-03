@@ -10352,7 +10352,12 @@ impl OpenFs {
             block_size: self.block_size(),
         };
         let snapshot = self.mvcc_store.read().current_snapshot();
-        MvccBlockDevice::new(base, Arc::clone(&self.mvcc_store), snapshot)
+        // Read-your-writes: this no-tx adapter's own write_block commits advance
+        // the store, so reads must resolve at the current snapshot to observe
+        // them. Without this, a write followed by a read of the same block via
+        // one adapter instance returns stale data (bd-vdi91: failed-mkdir /
+        // rename-over-existing left a stale block-bitmap csum).
+        MvccBlockDevice::new(base, Arc::clone(&self.mvcc_store), snapshot).with_read_your_writes()
     }
 
     /// Get a direct block adapter over the underlying byte device.
@@ -34326,18 +34331,15 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "bd-vdi91: rename-over-existing leaves block-bitmap CRC32C stale on \
-                metadata_csum images (count_free_blocks_in_group then errors). Runnable \
-                repro via `cargo test -- --ignored`; un-ignore once bd-vdi91 is fixed."]
     fn write_rename_over_existing_file_reclaims_target_inode_and_blocks() {
-        // The replaced target's inode (nlink -> 0) and its data blocks must be
-        // freed by rename — not leaked. The existing replaces_target test only
-        // checks the result name/data, not reclamation. EXPOSES bd-vdi91: on a
-        // metadata_csum image rename-over-existing leaves the block-bitmap csum
-        // stale (same root cause as the failed-mkdir rollback — a free during an
-        // MVCC-txn op reads stale GDT/bitmap and re-stamps a stale csum), so the
-        // count_free_blocks_in_group check below currently fails. Runs on remote
-        // workers via the generated image (open_writable_ext4 skips — bd-cc6ua).
+        // Regression for bd-vdi91: the replaced target's inode (nlink -> 0) and
+        // its data blocks must be freed by rename — not leaked — and the group
+        // block-bitmap CRC32C must stay valid on a metadata_csum image. Before
+        // the read-your-writes fix to the no-tx MvccBlockDevice adapter, the
+        // free that runs inside rename's MVCC-txn op read a stale GDT/bitmap and
+        // re-stamped a stale block_bitmap_csum, so count_free_blocks_in_group
+        // here errored. Runs on remote workers via the generated image
+        // (open_writable_ext4 skips — bd-cc6ua).
         let Some((fs, _tmp)) = open_writable_ext4_mkfs(64) else {
             return;
         };

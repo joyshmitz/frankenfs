@@ -3649,6 +3649,16 @@ pub struct MvccBlockDevice<D: BlockDevice> {
     base: D,
     store: Arc<RwLock<MvccStore>>,
     ownership: SnapshotOwnership,
+    /// When true, reads resolve at the store's *current* committed snapshot
+    /// rather than the construction-time snapshot. This gives read-your-writes
+    /// to a no-transaction adapter whose own `write_block` commits advance the
+    /// store (each `write_block` begins+commits a single-block txn at a higher
+    /// seq). Without it, a write followed by a read of the same block through
+    /// one adapter instance returns stale data, because the read stays pinned
+    /// to the older construction-time snapshot — the bug behind bd-vdi91
+    /// (failed-mkdir / rename-over-existing leaving a stale block-bitmap csum).
+    /// Fixed-snapshot readers (historical/isolation views) leave this false.
+    read_your_writes: bool,
 }
 
 impl<D: BlockDevice> MvccBlockDevice<D> {
@@ -3663,7 +3673,18 @@ impl<D: BlockDevice> MvccBlockDevice<D> {
             base,
             store,
             ownership: SnapshotOwnership::Inline { snapshot },
+            read_your_writes: false,
         }
+    }
+
+    /// Resolve reads at the store's current committed snapshot instead of the
+    /// construction-time snapshot, giving a no-transaction adapter
+    /// read-your-writes across its own `write_block` commits. See the
+    /// `read_your_writes` field docs (bd-vdi91).
+    #[must_use]
+    pub fn with_read_your_writes(mut self) -> Self {
+        self.read_your_writes = true;
+        self
     }
 
     /// Create a new MVCC block device using a [`SnapshotRegistry`] for
@@ -3682,15 +3703,26 @@ impl<D: BlockDevice> MvccBlockDevice<D> {
             base,
             store,
             ownership: SnapshotOwnership::Handle { handle },
+            read_your_writes: false,
         }
     }
 
-    /// The snapshot this device reads at.
+    /// The construction-time snapshot this device was created at.
     #[must_use]
     pub fn snapshot(&self) -> Snapshot {
         match &self.ownership {
             SnapshotOwnership::Inline { snapshot } => *snapshot,
             SnapshotOwnership::Handle { handle } => handle.snapshot(),
+        }
+    }
+
+    /// The snapshot reads actually resolve at: the store's current committed
+    /// snapshot when `read_your_writes` is set, else the construction-time one.
+    fn read_snapshot(&self) -> Snapshot {
+        if self.read_your_writes {
+            self.store.read().current_snapshot()
+        } else {
+            self.snapshot()
         }
     }
 
@@ -3726,7 +3758,7 @@ impl<D: BlockDevice> Drop for MvccBlockDevice<D> {
 
 impl<D: BlockDevice> BlockDevice for MvccBlockDevice<D> {
     fn read_block(&self, cx: &Cx, block: BlockNumber) -> ffs_error::Result<BlockBuf> {
-        let snap = self.snapshot();
+        let snap = self.read_snapshot();
         // Check version store first (shared lock, no I/O).
         {
             let guard = self.store.read();
@@ -3758,7 +3790,7 @@ impl<D: BlockDevice> BlockDevice for MvccBlockDevice<D> {
             .0
             .checked_add(count)
             .ok_or_else(|| FfsError::Format("block range overflow".to_owned()))?;
-        let snap = self.snapshot();
+        let snap = self.read_snapshot();
 
         {
             let guard = self.store.read();
