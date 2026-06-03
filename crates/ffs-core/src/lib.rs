@@ -12840,6 +12840,11 @@ impl OpenFs {
                 Ext4FileType::Dir,
                 reserved_tail,
             )?;
+            // This block belongs to the moved (child) directory, so its CRC32C
+            // tail is keyed on the child inode's number + generation.
+            let child_ino_u32 = u32::try_from(child_ino.0)
+                .map_err(|_| FfsError::Format("inode number exceeds ext4 32-bit limit".into()))?;
+            self.stamp_ext4_dir_block(&mut data, child_ino_u32, child_inode.generation);
             Some((dot_dot_block, data))
         } else {
             None
@@ -12878,6 +12883,14 @@ impl OpenFs {
                 for block in Self::extent_phys_blocks(ext) {
                     let mut data = self.read_block_vec(cx, block)?;
                     if ffs_dir::remove_entry(&mut data, new_name, reserved_tail)? {
+                        let np_ino_u32 = u32::try_from(new_parent.0).map_err(|_| {
+                            FfsError::Format("inode number exceeds ext4 32-bit limit".into())
+                        })?;
+                        self.stamp_ext4_dir_block(
+                            &mut data,
+                            np_ino_u32,
+                            new_parent_inode.generation,
+                        );
                         block_dev.write_block(cx, block, &data)?;
                         break 'rm_existing;
                     }
@@ -12944,6 +12957,10 @@ impl OpenFs {
             for block in Self::extent_phys_blocks(ext) {
                 let mut data = self.read_block_vec(cx, block)?;
                 if ffs_dir::remove_entry(&mut data, name, reserved_tail)? {
+                    let src_ino_u32 = u32::try_from(parent.0).map_err(|_| {
+                        FfsError::Format("inode number exceeds ext4 32-bit limit".into())
+                    })?;
+                    self.stamp_ext4_dir_block(&mut data, src_ino_u32, parent_inode.generation);
                     block_dev.write_block(cx, block, &data)?;
                     break 'rm_src;
                 }
@@ -33559,6 +33576,54 @@ mod tests {
             .expect("read root dir block");
         ffs_ondisk::verify_dir_block_checksum(&block2, seed, 2, root_inode2.generation)
             .expect("root dir block checksum must be valid after an unlink");
+    }
+
+    #[test]
+    fn rename_keeps_dir_block_checksums_valid_bd_x4icj() {
+        // Cross-parent directory rename must keep the source parent, target
+        // parent, and moved directory's ('..'-updated) dir-block checksums valid
+        // on a metadata_csum filesystem (bd-x4icj rename path).
+        let Some((fs, _tmp)) = open_writable_ext4_mkfs(8) else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let (has_csum, seed) = {
+            let sb = fs.ext4_superblock().expect("sb");
+            (sb.has_metadata_csum(), sb.csum_seed())
+        };
+        assert!(has_csum, "generated image expected to have metadata_csum");
+
+        let a = fs
+            .mkdir(&cx, root, OsStr::new("a"), 0o755, 0, 0)
+            .expect("mkdir a");
+        let b = fs
+            .mkdir(&cx, root, OsStr::new("b"), 0o755, 0, 0)
+            .expect("mkdir b");
+        let sub = fs
+            .mkdir(&cx, a.ino, OsStr::new("sub"), 0o755, 0, 0)
+            .expect("mkdir a/sub");
+
+        fs.rename(&cx, a.ino, OsStr::new("sub"), b.ino, OsStr::new("sub"))
+            .expect("cross-parent rename of a directory");
+
+        let check = |ino: InodeNumber| {
+            let inode = fs.read_inode(&cx, ino).expect("inode");
+            let extents = fs.collect_extents(&cx, &inode).expect("extents");
+            let phys = extents
+                .iter()
+                .find(|e| e.logical_block == 0)
+                .expect("logical block 0")
+                .physical_start;
+            let block = fs
+                .read_block_vec(&cx, BlockNumber(phys))
+                .expect("read dir block");
+            let ino_u32 = u32::try_from(ino.0).unwrap();
+            ffs_ondisk::verify_dir_block_checksum(&block, seed, ino_u32, inode.generation)
+        };
+        check(a.ino).expect("source parent dir block checksum valid after rename");
+        check(b.ino).expect("target parent dir block checksum valid after rename");
+        check(sub.ino).expect("moved dir '..' block checksum valid after rename");
     }
 
     fn open_writable_ext4_mkfs(size_mb: u64) -> Option<(OpenFs, tempfile::TempDir)> {
