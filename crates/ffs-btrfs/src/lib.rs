@@ -1372,7 +1372,6 @@ pub fn parse_dir_items(data: &[u8]) -> Result<Vec<BtrfsDirItem>, ParseError> {
         let child_key_type = data[cur + 8];
         let child_key_offset = read_u64(data, cur + 9, "dir_item.location.offset")?;
         // transid at +17..+25 (currently unused in VFS path)
-        let _transid = read_u64(data, cur + 17, "dir_item.transid")?;
         let data_len = usize::from(read_u16(data, cur + 25, "dir_item.data_len")?);
         let name_len = usize::from(read_u16(data, cur + 27, "dir_item.name_len")?);
         let file_type = data[cur + 29];
