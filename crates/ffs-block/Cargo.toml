@@ -7,7 +7,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [features]
-default = []
+default = ["s3fifo"]
 s3fifo = []
 
 [dependencies]
