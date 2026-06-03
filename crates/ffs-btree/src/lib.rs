@@ -70,6 +70,15 @@ pub enum SearchResult {
     },
 }
 
+/// Result of searching plus the parsed leaf entries from the searched leaf.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchLeafWindow {
+    /// Exact search result for the requested logical block.
+    pub result: SearchResult,
+    /// Extents parsed from the leaf node that answered the search.
+    pub extents: Vec<Ext4Extent>,
+}
+
 /// Search the extent tree rooted in `root_bytes` (the 60-byte `i_block` area)
 /// for the given `target` logical block.
 ///
@@ -94,6 +103,32 @@ pub fn search(
     let child_block = find_index_child(&indexes, target)?;
 
     descend_search(cx, dev, child_block, header.depth - 1, target)
+}
+
+/// Search and return the parsed leaf entries from the leaf that answered it.
+///
+/// This is intended for callers that can use the already-parsed neighboring
+/// extents, such as extent caches. Plain [`search`] remains allocation-free
+/// with respect to the returned leaf window.
+pub fn search_with_leaf_window(
+    cx: &Cx,
+    dev: &dyn BlockDevice,
+    root_bytes: &[u8; 60],
+    target: u32,
+) -> Result<SearchLeafWindow> {
+    let (header, _) = parse_header(root_bytes)?;
+    validate_header(&header, ROOT_MAX_ENTRIES)?;
+
+    if header.depth == 0 {
+        let extents = parse_leaf_entries(root_bytes, &header)?;
+        let result = search_leaf(&extents, target)?;
+        return Ok(SearchLeafWindow { result, extents });
+    }
+
+    let indexes = parse_index_entries(root_bytes, &header)?;
+    let child_block = find_index_child(&indexes, target)?;
+
+    descend_search_with_leaf_window(cx, dev, child_block, header.depth - 1, target)
 }
 
 /// Descend from an internal node at the given depth to find the target.
@@ -129,6 +164,42 @@ fn descend_search(
         let indexes = parse_index_entries(data, &header)?;
         let child = find_index_child(&indexes, target)?;
         descend_search(cx, dev, child, depth - 1, target)
+    }
+}
+
+fn descend_search_with_leaf_window(
+    cx: &Cx,
+    dev: &dyn BlockDevice,
+    block: u64,
+    depth: u16,
+    target: u32,
+) -> Result<SearchLeafWindow> {
+    cx_checkpoint(cx)?;
+
+    let buf = dev.read_block(cx, BlockNumber(block))?;
+    let data = buf.as_slice();
+    let max_entries = max_entries_external(dev.block_size());
+    let (header, _) = parse_header(data)?;
+    validate_header(&header, max_entries)?;
+
+    if header.depth != depth {
+        return Err(FfsError::Corruption {
+            block,
+            detail: format!(
+                "extent tree depth mismatch: expected {depth}, got {}",
+                header.depth
+            ),
+        });
+    }
+
+    if depth == 0 {
+        let extents = parse_leaf_entries(data, &header)?;
+        let result = search_leaf(&extents, target)?;
+        Ok(SearchLeafWindow { result, extents })
+    } else {
+        let indexes = parse_index_entries(data, &header)?;
+        let child = find_index_child(&indexes, target)?;
+        descend_search_with_leaf_window(cx, dev, child, depth - 1, target)
     }
 }
 

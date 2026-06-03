@@ -1474,6 +1474,10 @@ pub fn cached_map_logical_to_physical(
         }
     }
 
+    if count == 1 {
+        return cached_single_block_miss(cx, dev, root_bytes, logical_start, cache, ns);
+    }
+
     // Full tree walk (miss path).
     let mappings = map_logical_to_physical(cx, dev, root_bytes, logical_start, count)?;
 
@@ -1483,6 +1487,106 @@ pub fn cached_map_logical_to_physical(
     }
 
     Ok(mappings)
+}
+
+fn cached_single_block_miss(
+    cx: &Cx,
+    dev: &dyn BlockDevice,
+    root_bytes: &[u8; 60],
+    logical_start: u32,
+    cache: &ExtentCache,
+    ns: u64,
+) -> Result<Vec<ExtentMapping>> {
+    validate_root_header("map_logical_to_physical", root_bytes)?;
+    let _end = checked_logical_range_end("map_logical_to_physical", logical_start, 1)?;
+
+    cx_checkpoint(cx)?;
+    let window = ffs_btree::search_with_leaf_window(cx, dev, root_bytes, logical_start)?;
+    let mapping = single_mapping_from_search_result(
+        "map_logical_to_physical",
+        logical_start,
+        &window.result,
+    )?;
+
+    cache_valid_leaf_extents(cache, ns, &window.extents);
+    if let SearchResult::Hole { hole_len } = window.result {
+        cache_hole_interval(cache, ns, logical_start, hole_len);
+    }
+
+    Ok(vec![mapping])
+}
+
+fn single_mapping_from_search_result(
+    op: &str,
+    logical_start: u32,
+    result: &SearchResult,
+) -> Result<ExtentMapping> {
+    match result {
+        SearchResult::Found {
+            extent,
+            offset_in_extent,
+        } => {
+            let actual_len = u32::from(extent.actual_len());
+            validate_physical_span(op, extent.physical_start, actual_len)?;
+            Ok(ExtentMapping {
+                logical_start,
+                physical_start: checked_physical_add(
+                    op,
+                    extent.physical_start,
+                    u64::from(*offset_in_extent),
+                )?,
+                count: 1,
+                unwritten: extent.is_unwritten(),
+            })
+        }
+        SearchResult::Hole { .. } => Ok(ExtentMapping {
+            logical_start,
+            physical_start: 0,
+            count: 1,
+            unwritten: false,
+        }),
+    }
+}
+
+fn cache_valid_leaf_extents(cache: &ExtentCache, ns: u64, extents: &[Ext4Extent]) {
+    for extent in extents {
+        let count = u32::from(extent.actual_len());
+        if count == 0
+            || validate_physical_span("map_logical_to_physical", extent.physical_start, count)
+                .is_err()
+        {
+            continue;
+        }
+        cache.insert(
+            ns,
+            ExtentMapping {
+                logical_start: extent.logical_block,
+                physical_start: extent.physical_start,
+                count,
+                unwritten: extent.is_unwritten(),
+            },
+        );
+    }
+}
+
+fn cache_hole_interval(cache: &ExtentCache, ns: u64, logical_start: u32, hole_len: u64) {
+    let remaining_space = LOGICAL_BLOCK_SPACE.saturating_sub(u64::from(logical_start));
+    let count = hole_len.min(remaining_space).min(u64::from(u32::MAX));
+    let Ok(count) = u32::try_from(count) else {
+        return;
+    };
+    if count == 0 {
+        return;
+    }
+    cache.insert(
+        ns,
+        ExtentMapping {
+            logical_start,
+            physical_start: 0,
+            count,
+            unwritten: false,
+        },
+    );
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────
@@ -5580,6 +5684,55 @@ ExtentMapping { logical_start: 5, physical_start: 134, count: 2, unwritten: true
         let result2 = cached_map_logical_to_physical(&cx, &dev, &root, 5, 1, &cache, 0).unwrap();
         assert_eq!(result2.len(), 1);
         assert_eq!(cache.stats().hits, 1);
+    }
+
+    #[test]
+    fn cached_single_block_miss_populates_searched_leaf_window() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let geo = make_geometry();
+        let mut groups = make_groups(&geo);
+        let pctx = mock_pctx();
+        let mut root = empty_root();
+
+        for logical in 0..100_u32 {
+            allocate_extent(
+                &cx,
+                &dev,
+                &mut root,
+                &geo,
+                &mut groups,
+                logical,
+                1,
+                &AllocHint::default(),
+                &pctx,
+            )
+            .unwrap();
+        }
+
+        let cache = ExtentCache::new();
+        let expected_first = map_logical_to_physical(&cx, &dev, &root, 10, 1).unwrap();
+        let expected_second = map_logical_to_physical(&cx, &dev, &root, 11, 1).unwrap();
+
+        dev.clear_read_counts();
+        let first = cached_map_logical_to_physical(&cx, &dev, &root, 10, 1, &cache, 0).unwrap();
+        assert_eq!(first, expected_first);
+        assert_eq!(first[0].count, 1);
+        assert_eq!(dev.total_reads(), 1);
+        assert!(
+            cache.stats().entries > 1,
+            "a single-block miss should cache neighboring leaf extents"
+        );
+
+        dev.clear_read_counts();
+        let second = cached_map_logical_to_physical(&cx, &dev, &root, 11, 1, &cache, 0).unwrap();
+        assert_eq!(second, expected_second);
+        assert_eq!(second[0].count, 1);
+        assert_eq!(
+            dev.total_reads(),
+            0,
+            "adjacent block should be served from the searched leaf window"
+        );
     }
 
     #[test]

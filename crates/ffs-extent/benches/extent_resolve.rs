@@ -352,6 +352,85 @@ fn bench_extent_sequential_cached(c: &mut Criterion) {
     });
 }
 
+fn cached_map_logical_to_physical_one_block_old(
+    cx: &Cx,
+    dev: &dyn BlockDevice,
+    root: &[u8; 60],
+    logical_start: u32,
+    cache: &ffs_extent::ExtentCache,
+    ns: u64,
+) -> FfsResult<Vec<ffs_extent::ExtentMapping>> {
+    if let Some(hit) = cache.lookup(ns, logical_start) {
+        return Ok(vec![ffs_extent::ExtentMapping {
+            logical_start,
+            physical_start: hit.physical_start,
+            count: 1,
+            unwritten: hit.unwritten,
+        }]);
+    }
+
+    let mappings = ffs_extent::map_logical_to_physical(cx, dev, root, logical_start, 1)?;
+    for mapping in &mappings {
+        cache.insert(ns, *mapping);
+    }
+    Ok(mappings)
+}
+
+fn bench_extent_sequential_cached_cold_leaf_window(c: &mut Criterion) {
+    let cx = Cx::for_testing();
+    let (dev, root) = build_depth1_tree();
+
+    for blk in 0..100_u32 {
+        let old_cache = ffs_extent::ExtentCache::new();
+        let new_cache = ffs_extent::ExtentCache::new();
+        let old =
+            cached_map_logical_to_physical_one_block_old(&cx, &dev, &root, blk, &old_cache, 0)
+                .expect("old resolve");
+        let new =
+            ffs_extent::cached_map_logical_to_physical(&cx, &dev, &root, blk, 1, &new_cache, 0)
+                .expect("new resolve");
+        debug_assert_eq!(old, new, "old and leaf-window cache miss must agree");
+    }
+
+    let mut group = c.benchmark_group("extent_sequential_100blocks_cached_cold_ab");
+    group.bench_function("old_one_block_cache_miss", |b| {
+        b.iter(|| {
+            let cache = ffs_extent::ExtentCache::new();
+            for blk in 0..100_u32 {
+                let result = cached_map_logical_to_physical_one_block_old(
+                    black_box(&cx),
+                    black_box(&dev),
+                    black_box(&root),
+                    black_box(blk),
+                    black_box(&cache),
+                    black_box(0),
+                )
+                .expect("resolve");
+                black_box(result);
+            }
+        });
+    });
+    group.bench_function("leaf_window_cache_miss", |b| {
+        b.iter(|| {
+            let cache = ffs_extent::ExtentCache::new();
+            for blk in 0..100_u32 {
+                let result = ffs_extent::cached_map_logical_to_physical(
+                    black_box(&cx),
+                    black_box(&dev),
+                    black_box(&root),
+                    black_box(blk),
+                    black_box(1),
+                    black_box(&cache),
+                    black_box(0),
+                )
+                .expect("resolve");
+                black_box(result);
+            }
+        });
+    });
+    group.finish();
+}
+
 // bd-wc9v4 — bench coverage for ExtentCache mutation paths
 // (insert / invalidate_range / invalidate_all / eviction-at-capacity).
 // bd-upa13 just landed 5 MR proptests pinning correctness; these
@@ -464,6 +543,7 @@ criterion_group!(
     bench_extent_resolve_cached_repeated,
     bench_extent_sequential_uncached,
     bench_extent_sequential_cached,
+    bench_extent_sequential_cached_cold_leaf_window,
     bench_extent_cache_insert_cold,
     bench_extent_cache_invalidate_range_overlapping,
     bench_extent_cache_invalidate_all,
