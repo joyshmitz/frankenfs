@@ -10908,6 +10908,19 @@ impl OpenFs {
         Ok(attr)
     }
 
+    /// Stamp the ext4 directory-block CRC32C tail in place when the filesystem
+    /// uses `metadata_csum`. No-op otherwise. Must be called on a directory data
+    /// block (which carries a 12-byte checksum tail) immediately before writing
+    /// it back, keyed on the owning directory inode's number + generation, or
+    /// e2fsck reports a directory-block checksum mismatch (bd-gauub).
+    fn stamp_ext4_dir_block(&self, block: &mut [u8], dir_ino: u32, generation: u32) {
+        if let Some(sb) = self.ext4_superblock() {
+            if sb.has_metadata_csum() {
+                ffs_ondisk::stamp_dir_block_checksum(block, sb.csum_seed(), dir_ino, generation);
+            }
+        }
+    }
+
     /// Add a directory entry by scanning existing dir blocks, or allocating a new one.
     #[allow(clippy::too_many_arguments, clippy::significant_drop_tightening)]
     #[expect(clippy::too_many_lines)]
@@ -10942,6 +10955,9 @@ impl OpenFs {
             // Try adding to each existing block.
             let child_ino_u32 = u32::try_from(child_ino.0)
                 .map_err(|_| FfsError::Format("inode number exceeds ext4 32-bit limit".into()))?;
+            let parent_ino_u32 = u32::try_from(parent.0)
+                .map_err(|_| FfsError::Format("inode number exceeds ext4 32-bit limit".into()))?;
+            let parent_generation = parent_inode.generation;
             let reserved_tail = self.ext4_dir_reserved_tail();
             for ext in &extents {
                 if ext.is_unwritten() {
@@ -10957,6 +10973,7 @@ impl OpenFs {
                         reserved_tail,
                     ) {
                         Ok(_) => {
+                            self.stamp_ext4_dir_block(&mut data, parent_ino_u32, parent_generation);
                             dev.write_block(cx, block, &data)?;
 
                             // Update parent metadata (timestamps and link count if it's a new directory).
@@ -11065,6 +11082,7 @@ impl OpenFs {
                 file_type,
                 reserved_tail,
             )?;
+            self.stamp_ext4_dir_block(&mut new_block, parent_ino_u32, parent_generation);
             dev.write_block(cx, new_alloc.start, &new_block)?;
 
             // Insert extent for the new directory block and update parent metadata.
@@ -11302,6 +11320,8 @@ impl OpenFs {
             let extents = self.collect_extents(cx, &parent_inode)?;
             let mut removed = false;
             let reserved_tail = self.ext4_dir_reserved_tail();
+            let parent_ino_u32 = u32::try_from(parent.0)
+                .map_err(|_| FfsError::Format("inode number exceeds ext4 32-bit limit".into()))?;
             'outer: for ext in &extents {
                 if removed {
                     break;
@@ -11309,6 +11329,11 @@ impl OpenFs {
                 for block in Self::extent_phys_blocks(ext) {
                     let mut data = self.read_block_vec(cx, block)?;
                     if ffs_dir::remove_entry(&mut data, name, reserved_tail)? {
+                        self.stamp_ext4_dir_block(
+                            &mut data,
+                            parent_ino_u32,
+                            parent_inode.generation,
+                        );
                         tx_dev.write_block(cx, block, &data)?;
                         removed = true;
                         break 'outer;
@@ -33487,6 +33512,55 @@ mod tests {
     /// Create a fresh ext4 image via `mkfs.ext4` and open it writable.
     ///
     /// Returns `None` if `mkfs.ext4` is not available.
+    #[test]
+    fn dir_block_checksum_stays_valid_after_create_metadata_csum_bd_gauub() {
+        // Latent correctness check: after a directory modification on a
+        // metadata_csum filesystem, the modified directory block's CRC32C tail
+        // must still verify, or e2fsck flags it (bd-fwph3 class).
+        let Some((fs, _tmp)) = open_writable_ext4_mkfs(8) else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let (has_csum, seed) = {
+            let sb = fs.ext4_superblock().expect("sb");
+            (sb.has_metadata_csum(), sb.csum_seed())
+        };
+        assert!(has_csum, "generated image expected to have metadata_csum");
+
+        fs.create(&cx, root, OsStr::new("file_a.txt"), 0o644, 0, 0)
+            .expect("create");
+
+        let root_inode = fs.read_inode(&cx, root).expect("root inode");
+        let extents = fs.collect_extents(&cx, &root_inode).expect("root extents");
+        let phys = extents
+            .iter()
+            .find(|e| e.logical_block == 0)
+            .expect("root logical block 0")
+            .physical_start;
+        let block = fs
+            .read_block_vec(&cx, BlockNumber(phys))
+            .expect("read root dir block");
+        ffs_ondisk::verify_dir_block_checksum(&block, seed, 2, root_inode.generation)
+            .expect("root dir block checksum must be valid after a create");
+
+        // unlink must also leave the directory block checksum valid.
+        fs.unlink(&cx, root, OsStr::new("file_a.txt"))
+            .expect("unlink");
+        let root_inode2 = fs.read_inode(&cx, root).expect("root inode");
+        let extents2 = fs.collect_extents(&cx, &root_inode2).expect("root extents");
+        let phys2 = extents2
+            .iter()
+            .find(|e| e.logical_block == 0)
+            .expect("root logical block 0")
+            .physical_start;
+        let block2 = fs
+            .read_block_vec(&cx, BlockNumber(phys2))
+            .expect("read root dir block");
+        ffs_ondisk::verify_dir_block_checksum(&block2, seed, 2, root_inode2.generation)
+            .expect("root dir block checksum must be valid after an unlink");
+    }
+
     fn open_writable_ext4_mkfs(size_mb: u64) -> Option<(OpenFs, tempfile::TempDir)> {
         let tmp = tempfile::TempDir::new().expect("tmpdir");
         let image = tmp.path().join("test.ext4");
