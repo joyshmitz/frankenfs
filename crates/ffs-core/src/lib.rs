@@ -28906,6 +28906,78 @@ mod tests {
     }
 
     #[test]
+    fn fallocate_on_compressed_file_is_safely_rejected_without_mutation() {
+        // Feature interaction (previously untested): ext4_fallocate has no
+        // EXT4_COMPR_FL awareness. Verified contract: e2compr files are
+        // indirect-mapped, and fallocate refuses non-extent inodes outright
+        // (UnsupportedFeature), so PUNCH_HOLE on a compressed file is cleanly
+        // rejected rather than silently corrupting cluster data. This test
+        // pins both halves of that safety contract: the op errors AND the file
+        // contents are byte-for-byte unchanged afterward (no partial mutation).
+        let Some((fs, _tmp)) = open_writable_ext4_mkfs_with_incompat_features(
+            64,
+            ffs_ondisk::Ext4IncompatFeatures::COMPRESSION.0,
+        ) else {
+            eprintln!("mkfs.ext4 not available, skipping");
+            return;
+        };
+        let cx = Cx::for_testing();
+        let created = fs
+            .create(
+                &cx,
+                InodeNumber(2),
+                OsStr::new("compr-punch.bin"),
+                0o644,
+                0,
+                0,
+            )
+            .expect("create compr-punch.bin");
+        let mut write_scope = fs
+            .begin_request_scope(&cx, RequestOp::IoctlWrite)
+            .expect("begin ioctl write scope");
+        fs.set_inode_flags(&cx, &mut write_scope, created.ino, ffs_types::EXT4_COMPR_FL)
+            .expect("enable COMPR flag");
+        fs.commit_request_scope(&mut write_scope)
+            .expect("commit ioctl write scope");
+        fs.end_request_scope(&cx, RequestOp::IoctlWrite, write_scope)
+            .expect("end ioctl write scope");
+
+        // 128 KiB varied payload (avoids degenerate all-hole compression).
+        let len = 128 * 1024;
+        let payload: Vec<u8> = (0_usize..len)
+            .map(|i| u8::try_from((i * 31 + (i / 4096)) % 251).expect("pattern byte fits u8"))
+            .collect();
+        let written = fs
+            .write(&cx, created.ino, 0, &payload)
+            .expect("compressed write before punch");
+        assert_eq!(written as usize, payload.len());
+
+        // PUNCH_HOLE (0x02) | KEEP_SIZE (0x01) must be rejected on a compressed
+        // (indirect-mapped) inode, not silently applied.
+        let err = fs
+            .fallocate(&cx, created.ino, 64 * 1024, 16 * 1024, 0x02 | 0x01)
+            .expect_err("fallocate must reject a compressed/indirect-mapped file");
+        assert!(
+            matches!(err, FfsError::UnsupportedFeature(_)),
+            "expected UnsupportedFeature for fallocate on a compressed file, got {err:?}"
+        );
+
+        // The rejected fallocate must not have mutated the file.
+        let readback = fs
+            .read(
+                &cx,
+                created.ino,
+                0,
+                u32::try_from(len).expect("len fits u32"),
+            )
+            .expect("readback after rejected punch");
+        assert_eq!(
+            readback, payload,
+            "a rejected fallocate must leave compressed file contents byte-for-byte intact"
+        );
+    }
+
+    #[test]
     fn compressed_write_spanning_indirect_blocks_roundtrips_ext4() {
         // The existing compressed-write test writes a single 4K block (logical
         // block 0 → direct pointer). This drives a multi-cluster compressed
