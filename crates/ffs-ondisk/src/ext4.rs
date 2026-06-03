@@ -4546,107 +4546,39 @@ impl Ext4ImageReader {
         dir_inode: &Ext4Inode,
         name: &[u8],
     ) -> Result<Option<Ext4DirEntry>, ParseError> {
-        // Only attempt htree if the INDEX flag is set
+        // Only attempt htree if the INDEX flag is set.
         if !dir_inode.has_htree_index() {
             return self.lookup(image, dir_inode, name);
         }
 
-        // Read block 0 of the directory — it contains the DX root
-        let Some(phys0) = self.resolve_extent(image, dir_inode, 0)? else {
-            return self.lookup(image, dir_inode, name);
-        };
-        let block0 = self.read_block(image, ffs_types::BlockNumber(phys0))?;
-
-        // Parse the DX root from block 0
-        let Ok(dx_root) = parse_dx_root_with_large_dir(block0, self.sb.has_large_dir()) else {
-            return self.lookup(image, dir_inode, name);
-        };
-        if dx_root.entries.is_empty() {
-            return self.lookup(image, dir_inode, name);
+        // Navigate the DX index (shared with the runtime lookup path). Any
+        // failure or not-found yields None, on which we fall back to the linear
+        // scan — the index may be stale relative to linearly-appended entries.
+        let found = htree_find_entry(
+            self.sb.block_size,
+            &self.sb.hash_seed,
+            self.sb.has_large_dir(),
+            name,
+            |v| self.sb.effective_dirhash_version(v),
+            |lb| {
+                self.resolve_extent(image, dir_inode, lb)
+                    .ok()
+                    .flatten()
+                    .and_then(|phys| {
+                        self.read_block(image, ffs_types::BlockNumber(phys))
+                            .ok()
+                            .map(<[u8]>::to_vec)
+                    })
+            },
+        );
+        match found {
+            HtreeFindResult::Found(entry) => Ok(Some(entry)),
+            // Trust a successfully-navigated index for the static reader (the
+            // image's index is authoritative); matches the original behavior.
+            HtreeFindResult::NotFoundInIndex => Ok(None),
+            // Index unusable -> linear scan.
+            HtreeFindResult::IndexInvalid => self.lookup(image, dir_inode, name),
         }
-
-        // ext4 stores the base DX hash version in the root block and applies
-        // the superblock's signed/unsigned hash flag when hashing names.
-        let hash_version = self.sb.effective_dirhash_version(dx_root.hash_version);
-        let (hash, _minor) = dx_hash(hash_version, name, &self.sb.hash_seed);
-
-        let indirect_levels = usize::from(dx_root.indirect_levels);
-        let root_entries = dx_root.entries;
-        let root_idx = dx_find_leaf_idx(&root_entries, hash);
-        let mut frames = vec![Ext4DxFrame {
-            entries: root_entries,
-            idx: root_idx,
-        }];
-
-        for _ in 0..indirect_levels {
-            let child_block = frames.last().expect("root frame").entries
-                [frames.last().expect("root frame").idx]
-                .block;
-            let Some(child_phys) = self.resolve_extent(image, dir_inode, child_block)? else {
-                return self.lookup(image, dir_inode, name);
-            };
-            let child_data = self.read_block(image, ffs_types::BlockNumber(child_phys))?;
-            let child_entries = parse_dx_entries(child_data, 8)?;
-            if child_entries.is_empty() {
-                return self.lookup(image, dir_inode, name);
-            }
-            let child_idx = dx_find_leaf_idx(&child_entries, hash);
-            frames.push(Ext4DxFrame {
-                entries: child_entries,
-                idx: child_idx,
-            });
-        }
-
-        loop {
-            let leaf_block = frames.last().expect("leaf frame").entries
-                [frames.last().expect("leaf frame").idx]
-                .block;
-            let Some(leaf_phys) = self.resolve_extent(image, dir_inode, leaf_block)? else {
-                return self.lookup(image, dir_inode, name);
-            };
-            let leaf_data = self.read_block(image, ffs_types::BlockNumber(leaf_phys))?;
-            let (entries, _) = parse_dir_block(leaf_data, self.sb.block_size)?;
-            if let Some(entry) = entries.into_iter().find(|entry| entry.name == name) {
-                return Ok(Some(entry));
-            }
-
-            let mut level = frames.len() - 1;
-            loop {
-                frames[level].idx += 1;
-                if frames[level].idx < frames[level].entries.len() {
-                    break;
-                }
-                if level == 0 {
-                    break;
-                }
-                level -= 1;
-            }
-            if level == 0 && frames[level].idx >= frames[level].entries.len() {
-                break;
-            }
-
-            let next_hash = frames[level].entries[frames[level].idx].hash;
-            if !dx_hash_extends_collision_chain(hash, next_hash) {
-                break;
-            }
-
-            while level + 1 < frames.len() {
-                let child_block = frames[level].entries[frames[level].idx].block;
-                let Some(child_phys) = self.resolve_extent(image, dir_inode, child_block)? else {
-                    return self.lookup(image, dir_inode, name);
-                };
-                let child_data = self.read_block(image, ffs_types::BlockNumber(child_phys))?;
-                let child_entries = parse_dx_entries(child_data, 8)?;
-                if child_entries.is_empty() {
-                    return self.lookup(image, dir_inode, name);
-                }
-                level += 1;
-                frames[level].entries = child_entries;
-                frames[level].idx = 0;
-            }
-        }
-
-        Ok(None)
     }
 
     /// Read a directory block and parse its entries.
@@ -5034,6 +4966,129 @@ fn dx_hash_extends_collision_chain(target_hash: u32, next_hash: u32) -> bool {
 struct Ext4DxFrame {
     entries: Vec<Ext4DxEntry>,
     idx: usize,
+}
+
+/// Outcome of an htree/DX directory index lookup.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HtreeFindResult {
+    /// The name was found in a leaf reachable through the index.
+    Found(Ext4DirEntry),
+    /// The index is present and was navigated successfully, but the name is not
+    /// in the leaf/collision-chain the hash maps to. A reader that trusts the
+    /// index treats this as "absent"; a reader whose index may be stale relative
+    /// to linearly-appended entries should fall back to a linear scan.
+    NotFoundInIndex,
+    /// The index is absent/unparseable/unreadable — the caller must do a linear
+    /// scan (the index cannot be relied upon).
+    IndexInvalid,
+}
+
+/// Hash-tree (htree/DX) directory entry lookup, generic over how directory
+/// blocks are read.
+///
+/// `read_logical_dir_block(n)` returns the bytes of logical directory block `n`
+/// (resolving its extent and reading it), or `None` if it cannot be resolved or
+/// read. `effective_hash_version(v)` maps the DX root's base hash version to the
+/// effective version (applying the superblock signed/unsigned flag).
+///
+/// Infallible by design: any read/parse failure yields [`HtreeFindResult::IndexInvalid`]
+/// and a successful navigation that does not contain the name yields
+/// [`HtreeFindResult::NotFoundInIndex`], so this can never return a *wrong*
+/// entry — only "found", "not in index", or "index unusable". Callers gate on
+/// the directory's INDEX flag and choose their not-found policy (trust the index
+/// vs. linear fallback for a possibly-stale index).
+pub fn htree_find_entry<F, H>(
+    block_size: u32,
+    hash_seed: &[u32; 4],
+    has_large_dir: bool,
+    name: &[u8],
+    effective_hash_version: H,
+    mut read_logical_dir_block: F,
+) -> HtreeFindResult
+where
+    F: FnMut(u32) -> Option<Vec<u8>>,
+    H: Fn(u8) -> u8,
+{
+    macro_rules! invalid_unless {
+        ($e:expr) => {
+            match $e {
+                Some(v) => v,
+                None => return HtreeFindResult::IndexInvalid,
+            }
+        };
+    }
+
+    let block0 = invalid_unless!(read_logical_dir_block(0));
+    let dx_root = invalid_unless!(parse_dx_root_with_large_dir(&block0, has_large_dir).ok());
+    if dx_root.entries.is_empty() {
+        return HtreeFindResult::IndexInvalid;
+    }
+
+    let hash_version = effective_hash_version(dx_root.hash_version);
+    let (hash, _minor) = dx_hash(hash_version, name, hash_seed);
+
+    let indirect_levels = usize::from(dx_root.indirect_levels);
+    let root_idx = dx_find_leaf_idx(&dx_root.entries, hash);
+    let mut frames = vec![Ext4DxFrame {
+        entries: dx_root.entries,
+        idx: root_idx,
+    }];
+
+    for _ in 0..indirect_levels {
+        let frame = invalid_unless!(frames.last());
+        let child_block = invalid_unless!(frame.entries.get(frame.idx)).block;
+        let child_data = invalid_unless!(read_logical_dir_block(child_block));
+        let child_entries = invalid_unless!(parse_dx_entries(&child_data, 8).ok());
+        if child_entries.is_empty() {
+            return HtreeFindResult::IndexInvalid;
+        }
+        let child_idx = dx_find_leaf_idx(&child_entries, hash);
+        frames.push(Ext4DxFrame {
+            entries: child_entries,
+            idx: child_idx,
+        });
+    }
+
+    loop {
+        let frame = invalid_unless!(frames.last());
+        let leaf_block = invalid_unless!(frame.entries.get(frame.idx)).block;
+        let leaf_data = invalid_unless!(read_logical_dir_block(leaf_block));
+        let (entries, _) = invalid_unless!(parse_dir_block(&leaf_data, block_size).ok());
+        if let Some(entry) = entries.into_iter().find(|entry| entry.name == name) {
+            return HtreeFindResult::Found(entry);
+        }
+
+        // Advance to the next leaf in the collision chain (if any).
+        let mut level = frames.len() - 1;
+        loop {
+            frames[level].idx += 1;
+            if frames[level].idx < frames[level].entries.len() {
+                break;
+            }
+            if level == 0 {
+                break;
+            }
+            level -= 1;
+        }
+        if level == 0 && frames[level].idx >= frames[level].entries.len() {
+            return HtreeFindResult::NotFoundInIndex;
+        }
+        let next_hash = frames[level].entries[frames[level].idx].hash;
+        if !dx_hash_extends_collision_chain(hash, next_hash) {
+            return HtreeFindResult::NotFoundInIndex;
+        }
+        while level + 1 < frames.len() {
+            let child_block = frames[level].entries[frames[level].idx].block;
+            let child_data = invalid_unless!(read_logical_dir_block(child_block));
+            let child_entries = invalid_unless!(parse_dx_entries(&child_data, 8).ok());
+            if child_entries.is_empty() {
+                return HtreeFindResult::IndexInvalid;
+            }
+            level += 1;
+            frames[level].entries = child_entries;
+            frames[level].idx = 0;
+        }
+    }
 }
 
 // ── ext4 directory hash functions ───────────────────────────────────────────
