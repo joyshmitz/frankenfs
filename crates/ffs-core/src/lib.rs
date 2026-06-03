@@ -33890,6 +33890,220 @@ mod tests {
         }
     }
 
+    /// Splice a fabricated htree (dx-indexed) directory onto `dir_ino`, replacing
+    /// its linear blocks with `htree_blocks` (block 0 = dx_root, 1.. = leaves) and
+    /// setting `EXT4_INDEX_FL`. FrankenFS cannot yet *build* htree directories
+    /// (bd-rzq1y), so end-to-end htree-write tests fabricate one with
+    /// `ffs_ondisk::build_htree_directory_stamped` and install it here.
+    #[allow(clippy::significant_drop_tightening)]
+    fn install_htree_dir(fs: &OpenFs, cx: &Cx, dir_ino: InodeNumber, htree_blocks: &[Vec<u8>]) {
+        let mut inode = fs.read_inode(cx, dir_ino).expect("read dir inode");
+        let extents = fs.collect_extents(cx, &inode).expect("collect dir extents");
+        let block0_phys = extents
+            .iter()
+            .find(|e| e.logical_block == 0)
+            .expect("dir logical block 0")
+            .physical_start;
+        let block_size = u64::from(fs.ext4_superblock().expect("sb").block_size);
+
+        let block_dev = fs.block_device_adapter();
+        block_dev
+            .write_block(cx, BlockNumber(block0_phys), &htree_blocks[0])
+            .expect("write dx_root over block 0");
+
+        let dir_ino_u32 = u32::try_from(dir_ino.0).expect("ino fits u32");
+        let generation = inode.generation;
+        let mut root_bytes = OpenFs::extent_root(&inode);
+        {
+            let alloc_mutex = fs.require_alloc_state().expect("alloc state");
+            let mut alloc = alloc_mutex.lock();
+            for (i, blk) in htree_blocks.iter().enumerate().skip(1) {
+                let Ext4AllocState {
+                    geo,
+                    groups,
+                    persist_ctx,
+                } = &mut *alloc;
+                let ba = ffs_alloc::alloc_blocks_persist(
+                    cx,
+                    &block_dev,
+                    geo,
+                    groups,
+                    1,
+                    &AllocHint::default(),
+                    persist_ctx,
+                )
+                .expect("alloc leaf block");
+                block_dev
+                    .write_block(cx, ba.start, blk)
+                    .expect("write leaf block");
+                let extent = Ext4Extent {
+                    logical_block: u32::try_from(i).expect("logical fits u32"),
+                    raw_len: 1,
+                    physical_start: ba.start.0,
+                };
+                let mut tree_alloc = ffs_extent::GroupBlockAllocator {
+                    cx,
+                    dev: &block_dev,
+                    geo,
+                    groups,
+                    hint: AllocHint::default(),
+                    pctx: persist_ctx,
+                    ino: dir_ino_u32,
+                    generation,
+                };
+                ffs_btree::insert(cx, &block_dev, &mut root_bytes, extent, &mut tree_alloc)
+                    .expect("insert leaf extent");
+            }
+        }
+        OpenFs::set_extent_root(&mut inode, &root_bytes);
+        inode.flags |= ffs_types::EXT4_INDEX_FL;
+        inode.size = u64::try_from(htree_blocks.len()).unwrap() * block_size;
+        fs.persist_ext4_inode_for_testing(cx, dir_ino, &inode)
+            .expect("persist htree dir inode");
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn create_in_htree_dir_preserves_index_and_finds_new_entry_bd_wb4cd() {
+        // End-to-end proof of the bd-wb4cd routing fix: creating a file in a real
+        // htree directory must (a) leave the dx_root index intact (not the prior
+        // dx-root-overwriting corruption) and (b) place the new entry in its
+        // hash-correct leaf so htree_find_entry reaches it via the index.
+        let Some((fs, _tmp)) = open_writable_ext4_mkfs(16) else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let (csum_seed, hash_seed, has_large_dir, hash_version, block_size) = {
+            let sb = fs.ext4_superblock().expect("sb");
+            (
+                sb.csum_seed(),
+                sb.hash_seed,
+                sb.has_large_dir(),
+                // Build with the effective (signed/unsigned-resolved) version so
+                // the fabricated hashes match what the fs computes on lookup; the
+                // effective versions are fixed points of effective_dirhash_version.
+                sb.effective_dirhash_version(sb.def_hash_version),
+                usize::try_from(sb.block_size).unwrap(),
+            )
+        };
+
+        let dir = fs
+            .mkdir(&cx, root, OsStr::new("bigdir"), 0o755, 0, 0)
+            .expect("mkdir");
+        let dir_ino = dir.ino;
+        let dir_ino_u32 = u32::try_from(dir_ino.0).unwrap();
+        let generation = fs.read_inode(&cx, dir_ino).expect("read dir").generation;
+
+        // Fabricate a real dx_root + multi-leaf htree (300 entries).
+        let names: Vec<Vec<u8>> = (0..300)
+            .map(|i| format!("file_{i:04}.txt").into_bytes())
+            .collect();
+        let entries: Vec<(u32, u8, &[u8])> = names
+            .iter()
+            .enumerate()
+            .map(|(i, n)| {
+                (
+                    1000 + u32::try_from(i).unwrap(),
+                    ffs_ondisk::ext4::EXT4_FT_REG_FILE,
+                    n.as_slice(),
+                )
+            })
+            .collect();
+        let blocks = ffs_ondisk::build_htree_directory_stamped(
+            dir_ino_u32,
+            2,
+            &entries,
+            block_size,
+            hash_version,
+            &hash_seed,
+            csum_seed,
+            dir_ino_u32,
+            generation,
+        )
+        .expect("build htree");
+        assert!(
+            blocks.len() >= 3,
+            "need dx_root + multiple leaves, got {}",
+            blocks.len()
+        );
+        install_htree_dir(&fs, &cx, dir_ino, &blocks);
+
+        let find = |name: &[u8]| -> ffs_ondisk::HtreeFindResult {
+            ffs_ondisk::htree_find_entry(
+                u32::try_from(block_size).unwrap(),
+                &hash_seed,
+                has_large_dir,
+                name,
+                |v| v,
+                |lb| {
+                    let inode = fs.read_inode(&cx, dir_ino).ok()?;
+                    let exts = fs.collect_extents(&cx, &inode).ok()?;
+                    let phys = exts.iter().find_map(|e| {
+                        let len = u32::from(e.actual_len());
+                        if lb >= e.logical_block && lb < e.logical_block + len {
+                            Some(e.physical_start + u64::from(lb - e.logical_block))
+                        } else {
+                            None
+                        }
+                    })?;
+                    fs.read_block_vec(&cx, BlockNumber(phys)).ok()
+                },
+            )
+        };
+
+        assert!(
+            fs.read_inode(&cx, dir_ino).unwrap().has_htree_index(),
+            "installed dir must be htree-indexed"
+        );
+        assert!(
+            matches!(
+                find(b"file_0100.txt"),
+                ffs_ondisk::HtreeFindResult::Found(_)
+            ),
+            "pre-existing entry must be index-reachable before the create"
+        );
+
+        // Operation under test: create a NEW file in the htree directory.
+        let created = fs
+            .create(&cx, dir_ino, OsStr::new("zzz_new_entry.bin"), 0o644, 0, 0)
+            .expect("create in htree dir must succeed without corrupting the index");
+
+        // (a) dx_root (block 0) still parses as a valid index — NOT overwritten.
+        let block0_phys = {
+            let di = fs.read_inode(&cx, dir_ino).unwrap();
+            fs.collect_extents(&cx, &di)
+                .unwrap()
+                .iter()
+                .find(|e| e.logical_block == 0)
+                .unwrap()
+                .physical_start
+        };
+        let dxr = fs.read_block_vec(&cx, BlockNumber(block0_phys)).unwrap();
+        let parsed = ffs_ondisk::parse_dx_root(&dxr)
+            .expect("dx_root must still parse after the create (no corruption)");
+        assert!(
+            !parsed.entries.is_empty(),
+            "dx_root index entries must survive the create"
+        );
+
+        // (b) the new entry is reachable VIA THE INDEX (hash-correct leaf).
+        match find(b"zzz_new_entry.bin") {
+            ffs_ondisk::HtreeFindResult::Found(e) => {
+                assert_eq!(e.inode, u32::try_from(created.ino.0).unwrap());
+            }
+            other => panic!("new htree entry must be index-reachable, got {other:?}"),
+        }
+        // (c) a pre-existing entry remains index-reachable.
+        assert!(
+            matches!(
+                find(b"file_0100.txt"),
+                ffs_ondisk::HtreeFindResult::Found(_)
+            ),
+            "pre-existing entry must remain index-reachable after the create"
+        );
+    }
+
     fn open_writable_ext4_mkfs(size_mb: u64) -> Option<(OpenFs, tempfile::TempDir)> {
         let tmp = tempfile::TempDir::new().expect("tmpdir");
         let image = tmp.path().join("test.ext4");
