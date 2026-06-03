@@ -2220,6 +2220,104 @@ pub fn stamp_dir_block_checksum(dir_block: &mut [u8], csum_seed: u32, ino: u32, 
     dir_block[bs - 4..bs].copy_from_slice(&computed.to_le_bytes());
 }
 
+/// `count_offset` of the `dx_countlimit` within a DX **root** block (after the
+/// fake "."/".." entries and `dx_root_info`).
+pub const DX_ROOT_COUNT_OFFSET: usize = 0x20;
+/// `count_offset` of the `dx_countlimit` within a DX **node** (interior) block
+/// (after a single 8-byte fake dirent).
+pub const DX_NODE_COUNT_OFFSET: usize = 0x08;
+
+/// Compute the CRC32C of a hash-tree (htree) index block (`dx_root` or
+/// `dx_node`), mirroring the kernel's `ext4_dx_csum`.
+///
+/// The checksum covers `block[0 .. count_offset + count*8]` (the header through
+/// the *used* DX entries, per the `dx_countlimit.count` at `count_offset`), then
+/// the `dx_tail`'s 4-byte reserved field, then 4 zero bytes standing in for the
+/// `dt_checksum` field itself. The `dx_tail` lives at `count_offset + limit*8`
+/// and its checksum is the last 4 bytes. Returns `None` if the block is too
+/// small or `count > limit`. The per-inode seed matches
+/// [`stamp_dir_block_checksum`]. Validated against an e2fsprogs-written block by
+/// `dx_block_csum_matches_e2fsprogs_oracle`.
+#[must_use]
+pub fn ext4_dx_block_csum(
+    block: &[u8],
+    csum_seed: u32,
+    ino: u32,
+    generation: u32,
+    count_offset: usize,
+) -> Option<u32> {
+    let limit = usize::from(u16::from_le_bytes([
+        *block.get(count_offset)?,
+        *block.get(count_offset + 1)?,
+    ]));
+    let count = usize::from(u16::from_le_bytes([
+        *block.get(count_offset + 2)?,
+        *block.get(count_offset + 3)?,
+    ]));
+    let tail = count_offset.checked_add(limit.checked_mul(8)?)?;
+    if tail.checked_add(8)? > block.len() {
+        return None;
+    }
+    let coverage_end = count_offset.checked_add(count.checked_mul(8)?)?;
+    if coverage_end > tail {
+        return None; // count must not exceed limit
+    }
+    let seed = ext4_chksum(csum_seed, &ino.to_le_bytes());
+    let seed = ext4_chksum(seed, &generation.to_le_bytes());
+    let csum = ext4_chksum(seed, &block[..coverage_end]);
+    let csum = ext4_chksum(csum, &block[tail..tail + 4]); // dt_reserved
+    let csum = ext4_chksum(csum, &0_u32.to_le_bytes()); // dt_checksum field, treated as 0
+    Some(csum)
+}
+
+/// Stamp the CRC32C into a hash-tree index block's `dx_tail.dt_checksum`.
+///
+/// `count_offset` is [`DX_ROOT_COUNT_OFFSET`] for a root block or
+/// [`DX_NODE_COUNT_OFFSET`] for an interior node. No-op if the block is
+/// malformed (see [`ext4_dx_block_csum`]).
+pub fn stamp_dx_block_checksum(
+    block: &mut [u8],
+    csum_seed: u32,
+    ino: u32,
+    generation: u32,
+    count_offset: usize,
+) {
+    if let Some(csum) = ext4_dx_block_csum(block, csum_seed, ino, generation, count_offset) {
+        let limit = usize::from(u16::from_le_bytes([
+            block[count_offset],
+            block[count_offset + 1],
+        ]));
+        let tail = count_offset + limit * 8;
+        block[tail + 4..tail + 8].copy_from_slice(&csum.to_le_bytes());
+    }
+}
+
+/// Verify a hash-tree index block's stored `dx_tail.dt_checksum`.
+#[must_use]
+pub fn verify_dx_block_checksum(
+    block: &[u8],
+    csum_seed: u32,
+    ino: u32,
+    generation: u32,
+    count_offset: usize,
+) -> bool {
+    let Some(computed) = ext4_dx_block_csum(block, csum_seed, ino, generation, count_offset) else {
+        return false;
+    };
+    let limit = usize::from(u16::from_le_bytes([
+        block[count_offset],
+        block[count_offset + 1],
+    ]));
+    let tail = count_offset + limit * 8;
+    let stored = u32::from_le_bytes([
+        block[tail + 4],
+        block[tail + 5],
+        block[tail + 6],
+        block[tail + 7],
+    ]);
+    computed == stored
+}
+
 /// Verify the CRC32C checksum of an extent tree block.
 ///
 /// Extent tree blocks (non-root, stored in separate blocks) have a 4-byte
@@ -8180,6 +8278,65 @@ mod tests {
             !matches!(read(&blocks, b"does_not_exist"), HtreeFindResult::Found(_)),
             "false positive for an absent name"
         );
+    }
+
+    /// bd-gauub (write-half STEP 4.5): the htree index-block checksum matches
+    /// e2fsprogs. Oracle is the dx_root of inode 13 ("htree" dir) from the
+    /// committed metadata_csum golden image; e2fsprogs stamped
+    /// dt_checksum = 0xdab8599a (csum seed 0xea5be0da, gen 0).
+    #[test]
+    fn dx_block_csum_matches_e2fsprogs_oracle() {
+        const SEED: u32 = 0xea5b_e0da;
+        const INO: u32 = 13;
+        const GEN: u32 = 0;
+        const ORACLE: u32 = 0xdab8_599a;
+        let block: &[u8] =
+            include_bytes!("../../../conformance/golden/dx_root_oracle_metadata_csum.bin");
+        assert_eq!(block.len(), 4096);
+
+        assert_eq!(
+            ext4_dx_block_csum(block, SEED, INO, GEN, DX_ROOT_COUNT_OFFSET),
+            Some(ORACLE),
+            "ext4_dx_block_csum must reproduce the e2fsprogs dt_checksum"
+        );
+        assert!(verify_dx_block_checksum(
+            block,
+            SEED,
+            INO,
+            GEN,
+            DX_ROOT_COUNT_OFFSET
+        ));
+
+        // Stamping a clobbered copy restores the exact oracle value.
+        let mut clobbered = block.to_vec();
+        let limit = usize::from(u16::from_le_bytes([clobbered[0x20], clobbered[0x21]]));
+        let tail = 0x20 + limit * 8;
+        clobbered[tail + 4..tail + 8].copy_from_slice(&0xDEAD_BEEF_u32.to_le_bytes());
+        assert!(!verify_dx_block_checksum(
+            &clobbered,
+            SEED,
+            INO,
+            GEN,
+            DX_ROOT_COUNT_OFFSET
+        ));
+        stamp_dx_block_checksum(&mut clobbered, SEED, INO, GEN, DX_ROOT_COUNT_OFFSET);
+        assert_eq!(&clobbered[tail + 4..tail + 8], &ORACLE.to_le_bytes());
+        assert!(verify_dx_block_checksum(
+            &clobbered,
+            SEED,
+            INO,
+            GEN,
+            DX_ROOT_COUNT_OFFSET
+        ));
+
+        // A wrong inode must not verify (the per-inode seed binds it).
+        assert!(!verify_dx_block_checksum(
+            block,
+            SEED,
+            INO + 1,
+            GEN,
+            DX_ROOT_COUNT_OFFSET
+        ));
     }
 
     /// bd-12nk4 — Kernel-conformance pin for the ext4_dir_entry_2
