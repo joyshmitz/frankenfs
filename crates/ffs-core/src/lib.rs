@@ -28676,8 +28676,9 @@ mod tests {
         let ino;
 
         {
-            let fs = OpenFs::open_with_options(&cx, &tmp_path, &opts)
+            let mut fs = OpenFs::open_with_options(&cx, &tmp_path, &opts)
                 .expect("open ext4 image for setversion");
+            fs.enable_writes(&cx).expect("enable writes");
             let created = fs
                 .create(&cx, InodeNumber(2), OsStr::new("version.txt"), 0o644, 0, 0)
                 .expect("create version.txt");
@@ -28690,6 +28691,9 @@ mod tests {
                 .get_inode_generation(&cx, &mut RequestScope::empty(), ino)
                 .expect("read updated inode generation");
             assert_eq!(current, requested);
+
+            fs.flush_mvcc_to_device(&cx)
+                .expect("flush mvcc to device");
         }
 
         let reopened = OpenFs::open_with_options(&cx, &tmp_path, &opts)
@@ -40936,9 +40940,16 @@ mod tests {
     /// Create a temp file copy of the ext4_small fixture for persistence testing.
     /// Returns the temp path, or None if the fixture is not available.
     fn create_temp_ext4_image(label: &str) -> Option<std::path::PathBuf> {
+        let tmp = std::env::temp_dir().join(format!(
+            "ffs-e2e-{label}-{}-{:?}.img",
+            std::process::id(),
+            std::thread::current().id(),
+        ));
+
+        // Prefer a committed fixture if one is present on disk.
         let fixture = std::path::Path::new("tests/fixtures/images/ext4_small.img");
         let fixture = if fixture.exists() {
-            fixture.to_path_buf()
+            Some(fixture.to_path_buf())
         } else {
             let ws = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .parent()
@@ -40946,18 +40957,55 @@ mod tests {
                 .parent()
                 .unwrap()
                 .join("tests/fixtures/images/ext4_small.img");
-            if !ws.exists() {
+            ws.exists().then_some(ws)
+        };
+        if let Some(fixture) = fixture {
+            std::fs::copy(&fixture, &tmp).expect("copy fixture to temp");
+            return Some(tmp);
+        }
+
+        // No committed fixture (e.g. CI / remote-build workers): generate a
+        // small file-backed ext4 image in place via mkfs.ext4 so the
+        // file-backed persistence/durability E2E tests actually run instead of
+        // silently skipping (bd-jb3kh). If the format tooling is unavailable
+        // the caller skips, exactly as it did with the missing fixture.
+        let f = std::fs::File::create(&tmp).expect("create temp image");
+        f.set_len(16 * 1024 * 1024).expect("set image size");
+        drop(f);
+
+        // Mirror scripts/fixtures/make_ext4_fixtures.sh's ext4_small recipe
+        // (feature set + default geometry) so the generated image matches what
+        // these E2E tests were validated against with the committed fixture.
+        let out = std::process::Command::new("mkfs.ext4")
+            .args([
+                "-F",
+                "-O",
+                "extent,filetype",
+                "-L",
+                "ffs_gen",
+                tmp.to_str().unwrap(),
+            ])
+            .output();
+        match out {
+            Ok(o) if o.status.success() => {}
+            _ => {
+                let _ = std::fs::remove_file(&tmp);
                 return None;
             }
-            ws
-        };
+        }
 
-        let tmp = std::env::temp_dir().join(format!(
-            "ffs-e2e-{label}-{}-{:?}.img",
-            std::process::id(),
-            std::thread::current().id(),
-        ));
-        std::fs::copy(&fixture, &tmp).expect("copy fixture to temp");
+        // Make root writable so the E2E tests can mkdir/create under it,
+        // mirroring open_writable_ext4_mkfs. Best-effort: a fresh mkfs root is
+        // already owner-writable, so ignore failure if debugfs is absent.
+        let _ = std::process::Command::new("debugfs")
+            .args([
+                "-w",
+                "-R",
+                "set_inode_field / mode 040777",
+                tmp.to_str().unwrap(),
+            ])
+            .output();
+
         Some(tmp)
     }
 
@@ -41013,7 +41061,11 @@ mod tests {
                     assert_eq!(written as usize, content.len());
                 }
             }
-            // Drop fs — closes file handles, writes should be flushed.
+            // Checkpoint the in-memory MVCC versions to the backing device.
+            // The FS buffers writes in the MVCC store; durability requires an
+            // explicit flush (Drop alone does not persist).
+            fs.flush_mvcc_to_device(&cx)
+                .expect("flush mvcc to device");
         }
 
         // ── Phase 2: Reopen and verify ──────────────────────────────
@@ -41099,6 +41151,8 @@ mod tests {
                 fs.write(&cx, attr.ino, 0, content.as_bytes())
                     .expect("write");
             }
+            fs.flush_mvcc_to_device(&cx)
+                .expect("flush mvcc to device");
         }
 
         // Phase 2: Modify some, delete some, create new
@@ -41143,6 +41197,8 @@ mod tests {
                 fs.write(&cx, attr.ino, 0, content.as_bytes())
                     .expect("write");
             }
+            fs.flush_mvcc_to_device(&cx)
+                .expect("flush mvcc to device");
         }
 
         // Phase 3: Verify
