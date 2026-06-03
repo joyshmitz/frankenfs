@@ -5420,6 +5420,54 @@ pub fn build_htree_directory(
     Some(blocks)
 }
 
+/// Build a complete `metadata_csum`-ready hash-indexed directory.
+///
+/// Like [`build_htree_directory`] (with checksum tails reserved) but with every
+/// block's CRC32C stamped — the DX root via [`stamp_dx_block_checksum`] and each
+/// leaf via [`stamp_dir_block_checksum`], all under the directory inode's
+/// per-inode seed. The returned `[dx_root, leaf_0, ...]` blocks are ready to
+/// write to disk and pass `e2fsck` on a `metadata_csum` filesystem. This is the
+/// artifact the linear->htree conversion path writes. Returns `None` for the
+/// same deferred cases as [`build_htree_directory`].
+///
+/// Validated by `build_htree_directory_stamped_is_navigable_and_checksummed`:
+/// the result is navigable by the read-half AND every block's checksum verifies
+/// under the e2fsprogs-pinned formulas.
+#[must_use]
+#[allow(clippy::too_many_arguments)]
+pub fn build_htree_directory_stamped(
+    dot_inode: u32,
+    dotdot_inode: u32,
+    entries: &[(u32, u8, &[u8])],
+    block_size: usize,
+    hash_version: u8,
+    hash_seed: &[u32; 4],
+    csum_seed: u32,
+    dir_ino: u32,
+    generation: u32,
+) -> Option<Vec<Vec<u8>>> {
+    let mut blocks = build_htree_directory(
+        dot_inode,
+        dotdot_inode,
+        entries,
+        block_size,
+        hash_version,
+        hash_seed,
+        true,
+    )?;
+    stamp_dx_block_checksum(
+        &mut blocks[0],
+        csum_seed,
+        dir_ino,
+        generation,
+        DX_ROOT_COUNT_OFFSET,
+    );
+    for leaf in &mut blocks[1..] {
+        stamp_dir_block_checksum(leaf, csum_seed, dir_ino, generation);
+    }
+    Some(blocks)
+}
+
 /// Find the rightmost entry index whose hash is <= target_hash.
 fn dx_find_leaf_idx(entries: &[Ext4DxEntry], hash: u32) -> usize {
     // Binary search: find rightmost entry where entry.hash <= hash
@@ -8337,6 +8385,78 @@ mod tests {
             GEN,
             DX_ROOT_COUNT_OFFSET
         ));
+    }
+
+    /// bd-gauub (write-half): the stamped builder produces a directory that is
+    /// both navigable by the read-half AND fully checksum-valid (dx root + every
+    /// leaf), i.e. e2fsck-ready on a metadata_csum filesystem.
+    #[test]
+    fn build_htree_directory_stamped_is_navigable_and_checksummed() {
+        let bs = 4096_usize;
+        let seed = [0x1111_1111_u32, 0x2222_2222, 0x3333_3333, 0x4444_4444];
+        let csum_seed = 0xabcd_1234_u32;
+        let dir_ino = 77_u32;
+        let generation = 5_u32;
+        let hash_version = 1_u8;
+
+        let names: Vec<Vec<u8>> = (0..250)
+            .map(|i| format!("entry_{i:04}").into_bytes())
+            .collect();
+        let entries: Vec<(u32, u8, &[u8])> = names
+            .iter()
+            .enumerate()
+            .map(|(i, n)| {
+                (
+                    200 + u32::try_from(i).unwrap(),
+                    EXT4_FT_REG_FILE,
+                    n.as_slice(),
+                )
+            })
+            .collect();
+
+        let blocks = build_htree_directory_stamped(
+            2,
+            2,
+            &entries,
+            bs,
+            hash_version,
+            &seed,
+            csum_seed,
+            dir_ino,
+            generation,
+        )
+        .expect("stamped htree build");
+        assert!(blocks.len() >= 3, "needs dx_root + multiple leaves");
+
+        // DX root + every leaf checksum verifies under the e2fsprogs-pinned formulas.
+        assert!(verify_dx_block_checksum(
+            &blocks[0],
+            csum_seed,
+            dir_ino,
+            generation,
+            DX_ROOT_COUNT_OFFSET
+        ));
+        for leaf in &blocks[1..] {
+            verify_dir_block_checksum(leaf, csum_seed, dir_ino, generation)
+                .expect("leaf block checksum must verify");
+        }
+
+        // Still navigable: the checksum tails don't disturb index navigation.
+        for (i, name) in names.iter().enumerate() {
+            match htree_find_entry(
+                u32::try_from(bs).unwrap(),
+                &seed,
+                false,
+                name,
+                |v| v,
+                |lb| blocks.get(lb as usize).cloned(),
+            ) {
+                HtreeFindResult::Found(e) => {
+                    assert_eq!(e.inode, 200 + u32::try_from(i).unwrap());
+                }
+                other => panic!("entry {name:?} not reachable: {other:?}"),
+            }
+        }
     }
 
     /// bd-12nk4 — Kernel-conformance pin for the ext4_dir_entry_2
