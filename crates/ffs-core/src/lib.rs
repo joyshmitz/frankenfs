@@ -45,6 +45,7 @@ use ffs_btrfs::{
     enumerate_snapshots, enumerate_subvolumes, fsflags_to_btrfs_inode_flags, generate_send_stream,
     lookup_data_block_csum, map_logical_to_physical, parse_dir_items, parse_extent_data,
     parse_inode_item, parse_root_item, parse_xattr_items, walk_chunk_tree, walk_tree,
+    walk_tree_range,
     writeback::{DiskWritebackContext, WriteDependencyDag, WritebackExecutor},
     xflags_to_btrfs_inode_flags,
 };
@@ -5267,6 +5268,78 @@ impl OpenFs {
         .map_err(|e| parse_to_ffs_error(&e))
     }
 
+    /// Targeted-descent counterpart to [`walk_btrfs_tree`](Self::walk_btrfs_tree):
+    /// walk a btrfs b-tree but read only the O(log N) nodes whose key span can
+    /// overlap the half-open range `[lo, hi)`, returning exactly the leaf
+    /// entries with key in that range. The result is identical to
+    /// `walk_btrfs_tree(...).into_iter().filter(|e| lo <= e.key < hi)`, but
+    /// without reading subtrees that hold no matching key (bd-n040r).
+    pub fn walk_btrfs_tree_range(
+        &self,
+        cx: &Cx,
+        root_logical: u64,
+        lo: BtrfsKey,
+        hi: BtrfsKey,
+    ) -> Result<Vec<BtrfsLeafEntry>, FfsError> {
+        let ctx = self
+            .btrfs_context()
+            .ok_or_else(|| FfsError::Format("not a btrfs filesystem".into()))?;
+
+        let nodesize = ctx.nodesize;
+        let ns =
+            usize::try_from(nodesize).map_err(|_| FfsError::Format("nodesize overflow".into()))?;
+
+        let mut read_fn = |phys: u64| -> Result<Vec<u8>, ParseError> {
+            let mut buf = vec![0_u8; ns];
+            self.dev
+                .read_exact_at(cx, ByteOffset(phys), &mut buf)
+                .map_err(|_| ParseError::InsufficientData {
+                    needed: ns,
+                    offset: 0,
+                    actual: 0,
+                })?;
+            Ok(buf)
+        };
+
+        walk_tree_range(
+            &mut read_fn,
+            &ctx.chunks,
+            root_logical,
+            nodesize,
+            ctx.csum_type,
+            lo,
+            hi,
+        )
+        .map_err(|e| parse_to_ffs_error(&e))
+    }
+
+    /// Half-open key range `[(objectid, 0, 0), (objectid + 1, 0, 0))` covering
+    /// every item that belongs to a single btrfs object (e.g. all of an
+    /// inode's INODE_ITEM / EXTENT_DATA / DIR_* / XATTR items). Used to turn a
+    /// full-tree-walk-then-filter-by-objectid into a targeted descent.
+    fn btrfs_objectid_key_range(objectid: u64) -> (BtrfsKey, BtrfsKey) {
+        let lo = BtrfsKey {
+            objectid,
+            item_type: 0,
+            offset: 0,
+        };
+        // No real inode uses u64::MAX; fall back to an all-inclusive upper bound
+        // so the (impossible) top objectid still returns its items.
+        let hi = objectid.checked_add(1).map_or(
+            BtrfsKey {
+                objectid: u64::MAX,
+                item_type: u8::MAX,
+                offset: u64::MAX,
+            },
+            |next| BtrfsKey {
+                objectid: next,
+                item_type: 0,
+                offset: 0,
+            },
+        );
+        (lo, hi)
+    }
+
     /// Walk the btrfs root tree, returning all leaf items.
     ///
     /// Convenience wrapper around [`walk_btrfs_tree`](Self::walk_btrfs_tree)
@@ -5354,6 +5427,89 @@ impl OpenFs {
             }
         }
         items.sort_by(|lhs, rhs| Self::btrfs_key_order(&lhs.key, &rhs.key));
+    }
+
+    /// Range-restricted counterpart to
+    /// [`btrfs_apply_tree_log_overlay`](Self::btrfs_apply_tree_log_overlay):
+    /// merge only the logged items whose key falls in `[lo, hi)`. This keeps a
+    /// range walk isomorphic to `(full walk + overlay) filtered to [lo, hi)`,
+    /// because merging the full log then filtering is equivalent to merging
+    /// only the in-range log entries: items outside the range are dropped by
+    /// the filter either way, and a key in-range is replaced/added identically.
+    fn btrfs_apply_tree_log_overlay_range(
+        &self,
+        subvol_id: u64,
+        items: &mut Vec<BtrfsLeafEntry>,
+        lo: &BtrfsKey,
+        hi: &BtrfsKey,
+    ) {
+        let Some(ctx) = self.btrfs_context() else {
+            return;
+        };
+        if subvol_id != ctx.subvol_objectid || self.btrfs_tree_log_items.is_empty() {
+            return;
+        }
+
+        for logged in &self.btrfs_tree_log_items {
+            // Only items in [lo, hi) participate; others would be filtered out.
+            if Self::btrfs_key_order(&logged.key, lo) == std::cmp::Ordering::Less
+                || Self::btrfs_key_order(&logged.key, hi) != std::cmp::Ordering::Less
+            {
+                continue;
+            }
+            if let Some(existing) = items.iter_mut().find(|item| item.key == logged.key) {
+                *existing = logged.clone();
+            } else {
+                items.push(logged.clone());
+            }
+        }
+        items.sort_by(|lhs, rhs| Self::btrfs_key_order(&lhs.key, &rhs.key));
+    }
+
+    /// Targeted-descent counterpart to [`walk_btrfs_fs_tree`](Self::walk_btrfs_fs_tree):
+    /// return only this subvolume's fs-tree items in `[lo, hi)`, reading
+    /// O(log N) nodes instead of the whole tree. Isomorphic to
+    /// `walk_btrfs_fs_tree(cx)` filtered to `[lo, hi)` (bd-n040r).
+    fn walk_btrfs_fs_tree_range(
+        &self,
+        cx: &Cx,
+        lo: BtrfsKey,
+        hi: BtrfsKey,
+    ) -> Result<Vec<BtrfsLeafEntry>, FfsError> {
+        let subvol_id = self
+            .btrfs_context
+            .as_ref()
+            .map_or(BTRFS_FS_TREE_OBJECTID, |ctx| ctx.subvol_objectid);
+        self.walk_btrfs_fs_tree_by_objectid_range(cx, subvol_id, lo, hi)
+    }
+
+    /// Read every fs-tree item belonging to a single object (inode) via
+    /// targeted descent — the O(log N) replacement for
+    /// `walk_btrfs_fs_tree(cx)` followed by filtering to `objectid`. The
+    /// returned items are exactly those with `key.objectid == objectid`, in
+    /// key order, identical to the filtered full walk (bd-n040r).
+    fn walk_btrfs_fs_tree_object(
+        &self,
+        cx: &Cx,
+        objectid: u64,
+    ) -> Result<Vec<BtrfsLeafEntry>, FfsError> {
+        let (lo, hi) = Self::btrfs_objectid_key_range(objectid);
+        self.walk_btrfs_fs_tree_range(cx, lo, hi)
+    }
+
+    /// Resolve and range-walk a specific btrfs filesystem tree by root-tree
+    /// objectid, applying the range-restricted tree-log overlay.
+    fn walk_btrfs_fs_tree_by_objectid_range(
+        &self,
+        cx: &Cx,
+        subvol_id: u64,
+        lo: BtrfsKey,
+        hi: BtrfsKey,
+    ) -> Result<Vec<BtrfsLeafEntry>, FfsError> {
+        let root_bytenr = self.btrfs_fs_tree_root_bytenr(cx, subvol_id)?;
+        let mut items = self.walk_btrfs_tree_range(cx, root_bytenr, lo, hi)?;
+        self.btrfs_apply_tree_log_overlay_range(subvol_id, &mut items, &lo, &hi);
+        Ok(items)
     }
 
     fn btrfs_tree_search_entries(
@@ -5532,7 +5688,7 @@ impl OpenFs {
             return Ok(self.btrfs_inode_to_attr(canonical, &inode));
         }
 
-        let items = self.walk_btrfs_fs_tree(cx)?;
+        let items = self.walk_btrfs_fs_tree_object(cx, canonical)?;
         let inode_item = Self::btrfs_find_inode_item(&items, canonical)?;
         let inode = parse_inode_item(&inode_item.data).map_err(|e| parse_to_ffs_error(&e))?;
         self.btrfs_inode_attr_from_item(ino, inode)
@@ -5562,7 +5718,7 @@ impl OpenFs {
             return self.btrfs_read_inode_attr(cx, child_ino);
         }
 
-        let items = self.walk_btrfs_fs_tree(cx)?;
+        let items = self.walk_btrfs_fs_tree_object(cx, canonical_parent)?;
 
         for preferred_item_type in [BTRFS_ITEM_DIR_ITEM, BTRFS_ITEM_DIR_INDEX] {
             for item in &items {
@@ -5627,7 +5783,7 @@ impl OpenFs {
                 drop(alloc);
                 Box::new(cow_items.iter().map(|(k, v)| (k, v.as_slice())))
             } else {
-                ondisk_items = self.walk_btrfs_fs_tree(cx)?;
+                ondisk_items = self.walk_btrfs_fs_tree_object(cx, canonical_dir)?;
                 Box::new(
                     ondisk_items
                         .iter()
@@ -6273,7 +6429,7 @@ impl OpenFs {
             return Err(FfsError::Format("btrfs sectorsize is zero".into()));
         }
 
-        let items = self.walk_btrfs_fs_tree(cx)?;
+        let items = self.walk_btrfs_fs_tree_object(cx, canonical)?;
         let inode_entry = Self::btrfs_find_inode_item(&items, canonical)?;
         let inode = parse_inode_item(&inode_entry.data).map_err(|e| parse_to_ffs_error(&e))?;
         if inode.flags & BTRFS_INODE_NODATASUM != 0 {
@@ -6382,7 +6538,7 @@ impl OpenFs {
                     .collect::<Result<_, _>>()?;
                 (inode, exts)
             } else {
-                let items = self.walk_btrfs_fs_tree(cx)?;
+                let items = self.walk_btrfs_fs_tree_object(cx, canonical)?;
                 let inode_entry = Self::btrfs_find_inode_item(&items, canonical)?;
                 let inode =
                     parse_inode_item(&inode_entry.data).map_err(|e| parse_to_ffs_error(&e))?;
@@ -17881,7 +18037,7 @@ impl OpenFs {
         }
 
         // Read-only path: scan the on-disk FS tree.
-        let items = self.walk_btrfs_fs_tree(cx)?;
+        let items = self.walk_btrfs_fs_tree_object(cx, canonical)?;
         for item in &items {
             if item.key.objectid == canonical && item.key.item_type == BTRFS_ITEM_XATTR_ITEM {
                 let parsed = parse_xattr_items(&item.data).map_err(|e| parse_to_ffs_error(&e))?;
@@ -17925,7 +18081,7 @@ impl OpenFs {
             }
             Ok(result)
         } else {
-            let items = self.walk_btrfs_fs_tree(cx)?;
+            let items = self.walk_btrfs_fs_tree_object(cx, objectid)?;
             let mut result = Vec::new();
             for item in &items {
                 if item.key.objectid == objectid && item.key.item_type == BTRFS_ITEM_XATTR_ITEM {
@@ -19376,7 +19532,7 @@ impl OpenFs {
             ));
         }
         let canonical = self.btrfs_canonical_inode(InodeNumber(inode))?;
-        let items = self.walk_btrfs_fs_tree(cx)?;
+        let items = self.walk_btrfs_fs_tree_object(cx, canonical)?;
         Ok(items
             .iter()
             .filter(|item| {
@@ -20373,7 +20529,7 @@ impl OpenFs {
             drop(alloc);
             Ok(parsed)
         } else {
-            self.walk_btrfs_fs_tree(cx)?
+            self.walk_btrfs_fs_tree_object(cx, canonical)?
                 .iter()
                 .filter(|item| {
                     item.key.objectid == canonical && item.key.item_type == BTRFS_ITEM_EXTENT_DATA
@@ -21818,7 +21974,7 @@ impl FsOps for OpenFs {
                     drop(alloc);
                     inode.flags
                 } else {
-                    let items = self.walk_btrfs_fs_tree(cx)?;
+                    let items = self.walk_btrfs_fs_tree_object(cx, canonical)?;
                     let inode_item = Self::btrfs_find_inode_item(&items, canonical)?;
                     let inode =
                         parse_inode_item(&inode_item.data).map_err(|e| parse_to_ffs_error(&e))?;
@@ -21888,7 +22044,7 @@ impl FsOps for OpenFs {
                     drop(alloc);
                     inode.flags
                 } else {
-                    let items = self.walk_btrfs_fs_tree(cx)?;
+                    let items = self.walk_btrfs_fs_tree_object(cx, canonical)?;
                     let inode_item = Self::btrfs_find_inode_item(&items, canonical)?;
                     let inode =
                         parse_inode_item(&inode_item.data).map_err(|e| parse_to_ffs_error(&e))?;
@@ -22131,7 +22287,7 @@ impl FsOps for OpenFs {
                     drop(alloc);
                     inode.generation
                 } else {
-                    let items = self.walk_btrfs_fs_tree(cx)?;
+                    let items = self.walk_btrfs_fs_tree_object(cx, canonical)?;
                     let inode_item = Self::btrfs_find_inode_item(&items, canonical)?;
                     let inode =
                         parse_inode_item(&inode_item.data).map_err(|e| parse_to_ffs_error(&e))?;
@@ -22953,7 +23109,7 @@ impl FsOps for OpenFs {
                                 file_offset >= *start && file_offset < end
                             })
                     } else {
-                        let items = self.walk_btrfs_fs_tree(cx)?;
+                        let items = self.walk_btrfs_fs_tree_object(cx, canonical)?;
                         items
                             .iter()
                             .filter(|item| {
@@ -32425,6 +32581,231 @@ mod tests {
         stamp_btrfs_test_tree_block_crc32c(&mut image, BTRFS_TEST_FS_TREE_LOGICAL);
 
         image
+    }
+
+    /// Build a btrfs image whose FS tree is **two levels** (one internal root
+    /// node over `n_leaves` leaf nodes), each leaf holding the INODE_ITEM for a
+    /// distinct objectid `256 + i`. This is the geometry that exposes the
+    /// O(N)-full-walk vs O(log N)-targeted-descent difference (bd-n040r): a
+    /// single-leaf image reads one node either way, but a multi-leaf tree lets
+    /// a targeted range descent skip the leaves that hold no matching key.
+    #[allow(clippy::cast_possible_truncation)]
+    fn build_btrfs_multileaf_image(n_leaves: usize) -> Vec<u8> {
+        assert!(
+            (1..=64).contains(&n_leaves),
+            "fixture supports 1..=64 leaves"
+        );
+        let image_size: usize = 0x40_000; // 256 KiB
+        let mut image = vec![0_u8; image_size];
+        let sb_off = BTRFS_SUPER_INFO_OFFSET;
+
+        let root_tree_logical = 0x4_000_u64;
+        let internal_logical = 0x8_000_u64;
+        let leaf_logical = |i: usize| 0x20_000_u64 + (i as u64) * 0x1_000;
+
+        // Superblock (mirrors build_btrfs_fsops_image).
+        image[sb_off + 0x40..sb_off + 0x48].copy_from_slice(&BTRFS_MAGIC.to_le_bytes());
+        image[sb_off + 0x48..sb_off + 0x50].copy_from_slice(&1_u64.to_le_bytes());
+        image[sb_off + 0x50..sb_off + 0x58].copy_from_slice(&root_tree_logical.to_le_bytes());
+        image[sb_off + 0x70..sb_off + 0x78].copy_from_slice(&(image_size as u64).to_le_bytes());
+        image[sb_off + 0x80..sb_off + 0x88].copy_from_slice(&256_u64.to_le_bytes());
+        image[sb_off + 0x88..sb_off + 0x90].copy_from_slice(&1_u64.to_le_bytes());
+        image[sb_off + 0x90..sb_off + 0x94].copy_from_slice(&4096_u32.to_le_bytes());
+        image[sb_off + 0x94..sb_off + 0x98].copy_from_slice(&4096_u32.to_le_bytes());
+        image[sb_off + 0x9C..sb_off + 0xA0].copy_from_slice(&4096_u32.to_le_bytes());
+        image[sb_off + 0xC6] = 0; // root_level (root TREE is a single leaf)
+
+        // sys_chunk_array: one identity chunk [0, image_size).
+        let mut chunk_array = Vec::new();
+        chunk_array.extend_from_slice(&256_u64.to_le_bytes());
+        chunk_array.push(228_u8);
+        chunk_array.extend_from_slice(&0_u64.to_le_bytes());
+        chunk_array.extend_from_slice(&(image_size as u64).to_le_bytes());
+        chunk_array.extend_from_slice(&2_u64.to_le_bytes());
+        chunk_array.extend_from_slice(&0x1_0000_u64.to_le_bytes());
+        chunk_array.extend_from_slice(&1_u64.to_le_bytes());
+        chunk_array.extend_from_slice(&4096_u32.to_le_bytes());
+        chunk_array.extend_from_slice(&4096_u32.to_le_bytes());
+        chunk_array.extend_from_slice(&4096_u32.to_le_bytes());
+        chunk_array.extend_from_slice(&1_u16.to_le_bytes());
+        chunk_array.extend_from_slice(&0_u16.to_le_bytes());
+        chunk_array.extend_from_slice(&1_u64.to_le_bytes());
+        chunk_array.extend_from_slice(&0_u64.to_le_bytes());
+        chunk_array.extend_from_slice(&[0_u8; 16]);
+        image[sb_off + 0xA0..sb_off + 0xA4]
+            .copy_from_slice(&(chunk_array.len() as u32).to_le_bytes());
+        let array_start = sb_off + 0x32B;
+        image[array_start..array_start + chunk_array.len()].copy_from_slice(&chunk_array);
+
+        // Root tree leaf: one ROOT_ITEM for FS_TREE pointing at the internal
+        // node, with root_item level byte = 1 (the FS tree is two levels).
+        let root_leaf = root_tree_logical as usize;
+        image[root_leaf + 0x30..root_leaf + 0x38].copy_from_slice(&root_tree_logical.to_le_bytes());
+        image[root_leaf + 0x50..root_leaf + 0x58].copy_from_slice(&1_u64.to_le_bytes());
+        image[root_leaf + 0x58..root_leaf + 0x60].copy_from_slice(&1_u64.to_le_bytes());
+        image[root_leaf + 0x60..root_leaf + 0x64].copy_from_slice(&1_u32.to_le_bytes());
+        image[root_leaf + 0x64] = 0;
+        let root_item_size: u32 = 239;
+        write_btrfs_leaf_item(
+            &mut image,
+            root_leaf,
+            0,
+            BTRFS_FS_TREE_OBJECTID,
+            BTRFS_ITEM_ROOT_ITEM,
+            0,
+            3000,
+            root_item_size,
+        );
+        let mut root_item = vec![0_u8; root_item_size as usize];
+        root_item[168..176].copy_from_slice(&256_u64.to_le_bytes());
+        root_item[176..184].copy_from_slice(&internal_logical.to_le_bytes());
+        let root_item_last = root_item.len() - 1;
+        root_item[root_item_last] = 1; // FS tree root is level 1
+        let root_data_off = root_leaf + 3000;
+        image[root_data_off..root_data_off + root_item.len()].copy_from_slice(&root_item);
+
+        // Internal node (level 1) with one key_ptr per leaf.
+        let internal = internal_logical as usize;
+        image[internal + 0x30..internal + 0x38].copy_from_slice(&internal_logical.to_le_bytes());
+        image[internal + 0x50..internal + 0x58].copy_from_slice(&1_u64.to_le_bytes());
+        image[internal + 0x58..internal + 0x60].copy_from_slice(&5_u64.to_le_bytes());
+        image[internal + 0x60..internal + 0x64].copy_from_slice(&(n_leaves as u32).to_le_bytes());
+        image[internal + 0x64] = 1; // level 1 (internal)
+        for i in 0..n_leaves {
+            let kp = internal + 101 + i * 33;
+            let objectid = 256_u64 + i as u64;
+            image[kp..kp + 8].copy_from_slice(&objectid.to_le_bytes());
+            image[kp + 8] = BTRFS_ITEM_INODE_ITEM;
+            image[kp + 9..kp + 17].copy_from_slice(&0_u64.to_le_bytes());
+            image[kp + 17..kp + 25].copy_from_slice(&leaf_logical(i).to_le_bytes());
+            image[kp + 25..kp + 33].copy_from_slice(&1_u64.to_le_bytes());
+        }
+
+        // Leaves: each holds one INODE_ITEM for objectid 256 + i.
+        for i in 0..n_leaves {
+            let leaf = leaf_logical(i) as usize;
+            let objectid = 256_u64 + i as u64;
+            image[leaf + 0x30..leaf + 0x38].copy_from_slice(&leaf_logical(i).to_le_bytes());
+            image[leaf + 0x50..leaf + 0x58].copy_from_slice(&1_u64.to_le_bytes());
+            image[leaf + 0x58..leaf + 0x60].copy_from_slice(&5_u64.to_le_bytes());
+            image[leaf + 0x60..leaf + 0x64].copy_from_slice(&1_u32.to_le_bytes());
+            image[leaf + 0x64] = 0;
+            write_btrfs_leaf_item(
+                &mut image,
+                leaf,
+                0,
+                objectid,
+                BTRFS_ITEM_INODE_ITEM,
+                0,
+                3000,
+                160,
+            );
+            let mode = if i == 0 { 0o040_755 } else { 0o100_644 };
+            let inode = encode_btrfs_inode_item(mode, 0, 0, 1);
+            image[leaf + 3000..leaf + 3000 + inode.len()].copy_from_slice(&inode);
+            stamp_btrfs_test_tree_block_crc32c(&mut image, leaf);
+        }
+
+        stamp_btrfs_test_tree_block_crc32c(&mut image, root_leaf);
+        stamp_btrfs_test_tree_block_crc32c(&mut image, internal);
+        image
+    }
+
+    /// Device wrapper that counts every `read_exact_at`, used to prove the
+    /// targeted-descent read path reads O(log N) nodes vs the full walk's O(N).
+    struct AllReadsCounter {
+        inner: TestDevice,
+        reads: Arc<AtomicUsize>,
+    }
+
+    impl ByteDevice for AllReadsCounter {
+        fn len_bytes(&self) -> u64 {
+            self.inner.len_bytes()
+        }
+        fn read_exact_at(
+            &self,
+            cx: &Cx,
+            offset: ByteOffset,
+            buf: &mut [u8],
+        ) -> ffs_error::Result<()> {
+            self.reads.fetch_add(1, AtomicOrdering::SeqCst);
+            self.inner.read_exact_at(cx, offset, buf)
+        }
+        fn write_all_at(&self, cx: &Cx, offset: ByteOffset, buf: &[u8]) -> ffs_error::Result<()> {
+            self.inner.write_all_at(cx, offset, buf)
+        }
+        fn sync(&self, cx: &Cx) -> ffs_error::Result<()> {
+            self.inner.sync(cx)
+        }
+    }
+
+    #[test]
+    #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+    fn btrfs_targeted_descent_is_isomorphic_and_reads_fewer_nodes_bd_n040r() {
+        const N: usize = 8;
+        let image = build_btrfs_multileaf_image(N);
+        let reads = Arc::new(AtomicUsize::new(0));
+        let dev = AllReadsCounter {
+            inner: TestDevice::from_vec(image),
+            reads: Arc::clone(&reads),
+        };
+        let cx = Cx::for_testing();
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
+
+        // ISOMORPHISM (golden): for every inode, the targeted range walk returns
+        // exactly the filtered full walk — same keys, same data, same order.
+        let full = fs.walk_btrfs_fs_tree(&cx).unwrap();
+        for i in 0..N {
+            let oid = 256_u64 + i as u64;
+            let expected: Vec<_> = full.iter().filter(|e| e.key.objectid == oid).collect();
+            let got = fs.walk_btrfs_fs_tree_object(&cx, oid).unwrap();
+            assert_eq!(got.len(), expected.len(), "objectid {oid} item count");
+            for (g, e) in got.iter().zip(expected.iter()) {
+                assert_eq!(g.key, e.key, "objectid {oid} key");
+                assert_eq!(g.data, e.data, "objectid {oid} data");
+            }
+        }
+
+        // SCORE (bd-n040r): device-read count, full walk vs targeted descent for
+        // a single inode in the last leaf. Machine-independent (device ops, not
+        // wall-clock — cross-machine timing is unreliable here).
+        reads.store(0, AtomicOrdering::SeqCst);
+        let _ = fs.walk_btrfs_fs_tree(&cx).unwrap();
+        let full_reads = reads.load(AtomicOrdering::SeqCst);
+
+        // First inode: lo=(256,0,0) has no preceding sibling, so descent reads
+        // exactly root-tree + internal + the single covering leaf.
+        reads.store(0, AtomicOrdering::SeqCst);
+        let _ = fs.walk_btrfs_fs_tree_object(&cx, 256).unwrap();
+        let range_reads_first = reads.load(AtomicOrdering::SeqCst);
+
+        // Last inode: lo=(oid,0,0) sorts into the predecessor leaf's key span
+        // (the internal node stores only each child's first key, so descent
+        // conservatively probes that predecessor too) — root-tree + internal +
+        // 2 leaves. Still O(log N) + O(matching leaves), independent of N.
+        reads.store(0, AtomicOrdering::SeqCst);
+        let _ = fs
+            .walk_btrfs_fs_tree_object(&cx, 256 + (N as u64 - 1))
+            .unwrap();
+        let range_reads_last = reads.load(AtomicOrdering::SeqCst);
+
+        // Full walk reads every node: root-tree + internal + all N leaves.
+        assert_eq!(full_reads, N + 2, "full walk should read every node");
+        assert_eq!(
+            range_reads_first, 3,
+            "first-inode descent: root-tree+internal+1 leaf"
+        );
+        assert_eq!(
+            range_reads_last, 4,
+            "last-inode descent: root-tree+internal+2 leaves"
+        );
+        // Score uses the worst-case (last-inode) descent; even that clears 2.0,
+        // and the ratio grows with N while descent stays ~constant.
+        let score = full_reads as f64 / range_reads_last as f64;
+        assert!(
+            score >= 2.0,
+            "targeted-descent Score {score:.2} (full={full_reads} reads, worst-case range={range_reads_last} reads) must be >= 2.0"
+        );
     }
 
     /// Like [`build_btrfs_fsops_image`] but adds a csum tree covering the
