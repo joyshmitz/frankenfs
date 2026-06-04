@@ -10927,6 +10927,45 @@ impl OpenFs {
         }
     }
 
+    /// Stamp the CRC32C of an htree dx_root block (logical block 0 of an
+    /// `EXT4_INDEX_FL` directory). The dx_root checksum lives at the dx tail
+    /// ([`DX_ROOT_COUNT_OFFSET`]), not at the trailing fake-dirent the regular
+    /// [`stamp_ext4_dir_block`] writes — using the wrong one leaves the dir
+    /// e2fsck-dirty.
+    fn stamp_ext4_dx_root_block(&self, block: &mut [u8], dir_ino: u32, generation: u32) {
+        if let Some(sb) = self.ext4_superblock() {
+            if sb.has_metadata_csum() {
+                ffs_ondisk::stamp_dx_block_checksum(
+                    block,
+                    sb.csum_seed(),
+                    dir_ino,
+                    generation,
+                    ffs_ondisk::DX_ROOT_COUNT_OFFSET,
+                );
+            }
+        }
+    }
+
+    /// Repoint a directory's `..` entry to `new_parent_ino` in place. `.`/`..`
+    /// are always the first two entries at fixed offsets 0 and 12 (ext4 invariant,
+    /// enforced by e2fsck), so this works for both linear dir blocks and htree
+    /// dx_roots — and unlike remove/add it does not disturb a dx_root's hidden
+    /// index. Errors if offset 12 does not hold `..`.
+    fn ext4_update_dotdot_inode_in_place(
+        block: &mut [u8],
+        new_parent_ino: u32,
+    ) -> Result<(), FfsError> {
+        // ".." dirent header: inode@12..16, rec_len@16..18, name_len@18, name@20..
+        if block.len() < 22 || block[18] != 2 || &block[20..22] != b".." {
+            return Err(FfsError::Corruption {
+                block: 0,
+                detail: "directory block 0 does not hold '..' at the expected offset".into(),
+            });
+        }
+        block[12..16].copy_from_slice(&new_parent_ino.to_le_bytes());
+        Ok(())
+    }
+
     /// Add a directory entry by scanning existing dir blocks, or allocating a new one.
     #[allow(clippy::too_many_arguments, clippy::significant_drop_tightening)]
     #[expect(clippy::too_many_lines)]
@@ -13223,27 +13262,21 @@ impl OpenFs {
             })?;
             let dot_dot_block = BlockNumber(first_ext.physical_start);
             let mut data = self.read_block_vec(cx, dot_dot_block)?;
-            let reserved_tail = self.ext4_dir_reserved_tail();
-            if !ffs_dir::remove_entry(&mut data, b"..", reserved_tail)? {
-                return Err(FfsError::Corruption {
-                    block: dot_dot_block.0,
-                    detail: "directory missing '..' entry before cross-parent rename".to_owned(),
-                });
-            }
             let parent_ino_u32 = u32::try_from(new_parent.0)
                 .map_err(|_| FfsError::Format("inode number exceeds ext4 32-bit limit".into()))?;
-            ffs_dir::add_entry(
-                &mut data,
-                parent_ino_u32,
-                b"..",
-                Ext4FileType::Dir,
-                reserved_tail,
-            )?;
-            // This block belongs to the moved (child) directory, so its CRC32C
-            // tail is keyed on the child inode's number + generation.
+            // Repoint '..' in place (fixed offset 12). Using remove/add here would
+            // corrupt the moved dir's block 0 when it is an htree dx_root.
+            Self::ext4_update_dotdot_inode_in_place(&mut data, parent_ino_u32)?;
+            // This block belongs to the moved (child) directory, so its CRC32C is
+            // keyed on the child inode's number + generation. An htree dir's block
+            // 0 is a dx_root and needs the dx-root checksum, not the linear one.
             let child_ino_u32 = u32::try_from(child_ino.0)
                 .map_err(|_| FfsError::Format("inode number exceeds ext4 32-bit limit".into()))?;
-            self.stamp_ext4_dir_block(&mut data, child_ino_u32, child_inode.generation);
+            if child_inode.has_htree_index() {
+                self.stamp_ext4_dx_root_block(&mut data, child_ino_u32, child_inode.generation);
+            } else {
+                self.stamp_ext4_dir_block(&mut data, child_ino_u32, child_inode.generation);
+            }
             Some((dot_dot_block, data))
         } else {
             None
@@ -34491,6 +34524,135 @@ mod tests {
         assert!(
             !parsed.entries.is_empty(),
             "dx_root index must be populated"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn cross_parent_rename_of_htree_dir_keeps_dx_root_valid_bd_0h5jy() {
+        // Moving an htree directory to a new parent updates its '..'. That entry
+        // lives in the dx_root (logical block 0); the update must repoint '..' in
+        // place and re-stamp the DX-root checksum — not rewrite it as a linear
+        // block with the regular dir-block checksum (which left it e2fsck-dirty).
+        let Some((fs, _tmp)) = open_writable_ext4_mkfs(32) else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let (csum_seed, hash_seed, has_large_dir, hash_version, block_size) = {
+            let sb = fs.ext4_superblock().expect("sb");
+            (
+                sb.csum_seed(),
+                sb.hash_seed,
+                sb.has_large_dir(),
+                sb.effective_dirhash_version(sb.def_hash_version),
+                usize::try_from(sb.block_size).unwrap(),
+            )
+        };
+
+        let src = fs
+            .mkdir(&cx, root, OsStr::new("src"), 0o755, 0, 0)
+            .expect("mkdir src");
+        let dst = fs
+            .mkdir(&cx, root, OsStr::new("dst"), 0o755, 0, 0)
+            .expect("mkdir dst");
+        let big = fs
+            .mkdir(&cx, src.ino, OsStr::new("big"), 0o755, 0, 0)
+            .expect("mkdir src/big");
+        let big_ino = big.ino;
+        let big_ino_u32 = u32::try_from(big_ino.0).unwrap();
+        let generation = fs.read_inode(&cx, big_ino).expect("read big").generation;
+
+        // Fabricate a real htree directory for `big`.
+        let names: Vec<Vec<u8>> = (0..250)
+            .map(|i| format!("kid_{i:04}.txt").into_bytes())
+            .collect();
+        let entries: Vec<(u32, u8, &[u8])> = names
+            .iter()
+            .enumerate()
+            .map(|(i, n)| {
+                (
+                    9000 + u32::try_from(i).unwrap(),
+                    ffs_ondisk::ext4::EXT4_FT_REG_FILE,
+                    n.as_slice(),
+                )
+            })
+            .collect();
+        let blocks = ffs_ondisk::build_htree_directory_stamped(
+            big_ino_u32,
+            u32::try_from(src.ino.0).unwrap(),
+            &entries,
+            block_size,
+            hash_version,
+            &hash_seed,
+            csum_seed,
+            big_ino_u32,
+            generation,
+        )
+        .expect("build htree");
+        assert!(blocks.len() >= 3, "need dx_root + multiple leaves");
+        install_htree_dir(&fs, &cx, big_ino, &blocks);
+        assert!(
+            fs.read_inode(&cx, big_ino).unwrap().has_htree_index(),
+            "big must be htree-indexed"
+        );
+
+        // Cross-parent rename: src/big -> dst/big.
+        fs.rename(&cx, src.ino, OsStr::new("big"), dst.ino, OsStr::new("big"))
+            .expect("cross-parent rename of an htree directory");
+
+        // The moved dir's block 0 is still a valid dx_root with a valid DX
+        // checksum, and '..' now points to dst.
+        let inode = fs.read_inode(&cx, big_ino).expect("reread big");
+        let exts = fs.collect_extents(&cx, &inode).expect("extents");
+        let block0_phys = exts
+            .iter()
+            .find(|e| e.logical_block == 0)
+            .expect("logical 0")
+            .physical_start;
+        let dxr = fs
+            .read_block_vec(&cx, BlockNumber(block0_phys))
+            .expect("read dx_root");
+        assert!(
+            ffs_ondisk::verify_dx_block_checksum(
+                &dxr,
+                csum_seed,
+                big_ino_u32,
+                generation,
+                ffs_ondisk::DX_ROOT_COUNT_OFFSET,
+            ),
+            "moved htree dir's dx_root checksum must be valid after rename"
+        );
+        let dotdot = u32::from_le_bytes([dxr[12], dxr[13], dxr[14], dxr[15]]);
+        assert_eq!(
+            u64::from(dotdot),
+            dst.ino.0,
+            "moved dir '..' must point to the new parent"
+        );
+
+        // The index still navigates: a sample child remains reachable.
+        let find = ffs_ondisk::htree_find_entry(
+            u32::try_from(block_size).unwrap(),
+            &hash_seed,
+            has_large_dir,
+            b"kid_0100.txt",
+            |v| v,
+            |lb| {
+                let exts = fs.collect_extents(&cx, &inode).ok()?;
+                let phys = exts.iter().find_map(|e| {
+                    let len = u32::from(e.actual_len());
+                    if lb >= e.logical_block && lb < e.logical_block + len {
+                        Some(e.physical_start + u64::from(lb - e.logical_block))
+                    } else {
+                        None
+                    }
+                })?;
+                fs.read_block_vec(&cx, BlockNumber(phys)).ok()
+            },
+        );
+        assert!(
+            matches!(find, ffs_ondisk::HtreeFindResult::Found(_)),
+            "moved htree dir must remain index-navigable"
         );
     }
 
