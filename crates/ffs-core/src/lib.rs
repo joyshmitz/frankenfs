@@ -7824,8 +7824,14 @@ impl OpenFs {
                 };
                 let idx = &indexes[i];
 
-                let child_data =
-                    self.read_block_with_scope(cx, scope, BlockNumber(idx.leaf_block))?;
+                // Extent-tree index/leaf blocks are immutable on a read-only
+                // mount; route them through the RO block cache so re-descents
+                // through a shared index block hit memory (bd-nlggu).
+                let child_data = self.read_ext4_file_data_block_with_scope(
+                    cx,
+                    scope,
+                    BlockNumber(idx.leaf_block),
+                )?;
                 let (child_header, child_tree) =
                     parse_extent_tree(&child_data).map_err(|e| parse_to_ffs_error(&e))?;
 
@@ -7891,8 +7897,13 @@ impl OpenFs {
                     });
                 }
                 for idx in indexes {
-                    let child_data =
-                        self.read_block_with_scope(cx, scope, BlockNumber(idx.leaf_block))?;
+                    // Cache extent-tree child blocks on read-only mounts so
+                    // repeated flattens reuse them (bd-nlggu).
+                    let child_data = self.read_ext4_file_data_block_with_scope(
+                        cx,
+                        scope,
+                        BlockNumber(idx.leaf_block),
+                    )?;
                     let (child_header, child_tree) =
                         parse_extent_tree(&child_data).map_err(|e| parse_to_ffs_error(&e))?;
                     if child_header.depth + 1 != remaining_depth {
@@ -30046,6 +30057,130 @@ mod tests {
         assert!(
             score >= 2.0,
             "extent-range cache Score {score:.2} (4 blocks: cached={reads} read vs uncached=4) must be >= 2.0"
+        );
+    }
+
+    /// Inode #11 with a depth-1 extent tree whose single index block (block 14)
+    /// has TWO index entries → two leaf blocks (15, 16) covering disjoint
+    /// logical ranges (block 0 and block 100). Resolving an extent in each leaf
+    /// re-descends through the SHARED index block 14, exercising bd-nlggu.
+    fn build_ext4_image_with_shared_index_block() -> Vec<u8> {
+        let block_size: u32 = 4096;
+        let image_size: u32 = 256 * 1024;
+        let mut image = vec![0_u8; image_size as usize];
+        let sb_off = EXT4_SUPERBLOCK_OFFSET;
+
+        image[sb_off + 0x38..sb_off + 0x3A].copy_from_slice(&EXT4_SUPER_MAGIC.to_le_bytes());
+        image[sb_off + 0x18..sb_off + 0x1C].copy_from_slice(&2_u32.to_le_bytes());
+        let blocks_count = image_size / block_size;
+        image[sb_off + 0x04..sb_off + 0x08].copy_from_slice(&blocks_count.to_le_bytes());
+        image[sb_off..sb_off + 0x04].copy_from_slice(&128_u32.to_le_bytes());
+        image[sb_off + 0x14..sb_off + 0x18].copy_from_slice(&0_u32.to_le_bytes());
+        image[sb_off + 0x20..sb_off + 0x24].copy_from_slice(&blocks_count.to_le_bytes());
+        image[sb_off + 0x28..sb_off + 0x2C].copy_from_slice(&128_u32.to_le_bytes());
+        image[sb_off + 0x58..sb_off + 0x5A].copy_from_slice(&256_u16.to_le_bytes());
+        image[sb_off + 0x4C..sb_off + 0x50].copy_from_slice(&1_u32.to_le_bytes());
+        let incompat: u32 = 0x0002 | 0x0040;
+        image[sb_off + 0x60..sb_off + 0x64].copy_from_slice(&incompat.to_le_bytes());
+        image[sb_off + 0x54..sb_off + 0x58].copy_from_slice(&11_u32.to_le_bytes());
+
+        let gd_off: usize = 4096;
+        image[gd_off..gd_off + 4].copy_from_slice(&2_u32.to_le_bytes());
+        image[gd_off + 4..gd_off + 8].copy_from_slice(&3_u32.to_le_bytes());
+        image[gd_off + 8..gd_off + 12].copy_from_slice(&4_u32.to_le_bytes());
+
+        // Inode #11: regular file, 101 logical blocks, depth-1 extent tree.
+        let ino_off: usize = 4 * 4096 + 10 * 256;
+        image[ino_off..ino_off + 2].copy_from_slice(&0o100_644_u16.to_le_bytes());
+        image[ino_off + 4..ino_off + 8].copy_from_slice(&(101 * block_size).to_le_bytes());
+        image[ino_off + 0x1A..ino_off + 0x1C].copy_from_slice(&1_u16.to_le_bytes());
+        image[ino_off + 0x20..ino_off + 0x24].copy_from_slice(&0x0008_0000_u32.to_le_bytes());
+        image[ino_off + 0x80..ino_off + 0x82].copy_from_slice(&32_u16.to_le_bytes());
+
+        // Extent header (depth=1) + two index entries → leaf blocks 15 and 16.
+        let e = ino_off + 0x28;
+        image[e..e + 2].copy_from_slice(&0xF30A_u16.to_le_bytes());
+        image[e + 2..e + 4].copy_from_slice(&2_u16.to_le_bytes()); // entries=2
+        image[e + 4..e + 6].copy_from_slice(&4_u16.to_le_bytes());
+        image[e + 6..e + 8].copy_from_slice(&1_u16.to_le_bytes()); // depth=1
+        // index entry 0: logical 0 → leaf block 15
+        image[e + 12..e + 16].copy_from_slice(&0_u32.to_le_bytes());
+        image[e + 16..e + 20].copy_from_slice(&15_u32.to_le_bytes());
+        // index entry 1: logical 100 → leaf block 16
+        image[e + 24..e + 28].copy_from_slice(&100_u32.to_le_bytes());
+        image[e + 28..e + 32].copy_from_slice(&16_u32.to_le_bytes());
+
+        // Leaf block 15 (depth=0): extent logical 0, len 1 → physical 20.
+        let l = 15 * 4096;
+        image[l..l + 2].copy_from_slice(&0xF30A_u16.to_le_bytes());
+        image[l + 2..l + 4].copy_from_slice(&1_u16.to_le_bytes());
+        image[l + 4..l + 6].copy_from_slice(&340_u16.to_le_bytes());
+        image[l + 6..l + 8].copy_from_slice(&0_u16.to_le_bytes());
+        image[l + 12..l + 16].copy_from_slice(&0_u32.to_le_bytes());
+        image[l + 16..l + 18].copy_from_slice(&1_u16.to_le_bytes());
+        image[l + 20..l + 24].copy_from_slice(&20_u32.to_le_bytes());
+
+        // Leaf block 16 (depth=0): extent logical 100, len 1 → physical 21.
+        let l2 = 16 * 4096;
+        image[l2..l2 + 2].copy_from_slice(&0xF30A_u16.to_le_bytes());
+        image[l2 + 2..l2 + 4].copy_from_slice(&1_u16.to_le_bytes());
+        image[l2 + 4..l2 + 6].copy_from_slice(&340_u16.to_le_bytes());
+        image[l2 + 6..l2 + 8].copy_from_slice(&0_u16.to_le_bytes());
+        image[l2 + 12..l2 + 16].copy_from_slice(&100_u32.to_le_bytes());
+        image[l2 + 16..l2 + 18].copy_from_slice(&1_u16.to_le_bytes());
+        image[l2 + 20..l2 + 24].copy_from_slice(&21_u32.to_le_bytes());
+
+        image
+    }
+
+    #[test]
+    #[allow(clippy::cast_precision_loss, clippy::similar_names)]
+    fn ext4_extent_index_block_cache_hits_in_read_only_mode_bd_nlggu() {
+        // Depth-1 tree: the inode body holds the index entries; leaf blocks 15
+        // and 16 are the child blocks read during descent. Count reads of leaf
+        // block 15.
+        let image = build_ext4_image_with_shared_index_block();
+        let dev = CountingDevice::new(TestDevice::from_vec(image), ByteOffset(15 * 4096));
+        let cx = Cx::for_testing();
+        let fs = OpenFs::from_device(&cx, Box::new(dev.clone()), &OpenOptions::default()).unwrap();
+        let inode = fs.read_inode(&cx, InodeNumber(11)).unwrap();
+        let scope = RequestScope::empty();
+        dev.reset_count();
+
+        // ISOMORPHISM: block 0 → physical 20 (leaf 15), block 100 → physical 21
+        // (leaf 16). The first descent reads leaf 15 once and caches it.
+        let (p0, _) = fs.resolve_extent(&cx, &scope, &inode, 0).unwrap().unwrap();
+        let (p100, _) = fs
+            .resolve_extent(&cx, &scope, &inode, 100)
+            .unwrap()
+            .unwrap();
+        assert_eq!(p0, 20, "block 0 maps to physical 20");
+        assert_eq!(p100, 21, "block 100 maps to physical 21");
+        assert_eq!(
+            dev.read_count(),
+            1,
+            "leaf block 15 read once on first descent"
+        );
+
+        // SCORE (bd-nlggu): drop the extent-mapping cache so block 0 must
+        // re-descend (as a fragmented file's random access would). The leaf
+        // block is now served from the read-only block cache — zero device
+        // reads — instead of being re-read. Re-descent: 1 read uncached → 0
+        // cached, so across the two descents leaf 15 is read once, not twice.
+        fs.extent_cache.invalidate_all();
+        dev.reset_count();
+        let (p0b, _) = fs.resolve_extent(&cx, &scope, &inode, 0).unwrap().unwrap();
+        assert_eq!(p0b, 20, "re-descent maps block 0 to physical 20");
+        let reread = dev.read_count();
+        assert_eq!(
+            reread, 0,
+            "re-descent to leaf 15 must hit the block cache (0 device reads)"
+        );
+        let score = 2.0 / (1 + reread) as f64;
+        assert!(
+            score >= 2.0,
+            "extent child-block cache Score {score:.2} (2 descents: cached={} reads vs uncached=2) must be >= 2.0",
+            1 + reread
         );
     }
 
