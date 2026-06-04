@@ -7478,6 +7478,7 @@ impl OpenFs {
         scope: &RequestScope,
         inode: &Ext4Inode,
     ) -> Result<Vec<Ext4DirEntry>, FfsError> {
+        Self::ext4_reject_inline_data_dir(inode)?;
         let bs = u64::from(self.block_size());
         let num_blocks = dir_logical_block_count(inode.size, bs)?;
         let mut all_entries = Vec::new();
@@ -7516,6 +7517,7 @@ impl OpenFs {
         dir_inode: &Ext4Inode,
         name: &[u8],
     ) -> Result<Option<Ext4DirEntry>, FfsError> {
+        Self::ext4_reject_inline_data_dir(dir_inode)?;
         if let Some(entry) = self.htree_lookup_name_with_scope(cx, scope, dir_inode, name) {
             return Ok(Some(entry));
         }
@@ -11013,6 +11015,7 @@ impl OpenFs {
             let dev = &tx_dev;
 
             // Collect existing directory extents.
+            Self::ext4_reject_inline_data_dir(parent_inode)?;
             let extents = self.collect_extents(cx, parent_inode)?;
 
             // Try adding to each existing block.
@@ -14288,6 +14291,24 @@ impl OpenFs {
         // compressed inodes are not misclassified as inline-data files.
         inode.flags & ffs_types::EXT4_INLINE_DATA_FL != 0
             && inode.flags & ffs_types::EXT4_COMPR_FL == 0
+    }
+
+    /// Reject directory operations on an `inline_data` directory.
+    ///
+    /// Inline-data directories store their entries inside the inode (i_block +
+    /// the `system.data` ibody xattr), not in extent-mapped blocks. FrankenFS
+    /// has no inline-directory parser, so block-based readdir/lookup/insert
+    /// would silently see an empty directory (and an empty readdir can let
+    /// `rmdir` drop a non-empty dir) or overwrite the inline entries with a
+    /// fresh extent root (data loss). Until full inline-dir support lands
+    /// (bd-4y9ca), fail loudly instead of corrupting.
+    fn ext4_reject_inline_data_dir(inode: &Ext4Inode) -> Result<(), FfsError> {
+        if Self::ext4_inode_uses_inline_data(inode) {
+            return Err(FfsError::UnsupportedFeature(
+                "ext4 inline_data directories are not yet supported (bd-4y9ca)".to_owned(),
+            ));
+        }
+        Ok(())
     }
 
     fn seed_e2compr_defaults_for_inode(inode: &mut Ext4Inode) {
@@ -35057,6 +35078,50 @@ mod tests {
         assert!(
             miss.is_none(),
             "lookup_name must report a real miss as None"
+        );
+    }
+
+    #[test]
+    fn inline_data_directory_operations_fail_loudly_bd_4y9ca() {
+        // FrankenFS has no inline-directory parser, so directory ops on an
+        // EXT4_INLINE_DATA_FL inode must return a clean UnsupportedFeature error
+        // rather than silently reading an empty dir (which would let rmdir drop a
+        // non-empty dir) or overwriting the inline entries on insert (data loss).
+        let Some((fs, _tmp)) = open_writable_ext4_mkfs(8) else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let dir = fs
+            .mkdir(&cx, root, OsStr::new("inlinedir"), 0o755, 0, 0)
+            .expect("mkdir");
+
+        // Flag the directory inode as inline_data (mirrors an inline_data image).
+        let mut inode = fs.read_inode(&cx, dir.ino).expect("read inode");
+        inode.flags |= ffs_types::EXT4_INLINE_DATA_FL;
+        inode.flags &= !ffs_types::EXT4_COMPR_FL;
+        fs.persist_ext4_inode_for_testing(&cx, dir.ino, &inode)
+            .expect("persist inline flag");
+
+        let reread = fs.read_inode(&cx, dir.ino).expect("reread");
+        assert!(
+            matches!(
+                fs.read_dir(&cx, &reread),
+                Err(FfsError::UnsupportedFeature(_))
+            ),
+            "read_dir on an inline_data dir must fail loudly, not return empty"
+        );
+        assert!(
+            matches!(
+                fs.lookup_name(&cx, &reread, b"anything"),
+                Err(FfsError::UnsupportedFeature(_))
+            ),
+            "lookup on an inline_data dir must fail loudly"
+        );
+        assert!(
+            fs.create(&cx, dir.ino, OsStr::new("newfile.txt"), 0o644, 0, 0)
+                .is_err(),
+            "create in an inline_data dir must fail, not lose the inline entries"
         );
     }
 
