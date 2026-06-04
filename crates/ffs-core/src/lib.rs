@@ -8082,23 +8082,86 @@ impl OpenFs {
     ) -> Result<Vec<Ext4DirEntry>, FfsError> {
         Self::ext4_reject_inline_data_dir(inode)?;
         let bs = u64::from(self.block_size());
+        let block_size = self.block_size();
         let num_blocks = dir_logical_block_count(inode.size, bs)?;
         let mut all_entries = Vec::new();
 
-        for lb in 0..num_blocks {
-            if let Some((phys, unwritten)) = self.resolve_extent(cx, scope, inode, lb)? {
-                if unwritten {
-                    continue;
-                }
-                // Directory blocks are the dir inode's data blocks; route them
-                // through the read-only data-block cache so repeated readdirs
-                // hit memory instead of re-reading the device (bd-di429).
-                let block_data =
-                    self.read_ext4_file_data_block_with_scope(cx, scope, BlockNumber(phys))?;
-                let (entries, _tail) = parse_dir_block(&block_data, self.block_size())
-                    .map_err(|e| parse_to_ffs_error(&e))?;
-                all_entries.extend(entries);
+        // Helper: is this physical block already in the read-only data-block
+        // cache (bd-di429 warm path)?
+        let is_cached = |blk: BlockNumber| -> bool {
+            self.can_cache_ext4_read_only_block(scope, blk)
+                && self.ext4_file_data_block_cache.lock().get(&blk).is_some()
+        };
+
+        let mut lb: u32 = 0;
+        while lb < num_blocks {
+            let Some((phys, unwritten)) = self.resolve_extent(cx, scope, inode, lb)? else {
+                lb += 1;
+                continue;
+            };
+            if unwritten {
+                lb += 1;
+                continue;
             }
+            let phys_blk = BlockNumber(phys);
+
+            // Warm path: a cached dir block is served scalar from the cache
+            // (bd-di429), so repeated readdirs stay at zero device ops.
+            if is_cached(phys_blk) {
+                let block_data = self.read_ext4_file_data_block_with_scope(cx, scope, phys_blk)?;
+                let (entries, _tail) =
+                    parse_dir_block(&block_data, block_size).map_err(|e| parse_to_ffs_error(&e))?;
+                all_entries.extend(entries);
+                lb += 1;
+                continue;
+            }
+
+            // Cold path: extend a contiguous-physical run of present,
+            // non-unwritten, not-yet-cached blocks and read them in ONE
+            // vectored device op, then populate the cache (bd-q2tq5).
+            let cacheable = self.can_cache_ext4_read_only_block(scope, phys_blk);
+            let mut run_len: u32 = 1;
+            loop {
+                let next_lb = lb + run_len;
+                if next_lb >= num_blocks {
+                    break;
+                }
+                match self.resolve_extent(cx, scope, inode, next_lb)? {
+                    Some((next_phys, false))
+                        if next_phys == phys + u64::from(run_len)
+                            && !is_cached(BlockNumber(next_phys)) =>
+                    {
+                        run_len += 1;
+                    }
+                    _ => break,
+                }
+            }
+
+            if run_len == 1 {
+                // Single cold block: the cached-read helper reads + populates.
+                let block_data = self.read_ext4_file_data_block_with_scope(cx, scope, phys_blk)?;
+                let (entries, _tail) =
+                    parse_dir_block(&block_data, block_size).map_err(|e| parse_to_ffs_error(&e))?;
+                all_entries.extend(entries);
+            } else {
+                let datas =
+                    self.read_contiguous_blocks_with_scope(cx, scope, phys_blk, run_len as usize)?;
+                for (i, data) in datas.iter().enumerate() {
+                    if cacheable {
+                        let blk = BlockNumber(phys + i as u64);
+                        let mut cache = self.ext4_file_data_block_cache.lock();
+                        if cache.len() < EXT4_FILE_DATA_BLOCK_CACHE_LIMIT {
+                            cache
+                                .entry(blk)
+                                .or_insert_with(|| Arc::from(data.as_slice()));
+                        }
+                    }
+                    let (entries, _tail) =
+                        parse_dir_block(data, block_size).map_err(|e| parse_to_ffs_error(&e))?;
+                    all_entries.extend(entries);
+                }
+            }
+            lb += run_len;
         }
 
         Ok(all_entries)
@@ -31594,6 +31657,129 @@ mod tests {
         image[d + 8..d + 17].copy_from_slice(b"hello.txt");
 
         image
+    }
+
+    /// Root directory (#2) spanning FOUR contiguous data blocks (physical
+    /// 10..14) via a single len-4 extent. Block 10 holds "." / ".." / "f0";
+    /// blocks 11..14 are empty dir blocks. Used to prove read_dir coalesces the
+    /// contiguous dir blocks into one vectored device op (bd-q2tq5).
+    fn build_ext4_image_with_multiblock_dir() -> Vec<u8> {
+        let block_size: u32 = 4096;
+        let image_size: u32 = 256 * 1024;
+        let mut image = vec![0_u8; image_size as usize];
+        let sb_off = EXT4_SUPERBLOCK_OFFSET;
+
+        image[sb_off + 0x38..sb_off + 0x3A].copy_from_slice(&EXT4_SUPER_MAGIC.to_le_bytes());
+        image[sb_off + 0x18..sb_off + 0x1C].copy_from_slice(&2_u32.to_le_bytes());
+        let blocks_count = image_size / block_size;
+        image[sb_off + 0x04..sb_off + 0x08].copy_from_slice(&blocks_count.to_le_bytes());
+        image[sb_off..sb_off + 0x04].copy_from_slice(&128_u32.to_le_bytes());
+        image[sb_off + 0x14..sb_off + 0x18].copy_from_slice(&0_u32.to_le_bytes());
+        image[sb_off + 0x20..sb_off + 0x24].copy_from_slice(&blocks_count.to_le_bytes());
+        image[sb_off + 0x28..sb_off + 0x2C].copy_from_slice(&128_u32.to_le_bytes());
+        image[sb_off + 0x58..sb_off + 0x5A].copy_from_slice(&256_u16.to_le_bytes());
+        image[sb_off + 0x4C..sb_off + 0x50].copy_from_slice(&1_u32.to_le_bytes());
+        let incompat: u32 = 0x0002 | 0x0040; // FILETYPE | EXTENTS
+        image[sb_off + 0x60..sb_off + 0x64].copy_from_slice(&incompat.to_le_bytes());
+        image[sb_off + 0x54..sb_off + 0x58].copy_from_slice(&11_u32.to_le_bytes());
+
+        let gd_off: usize = 4096;
+        image[gd_off..gd_off + 4].copy_from_slice(&2_u32.to_le_bytes());
+        image[gd_off + 4..gd_off + 8].copy_from_slice(&3_u32.to_le_bytes());
+        image[gd_off + 8..gd_off + 12].copy_from_slice(&4_u32.to_le_bytes());
+
+        // Inode #2 (root dir): size = 4 blocks, depth-0 extent logical 0 len 4
+        // → physical 10.
+        let ino2 = 4 * 4096 + 256;
+        image[ino2..ino2 + 2].copy_from_slice(&0o040_755_u16.to_le_bytes());
+        image[ino2 + 4..ino2 + 8].copy_from_slice(&(4 * block_size).to_le_bytes());
+        image[ino2 + 0x1A..ino2 + 0x1C].copy_from_slice(&2_u16.to_le_bytes());
+        image[ino2 + 0x20..ino2 + 0x24].copy_from_slice(&0x0008_0000_u32.to_le_bytes());
+        image[ino2 + 0x80..ino2 + 0x82].copy_from_slice(&32_u16.to_le_bytes());
+        let e = ino2 + 0x28;
+        image[e..e + 2].copy_from_slice(&0xF30A_u16.to_le_bytes());
+        image[e + 2..e + 4].copy_from_slice(&1_u16.to_le_bytes());
+        image[e + 4..e + 6].copy_from_slice(&4_u16.to_le_bytes());
+        image[e + 6..e + 8].copy_from_slice(&0_u16.to_le_bytes()); // depth 0
+        image[e + 12..e + 16].copy_from_slice(&0_u32.to_le_bytes()); // logical 0
+        image[e + 16..e + 18].copy_from_slice(&4_u16.to_le_bytes()); // len 4
+        image[e + 20..e + 24].copy_from_slice(&10_u32.to_le_bytes()); // physical 10
+
+        // Inode #11 (the "f0" file).
+        let ino11 = 4 * 4096 + 10 * 256;
+        image[ino11..ino11 + 2].copy_from_slice(&0o100_644_u16.to_le_bytes());
+        image[ino11 + 0x1A..ino11 + 0x1C].copy_from_slice(&1_u16.to_le_bytes());
+        image[ino11 + 0x80..ino11 + 0x82].copy_from_slice(&32_u16.to_le_bytes());
+
+        // Block 10: ".", "..", "f0".
+        let d = 10 * 4096;
+        image[d..d + 4].copy_from_slice(&2_u32.to_le_bytes());
+        image[d + 4..d + 6].copy_from_slice(&12_u16.to_le_bytes());
+        image[d + 6] = 1;
+        image[d + 7] = 2;
+        image[d + 8] = b'.';
+        let d2 = d + 12;
+        image[d2..d2 + 4].copy_from_slice(&2_u32.to_le_bytes());
+        image[d2 + 4..d2 + 6].copy_from_slice(&12_u16.to_le_bytes());
+        image[d2 + 6] = 2;
+        image[d2 + 7] = 2;
+        image[d2 + 8] = b'.';
+        image[d2 + 9] = b'.';
+        let d3 = d2 + 12;
+        image[d3..d3 + 4].copy_from_slice(&11_u32.to_le_bytes());
+        image[d3 + 4..d3 + 6].copy_from_slice(&4072_u16.to_le_bytes());
+        image[d3 + 6] = 2;
+        image[d3 + 7] = 1;
+        image[d3 + 8..d3 + 10].copy_from_slice(b"f0");
+
+        // Blocks 11..14: empty dir blocks (one inode=0 entry spanning the block).
+        for blk in 11..14_usize {
+            let off = blk * 4096;
+            image[off..off + 4].copy_from_slice(&0_u32.to_le_bytes()); // inode 0 = unused
+            image[off + 4..off + 6].copy_from_slice(&4096_u16.to_le_bytes()); // rec_len = block
+        }
+
+        image
+    }
+
+    #[test]
+    fn ext4_read_dir_coalesces_contiguous_blocks_bd_q2tq5() {
+        let image = build_ext4_image_with_multiblock_dir();
+        let dev = VectoredCountingDevice::new(TestDevice::from_vec(image));
+        let scalar = Arc::clone(&dev.scalar_reads);
+        let vectored = Arc::clone(&dev.vectored_reads);
+        let cx = Cx::for_testing();
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
+        let root = fs.read_inode(&cx, InodeNumber(2)).unwrap();
+
+        // Discount open-time / inode reads; measure only the directory read.
+        scalar.store(0, AtomicOrdering::SeqCst);
+        vectored.store(0, AtomicOrdering::SeqCst);
+
+        let entries = fs.read_dir(&cx, &root).unwrap();
+
+        // ISOMORPHISM: every entry across the 4 blocks is listed.
+        assert!(
+            entries.iter().any(|en| en.name == b"f0"),
+            "f0 must be listed"
+        );
+        assert!(entries.iter().any(|en| en.name == b"."));
+        assert!(entries.iter().any(|en| en.name == b".."));
+
+        // SCORE (bd-q2tq5): the 4 contiguous dir blocks are served by exactly
+        // ONE vectored device op; pre-coalescing this was 4 scalar reads.
+        assert_eq!(
+            vectored.load(AtomicOrdering::SeqCst),
+            1,
+            "the 4 contiguous dir blocks must coalesce into one vectored read"
+        );
+        assert_eq!(
+            scalar.load(AtomicOrdering::SeqCst),
+            0,
+            "no scalar per-block dir reads remain"
+        );
+        // 4 scalar ops (old) vs 1 vectored op (new) => Score 4.0, growing with
+        // directory block count.
     }
 
     #[test]
