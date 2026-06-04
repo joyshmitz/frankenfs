@@ -8036,6 +8036,64 @@ impl OpenFs {
         Ok(inline_data[start..end].to_vec())
     }
 
+    /// Read the payload of an EA-inode-backed xattr value (the EA_INODE
+    /// feature). A large attribute value is stored as the file data of a
+    /// dedicated "EA inode" (referenced by `e_value_inum`); its `i_size` is the
+    /// value length. Read that many bytes from the EA inode's extent-mapped
+    /// data blocks, leaving zeros for any (unexpected) holes.
+    fn ext4_read_ea_inode_value(&self, cx: &Cx, value_inum: u32) -> ffs_error::Result<Vec<u8>> {
+        let ea_ino = InodeNumber(u64::from(value_inum));
+        let ea_inode = self.read_inode(cx, ea_ino)?;
+        let value_len = usize::try_from(ea_inode.size).map_err(|_| FfsError::Corruption {
+            block: 0,
+            detail: format!("EA inode {value_inum} value size exceeds addressable range"),
+        })?;
+        if value_len == 0 {
+            return Ok(Vec::new());
+        }
+        let block_size = usize::try_from(self.block_size())
+            .map_err(|_| FfsError::Format("block size does not fit usize".into()))?;
+        let mut value = vec![0_u8; value_len];
+        let extents = self.collect_extents(cx, &ea_inode)?;
+        for ext in &extents {
+            if ext.is_unwritten() {
+                continue; // hole: leave zeros
+            }
+            for i in 0..u64::from(ext.actual_len()) {
+                let logical = u64::from(ext.logical_block) + i;
+                let Ok(logical_usize) = usize::try_from(logical) else {
+                    continue;
+                };
+                let Some(start) = logical_usize.checked_mul(block_size) else {
+                    continue;
+                };
+                if start >= value_len {
+                    continue;
+                }
+                let phys =
+                    ext.physical_start
+                        .checked_add(i)
+                        .ok_or_else(|| FfsError::Corruption {
+                            block: 0,
+                            detail: format!(
+                                "EA inode {value_inum} extent physical offset overflow"
+                            ),
+                        })?;
+                let block = self.read_block_vec(cx, BlockNumber(phys))?;
+                let end = (start + block_size).min(value_len);
+                let take = end - start;
+                if take > block.len() {
+                    return Err(FfsError::Corruption {
+                        block: phys,
+                        detail: format!("EA inode {value_inum} short block read"),
+                    });
+                }
+                value[start..end].copy_from_slice(&block[..take]);
+            }
+        }
+        Ok(value)
+    }
+
     /// Read file data from an ext2/ext4 inode with compressed clusters (e2compr).
     ///
     /// Compressed files use indirect block addressing. For each cluster of
@@ -20856,19 +20914,25 @@ impl FsOps for OpenFs {
         match &self.flavor {
             FsFlavor::Ext4(_) => {
                 let inode = self.read_inode(cx, Self::ext4_canonical_inode(ino))?;
-                let mut xattrs =
-                    ffs_ondisk::parse_ibody_xattrs(&inode).map_err(|e| parse_to_ffs_error(&e))?;
+                let mut xattrs = ffs_ondisk::parse_ibody_xattrs_with_inum(&inode)
+                    .map_err(|e| parse_to_ffs_error(&e))?;
                 if inode.file_acl != 0 {
                     let block_data = self.read_block_vec(cx, BlockNumber(inode.file_acl))?;
-                    let block_xattrs = ffs_ondisk::parse_xattr_block(&block_data)
+                    let block_xattrs = ffs_ondisk::parse_xattr_block_with_inum(&block_data)
                         .map_err(|e| parse_to_ffs_error(&e))?;
                     xattrs.extend(block_xattrs);
                 }
-                Ok(xattrs
-                    .into_iter()
-                    .find(|x| x.full_name() == name)
-                    .map(ext4_present_xattr_value)
-                    .transpose()?)
+                let Some((mut xattr, value_inum)) =
+                    xattrs.into_iter().find(|(x, _)| x.full_name() == name)
+                else {
+                    return Ok(None);
+                };
+                // EA_INODE-backed value: the payload lives in a separate inode
+                // (xattr.value is the empty in-block placeholder). Read it.
+                if value_inum != 0 {
+                    xattr.value = self.ext4_read_ea_inode_value(cx, value_inum)?;
+                }
+                Ok(Some(ext4_present_xattr_value(xattr)?))
             }
             FsFlavor::Btrfs(_) => self.btrfs_getxattr(cx, ino, name),
         }

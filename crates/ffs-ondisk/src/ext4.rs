@@ -4804,6 +4804,23 @@ fn parse_xattr_entries(
     value_base: &[u8],
     value_offset_base: usize,
 ) -> Result<Vec<Ext4Xattr>, ParseError> {
+    Ok(
+        parse_xattr_entries_with_inum(data, value_base, value_offset_base)?
+            .into_iter()
+            .map(|(xattr, _value_inum)| xattr)
+            .collect(),
+    )
+}
+
+/// Like [`parse_xattr_entries`] but also returns each attribute's
+/// `e_value_inum` (0 for in-block values, non-zero for EA-inode-backed values
+/// whose payload lives in a separate inode). Callers with device access use
+/// the inum to read the external value; in-block callers can ignore it.
+fn parse_xattr_entries_with_inum(
+    data: &[u8],
+    value_base: &[u8],
+    value_offset_base: usize,
+) -> Result<Vec<(Ext4Xattr, u32)>, ParseError> {
     struct PendingXattr {
         name_index: u8,
         name: Vec<u8>,
@@ -4906,11 +4923,14 @@ fn parse_xattr_entries(
             Vec::new()
         };
 
-        entries.push(Ext4Xattr {
-            name_index: pending_entry.name_index,
-            name: pending_entry.name,
-            value,
-        });
+        entries.push((
+            Ext4Xattr {
+                name_index: pending_entry.name_index,
+                name: pending_entry.name,
+                value,
+            },
+            pending_entry.value_inum,
+        ));
     }
 
     Ok(entries)
@@ -4952,6 +4972,43 @@ pub fn parse_xattr_block(block_data: &[u8]) -> Result<Vec<Ext4Xattr>, ParseError
     }
     let entries_region = &block_data[32..];
     parse_xattr_entries(entries_region, block_data, 32)
+}
+
+/// Like [`parse_ibody_xattrs`] but also returns each attribute's `e_value_inum`
+/// (0 = in-block value; non-zero = EA-inode-backed, payload in that inode).
+pub fn parse_ibody_xattrs_with_inum(
+    inode: &Ext4Inode,
+) -> Result<Vec<(Ext4Xattr, u32)>, ParseError> {
+    if inode.xattr_ibody.len() < 4 {
+        return Ok(Vec::new());
+    }
+    let magic = read_le_u32(&inode.xattr_ibody, 0)?;
+    if magic != EXT4_XATTR_MAGIC {
+        return Ok(Vec::new());
+    }
+    let entries = &inode.xattr_ibody[4..];
+    parse_xattr_entries_with_inum(entries, entries, 0)
+}
+
+/// Like [`parse_xattr_block`] but also returns each attribute's `e_value_inum`
+/// (0 = in-block value; non-zero = EA-inode-backed, payload in that inode).
+pub fn parse_xattr_block_with_inum(block_data: &[u8]) -> Result<Vec<(Ext4Xattr, u32)>, ParseError> {
+    if block_data.len() < 32 {
+        return Err(ParseError::InsufficientData {
+            needed: 32,
+            offset: 0,
+            actual: block_data.len(),
+        });
+    }
+    let magic = read_le_u32(block_data, 0)?;
+    if magic != EXT4_XATTR_MAGIC {
+        return Err(ParseError::InvalidMagic {
+            expected: u64::from(EXT4_XATTR_MAGIC),
+            actual: u64::from(magic),
+        });
+    }
+    let entries_region = &block_data[32..];
+    parse_xattr_entries_with_inum(entries_region, block_data, 32)
 }
 
 // ── Hash-tree (htree/DX) structures and algorithms ──────────────────────────
@@ -10753,6 +10810,45 @@ mod tests {
         assert!(
             entries[1].value.is_empty(),
             "EA-inode value is not read from this block"
+        );
+    }
+
+    #[test]
+    fn parse_xattr_block_with_inum_surfaces_ea_inode_reference_bd_bj00n() {
+        // Full external xattr block: 32-byte header (magic) + entries at +32.
+        let mut block = vec![0_u8; 256];
+        block[0..4].copy_from_slice(&ffs_types::EXT4_XATTR_MAGIC.to_le_bytes());
+
+        // Entry 1 (in-block): user.test = "val" at value_offs 200.
+        block[32] = 4; // name_len
+        block[33] = ffs_types::EXT4_XATTR_INDEX_USER;
+        block[34..36].copy_from_slice(&200_u16.to_le_bytes()); // value_offs
+        block[36..40].copy_from_slice(&0_u32.to_le_bytes()); // value_inum = 0
+        block[40..44].copy_from_slice(&3_u32.to_le_bytes()); // value_size
+        block[48..52].copy_from_slice(b"test");
+        block[200..203].copy_from_slice(b"val");
+
+        // Entry 2 (EA-inode-backed): user.big, value in inode 77, offs 0.
+        block[52] = 3; // name_len
+        block[53] = ffs_types::EXT4_XATTR_INDEX_USER;
+        block[54..56].copy_from_slice(&0_u16.to_le_bytes()); // value_offs = 0
+        block[56..60].copy_from_slice(&77_u32.to_le_bytes()); // value_inum = 77
+        block[60..64].copy_from_slice(&5000_u32.to_le_bytes()); // value_size
+        block[68..71].copy_from_slice(b"big");
+
+        // Terminator at region offset 40 (block byte 72).
+        block[72] = 0;
+        block[73] = 0;
+
+        let entries = super::parse_xattr_block_with_inum(&block).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].0.full_name(), "user.test");
+        assert_eq!(entries[0].0.value, b"val");
+        assert_eq!(entries[0].1, 0, "in-block value has no EA inode");
+        assert_eq!(entries[1].0.full_name(), "user.big");
+        assert_eq!(
+            entries[1].1, 77,
+            "EA-inode reference is surfaced to the caller"
         );
     }
 
