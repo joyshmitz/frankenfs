@@ -12160,7 +12160,7 @@ impl OpenFs {
             .map_err(|_| FfsError::Format("inode number exceeds ext4 32-bit limit".into()))?;
         let generation = parent_inode.generation;
 
-        let (hash_seed, hash_version, has_metadata_csum) = {
+        let (hash_seed, hash_version, has_metadata_csum, has_large_dir) = {
             let sb = self
                 .ext4_superblock()
                 .ok_or_else(|| FfsError::Format("htree rebuild on non-ext4 fs".into()))?;
@@ -12168,6 +12168,7 @@ impl OpenFs {
                 sb.hash_seed,
                 sb.effective_dirhash_version(sb.def_hash_version),
                 sb.has_metadata_csum(),
+                sb.has_large_dir(),
             )
         };
 
@@ -12189,8 +12190,11 @@ impl OpenFs {
             .unwrap_or(0)
             .max(1);
 
-        // '..' inode is stored at offset 12 of the dx_root (logical block 0).
-        let dotdot_ino = {
+        // '..' inode is at offset 12 of the dx_root (logical block 0). For a
+        // multi-level index, also enumerate the real leaf blocks here: logical
+        // blocks 1..n then include interior dx_node blocks that parse_dir_block
+        // would mis-read, so the linear scan only holds for a single level.
+        let (dotdot_ino, leaf_logicals) = {
             let phys = resolve(0).ok_or_else(|| FfsError::Corruption {
                 block: 0,
                 detail: format!("htree dir inode {} missing logical block 0", parent.0),
@@ -12203,25 +12207,39 @@ impl OpenFs {
                     detail: "htree dx_root block too small".into(),
                 });
             }
-            // Single-level only: with indirect levels some logical blocks are dx
-            // interior nodes, not leaves, and parse_dir_block would mis-read them.
-            // A single 4 KiB level already addresses ~86k entries; deeper trees
-            // are rare and left as a follow-on rather than rebuilt incorrectly.
-            if let Ok(dxr) = ffs_ondisk::parse_dx_root(s)
-                && dxr.indirect_levels != 0
-            {
-                return Err(FfsError::UnsupportedFeature(format!(
-                    "htree rebuild for dir inode {} with {} indirect level(s) is not yet supported (bd-rzq1y)",
-                    parent.0, dxr.indirect_levels
-                )));
-            }
-            u32::from_le_bytes([s[12], s[13], s[14], s[15]])
+            let dotdot = u32::from_le_bytes([s[12], s[13], s[14], s[15]]);
+            let indirect_levels =
+                ffs_ondisk::parse_dx_root(s).map_or(0, |dxr| dxr.indirect_levels);
+            let leaves: Vec<u32> = if indirect_levels == 0 {
+                // Single level: every block after the dx_root is a leaf. Keep the
+                // long-standing full scan (it also covers any leaf the index
+                // references), since the insert path never leaves a leaf out of
+                // the index but the scan is the conservative, proven path.
+                (1..n_blocks).collect()
+            } else {
+                // Multi-level: descend the DX index so we read only real leaves
+                // and never mis-parse an interior dx_node block (bd-owt2r). The
+                // insert path keeps every leaf indexed, so this is complete.
+                let b0_owned = s.to_vec();
+                ffs_ondisk::htree_leaf_logical_blocks(&b0_owned, has_large_dir, |lb| {
+                    resolve(lb)
+                        .and_then(|p| dev.read_block(cx, BlockNumber(p)).ok())
+                        .map(|b| b.as_slice().to_vec())
+                })
+                .ok_or_else(|| {
+                    FfsError::UnsupportedFeature(format!(
+                        "htree rebuild for dir inode {} with {indirect_levels} indirect level(s): DX index unreadable",
+                        parent.0
+                    ))
+                })?
+            };
+            (dotdot, leaves)
         };
 
-        // Gather every real entry from the leaf blocks (logical 1..n); the
-        // dx_root (block 0) holds only '.'/'..' + the index, never file entries.
+        // Gather every real entry from the leaf blocks; the dx_root (block 0)
+        // and any interior dx_node blocks hold no file entries, only the index.
         let mut collected: Vec<(u32, u8, Vec<u8>)> = Vec::new();
-        for logical in 1..n_blocks {
+        for logical in leaf_logicals {
             let Some(phys) = resolve(logical) else {
                 continue;
             };
