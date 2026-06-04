@@ -240,6 +240,41 @@ fn bench_mixed_auto_consolidation_ab(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_write_heavy_message_buffer_ab(c: &mut Criterion) {
+    let mut group = c.benchmark_group("write_heavy_message_buffer_ab");
+    group.sample_size(10);
+
+    group.bench_function("old_individual_preconsolidation_8", |b| {
+        b.iter(|| {
+            let table = Arc::new(MappingTable::with_capacity(PAGE_CAPACITY));
+            let page = table.allocate_page().expect("alloc");
+            for i in 0..PREPOPULATE {
+                insert_without_message_buffer(&table, page, BwKey(i), BwValue(i));
+            }
+            let cfg = ConsolidationConfig::default();
+            let _ = table.consolidate_page(page, &cfg);
+
+            run_bwtree_workload_without_message_buffer(&table, page, 8, 30, 40, 30, 0);
+        });
+    });
+
+    group.bench_function("new_message_buffer_8", |b| {
+        b.iter(|| {
+            let table = Arc::new(MappingTable::with_capacity(PAGE_CAPACITY));
+            let page = table.allocate_page().expect("alloc");
+            for i in 0..PREPOPULATE {
+                table.insert(page, BwKey(i), BwValue(i)).expect("insert");
+            }
+            let cfg = ConsolidationConfig::default();
+            let _ = table.consolidate_page(page, &cfg);
+
+            run_bwtree_workload(&table, page, 8, 30, 40, 30, 0);
+        });
+    });
+
+    group.finish();
+}
+
 // ── Scenario 5: Consolidation overhead ──────────────────────────────────
 
 fn bench_consolidation_overhead(c: &mut Criterion) {
@@ -352,6 +387,59 @@ fn append_delta_without_preconsolidation(
     panic!("legacy no-preconsolidation append exhausted CAS retries");
 }
 
+fn append_delta_without_message_buffer(
+    table: &MappingTable,
+    page: PageId,
+    mutation: DeltaMutation,
+) {
+    let cfg = ConsolidationConfig::default();
+    for _ in 0..1_024 {
+        let snapshot = table.get_page(page).expect("snapshot");
+        if snapshot.chain_len > cfg.chain_threshold {
+            let _ = table.consolidate_page(page, &cfg);
+            continue;
+        }
+        let new_head = Arc::new(match mutation {
+            DeltaMutation::Insert { key, value } => PageDelta::Insert {
+                key,
+                value,
+                next: snapshot.head,
+            },
+            DeltaMutation::Delete { key } => PageDelta::Delete {
+                key,
+                next: snapshot.head,
+            },
+            DeltaMutation::Split {
+                separator,
+                new_sibling,
+            } => PageDelta::Split {
+                separator,
+                new_sibling,
+                next: snapshot.head,
+            },
+            DeltaMutation::Merge { removed_sibling } => PageDelta::Merge {
+                removed_sibling,
+                next: snapshot.head,
+            },
+        });
+        if table
+            .cas_page(page, snapshot.epoch, new_head, snapshot.chain_len + 1)
+            .expect("legacy cas")
+        {
+            return;
+        }
+    }
+    panic!("individual preconsolidation append exhausted CAS retries");
+}
+
+fn insert_without_message_buffer(table: &MappingTable, page: PageId, key: BwKey, value: BwValue) {
+    append_delta_without_message_buffer(table, page, DeltaMutation::Insert { key, value });
+}
+
+fn delete_without_message_buffer(table: &MappingTable, page: PageId, key: BwKey) {
+    append_delta_without_message_buffer(table, page, DeltaMutation::Delete { key });
+}
+
 fn legacy_insert_without_preconsolidation(
     table: &MappingTable,
     page: PageId,
@@ -398,6 +486,46 @@ fn run_bwtree_workload_without_preconsolidation(
                     );
                 } else if op < lookup_pct + insert_pct + delete_pct {
                     legacy_delete_without_preconsolidation(&table, page, BwKey(key));
+                } else {
+                    let _ = table.range_scan(page, BwKey(key), 10);
+                }
+            }
+        }));
+    }
+
+    for h in handles {
+        h.join().expect("no panic");
+    }
+}
+
+fn run_bwtree_workload_without_message_buffer(
+    table: &Arc<MappingTable>,
+    page: PageId,
+    thread_count: usize,
+    lookup_pct: u64,
+    insert_pct: u64,
+    delete_pct: u64,
+    scan_pct: u64,
+) {
+    let barrier = Arc::new(Barrier::new(thread_count));
+    let mut handles = Vec::new();
+    let total = lookup_pct + insert_pct + delete_pct + scan_pct;
+
+    for tid in 0..thread_count {
+        let table = Arc::clone(table);
+        let barrier = Arc::clone(&barrier);
+        handles.push(std::thread::spawn(move || {
+            barrier.wait();
+            let mut rng = (tid as u64 + 1).wrapping_mul(6_364_136_223_846_793_005);
+            for _ in 0..OPS_PER_THREAD {
+                let op = xorshift64(&mut rng) % total;
+                let key = xorshift64(&mut rng) % (PREPOPULATE * 2);
+                if op < lookup_pct {
+                    let _ = table.lookup(page, BwKey(key));
+                } else if op < lookup_pct + insert_pct {
+                    insert_without_message_buffer(&table, page, BwKey(key), BwValue(key + 1));
+                } else if op < lookup_pct + insert_pct + delete_pct {
+                    delete_without_message_buffer(&table, page, BwKey(key));
                 } else {
                     let _ = table.range_scan(page, BwKey(key), 10);
                 }
@@ -521,6 +649,7 @@ criterion_group!(
     bench_write_heavy,
     bench_mixed,
     bench_mixed_auto_consolidation_ab,
+    bench_write_heavy_message_buffer_ab,
     bench_consolidation_overhead,
     bench_point_lookup_ab,
 );

@@ -29,6 +29,7 @@ const MAX_CHAIN_DEPTH: usize = 16_384;
 /// when its base node was perfectly valid.
 const MAX_CHAIN_WALK: usize = MAX_CHAIN_DEPTH * 2;
 const DEFAULT_CONSOLIDATION_THRESHOLD: usize = 16;
+const DEFAULT_MESSAGE_BUFFER_CAPACITY: usize = 128;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct BwKey(pub u64);
@@ -57,6 +58,10 @@ pub enum PageDelta {
     },
     Merge {
         removed_sibling: PageId,
+        next: Arc<Self>,
+    },
+    MessageBuffer {
+        messages: BTreeMap<BwKey, BufferedMutation>,
         next: Arc<Self>,
     },
     Base {
@@ -93,7 +98,8 @@ impl Drop for PageDelta {
             Self::Insert { next, .. }
             | Self::Delete { next, .. }
             | Self::Split { next, .. }
-            | Self::Merge { next, .. } => std::mem::replace(next, Self::empty_base()),
+            | Self::Merge { next, .. }
+            | Self::MessageBuffer { next, .. } => std::mem::replace(next, Self::empty_base()),
             Self::Base { .. } => return,
         };
         // `self`'s default field-drops still run after this method returns,
@@ -106,7 +112,10 @@ impl Drop for PageDelta {
                         Self::Insert { next, .. }
                         | Self::Delete { next, .. }
                         | Self::Split { next, .. }
-                        | Self::Merge { next, .. } => std::mem::replace(next, Self::empty_base()),
+                        | Self::Merge { next, .. }
+                        | Self::MessageBuffer { next, .. } => {
+                            std::mem::replace(next, Self::empty_base())
+                        }
                         Self::Base { .. } => return,
                     };
                     // `node` is dropped at the end of this arm; recursing
@@ -148,6 +157,20 @@ pub enum DeltaMutation {
     Merge {
         removed_sibling: PageId,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BufferedMutation {
+    Insert(BwValue),
+    Delete,
+}
+
+enum MessageBufferAppend {
+    Buffered {
+        new_head: Arc<PageDelta>,
+        new_chain_len: usize,
+    },
+    FlushRequired,
 }
 
 #[derive(Debug)]
@@ -295,6 +318,32 @@ impl MappingTable {
         for attempt in 1..=MAX_CAS_RETRIES {
             let snapshot = self.get_page(page_id)?;
             let _guard = epoch::pin();
+
+            match message_buffer_append(mutation, &snapshot) {
+                Some(MessageBufferAppend::Buffered {
+                    new_head,
+                    new_chain_len,
+                }) => {
+                    if self.cas_page(page_id, snapshot.epoch, new_head, new_chain_len)? {
+                        return Ok(attempt);
+                    }
+                    continue;
+                }
+                Some(MessageBufferAppend::FlushRequired) => {
+                    let (state, _) = materialize_from_head(&snapshot.head)?;
+                    let new_base = Arc::new(PageDelta::Base { entries: state });
+                    if self.cas_page(page_id, snapshot.epoch, new_base, 1)? {
+                        debug!(
+                            target: "ffs::bwtree",
+                            event = "bw_append_message_buffer_flush",
+                            page_id = page_id.0,
+                            capacity = DEFAULT_MESSAGE_BUFFER_CAPACITY
+                        );
+                    }
+                    continue;
+                }
+                None => {}
+            }
 
             let chain_len = snapshot.chain_len;
             if chain_len > DEFAULT_CONSOLIDATION_THRESHOLD {
@@ -600,7 +649,8 @@ pub fn chain_length(head: &Arc<PageDelta>) -> usize {
             PageDelta::Insert { next, .. }
             | PageDelta::Delete { next, .. }
             | PageDelta::Split { next, .. }
-            | PageDelta::Merge { next, .. } => {
+            | PageDelta::Merge { next, .. }
+            | PageDelta::MessageBuffer { next, .. } => {
                 cursor = Arc::clone(next);
             }
         }
@@ -624,6 +674,63 @@ impl DeltaMutation {
                 removed_sibling,
                 next,
             },
+        }
+    }
+}
+
+fn message_buffer_append(
+    mutation: DeltaMutation,
+    snapshot: &PageSnapshot,
+) -> Option<MessageBufferAppend> {
+    let buffered = BufferedMutation::from_delta(mutation)?;
+    match snapshot.head.as_ref() {
+        PageDelta::MessageBuffer { messages, next } => {
+            let grows = !messages.contains_key(&buffered.key);
+            if grows && messages.len() >= DEFAULT_MESSAGE_BUFFER_CAPACITY {
+                return Some(MessageBufferAppend::FlushRequired);
+            }
+            let mut new_messages = messages.clone();
+            new_messages.insert(buffered.key, buffered.mutation);
+            Some(MessageBufferAppend::Buffered {
+                new_head: Arc::new(PageDelta::MessageBuffer {
+                    messages: new_messages,
+                    next: Arc::clone(next),
+                }),
+                new_chain_len: snapshot.chain_len,
+            })
+        }
+        _ if snapshot.chain_len <= DEFAULT_CONSOLIDATION_THRESHOLD => {
+            let mut messages = BTreeMap::new();
+            messages.insert(buffered.key, buffered.mutation);
+            Some(MessageBufferAppend::Buffered {
+                new_head: Arc::new(PageDelta::MessageBuffer {
+                    messages,
+                    next: Arc::clone(&snapshot.head),
+                }),
+                new_chain_len: snapshot.chain_len + 1,
+            })
+        }
+        _ => None,
+    }
+}
+
+struct BufferedMutationEntry {
+    key: BwKey,
+    mutation: BufferedMutation,
+}
+
+impl BufferedMutation {
+    fn from_delta(mutation: DeltaMutation) -> Option<BufferedMutationEntry> {
+        match mutation {
+            DeltaMutation::Insert { key, value } => Some(BufferedMutationEntry {
+                key,
+                mutation: Self::Insert(value),
+            }),
+            DeltaMutation::Delete { key } => Some(BufferedMutationEntry {
+                key,
+                mutation: Self::Delete,
+            }),
+            DeltaMutation::Split { .. } | DeltaMutation::Merge { .. } => None,
         }
     }
 }
@@ -695,6 +802,10 @@ fn materialize_from_head(head: &Arc<PageDelta>) -> Result<(BTreeMap<BwKey, BwVal
             PageDelta::Merge { next, .. } => {
                 cursor = Arc::clone(next);
             }
+            PageDelta::MessageBuffer { messages, next } => {
+                push_buffered_ops(&mut ops, messages);
+                cursor = Arc::clone(next);
+            }
         }
     }
 }
@@ -744,6 +855,10 @@ fn range_scan_from_head(
                 cursor = Arc::clone(next);
             }
             PageDelta::Merge { next, .. } => {
+                cursor = Arc::clone(next);
+            }
+            PageDelta::MessageBuffer { messages, next } => {
+                push_buffered_ops(&mut ops, messages);
                 cursor = Arc::clone(next);
             }
         }
@@ -884,6 +999,27 @@ fn lookup_from_head(head: &Arc<PageDelta>, key: BwKey) -> Result<(Option<BwValue
             PageDelta::Merge { next, .. } => {
                 cursor = next.as_ref();
             }
+            PageDelta::MessageBuffer { messages, next } => {
+                if let Some(message) = messages.get(&key) {
+                    return Ok((
+                        match *message {
+                            BufferedMutation::Insert(value) => Some(value),
+                            BufferedMutation::Delete => None,
+                        },
+                        chain_len,
+                    ));
+                }
+                cursor = next.as_ref();
+            }
+        }
+    }
+}
+
+fn push_buffered_ops(ops: &mut Vec<MaterializeOp>, messages: &BTreeMap<BwKey, BufferedMutation>) {
+    for (&key, &message) in messages {
+        match message {
+            BufferedMutation::Insert(value) => ops.push(MaterializeOp::Insert { key, value }),
+            BufferedMutation::Delete => ops.push(MaterializeOp::Delete { key }),
         }
     }
 }
@@ -913,9 +1049,10 @@ fn defer_reclaim(delta: Arc<PageDelta>) {
 #[cfg(test)]
 mod tests {
     use super::{
-        BwKey, BwValue, ConsolidationConfig, DEFAULT_CONSOLIDATION_THRESHOLD, DeltaMutation,
-        FfsError, MAX_CAS_RETRIES, MAX_CHAIN_DEPTH, MAX_CHAIN_WALK, MappingTable, PageDelta,
-        PageHead, PageId, chain_length, materialize_from_head, range_scan_from_head, write_lock,
+        BwKey, BwValue, ConsolidationConfig, DEFAULT_CONSOLIDATION_THRESHOLD,
+        DEFAULT_MESSAGE_BUFFER_CAPACITY, DeltaMutation, FfsError, MAX_CAS_RETRIES, MAX_CHAIN_DEPTH,
+        MAX_CHAIN_WALK, MappingTable, PageDelta, PageHead, PageId, chain_length,
+        materialize_from_head, range_scan_from_head, write_lock,
     };
     use std::collections::BTreeMap;
     use std::sync::{Arc, Barrier, atomic::Ordering};
@@ -984,6 +1121,70 @@ mod tests {
 
     fn delete_without_preconsolidation_for_test(table: &MappingTable, page: PageId, key: BwKey) {
         append_delta_without_preconsolidation_for_test(table, page, DeltaMutation::Delete { key });
+    }
+
+    fn append_delta_without_message_buffer_for_test(
+        table: &MappingTable,
+        page: PageId,
+        mutation: DeltaMutation,
+    ) {
+        let cfg = ConsolidationConfig::default();
+        for _ in 0..MAX_CAS_RETRIES {
+            let snapshot = table.get_page(page).expect("snapshot");
+            if snapshot.chain_len > cfg.chain_threshold {
+                table
+                    .consolidate_page(page, &cfg)
+                    .expect("legacy preconsolidate");
+                continue;
+            }
+            let new_head = Arc::new(match mutation {
+                DeltaMutation::Insert { key, value } => PageDelta::Insert {
+                    key,
+                    value,
+                    next: snapshot.head,
+                },
+                DeltaMutation::Delete { key } => PageDelta::Delete {
+                    key,
+                    next: snapshot.head,
+                },
+                DeltaMutation::Split {
+                    separator,
+                    new_sibling,
+                } => PageDelta::Split {
+                    separator,
+                    new_sibling,
+                    next: snapshot.head,
+                },
+                DeltaMutation::Merge { removed_sibling } => PageDelta::Merge {
+                    removed_sibling,
+                    next: snapshot.head,
+                },
+            });
+            if table
+                .cas_page(page, snapshot.epoch, new_head, snapshot.chain_len + 1)
+                .expect("legacy cas")
+            {
+                return;
+            }
+        }
+        panic!("legacy individual preconsolidation append exhausted CAS retries");
+    }
+
+    fn insert_without_message_buffer_for_test(
+        table: &MappingTable,
+        page: PageId,
+        key: BwKey,
+        value: BwValue,
+    ) {
+        append_delta_without_message_buffer_for_test(
+            table,
+            page,
+            DeltaMutation::Insert { key, value },
+        );
+    }
+
+    fn delete_without_message_buffer_for_test(table: &MappingTable, page: PageId, key: BwKey) {
+        append_delta_without_message_buffer_for_test(table, page, DeltaMutation::Delete { key });
     }
 
     #[test]
@@ -1560,6 +1761,233 @@ mod tests {
                 key.0, value.0
             );
         }
+    }
+
+    struct MessageBufferGoldenTables {
+        old_table: MappingTable,
+        old_page: PageId,
+        old_sibling: PageId,
+        new_table: MappingTable,
+        new_page: PageId,
+        new_sibling: PageId,
+    }
+
+    fn seed_message_buffer_golden_tables() -> MessageBufferGoldenTables {
+        let old_table = MappingTable::with_capacity(2);
+        let old_page = old_table.allocate_page().expect("old alloc");
+        let old_sibling = old_table.allocate_page().expect("old sibling");
+        let new_table = MappingTable::with_capacity(2);
+        let new_page = new_table.allocate_page().expect("new alloc");
+        let new_sibling = new_table.allocate_page().expect("new sibling");
+
+        for key in 0..96_u64 {
+            insert_without_message_buffer_for_test(
+                &old_table,
+                old_page,
+                BwKey(key),
+                BwValue(key * 10),
+            );
+            new_table
+                .insert(new_page, BwKey(key), BwValue(key * 10))
+                .expect("new seed insert");
+        }
+
+        let cfg = ConsolidationConfig::default();
+        old_table
+            .consolidate_page(old_page, &cfg)
+            .expect("old consolidate");
+        new_table
+            .consolidate_page(new_page, &cfg)
+            .expect("new consolidate");
+
+        MessageBufferGoldenTables {
+            old_table,
+            old_page,
+            old_sibling,
+            new_table,
+            new_page,
+            new_sibling,
+        }
+    }
+
+    fn apply_message_buffer_split_probe(tables: &MessageBufferGoldenTables) {
+        insert_without_message_buffer_for_test(
+            &tables.old_table,
+            tables.old_page,
+            BwKey(300),
+            BwValue(30_000),
+        );
+        tables
+            .new_table
+            .insert(tables.new_page, BwKey(300), BwValue(30_000))
+            .expect("new pre-split insert");
+        append_delta_without_message_buffer_for_test(
+            &tables.old_table,
+            tables.old_page,
+            DeltaMutation::Split {
+                separator: BwKey(256),
+                new_sibling: tables.old_sibling,
+            },
+        );
+        tables
+            .new_table
+            .append_split_delta(tables.new_page, BwKey(256), tables.new_sibling)
+            .expect("new split");
+        insert_without_message_buffer_for_test(
+            &tables.old_table,
+            tables.old_page,
+            BwKey(300),
+            BwValue(30_001),
+        );
+        tables
+            .new_table
+            .insert(tables.new_page, BwKey(300), BwValue(30_001))
+            .expect("new post-split insert");
+    }
+
+    fn apply_message_buffer_golden_workload(tables: &MessageBufferGoldenTables) {
+        for step in 0..384_u64 {
+            let key = BwKey((step * 109 + 17) % 512);
+            match step % 6 {
+                0 | 2 => {
+                    let value = BwValue(40_000 + step);
+                    insert_without_message_buffer_for_test(
+                        &tables.old_table,
+                        tables.old_page,
+                        key,
+                        value,
+                    );
+                    tables
+                        .new_table
+                        .insert(tables.new_page, key, value)
+                        .expect("new insert");
+                }
+                1 => {
+                    delete_without_message_buffer_for_test(&tables.old_table, tables.old_page, key);
+                    tables
+                        .new_table
+                        .delete(tables.new_page, key)
+                        .expect("new delete");
+                }
+                3 => {
+                    let value = BwValue(50_000 + step);
+                    insert_without_message_buffer_for_test(
+                        &tables.old_table,
+                        tables.old_page,
+                        key,
+                        value,
+                    );
+                    tables
+                        .new_table
+                        .insert(tables.new_page, key, value)
+                        .expect("new insert");
+                }
+                4 => {
+                    if key.0 % 4 == 0 {
+                        delete_without_message_buffer_for_test(
+                            &tables.old_table,
+                            tables.old_page,
+                            key,
+                        );
+                        tables
+                            .new_table
+                            .delete(tables.new_page, key)
+                            .expect("new delete");
+                    } else {
+                        let value = BwValue(60_000 + step);
+                        insert_without_message_buffer_for_test(
+                            &tables.old_table,
+                            tables.old_page,
+                            key,
+                            value,
+                        );
+                        tables
+                            .new_table
+                            .insert(tables.new_page, key, value)
+                            .expect("new insert");
+                    }
+                }
+                _ => {
+                    let value = BwValue(70_000 + step);
+                    insert_without_message_buffer_for_test(
+                        &tables.old_table,
+                        tables.old_page,
+                        key,
+                        value,
+                    );
+                    tables
+                        .new_table
+                        .insert(tables.new_page, key, value)
+                        .expect("new insert");
+                }
+            }
+        }
+    }
+
+    fn assert_message_buffer_golden_report(tables: &MessageBufferGoldenTables) {
+        let old_state = tables
+            .old_table
+            .materialize_page(tables.old_page)
+            .expect("old materialize");
+        let new_state = tables
+            .new_table
+            .materialize_page(tables.new_page)
+            .expect("new materialize");
+        assert_eq!(old_state, new_state);
+
+        let old_chain_len = assert_cached_chain_len_matches(&tables.old_table, tables.old_page);
+        let new_chain_len = assert_cached_chain_len_matches(&tables.new_table, tables.new_page);
+        assert!(old_chain_len <= DEFAULT_CONSOLIDATION_THRESHOLD + 1);
+        assert!(new_chain_len <= DEFAULT_MESSAGE_BUFFER_CAPACITY + 2);
+
+        println!("BWTREE_MESSAGE_BUFFER_GOLDEN\told_chain_len\t{old_chain_len}");
+        println!("BWTREE_MESSAGE_BUFFER_GOLDEN\tnew_chain_len\t{new_chain_len}");
+        println!(
+            "BWTREE_MESSAGE_BUFFER_GOLDEN\tstate_len\t{}",
+            new_state.len()
+        );
+
+        for key in [0_u64, 7, 17, 31, 63, 96, 127, 191, 255, 383, 511] {
+            let key = BwKey(key);
+            let old_lookup = tables
+                .old_table
+                .lookup(tables.old_page, key)
+                .expect("old lookup");
+            let new_lookup = tables
+                .new_table
+                .lookup(tables.new_page, key)
+                .expect("new lookup");
+            assert_eq!(old_lookup, new_lookup);
+            println!(
+                "BWTREE_MESSAGE_BUFFER_GOLDEN\tlookup\t{}\t{}",
+                key.0,
+                new_lookup.map_or_else(|| "None".to_owned(), |value| value.0.to_string())
+            );
+        }
+
+        let old_range = tables
+            .old_table
+            .range_scan(tables.old_page, BwKey(89), 16)
+            .expect("old range");
+        let new_range = tables
+            .new_table
+            .range_scan(tables.new_page, BwKey(89), 16)
+            .expect("new range");
+        assert_eq!(old_range, new_range);
+        for (key, value) in new_range {
+            println!(
+                "BWTREE_MESSAGE_BUFFER_GOLDEN\trange\t{}\t{}",
+                key.0, value.0
+            );
+        }
+    }
+
+    #[test]
+    fn message_buffer_matches_individual_preconsolidation_golden_report() {
+        let tables = seed_message_buffer_golden_tables();
+        apply_message_buffer_split_probe(&tables);
+        apply_message_buffer_golden_workload(&tables);
+        assert_message_buffer_golden_report(&tables);
     }
 
     // ── Comprehensive unit tests (bd-1mdk.3) ─────────────────────
