@@ -38432,6 +38432,63 @@ mod tests {
         );
     }
 
+    /// Broader e2fsck stress (bd-0ta4z follow-on): exercise many ext4 write-path
+    /// mutations — multi-block file writes, a subdirectory, an unlink (free
+    /// path), a rename, and a fallocate — then require the image to be
+    /// e2fsck-clean. Catches accounting regressions the single-create test
+    /// cannot (free paths, used_dirs, multi-group allocation).
+    #[test]
+    fn ext4_many_mutations_pass_e2fsck_bd_0ta4z() {
+        let Some((fs, dev, tmp)) = open_writable_ext4_mkfs_with_device(64) else {
+            return; // format tool unavailable
+        };
+        let image = tmp.path().join("test.ext4");
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        // 20 files, 4 blocks (16 KiB) each — exercises inode + block allocation.
+        for i in 0..20 {
+            let name = format!("file_{i:02}.dat");
+            let attr = fs
+                .create(&cx, root, OsStr::new(&name), 0o644, 0, 0)
+                .expect("create");
+            fs.write(&cx, attr.ino, 0, &[0xCD_u8; 16384]).expect("write");
+        }
+        // A subdirectory with a file inside (exercises used_dirs + nested dirs).
+        let dir = fs
+            .mkdir(&cx, root, OsStr::new("subdir"), 0o755, 0, 0)
+            .expect("mkdir");
+        let inner = fs
+            .create(&cx, dir.ino, OsStr::new("inner.txt"), 0o644, 0, 0)
+            .expect("create inner");
+        fs.write(&cx, inner.ino, 0, &[0xEE_u8; 4096]).expect("write inner");
+        // Unlink (inode + block free path) and rename.
+        fs.unlink(&cx, root, OsStr::new("file_05.dat")).expect("unlink");
+        fs.rename(
+            &cx,
+            root,
+            OsStr::new("file_06.dat"),
+            root,
+            OsStr::new("renamed.dat"),
+        )
+        .expect("rename");
+        // Preallocate beyond the file's data.
+        fs.fallocate(&cx, inner.ino, 0, 8192, libc::FALLOC_FL_KEEP_SIZE)
+            .expect("fallocate");
+
+        fs.flush_mvcc_to_device(&cx).expect("flush mvcc to device");
+        let bytes = dev.snapshot_bytes();
+        std::fs::write(&image, &bytes).expect("write modified image");
+
+        let Some((clean, output)) = run_e2fsck(&image) else {
+            return; // e2fsck unavailable
+        };
+        assert!(
+            clean,
+            "e2fsck must accept a multi-mutation FrankenFS ext4 image:\n{output}"
+        );
+    }
+
     fn open_writable_ext4_mkfs_with_incompat_features(
         size_mb: u64,
         incompat_bits: u32,
