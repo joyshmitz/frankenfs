@@ -12219,6 +12219,14 @@ impl OpenFs {
             return Err(FfsError::Format("cannot fallocate a symlink".into()));
         }
         Self::ext4_reject_encrypted(&inode)?;
+        // Immutable files reject all fallocate; append-only files reject the
+        // modes that alter existing data (the kernel returns EPERM).
+        Self::ext4_reject_immutable(&inode)?;
+        if inode.flags & ffs_types::EXT4_APPEND_FL != 0
+            && (punch_hole || collapse_range || zero_range || insert_range)
+        {
+            return Err(FfsError::Io(std::io::Error::from_raw_os_error(libc::EPERM)));
+        }
         if Self::ext4_inode_uses_inline_data(&inode) {
             return Err(FfsError::UnsupportedFeature(
                 "ext4 inline-data fallocate mutation is not supported".into(),
@@ -12718,6 +12726,12 @@ impl OpenFs {
         }
         // No fscrypt support: refuse to store plaintext into encrypted blocks.
         Self::ext4_reject_encrypted(&inode)?;
+        // Enforce immutable / append-only attributes (the kernel returns EPERM).
+        Self::ext4_reject_immutable(&inode)?;
+        if inode.flags & ffs_types::EXT4_APPEND_FL != 0 && offset != inode.size {
+            // Append-only: writes may only extend the file at EOF.
+            return Err(FfsError::Io(std::io::Error::from_raw_os_error(libc::EPERM)));
+        }
         // e2compr compressed write: route to cluster-based write path.
         //
         // The historic e2compr method field aliases the old compression flag
@@ -13564,6 +13578,12 @@ impl OpenFs {
             if inode.is_symlink() {
                 return Err(FfsError::Format("cannot truncate a symlink".into()));
             }
+            // Immutable files cannot be truncated; append-only files cannot
+            // shrink (the kernel returns EPERM).
+            Self::ext4_reject_immutable(&inode)?;
+            if inode.flags & ffs_types::EXT4_APPEND_FL != 0 && new_size < inode.size {
+                return Err(FfsError::Io(std::io::Error::from_raw_os_error(libc::EPERM)));
+            }
             if (inode.flags & ffs_types::EXT4_EXTENTS_FL) == 0 {
                 return Err(FfsError::UnsupportedFeature(
                     "truncation of non-extent (indirect block) files is not supported".into(),
@@ -14328,6 +14348,16 @@ impl OpenFs {
                 "ext4 encrypted (fscrypt) file content is not supported — no decryption key (bd-4sfty)"
                     .to_owned(),
             ));
+        }
+        Ok(())
+    }
+
+    /// Reject content mutation of an immutable (`EXT4_IMMUTABLE_FL`) inode with
+    /// EPERM, matching the kernel. FrankenFS is the filesystem, so it must
+    /// enforce the attribute on its direct API where no VFS layer does (bd-hbld5).
+    fn ext4_reject_immutable(inode: &Ext4Inode) -> Result<(), FfsError> {
+        if inode.flags & ffs_types::EXT4_IMMUTABLE_FL != 0 {
+            return Err(FfsError::Io(std::io::Error::from_raw_os_error(libc::EPERM)));
         }
         Ok(())
     }
@@ -35193,6 +35223,70 @@ mod tests {
         assert!(
             fs.fallocate(&cx, attr.ino, 0, 4096, 0).is_err(),
             "fallocate on an encrypted file must fail"
+        );
+    }
+
+    #[test]
+    fn immutable_and_append_attributes_enforced_on_writes_bd_hbld5() {
+        let Some((fs, _tmp)) = open_writable_ext4_mkfs(8) else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        let set_flag = |ino: InodeNumber, flag: u32| {
+            let mut inode = fs.read_inode(&cx, ino).expect("read inode");
+            inode.flags &= !(ffs_types::EXT4_IMMUTABLE_FL | ffs_types::EXT4_APPEND_FL);
+            inode.flags |= flag;
+            fs.persist_ext4_inode_for_testing(&cx, ino, &inode)
+                .expect("persist flag");
+        };
+
+        // ── Immutable: every content mutation must be rejected. ──
+        let imm = fs
+            .create(&cx, root, OsStr::new("imm.bin"), 0o644, 0, 0)
+            .expect("create imm");
+        fs.write(&cx, imm.ino, 0, b"hello world")
+            .expect("seed write");
+        set_flag(imm.ino, ffs_types::EXT4_IMMUTABLE_FL);
+        assert!(
+            fs.write(&cx, imm.ino, 0, b"nope").is_err(),
+            "write to an immutable file must be rejected"
+        );
+        assert!(
+            fs.fallocate(&cx, imm.ino, 0, 4096, 0).is_err(),
+            "fallocate on an immutable file must be rejected"
+        );
+        let trunc = SetAttrRequest {
+            size: Some(0),
+            ..SetAttrRequest::default()
+        };
+        assert!(
+            fs.setattr(&cx, imm.ino, &trunc).is_err(),
+            "truncate of an immutable file must be rejected"
+        );
+
+        // ── Append-only: appends at EOF allowed; overwrite/shrink rejected. ──
+        let app = fs
+            .create(&cx, root, OsStr::new("app.bin"), 0o644, 0, 0)
+            .expect("create app");
+        fs.write(&cx, app.ino, 0, b"0123456789")
+            .expect("seed write");
+        let size = fs.read_inode(&cx, app.ino).unwrap().size;
+        set_flag(app.ino, ffs_types::EXT4_APPEND_FL);
+        assert!(
+            fs.write(&cx, app.ino, 0, b"x").is_err(),
+            "non-append (offset < EOF) write to an append-only file must be rejected"
+        );
+        fs.write(&cx, app.ino, size, b"appended")
+            .expect("append at EOF must succeed on an append-only file");
+        let shrink = SetAttrRequest {
+            size: Some(1),
+            ..SetAttrRequest::default()
+        };
+        assert!(
+            fs.setattr(&cx, app.ino, &shrink).is_err(),
+            "shrinking an append-only file must be rejected"
         );
     }
 
