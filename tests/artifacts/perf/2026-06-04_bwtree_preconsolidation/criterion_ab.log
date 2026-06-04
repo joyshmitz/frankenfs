@@ -472,3 +472,51 @@
    Compiling criterion v0.8.2
    Compiling ffs-block v0.1.0 (/data/projects/frankenfs/crates/ffs-block)
    Compiling ffs-btree v0.1.0 (/data/projects/frankenfs/crates/ffs-btree)
+    Finished `release-perf` profile [optimized + debuginfo] target(s) in 3m 20s
+     Running benches/bwtree_vs_locked.rs (.rch-target-ts2-job-29872254800104154-1780601066664090199-0/release-perf/deps/bwtree_vs_locked-684b13d5d5dac4c6)
+Gnuplot not found, using plotters backend
+Benchmarking mixed_auto_consolidation_ab/old_deferred_consolidation_8
+Benchmarking mixed_auto_consolidation_ab/old_deferred_consolidation_8: Warming up for 1.0000 s
+
+Warning: Unable to complete 10 samples in 2.0s. You may wish to increase target time to 18.8s.
+Benchmarking mixed_auto_consolidation_ab/old_deferred_consolidation_8: Collecting 10 samples in estimated 18.794 s (10 iterations)
+Benchmarking mixed_auto_consolidation_ab/old_deferred_consolidation_8: Analyzing
+mixed_auto_consolidation_ab/old_deferred_consolidation_8
+                        time:   [1.8629 s 1.9152 s 1.9695 s]
+Benchmarking mixed_auto_consolidation_ab/new_default_preconsolidation_8
+Benchmarking mixed_auto_consolidation_ab/new_default_preconsolidation_8: Warming up for 1.0000 s
+
+Warning: Unable to complete 10 samples in 2.0s. You may wish to increase target time to 3.4s.
+Benchmarking mixed_auto_consolidation_ab/new_default_preconsolidation_8: Collecting 10 samples in estimated 3.3618 s (10 iterations)
+Benchmarking mixed_auto_consolidation_ab/new_default_preconsolidation_8: Analyzing
+mixed_auto_consolidation_ab/new_default_preconsolidation_8
+                        time:   [349.77 ms 376.24 ms 403.68 ms]
+
+  [2m2026-06-04T19:28:23.987893Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mRemote command finished: exit=0 in 227524ms[0m
+    [2;3mat[0m rch/src/hook.rs:6364 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:28:23.988201Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mRetrieving build artifacts...[0m
+    [2;3mat[0m rch/src/hook.rs:6413 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:28:23.988225Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRetrieving artifacts from /data/projects/frankenfs on ts2[0m
+    [2;3mat[0m rch/src/transfer.rs:2072 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:28:23.988271Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mLoaded 2 retrieval exclude pattern(s) from .rchignore (total: 6)[0m
+    [2;3mat[0m rch/src/transfer.rs:909 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:28:24.778705Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mArtifacts retrieved in 790ms (1 files, 2344 bytes)[0m
+    [2;3mat[0m rch/src/transfer.rs:2111 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:28:24.778722Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mArtifacts retrieved: 1 files, 2344 bytes in 790ms[0m
+    [2;3mat[0m rch/src/hook.rs:6446 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:28:24.778831Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRetrieving artifacts from /data/projects/frankenfs/.rch-target-ts2-job-29872254800104154-1780601066664090199-0 on ts2[0m
+    [2;3mat[0m rch/src/transfer.rs:2072 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:28:25.106422Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mArtifacts retrieved in 327ms (313 files, 653 bytes)[0m
+    [2;3mat[0m rch/src/transfer.rs:2111 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:28:25.106457Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mCustom CARGO_TARGET_DIR artifacts retrieved: 313 files, 653 bytes in 327ms[0m
+    [2;3mat[0m rch/src/hook.rs:6570 [2;3mon[0m ThreadId(1)
+
+[RCH] remote ts2 (239.8s)

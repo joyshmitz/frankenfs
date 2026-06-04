@@ -32,6 +32,15 @@ new_default_preconsolidation_8: [1.6495 s 2.1811 s 2.7749 s]
 
 Mean ratio: `4.9455 / 2.1811 = 2.27x`.
 
+Post-commit same-worker confirmation on `ts2`:
+
+```text
+old_deferred_consolidation_8: [1.8629 s 1.9152 s 1.9695 s]
+new_default_preconsolidation_8: [349.77 ms 376.24 ms 403.68 ms]
+```
+
+Confirmation mean ratio: `1.9152 / 0.37624 = 5.09x`.
+
 ## Proof
 
 Remote gates:
