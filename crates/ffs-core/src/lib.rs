@@ -11052,16 +11052,26 @@ impl OpenFs {
                         )?;
                         return Ok(());
                     }
-                    // The hash-correct leaf is full: a real htree leaf split +
-                    // dx-node update is required (bd-wb4cd follow-on). Refuse
-                    // rather than misplace the entry (an entry in the wrong leaf
-                    // is unreachable via the index → ENOENT) or corrupt the root.
+                    // The hash-correct leaf is full: a leaf split is needed.
+                    // Rather than incremental dx surgery (corruption-prone), gather
+                    // every entry plus the new one and rebuild the whole htree with
+                    // the proven build_htree_directory writer (bd-rzq1y). Correct by
+                    // construction — e2fsck validates htree validity, not shape.
                     Err(FfsError::NoSpace) => {
-                        return Err(FfsError::UnsupportedFeature(format!(
-                            "htree directory inode {} needs a leaf split to insert {:?}; htree leaf-split not yet implemented (bd-wb4cd follow-on)",
-                            parent.0,
-                            String::from_utf8_lossy(name)
-                        )));
+                        return self.ext4_rebuild_htree_dir(
+                            cx,
+                            dev,
+                            alloc,
+                            parent,
+                            parent_inode,
+                            &extents,
+                            name,
+                            child_ino_u32,
+                            file_type,
+                            csum_seed,
+                            tstamp_secs,
+                            tstamp_nanos,
+                        );
                     }
                     Err(e) => return Err(e),
                 }
@@ -11259,6 +11269,249 @@ impl OpenFs {
                 .map_err(|e| FfsError::Format(e.to_string()))?;
         }
         result
+    }
+
+    /// Rebuild an htree directory from all its current entries plus the new one,
+    /// using the proven `build_htree_directory` writer, and splice the result
+    /// back into the directory inode. Used when an incremental insert would
+    /// overflow the hash-target leaf (bd-rzq1y). This avoids corruption-prone
+    /// incremental dx-tree surgery by regenerating a fully-valid index from
+    /// scratch. Behavior parity is preserved — same entries, every one in its
+    /// hash-correct leaf, e2fsck-clean — only the internal tree byte-layout
+    /// differs (which e2fsck does not constrain). Runs inside the caller's mvcc
+    /// transaction (writes go through `dev`).
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn ext4_rebuild_htree_dir(
+        &self,
+        cx: &Cx,
+        dev: &dyn BlockDevice,
+        alloc: &mut Ext4AllocState,
+        parent: InodeNumber,
+        parent_inode: &Ext4Inode,
+        extents: &[Ext4Extent],
+        new_name: &[u8],
+        new_ino: u32,
+        new_file_type: Ext4FileType,
+        csum_seed: u32,
+        tstamp_secs: u64,
+        tstamp_nanos: u32,
+    ) -> Result<(), FfsError> {
+        let block_size_u64 = u64::from(alloc.geo.block_size);
+        let block_size = usize::try_from(alloc.geo.block_size)
+            .map_err(|_| FfsError::Format("block size does not fit usize".into()))?;
+        let parent_ino_u32 = u32::try_from(parent.0)
+            .map_err(|_| FfsError::Format("inode number exceeds ext4 32-bit limit".into()))?;
+        let generation = parent_inode.generation;
+
+        let (hash_seed, hash_version, has_metadata_csum) = {
+            let sb = self
+                .ext4_superblock()
+                .ok_or_else(|| FfsError::Format("htree rebuild on non-ext4 fs".into()))?;
+            (
+                sb.hash_seed,
+                sb.effective_dirhash_version(sb.def_hash_version),
+                sb.has_metadata_csum(),
+            )
+        };
+
+        let resolve = |logical: u32| -> Option<u64> {
+            for ext in extents {
+                if ext.is_unwritten() {
+                    continue;
+                }
+                let start = ext.logical_block;
+                let len = u32::from(ext.actual_len());
+                if logical >= start && logical < start.saturating_add(len) {
+                    return Some(ext.physical_start + u64::from(logical - start));
+                }
+            }
+            None
+        };
+
+        let n_blocks = u32::try_from(parent_inode.size / block_size_u64)
+            .unwrap_or(0)
+            .max(1);
+
+        // '..' inode is stored at offset 12 of the dx_root (logical block 0).
+        let dotdot_ino = {
+            let phys = resolve(0).ok_or_else(|| FfsError::Corruption {
+                block: 0,
+                detail: format!("htree dir inode {} missing logical block 0", parent.0),
+            })?;
+            let b0 = dev.read_block(cx, BlockNumber(phys))?;
+            let s = b0.as_slice();
+            if s.len() < 16 {
+                return Err(FfsError::Corruption {
+                    block: phys,
+                    detail: "htree dx_root block too small".into(),
+                });
+            }
+            // Single-level only: with indirect levels some logical blocks are dx
+            // interior nodes, not leaves, and parse_dir_block would mis-read them.
+            // A single 4 KiB level already addresses ~86k entries; deeper trees
+            // are rare and left as a follow-on rather than rebuilt incorrectly.
+            if let Ok(dxr) = ffs_ondisk::parse_dx_root(s)
+                && dxr.indirect_levels != 0
+            {
+                return Err(FfsError::UnsupportedFeature(format!(
+                    "htree rebuild for dir inode {} with {} indirect level(s) is not yet supported (bd-rzq1y)",
+                    parent.0, dxr.indirect_levels
+                )));
+            }
+            u32::from_le_bytes([s[12], s[13], s[14], s[15]])
+        };
+
+        // Gather every real entry from the leaf blocks (logical 1..n); the
+        // dx_root (block 0) holds only '.'/'..' + the index, never file entries.
+        let mut collected: Vec<(u32, u8, Vec<u8>)> = Vec::new();
+        for logical in 1..n_blocks {
+            let Some(phys) = resolve(logical) else {
+                continue;
+            };
+            let buf = dev.read_block(cx, BlockNumber(phys))?;
+            let (entries, _) = ffs_ondisk::parse_dir_block(buf.as_slice(), alloc.geo.block_size)
+                .map_err(|e| parse_to_ffs_error(&e))?;
+            for e in entries {
+                if e.inode == 0 || e.name.is_empty() || e.name == b"." || e.name == b".." {
+                    continue;
+                }
+                collected.push((e.inode, e.file_type.to_raw(), e.name));
+            }
+        }
+        collected.push((new_ino, new_file_type.to_raw(), new_name.to_vec()));
+
+        let entry_refs: Vec<(u32, u8, &[u8])> = collected
+            .iter()
+            .map(|(i, ft, n)| (*i, *ft, n.as_slice()))
+            .collect();
+        let new_blocks = if has_metadata_csum {
+            ffs_ondisk::build_htree_directory_stamped(
+                parent_ino_u32,
+                dotdot_ino,
+                &entry_refs,
+                block_size,
+                hash_version,
+                &hash_seed,
+                csum_seed,
+                parent_ino_u32,
+                generation,
+            )
+        } else {
+            ffs_ondisk::build_htree_directory(
+                parent_ino_u32,
+                dotdot_ino,
+                &entry_refs,
+                block_size,
+                hash_version,
+                &hash_seed,
+                false,
+            )
+        }
+        .ok_or_else(|| {
+            FfsError::UnsupportedFeature(format!(
+                "htree rebuild for dir inode {} exceeds the supported index depth",
+                parent.0
+            ))
+        })?;
+        let m_blocks = u32::try_from(new_blocks.len())
+            .map_err(|_| FfsError::Format("htree block count overflow".into()))?;
+
+        // Splice the rebuilt blocks back: overwrite logical 0..min(m,n) in place,
+        // allocate+map new logical blocks, free any now-unused tail blocks.
+        let mut parent_upd = parent_inode.clone();
+        let mut root_bytes = Self::extent_root(&parent_upd);
+        let sectors_per_block = if parent_upd.is_huge_file() {
+            1
+        } else {
+            alloc.geo.block_size / EXT4_SECTOR_SIZE
+        };
+        let mut allocated: u32 = 0;
+        for (i, blk) in new_blocks.iter().enumerate() {
+            let logical =
+                u32::try_from(i).map_err(|_| FfsError::Format("logical block overflow".into()))?;
+            if let Some(phys) = resolve(logical) {
+                dev.write_block(cx, BlockNumber(phys), blk)?;
+            } else {
+                let Ext4AllocState {
+                    geo,
+                    groups,
+                    persist_ctx,
+                } = &mut *alloc;
+                let ba = ffs_alloc::alloc_blocks_persist(
+                    cx,
+                    dev,
+                    geo,
+                    groups,
+                    1,
+                    &AllocHint::default(),
+                    persist_ctx,
+                )?;
+                dev.write_block(cx, ba.start, blk)?;
+                let extent = Ext4Extent {
+                    logical_block: logical,
+                    raw_len: 1,
+                    physical_start: ba.start.0,
+                };
+                let mut tree_alloc = ffs_extent::GroupBlockAllocator {
+                    cx,
+                    dev,
+                    geo,
+                    groups,
+                    hint: AllocHint::default(),
+                    pctx: persist_ctx,
+                    ino: parent_ino_u32,
+                    generation,
+                };
+                ffs_btree::insert(cx, dev, &mut root_bytes, extent, &mut tree_alloc)?;
+                allocated += 1;
+            }
+        }
+
+        let freed: u64 = if m_blocks < n_blocks {
+            let Ext4AllocState {
+                geo,
+                groups,
+                persist_ctx,
+            } = &mut *alloc;
+            ffs_extent::truncate_extents(
+                cx,
+                dev,
+                &mut root_bytes,
+                geo,
+                groups,
+                m_blocks,
+                persist_ctx,
+                ffs_extent::ExtentOwner {
+                    ino: parent_ino_u32,
+                    generation,
+                },
+            )?
+        } else {
+            0
+        };
+
+        Self::set_extent_root(&mut parent_upd, &root_bytes);
+        parent_upd.size = u64::from(m_blocks) * block_size_u64;
+        let block_delta =
+            (i128::from(allocated) - i128::from(freed)) * i128::from(sectors_per_block);
+        parent_upd.blocks =
+            Self::ext4_checked_inode_blocks_delta(parent_upd.blocks, parent, block_delta)?;
+        ffs_inode::touch_mtime_ctime(&mut parent_upd, tstamp_secs, tstamp_nanos);
+        if new_file_type == Ext4FileType::Dir {
+            parent_upd.links_count =
+                Self::ext4_checked_links_count_delta(parent_upd.links_count, parent, 1)?;
+        }
+        ffs_inode::write_inode(
+            cx,
+            dev,
+            &alloc.geo,
+            &alloc.groups,
+            parent,
+            &parent_upd,
+            csum_seed,
+        )?;
+        self.extent_cache.invalidate_all();
+        Ok(())
     }
 
     fn ext4_preflight_dir_entry_insert(
@@ -34101,6 +34354,143 @@ mod tests {
                 ffs_ondisk::HtreeFindResult::Found(_)
             ),
             "pre-existing entry must remain index-reachable after the create"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn many_creates_in_htree_dir_trigger_rebuild_and_keep_all_findable_bd_rzq1y() {
+        // Filling a hash-target leaf forces ext4_rebuild_htree_dir (bd-rzq1y).
+        // After many creates the directory must have grown new blocks (only the
+        // rebuild path allocates for an htree dir) and EVERY entry — original and
+        // newly created — must remain reachable via the index in its hash-correct
+        // leaf, with the dx_root still valid.
+        let Some((fs, _tmp)) = open_writable_ext4_mkfs(32) else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let (csum_seed, hash_seed, has_large_dir, hash_version, block_size) = {
+            let sb = fs.ext4_superblock().expect("sb");
+            (
+                sb.csum_seed(),
+                sb.hash_seed,
+                sb.has_large_dir(),
+                sb.effective_dirhash_version(sb.def_hash_version),
+                usize::try_from(sb.block_size).unwrap(),
+            )
+        };
+
+        let dir = fs
+            .mkdir(&cx, root, OsStr::new("growdir"), 0o755, 0, 0)
+            .expect("mkdir");
+        let dir_ino = dir.ino;
+        let dir_ino_u32 = u32::try_from(dir_ino.0).unwrap();
+        let generation = fs.read_inode(&cx, dir_ino).expect("read dir").generation;
+
+        let orig_names: Vec<Vec<u8>> = (0..200)
+            .map(|i| format!("orig_{i:04}.txt").into_bytes())
+            .collect();
+        let orig_entries: Vec<(u32, u8, &[u8])> = orig_names
+            .iter()
+            .enumerate()
+            .map(|(i, n)| {
+                (
+                    5000 + u32::try_from(i).unwrap(),
+                    ffs_ondisk::ext4::EXT4_FT_REG_FILE,
+                    n.as_slice(),
+                )
+            })
+            .collect();
+        let blocks = ffs_ondisk::build_htree_directory_stamped(
+            dir_ino_u32,
+            2,
+            &orig_entries,
+            block_size,
+            hash_version,
+            &hash_seed,
+            csum_seed,
+            dir_ino_u32,
+            generation,
+        )
+        .expect("build htree");
+        assert!(blocks.len() >= 2, "need a dx_root + at least one leaf");
+        install_htree_dir(&fs, &cx, dir_ino, &blocks);
+        let initial_size = fs.read_inode(&cx, dir_ino).unwrap().size;
+
+        // Create enough new files to overflow leaves and force rebuild(s).
+        let mut new_names: Vec<Vec<u8>> = Vec::new();
+        for i in 0..600 {
+            let nm = format!("created_{i:04}.dat");
+            fs.create(&cx, dir_ino, OsStr::new(&nm), 0o644, 0, 0)
+                .unwrap_or_else(|e| panic!("create {nm} must succeed (rebuild): {e:?}"));
+            new_names.push(nm.into_bytes());
+        }
+
+        // The directory must have grown — only the rebuild path allocates blocks
+        // for an htree dir, so growth proves the overflow/rebuild path ran.
+        let final_size = fs.read_inode(&cx, dir_ino).unwrap().size;
+        assert!(
+            final_size > initial_size,
+            "htree dir must have grown via rebuild: {initial_size} -> {final_size}"
+        );
+
+        let find = |name: &[u8]| -> ffs_ondisk::HtreeFindResult {
+            ffs_ondisk::htree_find_entry(
+                u32::try_from(block_size).unwrap(),
+                &hash_seed,
+                has_large_dir,
+                name,
+                |v| v,
+                |lb| {
+                    let inode = fs.read_inode(&cx, dir_ino).ok()?;
+                    let exts = fs.collect_extents(&cx, &inode).ok()?;
+                    let phys = exts.iter().find_map(|e| {
+                        let len = u32::from(e.actual_len());
+                        if lb >= e.logical_block && lb < e.logical_block + len {
+                            Some(e.physical_start + u64::from(lb - e.logical_block))
+                        } else {
+                            None
+                        }
+                    })?;
+                    fs.read_block_vec(&cx, BlockNumber(phys)).ok()
+                },
+            )
+        };
+
+        // Every created entry is reachable via the index in its hash-correct leaf.
+        for nm in &new_names {
+            assert!(
+                matches!(find(nm), ffs_ondisk::HtreeFindResult::Found(_)),
+                "created entry {:?} must be index-reachable after rebuild",
+                String::from_utf8_lossy(nm)
+            );
+        }
+        // A sample of the original entries survived the rebuild(s).
+        for i in (0..200).step_by(17) {
+            let nm = format!("orig_{i:04}.txt").into_bytes();
+            assert!(
+                matches!(find(&nm), ffs_ondisk::HtreeFindResult::Found(_)),
+                "original entry {:?} must survive the rebuild(s)",
+                String::from_utf8_lossy(&nm)
+            );
+        }
+        // dx_root (block 0) is still a valid index.
+        let block0_phys = {
+            let di = fs.read_inode(&cx, dir_ino).unwrap();
+            fs.collect_extents(&cx, &di)
+                .unwrap()
+                .iter()
+                .find(|e| e.logical_block == 0)
+                .unwrap()
+                .physical_start
+        };
+        let dxr = fs.read_block_vec(&cx, BlockNumber(block0_phys)).unwrap();
+        let parsed =
+            ffs_ondisk::parse_dx_root(&dxr).expect("dx_root must still parse after rebuilds");
+        assert!(
+            !parsed.entries.is_empty(),
+            "dx_root index must be populated"
         );
     }
 

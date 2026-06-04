@@ -3371,6 +3371,22 @@ impl Ext4FileType {
             _ => Self::Unknown,
         }
     }
+
+    /// The on-disk `ext4_dir_entry_2.file_type` byte for this entry kind.
+    /// Inverse of [`from_raw`](Self::from_raw).
+    #[must_use]
+    pub fn to_raw(self) -> u8 {
+        match self {
+            Self::Unknown => EXT4_FT_UNKNOWN,
+            Self::RegFile => EXT4_FT_REG_FILE,
+            Self::Dir => EXT4_FT_DIR,
+            Self::Chrdev => EXT4_FT_CHRDEV,
+            Self::Blkdev => EXT4_FT_BLKDEV,
+            Self::Fifo => EXT4_FT_FIFO,
+            Self::Sock => EXT4_FT_SOCK,
+            Self::Symlink => EXT4_FT_SYMLINK,
+        }
+    }
 }
 
 /// A parsed ext4 directory entry (`ext4_dir_entry_2`).
