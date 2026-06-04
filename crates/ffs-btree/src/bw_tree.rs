@@ -297,7 +297,7 @@ impl MappingTable {
             let _guard = epoch::pin();
 
             let chain_len = snapshot.chain_len;
-            if chain_len >= MAX_CHAIN_DEPTH {
+            if chain_len > DEFAULT_CONSOLIDATION_THRESHOLD {
                 let (state, _) = materialize_from_head(&snapshot.head)?;
                 let new_base = Arc::new(PageDelta::Base { entries: state });
                 if self.cas_page(page_id, snapshot.epoch, new_base, 1)? {
@@ -913,9 +913,9 @@ fn defer_reclaim(delta: Arc<PageDelta>) {
 #[cfg(test)]
 mod tests {
     use super::{
-        BwKey, BwValue, ConsolidationConfig, FfsError, MAX_CHAIN_DEPTH, MAX_CHAIN_WALK,
-        MappingTable, PageDelta, PageHead, PageId, chain_length, materialize_from_head,
-        range_scan_from_head, write_lock,
+        BwKey, BwValue, ConsolidationConfig, DEFAULT_CONSOLIDATION_THRESHOLD, DeltaMutation,
+        FfsError, MAX_CAS_RETRIES, MAX_CHAIN_DEPTH, MAX_CHAIN_WALK, MappingTable, PageDelta,
+        PageHead, PageId, chain_length, materialize_from_head, range_scan_from_head, write_lock,
     };
     use std::collections::BTreeMap;
     use std::sync::{Arc, Barrier, atomic::Ordering};
@@ -927,6 +927,63 @@ mod tests {
         std::thread::Builder::new()
             .spawn(f)
             .expect("spawn test thread")
+    }
+
+    fn append_delta_without_preconsolidation_for_test(
+        table: &MappingTable,
+        page: PageId,
+        mutation: DeltaMutation,
+    ) {
+        for _ in 0..MAX_CAS_RETRIES {
+            let snapshot = table.get_page(page).expect("snapshot");
+            let new_head = Arc::new(match mutation {
+                DeltaMutation::Insert { key, value } => PageDelta::Insert {
+                    key,
+                    value,
+                    next: snapshot.head,
+                },
+                DeltaMutation::Delete { key } => PageDelta::Delete {
+                    key,
+                    next: snapshot.head,
+                },
+                DeltaMutation::Split {
+                    separator,
+                    new_sibling,
+                } => PageDelta::Split {
+                    separator,
+                    new_sibling,
+                    next: snapshot.head,
+                },
+                DeltaMutation::Merge { removed_sibling } => PageDelta::Merge {
+                    removed_sibling,
+                    next: snapshot.head,
+                },
+            });
+            if table
+                .cas_page(page, snapshot.epoch, new_head, snapshot.chain_len + 1)
+                .expect("legacy cas")
+            {
+                return;
+            }
+        }
+        panic!("legacy no-preconsolidation append exhausted CAS retries");
+    }
+
+    fn insert_without_preconsolidation_for_test(
+        table: &MappingTable,
+        page: PageId,
+        key: BwKey,
+        value: BwValue,
+    ) {
+        append_delta_without_preconsolidation_for_test(
+            table,
+            page,
+            DeltaMutation::Insert { key, value },
+        );
+    }
+
+    fn delete_without_preconsolidation_for_test(table: &MappingTable, page: PageId, key: BwKey) {
+        append_delta_without_preconsolidation_for_test(table, page, DeltaMutation::Delete { key });
     }
 
     #[test]
@@ -1377,19 +1434,17 @@ mod tests {
     }
 
     #[test]
-    fn append_at_chain_depth_limit_preconsolidates_before_appending() {
+    fn append_at_default_threshold_preconsolidates_before_appending() {
         let table = MappingTable::with_capacity(1);
         let page = table.allocate_page().expect("alloc");
-        let limit_keys =
-            u64::try_from(MAX_CHAIN_DEPTH - 1).expect("chain depth fits in u64 for tests");
 
-        for i in 0..limit_keys {
+        for i in 0..u64::try_from(DEFAULT_CONSOLIDATION_THRESHOLD).expect("threshold fits") {
             table.insert(page, BwKey(i), BwValue(i)).expect("insert");
         }
 
         assert_eq!(
             assert_cached_chain_len_matches(&table, page),
-            MAX_CHAIN_DEPTH
+            DEFAULT_CONSOLIDATION_THRESHOLD + 1
         );
 
         table
@@ -1397,10 +1452,114 @@ mod tests {
             .expect("append after preconsolidation");
 
         let state = table.materialize_page(page).expect("materialize");
-        assert_eq!(state.len(), MAX_CHAIN_DEPTH);
+        assert_eq!(state.len(), DEFAULT_CONSOLIDATION_THRESHOLD + 1);
         assert_eq!(state.get(&BwKey(u64::MAX)).copied(), Some(BwValue(99)));
 
         assert_eq!(assert_cached_chain_len_matches(&table, page), 2);
+    }
+
+    #[test]
+    fn append_preconsolidation_matches_deferred_golden_report() {
+        let old_table = MappingTable::with_capacity(1);
+        let old_page = old_table.allocate_page().expect("old alloc");
+        let new_table = MappingTable::with_capacity(1);
+        let new_page = new_table.allocate_page().expect("new alloc");
+
+        for key in 0..32_u64 {
+            insert_without_preconsolidation_for_test(
+                &old_table,
+                old_page,
+                BwKey(key),
+                BwValue(key * 10),
+            );
+            new_table
+                .insert(new_page, BwKey(key), BwValue(key * 10))
+                .expect("new seed insert");
+        }
+
+        let cfg = ConsolidationConfig::default();
+        old_table
+            .consolidate_page(old_page, &cfg)
+            .expect("old consolidate");
+        new_table
+            .consolidate_page(new_page, &cfg)
+            .expect("new consolidate");
+
+        for step in 0..96_u64 {
+            let key = BwKey((step * 37 + 11) % 64);
+            match step % 4 {
+                0 => {
+                    let value = BwValue(10_000 + step);
+                    insert_without_preconsolidation_for_test(&old_table, old_page, key, value);
+                    new_table.insert(new_page, key, value).expect("new insert");
+                }
+                1 => {
+                    delete_without_preconsolidation_for_test(&old_table, old_page, key);
+                    new_table.delete(new_page, key).expect("new delete");
+                }
+                2 => {
+                    let value = BwValue(20_000 + step);
+                    insert_without_preconsolidation_for_test(&old_table, old_page, key, value);
+                    new_table.insert(new_page, key, value).expect("new insert");
+                }
+                _ => {
+                    if key.0 % 3 == 0 {
+                        delete_without_preconsolidation_for_test(&old_table, old_page, key);
+                        new_table.delete(new_page, key).expect("new delete");
+                    } else {
+                        let value = BwValue(30_000 + step);
+                        insert_without_preconsolidation_for_test(&old_table, old_page, key, value);
+                        new_table.insert(new_page, key, value).expect("new insert");
+                    }
+                }
+            }
+        }
+
+        let old_state = old_table
+            .materialize_page(old_page)
+            .expect("old materialize");
+        let new_state = new_table
+            .materialize_page(new_page)
+            .expect("new materialize");
+        assert_eq!(old_state, new_state);
+
+        let old_chain_len = assert_cached_chain_len_matches(&old_table, old_page);
+        let new_chain_len = assert_cached_chain_len_matches(&new_table, new_page);
+        assert!(old_chain_len > DEFAULT_CONSOLIDATION_THRESHOLD);
+        assert!(new_chain_len <= DEFAULT_CONSOLIDATION_THRESHOLD + 1);
+
+        println!("BWTREE_PRECONSOLIDATE_GOLDEN\told_chain_len\t{old_chain_len}");
+        println!("BWTREE_PRECONSOLIDATE_GOLDEN\tnew_chain_len\t{new_chain_len}");
+        println!(
+            "BWTREE_PRECONSOLIDATE_GOLDEN\tstate_len\t{}",
+            new_state.len()
+        );
+
+        for key in [0_u64, 1, 2, 3, 5, 8, 13, 21, 34, 55, 63] {
+            let key = BwKey(key);
+            let old_lookup = old_table.lookup(old_page, key).expect("old lookup");
+            let new_lookup = new_table.lookup(new_page, key).expect("new lookup");
+            assert_eq!(old_lookup, new_lookup);
+            println!(
+                "BWTREE_PRECONSOLIDATE_GOLDEN\tlookup\t{}\t{}",
+                key.0,
+                new_lookup.map_or_else(|| "None".to_owned(), |value| value.0.to_string())
+            );
+        }
+
+        let old_range = old_table
+            .range_scan(old_page, BwKey(7), 12)
+            .expect("old range");
+        let new_range = new_table
+            .range_scan(new_page, BwKey(7), 12)
+            .expect("new range");
+        assert_eq!(old_range, new_range);
+        for (key, value) in new_range {
+            println!(
+                "BWTREE_PRECONSOLIDATE_GOLDEN\trange\t{}\t{}",
+                key.0, value.0
+            );
+        }
     }
 
     // ── Comprehensive unit tests (bd-1mdk.3) ─────────────────────
@@ -2295,7 +2454,10 @@ mod tests {
 
         // Build several pages with chains long enough to qualify for
         // consolidation under the default threshold.
-        let cfg = ConsolidationConfig::default();
+        let cfg = ConsolidationConfig {
+            chain_threshold: 1,
+            max_retries: MAX_CAS_RETRIES,
+        };
         let mut pages = Vec::new();
         for _ in 0..4 {
             let p = table.allocate_page().expect("alloc");
