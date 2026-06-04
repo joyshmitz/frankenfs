@@ -12218,6 +12218,7 @@ impl OpenFs {
         if inode.is_symlink() {
             return Err(FfsError::Format("cannot fallocate a symlink".into()));
         }
+        Self::ext4_reject_encrypted(&inode)?;
         if Self::ext4_inode_uses_inline_data(&inode) {
             return Err(FfsError::UnsupportedFeature(
                 "ext4 inline-data fallocate mutation is not supported".into(),
@@ -12715,6 +12716,8 @@ impl OpenFs {
         if reject_symlink && inode.is_symlink() {
             return Err(FfsError::Format("cannot write to a symlink".into()));
         }
+        // No fscrypt support: refuse to store plaintext into encrypted blocks.
+        Self::ext4_reject_encrypted(&inode)?;
         // e2compr compressed write: route to cluster-based write path.
         //
         // The historic e2compr method field aliases the old compression flag
@@ -14306,6 +14309,24 @@ impl OpenFs {
         if Self::ext4_inode_uses_inline_data(inode) {
             return Err(FfsError::UnsupportedFeature(
                 "ext4 inline_data directories are not yet supported (bd-4y9ca)".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Reject content I/O on an fscrypt-encrypted inode.
+    ///
+    /// FrankenFS has no fscrypt key handling or AES-XTS, so reading would return
+    /// raw ciphertext as if it were plaintext, and writing would store the
+    /// caller's plaintext into the encrypted file's blocks — which the kernel
+    /// then decrypts into garbage (silent corruption). A real kernel without the
+    /// key returns ENOKEY, so failing loudly here is the only safe + parity-
+    /// defensible behavior (bd-4sfty).
+    fn ext4_reject_encrypted(inode: &Ext4Inode) -> Result<(), FfsError> {
+        if inode.is_encrypted() {
+            return Err(FfsError::UnsupportedFeature(
+                "ext4 encrypted (fscrypt) file content is not supported — no decryption key (bd-4sfty)"
+                    .to_owned(),
             ));
         }
         Ok(())
@@ -20576,6 +20597,8 @@ impl FsOps for OpenFs {
                 if inode.is_symlink() {
                     return Err(FfsError::Format("cannot read a symlink".into()));
                 }
+                // No fscrypt support: never return raw ciphertext as plaintext.
+                Self::ext4_reject_encrypted(&inode)?;
 
                 // e2compr compressed inode: if COMPRBLK_FL is set, the file
                 // contains at least one compressed cluster. Route to the
@@ -35122,6 +35145,54 @@ mod tests {
             fs.create(&cx, dir.ino, OsStr::new("newfile.txt"), 0o644, 0, 0)
                 .is_err(),
             "create in an inline_data dir must fail, not lose the inline entries"
+        );
+    }
+
+    #[test]
+    fn encrypted_file_content_io_fails_loudly_bd_4sfty() {
+        // FrankenFS has no fscrypt support, so read/write/fallocate on an
+        // encrypted file must fail loudly rather than return raw ciphertext
+        // (read) or store plaintext into the encrypted blocks (write/corruption).
+        let Some((fs, _tmp)) = open_writable_ext4_mkfs(8) else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let attr = fs
+            .create(&cx, root, OsStr::new("secret.bin"), 0o644, 0, 0)
+            .expect("create");
+        // Give the file an extent root + a small write before flagging it
+        // encrypted, so the guard (not some other path) is what rejects.
+        fs.write(&cx, attr.ino, 0, b"plaintext")
+            .expect("seed write");
+
+        // Flag the inode encrypted (EXT4_ENCRYPT_INODE_FL = 0x0000_0800).
+        let mut inode = fs.read_inode(&cx, attr.ino).expect("read inode");
+        inode.flags |= 0x0000_0800;
+        fs.persist_ext4_inode_for_testing(&cx, attr.ino, &inode)
+            .expect("persist encrypt flag");
+        assert!(
+            fs.read_inode(&cx, attr.ino).unwrap().is_encrypted(),
+            "inode must now be flagged encrypted"
+        );
+
+        assert!(
+            matches!(
+                fs.read(&cx, attr.ino, 0, 16),
+                Err(FfsError::UnsupportedFeature(_))
+            ),
+            "reading an encrypted file must fail, not return ciphertext as plaintext"
+        );
+        assert!(
+            matches!(
+                fs.write(&cx, attr.ino, 0, b"newdata"),
+                Err(FfsError::UnsupportedFeature(_))
+            ),
+            "writing an encrypted file must fail, not store plaintext into encrypted blocks"
+        );
+        assert!(
+            fs.fallocate(&cx, attr.ino, 0, 4096, 0).is_err(),
+            "fallocate on an encrypted file must fail"
         );
     }
 
