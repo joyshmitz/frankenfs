@@ -5182,6 +5182,25 @@ pub fn dx_root_entry_limit(block_size: usize, has_metadata_csum: bool) -> u16 {
     u16::try_from(usable).unwrap_or(u16::MAX)
 }
 
+/// Maximum number of DX entries (including the implicit entry 0) that fit in an
+/// interior `dx_node` block (an indirect level) of `block_size` bytes.
+///
+/// Unlike a DX root, an interior node has no `.`/`..` dirents: its entry area
+/// begins at [`DX_NODE_COUNT_OFFSET`] (`0x08`, just past the 8-byte fake
+/// dirent), so it fits one more slot than the root. As with the root, a
+/// `metadata_csum` filesystem reserves the trailing 8-byte slot for the
+/// `dx_tail`. This is the `limit` the kernel stores in an interior node.
+#[must_use]
+pub fn dx_node_entry_limit(block_size: usize, has_metadata_csum: bool) -> u16 {
+    let slots = block_size.saturating_sub(DX_NODE_COUNT_OFFSET) / 8;
+    let usable = if has_metadata_csum {
+        slots.saturating_sub(1)
+    } else {
+        slots
+    };
+    u16::try_from(usable).unwrap_or(u16::MAX)
+}
+
 /// Serialize the DX root index structures into directory block 0, in place.
 ///
 /// Writes the `dx_root_info` (`0x18..0x20`), the `dx_countlimit` (`0x20`), and
@@ -5242,6 +5261,73 @@ pub fn write_dx_root(
 
     // Entries 1.. @ 0x28: (hash, block) pairs.
     let mut off = 0x28;
+    for entry in &entries[1..] {
+        block[off..off + 4].copy_from_slice(&entry.hash.to_le_bytes());
+        block[off + 4..off + 8].copy_from_slice(&entry.block.to_le_bytes());
+        off += 8;
+    }
+
+    Ok(())
+}
+
+/// Serialize an interior DX node (an indirect index level) into a directory
+/// block, in place.
+///
+/// Mirrors [`write_dx_root`] but for the interior-node layout the read-half
+/// parses at [`DX_NODE_COUNT_OFFSET`] (`0x08`): an 8-byte fake dirent (inode 0,
+/// `rec_len` spanning the whole block, so a linear scan treats the block as one
+/// empty record), then the `dx_countlimit` at `0x08` (doubling as entry 0, whose
+/// block is at `0x0C`), then `(hash, block)` pairs from `0x10`. As in the root,
+/// `entries[0].hash` is ignored (the read-half forces entry 0's hash to 0). When
+/// `metadata_csum` is enabled the caller must stamp the `dx_tail` afterwards via
+/// [`stamp_dx_block_checksum`] with [`DX_NODE_COUNT_OFFSET`]. This is the inverse
+/// of the interior-node case of [`parse_dx_entries`].
+pub fn write_dx_node(
+    block: &mut [u8],
+    limit: u16,
+    entries: &[Ext4DxEntry],
+) -> Result<(), ParseError> {
+    if entries.is_empty() {
+        return Err(ParseError::InvalidField {
+            field: "dx_entries",
+            reason: "must contain at least the implicit entry 0",
+        });
+    }
+    let count = u16::try_from(entries.len()).map_err(|_| ParseError::InvalidField {
+        field: "dx_count",
+        reason: "entry count does not fit in u16",
+    })?;
+    if count > limit {
+        return Err(ParseError::InvalidField {
+            field: "dx_count",
+            reason: "entry count exceeds limit",
+        });
+    }
+    // Bytes consumed: fake dirent 0x00..0x08; countlimit+entry0 occupy
+    // 0x08..0x10; each remaining entry is 8 bytes from 0x10.
+    let needed = DX_NODE_COUNT_OFFSET + 8 + (entries.len() - 1) * 8;
+    if needed > block.len() {
+        return Err(ParseError::InsufficientData {
+            needed,
+            offset: 0,
+            actual: block.len(),
+        });
+    }
+
+    // Fake dirent @ 0x00..0x08: inode 0, rec_len spanning the block.
+    let bs = block.len();
+    block[0..4].copy_from_slice(&0_u32.to_le_bytes());
+    block[4..6].copy_from_slice(&rec_len_to_disk(bs).to_le_bytes());
+    block[6] = 0; // name_len
+    block[7] = 0; // file_type
+
+    // dx_countlimit @ 0x08: limit(u16), count(u16); doubles as entry 0.
+    block[0x08..0x0A].copy_from_slice(&limit.to_le_bytes());
+    block[0x0A..0x0C].copy_from_slice(&count.to_le_bytes());
+    block[0x0C..0x10].copy_from_slice(&entries[0].block.to_le_bytes());
+
+    // Entries 1.. @ 0x10: (hash, block) pairs.
+    let mut off = 0x10;
     for entry in &entries[1..] {
         block[off..off + 4].copy_from_slice(&entry.hash.to_le_bytes());
         block[off + 4..off + 8].copy_from_slice(&entry.block.to_le_bytes());
@@ -5425,6 +5511,43 @@ pub fn build_htree_directory(
     hash_seed: &[u32; 4],
     with_csum_tail: bool,
 ) -> Option<Vec<Vec<u8>>> {
+    build_htree_layout(
+        dot_inode,
+        dotdot_inode,
+        entries,
+        block_size,
+        hash_version,
+        hash_seed,
+        with_csum_tail,
+    )
+    .map(|layout| layout.blocks)
+}
+
+/// A freshly-built hash-indexed directory in logical-block order
+/// `[dx_root, leaf_0 .. leaf_{L-1}, node_0 .. node_{N-1}]`, plus the leaf count
+/// `L` so the stamped builder can checksum leaves (as dir blocks) and interior
+/// `dx_node` blocks (as index blocks) with the right formulas. `N == 0` for a
+/// single-level index (`indirect_levels == 0`).
+struct HtreeLayout {
+    blocks: Vec<Vec<u8>>,
+    leaf_count: usize,
+}
+
+/// Build the block images for a hash-indexed directory, choosing a single-level
+/// index (`indirect_levels == 0`) when the leaves fit in the DX root, or a
+/// two-level index (`indirect_levels == 1`) when they do not. Returns `None`
+/// when even two levels cannot hold the directory (a third indirect level would
+/// be required) or when a single hash value's run overflows one leaf (needs a
+/// collision chain), matching the cases the read-half cannot otherwise resolve.
+fn build_htree_layout(
+    dot_inode: u32,
+    dotdot_inode: u32,
+    entries: &[(u32, u8, &[u8])],
+    block_size: usize,
+    hash_version: u8,
+    hash_seed: &[u32; 4],
+    with_csum_tail: bool,
+) -> Option<HtreeLayout> {
     if !(64..=65536).contains(&block_size) || entries.is_empty() {
         return None;
     }
@@ -5466,25 +5589,22 @@ pub fn build_htree_directory(
     }
     leaves.push(current);
 
-    let limit = dx_root_entry_limit(block_size, with_csum_tail);
-    if leaves.len() > usize::from(limit) {
-        return None; // needs a two-level index (indirect_levels >= 1) — deferred
-    }
+    let leaf_count = leaves.len();
 
-    // DX entries: entry 0 has implicit hash 0 -> first leaf (logical block 1);
-    // each later entry maps the leaf's minimum hash to its logical block.
-    let mut dx_entries = Vec::with_capacity(leaves.len());
-    for (i, leaf) in leaves.iter().enumerate() {
-        let block_no = u32::try_from(i + 1).ok()?;
-        let min_hash = if i == 0 {
-            0
+    // The minimum hash a leaf covers: entry 0's hash is implicitly 0; every
+    // later leaf is identified by the hash of its first (lowest-hash) name.
+    let leaf_min_hash = |i: usize| -> Option<u32> {
+        if i == 0 {
+            Some(0)
         } else {
-            dx_hash(hash_version, leaf.first()?.2, hash_seed).0
-        };
-        dx_entries.push(Ext4DxEntry {
-            hash: min_hash,
-            block: block_no,
-        });
+            Some(dx_hash(hash_version, leaves[i].first()?.2, hash_seed).0)
+        }
+    };
+
+    // Leaf blocks occupy logical blocks 1..=L regardless of index depth.
+    let mut leaf_blocks = Vec::with_capacity(leaf_count);
+    for leaf in &leaves {
+        leaf_blocks.push(pack_dir_block_entries(leaf, block_size, with_csum_tail).ok()?);
     }
 
     // Block 0: fake "." and ".." entries; the ".." rec_len spans the DX area.
@@ -5500,14 +5620,68 @@ pub fn build_htree_directory(
     root[19] = EXT4_FT_DIR;
     root[20] = b'.';
     root[21] = b'.';
-    write_dx_root(&mut root, hash_version, 0, limit, &dx_entries).ok()?;
 
-    let mut blocks = Vec::with_capacity(leaves.len() + 1);
-    blocks.push(root);
-    for leaf in &leaves {
-        blocks.push(pack_dir_block_entries(leaf, block_size, with_csum_tail).ok()?);
+    let root_limit = dx_root_entry_limit(block_size, with_csum_tail);
+
+    if leaf_count <= usize::from(root_limit) {
+        // Single level: DX root entries point straight at the leaves.
+        let mut dx_entries = Vec::with_capacity(leaf_count);
+        for i in 0..leaf_count {
+            dx_entries.push(Ext4DxEntry {
+                hash: leaf_min_hash(i)?,
+                block: u32::try_from(i + 1).ok()?,
+            });
+        }
+        write_dx_root(&mut root, hash_version, 0, root_limit, &dx_entries).ok()?;
+        let mut blocks = Vec::with_capacity(leaf_count + 1);
+        blocks.push(root);
+        blocks.extend(leaf_blocks);
+        return Some(HtreeLayout { blocks, leaf_count });
     }
-    Some(blocks)
+
+    // Two-level: group the leaves into interior dx_node blocks of up to
+    // `node_limit` leaves each; the DX root points at the nodes, each node
+    // points at its leaves. Interior nodes occupy logical blocks (L+1)..=(L+N).
+    let node_limit_u16 = dx_node_entry_limit(block_size, with_csum_tail);
+    let node_limit = usize::from(node_limit_u16);
+    if node_limit == 0 {
+        return None;
+    }
+    let node_count = leaf_count.div_ceil(node_limit);
+    if node_count > usize::from(root_limit) {
+        return None; // would need a third indirect level — deferred
+    }
+
+    let mut node_blocks = Vec::with_capacity(node_count);
+    let mut root_entries = Vec::with_capacity(node_count);
+    for j in 0..node_count {
+        let start = j * node_limit;
+        let end = ((j + 1) * node_limit).min(leaf_count);
+        let mut node_entries = Vec::with_capacity(end - start);
+        for p in start..end {
+            node_entries.push(Ext4DxEntry {
+                hash: leaf_min_hash(p)?,
+                block: u32::try_from(p + 1).ok()?, // leaf logical block
+            });
+        }
+        // The DX root routes a hash to node `j` via this entry; entry 0's hash
+        // is ignored by the read-half, so node 0 (covering hash 0) is correct.
+        root_entries.push(Ext4DxEntry {
+            hash: leaf_min_hash(start)?,
+            block: u32::try_from(leaf_count + 1 + j).ok()?, // node logical block
+        });
+        let mut node = vec![0_u8; block_size];
+        write_dx_node(&mut node, node_limit_u16, &node_entries).ok()?;
+        node_blocks.push(node);
+    }
+
+    write_dx_root(&mut root, hash_version, 1, root_limit, &root_entries).ok()?;
+
+    let mut blocks = Vec::with_capacity(1 + leaf_count + node_count);
+    blocks.push(root);
+    blocks.extend(leaf_blocks);
+    blocks.extend(node_blocks);
+    Some(HtreeLayout { blocks, leaf_count })
 }
 
 /// Build a complete `metadata_csum`-ready hash-indexed directory.
@@ -5536,7 +5710,10 @@ pub fn build_htree_directory_stamped(
     dir_ino: u32,
     generation: u32,
 ) -> Option<Vec<Vec<u8>>> {
-    let mut blocks = build_htree_directory(
+    let HtreeLayout {
+        mut blocks,
+        leaf_count,
+    } = build_htree_layout(
         dot_inode,
         dotdot_inode,
         entries,
@@ -5545,6 +5722,9 @@ pub fn build_htree_directory_stamped(
         hash_seed,
         true,
     )?;
+    // Layout is [dx_root, leaf_0..leaf_{L-1}, node_0..node_{N-1}]: the root and
+    // any interior nodes are index blocks (dx_tail CRC32C), the leaves are
+    // directory blocks (dir-tail CRC32C).
     stamp_dx_block_checksum(
         &mut blocks[0],
         csum_seed,
@@ -5552,8 +5732,11 @@ pub fn build_htree_directory_stamped(
         generation,
         DX_ROOT_COUNT_OFFSET,
     );
-    for leaf in &mut blocks[1..] {
+    for leaf in &mut blocks[1..=leaf_count] {
         stamp_dir_block_checksum(leaf, csum_seed, dir_ino, generation);
+    }
+    for node in &mut blocks[leaf_count + 1..] {
+        stamp_dx_block_checksum(node, csum_seed, dir_ino, generation, DX_NODE_COUNT_OFFSET);
     }
     Some(blocks)
 }
@@ -8591,6 +8774,152 @@ mod tests {
             ) {
                 HtreeFindResult::Found(e) => {
                     assert_eq!(e.inode, 200 + u32::try_from(i).unwrap());
+                }
+                other => panic!("entry {name:?} not reachable: {other:?}"),
+            }
+        }
+    }
+
+    /// bd-owt2r (multi-level write-half): when the leaves overflow a single DX
+    /// root, the builder produces a two-level index (`indirect_levels == 1`)
+    /// whose interior `dx_node` blocks the read-half navigates correctly. A
+    /// 1 KiB block holds only 124 DX root entries, so a few thousand entries
+    /// force the second level. The read-half (`htree_find_entry`) is the oracle:
+    /// every name must resolve through root -> interior node -> leaf.
+    #[test]
+    fn build_htree_directory_two_level_is_navigable_bd_owt2r() {
+        let bs = 1024_usize;
+        let seed = [0x0bad_f00d_u32, 0xfeed_face, 0xdead_beef, 0xcafe_b0ba];
+        let hash_version = 1_u8; // half_md4
+
+        // 8000 entries at 1 KiB: > 124 leaves, so a single DX root cannot index
+        // them and the builder must emit indirect_levels == 1.
+        let names: Vec<Vec<u8>> = (0..8000)
+            .map(|i| format!("file_{i:06}").into_bytes())
+            .collect();
+        let entries: Vec<(u32, u8, &[u8])> = names
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (100 + u32::try_from(i).unwrap(), EXT4_FT_REG_FILE, n.as_slice()))
+            .collect();
+
+        let blocks = build_htree_directory(2, 2, &entries, bs, hash_version, &seed, false)
+            .expect("two-level htree should build");
+
+        // indirect_levels byte (0x1E of the dx_root) must be 1: the second level
+        // was actually emitted, not silently dropped.
+        assert_eq!(
+            blocks[0][0x1E], 1,
+            "dx_root must declare indirect_levels == 1"
+        );
+
+        // At least one interior node must parse as a dx_node with sane entries.
+        let root_limit = usize::from(dx_root_entry_limit(bs, false));
+        assert!(
+            blocks.len() > root_limit + 2,
+            "two-level layout must span more blocks than a single level could hold"
+        );
+
+        let read = |name: &[u8]| {
+            htree_find_entry(
+                u32::try_from(bs).unwrap(),
+                &seed,
+                false,
+                name,
+                |v| v,
+                |lb| blocks.get(lb as usize).cloned(),
+            )
+        };
+
+        for (i, name) in names.iter().enumerate() {
+            match read(name) {
+                HtreeFindResult::Found(e) => {
+                    assert_eq!(e.inode, 100 + u32::try_from(i).unwrap(), "wrong inode {name:?}");
+                }
+                other => panic!("entry {name:?} not reachable via two-level index: {other:?}"),
+            }
+        }
+
+        assert!(
+            !matches!(read(b"absent_name_zzz"), HtreeFindResult::Found(_)),
+            "false positive for an absent name in a two-level index"
+        );
+    }
+
+    /// bd-owt2r: the stamped two-level builder is both navigable AND fully
+    /// checksum-valid — DX root and interior `dx_node` blocks under the index
+    /// (`dx_tail`) formula, leaves under the directory-block formula — i.e.
+    /// e2fsck-ready on a metadata_csum filesystem.
+    #[test]
+    fn build_htree_directory_stamped_two_level_is_navigable_and_checksummed_bd_owt2r() {
+        let bs = 1024_usize;
+        let seed = [0x5151_5151_u32, 0x6262_6262, 0x7373_7373, 0x8484_8484];
+        let csum_seed = 0x0fad_cafe_u32;
+        let dir_ino = 99_u32;
+        let generation = 7_u32;
+        let hash_version = 1_u8;
+
+        let names: Vec<Vec<u8>> = (0..8000)
+            .map(|i| format!("name_{i:06}").into_bytes())
+            .collect();
+        let entries: Vec<(u32, u8, &[u8])> = names
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (300 + u32::try_from(i).unwrap(), EXT4_FT_REG_FILE, n.as_slice()))
+            .collect();
+
+        let blocks = build_htree_directory_stamped(
+            2, 2, &entries, bs, hash_version, &seed, csum_seed, dir_ino, generation,
+        )
+        .expect("stamped two-level htree build");
+
+        assert_eq!(
+            blocks[0][0x1E], 1,
+            "dx_root must declare indirect_levels == 1"
+        );
+
+        // The DX root checksum verifies under the index formula.
+        assert!(verify_dx_block_checksum(
+            &blocks[0],
+            csum_seed,
+            dir_ino,
+            generation,
+            DX_ROOT_COUNT_OFFSET
+        ));
+
+        // Every other block verifies under exactly one of the two formulas: a
+        // leaf (directory-block tail) or an interior node (dx_node dx_tail). At
+        // least one must be an interior node (the second level was stamped).
+        let mut node_blocks = 0_usize;
+        for blk in &blocks[1..] {
+            let dir_ok = verify_dir_block_checksum(blk, csum_seed, dir_ino, generation).is_ok();
+            let node_ok =
+                verify_dx_block_checksum(blk, csum_seed, dir_ino, generation, DX_NODE_COUNT_OFFSET);
+            if node_ok {
+                node_blocks += 1;
+            }
+            assert!(
+                dir_ok || node_ok,
+                "every block must carry a valid leaf or interior-node checksum"
+            );
+        }
+        assert!(
+            node_blocks >= 1,
+            "a two-level index must have at least one stamped interior node"
+        );
+
+        // Still navigable end-to-end with the checksum tails in place.
+        for (i, name) in names.iter().enumerate() {
+            match htree_find_entry(
+                u32::try_from(bs).unwrap(),
+                &seed,
+                false,
+                name,
+                |v| v,
+                |lb| blocks.get(lb as usize).cloned(),
+            ) {
+                HtreeFindResult::Found(e) => {
+                    assert_eq!(e.inode, 300 + u32::try_from(i).unwrap());
                 }
                 other => panic!("entry {name:?} not reachable: {other:?}"),
             }
