@@ -38382,6 +38382,58 @@ mod tests {
         Some((fs, tmp))
     }
 
+    /// Run `e2fsck -fn` (force, read-only) on an image; returns (clean, output).
+    fn run_e2fsck(image: &std::path::Path) -> Option<(bool, String)> {
+        let out = std::process::Command::new("e2fsck")
+            .args(["-fn", image.to_str().unwrap()])
+            .output()
+            .ok()?;
+        let mut combined = String::from_utf8_lossy(&out.stdout).into_owned();
+        combined.push_str(&String::from_utf8_lossy(&out.stderr));
+        // Exit 0 = clean. With -n, non-zero means errors were found (not fixed).
+        Some((out.status.success(), combined))
+    }
+
+    /// Validate FrankenFS's ext4 write path against real `e2fsck` (the ext4
+    /// analog of the btrfs-check harness that found bd-x36qn): create a file,
+    /// write data, persist, and require e2fsck to report the image clean.
+    ///
+    /// CURRENTLY FAILS (bd-0ta4z): real `e2fsck` reports wrong superblock free
+    /// counts, an invalid `bg_itable_unused`, and bitmap differences — FrankenFS
+    /// ext4 allocation does not maintain the superblock global free counts,
+    /// `bg_itable_unused`, or the INODE_UNINIT/BLOCK_UNINIT group flags on a
+    /// fresh (lazy-init) image. Kept as the validation harness; remove
+    /// `#[ignore]` once bd-0ta4z is fixed.
+    #[test]
+    #[ignore = "bd-0ta4z: ext4 write path is not e2fsck-clean yet (harness)"]
+    fn ext4_created_file_passes_e2fsck_bd_0ta4z() {
+        let Some((fs, dev, tmp)) = open_writable_ext4_mkfs_with_device(64) else {
+            return; // format tool unavailable
+        };
+        let image = tmp.path().join("test.ext4");
+        let cx = Cx::for_testing();
+
+        let attr = fs
+            .create(&cx, InodeNumber(2), OsStr::new("e2fsck_probe.txt"), 0o644, 0, 0)
+            .expect("create on real ext4 image");
+        fs.write(&cx, attr.ino, 0, &[0xAB_u8; 8192])
+            .expect("write file data");
+
+        // Persist the MVCC buffer to the device, then write the modified image
+        // back to disk for e2fsck.
+        fs.flush_mvcc_to_device(&cx).expect("flush mvcc to device");
+        let bytes = dev.snapshot_bytes();
+        std::fs::write(&image, &bytes).expect("write modified image");
+
+        let Some((clean, output)) = run_e2fsck(&image) else {
+            return; // e2fsck unavailable
+        };
+        assert!(
+            clean,
+            "e2fsck must accept a FrankenFS-created+written ext4 image:\n{output}"
+        );
+    }
+
     fn open_writable_ext4_mkfs_with_incompat_features(
         size_mb: u64,
         incompat_bits: u32,
