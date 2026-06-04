@@ -11727,6 +11727,8 @@ impl OpenFs {
             };
             let child_ino = InodeNumber(u64::from(entry.inode));
             let child_inode = self.read_inode(cx, child_ino)?;
+            // Immutable and append-only files cannot be deleted (kernel: EPERM).
+            Self::ext4_reject_immutable_or_append(&child_inode)?;
 
             if expect_dir {
                 if !child_inode.is_dir() {
@@ -11884,6 +11886,8 @@ impl OpenFs {
         if src_inode.is_dir() {
             return Err(FfsError::Io(std::io::Error::from_raw_os_error(EPERM_ERRNO)));
         }
+        // No hard link may be created to an immutable file (kernel: EPERM).
+        Self::ext4_reject_immutable(&src_inode)?;
         if src_inode.links_count >= EXT4_LINK_MAX {
             return Err(FfsError::Io(std::io::Error::from_raw_os_error(
                 EMLINK_ERRNO,
@@ -13285,6 +13289,8 @@ impl OpenFs {
             .ok_or_else(|| FfsError::NotFound(String::from_utf8_lossy(name).into_owned()))?;
         let child_ino = InodeNumber(u64::from(entry.inode));
         let child_inode = self.read_inode(cx, child_ino)?;
+        // Immutable and append-only files cannot be renamed (kernel: EPERM).
+        Self::ext4_reject_immutable_or_append(&child_inode)?;
         let ft = inode_dir_entry_file_type(&child_inode);
 
         // Check if target already exists — if so, remove it first.
@@ -13797,6 +13803,8 @@ impl OpenFs {
         let csum_seed = sb.csum_seed();
 
         let mut inode = self.read_inode(cx, ino)?;
+        // Immutable files reject xattr changes (kernel: EPERM).
+        Self::ext4_reject_immutable(&inode)?;
         let old_acl = inode.file_acl;
         let mut external_block = None;
         let mut old_refcount = 1;
@@ -14099,6 +14107,8 @@ impl OpenFs {
         let csum_seed = sb.csum_seed();
 
         let mut inode = self.read_inode(cx, ino)?;
+        // Immutable files reject xattr changes (kernel: EPERM).
+        Self::ext4_reject_immutable(&inode)?;
         let old_acl = inode.file_acl;
         let mut external_block = None;
         let mut old_refcount = 1;
@@ -14357,6 +14367,15 @@ impl OpenFs {
     /// enforce the attribute on its direct API where no VFS layer does (bd-hbld5).
     fn ext4_reject_immutable(inode: &Ext4Inode) -> Result<(), FfsError> {
         if inode.flags & ffs_types::EXT4_IMMUTABLE_FL != 0 {
+            return Err(FfsError::Io(std::io::Error::from_raw_os_error(libc::EPERM)));
+        }
+        Ok(())
+    }
+
+    /// Reject deletion/rename of an immutable OR append-only inode with EPERM.
+    /// `chattr +i` and `+a` both forbid removing or renaming the file (bd-hbld5).
+    fn ext4_reject_immutable_or_append(inode: &Ext4Inode) -> Result<(), FfsError> {
+        if inode.flags & (ffs_types::EXT4_IMMUTABLE_FL | ffs_types::EXT4_APPEND_FL) != 0 {
             return Err(FfsError::Io(std::io::Error::from_raw_os_error(libc::EPERM)));
         }
         Ok(())
@@ -35287,6 +35306,74 @@ mod tests {
         assert!(
             fs.setattr(&cx, app.ino, &shrink).is_err(),
             "shrinking an append-only file must be rejected"
+        );
+    }
+
+    #[test]
+    fn immutable_and_append_attributes_enforced_on_metadata_ops_bd_hbld5() {
+        let Some((fs, _tmp)) = open_writable_ext4_mkfs(8) else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let set_flag = |ino: InodeNumber, flag: u32| {
+            let mut inode = fs.read_inode(&cx, ino).expect("read inode");
+            inode.flags &= !(ffs_types::EXT4_IMMUTABLE_FL | ffs_types::EXT4_APPEND_FL);
+            inode.flags |= flag;
+            fs.persist_ext4_inode_for_testing(&cx, ino, &inode)
+                .expect("persist flag");
+        };
+
+        // Immutable: delete, rename, link, and xattr-set all rejected.
+        let imm = fs
+            .create(&cx, root, OsStr::new("imm.bin"), 0o644, 0, 0)
+            .expect("create imm");
+        set_flag(imm.ino, ffs_types::EXT4_IMMUTABLE_FL);
+        assert!(
+            fs.unlink(&cx, root, OsStr::new("imm.bin")).is_err(),
+            "deleting an immutable file must be rejected"
+        );
+        assert!(
+            fs.rename(
+                &cx,
+                root,
+                OsStr::new("imm.bin"),
+                root,
+                OsStr::new("imm2.bin")
+            )
+            .is_err(),
+            "renaming an immutable file must be rejected"
+        );
+        assert!(
+            fs.link(&cx, imm.ino, root, OsStr::new("imm_link.bin"))
+                .is_err(),
+            "hard-linking an immutable file must be rejected"
+        );
+        assert!(
+            fs.setxattr(&cx, imm.ino, "user.x", b"v", XattrSetMode::Set)
+                .is_err(),
+            "setting an xattr on an immutable file must be rejected"
+        );
+
+        // Append-only: delete and rename rejected (link/xattr remain allowed).
+        let app = fs
+            .create(&cx, root, OsStr::new("app.bin"), 0o644, 0, 0)
+            .expect("create app");
+        set_flag(app.ino, ffs_types::EXT4_APPEND_FL);
+        assert!(
+            fs.unlink(&cx, root, OsStr::new("app.bin")).is_err(),
+            "deleting an append-only file must be rejected"
+        );
+        assert!(
+            fs.rename(
+                &cx,
+                root,
+                OsStr::new("app.bin"),
+                root,
+                OsStr::new("app2.bin")
+            )
+            .is_err(),
+            "renaming an append-only file must be rejected"
         );
     }
 
