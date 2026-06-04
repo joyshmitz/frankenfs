@@ -263,6 +263,60 @@ pub fn build_extent_csum_items(
     Ok(items)
 }
 
+/// Look up the expected crc32c for the on-disk sector at `disk_bytenr` among a
+/// set of EXTENT_CSUM items (the read-side counterpart of
+/// [`build_extent_csum_items`]).
+///
+/// `items` are `(key, packed_csums)` pairs as stored in the csum tree, each key
+/// carrying the disk bytenr of the item's first sector in `key.offset` (the
+/// caller gathers the relevant items via a tree range query; order does not
+/// matter). Returns the checksum recorded for the sector that begins at
+/// `disk_bytenr`, or `None` if no item covers it or `disk_bytenr` is not
+/// sector-aligned to an item's coverage. A reader/scrub feeds the result to
+/// [`verify_extent_csum`] (or compares directly) to detect data corruption.
+#[must_use]
+pub fn lookup_data_block_csum(
+    items: &[(BtrfsKey, Vec<u8>)],
+    disk_bytenr: u64,
+    sectorsize: usize,
+) -> Option<u32> {
+    if sectorsize == 0 {
+        return None;
+    }
+    // The covering item is the one with the greatest offset <= disk_bytenr
+    // whose checksum run actually reaches disk_bytenr.
+    let mut best: Option<(u64, &[u8])> = None;
+    for (key, value) in items {
+        if key.item_type != BTRFS_ITEM_EXTENT_CSUM || key.objectid != BTRFS_EXTENT_CSUM_OBJECTID {
+            continue;
+        }
+        if key.offset > disk_bytenr {
+            continue;
+        }
+        if best.is_none_or(|(off, _)| key.offset > off) {
+            best = Some((key.offset, value.as_slice()));
+        }
+    }
+    let (item_offset, value) = best?;
+    let delta = disk_bytenr.checked_sub(item_offset)?;
+    let delta = usize::try_from(delta).ok()?;
+    if delta % sectorsize != 0 {
+        return None;
+    }
+    let index = delta / sectorsize;
+    let base = index.checked_mul(BTRFS_CRC32C_CSUM_SIZE)?;
+    let end = base.checked_add(BTRFS_CRC32C_CSUM_SIZE)?;
+    if end > value.len() {
+        return None; // beyond this item's coverage
+    }
+    Some(u32::from_le_bytes([
+        value[base],
+        value[base + 1],
+        value[base + 2],
+        value[base + 3],
+    ]))
+}
+
 /// First-mismatch detail from [`verify_extent_csum`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CsumMismatch {
@@ -6197,6 +6251,50 @@ mod tests {
             verify_extent_csum(&[0u8; 8192], 4096, &[0u8; 4]),
             Err(Err(BtrfsMutationError::InvalidConfig(_)))
         ));
+    }
+
+    #[test]
+    fn lookup_data_block_csum_finds_block_across_split_items_bd_x3fcu() {
+        let sectorsize = 4096_usize;
+        let base = 0x80_000_u64;
+        // 5 distinct sectors, split into items of 2 -> 3 items at base, base+2*ss, base+4*ss.
+        let mut data = Vec::new();
+        for s in 0..5_u8 {
+            data.extend(std::iter::repeat_n(0x10 | s, sectorsize));
+        }
+        let items = build_extent_csum_items(base, &data, sectorsize, 2).expect("split");
+        assert_eq!(items.len(), 3);
+
+        let ss = u64::try_from(sectorsize).unwrap();
+        // Every sector resolves to the same crc the single-item builder packs.
+        for s in 0..5_usize {
+            let off = s * sectorsize;
+            let bytenr = base + u64::try_from(off).unwrap();
+            let want = ffs_types::crc32c(&data[off..off + sectorsize]);
+            assert_eq!(
+                lookup_data_block_csum(&items, bytenr, sectorsize),
+                Some(want),
+                "sector {s} (crosses item boundaries at 2 and 4)"
+            );
+        }
+
+        // Misses: before the run, past the run, and a non-sector-aligned bytenr.
+        assert_eq!(lookup_data_block_csum(&items, base - ss, sectorsize), None);
+        assert_eq!(
+            lookup_data_block_csum(&items, base + 5 * ss, sectorsize),
+            None
+        );
+        assert_eq!(lookup_data_block_csum(&items, base + 100, sectorsize), None);
+        // Unrelated key types are ignored.
+        let noise = vec![(
+            BtrfsKey {
+                objectid: 5,
+                item_type: BTRFS_ITEM_INODE_ITEM,
+                offset: base,
+            },
+            vec![0xFF_u8; 4],
+        )];
+        assert_eq!(lookup_data_block_csum(&noise, base, sectorsize), None);
     }
 
     fn test_key(objectid: u64) -> BtrfsKey {
