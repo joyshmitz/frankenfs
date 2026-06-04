@@ -1344,7 +1344,7 @@ mod tests {
         let table = MappingTable::with_capacity(1);
         let page = table.allocate_page().expect("alloc");
         for i in 0..10 {
-            table.insert(page, BwKey(i), BwValue(i)).expect("insert");
+            insert_without_preconsolidation_for_test(&table, page, BwKey(i), BwValue(i));
         }
         assert_eq!(assert_cached_chain_len_matches(&table, page), 11); // 10 inserts + 1 base
     }
@@ -1355,9 +1355,7 @@ mod tests {
         let page = table.allocate_page().expect("alloc");
 
         for i in 0..20 {
-            table
-                .insert(page, BwKey(i), BwValue(i * 10))
-                .expect("insert");
+            insert_without_preconsolidation_for_test(&table, page, BwKey(i), BwValue(i * 10));
         }
         assert_eq!(assert_cached_chain_len_matches(&table, page), 21);
 
@@ -1421,11 +1419,11 @@ mod tests {
 
         // p0: 3 deltas (below threshold of 4)
         for i in 0..3 {
-            table.insert(p0, BwKey(i), BwValue(i)).expect("insert");
+            insert_without_preconsolidation_for_test(&table, p0, BwKey(i), BwValue(i));
         }
         // p1: 10 deltas (above threshold)
         for i in 0..10 {
-            table.insert(p1, BwKey(i), BwValue(i)).expect("insert");
+            insert_without_preconsolidation_for_test(&table, p1, BwKey(i), BwValue(i));
         }
         // p2: 1 delta (base only, below threshold)
 
@@ -1442,13 +1440,13 @@ mod tests {
         let p2 = table.allocate_page().expect("alloc");
 
         for i in 0..2 {
-            table.insert(p0, BwKey(i), BwValue(i)).expect("insert");
+            insert_without_preconsolidation_for_test(&table, p0, BwKey(i), BwValue(i));
         }
         for i in 0..10 {
-            table.insert(p1, BwKey(i), BwValue(i)).expect("insert");
+            insert_without_preconsolidation_for_test(&table, p1, BwKey(i), BwValue(i));
         }
         for i in 0..8 {
-            table.insert(p2, BwKey(i), BwValue(i)).expect("insert");
+            insert_without_preconsolidation_for_test(&table, p2, BwKey(i), BwValue(i));
         }
 
         let config = ConsolidationConfig {
@@ -1543,9 +1541,9 @@ mod tests {
         let table = MappingTable::with_capacity(1);
         let page = table.allocate_page().expect("alloc");
 
-        table.insert(page, BwKey(1), BwValue(10)).expect("insert");
-        table.insert(page, BwKey(2), BwValue(20)).expect("insert");
-        table.delete(page, BwKey(1)).expect("delete");
+        insert_without_preconsolidation_for_test(&table, page, BwKey(1), BwValue(10));
+        insert_without_preconsolidation_for_test(&table, page, BwKey(2), BwValue(20));
+        delete_without_preconsolidation_for_test(&table, page, BwKey(1));
 
         let config = default_config();
         let result = table.consolidate_page(page, &config).expect("consolidate");
@@ -1623,7 +1621,7 @@ mod tests {
         for i in 10..15 {
             table.insert(page, BwKey(i), BwValue(i)).expect("insert");
         }
-        assert_eq!(assert_cached_chain_len_matches(&table, page), 6);
+        assert_eq!(assert_cached_chain_len_matches(&table, page), 2);
 
         // All data still accessible
         for i in 0..15 {
@@ -1635,12 +1633,13 @@ mod tests {
     }
 
     #[test]
-    fn append_at_default_threshold_preconsolidates_before_appending() {
-        let table = MappingTable::with_capacity(1);
+    fn append_structural_delta_at_default_threshold_preconsolidates_before_appending() {
+        let table = MappingTable::with_capacity(2);
         let page = table.allocate_page().expect("alloc");
+        let sibling = table.allocate_page().expect("sibling alloc");
 
         for i in 0..u64::try_from(DEFAULT_CONSOLIDATION_THRESHOLD).expect("threshold fits") {
-            table.insert(page, BwKey(i), BwValue(i)).expect("insert");
+            insert_without_preconsolidation_for_test(&table, page, BwKey(i), BwValue(i));
         }
 
         assert_eq!(
@@ -1649,12 +1648,11 @@ mod tests {
         );
 
         table
-            .insert(page, BwKey(u64::MAX), BwValue(99))
-            .expect("append after preconsolidation");
+            .append_split_delta(page, BwKey(u64::MAX), sibling)
+            .expect("append structural delta after preconsolidation");
 
         let state = table.materialize_page(page).expect("materialize");
-        assert_eq!(state.len(), DEFAULT_CONSOLIDATION_THRESHOLD + 1);
-        assert_eq!(state.get(&BwKey(u64::MAX)).copied(), Some(BwValue(99)));
+        assert_eq!(state.len(), DEFAULT_CONSOLIDATION_THRESHOLD);
 
         assert_eq!(assert_cached_chain_len_matches(&table, page), 2);
     }
@@ -2456,11 +2454,11 @@ mod tests {
 
         // p0: exactly at threshold (should not be consolidated)
         for i in 0..4_u64 {
-            table.insert(p0, BwKey(i), BwValue(i)).expect("insert");
+            insert_without_preconsolidation_for_test(&table, p0, BwKey(i), BwValue(i));
         }
         // p1: above threshold
         for i in 0..20_u64 {
-            table.insert(p1, BwKey(i), BwValue(i)).expect("insert");
+            insert_without_preconsolidation_for_test(&table, p1, BwKey(i), BwValue(i));
         }
 
         let config = ConsolidationConfig {
@@ -2731,7 +2729,7 @@ mod tests {
 
         // Insert data, split, then merge.
         for i in 1..=5 {
-            table.insert(page, BwKey(i), BwValue(i)).expect("insert");
+            insert_without_preconsolidation_for_test(&table, page, BwKey(i), BwValue(i));
         }
         table
             .append_split_delta(page, BwKey(4), sibling)
@@ -2789,7 +2787,7 @@ mod tests {
 
         // Insert enough to build a long chain.
         for i in 0..20 {
-            table.insert(page, BwKey(i), BwValue(i)).expect("insert");
+            insert_without_preconsolidation_for_test(&table, page, BwKey(i), BwValue(i));
         }
 
         // With high threshold, no pages should need consolidation.
