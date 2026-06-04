@@ -8409,6 +8409,22 @@ fn dir_logical_block_count(file_size: u64, block_size: u64) -> Result<u32, FfsEr
     })
 }
 
+/// Whether an ext4 symlink whose target is `target_len` bytes is stored inline
+/// (a "fast" symlink in the inode's 60-byte `i_block`) or in a data block (a
+/// "slow" symlink).
+///
+/// The kernel stores the target *plus its NUL terminator* inline and chooses a
+/// fast symlink only when `target_len + 1 <= 60`, i.e. `target_len <= 59`; a
+/// 60-byte target is a slow symlink. Matching that boundary exactly keeps every
+/// FrankenFS-created fast symlink NUL-terminated within `i_block` (byte
+/// `target_len` is left zero by the zero-fill), so the kernel — which follows a
+/// fast symlink as a NUL-terminated C string with no length cap — never
+/// over-reads past `i_block`. Storing a 60-byte target inline (no room for the
+/// NUL) would be such an over-read. bd-8yaqi.
+const fn ext4_symlink_target_is_fast(target_len: usize) -> bool {
+    target_len < ffs_types::EXT4_FAST_SYMLINK_MAX
+}
+
 /// Validate btrfs superblock fields at mount time.
 ///
 /// Checks that `sectorsize` and `nodesize` are within the range accepted
@@ -12787,7 +12803,7 @@ impl OpenFs {
         let mut block_dev = self.block_device_adapter();
         let (tstamp_secs, tstamp_nanos) = Self::now_timestamp();
         let target_bytes = target.as_os_str().as_encoded_bytes();
-        let fast_storage = target_bytes.len() <= ffs_types::EXT4_FAST_SYMLINK_MAX;
+        let fast_storage = ext4_symlink_target_is_fast(target_bytes.len());
 
         let sb = self
             .ext4_superblock()
@@ -39840,6 +39856,25 @@ mod tests {
                 .expect("getattr after failed reserved-name link");
             assert_eq!(after.nlink, 1, "failed link should roll back nlink");
         }
+    }
+
+    #[test]
+    fn ext4_symlink_fast_boundary_matches_kernel_bd_8yaqi() {
+        // The kernel stores target+NUL inline, so a fast symlink needs
+        // target_len + 1 <= 60 (target_len <= 59); a 60-byte target is slow.
+        // A 60-byte inline target would leave no room for the NUL terminator,
+        // and the kernel follows fast symlinks as NUL-terminated strings.
+        assert!(ext4_symlink_target_is_fast(0));
+        assert!(ext4_symlink_target_is_fast(1));
+        assert!(
+            ext4_symlink_target_is_fast(ffs_types::EXT4_FAST_SYMLINK_MAX - 1),
+            "a 59-byte target fits inline with its NUL terminator"
+        );
+        assert!(
+            !ext4_symlink_target_is_fast(ffs_types::EXT4_FAST_SYMLINK_MAX),
+            "a 60-byte target leaves no room for the NUL and must be a slow symlink"
+        );
+        assert!(!ext4_symlink_target_is_fast(ffs_types::EXT4_FAST_SYMLINK_MAX + 1));
     }
 
     #[test]
