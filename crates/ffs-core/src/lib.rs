@@ -13559,6 +13559,19 @@ impl OpenFs {
 
         let mut inode = self.read_inode_with_scope(cx, scope, ino)?;
 
+        // Immutable files reject metadata changes too (chmod/chown/utimes), not
+        // just content — the kernel returns EPERM. The size change is guarded in
+        // its own block below; the immutable FLAG itself is changed via the
+        // separate set_inode_fsxattr path, which stays allowed. (bd-hbld5)
+        if attrs.mode.is_some()
+            || attrs.uid.is_some()
+            || attrs.gid.is_some()
+            || attrs.atime.is_some()
+            || attrs.mtime.is_some()
+        {
+            Self::ext4_reject_immutable(&inode)?;
+        }
+
         if let Some(mode) = attrs.mode {
             // Preserve file type bits (upper 4 bits of 16-bit mode).
             let type_bits = inode.mode & 0xF000;
@@ -35421,6 +35434,22 @@ mod tests {
             fs.setxattr(&cx, imm.ino, "user.x", b"v", XattrSetMode::Set)
                 .is_err(),
             "setting an xattr on an immutable file must be rejected"
+        );
+        let chmod = SetAttrRequest {
+            mode: Some(0o600),
+            ..SetAttrRequest::default()
+        };
+        assert!(
+            fs.setattr(&cx, imm.ino, &chmod).is_err(),
+            "chmod of an immutable file must be rejected"
+        );
+        let chown = SetAttrRequest {
+            uid: Some(1234),
+            ..SetAttrRequest::default()
+        };
+        assert!(
+            fs.setattr(&cx, imm.ino, &chown).is_err(),
+            "chown of an immutable file must be rejected"
         );
 
         // Append-only: delete and rename rejected (link/xattr remain allowed).
