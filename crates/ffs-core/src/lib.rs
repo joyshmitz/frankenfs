@@ -5756,17 +5756,16 @@ impl OpenFs {
         parent: InodeNumber,
         name: &[u8],
     ) -> Result<InodeAttr, FfsError> {
-        let parent_attr = self.btrfs_read_inode_attr(cx, parent)?;
-        if parent_attr.kind != FileType::Directory {
-            return Err(FfsError::NotDirectory);
-        }
-
         let canonical_parent = self.btrfs_canonical_inode(parent)?;
 
         // When writes are enabled, look up via the COW tree so mutations are
         // visible (the write-path helper already handles hash-collision
         // disambiguation).
         if let Some(alloc_mutex) = self.btrfs_alloc_state.as_ref() {
+            let parent_attr = self.btrfs_read_inode_attr(cx, parent)?;
+            if parent_attr.kind != FileType::Directory {
+                return Err(FfsError::NotDirectory);
+            }
             let alloc = alloc_mutex.lock();
             let dir_item = self.btrfs_lookup_dir_entry(&alloc, canonical_parent, name)?;
             let child_ino = InodeNumber(dir_item.child_objectid);
@@ -5774,7 +5773,16 @@ impl OpenFs {
             return self.btrfs_read_inode_attr(cx, child_ino);
         }
 
+        // Read-only: one fs-tree descent yields both the parent's INODE_ITEM
+        // (for the directory-type check) and its DIR_ITEM/DIR_INDEX entries —
+        // no second walk of the same subtree (bd-e94n2).
         let items = self.walk_btrfs_fs_tree_object(cx, canonical_parent)?;
+        let parent_inode =
+            parse_inode_item(&Self::btrfs_find_inode_item(&items, canonical_parent)?.data)
+                .map_err(|e| parse_to_ffs_error(&e))?;
+        if Self::btrfs_mode_to_file_type(parent_inode.mode) != FileType::Directory {
+            return Err(FfsError::NotDirectory);
+        }
 
         for preferred_item_type in [BTRFS_ITEM_DIR_ITEM, BTRFS_ITEM_DIR_INDEX] {
             for item in &items {
@@ -5806,11 +5814,6 @@ impl OpenFs {
     ) -> Result<Vec<(u64, DirEntry)>, FfsError> {
         trace!(inode = %ino, "btrfs readdir_start");
 
-        let dir_attr = self.btrfs_read_inode_attr(cx, ino)?;
-        if dir_attr.kind != FileType::Directory {
-            return Err(FfsError::NotDirectory);
-        }
-
         let canonical_dir = self.btrfs_canonical_inode(ino)?;
         let mut rows: Vec<(u64, DirEntry)> = Vec::new();
 
@@ -5818,39 +5821,66 @@ impl OpenFs {
         // tree depending on whether writes are enabled.
         let cow_items: Vec<(BtrfsKey, Vec<u8>)>;
         let ondisk_items: Vec<BtrfsLeafEntry>;
+        // Parent objectid for the synthetic ".." entry, captured from the same
+        // read-only walk below so it needs no separate (full-tree) walk
+        // (bd-e94n2). `None` on the writable path (resolved via the COW tree).
+        let mut readonly_parent_oid: Option<u64> = None;
 
-        let kv_iter: Box<dyn Iterator<Item = (&BtrfsKey, &[u8])>> =
-            if let Some(alloc_mutex) = self.btrfs_alloc_state.as_ref() {
-                let alloc = alloc_mutex.lock();
-                let start = BtrfsKey {
-                    objectid: canonical_dir,
-                    item_type: BTRFS_ITEM_DIR_ITEM,
-                    offset: 0,
-                };
-                let end = BtrfsKey {
-                    objectid: canonical_dir,
-                    item_type: BTRFS_ITEM_DIR_INDEX,
-                    offset: u64::MAX,
-                };
-                cow_items = alloc
-                    .fs_tree
-                    .range(&start, &end)
-                    .map_err(|e| btrfs_mutation_to_ffs(&e))?;
-                drop(alloc);
-                Box::new(cow_items.iter().map(|(k, v)| (k, v.as_slice())))
-            } else {
-                ondisk_items = self.walk_btrfs_fs_tree_object(cx, canonical_dir)?;
-                Box::new(
-                    ondisk_items
-                        .iter()
-                        .filter(|item| {
-                            item.key.objectid == canonical_dir
-                                && (item.key.item_type == BTRFS_ITEM_DIR_INDEX
-                                    || item.key.item_type == BTRFS_ITEM_DIR_ITEM)
-                        })
-                        .map(|item| (&item.key, item.data.as_slice())),
-                )
+        let kv_iter: Box<dyn Iterator<Item = (&BtrfsKey, &[u8])>> = if let Some(alloc_mutex) =
+            self.btrfs_alloc_state.as_ref()
+        {
+            let dir_attr = self.btrfs_read_inode_attr(cx, ino)?;
+            if dir_attr.kind != FileType::Directory {
+                return Err(FfsError::NotDirectory);
+            }
+            let alloc = alloc_mutex.lock();
+            let start = BtrfsKey {
+                objectid: canonical_dir,
+                item_type: BTRFS_ITEM_DIR_ITEM,
+                offset: 0,
             };
+            let end = BtrfsKey {
+                objectid: canonical_dir,
+                item_type: BTRFS_ITEM_DIR_INDEX,
+                offset: u64::MAX,
+            };
+            cow_items = alloc
+                .fs_tree
+                .range(&start, &end)
+                .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+            drop(alloc);
+            Box::new(cow_items.iter().map(|(k, v)| (k, v.as_slice())))
+        } else {
+            // Read-only: one descent yields the INODE_ITEM (dir-type check)
+            // and the DIR entries — no separate read_inode_attr walk of the
+            // same subtree (bd-e94n2).
+            ondisk_items = self.walk_btrfs_fs_tree_object(cx, canonical_dir)?;
+            let dir_inode =
+                parse_inode_item(&Self::btrfs_find_inode_item(&ondisk_items, canonical_dir)?.data)
+                    .map_err(|e| parse_to_ffs_error(&e))?;
+            if Self::btrfs_mode_to_file_type(dir_inode.mode) != FileType::Directory {
+                return Err(FfsError::NotDirectory);
+            }
+            // The dir's INODE_REF (whose key.offset is the parent objectid)
+            // is in this same subtree — capture it for ".." without a
+            // separate full-tree walk.
+            readonly_parent_oid = ondisk_items
+                .iter()
+                .find(|item| {
+                    item.key.objectid == canonical_dir && item.key.item_type == BTRFS_ITEM_INODE_REF
+                })
+                .map(|item| item.key.offset);
+            Box::new(
+                ondisk_items
+                    .iter()
+                    .filter(|item| {
+                        item.key.objectid == canonical_dir
+                            && (item.key.item_type == BTRFS_ITEM_DIR_INDEX
+                                || item.key.item_type == BTRFS_ITEM_DIR_ITEM)
+                    })
+                    .map(|item| (&item.key, item.data.as_slice())),
+            )
+        };
 
         for (key, data) in kv_iter {
             let parsed = match parse_dir_items(data) {
@@ -5929,13 +5959,7 @@ impl OpenFs {
             let alloc = alloc_mutex.lock();
             self.btrfs_lookup_parent(&alloc, canonical_dir)
         } else {
-            self.walk_btrfs_fs_tree(cx)
-                .unwrap_or_default()
-                .into_iter()
-                .find(|item| {
-                    item.key.objectid == canonical_dir && item.key.item_type == BTRFS_ITEM_INODE_REF
-                })
-                .map(|item| item.key.offset)
+            readonly_parent_oid
         }
         .map_or(ino, |oid| {
             if Some(oid) == root_oid {
@@ -33128,6 +33152,65 @@ mod tests {
         assert!(
             score >= 2.0,
             "root-bytenr cache Score {score:.2} ({K} resolves: cached={cached_k} reads vs uncached={uncached_k} reads) must be >= 2.0"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::cast_precision_loss)]
+    fn btrfs_lookup_readdir_fuse_walk_bd_e94n2() {
+        let entries: Vec<(&[u8], u64, u8, u32)> = vec![
+            (b"alpha", 257, ffs_btrfs::BTRFS_FT_REG_FILE, 0o100_644),
+            (b"beta", 258, ffs_btrfs::BTRFS_FT_REG_FILE, 0o100_644),
+            (b"gamma", 259, ffs_btrfs::BTRFS_FT_DIR, 0o040_755),
+        ];
+        let image = build_btrfs_readdir_image(&entries);
+        let reads = Arc::new(AtomicUsize::new(0));
+        let dev = AllReadsCounter {
+            inner: TestDevice::from_vec(image),
+            reads: Arc::clone(&reads),
+        };
+        let cx = Cx::for_testing();
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
+        let dir = InodeNumber(1);
+
+        // ISOMORPHISM: the fused readdir still returns every entry by name.
+        let rows = fs.btrfs_readdir_entries(&cx, dir).unwrap();
+        let names: std::collections::HashSet<Vec<u8>> =
+            rows.iter().map(|(_, e)| e.name.clone()).collect();
+        for (name, _, _, _) in &entries {
+            assert!(names.contains(*name), "readdir missing entry {name:?}");
+        }
+        // A non-directory inode still reports NotDirectory (dir-type check from
+        // the fused walk's INODE_ITEM).
+        assert!(matches!(
+            fs.btrfs_readdir_entries(&cx, InodeNumber(257)),
+            Err(FfsError::NotDirectory)
+        ));
+
+        // Warm the root-bytenr cache so the measurements are pure fs-tree walks.
+        let _ = fs.btrfs_read_inode_attr(&cx, dir).unwrap();
+        let canonical = fs.btrfs_canonical_inode(dir).unwrap();
+
+        // OLD readdir cost = the three walks the original did: read_inode_attr
+        // (dir-attr) + a targeted walk for the DIR entries + a FULL-tree walk to
+        // resolve the parent objectid for the synthetic "..".
+        reads.store(0, AtomicOrdering::SeqCst);
+        let _ = fs.btrfs_read_inode_attr(&cx, dir).unwrap();
+        let _ = fs.walk_btrfs_fs_tree_object(&cx, canonical).unwrap();
+        let _ = fs.walk_btrfs_fs_tree(&cx).unwrap();
+        let old_reads = reads.load(AtomicOrdering::SeqCst);
+
+        // NEW readdir cost = a single fused walk yielding the INODE_ITEM
+        // (dir-type check), the DIR entries, and the INODE_REF (".." parent).
+        reads.store(0, AtomicOrdering::SeqCst);
+        let _ = fs.btrfs_readdir_entries(&cx, dir).unwrap();
+        let new_reads = reads.load(AtomicOrdering::SeqCst);
+
+        assert!(new_reads >= 1, "readdir must read the dir subtree");
+        let score = old_reads as f64 / new_reads as f64;
+        assert!(
+            score >= 2.0,
+            "lookup/readdir fuse Score {score:.2} (old three-walk={old_reads} reads, fused={new_reads} reads) must be >= 2.0"
         );
     }
 
