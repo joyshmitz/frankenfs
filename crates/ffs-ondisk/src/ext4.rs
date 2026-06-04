@@ -5641,48 +5641,74 @@ fn build_htree_layout(
         return Some(HtreeLayout { blocks, leaf_count });
     }
 
-    // Two-level: group the leaves into interior dx_node blocks of up to
-    // `node_limit` leaves each; the DX root points at the nodes, each node
-    // points at its leaves. Interior nodes occupy logical blocks (L+1)..=(L+N).
+    // Multi-level: build interior dx_node levels bottom-up. Each interior node
+    // indexes up to `node_limit` children; the DX root indexes up to
+    // `root_limit`. A child is represented to its parent by `(min_hash, block)`,
+    // where `min_hash` is the lowest hash in its subtree — its leftmost leaf.
+    // Because the leaves are hash-sorted and every level groups contiguously,
+    // these representative hashes stay monotonic, so the read-half's
+    // `dx_find_leaf_idx` routes correctly at every level (entry 0's hash is
+    // ignored, which is exactly the leftmost child that covers hash 0).
+    //
+    // The kernel caps a non-`large_dir` index at `indirect_levels <= 2` (three
+    // levels), which is what `parse_dx_root` accepts here; deeper trees would
+    // need the `large_dir` feature, so this returns `None` past two levels (a
+    // two-level index already addresses tens of millions of entries).
     let node_limit_u16 = dx_node_entry_limit(block_size, with_csum_tail);
     let node_limit = usize::from(node_limit_u16);
-    if node_limit == 0 {
+    if node_limit < 2 {
         return None;
     }
-    let node_count = leaf_count.div_ceil(node_limit);
-    if node_count > usize::from(root_limit) {
-        return None; // would need a third indirect level — deferred
-    }
 
-    let mut node_blocks = Vec::with_capacity(node_count);
-    let mut root_entries = Vec::with_capacity(node_count);
-    for j in 0..node_count {
-        let start = j * node_limit;
-        let end = ((j + 1) * node_limit).min(leaf_count);
-        let mut node_entries = Vec::with_capacity(end - start);
-        for p in start..end {
-            node_entries.push(Ext4DxEntry {
-                hash: leaf_min_hash(p)?,
-                block: u32::try_from(p + 1).ok()?, // leaf logical block
-            });
-        }
-        // The DX root routes a hash to node `j` via this entry; entry 0's hash
-        // is ignored by the read-half, so node 0 (covering hash 0) is correct.
-        root_entries.push(Ext4DxEntry {
-            hash: leaf_min_hash(start)?,
-            block: u32::try_from(leaf_count + 1 + j).ok()?, // node logical block
+    // Interior nodes occupy logical blocks (L+1).., appended in creation order
+    // (bottom level first), which matches their assigned logical numbers.
+    let mut interior_blocks: Vec<Vec<u8>> = Vec::new();
+    let mut next_logical = u32::try_from(leaf_count + 1).ok()?;
+
+    // The children the current level must index: start with the leaves.
+    let mut children: Vec<Ext4DxEntry> = Vec::with_capacity(leaf_count);
+    for p in 0..leaf_count {
+        children.push(Ext4DxEntry {
+            hash: leaf_min_hash(p)?,
+            block: u32::try_from(p + 1).ok()?,
         });
-        let mut node = vec![0_u8; block_size];
-        write_dx_node(&mut node, node_limit_u16, &node_entries).ok()?;
-        node_blocks.push(node);
     }
 
-    write_dx_root(&mut root, hash_version, 1, root_limit, &root_entries).ok()?;
+    let mut indirect_levels: u8 = 0;
+    while children.len() > usize::from(root_limit) {
+        if indirect_levels >= 2 {
+            return None; // would exceed indirect_levels == 2 (needs large_dir)
+        }
+        let mut parents: Vec<Ext4DxEntry> = Vec::with_capacity(children.len().div_ceil(node_limit));
+        let mut i = 0;
+        while i < children.len() {
+            let end = (i + node_limit).min(children.len());
+            let chunk = &children[i..end];
+            let node_logical = next_logical;
+            next_logical = next_logical.checked_add(1)?;
+            // Representative hash = this node's leftmost child's hash (the lowest
+            // hash in its subtree). For the very first node it is 0, which the
+            // read-half assumes for entry 0 anyway.
+            let rep_hash = chunk[0].hash;
+            let mut node = vec![0_u8; block_size];
+            write_dx_node(&mut node, node_limit_u16, chunk).ok()?;
+            interior_blocks.push(node);
+            parents.push(Ext4DxEntry {
+                hash: rep_hash,
+                block: node_logical,
+            });
+            i = end;
+        }
+        children = parents;
+        indirect_levels += 1;
+    }
 
-    let mut blocks = Vec::with_capacity(1 + leaf_count + node_count);
+    write_dx_root(&mut root, hash_version, indirect_levels, root_limit, &children).ok()?;
+
+    let mut blocks = Vec::with_capacity(1 + leaf_count + interior_blocks.len());
     blocks.push(root);
     blocks.extend(leaf_blocks);
-    blocks.extend(node_blocks);
+    blocks.extend(interior_blocks);
     Some(HtreeLayout { blocks, leaf_count })
 }
 
@@ -9059,6 +9085,78 @@ mod tests {
             (1..=u32::try_from(blocks.len() - 1).unwrap()).collect::<Vec<_>>(),
             "single-level enumeration is every block after the dx_root"
         );
+    }
+
+    /// bd-owt2r (three-level construction): with a tiny 128-byte block the DX
+    /// root holds only 12 entries and each interior node 15, so a two-level
+    /// index caps at 12×15 = 180 leaves. A few thousand entries therefore force
+    /// `indirect_levels == 2` (root → middle node → bottom node → leaf). The
+    /// read-half navigates all three index levels and the leaf enumerator must
+    /// still list exactly the leaves; this exercises the recursive bottom-up
+    /// builder at its deepest supported depth.
+    #[test]
+    fn build_htree_directory_three_level_is_navigable_bd_owt2r() {
+        let bs = 128_usize;
+        let seed = [0x3333_1111_u32, 0x4444_2222, 0x5555_3333, 0x6666_4444];
+        let hash_version = 1_u8;
+
+        let names: Vec<Vec<u8>> = (0..4000).map(|i| format!("f{i:05}").into_bytes()).collect();
+        let entries: Vec<(u32, u8, &[u8])> = names
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (100 + u32::try_from(i).unwrap(), EXT4_FT_REG_FILE, n.as_slice()))
+            .collect();
+
+        let blocks = build_htree_directory(2, 2, &entries, bs, hash_version, &seed, false)
+            .expect("three-level htree should build");
+        assert_eq!(
+            blocks[0][0x1E], 2,
+            "dx_root must declare indirect_levels == 2 (three levels)"
+        );
+
+        // Every name resolves through root -> middle -> bottom -> leaf.
+        for (i, name) in names.iter().enumerate() {
+            match htree_find_entry(
+                u32::try_from(bs).unwrap(),
+                &seed,
+                false,
+                name,
+                |v| v,
+                |lb| blocks.get(lb as usize).cloned(),
+            ) {
+                HtreeFindResult::Found(e) => {
+                    assert_eq!(e.inode, 100 + u32::try_from(i).unwrap(), "wrong inode {name:?}");
+                }
+                other => panic!("entry {name:?} not reachable via three-level index: {other:?}"),
+            }
+        }
+
+        // The leaf enumerator descends both indirect levels and lists exactly
+        // the contiguous leaf range 1..=L (no interior nodes), recovering every
+        // input name when those leaves are parsed.
+        let leaves =
+            htree_leaf_logical_blocks(&blocks[0], false, |lb| blocks.get(lb as usize).cloned())
+                .expect("leaf enumeration");
+        let mut sorted = leaves.clone();
+        sorted.sort_unstable();
+        let l = sorted.len();
+        assert!(l > 180, "three-level dir must exceed the two-level leaf cap, got {l}");
+        assert_eq!(
+            sorted,
+            (1..=u32::try_from(l).unwrap()).collect::<Vec<_>>(),
+            "enumeration must be exactly the leaf blocks 1..=L"
+        );
+        let mut found = std::collections::BTreeSet::new();
+        for lb in &leaves {
+            let (parsed, _) =
+                parse_dir_block(&blocks[*lb as usize], u32::try_from(bs).unwrap()).unwrap();
+            for e in parsed {
+                if e.inode != 0 && e.name != b"." && e.name != b".." {
+                    found.insert(e.name);
+                }
+            }
+        }
+        assert_eq!(found.len(), names.len(), "every entry accounted for via leaves only");
     }
 
     #[test]
