@@ -20017,8 +20017,8 @@ impl OpenFs {
         &self,
         cx: &Cx,
         dir_inode: &Ext4Inode,
+        dir_ino_u32: u32,
         new_parent: InodeNumber,
-        reserved_tail: usize,
     ) -> ffs_error::Result<(BlockNumber, Vec<u8>)> {
         let child_extents = self.collect_extents(cx, dir_inode)?;
         let first_ext = child_extents
@@ -20032,11 +20032,18 @@ impl OpenFs {
         let mut data = self.read_block_vec(cx, dot_dot_block)?;
         let parent_ino_u32 = u32::try_from(new_parent.0)
             .map_err(|_| FfsError::Format("inode number exceeds ext4 32-bit limit".into()))?;
-        if !ffs_dir::swap_inode_in_entry(&mut data, b"..", parent_ino_u32, reserved_tail)? {
-            return Err(FfsError::Corruption {
-                block: dot_dot_block.0,
-                detail: "directory missing '..' entry before cross-parent rename".to_owned(),
-            });
+        // Repoint '..' at its fixed offset (12) rather than a linear scan: an
+        // htree dir's block 0 is the dx_root whose '..' rec_len spans past the
+        // reserved tail, so swap_inode_in_entry would reject it as corrupt on
+        // metadata_csum. This block belongs to the moved (child) directory, so
+        // re-stamp its CRC32C under the child inode's seed — the dx-root formula
+        // for an htree dir, the linear one otherwise (bd-tmpll; mirrors the
+        // ext4_rename cross-parent '..' update).
+        Self::ext4_update_dotdot_inode_in_place(&mut data, parent_ino_u32)?;
+        if dir_inode.has_htree_index() {
+            self.stamp_ext4_dx_root_block(&mut data, dir_ino_u32, dir_inode.generation);
+        } else {
+            self.stamp_ext4_dir_block(&mut data, dir_ino_u32, dir_inode.generation);
         }
         Ok((dot_dot_block, data))
     }
@@ -20184,12 +20191,12 @@ impl OpenFs {
         // remains stable while inode and file_type stay consistent.
         let reserved_tail = self.ext4_dir_reserved_tail();
         let src_dotdot_update = if cross_parent && src_is_dir {
-            Some(self.ext4_prepare_dotdot_update(cx, &src_inode, new_parent, reserved_tail)?)
+            Some(self.ext4_prepare_dotdot_update(cx, &src_inode, src_ino, new_parent)?)
         } else {
             None
         };
         let dst_dotdot_update = if cross_parent && dst_is_dir {
-            Some(self.ext4_prepare_dotdot_update(cx, &dst_inode, parent, reserved_tail)?)
+            Some(self.ext4_prepare_dotdot_update(cx, &dst_inode, dst_ino, parent)?)
         } else {
             None
         };
@@ -20219,9 +20226,17 @@ impl OpenFs {
         let alloc = alloc_mutex.lock();
 
         let parent_extents = self.collect_extents(cx, &parent_inode)?;
+        // For an htree dir, logical block 0 is the dx_root: it holds no file
+        // entries, and its '..' rec_len spans past the reserved tail so a linear
+        // retarget_entry scan rejects it as corrupt (same reason the remove /
+        // rename paths skip it). Skip it here too (bd-tmpll).
+        let parent_dx_root_phys = Self::ext4_htree_dx_root_phys(&parent_inode, &parent_extents);
         let mut src_swapped = false;
         'src: for ext in &parent_extents {
             for block in Self::extent_phys_blocks(ext) {
+                if Some(block) == parent_dx_root_phys {
+                    continue;
+                }
                 let mut data = self.read_block_with_scope(cx, scope, block)?;
                 if ffs_dir::retarget_entry(
                     &mut data,
@@ -20251,9 +20266,17 @@ impl OpenFs {
         } else {
             self.collect_extents(cx, &new_parent_inode)?
         };
+        let new_parent_dx_root_phys = if parent == new_parent {
+            parent_dx_root_phys
+        } else {
+            Self::ext4_htree_dx_root_phys(&new_parent_inode, &new_parent_extents)
+        };
         let mut dst_swapped = false;
         'dst: for ext in &new_parent_extents {
             for block in Self::extent_phys_blocks(ext) {
+                if Some(block) == new_parent_dx_root_phys {
+                    continue;
+                }
                 let mut data = self.read_block_with_scope(cx, scope, block)?;
                 if ffs_dir::retarget_entry(
                     &mut data,
@@ -20273,6 +20296,9 @@ impl OpenFs {
             // pointing at dst_ino.
             'undo: for ext in &parent_extents {
                 for block in Self::extent_phys_blocks(ext) {
+                    if Some(block) == parent_dx_root_phys {
+                        continue;
+                    }
                     let mut data = self.read_block_with_scope(cx, scope, block)?;
                     if ffs_dir::retarget_entry(
                         &mut data,
