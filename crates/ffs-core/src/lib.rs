@@ -32826,6 +32826,56 @@ mod tests {
         );
     }
 
+    #[test]
+    fn btrfs_datasum_write_survives_commit_remount_and_reverifies_bd_x3fcu() {
+        // End-to-end: a datasum write's DATA and its checksum both persist
+        // through a commit and re-verify after remount. The data is written via
+        // the MVCC-buffered block device, so flush_mvcc_to_device must run
+        // before snapshotting (a real fsync flushes data before the metadata
+        // commit); otherwise the byte-device snapshot misses the data.
+        let cx = Cx::for_testing();
+        let dev = TestDevice::from_vec(build_btrfs_csum_image());
+        let opts = OpenOptions {
+            btrfs_rw_ephemeral_ok: true,
+            ..OpenOptions::default()
+        };
+        let mut fs =
+            OpenFs::from_device(&cx, Box::new(dev.clone()), &opts).expect("open csum image");
+        fs.enable_writes(&cx).expect("enable writes");
+
+        // Append a fresh 3-sector datasum extent (allocated outside the reserved
+        // region), capturing its checksums.
+        let payload = vec![0x5C_u8; 9000];
+        let fs_ops: &dyn FsOps = &fs;
+        fs_ops
+            .write(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(257),
+                16384,
+                &payload,
+            )
+            .expect("datasum write");
+
+        // Flush data to the byte device, then commit metadata (real fsync order).
+        fs.flush_mvcc_to_device(&cx).expect("flush data to device");
+        fs.btrfs_full_transaction_commit(&cx, "datasum-e2e")
+            .expect("full transaction commit");
+
+        // Re-mount the committed image and verify the file's data against the
+        // persisted csum tree — the freshly written extent's data survived and
+        // re-verifies, alongside the original.
+        let committed = dev.snapshot_bytes();
+        let fs2 = OpenFs::from_device(
+            &cx,
+            Box::new(TestDevice::from_vec(committed)),
+            &OpenOptions::default(),
+        )
+        .expect("remount committed image");
+        fs2.btrfs_verify_file_data_csums(&cx, InodeNumber(257))
+            .expect("datasum data + checksums verify after commit and remount");
+    }
+
     #[allow(clippy::significant_drop_tightening)]
     fn csum_lookup_in_alloc(fs: &OpenFs, bytenr: u64) -> Option<u32> {
         let alloc = fs.btrfs_alloc_state.as_ref().unwrap().lock();
