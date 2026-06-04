@@ -32,19 +32,19 @@ use ffs_block::{
 };
 use ffs_btrfs::{
     BTRFS_BLOCK_GROUP_DATA, BTRFS_BLOCK_GROUP_METADATA, BTRFS_CHUNK_TREE_OBJECTID,
-    BTRFS_EXTENT_TREE_OBJECTID, BTRFS_FILE_EXTENT_PREALLOC, BTRFS_FILE_EXTENT_REG,
-    BTRFS_FIRST_FREE_OBJECTID, BTRFS_FS_TREE_OBJECTID, BTRFS_FT_BLKDEV, BTRFS_FT_CHRDEV,
-    BTRFS_FT_DIR, BTRFS_FT_FIFO, BTRFS_FT_REG_FILE, BTRFS_FT_SOCK, BTRFS_FT_SYMLINK,
-    BTRFS_INODE_NODATASUM, BTRFS_ITEM_DIR_INDEX, BTRFS_ITEM_DIR_ITEM, BTRFS_ITEM_EXTENT_DATA,
-    BTRFS_ITEM_INODE_ITEM, BTRFS_ITEM_INODE_REF, BTRFS_ITEM_ROOT_ITEM, BTRFS_ITEM_ROOT_REF,
-    BTRFS_ITEM_XATTR_ITEM, BTRFS_ROOT_SUBVOL_RDONLY, BTRFS_ROOT_TREE_OBJECTID,
+    BTRFS_CSUM_TREE_OBJECTID, BTRFS_EXTENT_TREE_OBJECTID, BTRFS_FILE_EXTENT_PREALLOC,
+    BTRFS_FILE_EXTENT_REG, BTRFS_FIRST_FREE_OBJECTID, BTRFS_FS_TREE_OBJECTID, BTRFS_FT_BLKDEV,
+    BTRFS_FT_CHRDEV, BTRFS_FT_DIR, BTRFS_FT_FIFO, BTRFS_FT_REG_FILE, BTRFS_FT_SOCK,
+    BTRFS_FT_SYMLINK, BTRFS_INODE_NODATASUM, BTRFS_ITEM_DIR_INDEX, BTRFS_ITEM_DIR_ITEM,
+    BTRFS_ITEM_EXTENT_DATA, BTRFS_ITEM_INODE_ITEM, BTRFS_ITEM_INODE_REF, BTRFS_ITEM_ROOT_ITEM,
+    BTRFS_ITEM_ROOT_REF, BTRFS_ITEM_XATTR_ITEM, BTRFS_ROOT_SUBVOL_RDONLY, BTRFS_ROOT_TREE_OBJECTID,
     BTRFS_USER_SETTABLE_FSFLAGS, BTRFS_USER_SETTABLE_XFLAGS, BtrfsBTree, BtrfsBlockGroupItem,
     BtrfsCowNode, BtrfsDirItem, BtrfsExtentAllocator, BtrfsExtentData, BtrfsInodeItem, BtrfsKey,
     BtrfsLeafEntry, BtrfsMutationError, BtrfsNodeSerializeParams, BtrfsRootItem, BtrfsTreeItem,
     InMemoryCowBtrfsTree, btrfs_inode_flags_to_fsflags, btrfs_inode_flags_to_xflags,
     enumerate_snapshots, enumerate_subvolumes, fsflags_to_btrfs_inode_flags, generate_send_stream,
-    map_logical_to_physical, parse_dir_items, parse_extent_data, parse_inode_item, parse_root_item,
-    parse_xattr_items, walk_chunk_tree, walk_tree,
+    lookup_data_block_csum, map_logical_to_physical, parse_dir_items, parse_extent_data,
+    parse_inode_item, parse_root_item, parse_xattr_items, walk_chunk_tree, walk_tree,
     writeback::{DiskWritebackContext, WriteDependencyDag, WritebackExecutor},
     xflags_to_btrfs_inode_flags,
 };
@@ -6101,6 +6101,106 @@ impl OpenFs {
             });
         }
         Ok(&decompressed[src_start..src_end])
+    }
+
+    /// Verify a btrfs file's on-disk data against the csum tree (bd-x3fcu).
+    ///
+    /// For a `datasum` inode this gathers the file's regular, uncompressed data
+    /// extents, reads each on-disk sector, and compares its crc32c to the
+    /// `EXTENT_CSUM` recorded in the csum tree — returning a corruption error
+    /// on the first mismatch, matching the kernel's EIO when reading a datasum
+    /// file whose data has rotted. It is a no-op for `NODATASUM` inodes and for
+    /// filesystems without a csum tree. This is the read-side consumer of the
+    /// csum primitives; it deliberately does not alter the hot read path.
+    ///
+    /// # Errors
+    /// Returns [`FfsError::Corruption`] on a checksum mismatch, or a read/parse
+    /// error if the inode, extents, or csum tree cannot be read.
+    pub fn btrfs_verify_file_data_csums(&self, cx: &Cx, ino: InodeNumber) -> ffs_error::Result<()> {
+        let canonical = self.btrfs_canonical_inode(ino)?;
+        let sectorsize = {
+            let sb = self
+                .btrfs_superblock()
+                .ok_or_else(|| FfsError::Format("not a btrfs filesystem".into()))?;
+            usize::try_from(sb.sectorsize)
+                .map_err(|_| FfsError::Format("btrfs sectorsize overflow".into()))?
+        };
+        if sectorsize == 0 {
+            return Err(FfsError::Format("btrfs sectorsize is zero".into()));
+        }
+
+        let items = self.walk_btrfs_fs_tree(cx)?;
+        let inode_entry = Self::btrfs_find_inode_item(&items, canonical)?;
+        let inode = parse_inode_item(&inode_entry.data).map_err(|e| parse_to_ffs_error(&e))?;
+        if inode.flags & BTRFS_INODE_NODATASUM != 0 {
+            return Ok(()); // not a datasum file — nothing to verify
+        }
+
+        // Resolve the csum tree root from the ROOT tree (objectid 7). A
+        // filesystem with no csum tree (e.g. all-nodatasum) has nothing to do.
+        let csum_root = match self.btrfs_fs_tree_root_bytenr(cx, BTRFS_CSUM_TREE_OBJECTID) {
+            Ok(bytenr) => bytenr,
+            Err(FfsError::NotFound(_)) => return Ok(()),
+            Err(e) => return Err(e),
+        };
+        let csum_items: Vec<(BtrfsKey, Vec<u8>)> = self
+            .walk_btrfs_tree(cx, csum_root)?
+            .into_iter()
+            .map(|entry| (entry.key, entry.data))
+            .collect();
+
+        for item in &items {
+            if item.key.objectid != canonical || item.key.item_type != BTRFS_ITEM_EXTENT_DATA {
+                continue;
+            }
+            let extent = parse_extent_data(&item.data).map_err(|e| parse_to_ffs_error(&e))?;
+            let BtrfsExtentData::Regular {
+                extent_type,
+                compression,
+                disk_bytenr,
+                disk_num_bytes,
+                ..
+            } = extent
+            else {
+                continue; // inline extents are covered by the metadata tree-block csum
+            };
+            if disk_bytenr == 0 {
+                continue; // sparse hole — no on-disk bytes
+            }
+            if compression != 0 {
+                continue; // compressed-data csums need pre-decompression bytes (follow-on)
+            }
+            if extent_type == BTRFS_FILE_EXTENT_PREALLOC {
+                continue; // preallocated/unwritten — no data checksum
+            }
+
+            let dnb = usize::try_from(disk_num_bytes)
+                .map_err(|_| FfsError::Format("btrfs disk_num_bytes overflow".into()))?;
+            let sectors = dnb.div_ceil(sectorsize);
+            for s in 0..sectors {
+                let delta = u64::try_from(s * sectorsize)
+                    .map_err(|_| FfsError::Format("btrfs csum sector offset overflow".into()))?;
+                let bytenr = disk_bytenr
+                    .checked_add(delta)
+                    .ok_or_else(|| FfsError::Format("btrfs csum sector bytenr overflow".into()))?;
+                let Some(expected) = lookup_data_block_csum(&csum_items, bytenr, sectorsize) else {
+                    continue; // no checksum recorded for this sector
+                };
+                let mut sector = vec![0_u8; sectorsize];
+                self.btrfs_read_logical_into(cx, bytenr, &mut sector)?;
+                let actual = ffs_types::crc32c(&sector);
+                if actual != expected {
+                    return Err(FfsError::Corruption {
+                        block: bytenr,
+                        detail: format!(
+                            "btrfs data csum mismatch at logical {bytenr}: \
+                             expected {expected:#010x}, computed {actual:#010x}"
+                        ),
+                    });
+                }
+            }
+        }
+        Ok(())
     }
 
     #[allow(clippy::too_many_lines)]
@@ -31991,6 +32091,69 @@ mod tests {
         image
     }
 
+    /// Like [`build_btrfs_fsops_image`] but adds a csum tree covering the
+    /// datasum file's single data sector, plus a CSUM_TREE(7) ROOT_ITEM in the
+    /// root leaf — so the on-disk csum read path (bd-x3fcu) can be exercised.
+    fn build_btrfs_csum_image() -> Vec<u8> {
+        let mut image = build_btrfs_fsops_image();
+        let file_data = BTRFS_TEST_FILE_DATA_LOGICAL; // 0x12000, datasum file 257's extent
+        let sectorsize = BTRFS_TEST_NODESIZE; // 4096
+        let csum_tree_logical = 0x16_000_usize; // free, identity-mapped, in the reserved region
+
+        // crc32c of the file's only on-disk sector (file bytes + zero padding).
+        let sector_csum = ffs_types::crc32c(&image[file_data..file_data + sectorsize]);
+
+        // --- csum tree leaf: one EXTENT_CSUM item keyed by the data bytenr ---
+        image[csum_tree_logical + 0x30..csum_tree_logical + 0x38]
+            .copy_from_slice(&(csum_tree_logical as u64).to_le_bytes()); // bytenr
+        image[csum_tree_logical + 0x50..csum_tree_logical + 0x58]
+            .copy_from_slice(&1_u64.to_le_bytes()); // generation
+        image[csum_tree_logical + 0x58..csum_tree_logical + 0x60]
+            .copy_from_slice(&BTRFS_CSUM_TREE_OBJECTID.to_le_bytes()); // owner
+        image[csum_tree_logical + 0x60..csum_tree_logical + 0x64]
+            .copy_from_slice(&1_u32.to_le_bytes()); // nritems
+        image[csum_tree_logical + 0x64] = 0; // level (leaf)
+        let csum_value_off: u32 = 4000;
+        write_btrfs_leaf_item(
+            &mut image,
+            csum_tree_logical,
+            0,
+            ffs_btrfs::BTRFS_EXTENT_CSUM_OBJECTID,
+            ffs_btrfs::BTRFS_ITEM_EXTENT_CSUM,
+            file_data as u64,
+            csum_value_off,
+            4,
+        );
+        let vo = csum_tree_logical + csum_value_off as usize;
+        image[vo..vo + 4].copy_from_slice(&sector_csum.to_le_bytes());
+        stamp_btrfs_test_tree_block_crc32c(&mut image, csum_tree_logical);
+
+        // --- add the CSUM_TREE(7) ROOT_ITEM as item 1 of the root leaf ---
+        let root_leaf = BTRFS_TEST_ROOT_TREE_LOGICAL; // 0x4000, currently nritems=1 (FS_TREE@idx0)
+        image[root_leaf + 0x60..root_leaf + 0x64].copy_from_slice(&2_u32.to_le_bytes());
+        let csum_root_item_off: u32 = 2700; // below the FS_TREE root item at 3000
+        let csum_root_item_size: u32 = 239;
+        write_btrfs_leaf_item(
+            &mut image,
+            root_leaf,
+            1,
+            BTRFS_CSUM_TREE_OBJECTID,
+            BTRFS_ITEM_ROOT_ITEM,
+            0,
+            csum_root_item_off,
+            csum_root_item_size,
+        );
+        let mut csum_root_item = vec![0_u8; csum_root_item_size as usize];
+        csum_root_item[176..184].copy_from_slice(&(csum_tree_logical as u64).to_le_bytes()); // bytenr
+        let last = csum_root_item.len() - 1;
+        csum_root_item[last] = 0; // level
+        let ro = root_leaf + csum_root_item_off as usize;
+        image[ro..ro + csum_root_item.len()].copy_from_slice(&csum_root_item);
+        stamp_btrfs_test_tree_block_crc32c(&mut image, root_leaf);
+
+        image
+    }
+
     fn btrfs_test_root_item(
         objectid: u64,
         root_dirid: u64,
@@ -32175,6 +32338,41 @@ mod tests {
         let ctx = fs.btrfs_context().unwrap();
         assert_eq!(ctx.nodesize, 4096);
         assert_eq!(ctx.chunks.len(), 1);
+    }
+
+    #[test]
+    fn btrfs_verify_file_data_csums_clean_then_detects_corruption_bd_x3fcu() {
+        let cx = Cx::for_testing();
+        let image = build_btrfs_csum_image();
+
+        // The datasum file (objectid 257) has a matching EXTENT_CSUM -> verifies clean.
+        let fs = OpenFs::from_device(
+            &cx,
+            Box::new(TestDevice::from_vec(image.clone())),
+            &OpenOptions::default(),
+        )
+        .expect("open csum image");
+        fs.btrfs_verify_file_data_csums(&cx, InodeNumber(257))
+            .expect("uncorrupted datasum file must verify clean");
+
+        // Flip a byte in the file's on-disk data sector -> the recomputed crc32c
+        // no longer matches the csum tree, so verification reports corruption
+        // (the kernel returns EIO here).
+        let mut corrupt = image;
+        corrupt[BTRFS_TEST_FILE_DATA_LOGICAL + 5] ^= 0xFF;
+        let fs2 = OpenFs::from_device(
+            &cx,
+            Box::new(TestDevice::from_vec(corrupt)),
+            &OpenOptions::default(),
+        )
+        .expect("open corrupted csum image");
+        let err = fs2
+            .btrfs_verify_file_data_csums(&cx, InodeNumber(257))
+            .expect_err("corrupted data must be detected");
+        assert!(
+            matches!(err, FfsError::Corruption { .. }),
+            "expected a corruption error, got {err:?}"
+        );
     }
 
     #[test]
