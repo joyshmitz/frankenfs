@@ -35,12 +35,12 @@ use ffs_btrfs::{
     BTRFS_EXTENT_TREE_OBJECTID, BTRFS_FILE_EXTENT_PREALLOC, BTRFS_FILE_EXTENT_REG,
     BTRFS_FIRST_FREE_OBJECTID, BTRFS_FS_TREE_OBJECTID, BTRFS_FT_BLKDEV, BTRFS_FT_CHRDEV,
     BTRFS_FT_DIR, BTRFS_FT_FIFO, BTRFS_FT_REG_FILE, BTRFS_FT_SOCK, BTRFS_FT_SYMLINK,
-    BTRFS_ITEM_DIR_INDEX, BTRFS_ITEM_DIR_ITEM, BTRFS_ITEM_EXTENT_DATA, BTRFS_ITEM_INODE_ITEM,
-    BTRFS_ITEM_INODE_REF, BTRFS_ITEM_ROOT_ITEM, BTRFS_ITEM_ROOT_REF, BTRFS_ITEM_XATTR_ITEM,
-    BTRFS_ROOT_SUBVOL_RDONLY, BTRFS_ROOT_TREE_OBJECTID, BTRFS_USER_SETTABLE_FSFLAGS,
-    BTRFS_USER_SETTABLE_XFLAGS, BtrfsBTree, BtrfsBlockGroupItem, BtrfsCowNode, BtrfsDirItem,
-    BtrfsExtentAllocator, BtrfsExtentData, BtrfsInodeItem, BtrfsKey, BtrfsLeafEntry,
-    BtrfsMutationError, BtrfsNodeSerializeParams, BtrfsRootItem, BtrfsTreeItem,
+    BTRFS_INODE_NODATASUM, BTRFS_ITEM_DIR_INDEX, BTRFS_ITEM_DIR_ITEM, BTRFS_ITEM_EXTENT_DATA,
+    BTRFS_ITEM_INODE_ITEM, BTRFS_ITEM_INODE_REF, BTRFS_ITEM_ROOT_ITEM, BTRFS_ITEM_ROOT_REF,
+    BTRFS_ITEM_XATTR_ITEM, BTRFS_ROOT_SUBVOL_RDONLY, BTRFS_ROOT_TREE_OBJECTID,
+    BTRFS_USER_SETTABLE_FSFLAGS, BTRFS_USER_SETTABLE_XFLAGS, BtrfsBTree, BtrfsBlockGroupItem,
+    BtrfsCowNode, BtrfsDirItem, BtrfsExtentAllocator, BtrfsExtentData, BtrfsInodeItem, BtrfsKey,
+    BtrfsLeafEntry, BtrfsMutationError, BtrfsNodeSerializeParams, BtrfsRootItem, BtrfsTreeItem,
     InMemoryCowBtrfsTree, btrfs_inode_flags_to_fsflags, btrfs_inode_flags_to_xflags,
     enumerate_snapshots, enumerate_subvolumes, fsflags_to_btrfs_inode_flags, generate_send_stream,
     map_logical_to_physical, parse_dir_items, parse_extent_data, parse_inode_item, parse_root_item,
@@ -16280,7 +16280,13 @@ impl OpenFs {
             gid,
             mode: u32::from(mode) | 0o100_000, // S_IFREG
             rdev: 0,
-            flags: 0,
+            // FrankenFS does not populate the btrfs csum tree, so mark new
+            // regular files NODATASUM: the kernel then skips data-checksum
+            // verification on read instead of returning EIO ("csum failed") for
+            // the missing csums. Interim for bd-x3fcu until full csum-tree
+            // population lands; FrankenFS's own write path is unchanged (it never
+            // wrote csums), this only sets the on-disk flag the kernel honors.
+            flags: BTRFS_INODE_NODATASUM,
             atime_sec: secs,
             atime_nsec: nanos,
             ctime_sec: secs,
@@ -45626,6 +45632,40 @@ mod tests {
             fs.largest_contiguous_free_run(&cx)
                 .expect("largest contiguous btrfs run"),
             48
+        );
+    }
+
+    #[test]
+    #[allow(clippy::significant_drop_tightening)]
+    fn btrfs_new_files_are_nodatasum_for_kernel_readability_bd_x3fcu() {
+        // FrankenFS does not populate the btrfs csum tree, so new regular files
+        // are created NODATASUM: the kernel reads their data without a csum
+        // lookup, which would otherwise fail with EIO for the missing csums.
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+        let attr = ops
+            .create(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("nds.dat"),
+                0o644,
+                0,
+                0,
+            )
+            .expect("create btrfs file");
+        let objectid = fs
+            .btrfs_canonical_inode(attr.ino)
+            .expect("canonical objectid");
+        let alloc_mutex = fs.btrfs_alloc_state.as_ref().expect("btrfs alloc state");
+        let alloc = alloc_mutex.lock();
+        let inode = fs
+            .btrfs_read_inode_from_tree(&alloc, objectid)
+            .expect("read back inode item");
+        assert!(
+            inode.flags & BTRFS_INODE_NODATASUM != 0,
+            "a new btrfs regular file must be NODATASUM (bd-x3fcu interim); flags=0x{:x}",
+            inode.flags
         );
     }
 
