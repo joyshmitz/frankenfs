@@ -5956,6 +5956,49 @@ where
     Some(entries.get(idx)?.block)
 }
 
+/// Enumerate the logical block numbers of *every* leaf in a hash-indexed
+/// directory, descending all indirect levels of the DX index.
+///
+/// `block0` is the dx_root (logical block 0); `read_logical(n)` returns the
+/// bytes of logical directory block `n` (for reading interior `dx_node` blocks).
+/// Returns the leaf logical-block numbers in DX (hash-sorted) order, or `None`
+/// if the index cannot be parsed.
+///
+/// This is the gather-side counterpart to [`htree_find_entry`]: where the lookup
+/// descends to the *one* leaf a hash maps to, this breadth-first-walks the whole
+/// index to list *all* leaves — what a directory rebuild needs so it reads only
+/// real leaf blocks and never mis-parses an interior `dx_node` as a leaf. At
+/// `indirect_levels == 0` the root entries already point at leaves; each further
+/// level descends every interior node via [`DX_NODE_COUNT_OFFSET`]. Pinned by
+/// `htree_leaf_logical_blocks_enumerates_every_leaf_*`.
+pub fn htree_leaf_logical_blocks<F>(
+    block0: &[u8],
+    has_large_dir: bool,
+    mut read_logical: F,
+) -> Option<Vec<u32>>
+where
+    F: FnMut(u32) -> Option<Vec<u8>>,
+{
+    let dx_root = parse_dx_root_with_large_dir(block0, has_large_dir).ok()?;
+    let indirect_levels = usize::from(dx_root.indirect_levels);
+
+    // Start at the root's entries; descend one level per indirect level. After
+    // `indirect_levels` descents the accumulated block numbers are the leaves.
+    let mut level_blocks: Vec<u32> = dx_root.entries.iter().map(|e| e.block).collect();
+    for _ in 0..indirect_levels {
+        let mut next = Vec::with_capacity(level_blocks.len());
+        for interior in level_blocks {
+            let data = read_logical(interior)?;
+            let entries = parse_dx_entries(&data, DX_NODE_COUNT_OFFSET).ok()?;
+            for e in entries {
+                next.push(e.block);
+            }
+        }
+        level_blocks = next;
+    }
+    Some(level_blocks)
+}
+
 // ── ext4 directory hash functions ───────────────────────────────────────────
 
 /// Hash version constants from the ext4 DX root.
@@ -8926,6 +8969,96 @@ mod tests {
                 other => panic!("entry {name:?} not reachable: {other:?}"),
             }
         }
+    }
+
+    /// bd-owt2r (gather-half): the leaf enumerator lists exactly the real leaf
+    /// blocks of a two-level index — never an interior `dx_node` — so a rebuild
+    /// reads only leaves. The builder lays leaves at logical 1..=L and interior
+    /// nodes at L+1..=L+N, so the enumerated set must be precisely {1..=L}, and
+    /// parsing those blocks must recover every input name and nothing else.
+    #[test]
+    fn htree_leaf_logical_blocks_enumerates_every_leaf_two_level_bd_owt2r() {
+        let bs = 1024_usize;
+        let seed = [0x0bad_f00d_u32, 0xfeed_face, 0xdead_beef, 0xcafe_b0ba];
+        let hash_version = 1_u8;
+
+        let names: Vec<Vec<u8>> = (0..8000)
+            .map(|i| format!("file_{i:06}").into_bytes())
+            .collect();
+        let entries: Vec<(u32, u8, &[u8])> = names
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (100 + u32::try_from(i).unwrap(), EXT4_FT_REG_FILE, n.as_slice()))
+            .collect();
+
+        let blocks = build_htree_directory(2, 2, &entries, bs, hash_version, &seed, false)
+            .expect("two-level htree should build");
+        assert_eq!(blocks[0][0x1E], 1, "fixture must be two-level");
+
+        let leaves =
+            htree_leaf_logical_blocks(&blocks[0], false, |lb| blocks.get(lb as usize).cloned())
+                .expect("leaf enumeration must succeed");
+
+        // The enumerated leaf set is exactly the contiguous leaf range 1..=L,
+        // which excludes the interior nodes (logical L+1..). If the walk had
+        // returned an interior node, the sorted set would not be 1..=L.
+        let mut sorted = leaves.clone();
+        sorted.sort_unstable();
+        let l = sorted.len();
+        assert!(l >= 2, "two-level dir must have multiple leaves, got {l}");
+        assert_eq!(
+            sorted,
+            (1..=u32::try_from(l).unwrap()).collect::<Vec<_>>(),
+            "enumeration must be exactly the leaf blocks 1..=L (no interior nodes)"
+        );
+
+        // Parsing those blocks recovers every input name and nothing spurious
+        // (an interior node would parse to a single inode-0 fake entry, but none
+        // are in the set, so the count must match exactly).
+        let mut found = std::collections::BTreeSet::new();
+        for lb in &leaves {
+            let (parsed, _) =
+                parse_dir_block(&blocks[*lb as usize], u32::try_from(bs).unwrap()).unwrap();
+            for e in parsed {
+                if e.inode != 0 && e.name != b"." && e.name != b".." {
+                    found.insert(e.name);
+                }
+            }
+        }
+        assert_eq!(found.len(), names.len(), "every entry accounted for via leaves only");
+        for n in &names {
+            assert!(found.contains(n), "missing {n:?}");
+        }
+    }
+
+    /// bd-owt2r: for a single-level index the enumerator returns the DX root's
+    /// own entries (the leaves directly), with no descent.
+    #[test]
+    fn htree_leaf_logical_blocks_single_level_returns_root_leaves_bd_owt2r() {
+        let bs = 4096_usize;
+        let seed = [0x1234_5678_u32, 0x9abc_def0, 0x0f0f_0f0f, 0xa5a5_a5a5];
+        let names: Vec<Vec<u8>> = (0..300)
+            .map(|i| format!("file_{i:05}").into_bytes())
+            .collect();
+        let entries: Vec<(u32, u8, &[u8])> = names
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (100 + u32::try_from(i).unwrap(), EXT4_FT_REG_FILE, n.as_slice()))
+            .collect();
+
+        let blocks = build_htree_directory(2, 2, &entries, bs, 1, &seed, false).unwrap();
+        assert_eq!(blocks[0][0x1E], 0, "fixture must be single-level");
+
+        let leaves =
+            htree_leaf_logical_blocks(&blocks[0], false, |lb| blocks.get(lb as usize).cloned())
+                .unwrap();
+        let mut sorted = leaves.clone();
+        sorted.sort_unstable();
+        assert_eq!(
+            sorted,
+            (1..=u32::try_from(blocks.len() - 1).unwrap()).collect::<Vec<_>>(),
+            "single-level enumeration is every block after the dx_root"
+        );
     }
 
     #[test]
