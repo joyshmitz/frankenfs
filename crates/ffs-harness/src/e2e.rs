@@ -228,6 +228,11 @@ impl E2eTestContext {
     ///
     /// Creates a temp directory under `/tmp/ffs-e2e-*` and prepares paths.
     pub fn new(name: &str, image_type: ImageType, options: &FixtureOptions) -> Result<Self> {
+        // Self-heal: lazily unmount dead FrankenFS mounts left behind by
+        // earlier crashed/killed runs before creating new ones (a wedged FUSE
+        // server leaks its mount past AutoUnmount; see `stale_mounts`).
+        crate::stale_mounts::reap_stale_frankenfs_mounts_once();
+
         let workdir = std::env::temp_dir().join(format!("ffs-e2e-{}-{}", name, std::process::id()));
         fs::create_dir_all(&workdir)
             .with_context(|| format!("create workdir {}", workdir.display()))?;

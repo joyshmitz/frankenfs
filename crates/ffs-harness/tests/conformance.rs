@@ -2260,6 +2260,8 @@ fn try_mount_ffs_with_options(
     mountpoint: &Path,
     mount_opts: &MountOptions,
 ) -> Option<fuser::BackgroundSession> {
+    // Self-heal dead mounts leaked by earlier crashed/killed runs.
+    ffs_harness::stale_mounts::reap_stale_frankenfs_mounts_once();
     let cx = Cx::for_testing();
     let opts = OpenOptions {
         skip_validation: false,
