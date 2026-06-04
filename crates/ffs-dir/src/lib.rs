@@ -1071,9 +1071,7 @@ mod tests {
         // inode 0 (bytes 0..4 already zero); rec_len spans the entire block.
         node[4..6].copy_from_slice(&u16::try_from(bs).unwrap().to_le_bytes());
         // Arbitrary index bytes after the 8-byte fake dirent.
-        for b in node[8..].iter_mut() {
-            *b = 0xAB;
-        }
+        node[8..].fill(0xAB);
         // metadata_csum dir (reserved_tail = 12): must be skipped, not rejected.
         assert!(
             !remove_entry(&mut node, b"victim.txt", 12).unwrap(),
