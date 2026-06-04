@@ -206,6 +206,120 @@ fn bitmap_find_free_range(bitmap: &[u8], mut idx: u32, end: u32) -> Option<u32> 
     None
 }
 
+fn bitmap_take_free_bits_cyclic<F>(
+    bitmap: &mut [u8],
+    count: u32,
+    max_count: u32,
+    start: u32,
+    mut record: F,
+) -> u32
+where
+    F: FnMut(u32),
+{
+    if count == 0 || max_count == 0 {
+        return 0;
+    }
+
+    let start = start.min(count);
+    let mut taken = bitmap_take_free_bits_range(bitmap, start, count, max_count, &mut record);
+    if taken < max_count && start > 0 {
+        taken += bitmap_take_free_bits_range(bitmap, 0, start, max_count - taken, &mut record);
+    }
+    taken
+}
+
+fn bitmap_take_free_bits_range<F>(
+    bitmap: &mut [u8],
+    mut idx: u32,
+    end: u32,
+    max_count: u32,
+    record: &mut F,
+) -> u32
+where
+    F: FnMut(u32),
+{
+    let mut taken = 0;
+
+    while idx < end && idx % 8 != 0 {
+        let byte_idx = (idx / 8) as usize;
+        let Some(byte) = bitmap.get_mut(byte_idx) else {
+            return taken;
+        };
+        let bit = idx % 8;
+        if (*byte >> bit) & 1 == 0 {
+            *byte |= 1 << bit;
+            record(idx);
+            taken += 1;
+            if taken == max_count {
+                return taken;
+            }
+        }
+        idx += 1;
+    }
+
+    while end.saturating_sub(idx) >= 64 {
+        let byte_idx = (idx / 8) as usize;
+        let Some(chunk) = bitmap.get_mut(byte_idx..byte_idx + 8) else {
+            return taken;
+        };
+        let word = u64::from_le_bytes([
+            chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
+        ]);
+        let mut free = !word;
+        while free != 0 {
+            let bit = free.trailing_zeros();
+            let byte_offset = (bit / 8) as usize;
+            let bit_offset = bit % 8;
+            chunk[byte_offset] |= 1 << bit_offset;
+            record(idx + bit);
+            taken += 1;
+            if taken == max_count {
+                return taken;
+            }
+            free &= free - 1;
+        }
+        idx += 64;
+    }
+
+    while end.saturating_sub(idx) >= 8 {
+        let byte_idx = (idx / 8) as usize;
+        let Some(byte) = bitmap.get_mut(byte_idx) else {
+            return taken;
+        };
+        let mut free = !*byte;
+        while free != 0 {
+            let bit = free.trailing_zeros();
+            *byte |= 1 << bit;
+            record(idx + bit);
+            taken += 1;
+            if taken == max_count {
+                return taken;
+            }
+            free &= free - 1;
+        }
+        idx += 8;
+    }
+
+    while idx < end {
+        let byte_idx = (idx / 8) as usize;
+        let Some(byte) = bitmap.get_mut(byte_idx) else {
+            return taken;
+        };
+        let bit = idx % 8;
+        if (*byte >> bit) & 1 == 0 {
+            *byte |= 1 << bit;
+            record(idx);
+            taken += 1;
+            if taken == max_count {
+                return taken;
+            }
+        }
+        idx += 1;
+    }
+
+    taken
+}
+
 /// Find `n` contiguous free bits in the first `count` bits of `bitmap`,
 /// starting from `start`.
 #[must_use]
@@ -1939,27 +2053,14 @@ fn try_alloc_batch_in_group(
 
     let to_alloc = max_count.min(groups[gidx].free_blocks);
     let mut allocated = Vec::with_capacity(to_alloc as usize);
-    let mut search_pos = start;
 
-    for _ in 0..to_alloc {
-        let Some(idx) = bitmap_find_free(&bitmap, blocks_in_group, search_pos) else {
-            break;
-        };
-        // Verify not reserved (belt-and-suspenders).
-        if is_reserved(&reserved, idx) {
-            // Skip past this position and continue.
-            search_pos = idx + 1;
-            continue;
-        }
-        bitmap_set(&mut bitmap, idx);
+    bitmap_take_free_bits_cyclic(&mut bitmap, blocks_in_group, to_alloc, start, |idx| {
         let abs = geo.group_block_to_absolute(group, idx);
         allocated.push(BlockAlloc {
             start: abs,
             count: 1,
         });
-        // Advance search position for locality.
-        search_pos = idx + 1;
-    }
+    });
 
     if allocated.is_empty() {
         return Ok(Vec::new());
@@ -2821,6 +2922,86 @@ mod tests {
                 )
                 .expect("write to String");
             }
+        }
+        print!("{report}");
+    }
+
+    fn take_free_bits_cyclic_naive(
+        bitmap: &mut [u8],
+        count: u32,
+        max_count: u32,
+        start: u32,
+    ) -> Vec<u32> {
+        let mut taken = Vec::new();
+        let mut search_pos = start;
+        for _ in 0..max_count {
+            let Some(idx) = bitmap_find_free(bitmap, count, search_pos) else {
+                break;
+            };
+            bitmap_set(bitmap, idx);
+            taken.push(idx);
+            search_pos = idx + 1;
+        }
+        taken
+    }
+
+    fn hex_bytes(bytes: &[u8]) -> String {
+        use std::fmt::Write as _;
+        let mut hex = String::with_capacity(bytes.len() * 2);
+        for byte in bytes {
+            write!(hex, "{byte:02x}").expect("write to String");
+        }
+        hex
+    }
+
+    #[test]
+    fn bitmap_take_free_bits_cyclic_golden_report() {
+        use std::fmt::Write as _;
+        let cases = vec![
+            ("truncated", Vec::new(), 16, 3, 0),
+            ("start_aligned_dense", vec![0xF0, 0x00, 0xFF], 24, 6, 0),
+            ("unaligned_start", vec![0xEF, 0x00, 0xFE], 24, 7, 5),
+            ("wraparound", vec![0xFF, 0xF0, 0x0F], 24, 8, 20),
+            ("partial_count_wrap", vec![0x00, 0x00, 0x00], 20, 12, 16),
+            (
+                "word_window",
+                vec![
+                    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x00,
+                    0x00, 0x00, 0x00,
+                ],
+                128,
+                10,
+                64,
+            ),
+        ];
+
+        let mut report = String::new();
+        for (name, bytes, count, max_count, start) in cases {
+            let mut actual_bitmap = bytes.clone();
+            let mut actual = Vec::new();
+            let taken =
+                bitmap_take_free_bits_cyclic(&mut actual_bitmap, count, max_count, start, |idx| {
+                    actual.push(idx);
+                });
+
+            let mut expected_bitmap = bytes;
+            let expected =
+                take_free_bits_cyclic_naive(&mut expected_bitmap, count, max_count, start);
+            assert_eq!(taken as usize, actual.len(), "{name}: taken count");
+            assert_eq!(actual, expected, "{name}: allocation order");
+            assert_eq!(actual_bitmap, expected_bitmap, "{name}: bitmap state");
+
+            let allocations = actual
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(",");
+            writeln!(
+                report,
+                "BATCH_TAKE_GOLDEN\t{name}\tcount={count}\tmax={max_count}\tstart={start}\talloc={allocations}\tbitmap={}",
+                hex_bytes(&actual_bitmap)
+            )
+            .expect("write to String");
         }
         print!("{report}");
     }
