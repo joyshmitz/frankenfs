@@ -38395,17 +38395,15 @@ mod tests {
     }
 
     /// Validate FrankenFS's ext4 write path against real `e2fsck` (the ext4
-    /// analog of the btrfs-check harness that found bd-x36qn): create a file,
-    /// write data, persist, and require e2fsck to report the image clean.
+    /// analog of the btrfs-check harness): create a file, write data, persist,
+    /// and require e2fsck to report the image clean.
     ///
-    /// CURRENTLY FAILS (bd-0ta4z): real `e2fsck` reports wrong superblock free
-    /// counts, an invalid `bg_itable_unused`, and bitmap differences — FrankenFS
-    /// ext4 allocation does not maintain the superblock global free counts,
-    /// `bg_itable_unused`, or the INODE_UNINIT/BLOCK_UNINIT group flags on a
-    /// fresh (lazy-init) image. Kept as the validation harness; remove
-    /// `#[ignore]` once bd-0ta4z is fixed.
+    /// Regression guard for bd-0ta4z: allocation on a fresh (lazy-init) image
+    /// formerly left the group flagged INODE_UNINIT/BLOCK_UNINIT with a stale
+    /// `bg_itable_unused`, so e2fsck recomputed the bitmaps/free counts as
+    /// all-free and reported them wrong. Fixed by clearing the UNINIT flags +
+    /// shrinking `itable_unused` when a group's bitmap is persisted.
     #[test]
-    #[ignore = "bd-0ta4z: ext4 write path is not e2fsck-clean yet (harness)"]
     fn ext4_created_file_passes_e2fsck_bd_0ta4z() {
         let Some((fs, dev, tmp)) = open_writable_ext4_mkfs_with_device(64) else {
             return; // format tool unavailable

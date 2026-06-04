@@ -109,6 +109,29 @@ pub fn bitmap_set(bitmap: &mut [u8], idx: u32) {
     }
 }
 
+/// Highest set bit index strictly below `count`, or `None` if no bit is set.
+/// Matches [`bitmap_set`]'s LSB-first-within-byte convention.
+fn highest_set_bit_index(bitmap: &[u8], count: u32) -> Option<u32> {
+    let count = count as usize;
+    let nbytes = count.div_ceil(8).min(bitmap.len());
+    for byte_idx in (0..nbytes).rev() {
+        let byte = bitmap[byte_idx];
+        if byte == 0 {
+            continue;
+        }
+        for bit in (0..8u32).rev() {
+            if byte & (1 << bit) != 0 {
+                let idx = byte_idx * 8 + bit as usize;
+                if idx < count {
+                    #[expect(clippy::cast_possible_truncation)]
+                    return Some(idx as u32);
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Clear bit `idx` in a bitmap byte slice.
 pub fn bitmap_clear(bitmap: &mut [u8], idx: u32) {
     let byte_idx = (idx / 8) as usize;
@@ -1501,6 +1524,27 @@ fn persist_group_desc_with_bitmap_overrides(
             &mut updated,
             pctx.desc_size,
         );
+    }
+
+    // bd-0ta4z: once a group's bitmap is written explicitly, the group is no
+    // longer "uninitialized" — clear the matching UNINIT flag so e2fsck reads
+    // the on-disk bitmap as authoritative instead of recomputing it as all-free.
+    // For inode allocations also shrink `itable_unused` (the count of inodes at
+    // the end of the table never yet used) so the freshly allocated inode leaves
+    // the descriptor's "unused inodes" tail. It is monotonic — taken as a `min`
+    // so it never grows back when inodes are freed (the inode table stays
+    // initialized up to the high-water mark).
+    if let Some(ibitmap) = inode_bitmap_override {
+        updated.flags &= !GD_FLAG_INODE_UNINIT;
+        if let Some(highest_used) = highest_set_bit_index(ibitmap, pctx.inodes_per_group) {
+            let unused = pctx
+                .inodes_per_group
+                .saturating_sub(highest_used.saturating_add(1));
+            updated.itable_unused = updated.itable_unused.min(unused);
+        }
+    }
+    if block_bitmap_override.is_some() {
+        updated.flags &= !GD_FLAG_BLOCK_UNINIT;
     }
 
     updated
