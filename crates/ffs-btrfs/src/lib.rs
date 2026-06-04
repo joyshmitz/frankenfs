@@ -11111,6 +11111,38 @@ mod tests {
     }
 
     #[test]
+    fn alloc_data_and_metadata_do_not_overlap_on_mixed_block_group_bd_s0ogm() {
+        // On a single mixed DATA|METADATA block group, a data extent and a
+        // subsequently allocated metadata extent must not share physical space
+        // (else a metadata commit would overwrite freshly written data).
+        let mut alloc = BtrfsExtentAllocator::new(1).expect("alloc");
+        alloc.add_block_group(
+            0,
+            BtrfsBlockGroupItem {
+                total_bytes: 1 << 20,
+                used_bytes: 0,
+                flags: BTRFS_BLOCK_GROUP_DATA | BTRFS_BLOCK_GROUP_METADATA,
+            },
+        );
+
+        let data = alloc.alloc_data(4096).expect("alloc data");
+        let meta = alloc
+            .alloc_metadata_for_tree(4096, BTRFS_FS_TREE_OBJECTID, 0)
+            .expect("alloc metadata");
+
+        let data_end = data.bytenr + 4096;
+        let meta_end = meta.bytenr + 4096;
+        assert!(
+            data_end <= meta.bytenr || meta_end <= data.bytenr,
+            "data [{:#x},{:#x}) and metadata [{:#x},{:#x}) overlap on a mixed block group",
+            data.bytenr,
+            data_end,
+            meta.bytenr,
+            meta_end
+        );
+    }
+
+    #[test]
     fn alloc_single_extent_in_empty_group() {
         let mut alloc = BtrfsExtentAllocator::new(1).expect("alloc");
         alloc.add_block_group(0x1_0000, make_data_bg(0x1_0000, 0x10_0000));
