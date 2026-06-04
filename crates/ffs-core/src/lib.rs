@@ -1191,6 +1191,40 @@ impl BlockDevice for ByteDeviceBlockAdapter<'_> {
         self.dev.write_all_at(cx, ByteOffset(offset), data)
     }
 
+    fn write_contiguous_blocks(
+        &self,
+        cx: &Cx,
+        start: BlockNumber,
+        data: &[u8],
+    ) -> Result<(), FfsError> {
+        let bs = usize::try_from(self.block_size)
+            .map_err(|_| FfsError::Format("block_size does not fit usize".to_owned()))?;
+        if bs == 0 || data.len() % bs != 0 {
+            return Err(FfsError::Format(
+                "write_contiguous_blocks: data length must be a multiple of block size".to_owned(),
+            ));
+        }
+        if data.is_empty() {
+            return Ok(());
+        }
+        // Collapse the whole contiguous run into ONE ranged device write
+        // instead of one write per block. Same bytes, same locations, so the
+        // final on-disk state is identical to scalar write_block calls.
+        let offset = self.block_offset(start)?;
+        let end = offset
+            .checked_add(data.len() as u64)
+            .ok_or_else(|| FfsError::Format("contiguous write range overflow".to_owned()))?;
+        if end > self.dev.len_bytes() {
+            return Err(FfsError::Format(format!(
+                "contiguous write [{}, {}) out of range for device length {}",
+                offset,
+                end,
+                self.dev.len_bytes()
+            )));
+        }
+        self.dev.write_all_at(cx, ByteOffset(offset), data)
+    }
+
     fn block_size(&self) -> u32 {
         self.block_size
     }

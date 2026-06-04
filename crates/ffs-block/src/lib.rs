@@ -544,6 +544,34 @@ pub trait BlockDevice: Send + Sync {
     /// Write a block by number. `data.len()` MUST equal `block_size()`.
     fn write_block(&self, cx: &Cx, block: BlockNumber, data: &[u8]) -> Result<()>;
 
+    /// Write a contiguous run of blocks starting at `start`. `data` holds the
+    /// concatenated block contents (`data.len()` MUST be a multiple of
+    /// `block_size()`); block `start + i` receives `data[i*bs .. (i+1)*bs]`.
+    ///
+    /// Implementations backed by a byte device may override this to collapse
+    /// the run into a single ranged write (one `pwrite`/`write_all_at` instead
+    /// of one per block). The default preserves scalar `write_block` semantics,
+    /// so the final on-disk state is identical either way.
+    fn write_contiguous_blocks(&self, cx: &Cx, start: BlockNumber, data: &[u8]) -> Result<()> {
+        cx_checkpoint(cx)?;
+        let bs = self.block_size() as usize;
+        if bs == 0 || data.len() % bs != 0 {
+            return Err(FfsError::Format(
+                "write_contiguous_blocks: data length must be a multiple of block size".to_owned(),
+            ));
+        }
+        for (idx, chunk) in data.chunks(bs).enumerate() {
+            let delta = u64::try_from(idx)
+                .map_err(|_| FfsError::Format("block index does not fit u64".to_owned()))?;
+            let block = BlockNumber(start.0.checked_add(delta).ok_or_else(|| {
+                FfsError::Format("contiguous write block range overflow".to_owned())
+            })?);
+            self.write_block(cx, block, chunk)?;
+        }
+        cx_checkpoint(cx)?;
+        Ok(())
+    }
+
     /// Device block size in bytes.
     fn block_size(&self) -> u32;
 
@@ -574,6 +602,10 @@ impl<D: BlockDevice + ?Sized> BlockDevice for Arc<D> {
 
     fn write_block(&self, cx: &Cx, block: BlockNumber, data: &[u8]) -> Result<()> {
         (**self).write_block(cx, block, data)
+    }
+
+    fn write_contiguous_blocks(&self, cx: &Cx, start: BlockNumber, data: &[u8]) -> Result<()> {
+        (**self).write_contiguous_blocks(cx, start, data)
     }
 
     fn block_size(&self) -> u32 {

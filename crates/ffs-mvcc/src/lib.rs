@@ -2935,14 +2935,41 @@ impl MvccStore {
     pub fn flush_to_device<D: BlockDevice>(&self, cx: &Cx, device: &D) -> FfsResult<usize> {
         let snapshot = self.current_snapshot();
         let mut flushed = 0usize;
+
+        // `versions` is a BTreeMap, so this iterates in ascending block order.
+        // Coalesce maximal runs of contiguous blocks and write each run with a
+        // single `write_contiguous_blocks` (one ranged device write for a
+        // byte-backed device) instead of one `write_block` per block. The bytes
+        // and locations are identical to the scalar path, so the final on-disk
+        // state is unchanged (bd-ryqep).
+        let mut run_start: Option<BlockNumber> = None;
+        let mut run_next: u64 = 0; // next block number that would continue the run
+        let mut run_buf: Vec<u8> = Vec::new();
+
         for (block, versions) in &self.versions {
-            if let Some(idx) = versions.iter().rposition(|v| v.commit_seq <= snapshot.high) {
-                if let Some(data) = compression::resolve_data_with(versions, idx, |v| &v.data) {
-                    device.write_block(cx, *block, &data)?;
-                    flushed += 1;
+            let Some(idx) = versions.iter().rposition(|v| v.commit_seq <= snapshot.high) else {
+                continue;
+            };
+            let Some(data) = compression::resolve_data_with(versions, idx, |v| &v.data) else {
+                continue;
+            };
+
+            let continues_run = run_start.is_some() && block.0 == run_next;
+            if !continues_run {
+                if let Some(start) = run_start.take() {
+                    device.write_contiguous_blocks(cx, start, &run_buf)?;
+                    run_buf.clear();
                 }
+                run_start = Some(*block);
             }
+            run_buf.extend_from_slice(&data);
+            run_next = block.0.saturating_add(1);
+            flushed += 1;
         }
+        if let Some(start) = run_start.take() {
+            device.write_contiguous_blocks(cx, start, &run_buf)?;
+        }
+
         if flushed > 0 {
             device.sync(cx)?;
             debug!(flushed_blocks = flushed, "mvcc_flush_to_device");
@@ -3930,6 +3957,122 @@ mod tests {
         let mut txn = store.begin();
         txn.stage_write(block, bytes.to_vec());
         store.commit(txn).expect("seed commit");
+    }
+
+    /// Device that records each `write_contiguous_blocks` run (and any scalar
+    /// `write_block`) so a test can prove the flush coalesces contiguous runs.
+    #[derive(Debug)]
+    struct RunCountingDevice {
+        block_size: u32,
+        block_count: u64,
+        blocks: parking_lot::RwLock<HashMap<BlockNumber, Vec<u8>>>,
+        run_lengths: parking_lot::RwLock<Vec<usize>>,
+        scalar_writes: std::sync::atomic::AtomicUsize,
+    }
+
+    impl RunCountingDevice {
+        fn new(block_size: u32, block_count: u64) -> Self {
+            Self {
+                block_size,
+                block_count,
+                blocks: parking_lot::RwLock::new(HashMap::new()),
+                run_lengths: parking_lot::RwLock::new(Vec::new()),
+                scalar_writes: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl BlockDevice for RunCountingDevice {
+        fn read_block(&self, _cx: &Cx, block: BlockNumber) -> ffs_error::Result<BlockBuf> {
+            let bs = self.block_size as usize;
+            Ok(BlockBuf::new(
+                self.blocks
+                    .read()
+                    .get(&block)
+                    .cloned()
+                    .unwrap_or_else(|| vec![0_u8; bs]),
+            ))
+        }
+        fn write_block(&self, _cx: &Cx, block: BlockNumber, data: &[u8]) -> ffs_error::Result<()> {
+            self.scalar_writes
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.blocks.write().insert(block, data.to_vec());
+            Ok(())
+        }
+        #[allow(clippy::significant_drop_tightening)]
+        fn write_contiguous_blocks(
+            &self,
+            _cx: &Cx,
+            start: BlockNumber,
+            data: &[u8],
+        ) -> ffs_error::Result<()> {
+            let bs = self.block_size as usize;
+            let n = data.len() / bs;
+            self.run_lengths.write().push(n);
+            let mut blocks = self.blocks.write();
+            for i in 0..n {
+                blocks.insert(
+                    BlockNumber(start.0 + i as u64),
+                    data[i * bs..(i + 1) * bs].to_vec(),
+                );
+            }
+            Ok(())
+        }
+        fn block_size(&self) -> u32 {
+            self.block_size
+        }
+        fn block_count(&self) -> u64 {
+            self.block_count
+        }
+        fn sync(&self, _cx: &Cx) -> ffs_error::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn flush_to_device_coalesces_contiguous_blocks_bd_ryqep() {
+        const BS: u32 = 4096;
+        let cx = test_cx();
+        let mut store = MvccStore::new();
+        // Four contiguous dirty blocks (10..14) plus a separated one (20).
+        for b in 10..14_u64 {
+            seed_block(
+                &mut store,
+                BlockNumber(b),
+                &vec![u8::try_from(b).unwrap(); BS as usize],
+            );
+        }
+        seed_block(&mut store, BlockNumber(20), &vec![0xAB; BS as usize]);
+
+        let dev = RunCountingDevice::new(BS, 64);
+        let flushed = store.flush_to_device(&cx, &dev).unwrap();
+        assert_eq!(flushed, 5, "all five dirty blocks flushed");
+
+        // SCORE (bd-ryqep): the four contiguous blocks become ONE ranged write
+        // (run length 4); block 20 is its own run. Two batched writes, zero
+        // scalar per-block writes — vs five scalar writes pre-coalescing.
+        assert_eq!(
+            *dev.run_lengths.read(),
+            vec![4, 1],
+            "contiguous run of 4 coalesced; separated block is its own run"
+        );
+        assert_eq!(
+            dev.scalar_writes.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "flush uses write_contiguous_blocks, not scalar write_block"
+        );
+
+        // ISOMORPHISM: every block's bytes landed at the right location.
+        for b in 10..14_u64 {
+            assert_eq!(
+                *dev.blocks.read().get(&BlockNumber(b)).unwrap(),
+                vec![u8::try_from(b).unwrap(); BS as usize]
+            );
+        }
+        assert_eq!(
+            *dev.blocks.read().get(&BlockNumber(20)).unwrap(),
+            vec![0xAB; BS as usize]
+        );
     }
 
     fn append_only_proof(base_len: usize) -> MergeProof {
