@@ -2522,6 +2522,9 @@ Hole { hole_len: 90 }
     /// bd-w9erb.
     #[test]
     fn grow_root_index_reaches_depth2_bd_w9erb() {
+        // 500 non-mergeable extents -- comfortably past the 337 threshold for
+        // depth 2 (4 inline index entries x 84 leaf extents @ 1 KiB block).
+        const N: u32 = 500;
         let cx = test_cx();
         // 1 KiB block: max_entries_external(1024) == 84 (verified above), so
         // depth 2 is reached at ~337 non-mergeable extents rather than ~1361.
@@ -2529,10 +2532,8 @@ Hole { hole_len: 90 }
         let mut root = make_root();
         let mut alloc = SeqAllocator::new(1000);
 
-        // Insert 500 non-mergeable extents (logical gaps of 10, each raw_len 1
-        // so adjacent extents never coalesce) -- comfortably past the 337
-        // threshold for depth 2.
-        const N: u32 = 500;
+        // Insert N non-mergeable extents (logical gaps of 10, each raw_len 1
+        // so adjacent extents never coalesce).
         for i in 0..N {
             let ext = Ext4Extent {
                 logical_block: i * 10,
