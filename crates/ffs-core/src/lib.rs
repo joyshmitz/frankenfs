@@ -16438,6 +16438,38 @@ impl OpenFs {
                     .free_extent(disk_bytenr, alloc_size, false);
                 return Err(btrfs_mutation_to_ffs(&e));
             }
+
+            // Capture data checksums for datasum inodes (bd-x3fcu slice B):
+            // read back the on-disk extent (so the checksum covers the exact
+            // bytes a later read returns, padding included) and record one
+            // EXTENT_CSUM per sector in the in-memory csum tree. NODATASUM
+            // inodes carry no data checksums and are skipped.
+            if inode.flags & BTRFS_INODE_NODATASUM == 0 {
+                let sectorsize_usize = usize::try_from(sectorsize)
+                    .map_err(|_| FfsError::Format("btrfs sectorsize overflow".into()))?;
+                let alloc_size_usize = usize::try_from(alloc_size)
+                    .map_err(|_| FfsError::Format("btrfs alloc size overflow".into()))?;
+                let mut on_disk = vec![0_u8; alloc_size_usize];
+                self.btrfs_read_logical_into(cx, disk_bytenr, &mut on_disk)?;
+                let max_per_item = ffs_btrfs::max_data_csums_per_item(alloc.nodesize);
+                let csum_items = ffs_btrfs::build_extent_csum_items(
+                    disk_bytenr,
+                    &on_disk,
+                    sectorsize_usize,
+                    max_per_item,
+                )
+                .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+                for (key, value) in csum_items {
+                    alloc
+                        .csum_tree
+                        .update(&key, &value)
+                        .or_else(|err| match err {
+                            BtrfsMutationError::KeyNotFound => alloc.csum_tree.insert(key, &value),
+                            other => Err(other),
+                        })
+                        .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+                }
+            }
         }
 
         // Update inode metadata.
@@ -32455,6 +32487,65 @@ mod tests {
             matches!(err, FfsError::Corruption { .. }),
             "expected a corruption error, got {err:?}"
         );
+    }
+
+    #[test]
+    fn btrfs_write_captures_data_csums_for_datasum_inode_bd_x3fcu() {
+        let cx = Cx::for_testing();
+        let opts = OpenOptions {
+            btrfs_rw_ephemeral_ok: true,
+            ..OpenOptions::default()
+        };
+        let mut fs = OpenFs::from_device(
+            &cx,
+            Box::new(TestDevice::from_vec(build_btrfs_csum_image())),
+            &opts,
+        )
+        .expect("open csum image");
+        fs.enable_writes(&cx).expect("enable writes");
+
+        let count_csums = |fs: &OpenFs| -> usize {
+            let alloc = fs.btrfs_alloc_state.as_ref().unwrap().lock();
+            let lo = BtrfsKey {
+                objectid: 0,
+                item_type: 0,
+                offset: 0,
+            };
+            let hi = BtrfsKey {
+                objectid: u64::MAX,
+                item_type: u8::MAX,
+                offset: u64::MAX,
+            };
+            alloc
+                .csum_tree
+                .range(&lo, &hi)
+                .expect("range csum tree")
+                .len()
+        };
+
+        let before = count_csums(&fs);
+        // Append a 3-sector payload to the datasum file (objectid 257); the
+        // write path must record an EXTENT_CSUM item for the new extent.
+        let payload = vec![0xAB_u8; 9000];
+        let fs_ops: &dyn FsOps = &fs;
+        fs_ops
+            .write(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(257),
+                16384,
+                &payload,
+            )
+            .expect("datasum write");
+        let after = count_csums(&fs);
+        assert!(
+            after > before,
+            "datasum write must record EXTENT_CSUM items ({before} -> {after})"
+        );
+
+        // The captured checksums verify against the bytes actually on disk.
+        fs.btrfs_verify_file_data_csums(&cx, InodeNumber(257))
+            .expect("captured csums verify clean");
     }
 
     #[test]
