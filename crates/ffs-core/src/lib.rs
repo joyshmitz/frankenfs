@@ -11581,11 +11581,19 @@ impl OpenFs {
         let extents = self.collect_extents(cx, parent_inode)?;
         let reserved_tail = self.ext4_dir_reserved_tail();
 
+        // For an htree dir, logical block 0 is the dx_root: a linear add_entry
+        // dry-run rejects its index-spanning '..' as corrupt. Skip it — the real
+        // insert (ext4_add_dir_entry) routes htree entries to the hash-correct
+        // leaf (and rebuilds on overflow), so an htree insert always has room.
+        let dx_root_phys = Self::ext4_htree_dx_root_phys(parent_inode, &extents);
         for ext in &extents {
             if ext.is_unwritten() {
                 continue;
             }
             for block in Self::extent_phys_blocks(ext) {
+                if Some(block) == dx_root_phys {
+                    continue;
+                }
                 let mut data = self.read_block_vec(cx, block)?;
                 match ffs_dir::add_entry(&mut data, 1, name, file_type, reserved_tail) {
                     Ok(_) | Err(FfsError::NoSpace) => {}
@@ -34819,6 +34827,140 @@ mod tests {
                 ffs_ondisk::DX_ROOT_COUNT_OFFSET,
             ),
             "dx_root checksum must remain valid across an unlink"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn link_and_rename_into_htree_dir_place_entries_in_index() {
+        // Hard-linking and renaming a file INTO an htree directory both route
+        // through ext4_add_dir_entry, so the new names must land in their
+        // hash-correct leaf (index-reachable) and the dx_root must stay valid.
+        let Some((fs, _tmp)) = open_writable_ext4_mkfs(32) else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let (csum_seed, hash_seed, has_large_dir, hash_version, block_size) = {
+            let sb = fs.ext4_superblock().expect("sb");
+            (
+                sb.csum_seed(),
+                sb.hash_seed,
+                sb.has_large_dir(),
+                sb.effective_dirhash_version(sb.def_hash_version),
+                usize::try_from(sb.block_size).unwrap(),
+            )
+        };
+
+        let dir = fs
+            .mkdir(&cx, root, OsStr::new("htdir"), 0o755, 0, 0)
+            .expect("mkdir");
+        let dir_ino = dir.ino;
+        let dir_ino_u32 = u32::try_from(dir_ino.0).unwrap();
+        let generation = fs.read_inode(&cx, dir_ino).expect("read dir").generation;
+
+        let names: Vec<Vec<u8>> = (0..250)
+            .map(|i| format!("base_{i:04}.txt").into_bytes())
+            .collect();
+        let entries: Vec<(u32, u8, &[u8])> = names
+            .iter()
+            .enumerate()
+            .map(|(i, n)| {
+                (
+                    8000 + u32::try_from(i).unwrap(),
+                    ffs_ondisk::ext4::EXT4_FT_REG_FILE,
+                    n.as_slice(),
+                )
+            })
+            .collect();
+        let blocks = ffs_ondisk::build_htree_directory_stamped(
+            dir_ino_u32,
+            2,
+            &entries,
+            block_size,
+            hash_version,
+            &hash_seed,
+            csum_seed,
+            dir_ino_u32,
+            generation,
+        )
+        .expect("build htree");
+        assert!(blocks.len() >= 3, "need dx_root + multiple leaves");
+        install_htree_dir(&fs, &cx, dir_ino, &blocks);
+
+        let find = |name: &[u8]| -> ffs_ondisk::HtreeFindResult {
+            ffs_ondisk::htree_find_entry(
+                u32::try_from(block_size).unwrap(),
+                &hash_seed,
+                has_large_dir,
+                name,
+                |v| v,
+                |lb| {
+                    let inode = fs.read_inode(&cx, dir_ino).ok()?;
+                    let exts = fs.collect_extents(&cx, &inode).ok()?;
+                    let phys = exts.iter().find_map(|e| {
+                        let len = u32::from(e.actual_len());
+                        if lb >= e.logical_block && lb < e.logical_block + len {
+                            Some(e.physical_start + u64::from(lb - e.logical_block))
+                        } else {
+                            None
+                        }
+                    })?;
+                    fs.read_block_vec(&cx, BlockNumber(phys)).ok()
+                },
+            )
+        };
+
+        // Hard-link an existing file into the htree dir.
+        let src = fs
+            .create(&cx, root, OsStr::new("orig.bin"), 0o644, 0, 0)
+            .expect("create source file");
+        fs.link(&cx, src.ino, dir_ino, OsStr::new("hardlink.bin"))
+            .expect("hard-link into htree dir");
+        assert!(
+            matches!(find(b"hardlink.bin"), ffs_ondisk::HtreeFindResult::Found(_)),
+            "hard-linked name must be index-reachable in the htree dir"
+        );
+
+        // Rename a file from root into the htree dir.
+        let mover = fs
+            .create(&cx, root, OsStr::new("mover.bin"), 0o644, 0, 0)
+            .expect("create mover");
+        fs.rename(
+            &cx,
+            root,
+            OsStr::new("mover.bin"),
+            dir_ino,
+            OsStr::new("moved.bin"),
+        )
+        .expect("rename into htree dir");
+        match find(b"moved.bin") {
+            ffs_ondisk::HtreeFindResult::Found(e) => {
+                assert_eq!(e.inode, u32::try_from(mover.ino.0).unwrap());
+            }
+            other => panic!("renamed-in name must be index-reachable, got {other:?}"),
+        }
+
+        // dx_root remains valid after both index insertions.
+        let block0_phys = {
+            let di = fs.read_inode(&cx, dir_ino).unwrap();
+            fs.collect_extents(&cx, &di)
+                .unwrap()
+                .iter()
+                .find(|e| e.logical_block == 0)
+                .unwrap()
+                .physical_start
+        };
+        let dxr = fs.read_block_vec(&cx, BlockNumber(block0_phys)).unwrap();
+        assert!(
+            ffs_ondisk::verify_dx_block_checksum(
+                &dxr,
+                csum_seed,
+                dir_ino_u32,
+                generation,
+                ffs_ondisk::DX_ROOT_COUNT_OFFSET,
+            ),
+            "dx_root checksum must stay valid across link + rename-in"
         );
     }
 
