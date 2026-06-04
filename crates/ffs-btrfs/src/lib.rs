@@ -6168,13 +6168,15 @@ mod tests {
         let mut corrupt = data.clone();
         corrupt[sectorsize + 10] ^= 0xFF;
         let expected_good = ffs_types::crc32c(&data[sectorsize..]);
-        match verify_extent_csum(&corrupt, sectorsize, &csums) {
-            Err(Ok(m)) => {
-                assert_eq!(m.sector_index, 1);
-                assert_eq!(m.expected, expected_good);
-                assert_ne!(m.actual, m.expected);
-            }
-            other => panic!("expected sector-1 mismatch, got {other:?}"),
+        let result = verify_extent_csum(&corrupt, sectorsize, &csums);
+        assert!(
+            matches!(result, Err(Ok(_))),
+            "expected a sector mismatch, got {result:?}"
+        );
+        if let Err(Ok(m)) = result {
+            assert_eq!(m.sector_index, 1);
+            assert_eq!(m.expected, expected_good);
+            assert_ne!(m.actual, m.expected);
         }
     }
 
