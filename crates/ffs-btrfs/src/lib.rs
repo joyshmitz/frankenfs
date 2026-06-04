@@ -7073,6 +7073,62 @@ mod tests {
     }
 
     #[test]
+    fn cow_tree_delete_stress_maintains_invariants_at_height3() {
+        use std::collections::BTreeSet;
+
+        // Build a height>=3 tree, then delete every key in an interleaved order
+        // (evens then odds) so merges/borrows fire across ALL internal levels —
+        // previously only the height 2->1 collapse was covered.
+        let mut tree = InMemoryCowBtrfsTree::new(3).expect("tree");
+        let n: u64 = 60;
+        for oid in 1..=n {
+            tree.insert(test_key(oid), &test_payload(oid)).expect("insert");
+        }
+        assert!(
+            tree.height().expect("height") >= 3,
+            "test needs a height>=3 tree, got {}",
+            tree.height().expect("height")
+        );
+        tree.validate_invariants().expect("invariants after build");
+
+        let order: Vec<u64> = (1..=n)
+            .filter(|x| x % 2 == 0)
+            .chain((1..=n).filter(|x| x % 2 == 1))
+            .collect();
+        let mut remaining: BTreeSet<u64> = (1..=n).collect();
+        for oid in order {
+            tree.delete(&test_key(oid)).expect("delete");
+            remaining.remove(&oid);
+
+            // The tree must remain a valid, balanced btree after every delete.
+            tree.validate_invariants()
+                .unwrap_or_else(|e| panic!("invariants broken after deleting {oid}: {e:?}"));
+
+            // The deleted key is gone and every remaining key still reads back.
+            assert!(
+                tree.get(&test_key(oid)).is_none(),
+                "deleted key {oid} still present"
+            );
+            for &r in &remaining {
+                let got = tree
+                    .get(&test_key(r))
+                    .unwrap_or_else(|| panic!("key {r} lost after deleting {oid}"));
+                assert_eq!(
+                    got,
+                    test_payload(r).to_vec(),
+                    "key {r} payload corrupted after deleting {oid}"
+                );
+            }
+        }
+        assert!(remaining.is_empty());
+        assert_eq!(
+            tree.root_level(),
+            0,
+            "a fully drained tree collapses back to a leaf root"
+        );
+    }
+
+    #[test]
     fn delete_shrinks_to_leaf_root() {
         let mut tree = InMemoryCowBtrfsTree::new(3).expect("tree");
         for objectid in 1_u64..=8 {
