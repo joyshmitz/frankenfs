@@ -860,12 +860,28 @@ pub struct OpenFs {
     /// descent. Only consulted/populated when writes are disabled
     /// (`btrfs_alloc_state` is `None`), since a commit can move the root.
     btrfs_fs_tree_root_cache: Mutex<std::collections::HashMap<u64, u64>>,
+    /// Raw btrfs tree-node bytes cached by physical address (bd-jgx7u). On a
+    /// read-only mount the on-disk metadata is immutable, so repeated tree
+    /// descents (every getattr/lookup/readdir/read re-walks from the fs-tree
+    /// root) re-read the same upper nodes; caching them turns those device
+    /// reads into memory hits. Only consulted/populated when writes are
+    /// disabled (`btrfs_alloc_state` is `None`), since COW writes reuse
+    /// physical addresses after a commit. Bounded by
+    /// `BTRFS_TREE_NODE_CACHE_LIMIT` (the hot upper nodes are read first, so a
+    /// small cache captures most of the benefit).
+    btrfs_tree_node_cache: Mutex<BTreeMap<u64, Arc<[u8]>>>,
 }
 
 /// Csum-tree items `(key, packed crc32c values)` used by the read-verify path.
 type BtrfsCsumItems = Vec<(BtrfsKey, Vec<u8>)>;
 
 const EXT4_FILE_DATA_BLOCK_CACHE_LIMIT: usize = 256;
+
+/// Maximum number of btrfs tree nodes cached by physical address on a
+/// read-only mount (bd-jgx7u). At a 16 KiB nodesize this caps the cache near
+/// 8 MiB; the hot upper-tree nodes (root + internal) are read first on every
+/// descent, so even a modest cap captures the bulk of the repeated-read win.
+const BTRFS_TREE_NODE_CACHE_LIMIT: usize = 512;
 
 /// Back-reference index used by `btrfs_resolve_inode_path` in read-only mode.
 ///
@@ -2699,6 +2715,7 @@ impl OpenFs {
             btrfs_verify_data_on_read: options.btrfs_verify_data_on_read,
             btrfs_csum_read_cache: Mutex::new(None),
             btrfs_fs_tree_root_cache: Mutex::new(std::collections::HashMap::new()),
+            btrfs_tree_node_cache: Mutex::new(BTreeMap::new()),
         };
 
         if fs.is_ext4() && !options.skip_validation {
@@ -5253,17 +5270,7 @@ impl OpenFs {
         let ns =
             usize::try_from(nodesize).map_err(|_| FfsError::Format("nodesize overflow".into()))?;
 
-        let mut read_fn = |phys: u64| -> Result<Vec<u8>, ParseError> {
-            let mut buf = vec![0_u8; ns];
-            self.dev
-                .read_exact_at(cx, ByteOffset(phys), &mut buf)
-                .map_err(|_| ParseError::InsufficientData {
-                    needed: ns,
-                    offset: 0,
-                    actual: 0,
-                })?;
-            Ok(buf)
-        };
+        let mut read_fn = |phys: u64| self.btrfs_read_tree_node(cx, phys, ns);
 
         walk_tree(
             &mut read_fn,
@@ -5273,6 +5280,43 @@ impl OpenFs {
             ctx.csum_type,
         )
         .map_err(|e| parse_to_ffs_error(&e))
+    }
+
+    /// Read a raw `ns`-byte btrfs tree node at physical address `phys`, serving
+    /// it from the read-only node cache when possible (bd-jgx7u). On a
+    /// read-only mount the on-disk metadata is immutable, so a node read once
+    /// can be replayed from memory on every later descent that crosses it
+    /// (the fs-tree root and upper internal nodes are re-read on every op).
+    /// Caching is skipped entirely when writes are enabled, because COW writes
+    /// reuse physical addresses across commits.
+    fn btrfs_read_tree_node(&self, cx: &Cx, phys: u64, ns: usize) -> Result<Vec<u8>, ParseError> {
+        let cacheable = self.btrfs_alloc_state.is_none();
+        if cacheable && let Some(bytes) = self.btrfs_tree_node_cache.lock().get(&phys) {
+            return Ok(bytes.to_vec());
+        }
+        let mut buf = vec![0_u8; ns];
+        self.dev
+            .read_exact_at(cx, ByteOffset(phys), &mut buf)
+            .map_err(|_| ParseError::InsufficientData {
+                needed: ns,
+                offset: 0,
+                actual: 0,
+            })?;
+        if cacheable {
+            let mut cache = self.btrfs_tree_node_cache.lock();
+            if cache.len() < BTRFS_TREE_NODE_CACHE_LIMIT {
+                cache.insert(phys, Arc::from(buf.as_slice()));
+            }
+        }
+        Ok(buf)
+    }
+
+    /// Test-only: drop the read-only tree-node cache so a following operation
+    /// measures cold device reads (used to isolate per-op descent structure
+    /// from the bd-jgx7u node cache in read-count tests).
+    #[cfg(test)]
+    fn btrfs_test_clear_node_cache(&self) {
+        self.btrfs_tree_node_cache.lock().clear();
     }
 
     /// Targeted-descent counterpart to [`walk_btrfs_tree`](Self::walk_btrfs_tree):
@@ -5296,17 +5340,7 @@ impl OpenFs {
         let ns =
             usize::try_from(nodesize).map_err(|_| FfsError::Format("nodesize overflow".into()))?;
 
-        let mut read_fn = |phys: u64| -> Result<Vec<u8>, ParseError> {
-            let mut buf = vec![0_u8; ns];
-            self.dev
-                .read_exact_at(cx, ByteOffset(phys), &mut buf)
-                .map_err(|_| ParseError::InsufficientData {
-                    needed: ns,
-                    offset: 0,
-                    actual: 0,
-                })?;
-            Ok(buf)
-        };
+        let mut read_fn = |phys: u64| self.btrfs_read_tree_node(cx, phys, ns);
 
         walk_tree_range(
             &mut read_fn,
@@ -32849,12 +32883,14 @@ mod tests {
         // SCORE (bd-n040r): device-read count, full walk vs targeted descent for
         // a single inode in the last leaf. Machine-independent (device ops, not
         // wall-clock — cross-machine timing is unreliable here).
+        fs.btrfs_test_clear_node_cache();
         reads.store(0, AtomicOrdering::SeqCst);
         let _ = fs.walk_btrfs_fs_tree(&cx).unwrap();
         let full_reads = reads.load(AtomicOrdering::SeqCst);
 
         // First inode: lo=(256,0,0) has no preceding sibling, so descent reads
         // exactly root-tree + internal + the single covering leaf.
+        fs.btrfs_test_clear_node_cache();
         reads.store(0, AtomicOrdering::SeqCst);
         let _ = fs.walk_btrfs_fs_tree_object(&cx, 256).unwrap();
         let range_reads_first = reads.load(AtomicOrdering::SeqCst);
@@ -32863,6 +32899,7 @@ mod tests {
         // (the internal node stores only each child's first key, so descent
         // conservatively probes that predecessor too) — internal + 2 leaves.
         // Still O(log N) + O(matching leaves), independent of N.
+        fs.btrfs_test_clear_node_cache();
         reads.store(0, AtomicOrdering::SeqCst);
         let _ = fs
             .walk_btrfs_fs_tree_object(&cx, 256 + (N as u64 - 1))
@@ -33074,6 +33111,7 @@ mod tests {
         }
 
         // SCORE (bd-b61hz): device reads, full root-tree walk vs targeted descent.
+        fs.btrfs_test_clear_node_cache();
         reads.store(0, AtomicOrdering::SeqCst);
         let _ = fs.walk_btrfs_root_tree(&cx).unwrap();
         let full_reads = reads.load(AtomicOrdering::SeqCst);
@@ -33089,6 +33127,7 @@ mod tests {
             item_type: BTRFS_ITEM_ROOT_ITEM + 1,
             offset: 0,
         };
+        fs.btrfs_test_clear_node_cache();
         reads.store(0, AtomicOrdering::SeqCst);
         let _ = fs.walk_btrfs_tree_range(&cx, sb_root, lo, hi).unwrap();
         let range_reads = reads.load(AtomicOrdering::SeqCst);
@@ -33191,17 +33230,27 @@ mod tests {
         let _ = fs.btrfs_read_inode_attr(&cx, dir).unwrap();
         let canonical = fs.btrfs_canonical_inode(dir).unwrap();
 
-        // OLD readdir cost = the three walks the original did: read_inode_attr
-        // (dir-attr) + a targeted walk for the DIR entries + a FULL-tree walk to
-        // resolve the parent objectid for the synthetic "..".
+        // OLD readdir cost = the three walks the original did, each a COLD
+        // device walk (the pre-bd-jgx7u code had no node cache, so every walk
+        // hit the device): read_inode_attr (dir-attr) + a targeted walk for the
+        // DIR entries + a FULL-tree walk to resolve the parent objectid for "..".
+        let mut old_reads = 0usize;
+        fs.btrfs_test_clear_node_cache();
         reads.store(0, AtomicOrdering::SeqCst);
         let _ = fs.btrfs_read_inode_attr(&cx, dir).unwrap();
+        old_reads += reads.load(AtomicOrdering::SeqCst);
+        fs.btrfs_test_clear_node_cache();
+        reads.store(0, AtomicOrdering::SeqCst);
         let _ = fs.walk_btrfs_fs_tree_object(&cx, canonical).unwrap();
+        old_reads += reads.load(AtomicOrdering::SeqCst);
+        fs.btrfs_test_clear_node_cache();
+        reads.store(0, AtomicOrdering::SeqCst);
         let _ = fs.walk_btrfs_fs_tree(&cx).unwrap();
-        let old_reads = reads.load(AtomicOrdering::SeqCst);
+        old_reads += reads.load(AtomicOrdering::SeqCst);
 
-        // NEW readdir cost = a single fused walk yielding the INODE_ITEM
+        // NEW readdir cost = a single fused COLD walk yielding the INODE_ITEM
         // (dir-type check), the DIR entries, and the INODE_REF (".." parent).
+        fs.btrfs_test_clear_node_cache();
         reads.store(0, AtomicOrdering::SeqCst);
         let _ = fs.btrfs_readdir_entries(&cx, dir).unwrap();
         let new_reads = reads.load(AtomicOrdering::SeqCst);
@@ -33211,6 +33260,64 @@ mod tests {
         assert!(
             score >= 2.0,
             "lookup/readdir fuse Score {score:.2} (old three-walk={old_reads} reads, fused={new_reads} reads) must be >= 2.0"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::cast_precision_loss)]
+    fn btrfs_tree_node_cache_amortizes_repeated_walks_bd_jgx7u() {
+        const N: usize = 8;
+        const K: usize = 8; // repeated metadata ops over the same subtree
+        let image = build_btrfs_multileaf_image(N);
+        let reads = Arc::new(AtomicUsize::new(0));
+        let dev = AllReadsCounter {
+            inner: TestDevice::from_vec(image),
+            reads: Arc::clone(&reads),
+        };
+        let cx = Cx::for_testing();
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
+
+        // ISOMORPHISM: a cache-served walk returns identical results to a cold
+        // one (same keys, data, order). The first walk also warms the
+        // root-bytenr cache so the measurements below are pure fs-tree reads.
+        fs.btrfs_test_clear_node_cache();
+        let cold_items = fs.walk_btrfs_fs_tree(&cx).unwrap();
+        let warm_items = fs.walk_btrfs_fs_tree(&cx).unwrap();
+        assert_eq!(cold_items.len(), warm_items.len(), "walk item count");
+        for (a, b) in cold_items.iter().zip(warm_items.iter()) {
+            assert_eq!(a.key, b.key, "walk key");
+            assert_eq!(a.data, b.data, "walk data");
+        }
+
+        // CACHED: K repeated walks pay the node reads once (first walk); the
+        // rest are memory hits.
+        fs.btrfs_test_clear_node_cache();
+        reads.store(0, AtomicOrdering::SeqCst);
+        for _ in 0..K {
+            let _ = fs.walk_btrfs_fs_tree(&cx).unwrap();
+        }
+        let cached_total = reads.load(AtomicOrdering::SeqCst);
+
+        // UNCACHED baseline: clear before each walk so every walk hits the
+        // device (the pre-bd-jgx7u behavior).
+        let mut uncached_total = 0usize;
+        for _ in 0..K {
+            fs.btrfs_test_clear_node_cache();
+            reads.store(0, AtomicOrdering::SeqCst);
+            let _ = fs.walk_btrfs_fs_tree(&cx).unwrap();
+            uncached_total += reads.load(AtomicOrdering::SeqCst);
+        }
+
+        assert!(cached_total >= 1, "first walk must read the tree");
+        assert_eq!(
+            uncached_total,
+            cached_total * K,
+            "uncached pays the full walk every call; cached pays it once"
+        );
+        let score = uncached_total as f64 / cached_total as f64;
+        assert!(
+            score >= 2.0,
+            "node-cache Score {score:.2} ({K} walks: cached={cached_total} reads vs uncached={uncached_total} reads) must be >= 2.0"
         );
     }
 
