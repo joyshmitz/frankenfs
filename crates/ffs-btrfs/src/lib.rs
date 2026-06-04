@@ -44,6 +44,8 @@ pub const BTRFS_ITEM_TREE_BLOCK_REF: u8 = 176;
 pub const BTRFS_ITEM_EXTENT_DATA_REF: u8 = 178;
 pub const BTRFS_ITEM_BLOCK_GROUP_ITEM: u8 = 192;
 pub const BTRFS_ITEM_DEV_ITEM: u8 = 216;
+/// Data-checksum item in the csum tree (kernel: `BTRFS_EXTENT_CSUM_KEY`).
+pub const BTRFS_ITEM_EXTENT_CSUM: u8 = 128;
 pub const BTRFS_ITEM_CHUNK: u8 = 228;
 pub const BTRFS_ITEM_FREE_SPACE_INFO: u8 = 198;
 pub const BTRFS_ITEM_FREE_SPACE_EXTENT: u8 = 199;
@@ -65,6 +67,12 @@ pub const BTRFS_UUID_TREE_OBJECTID: u64 = 9;
 pub const BTRFS_FREE_SPACE_TREE_OBJECTID: u64 = 10;
 /// Block-group tree v2 (kernel: `BTRFS_BLOCK_GROUP_TREE_OBJECTID`).
 pub const BTRFS_BLOCK_GROUP_TREE_OBJECTID: u64 = 11;
+/// Objectid shared by all data-checksum items in the csum tree
+/// (kernel: `BTRFS_EXTENT_CSUM_OBJECTID`, defined as `-10`).
+pub const BTRFS_EXTENT_CSUM_OBJECTID: u64 = 0xFFFF_FFFF_FFFF_FFF6;
+/// On-disk size of a single crc32c data checksum (kernel: `BTRFS_CSUM_SIZE`
+/// for the crc32c algorithm).
+pub const BTRFS_CRC32C_CSUM_SIZE: usize = 4;
 
 /// Block group type flags.
 pub const BTRFS_BLOCK_GROUP_DATA: u64 = 1;
@@ -117,6 +125,59 @@ pub const BTRFS_INODE_NOATIME: u64 = 1 << 9;
 pub const BTRFS_INODE_DIRSYNC: u64 = 1 << 10;
 /// Compress data.
 pub const BTRFS_INODE_COMPRESS: u64 = 1 << 11;
+
+/// Build the csum-tree leaf item for one on-disk data extent.
+///
+/// btrfs stores data checksums in the csum tree (`BTRFS_CSUM_TREE_OBJECTID`) as
+/// `EXTENT_CSUM` items. Each item's key is
+/// `{ objectid: BTRFS_EXTENT_CSUM_OBJECTID, type: BTRFS_ITEM_EXTENT_CSUM,
+/// offset: <logical byte address of the extent start> }`, and its value is a
+/// densely packed array of one crc32c per `sectorsize` bytes of extent data,
+/// each stored little-endian (`BTRFS_CRC32C_CSUM_SIZE` bytes). The kernel
+/// verifies every data read against these checksums on a `datasum`
+/// filesystem, so a file written without them is unreadable (EIO).
+///
+/// This is the pure foundational primitive for csum-tree population (bd-x3fcu):
+/// it computes the key and packed checksum bytes for a single contiguous
+/// extent. Wiring it into the COW commit (capturing extents during write,
+/// inserting these items, and updating the csum root) is the follow-on work.
+///
+/// `data` must be the on-disk (sector-padded) extent bytes, i.e. a non-empty
+/// whole multiple of `sectorsize`; `sectorsize` must be non-zero. Either
+/// violation returns [`BtrfsMutationError::InvalidConfig`] rather than
+/// producing a silently truncated checksum run.
+///
+/// # Errors
+/// Returns [`BtrfsMutationError::InvalidConfig`] if `sectorsize` is zero or if
+/// `data.len()` is not a positive multiple of `sectorsize`.
+pub fn build_extent_csum_item(
+    disk_bytenr: u64,
+    data: &[u8],
+    sectorsize: usize,
+) -> Result<(BtrfsKey, Vec<u8>), BtrfsMutationError> {
+    if sectorsize == 0 {
+        return Err(BtrfsMutationError::InvalidConfig(
+            "sectorsize must be non-zero",
+        ));
+    }
+    if data.is_empty() || data.len() % sectorsize != 0 {
+        return Err(BtrfsMutationError::InvalidConfig(
+            "data must be a positive whole multiple of sectorsize",
+        ));
+    }
+    let sectors = data.len() / sectorsize;
+    let mut value = Vec::with_capacity(sectors * BTRFS_CRC32C_CSUM_SIZE);
+    for sector in data.chunks_exact(sectorsize) {
+        let csum = ffs_types::crc32c(sector);
+        value.extend_from_slice(&csum.to_le_bytes());
+    }
+    let key = BtrfsKey {
+        objectid: BTRFS_EXTENT_CSUM_OBJECTID,
+        item_type: BTRFS_ITEM_EXTENT_CSUM,
+        offset: disk_bytenr,
+    };
+    Ok((key, value))
+}
 
 /// Convert btrfs inode flags to generic FS_*_FL flags for `FS_IOC_GETFLAGS`.
 ///
@@ -5814,6 +5875,59 @@ mod tests {
     const HEADER_SIZE: usize = 101;
     const ITEM_SIZE: usize = 25;
     const KEY_PTR_SIZE: usize = 33;
+
+    #[test]
+    fn build_extent_csum_item_packs_one_crc32c_per_sector_bd_x3fcu() {
+        let sectorsize = 4096_usize;
+        // Two sectors with distinct, recognizable content.
+        let mut data = vec![0xAB_u8; sectorsize];
+        data.extend(std::iter::repeat_n(0xCD_u8, sectorsize));
+
+        let disk_bytenr = 0x1_0000_u64;
+        let (key, value) = build_extent_csum_item(disk_bytenr, &data, sectorsize)
+            .expect("aligned two-sector extent");
+
+        // Key identifies the csum tree's single EXTENT_CSUM objectid, the
+        // EXTENT_CSUM item type, and the extent's logical start as the offset.
+        assert_eq!(key.objectid, BTRFS_EXTENT_CSUM_OBJECTID);
+        assert_eq!(
+            key.objectid,
+            u64::from_le_bytes((-10_i64).to_le_bytes()),
+            "EXTENT_CSUM objectid is -10"
+        );
+        assert_eq!(key.item_type, BTRFS_ITEM_EXTENT_CSUM);
+        assert_eq!(key.item_type, 128);
+        assert_eq!(key.offset, disk_bytenr);
+
+        // One crc32c per sector, packed densely little-endian.
+        assert_eq!(value.len(), 2 * BTRFS_CRC32C_CSUM_SIZE);
+        let expect0 = ffs_types::crc32c(&data[..sectorsize]).to_le_bytes();
+        let expect1 = ffs_types::crc32c(&data[sectorsize..]).to_le_bytes();
+        assert_eq!(&value[0..4], &expect0);
+        assert_eq!(&value[4..8], &expect1);
+        // Distinct sector content yields distinct checksums (no accidental
+        // whole-extent hashing).
+        assert_ne!(&value[0..4], &value[4..8]);
+    }
+
+    #[test]
+    fn build_extent_csum_item_rejects_misaligned_or_empty_bd_x3fcu() {
+        // Not a whole multiple of sectorsize.
+        assert!(matches!(
+            build_extent_csum_item(0, &[0u8; 4097], 4096),
+            Err(BtrfsMutationError::InvalidConfig(_))
+        ));
+        // Empty extent.
+        assert!(matches!(
+            build_extent_csum_item(0, &[], 4096),
+            Err(BtrfsMutationError::InvalidConfig(_))
+        ));
+        // Zero sectorsize.
+        assert!(matches!(
+            build_extent_csum_item(0, &[0u8; 8], 0),
+            Err(BtrfsMutationError::InvalidConfig(_))
+        ));
+    }
 
     fn test_key(objectid: u64) -> BtrfsKey {
         BtrfsKey {
