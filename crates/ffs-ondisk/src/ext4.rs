@@ -9021,26 +9021,13 @@ mod tests {
             .expect("two-level htree should build");
         assert_eq!(blocks[0][0x1E], 1, "fixture must be two-level");
 
-        let leaves =
+        let mut leaves =
             htree_leaf_logical_blocks(&blocks[0], false, |lb| blocks.get(lb as usize).cloned())
                 .expect("leaf enumeration must succeed");
 
-        // The enumerated leaf set is exactly the contiguous leaf range 1..=L,
-        // which excludes the interior nodes (logical L+1..). If the walk had
-        // returned an interior node, the sorted set would not be 1..=L.
-        let mut sorted = leaves.clone();
-        sorted.sort_unstable();
-        let l = sorted.len();
-        assert!(l >= 2, "two-level dir must have multiple leaves, got {l}");
-        assert_eq!(
-            sorted,
-            (1..=u32::try_from(l).unwrap()).collect::<Vec<_>>(),
-            "enumeration must be exactly the leaf blocks 1..=L (no interior nodes)"
-        );
-
-        // Parsing those blocks recovers every input name and nothing spurious
-        // (an interior node would parse to a single inode-0 fake entry, but none
-        // are in the set, so the count must match exactly).
+        // Parse the enumerated blocks first: they recover every input name and
+        // nothing spurious (an interior node would parse to a single inode-0
+        // fake entry, but the walk lists only real leaves, so the count matches).
         let mut found = std::collections::BTreeSet::new();
         for lb in &leaves {
             let (parsed, _) =
@@ -9052,6 +9039,18 @@ mod tests {
             }
         }
         assert_eq!(found.len(), names.len(), "every entry accounted for via leaves only");
+
+        // The enumerated leaf set is exactly the contiguous leaf range 1..=L,
+        // which excludes the interior nodes (logical L+1..). If the walk had
+        // returned an interior node, the sorted set would not be 1..=L.
+        leaves.sort_unstable();
+        let l = leaves.len();
+        assert!(l >= 2, "two-level dir must have multiple leaves, got {l}");
+        assert_eq!(
+            leaves,
+            (1..=u32::try_from(l).unwrap()).collect::<Vec<_>>(),
+            "enumeration must be exactly the leaf blocks 1..=L (no interior nodes)"
+        );
         for n in &names {
             assert!(found.contains(n), "missing {n:?}");
         }
@@ -9075,13 +9074,12 @@ mod tests {
         let blocks = build_htree_directory(2, 2, &entries, bs, 1, &seed, false).unwrap();
         assert_eq!(blocks[0][0x1E], 0, "fixture must be single-level");
 
-        let leaves =
+        let mut leaves =
             htree_leaf_logical_blocks(&blocks[0], false, |lb| blocks.get(lb as usize).cloned())
                 .unwrap();
-        let mut sorted = leaves.clone();
-        sorted.sort_unstable();
+        leaves.sort_unstable();
         assert_eq!(
-            sorted,
+            leaves,
             (1..=u32::try_from(blocks.len() - 1).unwrap()).collect::<Vec<_>>(),
             "single-level enumeration is every block after the dx_root"
         );
@@ -9134,18 +9132,9 @@ mod tests {
         // The leaf enumerator descends both indirect levels and lists exactly
         // the contiguous leaf range 1..=L (no interior nodes), recovering every
         // input name when those leaves are parsed.
-        let leaves =
+        let mut leaves =
             htree_leaf_logical_blocks(&blocks[0], false, |lb| blocks.get(lb as usize).cloned())
                 .expect("leaf enumeration");
-        let mut sorted = leaves.clone();
-        sorted.sort_unstable();
-        let l = sorted.len();
-        assert!(l > 180, "three-level dir must exceed the two-level leaf cap, got {l}");
-        assert_eq!(
-            sorted,
-            (1..=u32::try_from(l).unwrap()).collect::<Vec<_>>(),
-            "enumeration must be exactly the leaf blocks 1..=L"
-        );
         let mut found = std::collections::BTreeSet::new();
         for lb in &leaves {
             let (parsed, _) =
@@ -9157,6 +9146,15 @@ mod tests {
             }
         }
         assert_eq!(found.len(), names.len(), "every entry accounted for via leaves only");
+
+        leaves.sort_unstable();
+        let l = leaves.len();
+        assert!(l > 180, "three-level dir must exceed the two-level leaf cap, got {l}");
+        assert_eq!(
+            leaves,
+            (1..=u32::try_from(l).unwrap()).collect::<Vec<_>>(),
+            "enumeration must be exactly the leaf blocks 1..=L"
+        );
     }
 
     #[test]
