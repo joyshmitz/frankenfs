@@ -583,6 +583,11 @@ struct BtrfsAllocState {
     root_tree: InMemoryCowBtrfsTree,
     /// In-memory COW B-tree holding all FS-tree items (inodes, dirs, extents).
     fs_tree: InMemoryCowBtrfsTree,
+    /// In-memory COW B-tree holding the data-checksum tree's EXTENT_CSUM items
+    /// (`BTRFS_CSUM_TREE_OBJECTID`). Seeded from the on-disk csum tree at mount;
+    /// the read-verify path consumes it and the write path (bd-x3fcu slice B)
+    /// will populate + commit it. Empty when the filesystem has no csum tree.
+    csum_tree: InMemoryCowBtrfsTree,
     /// Extent allocator for data and metadata block allocation.
     extent_alloc: BtrfsExtentAllocator,
     /// Next available objectid for new inodes / directory entries.
@@ -4872,9 +4877,33 @@ impl OpenFs {
             "btrfs write state initialized"
         );
 
+        // Seed the in-memory csum tree (bd-x3fcu) from the on-disk csum tree.
+        // Resolve the CSUM_TREE ROOT_ITEM among the root items already walked
+        // above; if present, walk the csum tree and load its EXTENT_CSUM items.
+        // A filesystem with no csum tree yields an empty tree.
+        let mut csum_tree =
+            InMemoryCowBtrfsTree::new(max_items).map_err(|e| btrfs_mutation_to_ffs(&e))?;
+        if let Some(csum_root_entry) = root_items.iter().find(|item| {
+            item.key.objectid == BTRFS_CSUM_TREE_OBJECTID
+                && item.key.item_type == BTRFS_ITEM_ROOT_ITEM
+        }) {
+            let csum_root_item =
+                parse_root_item(&csum_root_entry.data).map_err(|e| parse_to_ffs_error(&e))?;
+            for entry in self.walk_btrfs_tree(cx, csum_root_item.bytenr)? {
+                csum_tree
+                    .update(&entry.key, &entry.data)
+                    .or_else(|err| match err {
+                        BtrfsMutationError::KeyNotFound => csum_tree.insert(entry.key, &entry.data),
+                        other => Err(other),
+                    })
+                    .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+            }
+        }
+
         Ok(BtrfsAllocState {
             root_tree,
             fs_tree,
+            csum_tree,
             extent_alloc,
             next_objectid: max_objectid + 1,
             generation,
@@ -6136,18 +6165,38 @@ impl OpenFs {
             return Ok(()); // not a datasum file — nothing to verify
         }
 
-        // Resolve the csum tree root from the ROOT tree (objectid 7). A
+        // Gather the csum-tree items. When writes are enabled, consume the
+        // in-memory csum tree (seeded at mount; slice B will also populate it
+        // on write); otherwise walk the on-disk csum tree via its ROOT_ITEM. A
         // filesystem with no csum tree (e.g. all-nodatasum) has nothing to do.
-        let csum_root = match self.btrfs_fs_tree_root_bytenr(cx, BTRFS_CSUM_TREE_OBJECTID) {
-            Ok(bytenr) => bytenr,
-            Err(FfsError::NotFound(_)) => return Ok(()),
-            Err(e) => return Err(e),
-        };
-        let csum_items: Vec<(BtrfsKey, Vec<u8>)> = self
-            .walk_btrfs_tree(cx, csum_root)?
-            .into_iter()
-            .map(|entry| (entry.key, entry.data))
-            .collect();
+        let csum_items: Vec<(BtrfsKey, Vec<u8>)> =
+            if let Some(alloc_mutex) = self.btrfs_alloc_state.as_ref() {
+                let alloc = alloc_mutex.lock();
+                let lo = BtrfsKey {
+                    objectid: 0,
+                    item_type: 0,
+                    offset: 0,
+                };
+                let hi = BtrfsKey {
+                    objectid: u64::MAX,
+                    item_type: u8::MAX,
+                    offset: u64::MAX,
+                };
+                alloc
+                    .csum_tree
+                    .range(&lo, &hi)
+                    .map_err(|e| btrfs_mutation_to_ffs(&e))?
+            } else {
+                match self.btrfs_fs_tree_root_bytenr(cx, BTRFS_CSUM_TREE_OBJECTID) {
+                    Ok(bytenr) => self
+                        .walk_btrfs_tree(cx, bytenr)?
+                        .into_iter()
+                        .map(|entry| (entry.key, entry.data))
+                        .collect(),
+                    Err(FfsError::NotFound(_)) => return Ok(()),
+                    Err(e) => return Err(e),
+                }
+            };
 
         for item in &items {
             if item.key.objectid != canonical || item.key.item_type != BTRFS_ITEM_EXTENT_DATA {
@@ -32369,6 +32418,39 @@ mod tests {
         let err = fs2
             .btrfs_verify_file_data_csums(&cx, InodeNumber(257))
             .expect_err("corrupted data must be detected");
+        assert!(
+            matches!(err, FfsError::Corruption { .. }),
+            "expected a corruption error, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn btrfs_verify_uses_seeded_in_memory_csum_tree_when_writable_bd_x3fcu() {
+        // With writes enabled, the alloc state seeds an in-memory csum tree from
+        // the on-disk csum tree at mount; the verify path must consume it (not
+        // re-walk the disk) and reach the same clean/corrupt verdicts.
+        let cx = Cx::for_testing();
+        let image = build_btrfs_csum_image();
+        let opts = OpenOptions {
+            btrfs_rw_ephemeral_ok: true,
+            ..OpenOptions::default()
+        };
+
+        let mut fs = OpenFs::from_device(&cx, Box::new(TestDevice::from_vec(image.clone())), &opts)
+            .expect("open csum image");
+        fs.enable_writes(&cx)
+            .expect("enable writes seeds the csum tree");
+        fs.btrfs_verify_file_data_csums(&cx, InodeNumber(257))
+            .expect("clean file verifies via the seeded in-memory csum tree");
+
+        let mut corrupt = image;
+        corrupt[BTRFS_TEST_FILE_DATA_LOGICAL + 7] ^= 0xFF;
+        let mut fs2 = OpenFs::from_device(&cx, Box::new(TestDevice::from_vec(corrupt)), &opts)
+            .expect("open corrupted csum image");
+        fs2.enable_writes(&cx).expect("enable writes");
+        let err = fs2
+            .btrfs_verify_file_data_csums(&cx, InodeNumber(257))
+            .expect_err("corruption detected via the seeded csum tree");
         assert!(
             matches!(err, FfsError::Corruption { .. }),
             "expected a corruption error, got {err:?}"
