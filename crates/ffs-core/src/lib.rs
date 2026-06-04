@@ -30247,6 +30247,110 @@ mod tests {
         image
     }
 
+    /// Inode #11 with a DEPTH-2 extent tree: i_block (depth 2) → index block 14
+    /// (depth 1) → leaf block 15 (depth 0) → a 2-block extent at physical 16.
+    /// Exercises the multi-level extent descent + per-level depth-consistency
+    /// validation, which only depth-0/1 fixtures had covered.
+    fn build_ext4_image_with_depth2_extent() -> Vec<u8> {
+        let block_size: u32 = 4096;
+        let image_size: u32 = 256 * 1024;
+        let mut image = vec![0_u8; image_size as usize];
+        let sb_off = EXT4_SUPERBLOCK_OFFSET;
+
+        image[sb_off + 0x38..sb_off + 0x3A].copy_from_slice(&EXT4_SUPER_MAGIC.to_le_bytes());
+        image[sb_off + 0x18..sb_off + 0x1C].copy_from_slice(&2_u32.to_le_bytes());
+        let blocks_count = image_size / block_size;
+        image[sb_off + 0x04..sb_off + 0x08].copy_from_slice(&blocks_count.to_le_bytes());
+        image[sb_off..sb_off + 0x04].copy_from_slice(&128_u32.to_le_bytes());
+        image[sb_off + 0x14..sb_off + 0x18].copy_from_slice(&0_u32.to_le_bytes());
+        image[sb_off + 0x20..sb_off + 0x24].copy_from_slice(&blocks_count.to_le_bytes());
+        image[sb_off + 0x28..sb_off + 0x2C].copy_from_slice(&128_u32.to_le_bytes());
+        image[sb_off + 0x58..sb_off + 0x5A].copy_from_slice(&256_u16.to_le_bytes());
+        image[sb_off + 0x4C..sb_off + 0x50].copy_from_slice(&1_u32.to_le_bytes());
+        let incompat: u32 = 0x0002 | 0x0040;
+        image[sb_off + 0x60..sb_off + 0x64].copy_from_slice(&incompat.to_le_bytes());
+        image[sb_off + 0x54..sb_off + 0x58].copy_from_slice(&11_u32.to_le_bytes());
+
+        let gd_off: usize = 4096;
+        image[gd_off..gd_off + 4].copy_from_slice(&2_u32.to_le_bytes());
+        image[gd_off + 4..gd_off + 8].copy_from_slice(&3_u32.to_le_bytes());
+        image[gd_off + 8..gd_off + 12].copy_from_slice(&4_u32.to_le_bytes());
+
+        // Inode #11: regular file, size 2 blocks, depth-2 extent tree.
+        let ino_off: usize = 4 * 4096 + 10 * 256;
+        image[ino_off..ino_off + 2].copy_from_slice(&0o100_644_u16.to_le_bytes());
+        image[ino_off + 4..ino_off + 8].copy_from_slice(&(2 * block_size).to_le_bytes());
+        image[ino_off + 0x1A..ino_off + 0x1C].copy_from_slice(&1_u16.to_le_bytes());
+        image[ino_off + 0x20..ino_off + 0x24].copy_from_slice(&0x0008_0000_u32.to_le_bytes());
+        image[ino_off + 0x80..ino_off + 0x82].copy_from_slice(&32_u16.to_le_bytes());
+
+        // i_block: extent header depth=2 + one index entry → index block 14.
+        let e = ino_off + 0x28;
+        image[e..e + 2].copy_from_slice(&0xF30A_u16.to_le_bytes());
+        image[e + 2..e + 4].copy_from_slice(&1_u16.to_le_bytes());
+        image[e + 4..e + 6].copy_from_slice(&4_u16.to_le_bytes());
+        image[e + 6..e + 8].copy_from_slice(&2_u16.to_le_bytes()); // depth=2
+        image[e + 12..e + 16].copy_from_slice(&0_u32.to_le_bytes()); // logical 0
+        image[e + 16..e + 20].copy_from_slice(&14_u32.to_le_bytes()); // → block 14
+
+        // Block 14: index node (depth=1) → leaf block 15.
+        let l14 = 14 * 4096;
+        image[l14..l14 + 2].copy_from_slice(&0xF30A_u16.to_le_bytes());
+        image[l14 + 2..l14 + 4].copy_from_slice(&1_u16.to_le_bytes());
+        image[l14 + 4..l14 + 6].copy_from_slice(&340_u16.to_le_bytes());
+        image[l14 + 6..l14 + 8].copy_from_slice(&1_u16.to_le_bytes()); // depth=1
+        image[l14 + 12..l14 + 16].copy_from_slice(&0_u32.to_le_bytes()); // logical 0
+        image[l14 + 16..l14 + 20].copy_from_slice(&15_u32.to_le_bytes()); // → block 15
+
+        // Block 15: leaf (depth=0) with one 2-block extent → physical 16.
+        let l15 = 15 * 4096;
+        image[l15..l15 + 2].copy_from_slice(&0xF30A_u16.to_le_bytes());
+        image[l15 + 2..l15 + 4].copy_from_slice(&1_u16.to_le_bytes());
+        image[l15 + 4..l15 + 6].copy_from_slice(&340_u16.to_le_bytes());
+        image[l15 + 6..l15 + 8].copy_from_slice(&0_u16.to_le_bytes()); // depth=0
+        image[l15 + 12..l15 + 16].copy_from_slice(&0_u32.to_le_bytes()); // logical 0
+        image[l15 + 16..l15 + 18].copy_from_slice(&2_u16.to_le_bytes()); // len=2
+        image[l15 + 20..l15 + 24].copy_from_slice(&16_u32.to_le_bytes()); // physical 16
+
+        image
+    }
+
+    #[test]
+    fn ext4_resolve_extent_descends_depth2_tree() {
+        let image = build_ext4_image_with_depth2_extent();
+        let cx = Cx::for_testing();
+        let fs = OpenFs::from_device(
+            &cx,
+            Box::new(TestDevice::from_vec(image)),
+            &OpenOptions::default(),
+        )
+        .expect("open depth-2 extent image");
+        let inode = fs.read_inode(&cx, InodeNumber(11)).expect("inode");
+        let scope = RequestScope::empty();
+
+        // Descend all the way: i_block (d2) → block 14 (d1) → block 15 (d0) →
+        // the 2-block extent at physical 16. Each level's depth must validate.
+        let (p0, unwritten0) = fs
+            .resolve_extent(&cx, &scope, &inode, 0)
+            .expect("resolve block 0")
+            .expect("block 0 mapped");
+        let (p1, _) = fs
+            .resolve_extent(&cx, &scope, &inode, 1)
+            .expect("resolve block 1")
+            .expect("block 1 mapped");
+        assert_eq!(p0, 16, "block 0 maps to physical 16 via depth-2 descent");
+        assert_eq!(p1, 17, "block 1 maps to physical 17 (contiguous 2-block extent)");
+        assert!(!unwritten0);
+
+        // A logical block past the extent is a hole.
+        assert!(
+            fs.resolve_extent(&cx, &scope, &inode, 2)
+                .expect("resolve block 2")
+                .is_none(),
+            "block 2 is past the file's extent → hole"
+        );
+    }
+
     #[test]
     #[allow(clippy::cast_precision_loss, clippy::similar_names)]
     fn ext4_resolve_extent_caches_full_extent_range_bd_r7enr() {
