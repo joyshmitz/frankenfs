@@ -7730,22 +7730,17 @@ impl OpenFs {
         }
 
         let (header, tree) = parse_inode_extent_tree(inode).map_err(|e| parse_to_ffs_error(&e))?;
-        let result = self.walk_extent_tree(cx, scope, &tree, logical_block, header.depth)?;
+        let walked = self.walk_extent_tree(cx, scope, &tree, logical_block, header.depth)?;
 
-        // Populate cache with the resolved mapping.
-        match &result {
-            Some((phys, unwritten)) => {
-                self.extent_cache.insert(
-                    ns,
-                    ffs_extent::ExtentMapping {
-                        logical_start: logical_block,
-                        physical_start: *phys,
-                        count: 1,
-                        unwritten: *unwritten,
-                    },
-                );
-            }
-            None => {
+        // Cache the FULL matched extent (count = ee_len) so the rest of the
+        // contiguous run is served from the cache instead of re-walking the
+        // tree per block (bd-r7enr); a hole caches a single-block sentinel.
+        // Then translate the cached extent to the requested block exactly as
+        // ExtentCache::lookup would (physical_start + offset), keeping the
+        // walk-path result identical to a later cache hit.
+        walked.map_or_else(
+            || {
+                // Hole: cache a single-block sentinel (physical 0) as before.
                 self.extent_cache.insert(
                     ns,
                     ffs_extent::ExtentMapping {
@@ -7755,10 +7750,23 @@ impl OpenFs {
                         unwritten: false,
                     },
                 );
-            }
-        }
-
-        Ok(result)
+                Ok(None)
+            },
+            |mapping| {
+                let extent_logical = mapping.logical_start;
+                let extent_phys = mapping.physical_start;
+                let unwritten = mapping.unwritten;
+                self.extent_cache.insert(ns, mapping);
+                if extent_phys == 0 {
+                    Ok(None)
+                } else {
+                    let offset = u64::from(logical_block - extent_logical);
+                    Ok(extent_phys
+                        .checked_add(offset)
+                        .map(|phys| (phys, unwritten)))
+                }
+            },
+        )
     }
 
     fn walk_extent_tree(
@@ -7768,7 +7776,7 @@ impl OpenFs {
         tree: &ExtentTree,
         logical_block: u32,
         remaining_depth: u16,
-    ) -> Result<Option<(u64, bool)>, FfsError> {
+    ) -> Result<Option<ffs_extent::ExtentMapping>, FfsError> {
         if remaining_depth > Self::MAX_EXTENT_DEPTH {
             return Err(FfsError::Corruption {
                 block: 0,
@@ -7782,11 +7790,16 @@ impl OpenFs {
                     let start = ext.logical_block;
                     let len = u32::from(ext.actual_len());
                     if logical_block >= start && logical_block < start.saturating_add(len) {
-                        let offset_within = u64::from(logical_block - start);
-                        return Ok(Some((
-                            ext.physical_start + offset_within,
-                            ext.is_unwritten(),
-                        )));
+                        // Return the whole matched extent so resolve_extent can
+                        // cache the full contiguous range (count = len) instead
+                        // of a single block — sequential access then needs one
+                        // tree walk, not one per block (bd-r7enr).
+                        return Ok(Some(ffs_extent::ExtentMapping {
+                            logical_start: start,
+                            physical_start: ext.physical_start,
+                            count: len,
+                            unwritten: ext.is_unwritten(),
+                        }));
                     }
                 }
                 Ok(None)
@@ -29935,6 +29948,105 @@ mod tests {
         image[bm + 1] = 0xE0; // bits 13, 14, 15 set (byte 1, bits 5-7)
 
         image
+    }
+
+    /// Inode #11 with a depth-1 extent tree whose single leaf extent covers
+    /// FOUR contiguous blocks (logical 0..4 → physical 15..19), via an index
+    /// block at physical block 14. Used to prove resolve_extent caches the full
+    /// extent range (count = ee_len) instead of one block per tree walk
+    /// (bd-r7enr): consecutive logical blocks must not re-descend (re-read
+    /// block 14).
+    fn build_ext4_image_with_multiblock_index_extent() -> Vec<u8> {
+        let block_size: u32 = 4096;
+        let image_size: u32 = 256 * 1024;
+        let mut image = vec![0_u8; image_size as usize];
+        let sb_off = EXT4_SUPERBLOCK_OFFSET;
+
+        image[sb_off + 0x38..sb_off + 0x3A].copy_from_slice(&EXT4_SUPER_MAGIC.to_le_bytes());
+        image[sb_off + 0x18..sb_off + 0x1C].copy_from_slice(&2_u32.to_le_bytes());
+        let blocks_count = image_size / block_size;
+        image[sb_off + 0x04..sb_off + 0x08].copy_from_slice(&blocks_count.to_le_bytes());
+        image[sb_off..sb_off + 0x04].copy_from_slice(&128_u32.to_le_bytes());
+        image[sb_off + 0x14..sb_off + 0x18].copy_from_slice(&0_u32.to_le_bytes());
+        image[sb_off + 0x20..sb_off + 0x24].copy_from_slice(&blocks_count.to_le_bytes());
+        image[sb_off + 0x28..sb_off + 0x2C].copy_from_slice(&128_u32.to_le_bytes());
+        image[sb_off + 0x58..sb_off + 0x5A].copy_from_slice(&256_u16.to_le_bytes());
+        image[sb_off + 0x4C..sb_off + 0x50].copy_from_slice(&1_u32.to_le_bytes());
+        let incompat: u32 = 0x0002 | 0x0040; // FILETYPE | EXTENTS
+        image[sb_off + 0x60..sb_off + 0x64].copy_from_slice(&incompat.to_le_bytes());
+        image[sb_off + 0x54..sb_off + 0x58].copy_from_slice(&11_u32.to_le_bytes());
+
+        let gd_off: usize = 4096;
+        image[gd_off..gd_off + 4].copy_from_slice(&2_u32.to_le_bytes());
+        image[gd_off + 4..gd_off + 8].copy_from_slice(&3_u32.to_le_bytes());
+        image[gd_off + 8..gd_off + 12].copy_from_slice(&4_u32.to_le_bytes());
+
+        // Inode #11 (index 10): regular file, size 4 blocks, depth-1 extent.
+        let ino_off: usize = 4 * 4096 + 10 * 256;
+        image[ino_off..ino_off + 2].copy_from_slice(&0o100_644_u16.to_le_bytes());
+        image[ino_off + 4..ino_off + 8].copy_from_slice(&(4 * block_size).to_le_bytes());
+        image[ino_off + 0x1A..ino_off + 0x1C].copy_from_slice(&1_u16.to_le_bytes());
+        image[ino_off + 0x20..ino_off + 0x24].copy_from_slice(&0x0008_0000_u32.to_le_bytes());
+        image[ino_off + 0x80..ino_off + 0x82].copy_from_slice(&32_u16.to_le_bytes());
+
+        // Extent header (depth=1) + one index entry → leaf block 14.
+        let e = ino_off + 0x28;
+        image[e..e + 2].copy_from_slice(&0xF30A_u16.to_le_bytes());
+        image[e + 2..e + 4].copy_from_slice(&1_u16.to_le_bytes());
+        image[e + 4..e + 6].copy_from_slice(&4_u16.to_le_bytes());
+        image[e + 6..e + 8].copy_from_slice(&1_u16.to_le_bytes()); // depth=1
+        image[e + 12..e + 16].copy_from_slice(&0_u32.to_le_bytes()); // logical 0
+        image[e + 16..e + 20].copy_from_slice(&14_u32.to_le_bytes()); // leaf block 14
+
+        // Block 14: leaf (depth=0) with one extent of 4 blocks → physical 15.
+        let l = 14 * 4096;
+        image[l..l + 2].copy_from_slice(&0xF30A_u16.to_le_bytes());
+        image[l + 2..l + 4].copy_from_slice(&1_u16.to_le_bytes());
+        image[l + 4..l + 6].copy_from_slice(&340_u16.to_le_bytes());
+        image[l + 6..l + 8].copy_from_slice(&0_u16.to_le_bytes()); // depth=0
+        image[l + 12..l + 16].copy_from_slice(&0_u32.to_le_bytes()); // logical 0
+        image[l + 16..l + 18].copy_from_slice(&4_u16.to_le_bytes()); // len=4
+        image[l + 20..l + 24].copy_from_slice(&15_u32.to_le_bytes()); // physical 15
+
+        image
+    }
+
+    #[test]
+    #[allow(clippy::cast_precision_loss, clippy::similar_names)]
+    fn ext4_resolve_extent_caches_full_extent_range_bd_r7enr() {
+        // Index/leaf block is physical block 14; count reads of it.
+        let image = build_ext4_image_with_multiblock_index_extent();
+        let dev = CountingDevice::new(TestDevice::from_vec(image), ByteOffset(14 * 4096));
+        let cx = Cx::for_testing();
+        let fs = OpenFs::from_device(&cx, Box::new(dev.clone()), &OpenOptions::default()).unwrap();
+        let inode = fs.read_inode(&cx, InodeNumber(11)).unwrap();
+        let scope = RequestScope::empty();
+        dev.reset_count();
+
+        // Resolve all four blocks of the single extent. ISOMORPHISM: each maps
+        // to physical 15 + logical (contiguous), and unwritten=false.
+        let mut physed = Vec::new();
+        for lb in 0..4u32 {
+            let (phys, unwritten) = fs.resolve_extent(&cx, &scope, &inode, lb).unwrap().unwrap();
+            assert!(!unwritten);
+            physed.push(phys);
+        }
+        assert_eq!(physed, vec![15, 16, 17, 18], "contiguous physical mapping");
+
+        // Score: the depth-1 index/leaf block is descended (read) ONCE for the
+        // whole extent, not once per block. Uncached this was 4 reads (one per
+        // block); caching the full range makes it 1 → Score 4.0 (= extent len),
+        // growing with extent length.
+        let reads = dev.read_count();
+        assert_eq!(
+            reads, 1,
+            "extent-tree descent must read the index block once"
+        );
+        let score = 4.0 / reads as f64;
+        assert!(
+            score >= 2.0,
+            "extent-range cache Score {score:.2} (4 blocks: cached={reads} read vs uncached=4) must be >= 2.0"
+        );
     }
 
     #[test]
