@@ -4808,6 +4808,7 @@ fn parse_xattr_entries(
         name_index: u8,
         name: Vec<u8>,
         value_offs: u16,
+        value_inum: u32,
         value_size: u32,
     }
 
@@ -4830,6 +4831,12 @@ fn parse_xattr_entries(
         }
 
         let value_offs = read_le_u16(data, offset + 2)?;
+        // e_value_inum (offset+4): when non-zero the value lives in a separate
+        // "EA inode" (the EA_INODE feature, for values too large to fit inline),
+        // NOT in this block at e_value_offs. Tracked so the value-resolution
+        // step below skips the in-block read for such entries instead of
+        // misreading e_value_offs (which is 0 for EA-inode entries).
+        let value_inum = read_le_u32(data, offset + 4)?;
         let value_size = read_le_u32(data, offset + 8)?;
 
         let name_start = offset + 16;
@@ -4845,6 +4852,7 @@ fn parse_xattr_entries(
             name_index,
             name: data[name_start..name_end].to_vec(),
             value_offs,
+            value_inum,
             value_size,
         });
 
@@ -4861,7 +4869,16 @@ fn parse_xattr_entries(
 
     let mut entries = Vec::with_capacity(pending.len());
     for pending_entry in pending {
-        let value = if pending_entry.value_size > 0 {
+        // EA-inode-backed value (EA_INODE feature): the value bytes live in a
+        // separate inode, not in this block. The on-disk e_value_offs is 0 for
+        // these, so the in-block read below would spuriously reject the whole
+        // block ("value overlaps header"). Surface the attribute with its name
+        // (so listxattr is complete and sibling in-block values stay readable)
+        // and an empty value; resolving the EA-inode payload itself is a
+        // separate read path the value-base caller does not have access to.
+        let value = if pending_entry.value_inum != 0 {
+            Vec::new()
+        } else if pending_entry.value_size > 0 {
             let v_off = usize::from(pending_entry.value_offs);
             if v_off < min_value_offset {
                 return Err(ParseError::InvalidField {
@@ -10689,6 +10706,54 @@ mod tests {
         assert_eq!(entries[0].value, b"context");
         assert_eq!(entries[1].full_name(), "user.mime");
         assert_eq!(entries[1].value, b"text");
+    }
+
+    #[test]
+    fn parse_xattr_entries_lists_ea_inode_backed_value_without_rejecting_block_bd_bj00n() {
+        // An EA_INODE-backed attribute stores its value in a separate inode:
+        // e_value_inum != 0 and e_value_offs == 0. Before the fix the parser
+        // ignored e_value_inum, treated e_value_offs (0) as an in-block offset,
+        // tripped the "value overlaps header" guard, and returned Err for the
+        // ENTIRE block — making the readable in-block sibling unreadable too.
+        let mut data = vec![0_u8; 256];
+
+        // Entry 1 (in-block): user.test = "val".
+        data[0] = 4; // name_len
+        data[1] = ffs_types::EXT4_XATTR_INDEX_USER;
+        data[2..4].copy_from_slice(&128_u16.to_le_bytes()); // value_offs
+        data[4..8].copy_from_slice(&0_u32.to_le_bytes()); // value_inum = 0 (in-block)
+        data[8..12].copy_from_slice(&3_u32.to_le_bytes()); // value_size
+        data[16..20].copy_from_slice(b"test");
+        data[128..131].copy_from_slice(b"val");
+
+        // Entry 2 (EA-inode-backed) at byte 20: user.big, value in inode 42.
+        data[20] = 3; // name_len
+        data[21] = ffs_types::EXT4_XATTR_INDEX_USER;
+        data[22..24].copy_from_slice(&0_u16.to_le_bytes()); // value_offs = 0
+        data[24..28].copy_from_slice(&42_u32.to_le_bytes()); // value_inum = 42
+        data[28..32].copy_from_slice(&9000_u32.to_le_bytes()); // value_size (> block, never read in-block)
+        data[36..39].copy_from_slice(b"big");
+
+        // Terminator at byte 40 ((36 + 3) rounded up to 4).
+        data[40] = 0;
+        data[41] = 0;
+
+        let entries = super::parse_xattr_entries(&data, &data, 0).unwrap();
+        assert_eq!(
+            entries.len(),
+            2,
+            "both attributes are listed, block not rejected"
+        );
+        // In-block sibling is still fully readable.
+        assert_eq!(entries[0].full_name(), "user.test");
+        assert_eq!(entries[0].value, b"val");
+        // EA-inode attribute: name surfaced (so listxattr is complete), value
+        // empty for now (resolving the EA-inode payload is a separate path).
+        assert_eq!(entries[1].full_name(), "user.big");
+        assert!(
+            entries[1].value.is_empty(),
+            "EA-inode value is not read from this block"
+        );
     }
 
     #[test]
