@@ -854,6 +854,12 @@ pub struct OpenFs {
     /// Lazily cached on-disk csum-tree items for read-only verify-on-read.
     /// `None` until first use; populated by walking the csum tree once.
     btrfs_csum_read_cache: Mutex<Option<std::sync::Arc<BtrfsCsumItems>>>,
+    /// Memoized fs-tree root bytenr per subvolume objectid (bd-yuk9v). On a
+    /// read-only mount the root tree is immutable, so resolving a subvolume's
+    /// ROOT_ITEM once and caching the bytenr removes the per-op root-tree
+    /// descent. Only consulted/populated when writes are disabled
+    /// (`btrfs_alloc_state` is `None`), since a commit can move the root.
+    btrfs_fs_tree_root_cache: Mutex<std::collections::HashMap<u64, u64>>,
 }
 
 /// Csum-tree items `(key, packed crc32c values)` used by the read-verify path.
@@ -2692,6 +2698,7 @@ impl OpenFs {
             btrfs_rw_ephemeral_ok: options.btrfs_rw_ephemeral_ok,
             btrfs_verify_data_on_read: options.btrfs_verify_data_on_read,
             btrfs_csum_read_cache: Mutex::new(None),
+            btrfs_fs_tree_root_cache: Mutex::new(std::collections::HashMap::new()),
         };
 
         if fs.is_ext4() && !options.skip_validation {
@@ -5575,6 +5582,32 @@ impl OpenFs {
 
     /// Resolve a btrfs filesystem tree's root block by walking the ROOT_TREE.
     fn btrfs_fs_tree_root_bytenr(&self, cx: &Cx, subvol_id: u64) -> ffs_error::Result<u64> {
+        // On a read-only mount the root tree is immutable, so memoize the
+        // resolved bytenr per subvolume and skip the per-op root-tree descent
+        // entirely on subsequent calls (bd-yuk9v): O(log R) device reads ->
+        // O(1) amortized. Writable mounts (alloc_state present) resolve fresh
+        // since a transaction commit can move the root.
+        let cacheable = self.btrfs_alloc_state.is_none();
+        if cacheable && let Some(&bytenr) = self.btrfs_fs_tree_root_cache.lock().get(&subvol_id) {
+            return Ok(bytenr);
+        }
+        let bytenr = self.btrfs_resolve_fs_tree_root_uncached(cx, subvol_id)?;
+        if cacheable {
+            self.btrfs_fs_tree_root_cache
+                .lock()
+                .insert(subvol_id, bytenr);
+        }
+        Ok(bytenr)
+    }
+
+    /// Resolve a subvolume's fs-tree root bytenr by targeted descent of the
+    /// root tree (no caching). See [`btrfs_fs_tree_root_bytenr`] for the cached
+    /// wrapper used on the hot read path.
+    fn btrfs_resolve_fs_tree_root_uncached(
+        &self,
+        cx: &Cx,
+        subvol_id: u64,
+    ) -> ffs_error::Result<u64> {
         // Targeted descent for just this subvolume's ROOT_ITEM rather than a
         // full root-tree walk (bd-b61hz): the root tree can span many leaves on
         // a multi-subvolume / snapshotted filesystem, and this resolve runs on
@@ -32804,23 +32837,30 @@ mod tests {
 
         // Last inode: lo=(oid,0,0) sorts into the predecessor leaf's key span
         // (the internal node stores only each child's first key, so descent
-        // conservatively probes that predecessor too) — root-tree + internal +
-        // 2 leaves. Still O(log N) + O(matching leaves), independent of N.
+        // conservatively probes that predecessor too) — internal + 2 leaves.
+        // Still O(log N) + O(matching leaves), independent of N.
         reads.store(0, AtomicOrdering::SeqCst);
         let _ = fs
             .walk_btrfs_fs_tree_object(&cx, 256 + (N as u64 - 1))
             .unwrap();
         let range_reads_last = reads.load(AtomicOrdering::SeqCst);
 
-        // Full walk reads every node: root-tree + internal + all N leaves.
-        assert_eq!(full_reads, N + 2, "full walk should read every node");
+        // The root-tree resolve was memoized on the first walk above (bd-yuk9v),
+        // so these counts are purely the fs-tree descent: the full walk reads
+        // internal + all N leaves; the targeted descent reads internal + only
+        // the covering leaf(s).
         assert_eq!(
-            range_reads_first, 3,
-            "first-inode descent: root-tree+internal+1 leaf"
+            full_reads,
+            N + 1,
+            "full walk should read every fs-tree node"
         );
         assert_eq!(
-            range_reads_last, 4,
-            "last-inode descent: root-tree+internal+2 leaves"
+            range_reads_first, 2,
+            "first-inode descent: internal + 1 leaf"
+        );
+        assert_eq!(
+            range_reads_last, 3,
+            "last-inode descent: internal + 2 leaves"
         );
         // Score uses the worst-case (last-inode) descent; even that clears 2.0,
         // and the ratio grows with N while descent stays ~constant.
@@ -33038,6 +33078,56 @@ mod tests {
         assert!(
             score >= 2.0,
             "ROOT_ITEM-descent Score {score:.2} (full={full_reads} reads, range={range_reads} reads) must be >= 2.0"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::cast_precision_loss)]
+    fn btrfs_root_bytenr_cache_amortizes_resolve_bd_yuk9v() {
+        const N: usize = 8;
+        const K: usize = 8; // repeated read ops on the same subvolume
+        let (image, subvol_ids) = build_btrfs_multileaf_root_image(N);
+        let reads = Arc::new(AtomicUsize::new(0));
+        let dev = AllReadsCounter {
+            inner: TestDevice::from_vec(image),
+            reads: Arc::clone(&reads),
+        };
+        let cx = Cx::for_testing();
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
+        let last = *subvol_ids.last().unwrap();
+
+        // Cold resolve: descends the root tree (internal + the covering leaf).
+        reads.store(0, AtomicOrdering::SeqCst);
+        let cold_bytenr = fs.btrfs_fs_tree_root_bytenr(&cx, last).unwrap();
+        let cold = reads.load(AtomicOrdering::SeqCst);
+
+        // Warm resolve: pure cache hit, zero device reads, same bytenr.
+        reads.store(0, AtomicOrdering::SeqCst);
+        let warm_bytenr = fs.btrfs_fs_tree_root_bytenr(&cx, last).unwrap();
+        let warm = reads.load(AtomicOrdering::SeqCst);
+
+        // Isomorphism: the cache returns exactly what the uncached descent does.
+        let uncached_bytenr = fs.btrfs_resolve_fs_tree_root_uncached(&cx, last).unwrap();
+        assert_eq!(cold_bytenr, warm_bytenr, "cache returns the same bytenr");
+        assert_eq!(
+            cold_bytenr, uncached_bytenr,
+            "cache matches uncached resolve"
+        );
+
+        assert!(
+            cold >= 2,
+            "cold resolve descends the root tree ({cold} reads)"
+        );
+        assert_eq!(warm, 0, "warm resolve is a pure cache hit (0 device reads)");
+
+        // SCORE (bd-yuk9v): over K read ops on the same subvolume, the cached
+        // path pays the descent once; the uncached path pays it every call.
+        let cached_k = cold; // cold + (K-1)*warm == cold + 0
+        let uncached_k = cold * K;
+        let score = uncached_k as f64 / cached_k as f64;
+        assert!(
+            score >= 2.0,
+            "root-bytenr cache Score {score:.2} ({K} resolves: cached={cached_k} reads vs uncached={uncached_k} reads) must be >= 2.0"
         );
     }
 
