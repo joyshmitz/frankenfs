@@ -13291,8 +13291,12 @@ impl OpenFs {
                 Self::set_extent_root(&mut inode, &root_bytes);
             }
         } else if zero_range {
-            // ZERO_RANGE: zero the data in the range by writing zero blocks.
-            // Existing extents keep their allocation; data is zeroed.
+            // ZERO_RANGE: the range must read back as zero AND be preallocated
+            // (man fallocate: "blocks are preallocated and zeroed"; mirrors the
+            // kernel's ext4_zero_range and the btrfs path). So holes in the range
+            // are allocated as unwritten extents (which read zero), unwritten
+            // extents are left as-is, and written blocks have their in-range
+            // bytes zeroed. bd-c0xru.
             let logical_start =
                 u32::try_from(offset / block_size).map_err(|_| FfsError::NoSpace)?;
             let logical_end = end.div_ceil(block_size);
@@ -13312,13 +13316,124 @@ impl OpenFs {
                 logical_count,
             )?;
 
-            for mapping in &mappings {
-                // Holes (physical_start == 0) and unwritten extents already
-                // read back as zero for the whole block, so neither full nor
-                // partial coverage requires any write.
-                if mapping.physical_start == 0 || mapping.unwritten {
+            // Preflight inode.blocks for the holes we will preallocate so an
+            // overflow is rejected before any tree mutation (mirrors the
+            // fallocate-default prealloc path).
+            let planned_new_blocks = mappings
+                .iter()
+                .filter(|mapping| mapping.physical_start == 0 && !mapping.unwritten)
+                .map(|mapping| u64::from(mapping.count))
+                .sum::<u64>();
+            let blocks_after_zero = if planned_new_blocks > 0 {
+                if inode.is_huge_file() {
+                    Some(Self::ext4_checked_inode_blocks_delta(
+                        inode.blocks,
+                        ino,
+                        i128::from(planned_new_blocks),
+                    )?)
+                } else {
+                    let added_sectors = planned_new_blocks
+                        .checked_mul(sectors_per_block)
+                        .ok_or_else(|| FfsError::Corruption {
+                            block: 0,
+                            detail: format!(
+                                "inode {} added sectors overflow during zero_range preflight",
+                                ino.0
+                            ),
+                        })?;
+                    Some(Self::ext4_checked_inode_blocks_delta(
+                        inode.blocks,
+                        ino,
+                        i128::from(added_sectors),
+                    )?)
+                }
+            } else {
+                None
+            };
+
+            let mut goal_block = None;
+            let mut newly_allocated_blocks = 0_u64;
+            for mapping in mappings {
+                // Unwritten extents already read back as zero; keep them as-is.
+                if mapping.unwritten {
+                    if mapping.physical_start != 0 {
+                        goal_block = Some(BlockNumber(
+                            mapping.physical_start + u64::from(mapping.count),
+                        ));
+                    }
                     continue;
                 }
+                if mapping.physical_start == 0 {
+                    // Hole: preallocate as an unwritten extent (reads zero), so
+                    // ZERO_RANGE actually reserves the space the kernel promises.
+                    let mut remaining = mapping.count;
+                    let mut logical = mapping.logical_start;
+                    while remaining > 0 {
+                        let chunk = remaining.min(MAX_EXTENT_COUNT);
+                        let hint = self.numa_allocation_hint(
+                            &alloc.geo,
+                            AllocHint {
+                                goal_block,
+                                ..AllocHint::default()
+                            },
+                            "ext4_fallocate",
+                            Some(ino),
+                        );
+                        let alloc_mapping = {
+                            let Ext4AllocState {
+                                geo,
+                                groups,
+                                persist_ctx,
+                            } = &mut *alloc;
+                            if let Some(tx) = &mut scope.tx {
+                                let tx_dev = TransactionBlockAdapter {
+                                    base: &block_dev,
+                                    tx: Mutex::new(tx),
+                                };
+                                ffs_extent::allocate_unwritten_extent(
+                                    cx,
+                                    &tx_dev,
+                                    &mut root_bytes,
+                                    geo,
+                                    groups,
+                                    logical,
+                                    chunk,
+                                    &hint,
+                                    persist_ctx,
+                                    ffs_extent::ExtentOwner {
+                                        ino: u32::try_from(ino.0).unwrap_or(u32::MAX),
+                                        generation: inode.generation,
+                                    },
+                                )?
+                            } else {
+                                ffs_extent::allocate_unwritten_extent(
+                                    cx,
+                                    &block_dev,
+                                    &mut root_bytes,
+                                    geo,
+                                    groups,
+                                    logical,
+                                    chunk,
+                                    &hint,
+                                    persist_ctx,
+                                    ffs_extent::ExtentOwner {
+                                        ino: u32::try_from(ino.0).unwrap_or(u32::MAX),
+                                        generation: inode.generation,
+                                    },
+                                )?
+                            }
+                        };
+                        self.extent_cache.invalidate_all();
+                        newly_allocated_blocks += u64::from(alloc_mapping.count);
+                        goal_block = Some(BlockNumber(
+                            alloc_mapping.physical_start + u64::from(alloc_mapping.count),
+                        ));
+                        logical = logical.saturating_add(chunk);
+                        remaining -= chunk;
+                    }
+                    continue;
+                }
+                // Written extent: zero the in-range bytes of each block.
                 for blk_offset in 0..u64::from(mapping.count) {
                     let logical_block = u64::from(mapping.logical_start) + blk_offset;
                     let block_byte_start = logical_block * block_size;
@@ -13349,8 +13464,19 @@ impl OpenFs {
                         block_dev.write_block(cx, phys, &buf)?;
                     }
                 }
+                goal_block =
+                    Some(BlockNumber(mapping.physical_start + u64::from(mapping.count)));
             }
             self.extent_cache.invalidate_all();
+
+            if newly_allocated_blocks > 0 {
+                inode.blocks = blocks_after_zero.ok_or_else(|| FfsError::Corruption {
+                    block: 0,
+                    detail: "planned block delta missing but blocks allocated during zero_range"
+                        .into(),
+                })?;
+                Self::set_extent_root(&mut inode, &root_bytes);
+            }
 
             if !keep_size && end > inode.size {
                 inode.size = end;
@@ -45083,6 +45209,54 @@ mod tests {
             data.iter().all(|&b| b == 0),
             "existing file data should be zeroed even when KEEP_SIZE is set"
         );
+    }
+
+    #[test]
+    fn write_fallocate_zero_range_preallocates_holes_bd_c0xru() {
+        // ZERO_RANGE must preallocate holes in the range (man fallocate: "blocks
+        // are preallocated and zeroed"), matching the kernel + the btrfs path —
+        // not leave them sparse. Build a 3-block file, punch the middle block to
+        // a hole, then ZERO_RANGE that hole: it must be re-allocated (inode block
+        // count rises back) and still read as zero.
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let attr = fs
+            .create(&cx, root, OsStr::new("zr_prealloc.txt"), 0o644, 0, 0)
+            .expect("create");
+        let ino = attr.ino;
+
+        // 3 written blocks [0, 12288).
+        fs.write(&cx, ino, 0, &[0x5A; 12288]).expect("seed");
+        let blocks_full = fs.read_inode(&cx, ino).expect("inode").blocks;
+
+        // Punch the middle block [4096, 8192) -> hole; block count drops.
+        fs.fallocate(&cx, ino, 4096, 4096, libc::FALLOC_FL_PUNCH_HOLE | libc::FALLOC_FL_KEEP_SIZE)
+            .expect("punch hole");
+        let blocks_punched = fs.read_inode(&cx, ino).expect("inode").blocks;
+        assert!(
+            blocks_punched < blocks_full,
+            "punch_hole must free the middle block ({blocks_punched} < {blocks_full})"
+        );
+
+        // ZERO_RANGE the punched hole: it must be preallocated again.
+        fs.fallocate(&cx, ino, 4096, 4096, libc::FALLOC_FL_ZERO_RANGE | libc::FALLOC_FL_KEEP_SIZE)
+            .expect("zero_range over hole");
+        let blocks_zeroed = fs.read_inode(&cx, ino).expect("inode").blocks;
+        assert!(
+            blocks_zeroed > blocks_punched,
+            "ZERO_RANGE must preallocate the hole (blocks {blocks_zeroed} > {blocks_punched})"
+        );
+
+        // The range still reads as zero, and the neighbours are untouched.
+        let mid = fs.read(&cx, ino, 4096, 4096).expect("read mid");
+        assert!(mid.iter().all(|&b| b == 0), "ZERO_RANGE region must read zero");
+        let head = fs.read(&cx, ino, 0, 4096).expect("read head");
+        assert!(head.iter().all(|&b| b == 0x5A), "block before the range is untouched");
+        let tail = fs.read(&cx, ino, 8192, 4096).expect("read tail");
+        assert!(tail.iter().all(|&b| b == 0x5A), "block after the range is untouched");
     }
 
     #[test]
