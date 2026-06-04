@@ -10946,6 +10946,24 @@ impl OpenFs {
         }
     }
 
+    /// Physical block of an htree directory's dx_root (logical block 0), or
+    /// `None` for a linear directory. A linear `remove_entry`/`add_entry` scan
+    /// must skip this block: it holds no file entries (only `.`/`..` over the
+    /// hidden index) and its `..` rec_len spans past the reserved tail, which a
+    /// linear parse rejects as corrupt.
+    fn ext4_htree_dx_root_phys(
+        dir_inode: &Ext4Inode,
+        extents: &[Ext4Extent],
+    ) -> Option<BlockNumber> {
+        if !dir_inode.has_htree_index() {
+            return None;
+        }
+        extents
+            .iter()
+            .find(|e| e.logical_block == 0)
+            .map(|e| BlockNumber(e.physical_start))
+    }
+
     /// Repoint a directory's `..` entry to `new_parent_ino` in place. `.`/`..`
     /// are always the first two entries at fixed offsets 0 and 12 (ext4 invariant,
     /// enforced by e2fsck), so this works for both linear dir blocks and htree
@@ -11724,11 +11742,19 @@ impl OpenFs {
             let reserved_tail = self.ext4_dir_reserved_tail();
             let parent_ino_u32 = u32::try_from(parent.0)
                 .map_err(|_| FfsError::Format("inode number exceeds ext4 32-bit limit".into()))?;
+            // For an htree directory, logical block 0 is the dx_root: it holds no
+            // file entries (only '.'/'..' over the hidden index), and its '..'
+            // rec_len spans past the reserved tail, so a linear remove_entry scan
+            // rejects it as corrupt. Skip it — the entry is always in a leaf.
+            let dx_root_phys = Self::ext4_htree_dx_root_phys(&parent_inode, &extents);
             'outer: for ext in &extents {
                 if removed {
                     break;
                 }
                 for block in Self::extent_phys_blocks(ext) {
+                    if Some(block) == dx_root_phys {
+                        continue;
+                    }
                     let mut data = self.read_block_vec(cx, block)?;
                     if ffs_dir::remove_entry(&mut data, name, reserved_tail)? {
                         self.stamp_ext4_dir_block(
@@ -13311,8 +13337,12 @@ impl OpenFs {
             // Remove the existing target.
             let extents = self.collect_extents(cx, &new_parent_inode)?;
             let reserved_tail = self.ext4_dir_reserved_tail();
+            let dx_root_phys = Self::ext4_htree_dx_root_phys(&new_parent_inode, &extents);
             'rm_existing: for ext in &extents {
                 for block in Self::extent_phys_blocks(ext) {
+                    if Some(block) == dx_root_phys {
+                        continue;
+                    }
                     let mut data = self.read_block_vec(cx, block)?;
                     if ffs_dir::remove_entry(&mut data, new_name, reserved_tail)? {
                         let np_ino_u32 = u32::try_from(new_parent.0).map_err(|_| {
@@ -13385,8 +13415,12 @@ impl OpenFs {
         // Remove old entry from source parent.
         let src_extents = self.collect_extents(cx, &parent_inode)?;
         let reserved_tail = self.ext4_dir_reserved_tail();
+        let dx_root_phys = Self::ext4_htree_dx_root_phys(&parent_inode, &src_extents);
         'rm_src: for ext in &src_extents {
             for block in Self::extent_phys_blocks(ext) {
+                if Some(block) == dx_root_phys {
+                    continue;
+                }
                 let mut data = self.read_block_vec(cx, block)?;
                 if ffs_dir::remove_entry(&mut data, name, reserved_tail)? {
                     let src_ino_u32 = u32::try_from(parent.0).map_err(|_| {
@@ -34653,6 +34687,138 @@ mod tests {
         assert!(
             matches!(find, ffs_ondisk::HtreeFindResult::Found(_)),
             "moved htree dir must remain index-navigable"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn create_then_unlink_in_htree_dir_keeps_index_consistent() {
+        // Unlink from an htree directory must remove the entry from its leaf
+        // (restamping that leaf) without touching or invalidating the dx_root,
+        // and the removed name must no longer resolve via the index while
+        // siblings still do.
+        let Some((fs, _tmp)) = open_writable_ext4_mkfs(32) else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let (csum_seed, hash_seed, has_large_dir, hash_version, block_size) = {
+            let sb = fs.ext4_superblock().expect("sb");
+            (
+                sb.csum_seed(),
+                sb.hash_seed,
+                sb.has_large_dir(),
+                sb.effective_dirhash_version(sb.def_hash_version),
+                usize::try_from(sb.block_size).unwrap(),
+            )
+        };
+
+        let dir = fs
+            .mkdir(&cx, root, OsStr::new("htdir"), 0o755, 0, 0)
+            .expect("mkdir");
+        let dir_ino = dir.ino;
+        let dir_ino_u32 = u32::try_from(dir_ino.0).unwrap();
+        let generation = fs.read_inode(&cx, dir_ino).expect("read dir").generation;
+
+        let names: Vec<Vec<u8>> = (0..250)
+            .map(|i| format!("seed_{i:04}.txt").into_bytes())
+            .collect();
+        let entries: Vec<(u32, u8, &[u8])> = names
+            .iter()
+            .enumerate()
+            .map(|(i, n)| {
+                (
+                    7000 + u32::try_from(i).unwrap(),
+                    ffs_ondisk::ext4::EXT4_FT_REG_FILE,
+                    n.as_slice(),
+                )
+            })
+            .collect();
+        let blocks = ffs_ondisk::build_htree_directory_stamped(
+            dir_ino_u32,
+            2,
+            &entries,
+            block_size,
+            hash_version,
+            &hash_seed,
+            csum_seed,
+            dir_ino_u32,
+            generation,
+        )
+        .expect("build htree");
+        assert!(blocks.len() >= 3, "need dx_root + multiple leaves");
+        install_htree_dir(&fs, &cx, dir_ino, &blocks);
+
+        let find = |name: &[u8]| -> ffs_ondisk::HtreeFindResult {
+            ffs_ondisk::htree_find_entry(
+                u32::try_from(block_size).unwrap(),
+                &hash_seed,
+                has_large_dir,
+                name,
+                |v| v,
+                |lb| {
+                    let inode = fs.read_inode(&cx, dir_ino).ok()?;
+                    let exts = fs.collect_extents(&cx, &inode).ok()?;
+                    let phys = exts.iter().find_map(|e| {
+                        let len = u32::from(e.actual_len());
+                        if lb >= e.logical_block && lb < e.logical_block + len {
+                            Some(e.physical_start + u64::from(lb - e.logical_block))
+                        } else {
+                            None
+                        }
+                    })?;
+                    fs.read_block_vec(&cx, BlockNumber(phys)).ok()
+                },
+            )
+        };
+
+        // Create a real file (real inode so unlink can decrement its link count).
+        let created = fs
+            .create(&cx, dir_ino, OsStr::new("victim.bin"), 0o644, 0, 0)
+            .expect("create victim");
+        assert!(
+            matches!(find(b"victim.bin"), ffs_ondisk::HtreeFindResult::Found(_)),
+            "victim must be index-reachable after create"
+        );
+
+        // Unlink it.
+        fs.unlink(&cx, dir_ino, OsStr::new("victim.bin"))
+            .expect("unlink victim from htree dir");
+
+        // The victim no longer resolves via the index; a seed sibling still does.
+        assert!(
+            !matches!(find(b"victim.bin"), ffs_ondisk::HtreeFindResult::Found(_)),
+            "victim must not resolve via the index after unlink (it was {:?})",
+            created.ino
+        );
+        assert!(
+            matches!(
+                find(b"seed_0100.txt"),
+                ffs_ondisk::HtreeFindResult::Found(_)
+            ),
+            "sibling entries must remain index-reachable after the unlink"
+        );
+
+        // The dx_root (block 0) is untouched and still valid.
+        let block0_phys = {
+            let di = fs.read_inode(&cx, dir_ino).unwrap();
+            fs.collect_extents(&cx, &di)
+                .unwrap()
+                .iter()
+                .find(|e| e.logical_block == 0)
+                .unwrap()
+                .physical_start
+        };
+        let dxr = fs.read_block_vec(&cx, BlockNumber(block0_phys)).unwrap();
+        assert!(
+            ffs_ondisk::verify_dx_block_checksum(
+                &dxr,
+                csum_seed,
+                dir_ino_u32,
+                generation,
+                ffs_ondisk::DX_ROOT_COUNT_OFFSET,
+            ),
+            "dx_root checksum must remain valid across an unlink"
         );
     }
 
