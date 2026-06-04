@@ -5539,6 +5539,8 @@ struct HtreeLayout {
 /// when even two levels cannot hold the directory (a third indirect level would
 /// be required) or when a single hash value's run overflows one leaf (needs a
 /// collision chain), matching the cases the read-half cannot otherwise resolve.
+#[allow(clippy::type_complexity)] // local (hash, entry) staging tuples
+#[allow(clippy::too_many_lines)] // single + two-level construction in one pass
 fn build_htree_layout(
     dot_inode: u32,
     dotdot_inode: u32,
