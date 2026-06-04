@@ -1,0 +1,6 @@
+BATCH_TAKE_GOLDEN	truncated	count=16	max=3	start=0	alloc=	bitmap=
+BATCH_TAKE_GOLDEN	start_aligned_dense	count=24	max=6	start=0	alloc=0,1,2,3,8,9	bitmap=ff03ff
+BATCH_TAKE_GOLDEN	unaligned_start	count=24	max=7	start=5	alloc=8,9,10,11,12,13,14	bitmap=ef7ffe
+BATCH_TAKE_GOLDEN	wraparound	count=24	max=8	start=20	alloc=20,21,22,23,8,9,10,11	bitmap=ffffff
+BATCH_TAKE_GOLDEN	partial_count_wrap	count=20	max=12	start=16	alloc=16,17,18,19,0,1,2,3,4,5,6,7	bitmap=ff000f
+BATCH_TAKE_GOLDEN	word_window	count=128	max=10	start=64	alloc=64,65,66,67,68,69,70,71,72,73	bitmap=ffffffffffffffffff03000000000000
