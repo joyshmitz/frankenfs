@@ -263,6 +263,72 @@ pub fn build_extent_csum_items(
     Ok(items)
 }
 
+/// First-mismatch detail from [`verify_extent_csum`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CsumMismatch {
+    /// Zero-based index of the first sector whose checksum did not match.
+    pub sector_index: usize,
+    /// The crc32c recorded in the csum tree for that sector.
+    pub expected: u32,
+    /// The crc32c actually computed over the on-disk sector bytes.
+    pub actual: u32,
+}
+
+/// Verify a contiguous on-disk data extent against its packed crc32c checksums.
+///
+/// Read-side inverse of [`build_extent_csum_item`]: given the extent's
+/// sector-padded bytes and the densely packed little-endian crc32c-per-sector
+/// value from its EXTENT_CSUM item, recompute each sector's crc32c (the same
+/// `ffs_types::crc32c` the kernel uses) and compare. The kernel returns EIO on
+/// the first mismatch when reading a `datasum` file; a reader or scrub built on
+/// this can do the same instead of silently returning corrupted data.
+///
+/// # Errors
+/// - `Err(Err(BtrfsMutationError::InvalidConfig))` if `sectorsize` is zero,
+///   `data` is not a positive whole multiple of `sectorsize`, or
+///   `expected_csums` length does not match the sector count.
+/// - `Err(Ok(CsumMismatch))` on the first sector whose checksum does not match.
+pub fn verify_extent_csum(
+    data: &[u8],
+    sectorsize: usize,
+    expected_csums: &[u8],
+) -> Result<(), Result<CsumMismatch, BtrfsMutationError>> {
+    if sectorsize == 0 {
+        return Err(Err(BtrfsMutationError::InvalidConfig(
+            "sectorsize must be non-zero",
+        )));
+    }
+    if data.is_empty() || data.len() % sectorsize != 0 {
+        return Err(Err(BtrfsMutationError::InvalidConfig(
+            "data must be a positive whole multiple of sectorsize",
+        )));
+    }
+    let sectors = data.len() / sectorsize;
+    if expected_csums.len() != sectors * BTRFS_CRC32C_CSUM_SIZE {
+        return Err(Err(BtrfsMutationError::InvalidConfig(
+            "expected_csums length does not match sector count",
+        )));
+    }
+    for (index, sector) in data.chunks_exact(sectorsize).enumerate() {
+        let base = index * BTRFS_CRC32C_CSUM_SIZE;
+        let expected = u32::from_le_bytes([
+            expected_csums[base],
+            expected_csums[base + 1],
+            expected_csums[base + 2],
+            expected_csums[base + 3],
+        ]);
+        let actual = ffs_types::crc32c(sector);
+        if actual != expected {
+            return Err(Ok(CsumMismatch {
+                sector_index: index,
+                expected,
+                actual,
+            }));
+        }
+    }
+    Ok(())
+}
+
 /// Convert btrfs inode flags to generic FS_*_FL flags for `FS_IOC_GETFLAGS`.
 ///
 /// Maps kernel `btrfs_inode_flags_to_fsflags()` from `fs/btrfs/ioctl.c`.
@@ -6084,6 +6150,50 @@ mod tests {
         assert!(matches!(
             build_extent_csum_items(0, &[], 4096, 4),
             Err(BtrfsMutationError::InvalidConfig(_))
+        ));
+    }
+
+    #[test]
+    fn verify_extent_csum_accepts_matching_and_flags_corruption_bd_x3fcu() {
+        let sectorsize = 4096_usize;
+        let mut data = vec![0xC3_u8; sectorsize];
+        data.extend(std::iter::repeat_n(0x7E_u8, sectorsize)); // 2 sectors
+        let (_key, csums) = build_extent_csum_item(0x1000, &data, sectorsize).expect("build csums");
+
+        // Faithful data verifies clean (round-trip with the builder).
+        assert_eq!(verify_extent_csum(&data, sectorsize, &csums), Ok(()));
+
+        // Corrupt one byte in the SECOND sector -> mismatch reported at sector 1
+        // with the recomputed crc, sector 0 still considered good.
+        let mut corrupt = data.clone();
+        corrupt[sectorsize + 10] ^= 0xFF;
+        let expected_good = ffs_types::crc32c(&data[sectorsize..]);
+        match verify_extent_csum(&corrupt, sectorsize, &csums) {
+            Err(Ok(m)) => {
+                assert_eq!(m.sector_index, 1);
+                assert_eq!(m.expected, expected_good);
+                assert_ne!(m.actual, m.expected);
+            }
+            other => panic!("expected sector-1 mismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn verify_extent_csum_rejects_bad_args_bd_x3fcu() {
+        // Zero sectorsize.
+        assert!(matches!(
+            verify_extent_csum(&[0u8; 8], 0, &[0u8; 8]),
+            Err(Err(BtrfsMutationError::InvalidConfig(_)))
+        ));
+        // Non-multiple data.
+        assert!(matches!(
+            verify_extent_csum(&[0u8; 4097], 4096, &[0u8; 4]),
+            Err(Err(BtrfsMutationError::InvalidConfig(_)))
+        ));
+        // Wrong csum length (2 sectors but only 1 csum).
+        assert!(matches!(
+            verify_extent_csum(&[0u8; 8192], 4096, &[0u8; 4]),
+            Err(Err(BtrfsMutationError::InvalidConfig(_)))
         ));
     }
 
