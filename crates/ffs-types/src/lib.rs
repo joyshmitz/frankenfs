@@ -693,6 +693,8 @@ pub const EXT4_TOPDIR_FL: u32 = 0x0002_0000;
 pub const EXT4_HUGE_FILE_FL: u32 = 0x0004_0000;
 /// Inode uses extents.
 pub const EXT4_EXTENTS_FL: u32 = 0x0008_0000;
+/// Inode has fs-verity protection (read-only, Merkle-tree-verified).
+pub const EXT4_VERITY_FL: u32 = 0x0010_0000;
 /// Inode used for large EA.
 pub const EXT4_EA_INODE_FL: u32 = 0x0020_0000;
 /// Blocks allocated beyond EOF (pre-allocation).

@@ -12223,6 +12223,7 @@ impl OpenFs {
             return Err(FfsError::Format("cannot fallocate a symlink".into()));
         }
         Self::ext4_reject_encrypted(&inode)?;
+        Self::ext4_reject_verity(&inode)?;
         // Immutable files reject all fallocate; append-only files reject the
         // modes that alter existing data (the kernel returns EPERM).
         Self::ext4_reject_immutable(&inode)?;
@@ -12730,6 +12731,8 @@ impl OpenFs {
         }
         // No fscrypt support: refuse to store plaintext into encrypted blocks.
         Self::ext4_reject_encrypted(&inode)?;
+        // No fs-verity support: writing would break the Merkle tree.
+        Self::ext4_reject_verity(&inode)?;
         // Enforce immutable / append-only attributes (the kernel returns EPERM).
         Self::ext4_reject_immutable(&inode)?;
         if inode.flags & ffs_types::EXT4_APPEND_FL != 0 && offset != inode.size {
@@ -13584,6 +13587,8 @@ impl OpenFs {
             if inode.is_symlink() {
                 return Err(FfsError::Format("cannot truncate a symlink".into()));
             }
+            // fs-verity files are read-only; truncation breaks the Merkle tree.
+            Self::ext4_reject_verity(&inode)?;
             // Immutable files cannot be truncated; append-only files cannot
             // shrink (the kernel returns EPERM).
             Self::ext4_reject_immutable(&inode)?;
@@ -14367,6 +14372,18 @@ impl OpenFs {
     /// enforce the attribute on its direct API where no VFS layer does (bd-hbld5).
     fn ext4_reject_immutable(inode: &Ext4Inode) -> Result<(), FfsError> {
         if inode.flags & ffs_types::EXT4_IMMUTABLE_FL != 0 {
+            return Err(FfsError::Io(std::io::Error::from_raw_os_error(libc::EPERM)));
+        }
+        Ok(())
+    }
+
+    /// Reject content mutation of an fs-verity inode (`EXT4_VERITY_FL`) with
+    /// EPERM. A verity file is sealed read-only and protected by a Merkle tree
+    /// past i_size; any write/truncate/punch would invalidate that tree and make
+    /// the kernel's verification fail (the file becomes unreadable). FrankenFS
+    /// has no fs-verity support, so it must never mutate such a file (bd-yz6c6).
+    fn ext4_reject_verity(inode: &Ext4Inode) -> Result<(), FfsError> {
+        if inode.flags & ffs_types::EXT4_VERITY_FL != 0 {
             return Err(FfsError::Io(std::io::Error::from_raw_os_error(libc::EPERM)));
         }
         Ok(())
@@ -35248,6 +35265,51 @@ mod tests {
         assert!(
             fs.fallocate(&cx, attr.ino, 0, 4096, 0).is_err(),
             "fallocate on an encrypted file must fail"
+        );
+    }
+
+    #[test]
+    fn verity_file_content_mutation_rejected_bd_yz6c6() {
+        // FrankenFS has no fs-verity support; mutating a verity file's content
+        // would break its Merkle tree, so write/fallocate/truncate must be
+        // rejected. Reads stay allowed (FrankenFS returns the raw data).
+        let Some((fs, _tmp)) = open_writable_ext4_mkfs(8) else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let attr = fs
+            .create(&cx, root, OsStr::new("sealed.bin"), 0o644, 0, 0)
+            .expect("create");
+        fs.write(&cx, attr.ino, 0, b"sealed contents")
+            .expect("seed write before sealing");
+
+        // Flag the inode fs-verity (EXT4_VERITY_FL).
+        let mut inode = fs.read_inode(&cx, attr.ino).expect("read inode");
+        inode.flags |= ffs_types::EXT4_VERITY_FL;
+        fs.persist_ext4_inode_for_testing(&cx, attr.ino, &inode)
+            .expect("persist verity flag");
+
+        assert!(
+            fs.write(&cx, attr.ino, 0, b"tamper").is_err(),
+            "writing a verity file must be rejected"
+        );
+        assert!(
+            fs.fallocate(&cx, attr.ino, 0, 4096, 0).is_err(),
+            "fallocate on a verity file must be rejected"
+        );
+        let trunc = SetAttrRequest {
+            size: Some(0),
+            ..SetAttrRequest::default()
+        };
+        assert!(
+            fs.setattr(&cx, attr.ino, &trunc).is_err(),
+            "truncating a verity file must be rejected"
+        );
+        // Reads remain allowed.
+        assert!(
+            fs.read(&cx, attr.ino, 0, 8).is_ok(),
+            "reading a verity file must still succeed"
         );
     }
 
