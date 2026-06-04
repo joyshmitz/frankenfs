@@ -6205,7 +6205,6 @@ impl OpenFs {
             let extent = parse_extent_data(&item.data).map_err(|e| parse_to_ffs_error(&e))?;
             let BtrfsExtentData::Regular {
                 extent_type,
-                compression,
                 disk_bytenr,
                 disk_num_bytes,
                 ..
@@ -6216,12 +6215,14 @@ impl OpenFs {
             if disk_bytenr == 0 {
                 continue; // sparse hole — no on-disk bytes
             }
-            if compression != 0 {
-                continue; // compressed-data csums need pre-decompression bytes (follow-on)
-            }
             if extent_type == BTRFS_FILE_EXTENT_PREALLOC {
                 continue; // preallocated/unwritten — no data checksum
             }
+            // Compressed extents ARE verified: btrfs checksums the compressed
+            // on-disk bytes (disk_num_bytes from disk_bytenr), keyed by
+            // disk_bytenr — exactly what the loop below reads and looks up. The
+            // checksum protects the compressed representation; decompression is
+            // a separate, later step and irrelevant to verification.
 
             let dnb = usize::try_from(disk_num_bytes)
                 .map_err(|_| FfsError::Format("btrfs disk_num_bytes overflow".into()))?;
