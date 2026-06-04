@@ -9157,9 +9157,44 @@ impl OpenFs {
                     detail: "indirect: logical block number overflow".into(),
                 })?;
             let offset_in_block = (current_offset % bs) as usize;
-            let remaining_in_block = bs_usize - offset_in_block;
-            let chunk_size = remaining_in_block.min(to_read - bytes_read);
+            let remaining = to_read - bytes_read;
 
+            // Full-block-aligned span: coalesce a contiguous-physical run of
+            // present data blocks into ONE vectored device op (bd-bov9c),
+            // mirroring the extent / btrfs read paths. Holes break the run and
+            // are left zero-filled.
+            if offset_in_block == 0 && remaining >= bs_usize {
+                if let Some(phys0) = self.resolve_indirect_block(cx, scope, inode, logical_block)? {
+                    let mut run_len: u32 = 1;
+                    while ((run_len as usize) + 1) * bs_usize <= remaining {
+                        let Some(next_lb) = logical_block.checked_add(run_len) else {
+                            break;
+                        };
+                        match self.resolve_indirect_block(cx, scope, inode, next_lb)? {
+                            Some(p) if p == phys0 + u64::from(run_len) => run_len += 1,
+                            _ => break,
+                        }
+                    }
+                    let datas = self.read_contiguous_blocks_with_scope(
+                        cx,
+                        scope,
+                        BlockNumber(phys0),
+                        run_len as usize,
+                    )?;
+                    for (i, data) in datas.iter().enumerate() {
+                        let dst = bytes_read + i * bs_usize;
+                        buf[dst..dst + bs_usize].copy_from_slice(&data[..bs_usize]);
+                    }
+                    bytes_read += run_len as usize * bs_usize;
+                } else {
+                    // Hole at a full block boundary — already zeroed.
+                    bytes_read += bs_usize;
+                }
+                continue;
+            }
+
+            // Partial head/tail (sub-block) read: scalar.
+            let chunk_size = (bs_usize - offset_in_block).min(remaining);
             if let Some(phys_block) =
                 self.resolve_indirect_block(cx, scope, inode, logical_block)?
             {
@@ -27027,6 +27062,64 @@ mod tests {
         assert!(
             out[BS..].iter().all(|&b| b == 0),
             "sparse hole must zero-fill"
+        );
+    }
+
+    #[test]
+    fn ext4_indirect_read_coalesces_contiguous_blocks_bd_bov9c() {
+        const BS: usize = 4096;
+        let mut image = build_ext4_image_with_extents();
+        // Four contiguous data blocks (30..34), each a distinct pattern.
+        for b in 30..34_usize {
+            let pat = vec![u8::try_from(b).expect("block index fits u8"); BS];
+            image[b * BS..(b + 1) * BS].copy_from_slice(&pat);
+        }
+
+        let dev = VectoredCountingDevice::new(TestDevice::from_vec(image));
+        let scalar = Arc::clone(&dev.scalar_reads);
+        let vectored = Arc::clone(&dev.vectored_reads);
+        let cx = Cx::for_testing();
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
+        let scope = RequestScope::empty();
+
+        // Legacy indirect inode: 4 direct pointers → contiguous blocks 30..34.
+        let mut inode = make_test_inode(ffs_types::S_IFREG | 0o644, 0, 0);
+        let mut ptrs = vec![0_u8; 15 * 4];
+        for i in 0..4_usize {
+            let blk = u32::try_from(30 + i).expect("block fits u32");
+            ptrs[i * 4..i * 4 + 4].copy_from_slice(&blk.to_le_bytes());
+        }
+        inode.extent_bytes = ptrs;
+        inode.size = (4 * BS) as u64;
+
+        scalar.store(0, AtomicOrdering::SeqCst);
+        vectored.store(0, AtomicOrdering::SeqCst);
+        let out = fs
+            .read_ext4_indirect(&cx, &scope, &inode, 0, u32::try_from(4 * BS).unwrap())
+            .expect("indirect read");
+
+        // ISOMORPHISM: each block reads through verbatim.
+        assert_eq!(out.len(), 4 * BS);
+        for b in 0..4_usize {
+            assert!(
+                out[b * BS..(b + 1) * BS]
+                    .iter()
+                    .all(|&x| x == u8::try_from(30 + b).unwrap()),
+                "block {b} reads its pattern"
+            );
+        }
+
+        // SCORE (bd-bov9c): the 4 contiguous data blocks are served by exactly
+        // ONE vectored device op; pre-coalescing this was 4 scalar reads.
+        assert_eq!(
+            vectored.load(AtomicOrdering::SeqCst),
+            1,
+            "4 contiguous indirect data blocks coalesce into one vectored read"
+        );
+        assert_eq!(
+            scalar.load(AtomicOrdering::SeqCst),
+            0,
+            "no scalar per-block indirect data reads remain"
         );
     }
 
