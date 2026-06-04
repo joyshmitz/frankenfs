@@ -48562,7 +48562,9 @@ mod tests {
     /// runs but FrankenFS cannot open the resulting image, this panics so the
     /// gap is visible. The `TempDir` keeps the on-disk image alive for callers
     /// that want to run `btrfs check` on it (bd-x3fcu validation).
-    fn open_writable_btrfs_mkfs(size_mb: u64) -> Option<(OpenFs, tempfile::TempDir, std::path::PathBuf)> {
+    fn open_writable_btrfs_mkfs(
+        size_mb: u64,
+    ) -> Option<(OpenFs, TestDevice, tempfile::TempDir, std::path::PathBuf)> {
         let tmp = tempfile::TempDir::new().expect("tmpdir");
         let image = tmp.path().join("test.btrfs");
         let f = std::fs::File::create(&image).expect("create image");
@@ -48587,11 +48589,68 @@ mod tests {
             btrfs_rw_ephemeral_ok: true,
             ..OpenOptions::default()
         };
-        let mut fs = OpenFs::from_device(&cx, Box::new(dev), &opts)
+        let mut fs = OpenFs::from_device(&cx, Box::new(dev.clone()), &opts)
             .expect("FrankenFS must open a real btrfs-progs image");
         fs.enable_writes(&cx)
             .expect("FrankenFS must enable writes on a real btrfs image");
-        Some((fs, tmp, image))
+        Some((fs, dev, tmp, image))
+    }
+
+    /// Run `btrfs check` on an image file; returns (success, combined output).
+    fn run_btrfs_check(image: &std::path::Path) -> Option<(bool, String)> {
+        let out = std::process::Command::new("btrfs")
+            .args(["check", image.to_str().unwrap()])
+            .output()
+            .ok()?;
+        let mut combined = String::from_utf8_lossy(&out.stdout).into_owned();
+        combined.push_str(&String::from_utf8_lossy(&out.stderr));
+        Some((out.status.success(), combined))
+    }
+
+    /// bd-x3fcu increment 2 / bd-x36qn: a file created + committed by FrankenFS
+    /// on a REAL btrfs image must remain `btrfs check`-clean. This validates the
+    /// btrfs write/commit path against real btrfs-progs (the validation that
+    /// gated the NODATASUM->datasum flip).
+    ///
+    /// CURRENTLY FAILS (bd-x36qn): real `btrfs check` rejects a FrankenFS write
+    /// with parent-transid-verify failures, extent-tree ref/backref mismatches,
+    /// and an fs-root level mismatch — the btrfs write path is not yet
+    /// kernel-valid. Kept as the validation harness; remove `#[ignore]` once
+    /// bd-x36qn is fixed to prove each fix against real btrfs-progs.
+    #[test]
+    #[ignore = "bd-x36qn: btrfs write path is not btrfs-check-valid yet (harness)"]
+    fn btrfs_created_file_passes_btrfs_check_bd_x3fcu() {
+        let Some((fs, dev, _tmp, image)) = open_writable_btrfs_mkfs(256) else {
+            return; // btrfs-progs unavailable
+        };
+        let cx = Cx::for_testing();
+
+        // Create a regular file in the default-subvolume root dir (objectid 256).
+        fs.create(
+            &cx,
+            InodeNumber(u64::from(BTRFS_FIRST_FREE_OBJECTID)),
+            OsStr::new("x3fcu_check.txt"),
+            0o644,
+            0,
+            0,
+        )
+        .expect("btrfs create on a real image");
+
+        // Persist the transaction (data flush then metadata commit), then write
+        // the modified image back to disk for btrfs check.
+        let _ = fs.flush_mvcc_to_device(&cx);
+        fs.btrfs_full_transaction_commit(&cx, "x3fcu-create-check")
+            .expect("btrfs full transaction commit");
+        let bytes = dev.snapshot_bytes();
+        std::fs::write(&image, &bytes).expect("write modified image");
+
+        let Some((ok, output)) = run_btrfs_check(&image) else {
+            return; // btrfs check tool unavailable
+        };
+        assert!(
+            ok,
+            "btrfs check must accept a FrankenFS-created+committed file:\n{output}"
+        );
     }
 
     /// bd-x3fcu foundation: FrankenFS must open a REAL btrfs-progs-formatted
@@ -48599,7 +48658,7 @@ mod tests {
     /// later increments can write datasum data and validate with `btrfs check`.
     #[test]
     fn btrfs_opens_real_mkfs_image_and_reads_root_bd_x3fcu() {
-        let Some((fs, _tmp, _image)) = open_writable_btrfs_mkfs(256) else {
+        let Some((fs, _dev, _tmp, _image)) = open_writable_btrfs_mkfs(256) else {
             return; // btrfs-progs unavailable
         };
         let cx = Cx::for_testing();
