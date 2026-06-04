@@ -179,6 +179,90 @@ pub fn build_extent_csum_item(
     Ok((key, value))
 }
 
+/// Maximum number of crc32c data checksums that fit in a single EXTENT_CSUM
+/// item in a leaf of `nodesize` bytes.
+///
+/// A leaf is `BTRFS_HEADER_SIZE` (101) of header plus item slots; a single
+/// item costs its 25-byte item entry plus its value bytes. So the value of one
+/// EXTENT_CSUM item that is alone in a leaf can be at most
+/// `nodesize - 101 - 25` bytes, i.e. `(nodesize - 126) / 4` crc32c checksums.
+/// Items at or below this bound always fit in a leaf (the B-tree handles
+/// packing several smaller items per leaf); the kernel accepts an EXTENT_CSUM
+/// item of any valid length, so any split that respects this bound is
+/// kernel-readable.
+#[must_use]
+pub fn max_data_csums_per_item(nodesize: u32) -> usize {
+    let usable = (nodesize as usize).saturating_sub(101 + 25);
+    (usable / BTRFS_CRC32C_CSUM_SIZE).max(1)
+}
+
+/// Build the csum-tree leaf items for one contiguous on-disk data extent,
+/// splitting into multiple EXTENT_CSUM items so each fits in a leaf.
+///
+/// [`build_extent_csum_item`] packs every sector's checksum into a single
+/// item, which overflows a leaf once an extent has more than
+/// [`max_data_csums_per_item`] sectors (a multi-MiB extent). btrfs stores such
+/// an extent's checksums across several EXTENT_CSUM items, each keyed by the
+/// disk bytenr of the first sector it covers. This returns that ordered set:
+/// each item covers up to `max_csums_per_item` consecutive sectors, and item
+/// `n`'s key offset is `disk_bytenr + n * max_csums_per_item * sectorsize`.
+///
+/// `data` must be a non-empty whole multiple of `sectorsize`; `sectorsize` and
+/// `max_csums_per_item` must be non-zero. Pass
+/// `max_data_csums_per_item(nodesize)` for `max_csums_per_item`.
+///
+/// # Errors
+/// Returns [`BtrfsMutationError::InvalidConfig`] on a zero `sectorsize` /
+/// `max_csums_per_item`, or `data` that is not a positive multiple of
+/// `sectorsize`.
+pub fn build_extent_csum_items(
+    disk_bytenr: u64,
+    data: &[u8],
+    sectorsize: usize,
+    max_csums_per_item: usize,
+) -> Result<Vec<(BtrfsKey, Vec<u8>)>, BtrfsMutationError> {
+    if max_csums_per_item == 0 {
+        return Err(BtrfsMutationError::InvalidConfig(
+            "max_csums_per_item must be non-zero",
+        ));
+    }
+    // build_extent_csum_item validates sectorsize / data shape.
+    let chunk_bytes =
+        max_csums_per_item
+            .checked_mul(sectorsize)
+            .ok_or(BtrfsMutationError::InvalidConfig(
+                "max_csums_per_item * sectorsize overflows",
+            ))?;
+    if chunk_bytes == 0 {
+        return Err(BtrfsMutationError::InvalidConfig(
+            "sectorsize must be non-zero",
+        ));
+    }
+    if data.is_empty() || data.len() % sectorsize != 0 {
+        return Err(BtrfsMutationError::InvalidConfig(
+            "data must be a positive whole multiple of sectorsize",
+        ));
+    }
+    let mut items = Vec::with_capacity(data.len().div_ceil(chunk_bytes));
+    let mut offset = 0usize;
+    while offset < data.len() {
+        let end = (offset + chunk_bytes).min(data.len());
+        let chunk_bytenr =
+            disk_bytenr
+                .checked_add(offset as u64)
+                .ok_or(BtrfsMutationError::InvalidConfig(
+                    "extent disk bytenr overflows",
+                ))?;
+        items.push(build_extent_csum_item(
+            chunk_bytenr,
+            &data[offset..end],
+            sectorsize,
+        )?);
+        offset = end;
+    }
+    Ok(items)
+}
+
 /// Convert btrfs inode flags to generic FS_*_FL flags for `FS_IOC_GETFLAGS`.
 ///
 /// Maps kernel `btrfs_inode_flags_to_fsflags()` from `fs/btrfs/ioctl.c`.
@@ -5925,6 +6009,80 @@ mod tests {
         // Zero sectorsize.
         assert!(matches!(
             build_extent_csum_item(0, &[0u8; 8], 0),
+            Err(BtrfsMutationError::InvalidConfig(_))
+        ));
+    }
+
+    #[test]
+    fn build_extent_csum_items_splits_large_extent_across_leaf_sized_items_bd_x3fcu() {
+        let sectorsize = 4096_usize;
+        let max_per_item = 2_usize; // force splitting
+        // 5 sectors with distinct content -> ceil(5/2) = 3 items (2,2,1).
+        let mut data = Vec::new();
+        for s in 0..5_u8 {
+            data.extend(std::iter::repeat_n(0xA0 | s, sectorsize));
+        }
+        let disk_bytenr = 0x40_000_u64;
+        let items =
+            build_extent_csum_items(disk_bytenr, &data, sectorsize, max_per_item).expect("split");
+
+        assert_eq!(items.len(), 3, "5 sectors / 2 per item = 3 items");
+        // Item keys advance by max_per_item*sectorsize from disk_bytenr.
+        assert_eq!(items[0].0.offset, disk_bytenr);
+        assert_eq!(items[1].0.offset, disk_bytenr + 2 * sectorsize as u64);
+        assert_eq!(items[2].0.offset, disk_bytenr + 4 * sectorsize as u64);
+        // All keys carry the EXTENT_CSUM objectid + type.
+        for (k, _) in &items {
+            assert_eq!(k.objectid, BTRFS_EXTENT_CSUM_OBJECTID);
+            assert_eq!(k.item_type, BTRFS_ITEM_EXTENT_CSUM);
+        }
+        // Value lengths: 2,2,1 csums * 4 bytes.
+        assert_eq!(items[0].1.len(), 2 * BTRFS_CRC32C_CSUM_SIZE);
+        assert_eq!(items[1].1.len(), 2 * BTRFS_CRC32C_CSUM_SIZE);
+        assert_eq!(items[2].1.len(), BTRFS_CRC32C_CSUM_SIZE);
+        // Concatenating all item values reproduces the single-item packing
+        // (proves the split is a faithful partition, not a recompute).
+        let whole = build_extent_csum_item(disk_bytenr, &data, sectorsize)
+            .expect("single")
+            .1;
+        let joined: Vec<u8> = items.iter().flat_map(|(_, v)| v.clone()).collect();
+        assert_eq!(joined, whole);
+    }
+
+    #[test]
+    fn build_extent_csum_items_single_item_when_under_limit_bd_x3fcu() {
+        let sectorsize = 4096_usize;
+        let data = vec![0x5A_u8; sectorsize * 3];
+        let items = build_extent_csum_items(0x1000, &data, sectorsize, 8).expect("fits");
+        assert_eq!(
+            items.len(),
+            1,
+            "3 sectors under the 8-per-item limit = 1 item"
+        );
+        assert_eq!(items[0].1.len(), 3 * BTRFS_CRC32C_CSUM_SIZE);
+    }
+
+    #[test]
+    fn max_data_csums_per_item_matches_leaf_geometry_bd_x3fcu() {
+        // (nodesize - 101 - 25) / 4, floored, min 1.
+        assert_eq!(max_data_csums_per_item(4096), (4096 - 126) / 4);
+        assert_eq!(max_data_csums_per_item(16384), (16384 - 126) / 4);
+        // Degenerate tiny nodesize never returns 0.
+        assert_eq!(max_data_csums_per_item(64), 1);
+    }
+
+    #[test]
+    fn build_extent_csum_items_rejects_bad_args_bd_x3fcu() {
+        assert!(matches!(
+            build_extent_csum_items(0, &[0u8; 4096], 4096, 0),
+            Err(BtrfsMutationError::InvalidConfig(_))
+        ));
+        assert!(matches!(
+            build_extent_csum_items(0, &[0u8; 4097], 4096, 4),
+            Err(BtrfsMutationError::InvalidConfig(_))
+        ));
+        assert!(matches!(
+            build_extent_csum_items(0, &[], 4096, 4),
             Err(BtrfsMutationError::InvalidConfig(_))
         ));
     }
