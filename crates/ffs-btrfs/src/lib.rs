@@ -1850,6 +1850,40 @@ pub fn walk_tree(
         out: Vec::new(),
         active_path: HashSet::new(),
         visited_nodes: HashSet::new(),
+        range: None,
+    };
+    walker.walk_node(root_logical)?;
+    Ok(walker.out)
+}
+
+/// Walk a btrfs b-tree but descend only into subtrees that can contain a key
+/// in the half-open range `[lo, hi)`, returning exactly the leaf entries whose
+/// key falls in that range.
+///
+/// This is the targeted-descent counterpart to [`walk_tree`]: instead of
+/// visiting every node (O(N) reads), it binary-prunes internal-node children
+/// whose key span cannot overlap the requested range, reading only the
+/// O(log N) nodes along the covering paths. The returned entries are identical
+/// to `walk_tree(...).into_iter().filter(|e| lo <= e.key < hi)` — same items,
+/// same order — but without reading subtrees that hold no matching key.
+pub fn walk_tree_range(
+    read_physical: &mut dyn FnMut(u64) -> Result<Vec<u8>, ParseError>,
+    chunks: &[BtrfsChunkEntry],
+    root_logical: u64,
+    nodesize: u32,
+    csum_type: u16,
+    lo: BtrfsKey,
+    hi: BtrfsKey,
+) -> Result<Vec<BtrfsLeafEntry>, ParseError> {
+    let mut walker = BtrfsTreeWalker {
+        read_physical,
+        chunks,
+        nodesize,
+        csum_type,
+        out: Vec::new(),
+        active_path: HashSet::new(),
+        visited_nodes: HashSet::new(),
+        range: Some((lo, hi)),
     };
     walker.walk_node(root_logical)?;
     Ok(walker.out)
@@ -1863,6 +1897,9 @@ struct BtrfsTreeWalker<'a> {
     out: Vec<BtrfsLeafEntry>,
     active_path: HashSet<u64>,
     visited_nodes: HashSet<u64>,
+    /// When `Some((lo, hi))`, prune internal-node children and leaf items
+    /// outside the half-open key range `[lo, hi)`. `None` walks the whole tree.
+    range: Option<(BtrfsKey, BtrfsKey)>,
 }
 
 impl BtrfsTreeWalker<'_> {
@@ -1917,15 +1954,32 @@ impl BtrfsTreeWalker<'_> {
         header.validate(block.len(), Some(logical))?;
 
         if header.level == 0 {
-            collect_leaf_items(&block, &mut self.out)?;
+            collect_leaf_items(&block, &mut self.out, self.range.as_ref())?;
         } else {
             let (_, ptrs) = parse_internal_items(&block)?;
-            for kp in &ptrs {
+            for (idx, kp) in ptrs.iter().enumerate() {
                 if kp.blockptr % nodesize_u64 != 0 {
                     return Err(ParseError::InvalidField {
                         field: "blockptr",
                         reason: "not aligned to nodesize",
                     });
+                }
+                // Targeted descent: child `idx` covers the key span
+                // `[kp.key, next_key)` (the next sibling's key, or +inf for the
+                // last child). Skip it when that span cannot overlap [lo, hi).
+                if let Some((lo, hi)) = self.range.as_ref() {
+                    // Span starts at or after `hi` -> no overlap (keys sorted).
+                    if key_cmp(&kp.key, hi) != Ordering::Less {
+                        // All later children start even higher; stop early.
+                        break;
+                    }
+                    // Span ends at or before `lo` -> no overlap. The span end is
+                    // the next sibling's key; the last child's span is unbounded.
+                    if let Some(next) = ptrs.get(idx + 1) {
+                        if key_cmp(&next.key, lo) != Ordering::Greater {
+                            continue;
+                        }
+                    }
                 }
                 self.walk_node(kp.blockptr)?;
             }
@@ -1936,9 +1990,21 @@ impl BtrfsTreeWalker<'_> {
     }
 }
 
-fn collect_leaf_items(block: &[u8], out: &mut Vec<BtrfsLeafEntry>) -> Result<(), ParseError> {
+fn collect_leaf_items(
+    block: &[u8],
+    out: &mut Vec<BtrfsLeafEntry>,
+    range: Option<&(BtrfsKey, BtrfsKey)>,
+) -> Result<(), ParseError> {
     let (_, items) = parse_leaf_items(block)?;
     for item in &items {
+        if let Some((lo, hi)) = range {
+            // Keep only items in the half-open range [lo, hi).
+            if key_cmp(&item.key, lo) == Ordering::Less
+                || key_cmp(&item.key, hi) != Ordering::Less
+            {
+                continue;
+            }
+        }
         let off = usize::try_from(item.data_offset).map_err(|_| ParseError::IntegerConversion {
             field: "data_offset",
         })?;
@@ -6550,6 +6616,112 @@ mod tests {
         assert_eq!(entries[0].data, vec![1, 2, 3, 4]);
         assert_eq!(entries[1].key.objectid, 512);
         assert_eq!(entries[1].data, vec![5, 6, 7, 8]);
+    }
+
+    /// Build a 2-level tree: one internal root with `objectids.len()` leaf
+    /// children, each leaf holding a single item keyed `(objectid, 1, 0)` with a
+    /// 4-byte payload. Returns the block map and the root logical address.
+    fn build_two_level_tree(objectids: &[u64]) -> (HashMap<u64, Vec<u8>>, u64) {
+        let root_logical = 0x1_0000_u64;
+        let mut root = vec![0_u8; NODESIZE as usize];
+        let nritems = u32::try_from(objectids.len()).expect("test child count fits u32");
+        write_header(&mut root, root_logical, nritems, 1, 1, 10);
+        let mut blocks: HashMap<u64, Vec<u8>> = HashMap::new();
+        for (i, &oid) in objectids.iter().enumerate() {
+            let leaf_logical = 0x2_0000_u64 + (i as u64) * 0x1_0000;
+            write_key_ptr(&mut root, i, oid, 1, leaf_logical, 10);
+            let mut leaf = vec![0_u8; NODESIZE as usize];
+            write_header(&mut leaf, leaf_logical, 1, 0, 5, 10);
+            write_leaf_item(&mut leaf, 0, oid, 1, 2000, 4);
+            let payload = u32::try_from(oid).unwrap_or(0).to_le_bytes();
+            leaf[2000..2004].copy_from_slice(&payload);
+            stamp_tree_block_crc32c(&mut leaf);
+            blocks.insert(leaf_logical, leaf);
+        }
+        stamp_tree_block_crc32c(&mut root);
+        blocks.insert(root_logical, root);
+        (blocks, root_logical)
+    }
+
+    #[test]
+    fn walk_tree_range_isomorphic_to_filtered_full_walk_and_prunes_reads() {
+        // 8 leaves spread across the keyspace under a single internal root.
+        let oids: Vec<u64> = vec![100, 200, 300, 400, 500, 600, 700, 800];
+        let (blocks, root_logical) = build_two_level_tree(&oids);
+        let chunks = identity_chunks();
+
+        let key = |oid: u64| BtrfsKey {
+            objectid: oid,
+            item_type: 0,
+            offset: 0,
+        };
+
+        // Probe a spread of half-open ranges, including empty, single-hit,
+        // multi-hit, boundary, and whole-tree.
+        let ranges = [
+            (key(0), key(50)),     // empty (below everything)
+            (key(300), key(301)),  // single leaf
+            (key(250), key(650)),  // spans 300,400,500,600
+            (key(800), key(900)),  // last leaf only
+            (key(0), key(10_000)), // whole tree
+            (key(401), key(599)),  // gap-only: hits leaf keyed 500
+        ];
+
+        for (lo, hi) in ranges {
+            // Reference: full walk, filtered to [lo, hi) in plain code.
+            let mut full_reads = 0_u32;
+            let mut read_full = |phys: u64| -> Result<Vec<u8>, ParseError> {
+                full_reads += 1;
+                blocks.get(&phys).cloned().ok_or(ParseError::InvalidField {
+                    field: "physical",
+                    reason: "block not in test image",
+                })
+            };
+            let full = walk_tree(&mut read_full, &chunks, root_logical, NODESIZE, 0)
+                .expect("full walk");
+            let expected: Vec<_> = full
+                .into_iter()
+                .filter(|e| {
+                    key_cmp(&e.key, &lo) != Ordering::Less && key_cmp(&e.key, &hi) == Ordering::Less
+                })
+                .collect();
+
+            // Targeted descent.
+            let mut range_reads = 0_u32;
+            let mut read_range = |phys: u64| -> Result<Vec<u8>, ParseError> {
+                range_reads += 1;
+                blocks.get(&phys).cloned().ok_or(ParseError::InvalidField {
+                    field: "physical",
+                    reason: "block not in test image",
+                })
+            };
+            let got = walk_tree_range(&mut read_range, &chunks, root_logical, NODESIZE, 0, lo, hi)
+                .expect("range walk");
+
+            // Isomorphism: identical entries (key + data), identical order.
+            assert_eq!(got.len(), expected.len(), "range [{lo:?},{hi:?}) entry count");
+            for (g, e) in got.iter().zip(expected.iter()) {
+                assert_eq!(g.key, e.key, "range [{lo:?},{hi:?}) key");
+                assert_eq!(g.data, e.data, "range [{lo:?},{hi:?}) data");
+            }
+
+            // Pruning: the targeted walk never reads MORE nodes than the full
+            // walk, and reads strictly fewer whenever the range excludes at
+            // least one leaf (every probe here except the whole-tree one).
+            assert!(
+                range_reads <= full_reads,
+                "range [{lo:?},{hi:?}) read {range_reads} > full {full_reads}"
+            );
+            let hits = got.len();
+            // full_reads = 1 root + 8 leaves = 9; targeted = 1 root + (leaves touched).
+            // Touched leaves <= hits + 1 boundary leaf, always < 8 for these probes.
+            if hits < oids.len() {
+                assert!(
+                    range_reads < full_reads,
+                    "range [{lo:?},{hi:?}) hit {hits} leaves but read {range_reads} (no pruning vs full {full_reads})"
+                );
+            }
+        }
     }
 
     #[test]
