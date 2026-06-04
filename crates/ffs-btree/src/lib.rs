@@ -2510,6 +2510,78 @@ Hole { hole_len: 90 }
         }
     }
 
+    /// Regression: force the extent tree to grow to depth 2, exercising the
+    /// deep-grow path `grow_root_index` (depth 1 -> 2). The existing
+    /// `many_inserts_cause_multi_level_tree` stops at 20 extents = depth 1
+    /// (`grow_root_leaf` only). `grow_root_index` is where a per-node-level
+    /// scale bug of the bd-iv5uy class (btrfs writeback DAG) would hide on the
+    /// ext4 side: code-read shows it serializes the two split halves at
+    /// `header.depth` and the new root at `header.depth + 1`. With a 1 KiB
+    /// block the inline root holds 4 index entries and each external leaf holds
+    /// 84 extents, so 4 x 84 = 336 fills depth 1 and the 337th forces depth 2.
+    /// bd-w9erb.
+    #[test]
+    fn grow_root_index_reaches_depth2_bd_w9erb() {
+        let cx = test_cx();
+        // 1 KiB block: max_entries_external(1024) == 84 (verified above), so
+        // depth 2 is reached at ~337 non-mergeable extents rather than ~1361.
+        let dev = MemBlockDevice::new(1024);
+        let mut root = make_root();
+        let mut alloc = SeqAllocator::new(1000);
+
+        // Insert 500 non-mergeable extents (logical gaps of 10, each raw_len 1
+        // so adjacent extents never coalesce) -- comfortably past the 337
+        // threshold for depth 2.
+        const N: u32 = 500;
+        for i in 0..N {
+            let ext = Ext4Extent {
+                logical_block: i * 10,
+                raw_len: 1,
+                physical_start: (i as u64) * 10 + 50_000,
+            };
+            insert(&cx, &dev, &mut root, ext, &mut alloc).unwrap();
+        }
+
+        // The inline root must now be an index at depth >= 2, which can only be
+        // produced by grow_root_index (grow_root_leaf only reaches depth 1).
+        let (header, _) = parse_header(&root).unwrap();
+        assert!(
+            header.depth >= 2,
+            "tree should have grown to depth >= 2 via grow_root_index, got depth {}",
+            header.depth
+        );
+
+        // Every inserted extent must still be findable through the deeper tree
+        // (descend_search validates child.depth + 1 == parent.depth at each
+        // level, so a mis-stamped depth from grow_root_index would surface here
+        // as Corruption rather than Found).
+        for i in 0..N {
+            let result = search(&cx, &dev, &root, i * 10).unwrap();
+            assert!(
+                matches!(&result, SearchResult::Found { .. }),
+                "expected Found for block {}, got {result:?}",
+                i * 10
+            );
+            if let SearchResult::Found { extent, .. } = result {
+                assert_eq!(extent.logical_block, i * 10);
+                assert_eq!(extent.physical_start, (i as u64) * 10 + 50_000);
+            }
+        }
+
+        // A full in-order walk must yield exactly N extents in ascending logical
+        // order -- confirms no leaves were orphaned or duplicated by the split.
+        let mut visited = Vec::new();
+        let count = walk(&cx, &dev, &root, &mut |ext| {
+            visited.push(ext.logical_block);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(count, N as usize);
+        for i in 0..N as usize {
+            assert_eq!(visited[i], (i as u32) * 10);
+        }
+    }
+
     #[test]
     fn bad_magic_returns_corruption() {
         let cx = test_cx();
