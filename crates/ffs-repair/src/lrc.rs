@@ -34,6 +34,7 @@
 //!
 //! All operations are safe Rust.
 
+use rayon::prelude::{IntoParallelIterator, ParallelIterator};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -347,18 +348,17 @@ pub fn encode_global(config: &LrcConfig, data: &[Vec<u8>]) -> Vec<Vec<u8>> {
         }
     }
 
-    let mut global_parities = Vec::with_capacity(p);
-
-    for j in 0..p {
-        let mut parity = vec![0_u8; block_size];
-        for (i, block) in data.iter().enumerate() {
-            let coeff = global_parity_coeff(i, j);
-            gf256_mul_xor_into(&mut parity, block, coeff);
-        }
-        global_parities.push(parity);
-    }
-
-    global_parities
+    (0..p)
+        .into_par_iter()
+        .map(|j| {
+            let mut parity = vec![0_u8; block_size];
+            for (i, block) in data.iter().enumerate() {
+                let coeff = global_parity_coeff(i, j);
+                gf256_mul_xor_into(&mut parity, block, coeff);
+            }
+            parity
+        })
+        .collect()
 }
 
 /// Full LRC encode: returns `(local_parities, global_parities)`.

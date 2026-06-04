@@ -984,6 +984,7 @@ dependencies = [
  "insta",
  "parking_lot",
  "proptest",
+ "rayon",
  "serde",
  "serde_json",
  "tracing",
