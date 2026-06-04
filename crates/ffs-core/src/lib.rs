@@ -331,6 +331,7 @@ pub fn fuzz_btrfs_serialize_inode_ref_payload(
 /// recovery or diagnostic workflows where reading a partially-corrupt
 /// image is intentional.
 #[derive(Debug, Clone)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct OpenOptions {
     /// Skip mount-time validation (geometry, features, checksums).
     ///
@@ -387,6 +388,13 @@ pub struct OpenOptions {
     /// With durable writeback implemented (bd-jdo53), mutations are always allowed
     /// regardless of this flag. The flag only affects commit behavior, not permission.
     pub btrfs_rw_ephemeral_ok: bool,
+    /// Verify btrfs file data against the csum tree on every read (bd-tkv2n).
+    ///
+    /// Defaults off: reads return data unverified (existing behavior). When on,
+    /// reads of a `datasum` inode verify the covered on-disk sectors against the
+    /// csum tree and return EIO on a mismatch, matching the kernel. Opt-in to
+    /// avoid a read-path regression while the path matures.
+    pub btrfs_verify_data_on_read: bool,
 }
 
 #[allow(clippy::derivable_impls)]
@@ -404,6 +412,7 @@ impl Default for OpenOptions {
             ext4_verify_journal_checksums: true,
             numa_allocation_policy: NumaAllocationPolicy::Disabled,
             btrfs_rw_ephemeral_ok: false,
+            btrfs_verify_data_on_read: false,
         }
     }
 }
@@ -839,7 +848,15 @@ pub struct OpenFs {
     /// `EROFS` to prevent silent data loss. When `true`, mutations proceed
     /// against the in-memory COW tree but will be lost on unmount.
     btrfs_rw_ephemeral_ok: bool,
+    /// When `true`, btrfs reads verify data against the csum tree (bd-tkv2n).
+    btrfs_verify_data_on_read: bool,
+    /// Lazily cached on-disk csum-tree items for read-only verify-on-read.
+    /// `None` until first use; populated by walking the csum tree once.
+    btrfs_csum_read_cache: Mutex<Option<std::sync::Arc<BtrfsCsumItems>>>,
 }
+
+/// Csum-tree items `(key, packed crc32c values)` used by the read-verify path.
+type BtrfsCsumItems = Vec<(BtrfsKey, Vec<u8>)>;
 
 const EXT4_FILE_DATA_BLOCK_CACHE_LIMIT: usize = 256;
 
@@ -2672,6 +2689,8 @@ impl OpenFs {
             move_ext_donor_fds: Mutex::new(BTreeMap::new()),
             btrfs_inode_path_cache: Mutex::new(None),
             btrfs_rw_ephemeral_ok: options.btrfs_rw_ephemeral_ok,
+            btrfs_verify_data_on_read: options.btrfs_verify_data_on_read,
+            btrfs_csum_read_cache: Mutex::new(None),
         };
 
         if fs.is_ext4() && !options.skip_validation {
@@ -6132,10 +6151,106 @@ impl OpenFs {
         Ok(&decompressed[src_start..src_end])
     }
 
+    /// Gather the csum-tree items for the read-verify path (bd-tkv2n): from the
+    /// in-memory csum tree when writes are enabled, otherwise a lazily-cached
+    /// on-disk walk. Empty when the filesystem has no csum tree.
+    #[allow(clippy::significant_drop_tightening)]
+    fn btrfs_read_csum_items(&self, cx: &Cx) -> ffs_error::Result<std::sync::Arc<BtrfsCsumItems>> {
+        if let Some(alloc_mutex) = self.btrfs_alloc_state.as_ref() {
+            let alloc = alloc_mutex.lock();
+            let lo = BtrfsKey {
+                objectid: 0,
+                item_type: 0,
+                offset: 0,
+            };
+            let hi = BtrfsKey {
+                objectid: u64::MAX,
+                item_type: u8::MAX,
+                offset: u64::MAX,
+            };
+            let items = alloc
+                .csum_tree
+                .range(&lo, &hi)
+                .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+            return Ok(std::sync::Arc::new(items));
+        }
+        {
+            let guard = self.btrfs_csum_read_cache.lock();
+            if let Some(cached) = guard.as_ref() {
+                return Ok(cached.clone());
+            }
+        }
+        let items: Vec<(BtrfsKey, Vec<u8>)> =
+            match self.btrfs_fs_tree_root_bytenr(cx, BTRFS_CSUM_TREE_OBJECTID) {
+                Ok(bytenr) => self
+                    .walk_btrfs_tree(cx, bytenr)?
+                    .into_iter()
+                    .map(|entry| (entry.key, entry.data))
+                    .collect(),
+                Err(FfsError::NotFound(_)) => Vec::new(),
+                Err(e) => return Err(e),
+            };
+        let arc = std::sync::Arc::new(items);
+        *self.btrfs_csum_read_cache.lock() = Some(arc.clone());
+        Ok(arc)
+    }
+
+    /// Verify one regular data extent against the csum tree (bd-x3fcu).
+    ///
+    /// Reads each on-disk sector of the extent (`disk_num_bytes` from
+    /// `disk_bytenr` — the compressed bytes for a compressed extent, which is
+    /// exactly what btrfs checksums) and compares its crc32c to the recorded
+    /// `EXTENT_CSUM`, returning [`FfsError::Corruption`] on the first mismatch.
+    /// Holes (`disk_bytenr == 0`) and preallocated extents carry no checksum
+    /// and are skipped, as are sectors with no recorded checksum.
+    ///
+    /// # Errors
+    /// [`FfsError::Corruption`] on mismatch, or a read error.
+    fn btrfs_verify_one_extent_csum(
+        &self,
+        cx: &Cx,
+        csum_items: &[(BtrfsKey, Vec<u8>)],
+        sectorsize: usize,
+        extent_type: u8,
+        disk_bytenr: u64,
+        disk_num_bytes: u64,
+    ) -> ffs_error::Result<()> {
+        if disk_bytenr == 0 || extent_type == BTRFS_FILE_EXTENT_PREALLOC {
+            return Ok(()); // hole / preallocated-unwritten — no on-disk data checksum
+        }
+        let dnb = usize::try_from(disk_num_bytes)
+            .map_err(|_| FfsError::Format("btrfs disk_num_bytes overflow".into()))?;
+        let sectors = dnb.div_ceil(sectorsize);
+        for s in 0..sectors {
+            let delta = u64::try_from(s * sectorsize)
+                .map_err(|_| FfsError::Format("btrfs csum sector offset overflow".into()))?;
+            let bytenr = disk_bytenr
+                .checked_add(delta)
+                .ok_or_else(|| FfsError::Format("btrfs csum sector bytenr overflow".into()))?;
+            let Some(expected) = lookup_data_block_csum(csum_items, bytenr, sectorsize) else {
+                continue; // no checksum recorded for this sector
+            };
+            let mut sector = vec![0_u8; sectorsize];
+            self.btrfs_read_logical_into(cx, bytenr, &mut sector)?;
+            let actual = ffs_types::crc32c(&sector);
+            if actual != expected {
+                return Err(FfsError::Corruption {
+                    block: bytenr,
+                    detail: format!(
+                        "btrfs data csum mismatch at logical {bytenr}: \
+                         expected {expected:#010x}, computed {actual:#010x}"
+                    ),
+                });
+            }
+        }
+        Ok(())
+    }
+
     /// Verify a btrfs file's on-disk data against the csum tree (bd-x3fcu).
     ///
-    /// For a `datasum` inode this gathers the file's regular, uncompressed data
-    /// extents, reads each on-disk sector, and compares its crc32c to the
+    /// For a `datasum` inode this gathers the file's regular data extents
+    /// (compressed included — the checksum covers the compressed on-disk
+    /// bytes), reads each on-disk sector, and compares its crc32c to the
     /// `EXTENT_CSUM` recorded in the csum tree — returning a corruption error
     /// on the first mismatch, matching the kernel's EIO when reading a datasum
     /// file whose data has rotted. It is a no-op for `NODATASUM` inodes and for
@@ -6212,43 +6327,14 @@ impl OpenFs {
             else {
                 continue; // inline extents are covered by the metadata tree-block csum
             };
-            if disk_bytenr == 0 {
-                continue; // sparse hole — no on-disk bytes
-            }
-            if extent_type == BTRFS_FILE_EXTENT_PREALLOC {
-                continue; // preallocated/unwritten — no data checksum
-            }
-            // Compressed extents ARE verified: btrfs checksums the compressed
-            // on-disk bytes (disk_num_bytes from disk_bytenr), keyed by
-            // disk_bytenr — exactly what the loop below reads and looks up. The
-            // checksum protects the compressed representation; decompression is
-            // a separate, later step and irrelevant to verification.
-
-            let dnb = usize::try_from(disk_num_bytes)
-                .map_err(|_| FfsError::Format("btrfs disk_num_bytes overflow".into()))?;
-            let sectors = dnb.div_ceil(sectorsize);
-            for s in 0..sectors {
-                let delta = u64::try_from(s * sectorsize)
-                    .map_err(|_| FfsError::Format("btrfs csum sector offset overflow".into()))?;
-                let bytenr = disk_bytenr
-                    .checked_add(delta)
-                    .ok_or_else(|| FfsError::Format("btrfs csum sector bytenr overflow".into()))?;
-                let Some(expected) = lookup_data_block_csum(&csum_items, bytenr, sectorsize) else {
-                    continue; // no checksum recorded for this sector
-                };
-                let mut sector = vec![0_u8; sectorsize];
-                self.btrfs_read_logical_into(cx, bytenr, &mut sector)?;
-                let actual = ffs_types::crc32c(&sector);
-                if actual != expected {
-                    return Err(FfsError::Corruption {
-                        block: bytenr,
-                        detail: format!(
-                            "btrfs data csum mismatch at logical {bytenr}: \
-                             expected {expected:#010x}, computed {actual:#010x}"
-                        ),
-                    });
-                }
-            }
+            self.btrfs_verify_one_extent_csum(
+                cx,
+                &csum_items,
+                sectorsize,
+                extent_type,
+                disk_bytenr,
+                disk_num_bytes,
+            )?;
         }
         Ok(())
     }
@@ -6333,6 +6419,43 @@ impl OpenFs {
             usize::try_from((inode.size - offset).min(u64::from(size))).unwrap_or(size as usize);
         let mut out = vec![0_u8; to_read];
         let read_end = offset.saturating_add(to_read as u64);
+
+        // Verify data checksums on read (bd-tkv2n), opt-in via
+        // OpenOptions.btrfs_verify_data_on_read. For a datasum inode, verify the
+        // regular extents overlapping the read range against the csum tree and
+        // return EIO (Corruption) on a mismatch — matching the kernel — before
+        // any data is returned. Off by default, so normal reads are unchanged.
+        if self.btrfs_verify_data_on_read && inode.flags & BTRFS_INODE_NODATASUM == 0 {
+            let verify_sectorsize = self
+                .btrfs_superblock()
+                .and_then(|sb| usize::try_from(sb.sectorsize).ok())
+                .filter(|s| *s != 0)
+                .ok_or_else(|| FfsError::Format("invalid btrfs sectorsize".into()))?;
+            let csum_items = self.btrfs_read_csum_items(cx)?;
+            for (logical_start, extent) in &extents {
+                let BtrfsExtentData::Regular {
+                    extent_type,
+                    disk_bytenr,
+                    disk_num_bytes,
+                    num_bytes,
+                    ..
+                } = extent
+                else {
+                    continue;
+                };
+                let extent_end = logical_start.saturating_add(*num_bytes);
+                if *logical_start < read_end && extent_end > offset {
+                    self.btrfs_verify_one_extent_csum(
+                        cx,
+                        &csum_items,
+                        verify_sectorsize,
+                        *extent_type,
+                        *disk_bytenr,
+                        *disk_num_bytes,
+                    )?;
+                }
+            }
+        }
 
         if to_read > 1_048_576 {
             debug!(inode = canonical, length = to_read, "btrfs large_read");
@@ -32875,6 +32998,57 @@ mod tests {
         .expect("remount committed image");
         fs2.btrfs_verify_file_data_csums(&cx, InodeNumber(257))
             .expect("datasum data + checksums verify after commit and remount");
+    }
+
+    #[test]
+    fn btrfs_verify_data_on_read_detects_corruption_bd_tkv2n() {
+        let cx = Cx::for_testing();
+        let image = build_btrfs_csum_image();
+        let opts_on = OpenOptions {
+            btrfs_verify_data_on_read: true,
+            ..OpenOptions::default()
+        };
+
+        // With verify-on-read enabled, a clean datasum file reads back fine.
+        let fs = OpenFs::from_device(&cx, Box::new(TestDevice::from_vec(image.clone())), &opts_on)
+            .expect("open csum image");
+        let ops: &dyn FsOps = &fs;
+        let data = ops
+            .read(&cx, &mut RequestScope::empty(), InodeNumber(257), 0, 22)
+            .expect("clean datasum read verifies");
+        assert_eq!(data.len(), 22);
+
+        // Corrupt the file's data sector: with verify-on-read, the read fails
+        // with a corruption error (the kernel returns EIO here).
+        let mut corrupt = image;
+        corrupt[BTRFS_TEST_FILE_DATA_LOGICAL + 3] ^= 0xFF;
+        let fs_c = OpenFs::from_device(
+            &cx,
+            Box::new(TestDevice::from_vec(corrupt.clone())),
+            &opts_on,
+        )
+        .expect("open corrupted image");
+        let ops_c: &dyn FsOps = &fs_c;
+        let err = ops_c
+            .read(&cx, &mut RequestScope::empty(), InodeNumber(257), 0, 22)
+            .expect_err("corrupted datasum read must fail");
+        assert!(
+            matches!(err, FfsError::Corruption { .. }),
+            "expected a corruption error, got {err:?}"
+        );
+
+        // With verify-on-read OFF (default), the same corrupt read returns data.
+        let fs_off = OpenFs::from_device(
+            &cx,
+            Box::new(TestDevice::from_vec(corrupt)),
+            &OpenOptions::default(),
+        )
+        .expect("open corrupted image (verify off)");
+        let ops_off: &dyn FsOps = &fs_off;
+        let data_off = ops_off
+            .read(&cx, &mut RequestScope::empty(), InodeNumber(257), 0, 22)
+            .expect("read with verify off returns data unverified");
+        assert_eq!(data_off.len(), 22);
     }
 
     #[allow(clippy::significant_drop_tightening)]
