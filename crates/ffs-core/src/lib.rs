@@ -5575,7 +5575,30 @@ impl OpenFs {
 
     /// Resolve a btrfs filesystem tree's root block by walking the ROOT_TREE.
     fn btrfs_fs_tree_root_bytenr(&self, cx: &Cx, subvol_id: u64) -> ffs_error::Result<u64> {
-        let root_items = self.walk_btrfs_root_tree(cx)?;
+        // Targeted descent for just this subvolume's ROOT_ITEM rather than a
+        // full root-tree walk (bd-b61hz): the root tree can span many leaves on
+        // a multi-subvolume / snapshotted filesystem, and this resolve runs on
+        // every read op. The half-open range [(subvol_id, ROOT_ITEM, 0),
+        // (subvol_id, ROOT_ITEM+1, 0)) captures every ROOT_ITEM for the
+        // subvolume regardless of offset (offset is a transid for snapshots),
+        // matching the original objectid+type filter. The root tree is not
+        // subject to the fs-tree tree-log overlay, so sb.root is descended
+        // directly. Isomorphic to walk_btrfs_root_tree().find(...): both return
+        // the first (objectid, ROOT_ITEM) item in key order.
+        let sb = self
+            .btrfs_superblock()
+            .ok_or_else(|| FfsError::Format("not a btrfs filesystem".into()))?;
+        let lo = BtrfsKey {
+            objectid: subvol_id,
+            item_type: BTRFS_ITEM_ROOT_ITEM,
+            offset: 0,
+        };
+        let hi = BtrfsKey {
+            objectid: subvol_id,
+            item_type: BTRFS_ITEM_ROOT_ITEM + 1,
+            offset: 0,
+        };
+        let root_items = self.walk_btrfs_tree_range(cx, sb.root, lo, hi)?;
         let fs_tree_root = root_items
             .iter()
             .find(|item| {
@@ -32589,7 +32612,7 @@ mod tests {
     /// O(N)-full-walk vs O(log N)-targeted-descent difference (bd-n040r): a
     /// single-leaf image reads one node either way, but a multi-leaf tree lets
     /// a targeted range descent skip the leaves that hold no matching key.
-    #[allow(clippy::cast_possible_truncation)]
+    #[allow(clippy::cast_possible_truncation, clippy::too_many_lines)]
     fn build_btrfs_multileaf_image(n_leaves: usize) -> Vec<u8> {
         assert!(
             (1..=64).contains(&n_leaves),
@@ -32805,6 +32828,216 @@ mod tests {
         assert!(
             score >= 2.0,
             "targeted-descent Score {score:.2} (full={full_reads} reads, worst-case range={range_reads_last} reads) must be >= 2.0"
+        );
+    }
+
+    /// Build a btrfs image whose ROOT tree is **two levels** (one internal root
+    /// over `n_leaves` leaves). Leaf 0 holds the FS_TREE(5) ROOT_ITEM (pointing
+    /// at a real single-leaf fs tree so the image opens); the remaining leaves
+    /// each hold a ROOT_ITEM for a distinct subvolume objectid. `sb.root` points
+    /// at the internal node. This is the geometry that exposes
+    /// btrfs_fs_tree_root_bytenr's per-op full root-tree walk vs targeted
+    /// ROOT_ITEM descent (bd-b61hz). Returns (image, subvol_ids in leaf order).
+    #[allow(clippy::cast_possible_truncation, clippy::too_many_lines)]
+    fn build_btrfs_multileaf_root_image(n_leaves: usize) -> (Vec<u8>, Vec<u64>) {
+        assert!(
+            (2..=64).contains(&n_leaves),
+            "fixture supports 2..=64 leaves"
+        );
+        let image_size: usize = 0x40_000;
+        let mut image = vec![0_u8; image_size];
+        let sb_off = BTRFS_SUPER_INFO_OFFSET;
+
+        let internal_logical = 0x8_000_u64; // sb.root → root-tree internal node
+        let leaf_logical = |i: usize| 0x20_000_u64 + (i as u64) * 0x1_000;
+        let fs_tree_leaf_logical = 0x30_000_u64; // real fs tree (single leaf)
+        let other_subvol_bytenr = 0x31_000_u64; // ROOT_ITEM target, never walked
+
+        // Leaf 0 → FS_TREE(5); leaves 1.. → subvols 256, 257, ... (key order).
+        let subvol_ids: Vec<u64> = std::iter::once(BTRFS_FS_TREE_OBJECTID)
+            .chain((0..n_leaves - 1).map(|i| 256_u64 + i as u64))
+            .collect();
+
+        // Superblock.
+        image[sb_off + 0x40..sb_off + 0x48].copy_from_slice(&BTRFS_MAGIC.to_le_bytes());
+        image[sb_off + 0x48..sb_off + 0x50].copy_from_slice(&1_u64.to_le_bytes());
+        image[sb_off + 0x50..sb_off + 0x58].copy_from_slice(&internal_logical.to_le_bytes());
+        image[sb_off + 0x70..sb_off + 0x78].copy_from_slice(&(image_size as u64).to_le_bytes());
+        image[sb_off + 0x80..sb_off + 0x88].copy_from_slice(&256_u64.to_le_bytes());
+        image[sb_off + 0x88..sb_off + 0x90].copy_from_slice(&1_u64.to_le_bytes());
+        image[sb_off + 0x90..sb_off + 0x94].copy_from_slice(&4096_u32.to_le_bytes());
+        image[sb_off + 0x94..sb_off + 0x98].copy_from_slice(&4096_u32.to_le_bytes());
+        image[sb_off + 0x9C..sb_off + 0xA0].copy_from_slice(&4096_u32.to_le_bytes());
+        image[sb_off + 0xC6] = 1; // root_level: root TREE is two levels
+
+        // sys_chunk_array: one identity chunk [0, image_size).
+        let mut chunk_array = Vec::new();
+        chunk_array.extend_from_slice(&256_u64.to_le_bytes());
+        chunk_array.push(228_u8);
+        chunk_array.extend_from_slice(&0_u64.to_le_bytes());
+        chunk_array.extend_from_slice(&(image_size as u64).to_le_bytes());
+        chunk_array.extend_from_slice(&2_u64.to_le_bytes());
+        chunk_array.extend_from_slice(&0x1_0000_u64.to_le_bytes());
+        chunk_array.extend_from_slice(&1_u64.to_le_bytes());
+        chunk_array.extend_from_slice(&4096_u32.to_le_bytes());
+        chunk_array.extend_from_slice(&4096_u32.to_le_bytes());
+        chunk_array.extend_from_slice(&4096_u32.to_le_bytes());
+        chunk_array.extend_from_slice(&1_u16.to_le_bytes());
+        chunk_array.extend_from_slice(&0_u16.to_le_bytes());
+        chunk_array.extend_from_slice(&1_u64.to_le_bytes());
+        chunk_array.extend_from_slice(&0_u64.to_le_bytes());
+        chunk_array.extend_from_slice(&[0_u8; 16]);
+        image[sb_off + 0xA0..sb_off + 0xA4]
+            .copy_from_slice(&(chunk_array.len() as u32).to_le_bytes());
+        let array_start = sb_off + 0x32B;
+        image[array_start..array_start + chunk_array.len()].copy_from_slice(&chunk_array);
+
+        // Internal node (level 1): one key_ptr per leaf, keyed by the leaf's
+        // first key (subvol_id, ROOT_ITEM, 0).
+        let internal = internal_logical as usize;
+        image[internal + 0x30..internal + 0x38].copy_from_slice(&internal_logical.to_le_bytes());
+        image[internal + 0x50..internal + 0x58].copy_from_slice(&1_u64.to_le_bytes());
+        image[internal + 0x58..internal + 0x60].copy_from_slice(&1_u64.to_le_bytes()); // ROOT_TREE
+        image[internal + 0x60..internal + 0x64].copy_from_slice(&(n_leaves as u32).to_le_bytes());
+        image[internal + 0x64] = 1;
+        for (i, &oid) in subvol_ids.iter().enumerate() {
+            let kp = internal + 101 + i * 33;
+            image[kp..kp + 8].copy_from_slice(&oid.to_le_bytes());
+            image[kp + 8] = BTRFS_ITEM_ROOT_ITEM;
+            image[kp + 9..kp + 17].copy_from_slice(&0_u64.to_le_bytes());
+            image[kp + 17..kp + 25].copy_from_slice(&leaf_logical(i).to_le_bytes());
+            image[kp + 25..kp + 33].copy_from_slice(&1_u64.to_le_bytes());
+        }
+
+        // Root-tree leaves: each holds one ROOT_ITEM for its subvol id. Leaf 0's
+        // ROOT_ITEM(5) points at the real fs tree; the rest point at a stub.
+        for (i, &oid) in subvol_ids.iter().enumerate() {
+            let leaf = leaf_logical(i) as usize;
+            image[leaf + 0x30..leaf + 0x38].copy_from_slice(&leaf_logical(i).to_le_bytes());
+            image[leaf + 0x50..leaf + 0x58].copy_from_slice(&1_u64.to_le_bytes());
+            image[leaf + 0x58..leaf + 0x60].copy_from_slice(&1_u64.to_le_bytes());
+            image[leaf + 0x60..leaf + 0x64].copy_from_slice(&1_u32.to_le_bytes());
+            image[leaf + 0x64] = 0;
+            write_btrfs_leaf_item(&mut image, leaf, 0, oid, BTRFS_ITEM_ROOT_ITEM, 0, 3000, 239);
+            let mut root_item = vec![0_u8; 239];
+            root_item[168..176].copy_from_slice(&256_u64.to_le_bytes());
+            let bytenr = if oid == BTRFS_FS_TREE_OBJECTID {
+                fs_tree_leaf_logical
+            } else {
+                other_subvol_bytenr
+            };
+            root_item[176..184].copy_from_slice(&bytenr.to_le_bytes());
+            let last = root_item.len() - 1;
+            root_item[last] = 0;
+            image[leaf + 3000..leaf + 3000 + root_item.len()].copy_from_slice(&root_item);
+            stamp_btrfs_test_tree_block_crc32c(&mut image, leaf);
+        }
+
+        // Real single-leaf fs tree with the root dir inode (256), so open works.
+        let fs_leaf = fs_tree_leaf_logical as usize;
+        image[fs_leaf + 0x30..fs_leaf + 0x38].copy_from_slice(&fs_tree_leaf_logical.to_le_bytes());
+        image[fs_leaf + 0x50..fs_leaf + 0x58].copy_from_slice(&1_u64.to_le_bytes());
+        image[fs_leaf + 0x58..fs_leaf + 0x60].copy_from_slice(&5_u64.to_le_bytes());
+        image[fs_leaf + 0x60..fs_leaf + 0x64].copy_from_slice(&1_u32.to_le_bytes());
+        image[fs_leaf + 0x64] = 0;
+        write_btrfs_leaf_item(
+            &mut image,
+            fs_leaf,
+            0,
+            256,
+            BTRFS_ITEM_INODE_ITEM,
+            0,
+            3000,
+            160,
+        );
+        let root_inode = encode_btrfs_inode_item(0o040_755, 0, 0, 1);
+        image[fs_leaf + 3000..fs_leaf + 3000 + root_inode.len()].copy_from_slice(&root_inode);
+        stamp_btrfs_test_tree_block_crc32c(&mut image, fs_leaf);
+
+        stamp_btrfs_test_tree_block_crc32c(&mut image, internal);
+        (image, subvol_ids)
+    }
+
+    #[test]
+    #[allow(clippy::cast_precision_loss)]
+    fn btrfs_root_item_resolve_is_isomorphic_and_reads_fewer_nodes_bd_b61hz() {
+        const N: usize = 8;
+        let (image, subvol_ids) = build_btrfs_multileaf_root_image(N);
+        let reads = Arc::new(AtomicUsize::new(0));
+        let dev = AllReadsCounter {
+            inner: TestDevice::from_vec(image),
+            reads: Arc::clone(&reads),
+        };
+        let cx = Cx::for_testing();
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
+        let sb_root = fs.btrfs_superblock().unwrap().root;
+
+        // ISOMORPHISM (golden): the targeted ROOT_ITEM range descent returns
+        // exactly the filtered full root-tree walk, for every subvolume — and
+        // the production resolver returns the matching ROOT_ITEM bytenr.
+        let full = fs.walk_btrfs_root_tree(&cx).unwrap();
+        for &oid in &subvol_ids {
+            let lo = BtrfsKey {
+                objectid: oid,
+                item_type: BTRFS_ITEM_ROOT_ITEM,
+                offset: 0,
+            };
+            let hi = BtrfsKey {
+                objectid: oid,
+                item_type: BTRFS_ITEM_ROOT_ITEM + 1,
+                offset: 0,
+            };
+            let expected: Vec<_> = full
+                .iter()
+                .filter(|e| e.key.objectid == oid && e.key.item_type == BTRFS_ITEM_ROOT_ITEM)
+                .collect();
+            let got = fs.walk_btrfs_tree_range(&cx, sb_root, lo, hi).unwrap();
+            assert_eq!(got.len(), expected.len(), "subvol {oid} ROOT_ITEM count");
+            for (g, e) in got.iter().zip(expected.iter()) {
+                assert_eq!(g.key, e.key, "subvol {oid} key");
+                assert_eq!(g.data, e.data, "subvol {oid} data");
+            }
+            let want = if oid == BTRFS_FS_TREE_OBJECTID {
+                0x30_000
+            } else {
+                0x31_000
+            };
+            assert_eq!(
+                fs.btrfs_fs_tree_root_bytenr(&cx, oid).unwrap(),
+                want,
+                "resolve {oid}"
+            );
+        }
+
+        // SCORE (bd-b61hz): device reads, full root-tree walk vs targeted descent.
+        reads.store(0, AtomicOrdering::SeqCst);
+        let _ = fs.walk_btrfs_root_tree(&cx).unwrap();
+        let full_reads = reads.load(AtomicOrdering::SeqCst);
+
+        let last = *subvol_ids.last().unwrap();
+        let lo = BtrfsKey {
+            objectid: last,
+            item_type: BTRFS_ITEM_ROOT_ITEM,
+            offset: 0,
+        };
+        let hi = BtrfsKey {
+            objectid: last,
+            item_type: BTRFS_ITEM_ROOT_ITEM + 1,
+            offset: 0,
+        };
+        reads.store(0, AtomicOrdering::SeqCst);
+        let _ = fs.walk_btrfs_tree_range(&cx, sb_root, lo, hi).unwrap();
+        let range_reads = reads.load(AtomicOrdering::SeqCst);
+
+        // Full walk reads internal + all N leaves; the targeted descent reads
+        // internal + exactly the one covering leaf (the resolve range matches on
+        // objectid+type, so no predecessor leaf is probed).
+        assert_eq!(full_reads, N + 1, "full root-tree walk reads every node");
+        assert_eq!(range_reads, 2, "targeted descent reads internal + 1 leaf");
+        let score = full_reads as f64 / range_reads as f64;
+        assert!(
+            score >= 2.0,
+            "ROOT_ITEM-descent Score {score:.2} (full={full_reads} reads, range={range_reads} reads) must be >= 2.0"
         );
     }
 
