@@ -15970,6 +15970,96 @@ impl OpenFs {
             .update(&fs_root_key, &root_item_data)
             .map_err(|e| btrfs_mutation_to_ffs(&e))?;
 
+        // ── CSUM_TREE commit (bd-x3fcu slice B3) ────────────────────────────────
+        //
+        // Commit the data-checksum tree BEFORE extent_tree, for the same reason
+        // fs_tree is committed first: the EXTENT_ITEMs its metadata-block
+        // allocations add must be serialized into extent_tree below. Skipped
+        // entirely when the csum tree is empty — the NODATASUM-default interim
+        // leaves it empty, so this is a no-op for current production images and
+        // cannot create a csum tree that an external `btrfs check` might reject.
+        let csum_dag = WriteDependencyDag::from_cow_tree(&alloc.csum_tree, new_gen)
+            .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+        if csum_dag.node_count() > 0 {
+            let mut csum_allocated_addrs = std::collections::BTreeMap::new();
+            for block in csum_dag.all_blocks() {
+                let level = csum_dag.node_level(block).ok_or_else(|| {
+                    FfsError::Format(format!(
+                        "btrfs commit: csum_tree DAG missing level for block {block}"
+                    ))
+                })?;
+                let allocation = alloc
+                    .extent_alloc
+                    .alloc_metadata_for_tree(u64::from(nodesize), BTRFS_CSUM_TREE_OBJECTID, level)
+                    .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+                csum_allocated_addrs.insert(block, allocation.bytenr);
+            }
+            let csum_disk_ctx = DiskWritebackContext::with_allocated_addresses(
+                sb.fsid,
+                sb.fsid,
+                new_gen,
+                BTRFS_CSUM_TREE_OBJECTID,
+                nodesize,
+                alloc.sectorsize,
+                csum_allocated_addrs,
+            );
+            let mut csum_executor = WritebackExecutor::new(csum_dag);
+            let csum_flush_result = csum_executor.execute(|block, level| {
+                let serialized = csum_disk_ctx.serialize_node(&alloc.csum_tree, block, level)?;
+                let node_bytes = serialized.len() as u64;
+                let logical = csum_disk_ctx.block_to_bytenr(block);
+                let physical = resolve_physical(logical)?;
+                self.dev
+                    .write_all_at(cx, ByteOffset(physical), &serialized)
+                    .map_err(|_| BtrfsMutationError::InvalidConfig("disk write failed"))?;
+                bytes_written = bytes_written.saturating_add(node_bytes);
+                nodes_written = nodes_written.saturating_add(1);
+                Ok(())
+            });
+            csum_flush_result.map_err(|e| btrfs_mutation_to_ffs(&e))?;
+
+            // Create (or update) the CSUM_TREE ROOT_ITEM in root_tree pointing
+            // at the just-written csum tree. A fresh image has no csum tree, so
+            // when the item is absent we clone the FS_TREE ROOT_ITEM as a
+            // structurally-valid template and repoint it via patch_root_commit.
+            let csum_tree_root = alloc.csum_tree.root_block();
+            let csum_tree_bytenr = csum_disk_ctx.block_to_bytenr(csum_tree_root);
+            let csum_tree_level = alloc.csum_tree.root_level();
+            let csum_root_key = BtrfsKey {
+                objectid: BTRFS_CSUM_TREE_OBJECTID,
+                item_type: BTRFS_ITEM_ROOT_ITEM,
+                offset: 0,
+            };
+            let mut csum_root_item_data = alloc
+                .root_tree
+                .get(&csum_root_key)
+                .or_else(|| alloc.root_tree.get(&fs_root_key))
+                .ok_or_else(|| {
+                    FfsError::Format(
+                        "btrfs commit: no ROOT_ITEM template available to create the \
+                         CSUM_TREE ROOT_ITEM"
+                            .into(),
+                    )
+                })?;
+            BtrfsRootItem::patch_root_commit(
+                &mut csum_root_item_data,
+                csum_tree_bytenr,
+                csum_tree_level,
+                new_gen,
+            )
+            .map_err(|e| FfsError::Parse(format!("CSUM_TREE ROOT_ITEM patch failed: {e}")))?;
+            alloc
+                .root_tree
+                .update(&csum_root_key, &csum_root_item_data)
+                .or_else(|err| match err {
+                    BtrfsMutationError::KeyNotFound => {
+                        alloc.root_tree.insert(csum_root_key, &csum_root_item_data)
+                    }
+                    other => Err(other),
+                })
+                .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+        }
+
         // ── EXTENT_TREE commit ─────────────────────────────────────────────────
         //
         // The fs_tree allocations above have added EXTENT_ITEMs to extent_tree.
@@ -32175,8 +32265,19 @@ mod tests {
     /// Like [`build_btrfs_fsops_image`] but adds a csum tree covering the
     /// datasum file's single data sector, plus a CSUM_TREE(7) ROOT_ITEM in the
     /// root leaf — so the on-disk csum read path (bd-x3fcu) can be exercised.
+    #[allow(clippy::too_many_lines)]
     fn build_btrfs_csum_image() -> Vec<u8> {
         let mut image = build_btrfs_fsops_image();
+
+        // The fsops image's single chunk is DATA-only; a full transaction commit
+        // also needs to allocate metadata blocks. Promote it to a mixed
+        // DATA|METADATA block group by patching the chunk type in the
+        // superblock's sys_chunk_array. The chunk type lives 41 bytes into the
+        // entry (17-byte disk_key + length(8) + owner(8) + stripe_len(8)).
+        let array_start = BTRFS_SUPER_INFO_OFFSET + 0x32B;
+        image[array_start + 41..array_start + 49]
+            .copy_from_slice(&(BTRFS_BLOCK_GROUP_DATA | BTRFS_BLOCK_GROUP_METADATA).to_le_bytes());
+
         let file_data = BTRFS_TEST_FILE_DATA_LOGICAL; // 0x12000, datasum file 257's extent
         let sectorsize = BTRFS_TEST_NODESIZE; // 4096
         let csum_tree_logical = 0x16_000_usize; // free, identity-mapped, in the reserved region
@@ -32209,27 +32310,90 @@ mod tests {
         image[vo..vo + 4].copy_from_slice(&sector_csum.to_le_bytes());
         stamp_btrfs_test_tree_block_crc32c(&mut image, csum_tree_logical);
 
-        // --- add the CSUM_TREE(7) ROOT_ITEM as item 1 of the root leaf ---
-        let root_leaf = BTRFS_TEST_ROOT_TREE_LOGICAL; // 0x4000, currently nritems=1 (FS_TREE@idx0)
-        image[root_leaf + 0x60..root_leaf + 0x64].copy_from_slice(&2_u32.to_le_bytes());
-        let csum_root_item_off: u32 = 2700; // below the FS_TREE root item at 3000
-        let csum_root_item_size: u32 = 239;
+        // Empty EXTENT_TREE leaf — the full commit requires an EXTENT_TREE
+        // ROOT_ITEM to repoint, and mount walks it to load EXTENT_ITEMs.
+        let extent_tree_logical = 0x18_000_usize;
+        image[extent_tree_logical + 0x30..extent_tree_logical + 0x38]
+            .copy_from_slice(&(extent_tree_logical as u64).to_le_bytes()); // bytenr
+        image[extent_tree_logical + 0x50..extent_tree_logical + 0x58]
+            .copy_from_slice(&1_u64.to_le_bytes()); // generation
+        image[extent_tree_logical + 0x58..extent_tree_logical + 0x60]
+            .copy_from_slice(&BTRFS_EXTENT_TREE_OBJECTID.to_le_bytes()); // owner
+        image[extent_tree_logical + 0x60..extent_tree_logical + 0x64]
+            .copy_from_slice(&0_u32.to_le_bytes()); // nritems = 0 (empty)
+        image[extent_tree_logical + 0x64] = 0; // level (leaf)
+        stamp_btrfs_test_tree_block_crc32c(&mut image, extent_tree_logical);
+
+        // Rewrite the root-tree ROOT_ITEMs as proper 279-byte BtrfsRootItems
+        // (the fsops builder writes 239-byte read-only stubs that the commit's
+        // patch_root_commit rejects). idx0 = FS_TREE, idx1 = CSUM_TREE,
+        // idx2 = EXTENT_TREE.
+        let root_leaf = BTRFS_TEST_ROOT_TREE_LOGICAL; // 0x4000
+        image[root_leaf + 0x60..root_leaf + 0x64].copy_from_slice(&3_u32.to_le_bytes()); // nritems
+
+        let fs_root = btrfs_test_root_item(
+            BTRFS_FS_TREE_OBJECTID,
+            256,
+            BTRFS_TEST_FS_TREE_LOGICAL as u64,
+            [0_u8; 16],
+            [0_u8; 16],
+        );
+        let fs_root_off: u32 = 3000;
         write_btrfs_leaf_item(
             &mut image,
             root_leaf,
             1,
+            BTRFS_FS_TREE_OBJECTID,
+            BTRFS_ITEM_ROOT_ITEM,
+            0,
+            fs_root_off,
+            u32::try_from(fs_root.data.len()).expect("root item fits u32"),
+        );
+        let fro = root_leaf + fs_root_off as usize;
+        image[fro..fro + fs_root.data.len()].copy_from_slice(&fs_root.data);
+
+        let csum_root = btrfs_test_root_item(
+            BTRFS_CSUM_TREE_OBJECTID,
+            0,
+            csum_tree_logical as u64,
+            [0_u8; 16],
+            [0_u8; 16],
+        );
+        let csum_root_off: u32 = 2700; // below the FS_TREE root item at 3000
+        write_btrfs_leaf_item(
+            &mut image,
+            root_leaf,
+            2,
             BTRFS_CSUM_TREE_OBJECTID,
             BTRFS_ITEM_ROOT_ITEM,
             0,
-            csum_root_item_off,
-            csum_root_item_size,
+            csum_root_off,
+            u32::try_from(csum_root.data.len()).expect("root item fits u32"),
         );
-        let mut csum_root_item = vec![0_u8; csum_root_item_size as usize];
-        csum_root_item[176..184].copy_from_slice(&(csum_tree_logical as u64).to_le_bytes()); // bytenr
-        let last = csum_root_item.len() - 1;
-        csum_root_item[last] = 0; // level
-        let ro = root_leaf + csum_root_item_off as usize;
-        image[ro..ro + csum_root_item.len()].copy_from_slice(&csum_root_item);
+        let cro = root_leaf + csum_root_off as usize;
+        image[cro..cro + csum_root.data.len()].copy_from_slice(&csum_root.data);
+
+        let extent_root = btrfs_test_root_item(
+            BTRFS_EXTENT_TREE_OBJECTID,
+            0,
+            extent_tree_logical as u64,
+            [0_u8; 16],
+            [0_u8; 16],
+        );
+        let extent_root_off: u32 = 2400; // below the CSUM_TREE root item at 2700
+        write_btrfs_leaf_item(
+            &mut image,
+            root_leaf,
+            0,
+            BTRFS_EXTENT_TREE_OBJECTID,
+            BTRFS_ITEM_ROOT_ITEM,
+            0,
+            extent_root_off,
+            u32::try_from(extent_root.data.len()).expect("root item fits u32"),
+        );
+        let ero = root_leaf + extent_root_off as usize;
+        image[ero..ero + extent_root.data.len()].copy_from_slice(&extent_root.data);
+
         stamp_btrfs_test_tree_block_crc32c(&mut image, root_leaf);
 
         image
@@ -32546,6 +32710,79 @@ mod tests {
         // The captured checksums verify against the bytes actually on disk.
         fs.btrfs_verify_file_data_csums(&cx, InodeNumber(257))
             .expect("captured csums verify clean");
+    }
+
+    #[test]
+    fn btrfs_commit_persists_csum_tree_across_remount_bd_x3fcu() {
+        let cx = Cx::for_testing();
+        let dev = TestDevice::from_vec(build_btrfs_csum_image());
+        let opts = OpenOptions {
+            btrfs_rw_ephemeral_ok: true,
+            ..OpenOptions::default()
+        };
+        let mut fs =
+            OpenFs::from_device(&cx, Box::new(dev.clone()), &opts).expect("open csum image");
+        fs.enable_writes(&cx).expect("enable writes");
+
+        // Append to the datasum file so the transaction is non-trivial and the
+        // capture adds a fresh EXTENT_CSUM alongside the seeded one.
+        let payload = vec![0x5C_u8; 9000];
+        let fs_ops: &dyn FsOps = &fs;
+        fs_ops
+            .write(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(257),
+                16384,
+                &payload,
+            )
+            .expect("datasum write");
+
+        // Persist the transaction: serializes the csum tree to disk and creates
+        // its CSUM_TREE ROOT_ITEM in the committed root tree.
+        fs.btrfs_full_transaction_commit(&cx, "csum-commit-roundtrip-test")
+            .expect("full transaction commit");
+
+        // Re-mount the committed image: the mount-time seed reloads the csum
+        // tree from disk. The checksum recorded for the file's original data
+        // sector (at 0x12000, in the untouched reserved region) must survive the
+        // commit and match that sector's crc32c — proving the csum tree was
+        // persisted in a form FrankenFS reads back.
+        let committed = dev.snapshot_bytes();
+        let mut fs2 = OpenFs::from_device(
+            &cx,
+            Box::new(TestDevice::from_vec(committed.clone())),
+            &opts,
+        )
+        .expect("remount committed image");
+        fs2.enable_writes(&cx).expect("re-seed csum tree from disk");
+
+        let csum_items: Vec<(BtrfsKey, Vec<u8>)> = {
+            let alloc = fs2.btrfs_alloc_state.as_ref().unwrap().lock();
+            let lo = BtrfsKey {
+                objectid: 0,
+                item_type: 0,
+                offset: 0,
+            };
+            let hi = BtrfsKey {
+                objectid: u64::MAX,
+                item_type: u8::MAX,
+                offset: u64::MAX,
+            };
+            alloc
+                .csum_tree
+                .range(&lo, &hi)
+                .expect("range remounted csum tree")
+        };
+        let data_bytenr = BTRFS_TEST_FILE_DATA_LOGICAL as u64;
+        let expected = ffs_types::crc32c(
+            &committed[BTRFS_TEST_FILE_DATA_LOGICAL..BTRFS_TEST_FILE_DATA_LOGICAL + 4096],
+        );
+        assert_eq!(
+            lookup_data_block_csum(&csum_items, data_bytenr, 4096),
+            Some(expected),
+            "committed csum tree must persist the data sector's checksum across remount"
+        );
     }
 
     #[test]
