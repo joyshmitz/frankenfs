@@ -6550,31 +6550,66 @@ impl OpenFs {
             return Ok(()); // not a datasum file — nothing to verify
         }
 
-        // Gather the csum-tree items. When writes are enabled, consume the
-        // in-memory csum tree (seeded at mount; slice B will also populate it
-        // on write); otherwise walk the on-disk csum tree via its ROOT_ITEM. A
-        // filesystem with no csum tree (e.g. all-nodatasum) has nothing to do.
+        // Compute the file's on-disk csum span so we fetch only the csum items
+        // covering THIS file's extents, not the whole csum tree (bd-0t26k). A
+        // csum item covering disk_bytenr starts no earlier than
+        // disk_bytenr - max_span (the widest a single EXTENT_CSUM item spans),
+        // and every item for an extent starts before disk_bytenr+disk_num_bytes,
+        // so [min_disk - max_span, max_disk_end) captures all of them with no
+        // covering item missed.
+        let mut min_disk = u64::MAX;
+        let mut max_disk_end = 0_u64;
+        let mut any_datasum_extent = false;
+        for item in &items {
+            if item.key.objectid != canonical || item.key.item_type != BTRFS_ITEM_EXTENT_DATA {
+                continue;
+            }
+            let extent = parse_extent_data(&item.data).map_err(|e| parse_to_ffs_error(&e))?;
+            if let BtrfsExtentData::Regular {
+                extent_type,
+                disk_bytenr,
+                disk_num_bytes,
+                ..
+            } = extent
+                && extent_type == BTRFS_FILE_EXTENT_REG
+                && disk_bytenr != 0
+            {
+                any_datasum_extent = true;
+                min_disk = min_disk.min(disk_bytenr);
+                max_disk_end = max_disk_end.max(disk_bytenr.saturating_add(disk_num_bytes));
+            }
+        }
+        if !any_datasum_extent {
+            return Ok(()); // only holes / inline / preallocated extents — nothing to verify
+        }
+        let nodesize = self.btrfs_superblock().map_or(0, |sb| sb.nodesize);
+        let max_span =
+            (ffs_btrfs::max_data_csums_per_item(nodesize) as u64).saturating_mul(sectorsize as u64);
+        let csum_lo = BtrfsKey {
+            objectid: ffs_btrfs::BTRFS_EXTENT_CSUM_OBJECTID,
+            item_type: ffs_btrfs::BTRFS_ITEM_EXTENT_CSUM,
+            offset: min_disk.saturating_sub(max_span),
+        };
+        let csum_hi = BtrfsKey {
+            objectid: ffs_btrfs::BTRFS_EXTENT_CSUM_OBJECTID,
+            item_type: ffs_btrfs::BTRFS_ITEM_EXTENT_CSUM,
+            offset: max_disk_end,
+        };
+
+        // Gather only the csum items in this file's disk span. Writes enabled →
+        // the in-memory csum tree; otherwise a targeted descent of the on-disk
+        // csum tree. A filesystem with no csum tree has nothing to do.
         let csum_items: Vec<(BtrfsKey, Vec<u8>)> =
             if let Some(alloc_mutex) = self.btrfs_alloc_state.as_ref() {
                 let alloc = alloc_mutex.lock();
-                let lo = BtrfsKey {
-                    objectid: 0,
-                    item_type: 0,
-                    offset: 0,
-                };
-                let hi = BtrfsKey {
-                    objectid: u64::MAX,
-                    item_type: u8::MAX,
-                    offset: u64::MAX,
-                };
                 alloc
                     .csum_tree
-                    .range(&lo, &hi)
+                    .range(&csum_lo, &csum_hi)
                     .map_err(|e| btrfs_mutation_to_ffs(&e))?
             } else {
                 match self.btrfs_fs_tree_root_bytenr(cx, BTRFS_CSUM_TREE_OBJECTID) {
                     Ok(bytenr) => self
-                        .walk_btrfs_tree(cx, bytenr)?
+                        .walk_btrfs_tree_range(cx, bytenr, csum_lo, csum_hi)?
                         .into_iter()
                         .map(|entry| (entry.key, entry.data))
                         .collect(),
@@ -33737,6 +33772,76 @@ mod tests {
         stamp_btrfs_test_tree_block_crc32c(&mut image, root_leaf);
 
         image
+    }
+
+    #[test]
+    #[allow(clippy::cast_precision_loss)]
+    fn btrfs_verify_loads_only_file_span_csums_bd_0t26k() {
+        // Start from the single-file csum image and append several EXTENT_CSUM
+        // items at FAR disk offsets — standing in for other files' csums on a
+        // large filesystem. The csum leaf then holds 1 in-span + 4 far items.
+        let mut image = build_btrfs_csum_image();
+        let csum_leaf = 0x16_000_usize;
+        image[csum_leaf + 0x60..csum_leaf + 0x64].copy_from_slice(&5_u32.to_le_bytes()); // nritems
+        for i in 0..4_u32 {
+            let value_off = 3990 - i * 10;
+            write_btrfs_leaf_item(
+                &mut image,
+                csum_leaf,
+                (i + 1) as usize,
+                ffs_btrfs::BTRFS_EXTENT_CSUM_OBJECTID,
+                ffs_btrfs::BTRFS_ITEM_EXTENT_CSUM,
+                0x50_0000 + u64::from(i) * 0x10_0000, // far disk offsets, key-ordered
+                value_off,
+                4,
+            );
+            let vo = csum_leaf + value_off as usize;
+            image[vo..vo + 4].copy_from_slice(&0xDEAD_BEEF_u32.to_le_bytes());
+        }
+        stamp_btrfs_test_tree_block_crc32c(&mut image, csum_leaf);
+
+        let dev = TestDevice::from_vec(image);
+        let cx = Cx::for_testing();
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
+        let csum_root = 0x16_000_u64;
+
+        // CORRECTNESS: the datasum file (257) still verifies cleanly — the
+        // targeted span captures its real csum despite the extra far items.
+        fs.btrfs_verify_file_data_csums(&cx, InodeNumber(257))
+            .unwrap();
+
+        // SCORE (bd-0t26k): file 257's data is one sector at disk 0x12000, so
+        // its csum span is well below the far items. The whole csum tree has 5
+        // items; the targeted span loads only the in-span one.
+        let whole = fs.walk_btrfs_tree(&cx, csum_root).unwrap();
+        let lo = BtrfsKey {
+            objectid: ffs_btrfs::BTRFS_EXTENT_CSUM_OBJECTID,
+            item_type: ffs_btrfs::BTRFS_ITEM_EXTENT_CSUM,
+            offset: 0,
+        };
+        let hi = BtrfsKey {
+            objectid: ffs_btrfs::BTRFS_EXTENT_CSUM_OBJECTID,
+            item_type: ffs_btrfs::BTRFS_ITEM_EXTENT_CSUM,
+            offset: 0x13_000, // 0x12000 + one sector
+        };
+        let targeted = fs.walk_btrfs_tree_range(&cx, csum_root, lo, hi).unwrap();
+        assert_eq!(whole.len(), 5, "whole csum tree holds all 5 items");
+        assert_eq!(
+            targeted.len(),
+            1,
+            "targeted span loads only the file's csum"
+        );
+        assert!(
+            targeted.iter().all(|e| e.key.offset < 0x13_000),
+            "targeted items are all in the file's disk span"
+        );
+        let score = whole.len() as f64 / targeted.len() as f64;
+        assert!(
+            score >= 2.0,
+            "csum-span Score {score:.2} (whole={} items vs targeted={}) must be >= 2.0",
+            whole.len(),
+            targeted.len()
+        );
     }
 
     fn btrfs_test_root_item(
