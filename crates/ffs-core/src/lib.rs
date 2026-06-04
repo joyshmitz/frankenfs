@@ -8031,7 +8031,11 @@ impl OpenFs {
                 if unwritten {
                     continue;
                 }
-                let block_data = self.read_block_with_scope(cx, scope, BlockNumber(phys))?;
+                // Directory blocks are the dir inode's data blocks; route them
+                // through the read-only data-block cache so repeated readdirs
+                // hit memory instead of re-reading the device (bd-di429).
+                let block_data =
+                    self.read_ext4_file_data_block_with_scope(cx, scope, BlockNumber(phys))?;
                 let (entries, _tail) = parse_dir_block(&block_data, self.block_size())
                     .map_err(|e| parse_to_ffs_error(&e))?;
                 all_entries.extend(entries);
@@ -8073,7 +8077,8 @@ impl OpenFs {
                 if unwritten {
                     continue;
                 }
-                let block_data = self.read_block_with_scope(cx, scope, BlockNumber(phys))?;
+                let block_data =
+                    self.read_ext4_file_data_block_with_scope(cx, scope, BlockNumber(phys))?;
                 let found = if dir_inode.flags & ffs_types::EXT4_CASEFOLD_FL != 0 {
                     lookup_in_dir_block_casefold(&block_data, self.block_size(), name)
                         .map_err(|e| parse_to_ffs_error(&e))?
@@ -8120,9 +8125,9 @@ impl OpenFs {
                         if unwritten {
                             return None;
                         }
-                        self.read_block_with_scope(cx, scope, BlockNumber(phys))
+                        self.read_ext4_file_data_block_with_scope(cx, scope, BlockNumber(phys))
                             .ok()
-                            .map(|block| block.as_slice().to_vec())
+                            .map(|block| block.to_vec())
                     })
             },
         );
@@ -31409,6 +31414,35 @@ mod tests {
             dev.read_count(),
             1,
             "the read-only scalar file-data cache should suppress the second data-block read"
+        );
+    }
+
+    #[test]
+    fn ext4_dir_block_cache_hits_in_read_only_mode_bd_di429() {
+        // Root dir inode #2 maps logical block 0 → physical block 10; the dir
+        // block holds ".", "..", "hello.txt". Count reads of that dir block.
+        let image = build_ext4_image_with_dir();
+        let dev = CountingDevice::new(TestDevice::from_vec(image), ByteOffset(10 * 4096));
+        let cx = Cx::for_testing();
+        let fs = OpenFs::from_device(&cx, Box::new(dev.clone()), &OpenOptions::default()).unwrap();
+        let root = fs.read_inode(&cx, InodeNumber(2)).unwrap();
+        dev.reset_count();
+
+        // Two lookups of the same directory. Each previously re-read the dir
+        // block from the device (2 reads); routing dir reads through the
+        // read-only block cache (bd-di429) makes the second a memory hit.
+        let first = fs.lookup_name(&cx, &root, b"hello.txt").unwrap();
+        let second = fs.lookup_name(&cx, &root, b"hello.txt").unwrap();
+
+        assert!(first.is_some(), "hello.txt should be found");
+        assert_eq!(first, second, "cached dir lookup must be byte-identical");
+        assert_eq!(first.as_ref().unwrap().inode, 11);
+        // Score: 2 lookups read the dir block once (cached) vs twice (uncached)
+        // = 2.0, growing with the number of repeated lookups/readdirs.
+        assert_eq!(
+            dev.read_count(),
+            1,
+            "the read-only dir-block cache should suppress the second directory-block read"
         );
     }
 
