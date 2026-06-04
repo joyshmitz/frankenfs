@@ -62,7 +62,14 @@ impl WriteDependencyDag {
         let mut nodes = BTreeMap::new();
         let root = tree.root_block();
 
-        Self::collect_nodes(tree, root, &mut nodes, generation)?;
+        // Each node's on-disk header level MUST equal its true depth (leaf = 0,
+        // each parent one greater), or btrfs readers reject the tree on the
+        // `child.level == parent.level - 1` consistency check. Drive the level
+        // top-down from the root rather than assigning every internal node the
+        // root's level — the latter only happens to be correct for height <= 2
+        // trees and corrupts deeper (height >= 3) commits (bd-iv5uy).
+        let root_level = tree.root_level();
+        Self::collect_nodes(tree, root, &mut nodes, generation, root_level)?;
 
         Ok(Self {
             nodes,
@@ -76,37 +83,35 @@ impl WriteDependencyDag {
         block: u64,
         nodes: &mut BTreeMap<u64, DagNode>,
         generation: u64,
+        level: u8,
     ) -> Result<(), BtrfsMutationError> {
         if nodes.contains_key(&block) {
             return Ok(());
         }
 
         let node = tree.node_snapshot(block)?;
-        let (level, children) = match &node {
+        // Leaves are always level 0; internal nodes carry the depth passed down
+        // from the root (root = root_level, each child one less).
+        let (node_level, children) = match &node {
             BtrfsCowNode::Leaf { .. } => (0, Vec::new()),
-            BtrfsCowNode::Internal { children, .. } => {
-                let child_blocks: Vec<u64> = children.clone();
-                let height = tree.height()?;
-                // Internal nodes have level > 0; for simplicity we use 1 for direct parents of leaves
-                let level = u8::try_from(height.saturating_sub(1)).unwrap_or(1);
-                (level.max(1), child_blocks)
-            }
+            BtrfsCowNode::Internal { children, .. } => (level, children.clone()),
         };
 
         nodes.insert(
             block,
             DagNode {
                 block,
-                level,
+                level: node_level,
                 generation,
                 children: children.clone(),
                 durable: false,
             },
         );
 
-        // Recursively collect children
+        // Recursively collect children one level shallower.
+        let child_level = level.saturating_sub(1);
         for child in children {
-            Self::collect_nodes(tree, child, nodes, generation)?;
+            Self::collect_nodes(tree, child, nodes, generation, child_level)?;
         }
 
         Ok(())

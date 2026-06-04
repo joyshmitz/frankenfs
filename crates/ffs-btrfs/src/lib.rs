@@ -1999,8 +1999,7 @@ fn collect_leaf_items(
     for item in &items {
         if let Some((lo, hi)) = range {
             // Keep only items in the half-open range [lo, hi).
-            if key_cmp(&item.key, lo) == Ordering::Less
-                || key_cmp(&item.key, hi) != Ordering::Less
+            if key_cmp(&item.key, lo) == Ordering::Less || key_cmp(&item.key, hi) != Ordering::Less
             {
                 continue;
             }
@@ -6677,8 +6676,8 @@ mod tests {
                     reason: "block not in test image",
                 })
             };
-            let full = walk_tree(&mut read_full, &chunks, root_logical, NODESIZE, 0)
-                .expect("full walk");
+            let full =
+                walk_tree(&mut read_full, &chunks, root_logical, NODESIZE, 0).expect("full walk");
             let expected: Vec<_> = full
                 .into_iter()
                 .filter(|e| {
@@ -6699,7 +6698,11 @@ mod tests {
                 .expect("range walk");
 
             // Isomorphism: identical entries (key + data), identical order.
-            assert_eq!(got.len(), expected.len(), "range [{lo:?},{hi:?}) entry count");
+            assert_eq!(
+                got.len(),
+                expected.len(),
+                "range [{lo:?},{hi:?}) entry count"
+            );
             for (g, e) in got.iter().zip(expected.iter()) {
                 assert_eq!(g.key, e.key, "range [{lo:?},{hi:?}) key");
                 assert_eq!(g.data, e.data, "range [{lo:?},{hi:?}) data");
@@ -7011,6 +7014,61 @@ mod tests {
             tree.root_level() >= 1,
             "expected root_level >= 1 after splits, got {}",
             tree.root_level()
+        );
+    }
+
+    #[test]
+    fn writeback_dag_assigns_true_per_node_levels_bd_iv5uy() {
+        use crate::writeback::WriteDependencyDag;
+        use std::collections::{BTreeSet, VecDeque};
+
+        // max_items=3 → a 3-level tree needs > 3*3 leaf items; 40 forces height>=3.
+        let mut tree = InMemoryCowBtrfsTree::new(3).expect("tree");
+        for objectid in 1_u64..=40 {
+            tree.insert(test_key(objectid), &test_payload(objectid))
+                .expect("insert");
+        }
+        let root_level = tree.root_level();
+        assert!(
+            root_level >= 2,
+            "test needs a height>=3 tree, got root_level {root_level}"
+        );
+
+        let dag = WriteDependencyDag::from_cow_tree(&tree, 7).expect("dag");
+
+        // BFS the tree: every node's DAG level must equal its true depth
+        // (root_level - depth from the root), i.e. leaves 0, parents-of-leaves
+        // 1, ..., root = root_level. The pre-fix code gave every internal node
+        // level == root_level, so a middle internal at level 1 proves the fix.
+        let mut levels_seen = BTreeSet::new();
+        let mut visited = BTreeSet::new();
+        let mut queue = VecDeque::new();
+        queue.push_back((tree.root_block(), 0_u8));
+        while let Some((block, depth)) = queue.pop_front() {
+            if !visited.insert(block) {
+                continue;
+            }
+            let expected = root_level - depth;
+            let got = dag.node_level(block).expect("block present in dag");
+            assert_eq!(
+                got, expected,
+                "block {block} at true depth {depth} should have level {expected}, got {got}"
+            );
+            levels_seen.insert(got);
+            if let BtrfsCowNode::Internal { children, .. } =
+                tree.node_snapshot(block).expect("snapshot")
+            {
+                for child in children {
+                    queue.push_back((child, depth + 1));
+                }
+            }
+        }
+
+        // A genuine height-3 tree spans levels 0, 1 and 2 — the pre-fix code
+        // could only ever emit level 0 (leaves) and root_level (all internals).
+        assert!(
+            levels_seen.contains(&0) && levels_seen.contains(&1) && levels_seen.contains(&2),
+            "expected node levels 0, 1 and 2 to be present, got {levels_seen:?}"
         );
     }
 
