@@ -34964,6 +34964,102 @@ mod tests {
         );
     }
 
+    #[test]
+    fn readdir_and_lookup_work_on_htree_dir() {
+        // The read paths must traverse an htree directory: read_dir parses every
+        // block (including the dx_root at block 0) and lookup falls back to a
+        // linear scan over block 0 — neither may choke on the dx_root's
+        // index-spanning '..' the way the write-path add_entry did.
+        let Some((fs, _tmp)) = open_writable_ext4_mkfs(32) else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let (csum_seed, hash_seed, hash_version, block_size) = {
+            let sb = fs.ext4_superblock().expect("sb");
+            (
+                sb.csum_seed(),
+                sb.hash_seed,
+                sb.effective_dirhash_version(sb.def_hash_version),
+                usize::try_from(sb.block_size).unwrap(),
+            )
+        };
+
+        let dir = fs
+            .mkdir(&cx, root, OsStr::new("htdir"), 0o755, 0, 0)
+            .expect("mkdir");
+        let dir_ino = dir.ino;
+        let dir_ino_u32 = u32::try_from(dir_ino.0).unwrap();
+        let generation = fs.read_inode(&cx, dir_ino).expect("read dir").generation;
+
+        let names: Vec<Vec<u8>> = (0..250)
+            .map(|i| format!("entry_{i:04}.txt").into_bytes())
+            .collect();
+        let entries: Vec<(u32, u8, &[u8])> = names
+            .iter()
+            .enumerate()
+            .map(|(i, n)| {
+                (
+                    6000 + u32::try_from(i).unwrap(),
+                    ffs_ondisk::ext4::EXT4_FT_REG_FILE,
+                    n.as_slice(),
+                )
+            })
+            .collect();
+        let blocks = ffs_ondisk::build_htree_directory_stamped(
+            dir_ino_u32,
+            2,
+            &entries,
+            block_size,
+            hash_version,
+            &hash_seed,
+            csum_seed,
+            dir_ino_u32,
+            generation,
+        )
+        .expect("build htree");
+        assert!(blocks.len() >= 3, "need dx_root + multiple leaves");
+        install_htree_dir(&fs, &cx, dir_ino, &blocks);
+
+        // read_dir must enumerate every entry (plus '.'/'..') without choking on
+        // the dx_root.
+        let inode = fs.read_inode(&cx, dir_ino).expect("reread");
+        let listed = fs.read_dir(&cx, &inode).expect("read_dir on htree dir");
+        let real: std::collections::BTreeSet<Vec<u8>> = listed
+            .iter()
+            .map(|e| e.name.clone())
+            .filter(|n| n != b"." && n != b"..")
+            .collect();
+        assert_eq!(
+            real.len(),
+            names.len(),
+            "read_dir must enumerate every htree entry exactly once"
+        );
+        for n in &names {
+            assert!(
+                real.contains(n),
+                "read_dir missing {:?}",
+                String::from_utf8_lossy(n)
+            );
+        }
+
+        // lookup_name must resolve a sample entry (via index or linear fallback).
+        let hit = fs
+            .lookup_name(&cx, &inode, b"entry_0137.txt")
+            .expect("lookup_name on htree dir must not error");
+        assert!(
+            hit.is_some(),
+            "lookup_name must find an existing htree entry"
+        );
+        let miss = fs
+            .lookup_name(&cx, &inode, b"does_not_exist.txt")
+            .expect("lookup_name miss must not error");
+        assert!(
+            miss.is_none(),
+            "lookup_name must report a real miss as None"
+        );
+    }
+
     fn open_writable_ext4_mkfs(size_mb: u64) -> Option<(OpenFs, tempfile::TempDir)> {
         let tmp = tempfile::TempDir::new().expect("tmpdir");
         let image = tmp.path().join("test.ext4");
