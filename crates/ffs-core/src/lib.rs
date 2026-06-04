@@ -14961,6 +14961,45 @@ impl OpenFs {
         value - (value % alignment)
     }
 
+    /// Remove EXTENT_CSUM items covering a freed data extent from the in-memory
+    /// csum tree (bd-x3fcu), so a committed csum tree never carries checksums
+    /// for extents that no longer exist (which `btrfs check` would flag). A
+    /// no-op for ranges with no recorded checksums (e.g. NODATASUM data).
+    fn btrfs_remove_extent_csums(
+        alloc: &mut BtrfsAllocState,
+        disk_bytenr: u64,
+        disk_num_bytes: u64,
+    ) -> ffs_error::Result<()> {
+        if disk_bytenr == 0 || disk_num_bytes == 0 {
+            return Ok(());
+        }
+        let last = disk_bytenr.saturating_add(disk_num_bytes.saturating_sub(1));
+        let lo = BtrfsKey {
+            objectid: ffs_btrfs::BTRFS_EXTENT_CSUM_OBJECTID,
+            item_type: ffs_btrfs::BTRFS_ITEM_EXTENT_CSUM,
+            offset: disk_bytenr,
+        };
+        let hi = BtrfsKey {
+            objectid: ffs_btrfs::BTRFS_EXTENT_CSUM_OBJECTID,
+            item_type: ffs_btrfs::BTRFS_ITEM_EXTENT_CSUM,
+            offset: last,
+        };
+        let stale: Vec<BtrfsKey> = alloc
+            .csum_tree
+            .range(&lo, &hi)
+            .map_err(|e| btrfs_mutation_to_ffs(&e))?
+            .into_iter()
+            .map(|(key, _)| key)
+            .collect();
+        for key in stale {
+            alloc
+                .csum_tree
+                .delete(&key)
+                .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+        }
+        Ok(())
+    }
+
     fn btrfs_remove_overlapping_extent_data(
         &self,
         cx: &Cx,
@@ -15017,6 +15056,7 @@ impl OpenFs {
                         .extent_alloc
                         .free_extent(disk_bytenr, disk_num_bytes, false)
                         .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+                    Self::btrfs_remove_extent_csums(alloc, disk_bytenr, disk_num_bytes)?;
                 }
             }
 
@@ -18526,6 +18566,7 @@ impl OpenFs {
                     .extent_alloc
                     .free_extent(disk_bytenr, disk_num_bytes, false)
                     .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+                Self::btrfs_remove_extent_csums(alloc, disk_bytenr, disk_num_bytes)?;
             }
             alloc
                 .fs_tree
@@ -32782,6 +32823,54 @@ mod tests {
             lookup_data_block_csum(&csum_items, data_bytenr, 4096),
             Some(expected),
             "committed csum tree must persist the data sector's checksum across remount"
+        );
+    }
+
+    #[allow(clippy::significant_drop_tightening)]
+    fn csum_lookup_in_alloc(fs: &OpenFs, bytenr: u64) -> Option<u32> {
+        let alloc = fs.btrfs_alloc_state.as_ref().unwrap().lock();
+        let lo = BtrfsKey {
+            objectid: 0,
+            item_type: 0,
+            offset: 0,
+        };
+        let hi = BtrfsKey {
+            objectid: u64::MAX,
+            item_type: u8::MAX,
+            offset: u64::MAX,
+        };
+        let items = alloc.csum_tree.range(&lo, &hi).expect("range csum tree");
+        lookup_data_block_csum(&items, bytenr, 4096)
+    }
+
+    #[test]
+    fn btrfs_remove_extent_csums_drops_items_in_range_bd_x3fcu() {
+        let cx = Cx::for_testing();
+        let opts = OpenOptions {
+            btrfs_rw_ephemeral_ok: true,
+            ..OpenOptions::default()
+        };
+        let mut fs = OpenFs::from_device(
+            &cx,
+            Box::new(TestDevice::from_vec(build_btrfs_csum_image())),
+            &opts,
+        )
+        .expect("open csum image");
+        fs.enable_writes(&cx).expect("enable writes");
+
+        let data_bytenr = BTRFS_TEST_FILE_DATA_LOGICAL as u64;
+        assert!(
+            csum_lookup_in_alloc(&fs, data_bytenr).is_some(),
+            "seeded checksum present before removal"
+        );
+        {
+            let mut alloc = fs.btrfs_alloc_state.as_ref().unwrap().lock();
+            OpenFs::btrfs_remove_extent_csums(&mut alloc, data_bytenr, 4096)
+                .expect("remove csums for the freed range");
+        }
+        assert!(
+            csum_lookup_in_alloc(&fs, data_bytenr).is_none(),
+            "checksum for the freed range must be gone"
         );
     }
 
