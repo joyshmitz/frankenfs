@@ -103,7 +103,9 @@ impl SuccinctBitmap {
         let mut cumulative = 0_u32;
         let mut super_local = 0_u32;
 
-        for block_idx in 0..num_blocks {
+        let full_rank_blocks = len / BLOCK_BITS;
+
+        for block_idx in 0..full_rank_blocks {
             let bit_start = block_idx * BLOCK_BITS;
             let block_within_super = block_idx % BLOCKS_PER_SUPER;
 
@@ -118,10 +120,29 @@ impl SuccinctBitmap {
             let local = super_local as u16;
             blocks.push(local);
 
-            let popcount =
-                popcount_aligned_block(&data, bit_start, BLOCK_BITS.min(len - bit_start));
+            let byte_start = (bit_start / 8) as usize;
+            let popcount = popcount_32_byte_block(&data[byte_start..byte_start + 32]);
             cumulative += popcount;
             super_local += popcount;
+        }
+
+        if full_rank_blocks < num_blocks {
+            let block_idx = full_rank_blocks;
+            let bit_start = block_idx * BLOCK_BITS;
+            let block_within_super = block_idx % BLOCKS_PER_SUPER;
+
+            if block_within_super == 0 {
+                superblocks.push(cumulative);
+                super_local = 0;
+            }
+
+            #[expect(clippy::cast_possible_truncation)]
+            let local = super_local as u16;
+            blocks.push(local);
+
+            let byte_start = (bit_start / 8) as usize;
+            let popcount = popcount_partial_block(&data, byte_start, len - bit_start);
+            cumulative += popcount;
         }
 
         // Sentinel superblock for the end.
@@ -552,39 +573,41 @@ fn popcount_full_bytes(bytes: &[u8]) -> u32 {
     total
 }
 
-fn popcount_aligned_block(bitmap: &[u8], bit_start: u32, count: u32) -> u32 {
-    debug_assert_eq!(bit_start % 8, 0);
+fn popcount_32_byte_block(block: &[u8]) -> u32 {
+    debug_assert_eq!(block.len(), 32);
+    let mut total = 0_u32;
+
+    total += u64::from_le_bytes([
+        block[0], block[1], block[2], block[3], block[4], block[5], block[6], block[7],
+    ])
+    .count_ones();
+    total += u64::from_le_bytes([
+        block[8], block[9], block[10], block[11], block[12], block[13], block[14], block[15],
+    ])
+    .count_ones();
+    total += u64::from_le_bytes([
+        block[16], block[17], block[18], block[19], block[20], block[21], block[22], block[23],
+    ])
+    .count_ones();
+    total += u64::from_le_bytes([
+        block[24], block[25], block[26], block[27], block[28], block[29], block[30], block[31],
+    ])
+    .count_ones();
+
+    total
+}
+
+fn popcount_partial_block(bitmap: &[u8], byte_start: usize, count: u32) -> u32 {
+    debug_assert!(count < BLOCK_BITS);
     if count == 0 {
         return 0;
     }
 
-    let byte_start = (bit_start / 8) as usize;
     let full_bytes = (count / 8) as usize;
     let remainder = count % 8;
     let mut total = 0_u32;
 
-    let bytes = &bitmap[byte_start..byte_start + full_bytes];
-    let mut blocks = bytes.chunks_exact(32);
-    for block in &mut blocks {
-        total += u64::from_le_bytes([
-            block[0], block[1], block[2], block[3], block[4], block[5], block[6], block[7],
-        ])
-        .count_ones();
-        total += u64::from_le_bytes([
-            block[8], block[9], block[10], block[11], block[12], block[13], block[14], block[15],
-        ])
-        .count_ones();
-        total += u64::from_le_bytes([
-            block[16], block[17], block[18], block[19], block[20], block[21], block[22], block[23],
-        ])
-        .count_ones();
-        total += u64::from_le_bytes([
-            block[24], block[25], block[26], block[27], block[28], block[29], block[30], block[31],
-        ])
-        .count_ones();
-    }
-
-    let mut chunks = blocks.remainder().chunks_exact(8);
+    let mut chunks = bitmap[byte_start..byte_start + full_bytes].chunks_exact(8);
     for chunk in &mut chunks {
         total += u64::from_le_bytes([
             chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
