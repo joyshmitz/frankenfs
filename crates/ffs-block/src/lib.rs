@@ -7760,23 +7760,44 @@ mod tests {
     #[test]
     fn arc_cache_pressure_prefers_evicting_cold_clean_entries() {
         let cx = Cx::for_testing();
-        let mem = MemoryByteDevice::new(4096 * 8);
+        let mem = MemoryByteDevice::new(4096 * 16);
         let dev = ByteBlockDevice::new(mem, 4096).expect("device");
-        let cache = ArcCache::new(dev, 4).expect("cache");
+        let cache = ArcCache::new(dev, 8).expect("cache");
 
-        // Build ARC state where block 0 is hot (in T2) and 1/2/3 are colder (in T1).
-        for block in [0_u64, 1, 2, 3] {
-            let _ = cache.read_block(&cx, BlockNumber(block)).expect("read");
+        // Warm seven cold blocks and one hot block, filling the cache to capacity.
+        //
+        // The reads use a stride of 2 deliberately: under the default S3-FIFO
+        // policy a *consecutive* read-miss streak (0,1,2,3,...) is detected as a
+        // one-pass scan and admitted to the ghost queue only, so those blocks
+        // would never become resident. Non-consecutive block numbers keep the
+        // scan detector disarmed, so every block is genuinely admitted and the
+        // pressure path has real cold residents to evict.
+        let cold_blocks = [0_u64, 2, 4, 6, 8, 10, 12];
+        for block in cold_blocks {
+            let _ = cache
+                .read_block(&cx, BlockNumber(block))
+                .expect("cold read");
         }
-        let _ = cache.read_block(&cx, BlockNumber(0)).expect("hot touch");
+        let hot_block = 14_u64;
+        let _ = cache
+            .read_block(&cx, BlockNumber(hot_block))
+            .expect("hot admit");
+        // Re-access promotes the hot block to the frequent (main) queue and makes
+        // it the youngest entry there, so the oldest-first pressure victim search
+        // reaches it last.
+        let _ = cache
+            .read_block(&cx, BlockNumber(hot_block))
+            .expect("hot touch");
 
+        // High pressure halves the target. With eight residents (one hot, seven
+        // cold) the four evictions can be satisfied entirely from cold entries.
         let report = cache.memory_pressure_callback(MemoryPressure::High);
-        assert_eq!(report.target_size, 2);
-        assert!(report.current_size <= 2);
+        assert_eq!(report.target_size, 4);
+        assert!(report.current_size <= 4);
 
         let before = cache.metrics();
         let _ = cache
-            .read_block(&cx, BlockNumber(0))
+            .read_block(&cx, BlockNumber(hot_block))
             .expect("read hot block");
         let after_hot = cache.metrics();
         assert_eq!(
@@ -7785,8 +7806,10 @@ mod tests {
             "hot block should remain resident under pressure"
         );
 
+        // The first-warmed cold block is the oldest clean resident, so it is the
+        // first pressure victim and must miss after the shrink.
         let _ = cache
-            .read_block(&cx, BlockNumber(1))
+            .read_block(&cx, BlockNumber(cold_blocks[0]))
             .expect("read colder block");
         let after_cold = cache.metrics();
         assert_eq!(
