@@ -572,19 +572,39 @@ fn apply_contiguous_word_zero_run(
         return (*run_len >= n).then_some(*run_start);
     }
 
-    for bit in 0..64 {
-        let pos = base + bit;
-        if (word >> bit) & 1 == 1 {
-            *run_start = pos + 1;
-            *run_len = 0;
-        } else {
-            *run_len += 1;
-            if *run_len >= n {
-                return Some(*run_start);
-            }
+    let prefix = word.trailing_zeros();
+    if prefix > 0 && run_len.saturating_add(prefix) >= n {
+        return Some(*run_start);
+    }
+
+    if n <= 64 {
+        let free = !word;
+        let starts = zero_run_starts_at_least(free, n);
+        if starts != 0 {
+            return Some(base + starts.trailing_zeros());
         }
     }
+
+    let suffix = word.leading_zeros();
+    if suffix > 0 {
+        *run_start = base + (64 - suffix);
+        *run_len = suffix;
+    } else {
+        *run_start = base + 64;
+        *run_len = 0;
+    }
     None
+}
+
+fn zero_run_starts_at_least(mut free: u64, n: u32) -> u64 {
+    debug_assert!((1..=64).contains(&n));
+    let mut span = 1;
+    while span < n {
+        let step = span.min(n - span);
+        free &= free >> step;
+        span += step;
+    }
+    free
 }
 
 // ── Group stats ─────────────────────────────────────────────────────────────
