@@ -3984,10 +3984,57 @@ pub struct ExtentAllocation {
 pub struct BlockGroupFreeSpace {
     /// Starting byte address of the block group.
     pub start: u64,
+    /// Total size of the block group in bytes (the `FREE_SPACE_INFO` key offset).
+    pub total_bytes: u64,
     /// Block group flags (DATA / METADATA / SYSTEM, etc.).
     pub flags: u64,
     /// Free `[start, len)` ranges within the group, sorted by start.
     pub free_ranges: Vec<(u64, u64)>,
+}
+
+/// Build the on-disk `FREE_SPACE_TREE` items for the given per-block-group free
+/// space, in ascending btrfs key order.
+///
+/// For each block group this emits one `FREE_SPACE_INFO` item followed by one
+/// `FREE_SPACE_EXTENT` item per free range — the extent-based representation
+/// (`flags = 0`), which btrfs uses whenever it is at least as compact as a
+/// bitmap. Item formats (confirmed against `btrfs inspect-internal dump-tree`):
+///
+/// * `FREE_SPACE_INFO`: key `(bg_start, 198, bg_total_bytes)`, value =
+///   `extent_count: u32_le` + `flags: u32_le` (8 bytes).
+/// * `FREE_SPACE_EXTENT`: key `(free_start, 199, free_len)`, empty value.
+///
+/// The returned items are globally sorted by `(objectid, type, offset)`, ready
+/// to bulk-insert into a fresh free-space-tree btree (bd-qxo5x). Groups with no
+/// free range still emit their `FREE_SPACE_INFO` with `extent_count = 0`.
+#[must_use]
+pub fn build_free_space_tree_items(groups: &[BlockGroupFreeSpace]) -> Vec<(BtrfsKey, Vec<u8>)> {
+    let mut items = Vec::new();
+    for group in groups {
+        let extent_count = u32::try_from(group.free_ranges.len()).unwrap_or(u32::MAX);
+        let info_key = BtrfsKey {
+            objectid: group.start,
+            item_type: BTRFS_ITEM_FREE_SPACE_INFO,
+            offset: group.total_bytes,
+        };
+        let mut info_value = Vec::with_capacity(8);
+        info_value.extend_from_slice(&extent_count.to_le_bytes());
+        info_value.extend_from_slice(&0_u32.to_le_bytes()); // flags = 0 (extent list)
+        items.push((info_key, info_value));
+
+        for &(free_start, free_len) in &group.free_ranges {
+            let extent_key = BtrfsKey {
+                objectid: free_start,
+                item_type: BTRFS_ITEM_FREE_SPACE_EXTENT,
+                offset: free_len,
+            };
+            items.push((extent_key, Vec::new()));
+        }
+    }
+    items.sort_by(|(a, _), (b, _)| {
+        (a.objectid, a.item_type, a.offset).cmp(&(b.objectid, b.item_type, b.offset))
+    });
+    items
 }
 
 /// In-memory block group state tracked by the extent allocator.
@@ -5001,6 +5048,7 @@ impl BtrfsExtentAllocator {
 
             result.push(BlockGroupFreeSpace {
                 start: bg.start,
+                total_bytes: bg.item.total_bytes,
                 flags: bg.item.flags,
                 free_ranges,
             });
@@ -12474,6 +12522,60 @@ mod tests {
         let alloc_sum: u64 = allocated.iter().map(|&(s, e)| e - s).sum();
         assert_eq!(free_sum + alloc_sum, bg_len, "free + allocated tiles group");
         assert_eq!(alloc_sum, 0x8000);
+    }
+
+    #[test]
+    fn build_free_space_tree_items_matches_btrfs_layout() {
+        let groups = vec![
+            BlockGroupFreeSpace {
+                start: 0x10_0000,
+                total_bytes: 0x40_0000,
+                flags: BTRFS_BLOCK_GROUP_DATA,
+                free_ranges: vec![(0x10_0000, 0x40_0000)], // wholly free
+            },
+            BlockGroupFreeSpace {
+                start: 0x150_0000,
+                total_bytes: 0x80_0000,
+                flags: BTRFS_BLOCK_GROUP_METADATA,
+                free_ranges: vec![(0x150_0000, 0x4000), (0x160_0000, 0x10_0000)],
+            },
+        ];
+        let items = build_free_space_tree_items(&groups);
+
+        // 2 FREE_SPACE_INFO + 3 FREE_SPACE_EXTENT, globally key-sorted with
+        // INFO(198) preceding EXTENT(199) within a block group.
+        let k = |o: u64, t: u8, off: u64| BtrfsKey {
+            objectid: o,
+            item_type: t,
+            offset: off,
+        };
+        let fsi = BTRFS_ITEM_FREE_SPACE_INFO;
+        let fse = BTRFS_ITEM_FREE_SPACE_EXTENT;
+        let info = |count: u32| {
+            let mut v = Vec::with_capacity(8);
+            v.extend_from_slice(&count.to_le_bytes());
+            v.extend_from_slice(&0_u32.to_le_bytes()); // flags 0 = extent-list
+            v
+        };
+        let expected: Vec<(BtrfsKey, Vec<u8>)> = vec![
+            (k(0x10_0000, fsi, 0x40_0000), info(1)),
+            (k(0x10_0000, fse, 0x40_0000), Vec::new()),
+            (k(0x150_0000, fsi, 0x80_0000), info(2)),
+            (k(0x150_0000, fse, 0x4000), Vec::new()),
+            (k(0x160_0000, fse, 0x10_0000), Vec::new()),
+        ];
+        assert_eq!(items, expected);
+
+        // An empty group still emits its FREE_SPACE_INFO with extent_count 0.
+        let empty = vec![BlockGroupFreeSpace {
+            start: 0x20_0000,
+            total_bytes: 0x10_0000,
+            flags: BTRFS_BLOCK_GROUP_SYSTEM,
+            free_ranges: vec![],
+        }];
+        let items = build_free_space_tree_items(&empty);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].1, vec![0u8; 8]);
     }
 
     #[test]
