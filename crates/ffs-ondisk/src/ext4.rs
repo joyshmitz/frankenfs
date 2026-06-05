@@ -5511,6 +5511,36 @@ pub fn build_htree_directory(
     hash_seed: &[u32; 4],
     with_csum_tail: bool,
 ) -> Option<Vec<Vec<u8>>> {
+    build_htree_directory_with_large_dir(
+        dot_inode,
+        dotdot_inode,
+        entries,
+        block_size,
+        hash_version,
+        hash_seed,
+        with_csum_tail,
+        false,
+    )
+}
+
+/// Build a hash-indexed directory, allowing the extra `large_dir` index depth.
+///
+/// Like [`build_htree_directory`] but allows a third indirect level
+/// (`indirect_levels == 3`) when `has_large_dir` is set, matching the kernel's
+/// `INCOMPAT_LARGEDIR` depth rule (and [`parse_dx_root_with_large_dir`]). With
+/// `has_large_dir == false` this is identical to [`build_htree_directory`].
+#[must_use]
+#[allow(clippy::too_many_arguments)]
+pub fn build_htree_directory_with_large_dir(
+    dot_inode: u32,
+    dotdot_inode: u32,
+    entries: &[(u32, u8, &[u8])],
+    block_size: usize,
+    hash_version: u8,
+    hash_seed: &[u32; 4],
+    with_csum_tail: bool,
+    has_large_dir: bool,
+) -> Option<Vec<Vec<u8>>> {
     build_htree_layout(
         dot_inode,
         dotdot_inode,
@@ -5519,6 +5549,7 @@ pub fn build_htree_directory(
         hash_version,
         hash_seed,
         with_csum_tail,
+        has_large_dir,
     )
     .map(|layout| layout.blocks)
 }
@@ -5540,7 +5571,8 @@ struct HtreeLayout {
 /// be required) or when a single hash value's run overflows one leaf (needs a
 /// collision chain), matching the cases the read-half cannot otherwise resolve.
 #[allow(clippy::type_complexity)] // local (hash, entry) staging tuples
-#[allow(clippy::too_many_lines)] // single + two-level construction in one pass
+#[allow(clippy::too_many_lines)] // single + multi-level construction in one pass
+#[allow(clippy::too_many_arguments)] // mirrors the build_htree_directory surface
 fn build_htree_layout(
     dot_inode: u32,
     dotdot_inode: u32,
@@ -5549,6 +5581,7 @@ fn build_htree_layout(
     hash_version: u8,
     hash_seed: &[u32; 4],
     with_csum_tail: bool,
+    has_large_dir: bool,
 ) -> Option<HtreeLayout> {
     if !(64..=65536).contains(&block_size) || entries.is_empty() {
         return None;
@@ -5651,9 +5684,12 @@ fn build_htree_layout(
     // ignored, which is exactly the leftmost child that covers hash 0).
     //
     // The kernel caps a non-`large_dir` index at `indirect_levels <= 2` (three
-    // levels), which is what `parse_dx_root` accepts here; deeper trees would
-    // need the `large_dir` feature, so this returns `None` past two levels (a
+    // block levels), which is what `parse_dx_root` accepts; the `large_dir`
+    // feature raises that to `indirect_levels <= 3`, matching
+    // `parse_dx_root_with_large_dir`. We refuse to build a depth the on-disk
+    // feature flags would make unreadable, returning `None` past the cap (a
     // two-level index already addresses tens of millions of entries).
+    let max_indirect_levels: u8 = if has_large_dir { 3 } else { 2 };
     let node_limit_u16 = dx_node_entry_limit(block_size, with_csum_tail);
     let node_limit = usize::from(node_limit_u16);
     if node_limit < 2 {
@@ -5676,8 +5712,8 @@ fn build_htree_layout(
 
     let mut indirect_levels: u8 = 0;
     while children.len() > usize::from(root_limit) {
-        if indirect_levels >= 2 {
-            return None; // would exceed indirect_levels == 2 (needs large_dir)
+        if indirect_levels >= max_indirect_levels {
+            return None; // would exceed the readable depth for this feature set
         }
         let mut parents: Vec<Ext4DxEntry> = Vec::with_capacity(children.len().div_ceil(node_limit));
         let mut i = 0;
@@ -5738,6 +5774,41 @@ pub fn build_htree_directory_stamped(
     dir_ino: u32,
     generation: u32,
 ) -> Option<Vec<Vec<u8>>> {
+    build_htree_directory_stamped_with_large_dir(
+        dot_inode,
+        dotdot_inode,
+        entries,
+        block_size,
+        hash_version,
+        hash_seed,
+        csum_seed,
+        dir_ino,
+        generation,
+        false,
+    )
+}
+
+/// Build a checksummed hash-indexed directory, allowing `large_dir` depth.
+///
+/// Like [`build_htree_directory_stamped`] but allows a third indirect level
+/// when `has_large_dir` is set (the checksummed analogue of
+/// [`build_htree_directory_with_large_dir`]). The extra interior level is
+/// stamped as a `dx_node` index block exactly like the existing levels, so the
+/// result stays e2fsck-clean on a `metadata_csum` + `large_dir` filesystem.
+#[must_use]
+#[allow(clippy::too_many_arguments)]
+pub fn build_htree_directory_stamped_with_large_dir(
+    dot_inode: u32,
+    dotdot_inode: u32,
+    entries: &[(u32, u8, &[u8])],
+    block_size: usize,
+    hash_version: u8,
+    hash_seed: &[u32; 4],
+    csum_seed: u32,
+    dir_ino: u32,
+    generation: u32,
+    has_large_dir: bool,
+) -> Option<Vec<Vec<u8>>> {
     let HtreeLayout {
         mut blocks,
         leaf_count,
@@ -5749,6 +5820,7 @@ pub fn build_htree_directory_stamped(
         hash_version,
         hash_seed,
         true,
+        has_large_dir,
     )?;
     // Layout is [dx_root, leaf_0..leaf_{L-1}, node_0..node_{N-1}]: the root and
     // any interior nodes are index blocks (dx_tail CRC32C), the leaves are
@@ -9155,6 +9227,172 @@ mod tests {
             (1..=u32::try_from(l).unwrap()).collect::<Vec<_>>(),
             "enumeration must be exactly the leaf blocks 1..=L"
         );
+    }
+
+    /// bd-owt2r (large_dir): with the `INCOMPAT_LARGEDIR` feature the builder is
+    /// allowed a fourth block level (`indirect_levels == 3`, root → upper node →
+    /// lower node → leaf). The read-half (with `has_large_dir = true`) must
+    /// navigate all three indirect frames and the leaf enumerator must still list
+    /// exactly the leaves. Without the feature the same directory is unbuildable
+    /// (the depth would be unreadable), so it must return `None` — never a
+    /// silently-too-deep, kernel-unreadable index.
+    #[test]
+    fn build_htree_directory_four_level_large_dir_is_navigable_bd_owt2r() {
+        let bs = 64_usize;
+        let seed = [0x1234_5678_u32, 0x2345_6789, 0x3456_789a, 0x4567_89ab];
+        let hash_version = 1_u8;
+
+        // bs=64 → root_limit 4, node_limit 7 → a two-level index caps at
+        // 4*7*7 = 196 leaves; ~600 leaves (4 entries/leaf) forces a third level.
+        let names: Vec<Vec<u8>> = (0..2400).map(|i| format!("f{i:05}").into_bytes()).collect();
+        let entries: Vec<(u32, u8, &[u8])> = names
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (100 + u32::try_from(i).unwrap(), EXT4_FT_REG_FILE, n.as_slice()))
+            .collect();
+
+        // Without large_dir the depth is unreadable: refuse to build it.
+        assert!(
+            build_htree_directory(2, 2, &entries, bs, hash_version, &seed, false).is_none(),
+            "a four-level index must not build without INCOMPAT_LARGEDIR"
+        );
+
+        let blocks = build_htree_directory_with_large_dir(
+            2, 2, &entries, bs, hash_version, &seed, false, true,
+        )
+        .expect("four-level htree should build with large_dir");
+        assert_eq!(
+            blocks[0][0x1E], 3,
+            "dx_root must declare indirect_levels == 3 (four block levels)"
+        );
+
+        // Every name resolves through root -> upper -> lower -> leaf.
+        for (i, name) in names.iter().enumerate() {
+            match htree_find_entry(
+                u32::try_from(bs).unwrap(),
+                &seed,
+                true,
+                name,
+                |v| v,
+                |lb| blocks.get(lb as usize).cloned(),
+            ) {
+                HtreeFindResult::Found(e) => {
+                    assert_eq!(e.inode, 100 + u32::try_from(i).unwrap(), "wrong inode {name:?}");
+                }
+                other => panic!("entry {name:?} not reachable via four-level index: {other:?}"),
+            }
+        }
+
+        // The leaf enumerator descends all indirect levels and lists exactly the
+        // contiguous leaf range 1..=L (no interior nodes), recovering every name.
+        let mut leaves =
+            htree_leaf_logical_blocks(&blocks[0], true, |lb| blocks.get(lb as usize).cloned())
+                .expect("leaf enumeration");
+        let mut found = std::collections::BTreeSet::new();
+        for lb in &leaves {
+            let (parsed, _) =
+                parse_dir_block(&blocks[*lb as usize], u32::try_from(bs).unwrap()).unwrap();
+            for e in parsed {
+                if e.inode != 0 && e.name != b"." && e.name != b".." {
+                    found.insert(e.name);
+                }
+            }
+        }
+        assert_eq!(found.len(), names.len(), "every entry accounted for via leaves only");
+
+        leaves.sort_unstable();
+        let l = leaves.len();
+        assert!(l > 196, "four-level dir must exceed the two-level leaf cap, got {l}");
+        assert_eq!(
+            leaves,
+            (1..=u32::try_from(l).unwrap()).collect::<Vec<_>>(),
+            "enumeration must be exactly the leaf blocks 1..=L"
+        );
+    }
+
+    /// bd-owt2r (large_dir, checksummed): the `metadata_csum` builder produces an
+    /// e2fsck-clean four-level index — every block verifies under exactly one of
+    /// the leaf / interior-node CRC32C formulas, the extra indirect level is
+    /// stamped as a `dx_node`, and the result stays navigable with the tails in
+    /// place.
+    #[test]
+    fn build_htree_directory_stamped_four_level_large_dir_is_navigable_and_checksummed_bd_owt2r() {
+        let bs = 64_usize;
+        let seed = [0x9090_1010_u32, 0xa0a0_2020, 0xb0b0_3030, 0xc0c0_4040];
+        let csum_seed = 0x0fad_beef_u32;
+        let dir_ino = 4242_u32;
+        let generation = 9_u32;
+        let hash_version = 1_u8;
+
+        // Stamped bs=64 → root_limit 3, node_limit 6 → two-level cap 3*6*6 = 108
+        // leaves; ~400 leaves (3 entries/leaf) forces a third indirect level.
+        let names: Vec<Vec<u8>> = (0..1200).map(|i| format!("g{i:05}").into_bytes()).collect();
+        let entries: Vec<(u32, u8, &[u8])> = names
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (500 + u32::try_from(i).unwrap(), EXT4_FT_REG_FILE, n.as_slice()))
+            .collect();
+
+        // Parity: unbuildable without the feature flag.
+        assert!(
+            build_htree_directory_stamped(
+                2, 2, &entries, bs, hash_version, &seed, csum_seed, dir_ino, generation,
+            )
+            .is_none(),
+            "a four-level stamped index must not build without INCOMPAT_LARGEDIR"
+        );
+
+        let blocks = build_htree_directory_stamped_with_large_dir(
+            2, 2, &entries, bs, hash_version, &seed, csum_seed, dir_ino, generation, true,
+        )
+        .expect("stamped four-level htree build with large_dir");
+        assert_eq!(blocks[0][0x1E], 3, "dx_root must declare indirect_levels == 3");
+
+        // The DX root checksum verifies under the index formula.
+        assert!(verify_dx_block_checksum(
+            &blocks[0],
+            csum_seed,
+            dir_ino,
+            generation,
+            DX_ROOT_COUNT_OFFSET
+        ));
+
+        // Every other block verifies under exactly one formula; a four-level
+        // index has at least two stamped interior nodes (two indirect levels).
+        let mut node_blocks = 0_usize;
+        for blk in &blocks[1..] {
+            let dir_ok = verify_dir_block_checksum(blk, csum_seed, dir_ino, generation).is_ok();
+            let node_ok =
+                verify_dx_block_checksum(blk, csum_seed, dir_ino, generation, DX_NODE_COUNT_OFFSET);
+            if node_ok {
+                node_blocks += 1;
+            }
+            assert!(
+                dir_ok || node_ok,
+                "every block must carry a valid leaf or interior-node checksum"
+            );
+        }
+        assert!(
+            node_blocks >= 2,
+            "a four-level index must have at least two stamped interior nodes, got {node_blocks}"
+        );
+
+        // Still navigable end-to-end with the checksum tails in place.
+        for (i, name) in names.iter().enumerate() {
+            match htree_find_entry(
+                u32::try_from(bs).unwrap(),
+                &seed,
+                true,
+                name,
+                |v| v,
+                |lb| blocks.get(lb as usize).cloned(),
+            ) {
+                HtreeFindResult::Found(e) => {
+                    assert_eq!(e.inode, 500 + u32::try_from(i).unwrap());
+                }
+                other => panic!("entry {name:?} not reachable: {other:?}"),
+            }
+        }
     }
 
     #[test]

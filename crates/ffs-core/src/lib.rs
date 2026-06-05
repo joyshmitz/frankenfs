@@ -12281,7 +12281,7 @@ impl OpenFs {
             .map(|(i, ft, n)| (*i, *ft, n.as_slice()))
             .collect();
         let new_blocks = if has_metadata_csum {
-            ffs_ondisk::build_htree_directory_stamped(
+            ffs_ondisk::build_htree_directory_stamped_with_large_dir(
                 parent_ino_u32,
                 dotdot_ino,
                 &entry_refs,
@@ -12291,9 +12291,10 @@ impl OpenFs {
                 csum_seed,
                 parent_ino_u32,
                 generation,
+                has_large_dir,
             )
         } else {
-            ffs_ondisk::build_htree_directory(
+            ffs_ondisk::build_htree_directory_with_large_dir(
                 parent_ino_u32,
                 dotdot_ino,
                 &entry_refs,
@@ -12301,6 +12302,7 @@ impl OpenFs {
                 hash_version,
                 &hash_seed,
                 false,
+                has_large_dir,
             )
         }
         .ok_or_else(|| {
