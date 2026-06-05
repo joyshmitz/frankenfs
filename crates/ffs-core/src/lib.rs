@@ -49653,6 +49653,96 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "bd-5aybu: btrfs whole-file overwrite after partial-overwrite churn reads back all-zeros (data corruption); run with --ignored to reproduce"]
+    fn btrfs_write_multi_extent_overwrite_matches_reference_model_bd_5aybu() {
+        // Metamorphic coverage for btrfs_remove_overlapping_extent_data's
+        // multi-extent trim loop: build several disjoint regular extents (with
+        // holes between them), then overwrite ranges that span extent
+        // boundaries, partially clip the head of one extent and the tail of
+        // another, cross EOF, and finally rewrite the whole file. After every
+        // write the full file must equal a byte-exact in-memory model (holes
+        // read as zero).
+        //
+        // CURRENTLY FAILS (bd-5aybu): write #10 — the whole-file (0, 84000)
+        // overwrite of the now-fragmented file — reports success but the entire
+        // file reads back as zero. The 2/3/4-write controls in the bead pass, so
+        // the corruption is specific to the accumulated partial-overwrite churn,
+        // not a simple large write or an MVCC-flush artifact.
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+        let attr = ops
+            .create(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("metamorphic.bin"),
+                0o644,
+                0,
+                0,
+            )
+            .unwrap();
+
+        // (offset, len, fill-byte). The file stays large enough (>nodesize) that
+        // every write takes the regular-extent path, not the inline path.
+        let writes: [(usize, usize, u8); 11] = [
+            (0, 16384, 0x11),     // extent A [0,16K)
+            (32768, 16384, 0x22), // extent B [32K,48K); hole [16K,32K)
+            (65536, 16384, 0x33), // extent C [64K,80K); hole [48K,64K)
+            (8192, 61440, 0x44),  // span: clip A tail, fill holes, drop B, clip C head
+            (0, 4096, 0x55),      // sector-aligned head overwrite
+            (1234, 100, 0x66),    // unaligned small overwrite inside a regular extent
+            (79000, 5000, 0x77),  // unaligned write crossing EOF (extends to 84000)
+            (40000, 8000, 0x88),  // unaligned middle overwrite spanning a boundary
+            (4096, 71000, 0x99),  // large unaligned span across many extents
+            (0, 84000, 0xAA),     // whole-file overwrite — reads back all-zeros (bd-5aybu)
+            (50, 83950, 0xBB),    // unaligned near-whole-file overwrite
+        ];
+
+        let mut model: Vec<u8> = Vec::new();
+        for (off, len, val) in writes {
+            let buf = vec![val; len];
+            let written = fs
+                .write(&cx, attr.ino, off as u64, &buf)
+                .expect("btrfs write");
+            assert_eq!(written as usize, len, "short write at off={off} len={len}");
+
+            if off + len > model.len() {
+                model.resize(off + len, 0);
+            }
+            model[off..off + len].copy_from_slice(&buf);
+
+            let got = fs
+                .read(
+                    &cx,
+                    attr.ino,
+                    0,
+                    u32::try_from(model.len()).expect("model size fits u32"),
+                )
+                .expect("btrfs read");
+            assert_eq!(
+                got.len(),
+                model.len(),
+                "size mismatch after write off={off} len={len}"
+            );
+            let ndiff = (0..model.len()).filter(|&i| got[i] != model[i]).count();
+            assert!(
+                ndiff == 0,
+                "content diverged from model after write off={off} len={len} val={val:#x}: \
+                 {ndiff} of {} bytes differ (first at {})",
+                model.len(),
+                (0..model.len()).find(|&i| got[i] != model[i]).unwrap_or(0),
+            );
+
+            let attr_now = fs.getattr(&cx, attr.ino).expect("getattr");
+            assert_eq!(
+                attr_now.size,
+                model.len() as u64,
+                "inode size mismatch after write off={off} len={len}"
+            );
+        }
+    }
+
+    #[test]
     fn btrfs_write_unlink_file() {
         let (fs, cx) = open_writable_btrfs();
         let ops: &dyn FsOps = &fs;
