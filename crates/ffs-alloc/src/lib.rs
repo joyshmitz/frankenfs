@@ -1807,8 +1807,7 @@ fn try_alloc_safe(
     let reserved = reserved_blocks_in_group(geo, groups, group);
 
     let bitmap_buf = dev.read_block(cx, groups[gidx].block_bitmap_block)?;
-    let original_bitmap = bitmap_buf.as_slice().to_vec();
-    let mut bitmap = original_bitmap.clone();
+    let mut bitmap = bitmap_buf.as_slice().to_vec();
 
     // Ensure all reserved blocks are marked as allocated in the bitmap.
     for &r in &reserved {
@@ -1862,7 +1861,7 @@ fn try_alloc_safe(
                 cx,
                 dev,
                 groups[gidx].block_bitmap_block,
-                &original_bitmap,
+                bitmap_buf.as_slice(),
                 "block bitmap allocation",
                 error,
             )?;
