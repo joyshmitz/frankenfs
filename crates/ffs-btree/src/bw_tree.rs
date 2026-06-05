@@ -61,7 +61,7 @@ pub enum PageDelta {
         next: Arc<Self>,
     },
     MessageBuffer {
-        messages: BTreeMap<BwKey, BufferedMutation>,
+        messages: BufferedMessages,
         next: Arc<Self>,
     },
     AppendRun {
@@ -169,6 +169,69 @@ pub enum DeltaMutation {
 pub enum BufferedMutation {
     Insert(BwValue),
     Delete,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BufferedMessages {
+    entries: Arc<Vec<(BwKey, BufferedMutation)>>,
+}
+
+impl BufferedMessages {
+    fn singleton(entry: BufferedMutationEntry) -> Self {
+        Self {
+            entries: Arc::new(vec![(entry.key, entry.mutation)]),
+        }
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    #[must_use]
+    pub fn get(&self, key: &BwKey) -> Option<&BufferedMutation> {
+        self.entries
+            .binary_search_by_key(key, |(entry_key, _)| *entry_key)
+            .ok()
+            .map(|index| &self.entries[index].1)
+    }
+
+    fn upsert(&self, entry: BufferedMutationEntry) -> Self {
+        match self
+            .entries
+            .binary_search_by_key(&entry.key, |(key, _)| *key)
+        {
+            Ok(index) => {
+                let mut entries = Vec::with_capacity(self.entries.len());
+                entries.extend_from_slice(self.entries.as_slice());
+                entries[index].1 = entry.mutation;
+                Self::from_sorted_entries(entries)
+            }
+            Err(index) => {
+                let mut entries = Vec::with_capacity(self.entries.len() + 1);
+                entries.extend_from_slice(&self.entries[..index]);
+                entries.push((entry.key, entry.mutation));
+                entries.extend_from_slice(&self.entries[index..]);
+                Self::from_sorted_entries(entries)
+            }
+        }
+    }
+
+    fn iter(&self) -> impl Iterator<Item = (BwKey, BufferedMutation)> + '_ {
+        self.entries.iter().copied()
+    }
+
+    fn from_sorted_entries(entries: Vec<(BwKey, BufferedMutation)>) -> Self {
+        debug_assert!(entries.windows(2).all(|window| window[0].0 < window[1].0));
+        Self {
+            entries: Arc::new(entries),
+        }
+    }
 }
 
 enum MessageBufferAppend {
@@ -336,8 +399,7 @@ impl MappingTable {
                     continue;
                 }
                 Some(MessageBufferAppend::FlushRequired) => {
-                    let (new_head, new_chain_len) =
-                        append_run_or_materialized_base(&snapshot)?;
+                    let (new_head, new_chain_len) = append_run_or_materialized_base(&snapshot)?;
                     if self.cas_page(page_id, snapshot.epoch, new_head, new_chain_len)? {
                         debug!(
                             target: "ffs::bwtree",
@@ -692,12 +754,11 @@ fn message_buffer_append(
     let buffered = BufferedMutation::from_delta(mutation)?;
     match snapshot.head.as_ref() {
         PageDelta::MessageBuffer { messages, next } => {
-            let grows = !messages.contains_key(&buffered.key);
+            let grows = messages.get(&buffered.key).is_none();
             if grows && messages.len() >= DEFAULT_MESSAGE_BUFFER_CAPACITY {
                 return Some(MessageBufferAppend::FlushRequired);
             }
-            let mut new_messages = messages.clone();
-            new_messages.insert(buffered.key, buffered.mutation);
+            let new_messages = messages.upsert(buffered);
             Some(MessageBufferAppend::Buffered {
                 new_head: Arc::new(PageDelta::MessageBuffer {
                     messages: new_messages,
@@ -707,11 +768,9 @@ fn message_buffer_append(
             })
         }
         _ if snapshot.chain_len <= DEFAULT_CONSOLIDATION_THRESHOLD => {
-            let mut messages = BTreeMap::new();
-            messages.insert(buffered.key, buffered.mutation);
             Some(MessageBufferAppend::Buffered {
                 new_head: Arc::new(PageDelta::MessageBuffer {
-                    messages,
+                    messages: BufferedMessages::singleton(buffered),
                     next: Arc::clone(&snapshot.head),
                 }),
                 new_chain_len: snapshot.chain_len + 1,
@@ -734,7 +793,7 @@ fn append_run_from_message_buffer(head: &Arc<PageDelta>) -> Option<Arc<PageDelta
     let PageDelta::MessageBuffer { messages, next } = head.as_ref() else {
         return None;
     };
-    let max_key = append_only_max_key(next.as_ref())?;
+    let max_key = append_only_max_key(next.as_ref())?.key_bound();
     let entries = buffered_insert_run_above(messages, max_key)?;
     Some(Arc::new(PageDelta::AppendRun {
         entries: Arc::new(entries),
@@ -742,12 +801,33 @@ fn append_run_from_message_buffer(head: &Arc<PageDelta>) -> Option<Arc<PageDelta
     }))
 }
 
-fn append_only_max_key(head: &PageDelta) -> Option<Option<BwKey>> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AppendOnlyMaxKey {
+    Empty,
+    Key(BwKey),
+}
+
+impl AppendOnlyMaxKey {
+    fn key_bound(self) -> Option<BwKey> {
+        match self {
+            Self::Empty => None,
+            Self::Key(key) => Some(key),
+        }
+    }
+}
+
+fn append_only_max_key(head: &PageDelta) -> Option<AppendOnlyMaxKey> {
     match head {
-        PageDelta::Base { entries } => Some(entries.keys().next_back().copied()),
+        PageDelta::Base { entries } => Some(
+            entries
+                .keys()
+                .next_back()
+                .copied()
+                .map_or(AppendOnlyMaxKey::Empty, AppendOnlyMaxKey::Key),
+        ),
         PageDelta::AppendRun { entries, next } => entries
             .last()
-            .map(|&(key, _)| Some(key))
+            .map(|&(key, _)| AppendOnlyMaxKey::Key(key))
             .or_else(|| append_only_max_key(next.as_ref())),
         PageDelta::Insert { .. }
         | PageDelta::Delete { .. }
@@ -758,7 +838,7 @@ fn append_only_max_key(head: &PageDelta) -> Option<Option<BwKey>> {
 }
 
 fn buffered_insert_run_above(
-    messages: &BTreeMap<BwKey, BufferedMutation>,
+    messages: &BufferedMessages,
     max_key: Option<BwKey>,
 ) -> Option<Vec<(BwKey, BwValue)>> {
     if messages.is_empty() {
@@ -766,7 +846,7 @@ fn buffered_insert_run_above(
     }
 
     let mut entries = Vec::with_capacity(messages.len());
-    for (&key, &message) in messages {
+    for (key, message) in messages.iter() {
         if max_key.is_some_and(|bound| key <= bound) {
             return None;
         }
@@ -1093,8 +1173,8 @@ fn lookup_from_head(head: &Arc<PageDelta>, key: BwKey) -> Result<(Option<BwValue
     }
 }
 
-fn push_buffered_ops(ops: &mut Vec<MaterializeOp>, messages: &BTreeMap<BwKey, BufferedMutation>) {
-    for (&key, &message) in messages {
+fn push_buffered_ops(ops: &mut Vec<MaterializeOp>, messages: &BufferedMessages) {
+    for (key, message) in messages.iter() {
         match message {
             BufferedMutation::Insert(value) => ops.push(MaterializeOp::Insert { key, value }),
             BufferedMutation::Delete => ops.push(MaterializeOp::Delete { key }),
