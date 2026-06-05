@@ -188,3 +188,7 @@ unwraps*.txt
 # .bak siblings are recovery-only and never re-committed.
 .beads/issues.jsonl.pre_*.bak
 .beads/issues.jsonl.*.bak
+
+# Ephemeral agent/skill scratch (repo-janitor 2026-06-04)
+.skill-loop-progress.md
+.skill-loop-progress-*.md
