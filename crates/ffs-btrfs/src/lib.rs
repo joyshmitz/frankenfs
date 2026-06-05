@@ -4150,6 +4150,21 @@ impl BtrfsExtentAllocator {
         }
     }
 
+    /// Set the transaction generation stamped into newly inserted
+    /// `EXTENT_ITEM`/`METADATA_ITEM` records.
+    ///
+    /// btrfs records the allocating transaction's generation in each extent
+    /// item, and `btrfs check` requires it to equal the generation written into
+    /// the referenced tree block's header. During a commit the tree blocks are
+    /// (re)written at the NEW generation, so the allocator must be advanced to
+    /// that same generation before its commit-time metadata allocations —
+    /// otherwise the extent item carries the previous generation and
+    /// `btrfs check --mode lowmem` reports "backref generation mismatch,
+    /// wanted: N, have: N-1" (bd-myrgc / bd-x36qn).
+    pub fn set_generation(&mut self, generation: u64) {
+        self.generation = generation;
+    }
+
     /// Register a block group.
     pub fn add_block_group(&mut self, start: u64, item: BtrfsBlockGroupItem) {
         debug!(

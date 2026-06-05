@@ -16615,6 +16615,14 @@ impl OpenFs {
         let new_gen = current_gen.saturating_add(1);
         let nodesize = alloc.nodesize;
 
+        // Advance the extent allocator to the new transaction generation before
+        // any commit-time metadata allocation. The fs/csum/extent/root tree
+        // nodes (re)written below carry `new_gen` in their headers, so the
+        // EXTENT_ITEMs the allocator stamps for them must use `new_gen` too —
+        // otherwise `btrfs check --mode lowmem` reports a "backref generation
+        // mismatch, wanted: N, have: N-1" for those nodes (bd-myrgc / bd-x36qn).
+        alloc.extent_alloc.set_generation(new_gen);
+
         // Drop the stale extent items of the trees we are about to rewrite
         // wholesale at fresh addresses (root/extent/fs/csum). Their old nodes,
         // loaded from disk, otherwise linger as backrefs for blocks no live tree
@@ -49094,6 +49102,59 @@ mod tests {
         assert!(
             ok,
             "btrfs check must accept a FrankenFS-created+committed file:\n{output}"
+        );
+    }
+
+    /// bd-myrgc diagnostic: commit a FrankenFS file then dump the extent tree +
+    /// root tree of the resulting image so we can map every "no backref" node to
+    /// its owner/origin (loaded mkfs extents vs FrankenFS-allocated metadata).
+    #[test]
+    #[ignore = "bd-myrgc diagnostic dump"]
+    fn btrfs_dump_tree_bd_myrgc_diag() {
+        let Some((fs, dev, _tmp, image)) = open_writable_btrfs_mkfs(256) else {
+            panic!("btrfs-progs unavailable on this worker — rerun to land on one with it");
+        };
+        let cx = Cx::for_testing();
+        fs.create(
+            &cx,
+            InodeNumber(u64::from(BTRFS_FIRST_FREE_OBJECTID)),
+            OsStr::new("x3fcu_check.txt"),
+            0o644,
+            0,
+            0,
+        )
+        .expect("btrfs create");
+        let _ = fs.flush_mvcc_to_device(&cx);
+        fs.btrfs_full_transaction_commit(&cx, "x3fcu-create-check")
+            .expect("commit");
+        let bytes = dev.snapshot_bytes();
+        std::fs::write(&image, &bytes).expect("write image");
+
+        let dump = |args: &[&str]| -> String {
+            let mut full = vec!["inspect-internal", "dump-tree"];
+            full.extend_from_slice(args);
+            full.push(image.to_str().unwrap());
+            let out = std::process::Command::new("btrfs")
+                .args(&full)
+                .output()
+                .expect("btrfs dump-tree");
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        };
+        // Extent tree (-t 2) shows every EXTENT_ITEM/METADATA_ITEM + its refs.
+        eprintln!("===== EXTENT TREE =====\n{}", dump(&["-t", "2"]));
+        // Root tree (-t 1) shows ROOT_ITEMs and the bytenr of each tree root.
+        eprintln!("===== ROOT TREE =====\n{}", dump(&["-t", "1"]));
+        let (_ok, check) = run_btrfs_check(&image).expect("btrfs check");
+        eprintln!("===== BTRFS CHECK =====\n{check}");
+        // lowmem mode gives precise per-node extent-tree diagnostics.
+        let lowmem = std::process::Command::new("btrfs")
+            .args(["check", "--mode", "lowmem", image.to_str().unwrap()])
+            .output()
+            .expect("btrfs check lowmem");
+        eprintln!(
+            "===== BTRFS CHECK LOWMEM =====\n{}{}",
+            String::from_utf8_lossy(&lowmem.stdout),
+            String::from_utf8_lossy(&lowmem.stderr)
         );
     }
 
