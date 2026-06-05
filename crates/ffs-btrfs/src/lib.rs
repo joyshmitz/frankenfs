@@ -3964,6 +3964,16 @@ struct BlockGroupState {
     item: BtrfsBlockGroupItem,
     /// Hint for next allocation search offset within this group.
     alloc_offset: u64,
+    /// Lowest offset within the group that may be handed out. Captured at
+    /// registration from the group's already-used bytes, this fences off the
+    /// reserved prefix (superblock / system / root region that carries no
+    /// EXTENT_ITEM in the data allocator's tree). The wrap-around gap search
+    /// must clamp to `start + min_usable_offset`; otherwise, when every data
+    /// extent in a group rooted at logical 0 has been freed (gap scan sees an
+    /// empty range set), it would reset to `start == 0` and hand out bytenr 0 —
+    /// the btrfs hole/none sentinel — silently turning the write into a hole
+    /// that reads back as zeros (bd-5aybu).
+    min_usable_offset: u64,
 }
 
 /// Extent allocator for btrfs write path.
@@ -4011,6 +4021,7 @@ impl BtrfsExtentAllocator {
                 start,
                 item,
                 alloc_offset: item.used_bytes,
+                min_usable_offset: item.used_bytes,
             },
         );
     }
@@ -4159,6 +4170,13 @@ impl BtrfsExtentAllocator {
 
         // Scan for gaps between existing extents.
         let alloc_offset = self.block_groups[&bg_start].alloc_offset;
+        // Lowest address this group may hand out: fences off the reserved prefix
+        // (system/root region carrying no EXTENT_ITEM here). Both the forward and
+        // wrap-around searches must respect it, or a fully-freed group rooted at
+        // logical 0 would allocate bytenr 0 — the hole sentinel (bd-5aybu).
+        let min_usable = bg_start
+            .checked_add(self.block_groups[&bg_start].min_usable_offset)
+            .ok_or(BtrfsMutationError::AddressOverflow)?;
         let mut cursor = bg_start
             .checked_add(alloc_offset)
             .ok_or(BtrfsMutationError::AddressOverflow)?;
@@ -4193,9 +4211,9 @@ impl BtrfsExtentAllocator {
                 }
             }
         }
-        // Wrap around: try from block group start if we started mid-group.
+        // Wrap around: try from the first usable offset if we started mid-group.
         if found.is_none() && alloc_offset > 0 {
-            cursor = bg_start;
+            cursor = min_usable;
             for &(ext_start, ext_size) in &allocated_ranges {
                 let ext_end = ext_start
                     .checked_add(ext_size)
@@ -4220,7 +4238,11 @@ impl BtrfsExtentAllocator {
             }
         }
 
-        let bytenr = found.ok_or(BtrfsMutationError::NoSpace)?;
+        // bytenr 0 is the btrfs hole/none sentinel and must never back a real
+        // extent; refuse it defensively rather than corrupt data (bd-5aybu).
+        let bytenr = found
+            .filter(|&b| b != 0)
+            .ok_or(BtrfsMutationError::NoSpace)?;
         let extent = ExtentKey { bytenr, num_bytes };
 
         debug!(
@@ -11402,8 +11424,11 @@ mod tests {
         // subsequently allocated metadata extent must not share physical space
         // (else a metadata commit would overwrite freshly written data).
         let mut alloc = BtrfsExtentAllocator::new(1).expect("alloc");
+        // Root the group at a realistic offset: btrfs reserves the low logical
+        // region, and bytenr 0 is the hole sentinel that the allocator must
+        // never hand out (bd-5aybu).
         alloc.add_block_group(
-            0,
+            1 << 20,
             BtrfsBlockGroupItem {
                 total_bytes: 1 << 20,
                 used_bytes: 0,

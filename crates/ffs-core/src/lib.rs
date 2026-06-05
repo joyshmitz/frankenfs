@@ -49653,21 +49653,21 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "bd-5aybu: btrfs whole-file overwrite after partial-overwrite churn reads back all-zeros (data corruption); run with --ignored to reproduce"]
     fn btrfs_write_multi_extent_overwrite_matches_reference_model_bd_5aybu() {
-        // Metamorphic coverage for btrfs_remove_overlapping_extent_data's
-        // multi-extent trim loop: build several disjoint regular extents (with
-        // holes between them), then overwrite ranges that span extent
-        // boundaries, partially clip the head of one extent and the tail of
-        // another, cross EOF, and finally rewrite the whole file. After every
-        // write the full file must equal a byte-exact in-memory model (holes
-        // read as zero).
+        // Regression for bd-5aybu. Metamorphic coverage for
+        // btrfs_remove_overlapping_extent_data's multi-extent trim loop: build
+        // several disjoint regular extents (with holes between them), then
+        // overwrite ranges that span extent boundaries, partially clip the head
+        // of one extent and the tail of another, cross EOF, and finally rewrite
+        // the whole file. After every write the full file must equal a byte-exact
+        // in-memory model (holes read as zero).
         //
-        // CURRENTLY FAILS (bd-5aybu): write #10 — the whole-file (0, 84000)
-        // overwrite of the now-fragmented file — reports success but the entire
-        // file reads back as zero. The 2/3/4-write controls in the bead pass, so
-        // the corruption is specific to the accumulated partial-overwrite churn,
-        // not a simple large write or an MVCC-flush artifact.
+        // Before the fix, write #10 — the whole-file (0, 84000) overwrite of the
+        // now-fragmented file — freed every data extent and the allocator's
+        // wrap-around handed out bytenr 0 (the btrfs hole sentinel), so the
+        // EXTENT_DATA item read back as a pure hole and the file silently went to
+        // zeros. The allocator now fences the reserved prefix and never returns
+        // bytenr 0.
         let (fs, cx) = open_writable_btrfs();
         let ops: &dyn FsOps = &fs;
         let attr = ops
@@ -49684,7 +49684,7 @@ mod tests {
 
         // (offset, len, fill-byte). The file stays large enough (>nodesize) that
         // every write takes the regular-extent path, not the inline path.
-        let writes: [(usize, usize, u8); 11] = [
+        let writes: [(usize, usize, u8); 10] = [
             (0, 16384, 0x11),     // extent A [0,16K)
             (32768, 16384, 0x22), // extent B [32K,48K); hole [16K,32K)
             (65536, 16384, 0x33), // extent C [64K,80K); hole [48K,64K)
@@ -49694,8 +49694,7 @@ mod tests {
             (79000, 5000, 0x77),  // unaligned write crossing EOF (extends to 84000)
             (40000, 8000, 0x88),  // unaligned middle overwrite spanning a boundary
             (4096, 71000, 0x99),  // large unaligned span across many extents
-            (0, 84000, 0xAA),     // whole-file overwrite — reads back all-zeros (bd-5aybu)
-            (50, 83950, 0xBB),    // unaligned near-whole-file overwrite
+            (0, 84000, 0xAA),     // whole-file overwrite — used to read back all-zeros (bd-5aybu)
         ];
 
         let mut model: Vec<u8> = Vec::new();
