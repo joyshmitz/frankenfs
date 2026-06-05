@@ -1521,7 +1521,7 @@ fn persist_group_desc_with_bitmap_overrides(
             .ok_or_else(|| FfsError::InvalidGeometry("GDT block number overflow".into()))?,
     );
     let raw = dev.read_block(cx, block_num)?;
-    let mut buf = raw.as_slice().to_vec();
+    let mut buf = raw.into_inner();
 
     // Build a temporary Ext4GroupDesc with updated counters and serialize.
     // Read existing descriptor to preserve fields we don't track.
