@@ -14595,7 +14595,6 @@ impl OpenFs {
                             "truncation size exceeds ext4 32-bit logical block limit".into(),
                         )
                     })?;
-                    let extent_ns = extent_root_namespace(&inode);
                     let mut root_bytes = Self::extent_root(&inode);
                     let freed = if let Some(tx) = &mut scope.tx {
                         let tx_dev = TransactionBlockAdapter {
@@ -14640,11 +14639,18 @@ impl OpenFs {
                             },
                         )?
                     };
-                    self.extent_cache.invalidate_range(
-                        extent_ns,
-                        new_logical_end,
-                        u64::from(u32::MAX) - u64::from(new_logical_end),
-                    );
+                    // bd-5911f: a truncate-down FREES blocks that the allocator
+                    // can later recycle into ANY logical offset of this or
+                    // another inode. The extent cache is namespaced by the
+                    // inode's (mutable) extent-root bytes, so a narrow
+                    // invalidate_range under the post-truncate namespace cannot
+                    // reach mappings cached under an earlier namespace — those
+                    // stale entries then point a future read at a recycled
+                    // physical block holding unrelated data. Freeing blocks must
+                    // therefore drop the whole cache (generation bump): it can
+                    // only over-invalidate (cost a re-walk), never serve stale
+                    // data.
+                    self.extent_cache.invalidate_all();
                     Self::set_extent_root(&mut inode, &root_bytes);
                     let freed_sectors = if inode.is_huge_file() {
                         freed
@@ -59713,6 +59719,91 @@ mod tests {
                     n,
                     (0..n).find(|&i| got[i] != model[i]).unwrap_or(0)
                 );
+            }
+        }
+    }
+
+    /// bd-5911f regression: deterministic replay of the minimal write/truncate
+    /// sequence that exposed stale extent-cache mappings surviving a
+    /// truncate-down (freed blocks recycled into other logical offsets, then a
+    /// read served the recycled block's old bytes). The fix makes truncate-down
+    /// drop the whole extent cache. Reads after every op, exactly like the
+    /// proptest, so the intermediate read that poisoned the cache is exercised.
+    #[test]
+    fn ext4_write_truncate_bd_5911f_stale_extent_cache() {
+        let Some((fs, _tmp)) = open_writable_ext4_mkfs(64) else {
+            return; // mkfs.ext4 unavailable — skip (matches the proptest).
+        };
+        let cx = Cx::for_testing();
+        let attr = fs
+            .create(&cx, InodeNumber(2), OsStr::new("prop.bin"), 0o644, 0, 0)
+            .expect("create");
+        let ops: &[(u8, usize, usize, u8)] = &[
+            (0, 25316, 15645, 0),
+            (0, 8192, 1, 0),
+            (1, 2207, 4948, 69),
+            (0, 47012, 9253, 62),
+            (1, 48477, 15962, 238),
+            (0, 27082, 12422, 238),
+        ];
+        let mut model: Vec<u8> = Vec::new();
+        let bs = 4096usize;
+        use std::fmt::Write as _;
+        for (opi, (kind, a, len, val)) in ops.iter().copied().enumerate() {
+            if kind == 0 {
+                let buf = vec![val; len];
+                fs.write(&cx, attr.ino, a as u64, &buf).expect("write");
+                if a + len > model.len() {
+                    model.resize(a + len, 0);
+                }
+                model[a..a + len].copy_from_slice(&buf);
+            } else {
+                fs.setattr(
+                    &cx,
+                    attr.ino,
+                    &SetAttrRequest {
+                        size: Some(a as u64),
+                        ..Default::default()
+                    },
+                )
+                .expect("truncate");
+                model.resize(a, 0);
+            }
+            // Mirror the proptest: read + compare the whole file after each op.
+            let n = model.len();
+            let attr_now = fs.getattr(&cx, attr.ino).expect("getattr");
+            assert_eq!(attr_now.size, n as u64, "op{opi}: inode size mismatch");
+            let got = fs
+                .read(&cx, attr.ino, 0, u32::try_from(n).unwrap())
+                .expect("read");
+            if got != model {
+                let mut msg = String::new();
+                let _ = writeln!(
+                    msg,
+                    "op{opi} (kind={kind},a={a},len={len},val={val}) n={n} got.len={}",
+                    got.len()
+                );
+                let mut i = 0;
+                while i < n {
+                    if got.get(i).copied().unwrap_or(0) != model[i] {
+                        let start = i;
+                        while i < n && got.get(i).copied().unwrap_or(0) != model[i] {
+                            i += 1;
+                        }
+                        let _ = writeln!(
+                            msg,
+                            "  DIFF [{start}..{i}) len={} blk[{}..{}] model={} got@start={}",
+                            i - start,
+                            start / bs,
+                            (i - 1) / bs,
+                            model[start],
+                            got.get(start).copied().unwrap_or(0),
+                        );
+                    } else {
+                        i += 1;
+                    }
+                }
+                panic!("{msg}");
             }
         }
     }
