@@ -19120,6 +19120,14 @@ impl OpenFs {
             .insert(dir_index_key, &new_bytes)
             .map_err(|e| btrfs_mutation_to_ffs(&e))?;
 
+        // Account the new entry against the directory's i_size (DIR_ITEM +
+        // DIR_INDEX => 2 * name_len), matching the kernel and `btrfs check`.
+        self.btrfs_adjust_dir_size(
+            alloc,
+            parent_oid,
+            Self::btrfs_dir_entry_size_delta(item.name.len()),
+        )?;
+
         Ok(seq)
     }
 
@@ -19179,6 +19187,13 @@ impl OpenFs {
     ) -> ffs_error::Result<()> {
         Self::btrfs_remove_named_dir_item(alloc, parent_oid, name)?;
         Self::btrfs_remove_named_dir_index(alloc, parent_oid, name)?;
+        // Reverse the i_size accounting applied at insert (DIR_ITEM + DIR_INDEX
+        // => 2 * name_len); both removals succeeded above.
+        self.btrfs_adjust_dir_size(
+            alloc,
+            parent_oid,
+            -Self::btrfs_dir_entry_size_delta(name.len()),
+        )?;
         Ok(())
     }
 
@@ -19378,6 +19393,51 @@ impl OpenFs {
             .update(&key, &inode.to_bytes())
             .map_err(|e| btrfs_mutation_to_ffs(&e))?;
         Ok(())
+    }
+
+    /// Adjust a btrfs directory inode's `size` by `delta` bytes and write it
+    /// back. btrfs (unlike ext4, where a directory's size is its block-aligned
+    /// allocation) sets a directory's i_size to the running total of the name
+    /// lengths of its entries, counted once per on-disk item — and because each
+    /// entry is stored as BOTH a `DIR_ITEM` and a `DIR_INDEX`, every link
+    /// contributes `2 * name_len`. `btrfs check` recomputes this sum and rejects
+    /// a mismatch ("dir isize wrong"), and `stat` on the directory reports it,
+    /// so the size must be maintained on every entry insert/remove (bd-x36qn).
+    fn btrfs_adjust_dir_size(
+        &self,
+        alloc: &mut BtrfsAllocState,
+        objectid: u64,
+        delta: i64,
+    ) -> ffs_error::Result<()> {
+        let mut inode = self.btrfs_read_inode_from_tree(alloc, objectid)?;
+        let new_size = i64::try_from(inode.size)
+            .ok()
+            .and_then(|size| size.checked_add(delta))
+            .and_then(|size| u64::try_from(size).ok())
+            .ok_or_else(|| FfsError::Corruption {
+                block: 0,
+                detail: format!(
+                    "btrfs dir {objectid} size adjustment out of range (size={}, delta={delta})",
+                    inode.size
+                ),
+            })?;
+        inode.size = new_size;
+        let key = BtrfsKey {
+            objectid,
+            item_type: BTRFS_ITEM_INODE_ITEM,
+            offset: 0,
+        };
+        alloc
+            .fs_tree
+            .update(&key, &inode.to_bytes())
+            .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+        Ok(())
+    }
+
+    /// The byte delta a directory entry with `name` contributes to its parent
+    /// directory's i_size: `2 * name_len` (one `DIR_ITEM` + one `DIR_INDEX`).
+    fn btrfs_dir_entry_size_delta(name_len: usize) -> i64 {
+        i64::try_from(name_len).unwrap_or(i64::MAX / 2).saturating_mul(2)
     }
 
     fn btrfs_collect_purge_plan(
@@ -49161,6 +49221,43 @@ mod tests {
             fs.largest_contiguous_free_run(&cx)
                 .expect("largest contiguous btrfs run"),
             48
+        );
+    }
+
+    /// bd-x36qn: a btrfs directory's i_size must track its entries the way the
+    /// kernel and `btrfs check` do — `2 * name_len` per entry (one DIR_ITEM +
+    /// one DIR_INDEX) — so the directory is `btrfs check`-clean and `stat`
+    /// reports the correct size. Previously FrankenFS never updated the parent
+    /// directory's size on create/unlink, so `btrfs check` reported
+    /// "dir isize wrong" and getattr returned a stale size.
+    #[test]
+    fn btrfs_dir_isize_tracks_entries_2x_name_len_bd_x36qn() {
+        let (fs, cx) = open_writable_btrfs();
+        let dir = InodeNumber(u64::from(BTRFS_FIRST_FREE_OBJECTID));
+        let base = fs.getattr(&cx, dir).expect("getattr dir").size;
+
+        let a = OsStr::new("alpha.txt");
+        let b = OsStr::new("beta_longer_name.bin");
+        let la = a.as_bytes().len() as u64;
+        let lb = b.as_bytes().len() as u64;
+
+        fs.create(&cx, dir, a, 0o644, 0, 0).expect("create a");
+        assert_eq!(
+            fs.getattr(&cx, dir).expect("getattr").size,
+            base + 2 * la,
+            "dir i_size must grow by 2*name_len on the first entry"
+        );
+        fs.create(&cx, dir, b, 0o644, 0, 0).expect("create b");
+        assert_eq!(
+            fs.getattr(&cx, dir).expect("getattr").size,
+            base + 2 * la + 2 * lb,
+            "dir i_size must accumulate 2*name_len per entry"
+        );
+        fs.unlink(&cx, dir, a).expect("unlink a");
+        assert_eq!(
+            fs.getattr(&cx, dir).expect("getattr").size,
+            base + 2 * lb,
+            "unlink must reverse the 2*name_len accounting"
         );
     }
 
