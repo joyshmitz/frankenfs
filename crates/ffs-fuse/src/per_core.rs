@@ -336,7 +336,44 @@ impl PerCoreDispatcher {
     /// donor and bounded transfer count.
     #[must_use]
     pub fn should_steal(&self, core: u32) -> bool {
-        self.steal_plan_for(core).is_some()
+        let n = self.core_metrics.len();
+        if n < 2 {
+            return false;
+        }
+        let receiver_idx = core as usize;
+        if receiver_idx >= n {
+            return false;
+        }
+
+        let Ok(core_count) = i64::try_from(n) else {
+            return false;
+        };
+
+        let mut total = 0_i64;
+        let mut receiver_pending = 0_i64;
+        let mut donor_pending = 0_i64;
+
+        for idx in 0..n {
+            let depth = self.pending_depth(idx);
+            total = total.saturating_add(depth);
+            if idx == receiver_idx {
+                receiver_pending = depth;
+            } else {
+                donor_pending = donor_pending.max(depth);
+            }
+        }
+
+        if total < core_count {
+            return false;
+        }
+
+        let avg = total as f64 / n as f64;
+        let mine = receiver_pending as f64;
+        if mine >= avg / self.config.normalized_steal_threshold() {
+            return false;
+        }
+
+        donor_pending > receiver_pending
     }
 
     /// Build an advisory plan for `receiver_core` to steal pending work.
@@ -929,6 +966,48 @@ mod tests {
         };
         let disp = PerCoreDispatcher::new(cfg);
         assert!(!disp.should_steal(9));
+    }
+
+    #[test]
+    fn should_steal_matches_plan_existence() {
+        let thresholds = [2.0, 1.5, f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0];
+        let cases: &[&[i64]] = &[
+            &[0, 0],
+            &[0, 1],
+            &[0, 9],
+            &[4, 4],
+            &[9, 0],
+            &[-5, 8],
+            &[0, 9, 9, 4],
+            &[1, 9, 0, 9],
+            &[i64::MAX, i64::MAX],
+        ];
+
+        for &threshold in &thresholds {
+            for pending in cases {
+                let core_count = u32::try_from(pending.len()).expect("test core count fits u32");
+                let disp = PerCoreDispatcher::new(PerCoreConfig {
+                    num_cores: core_count,
+                    steal_threshold: threshold,
+                    ..Default::default()
+                });
+                for (core, &depth) in pending.iter().enumerate() {
+                    let core_id = u32::try_from(core).expect("test core index fits u32");
+                    disp.core_metrics(core_id)
+                        .unwrap()
+                        .pending_requests
+                        .store(depth, Ordering::Relaxed);
+                }
+
+                for core in 0..=core_count {
+                    assert_eq!(
+                        disp.should_steal(core),
+                        disp.steal_plan_for(core).is_some(),
+                        "threshold={threshold:?} pending={pending:?} core={core}"
+                    );
+                }
+            }
+        }
     }
 
     fn steal_plan_reference_from_pending(
