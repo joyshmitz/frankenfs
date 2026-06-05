@@ -2082,8 +2082,7 @@ fn try_alloc_batch_in_group(
     let reserved = reserved_blocks_in_group(geo, groups, group);
 
     let bitmap_buf = dev.read_block(cx, groups[gidx].block_bitmap_block)?;
-    let original_bitmap = bitmap_buf.as_slice().to_vec();
-    let mut bitmap = original_bitmap.clone();
+    let mut bitmap = bitmap_buf.as_slice().to_vec();
 
     // Mark reserved blocks.
     for &r in &reserved {
@@ -2134,7 +2133,7 @@ fn try_alloc_batch_in_group(
             cx,
             dev,
             groups[gidx].block_bitmap_block,
-            &original_bitmap,
+            bitmap_buf.as_slice(),
             "batch block bitmap allocation",
             error,
         )?;
