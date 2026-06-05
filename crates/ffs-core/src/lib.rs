@@ -49545,6 +49545,44 @@ mod tests {
             write(fs, cx, attr.ino, 0, &vec![0x33_u8; 16384]);
             fs.unlink(cx, root, OsStr::new("del.dat")).expect("unlink");
         });
+
+        // E: sparse file — a hole between two extents (write @0 and @1 MiB).
+        scenario("E_sparse_hole", &|fs, cx| {
+            let attr = fs
+                .create(cx, root, OsStr::new("sp.dat"), 0o644, 0, 0)
+                .expect("create");
+            write(fs, cx, attr.ino, 0, &vec![0x44_u8; 16384]);
+            write(fs, cx, attr.ino, 1024 * 1024, &vec![0x55_u8; 16384]);
+        });
+
+        // F: sequential append (two adjacent extents).
+        scenario("F_append", &|fs, cx| {
+            let attr = fs
+                .create(cx, root, OsStr::new("ap.dat"), 0o644, 0, 0)
+                .expect("create");
+            write(fs, cx, attr.ino, 0, &vec![0x66_u8; 16384]);
+            write(fs, cx, attr.ino, 16384, &vec![0x77_u8; 16384]);
+        });
+
+        // G: two overlapping overwrites of one extent (repeated split/free).
+        scenario("G_double_overwrite", &|fs, cx| {
+            let attr = fs
+                .create(cx, root, OsStr::new("dow.dat"), 0o644, 0, 0)
+                .expect("create");
+            write(fs, cx, attr.ino, 0, &vec![0x10_u8; 65536]);
+            write(fs, cx, attr.ino, 16384, &vec![0x20_u8; 16384]);
+            write(fs, cx, attr.ino, 32768, &vec![0x30_u8; 16384]);
+        });
+
+        // H: overwrite then extend past EOF (split + new tail extent).
+        scenario("H_overwrite_then_extend", &|fs, cx| {
+            let attr = fs
+                .create(cx, root, OsStr::new("oe.dat"), 0o644, 0, 0)
+                .expect("create");
+            write(fs, cx, attr.ino, 0, &vec![0x88_u8; 65536]);
+            write(fs, cx, attr.ino, 16384, &vec![0x99_u8; 16384]);
+            write(fs, cx, attr.ino, 65536, &vec![0xAA_u8; 16384]);
+        });
     }
 
     /// bd-myrgc diagnostic: commit a FrankenFS file then dump the extent tree +
