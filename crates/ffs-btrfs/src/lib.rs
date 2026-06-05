@@ -3974,6 +3974,22 @@ pub struct ExtentAllocation {
     pub block_group_start: u64,
 }
 
+/// Free-space layout of one block group.
+///
+/// Holds the maximal free `[start, start + len)` ranges within the group's
+/// span (sorted by start), as the btrfs `FREE_SPACE_TREE` records them.
+/// Produced by [`BtrfsExtentAllocator::free_space_extents`] for
+/// FREE_SPACE_TREE maintenance.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockGroupFreeSpace {
+    /// Starting byte address of the block group.
+    pub start: u64,
+    /// Block group flags (DATA / METADATA / SYSTEM, etc.).
+    pub flags: u64,
+    /// Free `[start, len)` ranges within the group, sorted by start.
+    pub free_ranges: Vec<(u64, u64)>,
+}
+
 /// In-memory block group state tracked by the extent allocator.
 #[derive(Debug, Clone)]
 struct BlockGroupState {
@@ -4884,6 +4900,112 @@ impl BtrfsExtentAllocator {
         }
 
         Ok(best)
+    }
+
+    /// Enumerate the free-space extents of every block group.
+    ///
+    /// For each block group, returns a [`BlockGroupFreeSpace`] listing the
+    /// maximal half-open `[start, start + len)` ranges within its span not
+    /// covered by any allocated extent — exactly what btrfs's `FREE_SPACE_TREE`
+    /// records.
+    ///
+    /// This is the computational core of FREE_SPACE_TREE maintenance (bd-qxo5x):
+    /// FrankenFS reallocates metadata blocks during a commit but never rewrites
+    /// the on-disk free-space tree, so it goes stale and `btrfs check` rejects
+    /// it ("there is no free space entry for …"). The free ranges are derived
+    /// from the authoritative in-memory extent tree exactly as the allocator's
+    /// own gap search does — including block-group `used_bytes` that is not
+    /// materialised as an `EXTENT_ITEM`/`METADATA_ITEM` (the reserved prefix),
+    /// fenced off at the group start — so the result matches what the allocator
+    /// will actually hand out.
+    ///
+    /// # Errors
+    /// Returns [`BtrfsMutationError::AddressOverflow`] if a block-group or
+    /// extent range cannot be represented as a half-open byte interval, or any
+    /// error from reading the in-memory extent tree.
+    pub fn free_space_extents(&self) -> Result<Vec<BlockGroupFreeSpace>, BtrfsMutationError> {
+        let mut result = Vec::with_capacity(self.block_groups.len());
+        for bg in self.block_groups.values() {
+            let bg_end = bg
+                .start
+                .checked_add(bg.item.total_bytes)
+                .ok_or(BtrfsMutationError::AddressOverflow)?;
+            let range_start = BtrfsKey {
+                objectid: bg.start,
+                item_type: BTRFS_ITEM_EXTENT_ITEM,
+                offset: 0,
+            };
+            let range_end = BtrfsKey {
+                objectid: bg_end,
+                item_type: BTRFS_ITEM_METADATA_ITEM,
+                offset: u64::MAX,
+            };
+            let mut allocated_ranges = Vec::new();
+            let mut materialized_used = 0_u64;
+            for (key, _) in self.extent_tree.range(&range_start, &range_end)? {
+                if key.objectid >= bg_end {
+                    break;
+                }
+                if !matches!(
+                    key.item_type,
+                    BTRFS_ITEM_EXTENT_ITEM | BTRFS_ITEM_METADATA_ITEM
+                ) {
+                    continue;
+                }
+                let extent_start = key.objectid.max(bg.start);
+                let extent_end = key
+                    .objectid
+                    .checked_add(key.offset)
+                    .ok_or(BtrfsMutationError::AddressOverflow)?
+                    .min(bg_end);
+                if extent_start < extent_end {
+                    materialized_used = materialized_used
+                        .checked_add(extent_end - extent_start)
+                        .ok_or(BtrfsMutationError::AddressOverflow)?;
+                    allocated_ranges.push((extent_start, extent_end));
+                }
+            }
+
+            // Used bytes not represented as an extent item (the reserved
+            // system/superblock prefix) are fenced off at the group start, so
+            // the free-space tree never advertises them as free.
+            let untracked_used = bg
+                .item
+                .used_bytes
+                .saturating_sub(materialized_used)
+                .min(bg.item.total_bytes);
+            if untracked_used > 0 {
+                allocated_ranges.push((
+                    bg.start,
+                    bg.start
+                        .checked_add(untracked_used)
+                        .ok_or(BtrfsMutationError::AddressOverflow)?,
+                ));
+            }
+            allocated_ranges.sort_unstable_by_key(|&(start, end)| (start, end));
+
+            let mut free_ranges = Vec::new();
+            let mut cursor = bg.start;
+            for (extent_start, extent_end) in allocated_ranges {
+                if extent_end <= cursor {
+                    continue;
+                }
+                if cursor < extent_start {
+                    free_ranges.push((cursor, extent_start - cursor));
+                }
+                cursor = extent_end;
+            }
+            if cursor < bg_end {
+                free_ranges.push((cursor, bg_end - cursor));
+            }
+
+            result.push(BlockGroupFreeSpace {
+                start: bg.start,
+                flags: bg.item.flags,
+                free_ranges,
+            });
+        }
+        Ok(result)
     }
 
     /// Total used bytes across all block groups.
@@ -12300,6 +12422,58 @@ mod tests {
 
         alloc.alloc_data(100).expect("alloc");
         assert_eq!(alloc.total_free(BTRFS_BLOCK_GROUP_DATA), 2900);
+    }
+
+    #[test]
+    fn free_space_extents_are_the_complement_of_allocations() {
+        let mut alloc = BtrfsExtentAllocator::new(7).expect("alloc");
+        let bg_start = 0x10_0000_u64;
+        let bg_len = 0x1_0000_u64; // 64 KiB metadata group
+        alloc.add_block_group(bg_start, make_meta_bg(bg_start, bg_len));
+
+        // An empty group is one free range spanning the whole group.
+        let fse = alloc.free_space_extents().expect("fse");
+        let bg = fse
+            .iter()
+            .find(|g| g.start == bg_start)
+            .expect("group present");
+        assert_eq!(bg.flags, BTRFS_BLOCK_GROUP_METADATA);
+        assert_eq!(bg.free_ranges, vec![(bg_start, bg_len)]);
+
+        // Allocate two 16 KiB metadata blocks; the free ranges must be exactly
+        // the group span minus the allocations.
+        let a = alloc.alloc_metadata(0x4000).expect("a");
+        let b = alloc.alloc_metadata(0x4000).expect("b");
+        let mut allocated = [
+            (a.bytenr, a.bytenr + a.num_bytes),
+            (b.bytenr, b.bytenr + b.num_bytes),
+        ];
+        allocated.sort_unstable();
+
+        let fse = alloc.free_space_extents().expect("fse2");
+        let free = fse
+            .into_iter()
+            .find(|g| g.start == bg_start)
+            .expect("group present")
+            .free_ranges;
+
+        // Every free range is inside the group, disjoint, sorted, and never
+        // overlaps an allocation.
+        let mut prev_end = bg_start;
+        for &(start, len) in &free {
+            let end = start + len;
+            assert!(start >= prev_end, "free ranges sorted/disjoint: {free:?}");
+            assert!(end <= bg_start + bg_len, "free range within group");
+            for &(as_, ae) in &allocated {
+                assert!(end <= as_ || start >= ae, "free overlaps allocation");
+            }
+            prev_end = end;
+        }
+        // Free + allocated exactly tile the group (no bytes lost or double-counted).
+        let free_sum: u64 = free.iter().map(|&(_, l)| l).sum();
+        let alloc_sum: u64 = allocated.iter().map(|&(s, e)| e - s).sum();
+        assert_eq!(free_sum + alloc_sum, bg_len, "free + allocated tiles group");
+        assert_eq!(alloc_sum, 0x8000);
     }
 
     #[test]
