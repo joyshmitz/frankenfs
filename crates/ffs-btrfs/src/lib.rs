@@ -5185,6 +5185,72 @@ impl BtrfsExtentAllocator {
             .fold(0_u64, |total, bg| total.saturating_add(bg.item.used_bytes))
     }
 
+    /// Recompute every block group's `used_bytes` as the sum of the
+    /// `EXTENT_ITEM` / `METADATA_ITEM` lengths physically inside its range —
+    /// exactly the definition `btrfs check` enforces — and write that value into
+    /// both the in-memory block group and the on-disk `BLOCK_GROUP_ITEM` in the
+    /// extent tree. Returns the grand total, which is the superblock `bytes_used`.
+    ///
+    /// This is correct-by-construction (it mirrors the checker's own accounting),
+    /// so it does not depend on the in-memory `used_bytes` running tally — which
+    /// at mount is seeded from a synthetic reservation, not the real on-disk
+    /// figure. Call it at commit AFTER every extent item for the transaction is
+    /// present (self metadata items, data extent items, csum/free-space trees)
+    /// and BEFORE the extent-tree leaf is re-serialized. Without it `btrfs check`
+    /// reports "block group ... used N but extent items used M" and "super bytes
+    /// used N mismatches actual M" for any net-new data extent (bd-4cxkd).
+    ///
+    /// # Errors
+    /// Returns any error from reading or updating the in-memory extent tree.
+    pub fn sync_block_group_accounting(&mut self) -> Result<u64, BtrfsMutationError> {
+        let groups: Vec<(u64, u64)> = self
+            .block_groups
+            .values()
+            .map(|bg| (bg.start, bg.item.total_bytes))
+            .collect();
+        let nodesize = self.nodesize;
+        let mut grand_total = 0_u64;
+        for (start, total_bytes) in groups {
+            let end = start
+                .checked_add(total_bytes)
+                .ok_or(BtrfsMutationError::AddressOverflow)?;
+            let lo = BtrfsKey {
+                objectid: start,
+                item_type: BTRFS_ITEM_EXTENT_ITEM,
+                offset: 0,
+            };
+            let hi = BtrfsKey {
+                objectid: end,
+                item_type: BTRFS_ITEM_METADATA_ITEM,
+                offset: u64::MAX,
+            };
+            let used: u64 = self
+                .extent_tree
+                .range(&lo, &hi)?
+                .iter()
+                .filter_map(|(key, _)| allocation_extent_range(*key, nodesize))
+                .filter(|(ext_start, _)| *ext_start >= start && *ext_start < end)
+                .fold(0_u64, |acc, (_, len)| acc.saturating_add(len));
+
+            if let Some(bg) = self.block_groups.get_mut(&start) {
+                bg.item.used_bytes = used;
+            }
+            let bg_key = BtrfsKey {
+                objectid: start,
+                item_type: BTRFS_ITEM_BLOCK_GROUP_ITEM,
+                offset: total_bytes,
+            };
+            if let Some(mut value) = self.extent_tree.get(&bg_key) {
+                if value.len() >= 8 {
+                    value[0..8].copy_from_slice(&used.to_le_bytes());
+                    self.extent_tree.update(&bg_key, &value)?;
+                }
+            }
+            grand_total = grand_total.saturating_add(used);
+        }
+        Ok(grand_total)
+    }
+
     /// Total capacity across all block groups.
     #[must_use]
     pub fn total_capacity(&self) -> u64 {

@@ -17161,6 +17161,11 @@ impl OpenFs {
         // re-serialize that one leaf at its SAME address, so the root_tree's
         // EXTENT_TREE ROOT_ITEM (already pointing there) stays valid. Larger
         // multi-node extent trees fall back to the previous behaviour.
+        //
+        // bd-4cxkd: the superblock `bytes_used` recomputed from the final extent
+        // tree, set inside the single-leaf path below once every extent item is
+        // present. `None` => fall-back path; leave the on-disk value untouched.
+        let mut recomputed_bytes_used: Option<u64> = None;
         if alloc.extent_alloc.extent_tree_root_is_leaf() {
             alloc
                 .extent_alloc
@@ -17191,6 +17196,20 @@ impl OpenFs {
                     .set_tree_block_generation(fst_addr, fst_level, new_gen)
                     .map_err(|e| btrfs_mutation_to_ffs(&e))?;
             }
+
+            // bd-4cxkd: every extent item this transaction touches is now in the
+            // extent tree (self metadata items just above, data extent items from
+            // the writes, csum/free-space tree blocks). Recompute each block
+            // group's used_bytes as the sum of its extent items (what btrfs check
+            // does) and patch the on-disk BLOCK_GROUP_ITEMs + superblock
+            // bytes_used, so a net-new data extent no longer trips "block group
+            // used N but extent items used M" / "super bytes used ... mismatch".
+            recomputed_bytes_used = Some(
+                alloc
+                    .extent_alloc
+                    .sync_block_group_accounting()
+                    .map_err(|e| btrfs_mutation_to_ffs(&e))?,
+            );
 
             // Only re-serialize when the two inserts kept the extent tree a
             // single leaf; otherwise its root bytenr would have changed and the
@@ -17318,6 +17337,16 @@ impl OpenFs {
         sb_bytes[0x48..0x50].copy_from_slice(&new_gen.to_le_bytes());
         sb_bytes[0x50..0x58].copy_from_slice(&root_tree_bytenr.to_le_bytes());
         sb_bytes[0xC6] = root_tree_level;
+
+        // bd-4cxkd: superblock bytes_used = the total extent-item bytes
+        // recomputed above. On the REAL on-disk btrfs_super_block this field is
+        // at 0x78 (after total_bytes@0x70), NOT the 0x18 the in-struct model uses
+        // — 0x18 is inside the csum region. Only patched on the single-leaf path,
+        // where the BLOCK_GROUP_ITEMs were synced to match; the fall-back path
+        // leaves the existing value (and its accounting) untouched.
+        if let Some(bytes_used) = recomputed_bytes_used {
+            sb_bytes[0x78..0x80].copy_from_slice(&bytes_used.to_le_bytes());
+        }
 
         // bd-qxo5x: now that the FREE_SPACE_TREE has been rewritten to match the
         // new allocations, mark it valid so btrfs/`btrfs check` trust it rather
@@ -49299,24 +49328,14 @@ mod tests {
     }
 
     /// bd-x3fcu / bd-4cxkd: a file whose DATA is written + committed by FrankenFS
-    /// on a REAL btrfs image must be `btrfs check`-clean. The data extent now
-    /// carries its `EXTENT_ITEM` + inline `EXTENT_DATA_REF` backref (bd-4cxkd,
-    /// this commit), clearing the "referencer count / backpointer mismatch".
-    ///
-    /// STILL #[ignore]'d on one remaining class: commit-time space ACCOUNTING.
-    /// `btrfs check` now reports only:
-    ///   block group [X 8388608] used 0 but extent items used 16384
-    ///   super bytes used 147456 mismatches actual used 163840
-    /// The DATA block group's on-disk `BLOCK_GROUP_ITEM.used_bytes` and the
-    /// superblock `bytes_used` (0x18) are not bumped for a new data extent.
-    /// Metadata-only commits pass because they COW-reuse addresses (net used
-    /// unchanged); a fresh data extent is the first net allocation. Fixing it
-    /// needs the in-memory block-group `used_bytes` (currently a synthetic
-    /// reservation, not the real on-disk value) reconciled, then synced into the
-    /// extent tree's `BLOCK_GROUP_ITEM` + the superblock at commit. Tracked on
-    /// bd-4cxkd. Remove `#[ignore]` once that accounting lands.
+    /// on a REAL btrfs image must be `btrfs check`-clean. This exercises both
+    /// halves of bd-4cxkd: (1) the data extent carries its `EXTENT_ITEM` + inline
+    /// `EXTENT_DATA_REF` backref (no "referencer count / backpointer mismatch"),
+    /// and (2) the commit recomputes block-group `used_bytes` + superblock
+    /// `bytes_used` from the final extent tree (no "block group used N but extent
+    /// items used M" / "super bytes used ... mismatch"). Skips when btrfs-progs
+    /// is unavailable.
     #[test]
-    #[ignore = "bd-4cxkd: data backref fixed; block-group used + super bytes_used accounting pending"]
     fn btrfs_written_file_data_passes_btrfs_check_bd_x3fcu() {
         let Some((fs, dev, _tmp, image)) = open_writable_btrfs_mkfs(256) else {
             return; // btrfs-progs unavailable
