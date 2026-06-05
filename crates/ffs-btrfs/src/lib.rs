@@ -4403,6 +4403,50 @@ impl BtrfsExtentAllocator {
     }
 
     /// Free an extent (decrement refcount, remove if zero).
+    /// Locate the on-disk extent-tree key for an extent at `bytenr`. A skinny
+    /// METADATA_ITEM is keyed by tree level (unknown to the caller) so it is
+    /// found by range; an EXTENT_ITEM is matched exactly by its byte length.
+    fn locate_extent_key(
+        &self,
+        bytenr: u64,
+        num_bytes: u64,
+        is_metadata: bool,
+    ) -> Result<BtrfsKey, BtrfsMutationError> {
+        let item_type = if is_metadata {
+            BTRFS_ITEM_METADATA_ITEM
+        } else {
+            BTRFS_ITEM_EXTENT_ITEM
+        };
+        if is_metadata {
+            let lo = BtrfsKey {
+                objectid: bytenr,
+                item_type,
+                offset: 0,
+            };
+            let hi = BtrfsKey {
+                objectid: bytenr,
+                item_type,
+                offset: u64::MAX,
+            };
+            self.extent_tree
+                .range(&lo, &hi)?
+                .into_iter()
+                .next()
+                .map(|(found_key, _)| found_key)
+                .ok_or(BtrfsMutationError::KeyNotFound)
+        } else {
+            let key = BtrfsKey {
+                objectid: bytenr,
+                item_type,
+                offset: num_bytes,
+            };
+            if self.extent_tree.range(&key, &key)?.is_empty() {
+                return Err(BtrfsMutationError::KeyNotFound);
+            }
+            Ok(key)
+        }
+    }
+
     pub fn free_extent(
         &mut self,
         bytenr: u64,
@@ -4420,40 +4464,7 @@ impl BtrfsExtentAllocator {
             bytenr, size = num_bytes, "free_search"
         );
 
-        let item_type = if is_metadata {
-            BTRFS_ITEM_METADATA_ITEM
-        } else {
-            BTRFS_ITEM_EXTENT_ITEM
-        };
-        // A skinny METADATA_ITEM key offset is the tree level (unknown here), so
-        // locate the single metadata item at this bytenr by range; an EXTENT_ITEM
-        // is keyed by its byte length and matched exactly.
-        let key = if is_metadata {
-            let lo = BtrfsKey {
-                objectid: bytenr,
-                item_type,
-                offset: 0,
-            };
-            let hi = BtrfsKey {
-                objectid: bytenr,
-                item_type,
-                offset: u64::MAX,
-            };
-            match self.extent_tree.range(&lo, &hi)?.into_iter().next() {
-                Some((found_key, _)) => found_key,
-                None => return Err(BtrfsMutationError::KeyNotFound),
-            }
-        } else {
-            let key = BtrfsKey {
-                objectid: bytenr,
-                item_type,
-                offset: num_bytes,
-            };
-            if self.extent_tree.range(&key, &key)?.is_empty() {
-                return Err(BtrfsMutationError::KeyNotFound);
-            }
-            key
-        };
+        let key = self.locate_extent_key(bytenr, num_bytes, is_metadata)?;
 
         let extent_end = bytenr
             .checked_add(num_bytes)
