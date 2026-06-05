@@ -97,6 +97,11 @@ const FSCRYPT_CONTEXT_V2_SIZE: usize = 40;
 const EXT4_ENCRYPTION_XATTR_NAME: &[u8] = b"c";
 const BTRFS_TREE_LOG_OBJECTID: u64 = u64::MAX - 5;
 
+/// First DIR_INDEX sequence number assigned in a fresh directory, matching the
+/// kernel's `BTRFS_DIR_START_INDEX`. Sequences 0 and 1 are reserved for the
+/// implicit "." and ".." entries.
+const BTRFS_DIR_START_INDEX: u64 = 2;
+
 /// Adler-32 checksum with a 32-bit seed, matching the e2compr convention.
 ///
 /// The seed is split into `s1 = seed & 0xFFFF` and `s2 = seed >> 16`,
@@ -17463,10 +17468,10 @@ impl OpenFs {
             file_type: BTRFS_FT_REG_FILE,
             name: name.to_vec(),
         };
-        self.btrfs_insert_dir_entry(&mut alloc, parent_oid, &dir_item)?;
+        let dir_index_seq = self.btrfs_insert_dir_entry(&mut alloc, parent_oid, &dir_item)?;
 
-        // Add INODE_REF for parent backref.
-        Self::btrfs_insert_inode_ref(&mut alloc, new_oid, parent_oid, name, new_oid)?;
+        // Add INODE_REF for parent backref (index must match DIR_INDEX.offset).
+        Self::btrfs_insert_inode_ref(&mut alloc, new_oid, parent_oid, name, dir_index_seq)?;
 
         // Update parent inode timestamps.
         self.btrfs_touch_inode_times(&mut alloc, parent_oid, secs, nanos)?;
@@ -17544,10 +17549,10 @@ impl OpenFs {
             file_type: BTRFS_FT_DIR,
             name: name.to_vec(),
         };
-        self.btrfs_insert_dir_entry(&mut alloc, parent_oid, &dir_item)?;
+        let dir_index_seq = self.btrfs_insert_dir_entry(&mut alloc, parent_oid, &dir_item)?;
 
-        // Add INODE_REF for parent backref.
-        Self::btrfs_insert_inode_ref(&mut alloc, new_oid, parent_oid, name, new_oid)?;
+        // Add INODE_REF for parent backref (index must match DIR_INDEX.offset).
+        Self::btrfs_insert_inode_ref(&mut alloc, new_oid, parent_oid, name, dir_index_seq)?;
 
         // Bump parent nlink for the new subdirectory.
         self.btrfs_adjust_nlink(&mut alloc, parent_oid, 1)?;
@@ -17644,9 +17649,9 @@ impl OpenFs {
             file_type: btrfs_ft,
             name: name.to_vec(),
         };
-        self.btrfs_insert_dir_entry(&mut alloc, parent_oid, &dir_item)?;
+        let dir_index_seq = self.btrfs_insert_dir_entry(&mut alloc, parent_oid, &dir_item)?;
 
-        Self::btrfs_insert_inode_ref(&mut alloc, new_oid, parent_oid, name, new_oid)?;
+        Self::btrfs_insert_inode_ref(&mut alloc, new_oid, parent_oid, name, dir_index_seq)?;
 
         self.btrfs_touch_inode_times(&mut alloc, parent_oid, secs, nanos)?;
         drop(alloc);
@@ -17863,13 +17868,13 @@ impl OpenFs {
             file_type: child.file_type,
             name: new_name.to_vec(),
         };
-        self.btrfs_insert_dir_entry(&mut alloc, new_parent_oid, &dir_item)?;
+        let dir_index_seq = self.btrfs_insert_dir_entry(&mut alloc, new_parent_oid, &dir_item)?;
         Self::btrfs_insert_inode_ref(
             &mut alloc,
             child.child_objectid,
             new_parent_oid,
             new_name,
-            child.child_objectid,
+            dir_index_seq,
         )?;
 
         // If moving a directory across parents, adjust nlink for ".." backref.
@@ -17931,8 +17936,8 @@ impl OpenFs {
             file_type: ft,
             name: new_name.to_vec(),
         };
-        self.btrfs_insert_dir_entry(&mut alloc, parent_oid, &dir_item)?;
-        Self::btrfs_insert_inode_ref(&mut alloc, target_oid, parent_oid, new_name, target_oid)?;
+        let dir_index_seq = self.btrfs_insert_dir_entry(&mut alloc, parent_oid, &dir_item)?;
+        Self::btrfs_insert_inode_ref(&mut alloc, target_oid, parent_oid, new_name, dir_index_seq)?;
         self.btrfs_adjust_nlink(&mut alloc, target_oid, 1)?;
         self.btrfs_touch_inode_times(&mut alloc, parent_oid, secs, nanos)?;
 
@@ -18031,8 +18036,8 @@ impl OpenFs {
             file_type: BTRFS_FT_SYMLINK,
             name: name.to_vec(),
         };
-        self.btrfs_insert_dir_entry(&mut alloc, parent_oid, &dir_item)?;
-        Self::btrfs_insert_inode_ref(&mut alloc, new_oid, parent_oid, name, new_oid)?;
+        let dir_index_seq = self.btrfs_insert_dir_entry(&mut alloc, parent_oid, &dir_item)?;
+        Self::btrfs_insert_inode_ref(&mut alloc, new_oid, parent_oid, name, dir_index_seq)?;
         self.btrfs_touch_inode_times(&mut alloc, parent_oid, secs, nanos)?;
         drop(alloc);
 
@@ -18928,14 +18933,51 @@ impl OpenFs {
         Ok(())
     }
 
+    /// Compute the next DIR_INDEX sequence number for a directory.
+    ///
+    /// btrfs keys DIR_INDEX by a monotonic per-directory sequence (the dir
+    /// inode's `index_cnt`), assigned at link time and recovered on mount from
+    /// the highest existing DIR_INDEX key. We mirror that recovery exactly:
+    /// `max(existing DIR_INDEX offset) + 1`, starting at `BTRFS_DIR_START_INDEX`
+    /// for an empty directory. This makes the counter survive remount without a
+    /// new persisted inode field, matching the kernel's own derivation.
+    fn btrfs_next_dir_index_seq(
+        alloc: &BtrfsAllocState,
+        parent_oid: u64,
+    ) -> ffs_error::Result<u64> {
+        let range_start = BtrfsKey {
+            objectid: parent_oid,
+            item_type: BTRFS_ITEM_DIR_INDEX,
+            offset: 0,
+        };
+        let range_end = BtrfsKey {
+            objectid: parent_oid,
+            item_type: BTRFS_ITEM_DIR_INDEX,
+            offset: u64::MAX,
+        };
+        let next = alloc
+            .fs_tree
+            .range(&range_start, &range_end)
+            .map_err(|e| btrfs_mutation_to_ffs(&e))?
+            .iter()
+            .map(|(key, _)| key.offset)
+            .max()
+            .map_or(BTRFS_DIR_START_INDEX, |max| max.saturating_add(1));
+        Ok(next)
+    }
+
     /// Insert a directory entry (both DIR_ITEM and DIR_INDEX) into the FS tree.
+    ///
+    /// Returns the DIR_INDEX sequence number assigned to this entry. Callers
+    /// must thread it into the matching INODE_REF so that `INODE_REF.index ==
+    /// DIR_INDEX.offset`, exactly as the kernel assigns them at link time.
     #[allow(clippy::unused_self)]
     fn btrfs_insert_dir_entry(
         &self,
         alloc: &mut BtrfsAllocState,
         parent_oid: u64,
         item: &BtrfsDirItem,
-    ) -> ffs_error::Result<()> {
+    ) -> ffs_error::Result<u64> {
         let name_hash = ffs_types::crc32c_append(0, &item.name);
         let dir_item_key = BtrfsKey {
             objectid: parent_oid,
@@ -18968,38 +19010,23 @@ impl OpenFs {
             })
             .map_err(|e| btrfs_mutation_to_ffs(&e))?;
 
-        // Also insert a DIR_INDEX entry. The offset uses the child objectid,
-        // but the payload can still carry multiple names when the same inode
-        // has several hard links in the same parent.
+        // Insert a DIR_INDEX entry keyed by a monotonic per-directory sequence
+        // number (not the child objectid). Each link — including multiple hard
+        // links of the same inode in one directory — receives its own unique
+        // sequence and therefore its own DIR_INDEX item, matching the kernel.
+        // This also gives readdir its creation-order iteration.
+        let seq = Self::btrfs_next_dir_index_seq(alloc, parent_oid)?;
         let dir_index_key = BtrfsKey {
             objectid: parent_oid,
             item_type: BTRFS_ITEM_DIR_INDEX,
-            offset: item.child_objectid,
+            offset: seq,
         };
-        let merged_index = alloc
-            .fs_tree
-            .range(&dir_index_key, &dir_index_key)
-            .ok()
-            .and_then(|items| items.first().map(|(_, v)| v.clone()))
-            .map_or_else(
-                || new_bytes.clone(),
-                |mut existing| {
-                    existing.extend_from_slice(&new_bytes);
-                    existing
-                },
-            );
         alloc
             .fs_tree
-            .update(&dir_index_key, &merged_index)
-            .or_else(|err| match err {
-                BtrfsMutationError::KeyNotFound => {
-                    alloc.fs_tree.insert(dir_index_key, &merged_index)
-                }
-                other => Err(other),
-            })
+            .insert(dir_index_key, &new_bytes)
             .map_err(|e| btrfs_mutation_to_ffs(&e))?;
 
-        Ok(())
+        Ok(seq)
     }
 
     /// Look up a directory entry by name in the in-memory FS tree.
@@ -50545,7 +50572,7 @@ mod tests {
     }
 
     #[test]
-    fn btrfs_write_link_rejects_malformed_existing_dir_index_without_partial_mutation() {
+    fn btrfs_write_link_rejects_malformed_existing_inode_ref_without_partial_mutation() {
         let (fs, cx) = open_writable_btrfs();
         let ops: &dyn FsOps = &fs;
 
@@ -50569,14 +50596,18 @@ mod tests {
         )
         .unwrap();
 
+        // DIR_INDEX is now keyed by a monotonic sequence (bd-yqoni), so a new
+        // link never reads a sibling DIR_INDEX item. The pre-mutation parse the
+        // link path still performs is the target's INODE_REF (preflight). Corrupt
+        // it and the next link must fail closed before any mutation.
         let alloc_mutex = fs.require_btrfs_alloc_state().unwrap();
         let mut alloc = alloc_mutex.lock();
-        let dir_index_key = BtrfsKey {
-            objectid: 256,
-            item_type: BTRFS_ITEM_DIR_INDEX,
-            offset: attr.ino.0,
+        let inode_ref_key = BtrfsKey {
+            objectid: attr.ino.0,
+            item_type: BTRFS_ITEM_INODE_REF,
+            offset: 256,
         };
-        alloc.fs_tree.update(&dir_index_key, &[0xAA, 0xBB]).unwrap();
+        alloc.fs_tree.update(&inode_ref_key, &[0xAA, 0xBB]).unwrap();
         drop(alloc);
 
         let err = ops
@@ -55130,6 +55161,152 @@ mod tests {
         drop(alloc);
 
         assert!(matches!(err, FfsError::Corruption { .. }));
+    }
+
+    #[test]
+    fn btrfs_dir_index_uses_monotonic_sequence_not_child_objectid() {
+        // bd-yqoni: DIR_INDEX must be keyed by a monotonic per-directory
+        // sequence number (the kernel's index_cnt), not the child objectid.
+        // This gives readdir creation-order iteration and a unique item per
+        // link — including multiple hard links of one inode in one directory.
+        let (fs, _cx) = open_writable_btrfs();
+        let alloc_mutex = fs.btrfs_alloc_state.as_ref().unwrap();
+        let mut alloc = alloc_mutex.lock();
+        let parent_oid = 256;
+        let mk = |child: u64, name: &str| BtrfsDirItem {
+            child_objectid: child,
+            child_key_type: BTRFS_ITEM_INODE_ITEM,
+            child_key_offset: 0,
+            file_type: BTRFS_FT_REG_FILE,
+            name: name.as_bytes().to_vec(),
+        };
+
+        let base = OpenFs::btrfs_next_dir_index_seq(&alloc, parent_oid).unwrap();
+        assert!(base >= BTRFS_DIR_START_INDEX);
+
+        let seq_a = fs
+            .btrfs_insert_dir_entry(&mut alloc, parent_oid, &mk(9001, "a.txt"))
+            .unwrap();
+        let seq_b = fs
+            .btrfs_insert_dir_entry(&mut alloc, parent_oid, &mk(9002, "b.txt"))
+            .unwrap();
+        // Hard link: SAME child_objectid as a.txt, distinct name. Under the old
+        // child-objectid keying this collided onto a.txt's DIR_INDEX item.
+        let seq_link = fs
+            .btrfs_insert_dir_entry(&mut alloc, parent_oid, &mk(9001, "a-hardlink"))
+            .unwrap();
+
+        assert_eq!(seq_a, base);
+        assert_eq!(seq_b, base + 1);
+        assert_eq!(seq_link, base + 2);
+
+        let start = BtrfsKey {
+            objectid: parent_oid,
+            item_type: BTRFS_ITEM_DIR_INDEX,
+            offset: 0,
+        };
+        let end = BtrfsKey {
+            objectid: parent_oid,
+            item_type: BTRFS_ITEM_DIR_INDEX,
+            offset: u64::MAX,
+        };
+        let indices = alloc.fs_tree.range(&start, &end).unwrap();
+        let new_offsets: Vec<u64> = indices
+            .iter()
+            .map(|(k, _)| k.offset)
+            .filter(|off| *off >= base)
+            .collect();
+        // Three distinct items — the hard link did NOT merge onto a.txt.
+        assert_eq!(new_offsets, vec![base, base + 1, base + 2]);
+        // The offset is the sequence, never the child objectid.
+        assert!(!new_offsets.contains(&9001));
+        assert!(!new_offsets.contains(&9002));
+        // Each DIR_INDEX item carries exactly one entry (no merged payloads).
+        for (key, data) in &indices {
+            if key.offset < base {
+                continue;
+            }
+            assert_eq!(parse_dir_items(data).unwrap().len(), 1);
+        }
+        drop(alloc);
+    }
+
+    #[test]
+    fn btrfs_hard_link_inode_ref_index_matches_dir_index_offset() {
+        // bd-yqoni: each link's INODE_REF.index must equal its DIR_INDEX.offset
+        // (the kernel assigns one sequence number per link at link time).
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+
+        let target = ops
+            .create(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("seq-a.txt"),
+                0o644,
+                0,
+                0,
+            )
+            .expect("create file");
+        ops.link(
+            &cx,
+            &mut RequestScope::empty(),
+            target.ino,
+            InodeNumber(1),
+            OsStr::new("seq-a-link"),
+        )
+        .expect("hard link");
+
+        let root_oid = fs.btrfs_superblock().unwrap().root_dir_objectid;
+        let alloc = fs.btrfs_alloc_state.as_ref().unwrap().lock();
+
+        // Collect (offset -> name) for the two DIR_INDEX entries of `target`.
+        let dir_start = BtrfsKey {
+            objectid: root_oid,
+            item_type: BTRFS_ITEM_DIR_INDEX,
+            offset: 0,
+        };
+        let dir_end = BtrfsKey {
+            objectid: root_oid,
+            item_type: BTRFS_ITEM_DIR_INDEX,
+            offset: u64::MAX,
+        };
+        let mut dir_index_by_name: BTreeMap<Vec<u8>, u64> = BTreeMap::new();
+        for (key, data) in alloc.fs_tree.range(&dir_start, &dir_end).unwrap() {
+            for entry in parse_dir_items(&data).unwrap() {
+                if entry.child_objectid == target.ino.0 {
+                    dir_index_by_name.insert(entry.name, key.offset);
+                }
+            }
+        }
+        assert_eq!(dir_index_by_name.len(), 2, "two distinct DIR_INDEX items");
+
+        // The child's INODE_REF carries one (index, name) per link; each index
+        // must equal the DIR_INDEX offset of the same-named entry.
+        let ref_key = BtrfsKey {
+            objectid: target.ino.0,
+            item_type: BTRFS_ITEM_INODE_REF,
+            offset: root_oid,
+        };
+        let payload = alloc
+            .fs_tree
+            .range(&ref_key, &ref_key)
+            .unwrap()
+            .first()
+            .map(|(_, v)| v.clone())
+            .expect("inode_ref present");
+        let refs = OpenFs::btrfs_parse_inode_ref_payload(&payload).unwrap();
+        assert_eq!(refs.len(), 2);
+        for (index, name) in refs {
+            assert_eq!(
+                Some(&index),
+                dir_index_by_name.get(&name),
+                "INODE_REF.index must match DIR_INDEX.offset for {}",
+                String::from_utf8_lossy(&name)
+            );
+        }
+        drop(alloc);
     }
 
     #[test]
