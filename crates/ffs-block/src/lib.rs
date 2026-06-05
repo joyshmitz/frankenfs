@@ -1893,7 +1893,7 @@ impl DirtyTracker {
 }
 
 #[cfg(feature = "s3fifo")]
-const S3_FAST_HIT_MAX_SHARDS: usize = 64;
+const S3_FAST_HIT_MAX_SLOTS: usize = 4096;
 
 #[cfg(feature = "s3fifo")]
 #[derive(Debug)]
@@ -1954,61 +1954,61 @@ struct S3FastResident {
 #[cfg(feature = "s3fifo")]
 #[derive(Debug)]
 struct S3FastResidentTable {
-    shards: Vec<Mutex<HashMap<BlockNumber, S3FastResident>>>,
-    shard_mask: Option<u64>,
+    slots: Vec<Mutex<Option<(BlockNumber, S3FastResident)>>>,
+    slot_mask: u64,
 }
 
 #[cfg(feature = "s3fifo")]
 impl S3FastResidentTable {
-    fn for_host_parallelism(capacity_blocks: usize) -> Self {
-        let host_threads = thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
-        let shard_count = host_threads
-            .clamp(1, S3_FAST_HIT_MAX_SHARDS)
-            .min(capacity_blocks.max(1));
-        Self::new(shard_count)
+    fn for_capacity(capacity_blocks: usize) -> Self {
+        let target_slots = capacity_blocks
+            .saturating_mul(2)
+            .clamp(1, S3_FAST_HIT_MAX_SLOTS);
+        let slot_count = target_slots
+            .checked_next_power_of_two()
+            .unwrap_or(S3_FAST_HIT_MAX_SLOTS)
+            .min(S3_FAST_HIT_MAX_SLOTS);
+        Self::new(slot_count)
     }
 
-    fn new(shard_count: usize) -> Self {
-        let shard_count = shard_count.max(1);
-        let mut shards = Vec::with_capacity(shard_count);
-        for _ in 0..shard_count {
-            shards.push(Mutex::new(HashMap::new()));
+    fn new(slot_count: usize) -> Self {
+        let slot_count = slot_count.max(1).next_power_of_two();
+        let mut slots = Vec::with_capacity(slot_count);
+        for _ in 0..slot_count {
+            slots.push(Mutex::new(None));
         }
-        let shard_mask = shard_count
-            .is_power_of_two()
-            .then_some(u64::try_from(shard_count - 1).unwrap_or(u64::MAX));
-        Self { shards, shard_mask }
+        let slot_mask = u64::try_from(slot_count - 1).unwrap_or(u64::MAX);
+        Self { slots, slot_mask }
     }
 
-    fn shard_index(&self, block: BlockNumber) -> usize {
-        if let Some(mask) = self.shard_mask {
-            return usize::try_from(block.0 & mask).unwrap_or(0);
-        }
-        let shard_count = u64::try_from(self.shards.len()).unwrap_or(u64::MAX);
-        usize::try_from(block.0 % shard_count).unwrap_or(0)
+    fn slot_index(&self, block: BlockNumber) -> usize {
+        usize::try_from(block.0 & self.slot_mask).unwrap_or(0)
     }
 
     fn get_valid(&self, block: BlockNumber) -> Option<S3FastResident> {
-        let shard = &self.shards[self.shard_index(block)];
-        let guard = shard.lock();
-        let entry = guard
-            .get(&block)
-            .filter(|entry| entry.access.is_valid())
-            .cloned();
+        let slot = &self.slots[self.slot_index(block)];
+        let guard = slot.lock();
+        let entry = guard.as_ref().and_then(|(resident_block, entry)| {
+            (*resident_block == block && entry.access.is_valid()).then(|| entry.clone())
+        });
         drop(guard);
         entry
     }
 
     fn insert(&self, block: BlockNumber, entry: S3FastResident) {
-        let shard = &self.shards[self.shard_index(block)];
-        shard.lock().insert(block, entry);
+        let slot = &self.slots[self.slot_index(block)];
+        *slot.lock() = Some((block, entry));
     }
 
     fn remove(&self, block: BlockNumber) {
-        let shard = &self.shards[self.shard_index(block)];
-        let removed = shard.lock().remove(&block);
-        if let Some(entry) = removed {
-            entry.access.invalidate();
+        let slot = &self.slots[self.slot_index(block)];
+        let mut guard = slot.lock();
+        if let Some((resident_block, entry)) = guard.take() {
+            if resident_block == block {
+                entry.access.invalidate();
+            } else {
+                *guard = Some((resident_block, entry));
+            }
         }
     }
 }
@@ -3730,7 +3730,7 @@ impl<D: BlockDevice> ArcCache<D> {
             mvcc_flush_lifecycle,
             repair_flush_lifecycle,
             #[cfg(feature = "s3fifo")]
-            s3_fast_residents: S3FastResidentTable::for_host_parallelism(capacity_blocks),
+            s3_fast_residents: S3FastResidentTable::for_capacity(capacity_blocks),
             #[cfg(feature = "s3fifo")]
             s3_fast_hits: AtomicU64::new(0),
             #[cfg(feature = "s3fifo")]
