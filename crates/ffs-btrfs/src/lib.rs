@@ -4019,6 +4019,56 @@ impl BtrfsExtentAllocator {
         })
     }
 
+    /// Drop every skinny `METADATA_ITEM` whose inline `TREE_BLOCK_REF` names one
+    /// of `roots` as its owning tree, returning how many were removed.
+    ///
+    /// FrankenFS rewrites a fixed set of trees (root/extent/fs/csum) wholesale at
+    /// fresh logical addresses on every commit. The old nodes' extent items were
+    /// loaded from disk and, if left in place, become stale backrefs for blocks
+    /// no tree references any more — `btrfs check` then can't reconcile the
+    /// extent tree (`ref mismatch` / `no backref item`), even for the unrelated
+    /// chunk/dev/uuid trees, because the refcount walk is poisoned (bd-x36qn
+    /// levers A+B). Removing the to-be-rewritten trees' old items *before* the
+    /// commit re-adds the new nodes' items keeps the committed extent tree
+    /// describing only live blocks.
+    pub fn remove_metadata_items_owned_by_roots(
+        &mut self,
+        roots: &[u64],
+    ) -> Result<usize, BtrfsMutationError> {
+        let lo = BtrfsKey {
+            objectid: 0,
+            item_type: 0,
+            offset: 0,
+        };
+        let hi = BtrfsKey {
+            objectid: u64::MAX,
+            item_type: u8::MAX,
+            offset: u64::MAX,
+        };
+        let to_remove: Vec<BtrfsKey> = self
+            .extent_tree
+            .range(&lo, &hi)?
+            .into_iter()
+            .filter_map(|(key, value)| {
+                // Skinny METADATA_ITEM value: extent_item (24 bytes) followed by
+                // an inline ref { u8 type = TREE_BLOCK_REF (176), __le64 root }.
+                if key.item_type != BTRFS_ITEM_METADATA_ITEM || value.len() < 33 {
+                    return None;
+                }
+                if value[24] != BTRFS_ITEM_TREE_BLOCK_REF {
+                    return None;
+                }
+                let root = u64::from_le_bytes(value[25..33].try_into().ok()?);
+                roots.contains(&root).then_some(key)
+            })
+            .collect();
+        let removed = to_remove.len();
+        for key in to_remove {
+            self.extent_tree.delete(&key)?;
+        }
+        Ok(removed)
+    }
+
     /// Set the filesystem node size used to size skinny `METADATA_ITEM` extents
     /// during gap analysis. Callers loading a real image must set this from the
     /// superblock so the gap finder fences off live metadata tree blocks.

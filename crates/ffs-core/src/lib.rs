@@ -16609,6 +16609,22 @@ impl OpenFs {
         let new_gen = current_gen.saturating_add(1);
         let nodesize = alloc.nodesize;
 
+        // Drop the stale extent items of the trees we are about to rewrite
+        // wholesale at fresh addresses (root/extent/fs/csum). Their old nodes,
+        // loaded from disk, otherwise linger as backrefs for blocks no live tree
+        // references, poisoning btrfs check's refcount walk (bd-x36qn levers
+        // A+B). The chunk/dev/uuid/free-space/data-reloc trees are not rewritten,
+        // so their items are preserved.
+        alloc
+            .extent_alloc
+            .remove_metadata_items_owned_by_roots(&[
+                BTRFS_ROOT_TREE_OBJECTID,
+                BTRFS_EXTENT_TREE_OBJECTID,
+                BTRFS_FS_TREE_OBJECTID,
+                BTRFS_CSUM_TREE_OBJECTID,
+            ])
+            .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+
         // Build the write-dependency DAG from the in-memory FS tree
         let dag = WriteDependencyDag::from_cow_tree(&alloc.fs_tree, new_gen)
             .map_err(|e| btrfs_mutation_to_ffs(&e))?;
