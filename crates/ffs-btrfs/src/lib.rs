@@ -4291,7 +4291,16 @@ impl BtrfsExtentAllocator {
                 } else {
                     BTRFS_ITEM_EXTENT_ITEM
                 },
-                offset: num_bytes,
+                // A skinny METADATA_ITEM key encodes the tree level in its
+                // offset (not the byte length); an EXTENT_ITEM uses the length.
+                // Writing num_bytes for a METADATA_ITEM produces an on-disk item
+                // btrfs check reads as level 16384 -> "metadata level mismatch"
+                // and cannot attribute its backref (bd-x36qn).
+                offset: if is_metadata {
+                    u64::from(ref_level)
+                } else {
+                    num_bytes
+                },
             };
             self.extent_tree.insert(key, &extent_item.to_bytes())?;
 
@@ -4395,14 +4404,35 @@ impl BtrfsExtentAllocator {
         } else {
             BTRFS_ITEM_EXTENT_ITEM
         };
-        let key = BtrfsKey {
-            objectid: bytenr,
-            item_type,
-            offset: num_bytes,
+        // A skinny METADATA_ITEM key offset is the tree level (unknown here), so
+        // locate the single metadata item at this bytenr by range; an EXTENT_ITEM
+        // is keyed by its byte length and matched exactly.
+        let key = if is_metadata {
+            let lo = BtrfsKey {
+                objectid: bytenr,
+                item_type,
+                offset: 0,
+            };
+            let hi = BtrfsKey {
+                objectid: bytenr,
+                item_type,
+                offset: u64::MAX,
+            };
+            match self.extent_tree.range(&lo, &hi)?.into_iter().next() {
+                Some((found_key, _)) => found_key,
+                None => return Err(BtrfsMutationError::KeyNotFound),
+            }
+        } else {
+            let key = BtrfsKey {
+                objectid: bytenr,
+                item_type,
+                offset: num_bytes,
+            };
+            if self.extent_tree.range(&key, &key)?.is_empty() {
+                return Err(BtrfsMutationError::KeyNotFound);
+            }
+            key
         };
-        if self.extent_tree.range(&key, &key)?.is_empty() {
-            return Err(BtrfsMutationError::KeyNotFound);
-        }
 
         let extent_end = bytenr
             .checked_add(num_bytes)
@@ -11652,10 +11682,11 @@ mod tests {
         let meta = alloc
             .alloc_metadata_for_tree(4096, BTRFS_FS_TREE_OBJECTID, 1)
             .expect("metadata alloc");
+        // Skinny METADATA_ITEM is keyed by the tree level (1 here), not num_bytes.
         let metadata_key = BtrfsKey {
             objectid: meta.bytenr,
             item_type: BTRFS_ITEM_METADATA_ITEM,
-            offset: meta.num_bytes,
+            offset: 1,
         };
         let ref_key = BtrfsKey {
             objectid: meta.bytenr,
@@ -11706,10 +11737,11 @@ mod tests {
             .free_extent(meta.bytenr, meta.num_bytes, true)
             .expect("free metadata");
 
+        // Skinny METADATA_ITEM is keyed by the tree level (0 here), not num_bytes.
         let metadata_key = BtrfsKey {
             objectid: meta.bytenr,
             item_type: BTRFS_ITEM_METADATA_ITEM,
-            offset: meta.num_bytes,
+            offset: 0,
         };
         let ref_key = BtrfsKey {
             objectid: meta.bytenr,
@@ -13868,10 +13900,12 @@ mod tests {
         assert_eq!(reclaimed.len(), 1);
         assert_eq!(reclaimed[0].bytenr, data.bytenr);
 
+        // Skinny METADATA_ITEM is keyed by the tree level (0 for alloc_metadata),
+        // not num_bytes.
         let meta_key = BtrfsKey {
             objectid: meta.bytenr,
             item_type: BTRFS_ITEM_METADATA_ITEM,
-            offset: meta.num_bytes,
+            offset: 0,
         };
         assert_eq!(
             alloc
