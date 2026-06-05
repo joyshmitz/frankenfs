@@ -4025,6 +4025,22 @@ impl BtrfsExtentAllocator {
     pub fn set_nodesize(&mut self, nodesize: u64) {
         if nodesize > 0 {
             self.nodesize = nodesize;
+            // Size the extent tree's split threshold to the real node capacity.
+            // The default `new(5)` is a simulator value that splits after 5
+            // items, so a real fs's ~14 extent items become ~5 grossly
+            // under-filled 16 KiB nodes — each an extra metadata tree block that
+            // (a) lacks an EXTENT_ITEM (bd-myrgc / bd-x36qn lever A) and (b)
+            // violates btrfs's non-root half-full invariant. One ~16 KiB leaf
+            // holds hundreds of ~58-byte extent items, so a realistic threshold
+            // collapses them to a single properly-filled leaf. set_nodesize runs
+            // before any extents are loaded, so the tree is empty here and safe
+            // to replace.
+            let max_items = usize::try_from(nodesize.saturating_sub(101) / 64)
+                .unwrap_or(5)
+                .max(5);
+            if let Ok(tree) = InMemoryCowBtrfsTree::new(max_items) {
+                self.extent_tree = tree;
+            }
         }
     }
 
