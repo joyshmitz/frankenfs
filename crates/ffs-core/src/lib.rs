@@ -59507,6 +59507,68 @@ mod tests {
         }
     }
 
+    // Property-based metamorphic check of the btrfs file write/truncate path.
+    // Random interleavings of write and truncate against a byte-exact in-memory
+    // model explore the fragmented-extent / allocator-churn states that produced
+    // bd-5aybu (allocator handed out bytenr 0 -> whole file read as zeros) and
+    // bd-900t6 (re-inserted head/tail segment read back wrong). proptest shrinks
+    // any divergence to a minimal op sequence.
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(256))]
+        #[test]
+        fn btrfs_write_truncate_random_matches_reference_model(
+            ops in proptest::collection::vec(
+                (0u8..2, 0usize..80_000, 1usize..20_000, proptest::prelude::any::<u8>()),
+                1..32,
+            ),
+        ) {
+            let (fs, cx) = open_writable_btrfs();
+            let attr = fs
+                .create(&cx, InodeNumber(1), OsStr::new("prop.bin"), 0o644, 0, 0)
+                .expect("create");
+            let mut model: Vec<u8> = Vec::new();
+
+            for (kind, a, len, val) in ops {
+                if kind == 0 {
+                    let buf = vec![val; len];
+                    fs.write(&cx, attr.ino, a as u64, &buf).expect("write");
+                    if a + len > model.len() {
+                        model.resize(a + len, 0);
+                    }
+                    model[a..a + len].copy_from_slice(&buf);
+                } else {
+                    // Reuse `a` as the truncate target size.
+                    fs.setattr(
+                        &cx,
+                        attr.ino,
+                        &SetAttrRequest {
+                            size: Some(a as u64),
+                            ..Default::default()
+                        },
+                    )
+                    .expect("truncate");
+                    model.resize(a, 0);
+                }
+
+                let n = model.len();
+                let attr_now = fs.getattr(&cx, attr.ino).expect("getattr");
+                proptest::prop_assert_eq!(attr_now.size, n as u64, "inode size mismatch");
+                let got = fs
+                    .read(&cx, attr.ino, 0, u32::try_from(n).expect("size fits u32"))
+                    .expect("read");
+                proptest::prop_assert_eq!(got.len(), n, "read length mismatch");
+                let ndiff = (0..n).filter(|&i| got[i] != model[i]).count();
+                proptest::prop_assert!(
+                    ndiff == 0,
+                    "content diverged: {} of {} bytes differ (first at {})",
+                    ndiff,
+                    n,
+                    (0..n).find(|&i| got[i] != model[i]).unwrap_or(0)
+                );
+            }
+        }
+    }
+
     // ── Btrfs RW mode tests ────────────────────────────────────────────
     //
     // The btrfs_rw_ephemeral_ok flag controls commit strategy, not permission:
