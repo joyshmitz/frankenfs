@@ -16999,6 +16999,37 @@ impl OpenFs {
 
         // ── End EXTENT_TREE commit ─────────────────────────────────────────────
 
+        // bd-qxo5x: prepare to rewrite the FREE_SPACE_TREE in place. We reuse
+        // its current block address (a fresh allocation would itself perturb the
+        // free space we are recording), so only its ROOT_ITEM generation changes
+        // here — patch it now, before root_tree is serialized below. The leaf
+        // content and the FREE_SPACE_TREE_VALID flag are written after the
+        // extent tree is finalized, since the free ranges depend on it.
+        let fst_root_key = BtrfsKey {
+            objectid: ffs_btrfs::BTRFS_FREE_SPACE_TREE_OBJECTID,
+            item_type: BTRFS_ITEM_ROOT_ITEM,
+            offset: 0,
+        };
+        let fst_reuse: Option<(u64, u8)> =
+            if let Some(mut fst_root_data) = alloc.root_tree.get(&fst_root_key) {
+                let parsed = ffs_btrfs::parse_root_item(&fst_root_data).map_err(|e| {
+                    FfsError::Parse(format!("FREE_SPACE_TREE ROOT_ITEM parse failed: {e}"))
+                })?;
+                let (fst_addr, fst_level) = (parsed.bytenr, parsed.level);
+                BtrfsRootItem::patch_root_commit(&mut fst_root_data, fst_addr, fst_level, new_gen)
+                    .map_err(|e| {
+                        FfsError::Parse(format!("FREE_SPACE_TREE ROOT_ITEM patch failed: {e}"))
+                    })?;
+                alloc
+                    .root_tree
+                    .update(&fst_root_key, &fst_root_data)
+                    .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+                Some((fst_addr, fst_level))
+            } else {
+                None
+            };
+        let mut fst_committed = false;
+
         // Build WriteDependencyDag for root_tree and commit it
         let root_dag = WriteDependencyDag::from_cow_tree(&alloc.root_tree, new_gen)
             .map_err(|e| btrfs_mutation_to_ffs(&e))?;
@@ -17092,6 +17123,17 @@ impl OpenFs {
                 )
                 .map_err(|e| btrfs_mutation_to_ffs(&e))?;
 
+            // bd-qxo5x: the reused FREE_SPACE_TREE block is rewritten at new_gen
+            // below, so bump its loaded extent-item generation to match before
+            // the extent leaf is re-serialized (else btrfs check reports a
+            // backref generation mismatch for it).
+            if let Some((fst_addr, fst_level)) = fst_reuse {
+                alloc
+                    .extent_alloc
+                    .set_tree_block_generation(fst_addr, fst_level, new_gen)
+                    .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+            }
+
             // Only re-serialize when the two inserts kept the extent tree a
             // single leaf; otherwise its root bytenr would have changed and the
             // root_tree's pointer would be stale (fall back, leave as written).
@@ -17121,6 +17163,57 @@ impl OpenFs {
                         )))
                     })?;
                 self.dev.sync(cx)?;
+            }
+
+            // bd-qxo5x: rewrite the FREE_SPACE_TREE in place from the now-final
+            // extent tree, so its free ranges reflect this transaction's
+            // allocations. btrfs check [4/8] rejects a stale free-space tree
+            // ("there is no free space entry for ..."). Single-leaf only; a tree
+            // that would split falls back (left not-VALID in the superblock).
+            if let Some((fst_addr, fst_level)) = fst_reuse {
+                let groups = alloc
+                    .extent_alloc
+                    .free_space_extents()
+                    .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+                let items = ffs_btrfs::build_free_space_tree_items(&groups);
+                let fst_max_items = usize::try_from(u64::from(nodesize).saturating_sub(101) / 64)
+                    .unwrap_or(5)
+                    .max(5);
+                let mut fst_tree = InMemoryCowBtrfsTree::new(fst_max_items)
+                    .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+                for (key, value) in &items {
+                    fst_tree
+                        .insert(*key, value)
+                        .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+                }
+                if fst_level == 0 && fst_tree.root_level() == 0 {
+                    let leaf_block = fst_tree.root_block();
+                    let mut addrs = std::collections::BTreeMap::new();
+                    addrs.insert(leaf_block, fst_addr);
+                    let fst_ctx = DiskWritebackContext::with_allocated_addresses(
+                        sb.fsid,
+                        sb.fsid,
+                        new_gen,
+                        ffs_btrfs::BTRFS_FREE_SPACE_TREE_OBJECTID,
+                        nodesize,
+                        alloc.sectorsize,
+                        addrs,
+                    );
+                    let serialized = fst_ctx
+                        .serialize_node(&fst_tree, leaf_block, 0)
+                        .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+                    let physical =
+                        resolve_physical(fst_addr).map_err(|e| btrfs_mutation_to_ffs(&e))?;
+                    self.dev
+                        .write_all_at(cx, ByteOffset(physical), &serialized)
+                        .map_err(|e| {
+                            FfsError::Io(std::io::Error::other(format!(
+                                "free-space tree write failed: {e}"
+                            )))
+                        })?;
+                    self.dev.sync(cx)?;
+                    fst_committed = true;
+                }
             }
         }
 
@@ -17167,6 +17260,17 @@ impl OpenFs {
         sb_bytes[0x48..0x50].copy_from_slice(&new_gen.to_le_bytes());
         sb_bytes[0x50..0x58].copy_from_slice(&root_tree_bytenr.to_le_bytes());
         sb_bytes[0xC6] = root_tree_level;
+
+        // bd-qxo5x: now that the FREE_SPACE_TREE has been rewritten to match the
+        // new allocations, mark it valid so btrfs/`btrfs check` trust it rather
+        // than rebuilding. compat_ro_flags lives at 0xB4 (u64 LE).
+        if fst_committed && sb_bytes.len() >= 0xBC {
+            let mut compat_ro =
+                u64::from_le_bytes(sb_bytes[0xB4..0xBC].try_into().expect("8 bytes"));
+            compat_ro |= BTRFS_FEATURE_COMPAT_RO_FREE_SPACE_TREE_VALID;
+            sb_bytes[0xB4..0xBC].copy_from_slice(&compat_ro.to_le_bytes());
+        }
+
         let csum = ffs_types::crc32c(&sb_bytes[0x20..]);
         sb_bytes[0..4].copy_from_slice(&csum.to_le_bytes());
 

@@ -4182,6 +4182,42 @@ impl BtrfsExtentAllocator {
         Ok(())
     }
 
+    /// Stamp `generation` into the existing skinny `METADATA_ITEM` extent item
+    /// for the tree block at `bytenr` / `level`, leaving its refs and inline
+    /// backref untouched. Returns `true` if the item was present and patched.
+    ///
+    /// Used at commit when a metadata tree block is rewritten in place at the
+    /// new transaction generation but its extent item was loaded at the previous
+    /// one: `btrfs check` requires the extent item's generation to equal the
+    /// generation written into the block header, otherwise it reports a "backref
+    /// generation mismatch" (bd-qxo5x, same class as bd-myrgc). The generation
+    /// field always occupies bytes 8..16 of the extent-item value (`refs:u64`,
+    /// `generation:u64`, `flags:u64`), independent of the inline-ref encoding.
+    ///
+    /// # Errors
+    /// Returns any error from updating the in-memory extent tree.
+    pub fn set_tree_block_generation(
+        &mut self,
+        bytenr: u64,
+        level: u8,
+        generation: u64,
+    ) -> Result<bool, BtrfsMutationError> {
+        let key = BtrfsKey {
+            objectid: bytenr,
+            item_type: BTRFS_ITEM_METADATA_ITEM,
+            offset: u64::from(level),
+        };
+        let Some(mut value) = self.extent_tree.get(&key) else {
+            return Ok(false);
+        };
+        if value.len() < 16 {
+            return Ok(false);
+        }
+        value[8..16].copy_from_slice(&generation.to_le_bytes());
+        self.extent_tree.update(&key, &value)?;
+        Ok(true)
+    }
+
     /// Number of nodes currently in the extent tree (1 == a single leaf).
     #[must_use]
     pub fn extent_tree_root_is_leaf(&self) -> bool {
@@ -4999,10 +5035,18 @@ impl BtrfsExtentAllocator {
                 ) {
                     continue;
                 }
+                // A skinny METADATA_ITEM key encodes the tree LEVEL in its
+                // offset, not the byte length — the block is always `nodesize`
+                // bytes. An EXTENT_ITEM key offset is the real byte length.
+                let extent_len = if key.item_type == BTRFS_ITEM_METADATA_ITEM {
+                    self.nodesize
+                } else {
+                    key.offset
+                };
                 let extent_start = key.objectid.max(bg.start);
                 let extent_end = key
                     .objectid
-                    .checked_add(key.offset)
+                    .checked_add(extent_len)
                     .ok_or(BtrfsMutationError::AddressOverflow)?
                     .min(bg_end);
                 if extent_start < extent_end {
@@ -12522,6 +12566,56 @@ mod tests {
         let alloc_sum: u64 = allocated.iter().map(|&(s, e)| e - s).sum();
         assert_eq!(free_sum + alloc_sum, bg_len, "free + allocated tiles group");
         assert_eq!(alloc_sum, 0x8000);
+    }
+
+    #[test]
+    fn free_space_extents_excludes_loaded_skinny_metadata_items() {
+        // Regression (bd-qxo5x): a skinny METADATA_ITEM key encodes the tree
+        // LEVEL in its offset, not the byte length. Loaded extents (inserted
+        // straight into the extent tree without touching the block-group
+        // used_bytes accounting) must still be excluded from free space — the
+        // size comes from `nodesize`, not the key offset, or the whole group is
+        // wrongly reported free.
+        let mut alloc = BtrfsExtentAllocator::new(9).expect("alloc");
+        alloc.set_nodesize(0x4000); // 16 KiB nodes
+        let bg_start = 0x1d0_0000_u64;
+        let bg_len = 0x20_0000_u64;
+        alloc.add_block_group(bg_start, make_meta_bg(bg_start, bg_len));
+
+        // Two on-disk tree blocks at level 0 (offset == level), like a mount
+        // would load — note used_bytes stays 0, mirroring the loaded state.
+        for node in [bg_start, bg_start + 0x8000] {
+            let item = BtrfsExtentItem {
+                refs: 1,
+                generation: 9,
+                flags: BtrfsExtentItem::FLAG_TREE_BLOCK,
+            };
+            let mut value = item.to_bytes();
+            value.push(BTRFS_ITEM_TREE_BLOCK_REF);
+            value.extend_from_slice(&BTRFS_EXTENT_TREE_OBJECTID.to_le_bytes());
+            let key = BtrfsKey {
+                objectid: node,
+                item_type: BTRFS_ITEM_METADATA_ITEM,
+                offset: 0, // level 0 — NOT a byte length
+            };
+            alloc.extent_tree_mut().insert(key, &value).expect("insert");
+        }
+
+        let fse = alloc.free_space_extents().expect("fse");
+        let free = fse
+            .into_iter()
+            .find(|g| g.start == bg_start)
+            .expect("group present")
+            .free_ranges;
+        // The two 16 KiB blocks at bg_start and bg_start+0x8000 must be excluded.
+        assert_eq!(
+            free,
+            vec![
+                (bg_start + 0x4000, 0x4000),
+                (bg_start + 0xc000, bg_len - 0xc000),
+            ],
+            "loaded metadata blocks must be excluded from free space"
+        );
     }
 
     #[test]
