@@ -284,6 +284,7 @@ impl PerCoreConfig {
 /// this struct provides the routing and metrics infrastructure.
 pub struct PerCoreDispatcher {
     config: PerCoreConfig,
+    resolved_cores: u32,
     core_metrics: Vec<Arc<CoreMetrics>>,
 }
 
@@ -298,10 +299,12 @@ impl PerCoreDispatcher {
     /// Create a new dispatcher with the given configuration.
     #[must_use]
     pub fn new(config: PerCoreConfig) -> Self {
-        let n = config.resolved_cores() as usize;
+        let resolved_cores = config.resolved_cores();
+        let n = resolved_cores as usize;
         let core_metrics = (0..n).map(|_| Arc::new(CoreMetrics::new())).collect();
         Self {
             config,
+            resolved_cores,
             core_metrics,
         }
     }
@@ -309,7 +312,7 @@ impl PerCoreDispatcher {
     /// Number of cores.
     #[must_use]
     pub fn num_cores(&self) -> u32 {
-        self.config.resolved_cores()
+        self.resolved_cores
     }
 
     /// Get metrics for a specific core.
