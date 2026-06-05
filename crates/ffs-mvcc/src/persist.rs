@@ -791,7 +791,7 @@ fn write_checkpoint(
     next_commit: u64,
     versions: &[(BlockNumber, Vec<BlockVersion>)],
 ) -> Result<()> {
-    let mut hasher = Crc32cHasher::new();
+    let mut checkpoint = Vec::with_capacity(checkpoint_payload_capacity(versions));
 
     // Header
     let mut header = [0_u8; CHECKPOINT_HEADER_SIZE];
@@ -804,34 +804,28 @@ fn write_checkpoint(
         .map_err(|_| FfsError::Format("too many blocks for checkpoint".to_owned()))?;
     header[24..28].copy_from_slice(&num_blocks.to_le_bytes());
 
-    writer.write_all(&header)?;
-    hasher.update(&header);
+    checkpoint.extend_from_slice(&header);
 
     // Each block and its versions
     for (block, block_versions) in versions {
         let block_bytes = block.0.to_le_bytes();
-        writer.write_all(&block_bytes)?;
-        hasher.update(&block_bytes);
+        checkpoint.extend_from_slice(&block_bytes);
 
         let num_versions = u32::try_from(block_versions.len())
             .map_err(|_| FfsError::Format("too many versions for block".to_owned()))?;
         let num_versions_bytes = num_versions.to_le_bytes();
-        writer.write_all(&num_versions_bytes)?;
-        hasher.update(&num_versions_bytes);
+        checkpoint.extend_from_slice(&num_versions_bytes);
 
         for (vi, version) in block_versions.iter().enumerate() {
             let commit_seq_bytes = version.commit_seq.0.to_le_bytes();
-            writer.write_all(&commit_seq_bytes)?;
-            hasher.update(&commit_seq_bytes);
+            checkpoint.extend_from_slice(&commit_seq_bytes);
 
             let txn_id_bytes = version.writer.0.to_le_bytes();
-            writer.write_all(&txn_id_bytes)?;
-            hasher.update(&txn_id_bytes);
+            checkpoint.extend_from_slice(&txn_id_bytes);
 
             if version.data.is_identical() {
                 let data_len_bytes = u32::MAX.to_le_bytes();
-                writer.write_all(&data_len_bytes)?;
-                hasher.update(&data_len_bytes);
+                checkpoint.extend_from_slice(&data_len_bytes);
                 continue;
             }
 
@@ -843,19 +837,32 @@ fn write_checkpoint(
             let data_len = u32::try_from(materialized.len())
                 .map_err(|_| FfsError::Format("version data too large".to_owned()))?;
             let data_len_bytes = data_len.to_le_bytes();
-            writer.write_all(&data_len_bytes)?;
-            hasher.update(&data_len_bytes);
+            checkpoint.extend_from_slice(&data_len_bytes);
 
-            writer.write_all(&materialized)?;
-            hasher.update(&materialized);
+            checkpoint.extend_from_slice(&materialized);
         }
     }
 
     // Trailing CRC
-    let crc = hasher.finalize();
-    writer.write_all(&crc.to_le_bytes())?;
+    let crc = crc32c::crc32c(&checkpoint);
+    checkpoint.extend_from_slice(&crc.to_le_bytes());
+    writer.write_all(&checkpoint)?;
 
     Ok(())
+}
+
+fn checkpoint_payload_capacity(versions: &[(BlockNumber, Vec<BlockVersion>)]) -> usize {
+    let mut capacity = CHECKPOINT_HEADER_SIZE + 4;
+    for (_, block_versions) in versions {
+        capacity = capacity.saturating_add(12);
+        for version in block_versions {
+            capacity = capacity.saturating_add(20);
+            if !version.data.is_identical() {
+                capacity = capacity.saturating_add(version.data.memory_bytes());
+            }
+        }
+    }
+    capacity
 }
 
 /// Read a single block version from a checkpoint stream.
@@ -1141,6 +1148,7 @@ pub fn apply_wal_commit(store: &mut MvccStore, commit: &WalCommit) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sha2::{Digest, Sha256};
     use tempfile::NamedTempFile;
 
     fn test_cx() -> Cx {
@@ -1508,6 +1516,76 @@ mod tests {
     }
 
     // ── Checkpoint tests ────────────────────────────────────────────────────
+
+    #[test]
+    fn checkpoint_golden_report() {
+        let cx = test_cx();
+        let wal_tmp = NamedTempFile::new().expect("create wal file");
+        let wal_path = wal_tmp.path().to_path_buf();
+        let ckpt_tmp = NamedTempFile::new().expect("create checkpoint file");
+        let ckpt_path = ckpt_tmp.path().to_path_buf();
+
+        {
+            let store = PersistentMvccStore::open_with_options(
+                &cx,
+                &wal_path,
+                &PersistOptions {
+                    sync_on_commit: false,
+                    ..PersistOptions::default()
+                },
+            )
+            .expect("open");
+
+            for version in 0_u8..3 {
+                for block in [3_u8, 1, 2] {
+                    let mut txn = store.begin();
+                    let data = (0_u8..64)
+                        .map(|offset| {
+                            block
+                                .wrapping_mul(17)
+                                .wrapping_add(version.wrapping_mul(31))
+                                .wrapping_add(offset)
+                        })
+                        .collect();
+                    txn.stage_write(BlockNumber(u64::from(block)), data);
+                    store.commit(txn).expect("commit");
+                }
+            }
+
+            store.checkpoint(&ckpt_path).expect("checkpoint");
+        }
+
+        let checkpoint = std::fs::read(&ckpt_path).expect("read checkpoint");
+        let sha256 = Sha256::digest(&checkpoint);
+        let mut sha256_hex = String::with_capacity(64);
+        for byte in sha256 {
+            use std::fmt::Write as _;
+            write!(&mut sha256_hex, "{byte:02x}").expect("format sha256 hex");
+        }
+        assert_eq!(
+            sha256_hex,
+            "7adbdd643cc6f2d7d0512813d9c0db954a84af4c4b22b248401aafc70f9a8e17"
+        );
+        println!(
+            "CHECKPOINT_GOLDEN|len={}|sha256={sha256_hex}",
+            checkpoint.len()
+        );
+
+        let store = PersistentMvccStore::open_with_checkpoint(&cx, &wal_path, &ckpt_path)
+            .expect("open with checkpoint");
+        let snapshot = store.current_snapshot();
+        assert_eq!(snapshot.high, CommitSeq(9));
+        for block in [1_u8, 2, 3] {
+            let data = store
+                .read_visible(BlockNumber(u64::from(block)), snapshot)
+                .expect("block visible");
+            assert_eq!(data.len(), 64);
+            assert_eq!(
+                data[0],
+                block.wrapping_mul(17).wrapping_add(2_u8.wrapping_mul(31))
+            );
+        }
+    }
 
     #[test]
     fn checkpoint_and_restore() {

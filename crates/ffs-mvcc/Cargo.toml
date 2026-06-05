@@ -28,6 +28,7 @@ brotli = { workspace = true }
 criterion = { workspace = true }
 crc32c = { workspace = true }
 proptest = { workspace = true }
+sha2 = { workspace = true }
 
 [[bench]]
 name = "wal_throughput"
