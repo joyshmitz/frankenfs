@@ -13,7 +13,10 @@
 //! - **punch**: `punch_hole` — remove mappings without changing file size.
 //! - **unwritten**: `mark_written` — clear unwritten flag on extents.
 
-use std::collections::BTreeMap;
+use std::{
+    cmp::Reverse,
+    collections::{BTreeMap, BinaryHeap},
+};
 
 use asupersync::Cx;
 use ffs_alloc::{AllocHint, BlockAlloc, FsGeometry, GroupStats};
@@ -1257,6 +1260,13 @@ struct ExtentCacheInner {
     /// number) that prevents cross-scope cache pollution when a single cache
     /// instance is shared across many objects.
     entries: BTreeMap<(u64, u32), CacheEntry>,
+    /// Lazy min-heap of `(last_access, key)` eviction candidates.
+    ///
+    /// `BinaryHeap` does not support arbitrary removal, so lookup and insert
+    /// push fresh states and eviction discards stale heap rows until it reaches
+    /// a row matching the current cache entry. The tuple matches the previous
+    /// scan tie-break: oldest access first, then lexicographically smallest key.
+    eviction_heap: BinaryHeap<Reverse<(u64, (u64, u32))>>,
     /// Maximum number of entries before eviction.
     capacity: usize,
     /// Monotonically increasing generation; bumped on bulk invalidation.
@@ -1312,6 +1322,7 @@ impl ExtentCache {
         Self {
             inner: RwLock::new(ExtentCacheInner {
                 entries: BTreeMap::new(),
+                eviction_heap: BinaryHeap::with_capacity(capacity),
                 capacity,
                 generation: 0,
                 hits: 0,
@@ -1366,6 +1377,9 @@ impl ExtentCache {
             if let Some(e) = inner.entries.get_mut(&key) {
                 e.last_access = clock;
             }
+            if inner.entries.len() >= inner.capacity && inner.capacity != 0 {
+                push_eviction_state(&mut inner, key, clock);
+            }
             Some(ExtentMapping {
                 logical_start: logical_block,
                 physical_start,
@@ -1402,12 +1416,7 @@ impl ExtentCache {
 
         // Evict if at capacity and this is a new key.
         if inner.entries.len() >= inner.capacity && !inner.entries.contains_key(&key) {
-            // Find entry with lowest last_access.
-            if let Some((&victim_key, _)) = inner.entries.iter().min_by_key(|(_, e)| e.last_access)
-            {
-                inner.entries.remove(&victim_key);
-                inner.evictions = inner.evictions.saturating_add(1);
-            }
+            evict_lru_entry(&mut inner);
         }
 
         inner.entries.insert(
@@ -1418,6 +1427,7 @@ impl ExtentCache {
                 last_access: access_clock,
             },
         );
+        push_eviction_state(&mut inner, key, access_clock);
     }
 
     /// Invalidate all cached entries in the given namespace whose range overlaps
@@ -1448,6 +1458,7 @@ impl ExtentCache {
         for k in to_remove {
             inner.entries.remove(&k);
         }
+        compact_eviction_heap_if_needed(&mut inner);
     }
 
     /// Invalidate all entries (bulk reset). Bumps the generation counter so
@@ -1455,6 +1466,7 @@ impl ExtentCache {
     pub fn invalidate_all(&self) {
         let mut inner = self.inner.write();
         inner.entries.clear();
+        inner.eviction_heap.clear();
         inner.generation = inner.generation.saturating_add(1);
     }
 
@@ -1478,6 +1490,56 @@ impl ExtentCache {
         inner.misses = 0;
         inner.evictions = 0;
     }
+}
+
+fn push_eviction_state(inner: &mut ExtentCacheInner, key: (u64, u32), last_access: u64) {
+    inner.eviction_heap.push(Reverse((last_access, key)));
+    compact_eviction_heap_if_needed(inner);
+}
+
+fn evict_lru_entry(inner: &mut ExtentCacheInner) {
+    while let Some(Reverse((last_access, key))) = inner.eviction_heap.pop() {
+        if inner
+            .entries
+            .get(&key)
+            .is_some_and(|entry| entry.last_access == last_access)
+        {
+            inner.entries.remove(&key);
+            inner.evictions = inner.evictions.saturating_add(1);
+            return;
+        }
+    }
+
+    let victim_key = inner
+        .entries
+        .iter()
+        .min_by_key(|(key, entry)| (entry.last_access, **key))
+        .map(|(key, _)| *key);
+    if let Some(key) = victim_key {
+        inner.entries.remove(&key);
+        inner.evictions = inner.evictions.saturating_add(1);
+    }
+}
+
+fn compact_eviction_heap_if_needed(inner: &mut ExtentCacheInner) {
+    let live_entries = inner.entries.len();
+    if live_entries == 0 {
+        inner.eviction_heap.clear();
+        return;
+    }
+
+    let max_lazy_rows = live_entries.saturating_mul(4).max(64);
+    if inner.eviction_heap.len() <= max_lazy_rows {
+        return;
+    }
+
+    inner.eviction_heap.clear();
+    inner.eviction_heap.extend(
+        inner
+            .entries
+            .iter()
+            .map(|(&key, entry)| Reverse((entry.last_access, key))),
+    );
 }
 
 impl Default for ExtentCache {
