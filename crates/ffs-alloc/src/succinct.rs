@@ -96,6 +96,7 @@ impl SuccinctBitmap {
         let num_superblocks = len.div_ceil(SUPERBLOCK_BITS);
         let num_blocks = len.div_ceil(BLOCK_BITS);
 
+        let data = bitmap[..len.div_ceil(8) as usize].to_vec();
         let mut superblocks = Vec::with_capacity(num_superblocks as usize + 1);
         let mut blocks = Vec::with_capacity(num_blocks as usize);
 
@@ -117,8 +118,8 @@ impl SuccinctBitmap {
             let local = super_local as u16;
             blocks.push(local);
 
-            // Count ones in this 64-bit block.
-            let popcount = popcount_range(bitmap, bit_start, BLOCK_BITS.min(len - bit_start));
+            let popcount =
+                popcount_aligned_block(&data, bit_start, BLOCK_BITS.min(len - bit_start));
             cumulative += popcount;
             super_local += popcount;
         }
@@ -131,7 +132,7 @@ impl SuccinctBitmap {
             ones: cumulative,
             superblocks,
             blocks,
-            data: bitmap[..len.div_ceil(8) as usize].to_vec(),
+            data,
         }
     }
 
@@ -548,6 +549,60 @@ fn popcount_full_bytes(bytes: &[u8]) -> u32 {
     for &byte in chunks.remainder() {
         total += byte.count_ones();
     }
+    total
+}
+
+fn popcount_aligned_block(bitmap: &[u8], bit_start: u32, count: u32) -> u32 {
+    debug_assert_eq!(bit_start % 8, 0);
+    if count == 0 {
+        return 0;
+    }
+
+    let byte_start = (bit_start / 8) as usize;
+    let full_bytes = (count / 8) as usize;
+    let remainder = count % 8;
+    let mut total = 0_u32;
+
+    let bytes = &bitmap[byte_start..byte_start + full_bytes];
+    let mut blocks = bytes.chunks_exact(32);
+    for block in &mut blocks {
+        total += u64::from_le_bytes([
+            block[0], block[1], block[2], block[3], block[4], block[5], block[6], block[7],
+        ])
+        .count_ones();
+        total += u64::from_le_bytes([
+            block[8], block[9], block[10], block[11], block[12], block[13], block[14], block[15],
+        ])
+        .count_ones();
+        total += u64::from_le_bytes([
+            block[16], block[17], block[18], block[19], block[20], block[21], block[22], block[23],
+        ])
+        .count_ones();
+        total += u64::from_le_bytes([
+            block[24], block[25], block[26], block[27], block[28], block[29], block[30], block[31],
+        ])
+        .count_ones();
+    }
+
+    let mut chunks = blocks.remainder().chunks_exact(8);
+    for chunk in &mut chunks {
+        total += u64::from_le_bytes([
+            chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
+        ])
+        .count_ones();
+    }
+    for &byte in chunks.remainder() {
+        total += byte.count_ones();
+    }
+
+    if remainder > 0 {
+        let byte = bitmap[byte_start + full_bytes];
+        let mask = (1_u16 << remainder) - 1;
+        #[expect(clippy::cast_possible_truncation)]
+        let masked = (byte & mask as u8).count_ones();
+        total += masked;
+    }
+
     total
 }
 
