@@ -15625,10 +15625,12 @@ impl OpenFs {
             .extent_alloc
             .alloc_data(alloc_size)
             .map_err(|e| btrfs_mutation_to_ffs(&e))?;
-        if let Err(e) = self
-            .dev
-            .write_all_at(cx, ByteOffset(allocation.bytenr), data)
-        {
+        // Write through the logical->physical chunk mapping + MVCC overlay, the
+        // same path the main write (btrfs_write_logical) and every read
+        // (btrfs_read_logical_into) use. Writing raw to `self.dev` at the logical
+        // bytenr bypassed both, so a re-inserted head/tail segment could be lost
+        // (read back as zero/stale) — bd-900t6.
+        if let Err(e) = self.btrfs_write_logical(cx, allocation.bytenr, data) {
             let _ = alloc
                 .extent_alloc
                 .free_extent(allocation.bytenr, alloc_size, false);
@@ -49668,6 +49670,12 @@ mod tests {
         // EXTENT_DATA item read back as a pure hole and the file silently went to
         // zeros. The allocator now fences the reserved prefix and never returns
         // bytenr 0.
+        //
+        // Write #11 then re-overwrites [50, 84000), leaving a sub-sector head
+        // [0, 50) to be re-inserted as its own extent. That re-insertion used to
+        // write raw to the device at the logical bytenr (bypassing the chunk
+        // map + MVCC overlay), so the head read back wrong; it now writes through
+        // btrfs_write_logical like the main path (bd-900t6).
         let (fs, cx) = open_writable_btrfs();
         let ops: &dyn FsOps = &fs;
         let attr = ops
@@ -49684,7 +49692,7 @@ mod tests {
 
         // (offset, len, fill-byte). The file stays large enough (>nodesize) that
         // every write takes the regular-extent path, not the inline path.
-        let writes: [(usize, usize, u8); 10] = [
+        let writes: [(usize, usize, u8); 11] = [
             (0, 16384, 0x11),     // extent A [0,16K)
             (32768, 16384, 0x22), // extent B [32K,48K); hole [16K,32K)
             (65536, 16384, 0x33), // extent C [64K,80K); hole [48K,64K)
@@ -49695,6 +49703,7 @@ mod tests {
             (40000, 8000, 0x88),  // unaligned middle overwrite spanning a boundary
             (4096, 71000, 0x99),  // large unaligned span across many extents
             (0, 84000, 0xAA),     // whole-file overwrite — used to read back all-zeros (bd-5aybu)
+            (50, 83950, 0xBB),    // sub-sector head [0,50) re-inserted — used to be lost (bd-900t6)
         ];
 
         let mut model: Vec<u8> = Vec::new();
