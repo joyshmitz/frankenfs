@@ -49751,6 +49751,137 @@ mod tests {
     }
 
     #[test]
+    fn btrfs_write_truncate_interleave_matches_reference_model() {
+        // Metamorphic coverage for the interaction of btrfs writes and truncates.
+        // A shrink trims/drops extents at the new EOF (re-inserting a partial
+        // head via btrfs_insert_regular_extent_segment — the bd-900t6 path), an
+        // extend leaves an implicit hole that must read back as zero, and the
+        // free/realloc churn stresses the data allocator (the bd-5aybu path).
+        // After every op the whole file must equal a byte-exact in-memory model.
+        #[derive(Clone, Copy)]
+        enum Op {
+            Write(usize, usize, u8),
+            Trunc(usize),
+            Punch(usize, usize),
+            Zero(usize, usize),
+        }
+        use Op::{Punch, Trunc, Write, Zero};
+
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+        let attr = ops
+            .create(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("trunc-model.bin"),
+                0o644,
+                0,
+                0,
+            )
+            .unwrap();
+
+        let program = [
+            Write(0, 32768, 0x11),    // one regular extent [0,32K)
+            Punch(8192, 4096),        // sector-aligned hole inside the extent
+            Trunc(20000),             // shrink mid-extent (unaligned): trim + re-insert head
+            Trunc(40000),             // extend: implicit hole [20000,40000)
+            Write(30000, 5000, 0x22), // write inside the hole
+            Write(38000, 8000, 0x33), // write crossing EOF (extends to 46000)
+            Zero(20480, 8192),        // zero_range over a fragmented region (aligned, in-file)
+            Trunc(100),               // shrink to a sub-sector size
+            Write(50, 30000, 0x44),   // extend from 100 and overwrite across the old tail
+            Trunc(0),                 // empty the file
+            Write(0, 70000, 0x55),    // large write onto the empty file
+            Punch(4096, 8192),        // aligned punch in the middle of the big extent
+            Zero(57344, 8192),        // aligned zero near the end
+            Trunc(33333),             // shrink to an unaligned size
+            Trunc(80000),             // extend: large implicit hole tail
+            Write(79990, 20, 0x66),   // tiny unaligned write at the very end
+        ];
+
+        let mut model: Vec<u8> = Vec::new();
+        for (step, op) in program.iter().enumerate() {
+            match *op {
+                Write(off, len, val) => {
+                    let buf = vec![val; len];
+                    let written = fs.write(&cx, attr.ino, off as u64, &buf).expect("write");
+                    assert_eq!(written as usize, len, "short write at step {step}");
+                    if off + len > model.len() {
+                        model.resize(off + len, 0);
+                    }
+                    model[off..off + len].copy_from_slice(&buf);
+                }
+                Trunc(size) => {
+                    fs.setattr(
+                        &cx,
+                        attr.ino,
+                        &SetAttrRequest {
+                            size: Some(size as u64),
+                            ..Default::default()
+                        },
+                    )
+                    .expect("truncate");
+                    model.resize(size, 0);
+                }
+                Punch(off, len) => {
+                    // KEEP_SIZE punch hole: zero [off,off+len) in place, size held.
+                    fs.fallocate(
+                        &cx,
+                        attr.ino,
+                        off as u64,
+                        len as u64,
+                        libc::FALLOC_FL_KEEP_SIZE | libc::FALLOC_FL_PUNCH_HOLE,
+                    )
+                    .expect("punch hole");
+                    model[off..off + len].fill(0);
+                }
+                Zero(off, len) => {
+                    // ZERO_RANGE over an in-file aligned span: zero it, size held.
+                    fs.fallocate(
+                        &cx,
+                        attr.ino,
+                        off as u64,
+                        len as u64,
+                        libc::FALLOC_FL_ZERO_RANGE,
+                    )
+                    .expect("zero range");
+                    model[off..off + len].fill(0);
+                }
+            }
+
+            let attr_now = fs.getattr(&cx, attr.ino).expect("getattr");
+            assert_eq!(
+                attr_now.size,
+                model.len() as u64,
+                "inode size mismatch after step {step}"
+            );
+            if model.is_empty() {
+                continue;
+            }
+            let got = fs
+                .read(
+                    &cx,
+                    attr.ino,
+                    0,
+                    u32::try_from(model.len()).expect("model size fits u32"),
+                )
+                .expect("read");
+            let ndiff = (0..model.len()).filter(|&i| got[i] != model[i]).count();
+            assert!(
+                got.len() == model.len() && ndiff == 0,
+                "content diverged from model after step {step}: got {} bytes, model {} bytes, \
+                 {ndiff} differ (first at {})",
+                got.len(),
+                model.len(),
+                (0..model.len().min(got.len()))
+                    .find(|&i| got[i] != model[i])
+                    .unwrap_or(0),
+            );
+        }
+    }
+
+    #[test]
     fn btrfs_write_unlink_file() {
         let (fs, cx) = open_writable_btrfs();
         let ops: &dyn FsOps = &fs;
