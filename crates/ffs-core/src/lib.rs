@@ -50038,6 +50038,106 @@ mod tests {
     }
 
     #[test]
+    fn btrfs_directory_mutation_churn_matches_reference_model() {
+        // Metamorphic coverage for the btrfs directory-entry mutation path
+        // (DIR_ITEM / DIR_INDEX / INODE_REF), exercising the per-directory
+        // sequence keying (bd-yqoni) and the rename overwrite/purge path under a
+        // churny create/unlink/rename program. After every op, readdir must list
+        // exactly the modelled live names (each resolving to the right inode) and
+        // every name must look up to its modelled inode.
+        #[derive(Clone, Copy)]
+        enum Op {
+            Create(&'static str),
+            Unlink(&'static str),
+            Rename(&'static str, &'static str),
+        }
+        use Op::{Create, Rename, Unlink};
+
+        let (fs, cx) = open_writable_btrfs();
+        let root = InodeNumber(1);
+
+        // Ignore whatever the synthetic fixture root already holds (its seeded
+        // entry carries only a DIR_INDEX, not the DIR_ITEM that lookup keys on —
+        // an incomplete-image artifact, not a real entry). The model tracks only
+        // the entries this test mutates; every FrankenFS-written entry gets both
+        // a DIR_ITEM and a DIR_INDEX, so readdir and lookup stay consistent.
+        let preexisting: std::collections::BTreeSet<Vec<u8>> = fs
+            .readdir(&cx, root, 0)
+            .expect("initial readdir")
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
+        let mut model: std::collections::BTreeMap<Vec<u8>, u64> = std::collections::BTreeMap::new();
+
+        let program = [
+            Create("a"),
+            Create("b"),
+            Create("c"),
+            Rename("b", "b2"),
+            Create("d"),
+            Unlink("a"),
+            Rename("c", "d"), // overwrite an existing destination
+            Create("e"),
+            Create("f"),
+            Unlink("b2"),
+            Rename("e", "a"),
+            Create("g"),
+            Rename("d", "e"),
+            Unlink("f"),
+            Create("h"),
+            Create("i"),
+            Rename("g", "h"), // overwrite again
+            Unlink("e"),
+            Create("j"),
+            Rename("i", "j"), // overwrite
+        ];
+
+        for (step, op) in program.iter().enumerate() {
+            match *op {
+                Create(name) => {
+                    let attr = fs
+                        .create(&cx, root, OsStr::new(name), 0o644, 0, 0)
+                        .unwrap_or_else(|e| panic!("create {name} at step {step}: {e:?}"));
+                    model.insert(name.as_bytes().to_vec(), attr.ino.0);
+                }
+                Unlink(name) => {
+                    fs.unlink(&cx, root, OsStr::new(name))
+                        .unwrap_or_else(|e| panic!("unlink {name} at step {step}: {e:?}"));
+                    model.remove(name.as_bytes());
+                }
+                Rename(old, new) => {
+                    fs.rename(&cx, root, OsStr::new(old), root, OsStr::new(new))
+                        .unwrap_or_else(|e| panic!("rename {old}->{new} at step {step}: {e:?}"));
+                    let ino = model
+                        .remove(old.as_bytes())
+                        .expect("rename source modelled");
+                    model.insert(new.as_bytes().to_vec(), ino);
+                }
+            }
+
+            let mut got: std::collections::BTreeMap<Vec<u8>, u64> =
+                std::collections::BTreeMap::new();
+            for e in fs.readdir(&cx, root, 0).expect("readdir") {
+                if e.name != b"." && e.name != b".." && !preexisting.contains(&e.name) {
+                    got.insert(e.name.clone(), e.ino.0);
+                }
+            }
+            assert_eq!(got, model, "readdir diverged from model after step {step}");
+
+            for (name, ino) in &model {
+                let name_str = std::str::from_utf8(name).expect("modelled name is utf8");
+                let attr = fs
+                    .lookup(&cx, root, OsStr::new(name_str))
+                    .unwrap_or_else(|e| panic!("lookup {name_str} at step {step}: {e:?}"));
+                assert_eq!(
+                    attr.ino.0, *ino,
+                    "lookup inode mismatch for {name_str} after step {step}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn btrfs_write_unlink_file() {
         let (fs, cx) = open_writable_btrfs();
         let ops: &dyn FsOps = &fs;
