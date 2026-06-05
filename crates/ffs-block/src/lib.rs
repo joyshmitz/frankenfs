@@ -27,6 +27,8 @@ use std::os::fd::AsFd;
 use std::os::unix::fs::FileExt;
 use std::path::Path;
 use std::sync::Arc;
+#[cfg(feature = "s3fifo")]
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -1890,6 +1892,142 @@ impl DirtyTracker {
     }
 }
 
+#[cfg(feature = "s3fifo")]
+const S3_FAST_HIT_MAX_SHARDS: usize = 64;
+
+#[cfg(feature = "s3fifo")]
+#[derive(Debug)]
+struct S3AccessHandle {
+    count: AtomicU8,
+    valid: AtomicBool,
+}
+
+#[cfg(feature = "s3fifo")]
+impl S3AccessHandle {
+    fn new(count: u8) -> Arc<Self> {
+        Arc::new(Self {
+            count: AtomicU8::new(count),
+            valid: AtomicBool::new(true),
+        })
+    }
+
+    fn load_count(&self) -> u8 {
+        self.count.load(Ordering::Relaxed)
+    }
+
+    fn store_count(&self, count: u8) {
+        self.count.store(count, Ordering::Relaxed);
+    }
+
+    fn increment_count(&self) -> u8 {
+        let mut current = self.count.load(Ordering::Relaxed);
+        loop {
+            let next = current.saturating_add(1);
+            match self.count.compare_exchange_weak(
+                current,
+                next,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return next,
+                Err(actual) => current = actual,
+            }
+        }
+    }
+
+    fn invalidate(&self) {
+        self.valid.store(false, Ordering::Release);
+    }
+
+    fn is_valid(&self) -> bool {
+        self.valid.load(Ordering::Acquire)
+    }
+}
+
+#[cfg(feature = "s3fifo")]
+#[derive(Debug, Clone)]
+struct S3FastResident {
+    data: BlockBuf,
+    access: Arc<S3AccessHandle>,
+}
+
+#[cfg(feature = "s3fifo")]
+#[derive(Debug)]
+struct S3FastResidentTable {
+    shards: Vec<Mutex<HashMap<BlockNumber, S3FastResident>>>,
+    shard_mask: Option<u64>,
+}
+
+#[cfg(feature = "s3fifo")]
+impl S3FastResidentTable {
+    fn for_host_parallelism(capacity_blocks: usize) -> Self {
+        let host_threads = thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+        let shard_count = host_threads
+            .clamp(1, S3_FAST_HIT_MAX_SHARDS)
+            .min(capacity_blocks.max(1));
+        Self::new(shard_count)
+    }
+
+    fn new(shard_count: usize) -> Self {
+        let shard_count = shard_count.max(1);
+        let mut shards = Vec::with_capacity(shard_count);
+        for _ in 0..shard_count {
+            shards.push(Mutex::new(HashMap::new()));
+        }
+        let shard_mask = shard_count
+            .is_power_of_two()
+            .then_some(u64::try_from(shard_count - 1).unwrap_or(u64::MAX));
+        Self { shards, shard_mask }
+    }
+
+    fn shard_index(&self, block: BlockNumber) -> usize {
+        if let Some(mask) = self.shard_mask {
+            return usize::try_from(block.0 & mask).unwrap_or(0);
+        }
+        let shard_count = u64::try_from(self.shards.len()).unwrap_or(u64::MAX);
+        usize::try_from(block.0 % shard_count).unwrap_or(0)
+    }
+
+    fn get_valid(&self, block: BlockNumber) -> Option<S3FastResident> {
+        let shard = &self.shards[self.shard_index(block)];
+        let guard = shard.lock();
+        let entry = guard
+            .get(&block)
+            .filter(|entry| entry.access.is_valid())
+            .cloned();
+        drop(guard);
+        entry
+    }
+
+    fn insert(&self, block: BlockNumber, entry: S3FastResident) {
+        let shard = &self.shards[self.shard_index(block)];
+        shard.lock().insert(block, entry);
+    }
+
+    fn remove(&self, block: BlockNumber) {
+        let shard = &self.shards[self.shard_index(block)];
+        let removed = shard.lock().remove(&block);
+        if let Some(entry) = removed {
+            entry.access.invalidate();
+        }
+    }
+}
+
+#[cfg(feature = "s3fifo")]
+#[derive(Debug)]
+struct S3FastMutationGuard<'a> {
+    active: &'a AtomicUsize,
+    epoch: &'a AtomicU64,
+}
+
+#[cfg(feature = "s3fifo")]
+impl Drop for S3FastMutationGuard<'_> {
+    fn drop(&mut self) {
+        self.epoch.fetch_add(1, Ordering::AcqRel);
+        self.active.fetch_sub(1, Ordering::Release);
+    }
+}
+
 #[derive(Debug)]
 struct ArcState {
     /// Active target capacity in blocks (may be reduced under pressure).
@@ -1938,7 +2076,9 @@ struct ArcState {
     #[cfg(feature = "s3fifo")]
     sequential_read_miss_streak: u8,
     #[cfg(feature = "s3fifo")]
-    access_count: HashMap<BlockNumber, u8>,
+    access_count: HashMap<BlockNumber, Arc<S3AccessHandle>>,
+    #[cfg(feature = "s3fifo")]
+    fast_invalidations: Vec<BlockNumber>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -2002,6 +2142,8 @@ impl ArcState {
             sequential_read_miss_streak: 0,
             #[cfg(feature = "s3fifo")]
             access_count: HashMap::new(),
+            #[cfg(feature = "s3fifo")]
+            fast_invalidations: Vec::new(),
         }
     }
 
@@ -2012,6 +2154,26 @@ impl ArcState {
     fn add_usize_to_counter(counter: &mut u64, delta: usize) {
         let delta = u64::try_from(delta).unwrap_or(u64::MAX);
         *counter = counter.saturating_add(delta);
+    }
+
+    #[cfg(feature = "s3fifo")]
+    fn s3_access_handle(&mut self, key: BlockNumber, initial_count: u8) -> Arc<S3AccessHandle> {
+        self.access_count
+            .entry(key)
+            .or_insert_with(|| S3AccessHandle::new(initial_count))
+            .clone()
+    }
+
+    #[cfg(feature = "s3fifo")]
+    fn s3_access_count(&self, key: BlockNumber) -> u8 {
+        self.access_count
+            .get(&key)
+            .map_or(0, |handle| handle.load_count())
+    }
+
+    #[cfg(feature = "s3fifo")]
+    fn take_fast_invalidations(&mut self) -> Vec<BlockNumber> {
+        std::mem::take(&mut self.fast_invalidations)
     }
 
     fn resident_len(&self) -> usize {
@@ -2170,7 +2332,10 @@ impl ArcState {
         let _ = self.resident.remove(&victim);
         #[cfg(feature = "s3fifo")]
         {
-            let _ = self.access_count.remove(&victim);
+            if let Some(handle) = self.access_count.remove(&victim) {
+                handle.invalidate();
+                self.fast_invalidations.push(victim);
+            }
         }
         self.clear_dirty_unconditional(victim);
         trace!(event = "cache_evict_clean", block = victim.0);
@@ -2447,18 +2612,14 @@ impl ArcState {
                 self.loc.insert(key, ArcList::T1);
             }
         }
-        let access_count = self
-            .access_count
-            .entry(key)
-            .and_modify(|count| *count = count.saturating_add(1))
-            .or_insert(1);
+        let access_count = self.s3_access_handle(key, 0).increment_count();
         trace!(
             target: "ffs::block::s3fifo",
             event = "queue_transition",
             block = key.0,
             from_queue = "resident",
             to_queue = "resident",
-            access_count = *access_count,
+            access_count,
             small_len = self.t1.len(),
             main_len = self.t2.len(),
             ghost_len = self.b1.len()
@@ -2482,7 +2643,10 @@ impl ArcState {
             let _ = Self::remove_from_list(&mut self.t1, key);
             let _ = Self::remove_from_list(&mut self.t2, key);
             let _ = self.loc.remove(&key);
-            let _ = self.access_count.remove(&key);
+            if let Some(handle) = self.access_count.remove(&key) {
+                handle.invalidate();
+                self.fast_invalidations.push(key);
+            }
         }
 
         let ghost_hit = matches!(self.loc.get(&key), Some(ArcList::B1 | ArcList::B2));
@@ -2491,7 +2655,7 @@ impl ArcState {
             let _ = Self::remove_from_list(&mut self.b2, key);
             self.loc.insert(key, ArcList::T2);
             self.t2.push_back(key);
-            let _ = self.access_count.insert(key, 1);
+            let _ = self.access_count.insert(key, S3AccessHandle::new(1));
             debug!(
                 target: "ffs::block::s3fifo",
                 event = "admission_decision",
@@ -2522,7 +2686,7 @@ impl ArcState {
         } else {
             self.loc.insert(key, ArcList::T1);
             self.t1.push_back(key);
-            let _ = self.access_count.insert(key, 0);
+            let _ = self.access_count.insert(key, S3AccessHandle::new(0));
             debug!(
                 target: "ffs::block::s3fifo",
                 event = "admission_decision",
@@ -2575,7 +2739,7 @@ impl ArcState {
                 self.t1.push_back(victim);
                 continue;
             }
-            let access_count = self.access_count.get(&victim).copied().unwrap_or(0);
+            let access_count = self.s3_access_count(victim);
             if access_count > 0 {
                 self.loc.insert(victim, ArcList::T2);
                 self.t2.push_back(victim);
@@ -2625,10 +2789,12 @@ impl ArcState {
                 self.t2.push_back(victim);
                 continue;
             }
-            let access_count = self.access_count.get(&victim).copied().unwrap_or(0);
+            let access_count = self.s3_access_count(victim);
             if access_count > 0 {
                 let next_count = access_count.saturating_sub(1);
-                self.access_count.insert(victim, next_count);
+                if let Some(handle) = self.access_count.get(&victim) {
+                    handle.store_count(next_count);
+                }
                 self.t2.push_back(victim);
                 trace!(
                     target: "ffs::block::s3fifo",
@@ -2806,8 +2972,18 @@ impl ArcState {
             .retain(|candidate| resident_keys.contains(candidate) && seen.insert(*candidate));
         self.t2
             .retain(|candidate| resident_keys.contains(candidate) && seen.insert(*candidate));
-        self.access_count
-            .retain(|candidate, _| resident_keys.contains(candidate));
+        let stale_access_keys: Vec<BlockNumber> = self
+            .access_count
+            .keys()
+            .copied()
+            .filter(|candidate| !resident_keys.contains(candidate))
+            .collect();
+        for key in stale_access_keys {
+            if let Some(handle) = self.access_count.remove(&key) {
+                handle.invalidate();
+                self.fast_invalidations.push(key);
+            }
+        }
 
         let queue_loc_keys: Vec<BlockNumber> = self
             .loc
@@ -3116,6 +3292,18 @@ pub struct ArcCache<D: BlockDevice> {
     write_policy: ArcWritePolicy,
     mvcc_flush_lifecycle: Arc<dyn MvccFlushLifecycle>,
     repair_flush_lifecycle: Arc<dyn RepairFlushLifecycle>,
+    #[cfg(feature = "s3fifo")]
+    s3_fast_residents: S3FastResidentTable,
+    #[cfg(feature = "s3fifo")]
+    s3_fast_hits: AtomicU64,
+    #[cfg(feature = "s3fifo")]
+    s3_fast_hit_reset_pending: AtomicBool,
+    #[cfg(feature = "s3fifo")]
+    s3_fast_hits_enabled: bool,
+    #[cfg(feature = "s3fifo")]
+    s3_fast_mutation_active: AtomicUsize,
+    #[cfg(feature = "s3fifo")]
+    s3_fast_mutation_epoch: AtomicU64,
 }
 
 /// Write policy for [`ArcCache`].
@@ -3532,6 +3720,8 @@ impl<D: BlockDevice> ArcCache<D> {
                 "ArcCache capacity_blocks must be > 0".to_owned(),
             ));
         }
+        #[cfg(feature = "s3fifo")]
+        let s3_fast_hits_enabled = ArcState::s3_capacity_split(capacity_blocks).0 > 32;
         let cache = Self {
             inner,
             state: Mutex::new(ArcState::new(capacity_blocks)),
@@ -3539,6 +3729,18 @@ impl<D: BlockDevice> ArcCache<D> {
             write_policy,
             mvcc_flush_lifecycle,
             repair_flush_lifecycle,
+            #[cfg(feature = "s3fifo")]
+            s3_fast_residents: S3FastResidentTable::for_host_parallelism(capacity_blocks),
+            #[cfg(feature = "s3fifo")]
+            s3_fast_hits: AtomicU64::new(0),
+            #[cfg(feature = "s3fifo")]
+            s3_fast_hit_reset_pending: AtomicBool::new(false),
+            #[cfg(feature = "s3fifo")]
+            s3_fast_hits_enabled,
+            #[cfg(feature = "s3fifo")]
+            s3_fast_mutation_active: AtomicUsize::new(0),
+            #[cfg(feature = "s3fifo")]
+            s3_fast_mutation_epoch: AtomicU64::new(0),
         };
         #[cfg(feature = "s3fifo")]
         info!(
@@ -3567,7 +3769,18 @@ impl<D: BlockDevice> ArcCache<D> {
     /// The returned [`CacheMetrics`] is a frozen point-in-time snapshot.
     #[must_use]
     pub fn metrics(&self) -> CacheMetrics {
-        self.state.lock().snapshot_metrics()
+        #[cfg(feature = "s3fifo")]
+        {
+            let mut metrics = self.state.lock().snapshot_metrics();
+            metrics.hits = metrics
+                .hits
+                .saturating_add(self.s3_fast_hits.load(Ordering::Relaxed));
+            metrics
+        }
+        #[cfg(not(feature = "s3fifo"))]
+        {
+            self.state.lock().snapshot_metrics()
+        }
     }
 
     /// Export cache metrics using the runtime/e2e JSON field names.
@@ -3581,13 +3794,86 @@ impl<D: BlockDevice> ArcCache<D> {
         self.write_policy
     }
 
+    #[cfg(feature = "s3fifo")]
+    fn s3_fast_hit(&self, block: BlockNumber) -> Option<BlockBuf> {
+        if !self.s3_fast_hits_enabled {
+            return None;
+        }
+        let epoch = self.s3_fast_mutation_epoch.load(Ordering::Acquire);
+        if self.s3_fast_mutation_active.load(Ordering::Acquire) != 0 {
+            return None;
+        }
+        let entry = self.s3_fast_residents.get_valid(block)?;
+        if self.s3_fast_mutation_active.load(Ordering::Acquire) != 0
+            || self.s3_fast_mutation_epoch.load(Ordering::Acquire) != epoch
+            || !entry.access.is_valid()
+        {
+            return None;
+        }
+        entry.access.increment_count();
+        self.s3_fast_hits.fetch_add(1, Ordering::Relaxed);
+        self.s3_fast_hit_reset_pending
+            .store(true, Ordering::Release);
+        Some(entry.data.clone_ref())
+    }
+
+    #[cfg(feature = "s3fifo")]
+    fn begin_s3_fast_mutation(&self) -> S3FastMutationGuard<'_> {
+        self.s3_fast_mutation_active.fetch_add(1, Ordering::AcqRel);
+        self.s3_fast_mutation_epoch.fetch_add(1, Ordering::AcqRel);
+        S3FastMutationGuard {
+            active: &self.s3_fast_mutation_active,
+            epoch: &self.s3_fast_mutation_epoch,
+        }
+    }
+
+    #[cfg(feature = "s3fifo")]
+    fn apply_s3_fast_hit_scan_reset(&self, state: &mut ArcState) {
+        if self.s3_fast_hit_reset_pending.swap(false, Ordering::AcqRel) {
+            state.reset_s3_read_scan_detector();
+        }
+    }
+
+    #[cfg(feature = "s3fifo")]
+    fn s3_fast_entry_for(
+        &self,
+        state: &ArcState,
+        block: BlockNumber,
+        data: &BlockBuf,
+    ) -> Option<S3FastResident> {
+        if !self.s3_fast_hits_enabled {
+            return None;
+        }
+        let access = state.access_count.get(&block)?;
+        access.is_valid().then(|| S3FastResident {
+            data: data.clone_ref(),
+            access: Arc::clone(access),
+        })
+    }
+
+    #[cfg(feature = "s3fifo")]
+    fn apply_s3_fast_resident_updates(
+        &self,
+        invalidations: Vec<BlockNumber>,
+        insert: Option<(BlockNumber, S3FastResident)>,
+    ) {
+        for block in invalidations {
+            self.s3_fast_residents.remove(block);
+        }
+        if let Some((block, entry)) = insert {
+            self.s3_fast_residents.insert(block, entry);
+        }
+    }
+
     /// Apply a memory-pressure signal and adjust cache target size.
     ///
     /// This reduces (or restores) the active target capacity and evicts clean
     /// cold entries when possible. Dirty entries are never evicted.
     #[must_use]
     pub fn memory_pressure_callback(&self, pressure: MemoryPressure) -> CachePressureReport {
-        let (old_pressure, old_target, new_target, batch, report) = {
+        #[cfg(feature = "s3fifo")]
+        let mutation_guard = self.begin_s3_fast_mutation();
+        let (old_pressure, old_target, new_target, batch, report, fast_invalidations) = {
             let mut guard = self.state.lock();
             let old_pressure = guard.pressure_level;
             let old_target = guard.capacity;
@@ -3599,8 +3885,24 @@ impl<D: BlockDevice> ArcCache<D> {
                 guard.capacity,
                 batch,
                 guard.pressure_report(),
+                {
+                    #[cfg(feature = "s3fifo")]
+                    {
+                        guard.take_fast_invalidations()
+                    }
+                    #[cfg(not(feature = "s3fifo"))]
+                    {
+                        Vec::<BlockNumber>::new()
+                    }
+                },
             )
         };
+        #[cfg(feature = "s3fifo")]
+        self.apply_s3_fast_resident_updates(fast_invalidations, None);
+        #[cfg(feature = "s3fifo")]
+        drop(mutation_guard);
+        #[cfg(not(feature = "s3fifo"))]
+        let _ = fast_invalidations;
 
         if old_pressure != pressure {
             info!(
@@ -3625,7 +3927,9 @@ impl<D: BlockDevice> ArcCache<D> {
     /// Restore cache target size to the configured nominal capacity.
     #[must_use]
     pub fn restore_target_size(&self) -> CachePressureReport {
-        let (old_level, old_target, new_target, batch, report) = {
+        #[cfg(feature = "s3fifo")]
+        let mutation_guard = self.begin_s3_fast_mutation();
+        let (old_level, old_target, new_target, batch, report, fast_invalidations) = {
             let mut guard = self.state.lock();
             let old_level = guard.pressure_level;
             let old_target = guard.capacity;
@@ -3638,8 +3942,24 @@ impl<D: BlockDevice> ArcCache<D> {
                 guard.capacity,
                 batch,
                 guard.pressure_report(),
+                {
+                    #[cfg(feature = "s3fifo")]
+                    {
+                        guard.take_fast_invalidations()
+                    }
+                    #[cfg(not(feature = "s3fifo"))]
+                    {
+                        Vec::<BlockNumber>::new()
+                    }
+                },
             )
         };
+        #[cfg(feature = "s3fifo")]
+        self.apply_s3_fast_resident_updates(fast_invalidations, None);
+        #[cfg(feature = "s3fifo")]
+        drop(mutation_guard);
+        #[cfg(not(feature = "s3fifo"))]
+        let _ = fast_invalidations;
         if old_level != MemoryPressure::None {
             info!(
                 event = "cache_pressure_level_change",
@@ -4186,11 +4506,21 @@ impl<D: BlockDevice> ArcCache<D> {
 impl<D: BlockDevice> BlockDevice for ArcCache<D> {
     fn read_block(&self, cx: &Cx, block: BlockNumber) -> Result<BlockBuf> {
         cx_checkpoint(cx)?;
+        #[cfg(feature = "s3fifo")]
+        if let Some(buf) = self.s3_fast_hit(block) {
+            return Ok(buf);
+        }
         {
             let mut guard = self.state.lock();
+            #[cfg(feature = "s3fifo")]
+            self.apply_s3_fast_hit_scan_reset(&mut guard);
             if let Some(buf) = guard.resident.get(&block).cloned() {
                 guard.on_hit(block);
+                #[cfg(feature = "s3fifo")]
+                let fast_invalidations = guard.take_fast_invalidations();
                 drop(guard);
+                #[cfg(feature = "s3fifo")]
+                self.apply_s3_fast_resident_updates(fast_invalidations, None);
                 return Ok(buf);
             }
         }
@@ -4198,31 +4528,61 @@ impl<D: BlockDevice> BlockDevice for ArcCache<D> {
         let _page_lock = self.page_locks.acquire(block);
         {
             let mut guard = self.state.lock();
+            #[cfg(feature = "s3fifo")]
+            self.apply_s3_fast_hit_scan_reset(&mut guard);
             if let Some(buf) = guard.resident.get(&block).cloned() {
                 guard.on_hit(block);
+                #[cfg(feature = "s3fifo")]
+                let fast_invalidations = guard.take_fast_invalidations();
                 drop(guard);
+                #[cfg(feature = "s3fifo")]
+                self.apply_s3_fast_resident_updates(fast_invalidations, None);
                 return Ok(buf);
             }
         }
 
         let buf = self.inner.read_block(cx, block)?;
 
+        #[cfg(feature = "s3fifo")]
+        let mutation_guard = self.begin_s3_fast_mutation();
         let mut guard = self.state.lock();
+        #[cfg(feature = "s3fifo")]
+        self.apply_s3_fast_hit_scan_reset(&mut guard);
         // Re-check: another thread may have populated this block while we
         // were reading from the device (TOCTOU race).  If so, treat as a hit
         // and return the data already in the cache (it might be newer).
+        #[cfg(feature = "s3fifo")]
+        let mut fast_insert = None;
         let final_buf = if let Some(existing) = guard.resident.get(&block).cloned() {
             guard.on_hit(block);
+            #[cfg(feature = "s3fifo")]
+            {
+                fast_insert = self
+                    .s3_fast_entry_for(&guard, block, &existing)
+                    .map(|entry| (block, entry));
+            }
             existing
         } else {
             let bypass_cache = guard.on_read_miss_or_scan_bypass(block);
             if !bypass_cache {
                 guard.resident.insert(block, buf.clone_ref());
+                #[cfg(feature = "s3fifo")]
+                {
+                    fast_insert = self
+                        .s3_fast_entry_for(&guard, block, &buf)
+                        .map(|entry| (block, entry));
+                }
             }
             buf
         };
         let pending_flush = guard.take_pending_flush();
+        #[cfg(feature = "s3fifo")]
+        let fast_invalidations = guard.take_fast_invalidations();
         drop(guard);
+        #[cfg(feature = "s3fifo")]
+        self.apply_s3_fast_resident_updates(fast_invalidations, fast_insert);
+        #[cfg(feature = "s3fifo")]
+        drop(mutation_guard);
         self.flush_pending_evictions(cx, pending_flush)?;
         Ok(final_buf)
     }
@@ -4235,16 +4595,24 @@ impl<D: BlockDevice> BlockDevice for ArcCache<D> {
         }
 
         let mut enforce_backpressure = false;
+        #[cfg(feature = "s3fifo")]
+        let mutation_guard = self.begin_s3_fast_mutation();
         let mut guard = self.state.lock();
+        #[cfg(feature = "s3fifo")]
+        self.apply_s3_fast_hit_scan_reset(&mut guard);
         let payload = BlockBuf::new(data.to_vec());
         if guard.resident.contains_key(&block) {
             // Block already cached — just update data and touch for recency.
-            guard.resident.insert(block, payload);
+            guard.resident.insert(block, payload.clone_ref());
             guard.on_hit(block);
         } else {
             guard.on_miss_or_ghost_hit(block);
-            guard.resident.insert(block, payload);
+            guard.resident.insert(block, payload.clone_ref());
         }
+        #[cfg(feature = "s3fifo")]
+        let fast_insert = self
+            .s3_fast_entry_for(&guard, block, &payload)
+            .map(|entry| (block, entry));
 
         if matches!(self.write_policy, ArcWritePolicy::WriteBack) {
             guard.mark_dirty(
@@ -4303,7 +4671,13 @@ impl<D: BlockDevice> BlockDevice for ArcCache<D> {
         }
 
         let pending_flush = guard.take_pending_flush();
+        #[cfg(feature = "s3fifo")]
+        let fast_invalidations = guard.take_fast_invalidations();
         drop(guard);
+        #[cfg(feature = "s3fifo")]
+        self.apply_s3_fast_resident_updates(fast_invalidations, fast_insert);
+        #[cfg(feature = "s3fifo")]
+        drop(mutation_guard);
         self.flush_pending_evictions(cx, pending_flush)?;
 
         if enforce_backpressure {
@@ -5131,6 +5505,8 @@ impl<D: BlockDevice> std::fmt::Debug for ThrottleInjector<D> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "s3fifo")]
+    use sha2::{Digest, Sha256};
     use std::sync::Arc as StdArc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -5208,6 +5584,25 @@ mod tests {
     #[cfg(feature = "s3fifo")]
     fn s3_access(state: &mut ArcState, key: BlockNumber) {
         arc_access(state, key);
+    }
+
+    #[cfg(feature = "s3fifo")]
+    fn s3_access_count(state: &ArcState, key: BlockNumber) -> Option<u8> {
+        state
+            .access_count
+            .get(&key)
+            .map(|handle| handle.load_count())
+    }
+
+    #[cfg(feature = "s3fifo")]
+    fn sha256_hex(bytes: impl AsRef<[u8]>) -> String {
+        let digest = Sha256::digest(bytes.as_ref());
+        let mut hex = String::with_capacity(64);
+        for byte in digest {
+            use std::fmt::Write as _;
+            write!(&mut hex, "{byte:02x}").expect("format sha256");
+        }
+        hex
     }
 
     #[derive(Debug)]
@@ -5760,15 +6155,15 @@ mod tests {
     fn s3fifo_access_count_increments_on_hit() {
         let mut state = ArcState::new(20);
         s3_access(&mut state, BlockNumber(5));
-        assert_eq!(state.access_count.get(&BlockNumber(5)).copied(), Some(0));
+        assert_eq!(s3_access_count(&state, BlockNumber(5)), Some(0));
 
         // Second access: on_hit increments count.
         s3_access(&mut state, BlockNumber(5));
-        assert_eq!(state.access_count.get(&BlockNumber(5)).copied(), Some(1));
+        assert_eq!(s3_access_count(&state, BlockNumber(5)), Some(1));
 
         // Third access: increments again.
         s3_access(&mut state, BlockNumber(5));
-        assert_eq!(state.access_count.get(&BlockNumber(5)).copied(), Some(2));
+        assert_eq!(s3_access_count(&state, BlockNumber(5)), Some(2));
     }
 
     #[cfg(feature = "s3fifo")]
@@ -6089,6 +6484,57 @@ mod tests {
 
         let metrics = cache.metrics();
         assert!(metrics.resident <= metrics.capacity);
+    }
+
+    #[cfg(feature = "s3fifo")]
+    #[test]
+    fn s3fifo_arc_cache_large_hot_read_golden_report() {
+        const BLOCK_SIZE: u32 = 4096;
+        const HOT_BLOCKS: u64 = 32;
+        const ROUNDS: usize = 4;
+
+        let cx = Cx::for_testing();
+        let mem = MemoryByteDevice::new(BLOCK_SIZE as usize * 128);
+        let dev = ByteBlockDevice::new(mem, BLOCK_SIZE).expect("device");
+        let block_len = usize::try_from(dev.block_size()).expect("block size fits usize");
+
+        for block in 0_u64..HOT_BLOCKS {
+            let fill = u8::try_from(block.wrapping_mul(37).wrapping_add(11) % 251)
+                .expect("fill byte fits");
+            dev.write_block(&cx, BlockNumber(block), &vec![fill; block_len])
+                .expect("seed block");
+        }
+
+        let cache = ArcCache::new(dev, 512).expect("cache");
+        let mut payload_sha = Sha256::new();
+        let mut first_byte_sum = 0_u64;
+        for _ in 0..ROUNDS {
+            for block in 0_u64..HOT_BLOCKS {
+                let buf = cache.read_block(&cx, BlockNumber(block)).expect("hot read");
+                payload_sha.update(buf.as_slice());
+                first_byte_sum = first_byte_sum.saturating_add(u64::from(buf.as_slice()[0]));
+            }
+        }
+
+        let payload_sha_hex = {
+            let mut hex = String::with_capacity(64);
+            for byte in payload_sha.finalize() {
+                use std::fmt::Write as _;
+                write!(&mut hex, "{byte:02x}").expect("format payload sha256");
+            }
+            hex
+        };
+        let metrics = cache.metrics();
+        let report = format!(
+            "BLOCK_CACHE_HOT_READ_GOLDEN|rounds={ROUNDS}|blocks={HOT_BLOCKS}|hits={}|misses={}|resident={}|capacity={}|first_byte_sum={first_byte_sum}|payload_sha256={payload_sha_hex}",
+            metrics.hits, metrics.misses, metrics.resident, metrics.capacity
+        );
+        let report_sha = sha256_hex(&report);
+        println!("{report}|sha256={report_sha}");
+        assert_eq!(
+            report_sha,
+            "63bf85d8f27125241944f9a9b1713367bc7da9992af55e950d3bb009d04e21e5"
+        );
     }
 
     #[cfg(feature = "s3fifo")]
