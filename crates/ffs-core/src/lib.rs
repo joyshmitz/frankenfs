@@ -17740,13 +17740,12 @@ impl OpenFs {
             gid,
             mode: u32::from(mode) | 0o100_000, // S_IFREG
             rdev: 0,
-            // FrankenFS does not populate the btrfs csum tree, so mark new
-            // regular files NODATASUM: the kernel then skips data-checksum
-            // verification on read instead of returning EIO ("csum failed") for
-            // the missing csums. Interim for bd-x3fcu until full csum-tree
-            // population lands; FrankenFS's own write path is unchanged (it never
-            // wrote csums), this only sets the on-disk flag the kernel honors.
-            flags: BTRFS_INODE_NODATASUM,
+            // Datasum (the btrfs default): new regular files get crc32c data
+            // checksums. FrankenFS now populates + commits the csum tree on write
+            // (bd-x3fcu) and the written image is btrfs-check-clean end to end
+            // (bd-4cxkd), so the kernel can verify each data block on read. The
+            // earlier NODATASUM interim is retired now that the csums are real.
+            flags: 0,
             atime_sec: secs,
             atime_nsec: nanos,
             ctime_sec: secs,
@@ -49624,10 +49623,11 @@ mod tests {
 
     #[test]
     #[allow(clippy::significant_drop_tightening)]
-    fn btrfs_new_files_are_nodatasum_for_kernel_readability_bd_x3fcu() {
-        // FrankenFS does not populate the btrfs csum tree, so new regular files
-        // are created NODATASUM: the kernel reads their data without a csum
-        // lookup, which would otherwise fail with EIO for the missing csums.
+    fn btrfs_new_files_are_datasum_bd_x3fcu() {
+        // FrankenFS now populates + commits the csum tree on write (bd-x3fcu) and
+        // the written image is btrfs-check-clean (bd-4cxkd), so new regular files
+        // are created DATASUM (the btrfs default, flags=0): the kernel verifies
+        // each data block's crc32c on read. The earlier NODATASUM interim is gone.
         let (fs, cx) = open_writable_btrfs();
         let ops: &dyn FsOps = &fs;
         let attr = ops
@@ -49649,9 +49649,10 @@ mod tests {
         let inode = fs
             .btrfs_read_inode_from_tree(&alloc, objectid)
             .expect("read back inode item");
-        assert!(
-            inode.flags & BTRFS_INODE_NODATASUM != 0,
-            "a new btrfs regular file must be NODATASUM (bd-x3fcu interim); flags=0x{:x}",
+        assert_eq!(
+            inode.flags & BTRFS_INODE_NODATASUM,
+            0,
+            "a new btrfs regular file must be DATASUM (bd-x3fcu); flags=0x{:x}",
             inode.flags
         );
     }
