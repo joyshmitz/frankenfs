@@ -105,6 +105,7 @@ fn representative_groups() -> Vec<GroupStats> {
     vec![GroupStats {
         group: GroupNumber(0),
         free_blocks: 0,
+        block_largest_free_run: None,
         free_inodes: 0,
         used_dirs: 0,
         block_bitmap_block: BlockNumber(0),

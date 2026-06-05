@@ -7488,6 +7488,42 @@ impl OpenFs {
         match &self.flavor {
             FsFlavor::Ext4(sb) => {
                 let geo = FsGeometry::from_superblock(sb);
+                let cached_best = if let Some(alloc_mutex) = self.ext4_alloc_state.as_ref() {
+                    let mut alloc = alloc_mutex.lock();
+                    if let Ok(group_count) = usize::try_from(geo.group_count)
+                        && alloc.groups.len() == group_count
+                    {
+                        let mut best = 0_u64;
+                        for gidx in 0..group_count {
+                            let group = GroupNumber(
+                                u32::try_from(gidx)
+                                    .expect("group index is bounded by ext4 u32 group_count"),
+                            );
+                            let run = if let Some(run) =
+                                alloc.groups[gidx].cached_block_largest_free_run()
+                            {
+                                run
+                            } else {
+                                let blocks_in_group = alloc.geo.blocks_in_group(group);
+                                let bitmap = self.read_block_bitmap(cx, group)?;
+                                let run = bitmap_largest_free_run(&bitmap, blocks_in_group);
+                                alloc.groups[gidx].block_largest_free_run = Some(run);
+                                run
+                            };
+                            best = best.max(u64::from(run));
+                        }
+                        drop(alloc);
+                        Some(best)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                if let Some(best) = cached_best {
+                    return Ok(best);
+                }
+
                 let mut best = 0_u64;
                 for group_idx in 0..geo.group_count {
                     let group = GroupNumber(group_idx);

@@ -670,6 +670,7 @@ mod tests {
             .map(|g| GroupStats {
                 group: GroupNumber(g),
                 free_blocks: geo.blocks_per_group,
+                block_largest_free_run: None,
                 free_inodes: geo.inodes_per_group,
                 used_dirs: 0,
                 block_bitmap_block: BlockNumber(u64::from(g) * 100 + 1),
@@ -2003,6 +2004,7 @@ mod tests {
         let groups = vec![GroupStats {
             group: GroupNumber(0),
             free_blocks: geo.blocks_per_group,
+            block_largest_free_run: None,
             free_inodes: geo.inodes_per_group,
             used_dirs: 0,
             block_bitmap_block: BlockNumber(1),

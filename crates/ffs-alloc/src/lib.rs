@@ -614,6 +614,9 @@ fn zero_run_starts_at_least(mut free: u64, n: u32) -> u64 {
 pub struct GroupStats {
     pub group: GroupNumber,
     pub free_blocks: u32,
+    /// In-memory largest free block run for this group, populated from the
+    /// checksum-verified block bitmap when known.
+    pub block_largest_free_run: Option<u32>,
     pub free_inodes: u32,
     pub used_dirs: u32,
     pub block_bitmap_block: BlockNumber,
@@ -633,6 +636,7 @@ impl GroupStats {
         Self {
             group,
             free_blocks: gd.free_blocks_count,
+            block_largest_free_run: None,
             free_inodes: gd.free_inodes_count,
             used_dirs: gd.used_dirs_count,
             block_bitmap_csum: gd.block_bitmap_csum,
@@ -648,6 +652,17 @@ impl GroupStats {
     #[must_use]
     pub fn block_bitmap_uninit(&self) -> bool {
         self.flags & GD_FLAG_BLOCK_UNINIT != 0
+    }
+
+    /// Return the cached largest free block run for this group, if known.
+    #[must_use]
+    pub fn cached_block_largest_free_run(&self) -> Option<u32> {
+        self.block_largest_free_run
+    }
+
+    /// Refresh the cached largest free block run from an exact block bitmap.
+    pub fn refresh_block_largest_free_run(&mut self, bitmap: &[u8], blocks_in_group: u32) {
+        self.block_largest_free_run = Some(bitmap_largest_free_run(bitmap, blocks_in_group));
     }
 
     /// Whether the inode bitmap is uninitialized (all free).
@@ -1672,6 +1687,7 @@ fn try_alloc_in_group(
 
         // Update group stats.
         groups[gidx].free_blocks = groups[gidx].free_blocks.saturating_sub(alloc_count);
+        groups[gidx].refresh_block_largest_free_run(&bitmap, blocks_in_group);
 
         let abs_start = geo.group_block_to_absolute(group, rel_start);
         Ok(Some(BlockAlloc {
@@ -1763,6 +1779,7 @@ pub fn free_blocks(
 
         dev.write_block(cx, gs.block_bitmap_block, &bitmap)?;
         groups[gidx].free_blocks = groups[gidx].free_blocks.saturating_add(segment.count);
+        groups[gidx].refresh_block_largest_free_run(&bitmap, geo.blocks_in_group(segment.group));
     }
     Ok(())
 }
@@ -1864,7 +1881,9 @@ fn try_alloc_safe(
 
         dev.write_block(cx, groups[gidx].block_bitmap_block, &bitmap)?;
         let previous_free_blocks = groups[gidx].free_blocks;
+        let previous_largest_free_run = groups[gidx].block_largest_free_run;
         groups[gidx].free_blocks = previous_free_blocks.saturating_sub(alloc_count);
+        groups[gidx].refresh_block_largest_free_run(&bitmap, blocks_in_group);
 
         // Persist group descriptor (includes bitmap checksum stamping if metadata_csum).
         if let Err(error) = persist_group_desc_with_bitmap_overrides(
@@ -1877,6 +1896,7 @@ fn try_alloc_safe(
             None,
         ) {
             groups[gidx].free_blocks = previous_free_blocks;
+            groups[gidx].block_largest_free_run = previous_largest_free_run;
             restore_bitmap_after_group_desc_error(
                 cx,
                 dev,
@@ -1970,13 +1990,22 @@ pub fn free_blocks_persist(
             bitmap_clear(&mut bitmap, i);
         }
 
-        prepared.push((segment, bitmap, original_bitmap, groups[gidx].free_blocks));
+        prepared.push((
+            segment,
+            bitmap,
+            original_bitmap,
+            groups[gidx].free_blocks,
+            groups[gidx].block_largest_free_run,
+        ));
     }
 
-    for (segment, bitmap, original_bitmap, previous_free_blocks) in prepared {
+    for (segment, bitmap, original_bitmap, previous_free_blocks, previous_largest_free_run) in
+        prepared
+    {
         let gidx = segment.group.0 as usize;
         dev.write_block(cx, groups[gidx].block_bitmap_block, &bitmap)?;
         groups[gidx].free_blocks = groups[gidx].free_blocks.saturating_add(segment.count);
+        groups[gidx].refresh_block_largest_free_run(&bitmap, geo.blocks_in_group(segment.group));
 
         // Persist group descriptor.
         if let Err(error) = persist_group_desc_with_bitmap_overrides(
@@ -1989,6 +2018,7 @@ pub fn free_blocks_persist(
             None,
         ) {
             groups[gidx].free_blocks = previous_free_blocks;
+            groups[gidx].block_largest_free_run = previous_largest_free_run;
             restore_bitmap_after_group_desc_error(
                 cx,
                 dev,
@@ -2135,7 +2165,9 @@ fn try_alloc_batch_in_group(
         detail: "group allocation count is bounded by u32 request".into(),
     })?;
     let previous_free_blocks = groups[gidx].free_blocks;
+    let previous_largest_free_run = groups[gidx].block_largest_free_run;
     groups[gidx].free_blocks = previous_free_blocks.saturating_sub(count_allocated);
+    groups[gidx].refresh_block_largest_free_run(&bitmap, blocks_in_group);
 
     // Single GDT persist for all allocations in this group.
     if let Err(error) = persist_group_desc_with_bitmap_overrides(
@@ -2148,6 +2180,7 @@ fn try_alloc_batch_in_group(
         None,
     ) {
         groups[gidx].free_blocks = previous_free_blocks;
+        groups[gidx].block_largest_free_run = previous_largest_free_run;
         restore_bitmap_after_group_desc_error(
             cx,
             dev,
@@ -2785,6 +2818,7 @@ mod tests {
                 GroupStats {
                     group: GroupNumber(g),
                     free_blocks: geo.blocks_per_group,
+                    block_largest_free_run: None,
                     free_inodes: geo.inodes_per_group,
                     used_dirs: 0,
                     block_bitmap_block: BlockNumber(group_start + 1),
@@ -2806,6 +2840,7 @@ mod tests {
                 GroupStats {
                     group: GroupNumber(g),
                     free_blocks: geo.blocks_per_group,
+                    block_largest_free_run: None,
                     free_inodes: geo.inodes_per_group,
                     used_dirs: 0,
                     block_bitmap_block: BlockNumber(group_start + 1),
@@ -3519,6 +3554,27 @@ mod tests {
         read_gdt_group_desc(cx, dev, pctx, group).free_blocks_count
     }
 
+    fn assert_block_largest_free_run_cache_matches_bitmap(
+        cx: &Cx,
+        dev: &MemBlockDevice,
+        geo: &FsGeometry,
+        groups: &[GroupStats],
+        group: GroupNumber,
+    ) {
+        let gidx = group.0 as usize;
+        let bitmap = dev
+            .read_block(cx, groups[gidx].block_bitmap_block)
+            .unwrap()
+            .as_slice()
+            .to_vec();
+        let expected = bitmap_largest_free_run(&bitmap, geo.blocks_in_group(group));
+        assert_eq!(
+            groups[gidx].cached_block_largest_free_run(),
+            Some(expected),
+            "cached largest-free-run must match the group bitmap"
+        );
+    }
+
     fn read_gdt_free_inodes(
         cx: &Cx,
         dev: &MemBlockDevice,
@@ -3704,6 +3760,13 @@ mod tests {
 
         // In-memory stats should be decremented.
         assert_eq!(groups[0].free_blocks, 8191);
+        assert_block_largest_free_run_cache_matches_bitmap(
+            &cx,
+            &dev,
+            &geo,
+            &groups,
+            GroupNumber(0),
+        );
 
         // On-disk GDT should also be updated.
         let gdt_raw = dev.read_block(&cx, pctx.gdt_block).unwrap();
@@ -3721,6 +3784,7 @@ mod tests {
         seed_gdt_block(&dev, &pctx, &groups);
 
         let initial_free = groups[0].free_blocks;
+        let initial_largest_free_run = groups[0].cached_block_largest_free_run();
         let bitmap_block = groups[0].block_bitmap_block;
         let initial_bitmap = dev
             .read_block(&cx, bitmap_block)
@@ -3743,6 +3807,10 @@ mod tests {
 
         assert!(matches!(err, FfsError::Io(_)));
         assert_eq!(groups[0].free_blocks, initial_free);
+        assert_eq!(
+            groups[0].cached_block_largest_free_run(),
+            initial_largest_free_run
+        );
         assert_eq!(
             dev.read_block(&cx, bitmap_block).unwrap().as_slice(),
             initial_bitmap.as_slice()
@@ -3773,6 +3841,7 @@ mod tests {
         )
         .unwrap();
         let initial_free = groups[0].free_blocks;
+        let initial_largest_free_run = groups[0].cached_block_largest_free_run();
         let bitmap_block = groups[0].block_bitmap_block;
         let initial_bitmap = dev
             .read_block(&cx, bitmap_block)
@@ -3787,6 +3856,10 @@ mod tests {
 
         assert!(matches!(err, FfsError::Io(_)));
         assert_eq!(groups[0].free_blocks, initial_free);
+        assert_eq!(
+            groups[0].cached_block_largest_free_run(),
+            initial_largest_free_run
+        );
         assert_eq!(
             dev.read_block(&cx, bitmap_block).unwrap().as_slice(),
             initial_bitmap.as_slice()
@@ -3991,6 +4064,13 @@ mod tests {
         )
         .unwrap();
         assert_eq!(groups[0].free_blocks, original_free - 3);
+        assert_block_largest_free_run_cache_matches_bitmap(
+            &cx,
+            &dev,
+            &geo,
+            &groups,
+            GroupNumber(0),
+        );
 
         free_blocks_persist(
             &cx,
@@ -4003,6 +4083,13 @@ mod tests {
         )
         .unwrap();
         assert_eq!(groups[0].free_blocks, original_free);
+        assert_block_largest_free_run_cache_matches_bitmap(
+            &cx,
+            &dev,
+            &geo,
+            &groups,
+            GroupNumber(0),
+        );
 
         // Verify on-disk GDT matches.
         let gdt_raw = dev.read_block(&cx, pctx.gdt_block).unwrap();
@@ -4670,6 +4757,7 @@ mod tests {
         let mut gs = GroupStats {
             group: GroupNumber(0),
             free_blocks: 100,
+            block_largest_free_run: None,
             free_inodes: 50,
             used_dirs: 0,
             block_bitmap_block: BlockNumber(1),
@@ -5613,7 +5701,7 @@ mod tests {
         );
 
         let expected = "\
-GroupStats { group: GroupNumber(1), free_blocks: 8192, free_inodes: 2048, used_dirs: 0, block_bitmap_block: BlockNumber(8193), inode_bitmap_block: BlockNumber(8194), inode_table_block: BlockNumber(8195), flags: 0, block_bitmap_csum: 0, inode_bitmap_csum: 0 }
+GroupStats { group: GroupNumber(1), free_blocks: 8192, block_largest_free_run: None, free_inodes: 2048, used_dirs: 0, block_bitmap_block: BlockNumber(8193), inode_bitmap_block: BlockNumber(8194), inode_table_block: BlockNumber(8195), flags: 0, block_bitmap_csum: 0, inode_bitmap_csum: 0 }
 AllocHint { goal_group: Some(GroupNumber(1)), goal_block: Some(BlockNumber(8323)), numa: None }
 BlockAlloc { start: BlockNumber(8323), count: 4 }
 InodeAlloc { ino: InodeNumber(17), group: GroupNumber(1) }
@@ -5967,6 +6055,7 @@ InodeAlloc { ino: InodeNumber(17), group: GroupNumber(1) }
             let gs = GroupStats {
                 group: GroupNumber(0),
                 free_blocks: 100,
+                block_largest_free_run: None,
                 free_inodes: 100,
                 used_dirs: 0,
                 block_bitmap_block: BlockNumber(1),
@@ -5992,6 +6081,7 @@ InodeAlloc { ino: InodeNumber(17), group: GroupNumber(1) }
                 .map(|g| GroupStats {
                     group: GroupNumber(g),
                     free_blocks: 0,
+                    block_largest_free_run: None,
                     free_inodes: 0,
                     used_dirs: 100,
                     block_bitmap_block: BlockNumber(u64::from(g) * 100 + 1),
@@ -6020,6 +6110,7 @@ InodeAlloc { ino: InodeNumber(17), group: GroupNumber(1) }
                 .map(|g| GroupStats {
                     group: GroupNumber(g),
                     free_blocks: 1000,
+                    block_largest_free_run: None,
                     free_inodes: 0,
                     used_dirs: 100,
                     block_bitmap_block: BlockNumber(u64::from(g) * 100 + 1),

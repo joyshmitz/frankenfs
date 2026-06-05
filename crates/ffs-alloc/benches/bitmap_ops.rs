@@ -6,8 +6,10 @@
 use criterion::{Criterion, criterion_group, criterion_main};
 use ffs_alloc::succinct::SuccinctBitmap;
 use ffs_alloc::{
-    bitmap_count_free, bitmap_find_contiguous, bitmap_find_free, bitmap_largest_free_run,
+    GroupStats, bitmap_count_free, bitmap_find_contiguous, bitmap_find_free,
+    bitmap_largest_free_run,
 };
+use ffs_types::{BlockNumber, GroupNumber};
 use std::hint::black_box;
 
 /// Build a realistic ext4-like bitmap: 4096 bytes (32768 bits),
@@ -206,6 +208,63 @@ fn bench_largest_free_run(c: &mut Criterion) {
         b.iter(|| black_box(bitmap_largest_free_run(black_box(&bm), 32768)));
     });
 
+    group.finish();
+}
+
+fn largest_free_run_bitmap_scan_groups(bitmaps: &[Vec<u8>]) -> u64 {
+    bitmaps
+        .iter()
+        .map(|bitmap| u64::from(bitmap_largest_free_run(bitmap, 32768)))
+        .max()
+        .unwrap_or(0)
+}
+
+fn largest_free_run_cached_groups(groups: &[GroupStats]) -> u64 {
+    groups
+        .iter()
+        .filter_map(GroupStats::cached_block_largest_free_run)
+        .map(u64::from)
+        .max()
+        .unwrap_or(0)
+}
+
+fn bench_largest_free_run_cache_vs_bitmap_scan(c: &mut Criterion) {
+    let bitmaps: Vec<Vec<u8>> = (0..128).map(|_| make_fragmented_bitmap()).collect();
+    let groups: Vec<GroupStats> = bitmaps
+        .iter()
+        .enumerate()
+        .map(|(idx, bitmap)| GroupStats {
+            group: GroupNumber(
+                u32::try_from(idx).expect("benchmark group count is bounded by u32"),
+            ),
+            free_blocks: bitmap_count_free(bitmap, 32768),
+            block_largest_free_run: Some(bitmap_largest_free_run(bitmap, 32768)),
+            free_inodes: 0,
+            used_dirs: 0,
+            block_bitmap_block: BlockNumber(
+                u64::try_from(idx).expect("benchmark group count is bounded by u64"),
+            ),
+            inode_bitmap_block: BlockNumber(0),
+            inode_table_block: BlockNumber(0),
+            flags: 0,
+            block_bitmap_csum: 0,
+            inode_bitmap_csum: 0,
+        })
+        .collect();
+
+    debug_assert_eq!(
+        largest_free_run_bitmap_scan_groups(&bitmaps),
+        largest_free_run_cached_groups(&groups),
+        "cached group summaries must match rescanning all group bitmaps"
+    );
+
+    let mut group = c.benchmark_group("largest_free_run_cached_ab");
+    group.bench_function("bitmap_scan_128_groups", |b| {
+        b.iter(|| black_box(largest_free_run_bitmap_scan_groups(black_box(&bitmaps))));
+    });
+    group.bench_function("cached_group_stats_128_groups", |b| {
+        b.iter(|| black_box(largest_free_run_cached_groups(black_box(&groups))));
+    });
     group.finish();
 }
 
@@ -527,6 +586,7 @@ criterion_group!(
     bench_succinct_find_free_direct_vs_rank_select,
     bench_find_contiguous,
     bench_largest_free_run,
+    bench_largest_free_run_cache_vs_bitmap_scan,
     bench_rank,
     bench_select,
     bench_select0_in_block_bit_scan_vs_broadword,
