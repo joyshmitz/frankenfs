@@ -615,7 +615,11 @@ impl DiskWritebackContext {
             fsid: self.fsid,
             chunk_tree_uuid: self.chunk_tree_uuid,
             bytenr: self.block_to_bytenr(block),
-            flags: 0,
+            // WRITTEN + MIXED backref revision, matching real btrfs. The backref
+            // revision (high byte) is what makes `btrfs check` read the inline
+            // TREE_BLOCK_REFs (bd-fdwuh); the old default of 0 made it ignore
+            // them and report "extent item 0 / no backref" for every block.
+            flags: crate::BTRFS_HEADER_FLAGS_COMMITTED,
             generation: self.generation,
             owner: self.owner,
             nodesize: self.nodesize,

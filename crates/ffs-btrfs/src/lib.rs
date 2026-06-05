@@ -2102,6 +2102,24 @@ pub enum BtrfsCowNode {
 
 /// btrfs node header size in bytes.
 pub const BTRFS_HEADER_SIZE: usize = 101;
+/// btrfs tree-block header `flags`: the block has been written (low bit). Real
+/// btrfs always sets this on committed blocks.
+pub const BTRFS_HEADER_FLAG_WRITTEN: u64 = 1 << 0;
+/// Backref revision stored in the high byte of the header `flags` field.
+///
+/// `flags >> 56` selects the revision. Modern filesystems use the MIXED
+/// revision (1): it tells readers the extent backrefs are inline. Writing the
+/// OLD revision (0) makes `btrfs check` interpret the extent items with the old
+/// separate-backref format, so it ignores FrankenFS's inline `TREE_BLOCK_REF`s
+/// and reports "extent item 0 / no backref item" for every metadata block
+/// (bd-fdwuh).
+pub const BTRFS_MIXED_BACKREF_REV: u64 = 1;
+/// Bit position of the backref revision within the header `flags` field.
+pub const BTRFS_BACKREF_REV_SHIFT: u64 = 56;
+/// The header `flags` value FrankenFS writes for every committed tree block:
+/// WRITTEN, MIXED backref revision.
+pub const BTRFS_HEADER_FLAGS_COMMITTED: u64 =
+    BTRFS_HEADER_FLAG_WRITTEN | (BTRFS_MIXED_BACKREF_REV << BTRFS_BACKREF_REV_SHIFT);
 /// btrfs leaf item descriptor size in bytes.
 pub const BTRFS_ITEM_SIZE: usize = 25;
 /// btrfs internal key-pointer size in bytes.

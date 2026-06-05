@@ -49163,18 +49163,19 @@ mod tests {
         Some((out.status.success(), combined))
     }
 
-    /// bd-x3fcu increment 2 / bd-x36qn: a file created + committed by FrankenFS
-    /// on a REAL btrfs image must remain `btrfs check`-clean. This validates the
-    /// btrfs write/commit path against real btrfs-progs (the validation that
-    /// gated the NODATASUM->datasum flip).
+    /// bd-x3fcu increment 2 / bd-x36qn / bd-fdwuh: a file created + committed by
+    /// FrankenFS on a REAL btrfs image must remain `btrfs check`-clean. This
+    /// validates the btrfs write/commit path against real btrfs-progs (the
+    /// validation that gated the NODATASUM->datasum flip).
     ///
-    /// CURRENTLY FAILS (bd-x36qn): real `btrfs check` rejects a FrankenFS write
-    /// with parent-transid-verify failures, extent-tree ref/backref mismatches,
-    /// and an fs-root level mismatch — the btrfs write path is not yet
-    /// kernel-valid. Kept as the validation harness; remove `#[ignore]` once
-    /// bd-x36qn is fixed to prove each fix against real btrfs-progs.
+    /// PASSES as of bd-fdwuh: a FrankenFS-created+committed file is accepted by
+    /// real `btrfs check` in BOTH original and lowmem mode ("no error found",
+    /// total extent tree bytes != 0). The final gap was the tree-block header
+    /// `flags` field — FrankenFS wrote 0, so `btrfs check` read the extent items
+    /// with the OLD backref revision and ignored the inline TREE_BLOCK_REFs;
+    /// writing WRITTEN | (MIXED backref rev << 56) fixed the "extent item 0 / no
+    /// backref" cascade. Skips gracefully when btrfs-progs is unavailable.
     #[test]
-    #[ignore = "bd-x36qn: btrfs write path is not btrfs-check-valid yet (harness)"]
     fn btrfs_created_file_passes_btrfs_check_bd_x3fcu() {
         let Some((fs, dev, _tmp, image)) = open_writable_btrfs_mkfs(256) else {
             return; // btrfs-progs unavailable
@@ -49219,6 +49220,19 @@ mod tests {
             panic!("btrfs-progs unavailable on this worker — rerun to land on one with it");
         };
         let cx = Cx::for_testing();
+        // Control: does the PRISTINE mkfs image (untouched by FrankenFS) pass
+        // original-mode `btrfs check` on this btrfs-progs version? If it fails
+        // the same way, the original-mode gap is a btrfs-progs issue, not ours.
+        if let Some((pristine_ok, pristine_out)) = run_btrfs_check(&image) {
+            eprintln!(
+                "===== PRISTINE BTRFS CHECK (ok={pristine_ok}) =====\n{}",
+                pristine_out
+                    .lines()
+                    .take(20)
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            );
+        }
         fs.create(
             &cx,
             InodeNumber(u64::from(BTRFS_FIRST_FREE_OBJECTID)),
