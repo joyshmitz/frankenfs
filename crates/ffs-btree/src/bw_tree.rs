@@ -64,6 +64,10 @@ pub enum PageDelta {
         messages: BTreeMap<BwKey, BufferedMutation>,
         next: Arc<Self>,
     },
+    AppendRun {
+        entries: Arc<Vec<(BwKey, BwValue)>>,
+        next: Arc<Self>,
+    },
     Base {
         entries: BTreeMap<BwKey, BwValue>,
     },
@@ -99,7 +103,8 @@ impl Drop for PageDelta {
             | Self::Delete { next, .. }
             | Self::Split { next, .. }
             | Self::Merge { next, .. }
-            | Self::MessageBuffer { next, .. } => std::mem::replace(next, Self::empty_base()),
+            | Self::MessageBuffer { next, .. }
+            | Self::AppendRun { next, .. } => std::mem::replace(next, Self::empty_base()),
             Self::Base { .. } => return,
         };
         // `self`'s default field-drops still run after this method returns,
@@ -113,7 +118,8 @@ impl Drop for PageDelta {
                         | Self::Delete { next, .. }
                         | Self::Split { next, .. }
                         | Self::Merge { next, .. }
-                        | Self::MessageBuffer { next, .. } => {
+                        | Self::MessageBuffer { next, .. }
+                        | Self::AppendRun { next, .. } => {
                             std::mem::replace(next, Self::empty_base())
                         }
                         Self::Base { .. } => return,
@@ -330,9 +336,9 @@ impl MappingTable {
                     continue;
                 }
                 Some(MessageBufferAppend::FlushRequired) => {
-                    let (state, _) = materialize_from_head(&snapshot.head)?;
-                    let new_base = Arc::new(PageDelta::Base { entries: state });
-                    if self.cas_page(page_id, snapshot.epoch, new_base, 1)? {
+                    let (new_head, new_chain_len) =
+                        append_run_or_materialized_base(&snapshot)?;
+                    if self.cas_page(page_id, snapshot.epoch, new_head, new_chain_len)? {
                         debug!(
                             target: "ffs::bwtree",
                             event = "bw_append_message_buffer_flush",
@@ -650,7 +656,8 @@ pub fn chain_length(head: &Arc<PageDelta>) -> usize {
             | PageDelta::Delete { next, .. }
             | PageDelta::Split { next, .. }
             | PageDelta::Merge { next, .. }
-            | PageDelta::MessageBuffer { next, .. } => {
+            | PageDelta::MessageBuffer { next, .. }
+            | PageDelta::AppendRun { next, .. } => {
                 cursor = Arc::clone(next);
             }
         }
@@ -712,6 +719,63 @@ fn message_buffer_append(
         }
         _ => None,
     }
+}
+
+fn append_run_or_materialized_base(snapshot: &PageSnapshot) -> Result<(Arc<PageDelta>, usize)> {
+    if let Some(new_head) = append_run_from_message_buffer(&snapshot.head) {
+        return Ok((new_head, snapshot.chain_len));
+    }
+
+    let (state, _) = materialize_from_head(&snapshot.head)?;
+    Ok((Arc::new(PageDelta::Base { entries: state }), 1))
+}
+
+fn append_run_from_message_buffer(head: &Arc<PageDelta>) -> Option<Arc<PageDelta>> {
+    let PageDelta::MessageBuffer { messages, next } = head.as_ref() else {
+        return None;
+    };
+    let max_key = append_only_max_key(next.as_ref())?;
+    let entries = buffered_insert_run_above(messages, max_key)?;
+    Some(Arc::new(PageDelta::AppendRun {
+        entries: Arc::new(entries),
+        next: Arc::clone(next),
+    }))
+}
+
+fn append_only_max_key(head: &PageDelta) -> Option<Option<BwKey>> {
+    match head {
+        PageDelta::Base { entries } => Some(entries.keys().next_back().copied()),
+        PageDelta::AppendRun { entries, next } => entries
+            .last()
+            .map(|&(key, _)| Some(key))
+            .or_else(|| append_only_max_key(next.as_ref())),
+        PageDelta::Insert { .. }
+        | PageDelta::Delete { .. }
+        | PageDelta::Split { .. }
+        | PageDelta::Merge { .. }
+        | PageDelta::MessageBuffer { .. } => None,
+    }
+}
+
+fn buffered_insert_run_above(
+    messages: &BTreeMap<BwKey, BufferedMutation>,
+    max_key: Option<BwKey>,
+) -> Option<Vec<(BwKey, BwValue)>> {
+    if messages.is_empty() {
+        return None;
+    }
+
+    let mut entries = Vec::with_capacity(messages.len());
+    for (&key, &message) in messages {
+        if max_key.is_some_and(|bound| key <= bound) {
+            return None;
+        }
+        let BufferedMutation::Insert(value) = message else {
+            return None;
+        };
+        entries.push((key, value));
+    }
+    Some(entries)
 }
 
 struct BufferedMutationEntry {
@@ -806,6 +870,10 @@ fn materialize_from_head(head: &Arc<PageDelta>) -> Result<(BTreeMap<BwKey, BwVal
                 push_buffered_ops(&mut ops, messages);
                 cursor = Arc::clone(next);
             }
+            PageDelta::AppendRun { entries, next } => {
+                push_append_run_ops(&mut ops, entries);
+                cursor = Arc::clone(next);
+            }
         }
     }
 }
@@ -859,6 +927,10 @@ fn range_scan_from_head(
             }
             PageDelta::MessageBuffer { messages, next } => {
                 push_buffered_ops(&mut ops, messages);
+                cursor = Arc::clone(next);
+            }
+            PageDelta::AppendRun { entries, next } => {
+                push_append_run_ops(&mut ops, entries);
                 cursor = Arc::clone(next);
             }
         }
@@ -1011,6 +1083,12 @@ fn lookup_from_head(head: &Arc<PageDelta>, key: BwKey) -> Result<(Option<BwValue
                 }
                 cursor = next.as_ref();
             }
+            PageDelta::AppendRun { entries, next } => {
+                match entries.binary_search_by_key(&key, |(entry_key, _)| *entry_key) {
+                    Ok(index) => return Ok((Some(entries[index].1), chain_len)),
+                    Err(_) => cursor = next.as_ref(),
+                }
+            }
         }
     }
 }
@@ -1021,6 +1099,12 @@ fn push_buffered_ops(ops: &mut Vec<MaterializeOp>, messages: &BTreeMap<BwKey, Bu
             BufferedMutation::Insert(value) => ops.push(MaterializeOp::Insert { key, value }),
             BufferedMutation::Delete => ops.push(MaterializeOp::Delete { key }),
         }
+    }
+}
+
+fn push_append_run_ops(ops: &mut Vec<MaterializeOp>, entries: &[(BwKey, BwValue)]) {
+    for &(key, value) in entries {
+        ops.push(MaterializeOp::Insert { key, value });
     }
 }
 
