@@ -45849,6 +45849,162 @@ mod tests {
     }
 
     #[test]
+    fn ext4_write_fallocate_interleave_matches_reference_model() {
+        // Metamorphic coverage for the ext4 mutation surface, driven on a real
+        // mkfs.ext4 image so it actually runs on rch (the existing single-op
+        // collapse/insert tests use open_writable_ext4(), which skips there).
+        // Interleaves writes, truncates, KEEP_SIZE punch-hole, zero-range, and
+        // the data-SHIFTING modes collapse_range / insert_range against a
+        // byte-exact in-memory model. The shifting modes splice the extent tree;
+        // an off-by-one in the logical-block shift would diverge from the model.
+        #[derive(Clone, Copy)]
+        enum Op {
+            Write(usize, usize, u8),
+            Trunc(usize),
+            Punch(usize, usize),
+            Zero(usize, usize),
+            Collapse(usize, usize),
+            Insert(usize, usize),
+        }
+        use Op::{Collapse, Insert, Punch, Trunc, Write, Zero};
+
+        let Some((fs, _tmp)) = open_writable_ext4_mkfs(64) else {
+            eprintln!("mkfs.ext4 unavailable, skipping");
+            return;
+        };
+        let cx = Cx::for_testing();
+        let attr = fs
+            .create(
+                &cx,
+                InodeNumber(2),
+                OsStr::new("ext4-meta.bin"),
+                0o644,
+                0,
+                0,
+            )
+            .expect("create");
+
+        // Block size is 4096; collapse/insert offsets and lengths are 4 KiB
+        // aligned and strictly inside the file, as the kernel requires. Sizes in
+        // the trailing comments track the model after each op.
+        let program = [
+            Write(0, 40960, 0x11),    // ten-block extent [0,40K)
+            Collapse(8192, 8192),     // drop blocks 2-3, tail shifts down -> 32768
+            Insert(4096, 8192),       // insert two zero blocks, tail shifts up -> 40960
+            Write(0, 50000, 0x22),    // overwrite + extend (unaligned len)
+            Punch(8192, 4096),        // KEEP_SIZE hole
+            Zero(20480, 8192),        // zero a fragmented region
+            Collapse(16384, 4096),    // drop one interior block -> 45904
+            Insert(0, 4096),          // insert a leading block -> 50000
+            Trunc(30000),             // shrink
+            Trunc(45056),             // extend to an aligned size (implicit hole)
+            Collapse(4096, 8192),     // drop [4096,12288) -> 36864
+            Write(36000, 4000, 0x33), // overwrite crossing EOF -> 40000
+        ];
+
+        let mut model: Vec<u8> = Vec::new();
+        for (step, op) in program.iter().enumerate() {
+            match *op {
+                Write(off, len, val) => {
+                    let buf = vec![val; len];
+                    fs.write(&cx, attr.ino, off as u64, &buf).expect("write");
+                    if off + len > model.len() {
+                        model.resize(off + len, 0);
+                    }
+                    model[off..off + len].copy_from_slice(&buf);
+                }
+                Trunc(size) => {
+                    fs.setattr(
+                        &cx,
+                        attr.ino,
+                        &SetAttrRequest {
+                            size: Some(size as u64),
+                            ..Default::default()
+                        },
+                    )
+                    .expect("truncate");
+                    model.resize(size, 0);
+                }
+                Punch(off, len) => {
+                    fs.fallocate(
+                        &cx,
+                        attr.ino,
+                        off as u64,
+                        len as u64,
+                        libc::FALLOC_FL_KEEP_SIZE | libc::FALLOC_FL_PUNCH_HOLE,
+                    )
+                    .expect("punch hole");
+                    model[off..off + len].fill(0);
+                }
+                Zero(off, len) => {
+                    fs.fallocate(
+                        &cx,
+                        attr.ino,
+                        off as u64,
+                        len as u64,
+                        libc::FALLOC_FL_ZERO_RANGE,
+                    )
+                    .expect("zero range");
+                    model[off..off + len].fill(0);
+                }
+                Collapse(off, len) => {
+                    fs.fallocate(
+                        &cx,
+                        attr.ino,
+                        off as u64,
+                        len as u64,
+                        libc::FALLOC_FL_COLLAPSE_RANGE,
+                    )
+                    .expect("collapse range");
+                    model.drain(off..off + len);
+                }
+                Insert(off, len) => {
+                    fs.fallocate(
+                        &cx,
+                        attr.ino,
+                        off as u64,
+                        len as u64,
+                        libc::FALLOC_FL_INSERT_RANGE,
+                    )
+                    .expect("insert range");
+                    model.splice(off..off, std::iter::repeat_n(0_u8, len));
+                }
+            }
+
+            let attr_now = fs.getattr(&cx, attr.ino).expect("getattr");
+            assert_eq!(
+                attr_now.size,
+                model.len() as u64,
+                "inode size mismatch after step {step}"
+            );
+            if model.is_empty() {
+                continue;
+            }
+            let got = fs
+                .read(
+                    &cx,
+                    attr.ino,
+                    0,
+                    u32::try_from(model.len()).expect("model size fits u32"),
+                )
+                .expect("read");
+            let ndiff = (0..model.len().min(got.len()))
+                .filter(|&i| got[i] != model[i])
+                .count();
+            assert!(
+                got.len() == model.len() && ndiff == 0,
+                "content diverged from model after step {step}: got {} bytes, model {} bytes, \
+                 {ndiff} differ (first at {})",
+                got.len(),
+                model.len(),
+                (0..model.len().min(got.len()))
+                    .find(|&i| got[i] != model[i])
+                    .unwrap_or(0),
+            );
+        }
+    }
+
+    #[test]
     fn write_fallocate_collapse_range_unaligned_returns_einval() {
         let Some(fs) = open_writable_ext4() else {
             return;
