@@ -15668,6 +15668,20 @@ impl OpenFs {
                 .free_extent(allocation.bytenr, alloc_size, false);
             return Err(btrfs_mutation_to_ffs(&e));
         }
+        // Register the data extent's EXTENT_ITEM + EXTENT_DATA_REF backref (bd-x3fcu).
+        if let Err(e) = Self::btrfs_register_data_extent_backref(
+            alloc,
+            allocation.bytenr,
+            alloc_size,
+            canonical,
+            logical_offset,
+        ) {
+            let _ = alloc.fs_tree.delete(&extent_key);
+            let _ = alloc
+                .extent_alloc
+                .free_extent(allocation.bytenr, alloc_size, false);
+            return Err(e);
+        }
         Ok(())
     }
 
@@ -15712,7 +15726,51 @@ impl OpenFs {
                 .free_extent(allocation.bytenr, alloc_size, false);
             return Err(btrfs_mutation_to_ffs(&e));
         }
+        // A prealloc extent is still a data extent: register its EXTENT_ITEM +
+        // EXTENT_DATA_REF backref (bd-x3fcu).
+        if let Err(e) = Self::btrfs_register_data_extent_backref(
+            alloc,
+            allocation.bytenr,
+            alloc_size,
+            canonical,
+            logical_offset,
+        ) {
+            let _ = alloc.fs_tree.delete(&extent_key);
+            let _ = alloc
+                .extent_alloc
+                .free_extent(allocation.bytenr, alloc_size, false);
+            return Err(e);
+        }
         Ok(())
+    }
+
+    /// Register the extent-tree `EXTENT_ITEM` + inline `EXTENT_DATA_REF` backref
+    /// for a just-allocated file DATA extent (bd-x3fcu). Every data extent a file
+    /// references via `EXTENT_DATA` must have a matching extent-tree item, or
+    /// `btrfs check` reports a "referencer count mismatch / backpointer mismatch"
+    /// for it. `free_extent` removes the item again, so writes and frees stay
+    /// symmetric. `file_offset` is the extent's start offset within the file (the
+    /// `EXTENT_DATA` key offset for a fresh, unsplit extent). The owning root is
+    /// the default subvolume (`BTRFS_FS_TREE_OBJECTID`), matching the fs_tree
+    /// owner FrankenFS commits.
+    fn btrfs_register_data_extent_backref(
+        alloc: &mut BtrfsAllocState,
+        disk_bytenr: u64,
+        disk_num_bytes: u64,
+        canonical: u64,
+        file_offset: u64,
+    ) -> ffs_error::Result<()> {
+        alloc
+            .extent_alloc
+            .insert_data_extent_item(
+                disk_bytenr,
+                disk_num_bytes,
+                BTRFS_FS_TREE_OBJECTID,
+                canonical,
+                file_offset,
+                alloc.generation,
+            )
+            .map_err(|e| btrfs_mutation_to_ffs(&e))
     }
 
     fn btrfs_align_up(value: u64, alignment: u64) -> ffs_error::Result<u64> {
@@ -17530,6 +17588,19 @@ impl OpenFs {
                 return Err(btrfs_mutation_to_ffs(&e));
             }
 
+            // Register the extent-tree EXTENT_ITEM + EXTENT_DATA_REF backref for
+            // this data extent (bd-x3fcu) so the on-disk image is btrfs-check
+            // clean. On failure unwind the fs_tree item and the allocation.
+            if let Err(e) =
+                Self::btrfs_register_data_extent_backref(&mut alloc, disk_bytenr, alloc_size, canonical, offset)
+            {
+                let _ = alloc.fs_tree.delete(&extent_key);
+                let _ = alloc
+                    .extent_alloc
+                    .free_extent(disk_bytenr, alloc_size, false);
+                return Err(e);
+            }
+
             // Capture data checksums for datasum inodes (bd-x3fcu slice B):
             // read back the on-disk extent (so the checksum covers the exact
             // bytes a later read returns, padding included) and record one
@@ -18560,6 +18631,23 @@ impl OpenFs {
                                 false,
                             );
                             return Err(btrfs_mutation_to_ffs(&e));
+                        }
+                        // Register the converted extent's backref (bd-x3fcu);
+                        // the inline extent always starts at file offset 0.
+                        if let Err(e) = Self::btrfs_register_data_extent_backref(
+                            &mut alloc,
+                            prev_allocation.bytenr,
+                            prev_alloc_size,
+                            canonical,
+                            0,
+                        ) {
+                            let _ = alloc.fs_tree.delete(&inline_key);
+                            let _ = alloc.extent_alloc.free_extent(
+                                prev_allocation.bytenr,
+                                prev_alloc_size,
+                                false,
+                            );
+                            return Err(e);
                         }
                     }
                 }
@@ -49207,6 +49295,70 @@ mod tests {
         assert!(
             ok,
             "btrfs check must accept a FrankenFS-created+committed file:\n{output}"
+        );
+    }
+
+    /// bd-x3fcu / bd-4cxkd: a file whose DATA is written + committed by FrankenFS
+    /// on a REAL btrfs image must be `btrfs check`-clean. The data extent now
+    /// carries its `EXTENT_ITEM` + inline `EXTENT_DATA_REF` backref (bd-4cxkd,
+    /// this commit), clearing the "referencer count / backpointer mismatch".
+    ///
+    /// STILL #[ignore]'d on one remaining class: commit-time space ACCOUNTING.
+    /// `btrfs check` now reports only:
+    ///   block group [X 8388608] used 0 but extent items used 16384
+    ///   super bytes used 147456 mismatches actual used 163840
+    /// The DATA block group's on-disk `BLOCK_GROUP_ITEM.used_bytes` and the
+    /// superblock `bytes_used` (0x18) are not bumped for a new data extent.
+    /// Metadata-only commits pass because they COW-reuse addresses (net used
+    /// unchanged); a fresh data extent is the first net allocation. Fixing it
+    /// needs the in-memory block-group `used_bytes` (currently a synthetic
+    /// reservation, not the real on-disk value) reconciled, then synced into the
+    /// extent tree's `BLOCK_GROUP_ITEM` + the superblock at commit. Tracked on
+    /// bd-4cxkd. Remove `#[ignore]` once that accounting lands.
+    #[test]
+    #[ignore = "bd-4cxkd: data backref fixed; block-group used + super bytes_used accounting pending"]
+    fn btrfs_written_file_data_passes_btrfs_check_bd_x3fcu() {
+        let Some((fs, dev, _tmp, image)) = open_writable_btrfs_mkfs(256) else {
+            return; // btrfs-progs unavailable
+        };
+        let cx = Cx::for_testing();
+
+        let attr = fs
+            .create(
+                &cx,
+                InodeNumber(u64::from(BTRFS_FIRST_FREE_OBJECTID)),
+                OsStr::new("datasum.dat"),
+                0o644,
+                0,
+                0,
+            )
+            .expect("btrfs create on a real image");
+
+        // Write several full sectors to force a regular (non-inline) data
+        // extent — the csum tree covers regular extents, not inline data.
+        let payload = vec![0xA7_u8; 16384];
+        let fs_ops: &dyn FsOps = &fs;
+        fs_ops
+            .write(&cx, &mut RequestScope::empty(), attr.ino, 0, &payload)
+            .expect("btrfs data write on a real image");
+
+        // fsync order: flush data to the byte device, then commit metadata.
+        let _ = fs.flush_mvcc_to_device(&cx);
+        fs.btrfs_full_transaction_commit(&cx, "x3fcu-datasum-write-check")
+            .expect("btrfs full transaction commit");
+        let bytes = dev.snapshot_bytes();
+        std::fs::write(&image, &bytes).expect("write modified image");
+
+        let Some((ok, output)) = run_btrfs_check(&image) else {
+            return; // btrfs check tool unavailable
+        };
+        assert!(
+            !output.contains("no csum item"),
+            "btrfs check reported a missing csum item for FrankenFS-written data:\n{output}"
+        );
+        assert!(
+            ok,
+            "btrfs check must accept a FrankenFS-written file's data + csums:\n{output}"
         );
     }
 

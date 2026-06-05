@@ -3415,6 +3415,8 @@ pub struct BtrfsExtentItem {
 }
 
 impl BtrfsExtentItem {
+    /// Extent flag: this extent holds file data (`BTRFS_EXTENT_FLAG_DATA`).
+    pub const FLAG_DATA: u64 = 1;
     /// Extent flag: this is a tree block (metadata).
     pub const FLAG_TREE_BLOCK: u64 = 2;
 
@@ -4197,6 +4199,63 @@ impl BtrfsExtentAllocator {
             offset: u64::from(level),
         };
         self.extent_tree.insert(key, &value)?;
+        Ok(())
+    }
+
+    /// Attach the inline `EXTENT_DATA_REF` backref (and `FLAG_DATA`) to the
+    /// extent-tree `EXTENT_ITEM` for a regular/prealloc DATA extent.
+    ///
+    /// `alloc_extent` already inserts a *bare* data extent item — key
+    /// `(disk_bytenr, EXTENT_ITEM(168), disk_num_bytes)`, value = the 24-byte
+    /// `BtrfsExtentItem` with `flags = 0` and no backref. `btrfs check` rejects
+    /// that ("referencer count mismatch" / "backpointer mismatch") because the
+    /// file's `EXTENT_DATA` references the extent but the extent item records no
+    /// back-reference. This rewrites the item to the kernel-valid form: refs=1,
+    /// `FLAG_DATA`, followed by an inline `EXTENT_DATA_REF` (type byte 178 + the
+    /// 28-byte `(root, objectid, offset, count)` struct) — the data analog of the
+    /// inline `TREE_BLOCK_REF` `insert_self_metadata_item` writes for metadata.
+    ///
+    /// `offset` is the file logical offset of the extent's start (the
+    /// `EXTENT_DATA` key offset minus its `extent_offset`); for a fresh full
+    /// extent that is just the write offset. `free_extent` removes the item again
+    /// via `locate_extent_key`, so write and free stay symmetric.
+    ///
+    /// # Errors
+    /// Returns any error from updating the in-memory extent tree.
+    pub fn insert_data_extent_item(
+        &mut self,
+        bytenr: u64,
+        num_bytes: u64,
+        root: u64,
+        objectid: u64,
+        offset: u64,
+        generation: u64,
+    ) -> Result<(), BtrfsMutationError> {
+        let extent_item = BtrfsExtentItem {
+            refs: 1,
+            generation,
+            flags: BtrfsExtentItem::FLAG_DATA,
+        };
+        let mut value = extent_item.to_bytes();
+        value.push(BTRFS_ITEM_EXTENT_DATA_REF);
+        let data_ref = BtrfsExtentDataRef {
+            root,
+            objectid,
+            offset,
+            count: 1,
+        };
+        value.extend_from_slice(&data_ref.to_bytes());
+        let key = BtrfsKey {
+            objectid: bytenr,
+            item_type: BTRFS_ITEM_EXTENT_ITEM,
+            offset: num_bytes,
+        };
+        // alloc_extent already inserted the bare item; rewrite it in place. Fall
+        // back to insert for any caller that allocated with skip_extent_item.
+        self.extent_tree.update(&key, &value).or_else(|err| match err {
+            BtrfsMutationError::KeyNotFound => self.extent_tree.insert(key, &value),
+            other => Err(other),
+        })?;
         Ok(())
     }
 
