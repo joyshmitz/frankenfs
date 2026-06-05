@@ -49140,6 +49140,17 @@ mod tests {
                 .expect("btrfs dump-tree");
             String::from_utf8_lossy(&out.stdout).into_owned()
         };
+        // Superblock: compat_ro flags (FREE_SPACE_TREE / _VALID bits).
+        let super_out = std::process::Command::new("btrfs")
+            .args(["inspect-internal", "dump-super", image.to_str().unwrap()])
+            .output()
+            .expect("dump-super");
+        eprintln!(
+            "===== DUMP-SUPER =====\n{}",
+            String::from_utf8_lossy(&super_out.stdout)
+        );
+        // Free space tree (-t 10).
+        eprintln!("===== FREE SPACE TREE =====\n{}", dump(&["-t", "10"]));
         // Extent tree (-t 2) shows every EXTENT_ITEM/METADATA_ITEM + its refs.
         eprintln!("===== EXTENT TREE =====\n{}", dump(&["-t", "2"]));
         // Root tree (-t 1) shows ROOT_ITEMs and the bytenr of each tree root.
