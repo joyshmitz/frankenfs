@@ -4302,21 +4302,26 @@ impl BtrfsExtentAllocator {
                     num_bytes
                 },
             };
-            self.extent_tree.insert(key, &extent_item.to_bytes())?;
+            // For a skinny tree block, btrfs carries the backref INLINE in the
+            // METADATA_ITEM value: the 24-byte extent_item is followed by a
+            // btrfs_extent_inline_ref { u8 type = TREE_BLOCK_REF_KEY (176),
+            // __le64 offset = owning root objectid }. Writing a *separate*
+            // TREE_BLOCK_REF item instead left btrfs check counting zero inline
+            // refs ("extent item 0, found 1" + "has no backref item") — bd-x36qn.
+            let mut value = extent_item.to_bytes();
+            if is_metadata {
+                value.push(BTRFS_ITEM_TREE_BLOCK_REF);
+                value.extend_from_slice(&ref_root.to_le_bytes());
+            }
+            self.extent_tree.insert(key, &value)?;
 
             if is_metadata {
-                let ref_key = BtrfsKey {
-                    objectid: bytenr,
-                    item_type: BTRFS_ITEM_TREE_BLOCK_REF,
-                    offset: ref_root,
-                };
-                self.extent_tree.insert(ref_key, &[])?;
                 trace!(
                     target: "ffs::btrfs::alloc",
                     bytenr,
                     root = ref_root,
                     level = ref_level,
-                    "tree_block_ref_insert"
+                    "tree_block_inline_ref_insert"
                 );
             }
 
@@ -11688,27 +11693,35 @@ mod tests {
             item_type: BTRFS_ITEM_METADATA_ITEM,
             offset: 1,
         };
+        let item = alloc
+            .extent_tree
+            .range(&metadata_key, &metadata_key)
+            .expect("metadata item lookup");
+        assert_eq!(item.len(), 1);
+
+        // The TREE_BLOCK_REF backref is carried INLINE in the METADATA_ITEM
+        // value: 24-byte extent_item then { u8 type=176, le64 root }.
+        let value = &item[0].1;
+        assert_eq!(value.len(), 24 + 1 + 8, "skinny extent_item + inline ref");
+        assert_eq!(value[24], BTRFS_ITEM_TREE_BLOCK_REF, "inline ref type");
+        assert_eq!(
+            u64::from_le_bytes(value[25..33].try_into().expect("inline ref root")),
+            BTRFS_FS_TREE_OBJECTID,
+            "inline ref owning root"
+        );
+        // No separate TREE_BLOCK_REF item is emitted anymore.
         let ref_key = BtrfsKey {
             objectid: meta.bytenr,
             item_type: BTRFS_ITEM_TREE_BLOCK_REF,
             offset: BTRFS_FS_TREE_OBJECTID,
         };
-
-        assert_eq!(
-            alloc
-                .extent_tree
-                .range(&metadata_key, &metadata_key)
-                .expect("metadata item lookup")
-                .len(),
-            1
-        );
-        assert_eq!(
+        assert!(
             alloc
                 .extent_tree
                 .range(&ref_key, &ref_key)
                 .expect("tree block ref lookup")
-                .len(),
-            1
+                .is_empty(),
+            "backref must be inline, not a separate item"
         );
         assert_eq!(
             alloc.pending_for(&ExtentKey {
