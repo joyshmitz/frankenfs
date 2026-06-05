@@ -17,7 +17,7 @@ use crate::{
 use ffs_types::{BlockNumber, CommitSeq, Snapshot, TxnId};
 use parking_lot::{Condvar, Mutex, RwLock, RwLockWriteGuard};
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::{debug, info, trace};
 
 /// Number of MVCC version-store shards to provision per available CPU.
@@ -29,18 +29,22 @@ pub const MAX_MVCC_SHARDS: usize = 1024;
 
 struct CommitPublicationGate {
     completed_commit: AtomicU64,
-    wait_lock: Mutex<()>,
+    wait_lock: Mutex<PublicationState>,
     ready: Condvar,
-    waiters: AtomicUsize,
+}
+
+#[derive(Debug, Default)]
+struct PublicationState {
+    ready_commits: BTreeSet<u64>,
+    waiters: usize,
 }
 
 impl CommitPublicationGate {
     fn new() -> Self {
         Self {
             completed_commit: AtomicU64::new(0),
-            wait_lock: Mutex::new(()),
+            wait_lock: Mutex::new(PublicationState::default()),
             ready: Condvar::new(),
-            waiters: AtomicUsize::new(0),
         }
     }
 
@@ -48,32 +52,52 @@ impl CommitPublicationGate {
         self.completed_commit.load(Ordering::Acquire)
     }
 
-    fn publish(&self, commit_seq: CommitSeq) {
-        let predecessor = commit_seq.0.saturating_sub(1);
-        let mut guard = self.wait_lock.lock();
-        while self.completed() < predecessor {
-            self.waiters.fetch_add(1, Ordering::AcqRel);
-            self.ready.wait(&mut guard);
-            self.waiters.fetch_sub(1, Ordering::AcqRel);
+    fn advance_ready_prefix(&self, state: &mut PublicationState) -> bool {
+        let mut advanced = false;
+        loop {
+            let next = self.completed().saturating_add(1);
+            if !state.ready_commits.remove(&next) {
+                return advanced;
+            }
+            self.completed_commit.store(next, Ordering::Release);
+            advanced = true;
         }
+    }
 
+    fn publish(&self, commit_seq: CommitSeq) {
         if self.completed() >= commit_seq.0 {
             return;
         }
 
-        self.completed_commit.store(commit_seq.0, Ordering::Release);
-        if self.waiters.load(Ordering::Acquire) > 0 {
-            self.ready.notify_all();
+        let mut state = self.wait_lock.lock();
+        if self.completed() >= commit_seq.0 {
+            return;
         }
-        drop(guard);
+
+        state.ready_commits.insert(commit_seq.0);
+        loop {
+            let advanced = self.advance_ready_prefix(&mut state);
+            if advanced && state.waiters > 0 {
+                self.ready.notify_all();
+            }
+            if self.completed() >= commit_seq.0 {
+                return;
+            }
+
+            state.waiters = state.waiters.saturating_add(1);
+            self.ready.wait(&mut state);
+            state.waiters = state.waiters.saturating_sub(1);
+        }
     }
 }
 
 impl std::fmt::Debug for CommitPublicationGate {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let state = self.wait_lock.lock();
         f.debug_struct("CommitPublicationGate")
             .field("completed_commit", &self.completed())
-            .field("waiters", &self.waiters.load(Ordering::Acquire))
+            .field("waiters", &state.waiters)
+            .field("ready_commits", &state.ready_commits.len())
             .finish_non_exhaustive()
     }
 }
@@ -1012,6 +1036,60 @@ mod tests {
             .expect("commit 2 published after predecessor");
         worker.join().expect("worker joined");
         assert_eq!(gate.completed(), 2);
+    }
+
+    #[test]
+    fn commit_publication_gate_advances_ready_prefix_golden_report() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let gate = Arc::new(CommitPublicationGate::new());
+        let (done_tx, done_rx) = mpsc::channel();
+        let mut workers = Vec::new();
+        for seq in [CommitSeq(3), CommitSeq(2)] {
+            let worker_gate = Arc::clone(&gate);
+            let done_tx = done_tx.clone();
+            workers.push(std::thread::spawn(move || {
+                worker_gate.publish(seq);
+                done_tx.send(seq).expect("send completed seq");
+            }));
+        }
+        drop(done_tx);
+
+        let mut ready_count = 0_usize;
+        for _ in 0..100 {
+            ready_count = gate.wait_lock.lock().ready_commits.len();
+            if ready_count == 2 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(ready_count, 2, "commits 2 and 3 should be ready");
+        assert_eq!(gate.completed(), 0);
+        assert!(
+            done_rx.recv_timeout(Duration::from_millis(20)).is_err(),
+            "out-of-order commits must not publish before commit 1"
+        );
+
+        gate.publish(CommitSeq(1));
+        let mut completed = [
+            done_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("first waiting commit published"),
+            done_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("second waiting commit published"),
+        ];
+        completed.sort_by_key(|seq| seq.0);
+        assert_eq!(completed, [CommitSeq(2), CommitSeq(3)]);
+        for worker in workers {
+            worker.join().expect("worker joined");
+        }
+        assert_eq!(gate.completed(), 3);
+        println!(
+            "SHARDED_PUBLISH_GOLDEN|ready_prefix=2,3|release=1|completed={}",
+            gate.completed()
+        );
     }
 
     #[test]
