@@ -15613,6 +15613,46 @@ impl OpenFs {
         }
     }
 
+    /// Record one EXTENT_CSUM per sector for a just-written datasum data extent
+    /// (bd-x3fcu / bd-pb0ey). Reads the on-disk extent back so the checksum
+    /// covers the exact bytes a later read returns (sector padding included),
+    /// builds the leaf-sized EXTENT_CSUM items, and upserts them into the
+    /// in-memory csum tree. Callers gate this on the inode being datasum.
+    ///
+    /// Shared by the main write path and the overwrite-split segment re-insert
+    /// path; without it on the latter, `btrfs check` reports "some csum missing"
+    /// (I_ERR_SOME_CSUM_MISSING) for the re-inserted head/tail of an overwritten
+    /// file now that new files are datasum by default.
+    fn btrfs_capture_data_extent_csums(
+        &self,
+        cx: &Cx,
+        alloc: &mut BtrfsAllocState,
+        disk_bytenr: u64,
+        alloc_size: u64,
+    ) -> ffs_error::Result<()> {
+        let alloc_size_usize = usize::try_from(alloc_size)
+            .map_err(|_| FfsError::Format("btrfs alloc size overflow".into()))?;
+        let sectorsize_usize = usize::try_from(u64::from(alloc.sectorsize))
+            .map_err(|_| FfsError::Format("btrfs sectorsize overflow".into()))?;
+        let mut on_disk = vec![0_u8; alloc_size_usize];
+        self.btrfs_read_logical_into(cx, disk_bytenr, &mut on_disk)?;
+        let max_per_item = ffs_btrfs::max_data_csums_per_item(alloc.nodesize);
+        let csum_items =
+            ffs_btrfs::build_extent_csum_items(disk_bytenr, &on_disk, sectorsize_usize, max_per_item)
+                .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+        for (key, value) in csum_items {
+            alloc
+                .csum_tree
+                .update(&key, &value)
+                .or_else(|err| match err {
+                    BtrfsMutationError::KeyNotFound => alloc.csum_tree.insert(key, &value),
+                    other => Err(other),
+                })
+                .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+        }
+        Ok(())
+    }
+
     fn btrfs_insert_regular_extent_segment(
         &self,
         cx: &Cx,
@@ -15681,6 +15721,25 @@ impl OpenFs {
                 .extent_alloc
                 .free_extent(allocation.bytenr, alloc_size, false);
             return Err(e);
+        }
+        // bd-pb0ey: capture data checksums for this re-inserted segment too, or a
+        // datasum file (the default) ends up with the overwrite head/tail extents
+        // missing csums -> btrfs check "some csum missing". Mirrors the main write
+        // path. Gated on the inode being datasum.
+        let is_datasum = self
+            .btrfs_read_inode_from_tree(alloc, canonical)
+            .map(|inode| inode.flags & BTRFS_INODE_NODATASUM == 0)
+            .unwrap_or(false);
+        if is_datasum {
+            if let Err(e) =
+                self.btrfs_capture_data_extent_csums(cx, alloc, allocation.bytenr, alloc_size)
+            {
+                let _ = alloc.fs_tree.delete(&extent_key);
+                let _ = alloc
+                    .extent_alloc
+                    .free_extent(allocation.bytenr, alloc_size, false);
+                return Err(e);
+            }
         }
         Ok(())
     }
@@ -17630,36 +17689,11 @@ impl OpenFs {
                 return Err(e);
             }
 
-            // Capture data checksums for datasum inodes (bd-x3fcu slice B):
-            // read back the on-disk extent (so the checksum covers the exact
-            // bytes a later read returns, padding included) and record one
-            // EXTENT_CSUM per sector in the in-memory csum tree. NODATASUM
-            // inodes carry no data checksums and are skipped.
+            // Capture data checksums for datasum inodes (bd-x3fcu): record one
+            // EXTENT_CSUM per sector in the in-memory csum tree. NODATASUM inodes
+            // carry no data checksums and are skipped.
             if inode.flags & BTRFS_INODE_NODATASUM == 0 {
-                let sectorsize_usize = usize::try_from(sectorsize)
-                    .map_err(|_| FfsError::Format("btrfs sectorsize overflow".into()))?;
-                let alloc_size_usize = usize::try_from(alloc_size)
-                    .map_err(|_| FfsError::Format("btrfs alloc size overflow".into()))?;
-                let mut on_disk = vec![0_u8; alloc_size_usize];
-                self.btrfs_read_logical_into(cx, disk_bytenr, &mut on_disk)?;
-                let max_per_item = ffs_btrfs::max_data_csums_per_item(alloc.nodesize);
-                let csum_items = ffs_btrfs::build_extent_csum_items(
-                    disk_bytenr,
-                    &on_disk,
-                    sectorsize_usize,
-                    max_per_item,
-                )
-                .map_err(|e| btrfs_mutation_to_ffs(&e))?;
-                for (key, value) in csum_items {
-                    alloc
-                        .csum_tree
-                        .update(&key, &value)
-                        .or_else(|err| match err {
-                            BtrfsMutationError::KeyNotFound => alloc.csum_tree.insert(key, &value),
-                            other => Err(other),
-                        })
-                        .map_err(|e| btrfs_mutation_to_ffs(&e))?;
-                }
+                self.btrfs_capture_data_extent_csums(cx, &mut alloc, disk_bytenr, alloc_size)?;
             }
         }
 
@@ -49378,6 +49412,139 @@ mod tests {
             ok,
             "btrfs check must accept a FrankenFS-written file's data + csums:\n{output}"
         );
+    }
+
+    /// bd-pb0ey: a PARTIAL OVERWRITE of a regular file must stay btrfs-check
+    /// clean. The overwrite-split re-inserts the untouched head/tail as new
+    /// extents via btrfs_insert_regular_extent_segment; that path must capture
+    /// data csums too, or a datasum file (the default) ends up with the head/tail
+    /// missing csums -> "root X inode Y errors 1000, some csum missing". Skips
+    /// when btrfs-progs is unavailable.
+    #[test]
+    fn btrfs_overwrite_passes_btrfs_check_bd_pb0ey() {
+        let Some((fs, dev, _tmp, image)) = open_writable_btrfs_mkfs(256) else {
+            return; // btrfs-progs unavailable
+        };
+        let cx = Cx::for_testing();
+        let attr = fs
+            .create(
+                &cx,
+                InodeNumber(u64::from(BTRFS_FIRST_FREE_OBJECTID)),
+                OsStr::new("ow.dat"),
+                0o644,
+                0,
+                0,
+            )
+            .expect("create");
+        let ops: &dyn FsOps = &fs;
+        // Write 64 KiB, then overwrite the middle 16 KiB (splits the extent into
+        // re-inserted head [0,16K) + new [16K,32K) + re-inserted tail [32K,64K)).
+        ops.write(&cx, &mut RequestScope::empty(), attr.ino, 0, &vec![0x11_u8; 65536])
+            .expect("initial write");
+        ops.write(&cx, &mut RequestScope::empty(), attr.ino, 16384, &vec![0x22_u8; 16384])
+            .expect("overwrite");
+        let _ = fs.flush_mvcc_to_device(&cx);
+        fs.btrfs_full_transaction_commit(&cx, "pb0ey-overwrite-check")
+            .expect("commit");
+        std::fs::write(&image, &dev.snapshot_bytes()).expect("write image");
+
+        let Some((ok, output)) = run_btrfs_check(&image) else {
+            return; // check tool unavailable
+        };
+        assert!(
+            !output.contains("some csum missing"),
+            "btrfs check reported missing csums after a partial overwrite:\n{output}"
+        );
+        assert!(
+            ok,
+            "btrfs check must accept a FrankenFS partial overwrite:\n{output}"
+        );
+    }
+
+    /// Phase-B probe (TealFalcon): now that a single small datasum file is
+    /// btrfs-check-clean, map which MORE COMPLEX btrfs mutation sequences still
+    /// produce a kernel-valid image. Prints the `btrfs check` verdict for each
+    /// scenario so real corruption gaps (e.g. the single-leaf-only accounting +
+    /// self-metadata-item path falling back on a split extent tree) surface with
+    /// their exact errors. Run with `--ignored --nocapture`.
+    #[test]
+    #[ignore = "diagnostic: maps btrfs-check validity across complex mutation sequences"]
+    fn btrfs_complex_mutation_btrfs_check_probe() {
+        // Each scenario gets a fresh mkfs image; returns the check verdict.
+        let scenario = |label: &str, mutate: &dyn Fn(&OpenFs, &Cx)| {
+            let Some((fs, dev, _tmp, image)) = open_writable_btrfs_mkfs(256) else {
+                eprintln!("[{label}] SKIP — btrfs-progs unavailable");
+                return;
+            };
+            let cx = Cx::for_testing();
+            mutate(&fs, &cx);
+            let _ = fs.flush_mvcc_to_device(&cx);
+            fs.btrfs_full_transaction_commit(&cx, label)
+                .expect("commit");
+            let bytes = dev.snapshot_bytes();
+            std::fs::write(&image, &bytes).expect("write image");
+            match run_btrfs_check(&image) {
+                Some((true, _)) => eprintln!("[{label}] CLEAN"),
+                Some((false, out)) => {
+                    let errs: Vec<&str> = out
+                        .lines()
+                        .filter(|l| {
+                            !l.trim().is_empty()
+                                && !l.starts_with("Opening")
+                                && !l.starts_with("Checking")
+                                && !l.starts_with("UUID")
+                        })
+                        .take(30)
+                        .collect();
+                    eprintln!("[{label}] ERRORS:\n  {}", errs.join("\n  "));
+                }
+                None => eprintln!("[{label}] SKIP — check tool unavailable"),
+            }
+        };
+        let root = InodeNumber(u64::from(BTRFS_FIRST_FREE_OBJECTID));
+        let write = |fs: &OpenFs, cx: &Cx, ino: InodeNumber, off: u64, data: &[u8]| {
+            let ops: &dyn FsOps = fs;
+            ops.write(cx, &mut RequestScope::empty(), ino, off, data)
+                .expect("write");
+        };
+
+        // A: many small files — stresses the extent-tree-split / fall-back path
+        // that bd-4cxkd's single-leaf accounting + self-item sync does NOT cover.
+        scenario("A_many_files", &|fs, cx| {
+            for i in 0..24 {
+                let name = format!("f{i}.dat");
+                let attr = fs
+                    .create(cx, root, OsStr::new(&name), 0o644, 0, 0)
+                    .expect("create");
+                write(fs, cx, attr.ino, 0, &vec![0xA7_u8; 16384]);
+            }
+        });
+
+        // B: one large file (2 MiB → many sectors, large csum span).
+        scenario("B_large_file", &|fs, cx| {
+            let attr = fs
+                .create(cx, root, OsStr::new("big.dat"), 0o644, 0, 0)
+                .expect("create");
+            write(fs, cx, attr.ino, 0, &vec![0x5C_u8; 2 * 1024 * 1024]);
+        });
+
+        // C: overwrite the middle of a file (split + free + re-insert).
+        scenario("C_overwrite", &|fs, cx| {
+            let attr = fs
+                .create(cx, root, OsStr::new("ow.dat"), 0o644, 0, 0)
+                .expect("create");
+            write(fs, cx, attr.ino, 0, &vec![0x11_u8; 65536]);
+            write(fs, cx, attr.ino, 16384, &vec![0x22_u8; 16384]);
+        });
+
+        // D: create-then-delete (frees the extent + its backref + csums).
+        scenario("D_delete", &|fs, cx| {
+            let attr = fs
+                .create(cx, root, OsStr::new("del.dat"), 0o644, 0, 0)
+                .expect("create");
+            write(fs, cx, attr.ino, 0, &vec![0x33_u8; 16384]);
+            fs.unlink(cx, root, OsStr::new("del.dat")).expect("unlink");
+        });
     }
 
     /// bd-myrgc diagnostic: commit a FrankenFS file then dump the extent tree +
