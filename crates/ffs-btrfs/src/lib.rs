@@ -126,6 +126,25 @@ pub const BTRFS_INODE_DIRSYNC: u64 = 1 << 10;
 /// Compress data.
 pub const BTRFS_INODE_COMPRESS: u64 = 1 << 11;
 
+/// Compute the btrfs `DIR_ITEM`/`XATTR_ITEM` name hash (the key `offset`).
+///
+/// btrfs hashes entry names with `crc32c` seeded with `~1` (the kernel's
+/// `btrfs_name_hash` = `crc32c((u32)~1, name, len)`), using the *raw*
+/// continuation value with no final bit inversion. The `crc32c` crate's
+/// `crc32c_append(crc, data)` follows the streaming convention
+/// `out = !raw(!crc, data)`, so the raw kernel hash `raw(~1, name)` is obtained
+/// as `!crc32c_append(!~1, name) = !crc32c_append(1, name)`.
+///
+/// Using a plain seed-0 `crc32c` here (as earlier revisions did) produced the
+/// standard reflected crc32c instead, so FrankenFS-written `DIR_ITEM` keys did
+/// not match the hash real `btrfs check` recomputes from the stored name
+/// (bd-x36qn: "Dir items with mismatch hash"). This restores on-disk parity.
+#[inline]
+#[must_use]
+pub fn btrfs_name_hash(name: &[u8]) -> u32 {
+    !ffs_types::crc32c_append(1, name)
+}
+
 /// Build the csum-tree leaf item for one on-disk data extent.
 ///
 /// btrfs stores data checksums in the csum tree (`BTRFS_CSUM_TREE_OBJECTID`) as
@@ -4069,6 +4088,43 @@ impl BtrfsExtentAllocator {
         Ok(removed)
     }
 
+    /// Insert a skinny `METADATA_ITEM` + inline `TREE_BLOCK_REF` for an ALREADY
+    /// allocated tree node at `bytenr` owned by `owner_root`, without reserving
+    /// new space. Used at commit time to make the extent_tree's and root_tree's
+    /// OWN leaves self-describing (bd-x36qn / bd-myrgc): those nodes are written
+    /// at fresh addresses and reachable from the superblock but carry no extent
+    /// item, which `btrfs check` rejects and which cascades into spurious
+    /// "no backref" reports for every other (correct) extent.
+    pub fn insert_self_metadata_item(
+        &mut self,
+        bytenr: u64,
+        level: u8,
+        owner_root: u64,
+        generation: u64,
+    ) -> Result<(), BtrfsMutationError> {
+        let extent_item = BtrfsExtentItem {
+            refs: 1,
+            generation,
+            flags: BtrfsExtentItem::FLAG_TREE_BLOCK,
+        };
+        let mut value = extent_item.to_bytes();
+        value.push(BTRFS_ITEM_TREE_BLOCK_REF);
+        value.extend_from_slice(&owner_root.to_le_bytes());
+        let key = BtrfsKey {
+            objectid: bytenr,
+            item_type: BTRFS_ITEM_METADATA_ITEM,
+            offset: u64::from(level),
+        };
+        self.extent_tree.insert(key, &value)?;
+        Ok(())
+    }
+
+    /// Number of nodes currently in the extent tree (1 == a single leaf).
+    #[must_use]
+    pub fn extent_tree_root_is_leaf(&self) -> bool {
+        self.extent_tree.root_level() == 0
+    }
+
     /// Set the filesystem node size used to size skinny `METADATA_ITEM` extents
     /// during gap analysis. Callers loading a real image must set this from the
     /// superblock so the gap finder fences off live metadata tree blocks.
@@ -6303,6 +6359,22 @@ mod tests {
     const HEADER_SIZE: usize = 101;
     const ITEM_SIZE: usize = 25;
     const KEY_PTR_SIZE: usize = 33;
+
+    /// Golden: the btrfs name hash must equal the value real `btrfs check`
+    /// recomputes from the stored entry name. The value `0xe73b4577` for the
+    /// name "x3fcu_check.txt" was captured directly from `btrfs check`
+    /// ("wanted 0xe73b4577") on a FrankenFS-written image (bd-x36qn); the
+    /// previous seed-0 crc32c produced the rejected `0x7f4a4789`. A second
+    /// vector ("hello") pins the function against any future crc seam change.
+    #[test]
+    fn btrfs_name_hash_matches_kernel_btrfs_name_hash_bd_x36qn() {
+        assert_eq!(btrfs_name_hash(b"x3fcu_check.txt"), 0xe73b_4577);
+        // The standard reflected crc32c (seed 0) is the WRONG value that real
+        // `btrfs check` rejected ("has 0x7f4a4789"); guard against regressing
+        // back to it.
+        assert_eq!(ffs_types::crc32c_append(0, b"x3fcu_check.txt"), 0x7f4a_4789);
+        assert_ne!(btrfs_name_hash(b"x3fcu_check.txt"), 0x7f4a_4789);
+    }
 
     #[test]
     fn build_extent_csum_item_packs_one_crc32c_per_sector_bd_x3fcu() {

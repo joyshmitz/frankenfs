@@ -17047,6 +17047,69 @@ impl OpenFs {
 
         // Update alloc state generation
         alloc.generation = new_gen;
+
+        // bd-x36qn / bd-myrgc: make the extent_tree's and root_tree's OWN leaves
+        // self-describing. Both were just written (extent at `extent_tree_bytenr`,
+        // root at `root_tree_bytenr`) and are reachable from the superblock but
+        // carry no EXTENT_ITEM — which btrfs check rejects, and that single gap
+        // cascades into spurious "no backref" reports for every other (correct)
+        // extent. When the extent tree is a single leaf (the common small-fs
+        // case), insert their skinny METADATA_ITEMs + inline TREE_BLOCK_REFs and
+        // re-serialize that one leaf at its SAME address, so the root_tree's
+        // EXTENT_TREE ROOT_ITEM (already pointing there) stays valid. Larger
+        // multi-node extent trees fall back to the previous behaviour.
+        if alloc.extent_alloc.extent_tree_root_is_leaf() {
+            alloc
+                .extent_alloc
+                .insert_self_metadata_item(
+                    extent_tree_bytenr,
+                    extent_tree_level,
+                    BTRFS_EXTENT_TREE_OBJECTID,
+                    new_gen,
+                )
+                .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+            alloc
+                .extent_alloc
+                .insert_self_metadata_item(
+                    root_tree_bytenr,
+                    root_tree_level,
+                    BTRFS_ROOT_TREE_OBJECTID,
+                    new_gen,
+                )
+                .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+
+            // Only re-serialize when the two inserts kept the extent tree a
+            // single leaf; otherwise its root bytenr would have changed and the
+            // root_tree's pointer would be stale (fall back, leave as written).
+            if alloc.extent_alloc.extent_tree_root_is_leaf() {
+                let leaf_block = alloc.extent_alloc.extent_tree().root_block();
+                let mut addrs = std::collections::BTreeMap::new();
+                addrs.insert(leaf_block, extent_tree_bytenr);
+                let self_ctx = DiskWritebackContext::with_allocated_addresses(
+                    sb.fsid,
+                    sb.fsid,
+                    new_gen,
+                    BTRFS_EXTENT_TREE_OBJECTID,
+                    nodesize,
+                    alloc.sectorsize,
+                    addrs,
+                );
+                let serialized = self_ctx
+                    .serialize_node(alloc.extent_alloc.extent_tree(), leaf_block, 0)
+                    .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+                let physical =
+                    resolve_physical(extent_tree_bytenr).map_err(|e| btrfs_mutation_to_ffs(&e))?;
+                self.dev
+                    .write_all_at(cx, ByteOffset(physical), &serialized)
+                    .map_err(|e| {
+                        FfsError::Io(std::io::Error::other(format!(
+                            "self-describe extent leaf write failed: {e}"
+                        )))
+                    })?;
+                self.dev.sync(cx)?;
+            }
+        }
+
         drop(alloc);
 
         // Read the existing on-disk superblock and patch it in place rather
@@ -18515,7 +18578,7 @@ impl OpenFs {
         // on-disk tree).
         if let Some(alloc_mutex) = self.btrfs_alloc_state.as_ref() {
             let alloc = alloc_mutex.lock();
-            let name_hash = ffs_types::crc32c_append(0, name.as_bytes());
+            let name_hash = ffs_btrfs::btrfs_name_hash(name.as_bytes());
             let key = BtrfsKey {
                 objectid: canonical,
                 item_type: BTRFS_ITEM_XATTR_ITEM,
@@ -18697,7 +18760,7 @@ impl OpenFs {
         let mut alloc = alloc_mutex.lock();
         let mut inode = self.btrfs_read_inode_from_tree(&alloc, canonical)?;
 
-        let name_hash = ffs_types::crc32c_append(0, name.as_bytes());
+        let name_hash = ffs_btrfs::btrfs_name_hash(name.as_bytes());
         let key = BtrfsKey {
             objectid: canonical,
             item_type: BTRFS_ITEM_XATTR_ITEM,
@@ -18752,7 +18815,7 @@ impl OpenFs {
 
         let mut alloc = alloc_mutex.lock();
         let mut inode = self.btrfs_read_inode_from_tree(&alloc, canonical)?;
-        let name_hash = ffs_types::crc32c_append(0, name.as_bytes());
+        let name_hash = ffs_btrfs::btrfs_name_hash(name.as_bytes());
         let key = BtrfsKey {
             objectid: canonical,
             item_type: BTRFS_ITEM_XATTR_ITEM,
@@ -18905,7 +18968,7 @@ impl OpenFs {
         name: &[u8],
         child_oid: u64,
     ) -> ffs_error::Result<()> {
-        let name_hash = ffs_types::crc32c_append(0, name);
+        let name_hash = ffs_btrfs::btrfs_name_hash(name);
         let dir_item_key = BtrfsKey {
             objectid: parent_oid,
             item_type: BTRFS_ITEM_DIR_ITEM,
@@ -19003,7 +19066,7 @@ impl OpenFs {
         parent_oid: u64,
         item: &BtrfsDirItem,
     ) -> ffs_error::Result<u64> {
-        let name_hash = ffs_types::crc32c_append(0, &item.name);
+        let name_hash = ffs_btrfs::btrfs_name_hash(&item.name);
         let dir_item_key = BtrfsKey {
             objectid: parent_oid,
             item_type: BTRFS_ITEM_DIR_ITEM,
@@ -55082,7 +55145,7 @@ mod tests {
         let dir_item_key = BtrfsKey {
             objectid: parent_oid,
             item_type: BTRFS_ITEM_DIR_ITEM,
-            offset: u64::from(ffs_types::crc32c_append(0, name)),
+            offset: u64::from(ffs_btrfs::btrfs_name_hash(name)),
         };
         let alloc_mutex = fs.require_btrfs_alloc_state().unwrap();
         let mut alloc = alloc_mutex.lock();
@@ -55172,7 +55235,7 @@ mod tests {
         let ops: &dyn FsOps = &fs;
         let source_name = b"rename_source.txt";
         let new_name = b"rename_new_name.txt";
-        let source_hash = ffs_types::crc32c_append(0, source_name);
+        let source_hash = ffs_btrfs::btrfs_name_hash(source_name);
         let broken_name = [
             b"rename_broken_neighbor_0.txt".as_slice(),
             b"rename_broken_neighbor_1.txt".as_slice(),
@@ -55180,7 +55243,7 @@ mod tests {
             b"rename_broken_neighbor_3.txt".as_slice(),
         ]
         .into_iter()
-        .find(|candidate| ffs_types::crc32c_append(0, candidate) > source_hash)
+        .find(|candidate| ffs_btrfs::btrfs_name_hash(candidate) > source_hash)
         .expect("test fixture should include a sibling sorted after the source");
 
         let source = ops
@@ -55230,7 +55293,7 @@ mod tests {
         let source_key = BtrfsKey {
             objectid: root_oid,
             item_type: BTRFS_ITEM_DIR_ITEM,
-            offset: u64::from(ffs_types::crc32c_append(0, source_name)),
+            offset: u64::from(ffs_btrfs::btrfs_name_hash(source_name)),
         };
         let alloc_mutex = fs.require_btrfs_alloc_state().unwrap();
         let source_entries = alloc_mutex
