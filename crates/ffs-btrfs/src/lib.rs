@@ -3993,7 +3993,17 @@ pub struct BtrfsExtentAllocator {
     extent_refcounts: BTreeMap<ExtentKey, u64>,
     /// Current transaction generation.
     generation: u64,
+    /// Filesystem node size, used to size skinny `METADATA_ITEM` extents during
+    /// gap analysis. A skinny `METADATA_ITEM` key encodes the tree *level* in its
+    /// offset (not the byte length), so the gap finder must treat it as one
+    /// `nodesize` tree block; otherwise it under-sizes live metadata to a few
+    /// bytes and allocates straight into it, aliasing existing tree nodes
+    /// (`btrfs check` then reports parent-transid mismatches — part of bd-x36qn).
+    nodesize: u64,
 }
+
+/// Default btrfs node size (16 KiB), used until the real superblock value is set.
+const BTRFS_DEFAULT_NODESIZE: u64 = 16384;
 
 impl BtrfsExtentAllocator {
     /// Create a new extent allocator with an empty extent tree.
@@ -4005,7 +4015,17 @@ impl BtrfsExtentAllocator {
             delayed_ref_queue: DelayedRefQueue::new(),
             extent_refcounts: BTreeMap::new(),
             generation,
+            nodesize: BTRFS_DEFAULT_NODESIZE,
         })
+    }
+
+    /// Set the filesystem node size used to size skinny `METADATA_ITEM` extents
+    /// during gap analysis. Callers loading a real image must set this from the
+    /// superblock so the gap finder fences off live metadata tree blocks.
+    pub fn set_nodesize(&mut self, nodesize: u64) {
+        if nodesize > 0 {
+            self.nodesize = nodesize;
+        }
     }
 
     /// Register a block group.
@@ -4183,7 +4203,7 @@ impl BtrfsExtentAllocator {
 
         let allocated_ranges: Vec<(u64, u64)> = extents
             .iter()
-            .filter_map(|(key, _)| allocation_extent_range(*key))
+            .filter_map(|(key, _)| allocation_extent_range(*key, self.nodesize))
             .collect();
 
         let mut found = None;
@@ -4771,9 +4791,14 @@ impl BtrfsExtentAllocator {
     }
 }
 
-fn allocation_extent_range(key: BtrfsKey) -> Option<(u64, u64)> {
+fn allocation_extent_range(key: BtrfsKey, metadata_nodesize: u64) -> Option<(u64, u64)> {
     match key.item_type {
-        BTRFS_ITEM_EXTENT_ITEM | BTRFS_ITEM_METADATA_ITEM => Some((key.objectid, key.offset)),
+        // EXTENT_ITEM offset is the byte length (data extent size, or nodesize
+        // for a non-skinny tree block).
+        BTRFS_ITEM_EXTENT_ITEM => Some((key.objectid, key.offset)),
+        // Skinny METADATA_ITEM offset is the tree *level*, not a length: the
+        // block always spans exactly one nodesize tree block.
+        BTRFS_ITEM_METADATA_ITEM => Some((key.objectid, metadata_nodesize)),
         _ => None,
     }
 }
@@ -11450,6 +11475,59 @@ mod tests {
             data_end,
             meta.bytenr,
             meta_end
+        );
+    }
+
+    #[test]
+    fn alloc_metadata_does_not_alias_loaded_skinny_metadata_item_bd_x36qn() {
+        // A skinny METADATA_ITEM key encodes the tree level in its offset, not a
+        // byte length. The gap finder must treat such an item as occupying a full
+        // nodesize tree block; otherwise it under-sizes the live node to a few
+        // bytes (level 0 -> 0 bytes) and allocates straight into it — aliasing an
+        // existing tree node, which `btrfs check` reports as a parent-transid
+        // mismatch (bd-x36qn). Before the fix the new allocation landed on top of
+        // the live block; now it is placed clear of it.
+        let nodesize = 16384_u64;
+        let mut alloc = BtrfsExtentAllocator::new(9).expect("alloc");
+        alloc.set_nodesize(nodesize);
+
+        let bg_start = 1_u64 << 20;
+        alloc.add_block_group(
+            bg_start,
+            BtrfsBlockGroupItem {
+                total_bytes: 1 << 20,
+                used_bytes: 0,
+                flags: BTRFS_BLOCK_GROUP_METADATA,
+            },
+        );
+
+        // A live skinny metadata tree block sitting at the group's first usable
+        // offset (level 0 -> key offset 0).
+        let live = bg_start;
+        alloc
+            .extent_tree_mut()
+            .insert(
+                BtrfsKey {
+                    objectid: live,
+                    item_type: BTRFS_ITEM_METADATA_ITEM,
+                    offset: 0,
+                },
+                &[],
+            )
+            .expect("seed skinny metadata item");
+
+        let a = alloc
+            .alloc_metadata_for_tree(nodesize, BTRFS_FS_TREE_OBJECTID, 0)
+            .expect("alloc metadata");
+        let a_end = a.bytenr + nodesize;
+        let live_end = live + nodesize;
+        assert!(
+            a_end <= live || live_end <= a.bytenr,
+            "new metadata [{:#x},{:#x}) aliases live skinny METADATA_ITEM [{:#x},{:#x})",
+            a.bytenr,
+            a_end,
+            live,
+            live_end,
         );
     }
 

@@ -4851,6 +4851,11 @@ impl OpenFs {
         // device and mark known extents as allocated.
         let mut extent_alloc =
             BtrfsExtentAllocator::new(generation).map_err(|e| btrfs_mutation_to_ffs(&e))?;
+        // Size skinny METADATA_ITEM extents by the real node size so the gap
+        // finder fences off live metadata tree blocks instead of allocating into
+        // them (bd-x36qn: a skinny METADATA_ITEM key offset is the tree level,
+        // not the byte length).
+        extent_alloc.set_nodesize(u64::from(nodesize));
 
         // Add a block group for each chunk discovered in the superblock region
         // so that allocations are covered by valid logical-to-physical mappings.
