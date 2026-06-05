@@ -18747,6 +18747,33 @@ impl OpenFs {
                             );
                             return Err(e);
                         }
+                        // Capture data csums for the converted regular extent on a
+                        // datasum inode (bd-pb0ey sibling), matching the other data
+                        // sites — else a datasum file whose inline extent is
+                        // converted by fallocate trips btrfs check "some csum
+                        // missing". Near-unreachable for FrankenFS-created files
+                        // (writes are always regular), but real-image inline
+                        // extents reach it.
+                        let is_datasum = self
+                            .btrfs_read_inode_from_tree(&alloc, canonical)
+                            .map(|inode| inode.flags & BTRFS_INODE_NODATASUM == 0)
+                            .unwrap_or(false);
+                        if is_datasum {
+                            if let Err(e) = self.btrfs_capture_data_extent_csums(
+                                cx,
+                                &mut alloc,
+                                prev_allocation.bytenr,
+                                prev_alloc_size,
+                            ) {
+                                let _ = alloc.fs_tree.delete(&inline_key);
+                                let _ = alloc.extent_alloc.free_extent(
+                                    prev_allocation.bytenr,
+                                    prev_alloc_size,
+                                    false,
+                                );
+                                return Err(e);
+                            }
+                        }
                     }
                 }
             }
