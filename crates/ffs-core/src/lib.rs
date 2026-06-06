@@ -38415,6 +38415,70 @@ mod tests {
         );
     }
 
+    /// bd-4y9ca regression guard: ext4 inline-data DIRECTORY operations must fail
+    /// loudly (UnsupportedFeature / Err), never silently see an empty/block-mapped
+    /// directory. FrankenFS has no inline-directory parser; a silent empty readdir
+    /// would let rmdir drop a non-empty inline dir, and a silent insert would
+    /// overwrite the inline entries with a fresh extent root — both data loss. This
+    /// pins the comprehensive guard coverage across readdir/lookup/create/unlink/rmdir
+    /// so a future dir-op path cannot regress it.
+    #[test]
+    fn inline_data_directory_ops_fail_loudly_not_silently_bd_4y9ca() {
+        let Some((fs, _tmp)) = open_writable_ext4_mkfs(16) else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let dir = fs
+            .mkdir(&cx, root, OsStr::new("inlinedir"), 0o755, 0, 0)
+            .expect("mkdir");
+        let dir_ino = dir.ino;
+        // A real child so that a "silently empty" view would be an observable
+        // data-loss bug (rmdir would think the dir is empty and drop it).
+        fs.create(&cx, dir_ino, OsStr::new("child.txt"), 0o644, 0, 0)
+            .expect("create child");
+
+        // Mark the directory inline-data, as a kernel-created inline dir would be.
+        {
+            let mut inode = fs.read_inode(&cx, dir_ino).expect("read dir inode");
+            inode.flags |= ffs_types::EXT4_INLINE_DATA_FL;
+            inode.flags &= !ffs_types::EXT4_COMPR_FL;
+            fs.persist_ext4_inode_for_testing(&cx, dir_ino, &inode)
+                .expect("mark inline-data");
+        }
+        let inline_inode = fs.read_inode(&cx, dir_ino).expect("reread dir inode");
+
+        // readdir / lookup must reject rather than return an empty / not-found view.
+        assert!(
+            matches!(
+                fs.read_dir(&cx, &inline_inode),
+                Err(FfsError::UnsupportedFeature(_))
+            ),
+            "inline-dir readdir must fail loudly, not return an empty listing"
+        );
+        assert!(
+            matches!(
+                fs.lookup_name(&cx, &inline_inode, b"child.txt"),
+                Err(FfsError::UnsupportedFeature(_))
+            ),
+            "inline-dir lookup must fail loudly"
+        );
+        // create / unlink / rmdir must all error, never silently mutate a block view.
+        assert!(
+            fs.create(&cx, dir_ino, OsStr::new("new.txt"), 0o644, 0, 0)
+                .is_err(),
+            "create into an inline dir must fail, not overwrite the inline entries"
+        );
+        assert!(
+            fs.unlink(&cx, dir_ino, OsStr::new("child.txt")).is_err(),
+            "unlink from an inline dir must fail"
+        );
+        assert!(
+            fs.rmdir(&cx, root, OsStr::new("inlinedir")).is_err(),
+            "rmdir of a (non-empty) inline dir must fail, not silently drop it"
+        );
+    }
+
     #[test]
     #[allow(clippy::too_many_lines)]
     fn many_creates_in_htree_dir_trigger_rebuild_and_keep_all_findable_bd_rzq1y() {
