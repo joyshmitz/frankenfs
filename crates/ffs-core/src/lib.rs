@@ -60,7 +60,7 @@ use ffs_mvcc::{CommitError, MergeByteRange, MergeProof, MvccBlockDevice, MvccSto
 use ffs_ondisk::{
     BtrfsChunkEntry, BtrfsSuperblock, EXT4_ERROR_FS, EXT4_ORPHAN_FS, EXT4_VALID_FS, Ext4DirEntry,
     Ext4Extent, Ext4FileType, Ext4GroupDesc, Ext4ImageReader, Ext4Inode, Ext4Superblock, Ext4Xattr,
-    ExtentTree, HtreeFindResult, htree_find_entry, lookup_in_dir_block,
+    ExtentTree, HtreeFindResult, htree_find_entry, htree_find_entry_casefold, lookup_in_dir_block,
     lookup_in_dir_block_casefold, parse_dir_block, parse_extent_tree, parse_inode_extent_tree,
     parse_sys_chunk_array,
 };
@@ -8346,32 +8346,50 @@ impl OpenFs {
         // Never returns Err: any resolve/read/parse failure is swallowed to None
         // so the caller falls back to the linear scan (the source of truth). The
         // htree index may also be stale relative to linearly-appended entries.
-        if !dir_inode.has_htree_index() || dir_inode.flags & ffs_types::EXT4_CASEFOLD_FL != 0 {
+        if !dir_inode.has_htree_index() {
             return None;
         }
+        let casefold = dir_inode.flags & ffs_types::EXT4_CASEFOLD_FL != 0;
 
         let sb = self.ext4_superblock()?;
 
-        let found = htree_find_entry(
-            sb.block_size,
-            &sb.hash_seed,
-            sb.has_large_dir(),
-            name,
-            |v| sb.effective_dirhash_version(v),
-            |logical_block| {
-                self.resolve_extent(cx, scope, dir_inode, logical_block)
-                    .ok()
-                    .flatten()
-                    .and_then(|(phys, unwritten)| {
-                        if unwritten {
-                            return None;
-                        }
-                        self.read_ext4_file_data_block_with_scope(cx, scope, BlockNumber(phys))
-                            .ok()
-                            .map(|block| block.to_vec())
-                    })
-            },
-        );
+        let read_block = |logical_block| {
+            self.resolve_extent(cx, scope, dir_inode, logical_block)
+                .ok()
+                .flatten()
+                .and_then(|(phys, unwritten)| {
+                    if unwritten {
+                        return None;
+                    }
+                    self.read_ext4_file_data_block_with_scope(cx, scope, BlockNumber(phys))
+                        .ok()
+                        .map(|block| block.to_vec())
+                })
+        };
+
+        // Casefold dirs descend the htree by hashing the folded name and compare
+        // leaf entries case-insensitively (bd-owt2r). Byte-exact to the kernel
+        // for ASCII; an exotic-Unicode miss returns None and the caller's linear
+        // casefold scan stays authoritative — so a Some result is always correct.
+        let found = if casefold {
+            htree_find_entry_casefold(
+                sb.block_size,
+                &sb.hash_seed,
+                sb.has_large_dir(),
+                name,
+                |v| sb.effective_dirhash_version(v),
+                read_block,
+            )
+        } else {
+            htree_find_entry(
+                sb.block_size,
+                &sb.hash_seed,
+                sb.has_large_dir(),
+                name,
+                |v| sb.effective_dirhash_version(v),
+                read_block,
+            )
+        };
 
         match found {
             HtreeFindResult::Found(entry) => Some(entry),

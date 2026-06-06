@@ -5926,13 +5926,14 @@ pub enum HtreeFindResult {
 /// entry — only "found", "not in index", or "index unusable". Callers gate on
 /// the directory's INDEX flag and choose their not-found policy (trust the index
 /// vs. linear fallback for a possibly-stale index).
-pub fn htree_find_entry<F, H>(
+fn htree_find_entry_inner<F, H>(
     block_size: u32,
     hash_seed: &[u32; 4],
     has_large_dir: bool,
     name: &[u8],
     effective_hash_version: H,
     mut read_logical_dir_block: F,
+    casefold: bool,
 ) -> HtreeFindResult
 where
     F: FnMut(u32) -> Option<Vec<u8>>,
@@ -5954,7 +5955,14 @@ where
     }
 
     let hash_version = effective_hash_version(dx_root.hash_version);
-    let (hash, _minor) = dx_hash(hash_version, name, hash_seed);
+    // For casefold dirs the kernel hashes the case-folded name; matching that
+    // (byte-exact for ASCII, where casefold == ASCII-lowercase) lets the htree
+    // index resolve case-insensitive lookups. An exotic-Unicode fold that
+    // differs from the kernel's simply misses here, and the caller falls back
+    // to the linear casefold scan, so correctness is never at risk.
+    let folded = if casefold { Some(casefold_name(name)) } else { None };
+    let hash_input = folded.as_deref().unwrap_or(name);
+    let (hash, _minor) = dx_hash(hash_version, hash_input, hash_seed);
 
     let indirect_levels = usize::from(dx_root.indirect_levels);
     let root_idx = dx_find_leaf_idx(&dx_root.entries, hash);
@@ -5983,7 +5991,14 @@ where
         let leaf_block = invalid_unless!(frame.entries.get(frame.idx)).block;
         let leaf_data = invalid_unless!(read_logical_dir_block(leaf_block));
         let (entries, _) = invalid_unless!(parse_dir_block(&leaf_data, block_size).ok());
-        if let Some(entry) = entries.into_iter().find(|entry| entry.name == name) {
+        let matched = if casefold {
+            entries
+                .into_iter()
+                .find(|entry| ext4_casefold_names_collide(&entry.name, name))
+        } else {
+            entries.into_iter().find(|entry| entry.name == name)
+        };
+        if let Some(entry) = matched {
             return HtreeFindResult::Found(entry);
         }
 
@@ -6018,6 +6033,62 @@ where
             frames[level].idx = 0;
         }
     }
+}
+
+/// Locate a directory entry through the htree (DX) index by exact name match.
+pub fn htree_find_entry<F, H>(
+    block_size: u32,
+    hash_seed: &[u32; 4],
+    has_large_dir: bool,
+    name: &[u8],
+    effective_hash_version: H,
+    read_logical_dir_block: F,
+) -> HtreeFindResult
+where
+    F: FnMut(u32) -> Option<Vec<u8>>,
+    H: Fn(u8) -> u8,
+{
+    htree_find_entry_inner(
+        block_size,
+        hash_seed,
+        has_large_dir,
+        name,
+        effective_hash_version,
+        read_logical_dir_block,
+        false,
+    )
+}
+
+/// Locate a directory entry through the htree (DX) index using case-insensitive
+/// (casefold) matching, for `EXT4_CASEFOLD_FL` directories.
+///
+/// Descends the DX index hashing the case-folded query name (the kernel hashes
+/// the folded name for casefold dirs) and compares leaf entries with casefold
+/// collision. This is byte-exact to the kernel for ASCII names (where casefold
+/// is ASCII-lowercase). For exotic Unicode whose fold differs from the kernel's,
+/// the descent simply misses and returns `NotFoundInIndex` — callers MUST keep
+/// their linear casefold-scan fallback, which remains the source of truth.
+pub fn htree_find_entry_casefold<F, H>(
+    block_size: u32,
+    hash_seed: &[u32; 4],
+    has_large_dir: bool,
+    name: &[u8],
+    effective_hash_version: H,
+    read_logical_dir_block: F,
+) -> HtreeFindResult
+where
+    F: FnMut(u32) -> Option<Vec<u8>>,
+    H: Fn(u8) -> u8,
+{
+    htree_find_entry_inner(
+        block_size,
+        hash_seed,
+        has_large_dir,
+        name,
+        effective_hash_version,
+        read_logical_dir_block,
+        true,
+    )
 }
 
 /// Resolve the htree/DX leaf block that *covers* `name`'s hash — i.e. the leaf a
@@ -9000,6 +9071,92 @@ mod tests {
         assert!(
             !matches!(read(b"absent_name_zzz"), HtreeFindResult::Found(_)),
             "false positive for an absent name in a two-level index"
+        );
+    }
+
+    /// bd-owt2r: a casefold directory lookup resolves a case-variant query
+    /// through the htree index (O(log) device reads) instead of a linear scan
+    /// of every leaf block, and agrees with the linear casefold scan. The htree
+    /// entries are hashed by the case-folded (lowercase, for ASCII) name — exactly
+    /// as the kernel hashes a casefold dir — so an UPPERCASE query still descends
+    /// to the right leaf, while an exact-match descent must miss it.
+    #[test]
+    fn htree_find_entry_casefold_resolves_case_variants_via_index_bd_owt2r() {
+        let bs = 1024_usize;
+        let bs_u32 = u32::try_from(bs).unwrap();
+        let seed = [0x0bad_f00d_u32, 0xfeed_face, 0xdead_beef, 0xcafe_b0ba];
+        let hash_version = 1_u8; // half_md4
+
+        // A casefold dir stores names in their original (here lowercase) case and
+        // hashes the folded name. Build with lowercase names so the index is
+        // hashed exactly as a casefold directory's would be.
+        let names: Vec<Vec<u8>> = (0..400)
+            .map(|i| format!("file_{i:06}").into_bytes())
+            .collect();
+        let entries: Vec<(u32, u8, &[u8])> = names
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (100 + u32::try_from(i).unwrap(), EXT4_FT_REG_FILE, n.as_slice()))
+            .collect();
+        let blocks = build_htree_directory(2, 2, &entries, bs, hash_version, &seed, false)
+            .expect("casefold htree builds");
+        let total_leaf_blocks = blocks.len() - 1; // block 0 is the dx root
+        assert!(
+            total_leaf_blocks >= 4,
+            "need several leaf blocks for a meaningful score (got {total_leaf_blocks})"
+        );
+
+        // Query an UPPERCASE variant of a stored (lowercase) name.
+        let target_idx = 150_usize;
+        let stored_name = format!("file_{target_idx:06}").into_bytes();
+        let query_upper = format!("FILE_{target_idx:06}").into_bytes();
+
+        // Casefold descent, counting block reads.
+        let casefold_reads = std::cell::Cell::new(0_usize);
+        let cf = htree_find_entry_casefold(bs_u32, &seed, false, &query_upper, |v| v, |lb| {
+            casefold_reads.set(casefold_reads.get() + 1);
+            blocks.get(lb as usize).cloned()
+        });
+        let entry = match cf {
+            HtreeFindResult::Found(e) => e,
+            other => panic!("casefold descent failed for {query_upper:?}: {other:?}"),
+        };
+        assert_eq!(entry.inode, 100 + u32::try_from(target_idx).unwrap());
+        assert_eq!(entry.name, stored_name, "stored (original-case) name returned");
+
+        // Exact-match descent MUST miss the uppercase query — proves the casefold
+        // path is doing real work, not coincidentally matching.
+        assert!(
+            !matches!(
+                htree_find_entry(bs_u32, &seed, false, &query_upper, |v| v, |lb| blocks
+                    .get(lb as usize)
+                    .cloned()),
+                HtreeFindResult::Found(_)
+            ),
+            "exact-match descent must not find an uppercase variant"
+        );
+
+        // ISOMORPHISM: linear casefold scan over the leaf blocks finds the same
+        // entry (this is the pre-existing source of truth the lookup falls back to).
+        let mut linear_hit = None;
+        for blk in &blocks[1..] {
+            if let Ok(Some(found)) = lookup_in_dir_block_casefold(blk, bs_u32, &query_upper) {
+                linear_hit = Some(found);
+                break;
+            }
+        }
+        let linear_entry = linear_hit.expect("linear casefold scan finds it");
+        assert_eq!(linear_entry.inode, entry.inode, "htree vs linear casefold disagree");
+        assert_eq!(linear_entry.name, entry.name);
+
+        // SCORE: the casefold descent reads a handful of blocks; the prior
+        // behaviour (casefold dirs skipped the index) scanned up to every leaf
+        // block. Worst-case linear cost = total_leaf_blocks.
+        let reads = casefold_reads.get();
+        let score = total_leaf_blocks as f64 / reads as f64;
+        assert!(
+            score >= 2.0,
+            "Score {score} must clear 2.0 (linear {total_leaf_blocks} leaves -> casefold descent {reads} reads)"
         );
     }
 
