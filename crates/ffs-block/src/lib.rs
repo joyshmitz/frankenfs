@@ -2017,6 +2017,72 @@ impl S3FastResidentTable {
 }
 
 #[cfg(feature = "s3fifo")]
+#[repr(align(64))]
+#[derive(Debug)]
+struct S3FastHitStripe {
+    hits: AtomicU64,
+}
+
+#[cfg(feature = "s3fifo")]
+impl S3FastHitStripe {
+    fn new() -> Self {
+        Self {
+            hits: AtomicU64::new(0),
+        }
+    }
+}
+
+#[cfg(feature = "s3fifo")]
+#[derive(Debug)]
+struct S3FastHitCounter {
+    stripes: Vec<S3FastHitStripe>,
+    stripe_mask: u64,
+}
+
+#[cfg(feature = "s3fifo")]
+impl S3FastHitCounter {
+    fn for_capacity(capacity_blocks: usize) -> Self {
+        let target_stripes = capacity_blocks
+            .saturating_mul(2)
+            .clamp(1, S3_FAST_HIT_MAX_SLOTS);
+        let stripe_count = target_stripes
+            .checked_next_power_of_two()
+            .unwrap_or(S3_FAST_HIT_MAX_SLOTS)
+            .min(S3_FAST_HIT_MAX_SLOTS);
+        Self::new(stripe_count)
+    }
+
+    fn new(stripe_count: usize) -> Self {
+        let stripe_count = stripe_count.max(1).next_power_of_two();
+        let mut stripes = Vec::with_capacity(stripe_count);
+        for _ in 0..stripe_count {
+            stripes.push(S3FastHitStripe::new());
+        }
+        let stripe_mask = u64::try_from(stripe_count - 1).unwrap_or(u64::MAX);
+        Self {
+            stripes,
+            stripe_mask,
+        }
+    }
+
+    fn stripe_index(&self, block: BlockNumber) -> usize {
+        usize::try_from(block.0 & self.stripe_mask).unwrap_or(0)
+    }
+
+    fn increment(&self, block: BlockNumber) {
+        self.stripes[self.stripe_index(block)]
+            .hits
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn total(&self, ordering: Ordering) -> u64 {
+        self.stripes.iter().fold(0_u64, |total, stripe| {
+            total.saturating_add(stripe.hits.load(ordering))
+        })
+    }
+}
+
+#[cfg(feature = "s3fifo")]
 #[derive(Debug)]
 struct S3FastMutationGuard<'a> {
     active: &'a AtomicUsize,
@@ -3302,7 +3368,7 @@ pub struct ArcCache<D: BlockDevice> {
     #[cfg(feature = "s3fifo")]
     s3_fast_residents: S3FastResidentTable,
     #[cfg(feature = "s3fifo")]
-    s3_fast_hits: AtomicU64,
+    s3_fast_hits: S3FastHitCounter,
     #[cfg(feature = "s3fifo")]
     s3_fast_hits_enabled: bool,
     #[cfg(feature = "s3fifo")]
@@ -3737,7 +3803,7 @@ impl<D: BlockDevice> ArcCache<D> {
             #[cfg(feature = "s3fifo")]
             s3_fast_residents: S3FastResidentTable::for_capacity(capacity_blocks),
             #[cfg(feature = "s3fifo")]
-            s3_fast_hits: AtomicU64::new(0),
+            s3_fast_hits: S3FastHitCounter::for_capacity(capacity_blocks),
             #[cfg(feature = "s3fifo")]
             s3_fast_hits_enabled,
             #[cfg(feature = "s3fifo")]
@@ -3777,7 +3843,7 @@ impl<D: BlockDevice> ArcCache<D> {
             let mut metrics = self.state.lock().snapshot_metrics();
             metrics.hits = metrics
                 .hits
-                .saturating_add(self.s3_fast_hits.load(Ordering::Relaxed));
+                .saturating_add(self.s3_fast_hits.total(Ordering::Relaxed));
             metrics
         }
         #[cfg(not(feature = "s3fifo"))]
@@ -3814,7 +3880,7 @@ impl<D: BlockDevice> ArcCache<D> {
             return None;
         }
         entry.access.increment_count();
-        self.s3_fast_hits.fetch_add(1, Ordering::Relaxed);
+        self.s3_fast_hits.increment(block);
         Some(entry.data.clone_ref())
     }
 
@@ -3830,7 +3896,7 @@ impl<D: BlockDevice> ArcCache<D> {
 
     #[cfg(feature = "s3fifo")]
     fn apply_s3_fast_hit_scan_reset(&self, state: &mut ArcState) {
-        let fast_hits = self.s3_fast_hits.load(Ordering::Acquire);
+        let fast_hits = self.s3_fast_hits.total(Ordering::Acquire);
         if state.applied_s3_fast_hits != fast_hits {
             state.applied_s3_fast_hits = fast_hits;
             state.reset_s3_read_scan_detector();
