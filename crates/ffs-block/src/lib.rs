@@ -2079,6 +2079,8 @@ struct ArcState {
     access_count: HashMap<BlockNumber, Arc<S3AccessHandle>>,
     #[cfg(feature = "s3fifo")]
     fast_invalidations: Vec<BlockNumber>,
+    #[cfg(feature = "s3fifo")]
+    applied_s3_fast_hits: u64,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -2144,6 +2146,8 @@ impl ArcState {
             access_count: HashMap::new(),
             #[cfg(feature = "s3fifo")]
             fast_invalidations: Vec::new(),
+            #[cfg(feature = "s3fifo")]
+            applied_s3_fast_hits: 0,
         }
     }
 
@@ -3297,8 +3301,6 @@ pub struct ArcCache<D: BlockDevice> {
     #[cfg(feature = "s3fifo")]
     s3_fast_hits: AtomicU64,
     #[cfg(feature = "s3fifo")]
-    s3_fast_hit_reset_pending: AtomicBool,
-    #[cfg(feature = "s3fifo")]
     s3_fast_hits_enabled: bool,
     #[cfg(feature = "s3fifo")]
     s3_fast_mutation_active: AtomicUsize,
@@ -3734,8 +3736,6 @@ impl<D: BlockDevice> ArcCache<D> {
             #[cfg(feature = "s3fifo")]
             s3_fast_hits: AtomicU64::new(0),
             #[cfg(feature = "s3fifo")]
-            s3_fast_hit_reset_pending: AtomicBool::new(false),
-            #[cfg(feature = "s3fifo")]
             s3_fast_hits_enabled,
             #[cfg(feature = "s3fifo")]
             s3_fast_mutation_active: AtomicUsize::new(0),
@@ -3812,8 +3812,6 @@ impl<D: BlockDevice> ArcCache<D> {
         }
         entry.access.increment_count();
         self.s3_fast_hits.fetch_add(1, Ordering::Relaxed);
-        self.s3_fast_hit_reset_pending
-            .store(true, Ordering::Release);
         Some(entry.data.clone_ref())
     }
 
@@ -3829,7 +3827,9 @@ impl<D: BlockDevice> ArcCache<D> {
 
     #[cfg(feature = "s3fifo")]
     fn apply_s3_fast_hit_scan_reset(&self, state: &mut ArcState) {
-        if self.s3_fast_hit_reset_pending.swap(false, Ordering::AcqRel) {
+        let fast_hits = self.s3_fast_hits.load(Ordering::Acquire);
+        if state.applied_s3_fast_hits != fast_hits {
+            state.applied_s3_fast_hits = fast_hits;
             state.reset_s3_read_scan_detector();
         }
     }
