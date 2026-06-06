@@ -5564,6 +5564,38 @@ pub fn build_htree_directory_with_large_dir(
         hash_seed,
         with_csum_tail,
         has_large_dir,
+        false,
+    )
+    .map(|layout| layout.blocks)
+}
+
+/// Casefold counterpart of [`build_htree_directory_with_large_dir`] (no checksum
+/// tail).
+///
+/// Hashes each entry by its case-folded name while storing the original case.
+/// ASCII-only; see the stamped casefold builder for the rationale.
+#[must_use]
+#[allow(clippy::too_many_arguments)]
+pub fn build_htree_directory_with_large_dir_casefold(
+    dot_inode: u32,
+    dotdot_inode: u32,
+    entries: &[(u32, u8, &[u8])],
+    block_size: usize,
+    hash_version: u8,
+    hash_seed: &[u32; 4],
+    with_csum_tail: bool,
+    has_large_dir: bool,
+) -> Option<Vec<Vec<u8>>> {
+    build_htree_layout(
+        dot_inode,
+        dotdot_inode,
+        entries,
+        block_size,
+        hash_version,
+        hash_seed,
+        with_csum_tail,
+        has_large_dir,
+        true,
     )
     .map(|layout| layout.blocks)
 }
@@ -5596,6 +5628,7 @@ fn build_htree_layout(
     hash_seed: &[u32; 4],
     with_csum_tail: bool,
     has_large_dir: bool,
+    casefold: bool,
 ) -> Option<HtreeLayout> {
     if !(64..=65536).contains(&block_size) || entries.is_empty() {
         return None;
@@ -5606,10 +5639,21 @@ fn build_htree_layout(
         block_size
     };
 
+    // Casefold directories index by the case-folded name (byte-exact for ASCII),
+    // while the leaf still stores the original-case name; non-casefold hashes the
+    // name verbatim.
+    let name_hash = |name: &[u8]| -> u32 {
+        if casefold {
+            dx_hash(hash_version, &casefold_name(name), hash_seed).0
+        } else {
+            dx_hash(hash_version, name, hash_seed).0
+        }
+    };
+
     // Hash every name and sort by major hash (the value stored in DX entries).
     let mut hashed: Vec<(u32, (u32, u8, &[u8]))> = entries
         .iter()
-        .map(|&(ino, ft, name)| (dx_hash(hash_version, name, hash_seed).0, (ino, ft, name)))
+        .map(|&(ino, ft, name)| (name_hash(name), (ino, ft, name)))
         .collect();
     hashed.sort_by_key(|&(h, _)| h);
 
@@ -5646,7 +5690,7 @@ fn build_htree_layout(
         if i == 0 {
             Some(0)
         } else {
-            Some(dx_hash(hash_version, leaves[i].first()?.2, hash_seed).0)
+            Some(name_hash(leaves[i].first()?.2))
         }
     };
 
@@ -5823,6 +5867,52 @@ pub fn build_htree_directory_stamped_with_large_dir(
     generation: u32,
     has_large_dir: bool,
 ) -> Option<Vec<Vec<u8>>> {
+    build_htree_directory_stamped_with_large_dir_inner(
+        dot_inode, dotdot_inode, entries, block_size, hash_version, hash_seed, csum_seed, dir_ino,
+        generation, has_large_dir, false,
+    )
+}
+
+/// Casefold counterpart of [`build_htree_directory_stamped_with_large_dir`].
+///
+/// Hashes each entry by its case-folded name (byte-exact to the kernel for ASCII)
+/// while storing the original-case name in the leaf, so a rebuilt casefold
+/// directory keeps the same fold-indexed layout the kernel would produce. Callers
+/// must restrict this to entries whose fold is exact (ASCII).
+#[must_use]
+#[allow(clippy::too_many_arguments)]
+pub fn build_htree_directory_stamped_with_large_dir_casefold(
+    dot_inode: u32,
+    dotdot_inode: u32,
+    entries: &[(u32, u8, &[u8])],
+    block_size: usize,
+    hash_version: u8,
+    hash_seed: &[u32; 4],
+    csum_seed: u32,
+    dir_ino: u32,
+    generation: u32,
+    has_large_dir: bool,
+) -> Option<Vec<Vec<u8>>> {
+    build_htree_directory_stamped_with_large_dir_inner(
+        dot_inode, dotdot_inode, entries, block_size, hash_version, hash_seed, csum_seed, dir_ino,
+        generation, has_large_dir, true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_htree_directory_stamped_with_large_dir_inner(
+    dot_inode: u32,
+    dotdot_inode: u32,
+    entries: &[(u32, u8, &[u8])],
+    block_size: usize,
+    hash_version: u8,
+    hash_seed: &[u32; 4],
+    csum_seed: u32,
+    dir_ino: u32,
+    generation: u32,
+    has_large_dir: bool,
+    casefold: bool,
+) -> Option<Vec<Vec<u8>>> {
     let HtreeLayout {
         mut blocks,
         leaf_count,
@@ -5835,6 +5925,7 @@ pub fn build_htree_directory_stamped_with_large_dir(
         hash_seed,
         true,
         has_large_dir,
+        casefold,
     )?;
     // Layout is [dx_root, leaf_0..leaf_{L-1}, node_0..node_{N-1}]: the root and
     // any interior nodes are index blocks (dx_tail CRC32C), the leaves are
@@ -9251,6 +9342,73 @@ mod tests {
                 cf_leaf, exact_leaf,
                 "casefold insert of {upper:?} must target the leaf holding {lower:?}"
             );
+        }
+    }
+
+    /// bd-owt2r (leaf-full rebuild): the casefold rebuild builder lays out a
+    /// fold-indexed tree where every entry is reachable via the case-insensitive
+    /// descent. This is the core of ext4_rebuild_htree_dir's casefold path — it
+    /// re-hashes every entry by its fold, so a later case-variant lookup of ANY
+    /// name (including mixed-case originals) resolves through the index.
+    #[test]
+    fn build_htree_directory_casefold_rebuild_is_fold_navigable_bd_owt2r() {
+        let bs = 1024_usize;
+        let bs_u32 = u32::try_from(bs).unwrap();
+        let seed = [0x1357_9bdf_u32, 0x2468_ace0, 0x0f1e_2d3c, 0x4b5a_6978];
+        let csum_seed = 0x0fad_cafe_u32;
+        let hash_version = 1_u8;
+        let dir_ino = 77_u32;
+        let generation = 3_u32;
+
+        // Mixed-case original names (as the kernel might store them); the rebuild
+        // hashes by their ASCII fold. Enough to span multiple leaves.
+        let names: Vec<Vec<u8>> = (0..400)
+            .map(|i| {
+                if i % 2 == 0 {
+                    format!("File_{i:04}.TXT").into_bytes()
+                } else {
+                    format!("file_{i:04}.txt").into_bytes()
+                }
+            })
+            .collect();
+        let entries: Vec<(u32, u8, &[u8])> = names
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (200 + u32::try_from(i).unwrap(), EXT4_FT_REG_FILE, n.as_slice()))
+            .collect();
+
+        let blocks = build_htree_directory_stamped_with_large_dir_casefold(
+            dir_ino,
+            2,
+            &entries,
+            bs,
+            hash_version,
+            &seed,
+            csum_seed,
+            dir_ino,
+            generation,
+            false,
+        )
+        .expect("casefold rebuild builds");
+        assert!(blocks.len() > 4, "need several leaves for a real rebuild test");
+
+        // Every entry — queried by an arbitrary case variant — resolves via the
+        // casefold descent, proving the rebuilt index is fold-correct.
+        for (i, original) in names.iter().enumerate() {
+            let query = if i % 3 == 0 {
+                original.to_ascii_uppercase()
+            } else {
+                original.to_ascii_lowercase()
+            };
+            match htree_find_entry_casefold(bs_u32, &seed, false, &query, |v| v, |lb| {
+                blocks.get(lb as usize).cloned()
+            }) {
+                HtreeFindResult::Found(e) => {
+                    assert_eq!(e.inode, 200 + u32::try_from(i).unwrap(), "wrong inode for {query:?}");
+                    assert_eq!(&e.name, original, "original case must be preserved in the leaf");
+                }
+                other => panic!("rebuilt casefold entry {query:?} not fold-reachable: {other:?}"),
+            }
         }
     }
 

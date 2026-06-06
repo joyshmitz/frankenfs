@@ -12077,18 +12077,11 @@ impl OpenFs {
                     // the proven build_htree_directory writer (bd-rzq1y). Correct by
                     // construction — e2fsck validates htree validity, not shape.
                     Err(FfsError::NoSpace) => {
-                        // A casefold rebuild would re-hash every EXISTING entry by
-                        // its fold; entries created by the kernel may be non-ASCII,
-                        // where FrankenFS's fold can diverge — so it could relocate
-                        // them out of the kernel's reach. Defer until the rebuild
-                        // writer folds byte-exactly (bd-owt2r); the common
-                        // non-full-leaf casefold insert above still succeeds.
-                        if casefold {
-                            return Err(FfsError::UnsupportedFeature(format!(
-                                "casefold htree directory inode {} leaf-full rebuild is not yet supported (bd-owt2r)",
-                                parent.0
-                            )));
-                        }
+                        // The hash-correct leaf is full → rebuild the whole index.
+                        // ext4_rebuild_htree_dir is casefold-aware (it re-hashes by
+                        // the fold and refuses if any entry is non-ASCII), so the
+                        // common ASCII casefold case rebuilds correctly too
+                        // (bd-owt2r).
                         return self.ext4_rebuild_htree_dir(
                             cx,
                             dev,
@@ -12439,12 +12432,26 @@ impl OpenFs {
         }
         collected.push((new_ino, new_file_type.to_raw(), new_name.to_vec()));
 
+        // Casefold directories must be rebuilt with the fold-hashed builder so the
+        // index stays kernel-consistent. The rebuild re-hashes EVERY entry, so it
+        // is only safe when every name folds byte-exactly to the kernel — i.e. all
+        // ASCII. A single non-ASCII entry (created by the kernel) could otherwise
+        // be relocated out of the kernel's reach, with no read-side fallback on a
+        // freshly-written index. Refuse rather than risk that (bd-owt2r).
+        let casefold = parent_inode.flags & ffs_types::EXT4_CASEFOLD_FL != 0;
+        if casefold && !collected.iter().all(|(_, _, n)| n.is_ascii()) {
+            return Err(FfsError::UnsupportedFeature(format!(
+                "casefold htree directory inode {} rebuild with non-ASCII entries is not yet supported (bd-owt2r: needs byte-exact UTF-8 normalization)",
+                parent.0
+            )));
+        }
+
         let entry_refs: Vec<(u32, u8, &[u8])> = collected
             .iter()
             .map(|(i, ft, n)| (*i, *ft, n.as_slice()))
             .collect();
-        let new_blocks = if has_metadata_csum {
-            ffs_ondisk::build_htree_directory_stamped_with_large_dir(
+        let new_blocks = match (has_metadata_csum, casefold) {
+            (true, true) => ffs_ondisk::build_htree_directory_stamped_with_large_dir_casefold(
                 parent_ino_u32,
                 dotdot_ino,
                 &entry_refs,
@@ -12455,9 +12462,20 @@ impl OpenFs {
                 parent_ino_u32,
                 generation,
                 has_large_dir,
-            )
-        } else {
-            ffs_ondisk::build_htree_directory_with_large_dir(
+            ),
+            (true, false) => ffs_ondisk::build_htree_directory_stamped_with_large_dir(
+                parent_ino_u32,
+                dotdot_ino,
+                &entry_refs,
+                block_size,
+                hash_version,
+                &hash_seed,
+                csum_seed,
+                parent_ino_u32,
+                generation,
+                has_large_dir,
+            ),
+            (false, true) => ffs_ondisk::build_htree_directory_with_large_dir_casefold(
                 parent_ino_u32,
                 dotdot_ino,
                 &entry_refs,
@@ -12466,7 +12484,17 @@ impl OpenFs {
                 &hash_seed,
                 false,
                 has_large_dir,
-            )
+            ),
+            (false, false) => ffs_ondisk::build_htree_directory_with_large_dir(
+                parent_ino_u32,
+                dotdot_ino,
+                &entry_refs,
+                block_size,
+                hash_version,
+                &hash_seed,
+                false,
+                has_large_dir,
+            ),
         }
         .ok_or_else(|| {
             FfsError::UnsupportedFeature(format!(
