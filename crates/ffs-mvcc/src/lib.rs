@@ -319,12 +319,27 @@ pub(crate) fn newest_visible_index(
     versions: &[BlockVersion],
     visible_high: CommitSeq,
 ) -> Option<usize> {
+    newest_visible_index_by(versions, visible_high, |version| version.commit_seq)
+}
+
+/// Generic core of [`newest_visible_index`] over any ascending-by-`commit_seq`
+/// slice. Checks the newest element first (O(1) for readers at/near the latest
+/// snapshot) and otherwise binary-searches in O(log n). Used for both logical
+/// `BlockVersion` chains and physical `PhysicalBlockVersion` chains so a
+/// long-running reader holding the watermark down (which prevents the chain
+/// from being trimmed) does not pay an O(n) reverse linear scan per read.
+#[inline]
+pub(crate) fn newest_visible_index_by<T>(
+    versions: &[T],
+    visible_high: CommitSeq,
+    commit_seq: impl Fn(&T) -> CommitSeq,
+) -> Option<usize> {
     let last = versions.len().checked_sub(1)?;
-    if versions[last].commit_seq <= visible_high {
+    if commit_seq(&versions[last]) <= visible_high {
         return Some(last);
     }
     versions
-        .partition_point(|version| version.commit_seq <= visible_high)
+        .partition_point(|version| commit_seq(version) <= visible_high)
         .checked_sub(1)
 }
 
@@ -2869,12 +2884,10 @@ impl MvccStore {
         snapshot: Snapshot,
     ) -> Option<BlockNumber> {
         if let Some(versions) = self.physical_versions.get(&logical)
-            && let Some(version) = versions
-                .iter()
-                .rev()
-                .find(|version| version.commit_seq <= snapshot.high)
+            && let Some(idx) =
+                newest_visible_index_by(versions, snapshot.high, |version| version.commit_seq)
         {
-            return Some(version.physical);
+            return Some(versions[idx].physical);
         }
         self.read_visible(logical, snapshot).map(|_| logical)
     }
@@ -2947,7 +2960,9 @@ impl MvccStore {
         let mut run_buf: Vec<u8> = Vec::new();
 
         for (block, versions) in &self.versions {
-            let Some(idx) = versions.iter().rposition(|v| v.commit_seq <= snapshot.high) else {
+            // Binary-search the newest visible version instead of an O(n) reverse
+            // linear scan; identical index for an ascending-ordered chain.
+            let Some(idx) = newest_visible_index(versions, snapshot.high) else {
                 continue;
             };
             let Some(data) = compression::resolve_data_with(versions, idx, |v| &v.data) else {
@@ -3872,6 +3887,52 @@ mod tests {
     use super::*;
     use std::collections::{BTreeSet, HashMap};
     use std::sync::atomic::AtomicBool;
+
+    /// Isomorphism + golden proof that the binary-search visibility lookup
+    /// (`newest_visible_index_by`, now used by `read_visible_physical` and
+    /// `flush_to_device`) returns the byte-identical index to the prior O(n)
+    /// reverse linear scan (`rposition`/`.rev().find`) for every ascending
+    /// chain and every snapshot. Drives 5000 random ascending chains and pins
+    /// an FNV-1a digest of the per-case result.
+    #[test]
+    fn newest_visible_index_by_matches_reverse_scan_iso() {
+        // Reference: the prior reverse linear scan over an ascending chain.
+        fn reference(seqs: &[u64], high: u64) -> Option<usize> {
+            seqs.iter().rposition(|&s| s <= high)
+        }
+
+        let mut state: u64 = 0x0123_4567_89ab_cdef;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            state >> 33
+        };
+
+        let mut digest: u64 = 0xcbf2_9ce4_8422_2325;
+        let fold = |x: u64, d: &mut u64| {
+            *d ^= x;
+            *d = d.wrapping_mul(0x0000_0100_0000_01b3);
+        };
+
+        for _ in 0..5000 {
+            // Build a strictly-ascending commit_seq chain of length 0..=128.
+            let n = (next() % 129) as usize;
+            let mut seqs = Vec::with_capacity(n);
+            let mut cur = 0_u64;
+            for _ in 0..n {
+                cur += 1 + (next() % 5);
+                seqs.push(cur);
+            }
+            let high = next() % (cur + 4); // span below, within, and above the chain
+            let bin = newest_visible_index_by(&seqs, CommitSeq(high), |s| CommitSeq(*s));
+            let reff = reference(&seqs, high);
+            assert_eq!(bin, reff, "binary != reverse-scan for chain {seqs:?} high {high}");
+            fold(bin.map_or(u64::MAX, |i| i as u64), &mut digest);
+            fold(high, &mut digest);
+        }
+        assert_eq!(digest, 17_052_713_067_055_689_022, "golden visibility-index digest changed");
+    }
 
     /// Simple in-memory block device for testing `MvccBlockDevice`.
     #[derive(Debug)]

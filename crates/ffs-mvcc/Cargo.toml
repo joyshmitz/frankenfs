@@ -34,5 +34,9 @@ sha2 = { workspace = true }
 name = "wal_throughput"
 harness = false
 
+[[bench]]
+name = "physical_visibility"
+harness = false
+
 [lints]
 workspace = true
