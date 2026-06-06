@@ -11976,13 +11976,17 @@ impl OpenFs {
             // htree_find_entry navigates to — so the index stays consistent and
             // the dx_root is never linear-written.
             if parent_inode.has_htree_index() {
-                // Casefold htree directories hash the case-folded name; the
-                // plain dx_hash leaf locator would target the wrong leaf, so
-                // refuse rather than misplace (unreachable entry) or fall
-                // through to the dx_root-corrupting linear path.
-                if parent_inode.flags & ffs_types::EXT4_CASEFOLD_FL != 0 {
+                // Casefold htree directories index by the case-folded name. For
+                // ASCII names FrankenFS's fold is byte-exact to the kernel, so we
+                // can locate the hash-correct leaf and add there. Non-ASCII names
+                // fold via an approximation that may diverge from the kernel's
+                // normalization tables — and the write side has no linear-scan
+                // safety net — so refuse those rather than place an entry the
+                // kernel would never find (bd-owt2r).
+                let casefold = parent_inode.flags & ffs_types::EXT4_CASEFOLD_FL != 0;
+                if casefold && !name.is_ascii() {
                     return Err(FfsError::UnsupportedFeature(format!(
-                        "casefold htree directory inode {} insert is not yet supported (bd-wb4cd follow-on)",
+                        "non-ASCII casefold htree directory inode {} insert is not yet supported (bd-owt2r: needs byte-exact UTF-8 normalization)",
                         parent.0
                     )));
                 }
@@ -12005,13 +12009,25 @@ impl OpenFs {
                 let sb = self
                     .ext4_superblock()
                     .ok_or_else(|| FfsError::Format("htree directory on non-ext4 fs".into()))?;
-                let target_logical = ffs_ondisk::htree_target_leaf_block(
-                    &sb.hash_seed,
-                    sb.has_large_dir(),
-                    name,
-                    |v| sb.effective_dirhash_version(v),
-                    |lb| resolve_logical(lb).and_then(|phys| self.read_block_vec(cx, phys).ok()),
-                )
+                let read_leaf =
+                    |lb| resolve_logical(lb).and_then(|phys| self.read_block_vec(cx, phys).ok());
+                let target_logical = if casefold {
+                    ffs_ondisk::htree_target_leaf_block_casefold(
+                        &sb.hash_seed,
+                        sb.has_large_dir(),
+                        name,
+                        |v| sb.effective_dirhash_version(v),
+                        read_leaf,
+                    )
+                } else {
+                    ffs_ondisk::htree_target_leaf_block(
+                        &sb.hash_seed,
+                        sb.has_large_dir(),
+                        name,
+                        |v| sb.effective_dirhash_version(v),
+                        read_leaf,
+                    )
+                }
                 .ok_or_else(|| FfsError::Corruption {
                     block: 0,
                     detail: format!(
@@ -12061,6 +12077,18 @@ impl OpenFs {
                     // the proven build_htree_directory writer (bd-rzq1y). Correct by
                     // construction — e2fsck validates htree validity, not shape.
                     Err(FfsError::NoSpace) => {
+                        // A casefold rebuild would re-hash every EXISTING entry by
+                        // its fold; entries created by the kernel may be non-ASCII,
+                        // where FrankenFS's fold can diverge — so it could relocate
+                        // them out of the kernel's reach. Defer until the rebuild
+                        // writer folds byte-exactly (bd-owt2r); the common
+                        // non-full-leaf casefold insert above still succeeds.
+                        if casefold {
+                            return Err(FfsError::UnsupportedFeature(format!(
+                                "casefold htree directory inode {} leaf-full rebuild is not yet supported (bd-owt2r)",
+                                parent.0
+                            )));
+                        }
                         return self.ext4_rebuild_htree_dir(
                             cx,
                             dev,
@@ -38221,6 +38249,141 @@ mod tests {
                 ffs_ondisk::HtreeFindResult::Found(_)
             ),
             "pre-existing entry must remain index-reachable after the create"
+        );
+    }
+
+    /// bd-owt2r (insert side, end-to-end): creating an ASCII-named file in a
+    /// CASEFOLD htree directory now succeeds (was UnsupportedFeature) and places
+    /// the entry in the fold-correct leaf, so a case-insensitive lookup finds it.
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn create_in_casefold_htree_dir_finds_new_entry_via_fold_bd_owt2r() {
+        let Some((fs, _tmp)) = open_writable_ext4_mkfs(16) else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let (csum_seed, hash_seed, has_large_dir, hash_version, block_size) = {
+            let sb = fs.ext4_superblock().expect("sb");
+            (
+                sb.csum_seed(),
+                sb.hash_seed,
+                sb.has_large_dir(),
+                sb.effective_dirhash_version(sb.def_hash_version),
+                usize::try_from(sb.block_size).unwrap(),
+            )
+        };
+
+        let dir = fs
+            .mkdir(&cx, root, OsStr::new("casedir"), 0o755, 0, 0)
+            .expect("mkdir");
+        let dir_ino = dir.ino;
+        let dir_ino_u32 = u32::try_from(dir_ino.0).unwrap();
+        let generation = fs.read_inode(&cx, dir_ino).expect("read dir").generation;
+
+        // A casefold dir hashes by the folded name. Build the index from LOWERCASE
+        // names so the stored hashes equal the kernel's casefold (ASCII) hashes.
+        // Keep the count modest so leaves retain free space — this exercises the
+        // common non-full-leaf insert (the leaf-full casefold rebuild is deferred).
+        let names: Vec<Vec<u8>> = (0..30)
+            .map(|i| format!("file_{i:04}.txt").into_bytes())
+            .collect();
+        let entries: Vec<(u32, u8, &[u8])> = names
+            .iter()
+            .enumerate()
+            .map(|(i, n)| {
+                (
+                    1000 + u32::try_from(i).unwrap(),
+                    ffs_ondisk::ext4::EXT4_FT_REG_FILE,
+                    n.as_slice(),
+                )
+            })
+            .collect();
+        let blocks = ffs_ondisk::build_htree_directory_stamped(
+            dir_ino_u32,
+            2,
+            &entries,
+            block_size,
+            hash_version,
+            &hash_seed,
+            csum_seed,
+            dir_ino_u32,
+            generation,
+        )
+        .expect("build htree");
+        assert!(blocks.len() >= 2, "need dx_root + at least one leaf");
+        install_htree_dir(&fs, &cx, dir_ino, &blocks);
+
+        // Mark the directory casefold.
+        {
+            let mut inode = fs.read_inode(&cx, dir_ino).expect("read dir inode");
+            inode.flags |= ffs_types::EXT4_CASEFOLD_FL;
+            fs.persist_ext4_inode_for_testing(&cx, dir_ino, &inode)
+                .expect("set casefold flag");
+        }
+
+        let find_casefold = |name: &[u8]| -> ffs_ondisk::HtreeFindResult {
+            ffs_ondisk::htree_find_entry_casefold(
+                u32::try_from(block_size).unwrap(),
+                &hash_seed,
+                has_large_dir,
+                name,
+                |v| v,
+                |lb| {
+                    let inode = fs.read_inode(&cx, dir_ino).ok()?;
+                    let exts = fs.collect_extents(&cx, &inode).ok()?;
+                    let phys = exts.iter().find_map(|e| {
+                        let len = u32::from(e.actual_len());
+                        if lb >= e.logical_block && lb < e.logical_block + len {
+                            Some(e.physical_start + u64::from(lb - e.logical_block))
+                        } else {
+                            None
+                        }
+                    })?;
+                    fs.read_block_vec(&cx, BlockNumber(phys)).ok()
+                },
+            )
+        };
+
+        // A pre-existing entry is reachable via a CASE-VARIANT (uppercase) query.
+        assert!(
+            matches!(
+                find_casefold(b"FILE_0010.TXT"),
+                ffs_ondisk::HtreeFindResult::Found(_)
+            ),
+            "case-variant lookup of a pre-existing casefold entry must hit the index"
+        );
+
+        // Operation under test: create a file with an UPPERCASE name in the
+        // casefold dir (previously returned UnsupportedFeature).
+        let created = fs
+            .create(&cx, dir_ino, OsStr::new("ZZZ_NEW_ENTRY.BIN"), 0o644, 0, 0)
+            .expect("create in casefold htree dir must now succeed");
+
+        // The new entry is reachable via the folded (lowercase) query through the
+        // index — i.e. it was placed in the fold-correct leaf.
+        match find_casefold(b"zzz_new_entry.bin") {
+            ffs_ondisk::HtreeFindResult::Found(e) => {
+                assert_eq!(e.inode, u32::try_from(created.ino.0).unwrap());
+                assert_eq!(e.name, b"ZZZ_NEW_ENTRY.BIN", "original case is stored");
+            }
+            other => panic!("new casefold entry must be index-reachable, got {other:?}"),
+        }
+
+        // dx_root still parses (index not corrupted).
+        let block0_phys = {
+            let di = fs.read_inode(&cx, dir_ino).unwrap();
+            fs.collect_extents(&cx, &di)
+                .unwrap()
+                .iter()
+                .find(|e| e.logical_block == 0)
+                .unwrap()
+                .physical_start
+        };
+        let dxr = fs.read_block_vec(&cx, BlockNumber(block0_phys)).unwrap();
+        assert!(
+            !ffs_ondisk::parse_dx_root(&dxr).expect("dx_root parses").entries.is_empty(),
+            "dx_root index must survive the casefold create"
         );
     }
 

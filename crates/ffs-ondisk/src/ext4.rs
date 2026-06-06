@@ -6102,12 +6102,13 @@ where
 /// lives in the leaf whose hash range contains `dx_hash(name)`). Returns `None` if
 /// the index cannot be parsed/read, so callers must refuse to mutate rather than
 /// fall back to a linear write into the DX root.
-pub fn htree_target_leaf_block<F, H>(
+fn htree_target_leaf_block_inner<F, H>(
     hash_seed: &[u32; 4],
     has_large_dir: bool,
     name: &[u8],
     effective_hash_version: H,
     mut read_logical_dir_block: F,
+    casefold: bool,
 ) -> Option<u32>
 where
     F: FnMut(u32) -> Option<Vec<u8>>,
@@ -6120,7 +6121,11 @@ where
     }
 
     let hash_version = effective_hash_version(dx_root.hash_version);
-    let (hash, _minor) = dx_hash(hash_version, name, hash_seed);
+    // Casefold dirs index by the folded name (byte-exact for ASCII), so the
+    // target leaf for an insert is the one the folded hash maps to.
+    let folded = if casefold { Some(casefold_name(name)) } else { None };
+    let hash_input = folded.as_deref().unwrap_or(name);
+    let (hash, _minor) = dx_hash(hash_version, hash_input, hash_seed);
 
     let indirect_levels = usize::from(dx_root.indirect_levels);
     let mut entries = dx_root.entries;
@@ -6137,6 +6142,54 @@ where
     }
 
     Some(entries.get(idx)?.block)
+}
+
+/// Resolve the DX leaf block that a new entry named `name` must be inserted into
+/// (exact-name hashing). See [`htree_target_leaf_block_inner`].
+pub fn htree_target_leaf_block<F, H>(
+    hash_seed: &[u32; 4],
+    has_large_dir: bool,
+    name: &[u8],
+    effective_hash_version: H,
+    read_logical_dir_block: F,
+) -> Option<u32>
+where
+    F: FnMut(u32) -> Option<Vec<u8>>,
+    H: Fn(u8) -> u8,
+{
+    htree_target_leaf_block_inner(
+        hash_seed,
+        has_large_dir,
+        name,
+        effective_hash_version,
+        read_logical_dir_block,
+        false,
+    )
+}
+
+/// Casefold counterpart of [`htree_target_leaf_block`]: resolves the insert
+/// target leaf by hashing the case-folded name, matching how the kernel indexes
+/// `EXT4_CASEFOLD_FL` directories. Byte-exact to the kernel for ASCII names;
+/// callers must restrict casefold inserts to names where the fold is exact.
+pub fn htree_target_leaf_block_casefold<F, H>(
+    hash_seed: &[u32; 4],
+    has_large_dir: bool,
+    name: &[u8],
+    effective_hash_version: H,
+    read_logical_dir_block: F,
+) -> Option<u32>
+where
+    F: FnMut(u32) -> Option<Vec<u8>>,
+    H: Fn(u8) -> u8,
+{
+    htree_target_leaf_block_inner(
+        hash_seed,
+        has_large_dir,
+        name,
+        effective_hash_version,
+        read_logical_dir_block,
+        true,
+    )
 }
 
 /// Enumerate the logical block numbers of *every* leaf in a hash-indexed
@@ -9158,6 +9211,45 @@ mod tests {
             score >= 2.0,
             "Score {score} must clear 2.0 (linear {total_leaf_blocks} leaves -> casefold descent {reads} reads)"
         );
+    }
+
+    /// bd-owt2r (insert side): the casefold insert target-leaf locator places a
+    /// new entry into the exact leaf a case-insensitive lookup descends to. For
+    /// every stored (lowercase) name, inserting its UPPERCASE variant must target
+    /// the same leaf the stored name's exact hash maps to — so the kernel (and
+    /// FrankenFS's casefold lookup) finds it. Proves the write side is consistent
+    /// with the read side for ASCII casefold names.
+    #[test]
+    fn htree_target_leaf_block_casefold_targets_the_lookup_leaf_bd_owt2r() {
+        let bs = 1024_usize;
+        let seed = [0x0bad_f00d_u32, 0xfeed_face, 0xdead_beef, 0xcafe_b0ba];
+        let hash_version = 1_u8;
+        let names: Vec<Vec<u8>> = (0..400)
+            .map(|i| format!("file_{i:06}").into_bytes())
+            .collect();
+        let entries: Vec<(u32, u8, &[u8])> = names
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (100 + u32::try_from(i).unwrap(), EXT4_FT_REG_FILE, n.as_slice()))
+            .collect();
+        let blocks = build_htree_directory(2, 2, &entries, bs, hash_version, &seed, false)
+            .expect("casefold htree builds");
+        assert!(blocks.len() > 4, "need several leaves for a meaningful test");
+
+        for lower in names.iter().step_by(37) {
+            let upper = lower.to_ascii_uppercase();
+            let cf_leaf = htree_target_leaf_block_casefold(&seed, false, &upper, |v| v, |lb| {
+                blocks.get(lb as usize).cloned()
+            });
+            let exact_leaf = htree_target_leaf_block(&seed, false, lower, |v| v, |lb| {
+                blocks.get(lb as usize).cloned()
+            });
+            assert!(cf_leaf.is_some(), "casefold target leaf must resolve for {upper:?}");
+            assert_eq!(
+                cf_leaf, exact_leaf,
+                "casefold insert of {upper:?} must target the leaf holding {lower:?}"
+            );
+        }
     }
 
     /// bd-owt2r: the stamped two-level builder is both navigable AND fully
