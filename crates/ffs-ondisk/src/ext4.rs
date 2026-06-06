@@ -6167,10 +6167,12 @@ where
     )
 }
 
-/// Casefold counterpart of [`htree_target_leaf_block`]: resolves the insert
-/// target leaf by hashing the case-folded name, matching how the kernel indexes
-/// `EXT4_CASEFOLD_FL` directories. Byte-exact to the kernel for ASCII names;
-/// callers must restrict casefold inserts to names where the fold is exact.
+/// Casefold counterpart of [`htree_target_leaf_block`].
+///
+/// Resolves the insert target leaf by hashing the case-folded name, matching how
+/// the kernel indexes `EXT4_CASEFOLD_FL` directories. Byte-exact to the kernel
+/// for ASCII names; callers must restrict casefold inserts to names where the
+/// fold is exact.
 pub fn htree_target_leaf_block_casefold<F, H>(
     hash_seed: &[u32; 4],
     has_large_dir: bool,
