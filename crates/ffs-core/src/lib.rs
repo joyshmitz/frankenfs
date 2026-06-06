@@ -12154,10 +12154,20 @@ impl OpenFs {
                 ino: u32::try_from(parent.0).unwrap_or(u32::MAX),
                 generation: parent_upd.generation,
             };
+            // Snapshot the cache namespace from the pre-mutation inode: the
+            // extent cache keys entries by FNV(extent_root_bytes), which shifts
+            // once `set_extent_root` rewrites i_block below. Invalidating under
+            // the post-mutation namespace would target a different key and leave
+            // this directory's previously-cached entries orphaned under the old
+            // namespace (the stale-hole window tracked by bd-j6ljg). Capture the
+            // namespace the entries were actually cached under, matching the
+            // pre-mutation invalidation order used on the file write-allocate
+            // path. (bd-j6ljg's proper fix is a stable (ino,generation) key.)
+            let parent_extent_ns = extent_root_namespace(&parent_upd);
             ffs_btree::insert(cx, dev, &mut root_bytes, extent, &mut tree_alloc)?;
             Self::set_extent_root(&mut parent_upd, &root_bytes);
             self.extent_cache.invalidate_range(
-                extent_root_namespace(&parent_upd),
+                parent_extent_ns,
                 logical_end,
                 u64::from(u32::MAX - logical_end),
             );
