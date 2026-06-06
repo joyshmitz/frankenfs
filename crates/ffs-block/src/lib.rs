@@ -1762,6 +1762,19 @@ enum ArcList {
     B2,
 }
 
+#[cfg(feature = "s3fifo")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct S3GhostEntry {
+    key: BlockNumber,
+    generation: u64,
+}
+
+#[cfg(feature = "s3fifo")]
+type GhostQueueEntry = S3GhostEntry;
+
+#[cfg(not(feature = "s3fifo"))]
+type GhostQueueEntry = BlockNumber;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DirtyState {
     InFlight,
@@ -2110,8 +2123,16 @@ struct ArcState {
     p: usize,
     t1: VecDeque<BlockNumber>,
     t2: VecDeque<BlockNumber>,
-    b1: VecDeque<BlockNumber>,
-    b2: VecDeque<BlockNumber>,
+    b1: VecDeque<GhostQueueEntry>,
+    b2: VecDeque<GhostQueueEntry>,
+    #[cfg(feature = "s3fifo")]
+    b1_live_len: usize,
+    #[cfg(feature = "s3fifo")]
+    b2_live_len: usize,
+    #[cfg(feature = "s3fifo")]
+    ghost_generations: HashMap<BlockNumber, u64>,
+    #[cfg(feature = "s3fifo")]
+    next_ghost_generation: u64,
     loc: HashMap<BlockNumber, ArcList>,
     resident: HashMap<BlockNumber, BlockBuf>,
     /// Ordered dirty block tracking for write-back and durability accounting.
@@ -2189,6 +2210,14 @@ impl ArcState {
             t2: VecDeque::new(),
             b1: VecDeque::new(),
             b2: VecDeque::new(),
+            #[cfg(feature = "s3fifo")]
+            b1_live_len: 0,
+            #[cfg(feature = "s3fifo")]
+            b2_live_len: 0,
+            #[cfg(feature = "s3fifo")]
+            ghost_generations: HashMap::new(),
+            #[cfg(feature = "s3fifo")]
+            next_ghost_generation: 1,
             loc: HashMap::new(),
             resident: HashMap::new(),
             dirty: DirtyTracker::default(),
@@ -2253,6 +2282,28 @@ impl ArcState {
         self.t1.len() + self.t2.len()
     }
 
+    fn b1_len(&self) -> usize {
+        #[cfg(feature = "s3fifo")]
+        {
+            self.b1_live_len
+        }
+        #[cfg(not(feature = "s3fifo"))]
+        {
+            self.b1.len()
+        }
+    }
+
+    fn b2_len(&self) -> usize {
+        #[cfg(feature = "s3fifo")]
+        {
+            self.b2_live_len
+        }
+        #[cfg(not(feature = "s3fifo"))]
+        {
+            self.b2.len()
+        }
+    }
+
     #[cfg(not(feature = "s3fifo"))]
     fn total_len(&self) -> usize {
         self.t1.len() + self.t2.len() + self.b1.len() + self.b2.len()
@@ -2266,8 +2317,8 @@ impl ArcState {
             dirty_flushes: self.dirty_flushes,
             t1_len: self.t1.len(),
             t2_len: self.t2.len(),
-            b1_len: self.b1.len(),
-            b2_len: self.b2.len(),
+            b1_len: self.b1_len(),
+            b2_len: self.b2_len(),
             resident: self.resident_len(),
             dirty_blocks: self.dirty.dirty_count(),
             dirty_bytes: self.dirty.dirty_bytes(),
@@ -2337,13 +2388,7 @@ impl ArcState {
             }
             let freed_bytes = self.resident.get(&victim).map_or(0, BlockBuf::len);
             if self.evict_resident(victim) {
-                if from_t1 {
-                    self.b1.push_back(victim);
-                    self.loc.insert(victim, ArcList::B1);
-                } else {
-                    self.b2.push_back(victim);
-                    self.loc.insert(victim, ArcList::B2);
-                }
+                self.push_ghost(victim, if from_t1 { ArcList::B1 } else { ArcList::B2 });
                 self.evictions = self.evictions.saturating_add(1);
                 batch.evicted_blocks = batch.evicted_blocks.saturating_add(1);
                 batch.evicted_bytes = batch.evicted_bytes.saturating_add(freed_bytes);
@@ -2359,16 +2404,7 @@ impl ArcState {
                 break;
             }
         }
-        while self.b1.len() > self.capacity {
-            if let Some(victim) = self.b1.pop_front() {
-                let _ = self.loc.remove(&victim);
-            }
-        }
-        while self.b2.len() > self.capacity {
-            if let Some(victim) = self.b2.pop_front() {
-                let _ = self.loc.remove(&victim);
-            }
-        }
+        self.trim_ghosts_to(self.capacity);
         batch
     }
 
@@ -2386,6 +2422,173 @@ impl ArcState {
             return true;
         }
         false
+    }
+
+    #[cfg(feature = "s3fifo")]
+    fn live_ghost_entry(&self, entry: S3GhostEntry, list: ArcList) -> bool {
+        matches!(self.loc.get(&entry.key), Some(current) if *current == list)
+            && self
+                .ghost_generations
+                .get(&entry.key)
+                .is_some_and(|generation| *generation == entry.generation)
+    }
+
+    #[cfg(feature = "s3fifo")]
+    fn next_ghost_entry(&mut self, key: BlockNumber) -> S3GhostEntry {
+        let generation = self.next_ghost_generation;
+        self.next_ghost_generation = self.next_ghost_generation.saturating_add(1);
+        let _ = self.ghost_generations.insert(key, generation);
+        S3GhostEntry { key, generation }
+    }
+
+    #[cfg(all(feature = "s3fifo", test))]
+    fn b1_live_keys(&self) -> impl Iterator<Item = BlockNumber> + '_ {
+        self.b1
+            .iter()
+            .copied()
+            .filter(|entry| self.live_ghost_entry(*entry, ArcList::B1))
+            .map(|entry| entry.key)
+    }
+
+    #[cfg(all(feature = "s3fifo", test))]
+    fn b2_live_keys(&self) -> impl Iterator<Item = BlockNumber> + '_ {
+        self.b2
+            .iter()
+            .copied()
+            .filter(|entry| self.live_ghost_entry(*entry, ArcList::B2))
+            .map(|entry| entry.key)
+    }
+
+    #[cfg(all(feature = "s3fifo", test))]
+    fn b1_front_live(&self) -> Option<BlockNumber> {
+        self.b1_live_keys().next()
+    }
+
+    #[cfg(all(feature = "s3fifo", test))]
+    fn b1_contains_live(&self, key: BlockNumber) -> bool {
+        self.b1_live_keys().any(|entry| entry == key)
+    }
+
+    fn push_ghost(&mut self, key: BlockNumber, list: ArcList) {
+        match list {
+            ArcList::B1 => {
+                #[cfg(feature = "s3fifo")]
+                {
+                    let _ = self.remove_live_ghost(key);
+                    let entry = self.next_ghost_entry(key);
+                    self.b1.push_back(entry);
+                    self.b1_live_len = self.b1_live_len.saturating_add(1);
+                }
+                #[cfg(not(feature = "s3fifo"))]
+                {
+                    self.b1.push_back(key);
+                }
+                self.loc.insert(key, ArcList::B1);
+            }
+            ArcList::B2 => {
+                #[cfg(feature = "s3fifo")]
+                {
+                    let _ = self.remove_live_ghost(key);
+                    let entry = self.next_ghost_entry(key);
+                    self.b2.push_back(entry);
+                    self.b2_live_len = self.b2_live_len.saturating_add(1);
+                }
+                #[cfg(not(feature = "s3fifo"))]
+                {
+                    self.b2.push_back(key);
+                }
+                self.loc.insert(key, ArcList::B2);
+            }
+            ArcList::T1 | ArcList::T2 => {}
+        }
+    }
+
+    #[cfg(feature = "s3fifo")]
+    fn remove_live_ghost(&mut self, key: BlockNumber) -> bool {
+        match self.loc.get(&key).copied() {
+            Some(ArcList::B1) => {
+                self.b1_live_len = self.b1_live_len.saturating_sub(1);
+                let _ = self.ghost_generations.remove(&key);
+                let _ = self.loc.remove(&key);
+                true
+            }
+            Some(ArcList::B2) => {
+                self.b2_live_len = self.b2_live_len.saturating_sub(1);
+                let _ = self.ghost_generations.remove(&key);
+                let _ = self.loc.remove(&key);
+                true
+            }
+            Some(ArcList::T1 | ArcList::T2) | None => false,
+        }
+    }
+
+    fn pop_b1_front(&mut self) -> Option<BlockNumber> {
+        #[cfg(feature = "s3fifo")]
+        {
+            while let Some(victim) = self.b1.pop_front() {
+                if self.live_ghost_entry(victim, ArcList::B1) {
+                    self.b1_live_len = self.b1_live_len.saturating_sub(1);
+                    let _ = self.ghost_generations.remove(&victim.key);
+                    let _ = self.loc.remove(&victim.key);
+                    return Some(victim.key);
+                }
+            }
+            self.b1_live_len = 0;
+            None
+        }
+        #[cfg(not(feature = "s3fifo"))]
+        {
+            self.b1.pop_front().inspect(|victim| {
+                let _ = self.loc.remove(victim);
+            })
+        }
+    }
+
+    fn pop_b2_front(&mut self) -> Option<BlockNumber> {
+        #[cfg(feature = "s3fifo")]
+        {
+            while let Some(victim) = self.b2.pop_front() {
+                if self.live_ghost_entry(victim, ArcList::B2) {
+                    self.b2_live_len = self.b2_live_len.saturating_sub(1);
+                    let _ = self.ghost_generations.remove(&victim.key);
+                    let _ = self.loc.remove(&victim.key);
+                    return Some(victim.key);
+                }
+            }
+            self.b2_live_len = 0;
+            None
+        }
+        #[cfg(not(feature = "s3fifo"))]
+        {
+            self.b2.pop_front().inspect(|victim| {
+                let _ = self.loc.remove(victim);
+            })
+        }
+    }
+
+    fn trim_ghosts_to(&mut self, capacity: usize) {
+        while self.b1_len() > capacity {
+            let _ = self.pop_b1_front();
+        }
+        while self.b2_len() > capacity {
+            let _ = self.pop_b2_front();
+        }
+    }
+
+    fn remove_ghost_block(&mut self, key: BlockNumber) -> bool {
+        #[cfg(feature = "s3fifo")]
+        {
+            self.remove_live_ghost(key)
+        }
+        #[cfg(not(feature = "s3fifo"))]
+        {
+            let removed = Self::remove_from_list(&mut self.b1, key)
+                | Self::remove_from_list(&mut self.b2, key);
+            if removed {
+                let _ = self.loc.remove(&key);
+            }
+            removed
+        }
     }
 
     fn evict_resident(&mut self, victim: BlockNumber) -> bool {
@@ -2609,13 +2812,8 @@ impl ArcState {
         let has_cache_history = self.loc.contains_key(&key);
         let bypass = self.sequential_read_miss_streak >= 2 && !has_cache_history;
         if bypass {
-            self.loc.insert(key, ArcList::B1);
-            self.b1.push_back(key);
-            while self.b1.len() > self.ghost_capacity {
-                if let Some(victim) = self.b1.pop_front() {
-                    let _ = self.loc.remove(&victim);
-                }
-            }
+            self.push_ghost(key, ArcList::B1);
+            self.trim_ghosts_to(self.ghost_capacity);
             trace!(
                 target: "ffs::block::s3fifo",
                 event = "admission_decision",
@@ -2624,7 +2822,7 @@ impl ArcState {
                 sequential_read_miss_streak = self.sequential_read_miss_streak,
                 small_len = self.t1.len(),
                 main_len = self.t2.len(),
-                ghost_len = self.b1.len()
+                ghost_len = self.b1_len()
             );
             self.s3_emit_summary_if_due();
             true
@@ -2662,8 +2860,7 @@ impl ArcState {
                     queue = "resident",
                     detail = "hit observed for ghost location; repairing to resident queue"
                 );
-                let _ = Self::remove_from_list(&mut self.b1, key);
-                let _ = Self::remove_from_list(&mut self.b2, key);
+                let _ = self.remove_live_ghost(key);
                 let _ = Self::remove_from_list(&mut self.t1, key);
                 let _ = Self::remove_from_list(&mut self.t2, key);
                 self.t1.push_back(key);
@@ -2679,8 +2876,7 @@ impl ArcState {
                 );
                 let _ = Self::remove_from_list(&mut self.t1, key);
                 let _ = Self::remove_from_list(&mut self.t2, key);
-                let _ = Self::remove_from_list(&mut self.b1, key);
-                let _ = Self::remove_from_list(&mut self.b2, key);
+                let _ = self.remove_live_ghost(key);
                 self.t1.push_back(key);
                 self.loc.insert(key, ArcList::T1);
             }
@@ -2695,7 +2891,7 @@ impl ArcState {
             access_count,
             small_len = self.t1.len(),
             main_len = self.t2.len(),
-            ghost_len = self.b1.len()
+            ghost_len = self.b1_len()
         );
         self.s3_emit_summary_if_due();
     }
@@ -2724,8 +2920,7 @@ impl ArcState {
 
         let ghost_hit = matches!(self.loc.get(&key), Some(ArcList::B1 | ArcList::B2));
         if ghost_hit {
-            let _ = Self::remove_from_list(&mut self.b1, key);
-            let _ = Self::remove_from_list(&mut self.b2, key);
+            let _ = self.remove_live_ghost(key);
             self.loc.insert(key, ArcList::T2);
             self.t2.push_back(key);
             let _ = self.access_count.insert(key, S3AccessHandle::new(1));
@@ -2741,7 +2936,7 @@ impl ArcState {
                     self.small_capacity,
                     self.t2.len(),
                     self.main_capacity,
-                    self.b1.len(),
+                    self.b1_len(),
                     self.ghost_capacity
                 )
             );
@@ -2754,7 +2949,7 @@ impl ArcState {
                 access_count = 1_u8,
                 small_len = self.t1.len(),
                 main_len = self.t2.len(),
-                ghost_len = self.b1.len()
+                ghost_len = self.b1_len()
             );
         } else {
             self.loc.insert(key, ArcList::T1);
@@ -2772,7 +2967,7 @@ impl ArcState {
                     self.small_capacity,
                     self.t2.len(),
                     self.main_capacity,
-                    self.b1.len(),
+                    self.b1_len(),
                     self.ghost_capacity
                 )
             );
@@ -2785,7 +2980,7 @@ impl ArcState {
                 access_count = 0_u8,
                 small_len = self.t1.len(),
                 main_len = self.t2.len(),
-                ghost_len = self.b1.len()
+                ghost_len = self.b1_len()
             );
         }
 
@@ -2825,11 +3020,10 @@ impl ArcState {
                     access_count,
                     small_len = self.t1.len(),
                     main_len = self.t2.len(),
-                    ghost_len = self.b1.len()
+                    ghost_len = self.b1_len()
                 );
             } else if self.evict_resident(victim) {
-                self.loc.insert(victim, ArcList::B1);
-                self.b1.push_back(victim);
+                self.push_ghost(victim, ArcList::B1);
                 self.evictions = self.evictions.saturating_add(1);
                 trace!(
                     target: "ffs::block::s3fifo",
@@ -2840,7 +3034,7 @@ impl ArcState {
                     access_count,
                     small_len = self.t1.len(),
                     main_len = self.t2.len(),
-                    ghost_len = self.b1.len()
+                    ghost_len = self.b1_len()
                 );
             } else {
                 self.t1.push_back(victim);
@@ -2878,14 +3072,13 @@ impl ArcState {
                     access_count = next_count,
                     small_len = self.t1.len(),
                     main_len = self.t2.len(),
-                    ghost_len = self.b1.len()
+                    ghost_len = self.b1_len()
                 );
                 continue;
             }
 
             if self.evict_resident(victim) {
-                self.loc.insert(victim, ArcList::B1);
-                self.b1.push_back(victim);
+                self.push_ghost(victim, ArcList::B1);
                 self.evictions = self.evictions.saturating_add(1);
                 trace!(
                     target: "ffs::block::s3fifo",
@@ -2896,7 +3089,7 @@ impl ArcState {
                     access_count,
                     small_len = self.t1.len(),
                     main_len = self.t2.len(),
-                    ghost_len = self.b1.len()
+                    ghost_len = self.b1_len()
                 );
             } else {
                 self.t2.push_back(victim);
@@ -2904,10 +3097,9 @@ impl ArcState {
             }
         }
 
-        while self.b1.len() > self.ghost_capacity {
-            let overflow_by = self.b1.len().saturating_sub(self.ghost_capacity);
-            if let Some(victim) = self.b1.pop_front() {
-                let _ = self.loc.remove(&victim);
+        while self.b1_len() > self.ghost_capacity {
+            let overflow_by = self.b1_len().saturating_sub(self.ghost_capacity);
+            if let Some(victim) = self.pop_b1_front() {
                 warn!(
                     target: "ffs::block::s3fifo",
                     event = "ghost_overflow_recovery",
@@ -2938,8 +3130,7 @@ impl ArcState {
                 break;
             };
             if self.evict_resident(victim) {
-                self.loc.insert(victim, ArcList::B1);
-                self.b1.push_back(victim);
+                self.push_ghost(victim, ArcList::B1);
                 self.evictions = self.evictions.saturating_add(1);
                 trace!(
                     target: "ffs::block::s3fifo",
@@ -2949,7 +3140,7 @@ impl ArcState {
                     to_queue = "ghost",
                     small_len = self.t1.len(),
                     main_len = self.t2.len(),
-                    ghost_len = self.b1.len()
+                    ghost_len = self.b1_len()
                 );
             } else if from_t1 {
                 self.t1.push_back(victim);
@@ -3005,8 +3196,7 @@ impl ArcState {
                     let _ = Self::remove_from_list(&mut self.t2, victim);
                 }
                 if self.evict_resident(victim) {
-                    self.loc.insert(victim, ArcList::B1);
-                    self.b1.push_back(victim);
+                    self.push_ghost(victim, ArcList::B1);
                     self.evictions = self.evictions.saturating_add(1);
                 } else if from_t1 {
                     self.t1.push_back(victim);
@@ -3088,7 +3278,7 @@ impl ArcState {
             hits = self.hits,
             misses = self.misses,
             evictions = self.evictions,
-            ghost_hits = self.b1.len(),
+            ghost_hits = self.b1_len(),
             occupancy = self.resident_len(),
             mode = "s3fifo"
         );
@@ -4858,8 +5048,7 @@ impl<D: BlockDevice> BlockCache for ArcCache<D> {
         let mut removed = false;
         removed |= ArcState::remove_from_list(&mut guard.t1, block);
         removed |= ArcState::remove_from_list(&mut guard.t2, block);
-        removed |= ArcState::remove_from_list(&mut guard.b1, block);
-        removed |= ArcState::remove_from_list(&mut guard.b2, block);
+        removed |= guard.remove_ghost_block(block);
         removed |= guard.resident.remove(&block).is_some();
         guard.clear_dirty_unconditional(block);
         let _ = guard.loc.remove(&block);
@@ -5605,13 +5794,31 @@ mod tests {
             assert!(matches!(state.loc.get(&k), Some(ArcList::T2)));
             assert!(state.resident.contains_key(&k));
         }
-        for &k in &state.b1 {
-            assert!(matches!(state.loc.get(&k), Some(ArcList::B1)));
-            assert!(!state.resident.contains_key(&k));
+        #[cfg(feature = "s3fifo")]
+        {
+            let b1_live: Vec<_> = state.b1_live_keys().collect();
+            let b2_live: Vec<_> = state.b2_live_keys().collect();
+            assert_eq!(b1_live.len(), state.b1_len());
+            assert_eq!(b2_live.len(), state.b2_len());
+            for k in b1_live {
+                assert!(matches!(state.loc.get(&k), Some(ArcList::B1)));
+                assert!(!state.resident.contains_key(&k));
+            }
+            for k in b2_live {
+                assert!(matches!(state.loc.get(&k), Some(ArcList::B2)));
+                assert!(!state.resident.contains_key(&k));
+            }
         }
-        for &k in &state.b2 {
-            assert!(matches!(state.loc.get(&k), Some(ArcList::B2)));
-            assert!(!state.resident.contains_key(&k));
+        #[cfg(not(feature = "s3fifo"))]
+        {
+            for &k in &state.b1 {
+                assert!(matches!(state.loc.get(&k), Some(ArcList::B1)));
+                assert!(!state.resident.contains_key(&k));
+            }
+            for &k in &state.b2 {
+                assert!(matches!(state.loc.get(&k), Some(ArcList::B2)));
+                assert!(!state.resident.contains_key(&k));
+            }
         }
     }
 
@@ -6149,7 +6356,7 @@ mod tests {
             "single touches should not stay in main"
         );
         assert!(
-            !state.b1.is_empty(),
+            state.b1_len() > 0,
             "single-touch entries should be demoted into ghost queue"
         );
         assert!(state.resident_len() <= state.capacity);
@@ -6163,7 +6370,7 @@ mod tests {
         for key in 0..9_u64 {
             s3_access(&mut state, BlockNumber(key));
         }
-        let ghost_key = state.b1.front().copied().expect("ghost entry");
+        let ghost_key = state.b1_front_live().expect("ghost entry");
         s3_access(&mut state, ghost_key);
 
         assert!(
@@ -6268,7 +6475,7 @@ mod tests {
         s3_access(&mut state, BlockNumber(1)); // overflows small, key 0 (access_count=0) -> ghost
 
         assert!(
-            state.b1.contains(&BlockNumber(0)),
+            state.b1_contains_live(BlockNumber(0)),
             "block 0 with access_count=0 should be moved to ghost"
         );
         assert!(
@@ -6288,8 +6495,9 @@ mod tests {
         }
 
         let expected_ghost = VecDeque::from(vec![BlockNumber(0), BlockNumber(1), BlockNumber(2)]);
+        let actual_ghost: VecDeque<_> = state.b1_live_keys().collect();
         assert_eq!(
-            state.b1, expected_ghost,
+            actual_ghost, expected_ghost,
             "small-queue victims should enter ghost in FIFO order"
         );
         assert!(
@@ -6335,9 +6543,9 @@ mod tests {
         }
 
         assert!(
-            state.b1.len() <= state.ghost_capacity,
-            "ghost queue {} should not exceed ghost_capacity {}",
-            state.b1.len(),
+            state.b1_len() <= state.ghost_capacity,
+            "live ghost queue {} should not exceed ghost_capacity {}",
+            state.b1_len(),
             state.ghost_capacity
         );
     }
@@ -6690,7 +6898,7 @@ mod tests {
         }
         let ghost_key = {
             let guard = cache.state.lock();
-            guard.b1.front().copied().expect("ghost entry")
+            guard.b1_front_live().expect("ghost entry")
         };
 
         let _ = cache.read_block(&cx, ghost_key).expect("ghost re-read");
@@ -10736,11 +10944,23 @@ write_latency: 0ns, bandwidth_bps: 0, stall_probability: 0.0, stall_duration: \
             for &k in &state.t2 {
                 prop_assert!(state.loc.contains_key(&k), "T2 key {:?} not in loc", k);
             }
-            for &k in &state.b1 {
-                prop_assert!(state.loc.contains_key(&k), "B1 key {:?} not in loc", k);
+            #[cfg(feature = "s3fifo")]
+            {
+                for k in state.b1_live_keys() {
+                    prop_assert!(!state.resident.contains_key(&k), "live B1 key {:?} is resident", k);
+                }
+                for k in state.b2_live_keys() {
+                    prop_assert!(!state.resident.contains_key(&k), "live B2 key {:?} is resident", k);
+                }
             }
-            for &k in &state.b2 {
-                prop_assert!(state.loc.contains_key(&k), "B2 key {:?} not in loc", k);
+            #[cfg(not(feature = "s3fifo"))]
+            {
+                for &k in &state.b1 {
+                    prop_assert!(state.loc.contains_key(&k), "B1 key {:?} not in loc", k);
+                }
+                for &k in &state.b2 {
+                    prop_assert!(state.loc.contains_key(&k), "B2 key {:?} not in loc", k);
+                }
             }
         }
 
