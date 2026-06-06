@@ -3828,30 +3828,57 @@ impl<D: BlockDevice> BlockDevice for MvccBlockDevice<D> {
 
         let count = u64::try_from(bufs.len())
             .map_err(|_| FfsError::Format("block count does not fit u64".to_owned()))?;
-        let end = start
+        start
             .0
             .checked_add(count)
             .ok_or_else(|| FfsError::Format("block range overflow".to_owned()))?;
         let snap = self.read_snapshot();
 
+        // Single pass under one read guard at a single snapshot: capture the
+        // bytes of MVCC-visible blocks and leave the rest as base gaps. No
+        // device I/O is performed while the lock is held. Using one snapshot for
+        // the whole range (rather than re-fetching per block as the prior
+        // per-block `read_block` loop did) also keeps the contiguous read
+        // internally consistent under `read_your_writes`.
+        let mut visible: Vec<Option<Vec<u8>>> = Vec::with_capacity(bufs.len());
+        let mut any_visible = false;
         {
             let guard = self.store.read();
-            let has_visible = (start.0..end)
-                .map(BlockNumber)
-                .any(|block| guard.read_visible(block, snap).is_some());
-            if !has_visible {
-                drop(guard);
-                return self.base.read_contiguous_blocks(cx, start, bufs);
+            for delta in 0..count {
+                let block = BlockNumber(start.0 + delta);
+                match guard.read_visible(block, snap) {
+                    Some(bytes) => {
+                        visible.push(Some(bytes.into_owned()));
+                        any_visible = true;
+                    }
+                    None => visible.push(None),
+                }
             }
         }
 
-        for (idx, buf) in bufs.iter_mut().enumerate() {
-            let delta = u64::try_from(idx)
-                .map_err(|_| FfsError::Format("block index does not fit u64".to_owned()))?;
-            let block = BlockNumber(start.0.checked_add(delta).ok_or_else(|| {
-                FfsError::Format("contiguous read block range overflow".to_owned())
-            })?);
-            *buf = self.read_block(cx, block)?;
+        // Fast path: nothing overlaid by MVCC — one ranged base read, unchanged.
+        if !any_visible {
+            return self.base.read_contiguous_blocks(cx, start, bufs);
+        }
+
+        // Fill visible blocks from the captured bytes and coalesce maximal runs
+        // of base-resident gap blocks into ranged base reads — restoring
+        // vectored I/O for the gaps instead of one scalar `read_block` per gap
+        // block. Per-block bytes are identical to the prior path.
+        let mut idx = 0usize;
+        while idx < bufs.len() {
+            if let Some(bytes) = visible[idx].take() {
+                bufs[idx] = BlockBuf::new(bytes);
+                idx += 1;
+                continue;
+            }
+            let run_start = idx;
+            while idx < bufs.len() && visible[idx].is_none() {
+                idx += 1;
+            }
+            let run_block_start = BlockNumber(start.0 + run_start as u64);
+            self.base
+                .read_contiguous_blocks(cx, run_block_start, &mut bufs[run_start..idx])?;
         }
         Ok(())
     }
@@ -4134,6 +4161,162 @@ mod tests {
             *dev.blocks.read().get(&BlockNumber(20)).unwrap(),
             vec![0xAB; BS as usize]
         );
+    }
+
+    /// Base device that counts scalar `read_block` calls and records each
+    /// `read_contiguous_blocks` run length, to prove the MVCC contiguous read
+    /// coalesces base-resident gaps into ranged reads.
+    #[derive(Debug)]
+    struct ReadRunCountingDevice {
+        block_size: u32,
+        block_count: u64,
+        blocks: parking_lot::RwLock<HashMap<BlockNumber, Vec<u8>>>,
+        scalar_reads: std::sync::atomic::AtomicUsize,
+        ranged_runs: parking_lot::RwLock<Vec<usize>>,
+    }
+
+    impl ReadRunCountingDevice {
+        fn new(block_size: u32, block_count: u64) -> Self {
+            Self {
+                block_size,
+                block_count,
+                blocks: parking_lot::RwLock::new(HashMap::new()),
+                scalar_reads: std::sync::atomic::AtomicUsize::new(0),
+                ranged_runs: parking_lot::RwLock::new(Vec::new()),
+            }
+        }
+        fn reset(&self) {
+            self.scalar_reads
+                .store(0, std::sync::atomic::Ordering::SeqCst);
+            self.ranged_runs.write().clear();
+        }
+        fn one(&self, block: BlockNumber) -> Vec<u8> {
+            let bs = self.block_size as usize;
+            self.blocks
+                .read()
+                .get(&block)
+                .cloned()
+                .unwrap_or_else(|| vec![0_u8; bs])
+        }
+    }
+
+    impl BlockDevice for ReadRunCountingDevice {
+        fn read_block(&self, _cx: &Cx, block: BlockNumber) -> ffs_error::Result<BlockBuf> {
+            self.scalar_reads
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(BlockBuf::new(self.one(block)))
+        }
+        fn write_block(&self, _cx: &Cx, block: BlockNumber, data: &[u8]) -> ffs_error::Result<()> {
+            self.blocks.write().insert(block, data.to_vec());
+            Ok(())
+        }
+        fn supports_contiguous_reads(&self) -> bool {
+            true
+        }
+        fn read_contiguous_blocks(
+            &self,
+            _cx: &Cx,
+            start: BlockNumber,
+            bufs: &mut [BlockBuf],
+        ) -> ffs_error::Result<()> {
+            self.ranged_runs.write().push(bufs.len());
+            for (i, buf) in bufs.iter_mut().enumerate() {
+                *buf = BlockBuf::new(self.one(BlockNumber(start.0 + i as u64)));
+            }
+            Ok(())
+        }
+        fn block_size(&self) -> u32 {
+            self.block_size
+        }
+        fn block_count(&self) -> u64 {
+            self.block_count
+        }
+        fn sync(&self, _cx: &Cx) -> ffs_error::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Isomorphism + Score proof for the MVCC contiguous-read batching lever:
+    /// when MVCC overlays only some blocks of a contiguous range, the prior
+    /// per-block `read_block` loop issued one SCALAR base read per gap block.
+    /// The single-pass coalescing path issues one RANGED base read per maximal
+    /// gap run, with byte-identical per-block results.
+    #[test]
+    fn mvcc_contiguous_read_coalesces_base_gaps_score() {
+        use sha2::{Digest, Sha256};
+        const BS: u32 = 512;
+        const N: u64 = 64;
+        const OVERLAY: u64 = 32; // single MVCC-overlaid block, splitting the range
+        let cx = test_cx();
+
+        let base = ReadRunCountingDevice::new(BS, N);
+        for b in 0..N {
+            base.write_block(&cx, BlockNumber(b), &vec![u8::try_from(b % 251).unwrap(); BS as usize])
+                .expect("seed base");
+        }
+
+        // Overlay exactly one block in the MVCC store with distinct bytes.
+        let store = Arc::new(RwLock::new(MvccStore::new()));
+        seed_block(&mut store.write(), BlockNumber(OVERLAY), &vec![0xEE; BS as usize]);
+        let snap = store.read().current_snapshot();
+        let dev = MvccBlockDevice::new(base, Arc::clone(&store), snap);
+
+        // Reference (prior behavior): per-block read_block over the range.
+        let old_bufs: Vec<BlockBuf> = (0..N)
+            .map(|i| dev.read_block(&cx, BlockNumber(i)).expect("read"))
+            .collect();
+        let old_scalar = dev.base().scalar_reads.load(std::sync::atomic::Ordering::SeqCst);
+
+        // New: single contiguous read.
+        dev.base().reset();
+        let mut new_bufs: Vec<BlockBuf> = (0..N).map(|_| BlockBuf::new(vec![0_u8; BS as usize])).collect();
+        dev.read_contiguous_blocks(&cx, BlockNumber(0), &mut new_bufs)
+            .expect("contiguous read");
+        let new_ranged = dev.base().ranged_runs.read().len();
+        let new_scalar = dev.base().scalar_reads.load(std::sync::atomic::Ordering::SeqCst);
+
+        // ISOMORPHISM: byte-identical per-block, including the overlaid block.
+        for i in 0..new_bufs.len() {
+            assert_eq!(
+                old_bufs[i].as_slice(),
+                new_bufs[i].as_slice(),
+                "block {i} bytes diverged"
+            );
+        }
+        let overlay_idx = usize::try_from(OVERLAY).expect("overlay index fits usize");
+        assert_eq!(new_bufs[overlay_idx].as_slice(), &[0xEE; BS as usize]);
+
+        // GOLDEN: sha256 over the concatenated contiguous-read output.
+        let mut hasher = Sha256::new();
+        for buf in &new_bufs {
+            hasher.update(buf.as_slice());
+        }
+        let golden = hex_lower(&hasher.finalize());
+        assert_eq!(
+            golden,
+            "6631d26c4e6e0d7f6f0414c59844ae2afcca85b291177918dabba0ccf8fbd9ca",
+            "golden contiguous-read digest changed"
+        );
+
+        // SCORE: 63 scalar base reads (one per gap block) → 2 ranged reads
+        // (the gap runs either side of the overlaid block).
+        assert_eq!(old_scalar, 63, "prior path: one scalar base read per gap block");
+        assert_eq!(new_ranged, 2, "two maximal gap runs around the overlay");
+        assert_eq!(new_scalar, 0, "no scalar base reads on the coalesced path");
+        let read_op_ratio = old_scalar as f64 / new_ranged as f64;
+        assert!(
+            read_op_ratio >= 2.0,
+            "Score {read_op_ratio} must clear 2.0 (got {old_scalar} -> {new_ranged})"
+        );
+    }
+
+    fn hex_lower(bytes: &[u8]) -> String {
+        use std::fmt::Write as _;
+        let mut s = String::with_capacity(bytes.len() * 2);
+        for b in bytes {
+            let _ = write!(s, "{b:02x}");
+        }
+        s
     }
 
     fn append_only_proof(base_len: usize) -> MergeProof {
