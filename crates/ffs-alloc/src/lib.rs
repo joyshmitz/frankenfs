@@ -38,6 +38,11 @@ struct ByteZeroRun {
 }
 
 const BYTE_ZERO_RUNS: [ByteZeroRun; 256] = build_byte_zero_runs();
+static HALFWORD_ZERO_RUNS: [u16; 65_536] = build_halfword_zero_runs();
+
+const ZERO_RUN_FIELD_MASK: u16 = 0x1F;
+const ZERO_RUN_SUFFIX_SHIFT: u16 = 5;
+const ZERO_RUN_BEST_SHIFT: u16 = 10;
 
 const fn build_byte_zero_runs() -> [ByteZeroRun; 256] {
     let mut runs = [ByteZeroRun {
@@ -87,6 +92,52 @@ const fn byte_zero_run(byte: u8) -> ByteZeroRun {
         suffix,
         best,
     }
+}
+
+#[expect(
+    clippy::large_stack_arrays,
+    reason = "const-evaluated static table initializer; no runtime stack allocation"
+)]
+const fn build_halfword_zero_runs() -> [u16; 65_536] {
+    let mut runs = [0_u16; 65_536];
+    let mut halfword = 0_u16;
+    loop {
+        runs[halfword as usize] = halfword_zero_run_summary(halfword);
+        if halfword == u16::MAX {
+            break;
+        }
+        halfword += 1;
+    }
+    runs
+}
+
+const fn halfword_zero_run_summary(halfword: u16) -> u16 {
+    let mut prefix = 0_u16;
+    while prefix < 16 && ((halfword >> prefix) & 1) == 0 {
+        prefix += 1;
+    }
+
+    let mut suffix = 0_u16;
+    while suffix < 16 && ((halfword >> (15 - suffix)) & 1) == 0 {
+        suffix += 1;
+    }
+
+    let mut best = 0_u16;
+    let mut run = 0_u16;
+    let mut bit = 0_u16;
+    while bit < 16 {
+        if ((halfword >> bit) & 1) == 0 {
+            run += 1;
+            if run > best {
+                best = run;
+            }
+        } else {
+            run = 0;
+        }
+        bit += 1;
+    }
+
+    prefix | (suffix << ZERO_RUN_SUFFIX_SHIFT) | (best << ZERO_RUN_BEST_SHIFT)
 }
 
 /// Get bit `idx` from a bitmap byte slice.
@@ -429,22 +480,31 @@ fn apply_word_zero_run(word: u64, run: &mut u32, best: &mut u32) {
         return;
     }
 
-    let prefix = word.trailing_zeros();
+    for shift in [0_u32, 16, 32, 48] {
+        apply_halfword_zero_run(halfword_zero_run_summary_at(word, shift), run, best);
+    }
+}
+
+fn halfword_zero_run_summary_at(word: u64, shift: u32) -> u16 {
+    let halfword = ((word >> shift) & 0xFFFF) as u16;
+    HALFWORD_ZERO_RUNS[usize::from(halfword)]
+}
+
+fn apply_halfword_zero_run(summary: u16, run: &mut u32, best: &mut u32) {
+    let prefix = u32::from(summary & ZERO_RUN_FIELD_MASK);
+    if prefix == 16 {
+        *run = run.saturating_add(16);
+        *best = (*best).max(*run);
+        return;
+    }
+
     if prefix > 0 {
         *best = (*best).max(run.saturating_add(prefix));
     }
-    *best = (*best).max(longest_zero_run_in_mixed_word(word));
-    *run = word.leading_zeros();
-}
-
-fn longest_zero_run_in_mixed_word(word: u64) -> u32 {
-    let mut free = !word;
-    let mut len = 0;
-    while free != 0 {
-        len += 1;
-        free &= free << 1;
-    }
-    len
+    *best = (*best).max(u32::from(
+        (summary >> ZERO_RUN_BEST_SHIFT) & ZERO_RUN_FIELD_MASK,
+    ));
+    *run = u32::from((summary >> ZERO_RUN_SUFFIX_SHIFT) & ZERO_RUN_FIELD_MASK);
 }
 
 fn apply_byte_zero_run(stats: ByteZeroRun, run: &mut u32, best: &mut u32) {
