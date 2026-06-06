@@ -49646,6 +49646,62 @@ mod tests {
             write(fs, cx, attr.ino, 16384, &vec![0x99_u8; 16384]);
             write(fs, cx, attr.ino, 65536, &vec![0xAA_u8; 16384]);
         });
+
+        // I: mkdir + a file inside it.
+        scenario("I_mkdir", &|fs, cx| {
+            let d = fs
+                .mkdir(cx, root, OsStr::new("sub"), 0o755, 0, 0)
+                .expect("mkdir");
+            let f = fs
+                .create(cx, d.ino, OsStr::new("inner.dat"), 0o644, 0, 0)
+                .expect("create");
+            write(fs, cx, f.ino, 0, &vec![0xBB_u8; 16384]);
+        });
+
+        // J: rename within the same directory.
+        scenario("J_rename_same_dir", &|fs, cx| {
+            let f = fs
+                .create(cx, root, OsStr::new("old.dat"), 0o644, 0, 0)
+                .expect("create");
+            write(fs, cx, f.ino, 0, &vec![0xCC_u8; 16384]);
+            fs.rename(cx, root, OsStr::new("old.dat"), root, OsStr::new("new.dat"))
+                .expect("rename");
+        });
+
+        // K: rename across directories (INODE_REF reparent).
+        scenario("K_rename_cross_dir", &|fs, cx| {
+            let d = fs
+                .mkdir(cx, root, OsStr::new("dst"), 0o755, 0, 0)
+                .expect("mkdir");
+            let f = fs
+                .create(cx, root, OsStr::new("mv.dat"), 0o644, 0, 0)
+                .expect("create");
+            write(fs, cx, f.ino, 0, &vec![0xDD_u8; 16384]);
+            fs.rename(cx, root, OsStr::new("mv.dat"), d.ino, OsStr::new("mv.dat"))
+                .expect("rename");
+        });
+
+        // L: hardlink — stresses the nlink == #INODE_REF invariant.
+        scenario("L_hardlink", &|fs, cx| {
+            let f = fs
+                .create(cx, root, OsStr::new("orig.dat"), 0o644, 0, 0)
+                .expect("create");
+            write(fs, cx, f.ino, 0, &vec![0xEE_u8; 16384]);
+            fs.link(cx, f.ino, root, OsStr::new("hard.dat")).expect("link");
+        });
+
+        // M: symlink.
+        scenario("M_symlink", &|fs, cx| {
+            fs.symlink(
+                cx,
+                root,
+                OsStr::new("sl"),
+                std::path::Path::new("orig.dat"),
+                0,
+                0,
+            )
+            .expect("symlink");
+        });
     }
 
     /// bd-myrgc diagnostic: commit a FrankenFS file then dump the extent tree +
