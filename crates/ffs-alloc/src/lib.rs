@@ -1692,7 +1692,7 @@ fn try_alloc_in_group(
 
         // Update group stats.
         groups[gidx].free_blocks = groups[gidx].free_blocks.saturating_sub(alloc_count);
-        groups[gidx].invalidate_block_largest_free_run();
+        groups[gidx].refresh_block_largest_free_run(&bitmap, blocks_in_group);
 
         let abs_start = geo.group_block_to_absolute(group, rel_start);
         Ok(Some(BlockAlloc {
@@ -1784,7 +1784,7 @@ pub fn free_blocks(
 
         dev.write_block(cx, gs.block_bitmap_block, &bitmap)?;
         groups[gidx].free_blocks = groups[gidx].free_blocks.saturating_add(segment.count);
-        groups[gidx].invalidate_block_largest_free_run();
+        groups[gidx].refresh_block_largest_free_run(&bitmap, geo.blocks_in_group(segment.group));
     }
     Ok(())
 }
@@ -1888,7 +1888,7 @@ fn try_alloc_safe(
         let previous_free_blocks = groups[gidx].free_blocks;
         let previous_largest_free_run = groups[gidx].block_largest_free_run;
         groups[gidx].free_blocks = previous_free_blocks.saturating_sub(alloc_count);
-        groups[gidx].invalidate_block_largest_free_run();
+        groups[gidx].refresh_block_largest_free_run(&bitmap, blocks_in_group);
 
         // Persist group descriptor (includes bitmap checksum stamping if metadata_csum).
         if let Err(error) = persist_group_desc_with_bitmap_overrides(
@@ -2010,7 +2010,7 @@ pub fn free_blocks_persist(
         let gidx = segment.group.0 as usize;
         dev.write_block(cx, groups[gidx].block_bitmap_block, &bitmap)?;
         groups[gidx].free_blocks = groups[gidx].free_blocks.saturating_add(segment.count);
-        groups[gidx].invalidate_block_largest_free_run();
+        groups[gidx].refresh_block_largest_free_run(&bitmap, geo.blocks_in_group(segment.group));
 
         // Persist group descriptor.
         if let Err(error) = persist_group_desc_with_bitmap_overrides(
@@ -2172,7 +2172,7 @@ fn try_alloc_batch_in_group(
     let previous_free_blocks = groups[gidx].free_blocks;
     let previous_largest_free_run = groups[gidx].block_largest_free_run;
     groups[gidx].free_blocks = previous_free_blocks.saturating_sub(count_allocated);
-    groups[gidx].invalidate_block_largest_free_run();
+    groups[gidx].refresh_block_largest_free_run(&bitmap, blocks_in_group);
 
     // Single GDT persist for all allocations in this group.
     if let Err(error) = persist_group_desc_with_bitmap_overrides(
@@ -3559,12 +3559,20 @@ mod tests {
         read_gdt_group_desc(cx, dev, pctx, group).free_blocks_count
     }
 
-    fn assert_block_largest_free_run_cache_invalidated(groups: &[GroupStats], group: GroupNumber) {
+    fn assert_block_largest_free_run_cache_matches_bitmap(
+        cx: &Cx,
+        dev: &MemBlockDevice,
+        geo: &FsGeometry,
+        groups: &[GroupStats],
+        group: GroupNumber,
+    ) {
         let gidx = group.0 as usize;
+        let bitmap = dev.read_block(cx, groups[gidx].block_bitmap_block).unwrap();
+        let expected = bitmap_largest_free_run(bitmap.as_slice(), geo.blocks_in_group(group));
         assert_eq!(
             groups[gidx].cached_block_largest_free_run(),
-            None,
-            "bitmap mutations must invalidate the largest-free-run cache"
+            Some(expected),
+            "bitmap mutations must keep the largest-free-run cache exact"
         );
     }
 
@@ -3753,7 +3761,13 @@ mod tests {
 
         // In-memory stats should be decremented.
         assert_eq!(groups[0].free_blocks, 8191);
-        assert_block_largest_free_run_cache_invalidated(&groups, GroupNumber(0));
+        assert_block_largest_free_run_cache_matches_bitmap(
+            &cx,
+            &dev,
+            &geo,
+            &groups,
+            GroupNumber(0),
+        );
 
         // On-disk GDT should also be updated.
         let gdt_raw = dev.read_block(&cx, pctx.gdt_block).unwrap();
@@ -4051,7 +4065,13 @@ mod tests {
         )
         .unwrap();
         assert_eq!(groups[0].free_blocks, original_free - 3);
-        assert_block_largest_free_run_cache_invalidated(&groups, GroupNumber(0));
+        assert_block_largest_free_run_cache_matches_bitmap(
+            &cx,
+            &dev,
+            &geo,
+            &groups,
+            GroupNumber(0),
+        );
 
         free_blocks_persist(
             &cx,
@@ -4064,7 +4084,13 @@ mod tests {
         )
         .unwrap();
         assert_eq!(groups[0].free_blocks, original_free);
-        assert_block_largest_free_run_cache_invalidated(&groups, GroupNumber(0));
+        assert_block_largest_free_run_cache_matches_bitmap(
+            &cx,
+            &dev,
+            &geo,
+            &groups,
+            GroupNumber(0),
+        );
 
         // Verify on-disk GDT matches.
         let gdt_raw = dev.read_block(&cx, pctx.gdt_block).unwrap();
