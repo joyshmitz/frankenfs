@@ -825,6 +825,17 @@ pub struct OpenFs {
     /// LRU cache for extent tree lookups, avoiding repeated tree traversals
     /// for sequential reads. Invalidated on write/truncate/punch_hole.
     extent_cache: ffs_extent::ExtentCache,
+    /// Single-slot snapshot of the most-recently-listed directory's entries.
+    ///
+    /// A paginated `readdir` (FUSE issues one call per kernel buffer fill) would
+    /// otherwise re-read and re-parse the WHOLE directory on every call and then
+    /// discard everything before `offset` — `O(N)` per page, `O(N^2)` to list an
+    /// N-entry directory. This caches the full entry list from the first page and
+    /// serves later pages by slicing it. The cache self-invalidates: every entry
+    /// also records the directory inode's `(ctime, ctime_extra, mtime, size)`, and
+    /// any mutation bumps ctime/mtime, so a stale snapshot is detected and rebuilt
+    /// rather than relying on hooking every mutation path.
+    readdir_snapshot: Mutex<Option<ReaddirSnapshot>>,
     /// Optional repair lifecycle hook for notifying when blocks are committed.
     ///
     /// When present, `commit_transaction` and `commit_transaction_ssi` call
@@ -876,6 +887,33 @@ pub struct OpenFs {
     /// small cache captures most of the benefit).
     btrfs_tree_node_cache: Mutex<BTreeMap<u64, Arc<[u8]>>>,
 }
+
+/// Cached full directory listing for paginated `readdir` (see
+/// [`OpenFs::readdir_snapshot`]). The validation fields are the directory inode's
+/// timestamps and size at snapshot time; any directory mutation bumps ctime/mtime
+/// (and block additions change size), so a mismatch forces a rebuild.
+struct ReaddirSnapshot {
+    ino: u64,
+    ctime: u32,
+    ctime_extra: u32,
+    mtime: u32,
+    size: u64,
+    entries: Arc<Vec<DirEntry>>,
+}
+
+/// Return the readdir page at `offset` (a 1-indexed entry position) from a cached
+/// full listing. Cookies in the cached entries are already absolute positions, so
+/// a plain `[offset..]` slice preserves continuation semantics exactly.
+fn slice_readdir_snapshot(entries: &[DirEntry], offset: u64) -> Vec<DirEntry> {
+    let start = usize::try_from(offset).unwrap_or(usize::MAX).min(entries.len());
+    entries[start..].to_vec()
+}
+
+/// Test-only counter of how many times the ext4 readdir path performed a FULL
+/// directory read+parse (a snapshot miss). A paginated listing of an unchanged
+/// directory must increment this exactly once regardless of page count.
+#[cfg(test)]
+static READDIR_FULL_READS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// Csum-tree items `(key, packed crc32c values)` used by the read-verify path.
 type BtrfsCsumItems = Vec<(BtrfsKey, Vec<u8>)>;
@@ -2747,6 +2785,7 @@ impl OpenFs {
             ext4_file_data_block_cache: Mutex::new(BTreeMap::new()),
             btrfs_alloc_state: None,
             extent_cache: ffs_extent::ExtentCache::new(),
+            readdir_snapshot: Mutex::new(None),
             repair_flush_lifecycle: None,
             move_ext_donor_fds: Mutex::new(BTreeMap::new()),
             btrfs_inode_path_cache: Mutex::new(None),
@@ -22429,17 +22468,36 @@ impl FsOps for OpenFs {
     ) -> ffs_error::Result<Vec<DirEntry>> {
         match &self.flavor {
             FsFlavor::Ext4(_) => {
-                let inode =
-                    self.read_inode_with_scope(cx, scope, Self::ext4_canonical_inode(ino))?;
+                let canonical = Self::ext4_canonical_inode(ino);
+                let inode = self.read_inode_with_scope(cx, scope, canonical)?;
                 if !inode.is_dir() {
                     return Err(FfsError::NotDirectory);
                 }
 
+                // Serve a later page from the snapshot if the directory is
+                // unchanged since it was taken (ctime/mtime/size all match) —
+                // avoiding a full re-read+re-parse per paginated readdir call.
+                {
+                    let guard = self.readdir_snapshot.lock();
+                    if let Some(snap) = guard.as_ref()
+                        && snap.ino == canonical.0
+                        && snap.ctime == inode.ctime
+                        && snap.ctime_extra == inode.ctime_extra
+                        && snap.mtime == inode.mtime
+                        && snap.size == inode.size
+                    {
+                        return Ok(slice_readdir_snapshot(&snap.entries, offset));
+                    }
+                }
+
+                #[cfg(test)]
+                READDIR_FULL_READS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 let raw_entries = self.read_dir_with_scope(cx, scope, &inode)?;
-                let entries: Vec<DirEntry> = raw_entries
+                // Build the FULL list (offset 0) once; cookies are 1-indexed
+                // positions, so slicing `[offset..]` preserves them exactly.
+                let full: Vec<DirEntry> = raw_entries
                     .into_iter()
                     .enumerate()
-                    .filter(|(idx, _)| (*idx as u64) >= offset)
                     .map(|(idx, e)| {
                         Self::ext4_present_dir_entry(DirEntry {
                             ino: InodeNumber(u64::from(e.inode)),
@@ -22449,7 +22507,17 @@ impl FsOps for OpenFs {
                         })
                     })
                     .collect();
-                Ok(entries)
+                let full = Arc::new(full);
+                let page = slice_readdir_snapshot(&full, offset);
+                *self.readdir_snapshot.lock() = Some(ReaddirSnapshot {
+                    ino: canonical.0,
+                    ctime: inode.ctime,
+                    ctime_extra: inode.ctime_extra,
+                    mtime: inode.mtime,
+                    size: inode.size,
+                    entries: full,
+                });
+                Ok(page)
             }
             FsFlavor::Btrfs(_) => {
                 let rows = self.btrfs_readdir_entries(cx, ino)?;
@@ -38476,6 +38544,79 @@ mod tests {
         assert!(
             fs.rmdir(&cx, root, OsStr::new("inlinedir")).is_err(),
             "rmdir of a (non-empty) inline dir must fail, not silently drop it"
+        );
+    }
+
+    /// Paginated readdir must read+parse the directory ONCE and serve later pages
+    /// from the snapshot, not re-parse the whole dir per page (O(N) vs O(N^2)),
+    /// while producing byte-identical entries; a mutation invalidates the snapshot.
+    #[test]
+    fn readdir_pagination_serves_pages_from_one_parse_not_quadratic() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let Some((fs, _tmp)) = open_writable_ext4_mkfs(16) else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let dir = fs
+            .mkdir(&cx, root, OsStr::new("bigdir"), 0o755, 0, 0)
+            .expect("mkdir");
+        let dir_ino = dir.ino;
+        let n = 50usize;
+        for i in 0..n {
+            fs.create(&cx, dir_ino, OsStr::new(&format!("f{i:04}")), 0o644, 0, 0)
+                .expect("create entry");
+        }
+
+        // One full read builds the snapshot; every paginated page is then served
+        // from it (the prior behaviour re-parsed the whole dir on each page).
+        READDIR_FULL_READS.store(0, SeqCst);
+        let full = fs.readdir(&cx, dir_ino, 0).expect("readdir full");
+        assert!(full.len() >= n, "directory must list all {n} entries (+ '.' '..')");
+
+        let page = 7usize;
+        let mut collected: Vec<DirEntry> = Vec::new();
+        let mut off = 0u64;
+        loop {
+            let chunk = fs.readdir(&cx, dir_ino, off).expect("readdir page");
+            if chunk.is_empty() {
+                break;
+            }
+            let take: Vec<DirEntry> = chunk.into_iter().take(page).collect();
+            off = take.last().expect("non-empty page").offset;
+            collected.extend(take);
+            if collected.len() >= full.len() {
+                break;
+            }
+        }
+
+        // ISOMORPHISM: the paginated listing equals the single full listing.
+        assert_eq!(collected, full, "paginated readdir must equal the full listing");
+
+        // SCORE: one full parse served the full read + all paginated pages; the
+        // prior per-call rescan would have parsed once per call.
+        let pages = (full.len()).div_ceil(page);
+        assert!(pages >= 3, "need several pages for a meaningful score (got {pages})");
+        assert_eq!(
+            READDIR_FULL_READS.load(SeqCst),
+            1,
+            "snapshot must serve {pages}+ pages from a single directory parse"
+        );
+
+        // A mutation invalidates the snapshot (forces a fresh parse) and the new
+        // entry is visible.
+        fs.create(&cx, dir_ino, OsStr::new("zzz_new"), 0o644, 0, 0)
+            .expect("create after listing");
+        READDIR_FULL_READS.store(0, SeqCst);
+        let after = fs.readdir(&cx, dir_ino, 0).expect("readdir after mutation");
+        assert_eq!(
+            READDIR_FULL_READS.load(SeqCst),
+            1,
+            "a directory mutation must invalidate the snapshot"
+        );
+        assert!(
+            after.iter().any(|e| e.name == b"zzz_new"),
+            "newly created entry must appear after snapshot invalidation"
         );
     }
 
