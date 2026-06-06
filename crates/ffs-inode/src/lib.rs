@@ -377,6 +377,7 @@ pub fn create_inode(
         projid: 0,
         extent_bytes,
         xattr_ibody: Vec::new(),
+        number: 0,
     };
 
     write_inode(cx, dev, geo, groups, alloc.ino, &inode, csum_seed)?;
@@ -710,6 +711,7 @@ mod tests {
             projid: 0x5566_7788,
             extent_bytes: (0_u8..60).collect(),
             xattr_ibody: vec![0xAA, 0xBB, 0xCC, 0xDD],
+            number: 0,
         }
     }
 
@@ -878,6 +880,7 @@ mod tests {
             projid: 0,
             extent_bytes: vec![0u8; 60],
             xattr_ibody: Vec::new(),
+            number: 0,
         };
 
         let raw = serialize_inode(&inode, 256);
@@ -935,6 +938,7 @@ mod tests {
             projid: 0,
             extent_bytes: vec![0u8; 60],
             xattr_ibody: Vec::new(),
+            number: 0,
         };
 
         let mut raw = serialize_inode(&inode, 256);
@@ -1129,6 +1133,7 @@ mod tests {
             projid: 0,
             extent_bytes: vec![0u8; 60],
             xattr_ibody: Vec::new(),
+            number: 0,
         };
 
         touch_atime(&mut inode, 100, 500_000_000);
@@ -1290,6 +1295,7 @@ mod tests {
             projid: 0,
             extent_bytes: vec![0u8; 60],
             xattr_ibody: Vec::new(),
+            number: 0,
         };
 
         let raw = serialize_inode(&inode, 256);
@@ -1329,6 +1335,7 @@ mod tests {
             projid: 0,
             extent_bytes: vec![0u8; 60],
             xattr_ibody: Vec::new(),
+            number: 0,
         };
 
         let raw = serialize_inode(&inode, 256);
@@ -1367,6 +1374,7 @@ mod tests {
             projid: 0,
             extent_bytes: vec![0u8; 60],
             xattr_ibody: xattr_data.clone(),
+            number: 0,
         };
 
         let raw = serialize_inode(&inode, 256);
@@ -1659,6 +1667,7 @@ mod tests {
             projid: 0,
             extent_bytes: vec![0u8; 60],
             xattr_ibody: Vec::new(),
+            number: 0,
         };
 
         let raw = serialize_inode(&inode, 256);
@@ -1983,6 +1992,7 @@ mod tests {
             projid: 0,
             extent_bytes: vec![0u8; 60],
             xattr_ibody: Vec::new(),
+            number: 0,
         };
 
         let result = write_inode(&cx, &dev, &geo, &groups, InodeNumber(100_000), &inode, 0);
@@ -2044,6 +2054,7 @@ mod tests {
             projid: 0,
             extent_bytes: vec![0u8; 60],
             xattr_ibody: Vec::new(),
+            number: 0,
         };
 
         let result = write_inode(&cx, &dev, &geo, &groups, InodeNumber(14), &inode, 0);
@@ -2084,6 +2095,7 @@ mod tests {
             projid: 0x1234,
             extent_bytes: vec![0u8; 60],
             xattr_ibody: vec![0xAA; 10],
+            number: 0,
         };
 
         let raw = serialize_inode(&inode, 128);
@@ -2132,6 +2144,7 @@ mod tests {
             projid: 0,
             extent_bytes: vec![0u8; 60],
             xattr_ibody: Vec::new(),
+            number: 0,
         };
 
         let mut raw = serialize_inode(&inode, 128);
@@ -2174,6 +2187,7 @@ mod tests {
             projid: 0xABCD_1234,
             extent_bytes: vec![0u8; 60],
             xattr_ibody: Vec::new(),
+            number: 0,
         };
 
         let raw = serialize_inode(&inode, 256);
@@ -2214,6 +2228,7 @@ mod tests {
             projid: 0,
             extent_bytes: vec![0u8; 60],
             xattr_ibody: Vec::new(),
+            number: 0,
         };
 
         let raw = serialize_inode(&inode, 256);
@@ -2382,6 +2397,7 @@ mod tests {
             projid: 0,
             extent_bytes: vec![0u8; 60],
             xattr_ibody: Vec::new(),
+            number: 0,
         };
         let raw = serialize_inode(&inode, 256);
         let generation = u32::from_le_bytes([raw[0x64], raw[0x65], raw[0x66], raw[0x67]]);
@@ -2418,6 +2434,7 @@ mod tests {
             projid: 0,
             extent_bytes: vec![0u8; 60],
             xattr_ibody: Vec::new(),
+            number: 0,
         };
         let mut raw1 = serialize_inode(&inode, 256);
         let mut raw2 = serialize_inode(&inode, 256);
@@ -2456,6 +2473,7 @@ mod tests {
             projid: 0,
             extent_bytes: vec![0u8; 60],
             xattr_ibody: Vec::new(),
+            number: 0,
         };
 
         touch_atime(&mut inode, 2_000_000_000, 500_000);
@@ -2496,6 +2514,7 @@ mod tests {
             projid: 0,
             extent_bytes: vec![0u8; 60],
             xattr_ibody: Vec::new(),
+            number: 0,
         };
 
         touch_mtime_ctime(&mut inode, 2_000_000_000, 100_000);
@@ -2612,6 +2631,7 @@ mod tests {
             projid: 0,
             extent_bytes: vec![0u8; 60],
             xattr_ibody: Vec::new(),
+            number: 0,
         };
         let raw = serialize_inode(&inode, 256);
         // Low 32 bits at offset 0x68.
@@ -2708,6 +2728,7 @@ mod tests {
                 crtime: 0, crtime_extra: 0, extra_isize: 32,
                 checksum: 0, version_hi: 0, projid: 0,
                 extent_bytes: vec![0u8; 60], xattr_ibody: Vec::new(),
+                number: 0,
             };
 
             let orig_ctime = inode.ctime;
@@ -2738,6 +2759,7 @@ mod tests {
                 crtime: 0, crtime_extra: 0, extra_isize: 32,
                 checksum: 0, version_hi: 0, projid: 0,
                 extent_bytes: vec![0u8; 60], xattr_ibody: Vec::new(),
+                number: 0,
             };
 
             let orig_atime = inode.atime;
@@ -2772,6 +2794,7 @@ mod tests {
                 crtime: 0, crtime_extra: 0, extra_isize: 32,
                 checksum: 0, version_hi: 0, projid: 0,
                 extent_bytes: vec![0u8; 60], xattr_ibody: Vec::new(),
+                number: 0,
             };
 
             let raw = serialize_inode(&inode, 256);
@@ -2832,6 +2855,7 @@ mod tests {
                 crtime: 0, crtime_extra: 0, extra_isize: 32,
                 checksum: 0, version_hi: 0, projid: 0,
                 extent_bytes: vec![0u8; 60], xattr_ibody: Vec::new(),
+                number: 0,
             };
             // Ensure generation matches what will be in the raw buffer.
             let _ = &mut inode;
@@ -2860,6 +2884,7 @@ mod tests {
                 crtime: 1_700_000_000, crtime_extra: 0, extra_isize: 32,
                 checksum: 0, version_hi: 0, projid: 0,
                 extent_bytes: vec![0u8; 60], xattr_ibody: Vec::new(),
+                number: 0,
             };
 
             let mut stamped_from_clean = serialize_inode(&inode, 256);
@@ -2907,6 +2932,7 @@ mod tests {
                 crtime: 0, crtime_extra: 0, extra_isize: 32,
                 checksum: 0, version_hi: 0, projid: 0,
                 extent_bytes: vec![0u8; 60], xattr_ibody: Vec::new(),
+                number: 0,
             };
 
             let ino = InodeNumber(1);
@@ -2943,6 +2969,7 @@ mod tests {
                 crtime, crtime_extra: 0, extra_isize: 32,
                 checksum: 0, version_hi: 0, projid: 0,
                 extent_bytes: vec![0u8; 60], xattr_ibody: Vec::new(),
+                number: 0,
             };
 
             let raw = serialize_inode(&inode, 256);
@@ -2976,6 +3003,7 @@ mod tests {
                 crtime: 0, crtime_extra: 0, extra_isize: 32,
                 checksum: 0, version_hi: 0, projid: 0,
                 extent_bytes: vec![0u8; 60], xattr_ibody: Vec::new(),
+                number: 0,
             };
 
             touch_ctime(&mut inode, secs, nsec);
@@ -3001,6 +3029,7 @@ mod tests {
                 crtime: 0, crtime_extra: 0, extra_isize: 32,
                 checksum: 0, version_hi: 0, projid: 0,
                 extent_bytes: vec![0u8; 60], xattr_ibody: Vec::new(),
+                number: 0,
             };
 
             let raw = serialize_inode(&inode, 256);
@@ -3030,6 +3059,7 @@ mod tests {
                 crtime: 1_700_000_000, crtime_extra: 0, extra_isize: 32,
                 checksum: 0, version_hi: 0, projid: 0,
                 extent_bytes: vec![0u8; 60], xattr_ibody: Vec::new(),
+                number: 0,
             };
 
             let mut raw = serialize_inode(&inode, 256);
@@ -3063,6 +3093,7 @@ mod tests {
                 crtime: 0, crtime_extra: 0, extra_isize: 32,
                 checksum: 0, version_hi: 0, projid: 0,
                 extent_bytes: vec![0u8; 60], xattr_ibody: xattr_data.clone(),
+                number: 0,
             };
 
             let raw = serialize_inode(&inode, 256);
@@ -3092,6 +3123,7 @@ mod tests {
                 crtime: 0, crtime_extra: 0, extra_isize: 32,
                 checksum: 0, version_hi: initial_hi, projid: 0,
                 extent_bytes: vec![0u8; 60], xattr_ibody: Vec::new(),
+                number: 0,
             };
 
             let initial = u64::from(initial_lo) | (u64::from(initial_hi) << 32);
@@ -3130,6 +3162,7 @@ mod tests {
                 crtime: 0, crtime_extra: 0, extra_isize: 32,
                 checksum: 0, version_hi: initial_hi, projid: 0,
                 extent_bytes: vec![0u8; 60], xattr_ibody: Vec::new(),
+                number: 0,
             };
             touch_atime(&mut inode, secs, nsec);
             prop_assert_eq!(inode.version, initial_lo,
@@ -3154,6 +3187,7 @@ mod tests {
                 crtime: 0, crtime_extra: 0, extra_isize: 32,
                 checksum: 0, version_hi: initial_hi, projid: 0,
                 extent_bytes: vec![0u8; 60], xattr_ibody: Vec::new(),
+                number: 0,
             };
             let initial = u64::from(initial_lo) | (u64::from(initial_hi) << 32);
             touch_mtime_ctime(&mut inode, secs, nsec);
@@ -3178,6 +3212,7 @@ mod tests {
                 crtime: 0, crtime_extra: 0, extra_isize: 32,
                 checksum: 0, version_hi: initial_hi, projid: 0,
                 extent_bytes: vec![0u8; 60], xattr_ibody: Vec::new(),
+                number: 0,
             };
             let initial = u64::from(initial_lo) | (u64::from(initial_hi) << 32);
             touch_ctime(&mut inode, secs, nsec);
@@ -3265,6 +3300,7 @@ mod tests {
                 } else {
                     Vec::new()
                 },
+                number: 0,
             };
 
             let raw = serialize_inode(&inode, inode_size);
@@ -3379,6 +3415,7 @@ mod tests {
             projid: 0,
             extent_bytes: vec![0u8; 60],
             xattr_ibody: vec![],
+            number: 0,
         };
         let raw = serialize_inode(&inode, 256);
         let mode = u16::from_le_bytes([raw[0], raw[1]]);
@@ -3414,6 +3451,7 @@ mod tests {
             projid: 0,
             extent_bytes: vec![0u8; 60],
             xattr_ibody: vec![],
+            number: 0,
         };
         let raw = serialize_inode(&inode, 256);
         let flags = u32::from_le_bytes([raw[0x20], raw[0x21], raw[0x22], raw[0x23]]);
@@ -3484,6 +3522,7 @@ mod tests {
             projid: 0,
             extent_bytes: vec![0u8; 60],
             xattr_ibody: vec![],
+            number: 0,
         };
 
         touch_atime(&mut inode, 500, 123);
@@ -3524,6 +3563,7 @@ mod tests {
             projid: 0,
             extent_bytes: vec![0u8; 60],
             xattr_ibody: vec![],
+            number: 0,
         };
 
         touch_mtime_ctime(&mut inode, 600, 456);
@@ -3603,6 +3643,7 @@ mod tests {
             projid: 0,
             extent_bytes: vec![0xAB; 100], // larger than 60
             xattr_ibody: vec![],
+            number: 0,
         };
         let raw = serialize_inode(&inode, 256);
         // Bytes at 0x28..0x64 should be 0xAB (60 bytes).
@@ -3642,6 +3683,7 @@ mod tests {
             projid: 0,
             extent_bytes: vec![0u8; 60],
             xattr_ibody: vec![],
+            number: 0,
         };
         let raw = serialize_inode(&inode, 256);
         let dtime = u32::from_le_bytes([raw[0x14], raw[0x15], raw[0x16], raw[0x17]]);
@@ -3678,6 +3720,7 @@ mod tests {
             projid: 0,
             extent_bytes: vec![0u8; 60],
             xattr_ibody: vec![],
+            number: 0,
         };
         let raw = serialize_inode(&inode, 256);
         let links = u16::from_le_bytes([raw[0x1A], raw[0x1B]]);
@@ -3911,6 +3954,7 @@ mod tests {
             projid: 0,
             extent_bytes: vec![0u8; 60],
             xattr_ibody: vec![],
+            number: 0,
         };
         let ct_before = inode.ctime;
         let mt_before = inode.mtime;
@@ -3950,6 +3994,7 @@ mod tests {
             projid: 0,
             extent_bytes: vec![0u8; 60],
             xattr_ibody: vec![],
+            number: 0,
         };
         let at_before = inode.atime;
         let mt_before = inode.mtime;
@@ -4078,6 +4123,7 @@ mod tests {
             projid: 0,
             extent_bytes: vec![0xCC; 10], // shorter than 60
             xattr_ibody: vec![],
+            number: 0,
         };
         let raw = serialize_inode(&inode, 256);
         // First 10 bytes at 0x28 should be 0xCC.
@@ -4117,6 +4163,7 @@ mod tests {
             projid: 0,
             extent_bytes: vec![0u8; 60],
             xattr_ibody: vec![],
+            number: 0,
         };
         let raw = serialize_inode(&inode, 0x88);
         assert_eq!(raw.len(), 0x88);
@@ -4156,6 +4203,7 @@ mod tests {
             projid: 0,
             extent_bytes: vec![0u8; 60],
             xattr_ibody: vec![],
+            number: 0,
         };
         let raw = serialize_inode(&inode, 0x90);
         assert_eq!(raw.len(), 0x90);
@@ -4279,6 +4327,7 @@ mod tests {
             projid: 0,
             extent_bytes: vec![0u8; 60],
             xattr_ibody: vec![],
+            number: 0,
         };
 
         let future_secs: u64 = 0x2_0000_0005; // epoch bits = 2
@@ -4322,6 +4371,7 @@ mod tests {
             projid: 0,
             extent_bytes: vec![0u8; 60],
             xattr_ibody: vec![],
+            number: 0,
         };
 
         let future_secs: u64 = 0x3_FFFF_FFFE; // epoch bits = 3 (max)
@@ -4366,6 +4416,7 @@ mod tests {
             projid: 0,
             extent_bytes: vec![0u8; 60],
             xattr_ibody: Vec::new(),
+            number: 0,
         };
 
         let mut raw_a = serialize_inode(&inode, 256);
@@ -4418,6 +4469,7 @@ mod tests {
             projid: 0,
             extent_bytes: vec![0u8; 60],
             xattr_ibody: Vec::new(),
+            number: 0,
         };
 
         let mut raw_a = serialize_inode(&inode, 256);
@@ -4511,6 +4563,7 @@ mod tests {
             projid: 0,
             extent_bytes: vec![0u8; 60],
             xattr_ibody: vec![0xAA; 128],
+            number: 0,
         };
         let raw = serialize_inode(&inode, 256);
         // With extra_isize=0, xattr_start = 128 + 0 = 128.
@@ -4654,6 +4707,7 @@ mod tests {
             projid: 0,
             extent_bytes: vec![0; 60],
             xattr_ibody: Vec::new(),
+            number: 0,
         };
         assert_eq!(inode.version, 0);
         assert_eq!(inode.version_hi, 0);
@@ -4690,6 +4744,7 @@ mod tests {
             projid: 0,
             extent_bytes: vec![0; 60],
             xattr_ibody: Vec::new(),
+            number: 0,
         };
         bump_inode_version(&mut inode);
         // u32::MAX + 1 = 0x1_0000_0000 → version=0, version_hi=1
@@ -4725,6 +4780,7 @@ mod tests {
             projid: 0,
             extent_bytes: vec![0; 60],
             xattr_ibody: Vec::new(),
+            number: 0,
         };
         bump_inode_version(&mut inode);
         // u64::MAX + 1 wraps to 0
@@ -4760,6 +4816,7 @@ mod tests {
             projid: 0,
             extent_bytes: vec![0; 60],
             xattr_ibody: Vec::new(),
+            number: 0,
         };
         touch_mtime_ctime(&mut inode, 1000, 0);
         assert_eq!(
@@ -4796,6 +4853,7 @@ mod tests {
             projid: 0,
             extent_bytes: vec![0; 60],
             xattr_ibody: Vec::new(),
+            number: 0,
         };
         touch_ctime(&mut inode, 2000, 0);
         assert_eq!(

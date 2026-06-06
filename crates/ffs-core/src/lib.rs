@@ -3312,7 +3312,7 @@ impl OpenFs {
                 }
 
                 if inode.flags & ffs_types::EXT4_EXTENTS_FL != 0 && inode.extent_bytes.len() >= 60 {
-                    let extent_ns = extent_root_namespace(&inode);
+                    let extent_ns = extent_cache_namespace(&inode);
                     let mut root_bytes = Self::extent_root(&inode);
                     let logical_end_u64 = inode.size.div_ceil(u64::from(alloc.geo.block_size));
                     let logical_end = u32::try_from(logical_end_u64).map_err(|_| {
@@ -7305,9 +7305,13 @@ impl OpenFs {
             });
         }
 
-        let inode =
+        let mut inode =
             Ext4Inode::parse_from_bytes(&block_data[offset_in_block..offset_in_block + inode_size])
                 .map_err(|e| parse_to_ffs_error(&e))?;
+        // Stamp the inode number (the table index, not on-disk) so downstream
+        // consumers can derive a STABLE extent-cache namespace (number,
+        // generation) that does not drift as the extent tree mutates (bd-j6ljg).
+        inode.number = ino.0;
         Ok(inode)
     }
 
@@ -7833,7 +7837,7 @@ impl OpenFs {
         // of i_block (the extent header + first entry start) provide a
         // practically unique per-inode key to prevent cross-inode cache
         // pollution.
-        let ns = extent_root_namespace(inode);
+        let ns = extent_cache_namespace(inode);
 
         // Fast path: check extent cache.
         if let Some(hit) = self.extent_cache.lookup(ns, logical_block) {
@@ -10285,9 +10289,36 @@ impl OpenFs {
     }
 }
 
-/// Different inodes have different extent trees, so this produces a unique
-/// key per-inode. Uses a simple FNV-1a-like hash for speed (no cryptographic
-/// strength needed — just collision avoidance).
+/// Stable extent-cache namespace for an inode.
+///
+/// When the inode number has been stamped at load time (`inode.number != 0`,
+/// the normal case for inodes obtained via `read_inode*`), the namespace is
+/// `(number, generation)`: stable across the inode's lifetime and exact per
+/// inode, so a write that mutates the extent tree never shifts the key under
+/// which the inode's entries are cached. The generation disambiguates
+/// inode-number reuse after a free+realloc.
+///
+/// Unstamped inodes (`number == 0` — values built directly via
+/// `parse_from_bytes` or struct literals that never passed through the reader)
+/// fall back to the previous content hash of the mutable extent root. This is
+/// the only drift-prone path and is preserved purely to avoid a behavior
+/// change for those callers (none of which share a cache across inodes). See
+/// bd-j6ljg.
+fn extent_cache_namespace(inode: &Ext4Inode) -> u64 {
+    if inode.number != 0 {
+        // Pack (number, generation); the high bit space of a real inode number
+        // plus the generation gives an exact, drift-free per-inode key.
+        return inode
+            .number
+            .rotate_left(32)
+            ^ u64::from(inode.generation)
+            ^ 0x9e37_79b9_7f4a_7c15;
+    }
+    extent_root_namespace(inode)
+}
+
+/// Content hash of the inode's mutable extent root. Retained as the fallback
+/// for unstamped inodes; see [`extent_cache_namespace`].
 fn extent_root_namespace(inode: &Ext4Inode) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325; // FNV offset basis
     for &b in &inode.extent_bytes {
@@ -12163,7 +12194,7 @@ impl OpenFs {
             // namespace the entries were actually cached under, matching the
             // pre-mutation invalidation order used on the file write-allocate
             // path. (bd-j6ljg's proper fix is a stable (ino,generation) key.)
-            let parent_extent_ns = extent_root_namespace(&parent_upd);
+            let parent_extent_ns = extent_cache_namespace(&parent_upd);
             ffs_btree::insert(cx, dev, &mut root_bytes, extent, &mut tree_alloc)?;
             Self::set_extent_root(&mut parent_upd, &root_bytes);
             self.extent_cache.invalidate_range(
@@ -13181,7 +13212,7 @@ impl OpenFs {
                         -(i128::from(freed_sectors)),
                     )?
                 };
-                let extent_ns = extent_root_namespace(&inode);
+                let extent_ns = extent_cache_namespace(&inode);
                 {
                     let Ext4AllocState {
                         geo,
@@ -13897,7 +13928,7 @@ impl OpenFs {
                     // Re-acquire block_dev so subsequent bitmap reads see the allocation (if not staged)!
                     block_dev = self.block_device_adapter();
                     self.extent_cache.invalidate_range(
-                        extent_root_namespace(&inode),
+                        extent_cache_namespace(&inode),
                         logical_block,
                         1,
                     );
@@ -27666,6 +27697,50 @@ mod tests {
         buf[0x28..0x2C].copy_from_slice(&block0.to_le_bytes());
         buf[0x2C..0x30].copy_from_slice(&block1.to_le_bytes());
         Ext4Inode::parse_from_bytes(&buf).expect("test inode")
+    }
+
+    /// bd-j6ljg: a stamped inode's extent-cache namespace is STABLE across
+    /// extent-tree mutation (the drift the old content hash suffered), is exact
+    /// per inode, and disambiguates inode-number reuse via the generation. An
+    /// unstamped inode (number == 0) falls back to the content hash.
+    #[test]
+    fn extent_cache_namespace_stable_for_stamped_inode_bd_j6ljg() {
+        let mut inode = make_test_inode(0o100_644, 0, 0);
+        inode.number = 42;
+        inode.generation = 7;
+
+        let ns = extent_cache_namespace(&inode);
+
+        // Mutating the extent root bytes must NOT shift the namespace — this is
+        // exactly the drift that orphaned cached entries under the old scheme.
+        let mut mutated = inode.clone();
+        mutated.extent_bytes.push(0xAB);
+        if let Some(first) = mutated.extent_bytes.first_mut() {
+            *first ^= 0xFF;
+        }
+        assert_eq!(
+            ns,
+            extent_cache_namespace(&mutated),
+            "stable key drifted on extent mutation"
+        );
+
+        // Distinct inode number → distinct namespace (exact per-inode scoping).
+        let mut other = inode.clone();
+        other.number = 43;
+        assert_ne!(ns, extent_cache_namespace(&other));
+
+        // Same number, bumped generation (free + realloc) → distinct namespace.
+        let mut reborn = inode.clone();
+        reborn.generation = 8;
+        assert_ne!(ns, extent_cache_namespace(&reborn));
+
+        // Unstamped inode uses the content-hash fallback (preserves old behavior).
+        let mut unstamped = inode.clone();
+        unstamped.number = 0;
+        assert_eq!(
+            extent_cache_namespace(&unstamped),
+            extent_root_namespace(&unstamped)
+        );
     }
 
     /// Exercises the legacy ext4 indirect-block addressing
@@ -59349,6 +59424,7 @@ mod tests {
                     crtime: 0, crtime_extra: 0,
                     extra_isize: 32, checksum: 0, version_hi: initial_hi, projid: 0,
                     extent_bytes: vec![0; 60], xattr_ibody: Vec::new(),
+                    number: 0,
                 };
                 let before = u64::from(inode.version) | (u64::from(inode.version_hi) << 32);
                 ffs_inode::bump_inode_version(&mut inode);

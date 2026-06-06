@@ -666,6 +666,7 @@ unknown ro_compat: 0xAB"
             projid: 0,
             extent_bytes: vec![0; 60],
             xattr_ibody: Vec::new(),
+            number: 0,
         };
         let result = parse_ibody_xattrs(&inode);
         assert!(result.is_ok());
@@ -755,6 +756,7 @@ unknown ro_compat: 0xAB"
             projid: 0,
             extent_bytes: vec![0; 60],
             xattr_ibody: Vec::new(),
+            number: 0,
         }
     }
 

@@ -144,6 +144,7 @@ fn representative_inode(generation: u32) -> Ext4Inode {
         projid: 0,
         extent_bytes: vec![0_u8; 60],
         xattr_ibody: Vec::new(),
+        number: 0,
     }
 }
 

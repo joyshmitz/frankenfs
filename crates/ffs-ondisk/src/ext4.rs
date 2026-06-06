@@ -2665,6 +2665,17 @@ pub struct Ext4Inode {
     /// Raw bytes from the inode body area available for inline xattrs.
     /// This is the region `[128 + extra_isize .. inode_size]`.
     pub xattr_ibody: Vec<u8>,
+
+    // ── In-memory identity (NOT on-disk) ─────────────────────────────────
+    /// Inode number this value was loaded from, stamped by the reader at load
+    /// time. Not part of the on-disk format (it is the inode-table index, known
+    /// only to the caller), so it is `#[serde(skip)]` and defaults to 0 for
+    /// values built by `parse_from_bytes` or struct literals. Used to derive a
+    /// STABLE per-inode cache namespace `(number, generation)` that does not
+    /// drift as the extent tree mutates; consumers fall back to a content hash
+    /// when it is 0 (unstamped). See ffs-core `extent_cache_namespace`.
+    #[serde(skip)]
+    pub number: u64,
 }
 
 impl Ext4Inode {
@@ -2845,6 +2856,9 @@ impl Ext4Inode {
             } else {
                 Vec::new()
             },
+
+            // In-memory only; the reader stamps the real inode number after parse.
+            number: 0,
         })
     }
 
@@ -16544,6 +16558,7 @@ mod tests {
                 projid: 0,
                 extent_bytes: vec![0; 60],
                 xattr_ibody,
+                number: 0,
             };
             let _ = parse_ibody_xattrs(&inode);
         }

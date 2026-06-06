@@ -661,6 +661,7 @@ mod tests {
             projid: 0,
             extent_bytes: vec![0; 60],
             xattr_ibody: vec![0; ibody_len],
+            number: 0,
         }
     }
 

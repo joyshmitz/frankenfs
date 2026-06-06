@@ -294,6 +294,7 @@ fn ext4_inode_size_above_4gib_roundtrips() {
         projid: 0,
         extent_bytes: vec![0u8; 60],
         xattr_ibody: vec![0u8; 256 - 128 - 32],
+        number: 0,
     };
     let encoded = fuzz_serialize_inode(&inode, 256);
     assert_eq!(encoded.len(), 256);
