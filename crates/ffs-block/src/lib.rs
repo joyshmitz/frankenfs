@@ -1922,6 +1922,9 @@ impl S3AccessHandle {
     fn increment_count(&self) -> u8 {
         let mut current = self.count.load(Ordering::Relaxed);
         loop {
+            if current == u8::MAX {
+                return current;
+            }
             let next = current.saturating_add(1);
             match self.count.compare_exchange_weak(
                 current,
