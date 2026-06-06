@@ -17,7 +17,7 @@ use ffs_types::{
     EXT4_SUPERBLOCK_OFFSET, EXT4_SUPERBLOCK_SIZE, TxnId,
 };
 use nix::sys::uio::preadv;
-use parking_lot::{Condvar, Mutex};
+use parking_lot::{Condvar, Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs::File;
@@ -1954,7 +1954,7 @@ struct S3FastResident {
 #[cfg(feature = "s3fifo")]
 #[derive(Debug)]
 struct S3FastResidentTable {
-    slots: Vec<Mutex<Option<(BlockNumber, S3FastResident)>>>,
+    slots: Vec<RwLock<Option<(BlockNumber, S3FastResident)>>>,
     slot_mask: u64,
 }
 
@@ -1975,7 +1975,7 @@ impl S3FastResidentTable {
         let slot_count = slot_count.max(1).next_power_of_two();
         let mut slots = Vec::with_capacity(slot_count);
         for _ in 0..slot_count {
-            slots.push(Mutex::new(None));
+            slots.push(RwLock::new(None));
         }
         let slot_mask = u64::try_from(slot_count - 1).unwrap_or(u64::MAX);
         Self { slots, slot_mask }
@@ -1987,7 +1987,7 @@ impl S3FastResidentTable {
 
     fn get_valid(&self, block: BlockNumber) -> Option<S3FastResident> {
         let slot = &self.slots[self.slot_index(block)];
-        let guard = slot.lock();
+        let guard = slot.read();
         let entry = guard.as_ref().and_then(|(resident_block, entry)| {
             (*resident_block == block && entry.access.is_valid()).then(|| entry.clone())
         });
@@ -1997,12 +1997,12 @@ impl S3FastResidentTable {
 
     fn insert(&self, block: BlockNumber, entry: S3FastResident) {
         let slot = &self.slots[self.slot_index(block)];
-        *slot.lock() = Some((block, entry));
+        *slot.write() = Some((block, entry));
     }
 
     fn remove(&self, block: BlockNumber) {
         let slot = &self.slots[self.slot_index(block)];
-        let mut guard = slot.lock();
+        let mut guard = slot.write();
         if let Some((resident_block, entry)) = guard.take() {
             if resident_block == block {
                 entry.access.invalidate();
