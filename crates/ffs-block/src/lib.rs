@@ -2179,32 +2179,18 @@ impl ArcState {
     fn new(capacity: usize) -> Self {
         #[cfg(feature = "s3fifo")]
         let (small_capacity, main_capacity, ghost_capacity) = Self::s3_capacity_split(capacity);
-        #[cfg(feature = "s3fifo")]
-        let resident_reserve = small_capacity.saturating_add(main_capacity).max(1);
-        #[cfg(not(feature = "s3fifo"))]
-        let resident_reserve = capacity.max(1);
-        #[cfg(feature = "s3fifo")]
-        let loc_reserve = resident_reserve.saturating_add(ghost_capacity).max(1);
-        #[cfg(not(feature = "s3fifo"))]
-        let loc_reserve = capacity.saturating_mul(2).max(1);
-        #[cfg(feature = "s3fifo")]
-        let (t1_reserve, t2_reserve, b1_reserve, b2_reserve) =
-            (small_capacity, main_capacity, ghost_capacity, 0);
-        #[cfg(not(feature = "s3fifo"))]
-        let (t1_reserve, t2_reserve, b1_reserve, b2_reserve) =
-            (capacity, capacity, capacity, capacity);
         Self {
             capacity,
             max_capacity: capacity,
             pressure_level: MemoryPressure::None,
             #[cfg(not(feature = "s3fifo"))]
             p: 0,
-            t1: VecDeque::with_capacity(t1_reserve),
-            t2: VecDeque::with_capacity(t2_reserve),
-            b1: VecDeque::with_capacity(b1_reserve),
-            b2: VecDeque::with_capacity(b2_reserve),
-            loc: HashMap::with_capacity(loc_reserve),
-            resident: HashMap::with_capacity(resident_reserve),
+            t1: VecDeque::new(),
+            t2: VecDeque::new(),
+            b1: VecDeque::new(),
+            b2: VecDeque::new(),
+            loc: HashMap::new(),
+            resident: HashMap::new(),
             dirty: DirtyTracker::default(),
             pending_flush: Vec::new(),
             staged_txn_writes: HashMap::new(),
@@ -2226,7 +2212,7 @@ impl ArcState {
             #[cfg(feature = "s3fifo")]
             sequential_read_miss_streak: 0,
             #[cfg(feature = "s3fifo")]
-            access_count: HashMap::with_capacity(resident_reserve),
+            access_count: HashMap::new(),
             #[cfg(feature = "s3fifo")]
             fast_invalidations: Vec::new(),
             #[cfg(feature = "s3fifo")]
