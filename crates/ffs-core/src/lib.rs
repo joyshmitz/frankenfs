@@ -7739,40 +7739,75 @@ impl OpenFs {
             .0
             .checked_add(count_u64)
             .ok_or_else(|| FfsError::Format("block range overflow".to_owned()))?;
-        for block_num in start.0..end {
-            let block = BlockNumber(block_num);
-            if scope
-                .tx
-                .as_ref()
-                .and_then(|tx| tx.staged_write(block))
-                .is_some()
-            {
-                return (start.0..end)
-                    .map(|num| self.read_block_with_scope(cx, scope, BlockNumber(num)))
-                    .collect();
-            }
-        }
 
-        if let Some(snapshot) = scope.snapshot {
-            let store = self.mvcc_store.read();
-            let has_visible = (start.0..end)
-                .map(BlockNumber)
-                .any(|block| store.read_visible(block, snapshot).is_some());
-            drop(store);
-            if has_visible {
-                return (start.0..end)
-                    .map(|num| self.read_block_with_scope(cx, scope, BlockNumber(num)))
-                    .collect();
+        // Single pass resolving transaction/snapshot overlay blocks (matching
+        // read_block_with_scope's precedence exactly: tx staged write first,
+        // then — for a tx-backed scope — the MVCC version visible at the scope
+        // snapshot) without any device I/O. Blocks with no overlay are left as
+        // base gaps. Previously, a single staged or snapshot-visible block in
+        // the range forced the WHOLE contiguous read onto a per-block scalar
+        // path, losing vectored I/O for every base block around it — the common
+        // shape of a read-modify-write that staged only part of a large extent.
+        let mut resolved: Vec<Option<Vec<u8>>> = Vec::with_capacity(count);
+        let mut any_overlay = false;
+        {
+            // Hold the MVCC read lock only when a tx-scoped snapshot can be
+            // consulted; no device I/O happens under it.
+            let store = if scope.tx.is_some() && scope.snapshot.is_some() {
+                Some(self.mvcc_store.read())
+            } else {
+                None
+            };
+            for block_num in start.0..end {
+                let block = BlockNumber(block_num);
+                if let Some(staged) = scope.tx.as_ref().and_then(|tx| tx.staged_write(block)) {
+                    resolved.push(Some(staged.to_vec()));
+                    any_overlay = true;
+                    continue;
+                }
+                if let (Some(store), Some(snapshot)) = (store.as_ref(), scope.snapshot) {
+                    if let Some(visible) = store.read_visible(block, snapshot) {
+                        resolved.push(Some(visible.into_owned()));
+                        any_overlay = true;
+                        continue;
+                    }
+                }
+                resolved.push(None);
             }
         }
 
         let dev = self.block_device_adapter();
-        let mut bufs: Vec<BlockBuf> = (0..count).map(|_| BlockBuf::new(Vec::new())).collect();
-        dev.read_contiguous_blocks(cx, start, &mut bufs)?;
-        Ok(bufs
-            .into_iter()
-            .map(|buf| buf.as_slice().to_vec())
-            .collect())
+
+        // Fast path: no overlay anywhere — one ranged device read of the range.
+        if !any_overlay {
+            let mut bufs: Vec<BlockBuf> = (0..count).map(|_| BlockBuf::new(Vec::new())).collect();
+            dev.read_contiguous_blocks(cx, start, &mut bufs)?;
+            return Ok(bufs.into_iter().map(|buf| buf.as_slice().to_vec()).collect());
+        }
+
+        // Mixed: keep overlay bytes; coalesce maximal base-gap runs into ranged
+        // device reads instead of one scalar read per gap block. Per-block bytes
+        // are identical to the prior per-block read_block_with_scope path.
+        let mut idx = 0usize;
+        while idx < count {
+            if resolved[idx].is_some() {
+                idx += 1;
+                continue;
+            }
+            let run_start = idx;
+            while idx < count && resolved[idx].is_none() {
+                idx += 1;
+            }
+            let run_start_u64 = u64::try_from(run_start)
+                .map_err(|_| FfsError::Format("run start does not fit u64".to_owned()))?;
+            let run_block_start = BlockNumber(start.0 + run_start_u64);
+            let mut bufs: Vec<BlockBuf> = (run_start..idx).map(|_| BlockBuf::new(Vec::new())).collect();
+            dev.read_contiguous_blocks(cx, run_block_start, &mut bufs)?;
+            for (j, buf) in bufs.into_iter().enumerate() {
+                resolved[run_start + j] = Some(buf.as_slice().to_vec());
+            }
+        }
+        Ok(resolved.into_iter().map(Option::unwrap_or_default).collect())
     }
 
     fn write_block_with_scope(
@@ -28114,6 +28149,156 @@ mod tests {
     }
 
     // ── OpenFs tests ─────────────────────────────────────────────────────
+
+    /// Byte device wrapping a fixed image that counts scalar `read_exact_at`
+    /// calls versus ranged `read_vectored_exact_at` calls. Counters live behind
+    /// an `Arc` so the test can read them after the device is moved into
+    /// `OpenFs`.
+    #[derive(Debug, Default)]
+    struct ByteReadCounters {
+        scalar: std::sync::atomic::AtomicUsize,
+        vectored: std::sync::atomic::AtomicUsize,
+    }
+
+    #[derive(Debug)]
+    struct CountingByteDevice {
+        data: Vec<u8>,
+        counters: Arc<ByteReadCounters>,
+    }
+
+    impl CountingByteDevice {
+        fn new(data: Vec<u8>) -> (Self, Arc<ByteReadCounters>) {
+            let counters = Arc::new(ByteReadCounters::default());
+            (
+                Self {
+                    data,
+                    counters: Arc::clone(&counters),
+                },
+                counters,
+            )
+        }
+    }
+
+    impl ByteDevice for CountingByteDevice {
+        fn len_bytes(&self) -> u64 {
+            self.data.len() as u64
+        }
+        fn supports_vectored_reads(&self) -> bool {
+            true
+        }
+        fn read_exact_at(&self, _cx: &Cx, offset: ByteOffset, buf: &mut [u8]) -> ffs_error::Result<()> {
+            self.counters
+                .scalar
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let off = usize::try_from(offset.0).expect("offset fits usize");
+            buf.copy_from_slice(&self.data[off..off + buf.len()]);
+            Ok(())
+        }
+        fn read_vectored_exact_at(
+            &self,
+            _cx: &Cx,
+            offset: ByteOffset,
+            bufs: &mut [IoSliceMut<'_>],
+        ) -> ffs_error::Result<()> {
+            self.counters
+                .vectored
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let mut off = usize::try_from(offset.0).expect("offset fits usize");
+            for buf in bufs {
+                let len = buf.len();
+                buf.copy_from_slice(&self.data[off..off + len]);
+                off += len;
+            }
+            Ok(())
+        }
+        fn write_all_at(&self, _cx: &Cx, _offset: ByteOffset, _buf: &[u8]) -> ffs_error::Result<()> {
+            Ok(())
+        }
+        fn sync(&self, _cx: &Cx) -> ffs_error::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Isomorphism + Score proof for the scoped contiguous-read batching lever:
+    /// when a transaction has staged only part of a contiguous range, the prior
+    /// path read EVERY base block with a scalar device read; the single-pass
+    /// path resolves staged blocks in memory and coalesces base-resident gap
+    /// runs into ranged device reads, with byte-identical per-block results.
+    #[test]
+    fn scoped_contiguous_read_coalesces_base_gaps_score() {
+        const BS: usize = 1024;
+        const START: u64 = 40;
+        const COUNT: usize = 64;
+        const STAGED: u64 = 72; // single staged block splitting the range
+        let cx = Cx::for_testing();
+
+        let image = build_ext4_image(0); // 1024-byte blocks, 128 blocks
+        let (dev, counters) = CountingByteDevice::new(image);
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default())
+            .expect("open ext4");
+
+        let mut txn = fs.mvcc_store.write().begin();
+        txn.stage_write(BlockNumber(STAGED), vec![0xEE_u8; BS]);
+        let scope = RequestScope {
+            snapshot: None,
+            tx: Some(txn),
+        };
+
+        // Reference (prior behavior): per-block read_block_with_scope. Reset
+        // first so mount-time superblock/metadata reads are not counted.
+        counters.scalar.store(0, std::sync::atomic::Ordering::SeqCst);
+        counters
+            .vectored
+            .store(0, std::sync::atomic::Ordering::SeqCst);
+        let reference: Vec<Vec<u8>> = (START..START + COUNT as u64)
+            .map(|b| {
+                fs.read_block_with_scope(&cx, &scope, BlockNumber(b))
+                    .expect("ref read")
+            })
+            .collect();
+        let ref_scalar = counters.scalar.load(std::sync::atomic::Ordering::SeqCst);
+
+        // New: single contiguous read.
+        counters.scalar.store(0, std::sync::atomic::Ordering::SeqCst);
+        counters
+            .vectored
+            .store(0, std::sync::atomic::Ordering::SeqCst);
+        let coalesced = fs
+            .read_contiguous_blocks_with_scope(&cx, &scope, BlockNumber(START), COUNT)
+            .expect("contiguous read");
+        let new_scalar = counters.scalar.load(std::sync::atomic::Ordering::SeqCst);
+        let new_vectored = counters.vectored.load(std::sync::atomic::Ordering::SeqCst);
+
+        // ISOMORPHISM: byte-identical per block, incl. the staged overlay block.
+        assert_eq!(coalesced.len(), COUNT);
+        for (i, (a, b)) in reference.iter().zip(coalesced.iter()).enumerate() {
+            assert_eq!(a, b, "block {} bytes diverged", START as usize + i);
+        }
+        assert_eq!(coalesced[(STAGED - START) as usize], vec![0xEE_u8; BS]);
+
+        // GOLDEN: FNV-1a over the concatenated contiguous-read output.
+        let mut digest: u64 = 0xcbf2_9ce4_8422_2325;
+        for blk in &coalesced {
+            for &byte in blk {
+                digest ^= u64::from(byte);
+                digest = digest.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        }
+        assert_eq!(
+            digest, 12_574_137_928_603_788_069,
+            "golden scoped contiguous-read digest changed"
+        );
+
+        // SCORE: 63 scalar base reads (one per gap block) → 2 ranged reads.
+        assert_eq!(ref_scalar, 63, "prior path: one scalar base read per gap block");
+        assert_eq!(new_vectored, 2, "two maximal gap runs around the staged block");
+        assert_eq!(new_scalar, 0, "no scalar base reads on the coalesced path");
+        let read_op_ratio = ref_scalar as f64 / new_vectored as f64;
+        assert!(
+            read_op_ratio >= 2.0,
+            "Score {read_op_ratio} must clear 2.0 ({ref_scalar} -> {new_vectored})"
+        );
+    }
 
     /// Build a minimal synthetic ext4 image for OpenFs testing.
     #[allow(clippy::cast_possible_truncation)]
