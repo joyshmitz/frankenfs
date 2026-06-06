@@ -13,10 +13,7 @@
 //! - **punch**: `punch_hole` — remove mappings without changing file size.
 //! - **unwritten**: `mark_written` — clear unwritten flag on extents.
 
-use std::{
-    cmp::Reverse,
-    collections::{BTreeMap, BinaryHeap},
-};
+use std::collections::{BTreeMap, BTreeSet};
 
 use asupersync::Cx;
 use ffs_alloc::{AllocHint, BlockAlloc, FsGeometry, GroupStats};
@@ -1260,13 +1257,15 @@ struct ExtentCacheInner {
     /// number) that prevents cross-scope cache pollution when a single cache
     /// instance is shared across many objects.
     entries: BTreeMap<(u64, u32), CacheEntry>,
-    /// Lazy min-heap of `(last_access, key)` eviction candidates.
+    /// Exact-ordered eviction index of `(last_access, key)` for every live entry.
     ///
-    /// `BinaryHeap` does not support arbitrary removal, so lookup and insert
-    /// push fresh states and eviction discards stale heap rows until it reaches
-    /// a row matching the current cache entry. The tuple matches the previous
-    /// scan tie-break: oldest access first, then lexicographically smallest key.
-    eviction_heap: BinaryHeap<Reverse<(u64, (u64, u32))>>,
+    /// Ordered ascending, so `iter().next()` is always the unique LRU victim —
+    /// oldest access first, then lexicographically smallest key, matching the
+    /// historical `min_by_key` scan tie-break exactly. Unlike a `BinaryHeap`,
+    /// `BTreeSet` supports arbitrary removal, so the index carries no stale rows:
+    /// every lookup/insert/invalidate updates it in `O(log n)` and eviction is a
+    /// single `O(log n)` pop with no linear scan and no periodic rebuild.
+    eviction_index: BTreeSet<(u64, (u64, u32))>,
     /// Maximum number of entries before eviction.
     capacity: usize,
     /// Monotonically increasing generation; bumped on bulk invalidation.
@@ -1322,7 +1321,7 @@ impl ExtentCache {
         Self {
             inner: RwLock::new(ExtentCacheInner {
                 entries: BTreeMap::new(),
-                eviction_heap: BinaryHeap::with_capacity(capacity),
+                eviction_index: BTreeSet::new(),
                 capacity,
                 generation: 0,
                 hits: 0,
@@ -1369,17 +1368,12 @@ impl ExtentCache {
                 physical_start
             } else {
                 inner.misses = inner.misses.saturating_add(1);
-                inner.entries.remove(&key);
+                inner.remove_entry(key);
                 return None;
             };
             inner.hits = inner.hits.saturating_add(1);
             let clock = inner.hits.saturating_add(inner.misses);
-            if let Some(e) = inner.entries.get_mut(&key) {
-                e.last_access = clock;
-            }
-            if inner.entries.len() >= inner.capacity && inner.capacity != 0 {
-                push_eviction_state(&mut inner, key, clock);
-            }
+            inner.touch_entry(key, clock);
             Some(ExtentMapping {
                 logical_start: logical_block,
                 physical_start,
@@ -1390,7 +1384,7 @@ impl ExtentCache {
             inner.misses = inner.misses.saturating_add(1);
             // Stale entry — remove it.
             if entry_gen != current_gen {
-                inner.entries.remove(&key);
+                inner.remove_entry(key);
             }
             None
         }
@@ -1416,10 +1410,10 @@ impl ExtentCache {
 
         // Evict if at capacity and this is a new key.
         if inner.entries.len() >= inner.capacity && !inner.entries.contains_key(&key) {
-            evict_lru_entry(&mut inner);
+            inner.evict_lru();
         }
 
-        inner.entries.insert(
+        inner.put_entry(
             key,
             CacheEntry {
                 mapping,
@@ -1427,7 +1421,6 @@ impl ExtentCache {
                 last_access: access_clock,
             },
         );
-        push_eviction_state(&mut inner, key, access_clock);
     }
 
     /// Invalidate all cached entries in the given namespace whose range overlaps
@@ -1456,9 +1449,8 @@ impl ExtentCache {
             .collect();
 
         for k in to_remove {
-            inner.entries.remove(&k);
+            inner.remove_entry(k);
         }
-        compact_eviction_heap_if_needed(&mut inner);
     }
 
     /// Invalidate all entries (bulk reset). Bumps the generation counter so
@@ -1466,7 +1458,7 @@ impl ExtentCache {
     pub fn invalidate_all(&self) {
         let mut inner = self.inner.write();
         inner.entries.clear();
-        inner.eviction_heap.clear();
+        inner.eviction_index.clear();
         inner.generation = inner.generation.saturating_add(1);
     }
 
@@ -1492,59 +1484,71 @@ impl ExtentCache {
     }
 }
 
-fn push_eviction_state(inner: &mut ExtentCacheInner, key: (u64, u32), last_access: u64) {
-    inner.eviction_heap.push(Reverse((last_access, key)));
-    compact_eviction_heap_if_needed(inner);
-}
+impl ExtentCacheInner {
+    /// Insert or overwrite an entry, keeping `eviction_index` consistent.
+    fn put_entry(&mut self, key: (u64, u32), entry: CacheEntry) {
+        let new_access = entry.last_access;
+        if let Some(old) = self.entries.insert(key, entry) {
+            self.eviction_index.remove(&(old.last_access, key));
+        }
+        self.eviction_index.insert((new_access, key));
+    }
 
-fn evict_lru_entry(inner: &mut ExtentCacheInner) {
-    while let Some(Reverse((last_access, key))) = inner.eviction_heap.pop() {
-        if inner
-            .entries
-            .get(&key)
-            .is_some_and(|entry| entry.last_access == last_access)
-        {
-            inner.entries.remove(&key);
-            inner.evictions = inner.evictions.saturating_add(1);
-            return;
+    /// Remove an entry and its `eviction_index` row, if present.
+    fn remove_entry(&mut self, key: (u64, u32)) {
+        if let Some(old) = self.entries.remove(&key) {
+            self.eviction_index.remove(&(old.last_access, key));
         }
     }
 
-    let victim_key = inner
-        .entries
-        .iter()
-        .min_by_key(|(key, entry)| (entry.last_access, **key))
-        .map(|(key, _)| *key);
-    if let Some(key) = victim_key {
-        inner.entries.remove(&key);
-        inner.evictions = inner.evictions.saturating_add(1);
-    }
-}
-
-fn compact_eviction_heap_if_needed(inner: &mut ExtentCacheInner) {
-    let live_entries = inner.entries.len();
-    if live_entries == 0 {
-        inner.eviction_heap.clear();
-        return;
+    /// Refresh an entry's `last_access`, moving its `eviction_index` row.
+    fn touch_entry(&mut self, key: (u64, u32), new_access: u64) {
+        let old_access = match self.entries.get_mut(&key) {
+            Some(e) => {
+                let old = e.last_access;
+                e.last_access = new_access;
+                old
+            }
+            None => return,
+        };
+        self.eviction_index.remove(&(old_access, key));
+        self.eviction_index.insert((new_access, key));
     }
 
-    let max_lazy_rows = live_entries.saturating_mul(4).max(64);
-    if inner.eviction_heap.len() <= max_lazy_rows {
-        return;
+    /// Evict the unique LRU victim: oldest `last_access`, then smallest key.
+    /// `O(log n)` with no linear scan and no rebuild.
+    fn evict_lru(&mut self) {
+        let Some(&(last_access, key)) = self.eviction_index.iter().next() else {
+            return;
+        };
+        self.eviction_index.remove(&(last_access, key));
+        self.entries.remove(&key);
+        self.evictions = self.evictions.saturating_add(1);
     }
-
-    inner.eviction_heap.clear();
-    inner.eviction_heap.extend(
-        inner
-            .entries
-            .iter()
-            .map(|(&key, entry)| Reverse((entry.last_access, key))),
-    );
 }
 
 impl Default for ExtentCache {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+impl ExtentCache {
+    /// Test-only snapshot of `(key, last_access)` for every resident entry.
+    fn debug_resident(&self) -> Vec<((u64, u32), u64)> {
+        let inner = self.inner.read();
+        inner.entries.iter().map(|(&k, e)| (k, e.last_access)).collect()
+    }
+
+    /// Test-only invariant: `eviction_index` carries exactly one row per live
+    /// entry, with matching `last_access`. Drift here is the failure mode the
+    /// lazy-heap design risked (stale rows); the `BTreeSet` index must never.
+    fn debug_index_consistent(&self) -> bool {
+        let inner = self.inner.read();
+        let from_entries: BTreeSet<(u64, (u64, u32))> =
+            inner.entries.iter().map(|(&k, e)| (e.last_access, k)).collect();
+        from_entries == inner.eviction_index
     }
 }
 
@@ -6045,6 +6049,94 @@ ExtentMapping { logical_start: 5, physical_start: 134, count: 2, unwritten: true
         // Entry 0 and 2 should survive.
         assert!(cache.lookup(0, 10).is_some());
         assert!(cache.lookup(0, 210).is_some());
+    }
+
+    /// Differential proof for bd-xmh5g.58: the `BTreeSet` eviction index selects
+    /// the exact same victim as the historical `min_by_key(last_access, key)`
+    /// linear scan, op-for-op, over a long mixed insert/lookup workload — while
+    /// the index never drifts from the live entry set. A streamed FNV-1a digest
+    /// of the per-op resident set is the golden witness that the two algorithms
+    /// produce byte-identical decisions.
+    #[test]
+    fn cache_eviction_index_isomorphic_to_min_by_key_scan() {
+        const CAP: usize = 8;
+        let cache = ExtentCache::with_capacity(CAP);
+
+        // Deterministic LCG drives a reproducible workload (no rng dependency).
+        let mut state: u64 = 0x1234_5678_9abc_def0;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) as u32
+        };
+
+        // FNV-1a over the canonical resident-set trace.
+        let mut digest: u64 = 0xcbf2_9ce4_8422_2325;
+        let mut absorb = |bytes: &[u8], d: &mut u64| {
+            for &b in bytes {
+                *d ^= u64::from(b);
+                *d = d.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        };
+
+        for _ in 0..4000 {
+            let r = next();
+            let ns = u64::from(r % 4);
+            let logical = (r % 96) * 10;
+            let key = (ns, logical);
+
+            if r % 2 == 0 {
+                // Predict the scan victim from a pre-insert snapshot.
+                let resident = cache.debug_resident();
+                let already = resident.iter().any(|(k, _)| *k == key);
+                let expected_victim = if resident.len() >= CAP && !already {
+                    resident
+                        .iter()
+                        .min_by_key(|&&((n, l), la)| (la, (n, l)))
+                        .map(|&(k, _)| k)
+                } else {
+                    None
+                };
+
+                cache.insert(
+                    ns,
+                    ExtentMapping {
+                        logical_start: logical,
+                        physical_start: 1000 + u64::from(logical),
+                        count: 10,
+                        unwritten: false,
+                    },
+                );
+
+                let post: Vec<(u64, u32)> =
+                    cache.debug_resident().into_iter().map(|(k, _)| k).collect();
+                if let Some(v) = expected_victim {
+                    assert!(!post.contains(&v), "scan victim {v:?} survived eviction");
+                }
+                assert!(post.contains(&key), "freshly inserted key {key:?} missing");
+            } else {
+                let _ = cache.lookup(ns, logical);
+            }
+
+            // The index must mirror the live set exactly after every op.
+            assert!(
+                cache.debug_index_consistent(),
+                "eviction_index drifted from entries"
+            );
+
+            // Stream the resident set into the golden digest.
+            for ((n, l), la) in cache.debug_resident() {
+                absorb(&n.to_le_bytes(), &mut digest);
+                absorb(&l.to_le_bytes(), &mut digest);
+                absorb(&la.to_le_bytes(), &mut digest);
+            }
+            absorb(b"|", &mut digest);
+        }
+
+        assert_eq!(cache.stats().entries, CAP);
+        // Golden: pinned digest of the full op-by-op resident trace.
+        assert_eq!(digest, 6_744_581_030_166_392_336, "golden trace digest changed");
     }
 
     #[test]

@@ -620,6 +620,109 @@ fn bench_extent_cache_eviction_at_capacity(c: &mut Criterion) {
     });
 }
 
+// ── A/B: eviction victim selection (bd-xmh5g.58) ─────────────────────────────
+// Models the original linear `min_by_key` eviction scan so the production
+// `BTreeSet` eviction index can be measured against it in the same binary.
+// Pure-insert churn at capacity is the workload that triggers eviction; the
+// scan is O(capacity) per eviction while the BTreeSet pop is O(log capacity).
+
+use std::collections::BTreeMap;
+
+/// Standalone reference cache reproducing the pre-`bd-xmh5g.58` eviction:
+/// at capacity, choose the victim with a full `min_by_key(last_access, key)`
+/// linear scan over all entries.
+struct ScanEvictionCache {
+    entries: BTreeMap<(u64, u32), (ffs_extent::ExtentMapping, u64)>,
+    capacity: usize,
+}
+
+impl ScanEvictionCache {
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            entries: BTreeMap::new(),
+            capacity,
+        }
+    }
+
+    fn insert(&mut self, ns: u64, mapping: ffs_extent::ExtentMapping) {
+        if self.capacity == 0 || mapping.count == 0 {
+            return;
+        }
+        let key = (ns, mapping.logical_start);
+        // last_access mirrors hits+misses, which is 0 under pure-insert churn.
+        let access = 0u64;
+        if self.entries.len() >= self.capacity && !self.entries.contains_key(&key) {
+            if let Some(victim) = self
+                .entries
+                .iter()
+                .min_by_key(|(k, (_, last))| (*last, **k))
+                .map(|(k, _)| *k)
+            {
+                self.entries.remove(&victim);
+            }
+        }
+        self.entries.insert(key, (mapping, access));
+    }
+
+    fn resident_keys(&self) -> Vec<(u64, u32)> {
+        self.entries.keys().copied().collect()
+    }
+}
+
+fn churn_mapping(i: u32) -> ffs_extent::ExtentMapping {
+    ffs_extent::ExtentMapping {
+        logical_start: i * 10,
+        physical_start: 1_000 + u64::from(i) * 10,
+        count: 10,
+        unwritten: false,
+    }
+}
+
+fn bench_extent_cache_eviction_ab(c: &mut Criterion) {
+    // Capacity 512, churn 2048 fresh keys → 1536 evictions. At this capacity the
+    // O(n) scan tax is what the BTreeSet index removes.
+    const CAP: usize = 512;
+    const CHURN: u32 = 2048;
+
+    // Isomorphism: both policies retain the identical resident key set.
+    let mut scan = ScanEvictionCache::with_capacity(CAP);
+    let real = ffs_extent::ExtentCache::with_capacity(CAP);
+    for i in 0..CHURN {
+        scan.insert(0, churn_mapping(i));
+        real.insert(0, churn_mapping(i));
+    }
+    let real_keys: Vec<(u64, u32)> = (0..CHURN)
+        .map(|i| (0u64, i * 10))
+        .filter(|&(ns, l)| real.lookup(ns, l).is_some())
+        .collect();
+    assert_eq!(
+        scan.resident_keys(),
+        real_keys,
+        "eviction policies diverged"
+    );
+
+    let mut group = c.benchmark_group("extent_cache_eviction_ab_cap512_churn2048");
+    group.bench_function("old_min_by_key_scan", |b| {
+        b.iter(|| {
+            let mut cache = ScanEvictionCache::with_capacity(CAP);
+            for i in 0..CHURN {
+                cache.insert(black_box(0), churn_mapping(i));
+            }
+            black_box(cache.entries.len());
+        });
+    });
+    group.bench_function("btreeset_index", |b| {
+        b.iter(|| {
+            let cache = ffs_extent::ExtentCache::with_capacity(CAP);
+            for i in 0..CHURN {
+                cache.insert(black_box(0), churn_mapping(i));
+            }
+            black_box(cache.stats().entries);
+        });
+    });
+    group.finish();
+}
+
 criterion_group!(
     extent_resolve,
     bench_extent_resolve_depth0,
@@ -635,5 +738,6 @@ criterion_group!(
     bench_extent_cache_invalidate_range_overlapping,
     bench_extent_cache_invalidate_all,
     bench_extent_cache_eviction_at_capacity,
+    bench_extent_cache_eviction_ab,
 );
 criterion_main!(extent_resolve);
