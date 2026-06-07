@@ -6438,7 +6438,10 @@ pub fn generate_send_stream<F>(
     mut read_extent: F,
 ) -> Result<Vec<u8>, ParseError>
 where
-    F: FnMut(u64, u64) -> Result<Vec<u8>, ParseError>,
+    // (disk_bytenr, disk_num_bytes, ram_bytes, compression) -> DECOMPRESSED extent
+    // bytes. The callee must decompress compressed extents (ffs-btrfs has no
+    // decompressor) so the slice below is always in uncompressed/logical space.
+    F: FnMut(u64, u64, u64, u8) -> Result<Vec<u8>, ParseError>,
 {
     let mut builder = SendStreamBuilder::new();
     builder.write_header();
@@ -6555,6 +6558,15 @@ where
                         // Regular extents carry initialized data; preallocated
                         // extents are unwritten and must be represented as an
                         // extent update, not as bytes read from disk.
+                        // EXTENT_DATA layout: ram_bytes@8, compression@16,
+                        // type@20, then disk_bytenr/disk_num_bytes/extent_offset/
+                        // num_bytes. For a COMPRESSED extent disk_num_bytes is the
+                        // compressed on-disk size and extent_offset/num_bytes are
+                        // in the UNCOMPRESSED space, so we must decompress before
+                        // slicing (read_extent returns decompressed bytes).
+                        let ram_bytes =
+                            u64::from_le_bytes(entry.data[8..16].try_into().unwrap_or([0; 8]));
+                        let compression = entry.data[16];
                         let disk_bytenr =
                             u64::from_le_bytes(entry.data[21..29].try_into().unwrap_or([0; 8]));
                         let disk_num_bytes =
@@ -6571,8 +6583,11 @@ where
                                 attrs.iter().map(|(a, d)| (*a, d.as_slice())).collect();
                             builder.add_command(cmd, &refs);
                         } else if disk_num_bytes > 0 {
-                            // Read extent data and emit write
-                            if let Ok(full_data) = read_extent(disk_bytenr, disk_num_bytes) {
+                            // Read (and, if compressed, decompress) extent data,
+                            // then emit the write in uncompressed/logical space.
+                            if let Ok(full_data) =
+                                read_extent(disk_bytenr, disk_num_bytes, ram_bytes, compression)
+                            {
                                 #[expect(clippy::cast_possible_truncation)]
                                 let start = extent_offset as usize;
                                 #[expect(clippy::cast_possible_truncation)]
@@ -17466,12 +17481,18 @@ mod tests {
         ];
 
         let uuid = [0u8; 16];
-        let stream = generate_send_stream(&items, b"test_subvol", &uuid, 1, |_bytenr, _len| {
-            Err(ffs_types::ParseError::InvalidField {
-                field: "test",
-                reason: "no disk extents in test",
-            })
-        })
+        let stream = generate_send_stream(
+            &items,
+            b"test_subvol",
+            &uuid,
+            1,
+            |_bytenr: u64, _len: u64, _ram_bytes: u64, _compression: u8| {
+                Err(ffs_types::ParseError::InvalidField {
+                    field: "test",
+                    reason: "no disk extents in test",
+                })
+            },
+        )
         .expect("generate send stream");
 
         // Parse the generated stream
@@ -17603,11 +17624,17 @@ mod tests {
 
         let uuid = [0u8; 16];
         let original_for_read = original.clone();
-        let stream = generate_send_stream(&items, b"test_subvol", &uuid, 1, |bytenr, len| {
-            assert_eq!(bytenr, DISK_BYTENR, "unexpected extent read");
-            let len = usize::try_from(len).expect("len fits usize");
-            Ok(original_for_read[..len].to_vec())
-        })
+        let stream = generate_send_stream(
+            &items,
+            b"test_subvol",
+            &uuid,
+            1,
+            |bytenr, len, _ram_bytes, _compression| {
+                assert_eq!(bytenr, DISK_BYTENR, "unexpected extent read");
+                let len = usize::try_from(len).expect("len fits usize");
+                Ok(original_for_read[..len].to_vec())
+            },
+        )
         .expect("generate send stream");
 
         // The stream must round-trip through the parser (it would not if any
@@ -17654,6 +17681,136 @@ mod tests {
         assert_eq!(
             reassembled, original,
             "reassembled file must match original"
+        );
+    }
+
+    /// A COMPRESSED extent must emit DECOMPRESSED data in the send stream
+    /// (uncompressed/logical space). Before the fix, generate_send_stream read
+    /// disk_num_bytes (compressed size) and sliced [extent_offset..+num_bytes]
+    /// with uncompressed offsets — out of bounds / truncated garbage. Now it
+    /// passes ram_bytes + compression to the read closure (which returns the
+    /// decompressed bytes) and slices in uncompressed space.
+    #[test]
+    fn generate_send_stream_compressed_extent_emits_decompressed_data() {
+        const ATTR_FILE_OFFSET: u16 = SendAttr::FileOffset as u16;
+        const ATTR_DATA: u16 = SendAttr::Data as u16;
+
+        fn make_inode_item(mode: u32, size: u64) -> Vec<u8> {
+            let mut buf = vec![0u8; 160];
+            buf[0..8].copy_from_slice(&1_u64.to_le_bytes());
+            buf[16..24].copy_from_slice(&size.to_le_bytes());
+            buf[24..32].copy_from_slice(&size.to_le_bytes());
+            buf[40..44].copy_from_slice(&1_u32.to_le_bytes());
+            buf[52..56].copy_from_slice(&mode.to_le_bytes());
+            buf
+        }
+        #[expect(clippy::cast_possible_truncation)]
+        fn make_inode_ref(index: u64, name: &[u8]) -> Vec<u8> {
+            let mut buf = Vec::new();
+            buf.extend_from_slice(&index.to_le_bytes());
+            buf.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            buf.extend_from_slice(name);
+            buf
+        }
+        // Compressed regular EXTENT_DATA: ram_bytes@8, compression@16, type@20=1,
+        // disk_bytenr@21, disk_num_bytes@29 (compressed, small), extent_offset@37,
+        // num_bytes@45 (uncompressed).
+        fn make_compressed_extent(
+            disk_bytenr: u64,
+            disk_num_bytes: u64,
+            ram_bytes: u64,
+        ) -> Vec<u8> {
+            let mut buf = vec![0u8; 53];
+            buf[8..16].copy_from_slice(&ram_bytes.to_le_bytes());
+            buf[16] = BTRFS_COMPRESS_ZLIB;
+            buf[20] = 1;
+            buf[21..29].copy_from_slice(&disk_bytenr.to_le_bytes());
+            buf[29..37].copy_from_slice(&disk_num_bytes.to_le_bytes());
+            buf[37..45].copy_from_slice(&0u64.to_le_bytes());
+            buf[45..53].copy_from_slice(&ram_bytes.to_le_bytes());
+            buf
+        }
+
+        const RAM_BYTES: u64 = 12_000; // uncompressed size (> the compressed size)
+        const DISK_NUM_BYTES: u64 = 4_000; // compressed on-disk size
+        const DISK_BYTENR: u64 = 0x2_0000;
+        // The decompressed file content the read closure (= ffs-core, which
+        // decompresses) is expected to return.
+        let decompressed: Vec<u8> = (0..RAM_BYTES).map(|i| (i % 251) as u8).collect();
+
+        let items = vec![
+            BtrfsLeafEntry {
+                key: BtrfsKey {
+                    objectid: 256,
+                    item_type: BTRFS_ITEM_INODE_ITEM,
+                    offset: 0,
+                },
+                data: make_inode_item(0o40755, 0),
+            },
+            BtrfsLeafEntry {
+                key: BtrfsKey {
+                    objectid: 257,
+                    item_type: BTRFS_ITEM_INODE_ITEM,
+                    offset: 0,
+                },
+                data: make_inode_item(0o100_644, RAM_BYTES),
+            },
+            BtrfsLeafEntry {
+                key: BtrfsKey {
+                    objectid: 257,
+                    item_type: BTRFS_ITEM_INODE_REF,
+                    offset: 256,
+                },
+                data: make_inode_ref(2, b"z.bin"),
+            },
+            BtrfsLeafEntry {
+                key: BtrfsKey {
+                    objectid: 257,
+                    item_type: BTRFS_ITEM_EXTENT_DATA,
+                    offset: 0,
+                },
+                data: make_compressed_extent(DISK_BYTENR, DISK_NUM_BYTES, RAM_BYTES),
+            },
+        ];
+
+        let uuid = [0u8; 16];
+        let decompressed_for_read = decompressed.clone();
+        let stream = generate_send_stream(
+            &items,
+            b"test_subvol",
+            &uuid,
+            1,
+            |bytenr, disk_num_bytes, ram_bytes, compression| {
+                // generate_send_stream must hand us the compression + ram_bytes so
+                // we (ffs-core) can decompress; verify and return decompressed.
+                assert_eq!(bytenr, DISK_BYTENR);
+                assert_eq!(disk_num_bytes, DISK_NUM_BYTES, "compressed on-disk size");
+                assert_eq!(ram_bytes, RAM_BYTES, "uncompressed size");
+                assert_eq!(compression, BTRFS_COMPRESS_ZLIB);
+                Ok(decompressed_for_read.clone())
+            },
+        )
+        .expect("generate send stream");
+
+        let parsed = parse_send_stream(&stream).expect("parse stream");
+        let mut reassembled = vec![0u8; decompressed.len()];
+        for w in parsed.commands.iter().filter(|c| c.cmd == SendCommand::Write) {
+            let mut offset = None;
+            let mut data: Option<&[u8]> = None;
+            for (atype, adata) in &w.attrs {
+                if *atype == ATTR_FILE_OFFSET {
+                    offset =
+                        Some(u64::from_le_bytes(adata.as_slice().try_into().unwrap()) as usize);
+                } else if *atype == ATTR_DATA {
+                    data = Some(adata);
+                }
+            }
+            let (offset, data) = (offset.expect("offset"), data.expect("data"));
+            reassembled[offset..offset + data.len()].copy_from_slice(data);
+        }
+        assert_eq!(
+            reassembled, decompressed,
+            "send stream of a compressed extent must carry the full DECOMPRESSED data"
         );
     }
 
@@ -17735,13 +17892,19 @@ mod tests {
 
         let uuid = [0_u8; 16];
         let mut read_extent_called = false;
-        let stream = generate_send_stream(&items, b"test_subvol", &uuid, 1, |_bytenr, _len| {
-            read_extent_called = true;
-            Err(ffs_types::ParseError::InvalidField {
-                field: "test",
-                reason: "prealloc extents must not read disk bytes",
-            })
-        })
+        let stream = generate_send_stream(
+            &items,
+            b"test_subvol",
+            &uuid,
+            1,
+            |_bytenr: u64, _len: u64, _ram_bytes: u64, _compression: u8| {
+                read_extent_called = true;
+                Err(ffs_types::ParseError::InvalidField {
+                    field: "test",
+                    reason: "prealloc extents must not read disk bytes",
+                })
+            },
+        )
         .expect("generate send stream");
 
         assert!(

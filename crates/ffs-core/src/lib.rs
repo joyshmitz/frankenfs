@@ -25574,29 +25574,40 @@ impl FsOps for OpenFs {
                     subvol_name.as_bytes(),
                     &subvol_uuid,
                     ctransid,
-                    |offset, len| {
-                        // Read extent data through the chunk-boundary-aware read
-                        // path (bd-ttrw5). A btrfs data extent can straddle a
-                        // chunk boundary, where the physical mapping is
-                        // discontiguous; a single map_logical_to_physical + read
-                        // of `len` bytes from one mapping would emit wrong bytes
-                        // (from unrelated physical blocks) past the boundary into
-                        // the send stream. btrfs_read_logical_into loops per chunk
-                        // and is the same (MVCC-overlay-correct, vectored) read
-                        // every other btrfs read uses.
-                        let buf_len = usize::try_from(len).map_err(|_| {
+                    |disk_bytenr, disk_num_bytes, ram_bytes, compression| {
+                        // Read the on-disk extent bytes through the
+                        // chunk-boundary-aware read path (bd-ttrw5): a data extent
+                        // can straddle a chunk boundary, where the physical mapping
+                        // is discontiguous, so a single map+read would emit wrong
+                        // bytes. Then DECOMPRESS compressed extents (bd-...): the
+                        // on-disk bytes are compressed but the send stream carries
+                        // uncompressed data, so emitting the raw compressed bytes
+                        // produces a corrupt stream.
+                        let raw_len = usize::try_from(disk_num_bytes).map_err(|_| {
                             ffs_types::ParseError::IntegerConversion {
                                 field: "extent_length",
                             }
                         })?;
-                        let mut buf = vec![0u8; buf_len];
-                        self.btrfs_read_logical_into(cx, offset, &mut buf).map_err(|_| {
-                            ffs_types::ParseError::InvalidField {
+                        let mut raw = vec![0u8; raw_len];
+                        self.btrfs_read_logical_into(cx, disk_bytenr, &mut raw)
+                            .map_err(|_| ffs_types::ParseError::InvalidField {
                                 field: "extent_data",
                                 reason: "logical read failed",
+                            })?;
+                        if compression == ffs_btrfs::BTRFS_COMPRESS_NONE {
+                            return Ok(raw);
+                        }
+                        let uncompressed = usize::try_from(ram_bytes).map_err(|_| {
+                            ffs_types::ParseError::IntegerConversion {
+                                field: "ram_bytes",
                             }
                         })?;
-                        Ok(buf)
+                        Self::btrfs_decompress(&raw, compression, uncompressed).map_err(|_| {
+                            ffs_types::ParseError::InvalidField {
+                                field: "extent_data",
+                                reason: "decompression failed",
+                            }
+                        })
                     },
                 )
                 .map_err(|e| FfsError::Format(format!("generate_send_stream: {e}")))?;
