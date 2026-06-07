@@ -29337,6 +29337,106 @@ mod tests {
         assert_eq!(fs.read(&cx, ino, 0, bs as u32).expect("b0 after"), b0, "block 0 survives");
     }
 
+    /// bd-laay3 hardening: PARTIAL multi-level free. Earlier truncate/fallocate
+    /// tests only freed sub-trees that emptied completely (root cleared). This
+    /// covers the harder case: a truncate that frees one level-1 block under a
+    /// double-indirect root while a SIBLING level-1 block and the root itself
+    /// survive — exactly where a range off-by-one in free_indirect_subtree's
+    /// `[free_lo, free_hi)` intersection logic would corrupt the tree.
+    #[test]
+    fn ext4_indirect_partial_double_indirect_free_keeps_siblings_bd_laay3() {
+        let Some((fs, _tmp)) = open_writable_ext4_mkfs(16) else {
+            return; // mkfs.ext4 unavailable
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let bs = fs.block_size() as usize;
+        let bs_u64 = bs as u64;
+        let spb = u64::from(fs.block_size() / EXT4_SECTOR_SIZE);
+        let ppb = bs_u64 / 4;
+
+        // Indirect file mapping logical block 0.
+        let ino = fs
+            .create(&cx, root, OsStr::new("partial.bin"), 0o644, 0, 0)
+            .expect("create")
+            .ino;
+        let b0 = vec![0x01_u8; bs];
+        fs.write(&cx, ino, 0, &b0).expect("seed block 0");
+        let seeded = fs.read_inode(&cx, ino).expect("inode");
+        let phys0 = fs
+            .collect_extents(&cx, &seeded)
+            .expect("extents")
+            .iter()
+            .find(|e| e.logical_block == 0)
+            .map(|e| e.physical_start)
+            .expect("block 0 mapped");
+        let mut indirect = seeded.clone();
+        indirect.flags &= !ffs_types::EXT4_EXTENTS_FL;
+        let mut iblock = vec![0_u8; 15 * 4];
+        iblock[0..4].copy_from_slice(&u32::try_from(phys0).unwrap().to_le_bytes());
+        indirect.extent_bytes = iblock;
+        indirect.size = bs_u64;
+        fs.persist_ext4_inode_for_testing(&cx, ino, &indirect)
+            .expect("persist indirect");
+
+        // Double-indirect region base = 12 + ppb. Place two data blocks under the
+        // SAME double root but in DIFFERENT level-1 sub-blocks:
+        //   A at dind-index1 = 0 (logical base)
+        //   B at dind-index1 = 1 (logical base + ppb)
+        let dind_base = 12 + ppb;
+        let a_lb = dind_base; // idx1 = 0
+        let b_lb = dind_base + ppb; // idx1 = 1
+        let a_payload = vec![0xAA_u8; bs];
+        let b_payload = vec![0xBB_u8; bs];
+        fs.write(&cx, ino, a_lb * bs_u64, &a_payload).expect("write A");
+        fs.write(&cx, ino, b_lb * bs_u64, &b_payload).expect("write B");
+
+        let before = fs.read_inode(&cx, ino).expect("inode before trunc");
+        // i_block[13] (double-indirect root) at offset 13*4 = 52.
+        let dind_root = u32::from_le_bytes(before.extent_bytes[52..56].try_into().unwrap());
+        assert_ne!(dind_root, 0, "double-indirect root allocated");
+        let blocks_before = before.blocks;
+
+        // Truncate so B is freed but A is kept: cutoff strictly between a_lb+1 and
+        // b_lb. A block-aligned size at (a_lb + 1) blocks frees everything from
+        // logical a_lb+1 onward, i.e. B (and its level-1 block), keeping A.
+        let new_size = (a_lb + 1) * bs_u64;
+        let attrs = SetAttrRequest {
+            size: Some(new_size),
+            ..SetAttrRequest::default()
+        };
+        fs.setattr(&cx, ino, &attrs).expect("partial truncate");
+
+        let after = fs.read_inode(&cx, ino).expect("inode after trunc");
+        assert_eq!(after.size, new_size, "size shrunk");
+        // The double-indirect root MUST survive (A's level-1 block still hangs off it).
+        let dind_root_after = u32::from_le_bytes(after.extent_bytes[52..56].try_into().unwrap());
+        assert_eq!(
+            dind_root_after, dind_root,
+            "double-indirect root must survive a partial free (sibling still mapped)"
+        );
+        // Exactly two blocks freed: B's data block + B's now-empty level-1 block.
+        assert_eq!(
+            blocks_before - after.blocks,
+            2 * spb,
+            "partial free releases only B's data + its level-1 block"
+        );
+        // A still reads its data; B's region is now a zero hole.
+        assert_eq!(
+            fs.read(&cx, ino, a_lb * bs_u64, bs as u32).expect("read A"),
+            a_payload,
+            "sibling block A survives the partial free"
+        );
+        assert!(
+            fs.read(&cx, ino, b_lb * bs_u64, bs as u32)
+                .map(|v| v.is_empty())
+                .unwrap_or(true),
+            "B is beyond the new EOF (reads nothing)"
+        );
+        // Block 0 intact.
+        assert_eq!(fs.read(&cx, ino, 0, bs as u32).expect("b0"), b0, "block 0 survives");
+    }
+
     #[test]
     fn ext4_indirect_read_coalesces_contiguous_blocks_bd_bov9c() {
         const BS: usize = 4096;
