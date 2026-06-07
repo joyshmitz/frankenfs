@@ -29437,6 +29437,69 @@ mod tests {
         assert_eq!(fs.read(&cx, ino, 0, bs as u32).expect("b0"), b0, "block 0 survives");
     }
 
+    /// Regression: deleting a legacy indirect-block-mapped file must FREE its
+    /// data + indirect-metadata blocks. delete_inode previously freed blocks only
+    /// for extent-mapped inodes, so unlinking an indirect file leaked every block
+    /// (left allocated in the bitmap with no referencing inode — e2fsck-dirty).
+    /// Verified against the authoritative bitmap counts AND the group-descriptor
+    /// counts (they must stay consistent).
+    #[test]
+    fn ext4_indirect_unlink_frees_all_blocks_bd_laay3() {
+        let Some((fs, _tmp)) = open_writable_ext4_mkfs(16) else {
+            return; // mkfs.ext4 unavailable
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let bs = fs.block_size() as usize;
+
+        // Build an indirect file: block 0 (direct) + a grow into the
+        // single-indirect region (1 data block + 1 indirect-metadata block) =
+        // three filesystem blocks total.
+        let ino = fs
+            .create(&cx, root, OsStr::new("leak.bin"), 0o644, 0, 0)
+            .expect("create")
+            .ino;
+        fs.write(&cx, ino, 0, &vec![0x01_u8; bs]).expect("seed block 0");
+        let seeded = fs.read_inode(&cx, ino).expect("inode");
+        let phys0 = fs
+            .collect_extents(&cx, &seeded)
+            .expect("extents")
+            .iter()
+            .find(|e| e.logical_block == 0)
+            .map(|e| e.physical_start)
+            .expect("block 0 mapped");
+        let mut indirect = seeded.clone();
+        indirect.flags &= !ffs_types::EXT4_EXTENTS_FL;
+        let mut iblock = vec![0_u8; 15 * 4];
+        iblock[0..4].copy_from_slice(&u32::try_from(phys0).unwrap().to_le_bytes());
+        indirect.extent_bytes = iblock;
+        indirect.size = bs as u64;
+        fs.persist_ext4_inode_for_testing(&cx, ino, &indirect)
+            .expect("persist indirect");
+        // Logical block 12 is the first single-indirect block: allocates one
+        // data block plus the single-indirect metadata block.
+        fs.write(&cx, ino, 12 * bs as u64, &vec![0x0C_u8; bs])
+            .expect("grow into single-indirect region");
+
+        // The file now holds exactly 3 blocks (block 0 + grown data + its
+        // single-indirect metadata block).
+        let before = fs.free_space_summary(&cx).expect("free space before");
+
+        fs.unlink(&cx, root, OsStr::new("leak.bin")).expect("unlink");
+
+        let after = fs.free_space_summary(&cx).expect("free space after");
+        assert_eq!(
+            after.free_blocks_total - before.free_blocks_total,
+            3,
+            "unlink must free all 3 indirect-file blocks (bitmap), not leak them"
+        );
+        assert_eq!(
+            after.gd_free_blocks_total - before.gd_free_blocks_total,
+            3,
+            "group-descriptor free count must match the bitmap after the free"
+        );
+    }
+
     #[test]
     fn ext4_indirect_read_coalesces_contiguous_blocks_bd_bov9c() {
         const BS: usize = 4096;

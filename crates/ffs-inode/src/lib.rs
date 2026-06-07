@@ -387,6 +387,124 @@ pub fn create_inode(
 
 // ── Delete ──────────────────────────────────────────────────────────────────
 
+/// Inode flag: inline data stored in `i_block` (EXT4_INLINE_DATA_FL).
+const EXT4_INLINE_DATA_FL: u32 = 0x1000_0000;
+
+const S_IFMT: u16 = 0xF000;
+const S_IFREG: u16 = 0x8000;
+const S_IFDIR: u16 = 0x4000;
+const S_IFLNK: u16 = 0xA000;
+
+/// True iff the inode maps its data through legacy indirect block pointers
+/// (i_block[0..12] direct, [12]/[13]/[14] single/double/triple indirect) — so
+/// `delete_inode` must walk and free that chain.
+///
+/// Guards strictly: an inode that is extent-mapped, inline-data, or has no
+/// allocated blocks (fast symlink target inline in i_block, device file whose
+/// i_block holds the rdev, empty file) must NOT be treated as a pointer table —
+/// misreading those bytes as block pointers would free unrelated blocks.
+fn inode_uses_indirect_blocks(inode: &Ext4Inode) -> bool {
+    if inode.flags & EXT4_EXTENTS_FL != 0 || inode.flags & EXT4_INLINE_DATA_FL != 0 {
+        return false;
+    }
+    if inode.blocks == 0 {
+        return false;
+    }
+    matches!(inode.mode & S_IFMT, S_IFREG | S_IFDIR | S_IFLNK)
+}
+
+/// Recursively free an indirect pointer block at indirection `level`
+/// (1 = single → data blocks, 2 = double, 3 = triple): frees every data block
+/// reachable from it, then frees the pointer block itself.
+#[allow(clippy::too_many_arguments)] // recursive chain walk threads device + alloc + geometry
+fn free_indirect_chain(
+    cx: &Cx,
+    dev: &dyn BlockDevice,
+    geo: &FsGeometry,
+    groups: &mut [GroupStats],
+    block: BlockNumber,
+    level: u32,
+    ppb: usize,
+    pctx: &ffs_alloc::PersistCtx,
+) -> Result<()> {
+    cx_checkpoint(cx)?;
+    let buf = dev.read_block(cx, block)?;
+    let bytes = buf.as_slice();
+    for i in 0..ppb {
+        let off = i * 4;
+        if off + 4 > bytes.len() {
+            break;
+        }
+        let ptr = u32::from_le_bytes([bytes[off], bytes[off + 1], bytes[off + 2], bytes[off + 3]]);
+        if ptr == 0 {
+            continue;
+        }
+        let child = BlockNumber(u64::from(ptr));
+        if level == 1 {
+            ffs_alloc::free_blocks_persist(cx, dev, geo, groups, child, 1, pctx)?;
+        } else {
+            free_indirect_chain(cx, dev, geo, groups, child, level - 1, ppb, pctx)?;
+        }
+    }
+    // Free this indirect (metadata) block itself.
+    ffs_alloc::free_blocks_persist(cx, dev, geo, groups, block, 1, pctx)?;
+    Ok(())
+}
+
+/// Free every data + indirect-metadata block of a legacy indirect-mapped inode.
+/// Caller must have verified [`inode_uses_indirect_blocks`].
+fn free_indirect_blocks(
+    cx: &Cx,
+    dev: &dyn BlockDevice,
+    geo: &FsGeometry,
+    groups: &mut [GroupStats],
+    inode: &Ext4Inode,
+    pctx: &ffs_alloc::PersistCtx,
+) -> Result<()> {
+    let raw = &inode.extent_bytes;
+    if raw.len() < 60 {
+        return Ok(());
+    }
+    let read_ptr = |idx: usize| -> u32 {
+        let off = idx * 4;
+        u32::from_le_bytes([raw[off], raw[off + 1], raw[off + 2], raw[off + 3]])
+    };
+    let ppb = (geo.block_size / 4) as usize;
+
+    // Direct blocks i_block[0..12].
+    for i in 0..12usize {
+        let ptr = read_ptr(i);
+        if ptr != 0 {
+            ffs_alloc::free_blocks_persist(
+                cx,
+                dev,
+                geo,
+                groups,
+                BlockNumber(u64::from(ptr)),
+                1,
+                pctx,
+            )?;
+        }
+    }
+    // Single / double / triple indirect roots.
+    for (idx, level) in [(12usize, 1u32), (13usize, 2u32), (14usize, 3u32)] {
+        let ptr = read_ptr(idx);
+        if ptr != 0 {
+            free_indirect_chain(
+                cx,
+                dev,
+                geo,
+                groups,
+                BlockNumber(u64::from(ptr)),
+                level,
+                ppb,
+                pctx,
+            )?;
+        }
+    }
+    Ok(())
+}
+
 /// Delete an inode: truncate all extents, free the inode, zero the on-disk data.
 #[expect(clippy::too_many_arguments)]
 pub fn delete_inode(
@@ -427,6 +545,11 @@ pub fn delete_inode(
             },
         )?;
         inode.extent_bytes[..60].copy_from_slice(&root_buf);
+    } else if inode_uses_indirect_blocks(inode) {
+        // Legacy indirect-block-mapped inode: free its data + indirect-metadata
+        // blocks down the pointer chain. Without this the blocks leak (stay set
+        // in the block bitmap with no referencing inode — e2fsck-dirty).
+        free_indirect_blocks(cx, dev, geo, groups, inode, pctx)?;
     }
 
     // Free the external xattr block if present.
