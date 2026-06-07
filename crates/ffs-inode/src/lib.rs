@@ -389,6 +389,10 @@ pub fn create_inode(
 
 /// Inode flag: inline data stored in `i_block` (EXT4_INLINE_DATA_FL).
 const EXT4_INLINE_DATA_FL: u32 = 0x1000_0000;
+/// Inode flag: e2compr compression requested (EXT4_COMPR_FL).
+const EXT4_COMPR_FL: u32 = 0x0000_0004;
+/// Inode flag: e2compr compressed blocks present (EXT4_COMPRBLK_FL).
+const EXT4_COMPRBLK_FL: u32 = 0x0000_0200;
 
 const S_IFMT: u16 = 0xF000;
 const S_IFREG: u16 = 0x8000;
@@ -397,14 +401,20 @@ const S_IFLNK: u16 = 0xA000;
 
 /// True iff the inode maps its data through legacy indirect block pointers
 /// (i_block[0..12] direct, [12]/[13]/[14] single/double/triple indirect) — so
-/// `delete_inode` must walk and free that chain.
+/// `delete_inode` / truncate may walk and free that chain.
 ///
-/// Guards strictly: an inode that is extent-mapped, inline-data, or has no
-/// allocated blocks (fast symlink target inline in i_block, device file whose
-/// i_block holds the rdev, empty file) must NOT be treated as a pointer table —
-/// misreading those bytes as block pointers would free unrelated blocks.
+/// Guards strictly: an inode that is extent-mapped, inline-data, e2compr
+/// (compressed), or has no allocated blocks (fast symlink target inline in
+/// i_block, device file whose i_block holds the rdev, empty file) must NOT be
+/// treated as a plain pointer table. In particular e2compr files store the
+/// EXT2_COMPRESSED_BLKADDR sentinel (0xFFFFFFFF) in i_block slots — freeing that
+/// as a block would corrupt the allocator — so they are excluded here (their
+/// cluster-aware block management is unimplemented; deleting one currently
+/// leaks its data blocks rather than corrupting the bitmap).
 fn inode_uses_indirect_blocks(inode: &Ext4Inode) -> bool {
-    if inode.flags & EXT4_EXTENTS_FL != 0 || inode.flags & EXT4_INLINE_DATA_FL != 0 {
+    const EXCLUDED: u32 =
+        EXT4_EXTENTS_FL | EXT4_INLINE_DATA_FL | EXT4_COMPR_FL | EXT4_COMPRBLK_FL;
+    if inode.flags & EXCLUDED != 0 {
         return false;
     }
     if inode.blocks == 0 {
@@ -1434,6 +1444,80 @@ mod tests {
             geo.blocks_per_group - 1,
             "three of the four allocated blocks were freed"
         );
+    }
+
+    /// Regression: an e2compr (compressed) inode must NOT be treated as a plain
+    /// indirect pointer table. Its i_block holds EXT2_COMPRESSED_BLKADDR
+    /// (0xFFFFFFFF) sentinels, not block numbers; walking them as pointers (as
+    /// the W23 indirect-free walk would) calls free_blocks_persist(0xFFFFFFFF)
+    /// and corrupts/aborts. The guard must exclude compressed files, and
+    /// delete_inode must therefore skip block-freeing for them (no sentinel
+    /// reaches the allocator).
+    #[test]
+    fn compressed_inode_not_treated_as_indirect_and_delete_skips_sentinels() {
+        // Plain indirect regular file IS indirect-mapped.
+        let mut plain = representative_inode();
+        plain.flags = 0;
+        plain.mode = 0o100_644;
+        plain.blocks = 8;
+        assert!(
+            inode_uses_indirect_blocks(&plain),
+            "a plain non-extent regular file is indirect-mapped"
+        );
+
+        // Same inode with the e2compr flags is NOT.
+        for flag in [EXT4_COMPR_FL, EXT4_COMPRBLK_FL] {
+            let mut compr = plain.clone();
+            compr.flags = flag;
+            assert!(
+                !inode_uses_indirect_blocks(&compr),
+                "an e2compr inode (flag {flag:#x}) must not be walked as indirect pointers"
+            );
+        }
+
+        // End-to-end: delete_inode on a compressed inode whose i_block holds a
+        // 0xFFFFFFFF sentinel must succeed without trying to free that sentinel.
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let geo = make_geometry();
+        let mut groups = make_groups(&geo);
+
+        let (ino, mut inode) = create_inode(
+            &cx,
+            &dev,
+            &geo,
+            &mut groups,
+            0o100_644,
+            0,
+            0,
+            GroupNumber(0),
+            0,
+            1_700_000_000,
+            0,
+            &mock_pctx(),
+        )
+        .unwrap();
+        // Make it an e2compr file with a compressed-block sentinel in i_block[0].
+        inode.flags = EXT4_COMPRBLK_FL;
+        inode.blocks = 8;
+        let mut eb = vec![0u8; 60];
+        eb[0..4].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes()); // EXT2_COMPRESSED_BLKADDR
+        inode.extent_bytes = eb;
+
+        // Must not error (pre-fix this hit free_blocks_persist(0xFFFFFFFF)).
+        delete_inode(
+            &cx,
+            &dev,
+            &geo,
+            &mut groups,
+            ino,
+            &mut inode,
+            0,
+            1_700_000_001,
+            &mock_pctx(),
+        )
+        .expect("delete of a compressed inode must not free the 0xFFFFFFFF sentinel");
+        assert_eq!(inode.links_count, 0, "inode still freed");
     }
 
     #[test]
