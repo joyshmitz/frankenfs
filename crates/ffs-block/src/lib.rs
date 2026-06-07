@@ -2434,6 +2434,67 @@ impl ArcState {
     }
 
     #[cfg(feature = "s3fifo")]
+    fn should_compact_ghost_queue(physical_len: usize, live_len: usize, capacity: usize) -> bool {
+        let stale_len = physical_len.saturating_sub(live_len);
+        stale_len > capacity / 2 && physical_len > live_len.saturating_mul(2)
+    }
+
+    #[cfg(feature = "s3fifo")]
+    fn compact_b1_ghosts(&mut self) {
+        let old = std::mem::take(&mut self.b1);
+        let mut compact = VecDeque::with_capacity(self.b1_live_len);
+        let mut live_len = 0_usize;
+        for entry in old {
+            if self.live_ghost_entry(entry, ArcList::B1) {
+                compact.push_back(entry);
+                live_len = live_len.saturating_add(1);
+            }
+        }
+        self.b1 = compact;
+        self.b1_live_len = live_len;
+    }
+
+    #[cfg(feature = "s3fifo")]
+    fn compact_b2_ghosts(&mut self) {
+        let old = std::mem::take(&mut self.b2);
+        let mut compact = VecDeque::with_capacity(self.b2_live_len);
+        let mut live_len = 0_usize;
+        for entry in old {
+            if self.live_ghost_entry(entry, ArcList::B2) {
+                compact.push_back(entry);
+                live_len = live_len.saturating_add(1);
+            }
+        }
+        self.b2 = compact;
+        self.b2_live_len = live_len;
+    }
+
+    #[cfg(feature = "s3fifo")]
+    fn compact_ghosts_if_sparse(&mut self, list: ArcList) {
+        match list {
+            ArcList::B1
+                if Self::should_compact_ghost_queue(
+                    self.b1.len(),
+                    self.b1_live_len,
+                    self.ghost_capacity,
+                ) =>
+            {
+                self.compact_b1_ghosts();
+            }
+            ArcList::B2
+                if Self::should_compact_ghost_queue(
+                    self.b2.len(),
+                    self.b2_live_len,
+                    self.ghost_capacity,
+                ) =>
+            {
+                self.compact_b2_ghosts();
+            }
+            ArcList::T1 | ArcList::T2 | ArcList::B1 | ArcList::B2 => {}
+        }
+    }
+
+    #[cfg(feature = "s3fifo")]
     fn next_ghost_entry(&mut self, key: BlockNumber) -> S3GhostEntry {
         let generation = self.next_ghost_generation;
         self.next_ghost_generation = self.next_ghost_generation.saturating_add(1);
@@ -2510,12 +2571,14 @@ impl ArcState {
                 self.b1_live_len = self.b1_live_len.saturating_sub(1);
                 let _ = self.ghost_generations.remove(&key);
                 let _ = self.loc.remove(&key);
+                self.compact_ghosts_if_sparse(ArcList::B1);
                 true
             }
             Some(ArcList::B2) => {
                 self.b2_live_len = self.b2_live_len.saturating_sub(1);
                 let _ = self.ghost_generations.remove(&key);
                 let _ = self.loc.remove(&key);
+                self.compact_ghosts_if_sparse(ArcList::B2);
                 true
             }
             Some(ArcList::T1 | ArcList::T2) | None => false,
