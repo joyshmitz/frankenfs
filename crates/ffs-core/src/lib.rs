@@ -22599,32 +22599,32 @@ impl FsOps for OpenFs {
                 // Same snapshot lever as ext4: a paginated readdir otherwise
                 // re-walks the dir's DIR_INDEX items on every call (O(N^2)).
                 //
-                // Gated to READ-ONLY mounts (no btrfs_alloc_state): a writable
-                // btrfs mutation (e.g. a rename updating '..') does not reliably
-                // bump the change-time/size fields the snapshot validates on, so
-                // the writable path always re-walks (correctness over caching).
-                // A read-only directory cannot change, so the snapshot is
-                // unconditionally valid there.
+                // Active on BOTH read-only and writable mounts. Correctness on
+                // the writable path rests on EXPLICIT invalidation, not on
+                // timestamp self-validation: every FsOps directory mutation
+                // (create/mknod/mkdir/unlink/rmdir/rename/rename2/link/symlink)
+                // calls clear_readdir_snapshot() before mutating, so a later
+                // readdir can never serve a listing that predates a change —
+                // including a rename's '..' update, which does not reliably bump
+                // the dir's change-time (the reason an earlier revision gated
+                // this to read-only). readdir vs. mutation on the same dir is
+                // serialized by the FUSE dispatcher's inode locks, identical to
+                // the ext4 writable snapshot above.
                 let canonical = self.btrfs_canonical_inode(ino)?;
-                let validation = if self.btrfs_alloc_state.is_none() {
-                    let attr = self.btrfs_read_inode_attr(cx, ino)?;
-                    if attr.kind != FileType::Directory {
-                        return Err(FfsError::NotDirectory);
-                    }
-                    let v = ReaddirValidation {
-                        ctime: systemtime_nanos(attr.ctime),
-                        mtime: systemtime_nanos(attr.mtime),
-                        size: attr.size,
-                    };
-                    if let Some(page) =
-                        readdir_snapshot_serve(&self.readdir_snapshot, canonical, v, offset)
-                    {
-                        return Ok(page);
-                    }
-                    Some(v)
-                } else {
-                    None
+                let attr = self.btrfs_read_inode_attr(cx, ino)?;
+                if attr.kind != FileType::Directory {
+                    return Err(FfsError::NotDirectory);
+                }
+                let validation = ReaddirValidation {
+                    ctime: systemtime_nanos(attr.ctime),
+                    mtime: systemtime_nanos(attr.mtime),
+                    size: attr.size,
                 };
+                if let Some(page) =
+                    readdir_snapshot_serve(&self.readdir_snapshot, canonical, validation, offset)
+                {
+                    return Ok(page);
+                }
 
                 #[cfg(test)]
                 self.readdir_full_reads
@@ -22642,9 +22642,7 @@ impl FsOps for OpenFs {
                     .collect();
                 let full = Arc::new(full);
                 let page = slice_readdir_snapshot(&full, offset);
-                if let Some(v) = validation {
-                    readdir_snapshot_store(&self.readdir_snapshot, canonical, v, full);
-                }
+                readdir_snapshot_store(&self.readdir_snapshot, canonical, validation, full);
                 Ok(page)
             }
         }
@@ -37509,6 +37507,76 @@ mod tests {
             fs.readdir_full_reads.load(SeqCst),
             1,
             "snapshot must serve {pages}+ pages from a single DIR_INDEX walk"
+        );
+    }
+
+    /// bd-xmh5g.109 follow-up: the btrfs readdir snapshot is now active on
+    /// WRITABLE mounts too (it was gated read-only because btrfs rename does not
+    /// bump the dir's change-time, so timestamp self-validation could go stale).
+    /// Correctness now rests on EXPLICIT invalidation — every FsOps directory
+    /// mutation calls clear_readdir_snapshot() — so a paginated readdir over a
+    /// writable btrfs dir serves all pages from ONE DIR_INDEX walk (O(N), not
+    /// O(N^2)), and a subsequent create is reflected because the mutation cleared
+    /// the snapshot. Uses the synthetic writable image (no btrfs-progs needed).
+    #[test]
+    fn btrfs_writable_readdir_pagination_serves_pages_from_one_walk_and_invalidates() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let (fs, cx) = open_writable_btrfs();
+        let dir = InodeNumber(u64::from(BTRFS_FIRST_FREE_OBJECTID));
+
+        // Populate the directory with enough entries for several pages.
+        for i in 0..24u32 {
+            let name = format!("w_{i:04}.txt");
+            fs.create(&cx, dir, OsStr::new(&name), 0o644, 0, 0)
+                .expect("writable btrfs create");
+        }
+
+        // Baseline full listing — exactly one DIR_INDEX walk.
+        fs.readdir_full_reads.store(0, SeqCst);
+        let full = fs.readdir(&cx, dir, 0).expect("readdir full");
+        assert!(full.len() >= 24, "must list all entries (+ '.' '..')");
+
+        // Paginate; every later page must be served from the snapshot.
+        let page = 5usize;
+        let mut collected: Vec<DirEntry> = Vec::new();
+        let mut off = 0u64;
+        loop {
+            let chunk = fs.readdir(&cx, dir, off).expect("readdir page");
+            if chunk.is_empty() {
+                break;
+            }
+            let take: Vec<DirEntry> = chunk.into_iter().take(page).collect();
+            off = take.last().expect("non-empty page").offset;
+            collected.extend(take);
+            if collected.len() >= full.len() {
+                break;
+            }
+        }
+        assert_eq!(
+            collected, full,
+            "writable btrfs paginated readdir must equal the full listing"
+        );
+        let pages = full.len().div_ceil(page);
+        assert!(pages >= 3, "need several pages for a meaningful score (got {pages})");
+        assert_eq!(
+            fs.readdir_full_reads.load(SeqCst),
+            1,
+            "snapshot must serve {pages}+ pages from a single writable-mount DIR_INDEX walk"
+        );
+
+        // A mutation must invalidate the snapshot: the new entry appears AND the
+        // next readdir performs a fresh walk (counter advances past 1).
+        fs.create(&cx, dir, OsStr::new("w_new.txt"), 0o644, 0, 0)
+            .expect("post-snapshot create");
+        let after = fs.readdir(&cx, dir, 0).expect("readdir after create");
+        assert!(
+            after.iter().any(|e| e.name == b"w_new.txt"),
+            "a create after the snapshot must be reflected (explicit invalidation)"
+        );
+        assert_eq!(
+            fs.readdir_full_reads.load(SeqCst),
+            2,
+            "the mutation must have cleared the snapshot, forcing a second walk"
         );
     }
 
