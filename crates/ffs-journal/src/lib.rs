@@ -1551,32 +1551,38 @@ pub struct RecoveredCommit {
 /// Fast commit logs logical operations (not physical blocks) for low-latency
 /// fsync. The replay engine applies these operations to bring the filesystem
 /// to the state of the last fsync.
+///
+/// The discriminants are the on-disk `EXT4_FC_TAG_*` values from the Linux
+/// kernel's `fs/ext4/fast_commit.h` — fast-commit recovery parses kernel-written
+/// journals, so these MUST match the kernel exactly:
+/// `ADD_RANGE=1, DEL_RANGE=2, CREAT=3, LINK=4, UNLINK=5, INODE=6, PAD=7,
+/// TAIL=8, HEAD=9`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u16)]
 pub enum FcTag {
-    Link = 0x01,
-    Unlink = 0x02,
-    AddRange = 0x03,
-    DelRange = 0x04,
-    Creat = 0x05,
-    Inode = 0x07,
-    Pad = 0x08,
-    Tail = 0x09,
-    Head = 0x0A,
+    AddRange = 0x01,
+    DelRange = 0x02,
+    Creat = 0x03,
+    Link = 0x04,
+    Unlink = 0x05,
+    Inode = 0x06,
+    Pad = 0x07,
+    Tail = 0x08,
+    Head = 0x09,
 }
 
 impl FcTag {
     fn from_u16(val: u16) -> Option<Self> {
         match val {
-            0x01 => Some(Self::Link),
-            0x02 => Some(Self::Unlink),
-            0x03 => Some(Self::AddRange),
-            0x04 => Some(Self::DelRange),
-            0x05 => Some(Self::Creat),
-            0x07 => Some(Self::Inode),
-            0x08 => Some(Self::Pad),
-            0x09 => Some(Self::Tail),
-            0x0A => Some(Self::Head),
+            0x01 => Some(Self::AddRange),
+            0x02 => Some(Self::DelRange),
+            0x03 => Some(Self::Creat),
+            0x04 => Some(Self::Link),
+            0x05 => Some(Self::Unlink),
+            0x06 => Some(Self::Inode),
+            0x07 => Some(Self::Pad),
+            0x08 => Some(Self::Tail),
+            0x09 => Some(Self::Head),
             _ => None,
         }
     }
@@ -1800,7 +1806,8 @@ pub fn replay_fast_commit(data: &[u8]) -> Result<FcReplayResult> {
 
         match tag {
             FcTag::Head => {
-                if payload.len() < 16 {
+                // ext4_fc_head is fc_features(4) + fc_tid(4) = 8 bytes.
+                if payload.len() < 8 {
                     discard_pending_fc_transaction(&mut result, &mut pending);
                     result.fallback_required = true;
                     continue;
@@ -1864,6 +1871,31 @@ mod fc_tests {
         buf
     }
 
+    /// Golden: the fast-commit tag discriminants must equal the on-disk
+    /// `EXT4_FC_TAG_*` values from the Linux kernel's `fs/ext4/fast_commit.h`,
+    /// since recovery parses kernel-written journals. These literals are the
+    /// authoritative kernel values; a prior revision had every tag wrong (e.g.
+    /// HEAD=0x0A, ADD_RANGE=0x03), so FrankenFS misread every op in a real FC
+    /// journal. Pin the dispatch so it cannot silently regress again.
+    #[test]
+    fn fc_tag_values_match_kernel_fast_commit_h() {
+        assert_eq!(FcTag::from_u16(0x0001), Some(FcTag::AddRange));
+        assert_eq!(FcTag::from_u16(0x0002), Some(FcTag::DelRange));
+        assert_eq!(FcTag::from_u16(0x0003), Some(FcTag::Creat));
+        assert_eq!(FcTag::from_u16(0x0004), Some(FcTag::Link));
+        assert_eq!(FcTag::from_u16(0x0005), Some(FcTag::Unlink));
+        assert_eq!(FcTag::from_u16(0x0006), Some(FcTag::Inode));
+        assert_eq!(FcTag::from_u16(0x0007), Some(FcTag::Pad));
+        assert_eq!(FcTag::from_u16(0x0008), Some(FcTag::Tail));
+        assert_eq!(FcTag::from_u16(0x0009), Some(FcTag::Head));
+        // 0x0 is the terminator and anything >= 0x0A is unknown.
+        assert_eq!(FcTag::from_u16(0x0000), None);
+        assert_eq!(FcTag::from_u16(0x000A), None);
+        // repr(u16) discriminants equal the on-disk values.
+        assert_eq!(FcTag::AddRange as u16, 0x0001);
+        assert_eq!(FcTag::Head as u16, 0x0009);
+    }
+
     #[test]
     fn replay_empty_data() {
         let result = replay_fast_commit(&[]).unwrap();
@@ -1919,14 +1951,14 @@ mod fc_tests {
     #[test]
     fn replay_add_range() {
         let mut data = Vec::new();
-        data.extend(build_fc_tag(0x0A, &[0; 16])); // HEAD
+        data.extend(build_fc_tag(0x09, &[0; 16])); // HEAD
         // Written extent: ino 42, logical 100, 10 blocks, physical 5000.
         let payload = build_fc_add_range_payload(42, 100, 10, 5000);
-        data.extend(build_fc_tag(0x03, &payload)); // ADD_RANGE
+        data.extend(build_fc_tag(0x01, &payload)); // ADD_RANGE
         let mut tail = Vec::new();
         tail.extend_from_slice(&1_u32.to_le_bytes()); // tid
         tail.extend_from_slice(&0_u32.to_le_bytes()); // crc (ignored in replay)
-        data.extend(build_fc_tag(0x09, &tail)); // TAIL
+        data.extend(build_fc_tag(0x08, &tail)); // TAIL
 
         let result = replay_fast_commit(&data).unwrap();
         assert_eq!(result.operations.len(), 1);
@@ -1953,16 +1985,16 @@ mod fc_tests {
     #[test]
     fn replay_add_range_decodes_unwritten_and_48bit_physical_bd_6nwjx() {
         let mut data = Vec::new();
-        data.extend(build_fc_tag(0x0A, &[0; 16])); // HEAD
+        data.extend(build_fc_tag(0x09, &[0; 16])); // HEAD
         // Unwritten extent of 10 blocks: ee_len = 32768 + 10. Physical block
         // 0x3_0000_5000 needs ee_start_hi = 3 (the high 16 bits).
         let physical = 0x3_0000_5000_u64;
         let payload = build_fc_add_range_payload(42, 100, (1 << 15) + 10, physical);
-        data.extend(build_fc_tag(0x03, &payload)); // ADD_RANGE
+        data.extend(build_fc_tag(0x01, &payload)); // ADD_RANGE
         let mut tail = Vec::new();
         tail.extend_from_slice(&1_u32.to_le_bytes());
         tail.extend_from_slice(&0_u32.to_le_bytes());
-        data.extend(build_fc_tag(0x09, &tail)); // TAIL
+        data.extend(build_fc_tag(0x08, &tail)); // TAIL
 
         let result = replay_fast_commit(&data).unwrap();
         assert_eq!(result.operations.len(), 1);
@@ -1983,18 +2015,18 @@ mod fc_tests {
     fn replay_create_with_tail() {
         let mut data = Vec::new();
         // HEAD tag
-        data.extend(build_fc_tag(0x0A, &[0; 16]));
+        data.extend(build_fc_tag(0x09, &[0; 16]));
         // CREAT tag: ext4_fc_dentry_info = parent_ino(4) + ino(4) + dname[]
         let mut creat = Vec::new();
         creat.extend_from_slice(&2_u32.to_le_bytes()); // parent_ino
         creat.extend_from_slice(&11_u32.to_le_bytes()); // ino
         creat.extend_from_slice(b"hello"); // name (no length prefix — length from tag)
-        data.extend(build_fc_tag(0x05, &creat));
+        data.extend(build_fc_tag(0x03, &creat));
         // TAIL tag
         let mut tail = Vec::new();
         tail.extend_from_slice(&7_u32.to_le_bytes()); // tid
         tail.extend_from_slice(&0_u32.to_le_bytes()); // crc (ignored in replay)
-        data.extend(build_fc_tag(0x09, &tail));
+        data.extend(build_fc_tag(0x08, &tail));
 
         let result = replay_fast_commit(&data).unwrap();
         assert_eq!(result.transactions_found, 1);
@@ -2015,16 +2047,16 @@ mod fc_tests {
     #[test]
     fn replay_del_range() {
         let mut data = Vec::new();
-        data.extend(build_fc_tag(0x0A, &[0; 16])); // HEAD
+        data.extend(build_fc_tag(0x09, &[0; 16])); // HEAD
         let mut payload = Vec::new();
         payload.extend_from_slice(&99_u32.to_le_bytes());
         payload.extend_from_slice(&50_u32.to_le_bytes());
         payload.extend_from_slice(&20_u32.to_le_bytes());
-        data.extend(build_fc_tag(0x04, &payload));
+        data.extend(build_fc_tag(0x02, &payload));
         let mut tail = Vec::new();
         tail.extend_from_slice(&2_u32.to_le_bytes()); // tid
         tail.extend_from_slice(&0_u32.to_le_bytes()); // crc (ignored in replay)
-        data.extend(build_fc_tag(0x09, &tail)); // TAIL
+        data.extend(build_fc_tag(0x08, &tail)); // TAIL
 
         let result = replay_fast_commit(&data).unwrap();
         assert_eq!(result.operations.len(), 1);
@@ -2043,13 +2075,13 @@ mod fc_tests {
     #[test]
     fn replay_unknown_tags_require_fallback() {
         let mut data = Vec::new();
-        data.extend(build_fc_tag(0x0A, &[0; 16])); // HEAD
+        data.extend(build_fc_tag(0x09, &[0; 16])); // HEAD
         data.extend(build_fc_tag(0xFF, &[1, 2, 3])); // unknown tag
-        data.extend(build_fc_tag(0x07, &42_u32.to_le_bytes())); // INODE
+        data.extend(build_fc_tag(0x06, &42_u32.to_le_bytes())); // INODE
         let mut tail = Vec::new();
         tail.extend_from_slice(&3_u32.to_le_bytes()); // tid
         tail.extend_from_slice(&0_u32.to_le_bytes()); // crc (ignored in replay)
-        data.extend(build_fc_tag(0x09, &tail)); // TAIL
+        data.extend(build_fc_tag(0x08, &tail)); // TAIL
 
         let result = replay_fast_commit(&data).unwrap();
         assert!(result.operations.is_empty());
@@ -2061,7 +2093,7 @@ mod fc_tests {
     #[test]
     fn replay_operation_without_head_requires_fallback() {
         let mut data = Vec::new();
-        data.extend(build_fc_tag(0x07, &42_u32.to_le_bytes())); // INODE without HEAD
+        data.extend(build_fc_tag(0x06, &42_u32.to_le_bytes())); // INODE without HEAD
 
         let result = replay_fast_commit(&data).unwrap();
         assert!(result.operations.is_empty());
@@ -2071,12 +2103,12 @@ mod fc_tests {
     #[test]
     fn replay_short_head_requires_fallback() {
         let mut data = Vec::new();
-        data.extend(build_fc_tag(0x0A, &[0; 8])); // HEAD too short
-        data.extend(build_fc_tag(0x07, &42_u32.to_le_bytes())); // INODE
+        data.extend(build_fc_tag(0x09, &[0; 4])); // HEAD too short (ext4_fc_head is 8 bytes)
+        data.extend(build_fc_tag(0x06, &42_u32.to_le_bytes())); // INODE
         let mut tail = Vec::new();
         tail.extend_from_slice(&3_u32.to_le_bytes()); // tid
         tail.extend_from_slice(&0_u32.to_le_bytes()); // crc (ignored in replay)
-        data.extend(build_fc_tag(0x09, &tail)); // TAIL
+        data.extend(build_fc_tag(0x08, &tail)); // TAIL
 
         let result = replay_fast_commit(&data).unwrap();
         assert!(result.operations.is_empty());
@@ -2088,7 +2120,7 @@ mod fc_tests {
     #[test]
     fn replay_truncated_tag_stops() {
         let mut data = Vec::new();
-        data.extend(build_fc_tag(0x03, &[1, 2, 3])); // ADD_RANGE with payload too short
+        data.extend(build_fc_tag(0x01, &[1, 2, 3])); // ADD_RANGE with payload too short
         let result = replay_fast_commit(&data).unwrap();
         assert!(result.operations.is_empty()); // Payload < 16 bytes, skipped
         assert!(result.fallback_required);
@@ -2097,12 +2129,12 @@ mod fc_tests {
     #[test]
     fn replay_malformed_operation_inside_transaction_requires_fallback() {
         let mut data = Vec::new();
-        data.extend(build_fc_tag(0x0A, &[0; 16])); // HEAD
-        data.extend(build_fc_tag(0x07, &[1, 2, 3])); // INODE payload too short
+        data.extend(build_fc_tag(0x09, &[0; 16])); // HEAD
+        data.extend(build_fc_tag(0x06, &[1, 2, 3])); // INODE payload too short
         let mut tail = Vec::new();
         tail.extend_from_slice(&3_u32.to_le_bytes()); // tid
         tail.extend_from_slice(&0_u32.to_le_bytes()); // crc (ignored in replay)
-        data.extend(build_fc_tag(0x09, &tail)); // TAIL
+        data.extend(build_fc_tag(0x08, &tail)); // TAIL
 
         let result = replay_fast_commit(&data).unwrap();
         assert!(result.operations.is_empty());
@@ -2114,9 +2146,9 @@ mod fc_tests {
     #[test]
     fn replay_short_tail_requires_fallback() {
         let mut data = Vec::new();
-        data.extend(build_fc_tag(0x0A, &[0; 16])); // HEAD
-        data.extend(build_fc_tag(0x07, &42_u32.to_le_bytes())); // INODE
-        data.extend(build_fc_tag(0x09, &[1, 2, 3])); // TAIL too short for tid
+        data.extend(build_fc_tag(0x09, &[0; 16])); // HEAD
+        data.extend(build_fc_tag(0x06, &42_u32.to_le_bytes())); // INODE
+        data.extend(build_fc_tag(0x08, &[1, 2, 3])); // TAIL too short for tid
 
         let result = replay_fast_commit(&data).unwrap();
         assert!(result.operations.is_empty());
@@ -2128,9 +2160,9 @@ mod fc_tests {
     #[test]
     fn replay_tail_without_crc_requires_fallback() {
         let mut data = Vec::new();
-        data.extend(build_fc_tag(0x0A, &[0; 16])); // HEAD
-        data.extend(build_fc_tag(0x07, &42_u32.to_le_bytes())); // INODE
-        data.extend(build_fc_tag(0x09, &3_u32.to_le_bytes())); // TAIL missing crc
+        data.extend(build_fc_tag(0x09, &[0; 16])); // HEAD
+        data.extend(build_fc_tag(0x06, &42_u32.to_le_bytes())); // INODE
+        data.extend(build_fc_tag(0x08, &3_u32.to_le_bytes())); // TAIL missing crc
 
         let result = replay_fast_commit(&data).unwrap();
         assert!(result.operations.is_empty());
@@ -2142,8 +2174,8 @@ mod fc_tests {
     #[test]
     fn replay_incomplete_transaction_requires_fallback() {
         let mut data = Vec::new();
-        data.extend(build_fc_tag(0x0A, &[0; 16])); // HEAD
-        data.extend(build_fc_tag(0x07, &42_u32.to_le_bytes())); // INODE
+        data.extend(build_fc_tag(0x09, &[0; 16])); // HEAD
+        data.extend(build_fc_tag(0x06, &42_u32.to_le_bytes())); // INODE
 
         let result = replay_fast_commit(&data).unwrap();
         assert!(result.operations.is_empty());
@@ -2155,12 +2187,12 @@ mod fc_tests {
     #[test]
     fn replay_truncated_tag_after_committed_transaction_requires_fallback() {
         let mut data = Vec::new();
-        data.extend(build_fc_tag(0x0A, &[0; 16])); // HEAD
-        data.extend(build_fc_tag(0x07, &42_u32.to_le_bytes())); // INODE
+        data.extend(build_fc_tag(0x09, &[0; 16])); // HEAD
+        data.extend(build_fc_tag(0x06, &42_u32.to_le_bytes())); // INODE
         let mut tail = Vec::new();
         tail.extend_from_slice(&3_u32.to_le_bytes()); // tid
         tail.extend_from_slice(&0_u32.to_le_bytes()); // crc (ignored in replay)
-        data.extend(build_fc_tag(0x09, &tail)); // TAIL
+        data.extend(build_fc_tag(0x08, &tail)); // TAIL
         data.extend_from_slice(&0x07_u16.to_le_bytes()); // next tag type
         data.extend_from_slice(&16_u16.to_le_bytes()); // truncated next tag len
         data.extend_from_slice(&[1, 2, 3]); // not enough payload bytes
@@ -2176,12 +2208,12 @@ mod fc_tests {
     #[test]
     fn replay_trailing_nonzero_bytes_require_fallback() {
         let mut data = Vec::new();
-        data.extend(build_fc_tag(0x0A, &[0; 16])); // HEAD
-        data.extend(build_fc_tag(0x07, &42_u32.to_le_bytes())); // INODE
+        data.extend(build_fc_tag(0x09, &[0; 16])); // HEAD
+        data.extend(build_fc_tag(0x06, &42_u32.to_le_bytes())); // INODE
         let mut tail = Vec::new();
         tail.extend_from_slice(&3_u32.to_le_bytes()); // tid
         tail.extend_from_slice(&0_u32.to_le_bytes()); // crc (ignored in replay)
-        data.extend(build_fc_tag(0x09, &tail)); // TAIL
+        data.extend(build_fc_tag(0x08, &tail)); // TAIL
         data.extend_from_slice(&[0xAB, 0xCD, 0xEF]); // stray nonzero tail bytes
 
         let result = replay_fast_commit(&data).unwrap();
@@ -2195,12 +2227,12 @@ mod fc_tests {
     #[test]
     fn replay_zero_padding_after_tail_stops_cleanly() {
         let mut data = Vec::new();
-        data.extend(build_fc_tag(0x0A, &[0; 16])); // HEAD
-        data.extend(build_fc_tag(0x07, &42_u32.to_le_bytes())); // INODE
+        data.extend(build_fc_tag(0x09, &[0; 16])); // HEAD
+        data.extend(build_fc_tag(0x06, &42_u32.to_le_bytes())); // INODE
         let mut tail = Vec::new();
         tail.extend_from_slice(&3_u32.to_le_bytes()); // tid
         tail.extend_from_slice(&0_u32.to_le_bytes()); // crc (ignored in replay)
-        data.extend(build_fc_tag(0x09, &tail)); // TAIL
+        data.extend(build_fc_tag(0x08, &tail)); // TAIL
         data.extend_from_slice(&[0_u8; 64]); // zero-filled unused tail space
 
         let result = replay_fast_commit(&data).unwrap();
