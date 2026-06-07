@@ -16889,6 +16889,105 @@ impl OpenFs {
         Ok(())
     }
 
+    /// Share every data extent of `src_canonical` into `dst_canonical` — the
+    /// core of a btrfs reflink (bd-vh8p9). For each of src's `EXTENT_DATA`
+    /// items, insert an identical `EXTENT_DATA` for dst at the same file offset
+    /// (pointing at the SAME `disk_bytenr` — a shared extent) and, for regular
+    /// extents, bump the extent's refcount + add a keyed `EXTENT_DATA_REF`
+    /// backref for dst via [`BtrfsExtentAllocator::add_data_extent_ref`]. Inline
+    /// extents carry their bytes in the item itself, so the copied `EXTENT_DATA`
+    /// is sufficient (no extent-tree reference). No new space is allocated, and
+    /// the shared extent's `EXTENT_CSUM` (keyed by `disk_bytenr`) already covers
+    /// dst. Finally dst's `size`/`nbytes` are set to match src.
+    ///
+    /// The `EXTENT_DATA_REF` offset is `key.offset - extent_offset` (the disk
+    /// extent's logical start in the file), matching btrfs. This is the inode-
+    /// level core; the FUSE `clone_file`/`clone_file_range` plumbing (fd→inode
+    /// resolution) and the on-disk `btrfs check` validation are bd-vh8p9's next
+    /// increment.
+    // Unwired pending the FUSE clone_file/clone_file_range fd->inode plumbing
+    // and the on-disk btrfs-check E2E (bd-vh8p9 next increment); exercised by
+    // btrfs_clone_file_data_shares_extent_and_sets_size.
+    #[allow(dead_code)]
+    fn btrfs_clone_file_data(
+        &self,
+        alloc: &mut BtrfsAllocState,
+        src_canonical: u64,
+        dst_canonical: u64,
+    ) -> ffs_error::Result<()> {
+        let lo = BtrfsKey {
+            objectid: src_canonical,
+            item_type: BTRFS_ITEM_EXTENT_DATA,
+            offset: 0,
+        };
+        let hi = BtrfsKey {
+            objectid: src_canonical,
+            item_type: BTRFS_ITEM_EXTENT_DATA,
+            offset: u64::MAX,
+        };
+        let src_extents = alloc
+            .fs_tree
+            .range(&lo, &hi)
+            .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+
+        for (key, data) in src_extents {
+            let dst_key = BtrfsKey {
+                objectid: dst_canonical,
+                item_type: BTRFS_ITEM_EXTENT_DATA,
+                offset: key.offset,
+            };
+            // Same on-disk bytes: dst references the identical (possibly shared)
+            // extent. For inline extents this carries the data; for regular
+            // extents it points at src's disk_bytenr.
+            alloc
+                .fs_tree
+                .insert(dst_key, &data)
+                .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+
+            if let BtrfsExtentData::Regular {
+                disk_bytenr,
+                disk_num_bytes,
+                extent_offset,
+                ..
+            } = parse_extent_data(&data).map_err(|e| parse_to_ffs_error(&e))?
+            {
+                if disk_bytenr > 0 {
+                    let ref_offset = key.offset.checked_sub(extent_offset).ok_or_else(|| {
+                        FfsError::Corruption {
+                            block: disk_bytenr,
+                            detail: "clone: extent_offset exceeds file offset".into(),
+                        }
+                    })?;
+                    alloc
+                        .extent_alloc
+                        .add_data_extent_ref(
+                            disk_bytenr,
+                            disk_num_bytes,
+                            BTRFS_FS_TREE_OBJECTID,
+                            dst_canonical,
+                            ref_offset,
+                        )
+                        .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+                }
+            }
+        }
+
+        let src_inode = self.btrfs_read_inode_from_tree(alloc, src_canonical)?;
+        let mut dst_inode = self.btrfs_read_inode_from_tree(alloc, dst_canonical)?;
+        dst_inode.size = src_inode.size;
+        dst_inode.nbytes = src_inode.nbytes;
+        let dst_inode_key = BtrfsKey {
+            objectid: dst_canonical,
+            item_type: BTRFS_ITEM_INODE_ITEM,
+            offset: 0,
+        };
+        alloc
+            .fs_tree
+            .update(&dst_inode_key, &dst_inode.to_bytes())
+            .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+        Ok(())
+    }
+
     /// Register the extent-tree `EXTENT_ITEM` + inline `EXTENT_DATA_REF` backref
     /// for a just-allocated file DATA extent (bd-x3fcu). Every data extent a file
     /// references via `EXTENT_DATA` must have a matching extent-tree item, or
@@ -52600,6 +52699,116 @@ mod tests {
     fn btrfs_write_enable_writes_sets_writable() {
         let (fs, _cx) = open_writable_btrfs();
         assert!(fs.is_writable());
+    }
+
+    #[test]
+    fn btrfs_clone_file_data_shares_extent_and_sets_size() {
+        // The inode-level reflink core (bd-vh8p9 increment 3): sharing src's
+        // data extent into dst must bump the extent refcount 1->2, point dst's
+        // EXTENT_DATA at the SAME disk_bytenr (no new allocation), and set dst's
+        // size to match src. (On-disk btrfs-check validation is increment 4.)
+        let (fs, cx) = open_writable_btrfs();
+        let root = InodeNumber(u64::from(BTRFS_FIRST_FREE_OBJECTID));
+        let src = fs
+            .create(&cx, root, OsStr::new("src.dat"), 0o644, 0, 0)
+            .expect("create src");
+        let dst = fs
+            .create(&cx, root, OsStr::new("dst.dat"), 0o644, 0, 0)
+            .expect("create dst");
+
+        // Write enough to force a regular (non-inline) data extent.
+        let payload = vec![0x5A_u8; 16384];
+        let fs_ops: &dyn FsOps = &fs;
+        fs_ops
+            .write(&cx, &mut RequestScope::empty(), src.ino, 0, &payload)
+            .expect("write src");
+
+        let src_canon = fs.btrfs_canonical_inode(src.ino).expect("src canonical");
+        let dst_canon = fs.btrfs_canonical_inode(dst.ino).expect("dst canonical");
+        let alloc_mutex = fs.btrfs_alloc_state.as_ref().expect("writable btrfs");
+
+        // Locate src's regular extent and confirm refs == 1 before the clone.
+        let (disk_bytenr, disk_num_bytes) = {
+            let alloc = alloc_mutex.lock();
+            let lo = BtrfsKey {
+                objectid: src_canon,
+                item_type: BTRFS_ITEM_EXTENT_DATA,
+                offset: 0,
+            };
+            let hi = BtrfsKey {
+                objectid: src_canon,
+                item_type: BTRFS_ITEM_EXTENT_DATA,
+                offset: u64::MAX,
+            };
+            let exts = alloc.fs_tree.range(&lo, &hi).expect("src extents");
+            let (_, data) = exts.first().expect("src has a data extent");
+            match parse_extent_data(data).expect("parse src extent") {
+                BtrfsExtentData::Regular {
+                    disk_bytenr,
+                    disk_num_bytes,
+                    ..
+                } => (disk_bytenr, disk_num_bytes),
+                other => panic!("expected a regular extent, got {other:?}"),
+            }
+        };
+        assert!(disk_bytenr > 0, "src extent must be allocated");
+        {
+            let alloc = alloc_mutex.lock();
+            assert_eq!(
+                alloc
+                    .extent_alloc
+                    .extent_item_refs(disk_bytenr, disk_num_bytes)
+                    .expect("refs"),
+                Some(1)
+            );
+        }
+
+        // Clone src -> dst.
+        {
+            let mut alloc = alloc_mutex.lock();
+            fs.btrfs_clone_file_data(&mut alloc, src_canon, dst_canon)
+                .expect("clone src into dst");
+        }
+
+        // refs == 2; dst's EXTENT_DATA shares the SAME disk_bytenr; dst size set.
+        {
+            let alloc = alloc_mutex.lock();
+            assert_eq!(
+                alloc
+                    .extent_alloc
+                    .extent_item_refs(disk_bytenr, disk_num_bytes)
+                    .expect("refs"),
+                Some(2),
+                "clone must share (refcount 1 -> 2), not reallocate"
+            );
+            let lo = BtrfsKey {
+                objectid: dst_canon,
+                item_type: BTRFS_ITEM_EXTENT_DATA,
+                offset: 0,
+            };
+            let hi = BtrfsKey {
+                objectid: dst_canon,
+                item_type: BTRFS_ITEM_EXTENT_DATA,
+                offset: u64::MAX,
+            };
+            let dst_exts = alloc.fs_tree.range(&lo, &hi).expect("dst extents");
+            let (_, ddata) = dst_exts.first().expect("dst has a cloned extent");
+            match parse_extent_data(ddata).expect("parse dst extent") {
+                BtrfsExtentData::Regular {
+                    disk_bytenr: dst_db,
+                    ..
+                } => assert_eq!(dst_db, disk_bytenr, "dst must share src's disk extent"),
+                other => panic!("expected a regular extent, got {other:?}"),
+            }
+            let dst_inode = fs
+                .btrfs_read_inode_from_tree(&alloc, dst_canon)
+                .expect("dst inode");
+            assert_eq!(
+                dst_inode.size,
+                payload.len() as u64,
+                "dst size must match the cloned source"
+            );
+        }
     }
 
     #[test]
