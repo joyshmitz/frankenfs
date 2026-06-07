@@ -25568,40 +25568,34 @@ impl FsOps for OpenFs {
                 // Walk the FS tree to collect all items
                 let fs_tree_items = self.walk_btrfs_fs_tree(cx)?;
 
-                // Generate the send stream
-                let ctx_for_chunks = self
-                    .btrfs_context()
-                    .ok_or_else(|| FfsError::Format("btrfs context not available".to_owned()))?;
-                let chunks = &ctx_for_chunks.chunks;
-                let block_dev = self.device();
+                // Generate the send stream.
                 let stream = generate_send_stream(
                     &fs_tree_items,
                     subvol_name.as_bytes(),
                     &subvol_uuid,
                     ctransid,
                     |offset, len| {
-                        // Read extent data from the block device
-                        let mapping = map_logical_to_physical(chunks, offset)
-                            .map_err(|_| ffs_types::ParseError::InvalidField {
-                                field: "logical_offset",
-                                reason: "chunk map parse failed",
-                            })?
-                            .ok_or(ffs_types::ParseError::InvalidField {
-                                field: "logical_offset",
-                                reason: "not mapped in chunk array",
-                            })?;
+                        // Read extent data through the chunk-boundary-aware read
+                        // path (bd-ttrw5). A btrfs data extent can straddle a
+                        // chunk boundary, where the physical mapping is
+                        // discontiguous; a single map_logical_to_physical + read
+                        // of `len` bytes from one mapping would emit wrong bytes
+                        // (from unrelated physical blocks) past the boundary into
+                        // the send stream. btrfs_read_logical_into loops per chunk
+                        // and is the same (MVCC-overlay-correct, vectored) read
+                        // every other btrfs read uses.
                         let buf_len = usize::try_from(len).map_err(|_| {
                             ffs_types::ParseError::IntegerConversion {
                                 field: "extent_length",
                             }
                         })?;
                         let mut buf = vec![0u8; buf_len];
-                        block_dev
-                            .read_exact_at(cx, ByteOffset(mapping.physical), &mut buf)
-                            .map_err(|_| ffs_types::ParseError::InvalidField {
+                        self.btrfs_read_logical_into(cx, offset, &mut buf).map_err(|_| {
+                            ffs_types::ParseError::InvalidField {
                                 field: "extent_data",
-                                reason: "block read failed",
-                            })?;
+                                reason: "logical read failed",
+                            }
+                        })?;
                         Ok(buf)
                     },
                 )
