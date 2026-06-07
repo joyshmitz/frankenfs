@@ -14301,17 +14301,20 @@ impl OpenFs {
 
     /// Write to a legacy indirect-block-mapped ext4 file (no `EXT4_EXTENTS_FL`).
     ///
-    /// bd-laay3 increment 1: in-place OVERWRITE only. Every byte of the write
-    /// must land in a logical block that is already mapped (`resolve_indirect_block`
-    /// returns a physical block) and must not extend the file past its current
-    /// size. Writes that would extend the file or fill a sparse hole — both of
-    /// which require allocating data and/or indirect metadata blocks plus chain
-    /// growth — are deferred to a later increment and rejected with
-    /// `UnsupportedFeature` (never silently dropped or mis-written).
+    /// bd-laay3 increments 1+2: in-place OVERWRITE of mapped blocks, plus GROWTH
+    /// — extending the file past EOF and filling sparse holes. A logical block
+    /// that is already mapped is read-modify-written in place; an unmapped block
+    /// (hole or beyond EOF) is allocated and mapped via `write_block_ptr`, which
+    /// grows the pointer chain (direct/single/double/triple) and allocates the
+    /// indirect-metadata blocks as needed. Newly allocated data + metadata blocks
+    /// are counted in `i_blocks`, and `inode.size` extends to the new EOF.
+    /// Untouched blocks in a grown region remain holes (sparse).
     ///
     /// The block read-modify-write + staging + inode-persist path mirrors the
-    /// extent write path above; only block resolution differs (pointer chain vs.
-    /// extent tree).
+    /// extent write path above; only block resolution/allocation differs (pointer
+    /// chain vs. extent tree).
+    #[expect(clippy::too_many_lines)]
+    #[allow(clippy::significant_drop_tightening)] // alloc guard is held across the whole write
     fn ext4_write_indirect(
         &self,
         cx: &Cx,
@@ -14338,17 +14341,16 @@ impl OpenFs {
             .checked_add(write_len)
             .ok_or_else(|| FfsError::Format("write range overflow".into()))?;
 
-        // Overwrite-only: refuse to extend the file. Growth needs allocation +
-        // pointer-chain growth (a later bd-laay3 increment).
-        if end > inode.size {
-            return Err(FfsError::UnsupportedFeature(
-                "growing an indirect-block (non-extent) file is not yet supported \
-                 (in-place overwrite only)"
-                    .into(),
-            ));
-        }
-
-        let alloc = alloc_mutex.lock();
+        let mut alloc = alloc_mutex.lock();
+        // i_blocks counts 512-byte sectors per fs block (or 1 unit/block for
+        // huge_file inodes). Each newly mapped logical block costs one data
+        // block plus any indirect-metadata blocks write_block_ptr allocates.
+        let sectors_per_block = if inode.is_huge_file() {
+            1u64
+        } else {
+            u64::from(sb.block_size / EXT4_SECTOR_SIZE)
+        };
+        let mut added_sectors: u64 = 0;
         let mut bytes_written = 0u32;
         let mut pos = offset;
 
@@ -14362,22 +14364,56 @@ impl OpenFs {
                 .map_err(|_| FfsError::Format("remaining write size does not fit usize".into()))?;
             let chunk_len = (bs_usize - block_offset).min(remaining);
 
-            // Resolve the already-mapped physical block. A hole (None) within
-            // file bounds would need allocation — defer to the growth increment.
-            let phys = self
-                .resolve_indirect_block(cx, scope, &inode, logical_block)?
-                .ok_or_else(|| {
-                    FfsError::UnsupportedFeature(
-                        "writing into a hole of an indirect-block (non-extent) file is not yet \
-                         supported (in-place overwrite of mapped blocks only)"
-                            .into(),
-                    )
+            // Resolve the mapped physical block, or allocate one for a hole /
+            // beyond-EOF block (growth). write_block_ptr grows the pointer chain
+            // (direct/single/double/triple) and reports the indirect-metadata
+            // blocks it allocated so they can be counted in i_blocks.
+            let (phys_block, is_new) = if let Some(phys) =
+                self.resolve_indirect_block(cx, scope, &inode, logical_block)?
+            {
+                (BlockNumber(phys), false)
+            } else {
+                // Hole or beyond EOF: allocate a data block, map it (growing the
+                // pointer chain + allocating indirect-metadata blocks as needed).
+                let data_block = {
+                    let hint = self.numa_allocation_hint(
+                        &alloc.geo,
+                        AllocHint::default(),
+                        "ext4_write_indirect",
+                        Some(ino),
+                    );
+                    let Ext4AllocState {
+                        geo,
+                        groups,
+                        persist_ctx,
+                        ..
+                    } = &mut *alloc;
+                    ffs_alloc::alloc_blocks_persist(cx, &block_dev, geo, groups, 1, &hint, persist_ctx)?
+                        .start
+                };
+                let data_ptr = u32::try_from(data_block.0).map_err(|_| {
+                    FfsError::InvalidGeometry(format!(
+                        "indirect data block {} exceeds 32-bit pointer range",
+                        data_block.0
+                    ))
                 })?;
-            let phys_block = BlockNumber(phys);
+                let meta_blocks =
+                    self.write_block_ptr(cx, scope, &mut inode, &mut alloc, logical_block, data_ptr)?;
+                // Re-acquire the adapter so later reads observe the freshly
+                // allocated/staged blocks.
+                block_dev = self.block_device_adapter();
+                let new_block_count = 1 + u64::try_from(meta_blocks.len()).map_err(|_| {
+                    FfsError::Format("indirect metadata block count overflow".into())
+                })?;
+                added_sectors =
+                    added_sectors.saturating_add(new_block_count.saturating_mul(sectors_per_block));
+                (data_block, true)
+            };
 
-            // Read-modify-write: only read the existing block for a partial
-            // (sub-block) write; a full-block write overwrites every byte.
-            let mut block_data = if block_offset == 0 && chunk_len == bs_usize {
+            // Read-modify-write. A newly allocated block (its on-disk contents
+            // are undefined) or a full-block write starts from zeros; a partial
+            // overwrite of an existing block reads the current contents first.
+            let mut block_data = if is_new || (block_offset == 0 && chunk_len == bs_usize) {
                 vec![0u8; bs_usize]
             } else {
                 self.read_block_with_scope(cx, scope, phys_block)?
@@ -14406,7 +14442,15 @@ impl OpenFs {
             bytes_written = bytes_written.saturating_add(chunk_u32);
         }
 
-        // Size is unchanged (overwrite-only); only the data timestamps move.
+        // Extend the file size if we wrote past the old EOF, and account for any
+        // newly allocated data + indirect-metadata blocks in i_blocks.
+        if end > inode.size {
+            inode.size = end;
+        }
+        if added_sectors > 0 {
+            inode.blocks =
+                Self::ext4_checked_inode_blocks_delta(inode.blocks, ino, i128::from(added_sectors))?;
+        }
         ffs_inode::touch_mtime_ctime(&mut inode, tstamp_secs, tstamp_nanos);
 
         if let Some(tx) = &mut scope.tx {
@@ -14441,7 +14485,8 @@ impl OpenFs {
             ino = ino.0,
             offset,
             len = data.len(),
-            "indirect data overwritten"
+            new_size = inode.size,
+            "indirect data written"
         );
 
         Ok(bytes_written)
@@ -28406,14 +28451,102 @@ mod tests {
         assert_eq!(&post[0..50], &updated[0..50], "bytes before patch unchanged");
         assert_eq!(&post[150..], &updated[150..], "bytes after patch unchanged");
 
-        // Growth past EOF is a later increment — must be rejected, not mis-written.
+        // Growth past EOF (bd-laay3 increment 2): writing block 1 must allocate,
+        // extend size, and persist.
         let grow = vec![0x22_u8; bs];
-        let err = fs
-            .write(&cx, ino, bs as u64, &grow)
-            .expect_err("growth must be rejected");
+        assert_eq!(
+            fs.write(&cx, ino, bs as u64, &grow).expect("grow write") as usize,
+            bs
+        );
+        let grown = fs.read_inode(&cx, ino).expect("inode after grow");
+        assert_eq!(grown.size, (2 * bs) as u64, "size must extend to 2 blocks");
+        assert_eq!(
+            fs.read(&cx, ino, bs as u64, bs as u32).expect("read grown block"),
+            grow,
+            "newly grown block must persist"
+        );
+    }
+
+    /// bd-laay3 increment 2: growth of a legacy indirect-block file — extend past
+    /// EOF across a single-indirect boundary, fill a sparse hole, and verify
+    /// i_blocks accounting counts the allocated indirect-metadata block.
+    #[test]
+    fn ext4_indirect_growth_and_hole_fill_bd_laay3() {
+        let Some((fs, _tmp)) = open_writable_ext4_mkfs(16) else {
+            return; // mkfs.ext4 unavailable
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let bs = fs.block_size() as usize;
+        let ptrs_per_block = bs / 4;
+
+        // Create an extent file with one block, then re-stamp it indirect so it
+        // maps logical block 0 only (rest are holes).
+        let ino = fs
+            .create(&cx, root, OsStr::new("grow.bin"), 0o644, 0, 0)
+            .expect("create")
+            .ino;
+        let b0 = vec![0x01_u8; bs];
+        fs.write(&cx, ino, 0, &b0).expect("seed block 0");
+        let seeded = fs.read_inode(&cx, ino).expect("inode");
+        let phys0 = fs
+            .collect_extents(&cx, &seeded)
+            .expect("extents")
+            .iter()
+            .find(|e| e.logical_block == 0)
+            .map(|e| e.physical_start)
+            .expect("block 0 mapped");
+
+        let mut indirect = seeded.clone();
+        indirect.flags &= !ffs_types::EXT4_EXTENTS_FL;
+        let mut iblock = vec![0_u8; 15 * 4];
+        iblock[0..4].copy_from_slice(&u32::try_from(phys0).unwrap().to_le_bytes());
+        indirect.extent_bytes = iblock;
+        indirect.size = bs as u64;
+        fs.persist_ext4_inode_for_testing(&cx, ino, &indirect)
+            .expect("persist indirect");
+
+        // Grow across the single-indirect boundary: write logical block
+        // (12 + ptrs_per_block) lands in the DOUBLE-indirect region, forcing
+        // write_block_ptr to allocate indirect-metadata blocks (counted in
+        // i_blocks). Everything between block 0 and there stays a hole.
+        let far_lb = 12 + ptrs_per_block; // first double-indirect logical block
+        let far_off = (far_lb * bs) as u64;
+        let far = vec![0x07_u8; bs];
+        assert_eq!(
+            fs.write(&cx, ino, far_off, &far).expect("grow far block") as usize,
+            bs
+        );
+
+        let after = fs.read_inode(&cx, ino).expect("inode after grow");
+        assert_eq!(
+            after.size,
+            far_off + bs as u64,
+            "size extends to the far block's end"
+        );
+        // i_blocks must exceed a single data block's worth: block 0 + the far
+        // data block + the double-indirect root + its level-1 block.
+        let sectors_per_block = u64::from(fs.block_size() / EXT4_SECTOR_SIZE);
         assert!(
-            matches!(err, FfsError::UnsupportedFeature(_)),
-            "growing an indirect file must return UnsupportedFeature, got {err:?}"
+            after.blocks >= 4 * sectors_per_block,
+            "i_blocks must count data + indirect-metadata blocks, got {} sectors",
+            after.blocks
+        );
+
+        // Original block survived, the gap reads as a zero-filled hole, and the
+        // far block holds the new data.
+        assert_eq!(fs.read(&cx, ino, 0, bs as u32).expect("b0"), b0, "block 0 intact");
+        assert!(
+            fs.read(&cx, ino, bs as u64, bs as u32)
+                .expect("hole")
+                .iter()
+                .all(|&b| b == 0),
+            "untouched gap block reads as a zero hole"
+        );
+        assert_eq!(
+            fs.read(&cx, ino, far_off, bs as u32).expect("far"),
+            far,
+            "far grown block holds the new data"
         );
     }
 
