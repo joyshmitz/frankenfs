@@ -9998,15 +9998,17 @@ impl OpenFs {
         Ok(())
     }
 
-    /// Recursively free data blocks at or beyond `cutoff` within the indirect
-    /// pointer block `ptr_block` at indirection `level` (1 = single → data
-    /// blocks, 2 = double, 3 = triple), whose first entry maps logical data
-    /// block `base_logical`. Returns `(blocks_freed, ptr_block_is_now_empty)`.
+    /// Recursively free data blocks whose logical index falls in
+    /// `[free_lo, free_hi)` within the indirect pointer block `ptr_block` at
+    /// indirection `level` (1 = single → data blocks, 2 = double, 3 = triple),
+    /// whose first entry maps logical data block `base_logical`. Returns
+    /// `(blocks_freed, ptr_block_is_now_empty)`.
     ///
     /// Deeper metadata blocks that become fully empty are freed here and their
     /// parent slot zeroed; `ptr_block` itself is freed by the caller when this
     /// returns empty. Surviving slots that were freed are persisted as zero so a
-    /// later read never follows a stale pointer into a recycled block.
+    /// later read never follows a stale pointer into a recycled block. A truncate
+    /// passes `free_hi = u64::MAX`; a punch_hole passes a bounded upper edge.
     #[allow(clippy::too_many_arguments)] // recursive chain walk threads device + alloc + geometry
     fn free_indirect_subtree(
         &self,
@@ -10016,7 +10018,8 @@ impl OpenFs {
         ptr_block: BlockNumber,
         level: u32,
         base_logical: u64,
-        cutoff: u64,
+        free_lo: u64,
+        free_hi: u64,
         ppb: u64,
     ) -> Result<(u64, bool), FfsError> {
         let mut data = self.read_block_with_scope(cx, scope, ptr_block)?;
@@ -10027,8 +10030,9 @@ impl OpenFs {
 
         for i in 0..ppb {
             let child_base = base_logical.saturating_add(i.saturating_mul(entry_span));
-            // Entry's whole logical range is below the cutoff — keep untouched.
-            if child_base.saturating_add(entry_span) <= cutoff {
+            let child_end = child_base.saturating_add(entry_span);
+            // Entry's whole logical range is outside the free window — keep.
+            if child_end <= free_lo || child_base >= free_hi {
                 continue;
             }
             let idx = usize::try_from(i)
@@ -10052,7 +10056,7 @@ impl OpenFs {
 
             let free_this = if level == 1 {
                 // Leaf entry: a data block at logical `child_base`.
-                child_base >= cutoff
+                child_base >= free_lo && child_base < free_hi
             } else {
                 // Interior entry: recurse, then free the child metadata block iff
                 // it became empty.
@@ -10063,7 +10067,8 @@ impl OpenFs {
                     child,
                     level - 1,
                     child_base,
-                    cutoff,
+                    free_lo,
+                    free_hi,
                     ppb,
                 )?;
                 freed = freed.saturating_add(child_freed);
@@ -10098,17 +10103,21 @@ impl OpenFs {
         Ok((freed, empty))
     }
 
-    /// Free all blocks of an indirect-block-mapped inode at or beyond logical
-    /// block `cutoff` (data blocks + now-empty indirect metadata blocks),
-    /// zeroing the corresponding pointer slots in the inode and on disk. Returns
-    /// the total number of freed filesystem blocks (for `i_blocks` accounting).
-    fn ext4_truncate_indirect(
+    /// Free the blocks of an indirect-block-mapped inode whose logical index
+    /// falls in `[free_lo, free_hi)` (data blocks + now-empty indirect metadata
+    /// blocks), zeroing the corresponding pointer slots in the inode and on disk.
+    /// Returns the total number of freed filesystem blocks (for `i_blocks`
+    /// accounting). A truncate-down calls this with `free_hi = u64::MAX`; a
+    /// `FALLOC_FL_PUNCH_HOLE` calls it with a bounded window.
+    #[allow(clippy::too_many_arguments)] // chain walk threads device + alloc + inode + window
+    fn ext4_free_indirect_range(
         &self,
         cx: &Cx,
         scope: &mut RequestScope,
         alloc: &mut Ext4AllocState,
         inode: &mut Ext4Inode,
-        cutoff: u64,
+        free_lo: u64,
+        free_hi: u64,
         block_size: u32,
     ) -> Result<u64, FfsError> {
         let ppb = u64::from(block_size) / 4;
@@ -10116,7 +10125,7 @@ impl OpenFs {
 
         // Direct blocks i_block[0..12].
         for lb in 0..12u64 {
-            if lb < cutoff {
+            if lb < free_lo || lb >= free_hi {
                 continue;
             }
             let off = usize::try_from(lb * 4)
@@ -10152,8 +10161,8 @@ impl OpenFs {
         ];
         for (iblock_idx, level, base_logical) in roots {
             let span = ppb.saturating_pow(level);
-            // Entire region below the cutoff — keep the whole root untouched.
-            if base_logical.saturating_add(span) <= cutoff {
+            // Entire region outside the free window — keep the whole root.
+            if base_logical.saturating_add(span) <= free_lo || base_logical >= free_hi {
                 continue;
             }
             let off = iblock_idx * 4;
@@ -10173,8 +10182,17 @@ impl OpenFs {
                 continue;
             }
             let root = BlockNumber(u64::from(root_ptr));
-            let (sub_freed, empty) =
-                self.free_indirect_subtree(cx, scope, alloc, root, level, base_logical, cutoff, ppb)?;
+            let (sub_freed, empty) = self.free_indirect_subtree(
+                cx,
+                scope,
+                alloc,
+                root,
+                level,
+                base_logical,
+                free_lo,
+                free_hi,
+                ppb,
+            )?;
             freed = freed.saturating_add(sub_freed);
             if empty {
                 self.free_one_block(cx, alloc, root)?;
@@ -13596,10 +13614,21 @@ impl OpenFs {
                 "ext4 inline-data fallocate mutation is not supported".into(),
             ));
         }
-        if (inode.flags & ffs_types::EXT4_EXTENTS_FL) == 0 {
+        // e2compr compressed files are indirect-mapped but their blocks hold
+        // compressed cluster data, not plain file bytes — fallocate (alloc/zero/
+        // punch of raw blocks) would corrupt them. Reject before the indirect
+        // path below (the kernel has no e2compr support at all).
+        if inode.flags & ffs_types::EXT4_COMPR_FL != 0 {
             return Err(FfsError::UnsupportedFeature(
-                "fallocate of non-extent (indirect block) files is not supported".into(),
+                "ext4 fallocate of an e2compr compressed file is not supported".into(),
             ));
+        }
+        if (inode.flags & ffs_types::EXT4_EXTENTS_FL) == 0 {
+            // Legacy indirect-block-mapped file (bd-laay3 increment 4).
+            return self.ext4_fallocate_indirect(
+                cx, scope, ino, inode, offset, end, keep_size, punch_hole, zero_range,
+                collapse_range, insert_range, block_size, tstamp_secs, tstamp_nanos,
+            );
         }
 
         let mut root_bytes = Self::extent_root(&inode);
@@ -14699,6 +14728,217 @@ impl OpenFs {
         Ok(bytes_written)
     }
 
+    /// `fallocate` on a legacy indirect-block-mapped ext4 file (no
+    /// `EXT4_EXTENTS_FL`). bd-laay3 increment 4.
+    ///
+    /// Modes:
+    /// - default / `KEEP_SIZE`: allocate a zeroed data block for every hole in
+    ///   `[offset, end)` (preallocation); extend `i_size` to `end` unless
+    ///   `KEEP_SIZE`.
+    /// - `ZERO_RANGE`: as above, plus zero the in-window bytes of already-mapped
+    ///   blocks (freshly allocated blocks are already zero).
+    /// - `PUNCH_HOLE`: free the data + now-empty indirect-metadata blocks fully
+    ///   inside a block-aligned window, keeping `i_size`.
+    /// - `COLLAPSE_RANGE` / `INSERT_RANGE`: rejected with `UnsupportedFeature`,
+    ///   matching the kernel, which only implements them for extent files.
+    #[expect(clippy::too_many_arguments, clippy::too_many_lines)]
+    #[allow(clippy::significant_drop_tightening)] // alloc guard held across the whole op
+    #[allow(clippy::fn_params_excessive_bools)] // mirrors the kernel fallocate mode flags
+    fn ext4_fallocate_indirect(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        ino: InodeNumber,
+        mut inode: Ext4Inode,
+        offset: u64,
+        end: u64,
+        keep_size: bool,
+        punch_hole: bool,
+        zero_range: bool,
+        collapse_range: bool,
+        insert_range: bool,
+        block_size: u64,
+        tstamp_secs: u64,
+        tstamp_nanos: u32,
+    ) -> ffs_error::Result<()> {
+        if collapse_range || insert_range {
+            return Err(FfsError::UnsupportedFeature(
+                "ext4 collapse_range/insert_range require an extent-mapped file".into(),
+            ));
+        }
+
+        let alloc_mutex = self.require_alloc_state()?;
+        let mut block_dev = self.block_device_adapter();
+        let sb = self
+            .ext4_superblock()
+            .ok_or_else(|| FfsError::Format("not an ext4 filesystem".into()))?;
+        let csum_seed = sb.csum_seed();
+        let bs_usize = usize::try_from(block_size)
+            .map_err(|_| FfsError::Format("block size does not fit usize".into()))?;
+        let sectors_per_block = block_size / u64::from(EXT4_SECTOR_SIZE);
+        let block_size_u32 = u32::try_from(block_size)
+            .map_err(|_| FfsError::Format("block size does not fit u32".into()))?;
+
+        let mut alloc = alloc_mutex.lock();
+
+        if punch_hole {
+            // Mirror the extent punch path: require a block-aligned window.
+            if offset % block_size != 0 || (end - offset) % block_size != 0 {
+                return Err(FfsError::UnsupportedFeature(
+                    "ext4 punch_hole currently requires block-aligned offset/length".into(),
+                ));
+            }
+            let lo = offset / block_size;
+            let hi = end / block_size;
+            let freed = self
+                .ext4_free_indirect_range(cx, scope, &mut alloc, &mut inode, lo, hi, block_size_u32)?;
+            self.extent_cache.invalidate_all();
+            if freed > 0 {
+                let freed_sectors = if inode.is_huge_file() {
+                    freed
+                } else {
+                    freed.checked_mul(sectors_per_block).ok_or_else(|| FfsError::Corruption {
+                        block: 0,
+                        detail: format!("inode {} punch_hole freed sectors overflow", ino.0),
+                    })?
+                };
+                inode.blocks = Self::ext4_checked_inode_blocks_delta(
+                    inode.blocks,
+                    ino,
+                    -(i128::from(freed_sectors)),
+                )?;
+            }
+            // PUNCH_HOLE keeps the file size unchanged.
+        } else {
+            // default / KEEP_SIZE / ZERO_RANGE: preallocate every hole in the
+            // window as a zeroed data block.
+            let zero_block = vec![0u8; bs_usize];
+            let first_lb = offset / block_size;
+            let last_lb = (end - 1) / block_size; // end > offset (length > 0)
+            let mut added_sectors = 0u64;
+            let mut lb64 = first_lb;
+            while lb64 <= last_lb {
+                let lb = u32::try_from(lb64).map_err(|_| {
+                    FfsError::Format(
+                        "fallocate offset exceeds ext4 32-bit logical block limit".into(),
+                    )
+                })?;
+                let (phys_block, is_new) =
+                    if let Some(phys) = self.resolve_indirect_block(cx, scope, &inode, lb)? {
+                        (BlockNumber(phys), false)
+                    } else {
+                        let data_block = {
+                            let hint = self.numa_allocation_hint(
+                                &alloc.geo,
+                                AllocHint::default(),
+                                "ext4_fallocate_indirect",
+                                Some(ino),
+                            );
+                            let Ext4AllocState {
+                                geo,
+                                groups,
+                                persist_ctx,
+                                ..
+                            } = &mut *alloc;
+                            ffs_alloc::alloc_blocks_persist(
+                                cx, &block_dev, geo, groups, 1, &hint, persist_ctx,
+                            )?
+                            .start
+                        };
+                        let data_ptr = u32::try_from(data_block.0).map_err(|_| {
+                            FfsError::InvalidGeometry(format!(
+                                "indirect data block {} exceeds 32-bit pointer range",
+                                data_block.0
+                            ))
+                        })?;
+                        // Preallocated blocks must read back as zero.
+                        if let Some(tx) = &mut scope.tx {
+                            tx.stage_write_with_proof(
+                                data_block,
+                                zero_block.clone(),
+                                MergeProof::DisjointBlocks,
+                            );
+                        } else {
+                            block_dev.write_block(cx, data_block, &zero_block)?;
+                        }
+                        let meta = self
+                            .write_block_ptr(cx, scope, &mut inode, &mut alloc, lb, data_ptr)?;
+                        block_dev = self.block_device_adapter();
+                        let new_count = 1 + u64::try_from(meta.len()).map_err(|_| {
+                            FfsError::Format("indirect metadata block count overflow".into())
+                        })?;
+                        added_sectors = added_sectors
+                            .saturating_add(new_count.saturating_mul(sectors_per_block));
+                        (data_block, true)
+                    };
+
+                if zero_range && !is_new {
+                    // Zero only the in-window bytes of an already-mapped block.
+                    let blk_start = lb64.saturating_mul(block_size);
+                    let zfrom = usize::try_from(offset.max(blk_start) - blk_start)
+                        .map_err(|_| FfsError::Format("zero_range head offset overflow".into()))?;
+                    let zto = usize::try_from(end.min(blk_start + block_size) - blk_start)
+                        .map_err(|_| FfsError::Format("zero_range tail offset overflow".into()))?;
+                    if zfrom == 0 && zto == bs_usize {
+                        if let Some(tx) = &mut scope.tx {
+                            tx.stage_write_with_proof(
+                                phys_block,
+                                zero_block.clone(),
+                                MergeProof::DisjointBlocks,
+                            );
+                        } else {
+                            block_dev.write_block(cx, phys_block, &zero_block)?;
+                        }
+                    } else {
+                        let mut buf = self.read_block_with_scope(cx, scope, phys_block)?;
+                        buf[zfrom..zto].fill(0);
+                        if let Some(tx) = &mut scope.tx {
+                            let proof = MergeProof::NonOverlappingExtents {
+                                touched_ranges: vec![MergeByteRange::new(zfrom, zto - zfrom)],
+                            };
+                            tx.stage_write_with_proof(phys_block, buf, proof);
+                        } else {
+                            block_dev.write_block(cx, phys_block, &buf)?;
+                        }
+                    }
+                }
+                lb64 += 1;
+            }
+
+            if added_sectors > 0 {
+                inode.blocks = Self::ext4_checked_inode_blocks_delta(
+                    inode.blocks,
+                    ino,
+                    i128::from(added_sectors),
+                )?;
+            }
+            if !keep_size && end > inode.size {
+                inode.size = end;
+            }
+        }
+
+        ffs_inode::touch_mtime_ctime(&mut inode, tstamp_secs, tstamp_nanos);
+        if let Some(tx) = &mut scope.tx {
+            let tx_dev = TransactionBlockAdapter {
+                base: &block_dev,
+                tx: Mutex::new(tx),
+            };
+            ffs_inode::write_inode(cx, &tx_dev, &alloc.geo, &alloc.groups, ino, &inode, csum_seed)?;
+        } else {
+            ffs_inode::write_inode(cx, &block_dev, &alloc.geo, &alloc.groups, ino, &inode, csum_seed)?;
+        }
+
+        trace!(
+            target: "ffs::write",
+            op = "fallocate_indirect",
+            ino = ino.0,
+            offset,
+            end,
+            "indirect fallocate"
+        );
+        Ok(())
+    }
+
     /// Compressed ext4 write: accumulates data into cluster-sized buffers,
     /// compresses each cluster, and writes with the e2compr format.
     #[expect(
@@ -15420,8 +15660,15 @@ impl OpenFs {
                     // walk the pointer chain freeing data + now-empty indirect
                     // metadata blocks at/after the new EOF.
                     let cutoff = new_size.div_ceil(u64::from(block_size));
-                    let freed = self
-                        .ext4_truncate_indirect(cx, scope, &mut alloc, &mut inode, cutoff, block_size)?;
+                    let freed = self.ext4_free_indirect_range(
+                        cx,
+                        scope,
+                        &mut alloc,
+                        &mut inode,
+                        cutoff,
+                        u64::MAX,
+                        block_size,
+                    )?;
                     // Freed blocks become recyclable into any inode/offset; drop
                     // the extent cache for the same reason the extent path does.
                     self.extent_cache.invalidate_all();
@@ -28897,6 +29144,105 @@ mod tests {
         assert!(
             raw0[..new_size as usize].iter().all(|&b| b == 0x01),
             "kept bytes of the partial block are unchanged"
+        );
+    }
+
+    /// bd-laay3 increment 4: fallocate on a legacy indirect-block file —
+    /// default preallocation (extends size), KEEP_SIZE (allocates without
+    /// extending), ZERO_RANGE (zeros mapped bytes), PUNCH_HOLE (frees + reads
+    /// zero, keeps size), and COLLAPSE/INSERT rejection (extent-only).
+    #[test]
+    fn ext4_indirect_fallocate_bd_laay3() {
+        let Some((fs, _tmp)) = open_writable_ext4_mkfs(16) else {
+            return; // mkfs.ext4 unavailable
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let bs = fs.block_size() as usize;
+        let spb = u64::from(fs.block_size() / EXT4_SECTOR_SIZE);
+
+        // Build an indirect file mapping logical block 0 only.
+        let ino = fs
+            .create(&cx, root, OsStr::new("falloc.bin"), 0o644, 0, 0)
+            .expect("create")
+            .ino;
+        let b0 = vec![0x01_u8; bs];
+        fs.write(&cx, ino, 0, &b0).expect("seed block 0");
+        let seeded = fs.read_inode(&cx, ino).expect("inode");
+        let phys0 = fs
+            .collect_extents(&cx, &seeded)
+            .expect("extents")
+            .iter()
+            .find(|e| e.logical_block == 0)
+            .map(|e| e.physical_start)
+            .expect("block 0 mapped");
+        let mut indirect = seeded.clone();
+        indirect.flags &= !ffs_types::EXT4_EXTENTS_FL;
+        let mut iblock = vec![0_u8; 15 * 4];
+        iblock[0..4].copy_from_slice(&u32::try_from(phys0).unwrap().to_le_bytes());
+        indirect.extent_bytes = iblock;
+        indirect.size = bs as u64;
+        fs.persist_ext4_inode_for_testing(&cx, ino, &indirect)
+            .expect("persist indirect");
+
+        // (1) Default fallocate: preallocate blocks 1..4 and extend size to 4 blocks.
+        fs.fallocate(&cx, ino, bs as u64, (3 * bs) as u64, 0)
+            .expect("default fallocate");
+        let a = fs.read_inode(&cx, ino).expect("inode after default");
+        assert_eq!(a.size, (4 * bs) as u64, "default fallocate extends size");
+        assert!(a.blocks >= 4 * spb, "blocks 0..4 allocated");
+        let read = fs.read(&cx, ino, 0, (4 * bs) as u32).expect("read");
+        assert_eq!(&read[0..bs], &b0[..], "block 0 intact");
+        assert!(read[bs..].iter().all(|&b| b == 0), "preallocated blocks read zero");
+        let blocks_after_default = a.blocks;
+
+        // (2) KEEP_SIZE: allocate logical block 5 without changing the size.
+        fs.fallocate(&cx, ino, (5 * bs) as u64, bs as u64, 0x01)
+            .expect("keep_size fallocate");
+        let b = fs.read_inode(&cx, ino).expect("inode after keep_size");
+        assert_eq!(b.size, (4 * bs) as u64, "KEEP_SIZE must not change size");
+        assert!(b.blocks > blocks_after_default, "KEEP_SIZE still allocates");
+
+        // (3) ZERO_RANGE over the first half of block 0.
+        fs.fallocate(&cx, ino, 0, (bs / 2) as u64, 0x10)
+            .expect("zero_range fallocate");
+        let z = fs.read(&cx, ino, 0, bs as u32).expect("read after zero_range");
+        assert!(z[..bs / 2].iter().all(|&b| b == 0), "zero_range zeroed first half");
+        assert!(z[bs / 2..].iter().all(|&b| b == 0x01), "rest of block 0 unchanged");
+
+        // (4) PUNCH_HOLE block 1 (KEEP_SIZE required): frees it, keeps size.
+        let blocks_before_punch = fs.read_inode(&cx, ino).expect("inode").blocks;
+        fs.fallocate(&cx, ino, bs as u64, bs as u64, 0x02 | 0x01)
+            .expect("punch_hole fallocate");
+        let c = fs.read_inode(&cx, ino).expect("inode after punch");
+        assert_eq!(c.size, (4 * bs) as u64, "punch keeps size");
+        assert_eq!(
+            blocks_before_punch - c.blocks,
+            spb,
+            "punch frees exactly one data block"
+        );
+        assert!(
+            fs.read(&cx, ino, bs as u64, bs as u32)
+                .expect("read punched")
+                .iter()
+                .all(|&b| b == 0),
+            "punched block reads as a zero hole"
+        );
+
+        // (5) COLLAPSE_RANGE / INSERT_RANGE are extent-only → rejected.
+        assert!(
+            matches!(
+                fs.fallocate(&cx, ino, 0, bs as u64, 0x08),
+                Err(FfsError::UnsupportedFeature(_))
+            ),
+            "collapse_range must be rejected on an indirect file"
+        );
+        assert!(
+            matches!(
+                fs.fallocate(&cx, ino, 0, bs as u64, 0x20),
+                Err(FfsError::UnsupportedFeature(_))
+            ),
+            "insert_range must be rejected on an indirect file"
         );
     }
 
