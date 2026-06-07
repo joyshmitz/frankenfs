@@ -3750,14 +3750,30 @@ fn casefold_name(name: &[u8]) -> Vec<u8> {
         |s| {
             let mut folded = String::with_capacity(s.len());
             for ch in s.chars() {
-                match ch {
-                    'ß' | 'ẞ' => folded.push_str("ss"),
-                    _ => folded.extend(ch.to_lowercase()),
-                }
+                push_casefolded_char(&mut folded, ch);
             }
             folded.into_bytes()
         },
     )
+}
+
+fn push_casefolded_char(folded: &mut String, ch: char) {
+    match ch {
+        'ß' | 'ẞ' => folded.push_str("ss"),
+        'Α'..='Ρ' | 'Σ'..='Ϋ' => {
+            let lower = char::from_u32(u32::from(ch) + 0x20)
+                .expect("Greek uppercase range maps to valid lowercase scalar");
+            folded.push(lower);
+        }
+        'Ё' => folded.push('ё'),
+        'А'..='Я' => {
+            let lower = char::from_u32(u32::from(ch) + 0x20)
+                .expect("Cyrillic uppercase range maps to valid lowercase scalar");
+            folded.push(lower);
+        }
+        '\u{0590}'..='\u{05FF}' | '\u{4E00}'..='\u{9FFF}' => folded.push(ch),
+        _ => folded.extend(ch.to_lowercase()),
+    }
 }
 
 // ── Zero-allocation directory block iterator ────────────────────────────────
@@ -5647,7 +5663,11 @@ fn build_htree_layout(
     // bounding total work for N inserts to O(N) instead of rebuilding the whole
     // directory on (nearly) every create (O(N^2)). The hard `usable` cap still
     // applies to un-splittable equal-hash runs.
-    let fill_limit = if loose_pack { (usable / 2).max(1) } else { usable };
+    let fill_limit = if loose_pack {
+        (usable / 2).max(1)
+    } else {
+        usable
+    };
 
     // Casefold directories index by the case-folded name (byte-exact for ASCII),
     // while the leaf still stores the original-case name; non-casefold hashes the
@@ -5810,7 +5830,14 @@ fn build_htree_layout(
         indirect_levels += 1;
     }
 
-    write_dx_root(&mut root, hash_version, indirect_levels, root_limit, &children).ok()?;
+    write_dx_root(
+        &mut root,
+        hash_version,
+        indirect_levels,
+        root_limit,
+        &children,
+    )
+    .ok()?;
 
     let mut blocks = Vec::with_capacity(1 + leaf_count + interior_blocks.len());
     blocks.push(root);
@@ -5881,8 +5908,18 @@ pub fn build_htree_directory_stamped_with_large_dir(
     has_large_dir: bool,
 ) -> Option<Vec<Vec<u8>>> {
     build_htree_directory_stamped_with_large_dir_inner(
-        dot_inode, dotdot_inode, entries, block_size, hash_version, hash_seed, csum_seed, dir_ino,
-        generation, has_large_dir, false, false,
+        dot_inode,
+        dotdot_inode,
+        entries,
+        block_size,
+        hash_version,
+        hash_seed,
+        csum_seed,
+        dir_ino,
+        generation,
+        has_large_dir,
+        false,
+        false,
     )
 }
 
@@ -5907,8 +5944,18 @@ pub fn build_htree_directory_stamped_with_large_dir_casefold(
     has_large_dir: bool,
 ) -> Option<Vec<Vec<u8>>> {
     build_htree_directory_stamped_with_large_dir_inner(
-        dot_inode, dotdot_inode, entries, block_size, hash_version, hash_seed, csum_seed, dir_ino,
-        generation, has_large_dir, true, false,
+        dot_inode,
+        dotdot_inode,
+        entries,
+        block_size,
+        hash_version,
+        hash_seed,
+        csum_seed,
+        dir_ino,
+        generation,
+        has_large_dir,
+        true,
+        false,
     )
 }
 
@@ -6124,7 +6171,11 @@ where
     // index resolve case-insensitive lookups. An exotic-Unicode fold that
     // differs from the kernel's simply misses here, and the caller falls back
     // to the linear casefold scan, so correctness is never at risk.
-    let folded = if casefold { Some(casefold_name(name)) } else { None };
+    let folded = if casefold {
+        Some(casefold_name(name))
+    } else {
+        None
+    };
     let hash_input = folded.as_deref().unwrap_or(name);
     let (hash, _minor) = dx_hash(hash_version, hash_input, hash_seed);
 
@@ -6287,7 +6338,11 @@ where
     let hash_version = effective_hash_version(dx_root.hash_version);
     // Casefold dirs index by the folded name (byte-exact for ASCII), so the
     // target leaf for an insert is the one the folded hash maps to.
-    let folded = if casefold { Some(casefold_name(name)) } else { None };
+    let folded = if casefold {
+        Some(casefold_name(name))
+    } else {
+        None
+    };
     let hash_input = folded.as_deref().unwrap_or(name);
     let (hash, _minor) = dx_hash(hash_version, hash_input, hash_seed);
 
@@ -9247,7 +9302,13 @@ mod tests {
         let entries: Vec<(u32, u8, &[u8])> = names
             .iter()
             .enumerate()
-            .map(|(i, n)| (100 + u32::try_from(i).unwrap(), EXT4_FT_REG_FILE, n.as_slice()))
+            .map(|(i, n)| {
+                (
+                    100 + u32::try_from(i).unwrap(),
+                    EXT4_FT_REG_FILE,
+                    n.as_slice(),
+                )
+            })
             .collect();
 
         let blocks = build_htree_directory(2, 2, &entries, bs, hash_version, &seed, false)
@@ -9281,7 +9342,11 @@ mod tests {
         for (i, name) in names.iter().enumerate() {
             match read(name) {
                 HtreeFindResult::Found(e) => {
-                    assert_eq!(e.inode, 100 + u32::try_from(i).unwrap(), "wrong inode {name:?}");
+                    assert_eq!(
+                        e.inode,
+                        100 + u32::try_from(i).unwrap(),
+                        "wrong inode {name:?}"
+                    );
                 }
                 other => panic!("entry {name:?} not reachable via two-level index: {other:?}"),
             }
@@ -9315,7 +9380,13 @@ mod tests {
         let entries: Vec<(u32, u8, &[u8])> = names
             .iter()
             .enumerate()
-            .map(|(i, n)| (100 + u32::try_from(i).unwrap(), EXT4_FT_REG_FILE, n.as_slice()))
+            .map(|(i, n)| {
+                (
+                    100 + u32::try_from(i).unwrap(),
+                    EXT4_FT_REG_FILE,
+                    n.as_slice(),
+                )
+            })
             .collect();
         let blocks = build_htree_directory(2, 2, &entries, bs, hash_version, &seed, false)
             .expect("casefold htree builds");
@@ -9332,24 +9403,39 @@ mod tests {
 
         // Casefold descent, counting block reads.
         let casefold_reads = std::cell::Cell::new(0_usize);
-        let cf = htree_find_entry_casefold(bs_u32, &seed, false, &query_upper, |v| v, |lb| {
-            casefold_reads.set(casefold_reads.get() + 1);
-            blocks.get(lb as usize).cloned()
-        });
+        let cf = htree_find_entry_casefold(
+            bs_u32,
+            &seed,
+            false,
+            &query_upper,
+            |v| v,
+            |lb| {
+                casefold_reads.set(casefold_reads.get() + 1);
+                blocks.get(lb as usize).cloned()
+            },
+        );
         let entry = match cf {
             HtreeFindResult::Found(e) => e,
             other => panic!("casefold descent failed for {query_upper:?}: {other:?}"),
         };
         assert_eq!(entry.inode, 100 + u32::try_from(target_idx).unwrap());
-        assert_eq!(entry.name, stored_name, "stored (original-case) name returned");
+        assert_eq!(
+            entry.name, stored_name,
+            "stored (original-case) name returned"
+        );
 
         // Exact-match descent MUST miss the uppercase query — proves the casefold
         // path is doing real work, not coincidentally matching.
         assert!(
             !matches!(
-                htree_find_entry(bs_u32, &seed, false, &query_upper, |v| v, |lb| blocks
-                    .get(lb as usize)
-                    .cloned()),
+                htree_find_entry(
+                    bs_u32,
+                    &seed,
+                    false,
+                    &query_upper,
+                    |v| v,
+                    |lb| blocks.get(lb as usize).cloned()
+                ),
                 HtreeFindResult::Found(_)
             ),
             "exact-match descent must not find an uppercase variant"
@@ -9365,7 +9451,10 @@ mod tests {
             }
         }
         let linear_entry = linear_hit.expect("linear casefold scan finds it");
-        assert_eq!(linear_entry.inode, entry.inode, "htree vs linear casefold disagree");
+        assert_eq!(
+            linear_entry.inode, entry.inode,
+            "htree vs linear casefold disagree"
+        );
         assert_eq!(linear_entry.name, entry.name);
 
         // SCORE: the casefold descent reads a handful of blocks; the prior
@@ -9396,21 +9485,41 @@ mod tests {
         let entries: Vec<(u32, u8, &[u8])> = names
             .iter()
             .enumerate()
-            .map(|(i, n)| (100 + u32::try_from(i).unwrap(), EXT4_FT_REG_FILE, n.as_slice()))
+            .map(|(i, n)| {
+                (
+                    100 + u32::try_from(i).unwrap(),
+                    EXT4_FT_REG_FILE,
+                    n.as_slice(),
+                )
+            })
             .collect();
         let blocks = build_htree_directory(2, 2, &entries, bs, hash_version, &seed, false)
             .expect("casefold htree builds");
-        assert!(blocks.len() > 4, "need several leaves for a meaningful test");
+        assert!(
+            blocks.len() > 4,
+            "need several leaves for a meaningful test"
+        );
 
         for lower in names.iter().step_by(37) {
             let upper = lower.to_ascii_uppercase();
-            let cf_leaf = htree_target_leaf_block_casefold(&seed, false, &upper, |v| v, |lb| {
-                blocks.get(lb as usize).cloned()
-            });
-            let exact_leaf = htree_target_leaf_block(&seed, false, lower, |v| v, |lb| {
-                blocks.get(lb as usize).cloned()
-            });
-            assert!(cf_leaf.is_some(), "casefold target leaf must resolve for {upper:?}");
+            let cf_leaf = htree_target_leaf_block_casefold(
+                &seed,
+                false,
+                &upper,
+                |v| v,
+                |lb| blocks.get(lb as usize).cloned(),
+            );
+            let exact_leaf = htree_target_leaf_block(
+                &seed,
+                false,
+                lower,
+                |v| v,
+                |lb| blocks.get(lb as usize).cloned(),
+            );
+            assert!(
+                cf_leaf.is_some(),
+                "casefold target leaf must resolve for {upper:?}"
+            );
             assert_eq!(
                 cf_leaf, exact_leaf,
                 "casefold insert of {upper:?} must target the leaf holding {lower:?}"
@@ -9447,7 +9556,13 @@ mod tests {
         let entries: Vec<(u32, u8, &[u8])> = names
             .iter()
             .enumerate()
-            .map(|(i, n)| (200 + u32::try_from(i).unwrap(), EXT4_FT_REG_FILE, n.as_slice()))
+            .map(|(i, n)| {
+                (
+                    200 + u32::try_from(i).unwrap(),
+                    EXT4_FT_REG_FILE,
+                    n.as_slice(),
+                )
+            })
             .collect();
 
         let blocks = build_htree_directory_stamped_with_large_dir_casefold(
@@ -9463,7 +9578,10 @@ mod tests {
             false,
         )
         .expect("casefold rebuild builds");
-        assert!(blocks.len() > 4, "need several leaves for a real rebuild test");
+        assert!(
+            blocks.len() > 4,
+            "need several leaves for a real rebuild test"
+        );
 
         // Every entry — queried by an arbitrary case variant — resolves via the
         // casefold descent, proving the rebuilt index is fold-correct.
@@ -9473,12 +9591,24 @@ mod tests {
             } else {
                 original.to_ascii_lowercase()
             };
-            match htree_find_entry_casefold(bs_u32, &seed, false, &query, |v| v, |lb| {
-                blocks.get(lb as usize).cloned()
-            }) {
+            match htree_find_entry_casefold(
+                bs_u32,
+                &seed,
+                false,
+                &query,
+                |v| v,
+                |lb| blocks.get(lb as usize).cloned(),
+            ) {
                 HtreeFindResult::Found(e) => {
-                    assert_eq!(e.inode, 200 + u32::try_from(i).unwrap(), "wrong inode for {query:?}");
-                    assert_eq!(&e.name, original, "original case must be preserved in the leaf");
+                    assert_eq!(
+                        e.inode,
+                        200 + u32::try_from(i).unwrap(),
+                        "wrong inode for {query:?}"
+                    );
+                    assert_eq!(
+                        &e.name, original,
+                        "original case must be preserved in the leaf"
+                    );
                 }
                 other => panic!("rebuilt casefold entry {query:?} not fold-reachable: {other:?}"),
             }
@@ -9504,11 +9634,25 @@ mod tests {
         let entries: Vec<(u32, u8, &[u8])> = names
             .iter()
             .enumerate()
-            .map(|(i, n)| (300 + u32::try_from(i).unwrap(), EXT4_FT_REG_FILE, n.as_slice()))
+            .map(|(i, n)| {
+                (
+                    300 + u32::try_from(i).unwrap(),
+                    EXT4_FT_REG_FILE,
+                    n.as_slice(),
+                )
+            })
             .collect();
 
         let blocks = build_htree_directory_stamped(
-            2, 2, &entries, bs, hash_version, &seed, csum_seed, dir_ino, generation,
+            2,
+            2,
+            &entries,
+            bs,
+            hash_version,
+            &seed,
+            csum_seed,
+            dir_ino,
+            generation,
         )
         .expect("stamped two-level htree build");
 
@@ -9582,7 +9726,13 @@ mod tests {
         let entries: Vec<(u32, u8, &[u8])> = names
             .iter()
             .enumerate()
-            .map(|(i, n)| (100 + u32::try_from(i).unwrap(), EXT4_FT_REG_FILE, n.as_slice()))
+            .map(|(i, n)| {
+                (
+                    100 + u32::try_from(i).unwrap(),
+                    EXT4_FT_REG_FILE,
+                    n.as_slice(),
+                )
+            })
             .collect();
 
         let blocks = build_htree_directory(2, 2, &entries, bs, hash_version, &seed, false)
@@ -9606,7 +9756,11 @@ mod tests {
                 }
             }
         }
-        assert_eq!(found.len(), names.len(), "every entry accounted for via leaves only");
+        assert_eq!(
+            found.len(),
+            names.len(),
+            "every entry accounted for via leaves only"
+        );
 
         // The enumerated leaf set is exactly the contiguous leaf range 1..=L,
         // which excludes the interior nodes (logical L+1..). If the walk had
@@ -9636,7 +9790,13 @@ mod tests {
         let entries: Vec<(u32, u8, &[u8])> = names
             .iter()
             .enumerate()
-            .map(|(i, n)| (100 + u32::try_from(i).unwrap(), EXT4_FT_REG_FILE, n.as_slice()))
+            .map(|(i, n)| {
+                (
+                    100 + u32::try_from(i).unwrap(),
+                    EXT4_FT_REG_FILE,
+                    n.as_slice(),
+                )
+            })
             .collect();
 
         let blocks = build_htree_directory(2, 2, &entries, bs, 1, &seed, false).unwrap();
@@ -9670,7 +9830,13 @@ mod tests {
         let entries: Vec<(u32, u8, &[u8])> = names
             .iter()
             .enumerate()
-            .map(|(i, n)| (100 + u32::try_from(i).unwrap(), EXT4_FT_REG_FILE, n.as_slice()))
+            .map(|(i, n)| {
+                (
+                    100 + u32::try_from(i).unwrap(),
+                    EXT4_FT_REG_FILE,
+                    n.as_slice(),
+                )
+            })
             .collect();
 
         let blocks = build_htree_directory(2, 2, &entries, bs, hash_version, &seed, false)
@@ -9691,7 +9857,11 @@ mod tests {
                 |lb| blocks.get(lb as usize).cloned(),
             ) {
                 HtreeFindResult::Found(e) => {
-                    assert_eq!(e.inode, 100 + u32::try_from(i).unwrap(), "wrong inode {name:?}");
+                    assert_eq!(
+                        e.inode,
+                        100 + u32::try_from(i).unwrap(),
+                        "wrong inode {name:?}"
+                    );
                 }
                 other => panic!("entry {name:?} not reachable via three-level index: {other:?}"),
             }
@@ -9713,11 +9883,18 @@ mod tests {
                 }
             }
         }
-        assert_eq!(found.len(), names.len(), "every entry accounted for via leaves only");
+        assert_eq!(
+            found.len(),
+            names.len(),
+            "every entry accounted for via leaves only"
+        );
 
         leaves.sort_unstable();
         let l = leaves.len();
-        assert!(l > 180, "three-level dir must exceed the two-level leaf cap, got {l}");
+        assert!(
+            l > 180,
+            "three-level dir must exceed the two-level leaf cap, got {l}"
+        );
         assert_eq!(
             leaves,
             (1..=u32::try_from(l).unwrap()).collect::<Vec<_>>(),
@@ -9744,7 +9921,13 @@ mod tests {
         let entries: Vec<(u32, u8, &[u8])> = names
             .iter()
             .enumerate()
-            .map(|(i, n)| (100 + u32::try_from(i).unwrap(), EXT4_FT_REG_FILE, n.as_slice()))
+            .map(|(i, n)| {
+                (
+                    100 + u32::try_from(i).unwrap(),
+                    EXT4_FT_REG_FILE,
+                    n.as_slice(),
+                )
+            })
             .collect();
 
         // Without large_dir the depth is unreadable: refuse to build it.
@@ -9754,7 +9937,14 @@ mod tests {
         );
 
         let blocks = build_htree_directory_with_large_dir(
-            2, 2, &entries, bs, hash_version, &seed, false, true,
+            2,
+            2,
+            &entries,
+            bs,
+            hash_version,
+            &seed,
+            false,
+            true,
         )
         .expect("four-level htree should build with large_dir");
         assert_eq!(
@@ -9773,7 +9963,11 @@ mod tests {
                 |lb| blocks.get(lb as usize).cloned(),
             ) {
                 HtreeFindResult::Found(e) => {
-                    assert_eq!(e.inode, 100 + u32::try_from(i).unwrap(), "wrong inode {name:?}");
+                    assert_eq!(
+                        e.inode,
+                        100 + u32::try_from(i).unwrap(),
+                        "wrong inode {name:?}"
+                    );
                 }
                 other => panic!("entry {name:?} not reachable via four-level index: {other:?}"),
             }
@@ -9794,11 +9988,18 @@ mod tests {
                 }
             }
         }
-        assert_eq!(found.len(), names.len(), "every entry accounted for via leaves only");
+        assert_eq!(
+            found.len(),
+            names.len(),
+            "every entry accounted for via leaves only"
+        );
 
         leaves.sort_unstable();
         let l = leaves.len();
-        assert!(l > 196, "four-level dir must exceed the two-level leaf cap, got {l}");
+        assert!(
+            l > 196,
+            "four-level dir must exceed the two-level leaf cap, got {l}"
+        );
         assert_eq!(
             leaves,
             (1..=u32::try_from(l).unwrap()).collect::<Vec<_>>(),
@@ -9826,23 +10027,49 @@ mod tests {
         let entries: Vec<(u32, u8, &[u8])> = names
             .iter()
             .enumerate()
-            .map(|(i, n)| (500 + u32::try_from(i).unwrap(), EXT4_FT_REG_FILE, n.as_slice()))
+            .map(|(i, n)| {
+                (
+                    500 + u32::try_from(i).unwrap(),
+                    EXT4_FT_REG_FILE,
+                    n.as_slice(),
+                )
+            })
             .collect();
 
         // Parity: unbuildable without the feature flag.
         assert!(
             build_htree_directory_stamped(
-                2, 2, &entries, bs, hash_version, &seed, csum_seed, dir_ino, generation,
+                2,
+                2,
+                &entries,
+                bs,
+                hash_version,
+                &seed,
+                csum_seed,
+                dir_ino,
+                generation,
             )
             .is_none(),
             "a four-level stamped index must not build without INCOMPAT_LARGEDIR"
         );
 
         let blocks = build_htree_directory_stamped_with_large_dir(
-            2, 2, &entries, bs, hash_version, &seed, csum_seed, dir_ino, generation, true,
+            2,
+            2,
+            &entries,
+            bs,
+            hash_version,
+            &seed,
+            csum_seed,
+            dir_ino,
+            generation,
+            true,
         )
         .expect("stamped four-level htree build with large_dir");
-        assert_eq!(blocks[0][0x1E], 3, "dx_root must declare indirect_levels == 3");
+        assert_eq!(
+            blocks[0][0x1E], 3,
+            "dx_root must declare indirect_levels == 3"
+        );
 
         // The DX root checksum verifies under the index formula.
         assert!(verify_dx_block_checksum(
@@ -10341,6 +10568,57 @@ mod tests {
             ext4_casefold_key(b"some_quite_long_filename_with_many_characters_to_exercise.dat"),
             b"some_quite_long_filename_with_many_characters_to_exercise.dat"
         );
+    }
+
+    #[test]
+    fn ext4_casefold_key_specialized_unicode_ranges_match_slow_reference_bd_xmh5g_125() {
+        fn slow_reference(name: &[u8]) -> Vec<u8> {
+            if name.is_ascii() {
+                let mut folded = name.to_vec();
+                folded.make_ascii_lowercase();
+                return folded;
+            }
+
+            std::str::from_utf8(name).map_or_else(
+                |_| {
+                    name.iter()
+                        .map(|&b| {
+                            if b.is_ascii_uppercase() {
+                                b.to_ascii_lowercase()
+                            } else {
+                                b
+                            }
+                        })
+                        .collect()
+                },
+                |s| {
+                    let mut folded = String::with_capacity(s.len());
+                    for ch in s.chars() {
+                        match ch {
+                            'ß' | 'ẞ' => folded.push_str("ss"),
+                            _ => folded.extend(ch.to_lowercase()),
+                        }
+                    }
+                    folded.into_bytes()
+                },
+            )
+        }
+
+        let samples = [
+            "ΑΒΓΔΕΖΗΘΙΚΛΜΝΞΟΠΡΣΤΥΦΧΨΩΪΫ",
+            "ЁАБВГДЕЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ",
+            "你好世界这是一个长的中文文件名",
+            "אבגדהוזחטיכלמנסעפצקרשת",
+            "ΑΒΓStraßeЁЯ你好אבגSTRAẞE",
+        ];
+
+        for sample in samples {
+            assert_eq!(
+                ext4_casefold_key(sample.as_bytes()),
+                slow_reference(sample.as_bytes()),
+                "specialized casefold range must match slow reference for {sample:?}"
+            );
+        }
     }
 
     #[test]
