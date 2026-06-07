@@ -29246,6 +29246,97 @@ mod tests {
         );
     }
 
+    /// bd-laay3 hardening: exercise the DEEPEST pointer-chain path end-to-end —
+    /// the triple-indirect region (i_block[14]). A single sparse write there
+    /// allocates the data block plus three metadata levels (triple root +
+    /// double-indirect + single-indirect); a truncate back must free all four and
+    /// clear i_block[14]. This validates write_block_ptr / resolve_indirect_block
+    /// / free_indirect_subtree at level 3, which the other tests never reach.
+    #[test]
+    fn ext4_indirect_triple_indirect_grow_and_truncate_bd_laay3() {
+        let Some((fs, _tmp)) = open_writable_ext4_mkfs(16) else {
+            return; // mkfs.ext4 unavailable
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let bs = fs.block_size() as usize;
+        let bs_u64 = bs as u64;
+        let spb = u64::from(fs.block_size() / EXT4_SECTOR_SIZE);
+        let ppb = bs_u64 / 4;
+
+        // Build an indirect file mapping logical block 0.
+        let ino = fs
+            .create(&cx, root, OsStr::new("triple.bin"), 0o644, 0, 0)
+            .expect("create")
+            .ino;
+        let b0 = vec![0x01_u8; bs];
+        fs.write(&cx, ino, 0, &b0).expect("seed block 0");
+        let seeded = fs.read_inode(&cx, ino).expect("inode");
+        let phys0 = fs
+            .collect_extents(&cx, &seeded)
+            .expect("extents")
+            .iter()
+            .find(|e| e.logical_block == 0)
+            .map(|e| e.physical_start)
+            .expect("block 0 mapped");
+        let mut indirect = seeded.clone();
+        indirect.flags &= !ffs_types::EXT4_EXTENTS_FL;
+        let mut iblock = vec![0_u8; 15 * 4];
+        iblock[0..4].copy_from_slice(&u32::try_from(phys0).unwrap().to_le_bytes());
+        indirect.extent_bytes = iblock;
+        indirect.size = bs_u64;
+        fs.persist_ext4_inode_for_testing(&cx, ino, &indirect)
+            .expect("persist indirect");
+
+        // First logical block of the triple-indirect region:
+        //   12 (direct) + ppb (single) + ppb*ppb (double).
+        let triple_lb = 12 + ppb + ppb * ppb;
+        let triple_off = triple_lb * bs_u64;
+        let payload = vec![0x77_u8; bs];
+
+        let blocks_before = fs.read_inode(&cx, ino).expect("inode").blocks;
+        fs.write(&cx, ino, triple_off, &payload)
+            .expect("sparse write into triple-indirect region");
+
+        let after_grow = fs.read_inode(&cx, ino).expect("inode after grow");
+        assert_eq!(after_grow.size, triple_off + bs_u64, "size extends to triple block");
+        // i_block[14] (triple root) is at offset 14*4 = 56.
+        let tind_root = u32::from_le_bytes(after_grow.extent_bytes[56..60].try_into().unwrap());
+        assert_ne!(tind_root, 0, "triple-indirect root allocated");
+        // Allocated exactly 4 blocks: data + triple root + double-indirect + single-indirect.
+        assert_eq!(
+            after_grow.blocks - blocks_before,
+            4 * spb,
+            "triple-indirect write allocates data + 3 metadata levels"
+        );
+
+        // Read back: block 0 intact, the gap is a zero hole, the triple block holds data.
+        assert_eq!(fs.read(&cx, ino, 0, bs as u32).expect("b0"), b0, "block 0 intact");
+        assert_eq!(
+            fs.read(&cx, ino, triple_off, bs as u32).expect("triple"),
+            payload,
+            "triple-indirect block holds the written data"
+        );
+
+        // Truncate back to one block: must free the data block AND all three
+        // metadata levels, clearing i_block[14].
+        let attrs = SetAttrRequest {
+            size: Some(bs_u64),
+            ..SetAttrRequest::default()
+        };
+        fs.setattr(&cx, ino, &attrs).expect("truncate");
+        let after_trunc = fs.read_inode(&cx, ino).expect("inode after trunc");
+        assert_eq!(after_trunc.size, bs_u64, "size shrunk to one block");
+        let tind_root_after = u32::from_le_bytes(after_trunc.extent_bytes[56..60].try_into().unwrap());
+        assert_eq!(tind_root_after, 0, "triple-indirect root pointer cleared");
+        assert_eq!(
+            blocks_before, after_trunc.blocks,
+            "truncate frees all 4 triple-indirect-path blocks (i_blocks restored)"
+        );
+        // Block 0 still readable after the deep free.
+        assert_eq!(fs.read(&cx, ino, 0, bs as u32).expect("b0 after"), b0, "block 0 survives");
+    }
+
     #[test]
     fn ext4_indirect_read_coalesces_contiguous_blocks_bd_bov9c() {
         const BS: usize = 4096;
