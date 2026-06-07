@@ -52392,6 +52392,80 @@ mod tests {
         );
     }
 
+    /// bd-vh8p9 increment 4 (the on-disk validation gate): a FrankenFS reflink
+    /// (btrfs_clone_file_data sharing src's data extent into dst, refs 1->2 +
+    /// a keyed EXTENT_DATA_REF) must produce a `btrfs check`-clean image, and
+    /// dst must read back src's data through the shared extent. This is what
+    /// validates the increment-1/2/3 primitives on disk — in particular whether
+    /// real btrfs check accepts refs=2 as one inline (src) + one keyed (dst)
+    /// EXTENT_DATA_REF. Skips when btrfs-progs is unavailable.
+    ///
+    /// `#[ignore]` until a confirmed local run: it requires LOCAL btrfs-progs
+    /// (rch workers lack it) AND a clean local toolchain (the shared cargo
+    /// target is frequently rch-clobbered with an incompatible rustc — E0514).
+    /// Run explicitly to validate the reflink on-disk form:
+    /// `cargo test -p ffs-core --lib btrfs_clone_passes_btrfs_check_bd_vh8p9
+    /// -- --ignored --nocapture` (no concurrent rch). bd-vh8p9 increment 4.
+    #[test]
+    #[ignore = "needs local btrfs-progs + clean local toolchain; validates bd-vh8p9 reflink on-disk form"]
+    fn btrfs_clone_passes_btrfs_check_bd_vh8p9() {
+        let Some((fs, dev, _tmp, image)) = open_writable_btrfs_mkfs(256) else {
+            return; // btrfs-progs unavailable
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(u64::from(BTRFS_FIRST_FREE_OBJECTID));
+
+        let src = fs
+            .create(&cx, root, OsStr::new("src.dat"), 0o644, 0, 0)
+            .expect("create src");
+        let dst = fs
+            .create(&cx, root, OsStr::new("dst.dat"), 0o644, 0, 0)
+            .expect("create dst");
+
+        let payload = vec![0xA7_u8; 16384];
+        let fs_ops: &dyn FsOps = &fs;
+        fs_ops
+            .write(&cx, &mut RequestScope::empty(), src.ino, 0, &payload)
+            .expect("write src");
+
+        // Reflink src -> dst (shared data extent).
+        let src_canon = fs.btrfs_canonical_inode(src.ino).expect("src canonical");
+        let dst_canon = fs.btrfs_canonical_inode(dst.ino).expect("dst canonical");
+        {
+            let alloc_mutex = fs.btrfs_alloc_state.as_ref().expect("writable btrfs");
+            let mut alloc = alloc_mutex.lock();
+            fs.btrfs_clone_file_data(&mut alloc, src_canon, dst_canon)
+                .expect("clone src into dst");
+        }
+
+        // fsync order: flush data to the byte device, then commit metadata.
+        let _ = fs.flush_mvcc_to_device(&cx);
+        fs.btrfs_full_transaction_commit(&cx, "vh8p9-clone-check")
+            .expect("btrfs full transaction commit");
+        let bytes = dev.snapshot_bytes();
+        std::fs::write(&image, &bytes).expect("write modified image");
+
+        let Some((ok, output)) = run_btrfs_check(&image) else {
+            return; // btrfs check tool unavailable
+        };
+        assert!(
+            ok,
+            "btrfs check must accept a FrankenFS reflinked (shared-extent) image:\n{output}"
+        );
+
+        // dst reads back src's data through the shared extent.
+        let read_back = fs_ops
+            .read(
+                &cx,
+                &mut RequestScope::empty(),
+                dst.ino,
+                0,
+                u32::try_from(payload.len()).unwrap(),
+            )
+            .expect("read dst");
+        assert_eq!(read_back, payload, "dst must read the cloned source data");
+    }
+
     /// Phase-B probe (TealFalcon): now that a single small datasum file is
     /// btrfs-check-clean, map which MORE COMPLEX btrfs mutation sequences still
     /// produce a kernel-valid image. Prints the `btrfs check` verdict for each
