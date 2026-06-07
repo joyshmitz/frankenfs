@@ -19,6 +19,8 @@ use ffs_types::{
 use nix::sys::uio::preadv;
 use parking_lot::{Condvar, Mutex, RwLock};
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "s3fifo")]
+use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs::File;
 use std::fs::OpenOptions;
@@ -1909,6 +1911,23 @@ impl DirtyTracker {
 const S3_FAST_HIT_MAX_SLOTS: usize = 4096;
 
 #[cfg(feature = "s3fifo")]
+const S3_THREAD_FAST_HIT_SLOTS: usize = 256;
+
+#[cfg(feature = "s3fifo")]
+static S3_FAST_CACHE_IDS: AtomicU64 = AtomicU64::new(1);
+
+#[cfg(feature = "s3fifo")]
+thread_local! {
+    static S3_THREAD_FAST_RESIDENTS: RefCell<S3ThreadFastResidentSlab> =
+        RefCell::new(S3ThreadFastResidentSlab::new());
+}
+
+#[cfg(feature = "s3fifo")]
+fn next_s3_fast_cache_id() -> u64 {
+    S3_FAST_CACHE_IDS.fetch_add(1, Ordering::Relaxed)
+}
+
+#[cfg(feature = "s3fifo")]
 #[derive(Debug)]
 struct S3AccessHandle {
     count: AtomicU8,
@@ -1965,6 +1984,63 @@ impl S3AccessHandle {
 struct S3FastResident {
     data: BlockBuf,
     access: Arc<S3AccessHandle>,
+}
+
+#[cfg(feature = "s3fifo")]
+#[derive(Debug, Clone)]
+struct S3ThreadFastResident {
+    cache_id: u64,
+    block: BlockNumber,
+    epoch: u64,
+    data: BlockBuf,
+    access: Arc<S3AccessHandle>,
+}
+
+#[cfg(feature = "s3fifo")]
+#[derive(Debug)]
+struct S3ThreadFastResidentSlab {
+    slots: Vec<Option<S3ThreadFastResident>>,
+}
+
+#[cfg(feature = "s3fifo")]
+impl S3ThreadFastResidentSlab {
+    fn new() -> Self {
+        Self {
+            slots: vec![None; S3_THREAD_FAST_HIT_SLOTS],
+        }
+    }
+
+    fn slot_index(block: BlockNumber) -> usize {
+        let mask = u64::try_from(S3_THREAD_FAST_HIT_SLOTS - 1).unwrap_or(u64::MAX);
+        usize::try_from(block.0 & mask).unwrap_or(0)
+    }
+
+    fn get_valid(
+        &self,
+        cache_id: u64,
+        block: BlockNumber,
+        epoch: u64,
+    ) -> Option<S3ThreadFastResident> {
+        let slot = Self::slot_index(block);
+        self.slots[slot].as_ref().and_then(|entry| {
+            (entry.cache_id == cache_id
+                && entry.block == block
+                && entry.epoch == epoch
+                && entry.access.is_valid())
+            .then(|| entry.clone())
+        })
+    }
+
+    fn insert(&mut self, cache_id: u64, block: BlockNumber, epoch: u64, resident: S3FastResident) {
+        let slot = Self::slot_index(block);
+        self.slots[slot] = Some(S3ThreadFastResident {
+            cache_id,
+            block,
+            epoch,
+            data: resident.data,
+            access: resident.access,
+        });
+    }
 }
 
 #[cfg(feature = "s3fifo")]
@@ -3625,6 +3701,8 @@ pub struct ArcCache<D: BlockDevice> {
     #[cfg(feature = "s3fifo")]
     s3_fast_hits_enabled: bool,
     #[cfg(feature = "s3fifo")]
+    s3_fast_cache_id: u64,
+    #[cfg(feature = "s3fifo")]
     s3_fast_reset_pending: AtomicBool,
     #[cfg(feature = "s3fifo")]
     s3_fast_mutation_active: AtomicUsize,
@@ -4062,6 +4140,8 @@ impl<D: BlockDevice> ArcCache<D> {
             #[cfg(feature = "s3fifo")]
             s3_fast_hits_enabled,
             #[cfg(feature = "s3fifo")]
+            s3_fast_cache_id: next_s3_fast_cache_id(),
+            #[cfg(feature = "s3fifo")]
             s3_fast_reset_pending: AtomicBool::new(false),
             #[cfg(feature = "s3fifo")]
             s3_fast_mutation_active: AtomicUsize::new(0),
@@ -4129,6 +4209,9 @@ impl<D: BlockDevice> ArcCache<D> {
         if self.s3_fast_mutation_active.load(Ordering::Acquire) != 0 {
             return None;
         }
+        if let Some(buf) = self.s3_thread_fast_hit(block, epoch) {
+            return Some(buf);
+        }
         let entry = self.s3_fast_residents.get_valid(block)?;
         if self.s3_fast_mutation_active.load(Ordering::Acquire) != 0
             || self.s3_fast_mutation_epoch.load(Ordering::Acquire) != epoch
@@ -4139,7 +4222,37 @@ impl<D: BlockDevice> ArcCache<D> {
         entry.access.increment_count();
         self.s3_fast_hits.increment(block);
         self.s3_fast_reset_pending.store(true, Ordering::Release);
+        let data = entry.data.clone_ref();
+        self.store_s3_thread_fast_hit(block, epoch, entry);
+        Some(data)
+    }
+
+    #[cfg(feature = "s3fifo")]
+    fn s3_thread_fast_hit(&self, block: BlockNumber, epoch: u64) -> Option<BlockBuf> {
+        let entry = S3_THREAD_FAST_RESIDENTS.with(|residents| {
+            residents
+                .borrow()
+                .get_valid(self.s3_fast_cache_id, block, epoch)
+        })?;
+        if self.s3_fast_mutation_active.load(Ordering::Acquire) != 0
+            || self.s3_fast_mutation_epoch.load(Ordering::Acquire) != epoch
+            || !entry.access.is_valid()
+        {
+            return None;
+        }
+        entry.access.increment_count();
+        self.s3_fast_hits.increment(block);
+        self.s3_fast_reset_pending.store(true, Ordering::Release);
         Some(entry.data.clone_ref())
+    }
+
+    #[cfg(feature = "s3fifo")]
+    fn store_s3_thread_fast_hit(&self, block: BlockNumber, epoch: u64, resident: S3FastResident) {
+        S3_THREAD_FAST_RESIDENTS.with(|residents| {
+            residents
+                .borrow_mut()
+                .insert(self.s3_fast_cache_id, block, epoch, resident);
+        });
     }
 
     #[cfg(feature = "s3fifo")]
