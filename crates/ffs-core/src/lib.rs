@@ -943,6 +943,14 @@ fn readdir_snapshot_serve(
         .then(|| slice_readdir_snapshot(&snap.entries, offset))
 }
 
+/// Clear the readdir snapshot slot. Called on every directory mutation so a later
+/// readdir never serves a stale listing — the authoritative invalidation, since
+/// inode-timestamp self-validation alone can miss changes (e.g. a rename does not
+/// reliably bump the source directory's mtime).
+fn clear_readdir_snapshot(slot: &Mutex<Option<ReaddirSnapshot>>) {
+    *slot.lock() = None;
+}
+
 /// Replace the snapshot slot with a freshly-built full listing.
 fn readdir_snapshot_store(
     slot: &Mutex<Option<ReaddirSnapshot>>,
@@ -22913,6 +22921,7 @@ impl FsOps for OpenFs {
         uid: u32,
         gid: u32,
     ) -> ffs_error::Result<InodeAttr> {
+        clear_readdir_snapshot(&self.readdir_snapshot);
         match &self.flavor {
             FsFlavor::Ext4(_) => self
                 .ext4_create(
@@ -22943,6 +22952,7 @@ impl FsOps for OpenFs {
         uid: u32,
         gid: u32,
     ) -> ffs_error::Result<InodeAttr> {
+        clear_readdir_snapshot(&self.readdir_snapshot);
         match &self.flavor {
             FsFlavor::Ext4(_) => self
                 .ext4_mknod(
@@ -22973,6 +22983,7 @@ impl FsOps for OpenFs {
         uid: u32,
         gid: u32,
     ) -> ffs_error::Result<InodeAttr> {
+        clear_readdir_snapshot(&self.readdir_snapshot);
         match &self.flavor {
             FsFlavor::Ext4(_) => self
                 .ext4_mkdir(
@@ -22999,6 +23010,7 @@ impl FsOps for OpenFs {
         parent: InodeNumber,
         name: &OsStr,
     ) -> ffs_error::Result<()> {
+        clear_readdir_snapshot(&self.readdir_snapshot);
         match &self.flavor {
             FsFlavor::Ext4(_) => self.ext4_unlink_impl(
                 cx,
@@ -23021,6 +23033,7 @@ impl FsOps for OpenFs {
         parent: InodeNumber,
         name: &OsStr,
     ) -> ffs_error::Result<()> {
+        clear_readdir_snapshot(&self.readdir_snapshot);
         match &self.flavor {
             FsFlavor::Ext4(_) => self.ext4_unlink_impl(
                 cx,
@@ -23045,6 +23058,7 @@ impl FsOps for OpenFs {
         new_parent: InodeNumber,
         new_name: &OsStr,
     ) -> ffs_error::Result<()> {
+        clear_readdir_snapshot(&self.readdir_snapshot);
         match &self.flavor {
             FsFlavor::Ext4(_) => self.ext4_rename(
                 cx,
@@ -23123,6 +23137,7 @@ impl FsOps for OpenFs {
         }
 
         if flags & RENAME_EXCHANGE != 0 {
+            clear_readdir_snapshot(&self.readdir_snapshot);
             return self.ext4_rename2_exchange(cx, scope, parent, name, new_parent, new_name);
         }
 
@@ -23161,6 +23176,7 @@ impl FsOps for OpenFs {
         new_parent: InodeNumber,
         new_name: &OsStr,
     ) -> ffs_error::Result<InodeAttr> {
+        clear_readdir_snapshot(&self.readdir_snapshot);
         match &self.flavor {
             FsFlavor::Ext4(_) => self
                 .ext4_link(
@@ -23200,6 +23216,7 @@ impl FsOps for OpenFs {
                 "symlink target must not contain NUL".into(),
             ));
         }
+        clear_readdir_snapshot(&self.readdir_snapshot);
         match &self.flavor {
             FsFlavor::Ext4(_) => self
                 .ext4_symlink(
@@ -38711,6 +38728,45 @@ mod tests {
         assert!(
             fs.rmdir(&cx, root, OsStr::new("inlinedir")).is_err(),
             "rmdir of a (non-empty) inline dir must fail, not silently drop it"
+        );
+    }
+
+    /// The readdir snapshot must never serve a stale listing after a rename moves
+    /// an entry OUT of the directory — even if the rename does not bump the source
+    /// directory's timestamps (which the snapshot's self-validation keys on).
+    #[test]
+    fn readdir_snapshot_reflects_rename_out_of_source_dir() {
+        let Some((fs, _tmp)) = open_writable_ext4_mkfs(16) else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let a = fs.mkdir(&cx, root, OsStr::new("A"), 0o755, 0, 0).unwrap().ino;
+        let b = fs.mkdir(&cx, root, OsStr::new("B"), 0o755, 0, 0).unwrap().ino;
+        fs.create(&cx, a, OsStr::new("x.txt"), 0o644, 0, 0).unwrap();
+
+        // Populate A's readdir snapshot.
+        let before = fs.readdir(&cx, a, 0).unwrap();
+        assert!(
+            before.iter().any(|e| e.name == b"x.txt"),
+            "x.txt must be listed before the rename"
+        );
+
+        // Move x.txt out of A into B.
+        fs.rename(&cx, a, OsStr::new("x.txt"), b, OsStr::new("x.txt"))
+            .unwrap();
+
+        // A must no longer list x.txt (no stale snapshot).
+        let after = fs.readdir(&cx, a, 0).unwrap();
+        assert!(
+            !after.iter().any(|e| e.name == b"x.txt"),
+            "readdir of the source dir must not show an entry renamed out of it"
+        );
+        // And B must now list it.
+        let blist = fs.readdir(&cx, b, 0).unwrap();
+        assert!(
+            blist.iter().any(|e| e.name == b"x.txt"),
+            "renamed entry must appear in the destination dir"
         );
     }
 
