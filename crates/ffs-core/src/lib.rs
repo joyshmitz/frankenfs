@@ -29535,6 +29535,77 @@ mod tests {
         );
     }
 
+    /// Capstone (W17-24): the FULL indirect-file lifecycle leaks ZERO blocks.
+    /// create -> (restamp indirect) -> grow across the double-indirect boundary
+    /// -> truncate back -> delete must leave the free-block count EXACTLY at the
+    /// pre-creation baseline (and bitmap == group-descriptor throughout). Any
+    /// reintroduced leak in write/grow/truncate/delete fails this loudly.
+    #[test]
+    fn ext4_indirect_full_lifecycle_leaks_no_blocks_bd_laay3() {
+        let Some((fs, _tmp)) = open_writable_ext4_mkfs(16) else {
+            return; // mkfs.ext4 unavailable
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let bs = fs.block_size() as usize;
+        let bs_u64 = bs as u64;
+        let ppb = bs_u64 / 4;
+
+        // Baseline free space BEFORE the file exists.
+        let baseline = fs.free_space_summary(&cx).expect("baseline");
+
+        // create + seed block 0, then re-stamp as a legacy indirect file.
+        let ino = fs
+            .create(&cx, root, OsStr::new("life.bin"), 0o644, 0, 0)
+            .expect("create")
+            .ino;
+        fs.write(&cx, ino, 0, &vec![0x01_u8; bs]).expect("seed");
+        let seeded = fs.read_inode(&cx, ino).expect("inode");
+        let phys0 = fs
+            .collect_extents(&cx, &seeded)
+            .expect("extents")
+            .iter()
+            .find(|e| e.logical_block == 0)
+            .map(|e| e.physical_start)
+            .expect("block 0 mapped");
+        let mut indirect = seeded.clone();
+        indirect.flags &= !ffs_types::EXT4_EXTENTS_FL;
+        let mut iblock = vec![0_u8; 15 * 4];
+        iblock[0..4].copy_from_slice(&u32::try_from(phys0).unwrap().to_le_bytes());
+        indirect.extent_bytes = iblock;
+        indirect.size = bs_u64;
+        fs.persist_ext4_inode_for_testing(&cx, ino, &indirect)
+            .expect("persist indirect");
+
+        // Grow across the double-indirect boundary (allocates data + double-root +
+        // a level-1 indirect block), and a single-indirect block too.
+        fs.write(&cx, ino, 12 * bs_u64, &vec![0x0C_u8; bs])
+            .expect("grow single-indirect");
+        fs.write(&cx, ino, (12 + ppb) * bs_u64, &vec![0x0D_u8; bs])
+            .expect("grow double-indirect");
+
+        // Truncate back to a single block (frees most of the chain).
+        let attrs = SetAttrRequest {
+            size: Some(bs_u64),
+            ..SetAttrRequest::default()
+        };
+        fs.setattr(&cx, ino, &attrs).expect("truncate");
+
+        // Delete the file.
+        fs.unlink(&cx, root, OsStr::new("life.bin")).expect("remove");
+
+        // Every block the file ever held must be back: zero net leak.
+        let end = fs.free_space_summary(&cx).expect("final");
+        assert_eq!(
+            end.free_blocks_total, baseline.free_blocks_total,
+            "full indirect lifecycle must leak zero blocks (bitmap)"
+        );
+        assert_eq!(
+            end.gd_free_blocks_total, baseline.gd_free_blocks_total,
+            "full indirect lifecycle must leak zero blocks (group descriptors)"
+        );
+    }
+
     #[test]
     fn ext4_indirect_read_coalesces_contiguous_blocks_bd_bov9c() {
         const BS: usize = 4096;
