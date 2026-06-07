@@ -20819,18 +20819,21 @@ impl OpenFs {
             // delete fails cleanly instead of corrupting until refcount-aware
             // free lands. FrankenFS's own extents are refs==1, so this never
             // triggers on FrankenFS-created files.
-            if let Some((disk_bytenr, _)) = extent_to_free {
-                let refs = alloc
+            if let Some((disk_bytenr, disk_num_bytes)) = extent_to_free {
+                // EXTENT_ITEM.refs is the authoritative refcount (inline + keyed
+                // backrefs). > 1 => shared (reflink/snapshot/CoW).
+                if let Some(refs) = alloc
                     .extent_alloc
-                    .get_extent_data_refs(disk_bytenr)
-                    .map_err(|e| btrfs_mutation_to_ffs(&e))?;
-                let total: u64 = refs.iter().map(|r| u64::from(r.count)).sum();
-                if total > 1 {
-                    return Err(FfsError::UnsupportedFeature(format!(
-                        "cannot delete inode {objectid}: data extent {disk_bytenr} is shared by \
-                         {total} references (reflink/snapshot); refcount-aware extent free is not \
-                         yet implemented (bd-xkvcm)"
-                    )));
+                    .extent_item_refs(disk_bytenr, disk_num_bytes)
+                    .map_err(|e| btrfs_mutation_to_ffs(&e))?
+                {
+                    if refs > 1 {
+                        return Err(FfsError::UnsupportedFeature(format!(
+                            "cannot delete inode {objectid}: data extent {disk_bytenr} is shared \
+                             ({refs} references: reflink/snapshot); refcount-aware extent free is \
+                             not yet implemented (bd-xkvcm)"
+                        )));
+                    }
                 }
             }
             plan.push((key, extent_to_free));
@@ -58326,45 +58329,55 @@ mod tests {
             };
             let items = alloc.fs_tree.range(&start, &end).unwrap();
             let (_, data) = items.into_iter().next().expect("file has an extent");
-            let disk_bytenr = match parse_extent_data(&data).unwrap() {
-                BtrfsExtentData::Regular { disk_bytenr, .. } => disk_bytenr,
+            let (disk_bytenr, disk_num_bytes) = match parse_extent_data(&data).unwrap() {
+                BtrfsExtentData::Regular {
+                    disk_bytenr,
+                    disk_num_bytes,
+                    ..
+                } => (disk_bytenr, disk_num_bytes),
                 other => panic!("expected a regular extent, got {other:?}"),
             };
             assert!(disk_bytenr > 0, "regular extent has an on-disk bytenr");
+            assert_eq!(
+                alloc
+                    .extent_alloc
+                    .extent_item_refs(disk_bytenr, disk_num_bytes)
+                    .unwrap(),
+                Some(1),
+                "a FrankenFS-written extent starts at refcount 1"
+            );
 
-            let before: u64 = alloc
-                .extent_alloc
-                .get_extent_data_refs(disk_bytenr)
-                .unwrap()
-                .iter()
-                .map(|r| u64::from(r.count))
-                .sum();
-            assert_eq!(before, 1, "a FrankenFS-written extent starts at refcount 1");
-
-            let extra = ffs_btrfs::BtrfsExtentDataRef {
-                root: BTRFS_FS_TREE_OBJECTID,
-                objectid: 9999,
-                offset: 0,
-                count: 1,
-            };
-            let extra_key = BtrfsKey {
+            // Bump the EXTENT_ITEM refcount to 2 (simulating a reflink/snapshot
+            // sharing this extent with another file).
+            let ei_key = BtrfsKey {
                 objectid: disk_bytenr,
-                item_type: ffs_btrfs::BTRFS_ITEM_EXTENT_DATA_REF,
-                offset: 0xDEAD_BEEF,
+                item_type: ffs_btrfs::BTRFS_ITEM_EXTENT_ITEM,
+                offset: disk_num_bytes,
             };
+            let mut ei_data = alloc
+                .extent_alloc
+                .extent_tree_mut()
+                .range(&ei_key, &ei_key)
+                .unwrap()
+                .into_iter()
+                .next()
+                .expect("EXTENT_ITEM present")
+                .1;
+            ei_data[0..8].copy_from_slice(&2u64.to_le_bytes());
+            alloc.extent_alloc.extent_tree_mut().delete(&ei_key).unwrap();
             alloc
                 .extent_alloc
                 .extent_tree_mut()
-                .insert(extra_key, &extra.to_bytes())
+                .insert(ei_key, &ei_data)
                 .unwrap();
-            let after: u64 = alloc
-                .extent_alloc
-                .get_extent_data_refs(disk_bytenr)
-                .unwrap()
-                .iter()
-                .map(|r| u64::from(r.count))
-                .sum();
-            assert_eq!(after, 2, "extent is now shared (refcount 2)");
+            assert_eq!(
+                alloc
+                    .extent_alloc
+                    .extent_item_refs(disk_bytenr, disk_num_bytes)
+                    .unwrap(),
+                Some(2),
+                "extent is now shared (refcount 2)"
+            );
         }
 
         let err = ops

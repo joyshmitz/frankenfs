@@ -5274,6 +5274,32 @@ impl BtrfsExtentAllocator {
     ///
     /// Returns a list of (root, objectid, offset) tuples representing all
     /// files that reference the extent at `bytenr`. Used by `BTRFS_IOC_LOGICAL_INO`.
+    /// Read the reference count from a data extent's `EXTENT_ITEM` (the first
+    /// `u64` of its payload). Returns `None` if no such item is present. This is
+    /// the authoritative shared-extent indicator: an extent with `refs > 1` is
+    /// shared (reflink / snapshot / CoW) and counts inline + keyed backrefs,
+    /// unlike [`Self::get_extent_data_refs`] which sees only separate
+    /// `EXTENT_DATA_REF` items (a refcount-1 extent keeps its single ref inline).
+    pub fn extent_item_refs(
+        &self,
+        bytenr: u64,
+        num_bytes: u64,
+    ) -> Result<Option<u64>, BtrfsMutationError> {
+        let key = BtrfsKey {
+            objectid: bytenr,
+            item_type: BTRFS_ITEM_EXTENT_ITEM,
+            offset: num_bytes,
+        };
+        let items = self.extent_tree.range(&key, &key)?;
+        Ok(items.into_iter().next().and_then(|(_, data)| {
+            if data.len() >= 8 {
+                Some(u64::from_le_bytes(data[0..8].try_into().ok()?))
+            } else {
+                None
+            }
+        }))
+    }
+
     pub fn get_extent_data_refs(
         &self,
         bytenr: u64,
