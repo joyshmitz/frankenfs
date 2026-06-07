@@ -3625,6 +3625,8 @@ pub struct ArcCache<D: BlockDevice> {
     #[cfg(feature = "s3fifo")]
     s3_fast_hits_enabled: bool,
     #[cfg(feature = "s3fifo")]
+    s3_fast_reset_pending: AtomicBool,
+    #[cfg(feature = "s3fifo")]
     s3_fast_mutation_active: AtomicUsize,
     #[cfg(feature = "s3fifo")]
     s3_fast_mutation_epoch: AtomicU64,
@@ -4060,6 +4062,8 @@ impl<D: BlockDevice> ArcCache<D> {
             #[cfg(feature = "s3fifo")]
             s3_fast_hits_enabled,
             #[cfg(feature = "s3fifo")]
+            s3_fast_reset_pending: AtomicBool::new(false),
+            #[cfg(feature = "s3fifo")]
             s3_fast_mutation_active: AtomicUsize::new(0),
             #[cfg(feature = "s3fifo")]
             s3_fast_mutation_epoch: AtomicU64::new(0),
@@ -4134,6 +4138,7 @@ impl<D: BlockDevice> ArcCache<D> {
         }
         entry.access.increment_count();
         self.s3_fast_hits.increment(block);
+        self.s3_fast_reset_pending.store(true, Ordering::Release);
         Some(entry.data.clone_ref())
     }
 
@@ -4149,6 +4154,9 @@ impl<D: BlockDevice> ArcCache<D> {
 
     #[cfg(feature = "s3fifo")]
     fn apply_s3_fast_hit_scan_reset(&self, state: &mut ArcState) {
+        if !self.s3_fast_reset_pending.swap(false, Ordering::AcqRel) {
+            return;
+        }
         let fast_hits = self.s3_fast_hits.total(Ordering::Acquire);
         if state.applied_s3_fast_hits != fast_hits {
             state.applied_s3_fast_hits = fast_hits;
