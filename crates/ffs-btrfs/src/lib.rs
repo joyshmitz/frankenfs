@@ -6495,8 +6495,54 @@ where
         inodes.entry(entry.key.objectid).or_default().push(entry);
     }
 
-    // Process each inode
+    // Emission order (bd-7ucz7): the receiver creates by PATH, so a parent
+    // directory must already exist when its child is created. Emit DIRECTORIES
+    // first in topological order (parent dirs before child dirs, by depth in the
+    // inode_parents chain), then all non-directory inodes (whose parents are now
+    // all present). Plain objectid order is parent-before-child for simple trees
+    // but a rename can place a child under a higher-objectid dir, which would
+    // emit the child before its parent and break the receive.
+    let mut dir_inos: Vec<u64> = Vec::new();
+    let mut other_inos: Vec<u64> = Vec::new();
     for (&ino, entries) in &inodes {
+        if ino < BTRFS_FIRST_FREE_OBJECTID {
+            continue;
+        }
+        let Some(inode) = entries
+            .iter()
+            .find(|e| e.key.item_type == BTRFS_ITEM_INODE_ITEM)
+            .and_then(|e| parse_inode_item(&e.data).ok())
+        else {
+            continue;
+        };
+        #[expect(clippy::cast_possible_truncation)]
+        if (inode.mode as u16) & ffs_types::S_IFMT == ffs_types::S_IFDIR {
+            dir_inos.push(ino);
+        } else {
+            other_inos.push(ino);
+        }
+    }
+    let dir_depth = |start: u64| -> usize {
+        let mut depth = 0usize;
+        let mut cur = start;
+        while let Some((parent, _)) = inode_parents.get(&cur) {
+            if *parent == cur || *parent == BTRFS_FIRST_FREE_OBJECTID {
+                break;
+            }
+            cur = *parent;
+            depth += 1;
+            if depth > inodes.len() {
+                break; // defensive: malformed cyclic parent chain
+            }
+        }
+        depth
+    };
+    dir_inos.sort_by_key(|&ino| (dir_depth(ino), ino));
+    let emit_order: Vec<u64> = dir_inos.into_iter().chain(other_inos).collect();
+
+    // Process each inode
+    for &ino in &emit_order {
+        let entries = &inodes[&ino];
         // Skip special inodes (< BTRFS_FIRST_FREE_OBJECTID)
         if ino < BTRFS_FIRST_FREE_OBJECTID {
             continue;
@@ -17811,6 +17857,84 @@ mod tests {
         assert_eq!(
             reassembled, decompressed,
             "send stream of a compressed extent must carry the full DECOMPRESSED data"
+        );
+    }
+
+    /// bd-7ucz7: a child must never be emitted before its parent directory, even
+    /// when the child's objectid is LOWER than the parent dir's (e.g. a file
+    /// renamed under a later-created dir). The receiver creates by path, so the
+    /// parent mkdir must precede the child mkfile.
+    #[test]
+    fn generate_send_stream_emits_parent_dir_before_lower_objectid_child() {
+        const ATTR_PATH: u16 = SendAttr::Path as u16;
+
+        fn make_inode_item(mode: u32) -> Vec<u8> {
+            let mut buf = vec![0u8; 160];
+            buf[0..8].copy_from_slice(&1_u64.to_le_bytes());
+            buf[40..44].copy_from_slice(&1_u32.to_le_bytes());
+            buf[52..56].copy_from_slice(&mode.to_le_bytes());
+            buf
+        }
+        #[expect(clippy::cast_possible_truncation)]
+        fn make_inode_ref(index: u64, name: &[u8]) -> Vec<u8> {
+            let mut buf = Vec::new();
+            buf.extend_from_slice(&index.to_le_bytes());
+            buf.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            buf.extend_from_slice(name);
+            buf
+        }
+
+        // File f (objectid 257) lives under dir d (objectid 300, > 257) — as if f
+        // was renamed under a later-created directory. Objectid order would emit
+        // f before d.
+        let items = vec![
+            BtrfsLeafEntry {
+                key: BtrfsKey { objectid: 256, item_type: BTRFS_ITEM_INODE_ITEM, offset: 0 },
+                data: make_inode_item(0o40755),
+            },
+            BtrfsLeafEntry {
+                key: BtrfsKey { objectid: 257, item_type: BTRFS_ITEM_INODE_ITEM, offset: 0 },
+                data: make_inode_item(0o100_644),
+            },
+            BtrfsLeafEntry {
+                key: BtrfsKey { objectid: 257, item_type: BTRFS_ITEM_INODE_REF, offset: 300 },
+                data: make_inode_ref(2, b"f"),
+            },
+            BtrfsLeafEntry {
+                key: BtrfsKey { objectid: 300, item_type: BTRFS_ITEM_INODE_ITEM, offset: 0 },
+                data: make_inode_item(0o40755),
+            },
+            BtrfsLeafEntry {
+                key: BtrfsKey { objectid: 300, item_type: BTRFS_ITEM_INODE_REF, offset: 256 },
+                data: make_inode_ref(2, b"d"),
+            },
+        ];
+
+        let uuid = [0u8; 16];
+        let stream = generate_send_stream(&items, b"sv", &uuid, 1, |_b, _l, _r, _c| {
+            Ok(Vec::new())
+        })
+        .expect("generate send stream");
+        let parsed = parse_send_stream(&stream).expect("parse stream");
+
+        let path_of = |c: &SendStreamCommand| -> Option<Vec<u8>> {
+            c.attrs
+                .iter()
+                .find(|(t, _)| *t == ATTR_PATH)
+                .map(|(_, d)| d.clone())
+        };
+        let mkdir_pos = parsed.commands.iter().position(|c| {
+            c.cmd == SendCommand::Mkdir && path_of(c).as_deref() == Some(b"sv/d".as_ref())
+        });
+        let mkfile_pos = parsed.commands.iter().position(|c| {
+            c.cmd == SendCommand::Mkfile && path_of(c).as_deref() == Some(b"sv/d/f".as_ref())
+        });
+
+        let mkdir_pos = mkdir_pos.expect("mkdir sv/d emitted");
+        let mkfile_pos = mkfile_pos.expect("mkfile sv/d/f emitted");
+        assert!(
+            mkdir_pos < mkfile_pos,
+            "parent dir mkdir (pos {mkdir_pos}) must precede child mkfile (pos {mkfile_pos})"
         );
     }
 
