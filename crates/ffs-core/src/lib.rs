@@ -87,6 +87,10 @@ use tracing::{debug, error, info, trace, warn};
 const LINUX_PATH_MAX: u64 = 4096;
 const LINUX_SYMLINK_TARGET_MAX: u64 = LINUX_PATH_MAX - 1;
 const BTRFS_COMPRESSED_EXTENT_BYTE_LIMIT: usize = 128 * 1024 * 1024;
+/// btrfs LZO segment framing aligns segment headers to the filesystem sector
+/// size (kernel `fs/btrfs/lzo.c`). FrankenFS assumes the default 4 KiB sector
+/// (the same assumption already baked into the per-segment output cap).
+const BTRFS_LZO_SECTOR_SIZE: usize = 4096;
 const E2COMPR_DECOMPRESSED_BYTE_LIMIT: usize = 128 * 1024 * 1024;
 const FSCRYPT_POLICY_V1_VERSION: u8 = 0;
 const FSCRYPT_POLICY_V1_SIZE: usize = 12;
@@ -6455,7 +6459,11 @@ impl OpenFs {
                     })?;
                 Self::validate_btrfs_decompressed_len("zlib", out, uncompressed_size)
             }
-            2 => Self::btrfs_decompress_lzo(compressed, uncompressed_size),
+            2 => Self::btrfs_decompress_lzo(
+                compressed,
+                uncompressed_size,
+                BTRFS_LZO_SECTOR_SIZE,
+            ),
             3 => {
                 // ZSTD
                 let out = zstd::decode_all(compressed).map_err(|e| FfsError::Corruption {
@@ -6473,10 +6481,21 @@ impl OpenFs {
     fn btrfs_decompress_lzo(
         compressed: &[u8],
         uncompressed_size: usize,
+        sector_size: usize,
     ) -> Result<Vec<u8>, FfsError> {
-        // LZO with btrfs segment framing:
+        // LZO with btrfs segment framing (kernel fs/btrfs/lzo.c):
         // [total_len: u32 LE] then segments of [seg_len: u32 LE][LZO1X data].
-        if compressed.len() < 4 {
+        // A segment header is NOT allowed to cross a sector boundary, so the
+        // writer pads with up to LZO_LEN-1 zeros at the end of a sector and the
+        // reader must skip that padding before reading the next header.
+        const LZO_LEN: usize = 4;
+        if sector_size < LZO_LEN {
+            return Err(FfsError::Corruption {
+                block: 0,
+                detail: "btrfs LZO: sector size too small".into(),
+            });
+        }
+        if compressed.len() < LZO_LEN {
             return Err(FfsError::Corruption {
                 block: 0,
                 detail: "btrfs LZO: data too short for header".into(),
@@ -6496,9 +6515,19 @@ impl OpenFs {
         }
 
         let mut out = Vec::with_capacity(uncompressed_size);
-        let mut pos = 4_usize;
+        let mut pos = LZO_LEN;
         while pos < total_len && out.len() < uncompressed_size {
-            if total_len - pos < 4 {
+            // A segment header may not straddle a sector boundary: if fewer than
+            // LZO_LEN bytes remain in the current sector, the writer padded them
+            // with zeros — skip to the next sector (kernel lzo_decompress_bio).
+            let sector_left = sector_size - (pos % sector_size);
+            if sector_left < LZO_LEN {
+                pos += sector_left;
+                if pos >= total_len {
+                    break;
+                }
+            }
+            if total_len - pos < LZO_LEN {
                 return Err(FfsError::Corruption {
                     block: 0,
                     detail: "btrfs LZO segment header truncated".into(),
@@ -6510,7 +6539,7 @@ impl OpenFs {
                 compressed[pos + 2],
                 compressed[pos + 3],
             ]) as usize;
-            pos += 4;
+            pos += LZO_LEN;
             let seg_end = pos
                 .checked_add(seg_len)
                 .ok_or_else(|| FfsError::Corruption {
@@ -6524,9 +6553,9 @@ impl OpenFs {
                 });
             }
 
-            // btrfs LZO segments decompress to at most one 4096-byte page.
+            // btrfs LZO segments decompress to at most one sector.
             let remaining = uncompressed_size - out.len();
-            let page_size = remaining.min(4096);
+            let page_size = remaining.min(sector_size);
             let decompressed =
                 lzokay_native::decompress_all(&compressed[pos..seg_end], Some(page_size)).map_err(
                     |_| FfsError::Corruption {
@@ -31893,25 +31922,25 @@ mod tests {
 
     fn build_fc_inode_update_transaction(ino: u32, tid: u32) -> Vec<u8> {
         let mut bytes = Vec::new();
-        bytes.extend(build_fc_tag(0x0A, &[0; 16]));
-        bytes.extend(build_fc_tag(0x07, &ino.to_le_bytes()));
+        bytes.extend(build_fc_tag(0x09, &[0; 16]));
+        bytes.extend(build_fc_tag(0x06, &ino.to_le_bytes()));
         let mut tail = [0_u8; 8];
         tail[..4].copy_from_slice(&tid.to_le_bytes());
-        bytes.extend(build_fc_tag(0x09, &tail));
+        bytes.extend(build_fc_tag(0x08, &tail));
         bytes
     }
 
     fn build_fc_create_transaction(parent_ino: u32, ino: u32, name: &[u8], tid: u32) -> Vec<u8> {
         let mut bytes = Vec::new();
-        bytes.extend(build_fc_tag(0x0A, &[0; 16]));
+        bytes.extend(build_fc_tag(0x09, &[0; 16]));
         let mut payload = Vec::with_capacity(8 + name.len());
         payload.extend_from_slice(&parent_ino.to_le_bytes());
         payload.extend_from_slice(&ino.to_le_bytes());
         payload.extend_from_slice(name);
-        bytes.extend(build_fc_tag(0x05, &payload));
+        bytes.extend(build_fc_tag(0x03, &payload));
         let mut tail = [0_u8; 8];
         tail[..4].copy_from_slice(&tid.to_le_bytes());
-        bytes.extend(build_fc_tag(0x09, &tail));
+        bytes.extend(build_fc_tag(0x08, &tail));
         bytes
     }
 
@@ -31922,7 +31951,7 @@ mod tests {
         }
 
         let remaining = block_len - used;
-        let pad_tag = build_fc_tag(0x08, &[]);
+        let pad_tag = build_fc_tag(0x07, &[]);
         debug_assert_eq!(pad_tag.len(), 4);
         for _ in 0..(remaining / pad_tag.len()) {
             bytes.extend_from_slice(&pad_tag);
@@ -32228,8 +32257,8 @@ mod tests {
         let mut image = build_ext4_image_with_fast_commit_evidence();
         let fc_block = 24 * 4096;
         let mut truncated = Vec::new();
-        truncated.extend(build_fc_tag(0x0A, &[0; 16]));
-        truncated.extend(build_fc_tag(0x07, &42_u32.to_le_bytes()));
+        truncated.extend(build_fc_tag(0x09, &[0; 16]));
+        truncated.extend(build_fc_tag(0x06, &42_u32.to_le_bytes()));
         image[fc_block..fc_block + 4096].fill(0);
         image[fc_block..fc_block + truncated.len()].copy_from_slice(&truncated);
         image
@@ -38172,6 +38201,79 @@ mod tests {
         let decoded = OpenFs::btrfs_decompress(&framed, 2, payload.len())
             .expect("exact LZO frame should decode");
         assert_eq!(decoded, payload);
+    }
+
+    /// btrfs LZO segment headers may not cross a sector boundary: the writer
+    /// pads up to LZO_LEN-1 zeros at a sector's end and the reader must skip
+    /// them (kernel fs/btrfs/lzo.c). The previous reader packed segments
+    /// contiguously and would misread the next header out of the padding —
+    /// silently corrupting any multi-segment `compress=lzo` extent. Build a
+    /// kernel-valid padded frame (small sector so the pad is exercised
+    /// deterministically) and prove it round-trips, and that a contiguous
+    /// (no-skip) read fails on the same frame.
+    #[test]
+    fn btrfs_decompress_lzo_skips_inter_segment_sector_padding() {
+        const SECTOR: usize = 64;
+        const LZO_LEN: usize = 4;
+
+        // Find a full-sector payload whose LZO segment ends within LZO_LEN-1
+        // bytes of the SECTOR boundary, so the writer must pad and the reader
+        // must skip. Varying the leading run length (and a tail tweak) sweeps
+        // the compressed length until the next header would straddle the
+        // boundary. Deterministic — no RNG.
+        let mut sector0: Option<Vec<u8>> = None;
+        'search: for run in 0..SECTOR {
+            for tweak in 0_u8..64 {
+                let mut s0 = vec![0xAB_u8; run];
+                for i in run..SECTOR {
+                    let b = (i as u8)
+                        .wrapping_mul(197)
+                        ^ (i as u8).wrapping_mul(i as u8)
+                        ^ tweak
+                        ^ 0x5b;
+                    s0.push(b);
+                }
+                let c0 = lzokay_native::compress(&s0).expect("compress lzo sector");
+                let after = 4 + LZO_LEN + c0.len(); // total hdr + seg hdr + data
+                let left = SECTOR - (after % SECTOR);
+                if (1..LZO_LEN).contains(&left) {
+                    sector0 = Some(s0);
+                    break 'search;
+                }
+            }
+        }
+        let sector0 = sector0.expect("must find a pad-forcing sector-0 payload");
+        let sector1: Vec<u8> = (0..40_u8).map(|i| i.wrapping_mul(37) ^ 0x91).collect();
+        let original: Vec<u8> = sector0.iter().chain(sector1.iter()).copied().collect();
+
+        // Build the kernel-valid frame with the forced inter-segment pad.
+        let c0 = lzokay_native::compress(&sector0).expect("compress sector0");
+        let c1 = lzokay_native::compress(&sector1).expect("compress sector1");
+        let mut frame = vec![0_u8; 4];
+        frame.extend_from_slice(&u32::try_from(c0.len()).unwrap().to_le_bytes());
+        frame.extend_from_slice(&c0);
+        let left = SECTOR - (frame.len() % SECTOR);
+        assert!(
+            (1..LZO_LEN).contains(&left),
+            "fixture must place the next header in a pad zone (left={left})"
+        );
+        frame.extend(std::iter::repeat_n(0_u8, left)); // sector padding
+        frame.extend_from_slice(&u32::try_from(c1.len()).unwrap().to_le_bytes());
+        frame.extend_from_slice(&c1);
+        let total = u32::try_from(frame.len()).expect("frame len fits u32");
+        frame[0..4].copy_from_slice(&total.to_le_bytes());
+
+        let decoded = OpenFs::btrfs_decompress_lzo(&frame, original.len(), SECTOR)
+            .expect("padded multi-segment LZO frame decodes");
+        assert_eq!(decoded, original, "padded LZO frame must round-trip");
+
+        // A contiguous reader (no sector boundary -> never skips padding)
+        // misreads the next header out of the padding zeros and must fail.
+        let no_skip = OpenFs::btrfs_decompress_lzo(&frame, original.len(), usize::MAX);
+        assert!(
+            no_skip.is_err(),
+            "a no-skip (contiguous) read must fail on a sector-padded frame"
+        );
     }
 
     #[test]
