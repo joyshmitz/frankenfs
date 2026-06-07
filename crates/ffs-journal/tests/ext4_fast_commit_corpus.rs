@@ -32,7 +32,7 @@ enum ExpectedOperation {
         ino: u32,
         logical_block: u32,
         len: u32,
-        physical_block: u32,
+        physical_block: u64,
     },
     Create {
         parent_ino: u32,
