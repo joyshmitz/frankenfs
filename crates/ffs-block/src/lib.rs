@@ -2020,14 +2020,14 @@ impl S3ThreadFastResidentSlab {
         cache_id: u64,
         block: BlockNumber,
         epoch: u64,
-    ) -> Option<S3ThreadFastResident> {
+    ) -> Option<(BlockBuf, Arc<S3AccessHandle>)> {
         let slot = Self::slot_index(block);
         self.slots[slot].as_ref().and_then(|entry| {
             (entry.cache_id == cache_id
                 && entry.block == block
                 && entry.epoch == epoch
                 && entry.access.is_valid())
-            .then(|| entry.clone())
+            .then(|| (entry.data.clone_ref(), Arc::clone(&entry.access)))
         })
     }
 
@@ -4229,21 +4229,21 @@ impl<D: BlockDevice> ArcCache<D> {
 
     #[cfg(feature = "s3fifo")]
     fn s3_thread_fast_hit(&self, block: BlockNumber, epoch: u64) -> Option<BlockBuf> {
-        let entry = S3_THREAD_FAST_RESIDENTS.with(|residents| {
+        let (data, access) = S3_THREAD_FAST_RESIDENTS.with(|residents| {
             residents
                 .borrow()
                 .get_valid(self.s3_fast_cache_id, block, epoch)
         })?;
         if self.s3_fast_mutation_active.load(Ordering::Acquire) != 0
             || self.s3_fast_mutation_epoch.load(Ordering::Acquire) != epoch
-            || !entry.access.is_valid()
+            || !access.is_valid()
         {
             return None;
         }
-        entry.access.increment_count();
+        access.increment_count();
         self.s3_fast_hits.increment(block);
         self.s3_fast_reset_pending.store(true, Ordering::Release);
-        Some(entry.data.clone_ref())
+        Some(data)
     }
 
     #[cfg(feature = "s3fifo")]
