@@ -58558,6 +58558,107 @@ mod tests {
         assert_eq!(read, original, "refused overwrite must leave the file untouched");
     }
 
+    /// Test helper: create a btrfs file with an 8 KiB regular data extent and
+    /// force its EXTENT_ITEM refcount to 2 (simulating a reflink/snapshot
+    /// sharing the extent). Returns the file inode. Used by the bd-xkvcm
+    /// shared-extent refusal tests.
+    fn btrfs_make_shared_extent_file(fs: &OpenFs, cx: &Cx, name: &str) -> (InodeNumber, Vec<u8>) {
+        let ops: &dyn FsOps = fs;
+        let attr = ops
+            .create(
+                cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new(name),
+                0o644,
+                0,
+                0,
+            )
+            .unwrap();
+        let original = vec![0x5A_u8; 8192];
+        ops.write(cx, &mut RequestScope::empty(), attr.ino, 0, &original)
+            .unwrap();
+        let canonical = fs.btrfs_canonical_inode(attr.ino).unwrap();
+        {
+            let alloc_mutex = fs.btrfs_alloc_state.as_ref().expect("btrfs alloc state");
+            let mut alloc = alloc_mutex.lock();
+            let start = BtrfsKey {
+                objectid: canonical,
+                item_type: BTRFS_ITEM_EXTENT_DATA,
+                offset: 0,
+            };
+            let end = BtrfsKey {
+                objectid: canonical,
+                item_type: BTRFS_ITEM_EXTENT_DATA,
+                offset: u64::MAX,
+            };
+            let (_, data) = alloc
+                .fs_tree
+                .range(&start, &end)
+                .unwrap()
+                .into_iter()
+                .next()
+                .expect("file has an extent");
+            let (disk_bytenr, disk_num_bytes) = match parse_extent_data(&data).unwrap() {
+                BtrfsExtentData::Regular {
+                    disk_bytenr,
+                    disk_num_bytes,
+                    ..
+                } => (disk_bytenr, disk_num_bytes),
+                other => panic!("expected a regular extent, got {other:?}"),
+            };
+            let ei_key = BtrfsKey {
+                objectid: disk_bytenr,
+                item_type: ffs_btrfs::BTRFS_ITEM_EXTENT_ITEM,
+                offset: disk_num_bytes,
+            };
+            let mut ei_data = alloc
+                .extent_alloc
+                .extent_tree_mut()
+                .range(&ei_key, &ei_key)
+                .unwrap()
+                .into_iter()
+                .next()
+                .expect("EXTENT_ITEM present")
+                .1;
+            ei_data[0..8].copy_from_slice(&2u64.to_le_bytes());
+            alloc.extent_alloc.extent_tree_mut().delete(&ei_key).unwrap();
+            alloc
+                .extent_alloc
+                .extent_tree_mut()
+                .insert(ei_key, &ei_data)
+                .unwrap();
+        }
+        (attr.ino, original)
+    }
+
+    /// bd-xkvcm: fallocate PUNCH_HOLE over a SHARED data extent must be refused
+    /// (atomically, file intact). This exercises the third guard function —
+    /// btrfs_delete_extent_data_items (via btrfs_fallocate ->
+    /// btrfs_rewrite_extent_data_segments) — which the delete and overwrite
+    /// tests do not cover.
+    #[test]
+    fn btrfs_punch_hole_refuses_shared_extent_bd_xkvcm() {
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+        let (ino, original) = btrfs_make_shared_extent_file(&fs, &cx, "shared_punch.bin");
+
+        // PUNCH_HOLE | KEEP_SIZE over a sector-aligned range inside the extent.
+        let err = ops
+            .fallocate(&cx, &mut RequestScope::empty(), ino, 4096, 4096, 0x02 | 0x01)
+            .expect_err("punch_hole on a shared extent must be refused");
+        assert!(
+            matches!(err, FfsError::UnsupportedFeature(_)),
+            "expected UnsupportedFeature for shared-extent punch_hole, got {err:?}"
+        );
+
+        // File untouched.
+        let read = ops
+            .read(&cx, &mut RequestScope::empty(), ino, 0, 8192)
+            .unwrap();
+        assert_eq!(read, original, "refused punch_hole must leave the file untouched");
+    }
+
     #[test]
     fn btrfs_write_unlink_last_reference_rejects_malformed_extent_data() {
         let (fs, cx) = open_writable_btrfs();
