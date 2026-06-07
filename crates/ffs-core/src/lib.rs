@@ -15474,24 +15474,33 @@ impl OpenFs {
         // committed while moving the directory entry.
         block_dev = self.block_device_adapter();
 
-        // If renaming a directory across parents, update .. and link counts.
-        if child_inode.is_dir() && parent != new_parent {
-            if let Some((dot_dot_block, data)) = planned_child_dir_update.as_ref() {
-                block_dev.write_block(cx, *dot_dot_block, data)?;
+        // Directory rename link-count fixup. `ext4_add_dir_entry` already
+        // incremented `new_parent`'s link count for the inserted directory entry
+        // (the moved directory's '..' backref), so only the *old* parent needs
+        // adjusting:
+        // - Across parents: repoint '..' to the new parent and drop the old
+        //   parent's backref (net: new_parent +1 via add_dir_entry, old -1 here).
+        // - Same parent: the '..' backref never moved, so the increment
+        //   add_dir_entry applied is spurious — undo it (net: 0). Without this
+        //   `mv subdir newname` leaks a link on the parent (e2fsck "ref count is
+        //   N, should be N-1").
+        if child_inode.is_dir() {
+            if parent != new_parent {
+                if let Some((dot_dot_block, data)) = planned_child_dir_update.as_ref() {
+                    block_dev.write_block(cx, *dot_dot_block, data)?;
+                }
             }
-
-            // Decrement old parent link count, increment new parent.
-            let mut old_parent = self.read_inode(cx, parent)?;
-            old_parent.links_count =
-                Self::ext4_checked_links_count_delta(old_parent.links_count, parent, -1)?;
-            ffs_inode::touch_mtime_ctime(&mut old_parent, tstamp_secs, tstamp_nanos);
+            let mut adjust_parent = self.read_inode(cx, parent)?;
+            adjust_parent.links_count =
+                Self::ext4_checked_links_count_delta(adjust_parent.links_count, parent, -1)?;
+            ffs_inode::touch_mtime_ctime(&mut adjust_parent, tstamp_secs, tstamp_nanos);
             ffs_inode::write_inode(
                 cx,
                 &block_dev,
                 &alloc.geo,
                 &alloc.groups,
                 parent,
-                &old_parent,
+                &adjust_parent,
                 csum_seed,
             )?;
             block_dev = self.block_device_adapter();
@@ -42827,6 +42836,56 @@ mod tests {
         // Child in destination must be intact.
         fs.lookup(&cx, dst.ino, OsStr::new("child.txt"))
             .expect("child must survive failed rename");
+    }
+
+    #[test]
+    fn write_rename_directory_within_same_parent_preserves_parent_link_count() {
+        // `mv P/child P/child2` (same parent): the moved directory's '..' still
+        // points to P, so P's link count must be UNCHANGED. ext4_add_dir_entry
+        // increments the parent's link count for the inserted directory entry
+        // (treating it as a fresh subdirectory); the same-parent rename path
+        // must undo that, or the parent leaks a link and e2fsck reports
+        // "inode <P> ref count is N, should be N-1".
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        let parent = fs
+            .mkdir(&cx, root, OsStr::new("same_rename_parent"), 0o755, 0, 0)
+            .expect("create parent dir");
+        fs.mkdir(&cx, parent.ino, OsStr::new("child"), 0o755, 0, 0)
+            .expect("create child dir");
+
+        let before = fs
+            .read_inode(&cx, parent.ino)
+            .expect("read parent before")
+            .links_count;
+
+        fs.rename(
+            &cx,
+            parent.ino,
+            OsStr::new("child"),
+            parent.ino,
+            OsStr::new("child2"),
+        )
+        .expect("same-parent directory rename");
+
+        let after = fs
+            .read_inode(&cx, parent.ino)
+            .expect("read parent after")
+            .links_count;
+        assert_eq!(
+            after, before,
+            "same-parent directory rename must not change the parent link count \
+             (before={before}, after={after})"
+        );
+
+        // The directory is reachable only under the new name.
+        fs.lookup(&cx, parent.ino, OsStr::new("child2"))
+            .expect("child reachable under new name");
+        assert!(fs.lookup(&cx, parent.ino, OsStr::new("child")).is_err());
     }
 
     #[test]
