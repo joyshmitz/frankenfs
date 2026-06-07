@@ -14045,9 +14045,12 @@ impl OpenFs {
         }
 
         if (inode.flags & ffs_types::EXT4_EXTENTS_FL) == 0 {
-            return Err(FfsError::UnsupportedFeature(
-                "writing to non-extent (indirect block) files is not supported".into(),
-            ));
+            // Legacy indirect-block-mapped file (no EXT4_EXTENTS_FL). bd-laay3
+            // increment 1: in-place OVERWRITE of already-mapped blocks. Growth
+            // (extending size / filling holes, which needs data + indirect-block
+            // allocation and chain growth) is a later increment and still
+            // returns UnsupportedFeature from the helper.
+            return self.ext4_write_indirect(cx, scope, ino, inode, offset, data);
         }
 
         let mut alloc = alloc_mutex.lock();
@@ -14291,6 +14294,154 @@ impl OpenFs {
             len = data.len(),
             new_size = inode.size,
             "data written"
+        );
+
+        Ok(bytes_written)
+    }
+
+    /// Write to a legacy indirect-block-mapped ext4 file (no `EXT4_EXTENTS_FL`).
+    ///
+    /// bd-laay3 increment 1: in-place OVERWRITE only. Every byte of the write
+    /// must land in a logical block that is already mapped (`resolve_indirect_block`
+    /// returns a physical block) and must not extend the file past its current
+    /// size. Writes that would extend the file or fill a sparse hole — both of
+    /// which require allocating data and/or indirect metadata blocks plus chain
+    /// growth — are deferred to a later increment and rejected with
+    /// `UnsupportedFeature` (never silently dropped or mis-written).
+    ///
+    /// The block read-modify-write + staging + inode-persist path mirrors the
+    /// extent write path above; only block resolution differs (pointer chain vs.
+    /// extent tree).
+    fn ext4_write_indirect(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        ino: InodeNumber,
+        mut inode: Ext4Inode,
+        offset: u64,
+        data: &[u8],
+    ) -> ffs_error::Result<u32> {
+        let alloc_mutex = self.require_alloc_state()?;
+        let mut block_dev = self.block_device_adapter();
+        let (tstamp_secs, tstamp_nanos) = Self::now_timestamp();
+        let sb = self
+            .ext4_superblock()
+            .ok_or_else(|| FfsError::Format("not an ext4 filesystem".into()))?;
+        let csum_seed = sb.csum_seed();
+        let bs = u64::from(sb.block_size);
+        let bs_usize = usize::try_from(bs)
+            .map_err(|_| FfsError::Format("block size does not fit usize".into()))?;
+
+        let write_len = u64::try_from(data.len())
+            .map_err(|_| FfsError::Format("write length does not fit u64".into()))?;
+        let end = offset
+            .checked_add(write_len)
+            .ok_or_else(|| FfsError::Format("write range overflow".into()))?;
+
+        // Overwrite-only: refuse to extend the file. Growth needs allocation +
+        // pointer-chain growth (a later bd-laay3 increment).
+        if end > inode.size {
+            return Err(FfsError::UnsupportedFeature(
+                "growing an indirect-block (non-extent) file is not yet supported \
+                 (in-place overwrite only)"
+                    .into(),
+            ));
+        }
+
+        let alloc = alloc_mutex.lock();
+        let mut bytes_written = 0u32;
+        let mut pos = offset;
+
+        while pos < end {
+            let logical_block = u32::try_from(pos / bs).map_err(|_| {
+                FfsError::Format("file offset exceeds ext4 32-bit logical block limit".into())
+            })?;
+            let block_offset = usize::try_from(pos % bs)
+                .map_err(|_| FfsError::Format("block offset does not fit usize".into()))?;
+            let remaining = usize::try_from(end - pos)
+                .map_err(|_| FfsError::Format("remaining write size does not fit usize".into()))?;
+            let chunk_len = (bs_usize - block_offset).min(remaining);
+
+            // Resolve the already-mapped physical block. A hole (None) within
+            // file bounds would need allocation — defer to the growth increment.
+            let phys = self
+                .resolve_indirect_block(cx, scope, &inode, logical_block)?
+                .ok_or_else(|| {
+                    FfsError::UnsupportedFeature(
+                        "writing into a hole of an indirect-block (non-extent) file is not yet \
+                         supported (in-place overwrite of mapped blocks only)"
+                            .into(),
+                    )
+                })?;
+            let phys_block = BlockNumber(phys);
+
+            // Read-modify-write: only read the existing block for a partial
+            // (sub-block) write; a full-block write overwrites every byte.
+            let mut block_data = if block_offset == 0 && chunk_len == bs_usize {
+                vec![0u8; bs_usize]
+            } else {
+                self.read_block_with_scope(cx, scope, phys_block)?
+            };
+            let data_start = usize::try_from(pos - offset)
+                .map_err(|_| FfsError::Format("write offset does not fit usize".into()))?;
+            block_data[block_offset..block_offset + chunk_len]
+                .copy_from_slice(&data[data_start..data_start + chunk_len]);
+
+            if let Some(tx) = &mut scope.tx {
+                let proof = MergeProof::NonOverlappingExtents {
+                    touched_ranges: vec![MergeByteRange::new(block_offset, chunk_len)],
+                };
+                tx.stage_write_with_proof(phys_block, block_data, proof);
+            } else {
+                block_dev.write_block(cx, phys_block, &block_data)?;
+            }
+            // Re-acquire the adapter so any later reads observe a non-staged write.
+            block_dev = self.block_device_adapter();
+
+            let chunk_u64 = u64::try_from(chunk_len)
+                .map_err(|_| FfsError::Format("chunk length does not fit u64".into()))?;
+            pos = pos.saturating_add(chunk_u64);
+            let chunk_u32 = u32::try_from(chunk_len)
+                .map_err(|_| FfsError::Format("chunk length does not fit u32".into()))?;
+            bytes_written = bytes_written.saturating_add(chunk_u32);
+        }
+
+        // Size is unchanged (overwrite-only); only the data timestamps move.
+        ffs_inode::touch_mtime_ctime(&mut inode, tstamp_secs, tstamp_nanos);
+
+        if let Some(tx) = &mut scope.tx {
+            let tx_dev = TransactionBlockAdapter {
+                base: &block_dev,
+                tx: Mutex::new(tx),
+            };
+            ffs_inode::write_inode(
+                cx,
+                &tx_dev,
+                &alloc.geo,
+                &alloc.groups,
+                ino,
+                &inode,
+                csum_seed,
+            )?;
+        } else {
+            ffs_inode::write_inode(
+                cx,
+                &block_dev,
+                &alloc.geo,
+                &alloc.groups,
+                ino,
+                &inode,
+                csum_seed,
+            )?;
+        }
+
+        trace!(
+            target: "ffs::write",
+            op = "write_indirect",
+            ino = ino.0,
+            offset,
+            len = data.len(),
+            "indirect data overwritten"
         );
 
         Ok(bytes_written)
@@ -28173,6 +28324,96 @@ mod tests {
         assert!(
             out[BS..].iter().all(|&b| b == 0),
             "sparse hole must zero-fill"
+        );
+    }
+
+    /// bd-laay3 increment 1: a legacy indirect-block-mapped (non-extent) file
+    /// supports in-place OVERWRITE of its already-mapped blocks — full-block and
+    /// partial (sub-block RMW) — and persists across a re-read, while growth and
+    /// hole-fill (later increments) are cleanly rejected with UnsupportedFeature.
+    ///
+    /// The fixture creates a normal extent file, writes one block to allocate a
+    /// real data block, then re-stamps the inode as indirect (clear
+    /// EXTENT_FL, i_block[0] -> that physical block). Uses a real mkfs.ext4
+    /// image so the inode/data blocks are fully valid; skips if mkfs is absent.
+    #[test]
+    fn ext4_indirect_overwrite_in_place_bd_laay3() {
+        let Some((fs, _tmp)) = open_writable_ext4_mkfs(16) else {
+            return; // mkfs.ext4 unavailable
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let bs = fs.block_size() as usize;
+
+        // Create an extent file and write one full block so a data block is
+        // allocated on disk.
+        let ino = fs
+            .create(&cx, root, OsStr::new("legacy.bin"), 0o644, 0, 0)
+            .expect("create")
+            .ino;
+        let original = vec![0xAA_u8; bs];
+        assert_eq!(
+            fs.write(&cx, ino, 0, &original).expect("extent write") as usize,
+            bs
+        );
+
+        // Locate the allocated physical block for logical block 0.
+        let inode = fs.read_inode(&cx, ino).expect("read inode");
+        let extents = fs.collect_extents(&cx, &inode).expect("extents");
+        let phys = extents
+            .iter()
+            .find(|e| e.logical_block == 0)
+            .map(|e| e.physical_start)
+            .expect("logical block 0 mapped");
+
+        // Re-stamp the inode as a legacy indirect file: clear EXTENT_FL and map
+        // logical block 0 -> phys via i_block[0].
+        let mut indirect = inode.clone();
+        indirect.flags &= !ffs_types::EXT4_EXTENTS_FL;
+        let mut ptrs = vec![0_u8; 15 * 4];
+        ptrs[0..4].copy_from_slice(&u32::try_from(phys).expect("phys fits u32").to_le_bytes());
+        indirect.extent_bytes = ptrs;
+        indirect.size = bs as u64;
+        fs.persist_ext4_inode_for_testing(&cx, ino, &indirect)
+            .expect("persist indirect inode");
+
+        // Sanity: the indirect read path returns the original bytes.
+        assert_eq!(
+            fs.read(&cx, ino, 0, bs as u32).expect("indirect read"),
+            original,
+            "indirect read of the mapped block"
+        );
+
+        // Full-block in-place overwrite (the bd-laay3 increment-1 path).
+        let updated = vec![0x5C_u8; bs];
+        assert_eq!(
+            fs.write(&cx, ino, 0, &updated).expect("indirect overwrite") as usize,
+            bs,
+            "full-block overwrite writes every byte"
+        );
+        assert_eq!(
+            fs.read(&cx, ino, 0, bs as u32).expect("read back"),
+            updated,
+            "indirect in-place overwrite must persist"
+        );
+
+        // Partial (sub-block) overwrite: read-modify-write must touch only the
+        // patched byte range.
+        let patch = vec![0x11_u8; 100];
+        assert_eq!(fs.write(&cx, ino, 50, &patch).expect("partial overwrite"), 100);
+        let post = fs.read(&cx, ino, 0, bs as u32).expect("read back partial");
+        assert_eq!(&post[50..150], &patch[..], "patch lands at the offset");
+        assert_eq!(&post[0..50], &updated[0..50], "bytes before patch unchanged");
+        assert_eq!(&post[150..], &updated[150..], "bytes after patch unchanged");
+
+        // Growth past EOF is a later increment — must be rejected, not mis-written.
+        let grow = vec![0x22_u8; bs];
+        let err = fs
+            .write(&cx, ino, bs as u64, &grow)
+            .expect_err("growth must be rejected");
+        assert!(
+            matches!(err, FfsError::UnsupportedFeature(_)),
+            "growing an indirect file must return UnsupportedFeature, got {err:?}"
         );
     }
 
