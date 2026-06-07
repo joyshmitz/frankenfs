@@ -52398,16 +52398,12 @@ mod tests {
     /// dst must read back src's data through the shared extent. This is what
     /// validates the increment-1/2/3 primitives on disk — in particular whether
     /// real btrfs check accepts refs=2 as one inline (src) + one keyed (dst)
-    /// EXTENT_DATA_REF. Skips when btrfs-progs is unavailable.
-    ///
-    /// `#[ignore]` until a confirmed local run: it requires LOCAL btrfs-progs
-    /// (rch workers lack it) AND a clean local toolchain (the shared cargo
-    /// target is frequently rch-clobbered with an incompatible rustc — E0514).
-    /// Run explicitly to validate the reflink on-disk form:
-    /// `cargo test -p ffs-core --lib btrfs_clone_passes_btrfs_check_bd_vh8p9
-    /// -- --ignored --nocapture` (no concurrent rch). bd-vh8p9 increment 4.
+    /// EXTENT_DATA_REF. Skips when btrfs-progs is unavailable (rch workers lack
+    /// it), so it validates only on a local run with btrfs-progs — confirmed
+    /// PASSING locally against btrfs-progs v6.16: real `btrfs check` accepts
+    /// refs=2 represented as one inline (src) + one keyed (dst) EXTENT_DATA_REF,
+    /// the open question this increment answered. bd-vh8p9 increment 4.
     #[test]
-    #[ignore = "needs local btrfs-progs + clean local toolchain; validates bd-vh8p9 reflink on-disk form"]
     fn btrfs_clone_passes_btrfs_check_bd_vh8p9() {
         let Some((fs, dev, _tmp, image)) = open_writable_btrfs_mkfs(256) else {
             return; // btrfs-progs unavailable
