@@ -26063,8 +26063,15 @@ impl FsOps for OpenFs {
                 ))
             }
             FsFlavor::Btrfs(_) => {
-                // Reflink requires extent sharing in the extent tree
-                Err(FfsError::ReadOnly)
+                // btrfs reflink (extent sharing in the extent tree) is not yet
+                // implemented. The fs IS writable (require_btrfs_rw_allowed
+                // always succeeds since bd-jdo53), so the kernel-correct errno
+                // for an unsupported-but-writable operation is EOPNOTSUPP, not
+                // EROFS — `cp --reflink` then reports "operation not supported"
+                // rather than the misleading "read-only file system".
+                Err(FfsError::UnsupportedFeature(
+                    "FICLONE (btrfs reflink) is not yet implemented".to_owned(),
+                ))
             }
         }
     }
@@ -26084,8 +26091,12 @@ impl FsOps for OpenFs {
                 ))
             }
             FsFlavor::Btrfs(_) => {
-                // Reflink requires extent sharing in the extent tree
-                Err(FfsError::ReadOnly)
+                // btrfs reflink-range is not yet implemented; the fs is writable
+                // (bd-jdo53) so EOPNOTSUPP is the kernel-correct errno, not
+                // EROFS. See clone_file for the full rationale.
+                Err(FfsError::UnsupportedFeature(
+                    "FICLONERANGE (btrfs reflink) is not yet implemented".to_owned(),
+                ))
             }
         }
     }
@@ -52589,6 +52600,38 @@ mod tests {
     fn btrfs_write_enable_writes_sets_writable() {
         let (fs, _cx) = open_writable_btrfs();
         assert!(fs.is_writable());
+    }
+
+    #[test]
+    fn btrfs_clone_unimplemented_reports_eopnotsupp_not_erofs() {
+        // btrfs reflink (FICLONE/FICLONERANGE) is not yet implemented, but the
+        // btrfs fs is writable (require_btrfs_rw_allowed always succeeds since
+        // bd-jdo53). The kernel-correct errno for an unsupported-but-writable
+        // operation is EOPNOTSUPP — NOT EROFS, which would falsely tell
+        // userspace (e.g. `cp --reflink`) the whole filesystem is read-only.
+        let (fs, cx) = open_writable_btrfs();
+        assert!(fs.is_writable(), "fixture must be a writable btrfs");
+        let mut scope = RequestScope::empty();
+
+        let err = <OpenFs as FsOps>::clone_file(&fs, &cx, &mut scope, 0, 0)
+            .expect_err("btrfs FICLONE is unimplemented");
+        assert_eq!(
+            err.to_errno(),
+            libc::EOPNOTSUPP,
+            "FICLONE on writable btrfs must be EOPNOTSUPP, got {err:?}"
+        );
+        assert_ne!(err.to_errno(), libc::EROFS, "must not claim read-only fs");
+
+        let range = FileCloneRange {
+            src_fd: 0,
+            src_offset: 0,
+            src_length: 0,
+            dest_offset: 0,
+        };
+        let err2 = <OpenFs as FsOps>::clone_file_range(&fs, &cx, &mut scope, 0, range)
+            .expect_err("btrfs FICLONERANGE is unimplemented");
+        assert_eq!(err2.to_errno(), libc::EOPNOTSUPP);
+        assert_ne!(err2.to_errno(), libc::EROFS);
     }
 
     /// Regression: a corrupted ext4 superblock advertising blocks_count
