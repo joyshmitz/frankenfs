@@ -12243,7 +12243,35 @@ impl OpenFs {
                 }
             }
 
-            // All blocks full — allocate a new directory block.
+            // All linear blocks are full. If the filesystem supports hash indexing
+            // (dir_index), convert this directory to an htree now — like the kernel,
+            // which builds a dx index once the directory outgrows linear blocks.
+            // This bounds linear create/lookup to a single block; further growth
+            // uses the O(log N) htree path with loose-pack doubling rebuilds
+            // (bd-xmh5g.111), so mass-create into a fresh directory is O(N) rather
+            // than O(N^2), and lookups become O(log N) instead of O(blocks).
+            let has_dir_index = self
+                .ext4_superblock()
+                .is_some_and(|sb| sb.has_compat(ffs_ondisk::ext4::Ext4CompatFeatures::DIR_INDEX));
+            if has_dir_index {
+                return self.ext4_rebuild_htree_dir(
+                    cx,
+                    dev,
+                    alloc,
+                    parent,
+                    parent_inode,
+                    &extents,
+                    name,
+                    child_ino_u32,
+                    file_type,
+                    csum_seed,
+                    tstamp_secs,
+                    tstamp_nanos,
+                );
+            }
+
+            // No dir_index feature: keep the directory linear (kernel behaviour
+            // without dir_index). Allocate a new directory block.
             let parent_new_size = parent_inode
                 .size
                 .checked_add(u64::from(alloc.geo.block_size))
@@ -12460,24 +12488,34 @@ impl OpenFs {
             .unwrap_or(0)
             .max(1);
 
-        // '..' inode is at offset 12 of the dx_root (logical block 0). For a
-        // multi-level index, also enumerate the real leaf blocks here: logical
-        // blocks 1..n then include interior dx_node blocks that parse_dir_block
-        // would mis-read, so the linear scan only holds for a single level.
+        // Whether the source directory is already htree-indexed. When false this
+        // is a LINEAR -> htree conversion (bd-...): the directory's entries live
+        // in every block (0..n), block 0 is a normal dir block (not a dx_root),
+        // and we must SET EXT4_INDEX_FL in the finalised inode below.
+        let is_htree = parent_inode.has_htree_index();
+
+        // '..' inode is at offset 12 of block 0 — true for both a linear dir
+        // block (fake "." rec_len 12, then "..") and an htree dx_root (which
+        // mirrors that layout). For an htree multi-level index, enumerate the real
+        // leaf blocks; for a linear dir, every block 0..n holds entries.
         let (dotdot_ino, leaf_logicals) = {
             let phys = resolve(0).ok_or_else(|| FfsError::Corruption {
                 block: 0,
-                detail: format!("htree dir inode {} missing logical block 0", parent.0),
+                detail: format!("dir inode {} missing logical block 0", parent.0),
             })?;
             let b0 = dev.read_block(cx, BlockNumber(phys))?;
             let s = b0.as_slice();
             if s.len() < 16 {
                 return Err(FfsError::Corruption {
                     block: phys,
-                    detail: "htree dx_root block too small".into(),
+                    detail: "directory block 0 too small".into(),
                 });
             }
             let dotdot = u32::from_le_bytes([s[12], s[13], s[14], s[15]]);
+            if !is_htree {
+                // Linear directory: entries are in every block, including block 0.
+                ((dotdot), (0..n_blocks).collect::<Vec<u32>>())
+            } else {
             let indirect_levels =
                 ffs_ondisk::parse_dx_root(s).map_or(0, |dxr| dxr.indirect_levels);
             let leaves: Vec<u32> = if indirect_levels == 0 {
@@ -12504,10 +12542,12 @@ impl OpenFs {
                 })?
             };
             (dotdot, leaves)
+            }
         };
 
-        // Gather every real entry from the leaf blocks; the dx_root (block 0)
-        // and any interior dx_node blocks hold no file entries, only the index.
+        // Gather every real entry; for an htree source the dx_root (block 0) and
+        // interior dx_node blocks hold only the index, while for a linear source
+        // block 0 also holds entries — the './..' skip below handles both.
         let mut collected: Vec<(u32, u8, Vec<u8>)> = Vec::new();
         for logical in leaf_logicals {
             let Some(phys) = resolve(logical) else {
@@ -12650,6 +12690,11 @@ impl OpenFs {
         };
 
         Self::set_extent_root(&mut parent_upd, &root_bytes);
+        // Converting a linear directory: mark it hash-indexed so future lookups
+        // and inserts use the (now-built) htree index instead of a linear scan.
+        if !is_htree {
+            parent_upd.flags |= ffs_types::EXT4_INDEX_FL;
+        }
         parent_upd.size = u64::from(m_blocks) * block_size_u64;
         let block_delta =
             (i128::from(allocated) - i128::from(freed)) * i128::from(sectors_per_block);
@@ -38739,6 +38784,81 @@ mod tests {
         assert!(
             after.iter().any(|e| e.name == b"zzz_new"),
             "newly created entry must appear after snapshot invalidation"
+        );
+    }
+
+    /// A FrankenFS-created (initially linear) directory must auto-convert to an
+    /// htree once it outgrows linear blocks (when the fs has dir_index, like the
+    /// kernel), so mass-create is O(N) (htree + doubling rebuilds) and lookups are
+    /// O(log N) — not O(blocks). Every entry stays findable across the conversion.
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn fresh_linear_dir_auto_converts_to_htree_on_overflow() {
+        let Some((fs, _tmp)) = open_writable_ext4_mkfs(32) else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        // The conversion only applies when the filesystem supports hash indexing.
+        let has_dir_index = fs.ext4_superblock().is_some_and(|sb| {
+            sb.has_compat(ffs_ondisk::ext4::Ext4CompatFeatures::DIR_INDEX)
+        });
+        if !has_dir_index {
+            return;
+        }
+        let root = InodeNumber(2);
+        let dir = fs
+            .mkdir(&cx, root, OsStr::new("growdir"), 0o755, 0, 0)
+            .expect("mkdir");
+        let dir_ino = dir.ino;
+        assert!(
+            !fs.read_inode(&cx, dir_ino).unwrap().has_htree_index(),
+            "a freshly created directory must start linear (no htree index)"
+        );
+
+        // Create enough files to overflow the initial linear block(s) and trigger
+        // the linear -> htree conversion.
+        let n = 400usize;
+        for i in 0..n {
+            let nm = format!("f{i:05}.dat");
+            fs.create(&cx, dir_ino, OsStr::new(&nm), 0o644, 0, 0)
+                .unwrap_or_else(|e| panic!("create {nm} must succeed: {e:?}"));
+        }
+
+        // The directory must now be hash-indexed (auto-converted), with a valid
+        // dx_root, and every entry must remain findable.
+        assert!(
+            fs.read_inode(&cx, dir_ino).unwrap().has_htree_index(),
+            "directory must auto-convert to htree once it overflows linear blocks"
+        );
+        let block0_phys = {
+            let di = fs.read_inode(&cx, dir_ino).unwrap();
+            fs.collect_extents(&cx, &di)
+                .unwrap()
+                .iter()
+                .find(|e| e.logical_block == 0)
+                .unwrap()
+                .physical_start
+        };
+        let dxr = fs.read_block_vec(&cx, BlockNumber(block0_phys)).unwrap();
+        assert!(
+            !ffs_ondisk::parse_dx_root(&dxr)
+                .expect("converted block 0 must parse as a dx_root")
+                .entries
+                .is_empty(),
+            "converted dx_root must index at least one leaf"
+        );
+
+        let listing = fs.readdir(&cx, dir_ino, 0).expect("readdir");
+        let names: std::collections::HashSet<Vec<u8>> =
+            listing.iter().map(|e| e.name.clone()).collect();
+        for i in 0..n {
+            let nm = format!("f{i:05}.dat").into_bytes();
+            assert!(names.contains(&nm), "entry {i} missing from converted htree dir");
+        }
+        // A direct lookup must also resolve through the new index.
+        assert!(
+            fs.lookup(&cx, dir_ino, OsStr::new("f00200.dat")).is_ok(),
+            "lookup must resolve via the converted htree index"
         );
     }
 
