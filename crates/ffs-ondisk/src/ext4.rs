@@ -5565,6 +5565,7 @@ pub fn build_htree_directory_with_large_dir(
         with_csum_tail,
         has_large_dir,
         false,
+        false,
     )
     .map(|layout| layout.blocks)
 }
@@ -5596,6 +5597,7 @@ pub fn build_htree_directory_with_large_dir_casefold(
         with_csum_tail,
         has_large_dir,
         true,
+        false,
     )
     .map(|layout| layout.blocks)
 }
@@ -5619,6 +5621,7 @@ struct HtreeLayout {
 #[allow(clippy::type_complexity)] // local (hash, entry) staging tuples
 #[allow(clippy::too_many_lines)] // single + multi-level construction in one pass
 #[allow(clippy::too_many_arguments)] // mirrors the build_htree_directory surface
+#[allow(clippy::fn_params_excessive_bools)] // with_csum/large_dir/casefold/loose flags
 fn build_htree_layout(
     dot_inode: u32,
     dotdot_inode: u32,
@@ -5629,6 +5632,7 @@ fn build_htree_layout(
     with_csum_tail: bool,
     has_large_dir: bool,
     casefold: bool,
+    loose_pack: bool,
 ) -> Option<HtreeLayout> {
     if !(64..=65536).contains(&block_size) || entries.is_empty() {
         return None;
@@ -5638,6 +5642,12 @@ fn build_htree_layout(
     } else {
         block_size
     };
+    // Soft fill limit: a `loose_pack` build (the rebuild path) leaves ~50% leaf
+    // slack so a growing directory's rebuilds follow a doubling schedule —
+    // bounding total work for N inserts to O(N) instead of rebuilding the whole
+    // directory on (nearly) every create (O(N^2)). The hard `usable` cap still
+    // applies to un-splittable equal-hash runs.
+    let fill_limit = if loose_pack { (usable / 2).max(1) } else { usable };
 
     // Casefold directories index by the case-folded name (byte-exact for ASCII),
     // while the leaf still stores the original-case name; non-casefold hashes the
@@ -5669,10 +5679,13 @@ fn build_htree_layout(
             return None; // a single entry cannot fit a block
         }
         let same_hash_as_prev = last_hash == Some(hash);
-        if !current.is_empty() && current_bytes + rec > usable {
-            if same_hash_as_prev {
-                return None; // equal-hash run overflows one leaf — needs collision chain
-            }
+        // Hard cap: an equal-hash run that cannot be split must fit one full leaf.
+        if !current.is_empty() && current_bytes + rec > usable && same_hash_as_prev {
+            return None; // equal-hash run overflows one leaf — needs collision chain
+        }
+        // Soft cap: start a new leaf at the fill limit, only on a clean hash
+        // boundary (never split an equal-hash run).
+        if !current.is_empty() && current_bytes + rec > fill_limit && !same_hash_as_prev {
             leaves.push(std::mem::take(&mut current));
             current_bytes = 0;
         }
@@ -5869,7 +5882,7 @@ pub fn build_htree_directory_stamped_with_large_dir(
 ) -> Option<Vec<Vec<u8>>> {
     build_htree_directory_stamped_with_large_dir_inner(
         dot_inode, dotdot_inode, entries, block_size, hash_version, hash_seed, csum_seed, dir_ino,
-        generation, has_large_dir, false,
+        generation, has_large_dir, false, false,
     )
 }
 
@@ -5895,8 +5908,66 @@ pub fn build_htree_directory_stamped_with_large_dir_casefold(
 ) -> Option<Vec<Vec<u8>>> {
     build_htree_directory_stamped_with_large_dir_inner(
         dot_inode, dotdot_inode, entries, block_size, hash_version, hash_seed, csum_seed, dir_ino,
-        generation, has_large_dir, true,
+        generation, has_large_dir, true, false,
     )
+}
+
+/// Build a hash-indexed directory for the REBUILD path, with explicit
+/// `with_csum` / `casefold` / `loose_pack` options.
+///
+/// `loose_pack` leaves ~50% leaf slack so a growing directory's rebuilds follow a
+/// doubling schedule — total work for N inserts is O(N) instead of O(N^2) when
+/// every create would otherwise re-pack and re-rebuild the whole directory.
+/// `with_csum` selects the metadata_csum-stamped layout. Used only by the
+/// directory-rebuild path; one-shot builders stay tightly packed.
+#[must_use]
+#[allow(clippy::too_many_arguments)]
+#[allow(clippy::fn_params_excessive_bools)] // large_dir/casefold/with_csum/loose flags
+pub fn build_htree_directory_for_rebuild(
+    dot_inode: u32,
+    dotdot_inode: u32,
+    entries: &[(u32, u8, &[u8])],
+    block_size: usize,
+    hash_version: u8,
+    hash_seed: &[u32; 4],
+    csum_seed: u32,
+    dir_ino: u32,
+    generation: u32,
+    has_large_dir: bool,
+    casefold: bool,
+    with_csum: bool,
+    loose_pack: bool,
+) -> Option<Vec<Vec<u8>>> {
+    if with_csum {
+        build_htree_directory_stamped_with_large_dir_inner(
+            dot_inode,
+            dotdot_inode,
+            entries,
+            block_size,
+            hash_version,
+            hash_seed,
+            csum_seed,
+            dir_ino,
+            generation,
+            has_large_dir,
+            casefold,
+            loose_pack,
+        )
+    } else {
+        build_htree_layout(
+            dot_inode,
+            dotdot_inode,
+            entries,
+            block_size,
+            hash_version,
+            hash_seed,
+            false,
+            has_large_dir,
+            casefold,
+            loose_pack,
+        )
+        .map(|layout| layout.blocks)
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5912,6 +5983,7 @@ fn build_htree_directory_stamped_with_large_dir_inner(
     generation: u32,
     has_large_dir: bool,
     casefold: bool,
+    loose_pack: bool,
 ) -> Option<Vec<Vec<u8>>> {
     let HtreeLayout {
         mut blocks,
@@ -5926,6 +5998,7 @@ fn build_htree_directory_stamped_with_large_dir_inner(
         true,
         has_large_dir,
         casefold,
+        loose_pack,
     )?;
     // Layout is [dx_root, leaf_0..leaf_{L-1}, node_0..node_{N-1}]: the root and
     // any interior nodes are index blocks (dx_tail CRC32C), the leaves are

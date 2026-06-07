@@ -842,6 +842,11 @@ pub struct OpenFs {
     /// directory increments this exactly once regardless of page count.
     #[cfg(test)]
     readdir_full_reads: std::sync::atomic::AtomicUsize,
+    /// Test-only per-instance counter of ext4 htree full-rebuilds. Loose-packed
+    /// rebuilds make this grow ~logarithmically with inserts (doubling) rather
+    /// than once per overflowing create (which would be O(N) rebuilds).
+    #[cfg(test)]
+    htree_rebuilds: std::sync::atomic::AtomicUsize,
     /// Optional repair lifecycle hook for notifying when blocks are committed.
     ///
     /// When present, `commit_transaction` and `commit_transaction_ssi` call
@@ -2833,6 +2838,8 @@ impl OpenFs {
             readdir_snapshot: Mutex::new(None),
             #[cfg(test)]
             readdir_full_reads: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            htree_rebuilds: std::sync::atomic::AtomicUsize::new(0),
             repair_flush_lifecycle: None,
             move_ext_donor_fds: Mutex::new(BTreeMap::new()),
             btrfs_inode_path_cache: Mutex::new(None),
@@ -12536,52 +12543,29 @@ impl OpenFs {
             .iter()
             .map(|(i, ft, n)| (*i, *ft, n.as_slice()))
             .collect();
-        let new_blocks = match (has_metadata_csum, casefold) {
-            (true, true) => ffs_ondisk::build_htree_directory_stamped_with_large_dir_casefold(
-                parent_ino_u32,
-                dotdot_ino,
-                &entry_refs,
-                block_size,
-                hash_version,
-                &hash_seed,
-                csum_seed,
-                parent_ino_u32,
-                generation,
-                has_large_dir,
-            ),
-            (true, false) => ffs_ondisk::build_htree_directory_stamped_with_large_dir(
-                parent_ino_u32,
-                dotdot_ino,
-                &entry_refs,
-                block_size,
-                hash_version,
-                &hash_seed,
-                csum_seed,
-                parent_ino_u32,
-                generation,
-                has_large_dir,
-            ),
-            (false, true) => ffs_ondisk::build_htree_directory_with_large_dir_casefold(
-                parent_ino_u32,
-                dotdot_ino,
-                &entry_refs,
-                block_size,
-                hash_version,
-                &hash_seed,
-                false,
-                has_large_dir,
-            ),
-            (false, false) => ffs_ondisk::build_htree_directory_with_large_dir(
-                parent_ino_u32,
-                dotdot_ino,
-                &entry_refs,
-                block_size,
-                hash_version,
-                &hash_seed,
-                false,
-                has_large_dir,
-            ),
-        }
+        // Rebuild with ~50% leaf slack (loose_pack) so a growing directory's
+        // rebuilds follow a doubling schedule: total work for N inserts is O(N)
+        // amortized instead of re-packing + re-rebuilding the whole directory on
+        // (nearly) every create (O(N^2)). Correct by construction — the slack only
+        // changes the leaf fill level, which e2fsck and the kernel accept.
+        #[cfg(test)]
+        self.htree_rebuilds
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let new_blocks = ffs_ondisk::build_htree_directory_for_rebuild(
+            parent_ino_u32,
+            dotdot_ino,
+            &entry_refs,
+            block_size,
+            hash_version,
+            &hash_seed,
+            csum_seed,
+            parent_ino_u32,
+            generation,
+            has_large_dir,
+            casefold,
+            has_metadata_csum,
+            true,
+        )
         .ok_or_else(|| {
             FfsError::UnsupportedFeature(format!(
                 "htree rebuild for dir inode {} exceeds the supported index depth",
@@ -38820,6 +38804,8 @@ mod tests {
         let initial_size = fs.read_inode(&cx, dir_ino).unwrap().size;
 
         // Create enough new files to overflow leaves and force rebuild(s).
+        fs.htree_rebuilds
+            .store(0, std::sync::atomic::Ordering::SeqCst);
         let mut new_names: Vec<Vec<u8>> = Vec::new();
         for i in 0..600 {
             let nm = format!("created_{i:04}.dat");
@@ -38834,6 +38820,20 @@ mod tests {
         assert!(
             final_size > initial_size,
             "htree dir must have grown via rebuild: {initial_size} -> {final_size}"
+        );
+
+        // SCORE (loose-pack doubling): 600 creates must trigger only a handful of
+        // full rebuilds (O(log N), doubling), NOT one per overflowing create
+        // (O(N)). With tight packing every create past the first overflow would
+        // rebuild the whole directory (~hundreds of rebuilds, O(N^2) total work).
+        let rebuilds = fs.htree_rebuilds.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(
+            rebuilds > 0,
+            "the rebuild path must have run at least once"
+        );
+        assert!(
+            rebuilds <= 30,
+            "600 creates must rebuild ~logarithmically (doubling), got {rebuilds} rebuilds"
         );
 
         let find = |name: &[u8]| -> ffs_ondisk::HtreeFindResult {
