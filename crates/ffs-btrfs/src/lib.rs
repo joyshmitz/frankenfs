@@ -145,6 +145,32 @@ pub fn btrfs_name_hash(name: &[u8]) -> u32 {
     !ffs_types::crc32c_append(1, name)
 }
 
+/// Compute the btrfs `hash_extent_data_ref` — the `offset` (third) component of
+/// a keyed `EXTENT_DATA_REF` item's key for a shared data extent.
+///
+/// Mirrors the kernel `fs/btrfs/extent-tree.c::hash_extent_data_ref`:
+/// ```text
+/// high = crc32c(~0, root_objectid_le64)               // raw continuation
+/// low  = crc32c(crc32c(~0, owner_le64), offset_le64)   // raw, chained
+/// return ((u64)high << 31) ^ (u64)low
+/// ```
+/// where the kernel's `crc32c(seed, data)` is the *raw* running value. Using the
+/// same btrfs-check-validated convention as [`btrfs_name_hash`] (bd-x36qn) —
+/// `raw(seed, data) = !crc32c_append(!seed, data)` — gives
+/// `raw(~0, d) = !crc32c_append(0, d)`, and the chained `raw(raw(~0, owner),
+/// offset) = !crc32c_append(crc32c_append(0, owner), offset)` (the inner
+/// `crc32c_append` continuation matches the kernel's running CRC over
+/// `owner ++ offset`).
+#[must_use]
+pub fn hash_extent_data_ref(root: u64, owner: u64, offset: u64) -> u64 {
+    let high = !ffs_types::crc32c_append(0, &root.to_le_bytes());
+    let low = !ffs_types::crc32c_append(
+        ffs_types::crc32c_append(0, &owner.to_le_bytes()),
+        &offset.to_le_bytes(),
+    );
+    (u64::from(high) << 31) ^ u64::from(low)
+}
+
 /// Build the csum-tree leaf item for one on-disk data extent.
 ///
 /// btrfs stores data checksums in the csum tree (`BTRFS_CSUM_TREE_OBJECTID`) as
@@ -6858,6 +6884,49 @@ mod tests {
         // back to it.
         assert_eq!(ffs_types::crc32c_append(0, b"x3fcu_check.txt"), 0x7f4a_4789);
         assert_ne!(btrfs_name_hash(b"x3fcu_check.txt"), 0x7f4a_4789);
+    }
+
+    #[test]
+    fn hash_extent_data_ref_matches_kernel_formula() {
+        // The on-disk hash for a keyed EXTENT_DATA_REF (shared data extent),
+        // the offset component of its key. The kernel chains the raw CRC over
+        // owner ++ offset; cross-check the function's CHAINED form against an
+        // independent CONCATENATION form (same btrfs-check-validated crc
+        // convention as btrfs_name_hash, bd-x36qn). If the function's CRC
+        // continuation were wrong, these would diverge.
+        for &(root, owner, offset) in &[
+            (5_u64, 257_u64, 0_u64),
+            (5, 258, 4096),
+            (0x100, 0x1234, 0xdead_beef),
+        ] {
+            let high = !ffs_types::crc32c_append(0, &root.to_le_bytes());
+            let mut owner_then_offset = owner.to_le_bytes().to_vec();
+            owner_then_offset.extend_from_slice(&offset.to_le_bytes());
+            let low = !ffs_types::crc32c_append(0, &owner_then_offset);
+            let expected = (u64::from(high) << 31) ^ u64::from(low);
+            assert_eq!(
+                hash_extent_data_ref(root, owner, offset),
+                expected,
+                "chained CRC must equal the owner++offset concatenation for \
+                 (root={root}, owner={owner}, offset={offset})"
+            );
+        }
+
+        // Deterministic and input-sensitive.
+        assert_eq!(
+            hash_extent_data_ref(5, 257, 0),
+            hash_extent_data_ref(5, 257, 0)
+        );
+        assert_ne!(
+            hash_extent_data_ref(5, 257, 0),
+            hash_extent_data_ref(5, 257, 4096)
+        );
+        assert_ne!(
+            hash_extent_data_ref(5, 257, 0),
+            hash_extent_data_ref(5, 258, 0)
+        );
+        // (On-disk/btrfs-check ground truth is exercised when reflink wiring
+        // lands — bd-vh8p9 — which writes keyed EXTENT_DATA_REF items.)
     }
 
     #[test]
