@@ -20810,6 +20810,29 @@ impl OpenFs {
             } else {
                 None
             };
+            // SAFETY GUARD (bd-xkvcm): free_extent is not refcount-aware — it
+            // removes the EXTENT_ITEM + all backrefs and frees the space
+            // unconditionally. Freeing a SHARED data extent (reflink / snapshot /
+            // CoW, EXTENT_DATA_REF count > 1) would orphan the other references
+            // and free still-live space = corruption. This collection pass is
+            // read-only, so refusing here is atomic (no partial delete) — the
+            // delete fails cleanly instead of corrupting until refcount-aware
+            // free lands. FrankenFS's own extents are refs==1, so this never
+            // triggers on FrankenFS-created files.
+            if let Some((disk_bytenr, _)) = extent_to_free {
+                let refs = alloc
+                    .extent_alloc
+                    .get_extent_data_refs(disk_bytenr)
+                    .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+                let total: u64 = refs.iter().map(|r| u64::from(r.count)).sum();
+                if total > 1 {
+                    return Err(FfsError::UnsupportedFeature(format!(
+                        "cannot delete inode {objectid}: data extent {disk_bytenr} is shared by \
+                         {total} references (reflink/snapshot); refcount-aware extent free is not \
+                         yet implemented (bd-xkvcm)"
+                    )));
+                }
+            }
             plan.push((key, extent_to_free));
         }
 
@@ -58256,6 +58279,106 @@ mod tests {
         // The inode should be gone — getattr should fail.
         let err = ops.getattr(&cx, &mut RequestScope::empty(), attr.ino);
         assert!(err.is_err(), "expected NotFound for purged inode");
+    }
+
+    /// bd-xkvcm: deleting a file whose data extent is SHARED (reflink/snapshot,
+    /// EXTENT_DATA_REF refcount > 1) must be refused — not silently free the
+    /// extent + all backrefs while another file still references it (corruption).
+    /// The non-refcount-aware free_extent makes the actual free unsafe, so the
+    /// read-only purge-plan collection refuses upfront (atomic, no partial
+    /// delete). FrankenFS's own files are refcount 1 and delete normally.
+    #[test]
+    fn btrfs_unlink_refuses_shared_extent_bd_xkvcm() {
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+
+        let attr = ops
+            .create(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("shared.bin"),
+                0o644,
+                0,
+                0,
+            )
+            .unwrap();
+        // Two full sectors so the data lands in a regular (non-inline) extent.
+        let payload = vec![0x5A_u8; 8192];
+        ops.write(&cx, &mut RequestScope::empty(), attr.ino, 0, &payload)
+            .unwrap();
+        let canonical = fs.btrfs_canonical_inode(attr.ino).unwrap();
+
+        // Find the file's data extent and inject a SECOND EXTENT_DATA_REF,
+        // simulating a reflink / another referencing inode (refcount -> 2).
+        {
+            let alloc_mutex = fs.btrfs_alloc_state.as_ref().expect("btrfs alloc state");
+            let mut alloc = alloc_mutex.lock();
+            let start = BtrfsKey {
+                objectid: canonical,
+                item_type: BTRFS_ITEM_EXTENT_DATA,
+                offset: 0,
+            };
+            let end = BtrfsKey {
+                objectid: canonical,
+                item_type: BTRFS_ITEM_EXTENT_DATA,
+                offset: u64::MAX,
+            };
+            let items = alloc.fs_tree.range(&start, &end).unwrap();
+            let (_, data) = items.into_iter().next().expect("file has an extent");
+            let disk_bytenr = match parse_extent_data(&data).unwrap() {
+                BtrfsExtentData::Regular { disk_bytenr, .. } => disk_bytenr,
+                other => panic!("expected a regular extent, got {other:?}"),
+            };
+            assert!(disk_bytenr > 0, "regular extent has an on-disk bytenr");
+
+            let before: u64 = alloc
+                .extent_alloc
+                .get_extent_data_refs(disk_bytenr)
+                .unwrap()
+                .iter()
+                .map(|r| u64::from(r.count))
+                .sum();
+            assert_eq!(before, 1, "a FrankenFS-written extent starts at refcount 1");
+
+            let extra = ffs_btrfs::BtrfsExtentDataRef {
+                root: BTRFS_FS_TREE_OBJECTID,
+                objectid: 9999,
+                offset: 0,
+                count: 1,
+            };
+            let extra_key = BtrfsKey {
+                objectid: disk_bytenr,
+                item_type: ffs_btrfs::BTRFS_ITEM_EXTENT_DATA_REF,
+                offset: 0xDEAD_BEEF,
+            };
+            alloc
+                .extent_alloc
+                .extent_tree_mut()
+                .insert(extra_key, &extra.to_bytes())
+                .unwrap();
+            let after: u64 = alloc
+                .extent_alloc
+                .get_extent_data_refs(disk_bytenr)
+                .unwrap()
+                .iter()
+                .map(|r| u64::from(r.count))
+                .sum();
+            assert_eq!(after, 2, "extent is now shared (refcount 2)");
+        }
+
+        let err = ops
+            .unlink(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("shared.bin"),
+            )
+            .expect_err("deleting a file with a shared extent must be refused");
+        assert!(
+            matches!(err, FfsError::UnsupportedFeature(_)),
+            "expected UnsupportedFeature for shared-extent delete, got {err:?}"
+        );
     }
 
     #[test]
