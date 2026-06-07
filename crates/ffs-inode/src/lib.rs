@@ -505,6 +505,189 @@ fn free_indirect_blocks(
     Ok(())
 }
 
+/// Recursively free data blocks at or beyond logical block `cutoff` within an
+/// indirect pointer block at indirection `level`, whose first entry maps logical
+/// block `base`. Frees deeper metadata blocks that become empty, zeroes the
+/// freed pointer slots, and returns `(blocks_freed, block_is_now_empty)`. The
+/// caller frees `block` itself when this returns empty.
+#[allow(clippy::too_many_arguments)] // recursive chain walk threads device + alloc + geometry
+fn free_indirect_subtree_range(
+    cx: &Cx,
+    dev: &dyn BlockDevice,
+    geo: &FsGeometry,
+    groups: &mut [GroupStats],
+    block: BlockNumber,
+    level: u32,
+    base: u64,
+    cutoff: u64,
+    ppb: u64,
+    pctx: &ffs_alloc::PersistCtx,
+) -> Result<(u64, bool)> {
+    cx_checkpoint(cx)?;
+    let buf = dev.read_block(cx, block)?;
+    let mut data = buf.as_slice().to_vec();
+    let entry_span = ppb.saturating_pow(level - 1);
+    let mut freed = 0u64;
+    let mut dirty = false;
+
+    for i in 0..ppb {
+        let child_base = base.saturating_add(i.saturating_mul(entry_span));
+        // Entry's whole logical range is below the cutoff — keep untouched.
+        if child_base.saturating_add(entry_span) <= cutoff {
+            continue;
+        }
+        let off = match usize::try_from(i) {
+            Ok(idx) => idx * 4,
+            Err(_) => break,
+        };
+        if off + 4 > data.len() {
+            break;
+        }
+        let ptr = u32::from_le_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]]);
+        if ptr == 0 {
+            continue;
+        }
+        let child = BlockNumber(u64::from(ptr));
+        let free_this = if level == 1 {
+            child_base >= cutoff
+        } else {
+            let (child_freed, child_empty) = free_indirect_subtree_range(
+                cx,
+                dev,
+                geo,
+                groups,
+                child,
+                level - 1,
+                child_base,
+                cutoff,
+                ppb,
+                pctx,
+            )?;
+            freed = freed.saturating_add(child_freed);
+            child_empty
+        };
+        if free_this {
+            ffs_alloc::free_blocks_persist(cx, dev, geo, groups, child, 1, pctx)?;
+            data[off..off + 4].copy_from_slice(&0u32.to_le_bytes());
+            dirty = true;
+            freed = freed.saturating_add(1);
+        }
+    }
+
+    let empty = data.iter().all(|&b| b == 0);
+    // Persist zeroed slots only when the block survives; an emptied block is
+    // freed by the caller, so its contents become unreachable.
+    if dirty && !empty {
+        dev.write_block(cx, block, &data)?;
+    }
+    Ok((freed, empty))
+}
+
+/// Truncate a legacy indirect-mapped inode down to logical block `cutoff`.
+///
+/// Frees its data + now-empty indirect-metadata blocks at or beyond `cutoff`,
+/// zeroing the inode's pointer slots, and returns the number of freed
+/// filesystem blocks (for `i_blocks` accounting). Returns 0 for any inode that
+/// is not indirect-mapped (extent/inline/fast-symlink/device/empty) — never
+/// misreads such an `i_block` as pointers. Used by orphan recovery to complete
+/// an interrupted truncate.
+pub fn truncate_indirect_blocks(
+    cx: &Cx,
+    dev: &dyn BlockDevice,
+    geo: &FsGeometry,
+    groups: &mut [GroupStats],
+    inode: &mut Ext4Inode,
+    cutoff: u64,
+    pctx: &ffs_alloc::PersistCtx,
+) -> Result<u64> {
+    if !inode_uses_indirect_blocks(inode) || inode.extent_bytes.len() < 60 {
+        return Ok(0);
+    }
+    let ppb = u64::from(geo.block_size) / 4;
+    let mut freed = 0u64;
+
+    // Direct blocks i_block[0..12].
+    for lb in 0..12usize {
+        if (lb as u64) < cutoff {
+            continue;
+        }
+        let off = lb * 4;
+        let ptr = u32::from_le_bytes([
+            inode.extent_bytes[off],
+            inode.extent_bytes[off + 1],
+            inode.extent_bytes[off + 2],
+            inode.extent_bytes[off + 3],
+        ]);
+        if ptr != 0 {
+            ffs_alloc::free_blocks_persist(
+                cx,
+                dev,
+                geo,
+                groups,
+                BlockNumber(u64::from(ptr)),
+                1,
+                pctx,
+            )?;
+            inode.extent_bytes[off..off + 4].copy_from_slice(&0u32.to_le_bytes());
+            freed = freed.saturating_add(1);
+        }
+    }
+
+    // Single / double / triple indirect roots.
+    for (idx, level, base) in [
+        (12usize, 1u32, 12u64),
+        (13usize, 2u32, 12u64.saturating_add(ppb)),
+        (
+            14usize,
+            3u32,
+            12u64.saturating_add(ppb).saturating_add(ppb.saturating_mul(ppb)),
+        ),
+    ] {
+        let span = ppb.saturating_pow(level);
+        if base.saturating_add(span) <= cutoff {
+            continue;
+        }
+        let off = idx * 4;
+        let root_ptr = u32::from_le_bytes([
+            inode.extent_bytes[off],
+            inode.extent_bytes[off + 1],
+            inode.extent_bytes[off + 2],
+            inode.extent_bytes[off + 3],
+        ]);
+        if root_ptr == 0 {
+            continue;
+        }
+        let (sub_freed, empty) = free_indirect_subtree_range(
+            cx,
+            dev,
+            geo,
+            groups,
+            BlockNumber(u64::from(root_ptr)),
+            level,
+            base,
+            cutoff,
+            ppb,
+            pctx,
+        )?;
+        freed = freed.saturating_add(sub_freed);
+        if empty {
+            ffs_alloc::free_blocks_persist(
+                cx,
+                dev,
+                geo,
+                groups,
+                BlockNumber(u64::from(root_ptr)),
+                1,
+                pctx,
+            )?;
+            inode.extent_bytes[off..off + 4].copy_from_slice(&0u32.to_le_bytes());
+            freed = freed.saturating_add(1);
+        }
+    }
+
+    Ok(freed)
+}
+
 /// Delete an inode: truncate all extents, free the inode, zero the on-disk data.
 #[expect(clippy::too_many_arguments)]
 pub fn delete_inode(
@@ -1188,6 +1371,69 @@ mod tests {
         assert_eq!(inode.links_count, 0);
         assert_eq!(inode.dtime, 1_700_000_001);
         assert_eq!(groups[0].free_inodes, free_before + 1);
+    }
+
+    /// bd-c7t59 follow-up: truncate_indirect_blocks (used by orphan recovery to
+    /// complete an interrupted truncate of a legacy indirect file) frees the data
+    /// + now-empty indirect-metadata blocks at/after the cutoff, zeroes the freed
+    /// inode pointer slots, and leaves blocks below the cutoff intact.
+    #[test]
+    fn truncate_indirect_blocks_frees_range_and_zeroes_slots() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let geo = make_geometry();
+        let mut groups = make_groups(&geo);
+        // Move group 0's block bitmap off the gdt block (1) so descriptor
+        // persistence doesn't clobber the bitmap mid-test.
+        groups[0].block_bitmap_block = BlockNumber(10);
+
+        // Mark the file's blocks allocated in group 0's bitmap (block 10):
+        //   2000 = logical 0 (kept), 2001 = logical 1 (freed),
+        //   2002 = logical 12 data (freed), 2500 = single-indirect root (freed).
+        let mut bitmap = vec![0u8; 4096];
+        for &b in &[2000usize, 2001, 2002, 2500] {
+            bitmap[b / 8] |= 1 << (b % 8);
+        }
+        dev.write_block(&cx, BlockNumber(10), &bitmap).unwrap();
+        groups[0].free_blocks = geo.blocks_per_group - 4;
+
+        // Single-indirect block 2500: pointer[0] -> data block 2002 (logical 12).
+        let mut ind = vec![0u8; 4096];
+        ind[0..4].copy_from_slice(&2002u32.to_le_bytes());
+        dev.write_block(&cx, BlockNumber(2500), &ind).unwrap();
+
+        let mut inode = representative_inode();
+        inode.flags = 0; // legacy indirect (not extents, not inline)
+        inode.mode = 0o100_644; // regular file
+        inode.blocks = 4 * (4096 / 512); // four 4 KiB blocks, in 512-byte sectors
+        inode.size = 13 * 4096; // spans through logical block 12
+        let mut eb = vec![0u8; 60];
+        eb[0..4].copy_from_slice(&2000u32.to_le_bytes()); // i_block[0]  -> logical 0
+        eb[4..8].copy_from_slice(&2001u32.to_le_bytes()); // i_block[1]  -> logical 1
+        eb[48..52].copy_from_slice(&2500u32.to_le_bytes()); // i_block[12] -> single-indirect root
+        inode.extent_bytes = eb;
+
+        let freed = truncate_indirect_blocks(
+            &cx,
+            &dev,
+            &geo,
+            &mut groups,
+            &mut inode,
+            1, // cutoff: free everything from logical block 1 onward
+            &mock_pctx(),
+        )
+        .unwrap();
+
+        assert_eq!(freed, 3, "frees direct[1] + single-indirect data + its root");
+        // Slot 0 (logical 0) survives; slot 1 and the single-indirect root cleared.
+        assert_eq!(&inode.extent_bytes[0..4], &2000u32.to_le_bytes(), "logical 0 kept");
+        assert_eq!(&inode.extent_bytes[4..8], &[0, 0, 0, 0], "logical 1 slot cleared");
+        assert_eq!(&inode.extent_bytes[48..52], &[0, 0, 0, 0], "single-indirect root cleared");
+        assert_eq!(
+            groups[0].free_blocks,
+            geo.blocks_per_group - 1,
+            "three of the four allocated blocks were freed"
+        );
     }
 
     #[test]

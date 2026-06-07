@@ -3459,6 +3459,41 @@ impl OpenFs {
                         ino,
                         -(i128::from(freed_sectors)),
                     )?;
+                } else {
+                    // Legacy indirect-block-mapped truncate-orphan: free the
+                    // data + indirect-metadata blocks beyond the recorded size.
+                    // Without this they leak (same class as bd-c7t59, but the
+                    // links_count > 0 / interrupted-truncate recovery path).
+                    let cutoff = inode.size.div_ceil(u64::from(alloc.geo.block_size));
+                    let Ext4AllocState {
+                        geo,
+                        groups,
+                        persist_ctx,
+                    } = &mut alloc;
+                    let freed = ffs_inode::truncate_indirect_blocks(
+                        cx, &block_dev, geo, groups, &mut inode, cutoff, persist_ctx,
+                    )?;
+                    if freed > 0 {
+                        let freed_sectors = if inode.is_huge_file() {
+                            freed
+                        } else {
+                            freed
+                                .checked_mul(u64::from(geo.block_size / EXT4_SECTOR_SIZE))
+                                .ok_or_else(|| FfsError::Corruption {
+                                    block: 0,
+                                    detail: format!(
+                                        "inode {} orphan indirect truncation freed sectors overflow",
+                                        ino.0
+                                    ),
+                                })?
+                        };
+                        inode.blocks = Self::ext4_checked_inode_blocks_delta(
+                            inode.blocks,
+                            ino,
+                            -(i128::from(freed_sectors)),
+                        )?;
+                        self.extent_cache.invalidate_all();
+                    }
                 }
 
                 inode.dtime = 0;
