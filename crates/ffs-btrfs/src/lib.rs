@@ -6451,21 +6451,28 @@ where
     let refs: Vec<(SendAttr, &[u8])> = attrs.iter().map(|(a, d)| (*a, d.as_slice())).collect();
     builder.add_command(cmd, &refs);
 
-    // Build inode -> parent mapping from INODE_REF items
-    // key.objectid = child inode, key.offset = parent inode
-    let mut inode_parents: BTreeMap<u64, (u64, Vec<u8>)> = BTreeMap::new();
+    // Build inode -> links mapping from INODE_REF items. key.objectid = child
+    // inode, key.offset = parent inode; an item can list several names (links
+    // into the same parent), and an inode can have several INODE_REF items
+    // (links into different parents). Collect ALL (parent, name) links so hard
+    // links beyond the first are emitted as `link` commands, not dropped.
+    let mut inode_links: BTreeMap<u64, Vec<(u64, Vec<u8>)>> = BTreeMap::new();
     for entry in items {
         if entry.key.item_type == BTRFS_ITEM_INODE_REF {
             if let Ok(refs) = parse_inode_refs(&entry.data) {
-                if let Some(first_ref) = refs.first() {
-                    inode_parents.insert(
-                        entry.key.objectid,
-                        (entry.key.offset, first_ref.name.clone()),
-                    );
+                let links = inode_links.entry(entry.key.objectid).or_default();
+                for r in refs {
+                    links.push((entry.key.offset, r.name.clone()));
                 }
             }
         }
     }
+    // The primary link (first) drives path construction; the rest become hard
+    // links.
+    let inode_parents: BTreeMap<u64, (u64, Vec<u8>)> = inode_links
+        .iter()
+        .filter_map(|(&ino, links)| links.first().map(|(p, n)| (ino, (*p, n.clone()))))
+        .collect();
 
     // Build path for an inode by walking up the parent chain
     let build_path = |ino: u64| -> Vec<u8> {
@@ -6696,6 +6703,24 @@ where
                 builder.add_command(cmd, &refs);
             }
             _ => continue,
+        }
+
+        // Emit hard links: a non-directory inode reachable by more than one name
+        // is created once (above, at its primary path) and linked at each
+        // additional path. All parent dirs are already emitted, so the link path
+        // resolves. (Directories cannot be hard-linked.)
+        if file_type != ffs_types::S_IFDIR {
+            if let Some(links) = inode_links.get(&ino) {
+                for (parent, name) in links.iter().skip(1) {
+                    let mut link_path = build_path(*parent);
+                    link_path.push(b'/');
+                    link_path.extend_from_slice(name);
+                    let (cmd, attrs) = build_link_command(&link_path, &path);
+                    let refs: Vec<(SendAttr, &[u8])> =
+                        attrs.iter().map(|(a, d)| (*a, d.as_slice())).collect();
+                    builder.add_command(cmd, &refs);
+                }
+            }
         }
 
         // Emit xattrs
@@ -17935,6 +17960,92 @@ mod tests {
         assert!(
             mkdir_pos < mkfile_pos,
             "parent dir mkdir (pos {mkdir_pos}) must precede child mkfile (pos {mkfile_pos})"
+        );
+    }
+
+    /// bd-zvv7r: a hard-linked file (reachable by >1 name) must be created once
+    /// at its primary path and LINKED at every additional path — not dropped.
+    #[test]
+    fn generate_send_stream_emits_link_for_additional_hardlinks() {
+        const ATTR_PATH: u16 = SendAttr::Path as u16;
+        const ATTR_PATH_LINK: u16 = SendAttr::PathLink as u16;
+
+        fn make_inode_item(mode: u32) -> Vec<u8> {
+            let mut buf = vec![0u8; 160];
+            buf[0..8].copy_from_slice(&1_u64.to_le_bytes());
+            buf[40..44].copy_from_slice(&2_u32.to_le_bytes()); // nlink 2
+            buf[52..56].copy_from_slice(&mode.to_le_bytes());
+            buf
+        }
+        #[expect(clippy::cast_possible_truncation)]
+        fn make_inode_ref(index: u64, name: &[u8]) -> Vec<u8> {
+            let mut buf = Vec::new();
+            buf.extend_from_slice(&index.to_le_bytes());
+            buf.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            buf.extend_from_slice(name);
+            buf
+        }
+
+        // Dirs a(257) and b(258) under root; file f(259) hard-linked as a/f1 and
+        // b/f2 (two INODE_REF items, distinct parents).
+        let items = vec![
+            BtrfsLeafEntry {
+                key: BtrfsKey { objectid: 256, item_type: BTRFS_ITEM_INODE_ITEM, offset: 0 },
+                data: make_inode_item(0o40755),
+            },
+            BtrfsLeafEntry {
+                key: BtrfsKey { objectid: 257, item_type: BTRFS_ITEM_INODE_ITEM, offset: 0 },
+                data: make_inode_item(0o40755),
+            },
+            BtrfsLeafEntry {
+                key: BtrfsKey { objectid: 257, item_type: BTRFS_ITEM_INODE_REF, offset: 256 },
+                data: make_inode_ref(2, b"a"),
+            },
+            BtrfsLeafEntry {
+                key: BtrfsKey { objectid: 258, item_type: BTRFS_ITEM_INODE_ITEM, offset: 0 },
+                data: make_inode_item(0o40755),
+            },
+            BtrfsLeafEntry {
+                key: BtrfsKey { objectid: 258, item_type: BTRFS_ITEM_INODE_REF, offset: 256 },
+                data: make_inode_ref(2, b"b"),
+            },
+            BtrfsLeafEntry {
+                key: BtrfsKey { objectid: 259, item_type: BTRFS_ITEM_INODE_ITEM, offset: 0 },
+                data: make_inode_item(0o100_644),
+            },
+            BtrfsLeafEntry {
+                key: BtrfsKey { objectid: 259, item_type: BTRFS_ITEM_INODE_REF, offset: 257 },
+                data: make_inode_ref(2, b"f1"),
+            },
+            BtrfsLeafEntry {
+                key: BtrfsKey { objectid: 259, item_type: BTRFS_ITEM_INODE_REF, offset: 258 },
+                data: make_inode_ref(3, b"f2"),
+            },
+        ];
+
+        let uuid = [0u8; 16];
+        let stream = generate_send_stream(&items, b"sv", &uuid, 1, |_b, _l, _r, _c| Ok(Vec::new()))
+            .expect("generate send stream");
+        let parsed = parse_send_stream(&stream).expect("parse stream");
+
+        let attr = |c: &SendStreamCommand, t: u16| -> Option<Vec<u8>> {
+            c.attrs.iter().find(|(ty, _)| *ty == t).map(|(_, d)| d.clone())
+        };
+        // mkfile at the primary path a/f1.
+        assert!(
+            parsed.commands.iter().any(|c| c.cmd == SendCommand::Mkfile
+                && attr(c, ATTR_PATH).as_deref() == Some(b"sv/a/f1".as_ref())),
+            "file created once at its primary path"
+        );
+        // link b/f2 -> a/f1 for the second hard link.
+        let link = parsed.commands.iter().find(|c| {
+            c.cmd == SendCommand::Link && attr(c, ATTR_PATH).as_deref() == Some(b"sv/b/f2".as_ref())
+        });
+        let link = link.expect("second hard link must emit a Link command");
+        assert_eq!(
+            attr(link, ATTR_PATH_LINK).as_deref(),
+            Some(b"sv/a/f1".as_ref()),
+            "Link must target the primary path"
         );
     }
 
