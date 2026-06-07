@@ -28,6 +28,12 @@ const JBD2_FEATURE_INCOMPAT_CSUM_V2: u32 = 0x0000_0008;
 const JBD2_FEATURE_INCOMPAT_CSUM_V3: u32 = 0x0000_0010;
 const JBD2_FEATURE_INCOMPAT_FAST_COMMIT: u32 = 0x0000_0020;
 
+/// Fast-commit features understood by the replayer. The kernel defines
+/// `EXT4_FC_SUPPORTED_FEATURES` as 0 (no fast-commit feature bits exist yet);
+/// `ext4_fc_replay_scan` aborts with -EOPNOTSUPP if the HEAD's `fc_features`
+/// carries any bit outside this mask, falling back to full JBD2 recovery.
+const EXT4_FC_SUPPORTED_FEATURES: u32 = 0x0000_0000;
+
 const JBD2_HEADER_SIZE: usize = 12;
 const JBD2_REVOKE_HEADER_SIZE: usize = 16; // journal header (12) + r_count (4)
 const JBD2_TAG_SIZE_32: usize = 8;
@@ -1812,6 +1818,17 @@ pub fn replay_fast_commit(data: &[u8]) -> Result<FcReplayResult> {
                     result.fallback_required = true;
                     continue;
                 }
+                // Mirror ext4_fc_replay_scan: an FC stream advertising any
+                // feature bit outside EXT4_FC_SUPPORTED_FEATURES cannot be
+                // safely interpreted, so fall back to full JBD2 recovery
+                // rather than misreading feature-gated semantics.
+                let fc_features =
+                    u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                if fc_features & !EXT4_FC_SUPPORTED_FEATURES != 0 {
+                    discard_pending_fc_transaction(&mut result, &mut pending);
+                    result.fallback_required = true;
+                    continue;
+                }
                 discard_pending_fc_transaction(&mut result, &mut pending);
                 pending.active = true;
                 result.record_block_scanned();
@@ -1894,6 +1911,43 @@ mod fc_tests {
         // repr(u16) discriminants equal the on-disk values.
         assert_eq!(FcTag::AddRange as u16, 0x0001);
         assert_eq!(FcTag::Head as u16, 0x0009);
+    }
+
+    /// The kernel's ext4_fc_replay_scan aborts fast-commit replay (-EOPNOTSUPP)
+    /// when the HEAD's fc_features carries any bit outside
+    /// EXT4_FC_SUPPORTED_FEATURES (currently 0). A stream advertising an unknown
+    /// FC feature must fall back to full JBD2 recovery, not be interpreted.
+    #[test]
+    fn replay_head_with_unsupported_fc_features_forces_fallback() {
+        let mut data = Vec::new();
+        let mut head = [0_u8; 8];
+        head[0..4].copy_from_slice(&1_u32.to_le_bytes()); // fc_features = 1 (unknown)
+        data.extend(build_fc_tag(0x09, &head)); // HEAD
+        data.extend(build_fc_tag(0x06, &42_u32.to_le_bytes())); // INODE
+        let mut tail = Vec::new();
+        tail.extend_from_slice(&1_u32.to_le_bytes());
+        tail.extend_from_slice(&0_u32.to_le_bytes());
+        data.extend(build_fc_tag(0x08, &tail)); // TAIL
+
+        let result = replay_fast_commit(&data).unwrap();
+        assert!(
+            result.fallback_required,
+            "an unknown FC feature bit must force JBD2 fallback"
+        );
+        assert!(result.operations.is_empty());
+        assert_eq!(result.transactions_found, 0);
+        // A zero fc_features HEAD is still accepted (regression guard).
+        let mut ok = Vec::new();
+        ok.extend(build_fc_tag(0x09, &[0_u8; 8])); // HEAD, fc_features = 0
+        ok.extend(build_fc_tag(0x06, &7_u32.to_le_bytes())); // INODE
+        let mut tail2 = Vec::new();
+        tail2.extend_from_slice(&3_u32.to_le_bytes());
+        tail2.extend_from_slice(&0_u32.to_le_bytes());
+        ok.extend(build_fc_tag(0x08, &tail2)); // TAIL
+        let ok_result = replay_fast_commit(&ok).unwrap();
+        assert_eq!(ok_result.transactions_found, 1);
+        assert_eq!(ok_result.operations, vec![FcOperation::InodeUpdate(7)]);
+        assert!(!ok_result.fallback_required);
     }
 
     #[test]
