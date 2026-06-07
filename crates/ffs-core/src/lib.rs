@@ -16935,6 +16935,7 @@ impl OpenFs {
         Ok(())
     }
 
+    #[allow(clippy::too_many_lines)] // preflight share-check + materialize/re-insert loop
     fn btrfs_remove_overlapping_extent_data(
         &self,
         cx: &Cx,
@@ -16961,6 +16962,48 @@ impl OpenFs {
             .fs_tree
             .range(&ext_start, &ext_end)
             .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+
+        // SAFETY PREFLIGHT (bd-xkvcm): the loop below frees overlapping data
+        // extents via the non-refcount-aware free_extent. Freeing a SHARED data
+        // extent (EXTENT_ITEM refs > 1: reflink/snapshot/CoW) would orphan the
+        // other references = corruption. Because this routine mutates in place
+        // (delete + free + re-insert per extent), refuse UPFRONT — before any
+        // mutation — if any overlapping extent is shared, so the file is left
+        // untouched rather than half-rewritten. FrankenFS's own extents are
+        // refs == 1, so this never triggers on FrankenFS-written files.
+        for (key, extent_bytes) in &extents {
+            let extent = parse_extent_data(extent_bytes).map_err(|e| parse_to_ffs_error(&e))?;
+            let logical_len = Self::btrfs_extent_logical_len(&extent)?;
+            let logical_end = key
+                .offset
+                .checked_add(logical_len)
+                .ok_or_else(|| FfsError::InvalidGeometry("extent logical end overflow".into()))?;
+            if key.offset.max(range_start) >= logical_end.min(range_end) {
+                continue; // no overlap with the modified range
+            }
+            if let BtrfsExtentData::Regular {
+                disk_bytenr,
+                disk_num_bytes,
+                ..
+            } = extent
+            {
+                if disk_bytenr > 0 {
+                    if let Some(refs) = alloc
+                        .extent_alloc
+                        .extent_item_refs(disk_bytenr, disk_num_bytes)
+                        .map_err(|e| btrfs_mutation_to_ffs(&e))?
+                    {
+                        if refs > 1 {
+                            return Err(FfsError::UnsupportedFeature(format!(
+                                "cannot modify inode {canonical}: overlapping data extent \
+                                 {disk_bytenr} is shared ({refs} references: reflink/snapshot); \
+                                 refcount-aware extent free is not yet implemented (bd-xkvcm)"
+                            )));
+                        }
+                    }
+                }
+            }
+        }
 
         for (key, extent_bytes) in extents {
             let extent = parse_extent_data(&extent_bytes).map_err(|e| parse_to_ffs_error(&e))?;
@@ -17050,6 +17093,33 @@ impl OpenFs {
         alloc: &mut BtrfsAllocState,
         extents: &[(BtrfsKey, BtrfsExtentData)],
     ) -> ffs_error::Result<()> {
+        // SAFETY PREFLIGHT (bd-xkvcm): refuse before any mutation if any of these
+        // extents is SHARED (EXTENT_ITEM refs > 1: reflink/snapshot/CoW). The
+        // free_extent below is not refcount-aware and would orphan the other
+        // references = corruption. The slice is already collected, so this scan
+        // is read-only and the refusal is atomic (no partial rewrite).
+        for (key, extent) in extents {
+            if let BtrfsExtentData::Regular {
+                disk_bytenr,
+                disk_num_bytes,
+                ..
+            } = extent
+                && *disk_bytenr > 0
+                && let Some(refs) = alloc
+                    .extent_alloc
+                    .extent_item_refs(*disk_bytenr, *disk_num_bytes)
+                    .map_err(|e| btrfs_mutation_to_ffs(&e))?
+                && refs > 1
+            {
+                return Err(FfsError::UnsupportedFeature(format!(
+                    "cannot modify inode {}: data extent {} is shared ({} references: \
+                     reflink/snapshot); refcount-aware extent free is not yet implemented \
+                     (bd-xkvcm)",
+                    key.objectid, disk_bytenr, refs
+                )));
+            }
+        }
+
         for (key, extent) in extents {
             alloc
                 .fs_tree
@@ -58392,6 +58462,100 @@ mod tests {
             matches!(err, FfsError::UnsupportedFeature(_)),
             "expected UnsupportedFeature for shared-extent delete, got {err:?}"
         );
+    }
+
+    /// bd-xkvcm: OVERWRITING (partial write over) a SHARED data extent must also
+    /// be refused — atomically, before any mutation — so the other reference is
+    /// not corrupted and the file is left byte-for-byte intact. Covers the
+    /// btrfs_remove_overlapping_extent_data path (the delete-path guard does not
+    /// cover overwrite).
+    #[test]
+    fn btrfs_overwrite_refuses_shared_extent_bd_xkvcm() {
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+
+        let attr = ops
+            .create(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("shared_ow.bin"),
+                0o644,
+                0,
+                0,
+            )
+            .unwrap();
+        let original = vec![0x5A_u8; 8192];
+        ops.write(&cx, &mut RequestScope::empty(), attr.ino, 0, &original)
+            .unwrap();
+        let canonical = fs.btrfs_canonical_inode(attr.ino).unwrap();
+
+        // Bump the file's data extent EXTENT_ITEM refcount to 2 (shared).
+        {
+            let alloc_mutex = fs.btrfs_alloc_state.as_ref().expect("btrfs alloc state");
+            let mut alloc = alloc_mutex.lock();
+            let start = BtrfsKey {
+                objectid: canonical,
+                item_type: BTRFS_ITEM_EXTENT_DATA,
+                offset: 0,
+            };
+            let end = BtrfsKey {
+                objectid: canonical,
+                item_type: BTRFS_ITEM_EXTENT_DATA,
+                offset: u64::MAX,
+            };
+            let (_, data) = alloc
+                .fs_tree
+                .range(&start, &end)
+                .unwrap()
+                .into_iter()
+                .next()
+                .expect("file has an extent");
+            let (disk_bytenr, disk_num_bytes) = match parse_extent_data(&data).unwrap() {
+                BtrfsExtentData::Regular {
+                    disk_bytenr,
+                    disk_num_bytes,
+                    ..
+                } => (disk_bytenr, disk_num_bytes),
+                other => panic!("expected a regular extent, got {other:?}"),
+            };
+            let ei_key = BtrfsKey {
+                objectid: disk_bytenr,
+                item_type: ffs_btrfs::BTRFS_ITEM_EXTENT_ITEM,
+                offset: disk_num_bytes,
+            };
+            let mut ei_data = alloc
+                .extent_alloc
+                .extent_tree_mut()
+                .range(&ei_key, &ei_key)
+                .unwrap()
+                .into_iter()
+                .next()
+                .expect("EXTENT_ITEM present")
+                .1;
+            ei_data[0..8].copy_from_slice(&2u64.to_le_bytes());
+            alloc.extent_alloc.extent_tree_mut().delete(&ei_key).unwrap();
+            alloc
+                .extent_alloc
+                .extent_tree_mut()
+                .insert(ei_key, &ei_data)
+                .unwrap();
+        }
+
+        // A partial overwrite into the shared extent must be refused.
+        let err = ops
+            .write(&cx, &mut RequestScope::empty(), attr.ino, 4096, &[0xFF_u8; 2048])
+            .expect_err("overwriting a shared extent must be refused");
+        assert!(
+            matches!(err, FfsError::UnsupportedFeature(_)),
+            "expected UnsupportedFeature for shared-extent overwrite, got {err:?}"
+        );
+
+        // The file must be byte-for-byte intact (atomic refusal, no partial write).
+        let read = ops
+            .read(&cx, &mut RequestScope::empty(), attr.ino, 0, 8192)
+            .unwrap();
+        assert_eq!(read, original, "refused overwrite must leave the file untouched");
     }
 
     #[test]
