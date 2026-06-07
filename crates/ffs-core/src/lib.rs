@@ -9979,6 +9979,213 @@ impl OpenFs {
         Ok(())
     }
 
+    /// Free a single filesystem block back to the allocator (bitmap + group
+    /// descriptor counts), persisting the update.
+    fn free_one_block(
+        &self,
+        cx: &Cx,
+        alloc: &mut Ext4AllocState,
+        block: BlockNumber,
+    ) -> Result<(), FfsError> {
+        let dev = self.block_device_adapter();
+        let Ext4AllocState {
+            geo,
+            groups,
+            persist_ctx,
+            ..
+        } = &mut *alloc;
+        ffs_alloc::free_blocks_persist(cx, &dev, geo, groups, block, 1, persist_ctx)?;
+        Ok(())
+    }
+
+    /// Recursively free data blocks at or beyond `cutoff` within the indirect
+    /// pointer block `ptr_block` at indirection `level` (1 = single → data
+    /// blocks, 2 = double, 3 = triple), whose first entry maps logical data
+    /// block `base_logical`. Returns `(blocks_freed, ptr_block_is_now_empty)`.
+    ///
+    /// Deeper metadata blocks that become fully empty are freed here and their
+    /// parent slot zeroed; `ptr_block` itself is freed by the caller when this
+    /// returns empty. Surviving slots that were freed are persisted as zero so a
+    /// later read never follows a stale pointer into a recycled block.
+    #[allow(clippy::too_many_arguments)] // recursive chain walk threads device + alloc + geometry
+    fn free_indirect_subtree(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        alloc: &mut Ext4AllocState,
+        ptr_block: BlockNumber,
+        level: u32,
+        base_logical: u64,
+        cutoff: u64,
+        ppb: u64,
+    ) -> Result<(u64, bool), FfsError> {
+        let mut data = self.read_block_with_scope(cx, scope, ptr_block)?;
+        // Data blocks covered by each of the `ppb` entries at this level.
+        let entry_span = ppb.saturating_pow(level - 1);
+        let mut freed = 0u64;
+        let mut dirty = false;
+
+        for i in 0..ppb {
+            let child_base = base_logical.saturating_add(i.saturating_mul(entry_span));
+            // Entry's whole logical range is below the cutoff — keep untouched.
+            if child_base.saturating_add(entry_span) <= cutoff {
+                continue;
+            }
+            let idx = usize::try_from(i)
+                .map_err(|_| FfsError::Format("indirect entry index does not fit usize".into()))?;
+            let slot = Self::indirect_pointer_slot(
+                &data,
+                ptr_block,
+                idx,
+                "indirect block too small for pointer slot",
+            )?;
+            let ptr = u32::from_le_bytes([
+                data[slot.start],
+                data[slot.start + 1],
+                data[slot.start + 2],
+                data[slot.start + 3],
+            ]);
+            if ptr == 0 {
+                continue; // hole
+            }
+            let child = BlockNumber(u64::from(ptr));
+
+            let free_this = if level == 1 {
+                // Leaf entry: a data block at logical `child_base`.
+                child_base >= cutoff
+            } else {
+                // Interior entry: recurse, then free the child metadata block iff
+                // it became empty.
+                let (child_freed, child_empty) = self.free_indirect_subtree(
+                    cx,
+                    scope,
+                    alloc,
+                    child,
+                    level - 1,
+                    child_base,
+                    cutoff,
+                    ppb,
+                )?;
+                freed = freed.saturating_add(child_freed);
+                child_empty
+            };
+
+            if free_this {
+                self.free_one_block(cx, alloc, child)?;
+                Self::write_indirect_pointer_slot(
+                    &mut data,
+                    ptr_block,
+                    idx,
+                    0,
+                    "indirect block too small for pointer slot",
+                )?;
+                dirty = true;
+                freed = freed.saturating_add(1);
+            }
+        }
+
+        let empty = data.iter().all(|&b| b == 0);
+        // Persist the zeroed slots only when the block survives; if it is now
+        // empty the caller frees it and zeroes the parent slot, so its contents
+        // become unreachable.
+        if dirty && !empty {
+            if let Some(tx) = &mut scope.tx {
+                tx.stage_write_with_proof(ptr_block, data, MergeProof::DisjointBlocks);
+            } else {
+                self.block_device_adapter().write_block(cx, ptr_block, &data)?;
+            }
+        }
+        Ok((freed, empty))
+    }
+
+    /// Free all blocks of an indirect-block-mapped inode at or beyond logical
+    /// block `cutoff` (data blocks + now-empty indirect metadata blocks),
+    /// zeroing the corresponding pointer slots in the inode and on disk. Returns
+    /// the total number of freed filesystem blocks (for `i_blocks` accounting).
+    fn ext4_truncate_indirect(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        alloc: &mut Ext4AllocState,
+        inode: &mut Ext4Inode,
+        cutoff: u64,
+        block_size: u32,
+    ) -> Result<u64, FfsError> {
+        let ppb = u64::from(block_size) / 4;
+        let mut freed = 0u64;
+
+        // Direct blocks i_block[0..12].
+        for lb in 0..12u64 {
+            if lb < cutoff {
+                continue;
+            }
+            let off = usize::try_from(lb * 4)
+                .map_err(|_| FfsError::Format("direct pointer offset overflow".into()))?;
+            let slot = Self::indirect_pointer_slot(
+                &inode.extent_bytes,
+                BlockNumber(0),
+                usize::try_from(lb).unwrap_or(usize::MAX),
+                "inode extent_bytes too small for direct pointer",
+            )?;
+            let ptr = u32::from_le_bytes([
+                inode.extent_bytes[slot.start],
+                inode.extent_bytes[slot.start + 1],
+                inode.extent_bytes[slot.start + 2],
+                inode.extent_bytes[slot.start + 3],
+            ]);
+            if ptr != 0 {
+                self.free_one_block(cx, alloc, BlockNumber(u64::from(ptr)))?;
+                inode.extent_bytes[off..off + 4].copy_from_slice(&0u32.to_le_bytes());
+                freed = freed.saturating_add(1);
+            }
+        }
+
+        // Indirect roots: i_block[12] single, [13] double, [14] triple.
+        let roots = [
+            (12usize, 1u32, 12u64),
+            (13usize, 2u32, 12u64.saturating_add(ppb)),
+            (
+                14usize,
+                3u32,
+                12u64.saturating_add(ppb).saturating_add(ppb.saturating_mul(ppb)),
+            ),
+        ];
+        for (iblock_idx, level, base_logical) in roots {
+            let span = ppb.saturating_pow(level);
+            // Entire region below the cutoff — keep the whole root untouched.
+            if base_logical.saturating_add(span) <= cutoff {
+                continue;
+            }
+            let off = iblock_idx * 4;
+            let slot = Self::indirect_pointer_slot(
+                &inode.extent_bytes,
+                BlockNumber(0),
+                iblock_idx,
+                "inode extent_bytes too small for indirect root pointer",
+            )?;
+            let root_ptr = u32::from_le_bytes([
+                inode.extent_bytes[slot.start],
+                inode.extent_bytes[slot.start + 1],
+                inode.extent_bytes[slot.start + 2],
+                inode.extent_bytes[slot.start + 3],
+            ]);
+            if root_ptr == 0 {
+                continue;
+            }
+            let root = BlockNumber(u64::from(root_ptr));
+            let (sub_freed, empty) =
+                self.free_indirect_subtree(cx, scope, alloc, root, level, base_logical, cutoff, ppb)?;
+            freed = freed.saturating_add(sub_freed);
+            if empty {
+                self.free_one_block(cx, alloc, root)?;
+                inode.extent_bytes[off..off + 4].copy_from_slice(&0u32.to_le_bytes());
+                freed = freed.saturating_add(1);
+            }
+        }
+
+        Ok(freed)
+    }
+
     /// Collect previously allocated blocks for a cluster range before rewriting.
     ///
     /// Reads the current block pointers from the inode's direct block table,
@@ -15082,17 +15289,11 @@ impl OpenFs {
             if inode.flags & ffs_types::EXT4_APPEND_FL != 0 && new_size < inode.size {
                 return Err(FfsError::Io(std::io::Error::from_raw_os_error(libc::EPERM)));
             }
-            if (inode.flags & ffs_types::EXT4_EXTENTS_FL) == 0 {
-                return Err(FfsError::UnsupportedFeature(
-                    "truncation of non-extent (indirect block) files is not supported".into(),
-                ));
-            }
-
             if new_size != inode.size {
                 let mut alloc = alloc_mutex.lock();
                 let block_size = alloc.geo.block_size;
 
-                if new_size < inode.size {
+                if new_size < inode.size && (inode.flags & ffs_types::EXT4_EXTENTS_FL) != 0 {
                     // Truncate: free blocks beyond new size.
                     let new_logical_end_u64 = new_size.div_ceil(u64::from(block_size));
                     let new_logical_end = u32::try_from(new_logical_end_u64).map_err(|_| {
@@ -15211,6 +15412,66 @@ impl OpenFs {
                                 } else {
                                     block_dev.write_block(cx, physical_block, &block_data)?;
                                 }
+                            }
+                        }
+                    }
+                } else if new_size < inode.size {
+                    // Indirect-block (non-extent) truncate (bd-laay3 increment 3):
+                    // walk the pointer chain freeing data + now-empty indirect
+                    // metadata blocks at/after the new EOF.
+                    let cutoff = new_size.div_ceil(u64::from(block_size));
+                    let freed = self
+                        .ext4_truncate_indirect(cx, scope, &mut alloc, &mut inode, cutoff, block_size)?;
+                    // Freed blocks become recyclable into any inode/offset; drop
+                    // the extent cache for the same reason the extent path does.
+                    self.extent_cache.invalidate_all();
+                    let freed_sectors = if inode.is_huge_file() {
+                        freed
+                    } else {
+                        freed
+                            .checked_mul(u64::from(block_size / EXT4_SECTOR_SIZE))
+                            .ok_or_else(|| FfsError::Corruption {
+                                block: 0,
+                                detail: format!(
+                                    "inode {} indirect truncation freed sectors overflow",
+                                    ino.0
+                                ),
+                            })?
+                    };
+                    inode.blocks = Self::ext4_checked_inode_blocks_delta(
+                        inode.blocks,
+                        ino,
+                        -(i128::from(freed_sectors)),
+                    )?;
+
+                    // Zero the tail of the surviving partial block to prevent
+                    // data leakage past the new EOF.
+                    if new_size > 0 && new_size % u64::from(block_size) != 0 {
+                        let partial_lb =
+                            u32::try_from(new_size / u64::from(block_size)).map_err(|_| {
+                                FfsError::Format(
+                                    "truncation size exceeds ext4 32-bit logical block limit".into(),
+                                )
+                            })?;
+                        let partial_offset = usize::try_from(new_size % u64::from(block_size))
+                            .map_err(|_| {
+                                FfsError::Format("truncation offset exceeds usize capacity".into())
+                            })?;
+                        if let Some(phys) =
+                            self.resolve_indirect_block(cx, scope, &inode, partial_lb)?
+                        {
+                            let physical_block = BlockNumber(phys);
+                            let mut block_data =
+                                self.read_block_with_scope(cx, scope, physical_block)?;
+                            block_data[partial_offset..].fill(0);
+                            if let Some(tx) = &mut scope.tx {
+                                let tx_dev = TransactionBlockAdapter {
+                                    base: &block_dev,
+                                    tx: Mutex::new(tx),
+                                };
+                                tx_dev.write_block(cx, physical_block, &block_data)?;
+                            } else {
+                                block_dev.write_block(cx, physical_block, &block_data)?;
                             }
                         }
                     }
@@ -28547,6 +28808,95 @@ mod tests {
             fs.read(&cx, ino, far_off, bs as u32).expect("far"),
             far,
             "far grown block holds the new data"
+        );
+    }
+
+    /// bd-laay3 increment 3: truncating a legacy indirect-block file frees the
+    /// data blocks AND the now-empty indirect-metadata blocks beyond the new EOF,
+    /// clears the freed pointer slots, decrements i_blocks, and zeroes the tail of
+    /// the surviving partial block (no data leakage).
+    #[test]
+    fn ext4_indirect_truncate_frees_chain_bd_laay3() {
+        let Some((fs, _tmp)) = open_writable_ext4_mkfs(16) else {
+            return; // mkfs.ext4 unavailable
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let bs = fs.block_size() as usize;
+        let spb = u64::from(fs.block_size() / EXT4_SECTOR_SIZE);
+
+        // Build an indirect file with block 0 (direct), then grow into the
+        // single-indirect region (logical block 12) so a single-indirect
+        // metadata block is allocated.
+        let ino = fs
+            .create(&cx, root, OsStr::new("trunc.bin"), 0o644, 0, 0)
+            .expect("create")
+            .ino;
+        let b0 = vec![0x01_u8; bs];
+        fs.write(&cx, ino, 0, &b0).expect("seed block 0");
+        let seeded = fs.read_inode(&cx, ino).expect("inode");
+        let phys0 = fs
+            .collect_extents(&cx, &seeded)
+            .expect("extents")
+            .iter()
+            .find(|e| e.logical_block == 0)
+            .map(|e| e.physical_start)
+            .expect("block 0 mapped");
+        let mut indirect = seeded.clone();
+        indirect.flags &= !ffs_types::EXT4_EXTENTS_FL;
+        let mut iblock = vec![0_u8; 15 * 4];
+        iblock[0..4].copy_from_slice(&u32::try_from(phys0).unwrap().to_le_bytes());
+        indirect.extent_bytes = iblock;
+        indirect.size = bs as u64;
+        fs.persist_ext4_inode_for_testing(&cx, ino, &indirect)
+            .expect("persist indirect");
+
+        let lb12_off = (12 * bs) as u64;
+        fs.write(&cx, ino, lb12_off, &vec![0x0C_u8; bs])
+            .expect("grow into single-indirect region");
+
+        let before = fs.read_inode(&cx, ino).expect("inode before trunc");
+        assert_eq!(before.size, lb12_off + bs as u64, "grew to logical block 12");
+        // i_block[12] is the single-indirect root pointer (offset 12*4 = 48).
+        let root_before = u32::from_le_bytes(before.extent_bytes[48..52].try_into().unwrap());
+        assert_ne!(root_before, 0, "single-indirect metadata block allocated");
+        let blocks_before = before.blocks;
+
+        // Truncate into block 0's interior: frees the block-12 data block AND the
+        // single-indirect metadata block (2 blocks total).
+        let new_size = (bs / 2) as u64;
+        let attrs = SetAttrRequest {
+            size: Some(new_size),
+            ..SetAttrRequest::default()
+        };
+        fs.setattr(&cx, ino, &attrs).expect("indirect truncate");
+
+        let after = fs.read_inode(&cx, ino).expect("inode after trunc");
+        assert_eq!(after.size, new_size, "size shrunk");
+        let root_after = u32::from_le_bytes(after.extent_bytes[48..52].try_into().unwrap());
+        assert_eq!(root_after, 0, "freed single-indirect root pointer cleared");
+        assert_eq!(
+            blocks_before - after.blocks,
+            2 * spb,
+            "i_blocks must drop by 2 fs blocks (data + indirect metadata)"
+        );
+
+        // The surviving prefix reads back intact (clamped to the new size).
+        let read = fs.read(&cx, ino, 0, bs as u32).expect("read after trunc");
+        assert_eq!(read.len(), new_size as usize, "read clamped to new size");
+        assert!(read.iter().all(|&b| b == 0x01), "surviving prefix intact");
+
+        // The underlying block 0 must have its tail (>= new_size) zeroed on disk.
+        let raw0 = fs
+            .read_block_with_scope(&cx, &RequestScope::empty(), BlockNumber(phys0))
+            .expect("raw block 0");
+        assert!(
+            raw0[new_size as usize..].iter().all(|&b| b == 0),
+            "partial-block tail must be zeroed (no data leakage past EOF)"
+        );
+        assert!(
+            raw0[..new_size as usize].iter().all(|&b| b == 0x01),
+            "kept bytes of the partial block are unchanged"
         );
     }
 
