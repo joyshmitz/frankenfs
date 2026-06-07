@@ -58659,6 +58659,46 @@ mod tests {
         assert_eq!(read, original, "refused punch_hole must leave the file untouched");
     }
 
+    /// bd-xkvcm: fallocate COLLAPSE_RANGE and INSERT_RANGE over a SHARED data
+    /// extent must be refused ATOMICALLY. These shift the whole file tail (free +
+    /// re-insert every following extent via btrfs_delete_extent_data_items), so a
+    /// non-atomic refusal would half-rewrite the file. Both must leave it
+    /// byte-for-byte intact.
+    #[test]
+    fn btrfs_collapse_insert_refuse_shared_extent_bd_xkvcm() {
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+        let (ino, original) = btrfs_make_shared_extent_file(&fs, &cx, "shared_ci.bin");
+
+        // COLLAPSE_RANGE (0x08): remove [0, 4096), would shift the tail left.
+        let err = ops
+            .fallocate(&cx, &mut RequestScope::empty(), ino, 0, 4096, 0x08)
+            .expect_err("collapse_range on a shared extent must be refused");
+        assert!(
+            matches!(err, FfsError::UnsupportedFeature(_)),
+            "expected UnsupportedFeature for shared-extent collapse_range, got {err:?}"
+        );
+        assert_eq!(
+            ops.read(&cx, &mut RequestScope::empty(), ino, 0, 8192).unwrap(),
+            original,
+            "refused collapse_range must leave the file untouched"
+        );
+
+        // INSERT_RANGE (0x20): insert a hole at 4096, would shift the tail right.
+        let err = ops
+            .fallocate(&cx, &mut RequestScope::empty(), ino, 4096, 4096, 0x20)
+            .expect_err("insert_range on a shared extent must be refused");
+        assert!(
+            matches!(err, FfsError::UnsupportedFeature(_)),
+            "expected UnsupportedFeature for shared-extent insert_range, got {err:?}"
+        );
+        assert_eq!(
+            ops.read(&cx, &mut RequestScope::empty(), ino, 0, 8192).unwrap(),
+            original,
+            "refused insert_range must leave the file untouched"
+        );
+    }
+
     #[test]
     fn btrfs_write_unlink_last_reference_rejects_malformed_extent_data() {
         let (fs, cx) = open_writable_btrfs();
