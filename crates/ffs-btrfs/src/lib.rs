@@ -4285,6 +4285,64 @@ impl BtrfsExtentAllocator {
         Ok(())
     }
 
+    /// Add another reference to an existing data extent (reflink / shared
+    /// extent): increment the `EXTENT_ITEM` refcount by one and insert a *keyed*
+    /// `EXTENT_DATA_REF` backref for the new `(root, objectid, offset)`. The
+    /// pre-existing inline backref (written by [`insert_data_extent_item`]) is
+    /// left untouched, and the block group `used` accounting is unchanged —
+    /// sharing an extent allocates no new space. Using a keyed backref item
+    /// (key offset = [`hash_extent_data_ref`]) rather than appending an inline
+    /// ref avoids re-sorting the EXTENT_ITEM's inline backref list. This is the
+    /// exact inverse of the refcount-aware free planned for bd-xkvcm.
+    ///
+    /// # Errors
+    /// Returns `KeyNotFound` if the extent item does not exist,
+    /// `BrokenInvariant` if its value is malformed, `AddressOverflow` if the
+    /// refcount would overflow, or any error from the extent tree.
+    pub fn add_data_extent_ref(
+        &mut self,
+        bytenr: u64,
+        num_bytes: u64,
+        root: u64,
+        objectid: u64,
+        offset: u64,
+    ) -> Result<(), BtrfsMutationError> {
+        let item_key = BtrfsKey {
+            objectid: bytenr,
+            item_type: BTRFS_ITEM_EXTENT_ITEM,
+            offset: num_bytes,
+        };
+        let mut value = self
+            .extent_tree
+            .get(&item_key)
+            .ok_or(BtrfsMutationError::KeyNotFound)?;
+        if value.len() < 8 {
+            return Err(BtrfsMutationError::BrokenInvariant(
+                "extent item value too short for refs field",
+            ));
+        }
+        let refs = u64::from_le_bytes(value[0..8].try_into().expect("8 bytes"));
+        let new_refs = refs
+            .checked_add(1)
+            .ok_or(BtrfsMutationError::AddressOverflow)?;
+        value[0..8].copy_from_slice(&new_refs.to_le_bytes());
+        self.extent_tree.update(&item_key, &value)?;
+
+        let data_ref = BtrfsExtentDataRef {
+            root,
+            objectid,
+            offset,
+            count: 1,
+        };
+        let ref_key = BtrfsKey {
+            objectid: bytenr,
+            item_type: BTRFS_ITEM_EXTENT_DATA_REF,
+            offset: hash_extent_data_ref(root, objectid, offset),
+        };
+        self.extent_tree.insert(ref_key, &data_ref.to_bytes())?;
+        Ok(())
+    }
+
     /// Stamp `generation` into the existing skinny `METADATA_ITEM` extent item
     /// for the tree block at `bytenr` / `level`, leaving its refs and inline
     /// backref untouched. Returns `true` if the item was present and patched.
@@ -12364,6 +12422,55 @@ mod tests {
 
         let bg = alloc.block_group(0x1_0000).expect("bg");
         assert_eq!(bg.used_bytes, 4096); // only second extent remains
+    }
+
+    #[test]
+    fn add_data_extent_ref_shares_extent_without_new_space() {
+        let mut alloc = BtrfsExtentAllocator::new(7).expect("alloc");
+        alloc.add_block_group(0x1_0000, make_data_bg(0x1_0000, 0x10_0000));
+
+        let a = alloc.alloc_data(4096).expect("alloc");
+        // Establish the refs==1 state: EXTENT_ITEM + a single inline
+        // EXTENT_DATA_REF for the first inode (objectid 256) at offset 0.
+        alloc
+            .insert_data_extent_item(a.bytenr, a.num_bytes, 5, 256, 0, 7)
+            .expect("insert refs=1 extent item");
+        assert_eq!(
+            alloc.extent_item_refs(a.bytenr, a.num_bytes).expect("refs"),
+            Some(1)
+        );
+        let used_before = alloc.block_group(0x1_0000).expect("bg").used_bytes;
+
+        // Share the extent with a second inode (objectid 257) — a reflink.
+        alloc
+            .add_data_extent_ref(a.bytenr, a.num_bytes, 5, 257, 0)
+            .expect("add second ref");
+
+        // Refcount went 1 -> 2; no new space was consumed.
+        assert_eq!(
+            alloc.extent_item_refs(a.bytenr, a.num_bytes).expect("refs"),
+            Some(2)
+        );
+        assert_eq!(
+            alloc.block_group(0x1_0000).expect("bg").used_bytes,
+            used_before,
+            "sharing an extent must not change block-group used bytes"
+        );
+
+        // The new reference is a KEYED EXTENT_DATA_REF (the inline ref for 256
+        // stays inside the EXTENT_ITEM, so get_extent_data_refs returns only the
+        // keyed one), keyed by hash_extent_data_ref(5, 257, 0).
+        let keyed = alloc.get_extent_data_refs(a.bytenr).expect("keyed refs");
+        assert_eq!(keyed.len(), 1, "exactly one keyed EXTENT_DATA_REF");
+        assert_eq!(
+            keyed[0],
+            BtrfsExtentDataRef {
+                root: 5,
+                objectid: 257,
+                offset: 0,
+                count: 1,
+            }
+        );
     }
 
     #[test]
