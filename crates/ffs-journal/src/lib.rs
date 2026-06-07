@@ -3358,6 +3358,64 @@ mod tests {
         assert_eq!(out.committed_sequences, vec![7]);
     }
 
+    /// A revoke must suppress only OLDER copies of a block, never a copy written
+    /// in a LATER committed transaction. jbd2 semantics: a data block at sequence
+    /// S is skipped iff it was revoked at sequence R >= S. The existing test only
+    /// covers the same-transaction case; this pins the cross-transaction property
+    /// — dropping a legitimately-committed newer write would be silent data loss.
+    ///
+    /// Layout (block 5 = B, block 6 = D):
+    ///   txn 5: write B=0xAA, write D=0xDD, commit
+    ///   txn 7: revoke B, revoke D, commit
+    ///   txn 9: write B=0xCC, commit
+    /// Expected: B == 0xCC (newer write survives the revoke), D == 0 (older write
+    /// stays revoked, never rewritten).
+    #[test]
+    fn replay_jbd2_revoke_does_not_suppress_newer_write() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(512, 64);
+        let region = JournalRegion {
+            start: BlockNumber(20),
+            blocks: 16,
+        };
+
+        // txn 5: two writes (B@5, D@6) + commit.
+        dev.raw_write(
+            BlockNumber(20),
+            descriptor_block(512, 5, &[(5, 0), (6, JBD2_TAG_FLAG_LAST)]),
+        );
+        dev.raw_write(BlockNumber(21), vec![0xAA; 512]); // B data (txn 5)
+        dev.raw_write(BlockNumber(22), vec![0xDD; 512]); // D data (txn 5)
+        dev.raw_write(BlockNumber(23), commit_block(512, 5));
+        // txn 7: revoke both B and D + commit.
+        dev.raw_write(BlockNumber(24), revoke_block(512, 7, &[5, 6]));
+        dev.raw_write(BlockNumber(25), commit_block(512, 7));
+        // txn 9: rewrite B only + commit.
+        dev.raw_write(
+            BlockNumber(26),
+            descriptor_block(512, 9, &[(5, JBD2_TAG_FLAG_LAST)]),
+        );
+        dev.raw_write(BlockNumber(27), vec![0xCC; 512]); // B data (txn 9)
+        dev.raw_write(BlockNumber(28), commit_block(512, 9));
+
+        let out = replay_jbd2(&cx, &dev, region).expect("replay should succeed");
+
+        let b = dev.read_block(&cx, BlockNumber(5)).expect("B readable");
+        assert_eq!(
+            b.as_slice(),
+            &[0xCC_u8; 512],
+            "the newer (txn 9) write of B must be replayed, not suppressed by the txn 7 revoke"
+        );
+        let d = dev.read_block(&cx, BlockNumber(6)).expect("D readable");
+        assert_eq!(
+            d.as_slice(),
+            &[0_u8; 512],
+            "D was revoked and never rewritten — its older write must stay suppressed"
+        );
+        assert_eq!(out.stats.replayed_blocks, 1, "only B is replayed");
+        assert_eq!(out.committed_sequences, vec![5, 7, 9]);
+    }
+
     #[test]
     fn replay_jbd2_uncommitted_transaction_is_ignored() {
         let cx = test_cx();
