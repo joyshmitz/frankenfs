@@ -836,6 +836,12 @@ pub struct OpenFs {
     /// any mutation bumps ctime/mtime, so a stale snapshot is detected and rebuilt
     /// rather than relying on hooking every mutation path.
     readdir_snapshot: Mutex<Option<ReaddirSnapshot>>,
+    /// Test-only per-instance counter of readdir snapshot MISSES (full dir
+    /// read+parse/walk). Per-instance (not a global static) so concurrently
+    /// running tests do not interfere. A paginated listing of an unchanged
+    /// directory increments this exactly once regardless of page count.
+    #[cfg(test)]
+    readdir_full_reads: std::sync::atomic::AtomicUsize,
     /// Optional repair lifecycle hook for notifying when blocks are committed.
     ///
     /// When present, `commit_transaction` and `commit_transaction_ssi` call
@@ -888,32 +894,71 @@ pub struct OpenFs {
     btrfs_tree_node_cache: Mutex<BTreeMap<u64, Arc<[u8]>>>,
 }
 
+/// Opaque per-directory validation token: the directory inode's change-time and
+/// size at snapshot time. Any directory mutation bumps ctime/mtime (ext4 and
+/// btrfs both), so a mismatch forces a snapshot rebuild — no mutation-path hooks.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct ReaddirValidation {
+    /// ctime packed (ext4: secs<<32|nsec-extra; btrfs: nanos-since-epoch).
+    ctime: u64,
+    /// mtime (ext4: secs; btrfs: nanos-since-epoch).
+    mtime: u64,
+    size: u64,
+}
+
 /// Cached full directory listing for paginated `readdir` (see
-/// [`OpenFs::readdir_snapshot`]). The validation fields are the directory inode's
-/// timestamps and size at snapshot time; any directory mutation bumps ctime/mtime
-/// (and block additions change size), so a mismatch forces a rebuild.
+/// [`OpenFs::readdir_snapshot`]).
 struct ReaddirSnapshot {
     ino: u64,
-    ctime: u32,
-    ctime_extra: u32,
-    mtime: u32,
-    size: u64,
+    validation: ReaddirValidation,
+    /// Full listing, sorted ascending by continuation cookie (`offset`).
     entries: Arc<Vec<DirEntry>>,
 }
 
-/// Return the readdir page at `offset` (a 1-indexed entry position) from a cached
-/// full listing. Cookies in the cached entries are already absolute positions, so
-/// a plain `[offset..]` slice preserves continuation semantics exactly.
+/// Return the readdir page after continuation cookie `offset` from a cached full
+/// listing. Both ext4 (contiguous position cookies) and btrfs (sparse dir-index
+/// cookies) want "entries whose cookie > offset"; the list is cookie-sorted, so a
+/// binary-search `partition_point` slice serves the page without re-walking or
+/// re-parsing the directory.
 fn slice_readdir_snapshot(entries: &[DirEntry], offset: u64) -> Vec<DirEntry> {
-    let start = usize::try_from(offset).unwrap_or(usize::MAX).min(entries.len());
+    let start = entries.partition_point(|e| e.offset <= offset);
     entries[start..].to_vec()
 }
 
-/// Test-only counter of how many times the ext4 readdir path performed a FULL
-/// directory read+parse (a snapshot miss). A paginated listing of an unchanged
-/// directory must increment this exactly once regardless of page count.
-#[cfg(test)]
-static READDIR_FULL_READS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// Serve a readdir page from the snapshot slot iff it matches `ino` + `validation`.
+fn readdir_snapshot_serve(
+    slot: &Mutex<Option<ReaddirSnapshot>>,
+    ino: u64,
+    validation: ReaddirValidation,
+    offset: u64,
+) -> Option<Vec<DirEntry>> {
+    let guard = slot.lock();
+    let snap = guard.as_ref()?;
+    (snap.ino == ino && snap.validation == validation)
+        .then(|| slice_readdir_snapshot(&snap.entries, offset))
+}
+
+/// Replace the snapshot slot with a freshly-built full listing.
+fn readdir_snapshot_store(
+    slot: &Mutex<Option<ReaddirSnapshot>>,
+    ino: u64,
+    validation: ReaddirValidation,
+    entries: Arc<Vec<DirEntry>>,
+) {
+    *slot.lock() = Some(ReaddirSnapshot {
+        ino,
+        validation,
+        entries,
+    });
+}
+
+/// Nanoseconds since the Unix epoch, saturating — for comparing inode timestamps
+/// as a readdir-snapshot validation field.
+fn systemtime_nanos(t: std::time::SystemTime) -> u64 {
+    t.duration_since(std::time::UNIX_EPOCH)
+        .map(|d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
+}
 
 /// Csum-tree items `(key, packed crc32c values)` used by the read-verify path.
 type BtrfsCsumItems = Vec<(BtrfsKey, Vec<u8>)>;
@@ -2786,6 +2831,8 @@ impl OpenFs {
             btrfs_alloc_state: None,
             extent_cache: ffs_extent::ExtentCache::new(),
             readdir_snapshot: Mutex::new(None),
+            #[cfg(test)]
+            readdir_full_reads: std::sync::atomic::AtomicUsize::new(0),
             repair_flush_lifecycle: None,
             move_ext_donor_fds: Mutex::new(BTreeMap::new()),
             btrfs_inode_path_cache: Mutex::new(None),
@@ -22475,26 +22522,25 @@ impl FsOps for OpenFs {
                 }
 
                 // Serve a later page from the snapshot if the directory is
-                // unchanged since it was taken (ctime/mtime/size all match) —
+                // unchanged since it was taken (any mutation bumps ctime/mtime) —
                 // avoiding a full re-read+re-parse per paginated readdir call.
+                let validation = ReaddirValidation {
+                    ctime: (u64::from(inode.ctime) << 32) | u64::from(inode.ctime_extra),
+                    mtime: u64::from(inode.mtime),
+                    size: inode.size,
+                };
+                if let Some(page) =
+                    readdir_snapshot_serve(&self.readdir_snapshot, canonical.0, validation, offset)
                 {
-                    let guard = self.readdir_snapshot.lock();
-                    if let Some(snap) = guard.as_ref()
-                        && snap.ino == canonical.0
-                        && snap.ctime == inode.ctime
-                        && snap.ctime_extra == inode.ctime_extra
-                        && snap.mtime == inode.mtime
-                        && snap.size == inode.size
-                    {
-                        return Ok(slice_readdir_snapshot(&snap.entries, offset));
-                    }
+                    return Ok(page);
                 }
 
                 #[cfg(test)]
-                READDIR_FULL_READS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                self.readdir_full_reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 let raw_entries = self.read_dir_with_scope(cx, scope, &inode)?;
                 // Build the FULL list (offset 0) once; cookies are 1-indexed
-                // positions, so slicing `[offset..]` preserves them exactly.
+                // positions (ascending), so the binary-search slice serves any
+                // page exactly.
                 let full: Vec<DirEntry> = raw_entries
                     .into_iter()
                     .enumerate()
@@ -22509,27 +22555,60 @@ impl FsOps for OpenFs {
                     .collect();
                 let full = Arc::new(full);
                 let page = slice_readdir_snapshot(&full, offset);
-                *self.readdir_snapshot.lock() = Some(ReaddirSnapshot {
-                    ino: canonical.0,
-                    ctime: inode.ctime,
-                    ctime_extra: inode.ctime_extra,
-                    mtime: inode.mtime,
-                    size: inode.size,
-                    entries: full,
-                });
+                readdir_snapshot_store(&self.readdir_snapshot, canonical.0, validation, full);
                 Ok(page)
             }
             FsFlavor::Btrfs(_) => {
+                // Same snapshot lever as ext4: a paginated readdir otherwise
+                // re-walks the dir's DIR_INDEX items on every call (O(N^2)).
+                //
+                // Gated to READ-ONLY mounts (no btrfs_alloc_state): a writable
+                // btrfs mutation (e.g. a rename updating '..') does not reliably
+                // bump the change-time/size fields the snapshot validates on, so
+                // the writable path always re-walks (correctness over caching).
+                // A read-only directory cannot change, so the snapshot is
+                // unconditionally valid there.
+                let canonical = self.btrfs_canonical_inode(ino)?;
+                let validation = if self.btrfs_alloc_state.is_none() {
+                    let attr = self.btrfs_read_inode_attr(cx, ino)?;
+                    if attr.kind != FileType::Directory {
+                        return Err(FfsError::NotDirectory);
+                    }
+                    let v = ReaddirValidation {
+                        ctime: systemtime_nanos(attr.ctime),
+                        mtime: systemtime_nanos(attr.mtime),
+                        size: attr.size,
+                    };
+                    if let Some(page) =
+                        readdir_snapshot_serve(&self.readdir_snapshot, canonical, v, offset)
+                    {
+                        return Ok(page);
+                    }
+                    Some(v)
+                } else {
+                    None
+                };
+
+                #[cfg(test)]
+                self.readdir_full_reads
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 let rows = self.btrfs_readdir_entries(cx, ino)?;
-                let entries = rows
+                // Rows arrive sorted by DIR_INDEX key; the cookie is key+1, so the
+                // full list is cookie-ascending and the binary-search slice serves
+                // any page identically to the prior `key >= offset` filter.
+                let full: Vec<DirEntry> = rows
                     .into_iter()
-                    .filter(|(key, _)| *key >= offset)
                     .map(|(key, mut e)| {
                         e.offset = key.saturating_add(1);
                         e
                     })
                     .collect();
-                Ok(entries)
+                let full = Arc::new(full);
+                let page = slice_readdir_snapshot(&full, offset);
+                if let Some(v) = validation {
+                    readdir_snapshot_store(&self.readdir_snapshot, canonical, v, full);
+                }
+                Ok(page)
             }
         }
     }
@@ -37328,6 +37407,65 @@ mod tests {
         assert!(paged.is_empty());
     }
 
+    /// btrfs analogue of the ext4 readdir snapshot lever (bd-xmh5g.106 follow-up):
+    /// paginating a directory must walk the DIR_INDEX items ONCE and serve later
+    /// pages from the snapshot (O(N) vs O(N^2)), producing the identical listing.
+    #[test]
+    fn btrfs_readdir_pagination_serves_pages_from_one_walk() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let names: Vec<Vec<u8>> = (0..50).map(|i| format!("file_{i:04}.txt").into_bytes()).collect();
+        let entries: Vec<(&[u8], u64, u8, u32)> = names
+            .iter()
+            .enumerate()
+            .map(|(i, n)| {
+                (
+                    n.as_slice(),
+                    257 + i as u64,
+                    ffs_btrfs::BTRFS_FT_REG_FILE,
+                    0o100_644,
+                )
+            })
+            .collect();
+        let image = build_btrfs_readdir_image(&entries);
+        let dev = TestDevice::from_vec(image);
+        let cx = Cx::for_testing();
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
+        let ops: &dyn FsOps = &fs;
+
+        fs.readdir_full_reads.store(0, SeqCst);
+        let full = ops
+            .readdir(&cx, &mut RequestScope::empty(), InodeNumber(1), 0)
+            .unwrap();
+        assert!(full.len() >= 50, "must list all entries (+ '.' '..')");
+
+        let page = 7usize;
+        let mut collected: Vec<DirEntry> = Vec::new();
+        let mut off = 0u64;
+        loop {
+            let chunk = ops
+                .readdir(&cx, &mut RequestScope::empty(), InodeNumber(1), off)
+                .unwrap();
+            if chunk.is_empty() {
+                break;
+            }
+            let take: Vec<DirEntry> = chunk.into_iter().take(page).collect();
+            off = take.last().expect("non-empty page").offset;
+            collected.extend(take);
+            if collected.len() >= full.len() {
+                break;
+            }
+        }
+
+        assert_eq!(collected, full, "btrfs paginated readdir must equal the full listing");
+        let pages = full.len().div_ceil(page);
+        assert!(pages >= 3, "need several pages for a meaningful score (got {pages})");
+        assert_eq!(
+            fs.readdir_full_reads.load(SeqCst),
+            1,
+            "snapshot must serve {pages}+ pages from a single DIR_INDEX walk"
+        );
+    }
+
     #[test]
     fn btrfs_readdir_special_characters_in_names() {
         let entries: Vec<(&[u8], u64, u8, u32)> = vec![
@@ -38570,7 +38708,7 @@ mod tests {
 
         // One full read builds the snapshot; every paginated page is then served
         // from it (the prior behaviour re-parsed the whole dir on each page).
-        READDIR_FULL_READS.store(0, SeqCst);
+        fs.readdir_full_reads.store(0, SeqCst);
         let full = fs.readdir(&cx, dir_ino, 0).expect("readdir full");
         assert!(full.len() >= n, "directory must list all {n} entries (+ '.' '..')");
 
@@ -38598,7 +38736,7 @@ mod tests {
         let pages = (full.len()).div_ceil(page);
         assert!(pages >= 3, "need several pages for a meaningful score (got {pages})");
         assert_eq!(
-            READDIR_FULL_READS.load(SeqCst),
+            fs.readdir_full_reads.load(SeqCst),
             1,
             "snapshot must serve {pages}+ pages from a single directory parse"
         );
@@ -38607,10 +38745,10 @@ mod tests {
         // entry is visible.
         fs.create(&cx, dir_ino, OsStr::new("zzz_new"), 0o644, 0, 0)
             .expect("create after listing");
-        READDIR_FULL_READS.store(0, SeqCst);
+        fs.readdir_full_reads.store(0, SeqCst);
         let after = fs.readdir(&cx, dir_ino, 0).expect("readdir after mutation");
         assert_eq!(
-            READDIR_FULL_READS.load(SeqCst),
+            fs.readdir_full_reads.load(SeqCst),
             1,
             "a directory mutation must invalidate the snapshot"
         );
