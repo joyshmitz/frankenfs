@@ -4121,7 +4121,7 @@ impl OpenFs {
         ino: u32,
         logical_block: u32,
         len: u32,
-        physical_block: Option<u32>,
+        physical_block: Option<u64>,
         op: &'static str,
     ) -> bool {
         match self.read_inode(cx, InodeNumber(u64::from(ino))) {

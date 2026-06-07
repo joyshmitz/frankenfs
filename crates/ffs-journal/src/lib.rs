@@ -1591,12 +1591,23 @@ pub struct FcDentry {
 }
 
 /// A parsed fast commit extent operation.
+///
+/// The on-disk source is `struct ext4_fc_add_range` — `fc_ino` (le32) followed
+/// by a 12-byte on-disk `struct ext4_extent`:
+/// `ee_block`(le32) + `ee_len`(le16) + `ee_start_hi`(le16) + `ee_start_lo`(le32).
+/// `ee_len` carries the kernel's unwritten-extent encoding (a value greater than
+/// `EXT_INIT_MAX_LEN` = 32768 marks an unwritten extent whose real length is
+/// `ee_len - 32768`), and the physical block number is 48-bit
+/// (`ee_start_hi << 32 | ee_start_lo`). `len`/`physical_block`/`unwritten` here
+/// are the decoded values, matching `ext4_ext_get_actual_len` /
+/// `ext4_ext_pblock` / `ext4_ext_is_unwritten`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FcExtentRange {
     pub ino: u32,
     pub logical_block: u32,
     pub len: u32,
-    pub physical_block: u32,
+    pub physical_block: u64,
+    pub unwritten: bool,
 }
 
 /// A parsed fast commit truncate/punch operation.
@@ -1683,16 +1694,29 @@ fn parse_fc_operation(tag: FcTag, payload: &[u8]) -> Option<FcOperation> {
             FcOperation::InodeUpdate(ino)
         }),
         FcTag::AddRange => (payload.len() >= 16).then(|| {
+            // fc_ino(4) then a 12-byte on-disk ext4_extent. Decode ee_len's
+            // unwritten encoding and the 48-bit physical block exactly as the
+            // kernel does (the previous parse folded ee_len+ee_start_hi into a
+            // single u32 `len` and dropped the high 16 physical bits).
+            const EXT_INIT_MAX_LEN: u16 = 1 << 15; // 32768
+            let ino = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+            let ee_block = u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]);
+            let ee_len = u16::from_le_bytes([payload[8], payload[9]]);
+            let ee_start_hi = u16::from_le_bytes([payload[10], payload[11]]);
+            let ee_start_lo =
+                u32::from_le_bytes([payload[12], payload[13], payload[14], payload[15]]);
+            let unwritten = ee_len > EXT_INIT_MAX_LEN;
+            let actual_len = if unwritten {
+                ee_len - EXT_INIT_MAX_LEN
+            } else {
+                ee_len
+            };
             FcOperation::AddRange(FcExtentRange {
-                ino: u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]),
-                logical_block: u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]),
-                len: u32::from_le_bytes([payload[8], payload[9], payload[10], payload[11]]),
-                physical_block: u32::from_le_bytes([
-                    payload[12],
-                    payload[13],
-                    payload[14],
-                    payload[15],
-                ]),
+                ino,
+                logical_block: ee_block,
+                len: u32::from(actual_len),
+                physical_block: (u64::from(ee_start_hi) << 32) | u64::from(ee_start_lo),
+                unwritten,
             })
         }),
         FcTag::DelRange => (payload.len() >= 12).then(|| {
@@ -1875,15 +1899,29 @@ mod fc_tests {
         assert!(pending.operations.is_empty());
     }
 
+    /// Build the on-disk `ext4_fc_add_range` payload: fc_ino(le32) followed by a
+    /// 12-byte on-disk `ext4_extent` (ee_block le32, ee_len le16, ee_start_hi
+    /// le16, ee_start_lo le32). `ee_len` is encoded raw so callers can exercise
+    /// the unwritten-extent high-bit encoding.
+    fn build_fc_add_range_payload(ino: u32, ee_block: u32, ee_len: u16, physical: u64) -> Vec<u8> {
+        let mut p = Vec::new();
+        p.extend_from_slice(&ino.to_le_bytes());
+        p.extend_from_slice(&ee_block.to_le_bytes());
+        p.extend_from_slice(&ee_len.to_le_bytes());
+        #[allow(clippy::cast_possible_truncation)]
+        let ee_start_hi = (physical >> 32) as u16;
+        let ee_start_lo = physical as u32;
+        p.extend_from_slice(&ee_start_hi.to_le_bytes());
+        p.extend_from_slice(&ee_start_lo.to_le_bytes());
+        p
+    }
+
     #[test]
     fn replay_add_range() {
         let mut data = Vec::new();
         data.extend(build_fc_tag(0x0A, &[0; 16])); // HEAD
-        let mut payload = Vec::new();
-        payload.extend_from_slice(&42_u32.to_le_bytes()); // ino
-        payload.extend_from_slice(&100_u32.to_le_bytes()); // logical_block
-        payload.extend_from_slice(&10_u32.to_le_bytes()); // len
-        payload.extend_from_slice(&5000_u32.to_le_bytes()); // physical_block
+        // Written extent: ino 42, logical 100, 10 blocks, physical 5000.
+        let payload = build_fc_add_range_payload(42, 100, 10, 5000);
         data.extend(build_fc_tag(0x03, &payload)); // ADD_RANGE
         let mut tail = Vec::new();
         tail.extend_from_slice(&1_u32.to_le_bytes()); // tid
@@ -1902,7 +1940,43 @@ mod fc_tests {
             assert_eq!(r.logical_block, 100);
             assert_eq!(r.len, 10);
             assert_eq!(r.physical_block, 5000);
+            assert!(!r.unwritten);
         }
+    }
+
+    /// The on-disk `ext4_extent` encodes unwritten extents in `ee_len`
+    /// (`> EXT_INIT_MAX_LEN` ⟹ unwritten, real len = `ee_len - 32768`) and a
+    /// 48-bit physical block (`ee_start_hi << 32 | ee_start_lo`). The previous
+    /// parser folded `ee_len`+`ee_start_hi` into one u32 `len` and dropped the
+    /// high physical bits — so an unwritten extent with a high physical block
+    /// (e.g. a fast-committed fallocate beyond 4 GiB-of-blocks) was mis-decoded.
+    #[test]
+    fn replay_add_range_decodes_unwritten_and_48bit_physical_bd_6nwjx() {
+        let mut data = Vec::new();
+        data.extend(build_fc_tag(0x0A, &[0; 16])); // HEAD
+        // Unwritten extent of 10 blocks: ee_len = 32768 + 10. Physical block
+        // 0x3_0000_5000 needs ee_start_hi = 3 (the high 16 bits).
+        let physical = 0x3_0000_5000_u64;
+        let payload = build_fc_add_range_payload(42, 100, (1 << 15) + 10, physical);
+        data.extend(build_fc_tag(0x03, &payload)); // ADD_RANGE
+        let mut tail = Vec::new();
+        tail.extend_from_slice(&1_u32.to_le_bytes());
+        tail.extend_from_slice(&0_u32.to_le_bytes());
+        data.extend(build_fc_tag(0x09, &tail)); // TAIL
+
+        let result = replay_fast_commit(&data).unwrap();
+        assert_eq!(result.operations.len(), 1);
+        let FcOperation::AddRange(r) = &result.operations[0] else {
+            panic!("expected AddRange, got {:?}", result.operations[0]);
+        };
+        assert_eq!(r.ino, 42);
+        assert_eq!(r.logical_block, 100);
+        // Real length is 10, NOT 32778 (the old raw-u32 misread).
+        assert_eq!(r.len, 10);
+        assert!(r.unwritten, "high-bit ee_len marks an unwritten extent");
+        // Full 48-bit physical: the old parser dropped ee_start_hi and returned
+        // only 0x5000.
+        assert_eq!(r.physical_block, physical);
     }
 
     #[test]
