@@ -280,6 +280,7 @@ pub fn decode_group_with_owned_repair_symbols(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_lines)]
 fn decode_group_impl(
     cx: &Cx,
     device: &dyn BlockDevice,
