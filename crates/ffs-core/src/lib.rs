@@ -4183,6 +4183,18 @@ impl OpenFs {
         if raw_inode.is_empty() {
             return Ok(());
         }
+        // DELETION (bd-4tmpw): a fast-committed inode with links_count == 0 is a
+        // deleted inode (no valid file has zero links). Free it AND its blocks
+        // rather than writing the zero-link header back — otherwise the inode
+        // slot and its data blocks leak (an e2fsck "zero-link inode in use").
+        // Handled before the depth>0 guard below because delete_inode frees the
+        // whole extent tree at any depth. links_count is at on-disk offset 0x1A.
+        if raw_inode.len() >= 0x1C {
+            let fc_links = u16::from_le_bytes([raw_inode[0x1A], raw_inode[0x1B]]);
+            if fc_links == 0 {
+                return self.free_fast_commit_deleted_inode(cx, ino);
+            }
+        }
         // CONSISTENCY GUARD (bd-6nwjx): an inode with an EXTERNAL extent tree
         // (eh_depth > 0) keeps its data extents in leaf blocks outside the inode.
         // Those leaves are recovered by ADD_RANGE replay, which is not yet
@@ -4216,6 +4228,53 @@ impl OpenFs {
             }
         }
         self.recovery_write_inode_raw(cx, ino, raw_inode)
+    }
+
+    /// Free a fast-committed deleted inode (links_count reached 0) and all its
+    /// blocks at recovery (bd-4tmpw), so a single-link unlink that was
+    /// fast-committed but not checkpointed does not leak the inode + its data on
+    /// a crash. Reuses ext4 orphan recovery's deletion primitive
+    /// (`ffs_inode::delete_inode`) driven by a freshly loaded allocation state.
+    ///
+    /// Operates on the CURRENT on-device inode — which still carries the file's
+    /// real (pre-deletion) extent tree, i.e. the blocks to release — not on the
+    /// fast-commit record (whose extents may already be cleared). Idempotent: a
+    /// re-run sees the inode already at links_count == 0 and does nothing.
+    fn free_fast_commit_deleted_inode(&self, cx: &Cx, ino: u32) -> Result<(), FfsError> {
+        let ino_n = InodeNumber(u64::from(ino));
+        let mut inode = self.read_inode(cx, ino_n)?;
+        if inode.links_count == 0 {
+            // Already freed (or never linked) — nothing to do.
+            debug!(ino, "fc_apply: zero-link inode already freed — idempotent no-op");
+            return Ok(());
+        }
+        let csum_seed = self
+            .ext4_superblock()
+            .ok_or_else(|| FfsError::Format("not an ext4 filesystem".into()))?
+            .csum_seed();
+        let mut alloc = self.load_ext4_alloc_state(cx)?;
+        let block_dev = self.direct_block_device_adapter();
+        let (now_secs, _) = Self::now_timestamp();
+        inode.links_count = 0;
+        ffs_inode::delete_inode(
+            cx,
+            &block_dev,
+            &alloc.geo,
+            &mut alloc.groups,
+            ino_n,
+            &mut inode,
+            csum_seed,
+            now_secs,
+            &alloc.persist_ctx,
+        )?;
+        // The recovery writes bypassed the read-only caches; drop them so later
+        // reads observe the freed inode + bitmaps (mirrors orphan recovery).
+        self.extent_cache.invalidate_all();
+        self.ext4_inode_table_block_cache.lock().clear();
+        self.ext4_group_desc_cache.lock().clear();
+        self.ext4_file_data_block_cache.lock().clear();
+        debug!(ino, "fc_apply: freed zero-link inode + its blocks at recovery");
+        Ok(())
     }
 
     /// Splice raw inode bytes into the inode table at recovery time and write
@@ -54256,6 +54315,84 @@ mod tests {
         assert!(
             clean,
             "e2fsck must accept the image after an UNLINK apply:\n{output}"
+        );
+    }
+
+    /// bd-4tmpw: a fast-committed single-link delete (the common `rm` case) must,
+    /// on recovery, FREE the inode and its blocks — not just write a zero-link
+    /// header back. The UNLINK removes the dir entry and the accompanying
+    /// InodeUpdate carries links_count==0, which now triggers the inode/block
+    /// free. Validated with real e2fsck: a bare zero-link write would leave a
+    /// "zero-link inode in use" + leaked blocks; the free keeps it clean.
+    #[test]
+    fn fast_commit_delete_apply_frees_zero_link_inode_bd_4tmpw() {
+        let Some((fs, dev, _tmp, image)) = open_ext4_mke2fs(8, false) else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        // A single-link file with data (its blocks must be released on delete).
+        let attr = fs
+            .create(&cx, root, OsStr::new("victim.dat"), 0o644, 0, 0)
+            .expect("create file");
+        fs.write(&cx, attr.ino, 0, &[0xEF_u8; 3 * 1024])
+            .expect("write file data");
+        fs.flush_mvcc_to_device(&cx).expect("flush mvcc");
+        let inode_size = usize::from(fs.ext4_superblock().expect("sb").inode_size);
+        let ino_u32 = u32::try_from(attr.ino.0).expect("ino fits u32");
+        assert_eq!(
+            fs.read_inode(&cx, attr.ino).expect("read inode").links_count,
+            1,
+            "single link before delete"
+        );
+
+        // Reopen from_device (the recovery context) and recover the delete: the
+        // UNLINK removes the entry, the InodeUpdate carries links_count == 0.
+        let recov = std::sync::Arc::new(std::sync::Mutex::new(dev.snapshot_bytes()));
+        let fs2 = OpenFs::from_device(
+            &cx,
+            Box::new(TestDevice {
+                data: std::sync::Arc::clone(&recov),
+            }),
+            &OpenOptions::default(),
+        )
+        .expect("reopen from device");
+
+        let mut deleted_inode = fs2.read_inode(&cx, attr.ino).expect("read inode");
+        deleted_inode.links_count = 0;
+        let inode_raw = ffs_inode::serialize_inode(&deleted_inode, inode_size);
+        let ops = vec![
+            ffs_journal::FcOperation::Unlink(ffs_journal::FcDentry {
+                parent_ino: 2,
+                ino: ino_u32,
+                name: b"victim.dat".to_vec(),
+            }),
+            ffs_journal::FcOperation::InodeUpdate(ino_u32, inode_raw),
+        ];
+        fs2.apply_fast_commit_operations(&cx, &ops, true)
+            .expect("apply fc delete");
+
+        // (1) The name is gone. (The inode itself is now a freed slot — reading
+        // it back is not meaningful; e2fsck below is the authoritative proof that
+        // the inode and its blocks were released, not leaked.)
+        let root_inode = fs2.read_inode(&cx, root).expect("read root");
+        assert!(
+            fs2.lookup_name(&cx, &root_inode, b"victim.dat")
+                .expect("lookup")
+                .is_none(),
+            "deleted name must be gone"
+        );
+
+        // (2) Consistency: real e2fsck must accept the image — no leaked
+        // zero-link inode and no leaked data blocks.
+        std::fs::write(&image, recov.lock().unwrap().clone()).expect("write recovered image");
+        let Some((clean, output)) = run_e2fsck(&image) else {
+            return;
+        };
+        assert!(
+            clean,
+            "e2fsck must accept the image after a zero-link delete apply:\n{output}"
         );
     }
 
