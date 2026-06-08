@@ -16972,12 +16972,11 @@ impl OpenFs {
             } = parse_extent_data(&data).map_err(|e| parse_to_ffs_error(&e))?
             {
                 if disk_bytenr > 0 {
-                    let ref_offset = key.offset.checked_sub(extent_offset).ok_or_else(|| {
-                        FfsError::Corruption {
-                            block: disk_bytenr,
-                            detail: "clone: extent_offset exceeds file offset".into(),
-                        }
-                    })?;
+                    // btrfs data-backref offset = file_offset - extent_offset,
+                    // computed with u64 wraparound (a reflinked sub-range views
+                    // into the extent, so extent_offset can exceed file_offset —
+                    // btrfs check validates the wrapped value).
+                    let ref_offset = key.offset.wrapping_sub(extent_offset);
                     alloc
                         .extent_alloc
                         .add_data_extent_ref(
@@ -16996,6 +16995,199 @@ impl OpenFs {
         let mut dst_inode = self.btrfs_read_inode_from_tree(alloc, dst_canonical)?;
         dst_inode.size = src_inode.size;
         dst_inode.nbytes = src_inode.nbytes;
+        let dst_inode_key = BtrfsKey {
+            objectid: dst_canonical,
+            item_type: BTRFS_ITEM_INODE_ITEM,
+            offset: 0,
+        };
+        alloc
+            .fs_tree
+            .update(&dst_inode_key, &dst_inode.to_bytes())
+            .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+        Ok(())
+    }
+
+    /// Reflink a byte sub-range of `src` into `dst` (FICLONERANGE, bd-jbtd2).
+    /// Shares every src `EXTENT_DATA` overlapping `[src_offset, src_offset+len)`,
+    /// boundary-splitting partially-covered extents by adjusting the dst
+    /// `EXTENT_DATA`'s `extent_offset`/`num_bytes` — the underlying on-disk
+    /// extent is unchanged, only the file's view of it. Each shared extent bumps
+    /// the extent refcount via `add_data_extent_ref`. Existing dst data in
+    /// `[dest_offset, dest_offset+len)` is first dropped refcount-aware; dst
+    /// `size`/`nbytes` are then recomputed from the resulting extent set.
+    /// Inline/compressed extents can't be carved by view, so a partial range
+    /// covering one is refused (FrankenFS writes neither for data extents).
+    fn btrfs_clone_file_range_data(
+        &self,
+        cx: &Cx,
+        alloc: &mut BtrfsAllocState,
+        src_canonical: u64,
+        dst_canonical: u64,
+        src_offset: u64,
+        len: u64,
+        dest_offset: u64,
+    ) -> ffs_error::Result<()> {
+        let src_end = src_offset
+            .checked_add(len)
+            .ok_or_else(|| FfsError::InvalidGeometry("clone range src end overflow".into()))?;
+        let dest_end = dest_offset
+            .checked_add(len)
+            .ok_or_else(|| FfsError::InvalidGeometry("clone range dest end overflow".into()))?;
+
+        let lo = BtrfsKey {
+            objectid: src_canonical,
+            item_type: BTRFS_ITEM_EXTENT_DATA,
+            offset: 0,
+        };
+        let hi = BtrfsKey {
+            objectid: src_canonical,
+            item_type: BTRFS_ITEM_EXTENT_DATA,
+            offset: u64::MAX,
+        };
+        let src_extents = alloc
+            .fs_tree
+            .range(&lo, &hi)
+            .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+
+        // Build the dst shares BEFORE mutating, so an unsupported extent
+        // (inline/compressed partial) aborts cleanly with no half-done clone.
+        // Tuple: (dst_file_offset, dst EXTENT_DATA bytes, disk_bytenr,
+        // disk_num_bytes, EXTENT_DATA_REF offset).
+        let mut shares: Vec<(u64, Vec<u8>, u64, u64, u64)> = Vec::new();
+        for (key, data) in &src_extents {
+            let extent = parse_extent_data(data).map_err(|e| parse_to_ffs_error(&e))?;
+            let logical_len = Self::btrfs_extent_logical_len(&extent)?;
+            let f = key.offset;
+            let f_end = f.checked_add(logical_len).ok_or_else(|| {
+                FfsError::InvalidGeometry("src extent logical end overflow".into())
+            })?;
+            let overlap_start = f.max(src_offset);
+            let overlap_end = f_end.min(src_end);
+            if overlap_start >= overlap_end {
+                continue;
+            }
+            match extent {
+                BtrfsExtentData::Regular {
+                    generation,
+                    ram_bytes,
+                    extent_type,
+                    compression,
+                    disk_bytenr,
+                    disk_num_bytes,
+                    extent_offset,
+                    num_bytes: _,
+                } => {
+                    if disk_bytenr == 0 {
+                        continue; // hole: dst stays sparse across this gap
+                    }
+                    if compression != 0 {
+                        return Err(FfsError::UnsupportedFeature(
+                            "partial-range reflink of a compressed extent is not supported".into(),
+                        ));
+                    }
+                    let delta = overlap_start - f;
+                    let new_extent_offset = extent_offset.checked_add(delta).ok_or_else(|| {
+                        FfsError::InvalidGeometry("clone extent_offset overflow".into())
+                    })?;
+                    let new_num_bytes = overlap_end - overlap_start;
+                    let dst_file_offset =
+                        dest_offset
+                            .checked_add(overlap_start - src_offset)
+                            .ok_or_else(|| {
+                                FfsError::InvalidGeometry("clone dst offset overflow".into())
+                            })?;
+                    let new_extent = BtrfsExtentData::Regular {
+                        generation,
+                        ram_bytes,
+                        extent_type,
+                        compression,
+                        disk_bytenr,
+                        disk_num_bytes,
+                        extent_offset: new_extent_offset,
+                        num_bytes: new_num_bytes,
+                    };
+                    // u64-wrapping backref offset (see btrfs_clone_file_data):
+                    // a sub-range view has new_extent_offset > dst_file_offset.
+                    let ref_offset = dst_file_offset.wrapping_sub(new_extent_offset);
+                    shares.push((
+                        dst_file_offset,
+                        new_extent.to_bytes(),
+                        disk_bytenr,
+                        disk_num_bytes,
+                        ref_offset,
+                    ));
+                }
+                BtrfsExtentData::Inline { .. } => {
+                    return Err(FfsError::UnsupportedFeature(
+                        "partial-range reflink of an inline extent is not supported".into(),
+                    ));
+                }
+            }
+        }
+
+        // Replace any existing dst data in the destination window, then graft in
+        // the shared extents.
+        self.btrfs_remove_overlapping_extent_data(cx, alloc, dst_canonical, dest_offset, dest_end)?;
+        for (dst_file_offset, new_data, disk_bytenr, disk_num_bytes, ref_offset) in shares {
+            let dst_key = BtrfsKey {
+                objectid: dst_canonical,
+                item_type: BTRFS_ITEM_EXTENT_DATA,
+                offset: dst_file_offset,
+            };
+            alloc
+                .fs_tree
+                .insert(dst_key, &new_data)
+                .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+            alloc
+                .extent_alloc
+                .add_data_extent_ref(
+                    disk_bytenr,
+                    disk_num_bytes,
+                    BTRFS_FS_TREE_OBJECTID,
+                    dst_canonical,
+                    ref_offset,
+                )
+                .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+        }
+
+        // Recompute dst size/nbytes from the resulting extent set (nbytes counts
+        // num_bytes of allocated regular extents + ram_bytes of inline; holes
+        // contribute nothing).
+        let mut dst_inode = self.btrfs_read_inode_from_tree(alloc, dst_canonical)?;
+        let mut nbytes = 0_u64;
+        let d_lo = BtrfsKey {
+            objectid: dst_canonical,
+            item_type: BTRFS_ITEM_EXTENT_DATA,
+            offset: 0,
+        };
+        let d_hi = BtrfsKey {
+            objectid: dst_canonical,
+            item_type: BTRFS_ITEM_EXTENT_DATA,
+            offset: u64::MAX,
+        };
+        for (_, data) in alloc
+            .fs_tree
+            .range(&d_lo, &d_hi)
+            .map_err(|e| btrfs_mutation_to_ffs(&e))?
+        {
+            match parse_extent_data(&data).map_err(|e| parse_to_ffs_error(&e))? {
+                BtrfsExtentData::Regular {
+                    disk_bytenr,
+                    num_bytes,
+                    ..
+                } if disk_bytenr > 0 => {
+                    nbytes = nbytes.saturating_add(num_bytes);
+                }
+                BtrfsExtentData::Inline { ram_bytes, .. } => {
+                    nbytes = nbytes.saturating_add(ram_bytes);
+                }
+                _ => {}
+            }
+        }
+        dst_inode.nbytes = nbytes;
+        if dest_end > dst_inode.size {
+            dst_inode.size = dest_end;
+        }
         let dst_inode_key = BtrfsKey {
             objectid: dst_canonical,
             item_type: BTRFS_ITEM_INODE_ITEM,
@@ -17201,12 +17393,9 @@ impl OpenFs {
             } = extent
             {
                 if disk_bytenr > 0 {
-                    let ref_offset = key.offset.checked_sub(extent_offset).ok_or_else(|| {
-                        FfsError::Corruption {
-                            block: disk_bytenr,
-                            detail: "overwrite free: extent_offset exceeds EXTENT_DATA offset".into(),
-                        }
-                    })?;
+                    // u64-wrapping backref offset (matches the clone path, so a
+                    // partially-reflinked extent's backref hashes identically).
+                    let ref_offset = key.offset.wrapping_sub(extent_offset);
                     Self::btrfs_free_or_drop_extent_ref(
                         alloc,
                         disk_bytenr,
@@ -17292,12 +17481,8 @@ impl OpenFs {
             } = extent
                 && *disk_bytenr > 0
             {
-                let ref_offset = key.offset.checked_sub(*extent_offset).ok_or_else(|| {
-                    FfsError::Corruption {
-                        block: *disk_bytenr,
-                        detail: "delete-items free: extent_offset exceeds EXTENT_DATA offset".into(),
-                    }
-                })?;
+                // u64-wrapping backref offset (matches the clone path).
+                let ref_offset = key.offset.wrapping_sub(*extent_offset);
                 Self::btrfs_free_or_drop_extent_ref(
                     alloc,
                     *disk_bytenr,
@@ -21058,14 +21243,8 @@ impl OpenFs {
                             .map_err(|e| btrfs_mutation_to_ffs(&e))?
                             .unwrap_or(1);
                         if refs > 1 {
-                            let ref_offset =
-                                key.offset.checked_sub(extent_offset).ok_or_else(|| {
-                                    FfsError::Corruption {
-                                        block: disk_bytenr,
-                                        detail: "purge: extent_offset exceeds EXTENT_DATA offset"
-                                            .into(),
-                                    }
-                                })?;
+                            // u64-wrapping backref offset (matches the clone path).
+                            let ref_offset = key.offset.wrapping_sub(extent_offset);
                             BtrfsExtentDisposition::DropRef {
                                 disk_bytenr,
                                 disk_num_bytes,
@@ -26240,7 +26419,7 @@ impl FsOps for OpenFs {
 
     fn clone_file_range(
         &self,
-        _cx: &Cx,
+        cx: &Cx,
         _scope: &mut RequestScope,
         dest_ino: InodeNumber,
         src_ino: InodeNumber,
@@ -26258,23 +26437,30 @@ impl FsOps for OpenFs {
                 let dst_canonical = self.btrfs_canonical_inode(dest_ino)?;
                 let alloc_mutex = self.require_btrfs_alloc_state()?;
                 let mut alloc = alloc_mutex.lock();
-                // Whole-file range (src_length == 0 means "to source EOF")
-                // reduces to a full reflink, which is btrfs-check-validated.
-                // True partial-range extent sharing (boundary-extent splitting
-                // at arbitrary offsets) is a follow-up; refuse it honestly
-                // rather than corrupt, so `cp --reflink` of a sub-range reports
-                // EOPNOTSUPP instead of producing a wrong image.
+                // src_length == 0 means "to source EOF" (FICLONERANGE semantics).
                 let src_size = self.btrfs_read_inode_from_tree(&alloc, src_canonical)?.size;
-                let whole_file =
-                    src_offset == 0 && dest_offset == 0 && (src_length == 0 || src_length >= src_size);
-                if whole_file {
-                    self.btrfs_clone_file_data(&mut alloc, src_canonical, dst_canonical)
+                let len = if src_length == 0 {
+                    src_size.saturating_sub(src_offset)
                 } else {
-                    Err(FfsError::UnsupportedFeature(
-                        "partial-range btrfs reflink (FICLONERANGE) is not yet implemented; \
-                         whole-file clone is supported"
-                            .to_owned(),
-                    ))
+                    src_length
+                };
+                // A range covering the whole source from 0 into dst@0 reduces to
+                // a full reflink (verbatim extent copy). Any other window uses
+                // boundary-split sharing (bd-jbtd2).
+                if src_offset == 0 && dest_offset == 0 && len >= src_size {
+                    self.btrfs_clone_file_data(&mut alloc, src_canonical, dst_canonical)
+                } else if len == 0 {
+                    Ok(()) // empty range (e.g. src_offset past EOF): nothing to share
+                } else {
+                    self.btrfs_clone_file_range_data(
+                        cx,
+                        &mut alloc,
+                        src_canonical,
+                        dst_canonical,
+                        src_offset,
+                        len,
+                        dest_offset,
+                    )
                 }
             }
         }
@@ -53181,11 +53367,11 @@ mod tests {
         assert_eq!(refs, Some(2), "reflink must bump the extent refcount to 2");
     }
 
-    /// bd-vh8p9: clone_file_range over the whole file (src_length == 0 = to EOF)
-    /// reduces to a full reflink; a true sub-range is refused with EOPNOTSUPP
-    /// (honest, not a corrupt partial image).
+    /// bd-jbtd2: clone_file_range whole-file (src_length == 0 = to EOF) reduces
+    /// to a full reflink; a true sub-range performs boundary-split extent
+    /// sharing so dst reads exactly the requested src window.
     #[test]
-    fn clone_file_range_whole_and_partial_bd_vh8p9() {
+    fn clone_file_range_whole_and_partial_bd_jbtd2() {
         let (fs, cx) = open_writable_btrfs();
         let root = InodeNumber(u64::from(BTRFS_FIRST_FREE_OBJECTID));
         let src = fs
@@ -53197,7 +53383,12 @@ mod tests {
         let dst2 = fs
             .create(&cx, root, OsStr::new("dst2.dat"), 0o644, 0, 0)
             .expect("create dst2");
-        let payload = vec![0xC3_u8; 16384];
+        // Position-encoded payload (byte i carries its 4 KiB block index) so a
+        // sub-range clone's offset is actually verifiable.
+        let mut payload = vec![0_u8; 16384];
+        for (i, b) in payload.iter_mut().enumerate() {
+            *b = u8::try_from((i / 4096) & 0xff).unwrap();
+        }
         let fs_ops: &dyn FsOps = &fs;
         fs_ops
             .write(&cx, &mut RequestScope::empty(), src.ino, 0, &payload)
@@ -53207,20 +53398,30 @@ mod tests {
         fs_ops
             .clone_file_range(&cx, &mut RequestScope::empty(), dst.ino, src.ino, 0, 0, 0)
             .expect("whole-file clone_file_range must succeed");
-        let read = fs_ops
-            .read(&cx, &mut RequestScope::empty(), dst.ino, 0, 16384)
-            .expect("read dst");
-        assert_eq!(read, payload, "whole-file range clone must share src data");
-
-        // A true sub-range is refused, not silently mis-cloned.
-        let err = fs_ops
-            .clone_file_range(&cx, &mut RequestScope::empty(), dst2.ino, src.ino, 4096, 4096, 0)
-            .expect_err("partial-range reflink must be refused");
         assert_eq!(
-            err.to_errno(),
-            libc::EOPNOTSUPP,
-            "partial range must report EOPNOTSUPP, got {err:?}"
+            fs_ops
+                .read(&cx, &mut RequestScope::empty(), dst.ino, 0, 16384)
+                .expect("read dst"),
+            payload,
+            "whole-file range clone must share src data"
         );
+
+        // Sub-range [4096, 12288) of src -> dst2@0: dst2 reads exactly that window.
+        fs_ops
+            .clone_file_range(&cx, &mut RequestScope::empty(), dst2.ino, src.ino, 4096, 8192, 0)
+            .expect("partial-range clone_file_range must succeed");
+        let got = fs_ops
+            .read(&cx, &mut RequestScope::empty(), dst2.ino, 0, 8192)
+            .expect("read dst2");
+        assert_eq!(
+            got,
+            &payload[4096..12288],
+            "sub-range clone must copy the exact src window"
+        );
+        let attr = fs_ops
+            .getattr(&cx, &mut RequestScope::empty(), dst2.ino)
+            .expect("getattr dst2");
+        assert_eq!(attr.size, 8192, "dst2 size = cloned range length");
     }
 
     /// bd-vh8p9 on-disk validation: a reflink performed through the public
@@ -53263,6 +53464,62 @@ mod tests {
             .read(&cx, &mut RequestScope::empty(), dst.ino, 0, 16384)
             .expect("read dst");
         assert_eq!(dst_back, payload, "dst reads src's data post-check");
+    }
+
+    /// bd-jbtd2 on-disk validation: a partial-range reflink (boundary-split
+    /// extent sharing) through FsOps::clone_file_range produces a
+    /// btrfs-check-clean image — dst reads exactly the cloned src window and the
+    /// shared extent's refcount is consistent. Skips without btrfs-progs.
+    #[test]
+    fn clone_file_range_partial_passes_btrfs_check_bd_jbtd2() {
+        let Some((fs, dev, _tmp, image)) = open_writable_btrfs_mkfs(256) else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(u64::from(BTRFS_FIRST_FREE_OBJECTID));
+        let src = fs
+            .create(&cx, root, OsStr::new("src.dat"), 0o644, 0, 0)
+            .expect("create src");
+        let dst = fs
+            .create(&cx, root, OsStr::new("dst.dat"), 0o644, 0, 0)
+            .expect("create dst");
+        let mut payload = vec![0_u8; 16384];
+        for (i, b) in payload.iter_mut().enumerate() {
+            *b = u8::try_from((i / 4096) & 0xff).unwrap();
+        }
+        let fs_ops: &dyn FsOps = &fs;
+        fs_ops
+            .write(&cx, &mut RequestScope::empty(), src.ino, 0, &payload)
+            .expect("write src");
+
+        // Share src[4096, 12288) into dst@0 — boundary-splits the single src
+        // extent (extent_offset 4096, num_bytes 8192).
+        fs_ops
+            .clone_file_range(&cx, &mut RequestScope::empty(), dst.ino, src.ino, 4096, 8192, 0)
+            .expect("partial clone_file_range");
+
+        let _ = fs.flush_mvcc_to_device(&cx);
+        fs.btrfs_full_transaction_commit(&cx, "jbtd2-clone-range-check")
+            .expect("commit");
+        let bytes = dev.snapshot_bytes();
+        std::fs::write(&image, &bytes).expect("write image");
+
+        let Some((ok, output)) = run_btrfs_check(&image) else {
+            return;
+        };
+        assert!(
+            ok,
+            "btrfs check must accept the partial-range reflinked image:\n{output}"
+        );
+
+        let dst_back = fs_ops
+            .read(&cx, &mut RequestScope::empty(), dst.ino, 0, 8192)
+            .expect("read dst");
+        assert_eq!(
+            dst_back,
+            &payload[4096..12288],
+            "dst must read the exact cloned src window post-check"
+        );
     }
 
     /// bd-vh8p9: ext4 has no reflink — clone_file reports EOPNOTSUPP.
