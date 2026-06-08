@@ -51187,7 +51187,7 @@ mod tests {
         }
         use Op::{Collapse, Insert, Punch, Trunc, Write, Zero};
 
-        let Some((fs, _tmp)) = open_writable_ext4_mkfs(64) else {
+        let Some((fs, dev, tmp)) = open_writable_ext4_mkfs_with_device(64) else {
             eprintln!("mkfs.ext4 unavailable, skipping");
             return;
         };
@@ -51320,6 +51320,17 @@ mod tests {
                     .find(|&i| got[i] != model[i])
                     .unwrap_or(0),
             );
+        }
+
+        // The whole collapse/insert/punch/zero churn must also leave the on-disk
+        // accounting consistent (i_blocks / free totals after the extent-tree
+        // splices) — validated now that file-op snapshots are e2fsck-clean
+        // (bd-nd61w sb-total sync + bd-bdro7 coalescing).
+        fs.flush_mvcc_to_device(&cx).expect("flush mvcc");
+        let image = tmp.path().join("falloc_interleave_check.ext4");
+        std::fs::write(&image, dev.snapshot_bytes()).expect("write image");
+        if let Some((clean, output)) = run_e2fsck(&image) {
+            assert!(clean, "e2fsck after fallocate interleave churn:\n{output}");
         }
     }
 
