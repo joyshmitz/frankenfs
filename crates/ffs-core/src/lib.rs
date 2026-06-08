@@ -31071,6 +31071,67 @@ mod tests {
         );
     }
 
+    /// Build an open ext4 fs plus an InodeUpdate FC op that bumps the root
+    /// inode's mtime — the shared setup for the dispatch + gating tests.
+    #[cfg(test)]
+    fn fc_inode_update_op_for_root(
+        fs: &OpenFs,
+        cx: &Cx,
+    ) -> (u32, ffs_journal::FcOperation) {
+        let original = fs.read_inode(cx, InodeNumber(2)).expect("read root inode");
+        let new_mtime = original.mtime.wrapping_add(0x0202_0202);
+        let inode_size = usize::from(fs.ext4_superblock().expect("sb").inode_size);
+        let mut fc_inode = original.clone();
+        fc_inode.mtime = new_mtime;
+        let raw = ffs_inode::serialize_inode(&fc_inode, inode_size);
+        (new_mtime, ffs_journal::FcOperation::InodeUpdate(2, raw))
+    }
+
+    /// bd-6nwjx: the apply dispatcher (apply_fast_commit_operations) routes an
+    /// InodeUpdate through verify + the write-back when writes are permitted.
+    #[test]
+    fn fast_commit_apply_dispatch_writes_inode_when_allowed() {
+        let dev = TestDevice::from_vec(build_ext4_image_with_inode());
+        let cx = Cx::for_testing();
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default())
+            .expect("open ext4 image");
+        let (new_mtime, op) = fc_inode_update_op_for_root(&fs, &cx);
+
+        let applied = fs
+            .apply_fast_commit_operations(&cx, std::slice::from_ref(&op), true)
+            .expect("apply ops");
+        assert_eq!(applied, 1, "the readable inode op must be applied");
+        assert_eq!(
+            fs.read_inode(&cx, InodeNumber(2)).expect("re-read").mtime,
+            new_mtime,
+            "dispatched InodeUpdate must reach the inode table"
+        );
+    }
+
+    /// bd-6nwjx SAFETY GATE: with writes disallowed (Skip / SimulateOverlay
+    /// recovery), the apply must NOT mutate the base device — a read-only or
+    /// overlay mount must never be corrupted by fast-commit replay.
+    #[test]
+    fn fast_commit_apply_respects_writes_disallowed_gate() {
+        let dev = TestDevice::from_vec(build_ext4_image_with_inode());
+        let cx = Cx::for_testing();
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default())
+            .expect("open ext4 image");
+        let before = fs.read_inode(&cx, InodeNumber(2)).expect("read root").mtime;
+        let (new_mtime, op) = fc_inode_update_op_for_root(&fs, &cx);
+        assert_ne!(new_mtime, before, "op must propose a real change");
+
+        let applied = fs
+            .apply_fast_commit_operations(&cx, std::slice::from_ref(&op), false)
+            .expect("apply ops");
+        assert_eq!(applied, 1, "the op still verifies (counted), just not written");
+        assert_eq!(
+            fs.read_inode(&cx, InodeNumber(2)).expect("re-read").mtime,
+            before,
+            "writes-disallowed recovery must leave the base inode untouched"
+        );
+    }
+
     #[test]
     fn open_fs_collects_fast_commit_fallback_evidence_for_truncated_stream() {
         let image = build_ext4_image_with_truncated_fast_commit_evidence();
