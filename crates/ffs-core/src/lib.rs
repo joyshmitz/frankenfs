@@ -57304,6 +57304,50 @@ mod tests {
         );
     }
 
+    /// bd-7mi0p (known gap, ignored until fixed): a NON-sector-aligned btrfs write
+    /// must leave the image btrfs-check-clean. Today btrfs_write stores the raw
+    /// (unaligned) write length in the regular extent's ram_bytes/num_bytes, but
+    /// btrfs requires those sector-aligned — so `btrfs check` reports "bad file
+    /// extent" (I_ERR_BAD_FILE_EXTENT) for any non-aligned write (e.g. 6000 bytes).
+    /// The fix is not a one-liner: FrankenFS packs extents by unaligned logical
+    /// length, so simply rounding num_bytes up overlaps adjacent extents; it needs
+    /// a sector-aligned read-modify-write extent model (reads already cap by
+    /// i_size and are fine). This test pins the desired end state — un-ignore it
+    /// when bd-7mi0p lands. Also skips when btrfs-progs is unavailable.
+    #[test]
+    #[ignore = "bd-7mi0p: non-aligned btrfs writes produce non-sector-aligned extent num_bytes -> btrfs check 'bad file extent'; needs the sector-aligned RMW extent-model refactor"]
+    fn btrfs_nonaligned_write_passes_btrfs_check_bd_7mi0p() {
+        let Some((fs, dev, _tmp, image)) = open_writable_btrfs_mkfs(256) else {
+            return; // btrfs-progs unavailable
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(u64::from(BTRFS_FIRST_FREE_OBJECTID));
+
+        // 6000 bytes — spans 1.5 sectors, so the regular extent's num_bytes is not
+        // sector-aligned under the current model.
+        let attr = fs
+            .create(&cx, root, OsStr::new("nonaligned.bin"), 0o644, 0, 0)
+            .expect("create file");
+        fs.write(&cx, attr.ino, 0, &[0x4D_u8; 6000]).expect("write 6000 bytes");
+
+        let _ = fs.flush_mvcc_to_device(&cx);
+        fs.btrfs_full_transaction_commit(&cx, "nonaligned-write-check")
+            .expect("btrfs full transaction commit");
+        std::fs::write(&image, dev.snapshot_bytes()).expect("write modified image");
+
+        let Some((ok, output)) = run_btrfs_check(&image) else {
+            return; // btrfs check tool unavailable
+        };
+        assert!(
+            !output.contains("bad file extent"),
+            "a non-sector-aligned btrfs write must not produce a 'bad file extent' (bd-7mi0p):\n{output}"
+        );
+        assert!(
+            ok,
+            "btrfs check must accept a non-sector-aligned btrfs write (bd-7mi0p):\n{output}"
+        );
+    }
+
     /// A btrfs file hard-linked under several names — multiple links in ONE
     /// directory plus a link in a SECOND directory — and then one link removed,
     /// must stay btrfs-check-clean. This is the only on-disk validation of the
