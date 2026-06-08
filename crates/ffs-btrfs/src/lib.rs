@@ -4425,7 +4425,22 @@ impl BtrfsExtentAllocator {
         let removed_keyed = match self.extent_tree.get(&ref_key) {
             Some(kv) => match BtrfsExtentDataRef::from_bytes(&kv) {
                 Some(dr) if dr.root == root && dr.objectid == objectid && dr.offset == offset => {
-                    self.extent_tree.delete(&ref_key)?;
+                    // A keyed EXTENT_DATA_REF can hold count > 1 when
+                    // add_data_extent_ref merged duplicate references (bd-ngt1y).
+                    // Decrement the count and keep the item; only delete it when
+                    // this was its last reference — otherwise the backref would
+                    // vanish while EXTENT_ITEM.refs still counts the remaining
+                    // ones, leaving a later decrement with no backref to find
+                    // (bd-vrv1q).
+                    if dr.count > 1 {
+                        let decremented = BtrfsExtentDataRef {
+                            count: dr.count - 1,
+                            ..dr
+                        };
+                        self.extent_tree.update(&ref_key, &decremented.to_bytes())?;
+                    } else {
+                        self.extent_tree.delete(&ref_key)?;
+                    }
                     true
                 }
                 _ => false,
@@ -12658,6 +12673,58 @@ mod tests {
                 offset: 0,
                 count: 2,
             }
+        );
+    }
+
+    /// bd-vrv1q: removing a reference to a keyed EXTENT_DATA_REF whose count > 1
+    /// (merged by bd-ngt1y) must DECREMENT the count and keep the item, only
+    /// deleting it on the last reference — otherwise the backref vanishes while
+    /// EXTENT_ITEM.refs still counts the rest, and a later decrement fails with
+    /// "no matching EXTENT_DATA_REF backref for decrement".
+    #[test]
+    fn remove_data_extent_ref_decrements_merged_count_bd_vrv1q() {
+        let mut alloc = BtrfsExtentAllocator::new(7).expect("alloc");
+        alloc.add_block_group(0x1_0000, make_data_bg(0x1_0000, 0x10_0000));
+        let a = alloc.alloc_data(4096).expect("alloc");
+        // refs == 1: inline ref for inode 256.
+        alloc
+            .insert_data_extent_item(a.bytenr, a.num_bytes, 5, 256, 0, 7)
+            .expect("insert refs=1 extent item");
+        // Two refs for the SAME (5, 257, 0): merged keyed ref count == 2, refs == 3.
+        alloc
+            .add_data_extent_ref(a.bytenr, a.num_bytes, 5, 257, 0)
+            .expect("first keyed ref");
+        alloc
+            .add_data_extent_ref(a.bytenr, a.num_bytes, 5, 257, 0)
+            .expect("merged keyed ref");
+        assert_eq!(
+            alloc.extent_item_refs(a.bytenr, a.num_bytes).expect("refs"),
+            Some(3)
+        );
+
+        // First removal: refs 3 -> 2, keyed item kept with count 1.
+        alloc
+            .remove_data_extent_ref(a.bytenr, a.num_bytes, 5, 257, 0)
+            .expect("decrement merged ref");
+        assert_eq!(
+            alloc.extent_item_refs(a.bytenr, a.num_bytes).expect("refs"),
+            Some(2)
+        );
+        let keyed = alloc.get_extent_data_refs(a.bytenr).expect("keyed refs");
+        assert_eq!(keyed.len(), 1, "keyed ref kept after first decrement");
+        assert_eq!(keyed[0].count, 1, "count decremented 2 -> 1");
+
+        // Second removal: refs 2 -> 1, keyed item now deleted (last reference).
+        alloc
+            .remove_data_extent_ref(a.bytenr, a.num_bytes, 5, 257, 0)
+            .expect("remove last keyed ref");
+        assert_eq!(
+            alloc.extent_item_refs(a.bytenr, a.num_bytes).expect("refs"),
+            Some(1)
+        );
+        assert!(
+            alloc.get_extent_data_refs(a.bytenr).expect("keyed refs").is_empty(),
+            "keyed ref removed on its last reference"
         );
     }
 
