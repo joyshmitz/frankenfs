@@ -21008,6 +21008,58 @@ impl OpenFs {
             )
             .map_err(|e| btrfs_mutation_to_ffs(&e))?;
 
+        // Name linkage (bd-tm48j increment 3b): the parent directory entry plus
+        // the ROOT_REF/ROOT_BACKREF pair so the subvolume is visible by name.
+        //
+        // The parent's containing subvolume is the default FS_TREE (FrankenFS
+        // operates on the default subvol). The parent dir entry points at the
+        // subvolume's ROOT_ITEM (child_key_type = ROOT_ITEM, the kernel's -1
+        // location offset for subvolume entries); readdir emits it as a
+        // directory named `name`. No INODE_REF is added — a subvolume is not an
+        // inode in the parent's tree; the back-link is the ROOT_BACKREF.
+        let parent_root_objectid = BTRFS_FS_TREE_OBJECTID;
+        let dir_item = BtrfsDirItem {
+            child_objectid: subvol_id,
+            child_key_type: BTRFS_ITEM_ROOT_ITEM,
+            child_key_offset: u64::MAX,
+            file_type: BTRFS_FT_DIR,
+            name: name.to_vec(),
+        };
+        let dir_index_seq = self.btrfs_insert_dir_entry(&mut alloc, parent_oid, &dir_item)?;
+
+        // ROOT_REF  key (parent_root, ROOT_REF,     subvol_id) — enumerate uses this for the name.
+        // ROOT_BACKREF key (subvol_id, ROOT_BACKREF, parent_root) — the inverse link.
+        // On-disk btrfs_root_ref layout: dirid(8) + sequence(8) + name_len(2) + name.
+        let name_len = u16::try_from(name.len())
+            .map_err(|_| FfsError::Format("subvolume name exceeds u16 length".into()))?;
+        let mut root_ref_bytes = Vec::with_capacity(18 + name.len());
+        root_ref_bytes.extend_from_slice(&parent_oid.to_le_bytes());
+        root_ref_bytes.extend_from_slice(&dir_index_seq.to_le_bytes());
+        root_ref_bytes.extend_from_slice(&name_len.to_le_bytes());
+        root_ref_bytes.extend_from_slice(name);
+        alloc
+            .root_tree
+            .insert(
+                BtrfsKey {
+                    objectid: parent_root_objectid,
+                    item_type: ffs_btrfs::BTRFS_ITEM_ROOT_REF,
+                    offset: subvol_id,
+                },
+                &root_ref_bytes,
+            )
+            .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+        alloc
+            .root_tree
+            .insert(
+                BtrfsKey {
+                    objectid: subvol_id,
+                    item_type: ffs_btrfs::BTRFS_ITEM_ROOT_BACKREF,
+                    offset: parent_root_objectid,
+                },
+                &root_ref_bytes,
+            )
+            .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+
         alloc.extra_subvol_trees.push((subvol_id, subvol_tree));
         self.btrfs_touch_inode_times(&mut alloc, parent_oid, secs, nanos)?;
         drop(alloc);
@@ -40029,6 +40081,42 @@ mod tests {
         assert_ne!(
             subvol_root, fs_tree_root,
             "the created subvolume is a SEPARATE tree from the default FS_TREE"
+        );
+
+        // Name linkage (3b): the committed ROOT_ITEM + ROOT_REF make the
+        // subvolume enumerable by name from the remounted root tree.
+        let root_entries: Vec<ffs_btrfs::BtrfsLeafEntry> = {
+            let alloc = fs2.btrfs_alloc_state.as_ref().unwrap().lock();
+            let lo = BtrfsKey {
+                objectid: 0,
+                item_type: 0,
+                offset: 0,
+            };
+            let hi = BtrfsKey {
+                objectid: u64::MAX,
+                item_type: u8::MAX,
+                offset: u64::MAX,
+            };
+            alloc
+                .root_tree
+                .range(&lo, &hi)
+                .unwrap()
+                .into_iter()
+                .map(|(key, data)| ffs_btrfs::BtrfsLeafEntry { key, data })
+                .collect()
+        };
+        let subvols = ffs_btrfs::enumerate_subvolumes(&root_entries);
+        let created = subvols
+            .iter()
+            .find(|s| s.id == subvol_id)
+            .expect("created subvolume must be enumerated from the root tree");
+        assert_eq!(
+            created.name, "mysubvol",
+            "subvolume is listed by its ROOT_REF name"
+        );
+        assert_eq!(
+            created.parent_id, BTRFS_FS_TREE_OBJECTID,
+            "subvolume parent is the default FS_TREE"
         );
     }
 
