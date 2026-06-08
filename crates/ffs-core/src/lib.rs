@@ -4270,17 +4270,27 @@ impl OpenFs {
     /// (the target inode itself is recovered by the `InodeUpdate` apply).
     ///
     /// Mirrors the recovery write model of [`Self::recovery_write_inode_raw`]:
-    /// walk the parent's directory blocks, insert the new entry into the first
-    /// block with room, re-stamp the dir-block checksum when `metadata_csum` is
-    /// enabled, and write back via the unversioned device adapter (no
-    /// `alloc_state` is required at mount).
+    /// locate the directory block the entry belongs in, splice it via
+    /// [`ffs_dir::add_entry`], re-stamp the dir-block checksum when
+    /// `metadata_csum` is enabled, and write back via the unversioned device
+    /// adapter (no `alloc_state` is required at mount). For a **linear**
+    /// directory it walks the blocks and uses the first with room; for an
+    /// **htree** (hash-indexed) directory it descends the DX index to the leaf
+    /// whose hash range covers `name` ([`ffs_ondisk::htree_target_leaf_block`])
+    /// and adds there — the same leaf [`ffs_ondisk::htree_find_entry`] would
+    /// navigate to, so the index stays consistent without any dx surgery (no new
+    /// leaf is created).
     ///
     /// Conservative — returns `Ok(false)` (leaving the record verify-only) when:
     /// - the parent is not a directory;
-    /// - the parent uses an htree index — adding a linear entry without updating
-    ///   the hash index would desync the tree (deferred to bd-w6fxn);
-    /// - no existing directory block has room — growing the directory needs the
-    ///   writable-path block allocator, unavailable at mount recovery.
+    /// - the parent is a non-ASCII casefold htree dir — its fold may diverge from
+    ///   the kernel's normalization, and the write side has no linear safety net
+    ///   (bd-owt2r);
+    /// - the htree index is unreadable — refusing to mutate beats a linear write
+    ///   into the dx_root;
+    /// - no directory block (or the target htree leaf) has room — growing the
+    ///   directory / splitting a leaf needs the writable-path block allocator,
+    ///   unavailable at mount recovery.
     ///
     /// Returns `Ok(true)` when the entry was spliced in, or when it is already
     /// present (idempotent: the create may also have been captured by JBD2 replay
@@ -4297,18 +4307,11 @@ impl OpenFs {
         if !parent.is_dir() {
             return Ok(false);
         }
-        if parent.has_htree_index() {
-            warn!(
-                parent_ino,
-                ino = dentry.ino,
-                "fc_apply: CREAT/LINK skipped — htree parent dir (hash-index update deferred, bd-w6fxn)"
-            );
-            return Ok(false);
-        }
 
         // Idempotency (critical: a duplicate entry across blocks is corruption).
         // `add_entry` inserts into the first free slot without scanning other
-        // blocks for the name, so check the whole directory first.
+        // blocks for the name, so check the whole directory first (lookup_name
+        // covers both the htree index and the linear scan).
         if self.lookup_name(cx, &parent, &dentry.name)?.is_some() {
             debug!(
                 parent_ino,
@@ -4321,18 +4324,22 @@ impl OpenFs {
         // The directory-entry file type comes from the target inode's mode.
         let target = self.read_inode(cx, InodeNumber(u64::from(dentry.ino)))?;
         let file_type = inode_dir_entry_file_type(&target);
-
-        let sb = self
-            .ext4_superblock()
-            .ok_or_else(|| FfsError::Format("not an ext4 filesystem".into()))?;
-        let has_csum = sb.has_metadata_csum();
-        let csum_seed = sb.csum_seed();
-        let block_size_u16 = sb.block_size;
-        let reserved_tail = self.ext4_dir_reserved_tail();
         let scope = RequestScope::empty();
+
+        // htree (hash-indexed) directory: add into the hash-correct leaf only.
+        if parent.has_htree_index() {
+            return self.apply_fast_commit_add_dentry_htree(
+                cx,
+                &scope,
+                &parent,
+                dentry,
+                file_type,
+            );
+        }
+
+        // Linear directory: splice into the first block with room.
         let bs = u64::from(self.block_size());
         let num_blocks = dir_logical_block_count(parent.size, bs)?;
-
         for lb in 0..num_blocks {
             let Some((phys, unwritten)) = self.resolve_extent(cx, &scope, &parent, lb)? else {
                 continue;
@@ -4340,43 +4347,14 @@ impl OpenFs {
             if unwritten {
                 continue;
             }
-            let mut block = self
-                .read_ext4_file_data_block_with_scope(cx, &scope, BlockNumber(phys))?
-                .to_vec();
-            match ffs_dir::add_entry(
-                &mut block,
-                dentry.ino,
-                &dentry.name,
+            if self.fc_write_dentry_into_block(
+                cx,
+                BlockNumber(phys),
+                dentry,
                 file_type,
-                reserved_tail,
-            ) {
-                Ok(_) => {
-                    if has_csum {
-                        ffs_ondisk::stamp_dir_block_checksum(
-                            &mut block,
-                            csum_seed,
-                            parent_ino,
-                            parent.generation,
-                        );
-                    }
-                    let block_dev = ByteDeviceBlockAdapter {
-                        dev: &*self.dev,
-                        block_size: block_size_u16,
-                    };
-                    block_dev.write_block(cx, BlockNumber(phys), &block)?;
-                    self.ext4_file_data_block_cache
-                        .lock()
-                        .remove(&BlockNumber(phys));
-                    debug!(
-                        parent_ino,
-                        ino = dentry.ino,
-                        block = phys,
-                        "fc_apply: CREAT/LINK entry written back at recovery"
-                    );
-                    return Ok(true);
-                }
-                Err(FfsError::NoSpace) => {}
-                Err(error) => return Err(error),
+                parent.generation,
+            )? {
+                return Ok(true);
             }
         }
 
@@ -4386,6 +4364,150 @@ impl OpenFs {
             "fc_apply: CREAT/LINK skipped — no directory block with room (needs allocation)"
         );
         Ok(false)
+    }
+
+    /// htree branch of [`Self::apply_fast_commit_add_dentry`]: descend the DX
+    /// index to the leaf whose hash range covers `name` and splice the entry
+    /// there. Adding to the existing hash-correct leaf keeps the index valid
+    /// without creating a new leaf, so no dx surgery (or allocation) is needed.
+    fn apply_fast_commit_add_dentry_htree(
+        &self,
+        cx: &Cx,
+        scope: &RequestScope,
+        parent: &Ext4Inode,
+        dentry: &ffs_journal::FcDentry,
+        file_type: Ext4FileType,
+    ) -> Result<bool, FfsError> {
+        let parent_ino = dentry.parent_ino;
+        // Non-ASCII casefold folds may diverge from the kernel's; the write side
+        // has no linear fallback, so refuse rather than misplace the entry.
+        let casefold = parent.flags & ffs_types::EXT4_CASEFOLD_FL != 0;
+        if casefold && !dentry.name.is_ascii() {
+            warn!(
+                parent_ino,
+                "fc_apply: CREAT/LINK skipped — non-ASCII casefold htree dir (bd-owt2r)"
+            );
+            return Ok(false);
+        }
+
+        let sb = self
+            .ext4_superblock()
+            .ok_or_else(|| FfsError::Format("not an ext4 filesystem".into()))?;
+        let read_leaf = |lb: u32| -> Option<Vec<u8>> {
+            let (phys, unwritten) = self.resolve_extent(cx, scope, parent, lb).ok().flatten()?;
+            if unwritten {
+                return None;
+            }
+            self.read_ext4_file_data_block_with_scope(cx, scope, BlockNumber(phys))
+                .ok()
+                .map(|b| b.to_vec())
+        };
+        let target_logical = if casefold {
+            ffs_ondisk::htree_target_leaf_block_casefold(
+                &sb.hash_seed,
+                sb.has_large_dir(),
+                &dentry.name,
+                |v| sb.effective_dirhash_version(v),
+                read_leaf,
+            )
+        } else {
+            ffs_ondisk::htree_target_leaf_block(
+                &sb.hash_seed,
+                sb.has_large_dir(),
+                &dentry.name,
+                |v| sb.effective_dirhash_version(v),
+                read_leaf,
+            )
+        };
+        let Some(target_logical) = target_logical else {
+            warn!(
+                parent_ino,
+                "fc_apply: CREAT/LINK skipped — htree index unreadable (refusing to mutate)"
+            );
+            return Ok(false);
+        };
+
+        let Some((phys, unwritten)) = self.resolve_extent(cx, scope, parent, target_logical)?
+        else {
+            return Ok(false);
+        };
+        if unwritten {
+            return Ok(false);
+        }
+        if self.fc_write_dentry_into_block(
+            cx,
+            BlockNumber(phys),
+            dentry,
+            file_type,
+            parent.generation,
+        )? {
+            return Ok(true);
+        }
+        warn!(
+            parent_ino,
+            ino = dentry.ino,
+            "fc_apply: CREAT/LINK skipped — htree leaf full (split needs allocation)"
+        );
+        Ok(false)
+    }
+
+    /// Splice `dentry` into the directory block at `phys` and persist it the
+    /// recovery way (direct-to-device, dir-block checksum re-stamped, file-data
+    /// cache invalidated). Returns `Ok(true)` on success, `Ok(false)` when the
+    /// block has no room ([`FfsError::NoSpace`]) so the caller can try another
+    /// block. Shared by the linear and htree apply paths.
+    fn fc_write_dentry_into_block(
+        &self,
+        cx: &Cx,
+        phys: BlockNumber,
+        dentry: &ffs_journal::FcDentry,
+        file_type: Ext4FileType,
+        parent_generation: u32,
+    ) -> Result<bool, FfsError> {
+        let sb = self
+            .ext4_superblock()
+            .ok_or_else(|| FfsError::Format("not an ext4 filesystem".into()))?;
+        let has_csum = sb.has_metadata_csum();
+        let csum_seed = sb.csum_seed();
+        let block_size_u16 = sb.block_size;
+        let reserved_tail = self.ext4_dir_reserved_tail();
+
+        let mut block = self
+            .read_ext4_file_data_block_with_scope(cx, &RequestScope::empty(), phys)?
+            .to_vec();
+        match ffs_dir::add_entry(
+            &mut block,
+            dentry.ino,
+            &dentry.name,
+            file_type,
+            reserved_tail,
+        ) {
+            Ok(_) => {
+                if has_csum {
+                    ffs_ondisk::stamp_dir_block_checksum(
+                        &mut block,
+                        csum_seed,
+                        dentry.parent_ino,
+                        parent_generation,
+                    );
+                }
+                let block_dev = ByteDeviceBlockAdapter {
+                    dev: &*self.dev,
+                    block_size: block_size_u16,
+                };
+                block_dev.write_block(cx, phys, &block)?;
+                self.ext4_file_data_block_cache.lock().remove(&phys);
+                debug!(
+                    parent_ino = dentry.parent_ino,
+                    ino = dentry.ino,
+                    block = phys.0,
+                    "fc_apply: CREAT/LINK entry written back at recovery"
+                );
+                Ok(true)
+            }
+            Err(FfsError::NoSpace) => Ok(false),
+            Err(error) => Err(error),
+        }
     }
 
     /// Apply a fast-commit ADD_RANGE record (bd-6nwjx) by inserting the extent
@@ -41522,6 +41644,180 @@ mod tests {
                 ffs_ondisk::HtreeFindResult::Found(_)
             ),
             "pre-existing entry must remain index-reachable after the create"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn fast_commit_create_apply_into_htree_dir_bd_w6fxn() {
+        // bd-w6fxn: a fast-committed create whose parent is an htree (large)
+        // directory. CREAT recovery must descend the DX index and splice the new
+        // entry into the hash-correct leaf — reaching realistic directories the
+        // linear path skips — keeping the index consistent (no dx surgery).
+        //
+        // The apply is a recovery (from_device) operation: it reads the device
+        // directly, not the MVCC overlay. So we build the htree dir on a writable
+        // fs, flush it to the device, then REOPEN from_device and run the apply
+        // there (mirroring a real post-crash mount).
+        let Some((fs, dev, _tmp)) = open_writable_ext4_mkfs_with_device(16) else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let (csum_seed, hash_seed, has_large_dir, hash_version, block_size) = {
+            let sb = fs.ext4_superblock().expect("sb");
+            (
+                sb.csum_seed(),
+                sb.hash_seed,
+                sb.has_large_dir(),
+                sb.effective_dirhash_version(sb.def_hash_version),
+                usize::try_from(sb.block_size).unwrap(),
+            )
+        };
+
+        let dir = fs
+            .mkdir(&cx, root, OsStr::new("bigdir"), 0o755, 0, 0)
+            .expect("mkdir");
+        let dir_ino = dir.ino;
+        let dir_ino_u32 = u32::try_from(dir_ino.0).unwrap();
+        let generation = fs.read_inode(&cx, dir_ino).expect("read dir").generation;
+
+        // A real target inode the recovered entry will point at (CREAT reads its
+        // mode for the dir-entry file type).
+        let target = fs
+            .create(&cx, root, OsStr::new("target.bin"), 0o644, 0, 0)
+            .expect("create target file");
+        let target_ino_u32 = u32::try_from(target.ino.0).unwrap();
+
+        // Fabricate the htree blocks now (needs the dir generation). Keep the
+        // entry count small so the leaf the name hashes to always has ample room
+        // — mkfs picks a RANDOM hash seed each run, so a near-full multi-leaf
+        // layout would make the (no-split) recovery apply flakily hit a full
+        // leaf. A small dir is still genuinely htree-indexed (dx_root + leaf).
+        let names: Vec<Vec<u8>> = (0..20)
+            .map(|i| format!("file_{i:04}.txt").into_bytes())
+            .collect();
+        let entries: Vec<(u32, u8, &[u8])> = names
+            .iter()
+            .enumerate()
+            .map(|(i, n)| {
+                (
+                    1000 + u32::try_from(i).unwrap(),
+                    ffs_ondisk::ext4::EXT4_FT_REG_FILE,
+                    n.as_slice(),
+                )
+            })
+            .collect();
+        let blocks = ffs_ondisk::build_htree_directory_stamped(
+            dir_ino_u32,
+            2,
+            &entries,
+            block_size,
+            hash_version,
+            &hash_seed,
+            csum_seed,
+            dir_ino_u32,
+            generation,
+        )
+        .expect("build htree");
+        assert!(blocks.len() >= 2, "need dx_root + at least one leaf");
+
+        // Land the MVCC writes (mkdir/create) on the device FIRST, then install
+        // the htree blocks directly (so the direct dir-inode write is not later
+        // clobbered by a flush of the pre-htree MVCC dir inode).
+        fs.flush_mvcc_to_device(&cx).expect("flush mvcc");
+        install_htree_dir(&fs, &cx, dir_ino, &blocks);
+
+        // Reopen from the device so reads ARE the device (not the MVCC overlay).
+        // Skip journal replay: install_htree_dir's direct, non-journaled writes
+        // would otherwise be clobbered by replaying the pre-htree committed
+        // journal transactions (a flaky-under-parallelism failure depending on
+        // whether the flush left a pending transaction).
+        let reopen_opts = OpenOptions {
+            ext4_journal_replay_mode: Ext4JournalReplayMode::Skip,
+            ..OpenOptions::default()
+        };
+        let fs2 = OpenFs::from_device(
+            &cx,
+            Box::new(TestDevice::from_vec(dev.snapshot_bytes())),
+            &reopen_opts,
+        )
+        .expect("reopen ext4 from device");
+        let find = |name: &[u8]| -> ffs_ondisk::HtreeFindResult {
+            ffs_ondisk::htree_find_entry(
+                u32::try_from(block_size).unwrap(),
+                &hash_seed,
+                has_large_dir,
+                name,
+                |v| v,
+                |lb| {
+                    let inode = fs2.read_inode(&cx, dir_ino).ok()?;
+                    let exts = fs2.collect_extents(&cx, &inode).ok()?;
+                    let phys = exts.iter().find_map(|e| {
+                        let len = u32::from(e.actual_len());
+                        if lb >= e.logical_block && lb < e.logical_block + len {
+                            Some(e.physical_start + u64::from(lb - e.logical_block))
+                        } else {
+                            None
+                        }
+                    })?;
+                    fs2.read_block_vec(&cx, BlockNumber(phys)).ok()
+                },
+            )
+        };
+
+        assert!(
+            fs2.read_inode(&cx, dir_ino).unwrap().has_htree_index(),
+            "installed dir must be htree-indexed on the device"
+        );
+        assert!(
+            matches!(
+                find(b"file_0005.txt"),
+                ffs_ondisk::HtreeFindResult::Found(_)
+            ),
+            "pre-existing entry must be index-reachable before recovery"
+        );
+        assert!(
+            matches!(
+                find(b"zzz_recovered.bin"),
+                ffs_ondisk::HtreeFindResult::NotFoundInIndex
+            ),
+            "the recovered name must be absent before recovery"
+        );
+
+        // Operation under test: recover the fast-committed CREAT.
+        let dentry = ffs_journal::FcDentry {
+            parent_ino: dir_ino_u32,
+            ino: target_ino_u32,
+            name: b"zzz_recovered.bin".to_vec(),
+        };
+        let applied = fs2
+            .apply_fast_commit_add_dentry(&cx, &dentry)
+            .expect("apply htree create");
+        assert!(applied, "entry should splice into the hash-correct leaf");
+
+        // (a) the recovered entry is reachable VIA THE INDEX (hash-correct leaf).
+        match find(b"zzz_recovered.bin") {
+            ffs_ondisk::HtreeFindResult::Found(e) => assert_eq!(e.inode, target_ino_u32),
+            other => panic!("recovered htree entry must be index-reachable, got {other:?}"),
+        }
+        // (b) dx_root still parses (the index was not corrupted).
+        let block0_phys = {
+            let di = fs2.read_inode(&cx, dir_ino).unwrap();
+            fs2.collect_extents(&cx, &di)
+                .unwrap()
+                .iter()
+                .find(|e| e.logical_block == 0)
+                .unwrap()
+                .physical_start
+        };
+        let dxr = fs2.read_block_vec(&cx, BlockNumber(block0_phys)).unwrap();
+        let parsed = ffs_ondisk::parse_dx_root(&dxr).expect("dx_root must still parse");
+        assert!(!parsed.entries.is_empty(), "dx_root index must survive");
+        // (c) a pre-existing entry remains index-reachable.
+        assert!(
+            matches!(find(b"file_0005.txt"), ffs_ondisk::HtreeFindResult::Found(_)),
+            "pre-existing entry must remain index-reachable after recovery"
         );
     }
 
