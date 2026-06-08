@@ -56337,6 +56337,62 @@ mod tests {
         Some((fs, dev, tmp, image))
     }
 
+    /// Applying a fast-commit DEL_RANGE at recovery must punch the logical range,
+    /// FREE the underlying data blocks, charge the freed sectors out of i_blocks,
+    /// and leave the image e2fsck-clean (block bitmap + i_blocks + extent tree +
+    /// superblock free count all consistent). This is the corruption-sensitive
+    /// `ext4_fc_replay_del_range` analog and had no dedicated test — the existing
+    /// bd-6nwjx coverage exercises InodeUpdate / ADD_RANGE / Create but never the
+    /// punch-and-free pre-pass (lib.rs apply_fast_commit_del_range_ops, run from
+    /// apply_fast_commit_operations before the per-op loop). Punches the MIDDLE of
+    /// a contiguous extent so the inline (depth-0) root is split into two extents,
+    /// exercising the split path, not just a tail truncate. No metadata_csum so
+    /// the assertion isolates the punch/free/accounting from the csum tail.
+    #[test]
+    fn fast_commit_del_range_apply_punches_and_frees_passes_e2fsck() {
+        let Some((fs, dev, _tmp, image)) = open_ext4_mke2fs(8, false) else {
+            return; // e2fsprogs unavailable
+        };
+        let cx = Cx::for_testing();
+
+        // A FrankenFS-created file with a contiguous 4-block (depth-0) extent.
+        let attr = fs
+            .create(&cx, InodeNumber(2), OsStr::new("fc_del.dat"), 0o644, 0, 0)
+            .expect("create regular file");
+        let bs = u64::from(fs.ext4_superblock().expect("sb").block_size);
+        fs.write(&cx, attr.ino, 0, &vec![0x9C_u8; (4 * bs) as usize])
+            .expect("write 4 contiguous blocks");
+        // The punch reads the pre-recovery on-device extent tree, so the file's
+        // blocks must be flushed to the device first.
+        fs.flush_mvcc_to_device(&cx).expect("flush mvcc");
+
+        // DEL_RANGE punching the middle two logical blocks [1, 3): splits the
+        // single inline extent into [0,1) + [3,4) and frees 2 data blocks.
+        let ino_u32 = u32::try_from(attr.ino.0).expect("ino fits u32");
+        let ops = vec![ffs_journal::FcOperation::DelRange(ffs_journal::FcDelRange {
+            ino: ino_u32,
+            logical_block: 1,
+            len: 2,
+        })];
+        let applied = fs
+            .apply_fast_commit_operations(&cx, &ops, true)
+            .expect("apply fc del_range");
+        assert_eq!(applied, 1, "the DEL_RANGE op should verify and count as applied");
+
+        std::fs::write(&image, dev.snapshot_bytes()).expect("write recovered image");
+        let Some((clean, output)) = run_e2fsck(&image) else {
+            return; // e2fsck unavailable
+        };
+        assert!(
+            !output.contains("i_blocks"),
+            "e2fsck must not report an i_blocks mismatch after a fast-commit del_range punch+free:\n{output}"
+        );
+        assert!(
+            clean,
+            "e2fsck must accept the image after a fast-commit del_range punch+free:\n{output}"
+        );
+    }
+
     /// bd-6nwjx: applying a fast-commit InodeUpdate at recovery must leave the
     /// image `e2fsck`-clean — i.e. the inode is written back to the correct
     /// table location with a consistent result, not just an in-memory read-back.
