@@ -4328,16 +4328,44 @@ impl BtrfsExtentAllocator {
         value[0..8].copy_from_slice(&new_refs.to_le_bytes());
         self.extent_tree.update(&item_key, &value)?;
 
+        let ref_key = BtrfsKey {
+            objectid: bytenr,
+            item_type: BTRFS_ITEM_EXTENT_DATA_REF,
+            offset: hash_extent_data_ref(root, objectid, offset),
+        };
+        // If an EXTENT_DATA_REF for this exact (root, objectid, offset) already
+        // exists, the kernel MERGES the new reference by incrementing the
+        // existing item's count rather than failing — multiple file extents in
+        // one inode can legitimately reference the same data extent at the same
+        // backref key (bd-ngt1y). A keyed EXTENT_DATA_REF whose offset is
+        // hash_extent_data_ref(...) can hash-collide with a DIFFERENT
+        // (root, objectid, offset); only merge when the stored triple actually
+        // matches, so a genuine collision still falls through to insert() and
+        // keeps the prior fail-closed behavior (rather than corrupting an
+        // unrelated backref's count).
+        if let Some(existing) = self.extent_tree.get(&ref_key)
+            && let Some(existing_ref) = BtrfsExtentDataRef::from_bytes(&existing)
+            && existing_ref.root == root
+            && existing_ref.objectid == objectid
+            && existing_ref.offset == offset
+        {
+            let merged = BtrfsExtentDataRef {
+                root,
+                objectid,
+                offset,
+                count: existing_ref
+                    .count
+                    .checked_add(1)
+                    .ok_or(BtrfsMutationError::AddressOverflow)?,
+            };
+            self.extent_tree.update(&ref_key, &merged.to_bytes())?;
+            return Ok(());
+        }
         let data_ref = BtrfsExtentDataRef {
             root,
             objectid,
             offset,
             count: 1,
-        };
-        let ref_key = BtrfsKey {
-            objectid: bytenr,
-            item_type: BTRFS_ITEM_EXTENT_DATA_REF,
-            offset: hash_extent_data_ref(root, objectid, offset),
         };
         self.extent_tree.insert(ref_key, &data_ref.to_bytes())?;
         Ok(())
@@ -12572,6 +12600,48 @@ mod tests {
                 objectid: 257,
                 offset: 0,
                 count: 1,
+            }
+        );
+    }
+
+    /// bd-ngt1y: adding a SECOND EXTENT_DATA_REF for the same
+    /// (root, objectid, offset) must MERGE into the existing keyed item by
+    /// bumping its count (kernel behavior), not fail with KeyAlreadyExists or
+    /// create a duplicate item.
+    #[test]
+    fn add_data_extent_ref_merges_duplicate_backref_bd_ngt1y() {
+        let mut alloc = BtrfsExtentAllocator::new(7).expect("alloc");
+        alloc.add_block_group(0x1_0000, make_data_bg(0x1_0000, 0x10_0000));
+        let a = alloc.alloc_data(4096).expect("alloc");
+        // refs == 1: inline ref for inode 256 at offset 0.
+        alloc
+            .insert_data_extent_item(a.bytenr, a.num_bytes, 5, 256, 0, 7)
+            .expect("insert refs=1 extent item");
+
+        // First keyed ref for (5, 257, 0): refs 1 -> 2, keyed count 1.
+        alloc
+            .add_data_extent_ref(a.bytenr, a.num_bytes, 5, 257, 0)
+            .expect("add keyed ref");
+        // Second ref for the SAME (5, 257, 0): must merge, not error.
+        alloc
+            .add_data_extent_ref(a.bytenr, a.num_bytes, 5, 257, 0)
+            .expect("duplicate (root,objectid,offset) ref must merge, not fail");
+
+        // Total EXTENT_ITEM refs is now 3 (1 inline + 2 from the merged keyed ref).
+        assert_eq!(
+            alloc.extent_item_refs(a.bytenr, a.num_bytes).expect("refs"),
+            Some(3)
+        );
+        // Still exactly ONE keyed EXTENT_DATA_REF, now with count 2.
+        let keyed = alloc.get_extent_data_refs(a.bytenr).expect("keyed refs");
+        assert_eq!(keyed.len(), 1, "duplicate merged into one keyed item");
+        assert_eq!(
+            keyed[0],
+            BtrfsExtentDataRef {
+                root: 5,
+                objectid: 257,
+                offset: 0,
+                count: 2,
             }
         );
     }
