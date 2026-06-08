@@ -55330,6 +55330,54 @@ mod tests {
         );
     }
 
+    /// A btrfs file put through a fallocate churn (collapse / insert / punch /
+    /// zero, which splice the COW extent tree) and committed must remain
+    /// `btrfs check`-clean — no stale FILE_EXTENT backrefs after the splices, no
+    /// csum-tree drift after the punched/zeroed ranges, and block-group/superblock
+    /// byte accounting still reconciles. Complements the byte-exact
+    /// btrfs_write_fallocate_random fuzz (which validates data, not metadata).
+    /// Skips when btrfs-progs is unavailable.
+    #[test]
+    fn btrfs_fallocate_churn_passes_btrfs_check() {
+        let Some((fs, dev, _tmp, image)) = open_writable_btrfs_mkfs(256) else {
+            return; // btrfs-progs unavailable
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(u64::from(BTRFS_FIRST_FREE_OBJECTID));
+        let attr = fs
+            .create(&cx, root, OsStr::new("falloc_check.bin"), 0o644, 0, 0)
+            .expect("create");
+        fs.write(&cx, attr.ino, 0, &[0x11_u8; 40960])
+            .expect("write 10 blocks"); // 10 x 4096
+        fs.fallocate(&cx, attr.ino, 8192, 8192, libc::FALLOC_FL_COLLAPSE_RANGE)
+            .expect("collapse");
+        fs.fallocate(&cx, attr.ino, 4096, 8192, libc::FALLOC_FL_INSERT_RANGE)
+            .expect("insert");
+        fs.fallocate(
+            &cx,
+            attr.ino,
+            8192,
+            4096,
+            libc::FALLOC_FL_KEEP_SIZE | libc::FALLOC_FL_PUNCH_HOLE,
+        )
+        .expect("punch");
+        fs.fallocate(&cx, attr.ino, 12288, 4096, libc::FALLOC_FL_ZERO_RANGE)
+            .expect("zero");
+
+        let _ = fs.flush_mvcc_to_device(&cx);
+        fs.btrfs_full_transaction_commit(&cx, "fallocate-churn-check")
+            .expect("btrfs full transaction commit");
+        std::fs::write(&image, dev.snapshot_bytes()).expect("write modified image");
+
+        let Some((ok, output)) = run_btrfs_check(&image) else {
+            return; // btrfs check tool unavailable
+        };
+        assert!(
+            ok,
+            "btrfs check must accept a FrankenFS fallocate-churned file:\n{output}"
+        );
+    }
+
     /// bd-x3fcu / bd-4cxkd: a file whose DATA is written + committed by FrankenFS
     /// on a REAL btrfs image must be `btrfs check`-clean. This exercises both
     /// halves of bd-4cxkd: (1) the data extent carries its `EXTENT_ITEM` + inline
