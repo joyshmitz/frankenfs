@@ -54396,6 +54396,123 @@ mod tests {
         );
     }
 
+    /// Integration gauntlet for the ext4 fast-commit recovery campaign
+    /// (bd-6nwjx/bd-w6fxn/bd-4tmpw): a real crash replays a *stream* of mixed
+    /// operations in one batch, exercising the pre-passes (external-extent +
+    /// DEL_RANGE) and the per-op loop together. Each op type was tested in
+    /// isolation; this proves they compose into an e2fsck-clean image when
+    /// applied as one interleaved batch touching several inodes.
+    #[test]
+    fn fast_commit_mixed_batch_recovery_is_e2fsck_clean_bd_6nwjx() {
+        let Some((fs, dev, _tmp, image)) = open_ext4_mke2fs(8, false) else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let inode_size = usize::from(fs.ext4_superblock().expect("sb").inode_size);
+
+        // Build a small tree: a file to keep (mtime touch), one to delete, one to
+        // punch, a subdir, and a link target that gains a recovered name.
+        let keep = fs.create(&cx, root, OsStr::new("keep.dat"), 0o644, 0, 0).unwrap();
+        fs.write(&cx, keep.ino, 0, &[0x11_u8; 1024]).unwrap();
+        let victim = fs.create(&cx, root, OsStr::new("victim.dat"), 0o644, 0, 0).unwrap();
+        fs.write(&cx, victim.ino, 0, &[0x22_u8; 2048]).unwrap();
+        let punchme = fs.create(&cx, root, OsStr::new("punchme.dat"), 0o644, 0, 0).unwrap();
+        fs.write(&cx, punchme.ino, 0, &[0x33_u8; 3 * 1024]).unwrap();
+        let linktgt = fs.create(&cx, root, OsStr::new("linktgt.dat"), 0o644, 0, 0).unwrap();
+        fs.write(&cx, linktgt.ino, 0, &[0x44_u8; 1024]).unwrap();
+        let sub = fs.mkdir(&cx, root, OsStr::new("sub"), 0o755, 0, 0).unwrap();
+        fs.flush_mvcc_to_device(&cx).expect("flush mvcc");
+
+        let u32_of = |i: InodeNumber| u32::try_from(i.0).unwrap();
+        let (keep_u, victim_u, punch_u, link_u, sub_u) = (
+            u32_of(keep.ino),
+            u32_of(victim.ino),
+            u32_of(punchme.ino),
+            u32_of(linktgt.ino),
+            u32_of(sub.ino),
+        );
+
+        // Reopen from_device — the real recovery context.
+        let recov = std::sync::Arc::new(std::sync::Mutex::new(dev.snapshot_bytes()));
+        let fs2 = OpenFs::from_device(
+            &cx,
+            Box::new(TestDevice {
+                data: std::sync::Arc::clone(&recov),
+            }),
+            &OpenOptions::default(),
+        )
+        .expect("reopen from device");
+
+        // Fabricate the INODE records the kernel would pair with the dir ops.
+        let raw_with = |ino: InodeNumber, f: &dyn Fn(&mut Ext4Inode)| {
+            let mut i = fs2.read_inode(&cx, ino).expect("read inode");
+            f(&mut i);
+            ffs_inode::serialize_inode(&i, inode_size)
+        };
+        let keep_raw = raw_with(keep.ino, &|i| i.mtime = i.mtime.wrapping_add(0x5151));
+        let victim_raw = raw_with(victim.ino, &|i| i.links_count = 0);
+        let link_raw = raw_with(linktgt.ino, &|i| i.links_count = 2);
+
+        // One interleaved batch: delete + punch + create + two inode touches.
+        let ops = vec![
+            ffs_journal::FcOperation::Unlink(ffs_journal::FcDentry {
+                parent_ino: 2,
+                ino: victim_u,
+                name: b"victim.dat".to_vec(),
+            }),
+            ffs_journal::FcOperation::DelRange(ffs_journal::FcDelRange {
+                ino: punch_u,
+                logical_block: 1,
+                len: 1,
+            }),
+            ffs_journal::FcOperation::Create(ffs_journal::FcDentry {
+                parent_ino: sub_u,
+                ino: link_u,
+                name: b"recovered.dat".to_vec(),
+            }),
+            ffs_journal::FcOperation::InodeUpdate(victim_u, victim_raw),
+            ffs_journal::FcOperation::InodeUpdate(link_u, link_raw),
+            ffs_journal::FcOperation::InodeUpdate(keep_u, keep_raw),
+        ];
+        fs2.apply_fast_commit_operations(&cx, &ops, true)
+            .expect("apply mixed fc batch");
+
+        // Namespace assertions.
+        let root_inode = fs2.read_inode(&cx, root).expect("root");
+        let sub_inode = fs2.read_inode(&cx, sub.ino).expect("sub");
+        assert!(
+            fs2.lookup_name(&cx, &root_inode, b"victim.dat").unwrap().is_none(),
+            "deleted name gone"
+        );
+        assert!(
+            fs2.lookup_name(&cx, &root_inode, b"keep.dat").unwrap().is_some(),
+            "kept name survives"
+        );
+        let rec = fs2
+            .lookup_name(&cx, &sub_inode, b"recovered.dat")
+            .unwrap()
+            .expect("created name resolves");
+        assert_eq!(rec.inode, link_u, "created entry targets the link inode");
+        let punch_inode = fs2.read_inode(&cx, punchme.ino).expect("punchme");
+        assert!(
+            fs2.resolve_extent(&cx, &RequestScope::empty(), &punch_inode, 1)
+                .unwrap()
+                .is_none(),
+            "punched block is unmapped"
+        );
+
+        // The whole interleaved batch leaves an e2fsck-clean image.
+        std::fs::write(&image, recov.lock().unwrap().clone()).expect("write recovered image");
+        let Some((clean, output)) = run_e2fsck(&image) else {
+            return;
+        };
+        assert!(
+            clean,
+            "e2fsck must accept the image after a mixed fast-commit recovery batch:\n{output}"
+        );
+    }
+
     /// bd-x3fcu increment 2 / bd-x36qn / bd-fdwuh: a file created + committed by
     /// FrankenFS on a REAL btrfs image must remain `btrfs check`-clean. This
     /// validates the btrfs write/commit path against real btrfs-progs (the
