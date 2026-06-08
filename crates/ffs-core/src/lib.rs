@@ -9189,6 +9189,111 @@ impl OpenFs {
         }
     }
 
+    /// Count the on-disk extent-tree metadata blocks (index + leaf nodes)
+    /// referenced by an extent-mapped inode's tree. The inline root lives in the
+    /// inode `i_block` area (not a separate block), so a depth-0 tree has zero
+    /// metadata blocks; a depth >= 1 tree owns one block per child pointer at
+    /// every level.
+    ///
+    /// ext4 charges these blocks to `i_blocks` alongside data blocks. Snapshotting
+    /// this count at the start of a write/fallocate op and applying the delta at
+    /// the end keeps `i_blocks` correct under both tree growth and
+    /// coalescing-driven shrink, regardless of which internal path (allocate,
+    /// mark_written, …) changed the tree (bd-zpe9s). Returns 0 for an
+    /// indirect-mapped inode root that does not parse as an extent tree.
+    fn ext4_count_extent_tree_meta_blocks(
+        &self,
+        cx: &Cx,
+        scope: &RequestScope,
+        root_bytes: &[u8; 60],
+    ) -> Result<u64, FfsError> {
+        let (header, tree) = match parse_extent_tree(root_bytes) {
+            Ok(parsed) => parsed,
+            Err(_) => return Ok(0),
+        };
+        if header.depth == 0 {
+            return Ok(0);
+        }
+        let mut count = 0_u64;
+        self.count_extent_tree_meta_recursive(cx, scope, &tree, header.depth, &mut count)?;
+        Ok(count)
+    }
+
+    fn count_extent_tree_meta_recursive(
+        &self,
+        cx: &Cx,
+        scope: &RequestScope,
+        tree: &ExtentTree,
+        remaining_depth: u16,
+        count: &mut u64,
+    ) -> Result<(), FfsError> {
+        if remaining_depth > Self::MAX_EXTENT_DEPTH {
+            return Err(FfsError::Corruption {
+                block: 0,
+                detail: "extent tree depth exceeds maximum".into(),
+            });
+        }
+        // Only index nodes have child blocks; each child pointer addresses one
+        // on-disk metadata block (an inner index node or a leaf).
+        if let ExtentTree::Index(indexes) = tree {
+            if remaining_depth == 0 {
+                return Err(FfsError::Corruption {
+                    block: 0,
+                    detail: "extent index at depth 0".into(),
+                });
+            }
+            *count = count.checked_add(indexes.len() as u64).ok_or_else(|| {
+                FfsError::InvalidGeometry("extent meta-block count overflow".into())
+            })?;
+            for idx in indexes {
+                let child_data = self.read_ext4_file_data_block_with_scope(
+                    cx,
+                    scope,
+                    BlockNumber(idx.leaf_block),
+                )?;
+                let (child_header, child_tree) =
+                    parse_extent_tree(&child_data).map_err(|e| parse_to_ffs_error(&e))?;
+                self.count_extent_tree_meta_recursive(
+                    cx,
+                    scope,
+                    &child_tree,
+                    remaining_depth - 1,
+                    count,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Apply the change in extent-tree metadata-block count to `inode.blocks`,
+    /// in the inode's `i_blocks` unit (fs-blocks for huge_file, else 512B
+    /// sectors). The delta is signed so coalescing-driven tree shrink decrements
+    /// correctly (bd-zpe9s).
+    fn ext4_apply_extent_meta_delta(
+        inode: &mut Ext4Inode,
+        ino: InodeNumber,
+        meta_before: u64,
+        meta_after: u64,
+        sectors_per_block: u64,
+    ) -> Result<(), FfsError> {
+        if meta_after == meta_before {
+            return Ok(());
+        }
+        let block_delta = i128::from(meta_after) - i128::from(meta_before);
+        let unit_delta = if inode.is_huge_file() {
+            block_delta
+        } else {
+            block_delta
+                .checked_mul(i128::from(sectors_per_block))
+                .ok_or_else(|| FfsError::Corruption {
+                    block: 0,
+                    detail: format!("inode {} extent-meta sectors overflow", ino.0),
+                })?
+        };
+        inode.blocks = Self::ext4_checked_inode_blocks_delta(inode.blocks, ino, unit_delta)?;
+        Ok(())
+    }
+
     /// Read file data using extent mapping via the device.
     ///
     /// Resolves each logical block through the extent tree and reads the
@@ -14709,6 +14814,11 @@ impl OpenFs {
 
         let mut root_bytes = Self::extent_root(&inode);
         let mut alloc = alloc_mutex.lock();
+        // Snapshot extent-tree metadata blocks before any mode mutates the tree
+        // (prealloc grows it, punch/collapse can shrink it); the net change is
+        // charged to i_blocks at the common writeback below (bd-zpe9s).
+        let fallocate_meta_before =
+            self.ext4_count_extent_tree_meta_blocks(cx, scope, &root_bytes)?;
 
         if punch_hole {
             // Unaligned ranges are supported (bd-xnel9): deallocate the fully
@@ -15302,6 +15412,18 @@ impl OpenFs {
             }
         }
 
+        // Charge the net change in extent-tree metadata blocks across whichever
+        // mode ran (prealloc growth, punch/collapse shrink) to i_blocks — the
+        // per-mode data accounting above counts only data blocks (bd-zpe9s).
+        let fallocate_meta_after =
+            self.ext4_count_extent_tree_meta_blocks(cx, scope, &Self::extent_root(&inode))?;
+        Self::ext4_apply_extent_meta_delta(
+            &mut inode,
+            ino,
+            fallocate_meta_before,
+            fallocate_meta_after,
+            sectors_per_block,
+        )?;
         ffs_inode::touch_mtime_ctime(&mut inode, tstamp_secs, tstamp_nanos);
         ffs_inode::write_inode(
             cx,
@@ -15420,6 +15542,13 @@ impl OpenFs {
         }
 
         let mut alloc = alloc_mutex.lock();
+        // Snapshot extent-tree metadata blocks before any tree mutation in this
+        // write so growth (and any later coalescing-driven shrink) is charged to
+        // i_blocks at the end, regardless of which internal path changed the
+        // tree (bd-zpe9s). sectors_per_block for the i_blocks unit conversion.
+        let write_sectors_per_block = bs / u64::from(EXT4_SECTOR_SIZE);
+        let meta_before =
+            self.ext4_count_extent_tree_meta_blocks(cx, scope, &Self::extent_root(&inode))?;
         let mut bytes_written = 0u32;
         let mut pos = offset;
         let write_len = u64::try_from(data.len())
@@ -15677,6 +15806,18 @@ impl OpenFs {
         if end > inode.size {
             inode.size = end;
         }
+        // Charge the net change in extent-tree metadata blocks (index/leaf nodes
+        // grown or freed during this write) to i_blocks — the per-extent data
+        // deltas above count only data blocks (bd-zpe9s).
+        let meta_after =
+            self.ext4_count_extent_tree_meta_blocks(cx, scope, &Self::extent_root(&inode))?;
+        Self::ext4_apply_extent_meta_delta(
+            &mut inode,
+            ino,
+            meta_before,
+            meta_after,
+            write_sectors_per_block,
+        )?;
         ffs_inode::touch_mtime_ctime(&mut inode, tstamp_secs, tstamp_nanos);
 
         if let Some(tx) = &mut scope.tx {
@@ -43865,6 +44006,53 @@ mod tests {
         assert!(
             clean,
             "e2fsck must accept a FrankenFS-created+written ext4 image:\n{output}"
+        );
+    }
+
+    /// bd-zpe9s: when a file's extent tree grows past its inline 4-extent root
+    /// (depth >= 1), ffs_btree::insert allocates on-disk index/leaf metadata
+    /// blocks that must be charged to i_blocks alongside the data blocks, or
+    /// e2fsck reports "i_blocks is X, should be Y". The fix snapshots the
+    /// extent-tree metadata-block count at the start of each write/fallocate and
+    /// applies the signed delta at the end, so it stays correct under both growth
+    /// and the tree later shrinking via coalescing. Writes many discontiguous
+    /// single-block extents (holes defeat coalescing) to force growth, then
+    /// requires e2fsck clean.
+    #[test]
+    fn ext4_extent_tree_growth_counts_metadata_in_iblocks_bd_zpe9s() {
+        let Some((fs, dev, _tmp, image)) = open_ext4_mke2fs(16, false) else {
+            return; // e2fsprogs unavailable
+        };
+        let cx = Cx::for_testing();
+        let bs = u64::from(fs.ext4_superblock().expect("sb").block_size);
+        let attr = fs
+            .create(&cx, InodeNumber(2), OsStr::new("grow.bin"), 0o644, 0, 0)
+            .expect("create");
+
+        // 16 single blocks at even logical offsets: the holes between them defeat
+        // extent coalescing, so the 16 discontiguous extents overflow the inline
+        // 4-extent root and grow the tree to depth >= 1, allocating extent-tree
+        // metadata blocks that must land in i_blocks.
+        for k in 0..16u64 {
+            fs.write(&cx, attr.ino, k * 2 * bs, &vec![0xCD_u8; bs as usize])
+                .expect("discontiguous write");
+        }
+
+        fs.flush_mvcc_to_device(&cx).expect("flush mvcc");
+        std::fs::write(&image, dev.snapshot_bytes()).expect("write image");
+        let Some((clean, output)) = run_e2fsck(&image) else {
+            return; // e2fsck unavailable
+        };
+        // The pre-fix bug surfaces specifically as an i_blocks mismatch; assert
+        // on that directly (and on overall cleanliness) so the regression is
+        // unambiguous even if e2fsck emits unrelated optimization notices.
+        assert!(
+            !output.contains("i_blocks"),
+            "e2fsck must not report an i_blocks mismatch after extent-tree growth:\n{output}"
+        );
+        assert!(
+            clean,
+            "e2fsck must accept a file whose extent tree grew to depth >= 1:\n{output}"
         );
     }
 
