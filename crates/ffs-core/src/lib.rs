@@ -20890,6 +20890,27 @@ impl OpenFs {
         self.btrfs_create_subvolume(cx, parent, name, uid, gid)
     }
 
+    /// Create a snapshot of the default subvolume named `name` under `parent`
+    /// (the `BTRFS_IOC_SNAP_CREATE` equivalent). btrfs-only.
+    ///
+    /// The snapshot is a point-in-time copy of the source subvolume: its fs-tree
+    /// holds a copy of the source's items and its ROOT_ITEM carries the source's
+    /// uuid as `parent_uuid` (so it is classified as a snapshot). Returns the new
+    /// snapshot's root objectid. See [`Self::btrfs_create_snapshot`].
+    pub fn create_snapshot(
+        &self,
+        cx: &Cx,
+        parent: InodeNumber,
+        name: &[u8],
+    ) -> ffs_error::Result<u64> {
+        if self.btrfs_context().is_none() {
+            return Err(FfsError::UnsupportedFeature(
+                "snapshots are only supported on btrfs".into(),
+            ));
+        }
+        self.btrfs_create_snapshot(cx, parent, name)
+    }
+
     /// Create a new btrfs subvolume rooted under `parent` (bd-tm48j increment 3a).
     ///
     /// Allocates a fresh root objectid, builds the subvolume's own fs-tree (its
@@ -20903,6 +20924,105 @@ impl OpenFs {
     /// subvolume is resolvable by objectid via `btrfs_fs_tree_root_bytenr` after
     /// commit). The parent directory entry + ROOT_REF/ROOT_BACKREF name linkage
     /// and `btrfs check` validation are the next increments (3b).
+    /// Register a new subvolume root in the root tree and stage its fs-tree for
+    /// the next commit. Shared by `btrfs_create_subvolume` (empty tree, no
+    /// parent_uuid) and `btrfs_create_snapshot` (copied source tree, parent_uuid
+    /// = source uuid). Inserts the ROOT_ITEM, the parent directory entry, and the
+    /// ROOT_REF/ROOT_BACKREF name linkage (bd-tm48j).
+    #[allow(clippy::too_many_arguments)]
+    fn btrfs_register_subvolume_in_root(
+        &self,
+        alloc: &mut BtrfsAllocState,
+        parent_oid: u64,
+        name: &[u8],
+        subvol_id: u64,
+        subvol_tree: InMemoryCowBtrfsTree,
+        parent_uuid: [u8; 16],
+        secs: u64,
+        nanos: u32,
+    ) -> ffs_error::Result<()> {
+        let root_dir_oid = u64::from(BTRFS_FIRST_FREE_OBJECTID);
+
+        // ROOT_ITEM. bytenr/level are placeholders the commit repoints (via
+        // patch_root_commit) to the just-written tree root. A deterministic
+        // non-zero uuid (generation == generation_v2 from to_bytes) keeps it
+        // parseable; parent_uuid marks a snapshot (non-zero) vs a plain subvol.
+        let mut uuid = [0_u8; 16];
+        uuid[0..8].copy_from_slice(&subvol_id.to_le_bytes());
+        uuid[8..16].copy_from_slice(&alloc.generation.to_le_bytes());
+        let root_item = BtrfsRootItem {
+            bytenr: 0,
+            level: 0,
+            generation: alloc.generation,
+            root_dirid: root_dir_oid,
+            flags: 0,
+            refs: 1,
+            uuid,
+            parent_uuid,
+        };
+        alloc
+            .root_tree
+            .insert(
+                BtrfsKey {
+                    objectid: subvol_id,
+                    item_type: BTRFS_ITEM_ROOT_ITEM,
+                    offset: 0,
+                },
+                &root_item.to_bytes(),
+            )
+            .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+
+        // Name linkage: the parent dir entry points at the subvolume's ROOT_ITEM
+        // (child_key_type = ROOT_ITEM; readdir emits it as a directory named
+        // `name`). No INODE_REF — a subvolume is not an inode in the parent tree;
+        // the back-link is the ROOT_BACKREF.
+        let parent_root_objectid = BTRFS_FS_TREE_OBJECTID;
+        let dir_item = BtrfsDirItem {
+            child_objectid: subvol_id,
+            child_key_type: BTRFS_ITEM_ROOT_ITEM,
+            child_key_offset: u64::MAX,
+            file_type: BTRFS_FT_DIR,
+            name: name.to_vec(),
+        };
+        let dir_index_seq = self.btrfs_insert_dir_entry(alloc, parent_oid, &dir_item)?;
+
+        // ROOT_REF (parent_root, ROOT_REF, subvol_id) + the inverse ROOT_BACKREF.
+        // On-disk btrfs_root_ref: dirid(8) + sequence(8) + name_len(2) + name.
+        let name_len = u16::try_from(name.len())
+            .map_err(|_| FfsError::Format("subvolume name exceeds u16 length".into()))?;
+        let mut root_ref_bytes = Vec::with_capacity(18 + name.len());
+        root_ref_bytes.extend_from_slice(&parent_oid.to_le_bytes());
+        root_ref_bytes.extend_from_slice(&dir_index_seq.to_le_bytes());
+        root_ref_bytes.extend_from_slice(&name_len.to_le_bytes());
+        root_ref_bytes.extend_from_slice(name);
+        alloc
+            .root_tree
+            .insert(
+                BtrfsKey {
+                    objectid: parent_root_objectid,
+                    item_type: ffs_btrfs::BTRFS_ITEM_ROOT_REF,
+                    offset: subvol_id,
+                },
+                &root_ref_bytes,
+            )
+            .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+        alloc
+            .root_tree
+            .insert(
+                BtrfsKey {
+                    objectid: subvol_id,
+                    item_type: ffs_btrfs::BTRFS_ITEM_ROOT_BACKREF,
+                    offset: parent_root_objectid,
+                },
+                &root_ref_bytes,
+            )
+            .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+
+        alloc.extra_subvol_trees.push((subvol_id, subvol_tree));
+        self.btrfs_touch_inode_times(alloc, parent_oid, secs, nanos)?;
+        Ok(())
+    }
+
     fn btrfs_create_subvolume(
         &self,
         _cx: &Cx,
@@ -20979,92 +21099,125 @@ impl OpenFs {
             )
             .map_err(|e| btrfs_mutation_to_ffs(&e))?;
 
-        // Register the subvolume's ROOT_ITEM in the root tree. bytenr/level are
-        // placeholders the commit repoints (via patch_root_commit) to the
-        // just-written tree root. A deterministic non-zero uuid (generation ==
-        // generation_v2 from to_bytes) keeps it parseable as a valid root.
-        let mut uuid = [0_u8; 16];
-        uuid[0..8].copy_from_slice(&subvol_id.to_le_bytes());
-        uuid[8..16].copy_from_slice(&alloc.generation.to_le_bytes());
-        let root_item = BtrfsRootItem {
-            bytenr: 0,
-            level: 0,
-            generation: alloc.generation,
-            root_dirid: root_dir_oid,
-            flags: 0,
-            refs: 1,
-            uuid,
-            parent_uuid: [0_u8; 16],
-        };
-        alloc
-            .root_tree
-            .insert(
-                BtrfsKey {
-                    objectid: subvol_id,
-                    item_type: BTRFS_ITEM_ROOT_ITEM,
-                    offset: 0,
-                },
-                &root_item.to_bytes(),
-            )
-            .map_err(|e| btrfs_mutation_to_ffs(&e))?;
-
-        // Name linkage (bd-tm48j increment 3b): the parent directory entry plus
-        // the ROOT_REF/ROOT_BACKREF pair so the subvolume is visible by name.
-        //
-        // The parent's containing subvolume is the default FS_TREE (FrankenFS
-        // operates on the default subvol). The parent dir entry points at the
-        // subvolume's ROOT_ITEM (child_key_type = ROOT_ITEM, the kernel's -1
-        // location offset for subvolume entries); readdir emits it as a
-        // directory named `name`. No INODE_REF is added — a subvolume is not an
-        // inode in the parent's tree; the back-link is the ROOT_BACKREF.
-        let parent_root_objectid = BTRFS_FS_TREE_OBJECTID;
-        let dir_item = BtrfsDirItem {
-            child_objectid: subvol_id,
-            child_key_type: BTRFS_ITEM_ROOT_ITEM,
-            child_key_offset: u64::MAX,
-            file_type: BTRFS_FT_DIR,
-            name: name.to_vec(),
-        };
-        let dir_index_seq = self.btrfs_insert_dir_entry(&mut alloc, parent_oid, &dir_item)?;
-
-        // ROOT_REF  key (parent_root, ROOT_REF,     subvol_id) — enumerate uses this for the name.
-        // ROOT_BACKREF key (subvol_id, ROOT_BACKREF, parent_root) — the inverse link.
-        // On-disk btrfs_root_ref layout: dirid(8) + sequence(8) + name_len(2) + name.
-        let name_len = u16::try_from(name.len())
-            .map_err(|_| FfsError::Format("subvolume name exceeds u16 length".into()))?;
-        let mut root_ref_bytes = Vec::with_capacity(18 + name.len());
-        root_ref_bytes.extend_from_slice(&parent_oid.to_le_bytes());
-        root_ref_bytes.extend_from_slice(&dir_index_seq.to_le_bytes());
-        root_ref_bytes.extend_from_slice(&name_len.to_le_bytes());
-        root_ref_bytes.extend_from_slice(name);
-        alloc
-            .root_tree
-            .insert(
-                BtrfsKey {
-                    objectid: parent_root_objectid,
-                    item_type: ffs_btrfs::BTRFS_ITEM_ROOT_REF,
-                    offset: subvol_id,
-                },
-                &root_ref_bytes,
-            )
-            .map_err(|e| btrfs_mutation_to_ffs(&e))?;
-        alloc
-            .root_tree
-            .insert(
-                BtrfsKey {
-                    objectid: subvol_id,
-                    item_type: ffs_btrfs::BTRFS_ITEM_ROOT_BACKREF,
-                    offset: parent_root_objectid,
-                },
-                &root_ref_bytes,
-            )
-            .map_err(|e| btrfs_mutation_to_ffs(&e))?;
-
-        alloc.extra_subvol_trees.push((subvol_id, subvol_tree));
-        self.btrfs_touch_inode_times(&mut alloc, parent_oid, secs, nanos)?;
+        // Register the ROOT_ITEM + name linkage and stage the tree for commit.
+        // A plain subvolume has no parent_uuid (only snapshots set it).
+        self.btrfs_register_subvolume_in_root(
+            &mut alloc,
+            parent_oid,
+            name,
+            subvol_id,
+            subvol_tree,
+            [0_u8; 16],
+            secs,
+            nanos,
+        )?;
         drop(alloc);
 
         Ok(subvol_id)
+    }
+
+    /// Snapshot the default subvolume (bd-tm48j). The snapshot's fs-tree is a
+    /// copy of the source's items and its ROOT_ITEM's `parent_uuid` is the
+    /// source's uuid (so `enumerate_snapshots` classifies it as a snapshot).
+    ///
+    /// This is a metadata copy: it shares no on-disk blocks with the source
+    /// (the snapshot tree is written as its own blocks at commit). It is
+    /// therefore only valid when the source has no data extents to share —
+    /// FrankenFS supports snapshotting the (file-less) default subvolume.
+    /// Snapshotting a source with data extents requires incrementing those
+    /// extents' EXTENT_ITEM refcounts (the COW-share accounting) and is a
+    /// follow-up.
+    fn btrfs_create_snapshot(
+        &self,
+        _cx: &Cx,
+        parent: InodeNumber,
+        name: &[u8],
+    ) -> ffs_error::Result<u64> {
+        self.require_btrfs_rw_allowed("create_snapshot")?;
+        let alloc_mutex = self.require_btrfs_alloc_state()?;
+        let parent_oid = self.btrfs_canonical_inode(parent)?;
+        let (secs, nanos) = Self::btrfs_now_timestamp();
+
+        Self::validate_single_path_component(name)?;
+
+        let mut alloc = alloc_mutex.lock();
+        self.btrfs_require_directory_inode(&alloc, parent_oid)?;
+        if self.btrfs_lookup_dir_entry(&alloc, parent_oid, name).is_ok() {
+            return Err(FfsError::Exists);
+        }
+
+        // Source is the default subvolume (FS_TREE). Its uuid (ROOT_ITEM bytes
+        // offset 247, 16 bytes) becomes the snapshot's parent_uuid.
+        let source_uuid = {
+            let fs_root_key = BtrfsKey {
+                objectid: BTRFS_FS_TREE_OBJECTID,
+                item_type: BTRFS_ITEM_ROOT_ITEM,
+                offset: 0,
+            };
+            let data = alloc.root_tree.get(&fs_root_key).ok_or_else(|| {
+                FfsError::Format("FS_TREE ROOT_ITEM missing — cannot snapshot".into())
+            })?;
+            if data.len() < 263 {
+                return Err(FfsError::Format("FS_TREE ROOT_ITEM too short".into()));
+            }
+            let mut u = [0_u8; 16];
+            u.copy_from_slice(&data[247..263]);
+            u
+        };
+
+        // Copy the source fs-tree's items into the snapshot's fs-tree (a
+        // point-in-time metadata copy). The source must carry no data extents
+        // for this to be ref-consistent (see the fn doc).
+        let source_items: Vec<(BtrfsKey, Vec<u8>)> = {
+            let lo = BtrfsKey {
+                objectid: 0,
+                item_type: 0,
+                offset: 0,
+            };
+            let hi = BtrfsKey {
+                objectid: u64::MAX,
+                item_type: u8::MAX,
+                offset: u64::MAX,
+            };
+            alloc
+                .fs_tree
+                .range(&lo, &hi)
+                .map_err(|e| btrfs_mutation_to_ffs(&e))?
+        };
+        if source_items.iter().any(|(key, _)| {
+            key.item_type == BTRFS_ITEM_EXTENT_DATA
+        }) {
+            return Err(FfsError::UnsupportedFeature(
+                "snapshotting a subvolume that has file data extents is not yet supported \
+                 (requires shared-extent refcount accounting)"
+                    .into(),
+            ));
+        }
+        let max_items = ((alloc.nodesize as usize).saturating_sub(101) / 25).max(3);
+        let mut snap_tree =
+            InMemoryCowBtrfsTree::new(max_items).map_err(|e| btrfs_mutation_to_ffs(&e))?;
+        for (key, data) in &source_items {
+            snap_tree
+                .insert(*key, data)
+                .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+        }
+
+        let snapshot_id = alloc.next_objectid;
+        alloc.next_objectid = alloc.next_objectid.saturating_add(1);
+
+        self.btrfs_register_subvolume_in_root(
+            &mut alloc,
+            parent_oid,
+            name,
+            snapshot_id,
+            snap_tree,
+            source_uuid,
+            secs,
+            nanos,
+        )?;
+        drop(alloc);
+
+        Ok(snapshot_id)
     }
 
     /// Create a device node, FIFO, or socket in a btrfs filesystem.
@@ -56263,6 +56416,83 @@ mod tests {
         assert!(
             ok,
             "btrfs check must accept a FrankenFS-created subvolume:\n{output}"
+        );
+    }
+
+    /// bd-tm48j (snapshot variant): create_snapshot of the (file-less) default
+    /// subvolume must be classified as a snapshot by enumerate_snapshots after
+    /// remount AND be accepted by the real btrfs check tool.
+    #[test]
+    fn btrfs_create_snapshot_enumerates_and_passes_btrfs_check_bd_tm48j() {
+        let Some((fs, dev, _tmp, image)) = open_writable_btrfs_mkfs(256) else {
+            return; // btrfs-progs unavailable
+        };
+        let cx = Cx::for_testing();
+
+        let snap_id = fs
+            .create_snapshot(
+                &cx,
+                InodeNumber(u64::from(BTRFS_FIRST_FREE_OBJECTID)),
+                b"mysnap",
+            )
+            .expect("create_snapshot of the default subvolume");
+
+        let _ = fs.flush_mvcc_to_device(&cx);
+        fs.btrfs_full_transaction_commit(&cx, "snapshot-create-check")
+            .expect("commit the snapshot");
+        let committed = dev.snapshot_bytes();
+
+        // FrankenFS read-back: the snapshot is classified as a snapshot.
+        let opts = OpenOptions {
+            btrfs_rw_ephemeral_ok: true,
+            ..OpenOptions::default()
+        };
+        let mut fs2 = OpenFs::from_device(
+            &cx,
+            Box::new(TestDevice::from_vec(committed.clone())),
+            &opts,
+        )
+        .expect("remount committed image");
+        fs2.enable_writes(&cx).expect("enable writes on remount");
+        let root_entries: Vec<ffs_btrfs::BtrfsLeafEntry> = {
+            let alloc = fs2.btrfs_alloc_state.as_ref().unwrap().lock();
+            let lo = BtrfsKey {
+                objectid: 0,
+                item_type: 0,
+                offset: 0,
+            };
+            let hi = BtrfsKey {
+                objectid: u64::MAX,
+                item_type: u8::MAX,
+                offset: u64::MAX,
+            };
+            alloc
+                .root_tree
+                .range(&lo, &hi)
+                .unwrap()
+                .into_iter()
+                .map(|(key, data)| ffs_btrfs::BtrfsLeafEntry { key, data })
+                .collect()
+        };
+        let snaps = ffs_btrfs::enumerate_snapshots(&root_entries);
+        let created = snaps
+            .iter()
+            .find(|s| s.id == snap_id)
+            .expect("snapshot must be enumerated as a snapshot (parent_uuid set)");
+        assert_eq!(created.name, "mysnap", "snapshot listed by name");
+        assert_ne!(
+            created.parent_uuid, [0_u8; 16],
+            "a snapshot carries the source uuid as parent_uuid"
+        );
+
+        // btrfs check accepts the snapshot.
+        std::fs::write(&image, &committed).expect("write modified image");
+        let Some((ok, output)) = run_btrfs_check(&image) else {
+            return; // btrfs check tool unavailable
+        };
+        assert!(
+            ok,
+            "btrfs check must accept a FrankenFS-created snapshot:\n{output}"
         );
     }
 
