@@ -20647,7 +20647,16 @@ impl OpenFs {
         // btrfs inline extent overhead: BTRFS_HEADER_SIZE(101) + BTRFS_ITEM_SIZE(25)
         // + BTRFS_FILE_EXTENT_INLINE_DATA_START(21) = 147 bytes per item slot.
         // Use 160 to leave room for the dir item and inode item in the same leaf.
-        let mut can_be_inline = end.max(inode.size) <= u64::from(nodesize).saturating_sub(160)
+        //
+        // A btrfs inline extent must also fit within a single sector: a file whose
+        // size reaches `sectorsize` needs a regular extent, and `btrfs check`
+        // rejects an inline extent whose data reaches a full sector with
+        // I_ERR_FILE_EXTENT_TOO_LARGE ("inline file extent too large"). Without this
+        // bound, files in [sectorsize, nodesize/2] were written as invalid inline
+        // extents (bd-jctlm). The kernel likewise only inlines small files below
+        // the sector boundary.
+        let mut can_be_inline = end.max(inode.size) < sectorsize
+            && end.max(inode.size) <= u64::from(nodesize).saturating_sub(160)
             && u64::try_from(data.len()).unwrap_or(u64::MAX) <= max_inline;
         let mut existing_inline = None;
 
@@ -20782,6 +20791,14 @@ impl OpenFs {
             }
 
             // Insert the EXTENT_DATA item.
+            // NOTE: ram_bytes/num_bytes are the raw (unaligned) write length here.
+            // btrfs actually requires an uncompressed regular extent to have
+            // ram_bytes == num_bytes == disk_num_bytes, all sector-aligned (the
+            // file's real length lives in i_size); a non-aligned num_bytes is
+            // btrfs-check-invalid ("bad file extent") for any non-aligned write.
+            // Aligning it here alone breaks the read/overwrite/truncate paths,
+            // which currently treat num_bytes as the logical data length — fixing
+            // it needs a consistent refactor across those paths (bd-7mi0p).
             let extent = BtrfsExtentData::Regular {
                 generation: alloc.generation,
                 ram_bytes: write_len_u64,
@@ -57237,6 +57254,103 @@ mod tests {
         assert!(
             ok,
             "btrfs check must accept a FrankenFS-created subvolume:\n{output}"
+        );
+    }
+
+    /// bd-jctlm: btrfs only inlines files BELOW the sector boundary; a file whose
+    /// size reaches `sectorsize` (formerly stored inline, since the cap was
+    /// nodesize/2) must use a regular extent, or `btrfs check` reports "inline
+    /// file extent too large" (I_ERR_FILE_EXTENT_TOO_LARGE). Writes a file at
+    /// exactly sectorsize (4 KiB — the case that exposed the bug; a regular extent
+    /// of sectorsize is itself sector-aligned, so it is also clean of the separate
+    /// non-aligned-num_bytes issue bd-7mi0p) and a genuinely small file (which
+    /// must STILL be inline and valid), then requires real btrfs check clean.
+    /// Skips without btrfs-progs.
+    #[test]
+    fn btrfs_write_sectorsize_boundary_extent_passes_btrfs_check_bd_jctlm() {
+        let Some((fs, dev, _tmp, image)) = open_writable_btrfs_mkfs(256) else {
+            return; // btrfs-progs unavailable
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(u64::from(BTRFS_FIRST_FREE_OBJECTID));
+
+        // Exactly one sector — the size that triggered the inline bug (was stored
+        // inline; now a regular extent with sector-aligned num_bytes == 4096).
+        let f_sector = fs
+            .create(&cx, root, OsStr::new("sector.bin"), 0o644, 0, 0)
+            .expect("create sector.bin");
+        fs.write(&cx, f_sector.ino, 0, &[0x11_u8; 4096]).expect("write 4096");
+        // Genuinely small — must STILL be inline and btrfs-check-valid.
+        let f_small = fs
+            .create(&cx, root, OsStr::new("small.bin"), 0o644, 0, 0)
+            .expect("create small.bin");
+        fs.write(&cx, f_small.ino, 0, &[0x33_u8; 100]).expect("write 100");
+
+        let _ = fs.flush_mvcc_to_device(&cx);
+        fs.btrfs_full_transaction_commit(&cx, "inline-boundary-check")
+            .expect("btrfs full transaction commit");
+        std::fs::write(&image, dev.snapshot_bytes()).expect("write modified image");
+
+        let Some((ok, output)) = run_btrfs_check(&image) else {
+            return; // btrfs check tool unavailable
+        };
+        assert!(
+            !output.contains("inline file extent too large"),
+            "a sector-sized (or larger) file must use a regular extent, not an oversized inline (bd-jctlm):\n{output}"
+        );
+        assert!(
+            ok,
+            "btrfs check must accept files written across the inline/regular boundary (bd-jctlm):\n{output}"
+        );
+    }
+
+    /// A btrfs file hard-linked under several names — multiple links in ONE
+    /// directory plus a link in a SECOND directory — and then one link removed,
+    /// must stay btrfs-check-clean. This is the only on-disk validation of the
+    /// multi-reference INODE_REF handling: same-parent links share ONE INODE_REF
+    /// item that holds multiple (index, name) entries (btrfs_insert_inode_ref
+    /// appends/merges), a second parent gets its OWN INODE_REF item keyed by
+    /// parent objectid, and unlinking one same-parent name must drop only that
+    /// entry while keeping the item for the survivors (btrfs_remove_inode_ref
+    /// filters, deleting the item only when empty) — with nlink and the
+    /// DIR_ITEM/DIR_INDEX per name all kept consistent. Skips without btrfs-progs.
+    #[test]
+    fn btrfs_hardlink_churn_passes_btrfs_check() {
+        let Some((fs, dev, _tmp, image)) = open_writable_btrfs_mkfs(256) else {
+            return; // btrfs-progs unavailable
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(u64::from(BTRFS_FIRST_FREE_OBJECTID));
+
+        let attr = fs
+            .create(&cx, root, OsStr::new("orig.txt"), 0o644, 0, 0)
+            .expect("create file");
+        fs.write(&cx, attr.ino, 0, &[0x6B_u8; 4096]).expect("write file data");
+        let sub = fs
+            .mkdir(&cx, root, OsStr::new("sub"), 0o755, 0, 0)
+            .expect("mkdir sub");
+
+        // Two more links in root (same parent -> one INODE_REF item with 3 names)
+        // and one link in sub (second parent -> its own INODE_REF item). nlink 4.
+        fs.link(&cx, attr.ino, root, OsStr::new("h1.txt")).expect("link h1");
+        fs.link(&cx, attr.ino, root, OsStr::new("h2.txt")).expect("link h2");
+        fs.link(&cx, attr.ino, sub.ino, OsStr::new("h3.txt")).expect("link h3 in sub");
+
+        // Remove one same-parent link: drops only "h1.txt" from root's INODE_REF
+        // item, keeping orig.txt + h2.txt; nlink -> 3.
+        fs.unlink(&cx, root, OsStr::new("h1.txt")).expect("unlink h1");
+
+        let _ = fs.flush_mvcc_to_device(&cx);
+        fs.btrfs_full_transaction_commit(&cx, "hardlink-churn-check")
+            .expect("btrfs full transaction commit");
+        std::fs::write(&image, dev.snapshot_bytes()).expect("write modified image");
+
+        let Some((ok, output)) = run_btrfs_check(&image) else {
+            return; // btrfs check tool unavailable
+        };
+        assert!(
+            ok,
+            "btrfs check must accept a hard-link-churned file (multi-name INODE_REF + nlink consistent):\n{output}"
         );
     }
 
