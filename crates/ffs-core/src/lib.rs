@@ -45023,6 +45023,57 @@ mod tests {
         );
     }
 
+    /// Renaming a directory into a DIFFERENT parent on a metadata_csum image
+    /// exercises two paths no other e2fsck test covers: (1) the in-place `..`
+    /// repoint of the moved directory's block 0 and its subsequent re-stamp
+    /// (lib.rs ~16790: dx_root vs linear keyed on the moved dir's own inode +
+    /// generation), and (2) the parent link-count deltas (old parent loses the
+    /// child's `..` backlink, new parent gains one). A wrong `..` checksum would
+    /// surface as "directory passes checks but fails checksum" (the bd-bribi
+    /// failure mode) and a wrong link count as "Inode N ref count is M, should be
+    /// K". The namespace-churn proptest renames among parents but defers e2fsck;
+    /// bd-0ta4z renames a plain file, not a directory. This pins the directory
+    /// cross-parent rename deterministically.
+    #[test]
+    fn ext4_dir_rename_across_parents_passes_e2fsck() {
+        let Some((fs, dev, tmp)) = open_writable_ext4_mkfs_with_device(64) else {
+            return; // format tool unavailable
+        };
+        let image = tmp.path().join("test.ext4");
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        let a = fs.mkdir(&cx, root, OsStr::new("a"), 0o755, 0, 0).expect("mkdir a");
+        let b = fs.mkdir(&cx, root, OsStr::new("b"), 0o755, 0, 0).expect("mkdir b");
+        // A subdirectory inside `a`, itself holding a file, so the move shifts a
+        // non-trivial subtree and its `..` backlink between parents.
+        let sub = fs.mkdir(&cx, a.ino, OsStr::new("sub"), 0o755, 0, 0).expect("mkdir a/sub");
+        let inner = fs
+            .create(&cx, sub.ino, OsStr::new("inner.txt"), 0o644, 0, 0)
+            .expect("create a/sub/inner.txt");
+        fs.write(&cx, inner.ino, 0, &[0x5A_u8; 1024]).expect("write inner");
+
+        // Move the directory `a/sub` -> `b/sub`: repoints sub's `..` from a to b
+        // and adjusts both parents' link counts.
+        fs.rename(&cx, a.ino, OsStr::new("sub"), b.ino, OsStr::new("sub"))
+            .expect("rename a/sub -> b/sub");
+
+        fs.flush_mvcc_to_device(&cx).expect("flush mvcc to device");
+        std::fs::write(&image, dev.snapshot_bytes()).expect("write modified image");
+
+        let Some((clean, output)) = run_e2fsck(&image) else {
+            return; // e2fsck unavailable
+        };
+        assert!(
+            !output.contains("fails checksum"),
+            "moved directory's '..' block must carry a correct metadata_csum tail:\n{output}"
+        );
+        assert!(
+            clean,
+            "e2fsck must accept a directory renamed across parents on a metadata_csum image:\n{output}"
+        );
+    }
+
     /// bd-0y7jp: a block group's `bg_used_dirs_count` must stay correct as
     /// directory inodes are created and freed, or e2fsck reports "Directories
     /// count wrong for group #N". On the writable path the count was previously
