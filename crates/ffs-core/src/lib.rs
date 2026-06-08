@@ -4106,6 +4106,38 @@ impl OpenFs {
         if raw_inode.is_empty() {
             return Ok(());
         }
+        // CONSISTENCY GUARD (bd-6nwjx): an inode with an EXTERNAL extent tree
+        // (eh_depth > 0) keeps its data extents in leaf blocks outside the inode.
+        // Those leaves are recovered by ADD_RANGE replay, which is not yet
+        // applied — so writing back this inode's header alone would point at
+        // stale/unrecovered leaves (the FC write may even have grown the tree),
+        // producing an inconsistent file. Until AddRange apply lands, skip the
+        // write and leave the inode at its last consistent (JBD2-committed)
+        // state. Inline-extent inodes (depth 0) fully describe their data and
+        // are safe to apply.
+        const EXT4_EXTENT_HEADER_MAGIC: u16 = 0xF30A;
+        if raw_inode.len() >= 0x30 {
+            let flags = u32::from_le_bytes([
+                raw_inode[0x20],
+                raw_inode[0x21],
+                raw_inode[0x22],
+                raw_inode[0x23],
+            ]);
+            if flags & EXT4_EXTENTS_FL != 0 {
+                let eh_magic = u16::from_le_bytes([raw_inode[0x28], raw_inode[0x29]]);
+                let eh_depth = u16::from_le_bytes([raw_inode[0x2E], raw_inode[0x2F]]);
+                if eh_magic == EXT4_EXTENT_HEADER_MAGIC && eh_depth > 0 {
+                    warn!(
+                        ino,
+                        eh_depth,
+                        "fc_apply: skipping inode_update with external extent tree \
+                         (depth>0); leaf extents need ADD_RANGE apply — preserving \
+                         the last consistent on-disk inode"
+                    );
+                    return Ok(());
+                }
+            }
+        }
         let sb = self
             .ext4_superblock()
             .ok_or_else(|| FfsError::Format("not an ext4 filesystem".into()))?;
@@ -31068,6 +31100,43 @@ mod tests {
         assert_eq!(
             after.mtime, new_mtime,
             "fast-commit inode_update must persist to the inode table"
+        );
+    }
+
+    /// bd-6nwjx CONSISTENCY GUARD: an InodeUpdate whose inode carries an
+    /// EXTERNAL extent tree (eh_depth > 0) must NOT be written back on its own —
+    /// its leaf extents are only recovered by ADD_RANGE replay (not yet
+    /// implemented), so writing the header alone would reference stale leaves.
+    /// The on-disk inode must stay at its last consistent state.
+    #[test]
+    fn fast_commit_inode_update_skips_external_extent_tree_bd_6nwjx() {
+        let dev = TestDevice::from_vec(build_ext4_image_with_inode());
+        let cx = Cx::for_testing();
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default())
+            .expect("open ext4 image");
+
+        let root = InodeNumber(2);
+        let original = fs.read_inode(&cx, root).expect("read root inode");
+        let orig_mtime = original.mtime;
+        let inode_size = usize::from(fs.ext4_superblock().expect("sb").inode_size);
+
+        // Craft an FC inode record with a changed mtime AND a depth-1 extent
+        // header — i.e. it claims an external extent tree.
+        let mut fc_inode = original.clone();
+        fc_inode.mtime = orig_mtime.wrapping_add(0x3333_3333);
+        fc_inode.flags |= EXT4_EXTENTS_FL;
+        let mut raw = ffs_inode::serialize_inode(&fc_inode, inode_size);
+        raw[0x20..0x24].copy_from_slice(&(fc_inode.flags).to_le_bytes());
+        raw[0x28..0x2A].copy_from_slice(&0xF30A_u16.to_le_bytes()); // eh_magic
+        raw[0x2E..0x30].copy_from_slice(&1_u16.to_le_bytes()); // eh_depth = 1 (external)
+
+        fs.apply_fast_commit_inode_update(&cx, 2, &raw)
+            .expect("apply must succeed (as a skip)");
+
+        let after = fs.read_inode(&cx, root).expect("re-read root inode");
+        assert_eq!(
+            after.mtime, orig_mtime,
+            "external-extent-tree inode_update must be skipped, leaving the inode untouched"
         );
     }
 
