@@ -51768,14 +51768,14 @@ mod tests {
             let expected = if in_hole { 0x00 } else { 0xAB };
             assert_eq!(byte, expected, "byte {i} (in_hole={in_hole}) wrong");
         }
-        // NOTE: no e2fsck here — the writable fallocate path + flush_mvcc_to_device
-        // does not sync the superblock free-block/inode counts in the device
-        // snapshot (an aligned punch reproduces the same e2fsck count mismatch, so
-        // it is pre-existing and orthogonal to this unaligned fix; tracked in
-        // bd-nd61w). Byte-exact neighbor preservation here, plus the randomized
-        // ext4_write_fallocate_random gauntlet, cover the data correctness. The
-        // _ binding keeps the e2fsck-fixture handles alive without using them.
-        let _ = (&dev, &image);
+        // Real e2fsck now runs: the superblock free-total sync (bd-nd61w) makes
+        // a file-op snapshot e2fsck-clean, so this validates the unaligned punch
+        // leaves no leaked blocks / wrong i_blocks beyond byte-exactness.
+        fs.flush_mvcc_to_device(&cx).expect("flush mvcc");
+        std::fs::write(&image, dev.snapshot_bytes()).expect("write image");
+        if let Some((clean, output)) = run_e2fsck(&image) {
+            assert!(clean, "e2fsck after unaligned punch_hole:\n{output}");
+        }
     }
 
     #[test]
