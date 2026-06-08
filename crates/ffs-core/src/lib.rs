@@ -4082,6 +4082,12 @@ impl OpenFs {
         // the recovered inode, and counts ADD_RANGE as verified.
         if writes_allowed {
             self.apply_fast_commit_external_extent_recovery(cx, operations)?;
+            // DEL_RANGE pre-pass (bd-w6fxn): punch the removed logical ranges and
+            // FREE their blocks BEFORE the per-op loop applies any InodeUpdate —
+            // the punch must read the pre-recovery (on-device) extent tree to know
+            // which physical blocks to release; once an InodeUpdate rewrites the
+            // inode to its post-truncate extent root, those blocks would leak.
+            self.apply_fast_commit_del_range_ops(cx, operations)?;
         }
         let mut applied = 0_usize;
         for op in operations {
@@ -4508,6 +4514,147 @@ impl OpenFs {
             Err(FfsError::NoSpace) => Ok(false),
             Err(error) => Err(error),
         }
+    }
+
+    /// Apply the fast-commit `DEL_RANGE` records (bd-w6fxn): punch each removed
+    /// logical range out of its inode's extent tree and FREE the backing blocks,
+    /// so a punch-hole / truncate that was fast-committed (but not checkpointed
+    /// into the main JBD2 transaction) does not leak its blocks across a crash.
+    ///
+    /// Reuses the same recovery machinery as ext4 orphan truncation
+    /// ([`Self::maybe_recover_ext4_orphans`]): a freshly loaded allocation state
+    /// (geometry + group stats + persist context) drives
+    /// [`ffs_extent::punch_hole`], which removes the overlapping extents and
+    /// releases their blocks via `free_blocks_persist`. The updated inode (extent
+    /// root + reduced `i_blocks`) is written back with checksums; file size is
+    /// left to the accompanying `InodeUpdate` (punch-hole keeps size; a truncate
+    /// carries its new size in the INODE tag), matching the kernel's
+    /// `ext4_fc_replay_del_range`.
+    ///
+    /// Scoped to inline-root (depth-0) extent inodes — the common case. Legacy
+    /// indirect-mapped inodes and external (depth>0) extent trees are left to the
+    /// (verify-only) per-op pass; widening to those is tracked in bd-w6fxn. The
+    /// punch reads the current on-device extents, so it is idempotent under a
+    /// re-run (a range already punched frees nothing).
+    fn apply_fast_commit_del_range_ops(
+        &self,
+        cx: &Cx,
+        operations: &[ffs_journal::FcOperation],
+    ) -> Result<(), FfsError> {
+        let del_ranges: Vec<&ffs_journal::FcDelRange> = operations
+            .iter()
+            .filter_map(|op| match op {
+                ffs_journal::FcOperation::DelRange(r) => Some(r),
+                _ => None,
+            })
+            .collect();
+        if del_ranges.is_empty() {
+            return Ok(());
+        }
+
+        let csum_seed = self
+            .ext4_superblock()
+            .ok_or_else(|| FfsError::Format("not an ext4 filesystem".into()))?
+            .csum_seed();
+        let mut alloc = self.load_ext4_alloc_state(cx)?;
+        let block_dev = ByteDeviceBlockAdapter {
+            dev: &*self.dev,
+            block_size: alloc.geo.block_size,
+        };
+
+        let mut any_freed = false;
+        for range in del_ranges {
+            if range.len == 0 {
+                continue;
+            }
+            let ino = InodeNumber(u64::from(range.ino));
+            let mut inode = match self.read_inode(cx, ino) {
+                Ok(i) => i,
+                Err(error) => {
+                    warn!(ino = range.ino, error = %error, "fc_apply: DEL_RANGE target inode unreadable; skipping");
+                    continue;
+                }
+            };
+            // Only inline-root extent inodes (depth 0): depth>0 leaves and legacy
+            // indirect maps need the coordinated / indirect paths (bd-w6fxn).
+            if inode.flags & EXT4_EXTENTS_FL == 0 || inode.extent_bytes.len() < 60 {
+                continue;
+            }
+            let eh_depth = u16::from_le_bytes([inode.extent_bytes[6], inode.extent_bytes[7]]);
+            if eh_depth > 0 {
+                warn!(
+                    ino = range.ino,
+                    eh_depth, "fc_apply: DEL_RANGE on external extent tree deferred (bd-w6fxn)"
+                );
+                continue;
+            }
+
+            let mut root_bytes = Self::extent_root(&inode);
+            let owner = ffs_extent::ExtentOwner {
+                ino: range.ino,
+                generation: inode.generation,
+            };
+            let freed = ffs_extent::punch_hole(
+                cx,
+                &block_dev,
+                &mut root_bytes,
+                &alloc.geo,
+                &mut alloc.groups,
+                range.logical_block,
+                u64::from(range.len),
+                &alloc.persist_ctx,
+                owner,
+            )?;
+            Self::set_extent_root(&mut inode, &root_bytes);
+            if freed > 0 {
+                let freed_sectors = if inode.is_huge_file() {
+                    freed
+                } else {
+                    freed
+                        .checked_mul(u64::from(alloc.geo.block_size / EXT4_SECTOR_SIZE))
+                        .ok_or_else(|| FfsError::Corruption {
+                            block: 0,
+                            detail: format!(
+                                "inode {} DEL_RANGE freed sectors overflow",
+                                range.ino
+                            ),
+                        })?
+                };
+                inode.blocks = Self::ext4_checked_inode_blocks_delta(
+                    inode.blocks,
+                    ino,
+                    -(i128::from(freed_sectors)),
+                )?;
+                any_freed = true;
+            }
+            ffs_inode::write_inode(
+                cx,
+                &block_dev,
+                &alloc.geo,
+                &alloc.groups,
+                ino,
+                &inode,
+                csum_seed,
+            )?;
+            debug!(
+                ino = range.ino,
+                logical_block = range.logical_block,
+                len = range.len,
+                freed,
+                "fc_apply: DEL_RANGE punched and freed blocks at recovery"
+            );
+        }
+
+        if any_freed {
+            // The recovery writes bypassed the read-only caches (group_desc /
+            // inode_table / file_data); drop them so later reads see the freed
+            // bitmaps and rewritten inodes, mirroring orphan recovery.
+            self.extent_cache.invalidate_all();
+            self.ext4_inode_table_block_cache.lock().clear();
+            self.ext4_group_desc_cache.lock().clear();
+            self.ext4_file_data_block_cache.lock().clear();
+        }
+        Ok(())
     }
 
     /// Apply a fast-commit ADD_RANGE record (bd-6nwjx) by inserting the extent
@@ -53850,6 +53997,97 @@ mod tests {
         // recovery write; e2fsck on the device snapshot is the authoritative
         // check that the apply landed a consistent inode at the right location.
         let _ = new_mtime;
+    }
+
+    /// bd-w6fxn: a fast-committed DEL_RANGE (punch hole) must, on recovery, both
+    /// remove the logical range from the inode's extent tree AND free its blocks
+    /// — otherwise the punched blocks leak. Validated end-to-end with real
+    /// e2fsck (consistency) plus a from_device reopen proving the hole is real
+    /// (the punched blocks unmap, the surrounding data survives, i_blocks drops).
+    #[test]
+    fn fast_commit_del_range_apply_punches_and_frees_bd_w6fxn() {
+        let Some((fs, dev, _tmp, image)) = open_ext4_mke2fs(8, false) else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let block_size = u64::from(fs.ext4_superblock().expect("sb").block_size);
+        let sectors_per_block = block_size / u64::from(EXT4_SECTOR_SIZE);
+
+        // A small contiguous file (single inline extent). Punching one interior
+        // block leaves two extents that still fit the inline root (no tree grow,
+        // so i_blocks accounting is a clean delta).
+        let attr = fs
+            .create(&cx, InodeNumber(2), OsStr::new("punch.dat"), 0o644, 0, 0)
+            .expect("create regular file");
+        let file_len = usize::try_from(block_size * 4).unwrap();
+        fs.write(&cx, attr.ino, 0, &vec![0xAB_u8; file_len])
+            .expect("write file data");
+        fs.flush_mvcc_to_device(&cx).expect("flush mvcc");
+        let ino_u32 = u32::try_from(attr.ino.0).expect("ino fits u32");
+        let blocks_before = fs.read_inode(&cx, attr.ino).expect("read inode").blocks;
+
+        // Reopen from_device: a recovery mount whose reads/writes are the device
+        // and which loads a single authoritative allocation state — the real
+        // post-crash context (applying on the still-writable fs would
+        // double-account against its in-memory alloc state).
+        let recov = std::sync::Arc::new(std::sync::Mutex::new(dev.snapshot_bytes()));
+        let fs2 = OpenFs::from_device(
+            &cx,
+            Box::new(TestDevice {
+                data: std::sync::Arc::clone(&recov),
+            }),
+            &OpenOptions::default(),
+        )
+        .expect("reopen from device");
+
+        // Recover a DEL_RANGE punching the interior logical block 1.
+        let ops = vec![ffs_journal::FcOperation::DelRange(ffs_journal::FcDelRange {
+            ino: ino_u32,
+            logical_block: 1,
+            len: 1,
+        })];
+        fs2.apply_fast_commit_operations(&cx, &ops, true)
+            .expect("apply fc del_range");
+
+        // (1) The hole is real: the punched block unmaps, the rest survives.
+        let inode2 = fs2.read_inode(&cx, attr.ino).expect("read punched inode");
+        let scope = RequestScope::empty();
+        assert!(
+            fs2.resolve_extent(&cx, &scope, &inode2, 0)
+                .expect("resolve 0")
+                .is_some(),
+            "block before the hole must stay mapped"
+        );
+        assert!(
+            fs2.resolve_extent(&cx, &scope, &inode2, 1)
+                .expect("resolve 1")
+                .is_none(),
+            "punched block must be unmapped"
+        );
+        for lb in [2_u32, 3] {
+            assert!(
+                fs2.resolve_extent(&cx, &scope, &inode2, lb)
+                    .expect("resolve")
+                    .is_some(),
+                "block {lb} after the hole must stay mapped"
+            );
+        }
+        // i_blocks dropped by exactly the one freed block.
+        assert_eq!(
+            inode2.blocks + sectors_per_block,
+            blocks_before,
+            "i_blocks must drop by exactly the punched block"
+        );
+
+        // (2) Consistency: real e2fsck must accept the punched image.
+        std::fs::write(&image, recov.lock().unwrap().clone()).expect("write recovered image");
+        let Some((clean, output)) = run_e2fsck(&image) else {
+            return;
+        };
+        assert!(
+            clean,
+            "e2fsck must accept the image after a DEL_RANGE punch apply:\n{output}"
+        );
     }
 
     /// bd-x3fcu increment 2 / bd-x36qn / bd-fdwuh: a file created + committed by
