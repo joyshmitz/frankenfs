@@ -57318,6 +57318,59 @@ mod tests {
         );
     }
 
+    /// Truncating a file whose data extent is SHARED with a snapshot must only
+    /// DROP this inode's reference (refs 2 -> 1), never FREE the still-shared
+    /// extent — otherwise the snapshot is left pointing at a freed/unaccounted
+    /// extent and btrfs check reports corruption (dangling backref / missing
+    /// csum / wrong block-group used). This is the corruption-critical sibling of
+    /// btrfs_truncate_down_frees_datasum_extent_passes_btrfs_check: the plain
+    /// case frees a sole-referenced extent, this one must NOT free a shared one.
+    /// Create a datasum file, snapshot the subvolume (extent refs -> 2), truncate
+    /// the ORIGINAL to 0, commit, and require real btrfs check clean. Skips
+    /// without btrfs-progs.
+    #[test]
+    fn btrfs_truncate_of_snapshot_shared_extent_passes_btrfs_check() {
+        let Some((fs, dev, _tmp, image)) = open_writable_btrfs_mkfs(256) else {
+            return; // btrfs-progs unavailable
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(u64::from(BTRFS_FIRST_FREE_OBJECTID));
+
+        let attr = fs
+            .create(&cx, root, OsStr::new("shared_trunc.bin"), 0o644, 0, 0)
+            .expect("create file");
+        fs.write(&cx, attr.ino, 0, &[0xC3_u8; 16384])
+            .expect("write 16 KiB datasum data");
+        // Snapshot the non-empty default subvolume: the 16 KiB data extent is now
+        // referenced by both trees (refs -> 2).
+        let snap_id = fs
+            .create_snapshot(&cx, root, b"sharedsnap")
+            .expect("snapshot subvolume with data");
+        assert!(snap_id >= u64::from(BTRFS_FIRST_FREE_OBJECTID));
+        // Truncate the ORIGINAL to 0: must drop the default subvol's ref
+        // (refs 2 -> 1) and leave the extent + its csums in place for the
+        // snapshot, NOT free them.
+        fs.setattr(
+            &cx,
+            attr.ino,
+            &SetAttrRequest { size: Some(0), ..Default::default() },
+        )
+        .expect("truncate original to 0");
+
+        let _ = fs.flush_mvcc_to_device(&cx);
+        fs.btrfs_full_transaction_commit(&cx, "shared-truncate-check")
+            .expect("commit");
+        std::fs::write(&image, dev.snapshot_bytes()).expect("write modified image");
+
+        let Some((ok, output)) = run_btrfs_check(&image) else {
+            return; // btrfs check tool unavailable
+        };
+        assert!(
+            ok,
+            "btrfs check must accept truncating a snapshot-shared extent (drop ref, not free):\n{output}"
+        );
+    }
+
     /// bd-5svhs: a small file written inline (<= nodesize/2) must commit with
     /// nbytes == its inline length, not 0. btrfs_recompute_inode_nbytes used to
     /// sum only Regular extents, leaving an inline-only file with nbytes=0 while
