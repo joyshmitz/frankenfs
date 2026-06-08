@@ -1061,7 +1061,12 @@ impl std::fmt::Debug for OpenFs {
 /// fast-commit ADD_RANGE recovery so an extent insert succeeds only when it
 /// fits an existing leaf with no tree growth — growth needs the writable-path
 /// block allocator, which is not available during mount recovery.
-struct NoGrowBlockAllocator;
+struct NoGrowBlockAllocator {
+    has_metadata_csum: bool,
+    csum_seed: u32,
+    ino: u32,
+    generation: u32,
+}
 
 impl ffs_btree::BlockAllocator for NoGrowBlockAllocator {
     fn alloc_block(&mut self, _cx: &Cx) -> ffs_error::Result<BlockNumber> {
@@ -1077,6 +1082,20 @@ impl ffs_btree::BlockAllocator for NoGrowBlockAllocator {
             "fast-commit ADD_RANGE apply: extent-tree node free is not supported at recovery"
                 .into(),
         ))
+    }
+
+    fn finalize_node(&self, block: &mut [u8]) {
+        // A no-grow insert rewrites an EXISTING leaf in place; on metadata_csum
+        // filesystems that leaf carries a CRC32C tail keyed on the csum seed +
+        // owning inode, so re-stamp it (mirrors GroupBlockAllocator).
+        if self.has_metadata_csum {
+            ffs_ondisk::ext4::stamp_extent_block_checksum(
+                block,
+                self.csum_seed,
+                self.ino,
+                self.generation,
+            );
+        }
     }
 }
 
@@ -4243,14 +4262,19 @@ impl OpenFs {
             return Ok(false);
         }
         let mut root_bytes = Self::extent_root(&inode);
+        let sb = self
+            .ext4_superblock()
+            .ok_or_else(|| FfsError::Format("not an ext4 filesystem".into()))?;
         let block_dev = ByteDeviceBlockAdapter {
             dev: &*self.dev,
-            block_size: self
-                .ext4_superblock()
-                .ok_or_else(|| FfsError::Format("not an ext4 filesystem".into()))?
-                .block_size,
+            block_size: sb.block_size,
         };
-        let mut no_grow = NoGrowBlockAllocator;
+        let mut no_grow = NoGrowBlockAllocator {
+            has_metadata_csum: sb.has_metadata_csum(),
+            csum_seed: sb.csum_seed(),
+            ino,
+            generation: inode.generation,
+        };
         match ffs_btree::insert(cx, &block_dev, &mut root_bytes, extent, &mut no_grow) {
             Ok(()) => {
                 // The leaf/root mutation is in root_bytes (+ any existing leaf
