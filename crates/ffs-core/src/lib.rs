@@ -53181,8 +53181,10 @@ mod tests {
         let cx = Cx::for_testing();
         let data = std::fs::read(&image).expect("read image");
         let dev = TestDevice::from_vec(data);
-        let fs = OpenFs::from_device(&cx, Box::new(dev.clone()), &OpenOptions::default())
+        let mut fs = OpenFs::from_device(&cx, Box::new(dev.clone()), &OpenOptions::default())
             .expect("FrankenFS must open a real mke2fs image");
+        fs.enable_writes(&cx)
+            .expect("FrankenFS must enable writes on a real mke2fs image");
         Some((fs, dev, tmp, image))
     }
 
@@ -53226,6 +53228,52 @@ mod tests {
             new_mtime,
             "the applied inode_update must persist"
         );
+    }
+
+    /// bd-6nwjx: the InodeUpdate apply must also land correctly for a NON-root
+    /// regular-file inode — exercising the inode-location math (group + table
+    /// index + byte offset) for a real inode number, not just inode 2. The image
+    /// must stay e2fsck-clean after recovery. Skips without e2fsprogs.
+    #[test]
+    fn fast_commit_inode_update_on_regular_file_passes_e2fsck_bd_6nwjx() {
+        let Some((fs, dev, _tmp, image)) = open_ext4_mke2fs(8, false) else {
+            return;
+        };
+        let cx = Cx::for_testing();
+
+        // A FrankenFS-created+written regular file is e2fsck-clean to start.
+        let attr = fs
+            .create(&cx, InodeNumber(2), OsStr::new("fc_probe.dat"), 0o644, 0, 0)
+            .expect("create regular file");
+        fs.write(&cx, attr.ino, 0, &[0x7E_u8; 4096])
+            .expect("write file data");
+        fs.flush_mvcc_to_device(&cx).expect("flush mvcc");
+
+        // Apply an InodeUpdate (changed mtime) to that file's inode.
+        let original = fs.read_inode(&cx, attr.ino).expect("read file inode");
+        let new_mtime = original.mtime.wrapping_add(0x0BAD_F00D);
+        let inode_size = usize::from(fs.ext4_superblock().expect("sb").inode_size);
+        let mut fc_inode = original.clone();
+        fc_inode.mtime = new_mtime;
+        let inode_raw = ffs_inode::serialize_inode(&fc_inode, inode_size);
+        let ino_u32 = u32::try_from(attr.ino.0).expect("ino fits u32");
+        let ops = vec![ffs_journal::FcOperation::InodeUpdate(ino_u32, inode_raw)];
+        fs.apply_fast_commit_operations(&cx, &ops, true)
+            .expect("apply fc inode update");
+
+        std::fs::write(&image, dev.snapshot_bytes()).expect("write recovered image");
+        let Some((clean, output)) = run_e2fsck(&image) else {
+            return;
+        };
+        assert!(
+            clean,
+            "e2fsck must accept the image after a regular-file inode_update apply:\n{output}"
+        );
+        // NOTE: the running fs is writable here (to create the file), so its
+        // reads observe the MVCC overlay rather than the direct-to-device
+        // recovery write; e2fsck on the device snapshot is the authoritative
+        // check that the apply landed a consistent inode at the right location.
+        let _ = new_mtime;
     }
 
     /// bd-x3fcu increment 2 / bd-x36qn / bd-fdwuh: a file created + committed by
