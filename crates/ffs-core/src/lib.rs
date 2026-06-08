@@ -15965,16 +15965,80 @@ impl OpenFs {
         let mut alloc = alloc_mutex.lock();
 
         if punch_hole {
-            // Mirror the extent punch path: require a block-aligned window.
-            if offset % block_size != 0 || (end - offset) % block_size != 0 {
-                return Err(FfsError::UnsupportedFeature(
-                    "ext4 punch_hole currently requires block-aligned offset/length".into(),
-                ));
+            // Unaligned ranges are supported (bd-xnel9), mirroring the
+            // extent-mapped punch path and the kernel's ext4 indirect punch:
+            // zero the partial in-range bytes of any WRITTEN edge blocks (holes
+            // already read zero, so punch must not allocate them), then
+            // deallocate only the fully covered aligned interior blocks. The
+            // file size is unchanged (PUNCH_HOLE is always KEEP_SIZE).
+            let interior_start = offset.div_ceil(block_size) * block_size; // align up
+            let interior_end = (end / block_size) * block_size; // align down
+
+            // Byte ranges in [offset, end) outside the freed interior that must
+            // be zeroed in place. With a full-block interior these are the head
+            // and tail partials; without one the whole range sits in one or two
+            // partial edge blocks (second slot stays empty).
+            let edge_ranges: [(u64, u64); 2] = if interior_start < interior_end {
+                [(offset, interior_start), (interior_end, end)]
+            } else {
+                [(offset, end), (end, end)]
+            };
+            for (zero_start, zero_end) in edge_ranges {
+                if zero_start >= zero_end {
+                    continue;
+                }
+                let mut eb = zero_start / block_size;
+                let last_eb = (zero_end - 1) / block_size;
+                while eb <= last_eb {
+                    let lb = u32::try_from(eb).map_err(|_| {
+                        FfsError::Format(
+                            "punch_hole edge logical block exceeds ext4 32-bit limit".into(),
+                        )
+                    })?;
+                    if let Some(phys) = self.resolve_indirect_block(cx, scope, &inode, lb)? {
+                        let blk_start = eb * block_size;
+                        let zfrom = usize::try_from(zero_start.max(blk_start) - blk_start)
+                            .map_err(|_| {
+                                FfsError::Format("punch_hole edge head offset overflow".into())
+                            })?;
+                        let zto = usize::try_from(zero_end.min(blk_start + block_size) - blk_start)
+                            .map_err(|_| {
+                                FfsError::Format("punch_hole edge tail offset overflow".into())
+                            })?;
+                        if zfrom < zto {
+                            let phys_block = BlockNumber(phys);
+                            let mut buf = self.read_block_with_scope(cx, scope, phys_block)?;
+                            buf[zfrom..zto].fill(0);
+                            if let Some(tx) = &mut scope.tx {
+                                let proof = MergeProof::NonOverlappingExtents {
+                                    touched_ranges: vec![MergeByteRange::new(zfrom, zto - zfrom)],
+                                };
+                                tx.stage_write_with_proof(phys_block, buf, proof);
+                            } else {
+                                block_dev.write_block(cx, phys_block, &buf)?;
+                            }
+                        }
+                    }
+                    eb += 1;
+                }
             }
-            let lo = offset / block_size;
-            let hi = end / block_size;
-            let freed = self
-                .ext4_free_indirect_range(cx, scope, &mut alloc, &mut inode, lo, hi, block_size_u32)?;
+
+            // Deallocate the fully covered aligned interior blocks.
+            let lo = interior_start / block_size;
+            let hi = interior_end / block_size;
+            let freed = if lo < hi {
+                self.ext4_free_indirect_range(
+                    cx,
+                    scope,
+                    &mut alloc,
+                    &mut inode,
+                    lo,
+                    hi,
+                    block_size_u32,
+                )?
+            } else {
+                0
+            };
             self.extent_cache.invalidate_all();
             if freed > 0 {
                 let freed_sectors = if inode.is_huge_file() {
@@ -51935,6 +51999,97 @@ mod tests {
         if let Some((clean, output)) = run_e2fsck(&image) {
             assert!(clean, "e2fsck after unaligned punch_hole:\n{output}");
         }
+    }
+
+    /// bd-xnel9 (indirect path): unaligned PUNCH_HOLE on a legacy
+    /// indirect-block-mapped file must zero the partial in-range bytes of the
+    /// written edge blocks and deallocate only the fully-covered aligned
+    /// interior, leaving neighbors intact and the size unchanged — the same
+    /// semantics the extent path got in f8f28d07. Builds the indirect file via
+    /// the established re-stamp pattern (write an extent file, then clear the
+    /// extent flag and point the direct pointers at the allocated blocks).
+    #[test]
+    fn fallocate_punch_hole_unaligned_indirect_preserves_neighbors_bd_xnel9() {
+        let Some((fs, _tmp)) = open_writable_ext4_mkfs(16) else {
+            return; // mkfs.ext4 unavailable
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let bs = fs.block_size() as u64;
+        let sectors_per_block = bs / u64::from(EXT4_SECTOR_SIZE);
+
+        // Write a 5-block extent file (one contiguous extent), then re-stamp it
+        // as a legacy indirect file mapping logical 0..5 via i_block[0..5].
+        let ino = fs
+            .create(&cx, root, OsStr::new("punch_indirect.bin"), 0o644, 0, 0)
+            .expect("create")
+            .ino;
+        let total = usize::try_from(bs * 5).unwrap();
+        fs.write(&cx, ino, 0, &vec![0xAB_u8; total]).expect("write pattern");
+
+        let inode = fs.read_inode(&cx, ino).expect("read inode");
+        let extents = fs.collect_extents(&cx, &inode).expect("extents");
+        let mut ptrs = vec![0_u8; 15 * 4];
+        for lb in 0..5u32 {
+            let phys = extents
+                .iter()
+                .find(|e| {
+                    e.logical_block <= lb && lb < e.logical_block + u32::from(e.actual_len())
+                })
+                .map(|e| e.physical_start + u64::from(lb - e.logical_block))
+                .expect("logical block mapped");
+            let off = usize::try_from(lb).unwrap() * 4;
+            ptrs[off..off + 4]
+                .copy_from_slice(&u32::try_from(phys).expect("phys fits u32").to_le_bytes());
+        }
+        let mut indirect = inode.clone();
+        indirect.flags &= !ffs_types::EXT4_EXTENTS_FL;
+        indirect.extent_bytes = ptrs;
+        indirect.size = total as u64;
+        fs.persist_ext4_inode_for_testing(&cx, ino, &indirect)
+            .expect("persist indirect inode");
+
+        // Sanity: the indirect read path returns the original pattern.
+        assert_eq!(
+            fs.read(&cx, ino, 0, u32::try_from(total).unwrap()).expect("indirect read"),
+            vec![0xAB_u8; total],
+            "indirect read of the mapped blocks"
+        );
+        let blocks_before = fs.read_inode(&cx, ino).expect("inode pre-punch").blocks;
+
+        // Punch [bs/2, bs/2 + 3*bs): partial head (block 0), two full interior
+        // blocks (1,2 — freed), partial tail (block 3). Block 4 untouched.
+        let off = bs / 2;
+        let len = bs * 3;
+        fs.fallocate(
+            &cx,
+            ino,
+            off,
+            len,
+            libc::FALLOC_FL_KEEP_SIZE | libc::FALLOC_FL_PUNCH_HOLE,
+        )
+        .expect("unaligned indirect punch_hole must be supported");
+
+        // Size unchanged; in-range bytes zero; neighbors preserved.
+        assert_eq!(
+            fs.getattr(&cx, ino).expect("getattr").size,
+            total as u64,
+            "punch_hole keeps the file size"
+        );
+        let got = fs.read(&cx, ino, 0, u32::try_from(total).unwrap()).expect("read");
+        for (i, &byte) in got.iter().enumerate() {
+            let in_hole = (i as u64) >= off && (i as u64) < off + len;
+            let expected = if in_hole { 0x00 } else { 0xAB };
+            assert_eq!(byte, expected, "byte {i} (in_hole={in_hole}) wrong");
+        }
+
+        // Exactly the two fully-covered interior blocks were deallocated.
+        let blocks_after = fs.read_inode(&cx, ino).expect("inode post-punch").blocks;
+        assert_eq!(
+            blocks_before - blocks_after,
+            2 * sectors_per_block,
+            "only the 2 aligned interior blocks are freed (edges stay allocated)"
+        );
     }
 
     #[test]
