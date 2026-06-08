@@ -969,6 +969,7 @@ fn slice_readdir_snapshot(entries: &[DirEntry], offset: u64) -> Vec<DirEntry> {
 }
 
 /// Serve a readdir page from the snapshot slot iff it matches `ino` + `validation`.
+#[allow(clippy::significant_drop_tightening)]
 fn readdir_snapshot_serve(
     slot: &Mutex<Option<ReaddirSnapshot>>,
     ino: u64,
@@ -1007,8 +1008,7 @@ fn readdir_snapshot_store(
 /// as a readdir-snapshot validation field.
 fn systemtime_nanos(t: std::time::SystemTime) -> u64 {
     t.duration_since(std::time::UNIX_EPOCH)
-        .map(|d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX))
-        .unwrap_or(0)
+        .map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX))
 }
 
 /// Csum-tree items `(key, packed crc32c values)` used by the read-verify path.
@@ -4191,6 +4191,7 @@ impl OpenFs {
     /// `ext4_inode` bytes back into the inode table, mirroring JBD2 replay's
     /// direct-device writeback (no alloc_state required at mount). An empty body
     /// (legacy ino-only record) is a no-op.
+    #[allow(clippy::items_after_statements)]
     fn apply_fast_commit_inode_update(
         &self,
         cx: &Cx,
@@ -4698,6 +4699,7 @@ impl OpenFs {
     /// (verify-only) per-op pass; widening to those is tracked in bd-w6fxn. The
     /// punch reads the current on-device extents, so it is idempotent under a
     /// re-run (a range already punched frees nothing).
+    #[allow(clippy::too_many_lines)]
     fn apply_fast_commit_del_range_ops(
         &self,
         cx: &Cx,
@@ -9223,9 +9225,8 @@ impl OpenFs {
         scope: &RequestScope,
         root_bytes: &[u8; 60],
     ) -> Result<u64, FfsError> {
-        let (header, tree) = match parse_extent_tree(root_bytes) {
-            Ok(parsed) => parsed,
-            Err(_) => return Ok(0),
+        let Ok((header, tree)) = parse_extent_tree(root_bytes) else {
+            return Ok(0);
         };
         if header.depth == 0 {
             return Ok(0);
@@ -9333,9 +9334,8 @@ impl OpenFs {
         dev: &dyn BlockDevice,
         root_bytes: &[u8; 60],
     ) -> Result<u64, FfsError> {
-        let (header, tree) = match parse_extent_tree(root_bytes) {
-            Ok(parsed) => parsed,
-            Err(_) => return Ok(0),
+        let Ok((header, tree)) = parse_extent_tree(root_bytes) else {
+            return Ok(0);
         };
         if header.depth == 0 {
             return Ok(0);
@@ -12915,6 +12915,7 @@ impl OpenFs {
     /// assuming block 0 + offset 1024, which reads/indexes out of bounds on a
     /// 1024-byte-block fs (bd-icebl). ext4's minimum block size is 1024, so the
     /// block always exists.
+    #[allow(clippy::cast_possible_truncation)]
     fn ext4_superblock_location(&self) -> (BlockNumber, usize) {
         let bs = u64::from(self.block_size());
         let sb_byte = ffs_types::EXT4_SUPERBLOCK_OFFSET as u64;
@@ -12933,6 +12934,7 @@ impl OpenFs {
     ///
     /// (NOTE: the group `bg_used_dirs_count` total is a separate gap in the
     /// worker-owned ffs-alloc inode alloc/free path — not corrected here.)
+    #[allow(clippy::significant_drop_tightening)]
     fn ext4_sync_superblock_free_totals(&self, cx: &Cx) -> Result<(), FfsError> {
         let (has_csum, is_64bit) = match &self.flavor {
             FsFlavor::Ext4(sb) => (sb.has_metadata_csum(), sb.is_64bit()),
@@ -13973,6 +13975,7 @@ impl OpenFs {
     /// differs (which e2fsck does not constrain). Runs inside the caller's mvcc
     /// transaction (writes go through `dev`).
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    #[allow(clippy::if_not_else)]
     fn ext4_rebuild_htree_dir(
         &self,
         cx: &Cx,
@@ -18280,8 +18283,7 @@ impl OpenFs {
         // path. Gated on the inode being datasum.
         let is_datasum = self
             .btrfs_read_inode_from_tree(alloc, canonical)
-            .map(|inode| inode.flags & BTRFS_INODE_NODATASUM == 0)
-            .unwrap_or(false);
+            .is_ok_and(|inode| inode.flags & BTRFS_INODE_NODATASUM == 0);
         if is_datasum {
             if let Err(e) =
                 self.btrfs_capture_data_extent_csums(cx, alloc, allocation.bytenr, alloc_size)
@@ -18463,6 +18465,8 @@ impl OpenFs {
     /// `size`/`nbytes` are then recomputed from the resulting extent set.
     /// Inline/compressed extents can't be carved by view, so a partial range
     /// covering one is refused (FrankenFS writes neither for data extents).
+    #[allow(clippy::too_many_lines)]
+    #[allow(clippy::match_wildcard_for_single_variants)]
     fn btrfs_clone_file_range_data(
         &self,
         cx: &Cx,
@@ -19708,6 +19712,7 @@ impl OpenFs {
     ///   under references (no durable parent points at a non-durable child).
     /// - **WB-I2:** After crash, a reader observes generation `g` or `g+1`, never torn.
     #[expect(clippy::too_many_lines)]
+    #[allow(clippy::similar_names)]
     fn btrfs_full_transaction_commit(
         &self,
         cx: &Cx,
@@ -22174,8 +22179,7 @@ impl OpenFs {
                         // extents reach it.
                         let is_datasum = self
                             .btrfs_read_inode_from_tree(&alloc, canonical)
-                            .map(|inode| inode.flags & BTRFS_INODE_NODATASUM == 0)
-                            .unwrap_or(false);
+                            .is_ok_and(|inode| inode.flags & BTRFS_INODE_NODATASUM == 0);
                         if is_datasum {
                             if let Err(e) = self.btrfs_capture_data_extent_csums(
                                 cx,
@@ -28436,6 +28440,7 @@ impl FsOps for OpenFs {
         }
     }
 
+    #[allow(clippy::significant_drop_tightening)]
     fn clone_file_range(
         &self,
         cx: &Cx,
