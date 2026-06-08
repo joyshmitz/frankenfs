@@ -7077,6 +7077,14 @@ pub fn replay_tree_log(
 
 #[cfg(test)]
 mod tests {
+    // Test code relaxes a few pedantic style lints (the workspace denies
+    // clippy::pedantic + nursery and the production lib stays strict); these add
+    // noise without value in test setup. See bd-rmcf0.
+    #![allow(
+        clippy::too_many_lines,
+        clippy::items_after_statements,
+        clippy::cast_possible_truncation
+    )]
     use super::*;
     use ffs_ondisk::{BtrfsStripe, BtrfsSuperblock};
     use proptest::prelude::*;

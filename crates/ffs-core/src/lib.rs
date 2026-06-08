@@ -30319,6 +30319,22 @@ impl FrankenFsEngine {
 
 #[cfg(test)]
 mod tests {
+    // This (very large) test module relaxes pedantic/nursery style lints plus a
+    // few default-level noise lints that accumulated while ffs-core's clippy was
+    // un-runnable (its deps were clippy-red). They add no value in test setup
+    // (cast_possible_truncation on small literals, redundant_clone of fixtures,
+    // significant_drop_tightening of test guards, too_many_lines fixtures, etc.).
+    // The production lib stays strict — the workspace [lints] deny pedantic +
+    // nursery and the lib half of this crate is clippy-clean. See bd-rmcf0.
+    #![allow(
+        clippy::pedantic,
+        clippy::nursery,
+        clippy::useless_conversion,
+        clippy::needless_borrow,
+        clippy::needless_borrows_for_generic_args,
+        clippy::needless_pass_by_ref_mut,
+        clippy::doc_lazy_continuation
+    )]
     use super::*;
     use asupersync::SystemPressure;
     use ffs_types::{
@@ -33083,7 +33099,7 @@ mod tests {
         // The new mapping is now resolvable in the inode's extent tree.
         let after = fs.read_inode(&cx, ino).expect("re-read inode 11");
         let extents = fs
-            .collect_extents_with_scope(&cx, &mut RequestScope::empty(), &after)
+            .collect_extents_with_scope(&cx, &RequestScope::empty(), &after)
             .expect("collect extents");
         assert!(
             extents
@@ -33167,7 +33183,7 @@ mod tests {
         // The ADD_RANGE extent is recovered into the leaf.
         let after = fs.read_inode(&cx, ino).expect("re-read inode 12");
         let extents = fs
-            .collect_extents_with_scope(&cx, &mut RequestScope::empty(), &after)
+            .collect_extents_with_scope(&cx, &RequestScope::empty(), &after)
             .expect("collect extents");
         assert!(
             extents
@@ -33226,7 +33242,7 @@ mod tests {
         );
         // And none of the ADD_RANGE extents survived in the leaf (rolled back).
         let extents = fs
-            .collect_extents_with_scope(&cx, &mut RequestScope::empty(), &after)
+            .collect_extents_with_scope(&cx, &RequestScope::empty(), &after)
             .expect("collect extents");
         assert!(
             !extents.iter().any(|e| e.logical_block >= 1000),
