@@ -2163,6 +2163,7 @@ pub trait FsOps: Send + Sync {
     /// extents. FUSE dispatch resolves the caller's source fd to `src_ino`
     /// first. `src_length == 0` means "to source EOF". Returns
     /// `FfsError::ReadOnly` for read-only mounts.
+    #[allow(clippy::too_many_arguments)]
     fn clone_file_range(
         &self,
         _cx: &Cx,

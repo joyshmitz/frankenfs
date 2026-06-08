@@ -18467,6 +18467,7 @@ impl OpenFs {
     /// covering one is refused (FrankenFS writes neither for data extents).
     #[allow(clippy::too_many_lines)]
     #[allow(clippy::match_wildcard_for_single_variants)]
+    #[allow(clippy::too_many_arguments)]
     fn btrfs_clone_file_range_data(
         &self,
         cx: &Cx,
@@ -21077,7 +21078,7 @@ impl OpenFs {
         secs: u64,
         nanos: u32,
     ) -> ffs_error::Result<()> {
-        let root_dir_oid = u64::from(BTRFS_FIRST_FREE_OBJECTID);
+        let root_dir_oid = BTRFS_FIRST_FREE_OBJECTID;
 
         // ROOT_ITEM. bytenr/level are placeholders the commit repoints (via
         // patch_root_commit) to the just-written tree root. A deterministic
@@ -21207,7 +21208,7 @@ impl OpenFs {
             otime_sec: secs,
             otime_nsec: nanos,
         };
-        let root_dir_oid = u64::from(BTRFS_FIRST_FREE_OBJECTID);
+        let root_dir_oid = BTRFS_FIRST_FREE_OBJECTID;
         subvol_tree
             .insert(
                 BtrfsKey {
@@ -22785,7 +22786,9 @@ impl OpenFs {
     /// The DIR_INDEX sequence the next entry in `parent_oid` will receive,
     /// WITHOUT consuming it. Returns the live session counter if one exists,
     /// else `max(on-disk DIR_INDEX) + 1`. Use [`Self::btrfs_consume_dir_index_seq`]
-    /// to actually assign an index.
+    /// to actually assign an index. Test-only peek helper (production assigns
+    /// via [`btrfs_consume_dir_index_seq`]).
+    #[cfg(test)]
     fn btrfs_next_dir_index_seq(
         alloc: &BtrfsAllocState,
         parent_oid: u64,
