@@ -51508,6 +51508,88 @@ mod tests {
         }
     }
 
+    // Randomized differential gauntlet for the ext4 XATTR surface (set / remove
+    // across small in-inode values, ~external-block values, and >block-size
+    // values that spill to an EA_INODE). Random op streams on one file are run
+    // against a byte-exact name->value model: each op is applied to the model
+    // only on success (so out-of-room sets / absent removes skip in lockstep),
+    // and after every op getxattr (incl. an absent name) + listxattr must match
+    // the model. A final e2fsck validates the external-xattr-block + EA_INODE
+    // accounting (i_blocks / free totals) that a value model can't see — now that
+    // file-op snapshots are e2fsck-clean (bd-nd61w sb-total sync + bd-bdro7).
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(16))]
+        #[test]
+        fn ext4_xattr_churn_matches_reference_model_and_e2fsck(
+            ops in proptest::collection::vec(
+                (0u8..3, 0usize..5, 1usize..1500, proptest::prelude::any::<u8>()),
+                1..25,
+            ),
+        ) {
+            let Some((fs, dev, _tmp, image)) = open_ext4_mke2fs(8, false) else {
+                return Ok(()); // e2fsprogs unavailable — skip.
+            };
+            let cx = Cx::for_testing();
+            let attr = fs
+                .create(&cx, InodeNumber(2), OsStr::new("xattr.bin"), 0o644, 0, 0)
+                .expect("create");
+            let ino = attr.ino;
+            let names = ["user.a", "user.b", "user.c", "user.d", "user.eee"];
+            let absent = "user.zzz_absent";
+
+            let mut model: std::collections::BTreeMap<&'static str, Vec<u8>> =
+                std::collections::BTreeMap::new();
+
+            for (step, (kind, nidx, vlen, vbyte)) in ops.into_iter().enumerate() {
+                let name = names[nidx];
+                if kind < 2 {
+                    // set (create-or-replace). Skip the model update if the fs
+                    // rejects it (e.g. no room for an external block / EA_INODE).
+                    let value = vec![vbyte; vlen];
+                    if fs.setxattr(&cx, ino, name, &value, XattrSetMode::Set).is_ok() {
+                        model.insert(name, value);
+                    }
+                } else if fs.removexattr(&cx, ino, name).unwrap_or(false) {
+                    model.remove(name);
+                }
+
+                // listxattr lists exactly the modelled names.
+                let mut got_names: Vec<String> =
+                    fs.listxattr(&cx, ino).expect("listxattr");
+                got_names.sort();
+                let mut want_names: Vec<String> =
+                    model.keys().map(|s| (*s).to_owned()).collect();
+                want_names.sort();
+                proptest::prop_assert_eq!(got_names, want_names, "listxattr mismatch step {}", step);
+
+                // getxattr of each modelled name returns its value; an absent name
+                // returns None.
+                for (n, v) in &model {
+                    let got = fs.getxattr(&cx, ino, n).expect("getxattr");
+                    proptest::prop_assert_eq!(
+                        got.as_deref(),
+                        Some(v.as_slice()),
+                        "getxattr value mismatch for {} step {}",
+                        n,
+                        step
+                    );
+                }
+                proptest::prop_assert!(
+                    fs.getxattr(&cx, ino, absent).expect("getxattr absent").is_none(),
+                    "absent xattr must read None step {}",
+                    step
+                );
+            }
+
+            // e2fsck: validates external-xattr-block / EA_INODE accounting.
+            fs.flush_mvcc_to_device(&cx).expect("flush");
+            std::fs::write(&image, dev.snapshot_bytes()).expect("write image");
+            if let Some((clean, output)) = run_e2fsck(&image) {
+                proptest::prop_assert!(clean, "e2fsck after xattr churn:\n{}", output);
+            }
+        }
+    }
+
     // Randomized differential gauntlet for the ext4 NAMESPACE mutation surface
     // (create / mkdir / unlink / rmdir / cross-directory rename incl. directory
     // rename with `..` reparenting). ext4 had no directory-churn fuzz (btrfs did:
