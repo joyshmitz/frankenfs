@@ -67434,6 +67434,128 @@ mod tests {
         }
     }
 
+    // Property-based metamorphic check of the btrfs REFLINK surface
+    // (clone_file_range) interleaved with writes and truncates across three
+    // files, against a byte-exact per-file model. Reflink shares EXTENT_DATA
+    // (refs++); a later write must COW-break (the source range stays intact) and
+    // a truncate of a file holding shared extents must refcount-decrement them —
+    // exactly the path bd-vh8p9 / bd-jbtd2 / bd-xkvcm touched. A clone is applied
+    // to the model only on success (invalid/unaligned ranges skip in lockstep);
+    // after every op each file's full content must match its model.
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(48))]
+        #[test]
+        fn btrfs_reflink_random_matches_reference_model(
+            ops in proptest::collection::vec(
+                (0u8..4, 0usize..3, 0usize..3, 0usize..200_000, 0usize..200_000, 1usize..40_000, proptest::prelude::any::<u8>()),
+                1..40,
+            ),
+        ) {
+            let (fs, cx) = open_writable_btrfs();
+            let root = InodeNumber(u64::from(BTRFS_FIRST_FREE_OBJECTID));
+            let mut inos = Vec::new();
+            let mut model: Vec<Vec<u8>> = Vec::new();
+            for i in 0..3 {
+                let a = fs
+                    .create(&cx, root, OsStr::new(&format!("rl{i}.bin")), 0o644, 0, 0)
+                    .expect("create");
+                inos.push(a.ino);
+                model.push(Vec::new());
+            }
+            const BS: usize = 4096;
+            const CAP: usize = 256 * 1024;
+            let align_down = |x: usize| x & !(BS - 1);
+
+            for (step, (kind, fa, fb, raw_a, raw_b, raw_len, val)) in ops.into_iter().enumerate() {
+                match kind {
+                    0 => {
+                        // write file fa
+                        let off = raw_a.min(CAP - 1);
+                        let len = raw_len.min(CAP - off).max(1);
+                        let buf = vec![val; len];
+                        fs.write(&cx, inos[fa], off as u64, &buf).expect("write");
+                        if off + len > model[fa].len() {
+                            model[fa].resize(off + len, 0);
+                        }
+                        model[fa][off..off + len].copy_from_slice(&buf);
+                    }
+                    1 => {
+                        // truncate file fa (may drop shared extents -> refcount--)
+                        let size_new = raw_a % (CAP + 1);
+                        fs.setattr(
+                            &cx,
+                            inos[fa],
+                            &SetAttrRequest { size: Some(size_new as u64), ..Default::default() },
+                        )
+                        .expect("truncate");
+                        model[fa].resize(size_new, 0);
+                    }
+                    _ if fa != fb && model[fa].len() >= BS => {
+                        // clone_file_range src=fa -> dst=fb (block-aligned, within src).
+                        let src_size = model[fa].len();
+                        let src_off = align_down(raw_a % src_size);
+                        let maxlen = align_down(src_size - src_off);
+                        if maxlen >= BS {
+                            let len = BS * (1 + raw_len % (maxlen / BS));
+                            let dst_off = align_down(raw_b % CAP);
+                            if dst_off + len <= CAP {
+                                match fs.clone_file_range(
+                                    &cx,
+                                    &mut RequestScope::empty(),
+                                    inos[fb],
+                                    inos[fa],
+                                    src_off as u64,
+                                    len as u64,
+                                    dst_off as u64,
+                                ) {
+                                    Ok(()) => {
+                                        if dst_off + len > model[fb].len() {
+                                            model[fb].resize(dst_off + len, 0);
+                                        }
+                                        let chunk = model[fa][src_off..src_off + len].to_vec();
+                                        model[fb][dst_off..dst_off + len].copy_from_slice(&chunk);
+                                    }
+                                    Err(e)
+                                        if e.to_errno() == libc::EINVAL
+                                            || e.to_errno() == libc::EOPNOTSUPP => {}
+                                    Err(e) => {
+                                        proptest::prop_assert!(
+                                            false,
+                                            "unexpected clone error step {}: {}",
+                                            step,
+                                            e
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+
+                // Every file's full content must match its model.
+                for (fi, ino) in inos.iter().enumerate() {
+                    let n = model[fi].len();
+                    let attr_now = fs.getattr(&cx, *ino).expect("getattr");
+                    proptest::prop_assert_eq!(attr_now.size, n as u64, "size mismatch f{} step {}", fi, step);
+                    if n == 0 {
+                        continue;
+                    }
+                    let got = fs.read(&cx, *ino, 0, u32::try_from(n).expect("fits u32")).expect("read");
+                    let ndiff = (0..n).filter(|&i| got[i] != model[fi][i]).count();
+                    proptest::prop_assert!(
+                        ndiff == 0,
+                        "f{} content diverged step {}: {} bytes differ (first at {})",
+                        fi,
+                        step,
+                        ndiff,
+                        (0..n).find(|&i| got[i] != model[fi][i]).unwrap_or(0)
+                    );
+                }
+            }
+        }
+    }
+
     // Property-based metamorphic check of the ext4 file write/truncate path on a
     // real mkfs.ext4 image (so it runs on the rch workers, unlike the synthetic
     // open_writable_ext4 path which skips there — bd-cc6ua). Random interleavings
