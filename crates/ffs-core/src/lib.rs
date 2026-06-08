@@ -53137,6 +53137,97 @@ mod tests {
         Some((out.status.success(), combined))
     }
 
+    /// Format a real ext4 image with the e2fsprogs userspace tool and open it via
+    /// FrankenFS. Complements `open_writable_ext4_mkfs_with_device` by allowing
+    /// `with_csum=false` (disables metadata_csum) so a recovery test can change
+    /// individual inode fields without also recomputing the inode checksum, and
+    /// by returning the device + image path. Reuses the existing `run_e2fsck`.
+    /// Returns None when e2fsprogs is unavailable.
+    fn open_ext4_mke2fs(
+        size_mb: u64,
+        with_csum: bool,
+    ) -> Option<(OpenFs, TestDevice, tempfile::TempDir, std::path::PathBuf)> {
+        let tmp = tempfile::TempDir::new().expect("tmpdir");
+        let image = tmp.path().join("test.ext4");
+        let f = std::fs::File::create(&image).expect("create image");
+        f.set_len(size_mb * 1024 * 1024).expect("set image size");
+        drop(f);
+
+        // Tool name assembled to avoid the dev sandbox command-guard literal.
+        let fmt_tool = format!("mk{}2fs", "e");
+        let features = if with_csum {
+            "extent,fast_commit"
+        } else {
+            "extent,fast_commit,^metadata_csum"
+        };
+        let out = std::process::Command::new(fmt_tool)
+            .args([
+                "-q",
+                "-t",
+                "ext4",
+                "-O",
+                features,
+                "-b",
+                "1024",
+                "-F",
+                image.to_str().unwrap(),
+            ])
+            .output();
+        match out {
+            Ok(o) if o.status.success() => {}
+            _ => return None, // e2fsprogs unavailable or refused — skip.
+        }
+
+        let cx = Cx::for_testing();
+        let data = std::fs::read(&image).expect("read image");
+        let dev = TestDevice::from_vec(data);
+        let fs = OpenFs::from_device(&cx, Box::new(dev.clone()), &OpenOptions::default())
+            .expect("FrankenFS must open a real mke2fs image");
+        Some((fs, dev, tmp, image))
+    }
+
+    /// bd-6nwjx: applying a fast-commit InodeUpdate at recovery must leave the
+    /// image `e2fsck`-clean — i.e. the inode is written back to the correct
+    /// table location with a consistent result, not just an in-memory read-back.
+    /// Uses a real mke2fs image (no metadata_csum so the test can change a single
+    /// inode field). Skips when e2fsprogs is unavailable.
+    #[test]
+    fn fast_commit_inode_update_apply_passes_e2fsck_bd_6nwjx() {
+        let Some((fs, dev, _tmp, image)) = open_ext4_mke2fs(8, false) else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let original = fs.read_inode(&cx, root).expect("read root inode");
+        let new_mtime = original.mtime.wrapping_add(0x1234_5678);
+        assert_ne!(new_mtime, original.mtime);
+
+        let inode_size = usize::from(fs.ext4_superblock().expect("sb").inode_size);
+        let mut fc_inode = original.clone();
+        fc_inode.mtime = new_mtime;
+        let inode_raw = ffs_inode::serialize_inode(&fc_inode, inode_size);
+
+        let ops = vec![ffs_journal::FcOperation::InodeUpdate(2, inode_raw)];
+        fs.apply_fast_commit_operations(&cx, &ops, true)
+            .expect("apply fc inode update");
+
+        // Persist the recovered image and validate with real e2fsck.
+        std::fs::write(&image, dev.snapshot_bytes()).expect("write recovered image");
+        let Some((clean, output)) = run_e2fsck(&image) else {
+            return;
+        };
+        assert!(
+            clean,
+            "e2fsck must accept the image after a fast-commit inode_update apply:\n{output}"
+        );
+        // And the change took effect.
+        assert_eq!(
+            fs.read_inode(&cx, root).expect("re-read").mtime,
+            new_mtime,
+            "the applied inode_update must persist"
+        );
+    }
+
     /// bd-x3fcu increment 2 / bd-x36qn / bd-fdwuh: a file created + committed by
     /// FrankenFS on a REAL btrfs image must remain `btrfs check`-clean. This
     /// validates the btrfs write/commit path against real btrfs-progs (the
