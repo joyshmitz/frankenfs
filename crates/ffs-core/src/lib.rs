@@ -56539,6 +56539,90 @@ mod tests {
         );
     }
 
+    /// A broad set of btrfs metadata mutations (rmdir, symlink, device node,
+    /// hard link + remove-one-link, chmod/chown/utimes, truncate) must each
+    /// leave btrfs-check-clean on-disk metadata — the per-op convention checks
+    /// that surfaced the directory-nlink bug (bd-egyf6). One op with a wrong
+    /// nlink / item layout fails btrfs check here.
+    #[test]
+    fn btrfs_metadata_ops_pass_btrfs_check() {
+        let Some((fs, dev, _tmp, image)) = open_writable_btrfs_mkfs(256) else {
+            return; // btrfs-progs unavailable
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(u64::from(BTRFS_FIRST_FREE_OBJECTID));
+
+        // mkdir then rmdir an empty directory.
+        fs.mkdir(&cx, root, OsStr::new("tmpdir"), 0o755, 0, 0)
+            .expect("mkdir");
+        fs.rmdir(&cx, root, OsStr::new("tmpdir")).expect("rmdir");
+
+        // A symlink.
+        fs.symlink(
+            &cx,
+            root,
+            OsStr::new("alink"),
+            std::path::Path::new("target/path"),
+            0,
+            0,
+        )
+        .expect("symlink");
+
+        // A device node (FIFO).
+        fs.mknod(
+            &cx,
+            root,
+            OsStr::new("afifo"),
+            ffs_types::S_IFIFO | 0o644,
+            0,
+            0,
+            0,
+        )
+        .expect("mknod fifo");
+
+        // A file, hard-linked, then one link removed (nlink 1 -> 2 -> 1).
+        let f = fs
+            .create(&cx, root, OsStr::new("file1"), 0o644, 0, 0)
+            .expect("create file1");
+        fs.write(&cx, f.ino, 0, b"hello").expect("write file1");
+        fs.link(&cx, f.ino, root, OsStr::new("file1hard"))
+            .expect("hard link");
+        fs.unlink(&cx, root, OsStr::new("file1"))
+            .expect("remove one link");
+
+        // chmod/chown/utimes + truncate via setattr.
+        let g = fs
+            .create(&cx, root, OsStr::new("file2"), 0o644, 0, 0)
+            .expect("create file2");
+        fs.write(&cx, g.ino, 0, &[0xAB_u8; 8192]).expect("write file2");
+        fs.setattr(
+            &cx,
+            g.ino,
+            &SetAttrRequest {
+                mode: Some(0o600),
+                uid: Some(1000),
+                gid: Some(1000),
+                size: Some(4096),
+                mtime: Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000)),
+                ..Default::default()
+            },
+        )
+        .expect("setattr");
+
+        let _ = fs.flush_mvcc_to_device(&cx);
+        fs.btrfs_full_transaction_commit(&cx, "metadata-ops-check")
+            .expect("commit");
+        std::fs::write(&image, dev.snapshot_bytes()).expect("write modified image");
+
+        let Some((ok, output)) = run_btrfs_check(&image) else {
+            return; // btrfs check tool unavailable
+        };
+        assert!(
+            ok,
+            "btrfs check must accept symlink/mknod/hardlink/setattr/rmdir metadata:\n{output}"
+        );
+    }
+
     /// bd-tm48j (snapshot variant): create_snapshot of the (file-less) default
     /// subvolume must be classified as a snapshot by enumerate_snapshots after
     /// remount AND be accepted by the real btrfs check tool.
