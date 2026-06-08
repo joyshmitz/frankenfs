@@ -5741,6 +5741,9 @@ impl OpenFs {
             (|| {
                 let base_dev = self.direct_block_device_adapter();
                 let flushed = self.mvcc_store.read().flush_to_device(cx, &base_dev)?;
+                // Sync the superblock free-count totals so a device snapshot is
+                // e2fsck-consistent (bd-nd61w); no-op for btrfs / read-only ext4.
+                self.ext4_sync_superblock_free_totals(cx)?;
                 if flushed > 0 {
                     self.dev.sync(cx)?;
                     info!(flushed_blocks = flushed, "flush_mvcc_to_device");
@@ -12713,6 +12716,59 @@ impl OpenFs {
         let bs = u64::from(self.block_size());
         let sb_byte = ffs_types::EXT4_SUPERBLOCK_OFFSET as u64;
         (BlockNumber(sb_byte / bs), (sb_byte % bs) as usize)
+    }
+
+    /// Sync the superblock free-block / free-inode TOTALS from the loaded
+    /// allocation state (bd-nd61w). The writable path keeps the per-group
+    /// descriptor free counts and bitmaps consistent, but nothing updates the
+    /// superblock totals `s_free_blocks_count` / `s_free_inodes_count`, so a
+    /// device snapshot is `e2fsck`-dirty ("Free blocks/inodes count wrong").
+    /// Recompute the totals as the sum of the in-memory group stats (which mirror
+    /// the on-disk group descriptors) and write them back at the durability
+    /// boundary, re-stamping the superblock checksum under `metadata_csum`. A
+    /// no-op for btrfs or a read-only ext4 fs (no alloc state).
+    ///
+    /// (NOTE: the group `bg_used_dirs_count` total is a separate gap in the
+    /// worker-owned ffs-alloc inode alloc/free path — not corrected here.)
+    fn ext4_sync_superblock_free_totals(&self, cx: &Cx) -> Result<(), FfsError> {
+        let (has_csum, is_64bit) = match &self.flavor {
+            FsFlavor::Ext4(sb) => (sb.has_metadata_csum(), sb.is_64bit()),
+            FsFlavor::Btrfs(_) => return Ok(()),
+        };
+        let Ok(alloc_mutex) = self.require_alloc_state() else {
+            return Ok(()); // read-only fs — nothing to sync
+        };
+        let (total_free_blocks, total_free_inodes) = {
+            let alloc = alloc_mutex.lock();
+            let blocks: u64 = alloc.groups.iter().map(|g| u64::from(g.free_blocks)).sum();
+            let inodes: u64 = alloc.groups.iter().map(|g| u64::from(g.free_inodes)).sum();
+            (blocks, inodes)
+        };
+
+        let (sb_block, sb_off) = self.ext4_superblock_location();
+        let block_dev = self.direct_block_device_adapter();
+        let mut block_data = block_dev.read_block(cx, sb_block)?.as_slice().to_vec();
+
+        #[allow(clippy::cast_possible_truncation)]
+        let fb_lo = (total_free_blocks & 0xFFFF_FFFF) as u32;
+        #[allow(clippy::cast_possible_truncation)]
+        let fb_hi = (total_free_blocks >> 32) as u32;
+        let fi = u32::try_from(total_free_inodes).unwrap_or(u32::MAX);
+        block_data[sb_off + 0x0C..sb_off + 0x10].copy_from_slice(&fb_lo.to_le_bytes());
+        block_data[sb_off + 0x10..sb_off + 0x14].copy_from_slice(&fi.to_le_bytes());
+        if is_64bit {
+            block_data[sb_off + 0x158..sb_off + 0x15C].copy_from_slice(&fb_hi.to_le_bytes());
+        }
+        if has_csum {
+            let csum = ffs_ondisk::ext4_chksum(
+                !0u32,
+                &block_data[sb_off..sb_off + EXT4_SB_CHECKSUM_OFFSET],
+            );
+            block_data[sb_off + EXT4_SB_CHECKSUM_OFFSET..sb_off + EXT4_SB_CHECKSUM_OFFSET + 4]
+                .copy_from_slice(&csum.to_le_bytes());
+        }
+        block_dev.write_block(cx, sb_block, &block_data)?;
+        Ok(())
     }
 
     /// Get current wall-clock timestamp as (seconds-since-epoch, nanoseconds).
@@ -51577,6 +51633,50 @@ mod tests {
             // the per-step readdir + lookup model match. Once the accounting totals
             // are synced, add an e2fsck pass here to also cover `..`/link-count
             // invariants under the rename churn.
+        }
+    }
+
+    /// bd-nd61w: flush_mvcc_to_device must sync the superblock free-block/inode
+    /// TOTALS so a device snapshot is e2fsck-clean. Before the fix a bare
+    /// create+write+flush left s_free_blocks_count / s_free_inodes_count at their
+    /// mkfs values ("Free blocks/inodes count wrong"). Validated on BOTH
+    /// metadata_csum modes (the csum path re-stamps the superblock checksum) plus
+    /// a from_device reopen (proves the superblock still parses + csum-verifies).
+    /// (File ops only — no directories — so the separate worker-owned
+    /// gd-used-dirs gap is not exercised.)
+    #[test]
+    fn flush_syncs_superblock_free_totals_e2fsck_clean_bd_nd61w() {
+        for with_csum in [false, true] {
+            let Some((fs, dev, _tmp, image)) = open_ext4_mke2fs(8, with_csum) else {
+                continue; // e2fsprogs unavailable — skip.
+            };
+            let cx = Cx::for_testing();
+            // A file + several blocks of data: allocates an inode and data blocks,
+            // moving the free totals off their mkfs values.
+            let attr = fs
+                .create(&cx, InodeNumber(2), OsStr::new("nd61w.bin"), 0o644, 0, 0)
+                .expect("create");
+            fs.write(&cx, attr.ino, 0, &[0xAB_u8; 6 * 1024])
+                .expect("write");
+            fs.flush_mvcc_to_device(&cx).expect("flush");
+
+            // Reopen must succeed — proves the superblock still parses and (with
+            // metadata_csum) its checksum verifies after the free-total rewrite.
+            OpenFs::from_device(
+                &cx,
+                Box::new(TestDevice::from_vec(dev.snapshot_bytes())),
+                &OpenOptions::default(),
+            )
+            .unwrap_or_else(|e| panic!("reopen after sb free-total sync (csum={with_csum}): {e}"));
+
+            std::fs::write(&image, dev.snapshot_bytes()).expect("write image");
+            let Some((clean, output)) = run_e2fsck(&image) else {
+                continue;
+            };
+            assert!(
+                clean,
+                "e2fsck must accept after sb free-total sync (with_csum={with_csum}):\n{output}"
+            );
         }
     }
 
