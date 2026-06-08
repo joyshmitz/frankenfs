@@ -44868,6 +44868,48 @@ mod tests {
         );
     }
 
+    /// metadata_csum companion to bd-zpe9s: when a file's extent tree grows past
+    /// the inline 4-extent root, the newly allocated external leaf/index blocks
+    /// each carry an `ext4_extent_tail` CRC32C keyed on the fs csum seed + the
+    /// owning inode's number + generation. That tail is stamped via the block
+    /// allocator's `finalize_node` hook (GroupBlockAllocator), which `write_node`
+    /// invokes on every grow/rewrite. bd-zpe9s exercises growth only on a
+    /// `^metadata_csum` image (isolating the i_blocks accounting), so it would not
+    /// catch a missing or mis-keyed extent-block checksum — the extent-tree analog
+    /// of the empty-directory tail gap (bd-bribi). This pins the end-to-end
+    /// stamping: grow the tree on a metadata_csum image and require real e2fsck to
+    /// find no extent-checksum damage.
+    #[test]
+    fn ext4_extent_tree_growth_stamps_block_csum_passes_e2fsck() {
+        let Some((fs, dev, _tmp, image)) = open_ext4_mke2fs(16, true) else {
+            return; // e2fsprogs unavailable
+        };
+        let cx = Cx::for_testing();
+        let bs = u64::from(fs.ext4_superblock().expect("sb").block_size);
+        let attr = fs
+            .create(&cx, InodeNumber(2), OsStr::new("grow_csum.bin"), 0o644, 0, 0)
+            .expect("create");
+
+        // 16 discontiguous single-block writes (holes defeat coalescing) overflow
+        // the inline 4-extent root and grow the tree to depth >= 1, allocating
+        // external extent blocks that must be checksum-stamped on metadata_csum.
+        for k in 0..16u64 {
+            fs.write(&cx, attr.ino, k * 2 * bs, &vec![0xCD_u8; bs as usize])
+                .expect("discontiguous write");
+        }
+
+        fs.flush_mvcc_to_device(&cx).expect("flush mvcc");
+        std::fs::write(&image, dev.snapshot_bytes()).expect("write image");
+        let Some((clean, output)) = run_e2fsck(&image) else {
+            return; // e2fsck unavailable
+        };
+        assert!(
+            clean,
+            "e2fsck must accept a metadata_csum file whose extent tree grew to depth >= 1 \
+             (an unstamped/mis-keyed ext4_extent_tail would surface here):\n{output}"
+        );
+    }
+
     /// bd-kyp2q: the directory-mapping paths (`ext4_add_dir_entry` linear growth
     /// and `ext4_rebuild_htree_dir`) insert into a directory's extent tree via
     /// direct `ffs_btree::insert` calls. Once that tree grows past its inline
