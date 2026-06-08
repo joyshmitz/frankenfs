@@ -14284,6 +14284,24 @@ impl OpenFs {
         name: &[u8],
         file_type: Ext4FileType,
     ) -> ffs_error::Result<()> {
+        // Mirror ext4_add_dir_entry's casefold gate up-front: a non-ASCII name in
+        // a casefold htree directory cannot be placed in the fold-correct dx leaf
+        // (bd-owt2r/bd-vsuni), so the real insert will refuse it. Reject here in
+        // the preflight — this runs BEFORE ext4_rename removes the source entry,
+        // so the rename fails atomically instead of unlinking the source and then
+        // failing the target insert, which would orphan the renamed inode (silent
+        // data loss).
+        if parent_inode.has_htree_index()
+            && parent_inode.flags & ffs_types::EXT4_CASEFOLD_FL != 0
+            && !name.is_ascii()
+        {
+            return Err(FfsError::UnsupportedFeature(
+                "non-ASCII casefold htree directory insert is not yet supported \
+                 (bd-owt2r: needs byte-exact UTF-8 normalization)"
+                    .to_owned(),
+            ));
+        }
+
         let extents = self.collect_extents(cx, parent_inode)?;
         let reserved_tail = self.ext4_dir_reserved_tail();
 
@@ -43438,6 +43456,123 @@ mod tests {
         assert!(
             matches!(find(b"file_0005.txt"), ffs_ondisk::HtreeFindResult::Found(_)),
             "pre-existing entry must remain index-reachable after recovery"
+        );
+    }
+
+    /// Corruption-critical gate (bd-owt2r / bd-vsuni): inserting a NON-ASCII name
+    /// into a CASEFOLD htree directory must be REFUSED, never silently inserted.
+    /// FrankenFS's non-ASCII fold diverges from the kernel's NFD-normalized
+    /// casefold, so it cannot compute the fold-correct dx leaf — writing the entry
+    /// anyway would place it in the WRONG leaf, where the kernel's own (correct-
+    /// fold) descent would never find it (silent data loss). This pins the refusal
+    /// on every insertion entry point — create / link / rename, all of which route
+    /// through ext4_add_dir_entry — and that a refused op leaves NO partial entry.
+    /// Previously only the ASCII-create success path was covered. Remove these
+    /// asserts when byte-exact UTF-8 normalization lands (bd-vsuni).
+    #[test]
+    fn casefold_htree_rejects_non_ascii_insert_bd_owt2r() {
+        let Some((fs, _tmp)) = open_writable_ext4_mkfs(16) else {
+            return; // mkfs.ext4 unavailable
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let (csum_seed, hash_seed, hash_version, block_size) = {
+            let sb = fs.ext4_superblock().expect("sb");
+            (
+                sb.csum_seed(),
+                sb.hash_seed,
+                sb.effective_dirhash_version(sb.def_hash_version),
+                usize::try_from(sb.block_size).unwrap(),
+            )
+        };
+
+        // Build an htree-indexed directory and mark it casefold.
+        let dir = fs
+            .mkdir(&cx, root, OsStr::new("casedir"), 0o755, 0, 0)
+            .expect("mkdir");
+        let dir_ino = dir.ino;
+        let dir_ino_u32 = u32::try_from(dir_ino.0).unwrap();
+        let generation = fs.read_inode(&cx, dir_ino).expect("read dir").generation;
+        let names: Vec<Vec<u8>> = (0..30)
+            .map(|i| format!("file_{i:04}.txt").into_bytes())
+            .collect();
+        let entries: Vec<(u32, u8, &[u8])> = names
+            .iter()
+            .enumerate()
+            .map(|(i, n)| {
+                (
+                    1000 + u32::try_from(i).unwrap(),
+                    ffs_ondisk::ext4::EXT4_FT_REG_FILE,
+                    n.as_slice(),
+                )
+            })
+            .collect();
+        let blocks = ffs_ondisk::build_htree_directory_stamped(
+            dir_ino_u32,
+            2,
+            &entries,
+            block_size,
+            hash_version,
+            &hash_seed,
+            csum_seed,
+            dir_ino_u32,
+            generation,
+        )
+        .expect("build htree");
+        install_htree_dir(&fs, &cx, dir_ino, &blocks);
+        {
+            let mut inode = fs.read_inode(&cx, dir_ino).expect("read dir inode");
+            inode.flags |= ffs_types::EXT4_CASEFOLD_FL;
+            fs.persist_ext4_inode_for_testing(&cx, dir_ino, &inode)
+                .expect("set casefold flag");
+        }
+        assert!(
+            fs.read_inode(&cx, dir_ino).expect("re-read").has_htree_index(),
+            "the casefold test dir must be htree-indexed for the gate to apply"
+        );
+
+        // café.txt — the 'é' (U+00E9) makes this non-ASCII.
+        let non_ascii = OsStr::new("café.txt");
+
+        // create: refused, with no partial entry left behind.
+        let create_res = fs.create(&cx, dir_ino, non_ascii, 0o644, 0, 0);
+        assert!(
+            create_res.is_err(),
+            "non-ASCII create in a casefold htree dir must be refused, got {create_res:?}"
+        );
+        assert!(
+            fs.lookup(&cx, dir_ino, non_ascii).is_err(),
+            "a refused non-ASCII create must not leave a partial dir entry (silent corruption)"
+        );
+
+        // link: same gate.
+        let target = fs
+            .create(&cx, root, OsStr::new("linktgt.txt"), 0o644, 0, 0)
+            .expect("create link target");
+        let link_res = fs.link(&cx, target.ino, dir_ino, OsStr::new("résumé"));
+        assert!(
+            link_res.is_err(),
+            "non-ASCII link into a casefold htree dir must be refused, got {link_res:?}"
+        );
+
+        // rename: move an ASCII file in root to a non-ASCII name in the casefold dir.
+        fs.create(&cx, root, OsStr::new("mover.txt"), 0o644, 0, 0)
+            .expect("create mover");
+        let rename_res = fs.rename(
+            &cx,
+            root,
+            OsStr::new("mover.txt"),
+            dir_ino,
+            OsStr::new("naïve.txt"),
+        );
+        assert!(
+            rename_res.is_err(),
+            "non-ASCII rename into a casefold htree dir must be refused, got {rename_res:?}"
+        );
+        // The source name must survive a refused rename (no half-applied move).
+        assert!(
+            fs.lookup(&cx, root, OsStr::new("mover.txt")).is_ok(),
+            "a refused rename must leave the source entry intact"
         );
     }
 
