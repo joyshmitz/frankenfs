@@ -56897,6 +56897,54 @@ mod tests {
         );
     }
 
+    /// Truncating a datasum file DOWN must stay `btrfs check`-clean: freeing the
+    /// tail of a checksummed extent has to remove the freed range's EXTENT_CSUM
+    /// items, drop/decrement the data EXTENT_ITEM backref, decrement the block
+    /// group's `used`, and update the inode's `nbytes`/`size` — all in one
+    /// commit. The existing truncate coverage is in-memory model match only, and
+    /// bd-juj73 asserts just the in-memory csum tree; this pins the WHOLE on-disk
+    /// result against the authoritative tool (any orphan csum, dangling backref,
+    /// stale bg accounting, or nbytes drift surfaces as a btrfs check error).
+    /// Skips when btrfs-progs is unavailable.
+    #[test]
+    fn btrfs_truncate_down_frees_datasum_extent_passes_btrfs_check() {
+        let Some((fs, dev, _tmp, image)) = open_writable_btrfs_mkfs(256) else {
+            return; // btrfs-progs unavailable
+        };
+        let cx = Cx::for_testing();
+        let ops: &dyn FsOps = &fs;
+        let root = InodeNumber(u64::from(BTRFS_FIRST_FREE_OBJECTID));
+
+        let attr = ops
+            .create(&cx, &mut RequestScope::empty(), root, OsStr::new("trunc_check.bin"), 0o644, 0, 0)
+            .expect("btrfs create on a real image");
+        // A 16 KiB datasum extent (datasum is the default after bd-x3fcu).
+        ops.write(&cx, &mut RequestScope::empty(), attr.ino, 0, &[0xA7_u8; 16384])
+            .expect("write 16 KiB datasum data");
+        // Truncate down to 4 KiB: frees the [4K,16K) tail (3 sectors of csums +
+        // their extent backref/bg accounting) while keeping the [0,4K) head.
+        ops.setattr(
+            &cx,
+            &mut RequestScope::empty(),
+            attr.ino,
+            &SetAttrRequest { size: Some(4096), ..Default::default() },
+        )
+        .expect("truncate datasum file down to 4 KiB");
+
+        let _ = fs.flush_mvcc_to_device(&cx);
+        fs.btrfs_full_transaction_commit(&cx, "truncate-down-check")
+            .expect("btrfs full transaction commit");
+        std::fs::write(&image, dev.snapshot_bytes()).expect("write modified image");
+
+        let Some((ok, output)) = run_btrfs_check(&image) else {
+            return; // btrfs check tool unavailable
+        };
+        assert!(
+            ok,
+            "btrfs check must accept a datasum file truncated down (no orphan csum / backref / bg drift):\n{output}"
+        );
+    }
+
     /// bd-tm48j increment 4: a FrankenFS-created subvolume must be accepted by
     /// the real `btrfs check` tool (the strict kernel-parity bar for the
     /// create_subvolume path).
