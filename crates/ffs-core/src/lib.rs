@@ -18148,11 +18148,15 @@ impl OpenFs {
             .range(&lo, &hi)
             .map_err(|e| btrfs_mutation_to_ffs(&e))?;
 
-        // Build the dst shares BEFORE mutating, so an unsupported extent
-        // (inline/compressed partial) aborts cleanly with no half-done clone.
+        // Build the dst shares BEFORE mutating, so an unsupported extent aborts
+        // cleanly with no half-done clone.
         // Tuple: (dst_file_offset, dst EXTENT_DATA bytes, disk_bytenr,
         // disk_num_bytes, EXTENT_DATA_REF offset).
         let mut shares: Vec<(u64, Vec<u8>, u64, u64, u64)> = Vec::new();
+        // Inline extents have no shared disk extent, so a partial reflink of one
+        // is a data COPY: (dst_file_offset, sliced logical bytes) written to dst
+        // as a fresh extent after the destination window is cleared (bd-iypb9).
+        let mut inline_copies: Vec<(u64, Vec<u8>)> = Vec::new();
         for (key, data) in &src_extents {
             let extent = parse_extent_data(data).map_err(|e| parse_to_ffs_error(&e))?;
             let logical_len = Self::btrfs_extent_logical_len(&extent)?;
@@ -18218,10 +18222,48 @@ impl OpenFs {
                         ref_offset,
                     ));
                 }
-                BtrfsExtentData::Inline { .. } => {
-                    return Err(FfsError::UnsupportedFeature(
-                        "partial-range reflink of an inline extent is not supported".into(),
-                    ));
+                BtrfsExtentData::Inline {
+                    ram_bytes,
+                    compression,
+                    data: inline_data,
+                    ..
+                } => {
+                    // An inline extent stores its bytes in the item itself (no
+                    // shareable disk extent), so carve the overlapping logical
+                    // bytes and copy them to dst (bd-iypb9). Decompress first when
+                    // the inline payload is compressed.
+                    let logical = if compression == 0 {
+                        inline_data
+                    } else {
+                        Self::btrfs_decompress(
+                            &inline_data,
+                            compression,
+                            usize::try_from(ram_bytes).map_err(|_| {
+                                FfsError::InvalidGeometry("inline ram_bytes overflow".into())
+                            })?,
+                        )?
+                    };
+                    let slice_start = usize::try_from(overlap_start - f).map_err(|_| {
+                        FfsError::InvalidGeometry("inline slice start overflow".into())
+                    })?;
+                    let slice_end = usize::try_from(overlap_end - f).map_err(|_| {
+                        FfsError::InvalidGeometry("inline slice end overflow".into())
+                    })?;
+                    // The inline payload may be shorter than ram_bytes (implicit
+                    // trailing zeros); zero-pad the carved chunk to the overlap.
+                    let mut chunk = vec![0_u8; slice_end - slice_start];
+                    if slice_start < logical.len() {
+                        let copy_end = slice_end.min(logical.len());
+                        chunk[..copy_end - slice_start]
+                            .copy_from_slice(&logical[slice_start..copy_end]);
+                    }
+                    let dst_file_offset =
+                        dest_offset
+                            .checked_add(overlap_start - src_offset)
+                            .ok_or_else(|| {
+                                FfsError::InvalidGeometry("clone dst offset overflow".into())
+                            })?;
+                    inline_copies.push((dst_file_offset, chunk));
                 }
             }
         }
@@ -18249,6 +18291,28 @@ impl OpenFs {
                     ref_offset,
                 )
                 .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+        }
+        // Copy carved inline bytes into dst as fresh regular extents (bd-iypb9).
+        // btrfs file extents must be sectorsize-aligned, so pad the carved chunk
+        // up to a whole sector (the tail past dst i_size is allocated slack, like
+        // any sub-sector file); i_size is set to dest_end by the recompute below.
+        // All-zero chunks are left sparse by the segment writer (read back zero).
+        let sectorsize = usize::try_from(alloc.sectorsize)
+            .map_err(|_| FfsError::InvalidGeometry("sectorsize does not fit usize".into()))?;
+        for (dst_file_offset, mut chunk) in inline_copies {
+            let padded = chunk
+                .len()
+                .checked_add(sectorsize - 1)
+                .ok_or_else(|| FfsError::InvalidGeometry("inline copy pad overflow".into()))?
+                & !(sectorsize - 1);
+            chunk.resize(padded, 0);
+            self.btrfs_insert_regular_extent_segment(
+                cx,
+                alloc,
+                dst_canonical,
+                dst_file_offset,
+                &chunk,
+            )?;
         }
 
         // Recompute dst size/nbytes from the resulting extent set (nbytes counts
@@ -55435,6 +55499,99 @@ mod tests {
         std::fs::write(&image, dev.snapshot_bytes()).expect("write image");
         if let Some((ok, output)) = run_btrfs_check(&image) {
             assert!(ok, "btrfs check after partial compressed reflink:\n{output}");
+        }
+    }
+
+    /// bd-iypb9: partial-range reflink of an INLINE extent. Inline data lives in
+    /// the EXTENT_DATA item (no shareable disk extent), so the carved sub-range
+    /// is COPIED into dst as a fresh regular extent. Validated end-to-end: an
+    /// inline source reads back correctly, a partial reflink reads the source
+    /// sub-range, and the result is btrfs check-clean. The inline source is built
+    /// by replacing a normal write's extent with a hand-rolled inline one
+    /// (FrankenFS never writes inline). Skips when btrfs-progs is unavailable.
+    #[test]
+    fn btrfs_partial_reflink_of_inline_extent_bd_iypb9() {
+        let Some((fs, dev, _tmp, image)) = open_writable_btrfs_mkfs(256) else {
+            return; // btrfs-progs unavailable
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(u64::from(BTRFS_FIRST_FREE_OBJECTID));
+        let src = fs
+            .create(&cx, root, OsStr::new("isrc.bin"), 0o644, 0, 0)
+            .expect("create src");
+        // 1 KiB nonzero payload (small enough to be inline; nonzero so the carved
+        // copy is materialized, not left sparse).
+        let data: Vec<u8> = (0..1024u32).map(|i| (i % 251) as u8 | 1).collect();
+        fs.write(&cx, src.ino, 0, &data).expect("write src data");
+
+        // Replace src's regular extent with a single INLINE extent over [0, n).
+        {
+            let alloc_mutex = fs.require_btrfs_alloc_state().expect("alloc state");
+            let mut alloc = alloc_mutex.lock();
+            let canonical = fs.btrfs_canonical_inode(src.ino).expect("canonical");
+            let n = data.len() as u64;
+            fs.btrfs_remove_overlapping_extent_data(&cx, &mut alloc, canonical, 0, n)
+                .expect("remove regular extent");
+            let extent = BtrfsExtentData::Inline {
+                generation: alloc.generation,
+                ram_bytes: n,
+                compression: 0,
+                data: data.clone(),
+            };
+            alloc
+                .fs_tree
+                .insert(
+                    BtrfsKey {
+                        objectid: canonical,
+                        item_type: BTRFS_ITEM_EXTENT_DATA,
+                        offset: 0,
+                    },
+                    &extent.to_bytes(),
+                )
+                .expect("insert inline extent");
+            // Inline contributes ram_bytes to i_nbytes; the regular-extent remove
+            // zeroed it, so set it back for a btrfs-check-clean source.
+            let mut inode = fs.btrfs_read_inode_from_tree(&alloc, canonical).expect("read inode");
+            inode.nbytes = n;
+            inode.size = n;
+            alloc
+                .fs_tree
+                .update(
+                    &BtrfsKey {
+                        objectid: canonical,
+                        item_type: BTRFS_ITEM_INODE_ITEM,
+                        offset: 0,
+                    },
+                    &inode.to_bytes(),
+                )
+                .expect("update inode");
+        }
+
+        // Sanity: the inline source reads back as the original data.
+        let full = fs.read(&cx, src.ino, 0, data.len() as u32).expect("read src");
+        assert_eq!(full, data, "inline source must read back as the original data");
+
+        // Partial reflink (previously rejected): clone src[256..768) -> dst[0..).
+        // Sub-sector offsets — clone_file_range does not require alignment.
+        let dst = fs
+            .create(&cx, root, OsStr::new("idst.bin"), 0o644, 0, 0)
+            .expect("create dst");
+        fs.clone_file_range(&cx, &mut RequestScope::empty(), dst.ino, src.ino, 256, 512, 0)
+            .expect("partial reflink of an inline extent");
+        let cloned = fs.read(&cx, dst.ino, 0, 512).expect("read dst");
+        assert_eq!(
+            cloned,
+            &data[256..768],
+            "partial inline reflink must read the source sub-range"
+        );
+
+        // btrfs check: inline source + the copied dst extent must be clean.
+        let _ = fs.flush_mvcc_to_device(&cx);
+        fs.btrfs_full_transaction_commit(&cx, "iypb9-inline-reflink")
+            .expect("commit");
+        std::fs::write(&image, dev.snapshot_bytes()).expect("write image");
+        if let Some((ok, output)) = run_btrfs_check(&image) {
+            assert!(ok, "btrfs check after partial inline reflink:\n{output}");
         }
     }
 
