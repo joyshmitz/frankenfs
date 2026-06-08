@@ -43609,6 +43609,100 @@ mod tests {
         );
     }
 
+    /// A non-ASCII create/mkdir into a casefold htree dir is refused by the gate
+    /// INSIDE ext4_add_dir_entry — i.e. AFTER the new inode is already allocated.
+    /// The op must then roll back that allocation (ext4_create/ext4_mkdir call
+    /// delete_inode on the add failure) or it leaks an inode. The existing
+    /// rollback test triggers failure via an invalid name, which fails in
+    /// validate_single_path_component BEFORE any allocation, so it never exercises
+    /// this post-allocation rollback path. This pins it: the free-inode count must
+    /// be identical before and after the refused create AND the refused mkdir
+    /// (16 MiB image == one block group, so the group-0 count is the whole fs).
+    #[test]
+    fn casefold_htree_refused_insert_rolls_back_inode_alloc_bd_owt2r() {
+        let Some((fs, _tmp)) = open_writable_ext4_mkfs(16) else {
+            return; // mkfs.ext4 unavailable
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let (csum_seed, hash_seed, hash_version, block_size) = {
+            let sb = fs.ext4_superblock().expect("sb");
+            (
+                sb.csum_seed(),
+                sb.hash_seed,
+                sb.effective_dirhash_version(sb.def_hash_version),
+                usize::try_from(sb.block_size).unwrap(),
+            )
+        };
+        let dir = fs
+            .mkdir(&cx, root, OsStr::new("casedir"), 0o755, 0, 0)
+            .expect("mkdir");
+        let dir_ino = dir.ino;
+        let dir_ino_u32 = u32::try_from(dir_ino.0).unwrap();
+        let generation = fs.read_inode(&cx, dir_ino).expect("read dir").generation;
+        let names: Vec<Vec<u8>> = (0..30)
+            .map(|i| format!("file_{i:04}.txt").into_bytes())
+            .collect();
+        let entries: Vec<(u32, u8, &[u8])> = names
+            .iter()
+            .enumerate()
+            .map(|(i, n)| {
+                (
+                    1000 + u32::try_from(i).unwrap(),
+                    ffs_ondisk::ext4::EXT4_FT_REG_FILE,
+                    n.as_slice(),
+                )
+            })
+            .collect();
+        let blocks = ffs_ondisk::build_htree_directory_stamped(
+            dir_ino_u32,
+            2,
+            &entries,
+            block_size,
+            hash_version,
+            &hash_seed,
+            csum_seed,
+            dir_ino_u32,
+            generation,
+        )
+        .expect("build htree");
+        install_htree_dir(&fs, &cx, dir_ino, &blocks);
+        {
+            let mut inode = fs.read_inode(&cx, dir_ino).expect("read dir inode");
+            inode.flags |= ffs_types::EXT4_CASEFOLD_FL;
+            fs.persist_ext4_inode_for_testing(&cx, dir_ino, &inode)
+                .expect("set casefold flag");
+        }
+
+        let free_before = fs
+            .count_free_inodes_in_group(&cx, GroupNumber(0))
+            .expect("free inode count");
+
+        // Refused non-ASCII create — the gate fires after create_inode allocated
+        // the inode, so the create must delete_inode to roll it back.
+        let create_res = fs.create(&cx, dir_ino, OsStr::new("café.txt"), 0o644, 0, 0);
+        assert!(create_res.is_err(), "non-ASCII create must be refused");
+        let free_after_create = fs
+            .count_free_inodes_in_group(&cx, GroupNumber(0))
+            .expect("free inode count");
+        assert_eq!(
+            free_after_create, free_before,
+            "a refused casefold create must roll back (free) its allocated inode, not leak it"
+        );
+
+        // Refused non-ASCII mkdir — same post-allocation rollback (a directory
+        // inode also charges used_dirs, which delete_inode must release).
+        let mkdir_res = fs.mkdir(&cx, dir_ino, OsStr::new("ÜberDir"), 0o755, 0, 0);
+        assert!(mkdir_res.is_err(), "non-ASCII mkdir must be refused");
+        let free_after_mkdir = fs
+            .count_free_inodes_in_group(&cx, GroupNumber(0))
+            .expect("free inode count");
+        assert_eq!(
+            free_after_mkdir, free_before,
+            "a refused casefold mkdir must roll back (free) its allocated inode, not leak it"
+        );
+    }
+
     /// bd-owt2r (insert side, end-to-end): creating an ASCII-named file in a
     /// CASEFOLD htree directory now succeeds (was UnsupportedFeature) and places
     /// the entry in the fold-correct leaf, so a case-insensitive lookup finds it.
