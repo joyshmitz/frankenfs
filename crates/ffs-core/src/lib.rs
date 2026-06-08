@@ -3672,7 +3672,11 @@ impl OpenFs {
     }
 
     fn clear_ext4_orphan_state(&mut self, cx: &Cx) -> Result<(), FfsError> {
-        let sb_block = BlockNumber(0); // ext4 superblock is in block 0 (offset 1024)
+        // The superblock lives at byte 1024. For block sizes <= 1024 (e.g. a
+        // 1024-byte-block fs) that is a *later* block, not block 0, and the
+        // in-block offset is 0 — so block 0 + offset 1024 would read/index out
+        // of bounds (bd-icebl). Compute the block and in-block offset instead.
+        let (sb_block, sb_off) = self.ext4_superblock_location();
 
         // Phase 1: Read the current superblock.
         let mut block_data = {
@@ -3680,7 +3684,6 @@ impl OpenFs {
             block_dev.read_block(cx, sb_block)?.as_slice().to_vec()
         };
 
-        let sb_off = ffs_types::EXT4_SUPERBLOCK_OFFSET;
         let old_state = u16::from_le_bytes([block_data[sb_off + 0x3A], block_data[sb_off + 0x3B]]);
         let new_state = old_state & !EXT4_ORPHAN_FS;
         block_data[sb_off + 0x3A..sb_off + 0x3C].copy_from_slice(&new_state.to_le_bytes());
@@ -12696,6 +12699,20 @@ impl OpenFs {
             dev: self.dev.as_ref(),
             block_size: self.block_size(),
         }
+    }
+
+    /// Locate the ext4 superblock on disk as `(block, in-block byte offset)`.
+    ///
+    /// The 1024-byte superblock lives at absolute byte 1024. For block sizes
+    /// `> 1024` that is block 0 at offset 1024; for a 1024-byte-block fs it is
+    /// block 1 at offset 0. Centralizing this stops superblock writers from
+    /// assuming block 0 + offset 1024, which reads/indexes out of bounds on a
+    /// 1024-byte-block fs (bd-icebl). ext4's minimum block size is 1024, so the
+    /// block always exists.
+    fn ext4_superblock_location(&self) -> (BlockNumber, usize) {
+        let bs = u64::from(self.block_size());
+        let sb_byte = ffs_types::EXT4_SUPERBLOCK_OFFSET as u64;
+        (BlockNumber(sb_byte / bs), (sb_byte % bs) as usize)
     }
 
     /// Get current wall-clock timestamp as (seconds-since-epoch, nanoseconds).
@@ -26131,13 +26148,15 @@ impl FsOps for OpenFs {
                 let sb = self
                     .ext4_superblock()
                     .ok_or_else(|| FfsError::Format("not an ext4 filesystem".into()))?;
+                // The superblock may not be in block 0 on a 1024-byte-block fs
+                // (bd-icebl): use its true block + in-block offset.
+                let (sb_block, sb_off) = self.ext4_superblock_location();
                 let block_dev = self.direct_block_device_adapter();
                 let mut block_data = block_dev
-                    .read_block(cx, BlockNumber(0))?
+                    .read_block(cx, sb_block)?
                     .as_slice()
                     .to_vec();
 
-                let sb_off = ffs_types::EXT4_SUPERBLOCK_OFFSET;
                 let label_start = sb_off + EXT4_VOLUME_NAME_OFFSET;
                 let label_end = label_start + EXT4_LABEL_MAX;
                 block_data[label_start..label_end].fill(0);
@@ -26158,9 +26177,9 @@ impl FsOps for OpenFs {
                         base: &block_dev,
                         tx: Mutex::new(tx),
                     };
-                    tx_dev.write_block(cx, BlockNumber(0), &block_data)?;
+                    tx_dev.write_block(cx, sb_block, &block_data)?;
                 } else {
-                    block_dev.write_block(cx, BlockNumber(0), &block_data)?;
+                    block_dev.write_block(cx, sb_block, &block_data)?;
                 }
                 Ok(())
             }
@@ -32494,6 +32513,39 @@ mod tests {
             .get_encryption_policy_ex(&cx, &mut RequestScope::empty(), InodeNumber(11))
             .expect_err("unencrypted inode should not have a policy-ex payload");
         assert_eq!(err.to_errno(), libc::ENODATA);
+    }
+
+    #[test]
+    fn set_fs_label_works_on_1024_byte_block_fs_bd_icebl() {
+        // bd-icebl: on a 1024-byte-block fs the superblock is in block 1 (byte
+        // 1024), not block 0. The old code read block 0 (only 1024 bytes) and
+        // indexed at offset 1024+0x78 → out-of-bounds panic. Verify set_fs_label
+        // now works and the label lands at the correct on-disk superblock block.
+        let Some((fs, dev, _tmp, _image)) = open_ext4_mke2fs(8, false) else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        assert_eq!(
+            fs.ext4_superblock().expect("sb").block_size,
+            1024,
+            "fixture must be a 1024-byte-block fs to exercise bd-icebl"
+        );
+        fs.set_fs_label(&cx, &mut RequestScope::empty(), b"icebl-ok")
+            .expect("set_fs_label must not panic on a 1024-block fs");
+
+        // Reopen from the device: the label must be readable, proving the
+        // superblock was written to the correct block (block 1), not block 0.
+        let reopened = OpenFs::from_device(
+            &cx,
+            Box::new(TestDevice::from_vec(dev.snapshot_bytes())),
+            &OpenOptions::default(),
+        )
+        .expect("reopen 1024-block image");
+        let label = reopened
+            .get_fs_label(&cx, &mut RequestScope::empty())
+            .expect("read label");
+        let end = label.iter().position(|&b| b == 0).unwrap_or(label.len());
+        assert_eq!(&label[..end], b"icebl-ok");
     }
 
     #[test]
