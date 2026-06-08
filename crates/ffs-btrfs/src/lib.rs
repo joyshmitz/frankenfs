@@ -6689,8 +6689,17 @@ where
         .filter_map(|(&ino, links)| links.first().map(|(p, n)| (ino, (*p, n.clone()))))
         .collect();
 
-    // Build path for an inode by walking up the parent chain
+    // Build a command PATH for an inode by walking up the parent chain. btrfs
+    // send command paths are RELATIVE to the received subvolume root: no
+    // subvol-name prefix and no leading slash (the receiver creates entries
+    // inside the freshly-created subvol). The subvolume root inode itself is the
+    // received root — its path is empty (chmod/chown/utimes of the root apply to
+    // "."). A subvol-name prefix here makes every MKFILE/MKDIR/WRITE target a
+    // never-created `subvol/` subdirectory, so `btrfs receive` fails with ENOENT.
     let build_path = |ino: u64| -> Vec<u8> {
+        if ino == BTRFS_FIRST_FREE_OBJECTID {
+            return Vec::new();
+        }
         let mut components = Vec::new();
         let mut current = ino;
 
@@ -6703,9 +6712,11 @@ where
         }
 
         components.reverse();
-        let mut path = subvol_name.to_vec();
+        let mut path = Vec::new();
         for comp in components {
-            path.push(b'/');
+            if !path.is_empty() {
+                path.push(b'/');
+            }
             path.extend_from_slice(&comp);
         }
         path
@@ -6928,7 +6939,11 @@ where
             if let Some(links) = inode_links.get(&ino) {
                 for (parent, name) in links.iter().skip(1) {
                     let mut link_path = build_path(*parent);
-                    link_path.push(b'/');
+                    // Relative to the subvol root: no leading slash for a link
+                    // directly under the root (whose build_path is empty).
+                    if !link_path.is_empty() {
+                        link_path.push(b'/');
+                    }
                     link_path.extend_from_slice(name);
                     let (cmd, attrs) = build_link_command(&link_path, &path);
                     let refs: Vec<(SendAttr, &[u8])> =
@@ -18004,6 +18019,57 @@ mod tests {
             cmd_types.contains(&SendCommand::Utimes),
             "should have utimes command"
         );
+
+        // Command PATHs must be RELATIVE to the received subvol root — no
+        // subvol-name prefix, no '..' escape (bd-dnyr0). Previously every path
+        // was prefixed with "test_subvol", making the stream unreceivable.
+        const ATTR_PATH: u16 = SendAttr::Path as u16;
+        let path_of = |cmd: SendCommand| -> Option<Vec<u8>> {
+            parsed.commands.iter().find(|c| c.cmd == cmd).and_then(|c| {
+                c.attrs
+                    .iter()
+                    .find(|(t, _)| *t == ATTR_PATH)
+                    .map(|(_, v)| v.clone())
+            })
+        };
+        // The SUBVOL command does carry the subvolume name.
+        assert_eq!(path_of(SendCommand::Subvol).as_deref(), Some(&b"test_subvol"[..]));
+        // Child commands are subvol-relative.
+        assert_eq!(
+            path_of(SendCommand::Mkfile).as_deref(),
+            Some(&b"hello.txt"[..]),
+            "MKFILE path must be subvol-relative (no subvol-name prefix)"
+        );
+        assert_eq!(
+            path_of(SendCommand::Mkdir).as_deref(),
+            Some(&b"subdir"[..]),
+            "MKDIR path must be subvol-relative"
+        );
+        // No command path may carry the subvol prefix or escape the root.
+        for c in &parsed.commands {
+            for (t, v) in &c.attrs {
+                if *t == ATTR_PATH {
+                    assert!(
+                        !v.starts_with(b"test_subvol/"),
+                        "command path must not be subvol-name-prefixed: {:?}",
+                        String::from_utf8_lossy(v)
+                    );
+                    assert!(
+                        !v.windows(2).any(|w| w == b".."),
+                        "command path must not contain '..': {:?}",
+                        String::from_utf8_lossy(v)
+                    );
+                }
+            }
+        }
+        // The subvol root's metadata commands apply via an empty path.
+        assert!(
+            parsed.commands.iter().any(|c| c.cmd == SendCommand::Chmod
+                && c.attrs
+                    .iter()
+                    .any(|(t, v)| *t == ATTR_PATH && v.is_empty())),
+            "the subvolume root's chmod must use an empty (root-relative) path"
+        );
     }
 
     /// Regression: a file extent larger than the u16 TLV limit must be split
@@ -18349,10 +18415,10 @@ mod tests {
                 .map(|(_, d)| d.clone())
         };
         let mkdir_pos = parsed.commands.iter().position(|c| {
-            c.cmd == SendCommand::Mkdir && path_of(c).as_deref() == Some(b"sv/d".as_ref())
+            c.cmd == SendCommand::Mkdir && path_of(c).as_deref() == Some(b"d".as_ref())
         });
         let mkfile_pos = parsed.commands.iter().position(|c| {
-            c.cmd == SendCommand::Mkfile && path_of(c).as_deref() == Some(b"sv/d/f".as_ref())
+            c.cmd == SendCommand::Mkfile && path_of(c).as_deref() == Some(b"d/f".as_ref())
         });
 
         let mkdir_pos = mkdir_pos.expect("mkdir sv/d emitted");
@@ -18434,17 +18500,17 @@ mod tests {
         // mkfile at the primary path a/f1.
         assert!(
             parsed.commands.iter().any(|c| c.cmd == SendCommand::Mkfile
-                && attr(c, ATTR_PATH).as_deref() == Some(b"sv/a/f1".as_ref())),
+                && attr(c, ATTR_PATH).as_deref() == Some(b"a/f1".as_ref())),
             "file created once at its primary path"
         );
         // link b/f2 -> a/f1 for the second hard link.
         let link = parsed.commands.iter().find(|c| {
-            c.cmd == SendCommand::Link && attr(c, ATTR_PATH).as_deref() == Some(b"sv/b/f2".as_ref())
+            c.cmd == SendCommand::Link && attr(c, ATTR_PATH).as_deref() == Some(b"b/f2".as_ref())
         });
         let link = link.expect("second hard link must emit a Link command");
         assert_eq!(
             attr(link, ATTR_PATH_LINK).as_deref(),
-            Some(b"sv/a/f1".as_ref()),
+            Some(b"a/f1".as_ref()),
             "Link must target the primary path"
         );
     }
@@ -18575,7 +18641,7 @@ mod tests {
             .iter()
             .find_map(|(candidate, value)| (*candidate == ATTR_PATH).then_some(value.as_slice()))
             .expect("UpdateExtent should carry path");
-        assert_eq!(path, b"test_subvol/prealloc.bin");
+        assert_eq!(path, b"prealloc.bin");
         assert_eq!(attr_u64(update, ATTR_FILE_OFFSET), FILE_OFFSET);
         assert_eq!(attr_u64(update, ATTR_SIZE), PREALLOC_LEN);
     }
