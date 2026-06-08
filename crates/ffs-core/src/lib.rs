@@ -67219,6 +67219,173 @@ mod tests {
         }
     }
 
+    // Property-based metamorphic check of the btrfs FALLOCATE surface (punch /
+    // zero / collapse / insert interleaved with write / truncate) against a
+    // byte-exact in-memory model. btrfs had write/truncate + overwrite + dir
+    // churn fuzzes but no fallocate fuzz — and on btrfs these modes splice a COW
+    // extent tree (FILE_EXTENT items + the in-memory bw-tree), a different path
+    // from ext4's. Each fallocate op is attempted and an EINVAL/EOPNOTSUPP (an
+    // alignment/bounds combination invalid for the current file) is skipped
+    // identically in fs and model — keeping them in lockstep — while any
+    // content/size divergence or unexpected error fails the case.
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(96))]
+        #[test]
+        fn btrfs_write_fallocate_random_matches_reference_model(
+            ops in proptest::collection::vec(
+                (0u8..6, 0usize..200_000, 1usize..40_000, proptest::prelude::any::<u8>()),
+                1..40,
+            ),
+        ) {
+            let (fs, cx) = open_writable_btrfs();
+            let attr = fs
+                .create(&cx, InodeNumber(1), OsStr::new("falloc.bin"), 0o644, 0, 0)
+                .expect("create");
+            let mut model: Vec<u8> = Vec::new();
+            const BS: usize = 4096;
+            const CAP: usize = 512 * 1024;
+            let align_down = |x: usize| x & !(BS - 1);
+
+            for (step, (kind, a, b, val)) in ops.into_iter().enumerate() {
+                let size = model.len();
+                let do_falloc = |fs: &OpenFs,
+                                 model: &mut Vec<u8>,
+                                 off: usize,
+                                 len: usize,
+                                 mode: i32,
+                                 apply: &dyn Fn(&mut Vec<u8>)|
+                 -> Result<(), String> {
+                    match fs.fallocate(&cx, attr.ino, off as u64, len as u64, mode) {
+                        Ok(()) => {
+                            apply(model);
+                            Ok(())
+                        }
+                        Err(e)
+                            if e.to_errno() == libc::EINVAL
+                                || e.to_errno() == libc::EOPNOTSUPP =>
+                        {
+                            Ok(())
+                        }
+                        Err(e) => Err(format!("unexpected fallocate error at step {step}: {e}")),
+                    }
+                };
+
+                match kind {
+                    0 => {
+                        let off = a.min(CAP - 1);
+                        let len = b.min(CAP - off).max(1);
+                        let buf = vec![val; len];
+                        fs.write(&cx, attr.ino, off as u64, &buf).expect("write");
+                        if off + len > model.len() {
+                            model.resize(off + len, 0);
+                        }
+                        model[off..off + len].copy_from_slice(&buf);
+                    }
+                    1 => {
+                        let size_new = a % (CAP + 1);
+                        fs.setattr(
+                            &cx,
+                            attr.ino,
+                            &SetAttrRequest {
+                                size: Some(size_new as u64),
+                                ..Default::default()
+                            },
+                        )
+                        .expect("truncate");
+                        model.resize(size_new, 0);
+                    }
+                    2 if size >= BS => {
+                        let off = align_down(a % size);
+                        let maxlen = align_down(size - off);
+                        if maxlen >= BS {
+                            let len = (BS * (1 + (b % 8))).min(maxlen);
+                            let res = do_falloc(
+                                &fs,
+                                &mut model,
+                                off,
+                                len,
+                                libc::FALLOC_FL_KEEP_SIZE | libc::FALLOC_FL_PUNCH_HOLE,
+                                &|m| m[off..off + len].fill(0),
+                            );
+                            proptest::prop_assert!(res.is_ok(), "{}", res.unwrap_err());
+                        }
+                    }
+                    3 if size >= BS => {
+                        let off = align_down(a % size);
+                        let maxlen = align_down(size - off);
+                        if maxlen >= BS {
+                            let len = (BS * (1 + (b % 8))).min(maxlen);
+                            let res = do_falloc(
+                                &fs,
+                                &mut model,
+                                off,
+                                len,
+                                libc::FALLOC_FL_ZERO_RANGE,
+                                &|m| m[off..off + len].fill(0),
+                            );
+                            proptest::prop_assert!(res.is_ok(), "{}", res.unwrap_err());
+                        }
+                    }
+                    4 if size >= 2 * BS => {
+                        let off = align_down(a % (size - BS));
+                        let len = BS * (1 + (b % 8));
+                        if off + len < size {
+                            let res = do_falloc(
+                                &fs,
+                                &mut model,
+                                off,
+                                len,
+                                libc::FALLOC_FL_COLLAPSE_RANGE,
+                                &|m| {
+                                    m.drain(off..off + len);
+                                },
+                            );
+                            proptest::prop_assert!(res.is_ok(), "{}", res.unwrap_err());
+                        }
+                    }
+                    5 if size >= BS => {
+                        let off = align_down(a % size);
+                        let len = BS * (1 + (b % 8));
+                        if off + len <= CAP {
+                            let res = do_falloc(
+                                &fs,
+                                &mut model,
+                                off,
+                                len,
+                                libc::FALLOC_FL_INSERT_RANGE,
+                                &|m| {
+                                    m.splice(off..off, std::iter::repeat_n(0_u8, len));
+                                },
+                            );
+                            proptest::prop_assert!(res.is_ok(), "{}", res.unwrap_err());
+                        }
+                    }
+                    _ => {}
+                }
+
+                let n = model.len();
+                let attr_now = fs.getattr(&cx, attr.ino).expect("getattr");
+                proptest::prop_assert_eq!(attr_now.size, n as u64, "size mismatch after step {}", step);
+                if n == 0 {
+                    continue;
+                }
+                let got = fs
+                    .read(&cx, attr.ino, 0, u32::try_from(n).expect("fits u32"))
+                    .expect("read");
+                proptest::prop_assert_eq!(got.len(), n, "read length mismatch");
+                let ndiff = (0..n).filter(|&i| got[i] != model[i]).count();
+                proptest::prop_assert!(
+                    ndiff == 0,
+                    "content diverged after step {}: {} of {} bytes differ (first at {})",
+                    step,
+                    ndiff,
+                    n,
+                    (0..n).find(|&i| got[i] != model[i]).unwrap_or(0)
+                );
+            }
+        }
+    }
+
     // Property-based metamorphic check of the ext4 file write/truncate path on a
     // real mkfs.ext4 image (so it runs on the rch workers, unlike the synthetic
     // open_writable_ext4 path which skips there — bd-cc6ua). Random interleavings
