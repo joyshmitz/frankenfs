@@ -18179,11 +18179,13 @@ impl OpenFs {
                     if disk_bytenr == 0 {
                         continue; // hole: dst stays sparse across this gap
                     }
-                    if compression != 0 {
-                        return Err(FfsError::UnsupportedFeature(
-                            "partial-range reflink of a compressed extent is not supported".into(),
-                        ));
-                    }
+                    // Compressed extents CAN be carved by view (bd-sialu): the
+                    // share keeps disk_bytenr/disk_num_bytes/ram_bytes/compression
+                    // (the whole compressed blob) and adjusts extent_offset/
+                    // num_bytes to the sub-range; the reader decompresses the full
+                    // blob then slices by extent_offset/num_bytes
+                    // (btrfs_decompressed_extent_slice). So no special-casing is
+                    // needed beyond carrying `compression` into the new extent.
                     let delta = overlap_start - f;
                     let new_extent_offset = extent_offset.checked_add(delta).ok_or_else(|| {
                         FfsError::InvalidGeometry("clone extent_offset overflow".into())
@@ -55328,6 +55330,112 @@ mod tests {
             ok,
             "btrfs check must accept a FrankenFS-created+committed file:\n{output}"
         );
+    }
+
+    /// bd-sialu: partial-range reflink of a COMPRESSED extent. The source extent
+    /// is carved by view (extent_offset/num_bytes) while keeping the whole
+    /// compressed blob (disk_bytenr/disk_num_bytes/ram_bytes/compression); the
+    /// reader decompresses the blob then slices it, so the clone reads the right
+    /// bytes, a COW-break leaves the source intact, and the shared compressed
+    /// extent stays btrfs check-clean. FrankenFS never writes compressed extents,
+    /// so the source is built by replacing a normal write's extent with a
+    /// hand-rolled ZLIB-compressed one. Skips when btrfs-progs is unavailable.
+    #[test]
+    fn btrfs_partial_reflink_of_compressed_extent_bd_sialu() {
+        let Some((fs, dev, _tmp, image)) = open_writable_btrfs_mkfs(256) else {
+            return; // btrfs-progs unavailable
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(u64::from(BTRFS_FIRST_FREE_OBJECTID));
+        let src = fs
+            .create(&cx, root, OsStr::new("csrc.bin"), 0o644, 0, 0)
+            .expect("create src");
+        // Highly compressible 16 KiB payload.
+        let data: Vec<u8> = (0..16384u32).map(|i| (i % 251) as u8).collect();
+        fs.write(&cx, src.ino, 0, &data).expect("write src data");
+
+        // Replace src's uncompressed extent with one ZLIB-compressed extent over
+        // [0, data.len()) — FrankenFS's own writes are never compressed.
+        {
+            let alloc_mutex = fs.require_btrfs_alloc_state().expect("alloc state");
+            let mut alloc = alloc_mutex.lock();
+            let canonical = fs.btrfs_canonical_inode(src.ino).expect("canonical");
+            let n = data.len() as u64;
+            fs.btrfs_remove_overlapping_extent_data(&cx, &mut alloc, canonical, 0, n)
+                .expect("remove uncompressed extent");
+            let blob = btrfs_test_zlib_compress(&data);
+            let sectorsize = u64::from(alloc.sectorsize);
+            let alloc_size = (blob.len() as u64 + sectorsize - 1) & !(sectorsize - 1);
+            let allocation = alloc.extent_alloc.alloc_data(alloc_size).expect("alloc data");
+            let mut padded = blob;
+            padded.resize(alloc_size as usize, 0);
+            fs.btrfs_write_logical(&cx, allocation.bytenr, &padded)
+                .expect("write compressed blob");
+            let extent = BtrfsExtentData::Regular {
+                generation: alloc.generation,
+                ram_bytes: n,
+                extent_type: BTRFS_FILE_EXTENT_REG,
+                compression: ffs_btrfs::BTRFS_COMPRESS_ZLIB,
+                disk_bytenr: allocation.bytenr,
+                disk_num_bytes: alloc_size,
+                extent_offset: 0,
+                num_bytes: n,
+            };
+            let key = BtrfsKey {
+                objectid: canonical,
+                item_type: BTRFS_ITEM_EXTENT_DATA,
+                offset: 0,
+            };
+            alloc
+                .fs_tree
+                .insert(key, &extent.to_bytes())
+                .expect("insert compressed extent");
+            OpenFs::btrfs_register_data_extent_backref(
+                &mut alloc,
+                allocation.bytenr,
+                alloc_size,
+                canonical,
+                0,
+            )
+            .expect("register backref");
+            fs.btrfs_capture_data_extent_csums(&cx, &mut alloc, allocation.bytenr, alloc_size)
+                .expect("capture csums");
+        }
+
+        // Sanity: the whole compressed source must decompress to `data`.
+        let full = fs.read(&cx, src.ino, 0, data.len() as u32).expect("read src");
+        assert_eq!(full, data, "compressed source must read back as the original data");
+
+        // Partial reflink (previously rejected): clone src[4096..12288) -> dst[0..).
+        let dst = fs
+            .create(&cx, root, OsStr::new("cdst.bin"), 0o644, 0, 0)
+            .expect("create dst");
+        fs.clone_file_range(&cx, &mut RequestScope::empty(), dst.ino, src.ino, 4096, 8192, 0)
+            .expect("partial reflink of a compressed extent");
+        let cloned = fs.read(&cx, dst.ino, 0, 8192).expect("read dst");
+        assert_eq!(
+            cloned,
+            &data[4096..12288],
+            "partial reflink must read the source sub-range"
+        );
+
+        // COW-break dst; the source range stays intact.
+        fs.write(&cx, dst.ino, 0, &[0xEE_u8; 4096]).expect("cow-break write");
+        let src_after = fs.read(&cx, src.ino, 4096, 8192).expect("re-read src");
+        assert_eq!(
+            src_after,
+            &data[4096..12288],
+            "COW-break must not disturb the source"
+        );
+
+        // btrfs check: the shared compressed extent + backrefs + csums are clean.
+        let _ = fs.flush_mvcc_to_device(&cx);
+        fs.btrfs_full_transaction_commit(&cx, "sialu-compressed-reflink")
+            .expect("commit");
+        std::fs::write(&image, dev.snapshot_bytes()).expect("write image");
+        if let Some((ok, output)) = run_btrfs_check(&image) {
+            assert!(ok, "btrfs check after partial compressed reflink:\n{output}");
+        }
     }
 
     /// A btrfs file put through a fallocate churn (collapse / insert / punch /
