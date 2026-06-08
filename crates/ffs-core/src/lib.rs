@@ -619,7 +619,27 @@ struct BtrfsAllocState {
     sectorsize: u32,
 }
 
-type BtrfsPurgeAction = (BtrfsKey, Option<(u64, u64)>);
+/// What to do with the data extent (if any) referenced by a purged
+/// `EXTENT_DATA` item when its owning inode is deleted (bd-xkvcm).
+enum BtrfsExtentDisposition {
+    /// The item owns no freeable data extent (a non-`EXTENT_DATA` item, or an
+    /// inline / hole / unallocated extent).
+    Keep,
+    /// Sole reference (`refs == 1`): free the extent's space and remove its
+    /// checksums — the existing, refcount-unaware path.
+    Free { disk_bytenr: u64, disk_num_bytes: u64 },
+    /// Shared extent (`refs > 1`, reflink / snapshot / CoW): drop only this
+    /// inode's `EXTENT_DATA_REF`, leaving the space (and csums) live for the
+    /// other references. The inverse of the validated reflink share.
+    DropRef {
+        disk_bytenr: u64,
+        disk_num_bytes: u64,
+        objectid: u64,
+        ref_offset: u64,
+    },
+}
+
+type BtrfsPurgeAction = (BtrfsKey, BtrfsExtentDisposition);
 
 enum BtrfsExtentRewriteSegment {
     Data { logical_offset: u64, data: Vec<u8> },
@@ -21005,45 +21025,53 @@ impl OpenFs {
 
         let mut plan = Vec::with_capacity(items.len());
         for (key, data) in items {
-            let extent_to_free = if key.item_type == BTRFS_ITEM_EXTENT_DATA {
+            // Refcount-aware free (bd-xkvcm): a SHARED data extent
+            // (EXTENT_ITEM.refs > 1 — reflink / snapshot / CoW) must not be
+            // freed outright, which would orphan the other references and free
+            // still-live space. Drop only this inode's EXTENT_DATA_REF instead;
+            // a sole reference (refs == 1) is freed as before. EXTENT_ITEM.refs
+            // is the authoritative refcount (inline + keyed backrefs).
+            let disposition = if key.item_type == BTRFS_ITEM_EXTENT_DATA {
                 match parse_extent_data(&data).map_err(|e| parse_to_ffs_error(&e))? {
                     BtrfsExtentData::Regular {
                         disk_bytenr,
                         disk_num_bytes,
+                        extent_offset,
                         ..
-                    } if disk_bytenr > 0 => Some((disk_bytenr, disk_num_bytes)),
-                    _ => None,
+                    } if disk_bytenr > 0 => {
+                        let refs = alloc
+                            .extent_alloc
+                            .extent_item_refs(disk_bytenr, disk_num_bytes)
+                            .map_err(|e| btrfs_mutation_to_ffs(&e))?
+                            .unwrap_or(1);
+                        if refs > 1 {
+                            let ref_offset =
+                                key.offset.checked_sub(extent_offset).ok_or_else(|| {
+                                    FfsError::Corruption {
+                                        block: disk_bytenr,
+                                        detail: "purge: extent_offset exceeds EXTENT_DATA offset"
+                                            .into(),
+                                    }
+                                })?;
+                            BtrfsExtentDisposition::DropRef {
+                                disk_bytenr,
+                                disk_num_bytes,
+                                objectid,
+                                ref_offset,
+                            }
+                        } else {
+                            BtrfsExtentDisposition::Free {
+                                disk_bytenr,
+                                disk_num_bytes,
+                            }
+                        }
+                    }
+                    _ => BtrfsExtentDisposition::Keep,
                 }
             } else {
-                None
+                BtrfsExtentDisposition::Keep
             };
-            // SAFETY GUARD (bd-xkvcm): free_extent is not refcount-aware — it
-            // removes the EXTENT_ITEM + all backrefs and frees the space
-            // unconditionally. Freeing a SHARED data extent (reflink / snapshot /
-            // CoW, EXTENT_DATA_REF count > 1) would orphan the other references
-            // and free still-live space = corruption. This collection pass is
-            // read-only, so refusing here is atomic (no partial delete) — the
-            // delete fails cleanly instead of corrupting until refcount-aware
-            // free lands. FrankenFS's own extents are refs==1, so this never
-            // triggers on FrankenFS-created files.
-            if let Some((disk_bytenr, disk_num_bytes)) = extent_to_free {
-                // EXTENT_ITEM.refs is the authoritative refcount (inline + keyed
-                // backrefs). > 1 => shared (reflink/snapshot/CoW).
-                if let Some(refs) = alloc
-                    .extent_alloc
-                    .extent_item_refs(disk_bytenr, disk_num_bytes)
-                    .map_err(|e| btrfs_mutation_to_ffs(&e))?
-                {
-                    if refs > 1 {
-                        return Err(FfsError::UnsupportedFeature(format!(
-                            "cannot delete inode {objectid}: data extent {disk_bytenr} is shared \
-                             ({refs} references: reflink/snapshot); refcount-aware extent free is \
-                             not yet implemented (bd-xkvcm)"
-                        )));
-                    }
-                }
-            }
-            plan.push((key, extent_to_free));
+            plan.push((key, disposition));
         }
 
         Ok(plan)
@@ -21061,13 +21089,38 @@ impl OpenFs {
         alloc: &mut BtrfsAllocState,
         purge_plan: Vec<BtrfsPurgeAction>,
     ) -> ffs_error::Result<()> {
-        for (key, extent_to_free) in purge_plan {
-            if let Some((disk_bytenr, disk_num_bytes)) = extent_to_free {
-                alloc
-                    .extent_alloc
-                    .free_extent(disk_bytenr, disk_num_bytes, false)
-                    .map_err(|e| btrfs_mutation_to_ffs(&e))?;
-                Self::btrfs_remove_extent_csums(alloc, disk_bytenr, disk_num_bytes)?;
+        for (key, disposition) in purge_plan {
+            match disposition {
+                BtrfsExtentDisposition::Keep => {}
+                BtrfsExtentDisposition::Free {
+                    disk_bytenr,
+                    disk_num_bytes,
+                } => {
+                    alloc
+                        .extent_alloc
+                        .free_extent(disk_bytenr, disk_num_bytes, false)
+                        .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+                    Self::btrfs_remove_extent_csums(alloc, disk_bytenr, disk_num_bytes)?;
+                }
+                BtrfsExtentDisposition::DropRef {
+                    disk_bytenr,
+                    disk_num_bytes,
+                    objectid,
+                    ref_offset,
+                } => {
+                    // Shared extent: drop only this inode's reference. The space
+                    // and its csums stay live for the remaining references.
+                    alloc
+                        .extent_alloc
+                        .remove_data_extent_ref(
+                            disk_bytenr,
+                            disk_num_bytes,
+                            BTRFS_FS_TREE_OBJECTID,
+                            objectid,
+                            ref_offset,
+                        )
+                        .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+                }
             }
             alloc
                 .fs_tree
@@ -52462,6 +52515,74 @@ mod tests {
         assert_eq!(read_back, payload, "dst must read the cloned source data");
     }
 
+    /// bd-xkvcm on-disk validation: after reflinking src -> dst (shared extent)
+    /// and then DELETING dst, real `btrfs check` must still report the image
+    /// clean — the refcount-aware free dropped only dst's reference (refs 2 ->
+    /// 1) rather than freeing the still-live extent — and src must still read
+    /// its data. Pairs with the bd-vh8p9 reflink E2E. Skips without btrfs-progs.
+    #[test]
+    fn btrfs_unlink_shared_extent_passes_btrfs_check_bd_xkvcm() {
+        let Some((fs, dev, _tmp, image)) = open_writable_btrfs_mkfs(256) else {
+            return; // btrfs-progs unavailable
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(u64::from(BTRFS_FIRST_FREE_OBJECTID));
+
+        let src = fs
+            .create(&cx, root, OsStr::new("src.dat"), 0o644, 0, 0)
+            .expect("create src");
+        let dst = fs
+            .create(&cx, root, OsStr::new("dst.dat"), 0o644, 0, 0)
+            .expect("create dst");
+        let payload = vec![0xA7_u8; 16384];
+        let fs_ops: &dyn FsOps = &fs;
+        fs_ops
+            .write(&cx, &mut RequestScope::empty(), src.ino, 0, &payload)
+            .expect("write src");
+
+        let src_canon = fs.btrfs_canonical_inode(src.ino).expect("src canonical");
+        let dst_canon = fs.btrfs_canonical_inode(dst.ino).expect("dst canonical");
+        {
+            let alloc_mutex = fs.btrfs_alloc_state.as_ref().expect("writable btrfs");
+            let mut alloc = alloc_mutex.lock();
+            fs.btrfs_clone_file_data(&mut alloc, src_canon, dst_canon)
+                .expect("clone src into dst");
+        }
+
+        // Delete dst: refcount-aware free drops dst's reference (refs 2 -> 1),
+        // leaving the extent live for src.
+        fs_ops
+            .unlink(&cx, &mut RequestScope::empty(), root, OsStr::new("dst.dat"))
+            .expect("unlink dst");
+
+        let _ = fs.flush_mvcc_to_device(&cx);
+        fs.btrfs_full_transaction_commit(&cx, "xkvcm-delete-check")
+            .expect("btrfs full transaction commit");
+        let bytes = dev.snapshot_bytes();
+        std::fs::write(&image, &bytes).expect("write modified image");
+
+        let Some((ok, output)) = run_btrfs_check(&image) else {
+            return; // btrfs check tool unavailable
+        };
+        assert!(
+            ok,
+            "btrfs check must accept the image after deleting one sharer of a \
+             reflinked extent:\n{output}"
+        );
+
+        // src still reads its data through the surviving (decremented) extent.
+        let read_back = fs_ops
+            .read(
+                &cx,
+                &mut RequestScope::empty(),
+                src.ino,
+                0,
+                u32::try_from(payload.len()).unwrap(),
+            )
+            .expect("read src");
+        assert_eq!(read_back, payload, "src data must survive dst deletion");
+    }
+
     /// Phase-B probe (TealFalcon): now that a single small datasum file is
     /// btrfs-check-clean, map which MORE COMPLEX btrfs mutation sequences still
     /// produce a kernel-valid image. Prints the `btrfs check` verdict for each
@@ -58843,13 +58964,12 @@ mod tests {
     }
 
     /// bd-xkvcm: deleting a file whose data extent is SHARED (reflink/snapshot,
-    /// EXTENT_DATA_REF refcount > 1) must be refused — not silently free the
-    /// extent + all backrefs while another file still references it (corruption).
-    /// The non-refcount-aware free_extent makes the actual free unsafe, so the
-    /// read-only purge-plan collection refuses upfront (atomic, no partial
-    /// delete). FrankenFS's own files are refcount 1 and delete normally.
+    /// EXTENT_DATA_REF refcount > 1) drops only that inode's reference (refs
+    /// 2 -> 1) via the refcount-aware purge path — it must NOT free the extent's
+    /// space while another file still references it (corruption), nor refuse the
+    /// delete. A sole reference (refs == 1) is freed as before.
     #[test]
-    fn btrfs_unlink_refuses_shared_extent_bd_xkvcm() {
+    fn btrfs_unlink_drops_shared_extent_ref_bd_xkvcm() {
         let (fs, cx) = open_writable_btrfs();
         let ops: &dyn FsOps = &fs;
 
@@ -58872,7 +58992,7 @@ mod tests {
 
         // Find the file's data extent and inject a SECOND EXTENT_DATA_REF,
         // simulating a reflink / another referencing inode (refcount -> 2).
-        {
+        let (disk_bytenr, disk_num_bytes) = {
             let alloc_mutex = fs.btrfs_alloc_state.as_ref().expect("btrfs alloc state");
             let mut alloc = alloc_mutex.lock();
             let start = BtrfsKey {
@@ -58936,19 +59056,28 @@ mod tests {
                 Some(2),
                 "extent is now shared (refcount 2)"
             );
-        }
+            (disk_bytenr, disk_num_bytes)
+        };
 
-        let err = ops
-            .unlink(
-                &cx,
-                &mut RequestScope::empty(),
-                InodeNumber(1),
-                OsStr::new("shared.bin"),
-            )
-            .expect_err("deleting a file with a shared extent must be refused");
-        assert!(
-            matches!(err, FfsError::UnsupportedFeature(_)),
-            "expected UnsupportedFeature for shared-extent delete, got {err:?}"
+        // Refcount-aware free (bd-xkvcm): deleting one sharer drops just its
+        // reference (refs 2 -> 1) instead of the old UnsupportedFeature refusal.
+        ops.unlink(
+            &cx,
+            &mut RequestScope::empty(),
+            InodeNumber(1),
+            OsStr::new("shared.bin"),
+        )
+        .expect("deleting one sharer of a shared extent drops a ref, not refused");
+
+        let alloc_mutex = fs.btrfs_alloc_state.as_ref().expect("btrfs alloc state");
+        let alloc = alloc_mutex.lock();
+        assert_eq!(
+            alloc
+                .extent_alloc
+                .extent_item_refs(disk_bytenr, disk_num_bytes)
+                .unwrap(),
+            Some(1),
+            "shared extent refcount drops 2 -> 1; the space is not freed"
         );
     }
 
