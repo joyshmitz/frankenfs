@@ -9316,6 +9316,82 @@ impl OpenFs {
         Ok(())
     }
 
+    /// Like `ext4_count_extent_tree_meta_blocks`, but reads child index/leaf
+    /// blocks through the supplied `dev` rather than the request scope.
+    ///
+    /// The directory-mapping paths (`ext4_add_dir_entry`,
+    /// `ext4_rebuild_htree_dir`) grow a directory's extent tree inside an
+    /// uncommitted MVCC transaction, so the index/leaf blocks just allocated by
+    /// `ffs_btree::insert` are only visible through the transaction's device
+    /// adapter — the scope-based reader still sees the pre-mutation tree.
+    /// Snapshotting this count before/after the mutation and charging the signed
+    /// delta to `i_blocks` keeps directory `i_blocks` correct once the tree
+    /// grows past its inline depth-0 root, the same way the file write/fallocate
+    /// path does it (bd-kyp2q; file analog bd-zpe9s).
+    fn ext4_count_extent_tree_meta_blocks_via_dev(
+        cx: &Cx,
+        dev: &dyn BlockDevice,
+        root_bytes: &[u8; 60],
+    ) -> Result<u64, FfsError> {
+        let (header, tree) = match parse_extent_tree(root_bytes) {
+            Ok(parsed) => parsed,
+            Err(_) => return Ok(0),
+        };
+        if header.depth == 0 {
+            return Ok(0);
+        }
+        let mut count = 0_u64;
+        Self::count_extent_tree_meta_recursive_via_dev(cx, dev, &tree, header.depth, &mut count)?;
+        Ok(count)
+    }
+
+    fn count_extent_tree_meta_recursive_via_dev(
+        cx: &Cx,
+        dev: &dyn BlockDevice,
+        tree: &ExtentTree,
+        remaining_depth: u16,
+        count: &mut u64,
+    ) -> Result<(), FfsError> {
+        if remaining_depth > Self::MAX_EXTENT_DEPTH {
+            return Err(FfsError::Corruption {
+                block: 0,
+                detail: "extent tree depth exceeds maximum".into(),
+            });
+        }
+        // Only index nodes have child blocks; each child pointer addresses one
+        // on-disk metadata block (an inner index node or a leaf).
+        if let ExtentTree::Index(indexes) = tree {
+            if remaining_depth == 0 {
+                return Err(FfsError::Corruption {
+                    block: 0,
+                    detail: "extent index at depth 0".into(),
+                });
+            }
+            *count = count.checked_add(indexes.len() as u64).ok_or_else(|| {
+                FfsError::InvalidGeometry("extent meta-block count overflow".into())
+            })?;
+            for idx in indexes {
+                let child = dev.read_block(cx, BlockNumber(idx.leaf_block))?;
+                let (child_header, child_tree) =
+                    parse_extent_tree(child.as_slice()).map_err(|e| parse_to_ffs_error(&e))?;
+                if child_header.depth + 1 != remaining_depth {
+                    return Err(FfsError::Corruption {
+                        block: idx.leaf_block,
+                        detail: "child extent tree depth inconsistency".into(),
+                    });
+                }
+                Self::count_extent_tree_meta_recursive_via_dev(
+                    cx,
+                    dev,
+                    &child_tree,
+                    remaining_depth - 1,
+                    count,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
     /// Read file data using extent mapping via the device.
     ///
     /// Resolves each logical block through the extent tree and reads the
@@ -13826,7 +13902,17 @@ impl OpenFs {
             // pre-mutation invalidation order used on the file write-allocate
             // path. (bd-j6ljg's proper fix is a stable (ino,generation) key.)
             let parent_extent_ns = extent_cache_namespace(&parent_upd);
+            // Charge any extent-tree metadata blocks this insert allocates (once
+            // the directory's tree grows past its inline depth-0 root) to the dir
+            // i_blocks, or e2fsck reports it short — the data-block delta above
+            // counts only the new directory data block. Read via `dev` so the
+            // freshly-staged tree blocks in this txn are visible (bd-kyp2q). The
+            // common case (tree still inline) costs no device reads (depth 0 → 0).
+            let dir_meta_before =
+                Self::ext4_count_extent_tree_meta_blocks_via_dev(cx, dev, &root_bytes)?;
             ffs_btree::insert(cx, dev, &mut root_bytes, extent, &mut tree_alloc)?;
+            let dir_meta_after =
+                Self::ext4_count_extent_tree_meta_blocks_via_dev(cx, dev, &root_bytes)?;
             Self::set_extent_root(&mut parent_upd, &root_bytes);
             self.extent_cache.invalidate_range(
                 parent_extent_ns,
@@ -13835,6 +13921,13 @@ impl OpenFs {
             );
             parent_upd.size = parent_new_size;
             parent_upd.blocks = parent_blocks_after_alloc;
+            Self::ext4_apply_extent_meta_delta(
+                &mut parent_upd,
+                parent,
+                dir_meta_before,
+                dir_meta_after,
+                u64::from(alloc.geo.block_size / EXT4_SECTOR_SIZE),
+            )?;
             if file_type == Ext4FileType::Dir {
                 parent_upd.links_count =
                     Self::ext4_checked_links_count_delta(parent_upd.links_count, parent, 1)?;
@@ -14060,6 +14153,12 @@ impl OpenFs {
         } else {
             alloc.geo.block_size / EXT4_SECTOR_SIZE
         };
+        // Snapshot extent-tree metadata blocks before the rebuild remaps the
+        // directory: the per-logical-block inserts below grow the tree and the
+        // tail truncate may shrink it, neither charged by the data-block delta.
+        // Read via `dev` so the txn-staged tree blocks are visible (bd-kyp2q).
+        let dir_meta_before =
+            Self::ext4_count_extent_tree_meta_blocks_via_dev(cx, dev, &root_bytes)?;
         let mut allocated: u32 = 0;
         for (i, blk) in new_blocks.iter().enumerate() {
             let logical =
@@ -14136,6 +14235,19 @@ impl OpenFs {
             (i128::from(allocated) - i128::from(freed)) * i128::from(sectors_per_block);
         parent_upd.blocks =
             Self::ext4_checked_inode_blocks_delta(parent_upd.blocks, parent, block_delta)?;
+        // Charge the net change in extent-tree metadata blocks (index/leaf nodes
+        // grown by the inserts, freed by the tail truncate) to the dir i_blocks
+        // — the data-block delta above counts only the rebuilt data blocks
+        // (bd-kyp2q).
+        let dir_meta_after =
+            Self::ext4_count_extent_tree_meta_blocks_via_dev(cx, dev, &root_bytes)?;
+        Self::ext4_apply_extent_meta_delta(
+            &mut parent_upd,
+            parent,
+            dir_meta_before,
+            dir_meta_after,
+            u64::from(sectors_per_block),
+        )?;
         ffs_inode::touch_mtime_ctime(&mut parent_upd, tstamp_secs, tstamp_nanos);
         if new_file_type == Ext4FileType::Dir {
             parent_upd.links_count =
@@ -44748,6 +44860,62 @@ mod tests {
         );
     }
 
+    /// bd-kyp2q: the directory-mapping paths (`ext4_add_dir_entry` linear growth
+    /// and `ext4_rebuild_htree_dir`) insert into a directory's extent tree via
+    /// direct `ffs_btree::insert` calls. Once that tree grows past its inline
+    /// 4-extent root the allocated index/leaf metadata blocks must be charged to
+    /// the directory `i_blocks`, or e2fsck reports "i_blocks is X, should be Y"
+    /// — the directory analog of the file-write gap (bd-zpe9s).
+    ///
+    /// Uses a `^dir_index` image so the directory stays LINEAR and grows one
+    /// block at a time through the `ext4_add_dir_entry` insert (an htree rebuild
+    /// would re-pack the directory into fresh, possibly-contiguous blocks and
+    /// hide the fragmentation). A 4 KiB file write per entry occupies the block
+    /// the directory's contiguity hint would otherwise reuse, so the directory
+    /// blocks fragment across the disk: >4 discontiguous extents overflow the
+    /// inline root and force the extent tree to depth >= 1.
+    #[test]
+    fn ext4_dir_extent_tree_growth_counts_metadata_in_iblocks_bd_kyp2q() {
+        let Some((fs, dev, _tmp, image)) =
+            open_ext4_mke2fs_features(16, "extent,fast_commit,^metadata_csum,^dir_index")
+        else {
+            return; // e2fsprogs unavailable
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        // At a 1 KiB block size a linear directory needs many blocks for 300
+        // entries; the 4 KiB file write between each create occupies the blocks
+        // the directory's contiguity hint would reuse, so the directory blocks
+        // scatter. The resulting >4 discontiguous extents overflow the inline
+        // root and grow the extent tree to depth >= 1, allocating index/leaf
+        // metadata blocks that must land in the directory i_blocks.
+        for i in 0..300u32 {
+            let name = format!("entry_{i:04}.dat");
+            let attr = fs
+                .create(&cx, root, OsStr::new(&name), 0o644, 0, 0)
+                .expect("create entry");
+            fs.write(&cx, attr.ino, 0, &[0xAB_u8; 4096])
+                .expect("write file data");
+        }
+
+        fs.flush_mvcc_to_device(&cx).expect("flush mvcc");
+        std::fs::write(&image, dev.snapshot_bytes()).expect("write image");
+        let Some((clean, output)) = run_e2fsck(&image) else {
+            return; // e2fsck unavailable
+        };
+        // The pre-fix bug surfaces as an i_blocks mismatch on the directory
+        // inode; assert on that directly (and on overall cleanliness).
+        assert!(
+            !output.contains("i_blocks"),
+            "e2fsck must not report an i_blocks mismatch after directory extent-tree growth:\n{output}"
+        );
+        assert!(
+            clean,
+            "e2fsck must accept a directory whose extent tree grew to depth >= 1:\n{output}"
+        );
+    }
+
     /// Broader e2fsck stress (bd-0ta4z follow-on): exercise many ext4 write-path
     /// mutations — multi-block file writes, a subdirectory, an unlink (free
     /// path), a rename, and a fallocate — then require the image to be
@@ -55892,6 +56060,18 @@ mod tests {
         size_mb: u64,
         with_csum: bool,
     ) -> Option<(OpenFs, TestDevice, tempfile::TempDir, std::path::PathBuf)> {
+        let features = if with_csum {
+            "extent,fast_commit"
+        } else {
+            "extent,fast_commit,^metadata_csum"
+        };
+        open_ext4_mke2fs_features(size_mb, features)
+    }
+
+    fn open_ext4_mke2fs_features(
+        size_mb: u64,
+        features: &str,
+    ) -> Option<(OpenFs, TestDevice, tempfile::TempDir, std::path::PathBuf)> {
         let tmp = tempfile::TempDir::new().expect("tmpdir");
         let image = tmp.path().join("test.ext4");
         let f = std::fs::File::create(&image).expect("create image");
@@ -55900,11 +56080,6 @@ mod tests {
 
         // Tool name assembled to avoid the dev sandbox command-guard literal.
         let fmt_tool = format!("mk{}2fs", "e");
-        let features = if with_csum {
-            "extent,fast_commit"
-        } else {
-            "extent,fast_commit,^metadata_csum"
-        };
         let out = std::process::Command::new(fmt_tool)
             .args([
                 "-q",
