@@ -4088,11 +4088,25 @@ impl OpenFs {
             match op {
                 ffs_journal::FcOperation::Create(dentry) => {
                     if self.verify_fast_commit_dentry_target(cx, dentry, "create") {
+                        // Apply (bd-6nwjx/bd-w6fxn): splice the new dir entry into
+                        // the parent so the create's name survives, not just the
+                        // inode. Best-effort: a skip (htree/no-room) leaves the
+                        // record verify-only. Only mutate the base device in
+                        // Apply mode.
+                        if writes_allowed {
+                            self.apply_fast_commit_add_dentry(cx, dentry)?;
+                        }
                         applied += 1;
                     }
                 }
                 ffs_journal::FcOperation::Link(dentry) => {
                     if self.verify_fast_commit_dentry_target(cx, dentry, "link") {
+                        // A hard link is the same directory-entry insertion as a
+                        // create (the target inode already exists); reuse the
+                        // same recovery splice (bd-6nwjx/bd-w6fxn).
+                        if writes_allowed {
+                            self.apply_fast_commit_add_dentry(cx, dentry)?;
+                        }
                         applied += 1;
                     }
                 }
@@ -4246,6 +4260,132 @@ impl OpenFs {
         self.ext4_inode_table_block_cache.lock().remove(&block_num);
         debug!(ino, block = block_num.0, "fc_apply: inode written back at recovery");
         Ok(())
+    }
+
+    /// Apply a fast-commit `CREAT`/`LINK` record (bd-6nwjx, bd-w6fxn): splice the
+    /// directory entry `name -> ino` into the parent directory so a file that was
+    /// created (or hard-linked) and fast-committed — but not yet checkpointed
+    /// into the main JBD2 transaction — keeps its name across a crash, instead of
+    /// surviving only as an orphaned inode that fsck relocates to lost+found
+    /// (the target inode itself is recovered by the `InodeUpdate` apply).
+    ///
+    /// Mirrors the recovery write model of [`Self::recovery_write_inode_raw`]:
+    /// walk the parent's directory blocks, insert the new entry into the first
+    /// block with room, re-stamp the dir-block checksum when `metadata_csum` is
+    /// enabled, and write back via the unversioned device adapter (no
+    /// `alloc_state` is required at mount).
+    ///
+    /// Conservative — returns `Ok(false)` (leaving the record verify-only) when:
+    /// - the parent is not a directory;
+    /// - the parent uses an htree index — adding a linear entry without updating
+    ///   the hash index would desync the tree (deferred to bd-w6fxn);
+    /// - no existing directory block has room — growing the directory needs the
+    ///   writable-path block allocator, unavailable at mount recovery.
+    ///
+    /// Returns `Ok(true)` when the entry was spliced in, or when it is already
+    /// present (idempotent: the create may also have been captured by JBD2 replay
+    /// or a prior fast-commit apply — re-adding it would corrupt the directory
+    /// with a duplicate cross-block entry, since [`ffs_dir::add_entry`] does not
+    /// itself check for an existing name).
+    fn apply_fast_commit_add_dentry(
+        &self,
+        cx: &Cx,
+        dentry: &ffs_journal::FcDentry,
+    ) -> Result<bool, FfsError> {
+        let parent_ino = dentry.parent_ino;
+        let parent = self.read_inode(cx, InodeNumber(u64::from(parent_ino)))?;
+        if !parent.is_dir() {
+            return Ok(false);
+        }
+        if parent.has_htree_index() {
+            warn!(
+                parent_ino,
+                ino = dentry.ino,
+                "fc_apply: CREAT/LINK skipped — htree parent dir (hash-index update deferred, bd-w6fxn)"
+            );
+            return Ok(false);
+        }
+
+        // Idempotency (critical: a duplicate entry across blocks is corruption).
+        // `add_entry` inserts into the first free slot without scanning other
+        // blocks for the name, so check the whole directory first.
+        if self.lookup_name(cx, &parent, &dentry.name)?.is_some() {
+            debug!(
+                parent_ino,
+                ino = dentry.ino,
+                "fc_apply: CREAT/LINK entry already present — idempotent no-op"
+            );
+            return Ok(true);
+        }
+
+        // The directory-entry file type comes from the target inode's mode.
+        let target = self.read_inode(cx, InodeNumber(u64::from(dentry.ino)))?;
+        let file_type = inode_dir_entry_file_type(&target);
+
+        let sb = self
+            .ext4_superblock()
+            .ok_or_else(|| FfsError::Format("not an ext4 filesystem".into()))?;
+        let has_csum = sb.has_metadata_csum();
+        let csum_seed = sb.csum_seed();
+        let block_size_u16 = sb.block_size;
+        let reserved_tail = self.ext4_dir_reserved_tail();
+        let scope = RequestScope::empty();
+        let bs = u64::from(self.block_size());
+        let num_blocks = dir_logical_block_count(parent.size, bs)?;
+
+        for lb in 0..num_blocks {
+            let Some((phys, unwritten)) = self.resolve_extent(cx, &scope, &parent, lb)? else {
+                continue;
+            };
+            if unwritten {
+                continue;
+            }
+            let mut block = self
+                .read_ext4_file_data_block_with_scope(cx, &scope, BlockNumber(phys))?
+                .to_vec();
+            match ffs_dir::add_entry(
+                &mut block,
+                dentry.ino,
+                &dentry.name,
+                file_type,
+                reserved_tail,
+            ) {
+                Ok(_) => {
+                    if has_csum {
+                        ffs_ondisk::stamp_dir_block_checksum(
+                            &mut block,
+                            csum_seed,
+                            parent_ino,
+                            parent.generation,
+                        );
+                    }
+                    let block_dev = ByteDeviceBlockAdapter {
+                        dev: &*self.dev,
+                        block_size: block_size_u16,
+                    };
+                    block_dev.write_block(cx, BlockNumber(phys), &block)?;
+                    self.ext4_file_data_block_cache
+                        .lock()
+                        .remove(&BlockNumber(phys));
+                    debug!(
+                        parent_ino,
+                        ino = dentry.ino,
+                        block = phys,
+                        "fc_apply: CREAT/LINK entry written back at recovery"
+                    );
+                    return Ok(true);
+                }
+                Err(FfsError::NoSpace) => {}
+                Err(error) => return Err(error),
+            }
+        }
+
+        warn!(
+            parent_ino,
+            ino = dentry.ino,
+            "fc_apply: CREAT/LINK skipped — no directory block with room (needs allocation)"
+        );
+        Ok(false)
     }
 
     /// Apply a fast-commit ADD_RANGE record (bd-6nwjx) by inserting the extent
@@ -31630,6 +31770,94 @@ mod tests {
             fs.read_inode(&cx, InodeNumber(2)).expect("re-read").mtime,
             before,
             "writes-disallowed recovery must leave the base inode untouched"
+        );
+    }
+
+    #[test]
+    fn fast_commit_create_apply_splices_dir_entry_bd_6nwjx() {
+        // A create that was fast-committed but lost its directory entry on crash:
+        // the inode (#11) survives but the parent (#2) no longer lists it. CREAT
+        // apply must splice the entry back so the name is recovered rather than
+        // the inode landing in lost+found.
+        let mut image = build_ext4_image_with_dir();
+
+        // Surgically delete "hello.txt" from the root dir block (phys 10) to
+        // simulate the fast-commit-only create being lost. The inode stays.
+        let d = 10 * 4096;
+        let mut block = image[d..d + 4096].to_vec();
+        assert!(
+            ffs_dir::remove_entry(&mut block, b"hello.txt", 0).expect("remove entry"),
+            "fixture must contain hello.txt to remove"
+        );
+        image[d..d + 4096].copy_from_slice(&block);
+
+        let dev = TestDevice::from_vec(image);
+        let cx = Cx::for_testing();
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default())
+            .expect("open ext4 image");
+
+        // Precondition: the entry is gone, but the target inode is still readable.
+        let root = fs.read_inode(&cx, InodeNumber(2)).expect("read root");
+        assert!(
+            fs.lookup_name(&cx, &root, b"hello.txt")
+                .expect("lookup")
+                .is_none(),
+            "entry must be absent before recovery"
+        );
+        fs.read_inode(&cx, InodeNumber(11))
+            .expect("target inode #11 must survive");
+
+        // Apply the CREAT record.
+        let dentry = ffs_journal::FcDentry {
+            parent_ino: 2,
+            ino: 11,
+            name: b"hello.txt".to_vec(),
+        };
+        let applied = fs
+            .apply_fast_commit_add_dentry(&cx, &dentry)
+            .expect("apply create");
+        assert!(applied, "the entry should be spliced into a block with room");
+
+        // The directory now resolves the recovered name to inode #11 (re-read
+        // through the cache the apply invalidated).
+        let root = fs.read_inode(&cx, InodeNumber(2)).expect("re-read root");
+        let entry = fs
+            .lookup_name(&cx, &root, b"hello.txt")
+            .expect("lookup after recovery")
+            .expect("entry recovered");
+        assert_eq!(entry.inode, 11, "recovered entry must target the right inode");
+        assert_eq!(entry.file_type, Ext4FileType::RegFile);
+    }
+
+    #[test]
+    fn fast_commit_create_apply_is_idempotent_bd_6nwjx() {
+        // If the entry is already present (e.g. also captured by JBD2 replay),
+        // CREAT apply must be a no-op success — never a duplicate cross-block
+        // entry (`add_entry` alone does not check for an existing name). Prove it
+        // by asserting the device bytes are byte-identical after the apply.
+        let data = std::sync::Arc::new(std::sync::Mutex::new(build_ext4_image_with_dir()));
+        let before = data.lock().unwrap().clone();
+        let dev = TestDevice {
+            data: std::sync::Arc::clone(&data),
+        };
+        let cx = Cx::for_testing();
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default())
+            .expect("open ext4 image");
+
+        let dentry = ffs_journal::FcDentry {
+            parent_ino: 2,
+            ino: 11,
+            name: b"hello.txt".to_vec(),
+        };
+        let applied = fs
+            .apply_fast_commit_add_dentry(&cx, &dentry)
+            .expect("apply create");
+        assert!(applied, "already-present entry is an idempotent success");
+
+        let after = data.lock().unwrap().clone();
+        assert_eq!(
+            before, after,
+            "idempotent apply must not modify the device (no duplicate entry)"
         );
     }
 
