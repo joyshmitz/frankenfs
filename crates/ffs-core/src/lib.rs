@@ -4118,6 +4118,13 @@ impl OpenFs {
                 }
                 ffs_journal::FcOperation::Unlink(dentry) => {
                     if self.verify_fast_commit_parent_directory(cx, dentry, "unlink") {
+                        // Apply (bd-w6fxn): remove the dir entry so the unlinked
+                        // name does not survive the crash. The inode's link count
+                        // is handled by the accompanying InodeUpdate. Only mutate
+                        // the base device in Apply mode.
+                        if writes_allowed {
+                            self.apply_fast_commit_remove_dentry(cx, dentry)?;
+                        }
                         applied += 1;
                     }
                 }
@@ -4514,6 +4521,85 @@ impl OpenFs {
             Err(FfsError::NoSpace) => Ok(false),
             Err(error) => Err(error),
         }
+    }
+
+    /// Apply a fast-commit `UNLINK` record (bd-w6fxn): remove the directory entry
+    /// `name` from its parent so an unlink/rename that was fast-committed (but not
+    /// checkpointed into the main JBD2 transaction) does not leave the stale name
+    /// behind after a crash. The inverse of [`Self::apply_fast_commit_add_dentry`].
+    ///
+    /// The target inode's link count (and, when it reaches zero, freeing the
+    /// inode + its blocks) is left to the accompanying `InodeUpdate` record —
+    /// matching how the kernel records the modified inode separately, and
+    /// avoiding a wrong link-count delta for rename's UNLINK half. Freeing a
+    /// now-zero-link inode at recovery is the remaining piece tracked in bd-w6fxn.
+    ///
+    /// Works uniformly for linear and htree directories: it scans every directory
+    /// block and removes from whichever leaf holds the name (the dx index maps
+    /// hash ranges to leaves and is unaffected by removing one entry from a leaf
+    /// that still exists). The dx_root block is skipped — its `..` record spans
+    /// the reserved tail, which a linear `remove_entry` would reject as corrupt
+    /// (mirroring [`Self::ext4_unlink_impl`]). Returns `Ok(true)` when the entry
+    /// was removed or is already absent (idempotent), `Ok(false)` if the parent
+    /// is not a directory.
+    fn apply_fast_commit_remove_dentry(
+        &self,
+        cx: &Cx,
+        dentry: &ffs_journal::FcDentry,
+    ) -> Result<bool, FfsError> {
+        let parent_ino = dentry.parent_ino;
+        let parent = self.read_inode(cx, InodeNumber(u64::from(parent_ino)))?;
+        if !parent.is_dir() {
+            return Ok(false);
+        }
+        // Idempotent: the unlink may also have been captured by JBD2 replay or a
+        // prior apply, leaving the name already absent.
+        if self.lookup_name(cx, &parent, &dentry.name)?.is_none() {
+            debug!(
+                parent_ino,
+                "fc_apply: UNLINK entry already absent — idempotent no-op"
+            );
+            return Ok(true);
+        }
+
+        let sb = self
+            .ext4_superblock()
+            .ok_or_else(|| FfsError::Format("not an ext4 filesystem".into()))?;
+        let block_size_u16 = sb.block_size;
+        let reserved_tail = self.ext4_dir_reserved_tail();
+        let extents = self.collect_extents(cx, &parent)?;
+        let dx_root_phys = Self::ext4_htree_dx_root_phys(&parent, &extents);
+        let block_dev = ByteDeviceBlockAdapter {
+            dev: &*self.dev,
+            block_size: block_size_u16,
+        };
+
+        for ext in &extents {
+            for block in Self::extent_phys_blocks(ext) {
+                if Some(block) == dx_root_phys {
+                    continue;
+                }
+                let mut data = self.read_block_vec(cx, block)?;
+                if ffs_dir::remove_entry(&mut data, &dentry.name, reserved_tail)? {
+                    self.stamp_ext4_dir_block(&mut data, parent_ino, parent.generation);
+                    block_dev.write_block(cx, block, &data)?;
+                    self.ext4_file_data_block_cache.lock().remove(&block);
+                    debug!(
+                        parent_ino,
+                        ino = dentry.ino,
+                        block = block.0,
+                        "fc_apply: UNLINK entry removed at recovery"
+                    );
+                    return Ok(true);
+                }
+            }
+        }
+        warn!(
+            parent_ino,
+            ino = dentry.ino,
+            "fc_apply: UNLINK entry not found in any directory block"
+        );
+        Ok(false)
     }
 
     /// Apply the fast-commit `DEL_RANGE` records (bd-w6fxn): punch each removed
@@ -54087,6 +54173,89 @@ mod tests {
         assert!(
             clean,
             "e2fsck must accept the image after a DEL_RANGE punch apply:\n{output}"
+        );
+    }
+
+    /// bd-w6fxn: a fast-committed UNLINK must, on recovery, remove the directory
+    /// entry so the unlinked name does not survive a crash. Validated for a
+    /// hard-linked file (links 2->1): the removed name disappears, the surviving
+    /// name still resolves, the link count is correct, and real e2fsck accepts
+    /// the image (the UNLINK pairs with an InodeUpdate carrying the new count,
+    /// exactly as the kernel records it).
+    #[test]
+    fn fast_commit_unlink_apply_removes_dir_entry_bd_w6fxn() {
+        let Some((fs, dev, _tmp, image)) = open_ext4_mke2fs(8, false) else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        // A file with two hard links: "a.dat" and "b.dat" (links_count == 2).
+        let attr = fs
+            .create(&cx, root, OsStr::new("a.dat"), 0o644, 0, 0)
+            .expect("create file");
+        fs.write(&cx, attr.ino, 0, &[0xCD_u8; 1024])
+            .expect("write file data");
+        fs.link(&cx, attr.ino, root, OsStr::new("b.dat"))
+            .expect("hard link b.dat");
+        fs.flush_mvcc_to_device(&cx).expect("flush mvcc");
+        let inode_size = usize::from(fs.ext4_superblock().expect("sb").inode_size);
+        let ino_u32 = u32::try_from(attr.ino.0).expect("ino fits u32");
+
+        // Reopen from_device (the real recovery context) and recover the UNLINK of
+        // "b.dat" together with the InodeUpdate dropping the count to 1.
+        let recov = std::sync::Arc::new(std::sync::Mutex::new(dev.snapshot_bytes()));
+        let fs2 = OpenFs::from_device(
+            &cx,
+            Box::new(TestDevice {
+                data: std::sync::Arc::clone(&recov),
+            }),
+            &OpenOptions::default(),
+        )
+        .expect("reopen from device");
+
+        let mut unlinked_inode = fs2.read_inode(&cx, attr.ino).expect("read inode");
+        assert_eq!(unlinked_inode.links_count, 2, "two links before unlink");
+        unlinked_inode.links_count = 1;
+        let inode_raw = ffs_inode::serialize_inode(&unlinked_inode, inode_size);
+        let ops = vec![
+            ffs_journal::FcOperation::Unlink(ffs_journal::FcDentry {
+                parent_ino: 2,
+                ino: ino_u32,
+                name: b"b.dat".to_vec(),
+            }),
+            ffs_journal::FcOperation::InodeUpdate(ino_u32, inode_raw),
+        ];
+        fs2.apply_fast_commit_operations(&cx, &ops, true)
+            .expect("apply fc unlink");
+
+        // (1) The unlinked name is gone; the surviving name still resolves.
+        let root_inode = fs2.read_inode(&cx, root).expect("read root");
+        assert!(
+            fs2.lookup_name(&cx, &root_inode, b"b.dat")
+                .expect("lookup b")
+                .is_none(),
+            "unlinked name b.dat must be gone"
+        );
+        let surviving = fs2
+            .lookup_name(&cx, &root_inode, b"a.dat")
+            .expect("lookup a")
+            .expect("a.dat must survive");
+        assert_eq!(surviving.inode, ino_u32, "a.dat still points at the inode");
+        assert_eq!(
+            fs2.read_inode(&cx, attr.ino).expect("re-read inode").links_count,
+            1,
+            "link count dropped to 1"
+        );
+
+        // (2) Consistency: real e2fsck must accept the image.
+        std::fs::write(&image, recov.lock().unwrap().clone()).expect("write recovered image");
+        let Some((clean, output)) = run_e2fsck(&image) else {
+            return;
+        };
+        assert!(
+            clean,
+            "e2fsck must accept the image after an UNLINK apply:\n{output}"
         );
     }
 
