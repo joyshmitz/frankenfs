@@ -51108,6 +51108,197 @@ mod tests {
         }
     }
 
+    // Randomized differential gauntlet for the full ext4 mutation surface
+    // (write / truncate / punch-hole / zero-range / collapse-range /
+    // insert-range) against a byte-exact in-memory model, on a real mkfs.ext4
+    // image. The curated `ext4_write_fallocate_interleave_matches_reference_model`
+    // exercises ONE fixed 12-step program; this explores random interleavings so
+    // the extent-tree-splicing modes (collapse/insert) meet states the fixed
+    // sequence never reaches. Each fallocate op is attempted and an EINVAL (an
+    // alignment/bounds combination that is invalid for the current file state) is
+    // skipped identically in fs and model — keeping them in lockstep — while any
+    // content/size divergence or unexpected error fails the case.
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(16))]
+        #[test]
+        fn ext4_write_fallocate_random_matches_reference_model(
+            ops in proptest::collection::vec(
+                (0u8..6, 0usize..200_000, 1usize..40_000, proptest::prelude::any::<u8>()),
+                1..40,
+            ),
+        ) {
+            let Some((fs, _tmp)) = open_writable_ext4_mkfs(64) else {
+                return Ok(()); // mkfs.ext4 unavailable — skip.
+            };
+            let cx = Cx::for_testing();
+            let attr = fs
+                .create(&cx, InodeNumber(2), OsStr::new("rand-meta.bin"), 0o644, 0, 0)
+                .expect("create");
+            let mut model: Vec<u8> = Vec::new();
+            const BS: usize = 4096;
+            const CAP: usize = 512 * 1024;
+            let align_down = |x: usize| x & !(BS - 1);
+
+            for (step, (kind, a, b, val)) in ops.into_iter().enumerate() {
+                let size = model.len();
+                // Attempt a fallocate op: update the model only when the fs
+                // accepts it; tolerate EINVAL (invalid for the current state) by
+                // skipping both; fail on any other error.
+                let do_falloc = |fs: &OpenFs,
+                                     model: &mut Vec<u8>,
+                                     off: usize,
+                                     len: usize,
+                                     mode: i32,
+                                     apply: &dyn Fn(&mut Vec<u8>)|
+                 -> Result<(), String> {
+                    match fs.fallocate(&cx, attr.ino, off as u64, len as u64, mode) {
+                        Ok(()) => {
+                            apply(model);
+                            Ok(())
+                        }
+                        // EINVAL (args invalid for the current state) or
+                        // EOPNOTSUPP (FrankenFS does not yet support this exact
+                        // shape, e.g. unaligned punch — tracked separately) are
+                        // skipped identically in fs and model. Anything else is a
+                        // real failure.
+                        Err(e)
+                            if e.to_errno() == libc::EINVAL
+                                || e.to_errno() == libc::EOPNOTSUPP =>
+                        {
+                            Ok(())
+                        }
+                        Err(e) => Err(format!("unexpected fallocate error at step {step}: {e}")),
+                    }
+                };
+
+                match kind {
+                    0 => {
+                        // Write.
+                        let off = a.min(CAP - 1);
+                        let len = b.min(CAP - off).max(1);
+                        let buf = vec![val; len];
+                        fs.write(&cx, attr.ino, off as u64, &buf).expect("write");
+                        if off + len > model.len() {
+                            model.resize(off + len, 0);
+                        }
+                        model[off..off + len].copy_from_slice(&buf);
+                    }
+                    1 => {
+                        // Truncate.
+                        let size_new = a % (CAP + 1);
+                        fs.setattr(
+                            &cx,
+                            attr.ino,
+                            &SetAttrRequest {
+                                size: Some(size_new as u64),
+                                ..Default::default()
+                            },
+                        )
+                        .expect("truncate");
+                        model.resize(size_new, 0);
+                    }
+                    2 if size >= BS => {
+                        // Punch hole (KEEP_SIZE), block-aligned within the file
+                        // (FrankenFS requires aligned punch — unaligned tracked
+                        // separately).
+                        let off = align_down(a % size);
+                        let maxlen = align_down(size - off);
+                        if maxlen >= BS {
+                            let len = (BS * (1 + (b % 8))).min(maxlen);
+                            let res = do_falloc(
+                                &fs,
+                                &mut model,
+                                off,
+                                len,
+                                libc::FALLOC_FL_KEEP_SIZE | libc::FALLOC_FL_PUNCH_HOLE,
+                                &|m| m[off..off + len].fill(0),
+                            );
+                            proptest::prop_assert!(res.is_ok(), "{}", res.unwrap_err());
+                        }
+                    }
+                    3 if size >= BS => {
+                        // Zero range, block-aligned within the file.
+                        let off = align_down(a % size);
+                        let maxlen = align_down(size - off);
+                        if maxlen >= BS {
+                            let len = (BS * (1 + (b % 8))).min(maxlen);
+                            let res = do_falloc(
+                                &fs,
+                                &mut model,
+                                off,
+                                len,
+                                libc::FALLOC_FL_ZERO_RANGE,
+                                &|m| m[off..off + len].fill(0),
+                            );
+                            proptest::prop_assert!(res.is_ok(), "{}", res.unwrap_err());
+                        }
+                    }
+                    4 if size >= 2 * BS => {
+                        // Collapse range (block-aligned, strictly inside file).
+                        let off = align_down(a % (size - BS));
+                        let len = BS * (1 + (b % 8));
+                        if off + len < size {
+                            let res = do_falloc(
+                                &fs,
+                                &mut model,
+                                off,
+                                len,
+                                libc::FALLOC_FL_COLLAPSE_RANGE,
+                                &|m| {
+                                    m.drain(off..off + len);
+                                },
+                            );
+                            proptest::prop_assert!(res.is_ok(), "{}", res.unwrap_err());
+                        }
+                    }
+                    5 if size >= BS => {
+                        // Insert range (block-aligned, offset inside file).
+                        let off = align_down(a % size);
+                        let len = BS * (1 + (b % 8));
+                        if off + len <= CAP {
+                            let res = do_falloc(
+                                &fs,
+                                &mut model,
+                                off,
+                                len,
+                                libc::FALLOC_FL_INSERT_RANGE,
+                                &|m| {
+                                    m.splice(off..off, std::iter::repeat_n(0_u8, len));
+                                },
+                            );
+                            proptest::prop_assert!(res.is_ok(), "{}", res.unwrap_err());
+                        }
+                    }
+                    _ => {}
+                }
+
+                // Verify size + full content against the model after every op.
+                let attr_now = fs.getattr(&cx, attr.ino).expect("getattr");
+                proptest::prop_assert_eq!(
+                    attr_now.size,
+                    model.len() as u64,
+                    "size mismatch after step {}",
+                    step
+                );
+                if model.is_empty() {
+                    continue;
+                }
+                let got = fs
+                    .read(&cx, attr.ino, 0, u32::try_from(model.len()).expect("fits u32"))
+                    .expect("read");
+                proptest::prop_assert_eq!(got.len(), model.len(), "read length mismatch");
+                let ndiff = (0..model.len()).filter(|&i| got[i] != model[i]).count();
+                proptest::prop_assert!(
+                    ndiff == 0,
+                    "content diverged after step {}: {} bytes differ (first at {})",
+                    step,
+                    ndiff,
+                    (0..model.len()).find(|&i| got[i] != model[i]).unwrap_or(0)
+                );
+            }
+        }
+    }
+
     #[test]
     fn write_fallocate_collapse_range_unaligned_returns_einval() {
         let Some(fs) = open_writable_ext4() else {
