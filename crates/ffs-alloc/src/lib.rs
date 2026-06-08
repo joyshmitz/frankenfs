@@ -2437,7 +2437,8 @@ pub fn alloc_inode_persist(
         parent_group
     };
 
-    if let Some(alloc) = try_alloc_inode_in_group_persist(cx, dev, geo, groups, target_group, pctx)?
+    if let Some(alloc) =
+        try_alloc_inode_in_group_persist(cx, dev, geo, groups, target_group, is_directory, pctx)?
     {
         return Ok(alloc);
     }
@@ -2450,7 +2451,7 @@ pub fn alloc_inode_persist(
             if g >= 0 && (g as u32) < geo.group_count {
                 let group = GroupNumber(g as u32);
                 if let Some(alloc) =
-                    try_alloc_inode_in_group_persist(cx, dev, geo, groups, group, pctx)?
+                    try_alloc_inode_in_group_persist(cx, dev, geo, groups, group, is_directory, pctx)?
                 {
                     return Ok(alloc);
                 }
@@ -2463,7 +2464,9 @@ pub fn alloc_inode_persist(
         if group == target_group {
             continue;
         }
-        if let Some(alloc) = try_alloc_inode_in_group_persist(cx, dev, geo, groups, group, pctx)? {
+        if let Some(alloc) =
+            try_alloc_inode_in_group_persist(cx, dev, geo, groups, group, is_directory, pctx)?
+        {
             return Ok(alloc);
         }
     }
@@ -2478,6 +2481,7 @@ fn try_alloc_inode_in_group_persist(
     geo: &FsGeometry,
     groups: &mut [GroupStats],
     group: GroupNumber,
+    is_directory: bool,
     pctx: &PersistCtx,
 ) -> Result<Option<InodeAlloc>> {
     let gidx = group.0 as usize;
@@ -2510,7 +2514,15 @@ fn try_alloc_inode_in_group_persist(
 
     bitmap_set(&mut bitmap, idx);
     dev.write_block(cx, bitmap_block, &bitmap)?;
+    let previous_used_dirs = groups[gidx].used_dirs;
     groups[gidx].free_inodes = groups[gidx].free_inodes.saturating_sub(1);
+    // ext4 tracks the number of directory inodes per group in
+    // `bg_used_dirs_count`; the Orlov allocator reads it for dir spreading and
+    // e2fsck verifies it against the actual directory count. Maintain it here so
+    // the persisted group descriptor stays consistent (bd-0y7jp).
+    if is_directory {
+        groups[gidx].used_dirs = groups[gidx].used_dirs.saturating_add(1);
+    }
 
     if let Err(error) = persist_group_desc_with_bitmap_overrides(
         cx,
@@ -2522,6 +2534,7 @@ fn try_alloc_inode_in_group_persist(
         Some(&bitmap),
     ) {
         groups[gidx].free_inodes = previous_free_inodes;
+        groups[gidx].used_dirs = previous_used_dirs;
         restore_bitmap_after_group_desc_error(
             cx,
             dev,
@@ -2622,6 +2635,7 @@ pub fn free_inode_persist(
     geo: &FsGeometry,
     groups: &mut [GroupStats],
     ino: InodeNumber,
+    is_dir: bool,
     pctx: &PersistCtx,
 ) -> Result<()> {
     if geo.inodes_per_group == 0 {
@@ -2688,7 +2702,13 @@ pub fn free_inode_persist(
 
     bitmap_clear(&mut bitmap, bit_idx);
     dev.write_block(cx, bitmap_block, &bitmap)?;
+    let previous_used_dirs = groups[gidx].used_dirs;
     groups[gidx].free_inodes = groups[gidx].free_inodes.saturating_add(1);
+    // Mirror the directory-count maintenance done on allocation: freeing a
+    // directory inode decrements `bg_used_dirs_count` for its group (bd-0y7jp).
+    if is_dir {
+        groups[gidx].used_dirs = groups[gidx].used_dirs.saturating_sub(1);
+    }
 
     if let Err(error) = persist_group_desc_with_bitmap_overrides(
         cx,
@@ -2700,6 +2720,7 @@ pub fn free_inode_persist(
         Some(&bitmap),
     ) {
         groups[gidx].free_inodes = previous_free_inodes;
+        groups[gidx].used_dirs = previous_used_dirs;
         restore_bitmap_after_group_desc_error(
             cx,
             dev,
@@ -3994,8 +4015,8 @@ mod tests {
         let initial_gdt_free = read_gdt_free_inodes(&cx, &dev, &pctx, GroupNumber(0));
         let failing = FailGdtWriteDevice::new(&dev, pctx.gdt_block);
 
-        let err =
-            free_inode_persist(&cx, &failing, &geo, &mut groups, alloc.ino, &pctx).unwrap_err();
+        let err = free_inode_persist(&cx, &failing, &geo, &mut groups, alloc.ino, false, &pctx)
+            .unwrap_err();
 
         assert!(matches!(err, FfsError::Io(_)));
         assert_eq!(groups[0].free_inodes, initial_free);

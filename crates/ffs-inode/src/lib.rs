@@ -297,14 +297,12 @@ pub fn create_inode(
     cx_checkpoint(cx)?;
 
     let is_dir = (mode & 0xF000) == file_type::S_IFDIR;
+    // `alloc_inode_persist` itself increments the allocated group's `used_dirs`
+    // (and persists it in the same group-descriptor write) when `is_dir`, so the
+    // on-disk `bg_used_dirs_count` stays consistent (bd-0y7jp). Do NOT increment
+    // again here — a second bump double-counts once a later same-group
+    // allocation flushes the in-memory value to disk.
     let alloc = ffs_alloc::alloc_inode_persist(cx, dev, geo, groups, parent_group, is_dir, pctx)?;
-
-    if is_dir {
-        let gidx = alloc.group.0 as usize;
-        if gidx < groups.len() {
-            groups[gidx].used_dirs = groups[gidx].used_dirs.saturating_add(1);
-        }
-    }
 
     // Read old generation from the on-disk inode slot so we can bump it.
     // This is the NFS-style generation counter: when an inode number is reused,
@@ -713,6 +711,11 @@ pub fn delete_inode(
 ) -> Result<()> {
     cx_checkpoint(cx)?;
 
+    // Capture the directory bit before the inode fields are zeroed below: ext4
+    // decrements the group's `bg_used_dirs_count` when a directory inode is
+    // freed (bd-0y7jp), and `free_inode_persist` needs to know which kind it is.
+    let is_dir = inode.is_dir();
+
     debug!(
         target: "ffs::inode::generation",
         ino = ino.0,
@@ -783,7 +786,7 @@ pub fn delete_inode(
     write_inode(cx, dev, geo, groups, ino, inode, csum_seed)?;
 
     // Free the inode in the bitmap.
-    ffs_alloc::free_inode_persist(cx, dev, geo, groups, ino, pctx)?;
+    ffs_alloc::free_inode_persist(cx, dev, geo, groups, ino, is_dir, pctx)?;
 
     Ok(())
 }

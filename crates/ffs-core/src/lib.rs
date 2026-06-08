@@ -44973,6 +44973,62 @@ mod tests {
         );
     }
 
+    /// bd-0y7jp: a block group's `bg_used_dirs_count` must stay correct as
+    /// directory inodes are created and freed, or e2fsck reports "Directories
+    /// count wrong for group #N". On the writable path the count was previously
+    /// never maintained — `alloc_inode_persist` used the `is_directory` hint only
+    /// for Orlov target-group selection and `free_inode_persist` ignored it — so
+    /// the persisted descriptor drifted from the actual directory count. The fix
+    /// increments the owning group's `used_dirs` on directory-inode allocation
+    /// and decrements it on free, in the same group-descriptor write.
+    ///
+    /// Uses a `^metadata_csum` image so the assertion isolates the directory-count
+    /// accounting from the separate writable-path directory-block-checksum gap
+    /// (bd-bribi). Creates many directories (Orlov spreads them across both 1 KiB
+    /// block groups), removes half, and creates/unlinks a plain file (which must
+    /// NOT touch `used_dirs`), then requires e2fsck to find no directory-count
+    /// mismatch.
+    #[test]
+    fn ext4_dir_count_maintained_passes_e2fsck_bd_0y7jp() {
+        let Some((fs, dev, _tmp, image)) = open_ext4_mke2fs(16, false) else {
+            return; // e2fsprogs unavailable
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        // 24 directories: Orlov dir-spreading places them across both block
+        // groups, exercising the per-group used_dirs increment in each.
+        for i in 0..24u32 {
+            fs.mkdir(&cx, root, OsStr::new(&format!("d{i:02}")), 0o755, 0, 0)
+                .expect("mkdir");
+        }
+        // Remove half (exercises the used_dirs decrement on the free path).
+        for i in (0..24u32).step_by(2) {
+            fs.rmdir(&cx, root, OsStr::new(&format!("d{i:02}")))
+                .expect("rmdir");
+        }
+        // A plain file create+unlink must NOT change any group's used_dirs.
+        let f = fs
+            .create(&cx, root, OsStr::new("plain.txt"), 0o644, 0, 0)
+            .expect("create");
+        fs.write(&cx, f.ino, 0, &[0xAB_u8; 2048]).expect("write");
+        fs.unlink(&cx, root, OsStr::new("plain.txt")).expect("unlink");
+
+        fs.flush_mvcc_to_device(&cx).expect("flush mvcc");
+        std::fs::write(&image, dev.snapshot_bytes()).expect("write image");
+        let Some((clean, output)) = run_e2fsck(&image) else {
+            return; // e2fsck unavailable
+        };
+        assert!(
+            !output.contains("Directories count wrong"),
+            "e2fsck must not report a directory-count mismatch after dir create/rmdir churn (bd-0y7jp):\n{output}"
+        );
+        assert!(
+            clean,
+            "e2fsck must accept the image after directory create/rmdir churn:\n{output}"
+        );
+    }
+
     fn open_writable_ext4_mkfs_with_incompat_features(
         size_mb: u64,
         incompat_bits: u32,
@@ -52902,14 +52958,19 @@ mod tests {
                 }
                 verify(&fs, &model, step)?;
             }
-            // NOTE: e2fsck of the resulting image is deferred — a writable ext4
-            // snapshot is currently e2fsck-dirty on ACCOUNTING TOTALS (superblock
-            // s_free_blocks_count / s_free_inodes_count and group bg_used_dirs_count
-            // are not maintained on the writable path; tracked in bd-nd61w). That
-            // is orthogonal to namespace correctness, which this test validates via
-            // the per-step readdir + lookup model match. Once the accounting totals
-            // are synced, add an e2fsck pass here to also cover `..`/link-count
-            // invariants under the rename churn.
+            // NOTE: a full e2fsck pass here is still deferred. The accounting-total
+            // gaps are now closed — superblock free totals (bd-nd61w) and group
+            // bg_used_dirs_count (bd-0y7jp) are maintained on the writable path —
+            // but enabling e2fsck on a metadata_csum image surfaced a SEPARATE
+            // pre-existing gap: directory data blocks written under the namespace
+            // churn fail their metadata_csum tail ("directory passes checks but
+            // fails checksum"), tracked in bd-bribi. Once that is fixed, switch
+            // this to open_writable_ext4_mkfs_with_device + flush + run_e2fsck to
+            // also cover `..`/link-count invariants under the rename churn. The
+            // per-step readdir + lookup model match above already validates
+            // namespace correctness, and the dedicated bd-0y7jp e2fsck test
+            // (ext4_dir_count_maintained_passes_e2fsck_bd_0y7jp) covers the
+            // directory-count accounting on a ^metadata_csum image.
         }
     }
 
@@ -56795,6 +56856,75 @@ mod tests {
         assert!(
             ok,
             "btrfs check must accept symlink/mknod/hardlink/setattr/rmdir metadata:\n{output}"
+        );
+    }
+
+    /// The ext4 analog of `btrfs_metadata_ops_pass_btrfs_check`: the same broad
+    /// set of metadata mutations must leave e2fsck-clean on-disk metadata. ext4
+    /// uses the OPPOSITE directory-nlink convention to btrfs (2 + subdir count),
+    /// so a wrong nlink / link-count would be flagged here.
+    #[test]
+    fn ext4_metadata_ops_pass_e2fsck() {
+        let Some((fs, dev, _tmp, image)) = open_ext4_mke2fs(16, false) else {
+            return; // e2fsprogs unavailable
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        fs.mkdir(&cx, root, OsStr::new("tmpdir"), 0o755, 0, 0)
+            .expect("mkdir");
+        fs.mkdir(&cx, root, OsStr::new("keepdir"), 0o755, 0, 0)
+            .expect("mkdir keepdir");
+        fs.rmdir(&cx, root, OsStr::new("tmpdir")).expect("rmdir");
+
+        fs.symlink(
+            &cx,
+            root,
+            OsStr::new("alink"),
+            std::path::Path::new("target/path"),
+            0,
+            0,
+        )
+        .expect("symlink");
+        fs.mknod(&cx, root, OsStr::new("afifo"), ffs_types::S_IFIFO | 0o644, 0, 0, 0)
+            .expect("mknod fifo");
+
+        let f = fs
+            .create(&cx, root, OsStr::new("file1"), 0o644, 0, 0)
+            .expect("create file1");
+        fs.write(&cx, f.ino, 0, b"hello").expect("write file1");
+        fs.link(&cx, f.ino, root, OsStr::new("file1hard"))
+            .expect("hard link");
+        fs.unlink(&cx, root, OsStr::new("file1"))
+            .expect("remove one link");
+
+        let g = fs
+            .create(&cx, root, OsStr::new("file2"), 0o644, 0, 0)
+            .expect("create file2");
+        fs.write(&cx, g.ino, 0, &[0xAB_u8; 8192]).expect("write file2");
+        fs.setattr(
+            &cx,
+            g.ino,
+            &SetAttrRequest {
+                mode: Some(0o600),
+                uid: Some(1000),
+                gid: Some(1000),
+                size: Some(4096),
+                mtime: Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000)),
+                ..Default::default()
+            },
+        )
+        .expect("setattr");
+
+        fs.flush_mvcc_to_device(&cx).expect("flush mvcc");
+        std::fs::write(&image, dev.snapshot_bytes()).expect("write modified image");
+
+        let Some((clean, output)) = run_e2fsck(&image) else {
+            return; // e2fsck unavailable
+        };
+        assert!(
+            clean,
+            "e2fsck must accept symlink/mknod/hardlink/setattr/rmdir metadata:\n{output}"
         );
     }
 
