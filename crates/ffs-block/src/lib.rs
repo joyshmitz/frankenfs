@@ -2245,8 +2245,6 @@ struct ArcState {
     access_count: HashMap<BlockNumber, Arc<S3AccessHandle>>,
     #[cfg(feature = "s3fifo")]
     fast_invalidations: Vec<BlockNumber>,
-    #[cfg(feature = "s3fifo")]
-    applied_s3_fast_hits: u64,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -2320,8 +2318,6 @@ impl ArcState {
             access_count: HashMap::new(),
             #[cfg(feature = "s3fifo")]
             fast_invalidations: Vec::new(),
-            #[cfg(feature = "s3fifo")]
-            applied_s3_fast_hits: 0,
         }
     }
 
@@ -4267,12 +4263,7 @@ impl<D: BlockDevice> ArcCache<D> {
 
     #[cfg(feature = "s3fifo")]
     fn apply_s3_fast_hit_scan_reset(&self, state: &mut ArcState) {
-        if !self.s3_fast_reset_pending.swap(false, Ordering::AcqRel) {
-            return;
-        }
-        let fast_hits = self.s3_fast_hits.total(Ordering::Acquire);
-        if state.applied_s3_fast_hits != fast_hits {
-            state.applied_s3_fast_hits = fast_hits;
+        if self.s3_fast_reset_pending.swap(false, Ordering::AcqRel) {
             state.reset_s3_read_scan_detector();
         }
     }
