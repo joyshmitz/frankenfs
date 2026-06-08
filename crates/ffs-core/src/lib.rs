@@ -18959,13 +18959,19 @@ impl OpenFs {
             .range(&ext_start, &ext_end)
             .map_err(|e| btrfs_mutation_to_ffs(&e))?
         {
-            if let BtrfsExtentData::Regular { num_bytes, .. } =
-                parse_extent_data(&edata).map_err(|e| parse_to_ffs_error(&e))?
-            {
-                total_nbytes = total_nbytes.checked_add(num_bytes).ok_or_else(|| {
-                    FfsError::InvalidGeometry("btrfs inode nbytes overflow".into())
-                })?;
-            }
+            // A regular extent contributes its logical length; an inline extent
+            // contributes its uncompressed length (ram_bytes). btrfs check
+            // verifies nbytes against the extent set — omitting the inline arm
+            // here leaves an inline-only file with nbytes=0 while size>0, which
+            // fails check with I_ERR_FILE_NBYTES_WRONG. This matches the inline
+            // accounting already used on the clone path (bd-5svhs).
+            let contribution = match parse_extent_data(&edata).map_err(|e| parse_to_ffs_error(&e))? {
+                BtrfsExtentData::Regular { num_bytes, .. } => num_bytes,
+                BtrfsExtentData::Inline { ram_bytes, .. } => ram_bytes,
+            };
+            total_nbytes = total_nbytes.checked_add(contribution).ok_or_else(|| {
+                FfsError::InvalidGeometry("btrfs inode nbytes overflow".into())
+            })?;
         }
         Ok(total_nbytes)
     }
@@ -55551,6 +55557,56 @@ mod tests {
         );
     }
 
+    /// bd-5svhs: a small file written inline (<= nodesize/2) must commit with
+    /// nbytes == its inline length, not 0. btrfs_recompute_inode_nbytes used to
+    /// sum only Regular extents, leaving an inline-only file with nbytes=0 while
+    /// size>0 — which fails btrfs check with I_ERR_FILE_NBYTES_WRONG. Asserts the
+    /// in-memory nbytes (tool-independent) and then validates with real btrfs
+    /// check when btrfs-progs is available.
+    #[test]
+    fn btrfs_inline_file_nbytes_passes_btrfs_check_bd_5svhs() {
+        let Some((fs, dev, _tmp, image)) = open_writable_btrfs_mkfs(256) else {
+            return; // btrfs-progs unavailable
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(u64::from(BTRFS_FIRST_FREE_OBJECTID));
+        let attr = fs
+            .create(&cx, root, OsStr::new("inline.txt"), 0o644, 0, 0)
+            .expect("create");
+        // Small payload -> inline extent (well under nodesize/2).
+        let data = b"hello inline world";
+        fs.write(&cx, attr.ino, 0, data).expect("inline write");
+
+        // The inline file's nbytes must equal its inline length, not 0.
+        {
+            let alloc_mutex = fs.require_btrfs_alloc_state().expect("alloc state");
+            let alloc = alloc_mutex.lock();
+            let canonical = fs.btrfs_canonical_inode(attr.ino).expect("canonical");
+            let inode = fs
+                .btrfs_read_inode_from_tree(&alloc, canonical)
+                .expect("read inode");
+            assert_eq!(inode.size, data.len() as u64, "inline file size");
+            assert_eq!(
+                inode.nbytes,
+                data.len() as u64,
+                "inline file nbytes must equal the inline length, not 0"
+            );
+        }
+
+        // Persist and validate with real btrfs check (catches nbytes-wrong).
+        let _ = fs.flush_mvcc_to_device(&cx);
+        fs.btrfs_full_transaction_commit(&cx, "inline-nbytes-check")
+            .expect("btrfs full transaction commit");
+        std::fs::write(&image, dev.snapshot_bytes()).expect("write modified image");
+        let Some((ok, output)) = run_btrfs_check(&image) else {
+            return; // btrfs check tool unavailable
+        };
+        assert!(
+            ok,
+            "btrfs check must accept a FrankenFS inline-write file (nbytes):\n{output}"
+        );
+    }
+
     /// bd-sialu: partial-range reflink of a COMPRESSED extent. The source extent
     /// is carved by view (extent_offset/num_bytes) while keeping the whole
     /// compressed blob (disk_bytenr/disk_num_bytes/ram_bytes/compression); the
@@ -59806,8 +59862,9 @@ mod tests {
             .unwrap();
         assert_eq!(before.size, 8);
         assert_eq!(
-            before.blocks, 0,
-            "inline-only payload should not consume regular-extent block accounting yet"
+            before.blocks, 1,
+            "an 8-byte inline payload counts its inline length toward nbytes \
+             (8 bytes -> 1 512B sector); see bd-5svhs"
         );
 
         ops.fallocate(
