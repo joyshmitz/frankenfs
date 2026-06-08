@@ -67205,6 +67205,68 @@ mod tests {
         }
     }
 
+    // Randomized differential gauntlet for the btrfs XATTR surface (set / remove
+    // across small and large values) against a byte-exact name->value model.
+    // btrfs stores xattrs as XATTR_ITEM entries keyed by name hash in the fs
+    // tree (a different layout from ext4's in-inode/external block). Each op is
+    // applied to the model only on success (out-of-room sets skip in lockstep),
+    // and after every op getxattr (incl. an absent name) + listxattr must match.
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(64))]
+        #[test]
+        fn btrfs_xattr_churn_matches_reference_model(
+            ops in proptest::collection::vec(
+                (0u8..3, 0usize..5, 1usize..1500, proptest::prelude::any::<u8>()),
+                1..25,
+            ),
+        ) {
+            let (fs, cx) = open_writable_btrfs();
+            let attr = fs
+                .create(&cx, InodeNumber(u64::from(BTRFS_FIRST_FREE_OBJECTID)), OsStr::new("xattr.bin"), 0o644, 0, 0)
+                .expect("create");
+            let ino = attr.ino;
+            let names = ["user.a", "user.b", "user.c", "user.d", "user.eee"];
+            let absent = "user.zzz_absent";
+            let mut model: std::collections::BTreeMap<&'static str, Vec<u8>> =
+                std::collections::BTreeMap::new();
+
+            for (step, (kind, nidx, vlen, vbyte)) in ops.into_iter().enumerate() {
+                let name = names[nidx];
+                if kind < 2 {
+                    let value = vec![vbyte; vlen];
+                    if fs.setxattr(&cx, ino, name, &value, XattrSetMode::Set).is_ok() {
+                        model.insert(name, value);
+                    }
+                } else if fs.removexattr(&cx, ino, name).unwrap_or(false) {
+                    model.remove(name);
+                }
+
+                let mut got_names: Vec<String> = fs.listxattr(&cx, ino).expect("listxattr");
+                got_names.sort();
+                let mut want_names: Vec<String> =
+                    model.keys().map(|s| (*s).to_owned()).collect();
+                want_names.sort();
+                proptest::prop_assert_eq!(got_names, want_names, "listxattr mismatch step {}", step);
+
+                for (n, v) in &model {
+                    let got = fs.getxattr(&cx, ino, n).expect("getxattr");
+                    proptest::prop_assert_eq!(
+                        got.as_deref(),
+                        Some(v.as_slice()),
+                        "getxattr value mismatch for {} step {}",
+                        n,
+                        step
+                    );
+                }
+                proptest::prop_assert!(
+                    fs.getxattr(&cx, ino, absent).expect("getxattr absent").is_none(),
+                    "absent xattr must read None step {}",
+                    step
+                );
+            }
+        }
+    }
+
     // Property-based metamorphic check of the btrfs file write/truncate path.
     // Random interleavings of write and truncate against a byte-exact in-memory
     // model explore the fragmented-extent / allocator-churn states that produced
