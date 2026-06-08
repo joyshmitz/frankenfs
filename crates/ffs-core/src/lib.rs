@@ -31520,6 +31520,58 @@ mod tests {
         );
     }
 
+    /// bd-6nwjx SAFETY: when the ADD_RANGE extents would overflow the single
+    /// leaf (forcing tree growth, which recovery cannot allocate for), the WHOLE
+    /// inode recovery is skipped ATOMICALLY — the inode is left at its pre-FC
+    /// state and no extents are half-applied (a partial apply would be an e2fsck
+    /// i_blocks mismatch). Guards the no-grow allocator's rollback path.
+    #[test]
+    fn fast_commit_external_grow_needed_skips_atomically_bd_6nwjx() {
+        let dev = TestDevice::from_vec(build_ext4_image_with_extents());
+        let cx = Cx::for_testing();
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default())
+            .expect("open ext4 image");
+        let ino = InodeNumber(12);
+        let before = fs.read_inode(&cx, ino).expect("read inode 12");
+        let inode_size = usize::from(fs.ext4_superblock().expect("sb").inode_size);
+
+        // FC inode grows the file; 500 ADD_RANGE ops far exceed any single leaf's
+        // capacity ((block_size - 12) / 12 <= 340), so the inserts overflow and
+        // need tree growth the no-grow allocator refuses.
+        let mut updated = before.clone();
+        updated.size = before.size.saturating_add(4096 * 600);
+        let inode_raw = ffs_inode::serialize_inode(&updated, inode_size);
+        let mut ops: Vec<ffs_journal::FcOperation> = (0..500_u32)
+            .map(|k| {
+                ffs_journal::FcOperation::AddRange(ffs_journal::FcExtentRange {
+                    ino: 12,
+                    logical_block: 1000 + k * 2,
+                    len: 1,
+                    physical_block: u64::from(50_000 + k),
+                    unwritten: false,
+                })
+            })
+            .collect();
+        ops.push(ffs_journal::FcOperation::InodeUpdate(12, inode_raw));
+        fs.apply_fast_commit_operations(&cx, &ops, true)
+            .expect("apply fc ops");
+
+        // Atomic skip: the inode is untouched (no partial recovery).
+        let after = fs.read_inode(&cx, ino).expect("re-read inode 12");
+        assert_eq!(
+            after.size, before.size,
+            "grow-needed FC recovery must skip atomically, leaving the inode at its pre-FC size"
+        );
+        // And none of the ADD_RANGE extents survived in the leaf (rolled back).
+        let extents = fs
+            .collect_extents_with_scope(&cx, &mut RequestScope::empty(), &after)
+            .expect("collect extents");
+        assert!(
+            !extents.iter().any(|e| e.logical_block >= 1000),
+            "no ADD_RANGE extent may survive a rolled-back grow-needed recovery, got {extents:?}"
+        );
+    }
+
     /// Build an open ext4 fs plus an InodeUpdate FC op that bumps the root
     /// inode's mtime — the shared setup for the dispatch + gating tests.
     #[cfg(test)]
