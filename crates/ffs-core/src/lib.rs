@@ -13,7 +13,7 @@ pub use degradation::{
 };
 pub use vfs::{
     BtrfsQgroupLimitRequest, BtrfsTreeSearchKey, DirEntry, FIEMAP_EXTENT_LAST,
-    FIEMAP_EXTENT_UNWRITTEN, FiemapExtent, FileCloneRange, FileType, FsOps, FsStat, FsxattrInfo,
+    FIEMAP_EXTENT_UNWRITTEN, FiemapExtent, FileType, FsOps, FsStat, FsxattrInfo,
     InodeAttr, QuotaEntry, QuotaInfo, QuotaType, ReleaseRequest, RequestOp, RequestScope,
     SeekWhence, SetAttrRequest, XattrSetMode, xflags,
 };
@@ -26217,26 +26217,23 @@ impl FsOps for OpenFs {
         &self,
         _cx: &Cx,
         _scope: &mut RequestScope,
-        _dest_fh: u64,
-        _src_fd: i32,
+        dest_ino: InodeNumber,
+        src_ino: InodeNumber,
     ) -> ffs_error::Result<()> {
         match &self.flavor {
-            FsFlavor::Ext4(_) => {
-                // ext4 doesn't support reflinks
-                Err(FfsError::UnsupportedFeature(
-                    "FICLONE is not supported on ext4 filesystems".to_owned(),
-                ))
-            }
+            FsFlavor::Ext4(_) => Err(FfsError::UnsupportedFeature(
+                "FICLONE is not supported on ext4 filesystems".to_owned(),
+            )),
             FsFlavor::Btrfs(_) => {
-                // btrfs reflink (extent sharing in the extent tree) is not yet
-                // implemented. The fs IS writable (require_btrfs_rw_allowed
-                // always succeeds since bd-jdo53), so the kernel-correct errno
-                // for an unsupported-but-writable operation is EOPNOTSUPP, not
-                // EROFS — `cp --reflink` then reports "operation not supported"
-                // rather than the misleading "read-only file system".
-                Err(FfsError::UnsupportedFeature(
-                    "FICLONE (btrfs reflink) is not yet implemented".to_owned(),
-                ))
+                // Reflink: share every src EXTENT_DATA into dst (refs++,
+                // EXTENT_DATA_REF backref, dst i_size = src i_size). FUSE has
+                // already resolved src_ino on the same device. bd-vh8p9.
+                self.require_btrfs_rw_allowed("clone_file")?;
+                let src_canonical = self.btrfs_canonical_inode(src_ino)?;
+                let dst_canonical = self.btrfs_canonical_inode(dest_ino)?;
+                let alloc_mutex = self.require_btrfs_alloc_state()?;
+                let mut alloc = alloc_mutex.lock();
+                self.btrfs_clone_file_data(&mut alloc, src_canonical, dst_canonical)
             }
         }
     }
@@ -26245,23 +26242,40 @@ impl FsOps for OpenFs {
         &self,
         _cx: &Cx,
         _scope: &mut RequestScope,
-        _dest_fh: u64,
-        _range: FileCloneRange,
+        dest_ino: InodeNumber,
+        src_ino: InodeNumber,
+        src_offset: u64,
+        src_length: u64,
+        dest_offset: u64,
     ) -> ffs_error::Result<()> {
         match &self.flavor {
-            FsFlavor::Ext4(_) => {
-                // ext4 doesn't support reflinks
-                Err(FfsError::UnsupportedFeature(
-                    "FICLONERANGE is not supported on ext4 filesystems".to_owned(),
-                ))
-            }
+            FsFlavor::Ext4(_) => Err(FfsError::UnsupportedFeature(
+                "FICLONERANGE is not supported on ext4 filesystems".to_owned(),
+            )),
             FsFlavor::Btrfs(_) => {
-                // btrfs reflink-range is not yet implemented; the fs is writable
-                // (bd-jdo53) so EOPNOTSUPP is the kernel-correct errno, not
-                // EROFS. See clone_file for the full rationale.
-                Err(FfsError::UnsupportedFeature(
-                    "FICLONERANGE (btrfs reflink) is not yet implemented".to_owned(),
-                ))
+                self.require_btrfs_rw_allowed("clone_file_range")?;
+                let src_canonical = self.btrfs_canonical_inode(src_ino)?;
+                let dst_canonical = self.btrfs_canonical_inode(dest_ino)?;
+                let alloc_mutex = self.require_btrfs_alloc_state()?;
+                let mut alloc = alloc_mutex.lock();
+                // Whole-file range (src_length == 0 means "to source EOF")
+                // reduces to a full reflink, which is btrfs-check-validated.
+                // True partial-range extent sharing (boundary-extent splitting
+                // at arbitrary offsets) is a follow-up; refuse it honestly
+                // rather than corrupt, so `cp --reflink` of a sub-range reports
+                // EOPNOTSUPP instead of producing a wrong image.
+                let src_size = self.btrfs_read_inode_from_tree(&alloc, src_canonical)?.size;
+                let whole_file =
+                    src_offset == 0 && dest_offset == 0 && (src_length == 0 || src_length >= src_size);
+                if whole_file {
+                    self.btrfs_clone_file_data(&mut alloc, src_canonical, dst_canonical)
+                } else {
+                    Err(FfsError::UnsupportedFeature(
+                        "partial-range btrfs reflink (FICLONERANGE) is not yet implemented; \
+                         whole-file clone is supported"
+                            .to_owned(),
+                    ))
+                }
             }
         }
     }
@@ -53095,36 +53109,178 @@ mod tests {
         }
     }
 
-    #[test]
-    fn btrfs_clone_unimplemented_reports_eopnotsupp_not_erofs() {
-        // btrfs reflink (FICLONE/FICLONERANGE) is not yet implemented, but the
-        // btrfs fs is writable (require_btrfs_rw_allowed always succeeds since
-        // bd-jdo53). The kernel-correct errno for an unsupported-but-writable
-        // operation is EOPNOTSUPP — NOT EROFS, which would falsely tell
-        // userspace (e.g. `cp --reflink`) the whole filesystem is read-only.
-        let (fs, cx) = open_writable_btrfs();
-        assert!(fs.is_writable(), "fixture must be a writable btrfs");
-        let mut scope = RequestScope::empty();
+    /// Locate the (disk_bytenr, disk_num_bytes) of a btrfs inode's first
+    /// regular data extent — for asserting refcounts after a reflink.
+    #[cfg(test)]
+    fn btrfs_first_regular_extent(fs: &OpenFs, canonical: u64) -> (u64, u64) {
+        let alloc_mutex = fs.btrfs_alloc_state.as_ref().expect("writable btrfs");
+        let alloc = alloc_mutex.lock();
+        let lo = BtrfsKey {
+            objectid: canonical,
+            item_type: BTRFS_ITEM_EXTENT_DATA,
+            offset: 0,
+        };
+        let hi = BtrfsKey {
+            objectid: canonical,
+            item_type: BTRFS_ITEM_EXTENT_DATA,
+            offset: u64::MAX,
+        };
+        let exts = alloc.fs_tree.range(&lo, &hi).expect("extents");
+        for (_, data) in exts {
+            if let BtrfsExtentData::Regular {
+                disk_bytenr,
+                disk_num_bytes,
+                ..
+            } = parse_extent_data(&data).expect("parse extent")
+                && disk_bytenr > 0
+            {
+                return (disk_bytenr, disk_num_bytes);
+            }
+        }
+        panic!("inode {canonical} has no regular data extent");
+    }
 
-        let err = <OpenFs as FsOps>::clone_file(&fs, &cx, &mut scope, 0, 0)
-            .expect_err("btrfs FICLONE is unimplemented");
+    /// bd-vh8p9: FsOps::clone_file (FICLONE) shares src's data extent into dst
+    /// (refs 1 -> 2) and dst reads back src's bytes through the shared extent.
+    #[test]
+    fn clone_file_ops_shares_extent_bd_vh8p9() {
+        let (fs, cx) = open_writable_btrfs();
+        let root = InodeNumber(u64::from(BTRFS_FIRST_FREE_OBJECTID));
+        let src = fs
+            .create(&cx, root, OsStr::new("src.dat"), 0o644, 0, 0)
+            .expect("create src");
+        let dst = fs
+            .create(&cx, root, OsStr::new("dst.dat"), 0o644, 0, 0)
+            .expect("create dst");
+        let payload = vec![0x5A_u8; 16384];
+        let fs_ops: &dyn FsOps = &fs;
+        fs_ops
+            .write(&cx, &mut RequestScope::empty(), src.ino, 0, &payload)
+            .expect("write src");
+
+        let src_canon = fs.btrfs_canonical_inode(src.ino).expect("src canon");
+        let (db, dn) = btrfs_first_regular_extent(&fs, src_canon);
+
+        fs_ops
+            .clone_file(&cx, &mut RequestScope::empty(), dst.ino, src.ino)
+            .expect("clone_file must succeed on writable btrfs");
+
+        // dst reads src's data through the shared extent.
+        let read = fs_ops
+            .read(&cx, &mut RequestScope::empty(), dst.ino, 0, 16384)
+            .expect("read dst");
+        assert_eq!(read, payload, "dst must read src's cloned data");
+
+        // The shared extent now has two references.
+        let alloc_mutex = fs.btrfs_alloc_state.as_ref().expect("writable btrfs");
+        let refs = alloc_mutex
+            .lock()
+            .extent_alloc
+            .extent_item_refs(db, dn)
+            .expect("refs");
+        assert_eq!(refs, Some(2), "reflink must bump the extent refcount to 2");
+    }
+
+    /// bd-vh8p9: clone_file_range over the whole file (src_length == 0 = to EOF)
+    /// reduces to a full reflink; a true sub-range is refused with EOPNOTSUPP
+    /// (honest, not a corrupt partial image).
+    #[test]
+    fn clone_file_range_whole_and_partial_bd_vh8p9() {
+        let (fs, cx) = open_writable_btrfs();
+        let root = InodeNumber(u64::from(BTRFS_FIRST_FREE_OBJECTID));
+        let src = fs
+            .create(&cx, root, OsStr::new("src.dat"), 0o644, 0, 0)
+            .expect("create src");
+        let dst = fs
+            .create(&cx, root, OsStr::new("dst.dat"), 0o644, 0, 0)
+            .expect("create dst");
+        let dst2 = fs
+            .create(&cx, root, OsStr::new("dst2.dat"), 0o644, 0, 0)
+            .expect("create dst2");
+        let payload = vec![0xC3_u8; 16384];
+        let fs_ops: &dyn FsOps = &fs;
+        fs_ops
+            .write(&cx, &mut RequestScope::empty(), src.ino, 0, &payload)
+            .expect("write src");
+
+        // Whole-file range (length 0 = to EOF) clones.
+        fs_ops
+            .clone_file_range(&cx, &mut RequestScope::empty(), dst.ino, src.ino, 0, 0, 0)
+            .expect("whole-file clone_file_range must succeed");
+        let read = fs_ops
+            .read(&cx, &mut RequestScope::empty(), dst.ino, 0, 16384)
+            .expect("read dst");
+        assert_eq!(read, payload, "whole-file range clone must share src data");
+
+        // A true sub-range is refused, not silently mis-cloned.
+        let err = fs_ops
+            .clone_file_range(&cx, &mut RequestScope::empty(), dst2.ino, src.ino, 4096, 4096, 0)
+            .expect_err("partial-range reflink must be refused");
         assert_eq!(
             err.to_errno(),
             libc::EOPNOTSUPP,
-            "FICLONE on writable btrfs must be EOPNOTSUPP, got {err:?}"
+            "partial range must report EOPNOTSUPP, got {err:?}"
         );
-        assert_ne!(err.to_errno(), libc::EROFS, "must not claim read-only fs");
+    }
 
-        let range = FileCloneRange {
-            src_fd: 0,
-            src_offset: 0,
-            src_length: 0,
-            dest_offset: 0,
+    /// bd-vh8p9 on-disk validation: a reflink performed through the public
+    /// FsOps::clone_file path produces a btrfs-check-clean image (refs 2, src +
+    /// dst both read the shared data). Skips without btrfs-progs.
+    #[test]
+    fn clone_file_ops_passes_btrfs_check_bd_vh8p9() {
+        let Some((fs, dev, _tmp, image)) = open_writable_btrfs_mkfs(256) else {
+            return;
         };
-        let err2 = <OpenFs as FsOps>::clone_file_range(&fs, &cx, &mut scope, 0, range)
-            .expect_err("btrfs FICLONERANGE is unimplemented");
-        assert_eq!(err2.to_errno(), libc::EOPNOTSUPP);
-        assert_ne!(err2.to_errno(), libc::EROFS);
+        let cx = Cx::for_testing();
+        let root = InodeNumber(u64::from(BTRFS_FIRST_FREE_OBJECTID));
+        let src = fs
+            .create(&cx, root, OsStr::new("src.dat"), 0o644, 0, 0)
+            .expect("create src");
+        let dst = fs
+            .create(&cx, root, OsStr::new("dst.dat"), 0o644, 0, 0)
+            .expect("create dst");
+        let payload = vec![0xA7_u8; 16384];
+        let fs_ops: &dyn FsOps = &fs;
+        fs_ops
+            .write(&cx, &mut RequestScope::empty(), src.ino, 0, &payload)
+            .expect("write src");
+        fs_ops
+            .clone_file(&cx, &mut RequestScope::empty(), dst.ino, src.ino)
+            .expect("clone_file");
+
+        let _ = fs.flush_mvcc_to_device(&cx);
+        fs.btrfs_full_transaction_commit(&cx, "vh8p9-clone-file-check")
+            .expect("commit");
+        let bytes = dev.snapshot_bytes();
+        std::fs::write(&image, &bytes).expect("write image");
+
+        let Some((ok, output)) = run_btrfs_check(&image) else {
+            return;
+        };
+        assert!(ok, "btrfs check must accept the reflinked image:\n{output}");
+
+        let dst_back = fs_ops
+            .read(&cx, &mut RequestScope::empty(), dst.ino, 0, 16384)
+            .expect("read dst");
+        assert_eq!(dst_back, payload, "dst reads src's data post-check");
+    }
+
+    /// bd-vh8p9: ext4 has no reflink — clone_file reports EOPNOTSUPP.
+    #[test]
+    fn clone_file_ext4_reports_eopnotsupp_bd_vh8p9() {
+        let dev = TestDevice::from_vec(build_ext4_image(2));
+        let cx = Cx::for_testing();
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default())
+            .expect("open ext4");
+        let err = <OpenFs as FsOps>::clone_file(
+            &fs,
+            &cx,
+            &mut RequestScope::empty(),
+            InodeNumber(2),
+            InodeNumber(2),
+        )
+        .expect_err("ext4 has no reflink");
+        assert_eq!(err.to_errno(), libc::EOPNOTSUPP);
     }
 
     /// Regression: a corrupted ext4 superblock advertising blocks_count
