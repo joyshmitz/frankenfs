@@ -17092,7 +17092,55 @@ impl OpenFs {
         Ok(())
     }
 
-    #[allow(clippy::too_many_lines)] // preflight share-check + materialize/re-insert loop
+    /// Refcount-aware data-extent free (bd-xkvcm). If the extent is SHARED
+    /// (`EXTENT_ITEM.refs > 1`: reflink / snapshot / CoW) drop only the calling
+    /// inode's `EXTENT_DATA_REF` (refs N -> N-1) via `remove_data_extent_ref`,
+    /// leaving the space and its csums live for the remaining references. A sole
+    /// reference (refs == 1, or no EXTENT_ITEM) frees the space and — when
+    /// `remove_csums` — its csum items, as before. `ref_offset` is the backref
+    /// key offset (`file_offset - extent_offset`, the `add_data_extent_ref`
+    /// convention). Used by every data-extent free path (purge inlines the same
+    /// classification): delete, overwrite-split, punch/collapse/insert.
+    fn btrfs_free_or_drop_extent_ref(
+        alloc: &mut BtrfsAllocState,
+        disk_bytenr: u64,
+        disk_num_bytes: u64,
+        objectid: u64,
+        ref_offset: u64,
+        remove_csums: bool,
+    ) -> ffs_error::Result<()> {
+        if disk_bytenr == 0 {
+            return Ok(());
+        }
+        let refs = alloc
+            .extent_alloc
+            .extent_item_refs(disk_bytenr, disk_num_bytes)
+            .map_err(|e| btrfs_mutation_to_ffs(&e))?
+            .unwrap_or(1);
+        if refs > 1 {
+            alloc
+                .extent_alloc
+                .remove_data_extent_ref(
+                    disk_bytenr,
+                    disk_num_bytes,
+                    BTRFS_FS_TREE_OBJECTID,
+                    objectid,
+                    ref_offset,
+                )
+                .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+        } else {
+            alloc
+                .extent_alloc
+                .free_extent(disk_bytenr, disk_num_bytes, false)
+                .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+            if remove_csums {
+                Self::btrfs_remove_extent_csums(alloc, disk_bytenr, disk_num_bytes)?;
+            }
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_lines)] // materialize/re-insert loop
     fn btrfs_remove_overlapping_extent_data(
         &self,
         cx: &Cx,
@@ -17120,48 +17168,13 @@ impl OpenFs {
             .range(&ext_start, &ext_end)
             .map_err(|e| btrfs_mutation_to_ffs(&e))?;
 
-        // SAFETY PREFLIGHT (bd-xkvcm): the loop below frees overlapping data
-        // extents via the non-refcount-aware free_extent. Freeing a SHARED data
-        // extent (EXTENT_ITEM refs > 1: reflink/snapshot/CoW) would orphan the
-        // other references = corruption. Because this routine mutates in place
-        // (delete + free + re-insert per extent), refuse UPFRONT — before any
-        // mutation — if any overlapping extent is shared, so the file is left
-        // untouched rather than half-rewritten. FrankenFS's own extents are
-        // refs == 1, so this never triggers on FrankenFS-written files.
-        for (key, extent_bytes) in &extents {
-            let extent = parse_extent_data(extent_bytes).map_err(|e| parse_to_ffs_error(&e))?;
-            let logical_len = Self::btrfs_extent_logical_len(&extent)?;
-            let logical_end = key
-                .offset
-                .checked_add(logical_len)
-                .ok_or_else(|| FfsError::InvalidGeometry("extent logical end overflow".into()))?;
-            if key.offset.max(range_start) >= logical_end.min(range_end) {
-                continue; // no overlap with the modified range
-            }
-            if let BtrfsExtentData::Regular {
-                disk_bytenr,
-                disk_num_bytes,
-                ..
-            } = extent
-            {
-                if disk_bytenr > 0 {
-                    if let Some(refs) = alloc
-                        .extent_alloc
-                        .extent_item_refs(disk_bytenr, disk_num_bytes)
-                        .map_err(|e| btrfs_mutation_to_ffs(&e))?
-                    {
-                        if refs > 1 {
-                            return Err(FfsError::UnsupportedFeature(format!(
-                                "cannot modify inode {canonical}: overlapping data extent \
-                                 {disk_bytenr} is shared ({refs} references: reflink/snapshot); \
-                                 refcount-aware extent free is not yet implemented (bd-xkvcm)"
-                            )));
-                        }
-                    }
-                }
-            }
-        }
-
+        // Each overlapping extent is freed refcount-aware (bd-xkvcm): a SHARED
+        // extent (reflink/snapshot/CoW, EXTENT_ITEM.refs > 1) has only this
+        // inode's EXTENT_DATA_REF dropped — the left/right non-overlapping parts
+        // are re-inserted below as fresh materialized copies, so this inode no
+        // longer needs the shared extent and the other references stay live. A
+        // sole reference (refs == 1) is freed as before. FrankenFS's own extents
+        // are refs == 1, so the drop path only engages on kernel-shared extents.
         for (key, extent_bytes) in extents {
             let extent = parse_extent_data(&extent_bytes).map_err(|e| parse_to_ffs_error(&e))?;
             let logical_len = Self::btrfs_extent_logical_len(&extent)?;
@@ -17183,15 +17196,25 @@ impl OpenFs {
             if let BtrfsExtentData::Regular {
                 disk_bytenr,
                 disk_num_bytes,
+                extent_offset,
                 ..
             } = extent
             {
                 if disk_bytenr > 0 {
-                    alloc
-                        .extent_alloc
-                        .free_extent(disk_bytenr, disk_num_bytes, false)
-                        .map_err(|e| btrfs_mutation_to_ffs(&e))?;
-                    Self::btrfs_remove_extent_csums(alloc, disk_bytenr, disk_num_bytes)?;
+                    let ref_offset = key.offset.checked_sub(extent_offset).ok_or_else(|| {
+                        FfsError::Corruption {
+                            block: disk_bytenr,
+                            detail: "overwrite free: extent_offset exceeds EXTENT_DATA offset".into(),
+                        }
+                    })?;
+                    Self::btrfs_free_or_drop_extent_ref(
+                        alloc,
+                        disk_bytenr,
+                        disk_num_bytes,
+                        canonical,
+                        ref_offset,
+                        true,
+                    )?;
                 }
             }
 
@@ -17250,33 +17273,12 @@ impl OpenFs {
         alloc: &mut BtrfsAllocState,
         extents: &[(BtrfsKey, BtrfsExtentData)],
     ) -> ffs_error::Result<()> {
-        // SAFETY PREFLIGHT (bd-xkvcm): refuse before any mutation if any of these
-        // extents is SHARED (EXTENT_ITEM refs > 1: reflink/snapshot/CoW). The
-        // free_extent below is not refcount-aware and would orphan the other
-        // references = corruption. The slice is already collected, so this scan
-        // is read-only and the refusal is atomic (no partial rewrite).
-        for (key, extent) in extents {
-            if let BtrfsExtentData::Regular {
-                disk_bytenr,
-                disk_num_bytes,
-                ..
-            } = extent
-                && *disk_bytenr > 0
-                && let Some(refs) = alloc
-                    .extent_alloc
-                    .extent_item_refs(*disk_bytenr, *disk_num_bytes)
-                    .map_err(|e| btrfs_mutation_to_ffs(&e))?
-                && refs > 1
-            {
-                return Err(FfsError::UnsupportedFeature(format!(
-                    "cannot modify inode {}: data extent {} is shared ({} references: \
-                     reflink/snapshot); refcount-aware extent free is not yet implemented \
-                     (bd-xkvcm)",
-                    key.objectid, disk_bytenr, refs
-                )));
-            }
-        }
-
+        // Each removed extent is freed refcount-aware (bd-xkvcm): a SHARED extent
+        // (reflink/snapshot/CoW, EXTENT_ITEM.refs > 1) has only this inode's
+        // EXTENT_DATA_REF dropped (refs N -> N-1), leaving the space live for the
+        // remaining references; a sole reference (refs == 1) is freed as before.
+        // FrankenFS's own extents are refs == 1, so the drop path only engages on
+        // kernel-shared extents.
         for (key, extent) in extents {
             alloc
                 .fs_tree
@@ -17285,14 +17287,25 @@ impl OpenFs {
             if let BtrfsExtentData::Regular {
                 disk_bytenr,
                 disk_num_bytes,
+                extent_offset,
                 ..
             } = extent
                 && *disk_bytenr > 0
             {
-                alloc
-                    .extent_alloc
-                    .free_extent(*disk_bytenr, *disk_num_bytes, false)
-                    .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+                let ref_offset = key.offset.checked_sub(*extent_offset).ok_or_else(|| {
+                    FfsError::Corruption {
+                        block: *disk_bytenr,
+                        detail: "delete-items free: extent_offset exceeds EXTENT_DATA offset".into(),
+                    }
+                })?;
+                Self::btrfs_free_or_drop_extent_ref(
+                    alloc,
+                    *disk_bytenr,
+                    *disk_num_bytes,
+                    key.objectid,
+                    ref_offset,
+                    false,
+                )?;
             }
         }
         Ok(())
@@ -52583,6 +52596,86 @@ mod tests {
         assert_eq!(read_back, payload, "src data must survive dst deletion");
     }
 
+    /// bd-xkvcm on-disk validation: after reflinking src -> dst (shared extent)
+    /// and then OVERWRITING part of dst, real `btrfs check` must report the image
+    /// clean — the overwrite dropped only dst's reference to the shared extent
+    /// (refs 2 -> 1) and gave dst fresh copies of the untouched head/tail — and
+    /// src must still read its original data while dst reads the overwritten
+    /// bytes. Uses a REAL reflink (unlike the in-memory drop tests' synthetic
+    /// refs bump), so it validates on-disk backref consistency. Skips without
+    /// btrfs-progs.
+    #[test]
+    fn btrfs_overwrite_shared_extent_passes_btrfs_check_bd_xkvcm() {
+        let Some((fs, dev, _tmp, image)) = open_writable_btrfs_mkfs(256) else {
+            return; // btrfs-progs unavailable
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(u64::from(BTRFS_FIRST_FREE_OBJECTID));
+
+        let src = fs
+            .create(&cx, root, OsStr::new("src.dat"), 0o644, 0, 0)
+            .expect("create src");
+        let dst = fs
+            .create(&cx, root, OsStr::new("dst.dat"), 0o644, 0, 0)
+            .expect("create dst");
+        let payload = vec![0xA7_u8; 16384];
+        let fs_ops: &dyn FsOps = &fs;
+        fs_ops
+            .write(&cx, &mut RequestScope::empty(), src.ino, 0, &payload)
+            .expect("write src");
+
+        let src_canon = fs.btrfs_canonical_inode(src.ino).expect("src canonical");
+        let dst_canon = fs.btrfs_canonical_inode(dst.ino).expect("dst canonical");
+        {
+            let alloc_mutex = fs.btrfs_alloc_state.as_ref().expect("writable btrfs");
+            let mut alloc = alloc_mutex.lock();
+            fs.btrfs_clone_file_data(&mut alloc, src_canon, dst_canon)
+                .expect("clone src into dst");
+        }
+
+        // Overwrite a middle slice of dst: the refcount-aware free drops dst's
+        // reference to the shared extent (refs 2 -> 1), leaving src's live.
+        let overwrite = vec![0x5E_u8; 4096];
+        fs_ops
+            .write(&cx, &mut RequestScope::empty(), dst.ino, 4096, &overwrite)
+            .expect("overwrite dst middle");
+
+        let _ = fs.flush_mvcc_to_device(&cx);
+        fs.btrfs_full_transaction_commit(&cx, "xkvcm-overwrite-check")
+            .expect("btrfs full transaction commit");
+        let bytes = dev.snapshot_bytes();
+        std::fs::write(&image, &bytes).expect("write modified image");
+
+        let Some((ok, output)) = run_btrfs_check(&image) else {
+            return; // btrfs check tool unavailable
+        };
+        assert!(
+            ok,
+            "btrfs check must accept the image after overwriting one sharer of a \
+             reflinked extent:\n{output}"
+        );
+
+        // src still reads its original data through the surviving extent.
+        let src_back = fs_ops
+            .read(
+                &cx,
+                &mut RequestScope::empty(),
+                src.ino,
+                0,
+                u32::try_from(payload.len()).unwrap(),
+            )
+            .expect("read src");
+        assert_eq!(src_back, payload, "src data must survive dst overwrite");
+
+        // dst reads the overwritten middle with intact head/tail.
+        let dst_back = fs_ops
+            .read(&cx, &mut RequestScope::empty(), dst.ino, 0, 16384)
+            .expect("read dst");
+        assert_eq!(&dst_back[0..4096], &[0xA7_u8; 4096], "dst head intact");
+        assert_eq!(&dst_back[4096..8192], &[0x5E_u8; 4096], "dst overwritten region");
+        assert_eq!(&dst_back[8192..16384], &[0xA7_u8; 8192], "dst tail intact");
+    }
+
     /// Phase-B probe (TealFalcon): now that a single small datasum file is
     /// btrfs-check-clean, map which MORE COMPLEX btrfs mutation sequences still
     /// produce a kernel-valid image. Prints the `btrfs check` verdict for each
@@ -59081,105 +59174,48 @@ mod tests {
         );
     }
 
-    /// bd-xkvcm: OVERWRITING (partial write over) a SHARED data extent must also
-    /// be refused — atomically, before any mutation — so the other reference is
-    /// not corrupted and the file is left byte-for-byte intact. Covers the
-    /// btrfs_remove_overlapping_extent_data path (the delete-path guard does not
-    /// cover overwrite).
+    /// bd-xkvcm: OVERWRITING (partial write over) a SHARED data extent drops only
+    /// this inode's reference (refs 2 -> 1) instead of freeing the still-shared
+    /// extent — the overwritten inode keeps fresh copies of the untouched
+    /// head/tail. Covers the btrfs_remove_overlapping_extent_data path. On-disk
+    /// backref consistency is proven separately by
+    /// btrfs_overwrite_shared_extent_passes_btrfs_check_bd_xkvcm (real reflink).
     #[test]
-    fn btrfs_overwrite_refuses_shared_extent_bd_xkvcm() {
+    fn btrfs_overwrite_drops_shared_extent_ref_bd_xkvcm() {
         let (fs, cx) = open_writable_btrfs();
         let ops: &dyn FsOps = &fs;
+        let (ino, _original, disk_bytenr, disk_num_bytes) =
+            btrfs_make_shared_extent_file(&fs, &cx, "shared_ow.bin");
 
-        let attr = ops
-            .create(
-                &cx,
-                &mut RequestScope::empty(),
-                InodeNumber(1),
-                OsStr::new("shared_ow.bin"),
-                0o644,
-                0,
-                0,
-            )
-            .unwrap();
-        let original = vec![0x5A_u8; 8192];
-        ops.write(&cx, &mut RequestScope::empty(), attr.ino, 0, &original)
-            .unwrap();
-        let canonical = fs.btrfs_canonical_inode(attr.ino).unwrap();
+        // A partial overwrite into the shared extent now succeeds.
+        ops.write(&cx, &mut RequestScope::empty(), ino, 4096, &[0xFF_u8; 2048])
+            .expect("overwriting a shared extent must succeed (drop, not refuse)");
 
-        // Bump the file's data extent EXTENT_ITEM refcount to 2 (shared).
-        {
-            let alloc_mutex = fs.btrfs_alloc_state.as_ref().expect("btrfs alloc state");
-            let mut alloc = alloc_mutex.lock();
-            let start = BtrfsKey {
-                objectid: canonical,
-                item_type: BTRFS_ITEM_EXTENT_DATA,
-                offset: 0,
-            };
-            let end = BtrfsKey {
-                objectid: canonical,
-                item_type: BTRFS_ITEM_EXTENT_DATA,
-                offset: u64::MAX,
-            };
-            let (_, data) = alloc
-                .fs_tree
-                .range(&start, &end)
-                .unwrap()
-                .into_iter()
-                .next()
-                .expect("file has an extent");
-            let (disk_bytenr, disk_num_bytes) = match parse_extent_data(&data).unwrap() {
-                BtrfsExtentData::Regular {
-                    disk_bytenr,
-                    disk_num_bytes,
-                    ..
-                } => (disk_bytenr, disk_num_bytes),
-                other => panic!("expected a regular extent, got {other:?}"),
-            };
-            let ei_key = BtrfsKey {
-                objectid: disk_bytenr,
-                item_type: ffs_btrfs::BTRFS_ITEM_EXTENT_ITEM,
-                offset: disk_num_bytes,
-            };
-            let mut ei_data = alloc
-                .extent_alloc
-                .extent_tree_mut()
-                .range(&ei_key, &ei_key)
-                .unwrap()
-                .into_iter()
-                .next()
-                .expect("EXTENT_ITEM present")
-                .1;
-            ei_data[0..8].copy_from_slice(&2u64.to_le_bytes());
-            alloc.extent_alloc.extent_tree_mut().delete(&ei_key).unwrap();
-            alloc
-                .extent_alloc
-                .extent_tree_mut()
-                .insert(ei_key, &ei_data)
-                .unwrap();
-        }
+        // The shared extent kept refs == 1 (dropped, not freed outright).
+        assert_extent_refs_dropped_to_one(&fs, disk_bytenr, disk_num_bytes);
 
-        // A partial overwrite into the shared extent must be refused.
-        let err = ops
-            .write(&cx, &mut RequestScope::empty(), attr.ino, 4096, &[0xFF_u8; 2048])
-            .expect_err("overwriting a shared extent must be refused");
-        assert!(
-            matches!(err, FfsError::UnsupportedFeature(_)),
-            "expected UnsupportedFeature for shared-extent overwrite, got {err:?}"
-        );
-
-        // The file must be byte-for-byte intact (atomic refusal, no partial write).
+        // The overwritten region reads back the new bytes; the rest is intact.
         let read = ops
-            .read(&cx, &mut RequestScope::empty(), attr.ino, 0, 8192)
+            .read(&cx, &mut RequestScope::empty(), ino, 0, 8192)
             .unwrap();
-        assert_eq!(read, original, "refused overwrite must leave the file untouched");
+        assert_eq!(&read[0..4096], &[0x5A_u8; 4096], "head untouched");
+        assert_eq!(&read[4096..6144], &[0xFF_u8; 2048], "overwritten region");
+        assert_eq!(&read[6144..8192], &[0x5A_u8; 2048], "tail untouched");
     }
 
     /// Test helper: create a btrfs file with an 8 KiB regular data extent and
     /// force its EXTENT_ITEM refcount to 2 (simulating a reflink/snapshot
-    /// sharing the extent). Returns the file inode. Used by the bd-xkvcm
-    /// shared-extent refusal tests.
-    fn btrfs_make_shared_extent_file(fs: &OpenFs, cx: &Cx, name: &str) -> (InodeNumber, Vec<u8>) {
+    /// sharing the extent). Returns (inode, original bytes, disk_bytenr,
+    /// disk_num_bytes) — the last two locate the shared EXTENT_ITEM so a test
+    /// can assert the refcount dropped to 1 (drop, not free). NOTE: this only
+    /// bumps refs without a second backref, so it validates the in-memory
+    /// drop/free DECISION, not on-disk backref consistency — the latter needs a
+    /// real reflink fixture (see btrfs_overwrite_shared_extent_passes_btrfs_check).
+    fn btrfs_make_shared_extent_file(
+        fs: &OpenFs,
+        cx: &Cx,
+        name: &str,
+    ) -> (InodeNumber, Vec<u8>, u64, u64) {
         let ops: &dyn FsOps = fs;
         let attr = ops
             .create(
@@ -59196,7 +59232,7 @@ mod tests {
         ops.write(cx, &mut RequestScope::empty(), attr.ino, 0, &original)
             .unwrap();
         let canonical = fs.btrfs_canonical_inode(attr.ino).unwrap();
-        {
+        let (disk_bytenr, disk_num_bytes) = {
             let alloc_mutex = fs.btrfs_alloc_state.as_ref().expect("btrfs alloc state");
             let mut alloc = alloc_mutex.lock();
             let start = BtrfsKey {
@@ -59245,75 +59281,75 @@ mod tests {
                 .extent_tree_mut()
                 .insert(ei_key, &ei_data)
                 .unwrap();
-        }
-        (attr.ino, original)
+            (disk_bytenr, disk_num_bytes)
+        };
+        (attr.ino, original, disk_bytenr, disk_num_bytes)
     }
 
-    /// bd-xkvcm: fallocate PUNCH_HOLE over a SHARED data extent must be refused
-    /// (atomically, file intact). This exercises the third guard function —
-    /// btrfs_delete_extent_data_items (via btrfs_fallocate ->
-    /// btrfs_rewrite_extent_data_segments) — which the delete and overwrite
-    /// tests do not cover.
+    /// Assert the EXTENT_ITEM at (disk_bytenr, disk_num_bytes) now has refs == 1
+    /// — i.e. the shared-extent free DROPPED this inode's reference rather than
+    /// freeing the whole extent (which would delete the EXTENT_ITEM -> None).
+    fn assert_extent_refs_dropped_to_one(fs: &OpenFs, disk_bytenr: u64, disk_num_bytes: u64) {
+        let alloc_mutex = fs.btrfs_alloc_state.as_ref().expect("btrfs alloc state");
+        let alloc = alloc_mutex.lock();
+        let refs = alloc
+            .extent_alloc
+            .extent_item_refs(disk_bytenr, disk_num_bytes)
+            .expect("read EXTENT_ITEM refs");
+        assert_eq!(
+            refs,
+            Some(1),
+            "shared-extent free must DROP this inode's ref (refs 2 -> 1), not free the extent"
+        );
+    }
+
+    /// bd-xkvcm: fallocate PUNCH_HOLE over a SHARED data extent drops only this
+    /// inode's reference (refs 2 -> 1) — the punched region reads zero, the rest
+    /// stays intact. Exercises the btrfs_delete_extent_data_items path (via
+    /// btrfs_fallocate -> btrfs_rewrite_extent_data_segments).
     #[test]
-    fn btrfs_punch_hole_refuses_shared_extent_bd_xkvcm() {
+    fn btrfs_punch_hole_drops_shared_extent_ref_bd_xkvcm() {
         let (fs, cx) = open_writable_btrfs();
         let ops: &dyn FsOps = &fs;
-        let (ino, original) = btrfs_make_shared_extent_file(&fs, &cx, "shared_punch.bin");
+        let (ino, _original, disk_bytenr, disk_num_bytes) =
+            btrfs_make_shared_extent_file(&fs, &cx, "shared_punch.bin");
 
         // PUNCH_HOLE | KEEP_SIZE over a sector-aligned range inside the extent.
-        let err = ops
-            .fallocate(&cx, &mut RequestScope::empty(), ino, 4096, 4096, 0x02 | 0x01)
-            .expect_err("punch_hole on a shared extent must be refused");
-        assert!(
-            matches!(err, FfsError::UnsupportedFeature(_)),
-            "expected UnsupportedFeature for shared-extent punch_hole, got {err:?}"
-        );
+        ops.fallocate(&cx, &mut RequestScope::empty(), ino, 4096, 4096, 0x02 | 0x01)
+            .expect("punch_hole on a shared extent must succeed (drop, not refuse)");
 
-        // File untouched.
+        assert_extent_refs_dropped_to_one(&fs, disk_bytenr, disk_num_bytes);
+
         let read = ops
             .read(&cx, &mut RequestScope::empty(), ino, 0, 8192)
             .unwrap();
-        assert_eq!(read, original, "refused punch_hole must leave the file untouched");
+        assert_eq!(&read[0..4096], &[0x5A_u8; 4096], "head before the hole intact");
+        assert_eq!(&read[4096..8192], &[0u8; 4096], "punched region reads zero");
     }
 
     /// bd-xkvcm: fallocate COLLAPSE_RANGE and INSERT_RANGE over a SHARED data
-    /// extent must be refused ATOMICALLY. These shift the whole file tail (free +
-    /// re-insert every following extent via btrfs_delete_extent_data_items), so a
-    /// non-atomic refusal would half-rewrite the file. Both must leave it
-    /// byte-for-byte intact.
+    /// extent drop only this inode's reference (refs 2 -> 1) rather than freeing
+    /// the still-shared extent. These shift the file tail (free + re-insert every
+    /// following extent via btrfs_delete_extent_data_items). Each uses a fresh
+    /// shared-extent fixture so the drop is asserted independently.
     #[test]
-    fn btrfs_collapse_insert_refuse_shared_extent_bd_xkvcm() {
+    fn btrfs_collapse_insert_drop_shared_extent_ref_bd_xkvcm() {
         let (fs, cx) = open_writable_btrfs();
         let ops: &dyn FsOps = &fs;
-        let (ino, original) = btrfs_make_shared_extent_file(&fs, &cx, "shared_ci.bin");
 
-        // COLLAPSE_RANGE (0x08): remove [0, 4096), would shift the tail left.
-        let err = ops
-            .fallocate(&cx, &mut RequestScope::empty(), ino, 0, 4096, 0x08)
-            .expect_err("collapse_range on a shared extent must be refused");
-        assert!(
-            matches!(err, FfsError::UnsupportedFeature(_)),
-            "expected UnsupportedFeature for shared-extent collapse_range, got {err:?}"
-        );
-        assert_eq!(
-            ops.read(&cx, &mut RequestScope::empty(), ino, 0, 8192).unwrap(),
-            original,
-            "refused collapse_range must leave the file untouched"
-        );
+        // COLLAPSE_RANGE (0x08): remove [0, 4096), shifting the tail left.
+        let (ino_c, _orig_c, db_c, dn_c) =
+            btrfs_make_shared_extent_file(&fs, &cx, "shared_collapse.bin");
+        ops.fallocate(&cx, &mut RequestScope::empty(), ino_c, 0, 4096, 0x08)
+            .expect("collapse_range on a shared extent must succeed (drop, not refuse)");
+        assert_extent_refs_dropped_to_one(&fs, db_c, dn_c);
 
-        // INSERT_RANGE (0x20): insert a hole at 4096, would shift the tail right.
-        let err = ops
-            .fallocate(&cx, &mut RequestScope::empty(), ino, 4096, 4096, 0x20)
-            .expect_err("insert_range on a shared extent must be refused");
-        assert!(
-            matches!(err, FfsError::UnsupportedFeature(_)),
-            "expected UnsupportedFeature for shared-extent insert_range, got {err:?}"
-        );
-        assert_eq!(
-            ops.read(&cx, &mut RequestScope::empty(), ino, 0, 8192).unwrap(),
-            original,
-            "refused insert_range must leave the file untouched"
-        );
+        // INSERT_RANGE (0x20): insert a hole at 4096, shifting the tail right.
+        let (ino_i, _orig_i, db_i, dn_i) =
+            btrfs_make_shared_extent_file(&fs, &cx, "shared_insert.bin");
+        ops.fallocate(&cx, &mut RequestScope::empty(), ino_i, 4096, 4096, 0x20)
+            .expect("insert_range on a shared extent must succeed (drop, not refuse)");
+        assert_extent_refs_dropped_to_one(&fs, db_i, dn_i);
     }
 
     #[test]
