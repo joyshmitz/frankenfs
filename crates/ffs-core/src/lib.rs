@@ -5894,8 +5894,9 @@ impl OpenFs {
         // Walk the ROOT tree (tree 1) to populate the in-memory COW tree.
         // This tree contains ROOT_ITEMs pointing to each subvolume tree.
         let root_items = self.walk_btrfs_root_tree(cx)?;
-        let mut root_tree =
-            InMemoryCowBtrfsTree::new(max_items).map_err(|e| btrfs_mutation_to_ffs(&e))?;
+        let mut root_tree = InMemoryCowBtrfsTree::new(max_items)
+            .map_err(|e| btrfs_mutation_to_ffs(&e))?
+            .with_leaf_byte_budget((nodesize as usize).saturating_sub(101));
         for item in &root_items {
             let tree_item = BtrfsTreeItem {
                 key: BtrfsKey {
@@ -5918,8 +5919,9 @@ impl OpenFs {
 
         // Walk the FS tree to populate the in-memory COW tree.
         let items = self.walk_btrfs_fs_tree(cx)?;
-        let mut fs_tree =
-            InMemoryCowBtrfsTree::new(max_items).map_err(|e| btrfs_mutation_to_ffs(&e))?;
+        let mut fs_tree = InMemoryCowBtrfsTree::new(max_items)
+            .map_err(|e| btrfs_mutation_to_ffs(&e))?
+            .with_leaf_byte_budget((nodesize as usize).saturating_sub(101));
 
         // Find the highest objectid in use so we can mint new ones.
         let mut max_objectid = BTRFS_FIRST_FREE_OBJECTID;
@@ -19537,6 +19539,7 @@ impl OpenFs {
                 level: 0, // tree-log leaf
                 child_generations: Vec::new(),
                 child_bytenrs: Vec::new(),
+                child_min_keys: Vec::new(),
             })
             .map_err(|e| btrfs_mutation_to_ffs(&e))?;
 
@@ -57495,6 +57498,55 @@ mod tests {
         assert!(
             ok,
             "btrfs check must accept symlinks whose target is stored inline:\n{output}"
+        );
+    }
+
+    /// Creating MANY files in a btrfs directory grows the fs tree well past a
+    /// single leaf — forcing leaf splits and at least one internal node level —
+    /// and the committed image must stay btrfs-check-clean. The per-op metadata
+    /// tests only exercise a handful of items in a single (height-1) leaf, so
+    /// this is the only end-to-end validation that the real create -> commit
+    /// serialization (node splits, internal-node level/key/csum, the
+    /// WriteDependencyDag) produces a valid multi-level fs tree at scale (a level
+    /// bug in that path was found before at height >= 3, bd-iv5uy). A sampled
+    /// lookup also confirms entries stay reachable after the growth. Skips
+    /// without btrfs-progs; uses empty files so no data-extent path is involved.
+    #[test]
+    fn btrfs_many_files_multi_level_tree_passes_btrfs_check() {
+        let Some((fs, dev, _tmp, image)) = open_writable_btrfs_mkfs(256) else {
+            return; // btrfs-progs unavailable
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(u64::from(BTRFS_FIRST_FREE_OBJECTID));
+
+        // 1000 empty files: their INODE_ITEM/INODE_REF/DIR_ITEM/DIR_INDEX items
+        // overflow the root leaf many times over, so the fs tree must split into
+        // multiple leaves under an internal node.
+        let count = 1000u32;
+        for i in 0..count {
+            fs.create(&cx, root, OsStr::new(&format!("f{i:05}.dat")), 0o644, 0, 0)
+                .expect("create file in large dir");
+        }
+
+        // Sampled lookups must still resolve after the tree grew.
+        for name in ["f00000.dat", "f00500.dat", "f00999.dat"] {
+            assert!(
+                fs.lookup(&cx, root, OsStr::new(name)).is_ok(),
+                "entry {name} must remain reachable after fs-tree growth"
+            );
+        }
+
+        let _ = fs.flush_mvcc_to_device(&cx);
+        fs.btrfs_full_transaction_commit(&cx, "many-files-multi-level-check")
+            .expect("btrfs full transaction commit");
+        std::fs::write(&image, dev.snapshot_bytes()).expect("write modified image");
+
+        let Some((ok, output)) = run_btrfs_check(&image) else {
+            return; // btrfs check tool unavailable
+        };
+        assert!(
+            ok,
+            "btrfs check must accept a multi-level fs tree from many file creates:\n{output}"
         );
     }
 

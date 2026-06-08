@@ -2151,6 +2151,15 @@ pub const BTRFS_ITEM_SIZE: usize = 25;
 /// btrfs internal key-pointer size in bytes.
 pub const BTRFS_KEY_PTR_SIZE: usize = 33;
 
+/// Sentinel "largest possible" key, used only as the legacy fallback key for an
+/// internal node's last child when no per-child minimum key was supplied (see
+/// `child_min_keys`). Production writeback always supplies real minimums.
+const BTRFS_SENTINEL_MAX_KEY: BtrfsKey = BtrfsKey {
+    objectid: u64::MAX,
+    item_type: u8::MAX,
+    offset: u64::MAX,
+};
+
 /// Parameters for serializing a btrfs node to on-disk format.
 #[derive(Debug, Clone)]
 pub struct BtrfsNodeSerializeParams {
@@ -2186,6 +2195,16 @@ pub struct BtrfsNodeSerializeParams {
     /// `children[i]` value verbatim — that path is preserved for the
     /// simulator and standalone serializer tests.
     pub child_bytenrs: Vec<u64>,
+    /// Per-child subtree minimum key for internal nodes (indexed by child
+    /// position). btrfs requires key_ptr[i].key == the smallest key in child[i]'s
+    /// subtree; the in-memory CoW node only stores N-1 SEPARATOR keys (the
+    /// minimum of child[i+1]), so serialization must be told each child's own
+    /// minimum. When empty (default) serialization falls back to the legacy
+    /// separator-based keys — which mis-key every child by one and fabricate a
+    /// MAX_KEY for the last child, so `btrfs check` rejects any multi-leaf tree
+    /// ("Wrong key of child node/leaf"); production writeback now supplies this
+    /// (bd-6uyto). Preserved-empty for the simulator/standalone serializer tests.
+    pub child_min_keys: Vec<BtrfsKey>,
 }
 
 impl BtrfsCowNode {
@@ -2293,18 +2312,18 @@ impl BtrfsCowNode {
                         return Err(BtrfsMutationError::InvalidConfig("node overflow: key-ptrs"));
                     }
 
-                    // key (17 bytes): use keys[i] if i < keys.len(), else use a max key
-                    let key = if i < keys.len() {
-                        &keys[i]
-                    } else {
-                        // Last child has no separator key in our model; use max key
-                        static MAX_KEY: BtrfsKey = BtrfsKey {
-                            objectid: u64::MAX,
-                            item_type: u8::MAX,
-                            offset: u64::MAX,
-                        };
-                        &MAX_KEY
-                    };
+                    // key (17 bytes): btrfs requires key_ptr[i].key to be the
+                    // SMALLEST key in child[i]'s subtree. Production writeback
+                    // supplies that per-child minimum in `child_min_keys`
+                    // (bd-6uyto). Fall back to the legacy separator mapping only
+                    // when no minimums were provided (simulator / serializer
+                    // tests) — note that fallback is only correct for a
+                    // single-leaf-per-child shape and is rejected by btrfs check
+                    // for real multi-leaf trees.
+                    let key = params.child_min_keys.get(i).map_or_else(
+                        || if i < keys.len() { &keys[i] } else { &BTRFS_SENTINEL_MAX_KEY },
+                        |min_key| min_key,
+                    );
                     buf[kp_offset..kp_offset + 8].copy_from_slice(&key.objectid.to_le_bytes());
                     buf[kp_offset + 8] = key.item_type;
                     buf[kp_offset + 9..kp_offset + 17].copy_from_slice(&key.offset.to_le_bytes());
@@ -2425,6 +2444,14 @@ struct DeleteResult {
 pub struct InMemoryCowBtrfsTree {
     max_items: usize,
     min_items: usize,
+    /// Maximum serialized bytes a leaf may hold (`nodesize - BTRFS_HEADER_SIZE`).
+    /// A leaf is split when EITHER its item count exceeds `max_items` OR its
+    /// serialized size (sum of `BTRFS_ITEM_SIZE + data.len()` per item) exceeds
+    /// this budget — because real items vary in size (INODE_ITEM ~160 B, inline
+    /// EXTENT_DATA up to a sector), so the count cap alone lets a leaf overflow
+    /// `nodesize` on serialization (bd-6uyto). Defaults to `usize::MAX` (count
+    /// cap only) for callers that don't set a nodesize-derived budget.
+    leaf_byte_budget: usize,
     root: u64,
     allocator: Box<dyn BtrfsAllocator>,
     deferred_frees: Vec<u64>,
@@ -2455,6 +2482,7 @@ impl InMemoryCowBtrfsTree {
         Ok(Self {
             max_items,
             min_items: max_items / 2,
+            leaf_byte_budget: usize::MAX,
             root,
             allocator,
             deferred_frees: Vec::new(),
@@ -2462,6 +2490,32 @@ impl InMemoryCowBtrfsTree {
             staged_deferred_frees: Vec::new(),
             nodes,
         })
+    }
+
+    /// Set the per-leaf serialized-byte budget (`nodesize - BTRFS_HEADER_SIZE`)
+    /// so leaves split before they overflow an on-disk node (bd-6uyto). Builder
+    /// style; the tree must be empty (call right after construction).
+    #[must_use]
+    pub fn with_leaf_byte_budget(mut self, budget: usize) -> Self {
+        self.leaf_byte_budget = budget.max(1);
+        self
+    }
+
+    /// Smallest key in the subtree rooted at `block` — the first key of its
+    /// leftmost leaf. Used by writeback to stamp each internal-node key-pointer
+    /// with the child's true minimum (btrfs requires key_ptr[i].key == min of
+    /// child[i]), not the CoW separator (bd-6uyto). `None` for an empty tree.
+    pub fn subtree_min_key(&self, block: u64) -> Result<Option<BtrfsKey>, BtrfsMutationError> {
+        let mut current = block;
+        loop {
+            match self.node_snapshot(current)? {
+                BtrfsCowNode::Leaf { items } => return Ok(items.first().map(|item| item.key)),
+                BtrfsCowNode::Internal { children, .. } => match children.first() {
+                    Some(&first) => current = first,
+                    None => return Ok(None),
+                },
+            }
+        }
     }
 
     /// Current root block identifier.
@@ -2689,7 +2743,18 @@ impl InMemoryCowBtrfsTree {
         }
 
         items.insert(idx, entry);
-        if items.len() <= self.max_items {
+        // Split when the leaf exceeds EITHER the item-count cap OR the serialized
+        // byte budget (bd-6uyto). The byte check is what keeps a leaf of larger
+        // items (INODE_ITEM, inline EXTENT_DATA, long DIR names) from overflowing
+        // the on-disk node even while under `max_items`. A single item always fits
+        // a node (btrfs caps item size), so a 1-item leaf is never split.
+        let leaf_bytes: usize = items
+            .iter()
+            .map(|it| BTRFS_ITEM_SIZE + it.data.len())
+            .sum();
+        if items.len() <= 1
+            || (items.len() <= self.max_items && leaf_bytes <= self.leaf_byte_budget)
+        {
             let new_id = self.alloc_node(BtrfsCowNode::Leaf { items })?;
             return Ok(InsertResult {
                 node_id: new_id,
@@ -2697,8 +2762,22 @@ impl InMemoryCowBtrfsTree {
             });
         }
 
-        let mid = items.len() / 2;
-        let right_items = items.split_off(mid);
+        // Choose the split index by balancing serialized BYTES (not item count),
+        // so each half fits the node byte budget; this also lands near the count
+        // midpoint when items are uniform. Both halves stay non-empty.
+        let split_idx = {
+            let mut acc = 0usize;
+            let mut idx = items.len() / 2;
+            for (i, it) in items.iter().enumerate() {
+                acc += BTRFS_ITEM_SIZE + it.data.len();
+                if acc.saturating_mul(2) >= leaf_bytes {
+                    idx = i + 1;
+                    break;
+                }
+            }
+            idx.clamp(1, items.len() - 1)
+        };
+        let right_items = items.split_off(split_idx);
         let separator =
             right_items
                 .first()
@@ -17571,6 +17650,7 @@ mod tests {
             level: 0, // leaf
             child_generations: vec![],
             child_bytenrs: vec![],
+            child_min_keys: vec![],
         };
 
         let buf = node.serialize(&params).expect("serialize should succeed");
@@ -17624,6 +17704,7 @@ mod tests {
             level: 1, // internal node, level 1
             child_generations: vec![190, 195, 200],
             child_bytenrs: vec![],
+            child_min_keys: vec![],
         };
 
         let buf = node.serialize(&params).expect("serialize should succeed");

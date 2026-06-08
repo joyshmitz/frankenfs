@@ -610,6 +610,7 @@ impl DiskWritebackContext {
         level: u8,
         child_generations: Vec<u64>,
         child_bytenrs: Vec<u64>,
+        child_min_keys: Vec<crate::BtrfsKey>,
     ) -> crate::BtrfsNodeSerializeParams {
         crate::BtrfsNodeSerializeParams {
             fsid: self.fsid,
@@ -626,6 +627,7 @@ impl DiskWritebackContext {
             level,
             child_generations,
             child_bytenrs,
+            child_min_keys,
         }
     }
 
@@ -648,16 +650,26 @@ impl DiskWritebackContext {
     ) -> Result<Vec<u8>, BtrfsMutationError> {
         let node = tree.node_snapshot(block)?;
 
-        let (child_generations, child_bytenrs) = match &node {
-            BtrfsCowNode::Leaf { .. } => (Vec::new(), Vec::new()),
+        let (child_generations, child_bytenrs, child_min_keys) = match &node {
+            BtrfsCowNode::Leaf { .. } => (Vec::new(), Vec::new(), Vec::new()),
             BtrfsCowNode::Internal { children, .. } => {
                 let gens = children.iter().map(|_| self.generation).collect();
                 let bytenrs = children.iter().map(|c| self.block_to_bytenr(*c)).collect();
-                (gens, bytenrs)
+                // Each key_ptr must carry the child's true subtree minimum key,
+                // not the CoW separator (bd-6uyto).
+                let mut mins = Vec::with_capacity(children.len());
+                for child in children {
+                    let min = tree.subtree_min_key(*child)?.ok_or(
+                        BtrfsMutationError::BrokenInvariant("internal child subtree is empty"),
+                    )?;
+                    mins.push(min);
+                }
+                (gens, bytenrs, mins)
             }
         };
 
-        let params = self.params_for_block(block, level, child_generations, child_bytenrs);
+        let params =
+            self.params_for_block(block, level, child_generations, child_bytenrs, child_min_keys);
         node.serialize(&params)
     }
 }
