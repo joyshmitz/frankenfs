@@ -57398,6 +57398,54 @@ mod tests {
         );
     }
 
+    /// Setting (and removing) several xattrs across namespaces on a btrfs file
+    /// must leave the image btrfs-check-clean — the only on-disk validation of the
+    /// XATTR_ITEM encoding: each xattr is stored as an XATTR_ITEM keyed by the
+    /// btrfs name hash of the full attribute name, with a btrfs_dir_item-shaped
+    /// payload (name + value, type XATTR). A wrong key hash, payload layout, or a
+    /// stale item left after a remove would surface as a btrfs check error. Skips
+    /// without btrfs-progs.
+    #[test]
+    fn btrfs_xattr_set_remove_passes_btrfs_check() {
+        let Some((fs, dev, _tmp, image)) = open_writable_btrfs_mkfs(256) else {
+            return; // btrfs-progs unavailable
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(u64::from(BTRFS_FIRST_FREE_OBJECTID));
+
+        let attr = fs
+            .create(&cx, root, OsStr::new("xattr.bin"), 0o644, 0, 0)
+            .expect("create file");
+        // Several names across namespaces + a range of value sizes.
+        fs.setxattr(&cx, attr.ino, "user.mime", b"text/plain", XattrSetMode::Set)
+            .expect("set user.mime");
+        fs.setxattr(&cx, attr.ino, "user.author", b"frankenfs", XattrSetMode::Set)
+            .expect("set user.author");
+        fs.setxattr(&cx, attr.ino, "user.empty", b"", XattrSetMode::Set)
+            .expect("set user.empty");
+        fs.setxattr(&cx, attr.ino, "user.big", &[0x5A_u8; 512], XattrSetMode::Set)
+            .expect("set user.big");
+        // Overwrite an existing name (replace value in place).
+        fs.setxattr(&cx, attr.ino, "user.mime", b"application/octet-stream", XattrSetMode::Set)
+            .expect("replace user.mime");
+        // Remove one — its XATTR_ITEM must be fully dropped, not left dangling.
+        fs.removexattr(&cx, attr.ino, "user.author")
+            .expect("remove user.author");
+
+        let _ = fs.flush_mvcc_to_device(&cx);
+        fs.btrfs_full_transaction_commit(&cx, "xattr-set-remove-check")
+            .expect("btrfs full transaction commit");
+        std::fs::write(&image, dev.snapshot_bytes()).expect("write modified image");
+
+        let Some((ok, output)) = run_btrfs_check(&image) else {
+            return; // btrfs check tool unavailable
+        };
+        assert!(
+            ok,
+            "btrfs check must accept a file with xattrs set/replaced/removed:\n{output}"
+        );
+    }
+
     /// Cross-directory renames (a file moved between directories, and a
     /// NON-EMPTY directory moved between parents) must leave btrfs-check-clean
     /// metadata: the DIR_ITEM/DIR_INDEX move from the old parent to the new, the
