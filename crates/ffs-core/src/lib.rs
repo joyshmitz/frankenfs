@@ -20867,6 +20867,154 @@ impl OpenFs {
         Ok(self.btrfs_inode_to_attr(new_oid, &inode))
     }
 
+    /// Create a new subvolume named `name` under the directory `parent`.
+    ///
+    /// Subvolumes are a btrfs concept (the kernel exposes this as the
+    /// `BTRFS_IOC_SUBVOL_CREATE` ioctl); ext4 has none, so this returns
+    /// `UnsupportedFeature` on a non-btrfs filesystem. Returns the new
+    /// subvolume's root objectid. See [`Self::btrfs_create_subvolume`] for the
+    /// btrfs implementation (bd-tm48j).
+    pub fn create_subvolume(
+        &self,
+        cx: &Cx,
+        parent: InodeNumber,
+        name: &[u8],
+        uid: u32,
+        gid: u32,
+    ) -> ffs_error::Result<u64> {
+        if self.btrfs_context().is_none() {
+            return Err(FfsError::UnsupportedFeature(
+                "subvolume creation is only supported on btrfs".into(),
+            ));
+        }
+        self.btrfs_create_subvolume(cx, parent, name, uid, gid)
+    }
+
+    /// Create a new btrfs subvolume rooted under `parent` (bd-tm48j increment 3a).
+    ///
+    /// Allocates a fresh root objectid, builds the subvolume's own fs-tree (its
+    /// root directory inode 256 plus that inode's self INODE_REF), inserts a
+    /// ROOT_ITEM for it into the root tree, and stages the tree in
+    /// `extra_subvol_trees` so `btrfs_full_transaction_commit` writes it as its
+    /// own tree and wires its committed bytenr into the ROOT_ITEM (increment 1).
+    /// Returns the new subvolume's root objectid.
+    ///
+    /// This increment creates the subvolume tree + its registered ROOT_ITEM (the
+    /// subvolume is resolvable by objectid via `btrfs_fs_tree_root_bytenr` after
+    /// commit). The parent directory entry + ROOT_REF/ROOT_BACKREF name linkage
+    /// and `btrfs check` validation are the next increments (3b).
+    fn btrfs_create_subvolume(
+        &self,
+        _cx: &Cx,
+        parent: InodeNumber,
+        name: &[u8],
+        uid: u32,
+        gid: u32,
+    ) -> ffs_error::Result<u64> {
+        self.require_btrfs_rw_allowed("create_subvolume")?;
+        let alloc_mutex = self.require_btrfs_alloc_state()?;
+        let parent_oid = self.btrfs_canonical_inode(parent)?;
+        let (secs, nanos) = Self::btrfs_now_timestamp();
+
+        Self::validate_single_path_component(name)?;
+
+        let mut alloc = alloc_mutex.lock();
+        self.btrfs_require_directory_inode(&alloc, parent_oid)?;
+        if self.btrfs_lookup_dir_entry(&alloc, parent_oid, name).is_ok() {
+            return Err(FfsError::Exists);
+        }
+
+        // Allocate the new subvolume's root objectid from the shared id pool.
+        let subvol_id = alloc.next_objectid;
+        alloc.next_objectid = alloc.next_objectid.saturating_add(1);
+
+        // Build the subvolume's own fs-tree: its root directory (inode 256).
+        let max_items = ((alloc.nodesize as usize).saturating_sub(101) / 25).max(3);
+        let mut subvol_tree =
+            InMemoryCowBtrfsTree::new(max_items).map_err(|e| btrfs_mutation_to_ffs(&e))?;
+        let root_dir = BtrfsInodeItem {
+            generation: alloc.generation,
+            size: 0,
+            nbytes: 0,
+            nlink: 1,
+            uid,
+            gid,
+            mode: 0o040_755, // S_IFDIR | 0755
+            rdev: 0,
+            flags: 0,
+            atime_sec: secs,
+            atime_nsec: nanos,
+            ctime_sec: secs,
+            ctime_nsec: nanos,
+            mtime_sec: secs,
+            mtime_nsec: nanos,
+            otime_sec: secs,
+            otime_nsec: nanos,
+        };
+        let root_dir_oid = u64::from(BTRFS_FIRST_FREE_OBJECTID);
+        subvol_tree
+            .insert(
+                BtrfsKey {
+                    objectid: root_dir_oid,
+                    item_type: BTRFS_ITEM_INODE_ITEM,
+                    offset: 0,
+                },
+                &root_dir.to_bytes(),
+            )
+            .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+        // The subvolume root dir's self-referential INODE_REF ("..") — key
+        // (256, INODE_REF, 256), how btrfs roots a subvolume's top directory.
+        let self_ref = ffs_btrfs::BtrfsInodeRef {
+            index: 0,
+            name: b"..".to_vec(),
+        };
+        subvol_tree
+            .insert(
+                BtrfsKey {
+                    objectid: root_dir_oid,
+                    item_type: ffs_btrfs::BTRFS_ITEM_INODE_REF,
+                    offset: root_dir_oid,
+                },
+                &self_ref.to_bytes(),
+            )
+            .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+
+        // Register the subvolume's ROOT_ITEM in the root tree. bytenr/level are
+        // placeholders the commit repoints (via patch_root_commit) to the
+        // just-written tree root. A deterministic non-zero uuid (generation ==
+        // generation_v2 from to_bytes) keeps it parseable as a valid root.
+        let mut uuid = [0_u8; 16];
+        uuid[0..8].copy_from_slice(&subvol_id.to_le_bytes());
+        uuid[8..16].copy_from_slice(&alloc.generation.to_le_bytes());
+        let root_item = BtrfsRootItem {
+            bytenr: 0,
+            level: 0,
+            generation: alloc.generation,
+            root_dirid: root_dir_oid,
+            flags: 0,
+            refs: 1,
+            uuid,
+            parent_uuid: [0_u8; 16],
+        };
+        alloc
+            .root_tree
+            .insert(
+                BtrfsKey {
+                    objectid: subvol_id,
+                    item_type: BTRFS_ITEM_ROOT_ITEM,
+                    offset: 0,
+                },
+                &root_item.to_bytes(),
+            )
+            .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+
+        alloc.extra_subvol_trees.push((subvol_id, subvol_tree));
+        self.btrfs_touch_inode_times(&mut alloc, parent_oid, secs, nanos)?;
+        drop(alloc);
+
+        Ok(subvol_id)
+    }
+
     /// Create a device node, FIFO, or socket in a btrfs filesystem.
     #[allow(clippy::too_many_arguments)]
     fn btrfs_mknod(
@@ -39835,6 +39983,52 @@ mod tests {
         assert_ne!(
             subvol_root, fs_tree_root,
             "the subvolume is a SEPARATE tree from the default FS_TREE"
+        );
+    }
+
+    /// bd-tm48j increment 3a: the production btrfs_create_subvolume builds a new
+    /// subvolume (its own fs-tree with a root-dir inode + a registered ROOT_ITEM)
+    /// that commits and is resolvable by objectid after remount — end-to-end
+    /// through the increment-1 multi-tree commit machinery.
+    #[test]
+    fn btrfs_create_subvolume_persists_and_resolves_bd_tm48j() {
+        let Some((fs, dev, _tmp, _image)) = open_writable_btrfs_mkfs(256) else {
+            return; // btrfs-progs unavailable
+        };
+        let cx = Cx::for_testing();
+        let parent = InodeNumber(u64::from(BTRFS_FIRST_FREE_OBJECTID));
+
+        let subvol_id = fs
+            .create_subvolume(&cx, parent, b"mysubvol", 0, 0)
+            .expect("create_subvolume");
+        assert!(
+            subvol_id >= u64::from(BTRFS_FIRST_FREE_OBJECTID),
+            "subvolume root objectid must be a user objectid"
+        );
+
+        fs.btrfs_full_transaction_commit(&cx, "create-subvol-roundtrip-test")
+            .expect("commit the new subvolume");
+
+        let committed = dev.snapshot_bytes();
+        let opts = OpenOptions {
+            btrfs_rw_ephemeral_ok: true,
+            ..OpenOptions::default()
+        };
+        let mut fs2 =
+            OpenFs::from_device(&cx, Box::new(TestDevice::from_vec(committed)), &opts)
+                .expect("remount committed image");
+        fs2.enable_writes(&cx).expect("enable writes on remount");
+
+        let subvol_root = fs2
+            .btrfs_fs_tree_root_bytenr(&cx, subvol_id)
+            .expect("created subvolume ROOT_ITEM must resolve after commit+remount");
+        let fs_tree_root = fs2
+            .btrfs_fs_tree_root_bytenr(&cx, BTRFS_FS_TREE_OBJECTID)
+            .expect("default FS_TREE ROOT_ITEM must resolve");
+        assert_ne!(subvol_root, 0, "created subvolume tree must persist");
+        assert_ne!(
+            subvol_root, fs_tree_root,
+            "the created subvolume is a SEPARATE tree from the default FS_TREE"
         );
     }
 
