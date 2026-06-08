@@ -9253,6 +9253,12 @@ impl OpenFs {
                 )?;
                 let (child_header, child_tree) =
                     parse_extent_tree(&child_data).map_err(|e| parse_to_ffs_error(&e))?;
+                if child_header.depth + 1 != remaining_depth {
+                    return Err(FfsError::Corruption {
+                        block: idx.leaf_block,
+                        detail: "child extent tree depth inconsistency".into(),
+                    });
+                }
                 self.count_extent_tree_meta_recursive(
                     cx,
                     scope,
@@ -18853,13 +18859,20 @@ impl OpenFs {
             {
                 // u64-wrapping backref offset (matches the clone path).
                 let ref_offset = key.offset.wrapping_sub(*extent_offset);
+                // remove_csums = true: when this extent is the sole reference
+                // (refs == 1) and its space is freed, drop its EXTENT_CSUM items
+                // too — otherwise they orphan a disk range with no EXTENT_ITEM
+                // (bd-juj73). Matches the sibling free paths
+                // (btrfs_remove_overlapping_extent_data, btrfs_purge_inode);
+                // free_or_drop only removes csums on the refs == 1 branch, so
+                // shared/reflinked extents keep their csums.
                 Self::btrfs_free_or_drop_extent_ref(
                     alloc,
                     *disk_bytenr,
                     *disk_num_bytes,
                     key.objectid,
                     ref_offset,
-                    false,
+                    true,
                 )?;
             }
         }
@@ -63224,6 +63237,76 @@ mod tests {
             .unwrap();
         assert_eq!(&read[0..4096], &[0x5A_u8; 4096], "head before the hole intact");
         assert_eq!(&read[4096..8192], &[0u8; 4096], "punched region reads zero");
+    }
+
+    /// bd-juj73: freeing a SOLE-reference datasum extent via a fallocate op must
+    /// also remove its EXTENT_CSUM items. btrfs_delete_extent_data_items used to
+    /// pass remove_csums=false, orphaning the original extent's csums (disk range
+    /// with no live EXTENT_ITEM) when punch_hole frees it and re-inserts the
+    /// head/tail at new disk_bytenrs. Asserts the original extent's csum items
+    /// are gone after the punch.
+    #[test]
+    fn btrfs_punch_hole_removes_freed_extent_csums_bd_juj73() {
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+        let attr = ops
+            .create(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("datasum_punch.bin"),
+                0o644,
+                0,
+                0,
+            )
+            .unwrap();
+        // One 16 KiB datasum extent (default flags are datasum after bd-x3fcu).
+        ops.write(&cx, &mut RequestScope::empty(), attr.ino, 0, &[0x5A_u8; 16384])
+            .unwrap();
+        // Total checksummed sectors across the WHOLE csum tree (each crc32c csum
+        // is 4 bytes, so item data length / 4 = sectors). This is robust to the
+        // freed extent's disk_bytenr being reused by the re-inserted head/tail.
+        let total_csum_sectors = || -> usize {
+            let alloc = fs.btrfs_alloc_state.as_ref().unwrap().lock();
+            let lo = BtrfsKey {
+                objectid: ffs_btrfs::BTRFS_EXTENT_CSUM_OBJECTID,
+                item_type: ffs_btrfs::BTRFS_ITEM_EXTENT_CSUM,
+                offset: 0,
+            };
+            let hi = BtrfsKey {
+                objectid: ffs_btrfs::BTRFS_EXTENT_CSUM_OBJECTID,
+                item_type: ffs_btrfs::BTRFS_ITEM_EXTENT_CSUM,
+                offset: u64::MAX,
+            };
+            alloc
+                .csum_tree
+                .range(&lo, &hi)
+                .unwrap()
+                .into_iter()
+                .map(|(_, data)| data.len() / ffs_btrfs::BTRFS_CRC32C_CSUM_SIZE)
+                .sum()
+        };
+
+        // Sanity: the 16 KiB datasum write recorded csums for all 4 sectors.
+        assert_eq!(
+            total_csum_sectors(),
+            4,
+            "datasum write should record one EXTENT_CSUM per sector"
+        );
+
+        // Punch one sector inside the extent: the sole-reference original extent
+        // is freed (its 4 csums must be removed) and the head (1 sector) + tail
+        // (2 sectors) are re-inserted with fresh csums.
+        ops.fallocate(&cx, &mut RequestScope::empty(), attr.ino, 4096, 4096, 0x02 | 0x01)
+            .expect("punch_hole on a sole-reference datasum extent");
+
+        // Only the 3 live sectors (head + tail) keep csums; the freed extent's
+        // csums (incl. the punched sector) must be gone, no orphans (bd-juj73).
+        assert_eq!(
+            total_csum_sectors(),
+            3,
+            "punch must leave csums only for live head+tail sectors, no orphans (bd-juj73)"
+        );
     }
 
     /// bd-xkvcm: fallocate COLLAPSE_RANGE and INSERT_RANGE over a SHARED data
