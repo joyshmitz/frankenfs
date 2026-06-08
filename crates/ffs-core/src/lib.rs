@@ -13365,6 +13365,14 @@ impl OpenFs {
             .map_err(|_| FfsError::Format("inode number exceeds ext4 32-bit limit".into()))?;
         let reserved_tail = self.ext4_dir_reserved_tail();
         ffs_dir::init_dir_block(&mut dir_block, ino_u32, parent_u32, reserved_tail)?;
+        // On a metadata_csum filesystem the freshly initialized dir block carries
+        // a checksum tail that is still zero; stamp it (keyed on the new dir's own
+        // inode number + generation) before the write. The add_entry paths restamp
+        // a block whenever an entry is added, which is why a subdir that later
+        // receives a file appeared clean — but an *empty* directory is never
+        // restamped, so its block reached disk with a zero checksum and e2fsck
+        // reported "directory passes checks but fails checksum" (bd-bribi).
+        self.stamp_ext4_dir_block(&mut dir_block, ino_u32, new_inode.generation);
         block_dev.write_block(cx, dir_alloc.start, &dir_block)?;
 
         // Set up the extent tree to point to this block.
@@ -44973,6 +44981,48 @@ mod tests {
         );
     }
 
+    /// bd-bribi: an EMPTY directory created on a metadata_csum filesystem must
+    /// leave its data block's CRC32C tail correctly stamped. The mkdir path
+    /// initialized the new dir block (`.`/`..` + a zeroed checksum tail) and wrote
+    /// it WITHOUT stamping — only the add_entry paths restamp — so a directory
+    /// that never receives an entry reached disk with a zero checksum and e2fsck
+    /// pass 2 reported "directory passes checks but fails checksum". (A subdir
+    /// that later gets a file appeared clean because the add restamps the block,
+    /// which is why the single-subdir bd-0ta4z stress did not catch it.) Minimal
+    /// repro from the namespace-churn proptest: two empty sibling subdirs (pa, pb)
+    /// plus a single create in root.
+    #[test]
+    fn ext4_empty_dir_block_csum_stamped_passes_e2fsck_bd_bribi() {
+        let Some((fs, dev, tmp)) = open_writable_ext4_mkfs_with_device(64) else {
+            return; // format tool unavailable
+        };
+        let image = tmp.path().join("test.ext4");
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        // Two empty sibling subdirectories — neither ever receives an entry, so
+        // their blocks are never restamped by an add_entry on the writable path.
+        fs.mkdir(&cx, root, OsStr::new("pa"), 0o755, 0, 0).expect("mkdir pa");
+        fs.mkdir(&cx, root, OsStr::new("pb"), 0o755, 0, 0).expect("mkdir pb");
+        // A single create in root (the minimal churn op from the proptest).
+        fs.create(&cx, root, OsStr::new("f0"), 0o644, 0, 0).expect("create f0");
+
+        fs.flush_mvcc_to_device(&cx).expect("flush mvcc to device");
+        std::fs::write(&image, dev.snapshot_bytes()).expect("write modified image");
+
+        let Some((clean, output)) = run_e2fsck(&image) else {
+            return; // e2fsck unavailable
+        };
+        assert!(
+            !output.contains("fails checksum"),
+            "empty-directory data block must carry a correct metadata_csum tail (bd-bribi):\n{output}"
+        );
+        assert!(
+            clean,
+            "e2fsck must accept empty sibling subdirectories on a metadata_csum image (bd-bribi):\n{output}"
+        );
+    }
+
     /// bd-0y7jp: a block group's `bg_used_dirs_count` must stay correct as
     /// directory inodes are created and freed, or e2fsck reports "Directories
     /// count wrong for group #N". On the writable path the count was previously
@@ -52958,19 +53008,20 @@ mod tests {
                 }
                 verify(&fs, &model, step)?;
             }
-            // NOTE: a full e2fsck pass here is still deferred. The accounting-total
-            // gaps are now closed — superblock free totals (bd-nd61w) and group
-            // bg_used_dirs_count (bd-0y7jp) are maintained on the writable path —
-            // but enabling e2fsck on a metadata_csum image surfaced a SEPARATE
-            // pre-existing gap: directory data blocks written under the namespace
-            // churn fail their metadata_csum tail ("directory passes checks but
-            // fails checksum"), tracked in bd-bribi. Once that is fixed, switch
-            // this to open_writable_ext4_mkfs_with_device + flush + run_e2fsck to
-            // also cover `..`/link-count invariants under the rename churn. The
-            // per-step readdir + lookup model match above already validates
-            // namespace correctness, and the dedicated bd-0y7jp e2fsck test
-            // (ext4_dir_count_maintained_passes_e2fsck_bd_0y7jp) covers the
-            // directory-count accounting on a ^metadata_csum image.
+            // NOTE: wiring a full e2fsck pass into this proptest loop is left as
+            // optional future hardening (it would run e2fsck on a metadata_csum
+            // device snapshot per generated case). The previously-blocking gaps
+            // are now all closed and each has a dedicated deterministic e2fsck
+            // test: superblock free totals (bd-nd61w,
+            // flush_syncs_superblock_free_totals_e2fsck_clean_bd_nd61w), group
+            // bg_used_dirs_count (bd-0y7jp,
+            // ext4_dir_count_maintained_passes_e2fsck_bd_0y7jp), and the empty-
+            // directory metadata_csum tail that enabling e2fsck here first
+            // surfaced (bd-bribi,
+            // ext4_empty_dir_block_csum_stamped_passes_e2fsck_bd_bribi — the
+            // mkdir path now stamps the new dir block). The per-step readdir +
+            // lookup model match above already validates namespace correctness
+            // under the rename churn.
         }
     }
 
