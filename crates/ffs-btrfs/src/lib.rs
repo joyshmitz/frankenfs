@@ -4343,6 +4343,109 @@ impl BtrfsExtentAllocator {
         Ok(())
     }
 
+    /// Drop one reference to a SHARED data extent (refcount-aware free, bd-xkvcm)
+    /// — the exact inverse of [`add_data_extent_ref`]. Decrement the
+    /// `EXTENT_ITEM` refcount by one and remove this inode's `EXTENT_DATA_REF`
+    /// backref for `(root, objectid, offset)`, WITHOUT freeing the extent's
+    /// space (other references keep it live). The backref may be either the
+    /// keyed item (the form `add_data_extent_ref` writes, located by
+    /// [`hash_extent_data_ref`]) or the inline ref inside the `EXTENT_ITEM` (the
+    /// form `insert_data_extent_item` writes for the first reference); both are
+    /// handled. Use this only when the extent has more than one reference; a
+    /// refs==1 extent is freed outright via [`free_extent`].
+    ///
+    /// # Errors
+    /// Returns `KeyNotFound` if the extent item is absent, `BrokenInvariant` if
+    /// its value is malformed, the refcount would underflow, no matching backref
+    /// is found, or the inline backref list contains an unsupported ref type.
+    pub fn remove_data_extent_ref(
+        &mut self,
+        bytenr: u64,
+        num_bytes: u64,
+        root: u64,
+        objectid: u64,
+        offset: u64,
+    ) -> Result<(), BtrfsMutationError> {
+        const EXTENT_ITEM_HEADER: usize = 24; // refs(8) + generation(8) + flags(8)
+        const DATA_REF_PAYLOAD: usize = 28;
+
+        let item_key = BtrfsKey {
+            objectid: bytenr,
+            item_type: BTRFS_ITEM_EXTENT_ITEM,
+            offset: num_bytes,
+        };
+        let mut value = self
+            .extent_tree
+            .get(&item_key)
+            .ok_or(BtrfsMutationError::KeyNotFound)?;
+        if value.len() < EXTENT_ITEM_HEADER {
+            return Err(BtrfsMutationError::BrokenInvariant(
+                "extent item value too short for header",
+            ));
+        }
+        let refs = u64::from_le_bytes(value[0..8].try_into().expect("8 bytes"));
+        let new_refs = refs.checked_sub(1).ok_or(BtrfsMutationError::BrokenInvariant(
+            "extent item refcount underflow",
+        ))?;
+
+        // Prefer the keyed EXTENT_DATA_REF (the add_data_extent_ref form).
+        let ref_key = BtrfsKey {
+            objectid: bytenr,
+            item_type: BTRFS_ITEM_EXTENT_DATA_REF,
+            offset: hash_extent_data_ref(root, objectid, offset),
+        };
+        let removed_keyed = match self.extent_tree.get(&ref_key) {
+            Some(kv) => match BtrfsExtentDataRef::from_bytes(&kv) {
+                Some(dr) if dr.root == root && dr.objectid == objectid && dr.offset == offset => {
+                    self.extent_tree.delete(&ref_key)?;
+                    true
+                }
+                _ => false,
+            },
+            None => false,
+        };
+
+        if !removed_keyed {
+            // Remove the matching INLINE EXTENT_DATA_REF from the item value.
+            let mut cursor = EXTENT_ITEM_HEADER;
+            let mut found = false;
+            while cursor < value.len() {
+                if value[cursor] != BTRFS_ITEM_EXTENT_DATA_REF {
+                    // SHARED_DATA_REF / other inline forms aren't produced by
+                    // FrankenFS; refuse rather than mis-parse (atomic, no change
+                    // committed yet).
+                    return Err(BtrfsMutationError::BrokenInvariant(
+                        "unsupported inline backref type in extent item",
+                    ));
+                }
+                let payload_start = cursor + 1;
+                let payload_end = payload_start + DATA_REF_PAYLOAD;
+                if payload_end > value.len() {
+                    return Err(BtrfsMutationError::BrokenInvariant(
+                        "truncated inline EXTENT_DATA_REF",
+                    ));
+                }
+                match BtrfsExtentDataRef::from_bytes(&value[payload_start..payload_end]) {
+                    Some(dr) if dr.root == root && dr.objectid == objectid && dr.offset == offset => {
+                        value.drain(cursor..payload_end);
+                        found = true;
+                        break;
+                    }
+                    _ => cursor = payload_end,
+                }
+            }
+            if !found {
+                return Err(BtrfsMutationError::BrokenInvariant(
+                    "no matching EXTENT_DATA_REF backref for decrement",
+                ));
+            }
+        }
+
+        value[0..8].copy_from_slice(&new_refs.to_le_bytes());
+        self.extent_tree.update(&item_key, &value)?;
+        Ok(())
+    }
+
     /// Stamp `generation` into the existing skinny `METADATA_ITEM` extent item
     /// for the tree block at `bytenr` / `level`, leaving its refs and inline
     /// backref untouched. Returns `true` if the item was present and patched.
@@ -12471,6 +12574,57 @@ mod tests {
                 count: 1,
             }
         );
+    }
+
+    #[test]
+    fn remove_data_extent_ref_drops_inline_and_keyed_refs() {
+        let mut alloc = BtrfsExtentAllocator::new(7).expect("alloc");
+        alloc.add_block_group(0x1_0000, make_data_bg(0x1_0000, 0x10_0000));
+        let a = alloc.alloc_data(4096).expect("alloc");
+
+        // refs == 2: an inline ref for inode 256, a keyed ref for inode 257
+        // (a reflink), exactly the form the validated clone path produces.
+        alloc
+            .insert_data_extent_item(a.bytenr, a.num_bytes, 5, 256, 0, 7)
+            .expect("inline ref (inode 256)");
+        alloc
+            .add_data_extent_ref(a.bytenr, a.num_bytes, 5, 257, 0)
+            .expect("keyed ref (inode 257)");
+        assert_eq!(
+            alloc.extent_item_refs(a.bytenr, a.num_bytes).unwrap(),
+            Some(2)
+        );
+
+        // Drop the INLINE ref (inode 256): refs 2 -> 1; the keyed ref survives.
+        alloc
+            .remove_data_extent_ref(a.bytenr, a.num_bytes, 5, 256, 0)
+            .expect("drop inline ref");
+        assert_eq!(
+            alloc.extent_item_refs(a.bytenr, a.num_bytes).unwrap(),
+            Some(1)
+        );
+        let keyed = alloc.get_extent_data_refs(a.bytenr).unwrap();
+        assert_eq!(keyed.len(), 1, "keyed ref must survive inline removal");
+        assert_eq!(keyed[0].objectid, 257);
+
+        // Drop the KEYED ref (inode 257): refs 1 -> 0; backref removed.
+        alloc
+            .remove_data_extent_ref(a.bytenr, a.num_bytes, 5, 257, 0)
+            .expect("drop keyed ref");
+        assert_eq!(
+            alloc.extent_item_refs(a.bytenr, a.num_bytes).unwrap(),
+            Some(0)
+        );
+        assert!(alloc.get_extent_data_refs(a.bytenr).unwrap().is_empty());
+
+        // Dropping a ref that isn't present is an atomic error (no change).
+        alloc
+            .insert_data_extent_item(a.bytenr, a.num_bytes, 5, 256, 0, 7)
+            .expect("re-add inline");
+        assert!(matches!(
+            alloc.remove_data_extent_ref(a.bytenr, a.num_bytes, 5, 999, 0),
+            Err(BtrfsMutationError::BrokenInvariant(_))
+        ));
     }
 
     #[test]
