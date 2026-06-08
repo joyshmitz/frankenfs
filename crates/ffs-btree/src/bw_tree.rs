@@ -177,6 +177,10 @@ pub struct BufferedMessages {
 }
 
 impl BufferedMessages {
+    // Takes the entry by value (its Copy key/mutation are read into the new Vec)
+    // to keep the constructor symmetric with `upsert` and ready for a future
+    // non-Copy BufferedMutation payload.
+    #[allow(clippy::needless_pass_by_value)]
     fn singleton(entry: BufferedMutationEntry) -> Self {
         Self {
             entries: Arc::new(vec![(entry.key, entry.mutation)]),
@@ -201,6 +205,7 @@ impl BufferedMessages {
             .map(|index| &self.entries[index].1)
     }
 
+    #[allow(clippy::needless_pass_by_value)]
     fn upsert(&self, entry: BufferedMutationEntry) -> Self {
         match self
             .entries
