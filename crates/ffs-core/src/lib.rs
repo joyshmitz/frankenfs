@@ -616,6 +616,13 @@ struct BtrfsAllocState {
     /// ROOT_ITEM in `root_tree` (bd-tm48j subvolume creation). Drained on
     /// commit. Empty for every image that has not created a subvolume.
     extra_subvol_trees: Vec<(u64, InMemoryCowBtrfsTree)>,
+    /// Per-directory monotonic DIR_INDEX counter for this mount session (the
+    /// kernel's in-memory `index_cnt`), keyed by directory objectid. Seeded
+    /// lazily from `max(on-disk DIR_INDEX) + 1` and only ever incremented, so
+    /// deleting the highest-indexed entry does NOT free its index for reuse
+    /// (bd-rfi5j). Empty after mount; reconstructed from disk on demand, like the
+    /// kernel reseeds `index_cnt` after a remount.
+    dir_index_counters: std::collections::HashMap<u64, u64>,
     /// Next available objectid for new inodes / directory entries.
     next_objectid: u64,
     /// Current transaction generation (bumped on each commit).
@@ -6086,6 +6093,7 @@ impl OpenFs {
             csum_tree,
             extent_alloc,
             extra_subvol_trees: Vec::new(),
+            dir_index_counters: std::collections::HashMap::new(),
             next_objectid: max_objectid + 1,
             generation,
             nodesize,
@@ -22669,7 +22677,23 @@ impl OpenFs {
     /// `max(existing DIR_INDEX offset) + 1`, starting at `BTRFS_DIR_START_INDEX`
     /// for an empty directory. This makes the counter survive remount without a
     /// new persisted inode field, matching the kernel's own derivation.
+    /// The DIR_INDEX sequence the next entry in `parent_oid` will receive,
+    /// WITHOUT consuming it. Returns the live session counter if one exists,
+    /// else `max(on-disk DIR_INDEX) + 1`. Use [`Self::btrfs_consume_dir_index_seq`]
+    /// to actually assign an index.
     fn btrfs_next_dir_index_seq(
+        alloc: &BtrfsAllocState,
+        parent_oid: u64,
+    ) -> ffs_error::Result<u64> {
+        if let Some(&next) = alloc.dir_index_counters.get(&parent_oid) {
+            return Ok(next);
+        }
+        Self::btrfs_max_ondisk_dir_index_plus_one(alloc, parent_oid)
+    }
+
+    /// `max(on-disk DIR_INDEX offset in `parent_oid`) + 1`, or
+    /// `BTRFS_DIR_START_INDEX` when the directory has no DIR_INDEX items.
+    fn btrfs_max_ondisk_dir_index_plus_one(
         alloc: &BtrfsAllocState,
         parent_oid: u64,
     ) -> ffs_error::Result<u64> {
@@ -22691,6 +22715,26 @@ impl OpenFs {
             .map(|(key, _)| key.offset)
             .max()
             .map_or(BTRFS_DIR_START_INDEX, |max| max.saturating_add(1));
+        Ok(next)
+    }
+
+    /// Assign (consume) the next monotonic DIR_INDEX sequence for `parent_oid`,
+    /// advancing the per-directory session counter. The counter is seeded from
+    /// `max(on-disk DIR_INDEX) + 1` on first use and only ever increments, so a
+    /// deleted tail entry's index is never reused within a mount (bd-rfi5j),
+    /// matching the kernel's in-memory `index_cnt`.
+    fn btrfs_consume_dir_index_seq(
+        alloc: &mut BtrfsAllocState,
+        parent_oid: u64,
+    ) -> ffs_error::Result<u64> {
+        let next = if let Some(&v) = alloc.dir_index_counters.get(&parent_oid) {
+            v
+        } else {
+            Self::btrfs_max_ondisk_dir_index_plus_one(alloc, parent_oid)?
+        };
+        alloc
+            .dir_index_counters
+            .insert(parent_oid, next.saturating_add(1));
         Ok(next)
     }
 
@@ -22743,7 +22787,7 @@ impl OpenFs {
         // links of the same inode in one directory — receives its own unique
         // sequence and therefore its own DIR_INDEX item, matching the kernel.
         // This also gives readdir its creation-order iteration.
-        let seq = Self::btrfs_next_dir_index_seq(alloc, parent_oid)?;
+        let seq = Self::btrfs_consume_dir_index_seq(alloc, parent_oid)?;
         let dir_index_key = BtrfsKey {
             objectid: parent_oid,
             item_type: BTRFS_ITEM_DIR_INDEX,
@@ -64965,6 +65009,59 @@ mod tests {
             }
             assert_eq!(parse_dir_items(data).unwrap().len(), 1);
         }
+        drop(alloc);
+    }
+
+    /// bd-rfi5j: the DIR_INDEX sequence must be monotonic within a mount —
+    /// deleting the highest-indexed entry must NOT free its index for reuse (the
+    /// kernel's in-memory index_cnt never goes backward). The pre-fix max+1
+    /// derivation reused a deleted tail index.
+    #[test]
+    fn btrfs_dir_index_does_not_reuse_deleted_tail_bd_rfi5j() {
+        let (fs, _cx) = open_writable_btrfs();
+        let alloc_mutex = fs.btrfs_alloc_state.as_ref().unwrap();
+        let mut alloc = alloc_mutex.lock();
+        let parent_oid = 256;
+        let mk = |child: u64, name: &str| BtrfsDirItem {
+            child_objectid: child,
+            child_key_type: BTRFS_ITEM_INODE_ITEM,
+            child_key_offset: 0,
+            file_type: BTRFS_FT_REG_FILE,
+            name: name.as_bytes().to_vec(),
+        };
+
+        let a = fs
+            .btrfs_insert_dir_entry(&mut alloc, parent_oid, &mk(9001, "a"))
+            .unwrap();
+        let b = fs
+            .btrfs_insert_dir_entry(&mut alloc, parent_oid, &mk(9002, "b"))
+            .unwrap();
+        let c = fs
+            .btrfs_insert_dir_entry(&mut alloc, parent_oid, &mk(9003, "c"))
+            .unwrap();
+        assert_eq!(b, a + 1);
+        assert_eq!(c, b + 1);
+
+        // Delete the highest-indexed entry's DIR_INDEX item (the on-disk max now
+        // drops back to `b`).
+        alloc
+            .fs_tree
+            .delete(&BtrfsKey {
+                objectid: parent_oid,
+                item_type: BTRFS_ITEM_DIR_INDEX,
+                offset: c,
+            })
+            .unwrap();
+
+        // The next entry must get c + 1, NOT reuse c (which max+1 would now yield).
+        let d = fs
+            .btrfs_insert_dir_entry(&mut alloc, parent_oid, &mk(9004, "d"))
+            .unwrap();
+        assert_eq!(
+            d,
+            c + 1,
+            "a deleted tail DIR_INDEX must not be reused within a mount session"
+        );
         drop(alloc);
     }
 
