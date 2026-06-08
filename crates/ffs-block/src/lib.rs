@@ -2331,18 +2331,19 @@ impl ArcState {
     }
 
     #[cfg(feature = "s3fifo")]
-    fn s3_access_handle(&mut self, key: BlockNumber, initial_count: u8) -> Arc<S3AccessHandle> {
-        self.access_count
-            .entry(key)
-            .or_insert_with(|| S3AccessHandle::new(initial_count))
-            .clone()
-    }
-
-    #[cfg(feature = "s3fifo")]
     fn s3_access_count(&self, key: BlockNumber) -> u8 {
         self.access_count
             .get(&key)
             .map_or(0, |handle| handle.load_count())
+    }
+
+    #[cfg(feature = "s3fifo")]
+    fn increment_s3_access_count(&mut self, key: BlockNumber) -> u8 {
+        if let Some(handle) = self.access_count.get(&key) {
+            return handle.increment_count();
+        }
+        let _ = self.access_count.insert(key, S3AccessHandle::new(1));
+        1
     }
 
     #[cfg(feature = "s3fifo")]
@@ -3009,7 +3010,7 @@ impl ArcState {
                 self.loc.insert(key, ArcList::T1);
             }
         }
-        let access_count = self.s3_access_handle(key, 0).increment_count();
+        let access_count = self.increment_s3_access_count(key);
         trace!(
             target: "ffs::block::s3fifo",
             event = "queue_transition",
