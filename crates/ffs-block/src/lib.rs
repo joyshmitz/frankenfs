@@ -2262,10 +2262,6 @@ impl ArcState {
             // Tiny caches need relaxed split targets; otherwise S3-FIFO
             // under-fills and violates generic cache warm-up expectations.
             (capacity, capacity)
-        } else if capacity >= 512 {
-            let small = (capacity / 5).max(1).min(capacity - 1);
-            let main = capacity.saturating_sub(small);
-            (small, main)
         } else {
             let small = (capacity / 10).max(1).min(capacity - 1);
             let main = capacity.saturating_sub(small);
@@ -6566,11 +6562,6 @@ mod tests {
         assert_eq!(s, 10);
         assert_eq!(m, 90);
         assert_eq!(g, 100);
-
-        let (s, m, g) = ArcState::s3_capacity_split(640);
-        assert_eq!(s, 128);
-        assert_eq!(m, 512);
-        assert_eq!(g, 640);
 
         let (s, m, g) = ArcState::s3_capacity_split(10);
         assert_eq!(s, 1);
