@@ -1057,6 +1057,29 @@ impl std::fmt::Debug for OpenFs {
     }
 }
 
+/// A `ffs_btree::BlockAllocator` that refuses to allocate (bd-6nwjx). Used by
+/// fast-commit ADD_RANGE recovery so an extent insert succeeds only when it
+/// fits an existing leaf with no tree growth — growth needs the writable-path
+/// block allocator, which is not available during mount recovery.
+struct NoGrowBlockAllocator;
+
+impl ffs_btree::BlockAllocator for NoGrowBlockAllocator {
+    fn alloc_block(&mut self, _cx: &Cx) -> ffs_error::Result<BlockNumber> {
+        Err(FfsError::UnsupportedFeature(
+            "fast-commit ADD_RANGE apply: extent-tree growth (block allocation) is not \
+             supported at recovery"
+                .into(),
+        ))
+    }
+
+    fn free_block(&mut self, _cx: &Cx, _block: BlockNumber) -> ffs_error::Result<()> {
+        Err(FfsError::UnsupportedFeature(
+            "fast-commit ADD_RANGE apply: extent-tree node free is not supported at recovery"
+                .into(),
+        ))
+    }
+}
+
 /// Adapter that exposes a `ByteDevice` as a `BlockDevice` for journal replay.
 struct ByteDeviceBlockAdapter<'a> {
     dev: &'a dyn ByteDevice,
@@ -4138,6 +4161,20 @@ impl OpenFs {
                 }
             }
         }
+        self.recovery_write_inode_raw(cx, ino, raw_inode)
+    }
+
+    /// Splice raw inode bytes into the inode table at recovery time and write
+    /// the block back via the unversioned device adapter (the JBD2-replay write
+    /// path — no alloc_state needed at mount). Shared by the fast-commit
+    /// InodeUpdate and AddRange applies (bd-6nwjx). Writes only as many bytes as
+    /// `raw_inode` carries, preserving any trailing on-disk inode bytes.
+    fn recovery_write_inode_raw(
+        &self,
+        cx: &Cx,
+        ino: u32,
+        raw_inode: &[u8],
+    ) -> Result<(), FfsError> {
         let sb = self
             .ext4_superblock()
             .ok_or_else(|| FfsError::Format("not an ext4 filesystem".into()))?;
@@ -4170,24 +4207,74 @@ impl OpenFs {
             });
         }
         let mut updated = block.to_vec();
-        // The FC record may be shorter than the on-disk inode (i_extra_isize);
-        // overwrite only what it carries, preserving any trailing bytes.
         let write_len = raw_inode.len().min(inode_size);
         updated[offset_in_block..offset_in_block + write_len]
             .copy_from_slice(&raw_inode[..write_len]);
 
-        // Recovery-time writeback via the unversioned device adapter, exactly as
-        // JBD2 journal replay writes recovered blocks.
         let block_dev = ByteDeviceBlockAdapter {
             dev: &*self.dev,
             block_size: sb.block_size,
         };
         block_dev.write_block(cx, block_num, &updated)?;
-        // Drop the now-stale cached inode-table block so later reads observe the
-        // applied inode.
         self.ext4_inode_table_block_cache.lock().remove(&block_num);
-        debug!(ino, block = block_num.0, "fc_apply: inode_update written back");
+        debug!(ino, block = block_num.0, "fc_apply: inode written back at recovery");
         Ok(())
+    }
+
+    /// Apply a fast-commit ADD_RANGE record (bd-6nwjx) by inserting the extent
+    /// into the inode's extent tree, reusing the validated `ffs_btree::insert`
+    /// with a NO-GROW allocator: the insert succeeds when the target leaf has
+    /// room (no block allocation) and fails when the tree would need to grow —
+    /// growth needs the writable-path allocator, which is unavailable at mount
+    /// recovery. Returns Ok(true) when the extent was inserted, Ok(false) when
+    /// it was skipped (needs tree growth, or the inode is not extent-mapped).
+    /// NOTE: unwired pending the per-inode InodeUpdate coordination + the
+    /// metadata_csum leaf-tail finalize; see bd-6nwjx.
+    #[allow(dead_code)]
+    fn apply_fast_commit_add_range(
+        &self,
+        cx: &Cx,
+        ino: u32,
+        extent: Ext4Extent,
+    ) -> Result<bool, FfsError> {
+        let mut inode = self.read_inode(cx, InodeNumber(u64::from(ino)))?;
+        if inode.flags & EXT4_EXTENTS_FL == 0 {
+            // Legacy indirect-mapped inode: ADD_RANGE replay does not apply.
+            return Ok(false);
+        }
+        let mut root_bytes = Self::extent_root(&inode);
+        let block_dev = ByteDeviceBlockAdapter {
+            dev: &*self.dev,
+            block_size: self
+                .ext4_superblock()
+                .ok_or_else(|| FfsError::Format("not an ext4 filesystem".into()))?
+                .block_size,
+        };
+        let mut no_grow = NoGrowBlockAllocator;
+        match ffs_btree::insert(cx, &block_dev, &mut root_bytes, extent, &mut no_grow) {
+            Ok(()) => {
+                // The leaf/root mutation is in root_bytes (+ any existing leaf
+                // block the insert rewrote via the device). Persist the updated
+                // extent root back into the inode.
+                Self::set_extent_root(&mut inode, &root_bytes);
+                let inode_size = usize::from(
+                    self.ext4_superblock()
+                        .ok_or_else(|| FfsError::Format("not an ext4 filesystem".into()))?
+                        .inode_size,
+                );
+                let raw = ffs_inode::serialize_inode(&inode, inode_size);
+                self.recovery_write_inode_raw(cx, ino, &raw)?;
+                Ok(true)
+            }
+            Err(error) => {
+                warn!(
+                    ino,
+                    error = %error,
+                    "fc_apply: ADD_RANGE skipped — extent-tree growth not supported at recovery"
+                );
+                Ok(false)
+            }
+        }
     }
 
     fn verify_fast_commit_dentry_target(
@@ -31138,6 +31225,81 @@ mod tests {
             after.mtime, orig_mtime,
             "external-extent-tree inode_update must be skipped, leaving the inode untouched"
         );
+    }
+
+    /// bd-6nwjx (AddRange apply primitive): apply_fast_commit_add_range inserts
+    /// an extent into the inode's extent tree when the target leaf has room
+    /// (no block allocation) and reports a skip when growth would be required —
+    /// reusing the validated ffs_btree::insert with a no-grow allocator.
+    #[test]
+    fn fast_commit_add_range_apply_inserts_into_leaf_with_room_bd_6nwjx() {
+        let dev = TestDevice::from_vec(build_ext4_image_with_extents());
+        let cx = Cx::for_testing();
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default())
+            .expect("open ext4 image");
+        // Inode #11: a regular file with a single depth-0 (inline) leaf extent
+        // (logical 0). A 60-byte root holds up to 4 extents, so there is room.
+        let ino = InodeNumber(11);
+        let before = fs.read_inode(&cx, ino).expect("read inode 11");
+
+        // Insert a second extent (logical 5 -> physical 50): fits inline.
+        let extent = Ext4Extent {
+            logical_block: 5,
+            raw_len: 1,
+            physical_start: 50,
+        };
+        let applied = fs
+            .apply_fast_commit_add_range(&cx, 11, extent)
+            .expect("apply add_range");
+        assert!(applied, "no-growth insert must apply");
+
+        // The new mapping is now resolvable in the inode's extent tree.
+        let after = fs.read_inode(&cx, ino).expect("re-read inode 11");
+        let extents = fs
+            .collect_extents_with_scope(&cx, &mut RequestScope::empty(), &after)
+            .expect("collect extents");
+        assert!(
+            extents
+                .iter()
+                .any(|e| e.logical_block == 5 && e.physical_start == 50),
+            "inserted extent (logical 5 -> physical 50) must be present, got {extents:?}"
+        );
+        // The original extent is preserved.
+        assert!(
+            extents.iter().any(|e| e.logical_block == 0),
+            "original extent must remain"
+        );
+        let _ = before;
+
+        // Fill the inline root to capacity, then a further insert needs tree
+        // growth → skipped (Ok(false)), not corrupting.
+        for logical in [10_u32, 15] {
+            assert!(
+                fs.apply_fast_commit_add_range(
+                    &cx,
+                    11,
+                    Ext4Extent {
+                        logical_block: logical,
+                        raw_len: 1,
+                        physical_start: u64::from(logical) + 100,
+                    },
+                )
+                .expect("apply"),
+                "inserts up to root capacity must apply"
+            );
+        }
+        let grow = fs
+            .apply_fast_commit_add_range(
+                &cx,
+                11,
+                Ext4Extent {
+                    logical_block: 20,
+                    raw_len: 1,
+                    physical_start: 200,
+                },
+            )
+            .expect("apply (skip) must not error");
+        assert!(!grow, "an insert needing tree growth must be skipped at recovery");
     }
 
     /// Build an open ext4 fs plus an InodeUpdate FC op that bumps the root
