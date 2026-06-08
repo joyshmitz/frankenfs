@@ -4067,7 +4067,10 @@ impl OpenFs {
                         applied += 1;
                     }
                 }
-                ffs_journal::FcOperation::InodeUpdate(ino) => {
+                ffs_journal::FcOperation::InodeUpdate(ino, _raw_inode) => {
+                    // TODO(bd-6nwjx): write _raw_inode back to the inode table
+                    // (the parser now carries the EXT4_FC_TAG_INODE body) instead
+                    // of only verifying the inode exists.
                     if self.verify_fast_commit_inode(cx, *ino) {
                         applied += 1;
                     }
@@ -30947,7 +30950,7 @@ mod tests {
         assert_eq!(fc.replay.blocks_scanned, 1);
         assert_eq!(
             fc.replay.operations,
-            vec![ffs_journal::FcOperation::InodeUpdate(42)]
+            vec![ffs_journal::FcOperation::InodeUpdate(42, Vec::new())]
         );
 
         let target = fs.read_block_vec(&cx, BlockNumber(15)).unwrap();
@@ -30998,8 +31001,8 @@ mod tests {
         assert_eq!(
             fc.replay.operations,
             vec![
-                ffs_journal::FcOperation::InodeUpdate(42),
-                ffs_journal::FcOperation::InodeUpdate(43),
+                ffs_journal::FcOperation::InodeUpdate(42, Vec::new()),
+                ffs_journal::FcOperation::InodeUpdate(43, Vec::new()),
             ]
         );
     }

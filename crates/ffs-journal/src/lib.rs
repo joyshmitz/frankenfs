@@ -1643,8 +1643,12 @@ pub enum FcOperation {
     AddRange(FcExtentRange),
     /// Remove extent mapping (truncate/punch).
     DelRange(FcDelRange),
-    /// Mark an inode as modified (triggers re-read from disk).
-    InodeUpdate(u32),
+    /// Update an inode from a fast-commit record: the inode number plus the raw
+    /// on-disk `ext4_inode` bytes carried by `EXT4_FC_TAG_INODE`
+    /// (`fc_ino` le32 followed by the raw inode). The bytes are what the apply
+    /// step writes back to the inode table; an empty vec means the record
+    /// carried only the inode number (legacy/placeholder fixtures).
+    InodeUpdate(u32, Vec<u8>),
 }
 
 /// Result of replaying fast commit blocks from the journal.
@@ -1703,7 +1707,11 @@ fn parse_fc_operation(tag: FcTag, payload: &[u8]) -> Option<FcOperation> {
     match tag {
         FcTag::Inode => (payload.len() >= 4).then(|| {
             let ino = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
-            FcOperation::InodeUpdate(ino)
+            // EXT4_FC_TAG_INODE payload = fc_ino(le32) + the raw on-disk
+            // ext4_inode. Carry those bytes so the apply step can write them back
+            // to the inode table (bd-6nwjx); empty when the record is ino-only.
+            let raw_inode = payload.get(4..).unwrap_or(&[]).to_vec();
+            FcOperation::InodeUpdate(ino, raw_inode)
         }),
         FcTag::AddRange => (payload.len() >= 16).then(|| {
             // fc_ino(4) then a 12-byte on-disk ext4_extent. Decode ee_len's
@@ -1946,8 +1954,36 @@ mod fc_tests {
         ok.extend(build_fc_tag(0x08, &tail2)); // TAIL
         let ok_result = replay_fast_commit(&ok).unwrap();
         assert_eq!(ok_result.transactions_found, 1);
-        assert_eq!(ok_result.operations, vec![FcOperation::InodeUpdate(7)]);
+        assert_eq!(ok_result.operations, vec![FcOperation::InodeUpdate(7, Vec::new())]);
         assert!(!ok_result.fallback_required);
+    }
+
+    /// bd-6nwjx increment 1: a real EXT4_FC_TAG_INODE carries fc_ino(le32) +
+    /// the raw on-disk ext4_inode. The parser must surface those inode bytes on
+    /// InodeUpdate so the apply step can write them back (it previously discarded
+    /// everything after fc_ino, making FC inode recovery impossible).
+    #[test]
+    fn replay_fast_commit_carries_inode_body() {
+        let raw_inode: Vec<u8> = (0..160_u16).map(|i| (i & 0xff) as u8).collect();
+        let mut payload = Vec::with_capacity(4 + raw_inode.len());
+        payload.extend_from_slice(&42_u32.to_le_bytes()); // fc_ino
+        payload.extend_from_slice(&raw_inode); // raw ext4_inode
+
+        let mut stream = Vec::new();
+        stream.extend(build_fc_tag(0x09, &[0_u8; 8])); // HEAD
+        stream.extend(build_fc_tag(0x06, &payload)); // INODE + body
+        let mut tail = Vec::new();
+        tail.extend_from_slice(&5_u32.to_le_bytes());
+        tail.extend_from_slice(&0_u32.to_le_bytes());
+        stream.extend(build_fc_tag(0x08, &tail)); // TAIL
+
+        let result = replay_fast_commit(&stream).unwrap();
+        assert_eq!(
+            result.operations,
+            vec![FcOperation::InodeUpdate(42, raw_inode)],
+            "parser must carry the raw inode body, not just fc_ino"
+        );
+        assert!(!result.fallback_required);
     }
 
     #[test]
@@ -1973,7 +2009,7 @@ mod fc_tests {
 
         let mut pending = PendingFcTransaction {
             active: true,
-            operations: vec![FcOperation::InodeUpdate(42)],
+            operations: vec![FcOperation::InodeUpdate(42, Vec::new())],
         };
         discard_pending_fc_transaction(&mut result, &mut pending);
 
@@ -2254,7 +2290,7 @@ mod fc_tests {
         let result = replay_fast_commit(&data).unwrap();
         assert_eq!(result.transactions_found, 1);
         assert_eq!(result.last_tid, 3);
-        assert_eq!(result.operations, vec![FcOperation::InodeUpdate(42)]);
+        assert_eq!(result.operations, vec![FcOperation::InodeUpdate(42, Vec::new())]);
         assert_eq!(result.incomplete_transactions, 0);
         assert!(result.fallback_required);
     }
@@ -2273,7 +2309,7 @@ mod fc_tests {
         let result = replay_fast_commit(&data).unwrap();
         assert_eq!(result.transactions_found, 1);
         assert_eq!(result.last_tid, 3);
-        assert_eq!(result.operations, vec![FcOperation::InodeUpdate(42)]);
+        assert_eq!(result.operations, vec![FcOperation::InodeUpdate(42, Vec::new())]);
         assert_eq!(result.incomplete_transactions, 0);
         assert!(result.fallback_required);
     }
@@ -2292,7 +2328,7 @@ mod fc_tests {
         let result = replay_fast_commit(&data).unwrap();
         assert_eq!(result.transactions_found, 1);
         assert_eq!(result.last_tid, 3);
-        assert_eq!(result.operations, vec![FcOperation::InodeUpdate(42)]);
+        assert_eq!(result.operations, vec![FcOperation::InodeUpdate(42, Vec::new())]);
         assert_eq!(result.incomplete_transactions, 0);
         assert!(!result.fallback_required);
     }
