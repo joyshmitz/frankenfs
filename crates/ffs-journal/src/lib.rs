@@ -38,12 +38,17 @@ const JBD2_HEADER_SIZE: usize = 12;
 const JBD2_REVOKE_HEADER_SIZE: usize = 16; // journal header (12) + r_count (4)
 const JBD2_TAG_SIZE_32: usize = 8;
 const JBD2_TAG_SIZE_64: usize = 12;
-// Linux JBD2's journal_tag_bytes() adds the 2-byte checksum-v2 field on
-// top of the legacy 32/64-bit tag geometry. CsumV3 switches to a 16-byte
-// base tag with a 32-bit checksum. All formats append a 16-byte UUID when
-// JBD2_TAG_FLAG_SAME_UUID is clear.
-const JBD2_TAG_SIZE_CSUM_V2_32: usize = 10;
-const JBD2_TAG_SIZE_CSUM_V2_64: usize = 14;
+// The kernel on-disk csum-v2 tag is `journal_block_tag_t`:
+//   { __be32 t_blocknr; __be16 t_checksum; __be16 t_flags; __be32 t_blocknr_high }
+// i.e. 8 bytes (32-bit) or 12 bytes (64-bit, with t_blocknr_high) — IDENTICAL in
+// size to the legacy tag. The t_checksum is an in-struct field, NOT a 2-byte
+// suffix appended on top of the legacy geometry, so journal_tag_bytes() returns
+// the same 8/12 for v1 and v2 (only CsumV3 grows to a 16-byte base tag). A prior
+// revision sized these at 10/14, which mis-strided every tag after the first when
+// recovering a real kernel csum-v2 journal with >=2 tags (bd-bryy3). All formats
+// append a 16-byte UUID when JBD2_TAG_FLAG_SAME_UUID is clear.
+const JBD2_TAG_SIZE_CSUM_V2_32: usize = 8;
+const JBD2_TAG_SIZE_CSUM_V2_64: usize = 12;
 const JBD2_TAG_SIZE_CSUM_V3: usize = 16;
 const JBD2_TAG_UUID_SIZE: usize = 16;
 const JBD2_TAG_FLAGS_OFFSET_V1_V2: usize = 6;
@@ -4228,6 +4233,70 @@ mod tests {
         );
     }
 
+    /// bd-bryy3: recovering a real kernel csum-v2 journal whose descriptor holds
+    /// TWO tags must map each tag to its own destination block. The csum-v2 tag is
+    /// 8 bytes (32-bit): { blocknr[0:4], checksum u16[4:6], flags u16[6:8] }. A
+    /// prior revision sized it at 10 bytes, so the second tag's blocknr/flags were
+    /// read 2 bytes too far — mapping the journaled block to the wrong destination
+    /// (silent corruption). With the correct 8-byte stride both blocks land right.
+    #[test]
+    fn replay_jbd2_csum_v2_two_tag_descriptor_maps_each_block_bd_bryy3() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(512, 256);
+        let region = JournalRegion {
+            start: BlockNumber(100),
+            blocks: 32,
+        };
+        let uuid = [0_u8; 16];
+        // csum-v2 journal superblock: log starts at region block 1 (abs 101), seq 1.
+        dev.raw_write(
+            BlockNumber(100),
+            jbd2_superblock_block(512, 1, 1, 0, JBD2_FEATURE_INCOMPAT_CSUM_V2, uuid),
+        );
+
+        // Descriptor (block 101) with two csum-v2 tags (8-byte stride, SAME_UUID so
+        // no inline UUID): tag0 -> dest block 5, tag1 -> dest block 7 (LAST).
+        let mut desc = vec![0_u8; 512];
+        encode_jbd2_header(&mut desc, JBD2_BLOCKTYPE_DESCRIPTOR, 1);
+        let same_uuid = u16::try_from(JBD2_TAG_FLAG_SAME_UUID).unwrap();
+        let last_same = u16::try_from(JBD2_TAG_FLAG_LAST | JBD2_TAG_FLAG_SAME_UUID).unwrap();
+        // tag0 @ offset 12: blocknr[12:16], flags u16 @ 12+6=18.
+        desc[12..16].copy_from_slice(&5_u32.to_be_bytes());
+        desc[18..20].copy_from_slice(&same_uuid.to_be_bytes());
+        // tag1 @ offset 20 (12 + 8): blocknr[20:24], flags u16 @ 20+6=26.
+        desc[20..24].copy_from_slice(&7_u32.to_be_bytes());
+        desc[26..28].copy_from_slice(&last_same.to_be_bytes());
+        dev.raw_write(BlockNumber(101), desc);
+
+        // The two journaled data blocks follow the descriptor, in tag order.
+        let data0 = vec![0xA1_u8; 512];
+        let data1 = vec![0xB2_u8; 512];
+        dev.raw_write(BlockNumber(102), data0.clone());
+        dev.raw_write(BlockNumber(103), data1.clone());
+        dev.raw_write(BlockNumber(104), commit_block(512, 1));
+
+        let outcome = replay_jbd2_with_options(
+            &cx,
+            &dev,
+            region,
+            ReplayOptions {
+                verify_checksums: false,
+            },
+        )
+        .expect("replay of a two-tag csum-v2 journal");
+        assert_eq!(outcome.committed_sequences, vec![1]);
+        assert_eq!(
+            dev.read_block(&cx, BlockNumber(5)).unwrap().as_slice(),
+            &data0[..],
+            "tag0 must replay to its destination block 5"
+        );
+        assert_eq!(
+            dev.read_block(&cx, BlockNumber(7)).unwrap().as_slice(),
+            &data1[..],
+            "tag1 must replay to block 7 (mis-mapped under the old 10-byte stride)"
+        );
+    }
+
     #[test]
     fn jbd2_writer_multi_write_replays_all() {
         let cx = test_cx();
@@ -4641,16 +4710,20 @@ mod tests {
 
     #[test]
     fn jbd2_csum_v2_descriptor_tag_geometry_matches_kernel_tag_bytes() {
-        assert_eq!(Jbd2TagFormat::CsumV2.tag_size(false), 10);
-        assert_eq!(Jbd2TagFormat::CsumV2.tag_size(true), 14);
+        // journal_block_tag_t is 8 bytes (32-bit) / 12 (64-bit) — same size as the
+        // legacy tag; t_checksum is in-struct, not appended (bd-bryy3).
+        assert_eq!(Jbd2TagFormat::CsumV2.tag_size(false), 8);
+        assert_eq!(Jbd2TagFormat::CsumV2.tag_size(true), 12);
+        assert_eq!(Jbd2TagFormat::CsumV2.tag_size(false), Jbd2TagFormat::Legacy.tag_size(false));
+        assert_eq!(Jbd2TagFormat::CsumV2.tag_size(true), Jbd2TagFormat::Legacy.tag_size(true));
         assert_eq!(
             max_tags_per_descriptor_for_format(512, false, true, Jbd2TagFormat::CsumV2),
-            49
-        ); // (512 - 12 header - 4 tail) / 10.
+            62
+        ); // (512 - 12 header - 4 tail) / 8.
         assert_eq!(
             max_tags_per_descriptor_for_format(512, true, true, Jbd2TagFormat::CsumV2),
-            35
-        ); // (512 - 12 header - 4 tail) / 14.
+            41
+        ); // (512 - 12 header - 4 tail) / 12.
     }
 
     #[test]
