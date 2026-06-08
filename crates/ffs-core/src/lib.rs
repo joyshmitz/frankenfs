@@ -57446,6 +57446,58 @@ mod tests {
         );
     }
 
+    /// btrfs symlinks store their target as an INLINE EXTENT_DATA on an S_IFLNK
+    /// inode (regardless of length, up to PATH_MAX — the symlink case is exempt
+    /// from the regular-file sectorsize inline limit). This validates that path
+    /// on-disk: create symlinks with a short and a longer (multi-hundred-byte)
+    /// target, require real `btrfs check` clean, and confirm readlink round-trips
+    /// the exact target. Also guards that the bd-jctlm inline cap (which lives in
+    /// the regular-file btrfs_write path) did not disturb symlink target storage,
+    /// which uses its own inline write. Skips without btrfs-progs.
+    #[test]
+    fn btrfs_symlink_target_passes_btrfs_check() {
+        let Some((fs, dev, _tmp, image)) = open_writable_btrfs_mkfs(256) else {
+            return; // btrfs-progs unavailable
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(u64::from(BTRFS_FIRST_FREE_OBJECTID));
+
+        let short_target = "../relative/target/file.txt";
+        let s1 = fs
+            .symlink(&cx, root, OsStr::new("short.lnk"), std::path::Path::new(short_target), 0, 0)
+            .expect("create short symlink");
+        // A longer target (still < a sector) exercises a bigger inline payload.
+        let long_target = format!("/very/long/{}/deep/path/target", "segment/".repeat(40));
+        let s2 = fs
+            .symlink(&cx, root, OsStr::new("long.lnk"), std::path::Path::new(&long_target), 0, 0)
+            .expect("create long symlink");
+
+        // readlink must round-trip the exact target bytes.
+        assert_eq!(
+            fs.readlink(&cx, s1.ino).expect("readlink short"),
+            short_target.as_bytes(),
+            "short symlink target must round-trip"
+        );
+        assert_eq!(
+            fs.readlink(&cx, s2.ino).expect("readlink long"),
+            long_target.as_bytes(),
+            "long symlink target must round-trip"
+        );
+
+        let _ = fs.flush_mvcc_to_device(&cx);
+        fs.btrfs_full_transaction_commit(&cx, "symlink-target-check")
+            .expect("btrfs full transaction commit");
+        std::fs::write(&image, dev.snapshot_bytes()).expect("write modified image");
+
+        let Some((ok, output)) = run_btrfs_check(&image) else {
+            return; // btrfs check tool unavailable
+        };
+        assert!(
+            ok,
+            "btrfs check must accept symlinks whose target is stored inline:\n{output}"
+        );
+    }
+
     /// Cross-directory renames (a file moved between directories, and a
     /// NON-EMPTY directory moved between parents) must leave btrfs-check-clean
     /// metadata: the DIR_ITEM/DIR_INDEX move from the old parent to the new, the
