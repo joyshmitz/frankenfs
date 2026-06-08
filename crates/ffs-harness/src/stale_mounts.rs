@@ -57,6 +57,7 @@ pub fn reap_stale_frankenfs_mounts_once() {
 /// `Subtype("ffs")`). Only mountpoints under [`temp_roots`] are eligible, so
 /// a deliberately mounted FrankenFS volume elsewhere is never touched.
 #[cfg(target_os = "linux")]
+#[must_use]
 pub fn reap_stale_frankenfs_mounts() -> ReapReport {
     let Ok(mounts) = std::fs::read_to_string("/proc/mounts") else {
         return ReapReport::default();
@@ -122,6 +123,7 @@ fn is_frankenfs_mount(source: &str, fstype: &str) -> bool {
 
 /// Decode the octal escapes (`\040` space, `\011` tab, `\012` newline,
 /// `\134` backslash) used in `/proc/mounts` path fields.
+#[allow(clippy::items_after_statements)]
 fn unescape_mounts_field(field: &str) -> PathBuf {
     let mut out = Vec::with_capacity(field.len());
     let bytes = field.as_bytes();
@@ -173,6 +175,7 @@ enum Liveness {
 /// * exits non-zero         → re-check inline (safe: it did not hang) and reap
 ///   only on `ENOTCONN` (dead transport); permission errors etc. are skipped
 #[cfg(target_os = "linux")]
+#[allow(clippy::items_after_statements)]
 fn probe_liveness(mountpoint: &Path, timeout: Duration) -> Liveness {
     use std::process::{Command, Stdio};
     use std::time::Instant;
