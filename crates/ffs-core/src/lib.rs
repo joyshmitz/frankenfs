@@ -16918,31 +16918,17 @@ impl OpenFs {
                     )?;
                 }
             }
-            block_dev = self.block_device_adapter();
+            // (block_dev is re-acquired below, after the add-dir-entry insert.)
         }
 
-        // Remove old entry from source parent.
-        let src_extents = self.collect_extents(cx, &parent_inode)?;
-        let reserved_tail = self.ext4_dir_reserved_tail();
-        let dx_root_phys = Self::ext4_htree_dx_root_phys(&parent_inode, &src_extents);
-        'rm_src: for ext in &src_extents {
-            for block in Self::extent_phys_blocks(ext) {
-                if Some(block) == dx_root_phys {
-                    continue;
-                }
-                let mut data = self.read_block_vec(cx, block)?;
-                if ffs_dir::remove_entry(&mut data, name, reserved_tail)? {
-                    let src_ino_u32 = u32::try_from(parent.0).map_err(|_| {
-                        FfsError::Format("inode number exceeds ext4 32-bit limit".into())
-                    })?;
-                    self.stamp_ext4_dir_block(&mut data, src_ino_u32, parent_inode.generation);
-                    block_dev.write_block(cx, block, &data)?;
-                    break 'rm_src;
-                }
-            }
-        }
-
-        // Add new entry to target parent.
+        // Add the new entry to the target parent FIRST, before removing the source
+        // entry. ext4_add_dir_entry is the only fallible step remaining — it can
+        // reject the insert (non-ASCII casefold name; or an htree leaf that is full
+        // and would need an unsupported multi-level rebuild — bd-v1zli / bd-ikkdu).
+        // Performing it before the irreversible source removal makes rename atomic:
+        // a refused insert leaves the source entry intact instead of unlinking it
+        // and then failing, which would orphan the renamed inode (silent data
+        // loss). On success the result is identical to remove-then-add.
         let new_parent_inode_fresh = self.read_inode(cx, new_parent)?;
         self.ext4_add_dir_entry(
             cx,
@@ -16957,9 +16943,34 @@ impl OpenFs {
             tstamp_nanos,
         )?;
 
-        // Re-acquire the block device adapter so subsequent inode writes see the metadata updates
-        // committed while moving the directory entry.
+        // Re-acquire the block device adapter so subsequent reads/writes observe
+        // the metadata committed while inserting the directory entry.
         block_dev = self.block_device_adapter();
+
+        // Remove the old entry from the source parent. Re-read the source inode
+        // fresh: for a same-parent rename the insert above may have grown/rebuilt
+        // the directory's htree, so the pre-mutation `parent_inode` snapshot's
+        // extents would be stale.
+        let src_parent_fresh = self.read_inode(cx, parent)?;
+        let src_extents = self.collect_extents(cx, &src_parent_fresh)?;
+        let reserved_tail = self.ext4_dir_reserved_tail();
+        let dx_root_phys = Self::ext4_htree_dx_root_phys(&src_parent_fresh, &src_extents);
+        'rm_src: for ext in &src_extents {
+            for block in Self::extent_phys_blocks(ext) {
+                if Some(block) == dx_root_phys {
+                    continue;
+                }
+                let mut data = self.read_block_vec(cx, block)?;
+                if ffs_dir::remove_entry(&mut data, name, reserved_tail)? {
+                    let src_ino_u32 = u32::try_from(parent.0).map_err(|_| {
+                        FfsError::Format("inode number exceeds ext4 32-bit limit".into())
+                    })?;
+                    self.stamp_ext4_dir_block(&mut data, src_ino_u32, src_parent_fresh.generation);
+                    block_dev.write_block(cx, block, &data)?;
+                    break 'rm_src;
+                }
+            }
+        }
 
         // Directory rename link-count fixup. `ext4_add_dir_entry` already
         // incremented `new_parent`'s link count for the inserted directory entry
