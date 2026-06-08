@@ -18429,6 +18429,22 @@ impl OpenFs {
             .range(&lo, &hi)
             .map_err(|e| btrfs_mutation_to_ffs(&e))?;
 
+        // FICLONE replaces dst's ENTIRE content with src's. Drop dst's existing
+        // extents refcount-aware (a shared extent loses only this inode's
+        // EXTENT_DATA_REF; a sole extent is freed with its EXTENT_CSUM items)
+        // before grafting src's. Without this, cloning onto a NON-EMPTY dst
+        // either collides on a same-offset EXTENT_DATA key (KeyAlreadyExists,
+        // aborting mid-loop with a half-cloned dst) or leaves stale extents past
+        // the cloned i_size — leaking refs and tripping `btrfs check`. Mirrors
+        // the range path (btrfs_clone_file_range_data), which drops the dest
+        // window first. A whole-file clone onto itself is a no-op (guarding it
+        // also prevents freeing src's own extents in the clear step below).
+        if src_canonical == dst_canonical {
+            return Ok(());
+        }
+        let stale = Self::btrfs_extent_data_items(alloc, dst_canonical)?;
+        Self::btrfs_delete_extent_data_items(alloc, &stale)?;
+
         for (key, data) in src_extents {
             let dst_key = BtrfsKey {
                 objectid: dst_canonical,
@@ -58976,6 +58992,114 @@ mod tests {
                 "dst size must match the cloned source"
             );
         }
+    }
+
+    /// Whole-file FICLONE onto a NON-EMPTY destination must REPLACE dst's
+    /// content: drop dst's pre-existing extents (refcount-aware) before grafting
+    /// src's. Regression for the bug where btrfs_clone_file_data only inserted
+    /// src's extents — so a same-offset dst extent tripped KeyAlreadyExists
+    /// (aborting mid-loop) and any dst extent past src's i_size was left stale
+    /// (leaked ref + extent beyond i_size -> `btrfs check` failure). The range
+    /// path (FICLONERANGE) already dropped its window; this pins parity for the
+    /// whole-file path.
+    #[test]
+    fn btrfs_clone_file_data_over_nonempty_dst_replaces_content() {
+        let (fs, cx) = open_writable_btrfs();
+        let root = InodeNumber(u64::from(BTRFS_FIRST_FREE_OBJECTID));
+        let src = fs
+            .create(&cx, root, OsStr::new("src.dat"), 0o644, 0, 0)
+            .expect("create src");
+        let dst = fs
+            .create(&cx, root, OsStr::new("dst.dat"), 0o644, 0, 0)
+            .expect("create dst");
+
+        let fs_ops: &dyn FsOps = &fs;
+        // dst starts LARGER than and different from src: a regular extent at
+        // offset 0 (same key as src's) plus coverage past src's eventual i_size.
+        let dst_payload = vec![0xBB_u8; 16384];
+        fs_ops
+            .write(&cx, &mut RequestScope::empty(), dst.ino, 0, &dst_payload)
+            .expect("write dst");
+        let src_payload = vec![0xAA_u8; 8192];
+        fs_ops
+            .write(&cx, &mut RequestScope::empty(), src.ino, 0, &src_payload)
+            .expect("write src");
+
+        let src_canon = fs.btrfs_canonical_inode(src.ino).expect("src canonical");
+        let dst_canon = fs.btrfs_canonical_inode(dst.ino).expect("dst canonical");
+        let (src_db, src_dnb) = btrfs_first_regular_extent(&fs, src_canon);
+        let (old_dst_db, old_dst_dnb) = btrfs_first_regular_extent(&fs, dst_canon);
+        assert_ne!(
+            old_dst_db, src_db,
+            "src and dst must initially own distinct extents"
+        );
+
+        // Clone src -> dst over the non-empty destination. (Pre-fix this errored
+        // with KeyAlreadyExists on the offset-0 collision.)
+        {
+            let alloc_mutex = fs.btrfs_alloc_state.as_ref().expect("writable btrfs");
+            let mut alloc = alloc_mutex.lock();
+            fs.btrfs_clone_file_data(&mut alloc, src_canon, dst_canon)
+                .expect("clone over non-empty dst");
+        }
+
+        let alloc_mutex = fs.btrfs_alloc_state.as_ref().expect("writable btrfs");
+        let alloc = alloc_mutex.lock();
+        // dst now shares src's single extent; size matches src; nothing stale.
+        let dst_inode = fs
+            .btrfs_read_inode_from_tree(&alloc, dst_canon)
+            .expect("dst inode");
+        assert_eq!(
+            dst_inode.size,
+            src_payload.len() as u64,
+            "dst size must be replaced by src's"
+        );
+        let dst_exts = OpenFs::btrfs_extent_data_items(&alloc, dst_canon).expect("dst extents");
+        assert_eq!(dst_exts.len(), 1, "dst must hold exactly src's one extent");
+        let src_size = u64::try_from(src_payload.len()).unwrap();
+        for (key, ext) in &dst_exts {
+            assert!(
+                key.offset < src_size,
+                "no extent may sit past the cloned i_size"
+            );
+            match ext {
+                BtrfsExtentData::Regular { disk_bytenr, .. } => {
+                    assert_eq!(*disk_bytenr, src_db, "dst must share src's disk extent");
+                }
+                other => panic!("expected a regular extent, got {other:?}"),
+            }
+        }
+        // src's extent is now shared (refs 1 -> 2); dst's old sole extent was
+        // freed by the refcount-aware clear (refs 1 -> 0, no longer present).
+        assert_eq!(
+            alloc.extent_alloc.extent_item_refs(src_db, src_dnb).expect("src refs"),
+            Some(2),
+            "clone must share src's extent"
+        );
+        assert_eq!(
+            alloc
+                .extent_alloc
+                .extent_item_refs(old_dst_db, old_dst_dnb)
+                .expect("old dst refs"),
+            None,
+            "dst's replaced extent must be freed by the refcount-aware clear"
+        );
+        drop(alloc);
+
+        // dst reads back exactly src's bytes (no leftover 0xBB tail).
+        let read_back = fs_ops
+            .read(
+                &cx,
+                &mut RequestScope::empty(),
+                dst.ino,
+                0,
+                u32::try_from(dst_payload.len()).unwrap(),
+            )
+            .expect("read dst");
+        assert_eq!(
+            read_back, src_payload,
+            "dst must read back src's content, capped at src's i_size"
+        );
     }
 
     /// Locate the (disk_bytenr, disk_num_bytes) of a btrfs inode's first
