@@ -43574,6 +43574,28 @@ mod tests {
             fs.lookup(&cx, root, OsStr::new("mover.txt")).is_ok(),
             "a refused rename must leave the source entry intact"
         );
+
+        // SAME-PARENT rename to a non-ASCII name (within the casefold dir itself):
+        // an ASCII file already living in the casefold dir, renamed to a non-ASCII
+        // name in place, must also refuse atomically — the gate lives in the shared
+        // preflight, so it fires regardless of whether the parents differ.
+        fs.create(&cx, dir_ino, OsStr::new("inplace.txt"), 0o644, 0, 0)
+            .expect("create ascii file inside casefold dir");
+        let same_parent_res = fs.rename(
+            &cx,
+            dir_ino,
+            OsStr::new("inplace.txt"),
+            dir_ino,
+            OsStr::new("élan.txt"),
+        );
+        assert!(
+            same_parent_res.is_err(),
+            "non-ASCII same-parent rename in a casefold htree dir must be refused, got {same_parent_res:?}"
+        );
+        assert!(
+            fs.lookup(&cx, dir_ino, OsStr::new("inplace.txt")).is_ok(),
+            "a refused same-parent rename must leave the source entry intact"
+        );
     }
 
     /// bd-owt2r (insert side, end-to-end): creating an ASCII-named file in a
