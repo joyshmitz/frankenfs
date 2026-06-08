@@ -20813,7 +20813,7 @@ impl OpenFs {
         let mut alloc = alloc_mutex.lock();
         self.btrfs_require_directory_inode(&alloc, parent_oid)?;
         Self::btrfs_preflight_dir_entry_insert(&alloc, parent_oid, name, alloc.next_objectid)?;
-        self.btrfs_validate_nlink_adjustment(&alloc, parent_oid, 1)?;
+        // No parent nlink change for a btrfs subdirectory (bd-egyf6).
 
         // Check for duplicate name — POSIX requires EEXIST.
         if self
@@ -20830,7 +20830,10 @@ impl OpenFs {
             generation: alloc.generation,
             size: 0,
             nbytes: 0,
-            nlink: 2, // . and parent's reference
+            // btrfs directories always have nlink == 1 (unlike ext4's
+            // 2 + subdir-count); subdirectories do not bump the parent's link
+            // count (bd-egyf6).
+            nlink: 1,
             uid,
             gid,
             mode: u32::from(mode) | 0o040_000, // S_IFDIR
@@ -20867,8 +20870,8 @@ impl OpenFs {
         // Add INODE_REF for parent backref (index must match DIR_INDEX.offset).
         Self::btrfs_insert_inode_ref(&mut alloc, new_oid, parent_oid, name, dir_index_seq)?;
 
-        // Bump parent nlink for the new subdirectory.
-        self.btrfs_adjust_nlink(&mut alloc, parent_oid, 1)?;
+        // btrfs does NOT bump the parent's nlink for a new subdirectory
+        // (directories stay at nlink == 1) — bd-egyf6.
         self.btrfs_touch_inode_times(&mut alloc, parent_oid, secs, nanos)?;
         drop(alloc);
 
@@ -21387,14 +21390,13 @@ impl OpenFs {
         }
 
         Self::btrfs_require_inode_ref_name(&alloc, child_oid, parent_oid, name)?;
-        self.btrfs_validate_nlink_adjustment(&alloc, child_oid, if expect_dir { -2 } else { -1 })?;
-        if expect_dir {
-            self.btrfs_validate_nlink_adjustment(&alloc, parent_oid, -1)?;
-        }
+        // btrfs directories have nlink == 1 (not 2 + subdirs), so removing the
+        // sole link drops a dir as well as a file by -1; the parent's nlink does
+        // not change for a removed subdirectory (bd-egyf6).
+        self.btrfs_validate_nlink_adjustment(&alloc, child_oid, -1)?;
 
         let child_inode_before = self.btrfs_read_inode_from_tree(&alloc, child_oid)?;
-        let child_will_be_purged = (expect_dir && child_inode_before.nlink <= 2)
-            || (!expect_dir && child_inode_before.nlink <= 1);
+        let child_will_be_purged = child_inode_before.nlink <= 1;
         if child_will_be_purged {
             Self::btrfs_validate_purgeable_items(&alloc, child_oid)?;
         }
@@ -21405,12 +21407,8 @@ impl OpenFs {
         // Remove the INODE_REF back-pointer from child → parent.
         Self::btrfs_remove_inode_ref(&mut alloc, child_oid, parent_oid, name)?;
 
-        // Decrement child nlink.
-        if expect_dir {
-            self.btrfs_adjust_nlink(&mut alloc, child_oid, -2)?;
-        } else {
-            self.btrfs_adjust_nlink(&mut alloc, child_oid, -1)?;
-        }
+        // Drop the removed link (-1 for both files and directories).
+        self.btrfs_adjust_nlink(&mut alloc, child_oid, -1)?;
 
         // If nlink reached 0, purge the orphaned inode and all its data.
         let child_inode = self.btrfs_read_inode_from_tree(&alloc, child_oid)?;
@@ -21419,10 +21417,6 @@ impl OpenFs {
             self.btrfs_purge_inode(&mut alloc, child_oid)?;
         }
 
-        // If unlinking a directory, decrement parent nlink too.
-        if expect_dir {
-            self.btrfs_adjust_nlink(&mut alloc, parent_oid, -1)?;
-        }
         self.btrfs_touch_inode_times(&mut alloc, parent_oid, secs, nanos)?;
         drop(alloc);
 
@@ -21454,19 +21448,12 @@ impl OpenFs {
             return Err(FfsError::NotEmpty);
         }
         Self::btrfs_require_inode_ref_name(alloc, target_oid, new_parent_oid, new_name)?;
-        self.btrfs_validate_nlink_adjustment(
-            alloc,
-            target_oid,
-            if target_is_dir { -2 } else { -1 },
-        )?;
-        if target_is_dir {
-            self.btrfs_validate_nlink_adjustment(alloc, new_parent_oid, -1)?;
-        }
+        // btrfs dir nlink == 1: removing the overwritten target drops it by -1
+        // (file or dir) and leaves the new parent's nlink unchanged (bd-egyf6).
+        self.btrfs_validate_nlink_adjustment(alloc, target_oid, -1)?;
 
         let target_inode_before = self.btrfs_read_inode_from_tree(alloc, target_oid)?;
-        if (target_is_dir && target_inode_before.nlink <= 2)
-            || (!target_is_dir && target_inode_before.nlink <= 1)
-        {
+        if target_inode_before.nlink <= 1 {
             Self::btrfs_validate_purgeable_items(alloc, target_oid)?;
             Ok(true)
         } else {
@@ -21517,10 +21504,8 @@ impl OpenFs {
             child.child_objectid,
         )?;
         Self::btrfs_preflight_inode_ref_insert(&alloc, child.child_objectid, new_parent_oid)?;
-        if child_is_dir && parent_oid != new_parent_oid {
-            self.btrfs_validate_nlink_adjustment(&alloc, parent_oid, -1)?;
-            self.btrfs_validate_nlink_adjustment(&alloc, new_parent_oid, 1)?;
-        }
+        // Moving a directory across parents does NOT change either parent's
+        // nlink in btrfs (directories stay at nlink == 1) — bd-egyf6.
         let target_will_be_purged =
             self.btrfs_preflight_rename_target(&alloc, new_parent_oid, new_name, child_is_dir)?;
 
@@ -21539,12 +21524,11 @@ impl OpenFs {
             let target_is_dir = target.file_type == BTRFS_FT_DIR;
             self.btrfs_remove_dir_entry(&mut alloc, new_parent_oid, new_name)?;
             Self::btrfs_remove_inode_ref(&mut alloc, target_oid, new_parent_oid, new_name)?;
-            if target_is_dir {
-                self.btrfs_adjust_nlink(&mut alloc, target_oid, -2)?;
-                self.btrfs_adjust_nlink(&mut alloc, new_parent_oid, -1)?;
-            } else {
-                self.btrfs_adjust_nlink(&mut alloc, target_oid, -1)?;
-            }
+            // Removing the overwritten target drops its single link (-1 for both
+            // files and btrfs directories); the new parent's nlink is unchanged
+            // (bd-egyf6). `target_is_dir` no longer affects the link math.
+            let _ = target_is_dir;
+            self.btrfs_adjust_nlink(&mut alloc, target_oid, -1)?;
             let target_inode = self.btrfs_read_inode_from_tree(&alloc, target_oid)?;
             if target_inode.nlink == 0 {
                 debug_assert!(target_will_be_purged);
@@ -21569,11 +21553,8 @@ impl OpenFs {
             dir_index_seq,
         )?;
 
-        // If moving a directory across parents, adjust nlink for ".." backref.
-        if child_is_dir && new_parent_oid != parent_oid {
-            self.btrfs_adjust_nlink(&mut alloc, parent_oid, -1)?;
-            self.btrfs_adjust_nlink(&mut alloc, new_parent_oid, 1)?;
-        }
+        // Moving a directory across parents does not change either parent's
+        // nlink in btrfs (directories stay at nlink == 1) — bd-egyf6.
 
         self.btrfs_touch_inode_times(&mut alloc, parent_oid, secs, nanos)?;
         if new_parent_oid != parent_oid {
@@ -56489,6 +56470,75 @@ mod tests {
         );
     }
 
+    /// Cross-directory renames (a file moved between directories, and a
+    /// NON-EMPTY directory moved between parents) must leave btrfs-check-clean
+    /// metadata: the DIR_ITEM/DIR_INDEX move from the old parent to the new, the
+    /// moved inode's INODE_REF re-parented, the parent nlinks adjusted for the
+    /// directory move, and the moved subtree intact. The existing churn test
+    /// only covers single-directory file renames, so this pins the cross-parent
+    /// and directory-move paths against the real btrfs check tool.
+    #[test]
+    fn btrfs_cross_directory_rename_passes_btrfs_check() {
+        let Some((fs, dev, _tmp, image)) = open_writable_btrfs_mkfs(256) else {
+            return; // btrfs-progs unavailable
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(u64::from(BTRFS_FIRST_FREE_OBJECTID));
+
+        // /dira, /dirb; /dira/file.txt (with data); /dira/sub/inner.txt.
+        let dira = fs
+            .mkdir(&cx, root, OsStr::new("dira"), 0o755, 0, 0)
+            .expect("mkdir dira")
+            .ino;
+        let dirb = fs
+            .mkdir(&cx, root, OsStr::new("dirb"), 0o755, 0, 0)
+            .expect("mkdir dirb")
+            .ino;
+        let file = fs
+            .create(&cx, dira, OsStr::new("file.txt"), 0o644, 0, 0)
+            .expect("create file")
+            .ino;
+        fs.write(&cx, file, 0, b"payload").expect("write file");
+        let sub = fs
+            .mkdir(&cx, dira, OsStr::new("sub"), 0o755, 0, 0)
+            .expect("mkdir sub")
+            .ino;
+        fs.create(&cx, sub, OsStr::new("inner.txt"), 0o644, 0, 0)
+            .expect("create inner");
+
+        // Move a file across directories: /dira/file.txt -> /dirb/file.txt.
+        fs.rename(
+            &cx,
+            dira,
+            OsStr::new("file.txt"),
+            dirb,
+            OsStr::new("file.txt"),
+        )
+        .expect("cross-directory file rename");
+        // Move a NON-EMPTY directory across parents: /dira/sub -> /dirb/moved.
+        fs.rename(&cx, dira, OsStr::new("sub"), dirb, OsStr::new("moved"))
+            .expect("cross-directory directory rename");
+
+        // The moved entries are visible in their new parent, gone from the old.
+        assert!(fs.lookup(&cx, dirb, OsStr::new("file.txt")).is_ok());
+        assert!(fs.lookup(&cx, dirb, OsStr::new("moved")).is_ok());
+        assert!(fs.lookup(&cx, dira, OsStr::new("file.txt")).is_err());
+        assert!(fs.lookup(&cx, dira, OsStr::new("sub")).is_err());
+
+        let _ = fs.flush_mvcc_to_device(&cx);
+        fs.btrfs_full_transaction_commit(&cx, "cross-rename-check")
+            .expect("commit");
+        std::fs::write(&image, dev.snapshot_bytes()).expect("write modified image");
+
+        let Some((ok, output)) = run_btrfs_check(&image) else {
+            return; // btrfs check tool unavailable
+        };
+        assert!(
+            ok,
+            "btrfs check must accept cross-directory + directory renames:\n{output}"
+        );
+    }
+
     /// bd-tm48j (snapshot variant): create_snapshot of the (file-less) default
     /// subvolume must be classified as a snapshot by enumerate_snapshots after
     /// remount AND be accepted by the real btrfs check tool.
@@ -58537,7 +58587,7 @@ mod tests {
             .unwrap();
         assert_eq!(attr.kind, FileType::Directory);
         assert_eq!(attr.perm, 0o755);
-        assert_eq!(attr.nlink, 2); // . and parent ref
+        assert_eq!(attr.nlink, 1); // btrfs directories always have nlink == 1 (bd-egyf6)
 
         let found = ops
             .lookup(
@@ -64846,60 +64896,6 @@ mod tests {
     }
 
     #[test]
-    fn btrfs_mkdir_parent_nlink_overflow_preserves_source_state() {
-        let (fs, cx) = open_writable_btrfs();
-        let ops: &dyn FsOps = &fs;
-        let root = InodeNumber(1);
-        let root_oid = fs
-            .btrfs_canonical_inode(root)
-            .expect("canonical root inode");
-
-        {
-            let alloc_mutex = fs.btrfs_alloc_state.as_ref().unwrap();
-            let mut alloc = alloc_mutex.lock();
-            let mut inode = fs
-                .btrfs_read_inode_from_tree(&alloc, root_oid)
-                .expect("read root inode");
-            inode.nlink = u32::MAX;
-            let key = BtrfsKey {
-                objectid: root_oid,
-                item_type: BTRFS_ITEM_INODE_ITEM,
-                offset: 0,
-            };
-            alloc
-                .fs_tree
-                .update(&key, &inode.to_bytes())
-                .expect("corrupt root nlink");
-        }
-
-        let err = ops
-            .mkdir(
-                &cx,
-                &mut RequestScope::empty(),
-                root,
-                OsStr::new("overflow-dir"),
-                0o755,
-                0,
-                0,
-            )
-            .expect_err("mkdir should fail before partial mutation");
-        assert!(matches!(err, FfsError::Corruption { .. }));
-
-        let lookup_err = ops
-            .lookup(
-                &cx,
-                &mut RequestScope::empty(),
-                root,
-                OsStr::new("overflow-dir"),
-            )
-            .expect_err("failed mkdir must not publish destination");
-        assert!(
-            matches!(lookup_err, FfsError::NotFound(_)),
-            "overflow-dir should remain absent after failed mkdir, got {lookup_err:?}"
-        );
-    }
-
-    #[test]
     fn btrfs_remove_inode_ref_missing_name_reports_corruption() {
         let (fs, _cx) = open_writable_btrfs();
         let alloc_mutex = fs.btrfs_alloc_state.as_ref().unwrap();
@@ -65973,15 +65969,16 @@ mod tests {
         )
         .unwrap();
 
-        // dir_a has nlink=3 (., .., sub's ..), dir_b has nlink=2 (., ..)
+        // btrfs directories always have nlink == 1 — subdirectories do not bump
+        // the parent's link count (bd-egyf6), unlike ext4's 2 + subdir-count.
         let a_before = ops
             .getattr(&cx, &mut RequestScope::empty(), dir_a.ino)
             .unwrap();
         let b_before = ops
             .getattr(&cx, &mut RequestScope::empty(), dir_b.ino)
             .unwrap();
-        assert_eq!(a_before.nlink, 3, "a should have nlink=3 before rename");
-        assert_eq!(b_before.nlink, 2, "b should have nlink=2 before rename");
+        assert_eq!(a_before.nlink, 1, "a stays nlink=1 (btrfs dir)");
+        assert_eq!(b_before.nlink, 1, "b stays nlink=1 (btrfs dir)");
 
         // Rename sub from a/ to b/.
         ops.rename(
@@ -65994,15 +65991,22 @@ mod tests {
         )
         .unwrap();
 
-        // After: dir_a nlink=2, dir_b nlink=3.
+        // A cross-parent directory move leaves both parents at nlink=1.
         let a_after = ops
             .getattr(&cx, &mut RequestScope::empty(), dir_a.ino)
             .unwrap();
         let b_after = ops
             .getattr(&cx, &mut RequestScope::empty(), dir_b.ino)
             .unwrap();
-        assert_eq!(a_after.nlink, 2, "a should have nlink=2 after rename");
-        assert_eq!(b_after.nlink, 3, "b should have nlink=3 after rename");
+        assert_eq!(a_after.nlink, 1, "a stays nlink=1 after rename");
+        assert_eq!(b_after.nlink, 1, "b stays nlink=1 after rename");
+        // The entry actually moved.
+        assert!(ops
+            .lookup(&cx, &mut RequestScope::empty(), dir_b.ino, OsStr::new("sub"))
+            .is_ok());
+        assert!(ops
+            .lookup(&cx, &mut RequestScope::empty(), dir_a.ino, OsStr::new("sub"))
+            .is_err());
     }
 
     #[test]
