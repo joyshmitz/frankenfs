@@ -21120,13 +21120,11 @@ impl OpenFs {
     /// copy of the source's items and its ROOT_ITEM's `parent_uuid` is the
     /// source's uuid (so `enumerate_snapshots` classifies it as a snapshot).
     ///
-    /// This is a metadata copy: it shares no on-disk blocks with the source
-    /// (the snapshot tree is written as its own blocks at commit). It is
-    /// therefore only valid when the source has no data extents to share —
-    /// FrankenFS supports snapshotting the (file-less) default subvolume.
-    /// Snapshotting a source with data extents requires incrementing those
-    /// extents' EXTENT_ITEM refcounts (the COW-share accounting) and is a
-    /// follow-up.
+    /// The snapshot's metadata is a fresh copy (its own tree blocks), but its
+    /// data extents are SHARED with the source: each copied EXTENT_DATA's extent
+    /// gets one added reference owned by the snapshot root (bd-bndbz), so the
+    /// EXTENT_ITEM refcounts stay consistent. (The metadata blocks are not yet
+    /// COW-shared — that is a space optimization, not a correctness gap.)
     fn btrfs_create_snapshot(
         &self,
         _cx: &Cx,
@@ -21166,8 +21164,10 @@ impl OpenFs {
         };
 
         // Copy the source fs-tree's items into the snapshot's fs-tree (a
-        // point-in-time metadata copy). The source must carry no data extents
-        // for this to be ref-consistent (see the fn doc).
+        // point-in-time metadata copy). The snapshot tree is written as its own
+        // metadata blocks, but its EXTENT_DATA items reference the SAME on-disk
+        // data extents as the source — those shared extents' refcounts are bumped
+        // below (bd-bndbz).
         let source_items: Vec<(BtrfsKey, Vec<u8>)> = {
             let lo = BtrfsKey {
                 objectid: 0,
@@ -21184,15 +21184,6 @@ impl OpenFs {
                 .range(&lo, &hi)
                 .map_err(|e| btrfs_mutation_to_ffs(&e))?
         };
-        if source_items.iter().any(|(key, _)| {
-            key.item_type == BTRFS_ITEM_EXTENT_DATA
-        }) {
-            return Err(FfsError::UnsupportedFeature(
-                "snapshotting a subvolume that has file data extents is not yet supported \
-                 (requires shared-extent refcount accounting)"
-                    .into(),
-            ));
-        }
         let max_items = ((alloc.nodesize as usize).saturating_sub(101) / 25).max(3);
         let mut snap_tree =
             InMemoryCowBtrfsTree::new(max_items).map_err(|e| btrfs_mutation_to_ffs(&e))?;
@@ -21204,6 +21195,41 @@ impl OpenFs {
 
         let snapshot_id = alloc.next_objectid;
         alloc.next_objectid = alloc.next_objectid.saturating_add(1);
+
+        // Add one reference, owned by the snapshot root, to every shared data
+        // extent the copied tree now references. The snapshot's EXTENT_DATA_REF
+        // is keyed (snapshot_id, inode, file_offset - extent_offset) — distinct
+        // from the source's (FS_TREE, …) ref — so the extent's EXTENT_ITEM goes
+        // refs N -> N+1 with no key collision. Inline extents store their bytes
+        // in the item itself (copied verbatim) and own no shared extent; holes
+        // (disk_bytenr == 0) reference nothing.
+        for (key, data) in &source_items {
+            if key.item_type != BTRFS_ITEM_EXTENT_DATA {
+                continue;
+            }
+            if let BtrfsExtentData::Regular {
+                disk_bytenr,
+                disk_num_bytes,
+                extent_offset,
+                ..
+            } = parse_extent_data(data).map_err(|e| parse_to_ffs_error(&e))?
+            {
+                if disk_bytenr == 0 {
+                    continue;
+                }
+                let ref_offset = key.offset.wrapping_sub(extent_offset);
+                alloc
+                    .extent_alloc
+                    .add_data_extent_ref(
+                        disk_bytenr,
+                        disk_num_bytes,
+                        snapshot_id,
+                        key.objectid,
+                        ref_offset,
+                    )
+                    .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+            }
+        }
 
         self.btrfs_register_subvolume_in_root(
             &mut alloc,
@@ -56493,6 +56519,47 @@ mod tests {
         assert!(
             ok,
             "btrfs check must accept a FrankenFS-created snapshot:\n{output}"
+        );
+    }
+
+    /// bd-bndbz: snapshotting a subvolume that HAS file data must share the data
+    /// extents (bump their EXTENT_ITEM refcounts), and the result must pass btrfs
+    /// check. Create a file with a real (non-inline) data extent, snapshot the
+    /// default subvolume, commit, and require btrfs check to accept the shared
+    /// extents.
+    #[test]
+    fn btrfs_snapshot_with_file_data_passes_btrfs_check_bd_bndbz() {
+        let Some((fs, dev, _tmp, image)) = open_writable_btrfs_mkfs(256) else {
+            return; // btrfs-progs unavailable
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(u64::from(BTRFS_FIRST_FREE_OBJECTID));
+
+        // A file with a real 16 KiB Regular (datasum) extent in the default subvol.
+        let attr = fs
+            .create(&cx, root, OsStr::new("data.bin"), 0o644, 0, 0)
+            .expect("create file");
+        fs.write(&cx, attr.ino, 0, &[0xAB_u8; 16384])
+            .expect("write file data");
+
+        // Snapshot the now-non-empty default subvolume — its data extent is
+        // shared with the snapshot (refs bumped via add_data_extent_ref).
+        let snap_id = fs
+            .create_snapshot(&cx, root, b"datasnap")
+            .expect("snapshot a subvolume with file data");
+        assert!(snap_id >= u64::from(BTRFS_FIRST_FREE_OBJECTID));
+
+        let _ = fs.flush_mvcc_to_device(&cx);
+        fs.btrfs_full_transaction_commit(&cx, "snapshot-data-check")
+            .expect("commit");
+        std::fs::write(&image, dev.snapshot_bytes()).expect("write modified image");
+
+        let Some((ok, output)) = run_btrfs_check(&image) else {
+            return; // btrfs check tool unavailable
+        };
+        assert!(
+            ok,
+            "btrfs check must accept a snapshot that shares the source's data extents:\n{output}"
         );
     }
 
