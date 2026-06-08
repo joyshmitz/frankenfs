@@ -2898,7 +2898,14 @@ impl OpenFs {
                     .then(|| evidence.replay.operations.clone())
             });
             if let Some(operations) = maybe_fc_ops {
-                let verified = fs.apply_fast_commit_operations(cx, &operations);
+                // Only mutate the base device when recovery is in Apply mode —
+                // the same condition under which JBD2 replay wrote back. Skip /
+                // SimulateOverlay must not write the base image (bd-6nwjx).
+                let writes_allowed = matches!(
+                    options.ext4_journal_replay_mode,
+                    Ext4JournalReplayMode::Apply
+                );
+                let verified = fs.apply_fast_commit_operations(cx, &operations, writes_allowed);
                 if let Some(evidence) = fs.ext4_fast_commit_replay.as_mut() {
                     match verified {
                         Ok(count) => {
@@ -4024,6 +4031,7 @@ impl OpenFs {
         &self,
         cx: &Cx,
         operations: &[ffs_journal::FcOperation],
+        writes_allowed: bool,
     ) -> Result<usize, FfsError> {
         let mut applied = 0_usize;
         for op in operations {
@@ -4067,17 +4075,87 @@ impl OpenFs {
                         applied += 1;
                     }
                 }
-                ffs_journal::FcOperation::InodeUpdate(ino, _raw_inode) => {
-                    // TODO(bd-6nwjx): write _raw_inode back to the inode table
-                    // (the parser now carries the EXT4_FC_TAG_INODE body) instead
-                    // of only verifying the inode exists.
+                ffs_journal::FcOperation::InodeUpdate(ino, raw_inode) => {
+                    // Apply (bd-6nwjx): write the fast-committed inode back to the
+                    // inode table so FC-only inode changes survive a crash, not
+                    // just verify the inode is readable. Only write when recovery
+                    // is permitted to mutate the base device (Apply mode); the
+                    // ino-only/placeholder case (empty body) stays verify-only.
                     if self.verify_fast_commit_inode(cx, *ino) {
+                        if writes_allowed {
+                            self.apply_fast_commit_inode_update(cx, *ino, raw_inode)?;
+                        }
                         applied += 1;
                     }
                 }
             }
         }
         Ok(applied)
+    }
+
+    /// Apply an `EXT4_FC_TAG_INODE` record (bd-6nwjx): write its raw on-disk
+    /// `ext4_inode` bytes back into the inode table, mirroring JBD2 replay's
+    /// direct-device writeback (no alloc_state required at mount). An empty body
+    /// (legacy ino-only record) is a no-op.
+    fn apply_fast_commit_inode_update(
+        &self,
+        cx: &Cx,
+        ino: u32,
+        raw_inode: &[u8],
+    ) -> Result<(), FfsError> {
+        if raw_inode.is_empty() {
+            return Ok(());
+        }
+        let sb = self
+            .ext4_superblock()
+            .ok_or_else(|| FfsError::Format("not an ext4 filesystem".into()))?;
+        let scope = RequestScope::empty();
+        let loc = sb
+            .locate_inode(InodeNumber(u64::from(ino)))
+            .map_err(|e| parse_to_ffs_error(&e))?;
+        let gd = self.read_group_desc_with_scope(cx, &scope, loc.group)?;
+        let bs = u64::from(sb.block_size);
+        let inode_table_start_byte =
+            gd.inode_table
+                .checked_mul(bs)
+                .ok_or_else(|| FfsError::Corruption {
+                    block: gd.inode_table,
+                    detail: "inode table offset overflow".into(),
+                })?;
+        let abs_offset =
+            inode_table_start_byte + u64::from(loc.index) * u64::from(sb.inode_size);
+        let block_num = BlockNumber(abs_offset / bs);
+        let offset_in_block = usize::try_from(abs_offset % bs).map_err(|_| {
+            FfsError::InvalidGeometry("inode offset within block exceeds addressable range".into())
+        })?;
+        let inode_size = usize::from(sb.inode_size);
+
+        let block = self.read_ext4_inode_table_block_with_scope(cx, &scope, block_num)?;
+        if offset_in_block + inode_size > block.len() {
+            return Err(FfsError::Corruption {
+                block: block_num.0,
+                detail: "inode crosses block boundary or truncated block".into(),
+            });
+        }
+        let mut updated = block.to_vec();
+        // The FC record may be shorter than the on-disk inode (i_extra_isize);
+        // overwrite only what it carries, preserving any trailing bytes.
+        let write_len = raw_inode.len().min(inode_size);
+        updated[offset_in_block..offset_in_block + write_len]
+            .copy_from_slice(&raw_inode[..write_len]);
+
+        // Recovery-time writeback via the unversioned device adapter, exactly as
+        // JBD2 journal replay writes recovered blocks.
+        let block_dev = ByteDeviceBlockAdapter {
+            dev: &*self.dev,
+            block_size: sb.block_size,
+        };
+        block_dev.write_block(cx, block_num, &updated)?;
+        // Drop the now-stale cached inode-table block so later reads observe the
+        // applied inode.
+        self.ext4_inode_table_block_cache.lock().remove(&block_num);
+        debug!(ino, block = block_num.0, "fc_apply: inode_update written back");
+        Ok(())
     }
 
     fn verify_fast_commit_dentry_target(
@@ -30955,6 +31033,42 @@ mod tests {
 
         let target = fs.read_block_vec(&cx, BlockNumber(15)).unwrap();
         assert_eq!(&target[..16], b"JBD2-REPLAY-TEST");
+    }
+
+    /// bd-6nwjx increment 2: applying an EXT4_FC_TAG_INODE record writes the
+    /// fast-committed inode bytes back to the inode table (previously the replay
+    /// only verified the inode was readable, silently losing FC-only inode
+    /// changes after a crash). Re-reading the inode must observe the change,
+    /// proving the write landed at the correct table offset and the cached block
+    /// was invalidated.
+    #[test]
+    fn fast_commit_inode_update_apply_writes_inode_bd_6nwjx() {
+        let image = build_ext4_image_with_inode();
+        let dev = TestDevice::from_vec(image);
+        let cx = Cx::for_testing();
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default())
+            .expect("open ext4 image");
+
+        let root = InodeNumber(2);
+        let original = fs.read_inode(&cx, root).expect("read root inode");
+        let new_mtime = original.mtime.wrapping_add(0x0101_0101);
+        assert_ne!(new_mtime, original.mtime, "mtime must actually change");
+
+        // Build a fast-commit inode record (raw on-disk bytes) carrying the new
+        // mtime, as the parser now surfaces (bd-6nwjx incr 1).
+        let inode_size = usize::from(fs.ext4_superblock().expect("sb").inode_size);
+        let mut fc_inode = original.clone();
+        fc_inode.mtime = new_mtime;
+        let raw_inode = ffs_inode::serialize_inode(&fc_inode, inode_size);
+
+        fs.apply_fast_commit_inode_update(&cx, 2, &raw_inode)
+            .expect("apply fast-commit inode update");
+
+        let after = fs.read_inode(&cx, root).expect("re-read root inode");
+        assert_eq!(
+            after.mtime, new_mtime,
+            "fast-commit inode_update must persist to the inode table"
+        );
     }
 
     #[test]
