@@ -2037,6 +2037,9 @@ mod fc_tests {
         p.extend_from_slice(&ee_len.to_le_bytes());
         #[allow(clippy::cast_possible_truncation)]
         let ee_start_hi = (physical >> 32) as u16;
+        // The low 32 bits are the ext4 EXTENT ee_start_lo field; truncation is
+        // intentional (ee_start_hi above carries bits 32..48 of the 48-bit block).
+        #[allow(clippy::cast_possible_truncation)]
         let ee_start_lo = physical as u32;
         p.extend_from_slice(&ee_start_hi.to_le_bytes());
         p.extend_from_slice(&ee_start_lo.to_le_bytes());
