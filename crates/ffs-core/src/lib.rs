@@ -15372,6 +15372,13 @@ impl OpenFs {
             .checked_add(write_len)
             .ok_or_else(|| FfsError::Format("write range overflow".into()))?;
 
+        // Logical-block range [start, end) most recently allocated by this write
+        // as a coalesced run (bd-bdro7). Blocks in it resolve as "written" on
+        // later iterations, but are freshly allocated, so a PARTIAL write to one
+        // must still zero-fill (its bytes outside the chunk are new -> zero), not
+        // read stale disk content.
+        let mut fresh_run: Option<(u32, u32)> = None;
+
         while pos < end {
             let logical_block = u32::try_from(pos / bs).map_err(|_| {
                 FfsError::Format("file offset exceeds ext4 32-bit logical block limit".into())
@@ -15400,19 +15407,52 @@ impl OpenFs {
             });
 
             let (phys_block, zero_fill_before_write, mark_unwritten_written) = match resolved {
-                Some((b, unwritten)) => (b, unwritten, unwritten),
+                Some((b, unwritten)) => {
+                    // A block within the just-allocated run is newly allocated:
+                    // a partial write must zero-fill the rest, not read stale
+                    // disk bytes (bd-bdro7).
+                    let in_fresh_run = fresh_run
+                        .is_some_and(|(s, e)| logical_block >= s && logical_block < e);
+                    (b, unwritten || in_fresh_run, unwritten)
+                }
                 None => {
-                    // Allocate new extent for this block.
-                    let added_sectors = if inode.is_huge_file() {
-                        1
-                    } else {
-                        u64::from(block_size / EXT4_SECTOR_SIZE)
-                    };
-                    let blocks_after_alloc = Self::ext4_checked_inode_blocks_delta(
-                        inode.blocks,
-                        ino,
-                        i128::from(added_sectors),
-                    )?;
+                    // Allocate the whole contiguous run of currently-unmapped
+                    // blocks this write touches as ONE extent, rather than one
+                    // block per iteration (bd-bdro7). Without this a sequential
+                    // write fragments into one extent per block, overflowing the
+                    // inline extent root and forcing premature tree growth into a
+                    // metadata leaf block (mis-counted in i_blocks -> e2fsck
+                    // dirty). allocate_extent allocates up to `run_len` contiguous
+                    // blocks (returning the actual count if the free run is
+                    // shorter), so a fragmented disk still yields correct (if
+                    // multiple) extents; subsequent blocks of the run resolve to
+                    // the new extent on later iterations. The shared
+                    // ffs_btree::insert is left non-coalescing so collapse_range /
+                    // insert_range bookkeeping is unaffected.
+                    const MAX_EXTENT_BLOCKS: u32 = 1 << 15; // EXT_INIT_MAX_LEN
+                    let last_touched_block = u32::try_from((end - 1) / bs).map_err(|_| {
+                        FfsError::Format(
+                            "file offset exceeds ext4 32-bit logical block limit".into(),
+                        )
+                    })?;
+                    let mut run_len: u32 = 1;
+                    while run_len < MAX_EXTENT_BLOCKS {
+                        let Some(next) = logical_block.checked_add(run_len) else {
+                            break;
+                        };
+                        if next > last_touched_block {
+                            break;
+                        }
+                        let mapped = extents.iter().any(|e| {
+                            next >= e.logical_block
+                                && next < e.logical_block + u32::from(e.actual_len())
+                        });
+                        if mapped {
+                            break;
+                        }
+                        run_len += 1;
+                    }
+
                     let hint = self.numa_allocation_hint(
                         &alloc.geo,
                         AllocHint {
@@ -15440,7 +15480,7 @@ impl OpenFs {
                             geo,
                             groups,
                             logical_block,
-                            1,
+                            run_len,
                             &hint,
                             persist_ctx,
                             ffs_extent::ExtentOwner {
@@ -15461,7 +15501,7 @@ impl OpenFs {
                             geo,
                             groups,
                             logical_block,
-                            1,
+                            run_len,
                             &hint,
                             persist_ctx,
                             ffs_extent::ExtentOwner {
@@ -15470,15 +15510,28 @@ impl OpenFs {
                             },
                         )?
                     };
+                    // i_blocks rises by the actual number of blocks allocated.
+                    let alloc_blocks = u64::from(mapping.count);
+                    let added_sectors = if inode.is_huge_file() {
+                        alloc_blocks
+                    } else {
+                        alloc_blocks * u64::from(block_size / EXT4_SECTOR_SIZE)
+                    };
+                    let blocks_after_alloc = Self::ext4_checked_inode_blocks_delta(
+                        inode.blocks,
+                        ino,
+                        i128::from(added_sectors),
+                    )?;
                     // Re-acquire block_dev so subsequent bitmap reads see the allocation (if not staged)!
                     block_dev = self.block_device_adapter();
                     self.extent_cache.invalidate_range(
                         extent_cache_namespace(&inode),
                         logical_block,
-                        1,
+                        alloc_blocks,
                     );
                     Self::set_extent_root(&mut inode, &root_bytes);
                     inode.blocks = blocks_after_alloc;
+                    fresh_run = Some((logical_block, logical_block + mapping.count));
                     (BlockNumber(mapping.physical_start), true, false)
                 }
             };
@@ -51396,6 +51449,48 @@ mod tests {
                     (0..model.len()).find(|&i| got[i] != model[i]).unwrap_or(0)
                 );
             }
+        }
+    }
+
+    /// bd-bdro7: a contiguous sequential write must coalesce into ONE extent.
+    /// The write path allocated one block at a time; without run allocation each
+    /// became its own extent, so a >4-block write overflowed the inline extent
+    /// root and grew the tree into a metadata leaf block the writer did not count
+    /// in i_blocks — making the snapshot e2fsck-dirty. Allocating the contiguous
+    /// run as one extent keeps it inline: no growth, correct i_blocks, clean.
+    #[test]
+    fn ext4_contiguous_write_coalesces_to_one_extent_bd_bdro7() {
+        let Some((fs, dev, _tmp, image)) = open_ext4_mke2fs(8, false) else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let attr = fs
+            .create(&cx, InodeNumber(2), OsStr::new("seq.bin"), 0o644, 0, 0)
+            .expect("create");
+        // 8 contiguous blocks — 8 single-block extents pre-fix (exceeds the
+        // 4-entry inline root, forcing tree growth).
+        fs.write(&cx, attr.ino, 0, &[0xAB_u8; 8 * 1024])
+            .expect("write");
+
+        let inode = fs.read_inode(&cx, attr.ino).expect("read inode");
+        let exts = fs.collect_extents(&cx, &inode).expect("collect extents");
+        assert_eq!(
+            exts.len(),
+            1,
+            "a contiguous write must coalesce into one extent, got {exts:?}"
+        );
+        assert_eq!(exts[0].logical_block, 0);
+        assert_eq!(u32::from(exts[0].actual_len()), 8);
+
+        // Read-back is byte-exact (run allocation must not corrupt the mapping).
+        let got = fs.read(&cx, attr.ino, 0, 8 * 1024).expect("read back");
+        assert!(got.iter().all(|&b| b == 0xAB) && got.len() == 8 * 1024);
+
+        // e2fsck-clean: one inline extent, no metadata leaf, i_blocks correct.
+        fs.flush_mvcc_to_device(&cx).expect("flush");
+        std::fs::write(&image, dev.snapshot_bytes()).expect("write image");
+        if let Some((clean, output)) = run_e2fsck(&image) {
+            assert!(clean, "e2fsck after coalesced sequential write:\n{output}");
         }
     }
 
