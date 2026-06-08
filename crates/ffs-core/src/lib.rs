@@ -56233,6 +56233,39 @@ mod tests {
         );
     }
 
+    /// bd-tm48j increment 4: a FrankenFS-created subvolume must be accepted by
+    /// the real `btrfs check` tool (the strict kernel-parity bar for the
+    /// create_subvolume path).
+    #[test]
+    fn btrfs_created_subvolume_passes_btrfs_check_bd_tm48j() {
+        let Some((fs, dev, _tmp, image)) = open_writable_btrfs_mkfs(256) else {
+            return; // btrfs-progs unavailable
+        };
+        let cx = Cx::for_testing();
+
+        fs.create_subvolume(
+            &cx,
+            InodeNumber(u64::from(BTRFS_FIRST_FREE_OBJECTID)),
+            b"checksubvol",
+            0,
+            0,
+        )
+        .expect("create_subvolume on a real image");
+
+        let _ = fs.flush_mvcc_to_device(&cx);
+        fs.btrfs_full_transaction_commit(&cx, "subvol-create-check")
+            .expect("btrfs full transaction commit");
+        std::fs::write(&image, dev.snapshot_bytes()).expect("write modified image");
+
+        let Some((ok, output)) = run_btrfs_check(&image) else {
+            return; // btrfs check tool unavailable
+        };
+        assert!(
+            ok,
+            "btrfs check must accept a FrankenFS-created subvolume:\n{output}"
+        );
+    }
+
     /// bd-5svhs: a small file written inline (<= nodesize/2) must commit with
     /// nbytes == its inline length, not 0. btrfs_recompute_inode_nbytes used to
     /// sum only Regular extents, leaving an inline-only file with nbytes=0 while
