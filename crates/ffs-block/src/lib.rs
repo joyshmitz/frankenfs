@@ -4632,7 +4632,7 @@ impl<D: BlockDevice> ArcCache<D> {
             .name("ffs-flush-daemon".to_owned())
             .spawn(move || {
                 // Daemon uses a long-lived context for periodic background work.
-                let cx = Cx::detached_cancel_context();
+                let cx = Cx::for_testing();
                 let mut cycle_seq = 0_u64;
                 let mut daemon_throttled = false;
 
