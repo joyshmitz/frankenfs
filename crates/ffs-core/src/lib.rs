@@ -609,6 +609,13 @@ struct BtrfsAllocState {
     csum_tree: InMemoryCowBtrfsTree,
     /// Extent allocator for data and metadata block allocation.
     extent_alloc: BtrfsExtentAllocator,
+    /// Newly-created subvolume fs-trees awaiting their first commit, keyed by
+    /// the subvolume's root objectid (>= `BTRFS_FIRST_FREE_OBJECTID`). Each is
+    /// committed as its own tree by `btrfs_full_transaction_commit` (alongside
+    /// the default fs_tree), with its root bytenr wired into the matching
+    /// ROOT_ITEM in `root_tree` (bd-tm48j subvolume creation). Drained on
+    /// commit. Empty for every image that has not created a subvolume.
+    extra_subvol_trees: Vec<(u64, InMemoryCowBtrfsTree)>,
     /// Next available objectid for new inodes / directory entries.
     next_objectid: u64,
     /// Current transaction generation (bumped on each commit).
@@ -6078,6 +6085,7 @@ impl OpenFs {
             fs_tree,
             csum_tree,
             extent_alloc,
+            extra_subvol_trees: Vec::new(),
             next_objectid: max_objectid + 1,
             generation,
             nodesize,
@@ -19867,6 +19875,102 @@ impl OpenFs {
                 .or_else(|err| match err {
                     BtrfsMutationError::KeyNotFound => {
                         alloc.root_tree.insert(csum_root_key, &csum_root_item_data)
+                    }
+                    other => Err(other),
+                })
+                .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+        }
+
+        // ── Newly-created subvolume fs-trees (bd-tm48j) ────────────────────────
+        //
+        // Each subvolume created this transaction has its own fs-tree. Commit it
+        // exactly like the default fs_tree / csum_tree (allocate metadata blocks,
+        // serialize, write back) BEFORE extent_tree so the EXTENT_ITEMs its block
+        // allocations add are serialized into extent_tree below, then wire its
+        // root bytenr into the matching ROOT_ITEM in root_tree. Drained out of
+        // `alloc` first so the per-node serialize can borrow each tree while
+        // `alloc.extent_alloc` / `alloc.root_tree` are mutated.
+        let subvol_trees = std::mem::take(&mut alloc.extra_subvol_trees);
+        for (subvol_objectid, subvol_tree) in &subvol_trees {
+            let subvol_dag = WriteDependencyDag::from_cow_tree(subvol_tree, new_gen)
+                .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+            if subvol_dag.node_count() == 0 {
+                continue;
+            }
+            let mut subvol_allocated_addrs = std::collections::BTreeMap::new();
+            for block in subvol_dag.all_blocks() {
+                let level = subvol_dag.node_level(block).ok_or_else(|| {
+                    FfsError::Format(format!(
+                        "btrfs commit: subvol_tree DAG missing level for block {block}"
+                    ))
+                })?;
+                let allocation = alloc
+                    .extent_alloc
+                    .alloc_metadata_for_tree(u64::from(nodesize), *subvol_objectid, level)
+                    .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+                subvol_allocated_addrs.insert(block, allocation.bytenr);
+            }
+            let subvol_disk_ctx = DiskWritebackContext::with_allocated_addresses(
+                sb.fsid,
+                sb.fsid,
+                new_gen,
+                *subvol_objectid,
+                nodesize,
+                alloc.sectorsize,
+                subvol_allocated_addrs,
+            );
+            let mut subvol_executor = WritebackExecutor::new(subvol_dag);
+            let subvol_flush_result = subvol_executor.execute(|block, level| {
+                let serialized = subvol_disk_ctx.serialize_node(subvol_tree, block, level)?;
+                let node_bytes = serialized.len() as u64;
+                let logical = subvol_disk_ctx.block_to_bytenr(block);
+                let physical = resolve_physical(logical)?;
+                self.dev
+                    .write_all_at(cx, ByteOffset(physical), &serialized)
+                    .map_err(|_| BtrfsMutationError::InvalidConfig("disk write failed"))?;
+                bytes_written = bytes_written.saturating_add(node_bytes);
+                nodes_written = nodes_written.saturating_add(1);
+                Ok(())
+            });
+            subvol_flush_result.map_err(|e| btrfs_mutation_to_ffs(&e))?;
+
+            // Wire the just-written subvol tree into its ROOT_ITEM in root_tree.
+            // The create path inserts the ROOT_ITEM (and ROOT_REF/BACKREF); here
+            // we only repoint it at the committed bytenr/level/generation. If the
+            // item is somehow absent, clone the FS_TREE ROOT_ITEM as a
+            // structurally-valid template (mirrors the csum path).
+            let subvol_tree_root = subvol_tree.root_block();
+            let subvol_tree_bytenr = subvol_disk_ctx.block_to_bytenr(subvol_tree_root);
+            let subvol_tree_level = subvol_tree.root_level();
+            let subvol_root_key = BtrfsKey {
+                objectid: *subvol_objectid,
+                item_type: BTRFS_ITEM_ROOT_ITEM,
+                offset: 0,
+            };
+            let mut subvol_root_item_data = alloc
+                .root_tree
+                .get(&subvol_root_key)
+                .or_else(|| alloc.root_tree.get(&fs_root_key))
+                .ok_or_else(|| {
+                    FfsError::Format(
+                        "btrfs commit: no ROOT_ITEM template available to create the \
+                         subvolume ROOT_ITEM"
+                            .into(),
+                    )
+                })?;
+            BtrfsRootItem::patch_root_commit(
+                &mut subvol_root_item_data,
+                subvol_tree_bytenr,
+                subvol_tree_level,
+                new_gen,
+            )
+            .map_err(|e| FfsError::Parse(format!("subvolume ROOT_ITEM patch failed: {e}")))?;
+            alloc
+                .root_tree
+                .update(&subvol_root_key, &subvol_root_item_data)
+                .or_else(|err| match err {
+                    BtrfsMutationError::KeyNotFound => {
+                        alloc.root_tree.insert(subvol_root_key, &subvol_root_item_data)
                     }
                     other => Err(other),
                 })
@@ -39642,6 +39746,95 @@ mod tests {
             lookup_data_block_csum(&csum_items, data_bytenr, 4096),
             Some(expected),
             "committed csum tree must persist the data sector's checksum across remount"
+        );
+    }
+
+    /// bd-tm48j increment 1: a newly-created subvolume fs-tree staged in
+    /// `BtrfsAllocState.extra_subvol_trees` is committed as its OWN tree with a
+    /// ROOT_ITEM created in the root tree pointing at it, and survives remount.
+    /// Validates the multi-tree commit machinery (the foundation for
+    /// create_subvolume) by seeding a minimal subvol tree, committing,
+    /// remounting, and resolving the subvolume's ROOT_ITEM to its persisted
+    /// tree-root bytenr (distinct from the default FS_TREE).
+    #[test]
+    fn btrfs_commit_persists_extra_subvol_tree_bd_tm48j() {
+        // A real (mkfs) image so the metadata block group has room for a whole
+        // extra tree; the hand-crafted in-memory image has only a tiny one.
+        let Some((fs, dev, _tmp, _image)) = open_writable_btrfs_mkfs(256) else {
+            return; // btrfs-progs unavailable
+        };
+        let cx = Cx::for_testing();
+        let subvol_id = 1000_u64;
+
+        {
+            let alloc_mutex = fs.require_btrfs_alloc_state().expect("alloc state");
+            let mut alloc = alloc_mutex.lock();
+            // A minimal subvol fs-tree: one INODE_ITEM for its root dir (inode
+            // 256). The tree only needs to be non-empty so the commit serializes
+            // it and assigns a bytenr; this validation reads the ROOT_ITEM, not
+            // the subvol's contents.
+            let max_items = ((alloc.nodesize as usize).saturating_sub(101) / 25).max(3);
+            let mut subvol_tree =
+                InMemoryCowBtrfsTree::new(max_items).expect("new subvol tree");
+            let root_dir_inode = BtrfsInodeItem {
+                generation: alloc.generation,
+                size: 0,
+                nbytes: 0,
+                nlink: 2,
+                uid: 0,
+                gid: 0,
+                mode: 0o040_755,
+                rdev: 0,
+                flags: 0,
+                atime_sec: 0,
+                atime_nsec: 0,
+                ctime_sec: 0,
+                ctime_nsec: 0,
+                mtime_sec: 0,
+                mtime_nsec: 0,
+                otime_sec: 0,
+                otime_nsec: 0,
+            };
+            subvol_tree
+                .insert(
+                    BtrfsKey {
+                        objectid: u64::from(BTRFS_FIRST_FREE_OBJECTID),
+                        item_type: BTRFS_ITEM_INODE_ITEM,
+                        offset: 0,
+                    },
+                    &root_dir_inode.to_bytes(),
+                )
+                .expect("insert subvol root-dir inode");
+            alloc.extra_subvol_trees.push((subvol_id, subvol_tree));
+        }
+
+        fs.btrfs_full_transaction_commit(&cx, "subvol-commit-roundtrip-test")
+            .expect("full transaction commit with an extra subvol tree");
+
+        // Re-mount the committed image and resolve the subvolume's ROOT_ITEM.
+        let committed = dev.snapshot_bytes();
+        let opts = OpenOptions {
+            btrfs_rw_ephemeral_ok: true,
+            ..OpenOptions::default()
+        };
+        let mut fs2 =
+            OpenFs::from_device(&cx, Box::new(TestDevice::from_vec(committed)), &opts)
+                .expect("remount committed image");
+        fs2.enable_writes(&cx).expect("enable writes on remount");
+
+        let subvol_root = fs2
+            .btrfs_fs_tree_root_bytenr(&cx, subvol_id)
+            .expect("subvolume ROOT_ITEM must resolve after commit+remount");
+        let fs_tree_root = fs2
+            .btrfs_fs_tree_root_bytenr(&cx, BTRFS_FS_TREE_OBJECTID)
+            .expect("default FS_TREE ROOT_ITEM must resolve");
+        assert_ne!(
+            subvol_root, 0,
+            "committed subvolume tree must have a non-zero root bytenr"
+        );
+        assert_ne!(
+            subvol_root, fs_tree_root,
+            "the subvolume is a SEPARATE tree from the default FS_TREE"
         );
     }
 
