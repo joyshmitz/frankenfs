@@ -136,6 +136,7 @@ pub fn write_inode(
 }
 
 /// Serialize an `Ext4Inode` into raw bytes of the given `inode_size`.
+#[must_use]
 #[expect(clippy::cast_possible_truncation)]
 pub fn serialize_inode(inode: &Ext4Inode, inode_size: usize) -> Vec<u8> {
     let mut buf = vec![0u8; inode_size];
@@ -1388,7 +1389,7 @@ mod tests {
 
     /// bd-c7t59 follow-up: truncate_indirect_blocks (used by orphan recovery to
     /// complete an interrupted truncate of a legacy indirect file) frees the data
-    /// + now-empty indirect-metadata blocks at/after the cutoff, zeroes the freed
+    /// and now-empty indirect-metadata blocks at/after the cutoff, zeroes the freed
     /// inode pointer slots, and leaves blocks below the cutoff intact.
     #[test]
     fn truncate_indirect_blocks_frees_range_and_zeroes_slots() {

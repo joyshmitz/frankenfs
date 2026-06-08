@@ -6073,7 +6073,7 @@ ExtentMapping { logical_start: 5, physical_start: 134, count: 2, unwritten: true
 
         // FNV-1a over the canonical resident-set trace.
         let mut digest: u64 = 0xcbf2_9ce4_8422_2325;
-        let mut absorb = |bytes: &[u8], d: &mut u64| {
+        let absorb = |bytes: &[u8], d: &mut u64| {
             for &b in bytes {
                 *d ^= u64::from(b);
                 *d = d.wrapping_mul(0x0000_0100_0000_01b3);
