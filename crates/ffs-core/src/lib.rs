@@ -25211,7 +25211,16 @@ impl OpenFs {
             return Err(FfsError::Format("fiemap not supported on symlinks".into()));
         }
 
-        let extents = self.btrfs_fiemap_extent_items(cx, canonical)?;
+        // Explicit hole extents (disk_bytenr == 0, as kernel images without
+        // NO_HOLES carry) are not real extents: fiemap reports holes as GAPS
+        // between extents, never as physical-0 extents. Drop them so the output
+        // matches the kernel, btrfs_read_file, and SEEK_DATA/SEEK_HOLE, and so
+        // FIEMAP_EXTENT_LAST lands on the last real extent (bd-cfjvh).
+        let extents: Vec<_> = self
+            .btrfs_fiemap_extent_items(cx, canonical)?
+            .into_iter()
+            .filter(|(_, extent)| !Self::btrfs_extent_is_hole(extent))
+            .collect();
         let end = start.saturating_add(length);
         let mut result = Vec::new();
         for (i, (file_offset, extent)) in extents.iter().enumerate() {
@@ -67688,6 +67697,89 @@ mod tests {
         assert_eq!(
             hole_pos, s,
             "SEEK_HOLE must report the explicit hole extent at offset s"
+        );
+    }
+
+    /// btrfs fiemap must report an explicit hole extent (disk_bytenr == 0, as
+    /// kernel images without NO_HOLES carry) as a GAP, not as a physical-0
+    /// extent — otherwise filefrag / cp --sparse see the hole as data. Mirrors
+    /// the SEEK_DATA/SEEK_HOLE fix; both consume the same EXTENT_DATA items
+    /// (bd-cfjvh).
+    #[test]
+    fn btrfs_fiemap_skips_explicit_hole_extent_bd_cfjvh() {
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+        let s: u64 = 4096; // fsops image sectorsize
+
+        let file = ops
+            .create(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("fiemap-sparse.bin"),
+                0o644,
+                0,
+                0,
+            )
+            .unwrap();
+        // Real data extents at [0, s) and [2s, 3s); implicit gap [s, 2s).
+        ops.write(
+            &cx,
+            &mut RequestScope::empty(),
+            file.ino,
+            0,
+            &vec![0xAB_u8; s as usize],
+        )
+        .unwrap();
+        ops.write(
+            &cx,
+            &mut RequestScope::empty(),
+            file.ino,
+            2 * s,
+            &vec![0xCD_u8; s as usize],
+        )
+        .unwrap();
+
+        // Inject an EXPLICIT hole extent (disk_bytenr == 0) over [s, 2s).
+        let canonical = fs.btrfs_canonical_inode(file.ino).unwrap();
+        {
+            let alloc_mutex = fs.btrfs_alloc_state.as_ref().unwrap();
+            let mut alloc = alloc_mutex.lock();
+            let hole = BtrfsExtentData::Regular {
+                generation: alloc.generation,
+                ram_bytes: s,
+                extent_type: BTRFS_FILE_EXTENT_REG,
+                compression: 0,
+                disk_bytenr: 0,
+                disk_num_bytes: 0,
+                extent_offset: 0,
+                num_bytes: s,
+            };
+            let key = BtrfsKey {
+                objectid: canonical,
+                item_type: BTRFS_ITEM_EXTENT_DATA,
+                offset: s,
+            };
+            alloc.fs_tree.insert(key, &hole.to_bytes()).unwrap();
+        }
+
+        let mut scope = RequestScope::empty();
+        let extents = fs.fiemap(&cx, &mut scope, file.ino, 0, u64::MAX).unwrap();
+        assert_eq!(
+            extents.len(),
+            2,
+            "fiemap must report only the two real extents; the hole is a gap"
+        );
+        assert_eq!(extents[0].logical, 0);
+        assert_eq!(extents[1].logical, 2 * s, "no extent may be reported for the hole at offset s");
+        assert_ne!(
+            extents[1].physical, 0,
+            "the trailing real data extent must keep its physical address"
+        );
+        assert_ne!(
+            extents[1].flags & FIEMAP_EXTENT_LAST,
+            0,
+            "FIEMAP_EXTENT_LAST must land on the last REAL extent, not a trailing hole"
         );
     }
 
