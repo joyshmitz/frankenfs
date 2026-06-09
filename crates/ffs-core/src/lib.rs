@@ -57662,6 +57662,72 @@ mod tests {
         );
     }
 
+    /// Special-file inodes — a character device node, a block device node, and a
+    /// FIFO — plus a maximum-length (255-byte) filename must leave the image
+    /// btrfs-check-clean. This is the only on-disk validation of the device-node
+    /// INODE_ITEM (mode S_IFCHR/S_IFBLK + rdev, zero size/nbytes, no data
+    /// extents) and of a 255-byte DIR_ITEM/DIR_INDEX name. Skips without
+    /// btrfs-progs.
+    #[test]
+    fn btrfs_special_files_pass_btrfs_check() {
+        let Some((fs, dev, _tmp, image)) = open_writable_btrfs_mkfs(256) else {
+            return; // btrfs-progs unavailable
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(u64::from(BTRFS_FIRST_FREE_OBJECTID));
+
+        fs.mknod(
+            &cx,
+            root,
+            OsStr::new("cdev"),
+            (libc::S_IFCHR as u16) | 0o644,
+            259, // makedev(1, 3), e.g. /dev/null
+            0,
+            0,
+        )
+        .expect("mknod character device");
+        fs.mknod(
+            &cx,
+            root,
+            OsStr::new("bdev"),
+            (libc::S_IFBLK as u16) | 0o644,
+            2048, // makedev(8, 0), e.g. /dev/sda
+            0,
+            0,
+        )
+        .expect("mknod block device");
+        fs.mknod(
+            &cx,
+            root,
+            OsStr::new("fifo"),
+            (libc::S_IFIFO as u16) | 0o644,
+            0,
+            0,
+            0,
+        )
+        .expect("mknod FIFO");
+
+        let long_name = "n".repeat(255);
+        let f = fs
+            .create(&cx, root, OsStr::new(&long_name), 0o644, 0, 0)
+            .expect("create file with a 255-byte name");
+        fs.write(&cx, f.ino, 0, &[0x5E_u8; 4096])
+            .expect("write to the long-named file");
+
+        let _ = fs.flush_mvcc_to_device(&cx);
+        fs.btrfs_full_transaction_commit(&cx, "special-files-check")
+            .expect("btrfs full transaction commit");
+        std::fs::write(&image, dev.snapshot_bytes()).expect("write modified image");
+
+        let Some((ok, output)) = run_btrfs_check(&image) else {
+            return; // btrfs check tool unavailable
+        };
+        assert!(
+            ok,
+            "btrfs check must accept device nodes, a FIFO, and a 255-byte name:\n{output}"
+        );
+    }
+
     /// Setting (and removing) several xattrs across namespaces on a btrfs file
     /// must leave the image btrfs-check-clean — the only on-disk validation of the
     /// XATTR_ITEM encoding: each xattr is stored as an XATTR_ITEM keyed by the
