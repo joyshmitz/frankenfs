@@ -13313,16 +13313,14 @@ impl OpenFs {
 
         // A new subdirectory adds a '..' link to the parent. The kernel's
         // EXT4_DIR_LINK_MAX(dir) = !is_dx(dir) && i_nlink >= EXT4_LINK_MAX makes
-        // mkdir return EMLINK once a NON-htree directory reaches the link cap.
-        // (htree directories instead represent "too many to count" by capping
-        // their link count at 1 — the dir_nlink sentinel — a separate accounting
-        // concern tracked in bd-j12g7.) Without this guard the parent's u16
-        // links_count would climb to overflow and fail as a generic Corruption
-        // rather than the POSIX EMLINK. Mirrors ext4_link's cap and btrfs
-        // bd-ilg79.
-        const EXT4_DIR_LINK_MAX: u16 = 65_000;
+        // mkdir return EMLINK once a NON-htree directory reaches the link cap
+        // (65000); without this guard the parent's u16 links_count would climb to
+        // overflow and fail as a generic Corruption rather than the POSIX EMLINK.
+        // An htree directory instead pins its link count at the dir_nlink
+        // sentinel (1) — see `ext4_dir_link_inc` (bd-j12g7). Mirrors ext4_link's
+        // cap and btrfs bd-ilg79.
         if parent_inode.flags & ffs_types::EXT4_INDEX_FL == 0
-            && parent_inode.links_count >= EXT4_DIR_LINK_MAX
+            && parent_inode.links_count >= 65_000
         {
             return Err(FfsError::Io(std::io::Error::from_raw_os_error(libc::EMLINK)));
         }
@@ -13694,10 +13692,10 @@ impl OpenFs {
                         let mut parent_upd = parent_inode.clone();
                         ffs_inode::touch_mtime_ctime(&mut parent_upd, tstamp_secs, tstamp_nanos);
                         if file_type == Ext4FileType::Dir {
-                            parent_upd.links_count = Self::ext4_checked_links_count_delta(
+                            parent_upd.links_count = Self::ext4_dir_link_inc(
                                 parent_upd.links_count,
                                 parent,
-                                1,
+                                parent_upd.flags & ffs_types::EXT4_INDEX_FL != 0,
                             )?;
                         }
                         ffs_inode::write_inode(
@@ -13766,10 +13764,10 @@ impl OpenFs {
                                 tstamp_nanos,
                             );
                             if file_type == Ext4FileType::Dir {
-                                parent_upd.links_count = Self::ext4_checked_links_count_delta(
+                                parent_upd.links_count = Self::ext4_dir_link_inc(
                                     parent_upd.links_count,
                                     parent,
-                                    1,
+                                    parent_upd.flags & ffs_types::EXT4_INDEX_FL != 0,
                                 )?;
                             }
 
@@ -13964,8 +13962,11 @@ impl OpenFs {
                 u64::from(alloc.geo.block_size / EXT4_SECTOR_SIZE),
             )?;
             if file_type == Ext4FileType::Dir {
-                parent_upd.links_count =
-                    Self::ext4_checked_links_count_delta(parent_upd.links_count, parent, 1)?;
+                parent_upd.links_count = Self::ext4_dir_link_inc(
+                    parent_upd.links_count,
+                    parent,
+                    parent_upd.flags & ffs_types::EXT4_INDEX_FL != 0,
+                )?;
             }
             ffs_inode::touch_mtime_ctime(&mut parent_upd, tstamp_secs, tstamp_nanos);
             ffs_inode::write_inode(
@@ -14286,8 +14287,11 @@ impl OpenFs {
         )?;
         ffs_inode::touch_mtime_ctime(&mut parent_upd, tstamp_secs, tstamp_nanos);
         if new_file_type == Ext4FileType::Dir {
-            parent_upd.links_count =
-                Self::ext4_checked_links_count_delta(parent_upd.links_count, parent, 1)?;
+            parent_upd.links_count = Self::ext4_dir_link_inc(
+                parent_upd.links_count,
+                parent,
+                parent_upd.flags & ffs_types::EXT4_INDEX_FL != 0,
+            )?;
         }
         ffs_inode::write_inode(
             cx,
@@ -14401,6 +14405,49 @@ impl OpenFs {
                     block: 0,
                     detail: format!("inode {} links_count underflow on delta {delta}", ino.0),
                 })
+        }
+    }
+
+    /// ext4's `ext4_inc_count` for a directory's link count (`bd-j12g7`).
+    ///
+    /// A normal (non-htree) directory simply increments — `ext4_mkdir`'s
+    /// `EXT4_DIR_LINK_MAX` EMLINK guard keeps it below the cap. An htree
+    /// (`EXT4_INDEX_FL` / `is_dx`) directory instead represents "too many
+    /// subdirectories to count" by pinning its link count at the dir_nlink
+    /// sentinel (1): once an increment would exceed `EXT4_LINK_MAX`, or it
+    /// re-increments a dir already at the sentinel (the bump would land on 2),
+    /// the count is set to 1. This matches the kernel exactly. For a
+    /// normally-counted directory (fewer than `EXT4_LINK_MAX` subdirs) it is a
+    /// plain increment, so on-disk parity is unchanged outside the >= 65000 edge.
+    fn ext4_dir_link_inc(
+        current: u16,
+        ino: InodeNumber,
+        is_htree: bool,
+    ) -> ffs_error::Result<u16> {
+        const EXT4_LINK_MAX: u16 = 65_000;
+
+        if !is_htree {
+            return Self::ext4_checked_links_count_delta(current, ino, 1);
+        }
+        let incremented = current.saturating_add(1);
+        Ok(if incremented > EXT4_LINK_MAX || incremented == 2 {
+            1
+        } else {
+            incremented
+        })
+    }
+
+    /// ext4's `ext4_dec_count` for a directory's link count (`bd-j12g7`): never
+    /// drop a directory below 2. A normally-counted empty directory keeps
+    /// `.`+`..` == 2; an htree directory pinned at the sentinel 1 stays there.
+    /// Only directories whose count is > 2 are decremented, so for a normal
+    /// directory this is a plain decrement (a parent always has nlink >= 3 when
+    /// it still has a subdirectory to remove).
+    fn ext4_dir_link_dec(current: u16, ino: InodeNumber) -> ffs_error::Result<u16> {
+        if current > 2 {
+            Self::ext4_checked_links_count_delta(current, ino, -1)
+        } else {
+            Ok(current)
         }
     }
 
@@ -14571,8 +14618,11 @@ impl OpenFs {
             // Update parent timestamps.
             let mut parent_upd = self.read_inode(cx, parent)?;
             if expect_dir {
-                parent_upd.links_count =
-                    Self::ext4_checked_links_count_delta(parent_upd.links_count, parent, -1)?;
+                // ext4_dec_count: the parent loses the removed subdir's `..`
+                // backlink, but a directory's link count never drops below 2
+                // (an htree parent pinned at the dir_nlink sentinel 1 stays) —
+                // bd-j12g7.
+                parent_upd.links_count = Self::ext4_dir_link_dec(parent_upd.links_count, parent)?;
             }
             ffs_inode::touch_mtime_ctime(&mut parent_upd, tstamp_secs, tstamp_nanos);
             {
@@ -47620,6 +47670,35 @@ mod tests {
             free_blocks_after, free_blocks_before,
             "failed mkdir should not leak directory block allocation"
         );
+    }
+
+    #[test]
+    fn ext4_dir_link_inc_models_kernel_inc_count_bd_j12g7() {
+        let ino = InodeNumber(2);
+        // Non-htree: a plain increment (ext4_mkdir's EMLINK guard keeps it below
+        // the cap, so the overflow edge is unreachable here).
+        assert_eq!(OpenFs::ext4_dir_link_inc(2, ino, false).unwrap(), 3);
+        assert_eq!(OpenFs::ext4_dir_link_inc(64_999, ino, false).unwrap(), 65_000);
+        // htree below the cap: still a plain increment (parity unchanged).
+        assert_eq!(OpenFs::ext4_dir_link_inc(7, ino, true).unwrap(), 8);
+        assert_eq!(OpenFs::ext4_dir_link_inc(64_999, ino, true).unwrap(), 65_000);
+        // htree crossing EXT4_LINK_MAX (65000): pinned to the sentinel 1.
+        assert_eq!(OpenFs::ext4_dir_link_inc(65_000, ino, true).unwrap(), 1);
+        assert_eq!(OpenFs::ext4_dir_link_inc(65_001, ino, true).unwrap(), 1);
+        // htree already at the sentinel (1): the bump lands on 2 -> stays 1.
+        assert_eq!(OpenFs::ext4_dir_link_inc(1, ino, true).unwrap(), 1);
+    }
+
+    #[test]
+    fn ext4_dir_link_dec_models_kernel_dec_count_bd_j12g7() {
+        let ino = InodeNumber(2);
+        // Real count > 2: a plain decrement.
+        assert_eq!(OpenFs::ext4_dir_link_dec(7, ino).unwrap(), 6);
+        assert_eq!(OpenFs::ext4_dir_link_dec(3, ino).unwrap(), 2);
+        // Never drop a directory below 2: a base dir stays 2, an htree directory
+        // pinned at the sentinel stays 1.
+        assert_eq!(OpenFs::ext4_dir_link_dec(2, ino).unwrap(), 2);
+        assert_eq!(OpenFs::ext4_dir_link_dec(1, ino).unwrap(), 1);
     }
 
     #[test]
