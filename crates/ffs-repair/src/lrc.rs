@@ -352,9 +352,11 @@ pub fn encode_global(config: &LrcConfig, data: &[Vec<u8>]) -> Vec<Vec<u8>> {
         .into_par_iter()
         .map(|j| {
             let mut parity = vec![0_u8; block_size];
-            for (i, block) in data.iter().enumerate() {
-                let coeff = global_parity_coeff(i, j);
+            let step = global_parity_row_step(j);
+            let mut coeff = step;
+            for block in data {
                 gf256_mul_xor_into(&mut parity, block, coeff);
+                coeff = gf256::mul(coeff, step);
             }
             parity
         })
@@ -659,6 +661,10 @@ fn failed_global_repair() -> RepairResult {
 fn global_parity_coeff(data_idx: usize, parity_idx: usize) -> u8 {
     let exponent = ((data_idx + 1) * (parity_idx + 1)) % 255;
     gf256::generator_pow(exponent)
+}
+
+fn global_parity_row_step(parity_idx: usize) -> u8 {
+    gf256::generator_pow(parity_idx + 1)
 }
 
 /// XOR `src` into `dst` (byte-by-byte).
@@ -1082,6 +1088,22 @@ mod tests {
         data[2].truncate(8);
         let global = encode_global(&cfg, &data);
         assert!(global.is_empty());
+    }
+
+    #[test]
+    fn global_parity_coefficient_recurrence_matches_formula() {
+        for parity_idx in 0..255 {
+            let step = global_parity_row_step(parity_idx);
+            let mut coeff = step;
+            for data_idx in 0..255 {
+                assert_eq!(
+                    coeff,
+                    global_parity_coeff(data_idx, parity_idx),
+                    "data_idx={data_idx}, parity_idx={parity_idx}"
+                );
+                coeff = gf256::mul(coeff, step);
+            }
+        }
     }
 
     #[test]
