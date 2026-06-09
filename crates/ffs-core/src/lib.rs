@@ -16908,7 +16908,10 @@ impl OpenFs {
         self.ext4_preflight_dir_entry_insert(cx, &new_parent_inode, new_name, ft)?;
 
         let planned_child_dir_update = if child_inode.is_dir() && parent != new_parent {
-            Self::ext4_checked_links_count_delta(parent_inode.links_count, parent, -1)?;
+            // Preflight the old parent's `..`-backref decrement (applied below):
+            // ext4_dec_count never drops a directory below 2 — an htree parent
+            // pinned at the dir_nlink sentinel (1) stays put (bd-j12g7).
+            Self::ext4_dir_link_dec(parent_inode.links_count, parent)?;
             let child_extents = self.collect_extents(cx, &child_inode)?;
             let first_ext = child_extents.first().ok_or_else(|| FfsError::Corruption {
                 block: 0,
@@ -16970,7 +16973,9 @@ impl OpenFs {
             }
 
             if existing_inode.is_dir() {
-                Self::ext4_checked_links_count_delta(new_parent_inode.links_count, new_parent, -1)?;
+                // Preflight the new parent losing the clobbered victim dir's `..`
+                // backref; a directory never drops below 2 (bd-j12g7).
+                Self::ext4_dir_link_dec(new_parent_inode.links_count, new_parent)?;
             } else {
                 Self::ext4_checked_links_count_delta(existing_inode.links_count, existing_ino, -1)?;
             }
@@ -17004,10 +17009,10 @@ impl OpenFs {
             if ex_upd.is_dir() {
                 ex_upd.links_count = 0;
 
-                // Decrement the new parent's link count for the ".." backref from the deleted directory.
+                // Decrement the new parent's link count for the ".." backref from
+                // the deleted directory (ext4_dec_count: never below 2, bd-j12g7).
                 let mut new_par = self.read_inode(cx, new_parent)?;
-                new_par.links_count =
-                    Self::ext4_checked_links_count_delta(new_par.links_count, new_parent, -1)?;
+                new_par.links_count = Self::ext4_dir_link_dec(new_par.links_count, new_parent)?;
                 ffs_inode::touch_mtime_ctime(&mut new_par, tstamp_secs, tstamp_nanos);
                 {
                     let Ext4AllocState { geo, groups, .. } = &mut *alloc;
@@ -17121,8 +17126,9 @@ impl OpenFs {
                 }
             }
             let mut adjust_parent = self.read_inode(cx, parent)?;
-            adjust_parent.links_count =
-                Self::ext4_checked_links_count_delta(adjust_parent.links_count, parent, -1)?;
+            // ext4_dec_count for the old parent losing the moved subdir's `..`
+            // backref: never drop a directory below 2 (bd-j12g7).
+            adjust_parent.links_count = Self::ext4_dir_link_dec(adjust_parent.links_count, parent)?;
             ffs_inode::touch_mtime_ctime(&mut adjust_parent, tstamp_secs, tstamp_nanos);
             ffs_inode::write_inode(
                 cx,
@@ -47951,7 +47957,7 @@ mod tests {
     }
 
     #[test]
-    fn write_rename_directory_over_empty_directory_with_bad_parent_nlink_preserves_both_names() {
+    fn write_rename_directory_clamps_corrupt_parent_nlink_bd_j12g7() {
         let Some(fs) = open_writable_ext4() else {
             return;
         };
@@ -47961,34 +47967,49 @@ mod tests {
         let src = fs
             .mkdir(&cx, root, OsStr::new("rename_corrupt_src"), 0o755, 0, 0)
             .expect("create source dir");
-        let dst = fs
-            .mkdir(&cx, root, OsStr::new("rename_corrupt_dst"), 0o755, 0, 0)
+        fs.mkdir(&cx, root, OsStr::new("rename_corrupt_dst"), 0o755, 0, 0)
             .expect("create destination dir");
 
+        // Inject a corrupt parent link count (a real directory with subdirs never
+        // has 0). The kernel's ext4_dec_count never drops a directory below 2, so
+        // the '..'-backref decrements during this dir-over-dir rename CLAMP at the
+        // floor instead of underflowing — the rename completes rather than failing
+        // as a generic Corruption. Before bd-j12g7 FrankenFS surfaced the underflow
+        // as a hard error (non-kernel-faithful), which this test used to pin.
         let mut root_inode = fs.read_inode(&cx, root).expect("read root inode");
         root_inode.links_count = 0;
         persist_ext4_test_inode(&fs, &cx, root, &root_inode);
 
-        let err = fs
-            .rename(
-                &cx,
-                root,
-                OsStr::new("rename_corrupt_src"),
-                root,
-                OsStr::new("rename_corrupt_dst"),
-            )
-            .expect_err("rename should fail on corrupt destination parent nlink");
-        assert!(matches!(err, FfsError::Corruption { .. }));
+        fs.rename(
+            &cx,
+            root,
+            OsStr::new("rename_corrupt_src"),
+            root,
+            OsStr::new("rename_corrupt_dst"),
+        )
+        .expect("rename clamps the corrupt parent link count instead of erroring");
 
-        let src_lookup = fs
-            .lookup(&cx, root, OsStr::new("rename_corrupt_src"))
-            .expect("source name should remain after failed rename");
-        assert_eq!(src_lookup.ino, src.ino);
-
+        // The source name is gone; the destination name now resolves to the moved
+        // directory (the empty target was clobbered).
+        assert!(
+            fs.lookup(&cx, root, OsStr::new("rename_corrupt_src")).is_err(),
+            "source name must be removed after a successful rename"
+        );
         let dst_lookup = fs
             .lookup(&cx, root, OsStr::new("rename_corrupt_dst"))
-            .expect("destination name should remain after failed rename");
-        assert_eq!(dst_lookup.ino, dst.ino);
+            .expect("destination name resolves to the moved directory");
+        assert_eq!(dst_lookup.ino, src.ino);
+
+        // The corrupt parent link count is clamped at the directory floor, never
+        // underflowed past it.
+        let after = fs
+            .read_inode(&cx, root)
+            .expect("read root after rename")
+            .links_count;
+        assert!(
+            after <= 2,
+            "corrupt parent nlink must be clamped at the dir floor, not underflowed (got {after})"
+        );
     }
 
     #[test]
