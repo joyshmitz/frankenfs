@@ -3852,6 +3852,19 @@ const fn precomposed_nfd_casefold(ch: char) -> Option<(char, char)> {
         'Ź' | 'ź' => ('z', '\u{0301}'),
         'Ż' | 'ż' => ('z', '\u{0307}'),
         'Ž' | 'ž' => ('z', '\u{030C}'),
+        // ── Monotonic Greek precomposed letters (single canonical mark). ──
+        // Each folds to the lowercase Greek base + the combining mark; the
+        // two-mark letters ΐ (U+0390) and ΰ (U+03B0) are left to the fallback
+        // (the single-(base,mark) shape here can't represent them) — bd-nbw73.
+        'Ά' | 'ά' => ('α', '\u{0301}'),
+        'Έ' | 'έ' => ('ε', '\u{0301}'),
+        'Ή' | 'ή' => ('η', '\u{0301}'),
+        'Ί' | 'ί' => ('ι', '\u{0301}'),
+        'Ό' | 'ό' => ('ο', '\u{0301}'),
+        'Ύ' | 'ύ' => ('υ', '\u{0301}'),
+        'Ώ' | 'ώ' => ('ω', '\u{0301}'),
+        'Ϊ' | 'ϊ' => ('ι', '\u{0308}'),
+        'Ϋ' | 'ϋ' => ('υ', '\u{0308}'),
         _ => return None,
     };
     Some(mapped)
@@ -10675,6 +10688,13 @@ mod tests {
             ("ū", "u\u{0304}"),
             ("ę", "e\u{0328}"),
             ("ŇOČ", "n\u{030C}oc\u{030C}"), // mixed-case multi-letter
+            // Monotonic Greek precomposed (single mark).
+            ("ά", "α\u{0301}"),
+            ("Ά", "α\u{0301}"),
+            ("ή", "η\u{0301}"),
+            ("ό", "ο\u{0301}"),
+            ("ϊ", "ι\u{0308}"),
+            ("ΟΔΌΣ", "οδο\u{0301}σ"), // word-final sigma folds like non-final
         ];
         for (composed, decomposed) in cases {
             assert_eq!(
@@ -10737,6 +10757,15 @@ mod tests {
                 |s| {
                     let mut folded = String::with_capacity(s.len());
                     for ch in s.chars() {
+                        // Mirror the NFD decomposition of precomposed letters
+                        // (bd-qdmlu/bd-gegku) so this reference stays faithful to
+                        // the NFD-aware fast path; the canonical decomposition is
+                        // the ground truth.
+                        if let Some((base, mark)) = precomposed_nfd_casefold(ch) {
+                            folded.push(base);
+                            folded.push(mark);
+                            continue;
+                        }
                         match ch {
                             'ß' | 'ẞ' => folded.push_str("ss"),
                             _ => folded.extend(ch.to_lowercase()),
