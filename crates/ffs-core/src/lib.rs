@@ -15244,6 +15244,12 @@ impl OpenFs {
                 let new_size = inode.size.checked_add(length).ok_or_else(|| {
                     FfsError::Format("insert_range: file size + length overflow".into())
                 })?;
+                // INSERT_RANGE grows i_size by `length`. The top-of-function
+                // oversized check used offset+length, which does not bound the
+                // post-insert size, so enforce the ext4 maximum here too — the
+                // kernel's ext4_insert_range returns EFBIG when the insert would
+                // push i_size past s_maxbytes (bd-a3fh8; EFBIG class of bd-3pa5m).
+                Self::ext4_reject_oversized_file(new_size, block_size)?;
                 {
                     let Ext4AllocState {
                         geo,
@@ -52154,6 +52160,47 @@ mod tests {
             .write(&cx, ino, 1 << 50, b"x")
             .expect_err("write past the ext4 max file size must fail");
         assert_eq!(err.to_errno(), libc::EFBIG);
+    }
+
+    #[test]
+    fn ext4_fallocate_insert_range_past_max_file_size_returns_efbig_bd_a3fh8() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let ino = fs
+            .create(&cx, root, OsStr::new("insbig.bin"), 0o644, 0, 0)
+            .expect("create")
+            .ino;
+
+        let bs = u64::from(fs.ext4_superblock().expect("ext4 sb").block_size);
+        let max = (1_u64 << 32) * bs; // ext4 max file size (2^32 * block_size)
+
+        // Sparse-extend to just under the max (sets i_size only, no blocks).
+        let near_max = max - bs;
+        fs.setattr(
+            &cx,
+            ino,
+            &SetAttrRequest {
+                size: Some(near_max),
+                ..SetAttrRequest::default()
+            },
+        )
+        .expect("sparse extend to near the max must succeed");
+
+        // INSERT_RANGE of 2 blocks at offset `bs` would grow i_size to max + bs,
+        // exceeding the ext4 maximum -> EFBIG. The request's own offset+length is
+        // tiny, so only the post-insert size check catches it (bd-a3fh8).
+        const INSERT_RANGE: i32 = 0x20;
+        let ops: &dyn FsOps = &fs;
+        let err = ops
+            .fallocate(&cx, &mut RequestScope::empty(), ino, bs, 2 * bs, INSERT_RANGE)
+            .expect_err("insert_range past the ext4 max file size must be EFBIG");
+        assert_eq!(err.to_errno(), libc::EFBIG);
+
+        // The rejected insert left i_size unchanged.
+        assert_eq!(fs.getattr(&cx, ino).expect("getattr").size, near_max);
     }
 
     #[test]
