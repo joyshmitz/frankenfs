@@ -36,7 +36,8 @@ use ffs_btrfs::{
     BTRFS_CSUM_TREE_OBJECTID, BTRFS_EXTENT_TREE_OBJECTID, BTRFS_FILE_EXTENT_PREALLOC,
     BTRFS_FILE_EXTENT_REG, BTRFS_FIRST_FREE_OBJECTID, BTRFS_FS_TREE_OBJECTID, BTRFS_FT_BLKDEV,
     BTRFS_FT_CHRDEV, BTRFS_FT_DIR, BTRFS_FT_FIFO, BTRFS_FT_REG_FILE, BTRFS_FT_SOCK,
-    BTRFS_FT_SYMLINK, BTRFS_INODE_NODATASUM, BTRFS_ITEM_DIR_INDEX, BTRFS_ITEM_DIR_ITEM,
+    BTRFS_FT_SYMLINK, BTRFS_INODE_APPEND, BTRFS_INODE_IMMUTABLE, BTRFS_INODE_NODATASUM,
+    BTRFS_ITEM_DIR_INDEX, BTRFS_ITEM_DIR_ITEM,
     BTRFS_ITEM_EXTENT_DATA, BTRFS_ITEM_INODE_ITEM, BTRFS_ITEM_INODE_REF, BTRFS_ITEM_ROOT_ITEM,
     BTRFS_ITEM_ROOT_REF, BTRFS_ITEM_XATTR_ITEM, BTRFS_ROOT_SUBVOL_RDONLY, BTRFS_ROOT_TREE_OBJECTID,
     BTRFS_USER_SETTABLE_FSFLAGS, BTRFS_USER_SETTABLE_XFLAGS, BtrfsBTree, BtrfsBlockGroupItem,
@@ -14631,8 +14632,13 @@ impl OpenFs {
         if src_inode.is_dir() {
             return Err(FfsError::Io(std::io::Error::from_raw_os_error(EPERM_ERRNO)));
         }
-        // No hard link may be created to an immutable file (kernel: EPERM).
+        // No hard link may be created to an immutable OR append-only file: the
+        // kernel's vfs_link returns EPERM for both ("A link to an append-only or
+        // immutable file cannot be created") — bd-69ich.
         Self::ext4_reject_immutable(&src_inode)?;
+        if src_inode.flags & ffs_types::EXT4_APPEND_FL != 0 {
+            return Err(FfsError::Io(std::io::Error::from_raw_os_error(EPERM_ERRNO)));
+        }
         if src_inode.links_count >= EXT4_LINK_MAX {
             return Err(FfsError::Io(std::io::Error::from_raw_os_error(
                 EMLINK_ERRNO,
@@ -22277,6 +22283,12 @@ impl OpenFs {
         // all the way to u32::MAX and only then fail as Corruption instead of a
         // proper EMLINK. ext4_link enforces EXT4_LINK_MAX (65000) the same way.
         let link_target = self.btrfs_read_inode_from_tree(&alloc, target_oid)?;
+        // No hard link may be created to an immutable OR append-only file: the
+        // kernel's vfs_link returns EPERM for both ("A link to an append-only or
+        // immutable file cannot be created") — bd-69ich.
+        if link_target.flags & (BTRFS_INODE_IMMUTABLE | BTRFS_INODE_APPEND) != 0 {
+            return Err(FfsError::Io(std::io::Error::from_raw_os_error(libc::EPERM)));
+        }
         if link_target.nlink >= BTRFS_LINK_MAX {
             return Err(FfsError::Io(std::io::Error::from_raw_os_error(libc::EMLINK)));
         }
@@ -45938,7 +45950,8 @@ mod tests {
             "chown of an immutable file must be rejected"
         );
 
-        // Append-only: delete and rename rejected (link/xattr remain allowed).
+        // Append-only: delete, rename, and hard-link rejected. The kernel's
+        // vfs_link forbids a link to an append-only file too (bd-69ich).
         let app = fs
             .create(&cx, root, OsStr::new("app.bin"), 0o644, 0, 0)
             .expect("create app");
@@ -45957,6 +45970,13 @@ mod tests {
             )
             .is_err(),
             "renaming an append-only file must be rejected"
+        );
+        assert_eq!(
+            fs.link(&cx, app.ino, root, OsStr::new("app_link.bin"))
+                .unwrap_err()
+                .to_errno(),
+            libc::EPERM,
+            "hard-linking an append-only file must be EPERM (vfs_link)"
         );
     }
 
@@ -68583,6 +68603,66 @@ mod tests {
             .getattr(&cx, &mut RequestScope::empty(), attr.ino)
             .expect("getattr after rejected link");
         assert_eq!(after.nlink, 65_535, "rejected link must not bump nlink");
+    }
+
+    #[test]
+    fn btrfs_link_to_immutable_or_append_is_eperm_bd_69ich() {
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+        let parent = InodeNumber(1);
+
+        // vfs_link forbids a hard link to an immutable OR append-only file
+        // (EPERM). btrfs_link previously checked neither (bd-69ich).
+        for (name, flag) in [
+            ("imm.bin", BTRFS_INODE_IMMUTABLE),
+            ("app.bin", BTRFS_INODE_APPEND),
+        ] {
+            let attr = ops
+                .create(
+                    &cx,
+                    &mut RequestScope::empty(),
+                    parent,
+                    OsStr::new(name),
+                    0o644,
+                    0,
+                    0,
+                )
+                .unwrap();
+            {
+                let alloc_mutex = fs.btrfs_alloc_state.as_ref().unwrap();
+                let mut alloc = alloc_mutex.lock();
+                let mut inode = fs
+                    .btrfs_read_inode_from_tree(&alloc, attr.ino.0)
+                    .expect("read target inode");
+                inode.flags |= flag;
+                let key = BtrfsKey {
+                    objectid: attr.ino.0,
+                    item_type: BTRFS_ITEM_INODE_ITEM,
+                    offset: 0,
+                };
+                alloc
+                    .fs_tree
+                    .update(&key, &inode.to_bytes())
+                    .expect("pin attribute flag");
+            }
+            let link_name = format!("{name}.link");
+            let err = ops
+                .link(
+                    &cx,
+                    &mut RequestScope::empty(),
+                    attr.ino,
+                    parent,
+                    OsStr::new(&link_name),
+                )
+                .expect_err("link to an immutable/append-only file must be rejected");
+            assert_eq!(err.to_errno(), libc::EPERM, "{name} hard link must be EPERM");
+            // No partial mutation: the rejected link created no new name.
+            assert!(
+                ops.lookup(&cx, &mut RequestScope::empty(), parent, OsStr::new(&link_name))
+                    .is_err(),
+                "rejected link must not create the new name for {name}"
+            );
+        }
     }
 
     #[test]
