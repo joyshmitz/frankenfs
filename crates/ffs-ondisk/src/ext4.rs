@@ -3757,7 +3757,54 @@ fn casefold_name(name: &[u8]) -> Vec<u8> {
     )
 }
 
+/// Canonical (NFD) decomposition of a precomposed Latin-1 Supplement letter
+/// into its lowercased base char + single combining mark, for casefold
+/// comparison. The kernel's casefold NFD-normalizes before folding, so a
+/// precomposed letter and its decomposed form must fold to the same key; this
+/// makes the read-path linear-scan lookup match either form for the common
+/// accented Latin letters (bd-qdmlu, a read-correctness increment of bd-vsuni).
+/// Returns `None` for code points without a single-mark canonical decomposition
+/// (e.g. Æ, Ð, Ø, Þ, ß — handled elsewhere or left as-is).
+const fn latin1_nfd_casefold(ch: char) -> Option<(char, char)> {
+    let mapped = match ch {
+        'À' | 'à' => ('a', '\u{0300}'),
+        'Á' | 'á' => ('a', '\u{0301}'),
+        'Â' | 'â' => ('a', '\u{0302}'),
+        'Ã' | 'ã' => ('a', '\u{0303}'),
+        'Ä' | 'ä' => ('a', '\u{0308}'),
+        'Å' | 'å' => ('a', '\u{030A}'),
+        'Ç' | 'ç' => ('c', '\u{0327}'),
+        'È' | 'è' => ('e', '\u{0300}'),
+        'É' | 'é' => ('e', '\u{0301}'),
+        'Ê' | 'ê' => ('e', '\u{0302}'),
+        'Ë' | 'ë' => ('e', '\u{0308}'),
+        'Ì' | 'ì' => ('i', '\u{0300}'),
+        'Í' | 'í' => ('i', '\u{0301}'),
+        'Î' | 'î' => ('i', '\u{0302}'),
+        'Ï' | 'ï' => ('i', '\u{0308}'),
+        'Ñ' | 'ñ' => ('n', '\u{0303}'),
+        'Ò' | 'ò' => ('o', '\u{0300}'),
+        'Ó' | 'ó' => ('o', '\u{0301}'),
+        'Ô' | 'ô' => ('o', '\u{0302}'),
+        'Õ' | 'õ' => ('o', '\u{0303}'),
+        'Ö' | 'ö' => ('o', '\u{0308}'),
+        'Ù' | 'ù' => ('u', '\u{0300}'),
+        'Ú' | 'ú' => ('u', '\u{0301}'),
+        'Û' | 'û' => ('u', '\u{0302}'),
+        'Ü' | 'ü' => ('u', '\u{0308}'),
+        'Ý' | 'ý' => ('y', '\u{0301}'),
+        'Ÿ' | 'ÿ' => ('y', '\u{0308}'),
+        _ => return None,
+    };
+    Some(mapped)
+}
+
 fn push_casefolded_char(folded: &mut String, ch: char) {
+    if let Some((base, mark)) = latin1_nfd_casefold(ch) {
+        folded.push(base);
+        folded.push(mark);
+        return;
+    }
     match ch {
         'ß' | 'ẞ' => folded.push_str("ss"),
         'Α'..='Ρ' | 'Σ'..='Ϋ' => {
@@ -10542,6 +10589,34 @@ mod tests {
             ext4_casefold_key("Σ".as_bytes()),
             ext4_casefold_key("σ".as_bytes()),
         );
+    }
+
+    #[test]
+    fn ext4_casefold_key_nfd_normalizes_precomposed_latin1_bd_qdmlu() {
+        // The kernel casefold NFD-normalizes before folding, so a precomposed
+        // accented letter and its decomposed (base + combining mark) form fold
+        // to the same key. Cover case variants + a multi-letter name.
+        let cases: &[(&str, &str)] = &[
+            ("é", "e\u{0301}"),   // NFC vs NFD
+            ("É", "e\u{0301}"),   // uppercase precomposed folds to the same
+            ("café", "cafe\u{0301}"),
+            ("CAFÉ", "cafe\u{0301}"),
+            ("Ñ", "n\u{0303}"),
+            ("ñ", "n\u{0303}"),
+            ("über", "u\u{0308}ber"),
+            ("ÜBER", "u\u{0308}ber"),
+            ("ÿ", "y\u{0308}"),
+            ("Ÿ", "y\u{0308}"),
+        ];
+        for (composed, decomposed) in cases {
+            assert_eq!(
+                ext4_casefold_key(composed.as_bytes()),
+                ext4_casefold_key(decomposed.as_bytes()),
+                "composed {composed:?} must fold to the same key as decomposed {decomposed:?}"
+            );
+        }
+        // ASCII is unaffected.
+        assert_eq!(ext4_casefold_key(b"Hello"), b"hello".to_vec());
     }
 
     #[test]
