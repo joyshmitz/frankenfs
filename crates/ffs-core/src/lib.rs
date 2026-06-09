@@ -23031,6 +23031,27 @@ impl OpenFs {
         Ok(())
     }
 
+    /// Reject an extended-attribute name longer than the kernel's
+    /// `XATTR_NAME_MAX` (255 bytes, counting the full name including its
+    /// `user.`/`security.`/... namespace prefix) with `ERANGE`.
+    ///
+    /// Linux's setxattr/getxattr/removexattr syscalls copy the full name into a
+    /// `[XATTR_NAME_MAX + 1]` buffer and return `ERANGE` if it does not fit,
+    /// before the request ever reaches the filesystem. A FUSE mount therefore
+    /// never forwards an over-long name, but the public `OpenFs` xattr API must
+    /// enforce the same limit and errno: otherwise getxattr/removexattr report a
+    /// spurious not-found (`ENODATA`) and setxattr surfaces `ENAMETOOLONG` (via
+    /// `ffs_xattr`, which caps only the post-prefix suffix) instead of `ERANGE`.
+    fn xattr_name_within_limit_or_erange(name: &str) -> ffs_error::Result<()> {
+        const XATTR_NAME_MAX: usize = 255;
+        if name.len() > XATTR_NAME_MAX {
+            return Err(FfsError::Io(std::io::Error::from_raw_os_error(
+                libc::ERANGE,
+            )));
+        }
+        Ok(())
+    }
+
     fn btrfs_require_directory_inode(
         &self,
         alloc: &BtrfsAllocState,
@@ -26566,6 +26587,9 @@ impl FsOps for OpenFs {
         ino: InodeNumber,
         name: &str,
     ) -> ffs_error::Result<Option<Vec<u8>>> {
+        // An over-long name is ERANGE (kernel pre-fs check), not a spurious
+        // not-found.
+        Self::xattr_name_within_limit_or_erange(name)?;
         match &self.flavor {
             FsFlavor::Ext4(_) => {
                 let inode = self.read_inode(cx, Self::ext4_canonical_inode(ino))?;
@@ -26610,6 +26634,9 @@ impl FsOps for OpenFs {
         // ffs_xattr::set_xattr) and btrfs_setxattr had no check at all (it would
         // silently store the oversized value).
         const XATTR_SIZE_MAX: usize = 65_536;
+        // The kernel copies the name first (ERANGE if it exceeds XATTR_NAME_MAX)
+        // and then checks the value size, so the name check comes first.
+        Self::xattr_name_within_limit_or_erange(name)?;
         if value.len() > XATTR_SIZE_MAX {
             return Err(FfsError::Io(std::io::Error::from_raw_os_error(libc::E2BIG)));
         }
@@ -26636,6 +26663,8 @@ impl FsOps for OpenFs {
         ino: InodeNumber,
         name: &str,
     ) -> ffs_error::Result<bool> {
+        // An over-long name is ERANGE (kernel pre-fs check).
+        Self::xattr_name_within_limit_or_erange(name)?;
         match &self.flavor {
             FsFlavor::Ext4(_) => {
                 self.ext4_removexattr(cx, scope, Self::ext4_canonical_inode(ino), name)
@@ -48465,6 +48494,58 @@ mod tests {
             .setxattr(&cx, attr.ino, "user.big", &too_large, XattrSetMode::Set)
             .expect_err("an oversized xattr value must be rejected");
         assert_eq!(err.to_errno(), libc::E2BIG);
+    }
+
+    #[test]
+    fn ext4_xattr_name_over_xattr_name_max_returns_erange() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let ino = fs
+            .create(&cx, root, OsStr::new("xattr_erange.txt"), 0o644, 0, 0)
+            .expect("create")
+            .ino;
+
+        // Full name (incl. "user." prefix) longer than XATTR_NAME_MAX (255) is
+        // ERANGE per the kernel's pre-fs name copy — not ENAMETOOLONG (setxattr)
+        // nor a spurious ENODATA/not-found (getxattr). 5 + 256 = 261 bytes.
+        let long_name = format!("user.{}", "a".repeat(256));
+
+        let set_err = fs
+            .setxattr(&cx, ino, &long_name, b"v", XattrSetMode::Set)
+            .expect_err("an over-long xattr name must be rejected");
+        assert_eq!(set_err.to_errno(), libc::ERANGE);
+
+        let get_err = fs
+            .getxattr(&cx, ino, &long_name)
+            .expect_err("getxattr of an over-long name must be ERANGE, not not-found");
+        assert_eq!(get_err.to_errno(), libc::ERANGE);
+
+        let rm_err = fs
+            .removexattr(&cx, ino, &long_name)
+            .expect_err("removexattr of an over-long name must be ERANGE");
+        assert_eq!(rm_err.to_errno(), libc::ERANGE);
+    }
+
+    #[test]
+    fn btrfs_xattr_name_over_xattr_name_max_returns_erange() {
+        let (fs, cx) = open_writable_btrfs();
+        let attr = fs
+            .create(&cx, InodeNumber(1), OsStr::new("xattr_erange.bin"), 0o644, 0, 0)
+            .expect("create");
+
+        let long_name = format!("user.{}", "a".repeat(256));
+        let set_err = fs
+            .setxattr(&cx, attr.ino, &long_name, b"v", XattrSetMode::Set)
+            .expect_err("an over-long xattr name must be rejected");
+        assert_eq!(set_err.to_errno(), libc::ERANGE);
+
+        let get_err = fs
+            .getxattr(&cx, attr.ino, &long_name)
+            .expect_err("getxattr of an over-long name must be ERANGE");
+        assert_eq!(get_err.to_errno(), libc::ERANGE);
     }
 
     #[test]
