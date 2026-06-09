@@ -17175,18 +17175,21 @@ impl OpenFs {
                             },
                         )?
                     };
-                    // bd-5911f: a truncate-down FREES blocks that the allocator
-                    // can later recycle into ANY logical offset of this or
-                    // another inode. The extent cache is namespaced by the
-                    // inode's (mutable) extent-root bytes, so a narrow
-                    // invalidate_range under the post-truncate namespace cannot
-                    // reach mappings cached under an earlier namespace — those
-                    // stale entries then point a future read at a recycled
-                    // physical block holding unrelated data. Freeing blocks must
-                    // therefore drop the whole cache (generation bump): it can
-                    // only over-invalidate (cost a re-walk), never serve stale
-                    // data.
-                    self.extent_cache.invalidate_all();
+                    // A truncate-down frees blocks the allocator may recycle into
+                    // any logical offset of this or another inode (bd-5911f). With
+                    // the stable (ino,generation) cache namespace (bd-j6ljg) this
+                    // inode's mappings are reachable by its key, and a freed
+                    // physical block is never simultaneously mapped by another
+                    // inode, so dropping just THIS inode's whole namespace clears
+                    // every entry that could go stale while keeping other inodes'
+                    // mappings warm. The namespace is read BEFORE set_extent_root
+                    // below, so the (content-hash fallback) key still matches the
+                    // entries cached under the pre-truncate extent root.
+                    self.extent_cache.invalidate_range(
+                        extent_cache_namespace(&inode),
+                        0,
+                        u64::from(u32::MAX),
+                    );
                     Self::set_extent_root(&mut inode, &root_bytes);
                     let freed_sectors = if inode.is_huge_file() {
                         freed
@@ -17259,9 +17262,16 @@ impl OpenFs {
                         u64::MAX,
                         block_size,
                     )?;
-                    // Freed blocks become recyclable into any inode/offset; drop
-                    // the extent cache for the same reason the extent path does.
-                    self.extent_cache.invalidate_all();
+                    // Drop only this inode's cache namespace (bd-j6ljg stable
+                    // key), keeping other inodes warm — see the extent-path note
+                    // above. An indirect-mapped inode has no extent-cache entries
+                    // of its own, and a freed block is never simultaneously cached
+                    // under another inode, so this is sufficient.
+                    self.extent_cache.invalidate_range(
+                        extent_cache_namespace(&inode),
+                        0,
+                        u64::from(u32::MAX),
+                    );
                     let freed_sectors = if inode.is_huge_file() {
                         freed
                     } else {
@@ -31612,6 +31622,59 @@ mod tests {
         assert_eq!(
             extent_cache_namespace(&unstamped),
             extent_root_namespace(&unstamped)
+        );
+    }
+
+    /// A truncate-down now clears only the truncated inode's extent-cache
+    /// namespace (safe with the stable (ino,generation) key, bd-j6ljg) instead
+    /// of nuking the whole cache, so a DIFFERENT inode's cached extent mapping
+    /// stays warm across the free. Single-inode correctness is covered by the
+    /// random write/truncate proptests; this pins the warmth property.
+    #[test]
+    fn ext4_truncate_keeps_other_inode_extent_cache_warm() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let a = fs
+            .create(&cx, root, OsStr::new("keep.bin"), 0o644, 0, 0)
+            .expect("create A");
+        fs.write(&cx, a.ino, 0, &vec![0xA1_u8; 8192]).expect("write A");
+        let b = fs
+            .create(&cx, root, OsStr::new("drop.bin"), 0o644, 0, 0)
+            .expect("create B");
+        fs.write(&cx, b.ino, 0, &vec![0xB2_u8; 8192]).expect("write B");
+
+        // Warm A's extent mapping into the cache by reading it back.
+        let _ = fs.read(&cx, a.ino, 0, 8192).expect("read A");
+        assert!(
+            fs.extent_cache_stats().entries > 0,
+            "reading A must cache its extent mapping"
+        );
+
+        // Truncate B to zero (frees B's blocks). The scoped invalidation must
+        // NOT evict A's cached mapping — the old invalidate_all dropped the
+        // whole cache here.
+        fs.setattr(
+            &cx,
+            b.ino,
+            &SetAttrRequest {
+                size: Some(0),
+                ..Default::default()
+            },
+        )
+        .expect("truncate B to zero");
+        assert!(
+            fs.extent_cache_stats().entries > 0,
+            "truncating B must keep A's cached extent mapping warm"
+        );
+
+        // A's data stays intact (the scoped invalidation introduces no staleness).
+        let a_data = fs.read(&cx, a.ino, 0, 8192).expect("re-read A");
+        assert!(
+            a_data.iter().all(|&x| x == 0xA1),
+            "A's data must be intact after B's truncate"
         );
     }
 
