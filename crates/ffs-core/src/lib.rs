@@ -45426,6 +45426,61 @@ mod tests {
         );
     }
 
+    /// Both ext4 symlink forms must leave the image e2fsck-clean. A FAST symlink
+    /// (< 60-byte target) stores the target inline in i_block with no data block
+    /// (i_size = target length, i_blocks = 0). A SLOW symlink (longer target)
+    /// allocates a data block holding the target (i_size = target length,
+    /// i_blocks accounting for that block, an extent mapping it). The existing
+    /// symlink tests only round-trip the target back through readlink — internal
+    /// consistency — and never validate the on-disk i_size/i_blocks/extent
+    /// encoding, where a wrong block count or stray inline byte would surface
+    /// only under e2fsck.
+    #[test]
+    fn ext4_symlinks_pass_e2fsck() {
+        let Some((fs, dev, tmp)) = open_writable_ext4_mkfs_with_device(64) else {
+            return; // format tool unavailable
+        };
+        let image = tmp.path().join("test.ext4");
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        let fast_target = "short/target.txt";
+        assert!(fast_target.len() < ffs_types::EXT4_FAST_SYMLINK_MAX);
+        fs.symlink(
+            &cx,
+            root,
+            OsStr::new("fastlink"),
+            Path::new(fast_target),
+            0,
+            0,
+        )
+        .expect("create fast symlink");
+
+        let slow_target =
+            "/var/lib/frankenfs/some/really/long/path/exceeding/sixty/bytes/for/the/slow/symlink-target.txt";
+        assert!(slow_target.len() > ffs_types::EXT4_FAST_SYMLINK_MAX);
+        let slow = fs
+            .symlink(&cx, root, OsStr::new("slowlink"), Path::new(slow_target), 0, 0)
+            .expect("create slow symlink");
+        assert!(
+            !fs.read_inode(&cx, slow.ino)
+                .expect("read slow symlink inode")
+                .is_fast_symlink(),
+            "the long target must be a slow (block-mapped) symlink"
+        );
+
+        fs.flush_mvcc_to_device(&cx).expect("flush mvcc to device");
+        std::fs::write(&image, dev.snapshot_bytes()).expect("write modified image");
+
+        let Some((clean, output)) = run_e2fsck(&image) else {
+            return; // e2fsck unavailable
+        };
+        assert!(
+            clean,
+            "e2fsck must accept FrankenFS-written fast and slow ext4 symlinks:\n{output}"
+        );
+    }
+
     /// bd-zpe9s: when a file's extent tree grows past its inline 4-extent root
     /// (depth >= 1), ffs_btree::insert allocates on-disk index/leaf metadata
     /// blocks that must be charged to i_blocks alongside the data blocks, or
