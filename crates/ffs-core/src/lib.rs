@@ -17447,7 +17447,14 @@ impl OpenFs {
         match mode {
             XattrSetMode::Create if existing.is_some() => return Err(FfsError::Exists),
             XattrSetMode::Replace if existing.is_none() => {
-                return Err(FfsError::NotFound(name.to_owned()));
+                // setxattr(2): XATTR_REPLACE on a missing attribute is ENODATA,
+                // not ENOENT — consistent with getxattr/removexattr's
+                // missing-attribute errno and the kernel. Returning NotFound
+                // here surfaced ENOENT on the library API (the FUSE layer
+                // separately papered over it via a getattr heuristic). (bd-dssi7)
+                return Err(FfsError::Io(std::io::Error::from_raw_os_error(
+                    libc::ENODATA,
+                )));
             }
             XattrSetMode::Set | XattrSetMode::Create | XattrSetMode::Replace => {}
         }
@@ -22631,7 +22638,14 @@ impl OpenFs {
         match mode {
             XattrSetMode::Create if existing.is_some() => return Err(FfsError::Exists),
             XattrSetMode::Replace if existing.is_none() => {
-                return Err(FfsError::NotFound(name.to_owned()));
+                // setxattr(2): XATTR_REPLACE on a missing attribute is ENODATA,
+                // not ENOENT — consistent with getxattr/removexattr's
+                // missing-attribute errno and the kernel. Returning NotFound
+                // here surfaced ENOENT on the library API (the FUSE layer
+                // separately papered over it via a getattr heuristic). (bd-dssi7)
+                return Err(FfsError::Io(std::io::Error::from_raw_os_error(
+                    libc::ENODATA,
+                )));
             }
             XattrSetMode::Set | XattrSetMode::Create | XattrSetMode::Replace => {}
         }
@@ -47978,7 +47992,9 @@ mod tests {
         let err = fs
             .setxattr(&cx, ino, "user.missing", b"x", XattrSetMode::Replace)
             .unwrap_err();
-        assert_eq!(err.to_errno(), libc::ENOENT);
+        // setxattr(2): XATTR_REPLACE on a missing attribute is ENODATA, not
+        // ENOENT — same missing-attribute errno as getxattr/removexattr (bd-dssi7).
+        assert_eq!(err.to_errno(), libc::ENODATA);
     }
 
     #[test]
@@ -62186,7 +62202,9 @@ mod tests {
                 XattrSetMode::Replace,
             )
             .expect_err("replace on missing xattr should fail");
-        assert_eq!(err.to_errno(), libc::ENOENT);
+        // setxattr(2): XATTR_REPLACE on a missing attribute is ENODATA, not
+        // ENOENT (matches getxattr/removexattr's missing-attribute errno; bd-dssi7).
+        assert_eq!(err.to_errno(), libc::ENODATA);
         assert_eq!(ops.getxattr(&cx, attr.ino, "user.missing").unwrap(), None);
     }
 
