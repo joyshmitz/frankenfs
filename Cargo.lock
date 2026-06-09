@@ -927,6 +927,7 @@ name = "ffs-btrfs"
 version = "0.1.0"
 dependencies = [
  "asupersync",
+ "criterion",
  "ffs-block",
  "ffs-mvcc",
  "ffs-ondisk",
