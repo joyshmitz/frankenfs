@@ -19052,7 +19052,23 @@ impl OpenFs {
                 continue;
             }
 
-            let materialized = self.btrfs_materialize_extent(cx, &extent)?;
+            // A PREALLOC (unwritten) extent must keep its non-overlapping parts
+            // as PREALLOC, not be materialized into regular (zero) data: the
+            // kernel splits prealloc into prealloc + written + prealloc, so the
+            // surrounding regions stay reserved and FIEMAP-UNWRITTEN. Without
+            // this, btrfs_materialize_extent returns zeros for prealloc and the
+            // regular-segment re-insert skips all-zero data, silently dropping
+            // the surrounding prealloc to holes (bd-lqe6z).
+            let is_prealloc = matches!(
+                extent,
+                BtrfsExtentData::Regular { extent_type, .. }
+                    if extent_type == BTRFS_FILE_EXTENT_PREALLOC
+            );
+            let materialized = if is_prealloc {
+                Vec::new()
+            } else {
+                self.btrfs_materialize_extent(cx, &extent)?
+            };
             alloc
                 .fs_tree
                 .delete(&key)
@@ -19079,25 +19095,42 @@ impl OpenFs {
                 }
             }
 
-            let left_len = usize::try_from(overlap_start - key.offset)
-                .map_err(|_| FfsError::InvalidGeometry("left segment length overflow".into()))?;
-            let right_start = usize::try_from(overlap_end - key.offset)
-                .map_err(|_| FfsError::InvalidGeometry("right segment offset overflow".into()))?;
+            if is_prealloc {
+                Self::btrfs_insert_prealloc_extent_segment(
+                    alloc,
+                    canonical,
+                    key.offset,
+                    overlap_start - key.offset,
+                )?;
+                Self::btrfs_insert_prealloc_extent_segment(
+                    alloc,
+                    canonical,
+                    overlap_end,
+                    logical_end - overlap_end,
+                )?;
+            } else {
+                let left_len = usize::try_from(overlap_start - key.offset).map_err(|_| {
+                    FfsError::InvalidGeometry("left segment length overflow".into())
+                })?;
+                let right_start = usize::try_from(overlap_end - key.offset).map_err(|_| {
+                    FfsError::InvalidGeometry("right segment offset overflow".into())
+                })?;
 
-            self.btrfs_insert_regular_extent_segment(
-                cx,
-                alloc,
-                canonical,
-                key.offset,
-                &materialized[..left_len],
-            )?;
-            self.btrfs_insert_regular_extent_segment(
-                cx,
-                alloc,
-                canonical,
-                overlap_end,
-                &materialized[right_start..],
-            )?;
+                self.btrfs_insert_regular_extent_segment(
+                    cx,
+                    alloc,
+                    canonical,
+                    key.offset,
+                    &materialized[..left_len],
+                )?;
+                self.btrfs_insert_regular_extent_segment(
+                    cx,
+                    alloc,
+                    canonical,
+                    overlap_end,
+                    &materialized[right_start..],
+                )?;
+            }
         }
 
         Ok(())
@@ -64266,6 +64299,76 @@ mod tests {
             .expect("read after collapse");
         assert_eq!(&data[..block_usize], &payload[..block_usize]);
         assert!(data[block_usize..].iter().all(|byte| *byte == 0));
+    }
+
+    #[test]
+    fn btrfs_overwrite_into_prealloc_preserves_surrounding_unwritten_bd_lqe6z() {
+        let _guard = log_contract_guard();
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+        let block = 4096_u64;
+        let block_usize = usize::try_from(block).unwrap();
+
+        let attr = ops
+            .create(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("overwrite-prealloc.bin"),
+                0o644,
+                0,
+                0,
+            )
+            .unwrap();
+
+        // Preallocate three blocks as a single unwritten extent.
+        ops.fallocate(&cx, &mut RequestScope::empty(), attr.ino, 0, 3 * block, 0)
+            .expect("preallocate three blocks");
+
+        // Overwrite the MIDDLE block with real data.
+        let patch = vec![b'X'; block_usize];
+        ops.write(&cx, &mut RequestScope::empty(), attr.ino, block, &patch)
+            .expect("overwrite middle prealloc block");
+
+        let mut scope = RequestScope::empty();
+        let extents = fs.fiemap(&cx, &mut scope, attr.ino, 0, u64::MAX).unwrap();
+        assert_eq!(
+            extents.len(),
+            3,
+            "prealloc must split into prealloc + written + prealloc, not collapse to a hole: {extents:?}"
+        );
+        assert_eq!(extents[0].logical, 0);
+        assert_ne!(
+            extents[0].flags & FIEMAP_EXTENT_UNWRITTEN,
+            0,
+            "the prealloc region before the overwrite must stay UNWRITTEN (bd-lqe6z)"
+        );
+        assert_eq!(extents[1].logical, block);
+        assert_eq!(
+            extents[1].flags & FIEMAP_EXTENT_UNWRITTEN,
+            0,
+            "the overwritten middle block is now written data, not unwritten"
+        );
+        assert_eq!(extents[2].logical, 2 * block);
+        assert_ne!(
+            extents[2].flags & FIEMAP_EXTENT_UNWRITTEN,
+            0,
+            "the prealloc region after the overwrite must stay UNWRITTEN (bd-lqe6z)"
+        );
+
+        // Content: prealloc reads as zeros, the middle block as 'X'.
+        let data = ops
+            .read(
+                &cx,
+                &mut RequestScope::empty(),
+                attr.ino,
+                0,
+                u32::try_from(3 * block).unwrap(),
+            )
+            .expect("read after overwrite");
+        assert!(data[..block_usize].iter().all(|byte| *byte == 0));
+        assert!(data[block_usize..2 * block_usize].iter().all(|byte| *byte == b'X'));
+        assert!(data[2 * block_usize..].iter().all(|byte| *byte == 0));
     }
 
     #[test]
