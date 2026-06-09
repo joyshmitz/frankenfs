@@ -16826,6 +16826,16 @@ impl OpenFs {
 
         if let Some(existing) = self.lookup_name(cx, &new_parent_inode, new_name)? {
             let existing_ino = InodeNumber(u64::from(existing.inode));
+            // POSIX: renaming a file onto one of its own hard links (old and new
+            // resolve to the same inode) is a no-op: the kernel's vfs_rename
+            // short-circuits `if (source == target) return 0`, leaving both
+            // names and the link count intact. No mutation has happened yet, so
+            // returning here destroys neither name; without it the block below
+            // would unlink the target name and decrement the shared inode's
+            // link count, silently dropping a hard link (bd-f7q6k).
+            if existing_ino == child_ino {
+                return Ok(());
+            }
             let existing_inode = self.read_inode(cx, existing_ino)?;
 
             if existing_inode.is_dir() {
@@ -21683,6 +21693,20 @@ impl OpenFs {
         let child_is_dir = child.file_type == BTRFS_FT_DIR;
         Self::btrfs_require_inode_ref_name(&alloc, child.child_objectid, parent_oid, name)?;
         if parent_oid == new_parent_oid && name == new_name {
+            return Ok(());
+        }
+        // POSIX: renaming a file onto one of its own hard links (old and new
+        // names resolve to the same inode) is a no-op: the kernel's vfs_rename
+        // short-circuits `if (source == target) return 0`, leaving both names
+        // and the link count intact. This runs before any mutation, so neither
+        // name is removed and nlink is untouched. Without it the code below
+        // would remove the source name and decrement the shared inode's nlink,
+        // silently destroying a hard link (bd-f7q6k). A directory cannot be
+        // hard-linked, so this only fires for regular files.
+        if let Ok(existing_target) =
+            self.btrfs_lookup_dir_entry(&alloc, new_parent_oid, new_name)
+            && existing_target.child_objectid == child.child_objectid
+        {
             return Ok(());
         }
         if child_is_dir
@@ -65946,6 +65970,87 @@ mod tests {
         );
     }
 
+    /// POSIX: renaming a file onto one of its own hard links (old and new
+    /// resolve to the same inode via different names) is a no-op: vfs_rename
+    /// short-circuits `if (source == target) return 0`, leaving both names and
+    /// the link count untouched. btrfs_rename only guarded the same-*path* case,
+    /// so it removed the source name and decremented nlink, silently destroying
+    /// a hard link. Regression for bd-f7q6k.
+    #[test]
+    fn btrfs_rename_onto_own_hardlink_is_noop_keeps_both_names() {
+        let (fs, cx) = open_writable_btrfs();
+        let root = InodeNumber(u64::from(BTRFS_FIRST_FREE_OBJECTID));
+        let a = fs
+            .create(&cx, root, OsStr::new("a"), 0o644, 0, 0)
+            .expect("create a");
+        fs.link(&cx, a.ino, root, OsStr::new("b"))
+            .expect("hard-link b -> a");
+        assert_eq!(
+            fs.lookup(&cx, root, OsStr::new("b"))
+                .expect("b exists")
+                .nlink,
+            2,
+            "precondition: a and b are two links to one inode"
+        );
+
+        // rename(a, b): a and b are the same inode -> POSIX no-op.
+        fs.rename(&cx, root, OsStr::new("a"), root, OsStr::new("b"))
+            .expect("same-inode rename must succeed as a no-op");
+
+        let la = fs
+            .lookup(&cx, root, OsStr::new("a"))
+            .expect("a must still exist after a same-inode rename");
+        let lb = fs
+            .lookup(&cx, root, OsStr::new("b"))
+            .expect("b must still exist after a same-inode rename");
+        assert_eq!(la.ino, a.ino, "a still points at the original inode");
+        assert_eq!(lb.ino, a.ino, "b still points at the original inode");
+        assert_eq!(
+            la.nlink, 2,
+            "both hard links must survive a same-inode rename (no link destroyed)"
+        );
+    }
+
+    /// Same POSIX same-inode no-op rule as the btrfs test, on ext4: renaming a
+    /// file onto its own hard link must leave both names and the link count
+    /// intact (bd-f7q6k). ext4_rename only guarded the same-path case.
+    #[test]
+    fn ext4_rename_onto_own_hardlink_is_noop_keeps_both_names() {
+        let Some(fs) = open_writable_ext4() else {
+            return; // no ext4 fixture / mkfs available
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let a = fs
+            .create(&cx, root, OsStr::new("hl_a"), 0o644, 0, 0)
+            .expect("create hl_a");
+        fs.link(&cx, a.ino, root, OsStr::new("hl_b"))
+            .expect("hard-link hl_b -> hl_a");
+        assert_eq!(
+            fs.lookup(&cx, root, OsStr::new("hl_b"))
+                .expect("hl_b exists")
+                .nlink,
+            2,
+            "precondition: hl_a and hl_b are two links to one inode"
+        );
+
+        fs.rename(&cx, root, OsStr::new("hl_a"), root, OsStr::new("hl_b"))
+            .expect("same-inode rename must succeed as a no-op");
+
+        let la = fs
+            .lookup(&cx, root, OsStr::new("hl_a"))
+            .expect("hl_a must still exist after a same-inode rename");
+        let lb = fs
+            .lookup(&cx, root, OsStr::new("hl_b"))
+            .expect("hl_b must still exist after a same-inode rename");
+        assert_eq!(la.ino, a.ino);
+        assert_eq!(lb.ino, a.ino);
+        assert_eq!(
+            la.nlink, 2,
+            "both hard links must survive a same-inode rename"
+        );
+    }
+
     #[test]
     fn btrfs_rename_rejects_malformed_target_lookup_without_moving_source() {
         let (fs, cx) = open_writable_btrfs();
@@ -67554,6 +67659,12 @@ mod tests {
         )
         .unwrap();
 
+        // rename(2): "If oldpath and newpath are existing hard links referring
+        // to the same file, then rename() does nothing, and returns a success
+        // status." So BOTH names survive and the link count is unchanged — this
+        // is a true no-op, not a source-removing rename (bd-f7q6k). The previous
+        // assertions here encoded the buggy non-noop behavior (original.txt gone,
+        // nlink dropped to 1), which destroyed one of the two hard links.
         let alias = ops
             .lookup(
                 &cx,
@@ -67564,20 +67675,20 @@ mod tests {
             .unwrap();
         assert_eq!(alias.ino, file.ino);
 
-        let original_err = ops
+        let original = ops
             .lookup(
                 &cx,
                 &mut RequestScope::empty(),
                 InodeNumber(1),
                 OsStr::new("original.txt"),
             )
-            .unwrap_err();
-        assert_eq!(original_err.to_errno(), libc::ENOENT);
+            .expect("original.txt must survive a same-inode no-op rename");
+        assert_eq!(original.ino, file.ino);
 
         let after = ops
             .getattr(&cx, &mut RequestScope::empty(), file.ino)
             .unwrap();
-        assert_eq!(after.nlink, 1);
+        assert_eq!(after.nlink, 2, "both hard links must survive");
 
         let data = ops
             .read(&cx, &mut RequestScope::empty(), file.ino, 0, 4096)
