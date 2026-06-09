@@ -26018,19 +26018,45 @@ impl OpenFs {
         &self,
         cx: &Cx,
         canonical: u64,
+        from_offset: u64,
     ) -> ffs_error::Result<Vec<(u64, BtrfsExtentData)>> {
         if let Some(alloc_mutex) = self.btrfs_alloc_state.as_ref() {
+            let alloc = alloc_mutex.lock();
+            // fiemap / SEEK_DATA / SEEK_HOLE all only care about extents whose end
+            // is past `from_offset` (the requested range/seek start): an extent
+            // ending at or before it is skipped by every caller. `floor_key` seeks
+            // the lower bound to the extent covering/preceding `from_offset` so the
+            // fetch is O(log N + extents-after) instead of an O(extents) scan from
+            // the start of the file (bd-4milp's floor primitive). The result is
+            // identical — only extents the caller would skip anyway are dropped,
+            // and the file's last extent (fiemap's FIEMAP_EXTENT_LAST) is still
+            // reached because the upper bound stays u64::MAX. Fall back to offset 0
+            // when no EXTENT_DATA of this inode lies at/before `from_offset`.
+            let seek = BtrfsKey {
+                objectid: canonical,
+                item_type: BTRFS_ITEM_EXTENT_DATA,
+                offset: from_offset,
+            };
+            let lower_offset = match alloc
+                .fs_tree
+                .floor_key(&seek)
+                .map_err(|e| btrfs_mutation_to_ffs(&e))?
+            {
+                Some(k) if k.objectid == canonical && k.item_type == BTRFS_ITEM_EXTENT_DATA => {
+                    k.offset
+                }
+                _ => 0,
+            };
             let ext_start = BtrfsKey {
                 objectid: canonical,
                 item_type: BTRFS_ITEM_EXTENT_DATA,
-                offset: 0,
+                offset: lower_offset,
             };
             let ext_end = BtrfsKey {
                 objectid: canonical,
                 item_type: BTRFS_ITEM_EXTENT_DATA,
                 offset: u64::MAX,
             };
-            let alloc = alloc_mutex.lock();
             let ext_items = alloc
                 .fs_tree
                 .range(&ext_start, &ext_end)
@@ -26149,7 +26175,7 @@ impl OpenFs {
         // matches the kernel, btrfs_read_file, and SEEK_DATA/SEEK_HOLE, and so
         // FIEMAP_EXTENT_LAST lands on the last real extent (bd-cfjvh).
         let extents: Vec<_> = self
-            .btrfs_fiemap_extent_items(cx, canonical)?
+            .btrfs_fiemap_extent_items(cx, canonical, start)?
             .into_iter()
             .filter(|(_, extent)| !Self::btrfs_extent_is_hole(extent))
             .collect();
@@ -26348,7 +26374,7 @@ impl OpenFs {
         // Explicit hole extents (disk_bytenr == 0) are NOT data — drop them so
         // they read as gaps, matching btrfs_read_file and the kernel (bd-pb6bs).
         let extents: Vec<_> = self
-            .btrfs_fiemap_extent_items(cx, canonical)?
+            .btrfs_fiemap_extent_items(cx, canonical, offset)?
             .into_iter()
             .filter(|(_, extent)| !Self::btrfs_extent_is_hole(extent))
             .collect();
@@ -26388,7 +26414,7 @@ impl OpenFs {
         // Explicit hole extents (disk_bytenr == 0) are NOT data, so they must
         // count as holes, not advance the covered-data cursor (bd-pb6bs).
         let extents: Vec<_> = self
-            .btrfs_fiemap_extent_items(cx, canonical)?
+            .btrfs_fiemap_extent_items(cx, canonical, offset)?
             .into_iter()
             .filter(|(_, extent)| !Self::btrfs_extent_is_hole(extent))
             .collect();
