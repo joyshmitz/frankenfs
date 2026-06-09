@@ -13310,6 +13310,22 @@ impl OpenFs {
             return Err(FfsError::NotDirectory);
         }
 
+        // A new subdirectory adds a '..' link to the parent. The kernel's
+        // EXT4_DIR_LINK_MAX(dir) = !is_dx(dir) && i_nlink >= EXT4_LINK_MAX makes
+        // mkdir return EMLINK once a NON-htree directory reaches the link cap.
+        // (htree directories instead represent "too many to count" by capping
+        // their link count at 1 — the dir_nlink sentinel — a separate accounting
+        // concern tracked in bd-j12g7.) Without this guard the parent's u16
+        // links_count would climb to overflow and fail as a generic Corruption
+        // rather than the POSIX EMLINK. Mirrors ext4_link's cap and btrfs
+        // bd-ilg79.
+        const EXT4_DIR_LINK_MAX: u16 = 65_000;
+        if parent_inode.flags & ffs_types::EXT4_INDEX_FL == 0
+            && parent_inode.links_count >= EXT4_DIR_LINK_MAX
+        {
+            return Err(FfsError::Io(std::io::Error::from_raw_os_error(libc::EMLINK)));
+        }
+
         // Check for duplicate name — POSIX requires EEXIST.
         if self.lookup_name(cx, &parent_inode, name)?.is_some() {
             return Err(FfsError::Exists);
@@ -47405,7 +47421,7 @@ mod tests {
     }
 
     #[test]
-    fn write_mkdir_parent_nlink_overflow_reports_corruption() {
+    fn write_mkdir_at_dir_link_max_returns_emlink_bd_j12g7() {
         let Some(fs) = open_writable_ext4() else {
             return;
         };
@@ -47418,14 +47434,23 @@ mod tests {
             .count_free_blocks_in_group(&cx, GroupNumber(0))
             .expect("free block count before mkdir");
 
+        // A NON-htree directory at the EXT4_LINK_MAX cap must reject a new
+        // subdirectory with EMLINK (kernel EXT4_DIR_LINK_MAX), before allocating
+        // anything — previously FrankenFS let the parent's link count climb to a
+        // u16 overflow and surfaced a generic Corruption instead (bd-j12g7).
         let mut root_inode = fs.read_inode(&cx, root).expect("read root inode");
-        root_inode.links_count = u16::MAX;
+        assert_eq!(
+            root_inode.flags & ffs_types::EXT4_INDEX_FL,
+            0,
+            "root must be non-htree for the EMLINK path"
+        );
+        root_inode.links_count = 65_000;
         persist_ext4_test_inode(&fs, &cx, root, &root_inode);
 
         let err = fs
             .mkdir(&cx, root, OsStr::new("overflow_dir"), 0o755, 0, 0)
-            .expect_err("mkdir should fail on parent nlink overflow");
-        assert!(matches!(err, FfsError::Corruption { .. }));
+            .expect_err("mkdir at the directory link cap must fail");
+        assert_eq!(err.to_errno(), libc::EMLINK);
 
         let lookup_err = fs
             .lookup(&cx, root, OsStr::new("overflow_dir"))
