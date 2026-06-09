@@ -23068,6 +23068,12 @@ impl OpenFs {
     }
 
     /// Look up a directory entry by name in the in-memory FS tree.
+    ///
+    /// btrfs keys every DIR_ITEM by `(parent, DIR_ITEM, name_hash)`, and a name
+    /// is stored only in its own hash bucket, so this is an O(log N) point
+    /// lookup at the name's hash key plus a scan of the (tiny) collision bucket —
+    /// not an O(N) scan of every entry in the directory (bd-a9wot). Mirrors the
+    /// hash-keyed access `btrfs_getxattr` already uses for XATTR_ITEM.
     #[allow(clippy::unused_self)]
     fn btrfs_lookup_dir_entry(
         &self,
@@ -23075,19 +23081,14 @@ impl OpenFs {
         parent_oid: u64,
         name: &[u8],
     ) -> ffs_error::Result<BtrfsDirItem> {
-        let start = BtrfsKey {
+        let key = BtrfsKey {
             objectid: parent_oid,
             item_type: BTRFS_ITEM_DIR_ITEM,
-            offset: 0,
-        };
-        let end = BtrfsKey {
-            objectid: parent_oid,
-            item_type: BTRFS_ITEM_DIR_ITEM,
-            offset: u64::MAX,
+            offset: u64::from(ffs_btrfs::btrfs_name_hash(name)),
         };
         let items = alloc
             .fs_tree
-            .range(&start, &end)
+            .range(&key, &key)
             .map_err(|e| btrfs_mutation_to_ffs(&e))?;
         for (_, data) in items {
             let entries = Self::btrfs_parse_dir_items(
@@ -66583,17 +66584,12 @@ mod tests {
         let (fs, cx) = open_writable_btrfs();
         let ops: &dyn FsOps = &fs;
         let source_name = b"rename_source.txt";
-        let new_name = b"rename_new_name.txt";
-        let source_hash = ffs_btrfs::btrfs_name_hash(source_name);
-        let broken_name = [
-            b"rename_broken_neighbor_0.txt".as_slice(),
-            b"rename_broken_neighbor_1.txt".as_slice(),
-            b"rename_broken_neighbor_2.txt".as_slice(),
-            b"rename_broken_neighbor_3.txt".as_slice(),
-        ]
-        .into_iter()
-        .find(|candidate| ffs_btrfs::btrfs_name_hash(candidate) > source_hash)
-        .expect("test fixture should include a sibling sorted after the source");
+        // The rename TARGET is the entry whose DIR_ITEM we corrupt. With the
+        // hash-keyed lookup (bd-a9wot) a malformed entry only fails lookups of
+        // its OWN name — matching the kernel, which never scans unrelated
+        // entries — so the target lookup is what must fail closed, leaving the
+        // (valid) source untouched.
+        let broken_name = b"rename_broken_target.txt".as_slice();
 
         let source = ops
             .create(
@@ -66627,9 +66623,9 @@ mod tests {
                 InodeNumber(1),
                 OsStr::from_bytes(source_name),
                 InodeNumber(1),
-                OsStr::from_bytes(new_name),
+                OsStr::from_bytes(broken_name),
             )
-            .expect_err("malformed target lookup scan should fail closed");
+            .expect_err("rename to a malformed target must fail closed");
         assert!(
             matches!(
                 err,
@@ -67003,6 +66999,129 @@ mod tests {
         drop(alloc);
 
         assert!(matches!(err, FfsError::Corruption { .. }));
+    }
+
+    /// Reference O(N) implementation of btrfs_lookup_dir_entry: scan EVERY
+    /// DIR_ITEM in the directory (the pre-bd-a9wot behavior). Used only to prove
+    /// the hash-keyed point lookup is isomorphic to a full scan.
+    #[cfg(test)]
+    fn btrfs_lookup_dir_entry_full_scan_reference(
+        alloc: &BtrfsAllocState,
+        parent_oid: u64,
+        name: &[u8],
+    ) -> Option<BtrfsDirItem> {
+        let start = BtrfsKey {
+            objectid: parent_oid,
+            item_type: BTRFS_ITEM_DIR_ITEM,
+            offset: 0,
+        };
+        let end = BtrfsKey {
+            objectid: parent_oid,
+            item_type: BTRFS_ITEM_DIR_ITEM,
+            offset: u64::MAX,
+        };
+        for (_, data) in alloc.fs_tree.range(&start, &end).ok()? {
+            let entries = parse_dir_items(&data).ok()?;
+            if let Some(e) = entries.into_iter().find(|e| e.name == name) {
+                return Some(e);
+            }
+        }
+        None
+    }
+
+    /// Isomorphism guard for bd-a9wot: the hash-keyed btrfs_lookup_dir_entry must
+    /// return exactly what an O(N) full DIR_ITEM scan returns — for every present
+    /// name and for absent names — across a large directory.
+    #[test]
+    fn btrfs_lookup_dir_entry_hash_keyed_matches_full_scan_bd_a9wot() {
+        let (fs, cx) = open_writable_btrfs();
+        let root = InodeNumber(u64::from(BTRFS_FIRST_FREE_OBJECTID));
+        let mut names = Vec::new();
+        for i in 0..200u32 {
+            let name = format!("entry_{i:04}.dat");
+            fs.create(&cx, root, OsStr::new(&name), 0o644, 0, 0)
+                .expect("create entry");
+            names.push(name);
+        }
+
+        let parent = fs.btrfs_canonical_inode(root).expect("canonical");
+        let alloc_mutex = fs.btrfs_alloc_state.as_ref().expect("writable");
+        let alloc = alloc_mutex.lock();
+        for name in &names {
+            let via_hash = fs
+                .btrfs_lookup_dir_entry(&alloc, parent, name.as_bytes())
+                .expect("present name must be found");
+            let via_scan =
+                btrfs_lookup_dir_entry_full_scan_reference(&alloc, parent, name.as_bytes())
+                    .expect("full scan must find it too");
+            assert_eq!(
+                via_hash.child_objectid, via_scan.child_objectid,
+                "hash lookup must return the same entry as a full scan for {name}"
+            );
+            assert_eq!(via_hash.name, via_scan.name);
+        }
+        for absent in ["zzz_absent.dat", "nope", "entry_9999.dat"] {
+            assert!(
+                fs.btrfs_lookup_dir_entry(&alloc, parent, absent.as_bytes())
+                    .is_err(),
+                "absent name {absent} must be NotFound under the hash-keyed lookup"
+            );
+            assert!(
+                btrfs_lookup_dir_entry_full_scan_reference(&alloc, parent, absent.as_bytes())
+                    .is_none(),
+                "absent name {absent} must also be missing under a full scan"
+            );
+        }
+    }
+
+    /// Diagnostic A/B for bd-a9wot: time the hash-keyed point lookup vs the O(N)
+    /// full-scan reference over a large directory. Prints the Score (full / hash)
+    /// so the complexity-class win is measurable. Run with --ignored --nocapture.
+    #[test]
+    #[ignore = "perf A/B: btrfs dir lookup hash-keyed vs O(N) full scan (bd-a9wot)"]
+    fn btrfs_lookup_dir_entry_hash_vs_full_scan_ab_bd_a9wot() {
+        let (fs, cx) = open_writable_btrfs();
+        let root = InodeNumber(u64::from(BTRFS_FIRST_FREE_OBJECTID));
+        let n = 2000u32;
+        let mut names = Vec::new();
+        for i in 0..n {
+            let name = format!("f_{i:05}.dat");
+            fs.create(&cx, root, OsStr::new(&name), 0o644, 0, 0)
+                .expect("create");
+            names.push(name);
+        }
+        let parent = fs.btrfs_canonical_inode(root).unwrap();
+        let alloc = fs.btrfs_alloc_state.as_ref().unwrap().lock();
+
+        let iters = 5usize;
+        let t_hash = std::time::Instant::now();
+        let mut acc = 0u64;
+        for _ in 0..iters {
+            for name in &names {
+                acc = acc.wrapping_add(
+                    fs.btrfs_lookup_dir_entry(&alloc, parent, name.as_bytes())
+                        .unwrap()
+                        .child_objectid,
+                );
+            }
+        }
+        let hash_ns = t_hash.elapsed().as_nanos();
+
+        let t_scan = std::time::Instant::now();
+        for _ in 0..iters {
+            for name in &names {
+                acc = acc.wrapping_add(
+                    btrfs_lookup_dir_entry_full_scan_reference(&alloc, parent, name.as_bytes())
+                        .unwrap()
+                        .child_objectid,
+                );
+            }
+        }
+        let scan_ns = t_scan.elapsed().as_nanos();
+        eprintln!(
+            "BD_A9WOT N={n} iters={iters} hash_ns={hash_ns} scan_ns={scan_ns} score={:.2} (acc={acc})",
+            scan_ns as f64 / hash_ns.max(1) as f64
+        );
     }
 
     #[test]
