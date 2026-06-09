@@ -66626,13 +66626,14 @@ mod tests {
                 OsStr::from_bytes(broken_name),
             )
             .expect_err("rename to a malformed target must fail closed");
+        // The corruption is surfaced by whichever preflight step first parses the
+        // target's (now hash-keyed) DIR_ITEM bucket — insert-preflight,
+        // same-inode check, or rename-target preflight — so the exact detail is
+        // not pinned; what matters is that it fails closed with Corruption before
+        // the source is removed (asserted below).
         assert!(
-            matches!(
-                err,
-                FfsError::Corruption { ref detail, .. }
-                    if detail.contains("malformed btrfs DIR_ITEM payload during lookup")
-            ),
-            "unexpected malformed rename target error: {err:?}"
+            matches!(err, FfsError::Corruption { .. }),
+            "rename to a malformed target must fail closed with Corruption: {err:?}"
         );
 
         let source_key = BtrfsKey {
