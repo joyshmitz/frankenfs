@@ -14,9 +14,9 @@ pub use degradation::{
 pub use vfs::{
     BtrfsQgroupLimitRequest, BtrfsTreeSearchKey, DirEntry, FIEMAP_EXTENT_DATA_INLINE,
     FIEMAP_EXTENT_ENCODED, FIEMAP_EXTENT_LAST, FIEMAP_EXTENT_NOT_ALIGNED, FIEMAP_EXTENT_SHARED,
-    FIEMAP_EXTENT_UNWRITTEN, FiemapExtent, FileType, FsOps, FsStat, FsxattrInfo,
-    InodeAttr, QuotaEntry, QuotaInfo, QuotaType, ReleaseRequest, RequestOp, RequestScope,
-    SeekWhence, SetAttrRequest, XattrSetMode, xflags,
+    FIEMAP_EXTENT_UNWRITTEN, FiemapExtent, FileType, FsOps, FsStat, FsxattrInfo, InodeAttr,
+    QuotaEntry, QuotaInfo, QuotaType, ReleaseRequest, RequestOp, RequestScope, SeekWhence,
+    SetAttrRequest, XattrSetMode, xflags,
 };
 // Re-export repair lifecycle for convenient wiring.
 pub use ffs_block::RepairFlushLifecycle;
@@ -37,12 +37,12 @@ use ffs_btrfs::{
     BTRFS_FILE_EXTENT_REG, BTRFS_FIRST_FREE_OBJECTID, BTRFS_FS_TREE_OBJECTID, BTRFS_FT_BLKDEV,
     BTRFS_FT_CHRDEV, BTRFS_FT_DIR, BTRFS_FT_FIFO, BTRFS_FT_REG_FILE, BTRFS_FT_SOCK,
     BTRFS_FT_SYMLINK, BTRFS_INODE_APPEND, BTRFS_INODE_IMMUTABLE, BTRFS_INODE_NODATASUM,
-    BTRFS_ITEM_DIR_INDEX, BTRFS_ITEM_DIR_ITEM,
-    BTRFS_ITEM_EXTENT_DATA, BTRFS_ITEM_INODE_ITEM, BTRFS_ITEM_INODE_REF, BTRFS_ITEM_ROOT_ITEM,
-    BTRFS_ITEM_ROOT_REF, BTRFS_ITEM_XATTR_ITEM, BTRFS_ROOT_SUBVOL_RDONLY, BTRFS_ROOT_TREE_OBJECTID,
-    BTRFS_USER_SETTABLE_FSFLAGS, BTRFS_USER_SETTABLE_XFLAGS, BtrfsBTree, BtrfsBlockGroupItem,
-    BtrfsCowNode, BtrfsDirItem, BtrfsExtentAllocator, BtrfsExtentData, BtrfsInodeItem, BtrfsKey,
-    BtrfsLeafEntry, BtrfsMutationError, BtrfsNodeSerializeParams, BtrfsRootItem, BtrfsTreeItem,
+    BTRFS_ITEM_DIR_INDEX, BTRFS_ITEM_DIR_ITEM, BTRFS_ITEM_EXTENT_DATA, BTRFS_ITEM_INODE_ITEM,
+    BTRFS_ITEM_INODE_REF, BTRFS_ITEM_ROOT_ITEM, BTRFS_ITEM_ROOT_REF, BTRFS_ITEM_XATTR_ITEM,
+    BTRFS_ROOT_SUBVOL_RDONLY, BTRFS_ROOT_TREE_OBJECTID, BTRFS_USER_SETTABLE_FSFLAGS,
+    BTRFS_USER_SETTABLE_XFLAGS, BtrfsBTree, BtrfsBlockGroupItem, BtrfsCowNode, BtrfsDirItem,
+    BtrfsExtentAllocator, BtrfsExtentData, BtrfsInodeItem, BtrfsKey, BtrfsLeafEntry,
+    BtrfsMutationError, BtrfsNodeSerializeParams, BtrfsRootItem, BtrfsTreeItem,
     InMemoryCowBtrfsTree, btrfs_inode_flags_to_fsflags, btrfs_inode_flags_to_xflags,
     enumerate_snapshots, enumerate_subvolumes, fsflags_to_btrfs_inode_flags, generate_send_stream,
     lookup_data_block_csum, map_logical_to_physical, parse_dir_items, parse_extent_data,
@@ -643,7 +643,10 @@ enum BtrfsExtentDisposition {
     Keep,
     /// Sole reference (`refs == 1`): free the extent's space and remove its
     /// checksums — the existing, refcount-unaware path.
-    Free { disk_bytenr: u64, disk_num_bytes: u64 },
+    Free {
+        disk_bytenr: u64,
+        disk_num_bytes: u64,
+    },
     /// Shared extent (`refs > 1`, reflink / snapshot / CoW): drop only this
     /// inode's `EXTENT_DATA_REF`, leaving the space (and csums) live for the
     /// other references. The inverse of the validated reflink share.
@@ -3560,7 +3563,13 @@ impl OpenFs {
                         persist_ctx,
                     } = &mut alloc;
                     let freed = ffs_inode::truncate_indirect_blocks(
-                        cx, &block_dev, geo, groups, &mut inode, cutoff, persist_ctx,
+                        cx,
+                        &block_dev,
+                        geo,
+                        groups,
+                        &mut inode,
+                        cutoff,
+                        persist_ctx,
                     )?;
                     if freed > 0 {
                         let freed_sectors = if inode.is_huge_file() {
@@ -4265,7 +4274,10 @@ impl OpenFs {
         let mut inode = self.read_inode(cx, ino_n)?;
         if inode.links_count == 0 {
             // Already freed (or never linked) — nothing to do.
-            debug!(ino, "fc_apply: zero-link inode already freed — idempotent no-op");
+            debug!(
+                ino,
+                "fc_apply: zero-link inode already freed — idempotent no-op"
+            );
             return Ok(());
         }
         let csum_seed = self
@@ -4293,7 +4305,10 @@ impl OpenFs {
         self.ext4_inode_table_block_cache.lock().clear();
         self.ext4_group_desc_cache.lock().clear();
         self.ext4_file_data_block_cache.lock().clear();
-        debug!(ino, "fc_apply: freed zero-link inode + its blocks at recovery");
+        debug!(
+            ino,
+            "fc_apply: freed zero-link inode + its blocks at recovery"
+        );
         Ok(())
     }
 
@@ -4324,8 +4339,7 @@ impl OpenFs {
                     block: gd.inode_table,
                     detail: "inode table offset overflow".into(),
                 })?;
-        let abs_offset =
-            inode_table_start_byte + u64::from(loc.index) * u64::from(sb.inode_size);
+        let abs_offset = inode_table_start_byte + u64::from(loc.index) * u64::from(sb.inode_size);
         let block_num = BlockNumber(abs_offset / bs);
         let offset_in_block = usize::try_from(abs_offset % bs).map_err(|_| {
             FfsError::InvalidGeometry("inode offset within block exceeds addressable range".into())
@@ -4350,7 +4364,11 @@ impl OpenFs {
         };
         block_dev.write_block(cx, block_num, &updated)?;
         self.ext4_inode_table_block_cache.lock().remove(&block_num);
-        debug!(ino, block = block_num.0, "fc_apply: inode written back at recovery");
+        debug!(
+            ino,
+            block = block_num.0,
+            "fc_apply: inode written back at recovery"
+        );
         Ok(())
     }
 
@@ -4420,13 +4438,7 @@ impl OpenFs {
 
         // htree (hash-indexed) directory: add into the hash-correct leaf only.
         if parent.has_htree_index() {
-            return self.apply_fast_commit_add_dentry_htree(
-                cx,
-                &scope,
-                &parent,
-                dentry,
-                file_type,
-            );
+            return self.apply_fast_commit_add_dentry_htree(cx, &scope, &parent, dentry, file_type);
         }
 
         // Linear directory: splice into the first block with room.
@@ -4780,10 +4792,7 @@ impl OpenFs {
                         .checked_mul(u64::from(alloc.geo.block_size / EXT4_SECTOR_SIZE))
                         .ok_or_else(|| FfsError::Corruption {
                             block: 0,
-                            detail: format!(
-                                "inode {} DEL_RANGE freed sectors overflow",
-                                range.ino
-                            ),
+                            detail: format!("inode {} DEL_RANGE freed sectors overflow", range.ino),
                         })?
                 };
                 inode.blocks = Self::ext4_checked_inode_blocks_delta(
@@ -7426,11 +7435,7 @@ impl OpenFs {
                     })?;
                 Self::validate_btrfs_decompressed_len("zlib", out, uncompressed_size)
             }
-            2 => Self::btrfs_decompress_lzo(
-                compressed,
-                uncompressed_size,
-                BTRFS_LZO_SECTOR_SIZE,
-            ),
+            2 => Self::btrfs_decompress_lzo(compressed, uncompressed_size, BTRFS_LZO_SECTOR_SIZE),
             3 => {
                 // ZSTD
                 let out = zstd::decode_all(compressed).map_err(|e| FfsError::Corruption {
@@ -7843,10 +7848,19 @@ impl OpenFs {
                     item_type: BTRFS_ITEM_EXTENT_DATA,
                     offset: 0,
                 };
+                // Only fetch extents that can overlap the requested read window
+                // [offset, offset+size): an EXTENT_DATA item keyed at or past the
+                // window's end starts after the last byte read, so it can never
+                // contribute (the assembly loop below already skips it, and the
+                // output buffer is pre-zeroed for holes). Capping the upper key
+                // turns a per-read scan over EVERY extent of the inode into a scan
+                // bounded by the read window — the read result is identical
+                // (bd-4milp). The lower bound stays 0 so the extent covering the
+                // read start is always included.
                 let ext_end = BtrfsKey {
                     objectid: canonical,
                     item_type: BTRFS_ITEM_EXTENT_DATA,
-                    offset: u64::MAX,
+                    offset: offset.saturating_add(u64::from(size)),
                 };
                 let ext_items = alloc
                     .fs_tree
@@ -8914,7 +8928,10 @@ impl OpenFs {
         if !any_overlay {
             let mut bufs: Vec<BlockBuf> = (0..count).map(|_| BlockBuf::new(Vec::new())).collect();
             dev.read_contiguous_blocks(cx, start, &mut bufs)?;
-            return Ok(bufs.into_iter().map(|buf| buf.as_slice().to_vec()).collect());
+            return Ok(bufs
+                .into_iter()
+                .map(|buf| buf.as_slice().to_vec())
+                .collect());
         }
 
         // Mixed: keep overlay bytes; coalesce maximal base-gap runs into ranged
@@ -8933,13 +8950,18 @@ impl OpenFs {
             let run_start_u64 = u64::try_from(run_start)
                 .map_err(|_| FfsError::Format("run start does not fit u64".to_owned()))?;
             let run_block_start = BlockNumber(start.0 + run_start_u64);
-            let mut bufs: Vec<BlockBuf> = (run_start..idx).map(|_| BlockBuf::new(Vec::new())).collect();
+            let mut bufs: Vec<BlockBuf> = (run_start..idx)
+                .map(|_| BlockBuf::new(Vec::new()))
+                .collect();
             dev.read_contiguous_blocks(cx, run_block_start, &mut bufs)?;
             for (j, buf) in bufs.into_iter().enumerate() {
                 resolved[run_start + j] = Some(buf.as_slice().to_vec());
             }
         }
-        Ok(resolved.into_iter().map(Option::unwrap_or_default).collect())
+        Ok(resolved
+            .into_iter()
+            .map(Option::unwrap_or_default)
+            .collect())
     }
 
     fn write_block_with_scope(
@@ -11313,7 +11335,8 @@ impl OpenFs {
             if let Some(tx) = &mut scope.tx {
                 tx.stage_write_with_proof(ptr_block, data, MergeProof::DisjointBlocks);
             } else {
-                self.block_device_adapter().write_block(cx, ptr_block, &data)?;
+                self.block_device_adapter()
+                    .write_block(cx, ptr_block, &data)?;
             }
         }
         Ok((freed, empty))
@@ -11372,7 +11395,9 @@ impl OpenFs {
             (
                 14usize,
                 3u32,
-                12u64.saturating_add(ppb).saturating_add(ppb.saturating_mul(ppb)),
+                12u64
+                    .saturating_add(ppb)
+                    .saturating_add(ppb.saturating_mul(ppb)),
             ),
         ];
         for (iblock_idx, level, base_logical) in roots {
@@ -11903,11 +11928,7 @@ fn extent_cache_namespace(inode: &Ext4Inode) -> u64 {
     if inode.number != 0 {
         // Pack (number, generation); the high bit space of a real inode number
         // plus the generation gives an exact, drift-free per-inode key.
-        return inode
-            .number
-            .rotate_left(32)
-            ^ u64::from(inode.generation)
-            ^ 0x9e37_79b9_7f4a_7c15;
+        return inode.number.rotate_left(32) ^ u64::from(inode.generation) ^ 0x9e37_79b9_7f4a_7c15;
     }
     extent_root_namespace(inode)
 }
@@ -13319,10 +13340,11 @@ impl OpenFs {
         // An htree directory instead pins its link count at the dir_nlink
         // sentinel (1) — see `ext4_dir_link_inc` (bd-j12g7). Mirrors ext4_link's
         // cap and btrfs bd-ilg79.
-        if parent_inode.flags & ffs_types::EXT4_INDEX_FL == 0
-            && parent_inode.links_count >= 65_000
+        if parent_inode.flags & ffs_types::EXT4_INDEX_FL == 0 && parent_inode.links_count >= 65_000
         {
-            return Err(FfsError::Io(std::io::Error::from_raw_os_error(libc::EMLINK)));
+            return Err(FfsError::Io(std::io::Error::from_raw_os_error(
+                libc::EMLINK,
+            )));
         }
 
         // Check for duplicate name — POSIX requires EEXIST.
@@ -14082,20 +14104,20 @@ impl OpenFs {
                 // Linear directory: entries are in every block, including block 0.
                 ((dotdot), (0..n_blocks).collect::<Vec<u32>>())
             } else {
-            let indirect_levels =
-                ffs_ondisk::parse_dx_root(s).map_or(0, |dxr| dxr.indirect_levels);
-            let leaves: Vec<u32> = if indirect_levels == 0 {
-                // Single level: every block after the dx_root is a leaf. Keep the
-                // long-standing full scan (it also covers any leaf the index
-                // references), since the insert path never leaves a leaf out of
-                // the index but the scan is the conservative, proven path.
-                (1..n_blocks).collect()
-            } else {
-                // Multi-level: descend the DX index so we read only real leaves
-                // and never mis-parse an interior dx_node block (bd-owt2r). The
-                // insert path keeps every leaf indexed, so this is complete.
-                let b0_owned = s.to_vec();
-                ffs_ondisk::htree_leaf_logical_blocks(&b0_owned, has_large_dir, |lb| {
+                let indirect_levels =
+                    ffs_ondisk::parse_dx_root(s).map_or(0, |dxr| dxr.indirect_levels);
+                let leaves: Vec<u32> = if indirect_levels == 0 {
+                    // Single level: every block after the dx_root is a leaf. Keep the
+                    // long-standing full scan (it also covers any leaf the index
+                    // references), since the insert path never leaves a leaf out of
+                    // the index but the scan is the conservative, proven path.
+                    (1..n_blocks).collect()
+                } else {
+                    // Multi-level: descend the DX index so we read only real leaves
+                    // and never mis-parse an interior dx_node block (bd-owt2r). The
+                    // insert path keeps every leaf indexed, so this is complete.
+                    let b0_owned = s.to_vec();
+                    ffs_ondisk::htree_leaf_logical_blocks(&b0_owned, has_large_dir, |lb| {
                     resolve(lb)
                         .and_then(|p| dev.read_block(cx, BlockNumber(p)).ok())
                         .map(|b| b.as_slice().to_vec())
@@ -14106,8 +14128,8 @@ impl OpenFs {
                         parent.0
                     ))
                 })?
-            };
-            (dotdot, leaves)
+                };
+                (dotdot, leaves)
             }
         };
 
@@ -14419,11 +14441,7 @@ impl OpenFs {
     /// the count is set to 1. This matches the kernel exactly. For a
     /// normally-counted directory (fewer than `EXT4_LINK_MAX` subdirs) it is a
     /// plain increment, so on-disk parity is unchanged outside the >= 65000 edge.
-    fn ext4_dir_link_inc(
-        current: u16,
-        ino: InodeNumber,
-        is_htree: bool,
-    ) -> ffs_error::Result<u16> {
+    fn ext4_dir_link_inc(current: u16, ino: InodeNumber, is_htree: bool) -> ffs_error::Result<u16> {
         const EXT4_LINK_MAX: u16 = 65_000;
 
         if !is_htree {
@@ -15062,8 +15080,20 @@ impl OpenFs {
         if (inode.flags & ffs_types::EXT4_EXTENTS_FL) == 0 {
             // Legacy indirect-block-mapped file (bd-laay3 increment 4).
             return self.ext4_fallocate_indirect(
-                cx, scope, ino, inode, offset, end, keep_size, punch_hole, zero_range,
-                collapse_range, insert_range, block_size, tstamp_secs, tstamp_nanos,
+                cx,
+                scope,
+                ino,
+                inode,
+                offset,
+                end,
+                keep_size,
+                punch_hole,
+                zero_range,
+                collapse_range,
+                insert_range,
+                block_size,
+                tstamp_secs,
+                tstamp_nanos,
             );
         }
 
@@ -15522,8 +15552,9 @@ impl OpenFs {
                         block_dev.write_block(cx, phys, &buf)?;
                     }
                 }
-                goal_block =
-                    Some(BlockNumber(mapping.physical_start + u64::from(mapping.count)));
+                goal_block = Some(BlockNumber(
+                    mapping.physical_start + u64::from(mapping.count),
+                ));
             }
             self.extent_cache.invalidate_all();
 
@@ -15878,8 +15909,8 @@ impl OpenFs {
                     // A block within the just-allocated run is newly allocated:
                     // a partial write must zero-fill the rest, not read stale
                     // disk bytes (bd-bdro7).
-                    let in_fresh_run = fresh_run
-                        .is_some_and(|(s, e)| logical_block >= s && logical_block < e);
+                    let in_fresh_run =
+                        fresh_run.is_some_and(|(s, e)| logical_block >= s && logical_block < e);
                     (b, unwritten || in_fresh_run, unwritten)
                 }
                 None => {
@@ -16230,8 +16261,16 @@ impl OpenFs {
                         persist_ctx,
                         ..
                     } = &mut *alloc;
-                    ffs_alloc::alloc_blocks_persist(cx, &block_dev, geo, groups, 1, &hint, persist_ctx)?
-                        .start
+                    ffs_alloc::alloc_blocks_persist(
+                        cx,
+                        &block_dev,
+                        geo,
+                        groups,
+                        1,
+                        &hint,
+                        persist_ctx,
+                    )?
+                    .start
                 };
                 let data_ptr = u32::try_from(data_block.0).map_err(|_| {
                     FfsError::InvalidGeometry(format!(
@@ -16239,8 +16278,14 @@ impl OpenFs {
                         data_block.0
                     ))
                 })?;
-                let meta_blocks =
-                    self.write_block_ptr(cx, scope, &mut inode, &mut alloc, logical_block, data_ptr)?;
+                let meta_blocks = self.write_block_ptr(
+                    cx,
+                    scope,
+                    &mut inode,
+                    &mut alloc,
+                    logical_block,
+                    data_ptr,
+                )?;
                 // Re-acquire the adapter so later reads observe the freshly
                 // allocated/staged blocks.
                 block_dev = self.block_device_adapter();
@@ -16290,8 +16335,11 @@ impl OpenFs {
             inode.size = end;
         }
         if added_sectors > 0 {
-            inode.blocks =
-                Self::ext4_checked_inode_blocks_delta(inode.blocks, ino, i128::from(added_sectors))?;
+            inode.blocks = Self::ext4_checked_inode_blocks_delta(
+                inode.blocks,
+                ino,
+                i128::from(added_sectors),
+            )?;
         }
         ffs_inode::touch_mtime_ctime(&mut inode, tstamp_secs, tstamp_nanos);
 
@@ -16467,10 +16515,12 @@ impl OpenFs {
                 let freed_sectors = if inode.is_huge_file() {
                     freed
                 } else {
-                    freed.checked_mul(sectors_per_block).ok_or_else(|| FfsError::Corruption {
-                        block: 0,
-                        detail: format!("inode {} punch_hole freed sectors overflow", ino.0),
-                    })?
+                    freed
+                        .checked_mul(sectors_per_block)
+                        .ok_or_else(|| FfsError::Corruption {
+                            block: 0,
+                            detail: format!("inode {} punch_hole freed sectors overflow", ino.0),
+                        })?
                 };
                 inode.blocks = Self::ext4_checked_inode_blocks_delta(
                     inode.blocks,
@@ -16511,7 +16561,13 @@ impl OpenFs {
                                 ..
                             } = &mut *alloc;
                             ffs_alloc::alloc_blocks_persist(
-                                cx, &block_dev, geo, groups, 1, &hint, persist_ctx,
+                                cx,
+                                &block_dev,
+                                geo,
+                                groups,
+                                1,
+                                &hint,
+                                persist_ctx,
                             )?
                             .start
                         };
@@ -16531,8 +16587,8 @@ impl OpenFs {
                         } else {
                             block_dev.write_block(cx, data_block, &zero_block)?;
                         }
-                        let meta = self
-                            .write_block_ptr(cx, scope, &mut inode, &mut alloc, lb, data_ptr)?;
+                        let meta =
+                            self.write_block_ptr(cx, scope, &mut inode, &mut alloc, lb, data_ptr)?;
                         block_dev = self.block_device_adapter();
                         let new_count = 1 + u64::try_from(meta.len()).map_err(|_| {
                             FfsError::Format("indirect metadata block count overflow".into())
@@ -16593,9 +16649,25 @@ impl OpenFs {
                 base: &block_dev,
                 tx: Mutex::new(tx),
             };
-            ffs_inode::write_inode(cx, &tx_dev, &alloc.geo, &alloc.groups, ino, &inode, csum_seed)?;
+            ffs_inode::write_inode(
+                cx,
+                &tx_dev,
+                &alloc.geo,
+                &alloc.groups,
+                ino,
+                &inode,
+                csum_seed,
+            )?;
         } else {
-            ffs_inode::write_inode(cx, &block_dev, &alloc.geo, &alloc.groups, ino, &inode, csum_seed)?;
+            ffs_inode::write_inode(
+                cx,
+                &block_dev,
+                &alloc.geo,
+                &alloc.groups,
+                ino,
+                &inode,
+                csum_seed,
+            )?;
         }
 
         trace!(
@@ -17421,7 +17493,8 @@ impl OpenFs {
                         let partial_lb =
                             u32::try_from(new_size / u64::from(block_size)).map_err(|_| {
                                 FfsError::Format(
-                                    "truncation size exceeds ext4 32-bit logical block limit".into(),
+                                    "truncation size exceeds ext4 32-bit logical block limit"
+                                        .into(),
                                 )
                             })?;
                         let partial_offset = usize::try_from(new_size % u64::from(block_size))
@@ -18486,7 +18559,7 @@ impl OpenFs {
         aligned_offset: u64,
         data: &[u8],
         is_datasum: bool,
-    ) -> ffs_error::Result<()> {
+    ) -> ffs_error::Result<u64> {
         let alloc_size = u64::try_from(data.len())
             .map_err(|_| FfsError::InvalidGeometry("aligned extent length overflow".into()))?;
         let allocation = alloc
@@ -18541,7 +18614,7 @@ impl OpenFs {
         if is_datasum {
             self.btrfs_capture_data_extent_csums(cx, alloc, disk_bytenr, alloc_size)?;
         }
-        Ok(())
+        Ok(alloc_size)
     }
 
     /// Record one EXTENT_CSUM per sector for a just-written datasum data extent
@@ -18568,9 +18641,13 @@ impl OpenFs {
         let mut on_disk = vec![0_u8; alloc_size_usize];
         self.btrfs_read_logical_into(cx, disk_bytenr, &mut on_disk)?;
         let max_per_item = ffs_btrfs::max_data_csums_per_item(alloc.nodesize);
-        let csum_items =
-            ffs_btrfs::build_extent_csum_items(disk_bytenr, &on_disk, sectorsize_usize, max_per_item)
-                .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+        let csum_items = ffs_btrfs::build_extent_csum_items(
+            disk_bytenr,
+            &on_disk,
+            sectorsize_usize,
+            max_per_item,
+        )
+        .map_err(|e| btrfs_mutation_to_ffs(&e))?;
         for (key, value) in csum_items {
             alloc
                 .csum_tree
@@ -18591,9 +18668,9 @@ impl OpenFs {
         canonical: u64,
         logical_offset: u64,
         data: &[u8],
-    ) -> ffs_error::Result<()> {
+    ) -> ffs_error::Result<u64> {
         if data.is_empty() || data.iter().all(|byte| *byte == 0) {
-            return Ok(());
+            return Ok(0);
         }
 
         let sectorsize = u64::from(alloc.sectorsize);
@@ -18671,7 +18748,7 @@ impl OpenFs {
                 return Err(e);
             }
         }
-        Ok(())
+        Ok(data_len)
     }
 
     fn btrfs_insert_prealloc_extent_segment(
@@ -18679,9 +18756,9 @@ impl OpenFs {
         canonical: u64,
         logical_offset: u64,
         length: u64,
-    ) -> ffs_error::Result<()> {
+    ) -> ffs_error::Result<u64> {
         if length == 0 {
-            return Ok(());
+            return Ok(0);
         }
 
         let sectorsize = u64::from(alloc.sectorsize);
@@ -18730,7 +18807,7 @@ impl OpenFs {
                 .free_extent(allocation.bytenr, alloc_size, false);
             return Err(e);
         }
-        Ok(())
+        Ok(length)
     }
 
     /// Share every data extent of `src_canonical` into `dst_canonical` — the
@@ -18958,12 +19035,11 @@ impl OpenFs {
                         FfsError::InvalidGeometry("clone extent_offset overflow".into())
                     })?;
                     let new_num_bytes = overlap_end - overlap_start;
-                    let dst_file_offset =
-                        dest_offset
-                            .checked_add(overlap_start - src_offset)
-                            .ok_or_else(|| {
-                                FfsError::InvalidGeometry("clone dst offset overflow".into())
-                            })?;
+                    let dst_file_offset = dest_offset
+                        .checked_add(overlap_start - src_offset)
+                        .ok_or_else(|| {
+                            FfsError::InvalidGeometry("clone dst offset overflow".into())
+                        })?;
                     let new_extent = BtrfsExtentData::Regular {
                         generation,
                         ram_bytes,
@@ -19020,12 +19096,11 @@ impl OpenFs {
                         chunk[..copy_end - slice_start]
                             .copy_from_slice(&logical[slice_start..copy_end]);
                     }
-                    let dst_file_offset =
-                        dest_offset
-                            .checked_add(overlap_start - src_offset)
-                            .ok_or_else(|| {
-                                FfsError::InvalidGeometry("clone dst offset overflow".into())
-                            })?;
+                    let dst_file_offset = dest_offset
+                        .checked_add(overlap_start - src_offset)
+                        .ok_or_else(|| {
+                            FfsError::InvalidGeometry("clone dst offset overflow".into())
+                        })?;
                     inline_copies.push((dst_file_offset, chunk));
                 }
             }
@@ -19274,9 +19349,9 @@ impl OpenFs {
         canonical: u64,
         range_start: u64,
         range_end: u64,
-    ) -> ffs_error::Result<()> {
+    ) -> ffs_error::Result<i128> {
         if range_start >= range_end {
-            return Ok(());
+            return Ok(0);
         }
 
         let ext_start = BtrfsKey {
@@ -19301,6 +19376,7 @@ impl OpenFs {
         // longer needs the shared extent and the other references stay live. A
         // sole reference (refs == 1) is freed as before. FrankenFS's own extents
         // are refs == 1, so the drop path only engages on kernel-shared extents.
+        let mut nbytes_delta = 0_i128;
         for (key, extent_bytes) in extents {
             let extent = parse_extent_data(&extent_bytes).map_err(|e| parse_to_ffs_error(&e))?;
             let logical_len = Self::btrfs_extent_logical_len(&extent)?;
@@ -19313,6 +19389,10 @@ impl OpenFs {
             if overlap_start >= overlap_end {
                 continue;
             }
+            Self::btrfs_accumulate_nbytes_delta(
+                &mut nbytes_delta,
+                -i128::from(Self::btrfs_extent_nbytes_contribution(&extent)),
+            )?;
 
             // A PREALLOC (unwritten) extent must keep its non-overlapping parts
             // as PREALLOC, not be materialized into regular (zero) data: the
@@ -19358,18 +19438,20 @@ impl OpenFs {
             }
 
             if is_prealloc {
-                Self::btrfs_insert_prealloc_extent_segment(
+                let left_nbytes = Self::btrfs_insert_prealloc_extent_segment(
                     alloc,
                     canonical,
                     key.offset,
                     overlap_start - key.offset,
                 )?;
-                Self::btrfs_insert_prealloc_extent_segment(
+                Self::btrfs_accumulate_nbytes_delta(&mut nbytes_delta, i128::from(left_nbytes))?;
+                let right_nbytes = Self::btrfs_insert_prealloc_extent_segment(
                     alloc,
                     canonical,
                     overlap_end,
                     logical_end - overlap_end,
                 )?;
+                Self::btrfs_accumulate_nbytes_delta(&mut nbytes_delta, i128::from(right_nbytes))?;
             } else {
                 let left_len = usize::try_from(overlap_start - key.offset).map_err(|_| {
                     FfsError::InvalidGeometry("left segment length overflow".into())
@@ -19378,24 +19460,26 @@ impl OpenFs {
                     FfsError::InvalidGeometry("right segment offset overflow".into())
                 })?;
 
-                self.btrfs_insert_regular_extent_segment(
+                let left_nbytes = self.btrfs_insert_regular_extent_segment(
                     cx,
                     alloc,
                     canonical,
                     key.offset,
                     &materialized[..left_len],
                 )?;
-                self.btrfs_insert_regular_extent_segment(
+                Self::btrfs_accumulate_nbytes_delta(&mut nbytes_delta, i128::from(left_nbytes))?;
+                let right_nbytes = self.btrfs_insert_regular_extent_segment(
                     cx,
                     alloc,
                     canonical,
                     overlap_end,
                     &materialized[right_start..],
                 )?;
+                Self::btrfs_accumulate_nbytes_delta(&mut nbytes_delta, i128::from(right_nbytes))?;
             }
         }
 
-        Ok(())
+        Ok(nbytes_delta)
     }
 
     fn btrfs_extent_data_items(
@@ -19710,15 +19794,49 @@ impl OpenFs {
             // here leaves an inline-only file with nbytes=0 while size>0, which
             // fails check with I_ERR_FILE_NBYTES_WRONG. This matches the inline
             // accounting already used on the clone path (bd-5svhs).
-            let contribution = match parse_extent_data(&edata).map_err(|e| parse_to_ffs_error(&e))? {
-                BtrfsExtentData::Regular { num_bytes, .. } => num_bytes,
-                BtrfsExtentData::Inline { ram_bytes, .. } => ram_bytes,
-            };
-            total_nbytes = total_nbytes.checked_add(contribution).ok_or_else(|| {
-                FfsError::InvalidGeometry("btrfs inode nbytes overflow".into())
-            })?;
+            let extent = parse_extent_data(&edata).map_err(|e| parse_to_ffs_error(&e))?;
+            let contribution = Self::btrfs_extent_nbytes_contribution(&extent);
+            total_nbytes = total_nbytes
+                .checked_add(contribution)
+                .ok_or_else(|| FfsError::InvalidGeometry("btrfs inode nbytes overflow".into()))?;
         }
         Ok(total_nbytes)
+    }
+
+    fn btrfs_extent_nbytes_contribution(extent: &BtrfsExtentData) -> u64 {
+        match extent {
+            BtrfsExtentData::Regular { disk_bytenr: 0, .. } => 0,
+            BtrfsExtentData::Regular { num_bytes, .. } => *num_bytes,
+            BtrfsExtentData::Inline { ram_bytes, .. } => *ram_bytes,
+        }
+    }
+
+    fn btrfs_accumulate_nbytes_delta(delta: &mut i128, amount: i128) -> ffs_error::Result<()> {
+        *delta = delta
+            .checked_add(amount)
+            .ok_or_else(|| FfsError::InvalidGeometry("btrfs inode nbytes delta overflow".into()))?;
+        Ok(())
+    }
+
+    fn btrfs_apply_nbytes_delta(current: u64, delta: i128) -> ffs_error::Result<u64> {
+        if delta >= 0 {
+            let increment = u64::try_from(delta).map_err(|_| {
+                FfsError::InvalidGeometry("positive btrfs nbytes delta exceeds u64".into())
+            })?;
+            current
+                .checked_add(increment)
+                .ok_or_else(|| FfsError::InvalidGeometry("btrfs inode nbytes overflow".into()))
+        } else {
+            let negated = delta.checked_neg().ok_or_else(|| {
+                FfsError::InvalidGeometry("negative btrfs nbytes delta overflow".into())
+            })?;
+            let decrement = u64::try_from(negated).map_err(|_| {
+                FfsError::InvalidGeometry("negative btrfs nbytes delta exceeds u64".into())
+            })?;
+            current
+                .checked_sub(decrement)
+                .ok_or_else(|| FfsError::InvalidGeometry("btrfs inode nbytes underflow".into()))
+        }
     }
 
     fn btrfs_sync_operation_id(op: &str, ino: InodeNumber, datasync: bool) -> String {
@@ -20554,9 +20672,9 @@ impl OpenFs {
                 .root_tree
                 .update(&subvol_root_key, &subvol_root_item_data)
                 .or_else(|err| match err {
-                    BtrfsMutationError::KeyNotFound => {
-                        alloc.root_tree.insert(subvol_root_key, &subvol_root_item_data)
-                    }
+                    BtrfsMutationError::KeyNotFound => alloc
+                        .root_tree
+                        .insert(subvol_root_key, &subvol_root_item_data),
                     other => Err(other),
                 })
                 .map_err(|e| btrfs_mutation_to_ffs(&e))?;
@@ -21116,6 +21234,7 @@ impl OpenFs {
             && u64::try_from(data.len()).unwrap_or(u64::MAX) <= max_inline;
         let mut existing_inline = None;
 
+        let nbytes_after_write;
         if can_be_inline {
             let ext_start = BtrfsKey {
                 objectid: canonical,
@@ -21225,6 +21344,7 @@ impl OpenFs {
                     other => Err(other),
                 })
                 .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+            nbytes_after_write = Self::btrfs_recompute_inode_nbytes(&alloc, canonical)?;
         } else {
             // btrfs requires every uncompressed regular extent to be
             // sector-aligned in BOTH its file offset (key.offset) and its length
@@ -21249,9 +21369,8 @@ impl OpenFs {
             // sectors, then overlay the new data.
             let mut merged = vec![0_u8; alloc_size_usize];
             if offset > aligned_start {
-                let head_len = usize::try_from(offset - aligned_start).map_err(|_| {
-                    FfsError::InvalidGeometry("rmw head length overflow".into())
-                })?;
+                let head_len = usize::try_from(offset - aligned_start)
+                    .map_err(|_| FfsError::InvalidGeometry("rmw head length overflow".into()))?;
                 self.btrfs_read_existing_range_into(
                     cx,
                     &alloc,
@@ -21261,9 +21380,8 @@ impl OpenFs {
                 )?;
             }
             if aligned_end > end {
-                let tail_off = usize::try_from(end - aligned_start).map_err(|_| {
-                    FfsError::InvalidGeometry("rmw tail offset overflow".into())
-                })?;
+                let tail_off = usize::try_from(end - aligned_start)
+                    .map_err(|_| FfsError::InvalidGeometry("rmw tail offset overflow".into()))?;
                 self.btrfs_read_existing_range_into(
                     cx,
                     &alloc,
@@ -21279,18 +21397,20 @@ impl OpenFs {
             // Replace any extents in the aligned range. Because all extents are
             // sector-aligned, the split boundaries here are aligned too, so the
             // re-inserted left/right remnants stay aligned.
-            self.btrfs_remove_overlapping_extent_data(
+            let removed_nbytes_delta = self.btrfs_remove_overlapping_extent_data(
                 cx,
                 &mut alloc,
                 canonical,
                 aligned_start,
                 aligned_end,
             )?;
+            let nbytes_after_remove =
+                Self::btrfs_apply_nbytes_delta(inode.nbytes, removed_nbytes_delta)?;
 
             // Emit the single sector-aligned extent (alloc + write + backref +
             // per-sector csums) covering [aligned_start, aligned_end).
             let is_datasum = inode.flags & BTRFS_INODE_NODATASUM == 0;
-            self.btrfs_emit_aligned_extent(
+            let emitted_nbytes = self.btrfs_emit_aligned_extent(
                 cx,
                 &mut alloc,
                 canonical,
@@ -21298,6 +21418,9 @@ impl OpenFs {
                 &merged,
                 is_datasum,
             )?;
+            nbytes_after_write = nbytes_after_remove
+                .checked_add(emitted_nbytes)
+                .ok_or_else(|| FfsError::InvalidGeometry("btrfs inode nbytes overflow".into()))?;
         }
 
         // Update inode metadata.
@@ -21305,8 +21428,7 @@ impl OpenFs {
             inode.size = end;
         }
 
-        // Recompute nbytes (total physical space used by regular extents).
-        inode.nbytes = Self::btrfs_recompute_inode_nbytes(&alloc, canonical)?;
+        inode.nbytes = nbytes_after_write;
 
         let (secs, nanos) = Self::btrfs_now_timestamp();
         inode.mtime_sec = secs;
@@ -21680,7 +21802,10 @@ impl OpenFs {
 
         let mut alloc = alloc_mutex.lock();
         self.btrfs_require_directory_inode(&alloc, parent_oid)?;
-        if self.btrfs_lookup_dir_entry(&alloc, parent_oid, name).is_ok() {
+        if self
+            .btrfs_lookup_dir_entry(&alloc, parent_oid, name)
+            .is_ok()
+        {
             return Err(FfsError::Exists);
         }
 
@@ -21780,7 +21905,10 @@ impl OpenFs {
 
         let mut alloc = alloc_mutex.lock();
         self.btrfs_require_directory_inode(&alloc, parent_oid)?;
-        if self.btrfs_lookup_dir_entry(&alloc, parent_oid, name).is_ok() {
+        if self
+            .btrfs_lookup_dir_entry(&alloc, parent_oid, name)
+            .is_ok()
+        {
             return Err(FfsError::Exists);
         }
 
@@ -22134,8 +22262,7 @@ impl OpenFs {
         // would remove the source name and decrement the shared inode's nlink,
         // silently destroying a hard link (bd-f7q6k). A directory cannot be
         // hard-linked, so this only fires for regular files.
-        if let Ok(existing_target) =
-            self.btrfs_lookup_dir_entry(&alloc, new_parent_oid, new_name)
+        if let Ok(existing_target) = self.btrfs_lookup_dir_entry(&alloc, new_parent_oid, new_name)
             && existing_target.child_objectid == child.child_objectid
         {
             return Ok(());
@@ -22395,7 +22522,9 @@ impl OpenFs {
             return Err(FfsError::Io(std::io::Error::from_raw_os_error(libc::EPERM)));
         }
         if link_target.nlink >= BTRFS_LINK_MAX {
-            return Err(FfsError::Io(std::io::Error::from_raw_os_error(libc::EMLINK)));
+            return Err(FfsError::Io(std::io::Error::from_raw_os_error(
+                libc::EMLINK,
+            )));
         }
 
         if self
@@ -22624,12 +22753,7 @@ impl OpenFs {
                     if sector[..head_len].iter().any(|&b| b != 0) {
                         let is_datasum = inode.flags & BTRFS_INODE_NODATASUM == 0;
                         self.btrfs_emit_aligned_extent(
-                            cx,
-                            &mut alloc,
-                            canonical,
-                            eof_floor,
-                            &sector,
-                            is_datasum,
+                            cx, &mut alloc, canonical, eof_floor, &sector, is_datasum,
                         )?;
                     }
                 }
@@ -24053,7 +24177,9 @@ impl OpenFs {
     /// The byte delta a directory entry with `name` contributes to its parent
     /// directory's i_size: `2 * name_len` (one `DIR_ITEM` + one `DIR_INDEX`).
     fn btrfs_dir_entry_size_delta(name_len: usize) -> i64 {
-        i64::try_from(name_len).unwrap_or(i64::MAX / 2).saturating_mul(2)
+        i64::try_from(name_len)
+            .unwrap_or(i64::MAX / 2)
+            .saturating_mul(2)
     }
 
     fn btrfs_collect_purge_plan(
@@ -26057,11 +26183,7 @@ impl OpenFs {
                                 .ok()
                                 .flatten()
                         } else {
-                            self.btrfs_readonly_extent_item_refs(
-                                cx,
-                                *disk_bytenr,
-                                *disk_num_bytes,
-                            )?
+                            self.btrfs_readonly_extent_item_refs(cx, *disk_bytenr, *disk_num_bytes)?
                         };
                         if matches!(refs, Some(r) if r > 1) {
                             flags |= FIEMAP_EXTENT_SHARED;
@@ -26102,9 +26224,7 @@ impl OpenFs {
 
         // Offset at or beyond EOF returns ENXIO.
         if offset >= file_size {
-            return Err(FfsError::Io(std::io::Error::from_raw_os_error(
-                libc::ENXIO,
-            )));
+            return Err(FfsError::Io(std::io::Error::from_raw_os_error(libc::ENXIO)));
         }
 
         // Non-extent based files (indirect block mapping) are treated as fully allocated.
@@ -26134,9 +26254,7 @@ impl OpenFs {
         }
 
         // No data found after offset.
-        Err(FfsError::Io(std::io::Error::from_raw_os_error(
-            libc::ENXIO,
-        )))
+        Err(FfsError::Io(std::io::Error::from_raw_os_error(libc::ENXIO)))
     }
 
     /// ext4 SEEK_HOLE: find the next hole at or after `offset`.
@@ -26156,9 +26274,7 @@ impl OpenFs {
 
         // Offset at or beyond EOF returns ENXIO.
         if offset >= file_size {
-            return Err(FfsError::Io(std::io::Error::from_raw_os_error(
-                libc::ENXIO,
-            )));
+            return Err(FfsError::Io(std::io::Error::from_raw_os_error(libc::ENXIO)));
         }
 
         // Non-extent based files (indirect block mapping) are treated as fully allocated.
@@ -26206,9 +26322,7 @@ impl OpenFs {
 
         // Offset at or beyond EOF returns ENXIO.
         if offset >= file_size {
-            return Err(FfsError::Io(std::io::Error::from_raw_os_error(
-                libc::ENXIO,
-            )));
+            return Err(FfsError::Io(std::io::Error::from_raw_os_error(libc::ENXIO)));
         }
 
         // Explicit hole extents (disk_bytenr == 0) are NOT data — drop them so
@@ -26237,9 +26351,7 @@ impl OpenFs {
         }
 
         // No data found after offset.
-        Err(FfsError::Io(std::io::Error::from_raw_os_error(
-            libc::ENXIO,
-        )))
+        Err(FfsError::Io(std::io::Error::from_raw_os_error(libc::ENXIO)))
     }
 
     /// btrfs SEEK_HOLE: find the next hole at or after `offset`.
@@ -26250,9 +26362,7 @@ impl OpenFs {
 
         // Offset at or beyond EOF returns ENXIO.
         if offset >= file_size {
-            return Err(FfsError::Io(std::io::Error::from_raw_os_error(
-                libc::ENXIO,
-            )));
+            return Err(FfsError::Io(std::io::Error::from_raw_os_error(libc::ENXIO)));
         }
 
         // Explicit hole extents (disk_bytenr == 0) are NOT data, so they must
@@ -26793,7 +26903,8 @@ impl FsOps for OpenFs {
                 }
 
                 #[cfg(test)]
-                self.readdir_full_reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                self.readdir_full_reads
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 let raw_entries = self.read_dir_with_scope(cx, scope, &inode)?;
                 // Build the FULL list (offset 0) once; cookies are 1-indexed
                 // positions (ascending), so the binary-search slice serves any
@@ -28199,10 +28310,7 @@ impl FsOps for OpenFs {
                 // (bd-icebl): use its true block + in-block offset.
                 let (sb_block, sb_off) = self.ext4_superblock_location();
                 let block_dev = self.direct_block_device_adapter();
-                let mut block_data = block_dev
-                    .read_block(cx, sb_block)?
-                    .as_slice()
-                    .to_vec();
+                let mut block_data = block_dev.read_block(cx, sb_block)?.as_slice().to_vec();
 
                 let label_start = sb_off + EXT4_VOLUME_NAME_OFFSET;
                 let label_end = label_start + EXT4_LABEL_MAX;
@@ -29064,9 +29172,7 @@ impl FsOps for OpenFs {
                             return Ok(raw);
                         }
                         let uncompressed = usize::try_from(ram_bytes).map_err(|_| {
-                            ffs_types::ParseError::IntegerConversion {
-                                field: "ram_bytes",
-                            }
+                            ffs_types::ParseError::IntegerConversion { field: "ram_bytes" }
                         })?;
                         Self::btrfs_decompress(&raw, compression, uncompressed).map_err(|_| {
                             ffs_types::ParseError::InvalidField {
@@ -32429,11 +32535,13 @@ mod tests {
         let a = fs
             .create(&cx, root, OsStr::new("keep.bin"), 0o644, 0, 0)
             .expect("create A");
-        fs.write(&cx, a.ino, 0, &vec![0xA1_u8; 8192]).expect("write A");
+        fs.write(&cx, a.ino, 0, &vec![0xA1_u8; 8192])
+            .expect("write A");
         let b = fs
             .create(&cx, root, OsStr::new("drop.bin"), 0o644, 0, 0)
             .expect("create B");
-        fs.write(&cx, b.ino, 0, &vec![0xB2_u8; 8192]).expect("write B");
+        fs.write(&cx, b.ino, 0, &vec![0xB2_u8; 8192])
+            .expect("write B");
 
         // Warm A's extent mapping into the cache by reading it back.
         let _ = fs.read(&cx, a.ino, 0, 8192).expect("read A");
@@ -32673,10 +32781,17 @@ mod tests {
         // Partial (sub-block) overwrite: read-modify-write must touch only the
         // patched byte range.
         let patch = vec![0x11_u8; 100];
-        assert_eq!(fs.write(&cx, ino, 50, &patch).expect("partial overwrite"), 100);
+        assert_eq!(
+            fs.write(&cx, ino, 50, &patch).expect("partial overwrite"),
+            100
+        );
         let post = fs.read(&cx, ino, 0, bs as u32).expect("read back partial");
         assert_eq!(&post[50..150], &patch[..], "patch lands at the offset");
-        assert_eq!(&post[0..50], &updated[0..50], "bytes before patch unchanged");
+        assert_eq!(
+            &post[0..50],
+            &updated[0..50],
+            "bytes before patch unchanged"
+        );
         assert_eq!(&post[150..], &updated[150..], "bytes after patch unchanged");
 
         // Growth past EOF (bd-laay3 increment 2): writing block 1 must allocate,
@@ -32689,7 +32804,8 @@ mod tests {
         let grown = fs.read_inode(&cx, ino).expect("inode after grow");
         assert_eq!(grown.size, (2 * bs) as u64, "size must extend to 2 blocks");
         assert_eq!(
-            fs.read(&cx, ino, bs as u64, bs as u32).expect("read grown block"),
+            fs.read(&cx, ino, bs as u64, bs as u32)
+                .expect("read grown block"),
             grow,
             "newly grown block must persist"
         );
@@ -32763,7 +32879,11 @@ mod tests {
 
         // Original block survived, the gap reads as a zero-filled hole, and the
         // far block holds the new data.
-        assert_eq!(fs.read(&cx, ino, 0, bs as u32).expect("b0"), b0, "block 0 intact");
+        assert_eq!(
+            fs.read(&cx, ino, 0, bs as u32).expect("b0"),
+            b0,
+            "block 0 intact"
+        );
         assert!(
             fs.read(&cx, ino, bs as u64, bs as u32)
                 .expect("hole")
@@ -32823,7 +32943,11 @@ mod tests {
             .expect("grow into single-indirect region");
 
         let before = fs.read_inode(&cx, ino).expect("inode before trunc");
-        assert_eq!(before.size, lb12_off + bs as u64, "grew to logical block 12");
+        assert_eq!(
+            before.size,
+            lb12_off + bs as u64,
+            "grew to logical block 12"
+        );
         // i_block[12] is the single-indirect root pointer (offset 12*4 = 48).
         let root_before = u32::from_le_bytes(before.extent_bytes[48..52].try_into().unwrap());
         assert_ne!(root_before, 0, "single-indirect metadata block allocated");
@@ -32913,7 +33037,10 @@ mod tests {
         assert!(a.blocks >= 4 * spb, "blocks 0..4 allocated");
         let read = fs.read(&cx, ino, 0, (4 * bs) as u32).expect("read");
         assert_eq!(&read[0..bs], &b0[..], "block 0 intact");
-        assert!(read[bs..].iter().all(|&b| b == 0), "preallocated blocks read zero");
+        assert!(
+            read[bs..].iter().all(|&b| b == 0),
+            "preallocated blocks read zero"
+        );
         let blocks_after_default = a.blocks;
 
         // (2) KEEP_SIZE: allocate logical block 5 without changing the size.
@@ -32926,9 +33053,17 @@ mod tests {
         // (3) ZERO_RANGE over the first half of block 0.
         fs.fallocate(&cx, ino, 0, (bs / 2) as u64, 0x10)
             .expect("zero_range fallocate");
-        let z = fs.read(&cx, ino, 0, bs as u32).expect("read after zero_range");
-        assert!(z[..bs / 2].iter().all(|&b| b == 0), "zero_range zeroed first half");
-        assert!(z[bs / 2..].iter().all(|&b| b == 0x01), "rest of block 0 unchanged");
+        let z = fs
+            .read(&cx, ino, 0, bs as u32)
+            .expect("read after zero_range");
+        assert!(
+            z[..bs / 2].iter().all(|&b| b == 0),
+            "zero_range zeroed first half"
+        );
+        assert!(
+            z[bs / 2..].iter().all(|&b| b == 0x01),
+            "rest of block 0 unchanged"
+        );
 
         // (4) PUNCH_HOLE block 1 (KEEP_SIZE required): frees it, keeps size.
         let blocks_before_punch = fs.read_inode(&cx, ino).expect("inode").blocks;
@@ -33019,7 +33154,11 @@ mod tests {
             .expect("sparse write into triple-indirect region");
 
         let after_grow = fs.read_inode(&cx, ino).expect("inode after grow");
-        assert_eq!(after_grow.size, triple_off + bs_u64, "size extends to triple block");
+        assert_eq!(
+            after_grow.size,
+            triple_off + bs_u64,
+            "size extends to triple block"
+        );
         // i_block[14] (triple root) is at offset 14*4 = 56.
         let tind_root = u32::from_le_bytes(after_grow.extent_bytes[56..60].try_into().unwrap());
         assert_ne!(tind_root, 0, "triple-indirect root allocated");
@@ -33031,7 +33170,11 @@ mod tests {
         );
 
         // Read back: block 0 intact, the gap is a zero hole, the triple block holds data.
-        assert_eq!(fs.read(&cx, ino, 0, bs as u32).expect("b0"), b0, "block 0 intact");
+        assert_eq!(
+            fs.read(&cx, ino, 0, bs as u32).expect("b0"),
+            b0,
+            "block 0 intact"
+        );
         assert_eq!(
             fs.read(&cx, ino, triple_off, bs as u32).expect("triple"),
             payload,
@@ -33047,14 +33190,19 @@ mod tests {
         fs.setattr(&cx, ino, &attrs).expect("truncate");
         let after_trunc = fs.read_inode(&cx, ino).expect("inode after trunc");
         assert_eq!(after_trunc.size, bs_u64, "size shrunk to one block");
-        let tind_root_after = u32::from_le_bytes(after_trunc.extent_bytes[56..60].try_into().unwrap());
+        let tind_root_after =
+            u32::from_le_bytes(after_trunc.extent_bytes[56..60].try_into().unwrap());
         assert_eq!(tind_root_after, 0, "triple-indirect root pointer cleared");
         assert_eq!(
             blocks_before, after_trunc.blocks,
             "truncate frees all 4 triple-indirect-path blocks (i_blocks restored)"
         );
         // Block 0 still readable after the deep free.
-        assert_eq!(fs.read(&cx, ino, 0, bs as u32).expect("b0 after"), b0, "block 0 survives");
+        assert_eq!(
+            fs.read(&cx, ino, 0, bs as u32).expect("b0 after"),
+            b0,
+            "block 0 survives"
+        );
     }
 
     /// bd-laay3 hardening: PARTIAL multi-level free. Earlier truncate/fallocate
@@ -33108,8 +33256,10 @@ mod tests {
         let b_lb = dind_base + ppb; // idx1 = 1
         let a_payload = vec![0xAA_u8; bs];
         let b_payload = vec![0xBB_u8; bs];
-        fs.write(&cx, ino, a_lb * bs_u64, &a_payload).expect("write A");
-        fs.write(&cx, ino, b_lb * bs_u64, &b_payload).expect("write B");
+        fs.write(&cx, ino, a_lb * bs_u64, &a_payload)
+            .expect("write A");
+        fs.write(&cx, ino, b_lb * bs_u64, &b_payload)
+            .expect("write B");
 
         let before = fs.read_inode(&cx, ino).expect("inode before trunc");
         // i_block[13] (double-indirect root) at offset 13*4 = 52.
@@ -33154,7 +33304,11 @@ mod tests {
             "B is beyond the new EOF (reads nothing)"
         );
         // Block 0 intact.
-        assert_eq!(fs.read(&cx, ino, 0, bs as u32).expect("b0"), b0, "block 0 survives");
+        assert_eq!(
+            fs.read(&cx, ino, 0, bs as u32).expect("b0"),
+            b0,
+            "block 0 survives"
+        );
     }
 
     /// Regression: deleting a legacy indirect-block-mapped file must FREE its
@@ -33179,7 +33333,8 @@ mod tests {
             .create(&cx, root, OsStr::new("leak.bin"), 0o644, 0, 0)
             .expect("create")
             .ino;
-        fs.write(&cx, ino, 0, &vec![0x01_u8; bs]).expect("seed block 0");
+        fs.write(&cx, ino, 0, &vec![0x01_u8; bs])
+            .expect("seed block 0");
         let seeded = fs.read_inode(&cx, ino).expect("inode");
         let phys0 = fs
             .collect_extents(&cx, &seeded)
@@ -33205,7 +33360,8 @@ mod tests {
         // single-indirect metadata block).
         let before = fs.free_space_summary(&cx).expect("free space before");
 
-        fs.unlink(&cx, root, OsStr::new("leak.bin")).expect("unlink");
+        fs.unlink(&cx, root, OsStr::new("leak.bin"))
+            .expect("unlink");
 
         let after = fs.free_space_summary(&cx).expect("free space after");
         assert_eq!(
@@ -33277,7 +33433,8 @@ mod tests {
         fs.setattr(&cx, ino, &attrs).expect("truncate");
 
         // Delete the file.
-        fs.unlink(&cx, root, OsStr::new("life.bin")).expect("remove");
+        fs.unlink(&cx, root, OsStr::new("life.bin"))
+            .expect("remove");
 
         // Every block the file ever held must be back: zero net leak.
         let end = fs.free_space_summary(&cx).expect("final");
@@ -33566,7 +33723,12 @@ mod tests {
         fn supports_vectored_reads(&self) -> bool {
             true
         }
-        fn read_exact_at(&self, _cx: &Cx, offset: ByteOffset, buf: &mut [u8]) -> ffs_error::Result<()> {
+        fn read_exact_at(
+            &self,
+            _cx: &Cx,
+            offset: ByteOffset,
+            buf: &mut [u8],
+        ) -> ffs_error::Result<()> {
             self.counters
                 .scalar
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -33591,7 +33753,12 @@ mod tests {
             }
             Ok(())
         }
-        fn write_all_at(&self, _cx: &Cx, _offset: ByteOffset, _buf: &[u8]) -> ffs_error::Result<()> {
+        fn write_all_at(
+            &self,
+            _cx: &Cx,
+            _offset: ByteOffset,
+            _buf: &[u8],
+        ) -> ffs_error::Result<()> {
             Ok(())
         }
         fn sync(&self, _cx: &Cx) -> ffs_error::Result<()> {
@@ -33614,8 +33781,8 @@ mod tests {
 
         let image = build_ext4_image(0); // 1024-byte blocks, 128 blocks
         let (dev, counters) = CountingByteDevice::new(image);
-        let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default())
-            .expect("open ext4");
+        let fs =
+            OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).expect("open ext4");
 
         let mut txn = fs.mvcc_store.write().begin();
         txn.stage_write(BlockNumber(STAGED), vec![0xEE_u8; BS]);
@@ -33626,7 +33793,9 @@ mod tests {
 
         // Reference (prior behavior): per-block read_block_with_scope. Reset
         // first so mount-time superblock/metadata reads are not counted.
-        counters.scalar.store(0, std::sync::atomic::Ordering::SeqCst);
+        counters
+            .scalar
+            .store(0, std::sync::atomic::Ordering::SeqCst);
         counters
             .vectored
             .store(0, std::sync::atomic::Ordering::SeqCst);
@@ -33639,7 +33808,9 @@ mod tests {
         let ref_scalar = counters.scalar.load(std::sync::atomic::Ordering::SeqCst);
 
         // New: single contiguous read.
-        counters.scalar.store(0, std::sync::atomic::Ordering::SeqCst);
+        counters
+            .scalar
+            .store(0, std::sync::atomic::Ordering::SeqCst);
         counters
             .vectored
             .store(0, std::sync::atomic::Ordering::SeqCst);
@@ -33670,8 +33841,14 @@ mod tests {
         );
 
         // SCORE: 63 scalar base reads (one per gap block) → 2 ranged reads.
-        assert_eq!(ref_scalar, 63, "prior path: one scalar base read per gap block");
-        assert_eq!(new_vectored, 2, "two maximal gap runs around the staged block");
+        assert_eq!(
+            ref_scalar, 63,
+            "prior path: one scalar base read per gap block"
+        );
+        assert_eq!(
+            new_vectored, 2,
+            "two maximal gap runs around the staged block"
+        );
         assert_eq!(new_scalar, 0, "no scalar base reads on the coalesced path");
         let read_op_ratio = ref_scalar as f64 / new_vectored as f64;
         assert!(
@@ -34269,7 +34446,10 @@ mod tests {
                 },
             )
             .expect("apply (skip) must not error");
-        assert!(!grow, "an insert needing tree growth must be skipped at recovery");
+        assert!(
+            !grow,
+            "an insert needing tree growth must be skipped at recovery"
+        );
     }
 
     /// bd-6nwjx incr 3b: coordinated recovery of an EXTERNAL single-leaf
@@ -34380,10 +34560,7 @@ mod tests {
     /// Build an open ext4 fs plus an InodeUpdate FC op that bumps the root
     /// inode's mtime — the shared setup for the dispatch + gating tests.
     #[cfg(test)]
-    fn fc_inode_update_op_for_root(
-        fs: &OpenFs,
-        cx: &Cx,
-    ) -> (u32, ffs_journal::FcOperation) {
+    fn fc_inode_update_op_for_root(fs: &OpenFs, cx: &Cx) -> (u32, ffs_journal::FcOperation) {
         let original = fs.read_inode(cx, InodeNumber(2)).expect("read root inode");
         let new_mtime = original.mtime.wrapping_add(0x0202_0202);
         let inode_size = usize::from(fs.ext4_superblock().expect("sb").inode_size);
@@ -34430,7 +34607,10 @@ mod tests {
         let applied = fs
             .apply_fast_commit_operations(&cx, std::slice::from_ref(&op), false)
             .expect("apply ops");
-        assert_eq!(applied, 1, "the op still verifies (counted), just not written");
+        assert_eq!(
+            applied, 1,
+            "the op still verifies (counted), just not written"
+        );
         assert_eq!(
             fs.read_inode(&cx, InodeNumber(2)).expect("re-read").mtime,
             before,
@@ -34481,7 +34661,10 @@ mod tests {
         let applied = fs
             .apply_fast_commit_add_dentry(&cx, &dentry)
             .expect("apply create");
-        assert!(applied, "the entry should be spliced into a block with room");
+        assert!(
+            applied,
+            "the entry should be spliced into a block with room"
+        );
 
         // The directory now resolves the recovered name to inode #11 (re-read
         // through the cache the apply invalidated).
@@ -34490,7 +34673,10 @@ mod tests {
             .lookup_name(&cx, &root, b"hello.txt")
             .expect("lookup after recovery")
             .expect("entry recovered");
-        assert_eq!(entry.inode, 11, "recovered entry must target the right inode");
+        assert_eq!(
+            entry.inode, 11,
+            "recovered entry must target the right inode"
+        );
         assert_eq!(entry.file_type, Ext4FileType::RegFile);
     }
 
@@ -37116,7 +37302,10 @@ mod tests {
             .expect("resolve block 1")
             .expect("block 1 mapped");
         assert_eq!(p0, 16, "block 0 maps to physical 16 via depth-2 descent");
-        assert_eq!(p1, 17, "block 1 maps to physical 17 (contiguous 2-block extent)");
+        assert_eq!(
+            p1, 17,
+            "block 1 maps to physical 17 (contiguous 2-block extent)"
+        );
         assert!(!unwritten0);
 
         // A logical block past the extent is a hole.
@@ -37538,13 +37727,25 @@ mod tests {
 
         // SEEK_DATA at/beyond EOF must return ENXIO (lseek(2)), not EINVAL.
         let err = fs
-            .lseek(&cx, &mut scope, InodeNumber(11), attr.size, SeekWhence::Data)
+            .lseek(
+                &cx,
+                &mut scope,
+                InodeNumber(11),
+                attr.size,
+                SeekWhence::Data,
+            )
             .expect_err("SEEK_DATA at EOF must fail");
         assert_eq!(err.to_errno(), libc::ENXIO);
 
         // SEEK_HOLE at/beyond EOF must also return ENXIO.
         let err = fs
-            .lseek(&cx, &mut scope, InodeNumber(11), attr.size, SeekWhence::Hole)
+            .lseek(
+                &cx,
+                &mut scope,
+                InodeNumber(11),
+                attr.size,
+                SeekWhence::Hole,
+            )
             .expect_err("SEEK_HOLE at EOF must fail");
         assert_eq!(err.to_errno(), libc::ENXIO);
     }
@@ -41441,8 +41642,7 @@ mod tests {
             // it and assigns a bytenr; this validation reads the ROOT_ITEM, not
             // the subvol's contents.
             let max_items = ((alloc.nodesize as usize).saturating_sub(101) / 25).max(3);
-            let mut subvol_tree =
-                InMemoryCowBtrfsTree::new(max_items).expect("new subvol tree");
+            let mut subvol_tree = InMemoryCowBtrfsTree::new(max_items).expect("new subvol tree");
             let root_dir_inode = BtrfsInodeItem {
                 generation: alloc.generation,
                 size: 0,
@@ -41484,9 +41684,8 @@ mod tests {
             btrfs_rw_ephemeral_ok: true,
             ..OpenOptions::default()
         };
-        let mut fs2 =
-            OpenFs::from_device(&cx, Box::new(TestDevice::from_vec(committed)), &opts)
-                .expect("remount committed image");
+        let mut fs2 = OpenFs::from_device(&cx, Box::new(TestDevice::from_vec(committed)), &opts)
+            .expect("remount committed image");
         fs2.enable_writes(&cx).expect("enable writes on remount");
 
         let subvol_root = fs2
@@ -41533,9 +41732,8 @@ mod tests {
             btrfs_rw_ephemeral_ok: true,
             ..OpenOptions::default()
         };
-        let mut fs2 =
-            OpenFs::from_device(&cx, Box::new(TestDevice::from_vec(committed)), &opts)
-                .expect("remount committed image");
+        let mut fs2 = OpenFs::from_device(&cx, Box::new(TestDevice::from_vec(committed)), &opts)
+            .expect("remount committed image");
         fs2.enable_writes(&cx).expect("enable writes on remount");
 
         let subvol_root = fs2
@@ -42379,8 +42577,7 @@ mod tests {
             for tweak in 0_u8..64 {
                 let mut s0 = vec![0xAB_u8; run];
                 for i in run..SECTOR {
-                    let b = (i as u8)
-                        .wrapping_mul(197)
+                    let b = (i as u8).wrapping_mul(197)
                         ^ (i as u8).wrapping_mul(i as u8)
                         ^ tweak
                         ^ 0x5b;
@@ -43243,7 +43440,9 @@ mod tests {
     #[test]
     fn btrfs_readdir_pagination_serves_pages_from_one_walk() {
         use std::sync::atomic::Ordering::SeqCst;
-        let names: Vec<Vec<u8>> = (0..50).map(|i| format!("file_{i:04}.txt").into_bytes()).collect();
+        let names: Vec<Vec<u8>> = (0..50)
+            .map(|i| format!("file_{i:04}.txt").into_bytes())
+            .collect();
         let entries: Vec<(&[u8], u64, u8, u32)> = names
             .iter()
             .enumerate()
@@ -43286,9 +43485,15 @@ mod tests {
             }
         }
 
-        assert_eq!(collected, full, "btrfs paginated readdir must equal the full listing");
+        assert_eq!(
+            collected, full,
+            "btrfs paginated readdir must equal the full listing"
+        );
         let pages = full.len().div_ceil(page);
-        assert!(pages >= 3, "need several pages for a meaningful score (got {pages})");
+        assert!(
+            pages >= 3,
+            "need several pages for a meaningful score (got {pages})"
+        );
         assert_eq!(
             fs.readdir_full_reads.load(SeqCst),
             1,
@@ -43343,7 +43548,10 @@ mod tests {
             "writable btrfs paginated readdir must equal the full listing"
         );
         let pages = full.len().div_ceil(page);
-        assert!(pages >= 3, "need several pages for a meaningful score (got {pages})");
+        assert!(
+            pages >= 3,
+            "need several pages for a meaningful score (got {pages})"
+        );
         assert_eq!(
             fs.readdir_full_reads.load(SeqCst),
             1,
@@ -44555,7 +44763,10 @@ mod tests {
         assert!(!parsed.entries.is_empty(), "dx_root index must survive");
         // (c) a pre-existing entry remains index-reachable.
         assert!(
-            matches!(find(b"file_0005.txt"), ffs_ondisk::HtreeFindResult::Found(_)),
+            matches!(
+                find(b"file_0005.txt"),
+                ffs_ondisk::HtreeFindResult::Found(_)
+            ),
             "pre-existing entry must remain index-reachable after recovery"
         );
     }
@@ -44628,7 +44839,9 @@ mod tests {
                 .expect("set casefold flag");
         }
         assert!(
-            fs.read_inode(&cx, dir_ino).expect("re-read").has_htree_index(),
+            fs.read_inode(&cx, dir_ino)
+                .expect("re-read")
+                .has_htree_index(),
             "the casefold test dir must be htree-indexed for the gate to apply"
         );
 
@@ -44923,7 +45136,10 @@ mod tests {
         };
         let dxr = fs.read_block_vec(&cx, BlockNumber(block0_phys)).unwrap();
         assert!(
-            !ffs_ondisk::parse_dx_root(&dxr).expect("dx_root parses").entries.is_empty(),
+            !ffs_ondisk::parse_dx_root(&dxr)
+                .expect("dx_root parses")
+                .entries
+                .is_empty(),
             "dx_root index must survive the casefold create"
         );
     }
@@ -45002,8 +45218,14 @@ mod tests {
         };
         let cx = Cx::for_testing();
         let root = InodeNumber(2);
-        let a = fs.mkdir(&cx, root, OsStr::new("A"), 0o755, 0, 0).unwrap().ino;
-        let b = fs.mkdir(&cx, root, OsStr::new("B"), 0o755, 0, 0).unwrap().ino;
+        let a = fs
+            .mkdir(&cx, root, OsStr::new("A"), 0o755, 0, 0)
+            .unwrap()
+            .ino;
+        let b = fs
+            .mkdir(&cx, root, OsStr::new("B"), 0o755, 0, 0)
+            .unwrap()
+            .ino;
         fs.create(&cx, a, OsStr::new("x.txt"), 0o644, 0, 0).unwrap();
 
         // Populate A's readdir snapshot.
@@ -45056,7 +45278,10 @@ mod tests {
         // from it (the prior behaviour re-parsed the whole dir on each page).
         fs.readdir_full_reads.store(0, SeqCst);
         let full = fs.readdir(&cx, dir_ino, 0).expect("readdir full");
-        assert!(full.len() >= n, "directory must list all {n} entries (+ '.' '..')");
+        assert!(
+            full.len() >= n,
+            "directory must list all {n} entries (+ '.' '..')"
+        );
 
         let page = 7usize;
         let mut collected: Vec<DirEntry> = Vec::new();
@@ -45075,12 +45300,18 @@ mod tests {
         }
 
         // ISOMORPHISM: the paginated listing equals the single full listing.
-        assert_eq!(collected, full, "paginated readdir must equal the full listing");
+        assert_eq!(
+            collected, full,
+            "paginated readdir must equal the full listing"
+        );
 
         // SCORE: one full parse served the full read + all paginated pages; the
         // prior per-call rescan would have parsed once per call.
         let pages = (full.len()).div_ceil(page);
-        assert!(pages >= 3, "need several pages for a meaningful score (got {pages})");
+        assert!(
+            pages >= 3,
+            "need several pages for a meaningful score (got {pages})"
+        );
         assert_eq!(
             fs.readdir_full_reads.load(SeqCst),
             1,
@@ -45116,9 +45347,9 @@ mod tests {
         };
         let cx = Cx::for_testing();
         // The conversion only applies when the filesystem supports hash indexing.
-        let has_dir_index = fs.ext4_superblock().is_some_and(|sb| {
-            sb.has_compat(ffs_ondisk::ext4::Ext4CompatFeatures::DIR_INDEX)
-        });
+        let has_dir_index = fs
+            .ext4_superblock()
+            .is_some_and(|sb| sb.has_compat(ffs_ondisk::ext4::Ext4CompatFeatures::DIR_INDEX));
         if !has_dir_index {
             return;
         }
@@ -45170,7 +45401,10 @@ mod tests {
             listing.iter().map(|e| e.name.clone()).collect();
         for i in 0..n {
             let nm = format!("f{i:05}.dat").into_bytes();
-            assert!(names.contains(&nm), "entry {i} missing from converted htree dir");
+            assert!(
+                names.contains(&nm),
+                "entry {i} missing from converted htree dir"
+            );
         }
         // A direct lookup must also resolve through the new index.
         assert!(
@@ -45264,10 +45498,7 @@ mod tests {
         // (O(N)). With tight packing every create past the first overflow would
         // rebuild the whole directory (~hundreds of rebuilds, O(N^2) total work).
         let rebuilds = fs.htree_rebuilds.load(std::sync::atomic::Ordering::SeqCst);
-        assert!(
-            rebuilds > 0,
-            "the rebuild path must have run at least once"
-        );
+        assert!(rebuilds > 0, "the rebuild path must have run at least once");
         assert!(
             rebuilds <= 30,
             "600 creates must rebuild ~logarithmically (doubling), got {rebuilds} rebuilds"
@@ -46234,7 +46465,14 @@ mod tests {
         let cx = Cx::for_testing();
 
         let attr = fs
-            .create(&cx, InodeNumber(2), OsStr::new("e2fsck_probe.txt"), 0o644, 0, 0)
+            .create(
+                &cx,
+                InodeNumber(2),
+                OsStr::new("e2fsck_probe.txt"),
+                0o644,
+                0,
+                0,
+            )
             .expect("create on real ext4 image");
         fs.write(&cx, attr.ino, 0, &[0xAB_u8; 8192])
             .expect("write file data");
@@ -46357,11 +46595,17 @@ mod tests {
         )
         .expect("create fast symlink");
 
-        let slow_target =
-            "/var/lib/frankenfs/some/really/long/path/exceeding/sixty/bytes/for/the/slow/symlink-target.txt";
+        let slow_target = "/var/lib/frankenfs/some/really/long/path/exceeding/sixty/bytes/for/the/slow/symlink-target.txt";
         assert!(slow_target.len() > ffs_types::EXT4_FAST_SYMLINK_MAX);
         let slow = fs
-            .symlink(&cx, root, OsStr::new("slowlink"), Path::new(slow_target), 0, 0)
+            .symlink(
+                &cx,
+                root,
+                OsStr::new("slowlink"),
+                Path::new(slow_target),
+                0,
+                0,
+            )
             .expect("create slow symlink");
         assert!(
             !fs.read_inode(&cx, slow.ino)
@@ -46448,7 +46692,14 @@ mod tests {
         let cx = Cx::for_testing();
         let bs = u64::from(fs.ext4_superblock().expect("sb").block_size);
         let attr = fs
-            .create(&cx, InodeNumber(2), OsStr::new("grow_csum.bin"), 0o644, 0, 0)
+            .create(
+                &cx,
+                InodeNumber(2),
+                OsStr::new("grow_csum.bin"),
+                0o644,
+                0,
+                0,
+            )
             .expect("create");
 
         // 16 discontiguous single-block writes (holes defeat coalescing) overflow
@@ -46547,7 +46798,8 @@ mod tests {
             let attr = fs
                 .create(&cx, root, OsStr::new(&name), 0o644, 0, 0)
                 .expect("create");
-            fs.write(&cx, attr.ino, 0, &[0xCD_u8; 16384]).expect("write");
+            fs.write(&cx, attr.ino, 0, &[0xCD_u8; 16384])
+                .expect("write");
         }
         // A subdirectory with a file inside (exercises used_dirs + nested dirs).
         let dir = fs
@@ -46556,9 +46808,11 @@ mod tests {
         let inner = fs
             .create(&cx, dir.ino, OsStr::new("inner.txt"), 0o644, 0, 0)
             .expect("create inner");
-        fs.write(&cx, inner.ino, 0, &[0xEE_u8; 4096]).expect("write inner");
+        fs.write(&cx, inner.ino, 0, &[0xEE_u8; 4096])
+            .expect("write inner");
         // Unlink (inode + block free path) and rename.
-        fs.unlink(&cx, root, OsStr::new("file_05.dat")).expect("unlink");
+        fs.unlink(&cx, root, OsStr::new("file_05.dat"))
+            .expect("unlink");
         fs.rename(
             &cx,
             root,
@@ -46605,10 +46859,13 @@ mod tests {
 
         // Two empty sibling subdirectories — neither ever receives an entry, so
         // their blocks are never restamped by an add_entry on the writable path.
-        fs.mkdir(&cx, root, OsStr::new("pa"), 0o755, 0, 0).expect("mkdir pa");
-        fs.mkdir(&cx, root, OsStr::new("pb"), 0o755, 0, 0).expect("mkdir pb");
+        fs.mkdir(&cx, root, OsStr::new("pa"), 0o755, 0, 0)
+            .expect("mkdir pa");
+        fs.mkdir(&cx, root, OsStr::new("pb"), 0o755, 0, 0)
+            .expect("mkdir pb");
         // A single create in root (the minimal churn op from the proptest).
-        fs.create(&cx, root, OsStr::new("f0"), 0o644, 0, 0).expect("create f0");
+        fs.create(&cx, root, OsStr::new("f0"), 0o644, 0, 0)
+            .expect("create f0");
 
         fs.flush_mvcc_to_device(&cx).expect("flush mvcc to device");
         std::fs::write(&image, dev.snapshot_bytes()).expect("write modified image");
@@ -46646,15 +46903,22 @@ mod tests {
         let cx = Cx::for_testing();
         let root = InodeNumber(2);
 
-        let a = fs.mkdir(&cx, root, OsStr::new("a"), 0o755, 0, 0).expect("mkdir a");
-        let b = fs.mkdir(&cx, root, OsStr::new("b"), 0o755, 0, 0).expect("mkdir b");
+        let a = fs
+            .mkdir(&cx, root, OsStr::new("a"), 0o755, 0, 0)
+            .expect("mkdir a");
+        let b = fs
+            .mkdir(&cx, root, OsStr::new("b"), 0o755, 0, 0)
+            .expect("mkdir b");
         // A subdirectory inside `a`, itself holding a file, so the move shifts a
         // non-trivial subtree and its `..` backlink between parents.
-        let sub = fs.mkdir(&cx, a.ino, OsStr::new("sub"), 0o755, 0, 0).expect("mkdir a/sub");
+        let sub = fs
+            .mkdir(&cx, a.ino, OsStr::new("sub"), 0o755, 0, 0)
+            .expect("mkdir a/sub");
         let inner = fs
             .create(&cx, sub.ino, OsStr::new("inner.txt"), 0o644, 0, 0)
             .expect("create a/sub/inner.txt");
-        fs.write(&cx, inner.ino, 0, &[0x5A_u8; 1024]).expect("write inner");
+        fs.write(&cx, inner.ino, 0, &[0x5A_u8; 1024])
+            .expect("write inner");
 
         // Move the directory `a/sub` -> `b/sub`: repoints sub's `..` from a to b
         // and adjusts both parents' link counts.
@@ -46716,7 +46980,8 @@ mod tests {
             .create(&cx, root, OsStr::new("plain.txt"), 0o644, 0, 0)
             .expect("create");
         fs.write(&cx, f.ino, 0, &[0xAB_u8; 2048]).expect("write");
-        fs.unlink(&cx, root, OsStr::new("plain.txt")).expect("unlink");
+        fs.unlink(&cx, root, OsStr::new("plain.txt"))
+            .expect("unlink");
 
         fs.flush_mvcc_to_device(&cx).expect("flush mvcc");
         std::fs::write(&image, dev.snapshot_bytes()).expect("write image");
@@ -47684,10 +47949,16 @@ mod tests {
         // Non-htree: a plain increment (ext4_mkdir's EMLINK guard keeps it below
         // the cap, so the overflow edge is unreachable here).
         assert_eq!(OpenFs::ext4_dir_link_inc(2, ino, false).unwrap(), 3);
-        assert_eq!(OpenFs::ext4_dir_link_inc(64_999, ino, false).unwrap(), 65_000);
+        assert_eq!(
+            OpenFs::ext4_dir_link_inc(64_999, ino, false).unwrap(),
+            65_000
+        );
         // htree below the cap: still a plain increment (parity unchanged).
         assert_eq!(OpenFs::ext4_dir_link_inc(7, ino, true).unwrap(), 8);
-        assert_eq!(OpenFs::ext4_dir_link_inc(64_999, ino, true).unwrap(), 65_000);
+        assert_eq!(
+            OpenFs::ext4_dir_link_inc(64_999, ino, true).unwrap(),
+            65_000
+        );
         // htree crossing EXT4_LINK_MAX (65000): pinned to the sentinel 1.
         assert_eq!(OpenFs::ext4_dir_link_inc(65_000, ino, true).unwrap(), 1);
         assert_eq!(OpenFs::ext4_dir_link_inc(65_001, ino, true).unwrap(), 1);
@@ -47992,7 +48263,8 @@ mod tests {
         // The source name is gone; the destination name now resolves to the moved
         // directory (the empty target was clobbered).
         assert!(
-            fs.lookup(&cx, root, OsStr::new("rename_corrupt_src")).is_err(),
+            fs.lookup(&cx, root, OsStr::new("rename_corrupt_src"))
+                .is_err(),
             "source name must be removed after a successful rename"
         );
         let dst_lookup = fs
@@ -48454,7 +48726,9 @@ mod tests {
             !ext4_symlink_target_is_fast(ffs_types::EXT4_FAST_SYMLINK_MAX),
             "a 60-byte target leaves no room for the NUL and must be a slow symlink"
         );
-        assert!(!ext4_symlink_target_is_fast(ffs_types::EXT4_FAST_SYMLINK_MAX + 1));
+        assert!(!ext4_symlink_target_is_fast(
+            ffs_types::EXT4_FAST_SYMLINK_MAX + 1
+        ));
     }
 
     #[test]
@@ -49119,7 +49393,14 @@ mod tests {
     fn btrfs_setxattr_value_over_xattr_size_max_returns_e2big() {
         let (fs, cx) = open_writable_btrfs();
         let attr = fs
-            .create(&cx, InodeNumber(1), OsStr::new("xattr_e2big.bin"), 0o644, 0, 0)
+            .create(
+                &cx,
+                InodeNumber(1),
+                OsStr::new("xattr_e2big.bin"),
+                0o644,
+                0,
+                0,
+            )
             .expect("create");
 
         // Same generic XATTR_SIZE_MAX -> E2BIG limit. Pre-fix btrfs had no
@@ -49168,7 +49449,14 @@ mod tests {
     fn btrfs_xattr_name_over_xattr_name_max_returns_erange() {
         let (fs, cx) = open_writable_btrfs();
         let attr = fs
-            .create(&cx, InodeNumber(1), OsStr::new("xattr_erange.bin"), 0o644, 0, 0)
+            .create(
+                &cx,
+                InodeNumber(1),
+                OsStr::new("xattr_erange.bin"),
+                0o644,
+                0,
+                0,
+            )
             .expect("create");
 
         let long_name = format!("user.{}", "a".repeat(256));
@@ -52469,7 +52757,14 @@ mod tests {
         const INSERT_RANGE: i32 = 0x20;
         let ops: &dyn FsOps = &fs;
         let err = ops
-            .fallocate(&cx, &mut RequestScope::empty(), ino, bs, 2 * bs, INSERT_RANGE)
+            .fallocate(
+                &cx,
+                &mut RequestScope::empty(),
+                ino,
+                bs,
+                2 * bs,
+                INSERT_RANGE,
+            )
             .expect_err("insert_range past the ext4 max file size must be EFBIG");
         assert_eq!(err.to_errno(), libc::EFBIG);
 
@@ -53975,8 +54270,14 @@ mod tests {
         let blocks_full = fs.read_inode(&cx, ino).expect("inode").blocks;
 
         // Punch the middle block [4096, 8192) -> hole; block count drops.
-        fs.fallocate(&cx, ino, 4096, 4096, libc::FALLOC_FL_PUNCH_HOLE | libc::FALLOC_FL_KEEP_SIZE)
-            .expect("punch hole");
+        fs.fallocate(
+            &cx,
+            ino,
+            4096,
+            4096,
+            libc::FALLOC_FL_PUNCH_HOLE | libc::FALLOC_FL_KEEP_SIZE,
+        )
+        .expect("punch hole");
         let blocks_punched = fs.read_inode(&cx, ino).expect("inode").blocks;
         assert!(
             blocks_punched < blocks_full,
@@ -53984,8 +54285,14 @@ mod tests {
         );
 
         // ZERO_RANGE the punched hole: it must be preallocated again.
-        fs.fallocate(&cx, ino, 4096, 4096, libc::FALLOC_FL_ZERO_RANGE | libc::FALLOC_FL_KEEP_SIZE)
-            .expect("zero_range over hole");
+        fs.fallocate(
+            &cx,
+            ino,
+            4096,
+            4096,
+            libc::FALLOC_FL_ZERO_RANGE | libc::FALLOC_FL_KEEP_SIZE,
+        )
+        .expect("zero_range over hole");
         let blocks_zeroed = fs.read_inode(&cx, ino).expect("inode").blocks;
         assert!(
             blocks_zeroed > blocks_punched,
@@ -53994,11 +54301,20 @@ mod tests {
 
         // The range still reads as zero, and the neighbours are untouched.
         let mid = fs.read(&cx, ino, 4096, 4096).expect("read mid");
-        assert!(mid.iter().all(|&b| b == 0), "ZERO_RANGE region must read zero");
+        assert!(
+            mid.iter().all(|&b| b == 0),
+            "ZERO_RANGE region must read zero"
+        );
         let head = fs.read(&cx, ino, 0, 4096).expect("read head");
-        assert!(head.iter().all(|&b| b == 0x5A), "block before the range is untouched");
+        assert!(
+            head.iter().all(|&b| b == 0x5A),
+            "block before the range is untouched"
+        );
         let tail = fs.read(&cx, ino, 8192, 4096).expect("read tail");
-        assert!(tail.iter().all(|&b| b == 0x5A), "block after the range is untouched");
+        assert!(
+            tail.iter().all(|&b| b == 0x5A),
+            "block after the range is untouched"
+        );
     }
 
     #[test]
@@ -55087,7 +55403,8 @@ mod tests {
         // zeros), applying the same ops to both fs and model.
         let mut model: Vec<u8> = Vec::new();
         let do_write = |model: &mut Vec<u8>, off: usize, byte: u8, len: usize| {
-            fs.write(&cx, ino, off as u64, &vec![byte; len]).expect("write");
+            fs.write(&cx, ino, off as u64, &vec![byte; len])
+                .expect("write");
             if off + len > model.len() {
                 model.resize(off + len, 0);
             }
@@ -55131,7 +55448,10 @@ mod tests {
         let got = fs
             .read(&cx, ino, 0, u32::try_from(model.len()).unwrap())
             .expect("read");
-        assert_eq!(got, model, "ext4 data-op churn content must match the model");
+        assert_eq!(
+            got, model,
+            "ext4 data-op churn content must match the model"
+        );
 
         // e2fsck: validates extent-tree / i_blocks / block-bitmap accounting.
         fs.flush_mvcc_to_device(&cx).expect("flush");
@@ -55197,7 +55517,14 @@ mod tests {
         let cx = Cx::for_testing();
         let bs = u64::from(fs.ext4_superblock().expect("sb").block_size);
         let attr = fs
-            .create(&cx, InodeNumber(2), OsStr::new("punch_unaligned.bin"), 0o644, 0, 0)
+            .create(
+                &cx,
+                InodeNumber(2),
+                OsStr::new("punch_unaligned.bin"),
+                0o644,
+                0,
+                0,
+            )
             .expect("create");
         let total = usize::try_from(bs * 5).unwrap();
         fs.write(&cx, attr.ino, 0, &vec![0xAB_u8; total])
@@ -55264,7 +55591,8 @@ mod tests {
             .expect("create")
             .ino;
         let total = usize::try_from(bs * 5).unwrap();
-        fs.write(&cx, ino, 0, &vec![0xAB_u8; total]).expect("write pattern");
+        fs.write(&cx, ino, 0, &vec![0xAB_u8; total])
+            .expect("write pattern");
 
         let inode = fs.read_inode(&cx, ino).expect("read inode");
         let extents = fs.collect_extents(&cx, &inode).expect("extents");
@@ -55272,9 +55600,7 @@ mod tests {
         for lb in 0..5u32 {
             let phys = extents
                 .iter()
-                .find(|e| {
-                    e.logical_block <= lb && lb < e.logical_block + u32::from(e.actual_len())
-                })
+                .find(|e| e.logical_block <= lb && lb < e.logical_block + u32::from(e.actual_len()))
                 .map(|e| e.physical_start + u64::from(lb - e.logical_block))
                 .expect("logical block mapped");
             let off = usize::try_from(lb).unwrap() * 4;
@@ -55290,7 +55616,8 @@ mod tests {
 
         // Sanity: the indirect read path returns the original pattern.
         assert_eq!(
-            fs.read(&cx, ino, 0, u32::try_from(total).unwrap()).expect("indirect read"),
+            fs.read(&cx, ino, 0, u32::try_from(total).unwrap())
+                .expect("indirect read"),
             vec![0xAB_u8; total],
             "indirect read of the mapped blocks"
         );
@@ -55315,7 +55642,9 @@ mod tests {
             total as u64,
             "punch_hole keeps the file size"
         );
-        let got = fs.read(&cx, ino, 0, u32::try_from(total).unwrap()).expect("read");
+        let got = fs
+            .read(&cx, ino, 0, u32::try_from(total).unwrap())
+            .expect("read");
         for (i, &byte) in got.iter().enumerate() {
             let in_hole = (i as u64) >= off && (i as u64) < off + len;
             let expected = if in_hole { 0x00 } else { 0xAB };
@@ -58359,15 +58688,20 @@ mod tests {
         // DEL_RANGE punching the middle two logical blocks [1, 3): splits the
         // single inline extent into [0,1) + [3,4) and frees 2 data blocks.
         let ino_u32 = u32::try_from(attr.ino.0).expect("ino fits u32");
-        let ops = vec![ffs_journal::FcOperation::DelRange(ffs_journal::FcDelRange {
-            ino: ino_u32,
-            logical_block: 1,
-            len: 2,
-        })];
+        let ops = vec![ffs_journal::FcOperation::DelRange(
+            ffs_journal::FcDelRange {
+                ino: ino_u32,
+                logical_block: 1,
+                len: 2,
+            },
+        )];
         let applied = fs
             .apply_fast_commit_operations(&cx, &ops, true)
             .expect("apply fc del_range");
-        assert_eq!(applied, 1, "the DEL_RANGE op should verify and count as applied");
+        assert_eq!(
+            applied, 1,
+            "the DEL_RANGE op should verify and count as applied"
+        );
 
         std::fs::write(&image, dev.snapshot_bytes()).expect("write recovered image");
         let Some((clean, output)) = run_e2fsck(&image) else {
@@ -58513,11 +58847,13 @@ mod tests {
         .expect("reopen from device");
 
         // Recover a DEL_RANGE punching the interior logical block 1.
-        let ops = vec![ffs_journal::FcOperation::DelRange(ffs_journal::FcDelRange {
-            ino: ino_u32,
-            logical_block: 1,
-            len: 1,
-        })];
+        let ops = vec![ffs_journal::FcOperation::DelRange(
+            ffs_journal::FcDelRange {
+                ino: ino_u32,
+                logical_block: 1,
+                len: 1,
+            },
+        )];
         fs2.apply_fast_commit_operations(&cx, &ops, true)
             .expect("apply fc del_range");
 
@@ -58629,7 +58965,9 @@ mod tests {
             .expect("a.dat must survive");
         assert_eq!(surviving.inode, ino_u32, "a.dat still points at the inode");
         assert_eq!(
-            fs2.read_inode(&cx, attr.ino).expect("re-read inode").links_count,
+            fs2.read_inode(&cx, attr.ino)
+                .expect("re-read inode")
+                .links_count,
             1,
             "link count dropped to 1"
         );
@@ -58669,7 +59007,9 @@ mod tests {
         let inode_size = usize::from(fs.ext4_superblock().expect("sb").inode_size);
         let ino_u32 = u32::try_from(attr.ino.0).expect("ino fits u32");
         assert_eq!(
-            fs.read_inode(&cx, attr.ino).expect("read inode").links_count,
+            fs.read_inode(&cx, attr.ino)
+                .expect("read inode")
+                .links_count,
             1,
             "single link before delete"
         );
@@ -58740,13 +59080,21 @@ mod tests {
 
         // Build a small tree: a file to keep (mtime touch), one to delete, one to
         // punch, a subdir, and a link target that gains a recovered name.
-        let keep = fs.create(&cx, root, OsStr::new("keep.dat"), 0o644, 0, 0).unwrap();
+        let keep = fs
+            .create(&cx, root, OsStr::new("keep.dat"), 0o644, 0, 0)
+            .unwrap();
         fs.write(&cx, keep.ino, 0, &[0x11_u8; 1024]).unwrap();
-        let victim = fs.create(&cx, root, OsStr::new("victim.dat"), 0o644, 0, 0).unwrap();
+        let victim = fs
+            .create(&cx, root, OsStr::new("victim.dat"), 0o644, 0, 0)
+            .unwrap();
         fs.write(&cx, victim.ino, 0, &[0x22_u8; 2048]).unwrap();
-        let punchme = fs.create(&cx, root, OsStr::new("punchme.dat"), 0o644, 0, 0).unwrap();
+        let punchme = fs
+            .create(&cx, root, OsStr::new("punchme.dat"), 0o644, 0, 0)
+            .unwrap();
         fs.write(&cx, punchme.ino, 0, &[0x33_u8; 3 * 1024]).unwrap();
-        let linktgt = fs.create(&cx, root, OsStr::new("linktgt.dat"), 0o644, 0, 0).unwrap();
+        let linktgt = fs
+            .create(&cx, root, OsStr::new("linktgt.dat"), 0o644, 0, 0)
+            .unwrap();
         fs.write(&cx, linktgt.ino, 0, &[0x44_u8; 1024]).unwrap();
         let sub = fs.mkdir(&cx, root, OsStr::new("sub"), 0o755, 0, 0).unwrap();
         fs.flush_mvcc_to_device(&cx).expect("flush mvcc");
@@ -58809,11 +59157,15 @@ mod tests {
         let root_inode = fs2.read_inode(&cx, root).expect("root");
         let sub_inode = fs2.read_inode(&cx, sub.ino).expect("sub");
         assert!(
-            fs2.lookup_name(&cx, &root_inode, b"victim.dat").unwrap().is_none(),
+            fs2.lookup_name(&cx, &root_inode, b"victim.dat")
+                .unwrap()
+                .is_none(),
             "deleted name gone"
         );
         assert!(
-            fs2.lookup_name(&cx, &root_inode, b"keep.dat").unwrap().is_some(),
+            fs2.lookup_name(&cx, &root_inode, b"keep.dat")
+                .unwrap()
+                .is_some(),
             "kept name survives"
         );
         let rec = fs2
@@ -58906,18 +59258,35 @@ mod tests {
         let root = InodeNumber(u64::from(BTRFS_FIRST_FREE_OBJECTID));
 
         let attr = ops
-            .create(&cx, &mut RequestScope::empty(), root, OsStr::new("trunc_check.bin"), 0o644, 0, 0)
+            .create(
+                &cx,
+                &mut RequestScope::empty(),
+                root,
+                OsStr::new("trunc_check.bin"),
+                0o644,
+                0,
+                0,
+            )
             .expect("btrfs create on a real image");
         // A 16 KiB datasum extent (datasum is the default after bd-x3fcu).
-        ops.write(&cx, &mut RequestScope::empty(), attr.ino, 0, &[0xA7_u8; 16384])
-            .expect("write 16 KiB datasum data");
+        ops.write(
+            &cx,
+            &mut RequestScope::empty(),
+            attr.ino,
+            0,
+            &[0xA7_u8; 16384],
+        )
+        .expect("write 16 KiB datasum data");
         // Truncate down to 4 KiB: frees the [4K,16K) tail (3 sectors of csums +
         // their extent backref/bg accounting) while keeping the [0,4K) head.
         ops.setattr(
             &cx,
             &mut RequestScope::empty(),
             attr.ino,
-            &SetAttrRequest { size: Some(4096), ..Default::default() },
+            &SetAttrRequest {
+                size: Some(4096),
+                ..Default::default()
+            },
         )
         .expect("truncate datasum file down to 4 KiB");
 
@@ -58951,10 +59320,26 @@ mod tests {
         let root = InodeNumber(u64::from(BTRFS_FIRST_FREE_OBJECTID));
 
         let a = ops
-            .create(&cx, &mut RequestScope::empty(), root, OsStr::new("xchg_a.bin"), 0o644, 0, 0)
+            .create(
+                &cx,
+                &mut RequestScope::empty(),
+                root,
+                OsStr::new("xchg_a.bin"),
+                0o644,
+                0,
+                0,
+            )
             .expect("create a");
         let b = ops
-            .create(&cx, &mut RequestScope::empty(), root, OsStr::new("xchg_b.bin"), 0o644, 0, 0)
+            .create(
+                &cx,
+                &mut RequestScope::empty(),
+                root,
+                OsStr::new("xchg_b.bin"),
+                0o644,
+                0,
+                0,
+            )
             .expect("create b");
         ops.write(&cx, &mut RequestScope::empty(), a.ino, 0, &[0xA1_u8; 4096])
             .expect("write a");
@@ -59041,12 +59426,14 @@ mod tests {
         let f_sector = fs
             .create(&cx, root, OsStr::new("sector.bin"), 0o644, 0, 0)
             .expect("create sector.bin");
-        fs.write(&cx, f_sector.ino, 0, &[0x11_u8; 4096]).expect("write 4096");
+        fs.write(&cx, f_sector.ino, 0, &[0x11_u8; 4096])
+            .expect("write 4096");
         // Genuinely small — must STILL be inline and btrfs-check-valid.
         let f_small = fs
             .create(&cx, root, OsStr::new("small.bin"), 0o644, 0, 0)
             .expect("create small.bin");
-        fs.write(&cx, f_small.ino, 0, &[0x33_u8; 100]).expect("write 100");
+        fs.write(&cx, f_small.ino, 0, &[0x33_u8; 100])
+            .expect("write 100");
 
         let _ = fs.flush_mvcc_to_device(&cx);
         fs.btrfs_full_transaction_commit(&cx, "inline-boundary-check")
@@ -59085,7 +59472,8 @@ mod tests {
         let attr = fs
             .create(&cx, root, OsStr::new("nonaligned.bin"), 0o644, 0, 0)
             .expect("create file");
-        fs.write(&cx, attr.ino, 0, &[0x4D_u8; 6000]).expect("write 6000 bytes");
+        fs.write(&cx, attr.ino, 0, &[0x4D_u8; 6000])
+            .expect("write 6000 bytes");
 
         let _ = fs.flush_mvcc_to_device(&cx);
         fs.btrfs_full_transaction_commit(&cx, "nonaligned-write-check")
@@ -59288,20 +59676,25 @@ mod tests {
         let attr = fs
             .create(&cx, root, OsStr::new("orig.txt"), 0o644, 0, 0)
             .expect("create file");
-        fs.write(&cx, attr.ino, 0, &[0x6B_u8; 4096]).expect("write file data");
+        fs.write(&cx, attr.ino, 0, &[0x6B_u8; 4096])
+            .expect("write file data");
         let sub = fs
             .mkdir(&cx, root, OsStr::new("sub"), 0o755, 0, 0)
             .expect("mkdir sub");
 
         // Two more links in root (same parent -> one INODE_REF item with 3 names)
         // and one link in sub (second parent -> its own INODE_REF item). nlink 4.
-        fs.link(&cx, attr.ino, root, OsStr::new("h1.txt")).expect("link h1");
-        fs.link(&cx, attr.ino, root, OsStr::new("h2.txt")).expect("link h2");
-        fs.link(&cx, attr.ino, sub.ino, OsStr::new("h3.txt")).expect("link h3 in sub");
+        fs.link(&cx, attr.ino, root, OsStr::new("h1.txt"))
+            .expect("link h1");
+        fs.link(&cx, attr.ino, root, OsStr::new("h2.txt"))
+            .expect("link h2");
+        fs.link(&cx, attr.ino, sub.ino, OsStr::new("h3.txt"))
+            .expect("link h3 in sub");
 
         // Remove one same-parent link: drops only "h1.txt" from root's INODE_REF
         // item, keeping orig.txt + h2.txt; nlink -> 3.
-        fs.unlink(&cx, root, OsStr::new("h1.txt")).expect("unlink h1");
+        fs.unlink(&cx, root, OsStr::new("h1.txt"))
+            .expect("unlink h1");
 
         let _ = fs.flush_mvcc_to_device(&cx);
         fs.btrfs_full_transaction_commit(&cx, "hardlink-churn-check")
@@ -59404,15 +59797,33 @@ mod tests {
         // Several names across namespaces + a range of value sizes.
         fs.setxattr(&cx, attr.ino, "user.mime", b"text/plain", XattrSetMode::Set)
             .expect("set user.mime");
-        fs.setxattr(&cx, attr.ino, "user.author", b"frankenfs", XattrSetMode::Set)
-            .expect("set user.author");
+        fs.setxattr(
+            &cx,
+            attr.ino,
+            "user.author",
+            b"frankenfs",
+            XattrSetMode::Set,
+        )
+        .expect("set user.author");
         fs.setxattr(&cx, attr.ino, "user.empty", b"", XattrSetMode::Set)
             .expect("set user.empty");
-        fs.setxattr(&cx, attr.ino, "user.big", &[0x5A_u8; 512], XattrSetMode::Set)
-            .expect("set user.big");
+        fs.setxattr(
+            &cx,
+            attr.ino,
+            "user.big",
+            &[0x5A_u8; 512],
+            XattrSetMode::Set,
+        )
+        .expect("set user.big");
         // Overwrite an existing name (replace value in place).
-        fs.setxattr(&cx, attr.ino, "user.mime", b"application/octet-stream", XattrSetMode::Set)
-            .expect("replace user.mime");
+        fs.setxattr(
+            &cx,
+            attr.ino,
+            "user.mime",
+            b"application/octet-stream",
+            XattrSetMode::Set,
+        )
+        .expect("replace user.mime");
         // Remove one — its XATTR_ITEM must be fully dropped, not left dangling.
         fs.removexattr(&cx, attr.ino, "user.author")
             .expect("remove user.author");
@@ -59449,12 +59860,26 @@ mod tests {
 
         let short_target = "../relative/target/file.txt";
         let s1 = fs
-            .symlink(&cx, root, OsStr::new("short.lnk"), std::path::Path::new(short_target), 0, 0)
+            .symlink(
+                &cx,
+                root,
+                OsStr::new("short.lnk"),
+                std::path::Path::new(short_target),
+                0,
+                0,
+            )
             .expect("create short symlink");
         // A longer target (still < a sector) exercises a bigger inline payload.
         let long_target = format!("/very/long/{}/deep/path/target", "segment/".repeat(40));
         let s2 = fs
-            .symlink(&cx, root, OsStr::new("long.lnk"), std::path::Path::new(&long_target), 0, 0)
+            .symlink(
+                &cx,
+                root,
+                OsStr::new("long.lnk"),
+                std::path::Path::new(&long_target),
+                0,
+                0,
+            )
             .expect("create long symlink");
 
         // readlink must round-trip the exact target bytes.
@@ -59656,7 +60081,8 @@ mod tests {
         let g = fs
             .create(&cx, root, OsStr::new("file2"), 0o644, 0, 0)
             .expect("create file2");
-        fs.write(&cx, g.ino, 0, &[0xAB_u8; 8192]).expect("write file2");
+        fs.write(&cx, g.ino, 0, &[0xAB_u8; 8192])
+            .expect("write file2");
         fs.setattr(
             &cx,
             g.ino,
@@ -59712,8 +60138,16 @@ mod tests {
             0,
         )
         .expect("symlink");
-        fs.mknod(&cx, root, OsStr::new("afifo"), ffs_types::S_IFIFO | 0o644, 0, 0, 0)
-            .expect("mknod fifo");
+        fs.mknod(
+            &cx,
+            root,
+            OsStr::new("afifo"),
+            ffs_types::S_IFIFO | 0o644,
+            0,
+            0,
+            0,
+        )
+        .expect("mknod fifo");
 
         let f = fs
             .create(&cx, root, OsStr::new("file1"), 0o644, 0, 0)
@@ -59727,7 +60161,8 @@ mod tests {
         let g = fs
             .create(&cx, root, OsStr::new("file2"), 0o644, 0, 0)
             .expect("create file2");
-        fs.write(&cx, g.ino, 0, &[0xAB_u8; 8192]).expect("write file2");
+        fs.write(&cx, g.ino, 0, &[0xAB_u8; 8192])
+            .expect("write file2");
         fs.setattr(
             &cx,
             g.ino,
@@ -59907,7 +60342,10 @@ mod tests {
         fs.setattr(
             &cx,
             attr.ino,
-            &SetAttrRequest { size: Some(0), ..Default::default() },
+            &SetAttrRequest {
+                size: Some(0),
+                ..Default::default()
+            },
         )
         .expect("truncate original to 0");
 
@@ -60009,7 +60447,10 @@ mod tests {
             let blob = btrfs_test_zlib_compress(&data);
             let sectorsize = u64::from(alloc.sectorsize);
             let alloc_size = (blob.len() as u64 + sectorsize - 1) & !(sectorsize - 1);
-            let allocation = alloc.extent_alloc.alloc_data(alloc_size).expect("alloc data");
+            let allocation = alloc
+                .extent_alloc
+                .alloc_data(alloc_size)
+                .expect("alloc data");
             let mut padded = blob;
             padded.resize(alloc_size as usize, 0);
             fs.btrfs_write_logical(&cx, allocation.bytenr, &padded)
@@ -60046,15 +60487,28 @@ mod tests {
         }
 
         // Sanity: the whole compressed source must decompress to `data`.
-        let full = fs.read(&cx, src.ino, 0, data.len() as u32).expect("read src");
-        assert_eq!(full, data, "compressed source must read back as the original data");
+        let full = fs
+            .read(&cx, src.ino, 0, data.len() as u32)
+            .expect("read src");
+        assert_eq!(
+            full, data,
+            "compressed source must read back as the original data"
+        );
 
         // Partial reflink (previously rejected): clone src[4096..12288) -> dst[0..).
         let dst = fs
             .create(&cx, root, OsStr::new("cdst.bin"), 0o644, 0, 0)
             .expect("create dst");
-        fs.clone_file_range(&cx, &mut RequestScope::empty(), dst.ino, src.ino, 4096, 8192, 0)
-            .expect("partial reflink of a compressed extent");
+        fs.clone_file_range(
+            &cx,
+            &mut RequestScope::empty(),
+            dst.ino,
+            src.ino,
+            4096,
+            8192,
+            0,
+        )
+        .expect("partial reflink of a compressed extent");
         let cloned = fs.read(&cx, dst.ino, 0, 8192).expect("read dst");
         assert_eq!(
             cloned,
@@ -60063,7 +60517,8 @@ mod tests {
         );
 
         // COW-break dst; the source range stays intact.
-        fs.write(&cx, dst.ino, 0, &[0xEE_u8; 4096]).expect("cow-break write");
+        fs.write(&cx, dst.ino, 0, &[0xEE_u8; 4096])
+            .expect("cow-break write");
         let src_after = fs.read(&cx, src.ino, 4096, 8192).expect("re-read src");
         assert_eq!(
             src_after,
@@ -60077,7 +60532,10 @@ mod tests {
             .expect("commit");
         std::fs::write(&image, dev.snapshot_bytes()).expect("write image");
         if let Some((ok, output)) = run_btrfs_check(&image) {
-            assert!(ok, "btrfs check after partial compressed reflink:\n{output}");
+            assert!(
+                ok,
+                "btrfs check after partial compressed reflink:\n{output}"
+            );
         }
     }
 
@@ -60130,7 +60588,9 @@ mod tests {
                 .expect("insert inline extent");
             // Inline contributes ram_bytes to i_nbytes; the regular-extent remove
             // zeroed it, so set it back for a btrfs-check-clean source.
-            let mut inode = fs.btrfs_read_inode_from_tree(&alloc, canonical).expect("read inode");
+            let mut inode = fs
+                .btrfs_read_inode_from_tree(&alloc, canonical)
+                .expect("read inode");
             inode.nbytes = n;
             inode.size = n;
             alloc
@@ -60147,8 +60607,13 @@ mod tests {
         }
 
         // Sanity: the inline source reads back as the original data.
-        let full = fs.read(&cx, src.ino, 0, data.len() as u32).expect("read src");
-        assert_eq!(full, data, "inline source must read back as the original data");
+        let full = fs
+            .read(&cx, src.ino, 0, data.len() as u32)
+            .expect("read src");
+        assert_eq!(
+            full, data,
+            "inline source must read back as the original data"
+        );
 
         let dst = fs
             .create(&cx, root, OsStr::new("idst.bin"), 0o644, 0, 0)
@@ -60158,9 +60623,17 @@ mod tests {
         // requires sector-aligned offsets) — bd-70gyh. An unaligned src offset
         // would also force an unaligned shared extent_offset on a regular carve.
         assert_eq!(
-            fs.clone_file_range(&cx, &mut RequestScope::empty(), dst.ino, src.ino, 256, 512, 0)
-                .unwrap_err()
-                .to_errno(),
+            fs.clone_file_range(
+                &cx,
+                &mut RequestScope::empty(),
+                dst.ino,
+                src.ino,
+                256,
+                512,
+                0
+            )
+            .unwrap_err()
+            .to_errno(),
             libc::EINVAL,
             "an unaligned partial reflink must be EINVAL"
         );
@@ -60169,7 +60642,9 @@ mod tests {
         // EOF): the inline data is copied into dst as a sector-aligned extent.
         fs.clone_file_range(&cx, &mut RequestScope::empty(), dst.ino, src.ino, 0, 0, 0)
             .expect("whole-file reflink of an inline extent");
-        let cloned = fs.read(&cx, dst.ino, 0, data.len() as u32).expect("read dst");
+        let cloned = fs
+            .read(&cx, dst.ino, 0, data.len() as u32)
+            .expect("read dst");
         assert_eq!(
             cloned, data,
             "whole inline reflink must read the full source data"
@@ -60312,10 +60787,22 @@ mod tests {
         let ops: &dyn FsOps = &fs;
         // Write 64 KiB, then overwrite the middle 16 KiB (splits the extent into
         // re-inserted head [0,16K) + new [16K,32K) + re-inserted tail [32K,64K)).
-        ops.write(&cx, &mut RequestScope::empty(), attr.ino, 0, &vec![0x11_u8; 65536])
-            .expect("initial write");
-        ops.write(&cx, &mut RequestScope::empty(), attr.ino, 16384, &vec![0x22_u8; 16384])
-            .expect("overwrite");
+        ops.write(
+            &cx,
+            &mut RequestScope::empty(),
+            attr.ino,
+            0,
+            &vec![0x11_u8; 65536],
+        )
+        .expect("initial write");
+        ops.write(
+            &cx,
+            &mut RequestScope::empty(),
+            attr.ino,
+            16384,
+            &vec![0x22_u8; 16384],
+        )
+        .expect("overwrite");
         let _ = fs.flush_mvcc_to_device(&cx);
         fs.btrfs_full_transaction_commit(&cx, "pb0ey-overwrite-check")
             .expect("commit");
@@ -60548,7 +61035,11 @@ mod tests {
             .read(&cx, &mut RequestScope::empty(), dst.ino, 0, 16384)
             .expect("read dst");
         assert_eq!(&dst_back[0..4096], &[0xA7_u8; 4096], "dst head intact");
-        assert_eq!(&dst_back[4096..8192], &[0x5E_u8; 4096], "dst overwritten region");
+        assert_eq!(
+            &dst_back[4096..8192],
+            &[0x5E_u8; 4096],
+            "dst overwritten region"
+        );
         assert_eq!(&dst_back[8192..16384], &[0xA7_u8; 8192], "dst tail intact");
     }
 
@@ -60715,7 +61206,8 @@ mod tests {
                 .create(cx, root, OsStr::new("orig.dat"), 0o644, 0, 0)
                 .expect("create");
             write(fs, cx, f.ino, 0, &vec![0xEE_u8; 16384]);
-            fs.link(cx, f.ino, root, OsStr::new("hard.dat")).expect("link");
+            fs.link(cx, f.ino, root, OsStr::new("hard.dat"))
+                .expect("link");
         });
 
         // M: symlink.
@@ -60748,11 +61240,7 @@ mod tests {
         if let Some((pristine_ok, pristine_out)) = run_btrfs_check(&image) {
             eprintln!(
                 "===== PRISTINE BTRFS CHECK (ok={pristine_ok}) =====\n{}",
-                pristine_out
-                    .lines()
-                    .take(20)
-                    .collect::<Vec<_>>()
-                    .join("\n")
+                pristine_out.lines().take(20).collect::<Vec<_>>().join("\n")
             );
         }
         fs.create(
@@ -61091,7 +61579,10 @@ mod tests {
         // src's extent is now shared (refs 1 -> 2); dst's old sole extent was
         // freed by the refcount-aware clear (refs 1 -> 0, no longer present).
         assert_eq!(
-            alloc.extent_alloc.extent_item_refs(src_db, src_dnb).expect("src refs"),
+            alloc
+                .extent_alloc
+                .extent_item_refs(src_db, src_dnb)
+                .expect("src refs"),
             Some(2),
             "clone must share src's extent"
         );
@@ -61234,7 +61725,15 @@ mod tests {
 
         // Sub-range [4096, 12288) of src -> dst2@0: dst2 reads exactly that window.
         fs_ops
-            .clone_file_range(&cx, &mut RequestScope::empty(), dst2.ino, src.ino, 4096, 8192, 0)
+            .clone_file_range(
+                &cx,
+                &mut RequestScope::empty(),
+                dst2.ino,
+                src.ino,
+                4096,
+                8192,
+                0,
+            )
             .expect("partial-range clone_file_range must succeed");
         let got = fs_ops
             .read(&cx, &mut RequestScope::empty(), dst2.ino, 0, 8192)
@@ -61321,7 +61820,15 @@ mod tests {
         // Share src[4096, 12288) into dst@0 — boundary-splits the single src
         // extent (extent_offset 4096, num_bytes 8192).
         fs_ops
-            .clone_file_range(&cx, &mut RequestScope::empty(), dst.ino, src.ino, 4096, 8192, 0)
+            .clone_file_range(
+                &cx,
+                &mut RequestScope::empty(),
+                dst.ino,
+                src.ino,
+                4096,
+                8192,
+                0,
+            )
             .expect("partial clone_file_range");
 
         let _ = fs.flush_mvcc_to_device(&cx);
@@ -61405,7 +61912,11 @@ mod tests {
         let got = ops
             .read(&cx, &mut RequestScope::empty(), dst, 0, 5904)
             .expect("read dst");
-        assert_eq!(got, &payload[4096..10000], "dst reads the exact src EOF window");
+        assert_eq!(
+            got,
+            &payload[4096..10000],
+            "dst reads the exact src EOF window"
+        );
         assert_eq!(
             ops.getattr(&cx, &mut RequestScope::empty(), dst)
                 .expect("getattr dst")
@@ -61420,17 +61931,35 @@ mod tests {
         let (fs, cx) = open_writable_btrfs();
         let parent = InodeNumber(1);
         let ops: &dyn FsOps = &fs;
-        let src = fs.create(&cx, parent, OsStr::new("csrc.bin"), 0o644, 0, 0).unwrap();
-        let dst = fs.create(&cx, parent, OsStr::new("cdst.bin"), 0o644, 0, 0).unwrap();
-        ops.write(&cx, &mut RequestScope::empty(), src.ino, 0, &[0x33_u8; 8192])
-            .expect("seed src");
+        let src = fs
+            .create(&cx, parent, OsStr::new("csrc.bin"), 0o644, 0, 0)
+            .unwrap();
+        let dst = fs
+            .create(&cx, parent, OsStr::new("cdst.bin"), 0o644, 0, 0)
+            .unwrap();
+        ops.write(
+            &cx,
+            &mut RequestScope::empty(),
+            src.ino,
+            0,
+            &[0x33_u8; 8192],
+        )
+        .expect("seed src");
 
         // A sector-aligned destination offset near i64::MAX: the clone's dest_end
         // exceeds the btrfs maximum file size, so it must be EFBIG (the bd-70gyh
         // alignment check passes since the offset is sector-aligned).
         let dest = (i64::MAX as u64) & !4095; // 2^63 - 4096, sector-aligned
         let err = ops
-            .clone_file_range(&cx, &mut RequestScope::empty(), dst.ino, src.ino, 0, 8192, dest)
+            .clone_file_range(
+                &cx,
+                &mut RequestScope::empty(),
+                dst.ino,
+                src.ino,
+                0,
+                8192,
+                dest,
+            )
             .expect_err("clone past the btrfs max file size must fail");
         assert_eq!(err.to_errno(), libc::EFBIG);
         // The rejected clone left the destination empty.
@@ -61461,11 +61990,25 @@ mod tests {
         let dst = fs
             .create(&cx, root, OsStr::new("dst.dat"), 0o644, 0, 0)
             .expect("create dst");
-        ops.write(&cx, &mut RequestScope::empty(), src.ino, 0, &[0x5A_u8; 10000])
-            .expect("write src 10000 bytes");
+        ops.write(
+            &cx,
+            &mut RequestScope::empty(),
+            src.ino,
+            0,
+            &[0x5A_u8; 10000],
+        )
+        .expect("write src 10000 bytes");
         // Clone [4096, 10000) (len 5904, reaches src EOF) into dst@0.
-        ops.clone_file_range(&cx, &mut RequestScope::empty(), dst.ino, src.ino, 4096, 5904, 0)
-            .expect("len-to-EOF clone");
+        ops.clone_file_range(
+            &cx,
+            &mut RequestScope::empty(),
+            dst.ino,
+            src.ino,
+            4096,
+            5904,
+            0,
+        )
+        .expect("len-to-EOF clone");
 
         let _ = fs.flush_mvcc_to_device(&cx);
         fs.btrfs_full_transaction_commit(&cx, "clone-eof-tail-check")
@@ -61490,8 +62033,8 @@ mod tests {
     fn clone_file_ext4_reports_eopnotsupp_bd_vh8p9() {
         let dev = TestDevice::from_vec(build_ext4_image(2));
         let cx = Cx::for_testing();
-        let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default())
-            .expect("open ext4");
+        let fs =
+            OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).expect("open ext4");
         let err = <OpenFs as FsOps>::clone_file(
             &fs,
             &cx,
@@ -62354,6 +62897,95 @@ mod tests {
     }
 
     #[test]
+    fn btrfs_write_into_explicit_hole_updates_nbytes_bd_4xeew() {
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+
+        let attr = ops
+            .create(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("explicit-hole-nbytes.bin"),
+                0o644,
+                0,
+                0,
+            )
+            .unwrap();
+
+        let sector = 4096_u64;
+        let first = vec![0x11_u8; sector as usize];
+        let middle = vec![0x22_u8; sector as usize];
+        let last = vec![0x33_u8; sector as usize];
+        ops.write(&cx, &mut RequestScope::empty(), attr.ino, 0, &first)
+            .expect("seed first regular extent");
+        ops.write(&cx, &mut RequestScope::empty(), attr.ino, sector * 2, &last)
+            .expect("seed last regular extent");
+
+        {
+            let alloc_mutex = fs.require_btrfs_alloc_state().expect("alloc state");
+            let mut alloc = alloc_mutex.lock();
+            let canonical = fs.btrfs_canonical_inode(attr.ino).expect("canonical inode");
+            let hole = BtrfsExtentData::Regular {
+                generation: alloc.generation,
+                ram_bytes: sector,
+                extent_type: BTRFS_FILE_EXTENT_REG,
+                compression: 0,
+                disk_bytenr: 0,
+                disk_num_bytes: 0,
+                extent_offset: 0,
+                num_bytes: sector,
+            };
+            alloc
+                .fs_tree
+                .insert(
+                    BtrfsKey {
+                        objectid: canonical,
+                        item_type: BTRFS_ITEM_EXTENT_DATA,
+                        offset: sector,
+                    },
+                    &hole.to_bytes(),
+                )
+                .expect("insert explicit hole extent");
+            assert_eq!(
+                OpenFs::btrfs_recompute_inode_nbytes(&alloc, canonical).expect("recompute nbytes"),
+                sector * 2,
+                "explicit hole extents must not contribute to inode nbytes"
+            );
+        }
+
+        ops.write(&cx, &mut RequestScope::empty(), attr.ino, sector, &middle)
+            .expect("write into explicit hole");
+
+        let after = ops
+            .read(
+                &cx,
+                &mut RequestScope::empty(),
+                attr.ino,
+                0,
+                (sector * 3) as u32,
+            )
+            .expect("read after explicit-hole write");
+        assert_eq!(&after[..sector as usize], &first);
+        assert_eq!(&after[sector as usize..(sector * 2) as usize], &middle);
+        assert_eq!(&after[(sector * 2) as usize..], &last);
+
+        let updated = ops
+            .getattr(&cx, &mut RequestScope::empty(), attr.ino)
+            .expect("getattr after explicit-hole write");
+        assert_eq!(updated.size, sector * 3);
+        assert_eq!(updated.blocks, (sector * 3).div_ceil(512));
+        println!(
+            "BD_4XEEW_GOLDEN size={} blocks={} first={:02x} middle={:02x} last={:02x}",
+            updated.size,
+            updated.blocks,
+            after[0],
+            after[sector as usize],
+            after[(sector * 2) as usize]
+        );
+    }
+
+    #[test]
     fn btrfs_write_multi_extent_overwrite_matches_reference_model_bd_5aybu() {
         // Regression for bd-5aybu. Metamorphic coverage for
         // btrfs_remove_overlapping_extent_data's multi-extent trim loop: build
@@ -62937,10 +63569,26 @@ mod tests {
         let root = InodeNumber(1);
 
         let x = ops
-            .create(&cx, &mut RequestScope::empty(), root, OsStr::new("ex_x"), 0o644, 0, 0)
+            .create(
+                &cx,
+                &mut RequestScope::empty(),
+                root,
+                OsStr::new("ex_x"),
+                0o644,
+                0,
+                0,
+            )
             .expect("create x");
         let y = ops
-            .create(&cx, &mut RequestScope::empty(), root, OsStr::new("ex_y"), 0o644, 0, 0)
+            .create(
+                &cx,
+                &mut RequestScope::empty(),
+                root,
+                OsStr::new("ex_y"),
+                0o644,
+                0,
+                0,
+            )
             .expect("create y");
         assert_ne!(x.ino, y.ino, "distinct inodes or the swap is a no-op");
 
@@ -62985,8 +63633,16 @@ mod tests {
         let ops: &dyn FsOps = &fs;
         let root = InodeNumber(1);
 
-        ops.create(&cx, &mut RequestScope::empty(), root, OsStr::new("present"), 0o644, 0, 0)
-            .expect("create present");
+        ops.create(
+            &cx,
+            &mut RequestScope::empty(),
+            root,
+            OsStr::new("present"),
+            0o644,
+            0,
+            0,
+        )
+        .expect("create present");
 
         let err = ops
             .rename2(
@@ -63016,17 +63672,49 @@ mod tests {
         let root = InodeNumber(1);
 
         let da = ops
-            .mkdir(&cx, &mut RequestScope::empty(), root, OsStr::new("da"), 0o755, 0, 0)
+            .mkdir(
+                &cx,
+                &mut RequestScope::empty(),
+                root,
+                OsStr::new("da"),
+                0o755,
+                0,
+                0,
+            )
             .expect("mkdir da");
         let db = ops
-            .mkdir(&cx, &mut RequestScope::empty(), root, OsStr::new("db"), 0o755, 0, 0)
+            .mkdir(
+                &cx,
+                &mut RequestScope::empty(),
+                root,
+                OsStr::new("db"),
+                0o755,
+                0,
+                0,
+            )
             .expect("mkdir db");
 
         let fa = ops
-            .create(&cx, &mut RequestScope::empty(), da.ino, OsStr::new("fa"), 0o644, 0, 0)
+            .create(
+                &cx,
+                &mut RequestScope::empty(),
+                da.ino,
+                OsStr::new("fa"),
+                0o644,
+                0,
+                0,
+            )
             .expect("create da/fa");
         let fb = ops
-            .create(&cx, &mut RequestScope::empty(), db.ino, OsStr::new("fb"), 0o644, 0, 0)
+            .create(
+                &cx,
+                &mut RequestScope::empty(),
+                db.ino,
+                OsStr::new("fb"),
+                0o644,
+                0,
+                0,
+            )
             .expect("create db/fb");
 
         ops.rename2(
@@ -63058,13 +63746,37 @@ mod tests {
 
         // /a (dir), /a/sub (dir), /a/sub/b (file).
         let a = ops
-            .mkdir(&cx, &mut RequestScope::empty(), root, OsStr::new("a"), 0o755, 0, 0)
+            .mkdir(
+                &cx,
+                &mut RequestScope::empty(),
+                root,
+                OsStr::new("a"),
+                0o755,
+                0,
+                0,
+            )
             .expect("mkdir a");
         let sub = ops
-            .mkdir(&cx, &mut RequestScope::empty(), a.ino, OsStr::new("sub"), 0o755, 0, 0)
+            .mkdir(
+                &cx,
+                &mut RequestScope::empty(),
+                a.ino,
+                OsStr::new("sub"),
+                0o755,
+                0,
+                0,
+            )
             .expect("mkdir a/sub");
-        ops.create(&cx, &mut RequestScope::empty(), sub.ino, OsStr::new("b"), 0o644, 0, 0)
-            .expect("create a/sub/b");
+        ops.create(
+            &cx,
+            &mut RequestScope::empty(),
+            sub.ino,
+            OsStr::new("b"),
+            0o644,
+            0,
+            0,
+        )
+        .expect("create a/sub/b");
 
         // Exchanging /a with /a/sub/b would move directory "a" under its own
         // descendant "a/sub" — a cycle the kernel rejects with EINVAL.
@@ -65325,7 +66037,11 @@ mod tests {
             )
             .expect("read after overwrite");
         assert!(data[..block_usize].iter().all(|byte| *byte == 0));
-        assert!(data[block_usize..2 * block_usize].iter().all(|byte| *byte == b'X'));
+        assert!(
+            data[block_usize..2 * block_usize]
+                .iter()
+                .all(|byte| *byte == b'X')
+        );
         assert!(data[2 * block_usize..].iter().all(|byte| *byte == 0));
     }
 
@@ -65766,8 +66482,14 @@ mod tests {
                 0,
             )
             .unwrap();
-        ops.write(&cx, &mut RequestScope::empty(), attr.ino, 0, &[0xCD_u8; 4096])
-            .expect("seed file before invalid punch+zero mode");
+        ops.write(
+            &cx,
+            &mut RequestScope::empty(),
+            attr.ino,
+            0,
+            &[0xCD_u8; 4096],
+        )
+        .expect("seed file before invalid punch+zero mode");
 
         // PUNCH_HOLE | ZERO_RANGE is mutually exclusive -> EINVAL. Without the
         // guard, btrfs would fall into the shared punch_hole||zero_range branch
@@ -67795,7 +68517,11 @@ mod tests {
                 .expect("EXTENT_ITEM present")
                 .1;
             ei_data[0..8].copy_from_slice(&2u64.to_le_bytes());
-            alloc.extent_alloc.extent_tree_mut().delete(&ei_key).unwrap();
+            alloc
+                .extent_alloc
+                .extent_tree_mut()
+                .delete(&ei_key)
+                .unwrap();
             alloc
                 .extent_alloc
                 .extent_tree_mut()
@@ -67935,7 +68661,11 @@ mod tests {
                 .expect("EXTENT_ITEM present")
                 .1;
             ei_data[0..8].copy_from_slice(&2u64.to_le_bytes());
-            alloc.extent_alloc.extent_tree_mut().delete(&ei_key).unwrap();
+            alloc
+                .extent_alloc
+                .extent_tree_mut()
+                .delete(&ei_key)
+                .unwrap();
             alloc
                 .extent_alloc
                 .extent_tree_mut()
@@ -67975,15 +68705,26 @@ mod tests {
             btrfs_make_shared_extent_file(&fs, &cx, "shared_punch.bin");
 
         // PUNCH_HOLE | KEEP_SIZE over a sector-aligned range inside the extent.
-        ops.fallocate(&cx, &mut RequestScope::empty(), ino, 4096, 4096, 0x02 | 0x01)
-            .expect("punch_hole on a shared extent must succeed (drop, not refuse)");
+        ops.fallocate(
+            &cx,
+            &mut RequestScope::empty(),
+            ino,
+            4096,
+            4096,
+            0x02 | 0x01,
+        )
+        .expect("punch_hole on a shared extent must succeed (drop, not refuse)");
 
         assert_extent_refs_dropped_to_one(&fs, disk_bytenr, disk_num_bytes);
 
         let read = ops
             .read(&cx, &mut RequestScope::empty(), ino, 0, 8192)
             .unwrap();
-        assert_eq!(&read[0..4096], &[0x5A_u8; 4096], "head before the hole intact");
+        assert_eq!(
+            &read[0..4096],
+            &[0x5A_u8; 4096],
+            "head before the hole intact"
+        );
         assert_eq!(&read[4096..8192], &[0u8; 4096], "punched region reads zero");
     }
 
@@ -68009,8 +68750,14 @@ mod tests {
             )
             .unwrap();
         // One 16 KiB datasum extent (default flags are datasum after bd-x3fcu).
-        ops.write(&cx, &mut RequestScope::empty(), attr.ino, 0, &[0x5A_u8; 16384])
-            .unwrap();
+        ops.write(
+            &cx,
+            &mut RequestScope::empty(),
+            attr.ino,
+            0,
+            &[0x5A_u8; 16384],
+        )
+        .unwrap();
         // Total checksummed sectors across the WHOLE csum tree (each crc32c csum
         // is 4 bytes, so item data length / 4 = sectors). This is robust to the
         // freed extent's disk_bytenr being reused by the re-inserted head/tail.
@@ -68045,8 +68792,15 @@ mod tests {
         // Punch one sector inside the extent: the sole-reference original extent
         // is freed (its 4 csums must be removed) and the head (1 sector) + tail
         // (2 sectors) are re-inserted with fresh csums.
-        ops.fallocate(&cx, &mut RequestScope::empty(), attr.ino, 4096, 4096, 0x02 | 0x01)
-            .expect("punch_hole on a sole-reference datasum extent");
+        ops.fallocate(
+            &cx,
+            &mut RequestScope::empty(),
+            attr.ino,
+            4096,
+            4096,
+            0x02 | 0x01,
+        )
+        .expect("punch_hole on a sole-reference datasum extent");
 
         // Only the 3 live sectors (head + tail) keep csums; the freed extent's
         // csums (incl. the punched sector) must be gone, no orphans (bd-juj73).
@@ -68990,11 +69744,20 @@ mod tests {
                     OsStr::new(&link_name),
                 )
                 .expect_err("link to an immutable/append-only file must be rejected");
-            assert_eq!(err.to_errno(), libc::EPERM, "{name} hard link must be EPERM");
+            assert_eq!(
+                err.to_errno(),
+                libc::EPERM,
+                "{name} hard link must be EPERM"
+            );
             // No partial mutation: the rejected link created no new name.
             assert!(
-                ops.lookup(&cx, &mut RequestScope::empty(), parent, OsStr::new(&link_name))
-                    .is_err(),
+                ops.lookup(
+                    &cx,
+                    &mut RequestScope::empty(),
+                    parent,
+                    OsStr::new(&link_name)
+                )
+                .is_err(),
                 "rejected link must not create the new name for {name}"
             );
         }
@@ -69062,7 +69825,10 @@ mod tests {
         };
 
         // Case 1: an immutable SOURCE cannot be renamed (vfs_rename may_delete).
-        let s1 = fs.create(&cx, parent, OsStr::new("s1"), 0o644, 0, 0).unwrap().ino;
+        let s1 = fs
+            .create(&cx, parent, OsStr::new("s1"), 0o644, 0, 0)
+            .unwrap()
+            .ino;
         set_flag(s1.0, BTRFS_INODE_IMMUTABLE);
         assert_eq!(
             fs.rename(&cx, parent, OsStr::new("s1"), parent, OsStr::new("s1moved"))
@@ -69077,8 +69843,12 @@ mod tests {
         );
 
         // Case 2: an append-only VICTIM cannot be clobbered by a rename.
-        fs.create(&cx, parent, OsStr::new("s2"), 0o644, 0, 0).unwrap();
-        let v2 = fs.create(&cx, parent, OsStr::new("v2"), 0o644, 0, 0).unwrap().ino;
+        fs.create(&cx, parent, OsStr::new("s2"), 0o644, 0, 0)
+            .unwrap();
+        let v2 = fs
+            .create(&cx, parent, OsStr::new("v2"), 0o644, 0, 0)
+            .unwrap()
+            .ino;
         set_flag(v2.0, BTRFS_INODE_APPEND);
         assert_eq!(
             fs.rename(&cx, parent, OsStr::new("s2"), parent, OsStr::new("v2"))
@@ -69121,8 +69891,12 @@ mod tests {
         };
 
         // ── Immutable: every content mutation is rejected (EPERM). ──
-        let imm = fs.create(&cx, parent, OsStr::new("imm.bin"), 0o644, 0, 0).unwrap().ino;
-        fs.write(&cx, imm, 0, b"hello").expect("seed write before immutable");
+        let imm = fs
+            .create(&cx, parent, OsStr::new("imm.bin"), 0o644, 0, 0)
+            .unwrap()
+            .ino;
+        fs.write(&cx, imm, 0, b"hello")
+            .expect("seed write before immutable");
         set_flag(imm.0, BTRFS_INODE_IMMUTABLE);
         assert_eq!(
             fs.write(&cx, imm, 0, b"nope").unwrap_err().to_errno(),
@@ -69150,7 +69924,10 @@ mod tests {
         );
 
         // ── Append-only: EOF append allowed; non-append write + shrink rejected. ──
-        let app = fs.create(&cx, parent, OsStr::new("app.bin"), 0o644, 0, 0).unwrap().ino;
+        let app = fs
+            .create(&cx, parent, OsStr::new("app.bin"), 0o644, 0, 0)
+            .unwrap()
+            .ino;
         fs.write(&cx, app, 0, b"0123456789").expect("seed write");
         let size = fs.getattr(&cx, app).unwrap().size;
         set_flag(app.0, BTRFS_INODE_APPEND);
@@ -69205,10 +69982,15 @@ mod tests {
             ("imm.bin", BTRFS_INODE_IMMUTABLE),
             ("app.bin", BTRFS_INODE_APPEND),
         ] {
-            let f = fs.create(&cx, parent, OsStr::new(name), 0o644, 0, 0).unwrap().ino;
+            let f = fs
+                .create(&cx, parent, OsStr::new(name), 0o644, 0, 0)
+                .unwrap()
+                .ino;
             set_flag(f.0, flag);
             assert_eq!(
-                fs.unlink(&cx, parent, OsStr::new(name)).unwrap_err().to_errno(),
+                fs.unlink(&cx, parent, OsStr::new(name))
+                    .unwrap_err()
+                    .to_errno(),
                 libc::EPERM,
                 "deleting {name} must be EPERM"
             );
@@ -70387,14 +71169,18 @@ mod tests {
             },
         )
         .unwrap();
-        let before = ops.getattr(&cx, &mut RequestScope::empty(), file.ino).unwrap();
+        let before = ops
+            .getattr(&cx, &mut RequestScope::empty(), file.ino)
+            .unwrap();
         assert_eq!(before.mtime, old, "setup: mtime should be the pinned value");
 
         // Default-mode (prealloc) allocation of one sector.
         ops.fallocate(&cx, &mut RequestScope::empty(), file.ino, 0, 4096, 0)
             .unwrap();
 
-        let after = ops.getattr(&cx, &mut RequestScope::empty(), file.ino).unwrap();
+        let after = ops
+            .getattr(&cx, &mut RequestScope::empty(), file.ino)
+            .unwrap();
         assert_ne!(
             after.mtime, old,
             "fallocate must bump mtime off the pinned value"
@@ -70426,17 +71212,35 @@ mod tests {
                 0,
             )
             .unwrap();
-        ops.write(&cx, &mut RequestScope::empty(), file.ino, 0, &[0xAB_u8; 4096])
-            .expect("write");
+        ops.write(
+            &cx,
+            &mut RequestScope::empty(),
+            file.ino,
+            0,
+            &[0xAB_u8; 4096],
+        )
+        .expect("write");
 
         // SEEK_DATA / SEEK_HOLE at or beyond EOF must return ENXIO (lseek(2)),
         // not EINVAL. file size is 4096, so offset 4096 is exactly EOF.
         let err = ops
-            .lseek(&cx, &mut RequestScope::empty(), file.ino, 4096, SeekWhence::Data)
+            .lseek(
+                &cx,
+                &mut RequestScope::empty(),
+                file.ino,
+                4096,
+                SeekWhence::Data,
+            )
             .expect_err("SEEK_DATA at EOF must fail");
         assert_eq!(err.to_errno(), libc::ENXIO);
         let err = ops
-            .lseek(&cx, &mut RequestScope::empty(), file.ino, 8192, SeekWhence::Hole)
+            .lseek(
+                &cx,
+                &mut RequestScope::empty(),
+                file.ino,
+                8192,
+                SeekWhence::Hole,
+            )
             .expect_err("SEEK_HOLE beyond EOF must fail");
         assert_eq!(err.to_errno(), libc::ENXIO);
     }
@@ -70501,7 +71305,13 @@ mod tests {
 
         // SEEK_DATA from the start of the hole must skip to extent C at 2s.
         let data_pos = ops
-            .lseek(&cx, &mut RequestScope::empty(), file.ino, s, SeekWhence::Data)
+            .lseek(
+                &cx,
+                &mut RequestScope::empty(),
+                file.ino,
+                s,
+                SeekWhence::Data,
+            )
             .unwrap();
         assert_eq!(
             data_pos,
@@ -70511,7 +71321,13 @@ mod tests {
 
         // SEEK_HOLE from 0 must land at the start of the hole (s), not skip it.
         let hole_pos = ops
-            .lseek(&cx, &mut RequestScope::empty(), file.ino, 0, SeekWhence::Hole)
+            .lseek(
+                &cx,
+                &mut RequestScope::empty(),
+                file.ino,
+                0,
+                SeekWhence::Hole,
+            )
             .unwrap();
         assert_eq!(
             hole_pos, s,
@@ -70590,7 +71406,11 @@ mod tests {
             "fiemap must report only the two real extents; the hole is a gap"
         );
         assert_eq!(extents[0].logical, 0);
-        assert_eq!(extents[1].logical, 2 * s, "no extent may be reported for the hole at offset s");
+        assert_eq!(
+            extents[1].logical,
+            2 * s,
+            "no extent may be reported for the hole at offset s"
+        );
         assert_ne!(
             extents[1].physical, 0,
             "the trailing real data extent must keep its physical address"
@@ -70739,12 +71559,24 @@ mod tests {
         assert_eq!(a_after.nlink, 1, "a stays nlink=1 after rename");
         assert_eq!(b_after.nlink, 1, "b stays nlink=1 after rename");
         // The entry actually moved.
-        assert!(ops
-            .lookup(&cx, &mut RequestScope::empty(), dir_b.ino, OsStr::new("sub"))
-            .is_ok());
-        assert!(ops
-            .lookup(&cx, &mut RequestScope::empty(), dir_a.ino, OsStr::new("sub"))
-            .is_err());
+        assert!(
+            ops.lookup(
+                &cx,
+                &mut RequestScope::empty(),
+                dir_b.ino,
+                OsStr::new("sub")
+            )
+            .is_ok()
+        );
+        assert!(
+            ops.lookup(
+                &cx,
+                &mut RequestScope::empty(),
+                dir_a.ino,
+                OsStr::new("sub")
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -71289,7 +72121,7 @@ mod tests {
                 generation: alloc.generation,
                 ram_bytes: s,
                 extent_type: BTRFS_FILE_EXTENT_REG,
-                compression: 1, // zlib (any nonzero compression algorithm)
+                compression: 1,        // zlib (any nonzero compression algorithm)
                 disk_bytenr: 0x2_0000, // arbitrary; fiemap reports it, never reads it
                 disk_num_bytes: s,
                 extent_offset: 0,
@@ -74674,7 +75506,11 @@ mod tests {
             .btrfs_encoded_read(&cx, &mut RequestScope::empty(), attr.ino.0, &args)
             .expect("encoded_read at EOF");
 
-        assert_eq!(result.len(), 32, "EOF read returns only the metadata header");
+        assert_eq!(
+            result.len(),
+            32,
+            "EOF read returns only the metadata header"
+        );
         let len = u64::from_le_bytes(result[0..8].try_into().unwrap());
         let unencoded_len = u64::from_le_bytes(result[8..16].try_into().unwrap());
         assert_eq!(len, 0, "no encoded bytes are returned past EOF");

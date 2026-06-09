@@ -15,10 +15,15 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+criterion = { workspace = true }
 ffs-block = { workspace = true }
 proptest = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
+
+[[bench]]
+name = "extent_fetch"
+harness = false
 
 [lints]
 workspace = true
