@@ -3501,13 +3501,21 @@ fn validate_dir_block_slice_len(block: &[u8], block_size: u32) -> Result<(), Par
 ///
 /// Returns the entries (excluding checksum tails) and an optional
 /// checksum tail if one was found at the end.
-pub fn parse_dir_block(
+/// Walk the live entries of an ext4 directory block, invoking `on_entry` for
+/// each non-deleted entry with its already-bounds-checked fields and name slice
+/// (borrowed from `block`, no allocation). Performs the full structural
+/// validation `parse_dir_block` requires — `rec_len` alignment/bounds, checksum
+/// tail detection, and the trailing-completeness check — and returns the
+/// checksum tail (if any). Callbacks that only need to inspect entries (e.g.
+/// name lookup) avoid `parse_dir_block`'s per-entry name `Vec` allocations
+/// while seeing exactly the same entries in the same order.
+fn walk_dir_block_entries(
     block: &[u8],
     block_size: u32,
-) -> Result<(Vec<Ext4DirEntry>, Option<Ext4DirEntryTail>), ParseError> {
+    mut on_entry: impl FnMut(u32, u8, u32, u8, &[u8]),
+) -> Result<Option<Ext4DirEntryTail>, ParseError> {
     validate_dir_block_slice_len(block, block_size)?;
 
-    let mut entries = Vec::new();
     let mut tail = None;
     let mut offset = 0_usize;
 
@@ -3596,15 +3604,13 @@ pub fn parse_dir_block(
                 reason: "name extends past rec_len",
             });
         }
-        let name = block[offset + 8..name_end].to_vec();
-
-        entries.push(Ext4DirEntry {
+        on_entry(
             inode,
+            file_type_raw,
             rec_len,
             name_len,
-            file_type: Ext4FileType::from_raw(file_type_raw),
-            name,
-        });
+            &block[offset + 8..name_end],
+        );
 
         offset = entry_end;
     }
@@ -3617,6 +3623,27 @@ pub fn parse_dir_block(
         });
     }
 
+    Ok(tail)
+}
+
+pub fn parse_dir_block(
+    block: &[u8],
+    block_size: u32,
+) -> Result<(Vec<Ext4DirEntry>, Option<Ext4DirEntryTail>), ParseError> {
+    let mut entries = Vec::new();
+    let tail = walk_dir_block_entries(
+        block,
+        block_size,
+        |inode, file_type_raw, rec_len, name_len, name| {
+            entries.push(Ext4DirEntry {
+                inode,
+                rec_len,
+                name_len,
+                file_type: Ext4FileType::from_raw(file_type_raw),
+                name: name.to_vec(),
+            });
+        },
+    )?;
     Ok((entries, tail))
 }
 
@@ -3632,8 +3659,27 @@ pub fn lookup_in_dir_block(
     block_size: u32,
     target: &[u8],
 ) -> Result<Option<Ext4DirEntry>, ParseError> {
-    let (entries, _) = parse_dir_block(block, block_size)?;
-    Ok(entries.into_iter().find(|e| e.name == target))
+    // Walk the block in place, materialising only the first matching entry
+    // (one allocation) instead of building a `Vec<Ext4DirEntry>` with a name
+    // `Vec` per entry. The whole block is still validated, so the accept/reject
+    // behaviour is identical to `parse_dir_block(..).find(name == target)`.
+    let mut found: Option<Ext4DirEntry> = None;
+    walk_dir_block_entries(
+        block,
+        block_size,
+        |inode, file_type_raw, rec_len, name_len, name| {
+            if found.is_none() && name == target {
+                found = Some(Ext4DirEntry {
+                    inode,
+                    rec_len,
+                    name_len,
+                    file_type: Ext4FileType::from_raw(file_type_raw),
+                    name: name.to_vec(),
+                });
+            }
+        },
+    )?;
+    Ok(found)
 }
 
 /// Case-insensitive directory entry lookup for casefold directories.
@@ -3649,11 +3695,29 @@ pub fn lookup_in_dir_block_casefold(
     block_size: u32,
     target: &[u8],
 ) -> Result<Option<Ext4DirEntry>, ParseError> {
-    let (entries, _) = parse_dir_block(block, block_size)?;
     let target_lower = ext4_casefold_key(target);
-    Ok(entries
-        .into_iter()
-        .find(|e| ext4_casefold_key(&e.name) == target_lower))
+    // Walk in place: fold each entry name and compare against the (pre-folded)
+    // target, materialising only the first match. Avoids `parse_dir_block`'s
+    // per-entry name allocation and stops folding once matched, while still
+    // validating the whole block — identical to
+    // `parse_dir_block(..).find(casefold_key(name) == target_lower)`.
+    let mut found: Option<Ext4DirEntry> = None;
+    walk_dir_block_entries(
+        block,
+        block_size,
+        |inode, file_type_raw, rec_len, name_len, name| {
+            if found.is_none() && ext4_casefold_key(name) == target_lower {
+                found = Some(Ext4DirEntry {
+                    inode,
+                    rec_len,
+                    name_len,
+                    file_type: Ext4FileType::from_raw(file_type_raw),
+                    name: name.to_vec(),
+                });
+            }
+        },
+    )?;
+    Ok(found)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -12878,6 +12942,53 @@ mod tests {
 
             let names: Vec<String> = parsed_mutated.iter().map(Ext4Xattr::full_name).collect();
             prop_assert_eq!(names, vec!["user.b", "user.alpha"]);
+        }
+
+        /// Isomorphism oracle for the in-place `lookup_in_dir_block` /
+        /// `lookup_in_dir_block_casefold` walkers: build a valid directory block
+        /// from random unique names, then assert each lookup returns exactly what
+        /// `parse_dir_block(..).into_iter().find(..)` (the prior implementation)
+        /// would, for both a present and an absent target.
+        #[test]
+        fn ext4_proptest_lookup_in_dir_block_matches_parse_and_find(
+            raw_names in proptest::collection::vec("[a-zA-Z0-9_]{1,12}", 1..=40),
+            target_idx in 0_usize..50,
+        ) {
+            use std::collections::BTreeSet;
+            let mut seen = BTreeSet::new();
+            let names: Vec<Vec<u8>> = raw_names
+                .into_iter()
+                .filter(|n| seen.insert(n.clone()))
+                .map(String::into_bytes)
+                .collect();
+            let entries: Vec<(u32, u8, &[u8])> = names
+                .iter()
+                .enumerate()
+                .map(|(i, n)| (u32::try_from(i).unwrap() + 2, 1_u8, n.as_slice()))
+                .collect();
+            let block_size = 4096_usize;
+            prop_assume!(super::pack_dir_block_entries(&entries, block_size, false).is_ok());
+            let block = super::pack_dir_block_entries(&entries, block_size, false).unwrap();
+            let bs = u32::try_from(block_size).unwrap();
+
+            let target: Vec<u8> = if target_idx < names.len() {
+                names[target_idx].clone()
+            } else {
+                b"__absent_name__".to_vec()
+            };
+
+            let expected = super::parse_dir_block(&block, bs)
+                .map(|(es, _)| es.into_iter().find(|e| e.name == target));
+            let actual = super::lookup_in_dir_block(&block, bs, &target);
+            prop_assert_eq!(actual, expected);
+
+            let target_lower = super::ext4_casefold_key(&target);
+            let expected_cf = super::parse_dir_block(&block, bs).map(|(es, _)| {
+                es.into_iter()
+                    .find(|e| super::ext4_casefold_key(&e.name) == target_lower)
+            });
+            let actual_cf = super::lookup_in_dir_block_casefold(&block, bs, &target);
+            prop_assert_eq!(actual_cf, expected_cf);
         }
     }
 
