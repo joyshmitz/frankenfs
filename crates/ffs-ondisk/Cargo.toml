@@ -19,5 +19,9 @@ proptest = { workspace = true }
 name = "casefold_key"
 harness = false
 
+[[bench]]
+name = "btrfs_leaf_parse"
+harness = false
+
 [lints]
 workspace = true

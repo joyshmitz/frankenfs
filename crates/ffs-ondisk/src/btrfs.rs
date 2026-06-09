@@ -1385,6 +1385,50 @@ pub struct BtrfsKeyPtr {
     pub generation: u64,
 }
 
+/// A u64 mask with bits `[lo, hi)` set (`0 <= lo < hi <= 64`).
+#[inline]
+fn word_range_mask(lo: usize, hi: usize) -> u64 {
+    let high = if hi >= 64 { u64::MAX } else { (1_u64 << hi) - 1 };
+    let low = (1_u64 << lo) - 1;
+    high & !low
+}
+
+/// Test whether byte range `[start, end)` intersects any already-set bit in the
+/// coverage bitset; if it does not, set the range and return `false`. Returns
+/// `true` on the first intersection without mutating the bitset. `start < end`
+/// and the range must lie within `bits.len() * 64`.
+fn payload_range_collides(bits: &mut [u64], start: usize, end: usize) -> bool {
+    let first_word = start / 64;
+    let last_word = (end - 1) / 64;
+    let first_mask = word_range_mask(start % 64, 64);
+    let last_mask = word_range_mask(0, (end - 1) % 64 + 1);
+
+    if first_word == last_word {
+        let mask = first_mask & last_mask;
+        if bits[first_word] & mask != 0 {
+            return true;
+        }
+        bits[first_word] |= mask;
+        return false;
+    }
+
+    // Check every covered word before mutating any, so a collision leaves the
+    // bitset untouched (the caller errors out immediately).
+    if bits[first_word] & first_mask != 0 || bits[last_word] & last_mask != 0 {
+        return true;
+    }
+    if bits[first_word + 1..last_word].iter().any(|&w| w != 0) {
+        return true;
+    }
+
+    bits[first_word] |= first_mask;
+    bits[last_word] |= last_mask;
+    for word in &mut bits[first_word + 1..last_word] {
+        *word = u64::MAX;
+    }
+    false
+}
+
 pub fn parse_leaf_items(block: &[u8]) -> Result<(BtrfsHeader, Vec<BtrfsItem>), ParseError> {
     let header = BtrfsHeader::parse_from_block(block)?;
     if header.level != 0 {
@@ -1409,7 +1453,14 @@ pub fn parse_leaf_items(block: &[u8]) -> Result<(BtrfsHeader, Vec<BtrfsItem>), P
         });
     }
 
-    let mut payload_ranges: Vec<(usize, usize)> = Vec::with_capacity(nritems);
+    // Track payload coverage as a byte-granular bitset over the block, so each
+    // item's overlap check is O(payload words) instead of an O(N) all-pairs
+    // scan — making the whole leaf parse O(block size) rather than O(N^2) on a
+    // dense leaf (hundreds of items), with no per-item allocation. A range
+    // overlaps a previously-seen payload iff any of its bits are already set;
+    // this is identical to the all-pairs check because the set bits are exactly
+    // the union of all prior payload ranges.
+    let mut payload_coverage = vec![0_u64; block.len().div_ceil(64)];
     let mut items = Vec::with_capacity(nritems);
     let mut previous_key = None;
     for idx in 0..nritems {
@@ -1466,18 +1517,12 @@ pub fn parse_leaf_items(block: &[u8]) -> Result<(BtrfsHeader, Vec<BtrfsItem>), P
         }
 
         if data_size_usize > 0
-            && payload_ranges
-                .iter()
-                .any(|(start, end)| data_offset_usize < *end && data_end > *start)
+            && payload_range_collides(&mut payload_coverage, data_offset_usize, data_end)
         {
             return Err(ParseError::InvalidField {
                 field: "item_offset",
                 reason: "item payload overlaps another item",
             });
-        }
-
-        if data_size_usize > 0 {
-            payload_ranges.push((data_offset_usize, data_end));
         }
 
         items.push(BtrfsItem {
@@ -3702,6 +3747,75 @@ mod tests {
     // PROPTEST_CASES=1 PROPTEST_SEED=<seed> cargo test -p ffs-ondisk <test_name> -- --nocapture
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(32))]
+
+        /// Isomorphism oracle for the `parse_leaf_items` payload-overlap check
+        /// after replacing the O(N^2) all-pairs scan with an O(log N) BTreeMap
+        /// neighbour probe: build a leaf with strictly-increasing keys and
+        /// in-bounds payloads (so the only possible failure is payload overlap),
+        /// then assert the parser's accept/reject decision and parsed items
+        /// match a brute-force all-pairs overlap reference exactly.
+        #[test]
+        fn btrfs_proptest_parse_leaf_overlap_matches_bruteforce(
+            raw in proptest::collection::vec((0_u32..4000, 0_u32..300), 1..=48),
+        ) {
+            const BLOCK_SIZE: usize = 4096;
+            let nritems = raw.len();
+            let items_end = BTRFS_HEADER_SIZE + nritems * BTRFS_ITEM_SIZE;
+            // Skip degenerate shapes with no room for payloads.
+            prop_assume!(items_end < BLOCK_SIZE);
+            let region_len = BLOCK_SIZE - items_end;
+            let header_size = u32::try_from(BTRFS_HEADER_SIZE).unwrap();
+
+            // Derive in-bounds (offset, size) per item from the raw values.
+            let mut ranges: Vec<(usize, usize)> = Vec::new(); // size>0 only, in item order
+            let mut block = make_block(BLOCK_SIZE, u32::try_from(nritems).unwrap(), 0);
+            for (idx, (raw_off, raw_size)) in raw.iter().copied().enumerate() {
+                let off = (raw_off as usize) % region_len;
+                let max_size = region_len - off;
+                let size = (raw_size as usize) % (max_size + 1);
+                let data_offset_abs = items_end + off;
+                let base = BTRFS_HEADER_SIZE + idx * BTRFS_ITEM_SIZE;
+                block[base..base + 8].copy_from_slice(&(idx as u64).to_le_bytes());
+                block[base + 8] = 1; // item_type
+                block[base + 9..base + 17].copy_from_slice(&0_u64.to_le_bytes());
+                let data_offset_rel = u32::try_from(data_offset_abs).unwrap() - header_size;
+                block[base + 17..base + 21].copy_from_slice(&data_offset_rel.to_le_bytes());
+                block[base + 21..base + 25]
+                    .copy_from_slice(&u32::try_from(size).unwrap().to_le_bytes());
+                if size > 0 {
+                    ranges.push((data_offset_abs, data_offset_abs + size));
+                }
+            }
+
+            // Brute-force reference: any pair of size>0 payloads overlapping.
+            let mut expect_reject = false;
+            'outer: for i in 0..ranges.len() {
+                for j in (i + 1)..ranges.len() {
+                    let (a, b) = (ranges[i], ranges[j]);
+                    if a.0 < b.1 && b.0 < a.1 {
+                        expect_reject = true;
+                        break 'outer;
+                    }
+                }
+            }
+
+            let parsed = parse_leaf_items(&block);
+            prop_assert_eq!(parsed.is_err(), expect_reject);
+            if let Ok((_, items)) = parsed {
+                prop_assert_eq!(items.len(), nritems);
+                for (idx, item) in items.iter().enumerate() {
+                    prop_assert_eq!(item.key.objectid, idx as u64);
+                }
+            } else if let Err(err) = parsed {
+                prop_assert_eq!(
+                    err,
+                    ParseError::InvalidField {
+                        field: "item_offset",
+                        reason: "item payload overlaps another item",
+                    }
+                );
+            }
+        }
 
         #[test]
         fn btrfs_proptest_parse_superblock_region_no_panic(
