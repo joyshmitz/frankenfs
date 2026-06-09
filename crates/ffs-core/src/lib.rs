@@ -18773,12 +18773,27 @@ impl OpenFs {
         len: u64,
         dest_offset: u64,
     ) -> ffs_error::Result<()> {
-        let src_end = src_offset
-            .checked_add(len)
-            .ok_or_else(|| FfsError::InvalidGeometry("clone range src end overflow".into()))?;
+        // Logical destination EOF (carries the true, possibly sub-sector, end of
+        // the cloned data — used for dst i_size below).
         let dest_end = dest_offset
             .checked_add(len)
             .ok_or_else(|| FfsError::InvalidGeometry("clone range dest end overflow".into()))?;
+        // The caller (clone_file_range) guarantees sector alignment except for a
+        // length reaching the source EOF. Round the carve window UP to the sector
+        // grid so every shared/removed extent stays sector-aligned (the source's
+        // EOF extent is already padded to its sector, and dst reads cap by i_size
+        // so the rounded tail past dest_end is invisible) — bd-70gyh.
+        let ss = u64::from(alloc.sectorsize);
+        let carve_len = len
+            .checked_add(ss - 1)
+            .ok_or_else(|| FfsError::InvalidGeometry("clone carve len overflow".into()))?
+            & !(ss - 1);
+        let src_end = src_offset
+            .checked_add(carve_len)
+            .ok_or_else(|| FfsError::InvalidGeometry("clone range src end overflow".into()))?;
+        let carve_dest_end = dest_offset
+            .checked_add(carve_len)
+            .ok_or_else(|| FfsError::InvalidGeometry("clone carve dest end overflow".into()))?;
 
         let lo = BtrfsKey {
             objectid: src_canonical,
@@ -18915,9 +18930,15 @@ impl OpenFs {
             }
         }
 
-        // Replace any existing dst data in the destination window, then graft in
-        // the shared extents.
-        self.btrfs_remove_overlapping_extent_data(cx, alloc, dst_canonical, dest_offset, dest_end)?;
+        // Replace any existing dst data in the destination window (sector-aligned
+        // bounds), then graft in the shared extents.
+        self.btrfs_remove_overlapping_extent_data(
+            cx,
+            alloc,
+            dst_canonical,
+            dest_offset,
+            carve_dest_end,
+        )?;
         for (dst_file_offset, new_data, disk_bytenr, disk_num_bytes, ref_offset) in shares {
             let dst_key = BtrfsKey {
                 objectid: dst_canonical,
@@ -29338,6 +29359,22 @@ impl FsOps for OpenFs {
                 } else {
                     src_length
                 };
+                // FICLONERANGE alignment (kernel remap_check_alignment): the
+                // source and destination offsets must be sector-aligned, and the
+                // length must be sector-aligned UNLESS the range reaches the
+                // source EOF (the final partial block may be cloned). Otherwise
+                // EINVAL — which also keeps every cloned extent sector-aligned so
+                // the on-disk image stays btrfs-check-clean (bd-70gyh).
+                let ss = u64::from(alloc.sectorsize);
+                let reaches_src_eof = src_offset.saturating_add(len) >= src_size;
+                if src_offset % ss != 0
+                    || dest_offset % ss != 0
+                    || (!reaches_src_eof && len % ss != 0)
+                {
+                    return Err(FfsError::Io(std::io::Error::from_raw_os_error(
+                        libc::EINVAL,
+                    )));
+                }
                 // A range covering the whole source from 0 into dst@0 reduces to
                 // a full reflink (verbatim extent copy). Any other window uses
                 // boundary-split sharing (bd-jbtd2).
@@ -59640,18 +59677,29 @@ mod tests {
         let full = fs.read(&cx, src.ino, 0, data.len() as u32).expect("read src");
         assert_eq!(full, data, "inline source must read back as the original data");
 
-        // Partial reflink (previously rejected): clone src[256..768) -> dst[0..).
-        // Sub-sector offsets — clone_file_range does not require alignment.
         let dst = fs
             .create(&cx, root, OsStr::new("idst.bin"), 0o644, 0, 0)
             .expect("create dst");
-        fs.clone_file_range(&cx, &mut RequestScope::empty(), dst.ino, src.ino, 256, 512, 0)
-            .expect("partial reflink of an inline extent");
-        let cloned = fs.read(&cx, dst.ino, 0, 512).expect("read dst");
+        // A sub-sector partial reflink (src[256..768)) is rejected with EINVAL,
+        // matching the kernel's FICLONERANGE alignment check (remap_check_alignment
+        // requires sector-aligned offsets) — bd-70gyh. An unaligned src offset
+        // would also force an unaligned shared extent_offset on a regular carve.
         assert_eq!(
-            cloned,
-            &data[256..768],
-            "partial inline reflink must read the source sub-range"
+            fs.clone_file_range(&cx, &mut RequestScope::empty(), dst.ino, src.ino, 256, 512, 0)
+                .unwrap_err()
+                .to_errno(),
+            libc::EINVAL,
+            "an unaligned partial reflink must be EINVAL"
+        );
+
+        // The whole inline file CAN be reflinked (src@0 -> dst@0, length reaches
+        // EOF): the inline data is copied into dst as a sector-aligned extent.
+        fs.clone_file_range(&cx, &mut RequestScope::empty(), dst.ino, src.ino, 0, 0, 0)
+            .expect("whole-file reflink of an inline extent");
+        let cloned = fs.read(&cx, dst.ino, 0, data.len() as u32).expect("read dst");
+        assert_eq!(
+            cloned, data,
+            "whole inline reflink must read the full source data"
         );
 
         // btrfs check: inline source + the copied dst extent must be clean.
@@ -59660,7 +59708,7 @@ mod tests {
             .expect("commit");
         std::fs::write(&image, dev.snapshot_bytes()).expect("write image");
         if let Some((ok, output)) = run_btrfs_check(&image) {
-            assert!(ok, "btrfs check after partial inline reflink:\n{output}");
+            assert!(ok, "btrfs check after whole inline reflink:\n{output}");
         }
     }
 
@@ -60824,6 +60872,115 @@ mod tests {
             dst_back,
             &payload[4096..12288],
             "dst must read the exact cloned src window post-check"
+        );
+    }
+
+    /// bd-70gyh: FICLONERANGE must reject non-sector-aligned offsets/lengths with
+    /// EINVAL (kernel remap_check_alignment), except a length reaching the source
+    /// EOF — which is accepted and shares the source's (sector-aligned) tail
+    /// extent, with the destination's logical EOF carried in i_size.
+    #[test]
+    fn clone_file_range_alignment_einval_and_eof_tail_bd_70gyh() {
+        let (fs, cx) = open_writable_btrfs();
+        let root = InodeNumber(u64::from(BTRFS_FIRST_FREE_OBJECTID));
+        let ops: &dyn FsOps = &fs;
+        let src = fs
+            .create(&cx, root, OsStr::new("asrc.dat"), 0o644, 0, 0)
+            .expect("create src")
+            .ino;
+        let dst = fs
+            .create(&cx, root, OsStr::new("adst.dat"), 0o644, 0, 0)
+            .expect("create dst")
+            .ino;
+        // Source of 10000 bytes (unaligned size; one [0,12288) extent, i_size 10000).
+        let mut payload = vec![0_u8; 10000];
+        for (i, b) in payload.iter_mut().enumerate() {
+            *b = u8::try_from(i & 0xff).unwrap();
+        }
+        ops.write(&cx, &mut RequestScope::empty(), src, 0, &payload)
+            .expect("write src");
+
+        // Unaligned src offset -> EINVAL.
+        assert_eq!(
+            ops.clone_file_range(&cx, &mut RequestScope::empty(), dst, src, 100, 4096, 0)
+                .unwrap_err()
+                .to_errno(),
+            libc::EINVAL,
+            "unaligned src offset must be EINVAL"
+        );
+        // Unaligned dest offset -> EINVAL.
+        assert_eq!(
+            ops.clone_file_range(&cx, &mut RequestScope::empty(), dst, src, 0, 4096, 100)
+                .unwrap_err()
+                .to_errno(),
+            libc::EINVAL,
+            "unaligned dest offset must be EINVAL"
+        );
+        // Unaligned length NOT reaching src EOF -> EINVAL.
+        assert_eq!(
+            ops.clone_file_range(&cx, &mut RequestScope::empty(), dst, src, 0, 5000, 0)
+                .unwrap_err()
+                .to_errno(),
+            libc::EINVAL,
+            "unaligned mid-file length must be EINVAL"
+        );
+
+        // Unaligned length REACHING src EOF is accepted: clone [4096, 10000) of
+        // src into dst@0. dst reads the exact window; size is the logical length.
+        ops.clone_file_range(&cx, &mut RequestScope::empty(), dst, src, 4096, 5904, 0)
+            .expect("len-to-EOF clone must succeed");
+        let got = ops
+            .read(&cx, &mut RequestScope::empty(), dst, 0, 5904)
+            .expect("read dst");
+        assert_eq!(got, &payload[4096..10000], "dst reads the exact src EOF window");
+        assert_eq!(
+            ops.getattr(&cx, &mut RequestScope::empty(), dst)
+                .expect("getattr dst")
+                .size,
+            5904,
+            "dst size is the logical cloned length"
+        );
+    }
+
+    /// bd-70gyh on-disk validation: a partial reflink whose length reaches the
+    /// source EOF (so the tail is sub-sector) must stay btrfs-check-clean — the
+    /// shared destination extent is sector-aligned and i_size carries the EOF.
+    /// Skips without btrfs-progs.
+    #[test]
+    fn clone_file_range_unaligned_eof_tail_passes_btrfs_check_bd_70gyh() {
+        let Some((fs, dev, _tmp, image)) = open_writable_btrfs_mkfs(256) else {
+            return; // btrfs-progs unavailable
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(u64::from(BTRFS_FIRST_FREE_OBJECTID));
+        let ops: &dyn FsOps = &fs;
+        let src = fs
+            .create(&cx, root, OsStr::new("src.dat"), 0o644, 0, 0)
+            .expect("create src");
+        let dst = fs
+            .create(&cx, root, OsStr::new("dst.dat"), 0o644, 0, 0)
+            .expect("create dst");
+        ops.write(&cx, &mut RequestScope::empty(), src.ino, 0, &[0x5A_u8; 10000])
+            .expect("write src 10000 bytes");
+        // Clone [4096, 10000) (len 5904, reaches src EOF) into dst@0.
+        ops.clone_file_range(&cx, &mut RequestScope::empty(), dst.ino, src.ino, 4096, 5904, 0)
+            .expect("len-to-EOF clone");
+
+        let _ = fs.flush_mvcc_to_device(&cx);
+        fs.btrfs_full_transaction_commit(&cx, "clone-eof-tail-check")
+            .expect("btrfs full transaction commit");
+        std::fs::write(&image, dev.snapshot_bytes()).expect("write modified image");
+
+        let Some((ok, output)) = run_btrfs_check(&image) else {
+            return; // btrfs check tool unavailable
+        };
+        assert!(
+            !output.contains("bad file extent"),
+            "a len-to-EOF reflink must not produce a 'bad file extent' (bd-70gyh):\n{output}"
+        );
+        assert!(
+            ok,
+            "btrfs check must accept a len-to-EOF reflink (bd-70gyh):\n{output}"
         );
     }
 
