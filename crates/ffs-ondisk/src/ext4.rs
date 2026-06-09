@@ -3706,7 +3706,7 @@ pub fn lookup_in_dir_block_casefold(
         block,
         block_size,
         |inode, file_type_raw, rec_len, name_len, name| {
-            if found.is_none() && ext4_casefold_key(name) == target_lower {
+            if found.is_none() && casefold_key_eq(name, &target_lower) {
                 found = Some(Ext4DirEntry {
                     inode,
                     rec_len,
@@ -3765,9 +3765,37 @@ pub fn ext4_casefold_key(name: &[u8]) -> Vec<u8> {
     casefold_name(name)
 }
 
+/// Whether `name`'s casefold key equals an already-folded target key, without
+/// allocating when `name` is ASCII (the common case). For an ASCII `name`,
+/// `ext4_casefold_key(name)` is just its ASCII-lowercased bytes, so comparing
+/// `name` to `folded_target` with ASCII-insensitive equality is bit-for-bit
+/// identical to `ext4_casefold_key(name) == folded_target` — and avoids the
+/// per-call `Vec` allocation. Non-ASCII names (which may fold via Unicode rules,
+/// e.g. `ß`→`ss`) fall back to materialising the key.
+#[must_use]
+fn casefold_key_eq(name: &[u8], folded_target: &[u8]) -> bool {
+    if name.is_ascii() {
+        name.eq_ignore_ascii_case(folded_target)
+    } else {
+        ext4_casefold_key(name) == folded_target
+    }
+}
+
+/// Case-insensitive equality of two raw directory names under ext4 casefold,
+/// allocation-free when both are ASCII. Equivalent to
+/// `ext4_casefold_key(left) == ext4_casefold_key(right)`.
+#[must_use]
+pub fn ext4_casefold_eq(left: &[u8], right: &[u8]) -> bool {
+    if left.is_ascii() && right.is_ascii() {
+        left.eq_ignore_ascii_case(right)
+    } else {
+        ext4_casefold_key(left) == ext4_casefold_key(right)
+    }
+}
+
 #[must_use]
 pub fn ext4_casefold_names_collide(left: &[u8], right: &[u8]) -> bool {
-    ext4_casefold_key(left) == ext4_casefold_key(right)
+    ext4_casefold_eq(left, right)
 }
 
 #[must_use]
@@ -12989,6 +13017,62 @@ mod tests {
             });
             let actual_cf = super::lookup_in_dir_block_casefold(&block, bs, &target);
             prop_assert_eq!(actual_cf, expected_cf);
+        }
+
+        /// Isomorphism oracle for the allocation-free casefold comparators:
+        /// `ext4_casefold_eq` and `casefold_key_eq` must agree bit-for-bit with
+        /// the materialised `ext4_casefold_key(..) == ext4_casefold_key(..)`
+        /// across arbitrary byte strings (ASCII, invalid UTF-8, mixed case).
+        #[test]
+        fn ext4_proptest_casefold_eq_matches_key_equality(
+            a in proptest::collection::vec(any::<u8>(), 0..=24),
+            b in proptest::collection::vec(any::<u8>(), 0..=24),
+        ) {
+            let key_a = super::ext4_casefold_key(&a);
+            let key_b = super::ext4_casefold_key(&b);
+            let expected = key_a == key_b;
+            prop_assert_eq!(super::ext4_casefold_eq(&a, &b), expected);
+            prop_assert_eq!(super::casefold_key_eq(&a, &key_b), expected);
+        }
+    }
+
+    /// Casefold comparator equivalence on the Unicode fold path (ASCII fast path
+    /// is exercised by the proptest above; these names are non-ASCII or fold via
+    /// multi-char rules, so they take the materialised-key branch and must still
+    /// match `ext4_casefold_key` equality).
+    #[test]
+    fn casefold_eq_matches_key_on_unicode_folds() {
+        // Pairs that take the non-ASCII (materialised-key) branch. The assertion
+        // is that the comparators agree with `ext4_casefold_key` equality — not
+        // any presupposed fold result — so this is robust to the exact fold rules.
+        let str_cases: &[(&str, &str)] = &[
+            ("Straße", "STRASSE"),
+            ("Straße", "strasse"),
+            ("Café", "café"),
+            ("Café", "cafe"),
+            ("ÄÖÜ", "äöü"),
+            ("ΑΒΓ", "αβγ"),
+            ("groß", "gross"),
+            ("ß", "SS"),
+            ("ASCII", "ascii"),
+        ];
+        let mut cases: Vec<(&[u8], &[u8])> =
+            str_cases.iter().map(|(l, r)| (l.as_bytes(), r.as_bytes())).collect();
+        // Invalid UTF-8 pair → ASCII-fold fallback branch.
+        cases.push((&[0xFF, 0x41], &[0xFF, 0x61]));
+        for (left, right) in cases {
+            let key_eq = ext4_casefold_key(left) == ext4_casefold_key(right);
+            assert_eq!(
+                ext4_casefold_eq(left, right),
+                key_eq,
+                "ext4_casefold_eq diverged for {left:?} vs {right:?}"
+            );
+            let right_key = ext4_casefold_key(right);
+            assert_eq!(
+                casefold_key_eq(left, &right_key),
+                key_eq,
+                "casefold_key_eq diverged for {left:?} vs {right:?}"
+            );
         }
     }
 
