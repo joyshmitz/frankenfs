@@ -12399,6 +12399,11 @@ fn btrfs_mutation_to_ffs(e: &BtrfsMutationError) -> FfsError {
             detail: format!("btrfs invariant: {msg}"),
         },
         BtrfsMutationError::KeyAlreadyExists => FfsError::Exists,
+        // A full filesystem must surface as ENOSPC, not a generic EINVAL — real
+        // btrfs returns ENOSPC and userspace (e.g. write/fallocate/clone) keys
+        // off it to handle disk-full. Routing NoSpace through the Format
+        // catch-all mapped it to EINVAL, breaking that parity (bd-70hzk).
+        BtrfsMutationError::NoSpace => FfsError::NoSpace,
         _ => FfsError::Format(format!("btrfs mutation: {e}")),
     }
 }
@@ -58994,6 +58999,48 @@ mod tests {
         }
     }
 
+    /// A btrfs write that exhausts the filesystem must surface as ENOSPC, not
+    /// EINVAL. btrfs_mutation_to_ffs used to route BtrfsMutationError::NoSpace
+    /// through its Format catch-all (-> EINVAL); real btrfs returns ENOSPC and
+    /// userspace keys off it for disk-full handling. Regression for bd-70hzk:
+    /// fill the 512 KiB fsops image and assert the first failing write reports
+    /// ENOSPC via to_errno().
+    #[test]
+    fn btrfs_write_out_of_space_reports_enospc_bd_70hzk() {
+        let (fs, cx) = open_writable_btrfs();
+        let root = InodeNumber(u64::from(BTRFS_FIRST_FREE_OBJECTID));
+        let file = fs
+            .create(&cx, root, OsStr::new("filler.dat"), 0o644, 0, 0)
+            .expect("create");
+        let fs_ops: &dyn FsOps = &fs;
+        // The fsops image is 512 KiB with one DATA block group; writing distinct
+        // 32 KiB chunks at increasing offsets must exhaust it well before the u64
+        // offset space, and the FIRST write to fail must be ENOSPC.
+        let chunk = vec![0x3C_u8; 32 * 1024];
+        let mut err = None;
+        for i in 0..64_u64 {
+            match fs_ops.write(
+                &cx,
+                &mut RequestScope::empty(),
+                file.ino,
+                i * chunk.len() as u64,
+                &chunk,
+            ) {
+                Ok(_) => {}
+                Err(e) => {
+                    err = Some(e);
+                    break;
+                }
+            }
+        }
+        let err = err.expect("a 512 KiB image must run out of space within 2 MiB of writes");
+        assert_eq!(
+            err.to_errno(),
+            libc::ENOSPC,
+            "out-of-space write must report ENOSPC, got {err}"
+        );
+    }
+
     /// Whole-file FICLONE onto a NON-EMPTY destination must REPLACE dst's
     /// content: drop dst's pre-existing extents (refcount-aware) before grafting
     /// src's. Regression for the bug where btrfs_clone_file_data only inserted
@@ -70599,11 +70646,25 @@ mod tests {
                         let off = raw_a.min(CAP - 1);
                         let len = raw_len.min(CAP - off).max(1);
                         let buf = vec![val; len];
-                        fs.write(&cx, inos[fa], off as u64, &buf).expect("write");
-                        if off + len > model[fa].len() {
-                            model[fa].resize(off + len, 0);
+                        match fs.write(&cx, inos[fa], off as u64, &buf) {
+                            Ok(_) => {
+                                if off + len > model[fa].len() {
+                                    model[fa].resize(off + len, 0);
+                                }
+                                model[fa][off..off + len].copy_from_slice(&buf);
+                            }
+                            // The image is intentionally tiny (512 KiB), so three
+                            // files churning up to 256 KiB each can legitimately
+                            // exhaust it. ENOSPC is a valid filesystem response
+                            // (it now maps correctly, bd-70hzk), so skip the op in
+                            // lockstep without touching the model — the per-file
+                            // content assertions below still verify the file was
+                            // not left partially modified (bd-lf4fa).
+                            Err(ref e) if e.to_errno() == libc::ENOSPC => {}
+                            Err(e) => {
+                                proptest::prop_assert!(false, "write step {}: {}", step, e);
+                            }
                         }
-                        model[fa][off..off + len].copy_from_slice(&buf);
                     }
                     1 => {
                         // truncate file fa (may drop shared extents -> refcount--)
@@ -70643,7 +70704,8 @@ mod tests {
                                     }
                                     Err(e)
                                         if e.to_errno() == libc::EINVAL
-                                            || e.to_errno() == libc::EOPNOTSUPP => {}
+                                            || e.to_errno() == libc::EOPNOTSUPP
+                                            || e.to_errno() == libc::ENOSPC => {}
                                     Err(e) => {
                                         proptest::prop_assert!(
                                             false,
