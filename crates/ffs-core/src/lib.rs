@@ -25632,9 +25632,9 @@ impl OpenFs {
 
         // Offset at or beyond EOF returns ENXIO.
         if offset >= file_size {
-            return Err(FfsError::Format(
-                "ENXIO: offset at or beyond EOF, or no data/hole found".into(),
-            ));
+            return Err(FfsError::Io(std::io::Error::from_raw_os_error(
+                libc::ENXIO,
+            )));
         }
 
         // Non-extent based files (indirect block mapping) are treated as fully allocated.
@@ -25664,9 +25664,9 @@ impl OpenFs {
         }
 
         // No data found after offset.
-        Err(FfsError::Format(
-            "ENXIO: offset at or beyond EOF, or no data/hole found".into(),
-        ))
+        Err(FfsError::Io(std::io::Error::from_raw_os_error(
+            libc::ENXIO,
+        )))
     }
 
     /// ext4 SEEK_HOLE: find the next hole at or after `offset`.
@@ -25686,9 +25686,9 @@ impl OpenFs {
 
         // Offset at or beyond EOF returns ENXIO.
         if offset >= file_size {
-            return Err(FfsError::Format(
-                "ENXIO: offset at or beyond EOF, or no data/hole found".into(),
-            ));
+            return Err(FfsError::Io(std::io::Error::from_raw_os_error(
+                libc::ENXIO,
+            )));
         }
 
         // Non-extent based files (indirect block mapping) are treated as fully allocated.
@@ -25736,9 +25736,9 @@ impl OpenFs {
 
         // Offset at or beyond EOF returns ENXIO.
         if offset >= file_size {
-            return Err(FfsError::Format(
-                "ENXIO: offset at or beyond EOF, or no data/hole found".into(),
-            ));
+            return Err(FfsError::Io(std::io::Error::from_raw_os_error(
+                libc::ENXIO,
+            )));
         }
 
         // Explicit hole extents (disk_bytenr == 0) are NOT data — drop them so
@@ -25767,9 +25767,9 @@ impl OpenFs {
         }
 
         // No data found after offset.
-        Err(FfsError::Format(
-            "ENXIO: offset at or beyond EOF, or no data/hole found".into(),
-        ))
+        Err(FfsError::Io(std::io::Error::from_raw_os_error(
+            libc::ENXIO,
+        )))
     }
 
     /// btrfs SEEK_HOLE: find the next hole at or after `offset`.
@@ -25780,9 +25780,9 @@ impl OpenFs {
 
         // Offset at or beyond EOF returns ENXIO.
         if offset >= file_size {
-            return Err(FfsError::Format(
-                "ENXIO: offset at or beyond EOF, or no data/hole found".into(),
-            ));
+            return Err(FfsError::Io(std::io::Error::from_raw_os_error(
+                libc::ENXIO,
+            )));
         }
 
         // Explicit hole extents (disk_bytenr == 0) are NOT data, so they must
@@ -27072,9 +27072,11 @@ impl FsOps for OpenFs {
                 FsFlavor::Ext4(_) => self.ext4_lseek_hole(cx, scope, ino, offset),
                 FsFlavor::Btrfs(_) => self.btrfs_lseek_hole(cx, ino, offset),
             },
-            // SEEK_SET/CUR/END are handled by the FUSE layer directly.
+            // SEEK_SET/CUR/END are handled by the FUSE layer directly, so the
+            // filesystem only ever sees SEEK_DATA/SEEK_HOLE. Reaching here is an
+            // unsupported whence at the fs layer -> EINVAL (Format).
             SeekWhence::Set | SeekWhence::Cur | SeekWhence::End => Err(FfsError::Format(
-                "ENXIO: offset at or beyond EOF, or no data/hole found".into(),
+                "fs-level lseek only supports SEEK_DATA/SEEK_HOLE".into(),
             )),
         }
     }
@@ -37003,25 +37005,17 @@ mod tests {
         let mut scope = RequestScope::empty();
         let attr = fs.getattr(&cx, InodeNumber(11)).unwrap();
 
-        // SEEK_DATA at file_size should return error.
-        let result = fs.lseek(
-            &cx,
-            &mut scope,
-            InodeNumber(11),
-            attr.size,
-            SeekWhence::Data,
-        );
-        assert!(result.is_err());
+        // SEEK_DATA at/beyond EOF must return ENXIO (lseek(2)), not EINVAL.
+        let err = fs
+            .lseek(&cx, &mut scope, InodeNumber(11), attr.size, SeekWhence::Data)
+            .expect_err("SEEK_DATA at EOF must fail");
+        assert_eq!(err.to_errno(), libc::ENXIO);
 
-        // SEEK_HOLE at file_size should return error.
-        let result = fs.lseek(
-            &cx,
-            &mut scope,
-            InodeNumber(11),
-            attr.size,
-            SeekWhence::Hole,
-        );
-        assert!(result.is_err());
+        // SEEK_HOLE at/beyond EOF must also return ENXIO.
+        let err = fs
+            .lseek(&cx, &mut scope, InodeNumber(11), attr.size, SeekWhence::Hole)
+            .expect_err("SEEK_HOLE at EOF must fail");
+        assert_eq!(err.to_errno(), libc::ENXIO);
     }
 
     #[test]
@@ -68881,6 +68875,37 @@ mod tests {
     /// matching btrfs_read_file. Previously the lseek paths counted every
     /// present EXTENT_DATA as data, so SEEK_DATA returned a hole offset and
     /// SEEK_HOLE skipped past the hole (bd-pb6bs).
+    #[test]
+    fn btrfs_lseek_data_hole_at_eof_returns_enxio() {
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+
+        let file = ops
+            .create(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("seek_eof.bin"),
+                0o644,
+                0,
+                0,
+            )
+            .unwrap();
+        ops.write(&cx, &mut RequestScope::empty(), file.ino, 0, &[0xAB_u8; 4096])
+            .expect("write");
+
+        // SEEK_DATA / SEEK_HOLE at or beyond EOF must return ENXIO (lseek(2)),
+        // not EINVAL. file size is 4096, so offset 4096 is exactly EOF.
+        let err = ops
+            .lseek(&cx, &mut RequestScope::empty(), file.ino, 4096, SeekWhence::Data)
+            .expect_err("SEEK_DATA at EOF must fail");
+        assert_eq!(err.to_errno(), libc::ENXIO);
+        let err = ops
+            .lseek(&cx, &mut RequestScope::empty(), file.ino, 8192, SeekWhence::Hole)
+            .expect_err("SEEK_HOLE beyond EOF must fail");
+        assert_eq!(err.to_errno(), libc::ENXIO);
+    }
+
     #[test]
     fn btrfs_lseek_treats_explicit_hole_extent_as_hole_bd_pb6bs() {
         let (fs, cx) = open_writable_btrfs();
