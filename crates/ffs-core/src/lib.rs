@@ -16899,6 +16899,9 @@ impl OpenFs {
                 return Ok(());
             }
             let existing_inode = self.read_inode(cx, existing_ino)?;
+            // vfs_rename's may_delete(victim) forbids clobbering an immutable or
+            // append-only target with EPERM, before any mutation (bd-85rav).
+            Self::ext4_reject_immutable_or_append(&existing_inode)?;
 
             if existing_inode.is_dir() {
                 if !child_inode.is_dir() {
@@ -22079,6 +22082,21 @@ impl OpenFs {
         // nlink in btrfs (directories stay at nlink == 1) — bd-egyf6.
         let target_will_be_purged =
             self.btrfs_preflight_rename_target(&alloc, new_parent_oid, new_name, child_is_dir)?;
+
+        // vfs_rename's may_delete forbids renaming an immutable/append-only file
+        // (source) or clobbering one (victim) with EPERM — checked before any
+        // mutation. The same-inode-hardlink no-op above already short-circuited,
+        // matching the kernel's source==target early return (bd-85rav).
+        let src_inode = self.btrfs_read_inode_from_tree(&alloc, child.child_objectid)?;
+        if src_inode.flags & (BTRFS_INODE_IMMUTABLE | BTRFS_INODE_APPEND) != 0 {
+            return Err(FfsError::Io(std::io::Error::from_raw_os_error(libc::EPERM)));
+        }
+        if let Ok(victim) = self.btrfs_lookup_dir_entry(&alloc, new_parent_oid, new_name) {
+            let victim_inode = self.btrfs_read_inode_from_tree(&alloc, victim.child_objectid)?;
+            if victim_inode.flags & (BTRFS_INODE_IMMUTABLE | BTRFS_INODE_APPEND) != 0 {
+                return Err(FfsError::Io(std::io::Error::from_raw_os_error(libc::EPERM)));
+            }
+        }
 
         // Remove old entry and its INODE_REF.
         self.btrfs_remove_dir_entry(&mut alloc, parent_oid, name)?;
@@ -46009,6 +46027,48 @@ mod tests {
         );
     }
 
+    #[test]
+    fn ext4_rename_onto_immutable_target_is_eperm_bd_85rav() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        fs.create(&cx, root, OsStr::new("rsrc.bin"), 0o644, 0, 0)
+            .expect("create src");
+        let dst = fs
+            .create(&cx, root, OsStr::new("rdst.bin"), 0o644, 0, 0)
+            .expect("create dst");
+        // Make the rename victim immutable.
+        let mut di = fs.read_inode(&cx, dst.ino).expect("read dst inode");
+        di.flags |= ffs_types::EXT4_IMMUTABLE_FL;
+        persist_ext4_test_inode(&fs, &cx, dst.ino, &di);
+
+        // vfs_rename's may_delete(victim) forbids clobbering an immutable target.
+        assert_eq!(
+            fs.rename(
+                &cx,
+                root,
+                OsStr::new("rsrc.bin"),
+                root,
+                OsStr::new("rdst.bin")
+            )
+            .unwrap_err()
+            .to_errno(),
+            libc::EPERM,
+            "renaming onto an immutable target must be EPERM (bd-85rav)"
+        );
+        // No partial mutation: both names still resolve.
+        assert!(
+            fs.lookup(&cx, root, OsStr::new("rsrc.bin")).is_ok(),
+            "source must survive a rejected rename"
+        );
+        assert!(
+            fs.lookup(&cx, root, OsStr::new("rdst.bin")).is_ok(),
+            "immutable target must survive a rejected rename"
+        );
+    }
+
     fn open_writable_ext4_mkfs(size_mb: u64) -> Option<(OpenFs, tempfile::TempDir)> {
         let tmp = tempfile::TempDir::new().expect("tmpdir");
         let image = tmp.path().join("test.ext4");
@@ -68730,6 +68790,65 @@ mod tests {
                 .expect_err("setxattr on an immutable/append-only file must be rejected");
             assert_eq!(err.to_errno(), libc::EPERM, "{name} setxattr must be EPERM");
         }
+    }
+
+    #[test]
+    fn btrfs_rename_immutable_source_or_target_is_eperm_bd_85rav() {
+        let (fs, cx) = open_writable_btrfs();
+        let parent = InodeNumber(1);
+
+        let set_flag = |ino_raw: u64, flag: u64| {
+            let alloc_mutex = fs.btrfs_alloc_state.as_ref().unwrap();
+            let mut alloc = alloc_mutex.lock();
+            let mut inode = fs
+                .btrfs_read_inode_from_tree(&alloc, ino_raw)
+                .expect("read inode");
+            inode.flags |= flag;
+            let key = BtrfsKey {
+                objectid: ino_raw,
+                item_type: BTRFS_ITEM_INODE_ITEM,
+                offset: 0,
+            };
+            alloc
+                .fs_tree
+                .update(&key, &inode.to_bytes())
+                .expect("pin flag");
+        };
+
+        // Case 1: an immutable SOURCE cannot be renamed (vfs_rename may_delete).
+        let s1 = fs.create(&cx, parent, OsStr::new("s1"), 0o644, 0, 0).unwrap().ino;
+        set_flag(s1.0, BTRFS_INODE_IMMUTABLE);
+        assert_eq!(
+            fs.rename(&cx, parent, OsStr::new("s1"), parent, OsStr::new("s1moved"))
+                .unwrap_err()
+                .to_errno(),
+            libc::EPERM,
+            "renaming an immutable source must be EPERM"
+        );
+        assert!(
+            fs.lookup(&cx, parent, OsStr::new("s1")).is_ok(),
+            "immutable source must not be moved"
+        );
+
+        // Case 2: an append-only VICTIM cannot be clobbered by a rename.
+        fs.create(&cx, parent, OsStr::new("s2"), 0o644, 0, 0).unwrap();
+        let v2 = fs.create(&cx, parent, OsStr::new("v2"), 0o644, 0, 0).unwrap().ino;
+        set_flag(v2.0, BTRFS_INODE_APPEND);
+        assert_eq!(
+            fs.rename(&cx, parent, OsStr::new("s2"), parent, OsStr::new("v2"))
+                .unwrap_err()
+                .to_errno(),
+            libc::EPERM,
+            "renaming onto an append-only victim must be EPERM"
+        );
+        assert!(
+            fs.lookup(&cx, parent, OsStr::new("s2")).is_ok(),
+            "source must survive a rejected rename"
+        );
+        assert!(
+            fs.lookup(&cx, parent, OsStr::new("v2")).is_ok(),
+            "append-only victim must survive a rejected rename"
+        );
     }
 
     #[test]
