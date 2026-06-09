@@ -45353,6 +45353,79 @@ mod tests {
         );
     }
 
+    /// Special-file inodes — a character device node, a block device node, and a
+    /// FIFO — must leave an ext4 image e2fsck-clean. Existing mknod tests only
+    /// round-trip the rdev back through FrankenFS's own getattr (internal
+    /// consistency); this is the only check that the ON-DISK device inode is
+    /// kernel-valid: a device/FIFO inode carries no data (i_size 0, i_blocks 0,
+    /// no EXTENTS_FL), and the rdev lives in i_block[0] (old encoding) or
+    /// i_block[1] (new), with the rest of i_block zero. A stray EXTENTS flag,
+    /// allocated block, or non-zero size on these inodes would surface here.
+    #[test]
+    fn ext4_special_files_pass_e2fsck() {
+        let Some((fs, dev, tmp)) = open_writable_ext4_mkfs_with_device(64) else {
+            return; // format tool unavailable
+        };
+        let image = tmp.path().join("test.ext4");
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        fs.mknod(
+            &cx,
+            root,
+            OsStr::new("cdev"),
+            (libc::S_IFCHR as u16) | 0o644,
+            259, // makedev(1, 3), e.g. /dev/null
+            0,
+            0,
+        )
+        .expect("mknod character device");
+        fs.mknod(
+            &cx,
+            root,
+            OsStr::new("bdev"),
+            (libc::S_IFBLK as u16) | 0o644,
+            2048, // makedev(8, 0), e.g. /dev/sda
+            0,
+            0,
+        )
+        .expect("mknod block device");
+        fs.mknod(
+            &cx,
+            root,
+            OsStr::new("fifo"),
+            (libc::S_IFIFO as u16) | 0o644,
+            0,
+            0,
+            0,
+        )
+        .expect("mknod FIFO");
+        // A large device number (minor >= 256, so it does not fit the 16-bit old
+        // encoding) exercises the NEW rdev encoding stored in i_block[1] with
+        // i_block[0] zero — a separate code path from the three nodes above.
+        fs.mknod(
+            &cx,
+            root,
+            OsStr::new("bigdev"),
+            (libc::S_IFCHR as u16) | 0o644,
+            1_050_668, // makedev(8, 300): minor 300 forces the new (i_block[1]) form
+            0,
+            0,
+        )
+        .expect("mknod large-rdev character device");
+
+        fs.flush_mvcc_to_device(&cx).expect("flush mvcc to device");
+        std::fs::write(&image, dev.snapshot_bytes()).expect("write modified image");
+
+        let Some((clean, output)) = run_e2fsck(&image) else {
+            return; // e2fsck unavailable
+        };
+        assert!(
+            clean,
+            "e2fsck must accept FrankenFS-written ext4 device nodes (old + new rdev encoding) and a FIFO:\n{output}"
+        );
+    }
+
     /// bd-zpe9s: when a file's extent tree grows past its inline 4-extent root
     /// (depth >= 1), ffs_btree::insert allocates on-disk index/leaf metadata
     /// blocks that must be charged to i_blocks alongside the data blocks, or
