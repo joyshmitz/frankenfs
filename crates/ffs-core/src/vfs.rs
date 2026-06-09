@@ -169,6 +169,14 @@ pub struct FiemapExtent {
 
 /// FIEMAP extent flag: this extent is the last in the file.
 pub const FIEMAP_EXTENT_LAST: u32 = 0x0001;
+/// FIEMAP extent flag: data cannot be read while the fs is unmounted (e.g. it
+/// is compressed/encoded on disk).
+pub const FIEMAP_EXTENT_ENCODED: u32 = 0x0008;
+/// FIEMAP extent flag: extent offsets may not be block aligned.
+pub const FIEMAP_EXTENT_NOT_ALIGNED: u32 = 0x0100;
+/// FIEMAP extent flag: data is mixed with metadata (inline). Implies
+/// `FIEMAP_EXTENT_NOT_ALIGNED`.
+pub const FIEMAP_EXTENT_DATA_INLINE: u32 = 0x0200;
 /// FIEMAP extent flag: this extent is unwritten / preallocated.
 pub const FIEMAP_EXTENT_UNWRITTEN: u32 = 0x0800;
 

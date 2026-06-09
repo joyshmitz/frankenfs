@@ -12,7 +12,8 @@ pub use degradation::{
     DegradationPolicy, DegradationTransition, PressureMonitor,
 };
 pub use vfs::{
-    BtrfsQgroupLimitRequest, BtrfsTreeSearchKey, DirEntry, FIEMAP_EXTENT_LAST,
+    BtrfsQgroupLimitRequest, BtrfsTreeSearchKey, DirEntry, FIEMAP_EXTENT_DATA_INLINE,
+    FIEMAP_EXTENT_ENCODED, FIEMAP_EXTENT_LAST, FIEMAP_EXTENT_NOT_ALIGNED,
     FIEMAP_EXTENT_UNWRITTEN, FiemapExtent, FileType, FsOps, FsStat, FsxattrInfo,
     InodeAttr, QuotaEntry, QuotaInfo, QuotaType, ReleaseRequest, RequestOp, RequestScope,
     SeekWhence, SetAttrRequest, XattrSetMode, xflags,
@@ -25249,15 +25250,26 @@ impl OpenFs {
             }
 
             let (physical, mut flags) = match extent {
-                BtrfsExtentData::Inline { .. } => (0_u64, FIEMAP_EXTENT_LAST),
+                // An inline extent stores data mixed with metadata at a non-block
+                // offset; the kernel reports it DATA_INLINE | NOT_ALIGNED (and it
+                // is always the sole/last extent, so LAST is added below).
+                BtrfsExtentData::Inline { .. } => {
+                    (0_u64, FIEMAP_EXTENT_DATA_INLINE | FIEMAP_EXTENT_NOT_ALIGNED)
+                }
                 BtrfsExtentData::Regular {
                     disk_bytenr,
                     extent_type,
+                    compression,
                     ..
                 } => {
                     let mut flags = 0_u32;
                     if *extent_type == BTRFS_FILE_EXTENT_PREALLOC {
                         flags |= FIEMAP_EXTENT_UNWRITTEN;
+                    }
+                    // A compressed extent cannot be read raw while unmounted —
+                    // the kernel flags it ENCODED.
+                    if *compression != 0 {
+                        flags |= FIEMAP_EXTENT_ENCODED;
                     }
                     (*disk_bytenr, flags)
                 }
@@ -68450,9 +68462,75 @@ mod tests {
             "inline FIEMAP physical offset must be zero"
         );
         assert_eq!(extent.length, payload.len() as u64);
+        // The kernel reports an inline extent DATA_INLINE | NOT_ALIGNED, plus
+        // LAST (it is the sole extent). (bd-eordg)
         assert_eq!(
-            extent.flags, FIEMAP_EXTENT_LAST,
-            "inline FIEMAP extent should only carry LAST"
+            extent.flags,
+            FIEMAP_EXTENT_DATA_INLINE | FIEMAP_EXTENT_NOT_ALIGNED | FIEMAP_EXTENT_LAST,
+            "inline FIEMAP extent must carry DATA_INLINE | NOT_ALIGNED | LAST"
+        );
+    }
+
+    /// btrfs fiemap must flag a compressed extent FIEMAP_EXTENT_ENCODED (its
+    /// data cannot be read raw while unmounted), matching the kernel. FrankenFS
+    /// writes only uncompressed extents, so inject a compressed EXTENT_DATA
+    /// (as a kernel image carries) and confirm the flag (bd-eordg).
+    #[test]
+    fn btrfs_fiemap_marks_compressed_extent_encoded_bd_eordg() {
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+        let s: u64 = 4096;
+
+        let file = ops
+            .create(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("compressed.bin"),
+                0o644,
+                0,
+                0,
+            )
+            .unwrap();
+        let canonical = fs.btrfs_canonical_inode(file.ino).unwrap();
+        {
+            let alloc_mutex = fs.btrfs_alloc_state.as_ref().unwrap();
+            let mut alloc = alloc_mutex.lock();
+            let compressed = BtrfsExtentData::Regular {
+                generation: alloc.generation,
+                ram_bytes: s,
+                extent_type: BTRFS_FILE_EXTENT_REG,
+                compression: 1, // zlib (any nonzero compression algorithm)
+                disk_bytenr: 0x2_0000, // arbitrary; fiemap reports it, never reads it
+                disk_num_bytes: s,
+                extent_offset: 0,
+                num_bytes: s,
+            };
+            let key = BtrfsKey {
+                objectid: canonical,
+                item_type: BTRFS_ITEM_EXTENT_DATA,
+                offset: 0,
+            };
+            alloc.fs_tree.insert(key, &compressed.to_bytes()).unwrap();
+        }
+
+        let mut scope = RequestScope::empty();
+        let extents = fs.fiemap(&cx, &mut scope, file.ino, 0, u64::MAX).unwrap();
+        assert_eq!(extents.len(), 1);
+        assert_ne!(
+            extents[0].flags & FIEMAP_EXTENT_ENCODED,
+            0,
+            "a compressed extent must carry FIEMAP_EXTENT_ENCODED"
+        );
+        assert_eq!(
+            extents[0].flags & FIEMAP_EXTENT_UNWRITTEN,
+            0,
+            "a compressed regular extent is not UNWRITTEN"
+        );
+        assert_ne!(
+            extents[0].flags & FIEMAP_EXTENT_LAST,
+            0,
+            "the sole extent must carry LAST"
         );
     }
 
