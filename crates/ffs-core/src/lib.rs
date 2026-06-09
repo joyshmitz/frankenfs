@@ -18819,6 +18819,10 @@ impl OpenFs {
         let dest_end = dest_offset
             .checked_add(len)
             .ok_or_else(|| FfsError::InvalidGeometry("clone range dest end overflow".into()))?;
+        // A reflink whose destination end exceeds the btrfs maximum file size is
+        // EFBIG (the kernel's remap_file_range checks the result against
+        // s_maxbytes) — matches write/truncate/fallocate (bd-d9129, bd-o0dtg).
+        Self::btrfs_reject_oversized_file(dest_end)?;
         // The caller (clone_file_range) guarantees sector alignment except for a
         // length reaching the source EOF. Round the carve window UP to the sector
         // grid so every shared/removed extent stays sector-aligned (the source's
@@ -61230,6 +61234,34 @@ mod tests {
                 .size,
             5904,
             "dst size is the logical cloned length"
+        );
+    }
+
+    #[test]
+    fn btrfs_clone_file_range_past_max_file_size_returns_efbig_bd_o0dtg() {
+        let (fs, cx) = open_writable_btrfs();
+        let parent = InodeNumber(1);
+        let ops: &dyn FsOps = &fs;
+        let src = fs.create(&cx, parent, OsStr::new("csrc.bin"), 0o644, 0, 0).unwrap();
+        let dst = fs.create(&cx, parent, OsStr::new("cdst.bin"), 0o644, 0, 0).unwrap();
+        ops.write(&cx, &mut RequestScope::empty(), src.ino, 0, &[0x33_u8; 8192])
+            .expect("seed src");
+
+        // A sector-aligned destination offset near i64::MAX: the clone's dest_end
+        // exceeds the btrfs maximum file size, so it must be EFBIG (the bd-70gyh
+        // alignment check passes since the offset is sector-aligned).
+        let dest = (i64::MAX as u64) & !4095; // 2^63 - 4096, sector-aligned
+        let err = ops
+            .clone_file_range(&cx, &mut RequestScope::empty(), dst.ino, src.ino, 0, 8192, dest)
+            .expect_err("clone past the btrfs max file size must fail");
+        assert_eq!(err.to_errno(), libc::EFBIG);
+        // The rejected clone left the destination empty.
+        assert_eq!(
+            ops.getattr(&cx, &mut RequestScope::empty(), dst.ino)
+                .expect("getattr dst")
+                .size,
+            0,
+            "a rejected clone must not extend the destination"
         );
     }
 
