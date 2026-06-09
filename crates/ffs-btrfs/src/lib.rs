@@ -5633,6 +5633,53 @@ impl BtrfsExtentAllocator {
         Ok(result)
     }
 
+    /// Resolve the data `EXTENT_ITEM` that *contains* `logical` and return its
+    /// start bytenr.
+    ///
+    /// `BTRFS_IOC_LOGICAL_INO[_V2]` takes an arbitrary logical byte address,
+    /// which usually points into the *middle* of an extent (e.g. a byte from a
+    /// corruption report). The kernel first finds the extent covering the
+    /// address and then walks that extent's back-references. Keying the backref
+    /// lookup directly on `logical` (as [`Self::get_extent_data_refs`] does)
+    /// only matches when `logical` is exactly an extent's start bytenr, so any
+    /// mid-extent address resolved to an empty result. This finds the covering
+    /// `EXTENT_ITEM` so the caller can look up its backrefs (`bd-uv16n`).
+    ///
+    /// Data extents do not overlap, so at most one `EXTENT_ITEM` covers a given
+    /// address. The `EXTENT_ITEM` key encodes the extent length in `offset`.
+    pub fn resolve_containing_data_extent(
+        &self,
+        logical: u64,
+    ) -> Result<Option<u64>, BtrfsMutationError> {
+        // EXTENT_ITEM keys ordered (objectid=start_bytenr, type, offset=length);
+        // the covering extent has the greatest start bytenr <= logical.
+        let range_start = BtrfsKey {
+            objectid: 0,
+            item_type: BTRFS_ITEM_EXTENT_ITEM,
+            offset: 0,
+        };
+        let range_end = BtrfsKey {
+            objectid: logical,
+            item_type: BTRFS_ITEM_EXTENT_ITEM,
+            offset: u64::MAX,
+        };
+        let items = self.extent_tree.range(&range_start, &range_end)?;
+        let mut covering = None;
+        for (key, _value) in items {
+            // The lexicographic range can include other item types for objectids
+            // below `logical`; only EXTENT_ITEMs carry a data-extent length.
+            if key.item_type != BTRFS_ITEM_EXTENT_ITEM {
+                continue;
+            }
+            let start = key.objectid;
+            let length = key.offset;
+            if start <= logical && logical < start.saturating_add(length) {
+                covering = Some(start);
+            }
+        }
+        Ok(covering)
+    }
+
     fn delete_backrefs_for_extent(
         &mut self,
         bytenr: u64,
@@ -12718,6 +12765,63 @@ mod tests {
                 offset: 0,
                 count: 1,
             }
+        );
+    }
+
+    /// bd-uv16n: BTRFS_IOC_LOGICAL_INO takes an arbitrary logical byte address
+    /// that usually lands in the middle of an extent. Resolving the containing
+    /// EXTENT_ITEM must work for a mid-extent address, not only the exact start
+    /// bytenr (which is all `get_extent_data_refs` matches on its own).
+    #[test]
+    fn resolve_containing_data_extent_handles_mid_extent_address_bd_uv16n() {
+        let mut alloc = BtrfsExtentAllocator::new(7).expect("alloc");
+        alloc.add_block_group(0x1_0000, make_data_bg(0x1_0000, 0x10_0000));
+        let a = alloc.alloc_data(4096).expect("alloc");
+        alloc
+            .insert_data_extent_item(a.bytenr, a.num_bytes, 5, 256, 0, 7)
+            .expect("insert extent item");
+        alloc
+            .add_data_extent_ref(a.bytenr, a.num_bytes, 5, 257, 0)
+            .expect("add keyed ref");
+
+        let mid = a.bytenr + 2048; // a byte in the middle of the extent
+
+        // The bug: a mid-extent address matches no EXTENT_DATA_REF because the
+        // lookup keys on the exact extent start bytenr.
+        assert!(
+            alloc.get_extent_data_refs(mid).expect("refs").is_empty(),
+            "mid-extent address does not match a backref keyed at the extent start"
+        );
+
+        // The fix: resolve the covering extent first, then look up its refs.
+        let start = alloc
+            .resolve_containing_data_extent(mid)
+            .expect("resolve")
+            .expect("a data extent covers the mid-extent address");
+        assert_eq!(start, a.bytenr, "must resolve to the extent's start bytenr");
+        assert_eq!(
+            alloc.get_extent_data_refs(start).expect("refs").len(),
+            1,
+            "the containing extent's keyed backref is found via the resolved start"
+        );
+
+        // Boundary behaviour: exact start covered, exclusive end not covered,
+        // an address below any extent resolves to nothing.
+        assert_eq!(
+            alloc.resolve_containing_data_extent(a.bytenr).expect("resolve"),
+            Some(a.bytenr),
+        );
+        assert_eq!(
+            alloc
+                .resolve_containing_data_extent(a.bytenr + a.num_bytes)
+                .expect("resolve"),
+            None,
+            "the first byte past the extent (exclusive end) is not covered"
+        );
+        assert_eq!(
+            alloc.resolve_containing_data_extent(0x500).expect("resolve"),
+            None,
+            "an address below any extent resolves to nothing"
         );
     }
 

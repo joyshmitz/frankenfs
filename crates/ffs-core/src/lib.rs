@@ -28033,12 +28033,19 @@ impl FsOps for OpenFs {
             FsFlavor::Btrfs(_) => {
                 // Look up extent back-references for the given logical address.
                 // Returns all (ino, offset, root) tuples that reference this extent.
+                // The address usually points into the middle of an extent, so
+                // resolve the covering EXTENT_ITEM's start bytenr first (bd-uv16n).
                 let alloc = self.require_btrfs_alloc_state()?;
                 let data_refs = {
                     let alloc_guard = alloc.lock();
+                    let extent_start = alloc_guard
+                        .extent_alloc
+                        .resolve_containing_data_extent(logical)
+                        .map_err(|e| FfsError::Parse(format!("extent lookup failed: {e}")))?
+                        .unwrap_or(logical);
                     alloc_guard
                         .extent_alloc
-                        .get_extent_data_refs(logical)
+                        .get_extent_data_refs(extent_start)
                         .map_err(|e| FfsError::Parse(format!("extent lookup failed: {e}")))?
                 };
 
@@ -28084,14 +28091,23 @@ impl FsOps for OpenFs {
                 "BTRFS_IOC_LOGICAL_INO_V2 is not supported on ext4 filesystems".to_owned(),
             )),
             FsFlavor::Btrfs(_) => {
-                // V2 adds flags field (ignore_offset, etc) but core logic is same.
-                // Flags are in _args but we ignore them for now.
+                // V2 adds a flags field (ignore_offset, etc). We currently return
+                // all backrefs of the containing extent, which matches the
+                // IGNORE_OFFSET semantics; offset-precise filtering for the
+                // default flag set is a separate follow-up (bd-uv16n).
+                // Resolve the covering EXTENT_ITEM so a mid-extent address (the
+                // common case) is not silently empty (bd-uv16n).
                 let alloc = self.require_btrfs_alloc_state()?;
                 let data_refs = {
                     let alloc_guard = alloc.lock();
+                    let extent_start = alloc_guard
+                        .extent_alloc
+                        .resolve_containing_data_extent(logical)
+                        .map_err(|e| FfsError::Parse(format!("extent lookup failed: {e}")))?
+                        .unwrap_or(logical);
                     alloc_guard
                         .extent_alloc
-                        .get_extent_data_refs(logical)
+                        .get_extent_data_refs(extent_start)
                         .map_err(|e| FfsError::Parse(format!("extent lookup failed: {e}")))?
                 };
 
