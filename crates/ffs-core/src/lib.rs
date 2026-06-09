@@ -26602,6 +26602,17 @@ impl FsOps for OpenFs {
         value: &[u8],
         mode: XattrSetMode,
     ) -> ffs_error::Result<()> {
+        // setxattr(2): the kernel's generic syscall path rejects a value larger
+        // than XATTR_SIZE_MAX (65536) with E2BIG before reaching any filesystem,
+        // so the limit is uniform across ext4 and btrfs. A FUSE mount never
+        // forwards such a request, but the public OpenFs::setxattr library API
+        // must enforce it — ext4_setxattr previously surfaced EINVAL (Format, via
+        // ffs_xattr::set_xattr) and btrfs_setxattr had no check at all (it would
+        // silently store the oversized value).
+        const XATTR_SIZE_MAX: usize = 65_536;
+        if value.len() > XATTR_SIZE_MAX {
+            return Err(FfsError::Io(std::io::Error::from_raw_os_error(libc::E2BIG)));
+        }
         match &self.flavor {
             FsFlavor::Ext4(_) => self.ext4_setxattr(
                 cx,
@@ -48415,6 +48426,45 @@ mod tests {
             inode_after.file_acl, 0,
             "failed xattr should not leave file_acl set"
         );
+    }
+
+    #[test]
+    fn ext4_setxattr_value_over_xattr_size_max_returns_e2big() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let ino = fs
+            .create(&cx, root, OsStr::new("xattr_e2big.txt"), 0o644, 0, 0)
+            .expect("create")
+            .ino;
+
+        // setxattr(2): a value larger than XATTR_SIZE_MAX (65536) is E2BIG. The
+        // dispatcher rejects it before any storage attempt, so this is
+        // deterministic regardless of ext4's external-block capacity. Pre-fix
+        // ext4 surfaced EINVAL (Format via ffs_xattr).
+        let too_large = vec![0xAB_u8; 65_537];
+        let err = fs
+            .setxattr(&cx, ino, "user.big", &too_large, XattrSetMode::Set)
+            .expect_err("an oversized xattr value must be rejected");
+        assert_eq!(err.to_errno(), libc::E2BIG);
+    }
+
+    #[test]
+    fn btrfs_setxattr_value_over_xattr_size_max_returns_e2big() {
+        let (fs, cx) = open_writable_btrfs();
+        let attr = fs
+            .create(&cx, InodeNumber(1), OsStr::new("xattr_e2big.bin"), 0o644, 0, 0)
+            .expect("create");
+
+        // Same generic XATTR_SIZE_MAX -> E2BIG limit. Pre-fix btrfs had no
+        // size check at all and would silently store the oversized value.
+        let too_large = vec![0xCD_u8; 65_537];
+        let err = fs
+            .setxattr(&cx, attr.ino, "user.big", &too_large, XattrSetMode::Set)
+            .expect_err("an oversized xattr value must be rejected");
+        assert_eq!(err.to_errno(), libc::E2BIG);
     }
 
     #[test]
