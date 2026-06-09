@@ -21953,6 +21953,14 @@ impl OpenFs {
             return Err(FfsError::IsDirectory);
         }
 
+        // Immutable and append-only files/dirs cannot be deleted: the kernel's
+        // may_delete returns EPERM, before the dir-empty (ENOTEMPTY) check
+        // (matches ext4's delete path; bd-rmgwc). Checked before any mutation.
+        let victim_inode = self.btrfs_read_inode_from_tree(&alloc, child_oid)?;
+        if victim_inode.flags & (BTRFS_INODE_IMMUTABLE | BTRFS_INODE_APPEND) != 0 {
+            return Err(FfsError::Io(std::io::Error::from_raw_os_error(libc::EPERM)));
+        }
+
         // If removing a directory, verify it's empty.
         if expect_dir && !self.btrfs_dir_is_empty(&alloc, child_oid)? {
             return Err(FfsError::NotEmpty);
@@ -68957,6 +68965,48 @@ mod tests {
             libc::EPERM,
             "shrinking an append-only file must be EPERM"
         );
+    }
+
+    #[test]
+    fn btrfs_delete_of_immutable_or_append_is_eperm_bd_rmgwc() {
+        let (fs, cx) = open_writable_btrfs();
+        let parent = InodeNumber(1);
+
+        let set_flag = |ino_raw: u64, flag: u64| {
+            let alloc_mutex = fs.btrfs_alloc_state.as_ref().unwrap();
+            let mut alloc = alloc_mutex.lock();
+            let mut inode = fs
+                .btrfs_read_inode_from_tree(&alloc, ino_raw)
+                .expect("read inode");
+            inode.flags |= flag;
+            let key = BtrfsKey {
+                objectid: ino_raw,
+                item_type: BTRFS_ITEM_INODE_ITEM,
+                offset: 0,
+            };
+            alloc
+                .fs_tree
+                .update(&key, &inode.to_bytes())
+                .expect("pin flag");
+        };
+
+        // may_delete forbids removing an immutable or append-only file (EPERM).
+        for (name, flag) in [
+            ("imm.bin", BTRFS_INODE_IMMUTABLE),
+            ("app.bin", BTRFS_INODE_APPEND),
+        ] {
+            let f = fs.create(&cx, parent, OsStr::new(name), 0o644, 0, 0).unwrap().ino;
+            set_flag(f.0, flag);
+            assert_eq!(
+                fs.unlink(&cx, parent, OsStr::new(name)).unwrap_err().to_errno(),
+                libc::EPERM,
+                "deleting {name} must be EPERM"
+            );
+            assert!(
+                fs.lookup(&cx, parent, OsStr::new(name)).is_ok(),
+                "{name} must survive a rejected delete"
+            );
+        }
     }
 
     #[test]
