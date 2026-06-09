@@ -38,5 +38,9 @@ harness = false
 name = "physical_visibility"
 harness = false
 
+[[bench]]
+name = "read_visible"
+harness = false
+
 [lints]
 workspace = true

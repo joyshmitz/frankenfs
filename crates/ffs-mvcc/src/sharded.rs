@@ -679,13 +679,16 @@ impl ShardedMvccStore {
     pub fn read_visible(&self, block: BlockNumber, snapshot: Snapshot) -> Option<Vec<u8>> {
         let shard_idx = self.shard_index(block);
         let shard = self.shards[shard_idx].read();
-        shard.versions.get(&block).and_then(|versions| {
-            let idx = versions
-                .iter()
-                .rposition(|v| v.commit_seq <= snapshot.high)?;
-            compression::resolve_data_with(versions, idx, |v| &v.data)
-                .map(std::borrow::Cow::into_owned)
-        })
+        // Newest-first check then O(log n) binary search over the ascending
+        // `commit_seq` chain (via `newest_visible_index`), instead of an O(n)
+        // reverse linear scan — identical result for any ascending chain
+        // (`newest_visible_index_by_matches_reverse_scan_iso`), but a reader
+        // holding the GC watermark down no longer pays a per-read walk past
+        // every newer version. Mirrors `read_visible_physical`.
+        shard
+            .versions
+            .get(&block)
+            .and_then(|versions| crate::resolve_version_bytes_at_or_before(versions, snapshot.high))
     }
 
     /// Commit a transaction with first-committer-wins (FCW) conflict detection.
