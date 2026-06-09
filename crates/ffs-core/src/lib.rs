@@ -14911,6 +14911,7 @@ impl OpenFs {
         let end = offset
             .checked_add(length)
             .ok_or_else(|| FfsError::Format("fallocate range overflow".to_owned()))?;
+        Self::ext4_reject_oversized_file(end, block_size)?;
 
         let keep_size = (mode & KEEP_SIZE) != 0;
         let punch_hole = (mode & PUNCH_HOLE) != 0;
@@ -15634,6 +15635,26 @@ impl OpenFs {
         Ok(())
     }
 
+    /// The largest ext4 file size addressable by the 32-bit logical block
+    /// numbering: every byte offset must map to a block index <= u32::MAX, so
+    /// the cap is `2^32 * block_size` (16 TiB at 4 KiB blocks).
+    fn ext4_max_file_size(block_size: u64) -> u64 {
+        (1_u64 << 32).saturating_mul(block_size)
+    }
+
+    /// Reject a write/fallocate/truncate that would extend a file past the
+    /// ext4 maximum size with `EFBIG`, matching the kernel — the VFS checks the
+    /// requested size against `s_maxbytes` (and `MAX_LFS_FILESIZE`) before ext4
+    /// and returns EFBIG. Previously the truncate-extend path silently accepted
+    /// any `i_size`, and the deep per-block `u32` conversions failed late with
+    /// EINVAL on write/fallocate (`bd-3pa5m`).
+    fn ext4_reject_oversized_file(end: u64, block_size: u64) -> ffs_error::Result<()> {
+        if end > Self::ext4_max_file_size(block_size) {
+            return Err(FfsError::Io(std::io::Error::from_raw_os_error(libc::EFBIG)));
+        }
+        Ok(())
+    }
+
     /// Write data to an ext4 file.
     #[allow(
         clippy::too_many_lines,
@@ -15738,6 +15759,7 @@ impl OpenFs {
         let end = offset
             .checked_add(write_len)
             .ok_or_else(|| FfsError::Format("write range overflow".into()))?;
+        Self::ext4_reject_oversized_file(end, bs)?;
 
         // Logical-block range [start, end) most recently allocated by this write
         // as a coalesced run (bd-bdro7). Blocks in it resolve as "written" on
@@ -17130,6 +17152,10 @@ impl OpenFs {
             if inode.flags & ffs_types::EXT4_APPEND_FL != 0 && new_size < inode.size {
                 return Err(FfsError::Io(std::io::Error::from_raw_os_error(libc::EPERM)));
             }
+            // ftruncate(2)/EFBIG: extending past the ext4 maximum file size must
+            // fail. The extend branch below only sets i_size, so without this an
+            // arbitrarily large size (e.g. 1 PiB) was silently accepted.
+            Self::ext4_reject_oversized_file(new_size, u64::from(sb.block_size))?;
             if new_size != inode.size {
                 let mut alloc = alloc_mutex.lock();
                 let block_size = alloc.geo.block_size;
@@ -51729,6 +51755,70 @@ mod tests {
         assert_eq!(data.len(), 100);
         assert_eq!(&data[..5], b"hello");
         assert!(data[5..].iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn write_setattr_extend_past_max_file_size_returns_efbig() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let ino = fs
+            .create(&cx, root, OsStr::new("toobig.txt"), 0o644, 0, 0)
+            .expect("create")
+            .ino;
+
+        // ext4 max file size is 2^32 * block_size (>= 4 TiB even at 1 KiB
+        // blocks). ftruncate(2) past it must be EFBIG, not a silently-accepted
+        // i_size. 1 PiB exceeds the cap for any supported block size.
+        let one_pib: u64 = 1 << 50;
+        let err = fs
+            .setattr(
+                &cx,
+                ino,
+                &SetAttrRequest {
+                    size: Some(one_pib),
+                    ..SetAttrRequest::default()
+                },
+            )
+            .expect_err("extend past the ext4 max file size must fail");
+        assert_eq!(err.to_errno(), libc::EFBIG);
+
+        // The rejected truncate left the file untouched (still empty).
+        assert_eq!(fs.getattr(&cx, ino).expect("getattr").size, 0);
+
+        // A modest extend still works.
+        let ok = fs
+            .setattr(
+                &cx,
+                ino,
+                &SetAttrRequest {
+                    size: Some(1 << 20),
+                    ..SetAttrRequest::default()
+                },
+            )
+            .expect("a within-limit extend still succeeds");
+        assert_eq!(ok.size, 1 << 20);
+    }
+
+    #[test]
+    fn write_past_max_file_size_returns_efbig() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let ino = fs
+            .create(&cx, root, OsStr::new("bigwrite.txt"), 0o644, 0, 0)
+            .expect("create")
+            .ino;
+
+        // A write whose end offset exceeds the ext4 max file size is EFBIG.
+        let err = fs
+            .write(&cx, ino, 1 << 50, b"x")
+            .expect_err("write past the ext4 max file size must fail");
+        assert_eq!(err.to_errno(), libc::EFBIG);
     }
 
     #[test]
