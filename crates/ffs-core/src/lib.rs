@@ -20711,6 +20711,28 @@ impl OpenFs {
 
     // ── Btrfs write path ─────────────────────────────────────────────────
 
+    /// The largest btrfs file size. The kernel sets `sb->s_maxbytes =
+    /// MAX_LFS_FILESIZE` in `btrfs_fill_super`, which on 64-bit is
+    /// `i64::MAX` (`2^63 - 1`, ~8 EiB) — far larger than ext4's 32-bit-block
+    /// cap, hence enforced separately per port (`bd-d9129`).
+    fn btrfs_max_file_size() -> u64 {
+        i64::MAX as u64
+    }
+
+    /// Reject a write/fallocate/truncate that would extend a file past the
+    /// btrfs maximum size with `EFBIG`, matching the kernel — the VFS checks the
+    /// request against `s_maxbytes` (`MAX_LFS_FILESIZE`) before btrfs and returns
+    /// EFBIG (`inode_newsize_ok` for truncate, `generic_write_checks` for
+    /// write/fallocate). Previously the truncate-extend path silently accepted
+    /// any `i_size` and write/fallocate only guarded `u64` overflow (`bd-d9129`,
+    /// sibling of the ext4 `bd-3pa5m` fix).
+    fn btrfs_reject_oversized_file(end: u64) -> ffs_error::Result<()> {
+        if end > Self::btrfs_max_file_size() {
+            return Err(FfsError::Io(std::io::Error::from_raw_os_error(libc::EFBIG)));
+        }
+        Ok(())
+    }
+
     /// Write file data on a btrfs filesystem.
     #[allow(clippy::too_many_lines)]
     fn btrfs_write(
@@ -20760,6 +20782,9 @@ impl OpenFs {
         let end = offset
             .checked_add(data_len_u64)
             .ok_or_else(|| FfsError::InvalidGeometry("offset + length overflow".into()))?;
+        // A write whose end offset exceeds the btrfs maximum file size is EFBIG
+        // (the VFS rejects it against s_maxbytes before the fs).
+        Self::btrfs_reject_oversized_file(end)?;
         let sb = self
             .btrfs_superblock()
             .ok_or_else(|| FfsError::Format("not a btrfs filesystem".into()))?;
@@ -22201,6 +22226,10 @@ impl OpenFs {
             if file_type == FileType::Symlink {
                 return Err(FfsError::Format("cannot truncate a symlink".into()));
             }
+            // ftruncate(2)/EFBIG: extending past the btrfs maximum file size must
+            // be rejected (the VFS inode_newsize_ok check), not silently accepted
+            // into an out-of-range i_size (bd-d9129).
+            Self::btrfs_reject_oversized_file(size)?;
 
             let old_size = inode.size;
             inode.size = size;
@@ -22293,6 +22322,9 @@ impl OpenFs {
         let new_end = offset
             .checked_add(length)
             .ok_or_else(|| FfsError::InvalidGeometry("offset + length overflow".into()))?;
+        // fallocate whose end offset exceeds the btrfs maximum file size is
+        // EFBIG (matches the VFS s_maxbytes check before the fs).
+        Self::btrfs_reject_oversized_file(new_end)?;
 
         let mut alloc = alloc_mutex.lock();
         let mut inode = self.btrfs_read_inode_from_tree(&alloc, canonical)?;
@@ -51818,6 +51850,63 @@ mod tests {
         let err = fs
             .write(&cx, ino, 1 << 50, b"x")
             .expect_err("write past the ext4 max file size must fail");
+        assert_eq!(err.to_errno(), libc::EFBIG);
+    }
+
+    #[test]
+    fn btrfs_setattr_extend_past_max_file_size_returns_efbig() {
+        let (fs, cx) = open_writable_btrfs();
+        let root = InodeNumber(u64::from(BTRFS_FIRST_FREE_OBJECTID));
+        let ino = fs
+            .create(&cx, root, OsStr::new("toobig.txt"), 0o644, 0, 0)
+            .expect("create")
+            .ino;
+
+        // btrfs max file size is MAX_LFS_FILESIZE = i64::MAX (2^63 - 1).
+        // ftruncate(2) past it must be EFBIG, not a silently-accepted i_size.
+        let past_max: u64 = 1 << 63; // 2^63 > i64::MAX
+        let err = fs
+            .setattr(
+                &cx,
+                ino,
+                &SetAttrRequest {
+                    size: Some(past_max),
+                    ..SetAttrRequest::default()
+                },
+            )
+            .expect_err("extend past the btrfs max file size must fail");
+        assert_eq!(err.to_errno(), libc::EFBIG);
+
+        // The rejected truncate left the file untouched (still empty).
+        assert_eq!(fs.getattr(&cx, ino).expect("getattr").size, 0);
+
+        // A within-limit extend still works.
+        let ok = fs
+            .setattr(
+                &cx,
+                ino,
+                &SetAttrRequest {
+                    size: Some(1 << 20),
+                    ..SetAttrRequest::default()
+                },
+            )
+            .expect("a within-limit extend still succeeds");
+        assert_eq!(ok.size, 1 << 20);
+    }
+
+    #[test]
+    fn btrfs_write_past_max_file_size_returns_efbig() {
+        let (fs, cx) = open_writable_btrfs();
+        let root = InodeNumber(u64::from(BTRFS_FIRST_FREE_OBJECTID));
+        let ino = fs
+            .create(&cx, root, OsStr::new("bigwrite.txt"), 0o644, 0, 0)
+            .expect("create")
+            .ino;
+
+        // A write whose end offset exceeds the btrfs max file size is EFBIG.
+        let err = fs
+            .write(&cx, ino, 1 << 63, b"x")
+            .expect_err("write past the btrfs max file size must fail");
         assert_eq!(err.to_errno(), libc::EFBIG);
     }
 
