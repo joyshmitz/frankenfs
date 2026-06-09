@@ -21824,6 +21824,135 @@ impl OpenFs {
         Ok(())
     }
 
+    /// Atomic dual-entry swap for `renameat2(RENAME_EXCHANGE)` on btrfs.
+    ///
+    /// Both `name` and `new_name` must already exist; either missing -> ENOENT.
+    /// The two directory entries swap which inode they reference: afterwards
+    /// `(parent, name)` points at the inode that `new_name` referenced and
+    /// `(new_parent, new_name)` points at the inode that `name` referenced. No
+    /// link is created or destroyed, so nlink is unchanged on both inodes and —
+    /// as everywhere in the btrfs port — directory link counts and parent nlink
+    /// stay fixed (bd-egyf6). A moved directory's parent linkage is carried
+    /// entirely by its INODE_REF, which the remove+reinsert below rewrites, so
+    /// no separate `..` fixup is needed (unlike ext4). ctime is bumped on both
+    /// swapped inodes and mtime/ctime on both parents, per renameat2(2).
+    fn btrfs_rename2_exchange(
+        &self,
+        parent: InodeNumber,
+        name: &[u8],
+        new_parent: InodeNumber,
+        new_name: &[u8],
+    ) -> ffs_error::Result<()> {
+        self.require_btrfs_rw_allowed("rename")?;
+        let alloc_mutex = self.require_btrfs_alloc_state()?;
+        let parent_oid = self.btrfs_canonical_inode(parent)?;
+        let new_parent_oid = self.btrfs_canonical_inode(new_parent)?;
+        let (secs, nanos) = Self::btrfs_now_timestamp();
+
+        Self::validate_single_path_component(name)?;
+        Self::validate_single_path_component(new_name)?;
+
+        let mut alloc = alloc_mutex.lock();
+        self.btrfs_require_directory_inode(&alloc, parent_oid)?;
+        self.btrfs_require_directory_inode(&alloc, new_parent_oid)?;
+
+        // POSIX: exchanging an entry with itself is a successful no-op.
+        if parent_oid == new_parent_oid && name == new_name {
+            return Ok(());
+        }
+
+        // Both entries must exist (renameat2(2): ENOENT otherwise). Confirm the
+        // matching INODE_REF too so the remove() calls below cannot fail
+        // half-way through after the dir entries are already gone.
+        let src = self.btrfs_lookup_dir_entry(&alloc, parent_oid, name)?;
+        let dst = self.btrfs_lookup_dir_entry(&alloc, new_parent_oid, new_name)?;
+        Self::btrfs_require_inode_ref_name(&alloc, src.child_objectid, parent_oid, name)?;
+        Self::btrfs_require_inode_ref_name(&alloc, dst.child_objectid, new_parent_oid, new_name)?;
+
+        // Cross-parent directory moves must not create a cycle: neither moved
+        // directory may end up under itself (renameat2(2): EINVAL / vfs loop
+        // check). Same direction as btrfs_rename's descendant guard.
+        let cross_parent = parent_oid != new_parent_oid;
+        if cross_parent {
+            let src_is_dir = src.file_type == BTRFS_FT_DIR;
+            let dst_is_dir = dst.file_type == BTRFS_FT_DIR;
+            if (src_is_dir
+                && Self::btrfs_directory_is_descendant_of(
+                    &alloc,
+                    new_parent_oid,
+                    src.child_objectid,
+                )?)
+                || (dst_is_dir
+                    && Self::btrfs_directory_is_descendant_of(
+                        &alloc,
+                        parent_oid,
+                        dst.child_objectid,
+                    )?)
+            {
+                return Err(FfsError::Io(std::io::Error::from_raw_os_error(
+                    libc::EINVAL,
+                )));
+            }
+        }
+
+        // Remove both entries and their INODE_REFs, then reinsert each name
+        // pointing at the other entry's inode. Removing both before inserting
+        // keeps a same-parent swap from colliding on the in-flight names.
+        self.btrfs_remove_dir_entry(&mut alloc, parent_oid, name)?;
+        Self::btrfs_remove_inode_ref(&mut alloc, src.child_objectid, parent_oid, name)?;
+        self.btrfs_remove_dir_entry(&mut alloc, new_parent_oid, new_name)?;
+        Self::btrfs_remove_inode_ref(&mut alloc, dst.child_objectid, new_parent_oid, new_name)?;
+
+        let into_parent = BtrfsDirItem {
+            child_objectid: dst.child_objectid,
+            child_key_type: dst.child_key_type,
+            child_key_offset: dst.child_key_offset,
+            file_type: dst.file_type,
+            name: name.to_vec(),
+        };
+        let seq_into_parent = self.btrfs_insert_dir_entry(&mut alloc, parent_oid, &into_parent)?;
+        Self::btrfs_insert_inode_ref(
+            &mut alloc,
+            dst.child_objectid,
+            parent_oid,
+            name,
+            seq_into_parent,
+        )?;
+
+        let into_new_parent = BtrfsDirItem {
+            child_objectid: src.child_objectid,
+            child_key_type: src.child_key_type,
+            child_key_offset: src.child_key_offset,
+            file_type: src.file_type,
+            name: new_name.to_vec(),
+        };
+        let seq_into_new_parent =
+            self.btrfs_insert_dir_entry(&mut alloc, new_parent_oid, &into_new_parent)?;
+        Self::btrfs_insert_inode_ref(
+            &mut alloc,
+            src.child_objectid,
+            new_parent_oid,
+            new_name,
+            seq_into_new_parent,
+        )?;
+
+        // Both swapped inodes had their directory linkage changed: bump ctime
+        // (status change), not mtime. Skip the duplicate write when both names
+        // resolved to the same inode (hard links of one file).
+        self.btrfs_touch_inode_ctime(&mut alloc, src.child_objectid, secs, nanos)?;
+        if dst.child_objectid != src.child_objectid {
+            self.btrfs_touch_inode_ctime(&mut alloc, dst.child_objectid, secs, nanos)?;
+        }
+        // Both parent directories were modified: mtime + ctime.
+        self.btrfs_touch_inode_times(&mut alloc, parent_oid, secs, nanos)?;
+        if cross_parent {
+            self.btrfs_touch_inode_times(&mut alloc, new_parent_oid, secs, nanos)?;
+        }
+        drop(alloc);
+
+        Ok(())
+    }
+
     /// Create a hard link in a btrfs filesystem.
     fn btrfs_link(
         &self,
@@ -23915,6 +24044,31 @@ impl OpenFs {
         Ok(())
     }
 
+    /// Update only the ctime (status-change time) of a btrfs inode, leaving
+    /// mtime untouched. Used when an inode's metadata changes without its
+    /// data (e.g. a directory link is re-pointed by RENAME_EXCHANGE).
+    fn btrfs_touch_inode_ctime(
+        &self,
+        alloc: &mut BtrfsAllocState,
+        objectid: u64,
+        secs: u64,
+        nanos: u32,
+    ) -> ffs_error::Result<()> {
+        let mut inode = self.btrfs_read_inode_from_tree(alloc, objectid)?;
+        inode.ctime_sec = secs;
+        inode.ctime_nsec = nanos;
+        let key = BtrfsKey {
+            objectid,
+            item_type: BTRFS_ITEM_INODE_ITEM,
+            offset: 0,
+        };
+        alloc
+            .fs_tree
+            .update(&key, &inode.to_bytes())
+            .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+        Ok(())
+    }
+
     fn ext4_dir_reserved_tail(&self) -> usize {
         if let FsFlavor::Ext4(sb) = &self.flavor {
             if sb.has_metadata_csum() {
@@ -24389,9 +24543,9 @@ impl OpenFs {
     /// supported. Directory block and inode mutations are staged in one
     /// MVCC request transaction; under the FUSE dispatcher's parent guards
     /// concurrent observers see either the pre-swap or post-swap shape
-    /// of both entries, never a half-applied mix. btrfs handling is
-    /// deferred (the COW dir-item layout differs from ext4 enough that
-    /// a separate path is needed); btrfs callers receive `EINVAL`.
+    /// of both entries, never a half-applied mix. btrfs uses its own
+    /// COW-tree path (`btrfs_rename2_exchange`); this routine is ext4-only
+    /// and returns `EINVAL` if ever reached on a btrfs filesystem.
     #[allow(clippy::too_many_lines, clippy::significant_drop_tightening)]
     pub(crate) fn ext4_rename2_exchange(
         &self,
@@ -26673,7 +26827,20 @@ impl FsOps for OpenFs {
 
         if flags & RENAME_EXCHANGE != 0 {
             clear_readdir_snapshot(&self.readdir_snapshot);
-            return self.ext4_rename2_exchange(cx, scope, parent, name, new_parent, new_name);
+            return match &self.flavor {
+                FsFlavor::Ext4(_) => {
+                    self.ext4_rename2_exchange(cx, scope, parent, name, new_parent, new_name)
+                }
+                FsFlavor::Btrfs(_) => {
+                    self.check_btrfs_mutation_allowed("rename")?;
+                    self.btrfs_rename2_exchange(
+                        parent,
+                        name.as_encoded_bytes(),
+                        new_parent,
+                        new_name.as_encoded_bytes(),
+                    )
+                }
+            };
         }
 
         <Self as FsOps>::rename(self, cx, scope, parent, name, new_parent, new_name)
@@ -57690,6 +57857,57 @@ mod tests {
         );
     }
 
+    /// A `renameat2(RENAME_EXCHANGE)` swap of two regular files must leave the
+    /// on-disk tree `btrfs check`-clean: both DIR_ITEM/DIR_INDEX pairs and both
+    /// INODE_REF back-references have to end up pointing at the swapped inodes
+    /// with fresh dir-index sequences and no orphaned, duplicated, or dangling
+    /// refs. In-memory model tests can't catch a stale/duplicate INODE_REF that
+    /// the authoritative tool flags. Skips when btrfs-progs is unavailable.
+    #[test]
+    fn btrfs_rename2_exchange_passes_btrfs_check() {
+        let Some((fs, dev, _tmp, image)) = open_writable_btrfs_mkfs(256) else {
+            return; // btrfs-progs unavailable
+        };
+        let cx = Cx::for_testing();
+        let ops: &dyn FsOps = &fs;
+        let root = InodeNumber(u64::from(BTRFS_FIRST_FREE_OBJECTID));
+
+        let a = ops
+            .create(&cx, &mut RequestScope::empty(), root, OsStr::new("xchg_a.bin"), 0o644, 0, 0)
+            .expect("create a");
+        let b = ops
+            .create(&cx, &mut RequestScope::empty(), root, OsStr::new("xchg_b.bin"), 0o644, 0, 0)
+            .expect("create b");
+        ops.write(&cx, &mut RequestScope::empty(), a.ino, 0, &[0xA1_u8; 4096])
+            .expect("write a");
+        ops.write(&cx, &mut RequestScope::empty(), b.ino, 0, &[0xB2_u8; 4096])
+            .expect("write b");
+
+        ops.rename2(
+            &cx,
+            &mut RequestScope::empty(),
+            root,
+            OsStr::new("xchg_a.bin"),
+            root,
+            OsStr::new("xchg_b.bin"),
+            libc::RENAME_EXCHANGE,
+        )
+        .expect("RENAME_EXCHANGE swap on a real image");
+
+        let _ = fs.flush_mvcc_to_device(&cx);
+        fs.btrfs_full_transaction_commit(&cx, "rename-exchange-check")
+            .expect("btrfs full transaction commit");
+        std::fs::write(&image, dev.snapshot_bytes()).expect("write modified image");
+
+        let Some((ok, output)) = run_btrfs_check(&image) else {
+            return; // btrfs check tool unavailable
+        };
+        assert!(
+            ok,
+            "btrfs check must accept a RENAME_EXCHANGE swap (no orphan/duplicate INODE_REF or dir-index drift):\n{output}"
+        );
+    }
+
     /// bd-tm48j increment 4: a FrankenFS-created subvolume must be accepted by
     /// the real `btrfs check` tool (the strict kernel-parity bar for the
     /// create_subvolume path).
@@ -61327,6 +61545,170 @@ mod tests {
             )
             .unwrap();
         assert_eq!(found.ino, attr.ino);
+    }
+
+    #[test]
+    fn btrfs_rename2_exchange_swaps_two_entries_in_same_parent() {
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+        let root = InodeNumber(1);
+
+        let x = ops
+            .create(&cx, &mut RequestScope::empty(), root, OsStr::new("ex_x"), 0o644, 0, 0)
+            .expect("create x");
+        let y = ops
+            .create(&cx, &mut RequestScope::empty(), root, OsStr::new("ex_y"), 0o644, 0, 0)
+            .expect("create y");
+        assert_ne!(x.ino, y.ino, "distinct inodes or the swap is a no-op");
+
+        ops.write(&cx, &mut RequestScope::empty(), x.ino, 0, b"X-original")
+            .expect("write x");
+        ops.write(&cx, &mut RequestScope::empty(), y.ino, 0, b"Y-original")
+            .expect("write y");
+
+        ops.rename2(
+            &cx,
+            &mut RequestScope::empty(),
+            root,
+            OsStr::new("ex_x"),
+            root,
+            OsStr::new("ex_y"),
+            libc::RENAME_EXCHANGE,
+        )
+        .expect("RENAME_EXCHANGE same-parent swap must succeed");
+
+        let after_x = ops
+            .lookup(&cx, &mut RequestScope::empty(), root, OsStr::new("ex_x"))
+            .expect("lookup ex_x");
+        let after_y = ops
+            .lookup(&cx, &mut RequestScope::empty(), root, OsStr::new("ex_y"))
+            .expect("lookup ex_y");
+        assert_eq!(after_x.ino, y.ino, "ex_x now points at old y inode");
+        assert_eq!(after_y.ino, x.ino, "ex_y now points at old x inode");
+
+        let by_x = ops
+            .read(&cx, &mut RequestScope::empty(), after_x.ino, 0, 64)
+            .expect("read ex_x");
+        let by_y = ops
+            .read(&cx, &mut RequestScope::empty(), after_y.ino, 0, 64)
+            .expect("read ex_y");
+        assert!(by_x.starts_with(b"Y-original"), "ex_x reads y's data");
+        assert!(by_y.starts_with(b"X-original"), "ex_y reads x's data");
+    }
+
+    #[test]
+    fn btrfs_rename2_exchange_missing_target_returns_enoent() {
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+        let root = InodeNumber(1);
+
+        ops.create(&cx, &mut RequestScope::empty(), root, OsStr::new("present"), 0o644, 0, 0)
+            .expect("create present");
+
+        let err = ops
+            .rename2(
+                &cx,
+                &mut RequestScope::empty(),
+                root,
+                OsStr::new("present"),
+                root,
+                OsStr::new("absent"),
+                libc::RENAME_EXCHANGE,
+            )
+            .expect_err("RENAME_EXCHANGE with a missing target must fail");
+        assert_eq!(err.to_errno(), libc::ENOENT);
+
+        // The source survives the failed, side-effect-free exchange.
+        assert!(
+            ops.lookup(&cx, &mut RequestScope::empty(), root, OsStr::new("present"))
+                .is_ok(),
+            "source entry must be untouched after a failed exchange"
+        );
+    }
+
+    #[test]
+    fn btrfs_rename2_exchange_swaps_across_distinct_parents() {
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+        let root = InodeNumber(1);
+
+        let da = ops
+            .mkdir(&cx, &mut RequestScope::empty(), root, OsStr::new("da"), 0o755, 0, 0)
+            .expect("mkdir da");
+        let db = ops
+            .mkdir(&cx, &mut RequestScope::empty(), root, OsStr::new("db"), 0o755, 0, 0)
+            .expect("mkdir db");
+
+        let fa = ops
+            .create(&cx, &mut RequestScope::empty(), da.ino, OsStr::new("fa"), 0o644, 0, 0)
+            .expect("create da/fa");
+        let fb = ops
+            .create(&cx, &mut RequestScope::empty(), db.ino, OsStr::new("fb"), 0o644, 0, 0)
+            .expect("create db/fb");
+
+        ops.rename2(
+            &cx,
+            &mut RequestScope::empty(),
+            da.ino,
+            OsStr::new("fa"),
+            db.ino,
+            OsStr::new("fb"),
+            libc::RENAME_EXCHANGE,
+        )
+        .expect("cross-parent RENAME_EXCHANGE must succeed");
+
+        let after_a = ops
+            .lookup(&cx, &mut RequestScope::empty(), da.ino, OsStr::new("fa"))
+            .expect("lookup da/fa");
+        let after_b = ops
+            .lookup(&cx, &mut RequestScope::empty(), db.ino, OsStr::new("fb"))
+            .expect("lookup db/fb");
+        assert_eq!(after_a.ino, fb.ino, "da/fa now references old db/fb inode");
+        assert_eq!(after_b.ino, fa.ino, "db/fb now references old da/fa inode");
+    }
+
+    #[test]
+    fn btrfs_rename2_exchange_directory_under_its_own_descendant_returns_einval() {
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+        let root = InodeNumber(1);
+
+        // /a (dir), /a/sub (dir), /a/sub/b (file).
+        let a = ops
+            .mkdir(&cx, &mut RequestScope::empty(), root, OsStr::new("a"), 0o755, 0, 0)
+            .expect("mkdir a");
+        let sub = ops
+            .mkdir(&cx, &mut RequestScope::empty(), a.ino, OsStr::new("sub"), 0o755, 0, 0)
+            .expect("mkdir a/sub");
+        ops.create(&cx, &mut RequestScope::empty(), sub.ino, OsStr::new("b"), 0o644, 0, 0)
+            .expect("create a/sub/b");
+
+        // Exchanging /a with /a/sub/b would move directory "a" under its own
+        // descendant "a/sub" — a cycle the kernel rejects with EINVAL.
+        let err = ops
+            .rename2(
+                &cx,
+                &mut RequestScope::empty(),
+                root,
+                OsStr::new("a"),
+                sub.ino,
+                OsStr::new("b"),
+                libc::RENAME_EXCHANGE,
+            )
+            .expect_err("exchanging a directory under its own descendant must fail");
+        assert_eq!(err.to_errno(), libc::EINVAL);
+
+        // Nothing moved: both entries remain where they were.
+        assert!(
+            ops.lookup(&cx, &mut RequestScope::empty(), root, OsStr::new("a"))
+                .is_ok(),
+            "directory a must remain under root"
+        );
+        assert!(
+            ops.lookup(&cx, &mut RequestScope::empty(), sub.ino, OsStr::new("b"))
+                .is_ok(),
+            "file b must remain under a/sub"
+        );
     }
 
     #[test]
