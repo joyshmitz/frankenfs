@@ -25210,6 +25210,73 @@ impl OpenFs {
         }
     }
 
+    /// Read-only counterpart to `extent_alloc.extent_item_refs`: read the
+    /// EXTENT_ITEM refcount for (`disk_bytenr`, `disk_num_bytes`) directly from
+    /// the on-disk extent tree (resolved from the superblock's root tree).
+    /// Returns `None` when the EXTENT_TREE or the item is absent. fiemap uses
+    /// this to report `FIEMAP_EXTENT_SHARED` on read-only mounts, where the
+    /// in-memory extent allocator is not loaded (bd-0j8ev).
+    fn btrfs_readonly_extent_item_refs(
+        &self,
+        cx: &Cx,
+        disk_bytenr: u64,
+        disk_num_bytes: u64,
+    ) -> ffs_error::Result<Option<u64>> {
+        let sb = self
+            .btrfs_superblock()
+            .ok_or_else(|| FfsError::Format("not a btrfs filesystem".into()))?;
+        let root_lo = BtrfsKey {
+            objectid: BTRFS_EXTENT_TREE_OBJECTID,
+            item_type: BTRFS_ITEM_ROOT_ITEM,
+            offset: 0,
+        };
+        let root_hi = BtrfsKey {
+            objectid: BTRFS_EXTENT_TREE_OBJECTID,
+            item_type: BTRFS_ITEM_ROOT_ITEM,
+            offset: u64::MAX,
+        };
+        let Some(extent_root_bytenr) = self
+            .walk_btrfs_tree_range(cx, sb.root, root_lo, root_hi)?
+            .iter()
+            .find(|e| {
+                e.key.objectid == BTRFS_EXTENT_TREE_OBJECTID
+                    && e.key.item_type == BTRFS_ITEM_ROOT_ITEM
+            })
+            .and_then(|e| parse_root_item(&e.data).ok())
+            .map(|root_item| root_item.bytenr)
+            .filter(|&bytenr| bytenr != 0)
+        else {
+            return Ok(None);
+        };
+        let item_lo = BtrfsKey {
+            objectid: disk_bytenr,
+            item_type: ffs_btrfs::BTRFS_ITEM_EXTENT_ITEM,
+            offset: disk_num_bytes,
+        };
+        // walk_btrfs_tree_range is half-open [lo, hi); widen hi by one so the
+        // exact EXTENT_ITEM key is included.
+        let item_hi = BtrfsKey {
+            objectid: disk_bytenr,
+            item_type: ffs_btrfs::BTRFS_ITEM_EXTENT_ITEM,
+            offset: disk_num_bytes.saturating_add(1),
+        };
+        let items = self
+            .walk_btrfs_tree_range(cx, extent_root_bytenr, item_lo, item_hi)?
+            .into_iter()
+            .filter(|item| {
+                item.key.objectid == disk_bytenr
+                    && item.key.item_type == ffs_btrfs::BTRFS_ITEM_EXTENT_ITEM
+                    && item.key.offset == disk_num_bytes
+            })
+            .collect::<Vec<_>>();
+        // EXTENT_ITEM payload begins with a u64 reference count.
+        Ok(items.first().and_then(|item| {
+            item.data
+                .get(0..8)
+                .map(|bytes| u64::from_le_bytes(bytes.try_into().unwrap_or([0; 8])))
+        }))
+    }
+
     fn btrfs_fiemap(
         &self,
         cx: &Cx,
@@ -25273,19 +25340,25 @@ impl OpenFs {
                         flags |= FIEMAP_EXTENT_ENCODED;
                     }
                     // A data extent referenced by more than one inode
-                    // (reflink/snapshot) is reported SHARED. Refcounts live in
-                    // the in-memory extent tree on the writable path; a read-only
-                    // image would need an on-disk extent-tree backref walk
-                    // (separate follow-up). (bd-g704k)
-                    if *disk_bytenr != 0
-                        && let Some(alloc_mutex) = self.btrfs_alloc_state.as_ref()
-                    {
-                        let refs = alloc_mutex
-                            .lock()
-                            .extent_alloc
-                            .extent_item_refs(*disk_bytenr, *disk_num_bytes)
-                            .ok()
-                            .flatten();
+                    // (reflink/snapshot) is reported SHARED. The writable path
+                    // reads the in-memory extent tree; a read-only mount reads
+                    // the EXTENT_ITEM refcount straight from the on-disk extent
+                    // tree (bd-g704k, bd-0j8ev).
+                    if *disk_bytenr != 0 {
+                        let refs = if let Some(alloc_mutex) = self.btrfs_alloc_state.as_ref() {
+                            alloc_mutex
+                                .lock()
+                                .extent_alloc
+                                .extent_item_refs(*disk_bytenr, *disk_num_bytes)
+                                .ok()
+                                .flatten()
+                        } else {
+                            self.btrfs_readonly_extent_item_refs(
+                                cx,
+                                *disk_bytenr,
+                                *disk_num_bytes,
+                            )?
+                        };
                         if matches!(refs, Some(r) if r > 1) {
                             flags |= FIEMAP_EXTENT_SHARED;
                         }
@@ -68618,6 +68691,70 @@ mod tests {
             lone_fm[0].flags & FIEMAP_EXTENT_SHARED,
             0,
             "an unrelated file's extent must not be SHARED"
+        );
+    }
+
+    /// FIEMAP_EXTENT_SHARED must also be reported on a READ-ONLY mount, where the
+    /// in-memory extent allocator is not loaded and the refcount is read straight
+    /// from the on-disk extent tree. Write + reflink + commit, reopen read-only,
+    /// and confirm fiemap still flags the shared extent (bd-0j8ev).
+    #[test]
+    fn btrfs_fiemap_reports_shared_on_readonly_mount_bd_0j8ev() {
+        // A full COW commit does not fit the tiny in-memory fsops image, so this
+        // uses a real mkfs image (256 MiB) like the other commit+remount tests.
+        // It skips when btrfs-progs/mkfs is unavailable (the sandbox blocks
+        // mkfs) and runs end-to-end on a privileged runner.
+        let Some((fs, dev, _tmp, _image)) = open_writable_btrfs_mkfs(256) else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(u64::from(BTRFS_FIRST_FREE_OBJECTID));
+        let src = fs
+            .create(&cx, root, OsStr::new("ro-src.dat"), 0o644, 0, 0)
+            .expect("create src");
+        let dst = fs
+            .create(&cx, root, OsStr::new("ro-dst.dat"), 0o644, 0, 0)
+            .expect("create dst");
+
+        let fs_ops: &dyn FsOps = &fs;
+        let payload = vec![0x5A_u8; 16384];
+        fs_ops
+            .write(&cx, &mut RequestScope::empty(), src.ino, 0, &payload)
+            .expect("write src");
+
+        let src_canon = fs.btrfs_canonical_inode(src.ino).unwrap();
+        let dst_canon = fs.btrfs_canonical_inode(dst.ino).unwrap();
+        {
+            let alloc_mutex = fs.btrfs_alloc_state.as_ref().unwrap();
+            let mut alloc = alloc_mutex.lock();
+            fs.btrfs_clone_file_data(&mut alloc, src_canon, dst_canon)
+                .expect("reflink src into dst");
+        }
+
+        // Persist data + metadata, then snapshot the on-disk image.
+        let _ = fs.flush_mvcc_to_device(&cx);
+        fs.btrfs_full_transaction_commit(&cx, "ro-shared-fiemap-test")
+            .expect("commit");
+        let committed = dev.snapshot_bytes();
+
+        // Reopen READ-ONLY (no enable_writes => btrfs_alloc_state is None).
+        let ro = OpenFs::from_device(
+            &cx,
+            Box::new(TestDevice::from_vec(committed)),
+            &OpenOptions::default(),
+        )
+        .expect("reopen committed image read-only");
+        assert!(!ro.is_writable(), "the remount must be read-only");
+
+        let src_ro = ro
+            .lookup(&cx, root, OsStr::new("ro-src.dat"))
+            .expect("lookup src on the read-only mount");
+        let mut scope = RequestScope::empty();
+        let extents = ro.fiemap(&cx, &mut scope, src_ro.ino, 0, u64::MAX).unwrap();
+        assert_ne!(
+            extents[0].flags & FIEMAP_EXTENT_SHARED,
+            0,
+            "a read-only mount must report SHARED for a reflinked extent"
         );
     }
 
