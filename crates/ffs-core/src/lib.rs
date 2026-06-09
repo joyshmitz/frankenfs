@@ -21011,6 +21011,15 @@ impl OpenFs {
         if file_type == FileType::Symlink {
             return Err(FfsError::Format("cannot write to a symlink".into()));
         }
+        // Enforce immutable / append-only attributes, matching ext4_write and the
+        // kernel (EPERM): an immutable file rejects all writes; an append-only
+        // file may only be written at EOF (offset == i_size) — bd-xpsq4.
+        if inode.flags & BTRFS_INODE_IMMUTABLE != 0 {
+            return Err(FfsError::Io(std::io::Error::from_raw_os_error(libc::EPERM)));
+        }
+        if inode.flags & BTRFS_INODE_APPEND != 0 && offset != inode.size {
+            return Err(FfsError::Io(std::io::Error::from_raw_os_error(libc::EPERM)));
+        }
 
         let data_len_u64 = u64::try_from(data.len())
             .map_err(|_| FfsError::InvalidGeometry("write length does not fit u64".into()))?;
@@ -22484,6 +22493,14 @@ impl OpenFs {
             if file_type == FileType::Symlink {
                 return Err(FfsError::Format("cannot truncate a symlink".into()));
             }
+            // Immutable files cannot be truncated; append-only files cannot
+            // shrink — the kernel returns EPERM (matches ext4_setattr, bd-xpsq4).
+            if inode.flags & BTRFS_INODE_IMMUTABLE != 0 {
+                return Err(FfsError::Io(std::io::Error::from_raw_os_error(libc::EPERM)));
+            }
+            if inode.flags & BTRFS_INODE_APPEND != 0 && size < inode.size {
+                return Err(FfsError::Io(std::io::Error::from_raw_os_error(libc::EPERM)));
+            }
             // ftruncate(2)/EFBIG: extending past the btrfs maximum file size must
             // be rejected (the VFS inode_newsize_ok check), not silently accepted
             // into an out-of-range i_size (bd-d9129).
@@ -22639,6 +22656,17 @@ impl OpenFs {
         }
         if file_type == FileType::Symlink {
             return Err(FfsError::Format("cannot fallocate a symlink".into()));
+        }
+        // Immutable files reject all fallocate; append-only files reject the
+        // modes that alter existing data — the kernel returns EPERM (matches
+        // ext4_fallocate, bd-xpsq4).
+        if inode.flags & BTRFS_INODE_IMMUTABLE != 0 {
+            return Err(FfsError::Io(std::io::Error::from_raw_os_error(libc::EPERM)));
+        }
+        if inode.flags & BTRFS_INODE_APPEND != 0
+            && (punch_hole || collapse_range || zero_range || insert_range)
+        {
+            return Err(FfsError::Io(std::io::Error::from_raw_os_error(libc::EPERM)));
         }
 
         let sectorsize = u64::from(alloc.sectorsize);
@@ -68848,6 +68876,86 @@ mod tests {
         assert!(
             fs.lookup(&cx, parent, OsStr::new("v2")).is_ok(),
             "append-only victim must survive a rejected rename"
+        );
+    }
+
+    #[test]
+    fn btrfs_immutable_and_append_enforced_on_content_ops_bd_xpsq4() {
+        let (fs, cx) = open_writable_btrfs();
+        let parent = InodeNumber(1);
+
+        let set_flag = |ino_raw: u64, flag: u64| {
+            let alloc_mutex = fs.btrfs_alloc_state.as_ref().unwrap();
+            let mut alloc = alloc_mutex.lock();
+            let mut inode = fs
+                .btrfs_read_inode_from_tree(&alloc, ino_raw)
+                .expect("read inode");
+            inode.flags |= flag;
+            let key = BtrfsKey {
+                objectid: ino_raw,
+                item_type: BTRFS_ITEM_INODE_ITEM,
+                offset: 0,
+            };
+            alloc
+                .fs_tree
+                .update(&key, &inode.to_bytes())
+                .expect("pin flag");
+        };
+
+        // ── Immutable: every content mutation is rejected (EPERM). ──
+        let imm = fs.create(&cx, parent, OsStr::new("imm.bin"), 0o644, 0, 0).unwrap().ino;
+        fs.write(&cx, imm, 0, b"hello").expect("seed write before immutable");
+        set_flag(imm.0, BTRFS_INODE_IMMUTABLE);
+        assert_eq!(
+            fs.write(&cx, imm, 0, b"nope").unwrap_err().to_errno(),
+            libc::EPERM,
+            "write to an immutable file must be EPERM"
+        );
+        assert_eq!(
+            fs.setattr(
+                &cx,
+                imm,
+                &SetAttrRequest {
+                    size: Some(0),
+                    ..SetAttrRequest::default()
+                },
+            )
+            .unwrap_err()
+            .to_errno(),
+            libc::EPERM,
+            "truncating an immutable file must be EPERM"
+        );
+        assert_eq!(
+            fs.fallocate(&cx, imm, 0, 4096, 0).unwrap_err().to_errno(),
+            libc::EPERM,
+            "fallocate on an immutable file must be EPERM"
+        );
+
+        // ── Append-only: EOF append allowed; non-append write + shrink rejected. ──
+        let app = fs.create(&cx, parent, OsStr::new("app.bin"), 0o644, 0, 0).unwrap().ino;
+        fs.write(&cx, app, 0, b"0123456789").expect("seed write");
+        let size = fs.getattr(&cx, app).unwrap().size;
+        set_flag(app.0, BTRFS_INODE_APPEND);
+        assert_eq!(
+            fs.write(&cx, app, 0, b"x").unwrap_err().to_errno(),
+            libc::EPERM,
+            "a non-append (offset < EOF) write to an append-only file must be EPERM"
+        );
+        fs.write(&cx, app, size, b"appended")
+            .expect("appending at EOF on an append-only file must succeed");
+        assert_eq!(
+            fs.setattr(
+                &cx,
+                app,
+                &SetAttrRequest {
+                    size: Some(1),
+                    ..SetAttrRequest::default()
+                },
+            )
+            .unwrap_err()
+            .to_errno(),
+            libc::EPERM,
+            "shrinking an append-only file must be EPERM"
         );
     }
 
