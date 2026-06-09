@@ -18307,6 +18307,72 @@ impl OpenFs {
         }
     }
 
+    /// Fill `buf` with the file's *current* bytes for the logical range
+    /// `[range_start, range_start + buf.len())`, reading from the in-memory
+    /// `fs_tree` extents (materialized through the device). `buf` must be
+    /// pre-zeroed: holes, preallocated regions, and any range past the last
+    /// extent are left as zeros. Used by the sector-aligned write path to
+    /// read-modify-write the partial head/tail sectors of an unaligned write so
+    /// the rewritten extent stays sector-aligned without losing surrounding
+    /// data (bd-7mi0p). The caller holds the alloc lock; no re-lock is needed.
+    fn btrfs_read_existing_range_into(
+        &self,
+        cx: &Cx,
+        alloc: &BtrfsAllocState,
+        canonical: u64,
+        range_start: u64,
+        buf: &mut [u8],
+    ) -> ffs_error::Result<()> {
+        let buf_len = u64::try_from(buf.len())
+            .map_err(|_| FfsError::InvalidGeometry("rmw range length overflow".into()))?;
+        if buf_len == 0 {
+            return Ok(());
+        }
+        let range_end = range_start
+            .checked_add(buf_len)
+            .ok_or_else(|| FfsError::InvalidGeometry("rmw range end overflow".into()))?;
+        let ext_start = BtrfsKey {
+            objectid: canonical,
+            item_type: BTRFS_ITEM_EXTENT_DATA,
+            offset: 0,
+        };
+        let ext_end = BtrfsKey {
+            objectid: canonical,
+            item_type: BTRFS_ITEM_EXTENT_DATA,
+            offset: u64::MAX,
+        };
+        for (key, edata) in alloc
+            .fs_tree
+            .range(&ext_start, &ext_end)
+            .map_err(|e| btrfs_mutation_to_ffs(&e))?
+        {
+            let extent = parse_extent_data(&edata).map_err(|e| parse_to_ffs_error(&e))?;
+            let logical_len = Self::btrfs_extent_logical_len(&extent)?;
+            let ext_end_off = key.offset.saturating_add(logical_len);
+            let ov_start = key.offset.max(range_start);
+            let ov_end = ext_end_off.min(range_end);
+            if ov_start >= ov_end {
+                continue;
+            }
+            // Holes/prealloc materialize to zeros, which `buf` already holds; skip
+            // the device read for them.
+            if Self::btrfs_extent_is_hole(&extent) || Self::btrfs_extent_is_prealloc(&extent) {
+                continue;
+            }
+            let materialized = self.btrfs_materialize_extent(cx, &extent)?;
+            let src_off = usize::try_from(ov_start - key.offset)
+                .map_err(|_| FfsError::InvalidGeometry("rmw src offset overflow".into()))?;
+            let dst_off = usize::try_from(ov_start - range_start)
+                .map_err(|_| FfsError::InvalidGeometry("rmw dst offset overflow".into()))?;
+            let want = usize::try_from(ov_end - ov_start)
+                .map_err(|_| FfsError::InvalidGeometry("rmw copy length overflow".into()))?;
+            let avail = materialized.len().saturating_sub(src_off);
+            let n = want.min(avail);
+            buf[dst_off..dst_off + n].copy_from_slice(&materialized[src_off..src_off + n]);
+        }
+        Ok(())
+    }
+
     /// Record one EXTENT_CSUM per sector for a just-written datasum data extent
     /// (bd-x3fcu / bd-pb0ey). Reads the on-disk extent back so the checksum
     /// covers the exact bytes a later read returns (sector padding included),
@@ -20955,49 +21021,94 @@ impl OpenFs {
                 })
                 .map_err(|e| btrfs_mutation_to_ffs(&e))?;
         } else {
-            self.btrfs_remove_overlapping_extent_data(cx, &mut alloc, canonical, offset, end)?;
+            // btrfs requires every uncompressed regular extent to be
+            // sector-aligned in BOTH its file offset (key.offset) and its length
+            // (ram_bytes == num_bytes == disk_num_bytes), with the file's true
+            // (sub-sector) EOF carried in i_size; a non-aligned extent is
+            // btrfs-check-invalid ("bad file extent", bd-7mi0p). Implement a
+            // read-modify-write: widen the write to the enclosing sector grid,
+            // read back the partial head/tail sectors so surrounding data is
+            // preserved, then emit ONE aligned extent. (collect_extents/read cap
+            // by i_size, so the sector-padding tail past EOF reads as nothing.)
+            let aligned_start = offset & !(sectorsize - 1);
+            let aligned_end = end
+                .checked_add(sectorsize - 1)
+                .ok_or_else(|| FfsError::InvalidGeometry("aligned write end overflow".into()))?
+                & !(sectorsize - 1);
+            let alloc_size = aligned_end - aligned_start;
+            let alloc_size_usize = usize::try_from(alloc_size)
+                .map_err(|_| FfsError::InvalidGeometry("aligned write size overflow".into()))?;
 
-            // Allocate a data extent and write through the device.
-            let write_len_u64 = u64::try_from(data.len())
-                .map_err(|_| FfsError::InvalidGeometry("write length does not fit u64".into()))?;
-            let alloc_size = write_len_u64.saturating_add(sectorsize - 1) & !(sectorsize - 1);
+            // Build the sector-aligned buffer: zero-fill, restore the existing
+            // partial head [aligned_start, offset) and tail [end, aligned_end)
+            // sectors, then overlay the new data.
+            let mut merged = vec![0_u8; alloc_size_usize];
+            if offset > aligned_start {
+                let head_len = usize::try_from(offset - aligned_start).map_err(|_| {
+                    FfsError::InvalidGeometry("rmw head length overflow".into())
+                })?;
+                self.btrfs_read_existing_range_into(
+                    cx,
+                    &alloc,
+                    canonical,
+                    aligned_start,
+                    &mut merged[..head_len],
+                )?;
+            }
+            if aligned_end > end {
+                let tail_off = usize::try_from(end - aligned_start).map_err(|_| {
+                    FfsError::InvalidGeometry("rmw tail offset overflow".into())
+                })?;
+                self.btrfs_read_existing_range_into(
+                    cx,
+                    &alloc,
+                    canonical,
+                    end,
+                    &mut merged[tail_off..],
+                )?;
+            }
+            let data_off = usize::try_from(offset - aligned_start)
+                .map_err(|_| FfsError::InvalidGeometry("rmw data offset overflow".into()))?;
+            merged[data_off..data_off + data.len()].copy_from_slice(data);
+
+            // Replace any extents in the aligned range. Because all extents are
+            // sector-aligned, the split boundaries here are aligned too, so the
+            // re-inserted left/right remnants stay aligned.
+            self.btrfs_remove_overlapping_extent_data(
+                cx,
+                &mut alloc,
+                canonical,
+                aligned_start,
+                aligned_end,
+            )?;
+
             let allocation = alloc
                 .extent_alloc
                 .alloc_data(alloc_size)
                 .map_err(|e| btrfs_mutation_to_ffs(&e))?;
             let disk_bytenr = allocation.bytenr;
 
-            // Write data to the allocated logical region.
-            if let Err(e) = self.btrfs_write_logical(cx, disk_bytenr, data) {
+            if let Err(e) = self.btrfs_write_logical(cx, disk_bytenr, &merged) {
                 let _ = alloc
                     .extent_alloc
                     .free_extent(disk_bytenr, alloc_size, false);
                 return Err(e);
             }
 
-            // Insert the EXTENT_DATA item.
-            // NOTE: ram_bytes/num_bytes are the raw (unaligned) write length here.
-            // btrfs actually requires an uncompressed regular extent to have
-            // ram_bytes == num_bytes == disk_num_bytes, all sector-aligned (the
-            // file's real length lives in i_size); a non-aligned num_bytes is
-            // btrfs-check-invalid ("bad file extent") for any non-aligned write.
-            // Aligning it here alone breaks the read/overwrite/truncate paths,
-            // which currently treat num_bytes as the logical data length — fixing
-            // it needs a consistent refactor across those paths (bd-7mi0p).
             let extent = BtrfsExtentData::Regular {
                 generation: alloc.generation,
-                ram_bytes: write_len_u64,
+                ram_bytes: alloc_size,
                 extent_type: BTRFS_FILE_EXTENT_REG,
                 compression: 0,
                 disk_bytenr,
                 disk_num_bytes: alloc_size,
                 extent_offset: 0,
-                num_bytes: write_len_u64,
+                num_bytes: alloc_size,
             };
             let extent_key = BtrfsKey {
                 objectid: canonical,
                 item_type: BTRFS_ITEM_EXTENT_DATA,
-                offset,
+                offset: aligned_start,
             };
             let extent_bytes = extent.to_bytes();
             if let Err(e) = alloc.fs_tree.insert(extent_key, &extent_bytes) {
@@ -21010,9 +21121,13 @@ impl OpenFs {
             // Register the extent-tree EXTENT_ITEM + EXTENT_DATA_REF backref for
             // this data extent (bd-x3fcu) so the on-disk image is btrfs-check
             // clean. On failure unwind the fs_tree item and the allocation.
-            if let Err(e) =
-                Self::btrfs_register_data_extent_backref(&mut alloc, disk_bytenr, alloc_size, canonical, offset)
-            {
+            if let Err(e) = Self::btrfs_register_data_extent_backref(
+                &mut alloc,
+                disk_bytenr,
+                alloc_size,
+                canonical,
+                aligned_start,
+            ) {
                 let _ = alloc.fs_tree.delete(&extent_key);
                 let _ = alloc
                     .extent_alloc
@@ -58442,18 +58557,13 @@ mod tests {
         );
     }
 
-    /// bd-7mi0p (known gap, ignored until fixed): a NON-sector-aligned btrfs write
-    /// must leave the image btrfs-check-clean. Today btrfs_write stores the raw
-    /// (unaligned) write length in the regular extent's ram_bytes/num_bytes, but
-    /// btrfs requires those sector-aligned — so `btrfs check` reports "bad file
-    /// extent" (I_ERR_BAD_FILE_EXTENT) for any non-aligned write (e.g. 6000 bytes).
-    /// The fix is not a one-liner: FrankenFS packs extents by unaligned logical
-    /// length, so simply rounding num_bytes up overlaps adjacent extents; it needs
-    /// a sector-aligned read-modify-write extent model (reads already cap by
-    /// i_size and are fine). This test pins the desired end state — un-ignore it
-    /// when bd-7mi0p lands. Also skips when btrfs-progs is unavailable.
+    /// bd-7mi0p: a NON-sector-aligned btrfs write must leave the image
+    /// btrfs-check-clean. The write path now performs a sector-aligned
+    /// read-modify-write — the regular extent has ram_bytes == num_bytes ==
+    /// disk_num_bytes (all sector-aligned) with the sub-sector EOF carried in
+    /// i_size, so `btrfs check` no longer reports "bad file extent"
+    /// (I_ERR_BAD_FILE_EXTENT). Skips when btrfs-progs is unavailable.
     #[test]
-    #[ignore = "bd-7mi0p: non-aligned btrfs writes produce non-sector-aligned extent num_bytes -> btrfs check 'bad file extent'; needs the sector-aligned RMW extent-model refactor"]
     fn btrfs_nonaligned_write_passes_btrfs_check_bd_7mi0p() {
         let Some((fs, dev, _tmp, image)) = open_writable_btrfs_mkfs(256) else {
             return; // btrfs-progs unavailable
