@@ -17483,8 +17483,13 @@ impl OpenFs {
         let csum_seed = sb.csum_seed();
 
         let mut inode = self.read_inode(cx, ino)?;
-        // Immutable files reject xattr changes (kernel: EPERM).
+        // Immutable AND append-only files reject xattr changes: the kernel's
+        // xattr_permission returns EPERM for any MAY_WRITE xattr op on either
+        // (bd-kf7uw).
         Self::ext4_reject_immutable(&inode)?;
+        if inode.flags & ffs_types::EXT4_APPEND_FL != 0 {
+            return Err(FfsError::Io(std::io::Error::from_raw_os_error(libc::EPERM)));
+        }
         let old_acl = inode.file_acl;
         let mut external_block = None;
         let mut old_refcount = 1;
@@ -17794,8 +17799,13 @@ impl OpenFs {
         let csum_seed = sb.csum_seed();
 
         let mut inode = self.read_inode(cx, ino)?;
-        // Immutable files reject xattr changes (kernel: EPERM).
+        // Immutable AND append-only files reject xattr changes: the kernel's
+        // xattr_permission returns EPERM for any MAY_WRITE xattr op on either
+        // (bd-kf7uw).
         Self::ext4_reject_immutable(&inode)?;
+        if inode.flags & ffs_types::EXT4_APPEND_FL != 0 {
+            return Err(FfsError::Io(std::io::Error::from_raw_os_error(libc::EPERM)));
+        }
         let old_acl = inode.file_acl;
         let mut external_block = None;
         let mut old_refcount = 1;
@@ -23174,6 +23184,12 @@ impl OpenFs {
 
         let mut alloc = alloc_mutex.lock();
         let mut inode = self.btrfs_read_inode_from_tree(&alloc, canonical)?;
+        // Immutable AND append-only files reject xattr changes: the kernel's
+        // xattr_permission returns EPERM for any MAY_WRITE xattr op on either
+        // (bd-kf7uw).
+        if inode.flags & (BTRFS_INODE_IMMUTABLE | BTRFS_INODE_APPEND) != 0 {
+            return Err(FfsError::Io(std::io::Error::from_raw_os_error(libc::EPERM)));
+        }
 
         let name_hash = ffs_btrfs::btrfs_name_hash(name.as_bytes());
         let key = BtrfsKey {
@@ -23230,6 +23246,12 @@ impl OpenFs {
 
         let mut alloc = alloc_mutex.lock();
         let mut inode = self.btrfs_read_inode_from_tree(&alloc, canonical)?;
+        // Immutable AND append-only files reject xattr changes: the kernel's
+        // xattr_permission returns EPERM for any MAY_WRITE xattr op on either
+        // (bd-kf7uw).
+        if inode.flags & (BTRFS_INODE_IMMUTABLE | BTRFS_INODE_APPEND) != 0 {
+            return Err(FfsError::Io(std::io::Error::from_raw_os_error(libc::EPERM)));
+        }
         let name_hash = ffs_btrfs::btrfs_name_hash(name.as_bytes());
         let key = BtrfsKey {
             objectid: canonical,
@@ -45978,6 +46000,13 @@ mod tests {
             libc::EPERM,
             "hard-linking an append-only file must be EPERM (vfs_link)"
         );
+        assert_eq!(
+            fs.setxattr(&cx, app.ino, "user.x", b"v", XattrSetMode::Set)
+                .unwrap_err()
+                .to_errno(),
+            libc::EPERM,
+            "setxattr on an append-only file must be EPERM (xattr_permission, bd-kf7uw)"
+        );
     }
 
     fn open_writable_ext4_mkfs(size_mb: u64) -> Option<(OpenFs, tempfile::TempDir)> {
@@ -68662,6 +68691,44 @@ mod tests {
                     .is_err(),
                 "rejected link must not create the new name for {name}"
             );
+        }
+    }
+
+    #[test]
+    fn btrfs_setxattr_on_immutable_or_append_is_eperm_bd_kf7uw() {
+        let (fs, cx) = open_writable_btrfs();
+        let parent = InodeNumber(1);
+
+        // xattr_permission forbids any MAY_WRITE xattr op on an immutable OR
+        // append-only file (EPERM). btrfs_setxattr previously checked neither.
+        for (name, flag) in [
+            ("imm.bin", BTRFS_INODE_IMMUTABLE),
+            ("app.bin", BTRFS_INODE_APPEND),
+        ] {
+            let attr = fs
+                .create(&cx, parent, OsStr::new(name), 0o644, 0, 0)
+                .unwrap();
+            {
+                let alloc_mutex = fs.btrfs_alloc_state.as_ref().unwrap();
+                let mut alloc = alloc_mutex.lock();
+                let mut inode = fs
+                    .btrfs_read_inode_from_tree(&alloc, attr.ino.0)
+                    .expect("read target inode");
+                inode.flags |= flag;
+                let key = BtrfsKey {
+                    objectid: attr.ino.0,
+                    item_type: BTRFS_ITEM_INODE_ITEM,
+                    offset: 0,
+                };
+                alloc
+                    .fs_tree
+                    .update(&key, &inode.to_bytes())
+                    .expect("pin attribute flag");
+            }
+            let err = fs
+                .setxattr(&cx, attr.ino, "user.x", b"v", XattrSetMode::Set)
+                .expect_err("setxattr on an immutable/append-only file must be rejected");
+            assert_eq!(err.to_errno(), libc::EPERM, "{name} setxattr must be EPERM");
         }
     }
 
