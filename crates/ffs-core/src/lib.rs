@@ -21614,7 +21614,7 @@ impl OpenFs {
         Self::btrfs_remove_inode_ref(&mut alloc, child_oid, parent_oid, name)?;
 
         // Drop the removed link (-1 for both files and directories).
-        self.btrfs_adjust_nlink(&mut alloc, child_oid, -1)?;
+        self.btrfs_adjust_nlink(&mut alloc, child_oid, -1, secs, nanos)?;
 
         // If nlink reached 0, purge the orphaned inode and all its data.
         let child_inode = self.btrfs_read_inode_from_tree(&alloc, child_oid)?;
@@ -21748,7 +21748,7 @@ impl OpenFs {
             // files and btrfs directories); the new parent's nlink is unchanged
             // (bd-egyf6). `target_is_dir` no longer affects the link math.
             let _ = target_is_dir;
-            self.btrfs_adjust_nlink(&mut alloc, target_oid, -1)?;
+            self.btrfs_adjust_nlink(&mut alloc, target_oid, -1, secs, nanos)?;
             let target_inode = self.btrfs_read_inode_from_tree(&alloc, target_oid)?;
             if target_inode.nlink == 0 {
                 debug_assert!(target_will_be_purged);
@@ -21831,7 +21831,7 @@ impl OpenFs {
         };
         let dir_index_seq = self.btrfs_insert_dir_entry(&mut alloc, parent_oid, &dir_item)?;
         Self::btrfs_insert_inode_ref(&mut alloc, target_oid, parent_oid, new_name, dir_index_seq)?;
-        self.btrfs_adjust_nlink(&mut alloc, target_oid, 1)?;
+        self.btrfs_adjust_nlink(&mut alloc, target_oid, 1, secs, nanos)?;
         self.btrfs_touch_inode_times(&mut alloc, parent_oid, secs, nanos)?;
 
         let updated = self.btrfs_read_inode_from_tree(&alloc, target_oid)?;
@@ -23260,9 +23260,20 @@ impl OpenFs {
         alloc: &mut BtrfsAllocState,
         objectid: u64,
         delta: i32,
+        secs: u64,
+        nanos: u32,
     ) -> ffs_error::Result<()> {
         let mut inode = self.btrfs_read_inode_from_tree(alloc, objectid)?;
         inode.nlink = Self::btrfs_checked_nlink_delta(inode.nlink, objectid, delta)?;
+        // A link-count change is a status change: POSIX requires link() and
+        // link removal (and a rename that drops an overwritten target) to mark
+        // the inode's ctime for update. ext4_link / ext4 link-removal already do
+        // this (touch_ctime); btrfs must match or stat/ctime-based tooling (tar,
+        // rsync, find -newer, backup/audit) diverges from ext4 and the kernel
+        // (bd-ypyxq). The caller passes the operation's single timestamp
+        // snapshot so the target ctime agrees with the parent's mtime/ctime.
+        inode.ctime_sec = secs;
+        inode.ctime_nsec = nanos;
         let key = BtrfsKey {
             objectid,
             item_type: BTRFS_ITEM_INODE_ITEM,
@@ -66048,6 +66059,58 @@ mod tests {
         assert_eq!(
             la.nlink, 2,
             "both hard links must survive a same-inode rename"
+        );
+    }
+
+    /// POSIX: adding a hard link is a status change for the TARGET inode, so its
+    /// ctime must be marked for update (ext4_link does this via touch_ctime).
+    /// btrfs routed through btrfs_adjust_nlink, which only bumped nlink — leaving
+    /// the target ctime stale (bd-ypyxq). The link op stamps the target ctime and
+    /// the parent's mtime from the SAME timestamp snapshot, so after a link they
+    /// must be exactly equal (before the fix the target ctime stayed at its
+    /// distinct creation time).
+    #[test]
+    fn btrfs_link_updates_target_ctime_bd_ypyxq() {
+        let (fs, cx) = open_writable_btrfs();
+        let root = InodeNumber(u64::from(BTRFS_FIRST_FREE_OBJECTID));
+        let a = fs
+            .create(&cx, root, OsStr::new("a"), 0o644, 0, 0)
+            .expect("create a");
+        fs.link(&cx, a.ino, root, OsStr::new("b"))
+            .expect("hard-link b -> a");
+
+        let target = fs.getattr(&cx, a.ino).expect("getattr target");
+        let parent = fs.getattr(&cx, root).expect("getattr parent");
+        assert_eq!(target.nlink, 2, "the link must have been added");
+        assert_eq!(
+            target.ctime, parent.mtime,
+            "adding a hard link must stamp the target inode's ctime with the op time"
+        );
+    }
+
+    /// Removing one of an inode's hard links is likewise a status change for the
+    /// surviving inode: its ctime must be updated (ext4 does this on the
+    /// surviving child). Pairs with btrfs_link_updates_target_ctime (bd-ypyxq).
+    #[test]
+    fn btrfs_link_removal_updates_surviving_inode_ctime_bd_ypyxq() {
+        let (fs, cx) = open_writable_btrfs();
+        let root = InodeNumber(u64::from(BTRFS_FIRST_FREE_OBJECTID));
+        let a = fs
+            .create(&cx, root, OsStr::new("keep"), 0o644, 0, 0)
+            .expect("create keep");
+        fs.link(&cx, a.ino, root, OsStr::new("drop"))
+            .expect("hard-link drop -> keep");
+
+        // Remove the "drop" name; the inode survives via "keep" (nlink 2 -> 1).
+        fs.unlink(&cx, root, OsStr::new("drop"))
+            .expect("remove the drop link");
+
+        let survivor = fs.getattr(&cx, a.ino).expect("getattr survivor");
+        let parent = fs.getattr(&cx, root).expect("getattr parent");
+        assert_eq!(survivor.nlink, 1, "one link must remain");
+        assert_eq!(
+            survivor.ctime, parent.mtime,
+            "removing a hard link must stamp the surviving inode's ctime"
         );
     }
 
