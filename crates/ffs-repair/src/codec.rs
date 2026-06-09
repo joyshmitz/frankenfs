@@ -525,6 +525,7 @@ fn decode_group_impl(
 
 struct DirectRepairRow {
     coefficients: [Gf256; DIRECT_SMALL_ERASURE_MAX_CORRUPT],
+    source_coefficients: Vec<u8>,
     residual: Vec<u8>,
 }
 
@@ -695,35 +696,22 @@ fn select_direct_repair_plan(
         if decoder.repair_equation(*esi).is_err() {
             return None;
         }
-        let source_coefficients = source_coefficient_encoder.repair_symbol(*esi);
-        if source_coefficients.len() != known_source.len() {
-            return None;
-        }
+        let mut source_coefficients = vec![0_u8; known_source.len()];
+        source_coefficient_encoder.repair_symbol_into(*esi, &mut source_coefficients);
+
         let mut coefficients = [Gf256::ZERO; DIRECT_SMALL_ERASURE_MAX_CORRUPT];
         for slot in 0..missing.len() {
             let source_index = usize::try_from(missing[slot]).ok()?;
             coefficients[slot] = Gf256::new(*source_coefficients.get(source_index)?);
         }
 
-        let mut residual = actual.clone();
-        for (source_index, source_symbol) in known_source.iter().enumerate() {
-            if source_symbol.len() != block_size {
-                return None;
-            }
-            let source_index_u32 = u32::try_from(source_index).ok()?;
-            if missing.binary_search(&source_index_u32).is_ok() {
-                continue;
-            }
-            let coefficient = Gf256::new(source_coefficients[source_index]);
-            if !coefficient.is_zero() {
-                gf256_addmul_slice(&mut residual, source_symbol, coefficient);
-            }
-        }
         rows.push(DirectRepairRow {
             coefficients,
-            residual,
+            source_coefficients,
+            residual: actual.clone(),
         });
     }
+    project_known_source_contributions_source_major(&mut rows, missing, known_source, block_size)?;
 
     let selection = match missing.len() {
         1 => rows
@@ -735,6 +723,30 @@ fn select_direct_repair_plan(
         _ => None,
     }?;
     Some(DirectRepairPlan { rows, selection })
+}
+
+fn project_known_source_contributions_source_major(
+    rows: &mut [DirectRepairRow],
+    missing: &[u32],
+    known_source: &[Vec<u8>],
+    block_size: usize,
+) -> Option<()> {
+    for (source_index, source_symbol) in known_source.iter().enumerate() {
+        if source_symbol.len() != block_size {
+            return None;
+        }
+        let source_index_u32 = u32::try_from(source_index).ok()?;
+        if missing.binary_search(&source_index_u32).is_ok() {
+            continue;
+        }
+        for row in rows.iter_mut() {
+            let coefficient = Gf256::new(*row.source_coefficients.get(source_index)?);
+            if !coefficient.is_zero() {
+                gf256_addmul_slice(&mut row.residual, source_symbol, coefficient);
+            }
+        }
+    }
+    Some(())
 }
 
 fn select_full_rank_pair(rows: &[DirectRepairRow]) -> Option<(usize, usize)> {
@@ -1499,6 +1511,170 @@ mod tests {
                 );
             }
         }
+    }
+
+    fn reference_direct_rows_row_major(
+        decoder: &InactivationDecoder,
+        missing: &[u32],
+        repair_symbols: &[(u32, Vec<u8>)],
+        known_source: &[Vec<u8>],
+        source_coefficient_encoder: &SystematicEncoder,
+        block_size: usize,
+    ) -> Vec<DirectRepairRow> {
+        let mut rows = Vec::with_capacity(repair_symbols.len());
+        for (esi, actual) in repair_symbols {
+            assert!(
+                decoder.repair_equation(*esi).is_ok(),
+                "test ESI should be valid"
+            );
+            let source_coefficients = source_coefficient_encoder.repair_symbol(*esi);
+            assert_eq!(source_coefficients.len(), known_source.len());
+
+            let mut coefficients = [Gf256::ZERO; DIRECT_SMALL_ERASURE_MAX_CORRUPT];
+            for slot in 0..missing.len() {
+                let source_index = usize::try_from(missing[slot]).expect("missing index fits");
+                coefficients[slot] = Gf256::new(source_coefficients[source_index]);
+            }
+
+            let mut residual = actual.clone();
+            for (source_index, source_symbol) in known_source.iter().enumerate() {
+                assert_eq!(source_symbol.len(), block_size);
+                let source_index_u32 = u32::try_from(source_index).expect("source index fits u32");
+                if missing.binary_search(&source_index_u32).is_ok() {
+                    continue;
+                }
+                let coefficient = Gf256::new(source_coefficients[source_index]);
+                if !coefficient.is_zero() {
+                    gf256_addmul_slice(&mut residual, source_symbol, coefficient);
+                }
+            }
+
+            rows.push(DirectRepairRow {
+                coefficients,
+                source_coefficients,
+                residual,
+            });
+        }
+        rows
+    }
+
+    fn direct_selection_signature(selection: &DirectRepairSelection) -> (usize, Option<usize>) {
+        match *selection {
+            DirectRepairSelection::One(row) => (row, None),
+            DirectRepairSelection::Two(first, second) => (first, Some(second)),
+        }
+    }
+
+    #[test]
+    fn decode_direct_source_major_residuals_match_row_major_reference() {
+        let cx = Cx::for_testing();
+        let k = 16_u32;
+        let block_size = 257_u32;
+        let device = setup_device(k, block_size);
+        let uuid = test_uuid();
+        let group = GroupNumber(7);
+        let first = BlockNumber(0);
+        let corrupt = [0_u32, 1];
+
+        let encoded = encode_group(&cx, &device, &uuid, group, first, k, 4).unwrap();
+        let repair_data: Vec<(u32, Vec<u8>)> = encoded
+            .repair_symbols
+            .iter()
+            .map(|symbol| (symbol.esi, symbol.data.clone()))
+            .collect();
+        let corrupt_set = CorruptIndexSet::new(&corrupt, k, group).unwrap();
+        let known_source = read_known_source_symbols(
+            &cx,
+            &device,
+            first,
+            k,
+            &corrupt_set,
+            usize::try_from(block_size).expect("block size fits usize"),
+        )
+        .unwrap();
+        let decoder = InactivationDecoder::new(
+            usize::try_from(k).expect("K fits usize"),
+            usize::try_from(block_size).expect("block size fits usize"),
+            encoded.seed,
+        );
+        let source_coefficient_encoder = build_source_coefficient_encoder(
+            usize::try_from(k).expect("K fits usize"),
+            encoded.seed,
+        )
+        .expect("source coefficient encoder");
+
+        let actual = select_direct_repair_plan(
+            &decoder,
+            &corrupt_set.unique,
+            &repair_data,
+            &known_source,
+            &source_coefficient_encoder,
+            usize::try_from(block_size).expect("block size fits usize"),
+        )
+        .expect("source-major plan should be selected");
+        let expected_rows = reference_direct_rows_row_major(
+            &decoder,
+            &corrupt_set.unique,
+            &repair_data,
+            &known_source,
+            &source_coefficient_encoder,
+            usize::try_from(block_size).expect("block size fits usize"),
+        );
+        let (first_row, second_row) = select_full_rank_pair(&expected_rows).expect("full rank");
+        let expected_selection = DirectRepairSelection::Two(first_row, second_row);
+
+        assert_eq!(
+            direct_selection_signature(&actual.selection),
+            direct_selection_signature(&expected_selection)
+        );
+        assert_eq!(actual.rows.len(), expected_rows.len());
+        for (actual, expected) in actual.rows.iter().zip(&expected_rows) {
+            assert_eq!(actual.coefficients, expected.coefficients);
+            assert_eq!(actual.source_coefficients, expected.source_coefficients);
+            assert_eq!(actual.residual, expected.residual);
+        }
+    }
+
+    #[test]
+    fn raptorq_decode_golden_report() {
+        let cx = Cx::for_testing();
+        let k = 16_u32;
+        let block_size = 96_u32;
+        let device = setup_device(k, block_size);
+        let uuid = test_uuid();
+        let group = GroupNumber(3);
+        let first = BlockNumber(0);
+        let corrupt = [5_u32, 0, 5];
+
+        let encoded = encode_group(&cx, &device, &uuid, group, first, k, 4).unwrap();
+        let repair_data: Vec<(u32, Vec<u8>)> = encoded
+            .repair_symbols
+            .iter()
+            .map(|symbol| (symbol.esi, symbol.data.clone()))
+            .collect();
+        let outcome =
+            decode_group(&cx, &device, &uuid, group, first, k, &corrupt, &repair_data).unwrap();
+
+        println!("RAPTORQ_DECODE_GOLDEN_BEGIN");
+        println!(
+            "group={} source_block_count={} symbol_size={} seed={} corrupt={:?} complete={} policy_mode={:?} policy_reason={:?}",
+            group.0,
+            k,
+            block_size,
+            encoded.seed,
+            corrupt,
+            outcome.complete,
+            outcome.stats.policy_mode,
+            outcome.stats.policy_reason
+        );
+        for recovered in &outcome.recovered {
+            println!(
+                "recovered block={} data={}",
+                recovered.block.0,
+                hex_encode(&recovered.data)
+            );
+        }
+        println!("RAPTORQ_DECODE_GOLDEN_END");
     }
 
     #[test]
