@@ -22410,6 +22410,16 @@ impl OpenFs {
             inode.size = new_end;
         }
         inode.nbytes = Self::btrfs_recompute_inode_nbytes(&alloc, canonical)?;
+        // fallocate(2): a successful allocation marks the file modified, so the
+        // kernel (via file_modified) bumps both mtime and ctime — for every mode
+        // (default prealloc, KEEP_SIZE, PUNCH_HOLE, ZERO_RANGE, COLLAPSE/INSERT).
+        // ext4_fallocate already touches both (lib.rs:15598); btrfs must match or
+        // mtime/ctime-based tooling (make, tar, rsync, backup) misses the change.
+        let (ts_secs, ts_nanos) = Self::btrfs_now_timestamp();
+        inode.mtime_sec = ts_secs;
+        inode.mtime_nsec = ts_nanos;
+        inode.ctime_sec = ts_secs;
+        inode.ctime_nsec = ts_nanos;
         let inode_key = BtrfsKey {
             objectid: canonical,
             item_type: BTRFS_ITEM_INODE_ITEM,
@@ -68113,6 +68123,57 @@ mod tests {
         assert_eq!(
             attr.mtime, attr.ctime,
             "a size-changing truncate must update mtime, not leave it at the write time"
+        );
+    }
+
+    /// btrfs fallocate(2) must bump mtime and ctime on success, matching ext4
+    /// (ext4_fallocate touches both) and the kernel's file_modified semantics.
+    /// Previously btrfs_fallocate updated only size/nbytes, leaving the
+    /// timestamps frozen so mtime/ctime-based tooling missed the allocation.
+    #[test]
+    fn btrfs_fallocate_updates_mtime_and_ctime() {
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+        let file = ops
+            .create(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("falloc.bin"),
+                0o644,
+                0,
+                0,
+            )
+            .unwrap();
+
+        // Pin mtime to a known old value; setting it is a status change, so
+        // ctime advances to "now" — leaving mtime != ctime before fallocate.
+        let old = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+        ops.setattr(
+            &cx,
+            &mut RequestScope::empty(),
+            file.ino,
+            &SetAttrRequest {
+                mtime: Some(old),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let before = ops.getattr(&cx, &mut RequestScope::empty(), file.ino).unwrap();
+        assert_eq!(before.mtime, old, "setup: mtime should be the pinned value");
+
+        // Default-mode (prealloc) allocation of one sector.
+        ops.fallocate(&cx, &mut RequestScope::empty(), file.ino, 0, 4096, 0)
+            .unwrap();
+
+        let after = ops.getattr(&cx, &mut RequestScope::empty(), file.ino).unwrap();
+        assert_ne!(
+            after.mtime, old,
+            "fallocate must bump mtime off the pinned value"
+        );
+        assert_eq!(
+            after.mtime, after.ctime,
+            "fallocate must stamp mtime and ctime to the same allocation time"
         );
     }
 
