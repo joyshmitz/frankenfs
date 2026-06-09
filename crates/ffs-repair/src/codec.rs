@@ -27,12 +27,31 @@ use asupersync::raptorq::systematic::{EmittedSymbol, SystematicEncoder, Systemat
 use ffs_block::BlockDevice;
 use ffs_error::{FfsError, Result};
 use ffs_types::{BlockNumber, GroupNumber};
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::symbol::repair_seed;
 
 const RQ_DECODE_WAVEFRONT_BATCH: usize = 4;
 const DIRECT_SMALL_ERASURE_MAX_CORRUPT: usize = 2;
 const DIRECT_SMALL_ERASURE_MAX_SOURCE_BLOCKS: usize = 64;
+const SOURCE_COEFFICIENT_ENCODER_CACHE_CAPACITY: usize = 8;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SourceCoefficientEncoderKey {
+    source_count: usize,
+    seed: u64,
+}
+
+#[derive(Debug)]
+struct SourceCoefficientEncoderCacheEntry {
+    key: SourceCoefficientEncoderKey,
+    encoder: Arc<SystematicEncoder>,
+}
+
+static SOURCE_COEFFICIENT_ENCODER_CACHE: OnceLock<
+    Mutex<VecDeque<SourceCoefficientEncoderCacheEntry>>,
+> = OnceLock::new();
 
 // ── Encode ──────────────────────────────────────────────────────────────────
 
@@ -651,12 +670,77 @@ fn read_known_source_symbols(
     Ok(source)
 }
 
-fn build_source_coefficient_encoder(source_count: usize, seed: u64) -> Option<SystematicEncoder> {
+fn build_source_coefficient_encoder(
+    source_count: usize,
+    seed: u64,
+) -> Option<Arc<SystematicEncoder>> {
+    let key = SourceCoefficientEncoderKey { source_count, seed };
+    if let Some(encoder) = cached_source_coefficient_encoder(key) {
+        return Some(encoder);
+    }
+
+    let encoder = Arc::new(build_uncached_source_coefficient_encoder(
+        source_count,
+        seed,
+    )?);
+    Some(cache_source_coefficient_encoder(key, encoder))
+}
+
+fn build_uncached_source_coefficient_encoder(
+    source_count: usize,
+    seed: u64,
+) -> Option<SystematicEncoder> {
     let mut source_coefficients = vec![vec![0_u8; source_count]; source_count];
     for (source_index, symbol) in source_coefficients.iter_mut().enumerate() {
         symbol[source_index] = 1;
     }
     SystematicEncoder::new(&source_coefficients, source_count, seed)
+}
+
+fn source_coefficient_encoder_cache() -> &'static Mutex<VecDeque<SourceCoefficientEncoderCacheEntry>>
+{
+    SOURCE_COEFFICIENT_ENCODER_CACHE.get_or_init(|| {
+        Mutex::new(VecDeque::with_capacity(
+            SOURCE_COEFFICIENT_ENCODER_CACHE_CAPACITY,
+        ))
+    })
+}
+
+fn cached_source_coefficient_encoder(
+    key: SourceCoefficientEncoderKey,
+) -> Option<Arc<SystematicEncoder>> {
+    let Ok(mut entries) = source_coefficient_encoder_cache().lock() else {
+        return None;
+    };
+    let entry_index = entries.iter().position(|entry| entry.key == key)?;
+    let entry = entries.remove(entry_index)?;
+    let encoder = Arc::clone(&entry.encoder);
+    entries.push_back(entry);
+    Some(encoder)
+}
+
+fn cache_source_coefficient_encoder(
+    key: SourceCoefficientEncoderKey,
+    encoder: Arc<SystematicEncoder>,
+) -> Arc<SystematicEncoder> {
+    let Ok(mut entries) = source_coefficient_encoder_cache().lock() else {
+        return encoder;
+    };
+    if let Some(entry_index) = entries.iter().position(|entry| entry.key == key)
+        && let Some(entry) = entries.remove(entry_index)
+    {
+        let cached = Arc::clone(&entry.encoder);
+        entries.push_back(entry);
+        return cached;
+    }
+    if entries.len() == SOURCE_COEFFICIENT_ENCODER_CACHE_CAPACITY {
+        entries.pop_front();
+    }
+    entries.push_back(SourceCoefficientEncoderCacheEntry {
+        key,
+        encoder: Arc::clone(&encoder),
+    });
+    encoder
 }
 
 #[cfg(test)]
@@ -1141,6 +1225,41 @@ mod tests {
             assert_eq!(actual.is_source, expected.is_source);
             assert_eq!(actual.degree, expected.degree);
             assert_eq!(actual.data, expected.data);
+        }
+    }
+
+    #[test]
+    fn cached_source_coefficient_encoder_matches_uncached_reference() {
+        let k = 16_usize;
+        let seed = repair_seed(&test_uuid(), GroupNumber(7));
+        let cached = build_source_coefficient_encoder(k, seed).expect("cached encoder");
+        let cached_again = build_source_coefficient_encoder(k, seed).expect("same cached encoder");
+        let fresh = build_uncached_source_coefficient_encoder(k, seed).expect("fresh encoder");
+
+        assert!(
+            Arc::ptr_eq(&cached, &cached_again),
+            "same source-count/seed plan should reuse the cached encoder"
+        );
+        assert_eq!(cached.next_repair_esi(), fresh.next_repair_esi());
+        assert_eq!(cached.seed(), fresh.seed());
+        assert_eq!(cached.params().k, fresh.params().k);
+        assert_eq!(cached.params().k_prime, fresh.params().k_prime);
+        assert_eq!(cached.params().s, fresh.params().s);
+        assert_eq!(cached.params().h, fresh.params().h);
+        assert_eq!(cached.params().l, fresh.params().l);
+        assert_eq!(cached.params().w, fresh.params().w);
+        assert_eq!(cached.params().p, fresh.params().p);
+        assert_eq!(cached.params().b, fresh.params().b);
+        assert_eq!(cached.params().symbol_size, fresh.params().symbol_size);
+
+        let start_esi = cached.next_repair_esi();
+        for offset in 0..8 {
+            let esi = start_esi + offset;
+            let mut cached_coefficients = vec![0_u8; k];
+            let mut fresh_coefficients = vec![0_u8; k];
+            cached.repair_symbol_into(esi, &mut cached_coefficients);
+            fresh.repair_symbol_into(esi, &mut fresh_coefficients);
+            assert_eq!(cached_coefficients, fresh_coefficients, "ESI {esi}");
         }
     }
 
