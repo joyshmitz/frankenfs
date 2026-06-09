@@ -14924,6 +14924,17 @@ impl OpenFs {
                 "ext4 fallocate unsupported mode bits: 0x{unsupported_bits:08x}"
             )));
         }
+        // PUNCH_HOLE and ZERO_RANGE are mutually exclusive: the kernel's
+        // vfs_fallocate (fs/open.c) rejects the combination with EINVAL before
+        // the filesystem is reached. A FUSE mount never sees it, but the public
+        // OpenFs::fallocate library API must enforce it itself — otherwise the
+        // punch_hole-first branch below silently runs a punch and ignores the
+        // requested zeroing (and the btrfs port would silently zero instead).
+        if punch_hole && zero_range {
+            return Err(FfsError::Io(std::io::Error::from_raw_os_error(
+                EINVAL_ERRNO,
+            )));
+        }
         if punch_hole && !keep_size {
             return Err(FfsError::Io(std::io::Error::from_raw_os_error(
                 EINVAL_ERRNO,
@@ -18045,6 +18056,23 @@ impl OpenFs {
             );
             return Err(FfsError::UnsupportedFeature(format!(
                 "btrfs fallocate unsupported mode bits: 0x{unsupported_bits:08x}"
+            )));
+        }
+        // PUNCH_HOLE and ZERO_RANGE are mutually exclusive (kernel vfs_fallocate
+        // rejects the combination with EINVAL). Without this, both flags fall
+        // into the shared `punch_hole || zero_range` branch below and silently
+        // run ZERO_RANGE logic — see ext4_fallocate for the matching guard.
+        if punch_hole && zero_range {
+            warn!(
+                target: "ffs::btrfs::rw",
+                operation_id,
+                scenario_id,
+                outcome = "rejected",
+                error_class = "punch_hole_zero_range_conflict",
+                "btrfs_fallocate_rejected"
+            );
+            return Err(FfsError::Io(std::io::Error::from_raw_os_error(
+                EINVAL_ERRNO,
             )));
         }
         if punch_hole && !keep_size {
@@ -54382,6 +54410,40 @@ mod tests {
     }
 
     #[test]
+    fn write_fallocate_punch_hole_with_zero_range_returns_einval_without_mutation() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let attr = fs
+            .create(&cx, root, OsStr::new("falloc_ph_zr.bin"), 0o644, 0, 0)
+            .expect("create");
+        fs.write(&cx, attr.ino, 0, &[0xAB; 8192]).expect("write");
+        // PUNCH_HOLE and ZERO_RANGE are mutually exclusive (kernel vfs_fallocate
+        // returns EINVAL). Without the guard, the punch_hole-first branch would
+        // silently punch a hole and ignore the zeroing request. KEEP_SIZE is set
+        // so the independent punch-without-keep-size check does not fire first —
+        // this isolates the mutual-exclusion guard.
+        let err = fs
+            .fallocate(
+                &cx,
+                attr.ino,
+                0,
+                4096,
+                libc::FALLOC_FL_PUNCH_HOLE | libc::FALLOC_FL_ZERO_RANGE | libc::FALLOC_FL_KEEP_SIZE,
+            )
+            .expect_err("PUNCH_HOLE | ZERO_RANGE must be rejected");
+        assert_eq!(err.to_errno(), libc::EINVAL);
+        // No partial mutation: the file is untouched (no punch occurred).
+        let data = fs.read(&cx, attr.ino, 0, 8192).expect("read after reject");
+        assert!(
+            data.iter().all(|&b| b == 0xAB),
+            "rejected fallocate must not have punched or zeroed any bytes"
+        );
+    }
+
+    #[test]
     fn write_fallocate_non_block_aligned_punch_hole_zeroes_in_range_bytes() {
         let Some(fs) = open_writable_ext4() else {
             return;
@@ -64294,6 +64356,53 @@ mod tests {
             )
             .expect_err("punch-hole without KEEP_SIZE should be rejected");
         assert_eq!(err.to_errno(), libc::EINVAL);
+    }
+
+    #[test]
+    fn btrfs_write_fallocate_punch_hole_with_zero_range_rejects_without_mutation() {
+        let _guard = log_contract_guard();
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+
+        let attr = ops
+            .create(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("ph_zr_conflict.bin"),
+                0o644,
+                0,
+                0,
+            )
+            .unwrap();
+        ops.write(&cx, &mut RequestScope::empty(), attr.ino, 0, &[0xCD_u8; 4096])
+            .expect("seed file before invalid punch+zero mode");
+
+        // PUNCH_HOLE | ZERO_RANGE is mutually exclusive -> EINVAL. Without the
+        // guard, btrfs would fall into the shared punch_hole||zero_range branch
+        // and silently run ZERO_RANGE logic instead of rejecting. KEEP_SIZE is
+        // set so the punch-without-keep-size check does not fire first — this
+        // isolates the mutual-exclusion guard.
+        let err = ops
+            .fallocate(
+                &cx,
+                &mut RequestScope::empty(),
+                attr.ino,
+                0,
+                4096,
+                libc::FALLOC_FL_PUNCH_HOLE | libc::FALLOC_FL_ZERO_RANGE | libc::FALLOC_FL_KEEP_SIZE,
+            )
+            .expect_err("PUNCH_HOLE | ZERO_RANGE should be rejected");
+        assert_eq!(err.to_errno(), libc::EINVAL);
+
+        // The seeded data must survive the rejected, side-effect-free call.
+        let data = ops
+            .read(&cx, &mut RequestScope::empty(), attr.ino, 0, 4096)
+            .expect("read after reject");
+        assert!(
+            data.iter().all(|&b| b == 0xCD),
+            "rejected fallocate must not have mutated the file"
+        );
     }
 
     #[test]
