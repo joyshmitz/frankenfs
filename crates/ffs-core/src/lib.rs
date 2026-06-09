@@ -21989,6 +21989,8 @@ impl OpenFs {
         new_parent: InodeNumber,
         new_name: &[u8],
     ) -> ffs_error::Result<InodeAttr> {
+        // btrfs caps an inode's hard links at BTRFS_LINK_MAX (kernel value).
+        const BTRFS_LINK_MAX: u32 = 65_535;
         self.require_btrfs_rw_allowed("link")?;
         let alloc_mutex = self.require_btrfs_alloc_state()?;
         let target_oid = self.btrfs_canonical_inode(ino)?;
@@ -22002,6 +22004,14 @@ impl OpenFs {
         Self::btrfs_preflight_dir_entry_insert(&alloc, parent_oid, new_name, target_oid)?;
         Self::btrfs_preflight_inode_ref_insert(&alloc, target_oid, parent_oid)?;
         self.btrfs_validate_nlink_adjustment(&alloc, target_oid, 1)?;
+        // EMLINK: btrfs caps an inode's hard links at BTRFS_LINK_MAX (65535),
+        // matching the kernel's btrfs_link. Without this, the count could climb
+        // all the way to u32::MAX and only then fail as Corruption instead of a
+        // proper EMLINK. ext4_link enforces EXT4_LINK_MAX (65000) the same way.
+        let link_target = self.btrfs_read_inode_from_tree(&alloc, target_oid)?;
+        if link_target.nlink >= BTRFS_LINK_MAX {
+            return Err(FfsError::Io(std::io::Error::from_raw_os_error(libc::EMLINK)));
+        }
 
         if self
             .btrfs_lookup_dir_entry(&alloc, parent_oid, new_name)
@@ -67480,6 +67490,73 @@ mod tests {
             )
             .expect("failed unlink must leave directory entry intact");
         assert_eq!(looked_up.ino, attr.ino);
+    }
+
+    #[test]
+    fn btrfs_link_at_max_links_returns_emlink_without_mutation() {
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+
+        let attr = ops
+            .create(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("maxlink.bin"),
+                0o644,
+                0,
+                0,
+            )
+            .unwrap();
+
+        // Drive the inode's nlink up to the btrfs cap (BTRFS_LINK_MAX = 65535)
+        // so the next link would exceed it. Injecting the count directly avoids
+        // 65k real link() calls.
+        {
+            let alloc_mutex = fs.btrfs_alloc_state.as_ref().unwrap();
+            let mut alloc = alloc_mutex.lock();
+            let mut inode = fs
+                .btrfs_read_inode_from_tree(&alloc, attr.ino.0)
+                .expect("read target inode");
+            inode.nlink = 65_535;
+            let key = BtrfsKey {
+                objectid: attr.ino.0,
+                item_type: BTRFS_ITEM_INODE_ITEM,
+                offset: 0,
+            };
+            alloc
+                .fs_tree
+                .update(&key, &inode.to_bytes())
+                .expect("pin nlink at the link cap");
+        }
+
+        let err = ops
+            .link(
+                &cx,
+                &mut RequestScope::empty(),
+                attr.ino,
+                InodeNumber(1),
+                OsStr::new("maxlink_overflow.bin"),
+            )
+            .expect_err("link at BTRFS_LINK_MAX must be rejected with EMLINK");
+        assert_eq!(err.to_errno(), libc::EMLINK);
+
+        // No partial mutation: the rejected link created no new directory entry
+        // and left the link count unchanged.
+        assert!(
+            ops.lookup(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("maxlink_overflow.bin"),
+            )
+            .is_err(),
+            "rejected link must not create the new name"
+        );
+        let after = ops
+            .getattr(&cx, &mut RequestScope::empty(), attr.ino)
+            .expect("getattr after rejected link");
+        assert_eq!(after.nlink, 65_535, "rejected link must not bump nlink");
     }
 
     #[test]
