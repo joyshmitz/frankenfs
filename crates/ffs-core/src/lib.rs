@@ -28311,6 +28311,27 @@ impl FsOps for OpenFs {
 
                 let canonical = self.btrfs_canonical_inode(InodeNumber(ino))?;
 
+                // The encoded read must respect i_size: the kernel returns 0 at
+                // or past EOF, and never reports unencoded bytes beyond it. An
+                // extent can legitimately extend past i_size today (e.g. a
+                // fallocate KEEP_SIZE prealloc extent on a shorter file), and
+                // will routinely once extents become sector-aligned (bd-7mi0p);
+                // without this clamp the ioctl returns data for the region past
+                // EOF. `btrfs_read_inode_attr` resolves i_size on both the
+                // writable (alloc-state) and read-only (tree-walk) paths.
+                let file_size = self.btrfs_read_inode_attr(cx, InodeNumber(ino))?.size;
+                if file_offset >= file_size {
+                    // At/past EOF: no valid file data. Return the bare 32-byte
+                    // metadata header with len = unencoded_len = 0.
+                    let mut eof = Vec::with_capacity(32);
+                    eof.extend_from_slice(&0_u64.to_le_bytes()); // len
+                    eof.extend_from_slice(&0_u64.to_le_bytes()); // unencoded_len
+                    eof.extend_from_slice(&0_u64.to_le_bytes()); // unencoded_offset
+                    eof.extend_from_slice(&0_u32.to_le_bytes()); // compression
+                    eof.extend_from_slice(&0_u32.to_le_bytes()); // encryption
+                    return Ok(eof);
+                }
+
                 // Find extent at the requested offset
                 let extent_opt: Option<(u64, BtrfsExtentData)> =
                     if let Some(alloc_mutex) = self.btrfs_alloc_state.as_ref() {
@@ -28373,6 +28394,13 @@ impl FsOps for OpenFs {
                 let (extent_start, extent) =
                     extent_opt.ok_or_else(|| FfsError::NotFound("no extent at offset".into()))?;
 
+                // An extent may extend past EOF (prealloc KEEP_SIZE, or a
+                // sector-aligned tail). Only the [extent_start, i_size) portion
+                // is valid file data, so the reported unencoded length is capped
+                // to it — file_offset < file_size is guaranteed above, so this is
+                // always >= 1 (bd-7mi0p item 4 / encoded-read EOF parity).
+                let in_file_unencoded = file_size.saturating_sub(extent_start);
+
                 // Build response: encoded data + metadata
                 // Output format (after encoded data): metadata header
                 // len(8) + unencoded_len(8) + unencoded_offset(8) + compression(4) + encryption(4)
@@ -28429,6 +28457,7 @@ impl FsOps for OpenFs {
                 let actual_len = encoded_data.len().min(max_len as usize);
                 let mut result = Vec::with_capacity(32 + actual_len);
                 result.extend_from_slice(&(actual_len as u64).to_le_bytes()); // len
+                let unencoded_len = unencoded_len.min(in_file_unencoded); // cap to in-file bytes
                 result.extend_from_slice(&unencoded_len.to_le_bytes()); // unencoded_len
                 result.extend_from_slice(&unencoded_offset.to_le_bytes()); // unencoded_offset
                 result.extend_from_slice(&u32::from(compression).to_le_bytes()); // compression
@@ -73390,6 +73419,58 @@ mod tests {
         assert!(len > 0, "encoded length should be > 0");
         assert_eq!(unencoded_len, content.len() as u64);
         assert_eq!(compression, 0, "inline extent should be uncompressed");
+    }
+
+    #[test]
+    fn btrfs_encoded_read_respects_i_size_past_eof_bd_br44j() {
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+
+        let attr = ops
+            .create(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                std::ffi::OsStr::new("prealloc-eof.bin"),
+                0o644,
+                0,
+                0,
+            )
+            .expect("create");
+
+        // fallocate KEEP_SIZE: allocates an unwritten extent but leaves i_size 0.
+        ops.fallocate(
+            &cx,
+            &mut RequestScope::empty(),
+            attr.ino,
+            0,
+            8192,
+            libc::FALLOC_FL_KEEP_SIZE,
+        )
+        .expect("keep-size preallocation");
+        assert_eq!(
+            ops.getattr(&cx, &mut RequestScope::empty(), attr.ino)
+                .expect("getattr")
+                .size,
+            0,
+            "KEEP_SIZE must not extend i_size"
+        );
+
+        // Encoded read at offset 0 is at EOF (i_size == 0): the kernel returns no
+        // valid data even though a prealloc extent covers the range (bd-br44j).
+        let mut args = vec![0u8; 64];
+        args[16..24].copy_from_slice(&0_u64.to_le_bytes()); // offset
+        args[24..32].copy_from_slice(&0_u64.to_le_bytes()); // flags
+        args[32..40].copy_from_slice(&8192_u64.to_le_bytes()); // max_len
+        let result = fs
+            .btrfs_encoded_read(&cx, &mut RequestScope::empty(), attr.ino.0, &args)
+            .expect("encoded_read at EOF");
+
+        assert_eq!(result.len(), 32, "EOF read returns only the metadata header");
+        let len = u64::from_le_bytes(result[0..8].try_into().unwrap());
+        let unencoded_len = u64::from_le_bytes(result[8..16].try_into().unwrap());
+        assert_eq!(len, 0, "no encoded bytes are returned past EOF");
+        assert_eq!(unencoded_len, 0, "no unencoded bytes are reported past EOF");
     }
 
     #[test]
