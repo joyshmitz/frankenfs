@@ -21,8 +21,9 @@ use asupersync::Cx;
 use asupersync::raptorq::decoder::{
     DecodeError, DecodeResult, InactivationDecoder, ReceivedSymbol,
 };
-use asupersync::raptorq::gf256::{Gf256, gf256_addmul_slice, gf256_mul_slice};
-use asupersync::raptorq::systematic::{EmittedSymbol, SystematicEncoder};
+use asupersync::raptorq::gf256::{Gf256, gf256_add_slice, gf256_addmul_slice, gf256_mul_slice};
+use asupersync::raptorq::rfc6330::{next_prime_ge, try_tuple};
+use asupersync::raptorq::systematic::{EmittedSymbol, SystematicEncoder, SystematicParams};
 use ffs_block::BlockDevice;
 use ffs_error::{FfsError, Result};
 use ffs_types::{BlockNumber, GroupNumber};
@@ -85,17 +86,13 @@ pub fn encode_group(
         source_symbols.push(buf.into_inner());
     }
 
-    // Create systematic encoder.
-    let mut encoder = SystematicEncoder::new(&source_symbols, block_size as usize, seed)
-        .ok_or_else(|| {
-            FfsError::RepairFailed(format!(
-                "constraint matrix singular for group {} (K={source_block_count})",
-                group.0
-            ))
-        })?;
-
-    // Generate repair symbols.
-    let repair_symbols = encoder.emit_repair(repair_count as usize);
+    let repair_symbols = emit_projected_repair_symbols(
+        &source_symbols,
+        block_size as usize,
+        seed,
+        repair_count as usize,
+        group,
+    )?;
 
     Ok(EncodedGroup {
         group,
@@ -104,6 +101,81 @@ pub fn encode_group(
         seed,
         repair_symbols,
     })
+}
+
+fn emit_projected_repair_symbols(
+    source_symbols: &[Vec<u8>],
+    block_size: usize,
+    seed: u64,
+    repair_count: usize,
+    group: GroupNumber,
+) -> Result<Vec<EmittedSymbol>> {
+    let source_count = source_symbols.len();
+    let coefficient_encoder =
+        build_source_coefficient_encoder(source_count, seed).ok_or_else(|| {
+            FfsError::RepairFailed(format!(
+                "constraint matrix singular for group {} (K={source_count})",
+                group.0
+            ))
+        })?;
+
+    let start_esi = coefficient_encoder.next_repair_esi();
+    let params = coefficient_encoder.params();
+    let mut coefficients = vec![0_u8; source_count];
+    let mut repair_symbols = Vec::with_capacity(repair_count);
+
+    for i in 0..repair_count {
+        let Ok(i_u32) = u32::try_from(i) else {
+            break;
+        };
+        let Some(esi) = start_esi.checked_add(i_u32) else {
+            break;
+        };
+
+        coefficient_encoder.repair_symbol_into(esi, &mut coefficients);
+
+        let mut data = vec![0_u8; block_size];
+        for (&coefficient, source_symbol) in coefficients.iter().zip(source_symbols) {
+            let coefficient = Gf256::new(coefficient);
+            if coefficient.is_zero() {
+                continue;
+            }
+            if coefficient == Gf256::ONE {
+                gf256_add_slice(&mut data, source_symbol);
+            } else {
+                gf256_addmul_slice(&mut data, source_symbol, coefficient);
+            }
+        }
+
+        repair_symbols.push(EmittedSymbol {
+            esi,
+            data,
+            is_source: false,
+            degree: raptorq_repair_symbol_degree(params, esi),
+        });
+    }
+
+    Ok(repair_symbols)
+}
+
+fn raptorq_repair_symbol_degree(params: &SystematicParams, esi: u32) -> usize {
+    let Some(padding_delta) = params
+        .k_prime
+        .checked_sub(params.k)
+        .and_then(|delta| u32::try_from(delta).ok())
+    else {
+        return 0;
+    };
+    let Some(repair_isi) = esi.checked_add(padding_delta) else {
+        return 0;
+    };
+    let Some(pi_modulus) = next_prime_ge(params.p) else {
+        return 0;
+    };
+    let Some(lt_tuple) = try_tuple(params.j, params.w, params.p, pi_modulus, repair_isi) else {
+        return 0;
+    };
+    lt_tuple.d + lt_tuple.d1
 }
 
 // ── Decode ──────────────────────────────────────────────────────────────────
@@ -877,6 +949,16 @@ mod tests {
             .collect()
     }
 
+    fn hex_encode(bytes: &[u8]) -> String {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let mut out = String::with_capacity(bytes.len() * 2);
+        for &byte in bytes {
+            out.push(HEX[(byte >> 4) as usize] as char);
+            out.push(HEX[(byte & 0x0f) as usize] as char);
+        }
+        out
+    }
+
     fn setup_device(k: u32, block_size: u32) -> MemBlockDevice {
         let device = MemBlockDevice::new(block_size, u64::from(k) * 2);
         for i in 0..u64::from(k) {
@@ -921,6 +1003,132 @@ mod tests {
         for (s1, s2) in enc1.repair_symbols.iter().zip(enc2.repair_symbols.iter()) {
             assert_eq!(s1.esi, s2.esi);
             assert_eq!(s1.data, s2.data);
+        }
+    }
+
+    #[test]
+    fn raptorq_encode_golden_report() {
+        let cx = Cx::for_testing();
+        let k = 8;
+        let block_size = 96;
+        let repair_count = 4;
+        let device = setup_device(k, block_size);
+        let uuid = test_uuid();
+        let group = GroupNumber(3);
+
+        let encoded =
+            encode_group(&cx, &device, &uuid, group, BlockNumber(0), k, repair_count).unwrap();
+
+        println!("RAPTORQ_ENCODE_GOLDEN_BEGIN");
+        println!(
+            "group={} source_block_count={} symbol_size={} seed={} repair_count={}",
+            encoded.group.0,
+            encoded.source_block_count,
+            encoded.symbol_size,
+            encoded.seed,
+            encoded.repair_symbols.len()
+        );
+        for symbol in &encoded.repair_symbols {
+            println!(
+                "symbol esi={} is_source={} degree={} data={}",
+                symbol.esi,
+                symbol.is_source,
+                symbol.degree,
+                hex_encode(&symbol.data)
+            );
+        }
+        println!("RAPTORQ_ENCODE_GOLDEN_END");
+    }
+
+    #[test]
+    fn raptorq_reference_encode_golden_report() {
+        let cx = Cx::for_testing();
+        let k = 8_u32;
+        let block_size = 96_u32;
+        let repair_count = 4_u32;
+        let device = setup_device(k, block_size);
+        let uuid = test_uuid();
+        let group = GroupNumber(3);
+        let seed = repair_seed(&uuid, group);
+
+        let mut source_symbols = Vec::with_capacity(usize::try_from(k).expect("test K fits usize"));
+        for block in 0..k {
+            source_symbols.push(
+                device
+                    .read_block(&cx, BlockNumber(u64::from(block)))
+                    .unwrap()
+                    .into_inner(),
+            );
+        }
+        let mut reference_encoder = SystematicEncoder::new(
+            &source_symbols,
+            usize::try_from(block_size).expect("test block size fits usize"),
+            seed,
+        )
+        .unwrap();
+        let repair_symbols = reference_encoder
+            .emit_repair(usize::try_from(repair_count).expect("test repair count fits usize"));
+
+        println!("RAPTORQ_ENCODE_GOLDEN_BEGIN");
+        println!(
+            "group={} source_block_count={} symbol_size={} seed={} repair_count={}",
+            group.0,
+            k,
+            block_size,
+            seed,
+            repair_symbols.len()
+        );
+        for symbol in &repair_symbols {
+            println!(
+                "symbol esi={} is_source={} degree={} data={}",
+                symbol.esi,
+                symbol.is_source,
+                symbol.degree,
+                hex_encode(&symbol.data)
+            );
+        }
+        println!("RAPTORQ_ENCODE_GOLDEN_END");
+    }
+
+    #[test]
+    fn encode_group_projected_symbols_match_full_encoder_reference() {
+        let cx = Cx::for_testing();
+        let k = 16_u32;
+        let block_size = 257_u32;
+        let repair_count = 6_u32;
+        let device = setup_device(k, block_size);
+        let uuid = test_uuid();
+        let group = GroupNumber(5);
+        let seed = repair_seed(&uuid, group);
+
+        let mut source_symbols = Vec::with_capacity(usize::try_from(k).expect("test K fits usize"));
+        for block in 0..k {
+            source_symbols.push(
+                device
+                    .read_block(&cx, BlockNumber(u64::from(block)))
+                    .unwrap()
+                    .into_inner(),
+            );
+        }
+        let mut reference_encoder = SystematicEncoder::new(
+            &source_symbols,
+            usize::try_from(block_size).expect("test block size fits usize"),
+            seed,
+        )
+        .unwrap();
+        let expected = reference_encoder
+            .emit_repair(usize::try_from(repair_count).expect("test repair count fits usize"));
+
+        let actual =
+            encode_group(&cx, &device, &uuid, group, BlockNumber(0), k, repair_count).unwrap();
+
+        assert_eq!(actual.seed, seed);
+        assert_eq!(actual.repair_symbols.len(), expected.len());
+        for (actual, expected) in actual.repair_symbols.iter().zip(&expected) {
+            assert_eq!(actual.esi, expected.esi);
+            assert_eq!(actual.is_source, expected.is_source);
+            assert_eq!(actual.degree, expected.degree);
+            assert_eq!(actual.data, expected.data);
         }
     }
 
