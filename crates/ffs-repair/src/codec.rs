@@ -21,6 +21,7 @@ use asupersync::Cx;
 use asupersync::raptorq::decoder::{
     DecodeError, DecodeResult, InactivationDecoder, ReceivedSymbol,
 };
+use asupersync::raptorq::gf256::{Gf256, gf256_add_slice, gf256_addmul_slice, gf256_mul_slice};
 use asupersync::raptorq::systematic::{EmittedSymbol, SystematicEncoder};
 use ffs_block::BlockDevice;
 use ffs_error::{FfsError, Result};
@@ -29,6 +30,8 @@ use ffs_types::{BlockNumber, GroupNumber};
 use crate::symbol::repair_seed;
 
 const RQ_DECODE_WAVEFRONT_BATCH: usize = 4;
+const DIRECT_SMALL_ERASURE_MAX_CORRUPT: usize = 2;
+const DIRECT_SMALL_ERASURE_MAX_SOURCE_BLOCKS: usize = 64;
 
 // ── Encode ──────────────────────────────────────────────────────────────────
 
@@ -166,6 +169,13 @@ impl RepairSymbolInput<'_> {
         match self {
             Self::Borrowed(symbols) => symbols.len(),
             Self::Owned(symbols) => symbols.len(),
+        }
+    }
+
+    fn as_slice(&self) -> &[(u32, Vec<u8>)] {
+        match self {
+            Self::Borrowed(symbols) => symbols,
+            Self::Owned(symbols) => symbols,
         }
     }
 
@@ -336,6 +346,20 @@ fn decode_group_impl(
     repair_symbols.validate_lengths(block_size, group)?;
 
     let decoder = InactivationDecoder::new(k, block_size, seed);
+    if let Some(outcome) = try_direct_small_erasure_decode(
+        cx,
+        device,
+        &decoder,
+        first_block,
+        source_block_count,
+        corrupt_indices,
+        &corrupt_set,
+        repair_symbols.as_slice(),
+        seed,
+        block_size,
+    )? {
+        return Ok(outcome);
+    }
 
     // Start with constraint symbols (LDPC + HDPC with zero data).
     let mut received: Vec<ReceivedSymbol> = decoder.constraint_symbols();
@@ -425,6 +449,341 @@ fn decode_group_impl(
         recovered,
         stats: result.stats,
     })
+}
+
+#[derive(Clone, Copy)]
+struct DirectRepairRow {
+    symbol_index: usize,
+    coefficients: [Gf256; DIRECT_SMALL_ERASURE_MAX_CORRUPT],
+}
+
+struct DirectRepairPlan {
+    rows: Vec<DirectRepairRow>,
+    selection: DirectRepairSelection,
+}
+
+enum DirectRepairSelection {
+    One(DirectRepairRow),
+    Two(DirectRepairRow, DirectRepairRow),
+}
+
+#[allow(clippy::too_many_arguments)]
+fn try_direct_small_erasure_decode(
+    cx: &Cx,
+    device: &dyn BlockDevice,
+    decoder: &InactivationDecoder,
+    first_block: BlockNumber,
+    source_block_count: u32,
+    corrupt_indices: &[u32],
+    corrupt_set: &CorruptIndexSet,
+    repair_symbols: &[(u32, Vec<u8>)],
+    seed: u64,
+    block_size: usize,
+) -> Result<Option<DecodeOutcome>> {
+    let missing_count = corrupt_set.len();
+    let source_count =
+        usize::try_from(source_block_count).expect("u32 source block count fits usize");
+    if !(1..=DIRECT_SMALL_ERASURE_MAX_CORRUPT).contains(&missing_count)
+        || source_count > DIRECT_SMALL_ERASURE_MAX_SOURCE_BLOCKS
+    {
+        return Ok(None);
+    }
+
+    let Some(plan) = select_direct_repair_plan(
+        decoder,
+        source_count,
+        &corrupt_set.unique,
+        repair_symbols,
+        seed,
+    ) else {
+        return Ok(None);
+    };
+
+    let known_source = read_known_source_symbols(
+        cx,
+        device,
+        first_block,
+        source_block_count,
+        corrupt_set,
+        block_size,
+    )?;
+    let Some(known_encoder) = SystematicEncoder::new(&known_source, block_size, seed) else {
+        return Ok(None);
+    };
+
+    let solved = match plan {
+        DirectRepairPlan {
+            rows,
+            selection: DirectRepairSelection::One(row),
+        } => {
+            let Some(solved) = solve_one_erasure(&known_encoder, repair_symbols, row)? else {
+                return Ok(None);
+            };
+            if !direct_solution_satisfies_all_repairs(
+                &known_encoder,
+                repair_symbols,
+                &rows,
+                &solved,
+            )? {
+                return Ok(None);
+            }
+            solved
+        }
+        DirectRepairPlan {
+            rows,
+            selection: DirectRepairSelection::Two(row_a, row_b),
+        } => {
+            let Some(solved) = solve_two_erasures(&known_encoder, repair_symbols, row_a, row_b)?
+            else {
+                return Ok(None);
+            };
+            if !direct_solution_satisfies_all_repairs(
+                &known_encoder,
+                repair_symbols,
+                &rows,
+                &solved,
+            )? {
+                return Ok(None);
+            }
+            solved
+        }
+    };
+
+    let recovered =
+        recover_from_direct_solution(first_block, corrupt_indices, &corrupt_set.unique, &solved)?;
+
+    Ok(Some(DecodeOutcome {
+        complete: recovered.len() == corrupt_indices.len(),
+        recovered,
+        stats: direct_decode_stats(missing_count),
+    }))
+}
+
+fn read_known_source_symbols(
+    cx: &Cx,
+    device: &dyn BlockDevice,
+    first_block: BlockNumber,
+    source_block_count: u32,
+    corrupt_set: &CorruptIndexSet,
+    block_size: usize,
+) -> Result<Vec<Vec<u8>>> {
+    let mut source = Vec::with_capacity(source_block_count as usize);
+    for i in 0..source_block_count {
+        if corrupt_set.contains(i) {
+            source.push(vec![0; block_size]);
+            continue;
+        }
+        let block_num = BlockNumber(first_block.0.checked_add(u64::from(i)).ok_or_else(|| {
+            FfsError::RepairFailed(format!(
+                "decode_group: block address overflow at first_block={} + offset={i}",
+                first_block.0
+            ))
+        })?);
+        source.push(device.read_block(cx, block_num)?.into_inner());
+    }
+    Ok(source)
+}
+
+fn select_direct_repair_plan(
+    decoder: &InactivationDecoder,
+    source_block_count: usize,
+    missing: &[u32],
+    repair_symbols: &[(u32, Vec<u8>)],
+    seed: u64,
+) -> Option<DirectRepairPlan> {
+    let basis_encoders = build_missing_basis_encoders(source_block_count, missing, seed)?;
+    let mut rows = Vec::with_capacity(repair_symbols.len());
+    for (symbol_index, (esi, _data)) in repair_symbols.iter().enumerate() {
+        if decoder.repair_equation(*esi).is_err() {
+            return None;
+        }
+        let mut coefficients = [Gf256::ZERO; DIRECT_SMALL_ERASURE_MAX_CORRUPT];
+        for (slot, encoder) in basis_encoders.iter().enumerate() {
+            coefficients[slot] = Gf256::new(encoder.repair_symbol(*esi)[0]);
+        }
+        rows.push(DirectRepairRow {
+            symbol_index,
+            coefficients,
+        });
+    }
+
+    let selection = match missing.len() {
+        1 => rows
+            .iter()
+            .copied()
+            .find(|row| !row.coefficients[0].is_zero())
+            .map(DirectRepairSelection::One),
+        2 => select_full_rank_pair(&rows)
+            .map(|(row_a, row_b)| DirectRepairSelection::Two(row_a, row_b)),
+        _ => None,
+    }?;
+    Some(DirectRepairPlan { rows, selection })
+}
+
+fn build_missing_basis_encoders(
+    source_block_count: usize,
+    missing: &[u32],
+    seed: u64,
+) -> Option<Vec<SystematicEncoder>> {
+    let mut encoders = Vec::with_capacity(missing.len());
+    for &missing_index in missing {
+        let mut source = vec![vec![0_u8; 1]; source_block_count];
+        let missing_position = usize::try_from(missing_index).ok()?;
+        source[missing_position][0] = 1;
+        encoders.push(SystematicEncoder::new(&source, 1, seed)?);
+    }
+    Some(encoders)
+}
+
+fn select_full_rank_pair(rows: &[DirectRepairRow]) -> Option<(DirectRepairRow, DirectRepairRow)> {
+    for first_index in 0..rows.len() {
+        for second_index in first_index + 1..rows.len() {
+            let row_a = &rows[first_index];
+            let row_b = &rows[second_index];
+            if !det2(row_a.coefficients, row_b.coefficients).is_zero() {
+                return Some((*row_a, *row_b));
+            }
+        }
+    }
+    None
+}
+
+fn det2(
+    row_a: [Gf256; DIRECT_SMALL_ERASURE_MAX_CORRUPT],
+    row_b: [Gf256; DIRECT_SMALL_ERASURE_MAX_CORRUPT],
+) -> Gf256 {
+    row_a[0] * row_b[1] + row_a[1] * row_b[0]
+}
+
+fn repair_residual(
+    known_encoder: &SystematicEncoder,
+    repair_symbols: &[(u32, Vec<u8>)],
+    row: &DirectRepairRow,
+) -> Result<Vec<u8>> {
+    let (esi, actual) = &repair_symbols[row.symbol_index];
+    let known_contribution = known_encoder.repair_symbol(*esi);
+    if known_contribution.len() != actual.len() {
+        return Err(FfsError::RepairFailed(format!(
+            "decode_group: direct repair residual for esi {esi} had known length {} but actual length {}",
+            known_contribution.len(),
+            actual.len(),
+        )));
+    }
+    let mut residual = actual.clone();
+    gf256_add_slice(&mut residual, &known_contribution);
+    Ok(residual)
+}
+
+fn solve_one_erasure(
+    known_encoder: &SystematicEncoder,
+    repair_symbols: &[(u32, Vec<u8>)],
+    row: DirectRepairRow,
+) -> Result<Option<Vec<Vec<u8>>>> {
+    let coefficient = row.coefficients[0];
+    if coefficient.is_zero() {
+        return Ok(None);
+    }
+    let mut recovered = repair_residual(known_encoder, repair_symbols, &row)?;
+    gf256_mul_slice(&mut recovered, coefficient.inv());
+    Ok(Some(vec![recovered]))
+}
+
+fn solve_two_erasures(
+    known_encoder: &SystematicEncoder,
+    repair_symbols: &[(u32, Vec<u8>)],
+    row_a: DirectRepairRow,
+    row_b: DirectRepairRow,
+) -> Result<Option<Vec<Vec<u8>>>> {
+    let determinant = det2(row_a.coefficients, row_b.coefficients);
+    if determinant.is_zero() {
+        return Ok(None);
+    }
+
+    let residual_a = repair_residual(known_encoder, repair_symbols, &row_a)?;
+    let residual_b = repair_residual(known_encoder, repair_symbols, &row_b)?;
+    if residual_a.len() != residual_b.len() {
+        return Err(FfsError::RepairFailed(format!(
+            "decode_group: direct residual length mismatch: {} vs {}",
+            residual_a.len(),
+            residual_b.len(),
+        )));
+    }
+    let mut first = vec![0; residual_a.len()];
+    let mut second = vec![0; residual_a.len()];
+
+    gf256_addmul_slice(&mut first, &residual_a, row_b.coefficients[1]);
+    gf256_addmul_slice(&mut first, &residual_b, row_a.coefficients[1]);
+    gf256_mul_slice(&mut first, determinant.inv());
+
+    gf256_addmul_slice(&mut second, &residual_a, row_b.coefficients[0]);
+    gf256_addmul_slice(&mut second, &residual_b, row_a.coefficients[0]);
+    gf256_mul_slice(&mut second, determinant.inv());
+
+    Ok(Some(vec![first, second]))
+}
+
+fn direct_solution_satisfies_all_repairs(
+    known_encoder: &SystematicEncoder,
+    repair_symbols: &[(u32, Vec<u8>)],
+    rows: &[DirectRepairRow],
+    solved: &[Vec<u8>],
+) -> Result<bool> {
+    for row in rows {
+        let residual = repair_residual(known_encoder, repair_symbols, row)?;
+        let mut expected = vec![0; residual.len()];
+        for (missing_position, recovered) in solved.iter().enumerate() {
+            let coefficient = row.coefficients[missing_position];
+            if !coefficient.is_zero() {
+                gf256_addmul_slice(&mut expected, recovered, coefficient);
+            }
+        }
+        if residual != expected {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn recover_from_direct_solution(
+    first_block: BlockNumber,
+    corrupt_indices: &[u32],
+    unique_corrupt_indices: &[u32],
+    solved: &[Vec<u8>],
+) -> Result<Vec<RecoveredBlock>> {
+    let mut recovered = Vec::with_capacity(corrupt_indices.len());
+    for &idx in corrupt_indices {
+        let Some(unique_position) = unique_corrupt_indices
+            .iter()
+            .position(|&unique| unique == idx)
+        else {
+            return Err(FfsError::RepairFailed(format!(
+                "decode_group: corrupt index {idx} missing from direct solution"
+            )));
+        };
+        let block_num =
+            BlockNumber(first_block.0.checked_add(u64::from(idx)).ok_or_else(|| {
+                FfsError::RepairFailed(format!(
+                    "decode_group: block address overflow at first_block={} + corrupt_idx={idx}",
+                    first_block.0
+                ))
+            })?);
+        recovered.push(RecoveredBlock {
+            block: block_num,
+            data: solved[unique_position].clone(),
+        });
+    }
+    Ok(recovered)
+}
+
+#[allow(clippy::field_reassign_with_default)]
+fn direct_decode_stats(missing_count: usize) -> asupersync::raptorq::decoder::DecodeStats {
+    let mut stats = asupersync::raptorq::decoder::DecodeStats::default();
+    stats.peeled = missing_count;
+    stats.pivots_selected = missing_count;
+    stats.gauss_ops = missing_count;
+    stats.policy_mode = Some("small_erasure_direct");
+    stats.policy_reason = Some("full_rank_source_domain_repair");
+    stats
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────
@@ -912,6 +1271,87 @@ mod tests {
         assert!(outcome.complete);
         assert_eq!(outcome.recovered[0].data, orig_first);
         assert_eq!(outcome.recovered[1].data, orig_last);
+    }
+
+    #[test]
+    fn decode_two_corrupt_blocks_uses_direct_small_erasure_path() {
+        let cx = Cx::for_testing();
+        let k = 16;
+        let block_size = 64;
+        let device = setup_device(k, block_size);
+        let uuid = test_uuid();
+        let group = GroupNumber(0);
+
+        let encoded = encode_group(&cx, &device, &uuid, group, BlockNumber(0), k, k).unwrap();
+        let repair_data: Vec<(u32, Vec<u8>)> = encoded
+            .repair_symbols
+            .iter()
+            .map(|s| (s.esi, s.data.clone()))
+            .collect();
+
+        let corrupt = [0, 1];
+        let original_first = make_deterministic_block(0, block_size);
+        let original_second = make_deterministic_block(1, block_size);
+        let outcome = decode_group(
+            &cx,
+            &device,
+            &uuid,
+            group,
+            BlockNumber(0),
+            k,
+            &corrupt,
+            &repair_data,
+        )
+        .unwrap();
+
+        assert!(outcome.complete);
+        assert_eq!(outcome.stats.policy_mode, Some("small_erasure_direct"));
+        assert_eq!(outcome.recovered[0].block, BlockNumber(0));
+        assert_eq!(outcome.recovered[1].block, BlockNumber(1));
+        assert_eq!(outcome.recovered[0].data, original_first);
+        assert_eq!(outcome.recovered[1].data, original_second);
+    }
+
+    #[test]
+    fn decode_direct_small_erasure_preserves_duplicate_output_order() {
+        let cx = Cx::for_testing();
+        let k = 16;
+        let block_size = 64;
+        let device = setup_device(k, block_size);
+        let uuid = test_uuid();
+        let group = GroupNumber(0);
+
+        let encoded = encode_group(&cx, &device, &uuid, group, BlockNumber(0), k, k).unwrap();
+        let repair_data: Vec<(u32, Vec<u8>)> = encoded
+            .repair_symbols
+            .iter()
+            .map(|s| (s.esi, s.data.clone()))
+            .collect();
+
+        let corrupt = [5, 0, 5];
+        let original_five = make_deterministic_block(5, block_size);
+        let original_zero = make_deterministic_block(0, block_size);
+        let outcome = decode_group(
+            &cx,
+            &device,
+            &uuid,
+            group,
+            BlockNumber(0),
+            k,
+            &corrupt,
+            &repair_data,
+        )
+        .unwrap();
+
+        assert!(outcome.complete);
+        assert_eq!(outcome.stats.policy_mode, Some("small_erasure_direct"));
+        assert_eq!(outcome.recovered.len(), corrupt.len());
+        assert_eq!(outcome.recovered[0].block, BlockNumber(5));
+        assert_eq!(outcome.recovered[1].block, BlockNumber(0));
+        assert_eq!(outcome.recovered[2].block, BlockNumber(5));
+        assert_eq!(outcome.recovered[0].data, original_five);
+        assert_eq!(outcome.recovered[1].data, original_zero);
+        assert_eq!(outcome.recovered[2].data, outcome.recovered[0].data);
     }
 
     #[test]
