@@ -18135,6 +18135,17 @@ impl OpenFs {
         )
     }
 
+    /// True for a btrfs *explicit hole* file extent: a regular `EXTENT_DATA`
+    /// with `disk_bytenr == 0` (no backing extent, reads as zeros). Common on
+    /// kernel images without the `NO_HOLES` feature. A preallocated extent has a
+    /// real `disk_bytenr`, so it is NOT a hole — it is allocated data that reads
+    /// zeros (this matches the kernel's `EXTENT_MAP_HOLE` distinction). The read
+    /// path zero-fills these (see `btrfs_read_file`); `SEEK_DATA`/`SEEK_HOLE`
+    /// must treat them as holes too (bd-pb6bs).
+    fn btrfs_extent_is_hole(extent: &BtrfsExtentData) -> bool {
+        matches!(extent, BtrfsExtentData::Regular { disk_bytenr: 0, .. })
+    }
+
     fn btrfs_materialize_extent(
         &self,
         cx: &Cx,
@@ -25369,7 +25380,13 @@ impl OpenFs {
             ));
         }
 
-        let extents = self.btrfs_fiemap_extent_items(cx, canonical)?;
+        // Explicit hole extents (disk_bytenr == 0) are NOT data — drop them so
+        // they read as gaps, matching btrfs_read_file and the kernel (bd-pb6bs).
+        let extents: Vec<_> = self
+            .btrfs_fiemap_extent_items(cx, canonical)?
+            .into_iter()
+            .filter(|(_, extent)| !Self::btrfs_extent_is_hole(extent))
+            .collect();
 
         for (file_offset, extent) in &extents {
             let ext_len = Self::btrfs_extent_logical_len(extent)?;
@@ -25407,7 +25424,13 @@ impl OpenFs {
             ));
         }
 
-        let extents = self.btrfs_fiemap_extent_items(cx, canonical)?;
+        // Explicit hole extents (disk_bytenr == 0) are NOT data, so they must
+        // count as holes, not advance the covered-data cursor (bd-pb6bs).
+        let extents: Vec<_> = self
+            .btrfs_fiemap_extent_items(cx, canonical)?
+            .into_iter()
+            .filter(|(_, extent)| !Self::btrfs_extent_is_hole(extent))
+            .collect();
 
         // Track where we've seen contiguous data.
         let mut covered_until = 0_u64;
@@ -67582,6 +67605,89 @@ mod tests {
         assert_eq!(
             attr.mtime, attr.ctime,
             "a size-changing truncate must update mtime, not leave it at the write time"
+        );
+    }
+
+    /// btrfs SEEK_DATA/SEEK_HOLE must treat an explicit hole extent
+    /// (disk_bytenr == 0, as kernel images without NO_HOLES carry) as a hole,
+    /// matching btrfs_read_file. Previously the lseek paths counted every
+    /// present EXTENT_DATA as data, so SEEK_DATA returned a hole offset and
+    /// SEEK_HOLE skipped past the hole (bd-pb6bs).
+    #[test]
+    fn btrfs_lseek_treats_explicit_hole_extent_as_hole_bd_pb6bs() {
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+        let s: u64 = 4096; // fsops image sectorsize
+
+        let file = ops
+            .create(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("sparse.bin"),
+                0o644,
+                0,
+                0,
+            )
+            .unwrap();
+        // Data extent A at [0, s) and data extent C at [2s, 3s); gap [s, 2s).
+        ops.write(
+            &cx,
+            &mut RequestScope::empty(),
+            file.ino,
+            0,
+            &vec![0xAB_u8; s as usize],
+        )
+        .unwrap();
+        ops.write(
+            &cx,
+            &mut RequestScope::empty(),
+            file.ino,
+            2 * s,
+            &vec![0xCD_u8; s as usize],
+        )
+        .unwrap();
+
+        // Inject an EXPLICIT hole extent (disk_bytenr == 0) over [s, 2s).
+        let canonical = fs.btrfs_canonical_inode(file.ino).unwrap();
+        {
+            let alloc_mutex = fs.btrfs_alloc_state.as_ref().unwrap();
+            let mut alloc = alloc_mutex.lock();
+            let hole = BtrfsExtentData::Regular {
+                generation: alloc.generation,
+                ram_bytes: s,
+                extent_type: BTRFS_FILE_EXTENT_REG,
+                compression: 0,
+                disk_bytenr: 0,
+                disk_num_bytes: 0,
+                extent_offset: 0,
+                num_bytes: s,
+            };
+            let key = BtrfsKey {
+                objectid: canonical,
+                item_type: BTRFS_ITEM_EXTENT_DATA,
+                offset: s,
+            };
+            alloc.fs_tree.insert(key, &hole.to_bytes()).unwrap();
+        }
+
+        // SEEK_DATA from the start of the hole must skip to extent C at 2s.
+        let data_pos = ops
+            .lseek(&cx, &mut RequestScope::empty(), file.ino, s, SeekWhence::Data)
+            .unwrap();
+        assert_eq!(
+            data_pos,
+            2 * s,
+            "SEEK_DATA must skip an explicit hole extent to the next real data"
+        );
+
+        // SEEK_HOLE from 0 must land at the start of the hole (s), not skip it.
+        let hole_pos = ops
+            .lseek(&cx, &mut RequestScope::empty(), file.ino, 0, SeekWhence::Hole)
+            .unwrap();
+        assert_eq!(
+            hole_pos, s,
+            "SEEK_HOLE must report the explicit hole extent at offset s"
         );
     }
 
