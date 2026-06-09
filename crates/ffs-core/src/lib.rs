@@ -54964,6 +54964,84 @@ mod tests {
         }
     }
 
+    /// A COMPOUND ext4 data-op churn — extent growth, a sparse gap, in-place
+    /// overwrite, unwritten preallocation, punch-hole, truncate-down and -up,
+    /// and a write into the extended region — must keep the on-disk image
+    /// e2fsck-clean AND byte-exact. The xattr/namespace churn proptests cover
+    /// those surfaces; the data path (extent tree split/merge/free, i_blocks
+    /// accounting, block bitmap, unwritten extents) had only piecemeal e2fsck
+    /// coverage and the write/truncate/fallocate random proptests are in-memory
+    /// only (no e2fsck). Skips when e2fsprogs is unavailable (bd-8w6xh).
+    #[test]
+    fn ext4_data_op_churn_passes_e2fsck_bd_8w6xh() {
+        let Some((fs, dev, _tmp, image)) = open_ext4_mke2fs(8, false) else {
+            return; // e2fsprogs unavailable — skip.
+        };
+        let cx = Cx::for_testing();
+        let ino = fs
+            .create(&cx, InodeNumber(2), OsStr::new("data.bin"), 0o644, 0, 0)
+            .expect("create")
+            .ino;
+
+        // Mirror every op into a Vec<u8> content model (unwritten/holes read as
+        // zeros), applying the same ops to both fs and model.
+        let mut model: Vec<u8> = Vec::new();
+        let do_write = |model: &mut Vec<u8>, off: usize, byte: u8, len: usize| {
+            fs.write(&cx, ino, off as u64, &vec![byte; len]).expect("write");
+            if off + len > model.len() {
+                model.resize(off + len, 0);
+            }
+            for b in &mut model[off..off + len] {
+                *b = byte;
+            }
+        };
+        do_write(&mut model, 0, b'A', 8192); // two-block extent
+        do_write(&mut model, 16384, b'B', 4096); // sparse gap [8192,16384) + new extent
+        do_write(&mut model, 4096, b'C', 4096); // in-place overwrite of the 2nd block
+
+        const KEEP_SIZE: i32 = 0x01;
+        const PUNCH_HOLE: i32 = 0x02;
+        // Preallocate part of the hole as unwritten (reads zero; model no-op).
+        fs.fallocate(&cx, ino, 8192, 4096, KEEP_SIZE)
+            .expect("fallocate preallocate");
+        // Punch the first block (frees it; reads zero).
+        fs.fallocate(&cx, ino, 0, 4096, PUNCH_HOLE | KEEP_SIZE)
+            .expect("fallocate punch hole");
+        for b in &mut model[0..4096] {
+            *b = 0;
+        }
+
+        let do_truncate = |model: &mut Vec<u8>, size: usize| {
+            fs.setattr(
+                &cx,
+                ino,
+                &SetAttrRequest {
+                    size: Some(size as u64),
+                    ..SetAttrRequest::default()
+                },
+            )
+            .expect("truncate");
+            model.resize(size, 0);
+        };
+        do_truncate(&mut model, 18000); // truncate down mid-extent (frees tail blocks)
+        do_truncate(&mut model, 24000); // sparse extend
+        do_write(&mut model, 22000, b'D', 2000); // write into the extended region
+
+        // Content must match the model exactly.
+        let got = fs
+            .read(&cx, ino, 0, u32::try_from(model.len()).unwrap())
+            .expect("read");
+        assert_eq!(got, model, "ext4 data-op churn content must match the model");
+
+        // e2fsck: validates extent-tree / i_blocks / block-bitmap accounting.
+        fs.flush_mvcc_to_device(&cx).expect("flush");
+        std::fs::write(&image, dev.snapshot_bytes()).expect("write image");
+        if let Some((clean, output)) = run_e2fsck(&image) {
+            eprintln!("BD_8W6XH_E2FSCK_RAN clean={clean}");
+            assert!(clean, "e2fsck after ext4 data-op churn:\n{output}");
+        }
+    }
+
     /// bd-bdro7: a contiguous sequential write must coalesce into ONE extent.
     /// The write path allocated one block at a time; without run allocation each
     /// became its own extent, so a >4-block write overflowed the inline extent
