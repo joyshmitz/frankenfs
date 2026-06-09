@@ -7843,20 +7843,40 @@ impl OpenFs {
             if let Some(alloc_mutex) = self.btrfs_alloc_state.as_ref() {
                 let alloc = alloc_mutex.lock();
                 let inode = self.btrfs_read_inode_from_tree(&alloc, canonical)?;
+                // Fetch only the EXTENT_DATA items that can overlap the requested
+                // read window [offset, offset+size), bounding BOTH edges so the
+                // query is O(log N + overlapping) instead of an O(extents) scan
+                // over every extent of the inode (bd-4milp):
+                //   - Lower bound: `floor_key` seeks to the extent covering (or
+                //     immediately preceding) the read start. Any earlier extent
+                //     ends at or before `offset` and cannot overlap. Fall back to
+                //     offset 0 when the read begins before the inode's first
+                //     extent (no EXTENT_DATA of this inode at/before `offset`).
+                //   - Upper bound: an item keyed at or past the window end starts
+                //     after the last byte read and cannot contribute.
+                // The assembly loop below skips any non-overlapping item the range
+                // still returns, and the output buffer is pre-zeroed for holes, so
+                // the read result is byte-identical to the full scan.
+                let seek = BtrfsKey {
+                    objectid: canonical,
+                    item_type: BTRFS_ITEM_EXTENT_DATA,
+                    offset,
+                };
+                let lower_offset = match alloc
+                    .fs_tree
+                    .floor_key(&seek)
+                    .map_err(|e| btrfs_mutation_to_ffs(&e))?
+                {
+                    Some(k) if k.objectid == canonical && k.item_type == BTRFS_ITEM_EXTENT_DATA => {
+                        k.offset
+                    }
+                    _ => 0,
+                };
                 let ext_start = BtrfsKey {
                     objectid: canonical,
                     item_type: BTRFS_ITEM_EXTENT_DATA,
-                    offset: 0,
+                    offset: lower_offset,
                 };
-                // Only fetch extents that can overlap the requested read window
-                // [offset, offset+size): an EXTENT_DATA item keyed at or past the
-                // window's end starts after the last byte read, so it can never
-                // contribute (the assembly loop below already skips it, and the
-                // output buffer is pre-zeroed for holes). Capping the upper key
-                // turns a per-read scan over EVERY extent of the inode into a scan
-                // bounded by the read window — the read result is identical
-                // (bd-4milp). The lower bound stays 0 so the extent covering the
-                // read start is always included.
                 let ext_end = BtrfsKey {
                     objectid: canonical,
                     item_type: BTRFS_ITEM_EXTENT_DATA,

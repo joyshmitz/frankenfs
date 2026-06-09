@@ -72,5 +72,42 @@ fn bench_extent_fetch(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(extent_fetch, bench_extent_fetch);
+fn bench_extent_fetch_eof(c: &mut Criterion) {
+    let tree = build_tree();
+    // A 4 KiB read at the LAST extent of the file. With only the upper bound
+    // capped (lower bound 0), the query still scans every extent up to here; the
+    // floor seek skips straight to the covering extent.
+    let read_off = (EXTENTS - 1) * BLOCK;
+    let read_end = read_off + BLOCK;
+    let from_zero = key(0);
+    let end = key(read_end);
+    let seek = key(read_off);
+
+    // Isomorphism: the floor-seeked window holds exactly the extents that can
+    // overlap the read; the scan-from-zero window is a superset.
+    let floor = tree.floor_key(&seek).expect("floor").expect("covering extent");
+    let bounded = tree.range(&floor, &end).expect("bounded range");
+    let full = tree.range(&from_zero, &end).expect("full range");
+    assert_eq!(full.len() as u64, EXTENTS);
+    assert!(bounded.len() <= 2);
+    assert!(
+        bounded
+            .iter()
+            .all(|(k, v)| full.iter().any(|(fk, fv)| fk == k && fv == v))
+    );
+
+    let mut group = c.benchmark_group("btrfs_extent_fetch_eof_read");
+    group.bench_function("lower_bound_zero_scan_from_start", |b| {
+        b.iter(|| black_box(tree.range(black_box(&from_zero), black_box(&end)).unwrap()));
+    });
+    group.bench_function("floor_seek_then_bounded", |b| {
+        b.iter(|| {
+            let f = tree.floor_key(black_box(&seek)).unwrap().unwrap();
+            black_box(tree.range(black_box(&f), black_box(&end)).unwrap())
+        });
+    });
+    group.finish();
+}
+
+criterion_group!(extent_fetch, bench_extent_fetch, bench_extent_fetch_eof);
 criterion_main!(extent_fetch);

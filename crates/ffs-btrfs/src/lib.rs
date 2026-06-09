@@ -3474,6 +3474,50 @@ impl InMemoryCowBtrfsTree {
         }
         Ok(())
     }
+
+    /// The largest key in the tree that is `<= target` (predecessor-or-equal), or
+    /// `None` if every key is greater. O(log N) B-tree descent — the dual of
+    /// [`Self::collect_range_from`]. Lets a caller seek directly to the item
+    /// covering a position (e.g. the file extent covering a read offset) instead
+    /// of scanning from the start of an object's items.
+    pub fn floor_key(&self, target: &BtrfsKey) -> Result<Option<BtrfsKey>, BtrfsMutationError> {
+        self.floor_key_from(self.root, target)
+    }
+
+    fn floor_key_from(
+        &self,
+        node_id: u64,
+        target: &BtrfsKey,
+    ) -> Result<Option<BtrfsKey>, BtrfsMutationError> {
+        match self.node_ref(node_id)? {
+            BtrfsCowNode::Leaf { items } => {
+                // `partition_point` returns the count of keys <= target (the
+                // predicate holds for the sorted prefix); the floor is the last
+                // such key.
+                let le = items.partition_point(|item| key_cmp(&item.key, target) != Ordering::Greater);
+                Ok(if le == 0 { None } else { Some(items[le - 1].key) })
+            }
+            BtrfsCowNode::Internal { keys, children } => {
+                // children[i] holds keys in [keys[i-1], keys[i]); child 0's lower
+                // edge is -inf. The floor is in the rightmost child whose lower
+                // bound (keys[i-1]) is <= target — child index = count of separator
+                // keys <= target. If that child holds no key <= target (target sits
+                // in the gap below its first key), fall back to a left sibling,
+                // whose keys are all < keys[i-1] <= target, so its max is the floor.
+                let candidate = keys.partition_point(|k| key_cmp(k, target) != Ordering::Greater);
+                let mut i = candidate;
+                loop {
+                    if let Some(found) = self.floor_key_from(children[i], target)? {
+                        return Ok(Some(found));
+                    }
+                    if i == 0 {
+                        return Ok(None);
+                    }
+                    i -= 1;
+                }
+            }
+        }
+    }
 }
 
 // ── Extent allocation ───────────────────────────────────────────────────────
@@ -10076,6 +10120,40 @@ mod tests {
             let a = parse_root_item(&payload).expect("first parse");
             let b = parse_root_item(&payload).expect("second parse");
             proptest::prop_assert_eq!(a, b);
+        }
+    }
+
+    proptest::proptest! {
+        /// `floor_key` (predecessor-or-equal) must agree with a brute-force scan
+        /// of every inserted key for any target, across randomly-built trees
+        /// (varying both objectid and offset so the full key ordering is exercised
+        /// and the descent crosses internal-node boundaries).
+        #[test]
+        fn floor_key_matches_bruteforce(
+            raw in proptest::collection::vec((0_u64..40, 0_u64..40), 0..=48),
+            target_oid in 0_u64..40,
+            target_off in 0_u64..40,
+        ) {
+            let mk = |oid: u64, off: u64| BtrfsKey {
+                objectid: oid,
+                item_type: BTRFS_ITEM_EXTENT_DATA,
+                offset: off,
+            };
+            let mut tree = InMemoryCowBtrfsTree::new(4).expect("tree");
+            let mut keys = std::collections::BTreeSet::new();
+            for (oid, off) in &raw {
+                if keys.insert((*oid, *off)) {
+                    tree.insert(mk(*oid, *off), &[0_u8]).expect("insert");
+                }
+            }
+            let target = mk(target_oid, target_off);
+            let expected = keys
+                .iter()
+                .map(|(o, f)| mk(*o, *f))
+                .filter(|k| super::key_cmp(k, &target) != std::cmp::Ordering::Greater)
+                .max_by(super::key_cmp);
+            let got = tree.floor_key(&target).expect("floor_key");
+            proptest::prop_assert_eq!(got, expected);
         }
     }
 
