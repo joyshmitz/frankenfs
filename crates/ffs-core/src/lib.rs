@@ -13,7 +13,7 @@ pub use degradation::{
 };
 pub use vfs::{
     BtrfsQgroupLimitRequest, BtrfsTreeSearchKey, DirEntry, FIEMAP_EXTENT_DATA_INLINE,
-    FIEMAP_EXTENT_ENCODED, FIEMAP_EXTENT_LAST, FIEMAP_EXTENT_NOT_ALIGNED,
+    FIEMAP_EXTENT_ENCODED, FIEMAP_EXTENT_LAST, FIEMAP_EXTENT_NOT_ALIGNED, FIEMAP_EXTENT_SHARED,
     FIEMAP_EXTENT_UNWRITTEN, FiemapExtent, FileType, FsOps, FsStat, FsxattrInfo,
     InodeAttr, QuotaEntry, QuotaInfo, QuotaType, ReleaseRequest, RequestOp, RequestScope,
     SeekWhence, SetAttrRequest, XattrSetMode, xflags,
@@ -25258,6 +25258,7 @@ impl OpenFs {
                 }
                 BtrfsExtentData::Regular {
                     disk_bytenr,
+                    disk_num_bytes,
                     extent_type,
                     compression,
                     ..
@@ -25270,6 +25271,24 @@ impl OpenFs {
                     // the kernel flags it ENCODED.
                     if *compression != 0 {
                         flags |= FIEMAP_EXTENT_ENCODED;
+                    }
+                    // A data extent referenced by more than one inode
+                    // (reflink/snapshot) is reported SHARED. Refcounts live in
+                    // the in-memory extent tree on the writable path; a read-only
+                    // image would need an on-disk extent-tree backref walk
+                    // (separate follow-up). (bd-g704k)
+                    if *disk_bytenr != 0
+                        && let Some(alloc_mutex) = self.btrfs_alloc_state.as_ref()
+                    {
+                        let refs = alloc_mutex
+                            .lock()
+                            .extent_alloc
+                            .extent_item_refs(*disk_bytenr, *disk_num_bytes)
+                            .ok()
+                            .flatten();
+                        if matches!(refs, Some(r) if r > 1) {
+                            flags |= FIEMAP_EXTENT_SHARED;
+                        }
                     }
                     (*disk_bytenr, flags)
                 }
@@ -68531,6 +68550,74 @@ mod tests {
             extents[0].flags & FIEMAP_EXTENT_LAST,
             0,
             "the sole extent must carry LAST"
+        );
+    }
+
+    /// btrfs fiemap must flag a reflinked (shared) extent FIEMAP_EXTENT_SHARED
+    /// on every inode that references it, and leave an unshared extent
+    /// unflagged. FrankenFS reflink (FICLONE) bumps the extent refcount, which
+    /// fiemap now reads via extent_item_refs (bd-g704k).
+    #[test]
+    fn btrfs_fiemap_marks_reflinked_extent_shared_bd_g704k() {
+        let (fs, cx) = open_writable_btrfs();
+        let root = InodeNumber(u64::from(BTRFS_FIRST_FREE_OBJECTID));
+        let src = fs
+            .create(&cx, root, OsStr::new("share-src.dat"), 0o644, 0, 0)
+            .expect("create src");
+        let dst = fs
+            .create(&cx, root, OsStr::new("share-dst.dat"), 0o644, 0, 0)
+            .expect("create dst");
+        let lone = fs
+            .create(&cx, root, OsStr::new("share-lone.dat"), 0o644, 0, 0)
+            .expect("create lone");
+
+        let fs_ops: &dyn FsOps = &fs;
+        let payload = vec![0x5A_u8; 16384];
+        fs_ops
+            .write(&cx, &mut RequestScope::empty(), src.ino, 0, &payload)
+            .expect("write src");
+        fs_ops
+            .write(&cx, &mut RequestScope::empty(), lone.ino, 0, &payload)
+            .expect("write lone");
+
+        let mut scope = RequestScope::empty();
+        let src_before = fs.fiemap(&cx, &mut scope, src.ino, 0, u64::MAX).unwrap();
+        assert_eq!(
+            src_before[0].flags & FIEMAP_EXTENT_SHARED,
+            0,
+            "an unshared extent must not be SHARED before the reflink"
+        );
+
+        // Reflink src -> dst (shares the disk extent, refs 1 -> 2).
+        let src_canon = fs.btrfs_canonical_inode(src.ino).unwrap();
+        let dst_canon = fs.btrfs_canonical_inode(dst.ino).unwrap();
+        {
+            let alloc_mutex = fs.btrfs_alloc_state.as_ref().unwrap();
+            let mut alloc = alloc_mutex.lock();
+            fs.btrfs_clone_file_data(&mut alloc, src_canon, dst_canon)
+                .expect("reflink src into dst");
+        }
+
+        // BOTH src and dst now report SHARED on the shared extent.
+        let src_after = fs.fiemap(&cx, &mut scope, src.ino, 0, u64::MAX).unwrap();
+        assert_ne!(
+            src_after[0].flags & FIEMAP_EXTENT_SHARED,
+            0,
+            "src's now-shared extent must be SHARED"
+        );
+        let dst_after = fs.fiemap(&cx, &mut scope, dst.ino, 0, u64::MAX).unwrap();
+        assert_ne!(
+            dst_after[0].flags & FIEMAP_EXTENT_SHARED,
+            0,
+            "dst's shared extent must be SHARED"
+        );
+
+        // The unrelated file's extent stays unshared.
+        let lone_fm = fs.fiemap(&cx, &mut scope, lone.ino, 0, u64::MAX).unwrap();
+        assert_eq!(
+            lone_fm[0].flags & FIEMAP_EXTENT_SHARED,
+            0,
+            "an unrelated file's extent must not be SHARED"
         );
     }
 

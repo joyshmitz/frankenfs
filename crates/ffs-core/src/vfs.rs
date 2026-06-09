@@ -179,6 +179,9 @@ pub const FIEMAP_EXTENT_NOT_ALIGNED: u32 = 0x0100;
 pub const FIEMAP_EXTENT_DATA_INLINE: u32 = 0x0200;
 /// FIEMAP extent flag: this extent is unwritten / preallocated.
 pub const FIEMAP_EXTENT_UNWRITTEN: u32 = 0x0800;
+/// FIEMAP extent flag: the disk extent is shared with other files (reflink /
+/// snapshot — the extent's refcount is greater than one).
+pub const FIEMAP_EXTENT_SHARED: u32 = 0x2000;
 
 /// Seek whence for [`FsOps::lseek`].
 ///
