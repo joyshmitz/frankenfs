@@ -17067,6 +17067,7 @@ impl OpenFs {
         let csum_seed = sb.csum_seed();
 
         let mut inode = self.read_inode_with_scope(cx, scope, ino)?;
+        let ext4_original_size = inode.size;
 
         // Immutable files reject metadata changes too (chmod/chown/utimes), not
         // just content — the kernel returns EPERM. The size change is guarded in
@@ -17319,6 +17320,15 @@ impl OpenFs {
         }
 
         ffs_inode::touch_ctime(&mut inode, tstamp_secs, tstamp_nanos);
+        // A size-changing truncate is a data modification, so POSIX requires
+        // mtime (not just ctime) to be updated. The kernel sends only
+        // ATTR_SIZE/ATTR_CTIME on truncate (FUSE: FATTR_SIZE without
+        // FATTR_MTIME), so the filesystem owns this mtime bump — the in-kernel
+        // ext4 sets mtime=ctime on a size change. An explicit utimes mtime
+        // (attrs.mtime) takes precedence (bd-pssza).
+        if attrs.size.is_some() && inode.size != ext4_original_size && attrs.mtime.is_none() {
+            ffs_inode::touch_mtime_ctime(&mut inode, tstamp_secs, tstamp_nanos);
+        }
 
         if let Some(tx) = &mut scope.tx {
             let tx_dev = TransactionBlockAdapter {
@@ -21950,6 +21960,7 @@ impl OpenFs {
 
         let mut alloc = alloc_mutex.lock();
         let mut inode = self.btrfs_read_inode_from_tree(&alloc, canonical)?;
+        let original_size = inode.size;
 
         if let Some(mode) = attrs.mode {
             inode.mode = (inode.mode & !0o7777) | u32::from(mode & 0o7777);
@@ -21999,6 +22010,15 @@ impl OpenFs {
         let (secs, nanos) = Self::btrfs_now_timestamp();
         inode.ctime_sec = secs;
         inode.ctime_nsec = nanos;
+        // A size-changing truncate is a data modification, so POSIX requires
+        // mtime (not just ctime) to be updated. The kernel sends only
+        // ATTR_SIZE/ATTR_CTIME on truncate (FUSE: FATTR_SIZE without
+        // FATTR_MTIME), so the filesystem owns this mtime bump — ext4 does the
+        // same. An explicit utimes mtime (attrs.mtime) takes precedence (bd-pssza).
+        if attrs.size.is_some() && inode.size != original_size && attrs.mtime.is_none() {
+            inode.mtime_sec = secs;
+            inode.mtime_nsec = nanos;
+        }
 
         let inode_key = BtrfsKey {
             objectid: canonical,
@@ -50958,6 +50978,39 @@ mod tests {
         assert_eq!(verified.gid, 3000);
     }
 
+    /// ext4 mirror of btrfs_truncate_updates_mtime: a size-changing truncate
+    /// must update mtime, not just ctime (bd-pssza). Deterministic via
+    /// mtime == ctime after the op (both from the same op timestamp).
+    #[test]
+    fn ext4_truncate_updates_mtime_bd_pssza() {
+        let Some(fs) = open_writable_ext4() else {
+            return; // no ext4 fixture / mkfs available
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let attr = fs
+            .create(&cx, root, OsStr::new("trunc_mtime.bin"), 0o644, 0, 0)
+            .expect("create");
+        let ino = attr.ino;
+        fs.write(&cx, ino, 0, b"0123456789").expect("write");
+
+        let after = fs
+            .setattr(
+                &cx,
+                ino,
+                &SetAttrRequest {
+                    size: Some(4),
+                    ..SetAttrRequest::default()
+                },
+            )
+            .expect("truncate");
+        assert_eq!(after.size, 4);
+        assert_eq!(
+            after.mtime, after.ctime,
+            "an ext4 size-changing truncate must update mtime, not just ctime"
+        );
+    }
+
     #[test]
     fn write_setattr_extend_file_via_size() {
         let Some(fs) = open_writable_ext4() else {
@@ -67487,6 +67540,49 @@ mod tests {
             .read(&cx, &mut RequestScope::empty(), attr.ino, 0, 4096)
             .unwrap();
         assert_eq!(data, b"hello world!");
+    }
+
+    /// POSIX: a size-changing truncate is a data modification and must update
+    /// mtime (not just ctime). The kernel sends ATTR_SIZE/ATTR_CTIME (no
+    /// ATTR_MTIME) on truncate, so the fs owns the mtime bump; btrfs_setattr
+    /// updated only ctime, leaving mtime at the prior write time (bd-pssza).
+    /// Deterministic: after the truncate, mtime and ctime are stamped from the
+    /// same op timestamp, so they must be equal (before the fix mtime stayed at
+    /// the distinct write time).
+    #[test]
+    fn btrfs_truncate_updates_mtime_bd_pssza() {
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+        let file = ops
+            .create(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("trunc.bin"),
+                0o644,
+                0,
+                0,
+            )
+            .unwrap();
+        ops.write(&cx, &mut RequestScope::empty(), file.ino, 0, b"0123456789")
+            .unwrap();
+
+        let attr = ops
+            .setattr(
+                &cx,
+                &mut RequestScope::empty(),
+                file.ino,
+                &SetAttrRequest {
+                    size: Some(4),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(attr.size, 4);
+        assert_eq!(
+            attr.mtime, attr.ctime,
+            "a size-changing truncate must update mtime, not leave it at the write time"
+        );
     }
 
     #[test]
