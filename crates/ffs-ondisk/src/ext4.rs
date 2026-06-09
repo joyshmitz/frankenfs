@@ -3757,15 +3757,18 @@ fn casefold_name(name: &[u8]) -> Vec<u8> {
     )
 }
 
-/// Canonical (NFD) decomposition of a precomposed Latin-1 Supplement letter
-/// into its lowercased base char + single combining mark, for casefold
-/// comparison. The kernel's casefold NFD-normalizes before folding, so a
-/// precomposed letter and its decomposed form must fold to the same key; this
-/// makes the read-path linear-scan lookup match either form for the common
-/// accented Latin letters (bd-qdmlu, a read-correctness increment of bd-vsuni).
-/// Returns `None` for code points without a single-mark canonical decomposition
-/// (e.g. Æ, Ð, Ø, Þ, ß — handled elsewhere or left as-is).
-const fn latin1_nfd_casefold(ch: char) -> Option<(char, char)> {
+/// Canonical (NFD) decomposition of a precomposed Latin letter into its
+/// lowercased base char + single combining mark, for casefold comparison. The
+/// kernel's casefold NFD-normalizes before folding, so a precomposed letter and
+/// its decomposed form must fold to the same key; this makes the read-path
+/// linear-scan lookup match either form for the common accented Latin letters
+/// (bd-qdmlu / bd-gegku, read-correctness increments of bd-vsuni). Covers the
+/// Latin-1 Supplement (U+00C0-U+00FF) and Latin Extended-A (U+0100-U+017F)
+/// letters that have a single-mark canonical decomposition; returns `None`
+/// otherwise (e.g. Æ, Ð, Ø, Þ, ß, Đ, Ł, Œ, ŋ — no canonical decomposition,
+/// handled elsewhere or left as-is). All decompositions are ASCII base +
+/// combining mark, so this is byte-stable across Unicode versions.
+const fn precomposed_nfd_casefold(ch: char) -> Option<(char, char)> {
     let mapped = match ch {
         'À' | 'à' => ('a', '\u{0300}'),
         'Á' | 'á' => ('a', '\u{0301}'),
@@ -3793,14 +3796,69 @@ const fn latin1_nfd_casefold(ch: char) -> Option<(char, char)> {
         'Û' | 'û' => ('u', '\u{0302}'),
         'Ü' | 'ü' => ('u', '\u{0308}'),
         'Ý' | 'ý' => ('y', '\u{0301}'),
-        'Ÿ' | 'ÿ' => ('y', '\u{0308}'),
+        'Ÿ' | 'ÿ' => ('y', '\u{0308}'), // U+0178 / U+00FF
+        // ── Latin Extended-A (U+0100-U+017F), single-mark canonical NFD. ──
+        'Ā' | 'ā' => ('a', '\u{0304}'),
+        'Ă' | 'ă' => ('a', '\u{0306}'),
+        'Ą' | 'ą' => ('a', '\u{0328}'),
+        'Ć' | 'ć' => ('c', '\u{0301}'),
+        'Ĉ' | 'ĉ' => ('c', '\u{0302}'),
+        'Ċ' | 'ċ' => ('c', '\u{0307}'),
+        'Č' | 'č' => ('c', '\u{030C}'),
+        'Ď' | 'ď' => ('d', '\u{030C}'),
+        'Ē' | 'ē' => ('e', '\u{0304}'),
+        'Ĕ' | 'ĕ' => ('e', '\u{0306}'),
+        'Ė' | 'ė' => ('e', '\u{0307}'),
+        'Ę' | 'ę' => ('e', '\u{0328}'),
+        'Ě' | 'ě' => ('e', '\u{030C}'),
+        'Ĝ' | 'ĝ' => ('g', '\u{0302}'),
+        'Ğ' | 'ğ' => ('g', '\u{0306}'),
+        'Ġ' | 'ġ' => ('g', '\u{0307}'),
+        'Ģ' | 'ģ' => ('g', '\u{0327}'),
+        'Ĥ' | 'ĥ' => ('h', '\u{0302}'),
+        'Ĩ' | 'ĩ' => ('i', '\u{0303}'),
+        'Ī' | 'ī' => ('i', '\u{0304}'),
+        'Ĭ' | 'ĭ' => ('i', '\u{0306}'),
+        'Į' | 'į' => ('i', '\u{0328}'),
+        'İ' => ('i', '\u{0307}'), // unpaired: dotless small i (U+0131) has no decomposition
+        'Ĵ' | 'ĵ' => ('j', '\u{0302}'),
+        'Ķ' | 'ķ' => ('k', '\u{0327}'),
+        'Ĺ' | 'ĺ' => ('l', '\u{0301}'),
+        'Ļ' | 'ļ' => ('l', '\u{0327}'),
+        'Ľ' | 'ľ' => ('l', '\u{030C}'),
+        'Ń' | 'ń' => ('n', '\u{0301}'),
+        'Ņ' | 'ņ' => ('n', '\u{0327}'),
+        'Ň' | 'ň' => ('n', '\u{030C}'),
+        'Ō' | 'ō' => ('o', '\u{0304}'),
+        'Ŏ' | 'ŏ' => ('o', '\u{0306}'),
+        'Ő' | 'ő' => ('o', '\u{030B}'),
+        'Ŕ' | 'ŕ' => ('r', '\u{0301}'),
+        'Ŗ' | 'ŗ' => ('r', '\u{0327}'),
+        'Ř' | 'ř' => ('r', '\u{030C}'),
+        'Ś' | 'ś' => ('s', '\u{0301}'),
+        'Ŝ' | 'ŝ' => ('s', '\u{0302}'),
+        'Ş' | 'ş' => ('s', '\u{0327}'),
+        'Š' | 'š' => ('s', '\u{030C}'),
+        'Ţ' | 'ţ' => ('t', '\u{0327}'),
+        'Ť' | 'ť' => ('t', '\u{030C}'),
+        'Ũ' | 'ũ' => ('u', '\u{0303}'),
+        'Ū' | 'ū' => ('u', '\u{0304}'),
+        'Ŭ' | 'ŭ' => ('u', '\u{0306}'),
+        'Ů' | 'ů' => ('u', '\u{030A}'),
+        'Ű' | 'ű' => ('u', '\u{030B}'),
+        'Ų' | 'ų' => ('u', '\u{0328}'),
+        'Ŵ' | 'ŵ' => ('w', '\u{0302}'),
+        'Ŷ' | 'ŷ' => ('y', '\u{0302}'),
+        'Ź' | 'ź' => ('z', '\u{0301}'),
+        'Ż' | 'ż' => ('z', '\u{0307}'),
+        'Ž' | 'ž' => ('z', '\u{030C}'),
         _ => return None,
     };
     Some(mapped)
 }
 
 fn push_casefolded_char(folded: &mut String, ch: char) {
-    if let Some((base, mark)) = latin1_nfd_casefold(ch) {
+    if let Some((base, mark)) = precomposed_nfd_casefold(ch) {
         folded.push(base);
         folded.push(mark);
         return;
@@ -10607,6 +10665,16 @@ mod tests {
             ("ÜBER", "u\u{0308}ber"),
             ("ÿ", "y\u{0308}"),
             ("Ÿ", "y\u{0308}"),
+            // Latin Extended-A (bd-gegku): Central/Eastern European, Baltic, etc.
+            ("č", "c\u{030C}"),
+            ("Č", "c\u{030C}"),
+            ("š", "s\u{030C}"),
+            ("ž", "z\u{030C}"),
+            ("ā", "a\u{0304}"),
+            ("ő", "o\u{030B}"),
+            ("ū", "u\u{0304}"),
+            ("ę", "e\u{0328}"),
+            ("ŇOČ", "n\u{030C}oc\u{030C}"), // mixed-case multi-letter
         ];
         for (composed, decomposed) in cases {
             assert_eq!(
