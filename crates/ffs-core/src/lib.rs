@@ -58751,6 +58751,80 @@ mod tests {
         );
     }
 
+    /// bd-7mi0p/bd-70gyh: a COMPOUND churn of unaligned writes, overwrites into
+    /// the middle of multi-sector extents, gap creation, and truncate down/up
+    /// must keep the on-disk extents sector-aligned (btrfs check clean) AND
+    /// preserve byte-exact content. The single-op btrfs-check tests don't cover
+    /// the interactions between the read-modify-write write path, the overwrite
+    /// split, and the truncate EOF-sector rewrite. Skips without btrfs-progs.
+    #[test]
+    fn btrfs_write_truncate_churn_passes_btrfs_check_bd_7mi0p() {
+        let Some((fs, dev, _tmp, image)) = open_writable_btrfs_mkfs(256) else {
+            return; // btrfs-progs unavailable
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(u64::from(BTRFS_FIRST_FREE_OBJECTID));
+        let ino = fs
+            .create(&cx, root, OsStr::new("churn.bin"), 0o644, 0, 0)
+            .expect("create file")
+            .ino;
+
+        // Mirror every op into a Vec<u8> model (passed in, so the write/truncate
+        // closures can coexist), then assert the file matches.
+        let mut model: Vec<u8> = Vec::new();
+        let do_write = |model: &mut Vec<u8>, off: usize, byte: u8, len: usize| {
+            let data = vec![byte; len];
+            fs.write(&cx, ino, off as u64, &data).expect("churn write");
+            if off + len > model.len() {
+                model.resize(off + len, 0);
+            }
+            model[off..off + len].copy_from_slice(&data);
+        };
+        let do_trunc = |model: &mut Vec<u8>, size: usize| {
+            fs.setattr(
+                &cx,
+                ino,
+                &SetAttrRequest {
+                    size: Some(size as u64),
+                    ..SetAttrRequest::default()
+                },
+            )
+            .expect("churn truncate");
+            model.resize(size, 0);
+        };
+        do_write(&mut model, 0, b'A', 6000); // unaligned end (extent [0,8192), i_size 6000)
+        do_write(&mut model, 12000, b'B', 3000); // sparse gap [6000,12000); unaligned ends
+        do_write(&mut model, 4000, b'C', 2000); // overwrite tail of first extent + RMW head
+        do_write(&mut model, 1000, b'D', 5000); // overwrite the middle, RMW [0,1000) head
+        do_write(&mut model, 16000, b'E', 1000); // write into a fresh sector past the gap
+        do_trunc(&mut model, 9000); // down into a sector: drop extents past it, zero tail
+        do_trunc(&mut model, 20000); // sparse extend
+        do_write(&mut model, 17000, b'F', 2000); // overwrite spanning the extended region
+
+        // Content must match the model exactly.
+        let got = fs
+            .read(&cx, ino, 0, u32::try_from(model.len()).unwrap())
+            .expect("churn read");
+        assert_eq!(got, model, "churn file content must match the model");
+
+        let _ = fs.flush_mvcc_to_device(&cx);
+        fs.btrfs_full_transaction_commit(&cx, "write-truncate-churn-check")
+            .expect("btrfs full transaction commit");
+        std::fs::write(&image, dev.snapshot_bytes()).expect("write modified image");
+
+        let Some((ok, output)) = run_btrfs_check(&image) else {
+            return; // btrfs check tool unavailable
+        };
+        assert!(
+            !output.contains("bad file extent"),
+            "a write/truncate churn must not produce a 'bad file extent' (bd-7mi0p):\n{output}"
+        );
+        assert!(
+            ok,
+            "btrfs check must accept a write/truncate churn (bd-7mi0p):\n{output}"
+        );
+    }
+
     /// bd-70gyh: truncating down into a sector must zero the bytes between the
     /// new EOF and the sector boundary, so a later extend reads zeros (not the
     /// stale pre-truncate data).
