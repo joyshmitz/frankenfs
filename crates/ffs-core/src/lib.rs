@@ -18373,6 +18373,80 @@ impl OpenFs {
         Ok(())
     }
 
+    /// Allocate, write, and register ONE uncompressed regular data extent that is
+    /// already sector-aligned in both offset and length. `data.len()` must be a
+    /// multiple of the sector size and `aligned_offset` sector-aligned; the
+    /// emitted extent has `ram_bytes == num_bytes == disk_num_bytes == data.len()`
+    /// so the on-disk image stays btrfs-check-clean (bd-7mi0p). Handles the
+    /// fs_tree item, the EXTENT_ITEM/EXTENT_DATA_REF backref, and (for datasum
+    /// inodes) the per-sector EXTENT_CSUMs, unwinding each step on failure.
+    /// Shared by the write read-modify-write path and the truncate tail rewrite.
+    fn btrfs_emit_aligned_extent(
+        &self,
+        cx: &Cx,
+        alloc: &mut BtrfsAllocState,
+        canonical: u64,
+        aligned_offset: u64,
+        data: &[u8],
+        is_datasum: bool,
+    ) -> ffs_error::Result<()> {
+        let alloc_size = u64::try_from(data.len())
+            .map_err(|_| FfsError::InvalidGeometry("aligned extent length overflow".into()))?;
+        let allocation = alloc
+            .extent_alloc
+            .alloc_data(alloc_size)
+            .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+        let disk_bytenr = allocation.bytenr;
+
+        if let Err(e) = self.btrfs_write_logical(cx, disk_bytenr, data) {
+            let _ = alloc
+                .extent_alloc
+                .free_extent(disk_bytenr, alloc_size, false);
+            return Err(e);
+        }
+
+        let extent = BtrfsExtentData::Regular {
+            generation: alloc.generation,
+            ram_bytes: alloc_size,
+            extent_type: BTRFS_FILE_EXTENT_REG,
+            compression: 0,
+            disk_bytenr,
+            disk_num_bytes: alloc_size,
+            extent_offset: 0,
+            num_bytes: alloc_size,
+        };
+        let extent_key = BtrfsKey {
+            objectid: canonical,
+            item_type: BTRFS_ITEM_EXTENT_DATA,
+            offset: aligned_offset,
+        };
+        if let Err(e) = alloc.fs_tree.insert(extent_key, &extent.to_bytes()) {
+            let _ = alloc
+                .extent_alloc
+                .free_extent(disk_bytenr, alloc_size, false);
+            return Err(btrfs_mutation_to_ffs(&e));
+        }
+
+        if let Err(e) = Self::btrfs_register_data_extent_backref(
+            alloc,
+            disk_bytenr,
+            alloc_size,
+            canonical,
+            aligned_offset,
+        ) {
+            let _ = alloc.fs_tree.delete(&extent_key);
+            let _ = alloc
+                .extent_alloc
+                .free_extent(disk_bytenr, alloc_size, false);
+            return Err(e);
+        }
+
+        if is_datasum {
+            self.btrfs_capture_data_extent_csums(cx, alloc, disk_bytenr, alloc_size)?;
+        }
+        Ok(())
+    }
+
     /// Record one EXTENT_CSUM per sector for a just-written datasum data extent
     /// (bd-x3fcu / bd-pb0ey). Reads the on-disk extent back so the checksum
     /// covers the exact bytes a later read returns (sector padding included),
@@ -21082,65 +21156,17 @@ impl OpenFs {
                 aligned_end,
             )?;
 
-            let allocation = alloc
-                .extent_alloc
-                .alloc_data(alloc_size)
-                .map_err(|e| btrfs_mutation_to_ffs(&e))?;
-            let disk_bytenr = allocation.bytenr;
-
-            if let Err(e) = self.btrfs_write_logical(cx, disk_bytenr, &merged) {
-                let _ = alloc
-                    .extent_alloc
-                    .free_extent(disk_bytenr, alloc_size, false);
-                return Err(e);
-            }
-
-            let extent = BtrfsExtentData::Regular {
-                generation: alloc.generation,
-                ram_bytes: alloc_size,
-                extent_type: BTRFS_FILE_EXTENT_REG,
-                compression: 0,
-                disk_bytenr,
-                disk_num_bytes: alloc_size,
-                extent_offset: 0,
-                num_bytes: alloc_size,
-            };
-            let extent_key = BtrfsKey {
-                objectid: canonical,
-                item_type: BTRFS_ITEM_EXTENT_DATA,
-                offset: aligned_start,
-            };
-            let extent_bytes = extent.to_bytes();
-            if let Err(e) = alloc.fs_tree.insert(extent_key, &extent_bytes) {
-                let _ = alloc
-                    .extent_alloc
-                    .free_extent(disk_bytenr, alloc_size, false);
-                return Err(btrfs_mutation_to_ffs(&e));
-            }
-
-            // Register the extent-tree EXTENT_ITEM + EXTENT_DATA_REF backref for
-            // this data extent (bd-x3fcu) so the on-disk image is btrfs-check
-            // clean. On failure unwind the fs_tree item and the allocation.
-            if let Err(e) = Self::btrfs_register_data_extent_backref(
+            // Emit the single sector-aligned extent (alloc + write + backref +
+            // per-sector csums) covering [aligned_start, aligned_end).
+            let is_datasum = inode.flags & BTRFS_INODE_NODATASUM == 0;
+            self.btrfs_emit_aligned_extent(
+                cx,
                 &mut alloc,
-                disk_bytenr,
-                alloc_size,
                 canonical,
                 aligned_start,
-            ) {
-                let _ = alloc.fs_tree.delete(&extent_key);
-                let _ = alloc
-                    .extent_alloc
-                    .free_extent(disk_bytenr, alloc_size, false);
-                return Err(e);
-            }
-
-            // Capture data checksums for datasum inodes (bd-x3fcu): record one
-            // EXTENT_CSUM per sector in the in-memory csum tree. NODATASUM inodes
-            // carry no data checksums and are skipped.
-            if inode.flags & BTRFS_INODE_NODATASUM == 0 {
-                self.btrfs_capture_data_extent_csums(cx, &mut alloc, disk_bytenr, alloc_size)?;
-            }
+                &merged,
+                is_datasum,
+            )?;
         }
 
         // Update inode metadata.
@@ -22343,6 +22369,7 @@ impl OpenFs {
     }
 
     /// Set attributes on a btrfs inode.
+    #[allow(clippy::too_many_lines)]
     fn btrfs_setattr(
         &self,
         cx: &Cx,
@@ -22382,16 +22409,62 @@ impl OpenFs {
             let old_size = inode.size;
             inode.size = size;
 
-            // If truncating to a smaller size, trim or remove every extent that overlaps the new
-            // EOF so stale tail bytes cannot reappear if the file is extended later.
+            // If truncating to a smaller size, drop every extent past the new EOF
+            // so stale tail bytes cannot reappear if the file is extended later.
+            // To keep every extent sector-aligned (bd-7mi0p / bd-70gyh): trim at
+            // the sector boundary above the EOF sector, and when the new size
+            // falls mid-sector, rewrite that EOF sector with its head preserved
+            // and the [size, aligned) tail zeroed (a hole/all-zero head stays a
+            // hole — no spurious extent). Splitting at the raw unaligned `size`
+            // would re-insert a non-sector-aligned left remnant.
             if size < old_size {
-                self.btrfs_remove_overlapping_extent_data(
-                    cx,
-                    &mut alloc,
-                    canonical,
-                    size,
-                    u64::MAX,
-                )?;
+                let ss = u64::from(alloc.sectorsize);
+                if size % ss == 0 {
+                    self.btrfs_remove_overlapping_extent_data(
+                        cx,
+                        &mut alloc,
+                        canonical,
+                        size,
+                        u64::MAX,
+                    )?;
+                } else {
+                    let eof_floor = size & !(ss - 1);
+                    let head_len = usize::try_from(size - eof_floor).map_err(|_| {
+                        FfsError::InvalidGeometry("truncate eof head length overflow".into())
+                    })?;
+                    let ss_usize = usize::try_from(ss).map_err(|_| {
+                        FfsError::InvalidGeometry("btrfs sectorsize overflow".into())
+                    })?;
+                    let mut sector = vec![0_u8; ss_usize];
+                    self.btrfs_read_existing_range_into(
+                        cx,
+                        &alloc,
+                        canonical,
+                        eof_floor,
+                        &mut sector[..head_len],
+                    )?;
+                    // Drop the EOF sector and everything after it (aligned bound).
+                    self.btrfs_remove_overlapping_extent_data(
+                        cx,
+                        &mut alloc,
+                        canonical,
+                        eof_floor,
+                        u64::MAX,
+                    )?;
+                    // Re-emit the EOF sector only if its preserved head holds data
+                    // (a hole/prealloc head reads as zeros, so leave it a hole).
+                    if sector[..head_len].iter().any(|&b| b != 0) {
+                        let is_datasum = inode.flags & BTRFS_INODE_NODATASUM == 0;
+                        self.btrfs_emit_aligned_extent(
+                            cx,
+                            &mut alloc,
+                            canonical,
+                            eof_floor,
+                            &sector,
+                            is_datasum,
+                        )?;
+                    }
+                }
             }
 
             inode.nbytes = Self::btrfs_recompute_inode_nbytes(&alloc, canonical)?;
@@ -58593,6 +58666,94 @@ mod tests {
         assert!(
             ok,
             "btrfs check must accept a non-sector-aligned btrfs write (bd-7mi0p):\n{output}"
+        );
+    }
+
+    /// bd-70gyh: truncating a file DOWN to a non-sector-aligned size must keep
+    /// every extent sector-aligned (the EOF sector is rewritten with its tail
+    /// zeroed) so `btrfs check` stays clean — splitting at the raw size would
+    /// leave a non-aligned extent. Skips when btrfs-progs is unavailable.
+    #[test]
+    fn btrfs_truncate_to_unaligned_size_passes_btrfs_check_bd_70gyh() {
+        let Some((fs, dev, _tmp, image)) = open_writable_btrfs_mkfs(256) else {
+            return; // btrfs-progs unavailable
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(u64::from(BTRFS_FIRST_FREE_OBJECTID));
+        let attr = fs
+            .create(&cx, root, OsStr::new("truncated.bin"), 0o644, 0, 0)
+            .expect("create file");
+        // Two full sectors of data, then truncate down into the second sector.
+        fs.write(&cx, attr.ino, 0, &[0x4D_u8; 8192])
+            .expect("write 8192 bytes");
+        fs.setattr(
+            &cx,
+            attr.ino,
+            &SetAttrRequest {
+                size: Some(6000),
+                ..SetAttrRequest::default()
+            },
+        )
+        .expect("truncate down to 6000");
+
+        let _ = fs.flush_mvcc_to_device(&cx);
+        fs.btrfs_full_transaction_commit(&cx, "truncate-unaligned-check")
+            .expect("btrfs full transaction commit");
+        std::fs::write(&image, dev.snapshot_bytes()).expect("write modified image");
+
+        let Some((ok, output)) = run_btrfs_check(&image) else {
+            return; // btrfs check tool unavailable
+        };
+        assert!(
+            !output.contains("bad file extent"),
+            "truncate to an unaligned size must not produce a 'bad file extent' (bd-70gyh):\n{output}"
+        );
+        assert!(
+            ok,
+            "btrfs check must accept a truncate to an unaligned size (bd-70gyh):\n{output}"
+        );
+    }
+
+    /// bd-70gyh: truncating down into a sector must zero the bytes between the
+    /// new EOF and the sector boundary, so a later extend reads zeros (not the
+    /// stale pre-truncate data).
+    #[test]
+    fn btrfs_truncate_down_zeroes_eof_sector_tail_bd_70gyh() {
+        let (fs, cx) = open_writable_btrfs();
+        let root = InodeNumber(u64::from(BTRFS_FIRST_FREE_OBJECTID));
+        let ino = fs
+            .create(&cx, root, OsStr::new("ztail.bin"), 0o644, 0, 0)
+            .expect("create")
+            .ino;
+        fs.write(&cx, ino, 0, &[0xAB_u8; 8192]).expect("write 8192");
+        // Truncate down mid-sector, then extend back up without writing.
+        fs.setattr(
+            &cx,
+            ino,
+            &SetAttrRequest {
+                size: Some(6000),
+                ..SetAttrRequest::default()
+            },
+        )
+        .expect("truncate to 6000");
+        fs.setattr(
+            &cx,
+            ino,
+            &SetAttrRequest {
+                size: Some(8192),
+                ..SetAttrRequest::default()
+            },
+        )
+        .expect("extend to 8192");
+        let data = fs.read(&cx, ino, 0, 8192).expect("read");
+        assert_eq!(data.len(), 8192);
+        assert!(
+            data[..6000].iter().all(|&b| b == 0xAB),
+            "data below the truncation point must survive"
+        );
+        assert!(
+            data[6000..].iter().all(|&b| b == 0),
+            "the truncated EOF-sector tail must read as zeros after a later extend (bd-70gyh)"
         );
     }
 
