@@ -14,7 +14,8 @@
 
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use ffs_btrfs::{
-    BTRFS_ITEM_DIR_INDEX, BTRFS_ITEM_DIR_ITEM, BtrfsBTree, BtrfsKey, InMemoryCowBtrfsTree,
+    BTRFS_ITEM_DIR_INDEX, BTRFS_ITEM_DIR_ITEM, BtrfsBTree, BtrfsDirItem, BtrfsKey,
+    InMemoryCowBtrfsTree, btrfs_name_hash, parse_dir_items,
 };
 use std::collections::HashSet;
 use std::hint::black_box;
@@ -168,5 +169,111 @@ fn bench_readdir_collect(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(readdir_dedup, bench_readdir_dedup, bench_readdir_collect);
+/// Build a directory's DIR_ITEM span as btrfs keys it: one DIR_ITEM per file at
+/// key offset = `name_hash(name)` (the on-disk convention). Returns the tree and
+/// a representative target name to remove.
+fn build_dir_item_tree() -> (InMemoryCowBtrfsTree, Vec<u8>) {
+    let mut tree = InMemoryCowBtrfsTree::new(1 << 22).expect("tree");
+    let mut target = Vec::new();
+    for i in 0..FILES {
+        let name = format!("file{i:06}").into_bytes();
+        let payload = BtrfsDirItem {
+            child_objectid: 300 + i as u64,
+            child_key_type: 1, // INODE_ITEM
+            child_key_offset: 0,
+            file_type: 1, // regular file
+            name: name.clone(),
+        }
+        .to_bytes();
+        let key = BtrfsKey {
+            objectid: DIR_INODE,
+            item_type: BTRFS_ITEM_DIR_ITEM,
+            offset: u64::from(btrfs_name_hash(&name)),
+        };
+        tree.insert(key, &payload).expect("insert dir_item");
+        if i == FILES / 2 {
+            target = name;
+        }
+    }
+    (tree, target)
+}
+
+/// Old removal path: range every DIR_ITEM in the directory (offset 0..MAX) and
+/// parse each payload to find the bucket holding `name` — O(N) per removal.
+fn find_via_full_scan(tree: &InMemoryCowBtrfsTree, name: &[u8]) -> Option<u64> {
+    let start = BtrfsKey {
+        objectid: DIR_INODE,
+        item_type: BTRFS_ITEM_DIR_ITEM,
+        offset: 0,
+    };
+    let end = BtrfsKey {
+        objectid: DIR_INODE,
+        item_type: BTRFS_ITEM_DIR_ITEM,
+        offset: u64::MAX,
+    };
+    for (_k, payload) in tree.range(&start, &end).expect("range") {
+        let entries = parse_dir_items(&payload).expect("parse");
+        if let Some(e) = entries.into_iter().find(|e| e.name == name) {
+            return Some(e.child_objectid);
+        }
+    }
+    None
+}
+
+/// New removal path: seek straight to the name's hash bucket — an O(log N) point
+/// query plus a scan of the (tiny) collision bucket.
+fn find_via_point_query(tree: &InMemoryCowBtrfsTree, name: &[u8], name_hash: u64) -> Option<u64> {
+    let key = BtrfsKey {
+        objectid: DIR_INODE,
+        item_type: BTRFS_ITEM_DIR_ITEM,
+        offset: name_hash,
+    };
+    for (_k, payload) in tree.range(&key, &key).expect("range") {
+        let entries = parse_dir_items(&payload).expect("parse");
+        if let Some(e) = entries.into_iter().find(|e| e.name == name) {
+            return Some(e.child_objectid);
+        }
+    }
+    None
+}
+
+/// A/B for `btrfs_remove_named_dir_item` (bd-* this session): the removal scanned
+/// every DIR_ITEM in the directory to find a name that, by btrfs's hashed keying,
+/// can only live in its own `name_hash` bucket. Seeking that bucket directly turns
+/// each removal from O(N) into O(log N) — and a full directory delete from O(N^2)
+/// into O(N). Mirrors the lookup fast path (bd-a9wot).
+fn bench_remove_named_dir_item(c: &mut Criterion) {
+    let (tree, target) = build_dir_item_tree();
+    let target_hash = u64::from(btrfs_name_hash(&target));
+
+    // Isomorphism: both resolve the same entry (the name lives in exactly one
+    // hash bucket, so the point query sees everything the full scan would).
+    let full = find_via_full_scan(&tree, &target);
+    let point = find_via_point_query(&tree, &target, target_hash);
+    assert_eq!(full, point);
+    assert!(full.is_some());
+
+    let mut group = c.benchmark_group("btrfs_remove_named_dir_item");
+    group.sample_size(20);
+    group.bench_function("full_scan_all_dir_items", |b| {
+        b.iter(|| black_box(find_via_full_scan(&tree, black_box(&target))));
+    });
+    group.bench_function("point_query_at_name_hash", |b| {
+        b.iter(|| {
+            black_box(find_via_point_query(
+                &tree,
+                black_box(&target),
+                black_box(target_hash),
+            ))
+        });
+    });
+    group.finish();
+}
+
+criterion_group!(
+    readdir_dedup,
+    bench_readdir_dedup,
+    bench_readdir_collect,
+    bench_remove_named_dir_item
+);
 criterion_main!(readdir_dedup);

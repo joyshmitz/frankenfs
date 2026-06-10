@@ -12,7 +12,10 @@
 //! holding a deep run of single-block extents.
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use ffs_btrfs::{BTRFS_ITEM_EXTENT_DATA, BtrfsBTree, BtrfsKey, InMemoryCowBtrfsTree};
+use ffs_btrfs::{
+    BTRFS_ITEM_EXTENT_DATA, BtrfsBTree, BtrfsExtentData, BtrfsKey, InMemoryCowBtrfsTree,
+    parse_extent_data,
+};
 use std::hint::black_box;
 
 const INODE: u64 = 257;
@@ -139,10 +142,87 @@ fn bench_range_vs_range_with(c: &mut Criterion) {
     group.finish();
 }
 
+/// Build a tree of valid `Regular` EXTENT_DATA items (the read path parses
+/// these into `BtrfsExtentData`), one single-block extent per `BLOCK`.
+fn build_regular_extent_tree() -> InMemoryCowBtrfsTree {
+    let mut tree = InMemoryCowBtrfsTree::new(1 << 21).expect("tree");
+    for i in 0..EXTENTS {
+        let payload = BtrfsExtentData::Regular {
+            generation: 7,
+            ram_bytes: BLOCK,
+            extent_type: 1, // BTRFS_FILE_EXTENT_REG
+            compression: 0,
+            disk_bytenr: 0x10_0000 + i * BLOCK,
+            disk_num_bytes: BLOCK,
+            extent_offset: 0,
+            num_bytes: BLOCK,
+        }
+        .to_bytes();
+        tree.insert(key(i * BLOCK), &payload).expect("insert extent");
+    }
+    tree
+}
+
+fn bench_read_file_extent_parse(c: &mut Criterion) {
+    let tree = build_regular_extent_tree();
+    let from_zero = key(0);
+    let to_max = key(u64::MAX);
+
+    // The read path materialises `Vec<(u64, BtrfsExtentData)>`. Old: `range`
+    // clones each item's bytes into a throwaway Vec, then `parse_extent_data`
+    // reads and discards those bytes. New: `range_with` parses straight from the
+    // borrowed node bytes — no per-extent clone. Both produce the same vector.
+    let old = parse_via_range(&tree, &from_zero, &to_max);
+    let new = parse_via_range_with(&tree, &from_zero, &to_max);
+    assert_eq!(old.len() as u64, EXTENTS);
+    assert_eq!(old, new);
+
+    let mut group = c.benchmark_group("btrfs_read_file_extent_parse");
+    group.bench_function("range_clone_then_parse", |b| {
+        b.iter(|| black_box(parse_via_range(&tree, black_box(&from_zero), black_box(&to_max))));
+    });
+    group.bench_function("range_with_parse_in_place", |b| {
+        b.iter(|| {
+            black_box(parse_via_range_with(
+                &tree,
+                black_box(&from_zero),
+                black_box(&to_max),
+            ))
+        });
+    });
+    group.finish();
+}
+
+fn parse_via_range(
+    tree: &InMemoryCowBtrfsTree,
+    start: &BtrfsKey,
+    end: &BtrfsKey,
+) -> Vec<(u64, BtrfsExtentData)> {
+    let items = tree.range(start, end).expect("range");
+    items
+        .iter()
+        .map(|(k, v)| (k.offset, parse_extent_data(v).expect("parse")))
+        .collect()
+}
+
+fn parse_via_range_with(
+    tree: &InMemoryCowBtrfsTree,
+    start: &BtrfsKey,
+    end: &BtrfsKey,
+) -> Vec<(u64, BtrfsExtentData)> {
+    let mut out = Vec::new();
+    tree.range_with(start, end, |k, v| {
+        out.push((k.offset, parse_extent_data(v).expect("parse")));
+    })
+    .expect("range_with");
+    out
+}
+
 criterion_group!(
     extent_fetch,
     bench_extent_fetch,
     bench_extent_fetch_eof,
-    bench_range_vs_range_with
+    bench_range_vs_range_with,
+    bench_read_file_extent_parse
 );
 criterion_main!(extent_fetch);

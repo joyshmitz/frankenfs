@@ -7913,19 +7913,29 @@ impl OpenFs {
                     item_type: BTRFS_ITEM_EXTENT_DATA,
                     offset: offset.saturating_add(u64::from(size)),
                 };
-                let ext_items = alloc
+                // Parse each EXTENT_DATA item straight from the bytes borrowed
+                // from the tree node — `range_with` (bd-h9awv) avoids the
+                // throwaway per-extent `Vec<u8>` clone `range` makes before the
+                // parse discards it. The parsed structs are what the csum-verify
+                // and assembly loops below keep.
+                let mut exts: Vec<(u64, BtrfsExtentData)> = Vec::new();
+                let mut cb_err: Option<FfsError> = None;
+                alloc
                     .fs_tree
-                    .range(&ext_start, &ext_end)
+                    .range_with(&ext_start, &ext_end, |k, v| {
+                        if cb_err.is_some() {
+                            return;
+                        }
+                        match parse_extent_data(v) {
+                            Ok(parsed) => exts.push((k.offset, parsed)),
+                            Err(e) => cb_err = Some(parse_to_ffs_error(&e)),
+                        }
+                    })
                     .map_err(|e| btrfs_mutation_to_ffs(&e))?;
                 drop(alloc);
-                let exts = ext_items
-                    .iter()
-                    .map(|(k, v)| {
-                        parse_extent_data(v)
-                            .map(|parsed| (k.offset, parsed))
-                            .map_err(|e| parse_to_ffs_error(&e))
-                    })
-                    .collect::<Result<_, _>>()?;
+                if let Some(e) = cb_err {
+                    return Err(e);
+                }
                 (inode, exts)
             } else {
                 let items = self.walk_btrfs_fs_tree_object(cx, canonical)?;
@@ -23986,19 +23996,21 @@ impl OpenFs {
             "dir_item missing expected name {} in parent {parent_oid}",
             String::from_utf8_lossy(name)
         );
-        let start = BtrfsKey {
+        // DIR_ITEM is keyed by (parent, DIR_ITEM, name_hash) and a name lives only
+        // in its own hash bucket, so seek straight to that key — an O(log N) point
+        // query plus a scan of the tiny collision bucket — instead of ranging every
+        // DIR_ITEM in the directory (O(N) per removal => O(N^2) to empty a
+        // directory). Mirrors the hash-keyed lookup btrfs_lookup_dir_entry already
+        // uses (bd-a9wot); the name was inserted under exactly this key, so the
+        // bounded query is isomorphic to the old full scan.
+        let key = BtrfsKey {
             objectid: parent_oid,
             item_type: BTRFS_ITEM_DIR_ITEM,
-            offset: 0,
-        };
-        let end = BtrfsKey {
-            objectid: parent_oid,
-            item_type: BTRFS_ITEM_DIR_ITEM,
-            offset: u64::MAX,
+            offset: u64::from(ffs_btrfs::btrfs_name_hash(name)),
         };
         let items = alloc
             .fs_tree
-            .range(&start, &end)
+            .range(&key, &key)
             .map_err(|e| btrfs_mutation_to_ffs(&e))?;
         for (key, payload) in items {
             let entries = Self::btrfs_parse_dir_items(
