@@ -13,6 +13,9 @@
 //! helper is private to ffs-core).
 
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
+use ffs_btrfs::{
+    BTRFS_ITEM_DIR_INDEX, BTRFS_ITEM_DIR_ITEM, BtrfsBTree, BtrfsKey, InMemoryCowBtrfsTree,
+};
 use std::collections::HashSet;
 use std::hint::black_box;
 
@@ -80,5 +83,90 @@ fn bench_readdir_dedup(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(readdir_dedup, bench_readdir_dedup);
+const DIR_INODE: u64 = 256;
+/// Representative on-disk `btrfs_dir_item` payload: ~30-byte header plus a short
+/// name. readdir parses-and-discards this for every entry, so the COW collection
+/// previously cloned it into an intermediate `Vec<u8>` per entry.
+const DIR_ITEM_LEN: usize = 40;
+
+/// Build a directory's DIR_ITEM + DIR_INDEX span as readdir's COW path scans it
+/// (`[DIR_ITEM offset 0, DIR_INDEX offset MAX]`): one of each per file.
+fn build_dir_tree() -> InMemoryCowBtrfsTree {
+    let mut tree = InMemoryCowBtrfsTree::new(1 << 22).expect("tree");
+    let payload = vec![0_u8; DIR_ITEM_LEN];
+    for i in 0..FILES as u64 {
+        tree.insert(
+            BtrfsKey {
+                objectid: DIR_INODE,
+                item_type: BTRFS_ITEM_DIR_ITEM,
+                offset: i,
+            },
+            &payload,
+        )
+        .expect("insert dir_item");
+        tree.insert(
+            BtrfsKey {
+                objectid: DIR_INODE,
+                item_type: BTRFS_ITEM_DIR_INDEX,
+                offset: i,
+            },
+            &payload,
+        )
+        .expect("insert dir_index");
+    }
+    tree
+}
+
+/// A/B for the readdir COW collection (bd-h9awv migration): the old path called
+/// `range`, cloning every DIR entry's bytes into a throwaway `Vec<u8>` before
+/// parsing; the new path uses `range_with` to parse against the borrowed node
+/// bytes. The `ls` of a large directory walks 2 rows per file, so the clone is
+/// paid `2 * files` times per readdir.
+fn bench_readdir_collect(c: &mut Criterion) {
+    let tree = build_dir_tree();
+    let start = BtrfsKey {
+        objectid: DIR_INODE,
+        item_type: BTRFS_ITEM_DIR_ITEM,
+        offset: 0,
+    };
+    let end = BtrfsKey {
+        objectid: DIR_INODE,
+        item_type: BTRFS_ITEM_DIR_INDEX,
+        offset: u64::MAX,
+    };
+
+    // Isomorphism: range_with visits the same (key, bytes) sequence as range.
+    let materialised = tree.range(&start, &end).expect("range");
+    let mut collected = Vec::new();
+    tree.range_with(&start, &end, |k, v| collected.push((k, v.to_vec())))
+        .expect("range_with");
+    assert_eq!(materialised.len(), FILES * 2);
+    assert_eq!(materialised, collected);
+
+    let mut group = c.benchmark_group("btrfs_readdir_collect");
+    group.sample_size(20);
+    // Old: clone each entry's bytes, then "parse" (here: sum lengths).
+    group.bench_function("range_clones_each_entry", |b| {
+        b.iter(|| {
+            let items = tree.range(black_box(&start), black_box(&end)).unwrap();
+            let mut bytes = 0_usize;
+            for (_k, v) in &items {
+                bytes += v.len();
+            }
+            black_box(bytes)
+        });
+    });
+    // New: borrow each entry's bytes, parse in place — no per-entry allocation.
+    group.bench_function("range_with_zero_copy", |b| {
+        b.iter(|| {
+            let mut bytes = 0_usize;
+            tree.range_with(black_box(&start), black_box(&end), |_k, v| bytes += v.len())
+                .unwrap();
+            black_box(bytes)
+        });
+    });
+    group.finish();
+}
+
+criterion_group!(readdir_dedup, bench_readdir_dedup, bench_readdir_collect);
 criterion_main!(readdir_dedup);

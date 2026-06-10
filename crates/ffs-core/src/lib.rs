@@ -7029,18 +7029,15 @@ impl OpenFs {
         let canonical_dir = self.btrfs_canonical_inode(ino)?;
         let mut rows: Vec<(u64, DirEntry)> = Vec::new();
 
-        // Collect (key, data) pairs — either from the COW tree or the on-disk
-        // tree depending on whether writes are enabled.
-        let cow_items: Vec<(BtrfsKey, Vec<u8>)>;
-        let ondisk_items: Vec<BtrfsLeafEntry>;
         // Parent objectid for the synthetic ".." entry, captured from the same
         // read-only walk below so it needs no separate (full-tree) walk
         // (bd-e94n2). `None` on the writable path (resolved via the COW tree).
         let mut readonly_parent_oid: Option<u64> = None;
 
-        let kv_iter: Box<dyn Iterator<Item = (&BtrfsKey, &[u8])>> = if let Some(alloc_mutex) =
-            self.btrfs_alloc_state.as_ref()
-        {
+        // Collect rows from the DIR_ITEM/DIR_INDEX span — from the COW tree
+        // (zero-copy via `range_with`, bd-h9awv) or the on-disk tree depending
+        // on whether writes are enabled.
+        if let Some(alloc_mutex) = self.btrfs_alloc_state.as_ref() {
             let dir_attr = self.btrfs_read_inode_attr(cx, ino)?;
             if dir_attr.kind != FileType::Directory {
                 return Err(FfsError::NotDirectory);
@@ -7056,17 +7053,30 @@ impl OpenFs {
                 item_type: BTRFS_ITEM_DIR_INDEX,
                 offset: u64::MAX,
             };
-            cow_items = alloc
+            // Parse each DIR entry in place against the borrowed node bytes —
+            // no per-item `Vec<u8>` clone (the old `range` materialised one for
+            // every entry, discarded immediately after parsing).
+            let mut cb_err: Option<FfsError> = None;
+            alloc
                 .fs_tree
-                .range(&start, &end)
+                .range_with(&start, &end, |key, data| {
+                    if cb_err.is_some() {
+                        return;
+                    }
+                    if let Err(e) = Self::btrfs_push_dir_rows(canonical_dir, &key, data, &mut rows) {
+                        cb_err = Some(e);
+                    }
+                })
                 .map_err(|e| btrfs_mutation_to_ffs(&e))?;
             drop(alloc);
-            Box::new(cow_items.iter().map(|(k, v)| (k, v.as_slice())))
+            if let Some(e) = cb_err {
+                return Err(e);
+            }
         } else {
             // Read-only: one descent yields the INODE_ITEM (dir-type check)
             // and the DIR entries — no separate read_inode_attr walk of the
             // same subtree (bd-e94n2).
-            ondisk_items = self.walk_btrfs_fs_tree_object(cx, canonical_dir)?;
+            let ondisk_items = self.walk_btrfs_fs_tree_object(cx, canonical_dir)?;
             let dir_inode =
                 parse_inode_item(&Self::btrfs_find_inode_item(&ondisk_items, canonical_dir)?.data)
                     .map_err(|e| parse_to_ffs_error(&e))?;
@@ -7082,60 +7092,17 @@ impl OpenFs {
                     item.key.objectid == canonical_dir && item.key.item_type == BTRFS_ITEM_INODE_REF
                 })
                 .map(|item| item.key.offset);
-            Box::new(
-                ondisk_items
-                    .iter()
-                    .filter(|item| {
-                        item.key.objectid == canonical_dir
-                            && (item.key.item_type == BTRFS_ITEM_DIR_INDEX
-                                || item.key.item_type == BTRFS_ITEM_DIR_ITEM)
-                    })
-                    .map(|item| (&item.key, item.data.as_slice())),
-            )
-        };
-
-        for (key, data) in kv_iter {
-            let parsed = match parse_dir_items(data) {
-                Ok(p) => p,
-                Err(e) => {
-                    warn!(
-                        inode = canonical_dir,
-                        item_type = key.item_type,
-                        "btrfs invalid_dir_entry"
-                    );
-                    return Err(parse_to_ffs_error(&e));
-                }
-            };
-            for (idx, dir_item) in parsed.into_iter().enumerate() {
-                let local_idx = u64::try_from(idx).map_err(|_| FfsError::Corruption {
-                    block: 0,
-                    detail: "directory index conversion overflow".into(),
-                })?;
-                // Prefer DIR_INDEX ordering when available. DIR_ITEM entries get
-                // a high-bit bias so they naturally sort after DIR_INDEX.
-                let base = if key.item_type == BTRFS_ITEM_DIR_INDEX {
-                    key.offset
-                } else {
-                    key.offset | (1_u64 << 63)
-                };
-
-                trace!(
-                    inode = canonical_dir,
-                    child_inode = dir_item.child_objectid,
-                    file_type = dir_item.file_type,
-                    index = base.saturating_add(local_idx),
-                    "btrfs dir_item_found"
-                );
-
-                rows.push((
-                    base.saturating_add(local_idx),
-                    DirEntry {
-                        ino: InodeNumber(dir_item.child_objectid),
-                        offset: 0,
-                        kind: Self::btrfs_dir_type_to_file_type(dir_item.file_type),
-                        name: dir_item.name,
-                    },
-                ));
+            for item in ondisk_items.iter().filter(|item| {
+                item.key.objectid == canonical_dir
+                    && (item.key.item_type == BTRFS_ITEM_DIR_INDEX
+                        || item.key.item_type == BTRFS_ITEM_DIR_ITEM)
+            }) {
+                Self::btrfs_push_dir_rows(
+                    canonical_dir,
+                    &item.key,
+                    item.data.as_slice(),
+                    &mut rows,
+                )?;
             }
         }
 
@@ -7196,6 +7163,61 @@ impl OpenFs {
         );
 
         Ok(out)
+    }
+
+    /// Parse a single DIR_ITEM/DIR_INDEX payload and append its entries to
+    /// `rows`. Shared by both readdir paths so the COW path can parse directly
+    /// against bytes borrowed from the tree (`range_with`, zero-copy) while the
+    /// on-disk path feeds its materialised items through the same logic.
+    fn btrfs_push_dir_rows(
+        canonical_dir: u64,
+        key: &BtrfsKey,
+        data: &[u8],
+        rows: &mut Vec<(u64, DirEntry)>,
+    ) -> Result<(), FfsError> {
+        let parsed = match parse_dir_items(data) {
+            Ok(p) => p,
+            Err(e) => {
+                warn!(
+                    inode = canonical_dir,
+                    item_type = key.item_type,
+                    "btrfs invalid_dir_entry"
+                );
+                return Err(parse_to_ffs_error(&e));
+            }
+        };
+        for (idx, dir_item) in parsed.into_iter().enumerate() {
+            let local_idx = u64::try_from(idx).map_err(|_| FfsError::Corruption {
+                block: 0,
+                detail: "directory index conversion overflow".into(),
+            })?;
+            // Prefer DIR_INDEX ordering when available. DIR_ITEM entries get
+            // a high-bit bias so they naturally sort after DIR_INDEX.
+            let base = if key.item_type == BTRFS_ITEM_DIR_INDEX {
+                key.offset
+            } else {
+                key.offset | (1_u64 << 63)
+            };
+
+            trace!(
+                inode = canonical_dir,
+                child_inode = dir_item.child_objectid,
+                file_type = dir_item.file_type,
+                index = base.saturating_add(local_idx),
+                "btrfs dir_item_found"
+            );
+
+            rows.push((
+                base.saturating_add(local_idx),
+                DirEntry {
+                    ino: InodeNumber(dir_item.child_objectid),
+                    offset: 0,
+                    kind: Self::btrfs_dir_type_to_file_type(dir_item.file_type),
+                    name: dir_item.name,
+                },
+            ));
+        }
+        Ok(())
     }
 
     fn btrfs_logical_chunk_end(&self, logical: u64) -> Result<u64, FfsError> {
