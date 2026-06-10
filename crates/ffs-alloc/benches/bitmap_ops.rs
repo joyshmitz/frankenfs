@@ -211,6 +211,151 @@ fn bench_largest_free_run(c: &mut Criterion) {
     group.finish();
 }
 
+const OLD_ZERO_RUN_FIELD_MASK: u16 = 0x1F;
+const OLD_ZERO_RUN_SUFFIX_SHIFT: u16 = 5;
+const OLD_ZERO_RUN_BEST_SHIFT: u16 = 10;
+static OLD_HALFWORD_ZERO_RUNS: [u16; 65_536] = build_old_halfword_zero_runs();
+
+#[expect(
+    clippy::large_stack_arrays,
+    reason = "const-evaluated static table initializer; no runtime stack allocation"
+)]
+const fn build_old_halfword_zero_runs() -> [u16; 65_536] {
+    let mut runs = [0_u16; 65_536];
+    let mut halfword = 0_u16;
+    loop {
+        runs[halfword as usize] = old_halfword_zero_run_summary(halfword);
+        if halfword == u16::MAX {
+            break;
+        }
+        halfword += 1;
+    }
+    runs
+}
+
+const fn old_halfword_zero_run_summary(halfword: u16) -> u16 {
+    let mut prefix = 0_u16;
+    while prefix < 16 && ((halfword >> prefix) & 1) == 0 {
+        prefix += 1;
+    }
+
+    let mut suffix = 0_u16;
+    while suffix < 16 && ((halfword >> (15 - suffix)) & 1) == 0 {
+        suffix += 1;
+    }
+
+    let mut best = 0_u16;
+    let mut run = 0_u16;
+    let mut bit = 0_u16;
+    while bit < 16 {
+        if ((halfword >> bit) & 1) == 0 {
+            run += 1;
+            if run > best {
+                best = run;
+            }
+        } else {
+            run = 0;
+        }
+        bit += 1;
+    }
+
+    prefix | (suffix << OLD_ZERO_RUN_SUFFIX_SHIFT) | (best << OLD_ZERO_RUN_BEST_SHIFT)
+}
+
+fn largest_free_run_halfword_table_scan(bitmap: &[u8], count: u32) -> u32 {
+    if count == 0 {
+        return 0;
+    }
+    let full_bytes = (count / 8) as usize;
+    let remainder = count % 8;
+
+    let mut best = 0_u32;
+    let mut run = 0_u32;
+
+    let available_full_bytes = full_bytes.min(bitmap.len());
+    let word_bytes = available_full_bytes - (available_full_bytes % 8);
+
+    for chunk in bitmap[..word_bytes].chunks_exact(8) {
+        let word = u64::from_le_bytes([
+            chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
+        ]);
+        apply_old_word_zero_run(word, &mut run, &mut best);
+    }
+
+    for &byte in &bitmap[word_bytes..available_full_bytes] {
+        apply_old_byte_zero_run(byte, &mut run, &mut best);
+    }
+
+    if full_bytes > available_full_bytes {
+        run = 0;
+    }
+
+    if remainder > 0 {
+        if let Some(&byte) = bitmap.get(full_bytes) {
+            let mask = u8::MAX >> (8 - remainder);
+            apply_old_byte_zero_run(byte | !mask, &mut run, &mut best);
+        }
+    }
+
+    best
+}
+
+fn apply_old_word_zero_run(word: u64, run: &mut u32, best: &mut u32) {
+    if word == 0 {
+        *run = run.saturating_add(64);
+        *best = (*best).max(*run);
+        return;
+    }
+    if word == u64::MAX {
+        *run = 0;
+        return;
+    }
+
+    for shift in [0_u32, 16, 32, 48] {
+        let halfword = ((word >> shift) & 0xFFFF) as u16;
+        apply_old_halfword_zero_run(OLD_HALFWORD_ZERO_RUNS[usize::from(halfword)], run, best);
+    }
+}
+
+fn apply_old_halfword_zero_run(summary: u16, run: &mut u32, best: &mut u32) {
+    let prefix = u32::from(summary & OLD_ZERO_RUN_FIELD_MASK);
+    if prefix == 16 {
+        *run = run.saturating_add(16);
+        *best = (*best).max(*run);
+        return;
+    }
+
+    if prefix > 0 {
+        *best = (*best).max(run.saturating_add(prefix));
+    }
+    *best = (*best).max(u32::from(
+        (summary >> OLD_ZERO_RUN_BEST_SHIFT) & OLD_ZERO_RUN_FIELD_MASK,
+    ));
+    *run = u32::from((summary >> OLD_ZERO_RUN_SUFFIX_SHIFT) & OLD_ZERO_RUN_FIELD_MASK);
+}
+
+fn apply_old_byte_zero_run(byte: u8, run: &mut u32, best: &mut u32) {
+    apply_old_halfword_zero_run(OLD_HALFWORD_ZERO_RUNS[usize::from(byte)], run, best);
+}
+
+fn bench_largest_free_run_word_vs_halfword(c: &mut Criterion) {
+    let bm = make_fragmented_bitmap();
+    debug_assert_eq!(
+        largest_free_run_halfword_table_scan(&bm, 32768),
+        bitmap_largest_free_run(&bm, 32768),
+        "old halfword-table and new word-run scans must agree"
+    );
+
+    let mut group = c.benchmark_group("largest_free_run_ab");
+    group.bench_function("old_halfword_table", |b| {
+        b.iter(|| black_box(largest_free_run_halfword_table_scan(black_box(&bm), 32768)));
+    });
+    group.bench_function("word_run_detector", |b| {
+        b.iter(|| black_box(bitmap_largest_free_run(black_box(&bm), 32768)));
+    });
+    group.finish();
+}
+
 fn largest_free_run_bitmap_scan_groups(bitmaps: &[Vec<u8>]) -> u64 {
     bitmaps
         .iter()
@@ -586,6 +731,7 @@ criterion_group!(
     bench_succinct_find_free_direct_vs_rank_select,
     bench_find_contiguous,
     bench_largest_free_run,
+    bench_largest_free_run_word_vs_halfword,
     bench_largest_free_run_cache_vs_bitmap_scan,
     bench_rank,
     bench_select,
