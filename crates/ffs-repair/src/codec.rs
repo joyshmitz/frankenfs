@@ -1130,15 +1130,26 @@ fn solve_direct_repair_rows(
 }
 
 fn direct_solution_satisfies_all_repairs(rows: &[DirectRepairRow], solved: &[Vec<u8>]) -> bool {
+    let Some(first_row) = rows.first() else {
+        return true;
+    };
+    let block_size = first_row.residual.len();
+    if solved.iter().any(|recovered| recovered.len() != block_size)
+        || rows.iter().any(|row| row.residual.len() != block_size)
+    {
+        return false;
+    }
+
+    let mut expected = vec![0; block_size];
     for row in rows {
-        let mut expected = vec![0; row.residual.len()];
+        expected.fill(0);
         for (missing_position, recovered) in solved.iter().enumerate() {
             let coefficient = row.coefficients[missing_position];
             if !coefficient.is_zero() {
                 gf256_addmul_slice(&mut expected, recovered, coefficient);
             }
         }
-        if row.residual != expected {
+        if row.residual.as_slice() != expected.as_slice() {
             return false;
         }
     }
