@@ -354,9 +354,16 @@ pub fn encode_global(config: &LrcConfig, data: &[Vec<u8>]) -> Vec<Vec<u8>> {
             let mut parity = vec![0_u8; block_size];
             let step = global_parity_row_step(j);
             let mut coeff = step;
-            for block in data {
-                gf256_mul_xor_into(&mut parity, block, coeff);
+            let mut block_pairs = data.chunks_exact(2);
+            for pair in &mut block_pairs {
+                let lhs_coeff = coeff;
                 coeff = gf256::mul(coeff, step);
+                let rhs_coeff = coeff;
+                gf256_mul_xor_pair_into(&mut parity, &pair[0], lhs_coeff, &pair[1], rhs_coeff);
+                coeff = gf256::mul(coeff, step);
+            }
+            if let Some(block) = block_pairs.remainder().first() {
+                gf256_mul_xor_into(&mut parity, block, coeff);
             }
             parity
         })
@@ -686,6 +693,41 @@ fn gf256_mul_xor_into(dst: &mut [u8], src: &[u8], coeff: u8) {
     let coeff_mul = gf256::mul_row(coeff);
     for (d, s) in dst.iter_mut().zip(src.iter()) {
         *d ^= coeff_mul[*s as usize];
+    }
+}
+
+/// Compute two adjacent GF(256) projections into one destination pass.
+fn gf256_mul_xor_pair_into(dst: &mut [u8], lhs: &[u8], lhs_coeff: u8, rhs: &[u8], rhs_coeff: u8) {
+    debug_assert_eq!(dst.len(), lhs.len());
+    debug_assert_eq!(lhs.len(), rhs.len());
+    match (lhs_coeff, rhs_coeff) {
+        (0, 0) => {}
+        (0, coeff) => gf256_mul_xor_into(dst, rhs, coeff),
+        (coeff, 0) => gf256_mul_xor_into(dst, lhs, coeff),
+        (1, 1) => {
+            for ((d, l), r) in dst.iter_mut().zip(lhs.iter()).zip(rhs.iter()) {
+                *d ^= *l ^ *r;
+            }
+        }
+        (1, coeff) => {
+            let rhs_mul = gf256::mul_row(coeff);
+            for ((d, l), r) in dst.iter_mut().zip(lhs.iter()).zip(rhs.iter()) {
+                *d ^= *l ^ rhs_mul[*r as usize];
+            }
+        }
+        (coeff, 1) => {
+            let lhs_mul = gf256::mul_row(coeff);
+            for ((d, l), r) in dst.iter_mut().zip(lhs.iter()).zip(rhs.iter()) {
+                *d ^= lhs_mul[*l as usize] ^ *r;
+            }
+        }
+        (lhs_coeff, rhs_coeff) => {
+            let lhs_mul = gf256::mul_row(lhs_coeff);
+            let rhs_mul = gf256::mul_row(rhs_coeff);
+            for ((d, l), r) in dst.iter_mut().zip(lhs.iter()).zip(rhs.iter()) {
+                *d ^= lhs_mul[*l as usize] ^ rhs_mul[*r as usize];
+            }
+        }
     }
 }
 
@@ -1102,6 +1144,41 @@ mod tests {
                     "data_idx={data_idx}, parity_idx={parity_idx}"
                 );
                 coeff = gf256::mul(coeff, step);
+            }
+        }
+    }
+
+    #[test]
+    fn gf256_mul_xor_pair_matches_separate_passes() {
+        const COEFFS: [u8; 6] = [0, 1, 2, 17, 128, 255];
+        const LENS: [usize; 7] = [0, 1, 7, 8, 31, 96, 4096];
+
+        for len in LENS {
+            let mut dst = vec![0_u8; len];
+            let lhs: Vec<u8> = (0..len)
+                .map(|idx| u8::try_from((idx * 29 + 11) & 0xff).expect("pattern fits in u8"))
+                .collect();
+            let rhs: Vec<u8> = (0..len)
+                .map(|idx| u8::try_from((idx * 43 + 7) & 0xff).expect("pattern fits in u8"))
+                .collect();
+            for (idx, byte) in dst.iter_mut().enumerate() {
+                *byte = u8::try_from((idx * 19 + 5) & 0xff).expect("pattern fits in u8");
+            }
+
+            for lhs_coeff in COEFFS {
+                for rhs_coeff in COEFFS {
+                    let mut separate = dst.clone();
+                    gf256_mul_xor_into(&mut separate, &lhs, lhs_coeff);
+                    gf256_mul_xor_into(&mut separate, &rhs, rhs_coeff);
+
+                    let mut fused = dst.clone();
+                    gf256_mul_xor_pair_into(&mut fused, &lhs, lhs_coeff, &rhs, rhs_coeff);
+
+                    assert_eq!(
+                        fused, separate,
+                        "len={len} lhs_coeff={lhs_coeff} rhs_coeff={rhs_coeff}"
+                    );
+                }
             }
         }
     }
