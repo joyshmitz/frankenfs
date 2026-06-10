@@ -25,5 +25,9 @@ tempfile = { workspace = true }
 name = "extent_fetch"
 harness = false
 
+[[bench]]
+name = "readdir_dedup"
+harness = false
+
 [lints]
 workspace = true

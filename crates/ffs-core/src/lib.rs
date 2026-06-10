@@ -7000,6 +7000,24 @@ impl OpenFs {
         ))
     }
 
+    /// Deduplicate directory rows by entry name, keeping the first occurrence in
+    /// the (already sorted) iteration order — the rule readdir relies on for
+    /// stable pagination. O(rows) via a seen-name set instead of the prior
+    /// all-pairs `deduped.iter().any(name ==)` scan, which was O(rows^2): a btrfs
+    /// directory presents ~2 rows per file (a DIR_ITEM and a DIR_INDEX), so the
+    /// quadratic was O(files^2) on every `ls` of a large directory.
+    fn btrfs_dedup_dir_rows(rows: Vec<(u64, DirEntry)>) -> Vec<(u64, DirEntry)> {
+        let mut seen: std::collections::HashSet<Vec<u8>> =
+            std::collections::HashSet::with_capacity(rows.len());
+        let mut out: Vec<(u64, DirEntry)> = Vec::with_capacity(rows.len());
+        for row in rows {
+            if seen.insert(row.1.name.clone()) {
+                out.push(row);
+            }
+        }
+        out
+    }
+
     #[allow(clippy::too_many_lines)]
     fn btrfs_readdir_entries(
         &self,
@@ -7125,16 +7143,7 @@ impl OpenFs {
 
         // Remove duplicate names (DIR_ITEM and DIR_INDEX can both describe
         // the same entry). Keep first-by-sort-key for stable pagination.
-        let mut deduped: Vec<(u64, DirEntry)> = Vec::new();
-        for row in rows {
-            if deduped
-                .iter()
-                .any(|(_, existing)| existing.name == row.1.name)
-            {
-                continue;
-            }
-            deduped.push(row);
-        }
+        let deduped = Self::btrfs_dedup_dir_rows(rows);
 
         if deduped.len() > 1000 {
             debug!(
@@ -55002,6 +55011,43 @@ mod tests {
     // content/size divergence or unexpected error fails the case.
     proptest::proptest! {
         #![proptest_config(proptest::prelude::ProptestConfig::with_cases(16))]
+
+        /// The O(N) HashSet dedup must produce exactly the same result as the
+        /// prior O(N^2) keep-first-by-name all-pairs scan, for any row sequence.
+        #[test]
+        fn btrfs_dedup_dir_rows_matches_linear_dedup(
+            names in proptest::collection::vec(
+                proptest::collection::vec(proptest::prelude::any::<u8>(), 0..=6),
+                0..=80,
+            ),
+        ) {
+            let rows: Vec<(u64, DirEntry)> = names
+                .iter()
+                .enumerate()
+                .map(|(i, name)| {
+                    let key = u64::try_from(i).expect("index fits u64");
+                    (
+                        key,
+                        DirEntry {
+                            ino: InodeNumber(key + 2),
+                            offset: 0,
+                            kind: FileType::RegularFile,
+                            name: name.clone(),
+                        },
+                    )
+                })
+                .collect();
+            let mut expected: Vec<(u64, DirEntry)> = Vec::new();
+            for row in rows.clone() {
+                if expected.iter().any(|(_, e)| e.name == row.1.name) {
+                    continue;
+                }
+                expected.push(row);
+            }
+            let got = OpenFs::btrfs_dedup_dir_rows(rows);
+            proptest::prop_assert_eq!(got, expected);
+        }
+
         #[test]
         fn ext4_write_fallocate_random_matches_reference_model(
             ops in proptest::collection::vec(
