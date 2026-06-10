@@ -3424,25 +3424,33 @@ impl BtrfsBTree for InMemoryCowBtrfsTree {
             return Err(BtrfsMutationError::InvalidRange);
         }
         let mut out = Vec::new();
-        self.collect_range_from(self.root, start, end, &mut out)?;
+        self.for_each_in_range(self.root, start, end, &mut |item| {
+            out.push((item.key, item.data.clone()));
+        })?;
         Ok(out)
     }
 }
 
 impl InMemoryCowBtrfsTree {
-    /// B-tree-aware range descent. Only visits internal children whose
-    /// `[keys[i-1], keys[i])` span intersects `[start, end]`, and uses
-    /// `partition_point` on sorted leaves so the result is O(log N + k)
-    /// per call instead of a full-tree materialisation followed by
-    /// filter. bd-yt66z's `btrfs_resolve_inode_path_via_cow`
-    /// fast path depends on this for its O(depth · log N) complexity.
-    fn collect_range_from(
+    /// B-tree-aware range descent invoking `f` on every item whose key is in
+    /// `[start, end]`, in ascending key order. Only visits internal children
+    /// whose `[keys[i-1], keys[i])` span intersects `[start, end]`, and uses
+    /// `partition_point` on sorted leaves so the walk is O(log N + k) per call
+    /// instead of a full-tree materialisation followed by filter. bd-yt66z's
+    /// `btrfs_resolve_inode_path_via_cow` fast path depends on this for its
+    /// O(depth · log N) complexity. The items are borrowed from the tree nodes
+    /// (no allocation); both `range` (materialising) and `range_with`
+    /// (zero-copy) are thin wrappers so the traversal has a single definition.
+    fn for_each_in_range<F>(
         &self,
         node_id: u64,
         start: &BtrfsKey,
         end: &BtrfsKey,
-        out: &mut Vec<(BtrfsKey, Vec<u8>)>,
-    ) -> Result<(), BtrfsMutationError> {
+        f: &mut F,
+    ) -> Result<(), BtrfsMutationError>
+    where
+        F: FnMut(&BtrfsTreeItem),
+    {
         match self.node_ref(node_id)? {
             BtrfsCowNode::Leaf { items } => {
                 let lo = items.partition_point(|item| key_cmp(&item.key, start).is_lt());
@@ -3450,7 +3458,7 @@ impl InMemoryCowBtrfsTree {
                     if key_cmp(&item.key, end).is_gt() {
                         break;
                     }
-                    out.push((item.key, item.data.clone()));
+                    f(item);
                 }
             }
             BtrfsCowNode::Internal { keys, children } => {
@@ -3468,11 +3476,31 @@ impl InMemoryCowBtrfsTree {
                     if i > 0 && key_cmp(&keys[i - 1], end).is_gt() {
                         break;
                     }
-                    self.collect_range_from(*child, start, end, out)?;
+                    self.for_each_in_range(*child, start, end, f)?;
                 }
             }
         }
         Ok(())
+    }
+
+    /// Zero-copy range scan: invoke `f(key, &data)` for every item in
+    /// `[start, end]` with the item's bytes borrowed directly from the tree
+    /// node — no per-item `Vec<u8>` allocation. Callers that parse-and-discard
+    /// (extent reads, fiemap, readdir) avoid the clone that [`Self::range`]
+    /// performs. Same traversal and order as `range`.
+    pub fn range_with<F>(
+        &self,
+        start: &BtrfsKey,
+        end: &BtrfsKey,
+        mut f: F,
+    ) -> Result<(), BtrfsMutationError>
+    where
+        F: FnMut(BtrfsKey, &[u8]),
+    {
+        if key_cmp(start, end) == Ordering::Greater {
+            return Err(BtrfsMutationError::InvalidRange);
+        }
+        self.for_each_in_range(self.root, start, end, &mut |item| f(item.key, &item.data))
     }
 
     /// The largest key in the tree that is `<= target` (predecessor-or-equal), or
@@ -10154,6 +10182,40 @@ mod tests {
                 .max_by(super::key_cmp);
             let got = tree.floor_key(&target).expect("floor_key");
             proptest::prop_assert_eq!(got, expected);
+        }
+
+        /// `range_with` (zero-copy callback scan) must produce exactly the same
+        /// (key, bytes) sequence as `range` (materialising), for any window —
+        /// including the start > end error case — across randomly-built trees.
+        #[test]
+        fn range_with_matches_range(
+            raw in proptest::collection::vec((0_u64..40, 0_u64..40), 0..=48),
+            start_oid in 0_u64..40,
+            start_off in 0_u64..40,
+            end_oid in 0_u64..40,
+            end_off in 0_u64..40,
+        ) {
+            let mk = |oid: u64, off: u64| BtrfsKey {
+                objectid: oid,
+                item_type: BTRFS_ITEM_EXTENT_DATA,
+                offset: off,
+            };
+            let mut tree = InMemoryCowBtrfsTree::new(4).expect("tree");
+            let mut keys = std::collections::BTreeSet::new();
+            for (oid, off) in &raw {
+                if keys.insert((*oid, *off)) {
+                    tree.insert(mk(*oid, *off), &[*oid as u8, *off as u8]).expect("insert");
+                }
+            }
+            let start = mk(start_oid, start_off);
+            let end = mk(end_oid, end_off);
+            let range_res = tree.range(&start, &end);
+            let mut collected = Vec::new();
+            let with_res = tree.range_with(&start, &end, |k, v| collected.push((k, v.to_vec())));
+            proptest::prop_assert_eq!(range_res.is_ok(), with_res.is_ok());
+            if let Ok(materialised) = range_res {
+                proptest::prop_assert_eq!(materialised, collected);
+            }
         }
     }
 

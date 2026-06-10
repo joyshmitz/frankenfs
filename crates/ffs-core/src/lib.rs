@@ -26057,19 +26057,28 @@ impl OpenFs {
                 item_type: BTRFS_ITEM_EXTENT_DATA,
                 offset: u64::MAX,
             };
-            let ext_items = alloc
+            // Parse each EXTENT_DATA item straight from the borrowed tree bytes
+            // via the zero-copy `range_with`, instead of `range` cloning every
+            // item into an intermediate Vec<u8> first. For a whole-file fiemap of
+            // a fragmented file this drops one allocation+copy per extent.
+            let mut parsed = Vec::new();
+            let mut parse_err = None;
+            alloc
                 .fs_tree
-                .range(&ext_start, &ext_end)
-                .map_err(|e| btrfs_mutation_to_ffs(&e))?;
-            let parsed = ext_items
-                .iter()
-                .map(|(k, v)| {
-                    parse_extent_data(v)
-                        .map(|extent| (k.offset, extent))
-                        .map_err(|e| parse_to_ffs_error(&e))
+                .range_with(&ext_start, &ext_end, |k, v| {
+                    if parse_err.is_some() {
+                        return;
+                    }
+                    match parse_extent_data(v) {
+                        Ok(extent) => parsed.push((k.offset, extent)),
+                        Err(e) => parse_err = Some(parse_to_ffs_error(&e)),
+                    }
                 })
-                .collect::<Result<Vec<_>, _>>()?;
+                .map_err(|e| btrfs_mutation_to_ffs(&e))?;
             drop(alloc);
+            if let Some(e) = parse_err {
+                return Err(e);
+            }
             Ok(parsed)
         } else {
             self.walk_btrfs_fs_tree_object(cx, canonical)?

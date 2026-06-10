@@ -109,5 +109,40 @@ fn bench_extent_fetch_eof(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(extent_fetch, bench_extent_fetch, bench_extent_fetch_eof);
+fn bench_range_vs_range_with(c: &mut Criterion) {
+    let tree = build_tree();
+    let from_zero = key(0);
+    let to_max = key(u64::MAX);
+
+    // Isomorphism: range_with yields the same (key, bytes) sequence as range.
+    let materialised = tree.range(&from_zero, &to_max).expect("range");
+    let mut collected = Vec::new();
+    tree.range_with(&from_zero, &to_max, |k, v| collected.push((k, v.to_vec())))
+        .expect("range_with");
+    assert_eq!(materialised.len() as u64, EXTENTS);
+    assert_eq!(materialised, collected);
+
+    let mut group = c.benchmark_group("btrfs_whole_file_scan");
+    // `range` clones every item's bytes into an intermediate Vec<u8>.
+    group.bench_function("range_clones_each_item", |b| {
+        b.iter(|| black_box(tree.range(black_box(&from_zero), black_box(&to_max)).unwrap()));
+    });
+    // `range_with` borrows each item's bytes — no per-item allocation.
+    group.bench_function("range_with_zero_copy", |b| {
+        b.iter(|| {
+            let mut bytes = 0_usize;
+            tree.range_with(black_box(&from_zero), black_box(&to_max), |_k, v| bytes += v.len())
+                .unwrap();
+            black_box(bytes)
+        });
+    });
+    group.finish();
+}
+
+criterion_group!(
+    extent_fetch,
+    bench_extent_fetch,
+    bench_extent_fetch_eof,
+    bench_range_vs_range_with
+);
 criterion_main!(extent_fetch);
