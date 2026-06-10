@@ -237,6 +237,81 @@ fn find_via_point_query(tree: &InMemoryCowBtrfsTree, name: &[u8], name_hash: u64
     None
 }
 
+/// Build a directory's DIR_INDEX span as btrfs keys it: one DIR_INDEX per file
+/// at key offset = the monotonic per-directory sequence stored in the matching
+/// INODE_REF payload. Returns the tree, a target name, and that name's index.
+fn build_dir_index_tree() -> (InMemoryCowBtrfsTree, Vec<u8>, u64) {
+    let mut tree = InMemoryCowBtrfsTree::new(1 << 22).expect("tree");
+    let mut target = Vec::new();
+    let mut target_index = 0_u64;
+    for i in 0..FILES {
+        let name = format!("file{i:06}").into_bytes();
+        let payload = BtrfsDirItem {
+            child_objectid: 300 + i as u64,
+            child_key_type: 1, // INODE_ITEM
+            child_key_offset: 0,
+            file_type: 1, // regular file
+            name: name.clone(),
+        }
+        .to_bytes();
+        let dir_index = 2 + i as u64;
+        let key = BtrfsKey {
+            objectid: DIR_INODE,
+            item_type: BTRFS_ITEM_DIR_INDEX,
+            offset: dir_index,
+        };
+        tree.insert(key, &payload).expect("insert dir_index");
+        if i == FILES / 2 {
+            target = name;
+            target_index = dir_index;
+        }
+    }
+    (tree, target, target_index)
+}
+
+/// Old removal path: range every DIR_INDEX in the directory and parse each
+/// payload to find the matching name — O(N) per removal.
+fn find_dir_index_via_full_scan(tree: &InMemoryCowBtrfsTree, name: &[u8]) -> Option<u64> {
+    let start = BtrfsKey {
+        objectid: DIR_INODE,
+        item_type: BTRFS_ITEM_DIR_INDEX,
+        offset: 0,
+    };
+    let end = BtrfsKey {
+        objectid: DIR_INODE,
+        item_type: BTRFS_ITEM_DIR_INDEX,
+        offset: u64::MAX,
+    };
+    for (key, payload) in tree.range(&start, &end).expect("range") {
+        let entries = parse_dir_items(&payload).expect("parse");
+        if entries.iter().any(|e| e.name == name) {
+            return Some(key.offset);
+        }
+    }
+    None
+}
+
+/// New removal path: the matching INODE_REF already records the DIR_INDEX
+/// sequence, so seek straight to that key and validate the name.
+fn find_dir_index_via_point_query(
+    tree: &InMemoryCowBtrfsTree,
+    name: &[u8],
+    dir_index: u64,
+) -> Option<u64> {
+    let key = BtrfsKey {
+        objectid: DIR_INODE,
+        item_type: BTRFS_ITEM_DIR_INDEX,
+        offset: dir_index,
+    };
+    for (key, payload) in tree.range(&key, &key).expect("range") {
+        let entries = parse_dir_items(&payload).expect("parse");
+        if entries.iter().any(|e| e.name == name) {
+            return Some(key.offset);
+        }
+    }
+    None
+}
+
 /// A/B for `btrfs_remove_named_dir_item` (bd-* this session): the removal scanned
 /// every DIR_ITEM in the directory to find a name that, by btrfs's hashed keying,
 /// can only live in its own `name_hash` bucket. Seeking that bucket directly turns
@@ -270,10 +345,41 @@ fn bench_remove_named_dir_item(c: &mut Criterion) {
     group.finish();
 }
 
+/// A/B for `btrfs_remove_named_dir_index`: the current path scans every
+/// DIR_INDEX in the directory by name, but the matching INODE_REF carries the
+/// monotonic index sequence that keys the exact DIR_INDEX item.
+fn bench_remove_named_dir_index(c: &mut Criterion) {
+    let (tree, target, target_index) = build_dir_index_tree();
+
+    // Isomorphism: the INODE_REF-carried index points at the same entry the
+    // current full scan finds by parsing every DIR_INDEX payload.
+    let full = find_dir_index_via_full_scan(&tree, &target);
+    let point = find_dir_index_via_point_query(&tree, &target, target_index);
+    assert_eq!(full, point);
+    assert_eq!(full, Some(target_index));
+
+    let mut group = c.benchmark_group("btrfs_remove_named_dir_index");
+    group.sample_size(20);
+    group.bench_function("full_scan_all_dir_indexes", |b| {
+        b.iter(|| black_box(find_dir_index_via_full_scan(&tree, black_box(&target))));
+    });
+    group.bench_function("point_query_at_inode_ref_index", |b| {
+        b.iter(|| {
+            black_box(find_dir_index_via_point_query(
+                &tree,
+                black_box(&target),
+                black_box(target_index),
+            ))
+        });
+    });
+    group.finish();
+}
+
 criterion_group!(
     readdir_dedup,
     bench_readdir_dedup,
     bench_readdir_collect,
-    bench_remove_named_dir_item
+    bench_remove_named_dir_item,
+    bench_remove_named_dir_index
 );
 criterion_main!(readdir_dedup);

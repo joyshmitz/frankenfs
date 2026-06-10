@@ -7063,7 +7063,8 @@ impl OpenFs {
                     if cb_err.is_some() {
                         return;
                     }
-                    if let Err(e) = Self::btrfs_push_dir_rows(canonical_dir, &key, data, &mut rows) {
+                    if let Err(e) = Self::btrfs_push_dir_rows(canonical_dir, &key, data, &mut rows)
+                    {
                         cb_err = Some(e);
                     }
                 })
@@ -21295,7 +21296,6 @@ impl OpenFs {
             && u64::try_from(data.len()).unwrap_or(u64::MAX) <= max_inline;
         let mut existing_inline = None;
 
-        let nbytes_after_write;
         if can_be_inline {
             let ext_start = BtrfsKey {
                 objectid: canonical,
@@ -21322,7 +21322,7 @@ impl OpenFs {
             }
         }
 
-        if can_be_inline {
+        let nbytes_after_write = if can_be_inline {
             // Inline extent: store data directly in the tree item.
             let existing_inline_len = match &existing_inline {
                 Some(BtrfsExtentData::Inline {
@@ -21405,7 +21405,7 @@ impl OpenFs {
                     other => Err(other),
                 })
                 .map_err(|e| btrfs_mutation_to_ffs(&e))?;
-            nbytes_after_write = Self::btrfs_recompute_inode_nbytes(&alloc, canonical)?;
+            Self::btrfs_recompute_inode_nbytes(&alloc, canonical)?
         } else {
             // btrfs requires every uncompressed regular extent to be
             // sector-aligned in BOTH its file offset (key.offset) and its length
@@ -21479,10 +21479,10 @@ impl OpenFs {
                 &merged,
                 is_datasum,
             )?;
-            nbytes_after_write = nbytes_after_remove
+            nbytes_after_remove
                 .checked_add(emitted_nbytes)
-                .ok_or_else(|| FfsError::InvalidGeometry("btrfs inode nbytes overflow".into()))?;
-        }
+                .ok_or_else(|| FfsError::InvalidGeometry("btrfs inode nbytes overflow".into()))?
+        };
 
         // Update inode metadata.
         if end > inode.size {
@@ -22215,7 +22215,7 @@ impl OpenFs {
             return Err(FfsError::NotEmpty);
         }
 
-        Self::btrfs_require_inode_ref_name(&alloc, child_oid, parent_oid, name)?;
+        let dir_index = Self::btrfs_require_inode_ref_index(&alloc, child_oid, parent_oid, name)?;
         // btrfs directories have nlink == 1 (not 2 + subdirs), so removing the
         // sole link drops a dir as well as a file by -1; the parent's nlink does
         // not change for a removed subdirectory (bd-egyf6).
@@ -22228,7 +22228,7 @@ impl OpenFs {
         }
 
         // Remove DIR_ITEM and DIR_INDEX entries.
-        self.btrfs_remove_dir_entry(&mut alloc, parent_oid, name)?;
+        self.btrfs_remove_dir_entry(&mut alloc, parent_oid, name, dir_index)?;
 
         // Remove the INODE_REF back-pointer from child → parent.
         Self::btrfs_remove_inode_ref(&mut alloc, child_oid, parent_oid, name)?;
@@ -22311,7 +22311,8 @@ impl OpenFs {
 
         let child = self.btrfs_lookup_dir_entry(&alloc, parent_oid, name)?;
         let child_is_dir = child.file_type == BTRFS_FT_DIR;
-        Self::btrfs_require_inode_ref_name(&alloc, child.child_objectid, parent_oid, name)?;
+        let child_dir_index =
+            Self::btrfs_require_inode_ref_index(&alloc, child.child_objectid, parent_oid, name)?;
         if parent_oid == new_parent_oid && name == new_name {
             return Ok(());
         }
@@ -22364,7 +22365,7 @@ impl OpenFs {
         }
 
         // Remove old entry and its INODE_REF.
-        self.btrfs_remove_dir_entry(&mut alloc, parent_oid, name)?;
+        self.btrfs_remove_dir_entry(&mut alloc, parent_oid, name, child_dir_index)?;
         Self::btrfs_remove_inode_ref(&mut alloc, child.child_objectid, parent_oid, name)?;
 
         // If target exists, remove it first and handle nlink cleanup.
@@ -22376,7 +22377,9 @@ impl OpenFs {
         if let Some(target) = target {
             let target_oid = target.child_objectid;
             let target_is_dir = target.file_type == BTRFS_FT_DIR;
-            self.btrfs_remove_dir_entry(&mut alloc, new_parent_oid, new_name)?;
+            let target_dir_index =
+                Self::btrfs_require_inode_ref_index(&alloc, target_oid, new_parent_oid, new_name)?;
+            self.btrfs_remove_dir_entry(&mut alloc, new_parent_oid, new_name, target_dir_index)?;
             Self::btrfs_remove_inode_ref(&mut alloc, target_oid, new_parent_oid, new_name)?;
             // Removing the overwritten target drops its single link (-1 for both
             // files and btrfs directories); the new parent's nlink is unchanged
@@ -22461,8 +22464,14 @@ impl OpenFs {
         // half-way through after the dir entries are already gone.
         let src = self.btrfs_lookup_dir_entry(&alloc, parent_oid, name)?;
         let dst = self.btrfs_lookup_dir_entry(&alloc, new_parent_oid, new_name)?;
-        Self::btrfs_require_inode_ref_name(&alloc, src.child_objectid, parent_oid, name)?;
-        Self::btrfs_require_inode_ref_name(&alloc, dst.child_objectid, new_parent_oid, new_name)?;
+        let src_dir_index =
+            Self::btrfs_require_inode_ref_index(&alloc, src.child_objectid, parent_oid, name)?;
+        let dst_dir_index = Self::btrfs_require_inode_ref_index(
+            &alloc,
+            dst.child_objectid,
+            new_parent_oid,
+            new_name,
+        )?;
 
         // Cross-parent directory moves must not create a cycle: neither moved
         // directory may end up under itself (renameat2(2): EINVAL / vfs loop
@@ -22493,9 +22502,9 @@ impl OpenFs {
         // Remove both entries and their INODE_REFs, then reinsert each name
         // pointing at the other entry's inode. Removing both before inserting
         // keeps a same-parent swap from colliding on the in-flight names.
-        self.btrfs_remove_dir_entry(&mut alloc, parent_oid, name)?;
+        self.btrfs_remove_dir_entry(&mut alloc, parent_oid, name, src_dir_index)?;
         Self::btrfs_remove_inode_ref(&mut alloc, src.child_objectid, parent_oid, name)?;
-        self.btrfs_remove_dir_entry(&mut alloc, new_parent_oid, new_name)?;
+        self.btrfs_remove_dir_entry(&mut alloc, new_parent_oid, new_name, dst_dir_index)?;
         Self::btrfs_remove_inode_ref(&mut alloc, dst.child_objectid, new_parent_oid, new_name)?;
 
         let into_parent = BtrfsDirItem {
@@ -23974,9 +23983,20 @@ impl OpenFs {
         alloc: &mut BtrfsAllocState,
         parent_oid: u64,
         name: &[u8],
+        dir_index: u64,
     ) -> ffs_error::Result<()> {
+        // INODE_REF.index is assigned with the DIR_INDEX offset at link time, so
+        // it can address the exact DIR_INDEX item without a directory-wide scan.
+        let (dir_index_key, dir_index_entries) =
+            Self::btrfs_load_named_dir_index(alloc, parent_oid, name, dir_index)?;
         Self::btrfs_remove_named_dir_item(alloc, parent_oid, name)?;
-        Self::btrfs_remove_named_dir_index(alloc, parent_oid, name)?;
+        Self::btrfs_remove_loaded_dir_index(
+            alloc,
+            parent_oid,
+            name,
+            dir_index_key,
+            dir_index_entries,
+        )?;
         // Reverse the i_size accounting applied at insert (DIR_ITEM + DIR_INDEX
         // => 2 * name_len); both removals succeeded above.
         self.btrfs_adjust_dir_size(
@@ -24046,46 +24066,57 @@ impl OpenFs {
         Err(FfsError::Corruption { block: 0, detail })
     }
 
-    fn btrfs_remove_named_dir_index(
-        alloc: &mut BtrfsAllocState,
+    fn btrfs_load_named_dir_index(
+        alloc: &BtrfsAllocState,
         parent_oid: u64,
         name: &[u8],
-    ) -> ffs_error::Result<()> {
-        let range_start = BtrfsKey {
+        dir_index: u64,
+    ) -> ffs_error::Result<(BtrfsKey, Vec<BtrfsDirItem>)> {
+        let dir_index_key = BtrfsKey {
             objectid: parent_oid,
             item_type: BTRFS_ITEM_DIR_INDEX,
-            offset: 0,
-        };
-        let range_end = BtrfsKey {
-            objectid: parent_oid,
-            item_type: BTRFS_ITEM_DIR_INDEX,
-            offset: u64::MAX,
+            offset: dir_index,
         };
         let detail = format!(
-            "dir_index missing expected name {} in parent {parent_oid}",
+            "dir_index {dir_index} missing expected name {} in parent {parent_oid}",
             String::from_utf8_lossy(name)
         );
         let indices = alloc
             .fs_tree
-            .range(&range_start, &range_end)
+            .range(&dir_index_key, &dir_index_key)
             .map_err(|e| btrfs_mutation_to_ffs(&e))?;
-        let mut found_dir_index = None;
-        for (key, data) in &indices {
-            let entries = parse_dir_items(data).map_err(|e| parse_to_ffs_error(&e))?;
-            if entries.iter().any(|entry| entry.name == name) {
-                found_dir_index = Some((*key, entries));
-                break;
-            }
-        }
-        let (dir_index_key, dir_index_entries) =
-            found_dir_index.ok_or_else(|| FfsError::Corruption {
+        let (dir_index_key, data) = indices.first().ok_or_else(|| FfsError::Corruption {
+            block: 0,
+            detail: detail.clone(),
+        })?;
+        let dir_index_entries =
+            Self::btrfs_parse_dir_items(data, "malformed btrfs DIR_INDEX payload during removal")?;
+        if dir_index_entries.iter().any(|entry| entry.name == name) {
+            Ok((*dir_index_key, dir_index_entries))
+        } else {
+            Err(FfsError::Corruption {
                 block: 0,
                 detail: detail.clone(),
-            })?;
+            })
+        }
+    }
+
+    fn btrfs_remove_loaded_dir_index(
+        alloc: &mut BtrfsAllocState,
+        parent_oid: u64,
+        name: &[u8],
+        dir_index_key: BtrfsKey,
+        dir_index_entries: Vec<BtrfsDirItem>,
+    ) -> ffs_error::Result<()> {
+        let detail = format!(
+            "dir_index {} missing expected name {} in parent {parent_oid}",
+            dir_index_key.offset,
+            String::from_utf8_lossy(name)
+        );
         let original_index_len = dir_index_entries.len();
         let remaining_index_entries: Vec<_> = dir_index_entries
-            .iter()
-            .filter(|entry| entry.name != name)
+            .into_iter()
+            .filter(|entry| entry.name.as_slice() != name)
             .collect();
         if remaining_index_entries.len() == original_index_len {
             return Err(FfsError::Corruption { block: 0, detail });
@@ -24097,7 +24128,7 @@ impl OpenFs {
                 .map_err(|e| btrfs_mutation_to_ffs(&e))?;
         } else {
             let mut payload = Vec::new();
-            for entry in &remaining_index_entries {
+            for entry in remaining_index_entries {
                 let entry_bytes = entry.try_to_bytes().map_err(|e| parse_to_ffs_error(&e))?;
                 payload.extend_from_slice(&entry_bytes);
             }
@@ -24614,12 +24645,12 @@ impl OpenFs {
         Ok(())
     }
 
-    fn btrfs_require_inode_ref_name(
+    fn btrfs_require_inode_ref_index(
         alloc: &BtrfsAllocState,
         child_oid: u64,
         parent_oid: u64,
         name: &[u8],
-    ) -> ffs_error::Result<()> {
+    ) -> ffs_error::Result<u64> {
         let ref_key = BtrfsKey {
             objectid: child_oid,
             item_type: BTRFS_ITEM_INODE_REF,
@@ -24639,20 +24670,27 @@ impl OpenFs {
                 ),
             })?;
         let entries = Self::btrfs_parse_inode_ref_payload(&existing_payload)?;
-        if entries
-            .iter()
-            .any(|(_, existing_name)| existing_name.as_slice() == name)
-        {
-            Ok(())
-        } else {
-            Err(FfsError::Corruption {
-                block: 0,
-                detail: format!(
-                    "inode_ref missing expected name {} for child {child_oid} parent {parent_oid}",
-                    String::from_utf8_lossy(name)
-                ),
-            })
+        for (index, existing_name) in entries {
+            if existing_name.as_slice() == name {
+                return Ok(index);
+            }
         }
+        Err(FfsError::Corruption {
+            block: 0,
+            detail: format!(
+                "inode_ref missing expected name {} for child {child_oid} parent {parent_oid}",
+                String::from_utf8_lossy(name)
+            ),
+        })
+    }
+
+    fn btrfs_require_inode_ref_name(
+        alloc: &BtrfsAllocState,
+        child_oid: u64,
+        parent_oid: u64,
+        name: &[u8],
+    ) -> ffs_error::Result<()> {
+        Self::btrfs_require_inode_ref_index(alloc, child_oid, parent_oid, name).map(|_| ())
     }
 
     /// Look up the parent objectid for a btrfs inode via its INODE_REF.
@@ -70293,11 +70331,12 @@ mod tests {
             file_type: BTRFS_FT_REG_FILE,
             name: b"present.txt".to_vec(),
         };
-        fs.btrfs_insert_dir_entry(&mut alloc, parent_oid, &dir_item)
+        let dir_index = fs
+            .btrfs_insert_dir_entry(&mut alloc, parent_oid, &dir_item)
             .unwrap();
 
         let err = fs
-            .btrfs_remove_dir_entry(&mut alloc, parent_oid, b"missing.txt")
+            .btrfs_remove_dir_entry(&mut alloc, parent_oid, b"missing.txt", dir_index)
             .expect_err("missing dir entry should be treated as corruption");
         drop(alloc);
 
