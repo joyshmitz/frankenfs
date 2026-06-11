@@ -385,10 +385,6 @@ fn decode_group_impl(
     corrupt_indices: &[u32],
     repair_symbols: RepairSymbolInput<'_>,
 ) -> Result<DecodeOutcome> {
-    let block_size = device.block_size() as usize;
-    let k = source_block_count as usize;
-    let seed = repair_seed(fs_uuid, group);
-
     if corrupt_indices.is_empty() {
         return Ok(DecodeOutcome {
             recovered: Vec::new(),
@@ -396,6 +392,10 @@ fn decode_group_impl(
             complete: true,
         });
     }
+
+    let block_size = device.block_size() as usize;
+    let k = source_block_count as usize;
+    let seed = repair_seed(fs_uuid, group);
 
     let corrupt_set = CorruptIndexSet::new(corrupt_indices, source_block_count, group)?;
     if corrupt_set.len() >= source_block_count as usize && source_block_count > 0 {
