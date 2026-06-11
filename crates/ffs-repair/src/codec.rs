@@ -566,6 +566,11 @@ struct DirectRepairRow {
     residual: Vec<u8>,
 }
 
+struct KnownSourceSymbol {
+    source_index: usize,
+    data: Vec<u8>,
+}
+
 struct DirectRepairPlan {
     rows: Vec<DirectRepairRow>,
     selection: DirectRepairSelection,
@@ -627,6 +632,7 @@ fn try_direct_small_erasure_decode(
         decoder,
         &corrupt_set.unique,
         repair_symbols,
+        source_count,
         &known_source,
         &source_coefficient_encoder,
         block_size,
@@ -713,22 +719,12 @@ fn try_direct_small_erasure_decode_owned(
         });
     };
 
-    project_known_source_contributions_source_major(
-        &mut rows,
-        &corrupt_set.unique,
-        &known_source,
-        block_size,
-    )
-    .expect("known source symbols were read at the device block size");
+    project_known_source_contributions_source_major(&mut rows, &known_source, block_size)
+        .expect("known source symbols were read at the device block size");
 
     let Some(solved) = solve_direct_repair_rows(&rows, selection)? else {
-        restore_known_source_contributions_source_major(
-            &mut rows,
-            &corrupt_set.unique,
-            &known_source,
-            block_size,
-        )
-        .expect("known source projection should be reversible");
+        restore_known_source_contributions_source_major(&mut rows, &known_source, block_size)
+            .expect("known source projection should be reversible");
         return Ok(OwnedDirectDecodeAttempt {
             outcome: None,
             fallback: repair_symbols_from_direct_rows(rows),
@@ -754,12 +750,13 @@ fn read_known_source_symbols(
     first_block: BlockNumber,
     source_block_count: u32,
     corrupt_set: &CorruptIndexSet,
-    block_size: usize,
-) -> Result<Vec<Vec<u8>>> {
-    let mut source = Vec::with_capacity(source_block_count as usize);
+    _block_size: usize,
+) -> Result<Vec<KnownSourceSymbol>> {
+    let source_count =
+        usize::try_from(source_block_count).expect("u32 source block count fits usize");
+    let mut source = Vec::with_capacity(source_count.saturating_sub(corrupt_set.len()));
     for i in 0..source_block_count {
         if corrupt_set.contains(i) {
-            source.push(vec![0; block_size]);
             continue;
         }
         let block_num = BlockNumber(first_block.0.checked_add(u64::from(i)).ok_or_else(|| {
@@ -768,7 +765,10 @@ fn read_known_source_symbols(
                 first_block.0
             ))
         })?);
-        source.push(device.read_block(cx, block_num)?.into_inner());
+        source.push(KnownSourceSymbol {
+            source_index: usize::try_from(i).expect("u32 source index fits usize"),
+            data: device.read_block(cx, block_num)?.into_inner(),
+        });
     }
     Ok(source)
 }
@@ -874,11 +874,11 @@ fn select_direct_repair_plan(
     decoder: &InactivationDecoder,
     missing: &[u32],
     repair_symbols: &[(u32, Vec<u8>)],
-    known_source: &[Vec<u8>],
+    source_count: usize,
+    known_source: &[KnownSourceSymbol],
     source_coefficient_encoder: &SystematicEncoder,
     block_size: usize,
 ) -> Option<DirectRepairPlan> {
-    let source_count = known_source.len();
     if source_count > DIRECT_SMALL_ERASURE_MAX_SOURCE_BLOCKS {
         return None;
     }
@@ -906,7 +906,7 @@ fn select_direct_repair_plan(
             residual: actual.clone(),
         });
     }
-    project_known_source_contributions_source_major(&mut rows, missing, known_source, block_size)?;
+    project_known_source_contributions_source_major(&mut rows, known_source, block_size)?;
 
     let selection = select_direct_repair_rows(&rows, missing.len())?;
     Some(DirectRepairPlan { rows, selection })
@@ -1000,29 +1000,26 @@ fn select_direct_repair_rows(
 
 fn project_known_source_contributions_source_major(
     rows: &mut [DirectRepairRow],
-    missing: &[u32],
-    known_source: &[Vec<u8>],
+    known_source: &[KnownSourceSymbol],
     block_size: usize,
 ) -> Option<()> {
-    if rows
-        .iter()
-        .any(|row| row.source_count != known_source.len())
-    {
+    if rows.is_empty() {
+        return Some(());
+    }
+
+    let source_count = rows[0].source_count;
+    if rows.iter().any(|row| row.source_count != source_count) {
         return None;
     }
 
-    for (source_index, source_symbol) in known_source.iter().enumerate() {
-        if source_symbol.len() != block_size {
+    for source_symbol in known_source {
+        if source_symbol.source_index >= source_count || source_symbol.data.len() != block_size {
             return None;
         }
-        let source_index_u32 = u32::try_from(source_index).ok()?;
-        if missing.binary_search(&source_index_u32).is_ok() {
-            continue;
-        }
         for row in rows.iter_mut() {
-            let coefficient = Gf256::new(row.source_coefficients[source_index]);
+            let coefficient = Gf256::new(row.source_coefficients[source_symbol.source_index]);
             if !coefficient.is_zero() {
-                gf256_addmul_slice(&mut row.residual, source_symbol, coefficient);
+                gf256_addmul_slice(&mut row.residual, &source_symbol.data, coefficient);
             }
         }
     }
@@ -1031,11 +1028,10 @@ fn project_known_source_contributions_source_major(
 
 fn restore_known_source_contributions_source_major(
     rows: &mut [DirectRepairRow],
-    missing: &[u32],
-    known_source: &[Vec<u8>],
+    known_source: &[KnownSourceSymbol],
     block_size: usize,
 ) -> Option<()> {
-    project_known_source_contributions_source_major(rows, missing, known_source, block_size)
+    project_known_source_contributions_source_major(rows, known_source, block_size)
 }
 
 fn select_full_rank_pair(rows: &[DirectRepairRow]) -> Option<(usize, usize)> {
@@ -1970,23 +1966,30 @@ mod tests {
             encoded.seed,
         )
         .expect("source coefficient encoder");
+        let block_size_usize = usize::try_from(block_size).expect("block size fits usize");
+        let mut reference_known_source =
+            vec![vec![0_u8; block_size_usize]; usize::try_from(k).expect("K fits usize")];
+        for symbol in &known_source {
+            reference_known_source[symbol.source_index] = symbol.data.clone();
+        }
 
         let actual = select_direct_repair_plan(
             &decoder,
             &corrupt_set.unique,
             &repair_data,
+            usize::try_from(k).expect("K fits usize"),
             &known_source,
             &source_coefficient_encoder,
-            usize::try_from(block_size).expect("block size fits usize"),
+            block_size_usize,
         )
         .expect("source-major plan should be selected");
         let expected_rows = reference_direct_rows_row_major(
             &decoder,
             &corrupt_set.unique,
             &repair_data,
-            &known_source,
+            &reference_known_source,
             &source_coefficient_encoder,
-            usize::try_from(block_size).expect("block size fits usize"),
+            block_size_usize,
         );
         let (first_row, second_row) = select_full_rank_pair(&expected_rows).expect("full rank");
         let expected_selection = DirectRepairSelection::Two(first_row, second_row);
