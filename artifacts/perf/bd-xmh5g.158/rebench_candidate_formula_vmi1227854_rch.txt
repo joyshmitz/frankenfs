@@ -467,4 +467,178 @@ Script started on 2026-06-10 21:52:14-04:00 [COMMAND="RCH_WORKER=vmi1227854 RCH_
    Compiling log v0.4.29
    Compiling getrandom v0.3.4
    Compiling tempfile v3.27.0
-   Compiling pk
+   Compiling pkcs8 v0.10.2
+   Compiling rand_chacha v0.3.1
+   Compiling tracing v0.1.44
+   Compiling ed25519 v2.2.3
+   Compiling polyval v0.6.2
+   Compiling sha2 v0.10.9
+   Compiling aead v0.5.2
+   Compiling errno v0.3.14
+   Compiling arrayref v0.3.9
+   Compiling arrayvec v0.7.6
+   Compiling constant_time_eq v0.4.2
+   Compiling lazy_static v1.5.0
+   Compiling scopeguard v1.2.0
+   Compiling lock_api v0.4.14
+   Compiling sharded-slab v0.1.7
+   Compiling signal-hook-registry v1.4.8
+   Compiling rmp v0.8.15
+   Compiling ed25519-dalek v2.2.0
+   Compiling ghash v0.5.1
+   Compiling rand v0.8.6
+   Compiling signatory v0.27.1
+   Compiling franken-evidence v0.3.4
+   Compiling tracing-log v0.2.0
+   Compiling poly1305 v0.8.0
+   Compiling aes v0.8.4
+   Compiling chacha20 v0.9.1
+   Compiling ctr v0.9.2
+   Compiling franken-kernel v0.3.4
+   Compiling hmac v0.12.1
+   Compiling thread_local v1.1.9
+   Compiling parking v2.2.1
+   Compiling unty-next v0.1.1
+   Compiling futures-core v0.3.32
+   Compiling bytes v1.11.1
+   Compiling data-encoding v2.11.0
+   Compiling nu-ansi-term v0.50.3
+   Compiling futures-io v0.3.32
+   Compiling futures-lite v2.6.1
+   Compiling tracing-subscriber v0.3.23
+   Compiling nkeys v0.4.5
+   Compiling prost v0.14.4
+   Compiling bincode-next v2.1.0
+   Compiling hkdf v0.12.4
+   Compiling ffs-types v0.1.0 (/data/projects/.scratch/frankenfs-opt-rch-20260611-0105/crates/ffs-types)
+   Compiling franken-decision v0.3.4
+   Compiling aes-gcm v0.10.3
+   Compiling chacha20poly1305 v0.10.1
+   Compiling parking_lot v0.12.5
+   Compiling rand_core v0.9.5
+   Compiling rmp-serde v1.3.1
+   Compiling polling v3.11.0
+   Compiling sha2 v0.11.0
+   Compiling sha1 v0.11.0
+   Compiling hmac v0.13.0
+   Compiling sysinfo v0.33.1
+   Compiling pin-project v1.1.11
+   Compiling crossbeam-queue v0.3.12
+   Compiling socket2 v0.6.3
+   Compiling regex-syntax v0.8.10
+   Compiling base64 v0.22.1
+   Compiling slab v0.4.12
+   Compiling hex v0.4.3
+   Compiling asupersync v0.3.4
+   Compiling ffs-error v0.1.0 (/data/projects/.scratch/frankenfs-opt-rch-20260611-0105/crates/ffs-error)
+   Compiling half v2.7.1
+   Compiling alloca v0.4.0
+   Compiling clap_lex v1.1.0
+   Compiling anstyle v1.0.14
+   Compiling ciborium-io v0.2.2
+   Compiling plotters-backend v0.3.7
+   Compiling plotters-svg v0.3.7
+   Compiling ciborium-ll v0.2.2
+   Compiling clap_builder v4.6.0
+   Compiling ffs-block v0.1.0 (/data/projects/.scratch/frankenfs-opt-rch-20260611-0105/crates/ffs-block)
+   Compiling regex-automata v0.4.14
+   Compiling ffs-ondisk v0.1.0 (/data/projects/.scratch/frankenfs-opt-rch-20260611-0105/crates/ffs-ondisk)
+   Compiling itertools v0.13.0
+   Compiling wait-timeout v0.2.1
+   Compiling fnv v1.0.7
+   Compiling quick-error v1.2.3
+   Compiling bit-vec v0.8.0
+   Compiling cast v0.3.0
+   Compiling same-file v1.0.6
+   Compiling walkdir v2.5.0
+   Compiling criterion-plot v0.8.2
+   Compiling bit-set v0.8.0
+   Compiling rusty-fork v0.3.1
+   Compiling ffs-repair v0.1.0 (/data/projects/.scratch/frankenfs-opt-rch-20260611-0105/crates/ffs-repair)
+   Compiling regex v1.12.3
+   Compiling clap v4.6.1
+   Compiling ciborium v0.2.2
+   Compiling plotters v0.3.7
+   Compiling rand_chacha v0.9.0
+   Compiling rand v0.9.4
+   Compiling rand_xorshift v0.4.0
+   Compiling tinytemplate v1.2.1
+   Compiling console v0.16.3
+   Compiling page_size v0.6.0
+   Compiling oorandom v11.1.5
+   Compiling anes v0.1.6
+   Compiling unarray v0.1.4
+   Compiling similar v2.7.0
+   Compiling insta v1.47.2
+   Compiling proptest v1.11.0
+   Compiling criterion v0.8.2
+    Finished `bench` profile [optimized] target(s) in 10m 41s
+     Running benches/scrub_codec.rs (.rch-target-vmi1227854-job-29879662679165761-1781142736764131905-0/release/deps/scrub_codec-a949899c9b06997c)
+Gnuplot not found, using plotters backend
+Benchmarking raptorq_decode_group_16blocks
+Benchmarking raptorq_decode_group_16blocks: Warming up for 1.0000 s
+Benchmarking raptorq_decode_group_16blocks: Collecting 10 samples in estimated 2.0033 s (7865 iterations)
+Benchmarking raptorq_decode_group_16blocks: Analyzing
+raptorq_decode_group_16blocks
+                        time:   [249.69 µs 265.16 µs 278.92 µs]
+
+Benchmarking raptorq_decode_group_owned_symbols_16blocks
+Benchmarking raptorq_decode_group_owned_symbols_16blocks: Warming up for 1.0000 s
+Benchmarking raptorq_decode_group_owned_symbols_16blocks: Collecting 10 samples in estimated 2.0126 s (7700 iterations)
+Benchmarking raptorq_decode_group_owned_symbols_16blocks: Analyzing
+raptorq_decode_group_owned_symbols_16blocks
+                        time:   [251.75 µs 291.60 µs 319.61 µs]
+
+Benchmarking raptorq_decode_group_no_corruption_16blocks
+Benchmarking raptorq_decode_group_no_corruption_16blocks: Warming up for 1.0000 s
+Benchmarking raptorq_decode_group_no_corruption_16blocks: Collecting 10 samples in estimated 2.0000 s (10.0M iterations)
+Benchmarking raptorq_decode_group_no_corruption_16blocks: Analyzing
+raptorq_decode_group_no_corruption_16blocks
+                        time:   [195.86 ns 199.44 ns 203.05 ns]
+Found 2 outliers among 10 measurements (20.00%)
+  1 (10.00%) low mild
+  1 (10.00%) high mild
+
+  [2m2026-06-11T02:03:59.691272Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mRemote command finished: exit=0 in 653416ms[0m
+    [2;3mat[0m rch/src/hook.rs:6376 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T02:03:59.691631Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mRetrieving build artifacts...[0m
+    [2;3mat[0m rch/src/hook.rs:6425 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T02:03:59.691663Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRetrieving artifacts from /data/projects/.scratch/frankenfs-opt-rch-20260611-0105 on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:2106 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T02:03:59.691710Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mLoaded 2 retrieval exclude pattern(s) from .rchignore (total: 6)[0m
+    [2;3mat[0m rch/src/transfer.rs:909 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T02:04:01.628163Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mArtifacts retrieved in 1936ms (1 files, 1270 bytes)[0m
+    [2;3mat[0m rch/src/transfer.rs:2145 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T02:04:01.628188Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mArtifacts retrieved: 1 files, 1270 bytes in 1936ms[0m
+    [2;3mat[0m rch/src/hook.rs:6458 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T02:04:01.628313Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRetrieving artifacts from /data/projects/.scratch/frankenfs-opt-rch-20260611-0105/.rch-target-vmi1227854-job-29879662679165761-1781142736764131905-0 on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:2106 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T02:04:03.708605Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mArtifacts retrieved in 2080ms (35 files, 1172 bytes)[0m
+    [2;3mat[0m rch/src/transfer.rs:2145 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T02:04:03.708630Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mCustom CARGO_TARGET_DIR artifacts retrieved: 35 files, 1172 bytes in 2080ms[0m
+    [2;3mat[0m rch/src/hook.rs:6582 [2;3mon[0m ThreadId(1)
+
+[W] Worker: vmi1227854 | Job: j-29879662679165761
+[T] Total: 702.8s (sync 45.4s, build 653.4s, artifacts 4.0s)
+^ Sync: 207.3 KB in 45.4s (4.6 KB/s)
+[C] Compile: 653.4s
+v Artifacts: 2.4 KB in 4.0s (608 B/s)
+[T] Cache: MISS
++------------- [OK] Build Successful -------------+
+| Duration: 10.9m (v 6% faster vs previous 11.6m) |
+| Artifacts: 36 files (2.4 KB)                    |
+| Worker: vmi1227854                              |
+| Cache: MISS (warming cache)                     |
+| Time: 2026-06-11 02:04:03                       |
++-------------------------------------------------+
+[RCH] remote vmi1227854 (709.0s)
+
+Script done on 2026-06-10 22:04:03-04:00 [COMMAND_EXIT_CODE="0"]
