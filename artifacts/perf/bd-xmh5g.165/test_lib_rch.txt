@@ -1,0 +1,1108 @@
+  [2m2026-06-11T20:05:10.374667Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSelected worker: vmi1152480 at root@109.205.181.92 (0 slots remaining after reservation, speed 50.0)[0m
+    [2;3mat[0m rch/src/hook.rs:514 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T20:05:10.706054Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mStarting remote compilation pipeline for frankenfs-opt-20260611-navy-1515 (hash: ec650496dc9c69b3)[0m
+    [2;3mat[0m rch/src/hook.rs:5994 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T20:05:10.706131Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mPrepared dependency sync manifest for 24 roots[0m
+    [2;3mat[0m rch/src/hook.rs:6016 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T20:05:12.773646Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSyncing project to worker vmi1152480...[0m
+    [2;3mat[0m rch/src/hook.rs:6046 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T20:05:12.773779Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mLoaded 2 pattern(s) from .rchignore (total: 40)[0m
+    [2;3mat[0m rch/src/transfer.rs:799 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T20:05:12.773789Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenfs-opt-20260611-navy-1515 -> /data/projects/.scratch/frankenfs-opt-20260611-navy-1515 on vmi1152480[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T20:05:15.542030Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2768ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T20:05:15.542164Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenfs-opt-20260611-navy-1515/crates/ffs -> /data/projects/.scratch/frankenfs-opt-20260611-navy-1515/crates/ffs on vmi1152480[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T20:05:17.710599Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2168ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T20:05:17.710770Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenfs-opt-20260611-navy-1515/crates/ffs-alloc -> /data/projects/.scratch/frankenfs-opt-20260611-navy-1515/crates/ffs-alloc on vmi1152480[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T20:05:19.963048Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2252ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T20:05:19.963185Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenfs-opt-20260611-navy-1515/crates/ffs-block -> /data/projects/.scratch/frankenfs-opt-20260611-navy-1515/crates/ffs-block on vmi1152480[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T20:05:22.251574Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2288ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T20:05:22.251727Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenfs-opt-20260611-navy-1515/crates/ffs-btree -> /data/projects/.scratch/frankenfs-opt-20260611-navy-1515/crates/ffs-btree on vmi1152480[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T20:05:24.448233Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2196ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T20:05:24.448370Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenfs-opt-20260611-navy-1515/crates/ffs-btrfs -> /data/projects/.scratch/frankenfs-opt-20260611-navy-1515/crates/ffs-btrfs on vmi1152480[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T20:05:26.405829Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1957ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T20:05:26.405952Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenfs-opt-20260611-navy-1515/crates/ffs-cli -> /data/projects/.scratch/frankenfs-opt-20260611-navy-1515/crates/ffs-cli on vmi1152480[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T20:05:28.546718Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2140ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T20:05:28.546867Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenfs-opt-20260611-navy-1515/crates/ffs-core -> /data/projects/.scratch/frankenfs-opt-20260611-navy-1515/crates/ffs-core on vmi1152480[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T20:05:30.654640Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2107ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T20:05:30.654803Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenfs-opt-20260611-navy-1515/crates/ffs-dir -> /data/projects/.scratch/frankenfs-opt-20260611-navy-1515/crates/ffs-dir on vmi1152480[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T20:05:32.677791Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2022ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T20:05:32.677929Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenfs-opt-20260611-navy-1515/crates/ffs-error -> /data/projects/.scratch/frankenfs-opt-20260611-navy-1515/crates/ffs-error on vmi1152480[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T20:05:34.839159Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2161ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T20:05:34.839292Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenfs-opt-20260611-navy-1515/crates/ffs-ext4 -> /data/projects/.scratch/frankenfs-opt-20260611-navy-1515/crates/ffs-ext4 on vmi1152480[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T20:05:36.943669Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2104ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T20:05:36.943806Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenfs-opt-20260611-navy-1515/crates/ffs-extent -> /data/projects/.scratch/frankenfs-opt-20260611-navy-1515/crates/ffs-extent on vmi1152480[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T20:05:38.856744Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1912ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T20:05:38.856888Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenfs-opt-20260611-navy-1515/crates/ffs-fuse -> /data/projects/.scratch/frankenfs-opt-20260611-navy-1515/crates/ffs-fuse on vmi1152480[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T20:05:41.058428Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2201ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T20:05:41.058548Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenfs-opt-20260611-navy-1515/crates/ffs-harness -> /data/projects/.scratch/frankenfs-opt-20260611-navy-1515/crates/ffs-harness on vmi1152480[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T20:05:42.962955Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1904ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T20:05:42.963118Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenfs-opt-20260611-navy-1515/crates/ffs-inode -> /data/projects/.scratch/frankenfs-opt-20260611-navy-1515/crates/ffs-inode on vmi1152480[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T20:05:44.877133Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1913ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T20:05:44.877262Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenfs-opt-20260611-navy-1515/crates/ffs-journal -> /data/projects/.scratch/frankenfs-opt-20260611-navy-1515/crates/ffs-journal on vmi1152480[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T20:05:46.884410Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2007ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T20:05:46.884654Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenfs-opt-20260611-navy-1515/crates/ffs-mvcc -> /data/projects/.scratch/frankenfs-opt-20260611-navy-1515/crates/ffs-mvcc on vmi1152480[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T20:05:48.844047Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1959ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T20:05:48.844175Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenfs-opt-20260611-navy-1515/crates/ffs-ondisk -> /data/projects/.scratch/frankenfs-opt-20260611-navy-1515/crates/ffs-ondisk on vmi1152480[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T20:05:50.778035Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1933ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T20:05:50.778186Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenfs-opt-20260611-navy-1515/crates/ffs-repair -> /data/projects/.scratch/frankenfs-opt-20260611-navy-1515/crates/ffs-repair on vmi1152480[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T20:05:52.653898Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1875ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T20:05:52.654028Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenfs-opt-20260611-navy-1515/crates/ffs-tui -> /data/projects/.scratch/frankenfs-opt-20260611-navy-1515/crates/ffs-tui on vmi1152480[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T20:05:54.554395Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1900ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T20:05:54.554550Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenfs-opt-20260611-navy-1515/crates/ffs-types -> /data/projects/.scratch/frankenfs-opt-20260611-navy-1515/crates/ffs-types on vmi1152480[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T20:05:56.526920Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1972ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T20:05:56.527066Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenfs-opt-20260611-navy-1515/crates/ffs-xattr -> /data/projects/.scratch/frankenfs-opt-20260611-navy-1515/crates/ffs-xattr on vmi1152480[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T20:05:58.737690Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2210ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T20:05:58.737839Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenfs-opt-20260611-navy-1515/tools/ffs-ops -> /data/projects/.scratch/frankenfs-opt-20260611-navy-1515/tools/ffs-ops on vmi1152480[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T20:06:00.916720Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2178ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T20:06:00.916903Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenfs-opt-20260611-navy-1515/vendor/fuser -> /data/projects/.scratch/frankenfs-opt-20260611-navy-1515/vendor/fuser on vmi1152480[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T20:06:03.173946Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2257ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T20:06:03.173985Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSync complete: 4515 files, 216113 bytes in 50384ms[0m
+    [2;3mat[0m rch/src/hook.rs:6209 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T20:06:08.381456Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mExecuting command remotely: cargo test -j 1 -p ffs-repair --lib -- --nocapture '--test-threads=1'[0m
+    [2;3mat[0m rch/src/hook.rs:6252 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T20:06:08.381515Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRewriting CARGO_TARGET_DIR for remote execution (worker-scoped path): /data/tmp/cargo-target -> /data/projects/.scratch/frankenfs-opt-20260611-navy-1515/.rch-target-vmi1152480-job-29883510449766692-1781208312773638003-0[0m
+    [2;3mat[0m rch/src/transfer.rs:712 [2;3mon[0m ThreadId(1)
+
+    Updating crates.io index
+ Downloading crates ...
+  Downloaded nkeys v0.4.5
+  Downloaded const-oid v0.10.2
+  Downloaded zerocopy v0.8.48
+  Downloaded log v0.4.29
+  Downloaded generic-array v0.14.7
+  Downloaded zeroize_derive v1.4.3
+  Downloaded prost-derive v0.14.4
+  Downloaded rand v0.8.6
+  Downloaded sha2 v0.10.9
+  Downloaded aead v0.5.2
+  Downloaded ciborium-ll v0.2.2
+  Downloaded socket2 v0.6.3
+  Downloaded scopeguard v1.2.0
+  Downloaded plotters-backend v0.3.7
+  Downloaded bincode_derive-next v2.1.0
+  Downloaded polyval v0.6.2
+  Downloaded rand_chacha v0.3.1
+  Downloaded shlex v1.3.0
+  Downloaded pem-rfc7468 v0.7.0
+  Downloaded thread_local v1.1.9
+  Downloaded page_size v0.6.0
+  Downloaded quick-error v1.2.3
+  Downloaded same-file v1.0.6
+  Downloaded sha1 v0.11.0
+  Downloaded unarray v0.1.4
+  Downloaded version_check v0.9.5
+  Downloaded wait-timeout v0.2.1
+  Downloaded memoffset v0.9.1
+  Downloaded cast v0.3.0
+  Downloaded cmov v0.5.3
+  Downloaded ghash v0.5.1
+  Downloaded signature v2.2.0
+  Downloaded universal-hash v0.5.1
+  Downloaded arrayref v0.3.9
+  Downloaded crossbeam-queue v0.3.12
+  Downloaded plotters-svg v0.3.7
+  Downloaded rand_xorshift v0.4.0
+  Downloaded rustc_version v0.4.1
+  Downloaded futures-core v0.3.32
+  Downloaded unty-next v0.1.1
+  Downloaded inout v0.1.4
+  Downloaded opaque-debug v0.3.1
+  Downloaded signal-hook v0.4.4
+  Downloaded zmij v1.0.21
+  Downloaded block-buffer v0.12.0
+  Downloaded crc32c v0.6.8
+  Downloaded crypto-common v0.2.1
+  Downloaded quote v1.0.45
+  Downloaded smallvec v1.15.1
+  Downloaded virtue-next v0.1.3
+  Downloaded parking v2.2.1
+  Downloaded rand_core v0.9.5
+  Downloaded tracing-log v0.2.0
+  Downloaded visibility v0.1.1
+  Downloaded ciborium-io v0.2.2
+  Downloaded ppv-lite86 v0.2.21
+  Downloaded rand_chacha v0.9.0
+  Downloaded slab v0.4.12
+  Downloaded arrayvec v0.7.6
+  Downloaded cfg-if v1.0.4
+  Downloaded cpufeatures v0.3.0
+  Downloaded crypto-common v0.1.7
+  Downloaded ctr v0.9.2
+  Downloaded curve25519-dalek-derive v0.1.1
+  Downloaded data-encoding v2.11.0
+  Downloaded digest v0.10.7
+  Downloaded equivalent v1.0.2
+  Downloaded fastrand v2.4.1
+  Downloaded franken-decision v0.3.4
+  Downloaded franken-kernel v0.3.4
+  Downloaded futures-io v0.3.32
+  Downloaded hex v0.4.3
+  Downloaded itoa v1.0.18
+  Downloaded lazy_static v1.5.0
+  Downloaded lock_api v0.4.14
+  Downloaded rusty-fork v0.3.1
+  Downloaded subtle v2.6.1
+  Downloaded tempfile v3.27.0
+  Downloaded thiserror-impl v2.0.18
+  Downloaded tinytemplate v1.2.1
+  Downloaded walkdir v2.5.0
+  Downloaded zeroize v1.8.2
+  Downloaded alloca v0.4.0
+  Downloaded asupersync-macros v0.3.4
+  Downloaded bit-set v0.8.0
+  Downloaded block-buffer v0.10.4
+  Downloaded cfg_aliases v0.2.1
+  Downloaded chacha20 v0.9.1
+  Downloaded criterion-plot v0.8.2
+  Downloaded digest v0.11.2
+  Downloaded nu-ansi-term v0.50.3
+  Downloaded oorandom v11.1.5
+  Downloaded pin-project-internal v1.1.11
+  Downloaded pkcs8 v0.10.2
+  Downloaded poly1305 v0.8.0
+  Downloaded rand_core v0.6.4
+  Downloaded sharded-slab v0.1.7
+  Downloaded unicode-ident v1.0.24
+  Downloaded num-traits v0.2.19
+  Downloaded proc-macro2 v1.0.106
+  Downloaded prost v0.14.4
+  Downloaded sha2 v0.11.0
+  Downloaded tracing-attributes v0.1.31
+  Downloaded thiserror v2.0.18
+  Downloaded signal-hook-registry v1.4.8
+  Downloaded autocfg v1.5.0
+  Downloaded constant_time_eq v0.4.2
+  Downloaded crossbeam-deque v0.8.6
+  Downloaded similar v2.7.0
+  Downloaded base64ct v1.8.3
+  Downloaded cipher v0.4.4
+  Downloaded rmp-serde v1.3.1
+  Downloaded parking_lot_core v0.9.12
+  Downloaded once_cell v1.21.4
+  Downloaded parking_lot v0.12.5
+  Downloaded pin-project-lite v0.2.17
+  Downloaded semver v1.0.28
+  Downloaded spki v0.7.3
+  Downloaded rmp v0.8.15
+  Downloaded serde_derive v1.0.228
+  Downloaded crossbeam-epoch v0.9.18
+  Downloaded serde_core v1.0.228
+  Downloaded crossbeam-utils v0.8.21
+  Downloaded ed25519 v2.2.3
+  Downloaded either v1.15.0
+  Downloaded fnv v1.0.7
+  Downloaded cpufeatures v0.2.17
+  Downloaded pin-project v1.1.11
+  Downloaded find-msvc-tools v0.1.9
+  Downloaded rayon-core v1.13.0
+  Downloaded clap_lex v1.1.0
+  Downloaded tracing-core v0.1.36
+  Downloaded ctutils v0.4.2
+  Downloaded errno v0.3.14
+  Downloaded anes v0.1.6
+  Downloaded anstyle v1.0.14
+  Downloaded foldhash v0.2.0
+  Downloaded futures-lite v2.6.1
+  Downloaded hmac v0.12.1
+  Downloaded polling v3.11.0
+  Downloaded serde v1.0.228
+  Downloaded ciborium v0.2.2
+  Downloaded zerocopy-derive v0.8.48
+  Downloaded memchr v2.8.0
+  Downloaded rand v0.9.4
+  Downloaded rayon v1.12.0
+  Downloaded typenum v1.20.0
+  Downloaded bit-vec v0.8.0
+  Downloaded clap v4.6.1
+  Downloaded const-oid v0.9.6
+  Downloaded crc32fast v1.5.0
+  Downloaded franken-evidence v0.3.4
+  Downloaded getrandom v0.2.17
+  Downloaded getrandom v0.3.4
+  Downloaded getrandom v0.4.2
+  Downloaded hmac v0.13.0
+  Downloaded hybrid-array v0.4.10
+  Downloaded anyhow v1.0.102
+  Downloaded bitflags v2.11.1
+  Downloaded console v0.16.3
+  Downloaded half v2.7.1
+  Downloaded allocator-api2 v0.2.21
+  Downloaded base64 v0.22.1
+  Downloaded bytes v1.11.1
+  Downloaded ed25519-dalek v2.2.0
+  Downloaded signatory v0.27.1
+  Downloaded plotters v0.3.7
+  Downloaded regex v1.12.3
+  Downloaded tracing-subscriber v0.3.23
+  Downloaded serde_json v1.0.149
+  Downloaded sysinfo v0.33.1
+  Downloaded bincode-next v2.1.0
+  Downloaded proptest v1.11.0
+  Downloaded chacha20poly1305 v0.10.1
+  Downloaded der v0.7.10
+  Downloaded indexmap v2.14.0
+  Downloaded insta v1.47.2
+  Downloaded cc v1.2.60
+  Downloaded criterion v0.8.2
+  Downloaded aes v0.8.4
+  Downloaded syn v2.0.117
+  Downloaded aes-gcm v0.10.3
+  Downloaded nix v0.29.0
+  Downloaded nix v0.31.2
+  Downloaded hashbrown v0.17.0
+  Downloaded itertools v0.13.0
+  Downloaded itertools v0.14.0
+  Downloaded regex-syntax v0.8.10
+  Downloaded clap_builder v4.6.0
+  Downloaded hkdf v0.12.4
+  Downloaded aho-corasick v1.1.4
+  Downloaded blake3 v1.8.4
+  Downloaded rustix v1.1.4
+  Downloaded tracing v0.1.44
+  Downloaded regex-automata v0.4.14
+  Downloaded curve25519-dalek v4.1.3
+  Downloaded libc v0.2.185
+  Downloaded linux-raw-sys v0.12.1
+  Downloaded asupersync v0.3.4
+   Compiling cfg-if v1.0.4
+   Compiling libc v0.2.185
+   Compiling proc-macro2 v1.0.106
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.45
+   Compiling syn v2.0.117
+   Compiling typenum v1.20.0
+   Compiling version_check v0.9.5
+   Compiling generic-array v0.14.7
+   Compiling getrandom v0.2.17
+   Compiling rand_core v0.6.4
+   Compiling crypto-common v0.1.7
+   Compiling subtle v2.6.1
+   Compiling serde_core v1.0.228
+   Compiling zeroize_derive v1.4.3
+   Compiling zerocopy v0.8.48
+   Compiling autocfg v1.5.0
+   Compiling serde v1.0.228
+   Compiling zeroize v1.8.2
+   Compiling serde_derive v1.0.228
+   Compiling zerocopy-derive v0.8.48
+   Compiling cpufeatures v0.2.17
+   Compiling semver v1.0.28
+   Compiling crossbeam-utils v0.8.21
+   Compiling rustc_version v0.4.1
+   Compiling block-buffer v0.10.4
+   Compiling either v1.15.0
+   Compiling once_cell v1.21.4
+   Compiling digest v0.10.7
+   Compiling shlex v1.3.0
+   Compiling find-msvc-tools v0.1.9
+   Compiling cc v1.2.60
+   Compiling bitflags v2.11.1
+   Compiling crossbeam-epoch v0.9.18
+   Compiling num-traits v0.2.19
+   Compiling rayon-core v1.13.0
+   Compiling equivalent v1.0.2
+   Compiling zmij v1.0.21
+   Compiling foldhash v0.2.0
+   Compiling rustix v1.1.4
+   Compiling allocator-api2 v0.2.21
+   Compiling hashbrown v0.17.0
+   Compiling crossbeam-deque v0.8.6
+   Compiling inout v0.1.4
+   Compiling hybrid-array v0.4.10
+   Compiling memchr v2.8.0
+   Compiling cfg_aliases v0.2.1
+   Compiling getrandom v0.4.2
+   Compiling base64ct v1.8.3
+   Compiling serde_json v1.0.149
+   Compiling linux-raw-sys v0.12.1
+   Compiling pem-rfc7468 v0.7.0
+   Compiling cipher v0.4.4
+   Compiling indexmap v2.14.0
+   Compiling tracing-core v0.1.36
+   Compiling ppv-lite86 v0.2.21
+   Compiling universal-hash v0.5.1
+   Compiling cmov v0.5.3
+   Compiling fastrand v2.4.1
+   Compiling itoa v1.0.18
+   Compiling cpufeatures v0.3.0
+   Compiling opaque-debug v0.3.1
+   Compiling const-oid v0.9.6
+   Compiling thiserror v2.0.18
+   Compiling getrandom v0.3.4
+   Compiling der v0.7.10
+   Compiling ctutils v0.4.2
+   Compiling rayon v1.12.0
+   Compiling crypto-common v0.2.1
+   Compiling block-buffer v0.12.0
+   Compiling signature v2.2.0
+   Compiling curve25519-dalek v4.1.3
+   Compiling thiserror-impl v2.0.18
+   Compiling pin-project-lite v0.2.17
+   Compiling anyhow v1.0.102
+   Compiling const-oid v0.10.2
+   Compiling digest v0.11.2
+   Compiling tempfile v3.27.0
+   Compiling spki v0.7.3
+   Compiling blake3 v1.8.4
+   Compiling crc32c v0.6.8
+   Compiling memoffset v0.9.1
+   Compiling curve25519-dalek-derive v0.1.1
+   Compiling tracing-attributes v0.1.31
+   Compiling log v0.4.29
+   Compiling parking_lot_core v0.9.12
+   Compiling smallvec v1.15.1
+   Compiling tracing v0.1.44
+   Compiling rand_core v0.9.5
+   Compiling pkcs8 v0.10.2
+   Compiling ed25519 v2.2.3
+   Compiling polyval v0.6.2
+   Compiling rand_chacha v0.3.1
+   Compiling nix v0.31.2
+   Compiling sha2 v0.10.9
+   Compiling itertools v0.14.0
+   Compiling aead v0.5.2
+   Compiling errno v0.3.14
+   Compiling crc32fast v1.5.0
+   Compiling scopeguard v1.2.0
+   Compiling arrayref v0.3.9
+   Compiling constant_time_eq v0.4.2
+   Compiling signal-hook v0.4.4
+   Compiling arrayvec v0.7.6
+   Compiling virtue-next v0.1.3
+   Compiling lazy_static v1.5.0
+   Compiling regex-syntax v0.8.10
+   Compiling sharded-slab v0.1.7
+   Compiling bincode_derive-next v2.1.0
+   Compiling lock_api v0.4.14
+   Compiling signal-hook-registry v1.4.8
+   Compiling prost-derive v0.14.4
+   Compiling ed25519-dalek v2.2.0
+   Compiling rand v0.8.6
+   Compiling ghash v0.5.1
+   Compiling signatory v0.27.1
+   Compiling tracing-log v0.2.0
+   Compiling franken-evidence v0.3.4
+   Compiling poly1305 v0.8.0
+   Compiling rmp v0.8.15
+   Compiling ctr v0.9.2
+   Compiling aes v0.8.4
+   Compiling chacha20 v0.9.1
+   Compiling nix v0.29.0
+   Compiling alloca v0.4.0
+   Compiling hmac v0.12.1
+   Compiling franken-kernel v0.3.4
+   Compiling half v2.7.1
+   Compiling pin-project-internal v1.1.11
+   Compiling thread_local v1.1.9
+   Compiling unty-next v0.1.1
+   Compiling data-encoding v2.11.0
+   Compiling plotters-backend v0.3.7
+   Compiling clap_lex v1.1.0
+   Compiling bytes v1.11.1
+   Compiling futures-io v0.3.32
+   Compiling futures-core v0.3.32
+   Compiling ciborium-io v0.2.2
+   Compiling parking v2.2.1
+   Compiling nu-ansi-term v0.50.3
+   Compiling anstyle v1.0.14
+   Compiling clap_builder v4.6.0
+   Compiling tracing-subscriber v0.3.23
+   Compiling futures-lite v2.6.1
+   Compiling ciborium-ll v0.2.2
+   Compiling prost v0.14.4
+   Compiling plotters-svg v0.3.7
+   Compiling nkeys v0.4.5
+   Compiling bincode-next v2.1.0
+   Compiling pin-project v1.1.11
+   Compiling franken-decision v0.3.4
+   Compiling hkdf v0.12.4
+   Compiling chacha20poly1305 v0.10.1
+   Compiling aes-gcm v0.10.3
+   Compiling rmp-serde v1.3.1
+   Compiling parking_lot v0.12.5
+   Compiling ffs-types v0.1.0 (/data/projects/.scratch/frankenfs-opt-20260611-navy-1515/crates/ffs-types)
+   Compiling regex-automata v0.4.14
+   Compiling sha1 v0.11.0
+   Compiling sha2 v0.11.0
+   Compiling hmac v0.13.0
+   Compiling sysinfo v0.33.1
+   Compiling polling v3.11.0
+   Compiling crossbeam-queue v0.3.12
+   Compiling itertools v0.13.0
+   Compiling asupersync-macros v0.3.4
+   Compiling visibility v0.1.1
+   Compiling wait-timeout v0.2.1
+   Compiling socket2 v0.6.3
+   Compiling same-file v1.0.6
+   Compiling quick-error v1.2.3
+   Compiling base64 v0.22.1
+   Compiling hex v0.4.3
+   Compiling bit-vec v0.8.0
+   Compiling fnv v1.0.7
+   Compiling cast v0.3.0
+   Compiling slab v0.4.12
+   Compiling asupersync v0.3.4
+   Compiling criterion-plot v0.8.2
+   Compiling rusty-fork v0.3.1
+   Compiling bit-set v0.8.0
+   Compiling walkdir v2.5.0
+   Compiling regex v1.12.3
+   Compiling plotters v0.3.7
+   Compiling ciborium v0.2.2
+   Compiling clap v4.6.1
+   Compiling rand v0.9.4
+   Compiling rand_chacha v0.9.0
+   Compiling rand_xorshift v0.4.0
+   Compiling ffs-error v0.1.0 (/data/projects/.scratch/frankenfs-opt-20260611-navy-1515/crates/ffs-error)
+   Compiling tinytemplate v1.2.1
+   Compiling console v0.16.3
+   Compiling page_size v0.6.0
+   Compiling oorandom v11.1.5
+   Compiling similar v2.7.0
+   Compiling anes v0.1.6
+   Compiling unarray v0.1.4
+   Compiling proptest v1.11.0
+   Compiling criterion v0.8.2
+   Compiling insta v1.47.2
+   Compiling ffs-block v0.1.0 (/data/projects/.scratch/frankenfs-opt-20260611-navy-1515/crates/ffs-block)
+   Compiling ffs-ondisk v0.1.0 (/data/projects/.scratch/frankenfs-opt-20260611-navy-1515/crates/ffs-ondisk)
+   Compiling ffs-repair v0.1.0 (/data/projects/.scratch/frankenfs-opt-20260611-navy-1515/crates/ffs-repair)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 7m 43s
+     Running unittests src/lib.rs (.rch-target-vmi1152480-job-29883510449766692-1781208312773638003-0/debug/deps/ffs_repair-a587efa423210faf)
+
+running 444 tests
+test autopilot::tests::autopilot_sanitizes_non_finite_configuration_values ... ok
+test autopilot::tests::edge_cases_zero_and_full_corruption ... ok
+test autopilot::tests::fixed_metadata_expected_loss_uses_metadata_multiplier ... ok
+test autopilot::tests::higher_corruption_selects_higher_overhead ... ok
+test autopilot::tests::hybrid_zero_block_threshold_matches_every_write_refresh ... ok
+test autopilot::tests::metadata_multiplier_applies_to_optimal_overhead ... ok
+test autopilot::tests::optimal_overhead_monotonic_with_corruption_rate ... ok
+test autopilot::tests::optimal_overhead_respects_bounds ... ok
+test autopilot::tests::posterior_update_tracks_counts ... ok
+test autopilot::tests::proptest_beta_binomial_tail_in_unit_interval ... ok
+test autopilot::tests::proptest_beta_binomial_tail_monotonic_in_cutoff ... ok
+test autopilot::tests::proptest_expected_loss_nonneg_finite ... ok
+test autopilot::tests::proptest_floor_to_u32_accuracy ... ok
+test autopilot::tests::proptest_log_add_exp_commutative ... ok
+test autopilot::tests::proptest_log_add_exp_identity ... ok
+test autopilot::tests::proptest_optimal_overhead_within_bounds ... ok
+test autopilot::tests::proptest_posterior_mean_in_unit_interval ... ok
+test autopilot::tests::proptest_posterior_params_grow_with_observations ... ok
+test autopilot::tests::proptest_risk_bound_in_unit_interval ... ok
+test autopilot::tests::proptest_risk_bound_zero_at_full_overhead ... ok
+test autopilot::tests::proptest_symbol_count_bounded ... ok
+test autopilot::tests::refresh_all_policies_finite_under_idle ... ok
+test autopilot::tests::refresh_block_count_dominates_when_data_loss_is_catastrophic ... ok
+test autopilot::tests::refresh_compare_all_profiles ... ok
+test autopilot::tests::refresh_decision_boundary_exists_under_high_risk ... ok
+test autopilot::tests::refresh_loss_age_only_short_staleness_has_high_refresh_cost ... ok
+test autopilot::tests::refresh_loss_age_only_u_shape_under_high_risk ... ok
+test autopilot::tests::refresh_loss_block_count_decreases_with_larger_threshold_under_low_corruption ... ok
+test autopilot::tests::refresh_loss_hybrid_uses_shorter_window ... ok
+test autopilot::tests::refresh_loss_model_sanitizes_non_finite_inputs ... ok
+test autopilot::tests::refresh_loss_zero_source_blocks_returns_zero ... ok
+test autopilot::tests::refresh_loss_zero_staleness_returns_max ... ok
+test autopilot::tests::refresh_loss_zero_write_rate_block_count_returns_zero ... ok
+test autopilot::tests::single_block_group_decision_is_valid ... ok
+test autopilot::tests::verification_gate_all_profiles_correct ... ok
+test autopilot::tests::verification_gate_decision_boundary_valid ... ok
+Decision boundary: 16.67 writes/sec (age=5.268745e-4, block=5.268745e-4)
+=== Verification Gate: Adaptive Refresh Expected-Loss ===
+Parameters: age_staleness=30s, block_threshold=500, source_blocks=32768, crash_rate=3.17e-8, corruption_prob=0.01
+  Idle: age=3.333348e-4 block=2.619265e-6 hybrid=3.333348e-4 best=BlockCount
+test autopilot::tests::verification_gate_hybrid_expected_loss_improvement ... ok
+test autopilot::tests::verification_gate_hybrid_stale_window_reduction ... ok
+test autopilot::tests::zero_block_group_decision_is_empty ... ok
+test autopilot::tests::zero_block_group_selects_zero_overhead ... ok
+test codec::tests::cached_source_coefficient_encoder_matches_uncached_reference ... ok
+  Light: age=3.334785e-4 block=2.241927e-5 hybrid=3.334785e-4 best=BlockCount
+  Heavy: age=3.478489e-4 block=2.002419e-3 hybrid=2.002419e-3 best=AgeOnly
+  Burst: age=4.784892e-4 block=2.000242e-2 hybrid=2.000242e-2 best=AgeOnly
+  High-risk Heavy: age=1.161581e0 hybrid=1.955412e-1 improvement=83.2%
+  High-risk Burst: age=3.171313e0 hybrid=2.135412e-1 improvement=93.3%
+VERIFICATION GATE PASSED: adaptive refresh expected-loss model verified
+=== Verification Gate: Stale-Window p95 Reduction ===
+  Age-only p95: age=27000ms writes=1350
+  Hybrid p95:   age=4500ms writes=225
+  p95 age reduction: 83.3%
+  p95 writes reduction: 83.3%
+VERIFICATION GATE PASSED: p95 age reduction 83.3%, p95 writes reduction 83.3%
+test codec::tests::decode_direct_small_erasure_preserves_duplicate_output_order ... ok
+test codec::tests::decode_direct_source_major_residuals_match_row_major_reference ... ok
+test codec::tests::decode_duplicate_corrupt_indices_duplicate_recovered_output ... ok
+test codec::tests::decode_fails_with_insufficient_repair ... ok
+test codec::tests::decode_no_corruption_succeeds ... ok
+test codec::tests::decode_owned_direct_small_erasure_preserves_duplicate_output_order ... ok
+test codec::tests::decode_owned_repair_symbols_recovers_single_corrupt_block ... ok
+test codec::tests::decode_recovers_first_and_last_blocks ... ok
+test codec::tests::decode_recovers_multiple_corrupt_blocks ... ok
+test codec::tests::decode_recovers_single_corrupt_block ... ok
+test codec::tests::decode_rejects_malformed_repair_symbol_length ... ok
+test codec::tests::decode_rejects_out_of_range_corrupt_index_without_reads ... ok
+test codec::tests::decode_stats_populated ... ok
+test codec::tests::decode_two_corrupt_blocks_uses_direct_small_erasure_path ... ok
+test codec::tests::decode_with_nonzero_first_block ... ok
+test codec::tests::direct_source_coefficients_match_fused_known_basis_projection ... ok
+test codec::tests::encode_deterministic ... ok
+test codec::tests::encode_different_groups_produce_different_symbols ... ok
+test codec::tests::encode_group_projected_symbols_match_full_encoder_reference ... ok
+test codec::tests::encode_produces_repair_symbols ... ok
+test codec::tests::encode_zero_repair_symbols ... ok
+test codec::tests::fault_injection_progressive_corruption ... ok
+test codec::tests::proptest_different_groups_different_seeds ... ok
+test codec::tests::proptest_encode_decode_roundtrip ... ok
+test codec::tests::proptest_encode_deterministic ... ok
+test codec::tests::proptest_repair_count_matches_request ... ok
+test codec::tests::raptorq_decode_golden_report ... RAPTORQ_DECODE_GOLDEN_BEGIN
+group=3 source_block_count=16 symbol_size=96 seed=3090965789839318841 corrupt=[5, 0, 5] complete=true policy_mode=Some("small_erasure_direct") policy_reason=Some("full_rank_source_domain_repair")
+recovered block=5 data=6c798693a0adbac7d4e1eefb0815222f3c495663707d8a97a4b1becbd8e5f2ff0c192633404d5a6774818e9ba8b5c2cfdce9f603101d2a3744515e6b7885929facb9c6d3e0edfa0714212e3b4855626f7c8996a3b0bdcad7e4f1fe0b1825323f
+recovered block=0 data=0714212e3b4855626f7c8996a3b0bdcad7e4f1fe0b1825323f4c596673808d9aa7b4c1cedbe8f5020f1c293643505d6a7784919eabb8c5d2dfecf90613202d3a4754616e7b8895a2afbcc9d6e3f0fd0a1724313e4b5865727f8c99a6b3c0cdda
+recovered block=5 data=6c798693a0adbac7d4e1eefb0815222f3c495663707d8a97a4b1becbd8e5f2ff0c192633404d5a6774818e9ba8b5c2cfdce9f603101d2a3744515e6b7885929facb9c6d3e0edfa0714212e3b4855626f7c8996a3b0bdcad7e4f1fe0b1825323f
+RAPTORQ_DECODE_GOLDEN_END
+ok
+test codec::tests::raptorq_encode_golden_report ... RAPTORQ_ENCODE_GOLDEN_BEGIN
+group=3 source_block_count=8 symbol_size=96 seed=3090965789839318841 repair_count=4
+symbol esi=8 is_source=false degree=4 data=c7bab0762b3f50ab54c3efecffbd4b487d1c6fdc3ae1f710aa50474a20466733daa7f137aa4728eb145bf2f1befc2230055c2f8027fcb65192282b0a605b7ae79be6894f940768f6092bb3b0c684c7704541320066bdce29126867177d1a3b77
+symbol esi=9 is_source=false degree=4 data=f94c044a14cbef6ceb33b032f232005abed47ddc9e15d08c3f9e56aa8b6d8eac81341c52588da9d3541ac84aea2ac91cf86bc207e66dc89454d88a153415f6e1992c5a14c33216ab2cbdd052ac6c17a34713bae6fe758ed29c67436d4c0dee20
+symbol esi=10 is_source=false degree=12 data=49581ee5d1b010cdd91115ddd363bb23b6d6e90ee276af0333685e5324b08e66091832c9a6f858d0c400559dff4f406bfecbf48fa236832fae209e4e39f0cef625347a818ee54590843b79b1b707a876e38bb4d58e1acb67d13dfb0e79dce2fa
+symbol esi=11 is_source=false degree=5 data=78a5921deab81f39db47bf2bea95cd8c2681b61d0785227e123e9a0fce7301e61bc62aa537a106987ac5dc48522d6c953f2017cb64e69ac66d2782ae6f10629da37e33bc0800a7fb199b64f04b3472349e43740adc5e83df6686d7cd0ca8dac8
+RAPTORQ_ENCODE_GOLDEN_END
+ok
+test codec::tests::raptorq_reference_encode_golden_report ... RAPTORQ_ENCODE_GOLDEN_BEGIN
+group=3 source_block_count=8 symbol_size=96 seed=3090965789839318841 repair_count=4
+symbol esi=8 is_source=false degree=4 data=c7bab0762b3f50ab54c3efecffbd4b487d1c6fdc3ae1f710aa50474a20466733daa7f137aa4728eb145bf2f1befc2230055c2f8027fcb65192282b0a605b7ae79be6894f940768f6092bb3b0c684c7704541320066bdce29126867177d1a3b77
+symbol esi=9 is_source=false degree=4 data=f94c044a14cbef6ceb33b032f232005abed47ddc9e15d08c3f9e56aa8b6d8eac81341c52588da9d3541ac84aea2ac91cf86bc207e66dc89454d88a153415f6e1992c5a14c33216ab2cbdd052ac6c17a34713bae6fe758ed29c67436d4c0dee20
+symbol esi=10 is_source=false degree=12 data=49581ee5d1b010cdd91115ddd363bb23b6d6e90ee276af0333685e5324b08e66091832c9a6f858d0c400559dff4f406bfecbf48fa236832fae209e4e39f0cef625347a818ee54590843b79b1b707a876e38bb4d58e1acb67d13dfb0e79dce2fa
+symbol esi=11 is_source=false degree=5 data=78a5921deab81f39db47bf2bea95cd8c2681b61d0785227e123e9a0fce7301e61bc62aa537a106987ac5dc48522d6c953f2017cb64e69ac66d2782ae6f10629da37e33bc0800a7fb199b64f04b3472349e43740adc5e83df6686d7cd0ca8dac8
+RAPTORQ_ENCODE_GOLDEN_END
+ok
+test decision::tests::decision_json_round_trip ... ok
+test decision::tests::every_state_has_a_well_defined_optimal_action ... ok
+test decision::tests::loss_monotonicity_deferred_repair_risk_increases_with_severity ... ok
+test decision::tests::policy_clean_selects_defer ... ok
+test decision::tests::policy_io_stall_selects_degrade_readonly ... ok
+test decision::tests::policy_minor_corruption_selects_repair_local ... ok
+test decision::tests::policy_severe_corruption_selects_repair_global ... ok
+test decision::tests::proptest_classify_corruption_severity_monotonic ... ok
+test decision::tests::proptest_classify_io_errors_always_stall ... ok
+test decision::tests::proptest_classify_zero_corruption_is_clean ... ok
+test decision::tests::proptest_defer_loss_monotonic_with_severity ... ok
+test decision::tests::proptest_loss_nonneg_finite ... ok
+test decision::tests::proptest_safety_override_selects_forced_action_and_loss ... ok
+test decision::tests::proptest_safety_override_threshold ... ok
+test decision::tests::proptest_select_action_valid ... ok
+test decision::tests::safety_override_degrades_readonly_when_symbols_insufficient ... ok
+test decision::tests::safety_override_forces_repair_when_posterior_exceeds_threshold ... ok
+test decision::tests::safety_threshold_boundary ... ok
+test decision::tests::state_classify_clean_when_no_corruption ... ok
+test decision::tests::state_classify_io_stall_overrides_corruption ... ok
+test decision::tests::state_classify_minor_under_1pct ... ok
+test decision::tests::state_classify_severe_above_1pct ... ok
+test demo::tests::demo_output_has_expected_shape ... ok
+test evidence::tests::append_failed_partial_write_poisons_ledger_handle ... ok
+test evidence::tests::append_round_trip_via_ledger_parses_back ... ok
+test evidence::tests::backpressure_activated_round_trip ... ok
+test evidence::tests::corruption_detail_clone_and_eq ... ok
+test evidence::tests::corruption_detected_round_trip ... ok
+test evidence::tests::dirty_block_discarded_round_trip ... ok
+test evidence::tests::durability_policy_changed_round_trip ... ok
+test evidence::tests::evidence_event_type_hash_consistent ... ok
+test evidence::tests::evidence_event_type_serde_all_variants ... ok
+test evidence::tests::evidence_record_with_block_range_appears_in_json ... ok
+test evidence::tests::evidence_record_with_timestamp_overrides_auto ... ok
+test evidence::tests::flush_batch_round_trip ... ok
+test evidence::tests::from_recovery_evidence_failed ... ok
+test evidence::tests::from_recovery_evidence_partial_maps_to_repair_failed ... ok
+test evidence::tests::from_recovery_evidence_recovered ... ok
+test evidence::tests::from_scrub_report_conversion ... ok
+test evidence::tests::ledger_append_and_parse ... ok
+test evidence::tests::ledger_into_inner_returns_writer ... ok
+test evidence::tests::none_fields_omitted_from_json ... ok
+test evidence::tests::parse_evidence_ledger_all_blank_lines ... ok
+test evidence::tests::parse_evidence_ledger_empty_input ... ok
+test evidence::tests::parse_evidence_ledger_skips_invalid_utf8_lines_without_lossy_rewrite ... ok
+test evidence::tests::parse_skips_invalid_lines ... ok
+test evidence::tests::policy_decision_round_trip ... ok
+test evidence::tests::refresh_policy_changed_round_trip ... ok
+test evidence::tests::repair_attempted_round_trip ... ok
+test evidence::tests::repair_failed_round_trip ... ok
+test evidence::tests::repair_succeeded_round_trip ... ok
+test evidence::tests::representative_evidence_ledger_jsonl_exact_golden_contract ... ok
+test evidence::tests::scrub_cycle_round_trip ... ok
+test evidence::tests::serialization_conflict_round_trip ... ok
+test evidence::tests::snapshot_advanced_round_trip ... ok
+test evidence::tests::symbol_refresh_round_trip ... ok
+test evidence::tests::transaction_commit_round_trip ... ok
+test evidence::tests::txn_abort_reason_serde_all_variants ... ok
+test evidence::tests::txn_aborted_round_trip ... ok
+test evidence::tests::version_gc_round_trip ... ok
+test evidence::tests::wal_recovery_no_checkpoint ... ok
+test evidence::tests::wal_recovery_round_trip ... ok
+test exchange::tests::client_rejects_zero_transport_timeouts ... ok
+test exchange::tests::client_respects_expired_deadline_before_connect ... ok
+test exchange::tests::default_exchange_config_is_accepted ... ok
+test exchange::tests::exchange_backoff_observes_mid_sleep_cancellation ... ok
+test exchange::tests::exchange_backoff_rejects_deadline_that_cannot_fit ... ok
+test exchange::tests::exchange_rejects_zero_max_frame_bytes ... ok
+test exchange::tests::framing_round_trip_preserves_payload ... ok
+test exchange::tests::in_memory_store_rejects_same_generation_symbol_rewrite ... ok
+test exchange::tests::in_memory_store_repeated_same_generation_put_is_idempotent ... ok
+test exchange::tests::loopback_exchange_e2e ... ok
+test exchange::tests::response_mapping_round_trip_preserves_symbols ... ok
+test exchange::tests::retry_with_backoff_retries_until_success ... ok
+test exchange::tests::server_continues_after_malformed_client_connection ... ok
+test exchange::tests::server_rejects_zero_accept_poll_interval ... ok
+test exchange::tests::store_mapping_round_trip_preserves_generation ... ok
+test lrc::gf256::tests::generator_has_full_nonzero_field_order ... ok
+test lrc::gf256::tests::mul_commutative ... ok
+test lrc::gf256::tests::mul_identity ... ok
+test lrc::gf256::tests::mul_inverse ... ok
+test lrc::gf256::tests::mul_zero ... ok
+test lrc::tests::config_basics ... ok
+test lrc::tests::config_serde_roundtrip ... ok
+test lrc::tests::encode_global_produces_correct_count ... ok
+test lrc::tests::encode_global_rejects_mismatched_block_sizes - should panic ... ok
+
+thread 'lrc::tests::encode_global_rejects_mismatched_block_sizes' (2181138) panicked at crates/ffs-repair/src/lrc.rs:347:13:
+assertion `left == right` failed: block size mismatch
+  left: 8
+ right: 16
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test lrc::tests::encode_global_zero_parity_preserves_no_extra_block_size_validation ... ok
+test lrc::tests::encode_local_produces_correct_count ... ok
+test lrc::tests::full_encode_local_plus_global ... ok
+test lrc::tests::gf256_inv_zero_panics - should panic ... ok
+test lrc::tests::gf256_mul_associative_spot_check ... ok
+test lrc::tests::gf256_mul_self_inverse ... ok
+
+thread 'lrc::tests::gf256_inv_zero_panics' (2181144) panicked at crates/ffs-repair/src/lrc.rs:129:9:
+assertion `left != right` failed: GF(256) inverse of zero is undefined
+  left: 0
+ right: 0
+test lrc::tests::gf256_mul_xor_pair_matches_separate_passes ... ok
+test lrc::tests::global_encode_decode_single_failure ... ok
+test lrc::tests::global_parity_coefficient_recurrence_matches_formula ... ok
+test lrc::tests::global_repair_exceeds_capacity ... ok
+test lrc::tests::global_repair_handles_columns_separated_by_51 ... ok
+test lrc::tests::global_repair_rejects_mismatched_parity_size_without_panic ... ok
+test lrc::tests::global_repair_two_failures ... ok
+test lrc::tests::local_parity_is_xor_of_group ... ok
+test lrc::tests::local_parity_xor_correct ... ok
+test lrc::tests::local_repair_all_groups ... ok
+test lrc::tests::local_repair_fails_for_two_missing ... ok
+test lrc::tests::local_repair_invalid_group_or_missing_index_returns_none ... ok
+test lrc::tests::local_repair_rejects_block_size_mismatch_without_panic ... ok
+test lrc::tests::local_repair_rejects_malformed_available_count_without_panic ... ok
+test lrc::tests::local_repair_single_failure ... ok
+test lrc::tests::lrc_config_clone_and_copy ... ok
+test lrc::tests::lrc_config_minimum_viable ... ok
+test lrc::tests::lrc_config_num_groups_and_total ... ok
+test lrc::tests::lrc_config_overhead_fraction_correct ... ok
+test lrc::tests::lrc_config_rejects_indivisible - should panic ... ok
+
+thread 'lrc::tests::lrc_config_rejects_indivisible' (2181169) panicked at crates/ffs-repair/src/lrc.rs:213:9:
+data_blocks (7) must be divisible by local_group_size (3)
+test lrc::tests::lrc_config_rejects_too_many_global_data_columns - should panic ... ok
+test lrc::tests::lrc_config_rejects_zero_data_blocks - should panic ... ok
+
+thread 'lrc::tests::lrc_config_rejects_too_many_global_data_columns' (2181170) panicked at crates/ffs-repair/src/lrc.rs:221:9:
+data_blocks must be <= 255 when global parity is enabled
+
+thread 'lrc::tests::lrc_config_rejects_zero_data_blocks' (2181171) panicked at crates/ffs-repair/src/lrc.rs:211:9:
+data_blocks must be > 0
+
+thread 'lrc::tests::lrc_config_rejects_zero_group_size' (2181172) panicked at crates/ffs-repair/src/lrc.rs:212:9:
+local_group_size must be > 0
+test lrc::tests::lrc_config_rejects_zero_group_size - should panic ... ok
+test lrc::tests::lrc_global_parity_golden_report ... LRC_GLOBAL_PARITY_GOLDEN_BEGIN
+config data_blocks=16 local_group_size=4 global_parity_count=4 block_size=96
+parity[0]=ffbd4bc76a655ea01c5b1cc127a41de283e850a27ae8ee38921b6c5ec91869a8518345030e3c0b0cd1819054485eeb1354f832e5088016be8c77fe6ea4b67ba655991cfaa224d13a449b6a3eb9a5fb9c138a701d229ec02cc91a8a7c36b28cff
+parity[1]=80d2898fbfa53ad5d86b5891f96bfbd236408374948e277cbe3b6febc3ca82cc8d02c6ff39807e67ce6a19313fcbe1d0d639990fe6a6130e773beeaf59c7ed83a62be37a8b1f7ff96ed2b9fe3df198bead4b923b226f698fb1a10cc0acec58a6
+parity[2]=f83a68e6a6ee570fab6fe40020fa9e4bcbe98e490545951ce663c63486fdb6461a1688d51ed870a357f0b3b171fc4dee4e329f696440a6f58e1f56d8ac1f05a6c4a7be0eb24befd7e621b5e0d4ac96406e533f5a48287565d435ce6b66c1c190
+parity[3]=01bd2acf2b09a7692f267e2ad817f824dd9b90310ed90eb3f91db8b7e9e5d9902b692e03da82fc6a8e2654c3e3067c47c39edb892fdd5a43c6074b2bd6cf6994cb09a51ed924fc1467b245ce803279797bbf01dd46e261b03538399b0d2fdc1f
+LRC_GLOBAL_PARITY_GOLDEN_END
+ok
+test lrc::tests::no_failures_do_not_require_available_global_parity ... ok
+test lrc::tests::no_failures_returns_trivial_success ... ok
+test lrc::tests::proptest_config_serde_roundtrip ... ok
+test lrc::tests::proptest_config_total_blocks ... ok
+test lrc::tests::proptest_global_repair_within_budget ... ok
+test lrc::tests::proptest_local_parity_xor_identity ... ok
+test lrc::tests::proptest_local_repair_single_block ... ok
+test lrc::tests::proptest_overhead_fraction_bounded ... ok
+test lrc::tests::repair_io_comparison ... ok
+test ownership::tests::acquire_cancelled_before_record_write_does_not_mutate_disk ... ok
+test ownership::tests::acquire_creates_record_on_disk ... ok
+test ownership::tests::acquire_rejects_exhausted_lease_version_without_rewriting ... ok
+test ownership::tests::acquire_rejects_exhausted_repair_generation_without_rewriting ... ok
+test ownership::tests::acquire_rejects_live_lease_from_same_host_different_pid ... ok
+test ownership::tests::acquire_rejects_when_owned_by_other ... ok
+test ownership::tests::acquire_succeeds_after_lease_expiry ... ok
+test ownership::tests::acquisition_result_rejects_same_host_stale_incarnation ... ok
+test ownership::tests::coordination_record_bad_timestamp_treated_as_expired ... ok
+test ownership::tests::coordination_record_expired ... ok
+test ownership::tests::coordination_record_invalid_calendar_timestamp_treated_as_expired ... ok
+test ownership::tests::coordination_record_json_round_trip ... ok
+test ownership::tests::coordination_record_not_expired ... ok
+test ownership::tests::coordination_record_overflowing_ttl_treated_as_expired ... ok
+test ownership::tests::coordination_record_renew ... ok
+test ownership::tests::deterministic_tiebreak_lower_uuid_wins ... ok
+test ownership::tests::is_owned_by_us ... ok
+test ownership::tests::iso8601_parser_accepts_leap_day ... ok
+test ownership::tests::iso8601_parser_rejects_invalid_components ... ok
+test ownership::tests::iso8601_parser_rejects_non_ascii_without_panicking ... ok
+test ownership::tests::iso8601_round_trip ... ok
+test ownership::tests::proptest_rewrite_decision_orders_by_generation_then_host_id ... ok
+test ownership::tests::record_path_for_image ... ok
+test ownership::tests::record_path_for_image_no_parent ... ok
+test ownership::tests::release_cancelled_before_remove_keeps_record_on_disk ... ok
+test ownership::tests::release_rejects_same_host_same_lease_different_pid ... ok
+test ownership::tests::release_rejects_stale_guard_after_takeover ... ok
+test ownership::tests::release_removes_record ... ok
+test ownership::tests::renew_cancelled_before_write_does_not_mutate_record_or_guard ... ok
+test ownership::tests::renew_rejects_stale_guard_after_takeover ... ok
+test ownership::tests::renew_updates_timestamp ... ok
+test ownership::tests::rewrite_decision_prefers_generation_before_host_tiebreak ... ok
+test ownership::tests::rewrite_decision_preserves_newer_generation ... ok
+test ownership::tests::rewrite_decision_tiebreaks_equal_generation_by_host_id ... ok
+test ownership::tests::temp_file_nonce_rejects_numeric_limit_without_wrapping ... ok
+test ownership::tests::temp_record_path_is_unique_per_write_attempt ... ok
+test pipeline::tests::adaptive_policy_clamp_preserves_metadata_expected_loss ... ok
+test pipeline::tests::adaptive_policy_controls_symbol_refresh_count ... ok
+test pipeline::tests::adaptive_policy_logs_decision_on_clean_scrub ... ok
+test pipeline::tests::adaptive_policy_switches_eager_based_on_posterior ... ok
+test pipeline::tests::atomic_metrics_concurrent_updates ... ok
+test pipeline::tests::atomic_metrics_default_is_zeroed ... ok
+test pipeline::tests::atomic_metrics_increment_and_snapshot ... ok
+test pipeline::tests::atomic_metrics_saturate_at_numeric_limits ... ok
+test pipeline::tests::atomic_metrics_serde_round_trip ... ok
+test pipeline::tests::atomic_metrics_staleness_gauge_from_telemetry ... ok
+test pipeline::tests::atomic_metrics_wired_into_daemon ... ok
+test pipeline::tests::atomic_metrics_wired_into_pipeline_scrub ... ok
+test pipeline::tests::block_outcome_serde_round_trip ... ok
+test pipeline::tests::bootstrap_storage_rejects_symbols_beyond_layout_capacity ... ok
+test pipeline::tests::churn_writes_respect_staleness_budget ... ok
+test pipeline::tests::clean_scrub_produces_empty_report ... ok
+test pipeline::tests::default_metadata_group_is_empty_when_no_groups_configured ... ok
+test pipeline::tests::default_metadata_group_uses_lowest_configured_group_id ... ok
+test pipeline::tests::dirty_group_tracking_api_reports_state ... ok
+test pipeline::tests::distributed_repair_pipeline_e2e ... ok
+test pipeline::tests::e2e_survive_five_percent_random_block_corruption_with_daemon ... ok
+test pipeline::tests::eager_policy_refreshes_on_every_write ... ok
+test pipeline::tests::eager_policy_refreshes_symbols_on_write ... ok
+test pipeline::tests::evidence_ledger_captures_all_events ... ok
+test pipeline::tests::evidence_ledger_captures_churn_context_in_repair_events ... ok
+test pipeline::tests::ext4_superblock_corruption_recovered_and_logged ... ok
+test pipeline::tests::group_flush_keeps_fresh_lazy_group_dirty ... ok
+test pipeline::tests::group_flush_refreshes_eager_policy ... ok
+test pipeline::tests::group_recovery_summary_serde_omits_none_decoder_stats ... ok
+test pipeline::tests::lazy_policy_defers_refresh_until_scrub_or_timeout ... ok
+test pipeline::tests::lazy_policy_refreshes_on_next_scrub_cycle ... ok
+test pipeline::tests::local_scrub_detect_recover_pipeline ... ok
+test pipeline::tests::multiple_corrupt_blocks_same_group_recovered ... ok
+test pipeline::tests::no_false_clean_when_corruption_exists_under_heavy_churn ... ok
+test pipeline::tests::percentile_index_boundary_cases ... ok
+test pipeline::tests::queued_refresh_lifecycle_receives_group_notifications ... ok
+test pipeline::tests::queued_repair_refresh_drain_releases_lock_before_processing ... ok
+test pipeline::tests::queued_repair_refresh_empty_drain ... ok
+test pipeline::tests::queued_repair_refresh_ignores_blocks_outside_any_group ... ok
+test pipeline::tests::queued_repair_refresh_maps_blocks_to_groups ... ok
+test pipeline::tests::recovery_refresh_resets_dirty_state_and_atomic_staleness ... ok
+test pipeline::tests::recovery_report_is_fully_recovered_when_no_corruption ... ok
+test pipeline::tests::recovery_report_not_fully_recovered_with_unrecoverable ... ok
+test pipeline::tests::recovery_report_serde_round_trip ... ok
+test pipeline::tests::recovery_succeeds_with_fresh_symbols_under_write_churn ... ok
+test pipeline::tests::recovery_uses_configured_writeback_authority ... ok
+test pipeline::tests::recovery_writeback_rejection_fails_closed_without_symbol_refresh ... ok
+test pipeline::tests::refresh_mode_as_str_covers_all_variants ... ok
+test pipeline::tests::refresh_telemetry_multiple_groups_sorted ... ok
+test pipeline::tests::refresh_telemetry_reports_clean_state ... ok
+test pipeline::tests::refresh_telemetry_serializes_to_json ... ok
+test pipeline::tests::refresh_telemetry_tracks_dirty_group ... ok
+test pipeline::tests::repair_runtime_metrics_default_is_zeroed ... ok
+test pipeline::tests::repair_runtime_metrics_report_max_symbol_staleness ... ok
+test pipeline::tests::repair_runtime_metrics_serde_round_trip ... ok
+test pipeline::tests::scrub_daemon_backpressure_yield_observes_mid_sleep_cancellation ... ok
+test pipeline::tests::scrub_daemon_backpressure_yield_rejects_deadline_that_cannot_fit ... ok
+test pipeline::tests::scrub_daemon_completes_full_round_without_error ... ok
+test pipeline::tests::scrub_daemon_config_default_has_sensible_values ... ok
+test pipeline::tests::scrub_daemon_detection_only_does_not_write_recovery_blocks ... ok
+test pipeline::tests::scrub_daemon_detects_corruption_and_triggers_recovery ... ok
+test pipeline::tests::scrub_daemon_metrics_default_is_zeroed ... ok
+test pipeline::tests::scrub_daemon_metrics_serde_round_trip ... ok
+test pipeline::tests::scrub_daemon_respects_cancellation_promptly ... ok
+test pipeline::tests::scrub_daemon_run_once_applies_queued_refreshes ... ok
+test pipeline::tests::scrub_daemon_scans_at_least_one_group ... ok
+test pipeline::tests::scrub_daemon_step_serde_round_trip ... ok
+test pipeline::tests::scrub_daemon_yields_under_backpressure ... ok
+test pipeline::tests::scrub_daemon_yields_when_budget_is_low ... ok
+test pipeline::tests::scrub_detects_corruption_after_write_churn_dirties_symbols ... ok
+test pipeline::tests::single_corrupt_block_automatic_recovery ... ok
+test pipeline::tests::slo_breach_single_outlier_at_p95_boundary ... ok
+test pipeline::tests::slo_breach_when_age_exceeds_threshold ... ok
+test pipeline::tests::slo_breach_when_writes_exceed_threshold ... ok
+test pipeline::tests::slo_empty_groups_no_breach ... ok
+test pipeline::tests::slo_no_breach_when_all_groups_fresh ... ok
+test pipeline::tests::slo_no_breach_when_outlier_below_percentile ... ok
+test pipeline::tests::staleness_timeout_forces_refresh ... ok
+test pipeline::tests::stress_random_corruption_patterns ... ok
+test pipeline::tests::symbol_refresh_after_recovery ... ok
+test pipeline::tests::too_many_corrupt_blocks_graceful_failure ... ok
+test pipeline::tests::write_churn_with_staleness_timeout_still_recovers ... ok
+test pipeline::tests::writeback_flush_queue_triggers_symbol_refresh ... ok
+test por::tests::authenticator_detects_corruption ... ok
+test por::tests::authenticator_detects_wrong_index ... ok
+test por::tests::authenticator_detects_wrong_key ... ok
+test por::tests::authenticator_roundtrip ... ok
+test por::tests::authenticator_table_serde_roundtrip ... ok
+test por::tests::challenge_capped_at_total_blocks ... ok
+test por::tests::challenge_generation_deterministic ... ok
+test por::tests::challenge_no_duplicates ... ok
+test por::tests::constant_time_eq_works ... ok
+test por::tests::full_por_protocol_honest_prover ... ok
+test por::tests::min_challenges_1pct_matches_default ... ok
+test por::tests::min_challenges_boundary_cases ... ok
+test por::tests::min_challenges_full_corruption_needs_single_probe ... ok
+test por::tests::nonce_mismatch_fails ... ok
+test por::tests::por_detects_corrupted_block ... ok
+test por::tests::por_detects_missing_block ... ok
+test por::tests::por_rejects_tampered_response_block_hash ... ok
+test por::tests::security_analysis_1pct_corruption ... ok
+test por::tests::security_analysis_boundary_fractions_stay_in_probability_domain ... ok
+test por::tests::table_build_and_lookup ... ok
+test por::tests::verification_result_serde_roundtrip ... ok
+test recovery::tests::evidence_ledger_is_json_parseable_and_complete ... ok
+test recovery::tests::evidence_round_trip_preserves_partial_outcome ... ok
+test recovery::tests::map_corrupt_blocks_rejects_duplicate_indices ... ok
+test recovery::tests::orchestrator_rejects_source_outside_group_data ... ok
+test recovery::tests::orchestrator_rejects_zero_source_block_count ... ok
+test recovery::tests::recover_from_corrupt_blocks_maps_absolute_to_relative ... ok
+test recovery::tests::recover_from_corrupt_blocks_rejects_block_outside_source ... ok
+test recovery::tests::recovery_attempt_result_is_success_checks_outcome ... ok
+test recovery::tests::recovery_decoder_stats_default_is_zeroed ... ok
+test recovery::tests::recovery_deduplicates_corrupt_indices ... ok
+test recovery::tests::recovery_detects_stale_symbol_restore_via_blake3_mismatch ... ok
+test recovery::tests::recovery_evidence_to_json_is_valid ... ok
+test recovery::tests::recovery_fails_loudly_when_redundancy_is_insufficient ... ok
+test recovery::tests::recovery_handles_symbol_read_io_errors_gracefully ... ok
+test recovery::tests::recovery_noop_for_empty_corrupt_list ... ok
+test recovery::tests::recovery_outcome_serde_round_trip ... ok
+test recovery::tests::recovery_rejects_out_of_range_index ... ok
+test recovery::tests::recovery_restores_corrupted_blocks_when_redundancy_is_sufficient ... ok
+test recovery::tests::recovery_succeeds_with_partial_symbol_loss ... ok
+test scrub::tests::bit_flip_detected_deterministically ... ok
+test scrub::tests::btrfs_superblock_validator_accepts_valid_superblock ... ok
+test scrub::tests::btrfs_superblock_validator_detects_checksum_corruption ... ok
+test scrub::tests::btrfs_tree_block_validator_accepts_valid_tree_block ... ok
+test scrub::tests::btrfs_tree_block_validator_detects_checksum_corruption ... ok
+test scrub::tests::btrfs_tree_block_validator_skips_foreign_fsid_blocks ... ok
+test scrub::tests::clean_device_produces_clean_report ... ok
+test scrub::tests::composite_validator_merges_findings ... ok
+test scrub::tests::corruption_kind_copy_semantics ... ok
+test scrub::tests::corruption_kind_display_all_variants ... ok
+test scrub::tests::corruption_kind_hash_consistent ... ok
+test scrub::tests::count_at_severity_filters_correctly ... ok
+test scrub::tests::display_formatting ... ok
+test scrub::tests::ext4_superblock_validator_accepts_valid_primary_superblock ... ok
+test scrub::tests::ext4_superblock_validator_detects_checksum_corruption ... ok
+test scrub::tests::ext4_superblock_validator_handles_1k_block_layout ... ok
+test scrub::tests::io_error_recorded_as_finding ... ok
+test scrub::tests::multiple_corrupt_blocks ... ok
+test scrub::tests::scrub_does_not_panic_on_corrupted_data ... ok
+test scrub::tests::scrub_finding_display_includes_all_parts ... ok
+test scrub::tests::scrub_range_clamps_to_device_size ... ok
+test scrub::tests::scrub_range_falls_back_to_scalar_reads_after_batch_error ... ok
+test scrub::tests::scrub_range_respects_bounds ... ok
+test scrub::tests::scrub_range_uses_contiguous_read_batches ... ok
+test scrub::tests::scrub_report_display_with_io_errors ... ok
+test scrub::tests::scrub_report_empty_is_clean ... ok
+test scrub::tests::scrub_report_human_output_snapshot ... ok
+test scrub::tests::severity_display_all_variants ... ok
+test scrub::tests::severity_hash_consistent ... ok
+test scrub::tests::severity_ordering ... ok
+test scrub::tests::severity_total_ordering_equality ... ok
+test scrub::tests::zero_check_validator_detects_zeroed_blocks ... ok
+test storage::tests::layout_descriptor_blocks_at_group_boundary ... ok
+test storage::tests::layout_places_regions_at_group_tail ... ok
+test storage::tests::layout_rejects_reserved_exceeding_group_size ... ok
+test storage::tests::layout_rejects_zero_blocks_per_group ... ok
+test storage::tests::layout_rejects_zero_repair_block_count ... ok
+test storage::tests::proptest_layout_tail_regions_translate_with_group_start ... ok
+test storage::tests::storage_bootstrap_generation_zero_returns_empty_symbols ... ok
+test storage::tests::storage_multi_generation_upgrade ... ok
+test storage::tests::storage_prefers_latest_fully_valid_generation ... ok
+test storage::tests::storage_read_symbols_with_no_descriptors_returns_not_found ... ok
+test storage::tests::storage_read_with_no_descriptors_returns_not_found ... ok
+test storage::tests::storage_rejects_corrupted_symbol_header_metadata ... ok
+test storage::tests::storage_rejects_generation_regression ... ok
+test storage::tests::storage_rejects_incomplete_generation_without_fallback ... ok
+test storage::tests::storage_rejects_mismatched_symbol_sizes_in_input ... ok
+test storage::tests::storage_rejects_non_contiguous_esi_input ... ok
+test storage::tests::storage_rejects_non_empty_symbol_block_after_empty_tail ... ok
+test storage::tests::storage_rejects_source_range_first_esi_on_read ... ok
+test storage::tests::storage_rejects_source_range_repair_esi ... ok
+test storage::tests::storage_round_trip_symbols_and_generation_commit ... ok
+test storage::tests::storage_write_repair_symbols_rejects_stale_generation ... ok
+test symbol::tests::compute_repair_block_count_below_one_clamped ... ok
+test symbol::tests::compute_repair_block_count_no_overhead ... ok
+test symbol::tests::compute_repair_block_count_small_group ... ok
+test symbol::tests::compute_repair_block_count_standard ... ok
+test symbol::tests::compute_repair_block_count_zero_source_blocks ... ok
+test symbol::tests::magic_constants_are_correct ... ok
+test symbol::tests::proptest_repair_block_count_monotonic_in_overhead ... ok
+test symbol::tests::proptest_repair_block_header_bit_flip_detected ... ok
+test symbol::tests::proptest_repair_block_header_round_trip ... ok
+test symbol::tests::proptest_repair_group_desc_ext_bit_flip_detected ... ok
+test symbol::tests::proptest_repair_group_desc_ext_round_trip ... ok
+test symbol::tests::proptest_repair_seed_deterministic ... ok
+test symbol::tests::proptest_symbol_digest_round_trip ... ok
+test symbol::tests::repair_block_header_bad_magic ... ok
+test symbol::tests::repair_block_header_checksum_mismatch ... ok
+test symbol::tests::repair_block_header_clone_and_eq ... ok
+test symbol::tests::repair_block_header_insufficient_data ... ok
+test symbol::tests::repair_block_header_max_u16_values ... ok
+test symbol::tests::repair_block_header_payload_size ... ok
+test symbol::tests::repair_block_header_payload_size_zero_count ... ok
+test symbol::tests::repair_block_header_payload_size_zero_size ... ok
+test symbol::tests::repair_block_header_round_trip ... ok
+test symbol::tests::repair_group_desc_ext_bad_magic ... ok
+test symbol::tests::repair_group_desc_ext_checksum_mismatch ... ok
+test symbol::tests::repair_group_desc_ext_clone_and_eq ... ok
+test symbol::tests::repair_group_desc_ext_insufficient_data ... ok
+test symbol::tests::repair_group_desc_ext_round_trip ... ok
+test symbol::tests::repair_parse_error_clone_and_eq ... ok
+test symbol::tests::repair_parse_error_display_bad_magic ... ok
+test symbol::tests::repair_parse_error_display_checksum_mismatch ... ok
+test symbol::tests::repair_parse_error_display_insufficient_data ... ok
+test symbol::tests::repair_parse_error_is_std_error ... ok
+test symbol::tests::repair_seed_deterministic ... ok
+test symbol::tests::repair_seed_different_uuids_same_group ... ok
+test symbol::tests::symbol_digest_clone_and_eq ... ok
+test symbol::tests::symbol_digest_insufficient_data ... ok
+test symbol::tests::symbol_digest_round_trip ... ok
+
+test result: ok. 444 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 21.48s
+
+  [2m2026-06-11T20:14:17.101811Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mRemote command finished: exit=0 in 488720ms[0m
+    [2;3mat[0m rch/src/hook.rs:6376 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T20:14:17.102119Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mRetrieving build artifacts...[0m
+    [2;3mat[0m rch/src/hook.rs:6425 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T20:14:17.102136Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRetrieving artifacts from /data/projects/.scratch/frankenfs-opt-20260611-navy-1515 on vmi1152480[0m
+    [2;3mat[0m rch/src/transfer.rs:2106 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T20:14:17.102178Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mLoaded 2 retrieval exclude pattern(s) from .rchignore (total: 6)[0m
+    [2;3mat[0m rch/src/transfer.rs:909 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T20:14:19.216154Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mArtifacts retrieved in 2113ms (1 files, 1196 bytes)[0m
+    [2;3mat[0m rch/src/transfer.rs:2145 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T20:14:19.216181Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mArtifacts retrieved: 1 files, 1196 bytes in 2113ms[0m
+    [2;3mat[0m rch/src/hook.rs:6458 [2;3mon[0m ThreadId(1)
+
+[RCH] remote vmi1152480 (548.8s)
