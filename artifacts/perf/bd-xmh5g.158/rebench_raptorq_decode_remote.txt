@@ -1,0 +1,5 @@
+Script started on 2026-06-10 21:27:19-04:00 [COMMAND="RCH_WORKER=vmi1227854 RCH_WORKERS=vmi1227854 RCH_PREFERRED_WORKER=vmi1227854 RCH_FORCE_REMOTE=true RCH_REQUIRE_REMOTE=1 RCH_VISIBILITY=summary rch exec -- env CARGO_BUILD_JOBS=1 cargo bench -j 1 -p ffs-repair --bench scrub_codec -- raptorq_decode_group --noplot --sample-size 10 --warm-up-time 1 --measurement-time 2" <not executed on terminal>]
+[RCH] local (no admissible workers: critical_pressure=1,insufficient_slots=1)
+[RCH] remote required; refusing local fallback (no worker assigned)
+
+Script done on 2026-06-10 21:27:19-04:00 [COMMAND_EXIT_CODE="1"]

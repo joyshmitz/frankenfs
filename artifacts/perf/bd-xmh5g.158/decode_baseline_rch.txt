@@ -1,0 +1,33 @@
+[RCH] local (no admissible workers: critical_pressure=1,active_project_exclusion=1)
+    Finished `bench` profile [optimized] target(s) in 0.15s
+     Running benches/scrub_codec.rs (/data/tmp/cargo-target/release/deps/scrub_codec-a949899c9b06997c)
+Gnuplot not found, using plotters backend
+Benchmarking raptorq_decode_group_16blocks
+Benchmarking raptorq_decode_group_16blocks: Warming up for 1.0000 s
+Benchmarking raptorq_decode_group_16blocks: Collecting 10 samples in estimated 2.0085 s (6490 iterations)
+Benchmarking raptorq_decode_group_16blocks: Analyzing
+raptorq_decode_group_16blocks
+                        time:   [308.89 µs 312.49 µs 319.00 µs]
+                        change: [−40.552% −38.361% −35.858%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high mild
+
+Benchmarking raptorq_decode_group_owned_symbols_16blocks
+Benchmarking raptorq_decode_group_owned_symbols_16blocks: Warming up for 1.0000 s
+Benchmarking raptorq_decode_group_owned_symbols_16blocks: Collecting 10 samples in estimated 2.0053 s (6325 iterations)
+Benchmarking raptorq_decode_group_owned_symbols_16blocks: Analyzing
+raptorq_decode_group_owned_symbols_16blocks
+                        time:   [304.54 µs 311.14 µs 323.34 µs]
+                        change: [−38.636% −34.917% −30.277%] (p = 0.00 < 0.05)
+                        Performance has improved.
+
+Benchmarking raptorq_decode_group_no_corruption_16blocks
+Benchmarking raptorq_decode_group_no_corruption_16blocks: Warming up for 1.0000 s
+Benchmarking raptorq_decode_group_no_corruption_16blocks: Collecting 10 samples in estimated 2.0000 s (12M iterations)
+Benchmarking raptorq_decode_group_no_corruption_16blocks: Analyzing
+raptorq_decode_group_no_corruption_16blocks
+                        time:   [167.80 ns 170.72 ns 174.47 ns]
+                        change: [−11.787% −9.1984% −6.4258%] (p = 0.00 < 0.05)
+                        Performance has improved.
+

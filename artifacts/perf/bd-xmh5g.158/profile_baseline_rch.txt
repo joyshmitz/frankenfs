@@ -1,0 +1,97 @@
+[RCH] local (no admissible workers: critical_pressure=1,insufficient_slots=1)
+    Blocking waiting for file lock on build directory
+    Finished `bench` profile [optimized] target(s) in 38.65s
+     Running benches/scrub_codec.rs (/data/tmp/cargo-target/release/deps/scrub_codec-a949899c9b06997c)
+Gnuplot not found, using plotters backend
+Benchmarking scrub_clean_256blocks
+Benchmarking scrub_clean_256blocks: Warming up for 1.0000 s
+Benchmarking scrub_clean_256blocks: Collecting 10 samples in estimated 2.0016 s (24k iterations)
+Benchmarking scrub_clean_256blocks: Analyzing
+scrub_clean_256blocks   time:   [80.130 µs 80.871 µs 81.911 µs]
+                        change: [−7.4594% −1.0039% +4.4722%] (p = 0.80 > 0.05)
+                        No change in performance detected.
+
+Benchmarking scrub_corrupted_256blocks
+Benchmarking scrub_corrupted_256blocks: Warming up for 1.0000 s
+Benchmarking scrub_corrupted_256blocks: Collecting 10 samples in estimated 2.0003 s (25k iterations)
+Benchmarking scrub_corrupted_256blocks: Analyzing
+scrub_corrupted_256blocks
+                        time:   [82.686 µs 86.580 µs 91.557 µs]
+                        change: [−8.5502% −3.5869% +1.8980%] (p = 0.23 > 0.05)
+                        No change in performance detected.
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high mild
+
+Benchmarking scrub_buffer_prep/old_zero_per_batch
+Benchmarking scrub_buffer_prep/old_zero_per_batch: Warming up for 1.0000 s
+Benchmarking scrub_buffer_prep/old_zero_per_batch: Collecting 10 samples in estimated 2.0132 s (5995 iterations)
+Benchmarking scrub_buffer_prep/old_zero_per_batch: Analyzing
+scrub_buffer_prep/old_zero_per_batch
+                        time:   [350.64 µs 357.86 µs 370.41 µs]
+                        change: [−19.536% −16.571% −13.473%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high severe
+Benchmarking scrub_buffer_prep/new_reuse_pool
+Benchmarking scrub_buffer_prep/new_reuse_pool: Warming up for 1.0000 s
+Benchmarking scrub_buffer_prep/new_reuse_pool: Collecting 10 samples in estimated 2.0002 s (64k iterations)
+Benchmarking scrub_buffer_prep/new_reuse_pool: Analyzing
+scrub_buffer_prep/new_reuse_pool
+                        time:   [33.305 µs 34.961 µs 36.313 µs]
+                        change: [+0.2473% +4.6020% +9.2155%] (p = 0.07 > 0.05)
+                        No change in performance detected.
+
+Benchmarking raptorq_encode_group_16blocks
+Benchmarking raptorq_encode_group_16blocks: Warming up for 1.0000 s
+Benchmarking raptorq_encode_group_16blocks: Collecting 10 samples in estimated 2.0166 s (5775 iterations)
+Benchmarking raptorq_encode_group_16blocks: Analyzing
+raptorq_encode_group_16blocks
+                        time:   [330.90 µs 433.66 µs 486.17 µs]
+                        change: [−9.9098% +10.590% +33.495%] (p = 0.38 > 0.05)
+                        No change in performance detected.
+
+Benchmarking raptorq_decode_group_16blocks
+Benchmarking raptorq_decode_group_16blocks: Warming up for 1.0000 s
+Benchmarking raptorq_decode_group_16blocks: Collecting 10 samples in estimated 2.0253 s (3795 iterations)
+Benchmarking raptorq_decode_group_16blocks: Analyzing
+raptorq_decode_group_16blocks
+                        time:   [478.85 µs 494.24 µs 517.99 µs]
+                        change: [+60.688% +75.413% +91.555%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+
+Benchmarking raptorq_decode_group_owned_symbols_16blocks
+Benchmarking raptorq_decode_group_owned_symbols_16blocks: Warming up for 1.0000 s
+Benchmarking raptorq_decode_group_owned_symbols_16blocks: Collecting 10 samples in estimated 2.0206 s (4235 iterations)
+Benchmarking raptorq_decode_group_owned_symbols_16blocks: Analyzing
+raptorq_decode_group_owned_symbols_16blocks
+                        time:   [449.95 µs 473.54 µs 508.81 µs]
+                        change: [+32.491% +43.691% +55.175%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+
+Benchmarking raptorq_decode_group_no_corruption_16blocks
+Benchmarking raptorq_decode_group_no_corruption_16blocks: Warming up for 1.0000 s
+Benchmarking raptorq_decode_group_no_corruption_16blocks: Collecting 10 samples in estimated 2.0000 s (8.9M iterations)
+Benchmarking raptorq_decode_group_no_corruption_16blocks: Analyzing
+raptorq_decode_group_no_corruption_16blocks
+                        time:   [187.51 ns 191.93 ns 195.74 ns]
+                        change: [−12.845% −9.8365% −6.8871%] (p = 0.00 < 0.05)
+                        Performance has improved.
+
+Benchmarking lrc_encode_global_64blocks_8parity
+Benchmarking lrc_encode_global_64blocks_8parity: Warming up for 1.0000 s
+Benchmarking lrc_encode_global_64blocks_8parity: Collecting 10 samples in estimated 2.0199 s (3685 iterations)
+Benchmarking lrc_encode_global_64blocks_8parity: Analyzing
+lrc_encode_global_64blocks_8parity
+                        time:   [555.29 µs 572.61 µs 589.60 µs]
+                        change: [+57.469% +88.926% +125.33%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+
+Benchmarking repair_symbol_refresh_staleness_latency
+Benchmarking repair_symbol_refresh_staleness_latency: Warming up for 1.0000 s
+Benchmarking repair_symbol_refresh_staleness_latency: Collecting 10 samples in estimated 2.0000 s (44M iterations)
+Benchmarking repair_symbol_refresh_staleness_latency: Analyzing
+repair_symbol_refresh_staleness_latency
+                        time:   [45.466 ns 48.167 ns 50.966 ns]
+                        change: [+33.424% +40.209% +47.080%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+
