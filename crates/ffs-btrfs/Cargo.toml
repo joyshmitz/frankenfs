@@ -37,5 +37,9 @@ harness = false
 name = "ondisk_inode_attr"
 harness = false
 
+[[bench]]
+name = "parsed_node_cache"
+harness = false
+
 [lints]
 workspace = true

@@ -13,6 +13,7 @@ pub use ffs_ondisk::btrfs::*;
 use ffs_types::{BlockNumber, CommitSeq, ParseError, Snapshot, TxnId};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashSet};
+use std::sync::Arc;
 use thiserror::Error;
 use tracing::{debug, info, trace, warn};
 
@@ -1874,6 +1875,91 @@ fn validate_inline_extent_ram_bytes(
 
 /// Walk a btrfs tree from `root_logical` down to all leaves, collecting items.
 ///
+/// A btrfs tree node after checksum verification and structural parsing.
+///
+/// This is the unit the tree walkers consume. Producing it (read → verify →
+/// `parse_leaf_items`/`parse_internal_items`) is the per-node cost that a
+/// read-only mount pays once per *distinct* node and then re-pays on every
+/// re-traversal — a node-cache keyed on the logical address can hand the walker
+/// a shared `Arc<BtrfsParsedNode>` and skip read+verify+parse entirely on a hit
+/// (the kernel's `extent_buffer` model). A `Leaf` keeps the verified block
+/// shared so item payloads are still sliced lazily (only in-range items are
+/// cloned), matching the old in-walker parse with no extra per-traversal copy.
+#[derive(Debug, Clone)]
+pub enum BtrfsParsedNode {
+    /// A level-0 node: the verified block bytes plus its parsed item index.
+    Leaf {
+        block: Arc<[u8]>,
+        items: Vec<BtrfsItem>,
+    },
+    /// An internal node: its parsed key-pointers (key = child subtree minimum).
+    Internal { ptrs: Vec<BtrfsKeyPtr> },
+}
+
+/// Verify a btrfs tree block's checksum and parse it into a [`BtrfsParsedNode`].
+///
+/// Does exactly the per-node work the walker used to do inline (length check,
+/// `verify_btrfs_tree_block_checksum`, header parse + `validate`, then leaf or
+/// internal item parse), so the result is byte-for-byte equivalent to walking
+/// the raw block — it just lets a caller cache the parsed form.
+///
+/// # Errors
+/// Returns a [`ParseError`] on a length mismatch, checksum mismatch, or any
+/// malformed header / item layout.
+pub fn parse_btrfs_tree_node(
+    block: &[u8],
+    csum_type: u16,
+    logical: u64,
+    nodesize: u32,
+) -> Result<BtrfsParsedNode, ParseError> {
+    let ns = usize::try_from(nodesize)
+        .map_err(|_| ParseError::IntegerConversion { field: "nodesize" })?;
+    if block.len() != ns {
+        return Err(ParseError::InsufficientData {
+            needed: ns,
+            offset: 0,
+            actual: block.len(),
+        });
+    }
+    ffs_ondisk::verify_btrfs_tree_block_checksum(block, csum_type)?;
+    let header = BtrfsHeader::parse_from_block(block)?;
+    header.validate(block.len(), Some(logical))?;
+    if header.level == 0 {
+        let (_, items) = parse_leaf_items(block)?;
+        Ok(BtrfsParsedNode::Leaf {
+            block: Arc::from(block),
+            items,
+        })
+    } else {
+        let (_, ptrs) = parse_internal_items(block)?;
+        Ok(BtrfsParsedNode::Internal { ptrs })
+    }
+}
+
+/// Build the default node provider that reads a raw block via `read_physical`
+/// (after mapping logical→physical through `chunks`), verifies it, and parses
+/// it into a fresh `Arc<BtrfsParsedNode>` — i.e. the no-cache path. The
+/// `*_with_nodes` walkers take any such provider, so a caller with a parsed-node
+/// cache can substitute one that returns cached `Arc`s on a hit.
+fn byte_node_provider<'a>(
+    read_physical: &'a mut dyn FnMut(u64) -> Result<Vec<u8>, ParseError>,
+    chunks: &'a [BtrfsChunkEntry],
+    nodesize: u32,
+    csum_type: u16,
+) -> impl FnMut(u64) -> Result<Arc<BtrfsParsedNode>, ParseError> + 'a {
+    move |logical: u64| {
+        let mapping =
+            map_logical_to_physical(chunks, logical)?.ok_or(ParseError::InvalidField {
+                field: "logical_address",
+                reason: "not covered by any chunk",
+            })?;
+        let block = read_physical(mapping.physical)?;
+        Ok(Arc::new(parse_btrfs_tree_node(
+            &block, csum_type, logical, nodesize,
+        )?))
+    }
+}
+
 /// `read_physical` reads `nodesize` bytes at the given physical byte offset.
 /// `chunks` provides the logical→physical address mapping.
 ///
@@ -1887,11 +1973,28 @@ pub fn walk_tree(
     nodesize: u32,
     csum_type: u16,
 ) -> Result<Vec<BtrfsLeafEntry>, ParseError> {
+    let mut provider = byte_node_provider(read_physical, chunks, nodesize, csum_type);
+    walk_tree_with_nodes(&mut provider, root_logical, nodesize)
+}
+
+/// Full-tree walk driven by a [`BtrfsParsedNode`] provider.
+///
+/// Identical to [`walk_tree`] but obtains each node from `node_provider`
+/// (keyed by logical address) instead of reading+parsing raw bytes itself, so a
+/// caller holding a parsed-node cache reuses verified+parsed nodes across
+/// traversals.
+///
+/// # Errors
+/// Propagates any [`ParseError`] from the provider or from structural
+/// validation (cycles, misalignment, oversized items).
+pub fn walk_tree_with_nodes(
+    node_provider: &mut dyn FnMut(u64) -> Result<Arc<BtrfsParsedNode>, ParseError>,
+    root_logical: u64,
+    nodesize: u32,
+) -> Result<Vec<BtrfsLeafEntry>, ParseError> {
     let mut walker = BtrfsTreeWalker {
-        read_physical,
-        chunks,
+        node_provider,
         nodesize,
-        csum_type,
         out: Vec::new(),
         active_path: HashSet::new(),
         visited_nodes: HashSet::new(),
@@ -1920,11 +2023,30 @@ pub fn walk_tree_range(
     lo: BtrfsKey,
     hi: BtrfsKey,
 ) -> Result<Vec<BtrfsLeafEntry>, ParseError> {
+    let mut provider = byte_node_provider(read_physical, chunks, nodesize, csum_type);
+    walk_tree_range_with_nodes(&mut provider, root_logical, nodesize, lo, hi)
+}
+
+/// Range walk driven by a [`BtrfsParsedNode`] provider.
+///
+/// Identical to [`walk_tree_range`] but obtains each node from `node_provider`
+/// (keyed by logical address) instead of reading+parsing raw bytes itself, so a
+/// caller holding a parsed-node cache reuses verified+parsed nodes across the
+/// many range descents a single read/getattr/readdir performs.
+///
+/// # Errors
+/// Propagates any [`ParseError`] from the provider or from structural
+/// validation (cycles, misalignment, oversized items).
+pub fn walk_tree_range_with_nodes(
+    node_provider: &mut dyn FnMut(u64) -> Result<Arc<BtrfsParsedNode>, ParseError>,
+    root_logical: u64,
+    nodesize: u32,
+    lo: BtrfsKey,
+    hi: BtrfsKey,
+) -> Result<Vec<BtrfsLeafEntry>, ParseError> {
     let mut walker = BtrfsTreeWalker {
-        read_physical,
-        chunks,
+        node_provider,
         nodesize,
-        csum_type,
         out: Vec::new(),
         active_path: HashSet::new(),
         visited_nodes: HashSet::new(),
@@ -2080,10 +2202,8 @@ fn floor_descend(
 }
 
 struct BtrfsTreeWalker<'a> {
-    read_physical: &'a mut dyn FnMut(u64) -> Result<Vec<u8>, ParseError>,
-    chunks: &'a [BtrfsChunkEntry],
+    node_provider: &'a mut dyn FnMut(u64) -> Result<Arc<BtrfsParsedNode>, ParseError>,
     nodesize: u32,
-    csum_type: u16,
     out: Vec<BtrfsLeafEntry>,
     active_path: HashSet<u64>,
     visited_nodes: HashSet<u64>,
@@ -2120,58 +2240,43 @@ impl BtrfsTreeWalker<'_> {
             });
         }
 
-        let mapping =
-            map_logical_to_physical(self.chunks, logical)?.ok_or(ParseError::InvalidField {
-                field: "logical_address",
-                reason: "not covered by any chunk",
-            })?;
+        // The provider maps logical→physical, reads the block, verifies its
+        // checksum, and parses it — the per-node work a parsed-node cache can
+        // serve from a prior traversal (bd-u1n5f).
+        let node = (self.node_provider)(logical)?;
 
-        let block = (self.read_physical)(mapping.physical)?;
-        let ns = usize::try_from(self.nodesize)
-            .map_err(|_| ParseError::IntegerConversion { field: "nodesize" })?;
-        if block.len() != ns {
-            return Err(ParseError::InsufficientData {
-                needed: ns,
-                offset: 0,
-                actual: block.len(),
-            });
-        }
-
-        // Verify checksum before parsing.
-        ffs_ondisk::verify_btrfs_tree_block_checksum(&block, self.csum_type)?;
-
-        let header = BtrfsHeader::parse_from_block(&block)?;
-        header.validate(block.len(), Some(logical))?;
-
-        if header.level == 0 {
-            collect_leaf_items(&block, &mut self.out, self.range.as_ref())?;
-        } else {
-            let (_, ptrs) = parse_internal_items(&block)?;
-            for (idx, kp) in ptrs.iter().enumerate() {
-                if kp.blockptr % nodesize_u64 != 0 {
-                    return Err(ParseError::InvalidField {
-                        field: "blockptr",
-                        reason: "not aligned to nodesize",
-                    });
-                }
-                // Targeted descent: child `idx` covers the key span
-                // `[kp.key, next_key)` (the next sibling's key, or +inf for the
-                // last child). Skip it when that span cannot overlap [lo, hi).
-                if let Some((lo, hi)) = self.range.as_ref() {
-                    // Span starts at or after `hi` -> no overlap (keys sorted).
-                    if key_cmp(&kp.key, hi) != Ordering::Less {
-                        // All later children start even higher; stop early.
-                        break;
+        match node.as_ref() {
+            BtrfsParsedNode::Leaf { block, items } => {
+                collect_leaf_items(block.as_ref(), items, &mut self.out, self.range.as_ref())?;
+            }
+            BtrfsParsedNode::Internal { ptrs } => {
+                for (idx, kp) in ptrs.iter().enumerate() {
+                    if kp.blockptr % nodesize_u64 != 0 {
+                        return Err(ParseError::InvalidField {
+                            field: "blockptr",
+                            reason: "not aligned to nodesize",
+                        });
                     }
-                    // Span ends at or before `lo` -> no overlap. The span end is
-                    // the next sibling's key; the last child's span is unbounded.
-                    if let Some(next) = ptrs.get(idx + 1) {
-                        if key_cmp(&next.key, lo) != Ordering::Greater {
-                            continue;
+                    // Targeted descent: child `idx` covers the key span
+                    // `[kp.key, next_key)` (the next sibling's key, or +inf for
+                    // the last child). Skip it when that span cannot overlap
+                    // [lo, hi).
+                    if let Some((lo, hi)) = self.range.as_ref() {
+                        // Span starts at or after `hi` -> no overlap (sorted).
+                        if key_cmp(&kp.key, hi) != Ordering::Less {
+                            // All later children start even higher; stop early.
+                            break;
+                        }
+                        // Span ends at or before `lo` -> no overlap. The span end
+                        // is the next sibling's key; the last child is unbounded.
+                        if let Some(next) = ptrs.get(idx + 1) {
+                            if key_cmp(&next.key, lo) != Ordering::Greater {
+                                continue;
+                            }
                         }
                     }
+                    self.walk_node(kp.blockptr)?;
                 }
-                self.walk_node(kp.blockptr)?;
             }
         }
 
@@ -2182,11 +2287,11 @@ impl BtrfsTreeWalker<'_> {
 
 fn collect_leaf_items(
     block: &[u8],
+    items: &[BtrfsItem],
     out: &mut Vec<BtrfsLeafEntry>,
     range: Option<&(BtrfsKey, BtrfsKey)>,
 ) -> Result<(), ParseError> {
-    let (_, items) = parse_leaf_items(block)?;
-    for item in &items {
+    for item in items {
         if let Some((lo, hi)) = range {
             // Keep only items in the half-open range [lo, hi).
             if key_cmp(&item.key, lo) == Ordering::Less || key_cmp(&item.key, hi) != Ordering::Less
@@ -8077,6 +8182,66 @@ mod tests {
                     range_reads < full_reads,
                     "range [{lo:?},{hi:?}) hit {hits} leaves but read {range_reads} (no pruning vs full {full_reads})"
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn walk_tree_range_with_nodes_matches_byte_walk_bd_u1n5f() {
+        // A parsed-node cache (the read-only mount's reuse of verified+parsed
+        // nodes across traversals) must yield byte-for-byte the same entries as
+        // the byte walker, across repeated passes (warm cache) and varied ranges.
+        let oids: Vec<u64> = vec![100, 200, 300, 400, 500, 600, 700, 800];
+        let (blocks, root_logical) = build_two_level_tree(&oids);
+        let chunks = identity_chunks();
+
+        // Parse every node once into a shared cache, keyed by logical address
+        // (logical == physical under the identity chunk map).
+        let mut cache: HashMap<u64, Arc<BtrfsParsedNode>> = HashMap::new();
+        for (&addr, bytes) in &blocks {
+            let node = parse_btrfs_tree_node(bytes, 0, addr, NODESIZE).expect("parse node");
+            cache.insert(addr, Arc::new(node));
+        }
+
+        let key = |oid: u64| BtrfsKey {
+            objectid: oid,
+            item_type: 0,
+            offset: 0,
+        };
+        let ranges = [
+            (key(0), key(50)),
+            (key(300), key(301)),
+            (key(250), key(650)),
+            (key(800), key(900)),
+            (key(0), key(10_000)),
+            (key(401), key(599)),
+        ];
+
+        // Two passes exercise warm-cache reuse (the second pass re-reads the
+        // same Arc nodes the first pass did).
+        for _pass in 0..2 {
+            for (lo, hi) in ranges {
+                let mut read = |phys: u64| -> Result<Vec<u8>, ParseError> {
+                    blocks.get(&phys).cloned().ok_or(ParseError::InvalidField {
+                        field: "physical",
+                        reason: "block not in test image",
+                    })
+                };
+                let from_bytes =
+                    walk_tree_range(&mut read, &chunks, root_logical, NODESIZE, 0, lo, hi)
+                        .expect("byte walk");
+
+                let mut provider = |logical: u64| -> Result<Arc<BtrfsParsedNode>, ParseError> {
+                    cache.get(&logical).cloned().ok_or(ParseError::InvalidField {
+                        field: "logical",
+                        reason: "node not in parsed cache",
+                    })
+                };
+                let from_cache =
+                    walk_tree_range_with_nodes(&mut provider, root_logical, NODESIZE, lo, hi)
+                        .expect("cached walk");
+
+                assert_eq!(from_bytes, from_cache, "range [{lo:?},{hi:?})");
             }
         }
     }
