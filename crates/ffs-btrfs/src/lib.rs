@@ -13,6 +13,7 @@ pub use ffs_ondisk::btrfs::*;
 use ffs_types::{BlockNumber, CommitSeq, ParseError, Snapshot, TxnId};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashSet};
+use std::ops::Range;
 use std::sync::Arc;
 use thiserror::Error;
 use tracing::{debug, info, trace, warn};
@@ -22,6 +23,59 @@ use tracing::{debug, info, trace, warn};
 pub struct BtrfsLeafEntry {
     pub key: BtrfsKey,
     pub data: Vec<u8>,
+}
+
+/// A leaf item whose payload borrows from its containing verified tree block.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BtrfsLeafItemRef {
+    pub key: BtrfsKey,
+    data_start: usize,
+    data_end: usize,
+}
+
+impl BtrfsLeafItemRef {
+    /// Byte range of this item payload within its containing tree block.
+    #[must_use]
+    pub fn data_range(&self) -> Range<usize> {
+        self.data_start..self.data_end
+    }
+}
+
+/// Arc-backed batch of leaf entries from one verified btrfs tree block.
+///
+/// This is the zero-copy counterpart to [`BtrfsLeafEntry`]: each item records a
+/// range into the shared leaf block instead of allocating and copying its
+/// payload into a per-entry `Vec<u8>`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BtrfsLeafEntryBatch {
+    block: Arc<[u8]>,
+    pub entries: Vec<BtrfsLeafItemRef>,
+}
+
+impl BtrfsLeafEntryBatch {
+    /// Return the payload bytes for `entry`.
+    #[must_use]
+    pub fn data<'a>(&'a self, entry: &BtrfsLeafItemRef) -> &'a [u8] {
+        &self.block[entry.data_start..entry.data_end]
+    }
+
+    /// Iterate over `(key, data)` pairs in this leaf batch.
+    pub fn iter(&self) -> impl Iterator<Item = (BtrfsKey, &[u8])> + '_ {
+        self.entries
+            .iter()
+            .map(|entry| (entry.key, self.data(entry)))
+    }
+
+    /// Convert this zero-copy batch back to owned entries.
+    #[must_use]
+    pub fn to_owned_entries(&self) -> Vec<BtrfsLeafEntry> {
+        self.iter()
+            .map(|(key, data)| BtrfsLeafEntry {
+                key,
+                data: data.to_vec(),
+            })
+            .collect()
+    }
 }
 
 /// btrfs objectid for the root tree.
@@ -2004,6 +2058,27 @@ pub fn walk_tree_with_nodes(
     Ok(walker.out)
 }
 
+/// Full-tree zero-copy walk driven by a [`BtrfsParsedNode`] provider.
+///
+/// Returns one [`BtrfsLeafEntryBatch`] per visited leaf with item payloads stored
+/// as ranges into the shared verified leaf block.
+pub fn walk_tree_borrowed_with_nodes(
+    node_provider: &mut dyn FnMut(u64) -> Result<Arc<BtrfsParsedNode>, ParseError>,
+    root_logical: u64,
+    nodesize: u32,
+) -> Result<Vec<BtrfsLeafEntryBatch>, ParseError> {
+    let mut walker = BtrfsBorrowedTreeWalker {
+        node_provider,
+        nodesize,
+        out: Vec::new(),
+        active_path: HashSet::new(),
+        visited_nodes: HashSet::new(),
+        range: None,
+    };
+    walker.walk_node(root_logical)?;
+    Ok(walker.out)
+}
+
 /// Walk a btrfs b-tree but descend only into subtrees that can contain a key
 /// in the half-open range `[lo, hi)`, returning exactly the leaf entries whose
 /// key falls in that range.
@@ -2056,6 +2131,29 @@ pub fn walk_tree_range_with_nodes(
     Ok(walker.out)
 }
 
+/// Range zero-copy walk driven by a [`BtrfsParsedNode`] provider.
+///
+/// Identical to [`walk_tree_range_with_nodes`] except payload bytes stay in the
+/// shared leaf block and are exposed through per-item ranges.
+pub fn walk_tree_range_borrowed_with_nodes(
+    node_provider: &mut dyn FnMut(u64) -> Result<Arc<BtrfsParsedNode>, ParseError>,
+    root_logical: u64,
+    nodesize: u32,
+    lo: BtrfsKey,
+    hi: BtrfsKey,
+) -> Result<Vec<BtrfsLeafEntryBatch>, ParseError> {
+    let mut walker = BtrfsBorrowedTreeWalker {
+        node_provider,
+        nodesize,
+        out: Vec::new(),
+        active_path: HashSet::new(),
+        visited_nodes: HashSet::new(),
+        range: Some((lo, hi)),
+    };
+    walker.walk_node(root_logical)?;
+    Ok(walker.out)
+}
+
 /// Predecessor-or-equal descent over an on-disk btrfs B-tree.
 ///
 /// Returns the single leaf entry whose key is the largest `<= target`, reading
@@ -2077,25 +2175,33 @@ pub fn walk_tree_floor(
     csum_type: u16,
     target: BtrfsKey,
 ) -> Result<Option<BtrfsLeafEntry>, ParseError> {
-    let mut visited = HashSet::new();
-    floor_descend(
-        read_physical,
-        chunks,
-        root_logical,
-        nodesize,
-        csum_type,
-        &target,
-        &mut visited,
-    )
+    let mut provider = byte_node_provider(read_physical, chunks, nodesize, csum_type);
+    walk_tree_floor_with_nodes(&mut provider, root_logical, nodesize, target)
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Predecessor-or-equal descent driven by a [`BtrfsParsedNode`] provider.
+///
+/// Identical to [`walk_tree_floor`] but obtains each node from `node_provider`
+/// (keyed by logical address) instead of reading+parsing raw bytes itself, so a
+/// caller holding a parsed-node cache reuses verified+parsed nodes.
+///
+/// # Errors
+/// Propagates any [`ParseError`] from the provider or from structural
+/// validation (cycles, misalignment, oversized items).
+pub fn walk_tree_floor_with_nodes(
+    node_provider: &mut dyn FnMut(u64) -> Result<Arc<BtrfsParsedNode>, ParseError>,
+    root_logical: u64,
+    nodesize: u32,
+    target: BtrfsKey,
+) -> Result<Option<BtrfsLeafEntry>, ParseError> {
+    let mut visited = HashSet::new();
+    floor_descend(node_provider, root_logical, nodesize, &target, &mut visited)
+}
+
 fn floor_descend(
-    read_physical: &mut dyn FnMut(u64) -> Result<Vec<u8>, ParseError>,
-    chunks: &[BtrfsChunkEntry],
+    node_provider: &mut dyn FnMut(u64) -> Result<Arc<BtrfsParsedNode>, ParseError>,
     logical: u64,
     nodesize: u32,
-    csum_type: u16,
     target: &BtrfsKey,
     visited: &mut HashSet<u64>,
 ) -> Result<Option<BtrfsLeafEntry>, ParseError> {
@@ -2119,85 +2225,62 @@ fn floor_descend(
         });
     }
 
-    let mapping =
-        map_logical_to_physical(chunks, logical)?.ok_or(ParseError::InvalidField {
-            field: "logical_address",
-            reason: "not covered by any chunk",
-        })?;
-    let block = read_physical(mapping.physical)?;
-    let ns = usize::try_from(nodesize)
-        .map_err(|_| ParseError::IntegerConversion { field: "nodesize" })?;
-    if block.len() != ns {
-        return Err(ParseError::InsufficientData {
-            needed: ns,
-            offset: 0,
-            actual: block.len(),
-        });
-    }
-    ffs_ondisk::verify_btrfs_tree_block_checksum(&block, csum_type)?;
-    let header = BtrfsHeader::parse_from_block(&block)?;
-    header.validate(block.len(), Some(logical))?;
-
-    if header.level == 0 {
-        let (_, items) = parse_leaf_items(&block)?;
-        // Leaf items are sorted ascending; the floor is the last one `<= target`.
-        let mut best: Option<&BtrfsItem> = None;
-        for item in &items {
-            if key_cmp(&item.key, target) == Ordering::Greater {
-                break;
+    let node = node_provider(logical)?;
+    match node.as_ref() {
+        BtrfsParsedNode::Leaf { block, items } => {
+            let block = block.as_ref();
+            // Leaf items are sorted ascending; the floor is the last `<= target`.
+            let mut best: Option<&BtrfsItem> = None;
+            for item in items {
+                if key_cmp(&item.key, target) == Ordering::Greater {
+                    break;
+                }
+                best = Some(item);
             }
-            best = Some(item);
-        }
-        let Some(item) = best else {
-            return Ok(None);
-        };
-        let off = usize::try_from(item.data_offset).map_err(|_| ParseError::IntegerConversion {
-            field: "data_offset",
-        })?;
-        let sz = usize::try_from(item.data_size)
-            .map_err(|_| ParseError::IntegerConversion { field: "data_size" })?;
-        let end = off.checked_add(sz).ok_or(ParseError::InvalidField {
-            field: "data_offset",
-            reason: "overflow",
-        })?;
-        if end > block.len() {
-            return Err(ParseError::InvalidField {
+            let Some(item) = best else {
+                return Ok(None);
+            };
+            let off =
+                usize::try_from(item.data_offset).map_err(|_| ParseError::IntegerConversion {
+                    field: "data_offset",
+                })?;
+            let sz = usize::try_from(item.data_size)
+                .map_err(|_| ParseError::IntegerConversion { field: "data_size" })?;
+            let end = off.checked_add(sz).ok_or(ParseError::InvalidField {
                 field: "data_offset",
-                reason: "item data extends past block",
-            });
-        }
-        Ok(Some(BtrfsLeafEntry {
-            key: item.key,
-            data: block[off..end].to_vec(),
-        }))
-    } else {
-        let (_, ptrs) = parse_internal_items(&block)?;
-        // Rightmost child whose subtree-minimum key is `<= target`.
-        let mut chosen: Option<u64> = None;
-        for kp in &ptrs {
-            if key_cmp(&kp.key, target) == Ordering::Greater {
-                break;
+                reason: "overflow",
+            })?;
+            if end > block.len() {
+                return Err(ParseError::InvalidField {
+                    field: "data_offset",
+                    reason: "item data extends past block",
+                });
             }
-            chosen = Some(kp.blockptr);
+            Ok(Some(BtrfsLeafEntry {
+                key: item.key,
+                data: block[off..end].to_vec(),
+            }))
         }
-        let Some(blockptr) = chosen else {
-            return Ok(None);
-        };
-        if blockptr % nodesize_u64 != 0 {
-            return Err(ParseError::InvalidField {
-                field: "blockptr",
-                reason: "not aligned to nodesize",
-            });
+        BtrfsParsedNode::Internal { ptrs } => {
+            // Rightmost child whose subtree-minimum key is `<= target`.
+            let mut chosen: Option<u64> = None;
+            for kp in ptrs {
+                if key_cmp(&kp.key, target) == Ordering::Greater {
+                    break;
+                }
+                chosen = Some(kp.blockptr);
+            }
+            let Some(blockptr) = chosen else {
+                return Ok(None);
+            };
+            if blockptr % nodesize_u64 != 0 {
+                return Err(ParseError::InvalidField {
+                    field: "blockptr",
+                    reason: "not aligned to nodesize",
+                });
+            }
+            floor_descend(node_provider, blockptr, nodesize, target, visited)
         }
-        floor_descend(
-            read_physical,
-            chunks,
-            blockptr,
-            nodesize,
-            csum_type,
-            target,
-            visited,
-        )
     }
 }
 
@@ -2317,6 +2400,121 @@ fn collect_leaf_items(
         out.push(BtrfsLeafEntry {
             key: item.key,
             data: block[off..end].to_vec(),
+        });
+    }
+    Ok(())
+}
+
+struct BtrfsBorrowedTreeWalker<'a> {
+    node_provider: &'a mut dyn FnMut(u64) -> Result<Arc<BtrfsParsedNode>, ParseError>,
+    nodesize: u32,
+    out: Vec<BtrfsLeafEntryBatch>,
+    active_path: HashSet<u64>,
+    visited_nodes: HashSet<u64>,
+    range: Option<(BtrfsKey, BtrfsKey)>,
+}
+
+impl BtrfsBorrowedTreeWalker<'_> {
+    fn walk_node(&mut self, logical: u64) -> Result<(), ParseError> {
+        let nodesize_u64 = u64::from(self.nodesize);
+        if nodesize_u64 == 0 {
+            return Err(ParseError::InvalidField {
+                field: "nodesize",
+                reason: "zero nodesize",
+            });
+        }
+        if logical % nodesize_u64 != 0 {
+            return Err(ParseError::InvalidField {
+                field: "logical_address",
+                reason: "not aligned to nodesize",
+            });
+        }
+        if !self.active_path.insert(logical) {
+            return Err(ParseError::InvalidField {
+                field: "logical_address",
+                reason: "cycle detected in btrfs tree pointers",
+            });
+        }
+        if !self.visited_nodes.insert(logical) {
+            return Err(ParseError::InvalidField {
+                field: "logical_address",
+                reason: "duplicate node reference in btrfs tree pointers",
+            });
+        }
+
+        let node = (self.node_provider)(logical)?;
+
+        match node.as_ref() {
+            BtrfsParsedNode::Leaf { block, items } => {
+                collect_leaf_item_batch(block, items, &mut self.out, self.range.as_ref())?;
+            }
+            BtrfsParsedNode::Internal { ptrs } => {
+                for (idx, kp) in ptrs.iter().enumerate() {
+                    if kp.blockptr % nodesize_u64 != 0 {
+                        return Err(ParseError::InvalidField {
+                            field: "blockptr",
+                            reason: "not aligned to nodesize",
+                        });
+                    }
+                    if let Some((lo, hi)) = self.range.as_ref() {
+                        if key_cmp(&kp.key, hi) != Ordering::Less {
+                            break;
+                        }
+                        if let Some(next) = ptrs.get(idx + 1) {
+                            if key_cmp(&next.key, lo) != Ordering::Greater {
+                                continue;
+                            }
+                        }
+                    }
+                    self.walk_node(kp.blockptr)?;
+                }
+            }
+        }
+
+        self.active_path.remove(&logical);
+        Ok(())
+    }
+}
+
+fn collect_leaf_item_batch(
+    block: &Arc<[u8]>,
+    items: &[BtrfsItem],
+    out: &mut Vec<BtrfsLeafEntryBatch>,
+    range: Option<&(BtrfsKey, BtrfsKey)>,
+) -> Result<(), ParseError> {
+    let mut entries = Vec::new();
+    for item in items {
+        if let Some((lo, hi)) = range {
+            if key_cmp(&item.key, lo) == Ordering::Less || key_cmp(&item.key, hi) != Ordering::Less
+            {
+                continue;
+            }
+        }
+        let off = usize::try_from(item.data_offset).map_err(|_| ParseError::IntegerConversion {
+            field: "data_offset",
+        })?;
+        let sz = usize::try_from(item.data_size)
+            .map_err(|_| ParseError::IntegerConversion { field: "data_size" })?;
+        let end = off.checked_add(sz).ok_or(ParseError::InvalidField {
+            field: "data_offset",
+            reason: "overflow",
+        })?;
+        if end > block.len() {
+            return Err(ParseError::InvalidField {
+                field: "data_offset",
+                reason: "item data extends past block",
+            });
+        }
+        entries.push(BtrfsLeafItemRef {
+            key: item.key,
+            data_start: off,
+            data_end: end,
+        });
+    }
+    if !entries.is_empty() {
+        out.push(BtrfsLeafEntryBatch {
+            block: Arc::clone(block),
+            entries,
         });
     }
     Ok(())

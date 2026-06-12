@@ -42,12 +42,12 @@ use ffs_btrfs::{
     BTRFS_ROOT_SUBVOL_RDONLY, BTRFS_ROOT_TREE_OBJECTID, BTRFS_USER_SETTABLE_FSFLAGS,
     BTRFS_USER_SETTABLE_XFLAGS, BtrfsBTree, BtrfsBlockGroupItem, BtrfsCowNode, BtrfsDirItem,
     BtrfsExtentAllocator, BtrfsExtentData, BtrfsInodeItem, BtrfsKey, BtrfsLeafEntry,
-    BtrfsMutationError, BtrfsNodeSerializeParams, BtrfsRootItem, BtrfsTreeItem,
+    BtrfsMutationError, BtrfsNodeSerializeParams, BtrfsParsedNode, BtrfsRootItem, BtrfsTreeItem,
     InMemoryCowBtrfsTree, btrfs_inode_flags_to_fsflags, btrfs_inode_flags_to_xflags,
     enumerate_snapshots, enumerate_subvolumes, fsflags_to_btrfs_inode_flags, generate_send_stream,
-    lookup_data_block_csum, map_logical_to_physical, parse_dir_items, parse_extent_data,
-    parse_inode_item, parse_root_item, parse_xattr_items, walk_chunk_tree, walk_tree,
-    walk_tree_floor, walk_tree_range,
+    lookup_data_block_csum, map_logical_to_physical, parse_btrfs_tree_node, parse_dir_items,
+    parse_extent_data, parse_inode_item, parse_root_item, parse_xattr_items, walk_chunk_tree,
+    walk_tree, walk_tree_floor_with_nodes, walk_tree_range_with_nodes, walk_tree_with_nodes,
     writeback::{DiskWritebackContext, WriteDependencyDag, WritebackExecutor},
     xflags_to_btrfs_inode_flags,
 };
@@ -930,16 +930,20 @@ pub struct OpenFs {
     /// descent. Only consulted/populated when writes are disabled
     /// (`btrfs_alloc_state` is `None`), since a commit can move the root.
     btrfs_fs_tree_root_cache: Mutex<std::collections::HashMap<u64, u64>>,
-    /// Raw btrfs tree-node bytes cached by physical address (bd-jgx7u). On a
-    /// read-only mount the on-disk metadata is immutable, so repeated tree
-    /// descents (every getattr/lookup/readdir/read re-walks from the fs-tree
-    /// root) re-read the same upper nodes; caching them turns those device
-    /// reads into memory hits. Only consulted/populated when writes are
-    /// disabled (`btrfs_alloc_state` is `None`), since COW writes reuse
-    /// physical addresses after a commit. Bounded by
-    /// `BTRFS_TREE_NODE_CACHE_LIMIT` (the hot upper nodes are read first, so a
-    /// small cache captures most of the benefit).
-    btrfs_tree_node_cache: Mutex<BTreeMap<u64, Arc<[u8]>>>,
+    /// Verified+parsed btrfs tree nodes cached by logical address (bd-jgx7u,
+    /// bd-3n3ds — the kernel's `extent_buffer` model). On a read-only mount the
+    /// on-disk metadata is immutable, so repeated tree descents (every
+    /// getattr/lookup/readdir/read re-walks from the fs-tree root, and a single
+    /// read does several range descents sharing the upper nodes) re-read AND
+    /// re-verify AND re-parse the same nodes; caching the parsed form turns a
+    /// hit into an `Arc` clone — skipping the device read, checksum
+    /// verification, and structural parse. Verification happens once, before a
+    /// node is inserted, so every cached node is already-verified. Only
+    /// consulted/populated when writes are disabled (`btrfs_alloc_state` is
+    /// `None`), since COW writes reuse logical addresses after a commit. Bounded
+    /// by `BTRFS_TREE_NODE_CACHE_LIMIT` (the hot upper nodes are read first, so
+    /// a small cache captures most of the benefit).
+    btrfs_parsed_node_cache: Mutex<BTreeMap<u64, Arc<BtrfsParsedNode>>>,
 }
 
 /// Opaque per-directory validation token: the directory inode's change-time and
@@ -2940,7 +2944,7 @@ impl OpenFs {
             btrfs_verify_data_on_read: options.btrfs_verify_data_on_read,
             btrfs_csum_read_cache: Mutex::new(None),
             btrfs_fs_tree_root_cache: Mutex::new(std::collections::HashMap::new()),
-            btrfs_tree_node_cache: Mutex::new(BTreeMap::new()),
+            btrfs_parsed_node_cache: Mutex::new(BTreeMap::new()),
         };
 
         if fs.is_ext4() && !options.skip_validation {
@@ -6427,19 +6431,11 @@ impl OpenFs {
             .ok_or_else(|| FfsError::Format("not a btrfs filesystem".into()))?;
 
         let nodesize = ctx.nodesize;
-        let ns =
-            usize::try_from(nodesize).map_err(|_| FfsError::Format("nodesize overflow".into()))?;
 
-        let mut read_fn = |phys: u64| self.btrfs_read_tree_node(cx, phys, ns);
+        let mut provider = |logical: u64| self.btrfs_read_parsed_node(cx, logical);
 
-        walk_tree(
-            &mut read_fn,
-            &ctx.chunks,
-            root_logical,
-            nodesize,
-            ctx.csum_type,
-        )
-        .map_err(|e| parse_to_ffs_error(&e))
+        walk_tree_with_nodes(&mut provider, root_logical, nodesize)
+            .map_err(|e| parse_to_ffs_error(&e))
     }
 
     /// Read a raw `ns`-byte btrfs tree node at physical address `phys`, serving
@@ -6449,26 +6445,47 @@ impl OpenFs {
     /// (the fs-tree root and upper internal nodes are re-read on every op).
     /// Caching is skipped entirely when writes are enabled, because COW writes
     /// reuse physical addresses across commits.
-    fn btrfs_read_tree_node(&self, cx: &Cx, phys: u64, ns: usize) -> Result<Vec<u8>, ParseError> {
+    fn btrfs_read_parsed_node(
+        &self,
+        cx: &Cx,
+        logical: u64,
+    ) -> Result<Arc<BtrfsParsedNode>, ParseError> {
         let cacheable = self.btrfs_alloc_state.is_none();
-        if cacheable && let Some(bytes) = self.btrfs_tree_node_cache.lock().get(&phys) {
-            return Ok(bytes.to_vec());
+        if cacheable && let Some(node) = self.btrfs_parsed_node_cache.lock().get(&logical) {
+            // Hit: skip device read + checksum verification + structural parse.
+            return Ok(Arc::clone(node));
         }
+        let ctx = self.btrfs_context().ok_or(ParseError::InvalidField {
+            field: "btrfs_context",
+            reason: "not a btrfs filesystem",
+        })?;
+        let nodesize = ctx.nodesize;
+        let ns = usize::try_from(nodesize)
+            .map_err(|_| ParseError::IntegerConversion { field: "nodesize" })?;
+        let mapping =
+            map_logical_to_physical(&ctx.chunks, logical)?.ok_or(ParseError::InvalidField {
+                field: "logical_address",
+                reason: "not covered by any chunk",
+            })?;
         let mut buf = vec![0_u8; ns];
         self.dev
-            .read_exact_at(cx, ByteOffset(phys), &mut buf)
+            .read_exact_at(cx, ByteOffset(mapping.physical), &mut buf)
             .map_err(|_| ParseError::InsufficientData {
                 needed: ns,
                 offset: 0,
                 actual: 0,
             })?;
+        // Verify + parse ONCE, before the node enters the cache, so every cached
+        // node is already-verified — a hit never skips a checksum that was not
+        // already checked.
+        let node = Arc::new(parse_btrfs_tree_node(&buf, ctx.csum_type, logical, nodesize)?);
         if cacheable {
-            let mut cache = self.btrfs_tree_node_cache.lock();
+            let mut cache = self.btrfs_parsed_node_cache.lock();
             if cache.len() < BTRFS_TREE_NODE_CACHE_LIMIT {
-                cache.insert(phys, Arc::from(buf.as_slice()));
+                cache.insert(logical, Arc::clone(&node));
             }
         }
-        Ok(buf)
+        Ok(node)
     }
 
     /// Test-only: drop the read-only tree-node cache so a following operation
@@ -6476,7 +6493,7 @@ impl OpenFs {
     /// from the bd-jgx7u node cache in read-count tests).
     #[cfg(test)]
     fn btrfs_test_clear_node_cache(&self) {
-        self.btrfs_tree_node_cache.lock().clear();
+        self.btrfs_parsed_node_cache.lock().clear();
     }
 
     /// Targeted-descent counterpart to [`walk_btrfs_tree`](Self::walk_btrfs_tree):
@@ -6497,21 +6514,11 @@ impl OpenFs {
             .ok_or_else(|| FfsError::Format("not a btrfs filesystem".into()))?;
 
         let nodesize = ctx.nodesize;
-        let ns =
-            usize::try_from(nodesize).map_err(|_| FfsError::Format("nodesize overflow".into()))?;
 
-        let mut read_fn = |phys: u64| self.btrfs_read_tree_node(cx, phys, ns);
+        let mut provider = |logical: u64| self.btrfs_read_parsed_node(cx, logical);
 
-        walk_tree_range(
-            &mut read_fn,
-            &ctx.chunks,
-            root_logical,
-            nodesize,
-            ctx.csum_type,
-            lo,
-            hi,
-        )
-        .map_err(|e| parse_to_ffs_error(&e))
+        walk_tree_range_with_nodes(&mut provider, root_logical, nodesize, lo, hi)
+            .map_err(|e| parse_to_ffs_error(&e))
     }
 
     /// Predecessor-or-equal descent over a btrfs B-tree: the on-disk dual of
@@ -6529,18 +6536,9 @@ impl OpenFs {
             .btrfs_context()
             .ok_or_else(|| FfsError::Format("not a btrfs filesystem".into()))?;
         let nodesize = ctx.nodesize;
-        let ns =
-            usize::try_from(nodesize).map_err(|_| FfsError::Format("nodesize overflow".into()))?;
-        let mut read_fn = |phys: u64| self.btrfs_read_tree_node(cx, phys, ns);
-        walk_tree_floor(
-            &mut read_fn,
-            &ctx.chunks,
-            root_logical,
-            nodesize,
-            ctx.csum_type,
-            target,
-        )
-        .map_err(|e| parse_to_ffs_error(&e))
+        let mut provider = |logical: u64| self.btrfs_read_parsed_node(cx, logical);
+        walk_tree_floor_with_nodes(&mut provider, root_logical, nodesize, target)
+            .map_err(|e| parse_to_ffs_error(&e))
     }
 
     /// Resolve the mounted subvolume's fs-tree root and run a floor descent on it
@@ -41301,6 +41299,39 @@ mod tests {
         assert!(
             score >= 2.0,
             "node-cache Score {score:.2} ({K} walks: cached={cached_total} reads vs uncached={uncached_total} reads) must be >= 2.0"
+        );
+    }
+
+    #[test]
+    fn btrfs_parsed_node_cache_rejects_corrupt_node_bd_3n3ds() {
+        // A node enters the parsed-node cache ONLY after its checksum is
+        // verified (parse_btrfs_tree_node verifies before insert), so a corrupt
+        // node is rejected on every read and the cache never serves an
+        // unverified node. Valid-csum fixtures cannot catch a verification hole,
+        // so this corrupts a node's body explicitly and asserts rejection — both
+        // on the first read AND on a retry (proving nothing was cached as valid).
+        let mut image = build_btrfs_multileaf_image(8);
+        // Flip a body byte (past the 32-byte csum prefix) of the first fs-tree
+        // leaf at logical/physical 0x20_000, breaking its crc32c.
+        let leaf0 = 0x20_000_usize;
+        image[leaf0 + 0x100] ^= 0xff;
+        let cx = Cx::for_testing();
+        let fs = OpenFs::from_device(
+            &cx,
+            Box::new(TestDevice::from_vec(image)),
+            &OpenOptions::default(),
+        )
+        .expect("open succeeds: the corrupt leaf is not read until the fs-tree walk");
+
+        let first = fs.walk_btrfs_fs_tree(&cx);
+        assert!(
+            first.is_err(),
+            "the fs-tree walk must reject the corrupt leaf, not serve it"
+        );
+        let second = fs.walk_btrfs_fs_tree(&cx);
+        assert!(
+            second.is_err(),
+            "the corrupt leaf must never be cached as valid (retry still rejects)"
         );
     }
 
