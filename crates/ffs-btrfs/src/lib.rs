@@ -1934,6 +1934,151 @@ pub fn walk_tree_range(
     Ok(walker.out)
 }
 
+/// Predecessor-or-equal descent over an on-disk btrfs B-tree.
+///
+/// Returns the single leaf entry whose key is the largest `<= target`, reading
+/// only the O(log N) nodes on the path to it, or `None` when every key in the
+/// tree is greater than `target`.
+///
+/// The on-disk dual of [`InMemoryCowBtrfsTree::floor_key`]. A btrfs internal
+/// node's key-pointer key is the *minimum* key of its child subtree, so the
+/// floor lives in the rightmost child whose key-pointer key is `<= target` (that
+/// child's minimum is `<= target`, so it is guaranteed to hold a qualifying key
+/// — no left-sibling fallback is needed, unlike the separator-keyed in-memory
+/// tree). Lets a read seek straight to the extent covering a file offset instead
+/// of descending from the inode's first item (bd-kms5z).
+pub fn walk_tree_floor(
+    read_physical: &mut dyn FnMut(u64) -> Result<Vec<u8>, ParseError>,
+    chunks: &[BtrfsChunkEntry],
+    root_logical: u64,
+    nodesize: u32,
+    csum_type: u16,
+    target: BtrfsKey,
+) -> Result<Option<BtrfsLeafEntry>, ParseError> {
+    let mut visited = HashSet::new();
+    floor_descend(
+        read_physical,
+        chunks,
+        root_logical,
+        nodesize,
+        csum_type,
+        &target,
+        &mut visited,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn floor_descend(
+    read_physical: &mut dyn FnMut(u64) -> Result<Vec<u8>, ParseError>,
+    chunks: &[BtrfsChunkEntry],
+    logical: u64,
+    nodesize: u32,
+    csum_type: u16,
+    target: &BtrfsKey,
+    visited: &mut HashSet<u64>,
+) -> Result<Option<BtrfsLeafEntry>, ParseError> {
+    let nodesize_u64 = u64::from(nodesize);
+    if nodesize_u64 == 0 {
+        return Err(ParseError::InvalidField {
+            field: "nodesize",
+            reason: "zero nodesize",
+        });
+    }
+    if logical % nodesize_u64 != 0 {
+        return Err(ParseError::InvalidField {
+            field: "logical_address",
+            reason: "not aligned to nodesize",
+        });
+    }
+    if !visited.insert(logical) {
+        return Err(ParseError::InvalidField {
+            field: "logical_address",
+            reason: "duplicate node reference in btrfs tree pointers",
+        });
+    }
+
+    let mapping =
+        map_logical_to_physical(chunks, logical)?.ok_or(ParseError::InvalidField {
+            field: "logical_address",
+            reason: "not covered by any chunk",
+        })?;
+    let block = read_physical(mapping.physical)?;
+    let ns = usize::try_from(nodesize)
+        .map_err(|_| ParseError::IntegerConversion { field: "nodesize" })?;
+    if block.len() != ns {
+        return Err(ParseError::InsufficientData {
+            needed: ns,
+            offset: 0,
+            actual: block.len(),
+        });
+    }
+    ffs_ondisk::verify_btrfs_tree_block_checksum(&block, csum_type)?;
+    let header = BtrfsHeader::parse_from_block(&block)?;
+    header.validate(block.len(), Some(logical))?;
+
+    if header.level == 0 {
+        let (_, items) = parse_leaf_items(&block)?;
+        // Leaf items are sorted ascending; the floor is the last one `<= target`.
+        let mut best: Option<&BtrfsItem> = None;
+        for item in &items {
+            if key_cmp(&item.key, target) == Ordering::Greater {
+                break;
+            }
+            best = Some(item);
+        }
+        let Some(item) = best else {
+            return Ok(None);
+        };
+        let off = usize::try_from(item.data_offset).map_err(|_| ParseError::IntegerConversion {
+            field: "data_offset",
+        })?;
+        let sz = usize::try_from(item.data_size)
+            .map_err(|_| ParseError::IntegerConversion { field: "data_size" })?;
+        let end = off.checked_add(sz).ok_or(ParseError::InvalidField {
+            field: "data_offset",
+            reason: "overflow",
+        })?;
+        if end > block.len() {
+            return Err(ParseError::InvalidField {
+                field: "data_offset",
+                reason: "item data extends past block",
+            });
+        }
+        Ok(Some(BtrfsLeafEntry {
+            key: item.key,
+            data: block[off..end].to_vec(),
+        }))
+    } else {
+        let (_, ptrs) = parse_internal_items(&block)?;
+        // Rightmost child whose subtree-minimum key is `<= target`.
+        let mut chosen: Option<u64> = None;
+        for kp in &ptrs {
+            if key_cmp(&kp.key, target) == Ordering::Greater {
+                break;
+            }
+            chosen = Some(kp.blockptr);
+        }
+        let Some(blockptr) = chosen else {
+            return Ok(None);
+        };
+        if blockptr % nodesize_u64 != 0 {
+            return Err(ParseError::InvalidField {
+                field: "blockptr",
+                reason: "not aligned to nodesize",
+            });
+        }
+        floor_descend(
+            read_physical,
+            chunks,
+            blockptr,
+            nodesize,
+            csum_type,
+            target,
+            visited,
+        )
+    }
+}
+
 struct BtrfsTreeWalker<'a> {
     read_physical: &'a mut dyn FnMut(u64) -> Result<Vec<u8>, ParseError>,
     chunks: &'a [BtrfsChunkEntry],
@@ -7933,6 +8078,68 @@ mod tests {
                     "range [{lo:?},{hi:?}) hit {hits} leaves but read {range_reads} (no pruning vs full {full_reads})"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn walk_tree_floor_isomorphic_to_filtered_full_walk_max() {
+        // 8 leaves keyed 100..=800 under a single internal root.
+        let oids: Vec<u64> = vec![100, 200, 300, 400, 500, 600, 700, 800];
+        let (blocks, root_logical) = build_two_level_tree(&oids);
+        let chunks = identity_chunks();
+        let key = |oid: u64| BtrfsKey {
+            objectid: oid,
+            item_type: 0,
+            offset: 0,
+        };
+
+        // Below everything, exact leaf keys, gaps between leaves, above everything.
+        let targets = [50_u64, 100, 150, 300, 450, 750, 800, 1000];
+        for t in targets {
+            let target = key(t);
+
+            // Reference: full walk, take the largest entry with key <= target.
+            let mut read_full = |phys: u64| -> Result<Vec<u8>, ParseError> {
+                blocks.get(&phys).cloned().ok_or(ParseError::InvalidField {
+                    field: "physical",
+                    reason: "block not in test image",
+                })
+            };
+            let full =
+                walk_tree(&mut read_full, &chunks, root_logical, NODESIZE, 0).expect("full walk");
+            let expected = full
+                .into_iter()
+                .filter(|e| key_cmp(&e.key, &target) != Ordering::Greater)
+                .max_by(|a, b| key_cmp(&a.key, &b.key));
+
+            // Targeted floor descent.
+            let mut floor_reads = 0_u32;
+            let mut read_floor = |phys: u64| -> Result<Vec<u8>, ParseError> {
+                floor_reads += 1;
+                blocks.get(&phys).cloned().ok_or(ParseError::InvalidField {
+                    field: "physical",
+                    reason: "block not in test image",
+                })
+            };
+            let got = walk_tree_floor(&mut read_floor, &chunks, root_logical, NODESIZE, 0, target)
+                .expect("floor walk");
+
+            // Isomorphism: same predecessor entry (key + data), or both empty.
+            match (&got, &expected) {
+                (Some(g), Some(e)) => {
+                    assert_eq!(g.key, e.key, "floor key for target {t}");
+                    assert_eq!(g.data, e.data, "floor data for target {t}");
+                }
+                (None, None) => {}
+                _ => panic!("floor mismatch for target {t}: got {got:?}, expected {expected:?}"),
+            }
+
+            // Pruning: a two-level tree is descended as root + at most one leaf,
+            // i.e. O(log N) reads, never the full 1-root-plus-8-leaf scan.
+            assert!(
+                floor_reads <= 2,
+                "floor for target {t} read {floor_reads} nodes (expected <= 2)"
+            );
         }
     }
 
