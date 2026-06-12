@@ -23440,15 +23440,29 @@ impl OpenFs {
                 .map(|x| x.value));
         }
 
-        // Read-only path: scan the on-disk FS tree.
-        let items = self.walk_btrfs_fs_tree_object(cx, canonical)?;
+        // Read-only path: the xattr's name hash IS its key offset, so only the
+        // XATTR_ITEM bucket at (canonical, XATTR_ITEM, name_hash) can hold this
+        // name — seek that single bucket instead of walking every item of the
+        // inode (O(object) -> O(log N); a getxattr no longer descends the file's
+        // extents). Mirrors the COW fast path above. A name in any other bucket
+        // would hash differently, so no other item can match.
+        let name_hash = ffs_btrfs::btrfs_name_hash(name.as_bytes());
+        let lo = BtrfsKey {
+            objectid: canonical,
+            item_type: BTRFS_ITEM_XATTR_ITEM,
+            offset: u64::from(name_hash),
+        };
+        let hi = BtrfsKey {
+            objectid: canonical,
+            item_type: BTRFS_ITEM_XATTR_ITEM,
+            offset: u64::from(name_hash) + 1,
+        };
+        let items = self.walk_btrfs_fs_tree_range(cx, lo, hi)?;
         for item in &items {
-            if item.key.objectid == canonical && item.key.item_type == BTRFS_ITEM_XATTR_ITEM {
-                let parsed = parse_xattr_items(&item.data).map_err(|e| parse_to_ffs_error(&e))?;
-                for xattr in parsed {
-                    if xattr.name == name.as_bytes() {
-                        return Ok(Some(xattr.value));
-                    }
+            let parsed = parse_xattr_items(&item.data).map_err(|e| parse_to_ffs_error(&e))?;
+            for xattr in parsed {
+                if xattr.name == name.as_bytes() {
+                    return Ok(Some(xattr.value));
                 }
             }
         }
@@ -23485,14 +23499,24 @@ impl OpenFs {
             }
             Ok(result)
         } else {
-            let items = self.walk_btrfs_fs_tree_object(cx, objectid)?;
+            // Narrow the on-disk walk to the XATTR_ITEM key span of this object
+            // so listing xattrs does not descend the inode's EXTENT_DATA leaves
+            // (O(object) -> O(log N + xattrs)). Mirrors the COW range above.
+            let lo = BtrfsKey {
+                objectid,
+                item_type: BTRFS_ITEM_XATTR_ITEM,
+                offset: 0,
+            };
+            let hi = BtrfsKey {
+                objectid,
+                item_type: BTRFS_ITEM_XATTR_ITEM + 1,
+                offset: 0,
+            };
+            let items = self.walk_btrfs_fs_tree_range(cx, lo, hi)?;
             let mut result = Vec::new();
             for item in &items {
-                if item.key.objectid == objectid && item.key.item_type == BTRFS_ITEM_XATTR_ITEM {
-                    let parsed =
-                        parse_xattr_items(&item.data).map_err(|e| parse_to_ffs_error(&e))?;
-                    result.extend(parsed);
-                }
+                let parsed = parse_xattr_items(&item.data).map_err(|e| parse_to_ffs_error(&e))?;
+                result.extend(parsed);
             }
             Ok(result)
         }
