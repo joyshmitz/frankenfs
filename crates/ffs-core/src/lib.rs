@@ -7939,7 +7939,26 @@ impl OpenFs {
                 }
                 (inode, exts)
             } else {
-                let items = self.walk_btrfs_fs_tree_object(cx, canonical)?;
+                // Bound the on-disk walk to [inode start, EXTENT_DATA at the read
+                // window end) so reading a large fragmented file fetches the inode
+                // item and only the extents that can overlap [offset, offset+size)
+                // — not every EXTENT_DATA of the inode. Mirrors the COW path's
+                // window bound (bd-4milp). An extent keyed at or past the window
+                // end starts after the last byte read and cannot overlap; the
+                // assembly loop below skips any non-overlapping item the range
+                // still returns and the output is pre-zeroed for holes, so the
+                // result is byte-identical to the old whole-inode walk + filter.
+                let lo = BtrfsKey {
+                    objectid: canonical,
+                    item_type: 0,
+                    offset: 0,
+                };
+                let hi = BtrfsKey {
+                    objectid: canonical,
+                    item_type: BTRFS_ITEM_EXTENT_DATA,
+                    offset: offset.saturating_add(u64::from(size)),
+                };
+                let items = self.walk_btrfs_fs_tree_range(cx, lo, hi)?;
                 let inode_entry = Self::btrfs_find_inode_item(&items, canonical)?;
                 let inode =
                     parse_inode_item(&inode_entry.data).map_err(|e| parse_to_ffs_error(&e))?;
