@@ -6982,7 +6982,23 @@ impl OpenFs {
             return Ok(self.btrfs_inode_to_attr(canonical, &inode));
         }
 
-        let items = self.walk_btrfs_fs_tree_object(cx, canonical)?;
+        // Read-only getattr/stat only needs the single INODE_ITEM, not the
+        // whole inode object. Narrow the descent to the INODE_ITEM key span so a
+        // stat() of a large fragmented file does NOT walk every EXTENT_DATA leaf
+        // before it (O(extents) -> O(log N) node reads, bd-w6h4m). Equivalent:
+        // walk_btrfs_fs_tree_object is this same ranged walk with object bounds,
+        // and btrfs_find_inode_item returns the same single INODE_ITEM.
+        let inode_lo = BtrfsKey {
+            objectid: canonical,
+            item_type: BTRFS_ITEM_INODE_ITEM,
+            offset: 0,
+        };
+        let inode_hi = BtrfsKey {
+            objectid: canonical,
+            item_type: BTRFS_ITEM_INODE_ITEM,
+            offset: u64::MAX,
+        };
+        let items = self.walk_btrfs_fs_tree_range(cx, inode_lo, inode_hi)?;
         let inode_item = Self::btrfs_find_inode_item(&items, canonical)?;
         let inode = parse_inode_item(&inode_item.data).map_err(|e| parse_to_ffs_error(&e))?;
         self.btrfs_inode_attr_from_item(ino, inode)

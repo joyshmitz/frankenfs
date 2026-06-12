@@ -33,5 +33,9 @@ harness = false
 name = "ondisk_floor"
 harness = false
 
+[[bench]]
+name = "ondisk_inode_attr"
+harness = false
+
 [lints]
 workspace = true
