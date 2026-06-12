@@ -47,7 +47,7 @@ use ffs_btrfs::{
     enumerate_snapshots, enumerate_subvolumes, fsflags_to_btrfs_inode_flags, generate_send_stream,
     lookup_data_block_csum, map_logical_to_physical, parse_dir_items, parse_extent_data,
     parse_inode_item, parse_root_item, parse_xattr_items, walk_chunk_tree, walk_tree,
-    walk_tree_range,
+    walk_tree_floor, walk_tree_range,
     writeback::{DiskWritebackContext, WriteDependencyDag, WritebackExecutor},
     xflags_to_btrfs_inode_flags,
 };
@@ -6514,6 +6514,50 @@ impl OpenFs {
         .map_err(|e| parse_to_ffs_error(&e))
     }
 
+    /// Predecessor-or-equal descent over a btrfs B-tree: the on-disk dual of
+    /// [`InMemoryCowBtrfsTree::floor_key`]. Returns the leaf entry with the
+    /// largest key `<= target`, reading only O(log N) nodes (bd-kms5z). Does NOT
+    /// apply the tree-log overlay — callers that may have a pending log must
+    /// guard on [`Self::btrfs_tree_log_items`] being empty.
+    fn walk_btrfs_tree_floor(
+        &self,
+        cx: &Cx,
+        root_logical: u64,
+        target: BtrfsKey,
+    ) -> Result<Option<BtrfsLeafEntry>, FfsError> {
+        let ctx = self
+            .btrfs_context()
+            .ok_or_else(|| FfsError::Format("not a btrfs filesystem".into()))?;
+        let nodesize = ctx.nodesize;
+        let ns =
+            usize::try_from(nodesize).map_err(|_| FfsError::Format("nodesize overflow".into()))?;
+        let mut read_fn = |phys: u64| self.btrfs_read_tree_node(cx, phys, ns);
+        walk_tree_floor(
+            &mut read_fn,
+            &ctx.chunks,
+            root_logical,
+            nodesize,
+            ctx.csum_type,
+            target,
+        )
+        .map_err(|e| parse_to_ffs_error(&e))
+    }
+
+    /// Resolve the mounted subvolume's fs-tree root and run a floor descent on it
+    /// (no tree-log overlay — see [`Self::walk_btrfs_tree_floor`]).
+    fn walk_btrfs_fs_tree_floor(
+        &self,
+        cx: &Cx,
+        target: BtrfsKey,
+    ) -> Result<Option<BtrfsLeafEntry>, FfsError> {
+        let subvol_id = self
+            .btrfs_context
+            .as_ref()
+            .map_or(BTRFS_FS_TREE_OBJECTID, |ctx| ctx.subvol_objectid);
+        let root_bytenr = self.btrfs_fs_tree_root_bytenr(cx, subvol_id)?;
+        self.walk_btrfs_tree_floor(cx, root_bytenr, target)
+    }
+
     /// Half-open key range `[(objectid, 0, 0), (objectid + 1, 0, 0))` covering
     /// every item that belongs to a single btrfs object (e.g. all of an
     /// inode's INODE_ITEM / EXTENT_DATA / DIR_* / XATTR items). Used to turn a
@@ -7939,29 +7983,65 @@ impl OpenFs {
                 }
                 (inode, exts)
             } else {
-                // Bound the on-disk walk to [inode start, EXTENT_DATA at the read
-                // window end) so reading a large fragmented file fetches the inode
-                // item and only the extents that can overlap [offset, offset+size)
-                // — not every EXTENT_DATA of the inode. Mirrors the COW path's
-                // window bound (bd-4milp). An extent keyed at or past the window
-                // end starts after the last byte read and cannot overlap; the
-                // assembly loop below skips any non-overlapping item the range
-                // still returns and the output is pre-zeroed for holes, so the
-                // result is byte-identical to the old whole-inode walk + filter.
-                let lo = BtrfsKey {
+                // Bound the on-disk walk to the read window on BOTH edges so a
+                // read of a large fragmented file fetches the inode item and only
+                // the extents that can overlap [offset, offset+size) — not every
+                // EXTENT_DATA of the inode (mirrors the COW path's window bound,
+                // bd-4milp / bd-kms5z). The inode item and the EXTENT_DATA window
+                // are read as two targeted O(log N) descents:
+                //   - Inode item: the INODE_ITEM key span of this inode.
+                //   - Extents: lower bound = floor(EXTENT_DATA, offset) (the
+                //     extent covering or immediately preceding the read start —
+                //     earlier extents end at/before `offset` and cannot overlap),
+                //     upper bound = the window end. The floor is skipped (lower
+                //     bound 0) when a tree log is pending, since the floor descent
+                //     does not see logged items; the assembly loop skips any
+                //     non-overlapping item either way and the output is pre-zeroed
+                //     for holes, so the read is byte-identical to the full walk.
+                let inode_lo = BtrfsKey {
                     objectid: canonical,
-                    item_type: 0,
+                    item_type: BTRFS_ITEM_INODE_ITEM,
                     offset: 0,
                 };
-                let hi = BtrfsKey {
+                let inode_hi = BtrfsKey {
+                    objectid: canonical,
+                    item_type: BTRFS_ITEM_INODE_ITEM,
+                    offset: u64::MAX,
+                };
+                let inode_items = self.walk_btrfs_fs_tree_range(cx, inode_lo, inode_hi)?;
+                let inode_entry = Self::btrfs_find_inode_item(&inode_items, canonical)?;
+                let inode =
+                    parse_inode_item(&inode_entry.data).map_err(|e| parse_to_ffs_error(&e))?;
+
+                let lower_offset = if self.btrfs_tree_log_items.is_empty() {
+                    let seek = BtrfsKey {
+                        objectid: canonical,
+                        item_type: BTRFS_ITEM_EXTENT_DATA,
+                        offset,
+                    };
+                    match self.walk_btrfs_fs_tree_floor(cx, seek)? {
+                        Some(e)
+                            if e.key.objectid == canonical
+                                && e.key.item_type == BTRFS_ITEM_EXTENT_DATA =>
+                        {
+                            e.key.offset
+                        }
+                        _ => 0,
+                    }
+                } else {
+                    0
+                };
+                let ext_lo = BtrfsKey {
+                    objectid: canonical,
+                    item_type: BTRFS_ITEM_EXTENT_DATA,
+                    offset: lower_offset,
+                };
+                let ext_hi = BtrfsKey {
                     objectid: canonical,
                     item_type: BTRFS_ITEM_EXTENT_DATA,
                     offset: offset.saturating_add(u64::from(size)),
                 };
-                let items = self.walk_btrfs_fs_tree_range(cx, lo, hi)?;
-                let inode_entry = Self::btrfs_find_inode_item(&items, canonical)?;
-                let inode =
-                    parse_inode_item(&inode_entry.data).map_err(|e| parse_to_ffs_error(&e))?;
+                let items = self.walk_btrfs_fs_tree_range(cx, ext_lo, ext_hi)?;
                 let exts = items
                     .iter()
                     .filter(|item| {
