@@ -23817,24 +23817,29 @@ impl OpenFs {
         alloc: &BtrfsAllocState,
         parent_oid: u64,
     ) -> ffs_error::Result<u64> {
-        let range_start = BtrfsKey {
-            objectid: parent_oid,
-            item_type: BTRFS_ITEM_DIR_INDEX,
-            offset: 0,
-        };
-        let range_end = BtrfsKey {
+        // DIR_INDEX items are keyed by a monotonic per-directory offset, so the
+        // highest existing index is simply the LAST DIR_INDEX key of this parent.
+        // Seek it directly with floor_key (O(log N) predecessor-or-equal) rather
+        // than ranging and materialising every DIR_INDEX item just to take the max
+        // (O(N) plus a Vec<u8> clone per entry). The floor of
+        // `(parent, DIR_INDEX, u64::MAX)` is that last key when the directory has
+        // any DIR_INDEX entries; otherwise it lands on another object/type and we
+        // start fresh at BTRFS_DIR_START_INDEX.
+        let seek = BtrfsKey {
             objectid: parent_oid,
             item_type: BTRFS_ITEM_DIR_INDEX,
             offset: u64::MAX,
         };
-        let next = alloc
+        let next = match alloc
             .fs_tree
-            .range(&range_start, &range_end)
+            .floor_key(&seek)
             .map_err(|e| btrfs_mutation_to_ffs(&e))?
-            .iter()
-            .map(|(key, _)| key.offset)
-            .max()
-            .map_or(BTRFS_DIR_START_INDEX, |max| max.saturating_add(1));
+        {
+            Some(k) if k.objectid == parent_oid && k.item_type == BTRFS_ITEM_DIR_INDEX => {
+                k.offset.saturating_add(1)
+            }
+            _ => BTRFS_DIR_START_INDEX,
+        };
         Ok(next)
     }
 

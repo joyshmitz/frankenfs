@@ -375,11 +375,74 @@ fn bench_remove_named_dir_index(c: &mut Criterion) {
     group.finish();
 }
 
+/// Old counter-seed: range every DIR_INDEX of the directory and take the max key
+/// offset — materialises and clones every payload just to read the keys.
+fn max_dir_index_via_range(tree: &InMemoryCowBtrfsTree) -> u64 {
+    let start = BtrfsKey {
+        objectid: DIR_INODE,
+        item_type: BTRFS_ITEM_DIR_INDEX,
+        offset: 0,
+    };
+    let end = BtrfsKey {
+        objectid: DIR_INODE,
+        item_type: BTRFS_ITEM_DIR_INDEX,
+        offset: u64::MAX,
+    };
+    tree.range(&start, &end)
+        .expect("range")
+        .iter()
+        .map(|(k, _)| k.offset)
+        .max()
+        .map_or(2, |m| m.saturating_add(1))
+}
+
+/// New counter-seed: floor_key seeks the LAST DIR_INDEX key directly (O(log N),
+/// zero clones) — the max of an offset-sorted key set is its last element.
+fn max_dir_index_via_floor_key(tree: &InMemoryCowBtrfsTree) -> u64 {
+    let seek = BtrfsKey {
+        objectid: DIR_INODE,
+        item_type: BTRFS_ITEM_DIR_INDEX,
+        offset: u64::MAX,
+    };
+    match tree.floor_key(&seek).expect("floor_key") {
+        Some(k) if k.objectid == DIR_INODE && k.item_type == BTRFS_ITEM_DIR_INDEX => {
+            k.offset.saturating_add(1)
+        }
+        _ => 2,
+    }
+}
+
+/// A/B for `btrfs_max_ondisk_dir_index_plus_one` (this session): seeding a
+/// directory's monotonic DIR_INDEX counter on the first insert after mount ranged
+/// and materialised every DIR_INDEX item just to take the max offset — O(N) plus a
+/// Vec<u8> clone per entry. Since DIR_INDEX keys are offset-sorted, the max is the
+/// last key; floor_key seeks it in O(log N) with no allocation.
+fn bench_dir_index_seq_seed(c: &mut Criterion) {
+    let (tree, _target, _index) = build_dir_index_tree();
+
+    // Isomorphism: both yield max(existing DIR_INDEX offset) + 1.
+    assert_eq!(
+        max_dir_index_via_range(&tree),
+        max_dir_index_via_floor_key(&tree)
+    );
+
+    let mut group = c.benchmark_group("btrfs_dir_index_seq_seed");
+    group.sample_size(20);
+    group.bench_function("range_max_all_dir_indexes", |b| {
+        b.iter(|| black_box(max_dir_index_via_range(black_box(&tree))));
+    });
+    group.bench_function("floor_key_last_dir_index", |b| {
+        b.iter(|| black_box(max_dir_index_via_floor_key(black_box(&tree))));
+    });
+    group.finish();
+}
+
 criterion_group!(
     readdir_dedup,
     bench_readdir_dedup,
     bench_readdir_collect,
     bench_remove_named_dir_item,
-    bench_remove_named_dir_index
+    bench_remove_named_dir_index,
+    bench_dir_index_seq_seed
 );
 criterion_main!(readdir_dedup);
