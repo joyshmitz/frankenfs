@@ -29,5 +29,9 @@ harness = false
 name = "readdir_dedup"
 harness = false
 
+[[bench]]
+name = "ondisk_floor"
+harness = false
+
 [lints]
 workspace = true
