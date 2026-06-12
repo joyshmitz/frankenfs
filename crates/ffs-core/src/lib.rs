@@ -6982,12 +6982,25 @@ impl OpenFs {
             return Ok(self.btrfs_inode_to_attr(canonical, &inode));
         }
 
-        // Read-only getattr/stat only needs the single INODE_ITEM, not the
-        // whole inode object. Narrow the descent to the INODE_ITEM key span so a
-        // stat() of a large fragmented file does NOT walk every EXTENT_DATA leaf
-        // before it (O(extents) -> O(log N) node reads, bd-w6h4m). Equivalent:
-        // walk_btrfs_fs_tree_object is this same ranged walk with object bounds,
-        // and btrfs_find_inode_item returns the same single INODE_ITEM.
+        let inode = self.btrfs_read_ondisk_inode_item(cx, canonical)?;
+        self.btrfs_inode_attr_from_item(ino, inode)
+    }
+
+    /// Read just the parsed `INODE_ITEM` of an inode from the on-disk fs tree.
+    ///
+    /// Seeks the `INODE_ITEM` key span (a single O(log N) descent) instead of
+    /// walking the whole inode object, so a stat/ioctl that only needs inode
+    /// fields does NOT descend the file's `EXTENT_DATA` leaves (O(extents) ->
+    /// O(log N), bd-w6h4m). Equivalent to `walk_btrfs_fs_tree_object` +
+    /// [`Self::btrfs_find_inode_item`]: the object walk is this same ranged walk
+    /// with wider bounds, and there is exactly one `INODE_ITEM` per object. This
+    /// is the read-only path; callers holding `btrfs_alloc_state` read the
+    /// `INODE_ITEM` from the COW tree instead.
+    fn btrfs_read_ondisk_inode_item(
+        &self,
+        cx: &Cx,
+        canonical: u64,
+    ) -> Result<BtrfsInodeItem, FfsError> {
         let inode_lo = BtrfsKey {
             objectid: canonical,
             item_type: BTRFS_ITEM_INODE_ITEM,
@@ -7000,8 +7013,7 @@ impl OpenFs {
         };
         let items = self.walk_btrfs_fs_tree_range(cx, inode_lo, inode_hi)?;
         let inode_item = Self::btrfs_find_inode_item(&items, canonical)?;
-        let inode = parse_inode_item(&inode_item.data).map_err(|e| parse_to_ffs_error(&e))?;
-        self.btrfs_inode_attr_from_item(ino, inode)
+        parse_inode_item(&inode_item.data).map_err(|e| parse_to_ffs_error(&e))
     }
 
     fn btrfs_lookup_child(
@@ -27962,11 +27974,7 @@ impl FsOps for OpenFs {
                     drop(alloc);
                     inode.flags
                 } else {
-                    let items = self.walk_btrfs_fs_tree_object(cx, canonical)?;
-                    let inode_item = Self::btrfs_find_inode_item(&items, canonical)?;
-                    let inode =
-                        parse_inode_item(&inode_item.data).map_err(|e| parse_to_ffs_error(&e))?;
-                    inode.flags
+                    self.btrfs_read_ondisk_inode_item(cx, canonical)?.flags
                 };
                 Ok(btrfs_inode_flags_to_fsflags(btrfs_flags))
             }
@@ -28032,11 +28040,7 @@ impl FsOps for OpenFs {
                     drop(alloc);
                     inode.flags
                 } else {
-                    let items = self.walk_btrfs_fs_tree_object(cx, canonical)?;
-                    let inode_item = Self::btrfs_find_inode_item(&items, canonical)?;
-                    let inode =
-                        parse_inode_item(&inode_item.data).map_err(|e| parse_to_ffs_error(&e))?;
-                    inode.flags
+                    self.btrfs_read_ondisk_inode_item(cx, canonical)?.flags
                 };
                 Ok(FsxattrInfo {
                     xflags: btrfs_inode_flags_to_xflags(btrfs_flags),
@@ -28275,11 +28279,7 @@ impl FsOps for OpenFs {
                     drop(alloc);
                     inode.generation
                 } else {
-                    let items = self.walk_btrfs_fs_tree_object(cx, canonical)?;
-                    let inode_item = Self::btrfs_find_inode_item(&items, canonical)?;
-                    let inode =
-                        parse_inode_item(&inode_item.data).map_err(|e| parse_to_ffs_error(&e))?;
-                    inode.generation
+                    self.btrfs_read_ondisk_inode_item(cx, canonical)?.generation
                 };
                 u32::try_from(generation).map_err(|_| {
                     FfsError::Format(format!(
