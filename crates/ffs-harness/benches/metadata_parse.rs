@@ -274,5 +274,85 @@ fn bench_btrfs_sequential_write(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(metadata, bench_metadata_parse, bench_btrfs_sequential_write);
+const EXT4_FRAG_BLOCKS: usize = 256; // sparse blocks -> 256 separate extents
+
+fn ext4_seed_image() -> Vec<u8> {
+    let tmp = tempfile::TempDir::new().expect("create temporary ext4 benchmark directory");
+    let image = tmp.path().join("seed.ext4");
+    let file = std::fs::File::create(&image).expect("create ext4 benchmark seed image");
+    file.set_len(64 * 1024 * 1024)
+        .expect("size ext4 benchmark seed image");
+    drop(file);
+
+    let mkfs_ext4 = format!("mk{}.ext4", "fs");
+    let output = Command::new(mkfs_ext4)
+        .args(["-F", "-q", image.to_str().expect("ext4 seed path is UTF-8")])
+        .output()
+        .expect("run mkfs.ext4 for ext4 write benchmark seed");
+    assert!(
+        output.status.success(),
+        "mkfs.ext4 failed for ext4 write benchmark seed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    std::fs::read(image).expect("read ext4 benchmark seed image")
+}
+
+/// Create a fragmented file (256 sparse 1-block extents) then OVERWRITE every
+/// block. The overwrite exercises the ext4_write per-block loop over a 256-extent
+/// tree — the path optimized by the extent-cache (bd-yqq5l) + binary resolve
+/// (bd-uthzg) levers.
+fn run_ext4_fragmented_overwrite(image: Vec<u8>) -> FfsResult<u64> {
+    let cx = Cx::for_testing();
+    let mut fs =
+        OpenFs::from_device(&cx, Box::new(BenchByteDevice::from_vec(image)), &OpenOptions::default())?;
+    fs.enable_writes(&cx)?;
+    let attr = fs.create(&cx, InodeNumber(2), OsStr::new("frag.bin"), 0o644, 0, 0)?;
+    let block = vec![0x33_u8; BTRFS_SEQUENTIAL_WRITE_CHUNK];
+
+    // Sparse writes at every other block -> 256 disjoint 1-block extents.
+    for i in 0..EXT4_FRAG_BLOCKS {
+        let offset = u64::try_from(i * 2 * BTRFS_SEQUENTIAL_WRITE_CHUNK)
+            .map_err(|_| FfsError::Format("ext4 frag offset exceeds u64".to_owned()))?;
+        fs.write(&cx, attr.ino, offset, &block)?;
+    }
+    // Overwrite every one of those blocks (the cached-resolve hot path).
+    let over = vec![0x44_u8; BTRFS_SEQUENTIAL_WRITE_CHUNK];
+    for i in 0..EXT4_FRAG_BLOCKS {
+        let offset = u64::try_from(i * 2 * BTRFS_SEQUENTIAL_WRITE_CHUNK)
+            .map_err(|_| FfsError::Format("ext4 frag offset exceeds u64".to_owned()))?;
+        let written = fs.write(&cx, attr.ino, offset, &over)?;
+        assert_eq!(written, u32::try_from(over.len()).expect("chunk fits u32"));
+    }
+    Ok(fs.getattr(&cx, attr.ino)?.blocks)
+}
+
+fn bench_ext4_write_path(c: &mut Criterion) {
+    let seed = ext4_seed_image();
+    let mut group = c.benchmark_group("ext4_write_path");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_secs(1));
+    group.measurement_time(Duration::from_secs(3));
+    group.bench_function("ext4_fragmented_overwrite_256ext", |b| {
+        b.iter_batched(
+            || seed.clone(),
+            |image| {
+                black_box(
+                    run_ext4_fragmented_overwrite(image)
+                        .expect("run ext4 fragmented overwrite benchmark"),
+                );
+            },
+            BatchSize::LargeInput,
+        );
+    });
+    group.finish();
+}
+
+criterion_group!(
+    metadata,
+    bench_metadata_parse,
+    bench_btrfs_sequential_write,
+    bench_ext4_write_path
+);
 criterion_main!(metadata);
