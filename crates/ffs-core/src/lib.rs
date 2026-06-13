@@ -19666,15 +19666,41 @@ impl OpenFs {
             return Ok(0);
         }
 
+        // Bound the scan to the extents that can overlap [range_start,
+        // range_end) instead of every EXTENT_DATA of the inode (bd-4xeew). An
+        // extent starting at/after range_end cannot overlap; the only extent
+        // at/before range_start that can reach into the range is the floor (the
+        // rightmost extent with offset <= range_start — file extents are
+        // non-overlapping, so any earlier extent ends before the floor starts).
+        // So [floor(range_start), range_end] is a tight superset of the
+        // overlapping set; the overlap check below skips any boundary extent the
+        // window still returns, so the freed/re-inserted set and the nbytes
+        // delta are byte-identical to the old [0, MAX] scan. This turns the
+        // remove from O(inode extents) into O(log N + overlap) per write —
+        // O(N^2) -> O(N) for N sequential appends (the O(N^2) was masked by the
+        // now-removed per-write zstd, bd-i5gwr).
+        let floor_target = BtrfsKey {
+            objectid: canonical,
+            item_type: BTRFS_ITEM_EXTENT_DATA,
+            offset: range_start,
+        };
+        let lo_offset = match alloc
+            .fs_tree
+            .floor_key(&floor_target)
+            .map_err(|e| btrfs_mutation_to_ffs(&e))?
+        {
+            Some(k) if k.objectid == canonical && k.item_type == BTRFS_ITEM_EXTENT_DATA => k.offset,
+            _ => 0,
+        };
         let ext_start = BtrfsKey {
             objectid: canonical,
             item_type: BTRFS_ITEM_EXTENT_DATA,
-            offset: 0,
+            offset: lo_offset,
         };
         let ext_end = BtrfsKey {
             objectid: canonical,
             item_type: BTRFS_ITEM_EXTENT_DATA,
-            offset: u64::MAX,
+            offset: range_end,
         };
         let extents = alloc
             .fs_tree
