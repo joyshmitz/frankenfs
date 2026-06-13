@@ -1356,6 +1356,40 @@ impl BlockDevice for ByteDeviceBlockAdapter<'_> {
             .read_vectored_exact_at(cx, ByteOffset(offset), &mut slices)
     }
 
+    fn read_contiguous_into(
+        &self,
+        cx: &Cx,
+        start: BlockNumber,
+        dst: &mut [u8],
+    ) -> Result<(), FfsError> {
+        let block_size = usize::try_from(self.block_size)
+            .map_err(|_| FfsError::Format("block_size does not fit usize".to_owned()))?;
+        if block_size == 0 || dst.len() % block_size != 0 {
+            return Err(FfsError::Format(
+                "read_contiguous_into: dst length must be a multiple of block size".to_owned(),
+            ));
+        }
+        if dst.is_empty() {
+            return Ok(());
+        }
+        let count = (dst.len() / block_size) as u64;
+        let end = start
+            .0
+            .checked_add(count)
+            .ok_or_else(|| FfsError::Format("block range overflow".to_owned()))?;
+        if end > self.block_count() {
+            return Err(FfsError::Format(format!(
+                "block range out of range: start={} count={} block_count={}",
+                start.0,
+                count,
+                self.block_count()
+            )));
+        }
+        let offset = self.block_offset(start)?;
+        // One ranged read straight into the caller's contiguous buffer.
+        self.dev.read_exact_at(cx, ByteOffset(offset), dst)
+    }
+
     fn write_block(&self, cx: &Cx, block: BlockNumber, data: &[u8]) -> Result<(), FfsError> {
         let expected = usize::try_from(self.block_size)
             .map_err(|_| FfsError::Format("block_size does not fit usize".to_owned()))?;
@@ -6478,7 +6512,12 @@ impl OpenFs {
         // Verify + parse ONCE, before the node enters the cache, so every cached
         // node is already-verified — a hit never skips a checksum that was not
         // already checked.
-        let node = Arc::new(parse_btrfs_tree_node(&buf, ctx.csum_type, logical, nodesize)?);
+        let node = Arc::new(parse_btrfs_tree_node(
+            &buf,
+            ctx.csum_type,
+            logical,
+            nodesize,
+        )?);
         if cacheable {
             let mut cache = self.btrfs_parsed_node_cache.lock();
             if cache.len() < BTRFS_TREE_NODE_CACHE_LIMIT {
@@ -7457,12 +7496,15 @@ impl OpenFs {
             Self::btrfs_checked_physical_span(physical_offset, to_read_usize)?;
 
             // Read the contiguous physical span. For the run of fully-aligned
-            // blocks, coalesce into a single vectored device read (one preadv
-            // instead of one pread per block) — this is the rank-1 cost on the
-            // direct-read path (bd-a384r). `MvccBlockDevice::read_contiguous_blocks`
-            // keeps this overlay-correct: it only collapses ranges with no
-            // version-visible block and otherwise falls back to scalar reads.
-            // Unaligned head/tail bytes always use scalar `read_block`.
+            // blocks, coalesce into a single ranged device read (one preadv
+            // instead of one pread per block) straight into `out` — this is the
+            // rank-1 cost on the direct-read path (bd-a384r/bd-dy41g).
+            // `read_contiguous_into` reads directly into the output slice, so
+            // there is no per-block `BlockBuf` allocation and no post-read copy.
+            // `MvccBlockDevice::read_contiguous_into` keeps this overlay-correct:
+            // it collapses only ranges with no version-visible block and copies
+            // overlaid blocks from the version store. Unaligned head/tail bytes
+            // always use scalar `read_block`.
             let mut pos = 0_usize;
             while pos < to_read_usize {
                 let current_phys = Self::btrfs_checked_physical_offset(physical_offset, pos)?;
@@ -7475,15 +7517,9 @@ impl OpenFs {
                     && block_dev.supports_contiguous_reads()
                 {
                     let full_blocks = remaining / bs_usize;
-                    let mut bufs: Vec<BlockBuf> = (0..full_blocks)
-                        .map(|_| BlockBuf::zeroed(bs_usize))
-                        .collect();
-                    block_dev.read_contiguous_blocks(cx, block_num, &mut bufs)?;
-                    for (idx, buf) in bufs.iter().enumerate() {
-                        let dst = pos + idx * bs_usize;
-                        out[dst..dst + bs_usize].copy_from_slice(buf.as_slice());
-                    }
-                    pos += full_blocks * bs_usize;
+                    let span = full_blocks * bs_usize;
+                    block_dev.read_contiguous_into(cx, block_num, &mut out[pos..pos + span])?;
+                    pos += span;
                 } else {
                     let chunk_in_block = remaining.min(bs_usize - block_offset);
                     let block_data = block_dev.read_block(cx, block_num)?;
@@ -39853,10 +39889,12 @@ mod tests {
     }
 
     #[test]
-    fn btrfs_read_coalesces_contiguous_block_reads_into_vectored_io() {
-        // bd-a384r behaviour proof: a multi-block contiguous file read must be
-        // served by a single coalesced vectored device op, not one scalar read
-        // per block — and remain byte-identical.
+    fn btrfs_read_coalesces_contiguous_block_reads_into_one_ranged_op() {
+        // bd-a384r/bd-dy41g behaviour proof: a multi-block contiguous file read
+        // must be served by a single coalesced device op, not one read per
+        // block — and remain byte-identical. `read_contiguous_into` reads the
+        // whole contiguous run in one ranged `read_exact_at` straight into the
+        // output buffer (no per-block buffer allocation, no vectored scatter).
         let mut image = build_btrfs_fsops_image();
         let expected: Vec<u8> = (0..16_384)
             .map(|i| u8::try_from(i % 251).expect("value should fit in u8"))
@@ -39872,7 +39910,14 @@ mod tests {
         let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
         let ops: &dyn FsOps = &fs;
 
-        // Discount open-time metadata reads; measure only the file-data read.
+        // Warm the parsed-node (metadata) cache so the measured read performs no
+        // extent-tree device reads — only the file-data read remains. File data
+        // is never cached, so it always hits the device.
+        let warm = ops
+            .read(&cx, &mut RequestScope::empty(), InodeNumber(257), 0, 16_384)
+            .unwrap();
+        assert_eq!(warm, expected, "coalesced read must be byte-identical");
+
         scalar.store(0, AtomicOrdering::SeqCst);
         vectored.store(0, AtomicOrdering::SeqCst);
 
@@ -39881,17 +39926,23 @@ mod tests {
             .unwrap();
 
         assert_eq!(data, expected, "coalesced read must be byte-identical");
-        // Quantified syscall reduction: the 4 contiguous data blocks are served
-        // by exactly ONE vectored device op (preadv) — pre-coalescing this path
-        // issued 4 scalar reads (4 pread). The extent-tree metadata reads remain
-        // scalar, so `scalar` here counts only those, never the 4 data blocks.
+        // Quantified syscall reduction: with metadata served from the warm
+        // node cache, the 4 contiguous data blocks are served by exactly ONE
+        // ranged device read (one `read_exact_at` spanning the run) — pre-
+        // coalescing this path issued 4 scalar reads (4 pread). No vectored op
+        // and no per-block buffer is used.
+        assert_eq!(
+            scalar.load(AtomicOrdering::SeqCst),
+            1,
+            "4 contiguous data blocks must collapse to one ranged device op; \
+             got {} scalar + {} vectored",
+            scalar.load(AtomicOrdering::SeqCst),
+            vectored.load(AtomicOrdering::SeqCst),
+        );
         assert_eq!(
             vectored.load(AtomicOrdering::SeqCst),
-            1,
-            "4 contiguous data blocks must collapse to one vectored device op; \
-             got {} vectored + {} scalar",
-            vectored.load(AtomicOrdering::SeqCst),
-            scalar.load(AtomicOrdering::SeqCst),
+            0,
+            "the ranged read into the output buffer uses no vectored device op",
         );
     }
 

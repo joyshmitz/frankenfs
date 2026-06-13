@@ -3910,6 +3910,74 @@ impl<D: BlockDevice> BlockDevice for MvccBlockDevice<D> {
         Ok(())
     }
 
+    fn read_contiguous_into(
+        &self,
+        cx: &Cx,
+        start: BlockNumber,
+        dst: &mut [u8],
+    ) -> ffs_error::Result<()> {
+        let bs = self.block_size() as usize;
+        if bs == 0 || dst.len() % bs != 0 {
+            return Err(FfsError::Format(
+                "read_contiguous_into: dst length must be a multiple of block size".to_owned(),
+            ));
+        }
+        if dst.is_empty() {
+            return Ok(());
+        }
+        let count = (dst.len() / bs) as u64;
+        start
+            .0
+            .checked_add(count)
+            .ok_or_else(|| FfsError::Format("block range overflow".to_owned()))?;
+        let snap = self.read_snapshot();
+
+        // Capture MVCC-visible blocks once under a single read guard at one
+        // snapshot (mirrors `read_contiguous_blocks`), then read the remaining
+        // base-resident gaps directly into the matching `dst` sub-slices.
+        let mut visible: Vec<Option<Vec<u8>>> = Vec::with_capacity(count as usize);
+        let mut any_visible = false;
+        {
+            let guard = self.store.read();
+            for delta in 0..count {
+                let block = BlockNumber(start.0 + delta);
+                match guard.read_visible(block, snap) {
+                    Some(bytes) => {
+                        visible.push(Some(bytes.into_owned()));
+                        any_visible = true;
+                    }
+                    None => visible.push(None),
+                }
+            }
+        }
+
+        // Fast path: nothing overlaid — one ranged base read straight into dst.
+        if !any_visible {
+            return self.base.read_contiguous_into(cx, start, dst);
+        }
+
+        let n = count as usize;
+        let mut idx = 0usize;
+        while idx < n {
+            if let Some(bytes) = visible[idx].take() {
+                dst[idx * bs..(idx + 1) * bs].copy_from_slice(&bytes);
+                idx += 1;
+                continue;
+            }
+            let run_start = idx;
+            while idx < n && visible[idx].is_none() {
+                idx += 1;
+            }
+            let run_block_start = BlockNumber(start.0 + run_start as u64);
+            self.base.read_contiguous_into(
+                cx,
+                run_block_start,
+                &mut dst[run_start * bs..idx * bs],
+            )?;
+        }
+        Ok(())
+    }
+
     fn write_block(&self, _cx: &Cx, block: BlockNumber, data: &[u8]) -> ffs_error::Result<()> {
         // Stage into a new single-block transaction and commit immediately.
         // For batched writes, callers should use the MvccStore API directly.
@@ -3981,11 +4049,17 @@ mod tests {
             let high = next() % (cur + 4); // span below, within, and above the chain
             let bin = newest_visible_index_by(&seqs, CommitSeq(high), |s| CommitSeq(*s));
             let reff = reference(&seqs, high);
-            assert_eq!(bin, reff, "binary != reverse-scan for chain {seqs:?} high {high}");
+            assert_eq!(
+                bin, reff,
+                "binary != reverse-scan for chain {seqs:?} high {high}"
+            );
             fold(bin.map_or(u64::MAX, |i| i as u64), &mut digest);
             fold(high, &mut digest);
         }
-        assert_eq!(digest, 17_052_713_067_055_689_022, "golden visibility-index digest changed");
+        assert_eq!(
+            digest, 17_052_713_067_055_689_022,
+            "golden visibility-index digest changed"
+        );
     }
 
     /// Simple in-memory block device for testing `MvccBlockDevice`.
@@ -4252,6 +4326,24 @@ mod tests {
             }
             Ok(())
         }
+        fn read_contiguous_into(
+            &self,
+            _cx: &Cx,
+            start: BlockNumber,
+            dst: &mut [u8],
+        ) -> ffs_error::Result<()> {
+            let bs = self.block_size as usize;
+            if bs == 0 || dst.len() % bs != 0 {
+                return Err(ffs_error::FfsError::Format(
+                    "test read_contiguous_into requires whole blocks".to_owned(),
+                ));
+            }
+            self.ranged_runs.write().push(dst.len() / bs);
+            for (i, chunk) in dst.chunks_mut(bs).enumerate() {
+                chunk.copy_from_slice(&self.one(BlockNumber(start.0 + i as u64)));
+            }
+            Ok(())
+        }
         fn block_size(&self) -> u32 {
             self.block_size
         }
@@ -4278,13 +4370,21 @@ mod tests {
 
         let base = ReadRunCountingDevice::new(BS, N);
         for b in 0..N {
-            base.write_block(&cx, BlockNumber(b), &vec![u8::try_from(b % 251).unwrap(); BS as usize])
-                .expect("seed base");
+            base.write_block(
+                &cx,
+                BlockNumber(b),
+                &vec![u8::try_from(b % 251).unwrap(); BS as usize],
+            )
+            .expect("seed base");
         }
 
         // Overlay exactly one block in the MVCC store with distinct bytes.
         let store = Arc::new(RwLock::new(MvccStore::new()));
-        seed_block(&mut store.write(), BlockNumber(OVERLAY), &vec![0xEE; BS as usize]);
+        seed_block(
+            &mut store.write(),
+            BlockNumber(OVERLAY),
+            &vec![0xEE; BS as usize],
+        );
         let snap = store.read().current_snapshot();
         let dev = MvccBlockDevice::new(base, Arc::clone(&store), snap);
 
@@ -4292,15 +4392,23 @@ mod tests {
         let old_bufs: Vec<BlockBuf> = (0..N)
             .map(|i| dev.read_block(&cx, BlockNumber(i)).expect("read"))
             .collect();
-        let old_scalar = dev.base().scalar_reads.load(std::sync::atomic::Ordering::SeqCst);
+        let old_scalar = dev
+            .base()
+            .scalar_reads
+            .load(std::sync::atomic::Ordering::SeqCst);
 
         // New: single contiguous read.
         dev.base().reset();
-        let mut new_bufs: Vec<BlockBuf> = (0..N).map(|_| BlockBuf::new(vec![0_u8; BS as usize])).collect();
+        let mut new_bufs: Vec<BlockBuf> = (0..N)
+            .map(|_| BlockBuf::new(vec![0_u8; BS as usize]))
+            .collect();
         dev.read_contiguous_blocks(&cx, BlockNumber(0), &mut new_bufs)
             .expect("contiguous read");
         let new_ranged = dev.base().ranged_runs.read().len();
-        let new_scalar = dev.base().scalar_reads.load(std::sync::atomic::Ordering::SeqCst);
+        let new_scalar = dev
+            .base()
+            .scalar_reads
+            .load(std::sync::atomic::Ordering::SeqCst);
 
         // ISOMORPHISM: byte-identical per-block, including the overlaid block.
         for i in 0..new_bufs.len() {
@@ -4320,14 +4428,16 @@ mod tests {
         }
         let golden = hex_lower(&hasher.finalize());
         assert_eq!(
-            golden,
-            "6631d26c4e6e0d7f6f0414c59844ae2afcca85b291177918dabba0ccf8fbd9ca",
+            golden, "6631d26c4e6e0d7f6f0414c59844ae2afcca85b291177918dabba0ccf8fbd9ca",
             "golden contiguous-read digest changed"
         );
 
         // SCORE: 63 scalar base reads (one per gap block) → 2 ranged reads
         // (the gap runs either side of the overlaid block).
-        assert_eq!(old_scalar, 63, "prior path: one scalar base read per gap block");
+        assert_eq!(
+            old_scalar, 63,
+            "prior path: one scalar base read per gap block"
+        );
         assert_eq!(new_ranged, 2, "two maximal gap runs around the overlay");
         assert_eq!(new_scalar, 0, "no scalar base reads on the coalesced path");
         let read_op_ratio = old_scalar as f64 / new_ranged as f64;
@@ -4335,6 +4445,82 @@ mod tests {
             read_op_ratio >= 2.0,
             "Score {read_op_ratio} must clear 2.0 (got {old_scalar} -> {new_ranged})"
         );
+    }
+
+    #[test]
+    fn mvcc_contiguous_read_into_coalesces_base_gaps_score() {
+        use sha2::{Digest, Sha256};
+        const BS: u32 = 512;
+        const N: u64 = 64;
+        const OVERLAY: u64 = 32;
+        let cx = test_cx();
+
+        let base = ReadRunCountingDevice::new(BS, N);
+        for b in 0..N {
+            base.write_block(
+                &cx,
+                BlockNumber(b),
+                &vec![u8::try_from(b % 251).unwrap(); BS as usize],
+            )
+            .expect("seed base");
+        }
+
+        let store = Arc::new(RwLock::new(MvccStore::new()));
+        seed_block(
+            &mut store.write(),
+            BlockNumber(OVERLAY),
+            &vec![0xEE; BS as usize],
+        );
+        let snap = store.read().current_snapshot();
+        let dev = MvccBlockDevice::new(base, Arc::clone(&store), snap);
+
+        let old_bufs: Vec<BlockBuf> = (0..N)
+            .map(|i| dev.read_block(&cx, BlockNumber(i)).expect("read"))
+            .collect();
+        let old_scalar = dev
+            .base()
+            .scalar_reads
+            .load(std::sync::atomic::Ordering::SeqCst);
+
+        dev.base().reset();
+        let mut out = vec![0_u8; N as usize * BS as usize];
+        dev.read_contiguous_into(&cx, BlockNumber(0), &mut out)
+            .expect("contiguous read into");
+        let new_ranged = dev.base().ranged_runs.read().len();
+        let new_scalar = dev
+            .base()
+            .scalar_reads
+            .load(std::sync::atomic::Ordering::SeqCst);
+
+        for (i, expected) in old_bufs.iter().enumerate() {
+            let start = i * BS as usize;
+            assert_eq!(
+                expected.as_slice(),
+                &out[start..start + BS as usize],
+                "block {i} bytes diverged"
+            );
+        }
+        let overlay_start =
+            usize::try_from(OVERLAY).expect("overlay index fits usize") * BS as usize;
+        assert_eq!(
+            &out[overlay_start..overlay_start + BS as usize],
+            &[0xEE; BS as usize]
+        );
+
+        let mut hasher = Sha256::new();
+        hasher.update(&out);
+        let golden = hex_lower(&hasher.finalize());
+        assert_eq!(
+            golden, "6631d26c4e6e0d7f6f0414c59844ae2afcca85b291177918dabba0ccf8fbd9ca",
+            "golden contiguous-read-into digest changed"
+        );
+
+        assert_eq!(
+            old_scalar, 63,
+            "prior path: one scalar base read per gap block"
+        );
+        assert_eq!(new_ranged, 2, "two maximal gap runs around the overlay");
+        assert_eq!(new_scalar, 0, "no scalar base reads on the coalesced path");
     }
 
     fn hex_lower(bytes: &[u8]) -> String {

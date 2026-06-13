@@ -35,5 +35,9 @@ harness = false
 name = "block_buf_construct"
 harness = false
 
+[[bench]]
+name = "read_contiguous"
+harness = false
+
 [lints]
 workspace = true

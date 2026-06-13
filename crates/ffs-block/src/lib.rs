@@ -545,6 +545,40 @@ pub trait BlockDevice: Send + Sync {
         Ok(())
     }
 
+    /// Read a contiguous run of `dst.len() / block_size()` blocks starting at
+    /// `start` directly into the caller's contiguous `dst` buffer. `dst.len()`
+    /// MUST be a multiple of `block_size()`.
+    ///
+    /// This is the zero-copy counterpart to [`read_contiguous_blocks`]: where
+    /// that scatters a run into one `BlockBuf` per block (an allocation per
+    /// block) and forces the caller to copy each buffer into its destination,
+    /// byte-backed implementations override this to issue ONE ranged device
+    /// read straight into `dst` — no per-block buffer allocation and no copy.
+    /// The default preserves scalar `read_block` semantics (one read + one copy
+    /// per block), so the bytes written into `dst` are identical either way.
+    ///
+    /// [`read_contiguous_blocks`]: BlockDevice::read_contiguous_blocks
+    fn read_contiguous_into(&self, cx: &Cx, start: BlockNumber, dst: &mut [u8]) -> Result<()> {
+        cx_checkpoint(cx)?;
+        let bs = self.block_size() as usize;
+        if bs == 0 || dst.len() % bs != 0 {
+            return Err(FfsError::Format(
+                "read_contiguous_into: dst length must be a multiple of block size".to_owned(),
+            ));
+        }
+        for (idx, chunk) in dst.chunks_mut(bs).enumerate() {
+            let delta = u64::try_from(idx)
+                .map_err(|_| FfsError::Format("block index does not fit u64".to_owned()))?;
+            let block = BlockNumber(start.0.checked_add(delta).ok_or_else(|| {
+                FfsError::Format("contiguous read block range overflow".to_owned())
+            })?);
+            let buf = self.read_block(cx, block)?;
+            chunk.copy_from_slice(buf.as_slice());
+        }
+        cx_checkpoint(cx)?;
+        Ok(())
+    }
+
     /// Write a block by number. `data.len()` MUST equal `block_size()`.
     fn write_block(&self, cx: &Cx, block: BlockNumber, data: &[u8]) -> Result<()>;
 
@@ -602,6 +636,10 @@ impl<D: BlockDevice + ?Sized> BlockDevice for Arc<D> {
         bufs: &mut [BlockBuf],
     ) -> Result<()> {
         (**self).read_contiguous_blocks(cx, start, bufs)
+    }
+
+    fn read_contiguous_into(&self, cx: &Cx, start: BlockNumber, dst: &mut [u8]) -> Result<()> {
+        (**self).read_contiguous_into(cx, start, dst)
     }
 
     fn write_block(&self, cx: &Cx, block: BlockNumber, data: &[u8]) -> Result<()> {
@@ -869,6 +907,40 @@ impl<D: ByteDevice> BlockDevice for ByteBlockDevice<D> {
             .collect();
         self.inner
             .read_vectored_exact_at(cx, ByteOffset(offset), &mut slices)?;
+        cx_checkpoint(cx)?;
+        Ok(())
+    }
+
+    fn read_contiguous_into(&self, cx: &Cx, start: BlockNumber, dst: &mut [u8]) -> Result<()> {
+        cx_checkpoint(cx)?;
+        let block_size = usize::try_from(self.block_size)
+            .map_err(|_| FfsError::Format("block_size does not fit usize".to_owned()))?;
+        if block_size == 0 || dst.len() % block_size != 0 {
+            return Err(FfsError::Format(
+                "read_contiguous_into: dst length must be a multiple of block size".to_owned(),
+            ));
+        }
+        if dst.is_empty() {
+            return Ok(());
+        }
+        let count = (dst.len() / block_size) as u64;
+        let end = start
+            .0
+            .checked_add(count)
+            .ok_or_else(|| FfsError::Format("block range overflow".to_owned()))?;
+        if end > self.block_count {
+            return Err(FfsError::Format(format!(
+                "block range out of range: start={} count={} block_count={}",
+                start.0, count, self.block_count
+            )));
+        }
+        let offset = start
+            .0
+            .checked_mul(u64::from(self.block_size))
+            .ok_or_else(|| FfsError::Format("block offset overflow".to_owned()))?;
+        // One ranged read straight into the caller's contiguous buffer — no
+        // per-block `BlockBuf` allocation and no post-read copy.
+        self.inner.read_exact_at(cx, ByteOffset(offset), dst)?;
         cx_checkpoint(cx)?;
         Ok(())
     }
