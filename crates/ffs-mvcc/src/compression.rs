@@ -157,7 +157,15 @@ impl Default for CompressionPolicy {
         Self {
             dedup_identical: true,
             max_chain_length: Some(64),
-            algo: CompressionAlgo::Zstd { level: 0 },
+            // No compression by default: upstream ext4/btrfs keep dirty data
+            // uncompressed in the page cache, and zstd-compressing every dirty
+            // block in the MVCC version store costs ~29us/block of pure CPU on
+            // the commit hot path (46x slower 1 MiB writes) — pure waste on
+            // incompressible data, which is stored `Full` after the failed
+            // attempt anyway. Compression stays available via
+            // `CompressionPolicy::with_*`/explicit policies for memory-bound
+            // version-history use (bd-i5gwr).
+            algo: CompressionAlgo::None,
         }
     }
 }
@@ -322,7 +330,10 @@ mod tests {
         let policy = CompressionPolicy::default();
         assert!(policy.dedup_identical);
         assert_eq!(policy.max_chain_length, Some(64));
-        assert_eq!(policy.algo, CompressionAlgo::Zstd { level: 0 });
+        // Default is no compression: dirty MVCC versions stay uncompressed
+        // (matching upstream's page cache), zstd-per-block was a 46x write cost
+        // (bd-i5gwr). Compression is opt-in via explicit policies.
+        assert_eq!(policy.algo, CompressionAlgo::None);
     }
 
     #[test]

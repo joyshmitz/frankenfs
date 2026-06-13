@@ -42,5 +42,9 @@ harness = false
 name = "read_visible"
 harness = false
 
+[[bench]]
+name = "write_batch"
+harness = false
+
 [lints]
 workspace = true
