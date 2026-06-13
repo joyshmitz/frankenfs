@@ -17,6 +17,8 @@ use criterion::{Criterion, criterion_group, criterion_main};
 use std::hint::black_box;
 
 const N: u32 = 340; // max extents in a 4 KiB extent leaf
+const INDEX_CHILDREN: u32 = 340; // max index entries in a 4 KiB extent node
+const EXTENTS_PER_CHILD: u32 = 340;
 
 /// One extent: (logical_block, len, physical_start). Sorted, non-overlapping.
 fn build_extents() -> Vec<(u32, u32, u64)> {
@@ -58,6 +60,48 @@ fn binary(extents: &[(u32, u32, u64)], target: u32) -> Option<u64> {
     }
 }
 
+fn build_child_starts() -> Vec<u32> {
+    let child_span = EXTENTS_PER_CHILD * 2;
+    (0..INDEX_CHILDREN)
+        .map(|child| child * child_span)
+        .collect()
+}
+
+fn collect_child_suffix(start: u32, from_block: u32) -> u64 {
+    let mut acc = 0_u64;
+    for extent_idx in 0..EXTENTS_PER_CHILD {
+        let logical = start + extent_idx * 2;
+        let end = logical + 1;
+        if end > from_block {
+            acc = acc.wrapping_add(u64::from(logical));
+        }
+    }
+    acc
+}
+
+/// Old behavior: flatten every child leaf, then let FIEMAP/SEEK_DATA filter.
+fn full_collect_then_filter(child_starts: &[u32], from_block: u32) -> u64 {
+    child_starts.iter().fold(0_u64, |acc, &start| {
+        acc.wrapping_add(collect_child_suffix(start, from_block))
+    })
+}
+
+/// New behavior: prune index children whose next sibling starts at/before the
+/// query block, then run the same caller-visible suffix filter.
+fn suffix_pruned_collect_then_filter(child_starts: &[u32], from_block: u32) -> u64 {
+    let mut acc = 0_u64;
+    for (child_idx, &start) in child_starts.iter().enumerate() {
+        if matches!(
+            child_starts.get(child_idx + 1),
+            Some(&next_start) if next_start <= from_block
+        ) {
+            continue;
+        }
+        acc = acc.wrapping_add(collect_child_suffix(start, from_block));
+    }
+    acc
+}
+
 fn bench_extent_resolve(c: &mut Criterion) {
     let extents = build_extents();
     let max_logical = extents.last().map_or(0, |&(s, l, _)| s + l);
@@ -76,7 +120,11 @@ fn bench_extent_resolve(c: &mut Criterion) {
     // Isomorphism: binary returns the same physical block as linear for every
     // probe (cover and hole alike).
     for &t in &probes {
-        assert_eq!(linear(&extents, t), binary(&extents, t), "target {t} diverged");
+        assert_eq!(
+            linear(&extents, t),
+            binary(&extents, t),
+            "target {t} diverged"
+        );
     }
 
     let mut group = c.benchmark_group("ext4_extent_leaf_lookup_340");
@@ -101,5 +149,54 @@ fn bench_extent_resolve(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(extent_resolve, bench_extent_resolve);
+fn bench_extent_suffix_collect(c: &mut Criterion) {
+    let child_starts = build_child_starts();
+    let max_logical = INDEX_CHILDREN * EXTENTS_PER_CHILD * 2;
+    let probes: Vec<u32> = (0..1024)
+        .map(|i| max_logical / 2 + (i * 97 % (max_logical / 2)))
+        .collect();
+
+    // Isomorphism: pruning only removes child subtrees whose extents all end at
+    // or before the query block; the caller-side filter drops the same extents.
+    for &from_block in &probes {
+        assert_eq!(
+            full_collect_then_filter(&child_starts, from_block),
+            suffix_pruned_collect_then_filter(&child_starts, from_block),
+            "from_block {from_block} diverged"
+        );
+    }
+
+    let mut group = c.benchmark_group("ext4_extent_suffix_collect_340x340");
+    group.bench_function("full_collect_then_filter", |b| {
+        b.iter(|| {
+            let mut acc = 0_u64;
+            for &from_block in &probes {
+                acc = acc.wrapping_add(full_collect_then_filter(
+                    black_box(&child_starts),
+                    black_box(from_block),
+                ));
+            }
+            black_box(acc)
+        });
+    });
+    group.bench_function("suffix_pruned_collect", |b| {
+        b.iter(|| {
+            let mut acc = 0_u64;
+            for &from_block in &probes {
+                acc = acc.wrapping_add(suffix_pruned_collect_then_filter(
+                    black_box(&child_starts),
+                    black_box(from_block),
+                ));
+            }
+            black_box(acc)
+        });
+    });
+    group.finish();
+}
+
+criterion_group!(
+    extent_resolve,
+    bench_extent_resolve,
+    bench_extent_suffix_collect
+);
 criterion_main!(extent_resolve);

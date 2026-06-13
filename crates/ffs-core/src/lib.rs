@@ -38267,6 +38267,79 @@ mod tests {
     }
 
     #[test]
+    fn collect_extents_from_scope_prunes_completed_index_children_bd_yd3a0() {
+        use sha2::{Digest, Sha256};
+
+        let image = build_ext4_image_with_shared_index_block();
+        let dev = TestDevice::from_vec(image);
+        let cx = Cx::for_testing();
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
+        let scope = RequestScope::empty();
+        let inode = fs.read_inode(&cx, InodeNumber(11)).unwrap();
+
+        let full = fs.collect_extents_with_scope(&cx, &scope, &inode).unwrap();
+        assert_eq!(
+            full.iter().map(|e| e.logical_block).collect::<Vec<_>>(),
+            vec![0, 100]
+        );
+
+        let from_zero = fs
+            .collect_extents_from_with_scope(&cx, &scope, &inode, 0)
+            .unwrap();
+        assert_eq!(
+            from_zero
+                .iter()
+                .map(|e| e.logical_block)
+                .collect::<Vec<_>>(),
+            vec![0, 100],
+            "from_block=0 must preserve full collection"
+        );
+
+        let from_middle = fs
+            .collect_extents_from_with_scope(&cx, &scope, &inode, 50)
+            .unwrap();
+        assert_eq!(
+            from_middle
+                .iter()
+                .map(|e| e.logical_block)
+                .collect::<Vec<_>>(),
+            vec![0, 100],
+            "the child covering from_block is retained so callers can filter safely"
+        );
+
+        let from_second = fs
+            .collect_extents_from_with_scope(&cx, &scope, &inode, 100)
+            .unwrap();
+        assert_eq!(
+            from_second
+                .iter()
+                .map(|e| e.logical_block)
+                .collect::<Vec<_>>(),
+            vec![100],
+            "children whose next sibling starts at/before from_block are pruned"
+        );
+
+        let mut hasher = Sha256::new();
+        for extents in [&full, &from_zero, &from_middle, &from_second] {
+            hasher.update((extents.len() as u64).to_le_bytes());
+            for extent in extents {
+                hasher.update(extent.logical_block.to_le_bytes());
+                hasher.update(extent.actual_len().to_le_bytes());
+                hasher.update(extent.physical_start.to_le_bytes());
+                hasher.update([u8::from(extent.is_unwritten())]);
+            }
+        }
+        let digest = hasher.finalize();
+        let digest_hex = digest
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        println!(
+            "BD_YD3A0_EXTENT_SUFFIX_GOLDEN_BEGIN\n{digest_hex}\nBD_YD3A0_EXTENT_SUFFIX_GOLDEN_END"
+        );
+    }
+
+    #[test]
     fn ext4_fsops_get_inode_state_validates_inode() {
         let fs = Ext4FsOps::new(build_ext4_image_with_extents()).unwrap();
         let cx = Cx::for_testing();
