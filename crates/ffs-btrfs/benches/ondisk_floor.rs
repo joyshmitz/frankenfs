@@ -17,8 +17,8 @@
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use ffs_btrfs::{
-    BTRFS_HEADER_SIZE, BTRFS_ITEM_EXTENT_DATA, BTRFS_ITEM_SIZE, BTRFS_KEY_PTR_SIZE, BtrfsChunkEntry,
-    BtrfsKey, BtrfsStripe, walk_tree_floor, walk_tree_range,
+    BTRFS_HEADER_SIZE, BTRFS_ITEM_EXTENT_DATA, BTRFS_ITEM_SIZE, BTRFS_KEY_PTR_SIZE,
+    BtrfsChunkEntry, BtrfsKey, BtrfsStripe, walk_tree_floor, walk_tree_range,
 };
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -124,108 +124,160 @@ fn identity_chunks() -> Vec<BtrfsChunkEntry> {
     }]
 }
 
-fn bench_ondisk_read_lower_bound(c: &mut Criterion) {
-    let blocks = build_tree();
-    let chunks = identity_chunks();
+struct OndiskFloorBenchData {
+    blocks: HashMap<u64, Vec<u8>>,
+    chunks: Vec<BtrfsChunkEntry>,
+    read_off: u64,
+    from_zero: BtrfsKey,
+    window_end: BtrfsKey,
+    seek: BtrfsKey,
+}
 
-    // Read at the LAST extent of the file.
-    let read_off = (LEAVES - 1) * BLOCK;
-    let read_end = read_off + BLOCK;
-    let from_zero = BtrfsKey {
-        objectid: INODE,
-        item_type: 0,
-        offset: 0,
-    };
-    let window_end = ext_key(read_end);
-    let seek = ext_key(read_off);
+impl OndiskFloorBenchData {
+    fn new() -> Self {
+        let read_off = (LEAVES - 1) * BLOCK;
+        let read_end = read_off + BLOCK;
+        Self {
+            blocks: build_tree(),
+            chunks: identity_chunks(),
+            read_off,
+            from_zero: BtrfsKey {
+                objectid: INODE,
+                item_type: 0,
+                offset: 0,
+            },
+            window_end: ext_key(read_end),
+            seek: ext_key(read_off),
+        }
+    }
 
-    let reads = Cell::new(0_u32);
-    let mut read_physical = |phys: u64| {
+    fn read_block(&self, phys: u64) -> Result<Vec<u8>, ffs_types::ParseError> {
+        self.blocks
+            .get(&phys)
+            .cloned()
+            .ok_or(ffs_types::ParseError::InvalidField {
+                field: "physical",
+                reason: "missing",
+            })
+    }
+
+    fn counted_read(&self, reads: &Cell<u32>, phys: u64) -> Result<Vec<u8>, ffs_types::ParseError> {
         reads.set(reads.get() + 1);
-        blocks
+        self.blocks
             .get(&phys)
             .cloned()
             .ok_or(ffs_types::ParseError::InvalidField {
                 field: "physical",
                 reason: "block not in bench image",
             })
-    };
+    }
 
-    // Isomorphism + read-count check: the floor-bounded walk yields exactly the
-    // extents the lower-bound-zero walk yields that can overlap the read window
-    // (here: the single covering last extent), reading far fewer nodes.
-    reads.set(0);
-    let full = walk_tree_range(&mut read_physical, &chunks, ROOT_LOGICAL, NODESIZE, 0, from_zero, window_end)
+    fn assert_isomorphic(&self) {
+        // Isomorphism + read-count check: the floor-bounded walk yields exactly
+        // the extents the lower-bound-zero walk yields that can overlap the read
+        // window, reading far fewer nodes.
+        let reads = Cell::new(0_u32);
+        let mut read_physical = |phys: u64| self.counted_read(&reads, phys);
+
+        reads.set(0);
+        let full = walk_tree_range(
+            &mut read_physical,
+            &self.chunks,
+            ROOT_LOGICAL,
+            NODESIZE,
+            0,
+            self.from_zero,
+            self.window_end,
+        )
         .expect("full walk");
-    let full_reads = reads.get();
+        let full_reads = reads.get();
 
-    reads.set(0);
-    let floor = walk_tree_floor(&mut read_physical, &chunks, ROOT_LOGICAL, NODESIZE, 0, seek)
+        reads.set(0);
+        let floor = walk_tree_floor(
+            &mut read_physical,
+            &self.chunks,
+            ROOT_LOGICAL,
+            NODESIZE,
+            0,
+            self.seek,
+        )
         .expect("floor")
         .expect("covering extent");
-    let bounded = walk_tree_range(&mut read_physical, &chunks, ROOT_LOGICAL, NODESIZE, 0, floor.key, window_end)
+        let bounded = walk_tree_range(
+            &mut read_physical,
+            &self.chunks,
+            ROOT_LOGICAL,
+            NODESIZE,
+            0,
+            floor.key,
+            self.window_end,
+        )
         .expect("bounded walk");
-    let floor_reads = reads.get();
+        let floor_reads = reads.get();
 
-    assert_eq!(full.last().map(|e| e.key), Some(ext_key(read_off)));
-    assert_eq!(bounded.len(), 1);
-    assert_eq!(bounded[0].key, ext_key(read_off));
-    assert!(
-        floor_reads * 4 < full_reads,
-        "floor read {floor_reads} nodes vs full {full_reads} (expected >=4x fewer)"
-    );
+        assert_eq!(full.last().map(|e| e.key), Some(ext_key(self.read_off)));
+        assert_eq!(bounded.len(), 1);
+        assert_eq!(bounded[0].key, ext_key(self.read_off));
+        assert!(
+            floor_reads * 4 < full_reads,
+            "floor read {floor_reads} nodes vs full {full_reads} (expected >=4x fewer)"
+        );
+    }
 
-    let mut group = c.benchmark_group("btrfs_ondisk_read_eof");
-    // Lower bound 0: descend from the inode start, reading every leaf up to the
-    // window end (root + all N leaves at EOF).
-    group.bench_function("lower_bound_zero_scan_all_leaves", |b| {
-        let mut rp = |phys: u64| {
-            blocks
-                .get(&phys)
-                .cloned()
-                .ok_or(ffs_types::ParseError::InvalidField {
-                    field: "physical",
-                    reason: "missing",
-                })
-        };
-        b.iter(|| {
-            black_box(
-                walk_tree_range(
+    fn bench_groups(&self, c: &mut Criterion) {
+        let mut group = c.benchmark_group("btrfs_ondisk_read_eof");
+        group.bench_function("lower_bound_zero_scan_all_leaves", |b| {
+            let mut rp = |phys: u64| self.read_block(phys);
+            b.iter(|| {
+                black_box(
+                    walk_tree_range(
+                        &mut rp,
+                        black_box(&self.chunks),
+                        ROOT_LOGICAL,
+                        NODESIZE,
+                        0,
+                        self.from_zero,
+                        self.window_end,
+                    )
+                    .unwrap(),
+                )
+            });
+        });
+        group.bench_function("floor_then_windowed", |b| {
+            let mut rp = |phys: u64| self.read_block(phys);
+            b.iter(|| {
+                let f = walk_tree_floor(
                     &mut rp,
-                    black_box(&chunks),
+                    black_box(&self.chunks),
                     ROOT_LOGICAL,
                     NODESIZE,
                     0,
-                    from_zero,
-                    window_end,
+                    self.seek,
                 )
-                .unwrap(),
-            )
-        });
-    });
-    // Floor-bounded: seek the covering leaf, then a windowed walk from it
-    // (root + covering leaf).
-    group.bench_function("floor_then_windowed", |b| {
-        let mut rp = |phys: u64| {
-            blocks
-                .get(&phys)
-                .cloned()
-                .ok_or(ffs_types::ParseError::InvalidField {
-                    field: "physical",
-                    reason: "missing",
-                })
-        };
-        b.iter(|| {
-            let f = walk_tree_floor(&mut rp, black_box(&chunks), ROOT_LOGICAL, NODESIZE, 0, seek)
                 .unwrap()
                 .unwrap();
-            black_box(
-                walk_tree_range(&mut rp, black_box(&chunks), ROOT_LOGICAL, NODESIZE, 0, f.key, window_end)
+                black_box(
+                    walk_tree_range(
+                        &mut rp,
+                        black_box(&self.chunks),
+                        ROOT_LOGICAL,
+                        NODESIZE,
+                        0,
+                        f.key,
+                        self.window_end,
+                    )
                     .unwrap(),
-            )
+                )
+            });
         });
-    });
-    group.finish();
+        group.finish();
+    }
+}
+
+fn bench_ondisk_read_lower_bound(c: &mut Criterion) {
+    let data = OndiskFloorBenchData::new();
+    data.assert_isomorphic();
+    data.bench_groups(c);
 }
 
 criterion_group!(ondisk_floor, bench_ondisk_read_lower_bound);

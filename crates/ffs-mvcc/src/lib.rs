@@ -3925,21 +3925,23 @@ impl<D: BlockDevice> BlockDevice for MvccBlockDevice<D> {
         if dst.is_empty() {
             return Ok(());
         }
-        let count = (dst.len() / bs) as u64;
+        let count = dst.len() / bs;
+        let count_u64 = u64::try_from(count)
+            .map_err(|_| FfsError::Format("block range exceeds u64".to_owned()))?;
         start
             .0
-            .checked_add(count)
+            .checked_add(count_u64)
             .ok_or_else(|| FfsError::Format("block range overflow".to_owned()))?;
         let snap = self.read_snapshot();
 
         // Capture MVCC-visible blocks once under a single read guard at one
         // snapshot (mirrors `read_contiguous_blocks`), then read the remaining
         // base-resident gaps directly into the matching `dst` sub-slices.
-        let mut visible: Vec<Option<Vec<u8>>> = Vec::with_capacity(count as usize);
+        let mut visible: Vec<Option<Vec<u8>>> = Vec::with_capacity(count);
         let mut any_visible = false;
         {
             let guard = self.store.read();
-            for delta in 0..count {
+            for delta in 0..count_u64 {
                 let block = BlockNumber(start.0 + delta);
                 match guard.read_visible(block, snap) {
                     Some(bytes) => {
@@ -3956,7 +3958,7 @@ impl<D: BlockDevice> BlockDevice for MvccBlockDevice<D> {
             return self.base.read_contiguous_into(cx, start, dst);
         }
 
-        let n = count as usize;
+        let n = count;
         let mut idx = 0usize;
         while idx < n {
             if let Some(bytes) = visible[idx].take() {
@@ -3968,7 +3970,9 @@ impl<D: BlockDevice> BlockDevice for MvccBlockDevice<D> {
             while idx < n && visible[idx].is_none() {
                 idx += 1;
             }
-            let run_block_start = BlockNumber(start.0 + run_start as u64);
+            let run_start_u64 = u64::try_from(run_start)
+                .map_err(|_| FfsError::Format("block range exceeds u64".to_owned()))?;
+            let run_block_start = BlockNumber(start.0 + run_start_u64);
             self.base.read_contiguous_into(
                 cx,
                 run_block_start,

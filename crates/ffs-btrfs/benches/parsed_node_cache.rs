@@ -5,11 +5,10 @@
 //!
 //! On a read-only mount the on-disk metadata is immutable, so a tree node read
 //! once can be reused. The byte walkers nonetheless re-do the full per-node
-//! cost on EVERY traversal: read (cache clone) + `verify_btrfs_tree_block_checksum`
-//! + `BtrfsHeader` parse/validate + `parse_leaf_items`/`parse_internal_items`.
-//! A single `read`/`getattr`/`readdir` already performs several range descents
-//! that re-walk the same root + internal nodes, and repeated ops re-walk the
-//! same leaves.
+//! cost on EVERY traversal: read (cache clone), checksum verification, header
+//! parse/validate, and item parsing. A single `read`/`getattr`/`readdir`
+//! already performs several range descents that re-walk the same root +
+//! internal nodes, and repeated ops re-walk the same leaves.
 //!
 //! `walk_tree_range_with_nodes` takes an `Arc<BtrfsParsedNode>` provider, so a
 //! parsed-node cache hands the walker verified+parsed nodes and skips read +
@@ -20,7 +19,8 @@
 use criterion::{Criterion, criterion_group, criterion_main};
 use ffs_btrfs::{
     BTRFS_HEADER_SIZE, BTRFS_ITEM_EXTENT_DATA, BTRFS_ITEM_SIZE, BTRFS_KEY_PTR_SIZE,
-    BtrfsChunkEntry, BtrfsKey, BtrfsParsedNode, BtrfsStripe, parse_btrfs_tree_node, walk_tree_range,
+    BtrfsChunkEntry, BtrfsKey, BtrfsLeafEntry, BtrfsLeafEntryBatch, BtrfsParsedNode, BtrfsStripe,
+    parse_btrfs_tree_node, walk_tree_range, walk_tree_range_borrowed_with_nodes,
     walk_tree_range_with_nodes,
 };
 use std::collections::HashMap;
@@ -145,138 +145,204 @@ fn parsed_cache(blocks: &HashMap<u64, Vec<u8>>) -> HashMap<u64, Arc<BtrfsParsedN
     cache
 }
 
-fn bench_parsed_node_cache(c: &mut Criterion) {
-    let blocks = build_tree();
-    let chunks = identity_chunks();
-    let cache = parsed_cache(&blocks);
+fn owned_from_batches(batches: &[BtrfsLeafEntryBatch]) -> Vec<BtrfsLeafEntry> {
+    batches
+        .iter()
+        .flat_map(BtrfsLeafEntryBatch::to_owned_entries)
+        .collect()
+}
 
-    // Full range: visit every node.
-    let lo = item_key(0);
-    let hi = item_key(LEAVES * ITEMS_PER_LEAF);
+struct ParsedNodeBenchData {
+    blocks: HashMap<u64, Vec<u8>>,
+    chunks: Vec<BtrfsChunkEntry>,
+    cache: HashMap<u64, Arc<BtrfsParsedNode>>,
+    full_lo: BtrfsKey,
+    full_hi: BtrfsKey,
+    narrow_lo: BtrfsKey,
+    narrow_hi: BtrfsKey,
+}
 
-    // Isomorphism: the parsed-cache walk returns exactly what the byte walk does.
-    let mut byte_read = |phys: u64| {
-        blocks
+impl ParsedNodeBenchData {
+    fn new() -> Self {
+        let blocks = build_tree();
+        let chunks = identity_chunks();
+        let cache = parsed_cache(&blocks);
+        let needle = ITEMS_PER_LEAF + 5; // an item in leaf 1
+        Self {
+            blocks,
+            chunks,
+            cache,
+            full_lo: item_key(0),
+            full_hi: item_key(LEAVES * ITEMS_PER_LEAF),
+            narrow_lo: item_key(needle),
+            narrow_hi: item_key(needle + 1),
+        }
+    }
+
+    fn read_block(&self, phys: u64) -> Result<Vec<u8>, ffs_types::ParseError> {
+        self.blocks
             .get(&phys)
             .cloned()
             .ok_or(ffs_types::ParseError::InvalidField {
                 field: "physical",
                 reason: "missing",
             })
-    };
-    let from_bytes =
-        walk_tree_range(&mut byte_read, &chunks, ROOT_LOGICAL, NODESIZE, 0, lo, hi).expect("bytes");
-    let mut cache_provider = |logical: u64| {
-        cache
+    }
+
+    fn cached_node(&self, logical: u64) -> Result<Arc<BtrfsParsedNode>, ffs_types::ParseError> {
+        self.cache
             .get(&logical)
             .cloned()
             .ok_or(ffs_types::ParseError::InvalidField {
                 field: "logical",
                 reason: "missing",
             })
-    };
-    let from_cache =
-        walk_tree_range_with_nodes(&mut cache_provider, ROOT_LOGICAL, NODESIZE, lo, hi)
-            .expect("cached");
-    assert_eq!(from_bytes, from_cache);
-    assert_eq!(from_bytes.len() as u64, LEAVES * ITEMS_PER_LEAF);
+    }
 
-    // A narrow lookup: visit root + one packed leaf, return a single item. This
-    // is the shape of a keyed point read (getattr/getxattr/single-extent read)
-    // — `parse_leaf_items` still parses ALL items in the visited leaf to build
-    // its index, but only one is materialized, so the per-node parse dominates
-    // and the parsed-cache hit (which skips it) wins most.
-    let needle = ITEMS_PER_LEAF + 5; // an item in leaf 1
-    let nlo = item_key(needle);
-    let nhi = item_key(needle + 1);
+    fn assert_isomorphic(&self) {
+        let mut byte_read = |phys: u64| self.read_block(phys);
+        let from_bytes = walk_tree_range(
+            &mut byte_read,
+            &self.chunks,
+            ROOT_LOGICAL,
+            NODESIZE,
+            0,
+            self.full_lo,
+            self.full_hi,
+        )
+        .expect("bytes");
+        let mut cache_provider = |logical: u64| self.cached_node(logical);
+        let from_cache = walk_tree_range_with_nodes(
+            &mut cache_provider,
+            ROOT_LOGICAL,
+            NODESIZE,
+            self.full_lo,
+            self.full_hi,
+        )
+        .expect("cached");
+        assert_eq!(from_bytes, from_cache);
+        assert_eq!(from_bytes.len() as u64, LEAVES * ITEMS_PER_LEAF);
+        let borrowed = walk_tree_range_borrowed_with_nodes(
+            &mut cache_provider,
+            ROOT_LOGICAL,
+            NODESIZE,
+            self.full_lo,
+            self.full_hi,
+        )
+        .expect("borrowed");
+        assert_eq!(from_bytes, owned_from_batches(&borrowed));
+    }
 
-    let mut full_group = c.benchmark_group("btrfs_parsed_node_walk_full");
-    // Byte path: re-read + re-verify + re-parse every visited node each pass.
-    full_group.bench_function("byte_reparse", |b| {
-        let mut rp = |phys: u64| {
-            blocks
-                .get(&phys)
-                .cloned()
-                .ok_or(ffs_types::ParseError::InvalidField {
-                    field: "physical",
-                    reason: "missing",
-                })
-        };
-        b.iter(|| {
-            black_box(
-                walk_tree_range(&mut rp, black_box(&chunks), ROOT_LOGICAL, NODESIZE, 0, lo, hi)
+    fn bench_full_range(&self, c: &mut Criterion) {
+        let mut group = c.benchmark_group("btrfs_parsed_node_walk_full");
+        group.bench_function("byte_reparse", |b| {
+            let mut rp = |phys: u64| self.read_block(phys);
+            b.iter(|| {
+                black_box(
+                    walk_tree_range(
+                        &mut rp,
+                        black_box(&self.chunks),
+                        ROOT_LOGICAL,
+                        NODESIZE,
+                        0,
+                        self.full_lo,
+                        self.full_hi,
+                    )
                     .unwrap(),
-            )
-        });
-    });
-    // Parsed-cache path: nodes already verified+parsed; the walker just descends.
-    full_group.bench_function("parsed_cached", |b| {
-        let mut provider = |logical: u64| {
-            cache
-                .get(&logical)
-                .cloned()
-                .ok_or(ffs_types::ParseError::InvalidField {
-                    field: "logical",
-                    reason: "missing",
-                })
-        };
-        b.iter(|| {
-            black_box(
-                walk_tree_range_with_nodes(
-                    &mut provider,
-                    ROOT_LOGICAL,
-                    NODESIZE,
-                    black_box(lo),
-                    black_box(hi),
                 )
-                .unwrap(),
-            )
+            });
         });
-    });
-    full_group.finish();
-
-    let mut narrow_group = c.benchmark_group("btrfs_parsed_node_walk_narrow");
-    narrow_group.bench_function("byte_reparse", |b| {
-        let mut rp = |phys: u64| {
-            blocks
-                .get(&phys)
-                .cloned()
-                .ok_or(ffs_types::ParseError::InvalidField {
-                    field: "physical",
-                    reason: "missing",
-                })
-        };
-        b.iter(|| {
-            black_box(
-                walk_tree_range(&mut rp, black_box(&chunks), ROOT_LOGICAL, NODESIZE, 0, nlo, nhi)
+        group.bench_function("parsed_cached", |b| {
+            let mut provider = |logical: u64| self.cached_node(logical);
+            b.iter(|| {
+                black_box(
+                    walk_tree_range_with_nodes(
+                        &mut provider,
+                        ROOT_LOGICAL,
+                        NODESIZE,
+                        black_box(self.full_lo),
+                        black_box(self.full_hi),
+                    )
                     .unwrap(),
-            )
-        });
-    });
-    narrow_group.bench_function("parsed_cached", |b| {
-        let mut provider = |logical: u64| {
-            cache
-                .get(&logical)
-                .cloned()
-                .ok_or(ffs_types::ParseError::InvalidField {
-                    field: "logical",
-                    reason: "missing",
-                })
-        };
-        b.iter(|| {
-            black_box(
-                walk_tree_range_with_nodes(
-                    &mut provider,
-                    ROOT_LOGICAL,
-                    NODESIZE,
-                    black_box(nlo),
-                    black_box(nhi),
                 )
-                .unwrap(),
-            )
+            });
         });
-    });
-    narrow_group.finish();
+        group.bench_function("parsed_cached_borrowed", |b| {
+            let mut provider = |logical: u64| self.cached_node(logical);
+            b.iter(|| {
+                black_box(
+                    walk_tree_range_borrowed_with_nodes(
+                        &mut provider,
+                        ROOT_LOGICAL,
+                        NODESIZE,
+                        black_box(self.full_lo),
+                        black_box(self.full_hi),
+                    )
+                    .unwrap(),
+                )
+            });
+        });
+        group.finish();
+    }
+
+    fn bench_narrow_range(&self, c: &mut Criterion) {
+        let mut group = c.benchmark_group("btrfs_parsed_node_walk_narrow");
+        group.bench_function("byte_reparse", |b| {
+            let mut rp = |phys: u64| self.read_block(phys);
+            b.iter(|| {
+                black_box(
+                    walk_tree_range(
+                        &mut rp,
+                        black_box(&self.chunks),
+                        ROOT_LOGICAL,
+                        NODESIZE,
+                        0,
+                        self.narrow_lo,
+                        self.narrow_hi,
+                    )
+                    .unwrap(),
+                )
+            });
+        });
+        group.bench_function("parsed_cached", |b| {
+            let mut provider = |logical: u64| self.cached_node(logical);
+            b.iter(|| {
+                black_box(
+                    walk_tree_range_with_nodes(
+                        &mut provider,
+                        ROOT_LOGICAL,
+                        NODESIZE,
+                        black_box(self.narrow_lo),
+                        black_box(self.narrow_hi),
+                    )
+                    .unwrap(),
+                )
+            });
+        });
+        group.bench_function("parsed_cached_borrowed", |b| {
+            let mut provider = |logical: u64| self.cached_node(logical);
+            b.iter(|| {
+                black_box(
+                    walk_tree_range_borrowed_with_nodes(
+                        &mut provider,
+                        ROOT_LOGICAL,
+                        NODESIZE,
+                        black_box(self.narrow_lo),
+                        black_box(self.narrow_hi),
+                    )
+                    .unwrap(),
+                )
+            });
+        });
+        group.finish();
+    }
+}
+
+fn bench_parsed_node_cache(c: &mut Criterion) {
+    let data = ParsedNodeBenchData::new();
+    data.assert_isomorphic();
+    data.bench_full_range(c);
+    data.bench_narrow_range(c);
 }
 
 criterion_group!(parsed_node_cache, bench_parsed_node_cache);

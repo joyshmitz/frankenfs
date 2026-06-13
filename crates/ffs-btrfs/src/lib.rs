@@ -2769,7 +2769,13 @@ impl BtrfsCowNode {
                     // single-leaf-per-child shape and is rejected by btrfs check
                     // for real multi-leaf trees.
                     let key = params.child_min_keys.get(i).map_or_else(
-                        || if i < keys.len() { &keys[i] } else { &BTRFS_SENTINEL_MAX_KEY },
+                        || {
+                            if i < keys.len() {
+                                &keys[i]
+                            } else {
+                                &BTRFS_SENTINEL_MAX_KEY
+                            }
+                        },
                         |min_key| min_key,
                     );
                     buf[kp_offset..kp_offset + 8].copy_from_slice(&key.objectid.to_le_bytes());
@@ -3196,10 +3202,7 @@ impl InMemoryCowBtrfsTree {
         // items (INODE_ITEM, inline EXTENT_DATA, long DIR names) from overflowing
         // the on-disk node even while under `max_items`. A single item always fits
         // a node (btrfs caps item size), so a 1-item leaf is never split.
-        let leaf_bytes: usize = items
-            .iter()
-            .map(|it| BTRFS_ITEM_SIZE + it.data.len())
-            .sum();
+        let leaf_bytes: usize = items.iter().map(|it| BTRFS_ITEM_SIZE + it.data.len()).sum();
         if items.len() <= 1
             || (items.len() <= self.max_items && leaf_bytes <= self.leaf_byte_budget)
         {
@@ -3970,8 +3973,13 @@ impl InMemoryCowBtrfsTree {
                 // `partition_point` returns the count of keys <= target (the
                 // predicate holds for the sorted prefix); the floor is the last
                 // such key.
-                let le = items.partition_point(|item| key_cmp(&item.key, target) != Ordering::Greater);
-                Ok(if le == 0 { None } else { Some(items[le - 1].key) })
+                let le =
+                    items.partition_point(|item| key_cmp(&item.key, target) != Ordering::Greater);
+                Ok(if le == 0 {
+                    None
+                } else {
+                    Some(items[le - 1].key)
+                })
             }
             BtrfsCowNode::Internal { keys, children } => {
                 // children[i] holds keys in [keys[i-1], keys[i]); child 0's lower
@@ -4877,10 +4885,12 @@ impl BtrfsExtentAllocator {
         };
         // alloc_extent already inserted the bare item; rewrite it in place. Fall
         // back to insert for any caller that allocated with skip_extent_item.
-        self.extent_tree.update(&key, &value).or_else(|err| match err {
-            BtrfsMutationError::KeyNotFound => self.extent_tree.insert(key, &value),
-            other => Err(other),
-        })?;
+        self.extent_tree
+            .update(&key, &value)
+            .or_else(|err| match err {
+                BtrfsMutationError::KeyNotFound => self.extent_tree.insert(key, &value),
+                other => Err(other),
+            })?;
         Ok(())
     }
 
@@ -5011,9 +5021,11 @@ impl BtrfsExtentAllocator {
             ));
         }
         let refs = u64::from_le_bytes(value[0..8].try_into().expect("8 bytes"));
-        let new_refs = refs.checked_sub(1).ok_or(BtrfsMutationError::BrokenInvariant(
-            "extent item refcount underflow",
-        ))?;
+        let new_refs = refs
+            .checked_sub(1)
+            .ok_or(BtrfsMutationError::BrokenInvariant(
+                "extent item refcount underflow",
+            ))?;
 
         // Prefer the keyed EXTENT_DATA_REF (the add_data_extent_ref form).
         let ref_key = BtrfsKey {
@@ -5068,7 +5080,9 @@ impl BtrfsExtentAllocator {
                     ));
                 }
                 match BtrfsExtentDataRef::from_bytes(&value[payload_start..payload_end]) {
-                    Some(dr) if dr.root == root && dr.objectid == objectid && dr.offset == offset => {
+                    Some(dr)
+                        if dr.root == root && dr.objectid == objectid && dr.offset == offset =>
+                    {
                         value.drain(cursor..payload_end);
                         found = true;
                         break;
@@ -8430,16 +8444,88 @@ mod tests {
                         .expect("byte walk");
 
                 let mut provider = |logical: u64| -> Result<Arc<BtrfsParsedNode>, ParseError> {
-                    cache.get(&logical).cloned().ok_or(ParseError::InvalidField {
-                        field: "logical",
-                        reason: "node not in parsed cache",
-                    })
+                    cache
+                        .get(&logical)
+                        .cloned()
+                        .ok_or(ParseError::InvalidField {
+                            field: "logical",
+                            reason: "node not in parsed cache",
+                        })
                 };
                 let from_cache =
                     walk_tree_range_with_nodes(&mut provider, root_logical, NODESIZE, lo, hi)
                         .expect("cached walk");
 
                 assert_eq!(from_bytes, from_cache, "range [{lo:?},{hi:?})");
+            }
+        }
+    }
+
+    #[test]
+    fn walk_tree_range_borrowed_with_nodes_matches_owned_entries_bd_eiywc() {
+        // bd-eiywc isomorphism: the borrowed walker exposes each leaf item's
+        // payload as a range into the verified Arc-backed leaf block, but must
+        // return the same keys, same byte payloads, and same traversal order as
+        // the owned walker that clones every item into a Vec<u8>.
+        let oids: Vec<u64> = vec![100, 200, 300, 400, 500, 600, 700, 800];
+        let (blocks, root_logical) = build_two_level_tree(&oids);
+        let chunks = identity_chunks();
+
+        let mut cache: HashMap<u64, Arc<BtrfsParsedNode>> = HashMap::new();
+        for (&addr, bytes) in &blocks {
+            let node = parse_btrfs_tree_node(bytes, 0, addr, NODESIZE).expect("parse node");
+            cache.insert(addr, Arc::new(node));
+        }
+
+        let key = |oid: u64| BtrfsKey {
+            objectid: oid,
+            item_type: 0,
+            offset: 0,
+        };
+        let ranges = [
+            (key(0), key(50)),
+            (key(100), key(101)),
+            (key(250), key(650)),
+            (key(800), key(900)),
+            (key(0), key(10_000)),
+            (key(401), key(599)),
+        ];
+
+        for _pass in 0..2 {
+            for (lo, hi) in ranges {
+                let mut read = |phys: u64| -> Result<Vec<u8>, ParseError> {
+                    blocks.get(&phys).cloned().ok_or(ParseError::InvalidField {
+                        field: "physical",
+                        reason: "block not in test image",
+                    })
+                };
+                let expected =
+                    walk_tree_range(&mut read, &chunks, root_logical, NODESIZE, 0, lo, hi)
+                        .expect("byte walk");
+
+                let mut provider = |logical: u64| -> Result<Arc<BtrfsParsedNode>, ParseError> {
+                    cache
+                        .get(&logical)
+                        .cloned()
+                        .ok_or(ParseError::InvalidField {
+                            field: "logical",
+                            reason: "node not in parsed cache",
+                        })
+                };
+                let borrowed = walk_tree_range_borrowed_with_nodes(
+                    &mut provider,
+                    root_logical,
+                    NODESIZE,
+                    lo,
+                    hi,
+                )
+                .expect("borrowed walk");
+                let actual: Vec<BtrfsLeafEntry> = borrowed
+                    .iter()
+                    .flat_map(BtrfsLeafEntryBatch::to_owned_entries)
+                    .collect();
+
+                assert_eq!(actual, expected, "range [{lo:?},{hi:?})");
             }
         }
     }
@@ -8861,7 +8947,8 @@ mod tests {
         let mut tree = InMemoryCowBtrfsTree::new(3).expect("tree");
         let n: u64 = 60;
         for oid in 1..=n {
-            tree.insert(test_key(oid), &test_payload(oid)).expect("insert");
+            tree.insert(test_key(oid), &test_payload(oid))
+                .expect("insert");
         }
         assert!(
             tree.height().expect("height") >= 3,
@@ -13518,7 +13605,9 @@ mod tests {
         // Boundary behaviour: exact start covered, exclusive end not covered,
         // an address below any extent resolves to nothing.
         assert_eq!(
-            alloc.resolve_containing_data_extent(a.bytenr).expect("resolve"),
+            alloc
+                .resolve_containing_data_extent(a.bytenr)
+                .expect("resolve"),
             Some(a.bytenr),
         );
         assert_eq!(
@@ -13529,7 +13618,9 @@ mod tests {
             "the first byte past the extent (exclusive end) is not covered"
         );
         assert_eq!(
-            alloc.resolve_containing_data_extent(0x500).expect("resolve"),
+            alloc
+                .resolve_containing_data_extent(0x500)
+                .expect("resolve"),
             None,
             "an address below any extent resolves to nothing"
         );
@@ -13624,7 +13715,10 @@ mod tests {
             Some(1)
         );
         assert!(
-            alloc.get_extent_data_refs(a.bytenr).expect("keyed refs").is_empty(),
+            alloc
+                .get_extent_data_refs(a.bytenr)
+                .expect("keyed refs")
+                .is_empty(),
             "keyed ref removed on its last reference"
         );
     }
@@ -19003,7 +19097,10 @@ mod tests {
             })
         };
         // The SUBVOL command does carry the subvolume name.
-        assert_eq!(path_of(SendCommand::Subvol).as_deref(), Some(&b"test_subvol"[..]));
+        assert_eq!(
+            path_of(SendCommand::Subvol).as_deref(),
+            Some(&b"test_subvol"[..])
+        );
         // Child commands are subvol-relative.
         assert_eq!(
             path_of(SendCommand::Mkfile).as_deref(),
@@ -19035,9 +19132,7 @@ mod tests {
         // The subvol root's metadata commands apply via an empty path.
         assert!(
             parsed.commands.iter().any(|c| c.cmd == SendCommand::Chmod
-                && c.attrs
-                    .iter()
-                    .any(|(t, v)| *t == ATTR_PATH && v.is_empty())),
+                && c.attrs.iter().any(|(t, v)| *t == ATTR_PATH && v.is_empty())),
             "the subvolume root's chmod must use an empty (root-relative) path"
         );
     }
@@ -19301,7 +19396,11 @@ mod tests {
 
         let parsed = parse_send_stream(&stream).expect("parse stream");
         let mut reassembled = vec![0u8; decompressed.len()];
-        for w in parsed.commands.iter().filter(|c| c.cmd == SendCommand::Write) {
+        for w in parsed
+            .commands
+            .iter()
+            .filter(|c| c.cmd == SendCommand::Write)
+        {
             let mut offset = None;
             let mut data: Option<&[u8]> = None;
             for (atype, adata) in &w.attrs {
@@ -19350,32 +19449,50 @@ mod tests {
         // f before d.
         let items = vec![
             BtrfsLeafEntry {
-                key: BtrfsKey { objectid: 256, item_type: BTRFS_ITEM_INODE_ITEM, offset: 0 },
+                key: BtrfsKey {
+                    objectid: 256,
+                    item_type: BTRFS_ITEM_INODE_ITEM,
+                    offset: 0,
+                },
                 data: make_inode_item(0o40755),
             },
             BtrfsLeafEntry {
-                key: BtrfsKey { objectid: 257, item_type: BTRFS_ITEM_INODE_ITEM, offset: 0 },
+                key: BtrfsKey {
+                    objectid: 257,
+                    item_type: BTRFS_ITEM_INODE_ITEM,
+                    offset: 0,
+                },
                 data: make_inode_item(0o100_644),
             },
             BtrfsLeafEntry {
-                key: BtrfsKey { objectid: 257, item_type: BTRFS_ITEM_INODE_REF, offset: 300 },
+                key: BtrfsKey {
+                    objectid: 257,
+                    item_type: BTRFS_ITEM_INODE_REF,
+                    offset: 300,
+                },
                 data: make_inode_ref(2, b"f"),
             },
             BtrfsLeafEntry {
-                key: BtrfsKey { objectid: 300, item_type: BTRFS_ITEM_INODE_ITEM, offset: 0 },
+                key: BtrfsKey {
+                    objectid: 300,
+                    item_type: BTRFS_ITEM_INODE_ITEM,
+                    offset: 0,
+                },
                 data: make_inode_item(0o40755),
             },
             BtrfsLeafEntry {
-                key: BtrfsKey { objectid: 300, item_type: BTRFS_ITEM_INODE_REF, offset: 256 },
+                key: BtrfsKey {
+                    objectid: 300,
+                    item_type: BTRFS_ITEM_INODE_REF,
+                    offset: 256,
+                },
                 data: make_inode_ref(2, b"d"),
             },
         ];
 
         let uuid = [0u8; 16];
-        let stream = generate_send_stream(&items, b"sv", &uuid, 1, |_b, _l, _r, _c| {
-            Ok(Vec::new())
-        })
-        .expect("generate send stream");
+        let stream = generate_send_stream(&items, b"sv", &uuid, 1, |_b, _l, _r, _c| Ok(Vec::new()))
+            .expect("generate send stream");
         let parsed = parse_send_stream(&stream).expect("parse stream");
 
         let path_of = |c: &SendStreamCommand| -> Option<Vec<u8>> {
@@ -19426,35 +19543,67 @@ mod tests {
         // b/f2 (two INODE_REF items, distinct parents).
         let items = vec![
             BtrfsLeafEntry {
-                key: BtrfsKey { objectid: 256, item_type: BTRFS_ITEM_INODE_ITEM, offset: 0 },
+                key: BtrfsKey {
+                    objectid: 256,
+                    item_type: BTRFS_ITEM_INODE_ITEM,
+                    offset: 0,
+                },
                 data: make_inode_item(0o40755),
             },
             BtrfsLeafEntry {
-                key: BtrfsKey { objectid: 257, item_type: BTRFS_ITEM_INODE_ITEM, offset: 0 },
+                key: BtrfsKey {
+                    objectid: 257,
+                    item_type: BTRFS_ITEM_INODE_ITEM,
+                    offset: 0,
+                },
                 data: make_inode_item(0o40755),
             },
             BtrfsLeafEntry {
-                key: BtrfsKey { objectid: 257, item_type: BTRFS_ITEM_INODE_REF, offset: 256 },
+                key: BtrfsKey {
+                    objectid: 257,
+                    item_type: BTRFS_ITEM_INODE_REF,
+                    offset: 256,
+                },
                 data: make_inode_ref(2, b"a"),
             },
             BtrfsLeafEntry {
-                key: BtrfsKey { objectid: 258, item_type: BTRFS_ITEM_INODE_ITEM, offset: 0 },
+                key: BtrfsKey {
+                    objectid: 258,
+                    item_type: BTRFS_ITEM_INODE_ITEM,
+                    offset: 0,
+                },
                 data: make_inode_item(0o40755),
             },
             BtrfsLeafEntry {
-                key: BtrfsKey { objectid: 258, item_type: BTRFS_ITEM_INODE_REF, offset: 256 },
+                key: BtrfsKey {
+                    objectid: 258,
+                    item_type: BTRFS_ITEM_INODE_REF,
+                    offset: 256,
+                },
                 data: make_inode_ref(2, b"b"),
             },
             BtrfsLeafEntry {
-                key: BtrfsKey { objectid: 259, item_type: BTRFS_ITEM_INODE_ITEM, offset: 0 },
+                key: BtrfsKey {
+                    objectid: 259,
+                    item_type: BTRFS_ITEM_INODE_ITEM,
+                    offset: 0,
+                },
                 data: make_inode_item(0o100_644),
             },
             BtrfsLeafEntry {
-                key: BtrfsKey { objectid: 259, item_type: BTRFS_ITEM_INODE_REF, offset: 257 },
+                key: BtrfsKey {
+                    objectid: 259,
+                    item_type: BTRFS_ITEM_INODE_REF,
+                    offset: 257,
+                },
                 data: make_inode_ref(2, b"f1"),
             },
             BtrfsLeafEntry {
-                key: BtrfsKey { objectid: 259, item_type: BTRFS_ITEM_INODE_REF, offset: 258 },
+                key: BtrfsKey {
+                    objectid: 259,
+                    item_type: BTRFS_ITEM_INODE_REF,
+                    offset: 258,
+                },
                 data: make_inode_ref(3, b"f2"),
             },
         ];
@@ -19465,7 +19614,10 @@ mod tests {
         let parsed = parse_send_stream(&stream).expect("parse stream");
 
         let attr = |c: &SendStreamCommand, t: u16| -> Option<Vec<u8>> {
-            c.attrs.iter().find(|(ty, _)| *ty == t).map(|(_, d)| d.clone())
+            c.attrs
+                .iter()
+                .find(|(ty, _)| *ty == t)
+                .map(|(_, d)| d.clone())
         };
         // mkfile at the primary path a/f1.
         assert!(

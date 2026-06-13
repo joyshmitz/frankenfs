@@ -70,7 +70,12 @@ fn bench_extent_fetch(c: &mut Criterion) {
         b.iter(|| black_box(tree.range(black_box(&start), black_box(&full_end)).unwrap()));
     });
     group.bench_function("bounded_to_read_window", |b| {
-        b.iter(|| black_box(tree.range(black_box(&start), black_box(&bounded_end)).unwrap()));
+        b.iter(|| {
+            black_box(
+                tree.range(black_box(&start), black_box(&bounded_end))
+                    .unwrap(),
+            )
+        });
     });
     group.finish();
 }
@@ -88,7 +93,10 @@ fn bench_extent_fetch_eof(c: &mut Criterion) {
 
     // Isomorphism: the floor-seeked window holds exactly the extents that can
     // overlap the read; the scan-from-zero window is a superset.
-    let floor = tree.floor_key(&seek).expect("floor").expect("covering extent");
+    let floor = tree
+        .floor_key(&seek)
+        .expect("floor")
+        .expect("covering extent");
     let bounded = tree.range(&floor, &end).expect("bounded range");
     let full = tree.range(&from_zero, &end).expect("full range");
     assert_eq!(full.len() as u64, EXTENTS);
@@ -128,14 +136,21 @@ fn bench_range_vs_range_with(c: &mut Criterion) {
     let mut group = c.benchmark_group("btrfs_whole_file_scan");
     // `range` clones every item's bytes into an intermediate Vec<u8>.
     group.bench_function("range_clones_each_item", |b| {
-        b.iter(|| black_box(tree.range(black_box(&from_zero), black_box(&to_max)).unwrap()));
+        b.iter(|| {
+            black_box(
+                tree.range(black_box(&from_zero), black_box(&to_max))
+                    .unwrap(),
+            )
+        });
     });
     // `range_with` borrows each item's bytes — no per-item allocation.
     group.bench_function("range_with_zero_copy", |b| {
         b.iter(|| {
             let mut bytes = 0_usize;
-            tree.range_with(black_box(&from_zero), black_box(&to_max), |_k, v| bytes += v.len())
-                .unwrap();
+            tree.range_with(black_box(&from_zero), black_box(&to_max), |_k, v| {
+                bytes += v.len();
+            })
+            .unwrap();
             black_box(bytes)
         });
     });
@@ -158,7 +173,8 @@ fn build_regular_extent_tree() -> InMemoryCowBtrfsTree {
             num_bytes: BLOCK,
         }
         .to_bytes();
-        tree.insert(key(i * BLOCK), &payload).expect("insert extent");
+        tree.insert(key(i * BLOCK), &payload)
+            .expect("insert extent");
     }
     tree
 }
@@ -179,7 +195,13 @@ fn bench_read_file_extent_parse(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("btrfs_read_file_extent_parse");
     group.bench_function("range_clone_then_parse", |b| {
-        b.iter(|| black_box(parse_via_range(&tree, black_box(&from_zero), black_box(&to_max))));
+        b.iter(|| {
+            black_box(parse_via_range(
+                &tree,
+                black_box(&from_zero),
+                black_box(&to_max),
+            ))
+        });
     });
     group.bench_function("range_with_parse_in_place", |b| {
         b.iter(|| {
