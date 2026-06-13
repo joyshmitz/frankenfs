@@ -9585,9 +9585,29 @@ impl OpenFs {
         scope: &RequestScope,
         inode: &Ext4Inode,
     ) -> Result<Vec<Ext4Extent>, FfsError> {
+        // from_block 0 prunes nothing (no sibling starts at/below 0), so this
+        // collects the whole tree exactly as before.
+        self.collect_extents_from_with_scope(cx, scope, inode, 0)
+    }
+
+    /// Collect leaf extents whose range can reach `from_block` or later,
+    /// flattening multi-level trees. Index children whose entire subtree ends
+    /// at or before `from_block` are pruned, so the result is the sorted suffix
+    /// of extents starting at the leaf covering `from_block` (it may include a
+    /// few extents before `from_block` within that leaf — callers that only care
+    /// about extents reaching past a byte offset filter those out, getting the
+    /// identical answer without materializing the whole tree). bd-yd3a0, the
+    /// ext4 dual of the btrfs floor-seek (bd-x52ar/bd-kms5z).
+    pub fn collect_extents_from_with_scope(
+        &self,
+        cx: &Cx,
+        scope: &RequestScope,
+        inode: &Ext4Inode,
+        from_block: u32,
+    ) -> Result<Vec<Ext4Extent>, FfsError> {
         let (header, tree) = parse_inode_extent_tree(inode).map_err(|e| parse_to_ffs_error(&e))?;
         let mut result = Vec::new();
-        self.collect_extents_recursive(cx, scope, &tree, header.depth, &mut result)?;
+        self.collect_extents_recursive(cx, scope, &tree, header.depth, from_block, &mut result)?;
         Ok(result)
     }
 
@@ -9597,6 +9617,7 @@ impl OpenFs {
         scope: &RequestScope,
         tree: &ExtentTree,
         remaining_depth: u16,
+        from_block: u32,
         result: &mut Vec<Ext4Extent>,
     ) -> Result<(), FfsError> {
         if remaining_depth > Self::MAX_EXTENT_DEPTH {
@@ -9618,7 +9639,18 @@ impl OpenFs {
                         detail: "extent index at depth 0".into(),
                     });
                 }
-                for idx in indexes {
+                for (i, idx) in indexes.iter().enumerate() {
+                    // Prune children whose whole subtree ends at or before
+                    // `from_block`: child `i` covers [idx.logical_block,
+                    // next.logical_block), so a next sibling starting at/below
+                    // `from_block` means every extent under child `i` ends at or
+                    // before it (bd-yd3a0). The covering child and all later ones
+                    // are kept, preserving the sorted suffix and the final extent.
+                    if let Some(next) = indexes.get(i + 1) {
+                        if next.logical_block <= from_block {
+                            continue;
+                        }
+                    }
                     // Cache extent-tree child blocks on read-only mounts so
                     // repeated flattens reuse them (bd-nlggu).
                     let child_data = self.read_ext4_file_data_block_with_scope(
@@ -9639,6 +9671,7 @@ impl OpenFs {
                         scope,
                         &child_tree,
                         remaining_depth - 1,
+                        from_block,
                         result,
                     )?;
                 }
@@ -26426,7 +26459,13 @@ impl OpenFs {
         }
 
         let block_size = u64::from(sb.block_size);
-        let extents = self.collect_extents_with_scope(cx, scope, &inode)?;
+        // fiemap reports extents overlapping [start, end); collect just the
+        // suffix from start's block rather than the whole tree (bd-yd3a0).
+        // Extents before it end <= start and are skipped below; the suffix still
+        // runs through the file's last extent, so FIEMAP_EXTENT_LAST stays
+        // correct.
+        let from_block = u32::try_from(start / block_size).unwrap_or(u32::MAX);
+        let extents = self.collect_extents_from_with_scope(cx, scope, &inode, from_block)?;
         let end = start.saturating_add(length);
         let mut result = Vec::new();
         for (i, ext) in extents.iter().enumerate() {
@@ -26733,7 +26772,13 @@ impl OpenFs {
         }
 
         let block_size = u64::from(sb.block_size);
-        let extents = self.collect_extents_with_scope(cx, scope, &inode)?;
+        // SEEK_DATA only needs extents ending past `offset`, so collect just the
+        // suffix from offset's block instead of the whole tree — a fragmented
+        // file under repeated SEEK_DATA (cp --sparse) otherwise pays O(extents)
+        // per call (bd-yd3a0). Extents before the suffix all end <= offset and
+        // would be skipped below anyway, so the result is identical.
+        let from_block = u32::try_from(offset / block_size).unwrap_or(u32::MAX);
+        let extents = self.collect_extents_from_with_scope(cx, scope, &inode, from_block)?;
 
         for ext in &extents {
             let ext_logical_byte = u64::from(ext.logical_block) * block_size;
