@@ -305,8 +305,11 @@ fn ext4_seed_image() -> Vec<u8> {
 /// (bd-uthzg) levers.
 fn run_ext4_fragmented_overwrite(image: Vec<u8>) -> FfsResult<u64> {
     let cx = Cx::for_testing();
-    let mut fs =
-        OpenFs::from_device(&cx, Box::new(BenchByteDevice::from_vec(image)), &OpenOptions::default())?;
+    let mut fs = OpenFs::from_device(
+        &cx,
+        Box::new(BenchByteDevice::from_vec(image)),
+        &OpenOptions::default(),
+    )?;
     fs.enable_writes(&cx)?;
     let attr = fs.create(&cx, InodeNumber(2), OsStr::new("frag.bin"), 0o644, 0, 0)?;
     let block = vec![0x33_u8; BTRFS_SEQUENTIAL_WRITE_CHUNK];
