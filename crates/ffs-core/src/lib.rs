@@ -967,14 +967,31 @@ struct ReaddirSnapshot {
     entries: Arc<Vec<DirEntry>>,
 }
 
+/// Upper bound on entries returned by one [`slice_readdir_snapshot`] call.
+///
+/// A paginated readdir serves the tail after `offset` and the FUSE layer fills
+/// its reply buffer, breaks once full, and re-requests at the next cookie. The
+/// old code cloned the *entire* remaining tail every call, so a full enumeration
+/// of an N-entry directory cloned `N + (N-p) + (N-2p) + … = O(N²/p)` entries
+/// (each `DirEntry` carrying a heap-allocated name). Capping the page bounds the
+/// clone to O(page) per call → O(N) total. The cap is far larger than the entry
+/// capacity of a realistic FUSE readdir buffer (a 4 KiB buffer holds ~170 dir
+/// entries), so the reply still fills and breaks within one page — the kernel
+/// round-trip count is unchanged. If a buffer ever exceeds the cap the kernel
+/// simply re-requests the remainder (a short non-empty readdir reply is not EOF),
+/// so the complete, ordered listing is identical either way.
+const READDIR_SNAPSHOT_PAGE_MAX: usize = 512;
+
 /// Return the readdir page after continuation cookie `offset` from a cached full
 /// listing. Both ext4 (contiguous position cookies) and btrfs (sparse dir-index
 /// cookies) want "entries whose cookie > offset"; the list is cookie-sorted, so a
 /// binary-search `partition_point` slice serves the page without re-walking or
-/// re-parsing the directory.
+/// re-parsing the directory. The page is capped at [`READDIR_SNAPSHOT_PAGE_MAX`]
+/// entries so a full enumeration clones O(N) total rather than O(N²).
 fn slice_readdir_snapshot(entries: &[DirEntry], offset: u64) -> Vec<DirEntry> {
     let start = entries.partition_point(|e| e.offset <= offset);
-    entries[start..].to_vec()
+    let end = start.saturating_add(READDIR_SNAPSHOT_PAGE_MAX).min(entries.len());
+    entries[start..end].to_vec()
 }
 
 /// Serve a readdir page from the snapshot slot iff it matches `ino` + `validation`.
@@ -32075,6 +32092,53 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
     use std::sync::{Arc, Mutex};
     use tracing_subscriber::fmt::MakeWriter;
+
+    /// Capping the readdir snapshot page must not change the complete, ordered
+    /// listing a paginating caller reconstructs — only the per-call page size.
+    #[test]
+    fn readdir_snapshot_pagination_reconstructs_full_listing() {
+        // Cookie-ascending listing larger than the page cap so capping is
+        // exercised; names carry the heap-allocated payload the clone copies.
+        let n = (READDIR_SNAPSHOT_PAGE_MAX as u64) * 5 + 37;
+        let full: Vec<DirEntry> = (0..n)
+            .map(|i| DirEntry {
+                ino: InodeNumber(i + 100),
+                offset: i + 1, // 1-indexed ascending cookies
+                kind: FileType::RegularFile,
+                name: format!("entry_{i:08}").into_bytes(),
+            })
+            .collect();
+
+        // Drive the FUSE caller for buffer capacities below, at, and above the
+        // page cap: it consumes up to `buffer` entries per page then re-requests
+        // at the last cookie (a short non-empty reply is never EOF).
+        for buffer in [
+            1usize,
+            170,
+            READDIR_SNAPSHOT_PAGE_MAX,
+            READDIR_SNAPSHOT_PAGE_MAX * 2,
+        ] {
+            let mut got: Vec<DirEntry> = Vec::new();
+            let mut offset: u64 = 0;
+            loop {
+                let page = slice_readdir_snapshot(&full, offset);
+                if page.is_empty() {
+                    break;
+                }
+                let take = page.len().min(buffer);
+                got.extend_from_slice(&page[..take]);
+                offset = page[take - 1].offset;
+            }
+            assert_eq!(got, full, "pagination with buffer={buffer} lost/reordered entries");
+        }
+
+        // One serve from offset 0 yields exactly the first page (cap), not the
+        // whole tail — the O(N²)→O(N) bound.
+        assert_eq!(
+            slice_readdir_snapshot(&full, 0).len(),
+            READDIR_SNAPSHOT_PAGE_MAX
+        );
+    }
 
     /// In-memory ByteDevice for testing (no file I/O).
     #[derive(Debug, Clone)]
