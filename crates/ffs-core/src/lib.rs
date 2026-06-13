@@ -18092,7 +18092,10 @@ impl OpenFs {
             has_cap_fowner: true,
             has_cap_sys_admin: true,
         };
-        let existing = ffs_xattr::get_xattr_for_access(
+        // The Create/Replace mode check only needs presence, not the value, so
+        // probe via the early-exit existence finder instead of materializing
+        // every inline+external entry just to take is_some() (bd-dwiti).
+        let existing = ffs_xattr::xattr_exists_for_access(
             &inode,
             external_block.as_deref(),
             name,
@@ -18101,8 +18104,8 @@ impl OpenFs {
             },
         )?;
         match mode {
-            XattrSetMode::Create if existing.is_some() => return Err(FfsError::Exists),
-            XattrSetMode::Replace if existing.is_none() => {
+            XattrSetMode::Create if existing => return Err(FfsError::Exists),
+            XattrSetMode::Replace if !existing => {
                 // setxattr(2): XATTR_REPLACE on a missing attribute is ENODATA,
                 // not ENOENT — consistent with getxattr/removexattr's
                 // missing-attribute errno and the kernel. Returning NotFound

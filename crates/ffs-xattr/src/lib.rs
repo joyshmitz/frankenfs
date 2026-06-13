@@ -628,6 +628,61 @@ pub fn get_xattr_for_access(
     Ok(None)
 }
 
+/// Existence-only probe for `setxattr`'s `XATTR_CREATE`/`XATTR_REPLACE` mode
+/// check.
+///
+/// `setxattr` only needs to know whether an attribute is *present*, not its
+/// value. The old path called [`get_xattr_for_access`], which materialized
+/// *every* inline + external entry (a name+value `Vec` allocation each) just to
+/// take `is_some()`. This returns the identical observable answer — same name
+/// parse, same [`can_read_name_index`] access gate, same inline-first-then-
+/// external probe order, same "inode references external block but none
+/// provided" error — but routes through the by-name early-exit finders
+/// (`find_ibody_xattr_by_name` / `find_xattr_block_value_by_name`, bd-abu3z)
+/// that stop at the first match and allocate only for the one matched value,
+/// turning the O(N)-allocation existence scan into O(1) (bd-dwiti).
+///
+/// Isomorphic to `get_xattr_for_access(..)?.is_some()`: on a well-formed xattr
+/// region the early-exit finders return the same hit/miss as the materialize-
+/// all scan (names are unique, ibody probed first), and the access gate +
+/// external-missing error are replicated verbatim. The post-W110 getxattr path
+/// already relies on this same early-exit equivalence.
+pub fn xattr_exists_for_access(
+    inode: &Ext4Inode,
+    external_block: Option<&[u8]>,
+    full_name: &str,
+    access: XattrReadAccess,
+) -> Result<bool> {
+    let (name_index, _name) = parse_xattr_name(full_name)?;
+    if !can_read_name_index(name_index, access) {
+        return Ok(false);
+    }
+
+    if ffs_ondisk::find_ibody_xattr_by_name(inode, full_name)
+        .map_err(|err| parse_to_ffs(&err))?
+        .is_some()
+    {
+        return Ok(true);
+    }
+
+    if inode.file_acl != 0 && external_block.is_none() {
+        return Err(FfsError::Format(
+            "inode references external xattr block but none was provided".to_owned(),
+        ));
+    }
+
+    if let Some(block) = external_block {
+        if ffs_ondisk::find_xattr_block_value_by_name(block, full_name)
+            .map_err(|err| parse_to_ffs(&err))?
+            .is_some()
+        {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

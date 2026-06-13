@@ -13,6 +13,11 @@ ffs-ondisk = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name = "xattr_exists_probe"
+harness = false
 
 [lints]
 workspace = true
