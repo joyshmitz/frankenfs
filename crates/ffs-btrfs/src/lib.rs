@@ -368,12 +368,19 @@ pub fn build_extent_csum_items(
 /// [`build_extent_csum_items`]).
 ///
 /// `items` are `(key, packed_csums)` pairs as stored in the csum tree, each key
-/// carrying the disk bytenr of the item's first sector in `key.offset` (the
-/// caller gathers the relevant items via a tree range query; order does not
-/// matter). Returns the checksum recorded for the sector that begins at
-/// `disk_bytenr`, or `None` if no item covers it or `disk_bytenr` is not
-/// sector-aligned to an item's coverage. A reader/scrub feeds the result to
-/// [`verify_extent_csum`] (or compares directly) to detect data corruption.
+/// carrying the disk bytenr of the item's first sector in `key.offset`. They
+/// must be sorted ascending by `key.offset` — the order both
+/// [`build_extent_csum_items`] emits and a csum-tree range/B-tree walk yields,
+/// so every real caller already satisfies it. Returns the checksum recorded for
+/// the sector that begins at `disk_bytenr`, or `None` if no item covers it or
+/// `disk_bytenr` is not sector-aligned to an item's coverage. A reader/scrub
+/// feeds the result to [`verify_extent_csum`] (or compares directly) to detect
+/// data corruption.
+///
+/// Whole-file csum verification calls this once per sector against the entire
+/// csum tree, so a linear scan made it O(sectors * items); the covering item is
+/// the greatest `key.offset <= disk_bytenr`, so on a sorted list we
+/// binary-search to it — O(items) -> O(log items) per sector (bd-dgih3).
 #[must_use]
 pub fn lookup_data_block_csum(
     items: &[(BtrfsKey, Vec<u8>)],
@@ -383,19 +390,20 @@ pub fn lookup_data_block_csum(
     if sectorsize == 0 {
         return None;
     }
-    // The covering item is the one with the greatest offset <= disk_bytenr
-    // whose checksum run actually reaches disk_bytenr.
+    // Items are sorted ascending by key.offset. The covering item is the last
+    // one with offset <= disk_bytenr whose checksum run reaches disk_bytenr, so
+    // partition_point to the candidate suffix boundary and walk back to the
+    // first EXTENT_CSUM item (greatest offset <= target among matching items —
+    // identical to the old max-over-filtered scan, but O(log) on the common
+    // pure-csum list instead of O(items)).
+    let hi = items.partition_point(|(key, _)| key.offset <= disk_bytenr);
     let mut best: Option<(u64, &[u8])> = None;
-    for (key, value) in items {
+    for (key, value) in items[..hi].iter().rev() {
         if key.item_type != BTRFS_ITEM_EXTENT_CSUM || key.objectid != BTRFS_EXTENT_CSUM_OBJECTID {
             continue;
         }
-        if key.offset > disk_bytenr {
-            continue;
-        }
-        if best.is_none_or(|(off, _)| key.offset > off) {
-            best = Some((key.offset, value.as_slice()));
-        }
+        best = Some((key.offset, value.as_slice()));
+        break;
     }
     let (item_offset, value) = best?;
     let delta = disk_bytenr.checked_sub(item_offset)?;

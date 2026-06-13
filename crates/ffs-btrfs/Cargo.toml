@@ -41,5 +41,9 @@ harness = false
 name = "parsed_node_cache"
 harness = false
 
+[[bench]]
+name = "csum_lookup"
+harness = false
+
 [lints]
 workspace = true
