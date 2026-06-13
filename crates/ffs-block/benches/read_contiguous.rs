@@ -60,8 +60,10 @@ impl ByteDevice for MemByteDevice {
 
     fn read_exact_at(&self, _cx: &Cx, offset: ByteOffset, buf: &mut [u8]) -> Result<()> {
         let off = offset.0 as usize;
-        let guard = self.bytes.lock().unwrap();
-        buf.copy_from_slice(&guard[off..off + buf.len()]);
+        {
+            let guard = self.bytes.lock().unwrap();
+            buf.copy_from_slice(&guard[off..off + buf.len()]);
+        }
         Ok(())
     }
 
@@ -78,13 +80,16 @@ impl ByteDevice for MemByteDevice {
             buf.copy_from_slice(&guard[off..off + len]);
             off += len;
         }
+        drop(guard);
         Ok(())
     }
 
     fn write_all_at(&self, _cx: &Cx, offset: ByteOffset, buf: &[u8]) -> Result<()> {
         let off = offset.0 as usize;
-        let mut guard = self.bytes.lock().unwrap();
-        guard[off..off + buf.len()].copy_from_slice(buf);
+        {
+            let mut guard = self.bytes.lock().unwrap();
+            guard[off..off + buf.len()].copy_from_slice(buf);
+        }
         Ok(())
     }
 

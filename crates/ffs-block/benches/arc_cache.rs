@@ -2,12 +2,13 @@
 #![allow(clippy::cast_possible_truncation)]
 
 use asupersync::Cx;
-use criterion::{Criterion, criterion_group};
+use criterion::{BatchSize, Criterion, criterion_group};
 use ffs_block::{
-    ArcCache, ArcWritePolicy, BlockBuf, BlockDevice, ByteBlockDevice, ByteDevice, ShardedArcCache,
+    ArcCache, ArcWritePolicy, BlockBuf, BlockDevice, ByteBlockDevice, ByteDevice, MemoryPressure,
+    ShardedArcCache,
 };
 use ffs_error::Result;
-use ffs_types::{BlockNumber, ByteOffset};
+use ffs_types::{BlockNumber, ByteOffset, TxnId};
 use parking_lot::Mutex;
 use std::cmp::Ordering;
 use std::env;
@@ -739,6 +740,52 @@ fn bench_writeback_sync_100x4k(c: &mut Criterion) {
     });
 }
 
+fn make_dirty_front_pressure_cache(
+    capacity: usize,
+    dirty_prefix: usize,
+) -> ArcCache<ByteBlockDevice<MemByteDevice>> {
+    let cx = Cx::for_testing();
+    let cache = make_writeback_cache(BLOCK_SIZE_4K, capacity + 128, capacity);
+    let payload = vec![0xA7; BLOCK_SIZE_4K as usize];
+
+    for block in 0..capacity {
+        let block = BlockNumber(block as u64);
+        let buf = cache.read_block(&cx, block).expect("warm resident block");
+        black_box(buf.as_slice()[0]);
+    }
+
+    for block in 0..dirty_prefix {
+        cache
+            .stage_txn_write(
+                &cx,
+                TxnId(block as u64 + 1),
+                BlockNumber(block as u64),
+                &payload,
+            )
+            .expect("stage dirty-front block");
+    }
+
+    cache
+}
+
+fn bench_dirty_front_pressure_trim(c: &mut Criterion) {
+    const CAPACITY: usize = 4_096;
+    const DIRTY_PREFIX: usize = 3_072;
+
+    c.bench_function("arc_dirty_front_pressure_trim_4096_dirty3072", |b| {
+        b.iter_batched(
+            || make_dirty_front_pressure_cache(CAPACITY, DIRTY_PREFIX),
+            |cache| {
+                let report = cache.memory_pressure_callback(MemoryPressure::Critical);
+                black_box(report.current_size);
+                black_box(report.target_size);
+                black_box(report.dirty_count);
+            },
+            BatchSize::SmallInput,
+        );
+    });
+}
+
 fn bench_workload_sequential_scan(c: &mut Criterion) {
     bench_cache_workload(c, &sequential_scan_case());
 }
@@ -769,6 +816,7 @@ criterion_group!(
     bench_writeback_write_random_4k,
     bench_writeback_sync_single_4k,
     bench_writeback_sync_100x4k,
+    bench_dirty_front_pressure_trim,
     bench_workload_sequential_scan,
     bench_workload_zipf,
     bench_workload_mixed_seq_hot,

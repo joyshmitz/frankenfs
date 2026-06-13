@@ -17,7 +17,9 @@ use ffs_types::{
     EXT4_SUPERBLOCK_OFFSET, EXT4_SUPERBLOCK_SIZE, TxnId,
 };
 use nix::sys::uio::preadv;
-use parking_lot::{Condvar, Mutex, RwLock};
+#[cfg(feature = "s3fifo")]
+use parking_lot::RwLock;
+use parking_lot::{Condvar, Mutex};
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "s3fifo")]
 use std::cell::RefCell;
@@ -1836,6 +1838,20 @@ enum ArcList {
     B2,
 }
 
+#[cfg(not(feature = "s3fifo"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct CleanResidentEntry {
+    recency: u64,
+    block: BlockNumber,
+}
+
+#[cfg(not(feature = "s3fifo"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ResidentRecency {
+    list: ArcList,
+    entry: CleanResidentEntry,
+}
+
 #[cfg(feature = "s3fifo")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct S3GhostEntry {
@@ -2283,6 +2299,14 @@ struct ArcState {
     next_ghost_generation: u64,
     loc: HashMap<BlockNumber, ArcList>,
     resident: HashMap<BlockNumber, BlockBuf>,
+    #[cfg(not(feature = "s3fifo"))]
+    resident_recency: HashMap<BlockNumber, ResidentRecency>,
+    #[cfg(not(feature = "s3fifo"))]
+    clean_t1: BTreeSet<CleanResidentEntry>,
+    #[cfg(not(feature = "s3fifo"))]
+    clean_t2: BTreeSet<CleanResidentEntry>,
+    #[cfg(not(feature = "s3fifo"))]
+    next_recency: u64,
     /// Ordered dirty block tracking for write-back and durability accounting.
     dirty: DirtyTracker,
     /// Dirty payloads queued for retry after a failed flush attempt.
@@ -2366,6 +2390,14 @@ impl ArcState {
             next_ghost_generation: 1,
             loc: HashMap::new(),
             resident: HashMap::new(),
+            #[cfg(not(feature = "s3fifo"))]
+            resident_recency: HashMap::new(),
+            #[cfg(not(feature = "s3fifo"))]
+            clean_t1: BTreeSet::new(),
+            #[cfg(not(feature = "s3fifo"))]
+            clean_t2: BTreeSet::new(),
+            #[cfg(not(feature = "s3fifo"))]
+            next_recency: 0,
             dirty: DirtyTracker::default(),
             pending_flush: Vec::new(),
             staged_txn_writes: HashMap::new(),
@@ -2400,6 +2432,86 @@ impl ArcState {
     fn add_usize_to_counter(counter: &mut u64, delta: usize) {
         let delta = u64::try_from(delta).unwrap_or(u64::MAX);
         *counter = counter.saturating_add(delta);
+    }
+
+    #[cfg(not(feature = "s3fifo"))]
+    fn next_clean_recency(&mut self) -> u64 {
+        let recency = self.next_recency;
+        self.next_recency = self.next_recency.saturating_add(1);
+        recency
+    }
+
+    #[cfg(not(feature = "s3fifo"))]
+    fn remove_clean_entry(&mut self, recency: ResidentRecency) {
+        match recency.list {
+            ArcList::T1 => {
+                let _ = self.clean_t1.remove(&recency.entry);
+            }
+            ArcList::T2 => {
+                let _ = self.clean_t2.remove(&recency.entry);
+            }
+            ArcList::B1 | ArcList::B2 => {}
+        }
+    }
+
+    #[cfg(not(feature = "s3fifo"))]
+    fn insert_clean_entry(&mut self, recency: ResidentRecency) {
+        if self.is_dirty(recency.entry.block) {
+            return;
+        }
+        match recency.list {
+            ArcList::T1 => {
+                self.clean_t1.insert(recency.entry);
+            }
+            ArcList::T2 => {
+                self.clean_t2.insert(recency.entry);
+            }
+            ArcList::B1 | ArcList::B2 => {}
+        }
+    }
+
+    #[cfg(not(feature = "s3fifo"))]
+    fn remove_resident_recency(&mut self, block: BlockNumber) {
+        if let Some(recency) = self.resident_recency.remove(&block) {
+            self.remove_clean_entry(recency);
+        }
+    }
+
+    #[cfg(not(feature = "s3fifo"))]
+    fn track_resident_recency(&mut self, block: BlockNumber, list: ArcList) {
+        self.remove_resident_recency(block);
+        let recency = ResidentRecency {
+            list,
+            entry: CleanResidentEntry {
+                recency: self.next_clean_recency(),
+                block,
+            },
+        };
+        self.resident_recency.insert(block, recency);
+        self.insert_clean_entry(recency);
+    }
+
+    #[cfg(not(feature = "s3fifo"))]
+    fn remove_clean_resident(&mut self, block: BlockNumber) {
+        if let Some(recency) = self.resident_recency.get(&block).copied() {
+            self.remove_clean_entry(recency);
+        }
+    }
+
+    #[cfg(not(feature = "s3fifo"))]
+    fn refresh_clean_resident(&mut self, block: BlockNumber) {
+        if let Some(recency) = self.resident_recency.get(&block).copied() {
+            self.insert_clean_entry(recency);
+        }
+    }
+
+    #[cfg(not(feature = "s3fifo"))]
+    fn oldest_clean_resident(&self, list: ArcList) -> Option<BlockNumber> {
+        match list {
+            ArcList::T1 => self.clean_t1.first().map(|entry| entry.block),
+            ArcList::T2 => self.clean_t2.first().map(|entry| entry.block),
+            ArcList::B1 | ArcList::B2 => None,
+        }
     }
 
     #[cfg(feature = "s3fifo")]
@@ -2554,11 +2666,19 @@ impl ArcState {
     }
 
     fn next_pressure_victim(&self) -> Option<BlockNumber> {
-        self.t1
-            .iter()
-            .copied()
-            .find(|block| !self.is_dirty(*block))
-            .or_else(|| self.t2.iter().copied().find(|block| !self.is_dirty(*block)))
+        #[cfg(not(feature = "s3fifo"))]
+        {
+            self.oldest_clean_resident(ArcList::T1)
+                .or_else(|| self.oldest_clean_resident(ArcList::T2))
+        }
+        #[cfg(feature = "s3fifo")]
+        {
+            self.t1
+                .iter()
+                .copied()
+                .find(|block| !self.is_dirty(*block))
+                .or_else(|| self.t2.iter().copied().find(|block| !self.is_dirty(*block)))
+        }
     }
 
     fn remove_from_list(list: &mut VecDeque<BlockNumber>, key: BlockNumber) -> bool {
@@ -2813,6 +2933,8 @@ impl ArcState {
             );
             return false;
         }
+        #[cfg(not(feature = "s3fifo"))]
+        self.remove_resident_recency(victim);
         let _ = self.resident.remove(&victim);
         #[cfg(feature = "s3fifo")]
         {
@@ -2837,10 +2959,12 @@ impl ArcState {
                 let _ = Self::remove_from_list(&mut self.t1, key);
                 self.t2.push_back(key);
                 self.loc.insert(key, ArcList::T2);
+                self.track_resident_recency(key, ArcList::T2);
             }
             ArcList::T2 => {
                 let _ = Self::remove_from_list(&mut self.t2, key);
                 self.t2.push_back(key);
+                self.track_resident_recency(key, ArcList::T2);
             }
             ArcList::B1 | ArcList::B2 => {}
         }
@@ -2864,17 +2988,25 @@ impl ArcState {
         let mut from_t1 = target_t1;
 
         if from_t1 {
-            if let Some(pos) = self.t1.iter().position(|b| !self.is_dirty(*b)) {
-                victim = self.t1.remove(pos);
-            } else if let Some(pos) = self.t2.iter().position(|b| !self.is_dirty(*b)) {
-                victim = self.t2.remove(pos);
+            if let Some(block) = self.oldest_clean_resident(ArcList::T1) {
+                if Self::remove_from_list(&mut self.t1, block) {
+                    victim = Some(block);
+                }
+            } else if let Some(block) = self.oldest_clean_resident(ArcList::T2)
+                && Self::remove_from_list(&mut self.t2, block)
+            {
+                victim = Some(block);
                 from_t1 = false;
             }
         } else {
-            if let Some(pos) = self.t2.iter().position(|b| !self.is_dirty(*b)) {
-                victim = self.t2.remove(pos);
-            } else if let Some(pos) = self.t1.iter().position(|b| !self.is_dirty(*b)) {
-                victim = self.t1.remove(pos);
+            if let Some(block) = self.oldest_clean_resident(ArcList::T2) {
+                if Self::remove_from_list(&mut self.t2, block) {
+                    victim = Some(block);
+                }
+            } else if let Some(block) = self.oldest_clean_resident(ArcList::T1)
+                && Self::remove_from_list(&mut self.t1, block)
+            {
+                victim = Some(block);
                 from_t1 = true;
             }
         }
@@ -2952,6 +3084,7 @@ impl ArcState {
                 self.replace(key);
                 self.t2.push_back(key);
                 self.loc.insert(key, ArcList::T2);
+                self.track_resident_recency(key, ArcList::T2);
                 return;
             }
 
@@ -2965,6 +3098,7 @@ impl ArcState {
                 self.replace(key);
                 self.t2.push_back(key);
                 self.loc.insert(key, ArcList::T2);
+                self.track_resident_recency(key, ArcList::T2);
                 return;
             }
 
@@ -2993,6 +3127,7 @@ impl ArcState {
 
             self.t1.push_back(key);
             self.loc.insert(key, ArcList::T1);
+            self.track_resident_recency(key, ArcList::T1);
         }
     }
 
@@ -3496,16 +3631,22 @@ impl ArcState {
     ) {
         self.dirty
             .mark_dirty(block, bytes, txn_id, commit_seq, state);
+        #[cfg(not(feature = "s3fifo"))]
+        self.remove_clean_resident(block);
     }
 
     /// Clear the dirty flag for a block (after flushing to disk).
     fn clear_dirty(&mut self, block: BlockNumber, seq: u64) {
         self.dirty.clear_dirty(block, seq);
+        #[cfg(not(feature = "s3fifo"))]
+        self.refresh_clean_resident(block);
     }
 
     /// Clear the dirty flag for a block unconditionally.
     fn clear_dirty_unconditional(&mut self, block: BlockNumber) {
         self.dirty.clear_dirty_unconditional(block);
+        #[cfg(not(feature = "s3fifo"))]
+        self.refresh_clean_resident(block);
     }
 
     /// Check if a block is dirty.
@@ -5266,6 +5407,8 @@ impl<D: BlockDevice> BlockCache for ArcCache<D> {
         }
 
         let mut removed = false;
+        #[cfg(not(feature = "s3fifo"))]
+        guard.remove_resident_recency(block);
         removed |= ArcState::remove_from_list(&mut guard.t1, block);
         removed |= ArcState::remove_from_list(&mut guard.t2, block);
         removed |= guard.remove_ghost_block(block);
@@ -6004,15 +6147,32 @@ mod tests {
         {
             assert!(state.total_len() <= state.capacity.saturating_mul(2));
             assert_eq!(state.loc.len(), state.total_len());
+            assert_eq!(state.resident_recency.len(), state.resident.len());
         }
 
         for &k in &state.t1 {
             assert!(matches!(state.loc.get(&k), Some(ArcList::T1)));
             assert!(state.resident.contains_key(&k));
+            #[cfg(not(feature = "s3fifo"))]
+            assert!(matches!(
+                state.resident_recency.get(&k),
+                Some(ResidentRecency {
+                    list: ArcList::T1,
+                    ..
+                })
+            ));
         }
         for &k in &state.t2 {
             assert!(matches!(state.loc.get(&k), Some(ArcList::T2)));
             assert!(state.resident.contains_key(&k));
+            #[cfg(not(feature = "s3fifo"))]
+            assert!(matches!(
+                state.resident_recency.get(&k),
+                Some(ResidentRecency {
+                    list: ArcList::T2,
+                    ..
+                })
+            ));
         }
         #[cfg(feature = "s3fifo")]
         {
@@ -6039,6 +6199,31 @@ mod tests {
                 assert!(matches!(state.loc.get(&k), Some(ArcList::B2)));
                 assert!(!state.resident.contains_key(&k));
             }
+            let expected_t1_clean: Vec<BlockNumber> = state
+                .t1
+                .iter()
+                .copied()
+                .filter(|block| !state.is_dirty(*block))
+                .collect();
+            let expected_t2_clean: Vec<BlockNumber> = state
+                .t2
+                .iter()
+                .copied()
+                .filter(|block| !state.is_dirty(*block))
+                .collect();
+            let indexed_t1_clean: Vec<BlockNumber> =
+                state.clean_t1.iter().map(|entry| entry.block).collect();
+            let indexed_t2_clean: Vec<BlockNumber> =
+                state.clean_t2.iter().map(|entry| entry.block).collect();
+            assert_eq!(indexed_t1_clean, expected_t1_clean);
+            assert_eq!(indexed_t2_clean, expected_t2_clean);
+            assert_eq!(
+                state.next_pressure_victim(),
+                expected_t1_clean
+                    .first()
+                    .copied()
+                    .or_else(|| expected_t2_clean.first().copied())
+            );
         }
     }
 
@@ -11967,6 +12152,36 @@ write_latency: 0ns, bandwidth_bps: 0, stall_probability: 0.0, stall_duration: \
         let batch = state.trim_to_capacity();
         assert_eq!(batch.evicted_blocks, 0);
         assert_eq!(state.resident_len(), 3); // All preserved due to dirty.
+    }
+
+    #[cfg(not(feature = "s3fifo"))]
+    #[test]
+    fn arc_state_clean_index_preserves_dirty_front_victim_order() {
+        let mut state = ArcState::new(8);
+        for block in 0..8_u64 {
+            arc_access(&mut state, BlockNumber(block));
+        }
+
+        for block in 0..6_u64 {
+            state.mark_dirty(
+                BlockNumber(block),
+                4096,
+                TxnId(block + 1),
+                None,
+                DirtyState::InFlight,
+            );
+        }
+
+        assert_eq!(state.next_pressure_victim(), Some(BlockNumber(6)));
+
+        state.set_target_capacity(2);
+        let batch = state.trim_to_capacity();
+        assert_eq!(batch.evicted_blocks, 2);
+        assert_eq!(state.resident_len(), 6);
+        assert_eq!(state.next_pressure_victim(), None);
+
+        state.clear_dirty_unconditional(BlockNumber(0));
+        assert_eq!(state.next_pressure_victim(), Some(BlockNumber(0)));
     }
 
     // ── Capacity-1 boundary tests ───────────────────────────────────────
