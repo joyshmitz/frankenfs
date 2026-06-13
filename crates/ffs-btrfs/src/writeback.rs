@@ -668,8 +668,13 @@ impl DiskWritebackContext {
             }
         };
 
-        let params =
-            self.params_for_block(block, level, child_generations, child_bytenrs, child_min_keys);
+        let params = self.params_for_block(
+            block,
+            level,
+            child_generations,
+            child_bytenrs,
+            child_min_keys,
+        );
         node.serialize(&params)
     }
 }

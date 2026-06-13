@@ -36,9 +36,7 @@ fn bench_read_visible_deep_chain(c: &mut Criterion) {
     assert!(store.read_visible(BLOCK, old_snap).is_some());
 
     c.bench_function("mvcc_read_visible_oldsnapshot_chain512", |b| {
-        b.iter(|| {
-            black_box(store.read_visible(black_box(BLOCK), Snapshot { high: CommitSeq(5) }))
-        });
+        b.iter(|| black_box(store.read_visible(black_box(BLOCK), Snapshot { high: CommitSeq(5) })));
     });
 }
 
