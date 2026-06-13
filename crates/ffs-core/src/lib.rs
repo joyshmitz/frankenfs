@@ -16287,10 +16287,11 @@ impl OpenFs {
         let mut fresh_run: Option<(u32, u32)> = None;
 
         // The inode's extent tree is parsed once and reused across the per-block
-        // loop. It changes ONLY at the two `set_extent_root` sites below (after
-        // `allocate_extent` and after `mark_written`), where this is invalidated;
-        // a pure overwrite mutates neither, so an N-block write parses the tree
-        // once instead of once per block (O(N*E) -> O(E), bd-yqq5l).
+        // loop. Only `allocate_extent` (which maps a previously-unmapped run that
+        // later blocks resolve into) invalidates it; `mark_written` does not (see
+        // its site below). A pure overwrite or a fallocate+write mutates the cache
+        // not at all / never re-collects, so an N-block write parses the tree once
+        // instead of once per block (O(N*E) -> O(E); bd-yqq5l, bd-e4uwb).
         let mut cached_extents: Option<Vec<Ext4Extent>> = None;
 
         while pos < end {
@@ -16538,7 +16539,17 @@ impl OpenFs {
                 }
                 self.extent_cache.invalidate_all();
                 Self::set_extent_root(&mut inode, &root_bytes);
-                cached_extents = None; // tree mutated by mark_written
+                // NOTE: deliberately NOT invalidating `cached_extents` here. A
+                // mark_written split only flips the unwritten flag and splits the
+                // extent record; it preserves the physical mapping AND leaves the
+                // not-yet-processed suffix of the extent unwritten with the same
+                // physical base. The loop advances `pos` monotonically and never
+                // re-resolves an already-written block, so every later resolve
+                // against the pre-split cache returns the identical
+                // (physical, is_unwritten) it would against the split tree. Keeping
+                // the cache makes fallocate+write (writing into a big unwritten
+                // extent that splits per block) O(K) instead of O(K^2) — the splits
+                // would otherwise grow E and re-collect per block (bd-e4uwb).
             }
 
             let chunk_u64 = u64::try_from(chunk_len)
@@ -50055,6 +50066,57 @@ mod tests {
         let readback = fs.read(&cx, attr.ino, 0, 8192).expect("read after punch");
         assert!(readback[..4096].iter().all(|&b| b == 0xAB));
         assert!(readback[4096..8192].iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn write_many_blocks_into_preallocated_unwritten_extent_bd_e4uwb() {
+        // Regression for bd-e4uwb: ext4_write reuses its extent cache across the
+        // per-block loop and deliberately does NOT invalidate it after
+        // mark_written. Writing many consecutive blocks into one preallocated
+        // (unwritten) extent splits that extent per block; every block must still
+        // land its own distinct data at the right physical offset despite the
+        // cache still holding the pre-split single extent. A stale-resolution bug
+        // would corrupt later blocks, so verify EACH block reads back its byte.
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let attr = fs
+            .create(&cx, root, OsStr::new("falloc_write.bin"), 0o644, 0, 0)
+            .expect("create");
+
+        const BLOCKS: usize = 8;
+        const BS: usize = 4096;
+        fs.fallocate(&cx, attr.ino, 0, (BLOCKS * BS) as u64, 0)
+            .expect("fallocate");
+        let pre = fs
+            .read(&cx, attr.ino, 0, (BLOCKS * BS) as u32)
+            .expect("read prealloc");
+        assert!(
+            pre.iter().all(|&b| b == 0),
+            "preallocated region must read zero before write"
+        );
+
+        // Distinct data per block, written in ONE multi-block call so each block
+        // flows through the unwritten->written (mark_written) loop branch.
+        let mut payload = vec![0u8; BLOCKS * BS];
+        for (i, chunk) in payload.chunks_mut(BS).enumerate() {
+            chunk.fill(0x10 + u8::try_from(i).expect("block index fits u8"));
+        }
+        fs.write(&cx, attr.ino, 0, &payload)
+            .expect("write into unwritten");
+
+        let back = fs
+            .read(&cx, attr.ino, 0, (BLOCKS * BS) as u32)
+            .expect("readback");
+        for i in 0..BLOCKS {
+            let expect = 0x10 + u8::try_from(i).expect("block index fits u8");
+            assert!(
+                back[i * BS..(i + 1) * BS].iter().all(|&b| b == expect),
+                "block {i} mismatched: expected {expect:#x}"
+            );
+        }
     }
 
     #[test]
