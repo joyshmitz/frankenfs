@@ -1,30 +1,31 @@
 #![forbid(unsafe_code)]
 #![allow(clippy::cast_possible_truncation)]
 
-//! Same-machine A/B for the extent-insert overlap check (bd-8mbyr).
+//! Same-process A/B for the extent-insert overlap check (bd-8mbyr).
 //!
-//! `ffs_btree::insert` validates that a new extent does not overlap any existing
-//! one. The old check walked the WHOLE tree (O(N) per insert), so building an
+//! `ffs_btree::insert` validates a new extent against existing ones. The old
+//! check used `walk` over the WHOLE tree (O(N) per insert), so building an
 //! N-extent tree was O(N²). Extents are sorted and non-overlapping, so only the
 //! new extent's own logical range can hold a conflict; the fix uses `walk_range`
-//! over that range (O(log N) per insert) → O(N log N) to build the tree.
+//! over that range (O(log N) per insert).
 //!
-//! This benches building a fragmented N-extent file the way a sequential write
-//! of a hole-punched / non-contiguous file does: insert N sorted, disjoint,
-//! single-block extents into an initially empty inode extent-tree root.
+//! Both strategies are benched in ONE process against the same built tree using
+//! the public `walk` / `walk_range` (so the comparison is on one rch worker — no
+//! cross-worker skew). The visitor is the exact overlap predicate the production
+//! validator runs. The validated extent sits just past the tree (logical 2N), so
+//! `walk` scans all N extents while `walk_range` reads only the covering tail.
 
 use asupersync::Cx;
 use criterion::{Criterion, criterion_group, criterion_main};
 use ffs_block::{BlockBuf, BlockDevice};
-use ffs_btree::{BlockAllocator, insert};
-use ffs_error::Result;
+use ffs_btree::{BlockAllocator, insert, walk, walk_range};
+use ffs_error::{FfsError, Result};
 use ffs_ondisk::Ext4Extent;
 use ffs_types::BlockNumber;
 use std::collections::HashMap;
 use std::hint::black_box;
 use std::sync::Mutex;
 
-/// In-memory block device (mirrors the ffs-btree test device).
 struct MemBlockDevice {
     block_size: u32,
     blocks: Mutex<HashMap<u64, Vec<u8>>>,
@@ -66,7 +67,6 @@ impl BlockDevice for MemBlockDevice {
     }
 }
 
-/// Sequential block allocator for tree node blocks.
 struct SeqAllocator {
     next: u64,
 }
@@ -83,8 +83,6 @@ impl BlockAllocator for SeqAllocator {
     }
 }
 
-/// Build an empty depth-0 extent-tree root (12-byte ext4 extent header,
-/// magic 0xF30A, max_entries 4, the inode i_block layout).
 fn empty_root() -> [u8; 60] {
     let mut root = [0u8; 60];
     root[0..2].copy_from_slice(&0xF30A_u16.to_le_bytes()); // magic
@@ -95,37 +93,93 @@ fn empty_root() -> [u8; 60] {
     root
 }
 
-/// Insert `n` disjoint single-block extents (logical 0,2,4,... so each is a
-/// distinct non-overlapping run separated by a 1-block hole).
-fn build_tree(n: u32) -> u64 {
+fn extent_range(e: &Ext4Extent) -> (u64, u64) {
+    let start = u64::from(e.logical_block);
+    let len = u64::from(e.raw_len); // benched extents are written (raw_len == len)
+    (start, start + len)
+}
+
+/// Build an N-extent tree (disjoint single-block extents at logical 0,2,4,...).
+fn build_tree(n: u32) -> (MemBlockDevice, [u8; 60]) {
     let dev = MemBlockDevice::new(4096);
     let cx = Cx::for_testing();
     let mut alloc = SeqAllocator { next: 1 };
     let mut root = empty_root();
-    let mut ok = 0_u64;
     for i in 0..n {
         let ext = Ext4Extent {
             logical_block: i * 2,
             raw_len: 1,
             physical_start: u64::from(i) + 1_000_000,
         };
-        if insert(&cx, &dev, &mut root, ext, &mut alloc).is_ok() {
-            ok += 1;
+        insert(&cx, &dev, &mut root, ext, &mut alloc).expect("insert");
+    }
+    (dev, root)
+}
+
+/// OLD overlap check: full-tree walk.
+fn validate_walk(cx: &Cx, dev: &dyn BlockDevice, root: &[u8; 60], probe: &Ext4Extent) -> Result<()> {
+    let (ns, ne) = extent_range(probe);
+    walk(cx, dev, root, &mut |e| {
+        let (es, ee) = extent_range(e);
+        if ns < ee && ne > es {
+            return Err(FfsError::InvalidGeometry("overlap".into()));
         }
-    }
-    ok
+        Ok(())
+    })?;
+    Ok(())
 }
 
-fn bench_extent_insert(c: &mut Criterion) {
-    let mut group = c.benchmark_group("extent_insert_overlap_validate");
-    for &n in &[512_u32, 2000] {
-        assert_eq!(build_tree(n), u64::from(n), "all inserts must succeed");
-        group.bench_function(format!("build_{n}_extents"), |b| {
-            b.iter(|| black_box(build_tree(black_box(n))));
+/// NEW overlap check: walk_range over the probe's logical range.
+fn validate_walk_range(
+    cx: &Cx,
+    dev: &dyn BlockDevice,
+    root: &[u8; 60],
+    probe: &Ext4Extent,
+) -> Result<()> {
+    let (ns, ne) = extent_range(probe);
+    let count = ne.min(1_u64 << 32).saturating_sub(ns);
+    walk_range(cx, dev, root, probe.logical_block, count, &mut |e| {
+        let (es, ee) = extent_range(e);
+        if ns < ee && ne > es {
+            return Err(FfsError::InvalidGeometry("overlap".into()));
+        }
+        Ok(())
+    })?;
+    Ok(())
+}
+
+fn bench_overlap_check(c: &mut Criterion) {
+    let cx = Cx::for_testing();
+    for &n in &[2000_u32, 8000] {
+        let (dev, root) = build_tree(n);
+        // Probe extent just past the tree (no real overlap): `walk` still scans
+        // all N extents; `walk_range` reads only the covering tail.
+        let probe = Ext4Extent {
+            logical_block: n * 2,
+            raw_len: 1,
+            physical_start: 9_000_000,
+        };
+        // Sanity: both agree (no overlap).
+        assert!(validate_walk(&cx, &dev, &root, &probe).is_ok());
+        assert!(validate_walk_range(&cx, &dev, &root, &probe).is_ok());
+
+        let mut group = c.benchmark_group(format!("extent_overlap_check_{n}"));
+        group.bench_function("walk_full_tree", |b| {
+            b.iter(|| black_box(validate_walk(&cx, &dev, black_box(&root), black_box(&probe))));
         });
+        group.bench_function("walk_range", |b| {
+            b.iter(|| {
+                black_box(validate_walk_range(
+                    &cx,
+                    &dev,
+                    black_box(&root),
+                    black_box(&probe),
+                ))
+            });
+        });
+        group.finish();
     }
-    group.finish();
 }
 
-criterion_group!(benches, bench_extent_insert);
+criterion_group!(benches, bench_overlap_check);
 criterion_main!(benches);
