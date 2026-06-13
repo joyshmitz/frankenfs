@@ -973,6 +973,45 @@ impl<D: ByteDevice> BlockDevice for ByteBlockDevice<D> {
         Ok(())
     }
 
+    fn write_contiguous_blocks(&self, cx: &Cx, start: BlockNumber, data: &[u8]) -> Result<()> {
+        cx_checkpoint(cx)?;
+        let block_size = usize::try_from(self.block_size)
+            .map_err(|_| FfsError::Format("block_size does not fit usize".to_owned()))?;
+        if block_size == 0 || data.len() % block_size != 0 {
+            return Err(FfsError::Format(
+                "write_contiguous_blocks: data length must be a multiple of block size".to_owned(),
+            ));
+        }
+        if data.is_empty() {
+            return Ok(());
+        }
+        let count = (data.len() / block_size) as u64;
+        let end = start
+            .0
+            .checked_add(count)
+            .ok_or_else(|| FfsError::Format("block range overflow".to_owned()))?;
+        if end > self.block_count {
+            return Err(FfsError::Format(format!(
+                "block range out of range: start={} count={} block_count={}",
+                start.0, count, self.block_count
+            )));
+        }
+        let offset = start
+            .0
+            .checked_mul(u64::from(self.block_size))
+            .ok_or_else(|| FfsError::Format("block offset overflow".to_owned()))?;
+        // One ranged write of the whole contiguous run (one `write_all_at` /
+        // `pwrite` instead of one per block). Byte-for-byte identical to the
+        // scalar default's per-block writes — block `start + i` lands at byte
+        // offset `(start + i) * block_size` either way — but the MVCC flush
+        // (bd-ryqep) coalesces dirty runs and relied on this override to avoid
+        // N syscalls; without it the byte device silently fell back to scalar.
+        // Mirrors `read_contiguous_into`.
+        self.inner.write_all_at(cx, ByteOffset(offset), data)?;
+        cx_checkpoint(cx)?;
+        Ok(())
+    }
+
     fn block_size(&self) -> u32 {
         self.block_size
     }
