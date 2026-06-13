@@ -18924,7 +18924,9 @@ impl OpenFs {
         }
 
         if is_datasum {
-            self.btrfs_capture_data_extent_csums(cx, alloc, disk_bytenr, alloc_size)?;
+            // `data` is the exact sector-aligned content just written to
+            // `disk_bytenr`, so csum it directly — no device read-back.
+            self.btrfs_capture_data_extent_csums(cx, alloc, disk_bytenr, alloc_size, Some(data))?;
         }
         Ok(alloc_size)
     }
@@ -18945,17 +18947,33 @@ impl OpenFs {
         alloc: &mut BtrfsAllocState,
         disk_bytenr: u64,
         alloc_size: u64,
+        in_memory: Option<&[u8]>,
     ) -> ffs_error::Result<()> {
         let alloc_size_usize = usize::try_from(alloc_size)
             .map_err(|_| FfsError::Format("btrfs alloc size overflow".into()))?;
         let sectorsize_usize = usize::try_from(u64::from(alloc.sectorsize))
             .map_err(|_| FfsError::Format("btrfs sectorsize overflow".into()))?;
-        let mut on_disk = vec![0_u8; alloc_size_usize];
-        self.btrfs_read_logical_into(cx, disk_bytenr, &mut on_disk)?;
+        // When the caller already holds the exact sector-aligned bytes it just
+        // wrote (the emit-aligned path), csum them in place instead of reading
+        // the extent back from the device (bd-6dm4o): regular data round-trips,
+        // so the csum is byte-identical to a read-back, and the per-write read
+        // I/O + `alloc_size` buffer allocation + logical->physical map are
+        // removed. The materialize/re-insert callers pass `None` and keep the
+        // read-back.
+        let read_buf: Vec<u8>;
+        let on_disk: &[u8] = match in_memory {
+            Some(buf) if buf.len() == alloc_size_usize => buf,
+            _ => {
+                let mut b = vec![0_u8; alloc_size_usize];
+                self.btrfs_read_logical_into(cx, disk_bytenr, &mut b)?;
+                read_buf = b;
+                &read_buf
+            }
+        };
         let max_per_item = ffs_btrfs::max_data_csums_per_item(alloc.nodesize);
         let csum_items = ffs_btrfs::build_extent_csum_items(
             disk_bytenr,
-            &on_disk,
+            on_disk,
             sectorsize_usize,
             max_per_item,
         )
@@ -19051,7 +19069,7 @@ impl OpenFs {
             .is_ok_and(|inode| inode.flags & BTRFS_INODE_NODATASUM == 0);
         if is_datasum {
             if let Err(e) =
-                self.btrfs_capture_data_extent_csums(cx, alloc, allocation.bytenr, alloc_size)
+                self.btrfs_capture_data_extent_csums(cx, alloc, allocation.bytenr, alloc_size, None)
             {
                 let _ = alloc.fs_tree.delete(&extent_key);
                 let _ = alloc
@@ -23425,6 +23443,7 @@ impl OpenFs {
                                 &mut alloc,
                                 prev_allocation.bytenr,
                                 prev_alloc_size,
+                                None,
                             ) {
                                 let _ = alloc.fs_tree.delete(&inline_key);
                                 let _ = alloc.extent_alloc.free_extent(
@@ -61081,7 +61100,7 @@ mod tests {
                 0,
             )
             .expect("register backref");
-            fs.btrfs_capture_data_extent_csums(&cx, &mut alloc, allocation.bytenr, alloc_size)
+            fs.btrfs_capture_data_extent_csums(&cx, &mut alloc, allocation.bytenr, alloc_size, None)
                 .expect("capture csums");
         }
 
