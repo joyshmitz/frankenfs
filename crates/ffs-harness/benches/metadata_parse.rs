@@ -333,6 +333,32 @@ fn run_ext4_fragmented_overwrite(image: Vec<u8>) -> FfsResult<u64> {
     Ok(fs.getattr(&cx, attr.ino)?.blocks)
 }
 
+/// Write a contiguous file block-by-block (256 sequential 4 KiB writes). Unlike
+/// the fragmented-overwrite case (which isolates the resolve hot path over a
+/// 256-extent tree), this isolates the per-block ALLOCATION / extent-grow path —
+/// the W128 profile-first finding's e2e dominator (allocate_extent: bitmap scan +
+/// persist + btree insert + MVCC staging per block). Gives the write-path agent
+/// an alloc-bound e2e measurement (bd-3wal3 / bd-6tooy).
+fn run_ext4_sequential_write(image: Vec<u8>) -> FfsResult<u64> {
+    let cx = Cx::for_testing();
+    let mut fs = OpenFs::from_device(
+        &cx,
+        Box::new(BenchByteDevice::from_vec(image)),
+        &OpenOptions::default(),
+    )?;
+    fs.enable_writes(&cx)?;
+    let attr = fs.create(&cx, InodeNumber(2), OsStr::new("seq.bin"), 0o644, 0, 0)?;
+    let block = vec![0x55_u8; BTRFS_SEQUENTIAL_WRITE_CHUNK];
+
+    for i in 0..EXT4_FRAG_BLOCKS {
+        let offset = u64::try_from(i * BTRFS_SEQUENTIAL_WRITE_CHUNK)
+            .map_err(|_| FfsError::Format("ext4 seq offset exceeds u64".to_owned()))?;
+        let written = fs.write(&cx, attr.ino, offset, &block)?;
+        assert_eq!(written, u32::try_from(block.len()).expect("chunk fits u32"));
+    }
+    Ok(fs.getattr(&cx, attr.ino)?.blocks)
+}
+
 fn bench_ext4_write_path(c: &mut Criterion) {
     let seed = ext4_seed_image();
     let mut group = c.benchmark_group("ext4_write_path");
@@ -346,6 +372,18 @@ fn bench_ext4_write_path(c: &mut Criterion) {
                 black_box(
                     run_ext4_fragmented_overwrite(image)
                         .expect("run ext4 fragmented overwrite benchmark"),
+                );
+            },
+            BatchSize::LargeInput,
+        );
+    });
+    group.bench_function("ext4_sequential_write_256blk", |b| {
+        b.iter_batched(
+            || seed.clone(),
+            |image| {
+                black_box(
+                    run_ext4_sequential_write(image)
+                        .expect("run ext4 sequential write benchmark"),
                 );
             },
             BatchSize::LargeInput,
