@@ -9417,7 +9417,7 @@ impl OpenFs {
                 // `logical_block` is the last one whose start is <= it. Binary-
                 // search to that candidate (O(log N)) instead of scanning every
                 // extent (O(N), up to ~340 per leaf) — same result, since the
-                // linear scan also returns that single covering extent (bd-2xvf0).
+                // linear scan also returns that single covering extent (bd-vzmis).
                 let pp = extents.partition_point(|ext| ext.logical_block <= logical_block);
                 if pp == 0 {
                     return Ok(None);
@@ -9448,7 +9448,7 @@ impl OpenFs {
                 }
                 // Index entries are sorted ascending by logical_block; descend
                 // into the last child whose start is <= `logical_block` (the same
-                // entry the linear scan selected) via binary search (bd-2xvf0).
+                // entry the linear scan selected) via binary search (bd-vzmis).
                 let pp = indexes.partition_point(|idx| idx.logical_block <= logical_block);
                 if pp == 0 {
                     return Ok(None);

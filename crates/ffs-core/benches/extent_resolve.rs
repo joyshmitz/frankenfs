@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 #![allow(clippy::cast_possible_truncation)]
 
-//! Same-machine A/B for the ext4 extent-leaf lookup (bd-2xvf0).
+//! Same-machine A/B for the ext4 extent-leaf lookup (bd-vzmis).
 //!
 //! `walk_extent_tree`'s Leaf arm finds the extent covering a logical block.
 //! Extents are sorted ascending by `logical_block` and non-overlapping, so the
