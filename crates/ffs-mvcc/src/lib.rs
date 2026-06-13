@@ -650,6 +650,18 @@ impl SsiDangerousStructure {
     }
 }
 
+fn btree_map_key_span<V>(map: &BTreeMap<BlockNumber, V>) -> Option<(BlockNumber, BlockNumber)> {
+    Some((*map.first_key_value()?.0, *map.last_key_value()?.0))
+}
+
+fn btree_set_key_span(set: &BTreeSet<BlockNumber>) -> Option<(BlockNumber, BlockNumber)> {
+    Some((*set.first()?, *set.last()?))
+}
+
+fn key_in_span(key: BlockNumber, span: (BlockNumber, BlockNumber)) -> bool {
+    span.0 <= key && key <= span.1
+}
+
 fn ssi_incoming_edge(txn: &Transaction, record: &CommittedTxnRecord) -> Option<SsiRwEdge> {
     // rw-antidependency: a block the committed txn READ and we WRITE. This is a
     // set intersection of `record.read_set` and our `write_set`. Both are sorted
@@ -668,13 +680,20 @@ fn ssi_incoming_edge(txn: &Transaction, record: &CommittedTxnRecord) -> Option<S
         write_version: CommitSeq(0),
     };
     if write_set.len() < read_set.len() {
-        write_set
-            .keys()
-            .find_map(|&block| read_set.get(&block).map(|&rv| mk(block, rv)))
+        let read_span = btree_map_key_span(read_set)?;
+        write_set.keys().find_map(|&block| {
+            if key_in_span(block, read_span) {
+                read_set.get(&block).map(|&rv| mk(block, rv))
+            } else {
+                None
+            }
+        })
     } else {
-        read_set
-            .iter()
-            .find_map(|(&block, &rv)| write_set.contains_key(&block).then(|| mk(block, rv)))
+        let write_span = btree_map_key_span(write_set)?;
+        read_set.iter().find_map(|(&block, &rv)| {
+            (key_in_span(block, write_span) && write_set.contains_key(&block))
+                .then(|| mk(block, rv))
+        })
     }
 }
 
@@ -693,13 +712,19 @@ fn ssi_outgoing_edge(txn: &Transaction, record: &CommittedTxnRecord) -> Option<S
         write_version: record.commit_seq,
     };
     if write_set.len() < read_set.len() {
-        write_set
-            .iter()
-            .find_map(|&block| read_set.get(&block).map(|&rv| mk(block, rv)))
+        let read_span = btree_map_key_span(read_set)?;
+        write_set.iter().find_map(|&block| {
+            if key_in_span(block, read_span) {
+                read_set.get(&block).map(|&rv| mk(block, rv))
+            } else {
+                None
+            }
+        })
     } else {
-        read_set
-            .iter()
-            .find_map(|(&block, &rv)| write_set.contains(&block).then(|| mk(block, rv)))
+        let write_span = btree_set_key_span(write_set)?;
+        read_set.iter().find_map(|(&block, &rv)| {
+            (key_in_span(block, write_span) && write_set.contains(&block)).then(|| mk(block, rv))
+        })
     }
 }
 
@@ -2376,7 +2401,7 @@ impl MvccStore {
     #[allow(clippy::result_large_err)]
     fn apply_fcw_commit(
         &mut self,
-        mut txn: Transaction,
+        txn: Transaction,
     ) -> Result<(CommitSeq, Vec<BlockNumber>), (CommitError, Transaction)> {
         if let Err(error) = validate_transaction_id(txn.id()) {
             return Err((error, txn));
@@ -4520,13 +4545,15 @@ mod tests {
         const N: u64 = 64;
         const OVERLAY: u64 = 32;
         let cx = test_cx();
+        let block_count = usize::try_from(N).expect("test block count fits usize");
+        let block_size = BS as usize;
 
         let base = ReadRunCountingDevice::new(BS, N);
         for b in 0..N {
             base.write_block(
                 &cx,
                 BlockNumber(b),
-                &vec![u8::try_from(b % 251).unwrap(); BS as usize],
+                &vec![u8::try_from(b % 251).unwrap(); block_size],
             )
             .expect("seed base");
         }
@@ -4535,7 +4562,7 @@ mod tests {
         seed_block(
             &mut store.write(),
             BlockNumber(OVERLAY),
-            &vec![0xEE; BS as usize],
+            &vec![0xEE; block_size],
         );
         let snap = store.read().current_snapshot();
         let dev = MvccBlockDevice::new(base, Arc::clone(&store), snap);
@@ -4549,7 +4576,7 @@ mod tests {
             .load(std::sync::atomic::Ordering::SeqCst);
 
         dev.base().reset();
-        let mut out = vec![0_u8; N as usize * BS as usize];
+        let mut out = vec![0_u8; block_count * block_size];
         dev.read_contiguous_into(&cx, BlockNumber(0), &mut out)
             .expect("contiguous read into");
         let new_ranged = dev.base().ranged_runs.read().len();
@@ -4559,17 +4586,17 @@ mod tests {
             .load(std::sync::atomic::Ordering::SeqCst);
 
         for (i, expected) in old_bufs.iter().enumerate() {
-            let start = i * BS as usize;
+            let start = i * block_size;
             assert_eq!(
                 expected.as_slice(),
-                &out[start..start + BS as usize],
+                &out[start..start + block_size],
                 "block {i} bytes diverged"
             );
         }
         let overlay_start =
-            usize::try_from(OVERLAY).expect("overlay index fits usize") * BS as usize;
+            usize::try_from(OVERLAY).expect("overlay index fits usize") * block_size;
         assert_eq!(
-            &out[overlay_start..overlay_start + BS as usize],
+            &out[overlay_start..overlay_start + block_size],
             &[0xEE; BS as usize]
         );
 
@@ -10467,6 +10494,84 @@ mod tests {
         assert!(
             matches!(err, CommitError::SsiConflict { pivot_block, .. } if pivot_block == BlockNumber(0)),
             "expected SsiConflict on block 0, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn ssi_disjoint_key_spans_do_not_create_edges() {
+        let mut pivot = Transaction::new(TxnId(10), Snapshot { high: CommitSeq(0) });
+        for block in 0..192_u64 {
+            pivot.record_read(BlockNumber(block), CommitSeq(1));
+        }
+        pivot.stage_write(BlockNumber(1_000_000), vec![1; 64]);
+
+        let record = CommittedTxnRecord {
+            txn_id: TxnId(11),
+            commit_seq: CommitSeq(1),
+            snapshot: Snapshot { high: CommitSeq(0) },
+            write_set: BTreeSet::from([BlockNumber(2_000_000)]),
+            read_set: (10_000..10_192)
+                .map(|block| (BlockNumber(block), CommitSeq(1)))
+                .collect(),
+        };
+
+        assert!(ssi_incoming_edge(&pivot, &record).is_none());
+        assert!(ssi_outgoing_edge(&pivot, &record).is_none());
+        let (checks_performed, dangerous_structure) =
+            detect_ssi_dangerous_structure(&pivot, [&record]);
+        assert_eq!(checks_performed, 1);
+        assert!(dangerous_structure.is_none());
+    }
+
+    #[test]
+    fn ssi_span_guard_preserves_min_intersection_tiebreaks() {
+        use sha2::{Digest, Sha256};
+
+        let mut pivot = Transaction::new(TxnId(20), Snapshot { high: CommitSeq(0) });
+        pivot.record_read(BlockNumber(0), CommitSeq(11));
+        pivot.record_read(BlockNumber(1), CommitSeq(12));
+        pivot.stage_write(BlockNumber(2), vec![1; 64]);
+        pivot.stage_write(BlockNumber(3), vec![1; 64]);
+
+        let record = CommittedTxnRecord {
+            txn_id: TxnId(21),
+            commit_seq: CommitSeq(5),
+            snapshot: Snapshot { high: CommitSeq(0) },
+            write_set: BTreeSet::from([BlockNumber(0), BlockNumber(1)]),
+            read_set: [
+                (BlockNumber(2), CommitSeq(13)),
+                (BlockNumber(3), CommitSeq(14)),
+            ]
+            .into_iter()
+            .collect(),
+        };
+
+        let (checks_performed, dangerous_structure) =
+            detect_ssi_dangerous_structure(&pivot, [&record]);
+        let dangerous_structure = dangerous_structure.expect("both rw edges");
+        assert_eq!(checks_performed, 1);
+        assert_eq!(dangerous_structure.incoming.block, BlockNumber(2));
+        assert_eq!(dangerous_structure.incoming.read_version, CommitSeq(13));
+        assert_eq!(dangerous_structure.outgoing.block, BlockNumber(0));
+        assert_eq!(dangerous_structure.outgoing.read_version, CommitSeq(11));
+        assert_eq!(dangerous_structure.outgoing.write_version, CommitSeq(5));
+
+        let mut hasher = Sha256::new();
+        hasher.update(
+            u64::try_from(checks_performed)
+                .expect("test check count fits u64")
+                .to_le_bytes(),
+        );
+        hasher.update(dangerous_structure.incoming.block.0.to_le_bytes());
+        hasher.update(dangerous_structure.incoming.read_version.0.to_le_bytes());
+        hasher.update(dangerous_structure.incoming.write_version.0.to_le_bytes());
+        hasher.update(dangerous_structure.outgoing.block.0.to_le_bytes());
+        hasher.update(dangerous_structure.outgoing.read_version.0.to_le_bytes());
+        hasher.update(dangerous_structure.outgoing.write_version.0.to_le_bytes());
+        let golden = hex_lower(&hasher.finalize());
+        assert_eq!(
+            golden, "1800c846028c2f980ca158d0ea6c41114d05e293588da3cbd25ad3b8f001eb37",
+            "SSI span-guard golden digest changed"
         );
     }
 
