@@ -2376,16 +2376,57 @@ impl MvccStore {
     #[allow(clippy::result_large_err)]
     fn apply_fcw_commit(
         &mut self,
-        txn: Transaction,
+        mut txn: Transaction,
     ) -> Result<(CommitSeq, Vec<BlockNumber>), (CommitError, Transaction)> {
         if let Err(error) = validate_transaction_id(txn.id()) {
             return Err((error, txn));
         }
 
-        let resolved_writes = match self.resolved_writes_for_commit(&txn) {
-            Ok(writes) => writes,
-            Err(error) => return Err((error, txn)),
-        };
+        // Resolve conflicts before moving staged writes out of the transaction.
+        // The common no-conflict path stays borrow-only until the commit is
+        // known to succeed, so aborts still return the original transaction
+        // while successful commits can move owned staged bytes into storage.
+        let snapshot_high = txn.snapshot.high;
+        let effective = self.effective_policy();
+        let mut merged_writes = BTreeMap::new();
+        for (&block, staged) in &txn.writes {
+            let observed = self.latest_commit_seq(block);
+            if observed <= snapshot_high {
+                continue;
+            }
+            if effective == ConflictPolicy::Strict {
+                return Err((
+                    CommitError::Conflict {
+                        block,
+                        snapshot: snapshot_high,
+                        observed,
+                    },
+                    txn,
+                ));
+            }
+
+            let proof = txn.merge_proof(block).cloned().unwrap_or_default();
+            let base = self
+                .version_bytes_at(block, snapshot_high)
+                .unwrap_or_default();
+            let latest = self.version_bytes_at(block, observed).unwrap_or_default();
+            match proof.merge_bytes(&base, &latest, staged) {
+                Some(merged) => {
+                    merged_writes.insert(block, merged);
+                }
+                None => {
+                    return Err((
+                        CommitError::Conflict {
+                            block,
+                            snapshot: snapshot_high,
+                            observed,
+                        },
+                        txn,
+                    ));
+                }
+            }
+        }
+
         let commit_seq = match self.next_commit_seq() {
             Ok(seq) => seq,
             Err(error) => return Err((error, txn)),
@@ -2393,21 +2434,27 @@ impl MvccStore {
         let chain_cap = self.compression_policy.max_chain_length;
         let Transaction {
             id: txn_id,
-            snapshot: _,
-            writes: _,
-            merge_proofs: _,
-            reads: _,
+            writes,
             cow_writes,
             cow_orphans,
+            ..
         } = txn;
         let dedup_enabled = self.compression_policy.dedup_identical;
+        let store_full = matches!(self.compression_policy.algo, CompressionAlgo::None);
 
-        for (block, version_bytes) in resolved_writes {
-            let version_data = if dedup_enabled {
-                self.maybe_dedup(block, &version_bytes)
-            } else {
-                self.compress_data(&version_bytes)
-            };
+        for (block, staged_bytes) in writes {
+            let version_bytes = merged_writes.remove(&block).unwrap_or(staged_bytes);
+            // Move the owned bytes straight into `Full` for the no-compression
+            // store (the prior path re-`to_vec`d them in `compress_data`). Dedup
+            // and non-`None` compression keep their existing output.
+            let version_data =
+                if dedup_enabled && self.is_identical_to_latest(block, &version_bytes) {
+                    VersionData::Identical
+                } else if store_full {
+                    VersionData::Full(version_bytes)
+                } else {
+                    self.compress_data(&version_bytes)
+                };
 
             self.versions.entry(block).or_default().push(BlockVersion {
                 block,
@@ -2433,9 +2480,24 @@ impl MvccStore {
                 self.enforce_physical_chain_cap(block, cap);
             }
         }
+        debug_assert!(merged_writes.is_empty());
 
         let deferred = Self::collect_cow_deferred_frees(&cow_writes, cow_orphans);
         Ok((commit_seq, deferred))
+    }
+
+    /// Whether `bytes` is byte-identical to the latest committed version of
+    /// `block` — the dedup-`Identical` predicate, factored out of `maybe_dedup`
+    /// so the commit apply path can test it without re-`to_vec`ing the data.
+    fn is_identical_to_latest(&self, block: BlockNumber, bytes: &[u8]) -> bool {
+        let Some(versions) = self.versions.get(&block) else {
+            return false;
+        };
+        if versions.is_empty() {
+            return false;
+        }
+        compression::resolve_data_with(versions, versions.len() - 1, |v| &v.data)
+            .is_some_and(|existing| existing.as_ref() == bytes)
     }
 
     #[allow(clippy::result_large_err)]
@@ -4788,6 +4850,31 @@ mod tests {
             matches!(err, CommitError::Conflict { block: b, .. } if b == block),
             "expected strict FCW conflict, got {err:?}"
         );
+    }
+
+    #[test]
+    fn apply_fcw_commit_returns_original_writes_on_conflict_bd_csfbv() {
+        let mut store = MvccStore::new();
+        store.set_conflict_policy(ConflictPolicy::Strict);
+        let block = BlockNumber(8);
+        seed_block(&mut store, block, &[0]);
+
+        let mut first = store.begin();
+        let mut second = store.begin();
+        first.stage_write(block, vec![0, 1]);
+        second.stage_write(block, vec![0, 2]);
+
+        store.commit(first).expect("first write commits");
+
+        let (err, returned) = store
+            .commit_fcw_internal(second)
+            .expect_err("strict policy must reject stale write");
+        assert!(
+            matches!(err, CommitError::Conflict { block: b, .. } if b == block),
+            "expected strict FCW conflict, got {err:?}"
+        );
+        assert_eq!(returned.pending_writes(), 1);
+        assert_eq!(returned.staged_write(block), Some(&[0, 2][..]));
     }
 
     #[test]
