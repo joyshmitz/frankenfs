@@ -2525,6 +2525,44 @@ impl MvccStore {
             .is_some_and(|existing| existing.as_ref() == bytes)
     }
 
+    #[inline]
+    fn merged_writes_after_preflight(
+        &self,
+        txn: &Transaction,
+    ) -> Result<BTreeMap<BlockNumber, Vec<u8>>, CommitError> {
+        let snapshot_high = txn.snapshot.high;
+        let effective = self.effective_policy();
+        let mut merged_writes = BTreeMap::new();
+        for (&block, staged) in &txn.writes {
+            let observed = self.latest_commit_seq(block);
+            if observed <= snapshot_high {
+                continue;
+            }
+            if effective == ConflictPolicy::Strict {
+                return Err(CommitError::Conflict {
+                    block,
+                    snapshot: snapshot_high,
+                    observed,
+                });
+            }
+
+            let proof = txn.merge_proof(block).cloned().unwrap_or_default();
+            let base = self
+                .version_bytes_at(block, snapshot_high)
+                .unwrap_or_default();
+            let latest = self.version_bytes_at(block, observed).unwrap_or_default();
+            let Some(merged) = proof.merge_bytes(&base, &latest, staged) else {
+                return Err(CommitError::Conflict {
+                    block,
+                    snapshot: snapshot_high,
+                    observed,
+                });
+            };
+            merged_writes.insert(block, merged);
+        }
+        Ok(merged_writes)
+    }
+
     #[allow(clippy::result_large_err)]
     fn commit_ssi_internal(
         &mut self,
@@ -2540,10 +2578,11 @@ impl MvccStore {
             Err(e) => return Err((e, txn)),
         };
 
-        let resolved_writes = match self.resolved_writes_for_commit(&txn) {
+        let mut merged_writes = match self.merged_writes_after_preflight(&txn) {
             Ok(writes) => writes,
             Err(error) => return Err((error, txn)),
         };
+
         let write_keys: BTreeSet<BlockNumber> = txn.write_set().keys().copied().collect();
         let commit_seq = match self.next_commit_seq() {
             Ok(seq) => seq,
@@ -2553,20 +2592,30 @@ impl MvccStore {
         let Transaction {
             id: txn_id,
             snapshot,
-            writes: _,
+            writes,
             merge_proofs: _,
             reads,
             cow_writes,
             cow_orphans,
         } = txn;
         let dedup_enabled = self.compression_policy.dedup_identical;
+        let store_full = matches!(self.compression_policy.algo, CompressionAlgo::None);
 
-        for (block, version_bytes) in resolved_writes {
-            let version_data = if dedup_enabled {
-                self.maybe_dedup(block, &version_bytes)
-            } else {
-                self.compress_data(&version_bytes)
-            };
+        for (block, staged_bytes) in writes {
+            let version_bytes = merged_writes.remove(&block).unwrap_or(staged_bytes);
+            let version_data =
+                if dedup_enabled && self.is_identical_to_latest(block, &version_bytes) {
+                    trace!(
+                        block = block.0,
+                        bytes_saved = version_bytes.len(),
+                        "version_dedup: identical to previous"
+                    );
+                    VersionData::Identical
+                } else if store_full {
+                    VersionData::Full(version_bytes)
+                } else {
+                    self.compress_data(&version_bytes)
+                };
 
             self.versions.entry(block).or_default().push(BlockVersion {
                 block,
@@ -2592,6 +2641,7 @@ impl MvccStore {
                 self.enforce_physical_chain_cap(block, cap);
             }
         }
+        debug_assert!(merged_writes.is_empty());
 
         let read_set_size = reads.len();
         let write_set_size = write_keys.len();
@@ -4877,6 +4927,120 @@ mod tests {
             matches!(err, CommitError::Conflict { block: b, .. } if b == block),
             "expected strict FCW conflict, got {err:?}"
         );
+    }
+
+    #[test]
+    fn commit_ssi_move_through_preserves_full_bytes_and_golden_bd_9m1g4() {
+        use sha2::{Digest, Sha256};
+
+        let mut store = MvccStore::with_compression_policy(CompressionPolicy {
+            dedup_identical: false,
+            max_chain_length: None,
+            algo: CompressionAlgo::None,
+        });
+        let block_a = BlockNumber(31);
+        let block_b = BlockNumber(32);
+        let bytes_a = vec![0xA5; 16];
+        let bytes_b = vec![0x5A; 8];
+
+        let mut txn = store.begin();
+        txn.stage_write(block_a, bytes_a.clone());
+        txn.stage_write(block_b, bytes_b.clone());
+
+        let commit_seq = store.commit_ssi(txn).expect("SSI commit");
+        assert_eq!(commit_seq, CommitSeq(1));
+
+        let chain_a = store.versions.get(&block_a).expect("block_a chain");
+        let chain_b = store.versions.get(&block_b).expect("block_b chain");
+        let VersionData::Full(stored_a) = &chain_a[0].data else {
+            panic!("block_a should store full bytes");
+        };
+        let VersionData::Full(stored_b) = &chain_b[0].data else {
+            panic!("block_b should store full bytes");
+        };
+        assert_eq!(stored_a, &bytes_a);
+        assert_eq!(stored_b, &bytes_b);
+
+        let record = store.ssi_log.last().expect("SSI record");
+        assert_eq!(record.read_set.len(), 0);
+        assert_eq!(record.write_set, BTreeSet::from([block_a, block_b]));
+
+        let mut hasher = Sha256::new();
+        hasher.update(commit_seq.0.to_le_bytes());
+        for (block, bytes) in [
+            (block_a, stored_a.as_slice()),
+            (block_b, stored_b.as_slice()),
+        ] {
+            hasher.update(block.0.to_le_bytes());
+            let len = u64::try_from(bytes.len()).expect("test bytes length fits u64");
+            hasher.update(len.to_le_bytes());
+            hasher.update(bytes);
+        }
+        let read_set_len =
+            u64::try_from(record.read_set.len()).expect("test read-set length fits u64");
+        hasher.update(read_set_len.to_le_bytes());
+        for block in &record.write_set {
+            hasher.update(block.0.to_le_bytes());
+        }
+        let golden = hex_lower(&hasher.finalize());
+        assert_eq!(
+            golden, "dc236d4739346b0642de6982db3bf2afee6019b1f4637fd65699f7a8e6e984be",
+            "SSI move-through golden digest changed"
+        );
+    }
+
+    #[test]
+    fn commit_ssi_move_through_preserves_append_only_merge_bd_9m1g4() {
+        let mut store = MvccStore::new();
+        let block = BlockNumber(33);
+        seed_block(&mut store, block, &[0]);
+
+        let mut first = store.begin();
+        let mut second = store.begin();
+        first.stage_write_with_proof(block, vec![0, 1], append_only_proof(1));
+        second.stage_write_with_proof(block, vec![0, 2], append_only_proof(1));
+
+        store.commit_ssi(first).expect("first append");
+        store.commit_ssi(second).expect("second append merges");
+
+        let snapshot = store.current_snapshot();
+        let visible = store.read_visible(block, snapshot).expect("visible bytes");
+        assert_eq!(visible.as_ref(), &[0, 1, 2]);
+
+        let chain = store.versions.get(&block).expect("block chain");
+        let VersionData::Full(stored) = &chain[2].data else {
+            panic!("merged SSI append should store full bytes");
+        };
+        assert_eq!(stored, &[0, 1, 2]);
+    }
+
+    #[test]
+    fn commit_ssi_move_through_returns_original_txn_on_fcw_conflict_bd_9m1g4() {
+        let mut store = MvccStore::new();
+        store.set_conflict_policy(ConflictPolicy::Strict);
+        let block = BlockNumber(34);
+        seed_block(&mut store, block, &[0]);
+
+        let mut first = store.begin();
+        let mut second = store.begin();
+        first.stage_write(block, vec![0, 1]);
+        second.stage_write(block, vec![0, 2]);
+
+        store.commit_ssi(first).expect("first write");
+
+        let (err, returned) = store
+            .commit_ssi_internal(second)
+            .expect_err("strict FCW conflict");
+        assert!(
+            matches!(err, CommitError::Conflict { block: b, .. } if b == block),
+            "expected strict FCW conflict, got {err:?}"
+        );
+        assert_eq!(returned.pending_writes(), 1);
+        assert_eq!(returned.staged_write(block), Some(&[0, 2][..]));
+
+        let snapshot = store.current_snapshot();
+        let visible = store.read_visible(block, snapshot).expect("visible bytes");
+        assert_eq!(visible.as_ref(), &[0, 1]);
     }
 
     #[test]
