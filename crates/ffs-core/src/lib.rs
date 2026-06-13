@@ -7334,7 +7334,17 @@ impl OpenFs {
         let ctx = self
             .btrfs_context()
             .ok_or_else(|| FfsError::Format("not a btrfs filesystem".into()))?;
-        for chunk in &ctx.chunks {
+        // ctx.chunks is sorted ascending by key.offset (build_chunk_map sorts it)
+        // and covers disjoint logical ranges, so the only chunk that can cover
+        // `logical` is the last one whose start is <= logical. Binary-search to
+        // that candidate instead of scanning every chunk: this runs once per
+        // chunk-span of every read (btrfs_read_logical_into's loop), itself
+        // per-extent in btrfs_read_file — a redundant linear scan next to the
+        // already-binary-searched map_logical_to_physical. O(chunks) -> O(log)
+        // (bd-yrt8c, dual of bd-6u6xb).
+        let pp = ctx.chunks.partition_point(|c| c.key.offset <= logical);
+        if pp > 0 {
+            let chunk = &ctx.chunks[pp - 1];
             let end =
                 chunk
                     .key
@@ -7344,7 +7354,7 @@ impl OpenFs {
                         block: logical,
                         detail: "btrfs chunk logical range overflow".into(),
                     })?;
-            if logical >= chunk.key.offset && logical < end {
+            if logical < end {
                 return Ok(end);
             }
         }

@@ -42,5 +42,9 @@ tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }
 name = "extent_resolve"
 harness = false
 
+[[bench]]
+name = "chunk_end_resolve"
+harness = false
+
 [lints]
 workspace = true
