@@ -8908,6 +8908,7 @@ impl OpenFs {
                                 u32::try_from(gidx)
                                     .expect("group index is bounded by ext4 u32 group_count"),
                             );
+                            let group_free_blocks = u64::from(alloc.groups[gidx].free_blocks);
                             let run = if let Some(run) =
                                 alloc.groups[gidx].cached_block_largest_free_run()
                             {
@@ -8915,6 +8916,9 @@ impl OpenFs {
                             } else {
                                 let blocks_in_group = alloc.geo.blocks_in_group(group);
                                 let bitmap = self.read_block_bitmap(cx, group)?;
+                                if group_free_blocks <= best {
+                                    continue;
+                                }
                                 let run = bitmap_largest_free_run(&bitmap, blocks_in_group);
                                 alloc.groups[gidx].block_largest_free_run = Some(run);
                                 run

@@ -364,6 +364,17 @@ fn largest_free_run_bitmap_scan_groups(bitmaps: &[Vec<u8>]) -> u64 {
         .unwrap_or(0)
 }
 
+fn largest_free_run_pruned_bitmap_scan_groups(bitmaps: &[Vec<u8>], free_blocks: &[u32]) -> u64 {
+    let mut best = 0_u64;
+    for (bitmap, &free_blocks) in bitmaps.iter().zip(free_blocks) {
+        if u64::from(free_blocks) <= best {
+            continue;
+        }
+        best = best.max(u64::from(bitmap_largest_free_run(bitmap, 32768)));
+    }
+    best
+}
+
 fn largest_free_run_cached_groups(groups: &[GroupStats]) -> u64 {
     groups
         .iter()
@@ -409,6 +420,36 @@ fn bench_largest_free_run_cache_vs_bitmap_scan(c: &mut Criterion) {
     });
     group.bench_function("cached_group_stats_128_groups", |b| {
         b.iter(|| black_box(largest_free_run_cached_groups(black_box(&groups))));
+    });
+    group.finish();
+}
+
+fn bench_largest_free_run_free_count_prune(c: &mut Criterion) {
+    let mut bitmaps: Vec<Vec<u8>> = Vec::with_capacity(128);
+    bitmaps.push(vec![0_u8; 4096]);
+    bitmaps.extend((1..128).map(|_| make_fragmented_bitmap()));
+    let free_blocks: Vec<u32> = bitmaps
+        .iter()
+        .map(|bitmap| bitmap_count_free(bitmap, 32768))
+        .collect();
+
+    debug_assert_eq!(
+        largest_free_run_bitmap_scan_groups(&bitmaps),
+        largest_free_run_pruned_bitmap_scan_groups(&bitmaps, &free_blocks),
+        "free-block-count pruning must preserve the maximum free run"
+    );
+
+    let mut group = c.benchmark_group("largest_free_run_free_count_prune_ab");
+    group.bench_function("bitmap_scan_128_groups", |b| {
+        b.iter(|| black_box(largest_free_run_bitmap_scan_groups(black_box(&bitmaps))));
+    });
+    group.bench_function("free_count_pruned_128_groups", |b| {
+        b.iter(|| {
+            black_box(largest_free_run_pruned_bitmap_scan_groups(
+                black_box(&bitmaps),
+                black_box(&free_blocks),
+            ))
+        });
     });
     group.finish();
 }
@@ -733,6 +774,7 @@ criterion_group!(
     bench_largest_free_run,
     bench_largest_free_run_word_vs_halfword,
     bench_largest_free_run_cache_vs_bitmap_scan,
+    bench_largest_free_run_free_count_prune,
     bench_rank,
     bench_select,
     bench_select0_in_block_bit_scan_vs_broadword,
