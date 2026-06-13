@@ -45,5 +45,9 @@ harness = false
 name = "csum_lookup"
 harness = false
 
+[[bench]]
+name = "floor_node_scan"
+harness = false
+
 [lints]
 workspace = true

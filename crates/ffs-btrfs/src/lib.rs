@@ -2237,17 +2237,16 @@ fn floor_descend(
     match node.as_ref() {
         BtrfsParsedNode::Leaf { block, items } => {
             let block = block.as_ref();
-            // Leaf items are sorted ascending; the floor is the last `<= target`.
-            let mut best: Option<&BtrfsItem> = None;
-            for item in items {
-                if key_cmp(&item.key, target) == Ordering::Greater {
-                    break;
-                }
-                best = Some(item);
-            }
-            let Some(item) = best else {
+            // Leaf items are sorted ascending by key; the floor is the last item
+            // `<= target`. Binary-search to it instead of scanning the whole node
+            // (a 16 KiB leaf packs hundreds of items, and a floor descent visits
+            // one node per tree level on every read_file extent fetch — bd-hv6ww,
+            // the within-node dual of bd-6u6xb). O(items) -> O(log items).
+            let pp = items.partition_point(|item| key_cmp(&item.key, target) != Ordering::Greater);
+            if pp == 0 {
                 return Ok(None);
-            };
+            }
+            let item = &items[pp - 1];
             let off =
                 usize::try_from(item.data_offset).map_err(|_| ParseError::IntegerConversion {
                     field: "data_offset",
@@ -2270,17 +2269,15 @@ fn floor_descend(
             }))
         }
         BtrfsParsedNode::Internal { ptrs } => {
-            // Rightmost child whose subtree-minimum key is `<= target`.
-            let mut chosen: Option<u64> = None;
-            for kp in ptrs {
-                if key_cmp(&kp.key, target) == Ordering::Greater {
-                    break;
-                }
-                chosen = Some(kp.blockptr);
-            }
-            let Some(blockptr) = chosen else {
+            // Key-ptrs are sorted ascending by key (each key is the child
+            // subtree's minimum); the floor child is the rightmost whose key is
+            // `<= target`. Binary-search to it instead of scanning every ptr
+            // (bd-hv6ww). O(ptrs) -> O(log ptrs).
+            let pp = ptrs.partition_point(|kp| key_cmp(&kp.key, target) != Ordering::Greater);
+            if pp == 0 {
                 return Ok(None);
-            };
+            }
+            let blockptr = ptrs[pp - 1].blockptr;
             if blockptr % nodesize_u64 != 0 {
                 return Err(ParseError::InvalidField {
                     field: "blockptr",
