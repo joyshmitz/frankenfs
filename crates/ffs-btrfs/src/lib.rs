@@ -3166,6 +3166,23 @@ impl InMemoryCowBtrfsTree {
         Ok(self.root)
     }
 
+    /// Insert `item` at `key`, or replace the existing exact-key item.
+    ///
+    /// This preserves the existing sorted-key COW mutation semantics while
+    /// avoiding caller-side speculative update followed by insert fallback.
+    ///
+    /// # Errors
+    /// Returns the same COW-tree structural errors as [`Self::insert`].
+    pub fn upsert(&mut self, key: BtrfsKey, item: &[u8]) -> Result<u64, BtrfsMutationError> {
+        self.insert_entry(
+            BtrfsTreeItem {
+                key,
+                data: item.to_vec(),
+            },
+            true,
+        )
+    }
+
     /// Insert `insert_item` at `insert_key`, then update `update_key` to
     /// `update_item` as one atomic COW mutation.
     ///
@@ -9435,6 +9452,80 @@ mod tests {
         let entries = tree.range(&key, &key).expect("point range");
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].1, b"new");
+    }
+
+    fn bd_hfkty_csum_key(block_idx: u64) -> BtrfsKey {
+        BtrfsKey {
+            objectid: BTRFS_EXTENT_CSUM_OBJECTID,
+            item_type: BTRFS_ITEM_EXTENT_CSUM,
+            offset: block_idx * 4096,
+        }
+    }
+
+    fn bd_hfkty_csum_payload(block_idx: u64, revision: usize) -> Vec<u8> {
+        let mut payload = Vec::with_capacity(16);
+        payload.extend_from_slice(&block_idx.to_le_bytes());
+        payload.extend_from_slice(
+            &u64::try_from(revision)
+                .expect("test revision fits in u64")
+                .wrapping_mul(0x9E37_79B9)
+                .to_le_bytes(),
+        );
+        payload
+    }
+
+    #[test]
+    fn upsert_matches_update_or_insert_and_preserves_order_bd_hfkty() {
+        let mut legacy = InMemoryCowBtrfsTree::new(5).expect("legacy tree");
+        let mut upserted = InMemoryCowBtrfsTree::new(5).expect("upsert tree");
+        let write_order = [9_u64, 3, 27, 12, 3, 45, 27, 6, 51, 9, 60, 1, 12, 33];
+
+        for (revision, block_idx) in write_order.into_iter().enumerate() {
+            let key = bd_hfkty_csum_key(block_idx);
+            let payload = bd_hfkty_csum_payload(block_idx, revision);
+            legacy
+                .update(&key, &payload)
+                .or_else(|err| match err {
+                    BtrfsMutationError::KeyNotFound => legacy.insert(key, &payload),
+                    other => Err(other),
+                })
+                .expect("legacy update-or-insert");
+            upserted.upsert(key, &payload).expect("upsert");
+        }
+
+        let lo = bd_hfkty_csum_key(0);
+        let hi = bd_hfkty_csum_key(u64::MAX / 4096);
+        let legacy_entries = legacy.range(&lo, &hi).expect("legacy range");
+        let upsert_entries = upserted.range(&lo, &hi).expect("upsert range");
+        assert_eq!(upsert_entries, legacy_entries);
+        assert_eq!(
+            upsert_entries
+                .iter()
+                .map(|(key, _)| key.offset / 4096)
+                .collect::<Vec<_>>(),
+            vec![1, 3, 6, 9, 12, 27, 33, 45, 51, 60]
+        );
+
+        let mut digest = Sha256::new();
+        for (key, data) in &upsert_entries {
+            digest.update(key.objectid.to_le_bytes());
+            digest.update([key.item_type]);
+            digest.update(key.offset.to_le_bytes());
+            digest.update(
+                u64::try_from(data.len())
+                    .expect("test payload length fits")
+                    .to_le_bytes(),
+            );
+            digest.update(data);
+        }
+        let digest_hex = hex_lower(digest.finalize().as_ref());
+        assert_eq!(
+            digest_hex,
+            "a4098f58b4744652ef7cf8b227537c092989ffc8b91712c5a60c73d89ab42644"
+        );
+        println!(
+            "BD_HFKTY_CSUM_UPSERT_GOLDEN_BEGIN\n{digest_hex}\nBD_HFKTY_CSUM_UPSERT_GOLDEN_END"
+        );
     }
 
     fn bd_hfkty_inode_key() -> BtrfsKey {

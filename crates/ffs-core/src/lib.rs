@@ -19054,11 +19054,7 @@ impl OpenFs {
         for (key, value) in csum_items {
             alloc
                 .csum_tree
-                .update(&key, &value)
-                .or_else(|err| match err {
-                    BtrfsMutationError::KeyNotFound => alloc.csum_tree.insert(key, &value),
-                    other => Err(other),
-                })
+                .upsert(key, &value)
                 .map_err(|e| btrfs_mutation_to_ffs(&e))?;
         }
         Ok(())
