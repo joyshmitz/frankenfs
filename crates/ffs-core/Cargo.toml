@@ -71,5 +71,9 @@ harness = false
 name = "ext4_write_extent_cache"
 harness = false
 
+[[bench]]
+name = "ext4_write_resolve"
+harness = false
+
 [lints]
 workspace = true

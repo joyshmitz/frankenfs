@@ -16310,18 +16310,26 @@ impl OpenFs {
                 cached_extents = Some(self.collect_extents_with_scope(cx, scope, &inode)?);
             }
             let extents = cached_extents.as_deref().unwrap_or(&[]);
-            let resolved = extents.iter().find_map(|e| {
-                if logical_block >= e.logical_block
-                    && logical_block < e.logical_block + u32::from(e.actual_len())
-                {
-                    Some((
-                        BlockNumber(e.physical_start + u64::from(logical_block - e.logical_block)),
-                        e.is_unwritten(),
-                    ))
-                } else {
-                    None
-                }
-            });
+            // Extents come back sorted ascending by logical_block and are
+            // non-overlapping, so the only candidate covering `logical_block` is
+            // the last extent whose start is <= it (binary search), not a linear
+            // scan of all E extents per block (bd-uthzg). Identical result: any
+            // earlier extent ends at/before this candidate's start (no overlap),
+            // any later one starts after `logical_block`.
+            let resolved = {
+                let pos = extents.partition_point(|e| e.logical_block <= logical_block);
+                pos.checked_sub(1).and_then(|i| {
+                    let e = &extents[i];
+                    (logical_block < e.logical_block + u32::from(e.actual_len())).then(|| {
+                        (
+                            BlockNumber(
+                                e.physical_start + u64::from(logical_block - e.logical_block),
+                            ),
+                            e.is_unwritten(),
+                        )
+                    })
+                })
+            };
 
             let (phys_block, zero_fill_before_write, mark_unwritten_written) = match resolved {
                 Some((b, unwritten)) => {
@@ -16360,10 +16368,15 @@ impl OpenFs {
                         if next > last_touched_block {
                             break;
                         }
-                        let mapped = extents.iter().any(|e| {
-                            next >= e.logical_block
-                                && next < e.logical_block + u32::from(e.actual_len())
-                        });
+                        // Same binary-search covering-extent lookup as the resolve
+                        // above: is `next` mapped by any extent? (bd-uthzg)
+                        let mapped = {
+                            let p = extents.partition_point(|e| e.logical_block <= next);
+                            p.checked_sub(1).is_some_and(|i| {
+                                let e = &extents[i];
+                                next < e.logical_block + u32::from(e.actual_len())
+                            })
+                        };
                         if mapped {
                             break;
                         }
