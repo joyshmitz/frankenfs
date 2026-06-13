@@ -19,6 +19,7 @@ criterion = { workspace = true }
 ffs-block = { workspace = true }
 proptest = { workspace = true }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
 tempfile = { workspace = true }
 
 [[bench]]
@@ -51,6 +52,10 @@ harness = false
 
 [[bench]]
 name = "leaf_range_filter"
+harness = false
+
+[[bench]]
+name = "chunk_dedup"
 harness = false
 
 [lints]

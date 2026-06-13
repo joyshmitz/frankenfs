@@ -934,6 +934,7 @@ dependencies = [
  "ffs-types",
  "proptest",
  "serde_json",
+ "sha2 0.11.0",
  "tempfile",
  "thiserror 2.0.18",
  "tracing",
@@ -972,6 +973,7 @@ name = "ffs-core"
 version = "0.1.0"
 dependencies = [
  "asupersync",
+ "criterion",
  "ffs-alloc",
  "ffs-block",
  "ffs-btree",
@@ -992,6 +994,7 @@ dependencies = [
  "proptest",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "tempfile",
  "thiserror 2.0.18",
  "tracing",

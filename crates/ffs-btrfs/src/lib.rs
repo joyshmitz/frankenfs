@@ -6457,11 +6457,16 @@ pub fn walk_chunk_tree(
     )?;
 
     let mut chunks = bootstrap_chunks.to_vec();
+    // Dedup by logical offset against the bootstrap set + chunks already added.
+    // The old `chunks.iter().any(...)` scan made this O(chunks^2) at mount; a
+    // multi-TB filesystem has thousands of chunk items, so track seen offsets
+    // in a HashSet for O(1) membership: O(chunks^2) -> O(chunks) (bd-o6orc).
+    // Keeps the first occurrence of each offset, identical to the linear scan.
+    let mut seen: HashSet<u64> = bootstrap_chunks.iter().map(|c| c.key.offset).collect();
     for item in &items {
         if item.key.item_type == BTRFS_ITEM_CHUNK {
             let chunk = parse_chunk_item(&item.data, item.key.offset)?;
-            // Only add if not already in bootstrap set (avoid duplicates).
-            if !chunks.iter().any(|c| c.key.offset == chunk.key.offset) {
+            if seen.insert(chunk.key.offset) {
                 chunks.push(chunk);
             }
         }
@@ -7764,6 +7769,7 @@ mod tests {
     use super::*;
     use ffs_ondisk::{BtrfsStripe, BtrfsSuperblock};
     use proptest::prelude::*;
+    use sha2::{Digest, Sha256};
     use std::collections::{BTreeMap, HashMap};
     use std::fmt::Write as _;
     use std::sync::{Arc, Mutex};
@@ -8128,6 +8134,20 @@ mod tests {
         block[data_start..data_end].copy_from_slice(payload);
     }
 
+    fn write_leaf_item_payload_with_key_offset(
+        block: &mut [u8],
+        idx: usize,
+        objectid: u64,
+        item_type: u8,
+        key_offset: u64,
+        data_off: u32,
+        payload: &[u8],
+    ) {
+        write_leaf_item_payload(block, idx, objectid, item_type, data_off, payload);
+        let base = HEADER_SIZE + idx * ITEM_SIZE;
+        block[base + 9..base + 17].copy_from_slice(&key_offset.to_le_bytes());
+    }
+
     /// Write an internal key-pointer entry at the given index.
     fn write_key_ptr(
         block: &mut [u8],
@@ -8221,6 +8241,116 @@ mod tests {
 
         let err = walk_chunk_tree(&mut read, &sb, &chunks).unwrap_err();
         assert!(matches!(err, ParseError::InsufficientData { .. }));
+    }
+
+    #[test]
+    fn walk_chunk_tree_dedup_preserves_first_occurrence_golden_bd_o6orc() {
+        let root_logical = 0x4000_u64;
+        let chunks = identity_chunks();
+        let chunk_type = chunk_type_flags::BTRFS_BLOCK_GROUP_DATA;
+
+        let duplicate_bootstrap = make_chunk_item_payload(0x2000_0000, 0x1_0000, chunk_type, 1);
+        let first_new = make_chunk_item_payload(0x4000_0000, 0x1_0000, chunk_type, 1);
+        let second_new = make_chunk_item_payload(0x4000_0000, 0x1_0000, chunk_type, 1);
+
+        let mut leaf = vec![0_u8; NODESIZE as usize];
+        write_header(&mut leaf, root_logical, 4, 0, BTRFS_CHUNK_TREE_OBJECTID, 1);
+
+        let mut data_off = NODESIZE;
+        data_off = data_off
+            .checked_sub(4)
+            .expect("test noise item fits in node");
+        write_leaf_item_payload_with_key_offset(
+            &mut leaf,
+            0,
+            BTRFS_CHUNK_TREE_OBJECTID,
+            BTRFS_ITEM_INODE_ITEM,
+            0x2000_0000,
+            data_off,
+            b"skip",
+        );
+        for (idx, logical, payload) in [
+            (1_usize, 0_u64, duplicate_bootstrap.as_slice()),
+            (2, 0x4000_0000, first_new.as_slice()),
+            (3, 0x8000_0000, second_new.as_slice()),
+        ] {
+            let payload_len = u32::try_from(payload.len()).expect("test payload fits u32");
+            data_off = data_off
+                .checked_sub(payload_len)
+                .expect("test leaf payloads fit in node");
+            write_leaf_item_payload_with_key_offset(
+                &mut leaf,
+                idx,
+                BTRFS_CHUNK_TREE_OBJECTID,
+                BTRFS_ITEM_CHUNK,
+                logical,
+                data_off,
+                payload,
+            );
+        }
+        stamp_tree_block_crc32c(&mut leaf);
+
+        let blocks: HashMap<u64, Vec<u8>> = [(root_logical, leaf)].into();
+        let mut read = |phys: u64| -> Result<Vec<u8>, ParseError> {
+            blocks.get(&phys).cloned().ok_or(ParseError::InvalidField {
+                field: "physical",
+                reason: "block not in test image",
+            })
+        };
+
+        let sb = BtrfsSuperblock {
+            csum: [0; 32],
+            fsid: [0; 16],
+            bytenr: root_logical,
+            flags: 0,
+            magic: 0,
+            generation: 1,
+            root: 0,
+            chunk_root: root_logical,
+            chunk_root_generation: 1,
+            log_root: 0,
+            total_bytes: 0,
+            bytes_used: 0,
+            root_dir_objectid: 0,
+            num_devices: 1,
+            sectorsize: 4096,
+            nodesize: NODESIZE,
+            stripesize: 0,
+            compat_flags: 0,
+            compat_ro_flags: 0,
+            incompat_flags: 0,
+            csum_type: 0,
+            root_level: 0,
+            chunk_root_level: 0,
+            log_root_level: 0,
+            label: String::new(),
+            sys_chunk_array_size: 0,
+            sys_chunk_array: Vec::new(),
+        };
+
+        let walked = walk_chunk_tree(&mut read, &sb, &chunks).expect("walk chunk tree");
+        let offsets: Vec<u64> = walked.iter().map(|chunk| chunk.key.offset).collect();
+        assert_eq!(offsets, vec![0, 0x4000_0000, 0x8000_0000]);
+        assert_eq!(
+            walked
+                .iter()
+                .find(|chunk| chunk.key.offset == 0)
+                .expect("deduped chunk exists")
+                .length,
+            0x4000_0000,
+            "dedup must keep the bootstrap chunk for a duplicated logical offset"
+        );
+
+        let mut digest = Sha256::new();
+        for chunk in &walked {
+            digest.update(chunk.key.offset.to_le_bytes());
+            digest.update(chunk.length.to_le_bytes());
+            digest.update(chunk.stripes[0].offset.to_le_bytes());
+        }
+        assert_eq!(
+            hex_lower(digest.finalize().as_ref()),
+            "5449ca7c23cfc149c3770b706d2363ba9f44dab3b1ec3e5347d5e98e87a0abbc"
+        );
     }
 
     #[test]
