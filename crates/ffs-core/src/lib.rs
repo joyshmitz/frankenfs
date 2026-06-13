@@ -868,6 +868,11 @@ pub struct OpenFs {
     /// LRU cache for extent tree lookups, avoiding repeated tree traversals
     /// for sequential reads. Invalidated on write/truncate/punch_hole.
     extent_cache: ffs_extent::ExtentCache,
+    /// Single-slot cache for the flattened ext4 extent vector used by
+    /// `ext4_write` overwrite resolution. The regular `extent_cache` memoizes
+    /// point mappings; this snapshot avoids re-reading/re-parsing every leaf
+    /// when many small write calls hit the same unchanged fragmented inode.
+    ext4_write_extent_snapshot: Mutex<Option<Ext4WriteExtentSnapshot>>,
     /// Single-slot snapshot of the most-recently-listed directory's entries.
     ///
     /// A paginated `readdir` (FUSE issues one call per kernel buffer fill) would
@@ -944,6 +949,12 @@ pub struct OpenFs {
     /// by `BTRFS_TREE_NODE_CACHE_LIMIT` (the hot upper nodes are read first, so
     /// a small cache captures most of the benefit).
     btrfs_parsed_node_cache: Mutex<BTreeMap<u64, Arc<BtrfsParsedNode>>>,
+}
+
+struct Ext4WriteExtentSnapshot {
+    namespace: u64,
+    root_namespace: u64,
+    extents: Arc<[Ext4Extent]>,
 }
 
 /// Opaque per-directory validation token: the directory inode's change-time and
@@ -2986,6 +2997,7 @@ impl OpenFs {
             ext4_file_data_block_cache: Mutex::new(BTreeMap::new()),
             btrfs_alloc_state: None,
             extent_cache: ffs_extent::ExtentCache::new(),
+            ext4_write_extent_snapshot: Mutex::new(None),
             readdir_snapshot: Mutex::new(None),
             #[cfg(test)]
             readdir_full_reads: std::sync::atomic::AtomicUsize::new(0),
@@ -3590,6 +3602,7 @@ impl OpenFs {
                         logical_end,
                         u64::from(u32::MAX) - u64::from(logical_end),
                     );
+                    self.invalidate_ext4_write_extent_snapshot(&inode);
                     Self::set_extent_root(&mut inode, &root_bytes);
                     let freed_sectors = if inode.is_huge_file() {
                         freed
@@ -3649,6 +3662,7 @@ impl OpenFs {
                             -(i128::from(freed_sectors)),
                         )?;
                         self.extent_cache.invalidate_all();
+                        self.invalidate_all_ext4_write_extent_snapshots();
                     }
                 }
 
@@ -4360,6 +4374,7 @@ impl OpenFs {
         // The recovery writes bypassed the read-only caches; drop them so later
         // reads observe the freed inode + bitmaps (mirrors orphan recovery).
         self.extent_cache.invalidate_all();
+        self.invalidate_all_ext4_write_extent_snapshots();
         self.ext4_inode_table_block_cache.lock().clear();
         self.ext4_group_desc_cache.lock().clear();
         self.ext4_file_data_block_cache.lock().clear();
@@ -4841,6 +4856,7 @@ impl OpenFs {
                 &alloc.persist_ctx,
                 owner,
             )?;
+            self.invalidate_ext4_write_extent_snapshot(&inode);
             Self::set_extent_root(&mut inode, &root_bytes);
             if freed > 0 {
                 let freed_sectors = if inode.is_huge_file() {
@@ -4883,6 +4899,7 @@ impl OpenFs {
             // inode_table / file_data); drop them so later reads see the freed
             // bitmaps and rewritten inodes, mirroring orphan recovery.
             self.extent_cache.invalidate_all();
+            self.invalidate_all_ext4_write_extent_snapshots();
             self.ext4_inode_table_block_cache.lock().clear();
             self.ext4_group_desc_cache.lock().clear();
             self.ext4_file_data_block_cache.lock().clear();
@@ -4930,6 +4947,7 @@ impl OpenFs {
                 // The leaf/root mutation is in root_bytes (+ any existing leaf
                 // block the insert rewrote via the device). Persist the updated
                 // extent root back into the inode.
+                self.invalidate_ext4_write_extent_snapshot(&inode);
                 Self::set_extent_root(&mut inode, &root_bytes);
                 let inode_size = usize::from(
                     self.ext4_superblock()
@@ -9614,6 +9632,52 @@ impl OpenFs {
         self.collect_extents_from_with_scope(cx, scope, inode, 0)
     }
 
+    fn ext4_write_extents_with_scope(
+        &self,
+        cx: &Cx,
+        scope: &RequestScope,
+        inode: &Ext4Inode,
+    ) -> Result<Arc<[Ext4Extent]>, FfsError> {
+        let namespace = extent_cache_namespace(inode);
+        let root_namespace = extent_root_namespace(inode);
+
+        let cached_extents = {
+            let snapshot = self.ext4_write_extent_snapshot.lock();
+            snapshot
+                .as_ref()
+                .filter(|snapshot| {
+                    snapshot.namespace == namespace && snapshot.root_namespace == root_namespace
+                })
+                .map(|snapshot| Arc::clone(&snapshot.extents))
+        };
+        if let Some(extents) = cached_extents {
+            return Ok(extents);
+        }
+
+        let extents = Arc::<[Ext4Extent]>::from(self.collect_extents_with_scope(cx, scope, inode)?);
+        *self.ext4_write_extent_snapshot.lock() = Some(Ext4WriteExtentSnapshot {
+            namespace,
+            root_namespace,
+            extents: Arc::clone(&extents),
+        });
+        Ok(extents)
+    }
+
+    fn invalidate_ext4_write_extent_snapshot(&self, inode: &Ext4Inode) {
+        let namespace = extent_cache_namespace(inode);
+        let mut snapshot = self.ext4_write_extent_snapshot.lock();
+        if snapshot
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.namespace == namespace)
+        {
+            *snapshot = None;
+        }
+    }
+
+    fn invalidate_all_ext4_write_extent_snapshots(&self) {
+        *self.ext4_write_extent_snapshot.lock() = None;
+    }
+
     /// Collect leaf extents whose range can reach `from_block` or later,
     /// flattening multi-level trees. Index children whose entire subtree ends
     /// at or before `from_block` are pruned, so the result is the sorted suffix
@@ -13865,6 +13929,7 @@ impl OpenFs {
             };
             ffs_btree::insert(cx, &block_dev, &mut root_bytes, extent, &mut tree_alloc)?;
         }
+        self.invalidate_ext4_write_extent_snapshot(&new_inode);
         Self::set_extent_root(&mut new_inode, &root_bytes);
 
         // Update inode metadata.
@@ -14381,6 +14446,7 @@ impl OpenFs {
             ffs_btree::insert(cx, dev, &mut root_bytes, extent, &mut tree_alloc)?;
             let dir_meta_after =
                 Self::ext4_count_extent_tree_meta_blocks_via_dev(cx, dev, &root_bytes)?;
+            self.invalidate_ext4_write_extent_snapshot(&parent_upd);
             Self::set_extent_root(&mut parent_upd, &root_bytes);
             self.extent_cache.invalidate_range(
                 parent_extent_ns,
@@ -14696,6 +14762,7 @@ impl OpenFs {
             0
         };
 
+        self.invalidate_ext4_write_extent_snapshot(&parent_upd);
         Self::set_extent_root(&mut parent_upd, &root_bytes);
         // Converting a linear directory: mark it hash-indexed so future lookups
         // and inserts use the (now-built) htree index instead of a linear scan.
@@ -14738,6 +14805,7 @@ impl OpenFs {
             csum_seed,
         )?;
         self.extent_cache.invalidate_all();
+        self.invalidate_all_ext4_write_extent_snapshots();
         Ok(())
     }
 
@@ -15640,6 +15708,7 @@ impl OpenFs {
                     )?
                 };
                 inode.blocks = blocks_after_punch;
+                self.invalidate_ext4_write_extent_snapshot(&inode);
                 Self::set_extent_root(&mut inode, &root_bytes);
             }
             // Reads of both the zeroed edges and the freed interior changed.
@@ -15731,6 +15800,7 @@ impl OpenFs {
                 // cache is now wrong everywhere past the cut, easier to
                 // drop the whole namespace than to try to rewrite it.
                 self.extent_cache.invalidate_all();
+                self.invalidate_ext4_write_extent_snapshot(&inode);
                 inode.blocks = blocks_after_collapse;
                 inode.size = inode.size.saturating_sub(length);
                 Self::set_extent_root(&mut inode, &root_bytes);
@@ -15788,6 +15858,7 @@ impl OpenFs {
                 }
                 self.extent_cache.invalidate_all();
                 // No new physical blocks allocated; inode.blocks unchanged.
+                self.invalidate_ext4_write_extent_snapshot(&inode);
                 inode.size = new_size;
                 Self::set_extent_root(&mut inode, &root_bytes);
             }
@@ -15925,6 +15996,7 @@ impl OpenFs {
                             }
                         };
                         self.extent_cache.invalidate_all();
+                        self.invalidate_all_ext4_write_extent_snapshots();
                         newly_allocated_blocks += u64::from(alloc_mapping.count);
                         goal_block = Some(BlockNumber(
                             alloc_mapping.physical_start + u64::from(alloc_mapping.count),
@@ -15970,6 +16042,7 @@ impl OpenFs {
                 ));
             }
             self.extent_cache.invalidate_all();
+            self.invalidate_all_ext4_write_extent_snapshots();
 
             if newly_allocated_blocks > 0 {
                 inode.blocks = blocks_after_zero.ok_or_else(|| FfsError::Corruption {
@@ -15977,6 +16050,7 @@ impl OpenFs {
                     detail: "planned block delta missing but blocks allocated during zero_range"
                         .into(),
                 })?;
+                self.invalidate_ext4_write_extent_snapshot(&inode);
                 Self::set_extent_root(&mut inode, &root_bytes);
             }
 
@@ -16094,6 +16168,7 @@ impl OpenFs {
                         }
                     };
                     self.extent_cache.invalidate_all();
+                    self.invalidate_all_ext4_write_extent_snapshots();
 
                     newly_allocated_blocks += u64::from(alloc_mapping.count);
                     goal_block = Some(BlockNumber(
@@ -16109,6 +16184,7 @@ impl OpenFs {
                     block: 0,
                     detail: "planned block delta missing but blocks allocated".into(),
                 })?;
+                self.invalidate_ext4_write_extent_snapshot(&inode);
                 Self::set_extent_root(&mut inode, &root_bytes);
             }
 
@@ -16296,7 +16372,7 @@ impl OpenFs {
         // its site below). A pure overwrite or a fallocate+write mutates the cache
         // not at all / never re-collects, so an N-block write parses the tree once
         // instead of once per block (O(N*E) -> O(E); bd-yqq5l, bd-e4uwb).
-        let mut cached_extents: Option<Vec<Ext4Extent>> = None;
+        let mut cached_extents: Option<Arc<[Ext4Extent]>> = None;
 
         while pos < end {
             let logical_block = u32::try_from(pos / bs).map_err(|_| {
@@ -16312,7 +16388,7 @@ impl OpenFs {
 
             // Resolve or allocate the physical block.
             if cached_extents.is_none() {
-                cached_extents = Some(self.collect_extents_with_scope(cx, scope, &inode)?);
+                cached_extents = Some(self.ext4_write_extents_with_scope(cx, scope, &inode)?);
             }
             let extents = cached_extents.as_deref().unwrap_or(&[]);
             // Extents come back sorted ascending by logical_block and are
@@ -16464,6 +16540,7 @@ impl OpenFs {
                         logical_block,
                         alloc_blocks,
                     );
+                    self.invalidate_ext4_write_extent_snapshot(&inode);
                     Self::set_extent_root(&mut inode, &root_bytes);
                     cached_extents = None; // tree mutated by allocate_extent
                     inode.blocks = blocks_after_alloc;
@@ -16540,6 +16617,7 @@ impl OpenFs {
                     )?;
                 }
                 self.extent_cache.invalidate_all();
+                self.invalidate_ext4_write_extent_snapshot(&inode);
                 Self::set_extent_root(&mut inode, &root_bytes);
                 // NOTE: deliberately NOT invalidating `cached_extents` here. A
                 // mark_written split only flips the unwritten flag and splits the
@@ -16955,6 +17033,7 @@ impl OpenFs {
                 0
             };
             self.extent_cache.invalidate_all();
+            self.invalidate_all_ext4_write_extent_snapshots();
             if freed > 0 {
                 let freed_sectors = if inode.is_huge_file() {
                     freed
@@ -17829,6 +17908,7 @@ impl OpenFs {
                         0,
                         u64::from(u32::MAX),
                     );
+                    self.invalidate_ext4_write_extent_snapshot(&inode);
                     Self::set_extent_root(&mut inode, &root_bytes);
                     let freed_sectors = if inode.is_huge_file() {
                         freed
@@ -27300,6 +27380,8 @@ impl OpenFs {
                     donor_owner,
                 )?;
 
+                self.invalidate_ext4_write_extent_snapshot(&orig_inode);
+                self.invalidate_ext4_write_extent_snapshot(&donor_inode);
                 Self::set_extent_root(&mut orig_inode, &orig_root);
                 Self::set_extent_root(&mut donor_inode, &donor_root);
                 ffs_inode::touch_ctime(&mut orig_inode, tstamp_secs, tstamp_nanos);
@@ -27337,6 +27419,7 @@ impl OpenFs {
         }
 
         self.extent_cache.invalidate_all();
+        self.invalidate_all_ext4_write_extent_snapshots();
         debug!(
             target: "ffs::write",
             op = "move_ext",
@@ -50118,6 +50201,106 @@ mod tests {
                 "block {i} mismatched: expected {expect:#x}"
             );
         }
+    }
+
+    #[test]
+    fn ext4_write_cross_call_extent_snapshot_golden_bd_pqzev() {
+        use sha2::{Digest, Sha256};
+
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let attr = fs
+            .create(&cx, root, OsStr::new("pqzev_frag.bin"), 0o644, 0, 0)
+            .expect("create");
+
+        const BLOCKS: usize = 16;
+        const BS: usize = 4096;
+        let mut model = vec![0_u8; (BLOCKS * 2 - 1) * BS];
+
+        for i in 0..BLOCKS {
+            let logical = i * 2;
+            let payload = vec![0x30 + u8::try_from(i).expect("block index fits u8"); BS];
+            let offset = (logical * BS) as u64;
+            fs.write(&cx, attr.ino, offset, &payload)
+                .expect("sparse write");
+            model[logical * BS..(logical + 1) * BS].copy_from_slice(&payload);
+        }
+
+        for i in 0..BLOCKS {
+            let logical = i * 2;
+            let payload = vec![0x80 + u8::try_from(i).expect("block index fits u8"); BS];
+            let offset = (logical * BS) as u64;
+            fs.write(&cx, attr.ino, offset, &payload)
+                .expect("cross-call overwrite");
+            model[logical * BS..(logical + 1) * BS].copy_from_slice(&payload);
+        }
+
+        let inode_after_overwrite = fs.read_inode(&cx, attr.ino).expect("read inode");
+        let ns = extent_cache_namespace(&inode_after_overwrite);
+        assert!(
+            fs.ext4_write_extent_snapshot
+                .lock()
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.namespace == ns),
+            "pure cross-call overwrites should retain the write extent snapshot"
+        );
+
+        let readback = fs
+            .read(
+                &cx,
+                attr.ino,
+                0,
+                u32::try_from(model.len()).expect("model length fits u32"),
+            )
+            .expect("read fragmented file");
+        assert_eq!(readback, model);
+
+        let extents = fs
+            .collect_extents(&cx, &inode_after_overwrite)
+            .expect("collect extents");
+        let mut hasher = Sha256::new();
+        hasher.update(&readback);
+        for extent in &extents {
+            hasher.update(extent.logical_block.to_le_bytes());
+            hasher.update(extent.actual_len().to_le_bytes());
+            hasher.update(extent.physical_start.to_le_bytes());
+            hasher.update([u8::from(extent.is_unwritten())]);
+        }
+        let digest = hasher
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        println!("bd_pqzev_ext4_write_cross_call_golden_sha256={digest}");
+        assert_eq!(
+            digest,
+            "791b273880e57a4958d5ebb2d0ed53cb5944cddcadc143e6b1dd99442a62bf18"
+        );
+
+        fs.setattr(
+            &cx,
+            attr.ino,
+            &SetAttrRequest {
+                size: Some(BS as u64),
+                ..SetAttrRequest::default()
+            },
+        )
+        .expect("truncate");
+        assert!(
+            fs.ext4_write_extent_snapshot.lock().is_none(),
+            "truncate must invalidate the write extent snapshot"
+        );
+
+        let tail_payload = vec![0xEE_u8; BS];
+        fs.write(&cx, attr.ino, (BS * 4) as u64, &tail_payload)
+            .expect("write after truncate");
+        let tail = fs
+            .read(&cx, attr.ino, (BS * 4) as u64, BS as u32)
+            .expect("read tail after truncate");
+        assert_eq!(tail, tail_payload);
     }
 
     #[test]
