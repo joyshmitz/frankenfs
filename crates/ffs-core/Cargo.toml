@@ -79,5 +79,9 @@ harness = false
 name = "ext4_write_unwritten_cache"
 harness = false
 
+[[bench]]
+name = "htree_resolve_logical"
+harness = false
+
 [lints]
 workspace = true

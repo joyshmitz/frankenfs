@@ -14060,19 +14060,23 @@ impl OpenFs {
                     )));
                 }
                 let resolve_logical = |logical: u32| -> Option<BlockNumber> {
-                    for ext in &extents {
-                        if ext.is_unwritten() {
-                            continue;
-                        }
-                        let start = ext.logical_block;
-                        let len = u32::from(ext.actual_len());
-                        if logical >= start && logical < start.saturating_add(len) {
-                            return Some(BlockNumber(
-                                ext.physical_start + u64::from(logical - start),
-                            ));
-                        }
+                    // Directory extents are sorted ascending by logical_block and
+                    // non-overlapping, so the only extent that can cover `logical`
+                    // is the last whose start is <= it — a partition_point binary
+                    // search instead of a linear scan of all E extents per
+                    // htree-leaf-read (bd-urrco). If that extent is unwritten or
+                    // doesn't reach `logical`, no extent maps it (any earlier ends
+                    // at/before its start; any later starts past `logical`), so the
+                    // answer is None — identical to the old skip-unwritten scan.
+                    let pos = extents.partition_point(|e| e.logical_block <= logical);
+                    let ext = extents.get(pos.checked_sub(1)?)?;
+                    if ext.is_unwritten() {
+                        return None;
                     }
-                    None
+                    let start = ext.logical_block;
+                    let len = u32::from(ext.actual_len());
+                    (logical >= start && logical < start.saturating_add(len))
+                        .then(|| BlockNumber(ext.physical_start + u64::from(logical - start)))
                 };
 
                 let sb = self
