@@ -50,5 +50,9 @@ harness = false
 name = "extent_leaf_cache"
 harness = false
 
+[[bench]]
+name = "indirect_ptr_resolve"
+harness = false
+
 [lints]
 workspace = true

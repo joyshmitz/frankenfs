@@ -9101,6 +9101,66 @@ impl OpenFs {
         Ok(Arc::<[u8]>::from(dev.read_block(cx, block)?.as_slice()))
     }
 
+    /// Run `f` over a block's bytes without owning a copy.
+    ///
+    /// Same scope resolution as [`Self::read_block_with_scope`] (staged write ->
+    /// snapshot-visible version -> device), but passes a borrowed slice to `f`
+    /// instead of allocating and copying the whole block into a `Vec`. For
+    /// callers that only read a few bytes (e.g. an indirect block pointer), this
+    /// drops the per-call ~block-sized alloc+copy to nothing — a cache hit
+    /// returns an `Arc`-backed `BlockBuf` that `f` borrows directly (bd-wxmi1).
+    /// Keep the branch logic in sync with `read_block_with_scope`.
+    fn with_block_bytes<R>(
+        &self,
+        cx: &Cx,
+        scope: &RequestScope,
+        block: BlockNumber,
+        f: impl FnOnce(&[u8]) -> R,
+    ) -> Result<R, FfsError> {
+        if let Some(tx) = &scope.tx {
+            if let Some(staged) = tx.staged_write(block) {
+                return Ok(f(staged));
+            }
+        }
+        if scope.tx.is_some() {
+            if let Some(snapshot) = scope.snapshot {
+                let store = self.mvcc_store.read();
+                if let Some(visible) = store.read_visible(block, snapshot) {
+                    return Ok(f(visible.as_ref()));
+                }
+            }
+        }
+        let dev = self.block_device_adapter();
+        let buf = dev.read_block(cx, block)?;
+        Ok(f(buf.as_slice()))
+    }
+
+    /// Read the little-endian u32 block pointer at entry `idx` of an indirect
+    /// block (`phys` physical block number), without copying the whole block.
+    /// Out-of-range reads yield 0 (an absent pointer), matching the prior
+    /// bounds-checked behaviour in `resolve_indirect_block`.
+    fn read_indirect_ptr(
+        &self,
+        cx: &Cx,
+        scope: &RequestScope,
+        phys: u64,
+        idx: usize,
+    ) -> Result<u64, FfsError> {
+        let off = idx * 4;
+        self.with_block_bytes(cx, scope, BlockNumber(phys), |data| {
+            if off + 4 <= data.len() {
+                u64::from(u32::from_le_bytes([
+                    data[off],
+                    data[off + 1],
+                    data[off + 2],
+                    data[off + 3],
+                ]))
+            } else {
+                0
+            }
+        })
+    }
+
     fn read_contiguous_blocks_with_scope(
         &self,
         cx: &Cx,
@@ -11040,7 +11100,7 @@ impl OpenFs {
     ///
     /// For inodes WITHOUT `EXT4_EXTENTS_FL`, `extent_bytes` holds 15 × u32
     /// block pointers: 12 direct, 1 indirect, 1 double-indirect, 1 triple-indirect.
-    #[expect(clippy::too_many_lines, clippy::cast_possible_truncation)]
+    #[expect(clippy::cast_possible_truncation)]
     fn resolve_indirect_block(
         &self,
         cx: &Cx,
@@ -11075,6 +11135,10 @@ impl OpenFs {
             return Ok(if phys == 0 { None } else { Some(phys) });
         }
 
+        // Each level reads ONE u32 pointer from an indirect block; with_block_bytes
+        // borrows the block instead of copying it whole to read 4 bytes (bd-wxmi1).
+        // An absent pointer (0) or out-of-range index resolves to a hole.
+
         // Single indirect: i_block[12] points to a block of u32 pointers.
         let lb_indirect = lb - 12;
         if lb_indirect < ptrs_per_block {
@@ -11082,17 +11146,7 @@ impl OpenFs {
             if ind_block == 0 {
                 return Ok(None);
             }
-            let data = self.read_block_with_scope(cx, scope, BlockNumber(ind_block))?;
-            let off = (lb_indirect as usize) * 4;
-            if off + 4 > data.len() {
-                return Ok(None);
-            }
-            let phys = u64::from(u32::from_le_bytes([
-                data[off],
-                data[off + 1],
-                data[off + 2],
-                data[off + 3],
-            ]));
+            let phys = self.read_indirect_ptr(cx, scope, ind_block, lb_indirect as usize)?;
             return Ok(if phys == 0 { None } else { Some(phys) });
         }
 
@@ -11103,33 +11157,13 @@ impl OpenFs {
             if dind_block == 0 {
                 return Ok(None);
             }
-            let dind_data = self.read_block_with_scope(cx, scope, BlockNumber(dind_block))?;
             let idx1 = (lb_dind / ptrs_per_block) as usize;
-            let off1 = idx1 * 4;
-            if off1 + 4 > dind_data.len() {
-                return Ok(None);
-            }
-            let ind_block = u64::from(u32::from_le_bytes([
-                dind_data[off1],
-                dind_data[off1 + 1],
-                dind_data[off1 + 2],
-                dind_data[off1 + 3],
-            ]));
+            let ind_block = self.read_indirect_ptr(cx, scope, dind_block, idx1)?;
             if ind_block == 0 {
                 return Ok(None);
             }
-            let ind_data = self.read_block_with_scope(cx, scope, BlockNumber(ind_block))?;
             let idx2 = (lb_dind % ptrs_per_block) as usize;
-            let off2 = idx2 * 4;
-            if off2 + 4 > ind_data.len() {
-                return Ok(None);
-            }
-            let phys = u64::from(u32::from_le_bytes([
-                ind_data[off2],
-                ind_data[off2 + 1],
-                ind_data[off2 + 2],
-                ind_data[off2 + 3],
-            ]));
+            let phys = self.read_indirect_ptr(cx, scope, ind_block, idx2)?;
             return Ok(if phys == 0 { None } else { Some(phys) });
         }
 
@@ -11139,48 +11173,18 @@ impl OpenFs {
         if tind_block == 0 {
             return Ok(None);
         }
-        let tind_data = self.read_block_with_scope(cx, scope, BlockNumber(tind_block))?;
         let idx1 = (lb_triple / (ptrs_per_block * ptrs_per_block)) as usize;
-        let off1 = idx1 * 4;
-        if off1 + 4 > tind_data.len() {
-            return Ok(None);
-        }
-        let dind_block = u64::from(u32::from_le_bytes([
-            tind_data[off1],
-            tind_data[off1 + 1],
-            tind_data[off1 + 2],
-            tind_data[off1 + 3],
-        ]));
+        let dind_block = self.read_indirect_ptr(cx, scope, tind_block, idx1)?;
         if dind_block == 0 {
             return Ok(None);
         }
-        let dind_data = self.read_block_with_scope(cx, scope, BlockNumber(dind_block))?;
         let idx2 = ((lb_triple / ptrs_per_block) % ptrs_per_block) as usize;
-        let off2 = idx2 * 4;
-        if off2 + 4 > dind_data.len() {
-            return Ok(None);
-        }
-        let ind_block = u64::from(u32::from_le_bytes([
-            dind_data[off2],
-            dind_data[off2 + 1],
-            dind_data[off2 + 2],
-            dind_data[off2 + 3],
-        ]));
+        let ind_block = self.read_indirect_ptr(cx, scope, dind_block, idx2)?;
         if ind_block == 0 {
             return Ok(None);
         }
-        let ind_data = self.read_block_with_scope(cx, scope, BlockNumber(ind_block))?;
         let idx3 = (lb_triple % ptrs_per_block) as usize;
-        let off3 = idx3 * 4;
-        if off3 + 4 > ind_data.len() {
-            return Ok(None);
-        }
-        let phys = u64::from(u32::from_le_bytes([
-            ind_data[off3],
-            ind_data[off3 + 1],
-            ind_data[off3 + 2],
-            ind_data[off3 + 3],
-        ]));
+        let phys = self.read_indirect_ptr(cx, scope, ind_block, idx3)?;
         Ok(if phys == 0 { None } else { Some(phys) })
     }
 
