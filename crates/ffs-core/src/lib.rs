@@ -15,8 +15,8 @@ pub use vfs::{
     BtrfsQgroupLimitRequest, BtrfsTreeSearchKey, DirEntry, FIEMAP_EXTENT_DATA_INLINE,
     FIEMAP_EXTENT_ENCODED, FIEMAP_EXTENT_LAST, FIEMAP_EXTENT_NOT_ALIGNED, FIEMAP_EXTENT_SHARED,
     FIEMAP_EXTENT_UNWRITTEN, FiemapExtent, FileType, FsOps, FsStat, FsxattrInfo, InodeAttr,
-    QuotaEntry, QuotaInfo, QuotaType, ReleaseRequest, RequestOp, RequestScope, SeekWhence,
-    SetAttrRequest, XattrSetMode, xflags,
+    QuotaEntry, QuotaInfo, QuotaType, ReaddirPage, ReleaseRequest, RequestOp, RequestScope,
+    SeekWhence, SetAttrRequest, XattrSetMode, xflags,
 };
 // Re-export repair lifecycle for convenient wiring.
 pub use ffs_block::RepairFlushLifecycle;
@@ -967,7 +967,7 @@ struct ReaddirSnapshot {
     entries: Arc<Vec<DirEntry>>,
 }
 
-/// Upper bound on entries returned by one [`slice_readdir_snapshot`] call.
+/// Upper bound on entries visible through one [`slice_readdir_snapshot`] call.
 ///
 /// A paginated readdir serves the tail after `offset` and the FUSE layer fills
 /// its reply buffer, breaks once full, and re-requests at the next cookie. The
@@ -987,11 +987,14 @@ const READDIR_SNAPSHOT_PAGE_MAX: usize = 512;
 /// cookies) want "entries whose cookie > offset"; the list is cookie-sorted, so a
 /// binary-search `partition_point` slice serves the page without re-walking or
 /// re-parsing the directory. The page is capped at [`READDIR_SNAPSHOT_PAGE_MAX`]
-/// entries so a full enumeration clones O(N) total rather than O(N²).
-fn slice_readdir_snapshot(entries: &[DirEntry], offset: u64) -> Vec<DirEntry> {
+/// entries so a full enumeration borrows O(page) total rather than cloning an
+/// owned page on every call.
+fn slice_readdir_snapshot(entries: Arc<Vec<DirEntry>>, offset: u64) -> ReaddirPage {
     let start = entries.partition_point(|e| e.offset <= offset);
-    let end = start.saturating_add(READDIR_SNAPSHOT_PAGE_MAX).min(entries.len());
-    entries[start..end].to_vec()
+    let end = start
+        .saturating_add(READDIR_SNAPSHOT_PAGE_MAX)
+        .min(entries.len());
+    ReaddirPage::from_shared(entries, start, end)
 }
 
 /// Serve a readdir page from the snapshot slot iff it matches `ino` + `validation`.
@@ -1001,11 +1004,11 @@ fn readdir_snapshot_serve(
     ino: u64,
     validation: ReaddirValidation,
     offset: u64,
-) -> Option<Vec<DirEntry>> {
+) -> Option<ReaddirPage> {
     let guard = slot.lock();
     let snap = guard.as_ref()?;
     (snap.ino == ino && snap.validation == validation)
-        .then(|| slice_readdir_snapshot(&snap.entries, offset))
+        .then(|| slice_readdir_snapshot(Arc::clone(&snap.entries), offset))
 }
 
 /// Clear the readdir snapshot slot. Called on every directory mutation so a later
@@ -13061,7 +13064,7 @@ impl FsOps for Ext4FsOps {
         _scope: &mut RequestScope,
         ino: InodeNumber,
         offset: u64,
-    ) -> ffs_error::Result<Vec<DirEntry>> {
+    ) -> ffs_error::Result<ReaddirPage> {
         let inode = self.read_live_inode(ino)?;
 
         if !inode.is_dir() {
@@ -13087,7 +13090,7 @@ impl FsOps for Ext4FsOps {
             })
             .collect();
 
-        Ok(entries)
+        Ok(entries.into())
     }
 
     fn read(
@@ -25495,6 +25498,7 @@ impl OpenFs {
         offset: u64,
     ) -> ffs_error::Result<Vec<DirEntry>> {
         self.with_latest_scope(|scope| <Self as FsOps>::readdir(self, cx, scope, ino, offset))
+            .map(|page| page.to_vec())
     }
 
     /// Return raw directory-entry payloads for a btrfs directory inode.
@@ -27437,7 +27441,7 @@ impl FsOps for OpenFs {
         scope: &mut RequestScope,
         ino: InodeNumber,
         offset: u64,
-    ) -> ffs_error::Result<Vec<DirEntry>> {
+    ) -> ffs_error::Result<ReaddirPage> {
         match &self.flavor {
             FsFlavor::Ext4(_) => {
                 let canonical = Self::ext4_canonical_inode(ino);
@@ -27480,7 +27484,7 @@ impl FsOps for OpenFs {
                     })
                     .collect();
                 let full = Arc::new(full);
-                let page = slice_readdir_snapshot(&full, offset);
+                let page = slice_readdir_snapshot(Arc::clone(&full), offset);
                 readdir_snapshot_store(&self.readdir_snapshot, canonical.0, validation, full);
                 Ok(page)
             }
@@ -27530,7 +27534,7 @@ impl FsOps for OpenFs {
                     })
                     .collect();
                 let full = Arc::new(full);
-                let page = slice_readdir_snapshot(&full, offset);
+                let page = slice_readdir_snapshot(Arc::clone(&full), offset);
                 readdir_snapshot_store(&self.readdir_snapshot, canonical, validation, full);
                 Ok(page)
             }
@@ -32093,21 +32097,24 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use tracing_subscriber::fmt::MakeWriter;
 
-    /// Capping the readdir snapshot page must not change the complete, ordered
-    /// listing a paginating caller reconstructs — only the per-call page size.
+    /// Capping and Arc-sharing the readdir snapshot page must not change the
+    /// complete, ordered listing a paginating caller reconstructs — only the
+    /// per-call clone cost.
     #[test]
     fn readdir_snapshot_pagination_reconstructs_full_listing() {
         // Cookie-ascending listing larger than the page cap so capping is
         // exercised; names carry the heap-allocated payload the clone copies.
         let n = (READDIR_SNAPSHOT_PAGE_MAX as u64) * 5 + 37;
-        let full: Vec<DirEntry> = (0..n)
-            .map(|i| DirEntry {
-                ino: InodeNumber(i + 100),
-                offset: i + 1, // 1-indexed ascending cookies
-                kind: FileType::RegularFile,
-                name: format!("entry_{i:08}").into_bytes(),
-            })
-            .collect();
+        let full = Arc::new(
+            (0..n)
+                .map(|i| DirEntry {
+                    ino: InodeNumber(i + 100),
+                    offset: i + 1, // 1-indexed ascending cookies
+                    kind: FileType::RegularFile,
+                    name: format!("entry_{i:08}").into_bytes(),
+                })
+                .collect::<Vec<_>>(),
+        );
 
         // Drive the FUSE caller for buffer capacities below, at, and above the
         // page cap: it consumes up to `buffer` entries per page then re-requests
@@ -32121,23 +32128,68 @@ mod tests {
             let mut got: Vec<DirEntry> = Vec::new();
             let mut offset: u64 = 0;
             loop {
-                let page = slice_readdir_snapshot(&full, offset);
+                let page = slice_readdir_snapshot(Arc::clone(&full), offset);
                 if page.is_empty() {
                     break;
                 }
                 let take = page.len().min(buffer);
-                got.extend_from_slice(&page[..take]);
-                offset = page[take - 1].offset;
+                assert!(page.shares_entries_with(&full));
+                got.extend_from_slice(&page.as_slice()[..take]);
+                offset = page.as_slice()[take - 1].offset;
             }
-            assert_eq!(got, full, "pagination with buffer={buffer} lost/reordered entries");
+            assert_eq!(
+                got.as_slice(),
+                full.as_slice(),
+                "pagination with buffer={buffer} lost/reordered entries"
+            );
         }
 
         // One serve from offset 0 yields exactly the first page (cap), not the
-        // whole tail — the O(N²)→O(N) bound.
+        // whole tail — the O(N²) clone path stays removed.
         assert_eq!(
-            slice_readdir_snapshot(&full, 0).len(),
+            slice_readdir_snapshot(Arc::clone(&full), 0).len(),
             READDIR_SNAPSHOT_PAGE_MAX
         );
+
+        let digest = readdir_listing_sha256(full.as_slice());
+        assert_eq!(
+            digest,
+            "51a7e8413882063df6cc4489a52f9c370d7f2884b986e1d5a5056d84d477de84"
+        );
+        println!("bd_gn4zb_readdir_golden_sha256={digest}");
+    }
+
+    fn readdir_listing_sha256(entries: &[DirEntry]) -> String {
+        use sha2::{Digest, Sha256};
+        use std::fmt::Write as _;
+
+        let mut golden = String::new();
+        for entry in entries {
+            let kind = match entry.kind {
+                FileType::RegularFile => "regular",
+                FileType::Directory => "directory",
+                FileType::Symlink => "symlink",
+                FileType::BlockDevice => "block",
+                FileType::CharDevice => "char",
+                FileType::Fifo => "fifo",
+                FileType::Socket => "socket",
+            };
+            writeln!(
+                &mut golden,
+                "{}\t{}\t{}\t{}",
+                entry.ino.0,
+                entry.offset,
+                kind,
+                String::from_utf8_lossy(&entry.name)
+            )
+            .expect("write golden readdir row");
+        }
+        let digest = Sha256::digest(golden.as_bytes());
+        let mut hex = String::with_capacity(64);
+        for byte in digest {
+            write!(&mut hex, "{byte:02x}").expect("format digest byte");
+        }
+        hex
     }
 
     /// In-memory ByteDevice for testing (no file I/O).
@@ -32816,7 +32868,7 @@ mod tests {
             _scope: &mut RequestScope,
             ino: InodeNumber,
             offset: u64,
-        ) -> ffs_error::Result<Vec<DirEntry>> {
+        ) -> ffs_error::Result<ReaddirPage> {
             if ino != InodeNumber(1) {
                 return Err(FfsError::NotDirectory);
             }
@@ -32840,7 +32892,11 @@ mod tests {
                     name: b"hello.txt".to_vec(),
                 },
             ];
-            Ok(all.into_iter().filter(|e| e.offset > offset).collect())
+            Ok(all
+                .into_iter()
+                .filter(|e| e.offset > offset)
+                .collect::<Vec<_>>()
+                .into())
         }
 
         fn read(
@@ -44330,7 +44386,7 @@ mod tests {
             if chunk.is_empty() {
                 break;
             }
-            let take: Vec<DirEntry> = chunk.into_iter().take(page).collect();
+            let take: Vec<DirEntry> = chunk.iter().take(page).cloned().collect();
             off = take.last().expect("non-empty page").offset;
             collected.extend(take);
             if collected.len() >= full.len() {
@@ -44339,7 +44395,8 @@ mod tests {
         }
 
         assert_eq!(
-            collected, full,
+            collected,
+            full.to_vec(),
             "btrfs paginated readdir must equal the full listing"
         );
         let pages = full.len().div_ceil(page);
@@ -44389,7 +44446,7 @@ mod tests {
             if chunk.is_empty() {
                 break;
             }
-            let take: Vec<DirEntry> = chunk.into_iter().take(page).collect();
+            let take: Vec<DirEntry> = chunk.iter().take(page).cloned().collect();
             off = take.last().expect("non-empty page").offset;
             collected.extend(take);
             if collected.len() >= full.len() {
@@ -46144,7 +46201,7 @@ mod tests {
             if chunk.is_empty() {
                 break;
             }
-            let take: Vec<DirEntry> = chunk.into_iter().take(page).collect();
+            let take: Vec<DirEntry> = chunk.iter().take(page).cloned().collect();
             off = take.last().expect("non-empty page").offset;
             collected.extend(take);
             if collected.len() >= full.len() {
@@ -70378,7 +70435,7 @@ mod tests {
             .readdir(&cx, &mut RequestScope::empty(), InodeNumber(1), 0)
             .unwrap();
         let mut names: Vec<_> = entries
-            .into_iter()
+            .iter()
             .map(|entry| String::from_utf8_lossy(&entry.name).into_owned())
             .filter(|name| name != "." && name != "..")
             .collect();
@@ -70402,7 +70459,7 @@ mod tests {
             .readdir(&cx, &mut RequestScope::empty(), InodeNumber(1), 0)
             .unwrap();
         let mut names: Vec<_> = entries
-            .into_iter()
+            .iter()
             .map(|entry| String::from_utf8_lossy(&entry.name).into_owned())
             .filter(|name| name != "." && name != "..")
             .collect();

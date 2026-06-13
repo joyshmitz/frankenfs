@@ -151,6 +151,101 @@ impl DirEntry {
     }
 }
 
+/// Shared page returned by [`FsOps::readdir`].
+///
+/// The page holds an `Arc` to the full directory snapshot plus a visible range.
+/// Hot FUSE callers can iterate the slice without cloning each `DirEntry` name,
+/// while tests and convenience wrappers can still materialize an owned `Vec`
+/// when they need one.
+#[derive(Debug, Clone)]
+pub struct ReaddirPage {
+    entries: Arc<Vec<DirEntry>>,
+    start: usize,
+    end: usize,
+}
+
+impl ReaddirPage {
+    /// Construct a page covering an owned vector.
+    #[must_use]
+    pub fn new(entries: Vec<DirEntry>) -> Self {
+        let end = entries.len();
+        Self {
+            entries: Arc::new(entries),
+            start: 0,
+            end,
+        }
+    }
+
+    /// Construct a page over a shared full listing.
+    #[must_use]
+    pub(crate) fn from_shared(entries: Arc<Vec<DirEntry>>, start: usize, end: usize) -> Self {
+        debug_assert!(start <= end);
+        debug_assert!(end <= entries.len());
+        Self {
+            entries,
+            start,
+            end,
+        }
+    }
+
+    /// Return the visible page slice.
+    #[must_use]
+    pub fn as_slice(&self) -> &[DirEntry] {
+        &self.entries[self.start..self.end]
+    }
+
+    /// Iterate over the visible entries without cloning.
+    pub fn iter(&self) -> std::slice::Iter<'_, DirEntry> {
+        self.as_slice().iter()
+    }
+
+    /// Number of visible entries in this page.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.end - self.start
+    }
+
+    /// Whether this page contains no visible entries.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.start == self.end
+    }
+
+    /// Materialize the visible entries as an owned vector.
+    #[must_use]
+    pub fn to_vec(&self) -> Vec<DirEntry> {
+        self.as_slice().to_vec()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn shares_entries_with(&self, entries: &Arc<Vec<DirEntry>>) -> bool {
+        Arc::ptr_eq(&self.entries, entries)
+    }
+}
+
+impl From<Vec<DirEntry>> for ReaddirPage {
+    fn from(entries: Vec<DirEntry>) -> Self {
+        Self::new(entries)
+    }
+}
+
+impl std::ops::Deref for ReaddirPage {
+    type Target = [DirEntry];
+
+    fn deref(&self) -> &Self::Target {
+        self.as_slice()
+    }
+}
+
+impl<'a> IntoIterator for &'a ReaddirPage {
+    type Item = &'a DirEntry;
+    type IntoIter = std::slice::Iter<'a, DirEntry>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
 /// A single extent returned by [`FsOps::fiemap`].
 ///
 /// Mirrors `struct fiemap_extent` from `<linux/fiemap.h>`. All offsets and
@@ -610,7 +705,7 @@ pub trait FsOps: Send + Sync {
         scope: &mut RequestScope,
         ino: InodeNumber,
         offset: u64,
-    ) -> ffs_error::Result<Vec<DirEntry>>;
+    ) -> ffs_error::Result<ReaddirPage>;
 
     /// Read file data.
     ///
@@ -2502,7 +2597,7 @@ impl<T: FsOps + ?Sized> FsOps for Arc<T> {
         scope: &mut RequestScope,
         ino: InodeNumber,
         offset: u64,
-    ) -> ffs_error::Result<Vec<DirEntry>> {
+    ) -> ffs_error::Result<ReaddirPage> {
         self.as_ref().readdir(cx, scope, ino, offset)
     }
 
@@ -3375,7 +3470,7 @@ mod tests {
             _scope: &mut RequestScope,
             _ino: InodeNumber,
             _offset: u64,
-        ) -> ffs_error::Result<Vec<DirEntry>> {
+        ) -> ffs_error::Result<ReaddirPage> {
             Err(FfsError::UnsupportedFeature(
                 "readdir fixture path is not supported".to_owned(),
             ))

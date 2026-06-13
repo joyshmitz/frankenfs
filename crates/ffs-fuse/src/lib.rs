@@ -12,9 +12,9 @@ pub mod per_core;
 use asupersync::Cx;
 use ffs_core::{
     BackpressureDecision, BackpressureGate, BtrfsQgroupLimitRequest, BtrfsTreeSearchKey,
-    DirEntry as FfsDirEntry, FIEMAP_EXTENT_UNWRITTEN, FiemapExtent,
-    FileType as FfsFileType, FsOps, FsStat, FsxattrInfo, InodeAttr, ReleaseRequest, RequestOp,
-    RequestScope, SeekWhence, SetAttrRequest, XattrSetMode,
+    DirEntry as FfsDirEntry, FIEMAP_EXTENT_UNWRITTEN, FiemapExtent, FileType as FfsFileType, FsOps,
+    FsStat, FsxattrInfo, InodeAttr, ReleaseRequest, RequestOp, RequestScope, SeekWhence,
+    SetAttrRequest, XattrSetMode,
 };
 use ffs_error::FfsError;
 use ffs_types::{EXT4_EXTENTS_FL, InodeNumber};
@@ -2305,7 +2305,7 @@ impl FrankenFuse {
             let _ = entry.name_str();
         }
 
-        Ok(entries)
+        Ok(entries.to_vec())
     }
 
     /// Execute readlink without a live mount.
@@ -7039,7 +7039,8 @@ pub fn mount_managed(
 mod tests {
     use super::*;
     use ffs_core::{
-        DirEntry as FfsDirEntry, FIEMAP_EXTENT_LAST, FIEMAP_EXTENT_UNWRITTEN, RequestScope,
+        DirEntry as FfsDirEntry, FIEMAP_EXTENT_LAST, FIEMAP_EXTENT_UNWRITTEN,
+        ReaddirPage as FfsReaddirPage, RequestScope,
     };
     use ffs_types::CommitSeq;
     use std::os::fd::AsRawFd;
@@ -7073,8 +7074,8 @@ mod tests {
             _scope: &mut RequestScope,
             _ino: InodeNumber,
             _offset: u64,
-        ) -> ffs_error::Result<Vec<FfsDirEntry>> {
-            Ok(vec![])
+        ) -> ffs_error::Result<FfsReaddirPage> {
+            Ok(vec![].into())
         }
         fn read(
             &self,
@@ -8369,7 +8370,7 @@ mod tests {
             _scope: &mut RequestScope,
             _ino: InodeNumber,
             _offset: u64,
-        ) -> ffs_error::Result<Vec<FfsDirEntry>> {
+        ) -> ffs_error::Result<FfsReaddirPage> {
             unreachable!("opendir validation only calls getattr")
         }
 
@@ -8575,7 +8576,7 @@ mod tests {
                 _scope: &mut RequestScope,
                 _ino: InodeNumber,
                 _offset: u64,
-            ) -> ffs_error::Result<Vec<FfsDirEntry>> {
+            ) -> ffs_error::Result<FfsReaddirPage> {
                 unreachable!()
             }
             fn read(
@@ -9315,8 +9316,8 @@ mod tests {
             _scope: &mut RequestScope,
             _ino: InodeNumber,
             _offset: u64,
-        ) -> ffs_error::Result<Vec<FfsDirEntry>> {
-            Ok(vec![])
+        ) -> ffs_error::Result<FfsReaddirPage> {
+            Ok(vec![].into())
         }
 
         fn read(
@@ -14189,8 +14190,8 @@ mod tests {
             _scope: &mut RequestScope,
             _ino: InodeNumber,
             _offset: u64,
-        ) -> ffs_error::Result<Vec<FfsDirEntry>> {
-            Ok(vec![])
+        ) -> ffs_error::Result<FfsReaddirPage> {
+            Ok(vec![].into())
         }
 
         fn read(
@@ -14347,8 +14348,8 @@ mod tests {
             _scope: &mut RequestScope,
             _ino: InodeNumber,
             _offset: u64,
-        ) -> ffs_error::Result<Vec<FfsDirEntry>> {
-            Ok(vec![])
+        ) -> ffs_error::Result<FfsReaddirPage> {
+            Ok(vec![].into())
         }
 
         fn read(
@@ -14764,7 +14765,7 @@ mod tests {
             _scope: &mut RequestScope,
             ino: InodeNumber,
             offset: u64,
-        ) -> ffs_error::Result<Vec<FfsDirEntry>> {
+        ) -> ffs_error::Result<FfsReaddirPage> {
             self.calls
                 .lock()
                 .expect("lock mutation calls")
@@ -14774,7 +14775,8 @@ mod tests {
                 offset: offset + 1,
                 kind: FfsFileType::RegularFile,
                 name: b"entry.txt".to_vec(),
-            }])
+            }]
+            .into())
         }
 
         fn read(
@@ -15991,8 +15993,8 @@ mod tests {
             _scope: &mut RequestScope,
             _ino: InodeNumber,
             _offset: u64,
-        ) -> ffs_error::Result<Vec<FfsDirEntry>> {
-            Ok(vec![])
+        ) -> ffs_error::Result<FfsReaddirPage> {
+            Ok(vec![].into())
         }
 
         fn read(
