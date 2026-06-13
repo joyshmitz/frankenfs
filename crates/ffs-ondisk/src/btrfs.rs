@@ -564,50 +564,79 @@ pub struct BtrfsPhysicalMapping {
 ///
 /// Returns `Ok(Some(mapping))` if the logical address is covered,
 /// `Ok(None)` if no chunk covers it, or `Err` on malformed data.
+/// Resolve `logical` within a single chunk, returning `None` when the chunk
+/// does not cover it. Extracted so [`map_logical_to_physical`] can share the
+/// per-chunk logic between its linear and binary-search paths.
+fn chunk_physical(
+    chunk: &BtrfsChunkEntry,
+    logical: u64,
+) -> Result<Option<BtrfsPhysicalMapping>, ParseError> {
+    let chunk_start = chunk.key.offset;
+    let chunk_end = chunk_start
+        .checked_add(chunk.length)
+        .ok_or(ParseError::InvalidField {
+            field: "chunk_length",
+            reason: "logical range overflow",
+        })?;
+    if logical < chunk_start || logical >= chunk_end {
+        return Ok(None);
+    }
+    let profile = BtrfsRaidProfile::from_chunk_type(chunk.chunk_type);
+    match profile {
+        BtrfsRaidProfile::Single | BtrfsRaidProfile::Dup => {
+            validate_mirror_stripes(chunk, profile)?;
+        }
+        _ => {
+            return Err(ParseError::InvalidField {
+                field: "chunk_type",
+                reason: "multi-device RAID profile not supported",
+            });
+        }
+    }
+    let offset_within = logical - chunk_start;
+    // Use the first stripe (single-device assumption).
+    let stripe = chunk.stripes.first().ok_or(ParseError::InvalidField {
+        field: "stripes",
+        reason: "chunk has no stripes",
+    })?;
+    let physical = stripe
+        .offset
+        .checked_add(offset_within)
+        .ok_or(ParseError::InvalidField {
+            field: "stripe_offset",
+            reason: "physical address overflow",
+        })?;
+    Ok(Some(BtrfsPhysicalMapping {
+        devid: stripe.devid,
+        physical,
+    }))
+}
+
+/// Below this chunk count the linear scan is used. Bootstrap `sys_chunk_array`
+/// lists are tiny and not necessarily sorted; large lists only ever come from
+/// `walk_chunk_tree`, which sorts by `key.offset`.
+const CHUNK_MAP_BINARY_SEARCH_THRESHOLD: usize = 16;
+
 pub fn map_logical_to_physical(
     chunks: &[BtrfsChunkEntry],
     logical: u64,
 ) -> Result<Option<BtrfsPhysicalMapping>, ParseError> {
+    // Chunks cover disjoint logical ranges. For a large (sorted-by-key.offset)
+    // chunk list the covering chunk is the last one whose start is <= `logical`,
+    // so binary-search to that single candidate instead of scanning every chunk
+    // on every logical->physical mapping (every tree-node + data-block read).
+    // O(chunks) -> O(log chunks) (bd-6u6xb). Small bootstrap lists keep the
+    // linear scan (correct regardless of order, cheap at that size).
+    if chunks.len() > CHUNK_MAP_BINARY_SEARCH_THRESHOLD {
+        let pp = chunks.partition_point(|c| c.key.offset <= logical);
+        if pp == 0 {
+            return Ok(None);
+        }
+        return chunk_physical(&chunks[pp - 1], logical);
+    }
     for chunk in chunks {
-        let chunk_start = chunk.key.offset;
-        let chunk_end = chunk_start
-            .checked_add(chunk.length)
-            .ok_or(ParseError::InvalidField {
-                field: "chunk_length",
-                reason: "logical range overflow",
-            })?;
-
-        if logical >= chunk_start && logical < chunk_end {
-            let profile = BtrfsRaidProfile::from_chunk_type(chunk.chunk_type);
-            match profile {
-                BtrfsRaidProfile::Single | BtrfsRaidProfile::Dup => {
-                    validate_mirror_stripes(chunk, profile)?;
-                }
-                _ => {
-                    return Err(ParseError::InvalidField {
-                        field: "chunk_type",
-                        reason: "multi-device RAID profile not supported",
-                    });
-                }
-            }
-            let offset_within = logical - chunk_start;
-            // Use the first stripe (single-device assumption).
-            let stripe = chunk.stripes.first().ok_or(ParseError::InvalidField {
-                field: "stripes",
-                reason: "chunk has no stripes",
-            })?;
-            let physical =
-                stripe
-                    .offset
-                    .checked_add(offset_within)
-                    .ok_or(ParseError::InvalidField {
-                        field: "stripe_offset",
-                        reason: "physical address overflow",
-                    })?;
-            return Ok(Some(BtrfsPhysicalMapping {
-                devid: stripe.devid,
-                physical,
-            }));
+        if let Some(mapping) = chunk_physical(chunk, logical)? {
+            return Ok(Some(mapping));
         }
     }
     Ok(None)
