@@ -16286,6 +16286,13 @@ impl OpenFs {
         // read stale disk content.
         let mut fresh_run: Option<(u32, u32)> = None;
 
+        // The inode's extent tree is parsed once and reused across the per-block
+        // loop. It changes ONLY at the two `set_extent_root` sites below (after
+        // `allocate_extent` and after `mark_written`), where this is invalidated;
+        // a pure overwrite mutates neither, so an N-block write parses the tree
+        // once instead of once per block (O(N*E) -> O(E), bd-yqq5l).
+        let mut cached_extents: Option<Vec<Ext4Extent>> = None;
+
         while pos < end {
             let logical_block = u32::try_from(pos / bs).map_err(|_| {
                 FfsError::Format("file offset exceeds ext4 32-bit logical block limit".into())
@@ -16299,7 +16306,10 @@ impl OpenFs {
             let chunk_len = (bs_usize - block_offset).min(remaining);
 
             // Resolve or allocate the physical block.
-            let extents = self.collect_extents_with_scope(cx, scope, &inode)?;
+            if cached_extents.is_none() {
+                cached_extents = Some(self.collect_extents_with_scope(cx, scope, &inode)?);
+            }
+            let extents = cached_extents.as_deref().unwrap_or(&[]);
             let resolved = extents.iter().find_map(|e| {
                 if logical_block >= e.logical_block
                     && logical_block < e.logical_block + u32::from(e.actual_len())
@@ -16437,6 +16447,7 @@ impl OpenFs {
                         alloc_blocks,
                     );
                     Self::set_extent_root(&mut inode, &root_bytes);
+                    cached_extents = None; // tree mutated by allocate_extent
                     inode.blocks = blocks_after_alloc;
                     fresh_run = Some((logical_block, logical_block + mapping.count));
                     (BlockNumber(mapping.physical_start), true, false)
@@ -16514,6 +16525,7 @@ impl OpenFs {
                 }
                 self.extent_cache.invalidate_all();
                 Self::set_extent_root(&mut inode, &root_bytes);
+                cached_extents = None; // tree mutated by mark_written
             }
 
             let chunk_u64 = u64::try_from(chunk_len)
