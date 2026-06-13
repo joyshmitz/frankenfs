@@ -29,6 +29,10 @@ proptest = { workspace = true }
 name = "scrub_codec"
 harness = false
 
+[[bench]]
+name = "gf_simd_probe"
+harness = false
+
 [[bin]]
 name = "ffs-demo"
 path = "src/bin/ffs-demo.rs"
