@@ -134,6 +134,23 @@ fn bench_read_contiguous(c: &mut Criterion) {
             black_box(out)
         });
     });
+    // Old ext4 shape (bd-xfdjk): read_contiguous_blocks_with_scope returned a
+    // Vec<Vec<u8>> — one BlockBuf per block, then a `to_vec` into a SECOND
+    // per-block allocation, then the caller copies each Vec into `out`. Two
+    // allocations + two copies per block on top of the ranged read.
+    group.bench_function("ext4_blocks_then_vec_then_copy", |b| {
+        b.iter(|| {
+            let mut out = vec![0_u8; SPAN];
+            let mut bufs: Vec<BlockBuf> = (0..BLOCKS).map(|_| BlockBuf::zeroed(bs)).collect();
+            dev.read_contiguous_blocks(black_box(&cx), BlockNumber(0), &mut bufs)
+                .unwrap();
+            let datas: Vec<Vec<u8>> = bufs.iter().map(|b| b.as_slice().to_vec()).collect();
+            for (idx, data) in datas.iter().enumerate() {
+                out[idx * bs..(idx + 1) * bs].copy_from_slice(&data[..bs]);
+            }
+            black_box(out)
+        });
+    });
     // New: one ranged read straight into out — no per-block alloc/copy.
     group.bench_function("read_contiguous_into", |b| {
         b.iter(|| {

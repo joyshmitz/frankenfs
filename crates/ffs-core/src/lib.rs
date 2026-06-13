@@ -9187,6 +9187,101 @@ impl OpenFs {
             .collect())
     }
 
+    /// Zero-copy counterpart to [`read_contiguous_blocks_with_scope`]: read a
+    /// contiguous run of `dst.len() / block_size` blocks starting at `start`
+    /// directly into the caller's contiguous `dst` buffer (bd-xfdjk).
+    ///
+    /// `read_contiguous_blocks_with_scope` returns a `Vec<Vec<u8>>` — it
+    /// allocates a `BlockBuf` per block, then `to_vec`s each into a second
+    /// per-block allocation, and the caller copies each into its destination
+    /// (two allocations + two copies per block). This reads each base-gap run
+    /// straight into the matching `dst` sub-slice via
+    /// [`BlockDevice::read_contiguous_into`] (no per-block allocation, no
+    /// post-read copy) and copies overlay blocks into their `dst` sub-slices.
+    /// Overlay precedence and per-block bytes are identical to
+    /// `read_contiguous_blocks_with_scope`.
+    fn read_contiguous_into_with_scope(
+        &self,
+        cx: &Cx,
+        scope: &RequestScope,
+        start: BlockNumber,
+        dst: &mut [u8],
+    ) -> Result<(), FfsError> {
+        let bs = usize::try_from(self.block_size())
+            .map_err(|_| FfsError::Format("block_size does not fit usize".to_owned()))?;
+        if bs == 0 || dst.len() % bs != 0 {
+            return Err(FfsError::Format(
+                "read_contiguous_into_with_scope: dst length must be a multiple of block size"
+                    .to_owned(),
+            ));
+        }
+        if dst.is_empty() {
+            return Ok(());
+        }
+        let count = dst.len() / bs;
+        let count_u64 = u64::try_from(count)
+            .map_err(|_| FfsError::Format("block count does not fit u64".to_owned()))?;
+        let end = start
+            .0
+            .checked_add(count_u64)
+            .ok_or_else(|| FfsError::Format("block range overflow".to_owned()))?;
+
+        // Resolve scope overlay blocks (tx-staged first, then snapshot-visible)
+        // exactly as read_contiguous_blocks_with_scope does — no device I/O here.
+        let mut resolved: Vec<Option<Vec<u8>>> = Vec::with_capacity(count);
+        let mut any_overlay = false;
+        {
+            let store = if scope.tx.is_some() && scope.snapshot.is_some() {
+                Some(self.mvcc_store.read())
+            } else {
+                None
+            };
+            for block_num in start.0..end {
+                let block = BlockNumber(block_num);
+                if let Some(staged) = scope.tx.as_ref().and_then(|tx| tx.staged_write(block)) {
+                    resolved.push(Some(staged.to_vec()));
+                    any_overlay = true;
+                    continue;
+                }
+                if let (Some(store), Some(snapshot)) = (store.as_ref(), scope.snapshot) {
+                    if let Some(visible) = store.read_visible(block, snapshot) {
+                        resolved.push(Some(visible.into_owned()));
+                        any_overlay = true;
+                        continue;
+                    }
+                }
+                resolved.push(None);
+            }
+        }
+
+        let dev = self.block_device_adapter();
+
+        // Fast path: no overlay — one ranged device read straight into dst.
+        if !any_overlay {
+            return dev.read_contiguous_into(cx, start, dst);
+        }
+
+        // Mixed: copy overlay bytes into their dst sub-slices and coalesce
+        // maximal base-gap runs into ranged reads into the matching dst slices.
+        let mut idx = 0usize;
+        while idx < count {
+            if let Some(bytes) = resolved[idx].take() {
+                dst[idx * bs..(idx + 1) * bs].copy_from_slice(&bytes[..bs]);
+                idx += 1;
+                continue;
+            }
+            let run_start = idx;
+            while idx < count && resolved[idx].is_none() {
+                idx += 1;
+            }
+            let run_start_u64 = u64::try_from(run_start)
+                .map_err(|_| FfsError::Format("run start does not fit u64".to_owned()))?;
+            let run_block_start = BlockNumber(start.0 + run_start_u64);
+            dev.read_contiguous_into(cx, run_block_start, &mut dst[run_start * bs..idx * bs])?;
+        }
+        Ok(())
+    }
+
     fn write_block_with_scope(
         cx: &Cx,
         scope: &mut RequestScope,
@@ -9708,17 +9803,14 @@ impl OpenFs {
                         }
                     }
 
-                    let datas = self.read_contiguous_blocks_with_scope(
+                    let span = run_blocks * bs_usize;
+                    self.read_contiguous_into_with_scope(
                         cx,
                         scope,
                         BlockNumber(phys_block),
-                        run_blocks,
+                        &mut buf[bytes_read..bytes_read + span],
                     )?;
-                    for (idx, block_data) in datas.iter().enumerate() {
-                        let dst = bytes_read + idx * bs_usize;
-                        buf[dst..dst + bs_usize].copy_from_slice(&block_data[..bs_usize]);
-                    }
-                    bytes_read += run_blocks * bs_usize;
+                    bytes_read += span;
                 }
                 Some((phys_block, unwritten)) => {
                     if unwritten {
@@ -10890,16 +10982,13 @@ impl OpenFs {
                             _ => break,
                         }
                     }
-                    let datas = self.read_contiguous_blocks_with_scope(
+                    let span = run_len as usize * bs_usize;
+                    self.read_contiguous_into_with_scope(
                         cx,
                         scope,
                         BlockNumber(phys0),
-                        run_len as usize,
+                        &mut buf[bytes_read..bytes_read + span],
                     )?;
-                    for (i, data) in datas.iter().enumerate() {
-                        let dst = bytes_read + i * bs_usize;
-                        buf[dst..dst + bs_usize].copy_from_slice(&data[..bs_usize]);
-                    }
                     bytes_read += run_len as usize * bs_usize;
                 } else {
                     // Hole at a full block boundary — already zeroed.
@@ -33806,17 +33895,23 @@ mod tests {
             );
         }
 
-        // SCORE (bd-bov9c): the 4 contiguous data blocks are served by exactly
-        // ONE vectored device op; pre-coalescing this was 4 scalar reads.
-        assert_eq!(
-            vectored.load(AtomicOrdering::SeqCst),
-            1,
-            "4 contiguous indirect data blocks coalesce into one vectored read"
-        );
+        // SCORE (bd-bov9c/bd-xfdjk): the 4 contiguous data blocks are served by
+        // exactly ONE ranged device op — `read_contiguous_into` reads the whole
+        // run in one `read_exact_at` straight into the output buffer (no
+        // per-block buffers, no vectored scatter). Pre-coalescing this was 4
+        // scalar reads.
         assert_eq!(
             scalar.load(AtomicOrdering::SeqCst),
+            1,
+            "4 contiguous indirect data blocks collapse to one ranged device op; \
+             got {} scalar + {} vectored",
+            scalar.load(AtomicOrdering::SeqCst),
+            vectored.load(AtomicOrdering::SeqCst),
+        );
+        assert_eq!(
+            vectored.load(AtomicOrdering::SeqCst),
             0,
-            "no scalar per-block indirect data reads remain"
+            "the ranged read into the output buffer uses no vectored device op"
         );
     }
 
@@ -34168,6 +34263,85 @@ mod tests {
         assert!(
             read_op_ratio >= 2.0,
             "Score {read_op_ratio} must clear 2.0 ({ref_scalar} -> {new_vectored})"
+        );
+    }
+
+    #[test]
+    fn scoped_contiguous_read_into_coalesces_base_gaps_score_bd_xfdjk() {
+        const BS: usize = 1024;
+        const START: u64 = 40;
+        const COUNT: usize = 64;
+        const STAGED: u64 = 72;
+        let cx = Cx::for_testing();
+
+        let image = build_ext4_image(0);
+        let (dev, counters) = CountingByteDevice::new(image);
+        let fs =
+            OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).expect("open ext4");
+
+        let mut txn = fs.mvcc_store.write().begin();
+        txn.stage_write(BlockNumber(STAGED), vec![0xEE_u8; BS]);
+        let scope = RequestScope {
+            snapshot: None,
+            tx: Some(txn),
+        };
+
+        let reference: Vec<Vec<u8>> = (START..START + COUNT as u64)
+            .map(|b| {
+                fs.read_block_with_scope(&cx, &scope, BlockNumber(b))
+                    .expect("reference read")
+            })
+            .collect();
+
+        counters
+            .scalar
+            .store(0, std::sync::atomic::Ordering::SeqCst);
+        counters
+            .vectored
+            .store(0, std::sync::atomic::Ordering::SeqCst);
+        let mut direct = vec![0_u8; COUNT * BS];
+        fs.read_contiguous_into_with_scope(&cx, &scope, BlockNumber(START), &mut direct)
+            .expect("direct contiguous read");
+        let new_scalar = counters.scalar.load(std::sync::atomic::Ordering::SeqCst);
+        let new_vectored = counters.vectored.load(std::sync::atomic::Ordering::SeqCst);
+
+        for (idx, expected) in reference.iter().enumerate() {
+            let actual = &direct[idx * BS..(idx + 1) * BS];
+            assert_eq!(
+                actual,
+                expected,
+                "block {} bytes diverged",
+                START as usize + idx
+            );
+        }
+        assert_eq!(
+            &direct[(STAGED - START) as usize * BS..(STAGED - START + 1) as usize * BS],
+            &[0xEE_u8; BS]
+        );
+
+        let mut digest: u64 = 0xcbf2_9ce4_8422_2325;
+        for &byte in &direct {
+            digest ^= u64::from(byte);
+            digest = digest.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        assert_eq!(
+            digest, 12_574_137_928_603_788_069,
+            "golden direct-into scoped contiguous-read digest changed"
+        );
+
+        assert_eq!(
+            new_vectored, 0,
+            "direct-into path should not use vectored scatter reads"
+        );
+        assert_eq!(
+            new_scalar, 2,
+            "two maximal base-gap runs around the staged block"
+        );
+        let old_scalar_reads = COUNT - 1;
+        let read_op_ratio = old_scalar_reads as f64 / new_scalar as f64;
+        assert!(
+            read_op_ratio >= 2.0,
+            "Score {read_op_ratio} must clear 2.0 ({old_scalar_reads} -> {new_scalar})"
         );
     }
 
