@@ -5564,7 +5564,7 @@ impl BtrfsExtentAllocator {
         let min_usable = bg_start
             .checked_add(self.block_groups[&bg_start].min_usable_offset)
             .ok_or(BtrfsMutationError::AddressOverflow)?;
-        let mut cursor = bg_start
+        let cursor = bg_start
             .checked_add(alloc_offset)
             .ok_or(BtrfsMutationError::AddressOverflow)?;
 
@@ -5573,56 +5573,13 @@ impl BtrfsExtentAllocator {
             .filter_map(|(key, _)| allocation_extent_range(*key, self.nodesize))
             .collect();
 
-        let mut found = None;
-        // Try from alloc_offset first, then wrap around.
-        for &(ext_start, ext_size) in &allocated_ranges {
-            let ext_end = ext_start
-                .checked_add(ext_size)
-                .ok_or(BtrfsMutationError::AddressOverflow)?;
-            if cursor < ext_start {
-                let gap = ext_start - cursor;
-                if gap >= num_bytes {
-                    found = Some(cursor);
-                    break;
-                }
-            }
-            if ext_end > cursor {
-                cursor = ext_end;
-            }
-        }
-        // Check gap after last extent.
-        if found.is_none() {
-            if let Some(end) = cursor.checked_add(num_bytes) {
-                if end <= bg_end {
-                    found = Some(cursor);
-                }
-            }
-        }
-        // Wrap around: try from the first usable offset if we started mid-group.
+        // Forward search from the bump-pointer offset; if that finds nothing and
+        // we started mid-group, wrap around to the reserved-prefix floor. Both
+        // searches binary-search past the no-op prefix below their start cursor
+        // (bd-8fbka).
+        let mut found = first_gap_at_or_after(&allocated_ranges, cursor, num_bytes, bg_end)?;
         if found.is_none() && alloc_offset > 0 {
-            cursor = min_usable;
-            for &(ext_start, ext_size) in &allocated_ranges {
-                let ext_end = ext_start
-                    .checked_add(ext_size)
-                    .ok_or(BtrfsMutationError::AddressOverflow)?;
-                if cursor < ext_start {
-                    let gap = ext_start - cursor;
-                    if gap >= num_bytes {
-                        found = Some(cursor);
-                        break;
-                    }
-                }
-                if ext_end > cursor {
-                    cursor = ext_end;
-                }
-            }
-            if found.is_none() {
-                if let Some(end) = cursor.checked_add(num_bytes) {
-                    if end <= bg_end {
-                        found = Some(cursor);
-                    }
-                }
-            }
+            found = first_gap_at_or_after(&allocated_ranges, min_usable, num_bytes, bg_end)?;
         }
 
         // bytenr 0 is the btrfs hole/none sentinel and must never back a real
@@ -6468,6 +6425,50 @@ fn allocation_extent_range(key: BtrfsKey, metadata_nodesize: u64) -> Option<(u64
         BTRFS_ITEM_METADATA_ITEM => Some((key.objectid, metadata_nodesize)),
         _ => None,
     }
+}
+
+/// First-fit gap search over `allocated_ranges` (sorted ascending by start,
+/// non-overlapping) for the lowest address `>= cursor` with `num_bytes` free
+/// before `bg_end`.
+///
+/// The scan binary-searches past every extent that ends at or before `cursor`:
+/// those satisfy neither loop branch (`cursor < ext_start` is false because
+/// `ext_start < ext_end <= cursor`, and `ext_end > cursor` is false), so they
+/// are pure no-ops. Skipping them makes a bump-pointer sequential fill — where
+/// `cursor` advances past the allocated prefix every call — pay O(log E + tail)
+/// instead of O(E) per allocation, i.e. O(N log N) to fill a group instead of
+/// O(N^2) (bd-8fbka). Result is identical to scanning from index 0.
+fn first_gap_at_or_after(
+    allocated_ranges: &[(u64, u64)],
+    mut cursor: u64,
+    num_bytes: u64,
+    bg_end: u64,
+) -> Result<Option<u64>, BtrfsMutationError> {
+    // ext_end is non-decreasing (sorted, non-overlapping), so `ext_end <= cursor`
+    // is monotonic — a valid partition_point predicate.
+    let start_idx = allocated_ranges
+        .partition_point(|&(ext_start, ext_size)| ext_start.saturating_add(ext_size) <= cursor);
+    for &(ext_start, ext_size) in &allocated_ranges[start_idx..] {
+        let ext_end = ext_start
+            .checked_add(ext_size)
+            .ok_or(BtrfsMutationError::AddressOverflow)?;
+        if cursor < ext_start {
+            let gap = ext_start - cursor;
+            if gap >= num_bytes {
+                return Ok(Some(cursor));
+            }
+        }
+        if ext_end > cursor {
+            cursor = ext_end;
+        }
+    }
+    // Gap after the last extent.
+    if let Some(end) = cursor.checked_add(num_bytes) {
+        if end <= bg_end {
+            return Ok(Some(cursor));
+        }
+    }
+    Ok(None)
 }
 
 // ── btrfs multi-device support ─────────────────────────────────────────────
