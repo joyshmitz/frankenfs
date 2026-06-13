@@ -67,6 +67,7 @@ impl ByteDevice for BenchByteDevice {
             .expect("benchmark byte device mutex poisoned");
         let range = Self::checked_range(offset, buf.len(), data.len())?;
         buf.copy_from_slice(&data[range]);
+        drop(data);
         Ok(())
     }
 
@@ -77,6 +78,7 @@ impl ByteDevice for BenchByteDevice {
             .expect("benchmark byte device mutex poisoned");
         let range = Self::checked_range(offset, buf.len(), data.len())?;
         data[range].copy_from_slice(buf);
+        drop(data);
         Ok(())
     }
 
@@ -206,7 +208,7 @@ fn prepare_btrfs_prealloc_append(image: Vec<u8>) -> FfsResult<(OpenFs, InodeNumb
     Ok((fs, attr.ino, vec![0xA5_u8; BTRFS_SEQUENTIAL_WRITE_CHUNK]))
 }
 
-fn run_btrfs_prealloc_append(fs: OpenFs, ino: InodeNumber, chunk: Vec<u8>) -> FfsResult<u64> {
+fn run_btrfs_prealloc_append(fs: &OpenFs, ino: InodeNumber, chunk: &[u8]) -> FfsResult<u64> {
     let cx = Cx::for_testing();
     let base_offset =
         u64::try_from(BTRFS_PREALLOC_APPEND_EXTENTS * BTRFS_SEQUENTIAL_WRITE_CHUNK)
@@ -219,7 +221,7 @@ fn run_btrfs_prealloc_append(fs: OpenFs, ino: InodeNumber, chunk: Vec<u8>) -> Ff
                 })?,
             )
             .ok_or_else(|| FfsError::Format("benchmark append offset overflow".to_owned()))?;
-        let written = fs.write(&cx, ino, offset, &chunk)?;
+        let written = fs.write(&cx, ino, offset, chunk)?;
         assert_eq!(
             written,
             u32::try_from(BTRFS_SEQUENTIAL_WRITE_CHUNK).expect("benchmark chunk length fits u32")
@@ -264,7 +266,7 @@ fn bench_btrfs_sequential_write(c: &mut Criterion) {
             },
             |(fs, ino, chunk)| {
                 black_box(
-                    run_btrfs_prealloc_append(fs, ino, chunk)
+                    run_btrfs_prealloc_append(&fs, ino, &chunk)
                         .expect("run btrfs prealloc append benchmark"),
                 );
             },
