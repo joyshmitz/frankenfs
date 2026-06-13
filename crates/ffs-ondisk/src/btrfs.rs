@@ -778,25 +778,49 @@ pub fn map_logical_to_stripes(
     chunks: &[BtrfsChunkEntry],
     logical: u64,
 ) -> Result<Option<BtrfsStripeMapping>, ParseError> {
-    for chunk in chunks {
-        let chunk_start = chunk.key.offset;
-        let chunk_end = chunk_start
-            .checked_add(chunk.length)
-            .ok_or(ParseError::InvalidField {
-                field: "chunk_length",
-                reason: "logical range overflow",
-            })?;
-
-        if logical < chunk_start || logical >= chunk_end {
-            continue;
+    // Chunks cover disjoint logical ranges; large (sorted-by-key.offset) lists
+    // from `walk_chunk_tree` let us binary-search to the single covering chunk
+    // (last one whose start is <= `logical`) instead of scanning every chunk on
+    // every logical->stripe resolution. O(chunks) -> O(log chunks), the stripe
+    // dual of `map_logical_to_physical` (bd-6tygu / bd-6u6xb). Small bootstrap
+    // lists keep the linear scan (correct regardless of order, cheap at size).
+    if chunks.len() > CHUNK_MAP_BINARY_SEARCH_THRESHOLD {
+        let pp = chunks.partition_point(|c| c.key.offset <= logical);
+        if pp == 0 {
+            return Ok(None);
         }
-
-        let offset_within = logical - chunk_start;
-        let profile = BtrfsRaidProfile::from_chunk_type(chunk.chunk_type);
-        let stripes = resolve_chunk_stripes(chunk, offset_within, profile)?;
-        return Ok(Some(BtrfsStripeMapping { profile, stripes }));
+        return chunk_stripes(&chunks[pp - 1], logical);
+    }
+    for chunk in chunks {
+        if let Some(mapping) = chunk_stripes(chunk, logical)? {
+            return Ok(Some(mapping));
+        }
     }
     Ok(None)
+}
+
+/// Resolve `logical` to its stripe mapping within a single chunk, returning
+/// `None` when the chunk does not cover it. Extracted so
+/// [`map_logical_to_stripes`] can share the per-chunk logic between its linear
+/// and binary-search paths.
+fn chunk_stripes(
+    chunk: &BtrfsChunkEntry,
+    logical: u64,
+) -> Result<Option<BtrfsStripeMapping>, ParseError> {
+    let chunk_start = chunk.key.offset;
+    let chunk_end = chunk_start
+        .checked_add(chunk.length)
+        .ok_or(ParseError::InvalidField {
+            field: "chunk_length",
+            reason: "logical range overflow",
+        })?;
+    if logical < chunk_start || logical >= chunk_end {
+        return Ok(None);
+    }
+    let offset_within = logical - chunk_start;
+    let profile = BtrfsRaidProfile::from_chunk_type(chunk.chunk_type);
+    let stripes = resolve_chunk_stripes(chunk, offset_within, profile)?;
+    Ok(Some(BtrfsStripeMapping { profile, stripes }))
 }
 
 /// Resolve stripe mappings for a single chunk at the given offset.

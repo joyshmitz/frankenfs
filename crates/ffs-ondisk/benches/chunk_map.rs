@@ -12,7 +12,9 @@
 //! data-block read).
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use ffs_ondisk::{BtrfsChunkEntry, BtrfsKey, BtrfsStripe, map_logical_to_physical};
+use ffs_ondisk::{
+    BtrfsChunkEntry, BtrfsKey, BtrfsStripe, map_logical_to_physical, map_logical_to_stripes,
+};
 use std::hint::black_box;
 
 const N: u64 = 1000; // a multi-TB filesystem's chunk count
@@ -52,6 +54,20 @@ fn linear(chunks: &[BtrfsChunkEntry], logical: u64) -> Option<u64> {
     for c in chunks {
         if logical >= c.key.offset && logical < c.key.offset + c.length {
             return Some(c.stripes[0].offset + (logical - c.key.offset));
+        }
+    }
+    None
+}
+
+/// Linear scan over the *stripe* resolver (the pre-bd-6tygu shape): first chunk
+/// covering `logical`, returning its first readable stripe's physical offset.
+fn linear_stripes(chunks: &[BtrfsChunkEntry], logical: u64) -> Option<u64> {
+    for c in chunks {
+        if logical >= c.key.offset && logical < c.key.offset + c.length {
+            let m = map_logical_to_stripes(std::slice::from_ref(c), logical)
+                .unwrap()
+                .unwrap();
+            return Some(m.stripes[0].physical);
         }
     }
     None
@@ -105,5 +121,54 @@ fn bench_chunk_map(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(chunk_map, bench_chunk_map);
+fn bench_stripe_map(c: &mut Criterion) {
+    let chunks = build_chunks();
+    let max_logical = N * CHUNK_LEN;
+
+    let probes: Vec<u64> = {
+        let mut x: u64 = 0x9e37_79b9_7f4a_7c15;
+        (0..1024)
+            .map(|_| {
+                x = x.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+                (x >> 11) % max_logical
+            })
+            .collect()
+    };
+
+    // Isomorphism: the binary-search stripe map returns the same physical
+    // address the linear scan does for every probe.
+    for &t in &probes {
+        let mapped = map_logical_to_stripes(&chunks, t)
+            .unwrap()
+            .map(|m| m.stripes[0].physical);
+        assert_eq!(mapped, linear_stripes(&chunks, t), "logical {t} diverged");
+    }
+
+    let mut group = c.benchmark_group("btrfs_stripe_map_1000");
+    group.bench_function("linear_scan", |b| {
+        b.iter(|| {
+            let mut acc = 0_u64;
+            for &t in &probes {
+                acc = acc.wrapping_add(linear_stripes(black_box(&chunks), t).unwrap_or(0));
+            }
+            black_box(acc)
+        });
+    });
+    group.bench_function("binary_search", |b| {
+        b.iter(|| {
+            let mut acc = 0_u64;
+            for &t in &probes {
+                acc = acc.wrapping_add(
+                    map_logical_to_stripes(black_box(&chunks), t)
+                        .unwrap()
+                        .map_or(0, |m| m.stripes[0].physical),
+                );
+            }
+            black_box(acc)
+        });
+    });
+    group.finish();
+}
+
+criterion_group!(chunk_map, bench_chunk_map, bench_stripe_map);
 criterion_main!(chunk_map);
