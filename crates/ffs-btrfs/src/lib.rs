@@ -2373,20 +2373,36 @@ impl BtrfsTreeWalker<'_> {
     }
 }
 
+/// For a leaf whose `items` are sorted ascending by key, return the half-open
+/// index window `[start, end)` of items that fall in the key range `[lo, hi)`.
+///
+/// The kept items form a contiguous run because the leaf is sorted, so two
+/// `partition_point` probes (lower bound `>= lo`, upper bound `>= hi`) bracket
+/// them in O(log items) instead of scanning the whole leaf and filtering each
+/// item (bd-cp077). With no range the whole leaf `0..len` is the window. This
+/// runs once per leaf visited by a range walk (readdir/fiemap/listxattr), and a
+/// 16 KiB leaf packs hundreds of items.
+fn leaf_range_window(items: &[BtrfsItem], range: Option<&(BtrfsKey, BtrfsKey)>) -> (usize, usize) {
+    match range {
+        Some((lo, hi)) => {
+            let start = items.partition_point(|item| key_cmp(&item.key, lo) == Ordering::Less);
+            let end = items.partition_point(|item| key_cmp(&item.key, hi) == Ordering::Less);
+            // Guard against a degenerate lo > hi (keeps nothing, as the old
+            // per-item filter did) so the slice bounds stay valid.
+            (start, end.max(start))
+        }
+        None => (0, items.len()),
+    }
+}
+
 fn collect_leaf_items(
     block: &[u8],
     items: &[BtrfsItem],
     out: &mut Vec<BtrfsLeafEntry>,
     range: Option<&(BtrfsKey, BtrfsKey)>,
 ) -> Result<(), ParseError> {
-    for item in items {
-        if let Some((lo, hi)) = range {
-            // Keep only items in the half-open range [lo, hi).
-            if key_cmp(&item.key, lo) == Ordering::Less || key_cmp(&item.key, hi) != Ordering::Less
-            {
-                continue;
-            }
-        }
+    let (start, end) = leaf_range_window(items, range);
+    for item in &items[start..end] {
         let off = usize::try_from(item.data_offset).map_err(|_| ParseError::IntegerConversion {
             field: "data_offset",
         })?;
@@ -2488,13 +2504,8 @@ fn collect_leaf_item_batch(
     range: Option<&(BtrfsKey, BtrfsKey)>,
 ) -> Result<(), ParseError> {
     let mut entries = Vec::new();
-    for item in items {
-        if let Some((lo, hi)) = range {
-            if key_cmp(&item.key, lo) == Ordering::Less || key_cmp(&item.key, hi) != Ordering::Less
-            {
-                continue;
-            }
-        }
+    let (start, win_end) = leaf_range_window(items, range);
+    for item in &items[start..win_end] {
         let off = usize::try_from(item.data_offset).map_err(|_| ParseError::IntegerConversion {
             field: "data_offset",
         })?;

@@ -49,5 +49,9 @@ harness = false
 name = "floor_node_scan"
 harness = false
 
+[[bench]]
+name = "leaf_range_filter"
+harness = false
+
 [lints]
 workspace = true
