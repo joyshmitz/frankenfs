@@ -890,16 +890,20 @@ fn allocation_group_order(geo: &FsGeometry, hint: &AllocHint) -> Result<Vec<Grou
     let group_len = usize::try_from(geo.group_count)
         .map_err(|_| FfsError::InvalidGeometry("group_count does not fit usize".into()))?;
     let mut order = Vec::with_capacity(group_len);
+    // O(1) membership bitset for dedup: indexed by group number, length == group_count.
+    // Replaces an O(group_count) `order.contains()` scan per push, which made building
+    // the order an O(group_count^2) cost paid on every allocation.
+    let mut seen = vec![false; group_len];
 
     if let Some(numa) = &hint.numa {
         validate_allocator_numa_preference(geo, numa)?;
         if hint.goal_group.is_none() && hint.goal_block.is_none() {
-            push_numa_preferred_groups(geo, numa, &mut order);
+            push_numa_preferred_groups(geo, numa, &mut order, &mut seen);
         }
     }
 
     let fallback_goal = legacy_allocation_goal_group(geo, hint);
-    push_legacy_group_order(geo, fallback_goal, &mut order);
+    push_legacy_group_order(geo, fallback_goal, &mut order, &mut seen);
     Ok(order)
 }
 
@@ -929,6 +933,7 @@ fn push_numa_preferred_groups(
     geo: &FsGeometry,
     numa: &NumaAllocationPreference,
     order: &mut Vec<GroupNumber>,
+    seen: &mut [bool],
 ) {
     for (index, node) in numa.plan.group_nodes.iter().enumerate() {
         if *node != Some(numa.preferred_node) {
@@ -937,7 +942,7 @@ fn push_numa_preferred_groups(
         let Ok(group) = u32::try_from(index) else {
             continue;
         };
-        push_unique_group(geo, order, GroupNumber(group));
+        push_unique_group(geo, order, seen, GroupNumber(group));
     }
 }
 
@@ -945,27 +950,36 @@ fn push_legacy_group_order(
     geo: &FsGeometry,
     goal_group: GroupNumber,
     order: &mut Vec<GroupNumber>,
+    seen: &mut [bool],
 ) {
-    push_unique_group(geo, order, goal_group);
+    push_unique_group(geo, order, seen, goal_group);
 
     for delta in 1..=8_u32 {
         let next = goal_group.0.wrapping_add(delta);
         if next < geo.group_count {
-            push_unique_group(geo, order, GroupNumber(next));
+            push_unique_group(geo, order, seen, GroupNumber(next));
         }
         let prev = goal_group.0.wrapping_sub(delta);
         if prev < geo.group_count {
-            push_unique_group(geo, order, GroupNumber(prev));
+            push_unique_group(geo, order, seen, GroupNumber(prev));
         }
     }
 
     for group in 0..geo.group_count {
-        push_unique_group(geo, order, GroupNumber(group));
+        push_unique_group(geo, order, seen, GroupNumber(group));
     }
 }
 
-fn push_unique_group(geo: &FsGeometry, order: &mut Vec<GroupNumber>, group: GroupNumber) {
-    if group.0 < geo.group_count && !order.contains(&group) {
+fn push_unique_group(
+    geo: &FsGeometry,
+    order: &mut Vec<GroupNumber>,
+    seen: &mut [bool],
+    group: GroupNumber,
+) {
+    // `group.0 < geo.group_count` is checked before indexing `seen` (length == group_count),
+    // so the index is always in bounds. `&&` short-circuits, preserving that ordering.
+    if group.0 < geo.group_count && !seen[group.0 as usize] {
+        seen[group.0 as usize] = true;
         order.push(group);
     }
 }
