@@ -8505,33 +8505,39 @@ impl OpenFs {
             }
         }
 
-        let block_data = self.read_block_with_scope(cx, scope, block_num)?;
-        if offset_in_block + desc_len > block_data.len() {
-            return Err(FfsError::Corruption {
-                block: block_num.0,
-                detail: "group descriptor crosses block boundary or truncated block".into(),
-            });
-        }
-
-        let buf = &block_data[offset_in_block..offset_in_block + desc_len];
-
-        // Verify checksum if metadata_csum is enabled.
-        if let Some(geom) = &self.ext4_geometry {
-            if geom.group_desc_checksum_kind != ffs_ondisk::ext4::Ext4GroupDescChecksumKind::None {
-                ffs_ondisk::ext4::verify_group_desc_checksum(
-                    buf,
-                    &geom.uuid,
-                    geom.csum_seed,
-                    group.0,
-                    desc_size,
-                    geom.group_desc_checksum_kind,
-                )
-                .map_err(|e| parse_to_ffs_error(&e))?;
+        // Borrow the descriptor bytes out of the (cache-hit Arc-backed) block
+        // instead of copying the whole ~4 KiB GD-table block to read one ~64-byte
+        // descriptor — a cold all-groups scan re-touches the same block for every
+        // group it packs (~64), and tx/non-cacheable scopes copy on every call
+        // (bd-yuhvn, same lever as bd-wxmi1). verify + parse only read `buf`.
+        let desc = self.with_block_bytes(cx, scope, block_num, |block_data| {
+            if offset_in_block + desc_len > block_data.len() {
+                return Err(FfsError::Corruption {
+                    block: block_num.0,
+                    detail: "group descriptor crosses block boundary or truncated block".into(),
+                });
             }
-        }
+            let buf = &block_data[offset_in_block..offset_in_block + desc_len];
 
-        let desc =
-            Ext4GroupDesc::parse_from_bytes(buf, desc_size).map_err(|e| parse_to_ffs_error(&e))?;
+            // Verify checksum if metadata_csum is enabled.
+            if let Some(geom) = &self.ext4_geometry {
+                if geom.group_desc_checksum_kind
+                    != ffs_ondisk::ext4::Ext4GroupDescChecksumKind::None
+                {
+                    ffs_ondisk::ext4::verify_group_desc_checksum(
+                        buf,
+                        &geom.uuid,
+                        geom.csum_seed,
+                        group.0,
+                        desc_size,
+                        geom.group_desc_checksum_kind,
+                    )
+                    .map_err(|e| parse_to_ffs_error(&e))?;
+                }
+            }
+
+            Ext4GroupDesc::parse_from_bytes(buf, desc_size).map_err(|e| parse_to_ffs_error(&e))
+        })??;
         if cacheable {
             self.ext4_group_desc_cache
                 .lock()
@@ -9552,7 +9558,13 @@ impl OpenFs {
                     });
                 }
 
-                self.walk_extent_tree_leaf(cx, scope, &child_tree, logical_block, remaining_depth - 1)
+                self.walk_extent_tree_leaf(
+                    cx,
+                    scope,
+                    &child_tree,
+                    logical_block,
+                    remaining_depth - 1,
+                )
             }
         }
     }
@@ -37400,6 +37412,41 @@ mod tests {
     }
 
     #[test]
+    fn read_group_desc_zero_copy_preserves_golden_bd_yuhvn() {
+        use sha2::{Digest, Sha256};
+
+        let image = build_ext4_image_with_inode();
+        let dev = TestDevice::from_vec(image);
+        let cx = Cx::for_testing();
+
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
+        let gd = fs.read_group_desc(&cx, GroupNumber(0)).unwrap();
+
+        let mut bytes = Vec::with_capacity(52);
+        bytes.extend_from_slice(&gd.block_bitmap.to_le_bytes());
+        bytes.extend_from_slice(&gd.inode_bitmap.to_le_bytes());
+        bytes.extend_from_slice(&gd.inode_table.to_le_bytes());
+        bytes.extend_from_slice(&gd.free_blocks_count.to_le_bytes());
+        bytes.extend_from_slice(&gd.free_inodes_count.to_le_bytes());
+        bytes.extend_from_slice(&gd.used_dirs_count.to_le_bytes());
+        bytes.extend_from_slice(&gd.itable_unused.to_le_bytes());
+        bytes.extend_from_slice(&gd.flags.to_le_bytes());
+        bytes.extend_from_slice(&gd.checksum.to_le_bytes());
+        bytes.extend_from_slice(&gd.block_bitmap_csum.to_le_bytes());
+        bytes.extend_from_slice(&gd.inode_bitmap_csum.to_le_bytes());
+
+        let digest = Sha256::digest(&bytes);
+        assert_eq!(
+            digest.as_ref(),
+            [
+                0xe8, 0xfc, 0x19, 0x49, 0xff, 0x6d, 0x38, 0xeb, 0x55, 0x9c, 0x58, 0x47, 0xb8, 0x27,
+                0xff, 0x41, 0x26, 0xa7, 0x7b, 0x58, 0xd3, 0x35, 0xb1, 0x8f, 0xae, 0xf6, 0x1d, 0x20,
+                0xf3, 0x6f, 0x8c, 0xc4,
+            ]
+        );
+    }
+
+    #[test]
     fn read_group_desc_cache_hits_in_read_only_mode() {
         let image = build_ext4_image_with_inode();
         let dev = CountingDevice::new(TestDevice::from_vec(image), ByteOffset(4096));
@@ -61147,8 +61194,14 @@ mod tests {
                 0,
             )
             .expect("register backref");
-            fs.btrfs_capture_data_extent_csums(&cx, &mut alloc, allocation.bytenr, alloc_size, None)
-                .expect("capture csums");
+            fs.btrfs_capture_data_extent_csums(
+                &cx,
+                &mut alloc,
+                allocation.bytenr,
+                alloc_size,
+                None,
+            )
+            .expect("capture csums");
         }
 
         // Sanity: the whole compressed source must decompress to `data`.
