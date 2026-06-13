@@ -25,6 +25,7 @@ use ffs_repair::evidence::{
 use ffs_types::{BlockNumber, CommitSeq, Snapshot, TxnId};
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
+use smallvec::{SmallVec, smallvec};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{File, OpenOptions};
 use std::io::Write;
@@ -96,6 +97,8 @@ pub struct MergeByteRange {
     pub len: usize,
 }
 
+pub type MergeByteRanges = SmallVec<[MergeByteRange; 1]>;
+
 impl MergeByteRange {
     #[must_use]
     pub const fn new(start: usize, len: usize) -> Self {
@@ -146,17 +149,38 @@ pub enum MergeProof {
         base_len: usize,
     },
     IndependentKeys {
-        touched_ranges: Vec<MergeByteRange>,
+        touched_ranges: MergeByteRanges,
     },
     NonOverlappingExtents {
-        touched_ranges: Vec<MergeByteRange>,
+        touched_ranges: MergeByteRanges,
     },
     TimestampOnlyInode {
-        touched_ranges: Vec<MergeByteRange>,
+        touched_ranges: MergeByteRanges,
     },
 }
 
 impl MergeProof {
+    #[must_use]
+    pub fn independent_key_range(start: usize, len: usize) -> Self {
+        Self::IndependentKeys {
+            touched_ranges: smallvec![MergeByteRange::new(start, len)],
+        }
+    }
+
+    #[must_use]
+    pub fn non_overlapping_extent_range(start: usize, len: usize) -> Self {
+        Self::NonOverlappingExtents {
+            touched_ranges: smallvec![MergeByteRange::new(start, len)],
+        }
+    }
+
+    #[must_use]
+    pub fn timestamp_only_inode_range(start: usize, len: usize) -> Self {
+        Self::TimestampOnlyInode {
+            touched_ranges: smallvec![MergeByteRange::new(start, len)],
+        }
+    }
+
     #[must_use]
     pub fn mechanism(&self) -> MergeProofMechanism {
         match self {
@@ -4680,9 +4704,7 @@ mod tests {
     }
 
     fn independent_range_proof(start: usize, len: usize) -> MergeProof {
-        MergeProof::IndependentKeys {
-            touched_ranges: vec![MergeByteRange::new(start, len)],
-        }
+        MergeProof::independent_key_range(start, len)
     }
 
     #[derive(Debug)]
@@ -4803,7 +4825,6 @@ mod tests {
 
     #[test]
     fn merge_proof_mechanism_collapses_labels_to_two_merge_algorithms() {
-        let range = vec![MergeByteRange::new(2, 2)];
         let cases = vec![
             (MergeProof::Unsafe, MergeProofMechanism::NoSameBlockMerge),
             (
@@ -4815,21 +4836,15 @@ mod tests {
                 MergeProofMechanism::AppendOnly,
             ),
             (
-                MergeProof::IndependentKeys {
-                    touched_ranges: range.clone(),
-                },
+                MergeProof::independent_key_range(2, 2),
                 MergeProofMechanism::RangeOverlay,
             ),
             (
-                MergeProof::NonOverlappingExtents {
-                    touched_ranges: range.clone(),
-                },
+                MergeProof::non_overlapping_extent_range(2, 2),
                 MergeProofMechanism::RangeOverlay,
             ),
             (
-                MergeProof::TimestampOnlyInode {
-                    touched_ranges: range,
-                },
+                MergeProof::timestamp_only_inode_range(2, 2),
                 MergeProofMechanism::RangeOverlay,
             ),
         ];
@@ -4842,15 +4857,9 @@ mod tests {
     #[test]
     fn range_overlay_labels_share_the_same_byte_algorithm() {
         let proofs = vec![
-            MergeProof::IndependentKeys {
-                touched_ranges: vec![MergeByteRange::new(2, 2)],
-            },
-            MergeProof::NonOverlappingExtents {
-                touched_ranges: vec![MergeByteRange::new(2, 2)],
-            },
-            MergeProof::TimestampOnlyInode {
-                touched_ranges: vec![MergeByteRange::new(2, 2)],
-            },
+            MergeProof::independent_key_range(2, 2),
+            MergeProof::non_overlapping_extent_range(2, 2),
+            MergeProof::timestamp_only_inode_range(2, 2),
         ];
 
         for proof in proofs {
@@ -4864,15 +4873,9 @@ mod tests {
     #[test]
     fn range_overlay_labels_reject_undeclared_byte_changes() {
         let proofs = vec![
-            MergeProof::IndependentKeys {
-                touched_ranges: vec![MergeByteRange::new(2, 2)],
-            },
-            MergeProof::NonOverlappingExtents {
-                touched_ranges: vec![MergeByteRange::new(2, 2)],
-            },
-            MergeProof::TimestampOnlyInode {
-                touched_ranges: vec![MergeByteRange::new(2, 2)],
-            },
+            MergeProof::independent_key_range(2, 2),
+            MergeProof::non_overlapping_extent_range(2, 2),
+            MergeProof::timestamp_only_inode_range(2, 2),
         ];
 
         for proof in proofs {
@@ -4883,6 +4886,30 @@ mod tests {
                 "proof label {proof:?} must reject changes outside touched_ranges"
             );
         }
+    }
+
+    #[test]
+    fn merge_proof_inline_ranges_preserve_serde_golden_bd_6tooy() {
+        use sha2::{Digest, Sha256};
+
+        let proofs = vec![
+            MergeProof::independent_key_range(0, 2),
+            MergeProof::non_overlapping_extent_range(2, 2),
+            MergeProof::timestamp_only_inode_range(1, 1),
+        ];
+        let json = serde_json::to_string(&proofs).expect("serialize proof golden");
+        let digest = hex_lower(&Sha256::digest(json.as_bytes()));
+        println!("bd_6tooy_merge_proof_serde_sha256={digest}");
+
+        assert_eq!(
+            json,
+            r#"[{"IndependentKeys":{"touched_ranges":[{"start":0,"len":2}]}},{"NonOverlappingExtents":{"touched_ranges":[{"start":2,"len":2}]}},{"TimestampOnlyInode":{"touched_ranges":[{"start":1,"len":1}]}}]"#,
+            "inline range storage must preserve the prior Vec-backed serde shape"
+        );
+        assert_eq!(
+            digest, "e3a0f052016fa83985a7b1968c06b0d21589999a1e441915fff89c2d8c88a324",
+            "golden SHA changed for merge proof range serialization"
+        );
     }
 
     #[test]

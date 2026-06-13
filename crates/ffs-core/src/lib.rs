@@ -58,7 +58,7 @@ use ffs_journal::{
 };
 use ffs_mvcc::persist::WalRecoveryReport;
 use ffs_mvcc::wal_replay::{ReplayOutcome as MvccReplayOutcome, TailPolicy, WalReplayEngine};
-use ffs_mvcc::{CommitError, MergeByteRange, MergeProof, MvccBlockDevice, MvccStore, Transaction};
+use ffs_mvcc::{CommitError, MergeProof, MvccBlockDevice, MvccStore, Transaction};
 use ffs_ondisk::{
     BtrfsChunkEntry, BtrfsSuperblock, EXT4_ERROR_FS, EXT4_ORPHAN_FS, EXT4_VALID_FS, Ext4DirEntry,
     Ext4Extent, Ext4FileType, Ext4GroupDesc, Ext4ImageReader, Ext4Inode, Ext4Superblock, Ext4Xattr,
@@ -16486,9 +16486,7 @@ impl OpenFs {
 
             if let Some(tx) = &mut scope.tx {
                 // Provide byte-range proof for adaptive merge policy.
-                let proof = MergeProof::NonOverlappingExtents {
-                    touched_ranges: vec![MergeByteRange::new(block_offset, chunk_len)],
-                };
+                let proof = MergeProof::non_overlapping_extent_range(block_offset, chunk_len);
                 tx.stage_write_with_proof(phys_block, block_data, proof);
             } else {
                 block_dev.write_block(cx, phys_block, &block_data)?;
@@ -16760,9 +16758,7 @@ impl OpenFs {
                 .copy_from_slice(&data[data_start..data_start + chunk_len]);
 
             if let Some(tx) = &mut scope.tx {
-                let proof = MergeProof::NonOverlappingExtents {
-                    touched_ranges: vec![MergeByteRange::new(block_offset, chunk_len)],
-                };
+                let proof = MergeProof::non_overlapping_extent_range(block_offset, chunk_len);
                 tx.stage_write_with_proof(phys_block, block_data, proof);
             } else {
                 block_dev.write_block(cx, phys_block, &block_data)?;
@@ -16930,9 +16926,8 @@ impl OpenFs {
                             let mut buf = self.read_block_with_scope(cx, scope, phys_block)?;
                             buf[zfrom..zto].fill(0);
                             if let Some(tx) = &mut scope.tx {
-                                let proof = MergeProof::NonOverlappingExtents {
-                                    touched_ranges: vec![MergeByteRange::new(zfrom, zto - zfrom)],
-                                };
+                                let proof =
+                                    MergeProof::non_overlapping_extent_range(zfrom, zto - zfrom);
                                 tx.stage_write_with_proof(phys_block, buf, proof);
                             } else {
                                 block_dev.write_block(cx, phys_block, &buf)?;
@@ -17068,9 +17063,8 @@ impl OpenFs {
                         let mut buf = self.read_block_with_scope(cx, scope, phys_block)?;
                         buf[zfrom..zto].fill(0);
                         if let Some(tx) = &mut scope.tx {
-                            let proof = MergeProof::NonOverlappingExtents {
-                                touched_ranges: vec![MergeByteRange::new(zfrom, zto - zfrom)],
-                            };
+                            let proof =
+                                MergeProof::non_overlapping_extent_range(zfrom, zto - zfrom);
                             tx.stage_write_with_proof(phys_block, buf, proof);
                         } else {
                             block_dev.write_block(cx, phys_block, &buf)?;

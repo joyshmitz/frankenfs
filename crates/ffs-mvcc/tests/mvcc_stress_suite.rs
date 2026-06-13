@@ -4,7 +4,7 @@ use asupersync::types::Budget;
 use ffs_mvcc::sharded::ShardedMvccStore;
 use ffs_mvcc::{
     AdaptivePolicyConfig, CommitError, CompressionAlgo, CompressionPolicy, ConflictPolicy,
-    GcBackpressureConfig, MergeByteRange, MergeProof, MergeProofMechanism, MvccStore,
+    GcBackpressureConfig, MergeProof, MergeProofMechanism, MvccStore,
 };
 use ffs_types::{BlockNumber, Snapshot};
 use std::collections::VecDeque;
@@ -796,30 +796,18 @@ fn stress_honesty_merge_proofs_require_explicit_same_block_evidence() {
         let range_cases = [
             (
                 "IndependentKeys",
-                MergeProof::IndependentKeys {
-                    touched_ranges: vec![MergeByteRange::new(0, 2)],
-                },
-                MergeProof::IndependentKeys {
-                    touched_ranges: vec![MergeByteRange::new(2, 2)],
-                },
+                MergeProof::independent_key_range(0, 2),
+                MergeProof::independent_key_range(2, 2),
             ),
             (
                 "NonOverlappingExtents",
-                MergeProof::NonOverlappingExtents {
-                    touched_ranges: vec![MergeByteRange::new(0, 2)],
-                },
-                MergeProof::NonOverlappingExtents {
-                    touched_ranges: vec![MergeByteRange::new(2, 2)],
-                },
+                MergeProof::non_overlapping_extent_range(0, 2),
+                MergeProof::non_overlapping_extent_range(2, 2),
             ),
             (
                 "TimestampOnlyInode",
-                MergeProof::TimestampOnlyInode {
-                    touched_ranges: vec![MergeByteRange::new(0, 2)],
-                },
-                MergeProof::TimestampOnlyInode {
-                    touched_ranges: vec![MergeByteRange::new(2, 2)],
-                },
+                MergeProof::timestamp_only_inode_range(0, 2),
+                MergeProof::timestamp_only_inode_range(2, 2),
             ),
         ];
 
@@ -1171,9 +1159,7 @@ fn verification_gate_safe_merge_correctness_under_high_contention() {
         txn.stage_write_with_proof(
             hot_block_keys,
             data,
-            MergeProof::IndependentKeys {
-                touched_ranges: vec![MergeByteRange::new(offset, 3)],
-            },
+            MergeProof::independent_key_range(offset, 3),
         );
         key_txns.push((writer, txn));
     }
