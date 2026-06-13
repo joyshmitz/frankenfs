@@ -574,9 +574,12 @@ pub fn punch_hole(
 
     let hole_end = checked_logical_range_end("punch_hole", logical_start, count)?;
 
-    // Collect extents overlapping the hole.
+    // Collect extents overlapping the hole. walk_range prunes subtrees that
+    // cannot overlap [logical_start, hole_end) instead of walking the whole
+    // tree per punch (bd-k2wc7) — isomorphic, since the retained overlap
+    // predicate rejects anything a pruned subtree could hold.
     let mut overlapping = Vec::new();
-    ffs_btree::walk(cx, dev, root_bytes, &mut |ext: &Ext4Extent| {
+    ffs_btree::walk_range(cx, dev, root_bytes, logical_start, count, &mut |ext: &Ext4Extent| {
         let ext_len = u32::from(ext.actual_len());
         let ext_start = u64::from(ext.logical_block);
         let ext_end = ext_start.saturating_add(u64::from(ext_len));
@@ -905,17 +908,28 @@ pub fn mark_written(
 
     let range_end = checked_logical_range_end("mark_written", logical_start, u64::from(count))?;
 
-    // Collect unwritten extents overlapping the range.
+    // Collect unwritten extents overlapping the range. walk_range prunes the
+    // subtrees that cannot overlap [logical_start, range_end) instead of
+    // walking the whole tree per call (bd-k2wc7) — isomorphic, since the
+    // retained overlap predicate rejects anything a pruned subtree could hold.
     let mut unwritten_extents = Vec::new();
-    ffs_btree::walk(cx, dev, root_bytes, &mut |ext: &Ext4Extent| {
-        if ext.is_unwritten() {
-            let ext_end = u64::from(ext.logical_block) + u64::from(ext.actual_len());
-            if u64::from(ext.logical_block) < range_end && ext_end > u64::from(logical_start) {
-                unwritten_extents.push(*ext);
+    ffs_btree::walk_range(
+        cx,
+        dev,
+        root_bytes,
+        logical_start,
+        u64::from(count),
+        &mut |ext: &Ext4Extent| {
+            if ext.is_unwritten() {
+                let ext_end = u64::from(ext.logical_block) + u64::from(ext.actual_len());
+                if u64::from(ext.logical_block) < range_end && ext_end > u64::from(logical_start)
+                {
+                    unwritten_extents.push(*ext);
+                }
             }
-        }
-        Ok(())
-    })?;
+            Ok(())
+        },
+    )?;
 
     for ext in unwritten_extents {
         let ext_len = u32::from(ext.actual_len());
