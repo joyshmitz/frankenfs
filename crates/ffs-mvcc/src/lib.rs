@@ -10557,11 +10557,7 @@ mod tests {
         assert_eq!(dangerous_structure.outgoing.write_version, CommitSeq(5));
 
         let mut hasher = Sha256::new();
-        hasher.update(
-            u64::try_from(checks_performed)
-                .expect("test check count fits u64")
-                .to_le_bytes(),
-        );
+        hasher.update(checks_performed.to_le_bytes());
         hasher.update(dangerous_structure.incoming.block.0.to_le_bytes());
         hasher.update(dangerous_structure.incoming.read_version.0.to_le_bytes());
         hasher.update(dangerous_structure.incoming.write_version.0.to_le_bytes());
