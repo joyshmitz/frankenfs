@@ -23,5 +23,9 @@ proptest = { workspace = true }
 name = "bwtree_vs_locked"
 harness = false
 
+[[bench]]
+name = "extent_insert_overlap"
+harness = false
+
 [lints]
 workspace = true

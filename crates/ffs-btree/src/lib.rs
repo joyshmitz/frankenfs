@@ -1582,7 +1582,22 @@ fn validate_insert_does_not_overlap(
     extent: &Ext4Extent,
 ) -> Result<()> {
     let (new_start, new_end) = extent_logical_range(extent);
-    walk(cx, dev, root_bytes, &mut |existing| {
+    // Existing extents are sorted and non-overlapping, so the only ones that can
+    // conflict with the new extent are those whose own logical range intersects
+    // [new_start, new_end). `walk_range` visits exactly those — its
+    // `visit_leaf_range` predicate (`ext_end > start && ext_start < end`) is the
+    // same overlap test the old full walk applied per extent — while reading only
+    // the covering subtree instead of the whole O(N) tree. The extents the full
+    // walk visited but `walk_range` skips provably do not intersect the range, so
+    // they could never satisfy the predicate below; the result is identical.
+    // Clamp the count to the u32 logical-block space (existing extents all live
+    // there) so a near-`u32::MAX` extent can't trip walk_range's range-end check.
+    let max_logical = 1_u64 << 32;
+    let count = new_end.min(max_logical).saturating_sub(new_start);
+    if count == 0 {
+        return Ok(());
+    }
+    walk_range(cx, dev, root_bytes, extent.logical_block, count, &mut |existing| {
         let (existing_start, existing_end) = extent_logical_range(existing);
         if new_start < existing_end && new_end > existing_start {
             return Err(FfsError::InvalidGeometry(format!(
