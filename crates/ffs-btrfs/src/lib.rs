@@ -2896,7 +2896,7 @@ pub trait BtrfsBTree {
     ) -> Result<Vec<(BtrfsKey, Vec<u8>)>, BtrfsMutationError>;
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct InsertResult {
     node_id: u64,
     split: Option<(BtrfsKey, u64)>,
@@ -3164,6 +3164,184 @@ impl InMemoryCowBtrfsTree {
         self.commit_retired_nodes();
         trace!(old_root, new_root = self.root, "btrfs_cow_insert_complete");
         Ok(self.root)
+    }
+
+    /// Insert `insert_item` at `insert_key`, then update `update_key` to
+    /// `update_item` as one atomic COW mutation.
+    ///
+    /// This preserves the externally visible semantics of calling
+    /// [`BtrfsBTree::insert`] followed by [`BtrfsBTree::update`]: duplicate
+    /// insert keys still fail with [`BtrfsMutationError::KeyAlreadyExists`],
+    /// and missing update keys still fail with [`BtrfsMutationError::KeyNotFound`].
+    /// When both keys live in the root leaf and no split is needed, the leaf is
+    /// cloned and retired once instead of once per operation.
+    ///
+    /// # Errors
+    /// Returns any COW-tree mutation error produced by the equivalent
+    /// insert-then-update sequence.
+    pub fn insert_then_update(
+        &mut self,
+        insert_key: BtrfsKey,
+        insert_item: &[u8],
+        update_key: &BtrfsKey,
+        update_item: &[u8],
+    ) -> Result<u64, BtrfsMutationError> {
+        if key_cmp(&insert_key, update_key) == Ordering::Equal {
+            if self.find(&insert_key)?.is_some() {
+                return Err(BtrfsMutationError::KeyAlreadyExists);
+            }
+            return self.insert_entry(
+                BtrfsTreeItem {
+                    key: insert_key,
+                    data: update_item.to_vec(),
+                },
+                false,
+            );
+        }
+
+        if let Some(root) =
+            self.try_insert_then_update_root_leaf(insert_key, insert_item, update_key, update_item)?
+        {
+            return Ok(root);
+        }
+
+        if self.find(update_key)?.is_none() {
+            return Err(BtrfsMutationError::KeyNotFound);
+        }
+
+        debug_assert!(self.staged_allocations.is_empty());
+        debug_assert!(self.staged_deferred_frees.is_empty());
+        let old_root = self.root;
+        let insert_result = match self.insert_into(
+            self.root,
+            BtrfsTreeItem {
+                key: insert_key,
+                data: insert_item.to_vec(),
+            },
+            false,
+        ) {
+            Ok(result) => result,
+            Err(err) => {
+                self.rollback_mutation();
+                return Err(err);
+            }
+        };
+        let after_insert_root = match self.root_from_insert_result(old_root, insert_result) {
+            Ok(root) => root,
+            Err(err) => {
+                self.rollback_mutation();
+                return Err(err);
+            }
+        };
+        let update_result = match self.insert_into(
+            after_insert_root,
+            BtrfsTreeItem {
+                key: *update_key,
+                data: update_item.to_vec(),
+            },
+            true,
+        ) {
+            Ok(result) => result,
+            Err(err) => {
+                self.rollback_mutation();
+                return Err(err);
+            }
+        };
+        let new_root = match self.root_from_insert_result(after_insert_root, update_result) {
+            Ok(root) => root,
+            Err(err) => {
+                self.rollback_mutation();
+                return Err(err);
+            }
+        };
+        self.root = new_root;
+        self.commit_allocated_nodes();
+        self.commit_retired_nodes();
+        trace!(
+            old_root,
+            new_root = self.root,
+            "btrfs_cow_insert_then_update_complete"
+        );
+        Ok(self.root)
+    }
+
+    fn root_from_insert_result(
+        &mut self,
+        old_root: u64,
+        result: InsertResult,
+    ) -> Result<u64, BtrfsMutationError> {
+        if let Some((separator, right_id)) = result.split {
+            debug!(
+                old_root,
+                left_root = result.node_id,
+                right_root = right_id,
+                separator_objectid = separator.objectid,
+                separator_type = separator.item_type,
+                separator_offset = separator.offset,
+                "btrfs_cow_root_split"
+            );
+            self.alloc_node(BtrfsCowNode::Internal {
+                keys: vec![separator],
+                children: vec![result.node_id, right_id],
+            })
+        } else {
+            Ok(result.node_id)
+        }
+    }
+
+    fn try_insert_then_update_root_leaf(
+        &mut self,
+        insert_key: BtrfsKey,
+        insert_item: &[u8],
+        update_key: &BtrfsKey,
+        update_item: &[u8],
+    ) -> Result<Option<u64>, BtrfsMutationError> {
+        let old_root = self.root;
+        let BtrfsCowNode::Leaf { mut items } = self.node_ref(old_root)?.clone() else {
+            return Ok(None);
+        };
+
+        let insert_idx =
+            items.partition_point(|existing| key_cmp(&existing.key, &insert_key).is_lt());
+        if let Some(existing) = items.get(insert_idx)
+            && key_cmp(&existing.key, &insert_key) == Ordering::Equal
+        {
+            return Err(BtrfsMutationError::KeyAlreadyExists);
+        }
+        items.insert(
+            insert_idx,
+            BtrfsTreeItem {
+                key: insert_key,
+                data: insert_item.to_vec(),
+            },
+        );
+
+        let update_idx =
+            items.partition_point(|existing| key_cmp(&existing.key, update_key).is_lt());
+        let Some(existing) = items.get_mut(update_idx) else {
+            return Err(BtrfsMutationError::KeyNotFound);
+        };
+        if key_cmp(&existing.key, update_key) != Ordering::Equal {
+            return Err(BtrfsMutationError::KeyNotFound);
+        }
+        existing.data = update_item.to_vec();
+
+        let leaf_bytes: usize = items.iter().map(|it| BTRFS_ITEM_SIZE + it.data.len()).sum();
+        if items.len() > 1 && (items.len() > self.max_items || leaf_bytes > self.leaf_byte_budget) {
+            return Ok(None);
+        }
+
+        let new_root = self.alloc_node(BtrfsCowNode::Leaf { items })?;
+        self.retire_node(old_root);
+        self.root = new_root;
+        self.commit_allocated_nodes();
+        self.commit_retired_nodes();
+        trace!(
+            old_root,
+            new_root = self.root,
+            "btrfs_cow_root_leaf_insert_then_update_complete"
+        );
+        Ok(Some(self.root))
     }
 
     fn insert_into(
@@ -9257,6 +9435,111 @@ mod tests {
         let entries = tree.range(&key, &key).expect("point range");
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].1, b"new");
+    }
+
+    fn bd_hfkty_inode_key() -> BtrfsKey {
+        BtrfsKey {
+            objectid: 257,
+            item_type: BTRFS_ITEM_INODE_ITEM,
+            offset: 0,
+        }
+    }
+
+    fn bd_hfkty_extent_key(write_idx: u64) -> BtrfsKey {
+        BtrfsKey {
+            objectid: 257,
+            item_type: BTRFS_ITEM_EXTENT_DATA,
+            offset: write_idx * 4096,
+        }
+    }
+
+    fn bd_hfkty_inode_payload(write_idx: u64) -> Vec<u8> {
+        let mut payload = vec![0_u8; 160];
+        payload[16..24].copy_from_slice(&((write_idx + 1) * 4096).to_le_bytes());
+        payload[24..32].copy_from_slice(&((write_idx + 1) * 4096).to_le_bytes());
+        payload
+    }
+
+    fn bd_hfkty_extent_payload(write_idx: u64) -> Vec<u8> {
+        let mut payload = vec![0_u8; 53];
+        payload[0..8].copy_from_slice(&(write_idx + 1).to_le_bytes());
+        payload[13..21].copy_from_slice(&(0x1000_0000 + write_idx * 4096).to_le_bytes());
+        payload[21..29].copy_from_slice(&4096_u64.to_le_bytes());
+        payload[37..45].copy_from_slice(&4096_u64.to_le_bytes());
+        payload
+    }
+
+    #[test]
+    fn insert_then_update_matches_sequential_and_preserves_order_bd_hfkty() {
+        let mut sequential = InMemoryCowBtrfsTree::new(512).expect("sequential tree");
+        let mut batched = InMemoryCowBtrfsTree::new(512).expect("batched tree");
+        sequential
+            .insert(bd_hfkty_inode_key(), &bd_hfkty_inode_payload(0))
+            .expect("seed sequential inode");
+        batched
+            .insert(bd_hfkty_inode_key(), &bd_hfkty_inode_payload(0))
+            .expect("seed batched inode");
+
+        for write_idx in 0..32 {
+            let extent_key = bd_hfkty_extent_key(write_idx);
+            let extent_payload = bd_hfkty_extent_payload(write_idx);
+            let inode_payload = bd_hfkty_inode_payload(write_idx);
+            sequential
+                .insert(extent_key, &extent_payload)
+                .expect("sequential extent insert");
+            sequential
+                .update(&bd_hfkty_inode_key(), &inode_payload)
+                .expect("sequential inode update");
+            batched
+                .insert_then_update(
+                    extent_key,
+                    &extent_payload,
+                    &bd_hfkty_inode_key(),
+                    &inode_payload,
+                )
+                .expect("batched extent insert and inode update");
+        }
+
+        let lo = BtrfsKey {
+            objectid: 257,
+            item_type: 0,
+            offset: 0,
+        };
+        let hi = BtrfsKey {
+            objectid: 257,
+            item_type: u8::MAX,
+            offset: u64::MAX,
+        };
+        let sequential_entries = sequential.range(&lo, &hi).expect("sequential range");
+        let batched_entries = batched.range(&lo, &hi).expect("batched range");
+        assert_eq!(batched_entries, sequential_entries);
+        assert_eq!(batched_entries.len(), 33);
+        assert_eq!(batched_entries[0].0, bd_hfkty_inode_key());
+        assert!(
+            batched_entries[1..]
+                .iter()
+                .map(|(key, _)| key.offset)
+                .eq((0..32).map(|write_idx| write_idx * 4096))
+        );
+
+        let mut digest = Sha256::new();
+        for (key, data) in &batched_entries {
+            digest.update(key.objectid.to_le_bytes());
+            digest.update([key.item_type]);
+            digest.update(key.offset.to_le_bytes());
+            digest.update(
+                u64::try_from(data.len())
+                    .expect("test payload length fits")
+                    .to_le_bytes(),
+            );
+            digest.update(data);
+        }
+        let digest_hex = hex_lower(digest.finalize().as_ref());
+        assert_eq!(
+            digest_hex,
+            "bd523dce52c8af3935c65703cec9a593e76a0a9eb505799247cf882a05ab730f"
+        );
+        println!("BD_HFKTY_COW_BATCH_GOLDEN_BEGIN\n{digest_hex}\nBD_HFKTY_COW_BATCH_GOLDEN_END");
     }
 
     #[test]

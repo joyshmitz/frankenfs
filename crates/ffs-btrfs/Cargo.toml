@@ -58,5 +58,9 @@ harness = false
 name = "chunk_dedup"
 harness = false
 
+[[bench]]
+name = "cow_write_mutation"
+harness = false
+
 [lints]
 workspace = true
