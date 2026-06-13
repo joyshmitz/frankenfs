@@ -681,79 +681,6 @@ fn xor_into(dst: &mut [u8], src: &[u8]) {
     }
 }
 
-/// Portable-SIMD GF(256) multiply-XOR using the nibble-split (PSHUFB) identity.
-///
-/// GF(256) multiply by a constant `c` is GF(2)-linear, so for any byte `s`
-/// `mul(c, s) == mul(c, (s >> 4) << 4) ^ mul(c, s & 0x0F)`. Splitting the
-/// 256-entry `mul_row(c)` table into two 16-entry nibble tables turns the
-/// per-byte 256-way gather (which the optimizer cannot vectorize) into two
-/// 16-way `swizzle_dyn` shuffles that lower to a single PSHUFB per lane group.
-/// Output is byte-identical to indexing `mul_row(c)` directly.
-mod simd_gf {
-    use std::simd::Simd;
-
-    /// SIMD width: 32 bytes/iteration (one AVX2 lane group; 16-byte tables are
-    /// replicated so nibble indices < 16 always address the first copy).
-    const LANES: usize = 32;
-    type U8s = Simd<u8, LANES>;
-
-    /// Build replicated 16-entry low/high nibble tables from a full mul row.
-    fn nibble_tables(mul_row: &[u8; 256]) -> (U8s, U8s) {
-        let lo = U8s::from_array(std::array::from_fn(|i| mul_row[i % 16]));
-        let hi = U8s::from_array(std::array::from_fn(|i| mul_row[(i % 16) << 4]));
-        (lo, hi)
-    }
-
-    fn project(s: U8s, lo: U8s, hi: U8s, mask: U8s) -> U8s {
-        let lo_idx = s & mask;
-        let hi_idx = s >> Simd::splat(4);
-        lo.swizzle_dyn(lo_idx) ^ hi.swizzle_dyn(hi_idx)
-    }
-
-    /// `dst[i] ^= mul(coeff, src[i])` over the SIMD-aligned prefix; returns the
-    /// number of bytes consumed so the caller handles the scalar tail.
-    pub(super) fn mul_xor_into(dst: &mut [u8], src: &[u8], mul_row: &[u8; 256]) -> usize {
-        let n = dst.len().min(src.len());
-        let simd_len = n - (n % LANES);
-        let (lo, hi) = nibble_tables(mul_row);
-        let mask = U8s::splat(0x0F);
-        let mut off = 0;
-        while off < simd_len {
-            let s = U8s::from_slice(&src[off..off + LANES]);
-            let d = U8s::from_slice(&dst[off..off + LANES]);
-            (d ^ project(s, lo, hi, mask)).copy_to_slice(&mut dst[off..off + LANES]);
-            off += LANES;
-        }
-        simd_len
-    }
-
-    /// `dst[i] ^= mul(lc, lhs[i]) ^ mul(rc, rhs[i])` over the SIMD prefix in one
-    /// dst pass; returns bytes consumed. Mirrors the fused scalar pair kernel.
-    pub(super) fn mul_xor_pair_into(
-        dst: &mut [u8],
-        lhs: &[u8],
-        l_row: &[u8; 256],
-        rhs: &[u8],
-        r_row: &[u8; 256],
-    ) -> usize {
-        let n = dst.len().min(lhs.len()).min(rhs.len());
-        let simd_len = n - (n % LANES);
-        let (l_lo, l_hi) = nibble_tables(l_row);
-        let (r_lo, r_hi) = nibble_tables(r_row);
-        let mask = U8s::splat(0x0F);
-        let mut off = 0;
-        while off < simd_len {
-            let l = U8s::from_slice(&lhs[off..off + LANES]);
-            let r = U8s::from_slice(&rhs[off..off + LANES]);
-            let d = U8s::from_slice(&dst[off..off + LANES]);
-            let prod = project(l, l_lo, l_hi, mask) ^ project(r, r_lo, r_hi, mask);
-            (d ^ prod).copy_to_slice(&mut dst[off..off + LANES]);
-            off += LANES;
-        }
-        simd_len
-    }
-}
-
 /// Compute `dst[i] ^= gf256_mul(src[i], coeff)` for each byte.
 fn gf256_mul_xor_into(dst: &mut [u8], src: &[u8], coeff: u8) {
     if coeff == 0 {
@@ -764,8 +691,7 @@ fn gf256_mul_xor_into(dst: &mut [u8], src: &[u8], coeff: u8) {
         return;
     }
     let coeff_mul = gf256::mul_row(coeff);
-    let done = simd_gf::mul_xor_into(dst, src, coeff_mul);
-    for (d, s) in dst[done..].iter_mut().zip(src[done..].iter()) {
+    for (d, s) in dst.iter_mut().zip(src.iter()) {
         *d ^= coeff_mul[*s as usize];
     }
 }
@@ -798,12 +724,7 @@ fn gf256_mul_xor_pair_into(dst: &mut [u8], lhs: &[u8], lhs_coeff: u8, rhs: &[u8]
         (lhs_coeff, rhs_coeff) => {
             let lhs_mul = gf256::mul_row(lhs_coeff);
             let rhs_mul = gf256::mul_row(rhs_coeff);
-            let done = simd_gf::mul_xor_pair_into(dst, lhs, lhs_mul, rhs, rhs_mul);
-            for ((d, l), r) in dst[done..]
-                .iter_mut()
-                .zip(lhs[done..].iter())
-                .zip(rhs[done..].iter())
-            {
+            for ((d, l), r) in dst.iter_mut().zip(lhs.iter()).zip(rhs.iter()) {
                 *d ^= lhs_mul[*l as usize] ^ rhs_mul[*r as usize];
             }
         }
@@ -813,53 +734,6 @@ fn gf256_mul_xor_pair_into(dst: &mut [u8], lhs: &[u8], lhs_coeff: u8, rhs: &[u8]
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// The SIMD nibble-split GF(256) multiply-XOR kernels must be byte-identical
-    /// to a direct `mul_row` gather, including the scalar tail (length 100 is not
-    /// a multiple of the 32-byte SIMD width).
-    #[test]
-    fn simd_gf_mul_xor_matches_scalar_gather() {
-        // Length 100 is not a multiple of the 32-byte SIMD width, so this also
-        // exercises the scalar tail.
-        let pattern = |len: usize, a: usize, b: usize| -> Vec<u8> {
-            (0..len)
-                .map(|i| u8::try_from((i * a + b) & 0xFF).expect("masked byte fits in u8"))
-                .collect()
-        };
-        let len = 100;
-        for coeff in 0..=255_u8 {
-            let src = pattern(len, 31, 7);
-            let base = pattern(len, 17, 3);
-
-            let mut got = base.clone();
-            gf256_mul_xor_into(&mut got, &src, coeff);
-
-            let row = gf256::mul_row(coeff);
-            let mut want = base.clone();
-            for (d, s) in want.iter_mut().zip(src.iter()) {
-                *d ^= row[*s as usize];
-            }
-            assert_eq!(got, want, "single mul_xor mismatch for coeff={coeff}");
-        }
-
-        // Fused pair kernel across representative coefficient combinations.
-        for &(lc, rc) in &[(2_u8, 3_u8), (0, 5), (7, 0), (1, 9), (11, 1), (200, 250)] {
-            let lhs = pattern(len, 13, 1);
-            let rhs = pattern(len, 29, 5);
-            let base = pattern(len, 41, 9);
-
-            let mut got = base.clone();
-            gf256_mul_xor_pair_into(&mut got, &lhs, lc, &rhs, rc);
-
-            let lrow = gf256::mul_row(lc);
-            let rrow = gf256::mul_row(rc);
-            let mut want = base.clone();
-            for ((d, l), r) in want.iter_mut().zip(lhs.iter()).zip(rhs.iter()) {
-                *d ^= lrow[*l as usize] ^ rrow[*r as usize];
-            }
-            assert_eq!(got, want, "pair mul_xor mismatch for ({lc},{rc})");
-        }
-    }
 
     fn make_data(k: usize, block_size: usize) -> Vec<Vec<u8>> {
         (0..k)
