@@ -9366,53 +9366,75 @@ impl OpenFs {
         }
 
         let (header, tree) = parse_inode_extent_tree(inode).map_err(|e| parse_to_ffs_error(&e))?;
-        let walked = self.walk_extent_tree(cx, scope, &tree, logical_block, header.depth)?;
+        let leaf = self.walk_extent_tree_leaf(cx, scope, &tree, logical_block, header.depth)?;
 
-        // Cache the FULL matched extent (count = ee_len) so the rest of the
-        // contiguous run is served from the cache instead of re-walking the
-        // tree per block (bd-r7enr); a hole caches a single-block sentinel.
-        // Then translate the cached extent to the requested block exactly as
-        // ExtentCache::lookup would (physical_start + offset), keeping the
-        // walk-path result identical to a later cache hit.
-        walked.map_or_else(
-            || {
-                // Hole: cache a single-block sentinel (physical 0) as before.
-                self.extent_cache.insert(
-                    ns,
-                    ffs_extent::ExtentMapping {
-                        logical_start: logical_block,
-                        physical_start: 0,
-                        count: 1,
-                        unwritten: false,
-                    },
-                );
-                Ok(None)
-            },
-            |mapping| {
-                let extent_logical = mapping.logical_start;
-                let extent_phys = mapping.physical_start;
-                let unwritten = mapping.unwritten;
-                self.extent_cache.insert(ns, mapping);
-                if extent_phys == 0 {
-                    Ok(None)
-                } else {
-                    let offset = u64::from(logical_block - extent_logical);
-                    Ok(extent_phys
-                        .checked_add(offset)
-                        .map(|phys| (phys, unwritten)))
-                }
-            },
-        )
+        // A single-block hole sentinel (physical 0): cached for a block that no
+        // extent covers, so a re-lookup hits the cache instead of re-walking.
+        let hole_sentinel = || ffs_extent::ExtentMapping {
+            logical_start: logical_block,
+            physical_start: 0,
+            count: 1,
+            unwritten: false,
+        };
+
+        // No covering leaf (logical before every index entry): hole.
+        let Some(mappings) = leaf else {
+            self.extent_cache.insert(ns, hole_sentinel());
+            return Ok(None);
+        };
+
+        // Cache the WHOLE covering leaf, not just the matched extent: a
+        // fragmented file otherwise re-descends and re-parses this leaf once per
+        // extent boundary (O(extents^2) across a sequential read). All cached
+        // extents are transparent memoization — a later lookup returns the same
+        // physical mapping it would from a fresh walk (bd-tmyoc, extending the
+        // per-extent cache of bd-r7enr).
+        for mapping in &mappings {
+            self.extent_cache.insert(ns, *mapping);
+        }
+
+        // Translate the requested block exactly as ExtentCache::lookup would:
+        // the covering extent is the last whose start is <= logical_block.
+        let pp = mappings.partition_point(|m| m.logical_start <= logical_block);
+        if pp == 0 {
+            self.extent_cache.insert(ns, hole_sentinel());
+            return Ok(None);
+        }
+        let mapping = mappings[pp - 1];
+        if logical_block >= mapping.logical_start.saturating_add(mapping.count) {
+            // logical_block lies in a hole past this extent: cache the sentinel.
+            self.extent_cache.insert(ns, hole_sentinel());
+            return Ok(None);
+        }
+        if mapping.physical_start == 0 {
+            Ok(None)
+        } else {
+            let offset = u64::from(logical_block - mapping.logical_start);
+            Ok(mapping
+                .physical_start
+                .checked_add(offset)
+                .map(|phys| (phys, mapping.unwritten)))
+        }
     }
 
-    fn walk_extent_tree(
+    /// Descend the extent tree to the leaf that covers `logical_block` and
+    /// return **every** extent in that leaf as `ExtentMapping`s (tree order =
+    /// sorted by `logical_start`), or `Ok(None)` when `logical_block` falls
+    /// before every index entry (no covering leaf).
+    ///
+    /// Returning the whole leaf lets [`Self::resolve_extent`] cache all of it on
+    /// a single miss: a fragmented file with many extents in one leaf otherwise
+    /// re-descends and re-parses that ~340-entry leaf once per extent boundary —
+    /// O(extents^2) parsing across a sequential read. Caching the leaf makes it
+    /// one walk (bd-tmyoc; extends the per-extent cache of bd-r7enr).
+    fn walk_extent_tree_leaf(
         &self,
         cx: &Cx,
         scope: &RequestScope,
         tree: &ExtentTree,
         logical_block: u32,
         remaining_depth: u16,
-    ) -> Result<Option<ffs_extent::ExtentMapping>, FfsError> {
+    ) -> Result<Option<Vec<ffs_extent::ExtentMapping>>, FfsError> {
         if remaining_depth > Self::MAX_EXTENT_DEPTH {
             return Err(FfsError::Corruption {
                 block: 0,
@@ -9423,31 +9445,18 @@ impl OpenFs {
         match tree {
             ExtentTree::Leaf(extents) => {
                 // Extents in a leaf are sorted ascending by logical_block and are
-                // non-overlapping, so the only extent that can cover
-                // `logical_block` is the last one whose start is <= it. Binary-
-                // search to that candidate (O(log N)) instead of scanning every
-                // extent (O(N), up to ~340 per leaf) — same result, since the
-                // linear scan also returns that single covering extent (bd-vzmis).
-                let pp = extents.partition_point(|ext| ext.logical_block <= logical_block);
-                if pp == 0 {
-                    return Ok(None);
-                }
-                let ext = &extents[pp - 1];
-                let start = ext.logical_block;
-                let len = u32::from(ext.actual_len());
-                if logical_block < start.saturating_add(len) {
-                    // Return the whole matched extent so resolve_extent can cache
-                    // the full contiguous range (count = len) instead of a single
-                    // block — sequential access then needs one tree walk, not one
-                    // per block (bd-r7enr).
-                    return Ok(Some(ffs_extent::ExtentMapping {
-                        logical_start: start,
+                // non-overlapping. Map the whole leaf; resolve_extent picks the
+                // covering one (last start <= logical_block) and caches the rest.
+                let mappings = extents
+                    .iter()
+                    .map(|ext| ffs_extent::ExtentMapping {
+                        logical_start: ext.logical_block,
                         physical_start: ext.physical_start,
-                        count: len,
+                        count: u32::from(ext.actual_len()),
                         unwritten: ext.is_unwritten(),
-                    }));
-                }
-                Ok(None)
+                    })
+                    .collect();
+                Ok(Some(mappings))
             }
             ExtentTree::Index(indexes) => {
                 if remaining_depth == 0 {
@@ -9483,7 +9492,7 @@ impl OpenFs {
                     });
                 }
 
-                self.walk_extent_tree(cx, scope, &child_tree, logical_block, remaining_depth - 1)
+                self.walk_extent_tree_leaf(cx, scope, &child_tree, logical_block, remaining_depth - 1)
             }
         }
     }

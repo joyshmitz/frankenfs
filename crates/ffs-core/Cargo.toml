@@ -46,5 +46,9 @@ harness = false
 name = "chunk_end_resolve"
 harness = false
 
+[[bench]]
+name = "extent_leaf_cache"
+harness = false
+
 [lints]
 workspace = true
