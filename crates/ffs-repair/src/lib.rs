@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+#![feature(portable_simd)]
 //! RaptorQ self-healing and scrub.
 //!
 //! Generates fountain-coded repair symbols (RFC 6330) per block group,
