@@ -2628,57 +2628,70 @@ impl ArcState {
 
     fn trim_to_capacity(&mut self) -> PressureEvictionBatch {
         let mut batch = PressureEvictionBatch::default();
-        while self.resident_len() > self.capacity {
-            let Some(victim) = self.next_pressure_victim() else {
-                // All candidates are dirty; keep data durable and stop shrinking.
+        // Single O(N) forward pass over t1 (ghost B1) then t2 (ghost B2): evict
+        // clean blocks in FIFO order until back under capacity. The previous loop
+        // re-scanned past the dirty prefix on every eviction — `next_pressure_victim`
+        // and `remove_from_list` are each O(N) and ran per evicted block, so a long
+        // dirty front made trimming O(N^2). Draining each queue once keeps non-evicted
+        // (dirty / not-yet-reached) blocks in their original relative order, so the
+        // resulting queues, ghost pushes, and batch totals are byte-identical to the
+        // per-victim loop. `evict_resident` only fails on dirty blocks, which are
+        // skipped here, so the dirty-race break below is unreachable but preserved.
+        let mut resident = self.resident_len();
+        for (queue_is_t1, ghost) in [(true, ArcList::B1), (false, ArcList::B2)] {
+            if resident <= self.capacity {
                 break;
-            };
-            let from_t1 = Self::remove_from_list(&mut self.t1, victim);
-            let from_t2 = if from_t1 {
-                false
-            } else {
-                Self::remove_from_list(&mut self.t2, victim)
-            };
-            if !from_t1 && !from_t2 {
-                let _ = self.loc.remove(&victim);
-                continue;
             }
-            let freed_bytes = self.resident.get(&victim).map_or(0, BlockBuf::len);
-            if self.evict_resident(victim) {
-                self.push_ghost(victim, if from_t1 { ArcList::B1 } else { ArcList::B2 });
-                self.evictions = self.evictions.saturating_add(1);
-                batch.evicted_blocks = batch.evicted_blocks.saturating_add(1);
-                batch.evicted_bytes = batch.evicted_bytes.saturating_add(freed_bytes);
+            let queue = std::mem::take(if queue_is_t1 {
+                &mut self.t1
             } else {
-                if from_t1 {
-                    self.t1.push_back(victim);
-                    self.loc.insert(victim, ArcList::T1);
-                } else {
-                    self.t2.push_back(victim);
-                    self.loc.insert(victim, ArcList::T2);
+                &mut self.t2
+            });
+            let mut kept = VecDeque::with_capacity(queue.len());
+            let mut drain = queue.into_iter();
+            for victim in drain.by_ref() {
+                if resident <= self.capacity {
+                    kept.push_back(victim);
+                    break;
                 }
-                // Dirty races are tolerated; stop shrinking until flush catches up.
-                break;
+                if self.is_dirty(victim) {
+                    kept.push_back(victim);
+                    continue;
+                }
+                let freed_bytes = self.resident.get(&victim).map_or(0, BlockBuf::len);
+                if self.evict_resident(victim) {
+                    self.push_ghost(victim, ghost);
+                    self.evictions = self.evictions.saturating_add(1);
+                    batch.evicted_blocks = batch.evicted_blocks.saturating_add(1);
+                    batch.evicted_bytes = batch.evicted_bytes.saturating_add(freed_bytes);
+                    resident -= 1;
+                } else {
+                    // Unreachable (victim is clean); mirror the original dirty-race
+                    // tolerance: re-queue and stop shrinking until flush catches up.
+                    kept.push_back(victim);
+                    self.loc.insert(
+                        victim,
+                        if queue_is_t1 { ArcList::T1 } else { ArcList::T2 },
+                    );
+                    kept.extend(drain);
+                    if queue_is_t1 {
+                        self.t1 = kept;
+                    } else {
+                        self.t2 = kept;
+                    }
+                    self.trim_ghosts_to(self.capacity);
+                    return batch;
+                }
+            }
+            kept.extend(drain);
+            if queue_is_t1 {
+                self.t1 = kept;
+            } else {
+                self.t2 = kept;
             }
         }
         self.trim_ghosts_to(self.capacity);
         batch
-    }
-
-    fn next_pressure_victim(&self) -> Option<BlockNumber> {
-        #[cfg(not(feature = "s3fifo"))]
-        {
-            self.oldest_clean_resident(ArcList::T1)
-                .or_else(|| self.oldest_clean_resident(ArcList::T2))
-        }
-        #[cfg(feature = "s3fifo")]
-        {
-            self.t1
-                .iter()
-                .copied()
-                .find(|block| !self.is_dirty(*block))
-                .or_else(|| self.t2.iter().copied().find(|block| !self.is_dirty(*block)))
-        }
     }
 
     fn remove_from_list(list: &mut VecDeque<BlockNumber>, key: BlockNumber) -> bool {
