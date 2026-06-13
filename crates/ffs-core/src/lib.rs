@@ -9412,21 +9412,30 @@ impl OpenFs {
 
         match tree {
             ExtentTree::Leaf(extents) => {
-                for ext in extents {
-                    let start = ext.logical_block;
-                    let len = u32::from(ext.actual_len());
-                    if logical_block >= start && logical_block < start.saturating_add(len) {
-                        // Return the whole matched extent so resolve_extent can
-                        // cache the full contiguous range (count = len) instead
-                        // of a single block — sequential access then needs one
-                        // tree walk, not one per block (bd-r7enr).
-                        return Ok(Some(ffs_extent::ExtentMapping {
-                            logical_start: start,
-                            physical_start: ext.physical_start,
-                            count: len,
-                            unwritten: ext.is_unwritten(),
-                        }));
-                    }
+                // Extents in a leaf are sorted ascending by logical_block and are
+                // non-overlapping, so the only extent that can cover
+                // `logical_block` is the last one whose start is <= it. Binary-
+                // search to that candidate (O(log N)) instead of scanning every
+                // extent (O(N), up to ~340 per leaf) — same result, since the
+                // linear scan also returns that single covering extent (bd-2xvf0).
+                let pp = extents.partition_point(|ext| ext.logical_block <= logical_block);
+                if pp == 0 {
+                    return Ok(None);
+                }
+                let ext = &extents[pp - 1];
+                let start = ext.logical_block;
+                let len = u32::from(ext.actual_len());
+                if logical_block < start.saturating_add(len) {
+                    // Return the whole matched extent so resolve_extent can cache
+                    // the full contiguous range (count = len) instead of a single
+                    // block — sequential access then needs one tree walk, not one
+                    // per block (bd-r7enr).
+                    return Ok(Some(ffs_extent::ExtentMapping {
+                        logical_start: start,
+                        physical_start: ext.physical_start,
+                        count: len,
+                        unwritten: ext.is_unwritten(),
+                    }));
                 }
                 Ok(None)
             }
@@ -9437,18 +9446,14 @@ impl OpenFs {
                         detail: "extent index at depth 0".into(),
                     });
                 }
-                let mut chosen: Option<usize> = None;
-                for (i, idx) in indexes.iter().enumerate() {
-                    if idx.logical_block <= logical_block {
-                        chosen = Some(i);
-                    } else {
-                        break;
-                    }
-                }
-                let Some(i) = chosen else {
+                // Index entries are sorted ascending by logical_block; descend
+                // into the last child whose start is <= `logical_block` (the same
+                // entry the linear scan selected) via binary search (bd-2xvf0).
+                let pp = indexes.partition_point(|idx| idx.logical_block <= logical_block);
+                if pp == 0 {
                     return Ok(None);
-                };
-                let idx = &indexes[i];
+                }
+                let idx = &indexes[pp - 1];
 
                 // Extent-tree index/leaf blocks are immutable on a read-only
                 // mount; route them through the RO block cache so re-descents
