@@ -62,5 +62,9 @@ harness = false
 name = "cow_write_mutation"
 harness = false
 
+[[bench]]
+name = "alloc_gap_scan"
+harness = false
+
 [lints]
 workspace = true
