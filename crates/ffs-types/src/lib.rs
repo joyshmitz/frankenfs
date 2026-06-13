@@ -429,7 +429,20 @@ pub fn trim_nul_padded(bytes: &[u8]) -> String {
 
 #[must_use]
 pub fn all_zero_bytes(bytes: &[u8]) -> bool {
-    let mut chunks = bytes.chunks_exact(16);
+    let mut cache_lines = bytes.chunks_exact(64);
+    for cache_line in &mut cache_lines {
+        let word0 = u128::from_ne_bytes(cache_line[0..16].try_into().expect("first 16-byte lane"));
+        let word1 =
+            u128::from_ne_bytes(cache_line[16..32].try_into().expect("second 16-byte lane"));
+        let word2 = u128::from_ne_bytes(cache_line[32..48].try_into().expect("third 16-byte lane"));
+        let word3 =
+            u128::from_ne_bytes(cache_line[48..64].try_into().expect("fourth 16-byte lane"));
+        if (word0 | word1 | word2 | word3) != 0 {
+            return false;
+        }
+    }
+
+    let mut chunks = cache_lines.remainder().chunks_exact(16);
     for chunk in &mut chunks {
         let word = u128::from_ne_bytes(chunk.try_into().expect("16-byte chunk"));
         if word != 0 {
@@ -933,7 +946,7 @@ mod tests {
 
     #[test]
     fn all_zero_bytes_matches_scalar_scan() {
-        for len in 0_usize..80 {
+        for len in 0_usize..160 {
             let mut bytes = vec![0_u8; len];
             assert!(all_zero_bytes(&bytes), "all-zero len {len}");
             for pos in 0..len {
