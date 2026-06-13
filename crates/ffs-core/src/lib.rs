@@ -27649,25 +27649,44 @@ impl FsOps for OpenFs {
         match &self.flavor {
             FsFlavor::Ext4(_) => {
                 let inode = self.read_inode(cx, Self::ext4_canonical_inode(ino))?;
-                let mut xattrs = ffs_ondisk::parse_ibody_xattrs_with_inum(&inode)
+                // ext4 stores each attribute in exactly one place (inode body or
+                // the external block), so probe the inode body first and only
+                // read+parse the external ACL block on a miss — resolving an
+                // inline attribute no longer pays for the external block, and a
+                // by-name finder materializes only the matched value instead of
+                // every attribute's name+value (bd-abu3z). Isomorphic: the old
+                // code concatenated ibody++block and took the first full_name
+                // match, which (names being unique, ibody first) is the same
+                // entry this returns.
+                let found = ffs_ondisk::find_ibody_xattr_by_name(&inode, name)
                     .map_err(|e| parse_to_ffs_error(&e))?;
-                if inode.file_acl != 0 {
-                    let block_data = self.read_block_vec(cx, BlockNumber(inode.file_acl))?;
-                    let block_xattrs = ffs_ondisk::parse_xattr_block_with_inum(&block_data)
-                        .map_err(|e| parse_to_ffs_error(&e))?;
-                    xattrs.extend(block_xattrs);
-                }
-                let Some((mut xattr, value_inum)) =
-                    xattrs.into_iter().find(|(x, _)| x.full_name() == name)
-                else {
+                let found = match found {
+                    Some(v) => Some(v),
+                    None if inode.file_acl != 0 => {
+                        let block_data = self.read_block_vec(cx, BlockNumber(inode.file_acl))?;
+                        ffs_ondisk::find_xattr_block_value_by_name(&block_data, name)
+                            .map_err(|e| parse_to_ffs_error(&e))?
+                    }
+                    None => None,
+                };
+                let Some((name_index, value, value_inum)) = found else {
                     return Ok(None);
                 };
                 // EA_INODE-backed value: the payload lives in a separate inode
-                // (xattr.value is the empty in-block placeholder). Read it.
-                if value_inum != 0 {
-                    xattr.value = self.ext4_read_ea_inode_value(cx, value_inum)?;
-                }
-                Ok(Some(ext4_present_xattr_value(xattr)?))
+                // (the in-block value is an empty placeholder). Read it.
+                let value = if value_inum != 0 {
+                    self.ext4_read_ea_inode_value(cx, value_inum)?
+                } else {
+                    value
+                };
+                // POSIX ACL values need the ext4->generic expansion, keyed on
+                // name_index — apply exactly as the parse path did via
+                // ext4_present_xattr_value (name is unused there).
+                Ok(Some(ext4_present_xattr_value(Ext4Xattr {
+                    name_index,
+                    name: Vec::new(),
+                    value,
+                })?))
             }
             FsFlavor::Btrfs(_) => self.btrfs_getxattr(cx, ino, name),
         }

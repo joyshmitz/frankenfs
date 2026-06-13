@@ -31,5 +31,9 @@ harness = false
 name = "chunk_map"
 harness = false
 
+[[bench]]
+name = "xattr_lookup"
+harness = false
+
 [lints]
 workspace = true

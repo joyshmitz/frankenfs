@@ -5013,18 +5013,43 @@ impl Ext4Xattr {
     /// Return the full attribute name including the namespace prefix.
     #[must_use]
     pub fn full_name(&self) -> String {
-        let prefix = match self.name_index {
-            ffs_types::EXT4_XATTR_INDEX_USER => "user.",
-            ffs_types::EXT4_XATTR_INDEX_POSIX_ACL_ACCESS => "system.posix_acl_access",
-            ffs_types::EXT4_XATTR_INDEX_POSIX_ACL_DEFAULT => "system.posix_acl_default",
-            ffs_types::EXT4_XATTR_INDEX_TRUSTED => "trusted.",
-            ffs_types::EXT4_XATTR_INDEX_SECURITY => "security.",
-            ffs_types::EXT4_XATTR_INDEX_SYSTEM => "system.",
-            ffs_types::EXT4_XATTR_INDEX_RICHACL => "system.richacl",
-            _ => "unknown.",
-        };
-        format!("{prefix}{}", String::from_utf8_lossy(&self.name))
+        format!(
+            "{}{}",
+            xattr_name_index_prefix(self.name_index),
+            String::from_utf8_lossy(&self.name)
+        )
     }
+}
+
+/// The namespace prefix [`Ext4Xattr::full_name`] prepends for a given
+/// `name_index`. Shared so the by-name finder ([`find_xattr_value_in_block`])
+/// matches a query against an entry's full name byte-for-byte identically to
+/// `full_name()` without materializing every entry.
+fn xattr_name_index_prefix(name_index: u8) -> &'static str {
+    match name_index {
+        ffs_types::EXT4_XATTR_INDEX_USER => "user.",
+        ffs_types::EXT4_XATTR_INDEX_POSIX_ACL_ACCESS => "system.posix_acl_access",
+        ffs_types::EXT4_XATTR_INDEX_POSIX_ACL_DEFAULT => "system.posix_acl_default",
+        ffs_types::EXT4_XATTR_INDEX_TRUSTED => "trusted.",
+        ffs_types::EXT4_XATTR_INDEX_SECURITY => "security.",
+        ffs_types::EXT4_XATTR_INDEX_SYSTEM => "system.",
+        ffs_types::EXT4_XATTR_INDEX_RICHACL => "system.richacl",
+        _ => "unknown.",
+    }
+}
+
+/// True iff an xattr entry `(name_index, name)` has the full name `target`.
+///
+/// Equivalent to `Ext4Xattr { name_index, name, .. }.full_name() == target` —
+/// `format!("{prefix}{lossy_name}") == target` holds exactly when `target`
+/// starts with `prefix` and its remainder equals the lossily-decoded name — but
+/// allocates nothing for a non-match (the `from_utf8_lossy` `Cow` borrows for
+/// the valid-UTF-8 names that xattrs use in practice).
+fn xattr_entry_full_name_matches(name_index: u8, name: &[u8], target: &str) -> bool {
+    let prefix = xattr_name_index_prefix(name_index);
+    target
+        .strip_prefix(prefix)
+        .is_some_and(|rest| String::from_utf8_lossy(name) == rest)
 }
 
 /// Parse xattr entries from a byte slice (after the header/magic).
@@ -5174,6 +5199,146 @@ fn parse_xattr_entries_with_inum(
     }
 
     Ok(entries)
+}
+
+/// Find the value (and `e_value_inum`) of the single xattr whose full name is
+/// `target`, scanning entries in place without materializing every attribute.
+///
+/// The read-side counterpart of `getxattr`: where [`parse_xattr_block_with_inum`]
+/// allocates a name `Vec` and a value `Vec` for *every* attribute (and the
+/// caller then builds a `full_name` `String` per entry to find one), this walks
+/// the entry table once, compares each name to `target` allocation-free
+/// ([`xattr_entry_full_name_matches`]), and materializes only the matched
+/// value. Returns `Ok(None)` when no entry matches (bd-abu3z).
+///
+/// Matching and value-bounds validation are identical to
+/// `parse_xattr_entries_with_inum` for the matched entry; like the
+/// floor/binary-search read levers, only the consumed entry's value offset is
+/// validated (a corrupt *non*-matched value can no longer abort an unrelated
+/// lookup — a strict superset of the names a consistent image resolves).
+fn find_xattr_value_by_full_name(
+    data: &[u8],
+    value_base: &[u8],
+    value_offset_base: usize,
+    target: &str,
+) -> Result<Option<(u8, Vec<u8>, u32)>, ParseError> {
+    let mut offset = 0_usize;
+    // (name_index, value_offs, value_inum, value_size) of the matched entry.
+    let mut matched: Option<(u8, u16, u32, u32)> = None;
+    let entries_region_end = loop {
+        if offset + 4 > data.len() {
+            break offset;
+        }
+        let name_len = data[offset];
+        let name_index = data[offset + 1];
+        if name_len == 0 && name_index == 0 {
+            break offset + 4;
+        }
+        if offset + 16 > data.len() {
+            break offset;
+        }
+        let value_offs = read_le_u16(data, offset + 2)?;
+        let value_inum = read_le_u32(data, offset + 4)?;
+        let value_size = read_le_u32(data, offset + 8)?;
+        let name_start = offset + 16;
+        let name_end = name_start + usize::from(name_len);
+        if name_end > data.len() {
+            return Err(ParseError::InvalidField {
+                field: "xattr_name",
+                reason: "name extends past data boundary",
+            });
+        }
+        if matched.is_none()
+            && xattr_entry_full_name_matches(name_index, &data[name_start..name_end], target)
+        {
+            matched = Some((name_index, value_offs, value_inum, value_size));
+        }
+        offset = (name_end + 3) & !3;
+    };
+
+    let Some((name_index, value_offs, value_inum, value_size)) = matched else {
+        return Ok(None);
+    };
+
+    // EA-inode-backed value: payload lives in a separate inode; surface an empty
+    // in-block value and let the caller resolve it (mirrors the parse path).
+    if value_inum != 0 {
+        return Ok(Some((name_index, Vec::new(), value_inum)));
+    }
+    if value_size == 0 {
+        return Ok(Some((name_index, Vec::new(), 0)));
+    }
+    let min_value_offset =
+        value_offset_base
+            .checked_add(entries_region_end)
+            .ok_or(ParseError::InvalidField {
+                field: "xattr_value",
+                reason: "value offset floor overflow",
+            })?;
+    let v_off = usize::from(value_offs);
+    if v_off < min_value_offset {
+        return Err(ParseError::InvalidField {
+            field: "xattr_value",
+            reason: "value overlaps xattr header or entry table",
+        });
+    }
+    let v_size = usize::try_from(value_size).map_err(|_| ParseError::IntegerConversion {
+        field: "xattr_value_size",
+    })?;
+    let v_end = v_off.checked_add(v_size).ok_or(ParseError::InvalidField {
+        field: "xattr_value",
+        reason: "value extends past data boundary",
+    })?;
+    if v_end > value_base.len() {
+        return Err(ParseError::InvalidField {
+            field: "xattr_value",
+            reason: "value extends past data boundary",
+        });
+    }
+    Ok(Some((name_index, value_base[v_off..v_end].to_vec(), value_inum)))
+}
+
+/// Find one inode-body xattr by full name without materializing the rest.
+///
+/// Returns `(name_index, in_block_value, e_value_inum)`. By-name early-exit
+/// counterpart of [`parse_ibody_xattrs_with_inum`] (bd-abu3z).
+pub fn find_ibody_xattr_by_name(
+    inode: &Ext4Inode,
+    target: &str,
+) -> Result<Option<(u8, Vec<u8>, u32)>, ParseError> {
+    if inode.xattr_ibody.len() < 4 {
+        return Ok(None);
+    }
+    if read_le_u32(&inode.xattr_ibody, 0)? != EXT4_XATTR_MAGIC {
+        return Ok(None);
+    }
+    let entries = &inode.xattr_ibody[4..];
+    find_xattr_value_by_full_name(entries, entries, 0, target)
+}
+
+/// Find one external-block xattr by full name without materializing the rest.
+///
+/// Returns `(name_index, in_block_value, e_value_inum)`. By-name early-exit
+/// counterpart of [`parse_xattr_block_with_inum`] (bd-abu3z).
+pub fn find_xattr_block_value_by_name(
+    block_data: &[u8],
+    target: &str,
+) -> Result<Option<(u8, Vec<u8>, u32)>, ParseError> {
+    if block_data.len() < 32 {
+        return Err(ParseError::InsufficientData {
+            needed: 32,
+            offset: 0,
+            actual: block_data.len(),
+        });
+    }
+    if read_le_u32(block_data, 0)? != EXT4_XATTR_MAGIC {
+        return Err(ParseError::InvalidMagic {
+            expected: u64::from(EXT4_XATTR_MAGIC),
+            actual: u64::from(read_le_u32(block_data, 0)?),
+        });
+    }
+    let entries_region = &block_data[32..];
+    find_xattr_value_by_full_name(entries_region, block_data, 32, target)
 }
 
 /// Parse inline (ibody) xattrs from an `Ext4Inode`.
