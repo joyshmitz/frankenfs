@@ -3108,9 +3108,12 @@ impl InMemoryCowBtrfsTree {
     }
 
     fn child_slot(keys: &[BtrfsKey], key: &BtrfsKey) -> usize {
-        keys.iter()
-            .position(|sep| key_cmp(key, sep) == Ordering::Less)
-            .unwrap_or(keys.len())
+        // Separators are sorted ascending, so `key < sep` is false-then-true: the
+        // old `position(key < sep).unwrap_or(len)` is the first index where it
+        // flips true. That equals the count of separators with `key >= sep`
+        // (`!= Less`), a true-then-false predicate — i.e. partition_point, which
+        // is O(log N) over the up-to-~max_items keys instead of O(N) (bd-4p0ie).
+        keys.partition_point(|sep| key_cmp(key, sep) != Ordering::Less)
     }
 
     fn insert_entry(
@@ -3876,10 +3879,13 @@ impl InMemoryCowBtrfsTree {
 
     fn find_in(&self, node_id: u64, key: &BtrfsKey) -> Result<Option<Vec<u8>>, BtrfsMutationError> {
         match self.node_ref(node_id)? {
+            // Leaf items are sorted ascending by key with unique keys, so the
+            // exact-match lookup is a binary search instead of a linear scan over
+            // up-to-~max_items items (bd-4p0ie).
             BtrfsCowNode::Leaf { items } => Ok(items
-                .iter()
-                .find(|item| key_cmp(&item.key, key) == Ordering::Equal)
-                .map(|item| item.data.clone())),
+                .binary_search_by(|item| key_cmp(&item.key, key))
+                .ok()
+                .map(|idx| items[idx].data.clone())),
             BtrfsCowNode::Internal { keys, children } => {
                 if children.len() != keys.len().saturating_add(1) {
                     return Err(BtrfsMutationError::BrokenInvariant(
