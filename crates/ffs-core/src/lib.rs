@@ -8280,8 +8280,106 @@ impl OpenFs {
             );
         }
 
+        // Decompress the compressed extents overlapping the read in parallel
+        // across cores (bd-m6g2o). A read spanning N compressed extents (btrfs
+        // caps each at 128 KiB uncompressed) otherwise decompresses them one at
+        // a time in the assembly loop below. `Self::btrfs_decompress` is a pure
+        // function of (bytes, codec, ram_bytes), so decompressing the gathered
+        // blobs with `into_par_iter` is byte-identical and only reorders the CPU
+        // work. The compressed-blob device reads stay serial here (in extent
+        // order) so I/O ordering is unchanged; the assembly loop consumes each
+        // result in extent order via `?`, so a decompress error surfaces at the
+        // same extent it would have before. Inline data length is only known
+        // after decompression (overlap can't be pre-checked), matching the loop
+        // which also decompresses inline extents before testing overlap.
+        let mut decompressed_by_idx: Vec<Option<Result<Vec<u8>, FfsError>>> =
+            (0..extents.len()).map(|_| None).collect();
+        {
+            use rayon::prelude::{IntoParallelIterator, ParallelIterator};
+            let mut jobs: Vec<(usize, Vec<u8>, u8, usize)> = Vec::new();
+            for (idx, (logical_start, extent)) in extents.iter().enumerate() {
+                match extent {
+                    BtrfsExtentData::Inline {
+                        compression,
+                        data,
+                        ram_bytes,
+                        ..
+                    } if *compression != 0 => {
+                        let ram =
+                            usize::try_from(*ram_bytes).map_err(|_| FfsError::Corruption {
+                                block: 0,
+                                detail: "inline extent ram_bytes overflow".into(),
+                            })?;
+                        jobs.push((idx, data.clone(), *compression, ram));
+                    }
+                    BtrfsExtentData::Regular {
+                        extent_type,
+                        compression,
+                        ram_bytes,
+                        disk_bytenr,
+                        disk_num_bytes,
+                        num_bytes,
+                        ..
+                    } if *compression != 0
+                        && *extent_type == BTRFS_FILE_EXTENT_REG
+                        && *disk_bytenr != 0 =>
+                    {
+                        let extent_end =
+                            (*logical_start).checked_add(*num_bytes).ok_or_else(|| {
+                                FfsError::Corruption {
+                                    block: *logical_start,
+                                    detail: "regular extent logical range overflow".into(),
+                                }
+                            })?;
+                        let overlap_start = (*logical_start).max(offset);
+                        let overlap_end = extent_end.min(read_end);
+                        if overlap_start >= overlap_end {
+                            continue;
+                        }
+                        let compressed_len = usize::try_from(*disk_num_bytes).map_err(|_| {
+                            FfsError::Corruption {
+                                block: *disk_bytenr,
+                                detail: "compressed extent disk_num_bytes exceeds addressable size"
+                                    .into(),
+                            }
+                        })?;
+                        if compressed_len > BTRFS_COMPRESSED_EXTENT_BYTE_LIMIT {
+                            return Err(FfsError::Corruption {
+                                block: *disk_bytenr,
+                                detail: "compressed extent disk_num_bytes exceeds 128MB limit"
+                                    .into(),
+                            });
+                        }
+                        let ram = usize::try_from(*ram_bytes).map_err(|_| FfsError::Corruption {
+                            block: *disk_bytenr,
+                            detail: "compressed extent ram_bytes overflow".into(),
+                        })?;
+                        if ram > BTRFS_COMPRESSED_EXTENT_BYTE_LIMIT {
+                            return Err(FfsError::Corruption {
+                                block: *disk_bytenr,
+                                detail: "compressed extent ram_bytes exceeds 128MB limit".into(),
+                            });
+                        }
+                        let mut compressed = vec![0_u8; compressed_len];
+                        self.btrfs_read_logical_into(cx, *disk_bytenr, &mut compressed)?;
+                        jobs.push((idx, compressed, *compression, ram));
+                    }
+                    _ => {}
+                }
+            }
+            let results: Vec<(usize, Result<Vec<u8>, FfsError>)> = jobs
+                .into_par_iter()
+                .map(|(idx, compressed, comp, ram)| {
+                    (idx, Self::btrfs_decompress(&compressed, comp, ram))
+                })
+                .collect();
+            for (idx, res) in results {
+                decompressed_by_idx[idx] = Some(res);
+            }
+        }
+
         let mut covered_until = offset;
-        for (logical_start, extent) in &extents {
+        for (idx, (logical_start, extent)) in extents.iter().enumerate() {
             match extent {
                 BtrfsExtentData::Inline {
                     compression,
@@ -8297,14 +8395,12 @@ impl OpenFs {
                             ram_bytes,
                             "btrfs inline_decompress"
                         );
-                        let decompressed = Self::btrfs_decompress(
-                            data,
-                            *compression,
-                            usize::try_from(*ram_bytes).map_err(|_| FfsError::Corruption {
-                                block: 0,
-                                detail: "inline extent ram_bytes overflow".into(),
-                            })?,
-                        )?;
+                        // Decompressed in parallel above (bd-m6g2o); consume this
+                        // extent's result in order so a decompress error surfaces
+                        // at the same point as the serial path.
+                        let decompressed = decompressed_by_idx[idx]
+                            .take()
+                            .expect("inline compressed extent gathered for decompress")?;
                         std::borrow::Cow::Owned(decompressed)
                     } else {
                         std::borrow::Cow::Borrowed(data.as_slice())
@@ -8369,9 +8465,7 @@ impl OpenFs {
                 BtrfsExtentData::Regular {
                     extent_type,
                     compression,
-                    ram_bytes,
                     disk_bytenr,
-                    disk_num_bytes,
                     extent_offset,
                     num_bytes,
                     ..
@@ -8437,36 +8531,12 @@ impl OpenFs {
                     })?;
 
                     if *compression != 0 {
-                        // Compressed extent: read entire compressed blob, decompress,
-                        // then slice the decompressed result.
-                        let compressed_len =
-                            usize::try_from(*disk_num_bytes).map_err(|_| FfsError::Corruption {
-                                block: *disk_bytenr,
-                                detail: "compressed extent disk_num_bytes exceeds addressable size"
-                                    .into(),
-                            })?;
-                        if compressed_len > BTRFS_COMPRESSED_EXTENT_BYTE_LIMIT {
-                            return Err(FfsError::Corruption {
-                                block: *disk_bytenr,
-                                detail: "compressed extent disk_num_bytes exceeds 128MB limit"
-                                    .into(),
-                            });
-                        }
-                        let mut compressed = vec![0_u8; compressed_len];
-                        self.btrfs_read_logical_into(cx, *disk_bytenr, &mut compressed)?;
-                        let ram_bytes_usize =
-                            usize::try_from(*ram_bytes).map_err(|_| FfsError::Corruption {
-                                block: *disk_bytenr,
-                                detail: "compressed extent ram_bytes overflow".into(),
-                            })?;
-                        if ram_bytes_usize > BTRFS_COMPRESSED_EXTENT_BYTE_LIMIT {
-                            return Err(FfsError::Corruption {
-                                block: *disk_bytenr,
-                                detail: "compressed extent ram_bytes exceeds 128MB limit".into(),
-                            });
-                        }
-                        let decompressed =
-                            Self::btrfs_decompress(&compressed, *compression, ram_bytes_usize)?;
+                        // Compressed extent: decompressed in parallel above
+                        // (bd-m6g2o). Consume this extent's result in order, then
+                        // slice the decompressed result.
+                        let decompressed = decompressed_by_idx[idx]
+                            .take()
+                            .expect("compressed extent gathered for decompress")?;
                         let decompressed_slice = Self::btrfs_decompressed_extent_slice(
                             *disk_bytenr,
                             *extent_offset,

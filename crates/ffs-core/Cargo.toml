@@ -23,6 +23,7 @@ ffs-types = { workspace = true }
 ffs-xattr = { workspace = true }
 libc = { workspace = true }
 parking_lot = { workspace = true }
+rayon = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
@@ -89,6 +90,14 @@ harness = false
 
 [[bench]]
 name = "statfs_group_aggregate"
+harness = false
+
+[[bench]]
+name = "btrfs_encoded_read_covering_extent"
+harness = false
+
+[[bench]]
+name = "btrfs_decompress_extents"
 harness = false
 
 [lints]
