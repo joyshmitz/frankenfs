@@ -992,6 +992,7 @@ dependencies = [
  "lzokay-native",
  "parking_lot",
  "proptest",
+ "rayon",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -1235,6 +1236,7 @@ dependencies = [
 name = "ffs-xattr"
 version = "0.1.0"
 dependencies = [
+ "criterion",
  "ffs-error",
  "ffs-ondisk",
  "ffs-types",
