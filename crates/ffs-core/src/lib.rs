@@ -7114,30 +7114,61 @@ impl OpenFs {
             return self.btrfs_read_inode_attr(cx, child_ino);
         }
 
-        // Read-only: one fs-tree descent yields both the parent's INODE_ITEM
-        // (for the directory-type check) and its DIR_ITEM/DIR_INDEX entries —
-        // no second walk of the same subtree (bd-e94n2).
-        let items = self.walk_btrfs_fs_tree_object(cx, canonical_parent)?;
-        let parent_inode =
-            parse_inode_item(&Self::btrfs_find_inode_item(&items, canonical_parent)?.data)
-                .map_err(|e| parse_to_ffs_error(&e))?;
-        if Self::btrfs_mode_to_file_type(parent_inode.mode) != FileType::Directory {
+        // Read-only fast path: an entry's name hash IS its DIR_ITEM key offset,
+        // so only the bucket at (parent, DIR_ITEM, name_hash) can hold the name.
+        // Seek that single bucket (O(log N)) instead of walking every item of the
+        // directory (O(directory size)) — the read-only analog of the writable
+        // keyed lookup (btrfs_lookup_dir_entry, bd-a9wot) and the keyed getxattr
+        // fast path. Real btrfs always writes a DIR_ITEM, so this resolves the
+        // name without ever scanning the directory (bd-k115m).
+        let parent_attr = self.btrfs_read_inode_attr(cx, parent)?;
+        if parent_attr.kind != FileType::Directory {
             return Err(FfsError::NotDirectory);
         }
-
-        for preferred_item_type in [BTRFS_ITEM_DIR_ITEM, BTRFS_ITEM_DIR_INDEX] {
-            for item in &items {
-                if item.key.objectid != canonical_parent
-                    || item.key.item_type != preferred_item_type
-                {
-                    continue;
+        let name_hash = ffs_btrfs::btrfs_name_hash(name);
+        let dir_item_lo = BtrfsKey {
+            objectid: canonical_parent,
+            item_type: BTRFS_ITEM_DIR_ITEM,
+            offset: u64::from(name_hash),
+        };
+        let dir_item_hi = BtrfsKey {
+            objectid: canonical_parent,
+            item_type: BTRFS_ITEM_DIR_ITEM,
+            offset: u64::from(name_hash) + 1,
+        };
+        let bucket = self.walk_btrfs_fs_tree_range(cx, dir_item_lo, dir_item_hi)?;
+        for item in &bucket {
+            let dir_items = parse_dir_items(&item.data).map_err(|e| parse_to_ffs_error(&e))?;
+            for dir_item in dir_items {
+                if dir_item.name == name {
+                    let child_ino = InodeNumber(dir_item.child_objectid);
+                    return self.btrfs_read_inode_attr(cx, child_ino);
                 }
-                let dir_items = parse_dir_items(&item.data).map_err(|e| parse_to_ffs_error(&e))?;
-                for dir_item in dir_items {
-                    if dir_item.name == name {
-                        let child_ino = InodeNumber(dir_item.child_objectid);
-                        return self.btrfs_read_inode_attr(cx, child_ino);
-                    }
+            }
+        }
+
+        // Fallback for directories that carry the name only in a DIR_INDEX
+        // (sequence-keyed, so not reachable by name hash) — preserves the prior
+        // behaviour of scanning both item types. Real btrfs never reaches here
+        // (the DIR_ITEM bucket above already resolved the name); it covers
+        // images/states that omit the DIR_ITEM.
+        let index_lo = BtrfsKey {
+            objectid: canonical_parent,
+            item_type: BTRFS_ITEM_DIR_INDEX,
+            offset: 0,
+        };
+        let index_hi = BtrfsKey {
+            objectid: canonical_parent,
+            item_type: BTRFS_ITEM_DIR_INDEX,
+            offset: u64::MAX,
+        };
+        let index = self.walk_btrfs_fs_tree_range(cx, index_lo, index_hi)?;
+        for item in &index {
+            let dir_items = parse_dir_items(&item.data).map_err(|e| parse_to_ffs_error(&e))?;
+            for dir_item in dir_items {
+                if dir_item.name == name {
+                    let child_ino = InodeNumber(dir_item.child_objectid);
+                    return self.btrfs_read_inode_attr(cx, child_ino);
                 }
             }
         }
@@ -71458,6 +71489,150 @@ mod tests {
         eprintln!(
             "BD_A9WOT N={n} iters={iters} hash_ns={hash_ns} scan_ns={scan_ns} score={:.2} (acc={acc})",
             scan_ns as f64 / hash_ns.max(1) as f64
+        );
+    }
+
+    /// Read-only full-scan reference for bd-k115m: the prior
+    /// O(directory size) btrfs_lookup_child — walk every item of the parent and
+    /// scan DIR_ITEM then DIR_INDEX for the name.
+    fn btrfs_lookup_child_full_scan_reference(
+        fs: &OpenFs,
+        cx: &Cx,
+        canonical_parent: u64,
+        name: &[u8],
+    ) -> Option<u64> {
+        let items = fs.walk_btrfs_fs_tree_object(cx, canonical_parent).ok()?;
+        for preferred in [BTRFS_ITEM_DIR_ITEM, BTRFS_ITEM_DIR_INDEX] {
+            for item in &items {
+                if item.key.objectid != canonical_parent || item.key.item_type != preferred {
+                    continue;
+                }
+                let dir_items = parse_dir_items(&item.data).ok()?;
+                for di in dir_items {
+                    if di.name == name {
+                        return Some(di.child_objectid);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// mkfs a real btrfs image, create `n` files writable, persist, and reopen
+    /// READ-ONLY so `btrfs_lookup_child` takes the keyed on-disk path. Returns
+    /// `None` when btrfs-progs is unavailable (test skips).
+    fn btrfs_readonly_lookup_fixture(n: u32) -> Option<(OpenFs, Cx, InodeNumber, Vec<String>)> {
+        let (fs, dev, _tmp, _img) = open_writable_btrfs_mkfs(64)?;
+        let cx = Cx::for_testing();
+        let root = InodeNumber(u64::from(BTRFS_FIRST_FREE_OBJECTID));
+        let mut names = Vec::new();
+        for i in 0..n {
+            let name = format!("rofile_{i:05}.dat");
+            fs.create(&cx, root, OsStr::new(&name), 0o644, 0, 0)
+                .expect("create");
+            names.push(name);
+        }
+        fs.flush_mvcc_to_device(&cx).expect("flush writes to device");
+        let bytes = dev.snapshot_bytes();
+        let ro = OpenFs::from_device(
+            &cx,
+            Box::new(TestDevice::from_vec(bytes)),
+            &OpenOptions::default(),
+        )
+        .expect("reopen read-only");
+        assert!(!ro.is_writable());
+        Some((ro, cx, root, names))
+    }
+
+    /// Isomorphism guard for bd-k115m: the read-only keyed DIR_ITEM lookup must
+    /// resolve every present name to the same child as a full DIR_ITEM/DIR_INDEX
+    /// scan, and report absent names as NotFound.
+    #[test]
+    fn btrfs_readonly_lookup_keyed_matches_full_scan_bd_k115m() {
+        let Some((ro, cx, root, names)) = btrfs_readonly_lookup_fixture(150) else {
+            return;
+        };
+        let canonical = ro.btrfs_canonical_inode(root).expect("canonical");
+        for name in &names {
+            let via_keyed = <OpenFs as FsOps>::lookup(
+                &ro,
+                &cx,
+                &mut RequestScope::empty(),
+                root,
+                OsStr::new(name),
+            )
+            .expect("present name must be found by the keyed lookup");
+            let via_scan =
+                btrfs_lookup_child_full_scan_reference(&ro, &cx, canonical, name.as_bytes())
+                    .expect("full scan must find it too");
+            assert_eq!(
+                via_keyed.ino,
+                InodeNumber(via_scan),
+                "keyed lookup must return the same child as a full scan for {name}"
+            );
+        }
+        for absent in ["absent.dat", "nope", "rofile_99999.dat"] {
+            assert!(
+                <OpenFs as FsOps>::lookup(
+                    &ro,
+                    &cx,
+                    &mut RequestScope::empty(),
+                    root,
+                    OsStr::new(absent)
+                )
+                .is_err(),
+                "absent name {absent} must be NotFound under the keyed lookup"
+            );
+            assert!(
+                btrfs_lookup_child_full_scan_reference(&ro, &cx, canonical, absent.as_bytes())
+                    .is_none()
+            );
+        }
+    }
+
+    /// Diagnostic A/B for bd-k115m: time the read-only keyed point lookup vs the
+    /// O(directory) full-scan reference. Run with --ignored --nocapture.
+    #[test]
+    #[ignore = "perf A/B: read-only btrfs lookup keyed vs O(N) full scan (bd-k115m)"]
+    fn btrfs_readonly_lookup_keyed_vs_full_scan_ab_bd_k115m() {
+        let n = 1000u32;
+        let Some((ro, cx, root, names)) = btrfs_readonly_lookup_fixture(n) else {
+            return;
+        };
+        let canonical = ro.btrfs_canonical_inode(root).unwrap();
+        let iters = 3usize;
+        let mut acc = 0u64;
+        let t_keyed = std::time::Instant::now();
+        for _ in 0..iters {
+            for name in &names {
+                acc = acc.wrapping_add(
+                    <OpenFs as FsOps>::lookup(
+                        &ro,
+                        &cx,
+                        &mut RequestScope::empty(),
+                        root,
+                        OsStr::new(name),
+                    )
+                    .unwrap()
+                    .ino
+                    .0,
+                );
+            }
+        }
+        let keyed_ns = t_keyed.elapsed().as_nanos();
+        let t_scan = std::time::Instant::now();
+        for _ in 0..iters {
+            for name in &names {
+                acc = acc.wrapping_add(
+                    btrfs_lookup_child_full_scan_reference(&ro, &cx, canonical, name.as_bytes())
+                        .unwrap(),
+                );
+            }
+        }
+        let scan_ns = t_scan.elapsed().as_nanos();
+        eprintln!(
+            "BD_K115M N={n} iters={iters} keyed_ns={keyed_ns} scan_ns={scan_ns} score={:.2} (acc={acc})",
+            scan_ns as f64 / keyed_ns.max(1) as f64
         );
     }
 
