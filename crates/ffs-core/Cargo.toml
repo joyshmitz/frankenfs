@@ -83,5 +83,9 @@ harness = false
 name = "htree_resolve_logical"
 harness = false
 
+[[bench]]
+name = "readdir_dedup_clone"
+harness = false
+
 [lints]
 workspace = true

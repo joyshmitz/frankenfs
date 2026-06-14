@@ -7154,15 +7154,23 @@ impl OpenFs {
     /// directory presents ~2 rows per file (a DIR_ITEM and a DIR_INDEX), so the
     /// quadratic was O(files^2) on every `ls` of a large directory.
     fn btrfs_dedup_dir_rows(rows: Vec<(u64, DirEntry)>) -> Vec<(u64, DirEntry)> {
-        let mut seen: std::collections::HashSet<Vec<u8>> =
+        // First pass borrows each name into the seen-set (no per-row clone) and
+        // records which rows are the first occurrence; the second pass moves the
+        // kept rows out. The old code cloned every name into a HashSet<Vec<u8>>
+        // (a malloc + free per row, ~2 rows per file on a btrfs dir) purely to
+        // dedup — here the set borrows from `rows`, so a large `ls` pays zero
+        // name allocations. Same first-occurrence rule and iteration order.
+        let mut seen: std::collections::HashSet<&[u8]> =
             std::collections::HashSet::with_capacity(rows.len());
-        let mut out: Vec<(u64, DirEntry)> = Vec::with_capacity(rows.len());
-        for row in rows {
-            if seen.insert(row.1.name.clone()) {
-                out.push(row);
-            }
+        let mut keep: Vec<bool> = Vec::with_capacity(rows.len());
+        for row in &rows {
+            keep.push(seen.insert(row.1.name.as_slice()));
         }
-        out
+        drop(seen); // end the borrow of `rows` before moving rows out
+        rows.into_iter()
+            .zip(keep)
+            .filter_map(|(row, keep)| keep.then_some(row))
+            .collect()
     }
 
     #[allow(clippy::too_many_lines)]
