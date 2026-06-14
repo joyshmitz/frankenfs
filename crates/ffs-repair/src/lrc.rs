@@ -300,17 +300,22 @@ pub fn encode_local(config: &LrcConfig, data: &[Vec<u8>]) -> Vec<Vec<u8>> {
     let groups = config.num_groups() as usize;
     let group_size = config.local_group_size as usize;
 
-    let mut local_parities = Vec::with_capacity(groups);
-
-    for g in 0..groups {
-        let mut parity = vec![0_u8; block_size];
-        for i in 0..group_size {
-            let block = &data[g * group_size + i];
-            assert_eq!(block.len(), block_size, "block size mismatch");
-            xor_into(&mut parity, block);
-        }
-        local_parities.push(parity);
-    }
+    // Each local group's parity is an independent XOR of its own disjoint span
+    // of data blocks, so compute the groups in parallel across cores — the same
+    // rayon treatment encode_global already uses for the global parity loop
+    // (bd-blr6r sibling). Ordered collect preserves the per-group output order.
+    let local_parities: Vec<Vec<u8>> = (0..groups)
+        .into_par_iter()
+        .map(|g| {
+            let mut parity = vec![0_u8; block_size];
+            for i in 0..group_size {
+                let block = &data[g * group_size + i];
+                assert_eq!(block.len(), block_size, "block size mismatch");
+                xor_into(&mut parity, block);
+            }
+            parity
+        })
+        .collect();
 
     local_parities
 }

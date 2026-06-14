@@ -95,5 +95,56 @@ fn bench_encode(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_encode);
+// ── Local-parity XOR combine (encode_local) ────────────────────────────────
+
+const GROUPS: usize = 16; // local groups
+const GROUP_SIZE: usize = 4; // data blocks per local group
+
+fn xor_one(group: &[Vec<u8>]) -> Vec<u8> {
+    let mut parity = vec![0_u8; BLOCK];
+    for block in group {
+        for (p, &b) in parity.iter_mut().zip(block) {
+            *p ^= b;
+        }
+    }
+    parity
+}
+
+fn local_serial(groups: &[Vec<Vec<u8>>]) -> Vec<Vec<u8>> {
+    groups.iter().map(|g| xor_one(g)).collect()
+}
+
+fn local_parallel(groups: &[Vec<Vec<u8>>]) -> Vec<Vec<u8>> {
+    (0..groups.len())
+        .into_par_iter()
+        .map(|g| xor_one(&groups[g]))
+        .collect()
+}
+
+fn bench_local(c: &mut Criterion) {
+    let groups: Vec<Vec<Vec<u8>>> = (0..GROUPS)
+        .map(|g| {
+            (0..GROUP_SIZE)
+                .map(|i| {
+                    (0..BLOCK)
+                        .map(|b| prng((g as u64) << 24 ^ (i as u64) << 12 ^ b as u64))
+                        .collect()
+                })
+                .collect()
+        })
+        .collect();
+
+    assert_eq!(local_serial(&groups), local_parallel(&groups));
+
+    let mut group = c.benchmark_group("lrc_local_xor_g16_gs4_4k");
+    group.bench_function("serial", |b| {
+        b.iter(|| black_box(local_serial(black_box(&groups))));
+    });
+    group.bench_function("parallel_rayon", |b| {
+        b.iter(|| black_box(local_parallel(black_box(&groups))));
+    });
+    group.finish();
+}
+
+criterion_group!(benches, bench_encode, bench_local);
 criterion_main!(benches);
