@@ -376,12 +376,52 @@ pub(crate) fn resolve_version_bytes_at_or_before(
         .map(std::borrow::Cow::into_owned)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StagedWrite {
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) merge_proof: MergeProof,
+}
+
+#[derive(Clone, Copy)]
+pub struct WriteSet<'a> {
+    staged_writes: &'a BTreeMap<BlockNumber, StagedWrite>,
+}
+
+impl<'a> WriteSet<'a> {
+    #[must_use]
+    pub fn len(self) -> usize {
+        self.staged_writes.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(self) -> bool {
+        self.staged_writes.is_empty()
+    }
+
+    #[must_use]
+    pub fn contains_key(self, block: &BlockNumber) -> bool {
+        self.staged_writes.contains_key(block)
+    }
+
+    #[must_use]
+    pub fn keys(self) -> impl DoubleEndedIterator<Item = &'a BlockNumber> + ExactSizeIterator + 'a {
+        self.staged_writes.keys()
+    }
+
+    #[must_use]
+    fn key_span(self) -> Option<(BlockNumber, BlockNumber)> {
+        Some((
+            *self.staged_writes.first_key_value()?.0,
+            *self.staged_writes.last_key_value()?.0,
+        ))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Transaction {
     pub id: TxnId,
     pub snapshot: Snapshot,
-    writes: BTreeMap<BlockNumber, Vec<u8>>,
-    merge_proofs: BTreeMap<BlockNumber, MergeProof>,
+    staged_writes: BTreeMap<BlockNumber, StagedWrite>,
     /// Blocks read during the transaction's lifetime.  Each entry maps
     /// the block to the `CommitSeq` of the version that was read (or
     /// `CommitSeq(0)` if the block had no version at that snapshot).
@@ -399,6 +439,71 @@ pub struct Transaction {
     cow_orphans: BTreeSet<BlockNumber>,
 }
 
+#[derive(Serialize, Deserialize)]
+struct TransactionSerde {
+    id: TxnId,
+    snapshot: Snapshot,
+    writes: BTreeMap<BlockNumber, Vec<u8>>,
+    #[serde(default)]
+    merge_proofs: BTreeMap<BlockNumber, MergeProof>,
+    reads: BTreeMap<BlockNumber, CommitSeq>,
+    cow_writes: BTreeMap<BlockNumber, CowRewriteIntent>,
+    cow_orphans: BTreeSet<BlockNumber>,
+}
+
+impl Serialize for Transaction {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let writes = self
+            .staged_writes
+            .iter()
+            .map(|(&block, staged)| (block, staged.bytes.clone()))
+            .collect();
+        let merge_proofs = self
+            .staged_writes
+            .iter()
+            .map(|(&block, staged)| (block, staged.merge_proof.clone()))
+            .collect();
+        TransactionSerde {
+            id: self.id,
+            snapshot: self.snapshot,
+            writes,
+            merge_proofs,
+            reads: self.reads.clone(),
+            cow_writes: self.cow_writes.clone(),
+            cow_orphans: self.cow_orphans.clone(),
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for Transaction {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let mut helper = TransactionSerde::deserialize(deserializer)?;
+        let staged_writes = helper
+            .writes
+            .into_iter()
+            .map(|(block, bytes)| {
+                let merge_proof = helper.merge_proofs.remove(&block).unwrap_or_default();
+                (block, StagedWrite { bytes, merge_proof })
+            })
+            .collect();
+        Ok(Self {
+            id: helper.id,
+            snapshot: helper.snapshot,
+            staged_writes,
+            reads: helper.reads,
+            cow_writes: helper.cow_writes,
+            cow_orphans: helper.cow_orphans,
+        })
+    }
+}
+
 impl Transaction {
     /// Create a new transaction at the given snapshot.
     #[must_use]
@@ -406,8 +511,7 @@ impl Transaction {
         Self {
             id,
             snapshot,
-            writes: BTreeMap::new(),
-            merge_proofs: BTreeMap::new(),
+            staged_writes: BTreeMap::new(),
             reads: BTreeMap::new(),
             cow_writes: BTreeMap::new(),
             cow_orphans: BTreeSet::new(),
@@ -436,8 +540,8 @@ impl Transaction {
         bytes: Vec<u8>,
         merge_proof: MergeProof,
     ) {
-        self.writes.insert(block, bytes);
-        self.merge_proofs.insert(block, merge_proof);
+        self.staged_writes
+            .insert(block, StagedWrite { bytes, merge_proof });
     }
 
     fn stage_cow_rewrite(
@@ -462,18 +566,25 @@ impl Transaction {
                 "cow_orphan_staged_for_free"
             );
         }
-        self.writes.insert(logical, bytes);
-        self.merge_proofs.insert(logical, MergeProof::Unsafe);
+        self.staged_writes.insert(
+            logical,
+            StagedWrite {
+                bytes,
+                merge_proof: MergeProof::Unsafe,
+            },
+        );
     }
 
     #[must_use]
     pub fn staged_write(&self, block: BlockNumber) -> Option<&[u8]> {
-        self.writes.get(&block).map(Vec::as_slice)
+        self.staged_writes
+            .get(&block)
+            .map(|staged| staged.bytes.as_slice())
     }
 
     #[must_use]
     pub fn pending_writes(&self) -> usize {
-        self.writes.len()
+        self.staged_writes.len()
     }
 
     /// Record that `block` was read at version `version_seq`.
@@ -508,30 +619,29 @@ impl Transaction {
 
     /// The set of blocks this transaction will write.
     #[must_use]
-    pub fn write_set(&self) -> &BTreeMap<BlockNumber, Vec<u8>> {
-        &self.writes
+    pub fn write_set(&self) -> WriteSet<'_> {
+        WriteSet {
+            staged_writes: &self.staged_writes,
+        }
     }
 
     #[must_use]
     pub fn merge_proof(&self, block: BlockNumber) -> Option<&MergeProof> {
-        self.merge_proofs.get(&block)
+        self.staged_writes
+            .get(&block)
+            .map(|staged| &staged.merge_proof)
     }
 
-    pub(crate) fn into_writes_and_merge_proofs(
-        self,
-    ) -> (
-        BTreeMap<BlockNumber, Vec<u8>>,
-        BTreeMap<BlockNumber, MergeProof>,
-    ) {
+    pub(crate) fn into_staged_writes(self) -> BTreeMap<BlockNumber, StagedWrite> {
         assert!(
             self.cow_writes.is_empty(),
-            "COW writes silently dropped by into_writes_and_merge_proofs"
+            "COW writes silently dropped by into_staged_writes"
         );
         assert!(
             self.cow_orphans.is_empty(),
-            "COW orphans silently dropped by into_writes_and_merge_proofs"
+            "COW orphans silently dropped by into_staged_writes"
         );
-        (self.writes, self.merge_proofs)
+        self.staged_writes
     }
 
     #[must_use]
@@ -713,7 +823,7 @@ fn ssi_incoming_edge(txn: &Transaction, record: &CommittedTxnRecord) -> Option<S
             }
         })
     } else {
-        let write_span = btree_map_key_span(write_set)?;
+        let write_span = write_set.key_span()?;
         read_set.iter().find_map(|(&block, &rv)| {
             (key_in_span(block, write_span) && write_set.contains_key(&block))
                 .then(|| mk(block, rv))
@@ -1699,8 +1809,7 @@ impl MvccStore {
         let txn = Transaction {
             id: TxnId(self.next_txn),
             snapshot: self.current_snapshot(),
-            writes: BTreeMap::new(),
-            merge_proofs: BTreeMap::new(),
+            staged_writes: BTreeMap::new(),
             reads: BTreeMap::new(),
             cow_writes: BTreeMap::new(),
             cow_orphans: BTreeSet::new(),
@@ -2321,7 +2430,7 @@ impl MvccStore {
         let mut combined_write_bytes: usize = 0;
         let mut merge_variants: BTreeSet<String> = BTreeSet::new();
 
-        for block in txn.writes.keys() {
+        for block in txn.staged_writes.keys() {
             let latest = self.latest_commit_seq(*block);
             if latest > txn.snapshot.high {
                 had_conflict = true;
@@ -2438,7 +2547,7 @@ impl MvccStore {
         let snapshot_high = txn.snapshot.high;
         let effective = self.effective_policy();
         let mut merged_writes = BTreeMap::new();
-        for (&block, staged) in &txn.writes {
+        for (&block, staged) in &txn.staged_writes {
             let observed = self.latest_commit_seq(block);
             if observed <= snapshot_high {
                 continue;
@@ -2454,12 +2563,14 @@ impl MvccStore {
                 ));
             }
 
-            let proof = txn.merge_proof(block).cloned().unwrap_or_default();
             let base = self
                 .version_bytes_at(block, snapshot_high)
                 .unwrap_or_default();
             let latest = self.version_bytes_at(block, observed).unwrap_or_default();
-            match proof.merge_bytes(&base, &latest, staged) {
+            match staged
+                .merge_proof
+                .merge_bytes(&base, &latest, &staged.bytes)
+            {
                 Some(merged) => {
                     merged_writes.insert(block, merged);
                 }
@@ -2483,7 +2594,7 @@ impl MvccStore {
         let chain_cap = self.compression_policy.max_chain_length;
         let Transaction {
             id: txn_id,
-            writes,
+            staged_writes,
             cow_writes,
             cow_orphans,
             ..
@@ -2491,8 +2602,8 @@ impl MvccStore {
         let dedup_enabled = self.compression_policy.dedup_identical;
         let store_full = matches!(self.compression_policy.algo, CompressionAlgo::None);
 
-        for (block, staged_bytes) in writes {
-            let version_bytes = merged_writes.remove(&block).unwrap_or(staged_bytes);
+        for (block, staged) in staged_writes {
+            let version_bytes = merged_writes.remove(&block).unwrap_or(staged.bytes);
             // Move the owned bytes straight into `Full` for the no-compression
             // store (the prior path re-`to_vec`d them in `compress_data`). Dedup
             // and non-`None` compression keep their existing output.
@@ -2557,7 +2668,7 @@ impl MvccStore {
         let snapshot_high = txn.snapshot.high;
         let effective = self.effective_policy();
         let mut merged_writes = BTreeMap::new();
-        for (&block, staged) in &txn.writes {
+        for (&block, staged) in &txn.staged_writes {
             let observed = self.latest_commit_seq(block);
             if observed <= snapshot_high {
                 continue;
@@ -2570,12 +2681,14 @@ impl MvccStore {
                 });
             }
 
-            let proof = txn.merge_proof(block).cloned().unwrap_or_default();
             let base = self
                 .version_bytes_at(block, snapshot_high)
                 .unwrap_or_default();
             let latest = self.version_bytes_at(block, observed).unwrap_or_default();
-            let Some(merged) = proof.merge_bytes(&base, &latest, staged) else {
+            let Some(merged) = staged
+                .merge_proof
+                .merge_bytes(&base, &latest, &staged.bytes)
+            else {
                 return Err(CommitError::Conflict {
                     block,
                     snapshot: snapshot_high,
@@ -2616,8 +2729,7 @@ impl MvccStore {
         let Transaction {
             id: txn_id,
             snapshot,
-            writes,
-            merge_proofs: _,
+            staged_writes,
             reads,
             cow_writes,
             cow_orphans,
@@ -2625,8 +2737,8 @@ impl MvccStore {
         let dedup_enabled = self.compression_policy.dedup_identical;
         let store_full = matches!(self.compression_policy.algo, CompressionAlgo::None);
 
-        for (block, staged_bytes) in writes {
-            let version_bytes = merged_writes.remove(&block).unwrap_or(staged_bytes);
+        for (block, staged) in staged_writes {
+            let version_bytes = merged_writes.remove(&block).unwrap_or(staged.bytes);
             let version_data =
                 if dedup_enabled && self.is_identical_to_latest(block, &version_bytes) {
                     trace!(
@@ -2775,7 +2887,7 @@ impl MvccStore {
             target: "ffs::ssi",
             txn_id = txn.id.0,
             read_set_size = txn.reads.len(),
-            write_set_size = txn.writes.len(),
+            write_set_size = txn.staged_writes.len(),
             checks_performed,
             "ssi_two_edge_check_clean"
         );
@@ -9728,9 +9840,18 @@ mod tests {
         let mut txn = Transaction::new(TxnId(42), store.current_snapshot());
         txn.stage_write(BlockNumber(5), vec![0xAA; 8]);
         let json = serde_json::to_string(&txn).expect("serialize");
+        let value: serde_json::Value = serde_json::from_str(&json).expect("json value");
+        assert!(value.get("writes").is_some());
+        assert!(value.get("merge_proofs").is_some());
+        assert!(value.get("staged_writes").is_none());
         let parsed: Transaction = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(parsed.id(), TxnId(42));
         assert_eq!(parsed.pending_writes(), 1);
+        assert_eq!(parsed.staged_write(BlockNumber(5)), Some(&[0xAA; 8][..]));
+        assert_eq!(
+            parsed.merge_proof(BlockNumber(5)),
+            Some(&MergeProof::Unsafe)
+        );
     }
 
     #[test]

@@ -735,8 +735,7 @@ impl ShardedMvccStore {
             txn_id: txn.id(),
             dedup_enabled: self.compression_policy.dedup_identical,
         };
-        let (writes, merge_proofs) = txn.into_writes_and_merge_proofs();
-        for (block, bytes) in writes {
+        for (block, staged) in txn.into_staged_writes() {
             let shard_idx = self.shard_index(block);
             let Some(shard) = shard_guards
                 .binary_search_by_key(&shard_idx, |(idx, _)| *idx)
@@ -749,8 +748,8 @@ impl ShardedMvccStore {
             Self::install_committed_version_locked(
                 shard,
                 block,
-                bytes,
-                merge_proofs.get(&block),
+                staged.bytes,
+                Some(&staged.merge_proof),
                 install_ctx,
             );
         }
@@ -805,8 +804,7 @@ impl ShardedMvccStore {
         let read_set = txn.read_set().clone();
         let write_keys: BTreeSet<BlockNumber> = txn.write_set().keys().copied().collect();
 
-        let (writes, merge_proofs) = txn.into_writes_and_merge_proofs();
-        for (block, bytes) in writes {
+        for (block, staged) in txn.into_staged_writes() {
             let shard_idx = self.shard_index(block);
             let Some(shard) = shard_guards
                 .binary_search_by_key(&shard_idx, |(idx, _)| *idx)
@@ -819,8 +817,8 @@ impl ShardedMvccStore {
             Self::install_committed_version_locked(
                 shard,
                 block,
-                bytes,
-                merge_proofs.get(&block),
+                staged.bytes,
+                Some(&staged.merge_proof),
                 install_ctx,
             );
         }
