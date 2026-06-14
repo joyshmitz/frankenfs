@@ -9657,6 +9657,77 @@ impl OpenFs {
         self.collect_extents_with_scope(cx, &RequestScope::empty(), inode)
     }
 
+    /// Count the leaf extents of an inode without materializing them.
+    ///
+    /// `nextents` (FS_IOC_FSGETXATTR / statx) only needs the count, so sum each
+    /// leaf's on-disk `eh_entries` header field (one 12-byte read per leaf)
+    /// instead of parsing and collecting every extent (`collect_extents().len()`,
+    /// O(extents)). Equal to `collect_extents(..).len()` on a well-formed tree:
+    /// a leaf holds exactly `eh_entries` extents (bd-mh4tz). Index nodes are
+    /// still parsed to follow child pointers, but they carry no extents.
+    fn count_extents(
+        &self,
+        cx: &Cx,
+        scope: &RequestScope,
+        inode: &Ext4Inode,
+    ) -> Result<u32, FfsError> {
+        let (header, tree) = parse_inode_extent_tree(inode).map_err(|e| parse_to_ffs_error(&e))?;
+        if header.depth == 0 {
+            // Extents live inline in the inode (already parsed, at most 4).
+            return Ok(u32::from(header.entries));
+        }
+        self.count_extents_index(cx, scope, &tree, header.depth)
+    }
+
+    fn count_extents_index(
+        &self,
+        cx: &Cx,
+        scope: &RequestScope,
+        tree: &ExtentTree,
+        remaining_depth: u16,
+    ) -> Result<u32, FfsError> {
+        if remaining_depth == 0 || remaining_depth > Self::MAX_EXTENT_DEPTH {
+            return Err(FfsError::Corruption {
+                block: 0,
+                detail: "extent tree depth out of range while counting".into(),
+            });
+        }
+        let ExtentTree::Index(indexes) = tree else {
+            return Err(FfsError::Corruption {
+                block: 0,
+                detail: "expected extent index node while counting".into(),
+            });
+        };
+        let mut count: u32 = 0;
+        for idx in indexes {
+            let child_data =
+                self.read_ext4_file_data_block_with_scope(cx, scope, BlockNumber(idx.leaf_block))?;
+            let data: &[u8] = &child_data;
+            if data.len() < 12 || u16::from_le_bytes([data[0], data[1]]) != 0xF30A {
+                return Err(FfsError::Corruption {
+                    block: idx.leaf_block,
+                    detail: "invalid extent header magic while counting".into(),
+                });
+            }
+            let child_entries = u16::from_le_bytes([data[2], data[3]]);
+            let child_depth = u16::from_le_bytes([data[6], data[7]]);
+            if child_depth == 0 {
+                count = count.saturating_add(u32::from(child_entries));
+            } else {
+                let (_, child_tree) =
+                    parse_extent_tree(data).map_err(|e| parse_to_ffs_error(&e))?;
+                count =
+                    count.saturating_add(self.count_extents_index(
+                        cx,
+                        scope,
+                        &child_tree,
+                        remaining_depth - 1,
+                    )?);
+            }
+        }
+        Ok(count)
+    }
+
     /// Collect all leaf extents for an inode, flattening multi-level trees.
     ///
     /// Returns extents in tree-traversal order (sorted by logical block).
@@ -28538,8 +28609,9 @@ impl FsOps for OpenFs {
                 // Inline-data + non-extent-tree inodes report 0 extents
                 // (matches ext4's nextents accounting in fs/ext4/ioctl.c).
                 let nextents = if (inode.flags & ffs_types::EXT4_EXTENTS_FL) != 0 {
-                    self.collect_extents(cx, &inode)
-                        .map_or(0, |exts| u32::try_from(exts.len()).unwrap_or(u32::MAX))
+                    // Only the count is reported, so sum leaf eh_entries headers
+                    // instead of materializing every extent (bd-mh4tz).
+                    self.count_extents(cx, scope, &inode).unwrap_or(0)
                 } else {
                     0
                 };
@@ -38890,6 +38962,88 @@ mod tests {
                 assert_eq!(same, hole_byte, "SEEK_HOLE inside a hole returns the offset");
             }
         }
+    }
+
+    /// Isomorphism guard for bd-v388x: count_extents (sum leaf eh_entries) must
+    /// equal collect_extents().len() over a fragmented multi-leaf extent tree.
+    #[test]
+    fn ext4_count_extents_matches_collect_len_bd_v388x() {
+        let Some((fs, _tmp)) = open_writable_ext4_mkfs(64) else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let attr = fs
+            .create(&cx, root, OsStr::new("frag_count.bin"), 0o644, 0, 0)
+            .expect("create");
+        let bs = 4096_u64;
+        let block = vec![0xBB_u8; bs as usize];
+        let n = 600_u32; // many sparse extents -> tree spans multiple leaves
+        for i in 0..n {
+            let off = u64::from(i) * 2 * bs;
+            fs.write(&cx, attr.ino, off, &block).expect("write");
+        }
+        let mut scope = RequestScope::empty();
+        let canonical = OpenFs::ext4_canonical_inode(attr.ino);
+        let inode = fs
+            .read_inode_with_scope(&cx, &mut scope, canonical)
+            .expect("read inode");
+        let collected = u32::try_from(fs.collect_extents(&cx, &inode).expect("collect").len())
+            .expect("len fits u32");
+        let counted = fs.count_extents(&cx, &scope, &inode).expect("count");
+        assert_eq!(
+            counted, collected,
+            "count_extents must equal collect_extents().len()"
+        );
+        assert!(
+            collected >= n,
+            "expected at least {n} extents, got {collected}"
+        );
+    }
+
+    /// Diagnostic A/B for bd-v388x: header-count vs materialize-and-len over a
+    /// fragmented file (warm cache). Run with --ignored --nocapture.
+    #[test]
+    #[ignore = "perf A/B: ext4 count_extents (eh_entries) vs collect_extents().len() (bd-v388x)"]
+    fn ext4_count_extents_vs_collect_ab_bd_v388x() {
+        let Some((fs, _tmp)) = open_writable_ext4_mkfs(128) else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let attr = fs
+            .create(&cx, root, OsStr::new("frag_ab.bin"), 0o644, 0, 0)
+            .expect("create");
+        let bs = 4096_u64;
+        let block = vec![0xCC_u8; bs as usize];
+        let n = 2000_u32;
+        for i in 0..n {
+            fs.write(&cx, attr.ino, u64::from(i) * 2 * bs, &block)
+                .expect("write");
+        }
+        let mut scope = RequestScope::empty();
+        let canonical = OpenFs::ext4_canonical_inode(attr.ino);
+        let inode = fs
+            .read_inode_with_scope(&cx, &mut scope, canonical)
+            .expect("read inode");
+        // Warm the extent-tree block cache.
+        let _ = fs.collect_extents(&cx, &inode).expect("warm");
+        let iters = 200usize;
+        let mut acc = 0u64;
+        let t_count = std::time::Instant::now();
+        for _ in 0..iters {
+            acc = acc.wrapping_add(u64::from(fs.count_extents(&cx, &scope, &inode).unwrap()));
+        }
+        let count_ns = t_count.elapsed().as_nanos();
+        let t_collect = std::time::Instant::now();
+        for _ in 0..iters {
+            acc = acc.wrapping_add(fs.collect_extents(&cx, &inode).unwrap().len() as u64);
+        }
+        let collect_ns = t_collect.elapsed().as_nanos();
+        eprintln!(
+            "BD_V388X n={n} iters={iters} count_ns={count_ns} collect_ns={collect_ns} score={:.2} (acc={acc})",
+            collect_ns as f64 / count_ns.max(1) as f64
+        );
     }
 
     #[test]
