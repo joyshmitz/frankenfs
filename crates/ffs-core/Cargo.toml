@@ -100,6 +100,10 @@ harness = false
 name = "btrfs_decompress_extents"
 harness = false
 
+[[bench]]
+name = "btrfs_read_io_overlap"
+harness = false
+
 [lints]
 workspace = true
 

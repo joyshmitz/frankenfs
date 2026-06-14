@@ -8395,23 +8395,48 @@ impl OpenFs {
             );
         }
 
-        // Decompress the compressed extents overlapping the read in parallel
-        // across cores (bd-m6g2o). A read spanning N compressed extents (btrfs
-        // caps each at 128 KiB uncompressed) otherwise decompresses them one at
-        // a time in the assembly loop below. `Self::btrfs_decompress` is a pure
-        // function of (bytes, codec, ram_bytes), so decompressing the gathered
-        // blobs with `into_par_iter` is byte-identical and only reorders the CPU
-        // work. The compressed-blob device reads stay serial here (in extent
-        // order) so I/O ordering is unchanged; the assembly loop consumes each
-        // result in extent order via `?`, so a decompress error surfaces at the
-        // same extent it would have before. Inline data length is only known
-        // after decompression (overlap can't be pre-checked), matching the loop
-        // which also decompresses inline extents before testing overlap.
+        // Read and decompress the compressed extents overlapping the read in
+        // parallel across cores. The bd-m6g2o pass already decompressed the
+        // gathered blobs with `into_par_iter`; bd-307e4 additionally defers the
+        // per-extent compressed-blob *device read* into that same parallel map,
+        // so a read spanning N compressed extents overlaps its N device reads
+        // (and decompresses) across cores instead of issuing the reads one at a
+        // time in this gathering pass. `Self::btrfs_decompress` is a pure
+        // function of (bytes, codec, ram_bytes), and `btrfs_read_logical_into`
+        // is a `&self` read already issued concurrently by the FUSE worker pool
+        // (`Cx` and the block device are `Sync`), so moving the read into the
+        // par_iter is byte-identical and only reorders/overlaps work. All
+        // validation and the overlap test stay in this serial pass, so a
+        // malformed extent surfaces at the same extent — and in the same order —
+        // as before; only the device read + decompress run in parallel. Their
+        // results are collected per-idx and consumed in extent order via `?` in
+        // the assembly loop below, so the lowest-index I/O or decompress error
+        // still wins. Inline data length is only known after decompression
+        // (overlap can't be pre-checked), matching the assembly loop which also
+        // decompresses inline extents before testing overlap.
         let mut decompressed_by_idx: Vec<Option<Result<Vec<u8>, FfsError>>> =
             (0..extents.len()).map(|_| None).collect();
         {
             use rayon::prelude::{IntoParallelIterator, ParallelIterator};
-            let mut jobs: Vec<(usize, Vec<u8>, u8, usize)> = Vec::new();
+            // A deferred decompress job: either inline bytes already in memory,
+            // or a compressed blob still to be read from `logical` in the par
+            // map. `compressed_len`/`ram` are validated in the serial pass.
+            enum DecompressJob {
+                Inline {
+                    idx: usize,
+                    data: Vec<u8>,
+                    comp: u8,
+                    ram: usize,
+                },
+                Read {
+                    idx: usize,
+                    logical: u64,
+                    compressed_len: usize,
+                    comp: u8,
+                    ram: usize,
+                },
+            }
+            let mut jobs: Vec<DecompressJob> = Vec::new();
             for (idx, (logical_start, extent)) in extents.iter().enumerate() {
                 match extent {
                     BtrfsExtentData::Inline {
@@ -8425,7 +8450,12 @@ impl OpenFs {
                                 block: 0,
                                 detail: "inline extent ram_bytes overflow".into(),
                             })?;
-                        jobs.push((idx, data.clone(), *compression, ram));
+                        jobs.push(DecompressJob::Inline {
+                            idx,
+                            data: data.clone(),
+                            comp: *compression,
+                            ram,
+                        });
                     }
                     BtrfsExtentData::Regular {
                         extent_type,
@@ -8475,17 +8505,39 @@ impl OpenFs {
                                 detail: "compressed extent ram_bytes exceeds 128MB limit".into(),
                             });
                         }
-                        let mut compressed = vec![0_u8; compressed_len];
-                        self.btrfs_read_logical_into(cx, *disk_bytenr, &mut compressed)?;
-                        jobs.push((idx, compressed, *compression, ram));
+                        jobs.push(DecompressJob::Read {
+                            idx,
+                            logical: *disk_bytenr,
+                            compressed_len,
+                            comp: *compression,
+                            ram,
+                        });
                     }
                     _ => {}
                 }
             }
             let results: Vec<(usize, Result<Vec<u8>, FfsError>)> = jobs
                 .into_par_iter()
-                .map(|(idx, compressed, comp, ram)| {
-                    (idx, Self::btrfs_decompress(&compressed, comp, ram))
+                .map(|job| match job {
+                    DecompressJob::Inline {
+                        idx,
+                        data,
+                        comp,
+                        ram,
+                    } => (idx, Self::btrfs_decompress(&data, comp, ram)),
+                    DecompressJob::Read {
+                        idx,
+                        logical,
+                        compressed_len,
+                        comp,
+                        ram,
+                    } => {
+                        let mut compressed = vec![0_u8; compressed_len];
+                        match self.btrfs_read_logical_into(cx, logical, &mut compressed) {
+                            Ok(()) => (idx, Self::btrfs_decompress(&compressed, comp, ram)),
+                            Err(err) => (idx, Err(err)),
+                        }
+                    }
                 })
                 .collect();
             for (idx, res) in results {
