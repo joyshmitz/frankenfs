@@ -9716,13 +9716,12 @@ impl OpenFs {
             } else {
                 let (_, child_tree) =
                     parse_extent_tree(data).map_err(|e| parse_to_ffs_error(&e))?;
-                count =
-                    count.saturating_add(self.count_extents_index(
-                        cx,
-                        scope,
-                        &child_tree,
-                        remaining_depth - 1,
-                    )?);
+                count = count.saturating_add(self.count_extents_index(
+                    cx,
+                    scope,
+                    &child_tree,
+                    remaining_depth - 1,
+                )?);
             }
         }
         Ok(count)
@@ -27943,29 +27942,26 @@ impl FsOps for OpenFs {
                 // This is the exact aggregation ext4_sync_superblock_free_totals
                 // persists, so the totals are identical (bd-qsmav). A read-only
                 // fs has no alloc state and falls back to the descriptor read.
-                let (mut blocks_free, mut files_free) =
-                    if let Ok(alloc_mutex) = self.require_alloc_state() {
-                        let alloc = alloc_mutex.lock();
-                        let blocks: u64 =
-                            alloc.groups.iter().map(|g| u64::from(g.free_blocks)).sum();
-                        let inodes: u64 =
-                            alloc.groups.iter().map(|g| u64::from(g.free_inodes)).sum();
-                        drop(alloc);
-                        (blocks, inodes)
-                    } else {
-                        let geo = FsGeometry::from_superblock(sb);
-                        let mut blocks_free = 0_u64;
-                        let mut files_free = 0_u64;
-                        for group_idx in 0..geo.group_count {
-                            let gd =
-                                self.read_group_desc_with_scope(cx, scope, GroupNumber(group_idx))?;
-                            blocks_free =
-                                blocks_free.saturating_add(u64::from(gd.free_blocks_count));
-                            files_free =
-                                files_free.saturating_add(u64::from(gd.free_inodes_count));
-                        }
-                        (blocks_free, files_free)
-                    };
+                let (mut blocks_free, mut files_free) = if let Ok(alloc_mutex) =
+                    self.require_alloc_state()
+                {
+                    let alloc = alloc_mutex.lock();
+                    let blocks: u64 = alloc.groups.iter().map(|g| u64::from(g.free_blocks)).sum();
+                    let inodes: u64 = alloc.groups.iter().map(|g| u64::from(g.free_inodes)).sum();
+                    drop(alloc);
+                    (blocks, inodes)
+                } else {
+                    let geo = FsGeometry::from_superblock(sb);
+                    let mut blocks_free = 0_u64;
+                    let mut files_free = 0_u64;
+                    for group_idx in 0..geo.group_count {
+                        let gd =
+                            self.read_group_desc_with_scope(cx, scope, GroupNumber(group_idx))?;
+                        blocks_free = blocks_free.saturating_add(u64::from(gd.free_blocks_count));
+                        files_free = files_free.saturating_add(u64::from(gd.free_inodes_count));
+                    }
+                    (blocks_free, files_free)
+                };
                 blocks_free = blocks_free.min(sb.blocks_count);
                 files_free = files_free.min(u64::from(sb.inodes_count));
                 let blocks_available = blocks_free.saturating_sub(sb.reserved_blocks_count);
@@ -29713,6 +29709,39 @@ impl FsOps for OpenFs {
                             .into_iter()
                             .filter_map(|(k, v)| parse_extent_data(&v).ok().map(|e| (k.offset, e)))
                             .find(|(start, ext)| {
+                                let end = match ext {
+                                    BtrfsExtentData::Inline { data, .. } => {
+                                        start.saturating_add(data.len() as u64)
+                                    }
+                                    BtrfsExtentData::Regular { num_bytes, .. } => {
+                                        start.saturating_add(*num_bytes)
+                                    }
+                                };
+                                file_offset >= *start && file_offset < end
+                            })
+                    } else if self.btrfs_tree_log_items.is_empty() {
+                        // The covering extent is the EXTENT_DATA with the greatest
+                        // key offset <= file_offset (extents are sorted and
+                        // non-overlapping), so seek that floor directly instead of
+                        // walking every extent of the file — O(log N) not
+                        // O(extents) per encoded_read, the cost a full `btrfs send`
+                        // of a fragmented file otherwise pays per extent (bd-phd7z).
+                        // The floor descent does not see tree-log items, so the
+                        // walk-all fallback below handles a pending tree log.
+                        let seek = BtrfsKey {
+                            objectid: canonical,
+                            item_type: BTRFS_ITEM_EXTENT_DATA,
+                            offset: file_offset,
+                        };
+                        self.walk_btrfs_fs_tree_floor(cx, seek)?
+                            .filter(|e| {
+                                e.key.objectid == canonical
+                                    && e.key.item_type == BTRFS_ITEM_EXTENT_DATA
+                            })
+                            .and_then(|e| {
+                                parse_extent_data(&e.data).ok().map(|ext| (e.key.offset, ext))
+                            })
+                            .filter(|(start, ext)| {
                                 let end = match ext {
                                     BtrfsExtentData::Inline { data, .. } => {
                                         start.saturating_add(data.len() as u64)
@@ -38959,7 +38988,10 @@ mod tests {
                 let same = fs
                     .lseek(&cx, &mut scope, attr.ino, hole_byte, SeekWhence::Hole)
                     .expect("SEEK_HOLE from hole");
-                assert_eq!(same, hole_byte, "SEEK_HOLE inside a hole returns the offset");
+                assert_eq!(
+                    same, hole_byte,
+                    "SEEK_HOLE inside a hole returns the offset"
+                );
             }
         }
     }
@@ -71781,7 +71813,8 @@ mod tests {
                 .expect("create");
             names.push(name);
         }
-        fs.flush_mvcc_to_device(&cx).expect("flush writes to device");
+        fs.flush_mvcc_to_device(&cx)
+            .expect("flush writes to device");
         let bytes = dev.snapshot_bytes();
         let ro = OpenFs::from_device(
             &cx,
