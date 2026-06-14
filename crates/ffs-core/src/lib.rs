@@ -848,7 +848,7 @@ pub struct OpenFs {
     ///
     /// The writable path bypasses this cache because inode metadata changes
     /// are published through MVCC and eventually persisted to these blocks.
-    ext4_inode_table_block_cache: Mutex<BTreeMap<BlockNumber, Arc<[u8]>>>,
+    ext4_inode_table_block_cache: ShardedCache<BlockNumber, Arc<[u8]>>,
     /// Bounded read-only ext4 file-data block cache for scalar tail reads.
     ///
     /// The writable path bypasses this cache because file data changes are
@@ -1088,6 +1088,13 @@ impl CacheShard for u64 {
     }
 }
 
+impl CacheShard for BlockNumber {
+    #[inline]
+    fn cache_shard(&self) -> usize {
+        usize::try_from(self.0 & 0xFFF).unwrap_or(0)
+    }
+}
+
 type CacheShards<K, V> = Box<[Mutex<BTreeMap<K, V>>]>;
 
 /// A lock-striped map cache: each key maps to one of `FFS_CACHE_SHARDS`
@@ -1138,10 +1145,20 @@ impl<K: Ord + CacheShard, V: Clone> ShardedCache<K, V> {
         }
     }
 
-    // Used by cache-invalidation paths (currently the cfg(test) node-cache drop;
-    // ext4 metadata caches invalidate on recovery once converted) — part of the
-    // reusable cache API.
-    #[allow(dead_code)]
+    /// Unconditional insert (no admission cap), for caches bounded by explicit
+    /// invalidation rather than size. Keeps the atomic count accurate.
+    fn insert(&self, key: K, value: V) {
+        if self.shard(&key).lock().insert(key, value).is_none() {
+            self.len.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    fn remove(&self, key: &K) {
+        if self.shard(key).lock().remove(key).is_some() {
+            self.len.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
     fn clear(&self) {
         for shard in &self.shards {
             shard.lock().clear();
@@ -3081,7 +3098,7 @@ impl OpenFs {
             jbd2_writer: None,
             ext4_alloc_state: None,
             ext4_group_desc_cache: Mutex::new(BTreeMap::new()),
-            ext4_inode_table_block_cache: Mutex::new(BTreeMap::new()),
+            ext4_inode_table_block_cache: ShardedCache::new(),
             ext4_file_data_block_cache: RwLock::new(BTreeMap::new()),
             btrfs_alloc_state: None,
             extent_cache: ffs_extent::ExtentCache::new(),
@@ -3782,7 +3799,7 @@ impl OpenFs {
         // recovered inodes and group descriptors directly to the device,
         // bypassing those caches. Drop the cached blocks so post-recovery reads
         // observe the mutated on-disk state instead of stale pre-recovery copies.
-        self.ext4_inode_table_block_cache.lock().clear();
+        self.ext4_inode_table_block_cache.clear();
         self.ext4_group_desc_cache.lock().clear();
         self.ext4_file_data_block_cache.write().clear();
 
@@ -4463,7 +4480,7 @@ impl OpenFs {
         // reads observe the freed inode + bitmaps (mirrors orphan recovery).
         self.extent_cache.invalidate_all();
         self.invalidate_all_ext4_write_extent_snapshots();
-        self.ext4_inode_table_block_cache.lock().clear();
+        self.ext4_inode_table_block_cache.clear();
         self.ext4_group_desc_cache.lock().clear();
         self.ext4_file_data_block_cache.write().clear();
         debug!(
@@ -4524,7 +4541,7 @@ impl OpenFs {
             block_size: sb.block_size,
         };
         block_dev.write_block(cx, block_num, &updated)?;
-        self.ext4_inode_table_block_cache.lock().remove(&block_num);
+        self.ext4_inode_table_block_cache.remove(&block_num);
         debug!(
             ino,
             block = block_num.0,
@@ -4988,7 +5005,7 @@ impl OpenFs {
             // bitmaps and rewritten inodes, mirroring orphan recovery.
             self.extent_cache.invalidate_all();
             self.invalidate_all_ext4_write_extent_snapshots();
-            self.ext4_inode_table_block_cache.lock().clear();
+            self.ext4_inode_table_block_cache.clear();
             self.ext4_group_desc_cache.lock().clear();
             self.ext4_file_data_block_cache.write().clear();
         }
@@ -8792,11 +8809,7 @@ impl OpenFs {
     ) -> Result<Arc<[u8]>, FfsError> {
         let cacheable = self.can_cache_ext4_read_only_block(scope, block);
         if cacheable {
-            let cached = self
-                .ext4_inode_table_block_cache
-                .lock()
-                .get(&block)
-                .cloned();
+            let cached = self.ext4_inode_table_block_cache.get(&block);
             if let Some(cached) = cached {
                 return Ok(cached);
             }
@@ -8805,7 +8818,6 @@ impl OpenFs {
         let block_data = self.read_block_arc_with_scope(cx, scope, block)?;
         if cacheable {
             self.ext4_inode_table_block_cache
-                .lock()
                 .insert(block, Arc::clone(&block_data));
         }
         Ok(block_data)
