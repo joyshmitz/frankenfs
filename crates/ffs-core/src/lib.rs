@@ -27789,14 +27789,37 @@ impl FsOps for OpenFs {
     ) -> ffs_error::Result<FsStat> {
         match &self.flavor {
             FsFlavor::Ext4(sb) => {
-                let geo = FsGeometry::from_superblock(sb);
-                let mut blocks_free = 0_u64;
-                let mut files_free = 0_u64;
-                for group_idx in 0..geo.group_count {
-                    let gd = self.read_group_desc_with_scope(cx, scope, GroupNumber(group_idx))?;
-                    blocks_free = blocks_free.saturating_add(u64::from(gd.free_blocks_count));
-                    files_free = files_free.saturating_add(u64::from(gd.free_inodes_count));
-                }
+                // On a writable fs the in-memory group stats mirror the on-disk
+                // group descriptors and are kept current on every alloc/free, so
+                // sum those directly — one lock + O(group_count) field reads —
+                // instead of re-reading and csum-verifying + parsing every group
+                // descriptor block per statfs (O(group_count) device GD parses).
+                // This is the exact aggregation ext4_sync_superblock_free_totals
+                // persists, so the totals are identical (bd-qsmav). A read-only
+                // fs has no alloc state and falls back to the descriptor read.
+                let (mut blocks_free, mut files_free) =
+                    if let Ok(alloc_mutex) = self.require_alloc_state() {
+                        let alloc = alloc_mutex.lock();
+                        let blocks: u64 =
+                            alloc.groups.iter().map(|g| u64::from(g.free_blocks)).sum();
+                        let inodes: u64 =
+                            alloc.groups.iter().map(|g| u64::from(g.free_inodes)).sum();
+                        drop(alloc);
+                        (blocks, inodes)
+                    } else {
+                        let geo = FsGeometry::from_superblock(sb);
+                        let mut blocks_free = 0_u64;
+                        let mut files_free = 0_u64;
+                        for group_idx in 0..geo.group_count {
+                            let gd =
+                                self.read_group_desc_with_scope(cx, scope, GroupNumber(group_idx))?;
+                            blocks_free =
+                                blocks_free.saturating_add(u64::from(gd.free_blocks_count));
+                            files_free =
+                                files_free.saturating_add(u64::from(gd.free_inodes_count));
+                        }
+                        (blocks_free, files_free)
+                    };
                 blocks_free = blocks_free.min(sb.blocks_count);
                 files_free = files_free.min(u64::from(sb.inodes_count));
                 let blocks_available = blocks_free.saturating_sub(sb.reserved_blocks_count);
@@ -57501,6 +57524,63 @@ mod tests {
             before.files_free,
             after.files_free
         );
+    }
+
+    /// Isomorphism for bd-qsmav: statfs now sums the in-memory group stats, but
+    /// after a real write that must equal what the old code computed by reading
+    /// + summing every on-disk group descriptor. This pins the invariant the
+    /// change rests on — the writable path keeps the device descriptors and the
+    /// in-memory group stats consistent.
+    #[test]
+    fn write_statfs_group_stats_match_device_descriptors_bd_qsmav() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let attr = fs
+            .create(&cx, root, OsStr::new("qsmav.bin"), 0o644, 0, 0)
+            .expect("create");
+        fs.write(&cx, attr.ino, 0, &[0xCC; 16384]).expect("write");
+
+        // Replicate the OLD aggregation: sum the on-disk group descriptors,
+        // applying statfs's clamps.
+        let (group_count, blocks_count, inodes_count, reserved) = {
+            let sb = fs.ext4_superblock().expect("ext4 sb");
+            let geo = FsGeometry::from_superblock(sb);
+            (
+                geo.group_count,
+                sb.blocks_count,
+                u64::from(sb.inodes_count),
+                sb.reserved_blocks_count,
+            )
+        };
+        let (gd_blocks, gd_inodes) = fs
+            .with_latest_scope(|scope| {
+                let mut blocks = 0_u64;
+                let mut inodes = 0_u64;
+                for g in 0..group_count {
+                    let gd = fs.read_group_desc_with_scope(&cx, scope, GroupNumber(g))?;
+                    blocks = blocks.saturating_add(u64::from(gd.free_blocks_count));
+                    inodes = inodes.saturating_add(u64::from(gd.free_inodes_count));
+                }
+                Ok((blocks, inodes))
+            })
+            .expect("sum group descriptors");
+        let exp_blocks = gd_blocks.min(blocks_count);
+        let exp_inodes = gd_inodes.min(inodes_count);
+        let exp_available = exp_blocks.saturating_sub(reserved);
+
+        let st = fs.statfs(&cx, root).expect("statfs");
+        assert_eq!(
+            st.blocks_free, exp_blocks,
+            "statfs blocks_free must equal the device group-descriptor sum"
+        );
+        assert_eq!(
+            st.files_free, exp_inodes,
+            "statfs files_free must equal the device group-descriptor sum"
+        );
+        assert_eq!(st.blocks_available, exp_available);
     }
 
     #[test]

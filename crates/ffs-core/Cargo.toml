@@ -87,5 +87,9 @@ harness = false
 name = "readdir_dedup_clone"
 harness = false
 
+[[bench]]
+name = "statfs_group_aggregate"
+harness = false
+
 [lints]
 workspace = true
