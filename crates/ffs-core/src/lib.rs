@@ -843,7 +843,7 @@ pub struct OpenFs {
     ///
     /// The writable path bypasses this cache because group descriptor counters
     /// can change during allocation/free operations.
-    ext4_group_desc_cache: Mutex<BTreeMap<GroupNumber, Ext4GroupDesc>>,
+    ext4_group_desc_cache: ShardedCache<GroupNumber, Ext4GroupDesc>,
     /// Read-only ext4 inode-table block cache.
     ///
     /// The writable path bypasses this cache because inode metadata changes
@@ -1089,6 +1089,13 @@ impl CacheShard for u64 {
 }
 
 impl CacheShard for BlockNumber {
+    #[inline]
+    fn cache_shard(&self) -> usize {
+        usize::try_from(self.0 & 0xFFF).unwrap_or(0)
+    }
+}
+
+impl CacheShard for GroupNumber {
     #[inline]
     fn cache_shard(&self) -> usize {
         usize::try_from(self.0 & 0xFFF).unwrap_or(0)
@@ -3097,7 +3104,7 @@ impl OpenFs {
             mvcc_store,
             jbd2_writer: None,
             ext4_alloc_state: None,
-            ext4_group_desc_cache: Mutex::new(BTreeMap::new()),
+            ext4_group_desc_cache: ShardedCache::new(),
             ext4_inode_table_block_cache: ShardedCache::new(),
             ext4_file_data_block_cache: RwLock::new(BTreeMap::new()),
             btrfs_alloc_state: None,
@@ -3800,7 +3807,7 @@ impl OpenFs {
         // bypassing those caches. Drop the cached blocks so post-recovery reads
         // observe the mutated on-disk state instead of stale pre-recovery copies.
         self.ext4_inode_table_block_cache.clear();
-        self.ext4_group_desc_cache.lock().clear();
+        self.ext4_group_desc_cache.clear();
         self.ext4_file_data_block_cache.write().clear();
 
         info!(
@@ -4481,7 +4488,7 @@ impl OpenFs {
         self.extent_cache.invalidate_all();
         self.invalidate_all_ext4_write_extent_snapshots();
         self.ext4_inode_table_block_cache.clear();
-        self.ext4_group_desc_cache.lock().clear();
+        self.ext4_group_desc_cache.clear();
         self.ext4_file_data_block_cache.write().clear();
         debug!(
             ino,
@@ -5006,7 +5013,7 @@ impl OpenFs {
             self.extent_cache.invalidate_all();
             self.invalidate_all_ext4_write_extent_snapshots();
             self.ext4_inode_table_block_cache.clear();
-            self.ext4_group_desc_cache.lock().clear();
+            self.ext4_group_desc_cache.clear();
             self.ext4_file_data_block_cache.write().clear();
         }
         Ok(())
@@ -8754,7 +8761,7 @@ impl OpenFs {
 
         let cacheable = self.can_cache_ext4_read_only_block(scope, block_num);
         if cacheable {
-            let cached = self.ext4_group_desc_cache.lock().get(&group).cloned();
+            let cached = self.ext4_group_desc_cache.get(&group);
             if let Some(cached) = cached {
                 return Ok(cached);
             }
@@ -8794,9 +8801,7 @@ impl OpenFs {
             Ext4GroupDesc::parse_from_bytes(buf, desc_size).map_err(|e| parse_to_ffs_error(&e))
         })??;
         if cacheable {
-            self.ext4_group_desc_cache
-                .lock()
-                .insert(group, desc.clone());
+            self.ext4_group_desc_cache.insert(group, desc.clone());
         }
         Ok(desc)
     }
