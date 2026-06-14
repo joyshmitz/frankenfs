@@ -26742,11 +26742,46 @@ impl OpenFs {
             }
             Ok(parsed)
         } else {
-            self.walk_btrfs_fs_tree_object(cx, canonical)?
+            // Read-only mirror of the writable floor+range path above (bd-4milp,
+            // read-only sibling bd-5p27d): bound the on-disk walk to the
+            // EXTENT_DATA items from the floor of `from_offset` onward, instead of
+            // walking every item of the inode (INODE_ITEM/INODE_REF/...) and
+            // returning every extent. Earlier extents end at/before `from_offset`
+            // and are dropped by every caller (fiemap / SEEK_DATA / SEEK_HOLE)
+            // anyway; the upper bound stays u64::MAX so FIEMAP_EXTENT_LAST is
+            // still reached. The floor is skipped (lower bound 0) when a tree log
+            // is pending, since the floor descent does not see logged items
+            // (mirrors btrfs_read_file).
+            let lower_offset = if self.btrfs_tree_log_items.is_empty() {
+                let seek = BtrfsKey {
+                    objectid: canonical,
+                    item_type: BTRFS_ITEM_EXTENT_DATA,
+                    offset: from_offset,
+                };
+                match self.walk_btrfs_fs_tree_floor(cx, seek)? {
+                    Some(e)
+                        if e.key.objectid == canonical
+                            && e.key.item_type == BTRFS_ITEM_EXTENT_DATA =>
+                    {
+                        e.key.offset
+                    }
+                    _ => 0,
+                }
+            } else {
+                0
+            };
+            let ext_lo = BtrfsKey {
+                objectid: canonical,
+                item_type: BTRFS_ITEM_EXTENT_DATA,
+                offset: lower_offset,
+            };
+            let ext_hi = BtrfsKey {
+                objectid: canonical,
+                item_type: BTRFS_ITEM_EXTENT_DATA,
+                offset: u64::MAX,
+            };
+            self.walk_btrfs_fs_tree_range(cx, ext_lo, ext_hi)?
                 .iter()
-                .filter(|item| {
-                    item.key.objectid == canonical && item.key.item_type == BTRFS_ITEM_EXTENT_DATA
-                })
                 .map(|item| {
                     parse_extent_data(&item.data)
                         .map(|extent| (item.key.offset, extent))
