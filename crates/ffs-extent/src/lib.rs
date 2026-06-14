@@ -643,6 +643,18 @@ pub fn punch_hole(
     Ok(total_freed)
 }
 
+/// The logical suffix `[cut, 2^32)` expressed as a `walk_range` `(start, count)`
+/// pair — every extent at or past `cut`. ext4 logical block numbers are u32, so
+/// the logical space ends at `2^32`. `cut == 2^32` (a collapse/insert at the very
+/// end) yields `count == 0`, i.e. an empty suffix. Used to bound the tail/preflight
+/// scans of collapse_range / insert_range to the affected suffix instead of
+/// walking the whole tree (bd-46yld).
+fn logical_suffix(cut: u64) -> (u32, u64) {
+    let start = u32::try_from(cut).unwrap_or(u32::MAX);
+    let count = (1_u64 << 32).saturating_sub(cut);
+    (start, count)
+}
+
 /// Collapse the logical range `[logical_start, logical_start + count)`.
 ///
 /// Frees and removes all extents inside the range, then shifts every
@@ -691,8 +703,13 @@ pub fn collapse_range(
     // Phase 2: snapshot the tail before mutating the tree. We cannot
     // delete during walk() because the visitor only sees a read-only
     // view of each extent.
+    // punch_hole already removed/split any extent straddling cut, so the tail
+    // is exactly the extents at or past cut: walk_range over the [cut, 2^32)
+    // suffix instead of the whole tree (bd-46yld). Isomorphic — pruned subtrees
+    // hold only extents below cut, which the predicate rejects anyway.
+    let (tail_start, tail_span) = logical_suffix(cut);
     let mut tail: Vec<Ext4Extent> = Vec::new();
-    ffs_btree::walk(cx, dev, root_bytes, &mut |ext: &Ext4Extent| {
+    ffs_btree::walk_range(cx, dev, root_bytes, tail_start, tail_span, &mut |ext: &Ext4Extent| {
         if u64::from(ext.logical_block) >= cut {
             tail.push(*ext);
         }
@@ -774,18 +791,29 @@ pub fn insert_range(
     // after this point, so reject logical-space overflow before splitting or
     // deleting any existing mapping.
     let cut = u64::from(logical_start);
+    // Only extents with ext_end > cut move (and at most one straddles cut); those
+    // all overlap the [cut, 2^32) suffix, so walk_range over it prunes the
+    // entirely-below-cut prefix the old full walk skipped as a no-op (bd-46yld).
+    let (suffix_start, suffix_span) = logical_suffix(cut);
     let mut straddler: Option<Ext4Extent> = None;
-    ffs_btree::walk(cx, dev, root_bytes, &mut |ext: &Ext4Extent| {
-        let ext_start = u64::from(ext.logical_block);
-        let ext_end = ext_start.saturating_add(u64::from(u32::from(ext.actual_len())));
-        if ext_end > cut {
-            validate_shifted_extent_fits_logical_space("insert_range", ext, count)?;
-        }
-        if ext_start < cut && ext_end > cut {
-            straddler = Some(*ext);
-        }
-        Ok(())
-    })?;
+    ffs_btree::walk_range(
+        cx,
+        dev,
+        root_bytes,
+        suffix_start,
+        suffix_span,
+        &mut |ext: &Ext4Extent| {
+            let ext_start = u64::from(ext.logical_block);
+            let ext_end = ext_start.saturating_add(u64::from(u32::from(ext.actual_len())));
+            if ext_end > cut {
+                validate_shifted_extent_fits_logical_space("insert_range", ext, count)?;
+            }
+            if ext_start < cut && ext_end > cut {
+                straddler = Some(*ext);
+            }
+            Ok(())
+        },
+    )?;
 
     // Split a straddling extent; zero-length punch_hole cannot do it.
     let mut tree_alloc = GroupBlockAllocator {
@@ -803,9 +831,12 @@ pub fn insert_range(
         split_insert_range_straddler(cx, dev, root_bytes, cut, ext, &mut tree_alloc)?;
     }
 
-    // Snapshot the post-split tail before shifting it right by count.
+    // Snapshot the post-split tail before shifting it right by count. The
+    // straddler split above leaves no extent crossing cut, so the tail is the
+    // [cut, 2^32) suffix: walk_range over it, not the whole tree (bd-46yld).
+    let (tail_start, tail_span) = logical_suffix(cut);
     let mut tail: Vec<Ext4Extent> = Vec::new();
-    ffs_btree::walk(cx, dev, root_bytes, &mut |ext: &Ext4Extent| {
+    ffs_btree::walk_range(cx, dev, root_bytes, tail_start, tail_span, &mut |ext: &Ext4Extent| {
         if u64::from(ext.logical_block) >= cut {
             tail.push(*ext);
         }

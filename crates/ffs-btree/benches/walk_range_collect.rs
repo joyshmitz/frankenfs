@@ -150,6 +150,60 @@ fn collect_walk_range(
     out
 }
 
+/// OLD tail collection (collapse_range/insert_range shape): walk the whole
+/// tree, push extents at or past `cut`.
+fn collect_tail_walk(cx: &Cx, dev: &dyn BlockDevice, root: &[u8; 60], cut: u64) -> Vec<u64> {
+    let mut out = Vec::new();
+    walk(cx, dev, root, &mut |e| {
+        if u64::from(e.logical_block) >= cut {
+            out.push(u64::from(e.logical_block));
+        }
+        Ok(())
+    })
+    .expect("walk");
+    out
+}
+
+/// NEW tail collection: walk_range over the [cut, 2^32) suffix.
+fn collect_tail_walk_range(cx: &Cx, dev: &dyn BlockDevice, root: &[u8; 60], cut: u64) -> Vec<u64> {
+    let start = u32::try_from(cut).unwrap_or(u32::MAX);
+    let span = (1_u64 << 32).saturating_sub(cut);
+    let mut out = Vec::new();
+    walk_range(cx, dev, root, start, span, &mut |e| {
+        if u64::from(e.logical_block) >= cut {
+            out.push(u64::from(e.logical_block));
+        }
+        Ok(())
+    })
+    .expect("walk_range");
+    out
+}
+
+fn bench_tail(c: &mut Criterion) {
+    let cx = Cx::for_testing();
+    for &n in &[2000_u32, 8000] {
+        let (dev, root) = build_tree(n);
+        // Collapse/insert near a high logical offset: cut at ~90% of the tree,
+        // so the tail is the last ~10% and walk_range prunes the long prefix.
+        let cut = u64::from((n * 2) * 9 / 10);
+
+        assert_eq!(
+            collect_tail_walk(&cx, &dev, &root, cut),
+            collect_tail_walk_range(&cx, &dev, &root, cut),
+            "tail sets diverged at n={n}"
+        );
+
+        let mut group = c.benchmark_group(format!("extent_tail_collect_{n}"));
+        group.bench_function("walk_full_tree", |b| {
+            b.iter(|| black_box(collect_tail_walk(&cx, &dev, black_box(&root), cut)));
+        });
+        group.bench_function("walk_range", |b| {
+            b.iter(|| black_box(collect_tail_walk_range(&cx, &dev, black_box(&root), cut)));
+        });
+        group.finish();
+    }
+}
+
 fn bench_collect(c: &mut Criterion) {
     let cx = Cx::for_testing();
     // A small range (8 logical blocks) in the middle of the tree — the
@@ -178,5 +232,5 @@ fn bench_collect(c: &mut Criterion) {
     }
 }
 
-criterion_group!(benches, bench_collect);
+criterion_group!(benches, bench_collect, bench_tail);
 criterion_main!(benches);
