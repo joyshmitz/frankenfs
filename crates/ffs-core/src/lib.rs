@@ -27041,7 +27041,16 @@ impl OpenFs {
         }
 
         let block_size = u64::from(sb.block_size);
-        let extents = self.collect_extents_with_scope(cx, scope, &inode)?;
+        // SEEK_HOLE only inspects extents around/after `offset`: every early
+        // return below is gated on `ext_logical_byte > offset`, so an extent
+        // ending at/before `offset` can never trigger one. Collect just the
+        // suffix from offset's block instead of the whole tree — the same
+        // O(extents)->O(suffix) bound SEEK_DATA already uses (bd-yd3a0). The
+        // covered_until accumulation starts at 0, but since dropped extents all
+        // end <= offset they cannot satisfy any `> offset` check, so the hole
+        // position is identical (bd-62s1d).
+        let from_block = u32::try_from(offset / block_size).unwrap_or(u32::MAX);
+        let extents = self.collect_extents_from_with_scope(cx, scope, &inode, from_block)?;
 
         // Track where we've seen contiguous data.
         let mut covered_until = 0_u64;
@@ -38830,6 +38839,57 @@ mod tests {
             )
             .expect_err("SEEK_HOLE at EOF must fail");
         assert_eq!(err.to_errno(), libc::ENXIO);
+    }
+
+    /// Isomorphism guard for bd-62s1d: SEEK_HOLE over a fragmented sparse file
+    /// whose extent tree spans multiple leaves must report the exact known hole
+    /// positions even though the bounded collection prunes the leaves before the
+    /// query offset. Data lives at even blocks, a hole at every odd block.
+    #[test]
+    fn ext4_lseek_hole_bounded_finds_known_holes_bd_62s1d() {
+        let Some((fs, _tmp)) = open_writable_ext4_mkfs(64) else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let attr = fs
+            .create(&cx, root, OsStr::new("sparse_holes.bin"), 0o644, 0, 0)
+            .expect("create");
+        let bs = 4096_u64;
+        let block = vec![0xAA_u8; bs as usize];
+        // Enough sparse extents to push the extent tree past a single leaf so the
+        // from_block prune actually drops leaves for high offsets.
+        let n = 400_u32;
+        for i in 0..n {
+            let off = u64::from(i) * 2 * bs;
+            assert_eq!(
+                fs.write(&cx, attr.ino, off, &block).expect("write"),
+                bs as u32
+            );
+        }
+        let file_size = fs.getattr(&cx, attr.ino).expect("getattr").size;
+        let mut scope = RequestScope::empty();
+        for i in 0..n {
+            let data_byte = u64::from(i) * 2 * bs;
+            // From inside data block 2i, the next hole is the odd block right
+            // after it (or the virtual EOF hole for the final data block).
+            let hole = fs
+                .lseek(&cx, &mut scope, attr.ino, data_byte, SeekWhence::Hole)
+                .expect("SEEK_HOLE from data");
+            assert_eq!(
+                hole,
+                (data_byte + bs).min(file_size),
+                "SEEK_HOLE from data block {i} (offset {data_byte}) must land on the hole after it"
+            );
+            // From inside the hole block itself, SEEK_HOLE returns the offset.
+            let hole_byte = data_byte + bs;
+            if hole_byte < file_size {
+                let same = fs
+                    .lseek(&cx, &mut scope, attr.ino, hole_byte, SeekWhence::Hole)
+                    .expect("SEEK_HOLE from hole");
+                assert_eq!(same, hole_byte, "SEEK_HOLE inside a hole returns the offset");
+            }
+        }
     }
 
     #[test]
