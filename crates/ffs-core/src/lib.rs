@@ -29687,96 +29687,107 @@ impl FsOps for OpenFs {
                 }
 
                 // Find extent at the requested offset
-                let extent_opt: Option<(u64, BtrfsExtentData)> =
-                    if let Some(alloc_mutex) = self.btrfs_alloc_state.as_ref() {
-                        let alloc = alloc_mutex.lock();
-                        let ext_start = BtrfsKey {
-                            objectid: canonical,
-                            item_type: BTRFS_ITEM_EXTENT_DATA,
-                            offset: 0,
-                        };
-                        let ext_end = BtrfsKey {
-                            objectid: canonical,
-                            item_type: BTRFS_ITEM_EXTENT_DATA,
-                            offset: u64::MAX,
-                        };
-                        let ext_items = alloc
-                            .fs_tree
-                            .range(&ext_start, &ext_end)
-                            .map_err(|e| btrfs_mutation_to_ffs(&e))?;
-                        drop(alloc);
-                        ext_items
-                            .into_iter()
-                            .filter_map(|(k, v)| parse_extent_data(&v).ok().map(|e| (k.offset, e)))
-                            .find(|(start, ext)| {
-                                let end = match ext {
-                                    BtrfsExtentData::Inline { data, .. } => {
-                                        start.saturating_add(data.len() as u64)
-                                    }
-                                    BtrfsExtentData::Regular { num_bytes, .. } => {
-                                        start.saturating_add(*num_bytes)
-                                    }
-                                };
-                                file_offset >= *start && file_offset < end
-                            })
-                    } else if self.btrfs_tree_log_items.is_empty() {
-                        // The covering extent is the EXTENT_DATA with the greatest
-                        // key offset <= file_offset (extents are sorted and
-                        // non-overlapping), so seek that floor directly instead of
-                        // walking every extent of the file — O(log N) not
-                        // O(extents) per encoded_read, the cost a full `btrfs send`
-                        // of a fragmented file otherwise pays per extent (bd-phd7z).
-                        // The floor descent does not see tree-log items, so the
-                        // walk-all fallback below handles a pending tree log.
-                        let seek = BtrfsKey {
-                            objectid: canonical,
-                            item_type: BTRFS_ITEM_EXTENT_DATA,
-                            offset: file_offset,
-                        };
-                        self.walk_btrfs_fs_tree_floor(cx, seek)?
-                            .filter(|e| {
-                                e.key.objectid == canonical
-                                    && e.key.item_type == BTRFS_ITEM_EXTENT_DATA
-                            })
-                            .and_then(|e| {
-                                parse_extent_data(&e.data).ok().map(|ext| (e.key.offset, ext))
-                            })
-                            .filter(|(start, ext)| {
-                                let end = match ext {
-                                    BtrfsExtentData::Inline { data, .. } => {
-                                        start.saturating_add(data.len() as u64)
-                                    }
-                                    BtrfsExtentData::Regular { num_bytes, .. } => {
-                                        start.saturating_add(*num_bytes)
-                                    }
-                                };
-                                file_offset >= *start && file_offset < end
-                            })
-                    } else {
-                        let items = self.walk_btrfs_fs_tree_object(cx, canonical)?;
-                        items
-                            .iter()
-                            .filter(|item| {
-                                item.key.objectid == canonical
-                                    && item.key.item_type == BTRFS_ITEM_EXTENT_DATA
-                            })
-                            .filter_map(|item| {
-                                parse_extent_data(&item.data)
-                                    .ok()
-                                    .map(|e| (item.key.offset, e))
-                            })
-                            .find(|(start, ext)| {
-                                let end = match ext {
-                                    BtrfsExtentData::Inline { data, .. } => {
-                                        start.saturating_add(data.len() as u64)
-                                    }
-                                    BtrfsExtentData::Regular { num_bytes, .. } => {
-                                        start.saturating_add(*num_bytes)
-                                    }
-                                };
-                                file_offset >= *start && file_offset < end
-                            })
+                let extent_opt: Option<(u64, BtrfsExtentData)> = if let Some(alloc_mutex) =
+                    self.btrfs_alloc_state.as_ref()
+                {
+                    let alloc = alloc_mutex.lock();
+                    // The covering extent is the floor of file_offset in the
+                    // EXTENT_DATA span (sorted, non-overlapping), so seek it with
+                    // floor_key + get instead of ranging every extent of the file
+                    // — O(log N) not O(extents) per encoded_read (bd-chbrj, the
+                    // writable sibling of bd-phd7z). The COW tree has no separate
+                    // tree log, so no walk-all fallback is needed.
+                    let seek = BtrfsKey {
+                        objectid: canonical,
+                        item_type: BTRFS_ITEM_EXTENT_DATA,
+                        offset: file_offset,
                     };
+                    let covering = match alloc
+                        .fs_tree
+                        .floor_key(&seek)
+                        .map_err(|e| btrfs_mutation_to_ffs(&e))?
+                    {
+                        Some(k)
+                            if k.objectid == canonical && k.item_type == BTRFS_ITEM_EXTENT_DATA =>
+                        {
+                            alloc
+                                .fs_tree
+                                .get(&k)
+                                .and_then(|v| parse_extent_data(&v).ok().map(|e| (k.offset, e)))
+                        }
+                        _ => None,
+                    };
+                    drop(alloc);
+                    covering.filter(|(start, ext)| {
+                        let end = match ext {
+                            BtrfsExtentData::Inline { data, .. } => {
+                                start.saturating_add(data.len() as u64)
+                            }
+                            BtrfsExtentData::Regular { num_bytes, .. } => {
+                                start.saturating_add(*num_bytes)
+                            }
+                        };
+                        file_offset >= *start && file_offset < end
+                    })
+                } else if self.btrfs_tree_log_items.is_empty() {
+                    // The covering extent is the EXTENT_DATA with the greatest
+                    // key offset <= file_offset (extents are sorted and
+                    // non-overlapping), so seek that floor directly instead of
+                    // walking every extent of the file — O(log N) not
+                    // O(extents) per encoded_read, the cost a full `btrfs send`
+                    // of a fragmented file otherwise pays per extent (bd-phd7z).
+                    // The floor descent does not see tree-log items, so the
+                    // walk-all fallback below handles a pending tree log.
+                    let seek = BtrfsKey {
+                        objectid: canonical,
+                        item_type: BTRFS_ITEM_EXTENT_DATA,
+                        offset: file_offset,
+                    };
+                    self.walk_btrfs_fs_tree_floor(cx, seek)?
+                        .filter(|e| {
+                            e.key.objectid == canonical && e.key.item_type == BTRFS_ITEM_EXTENT_DATA
+                        })
+                        .and_then(|e| {
+                            parse_extent_data(&e.data)
+                                .ok()
+                                .map(|ext| (e.key.offset, ext))
+                        })
+                        .filter(|(start, ext)| {
+                            let end = match ext {
+                                BtrfsExtentData::Inline { data, .. } => {
+                                    start.saturating_add(data.len() as u64)
+                                }
+                                BtrfsExtentData::Regular { num_bytes, .. } => {
+                                    start.saturating_add(*num_bytes)
+                                }
+                            };
+                            file_offset >= *start && file_offset < end
+                        })
+                } else {
+                    let items = self.walk_btrfs_fs_tree_object(cx, canonical)?;
+                    items
+                        .iter()
+                        .filter(|item| {
+                            item.key.objectid == canonical
+                                && item.key.item_type == BTRFS_ITEM_EXTENT_DATA
+                        })
+                        .filter_map(|item| {
+                            parse_extent_data(&item.data)
+                                .ok()
+                                .map(|e| (item.key.offset, e))
+                        })
+                        .find(|(start, ext)| {
+                            let end = match ext {
+                                BtrfsExtentData::Inline { data, .. } => {
+                                    start.saturating_add(data.len() as u64)
+                                }
+                                BtrfsExtentData::Regular { num_bytes, .. } => {
+                                    start.saturating_add(*num_bytes)
+                                }
+                            };
+                            file_offset >= *start && file_offset < end
+                        })
+                };
 
                 let (extent_start, extent) =
                     extent_opt.ok_or_else(|| FfsError::NotFound("no extent at offset".into()))?;
@@ -39015,10 +39026,10 @@ mod tests {
             let off = u64::from(i) * 2 * bs;
             fs.write(&cx, attr.ino, off, &block).expect("write");
         }
-        let mut scope = RequestScope::empty();
+        let scope = RequestScope::empty();
         let canonical = OpenFs::ext4_canonical_inode(attr.ino);
         let inode = fs
-            .read_inode_with_scope(&cx, &mut scope, canonical)
+            .read_inode_with_scope(&cx, &scope, canonical)
             .expect("read inode");
         let collected = u32::try_from(fs.collect_extents(&cx, &inode).expect("collect").len())
             .expect("len fits u32");
@@ -39053,10 +39064,10 @@ mod tests {
             fs.write(&cx, attr.ino, u64::from(i) * 2 * bs, &block)
                 .expect("write");
         }
-        let mut scope = RequestScope::empty();
+        let scope = RequestScope::empty();
         let canonical = OpenFs::ext4_canonical_inode(attr.ino);
         let inode = fs
-            .read_inode_with_scope(&cx, &mut scope, canonical)
+            .read_inode_with_scope(&cx, &scope, canonical)
             .expect("read inode");
         // Warm the extent-tree block cache.
         let _ = fs.collect_extents(&cx, &inode).expect("warm");
