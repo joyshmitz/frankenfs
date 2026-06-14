@@ -33,6 +33,10 @@ harness = false
 name = "gf_simd_probe"
 harness = false
 
+[[bench]]
+name = "encode_parallel"
+harness = false
+
 [[bin]]
 name = "ffs-demo"
 path = "src/bin/ffs-demo.rs"

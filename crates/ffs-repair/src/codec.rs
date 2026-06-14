@@ -25,6 +25,7 @@ use asupersync::raptorq::gf256::{Gf256, gf256_add_slice, gf256_addmul_slice, gf2
 use asupersync::raptorq::rfc6330::{next_prime_ge, try_tuple};
 use asupersync::raptorq::systematic::{EmittedSymbol, SystematicEncoder, SystematicParams};
 use ffs_block::BlockDevice;
+use rayon::prelude::{IntoParallelIterator, ParallelIterator};
 use ffs_error::{FfsError, Result};
 use ffs_types::{BlockNumber, GroupNumber};
 use std::collections::VecDeque;
@@ -140,39 +141,50 @@ fn emit_projected_repair_symbols(
 
     let start_esi = coefficient_encoder.next_repair_esi();
     let params = coefficient_encoder.params();
-    let mut coefficients = vec![0_u8; source_count];
-    let mut repair_symbols = Vec::with_capacity(repair_count);
 
-    for i in 0..repair_count {
-        let Ok(i_u32) = u32::try_from(i) else {
-            break;
-        };
-        let Some(esi) = start_esi.checked_add(i_u32) else {
-            break;
-        };
+    // Each repair symbol is an independent GF256 linear combination of the K
+    // source symbols (own coefficients + data buffers; the encoder is shared
+    // read-only via the Arc), so compute the R of them in parallel across cores
+    // — mirroring the already-parallel LRC global-parity loop (lrc.rs) (bd-blr6r).
+    //
+    // The serial version `break`s on the first esi that would overflow u32; since
+    // esi = start_esi + i is monotonic, that valid set is a prefix, so cap the
+    // index range at `valid_count` and let rayon's ordered `collect` reproduce
+    // the exact emission order and symbols.
+    let valid_count = repair_count.min(
+        usize::try_from(u32::MAX - start_esi)
+            .unwrap_or(usize::MAX)
+            .saturating_add(1),
+    );
+    let repair_symbols: Vec<EmittedSymbol> = (0..valid_count)
+        .into_par_iter()
+        .map(|i| {
+            // i < valid_count guarantees i fits u32 and start_esi + i ≤ u32::MAX.
+            let esi = start_esi + u32::try_from(i).unwrap_or(u32::MAX);
+            let mut coefficients = vec![0_u8; source_count];
+            coefficient_encoder.repair_symbol_into(esi, &mut coefficients);
 
-        coefficient_encoder.repair_symbol_into(esi, &mut coefficients);
-
-        let mut data = vec![0_u8; block_size];
-        for (&coefficient, source_symbol) in coefficients.iter().zip(source_symbols) {
-            let coefficient = Gf256::new(coefficient);
-            if coefficient.is_zero() {
-                continue;
+            let mut data = vec![0_u8; block_size];
+            for (&coefficient, source_symbol) in coefficients.iter().zip(source_symbols) {
+                let coefficient = Gf256::new(coefficient);
+                if coefficient.is_zero() {
+                    continue;
+                }
+                if coefficient == Gf256::ONE {
+                    gf256_add_slice(&mut data, source_symbol);
+                } else {
+                    gf256_addmul_slice(&mut data, source_symbol, coefficient);
+                }
             }
-            if coefficient == Gf256::ONE {
-                gf256_add_slice(&mut data, source_symbol);
-            } else {
-                gf256_addmul_slice(&mut data, source_symbol, coefficient);
-            }
-        }
 
-        repair_symbols.push(EmittedSymbol {
-            esi,
-            data,
-            is_source: false,
-            degree: raptorq_repair_symbol_degree(params, esi),
-        });
-    }
+            EmittedSymbol {
+                esi,
+                data,
+                is_source: false,
+                degree: raptorq_repair_symbol_degree(params, esi),
+            }
+        })
+        .collect();
 
     Ok(repair_symbols)
 }
