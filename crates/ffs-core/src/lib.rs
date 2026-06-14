@@ -838,7 +838,7 @@ pub struct OpenFs {
     ///
     /// Protected by a Mutex since write operations need exclusive access.
     /// `None` for btrfs or when opened in read-only mode.
-    ext4_alloc_state: Option<Mutex<Ext4AllocState>>,
+    ext4_alloc_state: Option<RwLock<Ext4AllocState>>,
     /// Read-only ext4 group descriptor cache.
     ///
     /// The writable path bypasses this cache because group descriptor counters
@@ -858,7 +858,7 @@ pub struct OpenFs {
     ///
     /// Protected by a Mutex since write operations need exclusive access.
     /// `None` for ext4 or when opened in read-only mode.
-    btrfs_alloc_state: Option<Mutex<BtrfsAllocState>>,
+    btrfs_alloc_state: Option<RwLock<BtrfsAllocState>>,
     /// Items replayed from a btrfs tree-log at mount time.
     ///
     /// The write path publishes a single-leaf log tree for fast `fsync`.
@@ -5867,12 +5867,12 @@ impl OpenFs {
         match &self.flavor {
             FsFlavor::Ext4(_) => {
                 let alloc_state = self.load_ext4_alloc_state(cx)?;
-                self.ext4_alloc_state = Some(Mutex::new(alloc_state));
+                self.ext4_alloc_state = Some(RwLock::new(alloc_state));
                 self.ext4_forced_read_only.store(false, Ordering::SeqCst);
             }
             FsFlavor::Btrfs(_) => {
                 let alloc_state = self.load_btrfs_alloc_state(cx)?;
-                self.btrfs_alloc_state = Some(Mutex::new(alloc_state));
+                self.btrfs_alloc_state = Some(RwLock::new(alloc_state));
             }
         }
         Ok(())
@@ -6193,7 +6193,7 @@ impl OpenFs {
     }
 
     /// Require the btrfs alloc state to be present (i.e., writes enabled).
-    fn require_btrfs_alloc_state(&self) -> Result<&Mutex<BtrfsAllocState>, FfsError> {
+    fn require_btrfs_alloc_state(&self) -> Result<&RwLock<BtrfsAllocState>, FfsError> {
         self.btrfs_alloc_state.as_ref().ok_or(FfsError::ReadOnly)
     }
 
@@ -6863,7 +6863,7 @@ impl OpenFs {
                 return Ok(Vec::new());
             }
             let mut entries = {
-                let alloc = alloc_mutex.lock();
+                let alloc = alloc_mutex.read();
                 alloc
                     .fs_tree
                     .range(&start, &end)
@@ -7051,7 +7051,7 @@ impl OpenFs {
         // on-disk at enable_writes time and updated by mutations).  Read from
         // it so that newly-created inodes are visible.
         if let Some(alloc_mutex) = self.btrfs_alloc_state.as_ref() {
-            let alloc = alloc_mutex.lock();
+            let alloc = alloc_mutex.read();
             let inode = self.btrfs_read_inode_from_tree(&alloc, canonical)?;
             drop(alloc);
             return Ok(self.btrfs_inode_to_attr(canonical, &inode));
@@ -7107,7 +7107,7 @@ impl OpenFs {
             if parent_attr.kind != FileType::Directory {
                 return Err(FfsError::NotDirectory);
             }
-            let alloc = alloc_mutex.lock();
+            let alloc = alloc_mutex.read();
             let dir_item = self.btrfs_lookup_dir_entry(&alloc, canonical_parent, name)?;
             let child_ino = InodeNumber(dir_item.child_objectid);
             drop(alloc);
@@ -7228,7 +7228,7 @@ impl OpenFs {
             if dir_attr.kind != FileType::Directory {
                 return Err(FfsError::NotDirectory);
             }
-            let alloc = alloc_mutex.lock();
+            let alloc = alloc_mutex.read();
             let start = BtrfsKey {
                 objectid: canonical_dir,
                 item_type: BTRFS_ITEM_DIR_ITEM,
@@ -7313,7 +7313,7 @@ impl OpenFs {
         let root_oid = self.btrfs_superblock().map(|sb| sb.root_dir_objectid);
         #[allow(clippy::option_if_let_else)]
         let parent_ino = if let Some(alloc_mutex) = self.btrfs_alloc_state.as_ref() {
-            let alloc = alloc_mutex.lock();
+            let alloc = alloc_mutex.read();
             self.btrfs_lookup_parent(&alloc, canonical_dir)
         } else {
             readonly_parent_oid
@@ -7833,7 +7833,7 @@ impl OpenFs {
     #[allow(clippy::significant_drop_tightening)]
     fn btrfs_read_csum_items(&self, cx: &Cx) -> ffs_error::Result<std::sync::Arc<BtrfsCsumItems>> {
         if let Some(alloc_mutex) = self.btrfs_alloc_state.as_ref() {
-            let alloc = alloc_mutex.lock();
+            let alloc = alloc_mutex.read();
             let lo = BtrfsKey {
                 objectid: 0,
                 item_type: 0,
@@ -8007,7 +8007,7 @@ impl OpenFs {
         // csum tree. A filesystem with no csum tree has nothing to do.
         let csum_items: Vec<(BtrfsKey, Vec<u8>)> =
             if let Some(alloc_mutex) = self.btrfs_alloc_state.as_ref() {
-                let alloc = alloc_mutex.lock();
+                let alloc = alloc_mutex.read();
                 alloc
                     .csum_tree
                     .range(&csum_lo, &csum_hi)
@@ -8066,7 +8066,7 @@ impl OpenFs {
         // writes are enabled) or the on-disk FS tree.
         let (inode, extents): (BtrfsInodeItem, Vec<(u64, BtrfsExtentData)>) =
             if let Some(alloc_mutex) = self.btrfs_alloc_state.as_ref() {
-                let alloc = alloc_mutex.lock();
+                let alloc = alloc_mutex.read();
                 let inode = self.btrfs_read_inode_from_tree(&alloc, canonical)?;
                 // Fetch only the EXTENT_DATA items that can overlap the requested
                 // read window [offset, offset+size), bounding BOTH edges so the
@@ -8336,13 +8336,12 @@ impl OpenFs {
                         if overlap_start >= overlap_end {
                             continue;
                         }
-                        let compressed_len = usize::try_from(*disk_num_bytes).map_err(|_| {
-                            FfsError::Corruption {
+                        let compressed_len =
+                            usize::try_from(*disk_num_bytes).map_err(|_| FfsError::Corruption {
                                 block: *disk_bytenr,
                                 detail: "compressed extent disk_num_bytes exceeds addressable size"
                                     .into(),
-                            }
-                        })?;
+                            })?;
                         if compressed_len > BTRFS_COMPRESSED_EXTENT_BYTE_LIMIT {
                             return Err(FfsError::Corruption {
                                 block: *disk_bytenr,
@@ -8350,10 +8349,11 @@ impl OpenFs {
                                     .into(),
                             });
                         }
-                        let ram = usize::try_from(*ram_bytes).map_err(|_| FfsError::Corruption {
-                            block: *disk_bytenr,
-                            detail: "compressed extent ram_bytes overflow".into(),
-                        })?;
+                        let ram =
+                            usize::try_from(*ram_bytes).map_err(|_| FfsError::Corruption {
+                                block: *disk_bytenr,
+                                detail: "compressed extent ram_bytes overflow".into(),
+                            })?;
                         if ram > BTRFS_COMPRESSED_EXTENT_BYTE_LIMIT {
                             return Err(FfsError::Corruption {
                                 block: *disk_bytenr,
@@ -8766,7 +8766,7 @@ impl OpenFs {
                     .ok_or_else(|| FfsError::Format("not an ext4 filesystem".into()))?;
                 let csum_seed = sb.csum_seed();
                 {
-                    let alloc = alloc_mutex.lock();
+                    let alloc = alloc_mutex.read();
                     ffs_inode::write_inode(
                         cx,
                         &block_dev,
@@ -9025,7 +9025,7 @@ impl OpenFs {
             FsFlavor::Ext4(sb) => {
                 let geo = FsGeometry::from_superblock(sb);
                 let cached_best = if let Some(alloc_mutex) = self.ext4_alloc_state.as_ref() {
-                    let mut alloc = alloc_mutex.lock();
+                    let mut alloc = alloc_mutex.write();
                     if let Ok(group_count) = usize::try_from(geo.group_count)
                         && alloc.groups.len() == group_count
                     {
@@ -9080,7 +9080,7 @@ impl OpenFs {
                 let unit = u64::from(sb.sectorsize.max(1));
                 let free_bytes = if let Some(alloc_mutex) = self.btrfs_alloc_state.as_ref() {
                     alloc_mutex
-                        .lock()
+                        .read()
                         .extent_alloc
                         .largest_free_extent(BTRFS_BLOCK_GROUP_DATA)
                         .map_err(|e| btrfs_mutation_to_ffs(&e))?
@@ -13626,7 +13626,7 @@ impl OpenFs {
             return Ok(()); // read-only fs — nothing to sync
         };
         let (total_free_blocks, total_free_inodes) = {
-            let alloc = alloc_mutex.lock();
+            let alloc = alloc_mutex.read();
             let blocks: u64 = alloc.groups.iter().map(|g| u64::from(g.free_blocks)).sum();
             let inodes: u64 = alloc.groups.iter().map(|g| u64::from(g.free_inodes)).sum();
             (blocks, inodes)
@@ -13669,7 +13669,7 @@ impl OpenFs {
     }
 
     /// Require the ext4 alloc state to be present (i.e., writes enabled).
-    fn require_alloc_state(&self) -> Result<&Mutex<Ext4AllocState>, FfsError> {
+    fn require_alloc_state(&self) -> Result<&RwLock<Ext4AllocState>, FfsError> {
         if self.ext4_forced_read_only.load(Ordering::SeqCst) {
             return Err(FfsError::ReadOnly);
         }
@@ -13710,7 +13710,7 @@ impl OpenFs {
             return Err(FfsError::Exists);
         }
 
-        let mut alloc = alloc_mutex.lock();
+        let mut alloc = alloc_mutex.write();
         let Ext4AllocState {
             geo,
             groups,
@@ -13851,7 +13851,7 @@ impl OpenFs {
             return Err(FfsError::Exists);
         }
 
-        let mut alloc = alloc_mutex.lock();
+        let mut alloc = alloc_mutex.write();
         let Ext4AllocState {
             geo,
             groups,
@@ -14004,7 +14004,7 @@ impl OpenFs {
             return Err(FfsError::Exists);
         }
 
-        let mut alloc = alloc_mutex.lock();
+        let mut alloc = alloc_mutex.write();
 
         let parent_group = GroupNumber(
             u32::try_from(parent.0.saturating_sub(1) / u64::from(alloc.geo.inodes_per_group))
@@ -15218,7 +15218,7 @@ impl OpenFs {
                 return Err(FfsError::IsDirectory);
             }
 
-            let mut alloc = alloc_mutex.lock();
+            let mut alloc = alloc_mutex.write();
 
             // Remove directory entry from parent blocks.
             let extents = self.collect_extents(cx, &parent_inode)?;
@@ -15353,7 +15353,7 @@ impl OpenFs {
             .ok_or_else(|| FfsError::Format("not an ext4 filesystem".into()))?;
         let csum_seed = sb.csum_seed();
 
-        let mut alloc = alloc_mutex.lock();
+        let mut alloc = alloc_mutex.write();
         let block_dev = self.block_device_adapter();
 
         let src_inode = self.read_inode(cx, ino)?;
@@ -15459,7 +15459,7 @@ impl OpenFs {
         let csum_seed = sb.csum_seed();
 
         let (ino, mut symlink_inode, parent_inode) = {
-            let mut alloc = alloc_mutex.lock();
+            let mut alloc = alloc_mutex.write();
 
             let parent_inode = self.read_inode(cx, parent)?;
             if !parent_inode.is_dir() {
@@ -15554,7 +15554,7 @@ impl OpenFs {
         if !fast_storage {
             if let Err(err) = self.ext4_write(cx, scope, ino, 0, target_bytes, false) {
                 let mut rollback_inode = self.read_inode(cx, ino)?;
-                let mut alloc = alloc_mutex.lock();
+                let mut alloc = alloc_mutex.write();
                 let block_dev = self.block_device_adapter();
                 let Ext4AllocState {
                     geo,
@@ -15576,7 +15576,7 @@ impl OpenFs {
             }
 
             symlink_inode = self.read_inode(cx, ino)?;
-            let mut alloc = alloc_mutex.lock();
+            let mut alloc = alloc_mutex.write();
             if let Err(err) = self.ext4_add_dir_entry(
                 cx,
                 &mut alloc,
@@ -15758,7 +15758,7 @@ impl OpenFs {
         }
 
         let mut root_bytes = Self::extent_root(&inode);
-        let mut alloc = alloc_mutex.lock();
+        let mut alloc = alloc_mutex.write();
         // Snapshot extent-tree metadata blocks before any mode mutates the tree
         // (prealloc grows it, punch/collapse can shrink it); the net change is
         // charged to i_blocks at the common writeback below (bd-zpe9s).
@@ -16521,7 +16521,7 @@ impl OpenFs {
             return self.ext4_write_indirect(cx, scope, ino, inode, offset, data);
         }
 
-        let mut alloc = alloc_mutex.lock();
+        let mut alloc = alloc_mutex.write();
         // Snapshot extent-tree metadata blocks before any tree mutation in this
         // write so growth (and any later coalescing-driven shrink) is charged to
         // i_blocks at the end, regardless of which internal path changed the
@@ -16918,7 +16918,7 @@ impl OpenFs {
             .checked_add(write_len)
             .ok_or_else(|| FfsError::Format("write range overflow".into()))?;
 
-        let mut alloc = alloc_mutex.lock();
+        let mut alloc = alloc_mutex.write();
         // i_blocks counts 512-byte sectors per fs block (or 1 unit/block for
         // huge_file inodes). Each newly mapped logical block costs one data
         // block plus any indirect-metadata blocks write_block_ptr allocates.
@@ -17135,7 +17135,7 @@ impl OpenFs {
         let block_size_u32 = u32::try_from(block_size)
             .map_err(|_| FfsError::Format("block size does not fit u32".into()))?;
 
-        let mut alloc = alloc_mutex.lock();
+        let mut alloc = alloc_mutex.write();
 
         if punch_hole {
             // Unaligned ranges are supported (bd-xnel9), mirroring the
@@ -17397,7 +17397,7 @@ impl OpenFs {
         inode: &mut Ext4Inode,
         offset: u64,
         data: &[u8],
-        alloc_mutex: &Mutex<Ext4AllocState>,
+        alloc_mutex: &RwLock<Ext4AllocState>,
         block_size: u32,
         csum_seed: u32,
         tstamp_secs: u64,
@@ -17480,7 +17480,7 @@ impl OpenFs {
                         .min(cluster_bytes);
 
                 // Compress and write the cluster.
-                let mut alloc = alloc_mutex.lock();
+                let mut alloc = alloc_mutex.write();
                 let cluster_write = self.write_ext4_compressed_cluster(
                     cx,
                     scope,
@@ -17512,7 +17512,7 @@ impl OpenFs {
 
             // Write updated inode and free superseded cluster blocks.
             {
-                let mut alloc = alloc_mutex.lock();
+                let mut alloc = alloc_mutex.write();
                 if let Some(tx) = &mut scope.tx {
                     let tx_dev = TransactionBlockAdapter {
                         base: &block_dev,
@@ -17570,7 +17570,7 @@ impl OpenFs {
 
         if write_result.is_err() && !pending_new_blocks.is_empty() {
             {
-                let mut alloc = alloc_mutex.lock();
+                let mut alloc = alloc_mutex.write();
                 let mut rollback_block_dev = self.block_device_adapter();
                 for block in pending_new_blocks {
                     let Ext4AllocState {
@@ -17648,7 +17648,7 @@ impl OpenFs {
             return Err(FfsError::NotDirectory);
         }
 
-        let mut alloc = alloc_mutex.lock();
+        let mut alloc = alloc_mutex.write();
 
         // Look up the source entry.
         let entry = self
@@ -18017,7 +18017,7 @@ impl OpenFs {
             // arbitrarily large size (e.g. 1 PiB) was silently accepted.
             Self::ext4_reject_oversized_file(new_size, u64::from(sb.block_size))?;
             if new_size != inode.size {
-                let mut alloc = alloc_mutex.lock();
+                let mut alloc = alloc_mutex.write();
                 let block_size = alloc.geo.block_size;
 
                 if new_size < inode.size && (inode.flags & ffs_types::EXT4_EXTENTS_FL) != 0 {
@@ -18245,7 +18245,7 @@ impl OpenFs {
                 base: &block_dev,
                 tx: Mutex::new(tx),
             };
-            let alloc = alloc_mutex.lock();
+            let alloc = alloc_mutex.read();
             ffs_inode::write_inode(
                 cx,
                 &tx_dev,
@@ -18256,7 +18256,7 @@ impl OpenFs {
                 csum_seed,
             )?;
         } else {
-            let alloc = alloc_mutex.lock();
+            let alloc = alloc_mutex.read();
             ffs_inode::write_inode(
                 cx,
                 &block_dev,
@@ -18387,7 +18387,7 @@ impl OpenFs {
             Ok(s) => s,
             Err(FfsError::NoSpace) if old_acl == 0 => {
                 // Inline region exhausted and no external block exists yet — allocate one.
-                let mut alloc = alloc_mutex.lock();
+                let mut alloc = alloc_mutex.write();
                 let ino_group = ffs_types::inode_to_group(ino, alloc.geo.inodes_per_group);
                 let Ext4AllocState {
                     geo,
@@ -18468,7 +18468,7 @@ impl OpenFs {
         let mut allocated_external_block = None;
         let mut post_inode_actions = Vec::new();
         if let Some(mut block) = external_block {
-            let mut alloc = alloc_mutex.lock();
+            let mut alloc = alloc_mutex.write();
             let Ext4AllocState {
                 geo,
                 groups,
@@ -18522,7 +18522,7 @@ impl OpenFs {
 
         ffs_inode::touch_ctime(&mut inode, tstamp_secs, tstamp_nanos);
 
-        let alloc = alloc_mutex.lock();
+        let alloc = alloc_mutex.read();
         let inode_write = ffs_inode::write_inode(
             cx,
             &block_dev,
@@ -18536,7 +18536,7 @@ impl OpenFs {
 
         if let Err(err) = inode_write {
             if let Some(new_block) = allocated_external_block {
-                let mut alloc = alloc_mutex.lock();
+                let mut alloc = alloc_mutex.write();
                 let Ext4AllocState {
                     geo,
                     groups,
@@ -18591,7 +18591,7 @@ impl OpenFs {
                 }
                 Ext4XattrPostInodeAction::FreeBlock(block_no) => {
                     let alloc_mutex = self.require_alloc_state()?;
-                    let mut alloc = alloc_mutex.lock();
+                    let mut alloc = alloc_mutex.write();
                     let Ext4AllocState {
                         geo,
                         groups,
@@ -18670,7 +18670,7 @@ impl OpenFs {
         let mut allocated_external_block = None;
         let mut post_inode_actions = Vec::new();
         if let Some(mut block) = external_block {
-            let mut alloc = alloc_mutex.lock();
+            let mut alloc = alloc_mutex.write();
             let Ext4AllocState {
                 geo,
                 groups,
@@ -18736,7 +18736,7 @@ impl OpenFs {
 
         ffs_inode::touch_ctime(&mut inode, tstamp_secs, tstamp_nanos);
 
-        let alloc = alloc_mutex.lock();
+        let alloc = alloc_mutex.read();
         let inode_write = ffs_inode::write_inode(
             cx,
             &block_dev,
@@ -18750,7 +18750,7 @@ impl OpenFs {
 
         if let Err(err) = inode_write {
             if let Some(new_block) = allocated_external_block {
-                let mut alloc = alloc_mutex.lock();
+                let mut alloc = alloc_mutex.write();
                 let Ext4AllocState {
                     geo,
                     groups,
@@ -20859,7 +20859,7 @@ impl OpenFs {
         let canonical = self.btrfs_canonical_inode(ino)?;
         let alloc_mutex = self.require_btrfs_alloc_state()?;
         let (node_bytes, sb_bytes, stats) = {
-            let mut alloc = alloc_mutex.lock();
+            let mut alloc = alloc_mutex.write();
             Self::btrfs_prepare_tree_log_write(&sb, &mut alloc, canonical)?
         };
 
@@ -21034,7 +21034,7 @@ impl OpenFs {
         operation_id: &str,
     ) -> ffs_error::Result<BtrfsWritebackStats> {
         let alloc_mutex = self.require_btrfs_alloc_state()?;
-        let mut alloc = alloc_mutex.lock();
+        let mut alloc = alloc_mutex.write();
 
         // Extract superblock for serialization parameters
         let sb: &BtrfsSuperblock = match &self.flavor {
@@ -21908,7 +21908,7 @@ impl OpenFs {
         let alloc_mutex = self.require_btrfs_alloc_state()?;
         let canonical = self.btrfs_canonical_inode(ino)?;
 
-        let mut alloc = alloc_mutex.lock();
+        let mut alloc = alloc_mutex.write();
 
         // Look up the INODE_ITEM for this objectid.
         let inode_key = BtrfsKey {
@@ -22218,7 +22218,7 @@ impl OpenFs {
 
         Self::validate_single_path_component(name)?;
 
-        let mut alloc = alloc_mutex.lock();
+        let mut alloc = alloc_mutex.write();
         self.btrfs_require_directory_inode(&alloc, parent_oid)?;
         Self::btrfs_preflight_dir_entry_insert(&alloc, parent_oid, name, alloc.next_objectid)?;
 
@@ -22305,7 +22305,7 @@ impl OpenFs {
 
         Self::validate_single_path_component(name)?;
 
-        let mut alloc = alloc_mutex.lock();
+        let mut alloc = alloc_mutex.write();
         self.btrfs_require_directory_inode(&alloc, parent_oid)?;
         Self::btrfs_preflight_dir_entry_insert(&alloc, parent_oid, name, alloc.next_objectid)?;
         // No parent nlink change for a btrfs subdirectory (bd-egyf6).
@@ -22544,7 +22544,7 @@ impl OpenFs {
 
         Self::validate_single_path_component(name)?;
 
-        let mut alloc = alloc_mutex.lock();
+        let mut alloc = alloc_mutex.write();
         self.btrfs_require_directory_inode(&alloc, parent_oid)?;
         if self
             .btrfs_lookup_dir_entry(&alloc, parent_oid, name)
@@ -22647,7 +22647,7 @@ impl OpenFs {
 
         Self::validate_single_path_component(name)?;
 
-        let mut alloc = alloc_mutex.lock();
+        let mut alloc = alloc_mutex.write();
         self.btrfs_require_directory_inode(&alloc, parent_oid)?;
         if self
             .btrfs_lookup_dir_entry(&alloc, parent_oid, name)
@@ -22795,7 +22795,7 @@ impl OpenFs {
             )));
         }
 
-        let mut alloc = alloc_mutex.lock();
+        let mut alloc = alloc_mutex.write();
         self.btrfs_require_directory_inode(&alloc, parent_oid)?;
         Self::btrfs_preflight_dir_entry_insert(&alloc, parent_oid, name, alloc.next_objectid)?;
 
@@ -22870,7 +22870,7 @@ impl OpenFs {
         let parent_oid = self.btrfs_canonical_inode(parent)?;
         let (secs, nanos) = Self::btrfs_now_timestamp();
 
-        let mut alloc = alloc_mutex.lock();
+        let mut alloc = alloc_mutex.write();
         self.btrfs_require_directory_inode(&alloc, parent_oid)?;
 
         // Lookup the child entry in the parent directory.
@@ -22988,7 +22988,7 @@ impl OpenFs {
         Self::validate_single_path_component(name)?;
         Self::validate_single_path_component(new_name)?;
 
-        let mut alloc = alloc_mutex.lock();
+        let mut alloc = alloc_mutex.write();
         self.btrfs_require_directory_inode(&alloc, parent_oid)?;
         self.btrfs_require_directory_inode(&alloc, new_parent_oid)?;
 
@@ -23133,7 +23133,7 @@ impl OpenFs {
         Self::validate_single_path_component(name)?;
         Self::validate_single_path_component(new_name)?;
 
-        let mut alloc = alloc_mutex.lock();
+        let mut alloc = alloc_mutex.write();
         self.btrfs_require_directory_inode(&alloc, parent_oid)?;
         self.btrfs_require_directory_inode(&alloc, new_parent_oid)?;
 
@@ -23258,7 +23258,7 @@ impl OpenFs {
 
         Self::validate_single_path_component(new_name)?;
 
-        let mut alloc = alloc_mutex.lock();
+        let mut alloc = alloc_mutex.write();
         self.btrfs_require_directory_inode(&alloc, parent_oid)?;
         Self::btrfs_preflight_dir_entry_insert(&alloc, parent_oid, new_name, target_oid)?;
         Self::btrfs_preflight_inode_ref_insert(&alloc, target_oid, parent_oid)?;
@@ -23330,7 +23330,7 @@ impl OpenFs {
 
         Self::validate_single_path_component(name)?;
 
-        let mut alloc = alloc_mutex.lock();
+        let mut alloc = alloc_mutex.write();
         self.btrfs_require_directory_inode(&alloc, parent_oid)?;
         Self::btrfs_preflight_dir_entry_insert(&alloc, parent_oid, name, alloc.next_objectid)?;
 
@@ -23422,7 +23422,7 @@ impl OpenFs {
         let alloc_mutex = self.require_btrfs_alloc_state()?;
         let canonical = self.btrfs_canonical_inode(ino)?;
 
-        let mut alloc = alloc_mutex.lock();
+        let mut alloc = alloc_mutex.write();
         let mut inode = self.btrfs_read_inode_from_tree(&alloc, canonical)?;
         let original_size = inode.size;
 
@@ -23592,7 +23592,7 @@ impl OpenFs {
         // EFBIG (matches the VFS s_maxbytes check before the fs).
         Self::btrfs_reject_oversized_file(new_end)?;
 
-        let mut alloc = alloc_mutex.lock();
+        let mut alloc = alloc_mutex.write();
         let mut inode = self.btrfs_read_inode_from_tree(&alloc, canonical)?;
 
         let file_type = Self::btrfs_mode_to_file_type(inode.mode);
@@ -23987,7 +23987,7 @@ impl OpenFs {
         // Fast path: look up the specific xattr by name hash (COW tree or
         // on-disk tree).
         if let Some(alloc_mutex) = self.btrfs_alloc_state.as_ref() {
-            let alloc = alloc_mutex.lock();
+            let alloc = alloc_mutex.read();
             let name_hash = ffs_btrfs::btrfs_name_hash(name.as_bytes());
             let key = BtrfsKey {
                 objectid: canonical,
@@ -24045,7 +24045,7 @@ impl OpenFs {
         objectid: u64,
     ) -> ffs_error::Result<Vec<ffs_btrfs::BtrfsXattrItem>> {
         if let Some(alloc_mutex) = self.btrfs_alloc_state.as_ref() {
-            let alloc = alloc_mutex.lock();
+            let alloc = alloc_mutex.read();
             let start = BtrfsKey {
                 objectid,
                 item_type: BTRFS_ITEM_XATTR_ITEM,
@@ -24198,7 +24198,7 @@ impl OpenFs {
             XattrSetMode::Set | XattrSetMode::Create | XattrSetMode::Replace => {}
         }
 
-        let mut alloc = alloc_mutex.lock();
+        let mut alloc = alloc_mutex.write();
         let mut inode = self.btrfs_read_inode_from_tree(&alloc, canonical)?;
         // Immutable AND append-only files reject xattr changes: the kernel's
         // xattr_permission returns EPERM for any MAY_WRITE xattr op on either
@@ -24260,7 +24260,7 @@ impl OpenFs {
         let alloc_mutex = self.require_btrfs_alloc_state()?;
         let canonical = self.btrfs_canonical_inode(ino)?;
 
-        let mut alloc = alloc_mutex.lock();
+        let mut alloc = alloc_mutex.write();
         let mut inode = self.btrfs_read_inode_from_tree(&alloc, canonical)?;
         // Immutable AND append-only files reject xattr changes: the kernel's
         // xattr_permission returns EPERM for any MAY_WRITE xattr op on either
@@ -26181,7 +26181,7 @@ impl OpenFs {
                 new_parent_link_delta,
             )?;
         }
-        let alloc = alloc_mutex.lock();
+        let alloc = alloc_mutex.read();
 
         let parent_extents = self.collect_extents(cx, &parent_inode)?;
         // For an htree dir, logical block 0 is the dx_root: it holds no file
@@ -26371,7 +26371,7 @@ impl OpenFs {
                 .as_ref()
                 .map_or(BTRFS_FS_TREE_OBJECTID, |ctx| ctx.subvol_objectid);
             if treeid == mounted_treeid {
-                let alloc = alloc_mutex.lock();
+                let alloc = alloc_mutex.read();
                 return Self::btrfs_resolve_inode_path_via_cow(&alloc, objectid);
             }
         }
@@ -26401,7 +26401,7 @@ impl OpenFs {
                     offset: u64::MAX,
                 };
                 let entries = {
-                    let alloc = alloc_mutex.lock();
+                    let alloc = alloc_mutex.read();
                     alloc
                         .fs_tree
                         .range(&start, &end)
@@ -26822,7 +26822,7 @@ impl OpenFs {
         from_offset: u64,
     ) -> ffs_error::Result<Vec<(u64, BtrfsExtentData)>> {
         if let Some(alloc_mutex) = self.btrfs_alloc_state.as_ref() {
-            let alloc = alloc_mutex.lock();
+            let alloc = alloc_mutex.read();
             // fiemap / SEEK_DATA / SEEK_HOLE all only care about extents whose end
             // is past `from_offset` (the requested range/seek start): an extent
             // ending at or before it is skipped by every caller. `floor_key` seeks
@@ -27068,7 +27068,7 @@ impl OpenFs {
                     if *disk_bytenr != 0 {
                         let refs = if let Some(alloc_mutex) = self.btrfs_alloc_state.as_ref() {
                             alloc_mutex
-                                .lock()
+                                .read()
                                 .extent_alloc
                                 .extent_item_refs(*disk_bytenr, *disk_num_bytes)
                                 .ok()
@@ -27589,7 +27589,7 @@ impl OpenFs {
             count: moved_len,
         };
 
-        let mut alloc = alloc_mutex.lock();
+        let mut alloc = alloc_mutex.write();
         let mut apply_exchange =
             |dev: &dyn BlockDevice, alloc: &mut Ext4AllocState| -> ffs_error::Result<()> {
                 Self::ext4_move_ext_exchange_ranges(
@@ -28015,7 +28015,7 @@ impl FsOps for OpenFs {
                 let (mut blocks_free, mut files_free) = if let Ok(alloc_mutex) =
                     self.require_alloc_state()
                 {
-                    let alloc = alloc_mutex.lock();
+                    let alloc = alloc_mutex.read();
                     let blocks: u64 = alloc.groups.iter().map(|g| u64::from(g.free_blocks)).sum();
                     let inodes: u64 = alloc.groups.iter().map(|g| u64::from(g.free_inodes)).sum();
                     drop(alloc);
@@ -28055,7 +28055,7 @@ impl FsOps for OpenFs {
                     .btrfs_alloc_state
                     .as_ref()
                     .map_or(sb.bytes_used, |alloc_mutex| {
-                        alloc_mutex.lock().extent_alloc.total_used()
+                        alloc_mutex.read().extent_alloc.total_used()
                     });
                 let total_bytes = sb.total_bytes;
                 let free_bytes = total_bytes.saturating_sub(used_bytes);
@@ -28625,7 +28625,7 @@ impl FsOps for OpenFs {
             FsFlavor::Btrfs(_) => {
                 let canonical = self.btrfs_canonical_inode(ino)?;
                 let btrfs_flags = if let Some(alloc_mutex) = self.btrfs_alloc_state.as_ref() {
-                    let alloc = alloc_mutex.lock();
+                    let alloc = alloc_mutex.read();
                     let inode = self.btrfs_read_inode_from_tree(&alloc, canonical)?;
                     drop(alloc);
                     inode.flags
@@ -28692,7 +28692,7 @@ impl FsOps for OpenFs {
             FsFlavor::Btrfs(_) => {
                 let canonical = self.btrfs_canonical_inode(ino)?;
                 let btrfs_flags = if let Some(alloc_mutex) = self.btrfs_alloc_state.as_ref() {
-                    let alloc = alloc_mutex.lock();
+                    let alloc = alloc_mutex.read();
                     let inode = self.btrfs_read_inode_from_tree(&alloc, canonical)?;
                     drop(alloc);
                     inode.flags
@@ -28790,7 +28790,7 @@ impl FsOps for OpenFs {
                         .ext4_superblock()
                         .ok_or_else(|| FfsError::Format("not an ext4 filesystem".into()))?;
                     let csum_seed = sb.csum_seed();
-                    let alloc = alloc_mutex.lock();
+                    let alloc = alloc_mutex.read();
                     ffs_inode::write_inode(
                         cx,
                         &block_dev,
@@ -28827,7 +28827,7 @@ impl FsOps for OpenFs {
                 let alloc_mutex = self.require_btrfs_alloc_state()?;
                 let canonical = self.btrfs_canonical_inode(ino)?;
 
-                let mut alloc = alloc_mutex.lock();
+                let mut alloc = alloc_mutex.write();
                 let mut inode = self.btrfs_read_inode_from_tree(&alloc, canonical)?;
 
                 let requested_btrfs = xflags_to_btrfs_inode_flags(fsx.xflags);
@@ -28931,7 +28931,7 @@ impl FsOps for OpenFs {
             FsFlavor::Btrfs(_) => {
                 let canonical = self.btrfs_canonical_inode(ino)?;
                 let generation = if let Some(alloc_mutex) = self.btrfs_alloc_state.as_ref() {
-                    let alloc = alloc_mutex.lock();
+                    let alloc = alloc_mutex.read();
                     let inode = self.btrfs_read_inode_from_tree(&alloc, canonical)?;
                     drop(alloc);
                     inode.generation
@@ -28972,7 +28972,7 @@ impl FsOps for OpenFs {
                         base: &block_dev,
                         tx: Mutex::new(tx),
                     };
-                    let alloc = alloc_mutex.lock();
+                    let alloc = alloc_mutex.read();
                     ffs_inode::write_inode(
                         cx,
                         &tx_dev,
@@ -28983,7 +28983,7 @@ impl FsOps for OpenFs {
                         csum_seed,
                     )?;
                 } else {
-                    let alloc = alloc_mutex.lock();
+                    let alloc = alloc_mutex.read();
                     ffs_inode::write_inode(
                         cx,
                         &block_dev,
@@ -29324,7 +29324,7 @@ impl FsOps for OpenFs {
                 let generation = self
                     .btrfs_alloc_state
                     .as_ref()
-                    .map_or(sb.generation, |alloc_mutex| alloc_mutex.lock().generation);
+                    .map_or(sb.generation, |alloc_mutex| alloc_mutex.read().generation);
                 Ok(generation)
             }
         }
@@ -29405,7 +29405,7 @@ impl FsOps for OpenFs {
             FsFlavor::Btrfs(_) => {
                 let space_infos = self
                     .require_btrfs_alloc_state()?
-                    .lock()
+                    .read()
                     .extent_alloc
                     .space_info();
                 let total_spaces = u64::try_from(space_infos.len()).map_err(|_| {
@@ -29494,7 +29494,7 @@ impl FsOps for OpenFs {
                 // resolve the covering EXTENT_ITEM's start bytenr first (bd-uv16n).
                 let alloc = self.require_btrfs_alloc_state()?;
                 let data_refs = {
-                    let alloc_guard = alloc.lock();
+                    let alloc_guard = alloc.read();
                     let extent_start = alloc_guard
                         .extent_alloc
                         .resolve_containing_data_extent(logical)
@@ -29556,7 +29556,7 @@ impl FsOps for OpenFs {
                 // common case) is not silently empty (bd-uv16n).
                 let alloc = self.require_btrfs_alloc_state()?;
                 let data_refs = {
-                    let alloc_guard = alloc.lock();
+                    let alloc_guard = alloc.read();
                     let extent_start = alloc_guard
                         .extent_alloc
                         .resolve_containing_data_extent(logical)
@@ -29760,7 +29760,7 @@ impl FsOps for OpenFs {
                 let extent_opt: Option<(u64, BtrfsExtentData)> = if let Some(alloc_mutex) =
                     self.btrfs_alloc_state.as_ref()
                 {
-                    let alloc = alloc_mutex.lock();
+                    let alloc = alloc_mutex.read();
                     // The covering extent is the floor of file_offset in the
                     // EXTENT_DATA span (sorted, non-overlapping), so seek it with
                     // floor_key + get instead of ranging every extent of the file
@@ -30582,7 +30582,7 @@ impl FsOps for OpenFs {
                 let src_canonical = self.btrfs_canonical_inode(src_ino)?;
                 let dst_canonical = self.btrfs_canonical_inode(dest_ino)?;
                 let alloc_mutex = self.require_btrfs_alloc_state()?;
-                let mut alloc = alloc_mutex.lock();
+                let mut alloc = alloc_mutex.write();
                 self.btrfs_clone_file_data(&mut alloc, src_canonical, dst_canonical)
             }
         }
@@ -30608,7 +30608,7 @@ impl FsOps for OpenFs {
                 let src_canonical = self.btrfs_canonical_inode(src_ino)?;
                 let dst_canonical = self.btrfs_canonical_inode(dest_ino)?;
                 let alloc_mutex = self.require_btrfs_alloc_state()?;
-                let mut alloc = alloc_mutex.lock();
+                let mut alloc = alloc_mutex.write();
                 // src_length == 0 means "to source EOF" (FICLONERANGE semantics).
                 let src_size = self.btrfs_read_inode_from_tree(&alloc, src_canonical)?.size;
                 let len = if src_length == 0 {
@@ -30773,7 +30773,7 @@ impl FsOps for OpenFs {
 
                 let alloc_mutex = self.require_btrfs_alloc_state()?;
                 {
-                    let mut alloc = alloc_mutex.lock();
+                    let mut alloc = alloc_mutex.write();
 
                     let mut root_item_data = alloc.root_tree.get(&root_key).ok_or_else(|| {
                         FfsError::NotFound(format!(
@@ -30975,7 +30975,7 @@ impl FsOps for OpenFs {
                         base: &block_dev,
                         tx: Mutex::new(tx),
                     };
-                    let alloc = alloc_mutex.lock();
+                    let alloc = alloc_mutex.read();
                     ffs_inode::write_inode(
                         cx,
                         &tx_dev,
@@ -30986,7 +30986,7 @@ impl FsOps for OpenFs {
                         csum_seed,
                     )?;
                 } else {
-                    let alloc = alloc_mutex.lock();
+                    let alloc = alloc_mutex.read();
                     ffs_inode::write_inode(
                         cx,
                         &block_dev,
@@ -31004,7 +31004,7 @@ impl FsOps for OpenFs {
                 let alloc_mutex = self.require_btrfs_alloc_state()?;
                 let canonical = self.btrfs_canonical_inode(ino)?;
 
-                let mut alloc = alloc_mutex.lock();
+                let mut alloc = alloc_mutex.write();
                 let mut inode = self.btrfs_read_inode_from_tree(&alloc, canonical)?;
 
                 let requested_btrfs = fsflags_to_btrfs_inode_flags(flags);
@@ -42958,7 +42958,7 @@ mod tests {
         fs.enable_writes(&cx).expect("enable writes");
 
         let count_csums = |fs: &OpenFs| -> usize {
-            let alloc = fs.btrfs_alloc_state.as_ref().unwrap().lock();
+            let alloc = fs.btrfs_alloc_state.as_ref().unwrap().read();
             let lo = BtrfsKey {
                 objectid: 0,
                 item_type: 0,
@@ -43047,7 +43047,7 @@ mod tests {
         fs2.enable_writes(&cx).expect("re-seed csum tree from disk");
 
         let csum_items: Vec<(BtrfsKey, Vec<u8>)> = {
-            let alloc = fs2.btrfs_alloc_state.as_ref().unwrap().lock();
+            let alloc = fs2.btrfs_alloc_state.as_ref().unwrap().read();
             let lo = BtrfsKey {
                 objectid: 0,
                 item_type: 0,
@@ -43093,7 +43093,7 @@ mod tests {
 
         {
             let alloc_mutex = fs.require_btrfs_alloc_state().expect("alloc state");
-            let mut alloc = alloc_mutex.lock();
+            let mut alloc = alloc_mutex.write();
             // A minimal subvol fs-tree: one INODE_ITEM for its root dir (inode
             // 256). The tree only needs to be non-empty so the commit serializes
             // it and assigns a bytenr; this validation reads the ROOT_ITEM, not
@@ -43208,7 +43208,7 @@ mod tests {
         // Name linkage (3b): the committed ROOT_ITEM + ROOT_REF make the
         // subvolume enumerable by name from the remounted root tree.
         let root_entries: Vec<ffs_btrfs::BtrfsLeafEntry> = {
-            let alloc = fs2.btrfs_alloc_state.as_ref().unwrap().lock();
+            let alloc = fs2.btrfs_alloc_state.as_ref().unwrap().read();
             let lo = BtrfsKey {
                 objectid: 0,
                 item_type: 0,
@@ -43345,7 +43345,7 @@ mod tests {
 
     #[allow(clippy::significant_drop_tightening)]
     fn csum_lookup_in_alloc(fs: &OpenFs, bytenr: u64) -> Option<u32> {
-        let alloc = fs.btrfs_alloc_state.as_ref().unwrap().lock();
+        let alloc = fs.btrfs_alloc_state.as_ref().unwrap().read();
         let lo = BtrfsKey {
             objectid: 0,
             item_type: 0,
@@ -43381,7 +43381,7 @@ mod tests {
             "seeded checksum present before removal"
         );
         {
-            let mut alloc = fs.btrfs_alloc_state.as_ref().unwrap().lock();
+            let mut alloc = fs.btrfs_alloc_state.as_ref().unwrap().write();
             OpenFs::btrfs_remove_extent_csums(&mut alloc, data_bytenr, 4096)
                 .expect("remove csums for the freed range");
         }
@@ -45864,7 +45864,7 @@ mod tests {
         let mut root_bytes = OpenFs::extent_root(&inode);
         {
             let alloc_mutex = fs.require_alloc_state().expect("alloc state");
-            let mut alloc = alloc_mutex.lock();
+            let mut alloc = alloc_mutex.write();
             for (i, blk) in htree_blocks.iter().enumerate().skip(1) {
                 let Ext4AllocState {
                     geo,
@@ -48663,7 +48663,7 @@ mod tests {
         let csum_seed = sb.csum_seed();
         let block_dev = fs.block_device_adapter();
         let alloc_mutex = fs.require_alloc_state().expect("alloc state");
-        let alloc = alloc_mutex.lock();
+        let alloc = alloc_mutex.read();
         ffs_inode::write_inode(
             cx,
             &block_dev,
@@ -50104,7 +50104,7 @@ mod tests {
         let csum_seed = sb.csum_seed();
         let block_dev = fs.block_device_adapter();
         let alloc_mutex = fs.require_alloc_state().expect("alloc state");
-        let alloc = alloc_mutex.lock();
+        let alloc = alloc_mutex.read();
         ffs_inode::write_inode(
             &cx,
             &block_dev,
@@ -51292,7 +51292,7 @@ mod tests {
         let sb = fs.ext4_superblock().expect("ext4 superblock");
         let csum_seed = sb.csum_seed();
         let block_dev = fs.block_device_adapter();
-        let alloc = fs.require_alloc_state().expect("alloc state").lock();
+        let alloc = fs.require_alloc_state().expect("alloc state").read();
         ffs_inode::write_inode(
             &cx,
             &block_dev,
@@ -51383,7 +51383,7 @@ mod tests {
         let sb = fs.ext4_superblock().expect("ext4 superblock");
         let csum_seed = sb.csum_seed();
         let block_dev = fs.block_device_adapter();
-        let alloc = fs.require_alloc_state().expect("alloc state").lock();
+        let alloc = fs.require_alloc_state().expect("alloc state").read();
         ffs_inode::write_inode(
             &cx,
             &block_dev,
@@ -61928,7 +61928,7 @@ mod tests {
         .expect("remount committed image");
         fs2.enable_writes(&cx).expect("enable writes on remount");
         let root_entries: Vec<ffs_btrfs::BtrfsLeafEntry> = {
-            let alloc = fs2.btrfs_alloc_state.as_ref().unwrap().lock();
+            let alloc = fs2.btrfs_alloc_state.as_ref().unwrap().read();
             let lo = BtrfsKey {
                 objectid: 0,
                 item_type: 0,
@@ -62089,7 +62089,7 @@ mod tests {
         // The inline file's nbytes must equal its inline length, not 0.
         {
             let alloc_mutex = fs.require_btrfs_alloc_state().expect("alloc state");
-            let alloc = alloc_mutex.lock();
+            let alloc = alloc_mutex.read();
             let canonical = fs.btrfs_canonical_inode(attr.ino).expect("canonical");
             let inode = fs
                 .btrfs_read_inode_from_tree(&alloc, canonical)
@@ -62142,7 +62142,7 @@ mod tests {
         // [0, data.len()) — FrankenFS's own writes are never compressed.
         {
             let alloc_mutex = fs.require_btrfs_alloc_state().expect("alloc state");
-            let mut alloc = alloc_mutex.lock();
+            let mut alloc = alloc_mutex.write();
             let canonical = fs.btrfs_canonical_inode(src.ino).expect("canonical");
             let n = data.len() as u64;
             fs.btrfs_remove_overlapping_extent_data(&cx, &mut alloc, canonical, 0, n)
@@ -62273,7 +62273,7 @@ mod tests {
         // Replace src's regular extent with a single INLINE extent over [0, n).
         {
             let alloc_mutex = fs.require_btrfs_alloc_state().expect("alloc state");
-            let mut alloc = alloc_mutex.lock();
+            let mut alloc = alloc_mutex.write();
             let canonical = fs.btrfs_canonical_inode(src.ino).expect("canonical");
             let n = data.len() as u64;
             fs.btrfs_remove_overlapping_extent_data(&cx, &mut alloc, canonical, 0, n)
@@ -62567,7 +62567,7 @@ mod tests {
         let dst_canon = fs.btrfs_canonical_inode(dst.ino).expect("dst canonical");
         {
             let alloc_mutex = fs.btrfs_alloc_state.as_ref().expect("writable btrfs");
-            let mut alloc = alloc_mutex.lock();
+            let mut alloc = alloc_mutex.write();
             fs.btrfs_clone_file_data(&mut alloc, src_canon, dst_canon)
                 .expect("clone src into dst");
         }
@@ -62629,7 +62629,7 @@ mod tests {
         let dst_canon = fs.btrfs_canonical_inode(dst.ino).expect("dst canonical");
         {
             let alloc_mutex = fs.btrfs_alloc_state.as_ref().expect("writable btrfs");
-            let mut alloc = alloc_mutex.lock();
+            let mut alloc = alloc_mutex.write();
             fs.btrfs_clone_file_data(&mut alloc, src_canon, dst_canon)
                 .expect("clone src into dst");
         }
@@ -62700,7 +62700,7 @@ mod tests {
         let dst_canon = fs.btrfs_canonical_inode(dst.ino).expect("dst canonical");
         {
             let alloc_mutex = fs.btrfs_alloc_state.as_ref().expect("writable btrfs");
-            let mut alloc = alloc_mutex.lock();
+            let mut alloc = alloc_mutex.write();
             fs.btrfs_clone_file_data(&mut alloc, src_canon, dst_canon)
                 .expect("clone src into dst");
         }
@@ -63086,7 +63086,7 @@ mod tests {
 
         // Locate src's regular extent and confirm refs == 1 before the clone.
         let (disk_bytenr, disk_num_bytes) = {
-            let alloc = alloc_mutex.lock();
+            let alloc = alloc_mutex.read();
             let lo = BtrfsKey {
                 objectid: src_canon,
                 item_type: BTRFS_ITEM_EXTENT_DATA,
@@ -63110,7 +63110,7 @@ mod tests {
         };
         assert!(disk_bytenr > 0, "src extent must be allocated");
         {
-            let alloc = alloc_mutex.lock();
+            let alloc = alloc_mutex.read();
             assert_eq!(
                 alloc
                     .extent_alloc
@@ -63122,14 +63122,14 @@ mod tests {
 
         // Clone src -> dst.
         {
-            let mut alloc = alloc_mutex.lock();
+            let mut alloc = alloc_mutex.write();
             fs.btrfs_clone_file_data(&mut alloc, src_canon, dst_canon)
                 .expect("clone src into dst");
         }
 
         // refs == 2; dst's EXTENT_DATA shares the SAME disk_bytenr; dst size set.
         {
-            let alloc = alloc_mutex.lock();
+            let alloc = alloc_mutex.read();
             assert_eq!(
                 alloc
                     .extent_alloc
@@ -63254,13 +63254,13 @@ mod tests {
         // with KeyAlreadyExists on the offset-0 collision.)
         {
             let alloc_mutex = fs.btrfs_alloc_state.as_ref().expect("writable btrfs");
-            let mut alloc = alloc_mutex.lock();
+            let mut alloc = alloc_mutex.write();
             fs.btrfs_clone_file_data(&mut alloc, src_canon, dst_canon)
                 .expect("clone over non-empty dst");
         }
 
         let alloc_mutex = fs.btrfs_alloc_state.as_ref().expect("writable btrfs");
-        let alloc = alloc_mutex.lock();
+        let alloc = alloc_mutex.read();
         // dst now shares src's single extent; size matches src; nothing stale.
         let dst_inode = fs
             .btrfs_read_inode_from_tree(&alloc, dst_canon)
@@ -63326,7 +63326,7 @@ mod tests {
     #[cfg(test)]
     fn btrfs_first_regular_extent(fs: &OpenFs, canonical: u64) -> (u64, u64) {
         let alloc_mutex = fs.btrfs_alloc_state.as_ref().expect("writable btrfs");
-        let alloc = alloc_mutex.lock();
+        let alloc = alloc_mutex.read();
         let lo = BtrfsKey {
             objectid: canonical,
             item_type: BTRFS_ITEM_EXTENT_DATA,
@@ -63386,7 +63386,7 @@ mod tests {
         // The shared extent now has two references.
         let alloc_mutex = fs.btrfs_alloc_state.as_ref().expect("writable btrfs");
         let refs = alloc_mutex
-            .lock()
+            .read()
             .extent_alloc
             .extent_item_refs(db, dn)
             .expect("refs");
@@ -63797,7 +63797,7 @@ mod tests {
 
         {
             let alloc_mutex = fs.btrfs_alloc_state.as_ref().expect("btrfs alloc state");
-            let mut alloc = alloc_mutex.lock();
+            let mut alloc = alloc_mutex.write();
             let _first = alloc
                 .extent_alloc
                 .alloc_data(16 * sectorsize)
@@ -63891,7 +63891,7 @@ mod tests {
             .btrfs_canonical_inode(attr.ino)
             .expect("canonical objectid");
         let alloc_mutex = fs.btrfs_alloc_state.as_ref().expect("btrfs alloc state");
-        let alloc = alloc_mutex.lock();
+        let alloc = alloc_mutex.read();
         let inode = fs
             .btrfs_read_inode_from_tree(&alloc, objectid)
             .expect("read back inode item");
@@ -64633,7 +64633,7 @@ mod tests {
 
         {
             let alloc_mutex = fs.require_btrfs_alloc_state().expect("alloc state");
-            let mut alloc = alloc_mutex.lock();
+            let mut alloc = alloc_mutex.write();
             let canonical = fs.btrfs_canonical_inode(attr.ino).expect("canonical inode");
             let hole = BtrfsExtentData::Regular {
                 generation: alloc.generation,
@@ -66216,7 +66216,7 @@ mod tests {
         // link path still performs is the target's INODE_REF (preflight). Corrupt
         // it and the next link must fail closed before any mutation.
         let alloc_mutex = fs.require_btrfs_alloc_state().unwrap();
-        let mut alloc = alloc_mutex.lock();
+        let mut alloc = alloc_mutex.write();
         let inode_ref_key = BtrfsKey {
             objectid: attr.ino.0,
             item_type: BTRFS_ITEM_INODE_REF,
@@ -67196,7 +67196,7 @@ mod tests {
         };
         let alloc_mutex = fs.require_btrfs_alloc_state().unwrap();
         {
-            let mut alloc = alloc_mutex.lock();
+            let mut alloc = alloc_mutex.write();
             let compressed_extent = BtrfsExtentData::Inline {
                 generation: alloc.generation,
                 ram_bytes: u64::try_from(original.len()).unwrap(),
@@ -67231,7 +67231,7 @@ mod tests {
         assert_eq!(preserved, original);
 
         let entries = alloc_mutex
-            .lock()
+            .read()
             .fs_tree
             .range(&extent_key, &extent_key)
             .expect("lookup converted extent");
@@ -68611,7 +68611,7 @@ mod tests {
         let alloc_mutex = fs.require_btrfs_alloc_state().expect("btrfs alloc state");
         let baseline_start = Instant::now();
         let baseline_item_count = {
-            let alloc = alloc_mutex.lock();
+            let alloc = alloc_mutex.read();
             alloc
                 .fs_tree
                 .range(&start, &end)
@@ -68622,7 +68622,7 @@ mod tests {
 
         let fast_start = Instant::now();
         let tree_log_items = {
-            let mut alloc = alloc_mutex.lock();
+            let mut alloc = alloc_mutex.write();
             let (_node_bytes, _sb_bytes, stats) =
                 OpenFs::btrfs_prepare_tree_log_write(&sb, &mut alloc, canonical)
                     .expect("prepare tree-log fast-fsync write");
@@ -70178,7 +70178,7 @@ mod tests {
         // simulating a reflink / another referencing inode (refcount -> 2).
         let (disk_bytenr, disk_num_bytes) = {
             let alloc_mutex = fs.btrfs_alloc_state.as_ref().expect("btrfs alloc state");
-            let mut alloc = alloc_mutex.lock();
+            let mut alloc = alloc_mutex.write();
             let start = BtrfsKey {
                 objectid: canonical,
                 item_type: BTRFS_ITEM_EXTENT_DATA,
@@ -70258,7 +70258,7 @@ mod tests {
         .expect("deleting one sharer of a shared extent drops a ref, not refused");
 
         let alloc_mutex = fs.btrfs_alloc_state.as_ref().expect("btrfs alloc state");
-        let alloc = alloc_mutex.lock();
+        let alloc = alloc_mutex.read();
         assert_eq!(
             alloc
                 .extent_alloc
@@ -70329,7 +70329,7 @@ mod tests {
         let canonical = fs.btrfs_canonical_inode(attr.ino).unwrap();
         let (disk_bytenr, disk_num_bytes) = {
             let alloc_mutex = fs.btrfs_alloc_state.as_ref().expect("btrfs alloc state");
-            let mut alloc = alloc_mutex.lock();
+            let mut alloc = alloc_mutex.write();
             let start = BtrfsKey {
                 objectid: canonical,
                 item_type: BTRFS_ITEM_EXTENT_DATA,
@@ -70390,7 +70390,7 @@ mod tests {
     /// freeing the whole extent (which would delete the EXTENT_ITEM -> None).
     fn assert_extent_refs_dropped_to_one(fs: &OpenFs, disk_bytenr: u64, disk_num_bytes: u64) {
         let alloc_mutex = fs.btrfs_alloc_state.as_ref().expect("btrfs alloc state");
-        let alloc = alloc_mutex.lock();
+        let alloc = alloc_mutex.read();
         let refs = alloc
             .extent_alloc
             .extent_item_refs(disk_bytenr, disk_num_bytes)
@@ -70471,7 +70471,7 @@ mod tests {
         // is 4 bytes, so item data length / 4 = sectors). This is robust to the
         // freed extent's disk_bytenr being reused by the re-inserted head/tail.
         let total_csum_sectors = || -> usize {
-            let alloc = fs.btrfs_alloc_state.as_ref().unwrap().lock();
+            let alloc = fs.btrfs_alloc_state.as_ref().unwrap().read();
             let lo = BtrfsKey {
                 objectid: ffs_btrfs::BTRFS_EXTENT_CSUM_OBJECTID,
                 item_type: ffs_btrfs::BTRFS_ITEM_EXTENT_CSUM,
@@ -70566,7 +70566,7 @@ mod tests {
             .unwrap();
 
         let alloc_mutex = fs.require_btrfs_alloc_state().unwrap();
-        let mut alloc = alloc_mutex.lock();
+        let mut alloc = alloc_mutex.write();
         let extent_start = BtrfsKey {
             objectid: attr.ino.0,
             item_type: BTRFS_ITEM_EXTENT_DATA,
@@ -70634,7 +70634,7 @@ mod tests {
         let canonical = fs.btrfs_canonical_inode(attr.ino).unwrap();
 
         let alloc_mutex = fs.require_btrfs_alloc_state().unwrap();
-        let mut alloc = alloc_mutex.lock();
+        let mut alloc = alloc_mutex.write();
         let extent_key = BtrfsKey {
             objectid: canonical,
             item_type: BTRFS_ITEM_EXTENT_DATA,
@@ -70681,7 +70681,7 @@ mod tests {
         let canonical = fs.btrfs_canonical_inode(attr.ino).unwrap();
 
         let alloc_mutex = fs.require_btrfs_alloc_state().unwrap();
-        let mut alloc = alloc_mutex.lock();
+        let mut alloc = alloc_mutex.write();
         let extent_key = BtrfsKey {
             objectid: canonical,
             item_type: BTRFS_ITEM_EXTENT_DATA,
@@ -70703,7 +70703,7 @@ mod tests {
         );
 
         let preserved = {
-            let alloc = alloc_mutex.lock();
+            let alloc = alloc_mutex.read();
             alloc
                 .fs_tree
                 .range(&extent_key, &extent_key)
@@ -70720,7 +70720,7 @@ mod tests {
             offset: u64::from(ffs_btrfs::btrfs_name_hash(name)),
         };
         let alloc_mutex = fs.require_btrfs_alloc_state().unwrap();
-        let mut alloc = alloc_mutex.lock();
+        let mut alloc = alloc_mutex.write();
         alloc
             .fs_tree
             .update(&dir_item_key, payload)
@@ -70787,7 +70787,7 @@ mod tests {
 
         let alloc_mutex = fs.require_btrfs_alloc_state().unwrap();
         let err = {
-            let mut alloc = alloc_mutex.lock();
+            let mut alloc = alloc_mutex.write();
             OpenFs::btrfs_remove_named_dir_item(&mut alloc, root_oid, name)
                 .expect_err("malformed DIR_ITEM removal must fail closed")
         };
@@ -70998,7 +70998,7 @@ mod tests {
         };
         let alloc_mutex = fs.require_btrfs_alloc_state().unwrap();
         let source_entries = alloc_mutex
-            .lock()
+            .read()
             .fs_tree
             .range(&source_key, &source_key)
             .expect("source dir item lookup");
@@ -71116,7 +71116,7 @@ mod tests {
         )
         .unwrap();
 
-        let alloc = fs.btrfs_alloc_state.as_ref().unwrap().lock();
+        let alloc = fs.btrfs_alloc_state.as_ref().unwrap().read();
         let ref_key = BtrfsKey {
             objectid: attr.ino.0,
             item_type: BTRFS_ITEM_INODE_REF,
@@ -71141,7 +71141,7 @@ mod tests {
         )
         .unwrap();
 
-        let alloc = fs.btrfs_alloc_state.as_ref().unwrap().lock();
+        let alloc = fs.btrfs_alloc_state.as_ref().unwrap().read();
         let payload = alloc.fs_tree.range(&ref_key, &ref_key).unwrap();
         let refs = OpenFs::btrfs_parse_inode_ref_payload(&payload.first().unwrap().1).unwrap();
         drop(alloc);
@@ -71247,7 +71247,7 @@ mod tests {
 
         {
             let alloc_mutex = fs.btrfs_alloc_state.as_ref().unwrap();
-            let mut alloc = alloc_mutex.lock();
+            let mut alloc = alloc_mutex.write();
             let ref_key = BtrfsKey {
                 objectid: attr.ino.0,
                 item_type: BTRFS_ITEM_INODE_REF,
@@ -71299,7 +71299,7 @@ mod tests {
 
         {
             let alloc_mutex = fs.btrfs_alloc_state.as_ref().unwrap();
-            let mut alloc = alloc_mutex.lock();
+            let mut alloc = alloc_mutex.write();
             let mut inode = fs
                 .btrfs_read_inode_from_tree(&alloc, attr.ino.0)
                 .expect("read child inode");
@@ -71358,7 +71358,7 @@ mod tests {
         // 65k real link() calls.
         {
             let alloc_mutex = fs.btrfs_alloc_state.as_ref().unwrap();
-            let mut alloc = alloc_mutex.lock();
+            let mut alloc = alloc_mutex.write();
             let mut inode = fs
                 .btrfs_read_inode_from_tree(&alloc, attr.ino.0)
                 .expect("read target inode");
@@ -71428,7 +71428,7 @@ mod tests {
                 .unwrap();
             {
                 let alloc_mutex = fs.btrfs_alloc_state.as_ref().unwrap();
-                let mut alloc = alloc_mutex.lock();
+                let mut alloc = alloc_mutex.write();
                 let mut inode = fs
                     .btrfs_read_inode_from_tree(&alloc, attr.ino.0)
                     .expect("read target inode");
@@ -71488,7 +71488,7 @@ mod tests {
                 .unwrap();
             {
                 let alloc_mutex = fs.btrfs_alloc_state.as_ref().unwrap();
-                let mut alloc = alloc_mutex.lock();
+                let mut alloc = alloc_mutex.write();
                 let mut inode = fs
                     .btrfs_read_inode_from_tree(&alloc, attr.ino.0)
                     .expect("read target inode");
@@ -71517,7 +71517,7 @@ mod tests {
 
         let set_flag = |ino_raw: u64, flag: u64| {
             let alloc_mutex = fs.btrfs_alloc_state.as_ref().unwrap();
-            let mut alloc = alloc_mutex.lock();
+            let mut alloc = alloc_mutex.write();
             let mut inode = fs
                 .btrfs_read_inode_from_tree(&alloc, ino_raw)
                 .expect("read inode");
@@ -71583,7 +71583,7 @@ mod tests {
 
         let set_flag = |ino_raw: u64, flag: u64| {
             let alloc_mutex = fs.btrfs_alloc_state.as_ref().unwrap();
-            let mut alloc = alloc_mutex.lock();
+            let mut alloc = alloc_mutex.write();
             let mut inode = fs
                 .btrfs_read_inode_from_tree(&alloc, ino_raw)
                 .expect("read inode");
@@ -71670,7 +71670,7 @@ mod tests {
 
         let set_flag = |ino_raw: u64, flag: u64| {
             let alloc_mutex = fs.btrfs_alloc_state.as_ref().unwrap();
-            let mut alloc = alloc_mutex.lock();
+            let mut alloc = alloc_mutex.write();
             let mut inode = fs
                 .btrfs_read_inode_from_tree(&alloc, ino_raw)
                 .expect("read inode");
@@ -71714,7 +71714,7 @@ mod tests {
     fn btrfs_remove_inode_ref_missing_name_reports_corruption() {
         let (fs, _cx) = open_writable_btrfs();
         let alloc_mutex = fs.btrfs_alloc_state.as_ref().unwrap();
-        let mut alloc = alloc_mutex.lock();
+        let mut alloc = alloc_mutex.write();
         let ref_key = BtrfsKey {
             objectid: 9001,
             item_type: BTRFS_ITEM_INODE_REF,
@@ -71776,7 +71776,7 @@ mod tests {
 
         let parent = fs.btrfs_canonical_inode(root).expect("canonical");
         let alloc_mutex = fs.btrfs_alloc_state.as_ref().expect("writable");
-        let alloc = alloc_mutex.lock();
+        let alloc = alloc_mutex.read();
         for name in &names {
             let via_hash = fs
                 .btrfs_lookup_dir_entry(&alloc, parent, name.as_bytes())
@@ -71821,7 +71821,7 @@ mod tests {
             names.push(name);
         }
         let parent = fs.btrfs_canonical_inode(root).unwrap();
-        let alloc = fs.btrfs_alloc_state.as_ref().unwrap().lock();
+        let alloc = fs.btrfs_alloc_state.as_ref().unwrap().read();
 
         let iters = 5usize;
         let t_hash = std::time::Instant::now();
@@ -72003,7 +72003,7 @@ mod tests {
     fn btrfs_remove_dir_entry_missing_name_reports_corruption() {
         let (fs, _cx) = open_writable_btrfs();
         let alloc_mutex = fs.btrfs_alloc_state.as_ref().unwrap();
-        let mut alloc = alloc_mutex.lock();
+        let mut alloc = alloc_mutex.write();
         let parent_oid = 256;
         let dir_item = BtrfsDirItem {
             child_objectid: 9001,
@@ -72032,7 +72032,7 @@ mod tests {
         // link — including multiple hard links of one inode in one directory.
         let (fs, _cx) = open_writable_btrfs();
         let alloc_mutex = fs.btrfs_alloc_state.as_ref().unwrap();
-        let mut alloc = alloc_mutex.lock();
+        let mut alloc = alloc_mutex.write();
         let parent_oid = 256;
         let mk = |child: u64, name: &str| BtrfsDirItem {
             child_objectid: child,
@@ -72100,7 +72100,7 @@ mod tests {
     fn btrfs_dir_index_does_not_reuse_deleted_tail_bd_rfi5j() {
         let (fs, _cx) = open_writable_btrfs();
         let alloc_mutex = fs.btrfs_alloc_state.as_ref().unwrap();
-        let mut alloc = alloc_mutex.lock();
+        let mut alloc = alloc_mutex.write();
         let parent_oid = 256;
         let mk = |child: u64, name: &str| BtrfsDirItem {
             child_objectid: child,
@@ -72173,7 +72173,7 @@ mod tests {
         .expect("hard link");
 
         let root_oid = fs.btrfs_superblock().unwrap().root_dir_objectid;
-        let alloc = fs.btrfs_alloc_state.as_ref().unwrap().lock();
+        let alloc = fs.btrfs_alloc_state.as_ref().unwrap().read();
 
         // Collect (offset -> name) for the two DIR_INDEX entries of `target`.
         let dir_start = BtrfsKey {
@@ -73139,7 +73139,7 @@ mod tests {
         let canonical = fs.btrfs_canonical_inode(file.ino).unwrap();
         {
             let alloc_mutex = fs.btrfs_alloc_state.as_ref().unwrap();
-            let mut alloc = alloc_mutex.lock();
+            let mut alloc = alloc_mutex.write();
             let hole = BtrfsExtentData::Regular {
                 generation: alloc.generation,
                 ram_bytes: s,
@@ -73234,7 +73234,7 @@ mod tests {
         let canonical = fs.btrfs_canonical_inode(file.ino).unwrap();
         {
             let alloc_mutex = fs.btrfs_alloc_state.as_ref().unwrap();
-            let mut alloc = alloc_mutex.lock();
+            let mut alloc = alloc_mutex.write();
             let hole = BtrfsExtentData::Regular {
                 generation: alloc.generation,
                 ram_bytes: s,
@@ -73971,7 +73971,7 @@ mod tests {
         let canonical = fs.btrfs_canonical_inode(file.ino).unwrap();
         {
             let alloc_mutex = fs.btrfs_alloc_state.as_ref().unwrap();
-            let mut alloc = alloc_mutex.lock();
+            let mut alloc = alloc_mutex.write();
             let compressed = BtrfsExtentData::Regular {
                 generation: alloc.generation,
                 ram_bytes: s,
@@ -74050,7 +74050,7 @@ mod tests {
         let dst_canon = fs.btrfs_canonical_inode(dst.ino).unwrap();
         {
             let alloc_mutex = fs.btrfs_alloc_state.as_ref().unwrap();
-            let mut alloc = alloc_mutex.lock();
+            let mut alloc = alloc_mutex.write();
             fs.btrfs_clone_file_data(&mut alloc, src_canon, dst_canon)
                 .expect("reflink src into dst");
         }
@@ -74110,7 +74110,7 @@ mod tests {
         let dst_canon = fs.btrfs_canonical_inode(dst.ino).unwrap();
         {
             let alloc_mutex = fs.btrfs_alloc_state.as_ref().unwrap();
-            let mut alloc = alloc_mutex.lock();
+            let mut alloc = alloc_mutex.write();
             fs.btrfs_clone_file_data(&mut alloc, src_canon, dst_canon)
                 .expect("reflink src into dst");
         }
@@ -76375,7 +76375,7 @@ mod tests {
         // Inject a cycle by pointing cyc_a's INODE_REF back at cyc_b.
         {
             let alloc_mutex = fs.btrfs_alloc_state.as_ref().unwrap();
-            let mut alloc = alloc_mutex.lock();
+            let mut alloc = alloc_mutex.write();
             let old = BtrfsKey {
                 objectid: dir_a.ino.0,
                 item_type: BTRFS_ITEM_INODE_REF,

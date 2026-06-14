@@ -102,3 +102,7 @@ harness = false
 
 [lints]
 workspace = true
+
+[[bench]]
+name = "btrfs_alloc_rwlock"
+harness = false
