@@ -11,12 +11,26 @@ use asupersync::Cx;
 use ffs_mvcc::{CommitError, MvccStore, Transaction};
 pub use ffs_ondisk::btrfs::*;
 use ffs_types::{BlockNumber, CommitSeq, ParseError, Snapshot, TxnId};
+use rayon::prelude::{IntoParallelIterator, ParallelIterator};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashSet};
 use std::ops::Range;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use thiserror::Error;
 use tracing::{debug, info, trace, warn};
+
+const BTRFS_RANGE_PREFETCH_THREADS: usize = 16;
+static BTRFS_RANGE_PREFETCH_POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
+
+fn btrfs_range_prefetch_pool() -> &'static rayon::ThreadPool {
+    BTRFS_RANGE_PREFETCH_POOL.get_or_init(|| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(BTRFS_RANGE_PREFETCH_THREADS)
+            .thread_name(|idx| format!("ffs-btrfs-prefetch-{idx}"))
+            .build()
+            .unwrap_or_else(|err| panic!("failed to build btrfs range prefetch pool: {err}"))
+    })
+}
 
 /// A single leaf item yielded by tree traversal: key + raw payload bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2139,6 +2153,32 @@ pub fn walk_tree_range_with_nodes(
     Ok(walker.out)
 }
 
+/// Range walk with a `Sync` parsed-node provider and parallel sibling prefetch.
+///
+/// This preserves [`walk_tree_range_with_nodes`] output order by still
+/// finalizing child subtrees serially in key-pointer order. The only parallel
+/// work is fetching already-selected child nodes for one internal node after
+/// the serial range-pruning pass has determined that their spans overlap
+/// `[lo, hi)`.
+pub fn walk_tree_range_parallel_with_nodes(
+    node_provider: &(dyn Fn(u64) -> Result<Arc<BtrfsParsedNode>, ParseError> + Sync),
+    root_logical: u64,
+    nodesize: u32,
+    lo: BtrfsKey,
+    hi: BtrfsKey,
+) -> Result<Vec<BtrfsLeafEntry>, ParseError> {
+    let mut walker = BtrfsParallelTreeWalker {
+        node_provider,
+        nodesize,
+        out: Vec::new(),
+        active_path: HashSet::new(),
+        visited_nodes: HashSet::new(),
+        range: Some((lo, hi)),
+    };
+    walker.walk_node(root_logical)?;
+    Ok(walker.out)
+}
+
 /// Range zero-copy walk driven by a [`BtrfsParsedNode`] provider.
 ///
 /// Identical to [`walk_tree_range_with_nodes`] except payload bytes stay in the
@@ -2369,6 +2409,112 @@ impl BtrfsTreeWalker<'_> {
         }
 
         self.active_path.remove(&logical);
+        Ok(())
+    }
+}
+
+struct BtrfsParallelTreeWalker<'a> {
+    node_provider: &'a (dyn Fn(u64) -> Result<Arc<BtrfsParsedNode>, ParseError> + Sync),
+    nodesize: u32,
+    out: Vec<BtrfsLeafEntry>,
+    active_path: HashSet<u64>,
+    visited_nodes: HashSet<u64>,
+    range: Option<(BtrfsKey, BtrfsKey)>,
+}
+
+impl BtrfsParallelTreeWalker<'_> {
+    fn enter_node(&mut self, logical: u64) -> Result<u64, ParseError> {
+        let nodesize_u64 = u64::from(self.nodesize);
+        if nodesize_u64 == 0 {
+            return Err(ParseError::InvalidField {
+                field: "nodesize",
+                reason: "zero nodesize",
+            });
+        }
+        if logical % nodesize_u64 != 0 {
+            return Err(ParseError::InvalidField {
+                field: "logical_address",
+                reason: "not aligned to nodesize",
+            });
+        }
+        if !self.active_path.insert(logical) {
+            return Err(ParseError::InvalidField {
+                field: "logical_address",
+                reason: "cycle detected in btrfs tree pointers",
+            });
+        }
+        if !self.visited_nodes.insert(logical) {
+            self.active_path.remove(&logical);
+            return Err(ParseError::InvalidField {
+                field: "logical_address",
+                reason: "duplicate node reference in btrfs tree pointers",
+            });
+        }
+        Ok(nodesize_u64)
+    }
+
+    fn walk_node(&mut self, logical: u64) -> Result<(), ParseError> {
+        let nodesize_u64 = self.enter_node(logical)?;
+        let result =
+            (self.node_provider)(logical).and_then(|node| self.walk_node_body(&node, nodesize_u64));
+        self.active_path.remove(&logical);
+        result
+    }
+
+    fn walk_loaded_node(
+        &mut self,
+        logical: u64,
+        node: Result<Arc<BtrfsParsedNode>, ParseError>,
+    ) -> Result<(), ParseError> {
+        let nodesize_u64 = self.enter_node(logical)?;
+        let result = node.and_then(|node| self.walk_node_body(&node, nodesize_u64));
+        self.active_path.remove(&logical);
+        result
+    }
+
+    fn walk_node_body(
+        &mut self,
+        node: &Arc<BtrfsParsedNode>,
+        nodesize_u64: u64,
+    ) -> Result<(), ParseError> {
+        match node.as_ref() {
+            BtrfsParsedNode::Leaf { block, items } => {
+                collect_leaf_items(block.as_ref(), items, &mut self.out, self.range.as_ref())?;
+            }
+            BtrfsParsedNode::Internal { ptrs } => {
+                let mut children = Vec::new();
+                for (idx, kp) in ptrs.iter().enumerate() {
+                    if kp.blockptr % nodesize_u64 != 0 {
+                        return Err(ParseError::InvalidField {
+                            field: "blockptr",
+                            reason: "not aligned to nodesize",
+                        });
+                    }
+                    if let Some((lo, hi)) = self.range.as_ref() {
+                        if key_cmp(&kp.key, hi) != Ordering::Less {
+                            break;
+                        }
+                        if let Some(next) = ptrs.get(idx + 1) {
+                            if key_cmp(&next.key, lo) != Ordering::Greater {
+                                continue;
+                            }
+                        }
+                    }
+                    children.push(kp.blockptr);
+                }
+
+                let node_provider = self.node_provider;
+                let fetched = btrfs_range_prefetch_pool().install(|| {
+                    children
+                        .into_par_iter()
+                        .map(|logical| (logical, node_provider(logical)))
+                        .collect::<Vec<_>>()
+                });
+                for (logical, node) in fetched {
+                    self.walk_loaded_node(logical, node)?;
+                }
+            }
+        }
         Ok(())
     }
 }
@@ -8806,6 +8952,71 @@ mod tests {
 
                 assert_eq!(from_bytes, from_cache, "range [{lo:?},{hi:?})");
             }
+        }
+    }
+
+    #[test]
+    fn walk_tree_range_parallel_with_nodes_matches_serial() {
+        // bd-h6p3w isomorphism: parallel child-node prefetch may overlap the
+        // provider cost, but subtrees are still finalized in key-pointer order.
+        // The owned entries must therefore match the serial cached walker
+        // exactly for empty, narrow, multi-leaf, boundary, and whole-tree ranges.
+        let oids: Vec<u64> = vec![100, 200, 300, 400, 500, 600, 700, 800];
+        let (blocks, root_logical) = build_two_level_tree(&oids);
+
+        let mut cache: HashMap<u64, Arc<BtrfsParsedNode>> = HashMap::new();
+        for (&addr, bytes) in &blocks {
+            let node = parse_btrfs_tree_node(bytes, 0, addr, NODESIZE).expect("parse node");
+            cache.insert(addr, Arc::new(node));
+        }
+
+        let key = |oid: u64| BtrfsKey {
+            objectid: oid,
+            item_type: 0,
+            offset: 0,
+        };
+        let ranges = [
+            (key(0), key(50)),
+            (key(100), key(101)),
+            (key(250), key(650)),
+            (key(800), key(900)),
+            (key(0), key(10_000)),
+            (key(401), key(599)),
+        ];
+
+        for (lo, hi) in ranges {
+            let mut serial_provider = |logical: u64| -> Result<Arc<BtrfsParsedNode>, ParseError> {
+                cache
+                    .get(&logical)
+                    .cloned()
+                    .ok_or(ParseError::InvalidField {
+                        field: "logical",
+                        reason: "node not in parsed cache",
+                    })
+            };
+            let serial =
+                walk_tree_range_with_nodes(&mut serial_provider, root_logical, NODESIZE, lo, hi)
+                    .expect("serial cached walk");
+
+            let parallel_provider = |logical: u64| -> Result<Arc<BtrfsParsedNode>, ParseError> {
+                cache
+                    .get(&logical)
+                    .cloned()
+                    .ok_or(ParseError::InvalidField {
+                        field: "logical",
+                        reason: "node not in parsed cache",
+                    })
+            };
+            let parallel = walk_tree_range_parallel_with_nodes(
+                &parallel_provider,
+                root_logical,
+                NODESIZE,
+                lo,
+                hi,
+            )
+            .expect("parallel cached walk");
+
+            assert_eq!(parallel, serial, "range [{lo:?},{hi:?})");
         }
     }
 

@@ -47,7 +47,8 @@ use ffs_btrfs::{
     enumerate_snapshots, enumerate_subvolumes, fsflags_to_btrfs_inode_flags, generate_send_stream,
     lookup_data_block_csum, map_logical_to_physical, parse_btrfs_tree_node, parse_dir_items,
     parse_extent_data, parse_inode_item, parse_root_item, parse_xattr_items, walk_chunk_tree,
-    walk_tree, walk_tree_floor_with_nodes, walk_tree_range_with_nodes, walk_tree_with_nodes,
+    walk_tree, walk_tree_floor_with_nodes, walk_tree_range_parallel_with_nodes,
+    walk_tree_with_nodes,
     writeback::{DiskWritebackContext, WriteDependencyDag, WritebackExecutor},
     xflags_to_btrfs_inode_flags,
 };
@@ -6727,9 +6728,9 @@ impl OpenFs {
 
         let nodesize = ctx.nodesize;
 
-        let mut provider = |logical: u64| self.btrfs_read_parsed_node(cx, logical);
+        let provider = |logical: u64| self.btrfs_read_parsed_node(cx, logical);
 
-        walk_tree_range_with_nodes(&mut provider, root_logical, nodesize, lo, hi)
+        walk_tree_range_parallel_with_nodes(&provider, root_logical, nodesize, lo, hi)
             .map_err(|e| parse_to_ffs_error(&e))
     }
 

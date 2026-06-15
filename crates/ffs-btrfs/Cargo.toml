@@ -11,6 +11,7 @@ asupersync = { workspace = true }
 ffs-mvcc = { workspace = true }
 ffs-ondisk = { workspace = true }
 ffs-types = { workspace = true }
+rayon = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 
