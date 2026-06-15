@@ -16,17 +16,21 @@
 //! This bench isolates that I/O fan-out the way `btrfs_decompress_extents`
 //! isolates the decompress fan-out. The in-memory test device used by the
 //! unit tests is a zero-latency memcpy, so it cannot show the win; here a
-//! `LatencyDevice` parks the worker for a fixed per-read latency (modeling a
-//! real-disk/SSD-queue access time) before returning the blob. The two arms
-//! mirror the production shapes exactly and assert identical decompressed
-//! output, so this measures only the read-latency overlap, not any change in
-//! result:
+//! generic `LatencyBlockDevice<D: BlockDevice>` decorator parks the worker for
+//! a fixed per-read latency (modeling a real-disk/SSD-queue access time)
+//! before delegating to the wrapped block device. The two arms mirror the
+//! production shapes exactly and assert identical decompressed output, so this
+//! measures only the read-latency overlap, not any change in result:
 //!   * `serial_read_then_par_decompress` — the pre-bd-307e4 shape: read every
 //!     blob serially, then `into_par_iter` decompress.
 //!   * `par_read_and_decompress` — the bd-307e4 shape: `into_par_iter` over the
 //!     read specs, reading the blob and decompressing it inside the map.
 
+use asupersync::Cx;
 use criterion::{Criterion, criterion_group, criterion_main};
+use ffs_block::{BlockBuf, BlockDevice};
+use ffs_error::{FfsError, Result};
+use ffs_types::BlockNumber;
 use rayon::prelude::{IntoParallelIterator, ParallelIterator};
 use std::hint::black_box;
 use std::time::Duration;
@@ -47,18 +51,111 @@ fn prng(seed: u64) -> u8 {
     (x >> 33) as u8
 }
 
-/// A device whose every read pays a fixed access latency before returning the
-/// stored compressed blob — a stand-in for `btrfs_read_logical_into` against
-/// real storage. Parking (not spinning) models a blocking read that frees the
-/// core, so concurrent reads overlap their latencies up to the rayon pool size.
-struct LatencyDevice {
-    blobs: Vec<Vec<u8>>,
+/// Generic latency-injecting decorator for any `BlockDevice`.
+///
+/// Parking (not spinning) models a blocking read that frees the core, so
+/// concurrent reads overlap their latencies up to the rayon pool size.
+struct LatencyBlockDevice<D> {
+    inner: D,
+    read_latency: Duration,
 }
 
-impl LatencyDevice {
-    fn read(&self, idx: usize) -> Vec<u8> {
-        std::thread::sleep(READ_LATENCY);
-        self.blobs[idx].clone()
+impl<D: BlockDevice> LatencyBlockDevice<D> {
+    fn new(inner: D, read_latency: Duration) -> Self {
+        Self {
+            inner,
+            read_latency,
+        }
+    }
+}
+
+impl<D: BlockDevice> BlockDevice for LatencyBlockDevice<D> {
+    fn read_block(&self, cx: &Cx, block: BlockNumber) -> Result<BlockBuf> {
+        std::thread::sleep(self.read_latency);
+        self.inner.read_block(cx, block)
+    }
+
+    fn supports_contiguous_reads(&self) -> bool {
+        self.inner.supports_contiguous_reads()
+    }
+
+    fn read_contiguous_blocks(
+        &self,
+        cx: &Cx,
+        start: BlockNumber,
+        bufs: &mut [BlockBuf],
+    ) -> Result<()> {
+        std::thread::sleep(self.read_latency);
+        self.inner.read_contiguous_blocks(cx, start, bufs)
+    }
+
+    fn read_contiguous_into(&self, cx: &Cx, start: BlockNumber, dst: &mut [u8]) -> Result<()> {
+        std::thread::sleep(self.read_latency);
+        self.inner.read_contiguous_into(cx, start, dst)
+    }
+
+    fn write_block(&self, cx: &Cx, block: BlockNumber, data: &[u8]) -> Result<()> {
+        self.inner.write_block(cx, block, data)
+    }
+
+    fn write_contiguous_blocks(&self, cx: &Cx, start: BlockNumber, data: &[u8]) -> Result<()> {
+        self.inner.write_contiguous_blocks(cx, start, data)
+    }
+
+    fn block_size(&self) -> u32 {
+        self.inner.block_size()
+    }
+
+    fn block_count(&self) -> u64 {
+        self.inner.block_count()
+    }
+
+    fn sync(&self, cx: &Cx) -> Result<()> {
+        self.inner.sync(cx)
+    }
+}
+
+/// Blob-backed bench device: one compressed blob per logical block.
+struct BlobBlockDevice {
+    blobs: Vec<BlockBuf>,
+    max_blob_len: usize,
+}
+
+impl BlobBlockDevice {
+    fn new(blobs: Vec<Vec<u8>>) -> Self {
+        let max_blob_len = blobs.iter().map(Vec::len).max().unwrap_or(0);
+        let blobs = blobs.into_iter().map(BlockBuf::new).collect();
+        Self {
+            blobs,
+            max_blob_len,
+        }
+    }
+}
+
+impl BlockDevice for BlobBlockDevice {
+    fn read_block(&self, _cx: &Cx, block: BlockNumber) -> Result<BlockBuf> {
+        let idx = usize::try_from(block.0)
+            .map_err(|_| FfsError::Format("bench block index overflow".into()))?;
+        self.blobs
+            .get(idx)
+            .map(BlockBuf::clone_ref)
+            .ok_or_else(|| FfsError::Format(format!("bench block out of range: {}", block.0)))
+    }
+
+    fn write_block(&self, _cx: &Cx, _block: BlockNumber, _data: &[u8]) -> Result<()> {
+        Err(FfsError::ReadOnly)
+    }
+
+    fn block_size(&self) -> u32 {
+        u32::try_from(self.max_blob_len).unwrap_or(u32::MAX)
+    }
+
+    fn block_count(&self) -> u64 {
+        self.blobs.len() as u64
+    }
+
+    fn sync(&self, _cx: &Cx) -> Result<()> {
+        Ok(())
     }
 }
 
@@ -84,11 +181,16 @@ fn decompress_one(compressed: &[u8]) -> Vec<u8> {
     zstd::decode_all(compressed).expect("zstd decompress")
 }
 
+fn read_blob(dev: &impl BlockDevice, cx: &Cx, idx: usize) -> Vec<u8> {
+    let block = BlockNumber(u64::try_from(idx).expect("bench index fits u64"));
+    dev.read_block(cx, block).expect("bench read").into_inner()
+}
+
 /// Pre-bd-307e4: read every blob serially, then decompress in parallel.
-fn serial_read_then_par_decompress(dev: &LatencyDevice) -> Vec<Vec<u8>> {
+fn serial_read_then_par_decompress(dev: &impl BlockDevice, cx: &Cx) -> Vec<Vec<u8>> {
     let mut gathered: Vec<(usize, Vec<u8>)> = Vec::with_capacity(N);
     for idx in 0..N {
-        gathered.push((idx, dev.read(idx)));
+        gathered.push((idx, read_blob(dev, cx, idx)));
     }
     let mut out: Vec<(usize, Vec<u8>)> = gathered
         .into_par_iter()
@@ -99,11 +201,11 @@ fn serial_read_then_par_decompress(dev: &LatencyDevice) -> Vec<Vec<u8>> {
 }
 
 /// bd-307e4: read and decompress each blob inside the parallel map.
-fn par_read_and_decompress(dev: &LatencyDevice) -> Vec<Vec<u8>> {
+fn par_read_and_decompress(dev: &impl BlockDevice, cx: &Cx) -> Vec<Vec<u8>> {
     let mut out: Vec<(usize, Vec<u8>)> = (0..N)
         .into_par_iter()
         .map(|idx| {
-            let blob = dev.read(idx);
+            let blob = read_blob(dev, cx, idx);
             (idx, decompress_one(&blob))
         })
         .collect();
@@ -112,14 +214,13 @@ fn par_read_and_decompress(dev: &LatencyDevice) -> Vec<Vec<u8>> {
 }
 
 fn bench_btrfs_read_io_overlap(c: &mut Criterion) {
-    let dev = LatencyDevice {
-        blobs: build_compressed(),
-    };
+    let cx = Cx::for_testing();
+    let dev = LatencyBlockDevice::new(BlobBlockDevice::new(build_compressed()), READ_LATENCY);
 
     // Isomorphism: both arms produce byte-identical decompressed extents.
     assert_eq!(
-        serial_read_then_par_decompress(&dev),
-        par_read_and_decompress(&dev),
+        serial_read_then_par_decompress(&dev, &cx),
+        par_read_and_decompress(&dev, &cx),
         "bd-307e4 parallel read+decompress diverged from serial-read shape"
     );
 
@@ -129,10 +230,17 @@ fn bench_btrfs_read_io_overlap(c: &mut Criterion) {
         .warm_up_time(Duration::from_millis(300))
         .measurement_time(Duration::from_secs(3));
     group.bench_function("serial_read_then_par_decompress", |b| {
-        b.iter(|| black_box(serial_read_then_par_decompress(black_box(&dev))));
+        b.iter(|| {
+            black_box(serial_read_then_par_decompress(
+                black_box(&dev),
+                black_box(&cx),
+            ));
+        });
     });
     group.bench_function("par_read_and_decompress", |b| {
-        b.iter(|| black_box(par_read_and_decompress(black_box(&dev))));
+        b.iter(|| {
+            black_box(par_read_and_decompress(black_box(&dev), black_box(&cx)));
+        });
     });
     group.finish();
 }
