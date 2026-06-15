@@ -91,7 +91,9 @@ fn bench_chunk_map(c: &mut Criterion) {
     // Isomorphism: the binary-search map returns the same physical address the
     // linear scan does for every probe.
     for &t in &probes {
-        let mapped = map_logical_to_physical(&chunks, t).unwrap().map(|m| m.physical);
+        let mapped = map_logical_to_physical(&chunks, t)
+            .unwrap()
+            .map(|m| m.physical);
         assert_eq!(mapped, linear(&chunks, t), "logical {t} diverged");
     }
 

@@ -382,8 +382,7 @@ fn bench_ext4_write_path(c: &mut Criterion) {
             || seed.clone(),
             |image| {
                 black_box(
-                    run_ext4_sequential_write(image)
-                        .expect("run ext4 sequential write benchmark"),
+                    run_ext4_sequential_write(image).expect("run ext4 sequential write benchmark"),
                 );
             },
             BatchSize::LargeInput,

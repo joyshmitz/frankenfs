@@ -159,7 +159,11 @@ impl BlockDevice for BlobBlockDevice {
 /// Build N uncompressed `LEN`-byte extent payloads.
 fn build_extents() -> Vec<Vec<u8>> {
     (0..N)
-        .map(|e| (0..LEN).map(|b| prng((e as u64) << 24 ^ b as u64)).collect())
+        .map(|e| {
+            (0..LEN)
+                .map(|b| prng((e as u64) << 24 ^ b as u64))
+                .collect()
+        })
         .collect()
 }
 

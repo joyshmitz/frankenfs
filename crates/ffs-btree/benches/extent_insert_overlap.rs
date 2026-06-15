@@ -117,7 +117,12 @@ fn build_tree(n: u32) -> (MemBlockDevice, [u8; 60]) {
 }
 
 /// OLD overlap check: full-tree walk.
-fn validate_walk(cx: &Cx, dev: &dyn BlockDevice, root: &[u8; 60], probe: &Ext4Extent) -> Result<()> {
+fn validate_walk(
+    cx: &Cx,
+    dev: &dyn BlockDevice,
+    root: &[u8; 60],
+    probe: &Ext4Extent,
+) -> Result<()> {
     let (ns, ne) = extent_range(probe);
     walk(cx, dev, root, &mut |e| {
         let (es, ee) = extent_range(e);
@@ -165,7 +170,14 @@ fn bench_overlap_check(c: &mut Criterion) {
 
         let mut group = c.benchmark_group(format!("extent_overlap_check_{n}"));
         group.bench_function("walk_full_tree", |b| {
-            b.iter(|| black_box(validate_walk(&cx, &dev, black_box(&root), black_box(&probe))));
+            b.iter(|| {
+                black_box(validate_walk(
+                    &cx,
+                    &dev,
+                    black_box(&root),
+                    black_box(&probe),
+                ))
+            });
         });
         group.bench_function("walk_range", |b| {
             b.iter(|| {

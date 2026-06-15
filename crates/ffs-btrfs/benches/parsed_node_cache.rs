@@ -255,8 +255,8 @@ impl ParsedNodeBenchData {
 
         // bd-l8r3s: the full-tree parallel walk must equal the serial full walk.
         let mut full_serial_provider = |logical: u64| self.cached_node(logical);
-        let full_serial =
-            walk_tree_with_nodes(&mut full_serial_provider, ROOT_LOGICAL, NODESIZE).expect("serial");
+        let full_serial = walk_tree_with_nodes(&mut full_serial_provider, ROOT_LOGICAL, NODESIZE)
+            .expect("serial");
         let full_parallel_provider = |logical: u64| self.cached_node(logical);
         let full_parallel =
             walk_tree_parallel_with_nodes(&full_parallel_provider, ROOT_LOGICAL, NODESIZE)
@@ -371,9 +371,7 @@ impl ParsedNodeBenchData {
         group.bench_function("parallel_cached_latency", |b| {
             b.iter(|| {
                 let provider = |logical: u64| self.cached_node_with_latency(logical);
-                black_box(
-                    walk_tree_parallel_with_nodes(&provider, ROOT_LOGICAL, NODESIZE).unwrap(),
-                )
+                black_box(walk_tree_parallel_with_nodes(&provider, ROOT_LOGICAL, NODESIZE).unwrap())
             });
         });
         group.finish();

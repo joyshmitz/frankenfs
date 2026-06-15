@@ -222,7 +222,13 @@ fn bench_scrub_scan_io_overlap(c: &mut Criterion) {
         .warm_up_time(Duration::from_millis(300))
         .measurement_time(Duration::from_secs(3));
     group.bench_function("serial_scan", |b| {
-        b.iter(|| black_box(serial_scan(black_box(&dev), black_box(&validator), black_box(&cx))));
+        b.iter(|| {
+            black_box(serial_scan(
+                black_box(&dev),
+                black_box(&validator),
+                black_box(&cx),
+            ))
+        });
     });
     group.bench_function("parallel_scan", |b| {
         b.iter(|| {

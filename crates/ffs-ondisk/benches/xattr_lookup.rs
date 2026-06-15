@@ -40,13 +40,15 @@ fn build_block() -> Vec<u8> {
         block[entry_off + 1] = EXT4_XATTR_INDEX_USER;
         block[entry_off + 2..entry_off + 4].copy_from_slice(&(value_offs as u16).to_le_bytes());
         block[entry_off + 4..entry_off + 8].copy_from_slice(&0_u32.to_le_bytes()); // e_value_inum
-        block[entry_off + 8..entry_off + 12]
-            .copy_from_slice(&(VALUE_LEN as u32).to_le_bytes()); // e_value_size
+        block[entry_off + 8..entry_off + 12].copy_from_slice(&(VALUE_LEN as u32).to_le_bytes()); // e_value_size
         block[entry_off + 12..entry_off + 16].copy_from_slice(&0_u32.to_le_bytes()); // hash
         block[entry_off + 16..entry_off + 16 + name_bytes.len()].copy_from_slice(name_bytes);
 
         // Distinct value bytes per attribute.
-        for (j, b) in block[value_offs..value_offs + VALUE_LEN].iter_mut().enumerate() {
+        for (j, b) in block[value_offs..value_offs + VALUE_LEN]
+            .iter_mut()
+            .enumerate()
+        {
             *b = (i as u8).wrapping_mul(31).wrapping_add(j as u8);
         }
 

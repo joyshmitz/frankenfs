@@ -44,11 +44,19 @@ fn bench_dir_lookup(c: &mut Criterion) {
     let absent: &[u8] = b"zzzzzzzz";
 
     // Sanity: block parses and the absent name is not found.
-    assert!(lookup_in_dir_block(&block, BLOCK_SIZE, absent).unwrap().is_none());
+    assert!(
+        lookup_in_dir_block(&block, BLOCK_SIZE, absent)
+            .unwrap()
+            .is_none()
+    );
 
     let mut group = c.benchmark_group("dir_lookup");
     group.bench_function("lookup_absent_dense_4k", |b| {
-        b.iter(|| black_box(lookup_in_dir_block(black_box(&block), BLOCK_SIZE, black_box(absent)).unwrap()));
+        b.iter(|| {
+            black_box(
+                lookup_in_dir_block(black_box(&block), BLOCK_SIZE, black_box(absent)).unwrap(),
+            )
+        });
     });
     group.bench_function("lookup_casefold_absent_dense_4k", |b| {
         b.iter(|| {
