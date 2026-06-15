@@ -37,6 +37,10 @@ harness = false
 name = "encode_parallel"
 harness = false
 
+[[bench]]
+name = "scrub_validate_parallel"
+harness = false
+
 [[bin]]
 name = "ffs-demo"
 path = "src/bin/ffs-demo.rs"
