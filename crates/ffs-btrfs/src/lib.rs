@@ -13,7 +13,7 @@ pub use ffs_ondisk::btrfs::*;
 use ffs_types::{BlockNumber, CommitSeq, ParseError, Snapshot, TxnId};
 use rayon::prelude::{IntoParallelIterator, ParallelIterator};
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Range;
 use std::sync::{Arc, OnceLock};
 use thiserror::Error;
@@ -7765,28 +7765,42 @@ where
     // received root — its path is empty (chmod/chown/utimes of the root apply to
     // "."). A subvol-name prefix here makes every MKFILE/MKDIR/WRITE target a
     // never-created `subvol/` subdirectory, so `btrfs receive` fails with ENOENT.
-    let build_path = |ino: u64| -> Vec<u8> {
-        if ino == BTRFS_FIRST_FREE_OBJECTID {
-            return Vec::new();
+    let mut path_cache: HashMap<u64, Vec<u8>> =
+        HashMap::with_capacity(inode_parents.len().saturating_add(1));
+    path_cache.insert(BTRFS_FIRST_FREE_OBJECTID, Vec::new());
+    let mut build_path = |ino: u64| -> Vec<u8> {
+        if let Some(path) = path_cache.get(&ino) {
+            return path.clone();
         }
-        let mut components = Vec::new();
-        let mut current = ino;
 
-        while let Some((parent, name)) = inode_parents.get(&current) {
-            components.push(name.clone());
+        let mut trail = Vec::new();
+        let mut current = ino;
+        let mut base_path = Vec::new();
+        loop {
+            if let Some(path) = path_cache.get(&current) {
+                base_path.clone_from(path);
+                break;
+            }
+            let Some((parent, name)) = inode_parents.get(&current) else {
+                break;
+            };
+            trail.push((current, name.clone()));
             if *parent == current || *parent == BTRFS_FIRST_FREE_OBJECTID {
                 break;
             }
             current = *parent;
         }
 
-        components.reverse();
-        let mut path = Vec::new();
-        for comp in components {
+        let mut path = base_path;
+        for (node, name) in trail.iter().rev() {
             if !path.is_empty() {
                 path.push(b'/');
             }
-            path.extend_from_slice(&comp);
+            path.extend_from_slice(name);
+            path_cache.insert(*node, path.clone());
+        }
+        if trail.is_empty() {
+            path_cache.insert(ino, path.clone());
         }
         path
     };
@@ -7824,19 +7838,44 @@ where
             other_inos.push(ino);
         }
     }
-    let dir_depth = |start: u64| -> usize {
-        let mut depth = 0usize;
+    let mut depth_cache: HashMap<u64, usize> =
+        HashMap::with_capacity(inode_parents.len().saturating_add(1));
+    depth_cache.insert(BTRFS_FIRST_FREE_OBJECTID, 0);
+    let mut dir_depth = |start: u64| -> usize {
+        if let Some(&depth) = depth_cache.get(&start) {
+            return depth;
+        }
+
+        let mut trail = Vec::new();
         let mut cur = start;
-        while let Some((parent, _)) = inode_parents.get(&cur) {
+        let mut base_depth = 0usize;
+        loop {
+            if let Some(&depth) = depth_cache.get(&cur) {
+                base_depth = depth;
+                break;
+            }
+            let Some((parent, _)) = inode_parents.get(&cur) else {
+                break;
+            };
             if *parent == cur || *parent == BTRFS_FIRST_FREE_OBJECTID {
                 break;
             }
+            trail.push(cur);
             cur = *parent;
-            depth += 1;
-            if depth > inodes.len() {
-                break; // defensive: malformed cyclic parent chain
+            if trail.len() > inodes.len() {
+                let depth = trail.len();
+                depth_cache.insert(start, depth);
+                return depth;
             }
         }
+
+        let mut depth = base_depth;
+        for node in trail.iter().rev() {
+            depth += 1;
+            depth_cache.insert(*node, depth);
+        }
+        let depth = depth_cache.get(&start).copied().unwrap_or(base_depth);
+        depth_cache.insert(start, depth);
         depth
     };
     dir_inos.sort_by_key(|&ino| (dir_depth(ino), ino));
@@ -20434,6 +20473,138 @@ mod tests {
             Some(b"a/f1".as_ref()),
             "Link must target the primary path"
         );
+    }
+
+    #[test]
+    fn generate_send_stream_path_edge_golden_hashes() {
+        fn make_inode_item(mode: u32) -> Vec<u8> {
+            let mut buf = vec![0u8; 160];
+            buf[0..8].copy_from_slice(&1_u64.to_le_bytes());
+            buf[40..44].copy_from_slice(&1_u32.to_le_bytes());
+            buf[52..56].copy_from_slice(&mode.to_le_bytes());
+            buf
+        }
+        #[expect(clippy::cast_possible_truncation)]
+        fn make_inode_ref(index: u64, name: &[u8]) -> Vec<u8> {
+            let mut buf = Vec::new();
+            buf.extend_from_slice(&index.to_le_bytes());
+            buf.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            buf.extend_from_slice(name);
+            buf
+        }
+        fn inode_item(objectid: u64, mode: u32) -> BtrfsLeafEntry {
+            BtrfsLeafEntry {
+                key: BtrfsKey {
+                    objectid,
+                    item_type: BTRFS_ITEM_INODE_ITEM,
+                    offset: 0,
+                },
+                data: make_inode_item(mode),
+            }
+        }
+        fn inode_ref(objectid: u64, parent: u64, index: u64, name: &[u8]) -> BtrfsLeafEntry {
+            BtrfsLeafEntry {
+                key: BtrfsKey {
+                    objectid,
+                    item_type: BTRFS_ITEM_INODE_REF,
+                    offset: parent,
+                },
+                data: make_inode_ref(index, name),
+            }
+        }
+        fn stream_hash(items: &[BtrfsLeafEntry]) -> String {
+            let uuid = [0x42_u8; 16];
+            let stream =
+                generate_send_stream(items, b"sv", &uuid, 7, |_b, _l, _r, _c| Ok(Vec::new()))
+                    .expect("generate send stream");
+            let digest = Sha256::digest(&stream);
+            let mut hash = String::with_capacity(64);
+            for byte in digest {
+                write!(&mut hash, "{byte:02x}").expect("write hash");
+            }
+            hash
+        }
+
+        let dir = u32::from(ffs_types::S_IFDIR | 0o755);
+        let reg = u32::from(ffs_types::S_IFREG | 0o644);
+        let root = BTRFS_FIRST_FREE_OBJECTID;
+        let cases: [(&str, &str, Vec<BtrfsLeafEntry>); 7] = [
+            (
+                "flat",
+                "bab19e3cc9e0639ff53470abc6ed5e596a9f9b9868a46d76061e31c3cf237431",
+                vec![
+                    inode_item(root, dir),
+                    inode_item(root + 1, reg),
+                    inode_ref(root + 1, root, 1, b"file"),
+                ],
+            ),
+            (
+                "deep",
+                "482fd169b19c71bdb36a9bb4e70ad0bf7d4df087632b0ad9539062785089b480",
+                vec![
+                    inode_item(root, dir),
+                    inode_item(root + 1, dir),
+                    inode_ref(root + 1, root, 1, b"a"),
+                    inode_item(root + 2, dir),
+                    inode_ref(root + 2, root + 1, 1, b"b"),
+                    inode_item(root + 3, reg),
+                    inode_ref(root + 3, root + 2, 1, b"c"),
+                ],
+            ),
+            (
+                "renamed_parent_higher_objectid",
+                "064c7895f53ab4745c18cdceb536b56c197f969d46fc1297c6145bf5bed93af0",
+                vec![
+                    inode_item(root, dir),
+                    inode_item(root + 1, reg),
+                    inode_ref(root + 1, root + 44, 1, b"child"),
+                    inode_item(root + 44, dir),
+                    inode_ref(root + 44, root, 1, b"parent"),
+                ],
+            ),
+            (
+                "hardlink_second_parent",
+                "e23470feba03c5cb6acd9391ce357d8b85c31a416c0929526e12e9b09e92aeb7",
+                vec![
+                    inode_item(root, dir),
+                    inode_item(root + 1, dir),
+                    inode_ref(root + 1, root, 1, b"a"),
+                    inode_item(root + 2, dir),
+                    inode_ref(root + 2, root, 1, b"b"),
+                    inode_item(root + 3, reg),
+                    inode_ref(root + 3, root + 1, 1, b"f1"),
+                    inode_ref(root + 3, root + 2, 2, b"f2"),
+                ],
+            ),
+            (
+                "missing_parent",
+                "5cc7d8d4ee9ef3d0c6c37ed721630551c420e9d3365bef194955af8eb50fa54e",
+                vec![
+                    inode_item(root, dir),
+                    inode_item(root + 1, reg),
+                    inode_ref(root + 1, root + 99, 1, b"orphan"),
+                ],
+            ),
+            (
+                "root_self_ref",
+                "d272ea2d17b469310a9c24b0e937ce5baad73e9ee173ae3a85f61c7afec97a92",
+                vec![inode_item(root, dir), inode_ref(root, root, 0, b"..")],
+            ),
+            (
+                "non_root_self_loop",
+                "b2e688204e610da9a4566562676611e1cd597231ae62e5fb0f87da0981e2584c",
+                vec![
+                    inode_item(root, dir),
+                    inode_item(root + 1, reg),
+                    inode_ref(root + 1, root + 1, 1, b"loop"),
+                ],
+            ),
+        ];
+
+        for (name, expected_hash, items) in cases {
+            let hash = stream_hash(&items);
+            assert_eq!(hash, expected_hash, "{name} raw stream hash changed");
+        }
     }
 
     #[test]

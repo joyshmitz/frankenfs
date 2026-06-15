@@ -71,5 +71,9 @@ harness = false
 name = "cow_descent_scan"
 harness = false
 
+[[bench]]
+name = "send_stream_path_cache"
+harness = false
+
 [lints]
 workspace = true
