@@ -10497,8 +10497,15 @@ impl OpenFs {
         }
         // A data-bearing read job carved onto a disjoint `&mut buf` window.
         enum IoJob<'b> {
-            Run { phys: u64, dst: &'b mut [u8] },
-            Partial { phys: u64, off: usize, dst: &'b mut [u8] },
+            Run {
+                phys: u64,
+                dst: &'b mut [u8],
+            },
+            Partial {
+                phys: u64,
+                off: usize,
+                dst: &'b mut [u8],
+            },
         }
 
         let file_size = inode.size;
@@ -10675,17 +10682,35 @@ impl OpenFs {
         self.read_dir_with_scope(cx, &RequestScope::empty(), inode)
     }
 
+    #[allow(clippy::too_many_lines)]
     pub fn read_dir_with_scope(
         &self,
         cx: &Cx,
         scope: &RequestScope,
         inode: &Ext4Inode,
     ) -> Result<Vec<Ext4DirEntry>, FfsError> {
+        // A directory block segment in logical-block order (bd-2jurz): either a
+        // single block already in the warm cache, or a cold contiguous run read
+        // from the device. Holes / unwritten blocks contribute no segment.
+        // (Declared first so clippy::items_after_statements stays happy.)
+        enum DirSeg {
+            Cached {
+                phys: BlockNumber,
+            },
+            ColdRun {
+                phys: BlockNumber,
+                run_len: usize,
+                cacheable: bool,
+            },
+        }
+        // One cold run's vectored read result (block bytes), deferred from the
+        // parallel phase and consumed in block order during finalize.
+        type DirRunRead = Result<Vec<Vec<u8>>, FfsError>;
+
         Self::ext4_reject_inline_data_dir(inode)?;
         let bs = u64::from(self.block_size());
         let block_size = self.block_size();
         let num_blocks = dir_logical_block_count(inode.size, bs)?;
-        let mut all_entries = Vec::new();
 
         // Helper: is this physical block already in the read-only data-block
         // cache (bd-di429 warm path)?
@@ -10694,6 +10719,13 @@ impl OpenFs {
                 && self.ext4_file_data_block_cache.read().contains_key(&blk)
         };
 
+        // PLAN pass (serial): classify every present block into a segment in
+        // block order, reproducing the original interleaved control flow but
+        // issuing no device reads. The cache is only *read* here, and a cold
+        // block's later cache population can only affect its own physical block
+        // (extents map logical→physical 1:1), so the classification is
+        // identical to the serial reader (bd-q2tq5 run-coalescing preserved).
+        let mut segs: Vec<DirSeg> = Vec::new();
         let mut lb: u32 = 0;
         while lb < num_blocks {
             let Some((phys, unwritten)) = self.resolve_extent(cx, scope, inode, lb)? else {
@@ -10706,20 +10738,14 @@ impl OpenFs {
             }
             let phys_blk = BlockNumber(phys);
 
-            // Warm path: a cached dir block is served scalar from the cache
-            // (bd-di429), so repeated readdirs stay at zero device ops.
             if is_cached(phys_blk) {
-                let block_data = self.read_ext4_file_data_block_with_scope(cx, scope, phys_blk)?;
-                let (entries, _tail) =
-                    parse_dir_block(&block_data, block_size).map_err(|e| parse_to_ffs_error(&e))?;
-                all_entries.extend(entries);
+                segs.push(DirSeg::Cached { phys: phys_blk });
                 lb += 1;
                 continue;
             }
 
             // Cold path: extend a contiguous-physical run of present,
-            // non-unwritten, not-yet-cached blocks and read them in ONE
-            // vectored device op, then populate the cache (bd-q2tq5).
+            // non-unwritten, not-yet-cached blocks read in ONE vectored op.
             let cacheable = self.can_cache_ext4_read_only_block(scope, phys_blk);
             let mut run_len: u32 = 1;
             loop {
@@ -10737,32 +10763,79 @@ impl OpenFs {
                     _ => break,
                 }
             }
+            segs.push(DirSeg::ColdRun {
+                phys: phys_blk,
+                run_len: run_len as usize,
+                cacheable,
+            });
+            lb += run_len;
+        }
 
-            if run_len == 1 {
-                // Single cold block: the cached-read helper reads + populates.
-                let block_data = self.read_ext4_file_data_block_with_scope(cx, scope, phys_blk)?;
-                let (entries, _tail) =
-                    parse_dir_block(&block_data, block_size).map_err(|e| parse_to_ffs_error(&e))?;
-                all_entries.extend(entries);
-            } else {
-                let datas =
-                    self.read_contiguous_blocks_with_scope(cx, scope, phys_blk, run_len as usize)?;
-                for (i, data) in datas.iter().enumerate() {
-                    if cacheable {
-                        let blk = BlockNumber(phys + i as u64);
-                        let mut cache = self.ext4_file_data_block_cache.write();
-                        if cache.len() < EXT4_FILE_DATA_BLOCK_CACHE_LIMIT {
-                            cache
-                                .entry(blk)
-                                .or_insert_with(|| Arc::from(data.as_slice()));
-                        }
-                    }
-                    let (entries, _tail) =
-                        parse_dir_block(data, block_size).map_err(|e| parse_to_ffs_error(&e))?;
+        // PARALLEL READ: read the cold runs' device blocks concurrently. Each
+        // read is a `&self`/`&scope` call that only reads the MVCC overlay
+        // (RwLock store), so the per-run device-read latencies overlap (parking,
+        // pool-bounded) and the bytes are byte-identical. Results are consumed
+        // in segment (block) order below, so the lowest-block read error wins —
+        // isomorphic to the serial reader (bd-strse / bd-yg6tk precedent).
+        let mut cold_reads: Vec<Option<DirRunRead>> = (0..segs.len()).map(|_| None).collect();
+        {
+            use rayon::prelude::{IntoParallelIterator, ParallelIterator};
+            let specs: Vec<(usize, BlockNumber, usize)> = segs
+                .iter()
+                .enumerate()
+                .filter_map(|(i, seg)| match seg {
+                    DirSeg::ColdRun { phys, run_len, .. } => Some((i, *phys, *run_len)),
+                    DirSeg::Cached { .. } => None,
+                })
+                .collect();
+            let results: Vec<(usize, DirRunRead)> = specs
+                .into_par_iter()
+                .map(|(i, phys, run_len)| {
+                    (
+                        i,
+                        self.read_contiguous_blocks_with_scope(cx, scope, phys, run_len),
+                    )
+                })
+                .collect();
+            for (i, res) in results {
+                cold_reads[i] = Some(res);
+            }
+        }
+
+        // FINALIZE (serial, block order): serve cached blocks from the cache,
+        // populate the cache from the cold reads, and parse every block's
+        // directory entries in order.
+        let mut all_entries = Vec::new();
+        for (i, seg) in segs.iter().enumerate() {
+            match seg {
+                DirSeg::Cached { phys } => {
+                    let block_data = self.read_ext4_file_data_block_with_scope(cx, scope, *phys)?;
+                    let (entries, _tail) = parse_dir_block(&block_data, block_size)
+                        .map_err(|e| parse_to_ffs_error(&e))?;
                     all_entries.extend(entries);
                 }
+                DirSeg::ColdRun {
+                    phys, cacheable, ..
+                } => {
+                    let datas = cold_reads[i]
+                        .take()
+                        .expect("cold dir run read deferred to parallel phase")?;
+                    for (j, data) in datas.iter().enumerate() {
+                        if *cacheable {
+                            let blk = BlockNumber(phys.0 + j as u64);
+                            let mut cache = self.ext4_file_data_block_cache.write();
+                            if cache.len() < EXT4_FILE_DATA_BLOCK_CACHE_LIMIT {
+                                cache
+                                    .entry(blk)
+                                    .or_insert_with(|| Arc::from(data.as_slice()));
+                            }
+                        }
+                        let (entries, _tail) = parse_dir_block(data, block_size)
+                            .map_err(|e| parse_to_ffs_error(&e))?;
+                        all_entries.extend(entries);
+                    }
+                }
             }
-            lb += run_len;
         }
 
         Ok(all_entries)
