@@ -83,7 +83,11 @@ fn bench_extent_leaf_cache(c: &mut Criterion) {
         }
         for lb in 0..N as u32 {
             let cached = cache.lookup(0, lb).map(|m| m.physical_start);
-            assert_eq!(cached, resolve_via_reparse(&block, lb), "block {lb} diverged");
+            assert_eq!(
+                cached,
+                resolve_via_reparse(&block, lb),
+                "block {lb} diverged"
+            );
         }
     }
 

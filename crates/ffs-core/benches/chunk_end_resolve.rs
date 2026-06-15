@@ -64,7 +64,11 @@ fn bench_chunk_end_resolve(c: &mut Criterion) {
 
     // Isomorphism: binary returns the same chunk end as linear for every probe.
     for &t in &probes {
-        assert_eq!(linear(&chunks, t), binary(&chunks, t), "logical {t} diverged");
+        assert_eq!(
+            linear(&chunks, t),
+            binary(&chunks, t),
+            "logical {t} diverged"
+        );
     }
 
     let mut group = c.benchmark_group("btrfs_chunk_end_1000");

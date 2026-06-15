@@ -471,6 +471,11 @@ fn bench_select(c: &mut Criterion) {
     c.bench_function("succinct_select0", |b| {
         b.iter(|| black_box(sb.select0(black_box(target))));
     });
+
+    let target = sb.count_ones() / 2; // select the middle allocated block
+    c.bench_function("succinct_select1", |b| {
+        b.iter(|| black_box(sb.select1(black_box(target))));
+    });
 }
 
 fn raw_get_bit(bitmap: &[u8], pos: u32) -> bool {
@@ -551,6 +556,55 @@ fn select0_in_block_broadword(
     None
 }
 
+fn select1_in_block_bit_scan(
+    bitmap: &[u8],
+    block_idx: u32,
+    len: u32,
+    mut remaining: u32,
+) -> Option<u32> {
+    let bit_base = block_idx * 256;
+    let bits_in_block = 256.min(len - bit_base);
+
+    for bit in 0..bits_in_block {
+        let pos = bit_base + bit;
+        if raw_get_bit(bitmap, pos) {
+            if remaining == 0 {
+                return Some(pos);
+            }
+            remaining -= 1;
+        }
+    }
+
+    None
+}
+
+fn select1_in_block_broadword(
+    bitmap: &[u8],
+    block_idx: u32,
+    len: u32,
+    mut remaining: u32,
+) -> Option<u32> {
+    let mut word_base = block_idx * 256;
+    let block_end = word_base.saturating_add(256).min(len);
+
+    while word_base < block_end {
+        let bits_in_word = (block_end - word_base).min(64);
+        let mut one_mask = raw_read_word(bitmap, word_base / 64);
+        if bits_in_word < 64 {
+            one_mask &= (1_u64 << bits_in_word) - 1;
+        }
+
+        let ones_in_word = one_mask.count_ones();
+        if remaining < ones_in_word {
+            return Some(word_base + raw_select_nth_set_bit(one_mask, remaining));
+        }
+        remaining -= ones_in_word;
+        word_base += 64;
+    }
+
+    None
+}
+
 /// A/B only the one changed lever: the final in-block select0 scan.
 fn bench_select0_in_block_bit_scan_vs_broadword(c: &mut Criterion) {
     let mut bm = vec![0xFF_u8; 64]; // 512 bits, two succinct 256-bit blocks.
@@ -579,6 +633,45 @@ fn bench_select0_in_block_bit_scan_vs_broadword(c: &mut Criterion) {
     group.bench_function("new_broadword", |b| {
         b.iter(|| {
             black_box(select0_in_block_broadword(
+                black_box(&bm),
+                block_idx,
+                len,
+                black_box(target_in_block),
+            ))
+        });
+    });
+    group.finish();
+}
+
+/// A/B the symmetric select1 in-block scan before moving production select1
+/// onto the same broadword primitive select0 already uses.
+fn bench_select1_in_block_bit_scan_vs_broadword(c: &mut Criterion) {
+    let mut bm = vec![0_u8; 64]; // 512 bits, two succinct 256-bit blocks.
+    for pos in [256_u32, 257, 258, 300, 301, 302, 303, 304] {
+        bm[(pos / 8) as usize] |= 1 << (pos % 8);
+    }
+    let len = 305;
+    let block_idx = 1;
+    let target_in_block = 7;
+    debug_assert_eq!(
+        select1_in_block_bit_scan(&bm, block_idx, len, target_in_block),
+        select1_in_block_broadword(&bm, block_idx, len, target_in_block)
+    );
+
+    let mut group = c.benchmark_group("select1_in_block");
+    group.bench_function("old_bit_scan", |b| {
+        b.iter(|| {
+            black_box(select1_in_block_bit_scan(
+                black_box(&bm),
+                block_idx,
+                len,
+                black_box(target_in_block),
+            ))
+        });
+    });
+    group.bench_function("new_broadword", |b| {
+        b.iter(|| {
+            black_box(select1_in_block_broadword(
                 black_box(&bm),
                 block_idx,
                 len,
@@ -778,6 +871,7 @@ criterion_group!(
     bench_rank,
     bench_select,
     bench_select0_in_block_bit_scan_vs_broadword,
+    bench_select1_in_block_bit_scan_vs_broadword,
     bench_build,
     bench_find_free_full_scan_word_vs_byte,
     bench_find_contiguous_word_vs_byte,

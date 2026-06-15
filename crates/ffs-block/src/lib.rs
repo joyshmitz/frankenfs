@@ -2710,7 +2710,11 @@ impl ArcState {
                     kept.push_back(victim);
                     self.loc.insert(
                         victim,
-                        if queue_is_t1 { ArcList::T1 } else { ArcList::T2 },
+                        if queue_is_t1 {
+                            ArcList::T1
+                        } else {
+                            ArcList::T2
+                        },
                     );
                     kept.extend(drain);
                     if queue_is_t1 {
