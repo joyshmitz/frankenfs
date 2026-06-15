@@ -1959,7 +1959,10 @@ mod fc_tests {
         ok.extend(build_fc_tag(0x08, &tail2)); // TAIL
         let ok_result = replay_fast_commit(&ok).unwrap();
         assert_eq!(ok_result.transactions_found, 1);
-        assert_eq!(ok_result.operations, vec![FcOperation::InodeUpdate(7, Vec::new())]);
+        assert_eq!(
+            ok_result.operations,
+            vec![FcOperation::InodeUpdate(7, Vec::new())]
+        );
         assert!(!ok_result.fallback_required);
     }
 
@@ -2298,7 +2301,10 @@ mod fc_tests {
         let result = replay_fast_commit(&data).unwrap();
         assert_eq!(result.transactions_found, 1);
         assert_eq!(result.last_tid, 3);
-        assert_eq!(result.operations, vec![FcOperation::InodeUpdate(42, Vec::new())]);
+        assert_eq!(
+            result.operations,
+            vec![FcOperation::InodeUpdate(42, Vec::new())]
+        );
         assert_eq!(result.incomplete_transactions, 0);
         assert!(result.fallback_required);
     }
@@ -2317,7 +2323,10 @@ mod fc_tests {
         let result = replay_fast_commit(&data).unwrap();
         assert_eq!(result.transactions_found, 1);
         assert_eq!(result.last_tid, 3);
-        assert_eq!(result.operations, vec![FcOperation::InodeUpdate(42, Vec::new())]);
+        assert_eq!(
+            result.operations,
+            vec![FcOperation::InodeUpdate(42, Vec::new())]
+        );
         assert_eq!(result.incomplete_transactions, 0);
         assert!(result.fallback_required);
     }
@@ -2336,7 +2345,10 @@ mod fc_tests {
         let result = replay_fast_commit(&data).unwrap();
         assert_eq!(result.transactions_found, 1);
         assert_eq!(result.last_tid, 3);
-        assert_eq!(result.operations, vec![FcOperation::InodeUpdate(42, Vec::new())]);
+        assert_eq!(
+            result.operations,
+            vec![FcOperation::InodeUpdate(42, Vec::new())]
+        );
         assert_eq!(result.incomplete_transactions, 0);
         assert!(!result.fallback_required);
     }
@@ -4717,8 +4729,14 @@ mod tests {
         // legacy tag; t_checksum is in-struct, not appended (bd-bryy3).
         assert_eq!(Jbd2TagFormat::CsumV2.tag_size(false), 8);
         assert_eq!(Jbd2TagFormat::CsumV2.tag_size(true), 12);
-        assert_eq!(Jbd2TagFormat::CsumV2.tag_size(false), Jbd2TagFormat::Legacy.tag_size(false));
-        assert_eq!(Jbd2TagFormat::CsumV2.tag_size(true), Jbd2TagFormat::Legacy.tag_size(true));
+        assert_eq!(
+            Jbd2TagFormat::CsumV2.tag_size(false),
+            Jbd2TagFormat::Legacy.tag_size(false)
+        );
+        assert_eq!(
+            Jbd2TagFormat::CsumV2.tag_size(true),
+            Jbd2TagFormat::Legacy.tag_size(true)
+        );
         assert_eq!(
             max_tags_per_descriptor_for_format(512, false, true, Jbd2TagFormat::CsumV2),
             62

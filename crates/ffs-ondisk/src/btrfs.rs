@@ -1441,7 +1441,11 @@ pub struct BtrfsKeyPtr {
 /// A u64 mask with bits `[lo, hi)` set (`0 <= lo < hi <= 64`).
 #[inline]
 fn word_range_mask(lo: usize, hi: usize) -> u64 {
-    let high = if hi >= 64 { u64::MAX } else { (1_u64 << hi) - 1 };
+    let high = if hi >= 64 {
+        u64::MAX
+    } else {
+        (1_u64 << hi) - 1
+    };
     let low = (1_u64 << lo) - 1;
     high & !low
 }

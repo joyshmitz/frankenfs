@@ -411,8 +411,7 @@ const S_IFLNK: u16 = 0xA000;
 /// cluster-aware block management is unimplemented; deleting one currently
 /// leaks its data blocks rather than corrupting the bitmap).
 fn inode_uses_indirect_blocks(inode: &Ext4Inode) -> bool {
-    const EXCLUDED: u32 =
-        EXT4_EXTENTS_FL | EXT4_INLINE_DATA_FL | EXT4_COMPR_FL | EXT4_COMPRBLK_FL;
+    const EXCLUDED: u32 = EXT4_EXTENTS_FL | EXT4_INLINE_DATA_FL | EXT4_COMPR_FL | EXT4_COMPRBLK_FL;
     if inode.flags & EXCLUDED != 0 {
         return false;
     }
@@ -649,7 +648,9 @@ pub fn truncate_indirect_blocks(
         (
             14usize,
             3u32,
-            12u64.saturating_add(ppb).saturating_add(ppb.saturating_mul(ppb)),
+            12u64
+                .saturating_add(ppb)
+                .saturating_add(ppb.saturating_mul(ppb)),
         ),
     ] {
         let span = ppb.saturating_pow(level);
@@ -1438,11 +1439,26 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(freed, 3, "frees direct[1] + single-indirect data + its root");
+        assert_eq!(
+            freed, 3,
+            "frees direct[1] + single-indirect data + its root"
+        );
         // Slot 0 (logical 0) survives; slot 1 and the single-indirect root cleared.
-        assert_eq!(&inode.extent_bytes[0..4], &2000u32.to_le_bytes(), "logical 0 kept");
-        assert_eq!(&inode.extent_bytes[4..8], &[0, 0, 0, 0], "logical 1 slot cleared");
-        assert_eq!(&inode.extent_bytes[48..52], &[0, 0, 0, 0], "single-indirect root cleared");
+        assert_eq!(
+            &inode.extent_bytes[0..4],
+            &2000u32.to_le_bytes(),
+            "logical 0 kept"
+        );
+        assert_eq!(
+            &inode.extent_bytes[4..8],
+            &[0, 0, 0, 0],
+            "logical 1 slot cleared"
+        );
+        assert_eq!(
+            &inode.extent_bytes[48..52],
+            &[0, 0, 0, 0],
+            "single-indirect root cleared"
+        );
         assert_eq!(
             groups[0].free_blocks,
             geo.blocks_per_group - 1,

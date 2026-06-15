@@ -25,9 +25,9 @@ use asupersync::raptorq::gf256::{Gf256, gf256_add_slice, gf256_addmul_slice, gf2
 use asupersync::raptorq::rfc6330::{next_prime_ge, try_tuple};
 use asupersync::raptorq::systematic::{EmittedSymbol, SystematicEncoder, SystematicParams};
 use ffs_block::BlockDevice;
-use rayon::prelude::{IntoParallelIterator, ParallelIterator};
 use ffs_error::{FfsError, Result};
 use ffs_types::{BlockNumber, GroupNumber};
+use rayon::prelude::{IntoParallelIterator, ParallelIterator};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, OnceLock};
 

@@ -579,16 +579,23 @@ pub fn punch_hole(
     // tree per punch (bd-k2wc7) — isomorphic, since the retained overlap
     // predicate rejects anything a pruned subtree could hold.
     let mut overlapping = Vec::new();
-    ffs_btree::walk_range(cx, dev, root_bytes, logical_start, count, &mut |ext: &Ext4Extent| {
-        let ext_len = u32::from(ext.actual_len());
-        let ext_start = u64::from(ext.logical_block);
-        let ext_end = ext_start.saturating_add(u64::from(ext_len));
+    ffs_btree::walk_range(
+        cx,
+        dev,
+        root_bytes,
+        logical_start,
+        count,
+        &mut |ext: &Ext4Extent| {
+            let ext_len = u32::from(ext.actual_len());
+            let ext_start = u64::from(ext.logical_block);
+            let ext_end = ext_start.saturating_add(u64::from(ext_len));
 
-        if ext_start < hole_end && ext_end > u64::from(logical_start) {
-            overlapping.push(*ext);
-        }
-        Ok(())
-    })?;
+            if ext_start < hole_end && ext_end > u64::from(logical_start) {
+                overlapping.push(*ext);
+            }
+            Ok(())
+        },
+    )?;
 
     let mut total_freed = 0u64;
 
@@ -709,12 +716,19 @@ pub fn collapse_range(
     // hold only extents below cut, which the predicate rejects anyway.
     let (tail_start, tail_span) = logical_suffix(cut);
     let mut tail: Vec<Ext4Extent> = Vec::new();
-    ffs_btree::walk_range(cx, dev, root_bytes, tail_start, tail_span, &mut |ext: &Ext4Extent| {
-        if u64::from(ext.logical_block) >= cut {
-            tail.push(*ext);
-        }
-        Ok(())
-    })?;
+    ffs_btree::walk_range(
+        cx,
+        dev,
+        root_bytes,
+        tail_start,
+        tail_span,
+        &mut |ext: &Ext4Extent| {
+            if u64::from(ext.logical_block) >= cut {
+                tail.push(*ext);
+            }
+            Ok(())
+        },
+    )?;
 
     // Phase 3: delete-then-reinsert each tail extent at its shifted
     // logical_block. Physical blocks are kept — only the logical
@@ -836,12 +850,19 @@ pub fn insert_range(
     // [cut, 2^32) suffix: walk_range over it, not the whole tree (bd-46yld).
     let (tail_start, tail_span) = logical_suffix(cut);
     let mut tail: Vec<Ext4Extent> = Vec::new();
-    ffs_btree::walk_range(cx, dev, root_bytes, tail_start, tail_span, &mut |ext: &Ext4Extent| {
-        if u64::from(ext.logical_block) >= cut {
-            tail.push(*ext);
-        }
-        Ok(())
-    })?;
+    ffs_btree::walk_range(
+        cx,
+        dev,
+        root_bytes,
+        tail_start,
+        tail_span,
+        &mut |ext: &Ext4Extent| {
+            if u64::from(ext.logical_block) >= cut {
+                tail.push(*ext);
+            }
+            Ok(())
+        },
+    )?;
 
     // Move right-to-left so shifted extents cannot collide.
     tail.sort_by_key(|ext| std::cmp::Reverse(ext.logical_block));
@@ -953,8 +974,7 @@ pub fn mark_written(
         &mut |ext: &Ext4Extent| {
             if ext.is_unwritten() {
                 let ext_end = u64::from(ext.logical_block) + u64::from(ext.actual_len());
-                if u64::from(ext.logical_block) < range_end && ext_end > u64::from(logical_start)
-                {
+                if u64::from(ext.logical_block) < range_end && ext_end > u64::from(logical_start) {
                     unwritten_extents.push(*ext);
                 }
             }
@@ -1583,7 +1603,11 @@ impl ExtentCache {
     /// Test-only snapshot of `(key, last_access)` for every resident entry.
     fn debug_resident(&self) -> Vec<((u64, u32), u64)> {
         let inner = self.inner.read();
-        inner.entries.iter().map(|(&k, e)| (k, e.last_access)).collect()
+        inner
+            .entries
+            .iter()
+            .map(|(&k, e)| (k, e.last_access))
+            .collect()
     }
 
     /// Test-only invariant: `eviction_index` carries exactly one row per live
@@ -1591,8 +1615,11 @@ impl ExtentCache {
     /// lazy-heap design risked (stale rows); the `BTreeSet` index must never.
     fn debug_index_consistent(&self) -> bool {
         let inner = self.inner.read();
-        let from_entries: BTreeSet<(u64, (u64, u32))> =
-            inner.entries.iter().map(|(&k, e)| (e.last_access, k)).collect();
+        let from_entries: BTreeSet<(u64, (u64, u32))> = inner
+            .entries
+            .iter()
+            .map(|(&k, e)| (e.last_access, k))
+            .collect();
         from_entries == inner.eviction_index
     }
 }
@@ -6181,7 +6208,10 @@ ExtentMapping { logical_start: 5, physical_start: 134, count: 2, unwritten: true
 
         assert_eq!(cache.stats().entries, CAP);
         // Golden: pinned digest of the full op-by-op resident trace.
-        assert_eq!(digest, 6_744_581_030_166_392_336, "golden trace digest changed");
+        assert_eq!(
+            digest, 6_744_581_030_166_392_336,
+            "golden trace digest changed"
+        );
     }
 
     #[test]

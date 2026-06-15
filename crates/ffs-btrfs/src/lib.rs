@@ -9100,19 +9100,25 @@ mod tests {
         }
 
         let mut serial_provider = |logical: u64| -> Result<Arc<BtrfsParsedNode>, ParseError> {
-            cache.get(&logical).cloned().ok_or(ParseError::InvalidField {
-                field: "logical",
-                reason: "node not in parsed cache",
-            })
+            cache
+                .get(&logical)
+                .cloned()
+                .ok_or(ParseError::InvalidField {
+                    field: "logical",
+                    reason: "node not in parsed cache",
+                })
         };
         let serial = walk_tree_with_nodes(&mut serial_provider, root_logical, NODESIZE)
             .expect("serial cached full walk");
 
         let parallel_provider = |logical: u64| -> Result<Arc<BtrfsParsedNode>, ParseError> {
-            cache.get(&logical).cloned().ok_or(ParseError::InvalidField {
-                field: "logical",
-                reason: "node not in parsed cache",
-            })
+            cache
+                .get(&logical)
+                .cloned()
+                .ok_or(ParseError::InvalidField {
+                    field: "logical",
+                    reason: "node not in parsed cache",
+                })
         };
         let parallel = walk_tree_parallel_with_nodes(&parallel_provider, root_logical, NODESIZE)
             .expect("parallel cached full walk");

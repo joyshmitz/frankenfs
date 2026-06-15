@@ -1597,16 +1597,23 @@ fn validate_insert_does_not_overlap(
     if count == 0 {
         return Ok(());
     }
-    walk_range(cx, dev, root_bytes, extent.logical_block, count, &mut |existing| {
-        let (existing_start, existing_end) = extent_logical_range(existing);
-        if new_start < existing_end && new_end > existing_start {
-            return Err(FfsError::InvalidGeometry(format!(
-                "insert: extent [{new_start}, {new_end}) overlaps existing extent \
+    walk_range(
+        cx,
+        dev,
+        root_bytes,
+        extent.logical_block,
+        count,
+        &mut |existing| {
+            let (existing_start, existing_end) = extent_logical_range(existing);
+            if new_start < existing_end && new_end > existing_start {
+                return Err(FfsError::InvalidGeometry(format!(
+                    "insert: extent [{new_start}, {new_end}) overlaps existing extent \
                  [{existing_start}, {existing_end})"
-            )));
-        }
-        Ok(())
-    })?;
+                )));
+            }
+            Ok(())
+        },
+    )?;
     Ok(())
 }
 

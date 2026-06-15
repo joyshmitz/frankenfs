@@ -5298,7 +5298,11 @@ fn find_xattr_value_by_full_name(
             reason: "value extends past data boundary",
         });
     }
-    Ok(Some((name_index, value_base[v_off..v_end].to_vec(), value_inum)))
+    Ok(Some((
+        name_index,
+        value_base[v_off..v_end].to_vec(),
+        value_inum,
+    )))
 }
 
 /// Find one inode-body xattr by full name without materializing the rest.
@@ -10928,8 +10932,8 @@ mod tests {
         // accented letter and its decomposed (base + combining mark) form fold
         // to the same key. Cover case variants + a multi-letter name.
         let cases: &[(&str, &str)] = &[
-            ("é", "e\u{0301}"),   // NFC vs NFD
-            ("É", "e\u{0301}"),   // uppercase precomposed folds to the same
+            ("é", "e\u{0301}"), // NFC vs NFD
+            ("É", "e\u{0301}"), // uppercase precomposed folds to the same
             ("café", "cafe\u{0301}"),
             ("CAFÉ", "cafe\u{0301}"),
             ("Ñ", "n\u{0303}"),
@@ -13224,8 +13228,10 @@ mod tests {
             ("ß", "SS"),
             ("ASCII", "ascii"),
         ];
-        let mut cases: Vec<(&[u8], &[u8])> =
-            str_cases.iter().map(|(l, r)| (l.as_bytes(), r.as_bytes())).collect();
+        let mut cases: Vec<(&[u8], &[u8])> = str_cases
+            .iter()
+            .map(|(l, r)| (l.as_bytes(), r.as_bytes()))
+            .collect();
         // Invalid UTF-8 pair → ASCII-fold fallback branch.
         cases.push((&[0xFF, 0x41], &[0xFF, 0x61]));
         for (left, right) in cases {
