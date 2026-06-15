@@ -2153,6 +2153,31 @@ pub fn walk_tree_range_with_nodes(
     Ok(walker.out)
 }
 
+/// Full-tree walk with a `Sync` parsed-node provider and parallel sibling
+/// prefetch.
+///
+/// Full-tree counterpart to [`walk_tree_range_parallel_with_nodes`]: visits
+/// every leaf in left-to-right DFS order while fetching the children of each
+/// internal node concurrently. Output order is identical to the serial
+/// [`walk_tree_with_nodes`] because subtrees are still finalized serially in
+/// key-pointer order; only the per-node child fetch overlaps.
+pub fn walk_tree_parallel_with_nodes(
+    node_provider: &(dyn Fn(u64) -> Result<Arc<BtrfsParsedNode>, ParseError> + Sync),
+    root_logical: u64,
+    nodesize: u32,
+) -> Result<Vec<BtrfsLeafEntry>, ParseError> {
+    let mut walker = BtrfsParallelTreeWalker {
+        node_provider,
+        nodesize,
+        out: Vec::new(),
+        active_path: HashSet::new(),
+        visited_nodes: HashSet::new(),
+        range: None,
+    };
+    walker.walk_node(root_logical)?;
+    Ok(walker.out)
+}
+
 /// Range walk with a `Sync` parsed-node provider and parallel sibling prefetch.
 ///
 /// This preserves [`walk_tree_range_with_nodes`] output order by still
@@ -9018,6 +9043,42 @@ mod tests {
 
             assert_eq!(parallel, serial, "range [{lo:?},{hi:?})");
         }
+    }
+
+    #[test]
+    fn walk_tree_parallel_with_nodes_matches_serial() {
+        // bd-l8r3s isomorphism: the full-tree parallel walker must produce the
+        // exact same owned leaf entries (left-to-right DFS order) as the serial
+        // walk_tree_with_nodes — subtrees are still finalized serially in
+        // key-pointer order, only the per-node child fetch overlaps.
+        let oids: Vec<u64> = vec![100, 200, 300, 400, 500, 600, 700, 800];
+        let (blocks, root_logical) = build_two_level_tree(&oids);
+
+        let mut cache: HashMap<u64, Arc<BtrfsParsedNode>> = HashMap::new();
+        for (&addr, bytes) in &blocks {
+            let node = parse_btrfs_tree_node(bytes, 0, addr, NODESIZE).expect("parse node");
+            cache.insert(addr, Arc::new(node));
+        }
+
+        let mut serial_provider = |logical: u64| -> Result<Arc<BtrfsParsedNode>, ParseError> {
+            cache.get(&logical).cloned().ok_or(ParseError::InvalidField {
+                field: "logical",
+                reason: "node not in parsed cache",
+            })
+        };
+        let serial = walk_tree_with_nodes(&mut serial_provider, root_logical, NODESIZE)
+            .expect("serial cached full walk");
+
+        let parallel_provider = |logical: u64| -> Result<Arc<BtrfsParsedNode>, ParseError> {
+            cache.get(&logical).cloned().ok_or(ParseError::InvalidField {
+                field: "logical",
+                reason: "node not in parsed cache",
+            })
+        };
+        let parallel = walk_tree_parallel_with_nodes(&parallel_provider, root_logical, NODESIZE)
+            .expect("parallel cached full walk");
+
+        assert_eq!(parallel, serial, "full-tree parallel walk diverged");
     }
 
     #[test]

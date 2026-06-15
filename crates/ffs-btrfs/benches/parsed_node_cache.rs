@@ -20,8 +20,9 @@ use criterion::{Criterion, criterion_group, criterion_main};
 use ffs_btrfs::{
     BTRFS_HEADER_SIZE, BTRFS_ITEM_EXTENT_DATA, BTRFS_ITEM_SIZE, BTRFS_KEY_PTR_SIZE,
     BtrfsChunkEntry, BtrfsKey, BtrfsLeafEntry, BtrfsLeafEntryBatch, BtrfsParsedNode, BtrfsStripe,
-    parse_btrfs_tree_node, walk_tree_range, walk_tree_range_borrowed_with_nodes,
-    walk_tree_range_parallel_with_nodes, walk_tree_range_with_nodes,
+    parse_btrfs_tree_node, walk_tree_parallel_with_nodes, walk_tree_range,
+    walk_tree_range_borrowed_with_nodes, walk_tree_range_parallel_with_nodes,
+    walk_tree_range_with_nodes, walk_tree_with_nodes,
 };
 use std::collections::HashMap;
 use std::hint::black_box;
@@ -251,6 +252,16 @@ impl ParsedNodeBenchData {
         )
         .expect("parallel latency");
         assert_eq!(from_bytes, parallel_latency);
+
+        // bd-l8r3s: the full-tree parallel walk must equal the serial full walk.
+        let mut full_serial_provider = |logical: u64| self.cached_node(logical);
+        let full_serial =
+            walk_tree_with_nodes(&mut full_serial_provider, ROOT_LOGICAL, NODESIZE).expect("serial");
+        let full_parallel_provider = |logical: u64| self.cached_node(logical);
+        let full_parallel =
+            walk_tree_parallel_with_nodes(&full_parallel_provider, ROOT_LOGICAL, NODESIZE)
+                .expect("parallel");
+        assert_eq!(full_serial, full_parallel);
     }
 
     fn bench_full_range(&self, c: &mut Criterion) {
@@ -344,6 +355,30 @@ impl ParsedNodeBenchData {
         group.finish();
     }
 
+    fn bench_latency_full_walk(&self, c: &mut Criterion) {
+        // bd-l8r3s: full-tree walk (no range) serial vs parallel under latency.
+        let mut group = c.benchmark_group("btrfs_parsed_node_full_walk_latency");
+        group
+            .sample_size(10)
+            .warm_up_time(Duration::from_millis(300))
+            .measurement_time(Duration::from_secs(3));
+        group.bench_function("serial_cached_latency", |b| {
+            b.iter(|| {
+                let mut provider = |logical: u64| self.cached_node_with_latency(logical);
+                black_box(walk_tree_with_nodes(&mut provider, ROOT_LOGICAL, NODESIZE).unwrap())
+            });
+        });
+        group.bench_function("parallel_cached_latency", |b| {
+            b.iter(|| {
+                let provider = |logical: u64| self.cached_node_with_latency(logical);
+                black_box(
+                    walk_tree_parallel_with_nodes(&provider, ROOT_LOGICAL, NODESIZE).unwrap(),
+                )
+            });
+        });
+        group.finish();
+    }
+
     fn bench_narrow_range(&self, c: &mut Criterion) {
         let mut group = c.benchmark_group("btrfs_parsed_node_walk_narrow");
         group.bench_function("byte_reparse", |b| {
@@ -402,6 +437,7 @@ fn bench_parsed_node_cache(c: &mut Criterion) {
     data.assert_isomorphic();
     data.bench_full_range(c);
     data.bench_latency_full_range(c);
+    data.bench_latency_full_walk(c);
     data.bench_narrow_range(c);
 }
 
