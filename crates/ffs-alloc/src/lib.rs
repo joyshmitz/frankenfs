@@ -1670,6 +1670,13 @@ fn try_alloc_in_group(
     if gs.free_blocks < count {
         return Ok(None);
     }
+    if count > 1
+        && gs
+            .cached_block_largest_free_run()
+            .is_some_and(|largest| largest < count)
+    {
+        return Ok(None);
+    }
 
     let blocks_in_group = geo.blocks_in_group(group);
 
@@ -1856,6 +1863,13 @@ fn try_alloc_safe(
     }
 
     if groups[gidx].free_blocks < count {
+        return Ok(None);
+    }
+    if count > 1
+        && groups[gidx]
+            .cached_block_largest_free_run()
+            .is_some_and(|largest| largest < count)
+    {
         return Ok(None);
     }
 

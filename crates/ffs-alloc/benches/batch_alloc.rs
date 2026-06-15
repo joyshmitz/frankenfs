@@ -7,9 +7,10 @@
 //! the I/O amortization benefit.
 
 use asupersync::Cx;
-use criterion::{Criterion, criterion_group, criterion_main};
+use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use ffs_alloc::{
-    AllocHint, FsGeometry, GroupStats, PersistCtx, alloc_blocks_batch_persist, alloc_blocks_persist,
+    AllocHint, FsGeometry, GroupStats, PersistCtx, alloc_blocks, alloc_blocks_batch_persist,
+    alloc_blocks_persist, bitmap_clear, bitmap_count_free, bitmap_largest_free_run, bitmap_set,
 };
 use ffs_block::{BlockBuf, BlockDevice};
 use ffs_error::Result as FfsResult;
@@ -101,6 +102,16 @@ fn make_groups(geo: &FsGeometry) -> Vec<GroupStats> {
         .collect()
 }
 
+fn make_skip_geometry(group_count: u32) -> FsGeometry {
+    FsGeometry {
+        group_count,
+        total_blocks: u64::from(group_count) * 32_768,
+        blocks_per_group: 32_768,
+        block_size: 4096,
+        ..make_geometry()
+    }
+}
+
 fn make_persist_ctx() -> PersistCtx {
     PersistCtx {
         gdt_block: BlockNumber(50),
@@ -112,6 +123,62 @@ fn make_persist_ctx() -> PersistCtx {
         blocks_per_group: 32768,
         inodes_per_group: 2048,
     }
+}
+
+fn make_fragmented_bitmap(geo: &FsGeometry, groups: &[GroupStats], group: GroupNumber) -> Vec<u8> {
+    let mut bitmap = vec![0xAA_u8; geo.block_size as usize];
+    for rel in ffs_alloc::reserved_blocks_in_group(geo, groups, group) {
+        bitmap_set(&mut bitmap, rel);
+    }
+    bitmap
+}
+
+fn make_final_run_bitmap(geo: &FsGeometry, groups: &[GroupStats], group: GroupNumber) -> Vec<u8> {
+    let mut bitmap = vec![0xFF_u8; geo.block_size as usize];
+    let run_start = 1024;
+    for rel in run_start..run_start + 64 {
+        bitmap_clear(&mut bitmap, rel);
+    }
+    for rel in ffs_alloc::reserved_blocks_in_group(geo, groups, group) {
+        bitmap_set(&mut bitmap, rel);
+    }
+    bitmap
+}
+
+fn seed_contiguous_skip_world(
+    cx: &Cx,
+    dev: &MemBlockDevice,
+    geo: &FsGeometry,
+    groups: &mut [GroupStats],
+    exact_cache: bool,
+) {
+    let last_group = GroupNumber(geo.group_count - 1);
+    for group_idx in 0..geo.group_count {
+        let group = GroupNumber(group_idx);
+        let gidx = group_idx as usize;
+        let bitmap = if group == last_group {
+            make_final_run_bitmap(geo, groups, group)
+        } else {
+            make_fragmented_bitmap(geo, groups, group)
+        };
+        let blocks_in_group = geo.blocks_in_group(group);
+        groups[gidx].free_blocks = bitmap_count_free(&bitmap, blocks_in_group);
+        groups[gidx].block_largest_free_run =
+            exact_cache.then(|| bitmap_largest_free_run(&bitmap, blocks_in_group));
+        dev.write_block(cx, groups[gidx].block_bitmap_block, &bitmap)
+            .unwrap();
+    }
+}
+
+fn make_contiguous_skip_world(
+    exact_cache: bool,
+) -> (Cx, MemBlockDevice, FsGeometry, Vec<GroupStats>) {
+    let cx = Cx::for_testing();
+    let geo = make_skip_geometry(128);
+    let dev = MemBlockDevice::new(geo.block_size);
+    let mut groups = make_groups(&geo);
+    seed_contiguous_skip_world(&cx, &dev, &geo, &mut groups, exact_cache);
+    (cx, dev, geo, groups)
 }
 
 /// Benchmark: allocate N blocks one at a time via alloc_blocks_persist.
@@ -210,5 +277,68 @@ fn bench_bulk_alloc(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_single_alloc, bench_bulk_alloc);
+/// Benchmark: skip groups whose exact largest-run cache proves a multi-block
+/// allocation cannot fit. The cache-disabled arm is the pre-optimization shape:
+/// it reads and searches every fragmented group bitmap before reaching the
+/// final satisfiable group.
+fn bench_contiguous_cached_skip(c: &mut Criterion) {
+    let hint = AllocHint::default();
+
+    let (cx_old, dev_old, geo_old, mut groups_old) = make_contiguous_skip_world(false);
+    let (cx_new, dev_new, geo_new, mut groups_new) = make_contiguous_skip_world(true);
+    let old_alloc = alloc_blocks(&cx_old, &dev_old, &geo_old, &mut groups_old, 64, &hint).unwrap();
+    let new_alloc = alloc_blocks(&cx_new, &dev_new, &geo_new, &mut groups_new, 64, &hint).unwrap();
+    assert_eq!(
+        old_alloc, new_alloc,
+        "cached skip must preserve allocation choice"
+    );
+
+    let mut group = c.benchmark_group("alloc_contiguous_cached_skip_128groups");
+    group.bench_function("cache_disabled_bitmap_probe", |b| {
+        b.iter_batched(
+            || make_contiguous_skip_world(false),
+            |(cx, dev, geo, mut groups)| {
+                black_box(
+                    alloc_blocks(
+                        black_box(&cx),
+                        black_box(&dev),
+                        black_box(&geo),
+                        black_box(&mut groups),
+                        black_box(64),
+                        black_box(&hint),
+                    )
+                    .unwrap(),
+                );
+            },
+            BatchSize::SmallInput,
+        );
+    });
+    group.bench_function("exact_cache_skip", |b| {
+        b.iter_batched(
+            || make_contiguous_skip_world(true),
+            |(cx, dev, geo, mut groups)| {
+                black_box(
+                    alloc_blocks(
+                        black_box(&cx),
+                        black_box(&dev),
+                        black_box(&geo),
+                        black_box(&mut groups),
+                        black_box(64),
+                        black_box(&hint),
+                    )
+                    .unwrap(),
+                );
+            },
+            BatchSize::SmallInput,
+        );
+    });
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_single_alloc,
+    bench_bulk_alloc,
+    bench_contiguous_cached_skip
+);
 criterion_main!(benches);
