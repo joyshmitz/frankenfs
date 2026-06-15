@@ -1278,6 +1278,26 @@ impl ByteDeviceBlockAdapter<'_> {
             .checked_mul(u64::from(self.block_size))
             .ok_or_else(|| FfsError::Format("block offset overflow".to_owned()))
     }
+
+    fn read_block_vec(&self, cx: &Cx, block: BlockNumber) -> Result<Vec<u8>, FfsError> {
+        let block_size = usize::try_from(self.block_size)
+            .map_err(|_| FfsError::Format("block_size does not fit usize".to_owned()))?;
+        let offset = self.block_offset(block)?;
+        let end = offset
+            .checked_add(u64::from(self.block_size))
+            .ok_or_else(|| FfsError::Format("block range overflow".to_owned()))?;
+        if end > self.dev.len_bytes() {
+            return Err(FfsError::Format(format!(
+                "block {} out of range for device length {}",
+                block.0,
+                self.dev.len_bytes()
+            )));
+        }
+
+        let mut bytes = vec![0_u8; block_size];
+        self.dev.read_exact_at(cx, ByteOffset(offset), &mut bytes)?;
+        Ok(bytes)
+    }
 }
 
 /// Adapter for ext4 external-journal replay.
@@ -9377,9 +9397,33 @@ impl OpenFs {
             }
         }
 
-        // 3. Fall back to the device's default adapter (which uses the current snapshot).
-        let dev = self.block_device_adapter();
-        Ok(dev.read_block(cx, block)?.as_slice().to_vec())
+        // 3. Fall back to the current-snapshot device view.
+        self.read_current_block_vec_from_device(cx, block)
+    }
+
+    /// Resolve a block at the same current-snapshot fallback used by
+    /// `block_device_adapter`, then read base-device bytes directly into the
+    /// final owned `Vec`. This keeps `read_block_with_scope`'s visibility
+    /// ordering while avoiding the scalar miss path's transient aligned
+    /// `BlockBuf` plus trailing `to_vec` copy.
+    fn read_current_block_vec_from_device(
+        &self,
+        cx: &Cx,
+        block: BlockNumber,
+    ) -> Result<Vec<u8>, FfsError> {
+        let snapshot = self.mvcc_store.read().current_snapshot();
+        {
+            let store = self.mvcc_store.read();
+            if let Some(visible) = store.read_visible(block, snapshot) {
+                return Ok(visible.into_owned());
+            }
+        }
+
+        let base = ByteDeviceBlockAdapter {
+            dev: self.dev.as_ref(),
+            block_size: self.block_size(),
+        };
+        base.read_block_vec(cx, block)
     }
 
     /// Like [`Self::read_block_with_scope`] but materialises the block straight
@@ -58504,6 +58548,38 @@ mod tests {
         )
         .expect("end request scope");
         assert_eq!(fs.mvcc_store().read().active_snapshot_count(), 0);
+    }
+
+    #[test]
+    fn read_block_with_empty_scope_matches_current_adapter_view() {
+        let image = build_ext4_image_with_state(EXT4_VALID_FS);
+        let dev = TestDevice::from_vec(image);
+        let cx = Cx::for_testing();
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
+        let block = BlockNumber(8);
+
+        let base = fs
+            .block_device_adapter()
+            .read_block(&cx, block)
+            .expect("read adapter base block")
+            .as_slice()
+            .to_vec();
+        assert_eq!(
+            fs.read_block_with_scope(&cx, &RequestScope::empty(), block)
+                .expect("read empty-scope base block"),
+            base
+        );
+
+        let overlay = vec![0x5E_u8; usize::try_from(fs.block_size()).expect("block size fits")];
+        fs.block_device_adapter()
+            .write_block(&cx, block, &overlay)
+            .expect("write through current adapter");
+
+        assert_eq!(
+            fs.read_block_with_scope(&cx, &RequestScope::empty(), block)
+                .expect("read empty-scope current MVCC block"),
+            overlay
+        );
     }
 
     #[test]

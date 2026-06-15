@@ -19,6 +19,8 @@
 //! `to_vec`, so the delta isolates exactly the eliminated realign work. Running
 //! both in one binary keeps the comparison on a single CPU, side-stepping the
 //! cross-worker timing skew that makes absolute rch numbers untrustworthy.
+//! `block_vec_direct_final_buffer` measures the next owned-read lever: fill the
+//! final `Vec<u8>` directly when the caller already wants owned bytes.
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use ffs_block::BlockBuf;
@@ -29,6 +31,11 @@ const BLOCK_SIZE: usize = 4096;
 fn bench_block_buf_construct(c: &mut Criterion) {
     // Stand-in for the bytes a device read would deposit into the buffer.
     let src = vec![0xA5_u8; BLOCK_SIZE];
+    let mut aligned = BlockBuf::zeroed(BLOCK_SIZE);
+    aligned.make_mut().copy_from_slice(&src);
+    let mut direct = vec![0_u8; BLOCK_SIZE];
+    direct.copy_from_slice(&src);
+    assert_eq!(aligned.as_slice(), direct.as_slice());
 
     c.bench_function("block_buf_via_unaligned_vec", |b| {
         b.iter(|| {
@@ -44,6 +51,14 @@ fn bench_block_buf_construct(c: &mut Criterion) {
             let mut buf = BlockBuf::zeroed(BLOCK_SIZE);
             buf.make_mut().copy_from_slice(black_box(&src));
             black_box(buf.as_slice().to_vec())
+        });
+    });
+
+    c.bench_function("block_vec_direct_final_buffer", |b| {
+        b.iter(|| {
+            let mut bytes = vec![0_u8; BLOCK_SIZE];
+            bytes.copy_from_slice(black_box(&src));
+            black_box(bytes)
         });
     });
 
