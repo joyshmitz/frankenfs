@@ -14400,7 +14400,7 @@ impl OpenFs {
                 iblock[4..8].copy_from_slice(&rdev.to_le_bytes());
             }
         }
-        new_inode.extent_bytes = iblock.to_vec();
+        new_inode.extent_bytes = iblock.to_vec().into();
         // FIFOs/sockets/devices have no allocated data blocks.
         new_inode.blocks = 0;
         new_inode.size = 0;
@@ -34204,7 +34204,7 @@ mod tests {
         ptrs[12 * 4..12 * 4 + 4].copy_from_slice(&20_u32.to_le_bytes()); // i_block[12] = single
         ptrs[13 * 4..13 * 4 + 4].copy_from_slice(&21_u32.to_le_bytes()); // i_block[13] = double
         ptrs[14 * 4..14 * 4 + 4].copy_from_slice(&23_u32.to_le_bytes()); // i_block[14] = triple
-        inode.extent_bytes = ptrs;
+        inode.extent_bytes = ptrs.into();
 
         // First logical block reached via each indirection level.
         assert_eq!(
@@ -34269,7 +34269,7 @@ mod tests {
         let mut ptrs = vec![0_u8; 15 * 4];
         ptrs[0..4].copy_from_slice(&30_u32.to_le_bytes()); // i_block[0] = data block 30
         // i_block[1] left zero → sparse hole.
-        inode.extent_bytes = ptrs;
+        inode.extent_bytes = ptrs.into();
         inode.size = (2 * BS) as u64;
 
         let out = fs
@@ -34338,7 +34338,7 @@ mod tests {
         indirect.flags &= !ffs_types::EXT4_EXTENTS_FL;
         let mut ptrs = vec![0_u8; 15 * 4];
         ptrs[0..4].copy_from_slice(&u32::try_from(phys).expect("phys fits u32").to_le_bytes());
-        indirect.extent_bytes = ptrs;
+        indirect.extent_bytes = ptrs.into();
         indirect.size = bs as u64;
         fs.persist_ext4_inode_for_testing(&cx, ino, &indirect)
             .expect("persist indirect inode");
@@ -34430,7 +34430,7 @@ mod tests {
         indirect.flags &= !ffs_types::EXT4_EXTENTS_FL;
         let mut iblock = vec![0_u8; 15 * 4];
         iblock[0..4].copy_from_slice(&u32::try_from(phys0).unwrap().to_le_bytes());
-        indirect.extent_bytes = iblock;
+        indirect.extent_bytes = iblock.into();
         indirect.size = bs as u64;
         fs.persist_ext4_inode_for_testing(&cx, ino, &indirect)
             .expect("persist indirect");
@@ -34518,7 +34518,7 @@ mod tests {
         indirect.flags &= !ffs_types::EXT4_EXTENTS_FL;
         let mut iblock = vec![0_u8; 15 * 4];
         iblock[0..4].copy_from_slice(&u32::try_from(phys0).unwrap().to_le_bytes());
-        indirect.extent_bytes = iblock;
+        indirect.extent_bytes = iblock.into();
         indirect.size = bs as u64;
         fs.persist_ext4_inode_for_testing(&cx, ino, &indirect)
             .expect("persist indirect");
@@ -34609,7 +34609,7 @@ mod tests {
         indirect.flags &= !ffs_types::EXT4_EXTENTS_FL;
         let mut iblock = vec![0_u8; 15 * 4];
         iblock[0..4].copy_from_slice(&u32::try_from(phys0).unwrap().to_le_bytes());
-        indirect.extent_bytes = iblock;
+        indirect.extent_bytes = iblock.into();
         indirect.size = bs as u64;
         fs.persist_ext4_inode_for_testing(&cx, ino, &indirect)
             .expect("persist indirect");
@@ -34723,7 +34723,7 @@ mod tests {
         indirect.flags &= !ffs_types::EXT4_EXTENTS_FL;
         let mut iblock = vec![0_u8; 15 * 4];
         iblock[0..4].copy_from_slice(&u32::try_from(phys0).unwrap().to_le_bytes());
-        indirect.extent_bytes = iblock;
+        indirect.extent_bytes = iblock.into();
         indirect.size = bs_u64;
         fs.persist_ext4_inode_for_testing(&cx, ino, &indirect)
             .expect("persist indirect");
@@ -34827,7 +34827,7 @@ mod tests {
         indirect.flags &= !ffs_types::EXT4_EXTENTS_FL;
         let mut iblock = vec![0_u8; 15 * 4];
         iblock[0..4].copy_from_slice(&u32::try_from(phys0).unwrap().to_le_bytes());
-        indirect.extent_bytes = iblock;
+        indirect.extent_bytes = iblock.into();
         indirect.size = bs_u64;
         fs.persist_ext4_inode_for_testing(&cx, ino, &indirect)
             .expect("persist indirect");
@@ -34932,7 +34932,7 @@ mod tests {
         indirect.flags &= !ffs_types::EXT4_EXTENTS_FL;
         let mut iblock = vec![0_u8; 15 * 4];
         iblock[0..4].copy_from_slice(&u32::try_from(phys0).unwrap().to_le_bytes());
-        indirect.extent_bytes = iblock;
+        indirect.extent_bytes = iblock.into();
         indirect.size = bs as u64;
         fs.persist_ext4_inode_for_testing(&cx, ino, &indirect)
             .expect("persist indirect");
@@ -34998,7 +34998,7 @@ mod tests {
         indirect.flags &= !ffs_types::EXT4_EXTENTS_FL;
         let mut iblock = vec![0_u8; 15 * 4];
         iblock[0..4].copy_from_slice(&u32::try_from(phys0).unwrap().to_le_bytes());
-        indirect.extent_bytes = iblock;
+        indirect.extent_bytes = iblock.into();
         indirect.size = bs_u64;
         fs.persist_ext4_inode_for_testing(&cx, ino, &indirect)
             .expect("persist indirect");
@@ -35057,7 +35057,7 @@ mod tests {
             let blk = u32::try_from(30 + i).expect("block fits u32");
             ptrs[i * 4..i * 4 + 4].copy_from_slice(&blk.to_le_bytes());
         }
-        inode.extent_bytes = ptrs;
+        inode.extent_bytes = ptrs.into();
         inode.size = (4 * BS) as u64;
 
         scalar.store(0, AtomicOrdering::SeqCst);
@@ -35131,7 +35131,7 @@ mod tests {
         let mut inode = make_test_inode(ffs_types::S_IFREG | 0o644, 0, 0);
         inode.flags = ffs_types::EXT4_INLINE_DATA_FL;
         inode.size = 4;
-        inode.extent_bytes = b"data".to_vec();
+        inode.extent_bytes = b"data".to_vec().into();
 
         let bytes = OpenFs::read_ext4_inline_data(&inode, 0, 4)
             .expect("i_block-only inline data should not require ibody xattrs");
@@ -57760,7 +57760,7 @@ mod tests {
         }
         let mut indirect = inode.clone();
         indirect.flags &= !ffs_types::EXT4_EXTENTS_FL;
-        indirect.extent_bytes = ptrs;
+        indirect.extent_bytes = ptrs.into();
         indirect.size = total as u64;
         fs.persist_ext4_inode_for_testing(&cx, ino, &indirect)
             .expect("persist indirect inode");
@@ -75982,7 +75982,7 @@ mod tests {
                     atime_extra: 0, ctime_extra: 0, mtime_extra: 0,
                     crtime: 0, crtime_extra: 0,
                     extra_isize: 32, checksum: 0, version_hi: initial_hi, projid: 0,
-                    extent_bytes: vec![0; 60], xattr_ibody: Vec::new(),
+                    extent_bytes: vec![0; 60].into(), xattr_ibody: Vec::new(),
                     number: 0,
                 };
                 let before = u64::from(inode.version) | (u64::from(inode.version_hi) << 32);

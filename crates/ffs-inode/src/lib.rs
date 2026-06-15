@@ -374,7 +374,7 @@ pub fn create_inode(
         checksum: 0,
         version_hi: 0,
         projid: 0,
-        extent_bytes,
+        extent_bytes: extent_bytes.into(),
         xattr_ibody: Vec::new(),
         number: 0,
     };
@@ -1198,7 +1198,7 @@ mod tests {
 
             version_hi: 0,
             projid: 0,
-            extent_bytes: vec![0u8; 60],
+            extent_bytes: vec![0u8; 60].into(),
             xattr_ibody: Vec::new(),
             number: 0,
         };
@@ -1256,7 +1256,7 @@ mod tests {
 
             version_hi: 0,
             projid: 0,
-            extent_bytes: vec![0u8; 60],
+            extent_bytes: vec![0u8; 60].into(),
             xattr_ibody: Vec::new(),
             number: 0,
         };
@@ -1425,7 +1425,7 @@ mod tests {
         eb[0..4].copy_from_slice(&2000u32.to_le_bytes()); // i_block[0]  -> logical 0
         eb[4..8].copy_from_slice(&2001u32.to_le_bytes()); // i_block[1]  -> logical 1
         eb[48..52].copy_from_slice(&2500u32.to_le_bytes()); // i_block[12] -> single-indirect root
-        inode.extent_bytes = eb;
+        inode.extent_bytes = eb.into();
 
         let freed = truncate_indirect_blocks(
             &cx,
@@ -1506,7 +1506,7 @@ mod tests {
         inode.blocks = 8;
         let mut eb = vec![0u8; 60];
         eb[0..4].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes()); // EXT2_COMPRESSED_BLKADDR
-        inode.extent_bytes = eb;
+        inode.extent_bytes = eb.into();
 
         // Must not error (pre-fix this hit free_blocks_persist(0xFFFFFFFF)).
         delete_inode(
@@ -1588,7 +1588,7 @@ mod tests {
 
             version_hi: 0,
             projid: 0,
-            extent_bytes: vec![0u8; 60],
+            extent_bytes: vec![0u8; 60].into(),
             xattr_ibody: Vec::new(),
             number: 0,
         };
@@ -1750,7 +1750,7 @@ mod tests {
 
             version_hi: 0,
             projid: 0,
-            extent_bytes: vec![0u8; 60],
+            extent_bytes: vec![0u8; 60].into(),
             xattr_ibody: Vec::new(),
             number: 0,
         };
@@ -1790,7 +1790,7 @@ mod tests {
 
             version_hi: 0,
             projid: 0,
-            extent_bytes: vec![0u8; 60],
+            extent_bytes: vec![0u8; 60].into(),
             xattr_ibody: Vec::new(),
             number: 0,
         };
@@ -1829,7 +1829,7 @@ mod tests {
 
             version_hi: 0,
             projid: 0,
-            extent_bytes: vec![0u8; 60],
+            extent_bytes: vec![0u8; 60].into(),
             xattr_ibody: xattr_data.clone(),
             number: 0,
         };
@@ -2122,7 +2122,7 @@ mod tests {
 
             version_hi: 0,
             projid: 0,
-            extent_bytes: vec![0u8; 60],
+            extent_bytes: vec![0u8; 60].into(),
             xattr_ibody: Vec::new(),
             number: 0,
         };
@@ -2447,7 +2447,7 @@ mod tests {
 
             version_hi: 0,
             projid: 0,
-            extent_bytes: vec![0u8; 60],
+            extent_bytes: vec![0u8; 60].into(),
             xattr_ibody: Vec::new(),
             number: 0,
         };
@@ -2509,7 +2509,7 @@ mod tests {
 
             version_hi: 0,
             projid: 0,
-            extent_bytes: vec![0u8; 60],
+            extent_bytes: vec![0u8; 60].into(),
             xattr_ibody: Vec::new(),
             number: 0,
         };
@@ -2550,7 +2550,7 @@ mod tests {
 
             version_hi: 0,
             projid: 0x1234,
-            extent_bytes: vec![0u8; 60],
+            extent_bytes: vec![0u8; 60].into(),
             xattr_ibody: vec![0xAA; 10],
             number: 0,
         };
@@ -2599,7 +2599,7 @@ mod tests {
 
             version_hi: 0,
             projid: 0,
-            extent_bytes: vec![0u8; 60],
+            extent_bytes: vec![0u8; 60].into(),
             xattr_ibody: Vec::new(),
             number: 0,
         };
@@ -2642,7 +2642,7 @@ mod tests {
 
             version_hi: 0,
             projid: 0xABCD_1234,
-            extent_bytes: vec![0u8; 60],
+            extent_bytes: vec![0u8; 60].into(),
             xattr_ibody: Vec::new(),
             number: 0,
         };
@@ -2683,7 +2683,7 @@ mod tests {
 
             version_hi: 0,
             projid: 0,
-            extent_bytes: vec![0u8; 60],
+            extent_bytes: vec![0u8; 60].into(),
             xattr_ibody: Vec::new(),
             number: 0,
         };
@@ -2852,7 +2852,7 @@ mod tests {
 
             version_hi: 0,
             projid: 0,
-            extent_bytes: vec![0u8; 60],
+            extent_bytes: vec![0u8; 60].into(),
             xattr_ibody: Vec::new(),
             number: 0,
         };
@@ -2889,7 +2889,7 @@ mod tests {
 
             version_hi: 0,
             projid: 0,
-            extent_bytes: vec![0u8; 60],
+            extent_bytes: vec![0u8; 60].into(),
             xattr_ibody: Vec::new(),
             number: 0,
         };
@@ -2928,7 +2928,7 @@ mod tests {
 
             version_hi: 0,
             projid: 0,
-            extent_bytes: vec![0u8; 60],
+            extent_bytes: vec![0u8; 60].into(),
             xattr_ibody: Vec::new(),
             number: 0,
         };
@@ -2969,7 +2969,7 @@ mod tests {
 
             version_hi: 0,
             projid: 0,
-            extent_bytes: vec![0u8; 60],
+            extent_bytes: vec![0u8; 60].into(),
             xattr_ibody: Vec::new(),
             number: 0,
         };
@@ -3086,7 +3086,7 @@ mod tests {
 
             version_hi: 0,
             projid: 0,
-            extent_bytes: vec![0u8; 60],
+            extent_bytes: vec![0u8; 60].into(),
             xattr_ibody: Vec::new(),
             number: 0,
         };
@@ -3184,7 +3184,7 @@ mod tests {
                 atime_extra: 0, ctime_extra: 999, mtime_extra: 888,
                 crtime: 0, crtime_extra: 0, extra_isize: 32,
                 checksum: 0, version_hi: 0, projid: 0,
-                extent_bytes: vec![0u8; 60], xattr_ibody: Vec::new(),
+                extent_bytes: vec![0u8; 60].into(), xattr_ibody: Vec::new(),
                 number: 0,
             };
 
@@ -3215,7 +3215,7 @@ mod tests {
                 atime_extra: 42, ctime_extra: 0, mtime_extra: 0,
                 crtime: 0, crtime_extra: 0, extra_isize: 32,
                 checksum: 0, version_hi: 0, projid: 0,
-                extent_bytes: vec![0u8; 60], xattr_ibody: Vec::new(),
+                extent_bytes: vec![0u8; 60].into(), xattr_ibody: Vec::new(),
                 number: 0,
             };
 
@@ -3250,7 +3250,7 @@ mod tests {
                 atime_extra: 0, ctime_extra: 0, mtime_extra: 0,
                 crtime: 0, crtime_extra: 0, extra_isize: 32,
                 checksum: 0, version_hi: 0, projid: 0,
-                extent_bytes: vec![0u8; 60], xattr_ibody: Vec::new(),
+                extent_bytes: vec![0u8; 60].into(), xattr_ibody: Vec::new(),
                 number: 0,
             };
 
@@ -3311,7 +3311,7 @@ mod tests {
                 atime_extra: 0, ctime_extra: 0, mtime_extra: 0,
                 crtime: 0, crtime_extra: 0, extra_isize: 32,
                 checksum: 0, version_hi: 0, projid: 0,
-                extent_bytes: vec![0u8; 60], xattr_ibody: Vec::new(),
+                extent_bytes: vec![0u8; 60].into(), xattr_ibody: Vec::new(),
                 number: 0,
             };
             // Ensure generation matches what will be in the raw buffer.
@@ -3340,7 +3340,7 @@ mod tests {
                 atime_extra: 0, ctime_extra: 0, mtime_extra: 0,
                 crtime: 1_700_000_000, crtime_extra: 0, extra_isize: 32,
                 checksum: 0, version_hi: 0, projid: 0,
-                extent_bytes: vec![0u8; 60], xattr_ibody: Vec::new(),
+                extent_bytes: vec![0u8; 60].into(), xattr_ibody: Vec::new(),
                 number: 0,
             };
 
@@ -3388,7 +3388,7 @@ mod tests {
                 atime_extra: 0, ctime_extra: 0, mtime_extra: 0,
                 crtime: 0, crtime_extra: 0, extra_isize: 32,
                 checksum: 0, version_hi: 0, projid: 0,
-                extent_bytes: vec![0u8; 60], xattr_ibody: Vec::new(),
+                extent_bytes: vec![0u8; 60].into(), xattr_ibody: Vec::new(),
                 number: 0,
             };
 
@@ -3425,7 +3425,7 @@ mod tests {
                 atime_extra, ctime_extra, mtime_extra,
                 crtime, crtime_extra: 0, extra_isize: 32,
                 checksum: 0, version_hi: 0, projid: 0,
-                extent_bytes: vec![0u8; 60], xattr_ibody: Vec::new(),
+                extent_bytes: vec![0u8; 60].into(), xattr_ibody: Vec::new(),
                 number: 0,
             };
 
@@ -3459,7 +3459,7 @@ mod tests {
                 atime_extra: init_atime_extra, ctime_extra: 0, mtime_extra: init_mtime_extra,
                 crtime: 0, crtime_extra: 0, extra_isize: 32,
                 checksum: 0, version_hi: 0, projid: 0,
-                extent_bytes: vec![0u8; 60], xattr_ibody: Vec::new(),
+                extent_bytes: vec![0u8; 60].into(), xattr_ibody: Vec::new(),
                 number: 0,
             };
 
@@ -3485,7 +3485,7 @@ mod tests {
                 atime_extra: 0, ctime_extra: 0, mtime_extra: 0,
                 crtime: 0, crtime_extra: 0, extra_isize: 32,
                 checksum: 0, version_hi: 0, projid: 0,
-                extent_bytes: vec![0u8; 60], xattr_ibody: Vec::new(),
+                extent_bytes: vec![0u8; 60].into(), xattr_ibody: Vec::new(),
                 number: 0,
             };
 
@@ -3515,7 +3515,7 @@ mod tests {
                 atime_extra: 0, ctime_extra: 0, mtime_extra: 0,
                 crtime: 1_700_000_000, crtime_extra: 0, extra_isize: 32,
                 checksum: 0, version_hi: 0, projid: 0,
-                extent_bytes: vec![0u8; 60], xattr_ibody: Vec::new(),
+                extent_bytes: vec![0u8; 60].into(), xattr_ibody: Vec::new(),
                 number: 0,
             };
 
@@ -3549,7 +3549,7 @@ mod tests {
                 atime_extra: 0, ctime_extra: 0, mtime_extra: 0,
                 crtime: 0, crtime_extra: 0, extra_isize: 32,
                 checksum: 0, version_hi: 0, projid: 0,
-                extent_bytes: vec![0u8; 60], xattr_ibody: xattr_data.clone(),
+                extent_bytes: vec![0u8; 60].into(), xattr_ibody: xattr_data.clone(),
                 number: 0,
             };
 
@@ -3579,7 +3579,7 @@ mod tests {
                 atime_extra: 0, ctime_extra: 0, mtime_extra: 0,
                 crtime: 0, crtime_extra: 0, extra_isize: 32,
                 checksum: 0, version_hi: initial_hi, projid: 0,
-                extent_bytes: vec![0u8; 60], xattr_ibody: Vec::new(),
+                extent_bytes: vec![0u8; 60].into(), xattr_ibody: Vec::new(),
                 number: 0,
             };
 
@@ -3618,7 +3618,7 @@ mod tests {
                 atime_extra: 0, ctime_extra: 0, mtime_extra: 0,
                 crtime: 0, crtime_extra: 0, extra_isize: 32,
                 checksum: 0, version_hi: initial_hi, projid: 0,
-                extent_bytes: vec![0u8; 60], xattr_ibody: Vec::new(),
+                extent_bytes: vec![0u8; 60].into(), xattr_ibody: Vec::new(),
                 number: 0,
             };
             touch_atime(&mut inode, secs, nsec);
@@ -3643,7 +3643,7 @@ mod tests {
                 atime_extra: 0, ctime_extra: 0, mtime_extra: 0,
                 crtime: 0, crtime_extra: 0, extra_isize: 32,
                 checksum: 0, version_hi: initial_hi, projid: 0,
-                extent_bytes: vec![0u8; 60], xattr_ibody: Vec::new(),
+                extent_bytes: vec![0u8; 60].into(), xattr_ibody: Vec::new(),
                 number: 0,
             };
             let initial = u64::from(initial_lo) | (u64::from(initial_hi) << 32);
@@ -3668,7 +3668,7 @@ mod tests {
                 atime_extra: 0, ctime_extra: 0, mtime_extra: 0,
                 crtime: 0, crtime_extra: 0, extra_isize: 32,
                 checksum: 0, version_hi: initial_hi, projid: 0,
-                extent_bytes: vec![0u8; 60], xattr_ibody: Vec::new(),
+                extent_bytes: vec![0u8; 60].into(), xattr_ibody: Vec::new(),
                 number: 0,
             };
             let initial = u64::from(initial_lo) | (u64::from(initial_hi) << 32);
@@ -3751,7 +3751,7 @@ mod tests {
                 checksum: 0,
                 version_hi: if advertise(0x9C) { 0x1234_5678 } else { 0 },
                 projid: if advertise(0xA0) { 0xABCD_0123 } else { 0 },
-                extent_bytes: vec![0_u8; 60],
+                extent_bytes: vec![0_u8; 60].into(),
                 xattr_ibody: if extra_isize > 0 {
                     vec![0_u8; xattr_capacity]
                 } else {
@@ -3870,7 +3870,7 @@ mod tests {
 
             version_hi: 0,
             projid: 0,
-            extent_bytes: vec![0u8; 60],
+            extent_bytes: vec![0u8; 60].into(),
             xattr_ibody: vec![],
             number: 0,
         };
@@ -3906,7 +3906,7 @@ mod tests {
 
             version_hi: 0,
             projid: 0,
-            extent_bytes: vec![0u8; 60],
+            extent_bytes: vec![0u8; 60].into(),
             xattr_ibody: vec![],
             number: 0,
         };
@@ -3977,7 +3977,7 @@ mod tests {
 
             version_hi: 0,
             projid: 0,
-            extent_bytes: vec![0u8; 60],
+            extent_bytes: vec![0u8; 60].into(),
             xattr_ibody: vec![],
             number: 0,
         };
@@ -4018,7 +4018,7 @@ mod tests {
 
             version_hi: 0,
             projid: 0,
-            extent_bytes: vec![0u8; 60],
+            extent_bytes: vec![0u8; 60].into(),
             xattr_ibody: vec![],
             number: 0,
         };
@@ -4098,7 +4098,7 @@ mod tests {
 
             version_hi: 0,
             projid: 0,
-            extent_bytes: vec![0xAB; 100], // larger than 60
+            extent_bytes: vec![0xAB; 100].into(), // larger than 60
             xattr_ibody: vec![],
             number: 0,
         };
@@ -4138,7 +4138,7 @@ mod tests {
 
             version_hi: 0,
             projid: 0,
-            extent_bytes: vec![0u8; 60],
+            extent_bytes: vec![0u8; 60].into(),
             xattr_ibody: vec![],
             number: 0,
         };
@@ -4175,7 +4175,7 @@ mod tests {
 
             version_hi: 0,
             projid: 0,
-            extent_bytes: vec![0u8; 60],
+            extent_bytes: vec![0u8; 60].into(),
             xattr_ibody: vec![],
             number: 0,
         };
@@ -4409,7 +4409,7 @@ mod tests {
 
             version_hi: 0,
             projid: 0,
-            extent_bytes: vec![0u8; 60],
+            extent_bytes: vec![0u8; 60].into(),
             xattr_ibody: vec![],
             number: 0,
         };
@@ -4449,7 +4449,7 @@ mod tests {
 
             version_hi: 0,
             projid: 0,
-            extent_bytes: vec![0u8; 60],
+            extent_bytes: vec![0u8; 60].into(),
             xattr_ibody: vec![],
             number: 0,
         };
@@ -4578,7 +4578,7 @@ mod tests {
 
             version_hi: 0,
             projid: 0,
-            extent_bytes: vec![0xCC; 10], // shorter than 60
+            extent_bytes: vec![0xCC; 10].into(), // shorter than 60
             xattr_ibody: vec![],
             number: 0,
         };
@@ -4618,7 +4618,7 @@ mod tests {
 
             version_hi: 0,
             projid: 0,
-            extent_bytes: vec![0u8; 60],
+            extent_bytes: vec![0u8; 60].into(),
             xattr_ibody: vec![],
             number: 0,
         };
@@ -4658,7 +4658,7 @@ mod tests {
 
             version_hi: 0,
             projid: 0,
-            extent_bytes: vec![0u8; 60],
+            extent_bytes: vec![0u8; 60].into(),
             xattr_ibody: vec![],
             number: 0,
         };
@@ -4782,7 +4782,7 @@ mod tests {
 
             version_hi: 0,
             projid: 0,
-            extent_bytes: vec![0u8; 60],
+            extent_bytes: vec![0u8; 60].into(),
             xattr_ibody: vec![],
             number: 0,
         };
@@ -4826,7 +4826,7 @@ mod tests {
 
             version_hi: 0,
             projid: 0,
-            extent_bytes: vec![0u8; 60],
+            extent_bytes: vec![0u8; 60].into(),
             xattr_ibody: vec![],
             number: 0,
         };
@@ -4871,7 +4871,7 @@ mod tests {
 
             version_hi: 0,
             projid: 0,
-            extent_bytes: vec![0u8; 60],
+            extent_bytes: vec![0u8; 60].into(),
             xattr_ibody: Vec::new(),
             number: 0,
         };
@@ -4924,7 +4924,7 @@ mod tests {
 
             version_hi: 0,
             projid: 0,
-            extent_bytes: vec![0u8; 60],
+            extent_bytes: vec![0u8; 60].into(),
             xattr_ibody: Vec::new(),
             number: 0,
         };
@@ -5018,7 +5018,7 @@ mod tests {
 
             version_hi: 0,
             projid: 0,
-            extent_bytes: vec![0u8; 60],
+            extent_bytes: vec![0u8; 60].into(),
             xattr_ibody: vec![0xAA; 128],
             number: 0,
         };
@@ -5162,7 +5162,7 @@ mod tests {
             checksum: 0,
             version_hi: 0,
             projid: 0,
-            extent_bytes: vec![0; 60],
+            extent_bytes: vec![0; 60].into(),
             xattr_ibody: Vec::new(),
             number: 0,
         };
@@ -5199,7 +5199,7 @@ mod tests {
             checksum: 0,
             version_hi: 0,
             projid: 0,
-            extent_bytes: vec![0; 60],
+            extent_bytes: vec![0; 60].into(),
             xattr_ibody: Vec::new(),
             number: 0,
         };
@@ -5235,7 +5235,7 @@ mod tests {
             checksum: 0,
             version_hi: u32::MAX,
             projid: 0,
-            extent_bytes: vec![0; 60],
+            extent_bytes: vec![0; 60].into(),
             xattr_ibody: Vec::new(),
             number: 0,
         };
@@ -5271,7 +5271,7 @@ mod tests {
             checksum: 0,
             version_hi: 0,
             projid: 0,
-            extent_bytes: vec![0; 60],
+            extent_bytes: vec![0; 60].into(),
             xattr_ibody: Vec::new(),
             number: 0,
         };
@@ -5308,7 +5308,7 @@ mod tests {
             checksum: 0,
             version_hi: 0,
             projid: 0,
-            extent_bytes: vec![0; 60],
+            extent_bytes: vec![0; 60].into(),
             xattr_ibody: Vec::new(),
             number: 0,
         };

@@ -292,7 +292,7 @@ fn ext4_inode_size_above_4gib_roundtrips() {
         checksum: 0,
         version_hi: 0,
         projid: 0,
-        extent_bytes: vec![0u8; 60],
+        extent_bytes: vec![0u8; 60].into(),
         xattr_ibody: vec![0u8; 256 - 128 - 32],
         number: 0,
     };

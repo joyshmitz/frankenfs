@@ -1178,6 +1178,7 @@ dependencies = [
  "ffs-types",
  "proptest",
  "serde",
+ "smallvec",
 ]
 
 [[package]]

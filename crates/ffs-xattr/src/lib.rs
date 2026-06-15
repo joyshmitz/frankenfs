@@ -714,7 +714,7 @@ mod tests {
 
             version_hi: 0,
             projid: 0,
-            extent_bytes: vec![0; 60],
+            extent_bytes: vec![0; 60].into(),
             xattr_ibody: vec![0; ibody_len],
             number: 0,
         }

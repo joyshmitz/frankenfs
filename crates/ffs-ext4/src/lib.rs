@@ -664,7 +664,7 @@ unknown ro_compat: 0xAB"
 
             version_hi: 0,
             projid: 0,
-            extent_bytes: vec![0; 60],
+            extent_bytes: vec![0; 60].into(),
             xattr_ibody: Vec::new(),
             number: 0,
         };
@@ -754,7 +754,7 @@ unknown ro_compat: 0xAB"
 
             version_hi: 0,
             projid: 0,
-            extent_bytes: vec![0; 60],
+            extent_bytes: vec![0; 60].into(),
             xattr_ibody: Vec::new(),
             number: 0,
         }

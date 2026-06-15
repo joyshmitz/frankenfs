@@ -9,6 +9,7 @@ use ffs_types::{
     read_fixed, read_le_u16, read_le_u32, trim_nul_padded,
 };
 use serde::{Deserialize, Serialize};
+use smallvec::SmallVec;
 
 const EXT4_EXTENT_MAGIC: u16 = 0xF30A;
 pub const EXT_INIT_MAX_LEN: u16 = 1_u16 << 15;
@@ -2621,6 +2622,8 @@ impl Ext4MmpBlock {
 
 // EXT4_HUGE_FILE_FL imported from ffs_types
 
+pub type Ext4InodeBlockBytes = SmallVec<[u8; 64]>;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Ext4Inode {
     // ── Core fields (base 128 bytes) ─────────────────────────────────────
@@ -2659,7 +2662,7 @@ pub struct Ext4Inode {
     pub projid: u32,
 
     // ── Extent / inline data ─────────────────────────────────────────────
-    pub extent_bytes: Vec<u8>,
+    pub extent_bytes: Ext4InodeBlockBytes,
 
     // ── Inline xattr area ───────────────────────────────────────────────
     /// Raw bytes from the inode body area available for inline xattrs.
@@ -2717,9 +2720,9 @@ impl Ext4Inode {
         // Extent bytes: i_block[0..14] = 60 bytes at offset 0x28
         // Only read if we have enough data (some truncated test inodes may be short)
         let extent_bytes = if bytes.len() >= 0x28 + 60 {
-            read_fixed::<60>(bytes, 0x28)?.to_vec()
+            Ext4InodeBlockBytes::from_slice(&read_fixed::<60>(bytes, 0x28)?)
         } else {
-            vec![0_u8; 60]
+            Ext4InodeBlockBytes::from_slice(&[0_u8; 60])
         };
 
         // ── OS-dependent fields at 0x74..0x80 (Linux layout) ─────────────
@@ -17848,7 +17851,7 @@ mod tests {
                 checksum: 0,
                 version_hi: 0,
                 projid: 0,
-                extent_bytes: vec![0; 60],
+                extent_bytes: vec![0; 60].into(),
                 xattr_ibody,
                 number: 0,
             };
