@@ -41,6 +41,10 @@ harness = false
 name = "scrub_validate_parallel"
 harness = false
 
+[[bench]]
+name = "scrub_scan_io_overlap"
+harness = false
+
 [[bin]]
 name = "ffs-demo"
 path = "src/bin/ffs-demo.rs"

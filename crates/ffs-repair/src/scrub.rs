@@ -188,6 +188,10 @@ pub trait BlockValidator: Send + Sync {
 
 // ── Scrubber ────────────────────────────────────────────────────────────────
 
+/// Per-chunk scan result: `(findings, blocks_scanned, blocks_corrupt,
+/// blocks_io_error)`. The parallel `scrub_range` merges these in block order.
+type ChunkScan = (Vec<ScrubFinding>, u64, u64, u64);
+
 /// Block-level scrub engine.
 ///
 /// Iterates over a range of blocks on a [`BlockDevice`], validates each using
@@ -245,10 +249,101 @@ impl<'a> Scrubber<'a> {
     ///
     /// Returns a report with all findings. Does not panic on I/O errors or
     /// corrupted data — those are recorded as findings.
+    ///
+    /// The range is partitioned into chunks scanned in parallel across the
+    /// rayon pool (bd-tyym4). A whole-device scrub is dominated by the per-batch
+    /// device reads; running chunks concurrently overlaps those read latencies
+    /// (a blocking read parks its worker, so the overlap is bounded by the pool
+    /// size, not the CPU core count — the same I/O-overlap that drives the
+    /// read-path levers bd-307e4/bd-strse/bd-yg6tk), and the pure-CPU
+    /// per-block validation parallelizes for free. Each chunk scans a disjoint
+    /// sub-range with the identical serial batch loop, and the per-chunk reports
+    /// are merged in ascending block order, so the findings list and the
+    /// scanned/corrupt/io-error counters are byte-identical to a single serial
+    /// pass. Checkpoints still occur at the same 256-block cadence measured
+    /// from the caller's start block.
     pub fn scrub_range(&self, cx: &Cx, start: BlockNumber, count: u64) -> Result<ScrubReport> {
+        use rayon::prelude::{IntoParallelIterator, ParallelIterator};
+
         let device_blocks = self.device.block_count();
         let end = start.0.saturating_add(count).min(device_blocks);
+        if start.0 >= end {
+            return Ok(ScrubReport {
+                findings: Vec::new(),
+                blocks_scanned: 0,
+                blocks_corrupt: 0,
+                blocks_io_error: 0,
+            });
+        }
+        let total = end - start.0;
 
+        // Partition into a bounded number of chunks (~8 per pool thread) so the
+        // chunk reports stay cheap to merge while there are enough chunks to
+        // keep every pool worker busy. Each chunk covers at least one read
+        // batch. A range that fits in a single chunk is scanned inline to skip
+        // the rayon fan-out entirely.
+        let parallelism = rayon::current_num_threads().max(1) as u64;
+        let chunk = (total / (parallelism * 8))
+            .max(SCRUB_READ_BATCH_BLOCKS as u64)
+            .max(1);
+        let num_chunks = usize::try_from(total.div_ceil(chunk)).unwrap_or(usize::MAX);
+
+        if num_chunks <= 1 {
+            let (findings, blocks_scanned, blocks_corrupt, blocks_io_error) =
+                self.scan_subrange(cx, start.0, start.0, end)?;
+            return Ok(ScrubReport {
+                findings,
+                blocks_scanned,
+                blocks_corrupt,
+                blocks_io_error,
+            });
+        }
+
+        // `(0..num_chunks)` is an indexed range, so `collect` preserves chunk
+        // order; chunks are disjoint and ascending, so concatenating their
+        // findings yields the same block order as the serial scan.
+        let chunk_results: Vec<Result<ChunkScan>> = (0..num_chunks)
+            .into_par_iter()
+            .map(|ci| {
+                let ci = ci as u64;
+                let sub_start = start.0 + ci * chunk;
+                let sub_end = (sub_start + chunk).min(end);
+                self.scan_subrange(cx, start.0, sub_start, sub_end)
+            })
+            .collect();
+
+        let mut findings = Vec::new();
+        let mut blocks_scanned: u64 = 0;
+        let mut blocks_corrupt: u64 = 0;
+        let mut blocks_io_error: u64 = 0;
+        for result in chunk_results {
+            let (chunk_findings, scanned, corrupt, io_error) = result?;
+            findings.extend(chunk_findings);
+            blocks_scanned += scanned;
+            blocks_corrupt += corrupt;
+            blocks_io_error += io_error;
+        }
+
+        Ok(ScrubReport {
+            findings,
+            blocks_scanned,
+            blocks_corrupt,
+            blocks_io_error,
+        })
+    }
+
+    /// Scan a disjoint sub-range `[sub_start, sub_end)` with the serial
+    /// batch-read + validate loop, returning `(findings, scanned, corrupt,
+    /// io_error)`. This is the per-chunk unit of work parallelized by
+    /// [`Self::scrub_range`]; in isolation it is identical to the previous
+    /// single-pass scrub loop.
+    fn scan_subrange(
+        &self,
+        cx: &Cx,
+        range_start: u64,
+        sub_start: u64,
+        sub_end: u64,
+    ) -> Result<ChunkScan> {
         let mut findings = Vec::new();
         let mut blocks_scanned: u64 = 0;
         let mut blocks_corrupt: u64 = 0;
@@ -260,9 +355,9 @@ impl<'a> Scrubber<'a> {
         // block per scanned block on the hot scrub loop (bd-xmh5g.7).
         let mut bufs: Vec<BlockBuf> = Vec::new();
 
-        let mut next_block = start.0;
-        while next_block < end {
-            if blocks_scanned % 256 == 0 {
+        let mut next_block = sub_start;
+        while next_block < sub_end {
+            if (next_block - range_start) % 256 == 0 {
                 cx.checkpoint().map_err(|_| FfsError::Cancelled)?;
             }
 
@@ -288,7 +383,7 @@ impl<'a> Scrubber<'a> {
                 continue;
             }
 
-            let remaining_blocks = end - next_block;
+            let remaining_blocks = sub_end - next_block;
             let remaining = usize::try_from(remaining_blocks).unwrap_or(usize::MAX);
             let batch_len = remaining.min(SCRUB_READ_BATCH_BLOCKS);
             let batch_len_u64 = u64::try_from(batch_len)
@@ -342,12 +437,7 @@ impl<'a> Scrubber<'a> {
             next_block = batch_end;
         }
 
-        Ok(ScrubReport {
-            findings,
-            blocks_scanned,
-            blocks_corrupt,
-            blocks_io_error,
-        })
+        Ok((findings, blocks_scanned, blocks_corrupt, blocks_io_error))
     }
 
     /// Scrub the entire device.
