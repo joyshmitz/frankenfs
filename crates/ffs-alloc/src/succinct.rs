@@ -229,7 +229,6 @@ impl SuccinctBitmap {
     ///
     /// Returns `None` if there are fewer than `k + 1` one-bits.
     #[must_use]
-    #[expect(clippy::cast_possible_truncation)] // indices bounded by self.len (u32)
     pub fn select1(&self, k: u32) -> Option<u32> {
         if k >= self.ones {
             return None;
@@ -269,21 +268,7 @@ impl SuccinctBitmap {
             }
         }
 
-        // Scan within the 64-bit block.
-        let bit_base = (block_idx as u32) * BLOCK_BITS;
-        let bits_in_block = BLOCK_BITS.min(self.len - bit_base);
-
-        for bit in 0..bits_in_block {
-            let pos = bit_base + bit;
-            if self.get_bit(pos) {
-                if remaining == 0 {
-                    return Some(pos);
-                }
-                remaining -= 1;
-            }
-        }
-
-        None // Should not reach here if k < ones.
+        self.select1_in_block(block_idx, remaining)
     }
 
     /// Find the position of the k-th 0-bit (0-indexed).
@@ -428,6 +413,30 @@ impl SuccinctBitmap {
                     return Some(run_start);
                 }
             }
+        }
+
+        None
+    }
+
+    fn select1_in_block(&self, block_idx: usize, mut remaining: u32) -> Option<u32> {
+        let block_idx =
+            u32::try_from(block_idx).expect("block index is bounded by the u32 bitmap length");
+        let mut word_base = block_idx * BLOCK_BITS;
+        let block_end = word_base.saturating_add(BLOCK_BITS).min(self.len);
+
+        while word_base < block_end {
+            let bits_in_word = (block_end - word_base).min(64);
+            let mut one_mask = self.read_word(word_base / 64);
+            if bits_in_word < 64 {
+                one_mask &= (1_u64 << bits_in_word) - 1;
+            }
+
+            let ones_in_word = one_mask.count_ones();
+            if remaining < ones_in_word {
+                return Some(word_base + select_nth_set_bit(one_mask, remaining));
+            }
+            remaining -= ones_in_word;
+            word_base += 64;
         }
 
         None
