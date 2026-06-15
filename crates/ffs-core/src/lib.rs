@@ -8415,33 +8415,56 @@ impl OpenFs {
             );
         }
 
-        // Read and decompress the compressed extents overlapping the read in
-        // parallel across cores. The bd-m6g2o pass already decompressed the
-        // gathered blobs with `into_par_iter`; bd-307e4 additionally defers the
-        // per-extent compressed-blob *device read* into that same parallel map,
-        // so a read spanning N compressed extents overlaps its N device reads
-        // (and decompresses) across cores instead of issuing the reads one at a
-        // time in this gathering pass. `Self::btrfs_decompress` is a pure
-        // function of (bytes, codec, ram_bytes), and `btrfs_read_logical_into`
-        // is a `&self` read already issued concurrently by the FUSE worker pool
-        // (`Cx` and the block device are `Sync`), so moving the read into the
-        // par_iter is byte-identical and only reorders/overlaps work. All
-        // validation and the overlap test stay in this serial pass, so a
-        // malformed extent surfaces at the same extent — and in the same order —
-        // as before; only the device read + decompress run in parallel. Their
-        // results are collected per-idx and consumed in extent order via `?` in
-        // the assembly loop below, so the lowest-index I/O or decompress error
-        // still wins. Inline data length is only known after decompression
-        // (overlap can't be pre-checked), matching the assembly loop which also
-        // decompresses inline extents before testing overlap.
+        // Read (and decompress) the extents overlapping the read in parallel
+        // across cores. The bd-m6g2o pass already decompressed the gathered
+        // blobs with `into_par_iter`; bd-307e4 additionally deferred the
+        // per-extent compressed-blob *device read* into that same parallel map;
+        // bd-strse extends the map to the *uncompressed* regular extents too,
+        // reading each one straight into its disjoint `out` window. So a read
+        // spanning N extents overlaps its N device reads (and decompresses)
+        // across cores instead of issuing them one at a time in this gathering
+        // pass — on real storage each read pays an access latency, and parking
+        // (not core count) bounds the overlap, so the win exceeds core count.
+        // `Self::btrfs_decompress` is a pure function of (bytes, codec,
+        // ram_bytes), and `btrfs_read_logical_into` is a `&self` read already
+        // issued concurrently by the FUSE worker pool (`Cx` and the block
+        // device are `Sync`), so moving the reads into the par_iter is
+        // byte-identical and only reorders/overlaps work. All validation and
+        // the overlap test stay in this serial pass, so a malformed extent
+        // surfaces at the same extent — and in the same order — as before; only
+        // the device read + decompress run in parallel. Their results are
+        // collected per-idx and consumed in extent order via `?` in the
+        // assembly loop below, so the lowest-index I/O or decompress error still
+        // wins. The uncompressed extents write directly into pre-carved disjoint
+        // `out` sub-slices (`split_at_mut`), so the zero-copy serial read is
+        // preserved and only a unit result is carried per-idx. Inline data
+        // length is only known after decompression (overlap can't be
+        // pre-checked), matching the assembly loop which also decompresses
+        // inline extents before testing overlap.
         let mut decompressed_by_idx: Vec<Option<Result<Vec<u8>, FfsError>>> =
             (0..extents.len()).map(|_| None).collect();
         {
             use rayon::prelude::{IntoParallelIterator, ParallelIterator};
-            // A deferred decompress job: either inline bytes already in memory,
-            // or a compressed blob still to be read from `logical` in the par
-            // map. `compressed_len`/`ram` are validated in the serial pass.
-            enum DecompressJob {
+            // A deferred read job, consumed by one parallel map so that a read
+            // spanning N extents overlaps its N device-read latencies across
+            // cores instead of issuing them one at a time:
+            //   * `Inline`  — inline compressed bytes already in memory; only
+            //                 the decompress runs in the map.
+            //   * `Read`    — a compressed blob read from `logical` then
+            //                 decompressed in the map (bd-307e4).
+            //   * `Uncompressed` — an uncompressed regular extent read straight
+            //                 into its disjoint `dst` sub-slice of `out`
+            //                 (bd-strse). The output ranges of distinct extents
+            //                 are disjoint, so `split_at_mut` hands each job a
+            //                 non-overlapping `&mut out[..]` window and the read
+            //                 lands in place with no intermediate buffer (the
+            //                 zero-copy serial path is preserved). All overflow
+            //                 validation for these reads is done in the serial
+            //                 pass below, so a malformed extent surfaces at the
+            //                 same point and in the same order as the serial
+            //                 path; only the device read runs in parallel.
+            // `compressed_len`/`ram` are validated in the serial pass.
+            enum ReadJob<'o> {
                 Inline {
                     idx: usize,
                     data: Vec<u8>,
@@ -8455,8 +8478,18 @@ impl OpenFs {
                     comp: u8,
                     ram: usize,
                 },
+                Uncompressed {
+                    idx: usize,
+                    source_logical: u64,
+                    dst: &'o mut [u8],
+                },
             }
-            let mut jobs: Vec<DecompressJob> = Vec::new();
+            let mut jobs: Vec<ReadJob<'_>> = Vec::new();
+            // Specs for the uncompressed reads, gathered in extent order during
+            // the serial pass; carved into disjoint `&mut out` windows after the
+            // pass (so the borrow of `out` does not overlap the validation that
+            // can early-return). `(idx, dst_start, copy_len, source_logical)`.
+            let mut uncompressed_specs: Vec<(usize, usize, usize, u64)> = Vec::new();
             for (idx, (logical_start, extent)) in extents.iter().enumerate() {
                 match extent {
                     BtrfsExtentData::Inline {
@@ -8470,7 +8503,7 @@ impl OpenFs {
                                 block: 0,
                                 detail: "inline extent ram_bytes overflow".into(),
                             })?;
-                        jobs.push(DecompressJob::Inline {
+                        jobs.push(ReadJob::Inline {
                             idx,
                             data: data.clone(),
                             comp: *compression,
@@ -8525,7 +8558,7 @@ impl OpenFs {
                                 detail: "compressed extent ram_bytes exceeds 128MB limit".into(),
                             });
                         }
-                        jobs.push(DecompressJob::Read {
+                        jobs.push(ReadJob::Read {
                             idx,
                             logical: *disk_bytenr,
                             compressed_len,
@@ -8533,19 +8566,93 @@ impl OpenFs {
                             ram,
                         });
                     }
+                    // Uncompressed regular extents that contribute to the read:
+                    // defer the device read into the parallel map (bd-strse).
+                    // Holes (`disk_bytenr == 0`) and preallocated extents
+                    // (`extent_type != BTRFS_FILE_EXTENT_REG`) read nothing and
+                    // are left to the assembly loop's hole handling. All the
+                    // overlap and overflow validation mirrors the assembly
+                    // loop's uncompressed branch exactly, so an error surfaces
+                    // at the same extent — and, returned in idx order here, in
+                    // the same order — as the serial path.
+                    BtrfsExtentData::Regular {
+                        extent_type,
+                        compression,
+                        disk_bytenr,
+                        extent_offset,
+                        num_bytes,
+                        ..
+                    } if *compression == 0
+                        && *extent_type == BTRFS_FILE_EXTENT_REG
+                        && *disk_bytenr != 0 =>
+                    {
+                        let extent_end =
+                            (*logical_start).checked_add(*num_bytes).ok_or_else(|| {
+                                FfsError::Corruption {
+                                    block: *logical_start,
+                                    detail: "regular extent logical range overflow".into(),
+                                }
+                            })?;
+                        let overlap_start = (*logical_start).max(offset);
+                        let overlap_end = extent_end.min(read_end);
+                        if overlap_start >= overlap_end {
+                            continue;
+                        }
+                        let extent_delta = overlap_start - logical_start;
+                        let dst_start = usize::try_from(overlap_start - offset).map_err(|_| {
+                            FfsError::Corruption {
+                                block: 0,
+                                detail: "extent destination offset overflow".into(),
+                            }
+                        })?;
+                        let copy_len =
+                            usize::try_from(overlap_end - overlap_start).map_err(|_| {
+                                FfsError::Corruption {
+                                    block: 0,
+                                    detail: "extent copy length overflow".into(),
+                                }
+                            })?;
+                        let source_logical = disk_bytenr
+                            .checked_add(*extent_offset)
+                            .and_then(|x| x.checked_add(extent_delta))
+                            .ok_or_else(|| FfsError::Corruption {
+                                block: *disk_bytenr,
+                                detail: "extent source logical overflow".into(),
+                            })?;
+                        uncompressed_specs.push((idx, dst_start, copy_len, source_logical));
+                    }
                     _ => {}
                 }
+            }
+            // Carve disjoint `&mut out` windows for the uncompressed reads. The
+            // specs are in increasing `dst_start` order (extents are returned in
+            // logical-offset order and their output ranges are disjoint), so a
+            // single forward `split_at_mut` walk hands each read its own
+            // non-overlapping window without copying.
+            let mut remaining: &mut [u8] = out.as_mut_slice();
+            let mut consumed: usize = 0;
+            for &(idx, dst_start, copy_len, source_logical) in &uncompressed_specs {
+                let skip = dst_start - consumed;
+                let (_, rest) = remaining.split_at_mut(skip);
+                let (dst, rest_after) = rest.split_at_mut(copy_len);
+                remaining = rest_after;
+                consumed = dst_start + copy_len;
+                jobs.push(ReadJob::Uncompressed {
+                    idx,
+                    source_logical,
+                    dst,
+                });
             }
             let results: Vec<(usize, Result<Vec<u8>, FfsError>)> = jobs
                 .into_par_iter()
                 .map(|job| match job {
-                    DecompressJob::Inline {
+                    ReadJob::Inline {
                         idx,
                         data,
                         comp,
                         ram,
                     } => (idx, Self::btrfs_decompress(&data, comp, ram)),
-                    DecompressJob::Read {
+                    ReadJob::Read {
                         idx,
                         logical,
                         compressed_len,
@@ -8558,6 +8665,19 @@ impl OpenFs {
                             Err(err) => (idx, Err(err)),
                         }
                     }
+                    // Read the uncompressed extent straight into its disjoint
+                    // `out` window. The data is written in place; the entry in
+                    // `decompressed_by_idx` only carries the read's success or
+                    // error, consumed in idx order by the assembly loop so the
+                    // lowest-index read error still wins.
+                    ReadJob::Uncompressed {
+                        idx,
+                        source_logical,
+                        dst,
+                    } => match self.btrfs_read_logical_into(cx, source_logical, dst) {
+                        Ok(()) => (idx, Ok(Vec::new())),
+                        Err(err) => (idx, Err(err)),
+                    },
                 })
                 .collect();
             for (idx, res) in results {
@@ -8733,19 +8853,15 @@ impl OpenFs {
                         )?;
                         out[dst_start..dst_start + copy_len].copy_from_slice(decompressed_slice);
                     } else {
-                        // Uncompressed: direct read from logical address.
-                        let source_logical = disk_bytenr
-                            .checked_add(*extent_offset)
-                            .and_then(|x| x.checked_add(extent_delta))
-                            .ok_or_else(|| FfsError::Corruption {
-                                block: *disk_bytenr,
-                                detail: "extent source logical overflow".into(),
-                            })?;
-                        self.btrfs_read_logical_into(
-                            cx,
-                            source_logical,
-                            &mut out[dst_start..dst_start + copy_len],
-                        )?;
+                        // Uncompressed: the device read was deferred to the
+                        // parallel phase above and written directly into
+                        // out[dst_start..dst_start + copy_len]. Consume the
+                        // deferred read result in extent order so a read error
+                        // surfaces at the same point — and in the same order —
+                        // as the serial path; the bytes are already in place.
+                        decompressed_by_idx[idx]
+                            .take()
+                            .expect("uncompressed extent read deferred to parallel phase")?;
                     }
                     covered_until = covered_until.max(overlap_end);
                 }
