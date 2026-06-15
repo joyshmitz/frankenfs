@@ -10458,6 +10458,7 @@ impl OpenFs {
     /// corresponding physical blocks from the device. Holes are filled
     /// with zeroes. Returns the number of bytes actually read.
     #[allow(clippy::cast_possible_truncation)]
+    #[allow(clippy::too_many_lines)]
     pub fn read_file_data(
         &self,
         cx: &Cx,
@@ -10466,6 +10467,40 @@ impl OpenFs {
         offset: u64,
         buf: &mut [u8],
     ) -> Result<usize, FfsError> {
+        // Planned read segment tiling [0, to_read): the serial plan pass below
+        // resolves the whole read into one segment per coalesced run / partial
+        // block / hole (the metadata descent stays serial), then the device
+        // reads of the data-bearing segments overlap in a parallel phase
+        // (bd-yg6tk, I/O-overlap sibling of bd-strse). A fragmented file with N
+        // non-contiguous runs otherwise serializes N device-read latencies.
+        // (Declared first so clippy::items_after_statements stays happy.)
+        enum Seg {
+            // Coalesced run of logically+physically-consecutive written blocks.
+            Run {
+                dst: usize,
+                phys: u64,
+                span: usize,
+            },
+            // Partial (unaligned head/tail) written block: read the block, copy
+            // the [off, off+len) sub-range.
+            Partial {
+                dst: usize,
+                phys: u64,
+                off: usize,
+                len: usize,
+            },
+            // Hole / unwritten: zero-filled, no device I/O.
+            Zero {
+                dst: usize,
+                len: usize,
+            },
+        }
+        // A data-bearing read job carved onto a disjoint `&mut buf` window.
+        enum IoJob<'b> {
+            Run { phys: u64, dst: &'b mut [u8] },
+            Partial { phys: u64, off: usize, dst: &'b mut [u8] },
+        }
+
         let file_size = inode.size;
         if offset >= file_size {
             return Ok(0);
@@ -10476,8 +10511,9 @@ impl OpenFs {
 
         let bs = u64::from(self.block_size());
         let bs_usize = self.block_size() as usize;
-        let mut bytes_read = 0_usize;
 
+        let mut segs: Vec<Seg> = Vec::new();
+        let mut bytes_read = 0_usize;
         while bytes_read < to_read {
             let current_offset = offset + bytes_read as u64;
             let logical_block =
@@ -10494,7 +10530,7 @@ impl OpenFs {
                     // Aligned full written block: coalesce the run of
                     // logically-consecutive, physically-consecutive written
                     // blocks into one vectored device read (bd-a384r) instead
-                    // of one read per block. `read_contiguous_blocks_with_scope`
+                    // of one read per block. `read_contiguous_into_with_scope`
                     // keeps this overlay-correct (scalar fallback when any block
                     // is tx-staged or snapshot-visible).
                     let mut run_blocks = 1_usize;
@@ -10520,37 +10556,113 @@ impl OpenFs {
                     }
 
                     let span = run_blocks * bs_usize;
-                    self.read_contiguous_into_with_scope(
-                        cx,
-                        scope,
-                        BlockNumber(phys_block),
-                        &mut buf[bytes_read..bytes_read + span],
-                    )?;
+                    segs.push(Seg::Run {
+                        dst: bytes_read,
+                        phys: phys_block,
+                        span,
+                    });
                     bytes_read += span;
                 }
                 Some((phys_block, unwritten)) => {
                     if unwritten {
-                        buf[bytes_read..bytes_read + chunk_size].fill(0);
+                        segs.push(Seg::Zero {
+                            dst: bytes_read,
+                            len: chunk_size,
+                        });
                     } else {
-                        let block_data = self.read_ext4_file_data_block_with_scope(
-                            cx,
-                            scope,
-                            BlockNumber(phys_block),
-                        )?;
-                        buf[bytes_read..bytes_read + chunk_size].copy_from_slice(
-                            &block_data[offset_in_block..offset_in_block + chunk_size],
-                        );
+                        segs.push(Seg::Partial {
+                            dst: bytes_read,
+                            phys: phys_block,
+                            off: offset_in_block,
+                            len: chunk_size,
+                        });
                     }
                     bytes_read += chunk_size;
                 }
                 None => {
-                    buf[bytes_read..bytes_read + chunk_size].fill(0);
+                    segs.push(Seg::Zero {
+                        dst: bytes_read,
+                        len: chunk_size,
+                    });
                     bytes_read += chunk_size;
                 }
             }
         }
 
-        Ok(bytes_read)
+        // Fill the holes serially (cheap memset, no I/O) before carving the
+        // data windows, so the parallel reads touch only their own windows.
+        for seg in &segs {
+            if let Seg::Zero { dst, len } = seg {
+                buf[*dst..*dst + *len].fill(0);
+            }
+        }
+
+        // Carve disjoint `&mut buf` windows for the data-bearing segments. The
+        // segments tile [0, to_read) in increasing `dst` order, so a single
+        // forward `split_at_mut` walk hands each read its own non-overlapping
+        // window (zero-copy: each read lands in place).
+        let mut jobs: Vec<IoJob<'_>> = Vec::new();
+        let mut remaining: &mut [u8] = &mut buf[..to_read];
+        let mut consumed = 0_usize;
+        for seg in &segs {
+            let (dst_off, len) = match seg {
+                Seg::Run { dst, span, .. } => (*dst, *span),
+                Seg::Partial { dst, len, .. } => (*dst, *len),
+                Seg::Zero { .. } => continue,
+            };
+            let skip = dst_off - consumed;
+            let (_, rest) = remaining.split_at_mut(skip);
+            let (window, rest_after) = rest.split_at_mut(len);
+            remaining = rest_after;
+            consumed = dst_off + len;
+            match seg {
+                Seg::Run { phys, .. } => jobs.push(IoJob::Run {
+                    phys: *phys,
+                    dst: window,
+                }),
+                Seg::Partial { phys, off, .. } => jobs.push(IoJob::Partial {
+                    phys: *phys,
+                    off: *off,
+                    dst: window,
+                }),
+                Seg::Zero { .. } => unreachable!("zero segment filtered above"),
+            }
+        }
+
+        // Overlap the data reads across cores. Each job is a `&self` read into
+        // its disjoint window with a shared `&scope`; the scoped readers only
+        // *read* the MVCC overlay (RwLock-guarded store + sharded caches), so
+        // running them concurrently is byte-identical and only overlaps the
+        // per-read device latencies (parking, not core count, bounds the win).
+        // `collect` preserves job order, so consuming results in order returns
+        // the lowest-offset error first — isomorphic to the serial read
+        // (bd-strse / bd-307e4 precedent).
+        {
+            use rayon::prelude::{IntoParallelIterator, ParallelIterator};
+            let results: Vec<Result<(), FfsError>> = jobs
+                .into_par_iter()
+                .map(|job| match job {
+                    IoJob::Run { phys, dst } => {
+                        self.read_contiguous_into_with_scope(cx, scope, BlockNumber(phys), dst)
+                    }
+                    IoJob::Partial { phys, off, dst } => {
+                        let block_data = self.read_ext4_file_data_block_with_scope(
+                            cx,
+                            scope,
+                            BlockNumber(phys),
+                        )?;
+                        let len = dst.len();
+                        dst.copy_from_slice(&block_data[off..off + len]);
+                        Ok(())
+                    }
+                })
+                .collect();
+            for result in results {
+                result?;
+            }
+        }
+
+        Ok(to_read)
     }
 
     // ── Directory operations via device ───────────────────────────────
