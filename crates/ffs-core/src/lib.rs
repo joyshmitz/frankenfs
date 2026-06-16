@@ -22647,13 +22647,22 @@ impl OpenFs {
             // Replace any extents in the aligned range. Because all extents are
             // sector-aligned, the split boundaries here are aligned too, so the
             // re-inserted left/right remnants stay aligned.
-            let removed_nbytes_delta = self.btrfs_remove_overlapping_extent_data(
-                cx,
-                &mut alloc,
-                canonical,
-                aligned_start,
-                aligned_end,
-            )?;
+            let removed_nbytes_delta = if aligned_start >= inode.size && inode.nbytes <= inode.size
+            {
+                // Pure append with no KEEP_SIZE/prealloc reservation past
+                // old EOF: no existing EXTENT_DATA item can overlap the
+                // aligned write range, so the removal query would only
+                // prove an empty intersection.
+                0
+            } else {
+                self.btrfs_remove_overlapping_extent_data(
+                    cx,
+                    &mut alloc,
+                    canonical,
+                    aligned_start,
+                    aligned_end,
+                )?
+            };
             let nbytes_after_remove =
                 Self::btrfs_apply_nbytes_delta(inode.nbytes, removed_nbytes_delta)?;
 
@@ -67688,6 +67697,85 @@ mod tests {
             "KEEP_SIZE preallocation should reduce free space: before={}, after={}",
             stat_before.blocks_free,
             stat_after.blocks_free
+        );
+    }
+
+    #[test]
+    fn btrfs_write_into_keep_size_prealloc_splits_unwritten_tail_bd_xmh5g_183() {
+        let _guard = log_contract_guard();
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+        let block = 4096_u64;
+        let block_usize = usize::try_from(block).unwrap();
+
+        let attr = ops
+            .create(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("keep-size-write-tail.bin"),
+                0o644,
+                0,
+                0,
+            )
+            .unwrap();
+        ops.fallocate(
+            &cx,
+            &mut RequestScope::empty(),
+            attr.ino,
+            0,
+            2 * block,
+            libc::FALLOC_FL_KEEP_SIZE,
+        )
+        .expect("keep-size preallocate two blocks");
+        let before = ops
+            .getattr(&cx, &mut RequestScope::empty(), attr.ino)
+            .expect("getattr after keep-size prealloc");
+        assert_eq!(before.size, 0);
+        assert!(
+            before.blocks > 0,
+            "KEEP_SIZE preallocation must reserve blocks before the write"
+        );
+
+        let payload = vec![b'W'; block_usize];
+        ops.write(&cx, &mut RequestScope::empty(), attr.ino, 0, &payload)
+            .expect("write into first preallocated block");
+
+        let after = ops
+            .getattr(&cx, &mut RequestScope::empty(), attr.ino)
+            .expect("getattr after write");
+        assert_eq!(after.size, block);
+        let readback = ops
+            .read(
+                &cx,
+                &mut RequestScope::empty(),
+                attr.ino,
+                0,
+                u32::try_from(block).unwrap(),
+            )
+            .expect("read written block");
+        assert_eq!(readback, payload);
+
+        let mut scope = RequestScope::empty();
+        let extents = fs.fiemap(&cx, &mut scope, attr.ino, 0, u64::MAX).unwrap();
+        assert_eq!(
+            extents.len(),
+            2,
+            "write must split KEEP_SIZE prealloc into written data plus unwritten tail: {extents:?}"
+        );
+        assert_eq!(extents[0].logical, 0);
+        assert_eq!(extents[0].length, block);
+        assert_eq!(
+            extents[0].flags & FIEMAP_EXTENT_UNWRITTEN,
+            0,
+            "written block must not stay unwritten"
+        );
+        assert_eq!(extents[1].logical, block);
+        assert_eq!(extents[1].length, block);
+        assert_ne!(
+            extents[1].flags & FIEMAP_EXTENT_UNWRITTEN,
+            0,
+            "tail beyond i_size must remain an unwritten preallocation"
         );
     }
 
