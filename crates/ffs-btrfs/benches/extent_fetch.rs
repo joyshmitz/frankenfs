@@ -240,11 +240,122 @@ fn parse_via_range_with(
     out
 }
 
+fn extent_logical_len(extent: &BtrfsExtentData) -> u64 {
+    match extent {
+        BtrfsExtentData::Inline {
+            compression,
+            data,
+            ram_bytes,
+            ..
+        } => {
+            if *compression == 0 {
+                data.len() as u64
+            } else {
+                *ram_bytes
+            }
+        }
+        BtrfsExtentData::Regular { num_bytes, .. } => *num_bytes,
+    }
+}
+
+fn append_no_overlap_remove_probe_old(
+    tree: &InMemoryCowBtrfsTree,
+    range_start: u64,
+    range_end: u64,
+) -> u64 {
+    if range_start >= range_end {
+        return 0;
+    }
+
+    let floor_target = key(range_start);
+    let lo_offset = match tree.floor_key(&floor_target).expect("floor key") {
+        Some(k) if k.objectid == INODE && k.item_type == BTRFS_ITEM_EXTENT_DATA => k.offset,
+        _ => 0,
+    };
+    let ext_start = key(lo_offset);
+    let ext_end = key(range_end);
+    let extents = tree.range(&ext_start, &ext_end).expect("extent range");
+
+    let mut nbytes_delta = 0_u64;
+    for (extent_key, extent_bytes) in extents {
+        let extent = parse_extent_data(&extent_bytes).expect("parse extent");
+        let logical_end = extent_key.offset + extent_logical_len(&extent);
+        let overlap_start = extent_key.offset.max(range_start);
+        let overlap_end = logical_end.min(range_end);
+        if overlap_start >= overlap_end {
+            continue;
+        }
+        nbytes_delta = nbytes_delta.wrapping_add(extent_logical_len(&extent));
+    }
+    nbytes_delta
+}
+
+fn append_no_overlap_remove_probe_guarded(
+    tree: &InMemoryCowBtrfsTree,
+    range_start: u64,
+    range_end: u64,
+    inode_size: u64,
+    inode_nbytes: u64,
+) -> u64 {
+    if range_start >= inode_size && inode_nbytes <= inode_size {
+        0
+    } else {
+        append_no_overlap_remove_probe_old(tree, range_start, range_end)
+    }
+}
+
+fn bench_append_no_overlap_remove_probe(c: &mut Criterion) {
+    let tree = build_regular_extent_tree();
+    let append_start = EXTENTS * BLOCK;
+    let append_end = append_start + BLOCK;
+    let inode_size = append_start;
+    let inode_nbytes = inode_size;
+
+    // Isomorphism: for a pure append with no reserved bytes beyond EOF, no
+    // existing EXTENT_DATA item can overlap [append_start, append_end). The old
+    // path still proves that by seeking the floor extent, ranging it, parsing it,
+    // then finding an empty overlap. The guard returns the same zero delta.
+    let old = append_no_overlap_remove_probe_old(&tree, append_start, append_end);
+    let guarded = append_no_overlap_remove_probe_guarded(
+        &tree,
+        append_start,
+        append_end,
+        inode_size,
+        inode_nbytes,
+    );
+    assert_eq!(old, 0);
+    assert_eq!(old, guarded);
+
+    let mut group = c.benchmark_group("btrfs_append_no_overlap_remove_probe");
+    group.bench_function("floor_key_range_parse_no_overlap", |b| {
+        b.iter(|| {
+            black_box(append_no_overlap_remove_probe_old(
+                black_box(&tree),
+                black_box(append_start),
+                black_box(append_end),
+            ))
+        });
+    });
+    group.bench_function("guarded_pure_append", |b| {
+        b.iter(|| {
+            black_box(append_no_overlap_remove_probe_guarded(
+                black_box(&tree),
+                black_box(append_start),
+                black_box(append_end),
+                black_box(inode_size),
+                black_box(inode_nbytes),
+            ))
+        });
+    });
+    group.finish();
+}
+
 criterion_group!(
     extent_fetch,
     bench_extent_fetch,
     bench_extent_fetch_eof,
     bench_range_vs_range_with,
-    bench_read_file_extent_parse
+    bench_read_file_extent_parse,
+    bench_append_no_overlap_remove_probe
 );
 criterion_main!(extent_fetch);
