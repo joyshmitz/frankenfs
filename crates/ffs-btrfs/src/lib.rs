@@ -3480,6 +3480,23 @@ impl InMemoryCowBtrfsTree {
         }
     }
 
+    fn leaf_serialized_bytes(items: &[BtrfsTreeItem]) -> usize {
+        items.iter().map(|it| BTRFS_ITEM_SIZE + it.data.len()).sum()
+    }
+
+    fn leaf_exceeds_capacity(&self, items: &[BtrfsTreeItem]) -> bool {
+        if items.len() <= 1 {
+            return false;
+        }
+        if items.len() > self.max_items {
+            return true;
+        }
+        if self.leaf_byte_budget == usize::MAX {
+            return false;
+        }
+        Self::leaf_serialized_bytes(items) > self.leaf_byte_budget
+    }
+
     fn try_insert_then_update_root_leaf(
         &mut self,
         insert_key: BtrfsKey,
@@ -3517,8 +3534,7 @@ impl InMemoryCowBtrfsTree {
         }
         existing.data = update_item.to_vec();
 
-        let leaf_bytes: usize = items.iter().map(|it| BTRFS_ITEM_SIZE + it.data.len()).sum();
-        if items.len() > 1 && (items.len() > self.max_items || leaf_bytes > self.leaf_byte_budget) {
+        if self.leaf_exceeds_capacity(&items) {
             return Ok(None);
         }
 
@@ -3587,10 +3603,7 @@ impl InMemoryCowBtrfsTree {
         // items (INODE_ITEM, inline EXTENT_DATA, long DIR names) from overflowing
         // the on-disk node even while under `max_items`. A single item always fits
         // a node (btrfs caps item size), so a 1-item leaf is never split.
-        let leaf_bytes: usize = items.iter().map(|it| BTRFS_ITEM_SIZE + it.data.len()).sum();
-        if items.len() <= 1
-            || (items.len() <= self.max_items && leaf_bytes <= self.leaf_byte_budget)
-        {
+        if !self.leaf_exceeds_capacity(&items) {
             let new_id = self.alloc_node(BtrfsCowNode::Leaf { items })?;
             return Ok(InsertResult {
                 node_id: new_id,
@@ -3601,6 +3614,7 @@ impl InMemoryCowBtrfsTree {
         // Choose the split index by balancing serialized BYTES (not item count),
         // so each half fits the node byte budget; this also lands near the count
         // midpoint when items are uniform. Both halves stay non-empty.
+        let leaf_bytes = Self::leaf_serialized_bytes(&items);
         let split_idx = {
             let mut acc = 0usize;
             let mut idx = items.len() / 2;
@@ -9464,6 +9478,52 @@ mod tests {
             snapshot
         );
         tree.validate_invariants().expect("invariants");
+    }
+
+    #[test]
+    fn default_leaf_budget_bypass_keeps_finite_budget_split_bd_xmh5g_184() {
+        let mut default_budget = InMemoryCowBtrfsTree::new(3).expect("default budget tree");
+        default_budget
+            .insert(test_key(1), b"a")
+            .expect("default insert 1");
+        default_budget
+            .insert(test_key(2), b"b")
+            .expect("default insert 2");
+        assert_eq!(
+            default_budget.root_level(),
+            0,
+            "default infinite byte budget must not split before the item-count cap"
+        );
+        default_budget
+            .validate_invariants()
+            .expect("default invariants");
+
+        let mut finite_budget = InMemoryCowBtrfsTree::new(3)
+            .expect("finite budget tree")
+            .with_leaf_byte_budget(BTRFS_ITEM_SIZE + 1);
+        finite_budget
+            .insert(test_key(1), b"a")
+            .expect("finite insert 1");
+        finite_budget
+            .insert(test_key(2), b"b")
+            .expect("finite insert 2");
+        assert_eq!(
+            finite_budget.root_level(),
+            1,
+            "finite byte budget must still force a split"
+        );
+        assert_eq!(
+            finite_budget
+                .range(&test_key(0), &test_key(3))
+                .expect("finite range")
+                .into_iter()
+                .map(|(key, data)| (key.objectid, data))
+                .collect::<Vec<_>>(),
+            vec![(1, b"a".to_vec()), (2, b"b".to_vec())]
+        );
+        finite_budget
+            .validate_invariants()
+            .expect("finite invariants");
     }
 
     #[test]
