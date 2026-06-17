@@ -14,9 +14,11 @@
 //!
 //! Benches a full-fanout node (N=651): OLD linear `child_slot` / leaf find vs
 //! NEW `partition_point` / `binary_search_by`, asserted to agree across probes.
+//! Also times production `InMemoryCowBtrfsTree::get` on a full leaf so the
+//! public lookup path has before/after evidence.
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use ffs_btrfs::BtrfsKey;
+use ffs_btrfs::{BtrfsBTree, BtrfsKey, InMemoryCowBtrfsTree};
 use std::cmp::Ordering;
 use std::hint::black_box;
 
@@ -62,6 +64,22 @@ fn leaf_find_binary(keys: &[BtrfsKey], key: &BtrfsKey) -> Option<usize> {
     keys.binary_search_by(|k| key_cmp(k, key)).ok()
 }
 
+fn cow_get_linear_model(keys: &[BtrfsKey], key: &BtrfsKey) -> Option<Vec<u8>> {
+    keys.iter()
+        .find(|candidate| key_cmp(candidate, key) == Ordering::Equal)
+        .map(|candidate| candidate.objectid.to_le_bytes().to_vec())
+}
+
+fn build_cow_tree(keys: &[BtrfsKey]) -> InMemoryCowBtrfsTree {
+    let mut tree =
+        InMemoryCowBtrfsTree::new(usize::try_from(N).expect("N fits usize")).expect("tree");
+    for key in keys {
+        tree.insert(*key, &key.objectid.to_le_bytes())
+            .expect("insert");
+    }
+    tree
+}
+
 fn probes() -> Vec<BtrfsKey> {
     // Spread across the node, plus a present and an absent key.
     (0..N)
@@ -77,6 +95,7 @@ fn probes() -> Vec<BtrfsKey> {
 fn bench_descent(c: &mut Criterion) {
     let keys = build_keys();
     let probes = probes();
+    let tree = build_cow_tree(&keys);
 
     // Isomorphism: identical slot / find result for every probe.
     for p in &probes {
@@ -91,6 +110,17 @@ fn bench_descent(c: &mut Criterion) {
             leaf_find_binary(&keys, p),
             "leaf_find diverged at {}",
             p.objectid
+        );
+        let expected_get = if p.objectid % 2 == 0 && p.objectid / 2 < N {
+            Some(p.objectid.to_le_bytes().to_vec())
+        } else {
+            None
+        };
+        assert_eq!(tree.get(p), expected_get, "cow_tree get diverged");
+        assert_eq!(
+            cow_get_linear_model(&keys, p),
+            expected_get,
+            "old linear get model diverged"
         );
     }
 
@@ -127,6 +157,32 @@ fn bench_descent(c: &mut Criterion) {
             let mut acc = 0usize;
             for p in black_box(&probes) {
                 acc ^= leaf_find_binary(black_box(&keys), p).unwrap_or(0);
+            }
+            black_box(acc)
+        });
+    });
+    group.bench_function("cow_tree_get_old_linear_model", |b| {
+        b.iter(|| {
+            let mut acc = 0u64;
+            for p in black_box(&probes) {
+                if let Some(data) = cow_get_linear_model(black_box(&keys), p) {
+                    let mut bytes = [0_u8; 8];
+                    bytes.copy_from_slice(&data);
+                    acc ^= u64::from_le_bytes(bytes);
+                }
+            }
+            black_box(acc)
+        });
+    });
+    group.bench_function("cow_tree_get_production", |b| {
+        b.iter(|| {
+            let mut acc = 0u64;
+            for p in black_box(&probes) {
+                if let Some(data) = tree.get(p) {
+                    let mut bytes = [0_u8; 8];
+                    bytes.copy_from_slice(&data);
+                    acc ^= u64::from_le_bytes(bytes);
+                }
             }
             black_box(acc)
         });

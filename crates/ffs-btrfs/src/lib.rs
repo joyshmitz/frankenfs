@@ -3186,14 +3186,10 @@ impl InMemoryCowBtrfsTree {
 
     fn search(&self, node_id: u64, key: &BtrfsKey) -> Result<Vec<u8>, BtrfsMutationError> {
         match self.node_ref(node_id)? {
-            BtrfsCowNode::Leaf { items } => {
-                for item in items {
-                    if key_cmp(&item.key, key) == Ordering::Equal {
-                        return Ok(item.data.clone());
-                    }
-                }
-                Err(BtrfsMutationError::KeyNotFound)
-            }
+            BtrfsCowNode::Leaf { items } => items
+                .binary_search_by(|item| key_cmp(&item.key, key))
+                .map(|idx| items[idx].data.clone())
+                .map_err(|_| BtrfsMutationError::KeyNotFound),
             BtrfsCowNode::Internal { keys, children } => {
                 let idx = keys.partition_point(|k| key_cmp(k, key) != Ordering::Greater);
                 self.search(children[idx], key)
@@ -9580,6 +9576,23 @@ mod tests {
         assert_eq!(tree.get(&test_key(15)), None);
         assert_eq!(tree.get(&test_key(0)), None);
         assert_eq!(tree.get(&test_key(100)), None);
+    }
+
+    #[test]
+    fn get_returns_existing_key_data_from_dense_leaf() {
+        let mut tree = InMemoryCowBtrfsTree::new(64).expect("tree");
+        for objectid in (0_u64..64).map(|i| i * 2) {
+            tree.insert(test_key(objectid), &test_payload(objectid))
+                .expect("insert");
+        }
+
+        assert_eq!(tree.get(&test_key(0)), Some(test_payload(0).to_vec()));
+        assert_eq!(tree.get(&test_key(64)), Some(test_payload(64).to_vec()));
+        assert_eq!(tree.get(&test_key(126)), Some(test_payload(126).to_vec()));
+        assert_eq!(tree.get(&test_key(65)), None);
+        assert_eq!(tree.get(&test_key(127)), None);
+        assert_eq!(tree.root_level(), 0);
+        tree.validate_invariants().expect("invariants");
     }
 
     #[test]
