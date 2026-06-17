@@ -3868,6 +3868,8 @@ fn casefold_name(name: &[u8]) -> Vec<u8> {
 fn precomposed_nfd_casefold(ch: char) -> Option<(char, char)> {
     precomposed_latin1_nfd_casefold(ch)
         .or_else(|| precomposed_latin_extended_a_nfd_casefold(ch))
+        .or_else(|| precomposed_latin_extended_additional_a_l_nfd_casefold(ch))
+        .or_else(|| precomposed_latin_extended_additional_m_z_nfd_casefold(ch))
         .or_else(|| precomposed_vietnamese_single_mark_nfd_casefold(ch))
         .or_else(|| precomposed_greek_nfd_casefold(ch))
 }
@@ -3965,6 +3967,81 @@ const fn precomposed_latin_extended_a_nfd_casefold(ch: char) -> Option<(char, ch
     })
 }
 
+const fn precomposed_latin_extended_additional_a_l_nfd_casefold(ch: char) -> Option<(char, char)> {
+    Some(match ch {
+        'Ḁ' | 'ḁ' => ('a', '\u{0325}'),
+        'Ḃ' | 'ḃ' => ('b', '\u{0307}'),
+        'Ḅ' | 'ḅ' => ('b', '\u{0323}'),
+        'Ḇ' | 'ḇ' => ('b', '\u{0331}'),
+        'Ḋ' | 'ḋ' => ('d', '\u{0307}'),
+        'Ḍ' | 'ḍ' => ('d', '\u{0323}'),
+        'Ḏ' | 'ḏ' => ('d', '\u{0331}'),
+        'Ḑ' | 'ḑ' => ('d', '\u{0327}'),
+        'Ḓ' | 'ḓ' => ('d', '\u{032D}'),
+        'Ḙ' | 'ḙ' => ('e', '\u{032D}'),
+        'Ḛ' | 'ḛ' => ('e', '\u{0330}'),
+        'Ḟ' | 'ḟ' => ('f', '\u{0307}'),
+        'Ḡ' | 'ḡ' => ('g', '\u{0304}'),
+        'Ḣ' | 'ḣ' => ('h', '\u{0307}'),
+        'Ḥ' | 'ḥ' => ('h', '\u{0323}'),
+        'Ḧ' | 'ḧ' => ('h', '\u{0308}'),
+        'Ḩ' | 'ḩ' => ('h', '\u{0327}'),
+        'Ḫ' | 'ḫ' => ('h', '\u{032E}'),
+        'Ḭ' | 'ḭ' => ('i', '\u{0330}'),
+        'Ḱ' | 'ḱ' => ('k', '\u{0301}'),
+        'Ḳ' | 'ḳ' => ('k', '\u{0323}'),
+        'Ḵ' | 'ḵ' => ('k', '\u{0331}'),
+        'Ḷ' | 'ḷ' => ('l', '\u{0323}'),
+        'Ḻ' | 'ḻ' => ('l', '\u{0331}'),
+        'Ḽ' | 'ḽ' => ('l', '\u{032D}'),
+        _ => return None,
+    })
+}
+
+const fn precomposed_latin_extended_additional_m_z_nfd_casefold(ch: char) -> Option<(char, char)> {
+    Some(match ch {
+        'Ḿ' | 'ḿ' => ('m', '\u{0301}'),
+        'Ṁ' | 'ṁ' => ('m', '\u{0307}'),
+        'Ṃ' | 'ṃ' => ('m', '\u{0323}'),
+        'Ṅ' | 'ṅ' => ('n', '\u{0307}'),
+        'Ṇ' | 'ṇ' => ('n', '\u{0323}'),
+        'Ṉ' | 'ṉ' => ('n', '\u{0331}'),
+        'Ṋ' | 'ṋ' => ('n', '\u{032D}'),
+        'Ṕ' | 'ṕ' => ('p', '\u{0301}'),
+        'Ṗ' | 'ṗ' => ('p', '\u{0307}'),
+        'Ṙ' | 'ṙ' => ('r', '\u{0307}'),
+        'Ṛ' | 'ṛ' => ('r', '\u{0323}'),
+        'Ṟ' | 'ṟ' => ('r', '\u{0331}'),
+        'Ṡ' | 'ṡ' | 'ẛ' => ('s', '\u{0307}'),
+        'Ṣ' | 'ṣ' => ('s', '\u{0323}'),
+        'Ṫ' | 'ṫ' => ('t', '\u{0307}'),
+        'Ṭ' | 'ṭ' => ('t', '\u{0323}'),
+        'Ṯ' | 'ṯ' => ('t', '\u{0331}'),
+        'Ṱ' | 'ṱ' => ('t', '\u{032D}'),
+        'Ṳ' | 'ṳ' => ('u', '\u{0324}'),
+        'Ṵ' | 'ṵ' => ('u', '\u{0330}'),
+        'Ṷ' | 'ṷ' => ('u', '\u{032D}'),
+        'Ṽ' | 'ṽ' => ('v', '\u{0303}'),
+        'Ṿ' | 'ṿ' => ('v', '\u{0323}'),
+        'Ẁ' | 'ẁ' => ('w', '\u{0300}'),
+        'Ẃ' | 'ẃ' => ('w', '\u{0301}'),
+        'Ẅ' | 'ẅ' => ('w', '\u{0308}'),
+        'Ẇ' | 'ẇ' => ('w', '\u{0307}'),
+        'Ẉ' | 'ẉ' => ('w', '\u{0323}'),
+        'Ẋ' | 'ẋ' => ('x', '\u{0307}'),
+        'Ẍ' | 'ẍ' => ('x', '\u{0308}'),
+        'Ẏ' | 'ẏ' => ('y', '\u{0307}'),
+        'Ẑ' | 'ẑ' => ('z', '\u{0302}'),
+        'Ẓ' | 'ẓ' => ('z', '\u{0323}'),
+        'Ẕ' | 'ẕ' => ('z', '\u{0331}'),
+        'ẖ' => ('h', '\u{0331}'),
+        'ẗ' => ('t', '\u{0308}'),
+        'ẘ' => ('w', '\u{030A}'),
+        'ẙ' => ('y', '\u{030A}'),
+        _ => return None,
+    })
+}
+
 const fn precomposed_vietnamese_single_mark_nfd_casefold(ch: char) -> Option<(char, char)> {
     Some(match ch {
         // Latin Extended-B bases used by Vietnamese precomposed letters.
@@ -4009,6 +4086,22 @@ const fn precomposed_greek_nfd_casefold(ch: char) -> Option<(char, char)> {
 /// one combining mark. Marks are already in canonical combining-class order.
 fn precomposed_multi_mark_nfd_casefold(ch: char) -> Option<(char, &'static str)> {
     let mapped = match ch {
+        'Ḉ' | 'ḉ' => ('c', "\u{0327}\u{0301}"),
+        'Ḕ' | 'ḕ' => ('e', "\u{0304}\u{0300}"),
+        'Ḗ' | 'ḗ' => ('e', "\u{0304}\u{0301}"),
+        'Ḝ' | 'ḝ' => ('e', "\u{0327}\u{0306}"),
+        'Ḯ' | 'ḯ' => ('i', "\u{0308}\u{0301}"),
+        'Ḹ' | 'ḹ' => ('l', "\u{0323}\u{0304}"),
+        'Ṍ' | 'ṍ' => ('o', "\u{0303}\u{0301}"),
+        'Ṏ' | 'ṏ' => ('o', "\u{0303}\u{0308}"),
+        'Ṑ' | 'ṑ' => ('o', "\u{0304}\u{0300}"),
+        'Ṓ' | 'ṓ' => ('o', "\u{0304}\u{0301}"),
+        'Ṝ' | 'ṝ' => ('r', "\u{0323}\u{0304}"),
+        'Ṥ' | 'ṥ' => ('s', "\u{0301}\u{0307}"),
+        'Ṧ' | 'ṧ' => ('s', "\u{030C}\u{0307}"),
+        'Ṩ' | 'ṩ' => ('s', "\u{0323}\u{0307}"),
+        'Ṹ' | 'ṹ' => ('u', "\u{0303}\u{0301}"),
+        'Ṻ' | 'ṻ' => ('u', "\u{0304}\u{0308}"),
         'Ấ' | 'ấ' => ('a', "\u{0302}\u{0301}"),
         'Ầ' | 'ầ' => ('a', "\u{0302}\u{0300}"),
         'Ẩ' | 'ẩ' => ('a', "\u{0302}\u{0309}"),
@@ -4070,6 +4163,7 @@ fn push_casefolded_char(folded: &mut String, ch: char) {
             folded.push(lower);
         }
         'Ё' => folded.push('ё'),
+        'ſ' => folded.push('s'),
         'А'..='Я' => {
             let lower = char::from_u32(u32::from(ch) + 0x20)
                 .expect("Cyrillic uppercase range maps to valid lowercase scalar");
@@ -11060,6 +11154,77 @@ mod tests {
         }
         // ASCII is unaffected.
         assert_eq!(ext4_casefold_key(b"Hello"), b"hello".to_vec());
+    }
+
+    #[test]
+    fn ext4_casefold_key_nfd_normalizes_latin_extended_additional_single_mark_bd_vsuni() {
+        let cases: &[(&str, &str)] = &[
+            ("Ḁ", "a\u{0325}"),
+            ("Ḃ", "b\u{0307}"),
+            ("Ḅ", "b\u{0323}"),
+            ("Ḇ", "b\u{0331}"),
+            ("Ḑ", "d\u{0327}"),
+            ("ḓ", "d\u{032D}"),
+            ("Ḛ", "e\u{0330}"),
+            ("Ḡ", "g\u{0304}"),
+            ("Ḫ", "h\u{032E}"),
+            ("Ḭ", "i\u{0330}"),
+            ("Ḳ", "k\u{0323}"),
+            ("Ḽ", "l\u{032D}"),
+            ("Ṃ", "m\u{0323}"),
+            ("Ṋ", "n\u{032D}"),
+            ("Ṕ", "p\u{0301}"),
+            ("Ṟ", "r\u{0331}"),
+            ("Ṣ", "s\u{0323}"),
+            ("Ṱ", "t\u{032D}"),
+            ("Ṳ", "u\u{0324}"),
+            ("Ṽ", "v\u{0303}"),
+            ("Ẉ", "w\u{0323}"),
+            ("Ẍ", "x\u{0308}"),
+            ("Ẏ", "y\u{0307}"),
+            ("Ẕ", "z\u{0331}"),
+            ("ẛ", "s\u{0307}"),
+        ];
+        for (composed, decomposed) in cases {
+            assert_eq!(
+                ext4_casefold_key(composed.as_bytes()),
+                ext4_casefold_key(decomposed.as_bytes()),
+                "Latin Extended Additional composed {composed:?} must fold to {decomposed:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn ext4_casefold_key_nfd_normalizes_latin_extended_additional_multi_mark_bd_vsuni() {
+        let cases: &[(&str, &str)] = &[
+            ("Ḉ", "c\u{0327}\u{0301}"),
+            ("Ḕ", "e\u{0304}\u{0300}"),
+            ("Ḗ", "e\u{0304}\u{0301}"),
+            ("Ḝ", "e\u{0327}\u{0306}"),
+            ("Ḯ", "i\u{0308}\u{0301}"),
+            ("Ḹ", "l\u{0323}\u{0304}"),
+            ("Ṍ", "o\u{0303}\u{0301}"),
+            ("Ṏ", "o\u{0303}\u{0308}"),
+            ("Ṑ", "o\u{0304}\u{0300}"),
+            ("Ṓ", "o\u{0304}\u{0301}"),
+            ("Ṝ", "r\u{0323}\u{0304}"),
+            ("Ṥ", "s\u{0301}\u{0307}"),
+            ("Ṧ", "s\u{030C}\u{0307}"),
+            ("Ṩ", "s\u{0323}\u{0307}"),
+            ("Ṹ", "u\u{0303}\u{0301}"),
+            ("Ṻ", "u\u{0304}\u{0308}"),
+        ];
+        for (composed, decomposed) in cases {
+            assert_eq!(
+                ext4_casefold_key(composed.as_bytes()),
+                ext4_casefold_key(decomposed.as_bytes()),
+                "Latin Extended Additional multi-mark {composed:?} must fold to {decomposed:?}"
+            );
+        }
+        assert!(ext4_casefold_names_collide(
+            "ḈaṦeṸ".as_bytes(),
+            "c\u{0327}\u{0301}as\u{030C}\u{0307}eu\u{0303}\u{0301}".as_bytes()
+        ));
     }
 
     #[test]
