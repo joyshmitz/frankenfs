@@ -4038,6 +4038,7 @@ const fn precomposed_latin_extended_additional_m_z_nfd_casefold(ch: char) -> Opt
         'ẗ' => ('t', '\u{0308}'),
         'ẘ' => ('w', '\u{030A}'),
         'ẙ' => ('y', '\u{030A}'),
+        'ẚ' => ('a', '\u{02BE}'),
         _ => return None,
     })
 }
@@ -11472,6 +11473,18 @@ mod tests {
         assert!(ext4_casefold_names_collide(
             "Tiếng Việt".as_bytes(),
             "tie\u{0302}\u{0301}ng vie\u{0323}\u{0302}t".as_bytes()
+        ));
+    }
+
+    #[test]
+    fn ext4_casefold_key_nfd_normalizes_latin_extended_additional_u1e9a_bd_vsuni() {
+        assert_eq!(
+            ext4_casefold_key("ẚ".as_bytes()),
+            ext4_casefold_key("a\u{02BE}".as_bytes())
+        );
+        assert!(ext4_casefold_names_collide(
+            "ẚla".as_bytes(),
+            "a\u{02BE}la".as_bytes()
         ));
     }
 
