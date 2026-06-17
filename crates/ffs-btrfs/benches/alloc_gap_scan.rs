@@ -162,10 +162,33 @@ fn bench_free_space_extents(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_sync_block_group_accounting(c: &mut Criterion) {
+    let mut alloc = build_largest_free_allocator();
+    assert_eq!(
+        alloc
+            .sync_block_group_accounting()
+            .expect("sync block group accounting"),
+        E as u64 * EXT_SIZE
+    );
+
+    let mut group = c.benchmark_group("btrfs_sync_block_group_accounting_keyscan_4096");
+    group.bench_function("production_sync_block_group_accounting", |b| {
+        b.iter(|| {
+            black_box(
+                alloc
+                    .sync_block_group_accounting()
+                    .expect("sync block group accounting"),
+            )
+        });
+    });
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_alloc_gap_scan,
     bench_largest_free_extent,
-    bench_free_space_extents
+    bench_free_space_extents,
+    bench_sync_block_group_accounting
 );
 criterion_main!(benches);

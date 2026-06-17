@@ -6470,11 +6470,12 @@ impl BtrfsExtentAllocator {
                 item_type: BTRFS_ITEM_METADATA_ITEM,
                 offset: u64::MAX,
             };
-            let used: u64 = self
-                .extent_tree
-                .range(&lo, &hi)?
-                .iter()
-                .filter_map(|(key, _)| allocation_extent_range(*key, nodesize))
+            let mut extent_keys = Vec::new();
+            self.extent_tree
+                .range_with(&lo, &hi, |key, _| extent_keys.push(key))?;
+            let used: u64 = extent_keys
+                .into_iter()
+                .filter_map(|key| allocation_extent_range(key, nodesize))
                 .filter(|(ext_start, _)| *ext_start >= start && *ext_start < end)
                 .fold(0_u64, |acc, (_, len)| acc.saturating_add(len));
 
@@ -15313,6 +15314,45 @@ mod tests {
                 (bg_start + 0xc000, bg_len - 0xc000),
             ],
             "loaded metadata blocks must be excluded from free space"
+        );
+    }
+
+    #[test]
+    fn sync_block_group_accounting_uses_extent_keys_bd_xmh5g_192() {
+        let mut alloc = BtrfsExtentAllocator::new(11).expect("alloc");
+        alloc.set_nodesize(0x4000);
+        let bg_start = 0x2d0_0000_u64;
+        let bg_len = 0x40_0000_u64;
+        alloc.add_block_group(bg_start, make_meta_bg(bg_start, bg_len));
+
+        alloc
+            .insert_data_extent_item(bg_start, 0x2000, 5, 256, 0, 11)
+            .expect("insert data extent");
+        let item = BtrfsExtentItem {
+            refs: 1,
+            generation: 11,
+            flags: BtrfsExtentItem::FLAG_TREE_BLOCK,
+        };
+        let mut value = item.to_bytes();
+        value.push(BTRFS_ITEM_TREE_BLOCK_REF);
+        value.extend_from_slice(&BTRFS_EXTENT_TREE_OBJECTID.to_le_bytes());
+        let metadata_key = BtrfsKey {
+            objectid: bg_start + 0x8000,
+            item_type: BTRFS_ITEM_METADATA_ITEM,
+            offset: 0, // level 0, not length
+        };
+        alloc
+            .extent_tree_mut()
+            .insert(metadata_key, &value)
+            .expect("insert metadata extent");
+
+        let used = alloc
+            .sync_block_group_accounting()
+            .expect("sync block group accounting");
+        assert_eq!(used, 0x2000 + 0x4000);
+        assert_eq!(
+            alloc.block_group(bg_start).expect("block group").used_bytes,
+            used
         );
     }
 
