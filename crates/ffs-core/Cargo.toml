@@ -116,6 +116,10 @@ harness = false
 name = "ext4_readdir_run_overlap"
 harness = false
 
+[[bench]]
+name = "ext4_lookup_run_overlap"
+harness = false
+
 [lints]
 workspace = true
 

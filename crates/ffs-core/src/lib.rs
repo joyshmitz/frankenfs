@@ -10873,23 +10873,54 @@ impl OpenFs {
         let bs = u64::from(self.block_size());
         let num_blocks = dir_logical_block_count(dir_inode.size, bs)?;
 
+        // PLAN pass (serial): resolve every present, non-unwritten directory
+        // block to its physical block in logical order. The resolve_extent
+        // descent stays serial so its order and error semantics are preserved
+        // (the lowest-block resolve error still wins); no device reads here.
+        let mut planned: Vec<BlockNumber> = Vec::new();
         for lb in 0..num_blocks {
             if let Some((phys, unwritten)) = self.resolve_extent(cx, scope, dir_inode, lb)? {
-                if unwritten {
-                    continue;
+                if !unwritten {
+                    planned.push(BlockNumber(phys));
                 }
-                let block_data =
-                    self.read_ext4_file_data_block_with_scope(cx, scope, BlockNumber(phys))?;
-                let found = if dir_inode.flags & ffs_types::EXT4_CASEFOLD_FL != 0 {
-                    lookup_in_dir_block_casefold(&block_data, self.block_size(), name)
-                        .map_err(|e| parse_to_ffs_error(&e))?
-                } else {
-                    lookup_in_dir_block(&block_data, self.block_size(), name)
-                        .map_err(|e| parse_to_ffs_error(&e))?
-                };
-                if let Some(entry) = found {
-                    return Ok(Some(entry));
-                }
+            }
+        }
+
+        // PARALLEL READ + SEARCH (bd-xmh5g.194): read each planned block
+        // concurrently and search it for `name`. Each read is a `&self`/`&scope`
+        // call hitting the lock-striped data-block cache + device, so the
+        // per-block device-read latencies overlap (parking, pool-bounded) while
+        // the search runs over byte-identical block bytes. Results are consumed
+        // in logical-block order, so the FIRST matching block wins and the
+        // lowest-block read/parse error wins — isomorphic to the serial
+        // early-exit linear scan. The serial reader stops at the first match; the
+        // parallel reader may read later blocks too (bounded by the pool), but
+        // those extra reads only ever populate the read-through cache, which is
+        // not observable. The hot case this targets is a negative lookup (name
+        // absent) on a large non-htree or htree-stale directory, where the serial
+        // scan pays one device-read latency per block in sequence.
+        let casefold = dir_inode.flags & ffs_types::EXT4_CASEFOLD_FL != 0;
+        let block_size = self.block_size();
+        let block_results: Vec<Result<Option<Ext4DirEntry>, FfsError>> = {
+            use rayon::prelude::{IntoParallelIterator, ParallelIterator};
+            planned
+                .into_par_iter()
+                .map(|phys| {
+                    let block_data = self.read_ext4_file_data_block_with_scope(cx, scope, phys)?;
+                    if casefold {
+                        lookup_in_dir_block_casefold(&block_data, block_size, name)
+                            .map_err(|e| parse_to_ffs_error(&e))
+                    } else {
+                        lookup_in_dir_block(&block_data, block_size, name)
+                            .map_err(|e| parse_to_ffs_error(&e))
+                    }
+                })
+                .collect()
+        };
+
+        for result in block_results {
+            if let Some(entry) = result? {
+                return Ok(Some(entry));
             }
         }
 
