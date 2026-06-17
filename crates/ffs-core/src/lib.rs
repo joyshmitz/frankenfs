@@ -22149,6 +22149,11 @@ impl OpenFs {
         // tree, set inside the single-leaf path below once every extent item is
         // present. `None` => fall-back path; leave the on-disk value untouched.
         let mut recomputed_bytes_used: Option<u64> = None;
+        // bd-xmh5g.193: when the FREE_SPACE_TREE is rewritten in place below,
+        // the accounting recompute and the free-space derivation scan the exact
+        // same per-block-group extent keys. Compute both in one fused pass and
+        // carry the free-space groups here so the second scan is eliminated.
+        let mut fused_free_groups: Option<Vec<ffs_btrfs::BlockGroupFreeSpace>> = None;
         if alloc.extent_alloc.extent_tree_root_is_leaf() {
             alloc
                 .extent_alloc
@@ -22187,12 +22192,24 @@ impl OpenFs {
             // does) and patch the on-disk BLOCK_GROUP_ITEMs + superblock
             // bytes_used, so a net-new data extent no longer trips "block group
             // used N but extent items used M" / "super bytes used ... mismatch".
-            recomputed_bytes_used = Some(
-                alloc
+            if fst_reuse.is_some() {
+                // Fused single-scan accounting + free-space derivation: the
+                // FREE_SPACE_TREE rewrite below would otherwise re-scan the same
+                // extent keys a second time (bd-xmh5g.193).
+                let (bytes_used, free_groups) = alloc
                     .extent_alloc
-                    .sync_block_group_accounting()
-                    .map_err(|e| btrfs_mutation_to_ffs(&e))?,
-            );
+                    .sync_accounting_and_free_space()
+                    .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+                recomputed_bytes_used = Some(bytes_used);
+                fused_free_groups = Some(free_groups);
+            } else {
+                recomputed_bytes_used = Some(
+                    alloc
+                        .extent_alloc
+                        .sync_block_group_accounting()
+                        .map_err(|e| btrfs_mutation_to_ffs(&e))?,
+                );
+            }
 
             // Only re-serialize when the two inserts kept the extent tree a
             // single leaf; otherwise its root bytenr would have changed and the
@@ -22231,10 +22248,16 @@ impl OpenFs {
             // ("there is no free space entry for ..."). Single-leaf only; a tree
             // that would split falls back (left not-VALID in the superblock).
             if let Some((fst_addr, fst_level)) = fst_reuse {
-                let groups = alloc
-                    .extent_alloc
-                    .free_space_extents()
-                    .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+                // Reuse the free-space groups computed by the fused accounting
+                // pass above (bd-xmh5g.193); fall back to a standalone scan only
+                // if the single-leaf accounting branch did not run.
+                let groups = match fused_free_groups.take() {
+                    Some(groups) => groups,
+                    None => alloc
+                        .extent_alloc
+                        .free_space_extents()
+                        .map_err(|e| btrfs_mutation_to_ffs(&e))?,
+                };
                 let items = ffs_btrfs::build_free_space_tree_items(&groups);
                 let fst_max_items = usize::try_from(u64::from(nodesize).saturating_sub(101) / 64)
                     .unwrap_or(5)

@@ -18,7 +18,9 @@
 //! (asserted across several cursor positions).
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use ffs_btrfs::{BTRFS_BLOCK_GROUP_DATA, BtrfsBlockGroupItem, BtrfsExtentAllocator};
+use ffs_btrfs::{
+    BTRFS_BLOCK_GROUP_DATA, BlockGroupFreeSpace, BtrfsBlockGroupItem, BtrfsExtentAllocator,
+};
 use std::hint::black_box;
 
 const E: usize = 4096; // extents already allocated in the block group
@@ -184,28 +186,47 @@ fn bench_sync_block_group_accounting(c: &mut Criterion) {
     group.finish();
 }
 
-fn commit_accounting_free_space_production(alloc: &mut BtrfsExtentAllocator) -> (u64, usize) {
+/// OLD commit sequence: two adjacent passes over the same per-block-group
+/// extent keys — accounting recompute then free-space derivation.
+fn commit_accounting_free_space_production(
+    alloc: &mut BtrfsExtentAllocator,
+) -> (u64, Vec<BlockGroupFreeSpace>) {
     let bytes_used = alloc
         .sync_block_group_accounting()
         .expect("sync block group accounting");
     let free_space = alloc.free_space_extents().expect("free space extents");
-    let free_range_count = free_space
-        .iter()
-        .map(|group| group.free_ranges.len())
-        .sum();
-    (bytes_used, free_range_count)
+    (bytes_used, free_space)
+}
+
+/// NEW commit sequence (bd-xmh5g.193): one fused scan computing both the
+/// accounting grand total and the free-space groups.
+fn commit_accounting_free_space_fused(
+    alloc: &mut BtrfsExtentAllocator,
+) -> (u64, Vec<BlockGroupFreeSpace>) {
+    alloc
+        .sync_accounting_and_free_space()
+        .expect("fused accounting + free space")
 }
 
 fn bench_commit_accounting_free_space(c: &mut Criterion) {
-    let mut alloc = build_largest_free_allocator();
+    // Isomorphism: the fused single-scan helper returns byte-identical
+    // accounting totals AND free-space groups to the two-pass sequence.
+    let mut alloc_two_pass = build_largest_free_allocator();
+    let mut alloc_fused = build_largest_free_allocator();
+    let two_pass = commit_accounting_free_space_production(&mut alloc_two_pass);
+    let fused = commit_accounting_free_space_fused(&mut alloc_fused);
+    assert_eq!(two_pass.0, E as u64 * EXT_SIZE);
     assert_eq!(
-        commit_accounting_free_space_production(&mut alloc),
-        (E as u64 * EXT_SIZE, 1)
+        two_pass, fused,
+        "fused commit accounting diverged from two-pass"
     );
 
     let mut group = c.benchmark_group("btrfs_commit_accounting_free_space_scan_4096");
-    group.bench_function("production_commit_accounting_free_space", |b| {
-        b.iter(|| black_box(commit_accounting_free_space_production(&mut alloc)));
+    group.bench_function("production_two_pass", |b| {
+        b.iter(|| black_box(commit_accounting_free_space_production(&mut alloc_two_pass)));
+    });
+    group.bench_function("fused_single_scan", |b| {
+        b.iter(|| black_box(commit_accounting_free_space_fused(&mut alloc_fused)));
     });
     group.finish();
 }

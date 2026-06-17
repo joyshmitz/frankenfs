@@ -6499,6 +6499,165 @@ impl BtrfsExtentAllocator {
         Ok(grand_total)
     }
 
+    /// Fused commit-path pass that, in a SINGLE `EXTENT_ITEM`/`METADATA_ITEM`
+    /// key scan per block group, does the work of both
+    /// [`Self::sync_block_group_accounting`] and [`Self::free_space_extents`]:
+    ///
+    /// * recomputes every group's `used_bytes` (patching the in-memory group,
+    ///   the on-disk `BLOCK_GROUP_ITEM`, and accumulating the superblock grand
+    ///   total), and
+    /// * derives that group's free `[start, len)` ranges (the allocation
+    ///   complement) for `FREE_SPACE_TREE` maintenance.
+    ///
+    /// The btrfs commit path runs those two passes back-to-back whenever the
+    /// `FREE_SPACE_TREE` is rewritten in place (`fst_reuse`), and both passes
+    /// scan the identical per-group extent-key range. Folding them into one
+    /// scan halves the extent-tree key-scan work on every transaction commit
+    /// that reuses the free-space tree (bd-xmh5g.193).
+    ///
+    /// The result is byte-identical to calling `sync_block_group_accounting()`
+    /// and then `free_space_extents()`: within each group `used_bytes` is set
+    /// before the free ranges are derived, so the reserved-prefix
+    /// `untracked_used` fence uses the freshly recomputed figure exactly as the
+    /// two-call sequence does. Because each group's accounting depends only on
+    /// its own extent keys, processing one group fully (used then free) before
+    /// the next yields the same per-group `used_bytes` the free pass would have
+    /// observed after a separate full accounting pass.
+    ///
+    /// Callers that rewrite no free-space tree should keep using the standalone
+    /// [`Self::sync_block_group_accounting`] (no free-range work performed).
+    ///
+    /// # Errors
+    /// Returns any error from reading or updating the in-memory extent tree.
+    pub fn sync_accounting_and_free_space(
+        &mut self,
+    ) -> Result<(u64, Vec<BlockGroupFreeSpace>), BtrfsMutationError> {
+        let groups: Vec<(u64, u64, u64)> = self
+            .block_groups
+            .values()
+            .map(|bg| (bg.start, bg.item.total_bytes, bg.item.flags))
+            .collect();
+        let nodesize = self.nodesize;
+        let mut grand_total = 0_u64;
+        let mut free_space = Vec::with_capacity(groups.len());
+        for (start, total_bytes, flags) in groups {
+            let end = start
+                .checked_add(total_bytes)
+                .ok_or(BtrfsMutationError::AddressOverflow)?;
+            let lo = BtrfsKey {
+                objectid: start,
+                item_type: BTRFS_ITEM_EXTENT_ITEM,
+                offset: 0,
+            };
+            let hi = BtrfsKey {
+                objectid: end,
+                item_type: BTRFS_ITEM_METADATA_ITEM,
+                offset: u64::MAX,
+            };
+            // One walk over the in-key-order extent keys feeds both accounting
+            // intents: `used` sums the FULL extent lengths whose start lands in
+            // [start, end) (the `btrfs check` definition, == sync's tally), and
+            // `free_ranges` streams the complement of the clamped allocations.
+            let mut used = 0_u64;
+            let mut materialized_used = 0_u64;
+            let mut free_ranges = Vec::new();
+            let mut cursor = start;
+            let mut range_error = None;
+            self.extent_tree.range_with(&lo, &hi, |key, _| {
+                if range_error.is_some() {
+                    return;
+                }
+                if key.objectid >= end {
+                    return;
+                }
+                let Some((ext_start, ext_len)) = allocation_extent_range(key, nodesize) else {
+                    return;
+                };
+                // Range scan guarantees `ext_start >= start`; the break above
+                // guarantees `ext_start < end`, so this key is in-group.
+                used = used.saturating_add(ext_len);
+                let extent_start = ext_start.max(start);
+                let Some(extent_end) = ext_start.checked_add(ext_len).map(|stop| stop.min(end))
+                else {
+                    range_error = Some(BtrfsMutationError::AddressOverflow);
+                    return;
+                };
+                if extent_start < extent_end {
+                    let Some(next_materialized_used) =
+                        materialized_used.checked_add(extent_end - extent_start)
+                    else {
+                        range_error = Some(BtrfsMutationError::AddressOverflow);
+                        return;
+                    };
+                    if extent_end <= cursor {
+                        materialized_used = next_materialized_used;
+                        return;
+                    }
+                    if cursor < extent_start {
+                        free_ranges.push((cursor, extent_start - cursor));
+                    }
+                    cursor = extent_end;
+                    materialized_used = next_materialized_used;
+                }
+            })?;
+            if let Some(error) = range_error {
+                return Err(error);
+            }
+
+            // Accounting writeback (sync_block_group_accounting semantics).
+            if let Some(bg) = self.block_groups.get_mut(&start) {
+                bg.item.used_bytes = used;
+                bg.tail_verified = false;
+            }
+            let bg_key = BtrfsKey {
+                objectid: start,
+                item_type: BTRFS_ITEM_BLOCK_GROUP_ITEM,
+                offset: total_bytes,
+            };
+            if let Some(mut value) = self.extent_tree.get(&bg_key) {
+                if value.len() >= 8 {
+                    value[0..8].copy_from_slice(&used.to_le_bytes());
+                    self.extent_tree.update(&bg_key, &value)?;
+                }
+            }
+            grand_total = grand_total.saturating_add(used);
+
+            // Free-range complement (free_space_extents semantics). The reserved
+            // system/superblock prefix not represented by an extent item is
+            // fenced at the group start using the just-written `used_bytes`.
+            let untracked_used = used.saturating_sub(materialized_used).min(total_bytes);
+            if untracked_used > 0 {
+                let reserved_end = start
+                    .checked_add(untracked_used)
+                    .ok_or(BtrfsMutationError::AddressOverflow)?;
+                let mut fenced_ranges = Vec::with_capacity(free_ranges.len());
+                for (free_start, free_len) in free_ranges {
+                    let free_end = free_start
+                        .checked_add(free_len)
+                        .ok_or(BtrfsMutationError::AddressOverflow)?;
+                    if free_end <= reserved_end {
+                        continue;
+                    }
+                    let fenced_start = free_start.max(reserved_end);
+                    fenced_ranges.push((fenced_start, free_end - fenced_start));
+                }
+                free_ranges = fenced_ranges;
+                cursor = cursor.max(reserved_end);
+            }
+            if cursor < end {
+                free_ranges.push((cursor, end - cursor));
+            }
+
+            free_space.push(BlockGroupFreeSpace {
+                start,
+                total_bytes,
+                flags,
+                free_ranges,
+            });
+        }
+        Ok((grand_total, free_space))
+    }
+
     /// Total capacity across all block groups.
     #[must_use]
     pub fn total_capacity(&self) -> u64 {
@@ -15354,6 +15513,122 @@ mod tests {
             alloc.block_group(bg_start).expect("block group").used_bytes,
             used
         );
+    }
+
+    #[test]
+    fn sync_accounting_and_free_space_matches_two_pass_bd_xmh5g_193() {
+        // Build an allocator with two block groups (one data, one metadata),
+        // a mix of EXTENT_ITEM and skinny METADATA_ITEM extents, and real
+        // BLOCK_GROUP_ITEM payloads that both paths must patch identically.
+        let build = || {
+            let mut alloc = BtrfsExtentAllocator::new(11).expect("alloc");
+            alloc.set_nodesize(0x4000);
+            let insert_block_group_item =
+                |alloc: &mut BtrfsExtentAllocator, start: u64, item: BtrfsBlockGroupItem| {
+                    alloc
+                        .extent_tree_mut()
+                        .insert(
+                            BtrfsKey {
+                                objectid: start,
+                                item_type: BTRFS_ITEM_BLOCK_GROUP_ITEM,
+                                offset: item.total_bytes,
+                            },
+                            &item.to_bytes(),
+                        )
+                        .expect("insert block group item");
+                };
+
+            let data_start = 0x2d0_0000_u64;
+            let data_len = 0x40_0000_u64;
+            let data_item = BtrfsBlockGroupItem {
+                total_bytes: data_len,
+                used_bytes: 0x9000,
+                flags: BTRFS_BLOCK_GROUP_DATA,
+            };
+            alloc.add_block_group(data_start, data_item);
+            insert_block_group_item(&mut alloc, data_start, data_item);
+            alloc
+                .insert_data_extent_item(data_start + 0x4000, 0x2000, 5, 256, 0, 11)
+                .expect("insert data extent");
+            alloc
+                .insert_data_extent_item(data_start + 0x10_0000, 0x3000, 6, 257, 0, 11)
+                .expect("insert data extent 2");
+            alloc
+                .insert_data_extent_item(data_start + data_len - 0x1000, 0x3000, 7, 258, 0, 11)
+                .expect("insert crossing data extent");
+
+            let meta_start = 0x400_0000_u64;
+            let meta_len = 0x40_0000_u64;
+            let meta_item = make_meta_bg(meta_start, meta_len);
+            alloc.add_block_group(meta_start, meta_item);
+            insert_block_group_item(&mut alloc, meta_start, meta_item);
+            let item = BtrfsExtentItem {
+                refs: 1,
+                generation: 11,
+                flags: BtrfsExtentItem::FLAG_TREE_BLOCK,
+            };
+            let mut value = item.to_bytes();
+            value.push(BTRFS_ITEM_TREE_BLOCK_REF);
+            value.extend_from_slice(&BTRFS_EXTENT_TREE_OBJECTID.to_le_bytes());
+            let metadata_key = BtrfsKey {
+                objectid: meta_start + 0x8000,
+                item_type: BTRFS_ITEM_METADATA_ITEM,
+                offset: 0, // level 0, not length
+            };
+            alloc
+                .extent_tree_mut()
+                .insert(metadata_key, &value)
+                .expect("insert metadata extent");
+            alloc
+        };
+
+        // Two-pass reference (production order: accounting then free-space).
+        let mut alloc_two = build();
+        let used_two = alloc_two
+            .sync_block_group_accounting()
+            .expect("two-pass accounting");
+        let free_two = alloc_two.free_space_extents().expect("two-pass free space");
+        let used_bytes_two: Vec<(u64, u64)> = alloc_two
+            .block_groups
+            .values()
+            .map(|bg| (bg.start, bg.item.used_bytes))
+            .collect();
+
+        // Fused single-scan.
+        let mut alloc_fused = build();
+        let (used_fused, free_fused) = alloc_fused
+            .sync_accounting_and_free_space()
+            .expect("fused accounting + free space");
+        let used_bytes_fused: Vec<(u64, u64)> = alloc_fused
+            .block_groups
+            .values()
+            .map(|bg| (bg.start, bg.item.used_bytes))
+            .collect();
+
+        assert_eq!(used_two, used_fused, "grand total bytes_used must match");
+        assert_eq!(free_two, free_fused, "free-space groups must match exactly");
+        assert_eq!(
+            used_bytes_two, used_bytes_fused,
+            "per-block-group used_bytes patches must match"
+        );
+
+        // The on-disk BLOCK_GROUP_ITEMs must be patched identically too.
+        for (start, _) in &used_bytes_two {
+            let bg_key = BtrfsKey {
+                objectid: *start,
+                item_type: BTRFS_ITEM_BLOCK_GROUP_ITEM,
+                offset: alloc_two.block_group(*start).expect("bg").total_bytes,
+            };
+            assert_eq!(
+                alloc_two.extent_tree().get(&bg_key),
+                alloc_fused.extent_tree().get(&bg_key),
+                "BLOCK_GROUP_ITEM payload must match for {start:#x}"
+            );
+            assert!(
+                alloc_fused.extent_tree().get(&bg_key).is_some(),
+                "test must exercise BLOCK_GROUP_ITEM patching for {start:#x}"
+            );
+        }
     }
 
     #[test]
