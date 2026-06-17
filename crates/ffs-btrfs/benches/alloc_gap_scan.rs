@@ -18,6 +18,7 @@
 //! (asserted across several cursor positions).
 
 use criterion::{Criterion, criterion_group, criterion_main};
+use ffs_btrfs::{BTRFS_BLOCK_GROUP_DATA, BtrfsBlockGroupItem, BtrfsExtentAllocator};
 use std::hint::black_box;
 
 const E: usize = 4096; // extents already allocated in the block group
@@ -104,5 +105,46 @@ fn bench_alloc_gap_scan(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_alloc_gap_scan);
+fn build_largest_free_allocator() -> BtrfsExtentAllocator {
+    let mut alloc = BtrfsExtentAllocator::new(7).expect("allocator");
+    alloc.add_block_group(
+        BG_START,
+        BtrfsBlockGroupItem {
+            total_bytes: (E as u64 + 16) * EXT_SIZE,
+            used_bytes: E as u64 * EXT_SIZE,
+            flags: BTRFS_BLOCK_GROUP_DATA,
+        },
+    );
+    for i in 0..E as u64 {
+        alloc
+            .insert_data_extent_item(BG_START + i * EXT_SIZE, EXT_SIZE, 5, 256, i * EXT_SIZE, 7)
+            .expect("insert data extent item");
+    }
+    alloc
+}
+
+fn bench_largest_free_extent(c: &mut Criterion) {
+    let alloc = build_largest_free_allocator();
+    let expected = 16 * EXT_SIZE;
+    assert_eq!(
+        alloc
+            .largest_free_extent(BTRFS_BLOCK_GROUP_DATA)
+            .expect("largest free extent"),
+        expected
+    );
+
+    let mut group = c.benchmark_group("btrfs_largest_free_extent_keyscan_4096");
+    group.bench_function("production_largest_free_extent", |b| {
+        b.iter(|| {
+            black_box(
+                alloc
+                    .largest_free_extent(black_box(BTRFS_BLOCK_GROUP_DATA))
+                    .expect("largest free extent"),
+            )
+        });
+    });
+    group.finish();
+}
+
+criterion_group!(benches, bench_alloc_gap_scan, bench_largest_free_extent);
 criterion_main!(benches);
