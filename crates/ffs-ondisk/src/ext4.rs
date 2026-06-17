@@ -4137,6 +4137,36 @@ fn precomposed_multi_mark_nfd_casefold(ch: char) -> Option<(char, &'static str)>
     Some(mapped)
 }
 
+/// Targeted Greek Extended NFD + casefold coverage for polytonic forms. Some
+/// forms include U+0345 COMBINING GREEK YPOGEGRAMMENI in NFD; casefold expands
+/// that mark to a spacing iota, so the suffix may include Greek letters too.
+fn precomposed_greek_extended_nfd_casefold(ch: char) -> Option<(char, &'static str)> {
+    let mapped = match ch {
+        'Ἀ' | 'ἀ' => ('α', "\u{0313}"),
+        'Ἁ' | 'ἁ' => ('α', "\u{0314}"),
+        'Ἄ' | 'ἄ' => ('α', "\u{0313}\u{0301}"),
+        'Ἃ' | 'ἃ' => ('α', "\u{0314}\u{0300}"),
+        'Ἦ' | 'ἦ' => ('η', "\u{0313}\u{0342}"),
+        'Ὧ' | 'ὧ' => ('ω', "\u{0314}\u{0342}"),
+        'Ῥ' | 'ῥ' => ('ρ', "\u{0314}"),
+        'ᾈ' | 'ᾀ' => ('α', "\u{0313}ι"),
+        'ᾍ' | 'ᾅ' => ('α', "\u{0314}\u{0301}ι"),
+        'ᾨ' | 'ᾠ' => ('ω', "\u{0313}ι"),
+        'ᾧ' => ('ω', "\u{0314}\u{0342}ι"),
+        'ᾼ' | 'ᾳ' => ('α', "ι"),
+        'ῌ' | 'ῃ' => ('η', "ι"),
+        'ῼ' | 'ῳ' => ('ω', "ι"),
+        'ᾲ' => ('α', "\u{0300}ι"),
+        'ῷ' => ('ω', "\u{0342}ι"),
+        'ΐ' | 'ΐ' => ('ι', "\u{0308}\u{0301}"),
+        'ῒ' => ('ι', "\u{0308}\u{0300}"),
+        'ΰ' | 'ΰ' => ('υ', "\u{0308}\u{0301}"),
+        'ῢ' => ('υ', "\u{0308}\u{0300}"),
+        _ => return None,
+    };
+    Some(mapped)
+}
+
 fn push_precomposed_nfd_casefold(folded: &mut String, ch: char) -> bool {
     if let Some((base, mark)) = precomposed_nfd_casefold(ch) {
         folded.push(base);
@@ -4146,6 +4176,11 @@ fn push_precomposed_nfd_casefold(folded: &mut String, ch: char) -> bool {
     if let Some((base, marks)) = precomposed_multi_mark_nfd_casefold(ch) {
         folded.push(base);
         folded.push_str(marks);
+        return true;
+    }
+    if let Some((base, suffix)) = precomposed_greek_extended_nfd_casefold(ch) {
+        folded.push(base);
+        folded.push_str(suffix);
         return true;
     }
     false
@@ -4164,6 +4199,7 @@ fn push_casefolded_char(folded: &mut String, ch: char) {
         }
         'Ё' => folded.push('ё'),
         'ſ' => folded.push('s'),
+        'ς' => folded.push('σ'),
         'А'..='Я' => {
             let lower = char::from_u32(u32::from(ch) + 0x20)
                 .expect("Cyrillic uppercase range maps to valid lowercase scalar");
@@ -11109,6 +11145,52 @@ mod tests {
             ext4_casefold_key("Σ".as_bytes()),
             ext4_casefold_key("σ".as_bytes()),
         );
+    }
+
+    #[test]
+    fn ext4_casefold_key_final_sigma_folds_like_standard_sigma_bd_vsuni() {
+        assert_eq!(
+            ext4_casefold_key("ς".as_bytes()),
+            ext4_casefold_key("σ".as_bytes()),
+            "Greek final sigma must casefold to standard sigma"
+        );
+        assert!(ext4_casefold_names_collide(
+            "Ὀδυσσεύς".as_bytes(),
+            "Ὀδυσσεύσ".as_bytes()
+        ));
+    }
+
+    #[test]
+    fn ext4_casefold_key_nfd_normalizes_greek_extended_bd_vsuni() {
+        let cases: &[(&str, &str)] = &[
+            ("Ἀ", "α\u{0313}"),
+            ("Ἄ", "α\u{0313}\u{0301}"),
+            ("Ἃ", "α\u{0314}\u{0300}"),
+            ("Ἦ", "η\u{0313}\u{0342}"),
+            ("Ὧ", "ω\u{0314}\u{0342}"),
+            ("Ῥ", "ρ\u{0314}"),
+            ("ᾈ", "α\u{0313}ι"),
+            ("ᾅ", "α\u{0314}\u{0301}ι"),
+            ("ᾲ", "α\u{0300}ι"),
+            ("ᾨ", "ω\u{0313}ι"),
+            ("ᾧ", "ω\u{0314}\u{0342}ι"),
+            ("ῷ", "ω\u{0342}ι"),
+            ("ΐ", "ι\u{0308}\u{0301}"),
+            ("ῒ", "ι\u{0308}\u{0300}"),
+            ("ΰ", "υ\u{0308}\u{0301}"),
+            ("ῢ", "υ\u{0308}\u{0300}"),
+        ];
+        for (composed, decomposed) in cases {
+            assert_eq!(
+                ext4_casefold_key(composed.as_bytes()),
+                ext4_casefold_key(decomposed.as_bytes()),
+                "Greek Extended composed {composed:?} must fold to {decomposed:?}"
+            );
+        }
+        assert!(ext4_casefold_names_collide(
+            "ᾈᾅᾧ".as_bytes(),
+            "α\u{0313}ια\u{0314}\u{0301}ιω\u{0314}\u{0342}ι".as_bytes()
+        ));
     }
 
     #[test]
