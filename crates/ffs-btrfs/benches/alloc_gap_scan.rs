@@ -146,5 +146,26 @@ fn bench_largest_free_extent(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_alloc_gap_scan, bench_largest_free_extent);
+fn bench_free_space_extents(c: &mut Criterion) {
+    let alloc = build_largest_free_allocator();
+    let free_space = alloc.free_space_extents().expect("free space extents");
+    assert_eq!(free_space.len(), 1);
+    assert_eq!(
+        free_space[0].free_ranges,
+        vec![(BG_START + E as u64 * EXT_SIZE, 16 * EXT_SIZE)]
+    );
+
+    let mut group = c.benchmark_group("btrfs_free_space_extents_keyscan_4096");
+    group.bench_function("production_free_space_extents", |b| {
+        b.iter(|| black_box(alloc.free_space_extents().expect("free space extents")));
+    });
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_alloc_gap_scan,
+    bench_largest_free_extent,
+    bench_free_space_extents
+);
 criterion_main!(benches);

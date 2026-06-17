@@ -6345,7 +6345,10 @@ impl BtrfsExtentAllocator {
             };
             let mut allocated_ranges = Vec::new();
             let mut materialized_used = 0_u64;
-            for (key, _) in self.extent_tree.range(&range_start, &range_end)? {
+            let mut extent_keys = Vec::new();
+            self.extent_tree
+                .range_with(&range_start, &range_end, |key, _| extent_keys.push(key))?;
+            for key in extent_keys {
                 if key.objectid >= bg_end {
                     break;
                 }
