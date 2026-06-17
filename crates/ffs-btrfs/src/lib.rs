@@ -5097,6 +5097,10 @@ struct BlockGroupState {
     item: BtrfsBlockGroupItem,
     /// Hint for next allocation search offset within this group.
     alloc_offset: u64,
+    /// True when a prior full gap scan proved that `[start + alloc_offset,
+    /// start + total_bytes)` contains no allocation items. While true,
+    /// sequential tail allocations can use the bump pointer directly.
+    tail_verified: bool,
     /// Lowest offset within the group that may be handed out. Captured at
     /// registration from the group's already-used bytes, this fences off the
     /// reserved prefix (superblock / system / root region that carries no
@@ -5198,6 +5202,9 @@ impl BtrfsExtentAllocator {
         let removed = to_remove.len();
         for key in to_remove {
             self.extent_tree.delete(&key)?;
+        }
+        if removed > 0 {
+            self.invalidate_tail_cursors();
         }
         Ok(removed)
     }
@@ -5595,9 +5602,16 @@ impl BtrfsExtentAllocator {
                 start,
                 item,
                 alloc_offset: item.used_bytes,
+                tail_verified: false,
                 min_usable_offset: item.used_bytes,
             },
         );
+    }
+
+    fn invalidate_tail_cursors(&mut self) {
+        for bg in self.block_groups.values_mut() {
+            bg.tail_verified = false;
+        }
     }
 
     /// Allocate a data extent of the given size.
@@ -5720,54 +5734,80 @@ impl BtrfsExtentAllocator {
             "alloc_search_start"
         );
 
-        // Find a gap in this block group by scanning allocation items in range.
-        // We must include both EXTENT_ITEM (168) and METADATA_ITEM (169)
-        // as both represent physical space allocations.
-        let bg = &self.block_groups[&bg_start];
-        let bg_end = bg
-            .start
-            .checked_add(bg.item.total_bytes)
+        let (bg_base, bg_total, alloc_offset, min_usable_offset, tail_verified) = {
+            let bg = &self.block_groups[&bg_start];
+            (
+                bg.start,
+                bg.item.total_bytes,
+                bg.alloc_offset,
+                bg.min_usable_offset,
+                bg.tail_verified,
+            )
+        };
+        let bg_end = bg_base
+            .checked_add(bg_total)
             .ok_or(BtrfsMutationError::AddressOverflow)?;
-
-        let range_start = BtrfsKey {
-            objectid: bg.start,
-            item_type: BTRFS_ITEM_EXTENT_ITEM, // 168
-            offset: 0,
-        };
-        let range_end = BtrfsKey {
-            objectid: bg_end,
-            item_type: BTRFS_ITEM_METADATA_ITEM, // 169
-            offset: u64::MAX,
-        };
-
-        let extents = self.extent_tree.range(&range_start, &range_end)?;
-
-        // Scan for gaps between existing extents.
-        let alloc_offset = self.block_groups[&bg_start].alloc_offset;
         // Lowest address this group may hand out: fences off the reserved prefix
         // (system/root region carrying no EXTENT_ITEM here). Both the forward and
         // wrap-around searches must respect it, or a fully-freed group rooted at
         // logical 0 would allocate bytenr 0 — the hole sentinel (bd-5aybu).
         let min_usable = bg_start
-            .checked_add(self.block_groups[&bg_start].min_usable_offset)
+            .checked_add(min_usable_offset)
             .ok_or(BtrfsMutationError::AddressOverflow)?;
         let cursor = bg_start
             .checked_add(alloc_offset)
             .ok_or(BtrfsMutationError::AddressOverflow)?;
 
-        let allocated_ranges: Vec<(u64, u64)> = extents
-            .iter()
-            .filter_map(|(key, _)| allocation_extent_range(*key, self.nodesize))
-            .collect();
+        let direct_tail = tail_verified
+            && cursor >= min_usable
+            && cursor != 0
+            && cursor
+                .checked_add(num_bytes)
+                .is_some_and(|end| end <= bg_end);
+        let (found, tail_verified_after_alloc) = if direct_tail {
+            (Some(cursor), true)
+        } else {
+            // Find a gap in this block group by scanning allocation items in
+            // range. We must include both EXTENT_ITEM (168) and METADATA_ITEM
+            // (169) as both represent physical space allocations.
+            let range_start = BtrfsKey {
+                objectid: bg_base,
+                item_type: BTRFS_ITEM_EXTENT_ITEM, // 168
+                offset: 0,
+            };
+            let range_end = BtrfsKey {
+                objectid: bg_end,
+                item_type: BTRFS_ITEM_METADATA_ITEM, // 169
+                offset: u64::MAX,
+            };
+            let extents = self.extent_tree.range(&range_start, &range_end)?;
 
-        // Forward search from the bump-pointer offset; if that finds nothing and
-        // we started mid-group, wrap around to the reserved-prefix floor. Both
-        // searches binary-search past the no-op prefix below their start cursor
-        // (bd-8fbka).
-        let mut found = first_gap_at_or_after(&allocated_ranges, cursor, num_bytes, bg_end)?;
-        if found.is_none() && alloc_offset > 0 {
-            found = first_gap_at_or_after(&allocated_ranges, min_usable, num_bytes, bg_end)?;
-        }
+            let allocated_ranges: Vec<(u64, u64)> = extents
+                .iter()
+                .filter_map(|(key, _)| allocation_extent_range(*key, self.nodesize))
+                .collect();
+
+            // Forward search from the bump-pointer offset; if that finds
+            // nothing and we started mid-group, wrap around to the
+            // reserved-prefix floor. Both searches binary-search past the no-op
+            // prefix below their start cursor (bd-8fbka).
+            let mut found = first_gap_at_or_after(&allocated_ranges, cursor, num_bytes, bg_end)?;
+            if found.is_none() && alloc_offset > 0 {
+                found = first_gap_at_or_after(&allocated_ranges, min_usable, num_bytes, bg_end)?;
+            }
+
+            let mut last_extent_end = min_usable;
+            for &(ext_start, ext_size) in &allocated_ranges {
+                let ext_end = ext_start
+                    .checked_add(ext_size)
+                    .ok_or(BtrfsMutationError::AddressOverflow)?;
+                if ext_end > last_extent_end {
+                    last_extent_end = ext_end;
+                }
+            }
+            let tail_verified = found.is_some_and(|bytenr| bytenr >= last_extent_end);
+            (found, tail_verified)
+        };
 
         // bytenr 0 is the btrfs hole/none sentinel and must never back a real
         // extent; refuse it defensively rather than corrupt data (bd-5aybu).
@@ -5855,6 +5895,7 @@ impl BtrfsExtentAllocator {
             bg.alloc_offset = alloc_end
                 .checked_sub(bg_start)
                 .ok_or(BtrfsMutationError::AddressOverflow)?;
+            bg.tail_verified = tail_verified_after_alloc;
             trace!(
                 target: "ffs::btrfs::alloc",
                 block_group = bg_start,
@@ -6000,6 +6041,7 @@ impl BtrfsExtentAllocator {
             ))?;
         let used_before = bg.item.used_bytes;
         bg.item.used_bytes = used_after;
+        bg.tail_verified = false;
         trace!(
             target: "ffs::btrfs::alloc",
             block_group = bg.start,
@@ -6435,6 +6477,7 @@ impl BtrfsExtentAllocator {
 
             if let Some(bg) = self.block_groups.get_mut(&start) {
                 bg.item.used_bytes = used;
+                bg.tail_verified = false;
             }
             let bg_key = BtrfsKey {
                 objectid: start,
@@ -17257,6 +17300,37 @@ mod tests {
         }
 
         assert_eq!(alloc.total_used(), 4096 * 3);
+    }
+
+    #[test]
+    fn tail_verified_allocations_preserve_bump_semantics_bd_xmh5g_188() {
+        let mut alloc = BtrfsExtentAllocator::new(1).expect("alloc");
+        let bg_start = 0x10_0000;
+        alloc.add_block_group(bg_start, make_data_bg(bg_start, 0x100_000));
+
+        let a1 = alloc.alloc_data(4096).expect("alloc 1");
+        let a2 = alloc.alloc_data(4096).expect("alloc 2");
+        assert_eq!(a1.bytenr, bg_start);
+        assert_eq!(a2.bytenr, bg_start + 4096);
+        assert!(
+            alloc.block_groups.get(&bg_start).expect("bg").tail_verified,
+            "sequential tail allocation should keep the verified suffix"
+        );
+
+        alloc
+            .free_extent(a1.bytenr, a1.num_bytes, false)
+            .expect("free first extent");
+        assert!(
+            !alloc.block_groups.get(&bg_start).expect("bg").tail_verified,
+            "freeing an extent must force the next allocation through a scan"
+        );
+
+        let a3 = alloc.alloc_data(4096).expect("alloc 3");
+        assert_eq!(
+            a3.bytenr,
+            bg_start + 8192,
+            "bump-pointer semantics skip the earlier freed hole until wrap"
+        );
     }
 
     #[test]
