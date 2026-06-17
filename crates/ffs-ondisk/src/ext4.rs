@@ -3859,12 +3859,21 @@ fn casefold_name(name: &[u8]) -> Vec<u8> {
 /// linear-scan lookup match either form for the common accented Latin letters
 /// (bd-qdmlu / bd-gegku, read-correctness increments of bd-vsuni). Covers the
 /// Latin-1 Supplement (U+00C0-U+00FF) and Latin Extended-A (U+0100-U+017F)
-/// letters that have a single-mark canonical decomposition; returns `None`
-/// otherwise (e.g. Æ, Ð, Ø, Þ, ß, Đ, Ł, Œ, ŋ — no canonical decomposition,
-/// handled elsewhere or left as-is). All decompositions are ASCII base +
-/// combining mark, so this is byte-stable across Unicode versions.
-const fn precomposed_nfd_casefold(ch: char) -> Option<(char, char)> {
-    let mapped = match ch {
+/// letters that have a single-mark canonical decomposition. The multi-mark
+/// Latin Extended Additional / Vietnamese forms live in
+/// [`precomposed_multi_mark_nfd_casefold`]. Returns `None` otherwise (e.g. Æ,
+/// Ð, Ø, Þ, ß, Đ, Ł, Œ, ŋ — no canonical decomposition, handled elsewhere or
+/// left as-is). All decompositions are ASCII base + combining mark, so this is
+/// byte-stable across Unicode versions.
+fn precomposed_nfd_casefold(ch: char) -> Option<(char, char)> {
+    precomposed_latin1_nfd_casefold(ch)
+        .or_else(|| precomposed_latin_extended_a_nfd_casefold(ch))
+        .or_else(|| precomposed_vietnamese_single_mark_nfd_casefold(ch))
+        .or_else(|| precomposed_greek_nfd_casefold(ch))
+}
+
+const fn precomposed_latin1_nfd_casefold(ch: char) -> Option<(char, char)> {
+    Some(match ch {
         'À' | 'à' => ('a', '\u{0300}'),
         'Á' | 'á' => ('a', '\u{0301}'),
         'Â' | 'â' => ('a', '\u{0302}'),
@@ -3892,7 +3901,12 @@ const fn precomposed_nfd_casefold(ch: char) -> Option<(char, char)> {
         'Ü' | 'ü' => ('u', '\u{0308}'),
         'Ý' | 'ý' => ('y', '\u{0301}'),
         'Ÿ' | 'ÿ' => ('y', '\u{0308}'), // U+0178 / U+00FF
-        // ── Latin Extended-A (U+0100-U+017F), single-mark canonical NFD. ──
+        _ => return None,
+    })
+}
+
+const fn precomposed_latin_extended_a_nfd_casefold(ch: char) -> Option<(char, char)> {
+    Some(match ch {
         'Ā' | 'ā' => ('a', '\u{0304}'),
         'Ă' | 'ă' => ('a', '\u{0306}'),
         'Ą' | 'ą' => ('a', '\u{0328}'),
@@ -3947,10 +3961,36 @@ const fn precomposed_nfd_casefold(ch: char) -> Option<(char, char)> {
         'Ź' | 'ź' => ('z', '\u{0301}'),
         'Ż' | 'ż' => ('z', '\u{0307}'),
         'Ž' | 'ž' => ('z', '\u{030C}'),
-        // ── Monotonic Greek precomposed letters (single canonical mark). ──
-        // Each folds to the lowercase Greek base + the combining mark; the
-        // two-mark letters ΐ (U+0390) and ΰ (U+03B0) are left to the fallback
-        // (the single-(base,mark) shape here can't represent them) — bd-nbw73.
+        _ => return None,
+    })
+}
+
+const fn precomposed_vietnamese_single_mark_nfd_casefold(ch: char) -> Option<(char, char)> {
+    Some(match ch {
+        // Latin Extended-B bases used by Vietnamese precomposed letters.
+        'Ơ' | 'ơ' => ('o', '\u{031B}'),
+        'Ư' | 'ư' => ('u', '\u{031B}'),
+        'Ạ' | 'ạ' => ('a', '\u{0323}'),
+        'Ả' | 'ả' => ('a', '\u{0309}'),
+        'Ẹ' | 'ẹ' => ('e', '\u{0323}'),
+        'Ẻ' | 'ẻ' => ('e', '\u{0309}'),
+        'Ẽ' | 'ẽ' => ('e', '\u{0303}'),
+        'Ỉ' | 'ỉ' => ('i', '\u{0309}'),
+        'Ị' | 'ị' => ('i', '\u{0323}'),
+        'Ọ' | 'ọ' => ('o', '\u{0323}'),
+        'Ỏ' | 'ỏ' => ('o', '\u{0309}'),
+        'Ụ' | 'ụ' => ('u', '\u{0323}'),
+        'Ủ' | 'ủ' => ('u', '\u{0309}'),
+        'Ỳ' | 'ỳ' => ('y', '\u{0300}'),
+        'Ỵ' | 'ỵ' => ('y', '\u{0323}'),
+        'Ỷ' | 'ỷ' => ('y', '\u{0309}'),
+        'Ỹ' | 'ỹ' => ('y', '\u{0303}'),
+        _ => return None,
+    })
+}
+
+const fn precomposed_greek_nfd_casefold(ch: char) -> Option<(char, char)> {
+    Some(match ch {
         'Ά' | 'ά' => ('α', '\u{0301}'),
         'Έ' | 'έ' => ('ε', '\u{0301}'),
         'Ή' | 'ή' => ('η', '\u{0301}'),
@@ -3961,14 +4001,65 @@ const fn precomposed_nfd_casefold(ch: char) -> Option<(char, char)> {
         'Ϊ' | 'ϊ' => ('ι', '\u{0308}'),
         'Ϋ' | 'ϋ' => ('υ', '\u{0308}'),
         _ => return None,
+    })
+}
+
+/// Canonical (NFD) decomposition for Latin Extended Additional / Vietnamese
+/// letters whose Unicode 12.1 decomposition recursively expands to more than
+/// one combining mark. Marks are already in canonical combining-class order.
+fn precomposed_multi_mark_nfd_casefold(ch: char) -> Option<(char, &'static str)> {
+    let mapped = match ch {
+        'Ấ' | 'ấ' => ('a', "\u{0302}\u{0301}"),
+        'Ầ' | 'ầ' => ('a', "\u{0302}\u{0300}"),
+        'Ẩ' | 'ẩ' => ('a', "\u{0302}\u{0309}"),
+        'Ẫ' | 'ẫ' => ('a', "\u{0302}\u{0303}"),
+        'Ậ' | 'ậ' => ('a', "\u{0323}\u{0302}"),
+        'Ắ' | 'ắ' => ('a', "\u{0306}\u{0301}"),
+        'Ằ' | 'ằ' => ('a', "\u{0306}\u{0300}"),
+        'Ẳ' | 'ẳ' => ('a', "\u{0306}\u{0309}"),
+        'Ẵ' | 'ẵ' => ('a', "\u{0306}\u{0303}"),
+        'Ặ' | 'ặ' => ('a', "\u{0323}\u{0306}"),
+        'Ế' | 'ế' => ('e', "\u{0302}\u{0301}"),
+        'Ề' | 'ề' => ('e', "\u{0302}\u{0300}"),
+        'Ể' | 'ể' => ('e', "\u{0302}\u{0309}"),
+        'Ễ' | 'ễ' => ('e', "\u{0302}\u{0303}"),
+        'Ệ' | 'ệ' => ('e', "\u{0323}\u{0302}"),
+        'Ố' | 'ố' => ('o', "\u{0302}\u{0301}"),
+        'Ồ' | 'ồ' => ('o', "\u{0302}\u{0300}"),
+        'Ổ' | 'ổ' => ('o', "\u{0302}\u{0309}"),
+        'Ỗ' | 'ỗ' => ('o', "\u{0302}\u{0303}"),
+        'Ộ' | 'ộ' => ('o', "\u{0323}\u{0302}"),
+        'Ớ' | 'ớ' => ('o', "\u{031B}\u{0301}"),
+        'Ờ' | 'ờ' => ('o', "\u{031B}\u{0300}"),
+        'Ở' | 'ở' => ('o', "\u{031B}\u{0309}"),
+        'Ỡ' | 'ỡ' => ('o', "\u{031B}\u{0303}"),
+        'Ợ' | 'ợ' => ('o', "\u{031B}\u{0323}"),
+        'Ứ' | 'ứ' => ('u', "\u{031B}\u{0301}"),
+        'Ừ' | 'ừ' => ('u', "\u{031B}\u{0300}"),
+        'Ử' | 'ử' => ('u', "\u{031B}\u{0309}"),
+        'Ữ' | 'ữ' => ('u', "\u{031B}\u{0303}"),
+        'Ự' | 'ự' => ('u', "\u{031B}\u{0323}"),
+        _ => return None,
     };
     Some(mapped)
 }
 
-fn push_casefolded_char(folded: &mut String, ch: char) {
+fn push_precomposed_nfd_casefold(folded: &mut String, ch: char) -> bool {
     if let Some((base, mark)) = precomposed_nfd_casefold(ch) {
         folded.push(base);
         folded.push(mark);
+        return true;
+    }
+    if let Some((base, marks)) = precomposed_multi_mark_nfd_casefold(ch) {
+        folded.push(base);
+        folded.push_str(marks);
+        return true;
+    }
+    false
+}
+
+fn push_casefolded_char(folded: &mut String, ch: char) {
+    if push_precomposed_nfd_casefold(folded, ch) {
         return;
     }
     match ch {
@@ -10972,6 +11063,62 @@ mod tests {
     }
 
     #[test]
+    fn ext4_casefold_key_nfd_normalizes_vietnamese_bd_vsuni() {
+        let cases: &[(&str, &str)] = &[
+            ("ạ", "a\u{0323}"),
+            ("Ạ", "a\u{0323}"),
+            ("ả", "a\u{0309}"),
+            ("ơ", "o\u{031B}"),
+            ("Ư", "u\u{031B}"),
+            ("Ấ", "a\u{0302}\u{0301}"),
+            ("Ầ", "a\u{0302}\u{0300}"),
+            ("Ẩ", "a\u{0302}\u{0309}"),
+            ("Ẫ", "a\u{0302}\u{0303}"),
+            ("Ậ", "a\u{0323}\u{0302}"),
+            ("Ắ", "a\u{0306}\u{0301}"),
+            ("Ằ", "a\u{0306}\u{0300}"),
+            ("Ẳ", "a\u{0306}\u{0309}"),
+            ("Ẵ", "a\u{0306}\u{0303}"),
+            ("Ặ", "a\u{0323}\u{0306}"),
+            ("Ế", "e\u{0302}\u{0301}"),
+            ("Ề", "e\u{0302}\u{0300}"),
+            ("Ể", "e\u{0302}\u{0309}"),
+            ("Ễ", "e\u{0302}\u{0303}"),
+            ("Ệ", "e\u{0323}\u{0302}"),
+            ("Ố", "o\u{0302}\u{0301}"),
+            ("Ồ", "o\u{0302}\u{0300}"),
+            ("Ổ", "o\u{0302}\u{0309}"),
+            ("Ỗ", "o\u{0302}\u{0303}"),
+            ("Ộ", "o\u{0323}\u{0302}"),
+            ("Ớ", "o\u{031B}\u{0301}"),
+            ("Ờ", "o\u{031B}\u{0300}"),
+            ("Ở", "o\u{031B}\u{0309}"),
+            ("Ỡ", "o\u{031B}\u{0303}"),
+            ("Ợ", "o\u{031B}\u{0323}"),
+            ("Ứ", "u\u{031B}\u{0301}"),
+            ("Ừ", "u\u{031B}\u{0300}"),
+            ("Ử", "u\u{031B}\u{0309}"),
+            ("Ữ", "u\u{031B}\u{0303}"),
+            ("Ự", "u\u{031B}\u{0323}"),
+            ("Ỳ", "y\u{0300}"),
+            ("Ỵ", "y\u{0323}"),
+            ("Ỷ", "y\u{0309}"),
+            ("Ỹ", "y\u{0303}"),
+        ];
+        for (composed, decomposed) in cases {
+            assert_eq!(
+                ext4_casefold_key(composed.as_bytes()),
+                ext4_casefold_key(decomposed.as_bytes()),
+                "Vietnamese composed {composed:?} must fold to NFD key {decomposed:?}"
+            );
+        }
+        assert!(ext4_casefold_names_collide(
+            "Tiếng Việt".as_bytes(),
+            "tie\u{0302}\u{0301}ng vie\u{0323}\u{0302}t".as_bytes()
+        ));
+    }
+
+    #[test]
     fn ext4_casefold_key_exposes_collision_contract() {
         assert!(ext4_casefold_names_collide(
             "Straße.TXT".as_bytes(),
@@ -11025,9 +11172,7 @@ mod tests {
                         // (bd-qdmlu/bd-gegku) so this reference stays faithful to
                         // the NFD-aware fast path; the canonical decomposition is
                         // the ground truth.
-                        if let Some((base, mark)) = precomposed_nfd_casefold(ch) {
-                            folded.push(base);
-                            folded.push(mark);
+                        if push_precomposed_nfd_casefold(&mut folded, ch) {
                             continue;
                         }
                         match ch {
