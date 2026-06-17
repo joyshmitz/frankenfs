@@ -854,7 +854,7 @@ pub struct OpenFs {
     ///
     /// The writable path bypasses this cache because file data changes are
     /// published through MVCC and eventually persisted to these blocks.
-    ext4_file_data_block_cache: RwLock<BTreeMap<BlockNumber, Arc<[u8]>>>,
+    ext4_file_data_block_cache: ShardedCache<BlockNumber, Arc<[u8]>>,
     /// Mutable btrfs allocation state (COW FS tree, extent allocator).
     ///
     /// Protected by a Mutex since write operations need exclusive access.
@@ -1137,6 +1137,11 @@ impl<K: Ord + CacheShard, V: Clone> ShardedCache<K, V> {
     /// fully in parallel.
     fn get(&self, key: &K) -> Option<V> {
         self.shard(key).lock().get(key).cloned()
+    }
+
+    /// Read-only presence probe: lock only the key's shard, clone nothing.
+    fn contains_key(&self, key: &K) -> bool {
+        self.shard(key).lock().contains_key(key)
     }
 
     /// Insert only while the total entry count is below `limit`, preserving the
@@ -3127,7 +3132,7 @@ impl OpenFs {
             ext4_alloc_state: None,
             ext4_group_desc_cache: ShardedCache::new(),
             ext4_inode_table_block_cache: ShardedCache::new(),
-            ext4_file_data_block_cache: RwLock::new(BTreeMap::new()),
+            ext4_file_data_block_cache: ShardedCache::new(),
             btrfs_alloc_state: None,
             extent_cache: ffs_extent::ExtentCache::new(),
             ext4_write_extent_snapshot: Mutex::new(None),
@@ -3829,7 +3834,7 @@ impl OpenFs {
         // observe the mutated on-disk state instead of stale pre-recovery copies.
         self.ext4_inode_table_block_cache.clear();
         self.ext4_group_desc_cache.clear();
-        self.ext4_file_data_block_cache.write().clear();
+        self.ext4_file_data_block_cache.clear();
 
         info!(
             orphan_head = head,
@@ -4510,7 +4515,7 @@ impl OpenFs {
         self.invalidate_all_ext4_write_extent_snapshots();
         self.ext4_inode_table_block_cache.clear();
         self.ext4_group_desc_cache.clear();
-        self.ext4_file_data_block_cache.write().clear();
+        self.ext4_file_data_block_cache.clear();
         debug!(
             ino,
             "fc_apply: freed zero-link inode + its blocks at recovery"
@@ -4806,7 +4811,7 @@ impl OpenFs {
                     block_size: block_size_u16,
                 };
                 block_dev.write_block(cx, phys, &block)?;
-                self.ext4_file_data_block_cache.write().remove(&phys);
+                self.ext4_file_data_block_cache.remove(&phys);
                 debug!(
                     parent_ino = dentry.parent_ino,
                     ino = dentry.ino,
@@ -4880,7 +4885,7 @@ impl OpenFs {
                 if ffs_dir::remove_entry(&mut data, &dentry.name, reserved_tail)? {
                     self.stamp_ext4_dir_block(&mut data, parent_ino, parent.generation);
                     block_dev.write_block(cx, block, &data)?;
-                    self.ext4_file_data_block_cache.write().remove(&block);
+                    self.ext4_file_data_block_cache.remove(&block);
                     debug!(
                         parent_ino,
                         ino = dentry.ino,
@@ -5035,7 +5040,7 @@ impl OpenFs {
             self.invalidate_all_ext4_write_extent_snapshots();
             self.ext4_inode_table_block_cache.clear();
             self.ext4_group_desc_cache.clear();
-            self.ext4_file_data_block_cache.write().clear();
+            self.ext4_file_data_block_cache.clear();
         }
         Ok(())
     }
@@ -5210,7 +5215,7 @@ impl OpenFs {
             }
         }
         // The cached copy (if any) of the rewritten leaf is now stale.
-        self.ext4_file_data_block_cache.write().remove(&leaf_bn);
+        self.ext4_file_data_block_cache.remove(&leaf_bn);
 
         if all_ok {
             // Leaves recovered → the inode (i_size/i_blocks/root) is now safe to
@@ -5225,7 +5230,7 @@ impl OpenFs {
         } else {
             // Restore the leaf; leave the inode at its JBD2-committed state.
             block_dev.write_block(cx, leaf_bn, &leaf_before)?;
-            self.ext4_file_data_block_cache.write().remove(&leaf_bn);
+            self.ext4_file_data_block_cache.remove(&leaf_bn);
             warn!(
                 ino,
                 "fc_apply: external-extent inode needs tree growth at recovery; \
@@ -9025,18 +9030,18 @@ impl OpenFs {
     ) -> Result<Arc<[u8]>, FfsError> {
         let cacheable = self.can_cache_ext4_read_only_block(scope, block);
         if cacheable {
-            let cached = self.ext4_file_data_block_cache.read().get(&block).cloned();
-            if let Some(cached) = cached {
+            if let Some(cached) = self.ext4_file_data_block_cache.get(&block) {
                 return Ok(cached);
             }
         }
 
         let block_data = self.read_block_arc_with_scope(cx, scope, block)?;
         if cacheable {
-            let mut cache = self.ext4_file_data_block_cache.write();
-            if cache.len() < EXT4_FILE_DATA_BLOCK_CACHE_LIMIT {
-                cache.insert(block, Arc::clone(&block_data));
-            }
+            self.ext4_file_data_block_cache.insert_within(
+                block,
+                Arc::clone(&block_data),
+                EXT4_FILE_DATA_BLOCK_CACHE_LIMIT,
+            );
         }
         Ok(block_data)
     }
@@ -10717,7 +10722,7 @@ impl OpenFs {
         // cache (bd-di429 warm path)?
         let is_cached = |blk: BlockNumber| -> bool {
             self.can_cache_ext4_read_only_block(scope, blk)
-                && self.ext4_file_data_block_cache.read().contains_key(&blk)
+                && self.ext4_file_data_block_cache.contains_key(&blk)
         };
 
         // PLAN pass (serial): classify every present block into a segment in
@@ -10824,12 +10829,11 @@ impl OpenFs {
                     for (j, data) in datas.iter().enumerate() {
                         if *cacheable {
                             let blk = BlockNumber(phys.0 + j as u64);
-                            let mut cache = self.ext4_file_data_block_cache.write();
-                            if cache.len() < EXT4_FILE_DATA_BLOCK_CACHE_LIMIT {
-                                cache
-                                    .entry(blk)
-                                    .or_insert_with(|| Arc::from(data.as_slice()));
-                            }
+                            self.ext4_file_data_block_cache.insert_within(
+                                blk,
+                                Arc::from(data.as_slice()),
+                                EXT4_FILE_DATA_BLOCK_CACHE_LIMIT,
+                            );
                         }
                         let (entries, _tail) = parse_dir_block(data, block_size)
                             .map_err(|e| parse_to_ffs_error(&e))?;

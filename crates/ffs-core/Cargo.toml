@@ -130,3 +130,7 @@ harness = false
 [[bench]]
 name = "parsed_node_cache_shard"
 harness = false
+
+[[bench]]
+name = "ext4_file_data_cache_shard"
+harness = false
