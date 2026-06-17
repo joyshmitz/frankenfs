@@ -184,11 +184,38 @@ fn bench_sync_block_group_accounting(c: &mut Criterion) {
     group.finish();
 }
 
+fn commit_accounting_free_space_production(alloc: &mut BtrfsExtentAllocator) -> (u64, usize) {
+    let bytes_used = alloc
+        .sync_block_group_accounting()
+        .expect("sync block group accounting");
+    let free_space = alloc.free_space_extents().expect("free space extents");
+    let free_range_count = free_space
+        .iter()
+        .map(|group| group.free_ranges.len())
+        .sum();
+    (bytes_used, free_range_count)
+}
+
+fn bench_commit_accounting_free_space(c: &mut Criterion) {
+    let mut alloc = build_largest_free_allocator();
+    assert_eq!(
+        commit_accounting_free_space_production(&mut alloc),
+        (E as u64 * EXT_SIZE, 1)
+    );
+
+    let mut group = c.benchmark_group("btrfs_commit_accounting_free_space_scan_4096");
+    group.bench_function("production_commit_accounting_free_space", |b| {
+        b.iter(|| black_box(commit_accounting_free_space_production(&mut alloc)));
+    });
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_alloc_gap_scan,
     bench_largest_free_extent,
     bench_free_space_extents,
-    bench_sync_block_group_accounting
+    bench_sync_block_group_accounting,
+    bench_commit_accounting_free_space
 );
 criterion_main!(benches);

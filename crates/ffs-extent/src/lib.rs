@@ -1308,12 +1308,31 @@ const DEFAULT_EXTENT_CACHE_CAPACITY: usize = 1024;
 ///
 /// # Thread safety
 ///
-/// All operations acquire a `parking_lot::RwLock`: reads take a shared lock,
-/// mutations take an exclusive lock. The critical sections are small (BTreeMap
-/// lookups / inserts), so contention is minimal.
+/// The cache is lock-striped across [`EXTENT_CACHE_SHARDS`] independent
+/// `parking_lot::RwLock<ExtentCacheInner>` shards keyed by namespace (inode
+/// number). `lookup` mutates per-entry LRU state and hit/miss counters, so it
+/// takes the exclusive lock; without striping that exclusive lock serialized
+/// every logical→physical mapping across all FUSE worker threads. Routing each
+/// namespace to its own shard lets concurrent reads of different inodes proceed
+/// in parallel. All of one namespace's entries live in a single shard, so the
+/// per-namespace LRU order is preserved exactly; only cross-namespace eviction
+/// (capacity split across shards) differs — invisible to callers, since the
+/// cache is a transparent read-through accelerator (a miss re-resolves from the
+/// extent tree and yields the identical mapping).
 pub struct ExtentCache {
-    inner: RwLock<ExtentCacheInner>,
+    shards: Box<[RwLock<ExtentCacheInner>]>,
+    /// The capacity originally requested via [`Self::with_capacity`]. Each shard
+    /// is sized to this full value (so a single namespace — whose entries all
+    /// live in one shard — retains the exact global-LRU behavior it had before
+    /// striping), and [`Self::stats`] reports this configured value rather than
+    /// the per-shard sum.
+    configured_capacity: usize,
 }
+
+/// Number of lock-striping shards for [`ExtentCache`]. Mirrors the FUSE worker
+/// count (≤8) with headroom so concurrent lookups on distinct inodes rarely
+/// collide on the same shard.
+const EXTENT_CACHE_SHARDS: usize = 16;
 
 struct ExtentCacheInner {
     /// Entries keyed by `(namespace, logical_start)`.
@@ -1381,19 +1400,44 @@ impl ExtentCache {
     }
 
     /// Create a new cache with the given maximum entry count.
+    ///
+    /// Each of the [`EXTENT_CACHE_SHARDS`] shards is sized to the full
+    /// `capacity`. Because all entries of one namespace (inode) hash to a single
+    /// shard, a single namespace retains the exact global-LRU eviction it had
+    /// before striping; only entries of *different* namespaces — which never
+    /// competed for the same cache slot in any observable way — now evict
+    /// independently. The aggregate live-entry bound is therefore
+    /// `EXTENT_CACHE_SHARDS * capacity`, but [`Self::stats`] reports the
+    /// configured `capacity`.
     #[must_use]
     pub fn with_capacity(capacity: usize) -> Self {
+        let shards = (0..EXTENT_CACHE_SHARDS)
+            .map(|_| {
+                RwLock::new(ExtentCacheInner {
+                    entries: BTreeMap::new(),
+                    eviction_index: BTreeSet::new(),
+                    capacity,
+                    generation: 0,
+                    hits: 0,
+                    misses: 0,
+                    evictions: 0,
+                })
+            })
+            .collect();
         Self {
-            inner: RwLock::new(ExtentCacheInner {
-                entries: BTreeMap::new(),
-                eviction_index: BTreeSet::new(),
-                capacity,
-                generation: 0,
-                hits: 0,
-                misses: 0,
-                evictions: 0,
-            }),
+            shards,
+            configured_capacity: capacity,
         }
+    }
+
+    /// Select the shard owning `ns`. All entries for a namespace live in one
+    /// shard, so per-namespace lookups/inserts/invalidations touch exactly one
+    /// lock.
+    #[inline]
+    fn shard(&self, ns: u64) -> &RwLock<ExtentCacheInner> {
+        // `ns % SHARDS` is always < SHARDS, so the conversion is lossless.
+        let idx = usize::try_from(ns % EXTENT_CACHE_SHARDS as u64).unwrap_or(0);
+        &self.shards[idx]
     }
 
     /// Look up a logical block in the cache within the given namespace.
@@ -1405,8 +1449,9 @@ impl ExtentCache {
     /// Returns `Some(mapping)` if a cached extent covers `logical_block`.
     /// The returned mapping is adjusted to reflect the exact position within
     /// the extent.
+    #[must_use]
     pub fn lookup(&self, ns: u64, logical_block: u32) -> Option<ExtentMapping> {
-        let mut inner = self.inner.write();
+        let mut inner = self.shard(ns).write();
         let current_gen = inner.generation;
 
         // Find the last entry in this namespace with logical_start <= logical_block.
@@ -1459,7 +1504,7 @@ impl ExtentCache {
     ///
     /// If the cache is at capacity, the least-recently-used entry is evicted.
     pub fn insert(&self, ns: u64, mapping: ExtentMapping) {
-        let mut inner = self.inner.write();
+        let mut inner = self.shard(ns).write();
         if inner.capacity == 0
             || mapping.count == 0
             || (mapping.physical_start != 0
@@ -1496,7 +1541,7 @@ impl ExtentCache {
         }
         let range_end = u64::from(logical_start).saturating_add(count);
         let range_end_u32 = u32::try_from(range_end).unwrap_or(u32::MAX);
-        let mut inner = self.inner.write();
+        let mut inner = self.shard(ns).write();
 
         // Collect keys to remove: entries in this namespace whose extent overlaps the range.
         let to_remove: Vec<(u64, u32)> = inner
@@ -1521,31 +1566,47 @@ impl ExtentCache {
     /// Invalidate all entries (bulk reset). Bumps the generation counter so
     /// stale entries are lazily discarded on lookup.
     pub fn invalidate_all(&self) {
-        let mut inner = self.inner.write();
-        inner.entries.clear();
-        inner.eviction_index.clear();
-        inner.generation = inner.generation.saturating_add(1);
+        for shard in &self.shards {
+            let mut inner = shard.write();
+            inner.entries.clear();
+            inner.eviction_index.clear();
+            inner.generation = inner.generation.saturating_add(1);
+        }
     }
 
-    /// Return a snapshot of cache performance counters.
+    /// Return a snapshot of cache performance counters, aggregated across all
+    /// shards. Counters/entries sum across shards; `capacity` reports the
+    /// configured value (not the per-shard sum); the generation is the shared
+    /// value (every shard is bumped together by [`Self::invalidate_all`]).
+    #[must_use]
     pub fn stats(&self) -> ExtentCacheStats {
-        let inner = self.inner.read();
-        ExtentCacheStats {
-            hits: inner.hits,
-            misses: inner.misses,
-            evictions: inner.evictions,
-            entries: inner.entries.len(),
-            capacity: inner.capacity,
-            generation: inner.generation,
+        let mut agg = ExtentCacheStats {
+            hits: 0,
+            misses: 0,
+            evictions: 0,
+            entries: 0,
+            capacity: self.configured_capacity,
+            generation: 0,
+        };
+        for shard in &self.shards {
+            let inner = shard.read();
+            agg.hits = agg.hits.saturating_add(inner.hits);
+            agg.misses = agg.misses.saturating_add(inner.misses);
+            agg.evictions = agg.evictions.saturating_add(inner.evictions);
+            agg.entries += inner.entries.len();
+            agg.generation = agg.generation.max(inner.generation);
         }
+        agg
     }
 
     /// Reset performance counters (entries and generation are preserved).
     pub fn reset_stats(&self) {
-        let mut inner = self.inner.write();
-        inner.hits = 0;
-        inner.misses = 0;
-        inner.evictions = 0;
+        for shard in &self.shards {
+            let mut inner = shard.write();
+            inner.hits = 0;
+            inner.misses = 0;
+            inner.evictions = 0;
+        }
     }
 }
 
@@ -1602,25 +1663,37 @@ impl Default for ExtentCache {
 impl ExtentCache {
     /// Test-only snapshot of `(key, last_access)` for every resident entry.
     fn debug_resident(&self) -> Vec<((u64, u32), u64)> {
-        let inner = self.inner.read();
-        inner
-            .entries
+        let mut out: Vec<((u64, u32), u64)> = self
+            .shards
             .iter()
-            .map(|(&k, e)| (k, e.last_access))
-            .collect()
+            .flat_map(|shard| {
+                let inner = shard.read();
+                inner
+                    .entries
+                    .iter()
+                    .map(|(&k, e)| (k, e.last_access))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        // Canonical (globally key-sorted) order so the trace is deterministic
+        // and independent of shard layout.
+        out.sort_by_key(|&(k, _)| k);
+        out
     }
 
     /// Test-only invariant: `eviction_index` carries exactly one row per live
     /// entry, with matching `last_access`. Drift here is the failure mode the
     /// lazy-heap design risked (stale rows); the `BTreeSet` index must never.
     fn debug_index_consistent(&self) -> bool {
-        let inner = self.inner.read();
-        let from_entries: BTreeSet<(u64, (u64, u32))> = inner
-            .entries
-            .iter()
-            .map(|(&k, e)| (e.last_access, k))
-            .collect();
-        from_entries == inner.eviction_index
+        self.shards.iter().all(|shard| {
+            let inner = shard.read();
+            let from_entries: BTreeSet<(u64, (u64, u32))> = inner
+                .entries
+                .iter()
+                .map(|(&k, e)| (e.last_access, k))
+                .collect();
+            from_entries == inner.eviction_index
+        })
     }
 }
 
@@ -6159,11 +6232,20 @@ ExtentMapping { logical_start: 5, physical_start: 134, count: 2, unwritten: true
             let key = (ns, logical);
 
             if r % 2 == 0 {
-                // Predict the scan victim from a pre-insert snapshot.
+                // Predict the scan victim from a pre-insert snapshot. Eviction is
+                // per-shard (each namespace's entries live in one shard sized to
+                // the full capacity), so the victim is the LRU entry WITHIN the
+                // inserting namespace's shard — not the global LRU.
+                let shard = ns % EXTENT_CACHE_SHARDS as u64;
                 let resident = cache.debug_resident();
                 let already = resident.iter().any(|(k, _)| *k == key);
-                let expected_victim = if resident.len() >= CAP && !already {
-                    resident
+                let in_shard: Vec<((u64, u32), u64)> = resident
+                    .iter()
+                    .copied()
+                    .filter(|((n, _), _)| n % EXTENT_CACHE_SHARDS as u64 == shard)
+                    .collect();
+                let expected_victim = if in_shard.len() >= CAP && !already {
+                    in_shard
                         .iter()
                         .min_by_key(|&&((n, l), la)| (la, (n, l)))
                         .map(|&(k, _)| k)
@@ -6206,10 +6288,21 @@ ExtentMapping { logical_start: 5, physical_start: 134, count: 2, unwritten: true
             absorb(b"|", &mut digest);
         }
 
-        assert_eq!(cache.stats().entries, CAP);
-        // Golden: pinned digest of the full op-by-op resident trace.
+        // Per-shard eviction bounds each namespace independently at the full
+        // capacity (the inserting namespaces are 0 and 2 — `r % 2 == 0` forces
+        // `r % 4` even — each routed to its own shard and filled to CAP).
+        let mut per_ns: BTreeMap<u64, usize> = BTreeMap::new();
+        for ((n, _), _) in cache.debug_resident() {
+            *per_ns.entry(n).or_default() += 1;
+        }
+        for (&n, &cnt) in &per_ns {
+            assert!(cnt <= CAP, "namespace {n} exceeded per-shard capacity: {cnt}");
+        }
+        assert_eq!(cache.stats().entries, per_ns.values().sum::<usize>());
+        // Golden: pinned digest of the full op-by-op resident trace under
+        // per-shard LRU eviction.
         assert_eq!(
-            digest, 6_744_581_030_166_392_336,
+            digest, 10_183_694_378_586_896_653,
             "golden trace digest changed"
         );
     }
@@ -6312,7 +6405,8 @@ ExtentMapping { logical_start: 5, physical_start: 134, count: 2, unwritten: true
         );
 
         {
-            let mut inner = cache.inner.write();
+            // Namespace 0 lives in shard 0; seed that shard's counters/state.
+            let mut inner = cache.shards[0].write();
             inner.hits = u64::MAX;
             inner.misses = u64::MAX;
             inner.evictions = u64::MAX;
