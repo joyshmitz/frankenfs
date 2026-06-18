@@ -3803,6 +3803,95 @@ mod tests {
     // Reproduce any failing case with:
     // PROPTEST_CASES=1 PROPTEST_SEED=<seed> cargo test -p ffs-ondisk <test_name> -- --nocapture
     proptest! {
+        /// Full-struct round-trip: parsing a serialized `BtrfsSuperblock` must
+        /// recover EVERY field except `csum` (which `to_bytes` recomputes as
+        /// CRC32C over the rest of the block). Generates random superblocks whose
+        /// fields satisfy the parser's validation (valid power-of-two geometry,
+        /// non-zero total_bytes/num_devices, bytes_used <= total_bytes, tree
+        /// levels in range, supported csum type, nul-free label, size-matched
+        /// sys_chunk_array). Catches any field written to or read from a
+        /// mismatched on-disk offset, or dropped from one side of the codec
+        /// (bd-xmh5g.201).
+        #[test]
+        #[allow(clippy::too_many_arguments)]
+        fn btrfs_proptest_superblock_to_bytes_parse_roundtrip(
+            fsid in any::<[u8; 16]>(),
+            bytenr in any::<u64>(),
+            flags in any::<u64>(),
+            generation in any::<u64>(),
+            root in any::<u64>(),
+            chunk_root in any::<u64>(),
+            chunk_root_generation in any::<u64>(),
+            log_root in any::<u64>(),
+            total_bytes in 1_u64..=u64::MAX,
+            bytes_used_raw in any::<u64>(),
+            root_dir_objectid in any::<u64>(),
+            num_devices in 1_u64..=u64::MAX,
+            sector_shift in 9_u32..=17,
+            node_shift in 9_u32..=17,
+            stripe_choice in 0_u32..=9,
+            compat_flags in any::<u64>(),
+            compat_ro_flags in any::<u64>(),
+            incompat_flags in any::<u64>(),
+            root_level in 0_u8..=7,
+            chunk_root_level in 0_u8..=7,
+            log_root_level in 0_u8..=7,
+            label in "[a-zA-Z0-9_]{0,15}",
+            sys_chunk_array in proptest::collection::vec(any::<u8>(), 0..=64),
+        ) {
+            let sectorsize = 1_u32 << sector_shift;
+            let nodesize = 1_u32 << node_shift;
+            let stripesize = if stripe_choice == 0 {
+                0
+            } else {
+                1_u32 << (8 + stripe_choice)
+            };
+            let bytes_used = bytes_used_raw.min(total_bytes);
+            let sys_chunk_array_size =
+                u32::try_from(sys_chunk_array.len()).expect("len fits u32");
+
+            let mut sb = BtrfsSuperblock {
+                csum: [0_u8; 32],
+                fsid,
+                bytenr,
+                flags,
+                magic: BTRFS_MAGIC,
+                generation,
+                root,
+                chunk_root,
+                chunk_root_generation,
+                log_root,
+                total_bytes,
+                bytes_used,
+                root_dir_objectid,
+                num_devices,
+                sectorsize,
+                nodesize,
+                stripesize,
+                compat_flags,
+                compat_ro_flags,
+                incompat_flags,
+                csum_type: ffs_types::BTRFS_CSUM_TYPE_CRC32C,
+                root_level,
+                chunk_root_level,
+                log_root_level,
+                label,
+                sys_chunk_array_size,
+                sys_chunk_array,
+            };
+
+            let bytes = sb.to_bytes();
+            prop_assert_eq!(bytes.len(), BTRFS_SUPER_INFO_SIZE);
+            let parsed = BtrfsSuperblock::parse_superblock_region(&bytes)
+                .expect("a serialized valid superblock must re-parse");
+
+            // `csum` is recomputed by `to_bytes`, not a round-trip input.
+            sb.csum = parsed.csum;
+            prop_assert_eq!(parsed, sb);
+        }
+    }
+
+    proptest! {
         #![proptest_config(ProptestConfig::with_cases(32))]
 
         /// Isomorphism oracle for the `parse_leaf_items` payload-overlap check
