@@ -1,0 +1,176 @@
+#![forbid(unsafe_code)]
+#![allow(clippy::cast_possible_truncation)]
+
+//! Same-process A/B for overlapping the staged-block reads in the JBD2 replay
+//! apply phase, `replay_jbd2_inner` (bd-pkvrj).
+//!
+//! The apply phase reads one staged journal block per committed-dirty target
+//! block, verifies it, restores any escaped magic, then writes it to the target.
+//! On a crash-recovery mount this serializes one device-read access latency per
+//! committed block — thousands for a busy fs crashed mid-workload — gating mount
+//! time. The reads are independent; only `resolve_block` (an FnMut closure) and
+//! the verify/escape/write/count are order-sensitive.
+//!
+//! The lever splits apply into serial-plan (resolve block numbers) +
+//! parallel-read (read staged blocks across the rayon pool) + serial-consume
+//! (verify/escape/write/count in target order). A blocking read parks its
+//! worker, so the access latencies overlap up to the pool size — bounded by the
+//! pool, not the CPU core count (bd-g5v1s/bd-w52e5 family).
+//!
+//! This bench isolates the read phase on a `LatencyBlockDevice` (fixed per-read
+//! latency park + cheap memcpy from a pre-built store, the production cost
+//! shape). Both arms run the identical apply transform and produce the identical
+//! applied bytes in target order (asserted), so this measures only the read
+//! overlap.
+
+use asupersync::Cx;
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use ffs_block::{BlockBuf, BlockDevice};
+use ffs_error::{FfsError, Result};
+use ffs_types::BlockNumber;
+use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
+use std::hint::black_box;
+use std::time::Duration;
+
+const BS: usize = 4096; // block size (bytes)
+/// Per-block read access latency. Models a real-disk / SSD-queue round trip.
+const READ_LATENCY: Duration = Duration::from_micros(250);
+
+/// Deterministic pseudo-random byte (no `Math.random` in benches).
+fn prng(seed: u64) -> u8 {
+    let x = seed
+        .wrapping_mul(6_364_136_223_846_793_005)
+        .wrapping_add(1_442_695_040_888_963_407);
+    (x >> 33) as u8
+}
+
+fn block_bytes(blk: u64) -> Vec<u8> {
+    (0..BS).map(|i| prng(blk << 20 ^ i as u64)).collect()
+}
+
+/// Latency-injecting in-memory device (blocks pre-built once).
+struct LatencyBlockDevice {
+    blocks: Vec<BlockBuf>,
+    read_latency: Duration,
+}
+
+impl LatencyBlockDevice {
+    fn new(block_count: u64, read_latency: Duration) -> Self {
+        let blocks = (0..block_count)
+            .map(|blk| BlockBuf::new(block_bytes(blk)))
+            .collect();
+        Self {
+            blocks,
+            read_latency,
+        }
+    }
+
+    fn block(&self, block: BlockNumber) -> Result<BlockBuf> {
+        let idx = usize::try_from(block.0)
+            .map_err(|_| FfsError::Format("bench block index overflow".into()))?;
+        self.blocks
+            .get(idx)
+            .map(BlockBuf::clone_ref)
+            .ok_or_else(|| FfsError::Format(format!("bench block out of range: {}", block.0)))
+    }
+}
+
+impl BlockDevice for LatencyBlockDevice {
+    fn read_block(&self, _cx: &Cx, block: BlockNumber) -> Result<BlockBuf> {
+        std::thread::sleep(self.read_latency);
+        self.block(block)
+    }
+
+    fn supports_contiguous_reads(&self) -> bool {
+        false
+    }
+
+    fn read_contiguous_blocks(
+        &self,
+        _cx: &Cx,
+        start: BlockNumber,
+        bufs: &mut [BlockBuf],
+    ) -> Result<()> {
+        std::thread::sleep(self.read_latency);
+        for (i, buf) in bufs.iter_mut().enumerate() {
+            *buf = self.block(BlockNumber(start.0 + i as u64))?;
+        }
+        Ok(())
+    }
+
+    fn write_block(&self, _cx: &Cx, _block: BlockNumber, _data: &[u8]) -> Result<()> {
+        Ok(())
+    }
+
+    fn block_size(&self) -> u32 {
+        BS as u32
+    }
+
+    fn block_count(&self) -> u64 {
+        self.blocks.len() as u64
+    }
+
+    fn sync(&self, _cx: &Cx) -> Result<()> {
+        Ok(())
+    }
+}
+
+/// The representative per-block apply transform (mirrors the escaped-magic
+/// restore in `replay_jbd2_inner`): no-op here, returns the staged bytes.
+fn apply_transform(data: Vec<u8>) -> Vec<u8> {
+    data
+}
+
+/// OLD: serial read + apply loop — N read latencies back to back.
+fn apply_serial(cx: &Cx, device: &dyn BlockDevice, targets: &[BlockNumber]) -> Result<Vec<Vec<u8>>> {
+    let mut applied = Vec::with_capacity(targets.len());
+    for &block in targets {
+        let data = device.read_block(cx, block)?.as_slice().to_vec();
+        applied.push(apply_transform(data));
+    }
+    Ok(applied)
+}
+
+/// NEW: serial plan (here just the targets) + parallel read + serial apply.
+fn apply_parallel(
+    cx: &Cx,
+    device: &dyn BlockDevice,
+    targets: &[BlockNumber],
+) -> Result<Vec<Vec<u8>>> {
+    let reads: Vec<Result<Vec<u8>>> = targets
+        .par_iter()
+        .map(|&block| device.read_block(cx, block).map(|b| b.as_slice().to_vec()))
+        .collect();
+    let mut applied = Vec::with_capacity(reads.len());
+    for read in reads {
+        applied.push(apply_transform(read?));
+    }
+    Ok(applied)
+}
+
+fn bench_apply(c: &mut Criterion) {
+    let cx = Cx::for_testing();
+    let mut group = c.benchmark_group("journal_replay_apply_io_overlap");
+    for &n in &[16_usize, 64, 256] {
+        let device = LatencyBlockDevice::new(n as u64, READ_LATENCY);
+        let targets: Vec<BlockNumber> = (0..n as u64).map(BlockNumber).collect();
+
+        // Isomorphism: both apply strategies produce the identical bytes, in order.
+        assert_eq!(
+            apply_serial(&cx, &device, &targets).expect("serial apply"),
+            apply_parallel(&cx, &device, &targets).expect("parallel apply"),
+            "parallel apply diverged from serial (n={n})"
+        );
+
+        group.bench_with_input(BenchmarkId::new("serial", n), &n, |b, _| {
+            b.iter(|| black_box(apply_serial(&cx, &device, black_box(&targets))));
+        });
+        group.bench_with_input(BenchmarkId::new("parallel_rayon", n), &n, |b, _| {
+            b.iter(|| black_box(apply_parallel(&cx, &device, black_box(&targets))));
+        });
+    }
+    group.finish();
+}
+
+criterion_group!(benches, bench_apply);
+criterion_main!(benches);

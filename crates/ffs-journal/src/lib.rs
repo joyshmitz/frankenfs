@@ -820,10 +820,36 @@ fn replay_jbd2_inner(
         .as_ref()
         .map_or(Jbd2TagFormat::Legacy, Jbd2Superblock::tag_format);
 
+    // Apply the committed writes. The staged-block READS are independent, but
+    // `resolve_block` is an FnMut caller closure and the verify/escape/write/count
+    // is order-sensitive, so split into three phases:
+    //   1. serial PLAN — resolve every absolute block number (keeps the FnMut
+    //      serial and preserves the first resolve error in target order);
+    //   2. parallel READ — read each staged journal block across the rayon pool,
+    //      so a blocking read parks its worker and the access latencies overlap up
+    //      to the pool size (I/O-overlap, bd-g5v1s/bd-w52e5 family);
+    //   3. serial CONSUME — verify + restore-escaped + write + count in target
+    //      order, byte-identical to the old single loop (checksum skip, write
+    //      order, replayed_blocks count, first-error-in-order all preserved).
+    let planned: Vec<(BlockNumber, StagedWrite, BlockNumber)> = {
+        let mut planned = Vec::with_capacity(final_writes.len());
+        for (target, staged) in final_writes {
+            let absolute = resolve_block(staged.journal_idx)?;
+            planned.push((target, staged, absolute));
+        }
+        planned
+    };
+    let staged_reads: Vec<Result<Vec<u8>>> = {
+        use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
+        planned
+            .par_iter()
+            .map(|(_, _, absolute)| dev.read_block(cx, *absolute).map(|b| b.as_slice().to_vec()))
+            .collect()
+    };
+
     let mut replayed_blocks = 0_u64;
-    for (target, staged) in final_writes {
-        let absolute = resolve_block(staged.journal_idx)?;
-        let mut data = dev.read_block(cx, absolute)?.as_slice().to_vec();
+    for ((target, staged, _absolute), read) in planned.into_iter().zip(staged_reads) {
+        let mut data = read?;
         if options.verify_checksums
             && let Some(seed) = checksum_seed
             && let Some(expected) = staged.data_checksum
