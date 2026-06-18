@@ -73307,6 +73307,40 @@ mod tests {
     }
 
     #[test]
+    fn btrfs_rename_overwrites_existing_target() {
+        let (fs, cx) = open_writable_btrfs();
+        let parent = InodeNumber(1);
+        let a = fs
+            .create(&cx, parent, OsStr::new("src.bin"), 0o644, 0, 0)
+            .expect("create src");
+        fs.write(&cx, a.ino, 0, b"SOURCE").expect("write src");
+        let b = fs
+            .create(&cx, parent, OsStr::new("dst.bin"), 0o644, 0, 0)
+            .expect("create dst");
+        fs.write(&cx, b.ino, 0, b"TARGET").expect("write dst");
+        assert_ne!(a.ino, b.ino);
+
+        // Rename src onto the existing dst (POSIX overwrite).
+        fs.rename(
+            &cx,
+            parent,
+            OsStr::new("src.bin"),
+            parent,
+            OsStr::new("dst.bin"),
+        )
+        .expect("rename overwrite");
+
+        // src is gone; dst now resolves to the source inode with the source data.
+        assert!(fs.lookup(&cx, parent, OsStr::new("src.bin")).is_err());
+        let dst = fs
+            .lookup(&cx, parent, OsStr::new("dst.bin"))
+            .expect("lookup dst");
+        assert_eq!(dst.ino, a.ino, "dst must now point to the source inode");
+        let data = fs.read(&cx, dst.ino, 0, 6).expect("read dst");
+        assert_eq!(&data, b"SOURCE");
+    }
+
+    #[test]
     fn btrfs_hardlink_shares_inode_data() {
         let (fs, cx) = open_writable_btrfs();
         let parent = InodeNumber(1);
