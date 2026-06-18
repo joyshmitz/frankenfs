@@ -3270,6 +3270,42 @@ mod tests {
                 "non-sparse geometry should keep backup metadata in every group"
             );
         }
+
+        /// On a SPARSE_SUPER + RESIZE_INODE (no META_BG) filesystem, the
+        /// per-group reserved metadata accounting is fixed by whether the group
+        /// carries a backup: groups WITHOUT a backup reserve nothing; groups
+        /// WITH a backup reserve `reserved_gdt_blocks` and a base of
+        /// `1 (superblock) + gdt_blocks_count() + reserved_gdt_blocks`. Pins
+        /// base_meta_blocks_in_group / reserved_gdt_blocks_in_group, which drive
+        /// free-block accounting (bd-xmh5g.212).
+        #[test]
+        fn proptest_base_meta_blocks_tracks_backup_groups(
+            group in 0u32..10_000,
+        ) {
+            let mut geo = make_geometry();
+            geo.feature_ro_compat = ffs_ondisk::Ext4RoCompatFeatures(
+                ffs_ondisk::Ext4RoCompatFeatures::SPARSE_SUPER.0,
+            );
+            geo.feature_compat = ffs_ondisk::Ext4CompatFeatures(
+                ffs_ondisk::Ext4CompatFeatures::RESIZE_INODE.0,
+            );
+            geo.reserved_gdt_blocks = 16;
+
+            let g = GroupNumber(group);
+            let reserved = geo.reserved_gdt_blocks_in_group(g);
+            let base_meta = geo.base_meta_blocks_in_group(g);
+
+            if geo.has_backup_superblock(g) {
+                proptest::prop_assert_eq!(reserved, u32::from(geo.reserved_gdt_blocks));
+                proptest::prop_assert_eq!(
+                    base_meta,
+                    1 + geo.gdt_blocks_count() + u32::from(geo.reserved_gdt_blocks)
+                );
+            } else {
+                proptest::prop_assert_eq!(reserved, 0);
+                proptest::prop_assert_eq!(base_meta, 0);
+            }
+        }
     }
 
     // ── Geometry tests ──────────────────────────────────────────────────
