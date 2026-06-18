@@ -719,6 +719,44 @@ mod tests {
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(128))]
 
+        /// retarget_entry (renameat2 RENAME_EXCHANGE) must update BOTH the inode
+        /// and the file_type of a live entry, leave the block parseable, and
+        /// report no change for a name that is not present (bd-xmh5g.215).
+        #[test]
+        fn proptest_retarget_entry_updates_inode_and_file_type(
+            ino in 3_u32..1_000_000,
+            new_ino in 3_u32..1_000_000,
+            reserved_tail in prop_oneof![Just(0_usize), Just(12_usize), Just(24_usize)],
+            name in valid_dir_name_strategy(200),
+        ) {
+            let mut block = vec![0u8; 4096];
+            init_dir_block(&mut block, 2, 2, reserved_tail).unwrap();
+            add_entry(&mut block, ino, &name, Ext4FileType::RegFile, reserved_tail).unwrap();
+
+            // Retarget to a new inode AND a different file type.
+            let retargeted =
+                retarget_entry(&mut block, &name, new_ino, Ext4FileType::Dir, reserved_tail)
+                    .unwrap();
+            prop_assert!(retargeted);
+
+            let (entries, _) = parse_dir_block(&block, 4096).unwrap();
+            let entry = entries
+                .iter()
+                .find(|e| e.name == name)
+                .expect("retargeted entry must still parse");
+            prop_assert_eq!(entry.inode, new_ino);
+            prop_assert_eq!(entry.file_type, Ext4FileType::Dir);
+
+            // Retargeting a name that is not present reports no change.
+            let probe: &[u8] = b"\x01zz_absent_probe_zz\x01";
+            if name.as_slice() != probe {
+                let absent =
+                    retarget_entry(&mut block, probe, 9, Ext4FileType::RegFile, reserved_tail)
+                        .unwrap();
+                prop_assert!(!absent);
+            }
+        }
+
         #[test]
         fn proptest_add_remove_roundtrip_preserves_parseability(
             ino in 3_u32..=u32::MAX,
