@@ -73575,6 +73575,27 @@ mod tests {
     }
 
     #[test]
+    fn btrfs_unlink_dir_and_rmdir_file_reject_by_type() {
+        let (fs, cx) = open_writable_btrfs();
+        let root = InodeNumber(1);
+        fs.mkdir(&cx, root, OsStr::new("d"), 0o755, 0, 0)
+            .expect("mkdir");
+        fs.create(&cx, root, OsStr::new("f.txt"), 0o644, 0, 0)
+            .expect("create");
+
+        // Removing a directory through the file-removal path must fail (EISDIR).
+        let e1 = fs.unlink(&cx, root, OsStr::new("d")).unwrap_err();
+        assert_eq!(e1.to_errno(), libc::EISDIR);
+        // rmdir on a regular file must fail with ENOTDIR.
+        let e2 = fs.rmdir(&cx, root, OsStr::new("f.txt")).unwrap_err();
+        assert_eq!(e2.to_errno(), libc::ENOTDIR);
+
+        // Both entries remain intact after the rejected operations.
+        assert!(fs.lookup(&cx, root, OsStr::new("d")).is_ok());
+        assert!(fs.lookup(&cx, root, OsStr::new("f.txt")).is_ok());
+    }
+
+    #[test]
     fn btrfs_rmdir_non_empty_returns_enotempty() {
         let (fs, cx) = open_writable_btrfs();
         let root = InodeNumber(1);
