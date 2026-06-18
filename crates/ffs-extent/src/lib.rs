@@ -4673,6 +4673,30 @@ ExtentMapping { logical_start: 5, physical_start: 134, count: 2, unwritten: true
     }
 
     #[test]
+    fn validate_physical_span_and_checked_add_reject_overflow() {
+        // A zero count is rejected.
+        assert!(validate_physical_span("op", 100, 0).is_err());
+
+        // A span whose last block overflows u64 is rejected.
+        let err = validate_physical_span("op", u64::MAX, 5).unwrap_err();
+        assert!(
+            matches!(err, FfsError::InvalidGeometry(ref m) if m.contains("exceeds u64 block space")),
+            "got {err:?}",
+        );
+
+        // A valid span passes.
+        assert!(validate_physical_span("op", 100, 8).is_ok());
+
+        // checked_physical_add rejects a u64 overflow and adds otherwise.
+        let err = checked_physical_add("op", u64::MAX, 1).unwrap_err();
+        assert!(
+            matches!(err, FfsError::InvalidGeometry(ref m) if m.contains("overflows u64")),
+            "got {err:?}",
+        );
+        assert_eq!(checked_physical_add("op", 100, 5).unwrap(), 105);
+    }
+
+    #[test]
     fn encode_split_extent_len_preserves_written_boundary() {
         let raw_len = encode_split_extent_len("test", u32::from(EXT_INIT_MAX_LEN), false).unwrap();
         let ext = Ext4Extent {
