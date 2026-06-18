@@ -5450,6 +5450,14 @@ ExtentMapping { logical_start: 5, physical_start: 134, count: 2, unwritten: true
             }
 
             prop_assert_eq!(got, model, "insert_range map diverged from model");
+
+            let inserted_hole =
+                map_logical_to_physical(&cx, &dev, &root, cstart, u64::from(clen)).unwrap();
+            prop_assert!(
+                inserted_hole.iter().all(|m| m.physical_start == 0),
+                "insert_range failed to leave inserted gap unmapped: {:?}",
+                inserted_hole
+            );
         }
 
         /// Unwritten allocation produces mappings with unwritten flag set.
