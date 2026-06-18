@@ -55440,6 +55440,21 @@ mod tests {
     }
 
     #[test]
+    fn ext4_max_file_size_scales_with_block_size_and_rejects_above() {
+        // The extent tree addresses 2^32 logical blocks, so the max file size
+        // is 2^32 * block_size: 4 TiB / 8 TiB / 16 TiB for 1K / 2K / 4K blocks.
+        assert_eq!(OpenFs::ext4_max_file_size(1024), 1_u64 << 42);
+        assert_eq!(OpenFs::ext4_max_file_size(2048), 1_u64 << 43);
+        assert_eq!(OpenFs::ext4_max_file_size(4096), 1_u64 << 44);
+
+        // A file ending exactly at the max is allowed; one byte over is EFBIG.
+        let max = OpenFs::ext4_max_file_size(4096);
+        assert!(OpenFs::ext4_reject_oversized_file(max, 4096).is_ok());
+        let err = OpenFs::ext4_reject_oversized_file(max + 1, 4096).unwrap_err();
+        assert_eq!(err.to_errno(), libc::EFBIG);
+    }
+
+    #[test]
     fn write_setattr_extend_past_max_file_size_returns_efbig() {
         let Some(fs) = open_writable_ext4() else {
             return;
