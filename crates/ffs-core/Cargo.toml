@@ -146,3 +146,7 @@ harness = false
 [[bench]]
 name = "mvcc_read_visible_arc_share_realistic"
 harness = false
+
+[[bench]]
+name = "ls_dir_inode_prefetch"
+harness = false
