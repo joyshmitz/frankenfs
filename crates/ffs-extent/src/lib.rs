@@ -3828,6 +3828,62 @@ ExtentMapping { logical_start: 5, physical_start: 134, count: 2, unwritten: true
     }
 
     #[test]
+    fn zero_count_range_shifts_preserve_existing_map() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let geo = make_geometry();
+        let mut groups = make_groups(&geo);
+        let mut root = empty_root();
+        let pctx = mock_pctx();
+
+        allocate_extent(
+            &cx,
+            &dev,
+            &mut root,
+            &geo,
+            &mut groups,
+            0,
+            12,
+            &AllocHint::default(),
+            &pctx,
+            ExtentOwner::default(),
+        )
+        .unwrap();
+        let before = map_logical_to_physical(&cx, &dev, &root, 0, 12).unwrap();
+
+        let freed = collapse_range(
+            &cx,
+            &dev,
+            &mut root,
+            &geo,
+            &mut groups,
+            5,
+            0,
+            &pctx,
+            ExtentOwner::default(),
+        )
+        .unwrap();
+        assert_eq!(freed, 0);
+        let after_collapse = map_logical_to_physical(&cx, &dev, &root, 0, 12).unwrap();
+        assert_eq!(after_collapse, before, "zero-count collapse must be a noop");
+
+        insert_range(
+            &cx,
+            &dev,
+            &mut root,
+            &geo,
+            &mut groups,
+            5,
+            0,
+            &pctx,
+            ExtentOwner::default(),
+        )
+        .unwrap();
+        let after_insert = map_logical_to_physical(&cx, &dev, &root, 0, 12).unwrap();
+        assert_eq!(after_insert, before, "zero-count insert must be a noop");
+    }
+
+    #[test]
     fn insert_range_rejects_tail_shift_past_logical_space_without_mutation() {
         let cx = test_cx();
         let dev = MemBlockDevice::new(4096);
