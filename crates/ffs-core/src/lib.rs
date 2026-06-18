@@ -50273,6 +50273,43 @@ mod tests {
     }
 
     #[test]
+    fn ext4_fallocate_insert_range_rejects_misaligned_and_past_eof() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let attr = fs
+            .create(&cx, root, OsStr::new("insert-bad.bin"), 0o644, 0, 0)
+            .expect("create");
+        // 4 blocks of 4096 bytes.
+        fs.write(&cx, attr.ino, 0, &[0xAB_u8; 16384]).expect("write");
+
+        let insert = libc::FALLOC_FL_INSERT_RANGE;
+        // Misaligned offset -> EINVAL.
+        assert_eq!(
+            fs.fallocate(&cx, attr.ino, 100, 4096, insert)
+                .unwrap_err()
+                .to_errno(),
+            libc::EINVAL
+        );
+        // Misaligned length -> EINVAL.
+        assert_eq!(
+            fs.fallocate(&cx, attr.ino, 4096, 100, insert)
+                .unwrap_err()
+                .to_errno(),
+            libc::EINVAL
+        );
+        // Offset at/past EOF -> EINVAL (a hole cannot be inserted past the end).
+        assert_eq!(
+            fs.fallocate(&cx, attr.ino, 16384, 4096, insert)
+                .unwrap_err()
+                .to_errno(),
+            libc::EINVAL
+        );
+    }
+
+    #[test]
     fn ext4_collapse_range_preserves_preallocated_zeros_and_data() {
         // collapse_range over a preallocated region must (a) shift written data
         // correctly and (b) leave the preallocated (unwritten) blocks reading
