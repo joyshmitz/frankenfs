@@ -6589,6 +6589,31 @@ mod tests {
     }
 
     #[test]
+    fn stripe_resolve_raid5_rejects_stripe_len_product_overflow() {
+        let chunks = vec![make_chunk(
+            0,
+            u64::MAX,
+            u64::MAX,
+            chunk_type_flags::BTRFS_BLOCK_GROUP_DATA | chunk_type_flags::BTRFS_BLOCK_GROUP_RAID5,
+            vec![
+                stripe(1, 0x10_0000),
+                stripe(2, 0x20_0000),
+                stripe(3, 0x30_0000),
+            ],
+            0,
+        )];
+
+        let err = map_logical_to_stripes(&chunks, 0).unwrap_err();
+        assert_eq!(
+            err,
+            ParseError::InvalidField {
+                field: "stripe_len",
+                reason: "RAID5/6 stripe_len * data_stripes overflow",
+            }
+        );
+    }
+
+    #[test]
     fn stripe_resolve_raid6_parity_wraparound() {
         // 4 devices, RAID6 (2 parity), stripe_len=65536
         // This tests the case where P is at device 0 and Q wraps to the last device.
