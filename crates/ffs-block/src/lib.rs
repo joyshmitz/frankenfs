@@ -334,6 +334,21 @@ pub trait ByteDevice: Send + Sync {
         bufs: &mut [IoSliceMut<'_>],
     ) -> Result<()> {
         cx_checkpoint(cx)?;
+        let total_len = bufs.iter().try_fold(0_u64, |total, buf| {
+            let len = u64::try_from(buf.len())
+                .map_err(|_| FfsError::Format("read length overflows u64".to_owned()))?;
+            total
+                .checked_add(len)
+                .ok_or_else(|| FfsError::Format("read length overflows u64".to_owned()))
+        })?;
+        offset
+            .0
+            .checked_add(total_len)
+            .ok_or_else(|| FfsError::Format("read range overflows u64".to_owned()))?;
+        if total_len == 0 {
+            cx_checkpoint(cx)?;
+            return Ok(());
+        }
         let mut next_offset = offset.0;
         for buf in bufs {
             if buf.is_empty() {
@@ -6510,6 +6525,43 @@ mod tests {
     }
 
     #[derive(Debug)]
+    struct PermissiveReadByteDevice {
+        read_calls: Mutex<Vec<(ByteOffset, usize)>>,
+    }
+
+    impl PermissiveReadByteDevice {
+        fn new() -> Self {
+            Self {
+                read_calls: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn read_calls(&self) -> Vec<(ByteOffset, usize)> {
+            self.read_calls.lock().clone()
+        }
+    }
+
+    impl ByteDevice for PermissiveReadByteDevice {
+        fn len_bytes(&self) -> u64 {
+            u64::MAX
+        }
+
+        fn read_exact_at(&self, _cx: &Cx, offset: ByteOffset, buf: &mut [u8]) -> Result<()> {
+            self.read_calls.lock().push((offset, buf.len()));
+            buf.fill(0x5A);
+            Ok(())
+        }
+
+        fn write_all_at(&self, _cx: &Cx, _offset: ByteOffset, _buf: &[u8]) -> Result<()> {
+            Ok(())
+        }
+
+        fn sync(&self, _cx: &Cx) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[derive(Debug)]
     struct CountingBlockDevice<D: BlockDevice> {
         inner: D,
         reads: AtomicUsize,
@@ -6928,6 +6980,28 @@ mod tests {
             dev.read_calls(),
             vec![(ByteOffset(1), 2), (ByteOffset(3), 1)]
         );
+    }
+
+    #[test]
+    fn default_vectored_read_rejects_overflow_before_partial_reads() {
+        let cx = Cx::for_testing();
+        let dev = PermissiveReadByteDevice::new();
+        let mut first = [0xAA_u8; 2];
+        let mut second = [0xBB_u8; 1];
+        let mut bufs = [IoSliceMut::new(&mut first), IoSliceMut::new(&mut second)];
+
+        let err = dev
+            .read_vectored_exact_at(&cx, ByteOffset(u64::MAX - 1), &mut bufs)
+            .expect_err("overflowing vectored read should fail before scalar reads");
+
+        assert!(
+            matches!(err, FfsError::Format(ref message)
+                if message.contains("read range overflows u64")),
+            "expected read-range overflow Format error, got {err:?}"
+        );
+        assert!(dev.read_calls().is_empty());
+        assert_eq!(first, [0xAA; 2]);
+        assert_eq!(second, [0xBB; 1]);
     }
 
     #[test]
