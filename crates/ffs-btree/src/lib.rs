@@ -2018,6 +2018,51 @@ mod tests {
     }
 
     #[test]
+    fn search_leaf_bounded_returns_found_hole_and_rejects_zero_length() {
+        let ext = |logical_block, raw_len, physical_start| Ext4Extent {
+            logical_block,
+            raw_len,
+            physical_start,
+        };
+        // Two written extents: [0,4) and [10,14).
+        let extents = vec![ext(0, 4, 1000), ext(10, 4, 2000)];
+
+        // Empty leaf -> a hole spanning to the upper bound.
+        assert_eq!(
+            search_leaf_bounded(&[], 5, 100).unwrap(),
+            SearchResult::Hole { hole_len: 95 }
+        );
+        // Inside the first extent -> Found with the right offset.
+        assert_eq!(
+            search_leaf_bounded(&extents, 2, 100).unwrap(),
+            SearchResult::Found {
+                extent: ext(0, 4, 1000),
+                offset_in_extent: 2
+            }
+        );
+        // Inside the second extent.
+        assert_eq!(
+            search_leaf_bounded(&extents, 13, 100).unwrap(),
+            SearchResult::Found {
+                extent: ext(10, 4, 2000),
+                offset_in_extent: 3
+            }
+        );
+        // In the gap between extents -> hole up to the next start (10 - 6).
+        assert_eq!(
+            search_leaf_bounded(&extents, 6, 100).unwrap(),
+            SearchResult::Hole { hole_len: 4 }
+        );
+        // Past the last extent -> hole up to the upper bound (100 - 20).
+        assert_eq!(
+            search_leaf_bounded(&extents, 20, 100).unwrap(),
+            SearchResult::Hole { hole_len: 80 }
+        );
+        // A zero-length extent is on-disk corruption.
+        assert!(search_leaf_bounded(&[ext(0, 0, 1000)], 0, 100).is_err());
+    }
+
+    #[test]
     fn find_index_child_bound_selects_child_and_clamps_upper_bound() {
         let idx = |logical_block, leaf_block| Ext4ExtentIndex {
             logical_block,
