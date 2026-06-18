@@ -5460,6 +5460,65 @@ ExtentMapping { logical_start: 5, physical_start: 134, count: 2, unwritten: true
             );
         }
 
+        /// collapse_range and insert_range are exact mirrors, so collapsing the
+        /// same range that was just inserted must restore the original mapping:
+        /// `collapse_range(s, c) ∘ insert_range(s, c) == identity`. Catches any
+        /// asymmetry (off-by-one cut, straddler-split, or physical drift)
+        /// between the two shift ops (bd-xmh5g.207).
+        #[test]
+        fn proptest_insert_then_collapse_is_identity(
+            count in 12_u32..40,
+            cstart in 1_u32..8,
+            clen in 1_u32..8,
+        ) {
+            let cx = test_cx();
+            let dev = MemBlockDevice::new(4096);
+            let geo = make_geometry();
+            let mut groups = make_groups(&geo);
+            let mut root = empty_root();
+            let pctx = mock_pctx();
+
+            // One contiguous extent [0, count) -> physical p0 + L is the original.
+            let alloc = allocate_extent(
+                &cx, &dev, &mut root, &geo, &mut groups,
+                0, count,
+                &AllocHint::default(), &pctx,
+                ExtentOwner::default(),
+            ).unwrap();
+            let p0 = alloc.physical_start;
+            let mut original = BTreeMap::<u32, u64>::new();
+            for l in 0..count {
+                original.insert(l, p0 + u64::from(l));
+            }
+
+            // insert then collapse the identical range.
+            insert_range(
+                &cx, &dev, &mut root, &geo, &mut groups,
+                cstart, clen, &pctx,
+                ExtentOwner::default(),
+            ).unwrap();
+            collapse_range(
+                &cx, &dev, &mut root, &geo, &mut groups,
+                cstart, clen, &pctx,
+                ExtentOwner::default(),
+            ).unwrap();
+
+            // The resulting per-block map must equal the original.
+            let maps = map_logical_to_physical(&cx, &dev, &root, 0, u64::from(count)).unwrap();
+            let mut after = BTreeMap::<u32, u64>::new();
+            let mut pos = 0_u32;
+            for m in &maps {
+                if m.physical_start != 0 {
+                    for i in 0..m.count {
+                        after.insert(pos + i, m.physical_start + u64::from(i));
+                    }
+                }
+                pos += m.count;
+            }
+
+            prop_assert_eq!(after, original, "collapse_range must invert insert_range");
+        }
+
         /// Unwritten allocation produces mappings with unwritten flag set.
         #[test]
         fn proptest_unwritten_alloc_flag(
