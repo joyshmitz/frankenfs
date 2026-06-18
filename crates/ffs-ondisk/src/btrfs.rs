@@ -6614,6 +6614,38 @@ mod tests {
     }
 
     #[test]
+    fn stripe_resolve_raid5_rejects_physical_address_overflow() {
+        let chunks = vec![make_chunk(
+            0,
+            16,
+            1,
+            chunk_type_flags::BTRFS_BLOCK_GROUP_DATA | chunk_type_flags::BTRFS_BLOCK_GROUP_RAID5,
+            vec![
+                stripe(1, u64::MAX - 1),
+                stripe(2, 0x20_0000),
+                stripe(3, 0x30_0000),
+            ],
+            0,
+        )];
+
+        let boundary = map_logical_to_stripes(&chunks, 2)
+            .expect("boundary stripe mapping should be valid")
+            .expect("chunk should cover boundary logical address");
+        assert_eq!(boundary.stripes.len(), 1);
+        assert_eq!(boundary.stripes[0].devid, 1);
+        assert_eq!(boundary.stripes[0].physical, u64::MAX);
+
+        let err = map_logical_to_stripes(&chunks, 8).unwrap_err();
+        assert_eq!(
+            err,
+            ParseError::InvalidField {
+                field: "stripe_offset",
+                reason: "physical address overflow",
+            }
+        );
+    }
+
+    #[test]
     fn stripe_resolve_raid6_parity_wraparound() {
         // 4 devices, RAID6 (2 parity), stripe_len=65536
         // This tests the case where P is at device 0 and Q wraps to the last device.
