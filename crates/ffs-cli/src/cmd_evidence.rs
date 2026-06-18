@@ -1569,6 +1569,35 @@ mod tests {
     use std::collections::BTreeMap;
 
     #[test]
+    fn cache_dirty_pressure_and_writeback_pressure_classify_by_threshold() {
+        use super::{CacheRuntimeMetricsSnapshot, cache_dirty_pressure, writeback_pressure};
+        let snap = |dirty: u64, writeback: u64| CacheRuntimeMetricsSnapshot {
+            cache_hits: 0,
+            cache_misses: 0,
+            cache_evictions: 0,
+            cache_dirty_count: dirty,
+            writeback_queue_depth: writeback,
+            hit_rate: 0.0,
+        };
+
+        // dirty-count buckets: 0 / 1..=32 / 33..=128 / >128.
+        assert_eq!(cache_dirty_pressure(&snap(0, 0)), "clean");
+        assert_eq!(cache_dirty_pressure(&snap(1, 0)), "elevated");
+        assert_eq!(cache_dirty_pressure(&snap(32, 0)), "elevated");
+        assert_eq!(cache_dirty_pressure(&snap(33, 0)), "high");
+        assert_eq!(cache_dirty_pressure(&snap(128, 0)), "high");
+        assert_eq!(cache_dirty_pressure(&snap(129, 0)), "critical");
+
+        // writeback-depth buckets: 0 / 1..=8 / 9..=32 / >32.
+        assert_eq!(writeback_pressure(&snap(0, 0)), "idle");
+        assert_eq!(writeback_pressure(&snap(0, 1)), "active");
+        assert_eq!(writeback_pressure(&snap(0, 8)), "active");
+        assert_eq!(writeback_pressure(&snap(0, 9)), "queued");
+        assert_eq!(writeback_pressure(&snap(0, 32)), "queued");
+        assert_eq!(writeback_pressure(&snap(0, 33)), "saturated");
+    }
+
+    #[test]
     fn validate_evidence_args_rejects_unknown_preset() {
         let err = validate_evidence_args(Some("unknown-preset"), None, None, None, false)
             .expect_err("unknown preset should fail");
