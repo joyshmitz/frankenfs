@@ -2395,6 +2395,20 @@ mod tests {
     }
 
     #[test]
+    fn checked_item_table_end_rejects_overflow() {
+        // Reasonable item counts compute a valid end past the header.
+        assert!(checked_item_table_end(0, BTRFS_ITEM_SIZE, "items").is_ok());
+        assert!(checked_item_table_end(100, BTRFS_ITEM_SIZE, "items").is_ok());
+        // A count that overflows usize when multiplied by the item size is
+        // rejected, so a corrupt header cannot drive a huge allocation.
+        let err = checked_item_table_end(usize::MAX, BTRFS_ITEM_SIZE, "items").unwrap_err();
+        assert!(
+            matches!(err, ParseError::InvalidField { reason: "overflow", .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
     fn parse_leaf_items_smoke() {
         let mut block = vec![0_u8; 512];
 
