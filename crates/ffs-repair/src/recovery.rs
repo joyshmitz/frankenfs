@@ -55,6 +55,15 @@ impl RecoveryWriteback for DirectDeviceRecoveryWriteback {
         recovered: &[RecoveryWritebackBlock<'_>],
     ) -> Result<()> {
         for block in recovered {
+            let observed = device.read_block(cx, block.block)?;
+            if observed.as_slice() != block.expected_current {
+                return Err(FfsError::RepairFailed(format!(
+                    "recovery writeback compare failed at block {}",
+                    block.block.0
+                )));
+            }
+        }
+        for block in recovered {
             device.write_block(cx, block.block, block.data)?;
         }
         device.sync(cx)?;
@@ -745,6 +754,44 @@ mod tests {
             .write_repair_symbols(cx, &symbols, 1)
             .expect("write repair symbols");
         symbols.len()
+    }
+
+    #[test]
+    fn direct_writeback_rejects_changed_current_block() {
+        let cx = Cx::for_testing();
+        let block_size = 256;
+        let device = MemBlockDevice::new(block_size, 8);
+        let block = BlockNumber(3);
+        let expected = vec![0x11; block_size as usize];
+        let newer = vec![0x22; block_size as usize];
+        let recovered = vec![0x33; block_size as usize];
+
+        device
+            .write_block(&cx, block, &expected)
+            .expect("seed expected current bytes");
+        device
+            .write_block(&cx, block, &newer)
+            .expect("simulate concurrent block update");
+
+        let writeback = DirectDeviceRecoveryWriteback;
+        let err = writeback
+            .writeback_recovered(
+                &cx,
+                &device,
+                &[RecoveryWritebackBlock {
+                    block,
+                    expected_current: &expected,
+                    data: &recovered,
+                }],
+            )
+            .expect_err("stale expected_current must fail closed");
+
+        assert!(
+            err.to_string().contains("compare failed"),
+            "unexpected error: {err}"
+        );
+        let observed = device.read_block(&cx, block).expect("read current block");
+        assert_eq!(observed.as_slice(), newer.as_slice());
     }
 
     #[test]
