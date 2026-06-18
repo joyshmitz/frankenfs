@@ -13966,6 +13966,25 @@ mod tests {
     }
 
     #[test]
+    fn dx_hash_dispatcher_unknown_version_falls_back_to_half_md4_unsigned() {
+        let seed = [1_u32, 2, 3, 4];
+        let name = b"some_directory_entry_name";
+
+        // DX_HASH_HALF_MD4_UNSIGNED (4) and every unknown/future hash_version
+        // share the catch-all dispatch arm (half_md4 unsigned), matching the
+        // kernel fallback, so they must all hash identically. dx_hash_dispatcher
+        // only covers versions 0/1/2; this pins the catch-all arm.
+        let baseline = super::dx_hash(super::DX_HASH_HALF_MD4_UNSIGNED, name, &seed);
+        for version in [6_u8, 7, 99, 200, u8::MAX] {
+            assert_eq!(
+                super::dx_hash(version, name, &seed),
+                baseline,
+                "hash_version {version} must fall back to half_md4 unsigned",
+            );
+        }
+    }
+
+    #[test]
     fn dx_hash_matches_kernel_reference_vectors() {
         let seed = [0x1111_1111, 0x3333_2222, 0x5555_4444, 0x5555_5555];
         let name = b"alpha_0000_xyz.dat";
