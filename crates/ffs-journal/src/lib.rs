@@ -6920,6 +6920,23 @@ mod tests {
     }
 
     #[test]
+    fn journal_seq_newer_half_range_boundary_contract() {
+        let current = 0xFFFF_FFF0;
+        let one_ahead = current.wrapping_add(1);
+        let one_behind = current.wrapping_sub(1);
+        let last_newer = current.wrapping_add(JOURNAL_SEQ_HALF_RANGE - 1);
+        let exactly_half_range = current.wrapping_add(JOURNAL_SEQ_HALF_RANGE);
+
+        assert!(!journal_seq_is_newer(current, current));
+        assert!(journal_seq_is_newer_or_equal(current, current));
+        assert!(journal_seq_is_newer(one_ahead, current));
+        assert!(journal_seq_is_newer(last_newer, current));
+        assert!(!journal_seq_is_newer(exactly_half_range, current));
+        assert!(!journal_seq_is_newer(one_behind, current));
+        assert!(!journal_seq_is_newer(current, one_ahead));
+    }
+
+    #[test]
     fn max_revoke_entries_scales_with_block_size() {
         // 4096 block: (4096 - 16) / 4 = 1020.
         assert_eq!(max_revoke_entries(4096, false), 1020);
