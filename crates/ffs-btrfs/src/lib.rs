@@ -15662,6 +15662,92 @@ mod tests {
         }
     }
 
+    /// One generated block group: (total in 16 KiB units, used fraction n/255,
+    /// list of (offset_blocks, len_blocks) data extents).
+    type FusedAccountingGroupSpec = (u64, u64, Vec<(u64, u64)>);
+
+    proptest::proptest! {
+        /// The fused single-scan `sync_accounting_and_free_space` must return
+        /// byte-identical results to the two-pass `sync_block_group_accounting`
+        /// then `free_space_extents` sequence it replaces, for ANY block-group /
+        /// extent-tree state — random reserved-prefix `used_bytes` (the
+        /// `untracked_used` fence) and overlapping / out-of-group extents
+        /// (clamping) included. Two identical allocators are built from the same
+        /// spec; one runs the two-pass path, the other the fused path, and the
+        /// grand total, per-group free ranges, and per-group `used_bytes`
+        /// writeback must all match (bd-xmh5g.193 / .198).
+        #[test]
+        fn fused_accounting_matches_two_pass_proptest(
+            groups in proptest::collection::vec(
+                (
+                    1_u64..=64,   // total size in 16 KiB units
+                    0_u64..=255,  // used_bytes as a fraction (n/255) of total
+                    proptest::collection::vec((0_u64..256, 1_u64..=8), 0..=12), // (offset_blocks, len_blocks)
+                ),
+                1..=3,
+            ),
+        ) {
+            let build = |spec: &[FusedAccountingGroupSpec]| -> BtrfsExtentAllocator {
+                let mut alloc = BtrfsExtentAllocator::new(11).expect("alloc");
+                alloc.set_nodesize(0x4000);
+                for (gi, group) in spec.iter().enumerate() {
+                    let (total_units, used_frac, exts) = group;
+                    let start = 0x100_0000_u64 * (gi as u64 + 1);
+                    let total = *total_units * 0x4000;
+                    let used = ((*used_frac).saturating_mul(total) / 255).min(total);
+                    alloc.add_block_group(
+                        start,
+                        BtrfsBlockGroupItem {
+                            total_bytes: total,
+                            used_bytes: used,
+                            flags: BTRFS_BLOCK_GROUP_DATA,
+                        },
+                    );
+                    for ext in exts {
+                        let (off_blocks, len_blocks) = ext;
+                        let off = *off_blocks * 0x1000;
+                        if off >= total {
+                            continue;
+                        }
+                        let bytenr = start + off;
+                        let len = *len_blocks * 0x1000;
+                        // Identical for both builds, so any insert outcome
+                        // (including a duplicate-key rewrite) is reproduced on
+                        // both sides — the comparison stays valid.
+                        let _ = alloc.insert_data_extent_item(bytenr, len, 5, 256, 0, 11);
+                    }
+                }
+                alloc
+            };
+
+            let mut alloc_two = build(&groups);
+            let mut alloc_fused = build(&groups);
+
+            let used_two = alloc_two
+                .sync_block_group_accounting()
+                .expect("two-pass accounting");
+            let free_two = alloc_two.free_space_extents().expect("two-pass free space");
+            let used_bytes_two: Vec<(u64, u64)> = alloc_two
+                .block_groups
+                .values()
+                .map(|bg| (bg.start, bg.item.used_bytes))
+                .collect();
+
+            let (used_fused, free_fused) = alloc_fused
+                .sync_accounting_and_free_space()
+                .expect("fused accounting + free space");
+            let used_bytes_fused: Vec<(u64, u64)> = alloc_fused
+                .block_groups
+                .values()
+                .map(|bg| (bg.start, bg.item.used_bytes))
+                .collect();
+
+            proptest::prop_assert_eq!(used_two, used_fused);
+            proptest::prop_assert_eq!(free_two, free_fused);
+            proptest::prop_assert_eq!(used_bytes_two, used_bytes_fused);
+        }
+    }
+
     #[test]
     fn build_free_space_tree_items_matches_btrfs_layout() {
         let groups = vec![
