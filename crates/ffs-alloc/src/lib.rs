@@ -109,6 +109,13 @@ pub fn bitmap_set(bitmap: &mut [u8], idx: u32) {
     }
 }
 
+fn bitmap_set_with_clear_undo(bitmap: &mut [u8], idx: u32, undo_clear: &mut Vec<u32>) {
+    if !bitmap_get(bitmap, idx) {
+        bitmap_set(bitmap, idx);
+        undo_clear.push(idx);
+    }
+}
+
 /// Highest set bit index strictly below `count`, or `None` if no bit is set.
 /// Matches [`bitmap_set`]'s LSB-first-within-byte convention.
 fn highest_set_bit_index(bitmap: &[u8], count: u32) -> Option<u32> {
@@ -138,6 +145,25 @@ pub fn bitmap_clear(bitmap: &mut [u8], idx: u32) {
     let bit_idx = idx % 8;
     if byte_idx < bitmap.len() {
         bitmap[byte_idx] &= !(1 << bit_idx);
+    }
+}
+
+fn bitmap_clear_with_set_undo(bitmap: &mut [u8], idx: u32, undo_set: &mut Vec<u32>) {
+    if bitmap_get(bitmap, idx) {
+        bitmap_clear(bitmap, idx);
+        undo_set.push(idx);
+    }
+}
+
+fn rollback_set_mutations(bitmap: &mut [u8], undo_clear: &[u32]) {
+    for &idx in undo_clear.iter().rev() {
+        bitmap_clear(bitmap, idx);
+    }
+}
+
+fn rollback_clear_mutations(bitmap: &mut [u8], undo_set: &[u32]) {
+    for &idx in undo_set.iter().rev() {
+        bitmap_set(bitmap, idx);
     }
 }
 
@@ -1682,7 +1708,7 @@ fn try_alloc_in_group(
 
     // Read the block bitmap.
     let bitmap_buf = dev.read_block(cx, gs.block_bitmap_block)?;
-    let mut bitmap = bitmap_buf.as_slice().to_vec();
+    let mut bitmap = bitmap_buf.into_inner();
 
     let reserved = reserved_blocks_in_group(geo, groups, group);
     for &r in &reserved {
@@ -1797,7 +1823,7 @@ pub fn free_blocks(
         let gidx = segment.group.0 as usize;
         let gs = &groups[gidx];
         let bitmap_buf = dev.read_block(cx, gs.block_bitmap_block)?;
-        let mut bitmap = bitmap_buf.as_slice().to_vec();
+        let mut bitmap = bitmap_buf.into_inner();
 
         for i in segment.rel_start..segment.rel_start + segment.count {
             bitmap_clear(&mut bitmap, i);
@@ -1877,11 +1903,12 @@ fn try_alloc_safe(
     let reserved = reserved_blocks_in_group(geo, groups, group);
 
     let bitmap_buf = dev.read_block(cx, groups[gidx].block_bitmap_block)?;
-    let mut bitmap = bitmap_buf.as_slice().to_vec();
+    let mut bitmap = bitmap_buf.into_inner();
+    let mut rollback_clear_bits = Vec::with_capacity(reserved.len() + count as usize);
 
     // Ensure all reserved blocks are marked as allocated in the bitmap.
     for &r in &reserved {
-        bitmap_set(&mut bitmap, r);
+        bitmap_set_with_clear_undo(&mut bitmap, r, &mut rollback_clear_bits);
     }
 
     let start = hint.goal_block.map_or(0, |goal| {
@@ -1909,7 +1936,7 @@ fn try_alloc_safe(
 
         // Mark blocks as allocated.
         for i in rel_start..rel_start + alloc_count {
-            bitmap_set(&mut bitmap, i);
+            bitmap_set_with_clear_undo(&mut bitmap, i, &mut rollback_clear_bits);
         }
 
         dev.write_block(cx, groups[gidx].block_bitmap_block, &bitmap)?;
@@ -1930,11 +1957,12 @@ fn try_alloc_safe(
         ) {
             groups[gidx].free_blocks = previous_free_blocks;
             groups[gidx].block_largest_free_run = previous_largest_free_run;
+            rollback_set_mutations(&mut bitmap, &rollback_clear_bits);
             restore_bitmap_after_group_desc_error(
                 cx,
                 dev,
                 groups[gidx].block_bitmap_block,
-                bitmap_buf.as_slice(),
+                &bitmap,
                 "block bitmap allocation",
                 error,
             )?;
@@ -2006,8 +2034,8 @@ pub fn free_blocks_persist(
         }
 
         let bitmap_buf = dev.read_block(cx, groups[gidx].block_bitmap_block)?;
-        let original_bitmap = bitmap_buf.as_slice().to_vec();
-        let mut bitmap = original_bitmap.clone();
+        let mut bitmap = bitmap_buf.into_inner();
+        let mut rollback_set_bits = Vec::with_capacity(segment.count as usize);
 
         // Validate all blocks are currently allocated (double-free detection).
         for i in segment.rel_start..segment.rel_start + segment.count {
@@ -2020,19 +2048,19 @@ pub fn free_blocks_persist(
         }
 
         for i in segment.rel_start..segment.rel_start + segment.count {
-            bitmap_clear(&mut bitmap, i);
+            bitmap_clear_with_set_undo(&mut bitmap, i, &mut rollback_set_bits);
         }
 
         prepared.push((
             segment,
             bitmap,
-            original_bitmap,
+            rollback_set_bits,
             groups[gidx].free_blocks,
             groups[gidx].block_largest_free_run,
         ));
     }
 
-    for (segment, bitmap, original_bitmap, previous_free_blocks, previous_largest_free_run) in
+    for (segment, mut bitmap, rollback_set_bits, previous_free_blocks, previous_largest_free_run) in
         prepared
     {
         let gidx = segment.group.0 as usize;
@@ -2052,11 +2080,12 @@ pub fn free_blocks_persist(
         ) {
             groups[gidx].free_blocks = previous_free_blocks;
             groups[gidx].block_largest_free_run = previous_largest_free_run;
+            rollback_clear_mutations(&mut bitmap, &rollback_set_bits);
             restore_bitmap_after_group_desc_error(
                 cx,
                 dev,
                 groups[gidx].block_bitmap_block,
-                &original_bitmap,
+                &bitmap,
                 "block bitmap free",
                 error,
             )?;
@@ -2164,11 +2193,12 @@ fn try_alloc_batch_in_group(
     let reserved = reserved_blocks_in_group(geo, groups, group);
 
     let bitmap_buf = dev.read_block(cx, groups[gidx].block_bitmap_block)?;
-    let mut bitmap = bitmap_buf.as_slice().to_vec();
+    let mut bitmap = bitmap_buf.into_inner();
+    let mut rollback_clear_bits = Vec::with_capacity(reserved.len() + max_count as usize);
 
     // Mark reserved blocks.
     for &r in &reserved {
-        bitmap_set(&mut bitmap, r);
+        bitmap_set_with_clear_undo(&mut bitmap, r, &mut rollback_clear_bits);
     }
 
     let start = hint.goal_block.map_or(0, |goal| {
@@ -2180,6 +2210,7 @@ fn try_alloc_batch_in_group(
     let mut allocated = Vec::with_capacity(to_alloc as usize);
 
     bitmap_take_free_bits_cyclic(&mut bitmap, blocks_in_group, to_alloc, start, |idx| {
+        rollback_clear_bits.push(idx);
         let abs = geo.group_block_to_absolute(group, idx);
         allocated.push(BlockAlloc {
             start: abs,
@@ -2214,11 +2245,12 @@ fn try_alloc_batch_in_group(
     ) {
         groups[gidx].free_blocks = previous_free_blocks;
         groups[gidx].block_largest_free_run = previous_largest_free_run;
+        rollback_set_mutations(&mut bitmap, &rollback_clear_bits);
         restore_bitmap_after_group_desc_error(
             cx,
             dev,
             groups[gidx].block_bitmap_block,
-            bitmap_buf.as_slice(),
+            &bitmap,
             "batch block bitmap allocation",
             error,
         )?;
@@ -2354,7 +2386,7 @@ fn try_alloc_inode_in_group(
     }
 
     let bitmap_buf = dev.read_block(cx, gs.inode_bitmap_block)?;
-    let mut bitmap = bitmap_buf.as_slice().to_vec();
+    let mut bitmap = bitmap_buf.into_inner();
 
     // Mark reserved inodes as allocated.
     let reserved = reserved_inodes_in_group(geo, group);
@@ -2464,14 +2496,14 @@ fn try_alloc_inode_in_group_persist(
     }
 
     let bitmap_block = groups[gidx].inode_bitmap_block;
-    let original_bitmap = dev.read_block(cx, bitmap_block)?.as_slice().to_vec();
-    let mut bitmap = original_bitmap.clone();
+    let mut bitmap = dev.read_block(cx, bitmap_block)?.into_inner();
     let previous_free_inodes = groups[gidx].free_inodes;
 
     let inodes_in_group = geo.inodes_in_group(group);
     let reserved = reserved_inodes_in_group(geo, group);
+    let mut rollback_clear_bits = Vec::with_capacity(reserved.len() + 1);
     for &r in &reserved {
-        bitmap_set(&mut bitmap, r);
+        bitmap_set_with_clear_undo(&mut bitmap, r, &mut rollback_clear_bits);
     }
 
     let Some(idx) = bitmap_find_free(&bitmap, inodes_in_group, 0) else {
@@ -2486,7 +2518,7 @@ fn try_alloc_inode_in_group_persist(
         });
     }
 
-    bitmap_set(&mut bitmap, idx);
+    bitmap_set_with_clear_undo(&mut bitmap, idx, &mut rollback_clear_bits);
     dev.write_block(cx, bitmap_block, &bitmap)?;
     let previous_used_dirs = groups[gidx].used_dirs;
     groups[gidx].free_inodes = groups[gidx].free_inodes.saturating_sub(1);
@@ -2509,11 +2541,12 @@ fn try_alloc_inode_in_group_persist(
     ) {
         groups[gidx].free_inodes = previous_free_inodes;
         groups[gidx].used_dirs = previous_used_dirs;
+        rollback_set_mutations(&mut bitmap, &rollback_clear_bits);
         restore_bitmap_after_group_desc_error(
             cx,
             dev,
             bitmap_block,
-            &original_bitmap,
+            &bitmap,
             "inode bitmap allocation",
             error,
         )?;
@@ -2579,7 +2612,7 @@ pub fn free_inode(
 
     let gs = &groups[gidx];
     let bitmap_buf = dev.read_block(cx, gs.inode_bitmap_block)?;
-    let mut bitmap = bitmap_buf.as_slice().to_vec();
+    let mut bitmap = bitmap_buf.into_inner();
 
     if !bitmap_get(&bitmap, bit_idx) {
         return Err(FfsError::Corruption {
@@ -2640,8 +2673,8 @@ pub fn free_inode_persist(
         });
     }
     let bitmap_block = groups[gidx].inode_bitmap_block;
-    let original_bitmap = dev.read_block(cx, bitmap_block)?.as_slice().to_vec();
-    let mut bitmap = original_bitmap.clone();
+    let mut bitmap = dev.read_block(cx, bitmap_block)?.into_inner();
+    let mut rollback_set_bits = Vec::with_capacity(1);
     let previous_free_inodes = groups[gidx].free_inodes;
     let group = GroupNumber(group_idx);
     let bit_idx = u32::try_from(ino_zero % u64::from(geo.inodes_per_group)).map_err(|_| {
@@ -2674,7 +2707,7 @@ pub fn free_inode_persist(
         });
     }
 
-    bitmap_clear(&mut bitmap, bit_idx);
+    bitmap_clear_with_set_undo(&mut bitmap, bit_idx, &mut rollback_set_bits);
     dev.write_block(cx, bitmap_block, &bitmap)?;
     let previous_used_dirs = groups[gidx].used_dirs;
     groups[gidx].free_inodes = groups[gidx].free_inodes.saturating_add(1);
@@ -2695,11 +2728,12 @@ pub fn free_inode_persist(
     ) {
         groups[gidx].free_inodes = previous_free_inodes;
         groups[gidx].used_dirs = previous_used_dirs;
+        rollback_clear_mutations(&mut bitmap, &rollback_set_bits);
         restore_bitmap_after_group_desc_error(
             cx,
             dev,
             bitmap_block,
-            &original_bitmap,
+            &bitmap,
             "inode bitmap free",
             error,
         )?;
@@ -2963,6 +2997,31 @@ mod tests {
         bitmap_set(&mut bm, 8);
         assert!(bitmap_get(&bm, 8));
         assert_eq!(bm[1], 0x01);
+    }
+
+    #[test]
+    fn bitmap_undo_logs_restore_exact_original_bytes() {
+        let original = vec![0b0000_1000, 0b1000_0000, 0];
+
+        let mut set_bitmap = original.clone();
+        let mut undo_clear = Vec::new();
+        bitmap_set_with_clear_undo(&mut set_bitmap, 1, &mut undo_clear);
+        bitmap_set_with_clear_undo(&mut set_bitmap, 3, &mut undo_clear);
+        bitmap_set_with_clear_undo(&mut set_bitmap, 17, &mut undo_clear);
+        assert_eq!(undo_clear, vec![1, 17]);
+        assert_ne!(set_bitmap, original);
+        rollback_set_mutations(&mut set_bitmap, &undo_clear);
+        assert_eq!(set_bitmap, original);
+
+        let mut clear_bitmap = original.clone();
+        let mut undo_set = Vec::new();
+        bitmap_clear_with_set_undo(&mut clear_bitmap, 3, &mut undo_set);
+        bitmap_clear_with_set_undo(&mut clear_bitmap, 4, &mut undo_set);
+        bitmap_clear_with_set_undo(&mut clear_bitmap, 15, &mut undo_set);
+        assert_eq!(undo_set, vec![3, 15]);
+        assert_ne!(clear_bitmap, original);
+        rollback_clear_mutations(&mut clear_bitmap, &undo_set);
+        assert_eq!(clear_bitmap, original);
     }
 
     #[test]

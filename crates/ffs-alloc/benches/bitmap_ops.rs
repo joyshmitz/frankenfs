@@ -3,12 +3,13 @@
 //! Compares O(1) rank / O(log n) select via `SuccinctBitmap` against
 //! the plain `bitmap_count_free` / `bitmap_find_free` O(n) helpers.
 
-use criterion::{Criterion, criterion_group, criterion_main};
+use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use ffs_alloc::succinct::SuccinctBitmap;
 use ffs_alloc::{
     GroupStats, bitmap_count_free, bitmap_find_contiguous, bitmap_find_free,
     bitmap_largest_free_run,
 };
+use ffs_block::BlockBuf;
 use ffs_types::{BlockNumber, GroupNumber};
 use std::hint::black_box;
 
@@ -43,6 +44,40 @@ fn make_late_free_cluster_bitmap() -> Vec<u8> {
 fn make_fragmented_bitmap() -> Vec<u8> {
     let pattern = [0b1110_0001, 0b1000_1111, 0b1111_1000, 0b1100_0011];
     pattern.into_iter().cycle().take(4096).collect()
+}
+
+fn copy_bitmap_for_mutation_old(buf: BlockBuf) -> Vec<u8> {
+    buf.as_slice().to_vec()
+}
+
+fn move_bitmap_for_mutation(buf: BlockBuf) -> Vec<u8> {
+    buf.into_inner()
+}
+
+fn bench_bitmap_owned_move(c: &mut Criterion) {
+    let bm = make_fragmented_bitmap();
+    debug_assert_eq!(
+        copy_bitmap_for_mutation_old(BlockBuf::new(bm.clone())),
+        move_bitmap_for_mutation(BlockBuf::new(bm.clone())),
+        "copy and move paths must expose identical mutable bitmap bytes"
+    );
+
+    let mut group = c.benchmark_group("bitmap_owned_move_ab");
+    group.bench_function("old_copy_to_vec_4k", |b| {
+        b.iter_batched(
+            || BlockBuf::new(bm.clone()),
+            |buf| black_box(copy_bitmap_for_mutation_old(black_box(buf))),
+            BatchSize::SmallInput,
+        );
+    });
+    group.bench_function("move_into_inner_4k", |b| {
+        b.iter_batched(
+            || BlockBuf::new(bm.clone()),
+            |buf| black_box(move_bitmap_for_mutation(black_box(buf))),
+            BatchSize::SmallInput,
+        );
+    });
+    group.finish();
 }
 
 fn count_free_unrolled_chunks32(bitmap: &[u8], count: u32) -> u32 {
@@ -918,6 +953,7 @@ fn bench_find_contiguous_word_vs_byte(c: &mut Criterion) {
 
 criterion_group!(
     benches,
+    bench_bitmap_owned_move,
     bench_count_free,
     bench_count_free_unroll_vs_chunks8,
     bench_find_free,
