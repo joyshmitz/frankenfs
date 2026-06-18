@@ -2894,6 +2894,15 @@ Hole { hole_len: 90 }
                 hole_len: expected_hole_len
             }
         );
+
+        let (parsed_header, parsed_tree) = ffs_ondisk::parse_extent_tree(&root).unwrap();
+        assert_eq!(
+            search_parsed_root(&cx, &dev, &parsed_header, &parsed_tree, target).unwrap(),
+            SearchResult::Hole {
+                hole_len: expected_hole_len
+            },
+            "parsed-root search must preserve the bounded leaf-end hole length (bd-xmh5g.214)"
+        );
     }
 
     #[test]
