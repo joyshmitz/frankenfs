@@ -6362,6 +6362,59 @@ mod tests {
     }
 
     #[test]
+    fn stripe_resolve_raid1c3_returns_all_mirrors() {
+        let chunks = vec![make_chunk(
+            0,
+            1_048_576,
+            65536,
+            chunk_type_flags::BTRFS_BLOCK_GROUP_DATA | chunk_type_flags::BTRFS_BLOCK_GROUP_RAID1C3,
+            vec![
+                stripe(1, 0x10_0000),
+                stripe(2, 0x20_0000),
+                stripe(3, 0x30_0000),
+            ],
+            0,
+        )];
+        let result = map_logical_to_stripes(&chunks, 4096).unwrap().unwrap();
+        assert_eq!(result.profile, BtrfsRaidProfile::Raid1C3);
+        assert_eq!(result.stripes.len(), 3);
+        assert_eq!(result.stripes[0].devid, 1);
+        assert_eq!(result.stripes[1].devid, 2);
+        assert_eq!(result.stripes[2].devid, 3);
+        assert_eq!(result.stripes[0].physical, 0x10_0000 + 4096);
+        assert_eq!(result.stripes[1].physical, 0x20_0000 + 4096);
+        assert_eq!(result.stripes[2].physical, 0x30_0000 + 4096);
+    }
+
+    #[test]
+    fn stripe_resolve_raid1c4_returns_all_mirrors() {
+        let chunks = vec![make_chunk(
+            0,
+            1_048_576,
+            65536,
+            chunk_type_flags::BTRFS_BLOCK_GROUP_DATA | chunk_type_flags::BTRFS_BLOCK_GROUP_RAID1C4,
+            vec![
+                stripe(1, 0x10_0000),
+                stripe(2, 0x20_0000),
+                stripe(3, 0x30_0000),
+                stripe(4, 0x40_0000),
+            ],
+            0,
+        )];
+        let result = map_logical_to_stripes(&chunks, 8192).unwrap().unwrap();
+        assert_eq!(result.profile, BtrfsRaidProfile::Raid1C4);
+        assert_eq!(result.stripes.len(), 4);
+        assert_eq!(result.stripes[0].devid, 1);
+        assert_eq!(result.stripes[1].devid, 2);
+        assert_eq!(result.stripes[2].devid, 3);
+        assert_eq!(result.stripes[3].devid, 4);
+        assert_eq!(result.stripes[0].physical, 0x10_0000 + 8192);
+        assert_eq!(result.stripes[1].physical, 0x20_0000 + 8192);
+        assert_eq!(result.stripes[2].physical, 0x30_0000 + 8192);
+        assert_eq!(result.stripes[3].physical, 0x40_0000 + 8192);
+    }
+
+    #[test]
     fn stripe_resolve_dup_returns_copies_on_same_device() {
         let chunks = vec![make_chunk(
             0,
