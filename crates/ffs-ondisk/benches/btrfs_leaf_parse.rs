@@ -50,15 +50,142 @@ fn build_dense_leaf(block_size: usize, payload_size: usize) -> Vec<u8> {
     block
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct ParsedLeafItemModel {
+    objectid: u64,
+    item_type: u8,
+    key_offset: u64,
+    data_offset: u32,
+    data_size: u32,
+}
+
+fn read_u32_at(block: &[u8], offset: usize) -> u32 {
+    u32::from_le_bytes(block[offset..offset + 4].try_into().expect("u32 field"))
+}
+
+fn read_u64_at(block: &[u8], offset: usize) -> u64 {
+    u64::from_le_bytes(block[offset..offset + 8].try_into().expect("u64 field"))
+}
+
+fn eager_word_range_mask(lo: usize, hi: usize) -> u64 {
+    let high = if hi >= 64 {
+        u64::MAX
+    } else {
+        (1_u64 << hi) - 1
+    };
+    let low = (1_u64 << lo) - 1;
+    high & !low
+}
+
+fn eager_payload_range_collides(bits: &mut [u64], start: usize, end: usize) -> bool {
+    let first_word = start / 64;
+    let last_word = (end - 1) / 64;
+    let first_mask = eager_word_range_mask(start % 64, 64);
+    let last_mask = eager_word_range_mask(0, (end - 1) % 64 + 1);
+
+    if first_word == last_word {
+        let mask = first_mask & last_mask;
+        if bits[first_word] & mask != 0 {
+            return true;
+        }
+        bits[first_word] |= mask;
+        return false;
+    }
+
+    if bits[first_word] & first_mask != 0 || bits[last_word] & last_mask != 0 {
+        return true;
+    }
+    if bits[first_word + 1..last_word].iter().any(|&w| w != 0) {
+        return true;
+    }
+
+    bits[first_word] |= first_mask;
+    bits[last_word] |= last_mask;
+    for word in &mut bits[first_word + 1..last_word] {
+        *word = u64::MAX;
+    }
+    false
+}
+
+fn parse_leaf_items_eager_coverage_model(block: &[u8]) -> Vec<ParsedLeafItemModel> {
+    assert_eq!(block[LEVEL_OFFSET], 0, "model expects a leaf block");
+    let nritems = usize::try_from(read_u32_at(block, NRITEMS_OFFSET)).expect("nritems fits");
+    let items_end = BTRFS_HEADER_SIZE + nritems * BTRFS_ITEM_SIZE;
+    assert!(block.len() >= items_end, "item table fits");
+
+    let header_size = u32::try_from(BTRFS_HEADER_SIZE).expect("header size fits");
+    let mut payload_coverage = vec![0_u64; block.len().div_ceil(64)];
+    let mut previous_key = None;
+    let mut out = Vec::with_capacity(nritems);
+
+    for idx in 0..nritems {
+        let base = BTRFS_HEADER_SIZE + idx * BTRFS_ITEM_SIZE;
+        let objectid = read_u64_at(block, base);
+        let item_type = block[base + 8];
+        let key_offset = read_u64_at(block, base + 9);
+        let key = (objectid, item_type, key_offset);
+        if let Some(previous) = previous_key {
+            assert!(previous < key, "keys are strictly increasing");
+        }
+        previous_key = Some(key);
+
+        let data_offset = read_u32_at(block, base + 17)
+            .checked_add(header_size)
+            .expect("data offset fits");
+        let data_size = read_u32_at(block, base + 21);
+        let data_offset_usize = usize::try_from(data_offset).expect("offset fits");
+        let data_size_usize = usize::try_from(data_size).expect("size fits");
+        assert!(data_offset_usize >= items_end, "payload starts after table");
+        let data_end = data_offset_usize
+            .checked_add(data_size_usize)
+            .expect("payload end fits");
+        assert!(data_end <= block.len(), "payload lies inside block");
+        if data_size_usize > 0 {
+            assert!(
+                !eager_payload_range_collides(
+                    &mut payload_coverage,
+                    data_offset_usize,
+                    data_end
+                ),
+                "payloads do not overlap"
+            );
+        }
+
+        out.push(ParsedLeafItemModel {
+            objectid,
+            item_type,
+            key_offset,
+            data_offset,
+            data_size,
+        });
+    }
+
+    out
+}
+
+fn assert_model_matches_parser(block: &[u8]) {
+    let model = parse_leaf_items_eager_coverage_model(block);
+    let (_, parsed) = parse_leaf_items(block).expect("production parser accepts dense leaf");
+    assert_eq!(model.len(), parsed.len());
+    for (model, parsed) in model.iter().zip(parsed.iter()) {
+        assert_eq!(model.objectid, parsed.key.objectid);
+        assert_eq!(model.item_type, parsed.key.item_type);
+        assert_eq!(model.key_offset, parsed.key.offset);
+        assert_eq!(model.data_offset, parsed.data_offset);
+        assert_eq!(model.data_size, parsed.data_size);
+    }
+}
+
 fn bench_parse_dense_leaf(c: &mut Criterion) {
     // Default btrfs nodesize (16 KiB), 1-byte payloads → ~626 items.
     let leaf_16k = build_dense_leaf(16 * 1024, 1);
     // Smaller 4 KiB leaf → ~156 items.
     let leaf_4k = build_dense_leaf(4 * 1024, 1);
 
-    // Sanity: both parse cleanly before benchmarking.
-    assert!(parse_leaf_items(&leaf_16k).is_ok());
-    assert!(parse_leaf_items(&leaf_4k).is_ok());
+    // Sanity: both parse cleanly and match the old eager-coverage model before
+    // benchmarking either shape.
+    assert_model_matches_parser(&leaf_16k);
+    assert_model_matches_parser(&leaf_4k);
 
     let mut group = c.benchmark_group("btrfs_leaf_parse");
     group.bench_function("parse_dense_leaf_16k", |b| {
@@ -70,5 +197,23 @@ fn bench_parse_dense_leaf(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(btrfs_leaf, bench_parse_dense_leaf);
+fn bench_payload_coverage_ab(c: &mut Criterion) {
+    let leaf_16k = build_dense_leaf(16 * 1024, 1);
+    assert_model_matches_parser(&leaf_16k);
+
+    let mut group = c.benchmark_group("btrfs_leaf_payload_coverage_ab");
+    group.bench_function("old_eager_coverage_model_16k", |b| {
+        b.iter(|| black_box(parse_leaf_items_eager_coverage_model(black_box(&leaf_16k))));
+    });
+    group.bench_function("lazy_descending_fast_path_16k", |b| {
+        b.iter(|| black_box(parse_leaf_items(black_box(&leaf_16k)).unwrap()));
+    });
+    group.finish();
+}
+
+criterion_group!(
+    btrfs_leaf,
+    bench_parse_dense_leaf,
+    bench_payload_coverage_ab
+);
 criterion_main!(btrfs_leaf);

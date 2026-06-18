@@ -1499,6 +1499,32 @@ fn payload_range_collides(bits: &mut [u64], start: usize, end: usize) -> bool {
     false
 }
 
+fn seed_payload_coverage_from_items(
+    bits: &mut [u64],
+    items: &[BtrfsItem],
+) -> Result<(), ParseError> {
+    for item in items {
+        let size = usize::try_from(item.data_size)
+            .map_err(|_| ParseError::IntegerConversion { field: "item_size" })?;
+        if size == 0 {
+            continue;
+        }
+        let start = usize::try_from(item.data_offset)
+            .map_err(|_| ParseError::IntegerConversion { field: "item_offset" })?;
+        let end = start.checked_add(size).ok_or(ParseError::InvalidField {
+            field: "item_offset",
+            reason: "overflow",
+        })?;
+        if payload_range_collides(bits, start, end) {
+            return Err(ParseError::InvalidField {
+                field: "item_offset",
+                reason: "item payload overlaps another item",
+            });
+        }
+    }
+    Ok(())
+}
+
 pub fn parse_leaf_items(block: &[u8]) -> Result<(BtrfsHeader, Vec<BtrfsItem>), ParseError> {
     let header = BtrfsHeader::parse_from_block(block)?;
     if header.level != 0 {
@@ -1523,15 +1549,14 @@ pub fn parse_leaf_items(block: &[u8]) -> Result<(BtrfsHeader, Vec<BtrfsItem>), P
         });
     }
 
-    // Track payload coverage as a byte-granular bitset over the block, so each
-    // item's overlap check is O(payload words) instead of an O(N) all-pairs
-    // scan — making the whole leaf parse O(block size) rather than O(N^2) on a
-    // dense leaf (hundreds of items), with no per-item allocation. A range
-    // overlaps a previously-seen payload iff any of its bits are already set;
-    // this is identical to the all-pairs check because the set bits are exactly
-    // the union of all prior payload ranges.
-    let mut payload_coverage = vec![0_u64; block.len().div_ceil(64)];
-    let mut items = Vec::with_capacity(nritems);
+    // Kernel-written leaves pack payloads monotonically downward from the block
+    // end. Track that canonical shape with O(1) state and lazily allocate the
+    // byte-granular coverage bitset only if a noncanonical payload order appears.
+    // The fallback replays already accepted items into the same exact bitset
+    // checker, so arbitrary valid/invalid leaves keep the old overlap semantics.
+    let mut payload_coverage: Option<Vec<u64>> = None;
+    let mut lowest_payload_start = block.len();
+    let mut items: Vec<BtrfsItem> = Vec::with_capacity(nritems);
     let mut previous_key = None;
     for idx in 0..nritems {
         let base = BTRFS_HEADER_SIZE + idx * BTRFS_ITEM_SIZE;
@@ -1586,13 +1611,27 @@ pub fn parse_leaf_items(block: &[u8]) -> Result<(BtrfsHeader, Vec<BtrfsItem>), P
             });
         }
 
-        if data_size_usize > 0
-            && payload_range_collides(&mut payload_coverage, data_offset_usize, data_end)
-        {
-            return Err(ParseError::InvalidField {
-                field: "item_offset",
-                reason: "item payload overlaps another item",
-            });
+        if data_size_usize > 0 {
+            if let Some(coverage) = payload_coverage.as_mut() {
+                if payload_range_collides(coverage, data_offset_usize, data_end) {
+                    return Err(ParseError::InvalidField {
+                        field: "item_offset",
+                        reason: "item payload overlaps another item",
+                    });
+                }
+            } else if data_end <= lowest_payload_start {
+                lowest_payload_start = data_offset_usize;
+            } else {
+                let mut coverage = vec![0_u64; block.len().div_ceil(64)];
+                seed_payload_coverage_from_items(&mut coverage, &items)?;
+                if payload_range_collides(&mut coverage, data_offset_usize, data_end) {
+                    return Err(ParseError::InvalidField {
+                        field: "item_offset",
+                        reason: "item payload overlaps another item",
+                    });
+                }
+                payload_coverage = Some(coverage);
+            }
         }
 
         items.push(BtrfsItem {
@@ -3392,6 +3431,37 @@ mod tests {
             ),
             "expected item_offset error, got: {err:?}"
         );
+    }
+
+    #[test]
+    fn parse_leaf_items_accepts_noncanonical_nonoverlap_payload_order_bd_xmh5g_384() {
+        let mut block = make_block(512, 2, 0);
+        let base = BTRFS_HEADER_SIZE;
+        let header_size = u32::try_from(BTRFS_HEADER_SIZE).expect("header size fits");
+
+        // Item 0 sits lower in the block.
+        block[base..base + 8].copy_from_slice(&1_u64.to_le_bytes());
+        block[base + 8] = 1;
+        block[base + 9..base + 17].copy_from_slice(&0_u64.to_le_bytes());
+        let item0_offset = 200_u32;
+        block[base + 17..base + 21].copy_from_slice(&(item0_offset - header_size).to_le_bytes());
+        block[base + 21..base + 25].copy_from_slice(&10_u32.to_le_bytes());
+
+        // Item 1 is non-overlapping but higher than item 0. That violates the
+        // canonical downward-packing fast path and must fall back to exact
+        // bitset coverage instead of being rejected as a layout assumption.
+        let b1 = BTRFS_HEADER_SIZE + BTRFS_ITEM_SIZE;
+        block[b1..b1 + 8].copy_from_slice(&2_u64.to_le_bytes());
+        block[b1 + 8] = 2;
+        block[b1 + 9..b1 + 17].copy_from_slice(&0_u64.to_le_bytes());
+        let item1_offset = 300_u32;
+        block[b1 + 17..b1 + 21].copy_from_slice(&(item1_offset - header_size).to_le_bytes());
+        block[b1 + 21..b1 + 25].copy_from_slice(&10_u32.to_le_bytes());
+
+        let (_, items) = parse_leaf_items(&block).expect("non-overlapping payloads parse");
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].data_offset, item0_offset);
+        assert_eq!(items[1].data_offset, item1_offset);
     }
 
     #[test]
