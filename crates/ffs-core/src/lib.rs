@@ -35486,6 +35486,28 @@ mod tests {
         assert_eq!(attr.gid, 0);
     }
 
+    #[test]
+    fn inode_file_type_maps_symlink_fifo_socket_and_unknown() {
+        use ffs_types::{S_IFIFO, S_IFLNK, S_IFSOCK};
+
+        let with_mode = |mode: u16| make_test_inode(mode, 0, 0);
+        assert_eq!(
+            inode_file_type(&with_mode(S_IFLNK | 0o777)),
+            FileType::Symlink
+        );
+        assert_eq!(inode_file_type(&with_mode(S_IFIFO | 0o644)), FileType::Fifo);
+        assert_eq!(
+            inode_file_type(&with_mode(S_IFSOCK | 0o644)),
+            FileType::Socket
+        );
+        // An undefined S_IFMT value (0o030000) matches no predicate and falls
+        // back to RegularFile.
+        assert_eq!(
+            inode_file_type(&with_mode(0o030_000 | 0o644)),
+            FileType::RegularFile
+        );
+    }
+
     // ── Generation lifecycle tests ─────────────────────────────────────
 
     #[test]
