@@ -14,7 +14,7 @@
 //!   top of the single read.
 //! * `read_contiguous_into` — the post-bd-dy41g shape: one ranged read straight
 //!   into `out`. No per-block allocation and no post-read copy.
-//! * `read_contiguous_into_trusted_direct` — the post-bd-xmh5g.351 shape for
+//! * `read_contiguous_into_trusted_direct` — the post-bd-xmh5g.383 shape for
 //!   byte devices that already preserve read destinations on error: skip the
 //!   outer safety staging buffer and let the device fill `out` directly.
 //!
