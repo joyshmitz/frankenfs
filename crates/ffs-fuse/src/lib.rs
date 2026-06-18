@@ -15219,6 +15219,69 @@ mod tests {
     }
 
     #[test]
+    fn authorize_setattr_owner_change_denies_non_root_chown() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let options = MountOptions {
+            read_only: false,
+            ..MountOptions::default()
+        };
+        let fuse = FrankenFuse::with_options(
+            Box::new(MutationRecordingFs::new(Arc::clone(&calls))),
+            &options,
+        );
+        // The mock getattr reports uid=1000, gid=1000 for every inode.
+
+        let uid_change = SetAttrRequest {
+            mode: None,
+            uid: Some(501),
+            gid: None,
+            size: None,
+            atime: None,
+            mtime: None,
+        };
+        // Root may change ownership.
+        assert!(fuse.setattr_for_fuzzing_as(7, &uid_change, 0).is_ok());
+        // A non-root caller changing uid to a different value is refused (EPERM).
+        assert!(matches!(
+            fuse.setattr_for_fuzzing_as(7, &uid_change, 1000),
+            Err(errno) if errno == libc::EPERM
+        ));
+        // Same for an actual gid change.
+        let gid_change = SetAttrRequest {
+            mode: None,
+            uid: None,
+            gid: Some(999),
+            size: None,
+            atime: None,
+            mtime: None,
+        };
+        assert!(matches!(
+            fuse.setattr_for_fuzzing_as(7, &gid_change, 1000),
+            Err(errno) if errno == libc::EPERM
+        ));
+        // A non-root no-op (uid/gid set to their current values) is allowed.
+        let noop = SetAttrRequest {
+            mode: None,
+            uid: Some(1000),
+            gid: Some(1000),
+            size: None,
+            atime: None,
+            mtime: None,
+        };
+        assert!(fuse.setattr_for_fuzzing_as(7, &noop, 1000).is_ok());
+        // A non-root change to non-ownership attributes is allowed.
+        let mode_change = SetAttrRequest {
+            mode: Some(0o600),
+            uid: None,
+            gid: None,
+            size: None,
+            atime: None,
+            mtime: None,
+        };
+        assert!(fuse.setattr_for_fuzzing_as(7, &mode_change, 1000).is_ok());
+    }
+
+    #[test]
     fn conformance_fuse_setattr_metadata_round_trip() {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let options = MountOptions {
