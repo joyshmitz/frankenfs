@@ -79,7 +79,8 @@ fn run_single(cache: &Arc<RwLock<Inner>>) -> u64 {
             s.spawn(move || {
                 let mut acc = 0_u64;
                 for op in 0..OPS_PER_THREAD {
-                    if let Some(v) = cache.write().lookup(t as u64, key(op)) {
+                    let value = cache.write().lookup(t as u64, key(op));
+                    if let Some(v) = value {
                         acc = acc.wrapping_add(v);
                     }
                 }
@@ -101,7 +102,8 @@ fn run_sharded(shards: &Arc<Vec<RwLock<Inner>>>) -> u64 {
                 let shard = (ns % SHARDS as u64) as usize;
                 let mut acc = 0_u64;
                 for op in 0..OPS_PER_THREAD {
-                    if let Some(v) = shards[shard].write().lookup(ns, key(op)) {
+                    let value = shards[shard].write().lookup(ns, key(op));
+                    if let Some(v) = value {
                         acc = acc.wrapping_add(v);
                     }
                 }
@@ -113,12 +115,13 @@ fn run_sharded(shards: &Arc<Vec<RwLock<Inner>>>) -> u64 {
 }
 
 fn build_sharded() -> Vec<RwLock<Inner>> {
-    let mut shards: Vec<RwLock<Inner>> = (0..SHARDS).map(|_| RwLock::new(Inner::default())).collect();
+    let mut shards: Vec<RwLock<Inner>> =
+        (0..SHARDS).map(|_| RwLock::new(Inner::default())).collect();
     for ns in 0..THREADS as u64 {
         let s = (ns % SHARDS as u64) as usize;
         let inner = shards[s].get_mut();
         for lb in 0..ENTRIES_PER_NS {
-            inner.entries.insert((ns, lb), 0);
+            inner.entries.insert((ns, lb), (mapping_for(ns, lb), 0));
         }
     }
     shards

@@ -126,7 +126,11 @@ impl Sharded {
         if self.len.load(Ordering::Relaxed) >= limit {
             return;
         }
-        if self.shards[(k as usize) % SHARDS].lock().insert(k, v).is_none() {
+        if self.shards[(k as usize) % SHARDS]
+            .lock()
+            .insert(k, v)
+            .is_none()
+        {
             self.len.fetch_add(1, Ordering::Relaxed);
         }
     }

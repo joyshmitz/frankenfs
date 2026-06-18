@@ -6296,7 +6296,10 @@ ExtentMapping { logical_start: 5, physical_start: 134, count: 2, unwritten: true
             *per_ns.entry(n).or_default() += 1;
         }
         for (&n, &cnt) in &per_ns {
-            assert!(cnt <= CAP, "namespace {n} exceeded per-shard capacity: {cnt}");
+            assert!(
+                cnt <= CAP,
+                "namespace {n} exceeded per-shard capacity: {cnt}"
+            );
         }
         assert_eq!(cache.stats().entries, per_ns.values().sum::<usize>());
         // Golden: pinned digest of the full op-by-op resident trace under
