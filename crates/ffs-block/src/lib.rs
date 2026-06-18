@@ -20,6 +20,7 @@ use ffs_types::{
 use parking_lot::RwLock;
 use parking_lot::{Condvar, Mutex};
 use serde::{Deserialize, Serialize};
+use smallvec::SmallVec;
 #[cfg(feature = "s3fifo")]
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
@@ -1083,12 +1084,12 @@ impl<D: ByteDevice> BlockDevice for ByteBlockDevice<D> {
         if self.inner.preserves_read_vectored_destinations_on_error()
             && bufs.iter().all(|buf| buf.len() == block_size)
         {
-            let mut slices: Vec<IoSliceMut<'_>> = bufs
+            let mut slices: SmallVec<[IoSliceMut<'_>; 16]> = bufs
                 .iter_mut()
                 .map(|buf| IoSliceMut::new(buf.make_mut()))
                 .collect();
             self.inner
-                .read_vectored_exact_at(cx, ByteOffset(offset), &mut slices)?;
+                .read_vectored_exact_at(cx, ByteOffset(offset), slices.as_mut_slice())?;
             cx_checkpoint(cx)?;
             return Ok(());
         }
