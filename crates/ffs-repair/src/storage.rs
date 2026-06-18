@@ -65,6 +65,15 @@ impl RepairGroupLayout {
                 "repair_block_count must be > 0".to_owned(),
             ));
         }
+        group_start
+            .0
+            .checked_add(u64::from(blocks_per_group))
+            .ok_or_else(|| {
+                FfsError::InvalidGeometry(format!(
+                    "group range overflows u64: group_start={} blocks_per_group={blocks_per_group}",
+                    group_start.0
+                ))
+            })?;
 
         let reserved = u64::from(validation_block_count)
             + u64::from(repair_block_count)
@@ -1078,6 +1087,13 @@ mod tests {
         // validation(2) + repair(8) + desc(2) = 12 > blocks_per_group(10)
         let err = RepairGroupLayout::new(GroupNumber(0), BlockNumber(0), 10, 2, 8)
             .expect_err("reserved exceeds group");
+        assert!(matches!(err, FfsError::InvalidGeometry(_)));
+    }
+
+    #[test]
+    fn layout_rejects_group_end_overflow() {
+        let err = RepairGroupLayout::new(GroupNumber(0), BlockNumber(u64::MAX - 1), 4, 0, 1)
+            .expect_err("group end overflow");
         assert!(matches!(err, FfsError::InvalidGeometry(_)));
     }
 
