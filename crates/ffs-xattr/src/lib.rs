@@ -2697,6 +2697,34 @@ mod tests {
     }
 
     #[test]
+    fn xattr_exists_for_access_skips_external_block_when_namespace_denied() -> Result<()> {
+        let mut inode = make_inode(128);
+        inode.file_acl = 4242;
+        let default_read = XattrReadAccess::default();
+        let admin_read = XattrReadAccess {
+            has_cap_sys_admin: true,
+        };
+
+        if xattr_exists_for_access(&inode, None, "trusted.secret", default_read)? {
+            return Err(FfsError::Format(
+                "trusted xattr exists for default reader".to_owned(),
+            ));
+        }
+        if get_xattr_for_access(&inode, None, "trusted.secret", default_read)?.is_some() {
+            return Err(FfsError::Format(
+                "trusted xattr get succeeded for default reader".to_owned(),
+            ));
+        }
+
+        match xattr_exists_for_access(&inode, None, "trusted.secret", admin_read) {
+            Err(FfsError::Format(message)) if message.contains("external xattr block") => Ok(()),
+            _ => Err(FfsError::Format(
+                "admin-visible external xattr miss did not require the block".to_owned(),
+            )),
+        }
+    }
+
+    #[test]
     fn encryption_namespace_hidden_from_all_xattr_views() {
         let inode = Ext4Inode {
             xattr_ibody: build_inline_ibody(
