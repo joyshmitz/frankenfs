@@ -619,6 +619,12 @@ pub trait BlockDevice: Send + Sync {
                 FfsError::Format("contiguous read block range overflow".to_owned())
             })?);
             let buf = self.read_block(cx, block)?;
+            let actual_len = buf.as_slice().len();
+            if actual_len != bs {
+                return Err(FfsError::Format(format!(
+                    "read_block returned wrong size: got={actual_len} expected={bs}"
+                )));
+            }
             chunk.copy_from_slice(buf.as_slice());
         }
         cx_checkpoint(cx)?;
@@ -7315,6 +7321,51 @@ mod tests {
         assert!(matches!(err, FfsError::Format(_)));
         let block0 = dev.read_block(&cx, BlockNumber(0)).expect("read block 0");
         assert_eq!(block0.as_slice(), &[0_u8; 4096]);
+    }
+
+    #[derive(Debug)]
+    struct ShortReadBlockDevice;
+
+    impl BlockDevice for ShortReadBlockDevice {
+        fn read_block(&self, _cx: &Cx, _block: BlockNumber) -> Result<BlockBuf> {
+            Ok(BlockBuf::new(vec![0x5A; 2]))
+        }
+
+        fn write_block(&self, _cx: &Cx, _block: BlockNumber, _data: &[u8]) -> Result<()> {
+            Ok(())
+        }
+
+        fn block_size(&self) -> u32 {
+            4
+        }
+
+        fn block_count(&self) -> u64 {
+            1
+        }
+
+        fn sync(&self, _cx: &Cx) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn default_contiguous_into_rejects_short_block_without_panic() {
+        let cx = Cx::for_testing();
+        let dev = ShortReadBlockDevice;
+        let mut dst = [0xAA_u8; 4];
+
+        let err = dev
+            .read_contiguous_into(&cx, BlockNumber(0), &mut dst)
+            .expect_err("short scalar block should fail closed");
+
+        assert!(
+            matches!(err, FfsError::Format(ref message)
+                if message.contains("read_block returned wrong size")
+                    && message.contains("got=2")
+                    && message.contains("expected=4")),
+            "expected block-size Format error, got {err:?}"
+        );
+        assert_eq!(dst, [0xAA; 4]);
     }
 
     #[test]
