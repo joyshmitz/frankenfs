@@ -6822,6 +6822,34 @@ mod tests {
     }
 
     #[test]
+    fn file_byte_device_vectored_read_skips_interleaved_zero_length_iovecs() {
+        let cx = Cx::for_testing();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("mixed-vectored-read.img");
+        std::fs::write(&path, [10_u8, 11, 12, 13, 14, 15, 16]).expect("seed file");
+        let dev = FileByteDevice::open(&path).expect("device");
+
+        let mut leading = [];
+        let mut first = [0_u8; 2];
+        let mut middle = [];
+        let mut second = [0_u8; 3];
+        let mut trailing = [];
+        let mut bufs = [
+            IoSliceMut::new(&mut leading),
+            IoSliceMut::new(&mut first),
+            IoSliceMut::new(&mut middle),
+            IoSliceMut::new(&mut second),
+            IoSliceMut::new(&mut trailing),
+        ];
+
+        dev.read_vectored_exact_at(&cx, ByteOffset(1), &mut bufs)
+            .expect("mixed zero-length vectored read");
+
+        assert_eq!(first, [11, 12]);
+        assert_eq!(second, [13, 14, 15]);
+    }
+
+    #[test]
     fn default_vectored_read_skips_zero_length_iovecs() {
         let cx = Cx::for_testing();
         let dev = ScalarOnlyByteDevice::new(vec![10, 11, 12, 13, 14, 15]);
