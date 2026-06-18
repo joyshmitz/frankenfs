@@ -73691,6 +73691,32 @@ mod tests {
     }
 
     #[test]
+    fn btrfs_rename_type_mismatch_target_rejected() {
+        let (fs, cx) = open_writable_btrfs();
+        let root = InodeNumber(1);
+        fs.mkdir(&cx, root, OsStr::new("dir"), 0o755, 0, 0)
+            .expect("mkdir");
+        fs.create(&cx, root, OsStr::new("file.txt"), 0o644, 0, 0)
+            .expect("create file");
+
+        // Renaming a file onto an existing directory must fail with EISDIR.
+        let e1 = fs
+            .rename(&cx, root, OsStr::new("file.txt"), root, OsStr::new("dir"))
+            .unwrap_err();
+        assert_eq!(e1.to_errno(), libc::EISDIR);
+
+        // Renaming a directory onto an existing file must fail with ENOTDIR.
+        let e2 = fs
+            .rename(&cx, root, OsStr::new("dir"), root, OsStr::new("file.txt"))
+            .unwrap_err();
+        assert_eq!(e2.to_errno(), libc::ENOTDIR);
+
+        // Both entries remain intact after the rejected renames.
+        assert!(fs.lookup(&cx, root, OsStr::new("dir")).is_ok());
+        assert!(fs.lookup(&cx, root, OsStr::new("file.txt")).is_ok());
+    }
+
+    #[test]
     fn btrfs_rename_overwrites_existing_target() {
         let (fs, cx) = open_writable_btrfs();
         let parent = InodeNumber(1);
