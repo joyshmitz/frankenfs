@@ -95,7 +95,10 @@ impl RepairGroupLayout {
 
     #[must_use]
     pub fn group_end_exclusive(self) -> u64 {
-        self.group_start.0 + u64::from(self.blocks_per_group)
+        self.group_start
+            .0
+            .checked_add(u64::from(self.blocks_per_group))
+            .unwrap_or(u64::MAX)
     }
 
     #[must_use]
@@ -1095,6 +1098,23 @@ mod tests {
         let err = RepairGroupLayout::new(GroupNumber(0), BlockNumber(u64::MAX - 1), 4, 0, 1)
             .expect_err("group end overflow");
         assert!(matches!(err, FfsError::InvalidGeometry(_)));
+    }
+
+    #[test]
+    fn layout_public_field_end_saturates_instead_of_wrapping() {
+        let layout = RepairGroupLayout {
+            group: GroupNumber(0),
+            group_start: BlockNumber(u64::MAX - 1),
+            blocks_per_group: 4,
+            validation_block_count: 0,
+            repair_block_count: 1,
+        };
+
+        assert_eq!(layout.group_end_exclusive(), u64::MAX);
+        assert_eq!(
+            layout.descriptor_blocks(),
+            [BlockNumber(u64::MAX - 2), BlockNumber(u64::MAX - 1)]
+        );
     }
 
     #[test]
