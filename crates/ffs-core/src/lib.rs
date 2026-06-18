@@ -67365,6 +67365,29 @@ mod tests {
     }
 
     #[test]
+    fn btrfs_rename_directory_into_own_descendant_returns_einval() {
+        let (fs, cx) = open_writable_btrfs();
+        let root = InodeNumber(1);
+        let a = fs
+            .mkdir(&cx, root, OsStr::new("a"), 0o755, 0, 0)
+            .expect("mkdir a");
+        let b = fs
+            .mkdir(&cx, a.ino, OsStr::new("b"), 0o755, 0, 0)
+            .expect("mkdir a/b");
+
+        // Moving "a" to be a child of "a/b" (its own descendant) would create a
+        // cycle and must be rejected with EINVAL.
+        let err = fs
+            .rename(&cx, root, OsStr::new("a"), b.ino, OsStr::new("a"))
+            .unwrap_err();
+        assert_eq!(err.to_errno(), libc::EINVAL);
+
+        // The tree is unchanged: a still under root, b still under a.
+        assert!(fs.lookup(&cx, root, OsStr::new("a")).is_ok());
+        assert!(fs.lookup(&cx, a.ino, OsStr::new("b")).is_ok());
+    }
+
+    #[test]
     fn btrfs_rename2_exchange_directory_under_its_own_descendant_returns_einval() {
         let (fs, cx) = open_writable_btrfs();
         let ops: &dyn FsOps = &fs;
