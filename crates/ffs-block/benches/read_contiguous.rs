@@ -14,6 +14,9 @@
 //!   top of the single read.
 //! * `read_contiguous_into` — the post-bd-dy41g shape: one ranged read straight
 //!   into `out`. No per-block allocation and no post-read copy.
+//! * `read_contiguous_into_trusted_direct` — the post-bd-xmh5g.351 shape for
+//!   byte devices that already preserve read destinations on error: skip the
+//!   outer safety staging buffer and let the device fill `out` directly.
 //!
 //! Both deposit byte-identical data into `out`; the delta isolates exactly the
 //! eliminated allocation + copy traffic. Running both in one binary keeps the
@@ -35,12 +38,14 @@ const SPAN: usize = BLOCK_SIZE as usize * BLOCKS;
 /// Minimal in-memory `ByteDevice` for the bench (mirrors the arc_cache helper).
 struct MemByteDevice {
     bytes: Mutex<Vec<u8>>,
+    preserves_read_destination_on_error: bool,
 }
 
 impl MemByteDevice {
-    fn new(size: usize) -> Self {
+    fn new(size: usize, preserves_read_destination_on_error: bool) -> Self {
         Self {
             bytes: Mutex::new(vec![0u8; size]),
+            preserves_read_destination_on_error,
         }
     }
 }
@@ -56,6 +61,10 @@ impl ByteDevice for MemByteDevice {
         // the per-block buffers, so the A/B isolates the alloc + copy traffic
         // (not a scalar-vs-vectored syscall-count difference).
         true
+    }
+
+    fn preserves_read_exact_at_destination_on_error(&self) -> bool {
+        self.preserves_read_destination_on_error
     }
 
     fn read_exact_at(&self, _cx: &Cx, offset: ByteOffset, buf: &mut [u8]) -> Result<()> {
@@ -98,31 +107,42 @@ impl ByteDevice for MemByteDevice {
     }
 }
 
-fn make_device() -> ByteBlockDevice<MemByteDevice> {
+fn make_device(preserves_read_destination_on_error: bool) -> ByteBlockDevice<MemByteDevice> {
     let byte_len = BLOCK_SIZE as usize * (BLOCKS + 1);
-    let mem = MemByteDevice::new(byte_len);
+    let mem = MemByteDevice::new(byte_len, preserves_read_destination_on_error);
     ByteBlockDevice::new(mem, BLOCK_SIZE).expect("device")
 }
 
 fn bench_read_contiguous(c: &mut Criterion) {
     let cx = Cx::for_testing();
-    let dev = make_device();
+    let staged_dev = make_device(false);
+    let trusted_dev = make_device(true);
     let bs = BLOCK_SIZE as usize;
 
     // Isomorphism: both paths fill `out` with identical bytes.
     let mut out_old = vec![0_u8; SPAN];
     let mut bufs: Vec<BlockBuf> = (0..BLOCKS).map(|_| BlockBuf::zeroed(bs)).collect();
-    dev.read_contiguous_blocks(&cx, BlockNumber(0), &mut bufs)
+    staged_dev
+        .read_contiguous_blocks(&cx, BlockNumber(0), &mut bufs)
         .expect("contiguous blocks");
     for (idx, buf) in bufs.iter().enumerate() {
         out_old[idx * bs..(idx + 1) * bs].copy_from_slice(buf.as_slice());
     }
-    let mut out_new = vec![0_u8; SPAN];
-    dev.read_contiguous_into(&cx, BlockNumber(0), &mut out_new)
-        .expect("contiguous into");
+    let mut out_staged = vec![0_u8; SPAN];
+    staged_dev
+        .read_contiguous_into(&cx, BlockNumber(0), &mut out_staged)
+        .expect("staged contiguous into");
+    let mut out_direct = vec![0_u8; SPAN];
+    trusted_dev
+        .read_contiguous_into(&cx, BlockNumber(0), &mut out_direct)
+        .expect("trusted contiguous into");
     assert_eq!(
-        out_old, out_new,
-        "read_contiguous_into must match blocks+copy"
+        out_old, out_staged,
+        "staged read_contiguous_into must match blocks+copy"
+    );
+    assert_eq!(
+        out_old, out_direct,
+        "trusted direct read_contiguous_into must match blocks+copy"
     );
 
     let mut group = c.benchmark_group("read_contiguous_1mib");
@@ -131,7 +151,8 @@ fn bench_read_contiguous(c: &mut Criterion) {
         b.iter(|| {
             let mut out = vec![0_u8; SPAN];
             let mut bufs: Vec<BlockBuf> = (0..BLOCKS).map(|_| BlockBuf::zeroed(bs)).collect();
-            dev.read_contiguous_blocks(black_box(&cx), BlockNumber(0), &mut bufs)
+            staged_dev
+                .read_contiguous_blocks(black_box(&cx), BlockNumber(0), &mut bufs)
                 .unwrap();
             for (idx, buf) in bufs.iter().enumerate() {
                 out[idx * bs..(idx + 1) * bs].copy_from_slice(buf.as_slice());
@@ -147,7 +168,8 @@ fn bench_read_contiguous(c: &mut Criterion) {
         b.iter(|| {
             let mut out = vec![0_u8; SPAN];
             let mut bufs: Vec<BlockBuf> = (0..BLOCKS).map(|_| BlockBuf::zeroed(bs)).collect();
-            dev.read_contiguous_blocks(black_box(&cx), BlockNumber(0), &mut bufs)
+            staged_dev
+                .read_contiguous_blocks(black_box(&cx), BlockNumber(0), &mut bufs)
                 .unwrap();
             let datas: Vec<Vec<u8>> = bufs.iter().map(|b| b.as_slice().to_vec()).collect();
             for (idx, data) in datas.iter().enumerate() {
@@ -156,11 +178,25 @@ fn bench_read_contiguous(c: &mut Criterion) {
             black_box(out)
         });
     });
-    // New: one ranged read straight into out — no per-block alloc/copy.
-    group.bench_function("read_contiguous_into", |b| {
+    // Conservative all-device path: one ranged read into an outer staging buffer,
+    // then one final copy into out, preserving out on devices that may dirty
+    // their destination before returning Err.
+    group.bench_function("read_contiguous_into_outer_staged", |b| {
         b.iter(|| {
             let mut out = vec![0_u8; SPAN];
-            dev.read_contiguous_into(black_box(&cx), BlockNumber(0), &mut out)
+            staged_dev
+                .read_contiguous_into(black_box(&cx), BlockNumber(0), &mut out)
+                .unwrap();
+            black_box(out)
+        });
+    });
+    // Trusted all-or-nothing path: the byte device itself preserves out on Err,
+    // so ByteBlockDevice can skip the outer staging Vec and final memcpy.
+    group.bench_function("read_contiguous_into_trusted_direct", |b| {
+        b.iter(|| {
+            let mut out = vec![0_u8; SPAN];
+            trusted_dev
+                .read_contiguous_into(black_box(&cx), BlockNumber(0), &mut out)
                 .unwrap();
             black_box(out)
         });

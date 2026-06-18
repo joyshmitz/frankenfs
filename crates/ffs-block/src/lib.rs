@@ -318,6 +318,16 @@ pub trait ByteDevice: Send + Sync {
         false
     }
 
+    /// Returns true when `read_exact_at` leaves `buf` byte-for-byte unchanged
+    /// whenever it returns `Err`.
+    ///
+    /// Callers that must preserve their destination on read failure can skip an
+    /// outer staging buffer only when the concrete device advertises this
+    /// all-or-nothing contract.
+    fn preserves_read_exact_at_destination_on_error(&self) -> bool {
+        false
+    }
+
     /// Read exactly `buf.len()` bytes from `offset` into `buf`.
     fn read_exact_at(&self, cx: &Cx, offset: ByteOffset, buf: &mut [u8]) -> Result<()>;
 
@@ -444,6 +454,10 @@ impl ByteDevice for FileByteDevice {
     }
 
     fn supports_vectored_reads(&self) -> bool {
+        true
+    }
+
+    fn preserves_read_exact_at_destination_on_error(&self) -> bool {
         true
     }
 
@@ -1089,6 +1103,12 @@ impl<D: ByteDevice> BlockDevice for ByteBlockDevice<D> {
             .0
             .checked_mul(u64::from(self.block_size))
             .ok_or_else(|| FfsError::Format("block offset overflow".to_owned()))?;
+        if self.inner.preserves_read_exact_at_destination_on_error() {
+            self.inner.read_exact_at(cx, ByteOffset(offset), dst)?;
+            cx_checkpoint(cx)?;
+            return Ok(());
+        }
+
         let mut read_buf = vec![0_u8; dst.len()];
         self.inner
             .read_exact_at(cx, ByteOffset(offset), read_buf.as_mut_slice())?;
@@ -6617,6 +6637,50 @@ mod tests {
     }
 
     #[derive(Debug)]
+    struct AllOrNothingFailingReadByteDevice {
+        len: u64,
+        last_read_ptr: Mutex<Option<usize>>,
+    }
+
+    impl AllOrNothingFailingReadByteDevice {
+        fn new(len: u64) -> Self {
+            Self {
+                len,
+                last_read_ptr: Mutex::new(None),
+            }
+        }
+
+        fn last_read_ptr(&self) -> Option<usize> {
+            *self.last_read_ptr.lock()
+        }
+    }
+
+    impl ByteDevice for AllOrNothingFailingReadByteDevice {
+        fn len_bytes(&self) -> u64 {
+            self.len
+        }
+
+        fn preserves_read_exact_at_destination_on_error(&self) -> bool {
+            true
+        }
+
+        fn read_exact_at(&self, _cx: &Cx, _offset: ByteOffset, buf: &mut [u8]) -> Result<()> {
+            *self.last_read_ptr.lock() = Some(buf.as_ptr() as usize);
+            Err(FfsError::Format(
+                "injected all-or-nothing byte read failure".to_owned(),
+            ))
+        }
+
+        fn write_all_at(&self, _cx: &Cx, _offset: ByteOffset, _buf: &[u8]) -> Result<()> {
+            Ok(())
+        }
+
+        fn sync(&self, _cx: &Cx) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[derive(Debug)]
     struct ScalarOnlyByteDevice {
         bytes: Mutex<Vec<u8>>,
         read_calls: Mutex<Vec<(ByteOffset, usize)>>,
@@ -7070,6 +7134,27 @@ mod tests {
                 if message.contains("injected byte read failure")),
             "expected injected byte read Format error, got {err:?}"
         );
+        assert_eq!(dst, [0xAA; 8]);
+    }
+
+    #[test]
+    fn byte_block_device_trusted_contiguous_into_skips_outer_staging_on_error() {
+        let cx = Cx::for_testing();
+        let dev =
+            ByteBlockDevice::new(AllOrNothingFailingReadByteDevice::new(8), 4).expect("device");
+        let mut dst = [0xAA_u8; 8];
+        let dst_ptr = dst.as_ptr() as usize;
+
+        let err = dev
+            .read_contiguous_into(&cx, BlockNumber(0), &mut dst)
+            .expect_err("trusted backing read failure should still preserve destination");
+
+        assert!(
+            matches!(err, FfsError::Format(ref message)
+                if message.contains("injected all-or-nothing byte read failure")),
+            "expected injected all-or-nothing Format error, got {err:?}"
+        );
+        assert_eq!(dev.inner().last_read_ptr(), Some(dst_ptr));
         assert_eq!(dst, [0xAA; 8]);
     }
 
