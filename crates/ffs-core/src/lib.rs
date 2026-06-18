@@ -55509,6 +55509,32 @@ mod tests {
     }
 
     #[test]
+    fn btrfs_nbytes_delta_guards_reject_overflow_and_underflow() {
+        // apply: normal increment / decrement / zero.
+        assert_eq!(OpenFs::btrfs_apply_nbytes_delta(1000, 24).unwrap(), 1024);
+        assert_eq!(OpenFs::btrfs_apply_nbytes_delta(1000, -24).unwrap(), 976);
+        assert_eq!(OpenFs::btrfs_apply_nbytes_delta(1000, 0).unwrap(), 1000);
+        // Overflow past u64::MAX.
+        assert!(OpenFs::btrfs_apply_nbytes_delta(u64::MAX, 1).is_err());
+        // Releasing more bytes than the inode holds would wrap nbytes huge.
+        assert!(OpenFs::btrfs_apply_nbytes_delta(0, -1).is_err());
+        assert!(OpenFs::btrfs_apply_nbytes_delta(8, -16).is_err());
+        // A delta whose magnitude exceeds u64 is rejected (both signs).
+        assert!(OpenFs::btrfs_apply_nbytes_delta(0, i128::from(u64::MAX) + 1).is_err());
+        assert!(OpenFs::btrfs_apply_nbytes_delta(0, -(i128::from(u64::MAX) + 1)).is_err());
+        // i128::MIN cannot be negated -> rejected, not panicked.
+        assert!(OpenFs::btrfs_apply_nbytes_delta(0, i128::MIN).is_err());
+
+        // accumulate: sums deltas; rejects i128 overflow.
+        let mut acc: i128 = 0;
+        OpenFs::btrfs_accumulate_nbytes_delta(&mut acc, 100).unwrap();
+        OpenFs::btrfs_accumulate_nbytes_delta(&mut acc, -30).unwrap();
+        assert_eq!(acc, 70);
+        let mut at_max = i128::MAX;
+        assert!(OpenFs::btrfs_accumulate_nbytes_delta(&mut at_max, 1).is_err());
+    }
+
+    #[test]
     fn ext4_max_file_size_scales_with_block_size_and_rejects_above() {
         // The extent tree addresses 2^32 logical blocks, so the max file size
         // is 2^32 * block_size: 4 TiB / 8 TiB / 16 TiB for 1K / 2K / 4K blocks.
