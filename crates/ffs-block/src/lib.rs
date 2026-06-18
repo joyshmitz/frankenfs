@@ -6956,6 +6956,50 @@ mod tests {
     }
 
     #[test]
+    fn file_byte_device_rejects_u64_range_overflow_before_io() {
+        let cx = Cx::for_testing();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("range-overflow.img");
+        std::fs::write(&path, [1_u8, 2, 3, 4]).expect("seed file");
+        let dev = FileByteDevice::open(&path).expect("device");
+
+        let mut scalar = [0xAA_u8; 1];
+        let err = dev
+            .read_exact_at(&cx, ByteOffset(u64::MAX), &mut scalar)
+            .expect_err("scalar read should reject offset+len overflow before I/O");
+        assert!(
+            matches!(err, FfsError::Format(ref message)
+                if message.contains("read range overflows u64")),
+            "expected read-range overflow Format error, got {err:?}"
+        );
+        assert_eq!(scalar, [0xAA]);
+
+        let mut first = [0xBB_u8; 1];
+        let mut second = [0xCC_u8; 1];
+        let mut bufs = [IoSliceMut::new(&mut first), IoSliceMut::new(&mut second)];
+        let err = dev
+            .read_vectored_exact_at(&cx, ByteOffset(u64::MAX - 1), &mut bufs)
+            .expect_err("vectored read should reject offset+total_len overflow before I/O");
+        assert!(
+            matches!(err, FfsError::Format(ref message)
+                if message.contains("read range overflows u64")),
+            "expected read-range overflow Format error, got {err:?}"
+        );
+        assert_eq!(first, [0xBB]);
+        assert_eq!(second, [0xCC]);
+
+        let err = dev
+            .write_all_at(&cx, ByteOffset(u64::MAX), &[9])
+            .expect_err("write should reject offset+len overflow before I/O");
+        assert!(
+            matches!(err, FfsError::Format(ref message)
+                if message.contains("write range overflows u64")),
+            "expected write-range overflow Format error, got {err:?}"
+        );
+        assert_eq!(std::fs::read(&path).expect("read file"), [1_u8, 2, 3, 4]);
+    }
+
+    #[test]
     fn default_vectored_read_skips_zero_length_iovecs() {
         let cx = Cx::for_testing();
         let dev = ScalarOnlyByteDevice::new(vec![10, 11, 12, 13, 14, 15]);
