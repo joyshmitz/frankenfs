@@ -4697,6 +4697,26 @@ ExtentMapping { logical_start: 5, physical_start: 134, count: 2, unwritten: true
     }
 
     #[test]
+    fn checked_logical_range_end_rejects_overflow_and_oversize() {
+        // u64 overflow: a nonzero start plus a u64::MAX count wraps.
+        let err = checked_logical_range_end("op", 1, u64::MAX).unwrap_err();
+        assert!(
+            matches!(err, FfsError::InvalidGeometry(ref m) if m.contains("overflows u64")),
+            "got {err:?}",
+        );
+
+        // End exceeds the ext4 32-bit logical block space.
+        let err = checked_logical_range_end("op", 0, LOGICAL_BLOCK_SPACE + 1).unwrap_err();
+        assert!(
+            matches!(err, FfsError::InvalidGeometry(ref m) if m.contains("exceeds ext4 32-bit block space")),
+            "got {err:?}",
+        );
+
+        // A valid range returns the end.
+        assert_eq!(checked_logical_range_end("op", 10, 5).unwrap(), 15);
+    }
+
+    #[test]
     fn encode_split_extent_len_preserves_written_boundary() {
         let raw_len = encode_split_extent_len("test", u32::from(EXT_INIT_MAX_LEN), false).unwrap();
         let ext = Ext4Extent {
