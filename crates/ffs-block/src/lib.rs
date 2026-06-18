@@ -446,7 +446,9 @@ impl ByteDevice for FileByteDevice {
             )));
         }
 
-        self.file.read_exact_at(buf, offset.0)?;
+        let mut read_buf = vec![0_u8; buf.len()];
+        self.file.read_exact_at(read_buf.as_mut_slice(), offset.0)?;
+        buf.copy_from_slice(read_buf.as_slice());
         cx_checkpoint(cx)?;
         Ok(())
     }
@@ -7230,6 +7232,34 @@ mod tests {
             .expect_err("write should reject range before I/O");
         assert!(matches!(err, FfsError::Format(_)));
         assert_eq!(std::fs::read(&path).expect("read file"), [1_u8, 2, 3, 4]);
+    }
+
+    #[test]
+    fn file_byte_device_scalar_read_preserves_buffer_on_short_read() {
+        let cx = Cx::for_testing();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("short-scalar-read.img");
+        std::fs::write(&path, [1_u8, 2, 3, 4, 5, 6, 7, 8]).expect("seed file");
+        let dev = FileByteDevice::open(&path).expect("device");
+
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .expect("open for truncate")
+            .set_len(4)
+            .expect("truncate after device open");
+
+        let mut dst = [0xAA_u8; 8];
+        let err = dev
+            .read_exact_at(&cx, ByteOffset(0), &mut dst)
+            .expect_err("short backing read should fail without mutating caller buffer");
+
+        assert!(
+            matches!(err, FfsError::Io(ref io_err)
+                if io_err.kind() == std::io::ErrorKind::UnexpectedEof),
+            "expected short-read UnexpectedEof, got {err:?}"
+        );
+        assert_eq!(dst, [0xAA; 8]);
     }
 
     #[test]
