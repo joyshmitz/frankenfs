@@ -403,6 +403,10 @@ impl ByteDevice for FileByteDevice {
 
     fn read_exact_at(&self, cx: &Cx, offset: ByteOffset, buf: &mut [u8]) -> Result<()> {
         cx_checkpoint(cx)?;
+        if buf.is_empty() {
+            cx_checkpoint(cx)?;
+            return Ok(());
+        }
         let end = offset
             .0
             .checked_add(
@@ -6660,6 +6664,21 @@ mod tests {
         assert_eq!(bufs[0].as_slice(), &[4, 5, 6, 7]);
         assert_eq!(bufs[1].as_slice(), &[8, 9, 10, 11]);
         assert_eq!(dev.inner().read_count(), 1);
+    }
+
+    #[test]
+    fn file_byte_device_empty_scalar_read_is_noop() {
+        let cx = Cx::for_testing();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("empty-scalar-read.img");
+        std::fs::write(&path, [1_u8, 2, 3, 4]).expect("seed file");
+        let dev = FileByteDevice::open(&path).expect("device");
+
+        let mut empty = [];
+        dev.read_exact_at(&cx, ByteOffset(4), &mut empty)
+            .expect("empty read at EOF is a no-op");
+        dev.read_exact_at(&cx, ByteOffset(9), &mut empty)
+            .expect("empty read past EOF is a no-op");
     }
 
     #[test]
