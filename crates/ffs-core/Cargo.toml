@@ -142,3 +142,7 @@ harness = false
 [[bench]]
 name = "ext4_metadata_parse_xattr_ibody"
 harness = false
+
+[[bench]]
+name = "mvcc_read_visible_arc_share_realistic"
+harness = false
