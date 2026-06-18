@@ -11065,6 +11065,36 @@ mod tests {
     }
 
     #[test]
+    fn ssi_detect_stops_at_first_completed_dangerous_structure() {
+        // The pivot reads block 0 and writes block 2.
+        let mut pivot = Transaction::new(TxnId(90), Snapshot { high: CommitSeq(0) });
+        pivot.record_read(BlockNumber(0), CommitSeq(1));
+        pivot.stage_write(BlockNumber(2), vec![1; 64]);
+
+        // rec1 alone completes BOTH edges: it writes block 0 (pivot read it ->
+        // outgoing) AND reads block 2 (pivot wrote it -> incoming).
+        let rec1 = CommittedTxnRecord {
+            txn_id: TxnId(91),
+            commit_seq: CommitSeq(5),
+            snapshot: Snapshot { high: CommitSeq(0) },
+            write_set: BTreeSet::from([BlockNumber(0)]),
+            read_set: [(BlockNumber(2), CommitSeq(1))].into_iter().collect(),
+        };
+        // rec2 would also form both edges, but detect must stop before examining it.
+        let rec2 = CommittedTxnRecord {
+            txn_id: TxnId(92),
+            commit_seq: CommitSeq(6),
+            snapshot: Snapshot { high: CommitSeq(0) },
+            write_set: BTreeSet::from([BlockNumber(0)]),
+            read_set: [(BlockNumber(2), CommitSeq(1))].into_iter().collect(),
+        };
+
+        let (checks, dangerous) = detect_ssi_dangerous_structure(&pivot, [&rec1, &rec2]);
+        assert!(dangerous.is_some(), "rec1 alone forms the dangerous structure");
+        assert_eq!(checks, 1, "detect returns at rec1 without examining rec2");
+    }
+
+    #[test]
     fn ssi_dangerous_structure_accumulates_edges_across_records() {
         let mut pivot = Transaction::new(TxnId(60), Snapshot { high: CommitSeq(0) });
         pivot.record_read(BlockNumber(0), CommitSeq(1));
