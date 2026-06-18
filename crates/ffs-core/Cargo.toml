@@ -150,3 +150,7 @@ harness = false
 [[bench]]
 name = "ls_dir_inode_prefetch"
 harness = false
+
+[[bench]]
+name = "mvcc_commit_batching"
+harness = false
