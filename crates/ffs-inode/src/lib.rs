@@ -1750,6 +1750,40 @@ mod tests {
         );
     }
 
+    #[test]
+    fn inode_uses_indirect_blocks_excludes_extents_inline_and_non_data_modes() {
+        let mut base = representative_inode();
+        base.flags = 0;
+        base.mode = 0o100_644; // S_IFREG
+        base.blocks = 8;
+        assert!(
+            inode_uses_indirect_blocks(&base),
+            "a plain non-extent regular file is indirect-mapped"
+        );
+
+        // Extent-mapped and inline-data inodes must not be walked as indirect.
+        let mut ext = base.clone();
+        ext.flags = EXT4_EXTENTS_FL;
+        assert!(!inode_uses_indirect_blocks(&ext), "extent inode");
+        let mut inline = base.clone();
+        inline.flags = EXT4_INLINE_DATA_FL;
+        assert!(!inode_uses_indirect_blocks(&inline), "inline-data inode");
+
+        // An inode with no blocks has nothing to walk.
+        let mut noblocks = base.clone();
+        noblocks.blocks = 0;
+        assert!(!inode_uses_indirect_blocks(&noblocks), "zero blocks");
+
+        // Directories with blocks are indirect-mapped; device nodes are not
+        // (i_block holds the device number, not block pointers).
+        let mut dir = base.clone();
+        dir.mode = 0o040_755; // S_IFDIR
+        assert!(inode_uses_indirect_blocks(&dir), "directory");
+        let mut chr = base.clone();
+        chr.mode = 0o020_644; // S_IFCHR
+        assert!(!inode_uses_indirect_blocks(&chr), "char device");
+    }
+
     /// Regression: an e2compr (compressed) inode must NOT be treated as a plain
     /// indirect pointer table. Its i_block holds EXT2_COMPRESSED_BLKADDR
     /// (0xFFFFFFFF) sentinels, not block numbers; walking them as pointers (as
