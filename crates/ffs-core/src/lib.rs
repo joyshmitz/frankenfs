@@ -73307,6 +73307,30 @@ mod tests {
     }
 
     #[test]
+    fn btrfs_write_sparse_hole_reads_as_zeros() {
+        let (fs, cx) = open_writable_btrfs();
+        let parent = InodeNumber(1);
+        let attr = fs
+            .create(&cx, parent, OsStr::new("sparse.bin"), 0o644, 0, 0)
+            .expect("create");
+        let ino = attr.ino;
+
+        // Write past a hole: data at offset 8192, leaving [0, 8192) unwritten.
+        fs.write(&cx, ino, 8192, b"DATA").expect("write past hole");
+
+        // The hole reads back as the full requested span of zeros.
+        let hole = fs.read(&cx, ino, 0, 8192).expect("read hole");
+        assert_eq!(hole.len(), 8192, "hole read returns the full requested span");
+        assert!(
+            hole.iter().all(|&b| b == 0),
+            "btrfs hole must be zero-filled"
+        );
+        // The written data reads back intact.
+        let tail = fs.read(&cx, ino, 8192, 4).expect("read data");
+        assert_eq!(&tail[..], b"DATA");
+    }
+
+    #[test]
     fn btrfs_inode_to_attr_preserves_special_perm_bits_and_rounds_blocks() {
         let (fs, cx) = open_writable_btrfs();
         let parent = InodeNumber(1);
