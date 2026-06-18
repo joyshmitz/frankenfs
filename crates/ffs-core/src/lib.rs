@@ -38867,6 +38867,35 @@ mod tests {
     }
 
     #[test]
+    fn ext4_expand_posix_acl_xattr_value_rejects_malformed() {
+        // Shorter than the 4-byte version header.
+        assert!(matches!(
+            ext4_expand_posix_acl_xattr_value(&[0, 1, 2]),
+            Err(FfsError::Format(_))
+        ));
+        // Unsupported version.
+        assert!(matches!(
+            ext4_expand_posix_acl_xattr_value(&0x9999_u32.to_le_bytes()),
+            Err(FfsError::Format(_))
+        ));
+        // Storage version with a truncated entry header (2 trailing bytes, need 4).
+        let mut truncated_entry = EXT4_POSIX_ACL_STORAGE_VERSION.to_le_bytes().to_vec();
+        truncated_entry.extend_from_slice(&[0, 0]);
+        assert!(matches!(
+            ext4_expand_posix_acl_xattr_value(&truncated_entry),
+            Err(FfsError::Format(_))
+        ));
+        // Storage version, a USER entry whose 4-byte id is truncated.
+        let mut truncated_id = EXT4_POSIX_ACL_STORAGE_VERSION.to_le_bytes().to_vec();
+        truncated_id.extend_from_slice(&POSIX_ACL_TAG_USER.to_le_bytes());
+        truncated_id.extend_from_slice(&0_u16.to_le_bytes());
+        assert!(matches!(
+            ext4_expand_posix_acl_xattr_value(&truncated_id),
+            Err(FfsError::Format(_))
+        ));
+    }
+
+    #[test]
     fn ext4_getxattr_expands_posix_acl_access_to_userspace_format() {
         const ACL_USER_OBJ_TAG: u16 = 0x0001;
         const ACL_GROUP_OBJ_TAG: u16 = 0x0004;
