@@ -79842,6 +79842,36 @@ mod tests {
     }
 
     #[test]
+    fn btrfs_encoded_read_clamps_to_max_len() {
+        let (fs, cx) = open_writable_btrfs();
+        let attr = fs
+            .create(&cx, InodeNumber(1), OsStr::new("clamp.bin"), 0o644, 0, 0)
+            .expect("create");
+        fs.write(&cx, attr.ino, 0, &[0xAB_u8; 8192]).expect("write");
+
+        // Request far less than the extent holds; the encoded read must not
+        // return more than max_len encoded bytes (caller-buffer bound).
+        let max_len = 100_u64;
+        let mut args = vec![0u8; 64];
+        args[16..24].copy_from_slice(&0_u64.to_le_bytes()); // offset
+        args[32..40].copy_from_slice(&max_len.to_le_bytes()); // max_len
+        let result = fs
+            .btrfs_encoded_read(&cx, &mut RequestScope::empty(), attr.ino.0, &args)
+            .expect("encoded_read");
+
+        let header_len = u64::from_le_bytes(result[0..8].try_into().unwrap());
+        assert!(
+            header_len <= max_len,
+            "encoded len {header_len} must be clamped to max_len {max_len}"
+        );
+        assert_eq!(
+            result.len(),
+            32 + header_len as usize,
+            "result is the 32-byte header plus exactly header_len encoded bytes"
+        );
+    }
+
+    #[test]
     fn btrfs_encoded_read_respects_i_size_past_eof_bd_br44j() {
         let (fs, cx) = open_writable_btrfs();
         let ops: &dyn FsOps = &fs;
