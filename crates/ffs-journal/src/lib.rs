@@ -2594,12 +2594,17 @@ fn resolve_segment_block(
     let mut remaining = index;
     for segment in segments {
         if remaining < segment.blocks {
-            return segment.resolve(remaining).ok_or_else(|| {
-                FfsError::Format(format!(
-                    "journal segment offset {remaining} out of range for segment size={}",
-                    segment.blocks
-                ))
-            });
+            return segment
+                .start
+                .0
+                .checked_add(remaining)
+                .map(BlockNumber)
+                .ok_or_else(|| {
+                    FfsError::Format(format!(
+                        "journal segment offset {remaining} overflows absolute block number from start {}",
+                        segment.start.0
+                    ))
+                });
         }
         remaining = remaining.saturating_sub(segment.blocks);
     }
@@ -5202,6 +5207,26 @@ mod tests {
         assert_eq!(segment.resolve(0), Some(BlockNumber(50)));
         assert_eq!(segment.resolve(3), Some(BlockNumber(53)));
         assert_eq!(segment.resolve(4), None);
+    }
+
+    #[test]
+    fn resolve_segment_block_reports_absolute_block_overflow() {
+        let start = u64::MAX - 1;
+        let segments = [JournalSegment {
+            start: BlockNumber(start),
+            blocks: 3,
+        }];
+
+        assert_eq!(segments[0].resolve(2), None);
+
+        let err = resolve_segment_block(&segments, 2, 3).expect_err("absolute block overflow");
+        assert!(
+            matches!(err, FfsError::Format(ref message)
+                if message.contains("overflows absolute block number")
+                    && message.contains(&start.to_string())
+                    && message.contains('2')),
+            "expected absolute-overflow Format error, got {err:?}"
+        );
     }
 
     #[test]
