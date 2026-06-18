@@ -72766,6 +72766,54 @@ mod tests {
     }
 
     #[test]
+    fn btrfs_write_to_immutable_or_append_only_is_eperm() {
+        let (fs, cx) = open_writable_btrfs();
+        let parent = InodeNumber(1);
+
+        let set_flag = |ino: u64, flag: u64| {
+            let alloc_mutex = fs.btrfs_alloc_state.as_ref().unwrap();
+            let mut alloc = alloc_mutex.write();
+            let mut inode = fs
+                .btrfs_read_inode_from_tree(&alloc, ino)
+                .expect("read target inode");
+            inode.flags |= flag;
+            let key = BtrfsKey {
+                objectid: ino,
+                item_type: BTRFS_ITEM_INODE_ITEM,
+                offset: 0,
+            };
+            alloc
+                .fs_tree
+                .update(&key, &inode.to_bytes())
+                .expect("pin attribute flag");
+        };
+
+        // Immutable: every write is rejected with EPERM.
+        let imm = fs
+            .create(&cx, parent, OsStr::new("imm.bin"), 0o644, 0, 0)
+            .unwrap();
+        fs.write(&cx, imm.ino, 0, b"seed").expect("seed write");
+        set_flag(imm.ino.0, BTRFS_INODE_IMMUTABLE);
+        let err = fs
+            .write(&cx, imm.ino, 0, b"nope")
+            .expect_err("write to an immutable btrfs file must be rejected");
+        assert_eq!(err.to_errno(), libc::EPERM);
+
+        // Append-only: a non-EOF write is rejected; a write at EOF is allowed.
+        let app = fs
+            .create(&cx, parent, OsStr::new("app.bin"), 0o644, 0, 0)
+            .unwrap();
+        fs.write(&cx, app.ino, 0, b"hello").expect("seed write"); // size = 5
+        set_flag(app.ino.0, BTRFS_INODE_APPEND);
+        let err = fs
+            .write(&cx, app.ino, 0, b"X")
+            .expect_err("non-EOF write to an append-only btrfs file must be rejected");
+        assert_eq!(err.to_errno(), libc::EPERM);
+        fs.write(&cx, app.ino, 5, b"world")
+            .expect("append at EOF must succeed");
+    }
+
+    #[test]
     fn btrfs_rename_immutable_source_or_target_is_eperm_bd_85rav() {
         let (fs, cx) = open_writable_btrfs();
         let parent = InodeNumber(1);
