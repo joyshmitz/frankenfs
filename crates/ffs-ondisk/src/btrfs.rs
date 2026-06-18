@@ -5890,6 +5890,53 @@ mod tests {
     }
 
     #[test]
+    fn validate_mirror_stripes_rejects_insufficient_raid1c3_and_raid1c4() {
+        let make_chunk = |num: u16| BtrfsChunkEntry {
+            key: BtrfsKey {
+                objectid: 0,
+                item_type: 0,
+                offset: 0,
+            },
+            length: 0,
+            owner: 0,
+            stripe_len: 0,
+            chunk_type: 0,
+            io_align: 0,
+            io_width: 0,
+            sector_size: 0,
+            num_stripes: num,
+            sub_stripes: 0,
+            stripes: (0..num)
+                .map(|i| BtrfsStripe {
+                    devid: u64::from(i),
+                    offset: 0,
+                    dev_uuid: [0; 16],
+                })
+                .collect(),
+        };
+
+        // RAID1C3 needs >= 3 stripes; 2 is rejected with the profile-specific reason.
+        let err = super::validate_mirror_stripes(&make_chunk(2), BtrfsRaidProfile::Raid1C3)
+            .expect_err("RAID1C3 with 2 stripes must be rejected");
+        assert!(
+            matches!(err, ParseError::InvalidField { reason, .. } if reason.contains("at least three stripes")),
+            "got {err:?}",
+        );
+
+        // RAID1C4 needs >= 4 stripes; 3 is rejected.
+        let err = super::validate_mirror_stripes(&make_chunk(3), BtrfsRaidProfile::Raid1C4)
+            .expect_err("RAID1C4 with 3 stripes must be rejected");
+        assert!(
+            matches!(err, ParseError::InvalidField { reason, .. } if reason.contains("at least four stripes")),
+            "got {err:?}",
+        );
+
+        // The minimum valid stripe counts must pass.
+        assert!(super::validate_mirror_stripes(&make_chunk(3), BtrfsRaidProfile::Raid1C3).is_ok());
+        assert!(super::validate_mirror_stripes(&make_chunk(4), BtrfsRaidProfile::Raid1C4).is_ok());
+    }
+
+    #[test]
     fn raid_profile_redundancy() {
         assert!(!BtrfsRaidProfile::Single.is_redundant());
         assert!(!BtrfsRaidProfile::Raid0.is_redundant());
