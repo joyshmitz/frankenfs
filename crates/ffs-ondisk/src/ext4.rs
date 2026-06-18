@@ -17221,6 +17221,21 @@ mod tests {
     }
 
     #[test]
+    fn permission_bits_preserves_setuid_setgid_sticky() {
+        let with_mode = |mode: u16| Ext4Inode {
+            mode,
+            ..Ext4Inode::parse_from_bytes(&[0_u8; 256]).unwrap()
+        };
+        // setuid (0o4000), setgid (0o2000), and sticky (0o1000) all survive.
+        assert_eq!(with_mode(S_IFREG | 0o4755).permission_bits(), 0o4755);
+        assert_eq!(with_mode(S_IFREG | 0o2755).permission_bits(), 0o2755);
+        assert_eq!(with_mode(S_IFDIR | 0o1777).permission_bits(), 0o1777);
+        assert_eq!(with_mode(S_IFREG | 0o7777).permission_bits(), 0o7777);
+        // The S_IFMT file-type bits are excluded from the permission bits.
+        assert_eq!(with_mode(S_IFREG | 0o644).permission_bits(), 0o644);
+    }
+
+    #[test]
     fn dir_entry_actual_size_alignment() {
         let entry = Ext4DirEntry {
             inode: 2,
