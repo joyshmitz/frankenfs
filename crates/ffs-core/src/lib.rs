@@ -73307,6 +73307,42 @@ mod tests {
     }
 
     #[test]
+    fn btrfs_truncate_then_sparse_extend_zero_fills_gap() {
+        let (fs, cx) = open_writable_btrfs();
+        let parent = InodeNumber(1);
+        let attr = fs
+            .create(&cx, parent, OsStr::new("trunc_extend.bin"), 0o644, 0, 0)
+            .expect("create");
+        let ino = attr.ino;
+
+        fs.write(&cx, ino, 0, b"hello world!").expect("initial write");
+
+        // Truncate to 5 bytes ("hello"), dropping " world!".
+        let trunc = SetAttrRequest {
+            mode: None,
+            uid: None,
+            gid: None,
+            size: Some(5),
+            atime: None,
+            mtime: None,
+        };
+        fs.setattr(&cx, ino, &trunc).expect("truncate to five");
+
+        // Re-extend by writing past a gap; the gap [5,10) must read zeros, not the
+        // old truncated bytes " worl".
+        fs.write(&cx, ino, 10, b"Z").expect("sparse extend write");
+
+        let data = fs.read(&cx, ino, 0, 11).expect("read after sparse extend");
+        assert_eq!(&data[..5], b"hello");
+        assert!(
+            data[5..10].iter().all(|&b| b == 0),
+            "gap after truncate must be zero-filled, not stale data: {:?}",
+            &data[5..10]
+        );
+        assert_eq!(data[10], b'Z');
+    }
+
+    #[test]
     fn btrfs_setattr_extend_sparse_reads_zeros() {
         let (fs, cx) = open_writable_btrfs();
         let parent = InodeNumber(1);
