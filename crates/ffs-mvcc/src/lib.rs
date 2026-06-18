@@ -10932,36 +10932,37 @@ mod tests {
         pivot.stage_write(BlockNumber(2), vec![1; 64]);
         pivot.stage_write(BlockNumber(3), vec![1; 64]);
 
-        // Only an INCOMING edge: the record writes a block the pivot read, but
-        // reads nothing the pivot wrote. One edge is not a pivot.
-        let incoming_only = CommittedTxnRecord {
+        // Only an OUTGOING edge (pivot.read ∩ record.write = {0}): the pivot read
+        // block 0 and this record wrote it; the record reads nothing the pivot
+        // wrote. One edge is not a pivot.
+        let outgoing_only = CommittedTxnRecord {
             txn_id: TxnId(31),
             commit_seq: CommitSeq(5),
             snapshot: Snapshot { high: CommitSeq(0) },
             write_set: BTreeSet::from([BlockNumber(0)]),
             read_set: [(BlockNumber(99), CommitSeq(1))].into_iter().collect(),
         };
-        assert!(ssi_incoming_edge(&pivot, &incoming_only).is_some());
-        assert!(ssi_outgoing_edge(&pivot, &incoming_only).is_none());
+        assert!(ssi_incoming_edge(&pivot, &outgoing_only).is_none());
+        assert!(ssi_outgoing_edge(&pivot, &outgoing_only).is_some());
         assert!(
-            detect_ssi_dangerous_structure(&pivot, [&incoming_only])
+            detect_ssi_dangerous_structure(&pivot, [&outgoing_only])
                 .1
                 .is_none()
         );
 
-        // Only an OUTGOING edge: the record reads a block the pivot wrote, but
-        // writes nothing the pivot read.
-        let outgoing_only = CommittedTxnRecord {
+        // Only an INCOMING edge (record.read ∩ pivot.write = {2}): this record read
+        // block 2 and the pivot wrote it; the record writes nothing the pivot read.
+        let incoming_only = CommittedTxnRecord {
             txn_id: TxnId(32),
             commit_seq: CommitSeq(5),
             snapshot: Snapshot { high: CommitSeq(0) },
             write_set: BTreeSet::from([BlockNumber(99)]),
             read_set: [(BlockNumber(2), CommitSeq(1))].into_iter().collect(),
         };
-        assert!(ssi_incoming_edge(&pivot, &outgoing_only).is_none());
-        assert!(ssi_outgoing_edge(&pivot, &outgoing_only).is_some());
+        assert!(ssi_incoming_edge(&pivot, &incoming_only).is_some());
+        assert!(ssi_outgoing_edge(&pivot, &incoming_only).is_none());
         assert!(
-            detect_ssi_dangerous_structure(&pivot, [&outgoing_only])
+            detect_ssi_dangerous_structure(&pivot, [&incoming_only])
                 .1
                 .is_none()
         );
