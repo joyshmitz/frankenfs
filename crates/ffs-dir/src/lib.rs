@@ -997,6 +997,25 @@ mod tests {
     }
 
     #[test]
+    fn required_rec_len_rounds_up_to_four_byte_alignment() {
+        // DIR_ENTRY_HEADER_LEN is 8; required_rec_len = align4(8 + name_len).
+        assert_eq!(required_rec_len(1), 12);
+        assert_eq!(required_rec_len(3), 12);
+        assert_eq!(required_rec_len(4), 12);
+        assert_eq!(required_rec_len(5), 16);
+        assert_eq!(required_rec_len(8), 16);
+        // Invariant: always a multiple of 4 and large enough for header + name.
+        for name_len in 0..=255usize {
+            let r = required_rec_len(name_len);
+            assert_eq!(r % 4, 0, "rec_len must be 4-byte aligned (name_len {name_len})");
+            assert!(
+                r >= DIR_ENTRY_HEADER_LEN + name_len,
+                "rec_len must fit header + name (name_len {name_len})"
+            );
+        }
+    }
+
+    #[test]
     fn init_dir_block_contains_dot_and_dotdot() {
         let mut block = vec![0u8; 1024];
         init_dir_block(&mut block, 11, 2, 0).unwrap();
