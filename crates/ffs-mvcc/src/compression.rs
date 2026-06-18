@@ -276,6 +276,17 @@ mod tests {
     }
 
     #[test]
+    fn resolve_corrupt_zstd_returns_none() {
+        // A corrupt Zstd payload (e.g. disk corruption) must resolve to None
+        // rather than panic, so the caller falls back to repair instead of
+        // surfacing garbage. These bytes lack the zstd frame magic
+        // (0x28 0xB5 0x2F 0xFD), so zstd::decode_all errors.
+        let chain = vec![VersionData::Zstd(vec![0xFF, 0x00, 0x12, 0x34, 0x56, 0x78])];
+        let result = resolve_data_with(&chain, 0, |d| d);
+        assert!(result.is_none(), "corrupt zstd must resolve to None");
+    }
+
+    #[test]
     fn resolve_mixed_chain() {
         let chain = vec![
             VersionData::Full(vec![1]), // 0
