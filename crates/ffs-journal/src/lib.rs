@@ -2381,7 +2381,13 @@ impl NativeCowJournal {
                 Ok(Some(_)) => {
                     next_slot = next_slot.saturating_add(1);
                 }
-                Ok(None) | Err(FfsError::Format(_)) => break,
+                Ok(None) => break,
+                Err(FfsError::Format(message)) => {
+                    if next_slot == 0 {
+                        return Err(FfsError::Format(message));
+                    }
+                    break;
+                }
                 Err(err) => return Err(err),
             }
         }
@@ -3904,6 +3910,28 @@ mod tests {
         let reopened = NativeCowJournal::open(&cx, &dev, region)
             .expect("malformed tail should stop discovery cleanly");
         assert_eq!(reopened.next_slot(), 2);
+    }
+
+    #[test]
+    fn native_cow_open_rejects_malformed_first_record() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(512, 128);
+        let region = JournalRegion {
+            start: BlockNumber(60),
+            blocks: 16,
+        };
+
+        let mut malformed = vec![0_u8; 512];
+        malformed[0..4].copy_from_slice(&COW_MAGIC.to_le_bytes());
+        malformed[4..6].copy_from_slice(&COW_VERSION.to_le_bytes());
+        malformed[6..8].copy_from_slice(&(999_u16).to_le_bytes());
+        dev.raw_write(BlockNumber(60), malformed);
+
+        let err = NativeCowJournal::open(&cx, &dev, region).expect_err("malformed head");
+        assert!(
+            matches!(err, FfsError::Format(message) if message.contains("unknown COW record kind")),
+            "expected unknown-kind Format error, got {err:?}"
+        );
     }
 
     #[test]
