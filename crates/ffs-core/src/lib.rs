@@ -34557,6 +34557,46 @@ mod tests {
         );
     }
 
+    #[test]
+    fn resolve_indirect_block_returns_none_for_indirect_root_holes() {
+        // resolve_indirect_block_single_double_triple_levels covers direct and
+        // single-indirect-slot holes but keeps all three indirection roots
+        // present. This pins the root-hole short-circuits: when i_block[12/13/14]
+        // are themselves zero (a fully sparse file), each level must resolve to a
+        // hole (None), never physical block 0 / the superblock.
+        const PPB: u32 = 1024;
+        let cx = Cx::for_testing();
+        let image = build_ext4_image_with_extents();
+        let fs = OpenFs::from_device(
+            &cx,
+            Box::new(TestDevice::from_vec(image)),
+            &OpenOptions::default(),
+        )
+        .expect("open crafted ext4 image");
+        let scope = RequestScope::empty();
+
+        // Every block pointer is zero, so each indirection root short-circuits
+        // without any device read.
+        let mut inode = make_test_inode(ffs_types::S_IFREG | 0o644, 0, 0);
+        inode.extent_bytes = vec![0_u8; 15 * 4].into();
+
+        // Single / double / triple indirect roots are all zero -> holes.
+        assert_eq!(
+            fs.resolve_indirect_block(&cx, &scope, &inode, 12).unwrap(),
+            None
+        );
+        assert_eq!(
+            fs.resolve_indirect_block(&cx, &scope, &inode, 12 + PPB).unwrap(),
+            None
+        );
+        let triple_lb = 12 + PPB + PPB * PPB;
+        assert_eq!(
+            fs.resolve_indirect_block(&cx, &scope, &inode, triple_lb)
+                .unwrap(),
+            None
+        );
+    }
+
     /// Complements `resolve_indirect_block_single_double_triple_levels` by
     /// exercising `read_ext4_indirect`'s byte assembly on the legacy
     /// indirect-mapped path: a mapped block must read through verbatim while a
