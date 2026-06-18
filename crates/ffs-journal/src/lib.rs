@@ -7002,6 +7002,61 @@ mod tests {
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(64))]
 
+        /// `Jbd2Superblock::parse` must decode every field from its correct
+        /// big-endian on-disk offset. A reference builder lays random field
+        /// values at the kernel-defined offsets; parse must recover each one
+        /// exactly. A field read from the wrong offset would corrupt the journal
+        /// geometry recovery uses to locate descriptor/commit/data blocks
+        /// (bd-xmh5g.202).
+        #[test]
+        fn proptest_jbd2_superblock_parse_field_offsets(
+            block_type_v2 in any::<bool>(),
+            sequence in any::<u32>(),
+            block_size in any::<u32>(),
+            max_len in any::<u32>(),
+            first_log_block in any::<u32>(),
+            start_sequence in any::<u32>(),
+            start_block in any::<u32>(),
+            feature_compat in any::<u32>(),
+            feature_incompat in any::<u32>(),
+            feature_ro_compat in any::<u32>(),
+            num_fc_blocks in any::<u32>(),
+            uuid in any::<[u8; 16]>(),
+        ) {
+            let block_type = if block_type_v2 {
+                JBD2_BLOCKTYPE_SUPERBLOCK_V2
+            } else {
+                JBD2_BLOCKTYPE_SUPERBLOCK_V1
+            };
+            let mut buf = vec![0_u8; 1024];
+            buf[0..4].copy_from_slice(&JBD2_MAGIC.to_be_bytes());
+            buf[4..8].copy_from_slice(&block_type.to_be_bytes());
+            buf[8..12].copy_from_slice(&sequence.to_be_bytes());
+            buf[12..16].copy_from_slice(&block_size.to_be_bytes());
+            buf[16..20].copy_from_slice(&max_len.to_be_bytes());
+            buf[20..24].copy_from_slice(&first_log_block.to_be_bytes());
+            buf[24..28].copy_from_slice(&start_sequence.to_be_bytes());
+            buf[28..32].copy_from_slice(&start_block.to_be_bytes());
+            buf[36..40].copy_from_slice(&feature_compat.to_be_bytes());
+            buf[40..44].copy_from_slice(&feature_incompat.to_be_bytes());
+            buf[44..48].copy_from_slice(&feature_ro_compat.to_be_bytes());
+            buf[48..64].copy_from_slice(&uuid);
+            buf[84..88].copy_from_slice(&num_fc_blocks.to_be_bytes());
+
+            let sb = Jbd2Superblock::parse(&buf)
+                .expect("a well-formed JBD2 superblock must parse");
+            prop_assert_eq!(sb.block_size, block_size);
+            prop_assert_eq!(sb.max_len, max_len);
+            prop_assert_eq!(sb.first_log_block, first_log_block);
+            prop_assert_eq!(sb.start_sequence, start_sequence);
+            prop_assert_eq!(sb.start_block, start_block);
+            prop_assert_eq!(sb.feature_compat, feature_compat);
+            prop_assert_eq!(sb.feature_incompat, feature_incompat);
+            prop_assert_eq!(sb.feature_ro_compat, feature_ro_compat);
+            prop_assert_eq!(sb.num_fc_blocks, num_fc_blocks);
+            prop_assert_eq!(sb.uuid, uuid);
+        }
+
         #[test]
         fn proptest_commit_checksum_zeroed_field_is_field_invariant(
             sequence in 1_u32..1024,
