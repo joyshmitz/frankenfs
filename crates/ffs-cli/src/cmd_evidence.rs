@@ -1598,6 +1598,25 @@ mod tests {
     }
 
     #[test]
+    fn repair_freshness_classifies_symbol_staleness_by_threshold() {
+        use super::{RepairRuntimeMetricsSnapshot, repair_freshness};
+        let snap = |staleness: f64| RepairRuntimeMetricsSnapshot {
+            groups_scrubbed: 0,
+            corruption_detected: 0,
+            decode_attempts: 0,
+            decode_successes: 0,
+            symbol_refresh_count: 0,
+            symbol_staleness_max_seconds: staleness,
+        };
+        assert_eq!(repair_freshness(&snap(0.0)), "fresh");
+        assert_eq!(repair_freshness(&snap(59.9)), "fresh");
+        assert_eq!(repair_freshness(&snap(60.0)), "aging"); // >= 60s boundary
+        assert_eq!(repair_freshness(&snap(299.9)), "aging");
+        assert_eq!(repair_freshness(&snap(300.0)), "stale"); // >= 300s boundary
+        assert_eq!(repair_freshness(&snap(10_000.0)), "stale");
+    }
+
+    #[test]
     fn validate_evidence_args_rejects_unknown_preset() {
         let err = validate_evidence_args(Some("unknown-preset"), None, None, None, false)
             .expect_err("unknown preset should fail");
