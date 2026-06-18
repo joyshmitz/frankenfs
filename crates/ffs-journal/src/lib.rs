@@ -270,6 +270,9 @@ impl Jbd2Header {
     #[must_use]
     fn parse(bytes: &[u8]) -> Option<Self> {
         let magic = read_be_u32(bytes, 0)?;
+        if magic != JBD2_MAGIC {
+            return None;
+        }
         let block_type = read_be_u32(bytes, 4)?;
         let sequence = read_be_u32(bytes, 8)?;
         Some(Self {
@@ -5208,6 +5211,41 @@ mod tests {
     }
 
     #[test]
+    fn native_cow_recover_rejects_unsupported_version() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(512, 128);
+        let region = JournalRegion {
+            start: BlockNumber(40),
+            blocks: 16,
+        };
+
+        let mut journal = NativeCowJournal::open(&cx, &dev, region).expect("open");
+        journal
+            .append_write(&cx, &dev, CommitSeq(1), BlockNumber(5), &[0xAA; 64])
+            .expect("write");
+        journal
+            .append_commit(&cx, &dev, CommitSeq(1))
+            .expect("commit");
+
+        // Bump the write record's version field (offset 4..6) to an unsupported
+        // value; the version check rejects it before any payload/CRC handling.
+        let write_block = BlockNumber(40);
+        let mut raw = dev
+            .read_block(&cx, write_block)
+            .expect("read")
+            .as_slice()
+            .to_vec();
+        raw[4..6].copy_from_slice(&(COW_VERSION + 1).to_le_bytes());
+        dev.raw_write(write_block, raw);
+
+        let err = recover_native_cow(&cx, &dev, region).expect_err("unsupported version");
+        assert!(
+            matches!(err, FfsError::Format(_)),
+            "expected Format error for unsupported COW version, got {err:?}"
+        );
+    }
+
+    #[test]
     fn native_cow_replay_rejects_oversized_payload() {
         let commits = vec![RecoveredCommit {
             commit_seq: CommitSeq(1),
@@ -6911,6 +6949,13 @@ mod tests {
     }
 
     #[test]
+    fn jbd2_header_parse_bad_magic_returns_none() {
+        let mut raw = jbd2_header(JBD2_BLOCKTYPE_DESCRIPTOR, 42);
+        raw[0..4].copy_from_slice(&0xDEAD_BEEF_u32.to_be_bytes());
+        assert!(Jbd2Header::parse(&raw).is_none());
+    }
+
+    #[test]
     fn jbd2_header_parse_valid() {
         let raw = jbd2_header(JBD2_BLOCKTYPE_DESCRIPTOR, 42);
         let hdr = Jbd2Header::parse(&raw).unwrap();
@@ -6921,7 +6966,7 @@ mod tests {
 
     #[test]
     fn journal_seq_newer_half_range_boundary_contract() {
-        let current = 0xFFFF_FFF0;
+        let current: u32 = 0xFFFF_FFF0;
         let one_ahead = current.wrapping_add(1);
         let one_behind = current.wrapping_sub(1);
         let last_newer = current.wrapping_add(JOURNAL_SEQ_HALF_RANGE - 1);
