@@ -3852,19 +3852,17 @@ fn casefold_name(name: &[u8]) -> Vec<u8> {
     )
 }
 
-/// Canonical (NFD) decomposition of a precomposed Latin letter into its
-/// lowercased base char + single combining mark, for casefold comparison. The
-/// kernel's casefold NFD-normalizes before folding, so a precomposed letter and
+/// Canonical (NFD) decomposition of a precomposed single-mark letter into its
+/// lowercased base char + combining mark, for casefold comparison. The kernel's
+/// casefold table NFD-normalizes before folding, so a precomposed letter and
 /// its decomposed form must fold to the same key; this makes the read-path
-/// linear-scan lookup match either form for the common accented Latin letters
-/// (bd-qdmlu / bd-gegku, read-correctness increments of bd-vsuni). Covers the
-/// Latin-1 Supplement (U+00C0-U+00FF) and Latin Extended-A (U+0100-U+017F)
-/// letters that have a single-mark canonical decomposition. The multi-mark
-/// Latin Extended Additional / Vietnamese forms live in
+/// linear-scan lookup match either spelling for covered Latin, Greek, and
+/// Cyrillic rows (bd-qdmlu / bd-gegku, read-correctness increments of bd-vsuni).
+/// Multi-mark Latin Extended Additional / Vietnamese forms live in
 /// [`precomposed_multi_mark_nfd_casefold`]. Returns `None` otherwise (e.g. Æ,
 /// Ð, Ø, Þ, ß, Đ, Ł, Œ, ŋ — no canonical decomposition, handled elsewhere or
-/// left as-is). All decompositions are ASCII base + combining mark, so this is
-/// byte-stable across Unicode versions.
+/// left as-is). The tables are pinned to canonical Unicode 12.1 decompositions
+/// used by the ext4 casefold contract.
 fn precomposed_nfd_casefold(ch: char) -> Option<(char, char)> {
     precomposed_latin1_nfd_casefold(ch)
         .or_else(|| precomposed_latin_extended_a_nfd_casefold(ch))
@@ -3872,6 +3870,7 @@ fn precomposed_nfd_casefold(ch: char) -> Option<(char, char)> {
         .or_else(|| precomposed_latin_extended_additional_m_z_nfd_casefold(ch))
         .or_else(|| precomposed_vietnamese_single_mark_nfd_casefold(ch))
         .or_else(|| precomposed_greek_nfd_casefold(ch))
+        .or_else(|| precomposed_cyrillic_nfd_casefold(ch))
 }
 
 const fn precomposed_latin1_nfd_casefold(ch: char) -> Option<(char, char)> {
@@ -4078,6 +4077,41 @@ const fn precomposed_greek_nfd_casefold(ch: char) -> Option<(char, char)> {
         'Ώ' | 'ώ' => ('ω', '\u{0301}'),
         'Ϊ' | 'ϊ' => ('ι', '\u{0308}'),
         'Ϋ' | 'ϋ' => ('υ', '\u{0308}'),
+        _ => return None,
+    })
+}
+
+/// Cyrillic letters with canonical Unicode 12.1 decompositions. ext4's
+/// casefold table NFD-normalizes before folding, so composed spellings like
+/// `Й` and decomposed spellings like `и` + COMBINING BREVE must collide.
+const fn precomposed_cyrillic_nfd_casefold(ch: char) -> Option<(char, char)> {
+    Some(match ch {
+        'Ѐ' | 'ѐ' => ('е', '\u{0300}'),
+        'Ё' | 'ё' => ('е', '\u{0308}'),
+        'Ѓ' | 'ѓ' => ('г', '\u{0301}'),
+        'Ї' | 'ї' => ('і', '\u{0308}'),
+        'Ќ' | 'ќ' => ('к', '\u{0301}'),
+        'Ѝ' | 'ѝ' => ('и', '\u{0300}'),
+        'Ў' | 'ў' => ('у', '\u{0306}'),
+        'Й' | 'й' => ('и', '\u{0306}'),
+        'Ѷ' | 'ѷ' => ('ѵ', '\u{030F}'),
+        'Ӂ' | 'ӂ' => ('ж', '\u{0306}'),
+        'Ӑ' | 'ӑ' => ('а', '\u{0306}'),
+        'Ӓ' | 'ӓ' => ('а', '\u{0308}'),
+        'Ӗ' | 'ӗ' => ('е', '\u{0306}'),
+        'Ӛ' | 'ӛ' => ('ә', '\u{0308}'),
+        'Ӝ' | 'ӝ' => ('ж', '\u{0308}'),
+        'Ӟ' | 'ӟ' => ('з', '\u{0308}'),
+        'Ӣ' | 'ӣ' => ('и', '\u{0304}'),
+        'Ӥ' | 'ӥ' => ('и', '\u{0308}'),
+        'Ӧ' | 'ӧ' => ('о', '\u{0308}'),
+        'Ӫ' | 'ӫ' => ('ө', '\u{0308}'),
+        'Ӭ' | 'ӭ' => ('э', '\u{0308}'),
+        'Ӯ' | 'ӯ' => ('у', '\u{0304}'),
+        'Ӱ' | 'ӱ' => ('у', '\u{0308}'),
+        'Ӳ' | 'ӳ' => ('у', '\u{030B}'),
+        'Ӵ' | 'ӵ' => ('ч', '\u{0308}'),
+        'Ӹ' | 'ӹ' => ('ы', '\u{0308}'),
         _ => return None,
     })
 }
@@ -11485,6 +11519,75 @@ mod tests {
         assert!(ext4_casefold_names_collide(
             "ẚla".as_bytes(),
             "a\u{02BE}la".as_bytes()
+        ));
+    }
+
+    #[test]
+    fn ext4_casefold_key_nfd_normalizes_precomposed_cyrillic_bd_vsuni() {
+        let cases: &[(&str, &str)] = &[
+            ("Ѐ", "е\u{0300}"),
+            ("ѐ", "е\u{0300}"),
+            ("Ё", "е\u{0308}"),
+            ("ё", "е\u{0308}"),
+            ("Ѓ", "г\u{0301}"),
+            ("ѓ", "г\u{0301}"),
+            ("Ї", "і\u{0308}"),
+            ("ї", "і\u{0308}"),
+            ("Ќ", "к\u{0301}"),
+            ("ќ", "к\u{0301}"),
+            ("Ѝ", "и\u{0300}"),
+            ("ѝ", "и\u{0300}"),
+            ("Ў", "у\u{0306}"),
+            ("ў", "у\u{0306}"),
+            ("Й", "и\u{0306}"),
+            ("й", "и\u{0306}"),
+            ("Ѷ", "ѵ\u{030F}"),
+            ("ѷ", "ѵ\u{030F}"),
+            ("Ӂ", "ж\u{0306}"),
+            ("ӂ", "ж\u{0306}"),
+            ("Ӑ", "а\u{0306}"),
+            ("ӑ", "а\u{0306}"),
+            ("Ӓ", "а\u{0308}"),
+            ("ӓ", "а\u{0308}"),
+            ("Ӗ", "е\u{0306}"),
+            ("ӗ", "е\u{0306}"),
+            ("Ӛ", "ә\u{0308}"),
+            ("ӛ", "ә\u{0308}"),
+            ("Ӝ", "ж\u{0308}"),
+            ("ӝ", "ж\u{0308}"),
+            ("Ӟ", "з\u{0308}"),
+            ("ӟ", "з\u{0308}"),
+            ("Ӣ", "и\u{0304}"),
+            ("ӣ", "и\u{0304}"),
+            ("Ӥ", "и\u{0308}"),
+            ("ӥ", "и\u{0308}"),
+            ("Ӧ", "о\u{0308}"),
+            ("ӧ", "о\u{0308}"),
+            ("Ӫ", "ө\u{0308}"),
+            ("ӫ", "ө\u{0308}"),
+            ("Ӭ", "э\u{0308}"),
+            ("ӭ", "э\u{0308}"),
+            ("Ӯ", "у\u{0304}"),
+            ("ӯ", "у\u{0304}"),
+            ("Ӱ", "у\u{0308}"),
+            ("ӱ", "у\u{0308}"),
+            ("Ӳ", "у\u{030B}"),
+            ("ӳ", "у\u{030B}"),
+            ("Ӵ", "ч\u{0308}"),
+            ("ӵ", "ч\u{0308}"),
+            ("Ӹ", "ы\u{0308}"),
+            ("ӹ", "ы\u{0308}"),
+        ];
+        for (composed, decomposed) in cases {
+            assert_eq!(
+                ext4_casefold_key(composed.as_bytes()),
+                ext4_casefold_key(decomposed.as_bytes()),
+                "Cyrillic composed {composed:?} must fold to {decomposed:?}"
+            );
+        }
+        assert!(ext4_casefold_names_collide(
+            "КРАЙ-ӬЛ".as_bytes(),
+            "краи\u{0306}-э\u{0308}л".as_bytes()
         ));
     }
 
