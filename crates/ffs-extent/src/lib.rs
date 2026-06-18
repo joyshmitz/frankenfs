@@ -6619,6 +6619,47 @@ ExtentMapping { logical_start: 5, physical_start: 134, count: 2, unwritten: true
     }
 
     #[test]
+    fn lock_free_lookup_returns_correct_mapping_under_concurrency() {
+        // The hot-hit path takes only a SHARED read lock and refreshes an atomic
+        // last_access (plus an atomic hit counter). Eight threads hammering the
+        // SAME namespace and the SAME entries put maximum contention on those
+        // atomics; every lookup must still return the exact seeded mapping — the
+        // racy recency bumps must never corrupt or tear the returned value.
+        let cache = ExtentCache::with_capacity(256);
+        for i in 0..256_u32 {
+            cache.insert(
+                0,
+                ExtentMapping {
+                    logical_start: i,
+                    physical_start: u64::from(i) * 4096,
+                    count: 1,
+                    unwritten: false,
+                },
+            );
+        }
+
+        std::thread::scope(|s| {
+            for _ in 0..8 {
+                let cache = &cache;
+                s.spawn(move || {
+                    for op in 0..50_000_usize {
+                        let lb = u32::try_from(op % 256).unwrap();
+                        let mapping = cache.lookup(0, lb).expect("seeded entry must be found");
+                        assert_eq!(mapping.logical_start, lb);
+                        assert_eq!(mapping.physical_start, u64::from(lb) * 4096);
+                        assert_eq!(mapping.count, 1);
+                        assert!(!mapping.unwritten);
+                    }
+                });
+            }
+        });
+
+        // Every one of the 8 * 50_000 lookups was a hit; the atomic counter
+        // must have counted them all under concurrency.
+        assert!(cache.stats().hits >= 8 * 50_000);
+    }
+
+    #[test]
     fn cache_eviction_at_capacity() {
         let cache = ExtentCache::with_capacity(3);
         for i in 0..3 {
