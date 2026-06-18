@@ -154,3 +154,7 @@ harness = false
 [[bench]]
 name = "mvcc_commit_batching"
 harness = false
+
+[[bench]]
+name = "ext4_indirect_read_overlap"
+harness = false

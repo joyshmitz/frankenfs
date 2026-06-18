@@ -12276,8 +12276,28 @@ impl OpenFs {
         if offset >= file_size {
             return Ok(Vec::new());
         }
+        // One contiguous segment of the read: either a coalesced full-block run
+        // or a sub-block partial head/tail. Holes are not emitted (buf stays
+        // zero-filled). Declared at the top of the fn so it precedes statements
+        // (clippy::items_after_statements).
+        enum IndirectSeg {
+            Run { phys0: u64, span: usize, buf_off: usize },
+            Partial {
+                phys: u64,
+                in_off: usize,
+                len: usize,
+                buf_off: usize,
+            },
+        }
+
         let to_read = (file_size - offset).min(u64::from(size)) as usize;
         let mut buf = vec![0_u8; to_read];
+
+        // PLAN (serial): resolve the read into ordered segments. The indirect
+        // block resolution is a dependent (and cached) chain, so it stays serial;
+        // only the bulk DATA reads are overlapped below. Full-block-aligned spans
+        // coalesce a contiguous-physical run into ONE vectored op (bd-bov9c).
+        let mut segs: Vec<IndirectSeg> = Vec::new();
         let mut bytes_read = 0;
         while bytes_read < to_read {
             let current_offset = offset + bytes_read as u64;
@@ -12289,10 +12309,6 @@ impl OpenFs {
             let offset_in_block = (current_offset % bs) as usize;
             let remaining = to_read - bytes_read;
 
-            // Full-block-aligned span: coalesce a contiguous-physical run of
-            // present data blocks into ONE vectored device op (bd-bov9c),
-            // mirroring the extent / btrfs read paths. Holes break the run and
-            // are left zero-filled.
             if offset_in_block == 0 && remaining >= bs_usize {
                 if let Some(phys0) = self.resolve_indirect_block(cx, scope, inode, logical_block)? {
                     let mut run_len: u32 = 1;
@@ -12306,13 +12322,12 @@ impl OpenFs {
                         }
                     }
                     let span = run_len as usize * bs_usize;
-                    self.read_contiguous_into_with_scope(
-                        cx,
-                        scope,
-                        BlockNumber(phys0),
-                        &mut buf[bytes_read..bytes_read + span],
-                    )?;
-                    bytes_read += run_len as usize * bs_usize;
+                    segs.push(IndirectSeg::Run {
+                        phys0,
+                        span,
+                        buf_off: bytes_read,
+                    });
+                    bytes_read += span;
                 } else {
                     // Hole at a full block boundary — already zeroed.
                     bytes_read += bs_usize;
@@ -12320,17 +12335,59 @@ impl OpenFs {
                 continue;
             }
 
-            // Partial head/tail (sub-block) read: scalar.
+            // Partial head/tail (sub-block).
             let chunk_size = (bs_usize - offset_in_block).min(remaining);
             if let Some(phys_block) =
                 self.resolve_indirect_block(cx, scope, inode, logical_block)?
             {
-                let block_data = self.read_block_with_scope(cx, scope, BlockNumber(phys_block))?;
-                buf[bytes_read..bytes_read + chunk_size]
-                    .copy_from_slice(&block_data[offset_in_block..offset_in_block + chunk_size]);
+                segs.push(IndirectSeg::Partial {
+                    phys: phys_block,
+                    in_off: offset_in_block,
+                    len: chunk_size,
+                    buf_off: bytes_read,
+                });
             }
             // else: Hole — already zeroed.
             bytes_read += chunk_size;
+        }
+
+        // READ (parallel): fetch each segment's bytes across the rayon pool. A
+        // blocking read parks its worker, so the per-segment access latencies
+        // overlap up to the pool size (the I/O-overlap lever shared with the
+        // extent read path, bd-yg6tk).
+        let seg_reads: Vec<Result<Vec<u8>, FfsError>> = {
+            use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
+            segs.par_iter()
+                .map(|seg| match seg {
+                    IndirectSeg::Run { phys0, span, .. } => {
+                        let mut tmp = vec![0_u8; *span];
+                        self.read_contiguous_into_with_scope(
+                            cx,
+                            scope,
+                            BlockNumber(*phys0),
+                            &mut tmp,
+                        )?;
+                        Ok(tmp)
+                    }
+                    IndirectSeg::Partial {
+                        phys, in_off, len, ..
+                    } => {
+                        let block_data =
+                            self.read_block_with_scope(cx, scope, BlockNumber(*phys))?;
+                        Ok(block_data.as_slice()[*in_off..*in_off + *len].to_vec())
+                    }
+                })
+                .collect()
+        };
+
+        // ASSEMBLE (serial): copy each segment into the output in byte order,
+        // surfacing the first error in byte order exactly as the old loop did.
+        for (seg, read) in segs.iter().zip(seg_reads) {
+            let data = read?;
+            let buf_off = match seg {
+                IndirectSeg::Run { buf_off, .. } | IndirectSeg::Partial { buf_off, .. } => *buf_off,
+            };
+            buf[buf_off..buf_off + data.len()].copy_from_slice(&data);
         }
         Ok(buf)
     }
