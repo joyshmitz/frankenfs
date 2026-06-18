@@ -56905,6 +56905,32 @@ mod tests {
     }
 
     #[test]
+    fn ext4_removing_one_hardlink_keeps_data_for_other() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let a = fs
+            .create(&cx, root, OsStr::new("a.bin"), 0o644, 0, 0)
+            .expect("create");
+        fs.write(&cx, a.ino, 0, b"PERSIST").expect("write");
+        fs.link(&cx, a.ino, root, OsStr::new("b.bin")).expect("link");
+
+        // Remove the first name; the second hardlink must keep the inode + data.
+        fs.unlink(&cx, root, OsStr::new("a.bin"))
+            .expect("remove first name");
+
+        assert!(fs.lookup(&cx, root, OsStr::new("a.bin")).is_err());
+        let b = fs
+            .lookup(&cx, root, OsStr::new("b.bin"))
+            .expect("lookup surviving name");
+        assert_eq!(b.ino, a.ino, "surviving link keeps the same inode");
+        let data = fs.read(&cx, b.ino, 0, 7).expect("read via surviving link");
+        assert_eq!(&data, b"PERSIST");
+    }
+
+    #[test]
     fn write_link_shares_data() {
         let Some(fs) = open_writable_ext4() else {
             return;
