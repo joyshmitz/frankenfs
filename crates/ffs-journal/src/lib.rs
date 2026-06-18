@@ -2923,9 +2923,9 @@ fn encode_cow_record(block_size: u32, record: &CowRecord<'_>) -> Result<Vec<u8>>
     let block_size = usize::try_from(block_size)
         .map_err(|_| FfsError::Format("block_size does not fit usize".to_owned()))?;
     if block_size < COW_HEADER_SIZE {
-        return Err(FfsError::Format(
-            "block size too small for COW journal record".to_owned(),
-        ));
+        return Err(FfsError::Format(format!(
+            "COW journal block size {block_size} is smaller than header size {COW_HEADER_SIZE}"
+        )));
     }
 
     let mut out = vec![0_u8; block_size];
@@ -3932,6 +3932,31 @@ mod tests {
             matches!(err, FfsError::Format(message) if message.contains("unknown COW record kind")),
             "expected unknown-kind Format error, got {err:?}"
         );
+    }
+
+    #[test]
+    fn native_cow_append_rejects_block_size_smaller_than_header() {
+        let cx = test_cx();
+        let undersized = u32::try_from(COW_HEADER_SIZE - 1).expect("header size fits u32");
+        let dev = MemBlockDevice::new(undersized, 128);
+        let region = JournalRegion {
+            start: BlockNumber(60),
+            blocks: 16,
+        };
+
+        let mut journal = NativeCowJournal::open(&cx, &dev, region).expect("open");
+        let err = journal
+            .append_commit(&cx, &dev, CommitSeq(1))
+            .expect_err("undersized COW block");
+
+        assert!(
+            matches!(err, FfsError::Format(message)
+                if message.contains("smaller than header size")
+                    && message.contains(&undersized.to_string())
+                    && message.contains(&COW_HEADER_SIZE.to_string())),
+            "expected undersized-header Format error, got {err:?}"
+        );
+        assert_eq!(journal.next_slot(), 0);
     }
 
     #[test]
