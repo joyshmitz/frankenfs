@@ -4955,6 +4955,30 @@ mod tests {
     }
 
     #[test]
+    fn merge_bytes_append_only_rejects_oversized_base_and_prefix_changes() {
+        let base = b"abc".to_vec();
+        let proof = MergeProof::AppendOnly { base_len: 3 };
+
+        // Clean append: both writers extended the common prefix "abc"; the merge
+        // keeps latest and concatenates staged's suffix.
+        assert_eq!(
+            proof
+                .merge_bytes(&base, b"abcX", b"abcY")
+                .expect("append-only merge"),
+            b"abcXY"
+        );
+
+        // base_len larger than a buffer is rejected.
+        assert!(MergeProof::AppendOnly { base_len: 10 }
+            .merge_bytes(&base, b"abcX", b"abcY")
+            .is_none());
+
+        // A modified snapshot prefix (not a pure append) is rejected on either side.
+        assert!(proof.merge_bytes(&base, b"Xbc!", b"abcY").is_none());
+        assert!(proof.merge_bytes(&base, b"abcX", b"Zbc!").is_none());
+    }
+
+    #[test]
     fn merge_proof_unsafe_rejects_merge() {
         let merged = MergeProof::Unsafe.merge_bytes(&[0], &[0, 1], &[0, 2]);
         assert!(merged.is_none(), "unsafe proof must fall back to FCW");
