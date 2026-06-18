@@ -80,7 +80,7 @@ fn sleep_for_flush_budget_yield(cx: &Cx, duration: Duration) {
     }
 }
 
-const DEFAULT_BLOCK_ALIGNMENT: usize = 4096;
+pub const DEFAULT_BLOCK_ALIGNMENT: usize = 4096;
 // AlignedVec over-allocates by alignment - 1, so the public alignment input
 // must stay bounded even when callers pass extreme usize values.
 const MAX_SUPPORTED_ALIGNMENT: usize = 1 << 20;
@@ -261,6 +261,11 @@ impl BlockBuf {
     }
 
     #[must_use]
+    pub fn from_shared_aligned(bytes: Arc<AlignedVec>) -> Self {
+        Self { bytes }
+    }
+
+    #[must_use]
     pub fn as_slice(&self) -> &[u8] {
         self.bytes.as_slice()
     }
@@ -280,6 +285,11 @@ impl BlockBuf {
         Self {
             bytes: Arc::clone(&self.bytes),
         }
+    }
+
+    #[must_use]
+    pub fn shares_storage_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.bytes, &other.bytes)
     }
 
     #[must_use]

@@ -20,18 +20,22 @@
 //! Use [`resolve_data_with`] to walk backward through a version chain and find
 //! the actual bytes for an `Identical` marker, decompressing if necessary.
 
-use serde::{Deserialize, Serialize};
+use ffs_block::{AlignedVec, BlockBuf, DEFAULT_BLOCK_ALIGNMENT};
+use serde::de::{EnumAccess, VariantAccess, Visitor};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::borrow::Cow;
+use std::fmt;
+use std::sync::Arc;
 
 /// Compressed representation of block version data.
 ///
 /// Instead of always storing a full `Vec<u8>`, this enum allows
 /// memory-efficient alternatives when the data hasn't changed,
 /// or when compressed using standard algorithms.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VersionData {
-    /// Full block data stored inline.
-    Full(Vec<u8>),
+    /// Full block data stored as a shared aligned block buffer.
+    Full(Arc<AlignedVec>),
     /// Data is byte-identical to the previous version in the chain.
     /// No data is stored; resolve by walking backward.
     Identical,
@@ -42,6 +46,14 @@ pub enum VersionData {
 }
 
 impl VersionData {
+    #[must_use]
+    pub fn full(bytes: Vec<u8>) -> Self {
+        Self::Full(Arc::new(AlignedVec::from_vec(
+            bytes,
+            DEFAULT_BLOCK_ALIGNMENT,
+        )))
+    }
+
     /// Returns `true` if this version is a dedup marker (no data stored).
     #[must_use]
     pub fn is_identical(&self) -> bool {
@@ -58,8 +70,86 @@ impl VersionData {
     #[must_use]
     pub fn memory_bytes(&self) -> usize {
         match self {
-            Self::Full(bytes) | Self::Zstd(bytes) | Self::Brotli(bytes) => bytes.len(),
+            Self::Full(bytes) => bytes.len(),
+            Self::Zstd(bytes) | Self::Brotli(bytes) => bytes.len(),
             Self::Identical => 0,
+        }
+    }
+}
+
+impl Serialize for VersionData {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            Self::Full(bytes) => {
+                serializer.serialize_newtype_variant("VersionData", 0, "Full", bytes.as_slice())
+            }
+            Self::Identical => serializer.serialize_unit_variant("VersionData", 1, "Identical"),
+            Self::Zstd(bytes) => {
+                serializer.serialize_newtype_variant("VersionData", 2, "Zstd", bytes)
+            }
+            Self::Brotli(bytes) => {
+                serializer.serialize_newtype_variant("VersionData", 3, "Brotli", bytes)
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for VersionData {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_enum(
+            "VersionData",
+            &["Full", "Identical", "Zstd", "Brotli"],
+            VersionDataVisitor,
+        )
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(field_identifier)]
+enum VersionDataVariant {
+    Full,
+    Identical,
+    Zstd,
+    Brotli,
+}
+
+struct VersionDataVisitor;
+
+impl<'de> Visitor<'de> for VersionDataVisitor {
+    type Value = VersionData;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("an MVCC version-data variant")
+    }
+
+    fn visit_enum<A>(self, data: A) -> Result<Self::Value, A::Error>
+    where
+        A: EnumAccess<'de>,
+    {
+        let (variant, variant_access) = data.variant::<VersionDataVariant>()?;
+        match variant {
+            VersionDataVariant::Full => {
+                let bytes = variant_access.newtype_variant::<Vec<u8>>()?;
+                Ok(VersionData::full(bytes))
+            }
+            VersionDataVariant::Identical => {
+                variant_access.unit_variant()?;
+                Ok(VersionData::Identical)
+            }
+            VersionDataVariant::Zstd => {
+                let bytes = variant_access.newtype_variant::<Vec<u8>>()?;
+                Ok(VersionData::Zstd(bytes))
+            }
+            VersionDataVariant::Brotli => {
+                let bytes = variant_access.newtype_variant::<Vec<u8>>()?;
+                Ok(VersionData::Brotli(bytes))
+            }
         }
     }
 }
@@ -88,7 +178,7 @@ where
     let mut i = index;
     loop {
         match get_data(&chain[i]) {
-            VersionData::Full(bytes) => return Some(Cow::Borrowed(bytes)),
+            VersionData::Full(bytes) => return Some(Cow::Borrowed(bytes.as_slice())),
             VersionData::Zstd(bytes) => {
                 return match zstd::decode_all(bytes.as_slice()) {
                     Ok(decoded) => Some(Cow::Owned(decoded)),
@@ -108,6 +198,59 @@ where
                 let mut decompressor = brotli::Decompressor::new(bytes.as_slice(), 4096);
                 return match std::io::Read::read_to_end(&mut decompressor, &mut decoded) {
                     Ok(_) => Some(Cow::Owned(decoded)),
+                    Err(e) => {
+                        tracing::error!(
+                            index,
+                            compressed_len = bytes.len(),
+                            error = %e,
+                            "mvcc_brotli_decompression_failed"
+                        );
+                        None
+                    }
+                };
+            }
+            VersionData::Identical => {
+                if i == 0 {
+                    return None;
+                }
+                i -= 1;
+            }
+        }
+    }
+}
+
+pub fn resolve_block_buf_with<T, F>(chain: &[T], index: usize, get_data: F) -> Option<BlockBuf>
+where
+    F: Fn(&T) -> &VersionData,
+{
+    if index >= chain.len() {
+        return None;
+    }
+    let mut i = index;
+    loop {
+        match get_data(&chain[i]) {
+            VersionData::Full(bytes) => {
+                return Some(BlockBuf::from_shared_aligned(Arc::clone(bytes)));
+            }
+            VersionData::Zstd(bytes) => {
+                return match zstd::decode_all(bytes.as_slice()) {
+                    Ok(decoded) => Some(BlockBuf::new(decoded)),
+                    Err(e) => {
+                        tracing::error!(
+                            index,
+                            compressed_len = bytes.len(),
+                            error = %e,
+                            "mvcc_zstd_decompression_failed"
+                        );
+                        None
+                    }
+                };
+            }
+            VersionData::Brotli(bytes) => {
+                let mut decoded = Vec::new();
+                let mut decompressor = brotli::Decompressor::new(bytes.as_slice(), 4096);
+                return match std::io::Read::read_to_end(&mut decompressor, &mut decoded) {
+                    Ok(_) => Some(BlockBuf::new(decoded)),
                     Err(e) => {
                         tracing::error!(
                             index,
@@ -235,7 +378,7 @@ mod tests {
 
     #[test]
     fn version_data_full_roundtrip() {
-        let data = VersionData::Full(vec![1, 2, 3]);
+        let data = VersionData::full(vec![1, 2, 3]);
         assert!(data.is_full());
         assert!(!data.is_identical());
         assert_eq!(data.memory_bytes(), 3);
@@ -251,7 +394,10 @@ mod tests {
 
     #[test]
     fn resolve_full_at_index() {
-        let chain = vec![VersionData::Full(vec![0xAA]), VersionData::Full(vec![0xBB])];
+        let chain = vec![
+            VersionData::full(vec![0xAA]),
+            VersionData::full(vec![0xBB]),
+        ];
         let result = resolve_data_with(&chain, 1, |d| d);
         assert_eq!(result.as_deref(), Some(&[0xBB][..]));
     }
@@ -259,7 +405,7 @@ mod tests {
     #[test]
     fn resolve_identical_walks_back() {
         let chain = vec![
-            VersionData::Full(vec![0xAA]),
+            VersionData::full(vec![0xAA]),
             VersionData::Identical,
             VersionData::Identical,
         ];
@@ -289,9 +435,9 @@ mod tests {
     #[test]
     fn resolve_mixed_chain() {
         let chain = vec![
-            VersionData::Full(vec![1]), // 0
+            VersionData::full(vec![1]), // 0
             VersionData::Identical,     // 1 -> resolves to [1]
-            VersionData::Full(vec![2]), // 2
+            VersionData::full(vec![2]), // 2
             VersionData::Identical,     // 3 -> resolves to [2]
             VersionData::Identical,     // 4 -> resolves to [2]
         ];
@@ -369,7 +515,7 @@ mod tests {
                     let mut chain = Vec::with_capacity(len);
                     for (i, is_identical) in bools.iter().enumerate() {
                         if i == 0 || !is_identical {
-                            chain.push(VersionData::Full(datas[i].clone()));
+                            chain.push(VersionData::full(datas[i].clone()));
                         } else {
                             chain.push(VersionData::Identical);
                         }
@@ -387,7 +533,7 @@ mod tests {
         fn proptest_version_data_full_memory_bytes(
             data in proptest::collection::vec(any::<u8>(), 0..256),
         ) {
-            let vd = VersionData::Full(data.clone());
+            let vd = VersionData::full(data.clone());
             prop_assert_eq!(vd.memory_bytes(), data.len());
             prop_assert!(vd.is_full());
             prop_assert!(!vd.is_identical());

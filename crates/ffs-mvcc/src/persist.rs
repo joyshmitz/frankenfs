@@ -920,10 +920,10 @@ fn read_block_version(
         if is_identical {
             crate::compression::VersionData::Identical
         } else {
-            crate::compression::VersionData::Full(data)
+            crate::compression::VersionData::full(data)
         }
     } else {
-        crate::compression::VersionData::Full(data)
+        crate::compression::VersionData::full(data)
     };
 
     Ok(BlockVersion {

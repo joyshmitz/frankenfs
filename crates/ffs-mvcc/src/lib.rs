@@ -60,7 +60,7 @@ impl BlockVersion {
     #[must_use]
     pub fn bytes_inline(&self) -> Option<&[u8]> {
         match &self.data {
-            VersionData::Full(bytes) => Some(bytes),
+            VersionData::Full(bytes) => Some(bytes.as_slice()),
             _ => None,
         }
     }
@@ -1665,9 +1665,11 @@ impl MvccStore {
         for versions in self.versions.values() {
             for (idx, version) in versions.iter().enumerate() {
                 match &version.data {
-                    VersionData::Full(bytes)
-                    | VersionData::Zstd(bytes)
-                    | VersionData::Brotli(bytes) => {
+                    VersionData::Full(bytes) => {
+                        stats.full_versions += 1;
+                        stats.bytes_stored += bytes.len();
+                    }
+                    VersionData::Zstd(bytes) | VersionData::Brotli(bytes) => {
                         stats.full_versions += 1;
                         stats.bytes_stored += bytes.len();
                     }
@@ -2611,7 +2613,7 @@ impl MvccStore {
                 if dedup_enabled && self.is_identical_to_latest(block, &version_bytes) {
                     VersionData::Identical
                 } else if store_full {
-                    VersionData::Full(version_bytes)
+                    VersionData::full(version_bytes)
                 } else {
                     self.compress_data(&version_bytes)
                 };
@@ -2748,7 +2750,7 @@ impl MvccStore {
                     );
                     VersionData::Identical
                 } else if store_full {
-                    VersionData::Full(version_bytes)
+                    VersionData::full(version_bytes)
                 } else {
                     self.compress_data(&version_bytes)
                 };
@@ -2829,14 +2831,14 @@ impl MvccStore {
 
     pub(crate) fn compress_data(&self, new_bytes: &[u8]) -> VersionData {
         match self.compression_policy.algo {
-            compression::CompressionAlgo::None => VersionData::Full(new_bytes.to_vec()),
+            compression::CompressionAlgo::None => VersionData::full(new_bytes.to_vec()),
             compression::CompressionAlgo::Zstd { level } => {
                 if let Ok(compressed) = zstd::encode_all(new_bytes, level)
                     && compressed.len() < new_bytes.len()
                 {
                     return VersionData::Zstd(compressed);
                 }
-                VersionData::Full(new_bytes.to_vec())
+                VersionData::full(new_bytes.to_vec())
             }
             compression::CompressionAlgo::Brotli { level } => {
                 let mut compressed = Vec::new();
@@ -2851,7 +2853,7 @@ impl MvccStore {
                 {
                     return VersionData::Brotli(compressed);
                 }
-                VersionData::Full(new_bytes.to_vec())
+                VersionData::full(new_bytes.to_vec())
             }
         }
     }
@@ -3113,7 +3115,7 @@ impl MvccStore {
                 compression::resolve_data_with(versions, keep_from, |v| &v.data)
             {
                 let full_data = full_data.into_owned();
-                versions[keep_from].data = VersionData::Full(full_data);
+                versions[keep_from].data = VersionData::full(full_data);
             }
         }
     }
@@ -3174,6 +3176,18 @@ impl MvccStore {
         self.versions.get(&block).and_then(|versions| {
             let idx = newest_visible_index(versions, snapshot.high)?;
             compression::resolve_data_with(versions, idx, |v| &v.data)
+        })
+    }
+
+    #[must_use]
+    pub fn read_visible_block_buf(
+        &self,
+        block: BlockNumber,
+        snapshot: Snapshot,
+    ) -> Option<BlockBuf> {
+        self.versions.get(&block).and_then(|versions| {
+            let idx = newest_visible_index(versions, snapshot.high)?;
+            compression::resolve_block_buf_with(versions, idx, |v| &v.data)
         })
     }
 
@@ -4104,13 +4118,11 @@ impl<D: BlockDevice> BlockDevice for MvccBlockDevice<D> {
         // Check version store first (shared lock, no I/O).
         {
             let guard = self.store.read();
-            if let Some(bytes) = guard.read_visible(block, snap) {
-                // `read_visible` returns `Cow::Owned` for any compressed version
-                // (`resolve_data_with` decompresses into a fresh Vec). `into_owned`
-                // MOVES that Vec instead of cloning it (`to_vec` would allocate +
-                // copy the whole block again); for an uncompressed `Cow::Borrowed`
-                // it clones exactly as before. Byte-identical, strictly cheaper.
-                return Ok(BlockBuf::new(bytes.into_owned()));
+            if let Some(buf) = guard.read_visible_block_buf(block, snap) {
+                // Full uncompressed versions now share the stored aligned block
+                // buffer (`Arc::clone`), while compressed versions still
+                // materialize exactly the decompressed bytes into a fresh buffer.
+                return Ok(buf);
             }
         }
         // Fall back to base device (no lock held).
@@ -4145,15 +4157,15 @@ impl<D: BlockDevice> BlockDevice for MvccBlockDevice<D> {
         // the whole range (rather than re-fetching per block as the prior
         // per-block `read_block` loop did) also keeps the contiguous read
         // internally consistent under `read_your_writes`.
-        let mut visible: Vec<Option<Vec<u8>>> = Vec::with_capacity(bufs.len());
+        let mut visible: Vec<Option<BlockBuf>> = Vec::with_capacity(bufs.len());
         let mut any_visible = false;
         {
             let guard = self.store.read();
             for delta in 0..count {
                 let block = BlockNumber(start.0 + delta);
-                match guard.read_visible(block, snap) {
-                    Some(bytes) => {
-                        visible.push(Some(bytes.into_owned()));
+                match guard.read_visible_block_buf(block, snap) {
+                    Some(buf) => {
+                        visible.push(Some(buf));
                         any_visible = true;
                     }
                     None => visible.push(None),
@@ -4172,8 +4184,8 @@ impl<D: BlockDevice> BlockDevice for MvccBlockDevice<D> {
         // block. Per-block bytes are identical to the prior path.
         let mut idx = 0usize;
         while idx < bufs.len() {
-            if let Some(bytes) = visible[idx].take() {
-                bufs[idx] = BlockBuf::new(bytes);
+            if let Some(buf) = visible[idx].take() {
+                bufs[idx] = buf;
                 idx += 1;
                 continue;
             }
@@ -4215,15 +4227,15 @@ impl<D: BlockDevice> BlockDevice for MvccBlockDevice<D> {
         // Capture MVCC-visible blocks once under a single read guard at one
         // snapshot (mirrors `read_contiguous_blocks`), then read the remaining
         // base-resident gaps directly into the matching `dst` sub-slices.
-        let mut visible: Vec<Option<Vec<u8>>> = Vec::with_capacity(count);
+        let mut visible: Vec<Option<BlockBuf>> = Vec::with_capacity(count);
         let mut any_visible = false;
         {
             let guard = self.store.read();
             for delta in 0..count_u64 {
                 let block = BlockNumber(start.0 + delta);
-                match guard.read_visible(block, snap) {
-                    Some(bytes) => {
-                        visible.push(Some(bytes.into_owned()));
+                match guard.read_visible_block_buf(block, snap) {
+                    Some(buf) => {
+                        visible.push(Some(buf));
                         any_visible = true;
                     }
                     None => visible.push(None),
@@ -4239,8 +4251,8 @@ impl<D: BlockDevice> BlockDevice for MvccBlockDevice<D> {
         let n = count;
         let mut idx = 0usize;
         while idx < n {
-            if let Some(bytes) = visible[idx].take() {
-                dst[idx * bs..(idx + 1) * bs].copy_from_slice(&bytes);
+            if let Some(buf) = visible[idx].take() {
+                dst[idx * bs..(idx + 1) * bs].copy_from_slice(buf.as_slice());
                 idx += 1;
                 continue;
             }
@@ -5191,8 +5203,8 @@ mod tests {
         let VersionData::Full(stored_b) = &chain_b[0].data else {
             panic!("block_b should store full bytes");
         };
-        assert_eq!(stored_a, &bytes_a);
-        assert_eq!(stored_b, &bytes_b);
+        assert_eq!(stored_a.as_slice(), bytes_a.as_slice());
+        assert_eq!(stored_b.as_slice(), bytes_b.as_slice());
 
         let record = store.ssi_log.last().expect("SSI record");
         assert_eq!(record.read_set.len(), 0);
@@ -5244,7 +5256,7 @@ mod tests {
         let VersionData::Full(stored) = &chain[2].data else {
             panic!("merged SSI append should store full bytes");
         };
-        assert_eq!(stored, &[0, 1, 2]);
+        assert_eq!(stored.as_slice(), &[0, 1, 2]);
     }
 
     #[test]
@@ -5571,6 +5583,39 @@ mod tests {
 
         let buf = dev.read_block(&cx, BlockNumber(3)).expect("read block 3");
         assert_eq!(buf.as_slice(), &[0xAB; 512]);
+    }
+
+    #[test]
+    fn mvcc_device_read_shares_uncompressed_full_version_buffer_bd_xmh5g_394() {
+        let cx = test_cx();
+        let block = BlockNumber(4);
+        let store = Arc::new(RwLock::new(MvccStore::new()));
+        {
+            let mut guard = store.write();
+            let mut txn = guard.begin();
+            txn.stage_write(block, vec![0xCD; 512]);
+            guard.commit(txn).expect("commit");
+        }
+
+        let snap = store.read().current_snapshot();
+        let stored = {
+            let guard = store.read();
+            let versions = guard.versions.get(&block).expect("block chain");
+            let VersionData::Full(shared) = &versions[0].data else {
+                panic!("uncompressed commit should store shared full bytes");
+            };
+            BlockBuf::from_shared_aligned(Arc::clone(shared))
+        };
+
+        let base = MemBlockDevice::new(512, 16);
+        let dev = MvccBlockDevice::new(base, Arc::clone(&store), snap);
+        let read = dev.read_block(&cx, block).expect("read");
+
+        assert_eq!(read.as_slice(), &[0xCD; 512]);
+        assert!(
+            read.shares_storage_with(&stored),
+            "uncompressed MVCC read_block should share VersionData::Full storage"
+        );
     }
 
     #[test]
@@ -7294,7 +7339,7 @@ mod tests {
             block: BlockNumber(1),
             commit_seq: CommitSeq(1),
             writer: TxnId(1),
-            data: VersionData::Full(vec![0xA5; 8]),
+            data: VersionData::full(vec![0xA5; 8]),
         }]);
         reclaimer.collect();
 
@@ -9585,7 +9630,7 @@ mod tests {
                 block: BlockNumber(42),
                 commit_seq: CommitSeq(5),
                 writer: TxnId(1),
-                data: VersionData::Full(vec![0xDE; 64]),
+                data: VersionData::full(vec![0xDE; 64]),
             }],
         );
 
@@ -9648,7 +9693,7 @@ mod tests {
             block: BlockNumber(0),
             commit_seq: CommitSeq(1),
             writer: TxnId(1),
-            data: VersionData::Full(vec![0xAA; 64]),
+            data: VersionData::full(vec![0xAA; 64]),
         };
         assert_eq!(v.bytes_inline().unwrap(), &[0xAA; 64]);
     }
@@ -9820,7 +9865,7 @@ mod tests {
             block: BlockNumber(42),
             commit_seq: CommitSeq(7),
             writer: TxnId(3),
-            data: VersionData::Full(vec![0xBE; 16]),
+            data: VersionData::full(vec![0xBE; 16]),
         };
         let json = serde_json::to_string(&v).expect("serialize");
         let parsed: BlockVersion = serde_json::from_str(&json).expect("deserialize");
@@ -9836,7 +9881,7 @@ mod tests {
             block: BlockNumber(0),
             commit_seq: CommitSeq(1),
             writer: TxnId(1),
-            data: VersionData::Full(vec![1, 2, 3]),
+            data: VersionData::full(vec![1, 2, 3]),
         };
         let v2 = v.clone();
         assert_eq!(v, v2);

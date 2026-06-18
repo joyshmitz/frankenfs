@@ -326,7 +326,7 @@ impl ShardedMvccStore {
             );
             VersionData::Identical
         } else {
-            VersionData::Full(bytes)
+            VersionData::full(bytes)
         }
     }
 
@@ -339,7 +339,7 @@ impl ShardedMvccStore {
                 // version; move that decompressed Vec out instead of cloning it
                 // (matches the already-corrected twin in lib.rs make_chain_head_full).
                 let full_data = full_data.into_owned();
-                versions[keep_from].data = VersionData::Full(full_data);
+                versions[keep_from].data = VersionData::full(full_data);
             }
         }
     }
