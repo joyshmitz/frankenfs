@@ -35451,6 +35451,28 @@ mod tests {
     }
 
     #[test]
+    fn inode_to_attr_huge_file_scales_blocks_to_512_sectors() {
+        let sb = make_test_superblock(); // block_size = 4096
+        let mut inode = make_test_inode(ffs_types::S_IFREG | 0o644, 0, 0);
+        inode.blocks = 8;
+
+        // Without HUGE_FILE, i_blocks is already in 512-byte sectors -> passthrough.
+        let attr = inode_to_attr(&sb, InodeNumber(100), &inode);
+        assert_eq!(attr.blocks, 8);
+
+        // With HUGE_FILE, i_blocks is in filesystem blocks -> scale to 512-byte
+        // sectors (block_size/512). At 4K blocks that is 8 sectors per block.
+        inode.flags |= ffs_types::EXT4_HUGE_FILE_FL;
+        let attr = inode_to_attr(&sb, InodeNumber(100), &inode);
+        let sectors_per_block = u64::from(sb.block_size / 512);
+        assert!(
+            sectors_per_block > 1,
+            "test needs block_size > 512 to be meaningful"
+        );
+        assert_eq!(attr.blocks, 8 * sectors_per_block);
+    }
+
+    #[test]
     fn inode_to_attr_regular_file_rdev_zero() {
         use ffs_types::S_IFREG;
 
