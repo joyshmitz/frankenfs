@@ -336,6 +336,9 @@ pub trait ByteDevice: Send + Sync {
         cx_checkpoint(cx)?;
         let mut next_offset = offset.0;
         for buf in bufs {
+            if buf.is_empty() {
+                continue;
+            }
             let len = u64::try_from(buf.len())
                 .map_err(|_| FfsError::Format("read length overflows u64".to_owned()))?;
             self.read_exact_at(cx, ByteOffset(next_offset), buf)?;
@@ -6449,6 +6452,64 @@ mod tests {
     }
 
     #[derive(Debug)]
+    struct ScalarOnlyByteDevice {
+        bytes: Mutex<Vec<u8>>,
+        read_calls: Mutex<Vec<(ByteOffset, usize)>>,
+    }
+
+    impl ScalarOnlyByteDevice {
+        fn new(bytes: Vec<u8>) -> Self {
+            Self {
+                bytes: Mutex::new(bytes),
+                read_calls: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn read_calls(&self) -> Vec<(ByteOffset, usize)> {
+            self.read_calls.lock().clone()
+        }
+    }
+
+    impl ByteDevice for ScalarOnlyByteDevice {
+        fn len_bytes(&self) -> u64 {
+            u64::try_from(self.bytes.lock().len()).unwrap_or(0)
+        }
+
+        fn read_exact_at(&self, _cx: &Cx, offset: ByteOffset, buf: &mut [u8]) -> Result<()> {
+            self.read_calls.lock().push((offset, buf.len()));
+            let offset = usize::try_from(offset.0)
+                .map_err(|_| FfsError::Format("offset overflow".into()))?;
+            let end = offset
+                .checked_add(buf.len())
+                .ok_or_else(|| FfsError::Format("range overflow".into()))?;
+            let bytes = self.bytes.lock();
+            if end > bytes.len() {
+                return Err(FfsError::Format("oob".into()));
+            }
+            buf.copy_from_slice(&bytes[offset..end]);
+            Ok(())
+        }
+
+        fn write_all_at(&self, _cx: &Cx, offset: ByteOffset, buf: &[u8]) -> Result<()> {
+            let offset = usize::try_from(offset.0)
+                .map_err(|_| FfsError::Format("offset overflow".into()))?;
+            let end = offset
+                .checked_add(buf.len())
+                .ok_or_else(|| FfsError::Format("range overflow".into()))?;
+            let mut bytes = self.bytes.lock();
+            if end > bytes.len() {
+                return Err(FfsError::Format("oob".into()));
+            }
+            bytes[offset..end].copy_from_slice(buf);
+            Ok(())
+        }
+
+        fn sync(&self, _cx: &Cx) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[derive(Debug)]
     struct CountingBlockDevice<D: BlockDevice> {
         inner: D,
         reads: AtomicUsize,
@@ -6749,6 +6810,33 @@ mod tests {
         let mut zero_len_slices = [IoSliceMut::new(&mut zero_len)];
         dev.read_vectored_exact_at(&cx, ByteOffset(2), &mut zero_len_slices)
             .expect("zero-length iovec read is a no-op");
+    }
+
+    #[test]
+    fn default_vectored_read_skips_zero_length_iovecs() {
+        let cx = Cx::for_testing();
+        let dev = ScalarOnlyByteDevice::new(vec![10, 11, 12, 13, 14, 15]);
+
+        let mut leading = [];
+        let mut middle = [0_u8; 2];
+        let mut empty_between = [];
+        let mut tail = [0_u8; 1];
+        let mut bufs = [
+            IoSliceMut::new(&mut leading),
+            IoSliceMut::new(&mut middle),
+            IoSliceMut::new(&mut empty_between),
+            IoSliceMut::new(&mut tail),
+        ];
+
+        dev.read_vectored_exact_at(&cx, ByteOffset(1), &mut bufs)
+            .expect("default vectored read");
+
+        assert_eq!(middle, [11, 12]);
+        assert_eq!(tail, [13]);
+        assert_eq!(
+            dev.read_calls(),
+            vec![(ByteOffset(1), 2), (ByteOffset(3), 1)]
+        );
     }
 
     #[test]
