@@ -39035,6 +39035,20 @@ mod tests {
     }
 
     #[test]
+    fn ext4_expand_posix_acl_xattr_value_passes_through_userspace_format() {
+        // A value already in the POSIX_ACL_XATTR userspace layout (version
+        // 0x0002) is returned verbatim — no compact-to-userspace expansion.
+        let mut value = POSIX_ACL_XATTR_VERSION.to_le_bytes().to_vec();
+        value.extend_from_slice(&[0xAA_u8; 16]); // arbitrary already-expanded body
+        let expanded =
+            ext4_expand_posix_acl_xattr_value(&value).expect("userspace-format ACL passes through");
+        assert_eq!(
+            expanded, value,
+            "an already-userspace ACL must be returned unchanged"
+        );
+    }
+
+    #[test]
     fn ext4_expand_posix_acl_xattr_value_rejects_malformed() {
         // Shorter than the 4-byte version header.
         assert!(matches!(
