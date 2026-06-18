@@ -605,6 +605,13 @@ pub trait BlockDevice: Send + Sync {
                 "read_contiguous_into: dst length must be a multiple of block size".to_owned(),
             ));
         }
+        let count = u64::try_from(dst.len() / bs)
+            .map_err(|_| FfsError::Format("block count does not fit u64".to_owned()))?;
+        if let Some(last_delta) = count.checked_sub(1) {
+            start.0.checked_add(last_delta).ok_or_else(|| {
+                FfsError::Format("contiguous read block range overflow".to_owned())
+            })?;
+        }
         for (idx, chunk) in dst.chunks_mut(bs).enumerate() {
             let delta = u64::try_from(idx)
                 .map_err(|_| FfsError::Format("block index does not fit u64".to_owned()))?;
@@ -6879,6 +6886,25 @@ mod tests {
         assert!(dev.read_sequence().is_empty());
         assert_eq!(bufs[0].as_slice(), &[0xAA; 4]);
         assert_eq!(bufs[1].as_slice(), &[0xBB; 4]);
+    }
+
+    #[test]
+    fn default_contiguous_into_rejects_overflow_before_partial_reads() {
+        let cx = Cx::for_testing();
+        let dev = PermissiveBlockDevice::new();
+        let mut dst = [0xAA_u8; 8];
+
+        let err = dev
+            .read_contiguous_into(&cx, BlockNumber(u64::MAX), &mut dst)
+            .expect_err("overflowing contiguous read should fail before scalar reads");
+
+        assert!(
+            matches!(err, FfsError::Format(ref message)
+                if message.contains("contiguous read block range overflow")),
+            "expected contiguous-read overflow Format error, got {err:?}"
+        );
+        assert!(dev.read_sequence().is_empty());
+        assert_eq!(dst, [0xAA; 8]);
     }
 
     #[test]
