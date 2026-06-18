@@ -11592,6 +11592,19 @@ impl OpenFs {
             block: 0,
             detail: format!("EA inode {value_inum} value size exceeds addressable range"),
         })?;
+        // An xattr value cannot exceed XATTR_SIZE_MAX (64 KiB) — setxattr rejects
+        // larger values with E2BIG — so a larger EA-inode i_size is a corrupt
+        // image. Reject it rather than allocating an unbounded buffer (OOM on a
+        // malformed inode size).
+        const XATTR_SIZE_MAX: usize = 65_536;
+        if value_len > XATTR_SIZE_MAX {
+            return Err(FfsError::Corruption {
+                block: 0,
+                detail: format!(
+                    "EA inode {value_inum} value size {value_len} exceeds XATTR_SIZE_MAX"
+                ),
+            });
+        }
         if value_len == 0 {
             return Ok(Vec::new());
         }
@@ -11681,6 +11694,19 @@ impl OpenFs {
             block: 0,
             detail: format!("EA inode {value_inum} value size exceeds addressable range"),
         })?;
+        // An xattr value cannot exceed XATTR_SIZE_MAX (64 KiB) — setxattr rejects
+        // larger values with E2BIG — so a larger EA-inode i_size is a corrupt
+        // image. Reject it rather than allocating an unbounded buffer (OOM on a
+        // malformed inode size).
+        const XATTR_SIZE_MAX: usize = 65_536;
+        if value_len > XATTR_SIZE_MAX {
+            return Err(FfsError::Corruption {
+                block: 0,
+                detail: format!(
+                    "EA inode {value_inum} value size {value_len} exceeds XATTR_SIZE_MAX"
+                ),
+            });
+        }
         if value_len == 0 {
             return Ok(Vec::new());
         }
