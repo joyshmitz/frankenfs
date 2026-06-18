@@ -1864,6 +1864,75 @@ mod tests {
             }
         }
 
+        /// Every external-block entry hash written to disk must match the
+        /// logical entry recovered by the ondisk parser. This checks the full
+        /// sorted entry stream, not only the single-entry smoke case.
+        #[test]
+        fn proptest_external_block_entry_hashes_match_parsed_entries(
+            entries in external_xattr_entries_strategy(),
+        ) {
+            let block = build_external_block(4096, &entries).unwrap();
+            let parsed = parse_xattr_block(&block).unwrap();
+            prop_assert_eq!(parsed.len(), entries.len());
+
+            let mut offset = EXTERNAL_HEADER_LEN;
+            for parsed_entry in &parsed {
+                let header: &[u8; XATTR_ENTRY_HEADER_LEN] = block
+                    .get(offset..offset + XATTR_ENTRY_HEADER_LEN)
+                    .and_then(|bytes| bytes.try_into().ok())
+                    .ok_or_else(|| {
+                        proptest::test_runner::TestCaseError::fail(
+                            "entry header must fit inside external block",
+                        )
+                    })?;
+                let [
+                    name_len_raw,
+                    name_index,
+                    _,
+                    _,
+                    _,
+                    _,
+                    _,
+                    _,
+                    _,
+                    _,
+                    _,
+                    _,
+                    hash_0,
+                    hash_1,
+                    hash_2,
+                    hash_3,
+                ] = *header;
+                let name_len = usize::from(name_len_raw);
+                let name_start = offset + XATTR_ENTRY_HEADER_LEN;
+                let name_end = name_start + name_len;
+                let name_bytes = block.get(name_start..name_end).ok_or_else(|| {
+                    proptest::test_runner::TestCaseError::fail(
+                        "entry name must fit inside external block",
+                    )
+                })?;
+                let entry_hash = u32::from_le_bytes([hash_0, hash_1, hash_2, hash_3]);
+
+                prop_assert_eq!(name_index, parsed_entry.name_index);
+                prop_assert_eq!(name_len, parsed_entry.name.len());
+                prop_assert_eq!(name_bytes, parsed_entry.name.as_slice());
+                prop_assert_eq!(
+                    entry_hash,
+                    ext4_xattr_entry_hash(parsed_entry),
+                    "stored e_hash must match recomputed ext4 xattr entry hash"
+                );
+
+                offset += align4(XATTR_ENTRY_HEADER_LEN + name_len);
+            }
+
+            let terminator = block.get(offset..offset + 4).ok_or_else(|| {
+                proptest::test_runner::TestCaseError::fail(
+                    "external block must retain a 4-byte zero terminator",
+                )
+            })?;
+            prop_assert_eq!(terminator, [0, 0, 0, 0].as_slice());
+        }
+
         /// Removing all xattrs one-by-one leaves list empty.
         #[test]
         fn proptest_remove_all_leaves_empty(
