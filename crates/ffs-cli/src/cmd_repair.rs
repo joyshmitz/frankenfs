@@ -2850,6 +2850,18 @@ mod coordination_tests {
     }
 
     #[test]
+    fn build_btrfs_repair_group_spec_rejects_invalid_inputs() {
+        // Zero logical span.
+        assert!(build_btrfs_repair_group_spec(0, 1000, 0, 4096, &[]).is_err());
+        // Zero scrub block size.
+        assert!(build_btrfs_repair_group_spec(0, 1000, 4096, 0, &[]).is_err());
+        // Logical range overflow (start + bytes - 1 overflows u64).
+        assert!(build_btrfs_repair_group_spec(0, u64::MAX, u64::MAX, 4096, &[]).is_err());
+        // A logical start not covered by any chunk is rejected.
+        assert!(build_btrfs_repair_group_spec(0, 1000, 4096, 4096, &[]).is_err());
+    }
+
+    #[test]
     fn merge_scrub_reports_sums_counters_and_concatenates_findings() {
         use ffs_repair::scrub::{CorruptionKind, ScrubFinding};
         let finding = |block: u64| ScrubFinding {
