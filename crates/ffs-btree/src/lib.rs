@@ -1999,6 +1999,25 @@ mod tests {
     }
 
     #[test]
+    fn extent_arithmetic_guards_reject_overflow_and_out_of_range() {
+        // checked_physical_add: a normal sum, then a u64 overflow.
+        assert_eq!(checked_physical_add("t", 1000, 24).unwrap(), 1024);
+        assert!(checked_physical_add("t", u64::MAX, 1).is_err());
+
+        // checked_logical_range_end: a normal range end.
+        assert_eq!(checked_logical_range_end("t", 100, 24).unwrap(), 124);
+        // A range whose end is exactly the 32-bit boundary (2^32) is allowed.
+        assert_eq!(
+            checked_logical_range_end("t", 0, 1 << 32).unwrap(),
+            1 << 32
+        );
+        // A range exceeding the ext4 32-bit logical block space is rejected.
+        assert!(checked_logical_range_end("t", 1, 1 << 32).is_err());
+        // u64 overflow of start + count is rejected.
+        assert!(checked_logical_range_end("t", 1, u64::MAX).is_err());
+    }
+
+    #[test]
     fn search_empty_tree_returns_hole() {
         let cx = test_cx();
         let dev = MemBlockDevice::new(4096);
