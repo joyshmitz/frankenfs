@@ -2579,6 +2579,41 @@ mod tests {
     }
 
     #[test]
+    fn list_and_get_xattrs_hide_trusted_from_unprivileged_reader() {
+        let mut inode = make_inode(256);
+        let mut external = vec![0_u8; 4096];
+        let admin = XattrWriteAccess {
+            is_owner: true,
+            has_cap_fowner: true,
+            has_cap_sys_admin: true,
+        };
+        let unprivileged = XattrReadAccess::default();
+
+        set_xattr(&mut inode, Some(&mut external), "user.tag", b"u", admin).unwrap();
+        set_xattr(
+            &mut inode,
+            Some(&mut external),
+            "security.selinux",
+            b"context",
+            admin,
+        )
+        .unwrap();
+        set_xattr(&mut inode, Some(&mut external), "trusted.meta", b"t", admin).unwrap();
+
+        // An unprivileged listing must omit the trusted.* name (info-leak guard).
+        let mut names = list_xattrs_for_access(&inode, Some(&external), unprivileged).unwrap();
+        names.sort();
+        assert_eq!(names, vec!["security.selinux", "user.tag"]);
+        assert!(!names.contains(&"trusted.meta".to_string()));
+
+        // And getting the trusted value returns None (hidden), not the bytes.
+        assert_eq!(
+            get_xattr_for_access(&inode, Some(&external), "trusted.meta", unprivileged).unwrap(),
+            None
+        );
+    }
+
+    #[test]
     fn mixed_namespace_xattrs() {
         let mut inode = make_inode(256);
         let mut external = vec![0_u8; 4096];
