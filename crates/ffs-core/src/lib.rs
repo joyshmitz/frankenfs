@@ -36744,6 +36744,51 @@ mod tests {
         );
     }
 
+    #[test]
+    fn fast_commit_external_unwritten_extent_recovery() {
+        let dev = TestDevice::from_vec(build_ext4_image_with_extents());
+        let cx = Cx::for_testing();
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default())
+            .expect("open ext4 image");
+        let ino = InodeNumber(12);
+        let before = fs.read_inode(&cx, ino).expect("read inode 12");
+        let sb_bs = u64::from(fs.ext4_superblock().expect("sb").block_size);
+        let inode_size = usize::from(fs.ext4_superblock().expect("sb").inode_size);
+
+        let mut updated = before.clone();
+        updated.size = 6 * sb_bs;
+        let inode_raw = ffs_inode::serialize_inode(&updated, inode_size);
+
+        // An UNWRITTEN (preallocated) ADD_RANGE: recovery must preserve the
+        // unwritten state via the ee_len high-bit encoding so the region reads
+        // as zeros, not stale disk bytes.
+        let ops = vec![
+            ffs_journal::FcOperation::AddRange(ffs_journal::FcExtentRange {
+                ino: 12,
+                logical_block: 5,
+                len: 1,
+                physical_block: 60,
+                unwritten: true,
+            }),
+            ffs_journal::FcOperation::InodeUpdate(12, inode_raw),
+        ];
+        fs.apply_fast_commit_operations(&cx, &ops, true)
+            .expect("apply fc ops");
+
+        let after = fs.read_inode(&cx, ino).expect("re-read inode 12");
+        let extents = fs
+            .collect_extents_with_scope(&cx, &RequestScope::empty(), &after)
+            .expect("collect extents");
+        let recovered = extents
+            .iter()
+            .find(|e| e.logical_block == 5 && e.physical_start == 60)
+            .expect("unwritten extent must be recovered");
+        assert!(
+            recovered.is_unwritten(),
+            "recovered preallocated extent must stay unwritten, got {recovered:?}"
+        );
+    }
+
     /// bd-6nwjx SAFETY: when the ADD_RANGE extents would overflow the single
     /// leaf (forcing tree growth, which recovery cannot allocate for), the WHOLE
     /// inode recovery is skipped ATOMICALLY — the inode is left at its pre-FC
