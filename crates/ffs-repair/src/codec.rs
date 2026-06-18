@@ -626,6 +626,21 @@ fn try_direct_small_erasure_decode(
         return Ok(None);
     }
 
+    let Some(source_coefficient_encoder) = build_source_coefficient_encoder(source_count, seed)
+    else {
+        return Ok(None);
+    };
+
+    let Some(mut plan) = select_direct_repair_plan_without_projection(
+        decoder,
+        &corrupt_set.unique,
+        repair_symbols,
+        source_count,
+        &source_coefficient_encoder,
+    ) else {
+        return Ok(None);
+    };
+
     let known_source = read_known_source_symbols(
         cx,
         device,
@@ -634,23 +649,8 @@ fn try_direct_small_erasure_decode(
         corrupt_set,
         block_size,
     )?;
-
-    let Some(source_coefficient_encoder) = build_source_coefficient_encoder(source_count, seed)
-    else {
-        return Ok(None);
-    };
-
-    let Some(plan) = select_direct_repair_plan(
-        decoder,
-        &corrupt_set.unique,
-        repair_symbols,
-        source_count,
-        &known_source,
-        &source_coefficient_encoder,
-        block_size,
-    ) else {
-        return Ok(None);
-    };
+    project_known_source_contributions_source_major(&mut plan.rows, &known_source, block_size)
+        .expect("known source symbols were read at the device block size");
 
     let Some(solved) = solve_direct_repair_rows(&plan.rows, plan.selection)? else {
         return Ok(None);
@@ -691,15 +691,6 @@ fn try_direct_small_erasure_decode_owned(
         });
     }
 
-    let known_source = read_known_source_symbols(
-        cx,
-        device,
-        first_block,
-        source_block_count,
-        corrupt_set,
-        block_size,
-    )?;
-
     let Some(source_coefficient_encoder) = build_source_coefficient_encoder(source_count, seed)
     else {
         return Ok(OwnedDirectDecodeAttempt {
@@ -731,6 +722,14 @@ fn try_direct_small_erasure_decode_owned(
         });
     };
 
+    let known_source = read_known_source_symbols(
+        cx,
+        device,
+        first_block,
+        source_block_count,
+        corrupt_set,
+        block_size,
+    )?;
     project_known_source_contributions_source_major(&mut rows, &known_source, block_size)
         .expect("known source symbols were read at the device block size");
 
@@ -882,6 +881,7 @@ fn build_known_basis_encoder(
     SystematicEncoder::new(&source, symbol_size, seed)
 }
 
+#[cfg(test)]
 fn select_direct_repair_plan(
     decoder: &InactivationDecoder,
     missing: &[u32],
@@ -890,6 +890,24 @@ fn select_direct_repair_plan(
     known_source: &[KnownSourceSymbol],
     source_coefficient_encoder: &SystematicEncoder,
     block_size: usize,
+) -> Option<DirectRepairPlan> {
+    let mut plan = select_direct_repair_plan_without_projection(
+        decoder,
+        missing,
+        repair_symbols,
+        source_count,
+        source_coefficient_encoder,
+    )?;
+    project_known_source_contributions_source_major(&mut plan.rows, known_source, block_size)?;
+    Some(plan)
+}
+
+fn select_direct_repair_plan_without_projection(
+    decoder: &InactivationDecoder,
+    missing: &[u32],
+    repair_symbols: &[(u32, Vec<u8>)],
+    source_count: usize,
+    source_coefficient_encoder: &SystematicEncoder,
 ) -> Option<DirectRepairPlan> {
     if source_count > DIRECT_SMALL_ERASURE_MAX_SOURCE_BLOCKS {
         return None;
@@ -918,8 +936,6 @@ fn select_direct_repair_plan(
             residual: actual.clone(),
         });
     }
-    project_known_source_contributions_source_major(&mut rows, known_source, block_size)?;
-
     let selection = select_direct_repair_rows(&rows, missing.len())?;
     Some(DirectRepairPlan { rows, selection })
 }
@@ -1774,6 +1790,47 @@ mod tests {
             device.read_count(),
             reads_before_decode,
             "malformed repair symbol decode must fail before reading source blocks"
+        );
+    }
+
+    #[test]
+    fn decode_invalid_direct_repair_row_reads_intact_sources_once() {
+        let cx = Cx::for_testing();
+        let k = 8;
+        let block_size = 64;
+        let device = setup_device(k, block_size);
+        let uuid = test_uuid();
+        let group = GroupNumber(0);
+        let seed = repair_seed(&uuid, group);
+        let decoder = InactivationDecoder::new(k as usize, block_size as usize, seed);
+        let invalid_esi = [u32::MAX, u32::MAX - 1, u32::MAX - 2]
+            .into_iter()
+            .find(|&esi| decoder.repair_equation(esi).is_err())
+            .expect("test K must expose an overflow-invalid repair ESI");
+        let repair_data = vec![(invalid_esi, vec![0_u8; block_size as usize])];
+        let corrupt = [0_u32];
+
+        let reads_before_decode = device.read_count();
+        let result = decode_group(
+            &cx,
+            &device,
+            &uuid,
+            group,
+            BlockNumber(0),
+            k,
+            &corrupt,
+            &repair_data,
+        );
+
+        let error = result.expect_err("invalid repair equation must fail closed");
+        assert!(
+            matches!(&error, FfsError::RepairFailed(msg) if msg.contains("repair_equation failed")),
+            "expected RepairFailed about invalid repair equation, got: {error:?}"
+        );
+        assert_eq!(
+            device.read_count() - reads_before_decode,
+            (k as usize) - corrupt.len(),
+            "direct-row rejection must not pre-read intact sources before fallback"
         );
     }
 
