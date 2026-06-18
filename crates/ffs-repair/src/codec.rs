@@ -1835,6 +1835,25 @@ mod tests {
     }
 
     #[test]
+    fn validate_repair_symbol_lengths_rejects_wrong_length() {
+        let group = GroupNumber(3);
+        let block_size = 4096_usize;
+
+        // All symbols matching block_size validate.
+        let good: Vec<(u32, Vec<u8>)> = vec![(0, vec![0_u8; 4096]), (1, vec![0_u8; 4096])];
+        assert!(validate_repair_symbol_lengths(good.iter(), block_size, group).is_ok());
+
+        // No symbols is trivially valid.
+        let empty: Vec<(u32, Vec<u8>)> = vec![];
+        assert!(validate_repair_symbol_lengths(empty.iter(), block_size, group).is_ok());
+
+        // A symbol whose payload length differs from block_size is refused.
+        let bad: Vec<(u32, Vec<u8>)> = vec![(0, vec![0_u8; 4096]), (5, vec![0_u8; 100])];
+        let err = validate_repair_symbol_lengths(bad.iter(), block_size, group).unwrap_err();
+        assert!(matches!(err, FfsError::RepairFailed(_)), "got {err:?}");
+    }
+
+    #[test]
     fn decode_rejects_out_of_range_corrupt_index_without_reads() {
         let cx = Cx::for_testing();
         let k = 4;
