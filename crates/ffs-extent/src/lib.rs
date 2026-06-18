@@ -5381,6 +5381,14 @@ ExtentMapping { logical_start: 5, physical_start: 134, count: 2, unwritten: true
             }
 
             prop_assert_eq!(got, model, "collapse_range map diverged from model");
+
+            let vacated_tail =
+                map_logical_to_physical(&cx, &dev, &root, new_len, u64::from(clen)).unwrap();
+            prop_assert!(
+                vacated_tail.iter().all(|m| m.physical_start == 0),
+                "collapse_range left stale mappings in vacated tail: {:?}",
+                vacated_tail
+            );
         }
 
         /// insert_range (the mirror of collapse_range) shifts the tail right by
