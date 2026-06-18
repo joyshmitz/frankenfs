@@ -781,13 +781,26 @@ pub trait VectoredBlockDevice: BlockDevice {
                 block.0
             )));
         }
+        let block_size = self.block_size() as usize;
+        if block_size == 0 && !blocks.is_empty() {
+            return Err(FfsError::Format(
+                "read_vectored: block size must be nonzero".to_owned(),
+            ));
+        }
         trace!(
             target: "ffs::block::io",
             event = "read_vectored",
             block_count = blocks.len()
         );
         for (block, buf) in blocks.iter().copied().zip(bufs.iter_mut()) {
-            *buf = self.read_block(cx, block)?;
+            let read = self.read_block(cx, block)?;
+            let actual_len = read.as_slice().len();
+            if actual_len != block_size {
+                return Err(FfsError::Format(format!(
+                    "read_block returned wrong size: got={actual_len} expected={block_size}"
+                )));
+            }
+            *buf = read;
         }
         cx_checkpoint(cx)?;
         Ok(())
@@ -7408,6 +7421,27 @@ mod tests {
         fn sync(&self, _cx: &Cx) -> Result<()> {
             Ok(())
         }
+    }
+
+    #[test]
+    fn default_vectored_read_rejects_short_block_without_replacing_buffer() {
+        let cx = Cx::for_testing();
+        let dev = ShortReadBlockDevice;
+        let blocks = [BlockNumber(0)];
+        let mut bufs = [BlockBuf::new(vec![0xAA; 4])];
+
+        let err = dev
+            .read_vectored(&blocks, &mut bufs, &cx)
+            .expect_err("short scalar block should fail closed");
+
+        assert!(
+            matches!(err, FfsError::Format(ref message)
+                if message.contains("read_block returned wrong size")
+                    && message.contains("got=2")
+                    && message.contains("expected=4")),
+            "expected block-size Format error, got {err:?}"
+        );
+        assert_eq!(bufs[0].as_slice(), &[0xAA; 4]);
     }
 
     #[test]
