@@ -4655,6 +4655,24 @@ ExtentMapping { logical_start: 5, physical_start: 134, count: 2, unwritten: true
     }
 
     #[test]
+    fn encode_extent_len_rejects_zero_and_written_overflow() {
+        // Zero length is rejected by both encoders.
+        let err = encode_written_len("w", 0).unwrap_err();
+        assert!(format!("{err}").contains("must be nonzero"), "got {err}");
+        let err = encode_unwritten_len("u", 0).unwrap_err();
+        assert!(format!("{err}").contains("must be nonzero"), "got {err}");
+
+        // A written length above EXT_INIT_MAX_LEN (32768) is rejected; the value
+        // 32768 itself is the accepted maximum (covered by the split-len tests).
+        let err = encode_written_len("w", u64::from(EXT_INIT_MAX_LEN) + 1).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("exceeds") && msg.contains("32768"),
+            "got {msg}",
+        );
+    }
+
+    #[test]
     fn encode_split_extent_len_preserves_written_boundary() {
         let raw_len = encode_split_extent_len("test", u32::from(EXT_INIT_MAX_LEN), false).unwrap();
         let ext = Ext4Extent {
