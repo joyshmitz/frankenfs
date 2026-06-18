@@ -8964,6 +8964,31 @@ mod tests {
     }
 
     #[test]
+    fn validate_dir_block_slice_len_rejects_bad_inputs() {
+        // A zero block_size is rejected.
+        let err = super::validate_dir_block_slice_len(&[0_u8; 16], 0)
+            .expect_err("zero block_size must be rejected");
+        assert!(
+            matches!(err, ParseError::InvalidField { reason, .. } if reason.contains("must be non-zero")),
+            "got {err:?}",
+        );
+
+        // A block slice longer than the declared block_size is rejected.
+        let err = super::validate_dir_block_slice_len(&[0_u8; 100], 64)
+            .expect_err("oversized slice must be rejected");
+        assert!(
+            matches!(err, ParseError::InvalidField { reason, .. } if reason.contains("exceeds declared block_size")),
+            "got {err:?}",
+        );
+
+        // Slices within the declared block_size are accepted (including empty
+        // and exactly block_size).
+        assert!(super::validate_dir_block_slice_len(&[0_u8; 64], 64).is_ok());
+        assert!(super::validate_dir_block_slice_len(&[0_u8; 32], 64).is_ok());
+        assert!(super::validate_dir_block_slice_len(&[], 64).is_ok());
+    }
+
+    #[test]
     #[allow(clippy::cast_possible_truncation)]
     fn parse_dir_block_basic() {
         let block_size = 4096_u32;
