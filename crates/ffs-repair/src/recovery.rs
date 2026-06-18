@@ -54,27 +54,51 @@ impl RecoveryWriteback for DirectDeviceRecoveryWriteback {
         device: &dyn BlockDevice,
         recovered: &[RecoveryWritebackBlock<'_>],
     ) -> Result<()> {
-        for block in recovered {
-            let observed = device.read_block(cx, block.block)?;
-            if observed.as_slice() != block.expected_current {
-                return Err(FfsError::RepairFailed(format!(
-                    "recovery writeback compare failed at block {}",
-                    block.block.0
-                )));
-            }
+        use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
+
+        // Pre-write compare-and-write gate: confirm each block still matches the
+        // scrub-time bytes. The reads are independent, so overlap them across the
+        // rayon pool (a blocking read parks its worker); consume the per-block
+        // outcomes in index order so the first compare failure reported is
+        // identical to the serial loop's (I/O-overlap, bd-307e4/bd-g5v1s family).
+        let gate: Vec<Result<()>> = recovered
+            .par_iter()
+            .map(|block| {
+                let observed = device.read_block(cx, block.block)?;
+                if observed.as_slice() != block.expected_current {
+                    return Err(FfsError::RepairFailed(format!(
+                        "recovery writeback compare failed at block {}",
+                        block.block.0
+                    )));
+                }
+                Ok(())
+            })
+            .collect();
+        for outcome in gate {
+            outcome?;
         }
+        // Writes stay serial: the gate has passed, and write ordering / durability
+        // semantics are left untouched.
         for block in recovered {
             device.write_block(cx, block.block, block.data)?;
         }
         device.sync(cx)?;
-        for block in recovered {
-            let observed = device.read_block(cx, block.block)?;
-            if observed.as_slice() != block.data {
-                return Err(FfsError::RepairFailed(format!(
-                    "post-repair verification failed at block {}",
-                    block.block.0
-                )));
-            }
+        // Post-repair verification: same independent-read overlap as the gate.
+        let verify: Vec<Result<()>> = recovered
+            .par_iter()
+            .map(|block| {
+                let observed = device.read_block(cx, block.block)?;
+                if observed.as_slice() != block.data {
+                    return Err(FfsError::RepairFailed(format!(
+                        "post-repair verification failed at block {}",
+                        block.block.0
+                    )));
+                }
+                Ok(())
+            })
+            .collect();
+        for outcome in verify {
+            outcome?;
         }
         Ok(())
     }
