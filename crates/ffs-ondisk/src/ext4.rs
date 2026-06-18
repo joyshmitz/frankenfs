@@ -13253,6 +13253,55 @@ mod tests {
     }
 
     #[test]
+    fn is_fast_symlink_respects_size_boundary_and_conditions() {
+        let make = |mode: u16, size: u64, flags: u32| Ext4Inode {
+            mode,
+            uid: 0,
+            gid: 0,
+            size,
+            links_count: 1,
+            blocks: 0,
+            flags,
+            version: 0,
+            generation: 0,
+            file_acl: 0,
+            atime: 0,
+            ctime: 0,
+            mtime: 0,
+            dtime: 0,
+            atime_extra: 0,
+            ctime_extra: 0,
+            mtime_extra: 0,
+            crtime: 0,
+            crtime_extra: 0,
+            extra_isize: 32,
+            checksum: 0,
+            version_hi: 0,
+            projid: 0,
+            extent_bytes: vec![0_u8; 60].into(),
+            xattr_ibody: Vec::new(),
+            number: 0,
+        };
+        let symlink = 0o120_000_u16; // S_IFLNK
+        let regular = 0o100_000_u16; // S_IFREG
+
+        // Size boundary: 60 bytes is an inline (fast) symlink, 61 is a slow one.
+        assert!(make(symlink, 60, 0).is_fast_symlink());
+        assert!(!make(symlink, 61, 0).is_fast_symlink());
+
+        // A symlink that uses extents is never fast (target lives in blocks).
+        assert!(!make(symlink, 10, EXT4_EXTENTS_FL).is_fast_symlink());
+
+        // A non-symlink is never a fast symlink.
+        assert!(!make(regular, 10, 0).is_fast_symlink());
+
+        // fast_symlink_target follows is_fast_symlink.
+        assert!(make(symlink, 60, 0).fast_symlink_target().is_some());
+        assert!(make(symlink, 61, 0).fast_symlink_target().is_none());
+        assert!(make(regular, 10, 0).fast_symlink_target().is_none());
+    }
+
+    #[test]
     fn fast_symlink_detection_and_reading() {
         let image = build_symlink_test_image();
         let reader = Ext4ImageReader::new(&image).unwrap();
