@@ -10925,6 +10925,49 @@ mod tests {
     }
 
     #[test]
+    fn ssi_single_rw_edge_is_not_a_dangerous_structure() {
+        let mut pivot = Transaction::new(TxnId(30), Snapshot { high: CommitSeq(0) });
+        pivot.record_read(BlockNumber(0), CommitSeq(11));
+        pivot.record_read(BlockNumber(1), CommitSeq(12));
+        pivot.stage_write(BlockNumber(2), vec![1; 64]);
+        pivot.stage_write(BlockNumber(3), vec![1; 64]);
+
+        // Only an INCOMING edge: the record writes a block the pivot read, but
+        // reads nothing the pivot wrote. One edge is not a pivot.
+        let incoming_only = CommittedTxnRecord {
+            txn_id: TxnId(31),
+            commit_seq: CommitSeq(5),
+            snapshot: Snapshot { high: CommitSeq(0) },
+            write_set: BTreeSet::from([BlockNumber(0)]),
+            read_set: [(BlockNumber(99), CommitSeq(1))].into_iter().collect(),
+        };
+        assert!(ssi_incoming_edge(&pivot, &incoming_only).is_some());
+        assert!(ssi_outgoing_edge(&pivot, &incoming_only).is_none());
+        assert!(
+            detect_ssi_dangerous_structure(&pivot, [&incoming_only])
+                .1
+                .is_none()
+        );
+
+        // Only an OUTGOING edge: the record reads a block the pivot wrote, but
+        // writes nothing the pivot read.
+        let outgoing_only = CommittedTxnRecord {
+            txn_id: TxnId(32),
+            commit_seq: CommitSeq(5),
+            snapshot: Snapshot { high: CommitSeq(0) },
+            write_set: BTreeSet::from([BlockNumber(99)]),
+            read_set: [(BlockNumber(2), CommitSeq(1))].into_iter().collect(),
+        };
+        assert!(ssi_incoming_edge(&pivot, &outgoing_only).is_none());
+        assert!(ssi_outgoing_edge(&pivot, &outgoing_only).is_some());
+        assert!(
+            detect_ssi_dangerous_structure(&pivot, [&outgoing_only])
+                .1
+                .is_none()
+        );
+    }
+
+    #[test]
     fn ssi_span_guard_preserves_min_intersection_tiebreaks() {
         use sha2::{Digest, Sha256};
 
