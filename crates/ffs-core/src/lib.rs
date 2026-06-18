@@ -50024,6 +50024,33 @@ mod tests {
         Ok(None)
     }
 
+    fn linear_read_dir_reference(
+        fs: &OpenFs,
+        cx: &Cx,
+        scope: &RequestScope,
+        dir_inode: &Ext4Inode,
+    ) -> Result<Vec<Ext4DirEntry>, FfsError> {
+        let bs = u64::from(fs.block_size());
+        let block_size = fs.block_size();
+        let num_blocks = dir_logical_block_count(dir_inode.size, bs)?;
+        let mut entries = Vec::new();
+
+        for lb in 0..num_blocks {
+            let Some((phys, unwritten)) = fs.resolve_extent(cx, scope, dir_inode, lb)? else {
+                continue;
+            };
+            if unwritten {
+                continue;
+            }
+            let block_data = fs.read_block_with_scope(cx, scope, BlockNumber(phys))?;
+            let (block_entries, _tail) =
+                parse_dir_block(&block_data, block_size).map_err(|e| parse_to_ffs_error(&e))?;
+            entries.extend(block_entries);
+        }
+
+        Ok(entries)
+    }
+
     #[test]
     fn ext4_runtime_htree_lookup_matches_linear_scan_reference() {
         let Some((fs, cx, htree_inode)) = open_ext4_dir_index_golden() else {
@@ -50130,6 +50157,56 @@ mod tests {
             assert_eq!(
                 parallel, serial,
                 "parallel vs serial mismatch for absent {absent}"
+            );
+        }
+    }
+
+    /// A multi-block non-htree directory exercises the parallel cold-run reader
+    /// inside `read_dir_with_scope`. Compare it with a serial block-by-block
+    /// oracle so ordering, record lengths, and hole/unwritten skipping stay
+    /// byte-for-byte equivalent (bd-ygvfs).
+    #[test]
+    fn ext4_parallel_read_dir_matches_serial_multiblock_bd_ygvfs() {
+        let Some((fs, _dev, _tmp, _image)) =
+            open_ext4_mke2fs_features(16, "extent,fast_commit,^metadata_csum,^dir_index")
+        else {
+            return; // e2fsprogs unavailable; skip.
+        };
+        let cx = Cx::for_testing();
+        let scope = RequestScope::empty();
+
+        let names: Vec<String> = (0..180).map(|i| format!("entry_{i:04}.dat")).collect();
+        for name in &names {
+            fs.create(&cx, InodeNumber(2), OsStr::new(name), 0o644, 0, 0)
+                .unwrap_or_else(|err| panic!("create {name}: {err}"));
+        }
+
+        let dir_inode = fs.read_inode(&cx, InodeNumber(2)).expect("read root inode");
+        assert!(
+            !dir_inode.has_htree_index(),
+            "test needs a linear (non-htree) directory to exercise parallel read_dir"
+        );
+        let bs = u64::from(fs.block_size());
+        let num_blocks = dir_logical_block_count(dir_inode.size, bs).expect("dir block count");
+        assert!(
+            num_blocks > 1,
+            "directory must span multiple blocks (got {num_blocks})"
+        );
+
+        let parallel = fs
+            .read_dir_with_scope(&cx, &scope, &dir_inode)
+            .expect("parallel read_dir");
+        let serial =
+            linear_read_dir_reference(&fs, &cx, &scope, &dir_inode).expect("serial read_dir");
+        assert_eq!(
+            parallel, serial,
+            "parallel read_dir must match serial block order and parsed entries"
+        );
+
+        for name in &names {
+            assert!(
+                parallel.iter().any(|entry| entry.name == name.as_bytes()),
+                "read_dir output must contain {name}"
             );
         }
     }
