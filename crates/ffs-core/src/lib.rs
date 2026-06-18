@@ -73751,6 +73751,31 @@ mod tests {
     }
 
     #[test]
+    fn btrfs_link_directory_and_existing_name_rejected() {
+        let (fs, cx) = open_writable_btrfs();
+        let root = InodeNumber(1);
+        let dir = fs
+            .mkdir(&cx, root, OsStr::new("dir"), 0o755, 0, 0)
+            .expect("mkdir");
+        let file = fs
+            .create(&cx, root, OsStr::new("file.txt"), 0o644, 0, 0)
+            .expect("create");
+
+        // Hard-linking a directory is forbidden (it would allow cycles) -> EPERM.
+        let e1 = fs
+            .link(&cx, dir.ino, root, OsStr::new("dirlink"))
+            .unwrap_err();
+        assert_eq!(e1.to_errno(), libc::EPERM);
+        assert!(fs.lookup(&cx, root, OsStr::new("dirlink")).is_err());
+
+        // Linking onto an already-existing name -> EEXIST.
+        let e2 = fs
+            .link(&cx, file.ino, root, OsStr::new("dir"))
+            .unwrap_err();
+        assert_eq!(e2.to_errno(), libc::EEXIST);
+    }
+
+    #[test]
     fn btrfs_hardlink_shares_inode_data() {
         let (fs, cx) = open_writable_btrfs();
         let parent = InodeNumber(1);
