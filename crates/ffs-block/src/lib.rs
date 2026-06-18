@@ -341,13 +341,19 @@ pub trait ByteDevice: Send + Sync {
                 .checked_add(len)
                 .ok_or_else(|| FfsError::Format("read length overflows u64".to_owned()))
         })?;
-        offset
+        let end = offset
             .0
             .checked_add(total_len)
             .ok_or_else(|| FfsError::Format("read range overflows u64".to_owned()))?;
         if total_len == 0 {
             cx_checkpoint(cx)?;
             return Ok(());
+        }
+        let len_bytes = self.len_bytes();
+        if end > len_bytes {
+            return Err(FfsError::Format(format!(
+                "read out of bounds: offset={offset} len={total_len} device_len={len_bytes}"
+            )));
         }
         let mut next_offset = offset.0;
         for buf in bufs {
@@ -7221,6 +7227,31 @@ mod tests {
         assert!(dev.read_calls().is_empty());
         assert_eq!(first, [0xAA; 2]);
         assert_eq!(second, [0xBB; 1]);
+    }
+
+    #[test]
+    fn default_vectored_read_rejects_bounds_before_partial_reads() {
+        let cx = Cx::for_testing();
+        let dev = ScalarOnlyByteDevice::new(vec![10, 11, 12, 13]);
+        let mut first = [0xAA_u8; 1];
+        let mut second = [0xBB_u8; 2];
+        let mut bufs = [IoSliceMut::new(&mut first), IoSliceMut::new(&mut second)];
+
+        let err = dev
+            .read_vectored_exact_at(&cx, ByteOffset(2), &mut bufs)
+            .expect_err("out-of-bounds vectored read should fail before scalar reads");
+
+        assert!(
+            matches!(err, FfsError::Format(ref message)
+                if message.contains("read out of bounds")
+                    && message.contains("offset=2")
+                    && message.contains("len=3")
+                    && message.contains("device_len=4")),
+            "expected read-bounds Format error, got {err:?}"
+        );
+        assert!(dev.read_calls().is_empty());
+        assert_eq!(first, [0xAA; 1]);
+        assert_eq!(second, [0xBB; 2]);
     }
 
     #[test]
