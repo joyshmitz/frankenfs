@@ -73575,6 +73575,27 @@ mod tests {
     }
 
     #[test]
+    fn btrfs_rmdir_non_empty_returns_enotempty() {
+        let (fs, cx) = open_writable_btrfs();
+        let root = InodeNumber(1);
+        let dir = fs
+            .mkdir(&cx, root, OsStr::new("nonempty_dir"), 0o755, 0, 0)
+            .expect("mkdir");
+        fs.create(&cx, dir.ino, OsStr::new("child.txt"), 0o644, 0, 0)
+            .expect("create child");
+
+        // rmdir of a non-empty directory must fail with ENOTEMPTY.
+        let err = fs
+            .rmdir(&cx, root, OsStr::new("nonempty_dir"))
+            .unwrap_err();
+        assert_eq!(err.to_errno(), libc::ENOTEMPTY);
+
+        // The directory and its child remain intact (not orphaned).
+        assert!(fs.lookup(&cx, root, OsStr::new("nonempty_dir")).is_ok());
+        assert!(fs.lookup(&cx, dir.ino, OsStr::new("child.txt")).is_ok());
+    }
+
+    #[test]
     fn btrfs_rename_overwrites_existing_target() {
         let (fs, cx) = open_writable_btrfs();
         let parent = InodeNumber(1);
