@@ -55493,6 +55493,22 @@ mod tests {
     }
 
     #[test]
+    fn ext4_checked_inode_blocks_delta_bounds() {
+        let ino = InodeNumber(7);
+        // Normal increment/decrement (i_blocks counts 512-byte sectors).
+        assert_eq!(OpenFs::ext4_checked_inode_blocks_delta(100, ino, 8).unwrap(), 108);
+        assert_eq!(OpenFs::ext4_checked_inode_blocks_delta(100, ino, -8).unwrap(), 92);
+        assert_eq!(OpenFs::ext4_checked_inode_blocks_delta(100, ino, 0).unwrap(), 100);
+        // Overflow past u64::MAX.
+        assert!(OpenFs::ext4_checked_inode_blocks_delta(u64::MAX, ino, 1).is_err());
+        // Releasing more sectors than the inode holds would wrap i_blocks huge.
+        assert!(OpenFs::ext4_checked_inode_blocks_delta(0, ino, -1).is_err());
+        assert!(OpenFs::ext4_checked_inode_blocks_delta(8, ino, -16).is_err());
+        // A delta that does not fit u64 is rejected.
+        assert!(OpenFs::ext4_checked_inode_blocks_delta(0, ino, i128::from(u64::MAX) + 1).is_err());
+    }
+
+    #[test]
     fn ext4_max_file_size_scales_with_block_size_and_rejects_above() {
         // The extent tree addresses 2^32 logical blocks, so the max file size
         // is 2^32 * block_size: 4 TiB / 8 TiB / 16 TiB for 1K / 2K / 4K blocks.
