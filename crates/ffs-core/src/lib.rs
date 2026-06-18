@@ -35591,6 +35591,29 @@ mod tests {
     }
 
     #[test]
+    fn inode_file_type_maps_directory_regular_and_devices() {
+        // Complements inode_file_type_maps_symlink_fifo_socket_and_unknown by
+        // pinning the common formats directly (they were only hit indirectly).
+        let with_mode = |mode: u16| make_test_inode(mode, 0, 0);
+        assert_eq!(
+            inode_file_type(&with_mode(ffs_types::S_IFREG | 0o644)),
+            FileType::RegularFile
+        );
+        assert_eq!(
+            inode_file_type(&with_mode(ffs_types::S_IFDIR | 0o755)),
+            FileType::Directory
+        );
+        assert_eq!(
+            inode_file_type(&with_mode(ffs_types::S_IFBLK | 0o644)),
+            FileType::BlockDevice
+        );
+        assert_eq!(
+            inode_file_type(&with_mode(ffs_types::S_IFCHR | 0o644)),
+            FileType::CharDevice
+        );
+    }
+
+    #[test]
     fn ext4_flags_to_xflags_projects_each_flag_exactly() {
         use ffs_types::{
             EXT4_APPEND_FL, EXT4_IMMUTABLE_FL, EXT4_NOATIME_FL, EXT4_NODUMP_FL, EXT4_PROJINHERIT_FL,
