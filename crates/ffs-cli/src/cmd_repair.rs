@@ -2850,6 +2850,29 @@ mod coordination_tests {
     }
 
     #[test]
+    fn block_range_contains_handles_boundaries_and_overflow() {
+        let start = BlockNumber(100);
+        // An empty range contains nothing.
+        assert!(!block_range_contains(start, 0, BlockNumber(100)));
+        // A target below the start is excluded.
+        assert!(!block_range_contains(start, 10, BlockNumber(99)));
+        // The first and last blocks of [100, 110) are included.
+        assert!(block_range_contains(start, 10, BlockNumber(100)));
+        assert!(block_range_contains(start, 10, BlockNumber(109)));
+        // One past the end is excluded.
+        assert!(!block_range_contains(start, 10, BlockNumber(110)));
+        // count == u64::MAX covers everything at or above start.
+        assert!(block_range_contains(start, u64::MAX, BlockNumber(u64::MAX)));
+        assert!(!block_range_contains(start, u64::MAX, BlockNumber(99)));
+        // A range whose end overflows u64 still contains targets at/above start.
+        assert!(block_range_contains(
+            BlockNumber(u64::MAX - 5),
+            100,
+            BlockNumber(u64::MAX)
+        ));
+    }
+
+    #[test]
     fn partition_scrub_range_covers_exactly_without_overlap() {
         // No work when count or workers is zero.
         assert!(partition_scrub_range(BlockNumber(0), 0, 4).is_empty());
