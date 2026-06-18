@@ -2018,6 +2018,21 @@ mod tests {
     }
 
     #[test]
+    fn clamp_to_u16_and_u32_saturate_without_wrapping() {
+        // In-range values are the identity.
+        assert_eq!(clamp_to_u16(100), 100);
+        assert_eq!(clamp_to_u16(u64::from(u16::MAX)), u16::MAX);
+        // Above the field width: saturate at the max, never wrap.
+        assert_eq!(clamp_to_u16(u64::from(u16::MAX) + 1), u16::MAX);
+        assert_eq!(clamp_to_u16(u64::MAX), u16::MAX);
+
+        assert_eq!(clamp_to_u32(100), 100);
+        assert_eq!(clamp_to_u32(u64::from(u32::MAX)), u32::MAX);
+        assert_eq!(clamp_to_u32(u64::from(u32::MAX) + 1), u32::MAX);
+        assert_eq!(clamp_to_u32(u64::MAX), u32::MAX);
+    }
+
+    #[test]
     fn search_leaf_bounded_returns_found_hole_and_rejects_zero_length() {
         let ext = |logical_block, raw_len, physical_start| Ext4Extent {
             logical_block,
