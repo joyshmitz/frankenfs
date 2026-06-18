@@ -96,7 +96,25 @@ fn validate_reserved_tail(block_len: usize, reserved_tail: usize) -> Result<usiz
 }
 
 fn is_interior_htree_dx_node_block(block: &[u8]) -> bool {
-    read_u32_le(block, 0) == Some(0) && read_u16_le(block, 4).map(usize::from) == Some(block.len())
+    if read_u32_le(block, 0) != Some(0)
+        || read_u16_le(block, 4).map(usize::from) != Some(block.len())
+    {
+        return false;
+    }
+
+    let Some(limit) = read_u16_le(block, 8) else {
+        return false;
+    };
+    let Some(count) = read_u16_le(block, 10) else {
+        return false;
+    };
+    if count == 0 || count > limit {
+        return false;
+    }
+
+    8_usize
+        .checked_add(usize::from(count) * 8)
+        .is_some_and(|end| end <= block.len())
 }
 
 fn write_entry(
@@ -166,6 +184,9 @@ pub fn add_entry(
     let need = required_rec_len(name.len());
     let limit = validate_reserved_tail(block.len(), reserved_tail)?;
     if need > limit {
+        return Err(FfsError::NoSpace);
+    }
+    if is_interior_htree_dx_node_block(block) {
         return Err(FfsError::NoSpace);
     }
 
@@ -713,6 +734,15 @@ mod tests {
         assert_eq!(entry.name.len(), name_len);
     }
 
+    fn make_interior_htree_dx_node_block(block_size: usize) -> Vec<u8> {
+        let mut node = vec![0u8; block_size];
+        node[4..6].copy_from_slice(&u16::try_from(block_size).unwrap().to_le_bytes());
+        node[8..10].copy_from_slice(&7_u16.to_le_bytes()); // dx_countlimit.limit
+        node[10..12].copy_from_slice(&1_u16.to_le_bytes()); // dx_countlimit.count
+        node[12..16].copy_from_slice(&3_u32.to_le_bytes()); // entry 0 block
+        node
+    }
+
     macro_rules! add_entry_alignment_boundary_test {
         ($name:ident, $len:expr) => {
             #[test]
@@ -1186,28 +1216,21 @@ mod tests {
         // this returned Err(Corruption) for reserved_tail > 0 because the fake
         // dirent's rec_len (block_size) exceeds the usable area (block_size-12).
         let bs = 4096_usize;
-        let mut node = vec![0u8; bs];
-        // inode 0 (bytes 0..4 already zero); rec_len spans the entire block.
-        node[4..6].copy_from_slice(&u16::try_from(bs).unwrap().to_le_bytes());
-        // Arbitrary index bytes after the 8-byte fake dirent.
-        node[8..].fill(0xAB);
+        let mut node = make_interior_htree_dx_node_block(bs);
         // metadata_csum dir (reserved_tail = 12): must be skipped, not rejected.
         assert!(
             !remove_entry(&mut node, b"victim.txt", 12).unwrap(),
             "dx_node must be reported as not-present on metadata_csum"
         );
         // Non-csum (reserved_tail = 0) must behave identically.
-        let mut node2 = vec![0u8; bs];
-        node2[4..6].copy_from_slice(&u16::try_from(bs).unwrap().to_le_bytes());
+        let mut node2 = make_interior_htree_dx_node_block(bs);
         assert!(!remove_entry(&mut node2, b"victim.txt", 0).unwrap());
     }
 
     #[test]
     fn retarget_entry_skips_interior_htree_dx_node_block_bd_xmh5g_347() {
         let bs = 4096_usize;
-        let mut node = vec![0u8; bs];
-        node[4..6].copy_from_slice(&u16::try_from(bs).unwrap().to_le_bytes());
-        node[8..].fill(0xAB);
+        let mut node = make_interior_htree_dx_node_block(bs);
         let before = node.clone();
 
         assert!(
@@ -1216,9 +1239,25 @@ mod tests {
         );
         assert_eq!(node, before, "skipping a dx_node must not mutate it");
 
-        let mut node2 = vec![0u8; bs];
-        node2[4..6].copy_from_slice(&u16::try_from(bs).unwrap().to_le_bytes());
+        let mut node2 = make_interior_htree_dx_node_block(bs);
         assert!(!swap_inode_in_entry(&mut node2, b"victim.txt", 42, 0).unwrap());
+    }
+
+    #[test]
+    fn add_entry_skips_interior_htree_dx_node_block_bd_dir_add_skips_dx_node() {
+        let bs = 4096_usize;
+        let mut node = make_interior_htree_dx_node_block(bs);
+        let before = node.clone();
+
+        let err = add_entry(&mut node, 42, b"new", Ext4FileType::RegFile, 12).unwrap_err();
+        assert!(matches!(err, FfsError::NoSpace), "got {err:?}");
+        assert_eq!(node, before, "metadata-csum dx_node must not be mutated");
+
+        let mut node2 = make_interior_htree_dx_node_block(bs);
+        let before2 = node2.clone();
+        let err = add_entry(&mut node2, 42, b"new", Ext4FileType::RegFile, 0).unwrap_err();
+        assert!(matches!(err, FfsError::NoSpace), "got {err:?}");
+        assert_eq!(node2, before2, "non-csum dx_node must not be reused as a deleted slot");
     }
 
     #[test]
