@@ -54393,6 +54393,44 @@ mod tests {
     }
 
     #[test]
+    fn ext4_directory_is_descendant_of_walks_multiple_levels() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let a = fs.mkdir(&cx, root, OsStr::new("a"), 0o755, 0, 0).unwrap();
+        let mid = fs.mkdir(&cx, a.ino, OsStr::new("mid"), 0o755, 0, 0).unwrap();
+        let deep = fs
+            .mkdir(&cx, mid.ino, OsStr::new("deep"), 0o755, 0, 0)
+            .unwrap();
+        let other = fs
+            .mkdir(&cx, root, OsStr::new("other"), 0o755, 0, 0)
+            .unwrap();
+
+        // deep -> mid -> a: a descendant across multiple '..' levels.
+        assert!(fs
+            .ext4_directory_is_descendant_of(&cx, deep.ino, a.ino)
+            .unwrap());
+        // mid -> a: one level.
+        assert!(fs
+            .ext4_directory_is_descendant_of(&cx, mid.ino, a.ino)
+            .unwrap());
+        // The inverse direction is false: a is not under deep.
+        assert!(!fs
+            .ext4_directory_is_descendant_of(&cx, a.ino, deep.ino)
+            .unwrap());
+        // A sibling subtree is not a descendant.
+        assert!(!fs
+            .ext4_directory_is_descendant_of(&cx, other.ino, a.ino)
+            .unwrap());
+        // A directory is reported as a descendant of itself (rename rejects mv a a).
+        assert!(fs
+            .ext4_directory_is_descendant_of(&cx, a.ino, a.ino)
+            .unwrap());
+    }
+
+    #[test]
     fn ext4_rename2_exchange_directory_with_own_child_returns_einval() {
         let Some(fs) = open_writable_ext4() else {
             return;
