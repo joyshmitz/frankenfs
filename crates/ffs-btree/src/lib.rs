@@ -100,9 +100,9 @@ pub fn search(
 
     // Internal: descend through index levels.
     let indexes = parse_index_entries(root_bytes, &header)?;
-    let child_block = find_index_child(&indexes, target)?;
+    let (child_block, upper_bound) = find_index_child_bound(&indexes, target, 1_u64 << 32)?;
 
-    descend_search(cx, dev, child_block, header.depth - 1, target)
+    descend_search(cx, dev, child_block, header.depth - 1, target, upper_bound)
 }
 
 /// Search using a root extent tree that has already been parsed.
@@ -126,8 +126,9 @@ pub fn search_parsed_root(
             detail: "extent root depth 0 contains index entries".into(),
         }),
         (_, ExtentTree::Index(indexes)) => {
-            let child_block = find_index_child(indexes, target)?;
-            descend_search(cx, dev, child_block, header.depth - 1, target)
+            let (child_block, upper_bound) =
+                find_index_child_bound(indexes, target, 1_u64 << 32)?;
+            descend_search(cx, dev, child_block, header.depth - 1, target, upper_bound)
         }
         (_, ExtentTree::Leaf(_)) => Err(FfsError::Corruption {
             block: 0,
@@ -157,9 +158,9 @@ pub fn search_with_leaf_window(
     }
 
     let indexes = parse_index_entries(root_bytes, &header)?;
-    let child_block = find_index_child(&indexes, target)?;
+    let (child_block, upper_bound) = find_index_child_bound(&indexes, target, 1_u64 << 32)?;
 
-    descend_search_with_leaf_window(cx, dev, child_block, header.depth - 1, target)
+    descend_search_with_leaf_window(cx, dev, child_block, header.depth - 1, target, upper_bound)
 }
 
 /// Descend from an internal node at the given depth to find the target.
@@ -169,6 +170,7 @@ fn descend_search(
     block: u64,
     depth: u16,
     target: u32,
+    upper_bound: u64,
 ) -> Result<SearchResult> {
     cx_checkpoint(cx)?;
 
@@ -190,11 +192,11 @@ fn descend_search(
 
     if depth == 0 {
         let extents = parse_leaf_entries(data, &header)?;
-        search_leaf(&extents, target)
+        search_leaf_bounded(&extents, target, upper_bound)
     } else {
         let indexes = parse_index_entries(data, &header)?;
-        let child = find_index_child(&indexes, target)?;
-        descend_search(cx, dev, child, depth - 1, target)
+        let (child, child_upper_bound) = find_index_child_bound(&indexes, target, upper_bound)?;
+        descend_search(cx, dev, child, depth - 1, target, child_upper_bound)
     }
 }
 
@@ -204,6 +206,7 @@ fn descend_search_with_leaf_window(
     block: u64,
     depth: u16,
     target: u32,
+    upper_bound: u64,
 ) -> Result<SearchLeafWindow> {
     cx_checkpoint(cx)?;
 
@@ -225,20 +228,28 @@ fn descend_search_with_leaf_window(
 
     if depth == 0 {
         let extents = parse_leaf_entries(data, &header)?;
-        let result = search_leaf(&extents, target)?;
+        let result = search_leaf_bounded(&extents, target, upper_bound)?;
         Ok(SearchLeafWindow { result, extents })
     } else {
         let indexes = parse_index_entries(data, &header)?;
-        let child = find_index_child(&indexes, target)?;
-        descend_search_with_leaf_window(cx, dev, child, depth - 1, target)
+        let (child, child_upper_bound) = find_index_child_bound(&indexes, target, upper_bound)?;
+        descend_search_with_leaf_window(cx, dev, child, depth - 1, target, child_upper_bound)
     }
 }
 
 /// Binary search leaf extents for the target logical block.
 fn search_leaf(extents: &[Ext4Extent], target: u32) -> Result<SearchResult> {
+    search_leaf_bounded(extents, target, 1_u64 << 32)
+}
+
+fn search_leaf_bounded(
+    extents: &[Ext4Extent],
+    target: u32,
+    upper_bound: u64,
+) -> Result<SearchResult> {
     if extents.is_empty() {
         return Ok(SearchResult::Hole {
-            hole_len: 1_u64 << 32,
+            hole_len: upper_bound.saturating_sub(u64::from(target)),
         });
     }
 
@@ -274,7 +285,7 @@ fn search_leaf(extents: &[Ext4Extent], target: u32) -> Result<SearchResult> {
     let next_start = if pos < extents.len() {
         u64::from(extents[pos].logical_block)
     } else {
-        1_u64 << 32
+        upper_bound
     };
     let hole_len = next_start.saturating_sub(u64::from(target));
     Ok(SearchResult::Hole { hole_len })
@@ -283,7 +294,16 @@ fn search_leaf(extents: &[Ext4Extent], target: u32) -> Result<SearchResult> {
 /// Find the child block to descend into for the given target.
 ///
 /// Returns the leaf_block of the last index entry with `logical_block <= target`.
+#[cfg(test)]
 fn find_index_child(indexes: &[Ext4ExtentIndex], target: u32) -> Result<u64> {
+    find_index_child_bound(indexes, target, 1_u64 << 32).map(|(child, _)| child)
+}
+
+fn find_index_child_bound(
+    indexes: &[Ext4ExtentIndex],
+    target: u32,
+    parent_upper_bound: u64,
+) -> Result<(u64, u64)> {
     if indexes.is_empty() {
         return Err(FfsError::Corruption {
             block: 0,
@@ -293,7 +313,12 @@ fn find_index_child(indexes: &[Ext4ExtentIndex], target: u32) -> Result<u64> {
 
     let pos = indexes.partition_point(|idx| idx.logical_block <= target);
     let child_idx = if pos > 0 { pos - 1 } else { 0 };
-    Ok(indexes[child_idx].leaf_block)
+    let upper_bound = indexes
+        .get(child_idx + 1)
+        .map_or(parent_upper_bound, |idx| {
+            parent_upper_bound.min(u64::from(idx.logical_block))
+        });
+    Ok((indexes[child_idx].leaf_block, upper_bound))
 }
 
 // ── Walk ────────────────────────────────────────────────────────────────────
@@ -2818,6 +2843,57 @@ Hole { hole_len: 90 }
         // One past the end (block 10) should be a hole.
         let result = search(&cx, &dev, &root, 10).unwrap();
         assert!(matches!(result, SearchResult::Hole { .. }));
+    }
+
+    #[test]
+    fn search_multilevel_leaf_end_hole_stops_at_next_separator() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let mut root = make_root();
+        let mut alloc = SeqAllocator::new(100);
+
+        for i in 0_u32..10 {
+            let ext = Ext4Extent {
+                logical_block: i * 100,
+                raw_len: 10,
+                physical_start: u64::from(i) * 1_000 + 50_000,
+            };
+            insert(&cx, &dev, &mut root, ext, &mut alloc).unwrap();
+        }
+
+        let (header, _) = parse_header(&root).unwrap();
+        assert_eq!(header.depth, 1, "test must force a split root");
+        let indexes = parse_index_entries(&root, &header).unwrap();
+        assert!(indexes.len() >= 2, "test needs adjacent indexed leaves");
+
+        let next_separator = indexes[1].logical_block;
+        let left_buf = dev
+            .read_block(&cx, BlockNumber(indexes[0].leaf_block))
+            .unwrap();
+        let (left_header, _) = parse_header(left_buf.as_slice()).unwrap();
+        let left_extents = parse_leaf_entries(left_buf.as_slice(), &left_header).unwrap();
+        let last_left = left_extents.last().expect("left leaf should not be empty");
+        let target = last_left.logical_block + u32::from(actual_len(last_left.raw_len));
+        assert!(
+            target < next_separator,
+            "test needs a hole before the next indexed leaf"
+        );
+
+        let expected_hole_len = u64::from(next_separator - target);
+        assert_eq!(
+            search(&cx, &dev, &root, target).unwrap(),
+            SearchResult::Hole {
+                hole_len: expected_hole_len
+            }
+        );
+        assert_eq!(
+            search_with_leaf_window(&cx, &dev, &root, target)
+                .unwrap()
+                .result,
+            SearchResult::Hole {
+                hole_len: expected_hole_len
+            }
+        );
     }
 
     #[test]
