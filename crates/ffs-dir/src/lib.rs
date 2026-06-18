@@ -747,6 +747,24 @@ mod tests {
             prop_assert_eq!(entry.inode, new_ino);
             prop_assert_eq!(entry.file_type, Ext4FileType::Dir);
 
+            let second_ino = new_ino + 1;
+            let retargeted_again = retarget_entry(
+                &mut block,
+                &name,
+                second_ino,
+                Ext4FileType::Symlink,
+                reserved_tail,
+            )
+            .unwrap();
+            prop_assert!(retargeted_again);
+            let (entries, _) = parse_dir_block(&block, 4096).unwrap();
+            let entry = entries
+                .iter()
+                .find(|e| e.name == name)
+                .expect("retargeted entry must still parse after a second update");
+            prop_assert_eq!(entry.inode, second_ino);
+            prop_assert_eq!(entry.file_type, Ext4FileType::Symlink);
+
             // Retargeting a name that is not present reports no change.
             let probe: &[u8] = b"\x01zz_absent_probe_zz\x01";
             if name.as_slice() != probe {
