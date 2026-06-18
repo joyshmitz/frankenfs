@@ -9034,6 +9034,35 @@ mod tests {
     }
 
     #[test]
+    fn timestamp_full_decodes_nsec_and_high_epochs() {
+        let mut raw = [0_u8; 256];
+        raw[0x80..0x82].copy_from_slice(&32_u16.to_le_bytes()); // extra_isize = 32
+
+        // Nanoseconds live in the high 30 bits of *_extra (extra >> 2); the
+        // sign-extension test only ever uses nsec = 0.
+        raw[0x08..0x0C].copy_from_slice(&100_u32.to_le_bytes());
+        raw[0x8C..0x90].copy_from_slice(&(123_456_789_u32 << 2).to_le_bytes());
+        let inode = Ext4Inode::parse_from_bytes(&raw).unwrap();
+        assert_eq!(inode.atime_full(), (100, 123_456_789));
+
+        // Epoch bits 2 and 3 add 2*2^32 and 3*2^32 (only 0/1 were covered).
+        raw[0x08..0x0C].copy_from_slice(&0_u32.to_le_bytes());
+        raw[0x8C..0x90].copy_from_slice(&2_u32.to_le_bytes());
+        let inode = Ext4Inode::parse_from_bytes(&raw).unwrap();
+        assert_eq!(inode.atime_full(), (2_i64 << 32, 0));
+
+        raw[0x8C..0x90].copy_from_slice(&3_u32.to_le_bytes());
+        let inode = Ext4Inode::parse_from_bytes(&raw).unwrap();
+        assert_eq!(inode.atime_full(), (3_i64 << 32, 0));
+
+        // Combined: negative base (0xFFFF_FFFF = -1) + epoch 3 + nonzero nsec.
+        raw[0x08..0x0C].copy_from_slice(&0xFFFF_FFFF_u32.to_le_bytes());
+        raw[0x8C..0x90].copy_from_slice(&((5_u32 << 2) | 3).to_le_bytes());
+        let inode = Ext4Inode::parse_from_bytes(&raw).unwrap();
+        assert_eq!(inode.atime_full(), ((3_i64 << 32) - 1, 5));
+    }
+
+    #[test]
     fn inode_32bit_uid_gid() {
         let mut raw = [0_u8; 256];
         raw[0x02..0x04].copy_from_slice(&0xFFFF_u16.to_le_bytes()); // uid_lo
