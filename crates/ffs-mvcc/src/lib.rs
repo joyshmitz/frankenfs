@@ -10925,6 +10925,27 @@ mod tests {
     }
 
     #[test]
+    fn ssi_incoming_edge_attributes_reader_and_writer_correctly() {
+        // The pivot WROTE block 5; the committed record READ block 5. The record's
+        // read is anti the pivot's write -> an incoming rw-edge to the pivot, with
+        // reader = the record and writer = the pivot.
+        let mut pivot = Transaction::new(TxnId(70), Snapshot { high: CommitSeq(0) });
+        pivot.stage_write(BlockNumber(5), vec![1; 64]);
+
+        let record = CommittedTxnRecord {
+            txn_id: TxnId(71),
+            commit_seq: CommitSeq(3),
+            snapshot: Snapshot { high: CommitSeq(0) },
+            write_set: BTreeSet::new(),
+            read_set: [(BlockNumber(5), CommitSeq(1))].into_iter().collect(),
+        };
+        let edge = ssi_incoming_edge(&pivot, &record).expect("incoming edge on block 5");
+        assert_eq!(edge.block, BlockNumber(5));
+        assert_eq!(edge.reader_txn, TxnId(71), "the record is the reader");
+        assert_eq!(edge.writer_txn, TxnId(70), "the pivot is the writer");
+    }
+
+    #[test]
     fn ssi_single_rw_edge_is_not_a_dangerous_structure() {
         let mut pivot = Transaction::new(TxnId(30), Snapshot { high: CommitSeq(0) });
         pivot.record_read(BlockNumber(0), CommitSeq(11));
