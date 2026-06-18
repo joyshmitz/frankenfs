@@ -627,9 +627,15 @@ pub trait BlockDevice: Send + Sync {
         let count = u64::try_from(dst.len() / bs)
             .map_err(|_| FfsError::Format("block count does not fit u64".to_owned()))?;
         if let Some(last_delta) = count.checked_sub(1) {
-            start.0.checked_add(last_delta).ok_or_else(|| {
+            let last_block = start.0.checked_add(last_delta).ok_or_else(|| {
                 FfsError::Format("contiguous read block range overflow".to_owned())
             })?;
+            let block_count = self.block_count();
+            if last_block >= block_count {
+                return Err(FfsError::Format(format!(
+                    "block out of range: block={last_block} block_count={block_count}"
+                )));
+            }
         }
         for (idx, chunk) in dst.chunks_mut(bs).enumerate() {
             let delta = u64::try_from(idx)
@@ -7523,6 +7529,27 @@ mod tests {
         assert_eq!(dev.reads.load(Ordering::Relaxed), 0);
         assert_eq!(bufs[0].as_slice(), &[0xAA; 4]);
         assert_eq!(bufs[1].as_slice(), &[0xBB; 4]);
+    }
+
+    #[test]
+    fn default_contiguous_into_rejects_later_oob_before_partial_read() {
+        let cx = Cx::for_testing();
+        let dev = RangeCheckedReadBlockDevice::default();
+        let mut dst = [0xAA_u8; 8];
+
+        let err = dev
+            .read_contiguous_into(&cx, BlockNumber(1), &mut dst)
+            .expect_err("out-of-range later block should fail before reads");
+
+        assert!(
+            matches!(err, FfsError::Format(ref message)
+                if message.contains("block out of range")
+                    && message.contains("block=2")
+                    && message.contains("block_count=2")),
+            "expected out-of-range Format error, got {err:?}"
+        );
+        assert_eq!(dev.reads.load(Ordering::Relaxed), 0);
+        assert_eq!(dst, [0xAA; 8]);
     }
 
     #[test]
