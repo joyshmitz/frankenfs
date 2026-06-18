@@ -28,6 +28,10 @@ name = "extent_insert_overlap"
 harness = false
 
 [[bench]]
+name = "extent_leaf_search"
+harness = false
+
+[[bench]]
 name = "walk_range_collect"
 harness = false
 

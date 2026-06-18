@@ -95,7 +95,11 @@ pub fn search(
     if header.depth == 0 {
         // Leaf: search extents directly in root.
         let extents = parse_leaf_entries(root_bytes, &header)?;
-        return search_leaf(&extents, target);
+        return Ok(search_leaf_bounded_validated(
+            &extents,
+            target,
+            1_u64 << 32,
+        ));
     }
 
     // Internal: descend through index levels.
@@ -153,7 +157,7 @@ pub fn search_with_leaf_window(
 
     if header.depth == 0 {
         let extents = parse_leaf_entries(root_bytes, &header)?;
-        let result = search_leaf(&extents, target)?;
+        let result = search_leaf_bounded_validated(&extents, target, 1_u64 << 32);
         return Ok(SearchLeafWindow { result, extents });
     }
 
@@ -192,7 +196,11 @@ fn descend_search(
 
     if depth == 0 {
         let extents = parse_leaf_entries(data, &header)?;
-        search_leaf_bounded(&extents, target, upper_bound)
+        Ok(search_leaf_bounded_validated(
+            &extents,
+            target,
+            upper_bound,
+        ))
     } else {
         let indexes = parse_index_entries(data, &header)?;
         let (child, child_upper_bound) = find_index_child_bound(&indexes, target, upper_bound)?;
@@ -228,7 +236,7 @@ fn descend_search_with_leaf_window(
 
     if depth == 0 {
         let extents = parse_leaf_entries(data, &header)?;
-        let result = search_leaf_bounded(&extents, target, upper_bound)?;
+        let result = search_leaf_bounded_validated(&extents, target, upper_bound);
         Ok(SearchLeafWindow { result, extents })
     } else {
         let indexes = parse_index_entries(data, &header)?;
@@ -247,13 +255,6 @@ fn search_leaf_bounded(
     target: u32,
     upper_bound: u64,
 ) -> Result<SearchResult> {
-    if extents.is_empty() {
-        return Ok(SearchResult::Hole {
-            hole_len: upper_bound.saturating_sub(u64::from(target)),
-        });
-    }
-
-    // Validate: reject zero-length extents (on-disk corruption).
     for ext in extents {
         if actual_len(ext.raw_len) == 0 {
             return Err(FfsError::Corruption {
@@ -265,6 +266,19 @@ fn search_leaf_bounded(
             });
         }
     }
+    Ok(search_leaf_bounded_validated(extents, target, upper_bound))
+}
+
+fn search_leaf_bounded_validated(
+    extents: &[Ext4Extent],
+    target: u32,
+    upper_bound: u64,
+) -> SearchResult {
+    if extents.is_empty() {
+        return SearchResult::Hole {
+            hole_len: upper_bound.saturating_sub(u64::from(target)),
+        };
+    }
 
     // Binary search: find the last extent with logical_block <= target.
     let pos = extents.partition_point(|e| e.logical_block <= target);
@@ -274,10 +288,10 @@ fn search_leaf_bounded(
         let len = actual_len(ext.raw_len);
         let end = u64::from(ext.logical_block) + u64::from(len);
         if u64::from(target) < end {
-            return Ok(SearchResult::Found {
+            return SearchResult::Found {
                 extent: *ext,
                 offset_in_extent: target - ext.logical_block,
-            });
+            };
         }
     }
 
@@ -288,7 +302,7 @@ fn search_leaf_bounded(
         upper_bound
     };
     let hole_len = next_start.saturating_sub(u64::from(target));
-    Ok(SearchResult::Hole { hole_len })
+    SearchResult::Hole { hole_len }
 }
 
 /// Find the child block to descend into for the given target.
@@ -2150,6 +2164,28 @@ mod tests {
                 search_parsed_root(&cx, &dev, &header, &tree, target).unwrap()
             );
         }
+    }
+
+    #[test]
+    fn search_parsed_root_rejects_caller_supplied_zero_length_leaf_bd_xmh5g_386() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let header = Ext4ExtentHeader {
+            magic: EXT4_EXTENT_MAGIC,
+            entries: 1,
+            max_entries: ROOT_MAX_ENTRIES,
+            depth: 0,
+            generation: 0,
+        };
+        let tree = ExtentTree::Leaf(vec![Ext4Extent {
+            logical_block: 0,
+            raw_len: 0,
+            physical_start: 1000,
+        }]);
+
+        let err = search_parsed_root(&cx, &dev, &header, &tree, 0)
+            .expect_err("caller-supplied zero-length leaf must stay checked");
+        assert_corruption_contains(&err, "zero-length extent");
     }
 
     #[test]
