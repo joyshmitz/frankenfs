@@ -1414,6 +1414,36 @@ mod tests {
     }
 
     #[test]
+    fn check_write_permissions_denies_unprivileged_and_non_admin_writes() {
+        // An unprivileged non-owner cannot write a user.* xattr.
+        let unprivileged = XattrWriteAccess {
+            is_owner: false,
+            has_cap_fowner: false,
+            has_cap_sys_admin: false,
+        };
+        assert!(matches!(
+            check_write_permissions(EXT4_XATTR_INDEX_USER, unprivileged),
+            Err(FfsError::PermissionDenied)
+        ));
+        // The owner can write user.* with no capabilities.
+        let owner = XattrWriteAccess {
+            is_owner: true,
+            has_cap_fowner: false,
+            has_cap_sys_admin: false,
+        };
+        assert!(check_write_permissions(EXT4_XATTR_INDEX_USER, owner).is_ok());
+        // But the owner cannot write trusted.* / security.* without CAP_SYS_ADMIN.
+        assert!(matches!(
+            check_write_permissions(EXT4_XATTR_INDEX_TRUSTED, owner),
+            Err(FfsError::PermissionDenied)
+        ));
+        assert!(matches!(
+            check_write_permissions(EXT4_XATTR_INDEX_SECURITY, owner),
+            Err(FfsError::PermissionDenied)
+        ));
+    }
+
+    #[test]
     fn check_write_permissions_unknown_index_returns_unsupported() {
         let access = XattrWriteAccess {
             is_owner: true,
