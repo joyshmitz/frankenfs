@@ -5319,6 +5319,70 @@ ExtentMapping { logical_start: 5, physical_start: 134, count: 2, unwritten: true
             );
         }
 
+        /// collapse_range removes the inner range and shifts the tail left by
+        /// `count`, preserving each surviving block's physical address. Model:
+        /// blocks < cstart unchanged, blocks in [cstart, cstart+clen) dropped,
+        /// blocks >= cstart+clen moved to (logical - clen) with the same
+        /// physical (bd-xmh5g.205).
+        #[test]
+        fn proptest_collapse_range_logical_shift(
+            count in 12_u32..40,
+            cstart in 1_u32..8,
+            clen_raw in 1_u32..8,
+        ) {
+            let clen = clen_raw.min(count - cstart); // keep [cstart, cstart+clen) inside [0, count)
+
+            let cx = test_cx();
+            let dev = MemBlockDevice::new(4096);
+            let geo = make_geometry();
+            let mut groups = make_groups(&geo);
+            let mut root = empty_root();
+            let pctx = mock_pctx();
+
+            // One contiguous extent [0, count) -> physical p0 + L.
+            let alloc = allocate_extent(
+                &cx, &dev, &mut root, &geo, &mut groups,
+                0, count,
+                &AllocHint::default(), &pctx,
+                ExtentOwner::default(),
+            ).unwrap();
+            let p0 = alloc.physical_start;
+
+            // Model the expected post-collapse logical -> physical map.
+            let mut model = BTreeMap::<u32, u64>::new();
+            for l in 0..count {
+                if l < cstart {
+                    model.insert(l, p0 + u64::from(l));
+                } else if l >= cstart + clen {
+                    model.insert(l - clen, p0 + u64::from(l));
+                }
+                // [cstart, cstart+clen) is dropped.
+            }
+
+            collapse_range(
+                &cx, &dev, &mut root, &geo, &mut groups,
+                cstart, clen, &pctx,
+                ExtentOwner::default(),
+            ).unwrap();
+
+            // Expand the resulting mappings into a per-block logical -> physical
+            // map and compare to the model.
+            let new_len = count - clen;
+            let maps = map_logical_to_physical(&cx, &dev, &root, 0, u64::from(new_len)).unwrap();
+            let mut got = BTreeMap::<u32, u64>::new();
+            let mut pos = 0_u32;
+            for m in &maps {
+                if m.physical_start != 0 {
+                    for i in 0..m.count {
+                        got.insert(pos + i, m.physical_start + u64::from(i));
+                    }
+                }
+                pos += m.count;
+            }
+
+            prop_assert_eq!(got, model, "collapse_range map diverged from model");
+        }
+
         /// Unwritten allocation produces mappings with unwritten flag set.
         #[test]
         fn proptest_unwritten_alloc_flag(
