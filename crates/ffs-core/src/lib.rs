@@ -35536,6 +35536,42 @@ mod tests {
     }
 
     #[test]
+    fn ext4_move_ext_effective_len_clamps_to_both_file_bounds() {
+        let req = |orig_start, donor_start, len| Ext4MoveExtRequest {
+            ino: InodeNumber(1),
+            donor_fd: 0,
+            orig_start,
+            donor_start,
+            len,
+        };
+        // Within both files (each 10 blocks): the full requested length.
+        assert_eq!(
+            OpenFs::ext4_move_ext_effective_len(req(0, 0, 4), 10, 10),
+            4
+        );
+        // Source-limited: orig has 2 blocks left from start 8.
+        assert_eq!(
+            OpenFs::ext4_move_ext_effective_len(req(8, 0, 4), 10, 10),
+            2
+        );
+        // Donor-limited: donor has 1 block left from start 9.
+        assert_eq!(
+            OpenFs::ext4_move_ext_effective_len(req(0, 9, 4), 10, 10),
+            1
+        );
+        // Source start at/past EOF -> no exchange.
+        assert_eq!(
+            OpenFs::ext4_move_ext_effective_len(req(10, 0, 4), 10, 10),
+            0
+        );
+        // Donor start at/past EOF -> no exchange.
+        assert_eq!(
+            OpenFs::ext4_move_ext_effective_len(req(0, 10, 4), 10, 10),
+            0
+        );
+    }
+
+    #[test]
     fn inode_to_attr_block_device_rdev() {
         use ffs_types::{S_IFBLK, S_IFCHR};
 
