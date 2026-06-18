@@ -1070,6 +1070,20 @@ mod tests {
     }
 
     #[test]
+    fn retarget_entry_rejects_invalid_rec_len() {
+        // A block whose first entry has rec_len 0 (the infinite-loop hazard) is
+        // rejected by the rename/swap path's iteration guard.
+        let mut block = vec![0_u8; 64];
+        block[0..4].copy_from_slice(&11_u32.to_le_bytes()); // inode
+        block[4..6].copy_from_slice(&0_u16.to_le_bytes()); // rec_len = 0
+        block[6] = 1; // name_len
+        block[7] = 2; // file_type
+        block[8] = b'.';
+        let err = retarget_entry(&mut block, b"x", 42, Ext4FileType::RegFile, 0).unwrap_err();
+        assert!(matches!(err, FfsError::Corruption { .. }), "got {err:?}");
+    }
+
+    #[test]
     fn add_entry_splits_live_slot_slack() {
         let mut block = vec![0u8; 1024];
         write_entry(&mut block, 0, 2, 1024, Ext4FileType::Dir, b".").unwrap();
