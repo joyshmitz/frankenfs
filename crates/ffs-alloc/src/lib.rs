@@ -3178,6 +3178,40 @@ mod tests {
             let want = find_contiguous_linear_naive(&bytes, count, n, start);
             proptest::prop_assert_eq!(got, want, "n={} start={}", n, start);
         }
+
+        /// `group_block_to_absolute` and `absolute_to_group_block` are exact
+        /// inverses: splitting an absolute block built from (group, rel) must
+        /// recover (group, rel) for any valid geometry. This pins the ext4
+        /// block-address translation used by every allocation and metadata
+        /// lookup (bd-xmh5g.209).
+        #[test]
+        fn proptest_group_block_absolute_roundtrip(
+            first_data_block in 0u32..2,
+            blocks_per_group in 1u32..70_000,
+            group in 0u32..100_000,
+            rel_raw in proptest::prelude::any::<u32>(),
+        ) {
+            let mut geo = make_geometry();
+            geo.first_data_block = first_data_block;
+            geo.blocks_per_group = blocks_per_group;
+
+            let rel = rel_raw % blocks_per_group; // rel < blocks_per_group
+
+            let abs = geo.group_block_to_absolute(GroupNumber(group), rel);
+            proptest::prop_assert_eq!(
+                abs,
+                BlockNumber(
+                    u64::from(first_data_block)
+                        + u64::from(group) * u64::from(blocks_per_group)
+                        + u64::from(rel)
+                )
+            );
+
+            let (g2, off2) = geo.absolute_to_group_block(abs);
+            proptest::prop_assert_eq!(g2, GroupNumber(group));
+            proptest::prop_assert_eq!(off2, rel);
+            proptest::prop_assert!(off2 < blocks_per_group);
+        }
     }
 
     // ── Geometry tests ──────────────────────────────────────────────────

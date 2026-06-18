@@ -5023,6 +5023,47 @@ ExtentMapping { logical_start: 5, physical_start: 134, count: 2, unwritten: true
         assert_eq!(maps[0].count, 10);
     }
 
+    #[test]
+    fn truncate_beyond_extent_end_preserves_map() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let geo = make_geometry();
+        let mut groups = make_groups(&geo);
+        let mut root = empty_root();
+        let pctx = mock_pctx();
+
+        allocate_extent(
+            &cx,
+            &dev,
+            &mut root,
+            &geo,
+            &mut groups,
+            0,
+            10,
+            &AllocHint::default(),
+            &pctx,
+            ExtentOwner::default(),
+        )
+        .unwrap();
+        let before = map_logical_to_physical(&cx, &dev, &root, 0, 10).unwrap();
+
+        let freed = truncate_extents(
+            &cx,
+            &dev,
+            &mut root,
+            &geo,
+            &mut groups,
+            25,
+            &pctx,
+            ExtentOwner::default(),
+        )
+        .unwrap();
+        assert_eq!(freed, 0);
+
+        let after = map_logical_to_physical(&cx, &dev, &root, 0, 10).unwrap();
+        assert_eq!(after, before, "truncate past extent end must be a noop");
+    }
+
     // ── Proptest property-based tests ─────────────────────────────────
 
     use proptest::prelude::*;
