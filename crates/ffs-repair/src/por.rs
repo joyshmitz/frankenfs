@@ -362,6 +362,22 @@ where
     let mut failed = 0_u32;
     let mut failed_indices = Vec::new();
 
+    let challenged_indices: std::collections::HashSet<u64> =
+        challenges.challenges.iter().map(|c| c.index).collect();
+    if responses
+        .responses
+        .iter()
+        .any(|response| !challenged_indices.contains(&response.index))
+    {
+        return VerificationResult {
+            total_challenges: num_challenges,
+            passed: 0,
+            failed: num_challenges,
+            failed_indices: challenges.challenges.iter().map(|c| c.index).collect(),
+            audit_passed: false,
+        };
+    }
+
     // Build response lookup and remember duplicate indices. A duplicate for a
     // challenged block makes the response set ambiguous, so that challenge
     // must fail instead of accepting whichever entry survives map insertion.
@@ -777,6 +793,41 @@ mod tests {
         assert_eq!(result.failed, 1);
         assert_eq!(result.failed_indices, vec![duplicated_index]);
         assert_eq!(result.passed, u32::try_from(challenges.len()).unwrap() - 1);
+    }
+
+    #[test]
+    fn por_rejects_unchallenged_extra_response() {
+        let key = test_key();
+        let blocks = make_blocks(10, 4096);
+        let table = AuthenticatorTable::build(
+            &key,
+            blocks
+                .iter()
+                .enumerate()
+                .map(|(i, b)| (i as u64, b.as_slice())),
+        );
+
+        let seed = *blake3::hash(b"extra-response-test").as_bytes();
+        let challenges = ChallengeSet::generate(&seed, 10, 5);
+        let mut responses =
+            respond_to_challenges(&challenges, &table, |idx| get_block(&blocks, idx));
+        let extra_index = 999_u64;
+        let extra_block = vec![0xA5_u8; 32];
+        responses.responses.push(ChallengeResponse {
+            index: extra_index,
+            block_hash: *blake3::hash(&extra_block).as_bytes(),
+            authenticator: compute_authenticator(&key, extra_index, &extra_block),
+        });
+
+        let result = verify_responses(&key, &challenges, &responses, |idx| {
+            get_block(&blocks, idx)
+        });
+        let challenged: Vec<u64> = challenges.challenges.iter().map(|c| c.index).collect();
+
+        assert!(!result.audit_passed);
+        assert_eq!(result.passed, 0);
+        assert_eq!(result.failed, u32::try_from(challenges.len()).unwrap());
+        assert_eq!(result.failed_indices, challenged);
     }
 
     #[test]
