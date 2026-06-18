@@ -10968,6 +10968,38 @@ mod tests {
     }
 
     #[test]
+    fn ssi_skips_records_visible_in_snapshot() {
+        // Pivot's snapshot already includes everything up to CommitSeq(5).
+        let mut pivot = Transaction::new(TxnId(40), Snapshot { high: CommitSeq(5) });
+        pivot.record_read(BlockNumber(0), CommitSeq(1));
+        pivot.record_read(BlockNumber(1), CommitSeq(1));
+        pivot.stage_write(BlockNumber(2), vec![1; 64]);
+        pivot.stage_write(BlockNumber(3), vec![1; 64]);
+
+        // A record committed at/before the snapshot high is already visible, so
+        // it forms no rw-edge even though its key spans would otherwise create
+        // both an incoming and an outgoing edge.
+        let visible = CommittedTxnRecord {
+            txn_id: TxnId(41),
+            commit_seq: CommitSeq(5),
+            snapshot: Snapshot { high: CommitSeq(0) },
+            write_set: BTreeSet::from([BlockNumber(0), BlockNumber(1)]),
+            read_set: [
+                (BlockNumber(2), CommitSeq(1)),
+                (BlockNumber(3), CommitSeq(1)),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        let (checks_performed, dangerous) = detect_ssi_dangerous_structure(&pivot, [&visible]);
+        assert_eq!(checks_performed, 0, "a snapshot-visible record is skipped");
+        assert!(
+            dangerous.is_none(),
+            "no dangerous structure from a record the txn already observed"
+        );
+    }
+
+    #[test]
     fn ssi_span_guard_preserves_min_intersection_tiebreaks() {
         use sha2::{Digest, Sha256};
 
