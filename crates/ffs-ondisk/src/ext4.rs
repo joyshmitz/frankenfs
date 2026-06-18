@@ -13985,6 +13985,36 @@ mod tests {
     }
 
     #[test]
+    fn dx_hash_dispatcher_legacy_and_tea_unsigned_arms() {
+        let seed = [1_u32, 2, 3, 4];
+        // High-bit bytes so the signed/unsigned distinction actually matters.
+        let name = b"\xc3\xa9_dir_entry";
+
+        // Version 3 must route to legacy unsigned; version 5 to tea unsigned.
+        // dx_hash normalizes the major hash, so compare against the direct
+        // function output with the same normalization applied.
+        let (legacy_unsigned_major, legacy_unsigned_minor) = super::dx_hash_legacy(name, false);
+        assert_eq!(
+            super::dx_hash(super::DX_HASH_LEGACY_UNSIGNED, name, &seed),
+            (
+                super::normalize_dx_major_hash(legacy_unsigned_major),
+                legacy_unsigned_minor
+            ),
+            "version 3 must route to legacy unsigned",
+        );
+
+        let (tea_unsigned_major, tea_unsigned_minor) = super::dx_hash_tea(name, &seed, false);
+        assert_eq!(
+            super::dx_hash(super::DX_HASH_TEA_UNSIGNED, name, &seed),
+            (
+                super::normalize_dx_major_hash(tea_unsigned_major),
+                tea_unsigned_minor
+            ),
+            "version 5 must route to tea unsigned",
+        );
+    }
+
+    #[test]
     fn dx_hash_matches_kernel_reference_vectors() {
         let seed = [0x1111_1111, 0x3333_2222, 0x5555_4444, 0x5555_5555];
         let name = b"alpha_0000_xyz.dat";
