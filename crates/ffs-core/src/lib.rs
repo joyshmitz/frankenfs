@@ -9218,11 +9218,39 @@ impl OpenFs {
         Ok(inode)
     }
 
+    fn read_inode_metadata_with_scope(
+        &self,
+        cx: &Cx,
+        scope: &RequestScope,
+        ino: InodeNumber,
+    ) -> Result<Ext4Inode, FfsError> {
+        let inode = self.read_inode_raw_with_scope_using(
+            cx,
+            scope,
+            ino,
+            Ext4Inode::parse_metadata_from_bytes,
+        )?;
+        if inode.mode == 0 {
+            return Err(FfsError::NotFound(format!("inode {}", ino.0)));
+        }
+        Ok(inode)
+    }
+
     fn read_inode_raw_with_scope(
         &self,
         cx: &Cx,
         scope: &RequestScope,
         ino: InodeNumber,
+    ) -> Result<Ext4Inode, FfsError> {
+        self.read_inode_raw_with_scope_using(cx, scope, ino, Ext4Inode::parse_from_bytes)
+    }
+
+    fn read_inode_raw_with_scope_using(
+        &self,
+        cx: &Cx,
+        scope: &RequestScope,
+        ino: InodeNumber,
+        parse: impl FnOnce(&[u8]) -> Result<Ext4Inode, ParseError>,
     ) -> Result<Ext4Inode, FfsError> {
         let sb = self
             .ext4_superblock()
@@ -9256,9 +9284,8 @@ impl OpenFs {
             });
         }
 
-        let mut inode =
-            Ext4Inode::parse_from_bytes(&block_data[offset_in_block..offset_in_block + inode_size])
-                .map_err(|e| parse_to_ffs_error(&e))?;
+        let mut inode = parse(&block_data[offset_in_block..offset_in_block + inode_size])
+            .map_err(|e| parse_to_ffs_error(&e))?;
         // Stamp the inode number (the table index, not on-disk) so downstream
         // consumers can derive a STABLE extent-cache namespace (number,
         // generation) that does not drift as the extent tree mutates (bd-j6ljg).
@@ -9284,7 +9311,7 @@ impl OpenFs {
         let sb = self
             .ext4_superblock()
             .ok_or_else(|| FfsError::Format("not an ext4 filesystem".into()))?;
-        let inode = self.read_inode_with_scope(cx, scope, ino)?;
+        let inode = self.read_inode_metadata_with_scope(cx, scope, ino)?;
         Ok(inode_to_attr(sb, ino, &inode))
     }
 
@@ -11485,6 +11512,22 @@ impl Ext4FsOps {
         let inode = self
             .reader
             .read_inode(&self.image, ino)
+            .map_err(|e| parse_to_ffs_error(&e))?;
+        if inode.mode == 0 {
+            return Err(FfsError::NotFound(format!("inode {}", ino.0)));
+        }
+        Ok(inode)
+    }
+
+    /// Read an allocated inode for metadata-only VFS bridge paths.
+    fn read_live_inode_metadata(&self, ino: InodeNumber) -> Result<Ext4Inode, FfsError> {
+        self.reader
+            .sb
+            .locate_inode(ino)
+            .map_err(|e| parse_to_ffs_error(&e))?;
+        let inode = self
+            .reader
+            .read_inode_metadata(&self.image, ino)
             .map_err(|e| parse_to_ffs_error(&e))?;
         if inode.mode == 0 {
             return Err(FfsError::NotFound(format!("inode {}", ino.0)));
@@ -14065,7 +14108,7 @@ impl FsOps for Ext4FsOps {
         _scope: &mut RequestScope,
         ino: InodeNumber,
     ) -> ffs_error::Result<InodeAttr> {
-        let inode = self.read_live_inode(ino)?;
+        let inode = self.read_live_inode_metadata(ino)?;
         Ok(self.inode_to_attr(ino, &inode))
     }
 
@@ -14076,7 +14119,7 @@ impl FsOps for Ext4FsOps {
         parent: InodeNumber,
         name: &OsStr,
     ) -> ffs_error::Result<InodeAttr> {
-        let parent_inode = self.read_live_inode(parent)?;
+        let parent_inode = self.read_live_inode_metadata(parent)?;
 
         if !parent_inode.is_dir() {
             return Err(FfsError::NotDirectory);
@@ -14090,7 +14133,7 @@ impl FsOps for Ext4FsOps {
             .ok_or_else(|| FfsError::NotFound(name.to_string_lossy().into_owned()))?;
 
         let child_ino = InodeNumber(u64::from(entry.inode));
-        let child_inode = self.read_live_inode(child_ino)?;
+        let child_inode = self.read_live_inode_metadata(child_ino)?;
         Ok(self.inode_to_attr(child_ino, &child_inode))
     }
 
@@ -14101,7 +14144,7 @@ impl FsOps for Ext4FsOps {
         ino: InodeNumber,
         offset: u64,
     ) -> ffs_error::Result<ReaddirPage> {
-        let inode = self.read_live_inode(ino)?;
+        let inode = self.read_live_inode_metadata(ino)?;
 
         if !inode.is_dir() {
             return Err(FfsError::NotDirectory);
@@ -14201,7 +14244,7 @@ impl FsOps for Ext4FsOps {
         _scope: &mut RequestScope,
         ino: InodeNumber,
     ) -> ffs_error::Result<u32> {
-        let _ = self.read_live_inode(ino)?;
+        let _ = self.read_live_inode_metadata(ino)?;
         Ok(0)
     }
 
@@ -14227,7 +14270,7 @@ impl FsOps for Ext4FsOps {
         _scope: &mut RequestScope,
         ino: InodeNumber,
     ) -> ffs_error::Result<()> {
-        let _ = self.read_live_inode(ino)?;
+        let _ = self.read_live_inode_metadata(ino)?;
         Ok(())
     }
 }
@@ -28598,7 +28641,7 @@ impl FsOps for OpenFs {
         match &self.flavor {
             FsFlavor::Ext4(_) => {
                 let parent_ino = Self::ext4_canonical_inode(parent);
-                let parent_inode = self.read_inode_with_scope(cx, scope, parent_ino)?;
+                let parent_inode = self.read_inode_metadata_with_scope(cx, scope, parent_ino)?;
                 if !parent_inode.is_dir() {
                     return Err(FfsError::NotDirectory);
                 }
@@ -28626,7 +28669,7 @@ impl FsOps for OpenFs {
         match &self.flavor {
             FsFlavor::Ext4(_) => {
                 let canonical = Self::ext4_canonical_inode(ino);
-                let inode = self.read_inode_with_scope(cx, scope, canonical)?;
+                let inode = self.read_inode_metadata_with_scope(cx, scope, canonical)?;
                 if !inode.is_dir() {
                     return Err(FfsError::NotDirectory);
                 }

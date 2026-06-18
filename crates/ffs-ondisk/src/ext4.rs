@@ -2687,8 +2687,25 @@ impl Ext4Inode {
     /// Requires at least 128 bytes. Extended fields (timestamps, checksum,
     /// projid) are read when the buffer is large enough and `i_extra_isize`
     /// indicates they are present.
-    #[allow(clippy::too_many_lines, clippy::similar_names)]
     pub fn parse_from_bytes(bytes: &[u8]) -> Result<Self, ParseError> {
+        Self::parse_from_bytes_with_ibody(bytes, Ext4InodeIbodyParse::Full)
+    }
+
+    /// Parse only metadata fields from an ext4 inode.
+    ///
+    /// This preserves every fixed inode field parsed by [`Self::parse_from_bytes`],
+    /// but intentionally leaves `xattr_ibody` empty. Use it only on metadata
+    /// hot paths that immediately convert to attributes or directory traversal
+    /// state; xattr and inline-data callers require the full parser.
+    pub fn parse_metadata_from_bytes(bytes: &[u8]) -> Result<Self, ParseError> {
+        Self::parse_from_bytes_with_ibody(bytes, Ext4InodeIbodyParse::MetadataOnly)
+    }
+
+    #[allow(clippy::too_many_lines, clippy::similar_names)]
+    fn parse_from_bytes_with_ibody(
+        bytes: &[u8],
+        ibody_parse: Ext4InodeIbodyParse,
+    ) -> Result<Self, ParseError> {
         if bytes.len() < 128 {
             return Err(ParseError::InsufficientData {
                 needed: 128,
@@ -2849,7 +2866,7 @@ impl Ext4Inode {
 
             extent_bytes,
 
-            xattr_ibody: if extra_isize > 0 {
+            xattr_ibody: if ibody_parse == Ext4InodeIbodyParse::Full && extra_isize > 0 {
                 let xattr_start = 128 + usize::from(extra_isize);
                 if xattr_start < bytes.len() {
                     bytes[xattr_start..].to_vec()
@@ -3126,6 +3143,12 @@ impl Ext4Inode {
         let (s, ns) = self.crtime_full();
         Self::to_system_time(s, ns).unwrap_or(std::time::UNIX_EPOCH)
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ext4InodeIbodyParse {
+    Full,
+    MetadataOnly,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -4649,6 +4672,26 @@ impl Ext4ImageReader {
         image: &[u8],
         ino: ffs_types::InodeNumber,
     ) -> Result<Ext4Inode, ParseError> {
+        Ext4Inode::parse_from_bytes(self.inode_slice(image, ino)?)
+    }
+
+    /// Read an inode for metadata-only paths from a raw disk image.
+    ///
+    /// The returned inode has the same fixed fields as [`Self::read_inode`],
+    /// but its `xattr_ibody` is intentionally empty.
+    pub fn read_inode_metadata(
+        &self,
+        image: &[u8],
+        ino: ffs_types::InodeNumber,
+    ) -> Result<Ext4Inode, ParseError> {
+        Ext4Inode::parse_metadata_from_bytes(self.inode_slice(image, ino)?)
+    }
+
+    fn inode_slice<'image>(
+        &self,
+        image: &'image [u8],
+        ino: ffs_types::InodeNumber,
+    ) -> Result<&'image [u8], ParseError> {
         if ino.0 == 0 {
             return Err(ParseError::InvalidField {
                 field: "inode_number",
@@ -4683,8 +4726,7 @@ impl Ext4ImageReader {
         })?;
 
         let inode_size = usize::from(self.sb.inode_size);
-        let slice = ensure_slice(image, inode_offset, inode_size)?;
-        Ext4Inode::parse_from_bytes(slice)
+        ensure_slice(image, inode_offset, inode_size)
     }
 
     /// Read a data block by block number, returning a slice.
@@ -9003,6 +9045,43 @@ mod tests {
 
         // Extended inode area
         assert_eq!(inode.extra_isize, 32);
+    }
+
+    #[test]
+    fn inode_metadata_parse_skips_ibody_only() {
+        let mut raw = [0_u8; 256];
+        raw[0x00..0x02].copy_from_slice(&(S_IFREG | 0o644).to_le_bytes());
+        raw[0x02..0x04].copy_from_slice(&1000_u16.to_le_bytes());
+        raw[0x04..0x08].copy_from_slice(&8192_u32.to_le_bytes());
+        raw[0x08..0x0C].copy_from_slice(&1_700_000_000_u32.to_le_bytes());
+        raw[0x0C..0x10].copy_from_slice(&1_700_000_100_u32.to_le_bytes());
+        raw[0x10..0x14].copy_from_slice(&1_700_000_200_u32.to_le_bytes());
+        raw[0x18..0x1A].copy_from_slice(&100_u16.to_le_bytes());
+        raw[0x1A..0x1C].copy_from_slice(&1_u16.to_le_bytes());
+        raw[0x1C..0x20].copy_from_slice(&16_u32.to_le_bytes());
+        raw[0x20..0x24].copy_from_slice(&EXT4_EXTENTS_FL.to_le_bytes());
+        raw[0x28..0x64].fill(0x5A);
+        raw[0x64..0x68].copy_from_slice(&42_u32.to_le_bytes());
+        raw[0x78..0x7A].copy_from_slice(&1_u16.to_le_bytes());
+        raw[0x7A..0x7C].copy_from_slice(&2_u16.to_le_bytes());
+        raw[0x80..0x82].copy_from_slice(&32_u16.to_le_bytes());
+        raw[0x82..0x84].copy_from_slice(&0xBEEF_u16.to_le_bytes());
+        raw[0x84..0x88].copy_from_slice(&(500_000_000_u32 << 2).to_le_bytes());
+        raw[0x88..0x8C].copy_from_slice(&(250_000_000_u32 << 2).to_le_bytes());
+        raw[0x90..0x94].copy_from_slice(&1_600_000_000_u32.to_le_bytes());
+        raw[0x98..0x9C].copy_from_slice(&7_u32.to_le_bytes());
+        raw[0x9C..0xA0].copy_from_slice(&11_u32.to_le_bytes());
+        raw[160..].fill(0xA5);
+
+        let full = Ext4Inode::parse_from_bytes(&raw).expect("full inode parse");
+        let metadata =
+            Ext4Inode::parse_metadata_from_bytes(&raw).expect("metadata inode parse");
+        assert_eq!(full.xattr_ibody.as_slice(), &raw[160..]);
+        assert!(metadata.xattr_ibody.is_empty());
+
+        let mut expected = full;
+        expected.xattr_ibody.clear();
+        assert_eq!(metadata, expected);
     }
 
     /// Verify timestamp sign-extension matches the kernel's behavior.
