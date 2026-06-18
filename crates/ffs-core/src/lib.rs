@@ -56967,6 +56967,25 @@ mod tests {
     }
 
     #[test]
+    fn ext4_link_directory_returns_eperm() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let dir = fs
+            .mkdir(&cx, root, OsStr::new("dir"), 0o755, 0, 0)
+            .expect("mkdir");
+
+        // Hard-linking a directory is forbidden (it would allow cycles) -> EPERM.
+        let err = fs
+            .link(&cx, dir.ino, root, OsStr::new("dirlink"))
+            .unwrap_err();
+        assert_eq!(err.to_errno(), libc::EPERM);
+        assert!(fs.lookup(&cx, root, OsStr::new("dirlink")).is_err());
+    }
+
+    #[test]
     fn write_link_shares_data() {
         let Some(fs) = open_writable_ext4() else {
             return;
