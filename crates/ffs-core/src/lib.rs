@@ -9000,6 +9000,121 @@ impl OpenFs {
         Ok(desc)
     }
 
+    fn read_only_statfs_group_desc_totals(
+        &self,
+        cx: &Cx,
+        scope: &RequestScope,
+        sb: &Ext4Superblock,
+        geo: &FsGeometry,
+    ) -> Result<(u64, u64), FfsError> {
+        use rayon::prelude::{IntoParallelIterator, ParallelIterator};
+
+        let desc_size = usize::from(geo.desc_size);
+        if desc_size == 0 {
+            return Err(FfsError::InvalidGeometry(
+                "group descriptor size does not fit block size".into(),
+            ));
+        }
+        let desc_per_block = geo.block_size / u32::from(geo.desc_size);
+        if desc_per_block == 0 {
+            return Err(FfsError::InvalidGeometry(
+                "group descriptor size does not fit block size".into(),
+            ));
+        }
+
+        let results: Vec<Result<(u64, u64), FfsError>> = (0..geo.gdt_blocks_count())
+            .into_par_iter()
+            .map(|desc_block_idx| {
+                let first_group = desc_block_idx.saturating_mul(desc_per_block);
+                let last_group = first_group
+                    .saturating_add(desc_per_block)
+                    .min(geo.group_count);
+                let first_offset = sb
+                    .group_desc_offset(GroupNumber(first_group))
+                    .ok_or_else(|| FfsError::InvalidGeometry("group desc offset overflow".into()))?;
+                let bs = u64::from(sb.block_size);
+                let block_num = BlockNumber(first_offset / bs);
+                let cacheable = self.can_cache_ext4_read_only_block(scope, block_num);
+
+                if cacheable {
+                    let mut blocks_free = 0_u64;
+                    let mut files_free = 0_u64;
+                    let mut all_cached = true;
+                    for group_idx in first_group..last_group {
+                        if let Some(gd) = self.ext4_group_desc_cache.get(&GroupNumber(group_idx)) {
+                            blocks_free =
+                                blocks_free.saturating_add(u64::from(gd.free_blocks_count));
+                            files_free =
+                                files_free.saturating_add(u64::from(gd.free_inodes_count));
+                        } else {
+                            all_cached = false;
+                            break;
+                        }
+                    }
+                    if all_cached {
+                        return Ok((blocks_free, files_free));
+                    }
+                }
+
+                let block_totals = self.with_block_bytes(cx, scope, block_num, |block_data| {
+                    let mut blocks_free = 0_u64;
+                    let mut files_free = 0_u64;
+                    for group_idx in first_group..last_group {
+                        let group = GroupNumber(group_idx);
+                        let offset = sb.group_desc_offset(group).ok_or_else(|| {
+                            FfsError::InvalidGeometry("group desc offset overflow".into())
+                        })?;
+                        let offset_in_block = usize::try_from(offset % bs).map_err(|_| {
+                            FfsError::InvalidGeometry(
+                                "group desc offset within block exceeds addressable range".into(),
+                            )
+                        })?;
+                        if offset_in_block + desc_size > block_data.len() {
+                            return Err(FfsError::Corruption {
+                                block: block_num.0,
+                                detail: "group descriptor crosses block boundary or truncated block"
+                                    .into(),
+                            });
+                        }
+                        let buf = &block_data[offset_in_block..offset_in_block + desc_size];
+                        if let Some(geom) = &self.ext4_geometry
+                            && geom.group_desc_checksum_kind
+                                != ffs_ondisk::ext4::Ext4GroupDescChecksumKind::None
+                        {
+                            ffs_ondisk::ext4::verify_group_desc_checksum(
+                                buf,
+                                &geom.uuid,
+                                geom.csum_seed,
+                                group.0,
+                                geo.desc_size,
+                                geom.group_desc_checksum_kind,
+                            )
+                            .map_err(|e| parse_to_ffs_error(&e))?;
+                        }
+                        let gd = Ext4GroupDesc::parse_from_bytes(buf, geo.desc_size)
+                            .map_err(|e| parse_to_ffs_error(&e))?;
+                        blocks_free = blocks_free.saturating_add(u64::from(gd.free_blocks_count));
+                        files_free = files_free.saturating_add(u64::from(gd.free_inodes_count));
+                        if cacheable {
+                            self.ext4_group_desc_cache.insert(group, gd);
+                        }
+                    }
+                    Ok((blocks_free, files_free))
+                })?;
+                block_totals
+            })
+            .collect();
+
+        let mut blocks_free = 0_u64;
+        let mut files_free = 0_u64;
+        for result in results {
+            let (group_blocks, group_inodes) = result?;
+            blocks_free = blocks_free.saturating_add(group_blocks);
+            files_free = files_free.saturating_add(group_inodes);
+        }
+        Ok((blocks_free, files_free))
+    }
+
     fn read_ext4_inode_table_block_with_scope(
         &self,
         cx: &Cx,
@@ -28702,15 +28817,7 @@ impl FsOps for OpenFs {
                     (blocks, inodes)
                 } else {
                     let geo = FsGeometry::from_superblock(sb);
-                    let mut blocks_free = 0_u64;
-                    let mut files_free = 0_u64;
-                    for group_idx in 0..geo.group_count {
-                        let gd =
-                            self.read_group_desc_with_scope(cx, scope, GroupNumber(group_idx))?;
-                        blocks_free = blocks_free.saturating_add(u64::from(gd.free_blocks_count));
-                        files_free = files_free.saturating_add(u64::from(gd.free_inodes_count));
-                    }
-                    (blocks_free, files_free)
+                    self.read_only_statfs_group_desc_totals(cx, scope, sb, &geo)?
                 };
                 blocks_free = blocks_free.min(sb.blocks_count);
                 files_free = files_free.min(u64::from(sb.inodes_count));
@@ -37851,10 +37958,19 @@ mod tests {
         image
     }
 
-    fn set_group_desc_free_counts(image: &mut [u8], free_blocks: u16, free_inodes: u16) {
-        let gd_off: usize = 4096;
+    fn set_group_desc_free_counts_at(
+        image: &mut [u8],
+        group: usize,
+        free_blocks: u16,
+        free_inodes: u16,
+    ) {
+        let gd_off: usize = 4096 + group * 32;
         image[gd_off + 0x0C..gd_off + 0x0E].copy_from_slice(&free_blocks.to_le_bytes());
         image[gd_off + 0x0E..gd_off + 0x10].copy_from_slice(&free_inodes.to_le_bytes());
+    }
+
+    fn set_group_desc_free_counts(image: &mut [u8], free_blocks: u16, free_inodes: u16) {
+        set_group_desc_free_counts_at(image, 0, free_blocks, free_inodes);
     }
 
     fn write_jbd2_header(block: &mut [u8], block_type: u32, sequence: u32) {
@@ -41464,6 +41580,50 @@ mod tests {
         assert_eq!(stats.files, u64::from(sb.inodes_count));
         assert_eq!(stats.files_free, 17);
         assert_eq!(stats.name_max, 255);
+    }
+
+    #[test]
+    fn open_fs_fsops_statfs_ext4_parallel_group_descriptor_sum_matches_serial_bd_xmh5g_196() {
+        let mut image = build_ext4_image_with_dir();
+        let sb_off = EXT4_SUPERBLOCK_OFFSET;
+        image[sb_off + 0x20..sb_off + 0x24].copy_from_slice(&32_u32.to_le_bytes());
+        image[sb_off + 0x28..sb_off + 0x2C].copy_from_slice(&64_u32.to_le_bytes());
+        set_group_desc_free_counts_at(&mut image, 0, 11, 7);
+        set_group_desc_free_counts_at(&mut image, 1, 31, 13);
+
+        let dev = TestDevice::from_vec(image);
+        let cx = Cx::for_testing();
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
+        let sb = fs.ext4_superblock().expect("ext4 superblock");
+        let geo = FsGeometry::from_superblock(sb);
+        assert_eq!(geo.group_count, 2);
+
+        let serial = fs
+            .with_latest_scope(|scope| {
+                let mut blocks = 0_u64;
+                let mut inodes = 0_u64;
+                for g in 0..geo.group_count {
+                    let gd = fs.read_group_desc_with_scope(&cx, scope, GroupNumber(g))?;
+                    blocks = blocks.saturating_add(u64::from(gd.free_blocks_count));
+                    inodes = inodes.saturating_add(u64::from(gd.free_inodes_count));
+                }
+                Ok((blocks, inodes))
+            })
+            .expect("serial group descriptor sum");
+        let parallel = fs
+            .with_latest_scope(|scope| {
+                fs.read_only_statfs_group_desc_totals(&cx, scope, sb, &geo)
+            })
+            .expect("parallel group descriptor sum");
+        assert_eq!(parallel, serial);
+        assert_eq!(parallel, (42, 20));
+
+        let stats = fs
+            .statfs(&cx, InodeNumber(2))
+            .expect("statfs");
+        assert_eq!(stats.blocks_free, 42);
+        assert_eq!(stats.files_free, 20);
+        assert_eq!(stats.blocks_available, 42);
     }
 
     #[test]
