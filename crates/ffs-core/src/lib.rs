@@ -11193,11 +11193,14 @@ impl OpenFs {
             }
             return Ok(buf);
         }
-        // Slow symlink: read from data blocks
-        let len = usize::try_from(inode.size).map_err(|_| FfsError::Corruption {
-            block: 0,
-            detail: "symlink size overflow".into(),
-        })?;
+        // Slow symlink: read from data blocks. Cap the allocation at PATH_MAX so
+        // a corrupt inode size cannot drive a huge allocation, matching
+        // FsOps::readlink and the ext4 reader's symlink path.
+        let len =
+            usize::try_from(inode.size.min(LINUX_PATH_MAX)).map_err(|_| FfsError::Corruption {
+                block: 0,
+                detail: "symlink size overflow".into(),
+            })?;
         let mut buf = vec![0_u8; len];
         self.read_file_data(cx, scope, inode, 0, &mut buf)?;
         // Trim trailing NUL
@@ -56290,6 +56293,39 @@ mod tests {
             long_target.as_bytes(),
             "slow symlink target must round-trip byte-identically"
         );
+    }
+
+    #[test]
+    fn read_symlink_caps_slow_path_allocation_at_path_max() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let long_target = "/".to_string() + &"abcdefghijklmnopqrst/".repeat(6) + "final";
+        let attr = fs
+            .symlink(
+                &cx,
+                root,
+                OsStr::new("slow_sym"),
+                Path::new(&long_target),
+                0,
+                0,
+            )
+            .expect("slow symlink create");
+
+        // Corrupt the inode size to a value that would drive a multi-terabyte
+        // allocation in the uncapped slow path (bd-xmh5g.286).
+        let mut inode = fs.read_inode(&cx, attr.ino).expect("read inode");
+        inode.size = 1 << 40; // 1 TiB
+
+        // read_symlink must cap the allocation at PATH_MAX, not the corrupt size,
+        // so this returns a bounded target rather than OOM-ing.
+        let target = fs
+            .with_latest_scope(|scope| fs.read_symlink(&cx, scope, &inode))
+            .expect("read_symlink");
+        assert!(target.len() <= 4096, "got {} bytes", target.len());
+        assert!(target.starts_with(b"/abcdefgh"));
     }
 
     #[test]
