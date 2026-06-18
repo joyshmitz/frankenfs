@@ -3017,7 +3017,19 @@ fn decode_cow_record(block: &[u8]) -> Result<Option<DecodedCowRecord>> {
                 payload,
             }))
         }
-        COW_RECORD_COMMIT => Ok(Some(DecodedCowRecord::Commit { commit_seq })),
+        COW_RECORD_COMMIT => {
+            if target_block != 0 || payload_len != 0 || payload_crc != 0 {
+                return Err(FfsError::Format(
+                    "COW commit record metadata must be zero".to_owned(),
+                ));
+            }
+            if block[COW_HEADER_SIZE..].iter().any(|byte| *byte != 0) {
+                return Err(FfsError::Format(
+                    "COW commit record payload area must be zero".to_owned(),
+                ));
+            }
+            Ok(Some(DecodedCowRecord::Commit { commit_seq }))
+        }
         other => Err(FfsError::Format(format!(
             "unknown COW record kind: {other}"
         ))),
@@ -6796,6 +6808,45 @@ mod tests {
             }
             _ => return Err(FfsError::Format("expected commit record".to_owned())),
         }
+
+        Ok(())
+    }
+
+    #[test]
+    fn native_cow_commit_decode_rejects_nonzero_metadata() -> Result<()> {
+        let commit = encode_cow_record(
+            64,
+            &CowRecord::Commit {
+                commit_seq: CommitSeq(9),
+            },
+        )?;
+
+        let assert_format = |raw: &[u8], needle: &str| match decode_cow_record(raw) {
+            Err(FfsError::Format(message)) => {
+                assert!(
+                    message.contains(needle),
+                    "expected {needle:?} in error message {message:?}"
+                );
+            }
+            Err(other) => panic!("expected Format error, got {other:?}"),
+            Ok(_) => panic!("malformed commit record decoded successfully"),
+        };
+
+        let mut nonzero_target = commit.clone();
+        nonzero_target[16..24].copy_from_slice(&7_u64.to_le_bytes());
+        assert_format(&nonzero_target, "metadata");
+
+        let mut nonzero_payload_len = commit.clone();
+        nonzero_payload_len[24..28].copy_from_slice(&1_u32.to_le_bytes());
+        assert_format(&nonzero_payload_len, "metadata");
+
+        let mut nonzero_payload_crc = commit.clone();
+        nonzero_payload_crc[28..32].copy_from_slice(&0xA5A5_5A5A_u32.to_le_bytes());
+        assert_format(&nonzero_payload_crc, "metadata");
+
+        let mut nonzero_payload_area = commit;
+        nonzero_payload_area[COW_HEADER_SIZE] = 0xA5;
+        assert_format(&nonzero_payload_area, "payload area");
 
         Ok(())
     }
