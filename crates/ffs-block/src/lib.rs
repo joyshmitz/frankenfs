@@ -759,6 +759,13 @@ pub trait VectoredBlockDevice: BlockDevice {
                 bufs.len()
             )));
         }
+        let block_count = self.block_count();
+        if let Some(block) = blocks.iter().copied().find(|block| block.0 >= block_count) {
+            return Err(FfsError::Format(format!(
+                "block out of range: block={} block_count={block_count}",
+                block.0
+            )));
+        }
         trace!(
             target: "ffs::block::io",
             event = "write_vectored",
@@ -7288,6 +7295,26 @@ mod tests {
         assert!(matches!(err, FfsError::Format(_)));
         assert_eq!(reads[0].as_slice(), &[0xAA; 4096]);
         assert_eq!(reads[1].as_slice(), &[0xBB; 4096]);
+    }
+
+    #[test]
+    fn vectored_write_rejects_invalid_later_block_before_partial_writes() {
+        let cx = Cx::for_testing();
+        let mem = MemoryByteDevice::new(4096 * 2);
+        let dev = ByteBlockDevice::new(mem, 4096).expect("device");
+        let blocks = [BlockNumber(0), BlockNumber(2)];
+        let writes = [
+            BlockBuf::new(vec![0xAA; 4096]),
+            BlockBuf::new(vec![0xBB; 4096]),
+        ];
+
+        let err = dev
+            .write_vectored(&blocks, &writes, &cx)
+            .expect_err("invalid later block should fail before writes");
+
+        assert!(matches!(err, FfsError::Format(_)));
+        let block0 = dev.read_block(&cx, BlockNumber(0)).expect("read block 0");
+        assert_eq!(block0.as_slice(), &[0_u8; 4096]);
     }
 
     #[test]
