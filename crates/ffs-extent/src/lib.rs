@@ -5383,6 +5383,67 @@ ExtentMapping { logical_start: 5, physical_start: 134, count: 2, unwritten: true
             prop_assert_eq!(got, model, "collapse_range map diverged from model");
         }
 
+        /// insert_range (the mirror of collapse_range) shifts the tail right by
+        /// `count`, preserving each block's physical address and leaving a hole
+        /// at [cstart, cstart+clen). Model: blocks < cstart unchanged, blocks
+        /// >= cstart moved to (logical + clen) with the same physical
+        /// (bd-xmh5g.206).
+        #[test]
+        fn proptest_insert_range_logical_shift(
+            count in 12_u32..40,
+            cstart in 1_u32..8,
+            clen in 1_u32..8,
+        ) {
+            let cx = test_cx();
+            let dev = MemBlockDevice::new(4096);
+            let geo = make_geometry();
+            let mut groups = make_groups(&geo);
+            let mut root = empty_root();
+            let pctx = mock_pctx();
+
+            // One contiguous extent [0, count) -> physical p0 + L.
+            let alloc = allocate_extent(
+                &cx, &dev, &mut root, &geo, &mut groups,
+                0, count,
+                &AllocHint::default(), &pctx,
+                ExtentOwner::default(),
+            ).unwrap();
+            let p0 = alloc.physical_start;
+
+            // Model the expected post-insert logical -> physical map.
+            let mut model = BTreeMap::<u32, u64>::new();
+            for l in 0..count {
+                if l < cstart {
+                    model.insert(l, p0 + u64::from(l));
+                } else {
+                    model.insert(l + clen, p0 + u64::from(l));
+                }
+            }
+
+            insert_range(
+                &cx, &dev, &mut root, &geo, &mut groups,
+                cstart, clen, &pctx,
+                ExtentOwner::default(),
+            ).unwrap();
+
+            // Expand the resulting mappings into a per-block logical -> physical
+            // map (holes have physical_start 0 and are skipped) and compare.
+            let new_len = count + clen;
+            let maps = map_logical_to_physical(&cx, &dev, &root, 0, u64::from(new_len)).unwrap();
+            let mut got = BTreeMap::<u32, u64>::new();
+            let mut pos = 0_u32;
+            for m in &maps {
+                if m.physical_start != 0 {
+                    for i in 0..m.count {
+                        got.insert(pos + i, m.physical_start + u64::from(i));
+                    }
+                }
+                pos += m.count;
+            }
+
+            prop_assert_eq!(got, model, "insert_range map diverged from model");
+        }
+
         /// Unwritten allocation produces mappings with unwritten flag set.
         #[test]
         fn proptest_unwritten_alloc_flag(
