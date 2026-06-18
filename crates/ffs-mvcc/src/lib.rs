@@ -11022,6 +11022,49 @@ mod tests {
     }
 
     #[test]
+    fn ssi_dangerous_structure_accumulates_edges_across_records() {
+        let mut pivot = Transaction::new(TxnId(60), Snapshot { high: CommitSeq(0) });
+        pivot.record_read(BlockNumber(0), CommitSeq(1));
+        pivot.stage_write(BlockNumber(2), vec![1; 64]);
+
+        // Record 1 writes a block the pivot read -> only an incoming edge.
+        let rec1 = CommittedTxnRecord {
+            txn_id: TxnId(61),
+            commit_seq: CommitSeq(5),
+            snapshot: Snapshot { high: CommitSeq(0) },
+            write_set: BTreeSet::from([BlockNumber(0)]),
+            read_set: [(BlockNumber(99), CommitSeq(1))].into_iter().collect(),
+        };
+        // Record 2 reads a block the pivot wrote -> only an outgoing edge.
+        let rec2 = CommittedTxnRecord {
+            txn_id: TxnId(62),
+            commit_seq: CommitSeq(6),
+            snapshot: Snapshot { high: CommitSeq(0) },
+            write_set: BTreeSet::from([BlockNumber(99)]),
+            read_set: [(BlockNumber(2), CommitSeq(1))].into_iter().collect(),
+        };
+
+        // Neither record alone is a dangerous structure.
+        assert!(
+            detect_ssi_dangerous_structure(&pivot, [&rec1])
+                .1
+                .is_none()
+        );
+        assert!(
+            detect_ssi_dangerous_structure(&pivot, [&rec2])
+                .1
+                .is_none()
+        );
+        // Together they form the pivot: incoming from rec1, outgoing from rec2.
+        let (checks, dangerous) = detect_ssi_dangerous_structure(&pivot, [&rec1, &rec2]);
+        assert_eq!(checks, 2, "both records are examined");
+        assert!(
+            dangerous.is_some(),
+            "edges from two distinct records form a dangerous structure"
+        );
+    }
+
+    #[test]
     fn ssi_span_guard_preserves_min_intersection_tiebreaks() {
         use sha2::{Digest, Sha256};
 
