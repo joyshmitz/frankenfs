@@ -6543,6 +6543,33 @@ mod tests {
     }
 
     #[test]
+    fn stripe_resolve_raid10_returns_selected_mirror_pair() {
+        let chunks = vec![make_chunk(
+            0,
+            1_048_576,
+            65536,
+            chunk_type_flags::BTRFS_BLOCK_GROUP_DATA | chunk_type_flags::BTRFS_BLOCK_GROUP_RAID10,
+            vec![
+                stripe(1, 0x10_0000),
+                stripe(2, 0x20_0000),
+                stripe(3, 0x30_0000),
+                stripe(4, 0x40_0000),
+            ],
+            2,
+        )];
+
+        let mapping = map_logical_to_stripes(&chunks, 65_536)
+            .expect("RAID10 mirror pair should map")
+            .expect("chunk should cover logical address");
+        assert_eq!(mapping.profile, BtrfsRaidProfile::Raid10);
+        assert_eq!(mapping.stripes.len(), 2);
+        assert_eq!(mapping.stripes[0].devid, 3);
+        assert_eq!(mapping.stripes[0].physical, 0x30_0000);
+        assert_eq!(mapping.stripes[1].devid, 4);
+        assert_eq!(mapping.stripes[1].physical, 0x40_0000);
+    }
+
+    #[test]
     fn stripe_resolve_raid10_rejects_stripe_len_product_overflow() {
         let chunks = vec![make_chunk(
             0,
