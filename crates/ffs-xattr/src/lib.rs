@@ -2611,6 +2611,70 @@ mod tests {
     }
 
     #[test]
+    fn xattr_exists_for_access_honors_trusted_visibility() -> Result<()> {
+        let mut inode = make_inode(0);
+        let mut external = vec![0_u8; 4096];
+        let admin = XattrWriteAccess {
+            is_owner: true,
+            has_cap_fowner: true,
+            has_cap_sys_admin: true,
+        };
+        let admin_read = XattrReadAccess {
+            has_cap_sys_admin: true,
+        };
+
+        set_xattr(
+            &mut inode,
+            Some(&mut external),
+            "trusted.meta",
+            b"secret",
+            admin,
+        )?;
+
+        if xattr_exists_for_access(
+            &inode,
+            Some(&external),
+            "trusted.meta",
+            XattrReadAccess::default(),
+        )? {
+            return Err(FfsError::Format(
+                "trusted xattr exists for default reader".to_owned(),
+            ));
+        }
+        if !xattr_exists_for_access(
+            &inode,
+            Some(&external),
+            "trusted.meta",
+            admin_read,
+        )? {
+            return Err(FfsError::Format(
+                "trusted xattr hidden from admin reader".to_owned(),
+            ));
+        }
+        if get_xattr_for_access(
+            &inode,
+            Some(&external),
+            "trusted.meta",
+            XattrReadAccess::default(),
+        )?
+        .is_some()
+        {
+            return Err(FfsError::Format(
+                "trusted xattr get succeeded for default reader".to_owned(),
+            ));
+        }
+        if get_xattr_for_access(&inode, Some(&external), "trusted.meta", admin_read)?
+            != Some(b"secret".to_vec())
+        {
+            return Err(FfsError::Format(
+                "trusted xattr get failed for admin reader".to_owned(),
+            ));
+        }
+
+        Ok(())
+    }
+
+    #[test]
     fn encryption_namespace_hidden_from_all_xattr_views() {
         let inode = Ext4Inode {
             xattr_ibody: build_inline_ibody(
