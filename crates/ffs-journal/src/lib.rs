@@ -3192,6 +3192,28 @@ mod tests {
         );
     }
 
+    #[test]
+    fn jbd2_superblock_parse_rejects_bad_magic_and_block_type() {
+        // A full-size buffer with the wrong magic must not parse as a superblock.
+        let mut bad_magic =
+            jbd2_superblock_block(512, 1, 1, 0, JBD2_FEATURE_INCOMPAT_CSUM_V3, [7; 16]);
+        bad_magic[0..4].copy_from_slice(&0xDEAD_BEEF_u32.to_be_bytes());
+        assert!(
+            Jbd2Superblock::parse(&bad_magic).is_none(),
+            "wrong magic must be rejected"
+        );
+
+        // Correct magic but a non-superblock block type (a descriptor block)
+        // must be rejected so recovery never misreads it as a superblock.
+        let mut wrong_type =
+            jbd2_superblock_block(512, 1, 1, 0, JBD2_FEATURE_INCOMPAT_CSUM_V3, [7; 16]);
+        wrong_type[4..8].copy_from_slice(&JBD2_BLOCKTYPE_DESCRIPTOR.to_be_bytes());
+        assert!(
+            Jbd2Superblock::parse(&wrong_type).is_none(),
+            "non-superblock block type must be rejected"
+        );
+    }
+
     fn descriptor_block(block_size: usize, seq: u32, tags: &[(u32, u32)]) -> Vec<u8> {
         let mut out = vec![0_u8; block_size];
         out[0..JBD2_HEADER_SIZE].copy_from_slice(&jbd2_header(JBD2_BLOCKTYPE_DESCRIPTOR, seq));
