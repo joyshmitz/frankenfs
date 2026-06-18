@@ -11,7 +11,7 @@ use ffs_types::{
     EXT4_XATTR_INDEX_ENCRYPTION, EXT4_XATTR_INDEX_POSIX_ACL_ACCESS,
     EXT4_XATTR_INDEX_POSIX_ACL_DEFAULT, EXT4_XATTR_INDEX_RICHACL, EXT4_XATTR_INDEX_SECURITY,
     EXT4_XATTR_INDEX_SYSTEM, EXT4_XATTR_INDEX_TRUSTED, EXT4_XATTR_INDEX_USER, EXT4_XATTR_MAGIC,
-    ParseError,
+    ParseError, all_zero_bytes,
 };
 
 const INLINE_HEADER_LEN: usize = 4;
@@ -51,7 +51,7 @@ fn parse_external_entries(block: &[u8], allow_zero_initialized: bool) -> Result<
     }
     let magic = parse_external_magic(block)?;
     if magic != EXT4_XATTR_MAGIC {
-        if allow_zero_initialized && block.iter().all(|b| *b == 0) {
+        if allow_zero_initialized && all_zero_bytes(block) {
             return Ok(Vec::new());
         }
         return Err(FfsError::Format(

@@ -19,6 +19,7 @@
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use ffs_ondisk::Ext4Inode;
+use ffs_types::all_zero_bytes;
 use ffs_xattr::{XattrReadAccess, XattrWriteAccess, get_xattr_for_access, xattr_exists_for_access};
 use std::hint::black_box;
 
@@ -83,6 +84,10 @@ fn read_access() -> XattrReadAccess {
     }
 }
 
+fn scalar_all_zero(block: &[u8]) -> bool {
+    block.iter().all(|byte| *byte == 0)
+}
+
 fn bench_exists_probe(c: &mut Criterion) {
     let (inode, block) = build_populated();
     let access = read_access();
@@ -130,5 +135,41 @@ fn bench_exists_probe(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_exists_probe);
+fn bench_zero_initialized_external_block(c: &mut Criterion) {
+    let zero_block = vec![0_u8; BLOCK_SIZE];
+    let mut late_nonzero = zero_block.clone();
+    *late_nonzero.last_mut().expect("block is non-empty") = 1;
+
+    assert_eq!(
+        scalar_all_zero(&zero_block),
+        all_zero_bytes(&zero_block),
+        "zero block verdict diverged"
+    );
+    assert_eq!(
+        scalar_all_zero(&late_nonzero),
+        all_zero_bytes(&late_nonzero),
+        "late-nonzero block verdict diverged"
+    );
+
+    let mut group = c.benchmark_group("xattr_zero_initialized_external_block");
+    group.bench_function("scalar_zero_scan_4k", |b| {
+        b.iter(|| black_box(scalar_all_zero(black_box(&zero_block))));
+    });
+    group.bench_function("chunked_all_zero_4k", |b| {
+        b.iter(|| black_box(all_zero_bytes(black_box(&zero_block))));
+    });
+    group.bench_function("scalar_late_nonzero_4k", |b| {
+        b.iter(|| black_box(scalar_all_zero(black_box(&late_nonzero))));
+    });
+    group.bench_function("chunked_late_nonzero_4k", |b| {
+        b.iter(|| black_box(all_zero_bytes(black_box(&late_nonzero))));
+    });
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_exists_probe,
+    bench_zero_initialized_external_block
+);
 criterion_main!(benches);
