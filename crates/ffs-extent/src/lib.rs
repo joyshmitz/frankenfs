@@ -5062,6 +5062,12 @@ ExtentMapping { logical_start: 5, physical_start: 134, count: 2, unwritten: true
 
         let after = map_logical_to_physical(&cx, &dev, &root, 0, 10).unwrap();
         assert_eq!(after, before, "truncate past extent end must be a noop");
+
+        let beyond = map_logical_to_physical(&cx, &dev, &root, 10, 5).unwrap();
+        assert!(
+            beyond.iter().all(|m| m.physical_start == 0),
+            "truncate past extent end must not create mappings beyond EOF: {beyond:?}"
+        );
     }
 
     // ── Proptest property-based tests ─────────────────────────────────
