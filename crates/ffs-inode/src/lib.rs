@@ -582,27 +582,58 @@ fn free_indirect_subtree_range(
     let mut freed = 0u64;
     let mut dirty = false;
 
-    for i in 0..ppb {
-        let child_base = base.saturating_add(i.saturating_mul(entry_span));
-        // Entry's whole logical range is below the cutoff — keep untouched.
-        if child_base.saturating_add(entry_span) <= cutoff {
-            continue;
+    if level == 1 {
+        // entry_span == 1: every non-zero pointer surviving the cutoff check has
+        // `child_base >= cutoff` and is freed. Collect them (zeroing each slot in
+        // the in-memory indirect buffer) and free them in contiguous runs — one
+        // bitmap read-modify-write per run instead of per block (bd-wgv6x).
+        let mut to_free = Vec::new();
+        for i in 0..ppb {
+            let child_base = base.saturating_add(i.saturating_mul(entry_span));
+            if child_base.saturating_add(entry_span) <= cutoff {
+                continue;
+            }
+            let off = match usize::try_from(i) {
+                Ok(idx) => idx * 4,
+                Err(_) => break,
+            };
+            if off + 4 > data.len() {
+                break;
+            }
+            let ptr =
+                u32::from_le_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]]);
+            if ptr == 0 {
+                continue;
+            }
+            to_free.push(ptr);
+            data[off..off + 4].copy_from_slice(&0u32.to_le_bytes());
+            dirty = true;
         }
-        let off = match usize::try_from(i) {
-            Ok(idx) => idx * 4,
-            Err(_) => break,
-        };
-        if off + 4 > data.len() {
-            break;
+        if !to_free.is_empty() {
+            let n = to_free.len() as u64;
+            free_data_blocks_in_runs(cx, dev, geo, groups, &to_free, pctx)?;
+            freed = freed.saturating_add(n);
         }
-        let ptr = u32::from_le_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]]);
-        if ptr == 0 {
-            continue;
-        }
-        let child = BlockNumber(u64::from(ptr));
-        let free_this = if level == 1 {
-            child_base >= cutoff
-        } else {
+    } else {
+        for i in 0..ppb {
+            let child_base = base.saturating_add(i.saturating_mul(entry_span));
+            // Entry's whole logical range is below the cutoff — keep untouched.
+            if child_base.saturating_add(entry_span) <= cutoff {
+                continue;
+            }
+            let off = match usize::try_from(i) {
+                Ok(idx) => idx * 4,
+                Err(_) => break,
+            };
+            if off + 4 > data.len() {
+                break;
+            }
+            let ptr =
+                u32::from_le_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]]);
+            if ptr == 0 {
+                continue;
+            }
+            let child = BlockNumber(u64::from(ptr));
             let (child_freed, child_empty) = free_indirect_subtree_range(
                 cx,
                 dev,
@@ -616,13 +647,12 @@ fn free_indirect_subtree_range(
                 pctx,
             )?;
             freed = freed.saturating_add(child_freed);
-            child_empty
-        };
-        if free_this {
-            ffs_alloc::free_blocks_persist(cx, dev, geo, groups, child, 1, pctx)?;
-            data[off..off + 4].copy_from_slice(&0u32.to_le_bytes());
-            dirty = true;
-            freed = freed.saturating_add(1);
+            if child_empty {
+                ffs_alloc::free_blocks_persist(cx, dev, geo, groups, child, 1, pctx)?;
+                data[off..off + 4].copy_from_slice(&0u32.to_le_bytes());
+                dirty = true;
+                freed = freed.saturating_add(1);
+            }
         }
     }
 
