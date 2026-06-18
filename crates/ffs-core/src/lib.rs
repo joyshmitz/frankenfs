@@ -57277,6 +57277,32 @@ mod tests {
     }
 
     #[test]
+    fn ext4_setattr_atime_mtime_round_trip_without_swap() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let attr = fs
+            .create(&cx, root, OsStr::new("times.txt"), 0o644, 0, 0)
+            .expect("create");
+
+        // Distinct values so a swap or one-field drop is detectable.
+        let atime = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
+        let mtime = std::time::UNIX_EPOCH + std::time::Duration::from_secs(2_000_000);
+        let req = SetAttrRequest {
+            atime: Some(atime),
+            mtime: Some(mtime),
+            ..SetAttrRequest::default()
+        };
+        fs.setattr(&cx, attr.ino, &req).expect("set times");
+
+        let ga = fs.getattr(&cx, attr.ino).expect("getattr");
+        assert_eq!(ga.atime, atime, "atime must round-trip (not swapped/dropped)");
+        assert_eq!(ga.mtime, mtime, "mtime must round-trip (not swapped/dropped)");
+    }
+
+    #[test]
     fn write_fallocate_punch_hole_zeroes_data() {
         let Some(fs) = open_writable_ext4() else {
             return;
