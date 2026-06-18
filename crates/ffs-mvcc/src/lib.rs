@@ -2280,10 +2280,19 @@ impl MvccStore {
         self.apply_fcw_commit(txn)
     }
 
-    fn version_bytes_at(&self, block: BlockNumber, visible_high: CommitSeq) -> Option<Vec<u8>> {
-        self.versions
-            .get(&block)
-            .and_then(|versions| resolve_version_bytes_at_or_before(versions, visible_high))
+    fn version_bytes_at(
+        &self,
+        block: BlockNumber,
+        visible_high: CommitSeq,
+    ) -> Option<std::borrow::Cow<'_, [u8]>> {
+        // Conflict-merge only reads these bytes (`merge_bytes(&base, &latest, ..)`),
+        // so return a borrow for the common uncompressed `Full` version instead of
+        // cloning it into a fresh Vec; compressed versions still own their
+        // decompressed bytes. Byte-identical; `&Cow` deref-coerces to `&[u8]`.
+        self.versions.get(&block).and_then(|versions| {
+            let idx = newest_visible_index(versions, visible_high)?;
+            compression::resolve_data_with(versions, idx, |v| &v.data)
+        })
     }
 
     fn resolved_write_bytes(
