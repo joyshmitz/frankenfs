@@ -65891,6 +65891,27 @@ mod tests {
     }
 
     #[test]
+    fn btrfs_mknod_unsupported_file_type_returns_einval() {
+        let (fs, cx) = open_writable_btrfs();
+        let root = InodeNumber(1);
+
+        // A regular-file mode is not a special file: mknod must reject it.
+        let err = fs
+            .mknod(&cx, root, OsStr::new("bad"), ffs_types::S_IFREG | 0o644, 0, 0, 0)
+            .unwrap_err();
+        assert_eq!(err.to_errno(), libc::EINVAL);
+        // A directory mode via mknod is likewise rejected.
+        let err2 = fs
+            .mknod(&cx, root, OsStr::new("bad2"), ffs_types::S_IFDIR | 0o755, 0, 0, 0)
+            .unwrap_err();
+        assert_eq!(err2.to_errno(), libc::EINVAL);
+
+        // No partial entry was created for either rejected call.
+        assert!(fs.lookup(&cx, root, OsStr::new("bad")).is_err());
+        assert!(fs.lookup(&cx, root, OsStr::new("bad2")).is_err());
+    }
+
+    #[test]
     fn btrfs_mknod_fifo_and_socket_round_trip_through_getattr() {
         let (fs, cx) = open_writable_btrfs();
         let root = InodeNumber(1);
