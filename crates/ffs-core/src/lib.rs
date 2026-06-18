@@ -55440,6 +55440,23 @@ mod tests {
     }
 
     #[test]
+    fn btrfs_align_up_and_down_boundaries() {
+        // align_up: already-aligned passes through; otherwise rounds up.
+        assert_eq!(OpenFs::btrfs_align_up(96, 16).unwrap(), 96);
+        assert_eq!(OpenFs::btrfs_align_up(100, 16).unwrap(), 112);
+        assert_eq!(OpenFs::btrfs_align_up(0, 16).unwrap(), 0);
+        // Rounding up past u64::MAX is rejected, not wrapped.
+        let err = OpenFs::btrfs_align_up(u64::MAX, 16).unwrap_err();
+        assert!(matches!(err, FfsError::InvalidGeometry(_)), "got {err:?}");
+
+        // align_down: already-aligned passes through; otherwise rounds down.
+        assert_eq!(OpenFs::btrfs_align_down(96, 16), 96);
+        assert_eq!(OpenFs::btrfs_align_down(100, 16), 96);
+        assert_eq!(OpenFs::btrfs_align_down(15, 16), 0);
+        assert_eq!(OpenFs::btrfs_align_down(0, 16), 0);
+    }
+
+    #[test]
     fn ext4_max_file_size_scales_with_block_size_and_rejects_above() {
         // The extent tree addresses 2^32 logical blocks, so the max file size
         // is 2^32 * block_size: 4 TiB / 8 TiB / 16 TiB for 1K / 2K / 4K blocks.
