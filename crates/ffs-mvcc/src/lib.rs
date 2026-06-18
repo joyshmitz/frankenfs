@@ -5025,6 +5025,16 @@ mod tests {
     }
 
     #[test]
+    fn validate_transaction_id_rejects_reserved_ids() {
+        // Ordinary ids validate.
+        assert!(validate_transaction_id(TxnId(1)).is_ok());
+        assert!(validate_transaction_id(TxnId(u64::MAX - 1)).is_ok());
+        // 0 (uninitialized / no-transaction) and u64::MAX (sentinel) are reserved.
+        assert!(validate_transaction_id(TxnId(0)).is_err());
+        assert!(validate_transaction_id(TxnId(u64::MAX)).is_err());
+    }
+
+    #[test]
     fn resolved_writes_for_commit_returns_merged_bytes_for_append_only_proof() {
         let mut store = MvccStore::new();
         let block = BlockNumber(7);
