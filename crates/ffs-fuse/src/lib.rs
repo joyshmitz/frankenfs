@@ -8290,6 +8290,27 @@ mod tests {
     }
 
     #[test]
+    fn fuse_inode_locks_evict_slots_when_guards_drop() {
+        let locks = Arc::new(FuseInodeLocks {
+            table: Mutex::new(std::collections::BTreeMap::new()),
+        });
+
+        // A single-inode acquire creates one slot with users == 1.
+        let g = locks.acquire(&[InodeNumber(5)]);
+        assert_eq!(locks.table.lock().unwrap().len(), 1);
+        assert_eq!(locks.table.lock().unwrap()[&InodeNumber(5)].users, 1);
+        // Dropping the guard evicts the slot (users reaches 0) — no leak.
+        drop(g);
+        assert!(locks.table.lock().unwrap().is_empty());
+
+        // A multi-inode batch creates one slot per distinct inode, all evicted.
+        let g2 = locks.acquire(&[InodeNumber(5), InodeNumber(7)]);
+        assert_eq!(locks.table.lock().unwrap().len(), 2);
+        drop(g2);
+        assert!(locks.table.lock().unwrap().is_empty());
+    }
+
+    #[test]
     fn readahead_manager_evicts_oldest_when_over_limit() {
         let r = ReadaheadManager::new(2);
         r.insert(InodeNumber(1), 0, vec![1]);
