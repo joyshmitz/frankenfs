@@ -456,6 +456,10 @@ pub fn repair_local_single(
     }
 
     let block_size = local_parity.len();
+    if block_size == 0 {
+        return None;
+    }
+
     if available_blocks
         .iter()
         .flatten()
@@ -861,6 +865,15 @@ mod tests {
 
         assert!(repair_local_single(&cfg, 0, 2, &available, &local[0]).is_none());
         assert!(repair_local_single(&cfg, 0, 2, &available, &local[0][..63]).is_none());
+    }
+
+    #[test]
+    fn local_repair_rejects_zero_block_size_without_empty_recovery() {
+        let cfg = LrcConfig::new(4, 2, 1);
+        let empty = [];
+        let available: Vec<Option<&[u8]>> = vec![None, Some(empty.as_slice())];
+
+        assert!(repair_local_single(&cfg, 0, 0, &available, &[]).is_none());
     }
 
     #[test]
