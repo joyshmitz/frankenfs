@@ -35,6 +35,17 @@ fn read_inode_block(block: usize) -> u64 {
 
 fn bench_inode_prefetch(c: &mut Criterion) {
     let blocks: Vec<usize> = (0..ENTRIES).collect();
+    let serial_order_checksum = blocks
+        .iter()
+        .fold(0_u64, |acc, &blk| acc.wrapping_add(blk as u64));
+    let parallel_order_checksum = blocks
+        .par_iter()
+        .map(|&blk| blk as u64)
+        .reduce(|| 0, u64::wrapping_add);
+    assert_eq!(
+        serial_order_checksum, parallel_order_checksum,
+        "parallel prefetch must cover the same inode-table block set"
+    );
 
     let mut group = c.benchmark_group("ls_dir_inode_prefetch_256");
 

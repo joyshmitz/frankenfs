@@ -993,6 +993,9 @@ struct ReaddirSnapshot {
 /// simply re-requests the remainder (a short non-empty readdir reply is not EOF),
 /// so the complete, ordered listing is identical either way.
 const READDIR_SNAPSHOT_PAGE_MAX: usize = 512;
+/// Do not pay Rayon setup and inode-location work for tiny directory pages.
+/// The target workload is stat-heavy listing over hundreds of entries.
+const EXT4_READDIR_INODE_PREFETCH_MIN_ENTRIES: usize = 8;
 
 /// Return the readdir page after continuation cookie `offset` from a cached full
 /// listing. Both ext4 (contiguous position cookies) and btrfs (sparse dir-index
@@ -9137,6 +9140,98 @@ impl OpenFs {
                 .insert(block, Arc::clone(&block_data));
         }
         Ok(block_data)
+    }
+
+    fn ext4_inode_table_block_for_inode_with_scope(
+        &self,
+        cx: &Cx,
+        scope: &RequestScope,
+        sb: &Ext4Superblock,
+        ino: InodeNumber,
+    ) -> Result<BlockNumber, FfsError> {
+        let loc = sb.locate_inode(ino).map_err(|e| parse_to_ffs_error(&e))?;
+        let gd = self.read_group_desc_with_scope(cx, scope, loc.group)?;
+        let bs = u64::from(sb.block_size);
+        let inode_table_start_byte =
+            gd.inode_table
+                .checked_mul(bs)
+                .ok_or_else(|| FfsError::Corruption {
+                    block: gd.inode_table,
+                    detail: "inode table offset overflow".into(),
+                })?;
+        let inode_offset_in_table = u64::from(loc.index) * u64::from(sb.inode_size);
+        let abs_offset = inode_table_start_byte + inode_offset_in_table;
+        Ok(BlockNumber(abs_offset / bs))
+    }
+
+    fn prefetch_ext4_readdir_inode_table_blocks(
+        &self,
+        cx: &Cx,
+        scope: &RequestScope,
+        entries: &[DirEntry],
+    ) {
+        if entries.len() < EXT4_READDIR_INODE_PREFETCH_MIN_ENTRIES || self.is_writable() {
+            return;
+        }
+        let Some(sb) = self.ext4_superblock() else {
+            return;
+        };
+
+        let mut blocks = BTreeSet::new();
+        for entry in entries {
+            let ino = Self::ext4_canonical_inode(entry.ino);
+            match self.ext4_inode_table_block_for_inode_with_scope(cx, scope, sb, ino) {
+                Ok(block)
+                    if self.can_cache_ext4_read_only_block(scope, block)
+                        && !self.ext4_inode_table_block_cache.contains_key(&block) =>
+                {
+                    blocks.insert(block);
+                }
+                Ok(_) => {}
+                Err(err) => {
+                    trace!(
+                        inode = ino.0,
+                        error = %err,
+                        "ext4 readdir inode-table prefetch skipped inode"
+                    );
+                }
+            }
+        }
+
+        let blocks: Vec<BlockNumber> = blocks.into_iter().collect();
+        if blocks.is_empty() {
+            return;
+        }
+        if blocks.len() == 1 {
+            if let Err(err) = self.read_ext4_inode_table_block_with_scope(cx, scope, blocks[0]) {
+                trace!(
+                    block = blocks[0].0,
+                    error = %err,
+                    "ext4 readdir inode-table prefetch failed"
+                );
+            }
+            return;
+        }
+
+        use rayon::prelude::{IntoParallelIterator, ParallelIterator};
+        let reads: Vec<(BlockNumber, Result<(), FfsError>)> = blocks
+            .into_par_iter()
+            .map(|block| {
+                let result = self
+                    .read_ext4_inode_table_block_with_scope(cx, scope, block)
+                    .map(|_| ());
+                (block, result)
+            })
+            .collect();
+        for (block, result) in reads {
+            if let Err(err) = result {
+                trace!(
+                    block = block.0,
+                    error = %err,
+                    "ext4 readdir inode-table prefetch failed"
+                );
+            }
+        }
     }
 
     fn read_ext4_file_data_block_with_scope(
@@ -28685,6 +28780,7 @@ impl FsOps for OpenFs {
                 if let Some(page) =
                     readdir_snapshot_serve(&self.readdir_snapshot, canonical.0, validation, offset)
                 {
+                    self.prefetch_ext4_readdir_inode_table_blocks(cx, scope, page.as_slice());
                     return Ok(page);
                 }
 
@@ -28709,6 +28805,7 @@ impl FsOps for OpenFs {
                     .collect();
                 let full = Arc::new(full);
                 let page = slice_readdir_snapshot(Arc::clone(&full), offset);
+                self.prefetch_ext4_readdir_inode_table_blocks(cx, scope, page.as_slice());
                 readdir_snapshot_store(&self.readdir_snapshot, canonical.0, validation, full);
                 Ok(page)
             }
