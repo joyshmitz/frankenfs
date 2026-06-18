@@ -19,7 +19,7 @@
 //! - **WB-I2 (Atomic Generation Transition):** A reader after crash observes
 //!   generation `g` (pre-writeback) or `g+1` (post), never a torn mixture.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use tracing::{debug, trace};
 
@@ -122,7 +122,7 @@ impl WriteDependencyDag {
     /// This is the order in which nodes must be flushed to maintain WB-I1.
     pub fn reverse_topological_order(&self) -> Vec<u64> {
         let mut result = Vec::with_capacity(self.nodes.len());
-        let mut visited = BTreeSet::new();
+        let mut visited = HashSet::with_capacity(self.nodes.len());
 
         self.push_postorder(self.root, &mut visited, &mut result);
 
@@ -140,7 +140,7 @@ impl WriteDependencyDag {
         result
     }
 
-    fn push_postorder(&self, block: u64, visited: &mut BTreeSet<u64>, result: &mut Vec<u64>) {
+    fn push_postorder(&self, block: u64, visited: &mut HashSet<u64>, result: &mut Vec<u64>) {
         if !visited.insert(block) {
             return;
         }
@@ -1306,6 +1306,67 @@ mod tests {
                     "child block {child} must precede parent block {parent}"
                 );
             }
+        }
+    }
+
+    fn reverse_topological_order_btree_model(dag: &WriteDependencyDag) -> Vec<u64> {
+        fn push_postorder(
+            dag: &WriteDependencyDag,
+            block: u64,
+            visited: &mut BTreeSet<u64>,
+            result: &mut Vec<u64>,
+        ) {
+            if !visited.insert(block) {
+                return;
+            }
+
+            let Some(node) = dag.get(block) else {
+                return;
+            };
+
+            for child in &node.children {
+                push_postorder(dag, *child, visited, result);
+            }
+
+            result.push(block);
+        }
+
+        let mut result = Vec::with_capacity(dag.node_count());
+        let mut visited = BTreeSet::new();
+        push_postorder(dag, dag.root(), &mut visited, &mut result);
+
+        for block in dag.blocks() {
+            push_postorder(dag, block, &mut visited, &mut result);
+        }
+
+        result
+    }
+
+    #[test]
+    fn reverse_topological_order_hashset_matches_btree_membership_model() {
+        let mut tree = InMemoryCowBtrfsTree::new(8).expect("create tree");
+        for i in 0..256_u64 {
+            let key = BtrfsKey {
+                objectid: i,
+                item_type: 0x84,
+                offset: i * 4096,
+            };
+            tree.insert(key, &i.to_le_bytes()).expect("insert");
+        }
+        let dag = WriteDependencyDag::from_cow_tree(&tree, 100).expect("build dag");
+
+        let order = dag.reverse_topological_order();
+        let btree_model = reverse_topological_order_btree_model(&dag);
+        assert_eq!(
+            order, btree_model,
+            "HashSet membership must not change deterministic flush order"
+        );
+
+        for end in 0..=order.len() {
+            let durable = order[..end].iter().copied().collect();
+            WbI1Oracle::new(durable)
+                .check(&dag)
+                .expect("every deterministic flush prefix must satisfy WB-I1");
         }
     }
 
