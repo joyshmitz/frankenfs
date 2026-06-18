@@ -8720,6 +8720,53 @@ mod tests {
         }
     }
 
+    proptest::proptest! {
+        /// build_extent_csum_items + lookup_data_block_csum form a roundtrip:
+        /// every sector's packed crc32c must be recoverable, across arbitrary
+        /// sector counts, split factors, and bases. The unit test below covers
+        /// one fixed configuration only.
+        #[test]
+        fn proptest_build_csum_items_then_lookup_each_sector(
+            num_sectors in 1_usize..=12,
+            split in 1_usize..=4,
+            base_units in 0_u64..=1000,
+            seed in any::<u64>(),
+        ) {
+            let sectorsize = 4096_usize;
+            let base = base_units * u64::try_from(sectorsize).unwrap();
+
+            let mut data = vec![0_u8; num_sectors * sectorsize];
+            let mut rng = seed;
+            for b in &mut data {
+                rng = rng
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                *b = rng.to_le_bytes()[7];
+            }
+
+            let items = build_extent_csum_items(base, &data, sectorsize, split)
+                .expect("build csum items");
+
+            // Every sector's csum is recoverable.
+            for s in 0..num_sectors {
+                let off = s * sectorsize;
+                let bytenr = base + u64::try_from(off).unwrap();
+                let want = ffs_types::crc32c(&data[off..off + sectorsize]);
+                proptest::prop_assert_eq!(
+                    lookup_data_block_csum(&items, bytenr, sectorsize),
+                    Some(want),
+                    "sector {} of {}",
+                    s,
+                    num_sectors
+                );
+            }
+
+            // Just past the covered run -> miss.
+            let past = base + u64::try_from(num_sectors * sectorsize).unwrap();
+            proptest::prop_assert_eq!(lookup_data_block_csum(&items, past, sectorsize), None);
+        }
+    }
+
     #[test]
     fn lookup_data_block_csum_finds_block_across_split_items_bd_x3fcu() {
         let sectorsize = 4096_usize;
