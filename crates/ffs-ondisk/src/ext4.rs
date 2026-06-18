@@ -19791,6 +19791,45 @@ mod tests {
             );
         }
 
+        /// Cross-seed non-replay for inode_bitmap (missed sibling of the
+        /// block_bitmap test): a stamp under seed_a must NOT verify under
+        /// seed_b, defending against cross-filesystem replay of a valid
+        /// inode-bitmap checksum.
+        #[test]
+        fn ext4_proptest_inode_bitmap_checksum_cross_seed_non_replay(
+            seed_a in any::<u32>(),
+            seed_delta in 1_u32..,
+            byte_len in prop_oneof![Just(8_usize), Just(32_usize), Just(128_usize)],
+            fill_seed in any::<u64>(),
+        ) {
+            let seed_b = seed_a.wrapping_add(seed_delta);
+            let inodes_per_group = u32::try_from(byte_len * 8).unwrap();
+            let mut bm = vec![0u8; byte_len];
+            let mut rng = fill_seed;
+            for b in &mut bm {
+                rng = rng.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+                *b = rng.to_le_bytes()[7];
+            }
+            let mut gd = Ext4GroupDesc {
+                block_bitmap: 0, inode_bitmap: 0, inode_table: 0,
+                free_blocks_count: 0, free_inodes_count: 0, used_dirs_count: 0,
+                itable_unused: 0, flags: 0, checksum: 0,
+                block_bitmap_csum: 0, inode_bitmap_csum: 0,
+            };
+            stamp_inode_bitmap_checksum(&bm, seed_a, inodes_per_group, &mut gd, 64);
+            // Sanity: same-seed verifies.
+            prop_assert!(
+                verify_inode_bitmap_checksum(&bm, seed_a, inodes_per_group, &gd, 64).is_ok()
+            );
+            // Filter the astronomically rare cross-seed collision to keep stable.
+            let csum_b = inode_bitmap_checksum_value(&bm, seed_b, inodes_per_group, 64);
+            prop_assume!(csum_b != gd.inode_bitmap_csum);
+            prop_assert!(
+                verify_inode_bitmap_checksum(&bm, seed_b, inodes_per_group, &gd, 64).is_err(),
+                "stamp under seed {seed_a:#x} must NOT verify under seed {seed_b:#x}"
+            );
+        }
+
         // ── Superblock geometry and validation ───────────────────────
 
         /// Well-formed superblock always passes validate_geometry().
