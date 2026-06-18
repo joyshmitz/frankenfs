@@ -7670,8 +7670,11 @@ impl OpenFs {
                     // Full block overwrite.
                     block_dev.write_block(cx, block_num, &data_remaining[pos..pos + bs_usize])?;
                 } else {
-                    // Partial block overwrite: read-modify-write.
-                    let mut block_data = block_dev.read_block(cx, block_num)?.as_slice().to_vec();
+                    // Partial block overwrite: read-modify-write. The read buffer
+                    // is owned and sole-referenced here, so move its Vec out
+                    // (into_inner -> Arc::try_unwrap, O(1)) instead of copying the
+                    // whole block before patching the changed bytes.
+                    let mut block_data = block_dev.read_block(cx, block_num)?.into_inner();
                     block_data[block_offset..block_offset + chunk_in_block]
                         .copy_from_slice(&data_remaining[pos..pos + chunk_in_block]);
                     block_dev.write_block(cx, block_num, &block_data)?;
