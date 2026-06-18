@@ -2850,6 +2850,52 @@ mod coordination_tests {
     }
 
     #[test]
+    fn group_btrfs_corrupt_blocks_assigns_blocks_to_specs_and_counts_outsiders() {
+        use ffs_repair::scrub::{CorruptionKind, ScrubFinding};
+
+        let finding = |block: u64, severity| ScrubFinding {
+            block: BlockNumber(block),
+            kind: CorruptionKind::ChecksumMismatch,
+            severity,
+            detail: String::new(),
+        };
+        let spec = |group: u32, start: u64, count: u32| BtrfsRepairGroupSpec {
+            group,
+            logical_start: 0,
+            logical_bytes: 0,
+            physical_start_block: BlockNumber(start),
+            physical_block_count: u64::from(count),
+            source_block_count: count,
+            layout: RepairGroupLayout {
+                group: ffs_types::GroupNumber(group),
+                group_start: BlockNumber(start),
+                blocks_per_group: count,
+                validation_block_count: 0,
+                repair_block_count: 0,
+            },
+        };
+        let report = ScrubReport {
+            findings: vec![
+                finding(110, Severity::Error),   // spec A [100, 150)
+                finding(210, Severity::Error),   // spec B [200, 250)
+                finding(300, Severity::Error),   // outside both specs
+                finding(120, Severity::Warning), // sub-Error -> ignored
+            ],
+            blocks_scanned: 0,
+            blocks_corrupt: 0,
+            blocks_io_error: 0,
+        };
+        let specs = vec![spec(1, 100, 50), spec(2, 200, 50)];
+
+        let (grouped, outside) = group_btrfs_corrupt_blocks(&report, &specs);
+        assert_eq!(grouped.get(&1), Some(&vec![BlockNumber(110)]));
+        assert_eq!(grouped.get(&2), Some(&vec![BlockNumber(210)]));
+        assert_eq!(outside, 1, "block 300 lies outside every spec's source range");
+        // The Warning-severity finding must not be grouped.
+        assert!(!grouped.values().any(|v| v.contains(&BlockNumber(120))));
+    }
+
+    #[test]
     fn block_range_contains_handles_boundaries_and_overflow() {
         let start = BlockNumber(100);
         // An empty range contains nothing.
