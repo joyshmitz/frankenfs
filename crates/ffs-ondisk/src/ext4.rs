@@ -14988,6 +14988,25 @@ mod tests {
     }
 
     #[test]
+    fn dx_node_entry_limit_reserves_csum_tail_slot() {
+        // Without metadata_csum, all (block_size - DX_NODE_COUNT_OFFSET)/8 slots
+        // are usable.
+        assert_eq!(dx_node_entry_limit(4096, false), 511);
+        assert_eq!(dx_node_entry_limit(1024, false), 127);
+        // With metadata_csum, the last slot is reserved for the dx_tail checksum.
+        assert_eq!(dx_node_entry_limit(4096, true), 510);
+        assert_eq!(dx_node_entry_limit(1024, true), 126);
+        // The csum variant is always exactly one fewer than the non-csum variant.
+        for &bs in &[1024_usize, 2048, 4096, 8192, 16384, 65536] {
+            assert_eq!(
+                dx_node_entry_limit(bs, true) + 1,
+                dx_node_entry_limit(bs, false),
+                "csum reserves exactly one slot (block_size {bs})"
+            );
+        }
+    }
+
+    #[test]
     fn htree_lookup_applies_superblock_unsigned_hash_flag() {
         let target_name = b"\xC3unsigned-target";
         let target_hash = dx_hash(DX_HASH_HALF_MD4_UNSIGNED, target_name, &[0; 4]).0;
