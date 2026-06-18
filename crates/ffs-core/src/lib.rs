@@ -50236,6 +50236,43 @@ mod tests {
     }
 
     #[test]
+    fn ext4_fallocate_collapse_range_rejects_misaligned_and_eof_reaching() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let attr = fs
+            .create(&cx, root, OsStr::new("collapse-bad.bin"), 0o644, 0, 0)
+            .expect("create");
+        // 4 blocks of 4096 bytes.
+        fs.write(&cx, attr.ino, 0, &[0xAB_u8; 16384]).expect("write");
+
+        let collapse = libc::FALLOC_FL_COLLAPSE_RANGE;
+        // Misaligned offset -> EINVAL.
+        assert_eq!(
+            fs.fallocate(&cx, attr.ino, 100, 4096, collapse)
+                .unwrap_err()
+                .to_errno(),
+            libc::EINVAL
+        );
+        // Misaligned length -> EINVAL.
+        assert_eq!(
+            fs.fallocate(&cx, attr.ino, 4096, 100, collapse)
+                .unwrap_err()
+                .to_errno(),
+            libc::EINVAL
+        );
+        // A range that reaches EOF (whole file) -> EINVAL.
+        assert_eq!(
+            fs.fallocate(&cx, attr.ino, 0, 16384, collapse)
+                .unwrap_err()
+                .to_errno(),
+            libc::EINVAL
+        );
+    }
+
+    #[test]
     fn ext4_collapse_range_preserves_preallocated_zeros_and_data() {
         // collapse_range over a preallocated region must (a) shift written data
         // correctly and (b) leave the preallocated (unwritten) blocks reading
