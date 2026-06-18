@@ -493,6 +493,10 @@ impl ByteDevice for FileByteDevice {
         if !self.writable {
             return Err(FfsError::PermissionDenied);
         }
+        if buf.is_empty() {
+            cx_checkpoint(cx)?;
+            return Ok(());
+        }
         let end = offset
             .0
             .checked_add(
@@ -6679,6 +6683,23 @@ mod tests {
             .expect("empty read at EOF is a no-op");
         dev.read_exact_at(&cx, ByteOffset(9), &mut empty)
             .expect("empty read past EOF is a no-op");
+    }
+
+    #[test]
+    fn file_byte_device_empty_scalar_write_is_noop() {
+        let cx = Cx::for_testing();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("empty-scalar-write.img");
+        std::fs::write(&path, [1_u8, 2, 3, 4]).expect("seed file");
+        let dev = FileByteDevice::open(&path).expect("device");
+
+        dev.write_all_at(&cx, ByteOffset(4), &[])
+            .expect("empty write at EOF is a no-op");
+        dev.write_all_at(&cx, ByteOffset(9), &[])
+            .expect("empty write past EOF is a no-op");
+
+        assert_eq!(std::fs::read(&path).expect("read file"), [1_u8, 2, 3, 4]);
+        assert_eq!(std::fs::metadata(&path).expect("metadata").len(), 4);
     }
 
     #[test]
