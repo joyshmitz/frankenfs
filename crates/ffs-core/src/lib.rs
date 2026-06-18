@@ -55535,6 +55535,20 @@ mod tests {
     }
 
     #[test]
+    fn btrfs_checked_chunk_available_and_logical_advance_guards() {
+        // chunk_available: bytes from `logical` up to `chunk_end`.
+        assert_eq!(OpenFs::btrfs_checked_chunk_available(2000, 1000).unwrap(), 1000);
+        // A logical bytenr past the chunk end would map to the wrong chunk.
+        assert!(OpenFs::btrfs_checked_chunk_available(1000, 2000).is_err());
+        // A logical bytenr exactly at chunk_end leaves no bytes available.
+        assert!(OpenFs::btrfs_checked_chunk_available(1000, 1000).is_err());
+
+        // logical_advance: logical + amount, rejecting a u64 overflow.
+        assert_eq!(OpenFs::btrfs_checked_logical_advance(1000, 24).unwrap(), 1024);
+        assert!(OpenFs::btrfs_checked_logical_advance(u64::MAX, 1).is_err());
+    }
+
+    #[test]
     fn ext4_max_file_size_scales_with_block_size_and_rejects_above() {
         // The extent tree addresses 2^32 logical blocks, so the max file size
         // is 2^32 * block_size: 4 TiB / 8 TiB / 16 TiB for 1K / 2K / 4K blocks.
