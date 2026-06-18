@@ -40971,6 +40971,18 @@ mod tests {
     }
 
     #[test]
+    fn ext4_move_ext_validate_inode_rejects_non_regular() {
+        // move_ext may only touch regular files; a directory inode is rejected
+        // with EINVAL before any extent mutation.
+        let dir = make_test_inode(ffs_types::S_IFDIR | 0o755, 0, 0);
+        let err = OpenFs::ext4_move_ext_validate_inode(&dir, "source").unwrap_err();
+        assert_eq!(err.to_errno(), libc::EINVAL);
+        // A symlink is likewise not a valid move_ext target.
+        let link = make_test_inode(ffs_types::S_IFLNK | 0o777, 0, 0);
+        assert!(OpenFs::ext4_move_ext_validate_inode(&link, "donor").is_err());
+    }
+
+    #[test]
     fn move_ext_rejects_unregistered_donor_fd() {
         let Some((fs, _tmp)) = open_writable_ext4_mkfs(64) else {
             eprintln!("mkfs.ext4 not available, skipping");
