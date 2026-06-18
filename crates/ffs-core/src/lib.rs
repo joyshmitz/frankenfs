@@ -64426,6 +64426,59 @@ mod tests {
         assert_eq!(&dst_back[8192..16384], &[0xA7_u8; 8192], "dst tail intact");
     }
 
+    #[test]
+    fn btrfs_write_to_reflink_does_not_disturb_source_data() {
+        let (fs, cx) = open_writable_btrfs();
+        let root = InodeNumber(1);
+        let src = fs
+            .create(&cx, root, OsStr::new("src.dat"), 0o644, 0, 0)
+            .expect("create src");
+        let dst = fs
+            .create(&cx, root, OsStr::new("dst.dat"), 0o644, 0, 0)
+            .expect("create dst");
+
+        // Fill src with a known pattern across three blocks.
+        let payload = vec![0xA5_u8; 3 * 4096];
+        fs.write(&cx, src.ino, 0, &payload).expect("write src");
+
+        // Reflink src into dst (shared extent, refcount 2).
+        let src_canon = fs.btrfs_canonical_inode(src.ino).expect("src canonical");
+        let dst_canon = fs.btrfs_canonical_inode(dst.ino).expect("dst canonical");
+        {
+            let alloc_mutex = fs.btrfs_alloc_state.as_ref().expect("alloc state");
+            let mut alloc = alloc_mutex.write();
+            fs.btrfs_clone_file_data(&mut alloc, src_canon, dst_canon)
+                .expect("clone src into dst");
+        }
+
+        // Overwrite the middle block of dst. COW must leave src untouched.
+        let overwrite = vec![0x5A_u8; 4096];
+        fs.write(&cx, dst.ino, 4096, &overwrite)
+            .expect("overwrite dst middle");
+
+        // src reads the original pattern everywhere (no in-place shared mutation).
+        let src_read = fs.read(&cx, src.ino, 0, 3 * 4096).expect("read src");
+        assert!(
+            src_read.iter().all(|&b| b == 0xA5),
+            "reflink source must be unchanged by a write to the clone"
+        );
+
+        // dst reflects the overwrite only in the middle block.
+        let dst_read = fs.read(&cx, dst.ino, 0, 3 * 4096).expect("read dst");
+        assert!(
+            dst_read[0..4096].iter().all(|&b| b == 0xA5),
+            "dst block 0 must be unchanged"
+        );
+        assert!(
+            dst_read[4096..8192].iter().all(|&b| b == 0x5A),
+            "dst block 1 must reflect the overwrite"
+        );
+        assert!(
+            dst_read[8192..12288].iter().all(|&b| b == 0xA5),
+            "dst block 2 must be unchanged"
+        );
+    }
+
     /// Phase-B probe (TealFalcon): now that a single small datasum file is
     /// btrfs-check-clean, map which MORE COMPLEX btrfs mutation sequences still
     /// produce a kernel-valid image. Prints the `btrfs check` verdict for each
