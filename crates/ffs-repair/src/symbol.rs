@@ -123,6 +123,12 @@ impl RepairBlockHeader {
                 computed: computed_checksum,
             });
         }
+        if data[28..32].iter().any(|byte| *byte != 0) {
+            return Err(RepairParseError::ReservedNonZero {
+                offset: 28,
+                len: 4,
+            });
+        }
 
         Ok(Self {
             first_esi,
@@ -248,6 +254,12 @@ impl RepairGroupDescExt {
                 computed: computed_checksum,
             });
         }
+        if data[44..48].iter().any(|byte| *byte != 0) {
+            return Err(RepairParseError::ReservedNonZero {
+                offset: 44,
+                len: 4,
+            });
+        }
 
         Ok(Self {
             transfer_length,
@@ -355,6 +367,8 @@ pub enum RepairParseError {
     BadMagic { expected: u32, actual: u32 },
     /// CRC32C checksum mismatch.
     ChecksumMismatch { stored: u32, computed: u32 },
+    /// Reserved bytes that must remain zero were nonzero.
+    ReservedNonZero { offset: usize, len: usize },
 }
 
 impl std::fmt::Display for RepairParseError {
@@ -373,6 +387,12 @@ impl std::fmt::Display for RepairParseError {
                 write!(
                     f,
                     "checksum mismatch: stored {stored:#010x}, computed {computed:#010x}"
+                )
+            }
+            Self::ReservedNonZero { offset, len } => {
+                write!(
+                    f,
+                    "reserved bytes must be zero: offset {offset}, len {len}"
                 )
             }
         }
@@ -428,6 +448,23 @@ mod tests {
         bytes[5] ^= 0xFF;
         let err = RepairBlockHeader::parse(&bytes).unwrap_err();
         assert!(matches!(err, RepairParseError::ChecksumMismatch { .. }));
+    }
+
+    #[test]
+    fn repair_block_header_rejects_nonzero_reserved_bytes() {
+        let header = RepairBlockHeader {
+            first_esi: 0,
+            symbol_count: 10,
+            symbol_size: 128,
+            block_group: GroupNumber(0),
+            repair_generation: 1,
+            checksum: 0,
+        };
+        let mut bytes = header.to_bytes();
+        bytes[28] = 1;
+
+        let err = RepairBlockHeader::parse(&bytes).unwrap_err();
+        assert!(matches!(err, RepairParseError::ReservedNonZero { .. }));
     }
 
     #[test]
@@ -687,6 +724,26 @@ mod tests {
         bytes[10] ^= 0xFF; // corrupt a field
         let err = RepairGroupDescExt::parse(&bytes).unwrap_err();
         assert!(matches!(err, RepairParseError::ChecksumMismatch { .. }));
+    }
+
+    #[test]
+    fn repair_group_desc_ext_rejects_nonzero_reserved_bytes() {
+        let desc = RepairGroupDescExt {
+            transfer_length: 1024,
+            symbol_size: 256,
+            source_block_count: 4,
+            sub_blocks: 1,
+            symbol_alignment: 4,
+            repair_start_block: BlockNumber(100),
+            repair_block_count: 1,
+            repair_generation: 1,
+            checksum: 0,
+        };
+        let mut bytes = desc.to_bytes();
+        bytes[44] = 1;
+
+        let err = RepairGroupDescExt::parse(&bytes).unwrap_err();
+        assert!(matches!(err, RepairParseError::ReservedNonZero { .. }));
     }
 
     #[test]
