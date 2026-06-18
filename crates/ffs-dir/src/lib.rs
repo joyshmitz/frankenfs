@@ -1232,7 +1232,10 @@ mod tests {
         let mut block = vec![0u8; 1024];
         write_entry(&mut block, 0, 1, 1024, Ext4FileType::Dir, b".").unwrap();
         let err = add_entry(&mut block, 10, b"", Ext4FileType::RegFile, 0).unwrap_err();
-        assert!(matches!(err, FfsError::Format(_)));
+        assert!(
+            matches!(err, FfsError::Format(ref m) if m.contains("cannot be empty")),
+            "got {err:?}",
+        );
     }
 
     #[test]
@@ -1504,7 +1507,10 @@ mod tests {
         write_entry(&mut block, 0, 1, 4096, Ext4FileType::Dir, b".").unwrap();
         let too_long = vec![b'a'; 256];
         let err = add_entry(&mut block, 10, &too_long, Ext4FileType::RegFile, 0).unwrap_err();
-        assert!(matches!(err, FfsError::Format(_)));
+        assert!(
+            matches!(err, FfsError::Format(ref m) if m.contains("exceeds 255 bytes")),
+            "got {err:?}",
+        );
     }
 
     #[test]
@@ -1514,11 +1520,17 @@ mod tests {
 
         let slash_err =
             add_entry(&mut block, 10, b"bad/name", Ext4FileType::RegFile, 0).unwrap_err();
-        assert!(matches!(slash_err, FfsError::Format(_)));
+        assert!(
+            matches!(slash_err, FfsError::Format(ref m) if m.contains("cannot contain '/'")),
+            "got {slash_err:?}",
+        );
 
         let nul_err =
             add_entry(&mut block, 10, b"bad\0name", Ext4FileType::RegFile, 0).unwrap_err();
-        assert!(matches!(nul_err, FfsError::Format(_)));
+        assert!(
+            matches!(nul_err, FfsError::Format(ref m) if m.contains("cannot contain NUL")),
+            "got {nul_err:?}",
+        );
     }
 
     #[test]
