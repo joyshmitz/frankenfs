@@ -870,6 +870,17 @@ mod tests {
     }
 
     #[test]
+    fn validate_version_accepts_current_rejects_others() {
+        assert!(super::validate_version(super::PROTOCOL_VERSION).is_ok());
+        let err = super::validate_version(super::PROTOCOL_VERSION + 1).unwrap_err();
+        assert!(
+            format!("{err}").contains("unsupported exchange protocol version"),
+            "got {err}"
+        );
+        assert!(super::validate_version(0).is_err());
+    }
+
+    #[test]
     fn client_rejects_zero_transport_timeouts() {
         let zero_connect = Config {
             connect_timeout: Duration::ZERO,
