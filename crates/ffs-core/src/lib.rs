@@ -25152,10 +25152,10 @@ impl OpenFs {
             ino: InodeNumber(objectid),
             size: inode.size,
             blocks: inode.nbytes.div_ceil(512),
-            atime: UNIX_EPOCH + Duration::new(inode.atime_sec, inode.atime_nsec),
-            mtime: UNIX_EPOCH + Duration::new(inode.mtime_sec, inode.mtime_nsec),
-            ctime: UNIX_EPOCH + Duration::new(inode.ctime_sec, inode.ctime_nsec),
-            crtime: UNIX_EPOCH + Duration::new(inode.otime_sec, inode.otime_nsec),
+            atime: Self::btrfs_inode_timestamp(inode.atime_sec, inode.atime_nsec),
+            mtime: Self::btrfs_inode_timestamp(inode.mtime_sec, inode.mtime_nsec),
+            ctime: Self::btrfs_inode_timestamp(inode.ctime_sec, inode.ctime_nsec),
+            crtime: Self::btrfs_inode_timestamp(inode.otime_sec, inode.otime_nsec),
             kind: Self::btrfs_mode_to_file_type(inode.mode),
             perm: (inode.mode & 0o7777) as u16,
             nlink: inode.nlink,
@@ -25165,6 +25165,19 @@ impl OpenFs {
             blksize: self.block_size(),
             generation: inode.generation,
         }
+    }
+
+    /// Convert an untrusted on-disk btrfs `(secs, nsec)` timestamp into a
+    /// `SystemTime`, saturating at `UNIX_EPOCH` on overflow instead of
+    /// panicking. `SystemTime`'s `+` operator panics when the result is
+    /// unrepresentable and `Duration::new` panics on a `>= 1e9` nsec carry, so
+    /// a corrupt inode (e.g. `atime_sec == u64::MAX`) must fail soft here —
+    /// getattr/readdir/lookup on a malformed image must not crash. Mirrors the
+    /// ext4 `Ext4Inode::to_system_time` checked conversion.
+    fn btrfs_inode_timestamp(secs: u64, nsec: u32) -> std::time::SystemTime {
+        UNIX_EPOCH
+            .checked_add(Duration::new(secs, nsec.min(999_999_999)))
+            .unwrap_or(UNIX_EPOCH)
     }
 
     fn validate_single_path_component(name: &[u8]) -> ffs_error::Result<()> {
@@ -73071,6 +73084,30 @@ mod tests {
         assert_eq!(attr.perm, 0o4755);
         // nbytes 513 rounds up to ceil(513/512) = 2 512-byte blocks.
         assert_eq!(attr.blocks, 2);
+    }
+
+    #[test]
+    fn btrfs_inode_to_attr_saturates_out_of_range_timestamp_without_panic() {
+        let (fs, cx) = open_writable_btrfs();
+        let parent = InodeNumber(1);
+        let created = fs
+            .create(&cx, parent, OsStr::new("t.bin"), 0o644, 0, 0)
+            .unwrap();
+        let inode = {
+            let alloc_mutex = fs.btrfs_alloc_state.as_ref().unwrap();
+            let alloc = alloc_mutex.read();
+            let mut inode = fs
+                .btrfs_read_inode_from_tree(&alloc, created.ino.0)
+                .expect("read inode");
+            // Out-of-range timestamp the parser accepts but that would overflow
+            // UNIX_EPOCH + Duration::new and panic before the fix (bd-xmh5g.281).
+            inode.atime_sec = u64::MAX;
+            inode.atime_nsec = 999_999_999;
+            inode
+        };
+        // Must not panic; the out-of-range atime saturates to UNIX_EPOCH.
+        let attr = fs.btrfs_inode_to_attr(created.ino.0, &inode);
+        assert_eq!(attr.atime, std::time::UNIX_EPOCH);
     }
 
     #[test]
