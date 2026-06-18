@@ -65891,6 +65891,30 @@ mod tests {
     }
 
     #[test]
+    fn btrfs_mknod_fifo_and_socket_round_trip_through_getattr() {
+        let (fs, cx) = open_writable_btrfs();
+        let root = InodeNumber(1);
+
+        let fifo = fs
+            .mknod(&cx, root, OsStr::new("p"), ffs_types::S_IFIFO | 0o644, 0, 0, 0)
+            .expect("mknod fifo");
+        assert_eq!(fifo.kind, FileType::Fifo);
+        assert_eq!(
+            fs.getattr(&cx, fifo.ino).expect("getattr fifo").kind,
+            FileType::Fifo
+        );
+
+        let sock = fs
+            .mknod(&cx, root, OsStr::new("s"), ffs_types::S_IFSOCK | 0o600, 0, 0, 0)
+            .expect("mknod socket");
+        assert_eq!(sock.kind, FileType::Socket);
+        assert_eq!(
+            fs.getattr(&cx, sock.ino).expect("getattr socket").kind,
+            FileType::Socket
+        );
+    }
+
+    #[test]
     fn btrfs_mknod_chrdev_stores_rdev() {
         let (fs, cx) = open_writable_btrfs();
         let ops: &dyn FsOps = &fs;
