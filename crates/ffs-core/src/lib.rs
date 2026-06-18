@@ -52144,6 +52144,36 @@ mod tests {
     }
 
     #[test]
+    fn ext4_xattr_survives_data_overwrite() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let attr = fs
+            .create(&cx, root, OsStr::new("f.dat"), 0o644, 0, 0)
+            .expect("create");
+        fs.write(&cx, attr.ino, 0, b"original").expect("write data");
+        fs.setxattr(&cx, attr.ino, "user.tag", b"KEEPME", XattrSetMode::Set)
+            .expect("setxattr");
+
+        // Overwrite the data; the inode-body/external xattr must survive the
+        // inode rewrite that the data write performs.
+        fs.write(&cx, attr.ino, 0, b"OVERWRITTEN")
+            .expect("overwrite data");
+
+        let val = fs.getxattr(&cx, attr.ino, "user.tag").expect("getxattr");
+        assert_eq!(
+            val,
+            Some(b"KEEPME".to_vec()),
+            "xattr must survive a data overwrite"
+        );
+        // The overwrite itself took effect (test is not vacuous).
+        let data = fs.read(&cx, attr.ino, 0, 11).expect("read data");
+        assert_eq!(&data, b"OVERWRITTEN");
+    }
+
+    #[test]
     fn write_setxattr_replace_and_remove_roundtrip() {
         let Some(fs) = open_writable_ext4() else {
             return;
