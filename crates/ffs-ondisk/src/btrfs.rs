@@ -5937,6 +5937,29 @@ mod tests {
     }
 
     #[test]
+    fn validate_superblock_tree_level_rejects_above_max() {
+        // Levels 0..=BTRFS_MAX_LEVEL (7) are accepted; 8+ are rejected with the
+        // field name preserved. Distinct from the tree-node header level check.
+        assert!(super::validate_superblock_tree_level("root_level", 0).is_ok());
+        assert!(
+            super::validate_superblock_tree_level("root_level", super::BTRFS_MAX_LEVEL).is_ok()
+        );
+
+        let err = super::validate_superblock_tree_level(
+            "chunk_root_level",
+            super::BTRFS_MAX_LEVEL + 1,
+        )
+        .expect_err("level above max must be rejected");
+        assert!(
+            matches!(err, ParseError::InvalidField { field, reason }
+                if field == "chunk_root_level" && reason.contains("exceeds btrfs max tree level")),
+            "got {err:?}",
+        );
+
+        assert!(super::validate_superblock_tree_level("log_root_level", u8::MAX).is_err());
+    }
+
+    #[test]
     fn raid_profile_redundancy() {
         assert!(!BtrfsRaidProfile::Single.is_redundant());
         assert!(!BtrfsRaidProfile::Raid0.is_redundant());
