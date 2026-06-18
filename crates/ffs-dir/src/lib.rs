@@ -95,6 +95,10 @@ fn validate_reserved_tail(block_len: usize, reserved_tail: usize) -> Result<usiz
         .ok_or_else(|| FfsError::Format("directory reserved tail exceeds block length".to_owned()))
 }
 
+fn is_interior_htree_dx_node_block(block: &[u8]) -> bool {
+    read_u32_le(block, 0) == Some(0) && read_u16_le(block, 4).map(usize::from) == Some(block.len())
+}
+
 fn write_entry(
     block: &mut [u8],
     offset: usize,
@@ -263,9 +267,7 @@ pub fn remove_entry(block: &mut [u8], name: &[u8], reserved_tail: usize) -> Resu
     // block as corrupt — otherwise removing from a multi-level htree dir whose
     // interior node precedes the target leaf would spuriously fail (on
     // metadata_csum the fake dirent's rec_len exceeds `limit`). bd-y8tcx.
-    if read_u32_le(block, 0) == Some(0)
-        && read_u16_le(block, 4).map(usize::from) == Some(block.len())
-    {
+    if is_interior_htree_dx_node_block(block) {
         return Ok(false);
     }
 
@@ -358,6 +360,10 @@ fn update_live_entry_header(
 
     let mut off = 0usize;
     let limit = validate_reserved_tail(block.len(), reserved_tail)?;
+    if is_interior_htree_dx_node_block(block) {
+        return Ok(false);
+    }
+
     while off + DIR_ENTRY_HEADER_LEN <= limit {
         let rec_len =
             usize::from(
@@ -1194,6 +1200,25 @@ mod tests {
         let mut node2 = vec![0u8; bs];
         node2[4..6].copy_from_slice(&u16::try_from(bs).unwrap().to_le_bytes());
         assert!(!remove_entry(&mut node2, b"victim.txt", 0).unwrap());
+    }
+
+    #[test]
+    fn retarget_entry_skips_interior_htree_dx_node_block_bd_xmh5g_347() {
+        let bs = 4096_usize;
+        let mut node = vec![0u8; bs];
+        node[4..6].copy_from_slice(&u16::try_from(bs).unwrap().to_le_bytes());
+        node[8..].fill(0xAB);
+        let before = node.clone();
+
+        assert!(
+            !retarget_entry(&mut node, b"victim.txt", 42, Ext4FileType::RegFile, 12).unwrap(),
+            "metadata-csum dx_node must be reported as not-present, not corrupt"
+        );
+        assert_eq!(node, before, "skipping a dx_node must not mutate it");
+
+        let mut node2 = vec![0u8; bs];
+        node2[4..6].copy_from_slice(&u16::try_from(bs).unwrap().to_le_bytes());
+        assert!(!swap_inode_in_entry(&mut node2, b"victim.txt", 42, 0).unwrap());
     }
 
     #[test]
