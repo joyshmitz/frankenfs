@@ -2850,6 +2850,37 @@ mod coordination_tests {
     }
 
     #[test]
+    fn select_ext4_repair_groups_scopes_by_flags_and_staleness() {
+        use Ext4RepairStaleness::{Fresh, Stale, Untracked};
+        let all = vec![0_u32, 1, 2];
+
+        // full_scrub / rebuild_symbols select every group regardless of staleness.
+        let full = RepairFlags::empty().with_full_scrub(true);
+        assert_eq!(
+            select_ext4_repair_groups(full, false, &all, &[(0, Fresh), (1, Fresh)]),
+            all
+        );
+        let rebuild = RepairFlags::empty().with_rebuild_symbols(true);
+        assert_eq!(select_ext4_repair_groups(rebuild, false, &all, &[]), all);
+
+        let flags = RepairFlags::empty();
+        // Only stale groups are selected when some are stale.
+        assert_eq!(
+            select_ext4_repair_groups(flags, false, &all, &[(0, Fresh), (1, Stale), (2, Stale)]),
+            vec![1, 2]
+        );
+        // All fresh (no stale) -> nothing to repair.
+        assert!(select_ext4_repair_groups(flags, false, &all, &[(0, Fresh), (1, Fresh)]).is_empty());
+        // A clean filesystem short-circuits to empty.
+        assert!(select_ext4_repair_groups(flags, true, &all, &[(0, Untracked)]).is_empty());
+        // No stale, no fresh, not clean (untracked) -> conservative full set.
+        assert_eq!(
+            select_ext4_repair_groups(flags, false, &all, &[(0, Untracked), (1, Untracked)]),
+            all
+        );
+    }
+
+    #[test]
     fn group_btrfs_corrupt_blocks_assigns_blocks_to_specs_and_counts_outsiders() {
         use ffs_repair::scrub::{CorruptionKind, ScrubFinding};
 
