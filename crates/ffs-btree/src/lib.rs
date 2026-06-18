@@ -3366,12 +3366,9 @@ Hole { hole_len: 90 }
         let root = make_root();
 
         let result = search(&cx, &dev, &root, u32::MAX).unwrap();
-        assert_eq!(
-            result,
-            SearchResult::Hole {
-                hole_len: 1_u64 << 32
-            }
-        );
+        // The hole at the last addressable block spans exactly one block
+        // ([u32::MAX, 2^32)); it cannot extend past the logical address space.
+        assert_eq!(result, SearchResult::Hole { hole_len: 1 });
     }
 
     #[test]
@@ -4525,8 +4522,10 @@ Hole { hole_len: 90 }
             "expected Hole, got {result:?}"
         );
         if let SearchResult::Hole { hole_len } = result {
-            // hole_len should be 1 << 32 (saturating_sub behavior in u32 used to return u32::MAX)
-            assert_eq!(hole_len, 1_u64 << 32);
+            // The hole at the last addressable block is exactly one block wide
+            // ([u32::MAX, 2^32)); bd-xmh5g.213 bounds it to the logical address
+            // space instead of the old u32 saturating-sub overflow to u32::MAX.
+            assert_eq!(hole_len, 1);
         }
     }
 
