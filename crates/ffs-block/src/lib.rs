@@ -435,6 +435,10 @@ impl ByteDevice for FileByteDevice {
                 .checked_add(buf.len())
                 .ok_or_else(|| FfsError::Format("read length overflows usize".to_owned()))
         })?;
+        if total_len == 0 {
+            cx_checkpoint(cx)?;
+            return Ok(());
+        }
         let end = offset
             .0
             .checked_add(
@@ -6656,6 +6660,24 @@ mod tests {
         assert_eq!(bufs[0].as_slice(), &[4, 5, 6, 7]);
         assert_eq!(bufs[1].as_slice(), &[8, 9, 10, 11]);
         assert_eq!(dev.inner().read_count(), 1);
+    }
+
+    #[test]
+    fn file_byte_device_empty_vectored_read_is_noop() {
+        let cx = Cx::for_testing();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("empty-vectored-read.img");
+        std::fs::write(&path, [1_u8, 2, 3, 4]).expect("seed file");
+        let dev = FileByteDevice::open(&path).expect("device");
+
+        let mut empty_slices: [IoSliceMut<'_>; 0] = [];
+        dev.read_vectored_exact_at(&cx, ByteOffset(0), &mut empty_slices)
+            .expect("empty iovec read is a no-op");
+
+        let mut zero_len = [];
+        let mut zero_len_slices = [IoSliceMut::new(&mut zero_len)];
+        dev.read_vectored_exact_at(&cx, ByteOffset(2), &mut zero_len_slices)
+            .expect("zero-length iovec read is a no-op");
     }
 
     #[test]
