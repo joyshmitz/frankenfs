@@ -57,6 +57,10 @@ harness = false
 name = "recovery_writeback_verify_io_overlap"
 harness = false
 
+[[bench]]
+name = "repair_symbol_read_io_overlap"
+harness = false
+
 [[bin]]
 name = "ffs-demo"
 path = "src/bin/ffs-demo.rs"

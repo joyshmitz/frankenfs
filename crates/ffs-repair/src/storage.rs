@@ -16,7 +16,7 @@
 //! torn or corrupt.
 
 use asupersync::Cx;
-use ffs_block::BlockDevice;
+use ffs_block::{BlockBuf, BlockDevice};
 use ffs_error::{FfsError, Result};
 use ffs_types::{BlockNumber, GroupNumber};
 use std::cmp::Reverse;
@@ -299,6 +299,29 @@ impl<'a> RepairGroupStorage<'a> {
         Ok(candidates)
     }
 
+    /// The repair-symbol block numbers for `desc`, in ascending order.
+    fn repair_block_numbers(&self, desc: &RepairGroupDescExt) -> Vec<BlockNumber> {
+        (0..desc.repair_block_count)
+            .map(|i| BlockNumber(desc.repair_start_block.0 + u64::from(i)))
+            .collect()
+    }
+
+    /// Read `blocks` across the rayon pool, returning per-block read results in
+    /// the same order. The reads are independent; a blocking read parks its
+    /// worker so the access latencies overlap up to the pool size. Callers parse
+    /// the results serially in order to preserve error/ordering semantics.
+    fn read_blocks_parallel(
+        device: &dyn BlockDevice,
+        cx: &Cx,
+        blocks: &[BlockNumber],
+    ) -> Vec<Result<BlockBuf>> {
+        use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
+        blocks
+            .par_iter()
+            .map(|&block| device.read_block(cx, block))
+            .collect()
+    }
+
     fn read_symbols_for_desc(&self, cx: &Cx, desc: &RepairGroupDescExt) -> Result<SymbolBatch> {
         self.validate_desc_layout(desc)?;
         let block_size = self.block_size_usize()?;
@@ -321,12 +344,20 @@ impl<'a> RepairGroupStorage<'a> {
         }
         let payload_capacity = block_size - RepairBlockHeader::SIZE;
 
+        // The per-block reads are independent; only the parse below threads
+        // `next_expected_esi` and the empty-tail check. Read every repair block
+        // across the rayon pool (a blocking read parks its worker, so the access
+        // latencies overlap up to pool size), then parse SERIALLY in block order
+        // so the esi threading, empty-tail ordering, and first-error-in-block-
+        // order are byte-identical to the old loop (I/O-overlap, bd-g5v1s family).
+        let blocks = self.repair_block_numbers(desc);
+        let reads = Self::read_blocks_parallel(self.device, cx, &blocks);
+
         let mut out = Vec::new();
         let mut next_expected_esi = Some(u32::from(desc.source_block_count));
         let mut empty_tail_started = false;
-        for block_index in 0..desc.repair_block_count {
-            let block_num = BlockNumber(desc.repair_start_block.0 + u64::from(block_index));
-            let block = self.device.read_block(cx, block_num)?;
+        for (read, &block_num) in reads.into_iter().zip(blocks.iter()) {
+            let block = read?;
             let (mut block_symbols, next_esi) = self.read_symbol_block(
                 block.as_slice(),
                 block_num,
@@ -363,11 +394,17 @@ impl<'a> RepairGroupStorage<'a> {
             )));
         }
 
+        // Independent reads → parallel I/O overlap; serial parse in block order
+        // preserves ESI assignment, zero-skip, and first-error order (bd-g5v1s).
+        let blocks = self.repair_block_numbers(desc);
+        let reads = Self::read_blocks_parallel(self.device, cx, &blocks);
+
         let mut out = Vec::new();
         let base_esi = u32::from(desc.source_block_count);
-        for block_index in 0..desc.repair_block_count {
-            let block_num = BlockNumber(desc.repair_start_block.0 + u64::from(block_index));
-            let bytes = self.device.read_block(cx, block_num)?;
+        for (block_index, (read, &block_num)) in
+            (0..desc.repair_block_count).zip(reads.into_iter().zip(blocks.iter()))
+        {
+            let bytes = read?;
             let symbol = bytes
                 .as_slice()
                 .get(..symbol_size)
