@@ -6427,6 +6427,27 @@ mod tests {
     }
 
     #[test]
+    fn stripe_resolve_raid0_rejects_zero_stripe_len() {
+        let chunks = vec![make_chunk(
+            0,
+            1_048_576,
+            0,
+            chunk_type_flags::BTRFS_BLOCK_GROUP_DATA | chunk_type_flags::BTRFS_BLOCK_GROUP_RAID0,
+            vec![stripe(1, 0x10_0000), stripe(2, 0x20_0000)],
+            0,
+        )];
+
+        let err = map_logical_to_stripes(&chunks, 0).unwrap_err();
+        assert_eq!(
+            err,
+            ParseError::InvalidField {
+                field: "stripe_len",
+                reason: "chunk has zero stripe length",
+            }
+        );
+    }
+
+    #[test]
     fn stripe_resolve_raid0_rejects_stripe_len_product_overflow() {
         let chunks = vec![make_chunk(
             0,
