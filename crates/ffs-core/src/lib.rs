@@ -11456,6 +11456,113 @@ impl OpenFs {
     /// value length. Read that many bytes from the EA inode's extent-mapped
     /// data blocks, leaving zeros for any (unexpected) holes.
     fn ext4_read_ea_inode_value(&self, cx: &Cx, value_inum: u32) -> ffs_error::Result<Vec<u8>> {
+        struct EaInodeReadJob {
+            phys: u64,
+            start: usize,
+            end: usize,
+            take: usize,
+        }
+
+        struct EaInodeBlockRead {
+            start: usize,
+            end: usize,
+            block: Vec<u8>,
+        }
+
+        let ea_ino = InodeNumber(u64::from(value_inum));
+        let ea_inode = self.read_inode(cx, ea_ino)?;
+        let value_len = usize::try_from(ea_inode.size).map_err(|_| FfsError::Corruption {
+            block: 0,
+            detail: format!("EA inode {value_inum} value size exceeds addressable range"),
+        })?;
+        if value_len == 0 {
+            return Ok(Vec::new());
+        }
+        let block_size = usize::try_from(self.block_size())
+            .map_err(|_| FfsError::Format("block size does not fit usize".into()))?;
+        let mut value = vec![0_u8; value_len];
+        let extents = self.collect_extents(cx, &ea_inode)?;
+        let mut jobs = Vec::new();
+        let mut terminal_error = None;
+        'extent_scan: for ext in &extents {
+            if ext.is_unwritten() {
+                continue; // hole: leave zeros
+            }
+            for i in 0..u64::from(ext.actual_len()) {
+                let logical = u64::from(ext.logical_block) + i;
+                let Ok(logical_usize) = usize::try_from(logical) else {
+                    continue;
+                };
+                let Some(start) = logical_usize.checked_mul(block_size) else {
+                    continue;
+                };
+                if start >= value_len {
+                    continue;
+                }
+                let phys = match ext.physical_start.checked_add(i) {
+                    Some(phys) => phys,
+                    None => {
+                        terminal_error = Some(FfsError::Corruption {
+                            block: 0,
+                            detail: format!(
+                                "EA inode {value_inum} extent physical offset overflow"
+                            ),
+                        });
+                        break 'extent_scan;
+                    }
+                };
+                let end = (start + block_size).min(value_len);
+                jobs.push(EaInodeReadJob {
+                    phys,
+                    start,
+                    end,
+                    take: end - start,
+                });
+            }
+        }
+
+        // The value ranges are disjoint logical block windows. Overlap only the
+        // read + short-block validation; consume the collected results in job
+        // order so the lowest logical-block error remains the observable error.
+        {
+            use rayon::prelude::{IntoParallelIterator, ParallelIterator};
+
+            let reads: Vec<Result<EaInodeBlockRead, FfsError>> = jobs
+                .into_par_iter()
+                .map(|job| {
+                    let block = self.read_block_vec(cx, BlockNumber(job.phys))?;
+                    if job.take > block.len() {
+                        return Err(FfsError::Corruption {
+                            block: job.phys,
+                            detail: format!("EA inode {value_inum} short block read"),
+                        });
+                    }
+                    Ok(EaInodeBlockRead {
+                        start: job.start,
+                        end: job.end,
+                        block,
+                    })
+                })
+                .collect();
+
+            for read in reads {
+                let read = read?;
+                value[read.start..read.end]
+                    .copy_from_slice(&read.block[..read.end - read.start]);
+            }
+        }
+        if let Some(err) = terminal_error {
+            return Err(err);
+        }
+        Ok(value)
+    }
+
+    #[cfg(test)]
+    fn ext4_read_ea_inode_value_serial_for_test(
+        &self,
+        cx: &Cx,
+        value_inum: u32,
+    ) -> ffs_error::Result<Vec<u8>> {
         let ea_ino = InodeNumber(u64::from(value_inum));
         let ea_inode = self.read_inode(cx, ea_ino)?;
         let value_len = usize::try_from(ea_inode.size).map_err(|_| FfsError::Corruption {
@@ -58380,6 +58487,43 @@ mod tests {
         assert!(
             ffs_ondisk::verify_xattr_block_checksum(&block2, seed, inode2.file_acl),
             "external xattr block must stay metadata_csum-clean after removexattr"
+        );
+    }
+
+    #[test]
+    fn ext4_ea_inode_value_parallel_read_matches_serial_bd_xmh5g_197() {
+        let Some((fs, _dev, _tmp, _image)) = open_ext4_mke2fs(8, false) else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let attr = fs
+            .create(
+                &cx,
+                InodeNumber(2),
+                OsStr::new("ea_inode_value.bin"),
+                0o644,
+                0,
+                0,
+            )
+            .expect("create file used as EA-inode payload");
+        let value: Vec<u8> = (0..17_317)
+            .map(|i| u8::try_from((i * 37 + 11) % 251).expect("modulo fits u8"))
+            .collect();
+        fs.write(&cx, attr.ino, 0, &value)
+            .expect("write multi-block payload");
+        let value_inum = u32::try_from(attr.ino.0).expect("test inode fits u32");
+
+        let serial = fs
+            .ext4_read_ea_inode_value_serial_for_test(&cx, value_inum)
+            .expect("serial EA-inode read");
+        let parallel = fs
+            .ext4_read_ea_inode_value(&cx, value_inum)
+            .expect("parallel EA-inode read");
+
+        assert_eq!(serial, value, "serial oracle must match file payload");
+        assert_eq!(
+            parallel, serial,
+            "parallel EA-inode read must preserve the serial byte image"
         );
     }
 
