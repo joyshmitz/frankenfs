@@ -3305,6 +3305,17 @@ mod tests {
                 proptest::prop_assert_eq!(reserved, 0);
                 proptest::prop_assert_eq!(base_meta, 0);
             }
+
+            let mut meta_bg_geo = geo.clone();
+            meta_bg_geo.feature_incompat = ffs_ondisk::Ext4IncompatFeatures(
+                ffs_ondisk::Ext4IncompatFeatures::META_BG.0,
+            );
+            meta_bg_geo.first_meta_bg = 0;
+            proptest::prop_assert_eq!(meta_bg_geo.reserved_gdt_blocks_in_group(g), 0);
+            proptest::prop_assert_eq!(
+                meta_bg_geo.base_meta_blocks_in_group(g),
+                u32::from(meta_bg_geo.has_backup_superblock(g))
+            );
         }
     }
 
