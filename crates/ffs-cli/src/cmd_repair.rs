@@ -2850,6 +2850,33 @@ mod coordination_tests {
     }
 
     #[test]
+    fn partition_scrub_range_covers_exactly_without_overlap() {
+        // No work when count or workers is zero.
+        assert!(partition_scrub_range(BlockNumber(0), 0, 4).is_empty());
+        assert!(partition_scrub_range(BlockNumber(0), 100, 0).is_empty());
+
+        // 100 blocks across 3 workers: 33 each, remainder 1 to the first worker.
+        let parts = partition_scrub_range(BlockNumber(10), 100, 3);
+        assert_eq!(parts.len(), 3);
+        assert_eq!(parts[0], (BlockNumber(10), 34));
+        assert_eq!(parts[1], (BlockNumber(44), 33));
+        assert_eq!(parts[2], (BlockNumber(77), 33));
+
+        // The partitions exactly cover [start, start+count) with no overlap/gap.
+        let total: u64 = parts.iter().map(|(_, width)| *width).sum();
+        assert_eq!(total, 100);
+        for win in parts.windows(2) {
+            assert_eq!(win[0].0.0 + win[0].1, win[1].0.0, "ranges must be contiguous");
+        }
+        let last = parts.last().unwrap();
+        assert_eq!(last.0.0 + last.1, 110, "must end at start + count");
+
+        // More workers than blocks caps at `count` single-block ranges.
+        let many = partition_scrub_range(BlockNumber(0), 2, 8);
+        assert_eq!(many, vec![(BlockNumber(0), 1), (BlockNumber(1), 1)]);
+    }
+
+    #[test]
     fn resolve_host_id_prefers_explicit_override() {
         assert_eq!(
             resolve_host_id(Some("  pinned-host-id  "), Some("deadbeef"), "worker-1"),
