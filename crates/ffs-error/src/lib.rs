@@ -235,46 +235,52 @@ impl FfsError {
     #[must_use]
     pub fn to_errno(&self) -> libc::c_int {
         match self {
-            Self::Io(err) => err.raw_os_error().unwrap_or_else(|| match err.kind() {
-                std::io::ErrorKind::NotFound => libc::ENOENT,
-                std::io::ErrorKind::PermissionDenied => libc::EACCES,
-                std::io::ErrorKind::AlreadyExists => libc::EEXIST,
-                std::io::ErrorKind::WouldBlock => libc::EAGAIN,
-                std::io::ErrorKind::NotADirectory => libc::ENOTDIR,
-                std::io::ErrorKind::IsADirectory => libc::EISDIR,
-                std::io::ErrorKind::DirectoryNotEmpty => libc::ENOTEMPTY,
-                std::io::ErrorKind::ReadOnlyFilesystem => libc::EROFS,
-                std::io::ErrorKind::StorageFull => libc::ENOSPC,
-                std::io::ErrorKind::QuotaExceeded => libc::EDQUOT,
-                std::io::ErrorKind::FileTooLarge => libc::EFBIG,
-                std::io::ErrorKind::ResourceBusy => libc::EBUSY,
-                std::io::ErrorKind::ExecutableFileBusy => libc::ETXTBSY,
-                std::io::ErrorKind::Deadlock => libc::EDEADLK,
-                std::io::ErrorKind::CrossesDevices => libc::EXDEV,
-                std::io::ErrorKind::TooManyLinks => libc::EMLINK,
-                std::io::ErrorKind::InvalidFilename => libc::EINVAL,
-                std::io::ErrorKind::ArgumentListTooLong => libc::E2BIG,
-                std::io::ErrorKind::NotSeekable => libc::ESPIPE,
-                std::io::ErrorKind::HostUnreachable => libc::EHOSTUNREACH,
-                std::io::ErrorKind::NetworkUnreachable => libc::ENETUNREACH,
-                std::io::ErrorKind::NetworkDown => libc::ENETDOWN,
-                std::io::ErrorKind::StaleNetworkFileHandle => libc::ESTALE,
-                std::io::ErrorKind::OutOfMemory => libc::ENOMEM,
-                std::io::ErrorKind::InvalidInput | std::io::ErrorKind::InvalidData => libc::EINVAL,
-                std::io::ErrorKind::TimedOut => libc::ETIMEDOUT,
-                std::io::ErrorKind::Interrupted => libc::EINTR,
-                std::io::ErrorKind::WriteZero
-                | std::io::ErrorKind::UnexpectedEof
-                | std::io::ErrorKind::BrokenPipe
-                | std::io::ErrorKind::ConnectionReset
-                | std::io::ErrorKind::ConnectionAborted
-                | std::io::ErrorKind::NotConnected
-                | std::io::ErrorKind::AddrInUse
-                | std::io::ErrorKind::AddrNotAvailable
-                | std::io::ErrorKind::ConnectionRefused
-                | std::io::ErrorKind::Unsupported
-                | _ => libc::EIO,
-            }),
+            Self::Io(err) => match err.raw_os_error() {
+                Some(errno) if errno > 0 => errno,
+                Some(_) => libc::EIO,
+                None => match err.kind() {
+                    std::io::ErrorKind::NotFound => libc::ENOENT,
+                    std::io::ErrorKind::PermissionDenied => libc::EACCES,
+                    std::io::ErrorKind::AlreadyExists => libc::EEXIST,
+                    std::io::ErrorKind::WouldBlock => libc::EAGAIN,
+                    std::io::ErrorKind::NotADirectory => libc::ENOTDIR,
+                    std::io::ErrorKind::IsADirectory => libc::EISDIR,
+                    std::io::ErrorKind::DirectoryNotEmpty => libc::ENOTEMPTY,
+                    std::io::ErrorKind::ReadOnlyFilesystem => libc::EROFS,
+                    std::io::ErrorKind::StorageFull => libc::ENOSPC,
+                    std::io::ErrorKind::QuotaExceeded => libc::EDQUOT,
+                    std::io::ErrorKind::FileTooLarge => libc::EFBIG,
+                    std::io::ErrorKind::ResourceBusy => libc::EBUSY,
+                    std::io::ErrorKind::ExecutableFileBusy => libc::ETXTBSY,
+                    std::io::ErrorKind::Deadlock => libc::EDEADLK,
+                    std::io::ErrorKind::CrossesDevices => libc::EXDEV,
+                    std::io::ErrorKind::TooManyLinks => libc::EMLINK,
+                    std::io::ErrorKind::InvalidFilename => libc::EINVAL,
+                    std::io::ErrorKind::ArgumentListTooLong => libc::E2BIG,
+                    std::io::ErrorKind::NotSeekable => libc::ESPIPE,
+                    std::io::ErrorKind::HostUnreachable => libc::EHOSTUNREACH,
+                    std::io::ErrorKind::NetworkUnreachable => libc::ENETUNREACH,
+                    std::io::ErrorKind::NetworkDown => libc::ENETDOWN,
+                    std::io::ErrorKind::StaleNetworkFileHandle => libc::ESTALE,
+                    std::io::ErrorKind::OutOfMemory => libc::ENOMEM,
+                    std::io::ErrorKind::InvalidInput | std::io::ErrorKind::InvalidData => {
+                        libc::EINVAL
+                    }
+                    std::io::ErrorKind::TimedOut => libc::ETIMEDOUT,
+                    std::io::ErrorKind::Interrupted => libc::EINTR,
+                    std::io::ErrorKind::WriteZero
+                    | std::io::ErrorKind::UnexpectedEof
+                    | std::io::ErrorKind::BrokenPipe
+                    | std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::ConnectionAborted
+                    | std::io::ErrorKind::NotConnected
+                    | std::io::ErrorKind::AddrInUse
+                    | std::io::ErrorKind::AddrNotAvailable
+                    | std::io::ErrorKind::ConnectionRefused
+                    | std::io::ErrorKind::Unsupported
+                    | _ => libc::EIO,
+                },
+            },
             Self::Corruption { .. } | Self::RepairFailed(_) => libc::EIO,
             Self::Format(_) | Self::Parse(_) | Self::InvalidGeometry(_) => libc::EINVAL,
             Self::UnsupportedFeature(_)
@@ -411,6 +417,15 @@ mod tests {
         let raw = std::io::Error::from_raw_os_error(libc::EPERM);
         let ffs = FfsError::Io(raw);
         assert_eq!(ffs.to_errno(), libc::EPERM);
+    }
+
+    #[test]
+    fn io_error_non_positive_raw_errno_fails_closed_to_eio() {
+        for raw_errno in [0, -1] {
+            let raw = std::io::Error::from_raw_os_error(raw_errno);
+            let ffs = FfsError::Io(raw);
+            assert_eq!(ffs.to_errno(), libc::EIO);
+        }
     }
 
     #[test]
