@@ -14,6 +14,7 @@ ffs-types = { workspace = true }
 fuser = { workspace = true }
 libc = { workspace = true }
 parking_lot = { workspace = true }
+rayon = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }

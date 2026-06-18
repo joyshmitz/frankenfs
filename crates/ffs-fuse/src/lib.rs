@@ -5709,25 +5709,39 @@ impl Filesystem for FrankenFuse {
                 .readdir(cx, scope, InodeNumber(ino), fs_offset)
         }) {
             Ok(entries) => {
-                for entry in &entries {
+                // bd-xmh5g.399: fetch every entry's attributes in PARALLEL so a
+                // cold `ls -l` does not pay a serial inode-table-block read per
+                // entry; then add them to the reply in original order. I/O-overlap:
+                // the blocking inode reads park their cores and overlap across the
+                // rayon pool. Conformance-neutral — identical entries, attributes,
+                // and ordering; getattr is already concurrency-safe (the FUSE
+                // dispatcher calls it from multiple worker threads), Cx is Sync, and
+                // with_request_scope takes &self.
+                use rayon::prelude::*;
+                let this: &Self = &*self;
+                let cx_ref = &cx;
+                let attrs: Vec<Option<FileAttr>> = entries
+                    .par_iter()
+                    .map(|entry| {
+                        this.with_request_scope(cx_ref, RequestOp::Getattr, |cx, scope| {
+                            this.inner.ops.getattr(cx, scope, entry.ino)
+                        })
+                        .ok()
+                        .map(|attr| to_file_attr(&attr))
+                    })
+                    .collect();
+
+                for (entry, attr) in entries.iter().zip(attrs) {
+                    // If we couldn't get attrs, skip this entry (same as before).
+                    let Some(attr) = attr else {
+                        continue;
+                    };
                     #[cfg(unix)]
                     let name = OsStr::from_bytes(&entry.name);
                     #[cfg(not(unix))]
                     let owned_name = entry.name_str();
                     #[cfg(not(unix))]
                     let name = OsStr::new(&owned_name);
-
-                    // Get attributes for each entry
-                    let attr =
-                        match self.with_request_scope(&cx, RequestOp::Getattr, |cx, scope| {
-                            self.inner.ops.getattr(cx, scope, entry.ino)
-                        }) {
-                            Ok(attr) => to_file_attr(&attr),
-                            Err(_) => {
-                                // If we can't get attrs, skip this entry
-                                continue;
-                            }
-                        };
 
                     let full = reply.add(
                         entry.ino.0,
