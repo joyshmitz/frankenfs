@@ -6,16 +6,14 @@
 //!
 //! The A/B model in `extent_cache_same_ns.rs` isolates the lock-acquisition
 //! cost with a simplified `Inner`. This bench drives the REAL
-//! [`ffs_extent::ExtentCache`] — full `ExtentCacheInner` with the `eviction_index`
-//! BTreeSet touch, generation check, and counter bumps — so the measured
-//! baseline reflects the production hot path exactly.
+//! [`ffs_extent::ExtentCache`] — full `ExtentCacheInner` with generation checks,
+//! atomic hit counters, and atomic recency refreshes — so the measured
+//! candidate reflects the production hot path exactly.
 //!
 //! All threads read ONE namespace, so every lookup lands on one shard and takes
-//! that shard's EXCLUSIVE write lock (the hit path touches `last_access` + the
-//! eviction index). The 1→8-thread throughput curve quantifies the within-shard
-//! contention tax — the headroom the lock-free-hit lever can reclaim. (After
-//! ns-sharding (bd-e8us8) this is the residual serialization the sharding cannot
-//! reach: N FUSE workers reading one large file.)
+//! that shard's shared read lock on hits. The 1→8-thread throughput curve is
+//! the batch-test gate for the lock-free-hit lever against the old write-lock
+//! baseline recorded before bd-xmh5g.382 landed.
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use ffs_extent::{ExtentCache, ExtentMapping};
