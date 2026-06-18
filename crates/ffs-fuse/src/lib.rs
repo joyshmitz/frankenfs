@@ -8290,6 +8290,20 @@ mod tests {
     }
 
     #[test]
+    fn readahead_manager_evicts_oldest_when_over_limit() {
+        let r = ReadaheadManager::new(2);
+        r.insert(InodeNumber(1), 0, vec![1]);
+        r.insert(InodeNumber(2), 0, vec![2]);
+        r.insert(InodeNumber(3), 0, vec![3]); // exceeds max_pending=2
+
+        // The oldest entry was evicted to keep the cache bounded.
+        assert!(r.take(InodeNumber(1), 0, 1).is_none());
+        // The two most recent entries survive.
+        assert_eq!(r.take(InodeNumber(2), 0, 1), Some(vec![2]));
+        assert_eq!(r.take(InodeNumber(3), 0, 1), Some(vec![3]));
+    }
+
+    #[test]
     fn readahead_manager_take_removes_entry() {
         let r = ReadaheadManager::new(10);
         r.insert(InodeNumber(1), 0, vec![1, 2, 3, 4]);
