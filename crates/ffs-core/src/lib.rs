@@ -64479,6 +64479,53 @@ mod tests {
         );
     }
 
+    #[test]
+    fn btrfs_truncate_reflink_source_preserves_clone_data() {
+        let (fs, cx) = open_writable_btrfs();
+        let root = InodeNumber(1);
+        let src = fs
+            .create(&cx, root, OsStr::new("src.dat"), 0o644, 0, 0)
+            .expect("create src");
+        let dst = fs
+            .create(&cx, root, OsStr::new("dst.dat"), 0o644, 0, 0)
+            .expect("create dst");
+
+        // Fill src with a known pattern across two blocks.
+        let payload = vec![0xC3_u8; 2 * 4096];
+        fs.write(&cx, src.ino, 0, &payload).expect("write src");
+
+        // Reflink src into dst (shared extent, refcount 2).
+        let src_canon = fs.btrfs_canonical_inode(src.ino).expect("src canonical");
+        let dst_canon = fs.btrfs_canonical_inode(dst.ino).expect("dst canonical");
+        {
+            let alloc_mutex = fs.btrfs_alloc_state.as_ref().expect("alloc state");
+            let mut alloc = alloc_mutex.write();
+            fs.btrfs_clone_file_data(&mut alloc, src_canon, dst_canon)
+                .expect("clone src into dst");
+        }
+
+        // Truncate src to zero: refcount-aware free drops src's reference only,
+        // keeping the shared extent alive for dst.
+        let trunc = SetAttrRequest {
+            mode: None,
+            uid: None,
+            gid: None,
+            size: Some(0),
+            atime: None,
+            mtime: None,
+        };
+        fs.setattr(&cx, src.ino, &trunc).expect("truncate src to zero");
+        assert_eq!(fs.getattr(&cx, src.ino).expect("getattr src").size, 0);
+
+        // dst must still read its full original data.
+        let dst_read = fs.read(&cx, dst.ino, 0, 2 * 4096).expect("read dst");
+        assert_eq!(dst_read.len(), 2 * 4096);
+        assert!(
+            dst_read.iter().all(|&b| b == 0xC3),
+            "clone data must survive truncation of the reflink source"
+        );
+    }
+
     /// Phase-B probe (TealFalcon): now that a single small datasum file is
     /// btrfs-check-clean, map which MORE COMPLEX btrfs mutation sequences still
     /// produce a kernel-valid image. Prints the `btrfs check` verdict for each
