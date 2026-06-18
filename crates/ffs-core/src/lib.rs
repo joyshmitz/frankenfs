@@ -69286,6 +69286,29 @@ mod tests {
     }
 
     #[test]
+    fn btrfs_validate_fallocate_mode_rejects_invalid_combinations() {
+        let v = |mode| OpenFs::btrfs_validate_fallocate_mode(mode, "op", "scenario");
+
+        // Plain allocation and KEEP_SIZE alone are accepted.
+        assert!(v(0).is_ok());
+        assert!(v(libc::FALLOC_FL_KEEP_SIZE).is_ok());
+
+        // PUNCH_HOLE and ZERO_RANGE are mutually exclusive -> EINVAL.
+        let punch_zero =
+            libc::FALLOC_FL_PUNCH_HOLE | libc::FALLOC_FL_ZERO_RANGE | libc::FALLOC_FL_KEEP_SIZE;
+        assert_eq!(v(punch_zero).unwrap_err().to_errno(), libc::EINVAL);
+
+        // PUNCH_HOLE requires KEEP_SIZE -> EINVAL without it.
+        assert_eq!(
+            v(libc::FALLOC_FL_PUNCH_HOLE).unwrap_err().to_errno(),
+            libc::EINVAL
+        );
+
+        // An unknown / unsupported mode bit is rejected.
+        assert!(v(0x4000).is_err());
+    }
+
+    #[test]
     fn btrfs_write_fallocate_extends_file() {
         let _guard = log_contract_guard();
         let (fs, cx) = open_writable_btrfs();
