@@ -4488,6 +4488,94 @@ Hole { hole_len: 90 }
             }
         }
 
+        /// `search_with_leaf_window` must return the SAME result as plain
+        /// `search` for any target, and the leaf window it returns must contain
+        /// only real tree extents (each findable by `search`) in sorted order —
+        /// the invariant the extent-cache leaf-window fill (bd-xmh5g.21) relies
+        /// on to cache the whole answering leaf safely (bd-xmh5g.204).
+        #[test]
+        fn proptest_search_with_leaf_window_matches_search(
+            keys in proptest::collection::vec(0_u16..500_u16, 1..40),
+            probes in proptest::collection::vec(0_u16..1600_u16, 1..20),
+        ) {
+            let cx = test_cx();
+            let dev = MemBlockDevice::new(4096);
+            let mut root = make_root();
+            let mut alloc = SeqAllocator::new(10_000);
+            let mut inserted = BTreeMap::<u32, u64>::new();
+
+            for key in keys {
+                let logical = u32::from(key) * 3;
+                if inserted.contains_key(&logical) {
+                    continue;
+                }
+                let physical = 500_000 + u64::from(logical);
+                let ext = Ext4Extent {
+                    logical_block: logical,
+                    raw_len: 1,
+                    physical_start: physical,
+                };
+                insert(&cx, &dev, &mut root, ext, &mut alloc).unwrap();
+                inserted.insert(logical, physical);
+            }
+
+            // Probe inserted keys plus arbitrary (often-absent) targets.
+            let targets = inserted
+                .keys()
+                .copied()
+                .chain(probes.iter().map(|p| u32::from(*p)));
+            for target in targets {
+                let win = search_with_leaf_window(&cx, &dev, &root, target).unwrap();
+                let direct = search(&cx, &dev, &root, target).unwrap();
+
+                // 1. The window's result is exactly the plain search result.
+                prop_assert_eq!(
+                    win.result.clone(),
+                    direct,
+                    "leaf-window result diverged from search at target {}",
+                    target
+                );
+
+                // 2. The leaf window is sorted ascending by logical block.
+                for pair in win.extents.windows(2) {
+                    prop_assert!(
+                        pair[0].logical_block < pair[1].logical_block,
+                        "leaf window not sorted at target {}",
+                        target
+                    );
+                }
+
+                // 3. Every extent in the window is a real tree extent: searching
+                //    its own logical block returns Found with the same physical
+                //    address — the safety property the cache-fill depends on.
+                for ext in &win.extents {
+                    match search(&cx, &dev, &root, ext.logical_block).unwrap() {
+                        SearchResult::Found { extent, offset_in_extent } => {
+                            prop_assert_eq!(offset_in_extent, 0);
+                            prop_assert_eq!(extent.physical_start, ext.physical_start);
+                            prop_assert_eq!(extent.logical_block, ext.logical_block);
+                        }
+                        SearchResult::Hole { .. } => {
+                            prop_assert!(
+                                false,
+                                "leaf-window extent {} not found by search",
+                                ext.logical_block
+                            );
+                        }
+                    }
+                }
+
+                // 4. A Found result's extent must be present in its own window.
+                if let SearchResult::Found { extent, .. } = &win.result {
+                    prop_assert!(
+                        win.extents.iter().any(|e| e == extent),
+                        "found extent missing from its leaf window at target {}",
+                        target
+                    );
+                }
+            }
+        }
+
         /// Walk returns exactly the same set of extents that were inserted.
         #[test]
         fn proptest_walk_completeness(
