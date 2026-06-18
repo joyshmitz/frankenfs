@@ -8989,6 +8989,26 @@ mod tests {
     }
 
     #[test]
+    fn verify_bitmap_free_count_masks_partial_byte_and_rejects_short() {
+        // total_bits = 12 -> full_bytes = 1, rem_bits = 4 (mask 0x0F): only the
+        // low 4 bits of byte 1 count; the high nibble is ignored even when set.
+        // [0xFF, 0xF0]: 8 used in byte 0, 0 used in the masked nibble -> 4 free.
+        assert!(super::verify_bitmap_free_count(&[0xFF, 0xF0], 12, 4, "block_bitmap").is_ok());
+        // [0xFF, 0x0F]: low nibble fully set -> 12 used, 0 free.
+        assert!(super::verify_bitmap_free_count(&[0xFF, 0x0F], 12, 0, "block_bitmap").is_ok());
+        // Wrong expected free count for the partial byte is rejected.
+        assert!(super::verify_bitmap_free_count(&[0xFF, 0x0F], 12, 4, "block_bitmap").is_err());
+
+        // A bitmap shorter than ceil(total_bits/8) is rejected with InsufficientData.
+        let err = super::verify_bitmap_free_count(&[0x00], 16, 16, "block_bitmap")
+            .expect_err("short bitmap must be rejected");
+        assert!(
+            matches!(err, ParseError::InsufficientData { needed: 2, actual: 1, .. }),
+            "got {err:?}",
+        );
+    }
+
+    #[test]
     #[allow(clippy::cast_possible_truncation)]
     fn parse_dir_block_basic() {
         let block_size = 4096_u32;
