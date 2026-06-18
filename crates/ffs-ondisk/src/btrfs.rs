@@ -6522,6 +6522,27 @@ mod tests {
     }
 
     #[test]
+    fn stripe_resolve_raid10_rejects_stripe_len_product_overflow() {
+        let chunks = vec![make_chunk(
+            0,
+            u64::MAX,
+            u64::MAX,
+            chunk_type_flags::BTRFS_BLOCK_GROUP_DATA | chunk_type_flags::BTRFS_BLOCK_GROUP_RAID10,
+            vec![stripe(1, 0x10_0000), stripe(2, 0x20_0000)],
+            1,
+        )];
+
+        let err = map_logical_to_stripes(&chunks, 0).unwrap_err();
+        assert_eq!(
+            err,
+            ParseError::InvalidField {
+                field: "stripe_len",
+                reason: "RAID10 stripe_len * data_stripes overflow",
+            }
+        );
+    }
+
+    #[test]
     fn stripe_resolve_raid10_overflow_reports_error() {
         let chunks = vec![make_chunk(
             0,
