@@ -348,6 +348,16 @@ pub trait ByteDevice: Send + Sync {
     /// Read exactly `buf.len()` bytes from `offset` into `buf`.
     fn read_exact_at(&self, cx: &Cx, offset: ByteOffset, buf: &mut [u8]) -> Result<()>;
 
+    /// Read exactly `buf.len()` bytes into a caller-owned scratch buffer.
+    ///
+    /// Implementations may mutate `buf` before returning `Err`. Callers must
+    /// use this only when the destination is local to the current operation and
+    /// will be discarded on failure. Public paths that promise destination
+    /// preservation on error must keep using [`read_exact_at`].
+    fn read_exact_at_unstaged(&self, cx: &Cx, offset: ByteOffset, buf: &mut [u8]) -> Result<()> {
+        self.read_exact_at(cx, offset, buf)
+    }
+
     /// Read a contiguous byte range into multiple buffers.
     ///
     /// The default preserves scalar `read_exact_at` semantics. File-backed
@@ -394,7 +404,7 @@ pub trait ByteDevice: Send + Sync {
             let next_copied = copied
                 .checked_add(buf.len())
                 .ok_or_else(|| FfsError::Format("read length overflows usize".to_owned()))?;
-            self.read_exact_at(
+            self.read_exact_at_unstaged(
                 cx,
                 ByteOffset(next_offset),
                 &mut read_buf[copied..next_copied],
@@ -506,6 +516,32 @@ impl ByteDevice for FileByteDevice {
         let mut read_buf = vec![0_u8; buf.len()];
         self.file.read_exact_at(read_buf.as_mut_slice(), offset.0)?;
         buf.copy_from_slice(read_buf.as_slice());
+        cx_checkpoint(cx)?;
+        Ok(())
+    }
+
+    fn read_exact_at_unstaged(&self, cx: &Cx, offset: ByteOffset, buf: &mut [u8]) -> Result<()> {
+        cx_checkpoint(cx)?;
+        if buf.is_empty() {
+            cx_checkpoint(cx)?;
+            return Ok(());
+        }
+        let end = offset
+            .0
+            .checked_add(
+                u64::try_from(buf.len())
+                    .map_err(|_| FfsError::Format("read length overflows u64".to_owned()))?,
+            )
+            .ok_or_else(|| FfsError::Format("read range overflows u64".to_owned()))?;
+        if end > self.len {
+            return Err(FfsError::Format(format!(
+                "read out of bounds: offset={offset} len={} file_len={}",
+                buf.len(),
+                self.len
+            )));
+        }
+
+        self.file.read_exact_at(buf, offset.0)?;
         cx_checkpoint(cx)?;
         Ok(())
     }
@@ -1036,7 +1072,7 @@ impl<D: ByteDevice> BlockDevice for ByteBlockDevice<D> {
             .map_err(|_| FfsError::Format("block_size does not fit usize".to_owned()))?;
         let mut buf = BlockBuf::zeroed(block_size);
         self.inner
-            .read_exact_at(cx, ByteOffset(offset), buf.make_mut())?;
+            .read_exact_at_unstaged(cx, ByteOffset(offset), buf.make_mut())?;
         cx_checkpoint(cx)?;
         Ok(buf)
     }
@@ -1096,7 +1132,7 @@ impl<D: ByteDevice> BlockDevice for ByteBlockDevice<D> {
 
         let mut read_buf = vec![0_u8; total_len];
         self.inner
-            .read_exact_at(cx, ByteOffset(offset), read_buf.as_mut_slice())?;
+            .read_exact_at_unstaged(cx, ByteOffset(offset), read_buf.as_mut_slice())?;
         for (buf, chunk) in bufs.iter_mut().zip(read_buf.chunks_exact(block_size)) {
             if buf.len() == block_size {
                 buf.make_mut().copy_from_slice(chunk);
@@ -1144,7 +1180,7 @@ impl<D: ByteDevice> BlockDevice for ByteBlockDevice<D> {
 
         let mut read_buf = vec![0_u8; dst.len()];
         self.inner
-            .read_exact_at(cx, ByteOffset(offset), read_buf.as_mut_slice())?;
+            .read_exact_at_unstaged(cx, ByteOffset(offset), read_buf.as_mut_slice())?;
         dst.copy_from_slice(read_buf.as_slice());
         cx_checkpoint(cx)?;
         Ok(())
@@ -1237,7 +1273,7 @@ pub fn read_ext4_superblock_region(
     let mut buf = [0_u8; EXT4_SUPERBLOCK_SIZE];
     let offset = u64::try_from(EXT4_SUPERBLOCK_OFFSET)
         .map_err(|_| FfsError::Format("ext4 superblock offset does not fit u64".to_owned()))?;
-    dev.read_exact_at(cx, ByteOffset(offset), &mut buf)?;
+    dev.read_exact_at_unstaged(cx, ByteOffset(offset), &mut buf)?;
     Ok(buf)
 }
 
@@ -1249,7 +1285,7 @@ pub fn read_btrfs_superblock_region(
     let mut buf = [0_u8; BTRFS_SUPER_INFO_SIZE];
     let offset = u64::try_from(BTRFS_SUPER_INFO_OFFSET)
         .map_err(|_| FfsError::Format("btrfs superblock offset does not fit u64".to_owned()))?;
-    dev.read_exact_at(cx, ByteOffset(offset), &mut buf)?;
+    dev.read_exact_at_unstaged(cx, ByteOffset(offset), &mut buf)?;
     Ok(buf)
 }
 
@@ -6670,6 +6706,91 @@ mod tests {
     }
 
     #[derive(Debug)]
+    struct UnstagedProbeByteDevice {
+        bytes: Mutex<Vec<u8>>,
+        fail_unstaged: bool,
+        staged_reads: AtomicUsize,
+        unstaged_reads: AtomicUsize,
+    }
+
+    impl UnstagedProbeByteDevice {
+        fn new(bytes: Vec<u8>, fail_unstaged: bool) -> Self {
+            Self {
+                bytes: Mutex::new(bytes),
+                fail_unstaged,
+                staged_reads: AtomicUsize::new(0),
+                unstaged_reads: AtomicUsize::new(0),
+            }
+        }
+
+        fn staged_reads(&self) -> usize {
+            self.staged_reads.load(Ordering::Relaxed)
+        }
+
+        fn unstaged_reads(&self) -> usize {
+            self.unstaged_reads.load(Ordering::Relaxed)
+        }
+    }
+
+    impl ByteDevice for UnstagedProbeByteDevice {
+        fn len_bytes(&self) -> u64 {
+            u64::try_from(self.bytes.lock().len()).unwrap_or(0)
+        }
+
+        fn read_exact_at(&self, _cx: &Cx, offset: ByteOffset, buf: &mut [u8]) -> Result<()> {
+            self.staged_reads.fetch_add(1, Ordering::Relaxed);
+            let offset = usize::try_from(offset.0)
+                .map_err(|_| FfsError::Format("offset overflow".into()))?;
+            let end = offset
+                .checked_add(buf.len())
+                .ok_or_else(|| FfsError::Format("range overflow".into()))?;
+            let bytes = self.bytes.lock();
+            if end > bytes.len() {
+                return Err(FfsError::Format("oob".into()));
+            }
+            buf.copy_from_slice(&bytes[offset..end]);
+            Ok(())
+        }
+
+        fn read_exact_at_unstaged(
+            &self,
+            _cx: &Cx,
+            offset: ByteOffset,
+            buf: &mut [u8],
+        ) -> Result<()> {
+            self.unstaged_reads.fetch_add(1, Ordering::Relaxed);
+            if self.fail_unstaged {
+                if let Some(first) = buf.first_mut() {
+                    *first = 0xEE;
+                }
+                return Err(FfsError::Format(
+                    "injected unstaged byte read failure".to_owned(),
+                ));
+            }
+
+            let offset = usize::try_from(offset.0)
+                .map_err(|_| FfsError::Format("offset overflow".into()))?;
+            let end = offset
+                .checked_add(buf.len())
+                .ok_or_else(|| FfsError::Format("range overflow".into()))?;
+            let bytes = self.bytes.lock();
+            if end > bytes.len() {
+                return Err(FfsError::Format("oob".into()));
+            }
+            buf.copy_from_slice(&bytes[offset..end]);
+            Ok(())
+        }
+
+        fn write_all_at(&self, _cx: &Cx, _offset: ByteOffset, _buf: &[u8]) -> Result<()> {
+            Ok(())
+        }
+
+        fn sync(&self, _cx: &Cx) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[derive(Debug)]
     struct AllOrNothingFailingReadByteDevice {
         len: u64,
         last_read_ptr: Mutex<Option<usize>>,
@@ -7192,6 +7313,24 @@ mod tests {
     }
 
     #[test]
+    fn byte_block_device_read_block_uses_unstaged_owned_destination() {
+        let cx = Cx::for_testing();
+        let dev = ByteBlockDevice::new(
+            UnstagedProbeByteDevice::new(vec![0, 1, 2, 3, 4, 5, 6, 7], false),
+            4,
+        )
+        .expect("device");
+
+        let read = dev
+            .read_block(&cx, BlockNumber(1))
+            .expect("owned block read");
+
+        assert_eq!(read.as_slice(), &[4, 5, 6, 7]);
+        assert_eq!(dev.inner().staged_reads(), 0);
+        assert_eq!(dev.inner().unstaged_reads(), 1);
+    }
+
+    #[test]
     fn byte_block_device_reads_contiguous_blocks_with_one_byte_read() {
         let cx = Cx::for_testing();
         let mem = MemoryByteDevice::new(16);
@@ -7250,6 +7389,29 @@ mod tests {
         );
         assert!(bufs[0].as_slice().is_empty());
         assert_eq!(bufs[1].as_slice(), &[0xBB; 4]);
+    }
+
+    #[test]
+    fn byte_block_device_contiguous_blocks_unstaged_failure_keeps_callers_buffers() {
+        let cx = Cx::for_testing();
+        let dev =
+            ByteBlockDevice::new(UnstagedProbeByteDevice::new(vec![0_u8; 8], true), 4)
+                .expect("device");
+        let mut bufs = [BlockBuf::new(vec![0xAA; 4]), BlockBuf::new(vec![0xBB; 4])];
+
+        let err = dev
+            .read_contiguous_blocks(&cx, BlockNumber(0), &mut bufs)
+            .expect_err("local unstaged read failure should not mutate caller buffers");
+
+        assert!(
+            matches!(err, FfsError::Format(ref message)
+                if message.contains("injected unstaged byte read failure")),
+            "expected injected unstaged Format error, got {err:?}"
+        );
+        assert_eq!(bufs[0].as_slice(), &[0xAA; 4]);
+        assert_eq!(bufs[1].as_slice(), &[0xBB; 4]);
+        assert_eq!(dev.inner().staged_reads(), 0);
+        assert_eq!(dev.inner().unstaged_reads(), 1);
     }
 
     #[test]
