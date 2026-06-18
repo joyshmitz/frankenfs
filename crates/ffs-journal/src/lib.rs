@@ -2456,7 +2456,12 @@ pub fn recover_native_cow(
         let raw = dev.read_block(cx, block)?;
         let decoded = match decode_cow_record(raw.as_slice()) {
             Ok(decoded) => decoded,
-            Err(FfsError::Format(_)) => break,
+            Err(FfsError::Format(message)) => {
+                if commit_order.is_empty() {
+                    return Err(FfsError::Format(message));
+                }
+                break;
+            }
             Err(err) => return Err(err),
         };
         let Some(record) = decoded else {
@@ -5259,6 +5264,28 @@ mod tests {
         assert!(
             matches!(err, FfsError::Format(_)),
             "expected Format error for unsupported COW version, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn native_cow_recover_rejects_malformed_first_record() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(512, 128);
+        let region = JournalRegion {
+            start: BlockNumber(40),
+            blocks: 16,
+        };
+
+        let mut malformed = vec![0_u8; 512];
+        malformed[0..4].copy_from_slice(&COW_MAGIC.to_le_bytes());
+        malformed[4..6].copy_from_slice(&COW_VERSION.to_le_bytes());
+        malformed[6..8].copy_from_slice(&999_u16.to_le_bytes());
+        dev.raw_write(BlockNumber(40), malformed);
+
+        let err = recover_native_cow(&cx, &dev, region).expect_err("malformed first record");
+        assert!(
+            matches!(err, FfsError::Format(message) if message.contains("unknown COW record kind")),
+            "expected unknown-kind Format error, got {err:?}"
         );
     }
 
