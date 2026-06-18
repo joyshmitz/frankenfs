@@ -826,7 +826,10 @@ mod tests {
             prop_assert!(result.is_err(), "bit flip at byte {} bit {} not detected", flip_byte, flip_bit);
         }
 
-        /// RepairGroupDescExt round-trips through to_bytes/parse for all field values.
+        /// RepairGroupDescExt round-trips through to_bytes/parse for all field
+        /// values. The OTI fields and repair-block locations drive RaptorQ
+        /// decode, so a mismatched on-disk offset would silently break recovery
+        /// (bd-xmh5g.203).
         #[test]
         fn proptest_repair_group_desc_ext_round_trip(
             transfer_length in any::<u64>(),
@@ -859,6 +862,7 @@ mod tests {
             prop_assert_eq!(parsed.repair_start_block, BlockNumber(repair_start_block));
             prop_assert_eq!(parsed.repair_block_count, repair_block_count);
             prop_assert_eq!(parsed.repair_generation, repair_generation);
+            prop_assert_eq!(parsed.checksum, crc32c::crc32c(&bytes[..40]));
         }
 
         /// Any single-bit flip in a RepairGroupDescExt is detected by CRC32C.
