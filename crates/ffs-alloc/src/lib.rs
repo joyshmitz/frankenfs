@@ -3211,6 +3211,21 @@ mod tests {
             proptest::prop_assert_eq!(g2, GroupNumber(group));
             proptest::prop_assert_eq!(off2, rel);
             proptest::prop_assert!(off2 < blocks_per_group);
+
+            let last_rel = blocks_per_group - 1;
+            let last_abs = geo.group_block_to_absolute(GroupNumber(group), last_rel);
+            proptest::prop_assert_eq!(
+                last_abs,
+                BlockNumber(
+                    u64::from(first_data_block)
+                        + u64::from(group) * u64::from(blocks_per_group)
+                        + u64::from(last_rel)
+                )
+            );
+
+            let (last_group, last_off) = geo.absolute_to_group_block(last_abs);
+            proptest::prop_assert_eq!(last_group, GroupNumber(group));
+            proptest::prop_assert_eq!(last_off, last_rel);
         }
     }
 
