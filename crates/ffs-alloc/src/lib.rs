@@ -3227,6 +3227,43 @@ mod tests {
             proptest::prop_assert_eq!(last_group, GroupNumber(group));
             proptest::prop_assert_eq!(last_off, last_rel);
         }
+
+        /// On a SPARSE_SUPER filesystem, `has_backup_superblock` must follow the
+        /// ext4 rule exactly: a backup superblock+GDT lives in group 0 and in
+        /// every group that is a pure power of 3, 5, or 7 (group 1 = base^0 is
+        /// included). Checked against an INDEPENDENT power-of-base reference (a
+        /// division loop, distinct from the impl's `is_power_of`) so a bug in
+        /// either the rule or the power test is caught (bd-xmh5g.211).
+        #[test]
+        fn proptest_has_backup_superblock_sparse_super_rule(
+            group in 0u32..10_000,
+        ) {
+            let mut geo = make_geometry();
+            geo.feature_ro_compat = ffs_ondisk::Ext4RoCompatFeatures(
+                ffs_ondisk::Ext4RoCompatFeatures::SPARSE_SUPER.0,
+            );
+
+            // Independent reference: group 0, or a pure power of 3/5/7
+            // (1 == base^0 counts).
+            let is_pow = |mut n: u32, base: u32| -> bool {
+                if n == 0 {
+                    return false;
+                }
+                while n % base == 0 {
+                    n /= base;
+                }
+                n == 1
+            };
+            let expected =
+                group == 0 || is_pow(group, 3) || is_pow(group, 5) || is_pow(group, 7);
+
+            proptest::prop_assert_eq!(
+                geo.has_backup_superblock(GroupNumber(group)),
+                expected,
+                "sparse_super backup rule mismatch at group {}",
+                group
+            );
+        }
     }
 
     // ── Geometry tests ──────────────────────────────────────────────────
