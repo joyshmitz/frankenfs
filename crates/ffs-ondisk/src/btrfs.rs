@@ -6448,6 +6448,34 @@ mod tests {
     }
 
     #[test]
+    fn stripe_resolve_raid0_rejects_physical_address_overflow() {
+        let chunks = vec![make_chunk(
+            0,
+            16,
+            1,
+            chunk_type_flags::BTRFS_BLOCK_GROUP_DATA | chunk_type_flags::BTRFS_BLOCK_GROUP_RAID0,
+            vec![stripe(1, u64::MAX - 1), stripe(2, 0)],
+            0,
+        )];
+
+        let boundary = map_logical_to_stripes(&chunks, 2)
+            .expect("boundary stripe mapping should be valid")
+            .expect("chunk should cover boundary logical address");
+        assert_eq!(boundary.stripes.len(), 1);
+        assert_eq!(boundary.stripes[0].devid, 1);
+        assert_eq!(boundary.stripes[0].physical, u64::MAX);
+
+        let err = map_logical_to_stripes(&chunks, 4).unwrap_err();
+        assert_eq!(
+            err,
+            ParseError::InvalidField {
+                field: "stripe_offset",
+                reason: "physical address overflow",
+            }
+        );
+    }
+
+    #[test]
     fn stripe_resolve_raid10_rejects_zero_sub_stripes() {
         let chunks = vec![make_chunk(
             0,
