@@ -62739,6 +62739,65 @@ mod tests {
         );
     }
 
+    #[test]
+    fn fast_commit_link_apply_adds_hardlink_dir_entry() {
+        let Some((fs, dev, _tmp, _image)) = open_ext4_mke2fs(8, false) else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        // A single-linked file "a.dat".
+        let attr = fs
+            .create(&cx, root, OsStr::new("a.dat"), 0o644, 0, 0)
+            .expect("create file");
+        fs.write(&cx, attr.ino, 0, &[0xCD_u8; 1024])
+            .expect("write file data");
+        fs.flush_mvcc_to_device(&cx).expect("flush mvcc");
+        let inode_size = usize::from(fs.ext4_superblock().expect("sb").inode_size);
+        let ino_u32 = u32::try_from(attr.ino.0).expect("ino fits u32");
+
+        // Reopen (real recovery context) and recover a LINK of "b.dat" (a hardlink
+        // created just before the crash) plus the InodeUpdate raising the count.
+        let recov = std::sync::Arc::new(std::sync::Mutex::new(dev.snapshot_bytes()));
+        let fs2 = OpenFs::from_device(
+            &cx,
+            Box::new(TestDevice {
+                data: std::sync::Arc::clone(&recov),
+            }),
+            &OpenOptions::default(),
+        )
+        .expect("reopen from device");
+
+        let mut linked_inode = fs2.read_inode(&cx, attr.ino).expect("read inode");
+        assert_eq!(linked_inode.links_count, 1, "one link before recovery");
+        linked_inode.links_count = 2;
+        let inode_raw = ffs_inode::serialize_inode(&linked_inode, inode_size);
+        let ops = vec![
+            ffs_journal::FcOperation::Link(ffs_journal::FcDentry {
+                parent_ino: 2,
+                ino: ino_u32,
+                name: b"b.dat".to_vec(),
+            }),
+            ffs_journal::FcOperation::InodeUpdate(ino_u32, inode_raw),
+        ];
+        fs2.apply_fast_commit_operations(&cx, &ops, true)
+            .expect("apply fc link");
+
+        // Both names now resolve to the same inode.
+        let root_inode = fs2.read_inode(&cx, root).expect("read root");
+        let a = fs2
+            .lookup_name(&cx, &root_inode, b"a.dat")
+            .expect("lookup a")
+            .expect("a.dat survives");
+        let b = fs2
+            .lookup_name(&cx, &root_inode, b"b.dat")
+            .expect("lookup b")
+            .expect("b.dat recovered");
+        assert_eq!(a.inode, ino_u32);
+        assert_eq!(b.inode, ino_u32, "recovered hardlink points at the same inode");
+    }
+
     /// bd-4tmpw: a fast-committed single-link delete (the common `rm` case) must,
     /// on recovery, FREE the inode and its blocks — not just write a zero-link
     /// header back. The UNLINK removes the dir entry and the accompanying
