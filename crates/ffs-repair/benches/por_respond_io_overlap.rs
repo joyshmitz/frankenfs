@@ -270,5 +270,50 @@ fn bench_verify(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_respond, bench_verify);
+// ── Authenticator-table build A/B (bd-ya8zh) ────────────────────────────────
+//
+// `AuthenticatorTable::build` keyed-BLAKE3-hashes every block in a group (up to
+// 32768 x 4KiB). The hashes are pure + independent; the lever collects the
+// iterator then hashes across the rayon pool (CPU-parallel), order preserved.
+
+fn build_serial(key: &[u8; 32], blocks: &[(u64, Vec<u8>)]) -> Vec<[u8; 32]> {
+    blocks
+        .iter()
+        .map(|(idx, data)| recompute_authenticator(key, *idx, data))
+        .collect()
+}
+
+fn build_parallel(key: &[u8; 32], blocks: &[(u64, Vec<u8>)]) -> Vec<[u8; 32]> {
+    use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
+    blocks
+        .par_iter()
+        .map(|(idx, data)| recompute_authenticator(key, *idx, data))
+        .collect()
+}
+
+fn bench_build(c: &mut Criterion) {
+    let key = [0x37_u8; 32];
+    let mut group = c.benchmark_group("por_authtable_build");
+    for &n in &[4096_usize, 16384, 32768] {
+        let blocks: Vec<(u64, Vec<u8>)> =
+            (0..n as u64).map(|i| (i, block_bytes(i))).collect();
+
+        // Isomorphism: parallel build produces the identical authenticators, in order.
+        assert_eq!(
+            build_serial(&key, &blocks),
+            build_parallel(&key, &blocks),
+            "parallel authtable build diverged from serial (n={n})"
+        );
+
+        group.bench_with_input(BenchmarkId::new("serial", n), &n, |b, _| {
+            b.iter(|| black_box(build_serial(black_box(&key), black_box(&blocks))));
+        });
+        group.bench_with_input(BenchmarkId::new("parallel_rayon", n), &n, |b, _| {
+            b.iter(|| black_box(build_parallel(black_box(&key), black_box(&blocks))));
+        });
+    }
+    group.finish();
+}
+
+criterion_group!(benches, bench_respond, bench_verify, bench_build);
 criterion_main!(benches);

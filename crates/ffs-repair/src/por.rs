@@ -133,7 +133,16 @@ impl AuthenticatorTable {
     /// `blocks` is an iterator of `(index, data)` pairs.
     #[must_use]
     pub fn build<'a>(key: &PorKey, blocks: impl Iterator<Item = (u64, &'a [u8])>) -> Self {
-        let authenticators: Vec<Authenticator> = blocks
+        use rayon::prelude::{IntoParallelIterator, ParallelIterator};
+
+        // Each block's authenticator is an independent keyed BLAKE3 hash. Collect
+        // the (lazy) iterator into a Vec of (index, slice) refs (cheap), then hash
+        // them across the rayon pool. An indexed `into_par_iter().collect()`
+        // preserves order, so the table is byte-identical to the serial map; this
+        // parallelizes the tens-of-thousands of hashes a full-group build does.
+        let pairs: Vec<(u64, &'a [u8])> = blocks.collect();
+        let authenticators: Vec<Authenticator> = pairs
+            .into_par_iter()
             .map(|(idx, data)| compute_authenticator(key, idx, data))
             .collect();
         Self { authenticators }
