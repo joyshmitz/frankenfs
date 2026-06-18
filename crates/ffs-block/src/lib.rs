@@ -16,7 +16,6 @@ use ffs_types::{
     BTRFS_SUPER_INFO_OFFSET, BTRFS_SUPER_INFO_SIZE, BlockNumber, ByteOffset, CommitSeq,
     EXT4_SUPERBLOCK_OFFSET, EXT4_SUPERBLOCK_SIZE, TxnId,
 };
-use nix::sys::uio::preadv;
 #[cfg(feature = "s3fifo")]
 use parking_lot::RwLock;
 use parking_lot::{Condvar, Mutex};
@@ -26,8 +25,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs::File;
 use std::fs::OpenOptions;
-use std::io::{self, IoSliceMut};
-use std::os::fd::AsFd;
+use std::io::IoSliceMut;
 use std::os::unix::fs::FileExt;
 use std::path::Path;
 use std::sync::Arc;
@@ -483,31 +481,20 @@ impl ByteDevice for FileByteDevice {
             )));
         }
 
-        let mut total_read = 0_usize;
-        let mut remaining = bufs;
-        while !remaining.is_empty() {
-            let next_offset = offset
-                .0
-                .checked_add(
-                    u64::try_from(total_read)
-                        .map_err(|_| FfsError::Format("read length overflows u64".to_owned()))?,
-                )
-                .ok_or_else(|| FfsError::Format("read range overflows u64".to_owned()))?;
-            let next_offset = i64::try_from(next_offset)
-                .map_err(|_| FfsError::Format("read offset does not fit off_t".to_owned()))?;
-            let n = preadv(self.file.as_ref().as_fd(), remaining, next_offset)
-                .map_err(|errno| io::Error::from_raw_os_error(errno as i32))?;
-            if n == 0 {
-                return Err(io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    "failed to fill whole buffer",
-                )
-                .into());
+        let mut read_buf = vec![0_u8; total_len];
+        self.file
+            .read_exact_at(read_buf.as_mut_slice(), offset.0)?;
+        let mut copied = 0_usize;
+        for buf in bufs {
+            let len = buf.len();
+            if len == 0 {
+                continue;
             }
-            total_read = total_read
-                .checked_add(n)
+            let end = copied
+                .checked_add(len)
                 .ok_or_else(|| FfsError::Format("read length overflows usize".to_owned()))?;
-            IoSliceMut::advance_slices(&mut remaining, n);
+            (**buf).copy_from_slice(&read_buf[copied..end]);
+            copied = end;
         }
 
         cx_checkpoint(cx)?;
@@ -7260,6 +7247,37 @@ mod tests {
             "expected short-read UnexpectedEof, got {err:?}"
         );
         assert_eq!(dst, [0xAA; 8]);
+    }
+
+    #[test]
+    fn file_byte_device_vectored_read_preserves_buffers_on_short_read() {
+        let cx = Cx::for_testing();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("short-vectored-read.img");
+        std::fs::write(&path, [1_u8, 2, 3, 4, 5, 6, 7, 8]).expect("seed file");
+        let dev = FileByteDevice::open(&path).expect("device");
+
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .expect("open for truncate")
+            .set_len(4)
+            .expect("truncate after device open");
+
+        let mut first = [0xAA_u8; 3];
+        let mut second = [0xBB_u8; 5];
+        let mut bufs = [IoSliceMut::new(&mut first), IoSliceMut::new(&mut second)];
+        let err = dev
+            .read_vectored_exact_at(&cx, ByteOffset(0), &mut bufs)
+            .expect_err("short backing read should fail without mutating caller iovecs");
+
+        assert!(
+            matches!(err, FfsError::Io(ref io_err)
+                if io_err.kind() == std::io::ErrorKind::UnexpectedEof),
+            "expected short-read UnexpectedEof, got {err:?}"
+        );
+        assert_eq!(first, [0xAA; 3]);
+        assert_eq!(second, [0xBB; 5]);
     }
 
     #[test]
