@@ -8673,6 +8673,53 @@ mod tests {
         ));
     }
 
+    proptest::proptest! {
+        /// verify_extent_csum accepts correct per-sector crc32c and reports the
+        /// first mismatching sector when one is corrupted, across varying sector
+        /// counts. The unit tests only use fixed 2-sector examples.
+        #[test]
+        fn proptest_verify_extent_csum_roundtrip_and_tamper(
+            num_sectors in 1_usize..=8,
+            seed in any::<u64>(),
+            corrupt_sector in 0_usize..8,
+        ) {
+            let sectorsize = 64_usize;
+            let mut data = vec![0_u8; num_sectors * sectorsize];
+            let mut rng = seed;
+            for b in &mut data {
+                rng = rng
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                *b = rng.to_le_bytes()[7];
+            }
+
+            let mut csums = Vec::with_capacity(num_sectors * 4);
+            for s in 0..num_sectors {
+                let crc = ffs_types::crc32c(&data[s * sectorsize..(s + 1) * sectorsize]);
+                csums.extend_from_slice(&crc.to_le_bytes());
+            }
+
+            // Correct csums verify.
+            proptest::prop_assert_eq!(verify_extent_csum(&data, sectorsize, &csums), Ok(()));
+
+            // Corrupting one sector flags exactly that sector (the only, hence
+            // first, mismatch).
+            if corrupt_sector < num_sectors {
+                let mut tampered = data.clone();
+                tampered[corrupt_sector * sectorsize] ^= 0x5A;
+                match verify_extent_csum(&tampered, sectorsize, &csums) {
+                    Err(Ok(m)) => proptest::prop_assert_eq!(m.sector_index, corrupt_sector),
+                    other => proptest::prop_assert!(
+                        false,
+                        "expected mismatch at sector {}, got {:?}",
+                        corrupt_sector,
+                        other
+                    ),
+                }
+            }
+        }
+    }
+
     #[test]
     fn lookup_data_block_csum_finds_block_across_split_items_bd_x3fcu() {
         let sectorsize = 4096_usize;
