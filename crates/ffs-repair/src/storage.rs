@@ -103,22 +103,29 @@ impl RepairGroupLayout {
 
     #[must_use]
     pub fn repair_start_block(self) -> BlockNumber {
+        let end = self.group_end_exclusive();
         BlockNumber(
-            self.group_end_exclusive()
-                - u64::from(REPAIR_DESC_SLOT_COUNT)
-                - u64::from(self.repair_block_count),
+            end.saturating_sub(u64::from(REPAIR_DESC_SLOT_COUNT))
+                .saturating_sub(u64::from(self.repair_block_count)),
         )
     }
 
     #[must_use]
     pub fn validation_start_block(self) -> BlockNumber {
-        BlockNumber(self.repair_start_block().0 - u64::from(self.validation_block_count))
+        BlockNumber(
+            self.repair_start_block()
+                .0
+                .saturating_sub(u64::from(self.validation_block_count)),
+        )
     }
 
     #[must_use]
     pub fn descriptor_blocks(self) -> [BlockNumber; REPAIR_DESC_SLOT_COUNT_USIZE] {
         let end = self.group_end_exclusive();
-        [BlockNumber(end - 2), BlockNumber(end - 1)]
+        [
+            BlockNumber(end.saturating_sub(2)),
+            BlockNumber(end.saturating_sub(1)),
+        ]
     }
 }
 
@@ -1114,6 +1121,25 @@ mod tests {
         assert_eq!(
             layout.descriptor_blocks(),
             [BlockNumber(u64::MAX - 2), BlockNumber(u64::MAX - 1)]
+        );
+    }
+
+    #[test]
+    fn layout_public_field_tail_accessors_saturate_instead_of_underflowing() {
+        let layout = RepairGroupLayout {
+            group: GroupNumber(0),
+            group_start: BlockNumber(0),
+            blocks_per_group: 1,
+            validation_block_count: 4,
+            repair_block_count: 4,
+        };
+
+        assert_eq!(layout.group_end_exclusive(), 1);
+        assert_eq!(layout.repair_start_block(), BlockNumber(0));
+        assert_eq!(layout.validation_start_block(), BlockNumber(0));
+        assert_eq!(
+            layout.descriptor_blocks(),
+            [BlockNumber(0), BlockNumber(0)]
         );
     }
 
