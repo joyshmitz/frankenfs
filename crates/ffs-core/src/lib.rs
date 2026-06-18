@@ -35508,6 +35508,65 @@ mod tests {
         );
     }
 
+    #[test]
+    fn ext4_flags_to_xflags_projects_each_flag_exactly() {
+        use ffs_types::{
+            EXT4_APPEND_FL, EXT4_IMMUTABLE_FL, EXT4_NOATIME_FL, EXT4_NODUMP_FL, EXT4_PROJINHERIT_FL,
+            EXT4_SYNC_FL,
+        };
+
+        // No flags -> 0, and in particular no HASATTR.
+        assert_eq!(ext4_flags_to_xflags(0), 0);
+
+        // Each flag projects to exactly its xflag plus HASATTR.
+        let hasattr = xflags::FS_XFLAG_HASATTR;
+        assert_eq!(
+            ext4_flags_to_xflags(EXT4_IMMUTABLE_FL),
+            xflags::FS_XFLAG_IMMUTABLE | hasattr
+        );
+        assert_eq!(
+            ext4_flags_to_xflags(EXT4_APPEND_FL),
+            xflags::FS_XFLAG_APPEND | hasattr
+        );
+        assert_eq!(
+            ext4_flags_to_xflags(EXT4_SYNC_FL),
+            xflags::FS_XFLAG_SYNC | hasattr
+        );
+        assert_eq!(
+            ext4_flags_to_xflags(EXT4_NOATIME_FL),
+            xflags::FS_XFLAG_NOATIME | hasattr
+        );
+        assert_eq!(
+            ext4_flags_to_xflags(EXT4_NODUMP_FL),
+            xflags::FS_XFLAG_NODUMP | hasattr
+        );
+        assert_eq!(
+            ext4_flags_to_xflags(EXT4_PROJINHERIT_FL),
+            xflags::FS_XFLAG_PROJINHERIT | hasattr
+        );
+
+        // All flags together project to the union plus HASATTR.
+        let all = EXT4_IMMUTABLE_FL
+            | EXT4_APPEND_FL
+            | EXT4_SYNC_FL
+            | EXT4_NOATIME_FL
+            | EXT4_NODUMP_FL
+            | EXT4_PROJINHERIT_FL;
+        assert_eq!(
+            ext4_flags_to_xflags(all),
+            xflags::FS_XFLAG_IMMUTABLE
+                | xflags::FS_XFLAG_APPEND
+                | xflags::FS_XFLAG_SYNC
+                | xflags::FS_XFLAG_NOATIME
+                | xflags::FS_XFLAG_NODUMP
+                | xflags::FS_XFLAG_PROJINHERIT
+                | hasattr
+        );
+
+        // An ext4 flag with no xflag mapping projects to nothing.
+        assert_eq!(ext4_flags_to_xflags(ffs_types::EXT4_EXTENTS_FL), 0);
+    }
+
     // ── Generation lifecycle tests ─────────────────────────────────────
 
     #[test]
