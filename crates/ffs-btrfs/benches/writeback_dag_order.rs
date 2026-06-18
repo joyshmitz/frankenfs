@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
-//! A/B benchmark for btrfs writeback DAG scheduling (bd-f759f).
+//! A/B benchmark for btrfs writeback DAG scheduling and construction
+//! (`bd-f759f`, `bd-xmh5g.400`).
 //!
 //! `WriteDependencyDag::reverse_topological_order` runs before every metadata
 //! writeback and during crash-consistency enumeration. The flush order is
@@ -8,19 +9,28 @@
 //! disconnected components; the visited set only answers membership. This
 //! compares the old `BTreeSet` membership model against the production
 //! HashSet-backed scheduler while asserting exact order and WB-I1 prefix
-//! equivalence.
+//! equivalence. The construction group compares the old child-vector
+//! double-clone model against the moved-child production shape.
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use ffs_btrfs::writeback::{WbI1Oracle, WriteDependencyDag};
-use ffs_btrfs::{BtrfsBTree, BtrfsKey, InMemoryCowBtrfsTree};
-use std::collections::BTreeSet;
+use ffs_btrfs::{BtrfsBTree, BtrfsCowNode, BtrfsKey, BtrfsMutationError, InMemoryCowBtrfsTree};
+use std::collections::{BTreeMap, BTreeSet};
 use std::hint::black_box;
 
 const ITEMS: u64 = 2048;
 const MAX_ITEMS: usize = 8;
 const GENERATION: u64 = 123;
 
-fn build_dag() -> WriteDependencyDag {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BenchDagNode {
+    level: u8,
+    children: Vec<u64>,
+}
+
+type BenchDag = BTreeMap<u64, BenchDagNode>;
+
+fn build_tree() -> InMemoryCowBtrfsTree {
     let mut tree = InMemoryCowBtrfsTree::new(MAX_ITEMS).expect("create tree");
     for i in 0..ITEMS {
         let key = BtrfsKey {
@@ -30,7 +40,121 @@ fn build_dag() -> WriteDependencyDag {
         };
         tree.insert(key, &i.to_le_bytes()).expect("insert");
     }
+    tree
+}
+
+fn build_dag() -> WriteDependencyDag {
+    let tree = build_tree();
     WriteDependencyDag::from_cow_tree(&tree, GENERATION).expect("build dag")
+}
+
+fn collect_double_clone_model(
+    tree: &InMemoryCowBtrfsTree,
+    block: u64,
+    nodes: &mut BenchDag,
+    level: u8,
+) -> Result<(), BtrfsMutationError> {
+    if nodes.contains_key(&block) {
+        return Ok(());
+    }
+
+    let node = tree.node_snapshot(block)?;
+    let (node_level, children) = match &node {
+        BtrfsCowNode::Leaf { .. } => (0, Vec::new()),
+        BtrfsCowNode::Internal { children, .. } => (level, children.clone()),
+    };
+
+    nodes.insert(
+        block,
+        BenchDagNode {
+            level: node_level,
+            children: children.clone(),
+        },
+    );
+
+    let child_level = level.saturating_sub(1);
+    for child in children {
+        collect_double_clone_model(tree, child, nodes, child_level)?;
+    }
+
+    Ok(())
+}
+
+fn collect_single_clone_model(
+    tree: &InMemoryCowBtrfsTree,
+    block: u64,
+    nodes: &mut BenchDag,
+    level: u8,
+) -> Result<(), BtrfsMutationError> {
+    if nodes.contains_key(&block) {
+        return Ok(());
+    }
+
+    let node = tree.node_snapshot(block)?;
+    let (node_level, children) = match node {
+        BtrfsCowNode::Leaf { .. } => (0, Vec::new()),
+        BtrfsCowNode::Internal { children, .. } => (level, children),
+    };
+    let recursion_children = children.clone();
+
+    nodes.insert(
+        block,
+        BenchDagNode {
+            level: node_level,
+            children,
+        },
+    );
+
+    let child_level = level.saturating_sub(1);
+    for child in recursion_children {
+        collect_single_clone_model(tree, child, nodes, child_level)?;
+    }
+
+    Ok(())
+}
+
+fn double_clone_model(tree: &InMemoryCowBtrfsTree) -> BenchDag {
+    let mut nodes = BTreeMap::new();
+    collect_double_clone_model(tree, tree.root_block(), &mut nodes, tree.root_level())
+        .expect("old double-clone model");
+    nodes
+}
+
+fn single_clone_model(tree: &InMemoryCowBtrfsTree) -> BenchDag {
+    let mut nodes = BTreeMap::new();
+    collect_single_clone_model(tree, tree.root_block(), &mut nodes, tree.root_level())
+        .expect("single-clone model");
+    nodes
+}
+
+fn dag_shape_digest(dag: &BenchDag) -> u64 {
+    dag.iter().fold(0xcbf2_9ce4_8422_2325_u64, |acc, (block, node)| {
+        let mut digest = acc
+            .wrapping_mul(0x100_0000_01b3)
+            .wrapping_add(*block)
+            .wrapping_add(u64::from(node.level));
+        for child in &node.children {
+            digest = digest.wrapping_mul(0x100_0000_01b3).wrapping_add(*child);
+        }
+        digest
+    })
+}
+
+fn assert_build_isomorphic(tree: &InMemoryCowBtrfsTree) {
+    let old = double_clone_model(tree);
+    let new = single_clone_model(tree);
+    assert_eq!(old, new, "single-clone model changed DAG shape");
+
+    let production = WriteDependencyDag::from_cow_tree(tree, GENERATION).expect("production dag");
+    assert_eq!(production.node_count(), old.len(), "production node count changed");
+    for (block, old_node) in &old {
+        let production_node = production.get(*block).expect("production node");
+        assert_eq!(production_node.level, old_node.level, "node level changed");
+        assert_eq!(
+            production_node.children, old_node.children,
+            "node children changed"
+        );
+    }
 }
 
 fn btree_push_postorder(
@@ -106,5 +230,32 @@ fn bench_writeback_dag_order(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_writeback_dag_order);
+fn bench_writeback_dag_build(c: &mut Criterion) {
+    let tree = build_tree();
+    assert_build_isomorphic(&tree);
+
+    let mut group = c.benchmark_group("writeback_dag_build_child_vector_ab");
+    group.bench_function("old_double_clone_model", |b| {
+        b.iter(|| {
+            let dag = double_clone_model(black_box(&tree));
+            black_box(dag_shape_digest(&dag))
+        });
+    });
+    group.bench_function("single_clone_model", |b| {
+        b.iter(|| {
+            let dag = single_clone_model(black_box(&tree));
+            black_box(dag_shape_digest(&dag))
+        });
+    });
+    group.bench_function("production_from_cow_tree", |b| {
+        b.iter(|| {
+            let dag = WriteDependencyDag::from_cow_tree(black_box(&tree), GENERATION)
+                .expect("build production dag");
+            black_box(dag.node_count())
+        });
+    });
+    group.finish();
+}
+
+criterion_group!(benches, bench_writeback_dag_order, bench_writeback_dag_build);
 criterion_main!(benches);

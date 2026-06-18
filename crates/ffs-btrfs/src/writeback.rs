@@ -91,11 +91,14 @@ impl WriteDependencyDag {
 
         let node = tree.node_snapshot(block)?;
         // Leaves are always level 0; internal nodes carry the depth passed down
-        // from the root (root = root_level, each child one less).
-        let (node_level, children) = match &node {
+        // from the root (root = root_level, each child one less). The snapshot
+        // is owned, so move the child vector into the DAG node instead of
+        // cloning it twice while building the writeback plan.
+        let (node_level, children) = match node {
             BtrfsCowNode::Leaf { .. } => (0, Vec::new()),
-            BtrfsCowNode::Internal { children, .. } => (level, children.clone()),
+            BtrfsCowNode::Internal { children, .. } => (level, children),
         };
+        let recursion_children = children.clone();
 
         nodes.insert(
             block,
@@ -103,14 +106,14 @@ impl WriteDependencyDag {
                 block,
                 level: node_level,
                 generation,
-                children: children.clone(),
+                children,
                 durable: false,
             },
         );
 
         // Recursively collect children one level shallower.
         let child_level = level.saturating_sub(1);
-        for child in children {
+        for child in recursion_children {
             Self::collect_nodes(tree, child, nodes, generation, child_level)?;
         }
 
@@ -1340,6 +1343,89 @@ mod tests {
         }
 
         result
+    }
+
+    fn writeback_dag_double_clone_model(
+        tree: &InMemoryCowBtrfsTree,
+        generation: u64,
+    ) -> Result<WriteDependencyDag, BtrfsMutationError> {
+        fn collect_old(
+            tree: &InMemoryCowBtrfsTree,
+            block: u64,
+            nodes: &mut BTreeMap<u64, DagNode>,
+            generation: u64,
+            level: u8,
+        ) -> Result<(), BtrfsMutationError> {
+            if nodes.contains_key(&block) {
+                return Ok(());
+            }
+
+            let node = tree.node_snapshot(block)?;
+            let (node_level, children) = match &node {
+                BtrfsCowNode::Leaf { .. } => (0, Vec::new()),
+                BtrfsCowNode::Internal { children, .. } => (level, children.clone()),
+            };
+
+            nodes.insert(
+                block,
+                DagNode {
+                    block,
+                    level: node_level,
+                    generation,
+                    children: children.clone(),
+                    durable: false,
+                },
+            );
+
+            let child_level = level.saturating_sub(1);
+            for child in children {
+                collect_old(tree, child, nodes, generation, child_level)?;
+            }
+
+            Ok(())
+        }
+
+        let mut nodes = BTreeMap::new();
+        let root = tree.root_block();
+        collect_old(tree, root, &mut nodes, generation, tree.root_level())?;
+        Ok(WriteDependencyDag {
+            nodes,
+            root,
+            generation,
+        })
+    }
+
+    #[test]
+    fn dag_build_single_clone_matches_double_clone_model() {
+        let mut tree = InMemoryCowBtrfsTree::new(8).expect("create tree");
+        for i in 0..512_u64 {
+            let key = BtrfsKey {
+                objectid: i,
+                item_type: 0x84,
+                offset: i * 4096,
+            };
+            tree.insert(key, &i.to_le_bytes()).expect("insert");
+        }
+
+        let old = writeback_dag_double_clone_model(&tree, 100).expect("old model");
+        let new = WriteDependencyDag::from_cow_tree(&tree, 100).expect("production dag");
+
+        assert_eq!(old.root(), new.root(), "root block changed");
+        assert_eq!(old.generation(), new.generation(), "generation changed");
+        assert_eq!(old.nodes, new.nodes, "DAG nodes changed");
+        assert_eq!(
+            reverse_topological_order_btree_model(&old),
+            new.reverse_topological_order(),
+            "child-vector move changed deterministic flush order"
+        );
+
+        let order = new.reverse_topological_order();
+        for end in 0..=order.len() {
+            let durable = order[..end].iter().copied().collect();
+            WbI1Oracle::new(durable)
+                .check(&new)
+                .expect("every moved-child-vector flush prefix must satisfy WB-I1");
+        }
     }
 
     #[test]
