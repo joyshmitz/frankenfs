@@ -1388,6 +1388,55 @@ mod tests {
         assert_eq!(groups[0].free_inodes, free_before + 1);
     }
 
+    #[test]
+    fn delete_inode_preserves_generation() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let geo = make_geometry();
+        let mut groups = make_groups(&geo);
+
+        let (ino, mut inode) = create_inode(
+            &cx,
+            &dev,
+            &geo,
+            &mut groups,
+            0o100_644,
+            0,
+            0,
+            GroupNumber(0),
+            0,
+            1_700_000_000,
+            0,
+            &mock_pctx(),
+        )
+        .unwrap();
+
+        // ext4 preserves the inode generation across delete (NFS file-handle
+        // staleness detection and undelete safety); only inode REUSE bumps it.
+        inode.generation = 0xDEAD_BEEF;
+
+        delete_inode(
+            &cx,
+            &dev,
+            &geo,
+            &mut groups,
+            ino,
+            &mut inode,
+            0,
+            1_700_000_001,
+            &mock_pctx(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            inode.generation, 0xDEAD_BEEF,
+            "delete must preserve the inode generation"
+        );
+        // Sanity: the delete actually occurred.
+        assert_eq!(inode.links_count, 0);
+        assert_eq!(inode.dtime, 1_700_000_001);
+    }
+
     /// truncate_indirect_blocks must also free a DOUBLE-indirect subtree
     /// (i_block[13]): the data block, the intermediate single-indirect block,
     /// and the double-indirect root, zeroing the slot. The single-indirect
