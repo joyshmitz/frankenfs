@@ -67010,6 +67010,41 @@ mod tests {
     }
 
     #[test]
+    fn btrfs_directory_is_descendant_of_walks_multiple_levels() {
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+        let root = InodeNumber(1);
+        let mk = |parent: InodeNumber, name: &str| {
+            ops.mkdir(
+                &cx,
+                &mut RequestScope::empty(),
+                parent,
+                OsStr::new(name),
+                0o755,
+                0,
+                0,
+            )
+            .expect("mkdir")
+        };
+        let a = mk(root, "a");
+        let mid = mk(a.ino, "mid");
+        let deep = mk(mid.ino, "deep");
+        let other = mk(root, "other");
+
+        let alloc = fs.btrfs_alloc_state.as_ref().unwrap().read();
+        // deep -> mid -> a: a descendant across multiple parent levels.
+        assert!(OpenFs::btrfs_directory_is_descendant_of(&alloc, deep.ino.0, a.ino.0).unwrap());
+        // mid -> a: one level.
+        assert!(OpenFs::btrfs_directory_is_descendant_of(&alloc, mid.ino.0, a.ino.0).unwrap());
+        // The inverse direction is false: a is not under deep.
+        assert!(!OpenFs::btrfs_directory_is_descendant_of(&alloc, a.ino.0, deep.ino.0).unwrap());
+        // A sibling subtree is not a descendant.
+        assert!(!OpenFs::btrfs_directory_is_descendant_of(&alloc, other.ino.0, a.ino.0).unwrap());
+        // A directory is reported as a descendant of itself (rename rejects mv a a).
+        assert!(OpenFs::btrfs_directory_is_descendant_of(&alloc, a.ino.0, a.ino.0).unwrap());
+    }
+
+    #[test]
     fn btrfs_rename2_exchange_directory_under_its_own_descendant_returns_einval() {
         let (fs, cx) = open_writable_btrfs();
         let ops: &dyn FsOps = &fs;
