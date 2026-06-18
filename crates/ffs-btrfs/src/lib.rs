@@ -14639,6 +14639,30 @@ mod tests {
     }
 
     #[test]
+    fn free_extent_rejects_unallocated_extent_without_side_effects() {
+        let mut alloc = BtrfsExtentAllocator::new(1).expect("alloc");
+        alloc.add_block_group(0x1_0000, make_data_bg(0x1_0000, 0x10_0000));
+
+        // Seed one real allocation so the block group has nonzero used_bytes.
+        let _seed = alloc.alloc_data(4096).expect("seed alloc");
+        let used_before = alloc.block_group(0x1_0000).expect("bg").used_bytes;
+        let refs_before = alloc.delayed_ref_count();
+
+        // Freeing an extent that was never allocated (no extent item at this
+        // bytenr/len) must error before touching any accounting.
+        let result = alloc.free_extent(0x5_0000, 4096, false);
+        assert_eq!(result, Err(BtrfsMutationError::KeyNotFound));
+
+        let bg = alloc.block_group(0x1_0000).expect("bg");
+        assert_eq!(bg.used_bytes, used_before, "used_bytes must be unchanged");
+        assert_eq!(
+            alloc.delayed_ref_count(),
+            refs_before,
+            "no delayed ref must be queued"
+        );
+    }
+
+    #[test]
     fn alloc_fills_group_sequentially() {
         let mut alloc = BtrfsExtentAllocator::new(1).expect("alloc");
         alloc.add_block_group(0x1_0000, make_data_bg(0x1_0000, 0x10_0000));
