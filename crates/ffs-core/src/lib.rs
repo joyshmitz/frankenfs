@@ -74113,6 +74113,40 @@ mod tests {
     }
 
     #[test]
+    fn btrfs_inode_to_attr_maps_each_timestamp_field_distinctly() {
+        let (fs, cx) = open_writable_btrfs();
+        let parent = InodeNumber(1);
+        let created = fs
+            .create(&cx, parent, OsStr::new("t.bin"), 0o644, 0, 0)
+            .unwrap();
+        let inode = {
+            let alloc_mutex = fs.btrfs_alloc_state.as_ref().unwrap();
+            let alloc = alloc_mutex.read();
+            let mut inode = fs
+                .btrfs_read_inode_from_tree(&alloc, created.ino.0)
+                .expect("read inode");
+            // Distinct per-field seconds so a swap (incl. otime->crtime) fails.
+            inode.atime_sec = 1_000;
+            inode.atime_nsec = 0;
+            inode.mtime_sec = 2_000;
+            inode.mtime_nsec = 0;
+            inode.ctime_sec = 3_000;
+            inode.ctime_nsec = 0;
+            inode.otime_sec = 4_000;
+            inode.otime_nsec = 0;
+            inode
+        };
+        let attr = fs.btrfs_inode_to_attr(created.ino.0, &inode);
+        let secs = |t: std::time::SystemTime| {
+            t.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()
+        };
+        assert_eq!(secs(attr.atime), 1_000, "atime <- atime_sec");
+        assert_eq!(secs(attr.mtime), 2_000, "mtime <- mtime_sec");
+        assert_eq!(secs(attr.ctime), 3_000, "ctime <- ctime_sec");
+        assert_eq!(secs(attr.crtime), 4_000, "crtime <- otime_sec");
+    }
+
+    #[test]
     fn btrfs_inode_to_attr_saturates_out_of_range_timestamp_without_panic() {
         let (fs, cx) = open_writable_btrfs();
         let parent = InodeNumber(1);
