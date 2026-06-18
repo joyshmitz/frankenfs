@@ -9882,6 +9882,36 @@ mod tests {
         assert!(write_dx_root(&mut tiny, 1, 0, 1, &entries).is_err());
     }
 
+    #[test]
+    fn write_dx_node_round_trips_with_parse() {
+        let entries = vec![
+            Ext4DxEntry {
+                hash: 0,
+                block: 0x1111_1111,
+            }, // entry 0 (implicit hash 0)
+            Ext4DxEntry {
+                hash: 0x2222_2222,
+                block: 0x3333_3333,
+            },
+            Ext4DxEntry {
+                hash: 0x4444_4444,
+                block: 0x5555_5555,
+            },
+        ];
+        let mut block = vec![0_u8; 0x40];
+        write_dx_node(&mut block, 0x07, &entries).expect("write_dx_node");
+
+        // Inverse round-trip recovers exactly the entries we wrote.
+        let parsed =
+            parse_dx_entries(&block, DX_NODE_COUNT_OFFSET).expect("parse_dx_entries round-trip");
+        assert_eq!(parsed, entries);
+
+        // Reject branches: empty entries and a count exceeding the limit.
+        let mut tiny = vec![0_u8; 0x40];
+        assert!(write_dx_node(&mut tiny, 0x07, &[]).is_err());
+        assert!(write_dx_node(&mut tiny, 1, &entries).is_err());
+    }
+
     /// bd-gauub (write-half STEP 2): leaf-split point selection invariants.
     #[test]
     fn choose_htree_leaf_split_invariants() {
