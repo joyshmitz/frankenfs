@@ -9056,7 +9056,7 @@ impl OpenFs {
                     }
                 }
 
-                let block_totals = self.with_block_bytes(cx, scope, block_num, |block_data| {
+                self.with_block_bytes(cx, scope, block_num, |block_data| {
                     let mut blocks_free = 0_u64;
                     let mut files_free = 0_u64;
                     for group_idx in first_group..last_group {
@@ -9100,8 +9100,7 @@ impl OpenFs {
                         }
                     }
                     Ok((blocks_free, files_free))
-                })?;
-                block_totals
+                })?
             })
             .collect();
 
@@ -11614,17 +11613,12 @@ impl OpenFs {
                 if start >= value_len {
                     continue;
                 }
-                let phys = match ext.physical_start.checked_add(i) {
-                    Some(phys) => phys,
-                    None => {
-                        terminal_error = Some(FfsError::Corruption {
-                            block: 0,
-                            detail: format!(
-                                "EA inode {value_inum} extent physical offset overflow"
-                            ),
-                        });
-                        break 'extent_scan;
-                    }
+                let Some(phys) = ext.physical_start.checked_add(i) else {
+                    terminal_error = Some(FfsError::Corruption {
+                        block: 0,
+                        detail: format!("EA inode {value_inum} extent physical offset overflow"),
+                    });
+                    break 'extent_scan;
                 };
                 let end = (start + block_size).min(value_len);
                 jobs.push(EaInodeReadJob {
@@ -50070,6 +50064,74 @@ mod tests {
             linear_lookup_name_reference(&fs, &cx, &scope, &htree_inode, b"missing.txt")
                 .expect("missing linear lookup");
         assert_eq!(missing, linear_missing);
+    }
+
+    /// A non-htree (no `dir_index`) directory large enough to span several
+    /// directory blocks forces EVERY lookup through the parallel linear scan in
+    /// `lookup_name_with_scope` (bd-xmh5g.194), including positive matches in
+    /// blocks past the first. The htree golden test never exercises that case
+    /// because present names resolve via the index, not the linear fallback.
+    /// Each present and absent name must agree byte-for-byte with the
+    /// independent serial `linear_lookup_name_reference` oracle (bd-xmh5g.200).
+    #[test]
+    fn ext4_parallel_linear_lookup_matches_serial_multiblock_bd_xmh5g_200() {
+        let Some((fs, _dev, _tmp, _image)) =
+            open_ext4_mke2fs_features(16, "extent,fast_commit,^metadata_csum,^dir_index")
+        else {
+            return; // e2fsprogs unavailable; skip.
+        };
+        let cx = Cx::for_testing();
+        let scope = RequestScope::empty();
+
+        // Enough entries to span several 1 KiB directory blocks.
+        let names: Vec<String> = (0..180).map(|i| format!("entry_{i:04}.dat")).collect();
+        for name in &names {
+            fs.create(&cx, InodeNumber(2), OsStr::new(name), 0o644, 0, 0)
+                .unwrap_or_else(|err| panic!("create {name}: {err}"));
+        }
+
+        // Re-read the grown root inode and prove the path under test: a
+        // multi-block, non-htree directory (every lookup is a linear scan).
+        let dir_inode = fs.read_inode(&cx, InodeNumber(2)).expect("read root inode");
+        assert!(
+            !dir_inode.has_htree_index(),
+            "test needs a linear (non-htree) directory to exercise the parallel scan"
+        );
+        let bs = u64::from(fs.block_size());
+        let num_blocks = dir_logical_block_count(dir_inode.size, bs).expect("dir block count");
+        assert!(
+            num_blocks > 1,
+            "directory must span multiple blocks (got {num_blocks})"
+        );
+
+        // Every present name must be found by the parallel scan and agree with
+        // the serial reference; matches land in blocks past the first.
+        for name in &names {
+            let parallel = fs
+                .lookup_name_with_scope(&cx, &scope, &dir_inode, name.as_bytes())
+                .unwrap_or_else(|err| panic!("parallel lookup {name}: {err}"));
+            let serial =
+                linear_lookup_name_reference(&fs, &cx, &scope, &dir_inode, name.as_bytes())
+                    .unwrap_or_else(|err| panic!("serial lookup {name}: {err}"));
+            assert!(parallel.is_some(), "present name {name} must be found");
+            assert_eq!(parallel, serial, "parallel vs serial mismatch for {name}");
+        }
+
+        // Absent names: the parallel scan reads every block (negative lookup)
+        // and must return None, matching the serial reference.
+        for absent in ["entry_9999.dat", "nope", "entry_0001.daX"] {
+            let parallel = fs
+                .lookup_name_with_scope(&cx, &scope, &dir_inode, absent.as_bytes())
+                .unwrap_or_else(|err| panic!("parallel absent lookup {absent}: {err}"));
+            let serial =
+                linear_lookup_name_reference(&fs, &cx, &scope, &dir_inode, absent.as_bytes())
+                    .unwrap_or_else(|err| panic!("serial absent lookup {absent}: {err}"));
+            assert_eq!(parallel, None, "absent name {absent} must not be found");
+            assert_eq!(
+                parallel, serial,
+                "parallel vs serial mismatch for absent {absent}"
+            );
+        }
     }
 
     #[test]
