@@ -493,7 +493,8 @@ pub fn repair_global(
     block_size: usize,
 ) -> RepairResult {
     let p = config.global_parity_count as usize;
-    if !config_supports_global_repair(config)
+    if block_size == 0
+        || !config_supports_global_repair(config)
         || availability.data.len() != config.data_blocks as usize
         || availability
             .data
@@ -955,6 +956,22 @@ mod tests {
 
         let result = repair_global(&cfg, &availability, 32);
         assert!(!result.success);
+    }
+
+    #[test]
+    fn global_repair_rejects_zero_block_size_without_empty_recovery() {
+        let cfg = LrcConfig::new(4, 2, 1);
+        let availability = BlockAvailability {
+            data: vec![None, Some(Vec::new()), Some(Vec::new()), Some(Vec::new())],
+            local_parity: vec![],
+            global_parity: vec![Some(Vec::new())],
+        };
+
+        let result = repair_global(&cfg, &availability, 0);
+
+        assert!(!result.success);
+        assert_eq!(result.blocks_repaired, 0);
+        assert!(result.recovered_data.is_empty());
     }
 
     #[test]
