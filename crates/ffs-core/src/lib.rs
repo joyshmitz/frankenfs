@@ -41009,6 +41009,36 @@ mod tests {
     }
 
     #[test]
+    fn move_ext_rejects_same_inode_self_move() {
+        let Some((fs, _tmp)) = open_writable_ext4_mkfs(64) else {
+            eprintln!("ext4 image helper not available, skipping");
+            return;
+        };
+        let cx = Cx::for_testing();
+        let source = fs
+            .create(
+                &cx,
+                InodeNumber(2),
+                OsStr::new("self-move.bin"),
+                0o644,
+                0,
+                0,
+            )
+            .expect("create source inode");
+        fs.write(&cx, source.ino, 0, &[0x53; 8192])
+            .expect("seed source data");
+
+        // Register the donor fd to the SAME inode as the source.
+        fs.register_ioctl_fd_for_testing(7, source.ino)
+            .expect("register donor fd");
+
+        // A file may not exchange extents with itself.
+        let err = ext4_move_ext_request(&fs, &cx, source.ino, 7, 0, 1, 1)
+            .expect_err("same-inode move_ext should fail");
+        assert_eq!(err.to_errno(), libc::EINVAL);
+    }
+
+    #[test]
     fn move_ext_exchanges_requested_ext4_extent_range() {
         let Some((fs, _tmp)) = open_writable_ext4_mkfs(64) else {
             eprintln!("mkfs.ext4 not available, skipping");
