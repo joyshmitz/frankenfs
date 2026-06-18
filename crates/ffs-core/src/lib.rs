@@ -57405,6 +57405,36 @@ mod tests {
     }
 
     #[test]
+    fn ext4_fallocate_rejects_invalid_mode_combinations() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let attr = fs
+            .create(&cx, root, OsStr::new("falloc-mode.bin"), 0o644, 0, 0)
+            .expect("create");
+        fs.write(&cx, attr.ino, 0, &[0xAB_u8; 8192]).expect("write");
+
+        // PUNCH_HOLE and ZERO_RANGE are mutually exclusive -> EINVAL.
+        let punch_zero =
+            libc::FALLOC_FL_PUNCH_HOLE | libc::FALLOC_FL_ZERO_RANGE | libc::FALLOC_FL_KEEP_SIZE;
+        let err = fs
+            .fallocate(&cx, attr.ino, 0, 4096, punch_zero)
+            .unwrap_err();
+        assert_eq!(err.to_errno(), libc::EINVAL);
+
+        // PUNCH_HOLE requires KEEP_SIZE -> EINVAL without it.
+        let err2 = fs
+            .fallocate(&cx, attr.ino, 0, 4096, libc::FALLOC_FL_PUNCH_HOLE)
+            .unwrap_err();
+        assert_eq!(err2.to_errno(), libc::EINVAL);
+
+        // An unknown / unsupported mode bit is rejected.
+        assert!(fs.fallocate(&cx, attr.ino, 0, 4096, 0x4000).is_err());
+    }
+
+    #[test]
     fn write_fallocate_punch_hole_zeroes_data() {
         let Some(fs) = open_writable_ext4() else {
             return;
