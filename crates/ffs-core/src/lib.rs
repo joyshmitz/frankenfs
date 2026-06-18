@@ -35567,6 +35567,31 @@ mod tests {
         assert_eq!(ext4_flags_to_xflags(ffs_types::EXT4_EXTENTS_FL), 0);
     }
 
+    #[test]
+    fn xflags_to_ext4_flags_validates_preserves_and_clears() {
+        use ffs_types::{EXT4_APPEND_FL, EXT4_EXTENTS_FL, EXT4_IMMUTABLE_FL};
+
+        // The output-only HASATTR bit may not be set by userspace -> EINVAL.
+        let err = xflags_to_ext4_flags(xflags::FS_XFLAG_HASATTR, 0).unwrap_err();
+        assert_eq!(err.to_errno(), libc::EINVAL);
+
+        // An xflag ext4 does not support (NODEFRAG) -> EOPNOTSUPP.
+        let err = xflags_to_ext4_flags(xflags::FS_XFLAG_NODEFRAG, 0).unwrap_err();
+        assert_eq!(err.to_errno(), libc::EOPNOTSUPP);
+
+        // Non-user-settable current flags (EXTENTS) are preserved when applying
+        // xflags — clobbering them would make the extent tree uninterpretable.
+        let result = xflags_to_ext4_flags(xflags::FS_XFLAG_IMMUTABLE, EXT4_EXTENTS_FL).unwrap();
+        assert_eq!(result, EXT4_EXTENTS_FL | EXT4_IMMUTABLE_FL);
+
+        // A user-settable flag (APPEND) present in current_flags but absent from
+        // the new xflags is cleared, while EXTENTS is still preserved.
+        let result =
+            xflags_to_ext4_flags(xflags::FS_XFLAG_IMMUTABLE, EXT4_EXTENTS_FL | EXT4_APPEND_FL)
+                .unwrap();
+        assert_eq!(result, EXT4_EXTENTS_FL | EXT4_IMMUTABLE_FL);
+    }
+
     // ── Generation lifecycle tests ─────────────────────────────────────
 
     #[test]
