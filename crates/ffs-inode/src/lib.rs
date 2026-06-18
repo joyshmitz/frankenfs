@@ -1462,6 +1462,89 @@ mod tests {
         }
     }
 
+    /// truncate_indirect_blocks PARTIAL path: when the cutoff falls inside a
+    /// single-indirect block, the blocks below the cutoff are kept, the blocks
+    /// at/after it are freed, and the surviving single-indirect block is
+    /// rewritten with the freed slots zeroed (the dirty-but-not-empty branch of
+    /// free_indirect_subtree_range) — i_block[12] stays pointed at the root
+    /// (bd-xmh5g.218).
+    #[test]
+    fn truncate_indirect_blocks_partial_single_indirect_keeps_survivors() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let geo = make_geometry();
+        let mut groups = make_groups(&geo);
+        groups[0].block_bitmap_block = BlockNumber(10);
+
+        // Single-indirect root 2500 with data at logical 12/13/14 -> 2400/2401/2402.
+        let mut bitmap = vec![0u8; 4096];
+        for &b in &[2500usize, 2400, 2401, 2402] {
+            bitmap[b / 8] |= 1 << (b % 8);
+        }
+        dev.write_block(&cx, BlockNumber(10), &bitmap).unwrap();
+        groups[0].free_blocks = geo.blocks_per_group - 4;
+
+        let mut sind = vec![0u8; 4096];
+        sind[0..4].copy_from_slice(&2400u32.to_le_bytes()); // logical 12
+        sind[4..8].copy_from_slice(&2401u32.to_le_bytes()); // logical 13
+        sind[8..12].copy_from_slice(&2402u32.to_le_bytes()); // logical 14
+        dev.write_block(&cx, BlockNumber(2500), &sind).unwrap();
+
+        let mut inode = representative_inode();
+        inode.flags = 0;
+        inode.mode = 0o100_644;
+        inode.blocks = 4 * (4096 / 512);
+        inode.size = 15 * 4096;
+        let mut eb = vec![0u8; 60];
+        eb[48..52].copy_from_slice(&2500u32.to_le_bytes()); // i_block[12] -> single-indirect root
+        inode.extent_bytes = eb.into();
+
+        // cutoff 13: keep logical 12, free logical 13 and 14.
+        let freed = truncate_indirect_blocks(
+            &cx,
+            &dev,
+            &geo,
+            &mut groups,
+            &mut inode,
+            13,
+            &mock_pctx(),
+        )
+        .unwrap();
+
+        assert_eq!(freed, 2, "frees logical 13 and 14 only");
+        assert_eq!(
+            &inode.extent_bytes[48..52],
+            &2500u32.to_le_bytes(),
+            "surviving single-indirect root must stay referenced"
+        );
+
+        let bm_buf = dev.read_block(&cx, BlockNumber(10)).unwrap();
+        let bm_after = bm_buf.as_slice();
+        // Survivors stay allocated.
+        for &b in &[2500usize, 2400] {
+            assert_ne!(
+                bm_after[b / 8] & (1 << (b % 8)),
+                0,
+                "survivor block {b} must stay allocated"
+            );
+        }
+        // Freed data blocks are cleared.
+        for &b in &[2401usize, 2402] {
+            assert_eq!(
+                bm_after[b / 8] & (1 << (b % 8)),
+                0,
+                "block {b} must be freed in the bitmap"
+            );
+        }
+        // The surviving single-indirect block has its freed slots zeroed but
+        // keeps the kept-data pointer.
+        let sind_buf = dev.read_block(&cx, BlockNumber(2500)).unwrap();
+        let sind_after = sind_buf.as_slice();
+        assert_eq!(&sind_after[0..4], &2400u32.to_le_bytes(), "logical 12 kept");
+        assert_eq!(&sind_after[4..8], &[0, 0, 0, 0], "logical 13 slot zeroed");
+        assert_eq!(&sind_after[8..12], &[0, 0, 0, 0], "logical 14 slot zeroed");
+    }
+
     /// truncate_indirect_blocks must free a TRIPLE-indirect subtree
     /// (i_block[14]): data block, single-indirect, double-indirect, and the
     /// triple-indirect root, zeroing the slot. Exercises the deepest level-3
