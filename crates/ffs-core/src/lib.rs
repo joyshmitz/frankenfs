@@ -55691,6 +55691,12 @@ mod tests {
         assert!(OpenFs::validate_single_path_component(b"..").is_err());
         assert!(OpenFs::validate_single_path_component(b"a\0b").is_err());
         assert!(OpenFs::validate_single_path_component(&[b'x'; 256]).is_err());
+        // A component containing the path separator '/' is rejected — the guard
+        // that stops a single component from spanning directories (path traversal),
+        // whether the slash is embedded, leading, or trailing.
+        assert!(OpenFs::validate_single_path_component(b"a/b").is_err());
+        assert!(OpenFs::validate_single_path_component(b"/etc").is_err());
+        assert!(OpenFs::validate_single_path_component(b"sub/").is_err());
     }
 
     #[test]
