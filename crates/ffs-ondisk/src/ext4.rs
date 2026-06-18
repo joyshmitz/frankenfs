@@ -18533,6 +18533,19 @@ mod tests {
             prop_assert!(result.is_err(), "buffer shorter than inode_size should fail");
         }
 
+        /// verify_inode_checksum also rejects a buffer shorter than the common
+        /// 256-byte inode size; short_rejects above only covers 128 and no_panic
+        /// never asserts the reject for 256.
+        #[test]
+        fn ext4_proptest_verify_inode_checksum_short_rejects_256(
+            raw_inode in proptest::collection::vec(any::<u8>(), 0..=255),
+            csum_seed in any::<u32>(),
+            ino in any::<u32>(),
+        ) {
+            let result = verify_inode_checksum(&raw_inode, csum_seed, ino, 256);
+            prop_assert!(result.is_err(), "buffer shorter than 256 should fail for inode_size 256");
+        }
+
         /// bd-0g4j6 — Determinism MR for verify_inode_checksum.
         /// Verifier runs an independent ext4_chksum chain (per-inode
         /// seed, lo+hi extraction, extra_isize-conditional branches).
