@@ -73047,6 +73047,33 @@ mod tests {
     }
 
     #[test]
+    fn btrfs_inode_to_attr_preserves_special_perm_bits_and_rounds_blocks() {
+        let (fs, cx) = open_writable_btrfs();
+        let parent = InodeNumber(1);
+        let created = fs
+            .create(&cx, parent, OsStr::new("f.bin"), 0o644, 0, 0)
+            .unwrap();
+
+        // Read the inode, set a setuid mode and a non-512-aligned nbytes.
+        let inode = {
+            let alloc_mutex = fs.btrfs_alloc_state.as_ref().unwrap();
+            let alloc = alloc_mutex.read();
+            let mut inode = fs
+                .btrfs_read_inode_from_tree(&alloc, created.ino.0)
+                .expect("read inode");
+            inode.mode = 0o104_755; // S_IFREG | setuid 0o4755
+            inode.nbytes = 513; // not a multiple of 512
+            inode
+        };
+
+        let attr = fs.btrfs_inode_to_attr(created.ino.0, &inode);
+        // setuid/setgid/sticky bits survive into attr.perm.
+        assert_eq!(attr.perm, 0o4755);
+        // nbytes 513 rounds up to ceil(513/512) = 2 512-byte blocks.
+        assert_eq!(attr.blocks, 2);
+    }
+
+    #[test]
     fn btrfs_immutable_and_append_enforced_on_content_ops_bd_xpsq4() {
         let (fs, cx) = open_writable_btrfs();
         let parent = InodeNumber(1);
