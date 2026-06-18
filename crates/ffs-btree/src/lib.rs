@@ -4496,34 +4496,37 @@ Hole { hole_len: 90 }
         #[test]
         fn proptest_search_with_leaf_window_matches_search(
             keys in proptest::collection::vec(0_u16..500_u16, 1..40),
-            probes in proptest::collection::vec(0_u16..1600_u16, 1..20),
+            probes in proptest::collection::vec(0_u16..4100_u16, 1..20),
         ) {
             let cx = test_cx();
             let dev = MemBlockDevice::new(4096);
             let mut root = make_root();
             let mut alloc = SeqAllocator::new(10_000);
-            let mut inserted = BTreeMap::<u32, u64>::new();
+            let mut inserted = BTreeMap::<u32, (u64, u16)>::new();
 
             for key in keys {
-                let logical = u32::from(key) * 3;
+                let logical = u32::from(key) * 8;
                 if inserted.contains_key(&logical) {
                     continue;
                 }
+                let raw_len = 1 + (key % 4);
                 let physical = 500_000 + u64::from(logical);
                 let ext = Ext4Extent {
                     logical_block: logical,
-                    raw_len: 1,
+                    raw_len,
                     physical_start: physical,
                 };
                 insert(&cx, &dev, &mut root, ext, &mut alloc).unwrap();
-                inserted.insert(logical, physical);
+                inserted.insert(logical, (physical, raw_len));
             }
 
-            // Probe inserted keys plus arbitrary (often-absent) targets.
-            let targets = inserted
-                .keys()
-                .copied()
-                .chain(probes.iter().map(|p| u32::from(*p)));
+            // Probe every block inside each inserted extent plus arbitrary
+            // (often-absent) targets.
+            let mut targets = Vec::new();
+            for (&logical, &(_, raw_len)) in &inserted {
+                targets.extend((0..u32::from(raw_len)).map(|offset| logical + offset));
+            }
+            targets.extend(probes.iter().map(|p| u32::from(*p)));
             for target in targets {
                 let win = search_with_leaf_window(&cx, &dev, &root, target).unwrap();
                 let direct = search(&cx, &dev, &root, target).unwrap();
@@ -4567,6 +4570,12 @@ Hole { hole_len: 90 }
 
                 // 4. A Found result's extent must be present in its own window.
                 if let SearchResult::Found { extent, .. } = &win.result {
+                    prop_assert_eq!(
+                        inserted.get(&extent.logical_block).copied(),
+                        Some((extent.physical_start, extent.actual_len())),
+                        "found extent missing from inserted reference model at target {}",
+                        target
+                    );
                     prop_assert!(
                         win.extents.iter().any(|e| e == extent),
                         "found extent missing from its leaf window at target {}",
