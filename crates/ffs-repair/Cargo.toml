@@ -49,6 +49,10 @@ harness = false
 name = "recovery_build_writeback_blocks"
 harness = false
 
+[[bench]]
+name = "recovery_capture_io_overlap"
+harness = false
+
 [[bin]]
 name = "ffs-demo"
 path = "src/bin/ffs-demo.rs"

@@ -431,12 +431,33 @@ impl<'a> GroupRecoveryOrchestrator<'a> {
         cx: &Cx,
         corrupt_indices: &[u32],
     ) -> Result<Vec<(BlockNumber, Vec<u8>)>> {
-        let mut expected_current = Vec::with_capacity(corrupt_indices.len());
+        use rayon::prelude::{IntoParallelIterator, ParallelIterator};
+
+        // Plan the target blocks serially (cheap), honoring cancellation up
+        // front exactly as the old loop did before any read.
+        let mut blocks = Vec::with_capacity(corrupt_indices.len());
         for index in corrupt_indices {
             cx.checkpoint().map_err(|_| FfsError::Cancelled)?;
-            let block = BlockNumber(self.source_first_block.0 + u64::from(*index));
-            let bytes = self.device.read_block(cx, block)?.as_slice().to_vec();
-            expected_current.push((block, bytes));
+            blocks.push(BlockNumber(self.source_first_block.0 + u64::from(*index)));
+        }
+
+        // The per-block reads are independent. Read them across the rayon pool:
+        // a blocking device read parks its worker, so the per-read access
+        // latencies overlap up to the pool size (the I/O-overlap lever shared
+        // with the scrub/read-path levers bd-307e4/bd-tyym4). An indexed
+        // `into_par_iter().collect()` preserves block order, and consuming the
+        // results in index order with `?` reproduces the serial loop's
+        // first-error-in-index-order behaviour byte-for-byte.
+        let reads: Vec<Result<(BlockNumber, Vec<u8>)>> = blocks
+            .into_par_iter()
+            .map(|block| {
+                let bytes = self.device.read_block(cx, block)?.as_slice().to_vec();
+                Ok((block, bytes))
+            })
+            .collect();
+        let mut expected_current = Vec::with_capacity(reads.len());
+        for read in reads {
+            expected_current.push(read?);
         }
         Ok(expected_current)
     }
