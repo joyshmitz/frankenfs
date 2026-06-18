@@ -68379,6 +68379,33 @@ mod tests {
     }
 
     #[test]
+    fn btrfs_setattr_chown_uid_gid_round_trip_without_swap() {
+        let (fs, cx) = open_writable_btrfs();
+        let attr = fs
+            .create(&cx, InodeNumber(1), OsStr::new("chown.bin"), 0o644, 1000, 1000)
+            .expect("create");
+
+        // Distinct uid != gid so a swap or one-field drop is detectable.
+        let new_attr = fs
+            .setattr(
+                &cx,
+                attr.ino,
+                &SetAttrRequest {
+                    uid: Some(2000),
+                    gid: Some(3000),
+                    ..SetAttrRequest::default()
+                },
+            )
+            .expect("chown");
+        assert_eq!(new_attr.uid, 2000);
+        assert_eq!(new_attr.gid, 3000);
+
+        let ga = fs.getattr(&cx, attr.ino).expect("getattr");
+        assert_eq!(ga.uid, 2000, "uid must round-trip (not swapped/dropped)");
+        assert_eq!(ga.gid, 3000, "gid must round-trip (not swapped/dropped)");
+    }
+
+    #[test]
     fn btrfs_write_setattr_chmod() {
         let (fs, cx) = open_writable_btrfs();
         let ops: &dyn FsOps = &fs;
