@@ -2055,6 +2055,48 @@ mod tests {
     }
 
     #[test]
+    fn allocate_unwritten_extent_rejects_out_of_range_count() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let geo = make_geometry();
+        let mut groups = make_groups(&geo);
+        let mut root = empty_root();
+        let pctx = mock_pctx();
+
+        // count == 0 is meaningless and rejected before any allocation.
+        let err = allocate_unwritten_extent(
+            &cx,
+            &dev,
+            &mut root,
+            &geo,
+            &mut groups,
+            0,
+            0,
+            &AllocHint::default(),
+            &pctx,
+            ExtentOwner::default(),
+        )
+        .unwrap_err();
+        assert!(matches!(err, FfsError::Format(_)), "got {err:?}");
+
+        // count > 32767 exceeds the ext4 written-extent length encoding.
+        let err = allocate_unwritten_extent(
+            &cx,
+            &dev,
+            &mut root,
+            &geo,
+            &mut groups,
+            0,
+            32_768,
+            &AllocHint::default(),
+            &pctx,
+            ExtentOwner::default(),
+        )
+        .unwrap_err();
+        assert!(matches!(err, FfsError::Format(_)), "got {err:?}");
+    }
+
+    #[test]
     fn representative_extent_mapping_exact_golden_contract() {
         let cx = test_cx();
         let dev = MemBlockDevice::new(4096);
