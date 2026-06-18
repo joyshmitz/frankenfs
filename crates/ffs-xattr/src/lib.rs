@@ -2641,12 +2641,7 @@ mod tests {
                 "trusted xattr exists for default reader".to_owned(),
             ));
         }
-        if !xattr_exists_for_access(
-            &inode,
-            Some(&external),
-            "trusted.meta",
-            admin_read,
-        )? {
+        if !xattr_exists_for_access(&inode, Some(&external), "trusted.meta", admin_read)? {
             return Err(FfsError::Format(
                 "trusted xattr hidden from admin reader".to_owned(),
             ));
@@ -2672,6 +2667,33 @@ mod tests {
         }
 
         Ok(())
+    }
+
+    #[test]
+    fn xattr_exists_for_access_requires_external_block_on_miss() -> Result<()> {
+        let mut inode = make_inode(128);
+        inode.xattr_ibody = build_inline_ibody(
+            128,
+            &[Ext4Xattr {
+                name_index: EXT4_XATTR_INDEX_USER,
+                name: b"public".to_vec(),
+                value: b"u".to_vec(),
+            }],
+        )?;
+        inode.file_acl = 4242;
+
+        if !xattr_exists_for_access(&inode, None, "user.public", XattrReadAccess::default())? {
+            return Err(FfsError::Format(
+                "inline xattr missing from existence probe".to_owned(),
+            ));
+        }
+
+        match xattr_exists_for_access(&inode, None, "user.missing", XattrReadAccess::default()) {
+            Err(FfsError::Format(message)) if message.contains("external xattr block") => Ok(()),
+            _ => Err(FfsError::Format(
+                "missing external xattr block was not rejected".to_owned(),
+            )),
+        }
     }
 
     #[test]
