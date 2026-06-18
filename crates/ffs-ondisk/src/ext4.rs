@@ -13302,6 +13302,29 @@ mod tests {
     }
 
     #[test]
+    fn dir_logical_block_count_boundaries_and_overflow() {
+        // Ceil division of a directory's size into logical blocks.
+        assert_eq!(Ext4ImageReader::dir_logical_block_count(0, 4096).unwrap(), 0);
+        assert_eq!(Ext4ImageReader::dir_logical_block_count(1, 4096).unwrap(), 1);
+        assert_eq!(
+            Ext4ImageReader::dir_logical_block_count(4096, 4096).unwrap(),
+            1
+        );
+        assert_eq!(
+            Ext4ImageReader::dir_logical_block_count(4097, 4096).unwrap(),
+            2
+        );
+
+        // A directory whose block count exceeds u32 is rejected, not truncated.
+        assert!(matches!(
+            Ext4ImageReader::dir_logical_block_count(u64::MAX, 1),
+            Err(ParseError::IntegerConversion {
+                field: "dir_block_count"
+            })
+        ));
+    }
+
+    #[test]
     fn fast_symlink_detection_and_reading() {
         let image = build_symlink_test_image();
         let reader = Ext4ImageReader::new(&image).unwrap();
