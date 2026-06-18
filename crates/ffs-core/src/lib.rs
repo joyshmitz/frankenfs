@@ -73307,6 +73307,40 @@ mod tests {
     }
 
     #[test]
+    fn btrfs_setattr_extend_sparse_reads_zeros() {
+        let (fs, cx) = open_writable_btrfs();
+        let parent = InodeNumber(1);
+        let attr = fs
+            .create(&cx, parent, OsStr::new("extend.bin"), 0o644, 0, 0)
+            .expect("create");
+        let ino = attr.ino;
+
+        fs.write(&cx, ino, 0, b"HEAD").expect("write head");
+
+        // Extend to 8192 via a size-only setattr (a sparse region beyond "HEAD").
+        let req = SetAttrRequest {
+            mode: None,
+            uid: None,
+            gid: None,
+            size: Some(8192),
+            atime: None,
+            mtime: None,
+        };
+        fs.setattr(&cx, ino, &req).expect("extend");
+        assert_eq!(fs.getattr(&cx, ino).expect("getattr").size, 8192);
+
+        // Original data intact; the sparse extension reads as zeros (no stale data).
+        let head = fs.read(&cx, ino, 0, 4).expect("read head");
+        assert_eq!(&head, b"HEAD");
+        let tail = fs.read(&cx, ino, 4, 100).expect("read tail");
+        assert_eq!(tail.len(), 100);
+        assert!(
+            tail.iter().all(|&b| b == 0),
+            "btrfs sparse extension must be zero-filled"
+        );
+    }
+
+    #[test]
     fn btrfs_write_sparse_hole_reads_as_zeros() {
         let (fs, cx) = open_writable_btrfs();
         let parent = InodeNumber(1);
