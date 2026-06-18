@@ -3916,7 +3916,7 @@ impl OpenFs {
         // Phase 1: Read the current superblock.
         let mut block_data = {
             let block_dev = self.direct_block_device_adapter();
-            block_dev.read_block(cx, sb_block)?.as_slice().to_vec()
+            block_dev.read_block(cx, sb_block)?.into_inner()
         };
 
         let old_state = u16::from_le_bytes([block_data[sb_off + 0x3A], block_data[sb_off + 0x3B]]);
@@ -9823,7 +9823,7 @@ impl OpenFs {
             dev.read_contiguous_blocks(cx, start, &mut bufs)?;
             return Ok(bufs
                 .into_iter()
-                .map(|buf| buf.as_slice().to_vec())
+                .map(|buf| buf.into_inner())
                 .collect());
         }
 
@@ -9848,7 +9848,7 @@ impl OpenFs {
                 .collect();
             dev.read_contiguous_blocks(cx, run_block_start, &mut bufs)?;
             for (j, buf) in bufs.into_iter().enumerate() {
-                resolved[run_start + j] = Some(buf.as_slice().to_vec());
+                resolved[run_start + j] = Some(buf.into_inner());
             }
         }
         Ok(resolved
@@ -14423,7 +14423,7 @@ impl OpenFs {
 
         let (sb_block, sb_off) = self.ext4_superblock_location();
         let block_dev = self.direct_block_device_adapter();
-        let mut block_data = block_dev.read_block(cx, sb_block)?.as_slice().to_vec();
+        let mut block_data = block_dev.read_block(cx, sb_block)?.into_inner();
 
         #[allow(clippy::cast_possible_truncation)]
         let fb_lo = (total_free_blocks & 0xFFFF_FFFF) as u32;
@@ -15567,7 +15567,7 @@ impl OpenFs {
                     ffs_ondisk::htree_leaf_logical_blocks(&b0_owned, has_large_dir, |lb| {
                     resolve(lb)
                         .and_then(|p| dev.read_block(cx, BlockNumber(p)).ok())
-                        .map(|b| b.as_slice().to_vec())
+                        .map(|b| b.into_inner())
                 })
                 .ok_or_else(|| {
                     FfsError::UnsupportedFeature(format!(
@@ -16599,7 +16599,7 @@ impl OpenFs {
                             continue;
                         }
                         let phys = BlockNumber(mapping.physical_start + blk_offset);
-                        let mut buf = block_dev.read_block(cx, phys)?.as_slice().to_vec();
+                        let mut buf = block_dev.read_block(cx, phys)?.into_inner();
                         let from = usize::try_from(from_byte - block_byte_start).map_err(|_| {
                             FfsError::Format("punch_hole partial edge offset overflow".into())
                         })?;
@@ -16994,7 +16994,7 @@ impl OpenFs {
                         // is byte-granular (mirrors ext4_zero_range, which
                         // zeroes only the in-range bytes of edge blocks);
                         // rounding out to whole blocks here corrupts neighbors.
-                        let mut buf = block_dev.read_block(cx, phys)?.as_slice().to_vec();
+                        let mut buf = block_dev.read_block(cx, phys)?.into_inner();
                         let from = usize::try_from(zero_from - block_byte_start).map_err(|_| {
                             FfsError::Format("zero_range partial head offset overflow".into())
                         })?;
@@ -30073,7 +30073,7 @@ impl FsOps for OpenFs {
                 // (bd-icebl): use its true block + in-block offset.
                 let (sb_block, sb_off) = self.ext4_superblock_location();
                 let block_dev = self.direct_block_device_adapter();
-                let mut block_data = block_dev.read_block(cx, sb_block)?.as_slice().to_vec();
+                let mut block_data = block_dev.read_block(cx, sb_block)?.into_inner();
 
                 let label_start = sb_off + EXT4_VOLUME_NAME_OFFSET;
                 let label_end = label_start + EXT4_LABEL_MAX;
