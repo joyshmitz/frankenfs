@@ -48675,6 +48675,34 @@ mod tests {
     }
 
     #[test]
+    fn ext4_checked_inode_blocks_after_cluster_rewrite_scales_by_huge_flag() {
+        let Some((fs, _tmp)) = open_writable_ext4_mkfs(8) else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let ino = InodeNumber(2); // root
+        let mut inode = fs.read_inode(&cx, ino).expect("read root inode");
+        inode.blocks = 100;
+
+        // added_data=3 + added_meta=1 = 4 total added, freed=1 -> net 3 blocks.
+        // Non-HUGE: i_blocks is in 512-byte sectors, so scale by block_size/512.
+        inode.flags &= !ffs_types::EXT4_HUGE_FILE_FL;
+        let spb = u64::from(fs.block_size() / 512);
+        let result = fs
+            .ext4_checked_inode_blocks_after_cluster_rewrite(&inode, ino, 3, 1, 1, "test")
+            .expect("non-huge delta");
+        assert_eq!(result, 100 + 3 * spb);
+
+        // HUGE_FILE: i_blocks is in filesystem blocks, so the net delta applies
+        // directly without sector scaling.
+        inode.flags |= ffs_types::EXT4_HUGE_FILE_FL;
+        let result = fs
+            .ext4_checked_inode_blocks_after_cluster_rewrite(&inode, ino, 3, 1, 1, "test")
+            .expect("huge delta");
+        assert_eq!(result, 100 + 3);
+    }
+
+    #[test]
     fn immutable_and_append_attributes_enforced_on_writes_bd_hbld5() {
         let Some((fs, _tmp)) = open_writable_ext4_mkfs(8) else {
             return;
