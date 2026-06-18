@@ -56650,6 +56650,38 @@ mod tests {
     }
 
     #[test]
+    fn ext4_delete_reclaims_data_blocks() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let free_before = fs.statfs(&cx, root).expect("statfs before").blocks_free;
+
+        let attr = fs
+            .create(&cx, root, OsStr::new("big.bin"), 0o644, 0, 0)
+            .expect("create");
+        fs.write(&cx, attr.ino, 0, &[0xCD_u8; 128 * 1024])
+            .expect("write");
+        let free_after_write = fs.statfs(&cx, root).expect("statfs after write").blocks_free;
+        assert!(
+            free_after_write < free_before,
+            "write must consume data blocks ({free_after_write} < {free_before})"
+        );
+
+        // Removing the file's only name must return its data blocks to the pool.
+        fs.unlink(&cx, root, OsStr::new("big.bin")).expect("remove");
+        let free_after_delete = fs
+            .statfs(&cx, root)
+            .expect("statfs after delete")
+            .blocks_free;
+        assert!(
+            free_after_delete > free_after_write,
+            "delete must reclaim data blocks ({free_after_delete} > {free_after_write})"
+        );
+    }
+
+    #[test]
     fn write_sparse_hole_reads_as_zeros() {
         let Some(fs) = open_writable_ext4() else {
             return;
