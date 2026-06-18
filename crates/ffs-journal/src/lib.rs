@@ -2969,7 +2969,7 @@ fn encode_cow_record(block_size: u32, record: &CowRecord<'_>) -> Result<Vec<u8>>
             let payload_capacity = block_size.saturating_sub(COW_HEADER_SIZE);
             if payload.len() > payload_capacity {
                 return Err(FfsError::Format(format!(
-                    "COW payload too large: {} bytes (capacity {payload_capacity})",
+                    "COW payload too large: {} bytes exceeds capacity {payload_capacity}",
                     payload.len()
                 )));
             }
@@ -3983,6 +3983,34 @@ mod tests {
                     && message.contains(&undersized.to_string())
                     && message.contains(&COW_HEADER_SIZE.to_string())),
             "expected undersized-header Format error, got {err:?}"
+        );
+        assert_eq!(journal.next_slot(), 0);
+    }
+
+    #[test]
+    fn native_cow_append_rejects_oversized_payload_without_advancing_tail() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(64, 128);
+        let region = JournalRegion {
+            start: BlockNumber(60),
+            blocks: 16,
+        };
+        let capacity =
+            usize::try_from(dev.block_size()).expect("block size fits usize") - COW_HEADER_SIZE;
+        let payload = vec![0x5A; capacity + 1];
+
+        let mut journal = NativeCowJournal::open(&cx, &dev, region).expect("open");
+        let err = journal
+            .append_write(&cx, &dev, CommitSeq(1), BlockNumber(7), &payload)
+            .expect_err("oversized COW payload");
+
+        assert!(
+            matches!(err, FfsError::Format(ref message)
+                if message.contains("COW payload too large")
+                    && message.contains("exceeds capacity")
+                    && message.contains(&payload.len().to_string())
+                    && message.contains(&capacity.to_string())),
+            "expected oversized-payload Format error, got {err:?}"
         );
         assert_eq!(journal.next_slot(), 0);
     }
