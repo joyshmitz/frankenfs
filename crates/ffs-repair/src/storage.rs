@@ -692,7 +692,14 @@ impl<'a> RepairGroupStorage<'a> {
                 "descriptor slot {slot} out of range [0, {REPAIR_DESC_SLOT_COUNT_USIZE})"
             )));
         }
-        Ok(self.layout.descriptor_blocks()[slot])
+        let blocks = self.layout.descriptor_blocks();
+        if blocks[0] == blocks[1] {
+            return Err(FfsError::RepairFailed(format!(
+                "descriptor slots alias for group {} at block {}",
+                self.layout.group.0, blocks[0].0
+            )));
+        }
+        Ok(blocks[slot])
     }
 
     fn validate_desc_layout(&self, desc: &RepairGroupDescExt) -> Result<()> {
@@ -1140,6 +1147,33 @@ mod tests {
         assert_eq!(
             layout.descriptor_blocks(),
             [BlockNumber(0), BlockNumber(0)]
+        );
+    }
+
+    #[test]
+    fn storage_rejects_public_layout_with_aliasing_descriptor_slots() {
+        let cx = Cx::for_testing();
+        let device = MemBlockDevice::new(256, 8);
+        let layout = RepairGroupLayout {
+            group: GroupNumber(7),
+            group_start: BlockNumber(0),
+            blocks_per_group: 1,
+            validation_block_count: 4,
+            repair_block_count: 4,
+        };
+        let storage = RepairGroupStorage::new(&device, layout);
+        let desc = make_desc(layout, 0, 32);
+
+        let err = storage
+            .write_group_desc_ext(&cx, &desc)
+            .expect_err("aliased descriptor slots must fail before descriptor I/O");
+        let message = match err {
+            FfsError::RepairFailed(message) => message,
+            other => format!("expected RepairFailed, got {other:?}"),
+        };
+        assert!(
+            message.contains("descriptor slots alias"),
+            "unexpected descriptor-slot error: {message}"
         );
     }
 
