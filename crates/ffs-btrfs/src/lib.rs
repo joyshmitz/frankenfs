@@ -8717,6 +8717,43 @@ mod tests {
         assert_eq!(lookup_data_block_csum(&noise, base, sectorsize), None);
     }
 
+    #[test]
+    fn lookup_data_block_csum_skips_interleaved_non_csum_item() {
+        let sectorsize = 4096_usize;
+        let base = 0x80_000_u64;
+        let ss = u64::try_from(sectorsize).expect("ss");
+
+        // A single EXTENT_CSUM item covering two sectors at `base`.
+        let mut data = Vec::new();
+        for s in 0..2_u8 {
+            data.extend(std::iter::repeat_n(0x20 | s, sectorsize));
+        }
+        let mut items = build_extent_csum_items(base, &data, sectorsize, 2).expect("csum item");
+        assert_eq!(items.len(), 1);
+
+        // A non-csum item at a HIGHER offset (base + sectorsize), still
+        // <= disk_bytenr, so the reverse walk-back encounters it first and must
+        // skip it (continue) to reach the csum item at `base`.
+        items.push((
+            BtrfsKey {
+                objectid: 5,
+                item_type: BTRFS_ITEM_INODE_ITEM,
+                offset: base + ss,
+            },
+            vec![0xFF_u8; 64],
+        ));
+        items.sort_by_key(|(k, _)| k.offset);
+
+        // Sector 1 lives at base + sectorsize, exactly where the non-csum item
+        // sits. The lookup must skip it and resolve sector index 1's real crc.
+        let want = ffs_types::crc32c(&data[sectorsize..2 * sectorsize]);
+        assert_eq!(
+            lookup_data_block_csum(&items, base + ss, sectorsize),
+            Some(want),
+            "must skip the interleaved non-csum item and resolve sector 1",
+        );
+    }
+
     fn test_key(objectid: u64) -> BtrfsKey {
         BtrfsKey {
             objectid,
