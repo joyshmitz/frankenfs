@@ -2018,6 +2018,35 @@ mod tests {
     }
 
     #[test]
+    fn find_index_child_bound_selects_child_and_clamps_upper_bound() {
+        let idx = |logical_block, leaf_block| Ext4ExtentIndex {
+            logical_block,
+            leaf_block,
+        };
+        let indexes = vec![idx(0, 100), idx(50, 200), idx(100, 300)];
+
+        // An empty index node is corruption.
+        assert!(find_index_child_bound(&[], 10, 1 << 32).is_err());
+
+        // A target inside the first child's range selects the first leaf; its
+        // upper bound is the next sibling key (50).
+        assert_eq!(find_index_child_bound(&indexes, 0, 1 << 32).unwrap(), (100, 50));
+        assert_eq!(find_index_child_bound(&indexes, 49, 1 << 32).unwrap(), (100, 50));
+        // At the second key -> second leaf, upper bound = third key (100).
+        assert_eq!(
+            find_index_child_bound(&indexes, 50, 1 << 32).unwrap(),
+            (200, 100)
+        );
+        // Past the last key -> last leaf, upper bound = the parent bound.
+        assert_eq!(
+            find_index_child_bound(&indexes, 999, 1 << 32).unwrap(),
+            (300, 1 << 32)
+        );
+        // The parent upper bound clamps the per-child upper bound below the key.
+        assert_eq!(find_index_child_bound(&indexes, 0, 30).unwrap(), (100, 30));
+    }
+
+    #[test]
     fn search_empty_tree_returns_hole() {
         let cx = test_cx();
         let dev = MemBlockDevice::new(4096);
