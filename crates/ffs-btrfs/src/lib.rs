@@ -15748,6 +15748,98 @@ mod tests {
         }
     }
 
+    proptest::proptest! {
+        /// `build_free_space_tree_items` must emit a btrfs-check-valid
+        /// FREE_SPACE_TREE item set for ANY per-group free-space layout: the
+        /// whole list globally sorted by (objectid, item_type, offset); exactly
+        /// one FREE_SPACE_INFO per group whose 8-byte value encodes
+        /// `extent_count == free_ranges.len()` and `flags == 0`; and one empty
+        /// FREE_SPACE_EXTENT per free range keyed (free_start, 199, free_len)
+        /// (bd-qxo5x / bd-xmh5g.199).
+        #[test]
+        fn build_free_space_tree_items_invariants_proptest(
+            raw_groups in proptest::collection::vec(
+                (
+                    1_u64..=64, // total size in 16 KiB units
+                    proptest::collection::vec((0_u64..4096, 1_u64..=4096), 0..=8), // (free_start_blocks, free_len_blocks)
+                ),
+                0..=4,
+            ),
+        ) {
+            // Place each group 4 GiB apart so starts are distinct and groups do
+            // not overlap (total_bytes <= 1 MiB << 4 GiB); free ranges sit inside
+            // the group at block granularity.
+            let groups: Vec<BlockGroupFreeSpace> = raw_groups
+                .iter()
+                .enumerate()
+                .map(|(gi, (total_units, ranges))| {
+                    let base = (gi as u64 + 1) * 0x1_0000_0000;
+                    BlockGroupFreeSpace {
+                        start: base,
+                        total_bytes: total_units * 0x4000,
+                        flags: BTRFS_BLOCK_GROUP_DATA,
+                        free_ranges: ranges
+                            .iter()
+                            .map(|&(start_blocks, len_blocks)| {
+                                (base + start_blocks * 0x1000, len_blocks * 0x1000)
+                            })
+                            .collect(),
+                    }
+                })
+                .collect();
+
+            let items = build_free_space_tree_items(&groups);
+
+            // Invariant 1: total item count == groups + sum(free_ranges).
+            let expected_len = groups.len()
+                + groups.iter().map(|g| g.free_ranges.len()).sum::<usize>();
+            proptest::prop_assert_eq!(items.len(), expected_len);
+
+            // Invariant 2: globally sorted by (objectid, item_type, offset).
+            for window in items.windows(2) {
+                let (a, _) = &window[0];
+                let (b, _) = &window[1];
+                proptest::prop_assert!(
+                    (a.objectid, a.item_type, a.offset) <= (b.objectid, b.item_type, b.offset),
+                    "FREE_SPACE_TREE items must be globally key-sorted"
+                );
+            }
+
+            // Invariant 3: exactly one FREE_SPACE_INFO per group, value encodes
+            // extent_count == free_ranges.len() and flags == 0.
+            for group in &groups {
+                let infos: Vec<&(BtrfsKey, Vec<u8>)> = items
+                    .iter()
+                    .filter(|(key, _)| {
+                        key.item_type == BTRFS_ITEM_FREE_SPACE_INFO
+                            && key.objectid == group.start
+                            && key.offset == group.total_bytes
+                    })
+                    .collect();
+                proptest::prop_assert_eq!(infos.len(), 1);
+                let (_, value) = infos[0];
+                proptest::prop_assert_eq!(value.len(), 8);
+                let extent_count = u32::from_le_bytes(value[0..4].try_into().unwrap());
+                let flags = u32::from_le_bytes(value[4..8].try_into().unwrap());
+                proptest::prop_assert_eq!(extent_count as usize, group.free_ranges.len());
+                proptest::prop_assert_eq!(flags, 0_u32);
+            }
+
+            // Invariant 4: each free range has an empty FREE_SPACE_EXTENT item.
+            for group in &groups {
+                for &(free_start, free_len) in &group.free_ranges {
+                    let found = items.iter().any(|(key, value)| {
+                        key.item_type == BTRFS_ITEM_FREE_SPACE_EXTENT
+                            && key.objectid == free_start
+                            && key.offset == free_len
+                            && value.is_empty()
+                    });
+                    proptest::prop_assert!(found, "missing FREE_SPACE_EXTENT for a free range");
+                }
+            }
+        }
+    }
+
     #[test]
     fn build_free_space_tree_items_matches_btrfs_layout() {
         let groups = vec![
