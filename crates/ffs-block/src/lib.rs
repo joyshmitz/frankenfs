@@ -6850,6 +6850,38 @@ mod tests {
     }
 
     #[test]
+    fn file_byte_device_bounds_errors_have_no_side_effects() {
+        let cx = Cx::for_testing();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("bounds.img");
+        std::fs::write(&path, [1_u8, 2, 3, 4]).expect("seed file");
+        let dev = FileByteDevice::open(&path).expect("device");
+
+        let mut scalar = [0xAA_u8; 2];
+        let err = dev
+            .read_exact_at(&cx, ByteOffset(3), &mut scalar)
+            .expect_err("scalar read should reject range before I/O");
+        assert!(matches!(err, FfsError::Format(_)));
+        assert_eq!(scalar, [0xAA; 2]);
+
+        let mut first = [0xBB_u8; 1];
+        let mut second = [0xCC_u8; 2];
+        let mut bufs = [IoSliceMut::new(&mut first), IoSliceMut::new(&mut second)];
+        let err = dev
+            .read_vectored_exact_at(&cx, ByteOffset(2), &mut bufs)
+            .expect_err("vectored read should reject range before I/O");
+        assert!(matches!(err, FfsError::Format(_)));
+        assert_eq!(first, [0xBB]);
+        assert_eq!(second, [0xCC; 2]);
+
+        let err = dev
+            .write_all_at(&cx, ByteOffset(3), &[9, 9])
+            .expect_err("write should reject range before I/O");
+        assert!(matches!(err, FfsError::Format(_)));
+        assert_eq!(std::fs::read(&path).expect("read file"), [1_u8, 2, 3, 4]);
+    }
+
+    #[test]
     fn default_vectored_read_skips_zero_length_iovecs() {
         let cx = Cx::for_testing();
         let dev = ScalarOnlyByteDevice::new(vec![10, 11, 12, 13, 14, 15]);
