@@ -362,11 +362,24 @@ where
     let mut failed = 0_u32;
     let mut failed_indices = Vec::new();
 
-    // Build response lookup.
-    let response_map: std::collections::HashMap<u64, &ChallengeResponse> =
-        responses.responses.iter().map(|r| (r.index, r)).collect();
+    // Build response lookup and remember duplicate indices. A duplicate for a
+    // challenged block makes the response set ambiguous, so that challenge
+    // must fail instead of accepting whichever entry survives map insertion.
+    let mut duplicate_response_indices = std::collections::HashSet::new();
+    let mut response_map = std::collections::HashMap::with_capacity(responses.responses.len());
+    for response in &responses.responses {
+        if response_map.insert(response.index, response).is_some() {
+            duplicate_response_indices.insert(response.index);
+        }
+    }
 
     for challenge in &challenges.challenges {
+        if duplicate_response_indices.contains(&challenge.index) {
+            failed += 1;
+            failed_indices.push(challenge.index);
+            continue;
+        }
+
         let Some(response) = response_map.get(&challenge.index) else {
             // Missing response = failure.
             failed += 1;
@@ -610,7 +623,9 @@ mod tests {
         assert_eq!(responses.responses.len(), 50);
 
         // Verification.
-        let result = verify_responses(&key, &challenges, &responses, |idx| get_block(&blocks, idx));
+        let result = verify_responses(&key, &challenges, &responses, |idx| {
+            get_block(&blocks, idx)
+        });
 
         assert!(result.audit_passed);
         assert_eq!(result.passed, 50);
@@ -733,6 +748,35 @@ mod tests {
         assert!(!result.audit_passed);
         assert_eq!(result.failed, 1);
         assert_eq!(result.failed_indices, vec![tampered_index]);
+    }
+
+    #[test]
+    fn por_rejects_duplicate_challenged_response() {
+        let key = test_key();
+        let blocks = make_blocks(10, 4096);
+        let table = AuthenticatorTable::build(
+            &key,
+            blocks
+                .iter()
+                .enumerate()
+                .map(|(i, b)| (i as u64, b.as_slice())),
+        );
+
+        let seed = *blake3::hash(b"duplicate-response-test").as_bytes();
+        let challenges = ChallengeSet::generate(&seed, 10, 5);
+        let mut responses =
+            respond_to_challenges(&challenges, &table, |idx| get_block(&blocks, idx));
+        assert!(!responses.responses.is_empty());
+
+        let duplicated_index = responses.responses[0].index;
+        responses.responses.push(responses.responses[0].clone());
+
+        let result = verify_responses(&key, &challenges, &responses, |idx| get_block(&blocks, idx));
+
+        assert!(!result.audit_passed);
+        assert_eq!(result.failed, 1);
+        assert_eq!(result.failed_indices, vec![duplicated_index]);
+        assert_eq!(result.passed, u32::try_from(challenges.len()).unwrap() - 1);
     }
 
     #[test]
