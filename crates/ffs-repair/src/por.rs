@@ -364,6 +364,16 @@ where
 
     let challenged_indices: std::collections::HashSet<u64> =
         challenges.challenges.iter().map(|c| c.index).collect();
+    if challenged_indices.len() != challenges.challenges.len() {
+        return VerificationResult {
+            total_challenges: num_challenges,
+            passed: 0,
+            failed: num_challenges,
+            failed_indices: challenges.challenges.iter().map(|c| c.index).collect(),
+            audit_passed: false,
+        };
+    }
+
     if responses
         .responses
         .iter()
@@ -793,6 +803,43 @@ mod tests {
         assert_eq!(result.failed, 1);
         assert_eq!(result.failed_indices, vec![duplicated_index]);
         assert_eq!(result.passed, u32::try_from(challenges.len()).unwrap() - 1);
+    }
+
+    #[test]
+    fn por_rejects_duplicate_challenge_indices() {
+        let key = test_key();
+        let blocks = make_blocks(1, 4096);
+        let nonce = *blake3::hash(b"duplicate-challenge-test").as_bytes();
+        let challenges = ChallengeSet {
+            challenges: vec![
+                Challenge {
+                    index: 0,
+                    table_offset: 0,
+                },
+                Challenge {
+                    index: 0,
+                    table_offset: 0,
+                },
+            ],
+            nonce,
+        };
+        let responses = ResponseSet {
+            responses: vec![ChallengeResponse {
+                index: 0,
+                block_hash: *blake3::hash(&blocks[0]).as_bytes(),
+                authenticator: compute_authenticator(&key, 0, &blocks[0]),
+            }],
+            nonce,
+        };
+
+        let result = verify_responses(&key, &challenges, &responses, |idx| {
+            get_block(&blocks, idx)
+        });
+
+        assert!(!result.audit_passed);
+        assert_eq!(result.passed, 0);
+        assert_eq!(result.failed, 2);
+        assert_eq!(result.failed_indices, vec![0, 0]);
     }
 
     #[test]
