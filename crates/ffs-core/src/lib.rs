@@ -59245,6 +59245,35 @@ mod tests {
     }
 
     #[test]
+    fn ext4_read_ea_inode_value_rejects_oversized_value() {
+        let Some((fs, _dev, _tmp, _image)) = open_ext4_mke2fs(8, false) else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let attr = fs
+            .create(
+                &cx,
+                InodeNumber(2),
+                OsStr::new("oversized_ea.bin"),
+                0o644,
+                0,
+                0,
+            )
+            .expect("create EA-inode payload");
+        // A value larger than XATTR_SIZE_MAX (64 KiB) cannot be a valid xattr
+        // value, so the EA-inode reader must reject it (bd-xmh5g.287) rather than
+        // allocating an unbounded buffer on a corrupt EA-inode size.
+        let value = vec![0xab_u8; 65_536 + 1];
+        fs.write(&cx, attr.ino, 0, &value)
+            .expect("write oversized payload");
+        let value_inum = u32::try_from(attr.ino.0).expect("test inode fits u32");
+        let err = fs
+            .ext4_read_ea_inode_value(&cx, value_inum)
+            .expect_err("oversized EA-inode value must be rejected");
+        assert!(matches!(err, FfsError::Corruption { .. }), "got {err:?}");
+    }
+
+    #[test]
     #[ignore = "profiling tool for bd-y6h03: current ext4 preallocate cost and unwritten extent state"]
     fn profile_ext4_fallocate_prealloc_bd_y6h03() {
         let Some((fs, _tmp)) = open_writable_ext4_mkfs(256) else {
