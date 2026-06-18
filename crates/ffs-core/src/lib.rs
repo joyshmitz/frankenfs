@@ -45947,6 +45947,46 @@ mod tests {
     }
 
     #[test]
+    fn btrfs_file_type_code_encode_decode_round_trips() {
+        // (mode, expected FileType, expected on-disk BTRFS_FT_* code)
+        let cases = [
+            (ffs_types::S_IFDIR | 0o755, FileType::Directory, BTRFS_FT_DIR),
+            (
+                ffs_types::S_IFLNK | 0o777,
+                FileType::Symlink,
+                BTRFS_FT_SYMLINK,
+            ),
+            (
+                ffs_types::S_IFBLK | 0o644,
+                FileType::BlockDevice,
+                BTRFS_FT_BLKDEV,
+            ),
+            (
+                ffs_types::S_IFCHR | 0o644,
+                FileType::CharDevice,
+                BTRFS_FT_CHRDEV,
+            ),
+            (ffs_types::S_IFIFO | 0o644, FileType::Fifo, BTRFS_FT_FIFO),
+            (ffs_types::S_IFSOCK | 0o644, FileType::Socket, BTRFS_FT_SOCK),
+            (
+                ffs_types::S_IFREG | 0o644,
+                FileType::RegularFile,
+                BTRFS_FT_REG_FILE,
+            ),
+        ];
+        for (mode, expected_ft, expected_code) in cases {
+            let code = OpenFs::btrfs_file_type_code_from_mode(u32::from(mode));
+            assert_eq!(code, expected_code, "encode mismatch for {expected_ft:?}");
+            // The on-disk code must decode back to the same FileType.
+            assert_eq!(
+                OpenFs::btrfs_dir_type_to_file_type(code),
+                expected_ft,
+                "round-trip mismatch for {expected_ft:?}"
+            );
+        }
+    }
+
+    #[test]
     fn btrfs_dir_type_to_file_type_maps_all_codes() {
         use ffs_btrfs::{
             BTRFS_FT_BLKDEV, BTRFS_FT_CHRDEV, BTRFS_FT_DIR, BTRFS_FT_FIFO, BTRFS_FT_REG_FILE,
