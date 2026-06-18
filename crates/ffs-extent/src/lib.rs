@@ -5517,6 +5517,14 @@ ExtentMapping { logical_start: 5, physical_start: 134, count: 2, unwritten: true
             }
 
             prop_assert_eq!(after, original, "collapse_range must invert insert_range");
+
+            let restored_tail =
+                map_logical_to_physical(&cx, &dev, &root, count, u64::from(clen)).unwrap();
+            prop_assert!(
+                restored_tail.iter().all(|m| m.physical_start == 0),
+                "insert/collapse identity left stale mappings past restored length: {:?}",
+                restored_tail
+            );
         }
 
         /// Unwritten allocation produces mappings with unwritten flag set.
