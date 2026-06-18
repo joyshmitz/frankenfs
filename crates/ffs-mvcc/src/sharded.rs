@@ -335,7 +335,10 @@ impl ShardedMvccStore {
             if let Some(full_data) =
                 compression::resolve_data_with(versions, keep_from, |v| &v.data)
             {
-                let full_data = full_data.to_vec();
+                // `resolve_data_with` returns `Cow::Owned` for any compressed
+                // version; move that decompressed Vec out instead of cloning it
+                // (matches the already-corrected twin in lib.rs make_chain_head_full).
+                let full_data = full_data.into_owned();
                 versions[keep_from].data = VersionData::Full(full_data);
             }
         }
