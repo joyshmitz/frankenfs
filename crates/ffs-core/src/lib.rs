@@ -73111,6 +73111,24 @@ mod tests {
     }
 
     #[test]
+    fn btrfs_inode_timestamp_converts_valid_and_saturates_overflow() {
+        use std::time::{Duration, UNIX_EPOCH};
+        // A valid timestamp converts exactly.
+        assert_eq!(
+            OpenFs::btrfs_inode_timestamp(1_700_000_000, 123),
+            UNIX_EPOCH + Duration::new(1_700_000_000, 123)
+        );
+        // nsec >= 1e9 is clamped so Duration::new's second carry cannot overflow.
+        assert_eq!(
+            OpenFs::btrfs_inode_timestamp(0, u32::MAX),
+            UNIX_EPOCH + Duration::new(0, 999_999_999)
+        );
+        // Out-of-range seconds saturate to UNIX_EPOCH instead of panicking.
+        assert_eq!(OpenFs::btrfs_inode_timestamp(u64::MAX, 0), UNIX_EPOCH);
+        assert_eq!(OpenFs::btrfs_inode_timestamp(u64::MAX, u32::MAX), UNIX_EPOCH);
+    }
+
+    #[test]
     fn btrfs_immutable_and_append_enforced_on_content_ops_bd_xpsq4() {
         let (fs, cx) = open_writable_btrfs();
         let parent = InodeNumber(1);
