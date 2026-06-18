@@ -42200,6 +42200,23 @@ mod tests {
     }
 
     #[test]
+    fn ext4_read_buffer_len_clamps_to_eof() {
+        // Within the file: the full requested length is returned.
+        assert_eq!(ext4_read_buffer_len(100, 0, 50).unwrap(), 50);
+        // A read ending exactly at EOF returns the full request.
+        assert_eq!(ext4_read_buffer_len(100, 50, 50).unwrap(), 50);
+        // A read spanning EOF is clamped to the bytes remaining before EOF.
+        assert_eq!(ext4_read_buffer_len(100, 80, 50).unwrap(), 20);
+        // At or past EOF returns zero (no over-read of stale bytes).
+        assert_eq!(ext4_read_buffer_len(100, 100, 50).unwrap(), 0);
+        assert_eq!(ext4_read_buffer_len(100, 200, 50).unwrap(), 0);
+        // A zero-length request returns zero.
+        assert_eq!(ext4_read_buffer_len(100, 0, 0).unwrap(), 0);
+        // An empty file returns zero regardless of offset/request.
+        assert_eq!(ext4_read_buffer_len(0, 0, 50).unwrap(), 0);
+    }
+
+    #[test]
     fn parse_to_ffs_error_runtime_mappings() {
         let e = parse_to_ffs_error(&ParseError::InvalidField {
             field: "dir_entry",
