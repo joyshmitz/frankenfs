@@ -460,12 +460,12 @@ pub fn min_challenges(corruption_fraction: f64, security_bits: u32) -> u32 {
 
     let l = (f64::from(security_bits) * core::f64::consts::LN_2)
         / (1.0 / (1.0 - corruption_fraction)).ln();
-    if !l.is_finite() {
+    if !l.is_finite() || l >= f64::from(u32::MAX) {
         return u32::MAX;
     }
     #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     // l is positive here and explicitly saturated to the u32 API boundary.
-    let result = l.ceil().min(f64::from(u32::MAX)) as u32;
+    let result = l.floor() as u32 + 1;
     result
 }
 
@@ -809,6 +809,15 @@ mod tests {
             n < 200,
             "50% corruption should need <200 challenges, got {n}"
         );
+    }
+
+    #[test]
+    fn min_challenges_integer_boundary_is_strict() {
+        let n = min_challenges(0.5, 1);
+
+        assert_eq!(n, 2);
+        assert_f64_bits_eq(false_negative_probability(0.5, n - 1), 0.5);
+        assert!(false_negative_probability(0.5, n) < 2_f64.powi(-1));
     }
 
     #[test]
