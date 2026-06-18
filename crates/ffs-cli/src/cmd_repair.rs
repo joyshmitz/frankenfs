@@ -2850,6 +2850,44 @@ mod coordination_tests {
     }
 
     #[test]
+    fn merge_scrub_reports_sums_counters_and_concatenates_findings() {
+        use ffs_repair::scrub::{CorruptionKind, ScrubFinding};
+        let finding = |block: u64| ScrubFinding {
+            block: BlockNumber(block),
+            kind: CorruptionKind::ChecksumMismatch,
+            severity: Severity::Error,
+            detail: String::new(),
+        };
+
+        // Empty input yields a zeroed report.
+        let empty = merge_scrub_reports(Vec::new());
+        assert_eq!(empty.blocks_scanned, 0);
+        assert_eq!(empty.blocks_corrupt, 0);
+        assert_eq!(empty.blocks_io_error, 0);
+        assert!(empty.findings.is_empty());
+
+        let r1 = ScrubReport {
+            findings: vec![finding(10)],
+            blocks_scanned: 100,
+            blocks_corrupt: 1,
+            blocks_io_error: 0,
+        };
+        let r2 = ScrubReport {
+            findings: vec![finding(20), finding(30)],
+            blocks_scanned: 50,
+            blocks_corrupt: 2,
+            blocks_io_error: 3,
+        };
+        let merged = merge_scrub_reports(vec![r1, r2]);
+        assert_eq!(merged.blocks_scanned, 150);
+        assert_eq!(merged.blocks_corrupt, 3);
+        assert_eq!(merged.blocks_io_error, 3);
+        // Findings are concatenated in input order.
+        let blocks: Vec<u64> = merged.findings.iter().map(|f| f.block.0).collect();
+        assert_eq!(blocks, vec![10, 20, 30]);
+    }
+
+    #[test]
     fn select_ext4_repair_groups_scopes_by_flags_and_staleness() {
         use Ext4RepairStaleness::{Fresh, Stale, Untracked};
         let all = vec![0_u32, 1, 2];
