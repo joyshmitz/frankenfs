@@ -3263,6 +3263,12 @@ mod tests {
                 "sparse_super backup rule mismatch at group {}",
                 group
             );
+
+            let dense_geo = make_geometry();
+            proptest::prop_assert!(
+                dense_geo.has_backup_superblock(GroupNumber(group)),
+                "non-sparse geometry should keep backup metadata in every group"
+            );
         }
     }
 
