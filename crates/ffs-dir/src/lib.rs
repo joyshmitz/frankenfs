@@ -1236,6 +1236,33 @@ mod tests {
     }
 
     #[test]
+    fn add_entry_rejects_invalid_reserved_tail() {
+        let mut block = vec![0u8; 4096];
+        write_entry(&mut block, 0, 1, 4096, Ext4FileType::Dir, b".").unwrap();
+
+        // A nonzero reserved_tail below 12 bytes is rejected.
+        let err = add_entry(&mut block, 10, b"x", Ext4FileType::RegFile, 8).unwrap_err();
+        assert!(
+            matches!(err, FfsError::Format(ref m) if m.contains("at least 12 bytes")),
+            "got {err:?}",
+        );
+
+        // A reserved_tail >= 12 but not 4-byte aligned is rejected.
+        let err = add_entry(&mut block, 10, b"x", Ext4FileType::RegFile, 13).unwrap_err();
+        assert!(
+            matches!(err, FfsError::Format(ref m) if m.contains("4-byte aligned")),
+            "got {err:?}",
+        );
+
+        // A reserved_tail exceeding the block length is rejected.
+        let err = add_entry(&mut block, 10, b"x", Ext4FileType::RegFile, 5000).unwrap_err();
+        assert!(
+            matches!(err, FfsError::Format(ref m) if m.contains("exceeds block length")),
+            "got {err:?}",
+        );
+    }
+
+    #[test]
     fn remove_nonexistent_entry_returns_false() {
         let mut block = vec![0u8; 1024];
         write_entry(&mut block, 0, 10, 1024, Ext4FileType::RegFile, b"a").unwrap();
