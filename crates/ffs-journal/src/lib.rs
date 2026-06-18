@@ -3011,6 +3011,11 @@ fn decode_cow_record(block: &[u8]) -> Result<Option<DecodedCowRecord>> {
                     ),
                 });
             }
+            if block[payload_end..].iter().any(|byte| *byte != 0) {
+                return Err(FfsError::Format(
+                    "COW write record padding must be zero".to_owned(),
+                ));
+            }
             Ok(Some(DecodedCowRecord::Write {
                 commit_seq,
                 block: BlockNumber(target_block),
@@ -6847,6 +6852,34 @@ mod tests {
         let mut nonzero_payload_area = commit;
         nonzero_payload_area[COW_HEADER_SIZE] = 0xA5;
         assert_format(&nonzero_payload_area, "payload area");
+
+        Ok(())
+    }
+
+    #[test]
+    fn native_cow_write_decode_rejects_nonzero_padding() -> Result<()> {
+        let payload = [0x11, 0x22, 0x33];
+        let mut write = encode_cow_record(
+            64,
+            &CowRecord::Write {
+                commit_seq: CommitSeq(10),
+                block: BlockNumber(5),
+                payload: &payload,
+            },
+        )?;
+
+        write[COW_HEADER_SIZE + payload.len()] = 0xA5;
+
+        match decode_cow_record(&write) {
+            Err(FfsError::Format(message)) => {
+                assert!(
+                    message.contains("padding"),
+                    "expected padding error, got {message:?}"
+                );
+            }
+            Err(other) => panic!("expected Format error, got {other:?}"),
+            Ok(_) => panic!("malformed write record decoded successfully"),
+        }
 
         Ok(())
     }
