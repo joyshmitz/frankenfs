@@ -885,6 +885,7 @@ impl<D: ByteDevice> BlockDevice for ByteBlockDevice<D> {
     ) -> Result<()> {
         cx_checkpoint(cx)?;
         if bufs.is_empty() {
+            cx_checkpoint(cx)?;
             return Ok(());
         }
 
@@ -935,6 +936,7 @@ impl<D: ByteDevice> BlockDevice for ByteBlockDevice<D> {
             ));
         }
         if dst.is_empty() {
+            cx_checkpoint(cx)?;
             return Ok(());
         }
         let count = (dst.len() / block_size) as u64;
@@ -995,6 +997,7 @@ impl<D: ByteDevice> BlockDevice for ByteBlockDevice<D> {
             ));
         }
         if data.is_empty() {
+            cx_checkpoint(cx)?;
             return Ok(());
         }
         let count = (data.len() / block_size) as u64;
@@ -6358,6 +6361,7 @@ mod tests {
     struct MemoryByteDevice {
         bytes: Mutex<Vec<u8>>,
         read_count: AtomicUsize,
+        write_count: AtomicUsize,
     }
 
     impl MemoryByteDevice {
@@ -6365,11 +6369,16 @@ mod tests {
             Self {
                 bytes: Mutex::new(vec![0_u8; len]),
                 read_count: AtomicUsize::new(0),
+                write_count: AtomicUsize::new(0),
             }
         }
 
         fn read_count(&self) -> usize {
             self.read_count.load(Ordering::Relaxed)
+        }
+
+        fn write_count(&self) -> usize {
+            self.write_count.load(Ordering::Relaxed)
         }
     }
 
@@ -6419,6 +6428,7 @@ mod tests {
         }
 
         fn write_all_at(&self, _cx: &Cx, offset: ByteOffset, buf: &[u8]) -> Result<()> {
+            self.write_count.fetch_add(1, Ordering::Relaxed);
             let offset = usize::try_from(offset.0)
                 .map_err(|_| FfsError::Format("offset overflow".into()))?;
             let end = offset
@@ -6668,6 +6678,27 @@ mod tests {
         assert_eq!(bufs[0].as_slice(), &[4, 5, 6, 7]);
         assert_eq!(bufs[1].as_slice(), &[8, 9, 10, 11]);
         assert_eq!(dev.inner().read_count(), 1);
+    }
+
+    #[test]
+    fn byte_block_device_empty_contiguous_ops_are_noops_at_invalid_start() {
+        let cx = Cx::for_testing();
+        let mem = MemoryByteDevice::new(16);
+        let dev = ByteBlockDevice::new(mem, 4).expect("device");
+
+        let mut bufs: [BlockBuf; 0] = [];
+        dev.read_contiguous_blocks(&cx, BlockNumber(u64::MAX), &mut bufs)
+            .expect("empty block-vector read should not bounds-check start");
+
+        let mut dst = [];
+        dev.read_contiguous_into(&cx, BlockNumber(u64::MAX), &mut dst)
+            .expect("empty contiguous read should not bounds-check start");
+
+        dev.write_contiguous_blocks(&cx, BlockNumber(u64::MAX), &[])
+            .expect("empty contiguous write should not bounds-check start");
+
+        assert_eq!(dev.inner().read_count(), 0);
+        assert_eq!(dev.inner().write_count(), 0);
     }
 
     #[test]
