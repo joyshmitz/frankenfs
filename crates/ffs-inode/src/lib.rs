@@ -2239,6 +2239,40 @@ mod tests {
     }
 
     #[test]
+    fn write_inode_out_of_range_returns_corruption() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let geo = make_geometry();
+        let mut groups = make_groups(&geo);
+
+        let (_ino, inode) = create_inode(
+            &cx,
+            &dev,
+            &geo,
+            &mut groups,
+            0o100_644,
+            0,
+            0,
+            GroupNumber(0),
+            0,
+            1_700_000_000,
+            0,
+            &mock_pctx(),
+        )
+        .unwrap();
+
+        // write_inode must reject an inode number beyond the table, mirroring
+        // the read_inode out-of-range guard, instead of patching and writing
+        // back an arbitrary block.
+        let err = write_inode(&cx, &dev, &geo, &groups, InodeNumber(100_000), &inode, 0)
+            .unwrap_err();
+        assert!(
+            matches!(err, FfsError::Corruption { ref detail, .. } if detail.contains("out of range")),
+            "got {err:?}",
+        );
+    }
+
+    #[test]
     fn delete_directory_zeroes_fields() {
         let cx = test_cx();
         let dev = MemBlockDevice::new(4096);
