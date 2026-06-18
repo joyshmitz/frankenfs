@@ -6688,6 +6688,38 @@ mod tests {
     }
 
     #[test]
+    fn stripe_resolve_raid5_skips_rotated_parity_position() {
+        let chunks = vec![make_chunk(
+            0,
+            65536 * 2 * 4,
+            65536,
+            chunk_type_flags::BTRFS_BLOCK_GROUP_DATA | chunk_type_flags::BTRFS_BLOCK_GROUP_RAID5,
+            vec![
+                stripe(1, 0x10_0000),
+                stripe(2, 0x20_0000),
+                stripe(3, 0x30_0000),
+            ],
+            0,
+        )];
+
+        // Row 1: parity rotates to position 1 (device 2), so data uses positions 0 and 2.
+        let data0 = map_logical_to_stripes(&chunks, 131_072)
+            .expect("RAID5 row 1 data stripe 0 should map")
+            .expect("chunk should cover logical address");
+        assert_eq!(data0.profile, BtrfsRaidProfile::Raid5);
+        assert_eq!(data0.stripes.len(), 1);
+        assert_eq!(data0.stripes[0].devid, 1);
+        assert_eq!(data0.stripes[0].physical, 0x10_0000 + 65_536);
+
+        let data1 = map_logical_to_stripes(&chunks, 196_608)
+            .expect("RAID5 row 1 data stripe 1 should map")
+            .expect("chunk should cover logical address");
+        assert_eq!(data1.stripes.len(), 1);
+        assert_eq!(data1.stripes[0].devid, 3);
+        assert_eq!(data1.stripes[0].physical, 0x30_0000 + 65_536);
+    }
+
+    #[test]
     fn stripe_resolve_raid6_parity_wraparound() {
         // 4 devices, RAID6 (2 parity), stripe_len=65536
         // This tests the case where P is at device 0 and Q wraps to the last device.
