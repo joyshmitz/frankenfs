@@ -9035,6 +9035,50 @@ mod tests {
     }
 
     #[test]
+    fn read_visible_block_buf_shares_full_block_correctly_under_concurrency() {
+        // bd-xmh5g.394 made VersionData::Full(Arc<AlignedVec>) and
+        // read_visible_block_buf SHARE that buffer (BlockBuf::from_shared_aligned,
+        // Arc::clone) instead of copying it. This is the conformance guard the new
+        // shared-Arc read path lacked: concurrent readers of one uncompressed Full
+        // block must each get a BlockBuf with the EXACT stored bytes — the shared
+        // Arc must never corrupt or tear the data. (MvccStore::new defaults to
+        // algo: None => Full; the assertion holds even if a version is compressed,
+        // since the contract is "a read returns the written bytes".)
+        let mut store = MvccStore::new();
+        let block = BlockNumber(7);
+        let data: Vec<u8> = (0..4096_u32).map(|i| (i & 0xff) as u8).collect();
+
+        let mut txn = store.begin();
+        txn.stage_write(block, data.clone());
+        store.commit(txn).expect("commit");
+        let snap = store.current_snapshot();
+
+        // Single-threaded: the shared BlockBuf matches the stored bytes and the
+        // materialized read_visible Vec.
+        let shared = store
+            .read_visible_block_buf(block, snap)
+            .expect("visible block buf");
+        assert_eq!(shared.as_slice(), data.as_slice());
+        assert_eq!(store.read_visible(block, snap).unwrap().as_ref(), data.as_slice());
+
+        // Concurrency: 8 threads share the same Full Arc; every read returns the bytes.
+        std::thread::scope(|s| {
+            for _ in 0..8 {
+                let store = &store;
+                let data = &data;
+                s.spawn(move || {
+                    for _ in 0..20_000 {
+                        let buf = store
+                            .read_visible_block_buf(block, snap)
+                            .expect("visible");
+                        assert_eq!(buf.as_slice(), data.as_slice());
+                    }
+                });
+            }
+        });
+    }
+
+    #[test]
     fn registry_gc_respects_oldest_active_snapshot() {
         let registry = Arc::new(SnapshotRegistry::new());
         let mut store = MvccStore::new();
