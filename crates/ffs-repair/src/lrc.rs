@@ -239,6 +239,9 @@ impl LrcConfig {
     /// Number of local repair groups.
     #[must_use]
     pub fn num_groups(&self) -> u32 {
+        if self.local_group_size == 0 {
+            return 0;
+        }
         self.data_blocks / self.local_group_size
     }
 
@@ -252,18 +255,19 @@ impl LrcConfig {
     #[must_use]
     pub fn total_blocks(&self) -> u32 {
         self.data_blocks
-            .checked_add(self.local_parity_count())
-            .and_then(|count| count.checked_add(self.global_parity_count))
-            .expect("total LRC block count overflow")
+            .saturating_add(self.local_parity_count())
+            .saturating_add(self.global_parity_count)
     }
 
     /// Total storage overhead as a fraction.
     #[must_use]
     pub fn overhead_fraction(&self) -> f64 {
+        if self.data_blocks == 0 {
+            return 0.0;
+        }
         let parity = self
             .local_parity_count()
-            .checked_add(self.global_parity_count)
-            .expect("LRC parity block count overflow");
+            .saturating_add(self.global_parity_count);
         f64::from(parity) / f64::from(self.data_blocks)
     }
 }
@@ -777,6 +781,39 @@ mod tests {
         assert_eq!(cfg.total_blocks(), 17); // 12 + 3 + 2
         let overhead = cfg.overhead_fraction();
         assert!((overhead - 5.0 / 12.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn public_field_config_accessors_do_not_panic_on_invalid_values() {
+        let zero_group = LrcConfig {
+            data_blocks: 12,
+            local_group_size: 0,
+            global_parity_count: 2,
+        };
+        assert_eq!(zero_group.num_groups(), 0);
+        assert_eq!(zero_group.local_parity_count(), 0);
+        assert_eq!(zero_group.total_blocks(), 14);
+        assert_eq!(zero_group.overhead_fraction(), 2.0 / 12.0);
+
+        let zero_data = LrcConfig {
+            data_blocks: 0,
+            local_group_size: 4,
+            global_parity_count: 2,
+        };
+        assert_eq!(zero_data.num_groups(), 0);
+        assert_eq!(zero_data.local_parity_count(), 0);
+        assert_eq!(zero_data.total_blocks(), 2);
+        assert_eq!(zero_data.overhead_fraction(), 0.0);
+
+        let saturated = LrcConfig {
+            data_blocks: u32::MAX,
+            local_group_size: 1,
+            global_parity_count: 1,
+        };
+        assert_eq!(saturated.num_groups(), u32::MAX);
+        assert_eq!(saturated.local_parity_count(), u32::MAX);
+        assert_eq!(saturated.total_blocks(), u32::MAX);
+        assert_eq!(saturated.overhead_fraction(), 1.0);
     }
 
     #[test]
