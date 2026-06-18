@@ -297,6 +297,7 @@ pub fn encode_local(config: &LrcConfig, data: &[Vec<u8>]) -> Vec<Vec<u8>> {
     );
 
     let block_size = data[0].len();
+    assert!(block_size > 0, "block size must be > 0");
     let groups = config.num_groups() as usize;
     let group_size = config.local_group_size as usize;
 
@@ -348,6 +349,7 @@ pub fn encode_global(config: &LrcConfig, data: &[Vec<u8>]) -> Vec<Vec<u8>> {
     let p = config.global_parity_count as usize;
 
     if p > 0 {
+        assert!(block_size > 0, "block size must be > 0");
         for block in data {
             assert_eq!(block.len(), block_size, "block size mismatch");
         }
@@ -1165,6 +1167,24 @@ mod tests {
         data[2].truncate(8);
         let global = encode_global(&cfg, &data);
         assert!(global.is_empty());
+    }
+
+    #[test]
+    #[should_panic(expected = "block size must be > 0")]
+    fn encode_local_rejects_zero_block_size() {
+        let cfg = LrcConfig::new(4, 2, 1);
+        let data = vec![Vec::new(); 4];
+
+        let _ = encode_local(&cfg, &data);
+    }
+
+    #[test]
+    #[should_panic(expected = "block size must be > 0")]
+    fn encode_global_rejects_zero_block_size_when_parity_emitted() {
+        let cfg = LrcConfig::new(4, 2, 1);
+        let data = vec![Vec::new(); 4];
+
+        let _ = encode_global(&cfg, &data);
     }
 
     #[test]
