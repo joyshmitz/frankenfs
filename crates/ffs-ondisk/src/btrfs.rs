@@ -2232,6 +2232,47 @@ mod tests {
     }
 
     #[test]
+    fn map_logical_to_stripes_rejects_physical_address_overflow() {
+        let chunks = vec![BtrfsChunkEntry {
+            key: BtrfsKey {
+                objectid: 256,
+                item_type: 228,
+                offset: 0,
+            },
+            length: 8,
+            owner: 2,
+            stripe_len: 4,
+            chunk_type: chunk_type_flags::BTRFS_BLOCK_GROUP_DATA,
+            io_align: 4096,
+            io_width: 4096,
+            sector_size: 4096,
+            num_stripes: 1,
+            sub_stripes: 0,
+            stripes: vec![BtrfsStripe {
+                devid: 1,
+                offset: u64::MAX - 3,
+                dev_uuid: [0; 16],
+            }],
+        }];
+
+        let boundary = map_logical_to_stripes(&chunks, 3)
+            .expect("boundary stripe mapping should be valid")
+            .expect("chunk should cover boundary logical address");
+        assert_eq!(boundary.profile, BtrfsRaidProfile::Single);
+        assert_eq!(boundary.stripes.len(), 1);
+        assert_eq!(boundary.stripes[0].physical, u64::MAX);
+
+        let err = map_logical_to_stripes(&chunks, 4).unwrap_err();
+        assert_eq!(
+            err,
+            ParseError::InvalidField {
+                field: "stripe_offset",
+                reason: "physical address overflow",
+            }
+        );
+    }
+
+    #[test]
     fn map_logical_to_physical_miss() {
         let chunks = vec![BtrfsChunkEntry {
             key: BtrfsKey {
