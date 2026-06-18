@@ -565,6 +565,12 @@ pub trait BlockDevice: Send + Sync {
         bufs: &mut [BlockBuf],
     ) -> Result<()> {
         cx_checkpoint(cx)?;
+        let bs = self.block_size() as usize;
+        if bs == 0 && !bufs.is_empty() {
+            return Err(FfsError::Format(
+                "read_contiguous_blocks: block size must be nonzero".to_owned(),
+            ));
+        }
         let count = u64::try_from(bufs.len())
             .map_err(|_| FfsError::Format("block count does not fit u64".to_owned()))?;
         if let Some(last_delta) = count.checked_sub(1) {
@@ -578,7 +584,14 @@ pub trait BlockDevice: Send + Sync {
             let block = BlockNumber(start.0.checked_add(delta).ok_or_else(|| {
                 FfsError::Format("contiguous read block range overflow".to_owned())
             })?);
-            *buf = self.read_block(cx, block)?;
+            let read = self.read_block(cx, block)?;
+            let actual_len = read.as_slice().len();
+            if actual_len != bs {
+                return Err(FfsError::Format(format!(
+                    "read_block returned wrong size: got={actual_len} expected={bs}"
+                )));
+            }
+            *buf = read;
         }
         cx_checkpoint(cx)?;
         Ok(())
@@ -7346,6 +7359,26 @@ mod tests {
         fn sync(&self, _cx: &Cx) -> Result<()> {
             Ok(())
         }
+    }
+
+    #[test]
+    fn default_contiguous_blocks_rejects_short_block_without_replacing_buffer() {
+        let cx = Cx::for_testing();
+        let dev = ShortReadBlockDevice;
+        let mut bufs = [BlockBuf::new(vec![0xAA; 4])];
+
+        let err = dev
+            .read_contiguous_blocks(&cx, BlockNumber(0), &mut bufs)
+            .expect_err("short scalar block should fail closed");
+
+        assert!(
+            matches!(err, FfsError::Format(ref message)
+                if message.contains("read_block returned wrong size")
+                    && message.contains("got=2")
+                    && message.contains("expected=4")),
+            "expected block-size Format error, got {err:?}"
+        );
+        assert_eq!(bufs[0].as_slice(), &[0xAA; 4]);
     }
 
     #[test]
