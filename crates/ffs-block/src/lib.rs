@@ -353,17 +353,41 @@ pub trait ByteDevice: Send + Sync {
                 "read out of bounds: offset={offset} len={total_len} device_len={len_bytes}"
             )));
         }
+        let scratch_len = usize::try_from(total_len)
+            .map_err(|_| FfsError::Format("read length overflows usize".to_owned()))?;
+        let mut read_buf = vec![0_u8; scratch_len];
         let mut next_offset = offset.0;
-        for buf in bufs {
+        let mut copied = 0_usize;
+        for buf in bufs.iter() {
             if buf.is_empty() {
                 continue;
             }
             let len = u64::try_from(buf.len())
                 .map_err(|_| FfsError::Format("read length overflows u64".to_owned()))?;
-            self.read_exact_at(cx, ByteOffset(next_offset), buf)?;
+            let next_copied = copied
+                .checked_add(buf.len())
+                .ok_or_else(|| FfsError::Format("read length overflows usize".to_owned()))?;
+            self.read_exact_at(
+                cx,
+                ByteOffset(next_offset),
+                &mut read_buf[copied..next_copied],
+            )?;
+            copied = next_copied;
             next_offset = next_offset
                 .checked_add(len)
                 .ok_or_else(|| FfsError::Format("read range overflows u64".to_owned()))?;
+        }
+        copied = 0;
+        for buf in bufs.iter_mut() {
+            let len = buf.len();
+            if len == 0 {
+                continue;
+            }
+            let next_copied = copied
+                .checked_add(len)
+                .ok_or_else(|| FfsError::Format("read length overflows usize".to_owned()))?;
+            (**buf).copy_from_slice(&read_buf[copied..next_copied]);
+            copied = next_copied;
         }
         cx_checkpoint(cx)?;
         Ok(())
@@ -6651,6 +6675,52 @@ mod tests {
     }
 
     #[derive(Debug)]
+    struct FailOnSecondScalarReadByteDevice {
+        read_calls: Mutex<Vec<(ByteOffset, usize)>>,
+    }
+
+    impl FailOnSecondScalarReadByteDevice {
+        fn new() -> Self {
+            Self {
+                read_calls: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn read_calls(&self) -> Vec<(ByteOffset, usize)> {
+            self.read_calls.lock().clone()
+        }
+    }
+
+    impl ByteDevice for FailOnSecondScalarReadByteDevice {
+        fn len_bytes(&self) -> u64 {
+            u64::MAX
+        }
+
+        fn read_exact_at(&self, _cx: &Cx, offset: ByteOffset, buf: &mut [u8]) -> Result<()> {
+            let mut read_calls = self.read_calls.lock();
+            read_calls.push((offset, buf.len()));
+            if read_calls.len() == 1 {
+                buf.fill(0x5A);
+                return Ok(());
+            }
+            if let Some(first) = buf.first_mut() {
+                *first = 0xEE;
+            }
+            Err(FfsError::Format(
+                "injected second scalar read failure".to_owned(),
+            ))
+        }
+
+        fn write_all_at(&self, _cx: &Cx, _offset: ByteOffset, _buf: &[u8]) -> Result<()> {
+            Ok(())
+        }
+
+        fn sync(&self, _cx: &Cx) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[derive(Debug)]
     struct PermissiveReadByteDevice {
         read_calls: Mutex<Vec<(ByteOffset, usize)>>,
     }
@@ -7349,6 +7419,31 @@ mod tests {
             dev.read_calls(),
             vec![(ByteOffset(1), 2), (ByteOffset(3), 1)]
         );
+    }
+
+    #[test]
+    fn default_vectored_read_preserves_iovecs_when_later_scalar_read_fails() {
+        let cx = Cx::for_testing();
+        let dev = FailOnSecondScalarReadByteDevice::new();
+        let mut first = [0xAA_u8; 2];
+        let mut second = [0xBB_u8; 3];
+        let mut bufs = [IoSliceMut::new(&mut first), IoSliceMut::new(&mut second)];
+
+        let err = dev
+            .read_vectored_exact_at(&cx, ByteOffset(0), &mut bufs)
+            .expect_err("later scalar read failure should not mutate caller iovecs");
+
+        assert!(
+            matches!(err, FfsError::Format(ref message)
+                if message.contains("injected second scalar read failure")),
+            "expected injected scalar-read Format error, got {err:?}"
+        );
+        assert_eq!(
+            dev.read_calls(),
+            vec![(ByteOffset(0), 2), (ByteOffset(2), 3)]
+        );
+        assert_eq!(first, [0xAA; 2]);
+        assert_eq!(second, [0xBB; 3]);
     }
 
     #[test]
