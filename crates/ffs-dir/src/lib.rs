@@ -1046,6 +1046,30 @@ mod tests {
     }
 
     #[test]
+    fn add_entry_rejects_invalid_rec_len() {
+        // A block whose first entry has rec_len 0 — without the guard the
+        // iterator would never advance (infinite loop).
+        let mut block = vec![0_u8; 64];
+        block[0..4].copy_from_slice(&11_u32.to_le_bytes()); // inode
+        block[4..6].copy_from_slice(&0_u16.to_le_bytes()); // rec_len = 0
+        block[6] = 1; // name_len
+        block[7] = 2; // file_type
+        block[8] = b'.';
+        let err = add_entry(&mut block, 42, b"x", Ext4FileType::RegFile, 0).unwrap_err();
+        assert!(matches!(err, FfsError::Corruption { .. }), "got {err:?}");
+
+        // A misaligned rec_len (10, not a multiple of 4) is also rejected.
+        let mut block2 = vec![0_u8; 64];
+        block2[0..4].copy_from_slice(&11_u32.to_le_bytes());
+        block2[4..6].copy_from_slice(&10_u16.to_le_bytes()); // rec_len = 10
+        block2[6] = 1;
+        block2[7] = 2;
+        block2[8] = b'.';
+        let err2 = add_entry(&mut block2, 42, b"x", Ext4FileType::RegFile, 0).unwrap_err();
+        assert!(matches!(err2, FfsError::Corruption { .. }), "got {err2:?}");
+    }
+
+    #[test]
     fn add_entry_splits_live_slot_slack() {
         let mut block = vec![0u8; 1024];
         write_entry(&mut block, 0, 2, 1024, Ext4FileType::Dir, b".").unwrap();
