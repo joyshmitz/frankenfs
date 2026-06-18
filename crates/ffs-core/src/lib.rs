@@ -68327,6 +68327,32 @@ mod tests {
     }
 
     #[test]
+    fn btrfs_setattr_atime_mtime_round_trip_without_swap() {
+        let (fs, cx) = open_writable_btrfs();
+        let root = InodeNumber(1);
+        let attr = fs
+            .create(&cx, root, OsStr::new("t.bin"), 0o644, 0, 0)
+            .expect("create");
+
+        // Distinct values so a swap or one-field drop is detectable.
+        let atime = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
+        let mtime = std::time::UNIX_EPOCH + std::time::Duration::from_secs(2_000_000);
+        let req = SetAttrRequest {
+            mode: None,
+            uid: None,
+            gid: None,
+            size: None,
+            atime: Some(atime),
+            mtime: Some(mtime),
+        };
+        fs.setattr(&cx, attr.ino, &req).expect("setattr times");
+
+        let ga = fs.getattr(&cx, attr.ino).expect("getattr");
+        assert_eq!(ga.atime, atime, "atime must round-trip (not swapped/dropped)");
+        assert_eq!(ga.mtime, mtime, "mtime must round-trip (not swapped/dropped)");
+    }
+
+    #[test]
     fn btrfs_write_setattr_chmod() {
         let (fs, cx) = open_writable_btrfs();
         let ops: &dyn FsOps = &fs;
