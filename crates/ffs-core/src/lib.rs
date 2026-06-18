@@ -73307,6 +73307,32 @@ mod tests {
     }
 
     #[test]
+    fn btrfs_hardlink_shares_inode_data() {
+        let (fs, cx) = open_writable_btrfs();
+        let parent = InodeNumber(1);
+        let attr = fs
+            .create(&cx, parent, OsStr::new("orig.bin"), 0o644, 0, 0)
+            .expect("create");
+        fs.write(&cx, attr.ino, 0, b"shared_data").expect("write");
+
+        // A hardlink is a second name for the same inode.
+        fs.link(&cx, attr.ino, parent, OsStr::new("link.bin"))
+            .expect("link");
+
+        // A write through the original is visible through the hardlinked name.
+        fs.write(&cx, attr.ino, 0, b"UPDATED_DAT").expect("update");
+        let linked = fs
+            .lookup(&cx, parent, OsStr::new("link.bin"))
+            .expect("lookup link");
+        assert_eq!(
+            linked.ino, attr.ino,
+            "hardlink must resolve to the same inode"
+        );
+        let data = fs.read(&cx, linked.ino, 0, 11).expect("read via link");
+        assert_eq!(&data, b"UPDATED_DAT");
+    }
+
+    #[test]
     fn btrfs_truncate_then_sparse_extend_zero_fills_gap() {
         let (fs, cx) = open_writable_btrfs();
         let parent = InodeNumber(1);
