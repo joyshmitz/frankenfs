@@ -1396,6 +1396,24 @@ mod tests {
     }
 
     #[test]
+    fn can_read_name_index_enforces_trusted_and_encryption_visibility() {
+        let unprivileged = XattrReadAccess {
+            has_cap_sys_admin: false,
+        };
+        let admin = XattrReadAccess {
+            has_cap_sys_admin: true,
+        };
+        // trusted.* is readable only with CAP_SYS_ADMIN.
+        assert!(!can_read_name_index(EXT4_XATTR_INDEX_TRUSTED, unprivileged));
+        assert!(can_read_name_index(EXT4_XATTR_INDEX_TRUSTED, admin));
+        // fscrypt encryption contexts never surface, even to an admin.
+        assert!(!can_read_name_index(EXT4_XATTR_INDEX_ENCRYPTION, admin));
+        // user / security / system namespaces are readable by anyone.
+        assert!(can_read_name_index(EXT4_XATTR_INDEX_USER, unprivileged));
+        assert!(can_read_name_index(EXT4_XATTR_INDEX_SECURITY, unprivileged));
+    }
+
+    #[test]
     fn check_write_permissions_unknown_index_returns_unsupported() {
         let access = XattrWriteAccess {
             is_owner: true,
