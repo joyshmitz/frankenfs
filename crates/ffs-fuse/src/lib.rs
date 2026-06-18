@@ -8872,6 +8872,34 @@ mod tests {
     }
 
     #[test]
+    fn encode_fiemap_response_writes_extent_logical_physical_length_fields() {
+        // Distinct values so a logical/physical swap or a misplaced length fails.
+        let extents = vec![FiemapExtent {
+            logical: 0x1111,
+            physical: 0x2222,
+            length: 0x3333,
+            flags: 0,
+        }];
+        let response = FrankenFuse::encode_fiemap_response(0, u64::MAX, 4, &extents, 4096);
+        let off = FIEMAP_HEADER_SIZE;
+        assert_eq!(
+            u64::from_ne_bytes(response[off..off + 8].try_into().expect("logical")),
+            0x1111,
+            "logical at off"
+        );
+        assert_eq!(
+            u64::from_ne_bytes(response[off + 8..off + 16].try_into().expect("physical")),
+            0x2222,
+            "physical at off+8"
+        );
+        assert_eq!(
+            u64::from_ne_bytes(response[off + 16..off + 24].try_into().expect("length")),
+            0x3333,
+            "length at off+16"
+        );
+    }
+
+    #[test]
     fn encode_fiemap_response_limits_extents_to_output_buffer_capacity() {
         let extents = vec![
             FiemapExtent {
