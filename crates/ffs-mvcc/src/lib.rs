@@ -4916,6 +4916,45 @@ mod tests {
     }
 
     #[test]
+    fn merge_non_overlapping_ranges_overlays_disjoint_and_rejects_conflicts() {
+        let r = MergeByteRange::new;
+        let proof = MergeProof::default(); // label only
+        let base = vec![0_u8; 8];
+
+        // Clean 3-way merge: latest changed [4,8), staged changed declared [0,4).
+        let mut latest = base.clone();
+        latest[4..8].copy_from_slice(&[9, 9, 9, 9]);
+        let mut staged = base.clone();
+        staged[0..4].copy_from_slice(&[1, 2, 3, 4]);
+        let merged = merge_non_overlapping_ranges(&[r(0, 4)], &base, &latest, &staged, &proof)
+            .expect("disjoint writers merge");
+        assert_eq!(merged, vec![1, 2, 3, 4, 9, 9, 9, 9]);
+
+        // Size mismatch is rejected.
+        assert!(merge_non_overlapping_ranges(&[r(0, 4)], &base, &base[..4], &staged, &proof).is_none());
+        // Overlapping touched ranges are rejected.
+        assert!(
+            merge_non_overlapping_ranges(&[r(0, 5), r(4, 4)], &base, &latest, &staged, &proof)
+                .is_none()
+        );
+        // A range exceeding the block is rejected.
+        assert!(merge_non_overlapping_ranges(&[r(4, 8)], &base, &latest, &staged, &proof).is_none());
+
+        // Integrity: staged modified a byte OUTSIDE the declared range -> rejected.
+        let mut sneaky = staged.clone();
+        sneaky[7] = 42;
+        assert!(merge_non_overlapping_ranges(&[r(0, 4)], &base, &latest, &sneaky, &proof).is_none());
+
+        // True conflict: latest also modified the declared range -> rejected.
+        let mut latest_conflict = base.clone();
+        latest_conflict[0..4].copy_from_slice(&[5, 5, 5, 5]);
+        assert!(
+            merge_non_overlapping_ranges(&[r(0, 4)], &base, &latest_conflict, &staged, &proof)
+                .is_none()
+        );
+    }
+
+    #[test]
     fn merge_proof_unsafe_rejects_merge() {
         let merged = MergeProof::Unsafe.merge_bytes(&[0], &[0, 1], &[0, 2]);
         assert!(merged.is_none(), "unsafe proof must fall back to FCW");
