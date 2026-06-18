@@ -55473,6 +55473,26 @@ mod tests {
     }
 
     #[test]
+    fn nlink_delta_guards_reject_overflow_and_underflow() {
+        let ino = InodeNumber(42);
+        // ── ext4 links_count (u16) ──
+        assert_eq!(OpenFs::ext4_checked_links_count_delta(5, ino, 2).unwrap(), 7);
+        assert_eq!(OpenFs::ext4_checked_links_count_delta(5, ino, -2).unwrap(), 3);
+        assert_eq!(OpenFs::ext4_checked_links_count_delta(5, ino, 0).unwrap(), 5);
+        // Overflow past u16::MAX would wrap small and free a still-linked inode.
+        assert!(OpenFs::ext4_checked_links_count_delta(u16::MAX, ino, 1).is_err());
+        // Decrement below zero would wrap huge and leak the inode forever.
+        assert!(OpenFs::ext4_checked_links_count_delta(0, ino, -1).is_err());
+        assert!(OpenFs::ext4_checked_links_count_delta(1, ino, -2).is_err());
+
+        // ── btrfs nlink (u32) ──
+        assert_eq!(OpenFs::btrfs_checked_nlink_delta(5, 42, 2).unwrap(), 7);
+        assert_eq!(OpenFs::btrfs_checked_nlink_delta(5, 42, -2).unwrap(), 3);
+        assert!(OpenFs::btrfs_checked_nlink_delta(u32::MAX, 42, 1).is_err());
+        assert!(OpenFs::btrfs_checked_nlink_delta(0, 42, -1).is_err());
+    }
+
+    #[test]
     fn ext4_max_file_size_scales_with_block_size_and_rejects_above() {
         // The extent tree addresses 2^32 logical blocks, so the max file size
         // is 2^32 * block_size: 4 TiB / 8 TiB / 16 TiB for 1K / 2K / 4K blocks.
