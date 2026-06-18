@@ -6810,6 +6810,15 @@ mod tests {
         let mut zero_len_slices = [IoSliceMut::new(&mut zero_len)];
         dev.read_vectored_exact_at(&cx, ByteOffset(2), &mut zero_len_slices)
             .expect("zero-length iovec read is a no-op");
+
+        let mut past_eof_empty_slices: [IoSliceMut<'_>; 0] = [];
+        dev.read_vectored_exact_at(&cx, ByteOffset(9), &mut past_eof_empty_slices)
+            .expect("empty iovec read past EOF is a no-op");
+
+        let mut past_eof_zero_len = [];
+        let mut past_eof_zero_len_slices = [IoSliceMut::new(&mut past_eof_zero_len)];
+        dev.read_vectored_exact_at(&cx, ByteOffset(9), &mut past_eof_zero_len_slices)
+            .expect("zero-length iovec read past EOF is a no-op");
     }
 
     #[test]
