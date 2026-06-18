@@ -45767,6 +45767,52 @@ mod tests {
     }
 
     #[test]
+    fn btrfs_dir_type_to_file_type_maps_all_codes() {
+        use ffs_btrfs::{
+            BTRFS_FT_BLKDEV, BTRFS_FT_CHRDEV, BTRFS_FT_DIR, BTRFS_FT_FIFO, BTRFS_FT_REG_FILE,
+            BTRFS_FT_SOCK, BTRFS_FT_SYMLINK,
+        };
+        // readdir_mixed_types only exercises REG_FILE/DIR/SYMLINK; pin the rest.
+        assert_eq!(
+            OpenFs::btrfs_dir_type_to_file_type(BTRFS_FT_REG_FILE),
+            FileType::RegularFile
+        );
+        assert_eq!(
+            OpenFs::btrfs_dir_type_to_file_type(BTRFS_FT_DIR),
+            FileType::Directory
+        );
+        assert_eq!(
+            OpenFs::btrfs_dir_type_to_file_type(BTRFS_FT_SYMLINK),
+            FileType::Symlink
+        );
+        assert_eq!(
+            OpenFs::btrfs_dir_type_to_file_type(BTRFS_FT_BLKDEV),
+            FileType::BlockDevice
+        );
+        assert_eq!(
+            OpenFs::btrfs_dir_type_to_file_type(BTRFS_FT_CHRDEV),
+            FileType::CharDevice
+        );
+        assert_eq!(
+            OpenFs::btrfs_dir_type_to_file_type(BTRFS_FT_FIFO),
+            FileType::Fifo
+        );
+        assert_eq!(
+            OpenFs::btrfs_dir_type_to_file_type(BTRFS_FT_SOCK),
+            FileType::Socket
+        );
+        // Unknown/invalid type codes fall back to RegularFile.
+        assert_eq!(
+            OpenFs::btrfs_dir_type_to_file_type(0),
+            FileType::RegularFile
+        );
+        assert_eq!(
+            OpenFs::btrfs_dir_type_to_file_type(0xFF),
+            FileType::RegularFile
+        );
+    }
+
+    #[test]
     fn btrfs_readdir_empty_directory_returns_dot_dotdot() {
         let entries: Vec<(&[u8], u64, u8, u32)> = vec![];
         let image = build_btrfs_readdir_image(&entries);
