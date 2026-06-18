@@ -11000,6 +11000,28 @@ mod tests {
     }
 
     #[test]
+    fn ssi_empty_write_set_is_never_a_dangerous_structure() {
+        // A read-only transaction (no writes) can never be the pivot of a
+        // write-skew; detect returns immediately without examining any records.
+        let mut reader = Transaction::new(TxnId(50), Snapshot { high: CommitSeq(0) });
+        reader.record_read(BlockNumber(0), CommitSeq(1));
+        reader.record_read(BlockNumber(1), CommitSeq(1));
+
+        // This record writes blocks the reader read (would form an incoming edge),
+        // but with no write set the reader is never the pivot.
+        let record = CommittedTxnRecord {
+            txn_id: TxnId(51),
+            commit_seq: CommitSeq(5),
+            snapshot: Snapshot { high: CommitSeq(0) },
+            write_set: BTreeSet::from([BlockNumber(0), BlockNumber(1)]),
+            read_set: [(BlockNumber(2), CommitSeq(1))].into_iter().collect(),
+        };
+        let (checks_performed, dangerous) = detect_ssi_dangerous_structure(&reader, [&record]);
+        assert_eq!(checks_performed, 0, "no records examined for a read-only txn");
+        assert!(dangerous.is_none());
+    }
+
+    #[test]
     fn ssi_span_guard_preserves_min_intersection_tiebreaks() {
         use sha2::{Digest, Sha256};
 
