@@ -79928,6 +79928,39 @@ mod tests {
     }
 
     #[test]
+    fn btrfs_logical_ino_resolves_written_extent_to_inode() {
+        let (fs, cx) = open_writable_btrfs();
+        let attr = fs
+            .create(&cx, InodeNumber(1), OsStr::new("resolved.bin"), 0o644, 0, 0)
+            .expect("create");
+        fs.write(&cx, attr.ino, 0, &[0xCD_u8; 8192]).expect("write");
+
+        // The extent's btrfs logical address — fiemap reports disk_bytenr as the
+        // physical field for btrfs.
+        let extents = fs
+            .fiemap(&cx, &mut RequestScope::empty(), attr.ino, 0, u64::MAX)
+            .expect("fiemap");
+        assert!(!extents.is_empty(), "written file must have an extent");
+        let logical = extents[0].physical;
+
+        // LOGICAL_INO must resolve that address back to the owning inode.
+        let result = fs
+            .get_btrfs_logical_ino(&cx, &mut RequestScope::empty(), logical)
+            .expect("logical_ino");
+        let elem_cnt = u64::from_le_bytes(result[8..16].try_into().unwrap());
+        assert!(
+            elem_cnt >= 1,
+            "logical_ino must resolve the extent to at least one inode ref"
+        );
+        // First (ino, offset, root) tuple immediately follows the 24-byte header.
+        let ino = u64::from_le_bytes(result[24..32].try_into().unwrap());
+        assert_eq!(
+            ino, attr.ino.0,
+            "resolved inode must be the file that owns the extent"
+        );
+    }
+
+    #[test]
     fn btrfs_logical_ino_returns_valid_container() {
         let (fs, cx) = open_writable_btrfs();
 
