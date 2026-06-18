@@ -30736,7 +30736,7 @@ impl FsOps for OpenFs {
                             self.dev
                                 .read_exact_at(cx, ByteOffset(mapping.physical), &mut buf)?;
                             let offset_in_extent =
-                                file_offset.saturating_sub(extent_start) + *extent_offset;
+                                file_offset.saturating_sub(extent_start).saturating_add(*extent_offset);
                             (buf, *compression, *num_bytes, offset_in_extent)
                         }
                     }
