@@ -55457,6 +55457,22 @@ mod tests {
     }
 
     #[test]
+    fn btrfs_checked_physical_offset_and_span_reject_overflow() {
+        // Normal add.
+        assert_eq!(OpenFs::btrfs_checked_physical_offset(1000, 24).unwrap(), 1024);
+        // base + pos overflowing u64 is rejected, not wrapped.
+        let err = OpenFs::btrfs_checked_physical_offset(u64::MAX, 1).unwrap_err();
+        assert!(matches!(err, FfsError::Corruption { .. }), "got {err:?}");
+
+        // span: a zero-length span is always fine.
+        assert!(OpenFs::btrfs_checked_physical_span(1000, 0).is_ok());
+        assert!(OpenFs::btrfs_checked_physical_span(1000, 24).is_ok());
+        // A span whose last byte overflows u64 is rejected.
+        let err = OpenFs::btrfs_checked_physical_span(u64::MAX, 2).unwrap_err();
+        assert!(matches!(err, FfsError::Corruption { .. }), "got {err:?}");
+    }
+
+    #[test]
     fn ext4_max_file_size_scales_with_block_size_and_rejects_above() {
         // The extent tree addresses 2^32 logical blocks, so the max file size
         // is 2^32 * block_size: 4 TiB / 8 TiB / 16 TiB for 1K / 2K / 4K blocks.
