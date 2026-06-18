@@ -15147,6 +15147,30 @@ mod tests {
         assert_eq!(alloc.extent_refcount(extent), 0);
     }
 
+    proptest::proptest! {
+        /// alloc_data(N) then free_extent of the returned extent must leave the
+        /// owning block group's used_bytes exactly as it was, for any size. The
+        /// existing accounting tests only check fixed sizes (4096/8192), so a
+        /// size-dependent asymmetry between alloc and free rounding would slip
+        /// through.
+        #[test]
+        fn proptest_alloc_free_restores_block_group_used_bytes(size in 1_u64..=0x8000) {
+            let mut alloc = BtrfsExtentAllocator::new(1).expect("alloc");
+            alloc.add_block_group(0x1_0000, make_data_bg(0x1_0000, 0x10_0000));
+            let before = alloc.block_group(0x1_0000).expect("bg").used_bytes;
+
+            let a = alloc.alloc_data(size).expect("alloc");
+            let after_alloc = alloc.block_group(0x1_0000).expect("bg").used_bytes;
+            proptest::prop_assert!(after_alloc > before, "alloc must consume space");
+
+            alloc
+                .free_extent(a.bytenr, a.num_bytes, false)
+                .expect("free");
+            let after_free = alloc.block_group(0x1_0000).expect("bg").used_bytes;
+            proptest::prop_assert_eq!(after_free, before, "free must restore used_bytes");
+        }
+    }
+
     #[test]
     fn flush_delayed_refs_respects_limit() {
         let mut alloc = BtrfsExtentAllocator::new(9).expect("alloc");
