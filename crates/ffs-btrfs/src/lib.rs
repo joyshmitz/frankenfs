@@ -6780,33 +6780,42 @@ impl BtrfsExtentAllocator {
         &self,
         logical: u64,
     ) -> Result<Option<u64>, BtrfsMutationError> {
-        // EXTENT_ITEM keys ordered (objectid=start_bytenr, type, offset=length);
-        // the covering extent has the greatest start bytenr <= logical.
-        let range_start = BtrfsKey {
-            objectid: 0,
-            item_type: BTRFS_ITEM_EXTENT_ITEM,
-            offset: 0,
-        };
-        let range_end = BtrfsKey {
+        // EXTENT_ITEM keys are ordered by start bytenr. The only possible
+        // covering data extent is the greatest EXTENT_ITEM whose start is
+        // <= logical. Walk floor keys backward across interleaved non-extent
+        // records instead of materializing every preceding key.
+        let mut target = BtrfsKey {
             objectid: logical,
             item_type: BTRFS_ITEM_EXTENT_ITEM,
             offset: u64::MAX,
         };
-        let items = self.extent_tree.range(&range_start, &range_end)?;
-        let mut covering = None;
-        for (key, _value) in items {
-            // The lexicographic range can include other item types for objectids
-            // below `logical`; only EXTENT_ITEMs carry a data-extent length.
-            if key.item_type != BTRFS_ITEM_EXTENT_ITEM {
-                continue;
-            }
-            let start = key.objectid;
-            let length = key.offset;
-            if start <= logical && logical < start.saturating_add(length) {
-                covering = Some(start);
+        while let Some(key) = self.extent_tree.floor_key(&target)? {
+            match key.item_type.cmp(&BTRFS_ITEM_EXTENT_ITEM) {
+                Ordering::Equal => {
+                    let start = key.objectid;
+                    let end = start.saturating_add(key.offset);
+                    return Ok((start <= logical && logical < end).then_some(start));
+                }
+                Ordering::Greater => {
+                    target = BtrfsKey {
+                        objectid: key.objectid,
+                        item_type: BTRFS_ITEM_EXTENT_ITEM,
+                        offset: u64::MAX,
+                    };
+                }
+                Ordering::Less => {
+                    let Some(previous_objectid) = key.objectid.checked_sub(1) else {
+                        return Ok(None);
+                    };
+                    target = BtrfsKey {
+                        objectid: previous_objectid,
+                        item_type: u8::MAX,
+                        offset: u64::MAX,
+                    };
+                }
             }
         }
-        Ok(covering)
+        Ok(None)
     }
 
     fn delete_backrefs_for_extent(
@@ -14894,6 +14903,23 @@ mod tests {
             .expect("add keyed ref");
 
         let mid = a.bytenr + 2048; // a byte in the middle of the extent
+        let interleaved_ref = BtrfsExtentDataRef {
+            root: 5,
+            objectid: 999,
+            offset: 0,
+            count: 1,
+        };
+        alloc
+            .extent_tree_mut()
+            .insert(
+                BtrfsKey {
+                    objectid: mid - 256,
+                    item_type: BTRFS_ITEM_EXTENT_DATA_REF,
+                    offset: 0,
+                },
+                &interleaved_ref.to_bytes(),
+            )
+            .expect("insert interleaved non-extent key");
 
         // The bug: a mid-extent address matches no EXTENT_DATA_REF because the
         // lookup keys on the exact extent start bytenr.

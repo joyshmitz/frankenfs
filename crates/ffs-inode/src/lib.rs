@@ -122,7 +122,9 @@ pub fn write_inode(
 
     // Read the block, patch the inode bytes, write back.
     let buf = dev.read_block(cx, loc.block)?;
-    let mut block_data = buf.as_slice().to_vec();
+    // `buf` is owned and used only here; move its Vec out instead of copying the
+    // whole block — the patched bytes are written back from `block_data`.
+    let mut block_data = buf.into_inner();
     if loc.byte_offset + inode_size > block_data.len() {
         return Err(FfsError::Corruption {
             block: loc.block.0,
@@ -533,7 +535,8 @@ fn free_indirect_subtree_range(
 ) -> Result<(u64, bool)> {
     cx_checkpoint(cx)?;
     let buf = dev.read_block(cx, block)?;
-    let mut data = buf.as_slice().to_vec();
+    // `buf` is owned and consumed here; move its Vec out instead of copying.
+    let mut data = buf.into_inner();
     let entry_span = ppb.saturating_pow(level - 1);
     let mut freed = 0u64;
     let mut dirty = false;
@@ -754,7 +757,8 @@ pub fn delete_inode(
     if inode.file_acl != 0 {
         let acl_block = BlockNumber(inode.file_acl);
         let buf = dev.read_block(cx, acl_block)?;
-        let mut data = buf.as_slice().to_vec();
+        // `buf` is owned and consumed here; move its Vec out instead of copying.
+        let mut data = buf.into_inner();
         if data.len() >= 32 {
             let magic = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
             if magic == 0xEA02_0000 {

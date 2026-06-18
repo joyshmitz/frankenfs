@@ -13,13 +13,15 @@
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use ffs_btrfs::{
-    BTRFS_ITEM_EXTENT_DATA, BtrfsBTree, BtrfsExtentData, BtrfsKey, InMemoryCowBtrfsTree,
+    BTRFS_BLOCK_GROUP_DATA, BTRFS_ITEM_EXTENT_DATA, BTRFS_ITEM_EXTENT_ITEM, BtrfsBTree,
+    BtrfsBlockGroupItem, BtrfsExtentAllocator, BtrfsExtentData, BtrfsKey, InMemoryCowBtrfsTree,
     parse_extent_data,
 };
 use std::hint::black_box;
 
 const INODE: u64 = 257;
 const EXTENTS: u64 = 1024;
+const RESOLVE_EXTENTS: u64 = 4096;
 const BLOCK: u64 = 4096;
 /// A representative on-disk `EXTENT_DATA` item payload size.
 const ITEM_LEN: usize = 53;
@@ -350,12 +352,92 @@ fn bench_append_no_overlap_remove_probe(c: &mut Criterion) {
     group.finish();
 }
 
+fn build_containing_extent_allocator() -> BtrfsExtentAllocator {
+    let bg_start = 0x2000_0000;
+    let mut alloc = BtrfsExtentAllocator::new(7).expect("allocator");
+    alloc.add_block_group(
+        bg_start,
+        BtrfsBlockGroupItem {
+            total_bytes: (RESOLVE_EXTENTS + 16) * BLOCK,
+            used_bytes: 0,
+            flags: BTRFS_BLOCK_GROUP_DATA,
+        },
+    );
+    for i in 0..RESOLVE_EXTENTS {
+        let bytenr = bg_start + i * BLOCK;
+        alloc
+            .insert_data_extent_item(bytenr, BLOCK, 5, INODE, i * BLOCK, 7)
+            .expect("insert extent item");
+        alloc
+            .add_data_extent_ref(bytenr, BLOCK, 5, INODE + i + 1, i * BLOCK)
+            .expect("insert interleaved keyed ref");
+    }
+    alloc
+}
+
+fn resolve_containing_extent_range_scan(alloc: &BtrfsExtentAllocator, logical: u64) -> Option<u64> {
+    let start = BtrfsKey {
+        objectid: 0,
+        item_type: BTRFS_ITEM_EXTENT_ITEM,
+        offset: 0,
+    };
+    let end = BtrfsKey {
+        objectid: logical,
+        item_type: BTRFS_ITEM_EXTENT_ITEM,
+        offset: u64::MAX,
+    };
+    let mut covering = None;
+    for (key, _) in alloc.extent_tree().range(&start, &end).expect("range") {
+        if key.item_type != BTRFS_ITEM_EXTENT_ITEM {
+            continue;
+        }
+        if key.objectid <= logical && logical < key.objectid.saturating_add(key.offset) {
+            covering = Some(key.objectid);
+        }
+    }
+    covering
+}
+
+fn bench_resolve_containing_extent_floor(c: &mut Criterion) {
+    let alloc = build_containing_extent_allocator();
+    let logical = 0x2000_0000 + (RESOLVE_EXTENTS - 1) * BLOCK + BLOCK / 2;
+    let old = resolve_containing_extent_range_scan(&alloc, logical);
+    let new = alloc
+        .resolve_containing_data_extent(logical)
+        .expect("resolve containing extent");
+    assert_eq!(
+        old, new,
+        "floor-key predecessor lookup must match range scan"
+    );
+
+    let mut group = c.benchmark_group("resolve_containing_extent_floor_ab");
+    group.bench_function("range_from_zero_scan", |b| {
+        b.iter(|| {
+            black_box(resolve_containing_extent_range_scan(
+                black_box(&alloc),
+                black_box(logical),
+            ))
+        });
+    });
+    group.bench_function("floor_key_predecessor", |b| {
+        b.iter(|| {
+            black_box(
+                alloc
+                    .resolve_containing_data_extent(black_box(logical))
+                    .expect("resolve containing extent"),
+            )
+        });
+    });
+    group.finish();
+}
+
 criterion_group!(
     extent_fetch,
     bench_extent_fetch,
     bench_extent_fetch_eof,
     bench_range_vs_range_with,
     bench_read_file_extent_parse,
-    bench_append_no_overlap_remove_probe
+    bench_append_no_overlap_remove_probe,
+    bench_resolve_containing_extent_floor
 );
 criterion_main!(extent_fetch);
