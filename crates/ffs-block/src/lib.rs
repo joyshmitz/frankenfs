@@ -666,9 +666,15 @@ pub trait BlockDevice: Send + Sync {
         let count = u64::try_from(data.len() / bs)
             .map_err(|_| FfsError::Format("block count does not fit u64".to_owned()))?;
         if let Some(last_delta) = count.checked_sub(1) {
-            start.0.checked_add(last_delta).ok_or_else(|| {
+            let last_block = start.0.checked_add(last_delta).ok_or_else(|| {
                 FfsError::Format("contiguous write block range overflow".to_owned())
             })?;
+            let block_count = self.block_count();
+            if last_block >= block_count {
+                return Err(FfsError::Format(format!(
+                    "block out of range: block={last_block} block_count={block_count}"
+                )));
+            }
         }
         for (idx, chunk) in data.chunks(bs).enumerate() {
             let delta = u64::try_from(idx)
@@ -7399,6 +7405,61 @@ mod tests {
             "expected block-size Format error, got {err:?}"
         );
         assert_eq!(dst, [0xAA; 4]);
+    }
+
+    #[derive(Debug, Default)]
+    struct RangeCheckedWriteBlockDevice {
+        writes: AtomicUsize,
+    }
+
+    impl BlockDevice for RangeCheckedWriteBlockDevice {
+        fn read_block(&self, _cx: &Cx, _block: BlockNumber) -> Result<BlockBuf> {
+            Ok(BlockBuf::new(vec![0_u8; 4]))
+        }
+
+        fn write_block(&self, _cx: &Cx, block: BlockNumber, _data: &[u8]) -> Result<()> {
+            if block.0 >= self.block_count() {
+                return Err(FfsError::Format(format!(
+                    "block out of range: block={} block_count={}",
+                    block.0,
+                    self.block_count()
+                )));
+            }
+            self.writes.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+
+        fn block_size(&self) -> u32 {
+            4
+        }
+
+        fn block_count(&self) -> u64 {
+            2
+        }
+
+        fn sync(&self, _cx: &Cx) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn default_contiguous_write_rejects_later_oob_before_partial_write() {
+        let cx = Cx::for_testing();
+        let dev = RangeCheckedWriteBlockDevice::default();
+        let data = [0xA5_u8; 8];
+
+        let err = dev
+            .write_contiguous_blocks(&cx, BlockNumber(1), &data)
+            .expect_err("out-of-range later block should fail before writes");
+
+        assert!(
+            matches!(err, FfsError::Format(ref message)
+                if message.contains("block out of range")
+                    && message.contains("block=2")
+                    && message.contains("block_count=2")),
+            "expected out-of-range Format error, got {err:?}"
+        );
+        assert_eq!(dev.writes.load(Ordering::Relaxed), 0);
     }
 
     #[test]
