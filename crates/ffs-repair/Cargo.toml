@@ -45,6 +45,10 @@ harness = false
 name = "scrub_scan_io_overlap"
 harness = false
 
+[[bench]]
+name = "recovery_build_writeback_blocks"
+harness = false
+
 [[bin]]
 name = "ffs-demo"
 path = "src/bin/ffs-demo.rs"
