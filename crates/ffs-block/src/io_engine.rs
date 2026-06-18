@@ -492,7 +492,14 @@ mod tests {
             buf: vec![0_u8; 1],
         }]);
 
-        assert!(matches!(completions[0], IoCompletion::Error(_)));
+        let IoCompletion::Error(err) = &completions[0] else {
+            panic!("expected Error, got {:?}", completions[0]);
+        };
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("overflows usize"),
+            "expected the range-overflow error, got: {msg}"
+        );
         let stats = engine.stats();
         assert_eq!(stats.batches, 1);
         assert_eq!(stats.reads, 1);
@@ -508,7 +515,14 @@ mod tests {
             data: vec![0_u8; 1],
         }]);
 
-        assert!(matches!(completions[0], IoCompletion::Error(_)));
+        let IoCompletion::Error(err) = &completions[0] else {
+            panic!("expected Error, got {:?}", completions[0]);
+        };
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("overflows usize"),
+            "expected the range-overflow error, got: {msg}"
+        );
         let stats = engine.stats();
         assert_eq!(stats.batches, 1);
         assert_eq!(stats.writes, 1);
