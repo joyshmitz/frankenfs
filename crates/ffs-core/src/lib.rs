@@ -69413,6 +69413,47 @@ mod tests {
     }
 
     #[test]
+    fn btrfs_fallocate_collapse_insert_reject_misaligned_and_out_of_bounds() {
+        let (fs, cx) = open_writable_btrfs();
+        let attr = fs
+            .create(&cx, InodeNumber(1), OsStr::new("falloc-shift.bin"), 0o644, 0, 0)
+            .expect("create");
+        // 4 sectors of 4096 bytes.
+        fs.write(&cx, attr.ino, 0, &[0xAB_u8; 16384]).expect("write");
+
+        let collapse = libc::FALLOC_FL_COLLAPSE_RANGE;
+        let insert = libc::FALLOC_FL_INSERT_RANGE;
+
+        // Misaligned offset is rejected for both shift operations.
+        assert_eq!(
+            fs.fallocate(&cx, attr.ino, 100, 4096, collapse)
+                .unwrap_err()
+                .to_errno(),
+            libc::EINVAL
+        );
+        assert_eq!(
+            fs.fallocate(&cx, attr.ino, 100, 4096, insert)
+                .unwrap_err()
+                .to_errno(),
+            libc::EINVAL
+        );
+        // A collapse that reaches EOF is rejected.
+        assert_eq!(
+            fs.fallocate(&cx, attr.ino, 0, 16384, collapse)
+                .unwrap_err()
+                .to_errno(),
+            libc::EINVAL
+        );
+        // An insert offset at/past EOF is rejected.
+        assert_eq!(
+            fs.fallocate(&cx, attr.ino, 16384, 4096, insert)
+                .unwrap_err()
+                .to_errno(),
+            libc::EINVAL
+        );
+    }
+
+    #[test]
     fn btrfs_write_fallocate_extends_file() {
         let _guard = log_contract_guard();
         let (fs, cx) = open_writable_btrfs();
