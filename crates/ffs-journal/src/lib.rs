@@ -7171,6 +7171,13 @@ mod tests {
         assert!(!journal_seq_is_newer(exactly_half_range, current));
         assert!(!journal_seq_is_newer(one_behind, current));
         assert!(!journal_seq_is_newer(current, one_ahead));
+
+        // is_newer_or_equal accepts equal (above) and otherwise matches
+        // is_newer for newer / older / half-range candidates.
+        assert!(journal_seq_is_newer_or_equal(one_ahead, current));
+        assert!(journal_seq_is_newer_or_equal(last_newer, current));
+        assert!(!journal_seq_is_newer_or_equal(one_behind, current));
+        assert!(!journal_seq_is_newer_or_equal(exactly_half_range, current));
     }
 
     #[test]
