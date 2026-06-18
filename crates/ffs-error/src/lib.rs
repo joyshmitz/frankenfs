@@ -468,6 +468,36 @@ mod tests {
         assert_ne!(unsup.to_errno(), geom.to_errno());
     }
 
+    #[test]
+    fn to_errno_maps_all_direct_variants() {
+        // The direct (non-Io, non-already-tested) FfsError variants must each map
+        // to their POSIX errno — this is the boundary userspace observes.
+        assert_eq!(
+            FfsError::Corruption {
+                block: 0,
+                detail: String::new()
+            }
+            .to_errno(),
+            libc::EIO
+        );
+        assert_eq!(FfsError::RepairFailed(String::new()).to_errno(), libc::EIO);
+        assert_eq!(FfsError::Parse(String::new()).to_errno(), libc::EINVAL);
+        assert_eq!(
+            FfsError::MvccConflict { tx: 0, block: 0 }.to_errno(),
+            libc::EAGAIN
+        );
+        assert_eq!(FfsError::Cancelled.to_errno(), libc::EINTR);
+        assert_eq!(FfsError::NoSpace.to_errno(), libc::ENOSPC);
+        assert_eq!(FfsError::NotFound(String::new()).to_errno(), libc::ENOENT);
+        assert_eq!(FfsError::PermissionDenied.to_errno(), libc::EACCES);
+        assert_eq!(FfsError::ReadOnly.to_errno(), libc::EROFS);
+        assert_eq!(FfsError::NotDirectory.to_errno(), libc::ENOTDIR);
+        assert_eq!(FfsError::IsDirectory.to_errno(), libc::EISDIR);
+        assert_eq!(FfsError::NotEmpty.to_errno(), libc::ENOTEMPTY);
+        assert_eq!(FfsError::NameTooLong.to_errno(), libc::ENAMETOOLONG);
+        assert_eq!(FfsError::Exists.to_errno(), libc::EEXIST);
+    }
+
     // ── Exhaustive Display formatting tests ─────────────────────────────
 
     #[test]
