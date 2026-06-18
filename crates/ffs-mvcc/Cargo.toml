@@ -44,6 +44,10 @@ name = "read_visible"
 harness = false
 
 [[bench]]
+name = "read_block_cow_owned"
+harness = false
+
+[[bench]]
 name = "write_batch"
 harness = false
 

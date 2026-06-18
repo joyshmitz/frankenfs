@@ -4105,7 +4105,12 @@ impl<D: BlockDevice> BlockDevice for MvccBlockDevice<D> {
         {
             let guard = self.store.read();
             if let Some(bytes) = guard.read_visible(block, snap) {
-                return Ok(BlockBuf::new(bytes.to_vec()));
+                // `read_visible` returns `Cow::Owned` for any compressed version
+                // (`resolve_data_with` decompresses into a fresh Vec). `into_owned`
+                // MOVES that Vec instead of cloning it (`to_vec` would allocate +
+                // copy the whole block again); for an uncompressed `Cow::Borrowed`
+                // it clones exactly as before. Byte-identical, strictly cheaper.
+                return Ok(BlockBuf::new(bytes.into_owned()));
             }
         }
         // Fall back to base device (no lock held).
