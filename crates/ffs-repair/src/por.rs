@@ -349,11 +349,12 @@ pub fn verify_responses<F>(
     key: &PorKey,
     challenges: &ChallengeSet,
     responses: &ResponseSet,
-    mut read_block: F,
+    read_block: F,
 ) -> VerificationResult
 where
-    F: FnMut(u64) -> Option<Vec<u8>>,
+    F: Fn(u64) -> Option<Vec<u8>> + Sync + Send,
 {
+    use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
     // Check nonce matches.
     #[expect(clippy::cast_possible_truncation)] // challenge count bounded by u32 total_blocks
     let num_challenges = challenges.challenges.len() as u32;
@@ -366,10 +367,6 @@ where
             audit_passed: false,
         };
     }
-
-    let mut passed = 0_u32;
-    let mut failed = 0_u32;
-    let mut failed_indices = Vec::new();
 
     let challenged_indices: std::collections::HashSet<u64> =
         challenges.challenges.iter().map(|c| c.index).collect();
@@ -408,40 +405,49 @@ where
         }
     }
 
-    for challenge in &challenges.challenges {
-        if duplicate_response_indices.contains(&challenge.index) {
-            failed += 1;
-            failed_indices.push(challenge.index);
-            continue;
-        }
+    // Each challenge does an independent block read (I/O) plus two BLAKE3 hashes
+    // (block hash + keyed authenticator recompute). Evaluate them across the
+    // rayon pool — blocking reads park their workers so the latencies overlap and
+    // the hashes run across cores — producing a per-challenge verdict
+    // (`None` = pass, `Some(index)` = fail) in challenge order. The shared
+    // `response_map` / `duplicate_response_indices` / `key` are read-only. The
+    // serial fold below preserves `failed_indices` order and the passed/failed
+    // counts byte-identically to the old loop.
+    let verdicts: Vec<Option<u64>> = challenges
+        .challenges
+        .par_iter()
+        .map(|challenge| {
+            if duplicate_response_indices.contains(&challenge.index) {
+                return Some(challenge.index);
+            }
+            let Some(response) = response_map.get(&challenge.index) else {
+                return Some(challenge.index);
+            };
+            let Some(block_data) = read_block(challenge.index) else {
+                return Some(challenge.index);
+            };
+            let block_hash = *blake3::hash(&block_data).as_bytes();
+            if block_hash != response.block_hash {
+                return Some(challenge.index);
+            }
+            if verify_authenticator(key, challenge.index, &block_data, &response.authenticator) {
+                None
+            } else {
+                Some(challenge.index)
+            }
+        })
+        .collect();
 
-        let Some(response) = response_map.get(&challenge.index) else {
-            // Missing response = failure.
-            failed += 1;
-            failed_indices.push(challenge.index);
-            continue;
-        };
-
-        // Read the actual block data.
-        let Some(block_data) = read_block(challenge.index) else {
-            failed += 1;
-            failed_indices.push(challenge.index);
-            continue;
-        };
-
-        let block_hash = *blake3::hash(&block_data).as_bytes();
-        if block_hash != response.block_hash {
-            failed += 1;
-            failed_indices.push(challenge.index);
-            continue;
-        }
-
-        // Verify the authenticator.
-        if verify_authenticator(key, challenge.index, &block_data, &response.authenticator) {
-            passed += 1;
-        } else {
-            failed += 1;
-            failed_indices.push(challenge.index);
+    let mut passed = 0_u32;
+    let mut failed = 0_u32;
+    let mut failed_indices = Vec::new();
+    for verdict in verdicts {
+        match verdict {
+            None => passed += 1,
+            Some(index) => {
+                failed += 1;
+                failed_indices.push(index);
+            }
         }
     }
 
