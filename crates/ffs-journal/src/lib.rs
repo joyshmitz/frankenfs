@@ -2572,10 +2572,16 @@ pub fn replay_native_cow(
 }
 
 fn resolve_region_block(region: JournalRegion, index: u64) -> Result<BlockNumber> {
-    region.resolve(index).ok_or_else(|| {
-        FfsError::Format(format!(
+    if index >= region.blocks {
+        return Err(FfsError::Format(format!(
             "journal block index {index} out of range (region size={})",
             region.blocks
+        )));
+    }
+    region.start.0.checked_add(index).map(BlockNumber).ok_or_else(|| {
+        FfsError::Format(format!(
+            "journal block index {index} overflows absolute block number from start {}",
+            region.start.0
         ))
     })
 }
@@ -5216,6 +5222,26 @@ mod tests {
         };
         assert_eq!(region.resolve(10), None);
         assert_eq!(region.resolve(u64::MAX), None);
+    }
+
+    #[test]
+    fn resolve_region_block_reports_absolute_block_overflow() {
+        let start = u64::MAX - 1;
+        let region = JournalRegion {
+            start: BlockNumber(start),
+            blocks: 3,
+        };
+
+        assert_eq!(region.resolve(2), None);
+
+        let err = resolve_region_block(region, 2).expect_err("absolute block overflow");
+        assert!(
+            matches!(err, FfsError::Format(ref message)
+                if message.contains("overflows absolute block number")
+                    && message.contains(&start.to_string())
+                    && message.contains('2')),
+            "expected absolute-overflow Format error, got {err:?}"
+        );
     }
 
     #[test]
