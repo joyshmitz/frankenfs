@@ -1933,6 +1933,126 @@ mod tests {
             prop_assert_eq!(terminator, [0, 0, 0, 0].as_slice());
         }
 
+        /// The allocation-saving existence probe must stay isomorphic to the
+        /// public getxattr path for visible user xattrs, including mixed
+        /// inline/external storage.
+        #[test]
+        fn proptest_xattr_exists_matches_get_for_user_entries(
+            entries in prop::collection::btree_map(
+                xattr_suffix_strategy(),
+                xattr_value_strategy(),
+                1..6,
+            ),
+        ) {
+            let mut inode = make_inode(80);
+            let mut external = vec![0_u8; 4096];
+            let write_access = XattrWriteAccess { is_owner: true, ..Default::default() };
+            let read_access = XattrReadAccess::default();
+            let mut full_names = Vec::new();
+
+            let stored = set_xattr(
+                &mut inode,
+                Some(&mut external),
+                "user.inline_control",
+                b"i",
+                write_access,
+            )
+            .map_err(|_| {
+                proptest::test_runner::TestCaseError::fail(
+                    "inline control xattr must be writable",
+                )
+            })?;
+            prop_assert_eq!(stored, XattrStorage::Inline);
+            full_names.push("user.inline_control".to_owned());
+
+            let external_value = [b'x'; 128];
+            let stored = set_xattr(
+                &mut inode,
+                Some(&mut external),
+                "user.external_control",
+                &external_value,
+                write_access,
+            )
+            .map_err(|_| {
+                proptest::test_runner::TestCaseError::fail(
+                    "external control xattr must be writable",
+                )
+            })?;
+            prop_assert_eq!(stored, XattrStorage::External);
+            full_names.push("user.external_control".to_owned());
+
+            for (suffix, value) in &entries {
+                let full_name = format!("user.{suffix}");
+                set_xattr(
+                    &mut inode,
+                    Some(&mut external),
+                    &full_name,
+                    value,
+                    write_access,
+                )
+                .map_err(|_| {
+                    proptest::test_runner::TestCaseError::fail(
+                        "generated user xattr must be writable",
+                    )
+                })?;
+                full_names.push(full_name);
+            }
+
+            for full_name in &full_names {
+                let got = get_xattr_for_access(
+                    &inode,
+                    Some(&external),
+                    full_name,
+                    read_access,
+                )
+                .map_err(|_| {
+                    proptest::test_runner::TestCaseError::fail(
+                        "get_xattr_for_access must read written xattr",
+                    )
+                })?
+                .is_some();
+                let exists = xattr_exists_for_access(
+                    &inode,
+                    Some(&external),
+                    full_name,
+                    read_access,
+                )
+                .map_err(|_| {
+                    proptest::test_runner::TestCaseError::fail(
+                        "xattr_exists_for_access must probe written xattr",
+                    )
+                })?;
+                prop_assert_eq!(exists, got);
+            }
+
+            let absent_name = "user.__absent__";
+            let got_absent = get_xattr_for_access(
+                &inode,
+                Some(&external),
+                absent_name,
+                read_access,
+            )
+            .map_err(|_| {
+                proptest::test_runner::TestCaseError::fail(
+                    "get_xattr_for_access must handle absent user xattr",
+                )
+            })?
+            .is_some();
+            let exists_absent = xattr_exists_for_access(
+                &inode,
+                Some(&external),
+                absent_name,
+                read_access,
+            )
+            .map_err(|_| {
+                proptest::test_runner::TestCaseError::fail(
+                    "xattr_exists_for_access must handle absent user xattr",
+                )
+            })?;
+            prop_assert_eq!(got_absent, false);
+            prop_assert_eq!(exists_absent, got_absent);
+        }
+
         /// Removing all xattrs one-by-one leaves list empty.
         #[test]
         fn proptest_remove_all_leaves_empty(
