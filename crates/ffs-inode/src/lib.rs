@@ -1388,6 +1388,80 @@ mod tests {
         assert_eq!(groups[0].free_inodes, free_before + 1);
     }
 
+    /// truncate_indirect_blocks must also free a DOUBLE-indirect subtree
+    /// (i_block[13]): the data block, the intermediate single-indirect block,
+    /// and the double-indirect root, zeroing the slot. The single-indirect
+    /// coverage below never exercises the nested level-2 recursion in
+    /// free_indirect_subtree_range (bd-xmh5g.216).
+    #[test]
+    fn truncate_indirect_blocks_frees_double_indirect_subtree() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let geo = make_geometry();
+        let mut groups = make_groups(&geo);
+        // Keep group 0's block bitmap off the gdt block so descriptor
+        // persistence does not clobber it mid-test.
+        groups[0].block_bitmap_block = BlockNumber(10);
+
+        // Double-indirect chain: i_block[13] -> root 2600 -> single 2601 -> data 2602.
+        let mut bitmap = vec![0u8; 4096];
+        for &b in &[2600usize, 2601, 2602] {
+            bitmap[b / 8] |= 1 << (b % 8);
+        }
+        dev.write_block(&cx, BlockNumber(10), &bitmap).unwrap();
+        groups[0].free_blocks = geo.blocks_per_group - 3;
+
+        // Double-indirect root 2600: entry[0] -> single-indirect block 2601.
+        let mut dind = vec![0u8; 4096];
+        dind[0..4].copy_from_slice(&2601u32.to_le_bytes());
+        dev.write_block(&cx, BlockNumber(2600), &dind).unwrap();
+        // Single-indirect 2601: entry[0] -> data block 2602.
+        let mut sind = vec![0u8; 4096];
+        sind[0..4].copy_from_slice(&2602u32.to_le_bytes());
+        dev.write_block(&cx, BlockNumber(2601), &sind).unwrap();
+
+        let mut inode = representative_inode();
+        inode.flags = 0; // legacy indirect (not extents, not inline)
+        inode.mode = 0o100_644; // regular file
+        inode.blocks = 3 * (4096 / 512);
+        inode.size = 1100 * 4096; // spans into the double-indirect range (base 1036)
+        let mut eb = vec![0u8; 60];
+        eb[52..56].copy_from_slice(&2600u32.to_le_bytes()); // i_block[13] -> double-indirect root
+        inode.extent_bytes = eb.into();
+
+        let freed = truncate_indirect_blocks(
+            &cx,
+            &dev,
+            &geo,
+            &mut groups,
+            &mut inode,
+            12, // free everything from logical block 12 onward
+            &mock_pctx(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            freed, 3,
+            "frees data + intermediate single-indirect + double-indirect root"
+        );
+        assert_eq!(
+            &inode.extent_bytes[52..56],
+            &[0, 0, 0, 0],
+            "double-indirect root slot cleared"
+        );
+
+        // All three blocks must now be free in the group bitmap.
+        let bm_buf = dev.read_block(&cx, BlockNumber(10)).unwrap();
+        let bm_after = bm_buf.as_slice();
+        for &b in &[2600usize, 2601, 2602] {
+            assert_eq!(
+                bm_after[b / 8] & (1 << (b % 8)),
+                0,
+                "block {b} must be freed in the bitmap"
+            );
+        }
+    }
+
     /// bd-c7t59 follow-up: truncate_indirect_blocks (used by orphan recovery to
     /// complete an interrupted truncate of a legacy indirect file) frees the data
     /// and now-empty indirect-metadata blocks at/after the cutoff, zeroes the freed
