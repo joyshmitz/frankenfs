@@ -5582,6 +5582,72 @@ mod tests {
     }
 
     #[test]
+    fn numa_topology_rejects_uncovered_branches() {
+        let geo = make_geometry();
+
+        // EmptyGroupRange: a node range with group_count == 0.
+        let empty_range = observed_numa_topology(vec![NumaNodeGroupRange {
+            node_id: NumaNodeId(0),
+            first_group: GroupNumber(0),
+            group_count: 0,
+        }]);
+        assert_eq!(
+            validate_numa_allocation_topology(&geo, &empty_range, 1_000).unwrap_err(),
+            NumaTopologyError::EmptyGroupRange {
+                node_id: NumaNodeId(0),
+                first_group: GroupNumber(0),
+            }
+        );
+
+        // ExcessiveEvidenceWindow: declared max_age_secs above the hard cap.
+        let excessive = NumaAllocationTopology {
+            source: NumaTopologySource::Observed {
+                observed_at_unix_secs: 1_000,
+                max_age_secs: NUMA_TOPOLOGY_MAX_AGE_SECS + 1,
+                node_groups: vec![NumaNodeGroupRange {
+                    node_id: NumaNodeId(0),
+                    first_group: GroupNumber(0),
+                    group_count: 4,
+                }],
+            },
+            evidence_claim: NumaEvidenceClaim::AdvisoryOnly,
+            downstream_consumers: required_numa_consumers(),
+        };
+        assert_eq!(
+            validate_numa_allocation_topology(&geo, &excessive, 1_000).unwrap_err(),
+            NumaTopologyError::ExcessiveEvidenceWindow {
+                max_age_secs: NUMA_TOPOLOGY_MAX_AGE_SECS + 1,
+            }
+        );
+
+        // EmptyUnknownReason: Unknown source carrying a blank reason.
+        let blank_unknown = NumaAllocationTopology {
+            source: NumaTopologySource::Unknown {
+                reason: "   ".to_string(),
+            },
+            evidence_claim: NumaEvidenceClaim::AdvisoryOnly,
+            downstream_consumers: required_numa_consumers(),
+        };
+        assert_eq!(
+            validate_numa_allocation_topology(&geo, &blank_unknown, 1_000).unwrap_err(),
+            NumaTopologyError::EmptyUnknownReason
+        );
+
+        // EmptyGeometry: a zero-group geometry is rejected before the source is read.
+        let mut empty_geo = make_geometry();
+        empty_geo.group_count = 0;
+        let valid = observed_numa_topology(vec![NumaNodeGroupRange {
+            node_id: NumaNodeId(0),
+            first_group: GroupNumber(0),
+            group_count: 4,
+        }]);
+        assert_eq!(
+            validate_numa_allocation_topology(&empty_geo, &valid, 1_000).unwrap_err(),
+            NumaTopologyError::EmptyGeometry
+        );
+    }
+
+    #[test]
     fn numa_topology_rejects_invalid_contracts() {
         let geo = make_geometry();
 
