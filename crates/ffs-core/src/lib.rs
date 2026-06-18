@@ -73307,6 +73307,36 @@ mod tests {
     }
 
     #[test]
+    fn btrfs_delete_reclaims_data_blocks() {
+        let (fs, cx) = open_writable_btrfs();
+        let parent = InodeNumber(1);
+        let free_before = fs.statfs(&cx, parent).expect("statfs before").blocks_free;
+
+        let attr = fs
+            .create(&cx, parent, OsStr::new("big.bin"), 0o644, 0, 0)
+            .expect("create");
+        fs.write(&cx, attr.ino, 0, &[0xAB_u8; 128 * 1024])
+            .expect("write");
+        let free_after_write = fs.statfs(&cx, parent).expect("statfs after write").blocks_free;
+        assert!(
+            free_after_write < free_before,
+            "write must consume data blocks ({free_after_write} < {free_before})"
+        );
+
+        // Removing the file's only name must return its data blocks to the pool.
+        fs.unlink(&cx, parent, OsStr::new("big.bin"))
+            .expect("remove");
+        let free_after_delete = fs
+            .statfs(&cx, parent)
+            .expect("statfs after delete")
+            .blocks_free;
+        assert!(
+            free_after_delete > free_after_write,
+            "delete must reclaim data blocks ({free_after_delete} > {free_after_write})"
+        );
+    }
+
+    #[test]
     fn btrfs_removing_one_hardlink_keeps_data_for_other() {
         let (fs, cx) = open_writable_btrfs();
         let parent = InodeNumber(1);
