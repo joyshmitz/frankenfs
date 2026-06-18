@@ -995,6 +995,54 @@ mod tests {
     }
 
     #[test]
+    fn prune_preserves_read_visible_data_after_chain_head_compaction() {
+        // With dedup on, a repeated identical write becomes an `Identical`
+        // version; pruning makes it the chain head, which `make_chain_head_full`
+        // must MATERIALIZE to `Full` (the path bd-xmh5g.395 changed to move the
+        // resolved Cow via `into_owned`). The invariant under test holds
+        // regardless of that detail: pruning a version chain must never change
+        // the bytes visible at any retained snapshot — the conformance guard the
+        // GC compaction path previously lacked.
+        let policy = CompressionPolicy {
+            dedup_identical: true,
+            max_chain_length: None,
+            algo: compression::CompressionAlgo::None,
+        };
+        let store = ShardedMvccStore::with_compression_policy(8, policy);
+        let block = BlockNumber(42);
+        let d = vec![0xAB_u8; 100];
+        let e = vec![0xCD_u8; 100];
+
+        let mut t1 = store.begin();
+        t1.stage_write(block, d.clone());
+        store.commit(t1).expect("commit 1");
+
+        let mut t2 = store.begin();
+        t2.stage_write(block, d.clone()); // identical -> deduped to Identical
+        let seq2 = store.commit(t2).expect("commit 2");
+
+        let mut t3 = store.begin();
+        t3.stage_write(block, e.clone());
+        let seq3 = store.commit(t3).expect("commit 3");
+
+        // Pre-prune visibility: D at seq2 (via the Identical), E at seq3.
+        assert_eq!(store.read_visible(block, Snapshot { high: seq2 }), Some(d.clone()));
+        assert_eq!(store.read_visible(block, Snapshot { high: seq3 }), Some(e.clone()));
+
+        // Trim everything at or before seq2: the Identical@seq2 becomes the head
+        // and is materialized by make_chain_head_full; the older Full is drained.
+        store.prune_versions_older_than(seq2);
+
+        // The visible bytes must be byte-identical after compaction.
+        assert_eq!(
+            store.read_visible(block, Snapshot { high: seq2 }),
+            Some(d),
+            "chain-head compaction must preserve the bytes visible at the retained snapshot"
+        );
+        assert_eq!(store.read_visible(block, Snapshot { high: seq3 }), Some(e));
+    }
+
+    #[test]
     fn sharded_store_rounds_and_bounds_shard_count() {
         assert_eq!(ShardedMvccStore::new(0).shard_count(), 1);
         assert_eq!(ShardedMvccStore::new(3).shard_count(), 4);
