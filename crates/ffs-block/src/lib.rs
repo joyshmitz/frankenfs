@@ -822,6 +822,18 @@ pub trait VectoredBlockDevice: BlockDevice {
                 block.0
             )));
         }
+        let block_size = self.block_size() as usize;
+        if block_size == 0 && !blocks.is_empty() {
+            return Err(FfsError::Format(
+                "write_vectored: block size must be nonzero".to_owned(),
+            ));
+        }
+        if let Some(buf) = bufs.iter().find(|buf| buf.len() != block_size) {
+            return Err(FfsError::Format(format!(
+                "write_vectored block size mismatch: got={} expected={block_size}",
+                buf.len()
+            )));
+        }
         trace!(
             target: "ffs::block::io",
             event = "write_vectored",
@@ -7494,7 +7506,13 @@ mod tests {
             Ok(BlockBuf::new(vec![0_u8; 4]))
         }
 
-        fn write_block(&self, _cx: &Cx, block: BlockNumber, _data: &[u8]) -> Result<()> {
+        fn write_block(&self, _cx: &Cx, block: BlockNumber, data: &[u8]) -> Result<()> {
+            if data.len() != 4 {
+                return Err(FfsError::Format(format!(
+                    "write size mismatch: got={} expected=4",
+                    data.len()
+                )));
+            }
             if block.0 >= self.block_count() {
                 return Err(FfsError::Format(format!(
                     "block out of range: block={} block_count={}",
@@ -7535,6 +7553,27 @@ mod tests {
                     && message.contains("block=2")
                     && message.contains("block_count=2")),
             "expected out-of-range Format error, got {err:?}"
+        );
+        assert_eq!(dev.writes.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn default_vectored_write_rejects_short_buffer_before_partial_write() {
+        let cx = Cx::for_testing();
+        let dev = RangeCheckedWriteBlockDevice::default();
+        let blocks = [BlockNumber(0), BlockNumber(1)];
+        let bufs = [BlockBuf::new(vec![0xAA; 4]), BlockBuf::new(vec![0xBB; 2])];
+
+        let err = dev
+            .write_vectored(&blocks, &bufs, &cx)
+            .expect_err("short later vectored buffer should fail before writes");
+
+        assert!(
+            matches!(err, FfsError::Format(ref message)
+                if message.contains("write_vectored block size mismatch")
+                    && message.contains("got=2")
+                    && message.contains("expected=4")),
+            "expected vectored write size Format error, got {err:?}"
         );
         assert_eq!(dev.writes.load(Ordering::Relaxed), 0);
     }
