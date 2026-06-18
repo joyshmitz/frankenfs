@@ -55610,6 +55610,20 @@ mod tests {
     }
 
     #[test]
+    fn validate_single_path_component_rejects_special_names() {
+        // A normal component and the maximum 255-byte component are accepted.
+        assert!(OpenFs::validate_single_path_component(b"normal").is_ok());
+        assert!(OpenFs::validate_single_path_component(&[b'x'; 255]).is_ok());
+        // Empty, the special "." / ".." names, a NUL-bearing name, and a
+        // 256-byte name are all rejected.
+        assert!(OpenFs::validate_single_path_component(b"").is_err());
+        assert!(OpenFs::validate_single_path_component(b".").is_err());
+        assert!(OpenFs::validate_single_path_component(b"..").is_err());
+        assert!(OpenFs::validate_single_path_component(b"a\0b").is_err());
+        assert!(OpenFs::validate_single_path_component(&[b'x'; 256]).is_err());
+    }
+
+    #[test]
     fn nlink_delta_guards_reject_overflow_and_underflow() {
         let ino = InodeNumber(42);
         // ── ext4 links_count (u16) ──
