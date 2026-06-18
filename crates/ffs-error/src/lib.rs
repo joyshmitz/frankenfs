@@ -341,6 +341,32 @@ mod tests {
     }
 
     #[test]
+    fn errno_mapping_covers_io_error_kinds() {
+        // An io::Error built with a kind (no raw OS errno) must fall through to
+        // the ErrorKind -> errno table, not the generic EIO. A regression here
+        // would surface the wrong errno to FUSE/userspace (e.g. EIO for a
+        // missing file instead of ENOENT).
+        use std::io::ErrorKind;
+        let cases: &[(ErrorKind, libc::c_int)] = &[
+            (ErrorKind::NotFound, libc::ENOENT),
+            (ErrorKind::PermissionDenied, libc::EACCES),
+            (ErrorKind::AlreadyExists, libc::EEXIST),
+            (ErrorKind::WouldBlock, libc::EAGAIN),
+            (ErrorKind::InvalidInput, libc::EINVAL),
+            (ErrorKind::InvalidData, libc::EINVAL),
+            (ErrorKind::TimedOut, libc::ETIMEDOUT),
+            (ErrorKind::Interrupted, libc::EINTR),
+            (ErrorKind::WriteZero, libc::EIO),
+            (ErrorKind::UnexpectedEof, libc::EIO),
+        ];
+        for (kind, expected) in cases {
+            let err = FfsError::Io(std::io::Error::new(*kind, "synthetic"));
+            // Synthetic io errors carry no raw OS errno, so the kind table runs.
+            assert_eq!(err.to_errno(), *expected, "wrong errno for ErrorKind {kind:?}");
+        }
+    }
+
+    #[test]
     fn io_error_preserves_raw_os_error() {
         let raw = std::io::Error::from_raw_os_error(libc::EPERM);
         let ffs = FfsError::Io(raw);
