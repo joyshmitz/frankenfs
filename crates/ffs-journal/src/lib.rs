@@ -2517,6 +2517,15 @@ pub fn recover_native_cow(
                 });
             }
             DecodedCowRecord::Commit { commit_seq } => {
+                if let Some(last_commit_seq) = commit_order
+                    .last()
+                    .copied()
+                    .filter(|last_commit_seq| commit_seq < *last_commit_seq)
+                {
+                    return Err(FfsError::Format(format!(
+                        "COW commit sequence regressed: {commit_seq} after {last_commit_seq}"
+                    )));
+                }
                 if committed.insert(commit_seq) {
                     commit_order.push(commit_seq);
                 }
@@ -6639,6 +6648,39 @@ mod tests {
         assert_eq!(recovered.len(), 2);
         assert_eq!(recovered[0].commit_seq, CommitSeq(1));
         assert_eq!(recovered[1].commit_seq, CommitSeq(2));
+    }
+
+    #[test]
+    fn native_cow_recovery_rejects_regressing_commit_sequence() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(512, 128);
+        let region = JournalRegion {
+            start: BlockNumber(40),
+            blocks: 32,
+        };
+
+        let mut journal = NativeCowJournal::open(&cx, &dev, region).expect("open");
+        journal
+            .append_write(&cx, &dev, CommitSeq(2), BlockNumber(10), &[0x22; 64])
+            .expect("seq2 write");
+        journal
+            .append_commit(&cx, &dev, CommitSeq(2))
+            .expect("seq2 commit");
+        journal
+            .append_write(&cx, &dev, CommitSeq(1), BlockNumber(11), &[0x11; 64])
+            .expect("seq1 write");
+        journal
+            .append_commit(&cx, &dev, CommitSeq(1))
+            .expect("seq1 commit");
+
+        let err = recover_native_cow(&cx, &dev, region).expect_err("regressing commit sequence");
+        assert!(
+            matches!(err, FfsError::Format(ref message)
+                if message.contains("commit sequence regressed")
+                    && message.contains('1')
+                    && message.contains('2')),
+            "expected regressing-sequence Format error, got {err:?}"
+        );
     }
 
     #[test]
