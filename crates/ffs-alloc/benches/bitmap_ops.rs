@@ -27,6 +27,17 @@ fn make_bitmap() -> Vec<u8> {
     bm
 }
 
+/// Build an almost-full bitmap where a valid 32-block allocation exists only
+/// near the end. This stresses contiguous-run search without changing the
+/// ext4-scale 4 KiB bitmap shape.
+fn make_late_free_cluster_bitmap() -> Vec<u8> {
+    let mut bm = vec![0xFF_u8; 4096];
+    for i in 32000..32032 {
+        bm[i / 8] &= !(1 << (i % 8));
+    }
+    bm
+}
+
 /// Build a fragmented bitmap dominated by mixed bytes, where byte-level run
 /// summaries should beat per-bit inspection.
 fn make_fragmented_bitmap() -> Vec<u8> {
@@ -196,6 +207,54 @@ fn bench_find_contiguous(c: &mut Criterion) {
         });
     });
 
+    group.finish();
+}
+
+fn succinct_find_contiguous_bit_scan(bitmap: &[u8], count: u32, n: u32) -> Option<u32> {
+    if n == 0 {
+        return Some(0);
+    }
+
+    let mut run_start = 0_u32;
+    let mut run_len = 0_u32;
+    for pos in 0..count {
+        let byte = bitmap[(pos / 8) as usize];
+        if (byte >> (pos % 8)) & 1 == 1 {
+            run_start = pos + 1;
+            run_len = 0;
+        } else {
+            run_len += 1;
+            if run_len >= n {
+                return Some(run_start);
+            }
+        }
+    }
+    None
+}
+
+fn bench_succinct_find_contiguous_word_vs_bit(c: &mut Criterion) {
+    let bm = make_late_free_cluster_bitmap();
+    let sb = SuccinctBitmap::build(&bm, 32768);
+    let n = 32;
+    debug_assert_eq!(
+        succinct_find_contiguous_bit_scan(&bm, 32768, n),
+        sb.find_contiguous(n),
+        "old bit scan and new broadword succinct scans must agree"
+    );
+
+    let mut group = c.benchmark_group("succinct_find_contiguous_ab");
+    group.bench_function("old_bit_scan", |b| {
+        b.iter(|| {
+            black_box(succinct_find_contiguous_bit_scan(
+                black_box(&bm),
+                32768,
+                black_box(n),
+            ))
+        });
+    });
+    group.bench_function("broadword_zero_run", |b| {
+        b.iter(|| black_box(sb.find_contiguous(black_box(n))));
+    });
     group.finish();
 }
 
@@ -864,6 +923,7 @@ criterion_group!(
     bench_find_free,
     bench_succinct_find_free_direct_vs_rank_select,
     bench_find_contiguous,
+    bench_succinct_find_contiguous_word_vs_bit,
     bench_largest_free_run,
     bench_largest_free_run_word_vs_halfword,
     bench_largest_free_run_cache_vs_bitmap_scan,

@@ -359,8 +359,8 @@ impl SuccinctBitmap {
 
     /// Find `n` contiguous zero bits in the bitmap.
     ///
-    /// Uses word-level skip acceleration: if a 64-bit word is all-ones,
-    /// skip it entirely.
+    /// Uses a broadword zero-run detector over 64-bit words, preserving the
+    /// earliest-run tie breaking of the bit-by-bit scan.
     #[must_use]
     pub fn find_contiguous(&self, n: u32) -> Option<u32> {
         if n == 0 {
@@ -373,49 +373,89 @@ impl SuccinctBitmap {
         let mut run_start = 0_u32;
         let mut run_len = 0_u32;
 
-        // Process in 64-bit chunks for fast skipping.
         let full_words = self.len / 64;
 
         for word_idx in 0..full_words {
             let word = self.read_word(word_idx);
-            if word == u64::MAX {
-                // All ones — no free bits in this word.
-                run_start = (word_idx + 1) * 64;
-                run_len = 0;
-                continue;
-            }
-
-            // Scan individual bits in partial word.
-            let base = word_idx * 64;
-            for bit in 0..64 {
-                let pos = base + bit;
-                if (word >> bit) & 1 == 1 {
-                    run_start = pos + 1;
-                    run_len = 0;
-                } else {
-                    run_len += 1;
-                    if run_len >= n {
-                        return Some(run_start);
-                    }
-                }
+            if let Some(found) = Self::apply_contiguous_word_zero_run(
+                word,
+                word_idx * 64,
+                n,
+                &mut run_start,
+                &mut run_len,
+            ) {
+                return Some(found);
             }
         }
 
         // Handle remaining bits.
         let remaining_start = full_words * 64;
-        for pos in remaining_start..self.len {
-            if self.get_bit(pos) {
-                run_start = pos + 1;
-                run_len = 0;
-            } else {
-                run_len += 1;
-                if run_len >= n {
-                    return Some(run_start);
-                }
+        let remaining_bits = self.len - remaining_start;
+        if remaining_bits > 0 {
+            let mut word = self.read_word(full_words);
+            word |= u64::MAX << remaining_bits;
+            if let Some(found) = Self::apply_contiguous_word_zero_run(
+                word,
+                remaining_start,
+                n,
+                &mut run_start,
+                &mut run_len,
+            ) {
+                return Some(found);
             }
         }
 
         None
+    }
+
+    fn apply_contiguous_word_zero_run(
+        word: u64,
+        base: u32,
+        n: u32,
+        run_start: &mut u32,
+        run_len: &mut u32,
+    ) -> Option<u32> {
+        if word == 0 {
+            if *run_len == 0 {
+                *run_start = base;
+            }
+            *run_len = run_len.saturating_add(64);
+            return (*run_len >= n).then_some(*run_start);
+        }
+
+        let prefix = word.trailing_zeros();
+        if prefix > 0 && run_len.saturating_add(prefix) >= n {
+            return Some(*run_start);
+        }
+
+        if n <= 64 {
+            let free = !word;
+            let starts = Self::zero_run_starts_at_least(free, n);
+            if starts != 0 {
+                return Some(base + starts.trailing_zeros());
+            }
+        }
+
+        let suffix = word.leading_zeros();
+        if suffix > 0 {
+            *run_start = base + (64 - suffix);
+            *run_len = suffix;
+        } else {
+            *run_start = base + 64;
+            *run_len = 0;
+        }
+        None
+    }
+
+    fn zero_run_starts_at_least(mut free: u64, n: u32) -> u64 {
+        debug_assert!((1..=64).contains(&n));
+        let mut span = 1;
+        while span < n {
+            let step = span.min(n - span);
+            free &= free >> step;
+            span += step;
+        }
+        free
     }
 
     fn select1_in_block(&self, block_idx: usize, mut remaining: u32) -> Option<u32> {
@@ -496,6 +536,7 @@ impl SuccinctBitmap {
     }
 
     /// Read a single bit.
+    #[cfg(test)]
     #[must_use]
     #[inline]
     fn get_bit(&self, pos: u32) -> bool {
@@ -1040,6 +1081,27 @@ mod tests {
             .find(|&pos| !sb.get_bit(pos))
     }
 
+    fn naive_find_contiguous(sb: &SuccinctBitmap, n: u32) -> Option<u32> {
+        if n == 0 {
+            return Some(0);
+        }
+
+        let mut run_start = 0_u32;
+        let mut run_len = 0_u32;
+        for pos in 0..sb.len() {
+            if sb.get_bit(pos) {
+                run_start = pos + 1;
+                run_len = 0;
+            } else {
+                run_len += 1;
+                if run_len >= n {
+                    return Some(run_start);
+                }
+            }
+        }
+        None
+    }
+
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(128))]
 
@@ -1169,6 +1231,15 @@ mod tests {
                     prop_assert!(!sb.get_bit(i), "bit {} in contiguous run [{}, {}) is set", i, start, start + n);
                 }
             }
+        }
+
+        #[test]
+        fn proptest_find_contiguous_matches_naive_earliest_run(
+            (ref bitmap, len) in bitmap_strategy(),
+            n in 0_u32..160,
+        ) {
+            let sb = SuccinctBitmap::build(bitmap, len);
+            prop_assert_eq!(sb.find_contiguous(n), naive_find_contiguous(&sb, n));
         }
     }
 }
