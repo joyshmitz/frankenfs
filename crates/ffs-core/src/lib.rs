@@ -63153,6 +63153,33 @@ mod tests {
         );
     }
 
+    #[test]
+    fn btrfs_xattr_survives_data_overwrite() {
+        let (fs, cx) = open_writable_btrfs();
+        let root = InodeNumber(1);
+        let attr = fs
+            .create(&cx, root, OsStr::new("f.dat"), 0o644, 0, 0)
+            .expect("create");
+        fs.write(&cx, attr.ino, 0, b"original").expect("write data");
+        fs.setxattr(&cx, attr.ino, "user.tag", b"KEEPME", XattrSetMode::Set)
+            .expect("setxattr");
+
+        // Overwrite the data; the separate XATTR_ITEM must survive the COW of the
+        // data/inode items.
+        fs.write(&cx, attr.ino, 0, b"OVERWRITTEN")
+            .expect("overwrite data");
+
+        let val = fs.getxattr(&cx, attr.ino, "user.tag").expect("getxattr");
+        assert_eq!(
+            val,
+            Some(b"KEEPME".to_vec()),
+            "xattr must survive a data overwrite"
+        );
+        // The overwrite itself took effect (test is not vacuous).
+        let data = fs.read(&cx, attr.ino, 0, 11).expect("read data");
+        assert_eq!(&data, b"OVERWRITTEN");
+    }
+
     /// Setting (and removing) several xattrs across namespaces on a btrfs file
     /// must leave the image btrfs-check-clean — the only on-disk validation of the
     /// XATTR_ITEM encoding: each xattr is stored as an XATTR_ITEM keyed by the
