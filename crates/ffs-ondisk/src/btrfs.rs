@@ -17,8 +17,9 @@ const BTRFS_MAX_LEVEL: u8 = 7;
 const BTRFS_MAX_SUPERBLOCK_SIZE_FIELD: u32 = 256 * 1024;
 const BTRFS_SUPER_LABEL_OFFSET: usize = 0x12B;
 const BTRFS_SUPER_LABEL_LEN: usize = 256;
+const BTRFS_SYS_CHUNK_ARRAY_MAX_U32: u32 = 2048;
 const BTRFS_SYS_CHUNK_ARRAY_OFFSET: usize = 0x32B;
-const BTRFS_SYS_CHUNK_ARRAY_MAX: usize = 2048;
+const BTRFS_SYS_CHUNK_ARRAY_MAX: usize = BTRFS_SYS_CHUNK_ARRAY_MAX_U32 as usize;
 /// Size of a btrfs_disk_key on disk (objectid:u64 + type:u8 + offset:u64).
 const BTRFS_DISK_KEY_SIZE: usize = 17;
 /// Minimum chunk size: header fields before the stripe array (48 bytes).
@@ -277,8 +278,11 @@ impl BtrfsSuperblock {
         buf[0x98..0x9C].copy_from_slice(&self.nodesize.to_le_bytes());
         // stripesize at 0x9C
         buf[0x9C..0xA0].copy_from_slice(&self.stripesize.to_le_bytes());
+        let array_len = self.sys_chunk_array.len().min(BTRFS_SYS_CHUNK_ARRAY_MAX);
+        let array_size = u32::try_from(array_len).unwrap_or(BTRFS_SYS_CHUNK_ARRAY_MAX_U32);
+
         // sys_chunk_array_size at 0xA0
-        buf[0xA0..0xA4].copy_from_slice(&self.sys_chunk_array_size.to_le_bytes());
+        buf[0xA0..0xA4].copy_from_slice(&array_size.to_le_bytes());
         // chunk_root_generation at 0xA4
         buf[0xA4..0xAC].copy_from_slice(&self.chunk_root_generation.to_le_bytes());
         // compat_flags at 0xAC
@@ -301,7 +305,6 @@ impl BtrfsSuperblock {
         buf[BTRFS_SUPER_LABEL_OFFSET..BTRFS_SUPER_LABEL_OFFSET + label_len]
             .copy_from_slice(&label_bytes[..label_len]);
         // sys_chunk_array at 0x32B
-        let array_len = self.sys_chunk_array.len().min(BTRFS_SYS_CHUNK_ARRAY_MAX);
         buf[BTRFS_SYS_CHUNK_ARRAY_OFFSET..BTRFS_SYS_CHUNK_ARRAY_OFFSET + array_len]
             .copy_from_slice(&self.sys_chunk_array[..array_len]);
 
@@ -3888,6 +3891,45 @@ mod tests {
             // `csum` is recomputed by `to_bytes`, not a round-trip input.
             sb.csum = parsed.csum;
             prop_assert_eq!(parsed, sb);
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+
+        /// Serializer canonicalization: `sys_chunk_array_size` on disk must
+        /// describe the payload bytes actually emitted, not a stale public field
+        /// value carried by the in-memory struct (bd-6wubw).
+        #[test]
+        fn btrfs_proptest_superblock_to_bytes_canonicalizes_sys_chunk_array_size(
+            sys_chunk_array in proptest::collection::vec(
+                any::<u8>(),
+                0..=(BTRFS_SYS_CHUNK_ARRAY_MAX + 64),
+            ),
+            stale_size in any::<u32>(),
+        ) {
+            let mut sb = representative_btrfs_superblock();
+            sb.sys_chunk_array_size = stale_size;
+            sb.sys_chunk_array = sys_chunk_array;
+
+            let serialized = sb.to_bytes();
+            let expected_len = sb.sys_chunk_array.len().min(BTRFS_SYS_CHUNK_ARRAY_MAX);
+            let expected_size =
+                u32::try_from(expected_len).expect("sys_chunk_array max fits in u32");
+            let serialized_size = u32::from_le_bytes(
+                serialized[0xA0..0xA4]
+                    .try_into()
+                    .expect("sys_chunk_array_size field is four bytes"),
+            );
+            prop_assert_eq!(serialized_size, expected_size);
+
+            let parsed = BtrfsSuperblock::parse_superblock_region(&serialized)
+                .expect("canonical serialized superblock must re-parse");
+            prop_assert_eq!(parsed.sys_chunk_array_size, expected_size);
+            prop_assert_eq!(
+                parsed.sys_chunk_array.as_slice(),
+                &sb.sys_chunk_array[..expected_len],
+            );
         }
     }
 
