@@ -15696,6 +15696,10 @@ mod tests {
 
         // A wrong block number must not verify (the physical block is folded in).
         assert!(!verify_xattr_block_checksum(block, SEED, BLOCK_NR + 1));
+
+        // A wrong csum_seed (a different filesystem) must not verify either, so a
+        // valid xattr-block checksum cannot replay across filesystems.
+        assert!(!verify_xattr_block_checksum(block, SEED ^ 0x1, BLOCK_NR));
     }
 
     // ── Device number tests ──────────────────────────────────────────
