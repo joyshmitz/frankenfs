@@ -644,6 +644,13 @@ pub trait BlockDevice: Send + Sync {
                 "write_contiguous_blocks: data length must be a multiple of block size".to_owned(),
             ));
         }
+        let count = u64::try_from(data.len() / bs)
+            .map_err(|_| FfsError::Format("block count does not fit u64".to_owned()))?;
+        if let Some(last_delta) = count.checked_sub(1) {
+            start.0.checked_add(last_delta).ok_or_else(|| {
+                FfsError::Format("contiguous write block range overflow".to_owned())
+            })?;
+        }
         for (idx, chunk) in data.chunks(bs).enumerate() {
             let delta = u64::try_from(idx)
                 .map_err(|_| FfsError::Format("block index does not fit u64".to_owned()))?;
@@ -6578,17 +6585,23 @@ mod tests {
     #[derive(Debug)]
     struct PermissiveBlockDevice {
         reads: Mutex<Vec<BlockNumber>>,
+        writes: Mutex<Vec<BlockNumber>>,
     }
 
     impl PermissiveBlockDevice {
         fn new() -> Self {
             Self {
                 reads: Mutex::new(Vec::new()),
+                writes: Mutex::new(Vec::new()),
             }
         }
 
         fn read_sequence(&self) -> Vec<BlockNumber> {
             self.reads.lock().clone()
+        }
+
+        fn write_sequence(&self) -> Vec<BlockNumber> {
+            self.writes.lock().clone()
         }
     }
 
@@ -6598,7 +6611,8 @@ mod tests {
             Ok(BlockBuf::new(vec![0x5A; 4]))
         }
 
-        fn write_block(&self, _cx: &Cx, _block: BlockNumber, _data: &[u8]) -> Result<()> {
+        fn write_block(&self, _cx: &Cx, block: BlockNumber, _data: &[u8]) -> Result<()> {
+            self.writes.lock().push(block);
             Ok(())
         }
 
@@ -6905,6 +6919,23 @@ mod tests {
         );
         assert!(dev.read_sequence().is_empty());
         assert_eq!(dst, [0xAA; 8]);
+    }
+
+    #[test]
+    fn default_contiguous_write_rejects_overflow_before_partial_writes() {
+        let cx = Cx::for_testing();
+        let dev = PermissiveBlockDevice::new();
+
+        let err = dev
+            .write_contiguous_blocks(&cx, BlockNumber(u64::MAX), &[0xAA; 8])
+            .expect_err("overflowing contiguous write should fail before scalar writes");
+
+        assert!(
+            matches!(err, FfsError::Format(ref message)
+                if message.contains("contiguous write block range overflow")),
+            "expected contiguous-write overflow Format error, got {err:?}"
+        );
+        assert!(dev.write_sequence().is_empty());
     }
 
     #[test]
