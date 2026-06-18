@@ -565,6 +565,13 @@ pub trait BlockDevice: Send + Sync {
         bufs: &mut [BlockBuf],
     ) -> Result<()> {
         cx_checkpoint(cx)?;
+        let count = u64::try_from(bufs.len())
+            .map_err(|_| FfsError::Format("block count does not fit u64".to_owned()))?;
+        if let Some(last_delta) = count.checked_sub(1) {
+            start.0.checked_add(last_delta).ok_or_else(|| {
+                FfsError::Format("contiguous read block range overflow".to_owned())
+            })?;
+        }
         for (idx, buf) in bufs.iter_mut().enumerate() {
             let delta = u64::try_from(idx)
                 .map_err(|_| FfsError::Format("block index does not fit u64".to_owned()))?;
@@ -6562,6 +6569,46 @@ mod tests {
     }
 
     #[derive(Debug)]
+    struct PermissiveBlockDevice {
+        reads: Mutex<Vec<BlockNumber>>,
+    }
+
+    impl PermissiveBlockDevice {
+        fn new() -> Self {
+            Self {
+                reads: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn read_sequence(&self) -> Vec<BlockNumber> {
+            self.reads.lock().clone()
+        }
+    }
+
+    impl BlockDevice for PermissiveBlockDevice {
+        fn read_block(&self, _cx: &Cx, block: BlockNumber) -> Result<BlockBuf> {
+            self.reads.lock().push(block);
+            Ok(BlockBuf::new(vec![0x5A; 4]))
+        }
+
+        fn write_block(&self, _cx: &Cx, _block: BlockNumber, _data: &[u8]) -> Result<()> {
+            Ok(())
+        }
+
+        fn block_size(&self) -> u32 {
+            4
+        }
+
+        fn block_count(&self) -> u64 {
+            u64::MAX
+        }
+
+        fn sync(&self, _cx: &Cx) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[derive(Debug)]
     struct CountingBlockDevice<D: BlockDevice> {
         inner: D,
         reads: AtomicUsize,
@@ -6812,6 +6859,26 @@ mod tests {
 
         assert_eq!(dev.inner().read_count(), 0);
         assert_eq!(dev.inner().write_count(), 0);
+    }
+
+    #[test]
+    fn default_contiguous_read_rejects_overflow_before_partial_reads() {
+        let cx = Cx::for_testing();
+        let dev = PermissiveBlockDevice::new();
+        let mut bufs = vec![BlockBuf::new(vec![0xAA; 4]), BlockBuf::new(vec![0xBB; 4])];
+
+        let err = dev
+            .read_contiguous_blocks(&cx, BlockNumber(u64::MAX), &mut bufs)
+            .expect_err("overflowing contiguous read should fail before scalar reads");
+
+        assert!(
+            matches!(err, FfsError::Format(ref message)
+                if message.contains("contiguous read block range overflow")),
+            "expected contiguous-read overflow Format error, got {err:?}"
+        );
+        assert!(dev.read_sequence().is_empty());
+        assert_eq!(bufs[0].as_slice(), &[0xAA; 4]);
+        assert_eq!(bufs[1].as_slice(), &[0xBB; 4]);
     }
 
     #[test]
