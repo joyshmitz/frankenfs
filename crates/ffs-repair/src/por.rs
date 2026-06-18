@@ -303,14 +303,23 @@ pub struct VerificationResult {
 pub fn respond_to_challenges<F>(
     challenges: &ChallengeSet,
     auth_table: &AuthenticatorTable,
-    mut read_block: F,
+    read_block: F,
 ) -> ResponseSet
 where
-    F: FnMut(u64) -> Option<Vec<u8>>,
+    F: Fn(u64) -> Option<Vec<u8>> + Sync + Send,
 {
+    use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
+
+    // Each challenge does an independent block read (I/O) plus a full-block
+    // BLAKE3 hash (CPU). Answer them across the rayon pool: blocking reads park
+    // their workers so the read latencies overlap, and the hashes run across
+    // cores. `filter_map` has no early-return (a failed read / missing
+    // authenticator yields `None`, dropping that challenge), and rayon's
+    // `collect` preserves the relative order of the surviving responses, so the
+    // result is byte-identical to the serial `iter().filter_map()`.
     let responses = challenges
         .challenges
-        .iter()
+        .par_iter()
         .filter_map(|ch| {
             let block_data = read_block(ch.index)?;
             let block_hash = *blake3::hash(&block_data).as_bytes();
