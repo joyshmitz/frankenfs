@@ -328,6 +328,12 @@ pub trait ByteDevice: Send + Sync {
         false
     }
 
+    /// Returns true when `read_vectored_exact_at` leaves every destination
+    /// buffer byte-for-byte unchanged whenever it returns `Err`.
+    fn preserves_read_vectored_destinations_on_error(&self) -> bool {
+        false
+    }
+
     /// Read exactly `buf.len()` bytes from `offset` into `buf`.
     fn read_exact_at(&self, cx: &Cx, offset: ByteOffset, buf: &mut [u8]) -> Result<()>;
 
@@ -461,6 +467,10 @@ impl ByteDevice for FileByteDevice {
         true
     }
 
+    fn preserves_read_vectored_destinations_on_error(&self) -> bool {
+        true
+    }
+
     fn read_exact_at(&self, cx: &Cx, offset: ByteOffset, buf: &mut [u8]) -> Result<()> {
         cx_checkpoint(cx)?;
         if buf.is_empty() {
@@ -520,8 +530,7 @@ impl ByteDevice for FileByteDevice {
         }
 
         let mut read_buf = vec![0_u8; total_len];
-        self.file
-            .read_exact_at(read_buf.as_mut_slice(), offset.0)?;
+        self.file.read_exact_at(read_buf.as_mut_slice(), offset.0)?;
         let mut copied = 0_usize;
         for buf in bufs {
             let len = buf.len();
@@ -1061,6 +1070,19 @@ impl<D: ByteDevice> BlockDevice for ByteBlockDevice<D> {
             .len()
             .checked_mul(block_size)
             .ok_or_else(|| FfsError::Format("contiguous read length overflow".to_owned()))?;
+        if self.inner.preserves_read_vectored_destinations_on_error()
+            && bufs.iter().all(|buf| buf.len() == block_size)
+        {
+            let mut slices: Vec<IoSliceMut<'_>> = bufs
+                .iter_mut()
+                .map(|buf| IoSliceMut::new(buf.make_mut()))
+                .collect();
+            self.inner
+                .read_vectored_exact_at(cx, ByteOffset(offset), &mut slices)?;
+            cx_checkpoint(cx)?;
+            return Ok(());
+        }
+
         let mut read_buf = vec![0_u8; total_len];
         self.inner
             .read_exact_at(cx, ByteOffset(offset), read_buf.as_mut_slice())?;
@@ -6681,6 +6703,106 @@ mod tests {
     }
 
     #[derive(Debug)]
+    struct TrustedVectoredByteDevice {
+        bytes: Mutex<Vec<u8>>,
+        fail_read: bool,
+        read_exact_count: AtomicUsize,
+        read_vectored_count: AtomicUsize,
+        last_iovec_ptrs: Mutex<Vec<usize>>,
+    }
+
+    impl TrustedVectoredByteDevice {
+        fn new(bytes: Vec<u8>, fail_read: bool) -> Self {
+            Self {
+                bytes: Mutex::new(bytes),
+                fail_read,
+                read_exact_count: AtomicUsize::new(0),
+                read_vectored_count: AtomicUsize::new(0),
+                last_iovec_ptrs: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn read_exact_count(&self) -> usize {
+            self.read_exact_count.load(Ordering::Relaxed)
+        }
+
+        fn read_vectored_count(&self) -> usize {
+            self.read_vectored_count.load(Ordering::Relaxed)
+        }
+
+        fn last_iovec_ptrs(&self) -> Vec<usize> {
+            self.last_iovec_ptrs.lock().clone()
+        }
+    }
+
+    impl ByteDevice for TrustedVectoredByteDevice {
+        fn len_bytes(&self) -> u64 {
+            self.bytes.lock().len() as u64
+        }
+
+        fn supports_vectored_reads(&self) -> bool {
+            true
+        }
+
+        fn preserves_read_vectored_destinations_on_error(&self) -> bool {
+            true
+        }
+
+        fn read_exact_at(&self, _cx: &Cx, offset: ByteOffset, buf: &mut [u8]) -> Result<()> {
+            self.read_exact_count.fetch_add(1, Ordering::Relaxed);
+            let offset = usize::try_from(offset.0)
+                .map_err(|_| FfsError::Format("offset overflow".into()))?;
+            let end = offset
+                .checked_add(buf.len())
+                .ok_or_else(|| FfsError::Format("range overflow".into()))?;
+            let bytes = self.bytes.lock();
+            if end > bytes.len() {
+                return Err(FfsError::Format("oob".into()));
+            }
+            buf.copy_from_slice(&bytes[offset..end]);
+            Ok(())
+        }
+
+        fn read_vectored_exact_at(
+            &self,
+            _cx: &Cx,
+            offset: ByteOffset,
+            bufs: &mut [IoSliceMut<'_>],
+        ) -> Result<()> {
+            self.read_vectored_count.fetch_add(1, Ordering::Relaxed);
+            *self.last_iovec_ptrs.lock() = bufs.iter().map(|buf| buf.as_ptr() as usize).collect();
+            if self.fail_read {
+                return Err(FfsError::Format(
+                    "injected trusted vectored read failure".to_owned(),
+                ));
+            }
+
+            let mut offset = usize::try_from(offset.0)
+                .map_err(|_| FfsError::Format("offset overflow".into()))?;
+            let bytes = self.bytes.lock();
+            for buf in bufs {
+                let end = offset
+                    .checked_add(buf.len())
+                    .ok_or_else(|| FfsError::Format("range overflow".into()))?;
+                if end > bytes.len() {
+                    return Err(FfsError::Format("oob".into()));
+                }
+                (**buf).copy_from_slice(&bytes[offset..end]);
+                offset = end;
+            }
+            Ok(())
+        }
+
+        fn write_all_at(&self, _cx: &Cx, _offset: ByteOffset, _buf: &[u8]) -> Result<()> {
+            Ok(())
+        }
+
+        fn sync(&self, _cx: &Cx) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[derive(Debug)]
     struct ScalarOnlyByteDevice {
         bytes: Mutex<Vec<u8>>,
         read_calls: Mutex<Vec<(ByteOffset, usize)>>,
@@ -7159,6 +7281,59 @@ mod tests {
     }
 
     #[test]
+    fn byte_block_device_trusted_vectored_contiguous_blocks_reuses_sized_buffers() {
+        let cx = Cx::for_testing();
+        let mem = TrustedVectoredByteDevice::new(vec![0, 1, 2, 3, 4, 5, 6, 7], false);
+        let dev = ByteBlockDevice::new(mem, 4).expect("device");
+        let mut bufs = vec![BlockBuf::new(vec![0xAA; 4]), BlockBuf::new(vec![0xBB; 4])];
+        let ptrs_before: Vec<usize> = bufs
+            .iter()
+            .map(|buf| buf.as_slice().as_ptr() as usize)
+            .collect();
+
+        dev.read_contiguous_blocks(&cx, BlockNumber(0), &mut bufs)
+            .expect("trusted vectored contiguous read");
+
+        assert_eq!(bufs[0].as_slice(), &[0, 1, 2, 3]);
+        assert_eq!(bufs[1].as_slice(), &[4, 5, 6, 7]);
+        assert_eq!(dev.inner().read_exact_count(), 0);
+        assert_eq!(dev.inner().read_vectored_count(), 1);
+        assert_eq!(dev.inner().last_iovec_ptrs(), ptrs_before);
+        let ptrs_after: Vec<usize> = bufs
+            .iter()
+            .map(|buf| buf.as_slice().as_ptr() as usize)
+            .collect();
+        assert_eq!(ptrs_after, ptrs_before);
+    }
+
+    #[test]
+    fn byte_block_device_trusted_vectored_contiguous_blocks_preserves_buffers_on_error() {
+        let cx = Cx::for_testing();
+        let mem = TrustedVectoredByteDevice::new(vec![0, 1, 2, 3, 4, 5, 6, 7], true);
+        let dev = ByteBlockDevice::new(mem, 4).expect("device");
+        let mut bufs = vec![BlockBuf::new(vec![0xAA; 4]), BlockBuf::new(vec![0xBB; 4])];
+        let ptrs_before: Vec<usize> = bufs
+            .iter()
+            .map(|buf| buf.as_slice().as_ptr() as usize)
+            .collect();
+
+        let err = dev
+            .read_contiguous_blocks(&cx, BlockNumber(0), &mut bufs)
+            .expect_err("trusted vectored read failure should preserve buffers");
+
+        assert!(
+            matches!(err, FfsError::Format(ref message)
+                if message.contains("injected trusted vectored read failure")),
+            "expected trusted vectored Format error, got {err:?}"
+        );
+        assert_eq!(bufs[0].as_slice(), &[0xAA; 4]);
+        assert_eq!(bufs[1].as_slice(), &[0xBB; 4]);
+        assert_eq!(dev.inner().read_exact_count(), 0);
+        assert_eq!(dev.inner().read_vectored_count(), 1);
+        assert_eq!(dev.inner().last_iovec_ptrs(), ptrs_before);
+    }
+
+    #[test]
     fn byte_block_device_empty_contiguous_ops_are_noops_at_invalid_start() {
         let cx = Cx::for_testing();
         let mem = MemoryByteDevice::new(16);
@@ -7273,9 +7448,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("empty-read-only-write.img");
         std::fs::write(&path, [1_u8, 2, 3, 4]).expect("seed file");
-        let mut permissions = std::fs::metadata(&path)
-            .expect("metadata")
-            .permissions();
+        let mut permissions = std::fs::metadata(&path).expect("metadata").permissions();
         permissions.set_readonly(true);
         std::fs::set_permissions(&path, permissions).expect("set read-only permissions");
 

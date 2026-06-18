@@ -17,6 +17,10 @@
 //! * `read_contiguous_into_trusted_direct` — the post-bd-xmh5g.383 shape for
 //!   byte devices that already preserve read destinations on error: skip the
 //!   outer safety staging buffer and let the device fill `out` directly.
+//! * `read_contiguous_blocks_trusted_vectored` — the bd-xmh5g.392 shape for
+//!   callers that already supplied correctly sized `BlockBuf`s: issue one
+//!   trusted vectored read directly into those buffers and skip the whole-run
+//!   staging Vec inside `ByteBlockDevice`.
 //!
 //! Both deposit byte-identical data into `out`; the delta isolates exactly the
 //! eliminated allocation + copy traffic. Running both in one binary keeps the
@@ -39,13 +43,19 @@ const SPAN: usize = BLOCK_SIZE as usize * BLOCKS;
 struct MemByteDevice {
     bytes: Mutex<Vec<u8>>,
     preserves_read_destination_on_error: bool,
+    preserves_vectored_destinations_on_error: bool,
 }
 
 impl MemByteDevice {
-    fn new(size: usize, preserves_read_destination_on_error: bool) -> Self {
+    fn new(
+        size: usize,
+        preserves_read_destination_on_error: bool,
+        preserves_vectored_destinations_on_error: bool,
+    ) -> Self {
         Self {
             bytes: Mutex::new(vec![0u8; size]),
             preserves_read_destination_on_error,
+            preserves_vectored_destinations_on_error,
         }
     }
 }
@@ -65,6 +75,10 @@ impl ByteDevice for MemByteDevice {
 
     fn preserves_read_exact_at_destination_on_error(&self) -> bool {
         self.preserves_read_destination_on_error
+    }
+
+    fn preserves_read_vectored_destinations_on_error(&self) -> bool {
+        self.preserves_vectored_destinations_on_error
     }
 
     fn read_exact_at(&self, _cx: &Cx, offset: ByteOffset, buf: &mut [u8]) -> Result<()> {
@@ -107,16 +121,24 @@ impl ByteDevice for MemByteDevice {
     }
 }
 
-fn make_device(preserves_read_destination_on_error: bool) -> ByteBlockDevice<MemByteDevice> {
+fn make_device(
+    preserves_read_destination_on_error: bool,
+    preserves_vectored_destinations_on_error: bool,
+) -> ByteBlockDevice<MemByteDevice> {
     let byte_len = BLOCK_SIZE as usize * (BLOCKS + 1);
-    let mem = MemByteDevice::new(byte_len, preserves_read_destination_on_error);
+    let mem = MemByteDevice::new(
+        byte_len,
+        preserves_read_destination_on_error,
+        preserves_vectored_destinations_on_error,
+    );
     ByteBlockDevice::new(mem, BLOCK_SIZE).expect("device")
 }
 
 fn bench_read_contiguous(c: &mut Criterion) {
     let cx = Cx::for_testing();
-    let staged_dev = make_device(false);
-    let trusted_dev = make_device(true);
+    let staged_dev = make_device(false, false);
+    let trusted_dev = make_device(true, false);
+    let trusted_vectored_dev = make_device(false, true);
     let bs = BLOCK_SIZE as usize;
 
     // Isomorphism: both paths fill `out` with identical bytes.
@@ -136,6 +158,14 @@ fn bench_read_contiguous(c: &mut Criterion) {
     trusted_dev
         .read_contiguous_into(&cx, BlockNumber(0), &mut out_direct)
         .expect("trusted contiguous into");
+    let mut out_vectored_blocks = vec![0_u8; SPAN];
+    let mut vectored_bufs: Vec<BlockBuf> = (0..BLOCKS).map(|_| BlockBuf::zeroed(bs)).collect();
+    trusted_vectored_dev
+        .read_contiguous_blocks(&cx, BlockNumber(0), &mut vectored_bufs)
+        .expect("trusted vectored contiguous blocks");
+    for (idx, buf) in vectored_bufs.iter().enumerate() {
+        out_vectored_blocks[idx * bs..(idx + 1) * bs].copy_from_slice(buf.as_slice());
+    }
     assert_eq!(
         out_old, out_staged,
         "staged read_contiguous_into must match blocks+copy"
@@ -143,6 +173,10 @@ fn bench_read_contiguous(c: &mut Criterion) {
     assert_eq!(
         out_old, out_direct,
         "trusted direct read_contiguous_into must match blocks+copy"
+    );
+    assert_eq!(
+        out_old, out_vectored_blocks,
+        "trusted vectored read_contiguous_blocks must match blocks+copy"
     );
 
     let mut group = c.benchmark_group("read_contiguous_1mib");
@@ -198,6 +232,22 @@ fn bench_read_contiguous(c: &mut Criterion) {
             trusted_dev
                 .read_contiguous_into(black_box(&cx), BlockNumber(0), &mut out)
                 .unwrap();
+            black_box(out)
+        });
+    });
+    // New trusted scatter path: callers that already own correctly sized
+    // `BlockBuf`s avoid the whole-run staging allocation and per-block copy
+    // inside ByteBlockDevice while preserving error all-or-nothing semantics.
+    group.bench_function("read_contiguous_blocks_trusted_vectored", |b| {
+        b.iter(|| {
+            let mut out = vec![0_u8; SPAN];
+            let mut bufs: Vec<BlockBuf> = (0..BLOCKS).map(|_| BlockBuf::zeroed(bs)).collect();
+            trusted_vectored_dev
+                .read_contiguous_blocks(black_box(&cx), BlockNumber(0), &mut bufs)
+                .unwrap();
+            for (idx, buf) in bufs.iter().enumerate() {
+                out[idx * bs..(idx + 1) * bs].copy_from_slice(buf.as_slice());
+            }
             black_box(out)
         });
     });
