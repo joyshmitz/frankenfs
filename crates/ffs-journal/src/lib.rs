@@ -2262,6 +2262,34 @@ mod fc_tests {
     }
 
     #[test]
+    fn replay_short_del_creat_link_unlink_tags_require_fallback() {
+        // DelRange(0x02,>=12), Creat(0x03,>=8), Link(0x04,>=8), Unlink(0x05,>=8):
+        // a payload shorter than the tag's fixed header, framed inside a valid
+        // HEAD/TAIL transaction, must skip the op and flag fallback, never panic
+        // on out-of-bounds indexing. Only ADD_RANGE/INODE/HEAD/TAIL had this
+        // coverage before.
+        for tag in [0x02_u16, 0x03, 0x04, 0x05] {
+            let mut data = Vec::new();
+            data.extend(build_fc_tag(0x09, &[0_u8; 16])); // HEAD
+            data.extend(build_fc_tag(tag, &[1, 2, 3])); // short payload for the tag under test
+            let mut tail = Vec::new();
+            tail.extend_from_slice(&3_u32.to_le_bytes()); // tid
+            tail.extend_from_slice(&0_u32.to_le_bytes()); // crc (ignored in replay)
+            data.extend(build_fc_tag(0x08, &tail)); // TAIL
+
+            let result = replay_fast_commit(&data).unwrap();
+            assert!(
+                result.operations.is_empty(),
+                "tag {tag:#x}: short payload op must be skipped",
+            );
+            assert!(
+                result.fallback_required,
+                "tag {tag:#x}: short payload must require fallback",
+            );
+        }
+    }
+
+    #[test]
     fn replay_tail_without_crc_requires_fallback() {
         let mut data = Vec::new();
         data.extend(build_fc_tag(0x09, &[0; 16])); // HEAD
@@ -3929,7 +3957,7 @@ mod tests {
 
         let err = NativeCowJournal::open(&cx, &dev, region).expect_err("malformed head");
         assert!(
-            matches!(err, FfsError::Format(message) if message.contains("unknown COW record kind")),
+            matches!(err, FfsError::Format(ref message) if message.contains("unknown COW record kind")),
             "expected unknown-kind Format error, got {err:?}"
         );
     }
@@ -3950,7 +3978,7 @@ mod tests {
             .expect_err("undersized COW block");
 
         assert!(
-            matches!(err, FfsError::Format(message)
+            matches!(err, FfsError::Format(ref message)
                 if message.contains("smaller than header size")
                     && message.contains(&undersized.to_string())
                     && message.contains(&COW_HEADER_SIZE.to_string())),
@@ -5337,7 +5365,7 @@ mod tests {
 
         let err = recover_native_cow(&cx, &dev, region).expect_err("malformed first record");
         assert!(
-            matches!(err, FfsError::Format(message) if message.contains("unknown COW record kind")),
+            matches!(err, FfsError::Format(ref message) if message.contains("unknown COW record kind")),
             "expected unknown-kind Format error, got {err:?}"
         );
     }
