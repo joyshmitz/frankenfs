@@ -4900,6 +4900,22 @@ mod tests {
     }
 
     #[test]
+    fn ranges_are_pairwise_disjoint_detects_overlap() {
+        let r = MergeByteRange::new;
+        // Disjoint, non-touching ranges.
+        assert!(ranges_are_pairwise_disjoint(&[r(0, 4), r(10, 4), r(20, 4)]));
+        // Adjacent half-open ranges [0,4) and [4,8) do not overlap.
+        assert!(ranges_are_pairwise_disjoint(&[r(0, 4), r(4, 4)]));
+        // An overlapping pair is rejected.
+        assert!(!ranges_are_pairwise_disjoint(&[r(0, 5), r(4, 4)]));
+        // Overlap between non-adjacent entries (first and third) is still caught.
+        assert!(!ranges_are_pairwise_disjoint(&[r(0, 100), r(200, 4), r(50, 4)]));
+        // Empty and single-range inputs are trivially disjoint.
+        assert!(ranges_are_pairwise_disjoint(&[]));
+        assert!(ranges_are_pairwise_disjoint(&[r(0, 4)]));
+    }
+
+    #[test]
     fn merge_proof_unsafe_rejects_merge() {
         let merged = MergeProof::Unsafe.merge_bytes(&[0], &[0, 1], &[0, 2]);
         assert!(merged.is_none(), "unsafe proof must fall back to FCW");
