@@ -7639,6 +7639,76 @@ mod tests {
     }
 
     #[test]
+    fn validate_geometry_fields_rejects_uncovered_branches() {
+        // Start from a valid superblock with valid features so the error caught
+        // is the geometry field, not a feature mismatch. block_size = 4096.
+        let mut base = make_valid_sb();
+        let incompat =
+            (Ext4IncompatFeatures::FILETYPE.0 | Ext4IncompatFeatures::EXTENTS.0).to_le_bytes();
+        base[0x60..0x64].copy_from_slice(&incompat);
+
+        // inodes_per_group == 0
+        let mut bad = base;
+        bad[0x28..0x2C].copy_from_slice(&0_u32.to_le_bytes());
+        let err = Ext4Superblock::parse_superblock_region(&bad)
+            .unwrap()
+            .validate_geometry()
+            .unwrap_err();
+        assert!(
+            matches!(err, ParseError::InvalidField { field: "s_inodes_per_group", .. }),
+            "got {err}",
+        );
+
+        // inode_size < 128
+        let mut bad = base;
+        bad[0x58..0x5A].copy_from_slice(&64_u16.to_le_bytes());
+        let err = Ext4Superblock::parse_superblock_region(&bad)
+            .unwrap()
+            .validate_geometry()
+            .unwrap_err();
+        assert!(
+            matches!(err, ParseError::InvalidField { field: "s_inode_size", reason } if reason.contains("must be >= 128")),
+            "got {err}",
+        );
+
+        // inode_size > block_size (8192 is a power of two above 4096)
+        let mut bad = base;
+        bad[0x58..0x5A].copy_from_slice(&8192_u16.to_le_bytes());
+        let err = Ext4Superblock::parse_superblock_region(&bad)
+            .unwrap()
+            .validate_geometry()
+            .unwrap_err();
+        assert!(
+            matches!(err, ParseError::InvalidField { field: "s_inode_size", reason } if reason.contains("exceeds block_size")),
+            "got {err}",
+        );
+
+        // desc_size < 32 (when non-zero)
+        let mut bad = base;
+        bad[0xFE..0x100].copy_from_slice(&16_u16.to_le_bytes());
+        let err = Ext4Superblock::parse_superblock_region(&bad)
+            .unwrap()
+            .validate_geometry()
+            .unwrap_err();
+        assert!(
+            matches!(err, ParseError::InvalidField { field: "s_desc_size", reason } if reason.contains("must be >= 32")),
+            "got {err}",
+        );
+
+        // desc_size > block_size
+        let mut bad = base;
+        bad[0xFE..0x100].copy_from_slice(&8192_u16.to_le_bytes());
+        let err = Ext4Superblock::parse_superblock_region(&bad)
+            .unwrap()
+            .validate_geometry()
+            .unwrap_err();
+        assert!(
+            matches!(err, ParseError::InvalidField { field: "s_desc_size", reason } if reason.contains("exceeds block_size")),
+            "got {err}",
+        );
+    }
+
+    #[test]
     fn geometry_blocks_per_group_exceeds_bitmap() {
         let mut sb = make_valid_sb();
         // blocks_per_group = 4096*8+1 = 32769, exceeds bitmap capacity for 4K blocks
