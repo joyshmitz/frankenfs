@@ -531,7 +531,7 @@ pub fn parse_sys_chunk_array(data: &[u8]) -> Result<Vec<BtrfsChunkEntry>, ParseE
         let header = parse_chunk_header(data, &mut cur)?;
         let stripes = parse_chunk_stripes(data, &mut cur, header.num_stripes)?;
 
-        entries.push(BtrfsChunkEntry {
+        let entry = BtrfsChunkEntry {
             key,
             length: header.length,
             owner: header.owner,
@@ -543,7 +543,17 @@ pub fn parse_sys_chunk_array(data: &[u8]) -> Result<Vec<BtrfsChunkEntry>, ParseE
             num_stripes: header.num_stripes,
             sub_stripes: header.sub_stripes,
             stripes,
-        });
+        };
+        let profile = BtrfsRaidProfile::from_chunk_type(entry.chunk_type);
+        match profile {
+            BtrfsRaidProfile::Single
+            | BtrfsRaidProfile::Dup
+            | BtrfsRaidProfile::Raid1
+            | BtrfsRaidProfile::Raid1C3
+            | BtrfsRaidProfile::Raid1C4 => validate_mirror_stripes(&entry, profile)?,
+            _ => {}
+        }
+        entries.push(entry);
     }
 
     Ok(entries)
@@ -2513,6 +2523,56 @@ mod tests {
     }
 
     #[test]
+    fn parse_sys_chunk_array_rejects_invalid_mirror_stripe_layouts() {
+        let key = BtrfsKey {
+            objectid: BTRFS_FIRST_CHUNK_TREE_OBJECTID,
+            item_type: BTRFS_CHUNK_ITEM_KEY,
+            offset: 0,
+        };
+        let c = BTRFS_DISK_KEY_SIZE;
+
+        let mut single_extra = build_sys_chunk_entry(key, 2);
+        single_extra[c + 24..c + 32]
+            .copy_from_slice(&chunk_type_flags::BTRFS_BLOCK_GROUP_DATA.to_le_bytes());
+        let err = parse_sys_chunk_array(&single_extra).unwrap_err();
+        assert_eq!(
+            err,
+            ParseError::InvalidField {
+                field: "num_stripes",
+                reason: "single chunk must have exactly one stripe",
+            }
+        );
+
+        let mut raid1_too_few = build_sys_chunk_entry(key, 1);
+        raid1_too_few[c + 24..c + 32].copy_from_slice(
+            &(chunk_type_flags::BTRFS_BLOCK_GROUP_DATA | chunk_type_flags::BTRFS_BLOCK_GROUP_RAID1)
+                .to_le_bytes(),
+        );
+        let err = parse_sys_chunk_array(&raid1_too_few).unwrap_err();
+        assert_eq!(
+            err,
+            ParseError::InvalidField {
+                field: "num_stripes",
+                reason: "RAID1 chunk must have at least two stripes",
+            }
+        );
+
+        let mut dup_mixed = build_sys_chunk_entry(key, 2);
+        dup_mixed[c + 24..c + 32].copy_from_slice(
+            &(chunk_type_flags::BTRFS_BLOCK_GROUP_DATA | chunk_type_flags::BTRFS_BLOCK_GROUP_DUP)
+                .to_le_bytes(),
+        );
+        let err = parse_sys_chunk_array(&dup_mixed).unwrap_err();
+        assert_eq!(
+            err,
+            ParseError::InvalidField {
+                field: "stripe_devid",
+                reason: "DUP chunk must use a single device",
+            }
+        );
+    }
+
+    #[test]
     fn checked_item_table_end_rejects_overflow() {
         // Reasonable item counts compute a valid end past the header.
         assert!(checked_item_table_end(0, BTRFS_ITEM_SIZE, "items").is_ok());
@@ -4400,9 +4460,6 @@ mod tests {
             devids in proptest::collection::vec(any::<u64>(), 4),
             offsets in proptest::collection::vec(any::<u64>(), 4),
         ) {
-            let stripes_count = usize::from(num_stripes);
-            let entry_len = BTRFS_DISK_KEY_SIZE + BTRFS_CHUNK_FIXED_SIZE + stripes_count * BTRFS_STRIPE_SIZE;
-            let mut data = vec![0_u8; entry_len];
             let raid_bits = chunk_type & chunk_type_flags::RAID_MASK;
             let raid_bit = if raid_bits == 0 {
                 0
@@ -4410,6 +4467,17 @@ mod tests {
                 1_u64 << raid_bits.trailing_zeros()
             };
             let sanitized_chunk_type = (chunk_type & !chunk_type_flags::RAID_MASK) | raid_bit;
+            let profile = BtrfsRaidProfile::from_chunk_type(sanitized_chunk_type);
+            let valid_num_stripes = match profile {
+                BtrfsRaidProfile::Single => 1,
+                BtrfsRaidProfile::Dup | BtrfsRaidProfile::Raid1 => num_stripes.max(2),
+                BtrfsRaidProfile::Raid1C3 => num_stripes.max(3),
+                BtrfsRaidProfile::Raid1C4 => 4,
+                _ => num_stripes,
+            };
+            let stripes_count = usize::from(valid_num_stripes);
+            let entry_len = BTRFS_DISK_KEY_SIZE + BTRFS_CHUNK_FIXED_SIZE + stripes_count * BTRFS_STRIPE_SIZE;
+            let mut data = vec![0_u8; entry_len];
 
             let key = BtrfsKey {
                 objectid: BTRFS_FIRST_CHUNK_TREE_OBJECTID,
@@ -4426,12 +4494,17 @@ mod tests {
             data[chunk_base + 32..chunk_base + 36].copy_from_slice(&io_align.to_le_bytes());
             data[chunk_base + 36..chunk_base + 40].copy_from_slice(&io_width.to_le_bytes());
             data[chunk_base + 40..chunk_base + 44].copy_from_slice(&sector_size.to_le_bytes());
-            data[chunk_base + 44..chunk_base + 46].copy_from_slice(&num_stripes.to_le_bytes());
+            data[chunk_base + 44..chunk_base + 46].copy_from_slice(&valid_num_stripes.to_le_bytes());
             data[chunk_base + 46..chunk_base + 48].copy_from_slice(&sub_stripes.to_le_bytes());
 
             let mut stripe_base = chunk_base + BTRFS_CHUNK_FIXED_SIZE;
             for i in 0..stripes_count {
-                data[stripe_base..stripe_base + 8].copy_from_slice(&devids[i].to_le_bytes());
+                let devid = if profile == BtrfsRaidProfile::Dup {
+                    devids[0].saturating_add(1)
+                } else {
+                    devids[i].saturating_add(1)
+                };
+                data[stripe_base..stripe_base + 8].copy_from_slice(&devid.to_le_bytes());
                 data[stripe_base + 8..stripe_base + 16].copy_from_slice(&offsets[i].to_le_bytes());
                 stripe_base += BTRFS_STRIPE_SIZE;
             }
@@ -4447,11 +4520,16 @@ mod tests {
             prop_assert_eq!(entry.io_align, io_align);
             prop_assert_eq!(entry.io_width, io_width);
             prop_assert_eq!(entry.sector_size, sector_size);
-            prop_assert_eq!(entry.num_stripes, num_stripes);
+            prop_assert_eq!(entry.num_stripes, valid_num_stripes);
             prop_assert_eq!(entry.sub_stripes, sub_stripes);
             prop_assert_eq!(entry.stripes.len(), stripes_count);
             for i in 0..stripes_count {
-                prop_assert_eq!(entry.stripes[i].devid, devids[i]);
+                let expected_devid = if profile == BtrfsRaidProfile::Dup {
+                    devids[0].saturating_add(1)
+                } else {
+                    devids[i].saturating_add(1)
+                };
+                prop_assert_eq!(entry.stripes[i].devid, expected_devid);
                 prop_assert_eq!(entry.stripes[i].offset, offsets[i]);
             }
         }
