@@ -73307,6 +73307,29 @@ mod tests {
     }
 
     #[test]
+    fn btrfs_removing_one_hardlink_keeps_data_for_other() {
+        let (fs, cx) = open_writable_btrfs();
+        let parent = InodeNumber(1);
+        let a = fs
+            .create(&cx, parent, OsStr::new("a.bin"), 0o644, 0, 0)
+            .expect("create");
+        fs.write(&cx, a.ino, 0, b"PERSIST").expect("write");
+        fs.link(&cx, a.ino, parent, OsStr::new("b.bin")).expect("link");
+
+        // Remove the first name; the second hardlink must keep the inode + data.
+        fs.unlink(&cx, parent, OsStr::new("a.bin"))
+            .expect("remove first name");
+
+        assert!(fs.lookup(&cx, parent, OsStr::new("a.bin")).is_err());
+        let b = fs
+            .lookup(&cx, parent, OsStr::new("b.bin"))
+            .expect("lookup surviving name");
+        assert_eq!(b.ino, a.ino, "surviving link keeps the same inode");
+        let data = fs.read(&cx, b.ino, 0, 7).expect("read via surviving link");
+        assert_eq!(&data, b"PERSIST");
+    }
+
+    #[test]
     fn btrfs_rename_overwrites_existing_target() {
         let (fs, cx) = open_writable_btrfs();
         let parent = InodeNumber(1);
