@@ -493,12 +493,12 @@ impl ByteDevice for FileByteDevice {
 
     fn write_all_at(&self, cx: &Cx, offset: ByteOffset, buf: &[u8]) -> Result<()> {
         cx_checkpoint(cx)?;
-        if !self.writable {
-            return Err(FfsError::PermissionDenied);
-        }
         if buf.is_empty() {
             cx_checkpoint(cx)?;
             return Ok(());
+        }
+        if !self.writable {
+            return Err(FfsError::PermissionDenied);
         }
         let end = offset
             .0
@@ -6789,6 +6789,28 @@ mod tests {
             .expect("empty write at EOF is a no-op");
         dev.write_all_at(&cx, ByteOffset(9), &[])
             .expect("empty write past EOF is a no-op");
+
+        assert_eq!(std::fs::read(&path).expect("read file"), [1_u8, 2, 3, 4]);
+        assert_eq!(std::fs::metadata(&path).expect("metadata").len(), 4);
+    }
+
+    #[test]
+    fn file_byte_device_empty_scalar_write_on_read_only_file_is_noop() {
+        let cx = Cx::for_testing();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("empty-read-only-write.img");
+        std::fs::write(&path, [1_u8, 2, 3, 4]).expect("seed file");
+        let mut permissions = std::fs::metadata(&path)
+            .expect("metadata")
+            .permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&path, permissions).expect("set read-only permissions");
+
+        let dev = FileByteDevice::open(&path).expect("read-only device");
+        assert!(!dev.writable);
+
+        dev.write_all_at(&cx, ByteOffset(9), &[])
+            .expect("empty write past EOF on read-only file is a no-op");
 
         assert_eq!(std::fs::read(&path).expect("read file"), [1_u8, 2, 3, 4]);
         assert_eq!(std::fs::metadata(&path).expect("metadata").len(), 4);
