@@ -52,6 +52,10 @@ name = "blockbuf_into_inner"
 harness = false
 
 [[bench]]
+name = "read_block_uncompressed_clone_vs_share"
+harness = false
+
+[[bench]]
 name = "write_batch"
 harness = false
 
