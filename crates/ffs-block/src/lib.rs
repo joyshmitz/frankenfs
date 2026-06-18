@@ -1076,9 +1076,10 @@ impl<D: ByteDevice> BlockDevice for ByteBlockDevice<D> {
             .0
             .checked_mul(u64::from(self.block_size))
             .ok_or_else(|| FfsError::Format("block offset overflow".to_owned()))?;
-        // One ranged read straight into the caller's contiguous buffer — no
-        // per-block `BlockBuf` allocation and no post-read copy.
-        self.inner.read_exact_at(cx, ByteOffset(offset), dst)?;
+        let mut read_buf = vec![0_u8; dst.len()];
+        self.inner
+            .read_exact_at(cx, ByteOffset(offset), read_buf.as_mut_slice())?;
+        dst.copy_from_slice(read_buf.as_slice());
         cx_checkpoint(cx)?;
         Ok(())
     }
@@ -6586,7 +6587,10 @@ mod tests {
             self.len
         }
 
-        fn read_exact_at(&self, _cx: &Cx, _offset: ByteOffset, _buf: &mut [u8]) -> Result<()> {
+        fn read_exact_at(&self, _cx: &Cx, _offset: ByteOffset, buf: &mut [u8]) -> Result<()> {
+            if let Some(first) = buf.first_mut() {
+                *first = 0xEE;
+            }
             Err(FfsError::Format("injected byte read failure".to_owned()))
         }
 
@@ -6990,6 +6994,24 @@ mod tests {
         );
         assert!(bufs[0].as_slice().is_empty());
         assert_eq!(bufs[1].as_slice(), &[0xBB; 4]);
+    }
+
+    #[test]
+    fn byte_block_device_contiguous_into_preserves_dst_on_read_error() {
+        let cx = Cx::for_testing();
+        let dev = ByteBlockDevice::new(FailingReadByteDevice::new(8), 4).expect("device");
+        let mut dst = [0xAA_u8; 8];
+
+        let err = dev
+            .read_contiguous_into(&cx, BlockNumber(0), &mut dst)
+            .expect_err("backing byte read failure should not mutate destination");
+
+        assert!(
+            matches!(err, FfsError::Format(ref message)
+                if message.contains("injected byte read failure")),
+            "expected injected byte read Format error, got {err:?}"
+        );
+        assert_eq!(dst, [0xAA; 8]);
     }
 
     #[test]
