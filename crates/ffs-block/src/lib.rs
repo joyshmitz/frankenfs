@@ -1030,19 +1030,20 @@ impl<D: ByteDevice> BlockDevice for ByteBlockDevice<D> {
             .checked_mul(u64::from(self.block_size))
             .ok_or_else(|| FfsError::Format("block offset overflow".to_owned()))?;
 
-        for buf in bufs.iter_mut() {
-            // A successful exact vectored read overwrites every byte below; on
-            // error the caller observes Err and must not consume partial data.
-            if buf.len() != block_size {
-                *buf = BlockBuf::zeroed(block_size);
+        let total_len = bufs
+            .len()
+            .checked_mul(block_size)
+            .ok_or_else(|| FfsError::Format("contiguous read length overflow".to_owned()))?;
+        let mut read_buf = vec![0_u8; total_len];
+        self.inner
+            .read_exact_at(cx, ByteOffset(offset), read_buf.as_mut_slice())?;
+        for (buf, chunk) in bufs.iter_mut().zip(read_buf.chunks_exact(block_size)) {
+            if buf.len() == block_size {
+                buf.make_mut().copy_from_slice(chunk);
+            } else {
+                *buf = BlockBuf::new(chunk.to_vec());
             }
         }
-        let mut slices: Vec<IoSliceMut<'_>> = bufs
-            .iter_mut()
-            .map(|buf| IoSliceMut::new(buf.make_mut()))
-            .collect();
-        self.inner
-            .read_vectored_exact_at(cx, ByteOffset(offset), &mut slices)?;
         cx_checkpoint(cx)?;
         Ok(())
     }
@@ -6570,6 +6571,35 @@ mod tests {
     }
 
     #[derive(Debug)]
+    struct FailingReadByteDevice {
+        len: u64,
+    }
+
+    impl FailingReadByteDevice {
+        fn new(len: u64) -> Self {
+            Self { len }
+        }
+    }
+
+    impl ByteDevice for FailingReadByteDevice {
+        fn len_bytes(&self) -> u64 {
+            self.len
+        }
+
+        fn read_exact_at(&self, _cx: &Cx, _offset: ByteOffset, _buf: &mut [u8]) -> Result<()> {
+            Err(FfsError::Format("injected byte read failure".to_owned()))
+        }
+
+        fn write_all_at(&self, _cx: &Cx, _offset: ByteOffset, _buf: &[u8]) -> Result<()> {
+            Ok(())
+        }
+
+        fn sync(&self, _cx: &Cx) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[derive(Debug)]
     struct ScalarOnlyByteDevice {
         bytes: Mutex<Vec<u8>>,
         read_calls: Mutex<Vec<(ByteOffset, usize)>>,
@@ -6941,6 +6971,25 @@ mod tests {
         assert_eq!(bufs[0].as_slice(), &[4, 5, 6, 7]);
         assert_eq!(bufs[1].as_slice(), &[8, 9, 10, 11]);
         assert_eq!(dev.inner().read_count(), 1);
+    }
+
+    #[test]
+    fn byte_block_device_contiguous_blocks_preserves_buffers_on_read_error() {
+        let cx = Cx::for_testing();
+        let dev = ByteBlockDevice::new(FailingReadByteDevice::new(8), 4).expect("device");
+        let mut bufs = [BlockBuf::new(Vec::new()), BlockBuf::new(vec![0xBB; 4])];
+
+        let err = dev
+            .read_contiguous_blocks(&cx, BlockNumber(0), &mut bufs)
+            .expect_err("backing byte read failure should not mutate caller buffers");
+
+        assert!(
+            matches!(err, FfsError::Format(ref message)
+                if message.contains("injected byte read failure")),
+            "expected injected byte read Format error, got {err:?}"
+        );
+        assert!(bufs[0].as_slice().is_empty());
+        assert_eq!(bufs[1].as_slice(), &[0xBB; 4]);
     }
 
     #[test]
