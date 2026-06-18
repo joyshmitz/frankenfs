@@ -8311,6 +8311,19 @@ mod tests {
     }
 
     #[test]
+    fn readahead_manager_reinsert_does_not_evict_updated_entry() {
+        let r = ReadaheadManager::new(2);
+        r.insert(InodeNumber(1), 0, vec![1]);
+        r.insert(InodeNumber(1), 0, vec![2]); // re-insert same key: dedups the FIFO slot
+        r.insert(InodeNumber(2), 0, vec![3]);
+
+        // With FIFO dedup, both distinct keys fit within max_pending=2; the
+        // re-inserted entry was not spuriously evicted and holds the new value.
+        assert_eq!(r.take(InodeNumber(1), 0, 1), Some(vec![2]));
+        assert_eq!(r.take(InodeNumber(2), 0, 1), Some(vec![3]));
+    }
+
+    #[test]
     fn readahead_manager_evicts_oldest_when_over_limit() {
         let r = ReadaheadManager::new(2);
         r.insert(InodeNumber(1), 0, vec![1]);
