@@ -7709,6 +7709,38 @@ mod tests {
     }
 
     #[test]
+    fn validate_v1_rejects_uncovered_branches() {
+        // inodes_count exceeds group_count * inodes_per_group (geometry layout),
+        // surfaced through the public validate_v1 entry. make_valid_sb has one
+        // group * 8192 inodes_per_group, so 1_000_000 is well over the limit.
+        let mut bad = make_valid_sb();
+        let incompat =
+            (Ext4IncompatFeatures::FILETYPE.0 | Ext4IncompatFeatures::EXTENTS.0).to_le_bytes();
+        bad[0x60..0x64].copy_from_slice(&incompat);
+        bad[0x00..0x04].copy_from_slice(&1_000_000_u32.to_le_bytes());
+        let err = Ext4Superblock::parse_superblock_region(&bad)
+            .unwrap()
+            .validate_v1()
+            .unwrap_err();
+        assert!(
+            matches!(err, ParseError::InvalidField { field: "s_inodes_count", .. }),
+            "got {err}",
+        );
+
+        // Missing the required FILETYPE incompat feature (EXTENTS only).
+        let mut bad = make_valid_sb();
+        bad[0x60..0x64].copy_from_slice(&Ext4IncompatFeatures::EXTENTS.0.to_le_bytes());
+        let err = Ext4Superblock::parse_superblock_region(&bad)
+            .unwrap()
+            .validate_v1()
+            .unwrap_err();
+        assert!(
+            matches!(err, ParseError::InvalidField { field: "feature_incompat", reason } if reason.contains("missing required")),
+            "got {err}",
+        );
+    }
+
+    #[test]
     fn geometry_blocks_per_group_exceeds_bitmap() {
         let mut sb = make_valid_sb();
         // blocks_per_group = 4096*8+1 = 32769, exceeds bitmap capacity for 4K blocks
