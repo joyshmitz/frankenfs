@@ -423,6 +423,45 @@ fn inode_uses_indirect_blocks(inode: &Ext4Inode) -> bool {
     matches!(inode.mode & S_IFMT, S_IFREG | S_IFDIR | S_IFLNK)
 }
 
+/// Free a list of data block numbers (in file order) in maximal contiguous
+/// runs. `free_blocks_persist(start, len)` already does a single bitmap-block
+/// read-modify-write per group for the whole range, so collapsing a contiguous
+/// run into one ranged call turns O(blocks) bitmap RMWs into O(runs) — a large
+/// win when deleting/truncating sequentially-allocated files. Freeing a range is
+/// the canonical batch form of freeing each block individually (same bits, same
+/// validation, same accounting; freeing is commutative), so this is behaviorally
+/// identical to the per-block loop it replaces.
+fn free_data_blocks_in_runs(
+    cx: &Cx,
+    dev: &dyn BlockDevice,
+    geo: &FsGeometry,
+    groups: &mut [GroupStats],
+    blocks: &[u32],
+    pctx: &ffs_alloc::PersistCtx,
+) -> Result<()> {
+    let mut idx = 0;
+    while idx < blocks.len() {
+        let start = blocks[idx];
+        let mut len = 1u32;
+        while idx + (len as usize) < blocks.len()
+            && start.checked_add(len) == Some(blocks[idx + len as usize])
+        {
+            len += 1;
+        }
+        ffs_alloc::free_blocks_persist(
+            cx,
+            dev,
+            geo,
+            groups,
+            BlockNumber(u64::from(start)),
+            len,
+            pctx,
+        )?;
+        idx += len as usize;
+    }
+    Ok(())
+}
+
 /// Recursively free an indirect pointer block at indirection `level`
 /// (1 = single → data blocks, 2 = double, 3 = triple): frees every data block
 /// reachable from it, then frees the pointer block itself.
@@ -440,20 +479,34 @@ fn free_indirect_chain(
     cx_checkpoint(cx)?;
     let buf = dev.read_block(cx, block)?;
     let bytes = buf.as_slice();
-    for i in 0..ppb {
-        let off = i * 4;
-        if off + 4 > bytes.len() {
-            break;
+    if level == 1 {
+        // Leaf: gather the data-block pointers and free them in contiguous runs
+        // (one bitmap read-modify-write per group per run instead of per block).
+        let mut data_blocks = Vec::with_capacity(ppb);
+        for i in 0..ppb {
+            let off = i * 4;
+            if off + 4 > bytes.len() {
+                break;
+            }
+            let ptr =
+                u32::from_le_bytes([bytes[off], bytes[off + 1], bytes[off + 2], bytes[off + 3]]);
+            if ptr != 0 {
+                data_blocks.push(ptr);
+            }
         }
-        let ptr = u32::from_le_bytes([bytes[off], bytes[off + 1], bytes[off + 2], bytes[off + 3]]);
-        if ptr == 0 {
-            continue;
-        }
-        let child = BlockNumber(u64::from(ptr));
-        if level == 1 {
-            ffs_alloc::free_blocks_persist(cx, dev, geo, groups, child, 1, pctx)?;
-        } else {
-            free_indirect_chain(cx, dev, geo, groups, child, level - 1, ppb, pctx)?;
+        free_data_blocks_in_runs(cx, dev, geo, groups, &data_blocks, pctx)?;
+    } else {
+        for i in 0..ppb {
+            let off = i * 4;
+            if off + 4 > bytes.len() {
+                break;
+            }
+            let ptr =
+                u32::from_le_bytes([bytes[off], bytes[off + 1], bytes[off + 2], bytes[off + 3]]);
+            if ptr == 0 {
+                continue;
+            }
+            free_indirect_chain(cx, dev, geo, groups, BlockNumber(u64::from(ptr)), level - 1, ppb, pctx)?;
         }
     }
     // Free this indirect (metadata) block itself.
@@ -481,21 +534,9 @@ fn free_indirect_blocks(
     };
     let ppb = (geo.block_size / 4) as usize;
 
-    // Direct blocks i_block[0..12].
-    for i in 0..12usize {
-        let ptr = read_ptr(i);
-        if ptr != 0 {
-            ffs_alloc::free_blocks_persist(
-                cx,
-                dev,
-                geo,
-                groups,
-                BlockNumber(u64::from(ptr)),
-                1,
-                pctx,
-            )?;
-        }
-    }
+    // Direct blocks i_block[0..12], freed in contiguous runs.
+    let direct_blocks: Vec<u32> = (0..12usize).map(read_ptr).filter(|&ptr| ptr != 0).collect();
+    free_data_blocks_in_runs(cx, dev, geo, groups, &direct_blocks, pctx)?;
     // Single / double / triple indirect roots.
     for (idx, level) in [(12usize, 1u32), (13usize, 2u32), (14usize, 3u32)] {
         let ptr = read_ptr(idx);

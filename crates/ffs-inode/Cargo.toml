@@ -18,7 +18,12 @@ crc32c = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+criterion = { workspace = true }
 proptest = { workspace = true }
+
+[[bench]]
+name = "inode_free_runs"
+harness = false
 
 [lints]
 workspace = true
