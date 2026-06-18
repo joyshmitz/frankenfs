@@ -4367,6 +4367,60 @@ mod tests {
             );
         }
 
+        /// The binary-search fast path (chunks.len() > 16) must agree with an
+        /// independent linear scan for hits, gaps, and out-of-range logicals.
+        /// All other map tests use <= 2 chunks, so the partition_point path
+        /// (bd-6u6xb) was never exercised before.
+        #[test]
+        fn btrfs_proptest_map_logical_to_physical_binary_path_matches_linear(
+            specs in proptest::collection::vec(
+                (1_u64..=1000, 0_u64..=500, 0_u64..=10_000_000),
+                17..=24,
+            ),
+            probe in 0_u64..=40_000,
+        ) {
+            // Build disjoint, ascending-by-offset Single chunks. With 17..=24
+            // entries the list always exceeds CHUNK_MAP_BINARY_SEARCH_THRESHOLD.
+            let mut chunks = Vec::new();
+            let mut next_start = 0_u64;
+            for (length, gap, stripe_offset) in &specs {
+                next_start += gap;
+                let start = next_start;
+                chunks.push(BtrfsChunkEntry {
+                    key: BtrfsKey { objectid: 256, item_type: 228, offset: start },
+                    length: *length,
+                    owner: 2,
+                    stripe_len: 64 * 1024,
+                    chunk_type: 1,
+                    io_align: 4096,
+                    io_width: 4096,
+                    sector_size: 4096,
+                    num_stripes: 1,
+                    sub_stripes: 1,
+                    stripes: vec![BtrfsStripe {
+                        devid: 1,
+                        offset: *stripe_offset,
+                        dev_uuid: [0_u8; 16],
+                    }],
+                });
+                next_start += length;
+            }
+            prop_assert!(chunks.len() > 16);
+
+            let logical = probe;
+            // Independent reference: the single covering chunk, if any.
+            let expected = chunks
+                .iter()
+                .find(|c| logical >= c.key.offset && logical < c.key.offset + c.length)
+                .map(|c| BtrfsPhysicalMapping {
+                    devid: c.stripes[0].devid,
+                    physical: c.stripes[0].offset + (logical - c.key.offset),
+                });
+
+            let got = map_logical_to_physical(&chunks, logical).expect("map should succeed");
+            prop_assert_eq!(got, expected);
+        }
+
         #[test]
         fn btrfs_proptest_logical_mapping_translation_covariant(
             chunk_start in 0_u64..=1_000_000_u64,
