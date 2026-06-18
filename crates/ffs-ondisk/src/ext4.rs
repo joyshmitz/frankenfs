@@ -18473,6 +18473,42 @@ mod tests {
             }
         }
 
+        /// verify_bitmap_free_count agrees with an independent bit-by-bit count
+        /// across arbitrary, often non-byte-aligned total_bits — exercising the
+        /// trailing partial-byte mask that the multiple-of-8 proptests above
+        /// never reach (they set total_bits = byte_len * 8).
+        #[test]
+        fn proptest_verify_bitmap_free_count_matches_bit_loop(
+            bytes in proptest::collection::vec(any::<u8>(), 2..=64),
+            trim in 0_u32..=7,
+        ) {
+            // total_bits = full capacity minus a 0..8 remainder, so the last
+            // byte is often partial. ceil(total_bits/8) still equals bytes.len(),
+            // so the bitmap is never too short.
+            let capacity_bits = u32::try_from(bytes.len()).unwrap() * 8;
+            let total_bits = capacity_bits - trim;
+
+            // Independent reference: count set bits over exactly the first
+            // total_bits bits, ignoring any high bits in the partial last byte.
+            let mut used = 0_u32;
+            for bit in 0..total_bits {
+                let byte = bytes[usize::try_from(bit / 8).unwrap()];
+                if byte & (1_u8 << (bit % 8)) != 0 {
+                    used += 1;
+                }
+            }
+            let free = total_bits.saturating_sub(used);
+
+            prop_assert!(
+                verify_bitmap_free_count(&bytes, total_bits, free, "test").is_ok(),
+                "correct free {free} must verify for total_bits {total_bits}"
+            );
+            prop_assert!(
+                verify_bitmap_free_count(&bytes, total_bits, free + 1, "test").is_err(),
+                "wrong free must fail for total_bits {total_bits}"
+            );
+        }
+
         // ── verify_inode_checksum properties ───────────────────────────
 
         /// verify_inode_checksum never panics on arbitrary bytes.
