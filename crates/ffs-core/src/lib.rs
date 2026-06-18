@@ -35512,6 +35512,30 @@ mod tests {
     }
 
     #[test]
+    fn ext4_inode_to_attr_maps_each_timestamp_field_distinctly() {
+        let sb = make_test_superblock();
+        let mut inode = make_test_inode(ffs_types::S_IFREG | 0o644, 0, 0);
+        // Distinct per-field seconds (extras zeroed) so any swapped *_system_time
+        // call maps the wrong on-disk time into a field and fails.
+        inode.atime = 1_000;
+        inode.atime_extra = 0;
+        inode.mtime = 2_000;
+        inode.mtime_extra = 0;
+        inode.ctime = 3_000;
+        inode.ctime_extra = 0;
+        inode.crtime = 4_000;
+        inode.crtime_extra = 0;
+        let attr = inode_to_attr(&sb, InodeNumber(100), &inode);
+        let secs = |t: std::time::SystemTime| {
+            t.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()
+        };
+        assert_eq!(secs(attr.atime), 1_000, "atime");
+        assert_eq!(secs(attr.mtime), 2_000, "mtime");
+        assert_eq!(secs(attr.ctime), 3_000, "ctime");
+        assert_eq!(secs(attr.crtime), 4_000, "crtime");
+    }
+
+    #[test]
     fn inode_to_attr_block_device_rdev() {
         use ffs_types::{S_IFBLK, S_IFCHR};
 
