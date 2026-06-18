@@ -45895,6 +45895,35 @@ mod tests {
     }
 
     #[test]
+    fn btrfs_mode_to_file_type_maps_all_format_bits() {
+        // Permission bits are present to confirm they are masked off before decode.
+        assert_eq!(
+            OpenFs::btrfs_mode_to_file_type(0o100_644),
+            FileType::RegularFile
+        );
+        assert_eq!(
+            OpenFs::btrfs_mode_to_file_type(0o040_755),
+            FileType::Directory
+        );
+        assert_eq!(
+            OpenFs::btrfs_mode_to_file_type(0o120_777),
+            FileType::Symlink
+        );
+        assert_eq!(
+            OpenFs::btrfs_mode_to_file_type(0o060_644),
+            FileType::BlockDevice
+        );
+        assert_eq!(
+            OpenFs::btrfs_mode_to_file_type(0o020_644),
+            FileType::CharDevice
+        );
+        assert_eq!(OpenFs::btrfs_mode_to_file_type(0o010_644), FileType::Fifo);
+        assert_eq!(OpenFs::btrfs_mode_to_file_type(0o140_644), FileType::Socket);
+        // An unknown / zero format defaults to RegularFile.
+        assert_eq!(OpenFs::btrfs_mode_to_file_type(0), FileType::RegularFile);
+    }
+
+    #[test]
     fn btrfs_dir_type_to_file_type_maps_all_codes() {
         use ffs_btrfs::{
             BTRFS_FT_BLKDEV, BTRFS_FT_CHRDEV, BTRFS_FT_DIR, BTRFS_FT_FIFO, BTRFS_FT_REG_FILE,
