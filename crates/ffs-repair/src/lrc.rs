@@ -907,6 +907,30 @@ mod tests {
     }
 
     #[test]
+    fn config_supports_global_repair_enforces_gf256_and_divisibility() {
+        // A valid config supports global repair.
+        assert!(config_supports_global_repair(&LrcConfig::new(12, 4, 2)));
+
+        // Build invalid configs via the public fields (LrcConfig::new would panic).
+        let cfg = |d, g, p| LrcConfig {
+            data_blocks: d,
+            local_group_size: g,
+            global_parity_count: p,
+        };
+        // Zero data blocks / zero group size are invalid.
+        assert!(!config_supports_global_repair(&cfg(0, 4, 2)));
+        assert!(!config_supports_global_repair(&cfg(12, 0, 2)));
+        // data_blocks must divide evenly into local groups.
+        assert!(!config_supports_global_repair(&cfg(10, 4, 2)));
+        // A global parity count beyond GF(256) is invalid.
+        assert!(!config_supports_global_repair(&cfg(12, 4, 256)));
+        // With global parity, data_blocks must fit GF(256) (<= 255).
+        assert!(!config_supports_global_repair(&cfg(256, 4, 2)));
+        // Without global parity the GF(256) data limit does not apply.
+        assert!(config_supports_global_repair(&cfg(256, 4, 0)));
+    }
+
+    #[test]
     fn global_repair_two_failures() {
         let cfg = LrcConfig::new(4, 2, 2);
         let data = make_data(4, 32);
