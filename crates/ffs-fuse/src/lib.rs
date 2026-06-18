@@ -8082,6 +8082,38 @@ mod tests {
     }
 
     #[test]
+    fn to_file_attr_maps_each_timestamp_field_distinctly() {
+        // Distinct per-field values so an atime/mtime swap or ctime->crtime
+        // miscopy in the getattr translation cannot pass unnoticed.
+        let atime = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1);
+        let mtime = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(2);
+        let ctime = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(3);
+        let crtime = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(4);
+        let iattr = InodeAttr {
+            ino: InodeNumber(1),
+            size: 0,
+            blocks: 0,
+            atime,
+            mtime,
+            ctime,
+            crtime,
+            kind: FfsFileType::RegularFile,
+            perm: 0o644,
+            nlink: 1,
+            uid: 0,
+            gid: 0,
+            rdev: 0,
+            blksize: 4096,
+            generation: 0,
+        };
+        let fattr = to_file_attr(&iattr);
+        assert_eq!(fattr.atime, atime, "atime");
+        assert_eq!(fattr.mtime, mtime, "mtime");
+        assert_eq!(fattr.ctime, ctime, "ctime");
+        assert_eq!(fattr.crtime, crtime, "crtime");
+    }
+
+    #[test]
     fn to_fuser_file_type_all_variants() {
         assert_eq!(
             to_fuser_file_type(FfsFileType::RegularFile),
