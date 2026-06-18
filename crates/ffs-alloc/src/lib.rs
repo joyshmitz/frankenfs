@@ -2928,6 +2928,26 @@ mod tests {
     // ── Bitmap tests ────────────────────────────────────────────────────
 
     #[test]
+    fn highest_set_bit_index_finds_top_used_bit_and_ignores_padding() {
+        // No bits set -> None.
+        assert_eq!(highest_set_bit_index(&[0, 0], 16), None);
+        // Single low / high bit within a byte.
+        assert_eq!(highest_set_bit_index(&[0b0000_0001], 8), Some(0));
+        assert_eq!(highest_set_bit_index(&[0b1000_0000], 8), Some(7));
+        // Highest across bytes: byte1 bit 2 -> index 10.
+        assert_eq!(
+            highest_set_bit_index(&[0b0000_1001, 0b0000_0100], 16),
+            Some(10)
+        );
+        // A bit set beyond count (padding) is ignored.
+        assert_eq!(highest_set_bit_index(&[0b1000_0000], 5), None);
+        // count bounds the search: bit 4 at index 4 is excluded by count 4 ...
+        assert_eq!(highest_set_bit_index(&[0b0001_0000], 4), None);
+        // ... but included by count 5.
+        assert_eq!(highest_set_bit_index(&[0b0001_0000], 5), Some(4));
+    }
+
+    #[test]
     fn bitmap_get_set_clear() {
         let mut bm = vec![0u8; 4];
         assert!(!bitmap_get(&bm, 0));
