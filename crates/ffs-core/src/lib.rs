@@ -15,8 +15,8 @@ pub use vfs::{
     BtrfsQgroupLimitRequest, BtrfsTreeSearchKey, DirEntry, FIEMAP_EXTENT_DATA_INLINE,
     FIEMAP_EXTENT_ENCODED, FIEMAP_EXTENT_LAST, FIEMAP_EXTENT_NOT_ALIGNED, FIEMAP_EXTENT_SHARED,
     FIEMAP_EXTENT_UNWRITTEN, FiemapExtent, FileType, FsOps, FsStat, FsxattrInfo, InodeAttr,
-    QuotaEntry, QuotaInfo, QuotaType, ReaddirPage, ReleaseRequest, RequestOp, RequestScope,
-    SeekWhence, SetAttrRequest, XattrSetMode, xflags,
+    QuotaEntry, QuotaInfo, QuotaType, ReaddirPage, ReleaseRequest, RequestCommitMode, RequestOp,
+    RequestScope, SeekWhence, SetAttrRequest, XattrSetMode, xflags,
 };
 // Re-export repair lifecycle for convenient wiring.
 pub use ffs_block::RepairFlushLifecycle;
@@ -26629,6 +26629,57 @@ impl OpenFs {
         f(&mut scope)
     }
 
+    /// Begin a caller-held write scope for writeback-style batching.
+    ///
+    /// Existing FUSE request dispatch still commits each mutating request before
+    /// returning. This helper is the narrower primitive needed by a per-file
+    /// handle writeback table: stage several writes through the returned scope,
+    /// then call [`Self::commit_writeback_batch_scope`] at the flush/fsync/release
+    /// boundary.
+    pub fn begin_writeback_batch_scope(&self, cx: &Cx) -> ffs_error::Result<RequestScope> {
+        let mut scope = <Self as FsOps>::begin_request_scope(self, cx, RequestOp::Write)?;
+        scope.defer_commit_until_flush();
+        Ok(scope)
+    }
+
+    /// Commit and release a caller-held writeback batch scope.
+    ///
+    /// # Errors
+    ///
+    /// Returns the commit error if the batched transaction cannot commit. If
+    /// commit succeeds but snapshot release fails, returns the release error.
+    pub fn commit_writeback_batch_scope(
+        &self,
+        cx: &Cx,
+        mut scope: RequestScope,
+    ) -> ffs_error::Result<CommitSeq> {
+        let commit_result = <Self as FsOps>::commit_request_scope(self, &mut scope);
+        let end_result = <Self as FsOps>::end_request_scope(self, cx, RequestOp::Write, scope);
+
+        match (commit_result, end_result) {
+            (Ok(commit), Ok(())) => Ok(commit),
+            (Ok(_), Err(end_err)) => Err(end_err),
+            (Err(commit_err), Ok(())) => Err(commit_err),
+            (Err(commit_err), Err(end_err)) => {
+                warn!(
+                    target: "ffs::mvcc",
+                    error = %end_err,
+                    "writeback_batch_scope_cleanup_failed_after_commit_error"
+                );
+                Err(commit_err)
+            }
+        }
+    }
+
+    /// Abort and release a caller-held writeback batch scope.
+    pub fn abort_writeback_batch_scope(
+        &self,
+        cx: &Cx,
+        scope: RequestScope,
+    ) -> ffs_error::Result<()> {
+        <Self as FsOps>::end_request_scope(self, cx, RequestOp::Write, scope)
+    }
+
     pub fn create(
         &self,
         cx: &Cx,
@@ -27112,6 +27163,7 @@ impl OpenFs {
         let mut local_scope = RequestScope {
             snapshot: Some(snapshot),
             tx: Some(txn),
+            commit_mode: RequestCommitMode::PerRequest,
         };
         match self.ext4_rename2_exchange_staged(
             cx,
@@ -32434,7 +32486,11 @@ impl FsOps for OpenFs {
             (Some(snapshot), None)
         };
 
-        Ok(RequestScope { snapshot, tx })
+        Ok(RequestScope {
+            snapshot,
+            tx,
+            commit_mode: RequestCommitMode::PerRequest,
+        })
     }
 
     fn end_request_scope(
@@ -36193,6 +36249,7 @@ mod tests {
         let scope = RequestScope {
             snapshot: None,
             tx: Some(txn),
+            commit_mode: RequestCommitMode::PerRequest,
         };
 
         // Reference (prior behavior): per-block read_block_with_scope. Reset
@@ -36279,6 +36336,7 @@ mod tests {
         let scope = RequestScope {
             snapshot: None,
             tx: Some(txn),
+            commit_mode: RequestCommitMode::PerRequest,
         };
 
         let reference: Vec<Vec<u8>> = (START..START + COUNT as u64)
@@ -60664,6 +60722,7 @@ mod tests {
             RequestScope {
                 snapshot: Some(pinned),
                 tx: None,
+                commit_mode: RequestCommitMode::PerRequest,
             },
         )
         .expect("end request scope");
@@ -60719,6 +60778,78 @@ mod tests {
         assert!(
             scope.tx.is_some(),
             "write ioctl should allocate a transaction"
+        );
+    }
+
+    #[test]
+    fn writeback_batch_scope_stages_multiple_writes_for_one_commit() {
+        let image = build_ext4_image_with_state(EXT4_VALID_FS);
+        let dev = TestDevice::from_vec(image);
+        let cx = Cx::for_testing();
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
+        let block_size = usize::try_from(fs.block_size()).expect("block size fits usize");
+        let block_a = BlockNumber(8);
+        let block_b = BlockNumber(9);
+        let bytes_a = vec![0xA1_u8; block_size];
+        let bytes_b = vec![0xB2_u8; block_size];
+
+        assert_eq!(fs.mvcc_store().read().active_snapshot_count(), 0);
+        let base_snapshot = fs.current_snapshot();
+
+        let mut scope = fs
+            .begin_writeback_batch_scope(&cx)
+            .expect("begin writeback batch scope");
+        assert!(scope.is_deferred_until_flush());
+        assert!(scope.tx.is_some(), "batch scope must carry a transaction");
+        assert_eq!(scope.pending_write_count(), 0);
+        assert_eq!(fs.mvcc_store().read().active_snapshot_count(), 1);
+
+        {
+            let block_dev = fs.block_device_adapter();
+            OpenFs::write_block_with_scope(&cx, &mut scope, &block_dev, block_a, &bytes_a)
+                .expect("stage first write");
+            OpenFs::write_block_with_scope(&cx, &mut scope, &block_dev, block_b, &bytes_b)
+                .expect("stage second write");
+        }
+
+        assert_eq!(scope.pending_write_count(), 2);
+        assert_eq!(
+            fs.read_block_with_scope(&cx, &scope, block_a)
+                .expect("read staged block a")
+                .as_slice(),
+            bytes_a.as_slice()
+        );
+        assert_eq!(
+            fs.read_block_with_scope(&cx, &scope, block_b)
+                .expect("read staged block b")
+                .as_slice(),
+            bytes_b.as_slice()
+        );
+        assert_eq!(
+            fs.current_snapshot(),
+            base_snapshot,
+            "staged writeback bytes must not publish before commit"
+        );
+
+        let commit = fs
+            .commit_writeback_batch_scope(&cx, scope)
+            .expect("commit writeback batch");
+        assert_eq!(commit.0, base_snapshot.high.0 + 1);
+        assert_eq!(fs.mvcc_store().read().active_snapshot_count(), 0);
+
+        let committed_snapshot = fs.current_snapshot();
+        assert_eq!(committed_snapshot.high, commit);
+        assert_eq!(
+            fs.read_block_with_scope(&cx, &RequestScope::empty(), block_a)
+                .expect("read committed block a")
+                .as_slice(),
+            bytes_a.as_slice()
+        );
+        assert_eq!(
+            fs.read_block_with_scope(&cx, &RequestScope::empty(), block_b)
+                .expect("read committed block b")
+                .as_slice(),
+            bytes_b.as_slice()
         );
     }
 

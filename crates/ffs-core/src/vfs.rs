@@ -406,7 +406,23 @@ impl RequestOp {
     }
 }
 
-/// MVCC scope acquired for a single VFS request.
+/// Commit boundary policy carried by an MVCC request scope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RequestCommitMode {
+    /// The current FUSE behavior: commit before the request returns.
+    PerRequest,
+    /// A caller is deliberately holding the scope across several writes and
+    /// will commit it at a flush/fsync/release boundary.
+    DeferredUntilFlush,
+}
+
+impl Default for RequestCommitMode {
+    fn default() -> Self {
+        Self::PerRequest
+    }
+}
+
+/// MVCC scope acquired for a single VFS request or an explicit writeback batch.
 ///
 /// Current read-only implementations can return an empty scope. Future write
 /// implementations may attach a transaction captured at request
@@ -415,6 +431,8 @@ impl RequestOp {
 pub struct RequestScope {
     pub snapshot: Option<Snapshot>,
     pub tx: Option<ffs_mvcc::Transaction>,
+    #[serde(default)]
+    pub commit_mode: RequestCommitMode,
 }
 
 impl RequestScope {
@@ -424,6 +442,7 @@ impl RequestScope {
         Self {
             snapshot: None,
             tx: None,
+            commit_mode: RequestCommitMode::PerRequest,
         }
     }
 
@@ -433,7 +452,37 @@ impl RequestScope {
         Self {
             snapshot: Some(snapshot),
             tx: None,
+            commit_mode: RequestCommitMode::PerRequest,
         }
+    }
+
+    /// Create a scope around an existing write transaction.
+    #[must_use]
+    pub fn with_transaction(tx: ffs_mvcc::Transaction) -> Self {
+        Self {
+            snapshot: Some(tx.snapshot()),
+            tx: Some(tx),
+            commit_mode: RequestCommitMode::PerRequest,
+        }
+    }
+
+    /// Mark this write scope as intentionally held until a flush boundary.
+    pub fn defer_commit_until_flush(&mut self) {
+        self.commit_mode = RequestCommitMode::DeferredUntilFlush;
+    }
+
+    /// Whether this scope is a deliberate writeback batch.
+    #[must_use]
+    pub const fn is_deferred_until_flush(&self) -> bool {
+        matches!(self.commit_mode, RequestCommitMode::DeferredUntilFlush)
+    }
+
+    /// Number of currently staged block writes.
+    #[must_use]
+    pub fn pending_write_count(&self) -> usize {
+        self.tx
+            .as_ref()
+            .map_or(0, ffs_mvcc::Transaction::pending_writes)
     }
 
     /// Commit the transaction if one is present.

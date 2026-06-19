@@ -12,8 +12,10 @@
 //! once. The delta is the per-commit overhead the lever amortizes.
 
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
+use ffs_core::RequestScope;
 use ffs_mvcc::MvccStore;
 use ffs_types::BlockNumber;
+use parking_lot::RwLock;
 use std::hint::black_box;
 
 const BLOCKS: u64 = 2_000;
@@ -45,6 +47,24 @@ fn batched_commit(data: &[u8]) {
     black_box(&store);
 }
 
+/// Core writeback-batch primitive: caller holds one `RequestScope` transaction.
+fn request_scope_batched_commit(data: &[u8]) {
+    let store = RwLock::new(MvccStore::new());
+    let txn = store.write().begin();
+    let mut scope = RequestScope::with_transaction(txn);
+    scope.defer_commit_until_flush();
+    for b in 0..BLOCKS {
+        scope
+            .tx
+            .as_mut()
+            .expect("scope carries transaction")
+            .stage_write(BlockNumber(b), data.to_vec());
+    }
+    black_box(scope.pending_write_count());
+    scope.commit_if_write(&store).expect("commit");
+    black_box(&store);
+}
+
 fn bench_commit_batching(c: &mut Criterion) {
     let data = block_data();
 
@@ -57,6 +77,10 @@ fn bench_commit_batching(c: &mut Criterion) {
 
     group.bench_function("batched_commit", |b| {
         b.iter(|| batched_commit(black_box(&data)));
+    });
+
+    group.bench_function("request_scope_batched_commit", |b| {
+        b.iter(|| request_scope_batched_commit(black_box(&data)));
     });
 
     group.finish();
