@@ -351,9 +351,25 @@ kernel btrfs on metadata (parity multi-dir, 1.6× single-dir) — up from a 7× 
 lever: shard/relax the parsed-node cache so parallel btrfs walks don't contend (deferred — would need its
 own A/B; the single-thread path is already at parity).
 
-### ⭐ CONFORMANCE GAP found by the btrfs gauntlet: zstd-compressed read fails (bd-pokmq, cc 2026-06-19)
-Attempting a btrfs *compressed*-read head-to-head (to exercise the W144 `bd-m6g2o` parallel decompress)
-surfaced a **correctness bug, not a perf result**: frankenfs **cannot read a kernel-written
+### ⭐⭐ CONFORMANCE BUG found AND FIXED by the btrfs gauntlet: kernel zstd-compressed read (bd-pokmq, cc 2026-06-19)
+Attempting a btrfs *compressed*-read head-to-head surfaced — and this session **FIXED** — a real correctness
+bug: frankenfs could not read a kernel-written zstd-compressed btrfs file (`Unknown frame descriptor`), now
+it reads a 137 MiB / 1099-extent file fully, content sha256 matching the kernel's exactly.
+
+**Two compounding causes, both kernel-faithful now:** (1) btrfs rounds a compressed extent's on-disk length
+UP to the sector size, so the read buffer is `[zstd frame][zero padding]`; `zstd::decode_all` (multi-frame)
+decoded the frame then choked on the padding. Fix: `zstd_safe::find_frame_compressed_size` to slice the
+exact frame, then one-shot `bulk::decompress`. (2) A file's TAIL extent is sector-rounded so `ram_bytes`
+(86016) exceeds the frame's actual output (82944, the real data); the kernel decodes into a zeroed page
+buffer and the tail (beyond i_size) stays zero. Fix: `resize` the decode up to `ram_bytes` with zeros
+(integrity is the csum tree's job, not the decompressed-length check). The old strict "decoded N expected M"
+rejection — encoded in a test — was *wrong* and blocked all kernel zstd files; updated the test to assert
+zero-fill + added an oversized-frame-rejected test. ffs-core 1177 tests pass; the fix is in ffs-core (mine).
+Diagnosed via `btrfs-progs` ground truth + a temporary debug probe (reverted) confirming frankenfs reads the
+correct on-disk frame magic — so the defect was purely the decode handling. **The gauntlet found a real
+interop bug AND the fix shipped.**
+
+(Original finding, for the record:) frankenfs **could not read a kernel-written
 zstd-compressed btrfs file** — `btrfs zstd decompression failed: Unknown frame descriptor` — while the
 kernel `cat`s it fine. **Scoped:** frankenfs reads an *uncompressed* btrfs file correctly (1 MiB, exact
 bytes → logical→physical mapping + read path WORK); the failure is zstd-specific. The error on the *first*

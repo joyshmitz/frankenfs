@@ -7809,12 +7809,47 @@ impl OpenFs {
             }
             2 => Self::btrfs_decompress_lzo(compressed, uncompressed_size, BTRFS_LZO_SECTOR_SIZE),
             3 => {
-                // ZSTD
-                let out = zstd::decode_all(compressed).map_err(|e| FfsError::Corruption {
+                // ZSTD. btrfs rounds a compressed extent's on-disk length UP to the
+                // sector size, so `compressed` is `[one zstd frame][zero/garbage
+                // padding to the sector]`. `zstd::decode_all` (streaming, multi-frame)
+                // decodes the frame and then chokes on the trailing padding —
+                // "Unknown frame descriptor" — which made frankenfs unable to read
+                // kernel-written zstd btrfs files (bd-pokmq). frankenfs's own writes
+                // were not sector-padded, so the W144 round-trip masked it. Use the
+                // The one-shot decoder requires `src` to be EXACTLY one frame (it
+                // rejects trailing bytes with "Src size is incorrect"), so first find
+                // the first frame's exact compressed length and slice the padding off.
+                let frame_len = zstd::zstd_safe::find_frame_compressed_size(compressed)
+                    .map_err(|code| FfsError::Corruption {
+                        block: 0,
+                        detail: format!(
+                            "btrfs zstd frame size probe failed: {}",
+                            zstd::zstd_safe::get_error_name(code)
+                        ),
+                    })?;
+                let frame = compressed.get(..frame_len).ok_or_else(|| FfsError::Corruption {
                     block: 0,
-                    detail: format!("btrfs zstd decompression failed: {e}"),
+                    detail: format!(
+                        "btrfs zstd frame length {frame_len} exceeds compressed extent {}",
+                        compressed.len()
+                    ),
                 })?;
-                Self::validate_btrfs_decompressed_len("zstd", out, uncompressed_size)
+                // Decode the single frame, bounding its output to `ram_bytes` (so an
+                // oversized frame is rejected by the capacity), then zero-pad up to
+                // `ram_bytes`. btrfs sector-rounds a file's TAIL extent's `ram_bytes`
+                // ABOVE the frame's actual decompressed length; the kernel decodes
+                // into a zeroed page buffer and leaves the tail (beyond i_size, never
+                // returned) zero. Matching that is what lets frankenfs read kernel-
+                // written zstd files (bd-pokmq); integrity is the csum tree's job.
+                let mut out =
+                    zstd::bulk::decompress(frame, uncompressed_size).map_err(|e| {
+                        FfsError::Corruption {
+                            block: 0,
+                            detail: format!("btrfs zstd decompression failed: {e}"),
+                        }
+                    })?;
+                out.resize(uncompressed_size, 0_u8);
+                Ok(out)
             }
             other => Err(FfsError::UnsupportedFeature(format!(
                 "btrfs compression type {other} not supported"
@@ -45727,19 +45762,39 @@ mod tests {
     }
 
     #[test]
-    fn btrfs_decompress_zstd_rejects_short_decoded_length() {
+    fn btrfs_decompress_zstd_short_frame_zero_fills_to_ram_bytes() {
+        // btrfs sector-rounds a file's TAIL compressed extent, so its `ram_bytes`
+        // can exceed the zstd frame's actual decompressed length; the kernel
+        // decompresses into a zeroed page buffer and leaves the tail (which lies
+        // beyond i_size and is never returned) zero. frankenfs must match this to
+        // read kernel-written zstd files (bd-pokmq) — the old strict "decoded N but
+        // expected M" rejection broke that. Integrity of the compressed bytes is
+        // enforced by the csum tree, not by this length check.
+        let payload = b"short zstd payload";
         let compressed =
-            zstd::stream::encode_all(&b"short zstd payload"[..], 0).expect("compress zstd fixture");
-        let err =
-            OpenFs::btrfs_decompress(&compressed, 3, 4096).expect_err("short zstd output rejects");
-
+            zstd::stream::encode_all(&payload[..], 0).expect("compress zstd fixture");
+        let out = OpenFs::btrfs_decompress(&compressed, 3, 4096)
+            .expect("short zstd frame zero-fills to ram_bytes");
+        assert_eq!(out.len(), 4096, "output is padded to ram_bytes");
+        assert_eq!(&out[..payload.len()], payload, "frame content preserved at the head");
         assert!(
-            matches!(
-                err,
-                FfsError::Corruption { ref detail, .. }
-                    if detail.contains("btrfs zstd decompressed 18 bytes but expected 4096")
-            ),
-            "unexpected zstd length error: {err:?}"
+            out[payload.len()..].iter().all(|&b| b == 0),
+            "the bytes past the frame are zero-filled"
+        );
+    }
+
+    #[test]
+    fn btrfs_decompress_zstd_rejects_oversized_frame() {
+        // A frame that decodes to MORE than ram_bytes is still rejected: the one-shot
+        // decoder writes into a fixed ram_bytes buffer and errors on overflow.
+        let payload = vec![0xABu8; 8192];
+        let compressed =
+            zstd::stream::encode_all(&payload[..], 0).expect("compress zstd fixture");
+        let err = OpenFs::btrfs_decompress(&compressed, 3, 4096)
+            .expect_err("oversized zstd output rejects");
+        assert!(
+            matches!(err, FfsError::Corruption { .. }),
+            "unexpected oversized-frame error: {err:?}"
         );
     }
 
