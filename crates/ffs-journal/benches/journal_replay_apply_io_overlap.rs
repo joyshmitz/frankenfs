@@ -22,6 +22,12 @@
 //! shape). Both arms run the identical apply transform and produce the identical
 //! applied bytes in target order (asserted), so this measures only the read
 //! overlap.
+//!
+//! It also carries the bd-xmh5g.404 A/B for replay block materialization:
+//! old `as_slice().to_vec()` versus `BlockBuf::into_inner()` on owned staged
+//! blocks. The apply consume phase needs an owned `Vec<u8>` either way; the new
+//! path moves the owned aligned buffer when the backing read produced a unique
+//! block.
 
 use asupersync::Cx;
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
@@ -115,6 +121,49 @@ impl BlockDevice for LatencyBlockDevice {
     }
 }
 
+/// Fast owned-read device for materialization A/B rows.
+struct OwnedReadBlockDevice {
+    blocks: Vec<Vec<u8>>,
+}
+
+impl OwnedReadBlockDevice {
+    fn new(block_count: u64) -> Self {
+        let blocks = (0..block_count).map(block_bytes).collect();
+        Self { blocks }
+    }
+
+    fn block_owned(&self, block: BlockNumber) -> Result<BlockBuf> {
+        let idx = usize::try_from(block.0)
+            .map_err(|_| FfsError::Format("bench block index overflow".into()))?;
+        self.blocks
+            .get(idx)
+            .map(|bytes| BlockBuf::new(bytes.clone()))
+            .ok_or_else(|| FfsError::Format(format!("bench block out of range: {}", block.0)))
+    }
+}
+
+impl BlockDevice for OwnedReadBlockDevice {
+    fn read_block(&self, _cx: &Cx, block: BlockNumber) -> Result<BlockBuf> {
+        self.block_owned(block)
+    }
+
+    fn write_block(&self, _cx: &Cx, _block: BlockNumber, _data: &[u8]) -> Result<()> {
+        Ok(())
+    }
+
+    fn block_size(&self) -> u32 {
+        BS as u32
+    }
+
+    fn block_count(&self) -> u64 {
+        self.blocks.len() as u64
+    }
+
+    fn sync(&self, _cx: &Cx) -> Result<()> {
+        Ok(())
+    }
+}
+
 /// The representative per-block apply transform (mirrors the escaped-magic
 /// restore in `replay_jbd2_inner`): no-op here, returns the staged bytes.
 fn apply_transform(data: Vec<u8>) -> Vec<u8> {
@@ -148,6 +197,32 @@ fn apply_parallel(
     Ok(applied)
 }
 
+/// OLD bd-xmh5g.404: read an owned BlockBuf, then copy it into a Vec.
+fn materialize_old_to_vec(
+    cx: &Cx,
+    device: &dyn BlockDevice,
+    targets: &[BlockNumber],
+) -> Result<Vec<Vec<u8>>> {
+    let mut out = Vec::with_capacity(targets.len());
+    for &block in targets {
+        out.push(device.read_block(cx, block)?.as_slice().to_vec());
+    }
+    Ok(out)
+}
+
+/// NEW bd-xmh5g.404: consume the read BlockBuf and move its Vec when unique.
+fn materialize_into_inner(
+    cx: &Cx,
+    device: &dyn BlockDevice,
+    targets: &[BlockNumber],
+) -> Result<Vec<Vec<u8>>> {
+    let mut out = Vec::with_capacity(targets.len());
+    for &block in targets {
+        out.push(device.read_block(cx, block)?.into_inner());
+    }
+    Ok(out)
+}
+
 fn bench_apply(c: &mut Criterion) {
     let cx = Cx::for_testing();
     let mut group = c.benchmark_group("journal_replay_apply_io_overlap");
@@ -172,5 +247,28 @@ fn bench_apply(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_apply);
+fn bench_blockbuf_materialize(c: &mut Criterion) {
+    let cx = Cx::for_testing();
+    let mut group = c.benchmark_group("journal_replay_blockbuf_materialize");
+    for &n in &[16_usize, 64, 256] {
+        let device = OwnedReadBlockDevice::new(n as u64);
+        let targets: Vec<BlockNumber> = (0..n as u64).map(BlockNumber).collect();
+
+        assert_eq!(
+            materialize_old_to_vec(&cx, &device, &targets).expect("old materialize"),
+            materialize_into_inner(&cx, &device, &targets).expect("new materialize"),
+            "into_inner materialization changed bytes (n={n})"
+        );
+
+        group.bench_with_input(BenchmarkId::new("old_to_vec", n), &n, |b, _| {
+            b.iter(|| black_box(materialize_old_to_vec(&cx, &device, black_box(&targets))));
+        });
+        group.bench_with_input(BenchmarkId::new("into_inner", n), &n, |b, _| {
+            b.iter(|| black_box(materialize_into_inner(&cx, &device, black_box(&targets))));
+        });
+    }
+    group.finish();
+}
+
+criterion_group!(benches, bench_apply, bench_blockbuf_materialize);
 criterion_main!(benches);

@@ -843,7 +843,7 @@ fn replay_jbd2_inner(
         use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
         planned
             .par_iter()
-            .map(|(_, _, absolute)| dev.read_block(cx, *absolute).map(|b| b.as_slice().to_vec()))
+            .map(|(_, _, absolute)| dev.read_block(cx, *absolute).map(|b| b.into_inner()))
             .collect()
     };
 
