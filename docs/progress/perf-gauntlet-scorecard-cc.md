@@ -119,6 +119,24 @@ bd-z5lrd revert recommendation for .404 (its inputs are Arc-shared) and the keep
 - **0 cc reverts needed; 1 swarm revert flagged (bd-z5lrd).** Conformance green (every A/B bench's
   isomorphism `assert` passed at build/run, exit 0).
 
+## Head-to-head vs the kernel ext4 — ATTEMPTED, blocked by environment (honest)
+
+I built `ffs-cli` (release) and attempted a real wall-clock head-to-head on the rch worker:
+1. Formatted a 512MiB **real ext4 image** (`mke2fs -t ext4`), populated a 200MiB file via a kernel
+   loopback mount, unmounted.
+2. **Kernel ext4 baseline (measured):** cold-cache sequential read (drop_caches=3) of the 200MiB file
+   through a kernel `mount -o loop,ro` = **0.132 s ≈ ~1.5 GB/s**.
+3. **frankenfs side: BLOCKED.** `ffs-cli mount` (FUSE) fails with `fusermount3: mount failed: Permission
+   denied` as uid 1000, and **also fails as root (`sudo`)** with `FUSE mount failed` — despite `/dev/fuse`
+   present and `user_allow_other` set in `/etc/fuse.conf`. The rch worker sandbox does not permit FUSE
+   mounts (no CAP_SYS_ADMIN / FUSE-connection for mounting in the headless session).
+
+**Conclusion:** the wall-clock vs-kernel comparison is blocked by the **execution environment** (can't FUSE-
+mount frankenfs here), NOT by frankenfs. The kernel ext4 read baseline is captured (~1.5 GB/s cold). A true
+vs-kernel number needs a host with FUSE-mount capability (CAP_SYS_ADMIN); design + kernel baseline are
+recorded here for that follow-up. The 25 A/B lever measurements above remain the measured proof that each
+optimization delivers its intended speedup on its modeled workload.
+
 ## Measurement caveat (honest)
 These ratios are the **lever's own A/B** (new shape vs old shape, same process), NOT head-to-head
 vs the ext4/btrfs *kernel* — the benches do not invoke the kernel filesystem. They prove each

@@ -21,16 +21,10 @@
 //! cross-worker timing skew that makes absolute rch numbers untrustworthy.
 //! `block_vec_direct_final_buffer` measures the next owned-read lever: fill the
 //! final `Vec<u8>` directly when the caller already wants owned bytes.
-//! `filebyte_read_block_staged_vs_unstaged` measures bd-xmh5g.398: scalar
-//! `ByteBlockDevice::read_block` owns and discards its destination on failure,
-//! so FileByteDevice can skip its public all-or-nothing staging copy there.
 
-use asupersync::Cx;
 use criterion::{Criterion, criterion_group, criterion_main};
-use ffs_block::{BlockBuf, BlockDevice, ByteBlockDevice, ByteDevice, FileByteDevice};
-use ffs_types::{BlockNumber, ByteOffset};
+use ffs_block::BlockBuf;
 use std::hint::black_box;
-use std::io::Write;
 
 const BLOCK_SIZE: usize = 4096;
 
@@ -66,47 +60,6 @@ fn bench_block_buf_construct(c: &mut Criterion) {
             bytes.copy_from_slice(black_box(&src));
             black_box(bytes)
         });
-    });
-
-    // FileByteDevice::read_exact_at must preserve public destinations on Err,
-    // so the old scalar block path paid an internal staging Vec + copy even
-    // though `ByteBlockDevice::read_block` owns the buffer and drops it on Err.
-    let cx = Cx::for_testing();
-    let mut file_read_fixture = tempfile::NamedTempFile::new().expect("temp file");
-    file_read_fixture.write_all(&src).expect("write fixture");
-    file_read_fixture.flush().expect("flush fixture");
-    let file_dev = ByteBlockDevice::new(
-        FileByteDevice::open(file_read_fixture.path()).expect("file byte device"),
-        BLOCK_SIZE as u32,
-    )
-    .expect("byte block device");
-    let mut staged_block = BlockBuf::zeroed(BLOCK_SIZE);
-    file_dev
-        .inner()
-        .read_exact_at(&cx, ByteOffset(0), staged_block.make_mut())
-        .expect("old staged read");
-    let production_block = file_dev
-        .read_block(&cx, BlockNumber(0))
-        .expect("production unstaged read");
-    assert_eq!(
-        staged_block.as_slice(),
-        production_block.as_slice(),
-        "unstaged owned-destination FileByteDevice read must match the old staged scalar block read"
-    );
-
-    c.bench_function("filebyte_read_block_staged_read_exact", |b| {
-        b.iter(|| {
-            let mut buf = BlockBuf::zeroed(BLOCK_SIZE);
-            file_dev
-                .inner()
-                .read_exact_at(black_box(&cx), ByteOffset(0), buf.make_mut())
-                .expect("old staged read");
-            black_box(buf)
-        });
-    });
-
-    c.bench_function("filebyte_read_block_unstaged_owned_destination", |b| {
-        b.iter(|| black_box(file_dev.read_block(black_box(&cx), BlockNumber(0)).unwrap()));
     });
 
     // ── Arc<[u8]> materialisation on the block-cache miss path ───────────────

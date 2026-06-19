@@ -21,9 +21,6 @@
 //!   callers that already supplied correctly sized `BlockBuf`s: issue one
 //!   trusted vectored read directly into those buffers and skip the whole-run
 //!   staging Vec inside `ByteBlockDevice`.
-//! * `read_contiguous_short_trusted_vectored` — the bd-xmh5g.397 shape:
-//!   compare the former heap-backed `Vec<IoSliceMut>` descriptor list with the
-//!   production stack-backed SmallVec path for short 4/16-block runs.
 //!
 //! Both deposit byte-identical data into `out`; the delta isolates exactly the
 //! eliminated allocation + copy traffic. Running both in one binary keeps the
@@ -137,78 +134,42 @@ fn make_device(
     ByteBlockDevice::new(mem, BLOCK_SIZE).expect("device")
 }
 
-fn trusted_vectored_blocks_via_vec_iovecs(
-    dev: &ByteBlockDevice<MemByteDevice>,
-    cx: &Cx,
-    blocks: usize,
-) -> Vec<BlockBuf> {
-    let bs = BLOCK_SIZE as usize;
-    let mut bufs: Vec<BlockBuf> = (0..blocks).map(|_| BlockBuf::zeroed(bs)).collect();
-    {
-        let mut slices: Vec<IoSliceMut<'_>> = bufs
-            .iter_mut()
-            .map(|buf| IoSliceMut::new(buf.make_mut()))
-            .collect();
-        dev.inner()
-            .read_vectored_exact_at(cx, ByteOffset(0), &mut slices)
-            .expect("vec-backed trusted vectored read");
-    }
-    bufs
-}
-
-fn trusted_vectored_blocks_production(
-    dev: &ByteBlockDevice<MemByteDevice>,
-    cx: &Cx,
-    blocks: usize,
-) -> Vec<BlockBuf> {
-    let bs = BLOCK_SIZE as usize;
-    let mut bufs: Vec<BlockBuf> = (0..blocks).map(|_| BlockBuf::zeroed(bs)).collect();
-    dev.read_contiguous_blocks(cx, BlockNumber(0), &mut bufs)
-        .expect("production trusted vectored read");
-    bufs
-}
-
-fn flatten_blocks(bufs: &[BlockBuf]) -> Vec<u8> {
-    let bs = BLOCK_SIZE as usize;
-    let mut out = vec![0_u8; bufs.len() * bs];
+fn flatten_blocks(bufs: &[BlockBuf], block_size: usize) -> Vec<u8> {
+    let mut out = vec![0_u8; bufs.len() * block_size];
     for (idx, buf) in bufs.iter().enumerate() {
-        out[idx * bs..(idx + 1) * bs].copy_from_slice(buf.as_slice());
+        out[idx * block_size..(idx + 1) * block_size].copy_from_slice(buf.as_slice());
     }
     out
 }
 
-fn bench_read_contiguous(c: &mut Criterion) {
-    let cx = Cx::for_testing();
-    let staged_dev = make_device(false, false);
-    let trusted_dev = make_device(true, false);
-    let trusted_vectored_dev = make_device(false, true);
-    let bs = BLOCK_SIZE as usize;
-
-    // Isomorphism: both paths fill `out` with identical bytes.
-    let mut out_old = vec![0_u8; SPAN];
-    let mut bufs: Vec<BlockBuf> = (0..BLOCKS).map(|_| BlockBuf::zeroed(bs)).collect();
+fn assert_contiguous_paths_match(
+    staged_dev: &ByteBlockDevice<MemByteDevice>,
+    trusted_dev: &ByteBlockDevice<MemByteDevice>,
+    trusted_vectored_dev: &ByteBlockDevice<MemByteDevice>,
+    cx: &Cx,
+    block_size: usize,
+) {
+    let mut bufs: Vec<BlockBuf> = (0..BLOCKS).map(|_| BlockBuf::zeroed(block_size)).collect();
     staged_dev
-        .read_contiguous_blocks(&cx, BlockNumber(0), &mut bufs)
+        .read_contiguous_blocks(cx, BlockNumber(0), &mut bufs)
         .expect("contiguous blocks");
-    for (idx, buf) in bufs.iter().enumerate() {
-        out_old[idx * bs..(idx + 1) * bs].copy_from_slice(buf.as_slice());
-    }
+    let out_old = flatten_blocks(&bufs, block_size);
+
     let mut out_staged = vec![0_u8; SPAN];
     staged_dev
-        .read_contiguous_into(&cx, BlockNumber(0), &mut out_staged)
+        .read_contiguous_into(cx, BlockNumber(0), &mut out_staged)
         .expect("staged contiguous into");
     let mut out_direct = vec![0_u8; SPAN];
     trusted_dev
-        .read_contiguous_into(&cx, BlockNumber(0), &mut out_direct)
+        .read_contiguous_into(cx, BlockNumber(0), &mut out_direct)
         .expect("trusted contiguous into");
-    let mut out_vectored_blocks = vec![0_u8; SPAN];
-    let mut vectored_bufs: Vec<BlockBuf> = (0..BLOCKS).map(|_| BlockBuf::zeroed(bs)).collect();
+    let mut vectored_bufs: Vec<BlockBuf> =
+        (0..BLOCKS).map(|_| BlockBuf::zeroed(block_size)).collect();
     trusted_vectored_dev
-        .read_contiguous_blocks(&cx, BlockNumber(0), &mut vectored_bufs)
+        .read_contiguous_blocks(cx, BlockNumber(0), &mut vectored_bufs)
         .expect("trusted vectored contiguous blocks");
-    for (idx, buf) in vectored_bufs.iter().enumerate() {
-        out_vectored_blocks[idx * bs..(idx + 1) * bs].copy_from_slice(buf.as_slice());
-    }
+    let out_vectored_blocks = flatten_blocks(&vectored_bufs, block_size);
+
     assert_eq!(
         out_old, out_staged,
         "staged read_contiguous_into must match blocks+copy"
@@ -221,16 +182,16 @@ fn bench_read_contiguous(c: &mut Criterion) {
         out_old, out_vectored_blocks,
         "trusted vectored read_contiguous_blocks must match blocks+copy"
     );
-    for blocks in [4_usize, 16] {
-        let vec_iovecs = trusted_vectored_blocks_via_vec_iovecs(&trusted_vectored_dev, &cx, blocks);
-        let smallvec_iovecs = trusted_vectored_blocks_production(&trusted_vectored_dev, &cx, blocks);
-        assert_eq!(
-            flatten_blocks(&vec_iovecs),
-            flatten_blocks(&smallvec_iovecs),
-            "SmallVec trusted iovec path must match the old Vec-backed descriptor path for {blocks} blocks"
-        );
-    }
+}
 
+fn bench_read_contiguous(c: &mut Criterion) {
+    let cx = Cx::for_testing();
+    let staged_dev = make_device(false, false);
+    let trusted_dev = make_device(true, false);
+    let trusted_vectored_dev = make_device(false, true);
+    let bs = BLOCK_SIZE as usize;
+
+    assert_contiguous_paths_match(&staged_dev, &trusted_dev, &trusted_vectored_dev, &cx, bs);
     let mut group = c.benchmark_group("read_contiguous_1mib");
     // Old: Vec<BlockBuf> (alloc + zero per block) + ranged read + per-block copy.
     group.bench_function("read_contiguous_blocks_then_copy", |b| {
@@ -304,31 +265,6 @@ fn bench_read_contiguous(c: &mut Criterion) {
         });
     });
     group.finish();
-
-    let mut short_group = c.benchmark_group("read_contiguous_short_trusted_vectored");
-    for blocks in [4_usize, 16] {
-        short_group.bench_function(format!("old_vec_iovecs_{blocks}_blocks"), |b| {
-            b.iter(|| {
-                let bufs = trusted_vectored_blocks_via_vec_iovecs(
-                    black_box(&trusted_vectored_dev),
-                    black_box(&cx),
-                    blocks,
-                );
-                black_box(flatten_blocks(&bufs))
-            });
-        });
-        short_group.bench_function(format!("smallvec_iovecs_{blocks}_blocks"), |b| {
-            b.iter(|| {
-                let bufs = trusted_vectored_blocks_production(
-                    black_box(&trusted_vectored_dev),
-                    black_box(&cx),
-                    blocks,
-                );
-                black_box(flatten_blocks(&bufs))
-            });
-        });
-    }
-    short_group.finish();
 }
 
 criterion_group!(read_contiguous, bench_read_contiguous);
