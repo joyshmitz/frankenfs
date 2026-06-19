@@ -1294,7 +1294,20 @@ impl Ext4Superblock {
             });
         }
         let max_blocks_per_group = self.block_size.saturating_mul(8);
-        if max_blocks_per_group > 0 && self.blocks_per_group > max_blocks_per_group {
+        // With bigalloc the block bitmap tracks CLUSTERS (`clusters_per_group` bits),
+        // not individual blocks, so `blocks_per_group` legitimately exceeds
+        // `block_size * 8` — the one-block bitmap capacity bounds `clusters_per_group`
+        // instead. Validating `blocks_per_group` here rejected every bigalloc ext4
+        // image at open (could not be mounted/read at all).
+        let block_bitmap_units = if self
+            .feature_ro_compat
+            .contains(Ext4RoCompatFeatures::BIGALLOC)
+        {
+            self.clusters_per_group
+        } else {
+            self.blocks_per_group
+        };
+        if max_blocks_per_group > 0 && block_bitmap_units > max_blocks_per_group {
             return Err(ParseError::InvalidField {
                 field: "s_blocks_per_group",
                 reason: "exceeds block_size * 8 (block bitmap capacity)",

@@ -440,6 +440,23 @@ After: indirect direct/single/double-indirect/sparse files all read **byte-exact
 1177 tests pass. This is **ext2/ext3-style (indirect-mapped) ext4 read support** that was silently broken —
 frankenfs could not read any filesystem whose root directory used indirect blocks.
 
+**Continuing the ext4 oracle sweep — passed 1 KB/2 KB block sizes, indirect@1 KB, then found + FIXED a 3rd
+bug: bigalloc.** A `-O bigalloc` ext4 image failed at **open**: `invalid geometry: s_blocks_per_group exceeds
+block_size*8 (block bitmap capacity)`. With bigalloc the block bitmap tracks **clusters** (`clusters_per_group`
+bits), not blocks, so `blocks_per_group` legitimately exceeds `block_size*8` — frankenfs's geometry
+validation (ffs-ondisk `validate_geometry_fields`) checked `blocks_per_group` unconditionally and rejected
+**every bigalloc filesystem at mount**. Fix: when `BIGALLOC` is set, bound `clusters_per_group` instead
+(mirroring the existing `block_bitmap_units_per_group` logic). After: bigalloc small/big/sparse all read
+**byte-exact** vs kernel (reads were never the problem — extents map to blocks regardless of cluster
+allocation; only open-validation rejected it). ffs-ondisk 664 tests pass, clippy-clean.
+
+**Differential-oracle scorecard this session: 3 core read-path conformance bugs found + fixed** — btrfs
+compressed read (zstd/zlib/lzo, bd-pokmq), ext4 indirect-block read, ext4 bigalloc open. All were silently
+broken; all found by reading **real kernel-written data** across diverse configs and comparing sha256.
+Validated-correct dimensions: btrfs {inline, sparse, compressed×3, reflink, empty, large}; ext4 {extent,
+inline, sparse, fragmented, large, empty, indirect direct/single/double, 1 KB/2 KB blocks, indirect@1 KB,
+bigalloc}.
+
 Two real **CLI bugs found + fixed** along the way: (1) the CLI wrote tracing **logs to stdout**, corrupting
 `ffs read`'s file-data output (an empty file produced 1742 bytes of log noise) → routed logs to **stderr**
 (`.with_writer(std::io::stderr)`; data on stdout, logs on stderr — the universal convention). (2) latent
