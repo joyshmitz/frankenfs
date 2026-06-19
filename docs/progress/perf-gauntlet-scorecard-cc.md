@@ -339,10 +339,17 @@ still has many children/node and stays parallel).
 
 **4.3× faster (cold + warm); 7× → 1.6× vs kernel btrfs.** A regression in my own parallel-walk lever, found
 by profiling a LOSS and fixed; per-entry cost now matches the ext4 metadata path (~6 µs). Correctness:
-identical 30,002-entry result before/after. (Still 1.6× behind kernel btrfs = userspace tax + remaining
-b-tree-walk-per-getattr cost; the single big directory can't use `--parallel`, so a multi-dir btrfs tree
-would close further as it did for ext4.) ⭐ Lesson echoes W153: parallelism dispatched on tiny per-item
+identical 30,002-entry result before/after. ⭐ Lesson echoes W153: parallelism dispatched on tiny per-item
 work is a net LOSS — gate it on the work size.
+
+**Multi-dir btrfs (20k files / 1,001 dirs), cold, after the fix — PARITY:** kernel btrfs `find` 80–84 ms vs
+frankenfs serial 76–81 ms (≈ **1.0×**). Unlike ext4 (where `--parallel` flipped parity → 5×), btrfs
+`--parallel` does *not* help here (80–86 ms, slightly slower than serial) — the per-thread b-tree walks
+contend on the shared parsed-node cache, and btrfs already packs directory metadata compactly (kernel btrfs
+cold 82 ms < kernel ext4 cold 134 ms for the same tree). **Net: after the fan-out fix, frankenfs MATCHES
+kernel btrfs on metadata (parity multi-dir, 1.6× single-dir) — up from a 7× loss.** A possible follow-up
+lever: shard/relax the parsed-node cache so parallel btrfs walks don't contend (deferred — would need its
+own A/B; the single-thread path is already at parity).
 
 ### COLD bulk DATA read (`grep -r` / `tar`): the boundary — frankenfs LOSES on contiguous data (cc 2026-06-19)
 `ffs walk --read-data --parallel` reads every regular file's bytes (the read-all-files workload: build
