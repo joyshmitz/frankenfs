@@ -2147,6 +2147,8 @@ fn log_wal_recovery_telemetry(wal: &WalReplayInfoOutput) {
 }
 
 fn read_file_cmd(path: &PathBuf, file_path: &str, discard: bool) -> Result<()> {
+    const STREAM_CHUNK: usize = 64 * 1024 * 1024; // 64 MiB
+
     use std::io::Write;
     let cx = cli_cx();
     let open_fs = OpenFs::open(&cx, path)
@@ -2157,18 +2159,37 @@ fn read_file_cmd(path: &PathBuf, file_path: &str, discard: bool) -> Result<()> {
     let (ino, inode) = open_fs
         .resolve_path(&cx, &scope, file_path)
         .with_context(|| format!("failed to resolve {file_path}"))?;
-    let size = u32::try_from(inode.size).unwrap_or(u32::MAX);
-    let data = open_fs
-        .read_file(&cx, &scope, ino, 0, size)
-        .with_context(|| format!("failed to read {file_path}"))?;
-    let _ = open_fs.end_request_scope(&cx, RequestOp::Read, scope);
-    if discard {
-        eprintln!("read {} bytes from {file_path}", data.len());
-    } else {
+    if !discard {
+        let size = u32::try_from(inode.size).unwrap_or(u32::MAX);
+        let data = open_fs
+            .read_file(&cx, &scope, ino, 0, size)
+            .with_context(|| format!("failed to read {file_path}"))?;
+        let _ = open_fs.end_request_scope(&cx, RequestOp::Read, scope);
         std::io::stdout()
             .write_all(&data)
             .with_context(|| "failed to write file data to stdout".to_string())?;
+        return Ok(());
     }
+
+    let size = inode.size;
+    // For discard-mode perf probes, avoid materializing the whole file into one
+    // Vec. Each chunk still uses the chunked-parallel engine internally.
+    let mut buf = vec![0_u8; STREAM_CHUNK.min(usize::try_from(size).unwrap_or(STREAM_CHUNK))];
+    let mut off: u64 = 0;
+    let mut total: u64 = 0;
+    while off < size {
+        let want = usize::try_from((size - off).min(buf.len() as u64)).unwrap_or(buf.len());
+        let n = open_fs
+            .read_file_data(&cx, &scope, &inode, off, &mut buf[..want])
+            .with_context(|| format!("failed to read {file_path} at {off}"))?;
+        if n == 0 {
+            break;
+        }
+        off += n as u64;
+        total += n as u64;
+    }
+    let _ = open_fs.end_request_scope(&cx, RequestOp::Read, scope);
+    eprintln!("read {total} bytes from {file_path}");
     Ok(())
 }
 

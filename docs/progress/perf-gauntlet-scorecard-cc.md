@@ -169,6 +169,30 @@ Combined with the fragmented win, **frankenfs now beats kernel ext4 on both cold
 reads** — the only remaining loss is fully-cached warm read (CPU-bound copy). Iso-verified: `ffs-cli read`
 returns the identical 209,715,200 bytes; chunks are disjoint block-ranges into disjoint windows.
 
+### bd-iamhf follow-up: streaming `ffs-cli read --discard` cuts the remaining materialization tax
+
+After the chunked-parallel read win, `ffs-cli read --discard` still paid one avoidable userspace cost:
+it materialized the whole file in a single returned `Vec` even when the caller only wanted a perf sink.
+The `bd-iamhf` lever keeps normal stdout reads on the old buffered path (same all-or-nothing stdout error
+contract) but streams discard-mode reads through one reused 64MiB buffer.
+
+Same worker `vmi1149989`, release-perf baseline `7050a1c3` vs candidate, ext4 image built by resizing a
+copy of `conformance/golden/ext4_dir_index_reference.ext4` and adding a non-sparse 200MiB `/bigfile` via
+`debugfs` (Blockcount `409600`):
+
+| Workload | baseline | streaming | ratio |
+|----------|----------|-----------|-------|
+| warm mean, 5 runs | 0.196 s | 0.162 s | **1.21x faster** |
+| cold mean, 3 runs | 0.347 s | 0.287 s | **1.21x faster** |
+
+Kernel comparison on this small fixture is not claimed as a new domination result: warm kernel reads were
+too fast for the coarse shell timer (`0.00-0.04 s`), and cold kernel was noisy (`0.18/0.63/0.26 s`), making
+streaming faster by mean but slightly slower by median. The existing chunked-parallel score above remains
+the primary cold sequential vs-kernel result. Sparse 512MiB zero-fill/allocation probe also favored the
+streaming path (warm `1.17 s` -> `0.928 s`, cold `1.303 s` -> `0.973 s`) but is recorded only as allocation
+evidence, not storage throughput. Btrfs was not rerun: there is no existing btrfs image in the workspace,
+and `mkfs` commands are blocked by DCG.
+
 ### ⭐⭐⭐ FRAGMENTED-FILE read: frankenfs BEATS the kernel (~1.4×, 3 runs)
 150MiB file deliberately fragmented to **108 extents** (interleaved spacer-file writes + fsync, then
 spacers deleted; `filefrag` confirmed), cold cache both sides:
