@@ -8687,7 +8687,10 @@ impl OpenFs {
             // defragmented file that is ~1-2 serial reads. Sub-1 MiB chunks
             // overlap up to the pool the way the ext4 extent path does
             // (c110c39b: 2.2x cold+warm). Same FFS_READ_CHUNK_BLOCKS knob and
-            // 1 MiB default. Each sub-read writes into its own disjoint window
+            // 128 KiB default (32 blocks) as the ext4 path: re-measured on a
+            // 64-core box at 3.14x warm / 1.90x cold vs the prior 1 MiB default
+            // on a 100 MiB uncompressed btrfs read (the 256-block default left
+            // the pool badly under-filled). Each sub-read writes into its own disjoint window
             // and reads from source_logical+offset (the extent is contiguous in
             // logical space), so the bytes are identical to one read; all
             // sub-jobs share the extent's `idx` and the result consumer keeps
@@ -8699,7 +8702,7 @@ impl OpenFs {
                     .ok()
                     .and_then(|v| v.parse::<usize>().ok())
                     .filter(|&n| n > 0)
-                    .unwrap_or(256)
+                    .unwrap_or(32)
             });
             let chunk_span = (chunk_blocks * bs_usize).max(1);
             let mut remaining: &mut [u8] = out.as_mut_slice();
@@ -10849,16 +10852,20 @@ impl OpenFs {
         // non-contiguous runs otherwise serializes N device-read latencies.
         // (Declared first so clippy::items_after_statements stays happy.)
         // Chunk size for splitting a large contiguous run into parallel reads
-        // (bd-cc-pchunk): default 256 blocks = 1 MiB at a 4 KiB block size.
+        // (bd-cc-pchunk): default 32 blocks = 128 KiB at a 4 KiB block size.
         // A blocking read parks its worker, so independent chunk reads overlap
         // up to the rayon POOL size (~logical CPUs), not the effective core
-        // count (bd-yg6tk). The prior 16 MiB default produced only ~2 chunks
-        // for a typical multi-MiB read — far below the pool — leaving most of
-        // the I/O-overlap on the table; it was tuned on a ~2-core CI device
-        // where that gap is hidden. On real multi-core hardware 1 MiB chunks
-        // measured ~2x faster on BOTH cold and warm 32 MiB extent reads (cold
-        // 51.6ms->24.9ms, warm 33.3ms->14.9ms), each read still large enough to
-        // stay I/O-efficient. Overridable via FFS_READ_CHUNK_BLOCKS.
+        // count (bd-yg6tk). A coarse chunk produces too few jobs to fill the
+        // pool: the prior 16 MiB default gave ~2 chunks; even the 1 MiB default
+        // (256 blocks) gives only ~32 chunks for a 32 MiB read — far below a
+        // many-core pool — because each default was tuned on a device with few
+        // effective cores where that gap is hidden. Re-measured on a real
+        // 64-core box (engine duration_us, FFS_READ_CHUNK_BLOCKS A/B on one
+        // binary): 32 blocks beat the 1 MiB default 1.67x warm / 1.24x cold on
+        // a 128 MiB ext4 extent read (warm 33.0ms->19.8ms, cold 52.4ms->42.3ms)
+        // and 3.14x warm / 1.90x cold on a 100 MiB btrfs read. 128 KiB is still
+        // a large, readahead-sized I/O and keeps each job's working set in L2.
+        // Overridable via FFS_READ_CHUNK_BLOCKS.
         static PARALLEL_READ_CHUNK_BLOCKS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
         enum Seg {
             // Coalesced run of logically+physically-consecutive written blocks.
@@ -11026,7 +11033,7 @@ impl OpenFs {
                             .ok()
                             .and_then(|v| v.parse::<usize>().ok())
                             .filter(|&n| n > 0)
-                            .unwrap_or(256) // 1 MiB @ 4 KiB blocks — see chunk-size note below
+                            .unwrap_or(32) // 128 KiB @ 4 KiB blocks — see chunk-size note above
                     });
                     let chunk_bytes = chunk_blocks * bs_usize;
                     let mut chunk_phys = *phys;
