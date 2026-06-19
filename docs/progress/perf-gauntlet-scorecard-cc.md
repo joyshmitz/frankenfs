@@ -136,7 +136,7 @@ revert.**
 
 | Bead/area | Bench | Measured | Verdict |
 |-----------|-------|----------|---------|
-| bd-xmh5g.388 | resolve_containing_extent_floor_ab (floor_key vs zero-scan) | **1162x** | ✅ WIN — O(floor/log) predecessor vs O(N) range-from-zero scan. |
+| bd-xmh5g.388 | resolve_containing_extent_floor_ab (floor_key vs zero-scan) | **955.7x current cod-a rerun** (`624.25 us` -> `653.21 ns` on `hz2`; prior cc row was 1162x) | ✅ WIN — O(floor/log) predecessor vs O(N) range-from-zero scan. |
 | mvcc cow-owned read (bd-xmh5g.384/.387) | mvcc_read_block_cow_owned (into_owned_move vs to_vec_clone) | **10.85x / 49.7x / 311x** (4K/16K/64K) | ✅ WIN — move (O(1)) vs copy, on **uniquely-owned** decompressed buffers. |
 | BlockBuf construct (bd-xmh5g.398) | block_buf_construct (1-copy vs 2-copy) | **2.09x** | ✅ WIN — one copy vs two; direct-final-buffer fastest (2–3x vs aligned/unaligned). |
 
@@ -148,7 +148,7 @@ bd-z5lrd revert recommendation for .404 (its inputs are Arc-shared) and the keep
 
 ## Final tally: ~25 optimizations measured this gauntlet phase
 - **READ / lookup / free / bitmap / parse / construct levers: ALL WINS** (cc 13 @ 4.75–1009x; swarm
-  reads .394 112–1297x, .386 9x, .399 40x, .388 1162x, cow-owned 11–311x; broadword bitmap 4.4–7.5x;
+  reads .394 112–1297x, .386 9x, .399 40x, .388 955.7x current rerun, cow-owned 11–311x; broadword bitmap 4.4–7.5x;
   block construct 2.09x; read-contiguous 1.24x).
 - **Write-path / micro / ownership-mismatched levers: the only non-wins** — .401 commit-batch 1.08x
   (neutral, real cost unmeasured), .404 into_inner 1.4–1.6x REGRESSION (revert filed bd-z5lrd),
