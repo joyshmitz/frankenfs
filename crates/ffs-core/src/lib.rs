@@ -10471,30 +10471,54 @@ impl OpenFs {
                         detail: "extent index at depth 0".into(),
                     });
                 }
+                // PLAN (serial): range-prune to the surviving children, in order.
+                // Prune children whose whole subtree ends at or before
+                // `from_block`: child `i` covers [idx.logical_block,
+                // next.logical_block), so a next sibling starting at/below
+                // `from_block` means every extent under child `i` ends at or
+                // before it (bd-yd3a0). The covering child and all later ones are
+                // kept, preserving the sorted suffix and the final extent.
+                let mut survivors: Vec<u64> = Vec::new();
                 for (i, idx) in indexes.iter().enumerate() {
-                    // Prune children whose whole subtree ends at or before
-                    // `from_block`: child `i` covers [idx.logical_block,
-                    // next.logical_block), so a next sibling starting at/below
-                    // `from_block` means every extent under child `i` ends at or
-                    // before it (bd-yd3a0). The covering child and all later ones
-                    // are kept, preserving the sorted suffix and the final extent.
                     if let Some(next) = indexes.get(i + 1) {
                         if next.logical_block <= from_block {
                             continue;
                         }
                     }
-                    // Cache extent-tree child blocks on read-only mounts so
-                    // repeated flattens reuse them (bd-nlggu).
-                    let child_data = self.read_ext4_file_data_block_with_scope(
-                        cx,
-                        scope,
-                        BlockNumber(idx.leaf_block),
-                    )?;
+                    survivors.push(idx.leaf_block);
+                }
+
+                // FETCH (parallel): read each surviving child block. The reads are
+                // independent, so a blocking read parks its rayon worker and the
+                // access latencies overlap up to the pool size (the extent-tree
+                // analogue of the btrfs parallel walk bd-h6p3w). The child-block
+                // cache (bd-nlggu) is already thread-safe.
+                let child_datas: Vec<Result<_, FfsError>> = {
+                    use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
+                    survivors
+                        .par_iter()
+                        .map(|&leaf_block| {
+                            self.read_ext4_file_data_block_with_scope(
+                                cx,
+                                scope,
+                                BlockNumber(leaf_block),
+                            )
+                        })
+                        .collect()
+                };
+
+                // CONSUME (serial): parse + validate + recurse in child order so
+                // extents accumulate in sorted logical order and the first error
+                // in child order is surfaced exactly as the old loop did. The
+                // recursion parallel-fetches its own children, so the fan-out
+                // applies at every interior level.
+                for (&leaf_block, child_data) in survivors.iter().zip(child_datas) {
+                    let child_data = child_data?;
                     let (child_header, child_tree) =
                         parse_extent_tree(&child_data).map_err(|e| parse_to_ffs_error(&e))?;
                     if child_header.depth + 1 != remaining_depth {
                         return Err(FfsError::Corruption {
-                            block: idx.leaf_block,
+                            block: leaf_block,
                             detail: "child extent tree depth inconsistency".into(),
                         });
                     }
