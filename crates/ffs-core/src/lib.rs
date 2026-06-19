@@ -8680,6 +8680,28 @@ impl OpenFs {
             // logical-offset order and their output ranges are disjoint), so a
             // single forward `split_at_mut` walk hands each read its own
             // non-overlapping window without copying.
+            // Split each extent's window into <=1 MiB sub-reads so a few-large-
+            // extent file fills the rayon pool: btrfs_read_logical_into issues
+            // ONE ranged device read per extent, so an unsplit large extent
+            // overlaps only N (= extent count) device latencies — for a
+            // defragmented file that is ~1-2 serial reads. Sub-1 MiB chunks
+            // overlap up to the pool the way the ext4 extent path does
+            // (c110c39b: 2.2x cold+warm). Same FFS_READ_CHUNK_BLOCKS knob and
+            // 1 MiB default. Each sub-read writes into its own disjoint window
+            // and reads from source_logical+offset (the extent is contiguous in
+            // logical space), so the bytes are identical to one read; all
+            // sub-jobs share the extent's `idx` and the result consumer keeps
+            // the lowest-offset error per idx.
+            let bs_usize = self.block_size() as usize;
+            static BTRFS_CHUNK_BLOCKS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+            let chunk_blocks = *BTRFS_CHUNK_BLOCKS.get_or_init(|| {
+                std::env::var("FFS_READ_CHUNK_BLOCKS")
+                    .ok()
+                    .and_then(|v| v.parse::<usize>().ok())
+                    .filter(|&n| n > 0)
+                    .unwrap_or(256)
+            });
+            let chunk_span = (chunk_blocks * bs_usize).max(1);
             let mut remaining: &mut [u8] = out.as_mut_slice();
             let mut consumed: usize = 0;
             for &(idx, dst_start, copy_len, source_logical) in &uncompressed_specs {
@@ -8688,11 +8710,19 @@ impl OpenFs {
                 let (dst, rest_after) = rest.split_at_mut(copy_len);
                 remaining = rest_after;
                 consumed = dst_start + copy_len;
-                jobs.push(ReadJob::Uncompressed {
-                    idx,
-                    source_logical,
-                    dst,
-                });
+                let mut sub: &mut [u8] = dst;
+                let mut sub_logical = source_logical;
+                while !sub.is_empty() {
+                    let take = sub.len().min(chunk_span);
+                    let (chunk, rest2) = sub.split_at_mut(take);
+                    jobs.push(ReadJob::Uncompressed {
+                        idx,
+                        source_logical: sub_logical,
+                        dst: chunk,
+                    });
+                    sub_logical += take as u64;
+                    sub = rest2;
+                }
             }
             let results: Vec<(usize, Result<Vec<u8>, FfsError>)> = jobs
                 .into_par_iter()
@@ -8731,7 +8761,17 @@ impl OpenFs {
                     },
                 })
                 .collect();
+            // `results` preserves job order (extent order, then increasing
+            // sub-chunk offset within an extent). An uncompressed extent may now
+            // contribute several sub-jobs under one `idx`; keep the FIRST error
+            // seen for that idx (lowest offset) and never let a later Ok clobber
+            // it, so a partial read failure still surfaces at the lowest offset —
+            // identical to the single-read path. Compressed/inline jobs are one
+            // per idx, so this is a no-op for them.
             for (idx, res) in results {
+                if matches!(decompressed_by_idx[idx], Some(Err(_))) {
+                    continue;
+                }
                 decompressed_by_idx[idx] = Some(res);
             }
         }
