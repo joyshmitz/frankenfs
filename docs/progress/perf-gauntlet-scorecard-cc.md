@@ -94,6 +94,31 @@ parseable criterion output. **Net: every read-side optimization is a real measur
 losses/neutrals are write-path or micro-levers — and the one outright regression (.404) is flagged for
 revert.**
 
+### Final-final batch — extent floor-key, cow-owned move, block construct (swarm)
+
+| Bead/area | Bench | Measured | Verdict |
+|-----------|-------|----------|---------|
+| bd-xmh5g.388 | resolve_containing_extent_floor_ab (floor_key vs zero-scan) | **1162x** | ✅ WIN — O(floor/log) predecessor vs O(N) range-from-zero scan. |
+| mvcc cow-owned read (bd-xmh5g.384/.387) | mvcc_read_block_cow_owned (into_owned_move vs to_vec_clone) | **10.85x / 49.7x / 311x** (4K/16K/64K) | ✅ WIN — move (O(1)) vs copy, on **uniquely-owned** decompressed buffers. |
+| BlockBuf construct (bd-xmh5g.398) | block_buf_construct (1-copy vs 2-copy) | **2.09x** | ✅ WIN — one copy vs two; direct-final-buffer fastest (2–3x vs aligned/unaligned). |
+
+⭐⭐ **OWNERSHIP NUANCE (resolves the .404 paradox):** `into_owned`/`into_inner` is **10–310x FASTER** when the
+buffer is *uniquely owned* (cow_owned read, freshly decompressed) — but a **1.4–1.6x REGRESSION** when the
+buffer is *Arc-shared* (.404 journal replay, where bd-xmh5g.394 made reads Arc-backed), because try_unwrap
+fails and falls back to clone. Same pattern, opposite result, decided purely by ownership. Confirms the
+bd-z5lrd revert recommendation for .404 (its inputs are Arc-shared) and the keep for the cow-owned path.
+
+## Final tally: ~25 optimizations measured this gauntlet phase
+- **READ / lookup / free / bitmap / parse / construct levers: ALL WINS** (cc 13 @ 4.75–1009x; swarm
+  reads .394 112–1297x, .386 9x, .399 40x, .388 1162x, cow-owned 11–311x; broadword bitmap 4.4–7.5x;
+  block construct 2.09x; read-contiguous 1.24x).
+- **Write-path / micro / ownership-mismatched levers: the only non-wins** — .401 commit-batch 1.08x
+  (neutral, real cost unmeasured), .404 into_inner 1.4–1.6x REGRESSION (revert filed bd-z5lrd),
+  .397 smallvec iovec 0.95x (neutral), bd-ucrow within-noise.
+- **Unmeasurable:** writeback_dag_order, wal_throughput (no parseable criterion output).
+- **0 cc reverts needed; 1 swarm revert flagged (bd-z5lrd).** Conformance green (every A/B bench's
+  isomorphism `assert` passed at build/run, exit 0).
+
 ## Measurement caveat (honest)
 These ratios are the **lever's own A/B** (new shape vs old shape, same process), NOT head-to-head
 vs the ext4/btrfs *kernel* — the benches do not invoke the kernel filesystem. They prove each
