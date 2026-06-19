@@ -351,6 +351,20 @@ kernel btrfs on metadata (parity multi-dir, 1.6× single-dir) — up from a 7× 
 lever: shard/relax the parsed-node cache so parallel btrfs walks don't contend (deferred — would need its
 own A/B; the single-thread path is already at parity).
 
+### ⭐ CONFORMANCE GAP found by the btrfs gauntlet: zstd-compressed read fails (bd-pokmq, cc 2026-06-19)
+Attempting a btrfs *compressed*-read head-to-head (to exercise the W144 `bd-m6g2o` parallel decompress)
+surfaced a **correctness bug, not a perf result**: frankenfs **cannot read a kernel-written
+zstd-compressed btrfs file** — `btrfs zstd decompression failed: Unknown frame descriptor` — while the
+kernel `cat`s it fine. **Scoped:** frankenfs reads an *uncompressed* btrfs file correctly (1 MiB, exact
+bytes → logical→physical mapping + read path WORK); the failure is zstd-specific. The error on the *first*
+decode means the bytes frankenfs reads for a compressed extent don't start with the zstd magic
+(`0x28B52FFD`) — it's reading the **wrong compressed bytes**, not a decode-method issue (a single-frame
+`read_exact` gave the identical error, so I reverted that probe). frankenfs's own W144 decompress round-trips
+only because it never exercised kernel-written compressed extents. Filed **bd-pokmq** with full repro +
+the next step (hexdump frankenfs's read at `disk_bytenr` vs the on-disk frame). This is exactly the kind of
+interop gap the gauntlet exists to catch — compressed read is core btrfs functionality. (The compressed
+perf head-to-head is blocked until the read works.)
+
 ### COLD bulk DATA read (`grep -r` / `tar`): the boundary — frankenfs LOSES on contiguous data (cc 2026-06-19)
 `ffs walk --read-data --parallel` reads every regular file's bytes (the read-all-files workload: build
 source reads, `grep -r`, backup). Cold over a **250 MiB / 4,000-file** ext4 image (`mke2fs -d`, 64 KiB
