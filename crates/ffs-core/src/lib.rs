@@ -5565,9 +5565,8 @@ impl OpenFs {
         let txn_id = txn.id;
         let write_set_size = txn.pending_writes();
         let read_set_size = txn.read_set().len();
-        // Capture write-set blocks only when the optional repair lifecycle can
-        // consume them. Default mounts leave that lifecycle detached.
-        let write_blocks = self.collect_repair_flush_blocks(&txn);
+        // Capture write set blocks before commit consumes the transaction.
+        let write_blocks: Vec<BlockNumber> = txn.write_set().keys().copied().collect();
 
         debug!(
             target: "ffs::mvcc",
@@ -5651,7 +5650,7 @@ impl OpenFs {
             }
         }
 
-        if result.is_ok() && !write_blocks.is_empty() {
+        if result.is_ok() {
             self.notify_repair_flush_lifecycle(txn_id, &write_blocks);
         }
 
@@ -5671,9 +5670,8 @@ impl OpenFs {
         let txn_id = txn.id;
         let write_set_size = txn.pending_writes();
         let read_set_size = txn.read_set().len();
-        // Capture write-set blocks only when the optional repair lifecycle can
-        // consume them. Default mounts leave that lifecycle detached.
-        let write_blocks = self.collect_repair_flush_blocks(&txn);
+        // Capture write set blocks before commit consumes the transaction.
+        let write_blocks: Vec<BlockNumber> = txn.write_set().keys().copied().collect();
 
         debug!(
             target: "ffs::mvcc",
@@ -5711,7 +5709,7 @@ impl OpenFs {
             }
         }
 
-        if result.is_ok() && !write_blocks.is_empty() {
+        if result.is_ok() {
             self.notify_repair_flush_lifecycle(txn_id, &write_blocks);
         }
 
@@ -5801,14 +5799,6 @@ impl OpenFs {
         self.repair_flush_lifecycle.is_some()
     }
 
-    fn collect_repair_flush_blocks(&self, txn: &Transaction) -> Vec<BlockNumber> {
-        if self.repair_flush_lifecycle.is_some() {
-            txn.write_set().keys().copied().collect()
-        } else {
-            Vec::new()
-        }
-    }
-
     fn validate_repair_writeback_blocks(
         &self,
         recovered_blocks: &[RepairWritebackBlock<'_>],
@@ -5894,11 +5884,9 @@ impl OpenFs {
         let write_blocks = scope
             .tx
             .as_ref()
-            .map_or_else(Vec::new, |tx| self.collect_repair_flush_blocks(tx));
+            .map_or_else(Vec::new, |tx| tx.write_set().keys().copied().collect());
         let commit_seq = scope.commit_if_write(&self.mvcc_store)?;
-        if let Some(tx_id) = tx_id
-            && !write_blocks.is_empty()
-        {
+        if let Some(tx_id) = tx_id {
             self.notify_repair_flush_lifecycle_with_cx(cx, tx_id, &write_blocks);
         }
         Ok(commit_seq)
@@ -32589,12 +32577,10 @@ impl FsOps for OpenFs {
         let write_blocks = scope
             .tx
             .as_ref()
-            .map_or_else(Vec::new, |tx| self.collect_repair_flush_blocks(tx));
+            .map_or_else(Vec::new, |tx| tx.write_set().keys().copied().collect());
         let result = scope.commit_if_write(&self.mvcc_store);
         if result.is_ok() {
-            if let Some(tx_id) = tx_id
-                && !write_blocks.is_empty()
-            {
+            if let Some(tx_id) = tx_id {
                 self.notify_repair_flush_lifecycle(tx_id, &write_blocks);
             }
         }
@@ -60947,31 +60933,6 @@ mod tests {
 
     fn filled_repair_block(fs: &OpenFs, byte: u8) -> Vec<u8> {
         vec![byte; usize::try_from(fs.block_size()).expect("block size fits")]
-    }
-
-    #[test]
-    fn repair_flush_block_collection_is_lifecycle_gated() {
-        let image = build_ext4_image_with_state(EXT4_VALID_FS);
-        let dev = TestDevice::from_vec(image);
-        let cx = Cx::for_testing();
-        let mut fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
-        let block_size = usize::try_from(fs.block_size()).expect("block size fits");
-
-        let mut txn = fs.begin_transaction();
-        txn.stage_write(BlockNumber(9), vec![0x09_u8; block_size]);
-        txn.stage_write(BlockNumber(8), vec![0x08_u8; block_size]);
-
-        assert!(
-            fs.collect_repair_flush_blocks(&txn).is_empty(),
-            "default mounts must not allocate a repair refresh block list"
-        );
-
-        fs.attach_repair_flush_lifecycle(Arc::new(RecordingRepairLifecycle::default()));
-        assert_eq!(
-            fs.collect_repair_flush_blocks(&txn),
-            vec![BlockNumber(8), BlockNumber(9)],
-            "attached repair lifecycle must receive the exact sorted write-set blocks"
-        );
     }
 
     fn durable_block_bytes(fs: &OpenFs, cx: &Cx, block: BlockNumber) -> Vec<u8> {

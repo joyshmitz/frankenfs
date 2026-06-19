@@ -53,7 +53,7 @@ with `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cc`.
 |------|-------|----------|---------|
 | bd-xmh5g.401 | mvcc_commit_batching_2000 (per_write vs batched, N=2000) | per_write 10.24ms vs batched 9.51ms = **1.08x** | ⚠️ NEUTRAL at store level — in-memory MVCC commit is cheap; the WAL/SSI/snapshot/FUSE overhead the lever targets is NOT exercised by this bench. **bd-w3hol (per-fh writeback wiring) headroom is UNPROVEN** — needs an e2e FUSE+WAL bench before implementing. |
 | bd-xmh5g.404 | journal_replay_blockbuf_materialize (into_inner vs old_to_vec) | N=16 0.99x; N=64 **0.64x**; N=256 **0.70x** | ❌ REGRESSION — `into_inner` is 1.4–1.6x SLOWER than `as_slice().to_vec()` at N≥64 (likely Arc-shared BlockBuf → try_unwrap fails → clone, costlier than a straight copy). **Recommend revert to to_vec** (owner's file; flagged via bead). |
-| bd-ucrow | commit_scope_writeset_collect (gated_none vs always_collect) | N=64 1.08x; N=256 0.83x; N=1024 noisy outlier | ⚠️ WITHIN-NOISE NEUTRAL — the per-commit write-set Vec skip is a tiny constant factor swamped by commit cost; high cv. Harmless (kept) but not a measurable win. |
+| bd-ucrow | commit_scope_writeset_collect (gated_none vs always_collect) | Prior: N=64 1.08x; N=256 0.83x; N=1024 noisy outlier. Cod-a rerun: 64 blocks 0.854x, 256 blocks 1.008x, 1024 blocks 0.185x old/new speed ratio | ❌ REJECTED / REVERTED — lifecycle-none gating is neutral-to-slower and not a measured win; production restored unconditional write-set capture. |
 
 ### Swarm READ-path levers measured (all wins — confirm the read-path pattern)
 
@@ -89,7 +89,7 @@ store-level micro-benches, and is where the dead-ends cluster.
 swarm reads .394 112–1297x / .386 9x / .399 40x; broadword bitmap 4.4–7.5x; read-contiguous 1.24x).
 Write-path + micro-levers are where it breaks down: **.401** commit-batch 1.08x (neutral, real cost
 unmeasured), **.404** into_inner **1.4–1.6x REGRESSION** (revert filed bd-z5lrd), **.397** smallvec iovec
-0.95x (neutral), **bd-ucrow** within-noise. Two benches (writeback_dag_order, wal_throughput) emitted no
+0.95x (neutral), **bd-ucrow** within-noise-to-slower and reverted. Two benches (writeback_dag_order, wal_throughput) emitted no
 parseable criterion output. **Net: every read-side optimization is a real measured win; the only
 losses/neutrals are write-path or micro-levers — and the one outright regression (.404) is flagged for
 revert.**
@@ -114,9 +114,9 @@ bd-z5lrd revert recommendation for .404 (its inputs are Arc-shared) and the keep
   block construct 2.09x; read-contiguous 1.24x).
 - **Write-path / micro / ownership-mismatched levers: the only non-wins** — .401 commit-batch 1.08x
   (neutral, real cost unmeasured), .404 into_inner 1.4–1.6x REGRESSION (revert filed bd-z5lrd),
-  .397 smallvec iovec 0.95x (neutral), bd-ucrow within-noise.
+  .397 smallvec iovec 0.95x (neutral), bd-ucrow within-noise-to-slower and reverted.
 - **Unmeasurable:** writeback_dag_order, wal_throughput (no parseable criterion output).
-- **0 cc reverts needed; 1 swarm revert flagged (bd-z5lrd).** Conformance green (every A/B bench's
+- **0 cc reverts needed; 1 swarm revert flagged (bd-z5lrd); bd-ucrow was later reverted by cod-a closeout after a neutral/slower rerun.** Conformance green (every A/B bench's
   isomorphism `assert` passed at build/run, exit 0).
 
 ## Head-to-head vs the kernel ext4 — ATTEMPTED, blocked by environment (honest)
