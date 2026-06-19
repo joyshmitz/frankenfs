@@ -162,3 +162,7 @@ harness = false
 [[bench]]
 name = "ext4_extent_tree_walk_overlap"
 harness = false
+
+[[bench]]
+name = "e2compr_cluster_read_overlap"
+harness = false

@@ -12032,14 +12032,34 @@ impl OpenFs {
 
         // Gather all non-zero, non-sentinel block pointers from the cluster range.
         let mut raw_data = Vec::with_capacity(cluster_full_size);
+        // PLAN (serial): resolve the cluster's present (non-zero, non-sentinel)
+        // block pointers in order. resolve_indirect_block is a dependent/cached
+        // chain so it stays serial; only the data reads are overlapped below.
+        let mut valid_ptrs: Vec<u64> = Vec::with_capacity(cluster_nblocks as usize);
         for i in 0..cluster_nblocks {
             let ptr = self
                 .resolve_indirect_block(cx, scope, inode, cluster_start + i)?
                 .unwrap_or(0);
             if ptr != 0 && ptr != ffs_types::EXT2_COMPRESSED_BLKADDR {
-                let block_data = self.read_block_with_scope(cx, scope, BlockNumber(ptr))?;
-                raw_data.extend_from_slice(&block_data);
+                valid_ptrs.push(ptr);
             }
+        }
+
+        // READ (parallel): fetch each present block across the rayon pool, so a
+        // blocking read parks its worker and the per-block latencies overlap.
+        let block_reads: Vec<Result<_, FfsError>> = {
+            use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
+            valid_ptrs
+                .par_iter()
+                .map(|&ptr| self.read_block_with_scope(cx, scope, BlockNumber(ptr)))
+                .collect()
+        };
+
+        // ASSEMBLE (serial): append the raw cluster bytes in block order,
+        // surfacing the first read error in order exactly as the old loop did.
+        for read in block_reads {
+            let block_data = read?;
+            raw_data.extend_from_slice(&block_data);
         }
 
         if raw_data.len() < 16 {
