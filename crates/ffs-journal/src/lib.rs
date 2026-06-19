@@ -2602,12 +2602,17 @@ fn resolve_region_block(region: JournalRegion, index: u64) -> Result<BlockNumber
             region.blocks
         )));
     }
-    region.start.0.checked_add(index).map(BlockNumber).ok_or_else(|| {
-        FfsError::Format(format!(
-            "journal block index {index} overflows absolute block number from start {}",
-            region.start.0
-        ))
-    })
+    region
+        .start
+        .0
+        .checked_add(index)
+        .map(BlockNumber)
+        .ok_or_else(|| {
+            FfsError::Format(format!(
+                "journal block index {index} overflows absolute block number from start {}",
+                region.start.0
+            ))
+        })
 }
 
 fn resolve_segment_block(

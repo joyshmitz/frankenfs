@@ -58,7 +58,7 @@ fn block_bytes(blk: u64) -> Vec<u8> {
 }
 
 fn commit_block_bytes(len: usize) -> Vec<u8> {
-    let mut block: Vec<u8> = (0..len).map(|i| prng(0xC0FFEE_u64 ^ i as u64)).collect();
+    let mut block: Vec<u8> = (0..len).map(|i| prng(0x00C0_FFEE_u64 ^ i as u64)).collect();
     block[COMMIT_CHKSUM_OFFSET..COMMIT_CHKSUM_OFFSET + CHECKSUM_FIELD_SIZE]
         .copy_from_slice(&0xDEAD_BEEFu32.to_be_bytes());
     block
@@ -205,7 +205,11 @@ fn apply_transform(data: Vec<u8>) -> Vec<u8> {
 }
 
 /// OLD: serial read + apply loop — N read latencies back to back.
-fn apply_serial(cx: &Cx, device: &dyn BlockDevice, targets: &[BlockNumber]) -> Result<Vec<Vec<u8>>> {
+fn apply_serial(
+    cx: &Cx,
+    device: &dyn BlockDevice,
+    targets: &[BlockNumber],
+) -> Result<Vec<Vec<u8>>> {
     let mut applied = Vec::with_capacity(targets.len());
     for &block in targets {
         let data = device.read_block(cx, block)?.as_slice().to_vec();
@@ -316,9 +320,13 @@ fn bench_commit_checksum(c: &mut Criterion) {
             "segmented commit checksum diverged from clone-zero model (len={len})"
         );
 
-        group.bench_with_input(BenchmarkId::new("clone_zero_full_crc", len), &len, |b, _| {
-            b.iter(|| black_box(commit_checksum_old_clone(black_box(&block), seed)));
-        });
+        group.bench_with_input(
+            BenchmarkId::new("clone_zero_full_crc", len),
+            &len,
+            |b, _| {
+                b.iter(|| black_box(commit_checksum_old_clone(black_box(&block), seed)));
+            },
+        );
         group.bench_with_input(BenchmarkId::new("segmented_zero_crc", len), &len, |b, _| {
             b.iter(|| black_box(commit_checksum_segmented(black_box(&block), seed)));
         });
