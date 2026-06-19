@@ -92,3 +92,22 @@ isomorphism guards and built+ran to exit 0 (conformance of the A/B shapes is GRE
 **Pattern reinforced:** read/parse/staging levers WIN (.385/.384/.383/.392); the lone loss is the
 `into_inner` owned-buffer move at small blocks — now negative three times, a settled do-not-retry for
 4K RMW paths (see the seeded "Owned read-buffer clone→move" row; `.391` is the ffs-alloc instance).
+
+### .382 extent-cache read-lock hot-hit — MEASURED REGRESSION (cc, 2026-06-19, rch hz1)
+
+| Bead | Crate · bench (group) | old → new (median, 8 threads) | Ratio | Verdict |
+| --- | --- | --- | --- | --- |
+| `bd-xmh5g.382` | ffs-extent · extent_cache_same_ns · `extent_cache_same_ns_8t` | write_lock_hit 17.5 ms → read_lock_atomic_hit 21.7 ms | **0.81x** | REVERT (owner ffs-extent) — the "lock-free" read-lock hit path is SLOWER. Every lookup does `self.hits.fetch_add(1)` on ONE shared atomic counter → 8 threads ping-pong that single cache line: contention RELOCATED from the RwLock to the atomic, net worse. Corroborated by `extent_cache_real_same_ns` (production scales 1t 1.23 ms → 8t 21.9 ms = 17.8x degradation). `assert_eq` fold guard passed (correct, just slower). |
+
+**Lever direction for a real win:** the read-lock path can only beat the write-lock once the
+hit/miss accounting leaves the hot path — sloppy/per-shard/sampled counters or none at all. A single
+shared `AtomicU64` bumped on every hit is a worse contention point than the lock it replaced. Until
+then, keep the write-lock hit path. (Same family as the W156 sharding wins, but those parallelized
+*different* keys across shards; same-key same-shard contention can't be fixed by relocating it to an
+atomic.)
+
+### .396 ext4 metadata-only inode parse — MEASURED WIN (cc, 2026-06-19, rch hz1)
+
+| Bead | Crate · bench (group) | old → new (median) | Ratio | Verdict |
+| --- | --- | --- | --- | --- |
+| `bd-xmh5g.396` | ffs-core · ext4_metadata_parse_xattr_ibody | eager-to_vec 115648 ns → lazy-empty 25721 ns | **4.50x** | KEEP — `parse_metadata_from_bytes` skips the eager ~150B `xattr_ibody` heap alloc on the metadata hot path (getattr/lookup/readdir/access). Full `parse_from_bytes` retained for xattr/listxattr/getxattr/inline-data. Byte-identical fixed FileAttr fields (`inode_metadata_parse_skips_ibody_only` guard). Hot per-inode on ls/find/stat. |
