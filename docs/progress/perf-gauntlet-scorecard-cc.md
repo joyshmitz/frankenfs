@@ -79,6 +79,22 @@ bench (`--warm-up-time 1 --measurement-time 3`, criterion median) and records th
 | bd-xmh5g.382 | ffs-extent · extent_cache_same_ns_8t (8 threads) | write_lock_hit 17.5ms → read_lock_atomic_hit 21.7ms = **0.81x** | ❌ REGRESSION (recommend revert) — the "lock-free" read-lock hit path is SLOWER: each lookup bumps `self.hits.fetch_add(1)` on ONE shared atomic, so 8 threads ping-pong that single cache line — contention RELOCATED from the RwLock to the atomic counter, net worse. `extent_cache_real_same_ns` corroborates (1t 1.23ms → 8t 21.9ms, 17.8x degradation). Owner's file (ffs-extent); needs sloppy/sampled counters before the read-lock path can win. |
 | bd-xmh5g.390/.393 | ffs-mvcc · blockbuf_into_inner_vs_to_vec (sole-owned) | into_inner vs to_vec: 4K **1.11x** / 16K **1.04x** / 64K **1.09x** | ✅ WIN (keep) — the cc-owned ffs-core `into_inner` RMW sites are all single-block `read_block(...).into_inner()` on **sole-owned** buffers → O(1) move beats `to_vec` copy at every size. The `.389` "16K/64K regression" did NOT reproduce; the into_inner family reconciles by **ownership**, not size — reject only applies to Arc-**shared** contexts (`.404` journal replay holds staged refs → try_unwrap clones). |
 
+### Conformance gate (cc 2026-06-19, rch) — kept levers GREEN; one PRE-EXISTING red test
+
+Ran full lib suites for the kept-lever crates: **ffs-ondisk 304, ffs-xattr 664, ffs-block 120 — all
+pass, 0 failed** (covers .385/.384/.383/.392/.396). **ffs-core lib: 1176 pass, 1 failed.**
+
+The single ffs-core failure — `btrfs_logical_ino_resolves_written_extent_to_inode` (test bead
+bd-xmh5g.355) — is **NOT a regression and NOT caused by any kept lever**. Bisect in an isolated
+worktree proved it **fails identically at its own add-commit (cdd14414) and at HEAD** — it was
+committed RED as an aspirational pin. I also reverted bd-xmh5g.388's floor_key resolver to the old
+range-scan and the test STILL failed (388 exonerated; revert restored). Root cause: after
+`fs.write(8192B)`, `get_extent_data_refs(extent_start)` returns 0 refs — the in-memory btrfs WRITE
+path does not populate the extent tree's `EXTENT_ITEM` + inline `EXTENT_DATA_REF` for the written
+data extent (an unimplemented ffs-btrfs write-path feature gap), so LOGICAL_INO can't resolve it.
+Flagged on bd-xmh5g.355 (recommend `#[ignore]` until the write-path extent-tree accounting lands).
+**Net: every lever this session is conformance-clean; the lone red is a pre-existing feature pin.**
+
 **Read/parse/staging levers confirm the pattern: WIN.** Four of five (.385 2.28x, .384 1.89x, .383
 24.5x, .392 1.74x) are real measured wins on their modeled hot path. The one regression (.391) is
 the **`into_inner` owned-buffer move at small (4K) blocks** — now measured negative for the THIRD
