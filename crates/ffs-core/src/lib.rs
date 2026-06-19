@@ -10756,8 +10756,10 @@ impl OpenFs {
         // non-contiguous runs otherwise serializes N device-read latencies.
         // (Declared first so clippy::items_after_statements stays happy.)
         // Chunk size for splitting a large contiguous run into parallel reads
-        // (bd-cc-pchunk): 256 blocks = 1 MiB at a 4 KiB block size.
-        const PARALLEL_READ_CHUNK_BLOCKS: usize = 256;
+        // (bd-cc-pchunk): default 4096 blocks = 16 MiB at a 4 KiB block size
+        // (tuned: best cold+warm throughput in the rch sweep). Overridable via
+        // FFS_READ_CHUNK_BLOCKS (read once) for further tuning.
+        static PARALLEL_READ_CHUNK_BLOCKS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
         enum Seg {
             // Coalesced run of logically+physically-consecutive written blocks.
             Run {
@@ -10919,7 +10921,14 @@ impl OpenFs {
                     // (disjoint dst + disjoint phys; collect preserves offset order
                     // so the first error stays lowest-offset). Small runs (<= one
                     // chunk) stay a single job.
-                    let chunk_bytes = PARALLEL_READ_CHUNK_BLOCKS * bs_usize;
+                    let chunk_blocks = *PARALLEL_READ_CHUNK_BLOCKS.get_or_init(|| {
+                        std::env::var("FFS_READ_CHUNK_BLOCKS")
+                            .ok()
+                            .and_then(|v| v.parse::<usize>().ok())
+                            .filter(|&n| n > 0)
+                            .unwrap_or(4096) // 16 MiB @ 4 KiB blocks — tuned: best cold+warm in the sweep
+                    });
+                    let chunk_bytes = chunk_blocks * bs_usize;
                     let mut chunk_phys = *phys;
                     let mut w: &mut [u8] = window;
                     while !w.is_empty() {
