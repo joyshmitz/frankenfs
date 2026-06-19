@@ -145,7 +145,25 @@ cold cache (`drop_caches=3`) on both sides, 200MiB verified read by frankenfs (2
 | **frankenfs read engine** (`ffs-cli read`, userspace, no FUSE) | **733 MB/s** | 0.273 s |
 | **ratio** | — | **2.05x slower (frankenfs ≈ 0.49× kernel throughput)** |
 
-### Cold variance (3 runs) + warm (engine-overhead isolation)
+### ⭐⭐⭐ FRAGMENTED-FILE read: frankenfs BEATS the kernel (~1.4×, 3 runs)
+150MiB file deliberately fragmented to **108 extents** (interleaved spacer-file writes + fsync, then
+spacers deleted; `filefrag` confirmed), cold cache both sides:
+
+| Run | kernel ext4 | frankenfs engine | ratio |
+|-----|-------------|------------------|-------|
+| frag run 1 | 1112 MB/s | 1608 MB/s | **0.69× (frankenfs 1.45× FASTER)** |
+| frag run 2 | 1150 MB/s | 1591 MB/s | **0.72× (1.39× FASTER)** |
+| frag run 3 | 1149 MB/s | 1640 MB/s | **0.70× (1.43× FASTER)** |
+
+**This is the "beat the original" win.** On a fragmented file frankenfs is consistently **~1.4× FASTER than
+the kernel ext4**, because its parallel non-contiguous-run read (bd-yg6tk / bd-8nrzh / bd-r9c10 — the levers
+A/B-measured at 7–53× above) reads the 108 extents **concurrently** across the rayon pool, overlapping the
+fragmented-read latencies — while the kernel's readahead is tuned for sequential layout and is defeated by
+fragmentation (note the kernel drops from ~1.5 GB/s contiguous to ~1.1 GB/s fragmented; frankenfs *rises*
+from ~0.7 GB/s contiguous to ~1.6 GB/s fragmented because more extents = more parallelism to exploit).
+The A/B read-overlap levers translate directly into beating the kernel on the workload they target.
+
+### Sequential (contiguous): cold variance (3 runs) + warm (engine-overhead isolation)
 | Workload | kernel ext4 | frankenfs engine | ratio |
 |----------|-------------|------------------|-------|
 | cold run 1 | 1373 MB/s | 706 MB/s | 1.94× slower |
