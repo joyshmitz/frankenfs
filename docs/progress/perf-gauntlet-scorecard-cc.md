@@ -345,6 +345,31 @@ boundary is two-dimensional: frankenfs wins when (a) per-item I/O is paralleliza
 payload is large enough that I/O-overlap outweighs the userspace per-item setup cost. Many tiny files fail
 (b) regardless of fragmentation; a large fragmented file satisfies both.
 
+### PROFILE of the bulk-read loss (cc 2026-06-19, `perf record -F 999`, warm, 6,364 samples)
+Profiled `ffs walk --read-data` (serial) over the 256 MiB / 4,000-file warm fixture to locate *where* the
+~2× bulk-read loss lives. Top self-time:
+
+| % self | symbol | layer | meaning |
+|--------|--------|-------|---------|
+| 9.80% | `_copy_to_iter` | kernel | `pread` copies page-cache → user buffer (the read syscall's data copy) |
+| 3.23% | `native_queued_spin_lock_slowpath` | kernel | loop-device / fs lock contention |
+| 2.86% | `__memset_avx2` | libc | zero-init of read buffers before they are overwritten |
+| 2.74% | `__memmove_avx` | libc | staging/result copy |
+| 2.58% | `entry_SYSRETQ_unsafe_stack` | kernel | syscall return overhead |
+| ~4% | (frankenfs `ffs-cli` addrs) | userspace | parse/MVCC/extent logic — a MINORITY |
+
+**Verdict — the loss is the userspace-`pread` copy+syscall tax, architecturally bounded.** The dominant
+cost is kernel-side (`_copy_to_iter` + `SYSRETQ` + spinlock ≈ 15.6%) plus libc buffer `memset`/`memmove`
+(≈ 5.6%); frankenfs's own parse/MVCC/extent code is a minority (~4%). This is direct evidence that the
+sequential / many-small-files gap to the kernel is **not** closable by optimizing frankenfs's logic — it is
+the cost of reading through userspace `pread` (copy + syscall per block) vs the kernel's in-fs page access.
+Closing it needs a different I/O model (mmap = `unsafe`, forbidden; or `io_uring` batched reads = major
+structural work), not a hot-path lever. The one avoidable *frankenfs-side* slice is the read-buffer
+`memset`+`memmove` (~5.6%): the `.383`/`.392` "skip staging / read into the final buffer" levers already
+attack the `memmove`, and a non-zeroing read buffer would attack the `memset` — together ~5.6% headroom, not
+the missing ~50%. **Recorded as a profile-backed LOSS verdict: no large safe-Rust lever exists for cold/warm
+contiguous bulk read; frankenfs's win territory is scattered/parallel access (see the metadata dominations).**
+
 ### Sequential (contiguous): cold variance (3 runs) + warm (engine-overhead isolation)
 | Workload | kernel ext4 | frankenfs engine | ratio |
 |----------|-------------|------------------|-------|

@@ -138,3 +138,16 @@ reproduce here. The family reconciles cleanly by **ownership**, not block size:
 win. The do-not-retry guidance updates to: `into_inner` is correct where `read_block` returns a
 sole-referenced buffer that is then mutated/consumed; reject only where the buffer is provably
 Arc-shared at the call site (the `.404` replay shape).
+
+### Bulk-read loss PROFILED — userspace-pread tax, no safe lever (cc 2026-06-19)
+
+`perf record -F 999` over warm `ffs walk --read-data` (256 MiB / 4,000 files, 6,364 samples). Top
+self-time: `_copy_to_iter` 9.8% (kernel pread copy), spinlock 3.2%, libc `memset` 2.9% (read-buffer
+zero-init), `memmove` 2.7% (staging copy), `SYSRETQ` 2.6% (syscall return); frankenfs userspace logic
+only ~4%. **Verdict: the ~2× contiguous/many-files read gap to the kernel is the userspace-`pread`
+copy+syscall model, NOT frankenfs parse/MVCC/extent code — architecturally bounded.** Do NOT chase it
+with hot-path levers; the only avoidable frankenfs slice is read-buffer `memset`+`memmove` (~5.6%, partly
+already taken by `.383`/`.392`). Closing the rest needs mmap (`unsafe`, forbidden) or `io_uring` batching
+(major structural work). frankenfs's measured win territory is scattered/parallel access (metadata walk
+3–5×, fragmented single-large-file read 1.4×); the 2-D boundary (parallelizable I/O AND large-enough
+per-item payload) is the durable model. Retry only if an `io_uring`/mmap I/O backend is introduced.
