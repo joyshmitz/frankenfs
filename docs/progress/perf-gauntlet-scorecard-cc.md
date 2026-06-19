@@ -385,6 +385,29 @@ the next step (hexdump frankenfs's read at `disk_bytenr` vs the on-disk frame). 
 interop gap the gauntlet exists to catch — compressed read is core btrfs functionality. (The compressed
 perf head-to-head is blocked until the read works.)
 
+### ⭐⭐⭐ COLD btrfs COMPRESSED read: frankenfs BEATS the kernel ~1.5× (W144 validated head-to-head, cc 2026-06-19)
+With the kernel-zstd read bug fixed (bd-pokmq above), ran the compressed-read head-to-head the W144
+`bd-m6g2o` parallel multi-extent decompress was built for. Fixture: a **150 MiB file compressed to 1,201
+zstd extents** (`mke2fs`-equivalent `--rootdir`-less; data = random bytes over a 64-char alphabet → ~1.33×
+compression so each 128 KiB chunk is a substantial frame = real per-extent decompress work; `dump-tree`
+confirms 1,201 `compression 3` extents). Cold (`drop_caches=3`), 3 runs, kernel side = the same image
+loop-mounted ro:
+
+| reader | cold (3 runs) | vs frankenfs |
+|--------|---------------|--------------|
+| kernel `dd bs=4M` (kernel's fast path) | 160–166 ms | **frankenfs ~1.5× FASTER** |
+| kernel `cat` | 342–354 ms | frankenfs ~3.1× faster |
+| **frankenfs `walk --read-data --parallel`** | **108–113 ms** (full 150 MiB ✓) | — |
+
+**frankenfs reads+decompresses the 1,201 zstd frames concurrently across 16 threads (W144 parallel
+decompress + parallel extent I/O), beating the kernel's inline per-bio decompress by ~1.5×** even against
+`dd bs=4M` (the kernel's fastest reader; `cat`'s small-buffer path is ~3×). This is the head-to-head
+validation of the W144 lever the directive asks for — the parallel-decompress optimization translates
+directly into beating the kernel on the compressed-read workload it targets, the decompress analogue of the
+fragmented-read win. **Methodology note (learned the hard way):** an earlier fixture gave a bogus ~55×
+because kernel `cat` was pathologically slow (small-buffer behavior on an oddly-structured file) — always
+verify real multi-extent compression (`dump-tree`/`compsize`) and compare vs `dd bs=4M`, not `cat`.
+
 ### COLD bulk DATA read (`grep -r` / `tar`): the boundary — frankenfs LOSES on contiguous data (cc 2026-06-19)
 `ffs walk --read-data --parallel` reads every regular file's bytes (the read-all-files workload: build
 source reads, `grep -r`, backup). Cold over a **250 MiB / 4,000-file** ext4 image (`mke2fs -d`, 64 KiB
