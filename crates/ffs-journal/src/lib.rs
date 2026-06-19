@@ -316,6 +316,20 @@ fn checksum_jbd2_tail_zeroed_block(block: &[u8], seed: u32) -> Option<u32> {
     Some(!checksum)
 }
 
+fn checksum_jbd2_commit_zeroed_block(block: &[u8], seed: u32) -> Option<u32> {
+    if block.len() < JBD2_COMMIT_CHKSUM_OFFSET + JBD2_CHECKSUM_TAIL_SIZE {
+        return None;
+    }
+
+    let checksum = crc32c::crc32c_append(!seed, &block[..JBD2_COMMIT_CHKSUM_OFFSET]);
+    let checksum = crc32c::crc32c_append(checksum, &[0_u8; JBD2_CHECKSUM_TAIL_SIZE]);
+    let checksum = crc32c::crc32c_append(
+        checksum,
+        &block[JBD2_COMMIT_CHKSUM_OFFSET + JBD2_CHECKSUM_TAIL_SIZE..],
+    );
+    Some(!checksum)
+}
+
 fn checksum_jbd2_data_block(block: &[u8], sequence: u32, seed: u32) -> u32 {
     let sequence = sequence.to_be_bytes();
     let checksum = crc32c::crc32c_append(!seed, &sequence);
@@ -407,13 +421,8 @@ fn verify_jbd2_block_checksum(block: &[u8], sb: &Jbd2Superblock) -> bool {
                 return false;
             }
             let stored = read_be_u32(block, JBD2_COMMIT_CHKSUM_OFFSET).unwrap_or(0);
-            let mut temp = block.to_vec();
-            // Zero out the checksum field before computing.
-            for i in 0..4 {
-                temp[JBD2_COMMIT_CHKSUM_OFFSET + i] = 0;
-            }
             let seed = sb.csum_seed();
-            let computed = !crc32c::crc32c_append(!seed, &temp);
+            let computed = checksum_jbd2_commit_zeroed_block(block, seed).unwrap_or(0);
             stored == computed
         }
         _ => true,

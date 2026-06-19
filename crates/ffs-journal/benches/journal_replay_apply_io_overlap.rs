@@ -41,6 +41,9 @@ use std::time::Duration;
 const BS: usize = 4096; // block size (bytes)
 /// Per-block read access latency. Models a real-disk / SSD-queue round trip.
 const READ_LATENCY: Duration = Duration::from_micros(250);
+const COMMIT_CHKSUM_OFFSET: usize = 16;
+const CHECKSUM_FIELD_SIZE: usize = 4;
+const CHECKSUM_ZERO_FIELD: [u8; CHECKSUM_FIELD_SIZE] = [0; CHECKSUM_FIELD_SIZE];
 
 /// Deterministic pseudo-random byte (no `Math.random` in benches).
 fn prng(seed: u64) -> u8 {
@@ -52,6 +55,37 @@ fn prng(seed: u64) -> u8 {
 
 fn block_bytes(blk: u64) -> Vec<u8> {
     (0..BS).map(|i| prng(blk << 20 ^ i as u64)).collect()
+}
+
+fn commit_block_bytes(len: usize) -> Vec<u8> {
+    let mut block: Vec<u8> = (0..len).map(|i| prng(0xC0FFEE_u64 ^ i as u64)).collect();
+    block[COMMIT_CHKSUM_OFFSET..COMMIT_CHKSUM_OFFSET + CHECKSUM_FIELD_SIZE]
+        .copy_from_slice(&0xDEAD_BEEFu32.to_be_bytes());
+    block
+}
+
+fn commit_checksum_old_clone(block: &[u8], seed: u32) -> Option<u32> {
+    if block.len() < COMMIT_CHKSUM_OFFSET + CHECKSUM_FIELD_SIZE {
+        return None;
+    }
+
+    let mut temp = block.to_vec();
+    temp[COMMIT_CHKSUM_OFFSET..COMMIT_CHKSUM_OFFSET + CHECKSUM_FIELD_SIZE].fill(0);
+    Some(!crc32c::crc32c_append(!seed, &temp))
+}
+
+fn commit_checksum_segmented(block: &[u8], seed: u32) -> Option<u32> {
+    if block.len() < COMMIT_CHKSUM_OFFSET + CHECKSUM_FIELD_SIZE {
+        return None;
+    }
+
+    let checksum = crc32c::crc32c_append(!seed, &block[..COMMIT_CHKSUM_OFFSET]);
+    let checksum = crc32c::crc32c_append(checksum, &CHECKSUM_ZERO_FIELD);
+    let checksum = crc32c::crc32c_append(
+        checksum,
+        &block[COMMIT_CHKSUM_OFFSET + CHECKSUM_FIELD_SIZE..],
+    );
+    Some(!checksum)
 }
 
 /// Latency-injecting in-memory device (blocks pre-built once).
@@ -270,5 +304,32 @@ fn bench_blockbuf_materialize(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_apply, bench_blockbuf_materialize);
+fn bench_commit_checksum(c: &mut Criterion) {
+    let seed = 0xA55A_F00D;
+    let mut group = c.benchmark_group("journal_commit_checksum_zero_field_clone_vs_segmented");
+    for &len in &[1024_usize, 4096, 16_384] {
+        let block = commit_block_bytes(len);
+
+        assert_eq!(
+            commit_checksum_old_clone(&block, seed),
+            commit_checksum_segmented(&block, seed),
+            "segmented commit checksum diverged from clone-zero model (len={len})"
+        );
+
+        group.bench_with_input(BenchmarkId::new("clone_zero_full_crc", len), &len, |b, _| {
+            b.iter(|| black_box(commit_checksum_old_clone(black_box(&block), seed)));
+        });
+        group.bench_with_input(BenchmarkId::new("segmented_zero_crc", len), &len, |b, _| {
+            b.iter(|| black_box(commit_checksum_segmented(black_box(&block), seed)));
+        });
+    }
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_apply,
+    bench_blockbuf_materialize,
+    bench_commit_checksum
+);
 criterion_main!(benches);
