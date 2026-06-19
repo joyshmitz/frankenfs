@@ -111,3 +111,30 @@ atomic.)
 | Bead | Crate · bench (group) | old → new (median) | Ratio | Verdict |
 | --- | --- | --- | --- | --- |
 | `bd-xmh5g.396` | ffs-core · ext4_metadata_parse_xattr_ibody | eager-to_vec 115648 ns → lazy-empty 25721 ns | **4.50x** | KEEP — `parse_metadata_from_bytes` skips the eager ~150B `xattr_ibody` heap alloc on the metadata hot path (getattr/lookup/readdir/access). Full `parse_from_bytes` retained for xattr/listxattr/getxattr/inline-data. Byte-identical fixed FileAttr fields (`inode_metadata_parse_skips_ibody_only` guard). Hot per-inode on ls/find/stat. |
+
+### into_inner owned-buffer family RECONCILED — fresh primitive measurement (cc, 2026-06-19, rch hz1)
+
+Ran the governing primitive bench `ffs-mvcc · blockbuf_into_inner · blockbuf_into_inner_vs_to_vec`
+(sole-owned `BlockBuf::new`, the documented `read_block` invariant) on this host:
+
+| size | into_inner_move | as_slice_to_vec_copy | ratio (copy/move) |
+| --- | --- | --- | --- |
+| 4096  | 246.4 ns | 274.1 ns | **1.11x** |
+| 16384 | 677.6 ns | 702.8 ns | **1.04x** |
+| 65536 | 2215.7 ns | 2405.5 ns | **1.09x** |
+
+**`into_inner` WINS at ALL sizes on sole-owned buffers** — the `.389` "16K/64K regression" did NOT
+reproduce here. The family reconciles cleanly by **ownership**, not block size:
+- **Sole-owned** buffer (`read_block` cache-miss / compressed / single-ref) → `try_unwrap` succeeds →
+  O(1) move → `into_inner` wins (1.04–1.11x). This is the `bd-xmh5g.390` (btrfs partial-block RMW)
+  and `bd-xmh5g.393` (8 ffs-core read/RMW sites — all single-block `read_block(...).into_inner()`)
+  case → **KEEP** (measured small win, not a regression).
+- **Arc-shared** buffer (journal replay holds staged refs; `bd-xmh5g.394` version-store sharing) →
+  `try_unwrap` fails → clone + the failed-unwrap atomic → marginally slower than a direct `to_vec`.
+  This is why `bd-xmh5g.404` (journal replay, refs held) measured 0.64x and was correctly reverted,
+  and why `bd-xmh5g.391`/`bd-xmh5g.382`-adjacent shared cases lose.
+
+**Verdict:** the cc-owned ffs-core `into_inner` sites (`.390`/`.393`) are KEPT — measured sole-owned
+win. The do-not-retry guidance updates to: `into_inner` is correct where `read_block` returns a
+sole-referenced buffer that is then mutated/consumed; reject only where the buffer is provably
+Arc-shared at the call site (the `.404` replay shape).
