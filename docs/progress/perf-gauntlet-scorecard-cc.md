@@ -249,11 +249,29 @@ fragmentation (note the kernel drops from ~1.5 GB/s contiguous to ~1.1 GB/s frag
 from ~0.7 GB/s contiguous to ~1.6 GB/s fragmented because more extents = more parallelism to exploit).
 The A/B read-overlap levers translate directly into beating the kernel on the workload they target.
 
-### ⭐⭐⭐ COLD METADATA walk (`find | stat`): frankenfs MATCHES the kernel (3rd head-to-head, cc 2026-06-19)
+### ⭐⭐⭐ COLD METADATA walk (`find | stat`): frankenfs BEATS the kernel ~3× on a large directory (3rd head-to-head, cc 2026-06-19)
 A new `ffs walk` subcommand (no FUSE) recursively `readdir`s every directory and `getattr`s every entry —
-the userspace analogue of `find <mnt> -printf '%s'`. Measured cold (sysctl `vm.drop_caches=3` before every
-run) over a **20,000-file / 1,001-dir** ext4 image (`mke2fs -d`, 1 GiB), kernel side = the same image
-loop-mounted ro and walked with `find -printf '%s'`:
+the userspace analogue of `find <mnt> -printf '%s'`. Two cold fixtures (sysctl `vm.drop_caches=3` before
+every run), kernel side = the same image loop-mounted ro and walked with `find -printf '%s'`.
+
+**Fixture A — single 40,000-file directory (the prefetch lever's sweet spot), 3 cold runs:**
+
+| Run | kernel ext4 `find` (wall) | frankenfs `walk` (wall, incl. open+replay) | frankenfs walk-work (internal) |
+|-----|---------------------------|--------------------------------------------|--------------------------------|
+| 1 | 0.202 s | 0.063 s | 55.7 ms |
+| 2 | 0.201 s | 0.067 s | 58.8 ms |
+| 3 | 0.204 s | 0.069 s | 61.5 ms |
+
+**frankenfs is ~3.0× FASTER wall-clock (≈202 ms → ≈66 ms), ~3.4× on walk-work (≈58 ms).** This is the
+**metadata analogue of the fragmented-read win**: a 40k-entry directory is htree, so `readdir` yields
+entries in *hash* order while their inodes were allocated near-sequentially — i.e. the inode-table blocks
+are touched in **scattered** order. `bd-xmh5g.399` prefetches all of one `readdir` page's inode-table
+blocks **in parallel** across the rayon pool (overlapping the scattered cold-read latencies), while the
+kernel's sequential readahead is defeated by the hash-order access pattern — exactly as fragmentation
+defeats it on data reads. `bd-xmh5g.396` then makes each `getattr` parse allocation-free. Here frankenfs
+beats the kernel **even including** its per-invocation open+journal-replay (~7 ms).
+
+**Fixture B — 20,000 files spread over 1,001 small dirs (low per-`readdir` scatter), 3 cold runs:**
 
 | Run | kernel ext4 `find` (wall) | frankenfs `walk` (wall, incl. per-invocation open+journal-replay) | frankenfs walk-work only (internal) |
 |-----|---------------------------|-------------------------------------------------------------------|-------------------------------------|
@@ -261,20 +279,21 @@ loop-mounted ro and walked with `find -printf '%s'`:
 | 2 | 0.140 s | 0.142 s | 117.2 ms |
 | 3 | 0.145 s | 0.142 s | 116.4 ms |
 
-- **Wall-clock: PARITY (~1.0×)** — frankenfs's full `walk` process (which re-opens the image + replays the
-  journal every invocation, ~25 ms) ties the kernel's `find` over an **already-mounted** fs (no per-run
-  mount cost). A real FUSE-mounted frankenfs pays that open once, like the kernel.
-- **Walk-work only: frankenfs ~1.22× FASTER** (117 ms vs ~143 ms) — excluding the one-time open/replay, the
-  userspace metadata walk **beats** the in-kernel ext4 driver cold. The `bd-xmh5g.399` parallel inode-table
-  prefetch (40× A/B) overlaps the scattered inode-block read latencies across the rayon pool, and the
-  `bd-xmh5g.396` metadata-only inode parse (4.5× A/B) skips the per-inode `xattr_ibody` alloc on every
-  `getattr`. **This is the metadata counterpart of the fragmented-read win** — the cold I/O-overlap +
-  cheap-parse levers translate into matching/beating the kernel on the cold stat-heavy workload they target,
-  in sharp contrast to the warm sequential read (2.3× *behind* = the zero-copy page-cache tax).
-- **Honest caveats:** `mke2fs -d` lays inodes out near-sequentially (pristine, low scatter) — the prefetch
-  overlap has the most headroom on *aged*/scattered layouts (create/delete churn), which this fixture does
-  not model, so the steady-state ~1.22× is a conservative floor for that lever's real-world metadata win.
-  Single fixture; 3 cold runs (tight variance). frankenfs's per-invocation open+replay (~25 ms) is a real
+- **Wall-clock: PARITY (~1.0×)**; **walk-work only: frankenfs ~1.22× FASTER** (117 ms vs ~143 ms). With only
+  ~20 entries per directory, each `readdir` page is small, so the parallel prefetch has little to overlap
+  per directory — the win shrinks from Fixture A's 3× to a modest 1.22× on the walk work (and ties on
+  wall-clock once frankenfs's per-invocation open+journal-replay ~25 ms is included; a FUSE mount pays that
+  once, like the kernel). Same levers, smaller scatter ⇒ smaller win — which is the expected dose-response.
+- **Why Fixture A wins big and B only ties:** the `bd-xmh5g.399` prefetch parallelizes the inode-block reads
+  *within one `readdir` page*; a 40k-entry htree directory gives it a huge scattered batch to overlap, while
+  1,001 tiny directories give it ~20 near-sequential inodes at a time (which kernel readahead already
+  handles). The lever's win therefore scales with directory width × inode scatter — exactly analogous to
+  data-read fragmentation. In sharp contrast, **warm sequential data read is 2.3× *behind*** (the zero-copy
+  page-cache tax), so metadata is where the userspace port is most competitive with the kernel.
+- **Honest caveats:** `mke2fs -d` lays inodes out near-sequentially (pristine) — real *aged* layouts
+  (create/delete churn) scatter inodes further and would widen frankenfs's lead even in the many-small-dir
+  case. 3 cold runs per fixture (tight variance). frankenfs's per-invocation open+replay (~25 ms in B, ~7 ms
+  in A) is a real
   cost the kernel amortizes across a long-lived mount.
 
 ### Sequential (contiguous): cold variance (3 runs) + warm (engine-overhead isolation)
