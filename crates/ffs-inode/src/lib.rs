@@ -1850,7 +1850,7 @@ mod tests {
         let mut dir = base.clone();
         dir.mode = 0o040_755; // S_IFDIR
         assert!(inode_uses_indirect_blocks(&dir), "directory");
-        let mut chr = base.clone();
+        let mut chr = base;
         chr.mode = 0o020_644; // S_IFCHR
         assert!(!inode_uses_indirect_blocks(&chr), "char device");
     }

@@ -215,6 +215,82 @@ CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-b \
 cargo fmt -p ffs-btrfs --check
 ```
 
+## `bd-xmh5g.389` Addendum
+
+Date: 2026-06-19
+Agent: BlackThrush (`cod-a`)
+Scope: `ffs-inode` code-first backlog row `bd-xmh5g.389`
+Base commit under closeout: `f064ef29`
+RCH Criterion worker: `vmi1227854`
+Requested target dir: `/data/projects/.rch-targets/frankenfs-cod-a`
+Remote target dir used by RCH:
+`.rch-target-vmi1227854-pool-cbd309d7d1ec6129ad21bdb51108009f`
+
+### Verdict
+
+This row is release-ready only as a measured rejection. `BlockBuf::into_inner()`
+showed a small 4 KiB win but regressed the wider 16 KiB and 64 KiB rows that the
+same owned-buffer materialization primitive claims to cover. The three
+production `ffs-inode` RMW sites are back on `as_slice().to_vec()`; the
+Criterion A/B benchmark remains as a guard.
+
+### Scorecard
+
+| Gate | Result |
+| --- | --- |
+| Code-first backlog rows examined in this addendum | 1 |
+| RCH Criterion rows completed | 3 / 3 |
+| Same-worker evidence | Yes, `vmi1227854` for all benchmark rows |
+| Direct ext4/btrfs-kernel ratios | 0 / 1 direct; no kernel comparator exists for this Rust-internal owned-buffer materialization primitive |
+| Production levers kept | 0 |
+| Production levers rejected/reverted | 1 |
+| Conformance/build guard after revert | `cargo fmt -p ffs-inode --check` passed locally; `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-a rch exec -- cargo check -p ffs-inode --all-targets` passed on `hz1`; `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-a rch exec -- cargo test -p ffs-inode --lib -- --nocapture` passed on `ovh-a` with 129 passed / 0 failed; `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-a rch exec -- cargo clippy -p ffs-inode --all-targets --no-deps -- -D warnings` passed on `hz2`; focused post-clippy test `inode_uses_indirect_blocks_excludes_extents_inline_and_non_data_modes` passed on `ovh-a` |
+| Known adjacent gate limitation | Full dependency-lint clippy without `--no-deps` is blocked by an unrelated existing `ffs-extent` `clippy::significant_drop_tightening` lint at `crates/ffs-extent/src/lib.rs:1487`; this addendum does not take ownership of that crate |
+| Release-readiness score for perf-superiority claims | 20 / 100: decisive negative Rust-internal evidence, no valid kernel comparator, no keep claim |
+| Release-readiness score for this row's hygiene | 95 / 100: same-worker A/B completed, ratios ledgered, production reverted, retry predicate written, focused post-revert gates and formatting passed |
+
+### Measured Rows
+
+| Bead | Workload | Old copy | New move | Ratio | Verdict |
+| --- | --- | --- | --- | --- | --- |
+| `bd-xmh5g.389` | Owned `BlockBuf` materialization, 4096 B | `576.96 ns` | `534.36 ns` | `1.080x` old/new | Small 4 KiB win, not enough to carry the wider rows |
+| `bd-xmh5g.389` | Owned `BlockBuf` materialization, 16384 B | `1.3722 us` | `1.5633 us` | `0.878x` old/new | Reject: move is `13.9%` slower |
+| `bd-xmh5g.389` | Owned `BlockBuf` materialization, 65536 B | `3.7725 us` | `4.2885 us` | `0.880x` old/new | Reject: move is `13.7%` slower |
+
+### Kernel Reference Coverage
+
+No direct ext4/btrfs-kernel comparator is valid for this row. The lever only
+changes how FrankenFS materializes an owned Rust `BlockBuf` into a mutable `Vec`
+inside three inode read-modify-write helpers. Linux ext4/btrfs does not expose
+an equivalent timed primitive, and a whole-filesystem inode update benchmark
+would include syscall, VFS, journal, allocator, page-cache, and block-layer
+latency without isolating the `into_inner()` vs `to_vec()` choice.
+
+### Commands
+
+```bash
+AGENT_NAME=cod-a CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-a \
+  rch exec -- cargo bench --profile release-perf -p ffs-mvcc \
+  --bench blockbuf_into_inner -- \
+  blockbuf_into_inner_vs_to_vec
+
+cargo fmt -p ffs-inode --check
+
+CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-a \
+  rch exec -- cargo check -p ffs-inode --all-targets
+
+CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-a \
+  rch exec -- cargo test -p ffs-inode --lib -- --nocapture
+
+CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-a \
+  rch exec -- cargo clippy -p ffs-inode --all-targets --no-deps -- -D warnings
+
+RCH_WORKER=ovh-a RCH_WORKERS=ovh-a \
+  CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-a \
+  rch exec -- cargo test -p ffs-inode --lib \
+  inode_uses_indirect_blocks_excludes_extents_inline_and_non_data_modes -- --nocapture
+```
+
 ## `bd-f759f` Addendum
 
 Date: 2026-06-19
