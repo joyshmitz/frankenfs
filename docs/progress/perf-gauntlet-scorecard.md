@@ -75,3 +75,71 @@ RCH_WORKER=ovh-a RCH_WORKERS=ovh-a \
 CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-b \
   cargo check -p ffs-journal
 ```
+
+## `bd-xmh5g.403` Addendum
+
+Date: 2026-06-19
+Agent: BlackThrush (`cod-b`)
+Scope: `ffs-mvcc` code-first backlog row `bd-xmh5g.403`
+Commit under measurement: `1cd8de6f`
+RCH worker: `vmi1227854`
+Requested target dir: `/data/projects/.rch-targets/frankenfs-cod-b`
+Remote target dir used by RCH:
+`.rch-target-vmi1227854-pool-cbd309d7d1ec6129ad21bdb51108009f`
+
+### Verdict
+
+This row is release-ready only as a measured rejection. The fused SSI write-key
+log construction lost every tested write-count row against the old prebuilt
+`BTreeSet` path, so the production optimization was reverted. The Criterion A/B
+rows remain in `wal_throughput` as negative-evidence guards.
+
+### Scorecard
+
+| Gate | Result |
+| --- | --- |
+| Code-first backlog rows examined in this addendum | 1 |
+| RCH Criterion rows completed | 3 / 3 |
+| Same-worker evidence | Yes, `vmi1227854` for all rows |
+| Direct ext4/btrfs-kernel ratios | 0 / 1 direct; no kernel comparator exists for this internal SSI `CommittedTxnRecord.write_set` construction primitive |
+| Production levers kept | 0 |
+| Production levers rejected/reverted | 1 |
+| Conformance/build guard after revert | `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-b rch exec -- cargo check -p ffs-mvcc --bench wal_throughput` passed on `vmi1227854`; `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-b rch exec -- cargo test -p ffs-mvcc ssi -- --nocapture` passed on `hz2` with 70 filtered SSI lib tests, 1 evidence integration test, and 2 stress tests passing |
+| Format guard | `cargo fmt -p ffs-mvcc --check` failed on existing formatting drift in unrelated `ffs-mvcc` benches/tests and distant test blocks; the `.403` revert hunk was not listed in the rustfmt diff and this commit does not broaden into a format cleanup |
+| Release-readiness score for perf-superiority claims | 20 / 100: decisive negative Rust-internal evidence, no valid kernel comparator, no keep claim |
+| Release-readiness score for this row's hygiene | 90 / 100: same-worker A/B completed, ratios ledgered, production reverted, retry predicate written, focused post-revert gates passed; package fmt drift remains pre-existing follow-up work |
+
+### Measured Rows
+
+| Bead | Workload | Old prebuild | New fused | Ratio | Verdict |
+| --- | --- | --- | --- | --- | --- |
+| `bd-xmh5g.403` | SSI write-key log, 64 writes | `437.77 ns` | `790.80 ns` | `0.554x` old/new | Reject: fused is `80.6%` slower |
+| `bd-xmh5g.403` | SSI write-key log, 256 writes | `1.8957 us` | `4.1605 us` | `0.456x` old/new | Reject: fused is `119.5%` slower |
+| `bd-xmh5g.403` | SSI write-key log, 1024 writes | `8.0965 us` | `24.173 us` | `0.335x` old/new | Reject: fused is `198.6%` slower |
+
+### Kernel Reference Coverage
+
+No direct ext4/btrfs-kernel comparator is valid for this row. The lever only
+changes how FrankenFS constructs the in-memory SSI `CommittedTxnRecord.write_set`
+for `commit_ssi_internal`; ext4/btrfs-kernel does not expose an equivalent
+timed primitive. A whole-filesystem kernel write benchmark would include syscall,
+VFS, journal, allocator, and page-cache behavior, and would still not isolate
+this lever because FrankenFS's current write path uses plain `commit`, not
+`commit_ssi`.
+
+### Commands
+
+```bash
+CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-b \
+  rch exec -- cargo bench --profile release-perf -p ffs-mvcc \
+  --bench wal_throughput -- \
+  mvcc_commit_ssi_writekey_log_ab
+
+CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-b \
+  rch exec -- cargo check -p ffs-mvcc --bench wal_throughput
+
+CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-b \
+  rch exec -- cargo test -p ffs-mvcc ssi -- --nocapture
+
+cargo fmt -p ffs-mvcc --check
+```

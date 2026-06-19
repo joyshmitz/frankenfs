@@ -2746,11 +2746,9 @@ impl MvccStore {
         } = txn;
         let dedup_enabled = self.compression_policy.dedup_identical;
         let store_full = matches!(self.compression_policy.algo, CompressionAlgo::None);
-        let expected_write_set_size = staged_writes.len();
-        let mut write_keys = BTreeSet::new();
+        let write_keys: BTreeSet<BlockNumber> = staged_writes.keys().copied().collect();
 
         for (block, staged) in staged_writes {
-            write_keys.insert(block);
             let version_bytes = merged_writes.remove(&block).unwrap_or(staged.bytes);
             let version_data =
                 if dedup_enabled && self.is_identical_to_latest(block, &version_bytes) {
@@ -2791,7 +2789,6 @@ impl MvccStore {
             }
         }
         debug_assert!(merged_writes.is_empty());
-        debug_assert_eq!(write_keys.len(), expected_write_set_size);
 
         let read_set_size = reads.len();
         let write_set_size = write_keys.len();
