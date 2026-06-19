@@ -55,11 +55,21 @@ with `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cc`.
 | bd-xmh5g.404 | journal_replay_blockbuf_materialize (into_inner vs old_to_vec) | N=16 0.99x; N=64 **0.64x**; N=256 **0.70x** | ❌ REGRESSION — `into_inner` is 1.4–1.6x SLOWER than `as_slice().to_vec()` at N≥64 (likely Arc-shared BlockBuf → try_unwrap fails → clone, costlier than a straight copy). **Recommend revert to to_vec** (owner's file; flagged via bead). |
 | bd-ucrow | commit_scope_writeset_collect (gated_none vs always_collect) | N=64 1.08x; N=256 0.83x; N=1024 noisy outlier | ⚠️ WITHIN-NOISE NEUTRAL — the per-commit write-set Vec skip is a tiny constant factor swamped by commit cost; high cv. Harmless (kept) but not a measurable win. |
 
-⭐ Gauntlet value: 2 of the swarm's "code-first batch-test pending" write-path levers (.401, .404) do NOT
-deliver — .401 is neutral at the only bench that exists (real cost unmeasured), .404 is an outright
-regression. The cc read/free levers (1–10 above) all measured as real wins; the *write-path* levers are
-where the unproven/negative results cluster — consistent with the durability-critical caveat cc raised
-before implementing .401/bd-w3hol.
+### Swarm READ-path levers measured (all wins — confirm the read-path pattern)
+
+| Bead | Bench | Measured | Verdict |
+|------|-------|----------|---------|
+| bd-xmh5g.394 | read_block_uncompressed (clone vs arc_share) | **112x / 227x / 1297x** (4K/16K/64K block) | ✅ WIN — Arc refcount-bump (O(1), ~1ns) vs copying the whole block on every uncompressed read hit. |
+| bd-xmh5g.386 | extent_leaf_search_validation_ab (trusted no-rescan) | **9.01x** | ✅ WIN — skip re-validating an already-trusted extent leaf. |
+| bd-xmh5g.399 | ls_dir_inode_prefetch_256 (parallel vs serial getattr) | **40.4x** | ✅ WIN — parallel readdirplus inode prefetch (ls -l). |
+
+⭐⭐ **Central gauntlet finding (16+ levers measured): READ-path levers WIN, WRITE-path levers DON'T.**
+Every read/lookup/free lever — cc's 13 (4.75–70x, 6–53x, 1009x) AND the swarm's reads (.394 112–1297x,
+.386 9x, .399 40x) — is a real measured win. The ONLY neutral/negative results are the *write-path* levers:
+.401 commit-batching (1.08x neutral, real cost unmeasured → bd-w3hol unproven) and .404 replay into_inner
+(1.4–1.6x REGRESSION → revert filed bd-z5lrd). Consistent with the durability-critical caveat cc raised
+before implementing .401/bd-w3hol: write-path optimization needs e2e (WAL+FUSE) measurement, not
+store-level micro-benches, and is where the dead-ends cluster.
 
 ## Measurement caveat (honest)
 These ratios are the **lever's own A/B** (new shape vs old shape, same process), NOT head-to-head
