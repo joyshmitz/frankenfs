@@ -52,11 +52,7 @@ fn build_probes() -> Vec<u32> {
         .collect()
 }
 
-fn trusted_validated_search(
-    extents: &[Ext4Extent],
-    target: u32,
-    upper_bound: u64,
-) -> SearchResult {
+fn trusted_validated_search(extents: &[Ext4Extent], target: u32, upper_bound: u64) -> SearchResult {
     if extents.is_empty() {
         return SearchResult::Hole {
             hole_len: upper_bound.saturating_sub(u64::from(target)),

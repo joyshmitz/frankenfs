@@ -95,11 +95,7 @@ pub fn search(
     if header.depth == 0 {
         // Leaf: search extents directly in root.
         let extents = parse_leaf_entries(root_bytes, &header)?;
-        return Ok(search_leaf_bounded_validated(
-            &extents,
-            target,
-            1_u64 << 32,
-        ));
+        return Ok(search_leaf_bounded_validated(&extents, target, 1_u64 << 32));
     }
 
     // Internal: descend through index levels.
@@ -130,8 +126,7 @@ pub fn search_parsed_root(
             detail: "extent root depth 0 contains index entries".into(),
         }),
         (_, ExtentTree::Index(indexes)) => {
-            let (child_block, upper_bound) =
-                find_index_child_bound(indexes, target, 1_u64 << 32)?;
+            let (child_block, upper_bound) = find_index_child_bound(indexes, target, 1_u64 << 32)?;
             descend_search(cx, dev, child_block, header.depth - 1, target, upper_bound)
         }
         (_, ExtentTree::Leaf(_)) => Err(FfsError::Corruption {
@@ -196,11 +191,7 @@ fn descend_search(
 
     if depth == 0 {
         let extents = parse_leaf_entries(data, &header)?;
-        Ok(search_leaf_bounded_validated(
-            &extents,
-            target,
-            upper_bound,
-        ))
+        Ok(search_leaf_bounded_validated(&extents, target, upper_bound))
     } else {
         let indexes = parse_index_entries(data, &header)?;
         let (child, child_upper_bound) = find_index_child_bound(&indexes, target, upper_bound)?;
@@ -2021,10 +2012,7 @@ mod tests {
         // checked_logical_range_end: a normal range end.
         assert_eq!(checked_logical_range_end("t", 100, 24).unwrap(), 124);
         // A range whose end is exactly the 32-bit boundary (2^32) is allowed.
-        assert_eq!(
-            checked_logical_range_end("t", 0, 1 << 32).unwrap(),
-            1 << 32
-        );
+        assert_eq!(checked_logical_range_end("t", 0, 1 << 32).unwrap(), 1 << 32);
         // A range exceeding the ext4 32-bit logical block space is rejected.
         assert!(checked_logical_range_end("t", 1, 1 << 32).is_err());
         // u64 overflow of start + count is rejected.
@@ -2104,8 +2092,14 @@ mod tests {
 
         // A target inside the first child's range selects the first leaf; its
         // upper bound is the next sibling key (50).
-        assert_eq!(find_index_child_bound(&indexes, 0, 1 << 32).unwrap(), (100, 50));
-        assert_eq!(find_index_child_bound(&indexes, 49, 1 << 32).unwrap(), (100, 50));
+        assert_eq!(
+            find_index_child_bound(&indexes, 0, 1 << 32).unwrap(),
+            (100, 50)
+        );
+        assert_eq!(
+            find_index_child_bound(&indexes, 49, 1 << 32).unwrap(),
+            (100, 50)
+        );
         // At the second key -> second leaf, upper bound = third key (100).
         assert_eq!(
             find_index_child_bound(&indexes, 50, 1 << 32).unwrap(),
