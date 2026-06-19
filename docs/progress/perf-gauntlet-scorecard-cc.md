@@ -408,6 +408,32 @@ fragmented-read win. **Methodology note (learned the hard way):** an earlier fix
 because kernel `cat` was pathologically slow (small-buffer behavior on an oddly-structured file) — always
 verify real multi-extent compression (`dump-tree`/`compsize`) and compare vs `dd bs=4M`, not `cat`.
 
+### ⭐ DIFFERENTIAL btrfs read-conformance oracle (kernel vs frankenfs, byte-exact) + 2 CLI fixes (cc 2026-06-19)
+Made `ffs read` flavor-agnostic (descend from `InodeNumber(1)` via `lookup`, stream via `read`; was
+ext4-only `resolve_path`) so it reads btrfs too — unlocking a per-file **differential oracle**: kernel
+`sha256sum` vs `ffs read <img> <path> | sha256sum`. Ran it over 6 diverse kernel-written btrfs file shapes —
+**all byte-exact**:
+
+| file | shape | result |
+|------|-------|--------|
+| tiny.txt (17 B) | inline extent | ✅ byte-exact |
+| small_uncompressed.bin (100 KB) | uncompressed | ✅ |
+| compressible.bin (42 MB) | zstd-compressed | ✅ |
+| sparse.bin (10 MB) | hole + data | ✅ |
+| empty.bin (0 B) | empty | ✅ |
+| reflink.bin (42 MB) | **shared extent (`cp --reflink`)** | ✅ |
+
+Plus ext4 read re-verified byte-exact (the flavor-agnostic path didn't regress ext4). **btrfs read
+conformance validated across inline/sparse/compressed/reflink/empty** — the kind of differential coverage the
+gauntlet exists to provide.
+
+Two real **CLI bugs found + fixed** along the way: (1) the CLI wrote tracing **logs to stdout**, corrupting
+`ffs read`'s file-data output (an empty file produced 1742 bytes of log noise) → routed logs to **stderr**
+(`.with_writer(std::io::stderr)`; data on stdout, logs on stderr — the universal convention). (2) latent
+clippy-pedantic issues in the earlier `walk` code (a `usize as u32` cast, single-char bindings, an unused
+import) that slipped in when an rch clippy run flaked and I proceeded on build-only — now fixed; ffs-cli is
+clippy-clean.
+
 ### COLD bulk DATA read (`grep -r` / `tar`): the boundary — frankenfs LOSES on contiguous data (cc 2026-06-19)
 `ffs walk --read-data --parallel` reads every regular file's bytes (the read-all-files workload: build
 source reads, `grep -r`, backup). Cold over a **250 MiB / 4,000-file** ext4 image (`mke2fs -d`, 64 KiB

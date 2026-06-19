@@ -27,7 +27,7 @@ use ffs_btrfs::{
 use ffs_core::degradation::DegradationLevel;
 use ffs_core::{
     BackpressureGate, BtrfsMountSelection, CrashRecoveryOutcome, DegradationFsm, Ext4DataErrPolicy,
-    Ext4JournalReplayMode, FsFlavor, FsOps, OpenFs, OpenOptions, RepairWritebackBlock, RequestOp,
+    Ext4JournalReplayMode, FsFlavor, FsOps, OpenFs, OpenOptions, RepairWritebackBlock,
     detect_filesystem_at_path,
 };
 use ffs_fuse::{MountConfig, MountOptions, WritebackCacheMode, mount_managed};
@@ -574,7 +574,10 @@ fn init_logging(log_format_override: Option<LogFormat>) -> Result<LogFormat> {
         .unwrap_or(LogFormat::Human);
 
     match format {
+        // Logs go to STDERR (not the default stdout), so commands that emit data to
+        // stdout — notably `read`, which writes raw file bytes — keep stdout clean.
         LogFormat::Human => tracing_subscriber::fmt()
+            .with_writer(std::io::stderr)
             .with_env_filter(default_env_filter())
             .with_target(true)
             .with_level(true)
@@ -582,6 +585,7 @@ fn init_logging(log_format_override: Option<LogFormat>) -> Result<LogFormat> {
             .try_init()
             .map_err(|err| anyhow::anyhow!("failed to initialize human logger: {err}"))?,
         LogFormat::Json => tracing_subscriber::fmt()
+            .with_writer(std::io::stderr)
             .json()
             .flatten_event(true)
             .with_current_span(true)
@@ -2176,49 +2180,53 @@ fn log_wal_recovery_telemetry(wal: &WalReplayInfoOutput) {
 }
 
 fn read_file_cmd(path: &PathBuf, file_path: &str, discard: bool) -> Result<()> {
-    const STREAM_CHUNK: usize = 64 * 1024 * 1024; // 64 MiB
+    const STREAM_CHUNK: u32 = 64 * 1024 * 1024; // 64 MiB
 
     use std::io::Write;
     let cx = cli_cx();
     let open_fs = OpenFs::open(&cx, path)
         .with_context(|| format!("failed to open image: {}", path.display()))?;
-    let scope = open_fs
-        .begin_request_scope(&cx, RequestOp::Read)
-        .with_context(|| "failed to begin read scope".to_string())?;
-    let (ino, inode) = open_fs
-        .resolve_path(&cx, &scope, file_path)
-        .with_context(|| format!("failed to resolve {file_path}"))?;
-    if !discard {
-        let size = u32::try_from(inode.size).unwrap_or(u32::MAX);
-        let data = open_fs
-            .read_file(&cx, &scope, ino, 0, size)
-            .with_context(|| format!("failed to read {file_path}"))?;
-        let _ = open_fs.end_request_scope(&cx, RequestOp::Read, scope);
-        std::io::stdout()
-            .write_all(&data)
-            .with_context(|| "failed to write file data to stdout".to_string())?;
-        return Ok(());
-    }
 
-    let size = inode.size;
-    // For discard-mode perf probes, avoid materializing the whole file into one
-    // Vec. Each chunk still uses the chunked-parallel engine internally.
-    let mut buf = vec![0_u8; STREAM_CHUNK.min(usize::try_from(size).unwrap_or(STREAM_CHUNK))];
+    // Flavor-agnostic path resolution: descend from the FUSE root (InodeNumber(1),
+    // mapped internally to ext4 inode 2 / the btrfs subvolume root) via `lookup`, so
+    // `read` works on BOTH ext4 and btrfs images. read/lookup/getattr are
+    // self-scoping (with_latest_scope), so no long-lived scope is held.
+    let mut ino = InodeNumber(1);
+    for comp in file_path.split('/').filter(|c| !c.is_empty()) {
+        let attr = open_fs
+            .lookup(&cx, ino, std::ffi::OsStr::new(comp))
+            .with_context(|| format!("failed to resolve {file_path} at component {comp:?}"))?;
+        ino = attr.ino;
+    }
+    let size = open_fs
+        .getattr(&cx, ino)
+        .with_context(|| format!("failed to stat {file_path}"))?
+        .size;
+
+    // Stream the file in chunks through the read engine (each `read` chunk uses the
+    // chunked-parallel engine internally); write to stdout, or discard for perf
+    // probes (avoids materializing the whole file at once).
+    let mut out = std::io::stdout();
     let mut off: u64 = 0;
     let mut total: u64 = 0;
     while off < size {
-        let want = usize::try_from((size - off).min(buf.len() as u64)).unwrap_or(buf.len());
-        let n = open_fs
-            .read_file_data(&cx, &scope, &inode, off, &mut buf[..want])
+        let want = u32::try_from((size - off).min(u64::from(STREAM_CHUNK))).unwrap_or(STREAM_CHUNK);
+        let data = open_fs
+            .read(&cx, ino, off, want)
             .with_context(|| format!("failed to read {file_path} at {off}"))?;
-        if n == 0 {
+        if data.is_empty() {
             break;
         }
-        off += n as u64;
-        total += n as u64;
+        total += data.len() as u64;
+        off += data.len() as u64;
+        if !discard {
+            out.write_all(&data)
+                .with_context(|| "failed to write file data to stdout".to_string())?;
+        }
     }
-    let _ = open_fs.end_request_scope(&cx, RequestOp::Read, scope);
-    eprintln!("read {total} bytes from {file_path}");
+    if discard {
+        eprintln!("read {total} bytes from {file_path}");
+    }
     Ok(())
 }
 
@@ -2287,7 +2295,7 @@ fn walk_one_dir(
                     }
                     out.bytes += data.len() as u64;
                     off += data.len() as u64;
-                    if (data.len() as u32) < READ_CHUNK {
+                    if data.len() < READ_CHUNK as usize {
                         break;
                     }
                 }
@@ -2407,23 +2415,23 @@ fn walk_cmd(path: &PathBuf, no_stat: bool, parallel: bool, read_data: bool) -> R
         bytes = a_bytes.load(Ordering::Relaxed);
     } else {
         mode = "serial".to_owned();
-        let mut d: u64 = 1; // count root
-        let mut f: u64 = 0;
-        let mut s: u64 = 0;
-        let mut b: u64 = 0;
+        let mut dir_count: u64 = 1; // count root
+        let mut file_count: u64 = 0;
+        let mut stat_count: u64 = 0;
+        let mut byte_count: u64 = 0;
         let mut stack = vec![root_ino];
         while let Some(ino) = stack.pop() {
             let r = walk_one_dir(&open_fs, &cx, ino, no_stat, read_data)?;
-            d += r.dirs;
-            f += r.files;
-            s += r.stats;
-            b += r.bytes;
+            dir_count += r.dirs;
+            file_count += r.files;
+            stat_count += r.stats;
+            byte_count += r.bytes;
             stack.extend(r.subdirs);
         }
-        dirs = d;
-        files = f;
-        stats = s;
-        bytes = b;
+        dirs = dir_count;
+        files = file_count;
+        stats = stat_count;
+        bytes = byte_count;
     }
     let elapsed = started.elapsed();
     let total = dirs + files;
