@@ -653,6 +653,11 @@ enum Command {
         /// Skip the per-entry getattr (readdir-only walk).
         #[arg(long)]
         no_stat: bool,
+        /// Walk directories concurrently (level-parallel BFS), modeling the
+        /// concurrent readdir+getattr a FUSE-mounted fs sees from its worker
+        /// threads. Overlaps cold per-directory metadata reads across threads.
+        #[arg(long)]
+        parallel: bool,
     },
     /// Show MVCC and EBR version statistics for a filesystem image.
     MvccStats {
@@ -1794,7 +1799,11 @@ fn run() -> Result<()> {
             path,
             discard,
         } => read_file_cmd(&image, &path, discard),
-        Command::Walk { image, no_stat } => walk_cmd(&image, no_stat),
+        Command::Walk {
+            image,
+            no_stat,
+            parallel,
+        } => walk_cmd(&image, no_stat, parallel),
         Command::MvccStats { image, json } => mvcc_stats_cmd(&image, json),
         Command::Info {
             image,
@@ -2207,11 +2216,75 @@ fn read_file_cmd(path: &PathBuf, file_path: &str, discard: bool) -> Result<()> {
     Ok(())
 }
 
+/// Per-directory walk tally: entries readdir'd + statted in one directory, plus
+/// the child directories discovered (to recurse into).
+struct DirWalk {
+    files: u64,
+    dirs: u64,
+    stats: u64,
+    subdirs: Vec<InodeNumber>,
+}
+
+/// Walk a single directory: paginated `readdir` (advancing the continuation
+/// offset cookie until a page comes back empty, with a no-progress guard) plus a
+/// per-entry `getattr` unless `no_stat`. Returns the tally and child dirs.
+fn walk_one_dir(open_fs: &OpenFs, cx: &Cx, ino: InodeNumber, no_stat: bool) -> Result<DirWalk> {
+    let mut out = DirWalk {
+        files: 0,
+        dirs: 0,
+        stats: 0,
+        subdirs: Vec::new(),
+    };
+    let mut next_off: u64 = 0;
+    loop {
+        let off_in = next_off;
+        let entries = open_fs
+            .readdir(cx, ino, off_in)
+            .with_context(|| format!("failed to readdir inode {}", ino.0))?;
+        if entries.is_empty() {
+            break;
+        }
+        for entry in &entries {
+            next_off = entry.offset;
+            if entry.name == b"." || entry.name == b".." {
+                continue;
+            }
+            if !no_stat {
+                let _attr = open_fs
+                    .getattr(cx, entry.ino)
+                    .with_context(|| format!("failed to getattr inode {}", entry.ino.0))?;
+                out.stats += 1;
+            }
+            if format!("{:?}", entry.kind) == "Directory" {
+                out.dirs += 1;
+                out.subdirs.push(entry.ino);
+            } else {
+                out.files += 1;
+            }
+        }
+        // No-progress guard: if the continuation offset did not advance past the
+        // offset we passed in, stop rather than re-reading the same page.
+        if next_off <= off_in {
+            break;
+        }
+    }
+    Ok(out)
+}
+
 /// Recursively walk every directory from root, statting each entry — the no-FUSE
 /// `find | xargs stat` analogue. Exercises the cold metadata path (readdir +
 /// per-inode getattr → inode-table block reads + inode parse) so it can be raced
 /// head-to-head against the kernel filesystem on `ls -lR` / `find` workloads.
-fn walk_cmd(path: &PathBuf, no_stat: bool) -> Result<()> {
+///
+/// `parallel` walks each BFS level concurrently across `available_parallelism`
+/// threads — modeling the concurrent readdir+getattr a FUSE-mounted fs sees from
+/// its worker threads, so the cold per-directory metadata reads overlap (the
+/// single-threaded walk serializes them and understates frankenfs's throughput).
+#[allow(clippy::too_many_lines)]
+fn walk_cmd(path: &PathBuf, no_stat: bool, parallel: bool) -> Result<()> {
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
     let cx = cli_cx();
     let open_fs = OpenFs::open(&cx, path)
         .with_context(|| format!("failed to open image: {}", path.display()))?;
@@ -2229,48 +2302,88 @@ fn walk_cmd(path: &PathBuf, no_stat: bool) -> Result<()> {
         ino
     };
 
-    let mut stack = vec![root_ino];
-    let mut dirs: u64 = 1; // count root
-    let mut files: u64 = 0;
-    let mut stats: u64 = 0;
+    let dirs: u64;
+    let files: u64;
+    let stats: u64;
+    let mode: String;
     let started = Instant::now();
-    while let Some(ino) = stack.pop() {
-        // readdir is paginated: keep advancing the continuation offset until a
-        // page comes back empty, so directories larger than one page are walked
-        // in full (the offset cookie is the entry's `offset` field).
-        let mut next_off: u64 = 0;
-        loop {
-            let off_in = next_off;
-            let entries = open_fs
-                .readdir(&cx, ino, off_in)
-                .with_context(|| format!("failed to readdir inode {}", ino.0))?;
-            if entries.is_empty() {
-                break;
-            }
-            for entry in &entries {
-                next_off = entry.offset;
-                if entry.name == b"." || entry.name == b".." {
-                    continue;
+    if parallel {
+        let threads = std::thread::available_parallelism()
+            .map_or(8, std::num::NonZeroUsize::get)
+            .min(16);
+        mode = format!("parallel x{threads}");
+        let a_dirs = AtomicU64::new(1); // count root
+        let a_files = AtomicU64::new(0);
+        let a_stats = AtomicU64::new(0);
+        let first_err: Mutex<Option<anyhow::Error>> = Mutex::new(None);
+        // Shared references captured by-value (Copy) into each `move` worker
+        // closure, so the closures may own `chunk` without borrowing locals.
+        let fs_ref = &open_fs;
+        let cx_ref = &cx;
+        let err_ref = &first_err;
+        let files_ctr = &a_files;
+        let dirs_ctr = &a_dirs;
+        let stats_ctr = &a_stats;
+        let mut level = vec![root_ino];
+        while !level.is_empty() {
+            let next: Mutex<Vec<InodeNumber>> = Mutex::new(Vec::new());
+            let next_ref = &next;
+            let chunk_size = level.len().div_ceil(threads).max(1);
+            std::thread::scope(|s| {
+                for chunk in level.chunks(chunk_size) {
+                    s.spawn(move || {
+                        let mut local_files = 0_u64;
+                        let mut local_dirs = 0_u64;
+                        let mut local_stats = 0_u64;
+                        let mut lsub: Vec<InodeNumber> = Vec::new();
+                        for &ino in chunk {
+                            match walk_one_dir(fs_ref, cx_ref, ino, no_stat) {
+                                Ok(r) => {
+                                    local_files += r.files;
+                                    local_dirs += r.dirs;
+                                    local_stats += r.stats;
+                                    lsub.extend(r.subdirs);
+                                }
+                                Err(e) => {
+                                    let mut guard = err_ref.lock().unwrap();
+                                    if guard.is_none() {
+                                        *guard = Some(e);
+                                    }
+                                }
+                            }
+                        }
+                        files_ctr.fetch_add(local_files, Ordering::Relaxed);
+                        dirs_ctr.fetch_add(local_dirs, Ordering::Relaxed);
+                        stats_ctr.fetch_add(local_stats, Ordering::Relaxed);
+                        next_ref.lock().unwrap().extend(lsub);
+                    });
                 }
-                if !no_stat {
-                    let _attr = open_fs
-                        .getattr(&cx, entry.ino)
-                        .with_context(|| format!("failed to getattr inode {}", entry.ino.0))?;
-                    stats += 1;
-                }
-                if format!("{:?}", entry.kind) == "Directory" {
-                    dirs += 1;
-                    stack.push(entry.ino);
-                } else {
-                    files += 1;
-                }
+            });
+            let pending_err = first_err.lock().unwrap().take();
+            if let Some(e) = pending_err {
+                return Err(e);
             }
-            // No-progress guard: if the continuation offset did not advance past
-            // the offset we passed in, stop rather than re-reading the same page.
-            if next_off <= off_in {
-                break;
-            }
+            level = next.into_inner().unwrap();
         }
+        files = a_files.load(Ordering::Relaxed);
+        dirs = a_dirs.load(Ordering::Relaxed);
+        stats = a_stats.load(Ordering::Relaxed);
+    } else {
+        mode = "serial".to_owned();
+        let mut d: u64 = 1; // count root
+        let mut f: u64 = 0;
+        let mut s: u64 = 0;
+        let mut stack = vec![root_ino];
+        while let Some(ino) = stack.pop() {
+            let r = walk_one_dir(&open_fs, &cx, ino, no_stat)?;
+            d += r.dirs;
+            f += r.files;
+            s += r.stats;
+            stack.extend(r.subdirs);
+        }
+        dirs = d;
+        files = f;
+        stats = s;
     }
     let elapsed = started.elapsed();
     let total = dirs + files;
@@ -2280,8 +2393,8 @@ fn walk_cmd(path: &PathBuf, no_stat: bool) -> Result<()> {
         0.0
     };
     eprintln!(
-        "walked {dirs} dirs + {files} files ({total} entries, {stats} stats) in {elapsed:?} \
-         ({per_entry_us:.2} us/entry)"
+        "walked {dirs} dirs + {files} files ({total} entries, {stats} stats) [{mode}] in \
+         {elapsed:?} ({per_entry_us:.2} us/entry)"
     );
     Ok(())
 }

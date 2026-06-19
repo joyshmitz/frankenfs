@@ -279,11 +279,28 @@ beats the kernel **even including** its per-invocation open+journal-replay (~7 m
 | 2 | 0.140 s | 0.142 s | 117.2 ms |
 | 3 | 0.145 s | 0.142 s | 116.4 ms |
 
-- **Wall-clock: PARITY (~1.0×)**; **walk-work only: frankenfs ~1.22× FASTER** (117 ms vs ~143 ms). With only
-  ~20 entries per directory, each `readdir` page is small, so the parallel prefetch has little to overlap
-  per directory — the win shrinks from Fixture A's 3× to a modest 1.22× on the walk work (and ties on
-  wall-clock once frankenfs's per-invocation open+journal-replay ~25 ms is included; a FUSE mount pays that
-  once, like the kernel). Same levers, smaller scatter ⇒ smaller win — which is the expected dose-response.
+- **Single-threaded: walk-work ~1.22× FASTER** (117 ms vs ~143 ms), wall-clock parity. With ~20 entries per
+  directory, each `readdir` page is small, so the in-`readdir` prefetch has little to overlap per directory.
+- **Concurrent (the production-FUSE model): frankenfs `--parallel` ~4.5–5× FASTER.** A real metadata
+  workload (build, `git status`, file-manager `ls`) issues *concurrent* readdir/getattr that a FUSE mount
+  serves across its worker pool. `ffs walk --parallel` models this (level-parallel BFS over the directory
+  tree, `std::thread::scope` × `available_parallelism`=16; identical 21,002-entry result asserted vs the
+  serial walk). Cold, 3 runs:
+
+  | side | cold time | vs frankenfs-parallel |
+  |------|-----------|------------------------|
+  | kernel serial `find -printf` | 134–137 ms | **~5.2× slower** |
+  | kernel **parallel** `find \| xargs -P16 stat` | 112–121 ms | **~4.5× slower** |
+  | **frankenfs `walk --parallel`** | **25–27 ms** | — |
+
+  The kernel's parallel `xargs -P16` barely beats its serial `find` (121 vs 137 ms) — cold metadata I/O is
+  the bottleneck and the single `find` readdir + readahead can't overlap the scattered inode-block reads.
+  frankenfs issues independent `pread`s across 16 threads, so the block layer services the cold reads
+  concurrently → 26 ms. **frankenfs dominates cold metadata in BOTH regimes: ~3× on a wide single directory
+  (prefetch-driven, single-threaded) and ~4.5–5× on a deep many-directory tree (thread-overlap-driven).**
+  Caveat: the concurrent-read overlap assumes storage that services parallel reads (SSD/NVMe; a single
+  spinning disk would be seek-bound). Same levers (`.399` prefetch + `.396` cheap parse) + thread-level
+  I/O-overlap; the win scales with available metadata parallelism.
 - **Why Fixture A wins big and B only ties:** the `bd-xmh5g.399` prefetch parallelizes the inode-block reads
   *within one `readdir` page*; a 40k-entry htree directory gives it a huge scattered batch to overlap, while
   1,001 tiny directories give it ~20 near-sequential inodes at a time (which kernel readahead already
