@@ -218,3 +218,27 @@ small-core, and a large win over the prior 256 everywhere. Conclusion: do NOT ad
 
 Commands: `FFS_LOG_FORMAT=json RUST_LOG=info RAYON_NUM_THREADS=<n> FFS_READ_CHUNK_BLOCKS=<cb> \
 ffs-cli read IMG FILE --discard 2>&1 | grep duration_us` (ext4); `... ffs-cli walk IMG --read-data` (btrfs).
+
+### btrfs compressed-read pool OVER-subscription — root-caused, `with_min_len` cap FAILED (cc 2026-06-19, bd-defgb)
+
+`btrfs_read_file` fans every per-extent decompress (zstd/lzo) job across the FULL rayon pool. Decompression is
+CPU- and cache-bound (unlike the uncompressed memcpy path, which is bandwidth-bound and scales with cores), so
+on a 64-core box spreading ~270 short jobs across 64 threads OVER-subscribes. Measured (perf stat, 34 MiB zstd
+file, `walk --read-data`) at 64 vs 8 threads: **4.5x task-clock** (293M vs 64M), **4.2x cache-misses** (6.6M vs
+1.6M), **8x context-switches** — whole read **1.6x slower warm** (18.0 vs 11.4 ms) AND **1.46x slower cold**
+(20.9 vs 14.3 ms) at the default pool; both warm+cold peak at ~8 threads. Real regression at the default pool
+size — but NOT cleanly fixable from the work side.
+
+ATTEMPTED FIX (reverted): cap concurrency via `IndexedParallelIterator::with_min_len(jobs.len()/16)` for
+decompress-dominated reads. **Ineffective**: the rebuilt binary at the default 64-thread pool stayed at
+16.7 ms while the SAME binary forced to `RAYON_NUM_THREADS=8` ran at 10.2 ms. `with_min_len` only coarsens the
+task COUNT; it does not stop the 64-thread pool from waking/parking/steal-spinning, and that pool churn (not
+task granularity) is the overhead. Confirmed byte-identity and that the uncompressed `btrperf` path was
+unchanged, but with no speedup the change is pure complexity — reverted.
+
+PROPER FIX (deferred, bd-defgb): run the decompress par_iter inside a dedicated small rayon pool (~min(16,
+cores) threads) via a `OnceLock<ThreadPool>` + `install()`, so the idle global-pool threads stay parked. NOT
+landed because per-file `install()` risks the documented dedicated-pool scheduler thrash on multi-file walks
+(see the "spurious-fan-out gate" row) — `btrfs_read_file` is called once per file, so a `find`-style walk over
+N compressed files = N installs. That regression is not testable in this environment (no large multi-file
+compressed image), so the dedicated-pool fix needs a multi-file compressed-walk bench before it can ship.
