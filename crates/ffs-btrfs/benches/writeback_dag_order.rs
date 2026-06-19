@@ -128,16 +128,17 @@ fn single_clone_model(tree: &InMemoryCowBtrfsTree) -> BenchDag {
 }
 
 fn dag_shape_digest(dag: &BenchDag) -> u64 {
-    dag.iter().fold(0xcbf2_9ce4_8422_2325_u64, |acc, (block, node)| {
-        let mut digest = acc
-            .wrapping_mul(0x100_0000_01b3)
-            .wrapping_add(*block)
-            .wrapping_add(u64::from(node.level));
-        for child in &node.children {
-            digest = digest.wrapping_mul(0x100_0000_01b3).wrapping_add(*child);
-        }
-        digest
-    })
+    dag.iter()
+        .fold(0xcbf2_9ce4_8422_2325_u64, |acc, (block, node)| {
+            let mut digest = acc
+                .wrapping_mul(0x100_0000_01b3)
+                .wrapping_add(*block)
+                .wrapping_add(u64::from(node.level));
+            for child in &node.children {
+                digest = digest.wrapping_mul(0x100_0000_01b3).wrapping_add(*child);
+            }
+            digest
+        })
 }
 
 fn assert_build_isomorphic(tree: &InMemoryCowBtrfsTree) {
@@ -146,7 +147,11 @@ fn assert_build_isomorphic(tree: &InMemoryCowBtrfsTree) {
     assert_eq!(old, new, "single-clone model changed DAG shape");
 
     let production = WriteDependencyDag::from_cow_tree(tree, GENERATION).expect("production dag");
-    assert_eq!(production.node_count(), old.len(), "production node count changed");
+    assert_eq!(
+        production.node_count(),
+        old.len(),
+        "production node count changed"
+    );
     for (block, old_node) in &old {
         let production_node = production.get(*block).expect("production node");
         assert_eq!(production_node.level, old_node.level, "node level changed");
@@ -257,5 +262,9 @@ fn bench_writeback_dag_build(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_writeback_dag_order, bench_writeback_dag_build);
+criterion_group!(
+    benches,
+    bench_writeback_dag_order,
+    bench_writeback_dag_build
+);
 criterion_main!(benches);

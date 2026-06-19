@@ -143,3 +143,74 @@ CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-b \
 
 cargo fmt -p ffs-mvcc --check
 ```
+
+## `bd-xmh5g.400` Addendum
+
+Date: 2026-06-19
+Agent: BlackThrush (`cod-b`)
+Scope: `ffs-btrfs` code-first backlog row `bd-xmh5g.400`
+Commit under measurement: `e55bb16e`
+RCH Criterion worker: `ovh-a`
+Requested target dir: `/data/projects/.rch-targets/frankenfs-cod-b`
+Remote target dir used by RCH:
+`.rch-target-ovh-a-pool-42ea7743fa151ef0fd4b694270dc5239`
+
+### Verdict
+
+This row is release-ready only as a measured rejection. Moving the owned
+`BtrfsCowNode` child vector into the production `DagNode` was slower than the
+old double-clone construction on the existing realistic btrfs writeback DAG
+benchmark, so the production lever was reverted. The same A/B benchmark remains
+as a guard against rediscovering the moved-child shape.
+
+### Scorecard
+
+| Gate | Result |
+| --- | --- |
+| Code-first backlog rows examined in this addendum | 1 |
+| RCH Criterion rows completed | 3 / 3 |
+| Same-worker evidence | Yes, `ovh-a` for all benchmark rows |
+| Direct ext4/btrfs-kernel ratios | 0 / 1 direct; no kernel comparator exists for this Rust-internal `WriteDependencyDag` child-vector materialization primitive |
+| Production levers kept | 0 |
+| Production levers rejected/reverted | 1 |
+| Conformance/build guard after revert | `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-b rch exec -- cargo check -p ffs-btrfs --bench writeback_dag_order` passed on `hz1`; `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-b rch exec -- cargo test -p ffs-btrfs writeback -- --nocapture` passed on `hz2` with 37 passed / 0 failed; local `cargo fmt -p ffs-btrfs --check` passed |
+| Release-readiness score for perf-superiority claims | 20 / 100: decisive negative Rust-internal evidence, no valid kernel comparator, no keep claim |
+| Release-readiness score for this row's hygiene | 95 / 100: same-worker A/B completed, ratios ledgered, production reverted, retry predicate written, focused post-revert gates and formatting passed |
+
+### Measured Rows
+
+| Bead | Workload | Old double-clone | New moved-child | Ratio | Verdict |
+| --- | --- | --- | --- | --- | --- |
+| `bd-xmh5g.400` | DAG build, old double-clone model vs single-clone model | `89.928 us` | `112.58 us` | `0.799x` old/new | Reject: single-clone model is `25.2%` slower |
+| `bd-xmh5g.400` | DAG build, old double-clone model vs production moved-child path | `89.928 us` | `110.91 us` | `0.811x` old/new | Reject: production moved-child path is `23.3%` slower |
+
+### Kernel Reference Coverage
+
+No direct ext4/btrfs-kernel comparator is valid for this row. The lever only
+changes how FrankenFS builds an in-memory btrfs metadata writeback DAG from the
+safe Rust `InMemoryCowBtrfsTree` snapshot. Linux btrfs does not expose an
+equivalent timed primitive, and a whole-filesystem btrfs writeback benchmark
+would include VFS, page-cache, allocator, checksum, and device latency without
+isolating `WriteDependencyDag::collect_nodes`.
+
+The prior broad vs-kernel attempt on this branch captured a kernel ext4 read
+baseline but could not FUSE-mount FrankenFS in the execution environment. That
+artifact is useful as environment context only; it is not evidence for this
+in-memory btrfs DAG construction lever.
+
+### Commands
+
+```bash
+CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-b \
+  rch exec -- cargo bench --profile release-perf -p ffs-btrfs \
+  --bench writeback_dag_order -- \
+  writeback_dag_build_child_vector_ab
+
+CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-b \
+  rch exec -- cargo check -p ffs-btrfs --bench writeback_dag_order
+
+CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-b \
+  rch exec -- cargo test -p ffs-btrfs writeback -- --nocapture
+
+cargo fmt -p ffs-btrfs --check
+```

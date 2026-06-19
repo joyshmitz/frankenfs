@@ -91,14 +91,13 @@ impl WriteDependencyDag {
 
         let node = tree.node_snapshot(block)?;
         // Leaves are always level 0; internal nodes carry the depth passed down
-        // from the root (root = root_level, each child one less). The snapshot
-        // is owned, so move the child vector into the DAG node instead of
-        // cloning it twice while building the writeback plan.
-        let (node_level, children) = match node {
+        // from the root (root = root_level, each child one less). Keep the
+        // separate DAG and recursion child vectors; the moved-child variant was
+        // measured slower in bd-xmh5g.400's gauntlet bench.
+        let (node_level, children) = match &node {
             BtrfsCowNode::Leaf { .. } => (0, Vec::new()),
-            BtrfsCowNode::Internal { children, .. } => (level, children),
+            BtrfsCowNode::Internal { children, .. } => (level, children.clone()),
         };
-        let recursion_children = children.clone();
 
         nodes.insert(
             block,
@@ -106,14 +105,14 @@ impl WriteDependencyDag {
                 block,
                 level: node_level,
                 generation,
-                children,
+                children: children.clone(),
                 durable: false,
             },
         );
 
         // Recursively collect children one level shallower.
         let child_level = level.saturating_sub(1);
-        for child in recursion_children {
+        for child in children {
             Self::collect_nodes(tree, child, nodes, generation, child_level)?;
         }
 
