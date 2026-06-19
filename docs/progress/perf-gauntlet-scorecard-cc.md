@@ -47,6 +47,20 @@ with `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cc`.
   (parallel result == serial result, byte-identical), and all bench binaries built+ran to exit 0,
   so the parallel/batched paths are proven behaviorally identical to the serial originals.
 
+## Swarm levers measured (not cc's — recorded honestly; reverts deferred to owners, not my files)
+
+| Bead | Bench | Measured | Verdict |
+|------|-------|----------|---------|
+| bd-xmh5g.401 | mvcc_commit_batching_2000 (per_write vs batched, N=2000) | per_write 10.24ms vs batched 9.51ms = **1.08x** | ⚠️ NEUTRAL at store level — in-memory MVCC commit is cheap; the WAL/SSI/snapshot/FUSE overhead the lever targets is NOT exercised by this bench. **bd-w3hol (per-fh writeback wiring) headroom is UNPROVEN** — needs an e2e FUSE+WAL bench before implementing. |
+| bd-xmh5g.404 | journal_replay_blockbuf_materialize (into_inner vs old_to_vec) | N=16 0.99x; N=64 **0.64x**; N=256 **0.70x** | ❌ REGRESSION — `into_inner` is 1.4–1.6x SLOWER than `as_slice().to_vec()` at N≥64 (likely Arc-shared BlockBuf → try_unwrap fails → clone, costlier than a straight copy). **Recommend revert to to_vec** (owner's file; flagged via bead). |
+| bd-ucrow | commit_scope_writeset_collect (gated_none vs always_collect) | N=64 1.08x; N=256 0.83x; N=1024 noisy outlier | ⚠️ WITHIN-NOISE NEUTRAL — the per-commit write-set Vec skip is a tiny constant factor swamped by commit cost; high cv. Harmless (kept) but not a measurable win. |
+
+⭐ Gauntlet value: 2 of the swarm's "code-first batch-test pending" write-path levers (.401, .404) do NOT
+deliver — .401 is neutral at the only bench that exists (real cost unmeasured), .404 is an outright
+regression. The cc read/free levers (1–10 above) all measured as real wins; the *write-path* levers are
+where the unproven/negative results cluster — consistent with the durability-critical caveat cc raised
+before implementing .401/bd-w3hol.
+
 ## Measurement caveat (honest)
 These ratios are the **lever's own A/B** (new shape vs old shape, same process), NOT head-to-head
 vs the ext4/btrfs *kernel* — the benches do not invoke the kernel filesystem. They prove each
