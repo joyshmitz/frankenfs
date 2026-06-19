@@ -3572,9 +3572,9 @@ fn walk_dir_block_entries(
                 field: "de_rec_len",
                 reason: "overflow",
             })?;
-        let is_tail_position = entry_end <= block.len() && all_zero_bytes(&block[entry_end..]);
-        if is_tail_position
-            && is_malformed_dir_checksum_tail(inode, name_len, file_type_raw, rec_len)
+        if is_malformed_dir_checksum_tail(inode, name_len, file_type_raw, rec_len)
+            && entry_end <= block.len()
+            && all_zero_bytes(&block[entry_end..])
         {
             return Err(ParseError::InvalidField {
                 field: "dir_block_tail",
@@ -4579,9 +4579,10 @@ impl<'a> Iterator for DirBlockIter<'a> {
                 }
                 return None;
             }
-            let is_tail_position = header.entry_end <= self.block.len()
-                && all_zero_bytes(&self.block[header.entry_end..]);
-            if is_tail_position && Self::is_malformed_checksum_tail(header) {
+            if Self::is_malformed_checksum_tail(header)
+                && header.entry_end <= self.block.len()
+                && all_zero_bytes(&self.block[header.entry_end..])
+            {
                 self.done = true;
                 return Some(Err(ParseError::InvalidField {
                     field: "dir_block_tail",
@@ -11403,6 +11404,33 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn parse_dir_block_and_iter_allow_tail_marker_shape_when_not_at_tail_position() {
+        let block_size = 36_u32;
+        let mut block = vec![0_u8; block_size as usize];
+
+        // This has the malformed checksum-tail header shape, but it is followed
+        // by a live entry. It is therefore a deleted dirent, not the tail.
+        write_dir_entry(&mut block, 0, 0, EXT4_FT_DIR_CSUM, b"x", 12);
+        write_dir_entry(&mut block, 12, 7, EXT4_FT_REG_FILE, b"live", 24);
+
+        let (entries, tail) = parse_dir_block(&block, block_size).unwrap();
+        assert!(tail.is_none());
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].inode, 7);
+        assert_eq!(entries[0].name, b"live");
+
+        let mut iter = DirBlockIter::new(&block, block_size);
+        let entry = iter
+            .next()
+            .expect("one live entry")
+            .expect("tail-marker-shaped deleted entry is skipped");
+        assert_eq!(entry.inode, 7);
+        assert_eq!(entry.name, b"live");
+        assert!(iter.next().is_none());
+        assert!(iter.checksum_tail().is_none());
     }
 
     #[test]

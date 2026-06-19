@@ -10,9 +10,11 @@
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use ffs_ondisk::{lookup_in_dir_block, lookup_in_dir_block_casefold};
+use ffs_types::all_zero_bytes;
 use std::hint::black_box;
 
 const BLOCK_SIZE: u32 = 4096;
+const EXT4_FT_DIR_CSUM: u8 = 0xDE;
 
 /// Build a valid, densely packed ext4 directory block of fixed-width entries
 /// (`fileNNNN`, 8-byte names → 16-byte records). The final entry's `rec_len`
@@ -36,6 +38,68 @@ fn build_dense_dir_block() -> Vec<u8> {
         offset += this_rec;
     }
     block
+}
+
+fn bench_rec_len_from_disk(raw: u16) -> usize {
+    if raw == 0xFFFC || raw == 0 {
+        return BLOCK_SIZE as usize;
+    }
+    let len = usize::from(raw);
+    (len & 0xFFFC) | ((len & 0x3) << 16)
+}
+
+fn eager_tail_scan_probe(block: &[u8]) -> usize {
+    let mut offset = 0_usize;
+    let mut zero_suffixes = 0_usize;
+    while offset + 8 <= block.len() {
+        let rec_len_raw = u16::from_le_bytes([block[offset + 4], block[offset + 5]]);
+        let rec_len = bench_rec_len_from_disk(rec_len_raw);
+        let Some(entry_end) = offset.checked_add(rec_len) else {
+            break;
+        };
+        if entry_end <= block.len() && all_zero_bytes(&block[entry_end..]) {
+            zero_suffixes += 1;
+        }
+        if rec_len < 12 || entry_end <= offset || entry_end > block.len() {
+            break;
+        }
+        offset = entry_end;
+    }
+    zero_suffixes
+}
+
+fn gated_tail_scan_probe(block: &[u8]) -> usize {
+    let mut offset = 0_usize;
+    let mut malformed_tail_positions = 0_usize;
+    while offset + 8 <= block.len() {
+        let inode = u32::from_le_bytes([
+            block[offset],
+            block[offset + 1],
+            block[offset + 2],
+            block[offset + 3],
+        ]);
+        let rec_len_raw = u16::from_le_bytes([block[offset + 4], block[offset + 5]]);
+        let rec_len = bench_rec_len_from_disk(rec_len_raw);
+        let name_len = block[offset + 6];
+        let file_type_raw = block[offset + 7];
+        let Some(entry_end) = offset.checked_add(rec_len) else {
+            break;
+        };
+        if inode == 0
+            && name_len != 0
+            && file_type_raw == EXT4_FT_DIR_CSUM
+            && rec_len == 12
+            && entry_end <= block.len()
+            && all_zero_bytes(&block[entry_end..])
+        {
+            malformed_tail_positions += 1;
+        }
+        if rec_len < 12 || entry_end <= offset || entry_end > block.len() {
+            break;
+        }
+        offset = entry_end;
+    }
+    malformed_tail_positions
 }
 
 fn bench_dir_lookup(c: &mut Criterion) {
@@ -65,6 +129,12 @@ fn bench_dir_lookup(c: &mut Criterion) {
                     .unwrap(),
             )
         });
+    });
+    group.bench_function("tail_scan_eager_suffix_probe_dense_4k", |b| {
+        b.iter(|| black_box(eager_tail_scan_probe(black_box(&block))));
+    });
+    group.bench_function("tail_scan_gated_suffix_probe_dense_4k", |b| {
+        b.iter(|| black_box(gated_tail_scan_probe(black_box(&block))));
     });
     group.finish();
 }
