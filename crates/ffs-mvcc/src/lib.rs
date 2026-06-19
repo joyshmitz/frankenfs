@@ -2731,7 +2731,6 @@ impl MvccStore {
             Err(error) => return Err((error, txn)),
         };
 
-        let write_keys: BTreeSet<BlockNumber> = txn.write_set().keys().copied().collect();
         let commit_seq = match self.next_commit_seq() {
             Ok(seq) => seq,
             Err(error) => return Err((error, txn)),
@@ -2747,8 +2746,11 @@ impl MvccStore {
         } = txn;
         let dedup_enabled = self.compression_policy.dedup_identical;
         let store_full = matches!(self.compression_policy.algo, CompressionAlgo::None);
+        let expected_write_set_size = staged_writes.len();
+        let mut write_keys = BTreeSet::new();
 
         for (block, staged) in staged_writes {
+            write_keys.insert(block);
             let version_bytes = merged_writes.remove(&block).unwrap_or(staged.bytes);
             let version_data =
                 if dedup_enabled && self.is_identical_to_latest(block, &version_bytes) {
@@ -2789,6 +2791,7 @@ impl MvccStore {
             }
         }
         debug_assert!(merged_writes.is_empty());
+        debug_assert_eq!(write_keys.len(), expected_write_set_size);
 
         let read_set_size = reads.len();
         let write_set_size = write_keys.len();

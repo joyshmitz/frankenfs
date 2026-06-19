@@ -20,6 +20,7 @@ use ffs_mvcc::{CompressionAlgo, CompressionPolicy, ConflictPolicy, MergeProof, M
 use ffs_types::{BlockNumber, CommitSeq, TxnId};
 use parking_lot::Mutex;
 use serde::Serialize;
+use std::collections::BTreeSet;
 use std::fs;
 use std::hint::black_box;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -197,6 +198,52 @@ fn bench_ssi_overhead(c: &mut Criterion) {
             block_id += 1;
         });
     });
+
+    for &write_count in &[64_u64, 256, 1024] {
+        let mut txn = MvccStore::new().begin();
+        for block in 0..write_count {
+            txn.stage_write(BlockNumber(block), block_data.clone());
+        }
+        let expected: BTreeSet<BlockNumber> = txn.write_set().keys().copied().collect();
+        let mut fused = BTreeSet::new();
+        for &block in txn.write_set().keys() {
+            fused.insert(block);
+        }
+        assert_eq!(
+            expected, fused,
+            "fused SSI write-key log must preserve the old prebuilt set"
+        );
+
+        c.bench_function(
+            &format!("mvcc_commit_ssi_writekey_log_ab_prebuild_{write_count}"),
+            |b| {
+                b.iter(|| {
+                    let write_keys: BTreeSet<BlockNumber> =
+                        txn.write_set().keys().copied().collect();
+                    let mut installed_checksum = 0_u64;
+                    for block in txn.write_set().keys() {
+                        installed_checksum = installed_checksum.wrapping_add(block.0);
+                    }
+                    black_box((write_keys, installed_checksum))
+                });
+            },
+        );
+
+        c.bench_function(
+            &format!("mvcc_commit_ssi_writekey_log_ab_fused_{write_count}"),
+            |b| {
+                b.iter(|| {
+                    let mut write_keys = BTreeSet::new();
+                    let mut installed_checksum = 0_u64;
+                    for &block in txn.write_set().keys() {
+                        installed_checksum = installed_checksum.wrapping_add(block.0);
+                        write_keys.insert(block);
+                    }
+                    black_box((write_keys, installed_checksum))
+                });
+            },
+        );
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
