@@ -427,6 +427,19 @@ Plus ext4 read re-verified byte-exact (the flavor-agnostic path didn't regress e
 conformance validated across inline/sparse/compressed/reflink/empty** — the kind of differential coverage the
 gauntlet exists to provide.
 
+**Then ran the oracle over ext4 too — and it found + I FIXED a real read bug.** Extent+inline ext4 shapes
+(tiny/inline, 50 KB, 20 MB multi-extent, 10 MB sparse, empty, 18-extent fragmented) all byte-exact. But a
+`^extent` (indirect-block / ext2-ext3-style) image **failed every file**: `lookup` errored
+`invalid extent magic: expected 0xf30a, got 0x20a1` — frankenfs's `resolve_extent` (the logical→physical
+block mapper used by `read_dir`) parsed the inode's i_block as an **extent tree unconditionally**, so an
+indirect-mapped inode (no `EXT4_EXTENTS_FL`) — including the **root directory** — couldn't be read at all,
+breaking `lookup` before it started. frankenfs *had* `read_ext4_indirect` + a `resolve_indirect_block`
+single-block resolver for file data, but `resolve_extent` never checked the flag. **Fix (ffs-core, mine):**
+route inodes without `EXT4_EXTENTS_FL` through `resolve_indirect_block` at the top of `resolve_extent`.
+After: indirect direct/single/double-indirect/sparse files all read **byte-exact** vs the kernel; ffs-core
+1177 tests pass. This is **ext2/ext3-style (indirect-mapped) ext4 read support** that was silently broken —
+frankenfs could not read any filesystem whose root directory used indirect blocks.
+
 Two real **CLI bugs found + fixed** along the way: (1) the CLI wrote tracing **logs to stdout**, corrupting
 `ffs read`'s file-data output (an empty file produced 1742 bytes of log noise) → routed logs to **stderr**
 (`.with_writer(std::io::stderr)`; data on stdout, logs on stderr — the universal convention). (2) latent

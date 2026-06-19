@@ -10170,6 +10170,20 @@ impl OpenFs {
         inode: &Ext4Inode,
         logical_block: u32,
     ) -> Result<Option<(u64, bool)>, FfsError> {
+        // Legacy indirect-mapped inodes (no `EXT4_EXTENTS_FL` — ext2/ext3-style, or a
+        // `^extent` ext4) map logical→physical through the i_block indirect pointers,
+        // NOT an extent tree. Route them to the indirect resolver (which has its own
+        // chain cache); parsing their i_block as an extent header otherwise fails
+        // with a bogus "invalid extent magic" and breaks every read of an
+        // indirect-mapped file OR directory — including the root dir, so `lookup`
+        // can't even start (bd-pokmq-class interop gap). `unwritten` is always false:
+        // indirect mapping has no preallocated-unwritten extents.
+        if inode.flags & EXT4_EXTENTS_FL == 0 {
+            return Ok(self
+                .resolve_indirect_block(cx, scope, inode, logical_block)?
+                .map(|phys| (phys, false)));
+        }
+
         // Derive a cache namespace from the inode's extent root bytes.
         // Different inodes have different extent trees, so the first 8 bytes
         // of i_block (the extent header + first entry start) provide a
