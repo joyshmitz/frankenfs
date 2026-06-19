@@ -11,15 +11,18 @@
 //! commit per block; `batched_commit` stages all N blocks in one txn and commits
 //! once. The delta is the per-commit overhead the lever amortizes.
 
-use criterion::{Criterion, Throughput, criterion_group, criterion_main};
+use criterion::{
+    BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main,
+};
 use ffs_core::RequestScope;
-use ffs_mvcc::MvccStore;
+use ffs_mvcc::{MvccStore, Transaction};
 use ffs_types::BlockNumber;
 use parking_lot::RwLock;
 use std::hint::black_box;
 
 const BLOCKS: u64 = 2_000;
 const BLOCK_SIZE: usize = 4096;
+const WRITE_SET_COLLECT_BLOCKS: [u64; 3] = [64, 256, 1024];
 
 fn block_data() -> Vec<u8> {
     vec![0xA5_u8; BLOCK_SIZE]
@@ -65,6 +68,27 @@ fn request_scope_batched_commit(data: &[u8]) {
     black_box(&store);
 }
 
+fn staged_transaction(blocks: u64, data: &[u8]) -> Transaction {
+    let mut store = MvccStore::new();
+    let mut txn = store.begin();
+    for b in 0..blocks {
+        txn.stage_write(BlockNumber(b), data.to_vec());
+    }
+    txn
+}
+
+fn always_collect_write_set(txn: &Transaction) -> Vec<BlockNumber> {
+    txn.write_set().keys().copied().collect()
+}
+
+fn gated_collect_write_set(txn: &Transaction, lifecycle_present: bool) -> Vec<BlockNumber> {
+    if lifecycle_present {
+        txn.write_set().keys().copied().collect()
+    } else {
+        Vec::new()
+    }
+}
+
 fn bench_commit_batching(c: &mut Criterion) {
     let data = block_data();
 
@@ -86,5 +110,52 @@ fn bench_commit_batching(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(mvcc_commit_batching, bench_commit_batching);
+fn bench_writeset_collect(c: &mut Criterion) {
+    let data = block_data();
+    let mut group = c.benchmark_group("commit_scope_writeset_collect");
+    for blocks in WRITE_SET_COLLECT_BLOCKS {
+        group.throughput(Throughput::Elements(blocks));
+
+        group.bench_with_input(
+            BenchmarkId::new("old_always_collect", blocks),
+            &blocks,
+            |b, &blocks| {
+                b.iter_batched(
+                    || staged_transaction(blocks, &data),
+                    |txn| black_box(always_collect_write_set(&txn)),
+                    BatchSize::SmallInput,
+                );
+            },
+        );
+
+        group.bench_with_input(
+            BenchmarkId::new("new_gated_lifecycle_none", blocks),
+            &blocks,
+            |b, &blocks| {
+                b.iter_batched(
+                    || staged_transaction(blocks, &data),
+                    |txn| {
+                        black_box(gated_collect_write_set(&txn, black_box(false)));
+                    },
+                    BatchSize::SmallInput,
+                );
+            },
+        );
+
+        group.bench_with_input(
+            BenchmarkId::new("new_gated_lifecycle_some", blocks),
+            &blocks,
+            |b, &blocks| {
+                b.iter_batched(
+                    || staged_transaction(blocks, &data),
+                    |txn| black_box(gated_collect_write_set(&txn, black_box(true))),
+                    BatchSize::SmallInput,
+                );
+            },
+        );
+    }
+    group.finish();
+}
+
+criterion_group!(mvcc_commit_batching, bench_commit_batching, bench_writeset_collect);
 criterion_main!(mvcc_commit_batching);
