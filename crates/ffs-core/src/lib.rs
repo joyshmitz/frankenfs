@@ -7834,22 +7834,17 @@ impl OpenFs {
                         compressed.len()
                     ),
                 })?;
-                // Decode the single frame, bounding its output to `ram_bytes` (so an
-                // oversized frame is rejected by the capacity), then zero-pad up to
-                // `ram_bytes`. btrfs sector-rounds a file's TAIL extent's `ram_bytes`
-                // ABOVE the frame's actual decompressed length; the kernel decodes
-                // into a zeroed page buffer and leaves the tail (beyond i_size, never
-                // returned) zero. Matching that is what lets frankenfs read kernel-
-                // written zstd files (bd-pokmq); integrity is the csum tree's job.
-                let mut out =
+                // Decode the single frame, bounding its output to `ram_bytes`. The
+                // tail-extent sector-rounding (frame output < ram_bytes) is handled
+                // by `validate_btrfs_decompressed_len` (shared zero-fill, bd-pokmq).
+                let out =
                     zstd::bulk::decompress(frame, uncompressed_size).map_err(|e| {
                         FfsError::Corruption {
                             block: 0,
                             detail: format!("btrfs zstd decompression failed: {e}"),
                         }
                     })?;
-                out.resize(uncompressed_size, 0_u8);
-                Ok(out)
+                Self::validate_btrfs_decompressed_len("zstd", out, uncompressed_size)
             }
             other => Err(FfsError::UnsupportedFeature(format!(
                 "btrfs compression type {other} not supported"
@@ -7957,20 +7952,29 @@ impl OpenFs {
 
     fn validate_btrfs_decompressed_len(
         codec: &str,
-        out: Vec<u8>,
+        mut out: Vec<u8>,
         expected: usize,
     ) -> Result<Vec<u8>, FfsError> {
-        if out.len() == expected {
-            Ok(out)
-        } else {
-            Err(FfsError::Corruption {
+        if out.len() > expected {
+            // A frame that decodes to MORE than the extent's ram_bytes is genuine
+            // corruption (or a parse error), so reject it.
+            return Err(FfsError::Corruption {
                 block: 0,
                 detail: format!(
-                    "btrfs {codec} decompressed {} bytes but expected {expected}",
+                    "btrfs {codec} decompressed {} bytes, exceeds extent ram_bytes {expected}",
                     out.len()
                 ),
-            })
+            });
         }
+        // btrfs sector-rounds a file's TAIL compressed extent's `ram_bytes` ABOVE the
+        // frame's actual decompressed length; the kernel decodes into a zeroed page
+        // buffer, leaving the tail (which lies beyond i_size and is never returned)
+        // zero. Zero-fill short output up to `ram_bytes` to match — for ALL codecs
+        // (zlib/lzo/zstd). The old strict-equality check broke reading every
+        // kernel-written compressed file whose last extent is sector-padded
+        // (bd-pokmq); integrity of the compressed bytes is the csum tree's job.
+        out.resize(expected, 0_u8);
+        Ok(out)
     }
 
     fn btrfs_decompressed_extent_slice(
@@ -45746,18 +45750,18 @@ mod tests {
     }
 
     #[test]
-    fn btrfs_decompress_zlib_rejects_short_decoded_length() {
-        let compressed = btrfs_test_zlib_compress(b"short zlib payload");
-        let err =
-            OpenFs::btrfs_decompress(&compressed, 1, 4096).expect_err("short zlib output rejects");
-
+    fn btrfs_decompress_zlib_short_frame_zero_fills_to_ram_bytes() {
+        // Same tail-extent sector-rounding as zstd (bd-pokmq): a short zlib frame
+        // zero-fills up to ram_bytes rather than being rejected, matching the kernel.
+        let payload = b"short zlib payload";
+        let compressed = btrfs_test_zlib_compress(payload);
+        let out = OpenFs::btrfs_decompress(&compressed, 1, 4096)
+            .expect("short zlib frame zero-fills to ram_bytes");
+        assert_eq!(out.len(), 4096, "output padded to ram_bytes");
+        assert_eq!(&out[..payload.len()], payload, "frame content preserved at the head");
         assert!(
-            matches!(
-                err,
-                FfsError::Corruption { ref detail, .. }
-                    if detail.contains("btrfs zlib decompressed 18 bytes but expected 4096")
-            ),
-            "unexpected zlib length error: {err:?}"
+            out[payload.len()..].iter().all(|&b| b == 0),
+            "the bytes past the frame are zero-filled"
         );
     }
 

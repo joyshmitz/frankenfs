@@ -364,7 +364,11 @@ exact frame, then one-shot `bulk::decompress`. (2) A file's TAIL extent is secto
 buffer and the tail (beyond i_size) stays zero. Fix: `resize` the decode up to `ram_bytes` with zeros
 (integrity is the csum tree's job, not the decompressed-length check). The old strict "decoded N expected M"
 rejection — encoded in a test — was *wrong* and blocked all kernel zstd files; updated the test to assert
-zero-fill + added an oversized-frame-rejected test. ffs-core 1177 tests pass; the fix is in ffs-core (mine).
+zero-fill + added an oversized-frame-rejected test. **The tail-extent zero-fill was then GENERALIZED in the
+shared `validate_btrfs_decompressed_len` — kernel-written ZLIB and LZO btrfs files had the SAME bug** (cause
+#2; verified: both failed `decompressed 86272 but expected 90112` before, both read correctly after). Now
+all three codecs read kernel files with content sha256 matching the kernel exactly (zlib/lzo/zstd, 1489/634/
+1992 MiB/s warm). ffs-core 1177 tests pass; the fix is in ffs-core (mine).
 Diagnosed via `btrfs-progs` ground truth + a temporary debug probe (reverted) confirming frankenfs reads the
 correct on-disk frame magic — so the defect was purely the decode handling. **The gauntlet found a real
 interop bug AND the fix shipped.**
