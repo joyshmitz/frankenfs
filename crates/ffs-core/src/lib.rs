@@ -12430,6 +12430,10 @@ impl OpenFs {
         // coalesce a contiguous-physical run into ONE vectored op (bd-bov9c).
         let mut segs: Vec<IndirectSeg> = Vec::new();
         let mut bytes_read = 0;
+        // Per-pass memo of the most-recently-read pointer block at each indirect
+        // depth, so a sequential walk reads each indirect block once instead of
+        // once per logical block (bd-vdlyu — the PLAN is resolution-bound).
+        let mut memo: [Option<(u64, Vec<u8>)>; 3] = [None, None, None];
         while bytes_read < to_read {
             let current_offset = offset + bytes_read as u64;
             let logical_block =
@@ -12441,13 +12445,17 @@ impl OpenFs {
             let remaining = to_read - bytes_read;
 
             if offset_in_block == 0 && remaining >= bs_usize {
-                if let Some(phys0) = self.resolve_indirect_block(cx, scope, inode, logical_block)? {
+                if let Some(phys0) =
+                    self.resolve_indirect_block_memo(cx, scope, inode, logical_block, &mut memo)?
+                {
                     let mut run_len: u32 = 1;
                     while ((run_len as usize) + 1) * bs_usize <= remaining {
                         let Some(next_lb) = logical_block.checked_add(run_len) else {
                             break;
                         };
-                        match self.resolve_indirect_block(cx, scope, inode, next_lb)? {
+                        match self
+                            .resolve_indirect_block_memo(cx, scope, inode, next_lb, &mut memo)?
+                        {
                             Some(p) if p == phys0 + u64::from(run_len) => run_len += 1,
                             _ => break,
                         }
@@ -12469,7 +12477,7 @@ impl OpenFs {
             // Partial head/tail (sub-block).
             let chunk_size = (bs_usize - offset_in_block).min(remaining);
             if let Some(phys_block) =
-                self.resolve_indirect_block(cx, scope, inode, logical_block)?
+                self.resolve_indirect_block_memo(cx, scope, inode, logical_block, &mut memo)?
             {
                 segs.push(IndirectSeg::Partial {
                     phys: phys_block,
@@ -12612,6 +12620,135 @@ impl OpenFs {
         }
         let idx3 = (lb_triple % ptrs_per_block) as usize;
         let phys = self.read_indirect_ptr(cx, scope, ind_block, idx3)?;
+        Ok(if phys == 0 { None } else { Some(phys) })
+    }
+
+    /// Read a u32 indirect pointer at `idx` of block `phys`, memoizing the
+    /// whole pointer block at indirect `depth` (0 = final pointer block,
+    /// 1 = double-indirect mid block, 2 = triple-indirect root block).
+    ///
+    /// `resolve_indirect_block` does ONE `read_block` (device-cache lookup) per
+    /// pointer read, so a sequential PLAN pass re-reads the SAME indirect block
+    /// for up to `ptrs_per_block` consecutive logical blocks — ~15k cache
+    /// lookups dominate a 32 MiB cold indirect read (bd-vdlyu: the read is
+    /// resolution-bound, not I/O-bound; a chunk-size sweep over the parallel
+    /// data reads was flat). Sequential access touches each pointer block once
+    /// per `ptrs_per_block` (depth 0), `ptrs_per_block²` (depth 1) or
+    /// `ptrs_per_block³` (depth 2) blocks, so a 1-deep memo per depth collapses
+    /// the redundant lookups to ~one read per indirect block. Byte-identical to
+    /// `read_indirect_ptr`: same block bytes, same little-endian parse, same
+    /// out-of-range-yields-0 rule; the PLAN holds a fixed scope/snapshot so the
+    /// memoized bytes cannot go stale mid-pass.
+    fn read_indirect_ptr_memo(
+        &self,
+        cx: &Cx,
+        scope: &RequestScope,
+        phys: u64,
+        idx: usize,
+        depth: usize,
+        memo: &mut [Option<(u64, Vec<u8>)>; 3],
+    ) -> Result<u64, FfsError> {
+        let slot = &mut memo[depth];
+        if slot.as_ref().map(|(p, _)| *p) != Some(phys) {
+            let bytes = self.read_block_with_scope(cx, scope, BlockNumber(phys))?;
+            *slot = Some((phys, bytes));
+        }
+        let data = &slot.as_ref().expect("slot populated above").1;
+        let off = idx * 4;
+        Ok(if off + 4 <= data.len() {
+            u64::from(u32::from_le_bytes([
+                data[off],
+                data[off + 1],
+                data[off + 2],
+                data[off + 3],
+            ]))
+        } else {
+            0
+        })
+    }
+
+    /// `resolve_indirect_block` with a per-PLAN-pass memo (see
+    /// `read_indirect_ptr_memo`). Identical result to `resolve_indirect_block`.
+    fn resolve_indirect_block_memo(
+        &self,
+        cx: &Cx,
+        scope: &RequestScope,
+        inode: &Ext4Inode,
+        logical_block: u32,
+        memo: &mut [Option<(u64, Vec<u8>)>; 3],
+    ) -> Result<Option<u64>, FfsError> {
+        let bs = self.block_size();
+        let ptrs_per_block = u64::from(bs) / 4;
+
+        let raw = &inode.extent_bytes;
+        let read_ptr = |idx: usize| -> u64 {
+            let off = idx * 4;
+            if off + 4 <= raw.len() {
+                u64::from(u32::from_le_bytes([
+                    raw[off],
+                    raw[off + 1],
+                    raw[off + 2],
+                    raw[off + 3],
+                ]))
+            } else {
+                0
+            }
+        };
+
+        let lb = u64::from(logical_block);
+
+        if lb < 12 {
+            let phys = read_ptr(lb as usize);
+            return Ok(if phys == 0 { None } else { Some(phys) });
+        }
+
+        // Single indirect: i_block[12] -> final pointer block (depth 0).
+        let lb_indirect = lb - 12;
+        if lb_indirect < ptrs_per_block {
+            let ind_block = read_ptr(12);
+            if ind_block == 0 {
+                return Ok(None);
+            }
+            let phys =
+                self.read_indirect_ptr_memo(cx, scope, ind_block, lb_indirect as usize, 0, memo)?;
+            return Ok(if phys == 0 { None } else { Some(phys) });
+        }
+
+        // Double indirect: i_block[13] -> mid block (depth 1) -> final (depth 0).
+        let lb_dind = lb_indirect - ptrs_per_block;
+        if lb_dind < ptrs_per_block * ptrs_per_block {
+            let dind_block = read_ptr(13);
+            if dind_block == 0 {
+                return Ok(None);
+            }
+            let idx1 = (lb_dind / ptrs_per_block) as usize;
+            let ind_block = self.read_indirect_ptr_memo(cx, scope, dind_block, idx1, 1, memo)?;
+            if ind_block == 0 {
+                return Ok(None);
+            }
+            let idx2 = (lb_dind % ptrs_per_block) as usize;
+            let phys = self.read_indirect_ptr_memo(cx, scope, ind_block, idx2, 0, memo)?;
+            return Ok(if phys == 0 { None } else { Some(phys) });
+        }
+
+        // Triple indirect: i_block[14] -> root (depth 2) -> mid (depth 1) -> final (depth 0).
+        let lb_triple = lb_dind - ptrs_per_block * ptrs_per_block;
+        let tind_block = read_ptr(14);
+        if tind_block == 0 {
+            return Ok(None);
+        }
+        let idx1 = (lb_triple / (ptrs_per_block * ptrs_per_block)) as usize;
+        let dind_block = self.read_indirect_ptr_memo(cx, scope, tind_block, idx1, 2, memo)?;
+        if dind_block == 0 {
+            return Ok(None);
+        }
+        let idx2 = ((lb_triple / ptrs_per_block) % ptrs_per_block) as usize;
+        let ind_block = self.read_indirect_ptr_memo(cx, scope, dind_block, idx2, 1, memo)?;
+        if ind_block == 0 {
+            return Ok(None);
+        }
+        let idx3 = (lb_triple % ptrs_per_block) as usize;
+        let phys = self.read_indirect_ptr_memo(cx, scope, ind_block, idx3, 0, memo)?;
         Ok(if phys == 0 { None } else { Some(phys) })
     }
 
