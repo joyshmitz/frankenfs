@@ -131,11 +131,29 @@ I built `ffs-cli` (release) and attempted a real wall-clock head-to-head on the 
    present and `user_allow_other` set in `/etc/fuse.conf`. The rch worker sandbox does not permit FUSE
    mounts (no CAP_SYS_ADMIN / FUSE-connection for mounting in the headless session).
 
-**Conclusion:** the wall-clock vs-kernel comparison is blocked by the **execution environment** (can't FUSE-
-mount frankenfs here), NOT by frankenfs. The kernel ext4 read baseline is captured (~1.5 GB/s cold). A true
-vs-kernel number needs a host with FUSE-mount capability (CAP_SYS_ADMIN); design + kernel baseline are
-recorded here for that follow-up. The 25 A/B lever measurements above remain the measured proof that each
-optimization delivers its intended speedup on its modeled workload.
+**FUSE path blocked** by the sandbox (above). So I added a `ffs-cli read <image> <path>` subcommand
+(in-process read engine via `OpenFs::open` + `resolve_path` + `read_file`, NO FUSE) and ran the head-to-head
+that way:
+
+### ⭐⭐ MEASURED HEAD-TO-HEAD vs kernel ext4 (no-FUSE read engine)
+Real 512MiB ext4 image (`mke2fs`), 200MiB file of **/dev/urandom** (no zero/sparse short-circuit),
+cold cache (`drop_caches=3`) on both sides, 200MiB verified read by frankenfs (209,715,200 bytes):
+
+| Reader | Throughput | Time (200MiB) |
+|--------|-----------|---------------|
+| **kernel ext4** (loop mount, `cat`) | **1508 MB/s** | 0.133 s |
+| **frankenfs read engine** (`ffs-cli read`, userspace, no FUSE) | **733 MB/s** | 0.273 s |
+| **ratio** | — | **2.05x slower (frankenfs ≈ 0.49× kernel throughput)** |
+
+**Honest read:** frankenfs's userspace ext4 read engine is **~2x slower than the in-kernel ext4 driver**
+on cold sequential read — a sensible result for a userspace port (the kernel has in-kernel ext4 +
+readahead + zero-copy page cache; frankenfs parses extents and `pread`s blocks from the image fd into a
+materialized `Vec` in userspace). This is the read ENGINE only; a real FUSE-mounted deployment would add
+FUSE syscall overhead on top (so ≥2x). Caveats: single cold run (variance not characterized); `read_file`
+materializes the whole file (kernel `cat` streams); all-zeros files are NOT used (they let frankenfs
+short-circuit zero extents — measured a misleading 6.6× "win", corrected to random data). The 25 A/B lever
+measurements remain the proof that each optimization improves frankenfs's own read path — which is where
+the ~2x gap to the kernel must keep closing.
 
 ## Measurement caveat (honest)
 These ratios are the **lever's own A/B** (new shape vs old shape, same process), NOT head-to-head
