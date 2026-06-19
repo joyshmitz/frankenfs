@@ -330,8 +330,20 @@ same userspace zero-copy/sequential tax seen on warm sequential read. frankenfs 
 parallel kernel pipeline (`xargs -P16 cat`, 5.5×) but that is a process-spawn + seek-thrash strawman, not a
 real result. **The rule across all fixtures: frankenfs WINS where access is scattered / parallel (metadata
 walk 3–5×, fragmented read 1.4×) and LOSES ~2× where it is contiguous-sequential (bulk data read, warm
-read).** The `--read-data` tool is retained for a future *fragmented*-data head-to-head (where the
-parallel-read overlap should flip this, as it did for fragmented metadata and the 108-extent file read).
+read).**
+
+**Refinement — the fragmented-data win needs LARGE files, not many small ones (cc 2026-06-19).** Tested the
+"does fragmentation flip the bulk-read loss?" hypothesis with a deliberately fragmented fixture (Python
+fsync-per-4 KiB-block + interleaved spacers → `filefrag` confirms **17 extents** on each 128 KiB data file).
+Cold, all files: kernel `tar` 35–41 ms vs frankenfs `--read-data --parallel` 54–58 ms = **frankenfs ~1.4×
+SLOWER**. Fragmentation did NOT flip it — because the fixture is 1,980 *tiny* files (60 fragmented data +
+1,920 one-block spacers), so frankenfs's **per-file overhead** (inode parse + getattr + read-setup + MVCC ×
+1,980) dominates the wall time, not the per-file extent layout. This pinpoints the real loss driver for
+many-small-files reads: it is **per-file fixed cost**, not contiguity — distinct from the *single-large*
+fragmented file (108 extents / 150 MiB) where extent-parallelism dominates and frankenfs wins 1.4×. So the
+boundary is two-dimensional: frankenfs wins when (a) per-item I/O is parallelizable AND (b) the per-item
+payload is large enough that I/O-overlap outweighs the userspace per-item setup cost. Many tiny files fail
+(b) regardless of fragmentation; a large fragmented file satisfies both.
 
 ### Sequential (contiguous): cold variance (3 runs) + warm (engine-overhead isolation)
 | Workload | kernel ext4 | frankenfs engine | ratio |
