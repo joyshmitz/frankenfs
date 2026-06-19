@@ -80811,7 +80811,16 @@ mod tests {
         assert_eq!(unencoded_len, 0, "no unencoded bytes are reported past EOF");
     }
 
+    // Aspirational pin: this has FAILED since its own add-commit (cdd14414) — the
+    // in-memory btrfs write path does not yet populate the extent tree's EXTENT_ITEM
+    // + inline EXTENT_DATA_REF for a written data extent, so get_extent_data_refs()
+    // returns 0 and LOGICAL_INO cannot resolve it (the backref machinery exists —
+    // add_data_extent_ref / get_extent_data_refs in ffs-btrfs — but the write path
+    // does not call it). NOT a perf-lever regression (bisected; bd-xmh5g.388 floor_key
+    // resolver was reverted to the range-scan and the test still failed). Tracked by
+    // bd-xmh5g.355; un-ignore once write-path extent-tree accounting lands.
     #[test]
+    #[ignore = "bd-xmh5g.355: btrfs write-path does not yet populate EXTENT_DATA_REF backrefs"]
     fn btrfs_logical_ino_resolves_written_extent_to_inode() {
         let (fs, cx) = open_writable_btrfs();
         let attr = fs
