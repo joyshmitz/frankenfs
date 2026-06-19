@@ -642,6 +642,18 @@ enum Command {
         #[arg(long)]
         discard: bool,
     },
+    /// Recursively walk every directory and stat every entry (no FUSE).
+    ///
+    /// Equivalent to `find <mnt> | xargs stat` — a metadata-heavy workload
+    /// (readdir each directory + getattr each entry) for a no-FUSE head-to-head
+    /// vs the kernel filesystem on cold `ls -lR` / `find` / stat workloads.
+    Walk {
+        /// Path to the filesystem image.
+        image: PathBuf,
+        /// Skip the per-entry getattr (readdir-only walk).
+        #[arg(long)]
+        no_stat: bool,
+    },
     /// Show MVCC and EBR version statistics for a filesystem image.
     MvccStats {
         /// Path to the filesystem image.
@@ -995,6 +1007,7 @@ impl Command {
         match self {
             Self::Inspect { .. } => "inspect",
             Self::Read { .. } => "read",
+            Self::Walk { .. } => "walk",
             Self::MvccStats { .. } => "mvcc-stats",
             Self::Info { .. } => "info",
             Self::Dump { .. } => "dump",
@@ -1781,6 +1794,7 @@ fn run() -> Result<()> {
             path,
             discard,
         } => read_file_cmd(&image, &path, discard),
+        Command::Walk { image, no_stat } => walk_cmd(&image, no_stat),
         Command::MvccStats { image, json } => mvcc_stats_cmd(&image, json),
         Command::Info {
             image,
@@ -2190,6 +2204,85 @@ fn read_file_cmd(path: &PathBuf, file_path: &str, discard: bool) -> Result<()> {
     }
     let _ = open_fs.end_request_scope(&cx, RequestOp::Read, scope);
     eprintln!("read {total} bytes from {file_path}");
+    Ok(())
+}
+
+/// Recursively walk every directory from root, statting each entry — the no-FUSE
+/// `find | xargs stat` analogue. Exercises the cold metadata path (readdir +
+/// per-inode getattr → inode-table block reads + inode parse) so it can be raced
+/// head-to-head against the kernel filesystem on `ls -lR` / `find` workloads.
+fn walk_cmd(path: &PathBuf, no_stat: bool) -> Result<()> {
+    let cx = cli_cx();
+    let open_fs = OpenFs::open(&cx, path)
+        .with_context(|| format!("failed to open image: {}", path.display()))?;
+
+    // Resolve the root inode through a short read scope; readdir/getattr below
+    // are self-scoping (with_latest_scope), so no long-lived scope is held.
+    let root_ino = {
+        let scope = open_fs
+            .begin_request_scope(&cx, RequestOp::Read)
+            .with_context(|| "failed to begin read scope".to_string())?;
+        let (ino, _inode) = open_fs
+            .resolve_path(&cx, &scope, "/")
+            .with_context(|| "failed to resolve root directory".to_string())?;
+        let _ = open_fs.end_request_scope(&cx, RequestOp::Read, scope);
+        ino
+    };
+
+    let mut stack = vec![root_ino];
+    let mut dirs: u64 = 1; // count root
+    let mut files: u64 = 0;
+    let mut stats: u64 = 0;
+    let started = Instant::now();
+    while let Some(ino) = stack.pop() {
+        // readdir is paginated: keep advancing the continuation offset until a
+        // page comes back empty, so directories larger than one page are walked
+        // in full (the offset cookie is the entry's `offset` field).
+        let mut next_off: u64 = 0;
+        loop {
+            let off_in = next_off;
+            let entries = open_fs
+                .readdir(&cx, ino, off_in)
+                .with_context(|| format!("failed to readdir inode {}", ino.0))?;
+            if entries.is_empty() {
+                break;
+            }
+            for entry in &entries {
+                next_off = entry.offset;
+                if entry.name == b"." || entry.name == b".." {
+                    continue;
+                }
+                if !no_stat {
+                    let _attr = open_fs
+                        .getattr(&cx, entry.ino)
+                        .with_context(|| format!("failed to getattr inode {}", entry.ino.0))?;
+                    stats += 1;
+                }
+                if format!("{:?}", entry.kind) == "Directory" {
+                    dirs += 1;
+                    stack.push(entry.ino);
+                } else {
+                    files += 1;
+                }
+            }
+            // No-progress guard: if the continuation offset did not advance past
+            // the offset we passed in, stop rather than re-reading the same page.
+            if next_off <= off_in {
+                break;
+            }
+        }
+    }
+    let elapsed = started.elapsed();
+    let total = dirs + files;
+    let per_entry_us = if total > 0 {
+        (elapsed.as_secs_f64() * 1e6) / (total as f64)
+    } else {
+        0.0
+    };
+    eprintln!(
+        "walked {dirs} dirs + {files} files ({total} entries, {stats} stats) in {elapsed:?} \
+         ({per_entry_us:.2} us/entry)"
+    );
     Ok(())
 }
 
