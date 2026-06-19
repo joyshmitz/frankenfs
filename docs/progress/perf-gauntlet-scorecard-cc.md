@@ -157,6 +157,12 @@ a large run into 1 MiB block-aligned chunks read in parallel (rayon, disjoint `s
 | seq cold run 3 | ffs 698 (2.4× slower) | **ffs 1901 MB/s** (kernel 1667) | **0.87× → ffs 1.15× FASTER** ✅ |
 | seq warm | ffs 965 (6.5× slower) | **ffs 2985 MB/s** (kernel 6954) | 2.32× slower (was 6.5×; ~3× better) |
 
+**Chunk-size tuned (rch sweep, 200MiB):** cold is flat across 64–4096-block chunks (~1900 MB/s, disk-bound,
+all beat the kernel); **warm rises with larger chunks** (2747 → 3124 MB/s from 64 → 4096 blocks — fewer
+chunks = less per-read overhead). Default tuned to **4096 blocks (16 MiB)**; `FFS_READ_CHUNK_BLOCKS` env
+override (OnceLock) for further tuning. Final 3-run verify at 4096: cold ffs 1911–1953 vs kernel 1581–1695 =
+**0.80–0.87× (ffs 1.15–1.25× FASTER)**; warm ffs 2689 vs kernel 6209 = 2.30× slower (warm noisy 2.7–3.1 GB/s).
+
 **KEPT — a domination win.** Cold sequential went from **2.4× slower to 1.16× FASTER than the kernel**
 (~2.7× frankenfs speedup, 695→1900 MB/s); warm improved ~3× (still loses warm = userspace copy overhead).
 Combined with the fragmented win, **frankenfs now beats kernel ext4 on both cold sequential AND fragmented
