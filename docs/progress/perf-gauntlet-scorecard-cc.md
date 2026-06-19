@@ -113,7 +113,7 @@ store-level micro-benches, and is where the dead-ends cluster.
 
 | Bead/area | Bench | Measured | Verdict |
 |-----------|-------|----------|---------|
-| ffs-alloc broadword (bd-xmh5g.381) | find_contiguous_ab (word vs byte scan) | **4.93x** | ✅ WIN |
+| ffs-alloc broadword (bd-xmh5g.381) | find_contiguous_ab (old bit scan vs broadword zero-run) | **8.72x** on `hz2`: `20.486 us` vs `2.3492 us` | ✅ WIN |
 | ffs-alloc broadword | find_free_full_scan (word vs byte) | **7.48x** | ✅ WIN |
 | ffs-alloc broadword | select1_in_block (broadword vs bit-scan) | **4.60x** | ✅ WIN |
 | ffs-alloc broadword | select0_in_block (broadword vs bit-scan) | **4.40x** | ✅ WIN |

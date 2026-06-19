@@ -46,7 +46,7 @@ fn make_fragmented_bitmap() -> Vec<u8> {
     pattern.into_iter().cycle().take(4096).collect()
 }
 
-fn copy_bitmap_for_mutation_old(buf: BlockBuf) -> Vec<u8> {
+fn copy_bitmap_for_mutation_old(buf: &BlockBuf) -> Vec<u8> {
     buf.as_slice().to_vec()
 }
 
@@ -57,7 +57,7 @@ fn move_bitmap_for_mutation(buf: BlockBuf) -> Vec<u8> {
 fn bench_bitmap_owned_move(c: &mut Criterion) {
     let bm = make_fragmented_bitmap();
     debug_assert_eq!(
-        copy_bitmap_for_mutation_old(BlockBuf::new(bm.clone())),
+        copy_bitmap_for_mutation_old(&BlockBuf::new(bm.clone())),
         move_bitmap_for_mutation(BlockBuf::new(bm.clone())),
         "copy and move paths must expose identical mutable bitmap bytes"
     );
@@ -66,7 +66,7 @@ fn bench_bitmap_owned_move(c: &mut Criterion) {
     group.bench_function("old_copy_to_vec_4k", |b| {
         b.iter_batched(
             || BlockBuf::new(bm.clone()),
-            |buf| black_box(copy_bitmap_for_mutation_old(black_box(buf))),
+            |buf| black_box(copy_bitmap_for_mutation_old(black_box(&buf))),
             BatchSize::SmallInput,
         );
     });
