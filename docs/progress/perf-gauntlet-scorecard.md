@@ -214,3 +214,73 @@ CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-b \
 
 cargo fmt -p ffs-btrfs --check
 ```
+
+## `bd-f759f` Addendum
+
+Date: 2026-06-19
+Agent: BlackThrush (`cod-b`)
+Scope: `ffs-btrfs` code-first backlog row `bd-f759f`
+Code-first implementation commit: `c7b28426`
+Commit under measurement: `44e41db2`
+RCH Criterion worker: `ovh-a`
+Requested target dir: `/data/projects/.rch-targets/frankenfs-cod-b`
+Remote target dir used by RCH:
+`.rch-target-ovh-a-pool-42ea7743fa151ef0fd4b694270dc5239`
+
+### Verdict
+
+This row is release-ready as a measured Rust-internal keep. The production
+capacity-sized `HashSet` visited set is materially faster than the old
+`BTreeSet` visited membership model on the existing btrfs metadata writeback DAG
+scheduler benchmark, while the old-model oracle and WB-I1 prefix checks preserve
+the deterministic flush-order contract. No revert was applied.
+
+### Scorecard
+
+| Gate | Result |
+| --- | --- |
+| Code-first backlog rows examined in this addendum | 1 |
+| RCH Criterion rows completed | 1 / 1 |
+| Same-worker evidence | Yes, `ovh-a` for both A/B arms in one Criterion run |
+| Direct ext4/btrfs-kernel ratios | 0 / 1 direct; no valid kernel comparator exists for this Rust-internal `WriteDependencyDag` visited-set membership primitive |
+| Production levers kept | 1 |
+| Production levers rejected/reverted | 0 |
+| Conformance/build guard after keep | `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-b rch exec -- cargo check -p ffs-btrfs --bench writeback_dag_order` passed on `hz1`; `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-b rch exec -- cargo test -p ffs-btrfs writeback -- --nocapture` passed on `hz2` with 37 passed / 0 failed; local `cargo fmt -p ffs-btrfs --check` passed |
+| Release-readiness score for perf-superiority claims | 60 / 100: decisive same-worker Rust-internal keep, exact old-model order guard, but no valid direct ext4/btrfs-kernel comparator for the primitive |
+| Release-readiness score for this row's hygiene | 98 / 100: A/B benchmark completed, ratio ledgered, conformance/check/fmt passed, production kept without broadening the change |
+
+### Measured Rows
+
+| Bead | Workload | Old `BTreeSet` | New `HashSet` | Ratio | Verdict |
+| --- | --- | --- | --- | --- | --- |
+| `bd-f759f` | Reverse-topological writeback DAG scheduling | `18.969 us` | `13.220 us` | `1.435x` old/new; `0.697x` new/old latency | Keep: production `HashSet` is `30.3%` lower latency |
+
+### Kernel Reference Coverage
+
+No direct ext4/btrfs-kernel comparator is valid for this row. The lever only
+changes the in-memory membership set used by FrankenFS
+`WriteDependencyDag::reverse_topological_order`; Linux btrfs does not expose an
+equivalent timed primitive. A whole-filesystem btrfs writeback benchmark would
+include VFS, page-cache, allocator, checksum, journal, and device latency, and
+would not isolate the visited-set membership choice.
+
+The prior broad vs-kernel mount/read artifacts remain environment context only
+for this row. They are not evidence for or against this isolated scheduler
+membership lever.
+
+### Commands
+
+```bash
+CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-b \
+  rch exec -- cargo bench --profile release-perf -p ffs-btrfs \
+  --bench writeback_dag_order -- \
+  writeback_dag_order_hashset_ab
+
+CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-b \
+  rch exec -- cargo check -p ffs-btrfs --bench writeback_dag_order
+
+CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-b \
+  rch exec -- cargo test -p ffs-btrfs writeback -- --nocapture
+
+cargo fmt -p ffs-btrfs --check
+```
