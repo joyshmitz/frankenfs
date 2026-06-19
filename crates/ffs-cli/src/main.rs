@@ -658,6 +658,11 @@ enum Command {
         /// threads. Overlaps cold per-directory metadata reads across threads.
         #[arg(long)]
         parallel: bool,
+        /// Also read each regular file's full data (the `grep -r` / `tar` /
+        /// build-source-read workload), reporting total bytes. Combine with
+        /// `--parallel` to overlap the cold data reads across threads.
+        #[arg(long)]
+        read_data: bool,
     },
     /// Show MVCC and EBR version statistics for a filesystem image.
     MvccStats {
@@ -1803,7 +1808,8 @@ fn run() -> Result<()> {
             image,
             no_stat,
             parallel,
-        } => walk_cmd(&image, no_stat, parallel),
+            read_data,
+        } => walk_cmd(&image, no_stat, parallel, read_data),
         Command::MvccStats { image, json } => mvcc_stats_cmd(&image, json),
         Command::Info {
             image,
@@ -2222,17 +2228,28 @@ struct DirWalk {
     files: u64,
     dirs: u64,
     stats: u64,
+    bytes: u64,
     subdirs: Vec<InodeNumber>,
 }
 
 /// Walk a single directory: paginated `readdir` (advancing the continuation
 /// offset cookie until a page comes back empty, with a no-progress guard) plus a
 /// per-entry `getattr` unless `no_stat`. Returns the tally and child dirs.
-fn walk_one_dir(open_fs: &OpenFs, cx: &Cx, ino: InodeNumber, no_stat: bool) -> Result<DirWalk> {
+fn walk_one_dir(
+    open_fs: &OpenFs,
+    cx: &Cx,
+    ino: InodeNumber,
+    no_stat: bool,
+    read_data: bool,
+) -> Result<DirWalk> {
+    // 1 MiB read chunk for the --read-data path (the chunked-parallel read
+    // engine still parallelizes within each chunk internally).
+    const READ_CHUNK: u32 = 1024 * 1024;
     let mut out = DirWalk {
         files: 0,
         dirs: 0,
         stats: 0,
+        bytes: 0,
         subdirs: Vec::new(),
     };
     let mut next_off: u64 = 0;
@@ -2249,13 +2266,33 @@ fn walk_one_dir(open_fs: &OpenFs, cx: &Cx, ino: InodeNumber, no_stat: bool) -> R
             if entry.name == b"." || entry.name == b".." {
                 continue;
             }
+            let is_dir = format!("{:?}", entry.kind) == "Directory";
+            let is_file = format!("{:?}", entry.kind) == "RegularFile";
             if !no_stat {
                 let _attr = open_fs
                     .getattr(cx, entry.ino)
                     .with_context(|| format!("failed to getattr inode {}", entry.ino.0))?;
                 out.stats += 1;
             }
-            if format!("{:?}", entry.kind) == "Directory" {
+            if read_data && is_file {
+                // Stream the file's bytes through the read engine (data is
+                // discarded; only the byte count is kept).
+                let mut off: u64 = 0;
+                loop {
+                    let data = open_fs
+                        .read(cx, entry.ino, off, READ_CHUNK)
+                        .with_context(|| format!("failed to read inode {}", entry.ino.0))?;
+                    if data.is_empty() {
+                        break;
+                    }
+                    out.bytes += data.len() as u64;
+                    off += data.len() as u64;
+                    if (data.len() as u32) < READ_CHUNK {
+                        break;
+                    }
+                }
+            }
+            if is_dir {
                 out.dirs += 1;
                 out.subdirs.push(entry.ino);
             } else {
@@ -2281,7 +2318,7 @@ fn walk_one_dir(open_fs: &OpenFs, cx: &Cx, ino: InodeNumber, no_stat: bool) -> R
 /// its worker threads, so the cold per-directory metadata reads overlap (the
 /// single-threaded walk serializes them and understates frankenfs's throughput).
 #[allow(clippy::too_many_lines)]
-fn walk_cmd(path: &PathBuf, no_stat: bool, parallel: bool) -> Result<()> {
+fn walk_cmd(path: &PathBuf, no_stat: bool, parallel: bool, read_data: bool) -> Result<()> {
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -2305,6 +2342,7 @@ fn walk_cmd(path: &PathBuf, no_stat: bool, parallel: bool) -> Result<()> {
     let dirs: u64;
     let files: u64;
     let stats: u64;
+    let bytes: u64;
     let mode: String;
     let started = Instant::now();
     if parallel {
@@ -2315,6 +2353,7 @@ fn walk_cmd(path: &PathBuf, no_stat: bool, parallel: bool) -> Result<()> {
         let a_dirs = AtomicU64::new(1); // count root
         let a_files = AtomicU64::new(0);
         let a_stats = AtomicU64::new(0);
+        let a_bytes = AtomicU64::new(0);
         let first_err: Mutex<Option<anyhow::Error>> = Mutex::new(None);
         // Shared references captured by-value (Copy) into each `move` worker
         // closure, so the closures may own `chunk` without borrowing locals.
@@ -2324,6 +2363,7 @@ fn walk_cmd(path: &PathBuf, no_stat: bool, parallel: bool) -> Result<()> {
         let files_ctr = &a_files;
         let dirs_ctr = &a_dirs;
         let stats_ctr = &a_stats;
+        let bytes_ctr = &a_bytes;
         let mut level = vec![root_ino];
         while !level.is_empty() {
             let next: Mutex<Vec<InodeNumber>> = Mutex::new(Vec::new());
@@ -2335,13 +2375,15 @@ fn walk_cmd(path: &PathBuf, no_stat: bool, parallel: bool) -> Result<()> {
                         let mut local_files = 0_u64;
                         let mut local_dirs = 0_u64;
                         let mut local_stats = 0_u64;
+                        let mut local_bytes = 0_u64;
                         let mut lsub: Vec<InodeNumber> = Vec::new();
                         for &ino in chunk {
-                            match walk_one_dir(fs_ref, cx_ref, ino, no_stat) {
+                            match walk_one_dir(fs_ref, cx_ref, ino, no_stat, read_data) {
                                 Ok(r) => {
                                     local_files += r.files;
                                     local_dirs += r.dirs;
                                     local_stats += r.stats;
+                                    local_bytes += r.bytes;
                                     lsub.extend(r.subdirs);
                                 }
                                 Err(e) => {
@@ -2355,6 +2397,7 @@ fn walk_cmd(path: &PathBuf, no_stat: bool, parallel: bool) -> Result<()> {
                         files_ctr.fetch_add(local_files, Ordering::Relaxed);
                         dirs_ctr.fetch_add(local_dirs, Ordering::Relaxed);
                         stats_ctr.fetch_add(local_stats, Ordering::Relaxed);
+                        bytes_ctr.fetch_add(local_bytes, Ordering::Relaxed);
                         next_ref.lock().unwrap().extend(lsub);
                     });
                 }
@@ -2368,22 +2411,26 @@ fn walk_cmd(path: &PathBuf, no_stat: bool, parallel: bool) -> Result<()> {
         files = a_files.load(Ordering::Relaxed);
         dirs = a_dirs.load(Ordering::Relaxed);
         stats = a_stats.load(Ordering::Relaxed);
+        bytes = a_bytes.load(Ordering::Relaxed);
     } else {
         mode = "serial".to_owned();
         let mut d: u64 = 1; // count root
         let mut f: u64 = 0;
         let mut s: u64 = 0;
+        let mut b: u64 = 0;
         let mut stack = vec![root_ino];
         while let Some(ino) = stack.pop() {
-            let r = walk_one_dir(&open_fs, &cx, ino, no_stat)?;
+            let r = walk_one_dir(&open_fs, &cx, ino, no_stat, read_data)?;
             d += r.dirs;
             f += r.files;
             s += r.stats;
+            b += r.bytes;
             stack.extend(r.subdirs);
         }
         dirs = d;
         files = f;
         stats = s;
+        bytes = b;
     }
     let elapsed = started.elapsed();
     let total = dirs + files;
@@ -2392,9 +2439,15 @@ fn walk_cmd(path: &PathBuf, no_stat: bool, parallel: bool) -> Result<()> {
     } else {
         0.0
     };
+    let mb = bytes as f64 / (1024.0 * 1024.0);
+    let mb_s = if elapsed.as_secs_f64() > 0.0 {
+        mb / elapsed.as_secs_f64()
+    } else {
+        0.0
+    };
     eprintln!(
-        "walked {dirs} dirs + {files} files ({total} entries, {stats} stats) [{mode}] in \
-         {elapsed:?} ({per_entry_us:.2} us/entry)"
+        "walked {dirs} dirs + {files} files ({total} entries, {stats} stats, {bytes} bytes / \
+         {mb:.1} MiB @ {mb_s:.0} MiB/s) [{mode}] in {elapsed:?} ({per_entry_us:.2} us/entry)"
     );
     Ok(())
 }

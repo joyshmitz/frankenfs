@@ -313,6 +313,26 @@ beats the kernel **even including** its per-invocation open+journal-replay (~7 m
   in A) is a real
   cost the kernel amortizes across a long-lived mount.
 
+### COLD bulk DATA read (`grep -r` / `tar`): the boundary — frankenfs LOSES on contiguous data (cc 2026-06-19)
+`ffs walk --read-data --parallel` reads every regular file's bytes (the read-all-files workload: build
+source reads, `grep -r`, backup). Cold over a **250 MiB / 4,000-file** ext4 image (`mke2fs -d`, 64 KiB
+files, contiguous layout), 3 runs:
+
+| side | cold | vs frankenfs |
+|------|------|--------------|
+| kernel `tar -cf /dev/null` (optimal sequential) | 58–60 ms | **frankenfs ~2× SLOWER** |
+| kernel naive `find \| xargs -P16 cat` | 600–630 ms | frankenfs ~5.5× faster |
+| **frankenfs `walk --read-data --parallel`** | 105–118 ms (read 262 144 000 B ✓) | — |
+
+**Honest LOSS, not a win — and it pinpoints the boundary.** On *contiguous* file data, kernel `tar` does a
+single streaming sequential scan with readahead (the kernel's strong suit) and beats frankenfs ~2× — the
+same userspace zero-copy/sequential tax seen on warm sequential read. frankenfs does beat the *naive*
+parallel kernel pipeline (`xargs -P16 cat`, 5.5×) but that is a process-spawn + seek-thrash strawman, not a
+real result. **The rule across all fixtures: frankenfs WINS where access is scattered / parallel (metadata
+walk 3–5×, fragmented read 1.4×) and LOSES ~2× where it is contiguous-sequential (bulk data read, warm
+read).** The `--read-data` tool is retained for a future *fragmented*-data head-to-head (where the
+parallel-read overlap should flip this, as it did for fragmented metadata and the 108-extent file read).
+
 ### Sequential (contiguous): cold variance (3 runs) + warm (engine-overhead isolation)
 | Workload | kernel ext4 | frankenfs engine | ratio |
 |----------|-------------|------------------|-------|
