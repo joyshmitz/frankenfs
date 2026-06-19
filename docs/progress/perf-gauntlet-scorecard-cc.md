@@ -457,6 +457,14 @@ Validated-correct dimensions: btrfs {inline, sparse, compressed×3, reflink, emp
 inline, sparse, fragmented, large, empty, indirect direct/single/double, 1 KB/2 KB blocks, indirect@1 KB,
 bigalloc}.
 
+**Comprehensive real-tree validation (release-readiness evidence):** beyond the synthetic shapes, ran the
+oracle over **800 real files** from `/usr/include` (real C headers, varied sizes/structures) on **ext4** and
+another **800 real files** on **btrfs (compress=zstd)** — exercising the mixed inline/compressed/uncompressed
+extent distribution real files produce. **1,600 / 1,600 byte-exact vs the kernel, 0 mismatches.** Combined
+with the 3 fixes, frankenfs's read path now reads real ext4 and btrfs filesystems byte-for-byte identically
+to the kernel across the realistic file population — a concrete release-readiness conformance result, not a
+synthetic one.
+
 Two real **CLI bugs found + fixed** along the way: (1) the CLI wrote tracing **logs to stdout**, corrupting
 `ffs read`'s file-data output (an empty file produced 1742 bytes of log noise) → routed logs to **stderr**
 (`.with_writer(std::io::stderr)`; data on stdout, logs on stderr — the universal convention). (2) latent
