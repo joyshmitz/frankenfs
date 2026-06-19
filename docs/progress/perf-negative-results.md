@@ -151,3 +151,23 @@ already taken by `.383`/`.392`). Closing the rest needs mmap (`unsafe`, forbidde
 (major structural work). frankenfs's measured win territory is scattered/parallel access (metadata walk
 3–5×, fragmented single-large-file read 1.4×); the 2-D boundary (parallelizable I/O AND large-enough
 per-item payload) is the durable model. Retry only if an `io_uring`/mmap I/O backend is introduced.
+
+### btrfs prefetch-pool fan-out gate — fix verified complete, ext4 sites do NOT share it (cc 2026-06-19)
+
+The 4.3× btrfs metadata fix (`BTRFS_PREFETCH_MIN_CHILDREN`, commit 18fb0e88) is COMPLETE and bounded:
+- **Single dispatch site.** `grep` confirms `btrfs_range_prefetch_pool().install()` appears exactly once
+  (`walk_node_body`), shared by BOTH the `bd-h6p3w` range walker and the `bd-l8r3s` full-tree walker — so
+  the one gate covers every btrfs parallel walk. No sibling site to fix.
+- **Post-fix profile is healthy.** `perf` (2,291 samples) over the fixed walk shows the scheduler thrash
+  GONE (no `update_curr`/`pick_task_fair`/`sched_yield` domination); remaining cost is distributed across
+  legitimate work — `memmove` 4.9%, `_copy_to_iter` 2.8%, `memset` 2.3%, frankenfs b-tree/parse (`0x304c*`
+  cluster ~6–8%), with only minor residual pool `osq_lock` 3.1%. The 1.6× vs kernel btrfs (single dir) is
+  now genuine userspace b-tree-walk-per-getattr + I/O-copy cost, NOT a bug. No glaring further lever.
+- **The ext4 `par_iter` read sites do NOT share the bug — do not "fix" them.** ffs-core's ext4 read/extent
+  par sites (`collect_extents_recursive` child reads ~10499, `read_file_data` jobs ~10953, dir cold-run
+  ~11095, dir block scan ~11204) use the GLOBAL rayon pool via plain `.into_par_iter()` — NOT
+  `dedicated_pool.install()`. Rayon runs a tiny (1-element) `into_par_iter` inline on the current thread, so
+  there is no forced pool entry / worker-wakeup overhead; the ext4 `--read-data` profile showed NO scheduler
+  thrash (it was `_copy_to_iter`/syscall-bound). The btrfs thrash was unique to `install()`-into-a-dedicated-
+  16-thread-pool called thousands of times per recursive walk. Retry a fan-out gate on the ext4 sites only
+  if a profile actually shows scheduler thrash there (it does not today).
