@@ -10057,6 +10057,20 @@ impl OpenFs {
             .checked_add(count_u64)
             .ok_or_else(|| FfsError::Format("block range overflow".to_owned()))?;
 
+        // No-tx scopes (every read request: with_latest_scope sets tx=None) have
+        // no transaction overlay AND skip the snapshot store below (it is only
+        // consulted when tx.is_some()), so the per-block resolution loop would
+        // push `None` for all `count` blocks and fall through to the one ranged
+        // read regardless. Short-circuit straight to it, skipping the
+        // `Vec<Option<Vec<u8>>>` allocation + per-block walk — pure dead work on
+        // the hot warm-read path (32 MiB = 8192 wasted iterations + an 8192-slot
+        // Vec). The device adapter already resolves read-your-writes at the
+        // current snapshot, so this is byte-identical to the loop's fast path.
+        let dev = self.block_device_adapter();
+        if scope.tx.is_none() {
+            return dev.read_contiguous_into(cx, start, dst);
+        }
+
         // Resolve scope overlay blocks (tx-staged first, then snapshot-visible)
         // exactly as read_contiguous_blocks_with_scope does — no device I/O here.
         let mut resolved: Vec<Option<Vec<u8>>> = Vec::with_capacity(count);
@@ -10084,8 +10098,6 @@ impl OpenFs {
                 resolved.push(None);
             }
         }
-
-        let dev = self.block_device_adapter();
 
         // Fast path: no overlay — one ranged device read straight into dst.
         if !any_overlay {
