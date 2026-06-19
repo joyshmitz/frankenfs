@@ -71,6 +71,29 @@ Every read/lookup/free lever — cc's 13 (4.75–70x, 6–53x, 1009x) AND the sw
 before implementing .401/bd-w3hol: write-path optimization needs e2e (WAL+FUSE) measurement, not
 store-level micro-benches, and is where the dead-ends cluster.
 
+### Final batch — bitmap/broadword + read-contiguous (swarm)
+
+| Bead/area | Bench | Measured | Verdict |
+|-----------|-------|----------|---------|
+| ffs-alloc broadword (bd-xmh5g.381) | find_contiguous_ab (word vs byte scan) | **4.93x** | ✅ WIN |
+| ffs-alloc broadword | find_free_full_scan (word vs byte) | **7.48x** | ✅ WIN |
+| ffs-alloc broadword | select1_in_block (broadword vs bit-scan) | **4.60x** | ✅ WIN |
+| ffs-alloc broadword | select0_in_block (broadword vs bit-scan) | **4.40x** | ✅ WIN |
+| ffs-block read (trusted) | read_contiguous_1mib (trusted_vectored vs blocks+copy) | **1.24x** | ✅ modest WIN |
+| ffs-block iovec (bd-xmh5g.397) | read_contiguous_short (smallvec vs Vec iovecs, 16 blk) | **0.95x** | ⚠️ NEUTRAL — stack/smallvec iovec is marginally SLOWER; no benefit at this size (within noise). |
+| ffs-btrfs writeback (bd-xmh5g.400) | writeback_dag_order | — | ⊘ no criterion estimate produced (bench didn't emit parseable output; not measured) |
+| ffs-mvcc WAL | wal_throughput | — | ⊘ no criterion estimate produced (not measured) |
+
+## Final tally (this gauntlet phase)
+**~22 optimizations measured.** Read/lookup/free/bitmap levers: **all wins** (cc's 13 at 4.75–1009x;
+swarm reads .394 112–1297x / .386 9x / .399 40x; broadword bitmap 4.4–7.5x; read-contiguous 1.24x).
+Write-path + micro-levers are where it breaks down: **.401** commit-batch 1.08x (neutral, real cost
+unmeasured), **.404** into_inner **1.4–1.6x REGRESSION** (revert filed bd-z5lrd), **.397** smallvec iovec
+0.95x (neutral), **bd-ucrow** within-noise. Two benches (writeback_dag_order, wal_throughput) emitted no
+parseable criterion output. **Net: every read-side optimization is a real measured win; the only
+losses/neutrals are write-path or micro-levers — and the one outright regression (.404) is flagged for
+revert.**
+
 ## Measurement caveat (honest)
 These ratios are the **lever's own A/B** (new shape vs old shape, same process), NOT head-to-head
 vs the ext4/btrfs *kernel* — the benches do not invoke the kernel filesystem. They prove each
