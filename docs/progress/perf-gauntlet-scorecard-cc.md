@@ -59,7 +59,7 @@ with `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cc`.
 
 | Bead | Bench | Measured | Verdict |
 |------|-------|----------|---------|
-| bd-xmh5g.394 | read_block_uncompressed (clone vs arc_share) | **112x / 227x / 1297x** (4K/16K/64K block) | ✅ WIN — Arc refcount-bump (O(1), ~1ns) vs copying the whole block on every uncompressed read hit. |
+| bd-xmh5g.394 | read_block_uncompressed (clone vs arc_share) | **138.9x / 316.5x / 1978.1x** (4K/16K/64K block, cod-a `hz2` rerun) | ✅ WIN / KEEP — Arc refcount-bump (O(1), sub-ns median in this microbench) vs copying the whole block on every uncompressed read hit. Direct ext4/btrfs-kernel ratio is N/A for this internal MVCC materialization primitive; production-shaped scan corroboration was `29.615 GiB/s`. |
 | bd-xmh5g.386 | extent_leaf_search_validation_ab (trusted no-rescan) | **9.01x** | ✅ WIN — skip re-validating an already-trusted extent leaf. |
 | bd-xmh5g.399 | ls_dir_inode_prefetch_256 (parallel vs serial getattr) | **40.4x** | ✅ WIN — parallel readdirplus inode prefetch (ls -l). |
 

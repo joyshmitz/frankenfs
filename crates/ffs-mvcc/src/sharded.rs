@@ -1026,8 +1026,14 @@ mod tests {
         let seq3 = store.commit(t3).expect("commit 3");
 
         // Pre-prune visibility: D at seq2 (via the Identical), E at seq3.
-        assert_eq!(store.read_visible(block, Snapshot { high: seq2 }), Some(d.clone()));
-        assert_eq!(store.read_visible(block, Snapshot { high: seq3 }), Some(e.clone()));
+        assert_eq!(
+            store.read_visible(block, Snapshot { high: seq2 }),
+            Some(d.clone())
+        );
+        assert_eq!(
+            store.read_visible(block, Snapshot { high: seq3 }),
+            Some(e.clone())
+        );
 
         // Trim everything at or before seq2: the Identical@seq2 becomes the head
         // and is materialized by make_chain_head_full; the older Full is drained.

@@ -4935,7 +4935,11 @@ mod tests {
         // An overlapping pair is rejected.
         assert!(!ranges_are_pairwise_disjoint(&[r(0, 5), r(4, 4)]));
         // Overlap between non-adjacent entries (first and third) is still caught.
-        assert!(!ranges_are_pairwise_disjoint(&[r(0, 100), r(200, 4), r(50, 4)]));
+        assert!(!ranges_are_pairwise_disjoint(&[
+            r(0, 100),
+            r(200, 4),
+            r(50, 4)
+        ]));
         // Empty and single-range inputs are trivially disjoint.
         assert!(ranges_are_pairwise_disjoint(&[]));
         assert!(ranges_are_pairwise_disjoint(&[r(0, 4)]));
@@ -4957,19 +4961,25 @@ mod tests {
         assert_eq!(merged, vec![1, 2, 3, 4, 9, 9, 9, 9]);
 
         // Size mismatch is rejected.
-        assert!(merge_non_overlapping_ranges(&[r(0, 4)], &base, &base[..4], &staged, &proof).is_none());
+        assert!(
+            merge_non_overlapping_ranges(&[r(0, 4)], &base, &base[..4], &staged, &proof).is_none()
+        );
         // Overlapping touched ranges are rejected.
         assert!(
             merge_non_overlapping_ranges(&[r(0, 5), r(4, 4)], &base, &latest, &staged, &proof)
                 .is_none()
         );
         // A range exceeding the block is rejected.
-        assert!(merge_non_overlapping_ranges(&[r(4, 8)], &base, &latest, &staged, &proof).is_none());
+        assert!(
+            merge_non_overlapping_ranges(&[r(4, 8)], &base, &latest, &staged, &proof).is_none()
+        );
 
         // Integrity: staged modified a byte OUTSIDE the declared range -> rejected.
         let mut sneaky = staged.clone();
         sneaky[7] = 42;
-        assert!(merge_non_overlapping_ranges(&[r(0, 4)], &base, &latest, &sneaky, &proof).is_none());
+        assert!(
+            merge_non_overlapping_ranges(&[r(0, 4)], &base, &latest, &sneaky, &proof).is_none()
+        );
 
         // True conflict: latest also modified the declared range -> rejected.
         let mut latest_conflict = base.clone();
@@ -4995,9 +5005,11 @@ mod tests {
         );
 
         // base_len larger than a buffer is rejected.
-        assert!(MergeProof::AppendOnly { base_len: 10 }
-            .merge_bytes(&base, b"abcX", b"abcY")
-            .is_none());
+        assert!(
+            MergeProof::AppendOnly { base_len: 10 }
+                .merge_bytes(&base, b"abcX", b"abcY")
+                .is_none()
+        );
 
         // A modified snapshot prefix (not a pure append) is rejected on either side.
         assert!(proof.merge_bytes(&base, b"Xbc!", b"abcY").is_none());
@@ -5607,14 +5619,17 @@ mod tests {
         }
 
         let snap = store.read().current_snapshot();
-        let stored = {
+        let shared = {
             let guard = store.read();
             let versions = guard.versions.get(&block).expect("block chain");
             let VersionData::Full(shared) = &versions[0].data else {
                 panic!("uncompressed commit should store shared full bytes");
             };
-            BlockBuf::from_shared_aligned(Arc::clone(shared))
+            let shared = Arc::clone(shared);
+            drop(guard);
+            shared
         };
+        let stored = BlockBuf::from_shared_aligned(shared);
 
         let base = MemBlockDevice::new(512, 16);
         let dev = MvccBlockDevice::new(base, Arc::clone(&store), snap);
@@ -9068,7 +9083,10 @@ mod tests {
             .read_visible_block_buf(block, snap)
             .expect("visible block buf");
         assert_eq!(shared.as_slice(), data.as_slice());
-        assert_eq!(store.read_visible(block, snap).unwrap().as_ref(), data.as_slice());
+        assert_eq!(
+            store.read_visible(block, snap).unwrap().as_ref(),
+            data.as_slice()
+        );
 
         // Concurrency: 8 threads share the same Full Arc; every read returns the bytes.
         std::thread::scope(|s| {
@@ -9077,9 +9095,7 @@ mod tests {
                 let data = &data;
                 s.spawn(move || {
                     for _ in 0..20_000 {
-                        let buf = store
-                            .read_visible_block_buf(block, snap)
-                            .expect("visible");
+                        let buf = store.read_visible_block_buf(block, snap).expect("visible");
                         assert_eq!(buf.as_slice(), data.as_slice());
                     }
                 });
@@ -11027,6 +11043,10 @@ mod tests {
         assert!(dangerous_structure.is_none());
     }
 
+    fn one_read_set(block: u64) -> BTreeMap<BlockNumber, CommitSeq> {
+        std::iter::once((BlockNumber(block), CommitSeq(1))).collect()
+    }
+
     #[test]
     fn ssi_incoming_edge_attributes_reader_and_writer_correctly() {
         // The pivot WROTE block 5; the committed record READ block 5. The record's
@@ -11040,7 +11060,7 @@ mod tests {
             commit_seq: CommitSeq(3),
             snapshot: Snapshot { high: CommitSeq(0) },
             write_set: BTreeSet::new(),
-            read_set: [(BlockNumber(5), CommitSeq(1))].into_iter().collect(),
+            read_set: one_read_set(5),
         };
         let edge = ssi_incoming_edge(&pivot, &record).expect("incoming edge on block 5");
         assert_eq!(edge.block, BlockNumber(5));
@@ -11061,7 +11081,7 @@ mod tests {
             commit_seq: CommitSeq(3),
             snapshot: Snapshot { high: CommitSeq(0) },
             write_set: BTreeSet::from([BlockNumber(5)]),
-            read_set: [(BlockNumber(99), CommitSeq(1))].into_iter().collect(),
+            read_set: one_read_set(99),
         };
         let edge = ssi_outgoing_edge(&pivot, &record).expect("outgoing edge on block 5");
         assert_eq!(edge.block, BlockNumber(5));
@@ -11085,7 +11105,7 @@ mod tests {
             commit_seq: CommitSeq(5),
             snapshot: Snapshot { high: CommitSeq(0) },
             write_set: BTreeSet::from([BlockNumber(0)]),
-            read_set: [(BlockNumber(99), CommitSeq(1))].into_iter().collect(),
+            read_set: one_read_set(99),
         };
         assert!(ssi_incoming_edge(&pivot, &outgoing_only).is_none());
         assert!(ssi_outgoing_edge(&pivot, &outgoing_only).is_some());
@@ -11102,7 +11122,7 @@ mod tests {
             commit_seq: CommitSeq(5),
             snapshot: Snapshot { high: CommitSeq(0) },
             write_set: BTreeSet::from([BlockNumber(99)]),
-            read_set: [(BlockNumber(2), CommitSeq(1))].into_iter().collect(),
+            read_set: one_read_set(2),
         };
         assert!(ssi_incoming_edge(&pivot, &incoming_only).is_some());
         assert!(ssi_outgoing_edge(&pivot, &incoming_only).is_none());
@@ -11160,10 +11180,13 @@ mod tests {
             commit_seq: CommitSeq(5),
             snapshot: Snapshot { high: CommitSeq(0) },
             write_set: BTreeSet::from([BlockNumber(0), BlockNumber(1)]),
-            read_set: [(BlockNumber(2), CommitSeq(1))].into_iter().collect(),
+            read_set: one_read_set(2),
         };
         let (checks_performed, dangerous) = detect_ssi_dangerous_structure(&reader, [&record]);
-        assert_eq!(checks_performed, 0, "no records examined for a read-only txn");
+        assert_eq!(
+            checks_performed, 0,
+            "no records examined for a read-only txn"
+        );
         assert!(dangerous.is_none());
     }
 
@@ -11181,7 +11204,7 @@ mod tests {
             commit_seq: CommitSeq(5),
             snapshot: Snapshot { high: CommitSeq(0) },
             write_set: BTreeSet::from([BlockNumber(0)]),
-            read_set: [(BlockNumber(2), CommitSeq(1))].into_iter().collect(),
+            read_set: one_read_set(2),
         };
         // rec2 would also form both edges, but detect must stop before examining it.
         let rec2 = CommittedTxnRecord {
@@ -11189,11 +11212,14 @@ mod tests {
             commit_seq: CommitSeq(6),
             snapshot: Snapshot { high: CommitSeq(0) },
             write_set: BTreeSet::from([BlockNumber(0)]),
-            read_set: [(BlockNumber(2), CommitSeq(1))].into_iter().collect(),
+            read_set: one_read_set(2),
         };
 
         let (checks, dangerous) = detect_ssi_dangerous_structure(&pivot, [&rec1, &rec2]);
-        assert!(dangerous.is_some(), "rec1 alone forms the dangerous structure");
+        assert!(
+            dangerous.is_some(),
+            "rec1 alone forms the dangerous structure"
+        );
         assert_eq!(checks, 1, "detect returns at rec1 without examining rec2");
     }
 
@@ -11209,7 +11235,7 @@ mod tests {
             commit_seq: CommitSeq(5),
             snapshot: Snapshot { high: CommitSeq(0) },
             write_set: BTreeSet::from([BlockNumber(0)]),
-            read_set: [(BlockNumber(99), CommitSeq(1))].into_iter().collect(),
+            read_set: one_read_set(99),
         };
         // Record 2 reads a block the pivot wrote -> only an outgoing edge.
         let rec2 = CommittedTxnRecord {
@@ -11217,20 +11243,12 @@ mod tests {
             commit_seq: CommitSeq(6),
             snapshot: Snapshot { high: CommitSeq(0) },
             write_set: BTreeSet::from([BlockNumber(99)]),
-            read_set: [(BlockNumber(2), CommitSeq(1))].into_iter().collect(),
+            read_set: one_read_set(2),
         };
 
         // Neither record alone is a dangerous structure.
-        assert!(
-            detect_ssi_dangerous_structure(&pivot, [&rec1])
-                .1
-                .is_none()
-        );
-        assert!(
-            detect_ssi_dangerous_structure(&pivot, [&rec2])
-                .1
-                .is_none()
-        );
+        assert!(detect_ssi_dangerous_structure(&pivot, [&rec1]).1.is_none());
+        assert!(detect_ssi_dangerous_structure(&pivot, [&rec2]).1.is_none());
         // Together they form the pivot: incoming from rec1, outgoing from rec2.
         let (checks, dangerous) = detect_ssi_dangerous_structure(&pivot, [&rec1, &rec2]);
         assert_eq!(checks, 2, "both records are examined");

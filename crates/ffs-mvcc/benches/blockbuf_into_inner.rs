@@ -14,9 +14,7 @@
 //! realistic block sizes: the `into_inner` arm is flat (a move) while the copy
 //! arm tracks the byte count. Both arms yield byte-identical results (asserted).
 
-use criterion::{
-    BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main,
-};
+use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use ffs_block::BlockBuf;
 use std::hint::black_box;
 
@@ -29,7 +27,7 @@ fn bench_into_inner(c: &mut Criterion) {
     let probe = make_block(4096);
     assert_eq!(
         BlockBuf::new(probe.clone()).into_inner(),
-        BlockBuf::new(probe.clone()).as_slice().to_vec(),
+        BlockBuf::new(probe).as_slice().to_vec(),
         "into_inner diverged from as_slice().to_vec()"
     );
 

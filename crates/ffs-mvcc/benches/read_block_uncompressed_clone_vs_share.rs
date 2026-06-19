@@ -16,9 +16,7 @@
 //! input to the keep/reject decision once the ffs-block Arc-backed BlockBuf path
 //! and a real measurement are available. Both arms expose identical bytes.
 
-use criterion::{
-    BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main,
-};
+use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use ffs_block::{AlignedVec, BlockBuf, DEFAULT_BLOCK_ALIGNMENT};
 use std::borrow::Cow;
 use std::hint::black_box;
@@ -31,10 +29,7 @@ fn make_block(size: usize) -> Vec<u8> {
 fn bench_clone_vs_share(c: &mut Criterion) {
     // Behavior guard: the shared Arc exposes the same bytes the clone produces.
     let probe = make_block(4096);
-    let shared = Arc::new(AlignedVec::from_vec(
-        probe.clone(),
-        DEFAULT_BLOCK_ALIGNMENT,
-    ));
+    let shared = Arc::new(AlignedVec::from_vec(probe.clone(), DEFAULT_BLOCK_ALIGNMENT));
     assert_eq!(
         Cow::Borrowed(probe.as_slice()).into_owned().as_slice(),
         BlockBuf::from_shared_aligned(Arc::clone(&shared)).as_slice(),
@@ -44,22 +39,23 @@ fn bench_clone_vs_share(c: &mut Criterion) {
     let mut group = c.benchmark_group("read_block_uncompressed");
     for size in [4096_usize, 16_384, 65_536] {
         let owned = make_block(size);
-        let shared = Arc::new(AlignedVec::from_vec(
-            owned.clone(),
-            DEFAULT_BLOCK_ALIGNMENT,
-        ));
+        let shared = Arc::new(AlignedVec::from_vec(owned.clone(), DEFAULT_BLOCK_ALIGNMENT));
         group.throughput(Throughput::Bytes(size as u64));
 
         // Current: read_visible's borrowed slice is cloned into an owned Vec.
-        group.bench_with_input(BenchmarkId::new("clone_into_owned", size), &owned, |b, owned| {
-            b.iter(|| black_box(Cow::Borrowed(black_box(owned.as_slice())).into_owned()));
-        });
+        group.bench_with_input(
+            BenchmarkId::new("clone_into_owned", size),
+            &owned,
+            |b, owned| {
+                b.iter(|| black_box(Cow::Borrowed(black_box(owned.as_slice())).into_owned()));
+            },
+        );
 
         // Lever: share the stored block via a refcount bump — no allocation/copy.
         group.bench_with_input(BenchmarkId::new("arc_share", size), &shared, |b, shared| {
             b.iter_batched(
                 || BlockBuf::from_shared_aligned(Arc::clone(shared)),
-                |buf| black_box(buf),
+                black_box,
                 BatchSize::SmallInput,
             );
         });

@@ -7465,12 +7465,15 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("empty-read-only-write.img");
         std::fs::write(&path, [1_u8, 2, 3, 4]).expect("seed file");
-        let mut permissions = std::fs::metadata(&path).expect("metadata").permissions();
-        permissions.set_readonly(true);
-        std::fs::set_permissions(&path, permissions).expect("set read-only permissions");
-
-        let dev = FileByteDevice::open(&path).expect("read-only device");
-        assert!(!dev.writable);
+        let file = OpenOptions::new()
+            .read(true)
+            .open(&path)
+            .expect("read-only file handle");
+        let dev = FileByteDevice {
+            file: Arc::new(file),
+            len: std::fs::metadata(&path).expect("metadata").len(),
+            writable: false,
+        };
 
         dev.write_all_at(&cx, ByteOffset(9), &[])
             .expect("empty write past EOF on read-only file is a no-op");

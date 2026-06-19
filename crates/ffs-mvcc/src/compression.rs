@@ -394,10 +394,7 @@ mod tests {
 
     #[test]
     fn resolve_full_at_index() {
-        let chain = vec![
-            VersionData::full(vec![0xAA]),
-            VersionData::full(vec![0xBB]),
-        ];
+        let chain = vec![VersionData::full(vec![0xAA]), VersionData::full(vec![0xBB])];
         let result = resolve_data_with(&chain, 1, |d| d);
         assert_eq!(result.as_deref(), Some(&[0xBB][..]));
     }

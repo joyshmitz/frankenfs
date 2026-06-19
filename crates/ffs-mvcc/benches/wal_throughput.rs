@@ -107,6 +107,25 @@ fn bench_wal_commit_throughput(c: &mut Criterion) {
     });
 }
 
+fn setup_ssi_pivot_192reads_32records(block_data: &[u8]) -> (MvccStore, ffs_mvcc::Transaction) {
+    let mut store = MvccStore::new();
+    let mut pivot = store.begin();
+    for r in 0..192_u64 {
+        pivot.record_read(BlockNumber(r), CommitSeq(1));
+    }
+    pivot.stage_write(BlockNumber(1_000_000), block_data.to_vec());
+    for k in 0..32_u64 {
+        let mut w = store.begin();
+        let base = 10_000 + k * 1_000;
+        for r in 0..192_u64 {
+            w.record_read(BlockNumber(base + r), CommitSeq(1));
+        }
+        w.stage_write(BlockNumber(2_000_000 + k), block_data.to_vec());
+        store.commit_ssi(w).expect("seed concurrent record");
+    }
+    (store, pivot)
+}
+
 /// Compare FCW vs SSI commit cost to verify read-set tracking overhead.
 fn bench_ssi_overhead(c: &mut Criterion) {
     use ffs_types::CommitSeq;
@@ -161,24 +180,7 @@ fn bench_ssi_overhead(c: &mut Criterion) {
     c.bench_function("mvcc_commit_ssi_pivot_192reads_32records", |b| {
         use criterion::BatchSize;
         b.iter_batched(
-            || {
-                let mut store = MvccStore::new();
-                let mut pivot = store.begin();
-                for r in 0..192_u64 {
-                    pivot.record_read(BlockNumber(r), CommitSeq(1));
-                }
-                pivot.stage_write(BlockNumber(1_000_000), block_data.clone());
-                for k in 0..32_u64 {
-                    let mut w = store.begin();
-                    let base = 10_000 + k * 1_000;
-                    for r in 0..192_u64 {
-                        w.record_read(BlockNumber(base + r), CommitSeq(1));
-                    }
-                    w.stage_write(BlockNumber(2_000_000 + k), block_data.clone());
-                    store.commit_ssi(w).expect("seed concurrent record");
-                }
-                (store, pivot)
-            },
+            || setup_ssi_pivot_192reads_32records(&block_data),
             |(mut store, pivot)| {
                 black_box(store.commit_ssi(pivot).expect("pivot commit"));
             },
