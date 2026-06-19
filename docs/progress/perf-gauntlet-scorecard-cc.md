@@ -145,6 +145,23 @@ cold cache (`drop_caches=3`) on both sides, 200MiB verified read by frankenfs (2
 | **frankenfs read engine** (`ffs-cli read`, userspace, no FUSE) | **733 MB/s** | 0.273 s |
 | **ratio** | — | **2.05x slower (frankenfs ≈ 0.49× kernel throughput)** |
 
+### Cold variance (3 runs) + warm (engine-overhead isolation)
+| Workload | kernel ext4 | frankenfs engine | ratio |
+|----------|-------------|------------------|-------|
+| cold run 1 | 1373 MB/s | 706 MB/s | 1.94× slower |
+| cold run 2 | 1665 MB/s | 683 MB/s | 2.43× slower |
+| cold run 3 | 1674 MB/s | 698 MB/s | 2.39× slower |
+| **warm (both cached)** | **6271 MB/s** | **965 MB/s** | **6.49× slower** |
+
+**Two regimes:** (1) **cold = disk-bound** → frankenfs ~2.0–2.4× slower; the disk-read wait partially masks
+the userspace overhead. frankenfs is very consistent (~700 MB/s); the kernel varies more (1373–1674).
+(2) **warm = CPU-bound** → frankenfs **6.5× slower**, which isolates the pure read-engine overhead: userspace
+extent parse + a `pread` syscall per contiguous run + copy into a materialized `Vec`, vs the kernel's
+zero-copy page-cache read with readahead. frankenfs's read engine tops out ~1 GB/s; the kernel hits ~6.3 GB/s
+warm. **frankenfs does NOT beat the kernel on sequential read** — the gap (2.4× cold / 6.5× warm) is the
+userspace-port tax, and is the target the A/B read-path levers (measured above) chip at on frankenfs's own
+side. Closing it to the kernel needs zero-copy + readahead + fewer syscalls (future structural work).
+
 **Honest read:** frankenfs's userspace ext4 read engine is **~2x slower than the in-kernel ext4 driver**
 on cold sequential read — a sensible result for a userspace port (the kernel has in-kernel ext4 +
 readahead + zero-copy page cache; frankenfs parses extents and `pread`s blocks from the image fd into a

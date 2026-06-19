@@ -122,9 +122,7 @@ pub fn write_inode(
 
     // Read the block, patch the inode bytes, write back.
     let buf = dev.read_block(cx, loc.block)?;
-    // `buf` is owned and used only here; move its Vec out instead of copying the
-    // whole block — the patched bytes are written back from `block_data`.
-    let mut block_data = buf.into_inner();
+    let mut block_data = buf.as_slice().to_vec();
     if loc.byte_offset + inode_size > block_data.len() {
         return Err(FfsError::Corruption {
             block: loc.block.0,
@@ -506,7 +504,16 @@ fn free_indirect_chain(
             if ptr == 0 {
                 continue;
             }
-            free_indirect_chain(cx, dev, geo, groups, BlockNumber(u64::from(ptr)), level - 1, ppb, pctx)?;
+            free_indirect_chain(
+                cx,
+                dev,
+                geo,
+                groups,
+                BlockNumber(u64::from(ptr)),
+                level - 1,
+                ppb,
+                pctx,
+            )?;
         }
     }
     // Free this indirect (metadata) block itself.
@@ -576,8 +583,7 @@ fn free_indirect_subtree_range(
 ) -> Result<(u64, bool)> {
     cx_checkpoint(cx)?;
     let buf = dev.read_block(cx, block)?;
-    // `buf` is owned and consumed here; move its Vec out instead of copying.
-    let mut data = buf.into_inner();
+    let mut data = buf.as_slice().to_vec();
     let entry_span = ppb.saturating_pow(level - 1);
     let mut freed = 0u64;
     let mut dirty = false;
@@ -600,8 +606,7 @@ fn free_indirect_subtree_range(
             if off + 4 > data.len() {
                 break;
             }
-            let ptr =
-                u32::from_le_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]]);
+            let ptr = u32::from_le_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]]);
             if ptr == 0 {
                 continue;
             }
@@ -628,8 +633,7 @@ fn free_indirect_subtree_range(
             if off + 4 > data.len() {
                 break;
             }
-            let ptr =
-                u32::from_le_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]]);
+            let ptr = u32::from_le_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]]);
             if ptr == 0 {
                 continue;
             }
@@ -828,8 +832,7 @@ pub fn delete_inode(
     if inode.file_acl != 0 {
         let acl_block = BlockNumber(inode.file_acl);
         let buf = dev.read_block(cx, acl_block)?;
-        // `buf` is owned and consumed here; move its Vec out instead of copying.
-        let mut data = buf.into_inner();
+        let mut data = buf.as_slice().to_vec();
         if data.len() >= 32 {
             let magic = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
             if magic == 0xEA02_0000 {
@@ -1624,16 +1627,9 @@ mod tests {
         inode.extent_bytes = eb.into();
 
         // cutoff 13: keep logical 12, free logical 13 and 14.
-        let freed = truncate_indirect_blocks(
-            &cx,
-            &dev,
-            &geo,
-            &mut groups,
-            &mut inode,
-            13,
-            &mock_pctx(),
-        )
-        .unwrap();
+        let freed =
+            truncate_indirect_blocks(&cx, &dev, &geo, &mut groups, &mut inode, 13, &mock_pctx())
+                .unwrap();
 
         assert_eq!(freed, 2, "frees logical 13 and 14 only");
         assert_eq!(
@@ -2373,8 +2369,8 @@ mod tests {
         // write_inode must reject an inode number beyond the table, mirroring
         // the read_inode out-of-range guard, instead of patching and writing
         // back an arbitrary block.
-        let err = write_inode(&cx, &dev, &geo, &groups, InodeNumber(100_000), &inode, 0)
-            .unwrap_err();
+        let err =
+            write_inode(&cx, &dev, &geo, &groups, InodeNumber(100_000), &inode, 0).unwrap_err();
         assert!(
             matches!(err, FfsError::Corruption { ref detail, .. } if detail.contains("out of range")),
             "got {err:?}",

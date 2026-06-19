@@ -70,9 +70,15 @@ fn bench_free(c: &mut Criterion) {
     // Fully contiguous (sequentially allocated file): 1024 blocks -> 1 run.
     let contiguous: Vec<u32> = (1000..1000 + n).collect();
     // Fragmented (every other block present): 512 blocks -> 512 singleton runs.
-    let fragmented: Vec<u32> = (0..n).filter(|i| i % 2 == 0).map(|i| 1000 + i * 2).collect();
+    let fragmented: Vec<u32> = (0..n)
+        .filter(|i| i % 2 == 0)
+        .map(|i| 1000 + i * 2)
+        .collect();
 
-    for (label, blocks) in [("contiguous_1024", &contiguous), ("fragmented_512", &fragmented)] {
+    for (label, blocks) in [
+        ("contiguous_1024", &contiguous),
+        ("fragmented_512", &fragmented),
+    ] {
         assert_eq!(
             free_per_block(blocks),
             free_in_runs(blocks),
