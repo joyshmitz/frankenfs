@@ -196,3 +196,25 @@ world-accessible with `fusermount3` setuid + `user_allow_other` set, but the mou
 failed: Permission denied` even as root — a container/sandbox restriction on the FUSE mount syscall. There is
 no non-FUSE `ffs write` CLI, so the write-path e2e oracle is not exercisable in this environment. Write-path
 conformance remains validated only by in-process unit/property tests, not an external kernel-readback oracle.
+
+### Core-count-ADAPTIVE parallel-read chunk — REJECTED, overfit risk (cc 2026-06-19, bd-vffrx follow-up)
+
+After shipping the fixed `FFS_READ_CHUNK_BLOCKS` default `256 -> 32` blocks (bd-vffrx / 3671522c, a measured
+ext4 1.41x / btrfs 3.17x warm win on a 64-core box), tested whether the default should instead SCALE with the
+rayon pool size (simulated via `RAYON_NUM_THREADS`), since the optimum clearly moves with thread count.
+
+ext4 128 MiB warm, per-thread-count optimum (min duration_us): thr=2 -> 256, thr=4 -> 64, thr=8 -> 64,
+thr=16 -> 32, thr=32 -> 32, thr=64 -> 32. So fixed-32 is OPTIMAL for >=16 threads (the many-core reality) and
+only ~5-7% off the per-tier optimum at 2-8 threads.
+
+REJECTED an adaptive scheme because the btrfs cross-thread data is too NOISY and self-CONTRADICTORY to tune
+without overfitting: btrfs 100 MiB warm gave best=128 at thr=64 but best=16 at thr=8 and best=32 at thr=4 —
+mutually inconsistent across runs (the `walk --read-data` path mixes readdir/getattr/metadata I/O with the
+data read, so its per-chunk optimum is unstable). An adaptive formula fit to this would help small-core ext4
+by ~5-7% while risking unpredictable btrfs regressions, and no clean principled rule (e.g. fixed chunks/thread)
+reproduces the measured optima (4 threads wants 64-block chunks, not the 256 a "few-chunks-per-thread" rule
+predicts). Fixed-32 is the simple, robust, measured choice: optimal on many-core hardware, within noise on
+small-core, and a large win over the prior 256 everywhere. Conclusion: do NOT add adaptive chunk-sizing.
+
+Commands: `FFS_LOG_FORMAT=json RUST_LOG=info RAYON_NUM_THREADS=<n> FFS_READ_CHUNK_BLOCKS=<cb> \
+ffs-cli read IMG FILE --discard 2>&1 | grep duration_us` (ext4); `... ffs-cli walk IMG --read-data` (btrfs).

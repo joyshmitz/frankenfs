@@ -360,3 +360,29 @@ CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-b \
 
 cargo fmt -p ffs-btrfs --check
 ```
+
+---
+
+## WIN — parallel-read chunk default 256 -> 32 blocks on real many-core hw (cc 2026-06-19, bd-vffrx / 3671522c)
+
+The `FFS_READ_CHUNK_BLOCKS` default splits a large contiguous run into block-aligned chunks read concurrently
+on the rayon pool. c110c39b cut it 16 MiB -> 1 MiB (256 blocks) after the 4096 default was found tuned for a
+~2-core box; the same under-fill bug survived one level down. On a real **64-core** box (rayon pool ~62
+threads), 256 blocks yields only ~32 chunks for a 32 MiB read — about half the pool — leaving most of the
+I/O-overlap on the table. Dropped the default to **32 blocks = 128 KiB** at BOTH parallel-read sites (ext4
+`read_file_data`, btrfs `btrfs_read_file`).
+
+Measured (engine `duration_us`, A/B via `FFS_READ_CHUNK_BLOCKS` on one fresh release binary, min of N,
+default-32 vs forced-256):
+
+| Workload | warm 32 vs 256 | cold 32 vs 256 |
+|---|---|---|
+| ext4 128 MiB extent read   | **1.41x** (32.9 -> 23.3 ms) | **1.31x** (53.9 -> 41.2 ms) |
+| btrfs 100 MiB uncompressed  | **3.17x** (106 -> 33.5 ms)  | **1.69x** (117 -> 69.1 ms)  |
+
+Byte-identical output (md5 of a 128 MiB ext4 read matches the source for chunk 1/32/256/4096). ffs-core
+release tests green. Output is invariant in chunk size — only parallel-read granularity changes; the env
+override is preserved. Narrows the warm-seq kernel gap (ext4 warm ~2.4x -> read-only ~19.6ms vs kernel ~8ms).
+Residual gap root-caused to `FileByteDevice` pread-per-chunk syscall + page-cache copy (perf: sys 0.277s >>
+user 0.108s, IPC 0.35) — see bd-jgbam (mmap-backed ByteDevice deep swing). Adaptive (core-count-scaled) chunk
+sizing evaluated and rejected as overfit — see perf-negative-results.md.
