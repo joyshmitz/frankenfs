@@ -145,6 +145,24 @@ cold cache (`drop_caches=3`) on both sides, 200MiB verified read by frankenfs (2
 | **frankenfs read engine** (`ffs-cli read`, userspace, no FUSE) | **733 MB/s** | 0.273 s |
 | **ratio** | — | **2.05x slower (frankenfs ≈ 0.49× kernel throughput)** |
 
+### ⭐⭐⭐⭐ BOLD LEVER (bd-cc-pchunk): chunked-parallel contiguous read → frankenfs now BEATS the kernel on SEQUENTIAL too
+A contiguous file was one serial `read_contiguous_into` (no overlap) — the sequential loss. The lever splits
+a large run into 1 MiB block-aligned chunks read in parallel (rayon, disjoint `split_at_mut` windows).
+200MiB random file, cold cache, 3 runs, MEASURED vs kernel ext4:
+
+| | before lever | **after chunked-parallel** | vs kernel |
+|---|---|---|---|
+| seq cold run 1 | ffs 706 (2.0× slower) | **ffs 1870 MB/s** (kernel 1609) | **0.86× → ffs 1.16× FASTER** ✅ |
+| seq cold run 2 | ffs 683 (2.4× slower) | **ffs 1916 MB/s** (kernel 1645) | **0.85× → ffs 1.18× FASTER** ✅ |
+| seq cold run 3 | ffs 698 (2.4× slower) | **ffs 1901 MB/s** (kernel 1667) | **0.87× → ffs 1.15× FASTER** ✅ |
+| seq warm | ffs 965 (6.5× slower) | **ffs 2985 MB/s** (kernel 6954) | 2.32× slower (was 6.5×; ~3× better) |
+
+**KEPT — a domination win.** Cold sequential went from **2.4× slower to 1.16× FASTER than the kernel**
+(~2.7× frankenfs speedup, 695→1900 MB/s); warm improved ~3× (still loses warm = userspace copy overhead).
+Combined with the fragmented win, **frankenfs now beats kernel ext4 on both cold sequential AND fragmented
+reads** — the only remaining loss is fully-cached warm read (CPU-bound copy). Iso-verified: `ffs-cli read`
+returns the identical 209,715,200 bytes; chunks are disjoint block-ranges into disjoint windows.
+
 ### ⭐⭐⭐ FRAGMENTED-FILE read: frankenfs BEATS the kernel (~1.4×, 3 runs)
 150MiB file deliberately fragmented to **108 extents** (interleaved spacer-file writes + fsync, then
 spacers deleted; `filefrag` confirmed), cold cache both sides:
