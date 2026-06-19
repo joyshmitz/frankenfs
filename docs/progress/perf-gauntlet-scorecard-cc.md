@@ -313,6 +313,37 @@ beats the kernel **even including** its per-invocation open+journal-replay (~7 m
   in A) is a real
   cost the kernel amortizes across a long-lived mount.
 
+### ⭐⭐ BTRFS metadata walk: found a 7× LOSS, PROFILED it, FIXED my own W155 lever → 4.3× (cc 2026-06-19)
+The btrfs format tool + kernel btrfs became available this session, enabling the first **btrfs** head-to-head
+(all prior dominations were ext4). Made `ffs walk` flavor-agnostic (root = `InodeNumber(1)`, the FsOps
+canonical root for both flavors; ext4 walk byte-identical), then walked a 30,000-file btrfs directory.
+
+**Discovery — frankenfs was ~7× SLOWER than kernel btrfs on cold metadata** (≈940 ms vs ≈133 ms; 32.6
+µs/entry). `perf record` showed the cost was NOT b-tree work but **scheduler thrash + `sched_yield`** on a
+thread named `ffs-btrfs-prefetch` (`update_curr` 5.5%, `pick_task_fair` 3.9%, `__schedule` 2.9%,
+`do/__sched_yield` ~2.8%). Root cause: **my own `bd-h6p3w` (W155, commit 24549311) parallel range-walk**
+dispatches a `par_iter` to the 16-thread prefetch pool **at every internal node, even when a single child
+survives** — a getattr point lookup surfaces 1 child/node, so 30k metadata lookups thrash the idle pool
+workers on `sched_yield` while gaining zero parallelism.
+
+**Fix (mine to fix): fan-out gate** — only dispatch to the pool when `children.len() >= 2`; otherwise fetch
+serially (`BTRFS_PREFETCH_MIN_CHILDREN`, ffs-btrfs/lib.rs). Byte-identical (`into_par_iter` on a `Vec` +
+`collect` preserves order == serial `into_iter().map`; the deep/wide range walk that `bd-h6p3w` parallelized
+still has many children/node and stays parallel).
+
+| | before fix | after fix | kernel btrfs |
+|--|-----------|-----------|--------------|
+| cold 30k-file dir walk | 935–946 ms | **212–223 ms** | 128–155 ms |
+| warm | 977 ms | **208 ms** | — |
+| per-entry | 32.6 µs | **6.9 µs** | — |
+
+**4.3× faster (cold + warm); 7× → 1.6× vs kernel btrfs.** A regression in my own parallel-walk lever, found
+by profiling a LOSS and fixed; per-entry cost now matches the ext4 metadata path (~6 µs). Correctness:
+identical 30,002-entry result before/after. (Still 1.6× behind kernel btrfs = userspace tax + remaining
+b-tree-walk-per-getattr cost; the single big directory can't use `--parallel`, so a multi-dir btrfs tree
+would close further as it did for ext4.) ⭐ Lesson echoes W153: parallelism dispatched on tiny per-item
+work is a net LOSS — gate it on the work size.
+
 ### COLD bulk DATA read (`grep -r` / `tar`): the boundary — frankenfs LOSES on contiguous data (cc 2026-06-19)
 `ffs walk --read-data --parallel` reads every regular file's bytes (the read-all-files workload: build
 source reads, `grep -r`, backup). Cold over a **250 MiB / 4,000-file** ext4 image (`mke2fs -d`, 64 KiB

@@ -20,6 +20,15 @@ use thiserror::Error;
 use tracing::{debug, info, trace, warn};
 
 const BTRFS_RANGE_PREFETCH_THREADS: usize = 16;
+/// Minimum surviving-child fan-out before a tree-range walk dispatches the child
+/// fetch to the parallel prefetch pool. A point/narrow walk (e.g. a getattr inode
+/// point lookup) surfaces a single surviving child per internal node, so a
+/// 1-element `par_iter` on the 16-thread pool is pure dispatch overhead — and a
+/// metadata walk doing thousands of these thrashes the idle pool workers on
+/// `sched_yield` (measured ~7× slower than kernel btrfs on a 30k-entry directory
+/// before this gate). The deep-/wide-range walk that `bd-h6p3w` parallelized
+/// surfaces many children per node and stays on the parallel path.
+const BTRFS_PREFETCH_MIN_CHILDREN: usize = 2;
 static BTRFS_RANGE_PREFETCH_POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
 
 fn btrfs_range_prefetch_pool() -> &'static rayon::ThreadPool {
@@ -2529,12 +2538,26 @@ impl BtrfsParallelTreeWalker<'_> {
                 }
 
                 let node_provider = self.node_provider;
-                let fetched = btrfs_range_prefetch_pool().install(|| {
-                    children
-                        .into_par_iter()
-                        .map(|logical| (logical, node_provider(logical)))
-                        .collect::<Vec<_>>()
-                });
+                // Fan-out gate (see BTRFS_PREFETCH_MIN_CHILDREN): only dispatch to
+                // the parallel prefetch pool when there are enough surviving
+                // children for the I/O-overlap to outweigh dispatch + worker-wakeup
+                // cost; otherwise fetch serially so narrow/point walks don't thrash
+                // the pool. Byte-identical: `into_par_iter` on a `Vec` + `collect`
+                // preserves index order, matching the serial `into_iter().map`.
+                let fetched: Vec<(u64, Result<Arc<BtrfsParsedNode>, ParseError>)> =
+                    if children.len() >= BTRFS_PREFETCH_MIN_CHILDREN {
+                        btrfs_range_prefetch_pool().install(|| {
+                            children
+                                .into_par_iter()
+                                .map(|logical| (logical, node_provider(logical)))
+                                .collect::<Vec<_>>()
+                        })
+                    } else {
+                        children
+                            .into_iter()
+                            .map(|logical| (logical, node_provider(logical)))
+                            .collect::<Vec<_>>()
+                    };
                 for (logical, node) in fetched {
                     self.walk_loaded_node(logical, node)?;
                 }

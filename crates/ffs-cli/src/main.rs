@@ -2326,18 +2326,11 @@ fn walk_cmd(path: &PathBuf, no_stat: bool, parallel: bool, read_data: bool) -> R
     let open_fs = OpenFs::open(&cx, path)
         .with_context(|| format!("failed to open image: {}", path.display()))?;
 
-    // Resolve the root inode through a short read scope; readdir/getattr below
-    // are self-scoping (with_latest_scope), so no long-lived scope is held.
-    let root_ino = {
-        let scope = open_fs
-            .begin_request_scope(&cx, RequestOp::Read)
-            .with_context(|| "failed to begin read scope".to_string())?;
-        let (ino, _inode) = open_fs
-            .resolve_path(&cx, &scope, "/")
-            .with_context(|| "failed to resolve root directory".to_string())?;
-        let _ = open_fs.end_request_scope(&cx, RequestOp::Read, scope);
-        ino
-    };
+    // The FsOps/FUSE layer uses InodeNumber(1) as the canonical root for BOTH
+    // ext4 (mapped to inode 2 internally) and btrfs (mapped to the subvolume
+    // root) — so the walk is flavor-agnostic. readdir/getattr are self-scoping
+    // (with_latest_scope), so no long-lived scope is held.
+    let root_ino = InodeNumber(1);
 
     let dirs: u64;
     let files: u64;
