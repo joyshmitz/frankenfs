@@ -10755,6 +10755,9 @@ impl OpenFs {
         // (bd-yg6tk, I/O-overlap sibling of bd-strse). A fragmented file with N
         // non-contiguous runs otherwise serializes N device-read latencies.
         // (Declared first so clippy::items_after_statements stays happy.)
+        // Chunk size for splitting a large contiguous run into parallel reads
+        // (bd-cc-pchunk): 256 blocks = 1 MiB at a 4 KiB block size.
+        const PARALLEL_READ_CHUNK_BLOCKS: usize = 256;
         enum Seg {
             // Coalesced run of logically+physically-consecutive written blocks.
             Run {
@@ -10904,10 +10907,32 @@ impl OpenFs {
             remaining = rest_after;
             consumed = dst_off + len;
             match seg {
-                Seg::Run { phys, .. } => jobs.push(IoJob::Run {
-                    phys: *phys,
-                    dst: window,
-                }),
+                Seg::Run { phys, .. } => {
+                    // BOLD (bd-cc-pchunk): split a large contiguous run into
+                    // block-aligned chunks read in PARALLEL. A contiguous file is
+                    // otherwise a single run = a single serial `read_contiguous_into`
+                    // with no overlap (the sequential-read loss vs the kernel),
+                    // whereas a fragmented file already parallelizes per-run and
+                    // beats the kernel. Chunking applies that same device-latency
+                    // overlap to sequential reads. Reading adjacent block ranges
+                    // into adjacent window sub-slices is byte-identical to one read
+                    // (disjoint dst + disjoint phys; collect preserves offset order
+                    // so the first error stays lowest-offset). Small runs (<= one
+                    // chunk) stay a single job.
+                    let chunk_bytes = PARALLEL_READ_CHUNK_BLOCKS * bs_usize;
+                    let mut chunk_phys = *phys;
+                    let mut w: &mut [u8] = window;
+                    while !w.is_empty() {
+                        let take = w.len().min(chunk_bytes);
+                        let (chunk, rest) = w.split_at_mut(take);
+                        jobs.push(IoJob::Run {
+                            phys: chunk_phys,
+                            dst: chunk,
+                        });
+                        chunk_phys += (take / bs_usize) as u64;
+                        w = rest;
+                    }
+                }
                 Seg::Partial { phys, off, .. } => jobs.push(IoJob::Partial {
                     phys: *phys,
                     off: *off,
