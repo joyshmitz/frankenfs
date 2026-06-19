@@ -171,3 +171,27 @@ The 4.3× btrfs metadata fix (`BTRFS_PREFETCH_MIN_CHILDREN`, commit 18fb0e88) is
   thrash (it was `_copy_to_iter`/syscall-bound). The btrfs thrash was unique to `install()`-into-a-dedicated-
   16-thread-pool called thousands of times per recursive walk. Retry a fan-out gate on the ext4 sites only
   if a profile actually shows scheduler thrash there (it does not today).
+
+### ext4 INDIRECT-block sequential read ~5x slower than kernel (gap, cc 2026-06-19)
+
+Differential-oracle perf probe: a 32 MB indirect-mapped (`^extent`) ext4 file (25 extents, near-contiguous)
+read cold — kernel `dd bs=4M` 45 ms (711 MB/s) vs frankenfs `ffs read --discard` 211–224 ms (~145 MB/s) =
+**frankenfs ~5x SLOWER** (byte-exact correctness confirmed). This is WORSE than the extent-path sequential
+loss (~2x cold), indicating the indirect read path (`read_ext4_indirect`) does not chunk/parallelize a large
+contiguous run the way the extent path's `bd-cc-pchunk` (16 MiB block-aligned chunks read in parallel) does —
+it coalesces contiguous runs and parallelizes ACROSS non-contiguous runs (bd-r9c10) but a near-contiguous
+indirect file surfaces few runs, so there is little to overlap and the per-run read isn't chunked. **Gap
+(rare config — modern ext4 uses extents; only ext2/ext3-style `^extent` filesystems hit this), filed as a
+lever candidate: port the `bd-cc-pchunk` chunked-parallel large-run read to `read_ext4_indirect`.** Note: the
+intended *fragmented*-indirect test did not materialize — ext4's old block allocator coalesced the
+fsync-interleaved + spacer writes to 25 extents (fragmentation is hard to force; the original 108-extent
+fragmented-read win took deliberate effort), so this measures the contiguous/sequential indirect regime.
+
+### FUSE write-path round-trip oracle — BLOCKED by sandbox (cc 2026-06-19)
+
+Attempted a write-path differential oracle (frankenfs writes via `ffs mount --rw` FUSE → kernel reads back,
+byte-exact) to validate the data-loss-critical WRITE path. `ffs mount --rw` is supported and `/dev/fuse` is
+world-accessible with `fusermount3` setuid + `user_allow_other` set, but the mount fails `fusermount3: mount
+failed: Permission denied` even as root — a container/sandbox restriction on the FUSE mount syscall. There is
+no non-FUSE `ffs write` CLI, so the write-path e2e oracle is not exercisable in this environment. Write-path
+conformance remains validated only by in-process unit/property tests, not an external kernel-readback oracle.
