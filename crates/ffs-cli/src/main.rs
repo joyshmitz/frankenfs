@@ -27,7 +27,7 @@ use ffs_btrfs::{
 use ffs_core::degradation::DegradationLevel;
 use ffs_core::{
     BackpressureGate, BtrfsMountSelection, CrashRecoveryOutcome, DegradationFsm, Ext4DataErrPolicy,
-    Ext4JournalReplayMode, FsFlavor, FsOps, OpenFs, OpenOptions, RepairWritebackBlock,
+    Ext4JournalReplayMode, FsFlavor, FsOps, OpenFs, OpenOptions, RepairWritebackBlock, RequestOp,
     detect_filesystem_at_path,
 };
 use ffs_fuse::{MountConfig, MountOptions, WritebackCacheMode, mount_managed};
@@ -628,6 +628,20 @@ enum Command {
         #[arg(long)]
         snapshots: bool,
     },
+    /// Read a file's data from a filesystem image to stdout (no FUSE mount).
+    ///
+    /// Reads `path` (absolute, e.g. `/bigfile`) from `image` via the in-process
+    /// read engine and writes its bytes to stdout. Enables a no-FUSE head-to-head
+    /// read-throughput comparison against the kernel filesystem.
+    Read {
+        /// Path to the filesystem image.
+        image: PathBuf,
+        /// Absolute path of the file inside the image (e.g. /bigfile).
+        path: String,
+        /// Discard bytes (write to a sink) instead of stdout; report only the count.
+        #[arg(long)]
+        discard: bool,
+    },
     /// Show MVCC and EBR version statistics for a filesystem image.
     MvccStats {
         /// Path to the filesystem image.
@@ -980,6 +994,7 @@ impl Command {
     const fn name(&self) -> &'static str {
         match self {
             Self::Inspect { .. } => "inspect",
+            Self::Read { .. } => "read",
             Self::MvccStats { .. } => "mvcc-stats",
             Self::Info { .. } => "info",
             Self::Dump { .. } => "dump",
@@ -1761,6 +1776,11 @@ fn run() -> Result<()> {
             subvolumes,
             snapshots,
         } => inspect(&image, json, subvolumes, snapshots),
+        Command::Read {
+            image,
+            path,
+            discard,
+        } => read_file_cmd(&image, &path, discard),
         Command::MvccStats { image, json } => mvcc_stats_cmd(&image, json),
         Command::Info {
             image,
@@ -2124,6 +2144,32 @@ fn log_wal_recovery_telemetry(wal: &WalReplayInfoOutput) {
         used_checkpoint = wal.used_checkpoint,
         "wal_recovery_telemetry"
     );
+}
+
+fn read_file_cmd(path: &PathBuf, file_path: &str, discard: bool) -> Result<()> {
+    use std::io::Write;
+    let cx = cli_cx();
+    let open_fs = OpenFs::open(&cx, path)
+        .with_context(|| format!("failed to open image: {}", path.display()))?;
+    let scope = open_fs
+        .begin_request_scope(&cx, RequestOp::Read)
+        .with_context(|| "failed to begin read scope".to_string())?;
+    let (ino, inode) = open_fs
+        .resolve_path(&cx, &scope, file_path)
+        .with_context(|| format!("failed to resolve {file_path}"))?;
+    let size = u32::try_from(inode.size).unwrap_or(u32::MAX);
+    let data = open_fs
+        .read_file(&cx, &scope, ino, 0, size)
+        .with_context(|| format!("failed to read {file_path}"))?;
+    let _ = open_fs.end_request_scope(&cx, RequestOp::Read, scope);
+    if discard {
+        eprintln!("read {} bytes from {file_path}", data.len());
+    } else {
+        std::io::stdout()
+            .write_all(&data)
+            .with_context(|| "failed to write file data to stdout".to_string())?;
+    }
+    Ok(())
 }
 
 fn mvcc_stats_cmd(path: &PathBuf, json: bool) -> Result<()> {
