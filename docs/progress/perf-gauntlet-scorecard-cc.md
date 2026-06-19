@@ -47,13 +47,14 @@ with `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cc`.
   (parallel result == serial result, byte-identical), and all bench binaries built+ran to exit 0,
   so the parallel/batched paths are proven behaviorally identical to the serial originals.
 
-## Swarm levers measured (not cc's — recorded honestly; reverts deferred to owners, not my files)
+## Swarm levers measured (not cc's — recorded honestly; reverts kept to owned/claimed files)
 
 | Bead | Bench | Measured | Verdict |
 |------|-------|----------|---------|
 | bd-xmh5g.401 | mvcc_commit_batching_2000 (per_write vs batched, N=2000) | per_write 10.24ms vs batched 9.51ms = **1.08x** | ⚠️ NEUTRAL at store level — in-memory MVCC commit is cheap; the WAL/SSI/snapshot/FUSE overhead the lever targets is NOT exercised by this bench. **bd-w3hol (per-fh writeback wiring) headroom is UNPROVEN** — needs an e2e FUSE+WAL bench before implementing. |
 | bd-xmh5g.404 | journal_replay_blockbuf_materialize (into_inner vs old_to_vec) | N=16 0.99x; N=64 **0.64x**; N=256 **0.70x** | ❌ REGRESSION — `into_inner` is 1.4–1.6x SLOWER than `as_slice().to_vec()` at N≥64 (likely Arc-shared BlockBuf → try_unwrap fails → clone, costlier than a straight copy). **Recommend revert to to_vec** (owner's file; flagged via bead). |
 | bd-ucrow | commit_scope_writeset_collect (gated_none vs always_collect) | Prior: N=64 1.08x; N=256 0.83x; N=1024 noisy outlier. Cod-a rerun: 64 blocks 0.854x, 256 blocks 1.008x, 1024 blocks 0.185x old/new speed ratio | ❌ REJECTED / REVERTED — lifecycle-none gating is neutral-to-slower and not a measured win; production restored unconditional write-set capture. |
+| bd-xmh5g.391 | bitmap_owned_move_ab (copy-to_vec vs move-into_inner, 4K) | cc row: copy 243.4ns vs move 261.5ns = 0.93x. Cod-a rerun on `hz2`: copy 241.61ns vs move 271.26ns = **0.891x** old/new speed ratio | ❌ REJECTED / REVERTED — production allocator bitmap mutation paths restored to `as_slice().to_vec()`; bit-level undo-log rollback refactor preserved and tested. |
 
 ### Swarm READ-path levers measured (all wins — confirm the read-path pattern)
 
@@ -74,7 +75,7 @@ bench (`--warm-up-time 1 --measurement-time 3`, criterion median) and records th
 | bd-xmh5g.384 | ffs-ondisk · btrfs_leaf_payload_coverage_ab | eager 7002ns → lazy-descending 3699ns = **1.89x** | ✅ WIN (keep) — skip the eager per-leaf coverage-bitmap alloc/zero on canonical (monotonic-descending) btrfs leaves; bitset replay retained for noncanonical. Hot on every leaf parse. |
 | bd-xmh5g.383 | ffs-block · read_contiguous_1mib (outer_staged vs trusted_direct) | outer-staged 699974ns → trusted-direct 28577ns = **24.5x** | ✅ WIN (keep) — skip the outer staging Vec when the inner ByteDevice guarantees all-or-nothing destination preservation; read straight into the caller buffer. |
 | bd-xmh5g.392 | ffs-block · read_contiguous_1mib (blocks_then_copy vs trusted_vectored) | blocks-then-copy 1529826ns / ext4-vec 1278027ns → trusted-vectored 876044ns = **1.74x / 1.46x** | ✅ WIN (keep) — one trusted vectored read into already-block-sized BlockBufs instead of a whole-run staging Vec + per-chunk copy. |
-| bd-xmh5g.391 | ffs-alloc · bitmap_owned_move_ab (4k) | copy-to_vec 243.4ns → move-into_inner 261.5ns = **0.93x** | ❌ REGRESSION (recommend revert) — `BlockBuf::into_inner()` (Arc::try_unwrap) is ~7% SLOWER than `as_slice().to_vec()` at 4K, the **same** small-block into_inner overhead measured at `.389` (reverted) and `.404` (reverted). Owner's file (ffs-alloc); flagged for revert of the owned-move arm. |
+| bd-xmh5g.391 | ffs-alloc · bitmap_owned_move_ab (4k) | cc row copy-to_vec 243.4ns → move-into_inner 261.5ns = 0.93x; cod-a rerun on `hz2` copy 241.61ns → move 271.26ns = **0.891x** | ❌ REGRESSION / REVERTED — `BlockBuf::into_inner()` (Arc::try_unwrap) is slower than `as_slice().to_vec()` on this allocator bitmap mutation shape. Production restored the owned-move arm to `to_vec`; the bit-level undo-log rollback guard remains. |
 | bd-xmh5g.396 | ffs-core · ext4_metadata_parse_xattr_ibody | eager-to_vec 115648ns → lazy-empty 25721ns = **4.50x** | ✅ WIN (keep) — metadata-only inode parse (`parse_metadata_from_bytes`) skips the eager ~150B `xattr_ibody` alloc on the getattr/lookup/readdir/access hot path; full parse retained for xattr/inline-data. Byte-identical fixed FileAttr fields (guard). Hot on ls/find/stat. |
 | bd-xmh5g.382 | ffs-extent · extent_cache_same_ns_8t (8 threads) | write_lock_hit 17.5ms → read_lock_atomic_hit 21.7ms = **0.81x** | ❌ REGRESSION (recommend revert) — the "lock-free" read-lock hit path is SLOWER: each lookup bumps `self.hits.fetch_add(1)` on ONE shared atomic, so 8 threads ping-pong that single cache line — contention RELOCATED from the RwLock to the atomic counter, net worse. `extent_cache_real_same_ns` corroborates (1t 1.23ms → 8t 21.9ms, 17.8x degradation). Owner's file (ffs-extent); needs sloppy/sampled counters before the read-lock path can win. |
 | bd-xmh5g.390/.393 | ffs-mvcc · blockbuf_into_inner_vs_to_vec (sole-owned) | into_inner vs to_vec: 4K **1.11x** / 16K **1.04x** / 64K **1.09x** | ✅ WIN (keep) — the cc-owned ffs-core `into_inner` RMW sites are all single-block `read_block(...).into_inner()` on **sole-owned** buffers → O(1) move beats `to_vec` copy at every size. The `.389` "16K/64K regression" did NOT reproduce; the into_inner family reconciles by **ownership**, not size — reject only applies to Arc-**shared** contexts (`.404` journal replay holds staged refs → try_unwrap clones). |
@@ -96,10 +97,11 @@ Flagged on bd-xmh5g.355 (recommend `#[ignore]` until the write-path extent-tree 
 **Net: every lever this session is conformance-clean; the lone red is a pre-existing feature pin.**
 
 **Read/parse/staging levers confirm the pattern: WIN.** Four of five (.385 2.28x, .384 1.89x, .383
-24.5x, .392 1.74x) are real measured wins on their modeled hot path. The one regression (.391) is
+24.5x, .392 1.74x) are real measured wins on their modeled hot path. The one regression (.391) was
 the **`into_inner` owned-buffer move at small (4K) blocks** — now measured negative for the THIRD
 time (`.389`, `.404`, `.391`), confirming the seeded-ledger warning that the into_inner clone→move
-"keep unconditionally" assumption does NOT hold at the sizes these RMW paths actually use.
+"keep unconditionally" assumption does NOT hold at the sizes these RMW paths actually use; cod-a
+restored the allocator bitmap mutation paths to `as_slice().to_vec()`.
 
 ⭐⭐ **Central gauntlet finding (16+ levers measured): READ-path levers WIN, WRITE-path levers DON'T.**
 Every read/lookup/free lever — cc's 13 (4.75–70x, 6–53x, 1009x) AND the swarm's reads (.394 112–1297x,
