@@ -2209,18 +2209,23 @@ fn read_file_cmd(path: &PathBuf, file_path: &str, discard: bool) -> Result<()> {
     let mut out = std::io::stdout();
     let mut off: u64 = 0;
     let mut total: u64 = 0;
+    // Reuse one chunk buffer across the whole stream via read_into, so a
+    // multi-chunk file does not allocate (and mmap/page-fault/munmap) a fresh
+    // multi-MiB Vec per chunk (bd-2x68s). Sized to the first chunk's need.
+    let first = u32::try_from(size.min(u64::from(STREAM_CHUNK))).unwrap_or(STREAM_CHUNK);
+    let mut buf: Vec<u8> = vec![0_u8; first.max(1) as usize];
     while off < size {
         let want = u32::try_from((size - off).min(u64::from(STREAM_CHUNK))).unwrap_or(STREAM_CHUNK);
-        let data = open_fs
-            .read(&cx, ino, off, want)
+        let n = open_fs
+            .read_into(&cx, ino, off, &mut buf[..want as usize])
             .with_context(|| format!("failed to read {file_path} at {off}"))?;
-        if data.is_empty() {
+        if n == 0 {
             break;
         }
-        total += data.len() as u64;
-        off += data.len() as u64;
+        total += n as u64;
+        off += n as u64;
         if !discard {
-            out.write_all(&data)
+            out.write_all(&buf[..n])
                 .with_context(|| "failed to write file data to stdout".to_string())?;
         }
     }
@@ -2260,6 +2265,16 @@ fn walk_one_dir(
         bytes: 0,
         subdirs: Vec::new(),
     };
+    // One reusable read buffer for the whole directory's --read-data pass.
+    // read_into fills it in place, so the per-file/per-chunk fresh-Vec
+    // allocations (each an mmap + page-fault churn + munmap, ~2.26x slower
+    // than fixed-buffer reuse, bd-2x68s) collapse to a single buffer reused
+    // across every file in this directory. Allocated only when needed.
+    let mut read_buf: Vec<u8> = if read_data {
+        vec![0_u8; READ_CHUNK as usize]
+    } else {
+        Vec::new()
+    };
     let mut next_off: u64 = 0;
     loop {
         let off_in = next_off;
@@ -2283,19 +2298,20 @@ fn walk_one_dir(
                 out.stats += 1;
             }
             if read_data && is_file {
-                // Stream the file's bytes through the read engine (data is
-                // discarded; only the byte count is kept).
+                // Stream the file's bytes through the read engine into the
+                // reused buffer (data is discarded; only the byte count is
+                // kept).
                 let mut off: u64 = 0;
                 loop {
-                    let data = open_fs
-                        .read(cx, entry.ino, off, READ_CHUNK)
+                    let n = open_fs
+                        .read_into(cx, entry.ino, off, &mut read_buf)
                         .with_context(|| format!("failed to read inode {}", entry.ino.0))?;
-                    if data.is_empty() {
+                    if n == 0 {
                         break;
                     }
-                    out.bytes += data.len() as u64;
-                    off += data.len() as u64;
-                    if data.len() < READ_CHUNK as usize {
+                    out.bytes += n as u64;
+                    off += n as u64;
+                    if n < READ_CHUNK as usize {
                         break;
                     }
                 }

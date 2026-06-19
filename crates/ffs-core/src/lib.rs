@@ -27200,6 +27200,56 @@ impl OpenFs {
         self.with_latest_scope(|scope| <Self as FsOps>::read(self, cx, scope, ino, offset, size))
     }
 
+    /// Read up to `dst.len()` bytes of file `ino` at `offset` into `dst`,
+    /// returning the number of bytes read.
+    ///
+    /// Unlike [`Self::read`], the common uncompressed-extent ext4 path fills
+    /// `dst` directly with no per-call output allocation, so a caller streaming
+    /// a large file (or walking many files) can REUSE one buffer instead of
+    /// allocating a fresh multi-MiB `Vec` per `read()`. Each such allocation is
+    /// served by glibc via `mmap` (it exceeds the 128 KiB mmap threshold), so it
+    /// pays an `mmap` + a page-fault to populate every page + a `munmap` on
+    /// free; profiling a warm read showed ~30% of cycles in that per-read page
+    /// churn, and reusing one buffer measured up to 2.26x on a multi-file
+    /// `walk --read-data` vs the kernel-style fixed-buffer reuse (bd-2x68s).
+    /// Pure-safe-Rust — no allocator tuning (the crate is `forbid(unsafe_code)`).
+    ///
+    /// Result is byte-identical to `read(..)[..n]`. Less-common ext4 paths
+    /// (compressed / inline / indirect) and btrfs fall back to `read` + a copy
+    /// into `dst`, which still allocates but preserves exact semantics.
+    pub fn read_into(
+        &self,
+        cx: &Cx,
+        ino: InodeNumber,
+        offset: u64,
+        dst: &mut [u8],
+    ) -> ffs_error::Result<usize> {
+        let size = u32::try_from(dst.len()).unwrap_or(u32::MAX);
+        self.with_latest_scope(|scope| {
+            if let FsFlavor::Ext4(_) = &self.flavor {
+                let inode =
+                    self.read_inode_with_scope(cx, scope, Self::ext4_canonical_inode(ino))?;
+                // Fast path: exactly the uncompressed-extent case `read` fills a
+                // window for (not dir/symlink/compressed/inline/indirect).
+                let plain_extent = !inode.is_dir()
+                    && !inode.is_symlink()
+                    && inode.flags & EXT4_COMPRBLK_FL == 0
+                    && !Self::ext4_inode_uses_inline_data(&inode)
+                    && inode.flags & ffs_types::EXT4_EXTENTS_FL != 0;
+                if plain_extent {
+                    Self::ext4_reject_encrypted(&inode)?;
+                    let want = ext4_read_buffer_len(inode.size, offset, size)?;
+                    return self.read_file_data(cx, scope, &inode, offset, &mut dst[..want]);
+                }
+            }
+            // Fallback: exact-semantics owned read, then copy into dst.
+            let data = <Self as FsOps>::read(self, cx, scope, ino, offset, size)?;
+            let n = data.len();
+            dst[..n].copy_from_slice(&data);
+            Ok(n)
+        })
+    }
+
     pub fn link(
         &self,
         cx: &Cx,
