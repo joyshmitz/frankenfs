@@ -250,7 +250,9 @@ landed because per-file `install()` risks the documented dedicated-pool schedule
 N compressed files = N installs. That regression is not testable in this environment (no large multi-file
 compressed image), so the dedicated-pool fix needs a multi-file compressed-walk bench before it can ship.
 
-FOLLOW-UP MEASURED REJECT (cod-a/BlackThrush 2026-06-20, bd-defgb): added production-shaped synthetic bench
+#### Follow-up: production-shaped dedicated-pool synthetic bench also failed (cod-a/BlackThrush 2026-06-20, bd-defgb)
+
+Added production-shaped synthetic bench
 arms to `btrfs_decompress_extents` and tested the dedicated-pool idea before shipping it. Command:
 `AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-a rch exec -- cargo bench
 --profile release-perf -p ffs-core --bench btrfs_decompress_extents -- --warm-up-time 1 --measurement-time 3`
@@ -261,3 +263,21 @@ production `OnceLock<ThreadPool>`/gate patch was reverted. Keep only the bench e
 ship the dedicated-pool or gated-dedicated-pool approach from synthetic evidence; it does not materially close
 the compressed-read gap and the anti-thrash gate regresses its modeled workload. Next valid attempt needs a
 different lever or an actual large multi-file compressed image with head-to-head kernel/frankenfs timings.
+
+#### Follow-up: dedicated decompress pool ALSO failed — bottleneck mis-localized (cc 2026-06-19, bd-defgb)
+
+Built the deferred fix anyway: a bounded `OnceLock<rayon::ThreadPool>` (FFS_DECOMPRESS_THREADS, default
+min(16, cores)) with `install()` around the decompress map for decompress-dominated reads. **Also ineffective
+and reverted.** Decisive diagnostic on the rebuilt binary: `FFS_DECOMPRESS_THREADS=1` ran the 34 MiB zstd file
+in 19.9 ms and `=64` in 19.1 ms — i.e. the dedicated pool size has NO effect on the read time, so the
+decompress map is NOT the pool-size-sensitive path. Yet shrinking the GLOBAL pool (`RAYON_NUM_THREADS=8`)
+still gives ~10 ms vs ~18 ms at 64. Conclusion: the global-pool over-subscription is real but lives in a
+DIFFERENT path than `btrfs_read_file`'s per-extent decompress jobs. Crucial missed detail: `walk --read-data`
+issues the read in 1 MiB chunks (READ_CHUNK), so each `btrfs_read_file` call sees only ~8 extents — the
+decompress-jobs guard (`decompress_jobs > 16`) never even trips, and 8 jobs on 64 threads is already only
+8-way. The RAYON_NUM_THREADS sensitivity must come from a per-1 MiB-read path that fans across the global pool
+(prime suspect: the btrfs extent-tree / metadata walk that locates the extents for each read, or the
+`collect_extents_recursive` parallel child-block reads). bd-defgb re-scoped: ROOT-CAUSE must be re-localized
+(profile which symbol's parallelism responds to RAYON_NUM_THREADS) BEFORE any cap is attempted — two cap
+attempts (with_min_len, dedicated pool) both missed because the bottleneck was assumed to be the decompress
+fan-out. No code shipped for this lever.
