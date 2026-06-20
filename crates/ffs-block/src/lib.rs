@@ -437,6 +437,13 @@ pub struct FileByteDevice {
     writable: bool,
 }
 
+/// Reads at or above this size skip the per-read staging scratch in
+/// `FileByteDevice::read_exact_at` and read straight into the caller buffer.
+/// Chosen at the allocator's mmap threshold: below it a scratch `Vec` is served
+/// from the freelist with no page faults (cheaper than an extra `fstat`); at or
+/// above it the scratch mmaps fresh pages whose first-touch faults dominate.
+const FILE_DEVICE_DIRECT_READ_MIN: usize = 64 * 1024;
+
 impl FileByteDevice {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let (file, writable) = OpenOptions::new()
@@ -500,6 +507,41 @@ impl ByteDevice for FileByteDevice {
                 buf.len(),
                 self.len
             )));
+        }
+
+        // For a large read, a fresh `vec![0; len]` staging buffer crosses the
+        // allocator's mmap threshold, so it mmaps anon pages and pays a
+        // first-touch page fault per 4 KiB on the zero-init AND again on the
+        // post-read copy — pure overhead that dominates a warm read (measured
+        // ~13x on a 1 MiB A/B). Read straight into the caller's buffer instead.
+        // A positioned read on a regular file fills the whole buffer in one
+        // `pread` when the range is within the live file length, and `pread`
+        // writes zero bytes on error, so the only way `buf` could be partially
+        // dirtied before an `Err` is the backing file having shrunk below the
+        // length cached at `open` (TOCTOU). Guard that rare case with a single
+        // length re-check up front so the destination is never touched on a
+        // short read — preserving the all-or-nothing contract this device
+        // advertises. The extra `fstat` is negligible against a >=64 KiB read.
+        //
+        // For small reads (e.g. 4 KiB metadata blocks) the staging buffer is
+        // served from the allocator's freelist with no page faults and the
+        // memset/copy is a few hundred bytes, so the scratch is cheaper than an
+        // extra syscall — keep it, which also preserves the destination for
+        // free and leaves the hot metadata read path byte-identical.
+        if buf.len() >= FILE_DEVICE_DIRECT_READ_MIN {
+            let live_len = self.file.metadata()?.len();
+            if end > live_len {
+                return Err(FfsError::Io(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    format!(
+                        "short backing read: offset={offset} len={} live_len={live_len}",
+                        buf.len()
+                    ),
+                )));
+            }
+            self.file.read_exact_at(buf, offset.0)?;
+            cx_checkpoint(cx)?;
+            return Ok(());
         }
 
         let mut read_buf = vec![0_u8; buf.len()];
@@ -7595,6 +7637,58 @@ mod tests {
             "expected short-read UnexpectedEof, got {err:?}"
         );
         assert_eq!(dst, [0xAA; 8]);
+    }
+
+    #[test]
+    fn file_byte_device_large_direct_read_preserves_buffer_on_short_read() {
+        // Reads >= 64 KiB take the direct (no-scratch) path; verify it still
+        // honors the all-or-nothing contract when the backing file shrinks
+        // under the device — the up-front length re-check must error before any
+        // byte of the destination is touched.
+        let cx = Cx::for_testing();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("short-large-read.img");
+        let len = 256 * 1024_usize;
+        std::fs::write(&path, vec![0x5A_u8; len]).expect("seed file");
+        let dev = FileByteDevice::open(&path).expect("device");
+
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .expect("open for truncate")
+            .set_len(8 * 1024)
+            .expect("truncate after device open");
+
+        let mut dst = vec![0xAA_u8; len];
+        let err = dev
+            .read_exact_at(&cx, ByteOffset(0), &mut dst)
+            .expect_err("short backing read should fail without mutating caller buffer");
+
+        assert!(
+            matches!(err, FfsError::Io(ref io_err)
+                if io_err.kind() == std::io::ErrorKind::UnexpectedEof),
+            "expected short-read UnexpectedEof, got {err:?}"
+        );
+        assert!(dst.iter().all(|&b| b == 0xAA), "destination must be preserved");
+    }
+
+    #[test]
+    fn file_byte_device_large_direct_read_round_trips() {
+        // The direct path must still deliver byte-identical data on success.
+        let cx = Cx::for_testing();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("large-read.img");
+        let len = 256 * 1024_usize;
+        let data: Vec<u8> = (0..len)
+            .map(|i| u8::try_from((i * 31 + 7) % 256).expect("byte"))
+            .collect();
+        std::fs::write(&path, &data).expect("seed file");
+        let dev = FileByteDevice::open(&path).expect("device");
+
+        let mut dst = vec![0_u8; len];
+        dev.read_exact_at(&cx, ByteOffset(0), &mut dst)
+            .expect("direct read");
+        assert_eq!(dst, data);
     }
 
     #[test]
