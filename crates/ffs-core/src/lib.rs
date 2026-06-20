@@ -8237,13 +8237,25 @@ impl OpenFs {
     }
 
     #[allow(clippy::too_many_lines)]
-    fn btrfs_read_file(
+    /// Read btrfs file data directly into the caller-provided `dst` buffer,
+    /// returning the number of bytes written.
+    ///
+    /// This is the read-into-buffer form used by [`OpenFs::read_into`]'s btrfs
+    /// fast path: it writes straight into `dst[..to_read]` with no intermediate
+    /// owned `Vec` allocation + copy (bd-2emlm — the owned-`Vec` form doubled
+    /// the resident set on a streamed read and thrashed page-faults). `dst` is
+    /// zeroed over `[..to_read]` first so unwritten holes read back as zero,
+    /// byte-identical to the previous `vec![0u8; to_read]`-then-fill path.
+    /// `dst.len()` must be `>= to_read` (the caller sizes it from the read
+    /// request; `to_read = min(file_size - offset, size)`).
+    fn btrfs_read_file_into(
         &self,
         cx: &Cx,
         ino: InodeNumber,
         offset: u64,
         size: u32,
-    ) -> Result<Vec<u8>, FfsError> {
+        dst: &mut [u8],
+    ) -> Result<usize, FfsError> {
         let read_started = Instant::now();
         let canonical = self.btrfs_canonical_inode(ino)?;
         trace!(inode = canonical, offset, length = size, "btrfs read_start");
@@ -8403,12 +8415,17 @@ impl OpenFs {
                 duration_us = read_started.elapsed().as_micros(),
                 "btrfs read_complete"
             );
-            return Ok(Vec::new());
+            return Ok(0);
         }
 
         let to_read =
             usize::try_from((inode.size - offset).min(u64::from(size))).unwrap_or(size as usize);
-        let mut out = vec![0_u8; to_read];
+        // Borrow the caller's buffer instead of allocating an owned `Vec`
+        // (bd-2emlm). Zero `[..to_read]` so holes read back as zero, exactly as
+        // the previous `vec![0u8; to_read]` did before the fill loops overwrote
+        // the covered ranges.
+        let out: &mut [u8] = &mut dst[..to_read];
+        out.fill(0);
         let read_end = offset.saturating_add(to_read as u64);
 
         // Verify data checksums on read (bd-tkv2n), opt-in via
@@ -8705,7 +8722,7 @@ impl OpenFs {
                     .unwrap_or(32)
             });
             let chunk_span = (chunk_blocks * bs_usize).max(1);
-            let mut remaining: &mut [u8] = out.as_mut_slice();
+            let mut remaining: &mut [u8] = &mut out[..];
             let mut consumed: usize = 0;
             for &(idx, dst_start, copy_len, source_logical) in &uncompressed_specs {
                 let skip = dst_start - consumed;
@@ -8977,7 +8994,24 @@ impl OpenFs {
             duration_us = read_started.elapsed().as_micros(),
             "btrfs read_complete"
         );
-        Ok(out)
+        Ok(to_read)
+    }
+
+    /// Owned-`Vec` form of [`OpenFs::btrfs_read_file_into`]: allocate a buffer,
+    /// read into it, and return it. Kept for callers that need owned bytes
+    /// (`FsOps::read`, symlink-target reads); the streamed `read_into` path uses
+    /// `btrfs_read_file_into` directly to avoid the allocation + copy.
+    fn btrfs_read_file(
+        &self,
+        cx: &Cx,
+        ino: InodeNumber,
+        offset: u64,
+        size: u32,
+    ) -> Result<Vec<u8>, FfsError> {
+        let mut buf = vec![0_u8; size as usize];
+        let n = self.btrfs_read_file_into(cx, ino, offset, size, &mut buf)?;
+        buf.truncate(n);
+        Ok(buf)
     }
 
     /// Read a group descriptor via the device.
@@ -27295,6 +27329,22 @@ impl OpenFs {
                     let want = ext4_read_buffer_len(inode.size, offset, size)?;
                     return self.read_file_data(cx, scope, &inode, offset, &mut dst[..want]);
                 }
+            }
+            // Btrfs fast path: read straight into `dst` with no intermediate
+            // owned `Vec` + copy (bd-2emlm). Mirrors `FsOps::read`'s btrfs arm
+            // (the dir/symlink guards then `btrfs_read_file`), but calls the
+            // read-into-buffer form so a streamed read does not allocate and copy
+            // a fresh chunk-sized `Vec` per call (which doubled resident memory
+            // and thrashed page-faults vs the ext4 direct-into-`dst` path above).
+            if let FsFlavor::Btrfs(_) = &self.flavor {
+                let attr = self.btrfs_read_inode_attr(cx, ino)?;
+                if attr.kind == FileType::Directory {
+                    return Err(FfsError::IsDirectory);
+                }
+                if attr.kind == FileType::Symlink {
+                    return Err(FfsError::Format("cannot read a symlink".into()));
+                }
+                return self.btrfs_read_file_into(cx, ino, offset, size, dst);
             }
             // Fallback: exact-semantics owned read, then copy into dst.
             let data = <Self as FsOps>::read(self, cx, scope, ino, offset, size)?;
