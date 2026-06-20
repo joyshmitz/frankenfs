@@ -94,6 +94,10 @@ const BTRFS_COMPRESSED_EXTENT_BYTE_LIMIT: usize = 128 * 1024 * 1024;
 /// size (kernel `fs/btrfs/lzo.c`). FrankenFS assumes the default 4 KiB sector
 /// (the same assumption already baked into the per-segment output cap).
 const BTRFS_LZO_SECTOR_SIZE: usize = 4096;
+thread_local! {
+    static BTRFS_ZSTD_DECOMPRESSOR: std::cell::RefCell<Option<zstd::bulk::Decompressor<'static>>> =
+        const { std::cell::RefCell::new(None) };
+}
 const E2COMPR_DECOMPRESSED_BYTE_LIMIT: usize = 128 * 1024 * 1024;
 const FSCRYPT_POLICY_V1_VERSION: u8 = 0;
 const FSCRYPT_POLICY_V1_SIZE: usize = 12;
@@ -7871,37 +7875,63 @@ impl OpenFs {
                 // The one-shot decoder requires `src` to be EXACTLY one frame (it
                 // rejects trailing bytes with "Src size is incorrect"), so first find
                 // the first frame's exact compressed length and slice the padding off.
-                let frame_len = zstd::zstd_safe::find_frame_compressed_size(compressed)
-                    .map_err(|code| FfsError::Corruption {
-                        block: 0,
-                        detail: format!(
-                            "btrfs zstd frame size probe failed: {}",
-                            zstd::zstd_safe::get_error_name(code)
-                        ),
-                    })?;
-                let frame = compressed.get(..frame_len).ok_or_else(|| FfsError::Corruption {
-                    block: 0,
-                    detail: format!(
-                        "btrfs zstd frame length {frame_len} exceeds compressed extent {}",
-                        compressed.len()
-                    ),
-                })?;
-                // Decode the single frame, bounding its output to `ram_bytes`. The
-                // tail-extent sector-rounding (frame output < ram_bytes) is handled
-                // by `validate_btrfs_decompressed_len` (shared zero-fill, bd-pokmq).
-                let out =
-                    zstd::bulk::decompress(frame, uncompressed_size).map_err(|e| {
+                let frame_len =
+                    zstd::zstd_safe::find_frame_compressed_size(compressed).map_err(|code| {
                         FfsError::Corruption {
                             block: 0,
-                            detail: format!("btrfs zstd decompression failed: {e}"),
+                            detail: format!(
+                                "btrfs zstd frame size probe failed: {}",
+                                zstd::zstd_safe::get_error_name(code)
+                            ),
                         }
                     })?;
-                Self::validate_btrfs_decompressed_len("zstd", out, uncompressed_size)
+                let frame = compressed
+                    .get(..frame_len)
+                    .ok_or_else(|| FfsError::Corruption {
+                        block: 0,
+                        detail: format!(
+                            "btrfs zstd frame length {frame_len} exceeds compressed extent {}",
+                            compressed.len()
+                        ),
+                    })?;
+                Self::btrfs_decompress_zstd_frame(frame, uncompressed_size)
             }
             other => Err(FfsError::UnsupportedFeature(format!(
                 "btrfs compression type {other} not supported"
             ))),
         }
+    }
+
+    fn btrfs_decompress_zstd_frame(
+        frame: &[u8],
+        uncompressed_size: usize,
+    ) -> Result<Vec<u8>, FfsError> {
+        // The btrfs read path often sees hundreds of independent 4 KiB zstd
+        // frames that expand to 128 KiB extents. Reusing the decoder context
+        // per worker thread avoids reinitializing zstd workspace for every
+        // tiny frame while keeping frames independent and byte-identical.
+        let out = BTRFS_ZSTD_DECOMPRESSOR.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            if slot.is_none() {
+                *slot =
+                    Some(
+                        zstd::bulk::Decompressor::new().map_err(|e| FfsError::Corruption {
+                            block: 0,
+                            detail: format!("btrfs zstd decompressor init failed: {e}"),
+                        })?,
+                    );
+            }
+            let decoder = slot.as_mut().expect("zstd decompressor initialized above");
+            let mut out = Vec::with_capacity(uncompressed_size);
+            decoder
+                .decompress_to_buffer(frame, &mut out)
+                .map_err(|e| FfsError::Corruption {
+                    block: 0,
+                    detail: format!("btrfs zstd decompression failed: {e}"),
+                })?;
+            Ok::<Vec<u8>, FfsError>(out)
+        })?;
+        Self::validate_btrfs_decompressed_len("zstd", out, uncompressed_size)
     }
 
     fn btrfs_decompress_lzo(
@@ -9203,9 +9233,11 @@ impl OpenFs {
                 let last_group = first_group
                     .saturating_add(desc_per_block)
                     .min(geo.group_count);
-                let first_offset = sb
-                    .group_desc_offset(GroupNumber(first_group))
-                    .ok_or_else(|| FfsError::InvalidGeometry("group desc offset overflow".into()))?;
+                let first_offset =
+                    sb.group_desc_offset(GroupNumber(first_group))
+                        .ok_or_else(|| {
+                            FfsError::InvalidGeometry("group desc offset overflow".into())
+                        })?;
                 let bs = u64::from(sb.block_size);
                 let block_num = BlockNumber(first_offset / bs);
                 let cacheable = self.can_cache_ext4_read_only_block(scope, block_num);
@@ -9218,8 +9250,7 @@ impl OpenFs {
                         if let Some(gd) = self.ext4_group_desc_cache.get(&GroupNumber(group_idx)) {
                             blocks_free =
                                 blocks_free.saturating_add(u64::from(gd.free_blocks_count));
-                            files_free =
-                                files_free.saturating_add(u64::from(gd.free_inodes_count));
+                            files_free = files_free.saturating_add(u64::from(gd.free_inodes_count));
                         } else {
                             all_cached = false;
                             break;
@@ -9246,8 +9277,9 @@ impl OpenFs {
                         if offset_in_block + desc_size > block_data.len() {
                             return Err(FfsError::Corruption {
                                 block: block_num.0,
-                                detail: "group descriptor crosses block boundary or truncated block"
-                                    .into(),
+                                detail:
+                                    "group descriptor crosses block boundary or truncated block"
+                                        .into(),
                             });
                         }
                         let buf = &block_data[offset_in_block..offset_in_block + desc_size];
@@ -10111,10 +10143,7 @@ impl OpenFs {
         if !any_overlay {
             let mut bufs: Vec<BlockBuf> = (0..count).map(|_| BlockBuf::new(Vec::new())).collect();
             dev.read_contiguous_blocks(cx, start, &mut bufs)?;
-            return Ok(bufs
-                .into_iter()
-                .map(|buf| buf.into_inner())
-                .collect());
+            return Ok(bufs.into_iter().map(|buf| buf.into_inner()).collect());
         }
 
         // Mixed: keep overlay bytes; coalesce maximal base-gap runs into ranged
@@ -12076,8 +12105,7 @@ impl OpenFs {
 
             for read in reads {
                 let read = read?;
-                value[read.start..read.end]
-                    .copy_from_slice(&read.block[..read.end - read.start]);
+                value[read.start..read.end].copy_from_slice(&read.block[..read.end - read.start]);
             }
         }
         if let Some(err) = terminal_error {
@@ -31465,8 +31493,9 @@ impl FsOps for OpenFs {
                             let mut buf = vec![0u8; read_len];
                             self.dev
                                 .read_exact_at(cx, ByteOffset(mapping.physical), &mut buf)?;
-                            let offset_in_extent =
-                                file_offset.saturating_sub(extent_start).saturating_add(*extent_offset);
+                            let offset_in_extent = file_offset
+                                .saturating_sub(extent_start)
+                                .saturating_add(*extent_offset);
                             (buf, *compression, *num_bytes, offset_in_extent)
                         }
                     }
@@ -35320,7 +35349,8 @@ mod tests {
             None
         );
         assert_eq!(
-            fs.resolve_indirect_block(&cx, &scope, &inode, 12 + PPB).unwrap(),
+            fs.resolve_indirect_block(&cx, &scope, &inode, 12 + PPB)
+                .unwrap(),
             None
         );
         let triple_lb = 12 + PPB + PPB * PPB;
@@ -36347,9 +36377,8 @@ mod tests {
         inode.crtime = 4_000;
         inode.crtime_extra = 0;
         let attr = inode_to_attr(&sb, InodeNumber(100), &inode);
-        let secs = |t: std::time::SystemTime| {
-            t.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()
-        };
+        let secs =
+            |t: std::time::SystemTime| t.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
         assert_eq!(secs(attr.atime), 1_000, "atime");
         assert_eq!(secs(attr.mtime), 2_000, "mtime");
         assert_eq!(secs(attr.ctime), 3_000, "ctime");
@@ -36366,20 +36395,11 @@ mod tests {
             len,
         };
         // Within both files (each 10 blocks): the full requested length.
-        assert_eq!(
-            OpenFs::ext4_move_ext_effective_len(req(0, 0, 4), 10, 10),
-            4
-        );
+        assert_eq!(OpenFs::ext4_move_ext_effective_len(req(0, 0, 4), 10, 10), 4);
         // Source-limited: orig has 2 blocks left from start 8.
-        assert_eq!(
-            OpenFs::ext4_move_ext_effective_len(req(8, 0, 4), 10, 10),
-            2
-        );
+        assert_eq!(OpenFs::ext4_move_ext_effective_len(req(8, 0, 4), 10, 10), 2);
         // Donor-limited: donor has 1 block left from start 9.
-        assert_eq!(
-            OpenFs::ext4_move_ext_effective_len(req(0, 9, 4), 10, 10),
-            1
-        );
+        assert_eq!(OpenFs::ext4_move_ext_effective_len(req(0, 9, 4), 10, 10), 1);
         // Source start at/past EOF -> no exchange.
         assert_eq!(
             OpenFs::ext4_move_ext_effective_len(req(10, 0, 4), 10, 10),
@@ -36497,8 +36517,8 @@ mod tests {
     #[test]
     fn ext4_flags_to_xflags_projects_each_flag_exactly() {
         use ffs_types::{
-            EXT4_APPEND_FL, EXT4_IMMUTABLE_FL, EXT4_NOATIME_FL, EXT4_NODUMP_FL, EXT4_PROJINHERIT_FL,
-            EXT4_SYNC_FL,
+            EXT4_APPEND_FL, EXT4_IMMUTABLE_FL, EXT4_NOATIME_FL, EXT4_NODUMP_FL,
+            EXT4_PROJINHERIT_FL, EXT4_SYNC_FL,
         };
 
         // No flags -> 0, and in particular no HASATTR.
@@ -42851,16 +42871,12 @@ mod tests {
             })
             .expect("serial group descriptor sum");
         let parallel = fs
-            .with_latest_scope(|scope| {
-                fs.read_only_statfs_group_desc_totals(&cx, scope, sb, &geo)
-            })
+            .with_latest_scope(|scope| fs.read_only_statfs_group_desc_totals(&cx, scope, sb, &geo))
             .expect("parallel group descriptor sum");
         assert_eq!(parallel, serial);
         assert_eq!(parallel, (42, 20));
 
-        let stats = fs
-            .statfs(&cx, InodeNumber(2))
-            .expect("statfs");
+        let stats = fs.statfs(&cx, InodeNumber(2)).expect("statfs");
         assert_eq!(stats.blocks_free, 42);
         assert_eq!(stats.files_free, 20);
         assert_eq!(stats.blocks_available, 42);
@@ -46206,7 +46222,11 @@ mod tests {
         let out = OpenFs::btrfs_decompress(&compressed, 1, 4096)
             .expect("short zlib frame zero-fills to ram_bytes");
         assert_eq!(out.len(), 4096, "output padded to ram_bytes");
-        assert_eq!(&out[..payload.len()], payload, "frame content preserved at the head");
+        assert_eq!(
+            &out[..payload.len()],
+            payload,
+            "frame content preserved at the head"
+        );
         assert!(
             out[payload.len()..].iter().all(|&b| b == 0),
             "the bytes past the frame are zero-filled"
@@ -46223,12 +46243,15 @@ mod tests {
         // expected M" rejection broke that. Integrity of the compressed bytes is
         // enforced by the csum tree, not by this length check.
         let payload = b"short zstd payload";
-        let compressed =
-            zstd::stream::encode_all(&payload[..], 0).expect("compress zstd fixture");
+        let compressed = zstd::stream::encode_all(&payload[..], 0).expect("compress zstd fixture");
         let out = OpenFs::btrfs_decompress(&compressed, 3, 4096)
             .expect("short zstd frame zero-fills to ram_bytes");
         assert_eq!(out.len(), 4096, "output is padded to ram_bytes");
-        assert_eq!(&out[..payload.len()], payload, "frame content preserved at the head");
+        assert_eq!(
+            &out[..payload.len()],
+            payload,
+            "frame content preserved at the head"
+        );
         assert!(
             out[payload.len()..].iter().all(|&b| b == 0),
             "the bytes past the frame are zero-filled"
@@ -46240,8 +46263,7 @@ mod tests {
         // A frame that decodes to MORE than ram_bytes is still rejected: the one-shot
         // decoder writes into a fixed ram_bytes buffer and errors on overflow.
         let payload = vec![0xABu8; 8192];
-        let compressed =
-            zstd::stream::encode_all(&payload[..], 0).expect("compress zstd fixture");
+        let compressed = zstd::stream::encode_all(&payload[..], 0).expect("compress zstd fixture");
         let err = OpenFs::btrfs_decompress(&compressed, 3, 4096)
             .expect_err("oversized zstd output rejects");
         assert!(
@@ -46954,7 +46976,11 @@ mod tests {
     fn btrfs_file_type_code_encode_decode_round_trips() {
         // (mode, expected FileType, expected on-disk BTRFS_FT_* code)
         let cases = [
-            (ffs_types::S_IFDIR | 0o755, FileType::Directory, BTRFS_FT_DIR),
+            (
+                ffs_types::S_IFDIR | 0o755,
+                FileType::Directory,
+                BTRFS_FT_DIR,
+            ),
             (
                 ffs_types::S_IFLNK | 0o777,
                 FileType::Symlink,
@@ -51148,7 +51174,8 @@ mod tests {
             .create(&cx, root, OsStr::new("collapse-bad.bin"), 0o644, 0, 0)
             .expect("create");
         // 4 blocks of 4096 bytes.
-        fs.write(&cx, attr.ino, 0, &[0xAB_u8; 16384]).expect("write");
+        fs.write(&cx, attr.ino, 0, &[0xAB_u8; 16384])
+            .expect("write");
 
         let collapse = libc::FALLOC_FL_COLLAPSE_RANGE;
         // Misaligned offset -> EINVAL.
@@ -51185,7 +51212,8 @@ mod tests {
             .create(&cx, root, OsStr::new("insert-bad.bin"), 0o644, 0, 0)
             .expect("create");
         // 4 blocks of 4096 bytes.
-        fs.write(&cx, attr.ino, 0, &[0xAB_u8; 16384]).expect("write");
+        fs.write(&cx, attr.ino, 0, &[0xAB_u8; 16384])
+            .expect("write");
 
         let insert = libc::FALLOC_FL_INSERT_RANGE;
         // Misaligned offset -> EINVAL.
@@ -55640,7 +55668,9 @@ mod tests {
         let cx = Cx::for_testing();
         let root = InodeNumber(2);
         let a = fs.mkdir(&cx, root, OsStr::new("a"), 0o755, 0, 0).unwrap();
-        let mid = fs.mkdir(&cx, a.ino, OsStr::new("mid"), 0o755, 0, 0).unwrap();
+        let mid = fs
+            .mkdir(&cx, a.ino, OsStr::new("mid"), 0o755, 0, 0)
+            .unwrap();
         let deep = fs
             .mkdir(&cx, mid.ino, OsStr::new("deep"), 0o755, 0, 0)
             .unwrap();
@@ -55649,25 +55679,30 @@ mod tests {
             .unwrap();
 
         // deep -> mid -> a: a descendant across multiple '..' levels.
-        assert!(fs
-            .ext4_directory_is_descendant_of(&cx, deep.ino, a.ino)
-            .unwrap());
+        assert!(
+            fs.ext4_directory_is_descendant_of(&cx, deep.ino, a.ino)
+                .unwrap()
+        );
         // mid -> a: one level.
-        assert!(fs
-            .ext4_directory_is_descendant_of(&cx, mid.ino, a.ino)
-            .unwrap());
+        assert!(
+            fs.ext4_directory_is_descendant_of(&cx, mid.ino, a.ino)
+                .unwrap()
+        );
         // The inverse direction is false: a is not under deep.
-        assert!(!fs
-            .ext4_directory_is_descendant_of(&cx, a.ino, deep.ino)
-            .unwrap());
+        assert!(
+            !fs.ext4_directory_is_descendant_of(&cx, a.ino, deep.ino)
+                .unwrap()
+        );
         // A sibling subtree is not a descendant.
-        assert!(!fs
-            .ext4_directory_is_descendant_of(&cx, other.ino, a.ino)
-            .unwrap());
+        assert!(
+            !fs.ext4_directory_is_descendant_of(&cx, other.ino, a.ino)
+                .unwrap()
+        );
         // A directory is reported as a descendant of itself (rename rejects mv a a).
-        assert!(fs
-            .ext4_directory_is_descendant_of(&cx, a.ino, a.ino)
-            .unwrap());
+        assert!(
+            fs.ext4_directory_is_descendant_of(&cx, a.ino, a.ino)
+                .unwrap()
+        );
     }
 
     #[test]
@@ -56836,7 +56871,10 @@ mod tests {
     #[test]
     fn btrfs_checked_physical_offset_and_span_reject_overflow() {
         // Normal add.
-        assert_eq!(OpenFs::btrfs_checked_physical_offset(1000, 24).unwrap(), 1024);
+        assert_eq!(
+            OpenFs::btrfs_checked_physical_offset(1000, 24).unwrap(),
+            1024
+        );
         // base + pos overflowing u64 is rejected, not wrapped.
         let err = OpenFs::btrfs_checked_physical_offset(u64::MAX, 1).unwrap_err();
         assert!(matches!(err, FfsError::Corruption { .. }), "got {err:?}");
@@ -56873,9 +56911,18 @@ mod tests {
     fn nlink_delta_guards_reject_overflow_and_underflow() {
         let ino = InodeNumber(42);
         // ── ext4 links_count (u16) ──
-        assert_eq!(OpenFs::ext4_checked_links_count_delta(5, ino, 2).unwrap(), 7);
-        assert_eq!(OpenFs::ext4_checked_links_count_delta(5, ino, -2).unwrap(), 3);
-        assert_eq!(OpenFs::ext4_checked_links_count_delta(5, ino, 0).unwrap(), 5);
+        assert_eq!(
+            OpenFs::ext4_checked_links_count_delta(5, ino, 2).unwrap(),
+            7
+        );
+        assert_eq!(
+            OpenFs::ext4_checked_links_count_delta(5, ino, -2).unwrap(),
+            3
+        );
+        assert_eq!(
+            OpenFs::ext4_checked_links_count_delta(5, ino, 0).unwrap(),
+            5
+        );
         // Overflow past u16::MAX would wrap small and free a still-linked inode.
         assert!(OpenFs::ext4_checked_links_count_delta(u16::MAX, ino, 1).is_err());
         // Decrement below zero would wrap huge and leak the inode forever.
@@ -56893,9 +56940,18 @@ mod tests {
     fn ext4_checked_inode_blocks_delta_bounds() {
         let ino = InodeNumber(7);
         // Normal increment/decrement (i_blocks counts 512-byte sectors).
-        assert_eq!(OpenFs::ext4_checked_inode_blocks_delta(100, ino, 8).unwrap(), 108);
-        assert_eq!(OpenFs::ext4_checked_inode_blocks_delta(100, ino, -8).unwrap(), 92);
-        assert_eq!(OpenFs::ext4_checked_inode_blocks_delta(100, ino, 0).unwrap(), 100);
+        assert_eq!(
+            OpenFs::ext4_checked_inode_blocks_delta(100, ino, 8).unwrap(),
+            108
+        );
+        assert_eq!(
+            OpenFs::ext4_checked_inode_blocks_delta(100, ino, -8).unwrap(),
+            92
+        );
+        assert_eq!(
+            OpenFs::ext4_checked_inode_blocks_delta(100, ino, 0).unwrap(),
+            100
+        );
         // Overflow past u64::MAX.
         assert!(OpenFs::ext4_checked_inode_blocks_delta(u64::MAX, ino, 1).is_err());
         // Releasing more sectors than the inode holds would wrap i_blocks huge.
@@ -56934,14 +56990,20 @@ mod tests {
     #[test]
     fn btrfs_checked_chunk_available_and_logical_advance_guards() {
         // chunk_available: bytes from `logical` up to `chunk_end`.
-        assert_eq!(OpenFs::btrfs_checked_chunk_available(2000, 1000).unwrap(), 1000);
+        assert_eq!(
+            OpenFs::btrfs_checked_chunk_available(2000, 1000).unwrap(),
+            1000
+        );
         // A logical bytenr past the chunk end would map to the wrong chunk.
         assert!(OpenFs::btrfs_checked_chunk_available(1000, 2000).is_err());
         // A logical bytenr exactly at chunk_end leaves no bytes available.
         assert!(OpenFs::btrfs_checked_chunk_available(1000, 1000).is_err());
 
         // logical_advance: logical + amount, rejecting a u64 overflow.
-        assert_eq!(OpenFs::btrfs_checked_logical_advance(1000, 24).unwrap(), 1024);
+        assert_eq!(
+            OpenFs::btrfs_checked_logical_advance(1000, 24).unwrap(),
+            1024
+        );
         assert!(OpenFs::btrfs_checked_logical_advance(u64::MAX, 1).is_err());
     }
 
@@ -57869,7 +57931,10 @@ mod tests {
             .expect("create");
         fs.write(&cx, attr.ino, 0, &[0xCD_u8; 128 * 1024])
             .expect("write");
-        let free_after_write = fs.statfs(&cx, root).expect("statfs after write").blocks_free;
+        let free_after_write = fs
+            .statfs(&cx, root)
+            .expect("statfs after write")
+            .blocks_free;
         assert!(
             free_after_write < free_before,
             "write must consume data blocks ({free_after_write} < {free_before})"
@@ -58121,7 +58186,8 @@ mod tests {
             .create(&cx, root, OsStr::new("a.bin"), 0o644, 0, 0)
             .expect("create");
         fs.write(&cx, a.ino, 0, b"PERSIST").expect("write");
-        fs.link(&cx, a.ino, root, OsStr::new("b.bin")).expect("link");
+        fs.link(&cx, a.ino, root, OsStr::new("b.bin"))
+            .expect("link");
 
         // Remove the first name; the second hardlink must keep the inode + data.
         fs.unlink(&cx, root, OsStr::new("a.bin"))
@@ -58376,8 +58442,14 @@ mod tests {
         fs.setattr(&cx, attr.ino, &req).expect("set times");
 
         let ga = fs.getattr(&cx, attr.ino).expect("getattr");
-        assert_eq!(ga.atime, atime, "atime must round-trip (not swapped/dropped)");
-        assert_eq!(ga.mtime, mtime, "mtime must round-trip (not swapped/dropped)");
+        assert_eq!(
+            ga.atime, atime,
+            "atime must round-trip (not swapped/dropped)"
+        );
+        assert_eq!(
+            ga.mtime, mtime,
+            "mtime must round-trip (not swapped/dropped)"
+        );
     }
 
     #[test]
@@ -63770,7 +63842,10 @@ mod tests {
             .expect("lookup b")
             .expect("b.dat recovered");
         assert_eq!(a.inode, ino_u32);
-        assert_eq!(b.inode, ino_u32, "recovered hardlink points at the same inode");
+        assert_eq!(
+            b.inode, ino_u32,
+            "recovered hardlink points at the same inode"
+        );
     }
 
     /// bd-4tmpw: a fast-committed single-link delete (the common `rm` case) must,
@@ -65954,7 +66029,8 @@ mod tests {
             atime: None,
             mtime: None,
         };
-        fs.setattr(&cx, src.ino, &trunc).expect("truncate src to zero");
+        fs.setattr(&cx, src.ino, &trunc)
+            .expect("truncate src to zero");
         assert_eq!(fs.getattr(&cx, src.ino).expect("getattr src").size, 0);
 
         // dst must still read its full original data.
@@ -67280,12 +67356,28 @@ mod tests {
 
         // A regular-file mode is not a special file: mknod must reject it.
         let err = fs
-            .mknod(&cx, root, OsStr::new("bad"), ffs_types::S_IFREG | 0o644, 0, 0, 0)
+            .mknod(
+                &cx,
+                root,
+                OsStr::new("bad"),
+                ffs_types::S_IFREG | 0o644,
+                0,
+                0,
+                0,
+            )
             .unwrap_err();
         assert_eq!(err.to_errno(), libc::EINVAL);
         // A directory mode via mknod is likewise rejected.
         let err2 = fs
-            .mknod(&cx, root, OsStr::new("bad2"), ffs_types::S_IFDIR | 0o755, 0, 0, 0)
+            .mknod(
+                &cx,
+                root,
+                OsStr::new("bad2"),
+                ffs_types::S_IFDIR | 0o755,
+                0,
+                0,
+                0,
+            )
             .unwrap_err();
         assert_eq!(err2.to_errno(), libc::EINVAL);
 
@@ -67300,7 +67392,15 @@ mod tests {
         let root = InodeNumber(1);
 
         let fifo = fs
-            .mknod(&cx, root, OsStr::new("p"), ffs_types::S_IFIFO | 0o644, 0, 0, 0)
+            .mknod(
+                &cx,
+                root,
+                OsStr::new("p"),
+                ffs_types::S_IFIFO | 0o644,
+                0,
+                0,
+                0,
+            )
             .expect("mknod fifo");
         assert_eq!(fifo.kind, FileType::Fifo);
         assert_eq!(
@@ -67309,7 +67409,15 @@ mod tests {
         );
 
         let sock = fs
-            .mknod(&cx, root, OsStr::new("s"), ffs_types::S_IFSOCK | 0o600, 0, 0, 0)
+            .mknod(
+                &cx,
+                root,
+                OsStr::new("s"),
+                ffs_types::S_IFSOCK | 0o600,
+                0,
+                0,
+                0,
+            )
             .expect("mknod socket");
         assert_eq!(sock.kind, FileType::Socket);
         assert_eq!(
@@ -69614,15 +69722,28 @@ mod tests {
         fs.setattr(&cx, attr.ino, &req).expect("setattr times");
 
         let ga = fs.getattr(&cx, attr.ino).expect("getattr");
-        assert_eq!(ga.atime, atime, "atime must round-trip (not swapped/dropped)");
-        assert_eq!(ga.mtime, mtime, "mtime must round-trip (not swapped/dropped)");
+        assert_eq!(
+            ga.atime, atime,
+            "atime must round-trip (not swapped/dropped)"
+        );
+        assert_eq!(
+            ga.mtime, mtime,
+            "mtime must round-trip (not swapped/dropped)"
+        );
     }
 
     #[test]
     fn btrfs_setattr_chown_uid_gid_round_trip_without_swap() {
         let (fs, cx) = open_writable_btrfs();
         let attr = fs
-            .create(&cx, InodeNumber(1), OsStr::new("chown.bin"), 0o644, 1000, 1000)
+            .create(
+                &cx,
+                InodeNumber(1),
+                OsStr::new("chown.bin"),
+                0o644,
+                1000,
+                1000,
+            )
             .expect("create");
 
         // Distinct uid != gid so a swap or one-field drop is detectable.
@@ -70450,10 +70571,18 @@ mod tests {
     fn btrfs_fallocate_collapse_insert_reject_misaligned_and_out_of_bounds() {
         let (fs, cx) = open_writable_btrfs();
         let attr = fs
-            .create(&cx, InodeNumber(1), OsStr::new("falloc-shift.bin"), 0o644, 0, 0)
+            .create(
+                &cx,
+                InodeNumber(1),
+                OsStr::new("falloc-shift.bin"),
+                0o644,
+                0,
+                0,
+            )
             .expect("create");
         // 4 sectors of 4096 bytes.
-        fs.write(&cx, attr.ino, 0, &[0xAB_u8; 16384]).expect("write");
+        fs.write(&cx, attr.ino, 0, &[0xAB_u8; 16384])
+            .expect("write");
 
         let collapse = libc::FALLOC_FL_COLLAPSE_RANGE;
         let insert = libc::FALLOC_FL_INSERT_RANGE;
@@ -75100,7 +75229,10 @@ mod tests {
             .expect("create");
         fs.write(&cx, attr.ino, 0, &[0xAB_u8; 128 * 1024])
             .expect("write");
-        let free_after_write = fs.statfs(&cx, parent).expect("statfs after write").blocks_free;
+        let free_after_write = fs
+            .statfs(&cx, parent)
+            .expect("statfs after write")
+            .blocks_free;
         assert!(
             free_after_write < free_before,
             "write must consume data blocks ({free_after_write} < {free_before})"
@@ -75127,7 +75259,8 @@ mod tests {
             .create(&cx, parent, OsStr::new("a.bin"), 0o644, 0, 0)
             .expect("create");
         fs.write(&cx, a.ino, 0, b"PERSIST").expect("write");
-        fs.link(&cx, a.ino, parent, OsStr::new("b.bin")).expect("link");
+        fs.link(&cx, a.ino, parent, OsStr::new("b.bin"))
+            .expect("link");
 
         // Remove the first name; the second hardlink must keep the inode + data.
         fs.unlink(&cx, parent, OsStr::new("a.bin"))
@@ -75174,9 +75307,7 @@ mod tests {
             .expect("create child");
 
         // rmdir of a non-empty directory must fail with ENOTEMPTY.
-        let err = fs
-            .rmdir(&cx, root, OsStr::new("nonempty_dir"))
-            .unwrap_err();
+        let err = fs.rmdir(&cx, root, OsStr::new("nonempty_dir")).unwrap_err();
         assert_eq!(err.to_errno(), libc::ENOTEMPTY);
 
         // The directory and its child remain intact (not orphaned).
@@ -75263,9 +75394,7 @@ mod tests {
         assert!(fs.lookup(&cx, root, OsStr::new("dirlink")).is_err());
 
         // Linking onto an already-existing name -> EEXIST.
-        let e2 = fs
-            .link(&cx, file.ino, root, OsStr::new("dir"))
-            .unwrap_err();
+        let e2 = fs.link(&cx, file.ino, root, OsStr::new("dir")).unwrap_err();
         assert_eq!(e2.to_errno(), libc::EEXIST);
     }
 
@@ -75304,7 +75433,8 @@ mod tests {
             .expect("create");
         let ino = attr.ino;
 
-        fs.write(&cx, ino, 0, b"hello world!").expect("initial write");
+        fs.write(&cx, ino, 0, b"hello world!")
+            .expect("initial write");
 
         // Truncate to 5 bytes ("hello"), dropping " world!".
         let trunc = SetAttrRequest {
@@ -75379,7 +75509,11 @@ mod tests {
 
         // The hole reads back as the full requested span of zeros.
         let hole = fs.read(&cx, ino, 0, 8192).expect("read hole");
-        assert_eq!(hole.len(), 8192, "hole read returns the full requested span");
+        assert_eq!(
+            hole.len(),
+            8192,
+            "hole read returns the full requested span"
+        );
         assert!(
             hole.iter().all(|&b| b == 0),
             "btrfs hole must be zero-filled"
@@ -75441,9 +75575,8 @@ mod tests {
             inode
         };
         let attr = fs.btrfs_inode_to_attr(created.ino.0, &inode);
-        let secs = |t: std::time::SystemTime| {
-            t.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()
-        };
+        let secs =
+            |t: std::time::SystemTime| t.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
         assert_eq!(secs(attr.atime), 1_000, "atime <- atime_sec");
         assert_eq!(secs(attr.mtime), 2_000, "mtime <- mtime_sec");
         assert_eq!(secs(attr.ctime), 3_000, "ctime <- ctime_sec");
@@ -75489,7 +75622,10 @@ mod tests {
         );
         // Out-of-range seconds saturate to UNIX_EPOCH instead of panicking.
         assert_eq!(OpenFs::btrfs_inode_timestamp(u64::MAX, 0), UNIX_EPOCH);
-        assert_eq!(OpenFs::btrfs_inode_timestamp(u64::MAX, u32::MAX), UNIX_EPOCH);
+        assert_eq!(
+            OpenFs::btrfs_inode_timestamp(u64::MAX, u32::MAX),
+            UNIX_EPOCH
+        );
     }
 
     #[test]

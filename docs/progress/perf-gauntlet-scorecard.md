@@ -817,3 +817,76 @@ materialization paths.
 Do not reopen the `to_vec` materialization path for `Cow::Owned`. Future work should target an actual remaining
 direct-kernel gap, such as mounted ext4/btrfs streaming read syscall/copy overhead, unless a new profile shows
 compressed MVCC GC compaction itself dominating a realistic write+GC workload.
+
+## `bd-xmh5g` Addendum (cod-a btrfs zstd decoder reuse)
+
+Date: 2026-06-20
+Agent: BlackThrush (`cod-a`)
+Scope: `ffs-core` btrfs zstd transparent decompression for compressed extents
+Production status: kept; `btrfs_decompress` reuses one zstd decompressor context per worker thread
+RCH proof workers: `vmi1167313` for bench/check/focused test, `ovh-a` for conformance, `vmi1227854` for release build
+Requested target dir: `/data/projects/.rch-targets/frankenfs-cod-a`
+
+### Verdict
+
+Keep the thread-local zstd decoder reuse because the real mounted-image target
+improved twice: single-file read improved `76.1 ms -> 54.9 ms` (`1.39x`) and
+whole-tree walk improved `53.2 ms -> 32.8 ms` (`1.62x`). This is not kernel
+domination: current kernel btrfs still wins by `8.51x` on the single-file
+surface and `2.99x` on the walk surface.
+
+The internal synthetic decompressor-context bench is negative evidence, not a
+keep proof: fresh decompressor median `5.9330 ms` vs thread-reused median
+`7.2849 ms` (`0.814x` old/new). The direct workload outweighed the synthetic
+loss, but future zstd-context-only microbenches should not be treated as
+decisive unless they match the mounted-image path.
+
+### Scorecard
+
+| Gate | Result |
+| --- | --- |
+| Code-first backlog rows examined in this addendum | 1 |
+| RCH Criterion rows completed | 2 / 2 tiny zstd rows after adding a targeted bench-filter guard |
+| Direct ext4/btrfs-kernel ratios | Single-file candidate `54.9 ms` vs kernel `6.5 ms` (`8.51x` slower); walk candidate `32.8 ms` vs kernel `11.0 ms` (`2.99x` slower) |
+| Production levers kept | 1 (`BTRFS_ZSTD_DECOMPRESSOR` thread-local decoder reuse) |
+| Production levers rejected/reverted | 0 production; synthetic mechanism row is recorded as a loss |
+| Internal win/loss/neutral | `0/1/0` |
+| Direct kernel win/loss/neutral | `0/2/0` |
+| Conformance/behavior guard | Local `cargo fmt -p ffs-core --check` passed; RCH `cargo check -p ffs-core --all-targets` passed; RCH `cargo test -p ffs-core btrfs_decompress -- --nocapture` passed 10/10; RCH conformance passed 100/0/2 ignored; RCH `cargo build --release -p ffs-cli` passed. |
+| Known gate caveat | RCH `cargo clippy -p ffs-core --all-targets --no-deps -- -D warnings` is blocked by pre-existing `ffs-core` pedantic debt in `vfs.rs`, old indirect-pointer casts, xattr const placement, and redundant closures outside this lever. |
+| Release-readiness score for perf-superiority claims | 58 / 100: real direct-image improvement on the largest btrfs compressed-read gap, conformance green, but kernel still leads by `2.99-8.51x` |
+| Release-readiness score for this row's hygiene | 88 / 100: direct baseline/candidate confirmation, RCH bench/check/test/build, conformance, and ledgers are complete; residual risk is the contradictory synthetic row and pre-existing clippy debt |
+
+### Measured Rows
+
+| Workload | Baseline | Candidate confirmation | Ratio | Verdict |
+| --- | ---: | ---: | ---: | --- |
+| FrankenFS `read --discard /compressible.bin` | `76.1 ms` | `54.9 ms` | `1.39x` old/new | KEEP |
+| Kernel `cat /compressible.bin` vs candidate | `6.5 ms` kernel | `54.9 ms` FrankenFS | kernel `8.51x` faster | Direct loss remains |
+| FrankenFS `walk --read-data --no-stat` | `53.2 ms` | `32.8 ms` | `1.62x` old/new | KEEP |
+| Kernel `cat *` vs candidate walk | `11.0 ms` kernel | `32.8 ms` FrankenFS | kernel `2.99x` faster | Direct loss remains |
+| RCH synthetic `fresh_decompressor_per_frame` vs `thread_reused_decompressor` | `5.9330 ms` | `7.2849 ms` | `0.814x` old/new | Synthetic loss |
+
+### Isomorphism
+
+Ordering preserved: yes. Each compressed extent still decodes independently,
+then the existing read assembly copies slices in the same file-offset order.
+
+Tie-breaking unchanged: yes. Extent lookup, checksum handling, and compression
+type dispatch are unchanged.
+
+Floating-point identical: N/A.
+
+RNG seeds unchanged: N/A.
+
+Bytes verified: yes. The existing btrfs decompression tests passed, including
+zstd short-frame zero-fill and oversized-frame rejection. Harness conformance
+also passed `btrfs_transparent_decompression_zstd_regular_extent_conforms`.
+
+### Retry Predicate
+
+Do not retry dedicated pools, `with_min_len`, or zstd decoder-context-only
+microbenches without a new direct-image signal. Next work should attack a
+different remaining cost center: output-buffer reuse or decode-direct-to-final
+buffer, btrfs metadata/extent lookup fan-out, or a larger multi-file compressed
+kernel image that reproduces the remaining `2.99-8.51x` loss.
