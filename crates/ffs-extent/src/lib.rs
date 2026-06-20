@@ -1502,6 +1502,7 @@ impl ExtentCache {
                         inner.remove_entry(key);
                     }
                 }
+                drop(inner);
                 return None;
             };
             let clock = atomic_saturating_add(&inner.hits, 1)
