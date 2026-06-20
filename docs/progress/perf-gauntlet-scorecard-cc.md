@@ -33,6 +33,7 @@ with `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cc`.
 | 9 | bd-8nrzh | ffs-core · ext4_extent_tree_walk_overlap | parallel child reads | **8.85x/44.6x/52.9x** (N=16/64/256) | ✅ WIN (keep) |
 | 10 | bd-giyxr | ffs-core · e2compr_cluster_read_overlap | parallel cluster reads | **3.19x/8.74x/15.6x** (N=4/16/32) | ✅ WIN (keep) |
 | 11 | bd-2emlm | ffs-block · file_device_read | large-read direct (skip per-read scratch) | **13–17.6x** (1 MiB warm A/B; staged_scratch vs direct) | ✅ WIN (keep) |
+| 12 | bd-jgbam | ffs-block · file_device_read + mounted ext4/btrfs hyperfine | mmap-backed ByteDevice follow-up | safe direct path reconfirmed **15.36x** vs staged; mmap no-ship under `unsafe_code = "forbid"` | ❌ REJECT (no source kept) |
 
 ### Lever 11 — FileByteDevice large-read direct, no per-read scratch (cc 2026-06-20)
 `FileByteDevice::read_exact_at` staged **every** device read through a fresh `vec![0; len]`
@@ -57,10 +58,28 @@ clippy clean. **Caveat:** this is the lever's own A/B (staged vs direct in one p
 head-to-head vs the kernel; it proves the scratch elimination delivers and removes a real
 per-read allocation+fault on the bulk path.
 
+### Residual bd-jgbam — mmap-backed ByteDevice rejected under the unsafe ban (cod-a 2026-06-20)
+`bd-jgbam` targeted the remaining warm sequential read loss after Lever 11. Fresh direct kernel
+comparators still show a real gap: ext4 `/data/tmp/extdiff_1497854.img:/large.bin` read via
+FrankenFS `read --discard` averaged `15.0 ms` vs mounted-kernel `cat` `4.4 ms` (`3.36x` slower),
+and btrfs `/data/tmp/btrperf_1231197.img:/m.bin` averaged `76.5 ms` vs mounted-kernel `cat`
+`11.6 ms` (`6.58x` slower). The already-shipped safe large-read direct primitive remains sound:
+RCH `vmi1152480` measured `file_device_read_1mib` staged scratch median `506.33 us` vs direct
+`32.957 us`, old/new `15.36x`.
+
+The proposed radical follow-up, a file-backed `memmap2` `ByteDevice`, was rejected without source:
+current `memmap2` marks file-backed mapping constructors `unsafe`, while the workspace forbids unsafe
+code (`unsafe_code = "forbid"` and `ffs-block` has `#![forbid(unsafe_code)]`). Adding mmap here would
+violate the core safety invariant and would still need SIGBUS/truncation policy work to preserve the
+destination-on-error contract. Retry only with a policy-approved safe I/O model such as batched
+`io_uring`/`preadv2`, or after an explicit project decision to host an audited unsafe backend outside
+the forbidden crates.
+
 ## Summary — release-readiness
 
-- **14 levers measured, 14 kept, 0 reverted.** Every shipped optimization delivers a real,
-  measured speedup on its modeled workload; none regressed.
+- **15 levers/routes measured, 14 kept, 1 rejected/no-ship.** Every shipped optimization delivers a
+  real, measured speedup on its modeled workload; the new `bd-jgbam` mmap route is rejected before
+  source because the required API is unsafe under the repo's safety invariant.
 - The single neutral data point is **inode batch-free on a fully-fragmented file (1.01x)** — by
   design a zero-cost no-op when no contiguous runs exist; on contiguous (sequentially-allocated)
   files the same lever is **~1009x** (1024 per-block bitmap read-modify-writes → one ranged call).
