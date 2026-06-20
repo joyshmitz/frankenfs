@@ -394,10 +394,19 @@ ext4 one (dir/symlink guards then `btrfs_read_file_into`). MEASURED on the 128 M
 | warm read | 80.7 ms (1587 MB/s) | **59.1 ms (2164 MB/s)** | **1.37× faster** |
 | vs kernel `dd bs=128M` (82.9 ms) | 0.97× (parity) | **1.40× FASTER** | **flips btrfs from parity to a kernel-domination win** |
 
-Byte-identical (ffs-core `btrfs_read*` + `read_into` tests green, exit 0; full ffs-core suite green). Residual
-vs ext4 (21 ms) is the kept `out.fill(0)` memset + the btrfs per-chunk logical→physical work — a smaller,
-separate follow-up. **bd-2emlm closed.** This is the session's REAL kernel-domination win: btrfs warm reads now
-beat the in-kernel btrfs driver's single-threaded materialise, the same way ext4 already did.
+Byte-identical (ffs-core `btrfs_read*` + `read_into` tests green, exit 0; full ffs-core suite green).
+**bd-2emlm closed.** This is the session's REAL kernel-domination win: btrfs warm reads now beat the in-kernel
+btrfs driver's single-threaded materialise, the same way ext4 already did.
+
+**Residual re-profiled (post-fix, release-perf):** the kept `out.fill(0)` memset is only **2.5 %**
+(`__memset_avx2`) — NOT worth a zero-only-holes rewrite. The remaining btrfs-vs-ext4 (59 vs 21 ms) gap is
+diffuse: **16.6 % `__memmove_avx`** = the `FileByteDevice::read_exact_at` temp→`dst` double-copy (page-cache →
+temp → caller buffer vs the kernel's single copy — shared with ext4, the same userspace-pread tax recorded in
+"Bulk-read loss PROFILED"), **~5 % rayon `Stealer::steal`** (mild btrfs pool imbalance, down from ~8 %), and
+the btrfs per-chunk logical→physical resolution. The one shared lever (eliminate the FileByteDevice
+double-copy) needs **relaxing `preserves_read_exact_at_destination_on_error`**, a guarantee the team
+*deliberately added* (W160 bd-wvdrd/bd-d2bci, with a dedicated truncation test) — a design decision, not a
+code tweak, so deferred rather than blindly undone. No further single-crate lever closes the residual safely.
 
 ### btrfs read gap ROOT-CAUSED: memory-pressure / 2× RSS, not CPU/syscalls/parallelism (cc 2026-06-20, release-perf + symbols, bd-2emlm)
 
