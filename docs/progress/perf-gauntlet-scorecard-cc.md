@@ -63,7 +63,7 @@ with `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cc`.
 |------|-------|----------|---------|
 | bd-xmh5g.394 | read_block_uncompressed (clone vs arc_share) | **138.9x / 316.5x / 1978.1x** (4K/16K/64K block, cod-a `hz2` rerun). Supplemental cod-b BlackThrush rerun on `vmi1156319`: **57.70x / 157.41x / 749.91x** (`143.59ns -> 2.4887ns`, `447.25ns -> 2.8413ns`, `1.8696us -> 2.4931ns`). | ✅ WIN / KEEP — Arc refcount-bump (O(1), sub-ns median in this microbench) vs copying the whole block on every uncompressed read hit. Direct ext4/btrfs-kernel ratio is N/A for this internal MVCC materialization primitive; production-shaped scan corroboration was `29.615 GiB/s`. |
 | bd-xmh5g.386 | extent_leaf_search_validation_ab (trusted no-rescan) | **11.15x current cod-a rerun** (`451.37 us` -> `40.482 us` on `vmi1167313`; prior cc row was 9.01x) | ✅ WIN — skip re-validating an already-trusted extent leaf; public parsed-root zero-length guard stays checked. |
-| bd-xmh5g.399 | ls_dir_inode_prefetch_256 (parallel vs serial getattr) | **40.4x** | ✅ WIN — parallel readdirplus inode prefetch (ls -l). |
+| bd-xmh5g.399 | ls_dir_inode_prefetch_256 (parallel vs serial getattr) | **8.78x fresh cod-a rch rerun** (`32.894 ms` serial -> `3.7480 ms` parallel on `vmi1149989`; prior cc row was 40.4x) | ✅ WIN / KEEP — parallel readdirplus inode prefetch (ls -l); direct ext4-kernel ratio is N/A for this synthetic in-request I/O-overlap microbench. |
 
 ### Swarm parse/staging/scan levers measured — BOLD-VERIFY batch (cc-measured 2026-06-19, rch hz1)
 
