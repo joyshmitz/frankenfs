@@ -11,9 +11,7 @@
 //! commit per block; `batched_commit` stages all N blocks in one txn and commits
 //! once. The delta is the per-commit overhead the lever amortizes.
 
-use criterion::{
-    BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main,
-};
+use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use ffs_core::RequestScope;
 use ffs_mvcc::{MvccStore, Transaction};
 use ffs_types::BlockNumber;
@@ -157,5 +155,9 @@ fn bench_writeset_collect(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(mvcc_commit_batching, bench_commit_batching, bench_writeset_collect);
+criterion_group!(
+    mvcc_commit_batching,
+    bench_commit_batching,
+    bench_writeset_collect
+);
 criterion_main!(mvcc_commit_batching);

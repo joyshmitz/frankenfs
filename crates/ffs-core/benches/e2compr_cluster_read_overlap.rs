@@ -131,9 +131,13 @@ fn bench_cluster(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("serial", nblocks), &nblocks, |b, _| {
             b.iter(|| black_box(cluster_serial(&cx, &dev, black_box(&ptrs))));
         });
-        group.bench_with_input(BenchmarkId::new("parallel_rayon", nblocks), &nblocks, |b, _| {
-            b.iter(|| black_box(cluster_parallel(&cx, &dev, black_box(&ptrs))));
-        });
+        group.bench_with_input(
+            BenchmarkId::new("parallel_rayon", nblocks),
+            &nblocks,
+            |b, _| {
+                b.iter(|| black_box(cluster_parallel(&cx, &dev, black_box(&ptrs))));
+            },
+        );
     }
     group.finish();
 }

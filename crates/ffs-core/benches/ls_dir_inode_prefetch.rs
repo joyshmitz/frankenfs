@@ -63,7 +63,14 @@ fn bench_inode_prefetch(c: &mut Criterion) {
     // Lever: readdir prefetches all the inode-table blocks in parallel; the
     // blocking reads overlap across the rayon pool.
     group.bench_function("parallel_prefetch", |b| {
-        b.iter(|| black_box(blocks.par_iter().map(|&blk| read_inode_block(blk)).sum::<u64>()));
+        b.iter(|| {
+            black_box(
+                blocks
+                    .par_iter()
+                    .map(|&blk| read_inode_block(blk))
+                    .sum::<u64>(),
+            )
+        });
     });
 
     group.finish();

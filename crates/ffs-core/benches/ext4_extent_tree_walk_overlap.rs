@@ -105,9 +105,7 @@ impl BlockDevice for LatencyBlockDevice {
 /// block bytes (stands in for `parse_extent_tree` + `extend_from_slice`).
 fn parse_child(data: &BlockBuf) -> Vec<u64> {
     let s = data.as_slice();
-    (0..4)
-        .map(|k| u64::from(s[k * 8]) ^ (k as u64))
-        .collect()
+    (0..4).map(|k| u64::from(s[k * 8]) ^ (k as u64)).collect()
 }
 
 /// OLD: read each surviving child serially, parse + accumulate in order.
@@ -149,9 +147,13 @@ fn bench_walk(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("serial", fanout), &fanout, |b, _| {
             b.iter(|| black_box(walk_serial(&cx, &dev, black_box(&children))));
         });
-        group.bench_with_input(BenchmarkId::new("parallel_rayon", fanout), &fanout, |b, _| {
-            b.iter(|| black_box(walk_parallel(&cx, &dev, black_box(&children))));
-        });
+        group.bench_with_input(
+            BenchmarkId::new("parallel_rayon", fanout),
+            &fanout,
+            |b, _| {
+                b.iter(|| black_box(walk_parallel(&cx, &dev, black_box(&children))));
+            },
+        );
     }
     group.finish();
 }
