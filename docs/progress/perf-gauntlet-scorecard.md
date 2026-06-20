@@ -629,3 +629,49 @@ median (`12.58x`) with byte-identical output asserted by the bench. A follow-up 
 fast path was measured and reverted (`76.3 -> 75.7 ms`, `0.8%`, inside noise; forced 256 flipped faster under the
 same noisy run). Release-readiness verdict: chunking is a real keep versus the old setting, but btrfs-kernel
 domination remains open and should route to file-device/syscall/copy work, not more chunk retuning.
+
+---
+
+## REJECT — btrfs read scratch/direct-into-dst candidates did not transfer (cod-b 2026-06-20, bd-2emlm)
+
+Commit under measurement: uncommitted candidate, reverted before commit
+RCH build/bench worker: `hz1` for `ffs-block` Criterion and `ffs-cli` release build
+Requested target dir: `/data/projects/.rch-targets/frankenfs-cod-b`
+
+### Verdict
+
+This row is release-ready as negative evidence, not a production keep. The `FileByteDevice` reusable scratch
+primitive won dramatically in isolation, but the combined real-read candidate stayed neutral versus the prior
+FrankenFS btrfs timing and still lost to kernel streaming. Source candidates were reverted.
+
+### Scorecard
+
+| Gate | Result |
+| --- | --- |
+| Code-first backlog rows examined in this addendum | 1 |
+| RCH Criterion rows completed | 1 / 1 |
+| Same-worker primitive evidence | Yes, `hz1` for both A/B arms in one Criterion run |
+| Direct ext4/btrfs-kernel ratios | `1/2/0`: candidate beat kernel btrfs `dd bs=128M` (`74.949 ms` vs `127.923 ms`, `1.71x` faster), lost to kernel `dd bs=8M` (`77.580 ms` vs `51.407 ms`, `1.51x` slower), and lost to kernel `cat` (`77.580 ms` vs `11.710 ms`, `6.63x` slower) |
+| Internal win/loss/neutral | `1/0/1`: `FileByteDevice` scratch A/B was `11.15x` faster in the primitive; whole btrfs read was neutral versus prior `76.3 ms` FrankenFS context (`74.949 ms` / `77.580 ms`) |
+| Production levers kept | 0 |
+| Production levers rejected/reverted | 2 (`FileByteDevice` reusable staging scratch; btrfs `read_into` direct-to-dst candidate) |
+| Conformance/build guard after revert | RCH `cargo check -p ffs-block --all-targets` passed on `hz1`; RCH `cargo test -p ffs-block file_byte_device -- --nocapture` passed on `vmi1149989`; RCH `cargo clippy -p ffs-block --all-targets -- -D warnings` passed on `vmi1152480`; RCH `cargo build --release -p ffs-cli` passed on `hz1`; RCH `cargo test -p ffs-harness --test conformance -- --nocapture` passed on `vmi1152480` (100 passed / 0 failed / 2 ignored); source reverted to no production code delta |
+| Release-readiness score for perf-superiority claims | 45 / 100: useful real-image evidence and fresh kernel comparators, but no shippable speedup and kernel streaming still dominates |
+| Release-readiness score for this row's hygiene | 93 / 100: measured before rejecting, logged win/loss/neutral ratios, reverted no-gain source, and left retry predicate; whole-workspace fmt remains blocked by unrelated pre-existing `ffs-core` formatting dirt |
+
+### Measured Rows
+
+| Workload | Candidate | Comparator | Ratio | Verdict |
+| --- | ---: | ---: | ---: | --- |
+| `file_byte_device_read_1mib` primitive | `96.908 us` reusable scratch | `1.0804 ms` fresh-temp shape | `11.15x` old/new | Reject at production surface; primitive win did not transfer |
+| btrfs `/m.bin` real read | `74.949 ms` candidate | prior FrankenFS default-32 `76.3 ms` | `1.02x` | Neutral |
+| btrfs `/m.bin` real read, streaming run | `77.580 ms` candidate | prior FrankenFS default-32 `76.3 ms` | `0.98x` | Neutral |
+| btrfs `/m.bin` vs kernel materialising read | `74.949 ms` candidate | kernel `dd bs=128M` `127.923 ms` | `1.71x` FrankenFS faster | Win |
+| btrfs `/m.bin` vs kernel buffered read | `77.580 ms` candidate | kernel `dd bs=8M` `51.407 ms` | `1.51x` FrankenFS slower | Loss |
+| btrfs `/m.bin` vs kernel page-cache streaming | `77.580 ms` candidate | kernel `cat` `11.710 ms` | `6.63x` FrankenFS slower | Loss |
+
+### Retry Predicate
+
+Do not retry reusable staging scratch or btrfs direct-to-dst as blind standalone levers. The next credible
+`bd-2emlm` pass needs heap allocation attribution for the btrfs read pipeline and must prove RSS drops below the
+current ~133-138 MiB profile before measuring throughput again.

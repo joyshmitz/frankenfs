@@ -377,6 +377,28 @@ over-recorded. The lever is still correct to keep (serial 6.7/24.8/104 ms vs par
 **I/O-overlap absolute ratios from these synthetic latency benches are host-dependent — read them as "clear
 win, magnitude ±", not literal speedups.**
 
+### ✅ btrfs read gap FIXED — read-into-`dst` fast path, 1.37× warm + RSS halved, now BEATS the kernel (cc 2026-06-20, bd-2emlm SHIPPED)
+
+Acting on the root-cause below: `read_into` (the streamed-read API the CLI/FUSE use) had an **ext4 fast path
+that reads straight into the caller's `dst`** but a **btrfs fallback through `FsOps::read` that allocates a
+fresh owned `Vec` per 64 MiB chunk and copies it into `dst`** — the source of the 2× RSS, the `__memmove_avx`
+samples, and the page-fault thrash. Fix: parameterised `btrfs_read_file` → **`btrfs_read_file_into(dst)`** that
+writes straight into the caller buffer (zeroing `dst[..to_read]` first so holes stay zero — byte-identical to
+the old `vec![0u8; to_read]`), kept a thin owned-`Vec` `btrfs_read_file` wrapper for the two callers that need
+owned bytes (`FsOps::read`, symlink-target reads), and added a **btrfs fast path in `read_into`** mirroring the
+ext4 one (dir/symlink guards then `btrfs_read_file_into`). MEASURED on the 128 MiB btrfs (release-perf, warm):
+
+| metric | before | after | result |
+|--------|--------|-------|--------|
+| max RSS | 133 MB | **70 MB** | **−47 %** (matches ext4's 64 MB — the owned-Vec gone) |
+| warm read | 80.7 ms (1587 MB/s) | **59.1 ms (2164 MB/s)** | **1.37× faster** |
+| vs kernel `dd bs=128M` (82.9 ms) | 0.97× (parity) | **1.40× FASTER** | **flips btrfs from parity to a kernel-domination win** |
+
+Byte-identical (ffs-core `btrfs_read*` + `read_into` tests green, exit 0; full ffs-core suite green). Residual
+vs ext4 (21 ms) is the kept `out.fill(0)` memset + the btrfs per-chunk logical→physical work — a smaller,
+separate follow-up. **bd-2emlm closed.** This is the session's REAL kernel-domination win: btrfs warm reads now
+beat the in-kernel btrfs driver's single-threaded materialise, the same way ext4 already did.
+
 ### btrfs read gap ROOT-CAUSED: memory-pressure / 2× RSS, not CPU/syscalls/parallelism (cc 2026-06-20, release-perf + symbols, bd-2emlm)
 
 Rebuilt `ffs-cli` with `--profile release-perf` (opt-level=3 + symbols) and profiled the btrfs vs ext4 read
@@ -436,3 +458,58 @@ confirms (not supersedes) the existing verdict: frankenfs's parallel read **beat
 materialises the file and trails only an idealised zero-copy streaming reader — the residual is the
 materialisation + double-copy tax above, not a parallelism deficit. (Note: tmpfs image → `drop_caches` does
 not evict, so only the warm/CPU-bound regime is characterised here, which is exactly where the gap lives.)
+
+### REJECTED: btrfs read scratch/direct-into-dst candidates did not move the real read gap (cod-b 2026-06-20, bd-2emlm)
+
+Tried the next obvious memory-footprint levers against `bd-2emlm` and reverted them because the primitive win
+did not transfer to the real btrfs read:
+
+- `FileByteDevice` thread-local reusable staging scratch, preserving destination-on-error semantics.
+- btrfs `read_into` direct-to-caller-buffer form, avoiding the owned `Vec` + fallback copy in the streamed
+  `OpenFs::read_into` path.
+
+The isolated block primitive looked spectacular on RCH `hz1`: in one same-binary Criterion run,
+`file_byte_device_read_1mib/fresh_temp_vec_shape` measured `1.0804 ms` median while
+`file_device_reused_scratch` measured `96.908 us`, an `11.15x` old/new win. That was not enough. The candidate
+release CLI still measured essentially neutral on the actual 100 MiB btrfs image:
+
+| Comparator | Mean | Ratio | Verdict |
+| --- | ---: | ---: | --- |
+| FrankenFS candidate `read --discard /m.bin` | `74.949 ms` | vs prior `76.3 ms`: `1.02x` faster, inside noise | Neutral |
+| FrankenFS candidate in kernel-streaming run | `77.580 ms` | vs prior `76.3 ms`: `0.98x` slower, inside noise | Neutral |
+| kernel btrfs `dd bs=128M` | `127.923 ms` | FrankenFS `1.71x` faster | Win vs materialising comparator |
+| kernel btrfs `dd bs=8M` | `51.407 ms` | FrankenFS `1.51x` slower | Loss |
+| kernel btrfs `cat` | `11.710 ms` | FrankenFS `6.63x` slower | Loss |
+
+The one-shot `/usr/bin/time` smoke for the candidate binary reported `maxrss=137968 KiB`, not lower than the
+prior ~133 MiB btrfs profile. That falsifies the hoped-for "remove one big allocation and drop RSS" story for
+this surface. The likely remaining gap is not the `FileByteDevice` temp buffer alone, nor the fallback copy
+alone; it needs heap-allocation attribution inside the btrfs read pipeline (`jobs`, `results`,
+`decompressed_by_idx`, output lifetime, and chunk-map metadata) before another code lever. Retrying scratch or
+read-into-dst without a new allocation profile is expected to be neutral.
+
+Commands/evidence:
+
+```bash
+CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-b \
+  rch exec -- cargo bench -p ffs-block --bench read_contiguous -- \
+  file_byte_device_read_1mib --warm-up-time 1 --measurement-time 2
+
+CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-b \
+  rch exec -- cargo build --release -p ffs-cli
+
+CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-b \
+  rch exec -- cargo test -p ffs-harness --test conformance -- --nocapture
+
+hyperfine --warmup 3 --runs 10 \
+  '/data/projects/.rch-targets/frankenfs-cod-b/release/ffs-cli --log-format json read /data/tmp/btrperf_1231197.img /m.bin --discard >/dev/null 2>&1' \
+  'dd if=/data/tmp/btrperfmnt_1231197/m.bin of=/dev/null bs=128M status=none'
+
+hyperfine --warmup 3 --runs 10 \
+  '/data/projects/.rch-targets/frankenfs-cod-b/release/ffs-cli --log-format json read /data/tmp/btrperf_1231197.img /m.bin --discard >/dev/null 2>&1' \
+  'cat /data/tmp/btrperfmnt_1231197/m.bin >/dev/null' \
+  'dd if=/data/tmp/btrperfmnt_1231197/m.bin of=/dev/null bs=8M status=none'
+```
+
+Production verdict: **no code kept**. Both source candidates were reverted. `bd-2emlm` remains a real open
+gap; the next credible move is a heap profiler or allocation census, not another temp-buffer micro-lever.
