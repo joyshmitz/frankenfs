@@ -1,5 +1,86 @@
 # Perf Gauntlet Scorecard
 
+## `bd-xmh5g.407` cod-b CLI Read-Tile Rejection
+
+Date: 2026-06-20
+Agent: BlackThrush (`cod-b`)
+Scope: `ffs-cli read` single-file stream tile for btrfs compressed reads,
+64 MiB -> 1 MiB
+Commit under measurement: rejected local candidate, source reverted before
+commit
+RCH workers: `vmi1227854` clean-source release-perf build, `vmi1149989`
+candidate release-perf build
+Requested target dir: `/data/projects/.rch-targets/frankenfs-cod-b`
+
+### Verdict
+
+REJECT. The profile hypothesis was that the single-file `ffs read` command was
+making the btrfs compressed-read gap worse by requesting a 64 MiB chunk, forcing
+the core read path to hold the output chunk plus every decompressed extent in
+that chunk. The `walk --read-data` path already uses a 1 MiB buffer and showed
+much lower one-shot RSS, so this was a plausible cache/working-set tile lever.
+
+The real direct comparator rejected it. A one-shot smoke looked faster
+(`33.2 ms` -> `29.8 ms` CLI duration), but the 15-run hyperfine acceptance pass
+regressed the target read from `35.266 ms` to `36.367 ms` (`0.970x` old/new).
+RSS did not materially improve (`47,844 KiB` baseline vs `47,812 KiB`
+candidate), so the working-set story did not hold. The production source was
+reverted; only this evidence remains.
+
+### Scorecard
+
+| Gate | Result |
+| --- | --- |
+| Code-first backlog rows examined in this closeout | 1 |
+| Direct mounted btrfs rows completed | 4 rows: current/candidate `ffs read` and current/candidate `walk --read-data`, each compared to the mounted kernel image |
+| Same-host evidence | Local A/B against `/data/tmp/btrdiff2_1340519.img` and mounted reference `/data/tmp/btrdiff2mnt_1340519`; acceptance runs used 15 iterations |
+| Direct ext4/btrfs-kernel ratios | Candidate single-file read `36.367 ms` vs kernel `6.268 ms` (`5.80x` slower); candidate walk `31.486 ms` vs kernel `11.888 ms` (`2.65x` slower) |
+| Production levers kept | 0 |
+| Production levers rejected/reverted | 1 |
+| Internal A/B win/loss/neutral | `0 / 1 / 1`: target read loss; untouched walk path treated as collateral/no-ship evidence |
+| Direct kernel win/loss/neutral | `0 / 2 / 0` |
+| Conformance/build guard | RCH clean-source `cargo build --profile release-perf -p ffs-cli` passed on `vmi1227854`; RCH candidate build passed on `vmi1149989`; source reverted; `git diff --exit-code -- crates/ffs-cli/src/main.rs` passed; RCH conformance `cargo test -p ffs-harness --test conformance -- --nocapture` passed on `hz2` (100 passed / 0 failed / 2 ignored). `cargo fmt -p ffs-cli --check` is blocked by pre-existing formatting drift in `crates/ffs-cli/src/cmd_repair.rs`, not by this reverted candidate. |
+| Release-readiness score for perf-superiority claims | 35 / 100: direct mounted-kernel evidence is real, but no production code was kept and kernel still leads by `2.65-5.80x` on the accepted candidate rows. |
+| Release-readiness score for this row's hygiene | 92 / 100: baseline/candidate direct rows, RSS smoke, kernel ratios, RCH build evidence, and manual source revert are recorded; remaining risk is that no allocator profiler was available to pinpoint the underlying allocation site. |
+
+### Measured Rows
+
+| Phase | Workload | Baseline | Candidate | Kernel btrfs | Ratio vs baseline | Ratio vs kernel | Verdict |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | --- |
+| One-shot RSS smoke | `ffs-cli read --discard /compressible.bin` | `33.228 ms`, `47,844 KiB`, `11,577` minor faults | `29.814 ms`, `47,812 KiB`, `11,561` minor faults | N/A | `1.11x` old/new smoke | N/A | Routing-only smoke; RSS unchanged |
+| Acceptance, 15 runs | `ffs-cli read --discard /compressible.bin` vs kernel `cat` | `35.266 ms` | `36.367 ms` | `6.268 ms` | `0.970x` old/new | candidate `5.80x` slower than kernel | Reject: regression |
+| Acceptance, 15 runs | `ffs-cli walk --read-data --no-stat` vs kernel `cat *` | `29.108 ms` | `31.486 ms` | `11.888 ms` | `0.925x` old/new | candidate `2.65x` slower than kernel | Reject: no collateral win |
+
+### Kernel Reference Coverage
+
+This row used the same mounted read-only btrfs image as the direct kernel
+reference. The candidate never beat kernel btrfs. The failed RSS movement says
+the remaining compressed-read gap is not solved by shrinking the CLI request
+tile alone; another pass needs allocator attribution inside `btrfs_read_file`
+or a structural I/O/decode design that actually reduces live decompressed
+extent/output overlap.
+
+### Commands
+
+```bash
+AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-b \
+  rch exec -- cargo build --profile release-perf -p ffs-cli
+
+hyperfine --warmup 3 --runs 15 \
+  --export-json /tmp/frankenfs_cod_b_current_btrdiff2_read_walk.json \
+  '/data/projects/.rch-targets/frankenfs-cod-b/release-perf/ffs-cli --log-format json read /data/tmp/btrdiff2_1340519.img /compressible.bin --discard >/dev/null 2>&1' \
+  'cat /data/tmp/btrdiff2mnt_1340519/compressible.bin >/dev/null' \
+  '/data/projects/.rch-targets/frankenfs-cod-b/release-perf/ffs-cli --log-format json walk --read-data --no-stat /data/tmp/btrdiff2_1340519.img >/dev/null 2>&1' \
+  'cat /data/tmp/btrdiff2mnt_1340519/* >/dev/null'
+
+hyperfine --warmup 3 --runs 15 \
+  --export-json /tmp/frankenfs_cod_b_candidate_btrdiff2_read_walk.json \
+  '/data/projects/.rch-targets/frankenfs-cod-b/release-perf/ffs-cli --log-format json read /data/tmp/btrdiff2_1340519.img /compressible.bin --discard >/dev/null 2>&1' \
+  'cat /data/tmp/btrdiff2mnt_1340519/compressible.bin >/dev/null' \
+  '/data/projects/.rch-targets/frankenfs-cod-b/release-perf/ffs-cli --log-format json walk --read-data --no-stat /data/tmp/btrdiff2_1340519.img >/dev/null 2>&1' \
+  'cat /data/tmp/btrdiff2mnt_1340519/* >/dev/null'
+```
+
 ## `bd-xmh5g` cod-b Scratch-Buffer Rejection
 
 Date: 2026-06-20
