@@ -54,6 +54,7 @@ const MAX_COALESCED_READ_SIZE: u32 = 256 * 1024;
 const FUSE_MAX_READ_BYTES: u32 = 16 * 1024 * 1024;
 const MAX_PENDING_READAHEAD_ENTRIES: usize = 64;
 const MAX_ACCESS_PREDICTOR_ENTRIES: usize = 4096;
+const MAX_WRITEBACK_BATCH_PENDING_WRITES: usize = 8192;
 const BACKPRESSURE_THROTTLE_DELAY: Duration = Duration::from_millis(5);
 const BACKPRESSURE_SLEEP_CHECK_INTERVAL: Duration = Duration::from_millis(10);
 const MOUNT_HANDLE_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
@@ -1214,6 +1215,7 @@ impl ReadaheadManager {
 /// | `kernel_notifier`  | `Mutex<Option<Notifier>>`           | leaf |
 /// | `access_predictor` | `AccessPredictor.state: Mutex`      | leaf |
 /// | `readahead`        | `ReadaheadManager.pending: Mutex`   | leaf |
+/// | `writeback_batches` | table mutex + per-batch scope mutex | leaf/table-only, then per-handle scope |
 /// | `inode_locks`      | `FuseInodeLocks.table: Mutex`       | 0 (see bd-pfv55 doc on FuseInodeLocks for the per-inode `held` rank-1 sublock) |
 ///
 /// Production callers comply by **never nesting two subsystem
@@ -1231,6 +1233,8 @@ impl ReadaheadManager {
 /// | `AccessPredictor::invalidate_inode` | access_predictor | leaf-only                        |
 /// | `ReadaheadManager::insert/take` | readahead          | leaf-only                        |
 /// | `ReadaheadManager::invalidate_inode` | readahead       | leaf-only                        |
+/// | `get_or_begin_writeback_batch` | writeback_batches  | table-only; no inode/readahead lock held |
+/// | `commit_writeback_batch_for_key` | writeback_batches | drain batch, release table, then commit |
 /// | `FuseInodeLocks::acquire`       | inode_locks        | rank 0 → drop → rank 1 (sorted)  |
 /// | `FuseInodeLocks::try_acquire`   | inode_locks        | rank 0 → drop → rank 1 (sorted)  |
 /// | `FuseInodeGuard::Drop`          | inode_locks        | rank 0 → rank 1 (nested)         |
@@ -1254,10 +1258,12 @@ struct FuseInner {
     metrics: Arc<AtomicMetrics>,
     thread_count: usize,
     read_only: bool,
+    writeback_cache: bool,
     mountpoint: Option<PathBuf>,
     kernel_notifier: Mutex<Option<fuser::Notifier>>,
     ioctl_trace: Option<IoctlTraceProbe>,
     backpressure: Option<Arc<BackpressureGate>>,
+    writeback_batches: Mutex<BTreeMap<WritebackKey, Arc<WritebackBatch>>>,
     access_predictor: AccessPredictor,
     readahead: ReadaheadManager,
     inode_locks: Arc<FuseInodeLocks>,
@@ -1269,8 +1275,34 @@ impl std::fmt::Debug for FuseInner {
             .field("metrics", &self.metrics)
             .field("thread_count", &self.thread_count)
             .field("read_only", &self.read_only)
+            .field("writeback_cache", &self.writeback_cache)
             .field("mountpoint", &self.mountpoint)
             .finish_non_exhaustive()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct WritebackKey {
+    ino: InodeNumber,
+    fh: u64,
+}
+
+impl WritebackKey {
+    const fn new(ino: InodeNumber, fh: u64) -> Self {
+        Self { ino, fh }
+    }
+}
+
+#[derive(Debug)]
+struct WritebackBatch {
+    scope: Mutex<Option<RequestScope>>,
+}
+
+impl WritebackBatch {
+    fn new(scope: RequestScope) -> Self {
+        Self {
+            scope: Mutex::new(Some(scope)),
+        }
     }
 }
 
@@ -1983,10 +2015,12 @@ impl FrankenFuse {
                 metrics: Arc::new(AtomicMetrics::new()),
                 thread_count,
                 read_only: options.read_only,
+                writeback_cache: options.writeback_cache.is_enabled(),
                 mountpoint: mountpoint.map(Path::to_path_buf),
                 kernel_notifier: Mutex::new(None),
                 ioctl_trace: options.ioctl_trace_path.clone().map(IoctlTraceProbe::new),
                 backpressure,
+                writeback_batches: Mutex::new(BTreeMap::new()),
                 access_predictor: AccessPredictor::default(),
                 readahead: ReadaheadManager::new(MAX_PENDING_READAHEAD_ENTRIES),
                 inode_locks: Arc::new(FuseInodeLocks::default()),
@@ -2131,7 +2165,7 @@ impl FrankenFuse {
         let byte_offset = u64::try_from(offset).map_err(|_| libc::EINVAL)?;
         let cx = Self::cx_for_request();
         let data = self
-            .read_with_readahead(&cx, InodeNumber(ino), byte_offset, size)
+            .read_with_readahead(&cx, InodeNumber(ino), 0, byte_offset, size)
             .map_err(|error| error.to_errno())?;
         self.inner
             .metrics
@@ -2181,6 +2215,9 @@ impl FrankenFuse {
         lock_owner: u64,
     ) -> std::result::Result<(), c_int> {
         let cx = Self::cx_for_request();
+        let key = WritebackKey::new(InodeNumber(ino), fh);
+        self.commit_writeback_batch_for_key(&cx, key)
+            .map_err(|error| error.to_errno())?;
         self.with_request_scope(&cx, RequestOp::Flush, |cx, scope| {
             self.inner
                 .ops
@@ -2204,6 +2241,9 @@ impl FrankenFuse {
         if let Some(errno) = self.backpressure_errno(&cx, RequestOp::Fsync) {
             return Err(errno);
         }
+        let key = WritebackKey::new(InodeNumber(ino), fh);
+        self.commit_writeback_batch_for_key(&cx, key)
+            .map_err(|error| error.to_errno())?;
         self.with_request_scope(&cx, RequestOp::Fsync, |cx, scope| {
             self.inner
                 .ops
@@ -2225,6 +2265,9 @@ impl FrankenFuse {
         flush: bool,
     ) -> std::result::Result<(), c_int> {
         let cx = Self::cx_for_request();
+        let key = WritebackKey::new(InodeNumber(ino), fh);
+        self.commit_writeback_batch_for_key(&cx, key)
+            .map_err(|error| error.to_errno())?;
         self.with_request_scope(&cx, RequestOp::Release, |cx, scope| {
             self.inner.ops.release(
                 cx,
@@ -4885,6 +4928,142 @@ impl FrankenFuse {
         }
     }
 
+    fn lock_writeback_batches(
+        &self,
+    ) -> std::sync::MutexGuard<'_, BTreeMap<WritebackKey, Arc<WritebackBatch>>> {
+        match self.inner.writeback_batches.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                warn!("FUSE writeback batch table poisoned, recovering");
+                poisoned.into_inner()
+            }
+        }
+    }
+
+    fn lock_writeback_scope(
+        batch: &WritebackBatch,
+    ) -> std::sync::MutexGuard<'_, Option<RequestScope>> {
+        match batch.scope.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                warn!("FUSE writeback batch scope poisoned, recovering");
+                poisoned.into_inner()
+            }
+        }
+    }
+
+    fn begin_deferred_write_scope(&self, cx: &Cx) -> ffs_error::Result<RequestScope> {
+        let mut scope = self.inner.ops.begin_request_scope(cx, RequestOp::Write)?;
+        scope.defer_commit_until_flush();
+        Ok(scope)
+    }
+
+    fn end_deferred_write_scope(&self, cx: &Cx, scope: RequestScope) -> ffs_error::Result<()> {
+        self.inner
+            .ops
+            .end_request_scope(cx, RequestOp::Write, scope)
+    }
+
+    fn commit_deferred_write_scope(
+        &self,
+        cx: &Cx,
+        mut scope: RequestScope,
+    ) -> ffs_error::Result<ffs_types::CommitSeq> {
+        let commit_result = self.inner.ops.commit_request_scope(&mut scope);
+        let end_result = self.end_deferred_write_scope(cx, scope);
+
+        match (commit_result, end_result) {
+            (Ok(commit), Ok(())) => Ok(commit),
+            (Ok(_), Err(end_err)) => Err(end_err),
+            (Err(commit_err), Ok(())) => Err(commit_err),
+            (Err(commit_err), Err(end_err)) => {
+                warn!(
+                    error = %end_err,
+                    "writeback batch cleanup failed after commit error"
+                );
+                Err(commit_err)
+            }
+        }
+    }
+
+    fn writeback_batch(&self, key: WritebackKey) -> Option<Arc<WritebackBatch>> {
+        self.lock_writeback_batches().get(&key).cloned()
+    }
+
+    fn get_or_begin_writeback_batch(
+        &self,
+        cx: &Cx,
+        key: WritebackKey,
+    ) -> ffs_error::Result<Arc<WritebackBatch>> {
+        if let Some(batch) = self.writeback_batch(key) {
+            return Ok(batch);
+        }
+
+        let scope = self.begin_deferred_write_scope(cx)?;
+        let batch = Arc::new(WritebackBatch::new(scope));
+        let mut batches = self.lock_writeback_batches();
+        if let Some(existing) = batches.get(&key) {
+            let existing = Arc::clone(existing);
+            drop(batches);
+            let mut scope_guard = Self::lock_writeback_scope(&batch);
+            if let Some(scope) = scope_guard.take() {
+                drop(scope_guard);
+                self.end_deferred_write_scope(cx, scope)?;
+            }
+            return Ok(existing);
+        }
+        batches.insert(key, Arc::clone(&batch));
+        drop(batches);
+        Ok(batch)
+    }
+
+    fn remove_writeback_batch_if_same(&self, key: WritebackKey, batch: &Arc<WritebackBatch>) {
+        let mut batches = self.lock_writeback_batches();
+        if batches
+            .get(&key)
+            .is_some_and(|existing| Arc::ptr_eq(existing, batch))
+        {
+            batches.remove(&key);
+        }
+    }
+
+    fn commit_writeback_batch_for_key(
+        &self,
+        cx: &Cx,
+        key: WritebackKey,
+    ) -> ffs_error::Result<Option<ffs_types::CommitSeq>> {
+        let batch = self.lock_writeback_batches().remove(&key);
+        let Some(batch) = batch else {
+            return Ok(None);
+        };
+        let mut scope_guard = Self::lock_writeback_scope(&batch);
+        let Some(scope) = scope_guard.take() else {
+            return Ok(None);
+        };
+        drop(scope_guard);
+        self.commit_deferred_write_scope(cx, scope).map(Some)
+    }
+
+    fn commit_all_writeback_batches(&self, cx: &Cx) -> ffs_error::Result<usize> {
+        let batches: Vec<_> = {
+            let mut table = self.lock_writeback_batches();
+            let batches = table.values().cloned().collect();
+            table.clear();
+            batches
+        };
+        let mut committed = 0;
+        for batch in batches {
+            let mut scope_guard = Self::lock_writeback_scope(&batch);
+            let Some(scope) = scope_guard.take() else {
+                continue;
+            };
+            drop(scope_guard);
+            self.commit_deferred_write_scope(cx, scope)?;
+            committed += 1;
+        }
+        Ok(committed)
+    }
+
     fn dispatch_opendir(&self, cx: &Cx, ino: InodeNumber) -> ffs_error::Result<(u64, u32)> {
         self.with_request_scope(cx, RequestOp::Opendir, |cx, scope| {
             let attr = self.inner.ops.getattr(cx, scope, ino)?;
@@ -5124,6 +5303,29 @@ impl FrankenFuse {
         }
         let byte_offset =
             u64::try_from(offset).map_err(|_| MutationDispatchError::Errno(libc::EINVAL))?;
+        if !self.inner.writeback_cache || intent.nowait() {
+            return self.dispatch_write_per_request(&cx, ino, byte_offset, data, intent);
+        }
+        if intent.sync_mode().is_some() {
+            let key = WritebackKey::new(InodeNumber(ino), intent.fh);
+            self.commit_writeback_batch_for_key(&cx, key)
+                .map_err(|error| MutationDispatchError::Operation {
+                    error,
+                    offset: Some(byte_offset),
+                })?;
+            return self.dispatch_write_per_request(&cx, ino, byte_offset, data, intent);
+        }
+        self.dispatch_write_batched(&cx, ino, byte_offset, data, intent)
+    }
+
+    fn dispatch_write_per_request(
+        &self,
+        cx: &Cx,
+        ino: u64,
+        byte_offset: u64,
+        data: &[u8],
+        intent: WriteIntent,
+    ) -> Result<u32, MutationDispatchError> {
         let mut operation_offset = byte_offset;
         let (written, _commit_seq) = {
             let _inode_guards = if intent.nowait() {
@@ -5132,7 +5334,7 @@ impl FrankenFuse {
             } else {
                 self.acquire_mutation_inode_guards(&[InodeNumber(ino)])
             };
-            self.with_request_scope(&cx, RequestOp::Write, |cx, scope| {
+            self.with_request_scope(cx, RequestOp::Write, |cx, scope| {
                 let write_offset = if intent.append_to_eof() {
                     self.inner.ops.getattr(cx, scope, InodeNumber(ino))?.size
                 } else {
@@ -5162,6 +5364,56 @@ impl FrankenFuse {
             offset: Some(operation_offset),
         })?;
         // Update writeback barrier if enabled.
+        Ok(written)
+    }
+
+    fn dispatch_write_batched(
+        &self,
+        cx: &Cx,
+        ino: u64,
+        byte_offset: u64,
+        data: &[u8],
+        intent: WriteIntent,
+    ) -> Result<u32, MutationDispatchError> {
+        let key = WritebackKey::new(InodeNumber(ino), intent.fh);
+        let mut operation_offset = byte_offset;
+        let write_result: ffs_error::Result<u32> = (|| {
+            loop {
+                let batch = self.get_or_begin_writeback_batch(cx, key)?;
+                let inode_guards = self.acquire_mutation_inode_guards(&[InodeNumber(ino)]);
+                let mut scope_guard = Self::lock_writeback_scope(&batch);
+                let Some(scope) = scope_guard.as_mut() else {
+                    drop(scope_guard);
+                    drop(inode_guards);
+                    self.remove_writeback_batch_if_same(key, &batch);
+                    continue;
+                };
+                let write_offset = if intent.append_to_eof() {
+                    self.inner.ops.getattr(cx, scope, InodeNumber(ino))?.size
+                } else {
+                    byte_offset
+                };
+                operation_offset = write_offset;
+                let bytes =
+                    self.inner
+                        .ops
+                        .write(cx, scope, InodeNumber(ino), write_offset, data)?;
+                self.inner.readahead.invalidate_inode(InodeNumber(ino));
+                if scope.pending_write_count() < MAX_WRITEBACK_BATCH_PENDING_WRITES {
+                    return Ok(bytes);
+                }
+                let scope = scope_guard.take().expect("scope present after as_mut");
+                drop(scope_guard);
+                drop(inode_guards);
+                self.remove_writeback_batch_if_same(key, &batch);
+                self.commit_deferred_write_scope(cx, scope)?;
+                return Ok(bytes);
+            }
+        })();
+        let written = write_result.map_err(|error| MutationDispatchError::Operation {
+            error,
+            offset: Some(operation_offset),
+        })?;
         Ok(written)
     }
 
@@ -5257,10 +5509,27 @@ impl FrankenFuse {
         &self,
         cx: &Cx,
         ino: InodeNumber,
+        fh: u64,
         byte_offset: u64,
         size: u32,
     ) -> ffs_error::Result<Vec<u8>> {
         let requested_len = usize::try_from(size).unwrap_or(usize::MAX);
+        if self.inner.writeback_cache {
+            let key = WritebackKey::new(ino, fh);
+            if let Some(batch) = self.writeback_batch(key) {
+                let mut scope_guard = Self::lock_writeback_scope(&batch);
+                if let Some(scope) = scope_guard.as_mut() {
+                    let mut data = self.inner.ops.read(cx, scope, ino, byte_offset, size)?;
+                    data.truncate(requested_len);
+                    self.inner.access_predictor.record_read(
+                        ino,
+                        byte_offset,
+                        u32::try_from(data.len()).unwrap_or(u32::MAX),
+                    );
+                    return Ok(data);
+                }
+            }
+        }
         self.with_request_scope(cx, RequestOp::Read, |cx, scope| {
             let mut served = self
                 .inner
@@ -5426,6 +5695,16 @@ impl Filesystem for FrankenFuse {
 
     fn destroy(&mut self) {
         let cx = Self::cx_for_request();
+        match self.commit_all_writeback_batches(&cx) {
+            Ok(committed) if committed > 0 => {
+                debug!(
+                    committed,
+                    "committed deferred writeback batches during destroy"
+                );
+            }
+            Ok(_) => {}
+            Err(e) => warn!("writeback batch commit failed during FUSE destroy: {e}"),
+        }
         if let Err(e) = self.inner.ops.flush_on_destroy(&cx) {
             warn!("flush_on_destroy failed during FUSE destroy: {e}");
         }
@@ -5601,7 +5880,7 @@ impl Filesystem for FrankenFuse {
         &mut self,
         _req: &Request<'_>,
         ino: u64,
-        _fh: u64,
+        fh: u64,
         offset: i64,
         size: u32,
         _flags: i32,
@@ -5614,7 +5893,7 @@ impl Filesystem for FrankenFuse {
             reply.error(libc::EINVAL);
             return;
         };
-        match self.read_with_readahead(&cx, InodeNumber(ino), byte_offset, size) {
+        match self.read_with_readahead(&cx, InodeNumber(ino), fh, byte_offset, size) {
             Ok(data) => {
                 self.inner
                     .metrics
@@ -6445,6 +6724,19 @@ impl Filesystem for FrankenFuse {
 
     fn flush(&mut self, _req: &Request<'_>, ino: u64, fh: u64, lock_owner: u64, reply: ReplyEmpty) {
         let cx = Self::cx_for_request();
+        let key = WritebackKey::new(InodeNumber(ino), fh);
+        if let Err(e) = self.commit_writeback_batch_for_key(&cx, key) {
+            Self::reply_error_empty(
+                &FuseErrorContext {
+                    error: &e,
+                    operation: "flush",
+                    ino,
+                    offset: None,
+                },
+                reply,
+            );
+            return;
+        }
         match self.with_request_scope(&cx, RequestOp::Flush, |cx, scope| {
             self.inner
                 .ops
@@ -6476,6 +6768,19 @@ impl Filesystem for FrankenFuse {
         reply: ReplyEmpty,
     ) {
         let cx = Self::cx_for_request();
+        let key = WritebackKey::new(InodeNumber(ino), fh);
+        if let Err(e) = self.commit_writeback_batch_for_key(&cx, key) {
+            Self::reply_error_empty(
+                &FuseErrorContext {
+                    error: &e,
+                    operation: "release",
+                    ino,
+                    offset: None,
+                },
+                reply,
+            );
+            return;
+        }
         match self.with_request_scope(&cx, RequestOp::Release, |cx, scope| {
             self.inner.ops.release(
                 cx,
@@ -6513,6 +6818,19 @@ impl Filesystem for FrankenFuse {
         if let Some(errno) = self.backpressure_errno(&cx, RequestOp::Fsync) {
             warn!(ino, "backpressure: shedding fsync");
             reply.error(errno);
+            return;
+        }
+        let key = WritebackKey::new(InodeNumber(ino), fh);
+        if let Err(e) = self.commit_writeback_batch_for_key(&cx, key) {
+            Self::reply_error_empty(
+                &FuseErrorContext {
+                    error: &e,
+                    operation: "fsync",
+                    ino,
+                    offset: None,
+                },
+                reply,
+            );
             return;
         }
         match self.with_request_scope(&cx, RequestOp::Fsync, |cx, scope| {
@@ -8102,7 +8420,7 @@ mod tests {
         let atime = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1);
         let mtime = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(2);
         let ctime = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(3);
-        let crtime = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(4);
+        let creation_time = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(4);
         let iattr = InodeAttr {
             ino: InodeNumber(1),
             size: 0,
@@ -8110,7 +8428,7 @@ mod tests {
             atime,
             mtime,
             ctime,
-            crtime,
+            crtime: creation_time,
             kind: FfsFileType::RegularFile,
             perm: 0o644,
             nlink: 1,
@@ -8124,7 +8442,7 @@ mod tests {
         assert_eq!(fattr.atime, atime, "atime");
         assert_eq!(fattr.mtime, mtime, "mtime");
         assert_eq!(fattr.ctime, ctime, "ctime");
-        assert_eq!(fattr.crtime, crtime, "crtime");
+        assert_eq!(fattr.crtime, creation_time, "crtime");
     }
 
     #[test]
@@ -14353,19 +14671,19 @@ mod tests {
         let ino = InodeNumber(1);
 
         assert_eq!(
-            fuse.read_with_readahead(&cx, ino, 0, 4).unwrap(),
+            fuse.read_with_readahead(&cx, ino, 0, 0, 4).unwrap(),
             vec![0, 1, 2, 3]
         );
         assert_eq!(
-            fuse.read_with_readahead(&cx, ino, 4, 4).unwrap(),
+            fuse.read_with_readahead(&cx, ino, 0, 4, 4).unwrap(),
             vec![4, 5, 6, 7]
         );
         assert_eq!(
-            fuse.read_with_readahead(&cx, ino, 8, 4).unwrap(),
+            fuse.read_with_readahead(&cx, ino, 0, 8, 4).unwrap(),
             vec![8, 9, 10, 11]
         );
         assert_eq!(
-            fuse.read_with_readahead(&cx, ino, 12, 4).unwrap(),
+            fuse.read_with_readahead(&cx, ino, 0, 12, 4).unwrap(),
             vec![12, 13, 14, 15]
         );
 
@@ -14392,7 +14710,7 @@ mod tests {
                 expected_start.saturating_add(3),
             ];
             assert_eq!(
-                fuse.read_with_readahead(&cx, ino, offset, 4).unwrap(),
+                fuse.read_with_readahead(&cx, ino, 0, offset, 4).unwrap(),
                 expected
             );
         }
@@ -14412,7 +14730,7 @@ mod tests {
         let offsets = [0_u64, 32, 4, 48, 8, 64];
 
         for offset in offsets {
-            let _ = fuse.read_with_readahead(&cx, ino, offset, 4).unwrap();
+            let _ = fuse.read_with_readahead(&cx, ino, 0, offset, 4).unwrap();
         }
 
         assert_eq!(
@@ -15982,6 +16300,227 @@ mod tests {
     }
 
     #[test]
+    fn writeback_cache_write_defers_commit_until_flush() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let options = MountOptions {
+            read_only: false,
+            writeback_cache: WritebackCacheMode::Enabled,
+            ..MountOptions::default()
+        };
+        let fuse = FrankenFuse::with_options(
+            Box::new(MutationRecordingFs::with_scope_recording(Arc::clone(
+                &calls,
+            ))),
+            &options,
+        );
+
+        let written = fuse
+            .dispatch_write_with_intent(44, 16, b"payload", WriteIntent::from_fuse(9001, 0, 0))
+            .expect("writeback-cache write");
+        assert_eq!(written, 7);
+        assert_eq!(
+            calls.lock().expect("lock calls").as_slice(),
+            &[
+                MutationCall::Begin {
+                    op: RequestOp::Write,
+                },
+                MutationCall::Write {
+                    ino: InodeNumber(44),
+                    offset: 16,
+                    data: b"payload".to_vec(),
+                },
+            ],
+            "buffered writeback-cache writes must not commit before a boundary"
+        );
+
+        fuse.flush_for_fuzzing(44, 9001, 0xABCD)
+            .expect("flush commits pending batch");
+        assert_eq!(
+            calls.lock().expect("lock calls").as_slice(),
+            &[
+                MutationCall::Begin {
+                    op: RequestOp::Write,
+                },
+                MutationCall::Write {
+                    ino: InodeNumber(44),
+                    offset: 16,
+                    data: b"payload".to_vec(),
+                },
+                MutationCall::Commit,
+                MutationCall::End {
+                    op: RequestOp::Write,
+                },
+                MutationCall::Begin {
+                    op: RequestOp::Flush,
+                },
+                MutationCall::Flush {
+                    ino: InodeNumber(44),
+                    fh: 9001,
+                    lock_owner: 0xABCD,
+                },
+                MutationCall::End {
+                    op: RequestOp::Flush,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn writeback_cache_fsync_commits_pending_writes_before_fsync() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let options = MountOptions {
+            read_only: false,
+            writeback_cache: WritebackCacheMode::Enabled,
+            ..MountOptions::default()
+        };
+        let fuse = FrankenFuse::with_options(
+            Box::new(MutationRecordingFs::with_scope_recording(Arc::clone(
+                &calls,
+            ))),
+            &options,
+        );
+
+        fuse.dispatch_write_with_intent(44, 0, b"abc", WriteIntent::from_fuse(9001, 0, 0))
+            .expect("writeback-cache write");
+        fuse.fsync_for_fuzzing(44, 9001, true)
+            .expect("fsync commits pending batch");
+
+        assert_eq!(
+            calls.lock().expect("lock calls").as_slice(),
+            &[
+                MutationCall::Begin {
+                    op: RequestOp::Write,
+                },
+                MutationCall::Write {
+                    ino: InodeNumber(44),
+                    offset: 0,
+                    data: b"abc".to_vec(),
+                },
+                MutationCall::Commit,
+                MutationCall::End {
+                    op: RequestOp::Write,
+                },
+                MutationCall::Begin {
+                    op: RequestOp::Fsync,
+                },
+                MutationCall::Fsync {
+                    ino: InodeNumber(44),
+                    fh: 9001,
+                    datasync: true,
+                },
+                MutationCall::Commit,
+                MutationCall::End {
+                    op: RequestOp::Fsync,
+                },
+            ]
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn writeback_cache_sync_write_drains_existing_batch_first() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let options = MountOptions {
+            read_only: false,
+            writeback_cache: WritebackCacheMode::Enabled,
+            ..MountOptions::default()
+        };
+        let fuse = FrankenFuse::with_options(
+            Box::new(MutationRecordingFs::with_scope_recording(Arc::clone(
+                &calls,
+            ))),
+            &options,
+        );
+
+        fuse.dispatch_write_with_intent(44, 0, b"old", WriteIntent::from_fuse(9001, 0, 0))
+            .expect("deferred write");
+        fuse.dispatch_write_with_intent(
+            44,
+            3,
+            b"sync",
+            WriteIntent::from_fuse(9001, 0, libc::O_DSYNC),
+        )
+        .expect("sync write");
+
+        assert_eq!(
+            calls.lock().expect("lock calls").as_slice(),
+            &[
+                MutationCall::Begin {
+                    op: RequestOp::Write,
+                },
+                MutationCall::Write {
+                    ino: InodeNumber(44),
+                    offset: 0,
+                    data: b"old".to_vec(),
+                },
+                MutationCall::Commit,
+                MutationCall::End {
+                    op: RequestOp::Write,
+                },
+                MutationCall::Begin {
+                    op: RequestOp::Write,
+                },
+                MutationCall::Write {
+                    ino: InodeNumber(44),
+                    offset: 3,
+                    data: b"sync".to_vec(),
+                },
+                MutationCall::Commit,
+                MutationCall::Fsync {
+                    ino: InodeNumber(44),
+                    fh: 9001,
+                    datasync: true,
+                },
+                MutationCall::End {
+                    op: RequestOp::Write,
+                },
+            ],
+            "a sync write must publish any older deferred writes before its own fsync boundary"
+        );
+    }
+
+    #[test]
+    fn writeback_cache_read_reuses_live_write_scope_for_same_handle() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let options = MountOptions {
+            read_only: false,
+            writeback_cache: WritebackCacheMode::Enabled,
+            ..MountOptions::default()
+        };
+        let fuse = FrankenFuse::with_options(
+            Box::new(MutationRecordingFs::with_scope_recording(Arc::clone(
+                &calls,
+            ))),
+            &options,
+        );
+
+        fuse.write_for_fuzzing(44, 16, b"payload")
+            .expect("writeback-cache write");
+        let data = fuse.read_for_fuzzing(44, 16, 4).expect("same-handle read");
+
+        assert_eq!(data, b"read".to_vec());
+        assert_eq!(
+            calls.lock().expect("lock calls").as_slice(),
+            &[
+                MutationCall::Begin {
+                    op: RequestOp::Write,
+                },
+                MutationCall::Write {
+                    ino: InodeNumber(44),
+                    offset: 16,
+                    data: b"payload".to_vec(),
+                },
+                MutationCall::Read {
+                    ino: InodeNumber(44),
+                    offset: 16,
+                    size: 4,
+                },
+            ],
+            "same-handle reads must use the deferred write scope, not a new read snapshot"
+        );
+    }
+
+    #[test]
     fn conformance_fuse_copy_file_range_lifecycle_round_trip() {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let options = MountOptions {
@@ -17477,10 +18016,12 @@ mod tests {
             metrics: Arc::new(AtomicMetrics::new()),
             thread_count: 4,
             read_only: true,
+            writeback_cache: false,
             mountpoint: None,
             kernel_notifier: Mutex::new(None),
             ioctl_trace: None,
             backpressure: None,
+            writeback_batches: Mutex::new(BTreeMap::new()),
             access_predictor: AccessPredictor::default(),
             readahead: ReadaheadManager::new(MAX_PENDING_READAHEAD_ENTRIES),
             inode_locks: Arc::new(FuseInodeLocks::default()),
@@ -18827,6 +19368,7 @@ CUSTOM("congestion_threshold=3")"#;
             "bytes_read: 0, requests_throttled: 0, requests_shed: 0 }, ",
             "thread_count: 2, ",
             "read_only: false, ",
+            "writeback_cache: false, ",
             "mountpoint: None, ",
             ".. }"
         );
@@ -18836,10 +19378,12 @@ CUSTOM("congestion_threshold=3")"#;
             metrics: Arc::new(AtomicMetrics::new()),
             thread_count: 2,
             read_only: false,
+            writeback_cache: false,
             mountpoint: None,
             kernel_notifier: Mutex::new(None),
             ioctl_trace: None,
             backpressure: None,
+            writeback_batches: Mutex::new(BTreeMap::new()),
             access_predictor: AccessPredictor::default(),
             readahead: ReadaheadManager::new(8),
             inode_locks: Arc::new(FuseInodeLocks::default()),

@@ -6,11 +6,18 @@
 //! aggregate metrics collection, backpressure decisions, and atomic
 //! metrics recording. These operate without actual FUSE mounts.
 
+use asupersync::Cx;
 use criterion::{Criterion, criterion_group, criterion_main};
-use ffs_fuse::AtomicMetrics;
+use ffs_core::{FsOps, InodeAttr, ReaddirPage, RequestOp, RequestScope};
+use ffs_error::FfsError;
 use ffs_fuse::per_core::{PerCoreConfig, PerCoreDispatcher};
+use ffs_fuse::{AtomicMetrics, FrankenFuse, MountOptions, WritebackCacheMode};
+use ffs_types::{CommitSeq, InodeNumber};
+use std::ffi::OsStr;
 use std::hint::black_box;
 use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+use std::time::Duration;
 
 fn bench_per_core_route_inode(c: &mut Criterion) {
     let dispatcher = PerCoreDispatcher::new(PerCoreConfig {
@@ -157,6 +164,165 @@ fn bench_backpressure_emergency(c: &mut Criterion) {
     });
 }
 
+struct WritebackBenchFs {
+    writes: AtomicU64,
+    commits: AtomicU64,
+    commit_work: u64,
+}
+
+impl WritebackBenchFs {
+    fn new(commit_work: u64) -> Self {
+        Self {
+            writes: AtomicU64::new(0),
+            commits: AtomicU64::new(0),
+            commit_work,
+        }
+    }
+}
+
+impl FsOps for WritebackBenchFs {
+    fn getattr(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _ino: InodeNumber,
+    ) -> ffs_error::Result<InodeAttr> {
+        Err(FfsError::UnsupportedFeature(
+            "writeback bench does not model getattr".to_owned(),
+        ))
+    }
+
+    fn lookup(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _parent: InodeNumber,
+        _name: &OsStr,
+    ) -> ffs_error::Result<InodeAttr> {
+        Err(FfsError::UnsupportedFeature(
+            "writeback bench does not model lookup".to_owned(),
+        ))
+    }
+
+    fn readdir(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _ino: InodeNumber,
+        _offset: u64,
+    ) -> ffs_error::Result<ReaddirPage> {
+        Err(FfsError::UnsupportedFeature(
+            "writeback bench does not model readdir".to_owned(),
+        ))
+    }
+
+    fn read(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _ino: InodeNumber,
+        _offset: u64,
+        size: u32,
+    ) -> ffs_error::Result<Vec<u8>> {
+        Ok(vec![0; usize::try_from(size).unwrap_or(usize::MAX)])
+    }
+
+    fn readlink(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _ino: InodeNumber,
+    ) -> ffs_error::Result<Vec<u8>> {
+        Err(FfsError::UnsupportedFeature(
+            "writeback bench does not model readlink".to_owned(),
+        ))
+    }
+
+    fn write(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _ino: InodeNumber,
+        _offset: u64,
+        data: &[u8],
+    ) -> ffs_error::Result<u32> {
+        self.writes.fetch_add(1, AtomicOrdering::Relaxed);
+        Ok(u32::try_from(data.len()).unwrap_or(u32::MAX))
+    }
+
+    fn begin_request_scope(&self, _cx: &Cx, _op: RequestOp) -> ffs_error::Result<RequestScope> {
+        Ok(RequestScope::empty())
+    }
+
+    fn commit_request_scope(&self, _scope: &mut RequestScope) -> ffs_error::Result<CommitSeq> {
+        let mut state = self.commits.load(AtomicOrdering::Relaxed);
+        for n in 0..self.commit_work {
+            state = state.wrapping_add(n.rotate_left(7)).rotate_left(13) ^ 0x9E37_79B9_7F4A_7C15;
+        }
+        black_box(state);
+        let seq = self.commits.fetch_add(1, AtomicOrdering::Relaxed) + 1;
+        Ok(CommitSeq(seq))
+    }
+
+    fn end_request_scope(
+        &self,
+        _cx: &Cx,
+        _op: RequestOp,
+        _scope: RequestScope,
+    ) -> ffs_error::Result<()> {
+        Ok(())
+    }
+
+    fn fsync(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _ino: InodeNumber,
+        _fh: u64,
+        _datasync: bool,
+    ) -> ffs_error::Result<()> {
+        Ok(())
+    }
+}
+
+fn run_writeback_batch(writeback_cache: bool, writes: usize, payload: &[u8], commit_work: u64) {
+    let options = MountOptions {
+        read_only: false,
+        writeback_cache: WritebackCacheMode::from_enabled(writeback_cache),
+        ..MountOptions::default()
+    };
+    let fuse = FrankenFuse::with_options(Box::new(WritebackBenchFs::new(commit_work)), &options);
+    for index in 0..writes {
+        let offset = i64::try_from(index.saturating_mul(payload.len())).unwrap_or(i64::MAX);
+        let written = fuse
+            .write_for_fuzzing(44, offset, payload)
+            .expect("bench write succeeds");
+        assert_eq!(written as usize, payload.len());
+    }
+    if writeback_cache {
+        fuse.flush_for_fuzzing(44, 0, 0)
+            .expect("bench flush commits deferred writeback");
+    }
+}
+
+fn bench_writeback_cache_batching(c: &mut Criterion) {
+    let payload = vec![0x5A_u8; 32 * 1024];
+    let writes = 32_usize;
+    let commit_work = 512_u64;
+    let mut group = c.benchmark_group("mount_runtime_writeback");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(1));
+
+    group.bench_function("per_write_commit_32x32k", |b| {
+        b.iter(|| run_writeback_batch(false, writes, black_box(&payload), commit_work));
+    });
+
+    group.bench_function("deferred_flush_32x32k", |b| {
+        b.iter(|| run_writeback_batch(true, writes, black_box(&payload), commit_work));
+    });
+    group.finish();
+}
+
 criterion_group!(
     mount_runtime,
     bench_per_core_route_inode,
@@ -167,5 +333,6 @@ criterion_group!(
     bench_backpressure_normal,
     bench_backpressure_degraded,
     bench_backpressure_emergency,
+    bench_writeback_cache_batching,
 );
 criterion_main!(mount_runtime);

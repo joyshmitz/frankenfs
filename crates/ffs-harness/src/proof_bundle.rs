@@ -2571,7 +2571,7 @@ mod tests {
                     None
                 }
             })
-            .unwrap_or_else(|| "test-fixture-sha".to_string())
+            .unwrap_or_else(|| "unknown".to_string())
     }
 
     fn sample_bundle() -> Result<SampleBundle> {

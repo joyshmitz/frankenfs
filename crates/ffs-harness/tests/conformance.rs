@@ -2559,7 +2559,8 @@ fn build_ext4_featured_dir_image(
     image[ino2..ino2 + 2].copy_from_slice(&0o040_755_u16.to_le_bytes());
     image[ino2 + 4..ino2 + 8].copy_from_slice(&4096_u32.to_le_bytes());
     image[ino2 + 0x1A..ino2 + 0x1C].copy_from_slice(&3_u16.to_le_bytes());
-    image[ino2 + 0x20..ino2 + 0x24].copy_from_slice(&root_inode_flags.to_le_bytes());
+    image[ino2 + 0x20..ino2 + 0x24]
+        .copy_from_slice(&(root_inode_flags | EXT4_EXTENTS_FL).to_le_bytes());
     image[ino2 + 0x80..ino2 + 0x82].copy_from_slice(&32_u16.to_le_bytes());
 
     let root_extent = ino2 + 0x28;
@@ -2643,6 +2644,7 @@ fn build_ext4_inline_data_image(inode_fixture: &str) -> Vec<u8> {
     image[ino2..ino2 + 2].copy_from_slice(&0o040_755_u16.to_le_bytes());
     image[ino2 + 4..ino2 + 8].copy_from_slice(&4096_u32.to_le_bytes());
     image[ino2 + 0x1A..ino2 + 0x1C].copy_from_slice(&3_u16.to_le_bytes());
+    image[ino2 + 0x20..ino2 + 0x24].copy_from_slice(&EXT4_EXTENTS_FL.to_le_bytes());
     image[ino2 + 0x80..ino2 + 0x82].copy_from_slice(&32_u16.to_le_bytes());
 
     let root_extent = ino2 + 0x28;
@@ -3102,6 +3104,16 @@ fn build_fc_tag(tag_type: u16, payload: &[u8]) -> Vec<u8> {
     bytes
 }
 
+fn build_fc_inode_update_transaction(ino: u32, tid: u32) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    bytes.extend(build_fc_tag(0x09, &[0; 16]));
+    bytes.extend(build_fc_tag(0x06, &ino.to_le_bytes()));
+    let mut tail = [0_u8; 8];
+    tail[..4].copy_from_slice(&tid.to_le_bytes());
+    bytes.extend(build_fc_tag(0x08, &tail));
+    bytes
+}
+
 #[allow(clippy::cast_possible_truncation)]
 fn build_ext4_fast_commit_test_image() -> Vec<u8> {
     const JBD2_FEATURE_INCOMPAT_FAST_COMMIT: u32 = 0x0000_0020;
@@ -3162,10 +3174,7 @@ fn build_ext4_fast_commit_test_image() -> Vec<u8> {
     let j_commit = 23 * 4096;
     write_jbd2_header(&mut image[j_commit..j_commit + 4096], 2, 1);
 
-    let mut fc_payload = Vec::new();
-    fc_payload.extend(build_fc_tag(0x0A, &[0; 16]));
-    fc_payload.extend(build_fc_tag(0x07, &42_u32.to_le_bytes()));
-    fc_payload.extend(build_fc_tag(0x09, &[1, 0, 0, 0, 0, 0, 0, 0]));
+    let fc_payload = build_fc_inode_update_transaction(42, 1);
     let fc_block = 24 * 4096;
     image[fc_block..fc_block + fc_payload.len()].copy_from_slice(&fc_payload);
 
@@ -3177,8 +3186,8 @@ fn build_ext4_truncated_fast_commit_test_image() -> Vec<u8> {
     let mut image = build_ext4_fast_commit_test_image();
     let fc_block = 24 * 4096;
     let mut truncated = Vec::new();
-    truncated.extend(build_fc_tag(0x0A, &[0; 16]));
-    truncated.extend(build_fc_tag(0x07, &42_u32.to_le_bytes()));
+    truncated.extend(build_fc_tag(0x09, &[0; 16]));
+    truncated.extend(build_fc_tag(0x06, &42_u32.to_le_bytes()));
     image[fc_block..fc_block + 4096].fill(0);
     image[fc_block..fc_block + truncated.len()].copy_from_slice(&truncated);
     image
@@ -3735,7 +3744,10 @@ fn ext4_fast_commit_replay_openfs_evidence_conforms() {
     assert_eq!(fc.replay.transactions_found, 1);
     assert_eq!(fc.replay.last_tid, 1);
     assert_eq!(fc.replay.operations.len(), 1);
-    assert_eq!(format!("{:?}", fc.replay.operations), "[InodeUpdate(42)]");
+    assert_eq!(
+        format!("{:?}", fc.replay.operations),
+        "[InodeUpdate(42, [])]"
+    );
     assert_eq!(fc.replay.incomplete_transactions, 0);
     assert!(!fc.replay.fallback_required);
     assert_eq!(fc.replay.blocks_scanned, 1);

@@ -281,7 +281,8 @@ fn build_ext4_featured_dir_image(
     image[root_ino..root_ino + 2].copy_from_slice(&0o040_755_u16.to_le_bytes());
     image[root_ino + 4..root_ino + 8].copy_from_slice(&4096_u32.to_le_bytes());
     image[root_ino + 0x1A..root_ino + 0x1C].copy_from_slice(&3_u16.to_le_bytes());
-    image[root_ino + 0x20..root_ino + 0x24].copy_from_slice(&root_inode_flags.to_le_bytes());
+    image[root_ino + 0x20..root_ino + 0x24]
+        .copy_from_slice(&(root_inode_flags | ffs_types::EXT4_EXTENTS_FL).to_le_bytes());
     image[root_ino + 0x80..root_ino + 0x82].copy_from_slice(&32_u16.to_le_bytes());
 
     let root_extent = root_ino + 0x28;
@@ -365,6 +366,7 @@ fn build_ext4_inline_data_image(inode_fixture: &str) -> Vec<u8> {
     image[ino2..ino2 + 2].copy_from_slice(&0o040_755_u16.to_le_bytes());
     image[ino2 + 4..ino2 + 8].copy_from_slice(&4096_u32.to_le_bytes());
     image[ino2 + 0x1A..ino2 + 0x1C].copy_from_slice(&3_u16.to_le_bytes());
+    image[ino2 + 0x20..ino2 + 0x24].copy_from_slice(&ffs_types::EXT4_EXTENTS_FL.to_le_bytes());
     image[ino2 + 0x80..ino2 + 0x82].copy_from_slice(&32_u16.to_le_bytes());
 
     let root_extent = ino2 + 0x28;

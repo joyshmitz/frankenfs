@@ -1,5 +1,81 @@
 # Perf Gauntlet Scorecard
 
+## `bd-w3hol` Addendum
+
+Date: 2026-06-20
+Agent: BlackThrush (`cod-b`)
+Scope: `ffs-fuse` per-file-handle writeback batching for `bd-w3hol`
+Commit under measurement: this commit
+RCH workers: `vmi1227854` bench, `vmi1153651` release build, `ovh-a` focused tests, `hz1` clippy, `hz2` broad harness/conformance probe
+Requested target dir: `/data/projects/.rch-targets/frankenfs-cod-b`
+
+### Verdict
+
+KEEP. The production FUSE write path now keeps one deferred write
+`RequestScope` per `(ino, fh)` while writeback-cache writes are buffered by the
+kernel, then commits that scope on `flush`, `fsync`, `release`, or `destroy`.
+Synchronous and NOWAIT writes explicitly drain or bypass the deferred scope, so
+the optimization only amortizes commit overhead where the FUSE writeback-cache
+contract permits delayed visibility to stable storage.
+
+### Scorecard
+
+| Gate | Result |
+| --- | --- |
+| Code-first backlog rows examined in this addendum | 1 |
+| RCH Criterion rows completed | 2 / 2 |
+| Same-worker evidence | Yes, `vmi1227854` for both A/B rows |
+| Direct ext4/btrfs-kernel ratios | 0 / 1 direct; no kernel comparator isolates FrankenFS's per-FH `RequestScope` batching table |
+| Production levers kept | 1 |
+| Production levers rejected/reverted | 0 |
+| Internal A/B win/loss/neutral | 1 / 0 / 0 |
+| Direct kernel win/loss/neutral | 0 / 0 / 1 |
+| Conformance/build guard | RCH `cargo build --release -p ffs-fuse` passed on `vmi1153651`; RCH `cargo test -p ffs-fuse writeback_cache -- --nocapture` passed on `ovh-a` (12/12); RCH `cargo clippy -p ffs-fuse --all-targets --no-deps -- -D warnings` passed on `hz1`; RCH `cargo test -p ffs-harness -- --nocapture` on `hz2` cleared lib `2056/2056`, `tests/btrfs_kernel_reference.rs` `7/7`, and `tests/conformance.rs` `100 passed / 0 failed / 2 ignored` before unrelated mounted `fuse_e2e` failures; RCH focused post-patch `cargo test -p ffs-harness --test fuse_e2e ext4_fuse_inline_data_reads -- --nocapture` passed on `ovh-a` (2/2). |
+| Format/lint guard | `cargo fmt -p ffs-fuse --check`, `cargo fmt -p ffs-harness --check`, and `git diff --check` passed; focused local `cargo clippy -p ffs-harness --test conformance --test fuse_e2e --no-deps -- -D warnings` passed. Full workspace `cargo fmt --check` remains blocked by pre-existing unrelated formatting drift. |
+| Release-readiness score for perf-superiority claims | 65 / 100: real same-worker keep on the writeback amortization primitive, but no direct kernel ratio yet and broad mounted `fuse_e2e` still has unrelated red rows. |
+| Release-readiness score for this row's hygiene | 90 / 100: measured keep, focused behavior tests, conformance green, stale mounted-suite failures documented; remaining work is a direct mounted write+fsync kernel comparator after unrelated `fuse_e2e` debt is isolated. |
+
+### Measured Rows
+
+| Bead | Workload | Old per-write commit | New deferred flush | Ratio | Verdict |
+| --- | --- | --- | --- | --- | --- |
+| `bd-w3hol` | `mount_runtime_writeback/per_write_commit_32x32k` vs `deferred_flush_32x32k`, 32 x 32 KiB writes plus flush | `43.353 us` median | `30.213 us` median | `1.435x` old/new; production latency `0.697x` | Keep: `30.3%` lower latency on the isolated commit-amortization primitive |
+
+### Kernel Reference Coverage
+
+No direct ext4/btrfs-kernel comparator is valid for this row. The lever changes
+FrankenFS's in-process FUSE dispatch strategy: multiple write requests against
+one file handle share a deferred `RequestScope` until a durability boundary.
+Linux ext4/btrfs do not expose an equivalent timed primitive. A mounted kernel
+write+fsync benchmark is still required for a whole-filesystem superiority
+claim because it includes syscall, VFS, page-cache, FUSE transport, allocator,
+journal, and block-layer behavior.
+
+### Residual Mounted-Suite Risk
+
+A stale RCH full-harness run on `hz2` started before the final
+`fuse_e2e` fixture patch and was interrupted after printing unrelated mounted
+`fuse_e2e` failures: btrfs cross-parent directory nlink accounting,
+security-xattr privilege enforcement, btrfs `RENAME_EXCHANGE`, and a read-only
+ext4 ioctl fast-fail assertion. The duplicated inline-data fixture issue from
+that run was fixed in both `conformance.rs` and `fuse_e2e.rs`; the focused
+post-patch RCH inline-data mounted check passed on `ovh-a`.
+
+### Commands
+
+```bash
+AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-b \
+  rch exec -- cargo bench --profile release-perf -p ffs-fuse \
+  --bench mount_runtime -- mount_runtime_writeback --sample-size 10
+
+AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-b \
+  rch exec -- cargo test -p ffs-fuse writeback_cache -- --nocapture
+
+AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-b \
+  rch exec -- cargo test -p ffs-harness --test fuse_e2e \
+  ext4_fuse_inline_data_reads -- --nocapture
+```
+
 Date: 2026-06-19
 Agent: BlackThrush (`cod-b`)
 Scope: `ffs-journal` code-first backlog rows `bd-xmh5g.406` and `bd-xmh5g.404`
