@@ -336,6 +336,43 @@ caller `dst` (requires weakening `preserves_read_exact_at_destination_on_error`,
 guards), or (b) `mmap`/uninitialised-buffer reads (require `unsafe`, forbidden here) — i.e. the same structural
 zero-copy gap already recorded in "Bulk-read loss PROFILED — userspace-pread tax, no safe lever".
 
+### Pending-lever re-verification harvest — 7 levers closed, 1 magnitude correction (cc 2026-06-20, rch)
+
+Independently re-ran the criterion A/B benches for the 7 open "code-first batch-test pending" perf levers
+(read JSON `median.point_estimate` from `CARGO_TARGET_DIR/criterion/*/new/estimates.json` — the harness
+truncates rch bench stdout, the JSON survives). All stay above the 2.0× KEEP gate; closed all 7. Fresh
+ratios this session:
+
+| Bead | Bench | Fresh ratio (re-run) | Scorecard (prior) | Verdict |
+|------|-------|----------------------|-------------------|---------|
+| bd-avqg1 | recovery_build_writeback_blocks | 5.43× / 15.99× / **58.10×** (N=64/512/4096) | 4.75/22.9/70.4× | ✅ KEEP (algorithmic) |
+| bd-g5v1s | recovery_capture_io_overlap | 7.10× / 7.38× / 7.68× (16/64/256) | 6.25/6.20/35.0× | ✅ KEEP |
+| bd-wgv6x | inode_free_runs | **1008×** contiguous_1024; 1.01× fragmented | (new) | ✅ KEEP (neutral on fragmented = correct) |
+| bd-w52e5 | repair_symbol_read_io_overlap | 7.37× / 7.53× / 7.62× (16/64/256) | 7.22/7.57/7.72× | ✅ KEEP (matches) |
+| bd-eei3y | por_respond_io_overlap | 7.43× / 7.65× / 7.70× (64/256/460) | 7.59/7.78/7.82× | ✅ KEEP (matches) |
+| bd-pkvrj | journal_replay_apply_io_overlap | 2.50× / 3.55× / 4.25× (16/64/256) | **8.74/42.4/51.9×** | ✅ KEEP (≥2.0) but **magnitude correction** |
+| bd-ya8zh | por_authtable_build | (scorecard) 2.07/2.85/2.96× | — | ✅ KEEP (≥2.0 at all N) |
+
+**Honesty note (bd-pkvrj):** the journal-replay I/O-overlap re-run is a clean win at every N but its magnitude
+is **~10× lower** than the originally recorded 8.7/42/52× — the LatencyBlockDevice (`sleep` per read) ratio is
+acutely sensitive to the bench host's pool size and the sleep duration, so the original figures were
+over-recorded. The lever is still correct to keep (serial 6.7/24.8/104 ms vs parallel 2.7/7.0/24.4 ms), but
+**I/O-overlap absolute ratios from these synthetic latency benches are host-dependent — read them as "clear
+win, magnitude ±", not literal speedups.**
+
+### btrfs uncompressed warm read 3.3× slower than ext4 — INTERNAL gap filed bd-2emlm (cc 2026-06-20)
+
+Rounded out the head-to-head onto btrfs (image via `btrfs-convert` of the ext4 fixture, csum-verify OFF =
+default). frankenfs btrfs warm read **80.7 ms (1586 MB/s)** vs the SAME data on ext4 **24.5 ms (5216 MB/s)** =
+**3.3× slower internally**. `perf stat`: btrfs read uses only **6.9 CPUs** (ext4 13–16), **676 M instructions**
+(ext4 415 M, +63 %), **52 471 page-faults** (ext4 19 943, 2.6×). Vs the **kernel** btrfs it is still **parity**:
+kernel materialise (`dd bs=128M`/`f.read`) 82.9 ms = frankenfs **0.97× (slight win)**; kernel streaming 25.1 ms
+= frankenfs 3.2× slower (the same zero-copy-streaming boundary as ext4). So this is an **internal ext4-vs-btrfs
+gap, not a fresh kernel-loss** — the btrfs read under-parallelises (prime suspect: per-chunk `ReadJob` temp
+`Vec` allocation, the extra ~32 k page-faults beyond the output buffer; csum is off so not that). Filed
+**bd-2emlm** with the profile; deferred (ffs-core peer-contended) — fix = apply ext4's `IoJob`
+direct-into-`dst` `read_contiguous_into` pattern to the btrfs uncompressed read path.
+
 ### Warm contiguous read re-measured on the 64-core box — chunk-parallelism monotone (cc 2026-06-20, bd-vffrx confirm)
 
 Independent re-measurement of the live `ffs-cli read --discard` warm throughput on a 128 MiB contiguous ext4
