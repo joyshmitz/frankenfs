@@ -437,12 +437,27 @@ pub struct FileByteDevice {
     writable: bool,
 }
 
-/// Reads at or above this size skip the per-read staging scratch in
+/// Default size at or above which reads skip the per-read staging scratch in
 /// `FileByteDevice::read_exact_at` and read straight into the caller buffer.
 /// Chosen at the allocator's mmap threshold: below it a scratch `Vec` is served
 /// from the freelist with no page faults (cheaper than an extra `fstat`); at or
 /// above it the scratch mmaps fresh pages whose first-touch faults dominate.
-const FILE_DEVICE_DIRECT_READ_MIN: usize = 64 * 1024;
+const FILE_DEVICE_DIRECT_READ_MIN_DEFAULT: usize = 64 * 1024;
+
+/// Resolve the direct-read threshold, allowing `FFS_DIRECT_READ_MIN_BYTES` to
+/// override the default (read once). Set it to a huge value to force the staged
+/// path for every read (used to A/B the lever in a single binary); set it low to
+/// widen the direct path. Parsed lazily so the env read is off the hot path.
+fn file_device_direct_read_min() -> usize {
+    use std::sync::OnceLock;
+    static MIN: OnceLock<usize> = OnceLock::new();
+    *MIN.get_or_init(|| {
+        std::env::var("FFS_DIRECT_READ_MIN_BYTES")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(FILE_DEVICE_DIRECT_READ_MIN_DEFAULT)
+    })
+}
 
 impl FileByteDevice {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
@@ -528,7 +543,7 @@ impl ByteDevice for FileByteDevice {
         // memset/copy is a few hundred bytes, so the scratch is cheaper than an
         // extra syscall — keep it, which also preserves the destination for
         // free and leaves the hot metadata read path byte-identical.
-        if buf.len() >= FILE_DEVICE_DIRECT_READ_MIN {
+        if buf.len() >= file_device_direct_read_min() {
             let live_len = self.file.metadata()?.len();
             if end > live_len {
                 return Err(FfsError::Io(std::io::Error::new(
