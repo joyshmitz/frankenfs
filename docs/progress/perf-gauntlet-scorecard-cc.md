@@ -199,11 +199,11 @@ a large run into 1 MiB block-aligned chunks read in parallel (rayon, disjoint `s
 | seq cold run 3 | ffs 698 (2.4× slower) | **ffs 1901 MB/s** (kernel 1667) | **0.87× → ffs 1.15× FASTER** ✅ |
 | seq warm | ffs 965 (6.5× slower) | **ffs 2985 MB/s** (kernel 6954) | 2.32× slower (was 6.5×; ~3× better) |
 
-**Chunk-size tuned (rch sweep, 200MiB):** cold is flat across 64–4096-block chunks (~1900 MB/s, disk-bound,
-all beat the kernel); **warm rises with larger chunks** (2747 → 3124 MB/s from 64 → 4096 blocks — fewer
-chunks = less per-read overhead). Default tuned to **4096 blocks (16 MiB)**; `FFS_READ_CHUNK_BLOCKS` env
-override (OnceLock) for further tuning. Final 3-run verify at 4096: cold ffs 1911–1953 vs kernel 1581–1695 =
-**0.80–0.87× (ffs 1.15–1.25× FASTER)**; warm ffs 2689 vs kernel 6209 = 2.30× slower (warm noisy 2.7–3.1 GB/s).
+**Historical chunk-size sweep (rch, 200MiB):** cold was flat across 64–4096-block chunks (~1900 MB/s,
+disk-bound, all beat the kernel); the first cold-sequential win therefore shipped at **4096 blocks (16 MiB)**.
+That default is now superseded by the later `bd-2x68s`/`bd-vffrx` warm-read retunes below: production defaults
+to **32 blocks (128 KiB)** through `FFS_READ_CHUNK_BLOCKS`, because many-core warm reads were under-parallelized
+at 4096 and then 256 blocks.
 
 **KEPT — a domination win.** Cold sequential went from **2.4× slower to 1.16× FASTER than the kernel**
 (~2.7× frankenfs speedup, 695→1900 MB/s); warm improved ~3× (still loses warm = userspace copy overhead).
@@ -234,6 +234,24 @@ the primary cold sequential vs-kernel result. Sparse 512MiB zero-fill/allocation
 streaming path (warm `1.17 s` -> `0.928 s`, cold `1.303 s` -> `0.973 s`) but is recorded only as allocation
 evidence, not storage throughput. Btrfs was not rerun: there is no existing btrfs image in the workspace,
 and `mkfs` commands are blocked by DCG.
+
+### bd-2x68s closeout: stale warm extent-read gap reconciled (cod-a/BlackThrush, 2026-06-20)
+
+`bd-2x68s` stayed open after the shipped read path fixes, but the measured evidence now resolves the original
+direct gap. Initial warm ext4 extent reads were ~2.3-2.5x slower than kernel (`~25ms` frankenfs excluding the
+~10ms CLI/open artifact vs `~10ms` kernel dd). The kept family is:
+
+| Lever | Result |
+|-------|--------|
+| `d5e2059a` `OpenFs::read_into` caller-buffer reuse | multi-file `walk --read-data` 37ms -> 11.7ms = **3.2x**; single-shot 32MiB read neutral 33.6ms -> 33.0ms |
+| `c110c39b` extent chunk `4096->256` blocks | 32MiB warm 33.3ms -> 15.7ms = **2.19x**; cold 51.8ms -> 23.3ms = **2.22x**, beating the kernel cold comparator (23.3ms < 30ms) |
+| `3671522c` chunk default `256->32` blocks | ext4 128MiB **1.67x warm / 1.24x cold**; btrfs 100MiB **3.14x warm / 1.90x cold** vs the prior 256-block default |
+
+Negative evidence stays in the ledger: the indirect-read direct-window rewrite was neutral/slower (warm ~42ms
+-> ~44ms, cold 49.5ms -> 53.4ms), and the per-invocation CLI/open tax had no frankenfs hot symbol. Fresh closeout
+gates: RCH release build `ffs-core`+`ffs-cli` passed on `vmi1149989`; RCH `ffs-core read_file_data` passed 4/4 and
+`read_into` coalescing passed 1/1 on `vmi1153651`. Verdict: close `bd-2x68s` as measured resolved; remaining read
+losses are separate surfaces, notably rare ext4 indirect sequential reads and btrfs compressed-read pool overhead.
 
 ### ⭐⭐⭐ FRAGMENTED-FILE read: frankenfs BEATS the kernel (~1.4×, 3 runs)
 150MiB file deliberately fragmented to **108 extents** (interleaved spacer-file writes + fsync, then
