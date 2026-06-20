@@ -14,12 +14,13 @@
 //! - EBR memory-behavior scenario report (JSON artifact)
 
 use asupersync::Cx;
-use criterion::{Criterion, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use ffs_mvcc::persist::{PersistOptions, PersistentMvccStore};
 use ffs_mvcc::{CompressionAlgo, CompressionPolicy, ConflictPolicy, MergeProof, MvccStore};
 use ffs_types::{BlockNumber, CommitSeq, TxnId};
 use parking_lot::Mutex;
 use serde::Serialize;
+use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::fs;
 use std::hint::black_box;
@@ -1657,6 +1658,41 @@ fn bench_read_visible_deep_chain(c: &mut Criterion) {
     }
 }
 
+fn bench_conflict_merge_materialization_ab(c: &mut Criterion) {
+    let mut group = c.benchmark_group("conflict_merge_materialization_ab");
+
+    for &bytes in &[4096_usize, 16384, 65536] {
+        let base = vec![0x11_u8; bytes];
+        let latest = vec![0x22_u8; bytes];
+
+        group.bench_with_input(
+            BenchmarkId::new("old_vec_clone_base_latest", bytes),
+            &(base.clone(), latest.clone()),
+            |b, (base, latest)| {
+                b.iter(|| {
+                    let base = Cow::Borrowed(black_box(base.as_slice())).into_owned();
+                    let latest = Cow::Borrowed(black_box(latest.as_slice())).into_owned();
+                    black_box((base, latest));
+                });
+            },
+        );
+
+        group.bench_with_input(
+            BenchmarkId::new("cow_borrow_base_latest", bytes),
+            &(base, latest),
+            |b, (base, latest)| {
+                b.iter(|| {
+                    let base = Cow::Borrowed(black_box(base.as_slice()));
+                    let latest = Cow::Borrowed(black_box(latest.as_slice()));
+                    black_box((base.as_ref(), latest.as_ref()));
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     wal_benches,
     bench_read_visible_deep_chain,
@@ -1673,5 +1709,6 @@ criterion_group!(
     bench_coalesced_append,
     bench_checkpoint_throughput,
     bench_truncate_wal_throughput,
+    bench_conflict_merge_materialization_ab,
 );
 criterion_main!(wal_benches);

@@ -367,13 +367,19 @@ pub(crate) fn newest_visible_index_by<T>(
         .checked_sub(1)
 }
 
+pub(crate) fn resolve_version_bytes_cow_at_or_before(
+    versions: &[BlockVersion],
+    visible_high: CommitSeq,
+) -> Option<std::borrow::Cow<'_, [u8]>> {
+    let idx = newest_visible_index(versions, visible_high)?;
+    compression::resolve_data_with(versions, idx, |version| &version.data)
+}
+
 pub(crate) fn resolve_version_bytes_at_or_before(
     versions: &[BlockVersion],
     visible_high: CommitSeq,
 ) -> Option<Vec<u8>> {
-    let idx = newest_visible_index(versions, visible_high)?;
-    compression::resolve_data_with(versions, idx, |version| &version.data)
-        .map(std::borrow::Cow::into_owned)
+    resolve_version_bytes_cow_at_or_before(versions, visible_high).map(std::borrow::Cow::into_owned)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

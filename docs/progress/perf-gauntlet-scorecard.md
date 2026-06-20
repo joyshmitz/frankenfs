@@ -818,6 +818,73 @@ Do not reopen the `to_vec` materialization path for `Cow::Owned`. Future work sh
 direct-kernel gap, such as mounted ext4/btrfs streaming read syscall/copy overhead, unless a new profile shows
 compressed MVCC GC compaction itself dominating a realistic write+GC workload.
 
+## KEEP — sharded MVCC conflict-merge Cow borrow verification (cod-b 2026-06-20, bd-xmh5g.402)
+
+Commit under measurement: uncommitted cod-b candidate for sharded conflict-merge base/latest materialization.
+RCH proof workers: `vmi1227854` for primary same-worker Criterion/check, `vmi1153651` for focused test and
+targeted conformance, `hz1` for scoped clippy and secondary benchmark sanity.
+Requested target dir: `/data/projects/.rch-targets/frankenfs-cod-b`
+
+### Verdict
+
+Keep the production change. The sharded SafeMerge conflict path used to materialize base/latest visible version
+bytes as owned `Vec`s even though `merge_bytes` only reads them. The new helper preserves the existing owned
+public read API while allowing conflict merge to borrow uncompressed `Full` version bytes through `Cow`; compressed
+or identical-chain versions still allocate only when decompression or resolution requires ownership.
+
+This is not a whole-filesystem ext4/btrfs-kernel domination row. The direct kernel ratio is N/A because the measured
+surface is an internal MVCC merge materialization primitive, not a kernel-visible mounted read/write syscall path.
+
+### Scorecard
+
+| Gate | Result |
+| --- | --- |
+| Code-first backlog rows examined in this addendum | 1 |
+| RCH Criterion rows completed | 6 / 6 (`3` primary same-worker acceptance rows, `3` secondary sanity rows) |
+| Same-worker evidence | Yes: old clone and borrowed `Cow` arms measured in one Criterion run on `vmi1227854` |
+| Direct ext4/btrfs-kernel ratios | N/A for this internal MVCC primitive; recorded as direct-kernel neutral (`0/0/1`) |
+| Internal win/loss/neutral | `3/0/0` acceptance (`3/0/0` secondary sanity, not used as acceptance proof) |
+| Direct kernel win/loss/neutral | `0/0/1` |
+| Production levers kept | 1 (`resolve_version_bytes_cow_at_or_before` plus sharded conflict-merge borrow path) |
+| Production levers rejected/reverted | 0 |
+| Conformance/behavior guard | RCH `cargo bench --profile release-perf -p ffs-mvcc --bench wal_throughput -- conflict_merge_materialization_ab --warm-up-time 1 --measurement-time 3` passed on `vmi1227854`; RCH `cargo check -p ffs-mvcc --bench wal_throughput` passed on `vmi1227854`; RCH focused test `sharded::tests::fcw_append_only_merge_proof_allows_same_block_commit` passed on `vmi1153651`; RCH `cargo clippy -p ffs-mvcc --all-targets --no-deps -- -D warnings` passed on `hz1`; RCH conformance passed on `vmi1153651` (100 passed / 0 failed / 2 ignored); local `cargo fmt --check --package ffs-mvcc` passed. |
+| Known gate caveat | RCH `cargo build --release -p ffs-mvcc` compiled successfully on `vmi1153651`, then artifact retrieval failed with `RCH-E309`/exit 102. Full `cargo test -p ffs-harness -- --nocapture` exposed unrelated mounted FUSE failures before interruption; the targeted conformance test passed cleanly. |
+| Release-readiness score for perf-superiority claims | 55 / 100: decisive same-worker internal win and conformance green, but no direct kernel comparator applies and the parent mounted read gaps remain open |
+| Release-readiness score for this row's hygiene | 91 / 100: measured A/B, focused invariant test, check, scoped clippy, fmt, targeted conformance, and canonical ledger row are complete; residual caveats are unrelated full-harness FUSE failures and the RCH artifact-retrieval failure after successful remote release build |
+
+### Measured Rows
+
+| Workload | Old clone path | Kept borrow path | Ratio | Verdict |
+| --- | ---: | ---: | ---: | --- |
+| `conflict_merge_materialization_ab/old_vec_clone_base_latest/4096` vs `cow_borrow_base_latest/4096` | `127.52 ns` | `4.4895 ns` | `28.40x` old/new | KEEP |
+| `conflict_merge_materialization_ab/old_vec_clone_base_latest/16384` vs `cow_borrow_base_latest/16384` | `478.34 ns` | `4.3897 ns` | `108.97x` old/new | KEEP |
+| `conflict_merge_materialization_ab/old_vec_clone_base_latest/65536` vs `cow_borrow_base_latest/65536` | `1.5497 us` | `4.4659 ns` | `347.0x` old/new | KEEP |
+| secondary `hz1` sanity, 4 KiB | `159.77 ns` | `7.1521 ns` | `22.34x` old/new | Sanity only |
+| secondary `hz1` sanity, 16 KiB | `692.12 ns` | `7.2868 ns` | `94.98x` old/new | Sanity only |
+| secondary `hz1` sanity, 64 KiB | `2.8152 us` | `7.4608 ns` | `377.3x` old/new | Sanity only |
+
+### Isomorphism
+
+Ordering preserved: yes. The sharded path still selects the same newest visible version with the same
+`newest_visible_index` helper.
+
+Tie-breaking unchanged: yes. Commit sequence visibility and SafeMerge conflict resolution are unchanged; only
+base/latest byte ownership changes.
+
+Floating-point identical: N/A.
+
+RNG seeds unchanged: N/A.
+
+Bytes verified: yes. The focused sharded SafeMerge test passed, public visible reads still return owned `Vec`s,
+and the new borrow path passes the same byte slices to read-only `merge_bytes`. Compressed versions still use owned
+decompressed bytes via `Cow::Owned`.
+
+### Retry Predicate
+
+Do not reopen clone-vs-borrow materialization for read-only conflict-merge inputs unless a future profile shows
+compressed or identical-chain resolution dominates and needs a different specialization. Next `bd-xmh5g` work should
+target a remaining direct kernel loss rather than another internal MVCC byte-ownership micro-lever.
+
 ## `bd-xmh5g` Addendum (cod-a btrfs zstd decoder reuse)
 
 Date: 2026-06-20

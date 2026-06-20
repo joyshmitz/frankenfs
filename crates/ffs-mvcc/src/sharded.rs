@@ -12,7 +12,7 @@ use crate::compression::{self, CompressionPolicy, VersionData};
 use crate::{
     AdaptivePolicyConfig, BlockVersion, CommitError, CommittedTxnRecord, ConflictPolicy,
     ContentionMetrics, MergeProof, Transaction, detect_ssi_dangerous_structure,
-    resolve_version_bytes_at_or_before, validate_transaction_id,
+    resolve_version_bytes_cow_at_or_before, validate_transaction_id,
 };
 use ffs_types::{BlockNumber, CommitSeq, Snapshot, TxnId};
 use parking_lot::{Condvar, Mutex, RwLock, RwLockWriteGuard};
@@ -388,12 +388,14 @@ impl ShardedMvccStore {
         let base = shard
             .versions
             .get(&block)
-            .and_then(|versions| resolve_version_bytes_at_or_before(versions, txn.snapshot().high))
+            .and_then(|versions| {
+                resolve_version_bytes_cow_at_or_before(versions, txn.snapshot().high)
+            })
             .unwrap_or_default();
         let latest = shard
             .versions
             .get(&block)
-            .and_then(|versions| resolve_version_bytes_at_or_before(versions, observed))
+            .and_then(|versions| resolve_version_bytes_cow_at_or_before(versions, observed))
             .unwrap_or_default();
         proof
             .merge_bytes(&base, &latest, staged)
@@ -503,12 +505,12 @@ impl ShardedMvccStore {
         let base = shard
             .versions
             .get(&block)
-            .and_then(|versions| resolve_version_bytes_at_or_before(versions, snapshot.high))
+            .and_then(|versions| resolve_version_bytes_cow_at_or_before(versions, snapshot.high))
             .unwrap_or_default();
         let latest = shard
             .versions
             .get(&block)
-            .and_then(|versions| resolve_version_bytes_at_or_before(versions, observed))
+            .and_then(|versions| resolve_version_bytes_cow_at_or_before(versions, observed))
             .unwrap_or_default();
         proof
             .merge_bytes(&base, &latest, &bytes)
