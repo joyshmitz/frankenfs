@@ -242,3 +242,15 @@ landed because per-file `install()` risks the documented dedicated-pool schedule
 (see the "spurious-fan-out gate" row) — `btrfs_read_file` is called once per file, so a `find`-style walk over
 N compressed files = N installs. That regression is not testable in this environment (no large multi-file
 compressed image), so the dedicated-pool fix needs a multi-file compressed-walk bench before it can ship.
+
+FOLLOW-UP MEASURED REJECT (cod-a/BlackThrush 2026-06-20, bd-defgb): added production-shaped synthetic bench
+arms to `btrfs_decompress_extents` and tested the dedicated-pool idea before shipping it. Command:
+`AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-a rch exec -- cargo bench
+--profile release-perf -p ffs-core --bench btrfs_decompress_extents -- --warm-up-time 1 --measurement-time 3`
+on worker `hz1`. Results: large 272x128KiB compressed file, global pool 3.1463 ms vs dedicated max16 pool
+3.0628 ms = **1.03x**, below the keep gate; many-small-files 64x4x128KiB, always-install dedicated pool
+8.0391 ms vs gated-small-files global fallback 8.7118 ms = **0.92x regression** for the gate. The attempted
+production `OnceLock<ThreadPool>`/gate patch was reverted. Keep only the bench evidence. Conclusion: do NOT
+ship the dedicated-pool or gated-dedicated-pool approach from synthetic evidence; it does not materially close
+the compressed-read gap and the anti-thrash gate regresses its modeled workload. Next valid attempt needs a
+different lever or an actual large multi-file compressed image with head-to-head kernel/frankenfs timings.
