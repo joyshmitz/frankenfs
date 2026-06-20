@@ -447,6 +447,83 @@ AGENT_NAME=BlackThrush \
   rch exec -- cargo test -p ffs-harness --test conformance -- --nocapture
 ```
 
+## `bd-xmh5g` Addendum
+
+Date: 2026-06-20
+Agent: BlackThrush (`cod-b`)
+Scope: `ffs-core` ext4 indirect near-contiguous large-run reads
+Production status: kept; `read_ext4_indirect` now splits large coalesced runs into ordered chunks before the existing parallel owned-buffer read phase
+RCH proof worker: `vmi1227854` for Criterion A/B
+Requested target dir: `/data/projects/.rch-targets/frankenfs-cod-b`
+
+### Verdict
+
+Keep the 128-block default. The internal 32 MiB large-run model improves from
+`25.523 ms` single-run median to `15.729 ms` at 128-block chunks (`1.623x`
+old/new). The 16-block candidate lost and the 32-block row was too small/noisy
+to use as the default. Fresh mounted ext4-kernel comparison was attempted but
+blocked by loop-device policy, so the prior direct ext4-kernel loss remains the
+release-readiness limiter.
+
+### Scorecard
+
+| Gate | Result |
+| --- | --- |
+| Code-first backlog rows examined in this addendum | 1 |
+| RCH Criterion rows completed | 7 / 7 large-run rows |
+| Same-worker evidence | Yes: chunk-size sweep on `vmi1227854` |
+| Direct ext4/btrfs-kernel ratios | Existing direct loss remains `211-224 ms` FrankenFS vs `45 ms` kernel (`~4.7-5.0x` slower); fresh rerun blocked by loop-device setup failure |
+| Production levers kept | 1 (`read_ext4_indirect` large-run chunking, default `128` blocks) |
+| Production levers rejected/reverted | 1 rejected setting family (`16` blocks); `32` blocks treated neutral/noisy |
+| Internal win/loss/neutral | `4/1/1` |
+| Direct kernel win/loss/neutral | `0/1/0` existing direct loss; fresh run blocked |
+| Conformance/behavior guard | RCH focused test `ext4_indirect_large_run_chunks_default_bd_xmh5g` passed on `vmi1167313`; RCH `cargo check -p ffs-core --all-targets` passed on `vmi1152480`; RCH-wrapper local fallback `cargo test -p ffs-harness --test conformance -- --nocapture` passed `100 / 0 / 2 ignored`; `git diff --check` passed. |
+| Release-readiness score for perf-superiority claims | 45 / 100: real same-worker keep for the targeted internal gap, but no fresh mounted kernel ratio and the old direct ext4-kernel loss is still open |
+| Release-readiness score for this row's hygiene | 90 / 100: same-worker sweep, focused behavior proof, check, conformance, and ledgers are recorded; remaining gaps are loop-device policy and unrelated pre-existing clippy/rustfmt debt |
+
+### Measured Rows
+
+| Workload | Single-run | Candidate | Ratio | Verdict |
+| --- | --- | --- | --- | --- |
+| `large_run_chunked_16blocks/8192` | `25.523 ms` | `31.397 ms` | `0.813x` old/new | Reject |
+| `large_run_chunked_32blocks/8192` | `25.523 ms` | `23.067 ms` | `1.106x` old/new | Neutral/noisy |
+| `large_run_chunked_64blocks/8192` | `25.523 ms` | `17.267 ms` | `1.478x` old/new | Win |
+| `large_run_chunked_128blocks/8192` | `25.523 ms` | `15.729 ms` | `1.623x` old/new | KEEP |
+| `large_run_chunked_256blocks/8192` | `25.523 ms` | `16.591 ms` | `1.539x` old/new | Win |
+| `large_run_chunked_512blocks/8192` | `25.523 ms` | `17.475 ms` | `1.461x` old/new | Win |
+
+### Kernel Reference Coverage
+
+The direct comparator built `ffs-cli` release-perf, generated a 32 MiB ext4
+`^extents` file, and `debugfs stat` confirmed indirect/double-indirect block
+mappings. The worker then failed `mount -o loop,ro` with `failed to setup loop
+device` (`/tmp/ffs_indirect_cmp.0g2lsq`). This addendum must not be reported as
+whole-filesystem ext4 domination until that mounted comparator reruns.
+
+### Commands
+
+```bash
+AGENT_NAME=BlackThrush \
+  CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-b \
+  rch exec -- cargo bench --profile release-perf -p ffs-core \
+  --bench ext4_indirect_read_overlap -- \
+  ext4_indirect_read_overlap/large_run --warm-up-time 1 \
+  --measurement-time 1 --sample-size 20
+
+AGENT_NAME=BlackThrush \
+  CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-b \
+  rch exec -- cargo test -p ffs-core \
+  ext4_indirect_large_run_chunks_default_bd_xmh5g -- --nocapture
+
+AGENT_NAME=BlackThrush \
+  CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-b \
+  rch exec -- cargo check -p ffs-core --all-targets
+
+AGENT_NAME=BlackThrush \
+  CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-b \
+  rch exec -- cargo test -p ffs-harness --test conformance -- --nocapture
+```
+
 ## `bd-xmh5g.389` Addendum
 
 Date: 2026-06-19

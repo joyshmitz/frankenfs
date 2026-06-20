@@ -2880,6 +2880,58 @@ enum Ext4XattrPostInodeAction {
     },
 }
 
+enum Ext4IndirectReadSeg {
+    Run {
+        phys0: u64,
+        span: usize,
+        buf_off: usize,
+    },
+    Partial {
+        phys: u64,
+        in_off: usize,
+        len: usize,
+        buf_off: usize,
+    },
+}
+
+static PARALLEL_EXT4_INDIRECT_READ_CHUNK_BLOCKS: std::sync::OnceLock<usize> =
+    std::sync::OnceLock::new();
+
+fn ext4_indirect_read_chunk_bytes(bs_usize: usize) -> usize {
+    let chunk_blocks = *PARALLEL_EXT4_INDIRECT_READ_CHUNK_BLOCKS.get_or_init(|| {
+        std::env::var("FFS_INDIRECT_READ_CHUNK_BLOCKS")
+            .or_else(|_| std::env::var("FFS_READ_CHUNK_BLOCKS"))
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(128)
+    });
+    chunk_blocks
+        .checked_mul(bs_usize)
+        .filter(|&n| n >= bs_usize)
+        .unwrap_or(128 * bs_usize)
+}
+
+fn push_ext4_indirect_run_chunks(
+    segs: &mut Vec<Ext4IndirectReadSeg>,
+    phys0: u64,
+    span: usize,
+    buf_off: usize,
+    bs_usize: usize,
+    chunk_bytes: usize,
+) {
+    let mut emitted = 0_usize;
+    while emitted < span {
+        let take = (span - emitted).min(chunk_bytes);
+        segs.push(Ext4IndirectReadSeg::Run {
+            phys0: phys0 + (emitted / bs_usize) as u64,
+            span: take,
+            buf_off: buf_off + emitted,
+        });
+        emitted += take;
+    }
+}
+
 impl OpenFs {
     /// Open a filesystem image at `path` with default options (validation enabled).
     pub fn open(cx: &Cx, path: impl AsRef<Path>) -> Result<Self, FfsError> {
@@ -12503,22 +12555,10 @@ impl OpenFs {
     ) -> Result<Vec<u8>, FfsError> {
         let bs = u64::from(self.block_size());
         let bs_usize = self.block_size() as usize;
+        let chunk_bytes = ext4_indirect_read_chunk_bytes(bs_usize);
         let file_size = inode.size;
         if offset >= file_size {
             return Ok(Vec::new());
-        }
-        // One contiguous segment of the read: either a coalesced full-block run
-        // or a sub-block partial head/tail. Holes are not emitted (buf stays
-        // zero-filled). Declared at the top of the fn so it precedes statements
-        // (clippy::items_after_statements).
-        enum IndirectSeg {
-            Run { phys0: u64, span: usize, buf_off: usize },
-            Partial {
-                phys: u64,
-                in_off: usize,
-                len: usize,
-                buf_off: usize,
-            },
         }
 
         let to_read = (file_size - offset).min(u64::from(size)) as usize;
@@ -12528,7 +12568,7 @@ impl OpenFs {
         // block resolution is a dependent (and cached) chain, so it stays serial;
         // only the bulk DATA reads are overlapped below. Full-block-aligned spans
         // coalesce a contiguous-physical run into ONE vectored op (bd-bov9c).
-        let mut segs: Vec<IndirectSeg> = Vec::new();
+        let mut segs: Vec<Ext4IndirectReadSeg> = Vec::new();
         let mut bytes_read = 0;
         // Per-pass memo of the most-recently-read pointer block at each indirect
         // depth, so a sequential walk reads each indirect block once instead of
@@ -12561,11 +12601,14 @@ impl OpenFs {
                         }
                     }
                     let span = run_len as usize * bs_usize;
-                    segs.push(IndirectSeg::Run {
+                    push_ext4_indirect_run_chunks(
+                        &mut segs,
                         phys0,
                         span,
-                        buf_off: bytes_read,
-                    });
+                        bytes_read,
+                        bs_usize,
+                        chunk_bytes,
+                    );
                     bytes_read += span;
                 } else {
                     // Hole at a full block boundary — already zeroed.
@@ -12579,7 +12622,7 @@ impl OpenFs {
             if let Some(phys_block) =
                 self.resolve_indirect_block_memo(cx, scope, inode, logical_block, &mut memo)?
             {
-                segs.push(IndirectSeg::Partial {
+                segs.push(Ext4IndirectReadSeg::Partial {
                     phys: phys_block,
                     in_off: offset_in_block,
                     len: chunk_size,
@@ -12598,7 +12641,7 @@ impl OpenFs {
             use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
             segs.par_iter()
                 .map(|seg| match seg {
-                    IndirectSeg::Run { phys0, span, .. } => {
+                    Ext4IndirectReadSeg::Run { phys0, span, .. } => {
                         let mut tmp = vec![0_u8; *span];
                         self.read_contiguous_into_with_scope(
                             cx,
@@ -12608,7 +12651,7 @@ impl OpenFs {
                         )?;
                         Ok(tmp)
                     }
-                    IndirectSeg::Partial {
+                    Ext4IndirectReadSeg::Partial {
                         phys, in_off, len, ..
                     } => {
                         let block_data =
@@ -12624,7 +12667,8 @@ impl OpenFs {
         for (seg, read) in segs.iter().zip(seg_reads) {
             let data = read?;
             let buf_off = match seg {
-                IndirectSeg::Run { buf_off, .. } | IndirectSeg::Partial { buf_off, .. } => *buf_off,
+                Ext4IndirectReadSeg::Run { buf_off, .. }
+                | Ext4IndirectReadSeg::Partial { buf_off, .. } => *buf_off,
             };
             buf[buf_off..buf_off + data.len()].copy_from_slice(&data);
         }
@@ -36142,6 +36186,93 @@ mod tests {
             vectored.load(AtomicOrdering::SeqCst),
             0,
             "the ranged read into the output buffer uses no vectored device op"
+        );
+    }
+
+    #[test]
+    fn ext4_indirect_large_run_chunks_default_bd_xmh5g() {
+        const BS: usize = 4096;
+        const DATA_START: usize = 30;
+        const INDIRECT_BLOCK: usize = 20;
+        const RUN_BLOCKS: usize = 129;
+
+        let mut image = build_ext4_image_with_extents();
+        image.resize((DATA_START + RUN_BLOCKS + 1) * BS, 0);
+        let blocks_count = u32::try_from(image.len() / BS).expect("test image block count fits");
+        let sb_off = EXT4_SUPERBLOCK_OFFSET;
+        image[sb_off + 0x04..sb_off + 0x08].copy_from_slice(&blocks_count.to_le_bytes());
+        image[sb_off + 0x20..sb_off + 0x24].copy_from_slice(&blocks_count.to_le_bytes());
+
+        for b in 0..RUN_BLOCKS {
+            let pat = u8::try_from(DATA_START + b).expect("block pattern fits u8");
+            let phys = DATA_START + b;
+            image[phys * BS..(phys + 1) * BS].fill(pat);
+        }
+        let indirect_off = INDIRECT_BLOCK * BS;
+        for i in 0..RUN_BLOCKS - 12 {
+            let phys = u32::try_from(DATA_START + 12 + i).expect("physical block fits u32");
+            image[indirect_off + i * 4..indirect_off + i * 4 + 4]
+                .copy_from_slice(&phys.to_le_bytes());
+        }
+
+        let dev = VectoredCountingDevice::new(TestDevice::from_vec(image));
+        let scalar = Arc::clone(&dev.scalar_reads);
+        let vectored = Arc::clone(&dev.vectored_reads);
+        let cx = Cx::for_testing();
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
+        let scope = RequestScope::empty();
+
+        let mut inode = make_test_inode(ffs_types::S_IFREG | 0o644, 0, 0);
+        let mut ptrs = vec![0_u8; 15 * 4];
+        for i in 0..12_usize {
+            let phys = u32::try_from(DATA_START + i).expect("physical block fits u32");
+            ptrs[i * 4..i * 4 + 4].copy_from_slice(&phys.to_le_bytes());
+        }
+        ptrs[12 * 4..13 * 4].copy_from_slice(
+            &u32::try_from(INDIRECT_BLOCK)
+                .expect("indirect block fits u32")
+                .to_le_bytes(),
+        );
+        inode.extent_bytes = ptrs.into();
+        inode.size = (RUN_BLOCKS * BS) as u64;
+
+        scalar.store(0, AtomicOrdering::SeqCst);
+        vectored.store(0, AtomicOrdering::SeqCst);
+        let out = fs
+            .read_ext4_indirect(
+                &cx,
+                &scope,
+                &inode,
+                0,
+                u32::try_from(RUN_BLOCKS * BS).unwrap(),
+            )
+            .expect("large indirect read");
+
+        assert_eq!(out.len(), RUN_BLOCKS * BS);
+        for b in 0..RUN_BLOCKS {
+            let pat = u8::try_from(DATA_START + b).expect("block pattern fits u8");
+            assert!(
+                out[b * BS..(b + 1) * BS].iter().all(|&x| x == pat),
+                "block {b} reads its pattern"
+            );
+        }
+
+        if std::env::var_os("FFS_INDIRECT_READ_CHUNK_BLOCKS").is_none()
+            && std::env::var_os("FFS_READ_CHUNK_BLOCKS").is_none()
+        {
+            assert_eq!(
+                scalar.load(AtomicOrdering::SeqCst),
+                3,
+                "129 contiguous indirect data blocks should use one cached metadata read \
+                 plus two data reads at the 128-block default; got {} scalar + {} vectored",
+                scalar.load(AtomicOrdering::SeqCst),
+                vectored.load(AtomicOrdering::SeqCst),
+            );
+        }
+        assert_eq!(
+            vectored.load(AtomicOrdering::SeqCst),
+            0,
+            "indirect chunk reads use read_contiguous_into, not vectored scatter"
         );
     }
 

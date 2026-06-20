@@ -32,6 +32,8 @@ use std::time::Duration;
 const RUN_BLOCKS: usize = 8; // blocks per contiguous run
 const BS: usize = 4096; // ext4 block size
 const RUN_BYTES: usize = RUN_BLOCKS * BS;
+const LARGE_RUN_BLOCKS: usize = 8192; // 32 MiB: matches the residual ext4 gap row.
+const LARGE_CHUNK_BLOCKS: &[usize] = &[16, 32, 64, 128, 256, 512];
 /// Per-read access latency. Models a real-disk / SSD-queue round trip.
 const READ_LATENCY: Duration = Duration::from_micros(250);
 
@@ -198,6 +200,48 @@ fn read_parallel_in_place(
     Ok(buf)
 }
 
+/// OLD large-run shape: one huge coalesced run, then serial assembly copy.
+fn read_large_run_single(cx: &Cx, dev: &LatencyBlockDevice, blocks: usize) -> Result<Vec<u8>> {
+    let span = blocks * BS;
+    let mut tmp = vec![0_u8; span];
+    dev.read_contiguous_into(cx, BlockNumber(0), &mut tmp)?;
+    let mut buf = vec![0_u8; span];
+    buf.copy_from_slice(&tmp);
+    Ok(buf)
+}
+
+/// NEW large-run shape: split one coalesced run into ordered owned chunks.
+fn read_large_run_chunked(
+    cx: &Cx,
+    dev: &LatencyBlockDevice,
+    blocks: usize,
+    chunk_blocks: usize,
+) -> Result<Vec<u8>> {
+    let mut chunks = Vec::new();
+    let mut block_off = 0_usize;
+    while block_off < blocks {
+        let take_blocks = (blocks - block_off).min(chunk_blocks);
+        chunks.push((block_off, take_blocks, block_off * BS));
+        block_off += take_blocks;
+    }
+
+    let reads: Vec<Result<Vec<u8>>> = chunks
+        .par_iter()
+        .map(|&(block_off, take_blocks, _)| {
+            let mut tmp = vec![0_u8; take_blocks * BS];
+            dev.read_contiguous_into(cx, BlockNumber(block_off as u64), &mut tmp)?;
+            Ok(tmp)
+        })
+        .collect();
+
+    let mut buf = vec![0_u8; blocks * BS];
+    for ((_, _, buf_off), read) in chunks.iter().zip(reads) {
+        let data = read?;
+        buf[*buf_off..*buf_off + data.len()].copy_from_slice(&data);
+    }
+    Ok(buf)
+}
+
 fn bench_indirect(c: &mut Criterion) {
     let cx = Cx::for_testing();
     let mut group = c.benchmark_group("ext4_indirect_read_overlap");
@@ -231,6 +275,44 @@ fn bench_indirect(c: &mut Criterion) {
             &runs,
             |b, _| {
                 b.iter(|| black_box(read_parallel_in_place(&cx, &dev, black_box(&run_starts))));
+            },
+        );
+    }
+
+    let dev = LatencyBlockDevice::new(LARGE_RUN_BLOCKS as u64, READ_LATENCY);
+    let single_large =
+        read_large_run_single(&cx, &dev, LARGE_RUN_BLOCKS).expect("large-run single");
+    for &chunk_blocks in LARGE_CHUNK_BLOCKS {
+        assert_eq!(
+            single_large,
+            read_large_run_chunked(&cx, &dev, LARGE_RUN_BLOCKS, chunk_blocks)
+                .expect("large-run chunked"),
+            "chunked large-run indirect read diverged from one-run read (chunk_blocks={chunk_blocks})",
+        );
+    }
+    group.bench_with_input(
+        BenchmarkId::new("large_run_single", LARGE_RUN_BLOCKS),
+        &LARGE_RUN_BLOCKS,
+        |b, &blocks| {
+            b.iter(|| black_box(read_large_run_single(&cx, &dev, black_box(blocks))));
+        },
+    );
+    for &chunk_blocks in LARGE_CHUNK_BLOCKS {
+        group.bench_with_input(
+            BenchmarkId::new(
+                format!("large_run_chunked_{chunk_blocks}blocks"),
+                LARGE_RUN_BLOCKS,
+            ),
+            &LARGE_RUN_BLOCKS,
+            |b, &blocks| {
+                b.iter(|| {
+                    black_box(read_large_run_chunked(
+                        &cx,
+                        &dev,
+                        black_box(blocks),
+                        black_box(chunk_blocks),
+                    ))
+                });
             },
         );
     }
