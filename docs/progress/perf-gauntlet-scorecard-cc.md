@@ -54,9 +54,24 @@ zero added syscalls**. Measured **13.0×** (host vmi1227854: 366µs→28µs) and
 length re-check rather than a scratch). Removing the per-read scratch also cuts allocation
 footprint, which my own btrfs root-cause work identified as the dominant cold/memory-pressure cost
 (2× RSS → 2.25× slower preads via page faults). ffs-block 306 tests + ffs-core 1177 tests green;
-clippy clean. **Caveat:** this is the lever's own A/B (staged vs direct in one process), not a
-head-to-head vs the kernel; it proves the scratch elimination delivers and removes a real
-per-read allocation+fault on the bulk path.
+clippy clean.
+
+**E2E TRANSFER VERIFIED + kernel head-to-head (cc 2026-06-20, resume).** A primitive microbench win
+can fail to move the real workload (cf. cod-b NEGATIVE_EVIDENCE row 27: a btrfs scratch-*reuse*
+candidate's 11x primitive did NOT transfer). Made the threshold env-overridable
+(`FFS_DIRECT_READ_MIN_BYTES`, commit `fd3cecfb`) and A/B'd the lever in ONE release-perf binary on a
+real 128 MiB warm ext4 read (`ffs-cli read --discard`, `mke2fs -d` image): lever-ON median **22.85 ms**
+vs forced-staged **26.5 ms** = **1.16x** (13 runs × 2 interleaved repeats, both consistent) — the
+scratch elimination **transfers** to the real ext4 `read_contiguous_into` path (elimination + size-gate,
+unlike cod-b's btrfs reuse). Kernel head-to-head on the same 128 MiB warm bytes: FrankenFS **5602 MB/s**
+beats single-thread kernel `dd bs=128M` materialize (~1150 MB/s, **4.9x**) and `dd bs=8M` (~2200 MB/s,
+**2.5x**) — FrankenFS parallelizes the chunked read across the 64-core rayon pool while `dd` is
+single-threaded. It still trails kernel `cat`/streaming (`cat`→/dev/null ~10 ms here; cod-a's mounted
+`cat` measured ext4 3.36x / btrfs 6.58x in `bd-jgbam` below) — the kernel's best case (reused small
+buffer, splice). **Honest verdict:** the warm-read win/loss flips on the kernel baseline (WIN vs
+single-thread materialize, LOSS vs streaming `cat`); the lever's unambiguous, baseline-independent
+contribution is the **1.16x improvement to FrankenFS's own read path**, verified to transfer. Full
+conformance 100/0/2 green; ffs-block 308 + ffs-core 1177 tests green; clippy clean.
 
 ### Lever 10 fresh cod-a verification — e2compr cluster read overlap (2026-06-20)
 `bd-giyxr` was already implemented in `e6259d5d`, but the bead remained open as
