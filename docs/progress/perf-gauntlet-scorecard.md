@@ -1,5 +1,101 @@
 # Perf Gauntlet Scorecard
 
+## `bd-xmh5g` cod-a Guard-Fold Rejection
+
+Date: 2026-06-20
+Agent: BlackThrush (`cod-a`)
+Scope: `ffs-core` btrfs streamed-read dir/symlink guard fold in
+`btrfs_read_file_into_impl`
+Commit under measurement: `4e9e9c1b`
+Revert commit: `37b7e8b`
+RCH workers: `vmi1149989` clean-current release-perf build and post-revert
+`ffs-core` check, `vmi1153651` parent release-perf build
+Requested target dir: `/data/projects/.rch-targets/frankenfs-cod-a`
+
+### Verdict
+
+REJECT. The idea was a metadata-elision lever: reuse the already-fetched btrfs
+inode item in the streamed-read path instead of doing another
+`btrfs_read_inode_attr` style guard before regular-file reads. It was plausible
+because the remaining compressed-read gap has repeatedly pointed at btrfs
+metadata fan-out and per-call overhead.
+
+The first local A/B appeared spectacular, but it was invalid: the shared
+worktree had a concurrent peer edit in `crates/ffs-cli/src/main.rs` that changed
+the CLI single-file read tile from 64 MiB to 1 MiB. The contaminated binary
+therefore measured two levers at once. Detached clean worktrees for parent
+`5d77712a` and current `4e9e9c1b` removed that contamination and showed the
+guard fold alone was neutral on single-file read and neutral/slightly negative
+on walk. Production source was reverted.
+
+### Scorecard
+
+| Gate | Result |
+| --- | --- |
+| Code-first backlog rows examined in this closeout | 1 |
+| Direct mounted btrfs rows completed | 4 clean rows plus 4 invalid/contaminated diagnostic rows |
+| Same-host evidence | Local A/B against `/data/tmp/btrdiff2_1340519.img` and mounted reference `/data/tmp/btrdiff2mnt_1340519`; clean acceptance runs used 15 iterations |
+| Direct ext4/btrfs-kernel ratios | Clean current single-file read `56.5 ms` vs kernel `7.1 ms` (`8.01x` slower); clean current walk `34.9 ms` vs kernel `12.4 ms` (`2.82x` slower) |
+| Production levers kept | 0 |
+| Production levers rejected/reverted | 1 |
+| Internal A/B win/loss/neutral | `0 / 1 / 1`: single-file neutral below keep threshold, walk slight loss/noise |
+| Direct kernel win/loss/neutral | `0 / 2 / 0` |
+| Conformance/build guard | RCH clean-current `cargo build --profile release-perf -p ffs-cli` passed on `vmi1149989`; RCH parent build passed on `vmi1153651`; local clean parent/current release-perf builds passed for runnable binaries; `cargo fmt -p ffs-core --check` passed; RCH `cargo check -p ffs-core --all-targets` passed on `vmi1149989`; local fallback `cargo test -p ffs-harness --test conformance -- --nocapture` passed `100 / 0 / 2 ignored` after RCH reported no admissible worker for that test. |
+| Release-readiness score for perf-superiority claims | 42 / 100: direct mounted-kernel evidence and conformance are green, but this lever keeps no production win and btrfs-kernel still leads by `2.82-8.01x` on clean rows. |
+| Release-readiness score for this row's hygiene | 97 / 100: exact parent/current commits were rebuilt, contamination was detected and corrected with detached clean worktrees, direct kernel ratios and invalid rows are recorded, and the no-gain source was reverted. |
+
+### Measured Rows
+
+| Phase | Workload | Parent | Current | Kernel btrfs | Ratio vs parent | Ratio vs kernel | Verdict |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | --- |
+| Invalid contaminated, parent first | `ffs-cli read --discard /compressible.bin` vs kernel `cat` | `59.5 ms` | `23.3 ms` | `7.2 ms` | `2.55x` old/new | current `3.25x` slower than kernel | Invalid: current binary included peer CLI tile edit |
+| Invalid contaminated, current first | `ffs-cli read --discard /compressible.bin` vs kernel `cat` | `58.4 ms` | `22.7 ms` | `7.0 ms` | `2.57x` old/new | current `3.23x` slower than kernel | Invalid: confirms contamination, not guard-fold keep |
+| Invalid contaminated, parent first | `ffs-cli walk --read-data --no-stat` vs kernel `cat *` | `35.1 ms` | `36.0 ms` | `11.7 ms` | `0.974x` old/new | current `3.07x` slower than kernel | Invalid diagnostic; walk did not improve |
+| Invalid contaminated, current first | `ffs-cli walk --read-data --no-stat` vs kernel `cat *` | `34.4 ms` | `34.3 ms` | `10.9 ms` | `1.003x` old/new | current `3.15x` slower than kernel | Invalid diagnostic; neutral |
+| Clean acceptance | `ffs-cli read --discard /compressible.bin` vs kernel `cat` | `57.1 ms` | `56.5 ms` | `7.1 ms` | `1.011x` old/new | current `8.01x` slower than kernel | Reject: neutral/no-ship |
+| Clean acceptance | `ffs-cli walk --read-data --no-stat` vs kernel `cat *` | `34.4 ms` | `34.9 ms` | `12.4 ms` | `0.986x` old/new | current `2.82x` slower than kernel | Reject: slight loss/noise |
+
+### Kernel Reference Coverage
+
+This row used the same mounted read-only btrfs image as the direct kernel
+reference. The clean candidate never beat kernel btrfs and did not move the
+FrankenFS side enough to justify keeping code. The false contaminated win is a
+useful guardrail: do not attribute future 64 MiB -> 1 MiB CLI tile results to
+core btrfs metadata changes unless the binary is built from a clean worktree.
+
+### Commands
+
+```bash
+AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-a \
+  rch exec -- cargo build --profile release-perf -p ffs-cli
+
+hyperfine --warmup 3 --runs 15 \
+  --export-json /data/projects/.scratch/guardfold-clean-btrfs-zstd-single-20260620.json \
+  --command-name parent-5d77712a \
+  '/data/projects/.scratch/ffs-cli-5d77712a-guardfold-parent --log-format json read /data/tmp/btrdiff2_1340519.img /compressible.bin --discard >/dev/null 2>&1' \
+  --command-name clean-current-4e9e9c1b \
+  '/data/projects/.scratch/ffs-cli-4e9e9c1b-guardfold-clean-current --log-format json read /data/tmp/btrdiff2_1340519.img /compressible.bin --discard >/dev/null 2>&1' \
+  --command-name btrfs-kernel-cat \
+  'cat /data/tmp/btrdiff2mnt_1340519/compressible.bin >/dev/null'
+
+hyperfine --warmup 3 --runs 15 \
+  --export-json /data/projects/.scratch/guardfold-clean-btrfs-zstd-walk-20260620.json \
+  --command-name parent-5d77712a \
+  '/data/projects/.scratch/ffs-cli-5d77712a-guardfold-parent --log-format json walk /data/tmp/btrdiff2_1340519.img --read-data --no-stat >/dev/null 2>&1' \
+  --command-name clean-current-4e9e9c1b \
+  '/data/projects/.scratch/ffs-cli-4e9e9c1b-guardfold-clean-current --log-format json walk /data/tmp/btrdiff2_1340519.img --read-data --no-stat >/dev/null 2>&1' \
+  --command-name btrfs-kernel-cat \
+  'cat /data/tmp/btrdiff2mnt_1340519/* >/dev/null'
+
+cargo fmt -p ffs-core --check
+
+AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-a \
+  rch exec -- cargo check -p ffs-core --all-targets
+
+AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-a \
+  rch exec -- cargo test -p ffs-harness --test conformance -- --nocapture
+```
+
 ## `bd-xmh5g.407` cod-b CLI Read-Tile Rejection
 
 Date: 2026-06-20
