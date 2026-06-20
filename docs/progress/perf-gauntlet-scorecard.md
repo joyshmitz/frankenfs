@@ -1,5 +1,80 @@
 # Perf Gauntlet Scorecard
 
+## `bd-xmh5g` cod-b Scratch-Buffer Rejection
+
+Date: 2026-06-20
+Agent: BlackThrush (`cod-b`)
+Scope: btrfs zstd compressed-read input-buffer scratch reuse, retaining one
+compressed input `Vec` per Rayon worker for sub-1 MiB compressed extents.
+Commit under measurement: rejected local candidate, source reverted before
+commit
+RCH workers: `vmi1153651` release build after revert, `vmi1149989`
+conformance after revert
+Requested target dir: `/data/projects/.rch-targets/frankenfs-cod-b`
+
+### Verdict
+
+REJECT. The lever was a plausible allocator-pressure attack from the btrfs
+compressed-read gap: reuse the compressed input staging buffer per worker while
+leaving output assembly and decompressor semantics unchanged. A 7-run smoke
+looked mildly positive, but the 25-run acceptance pass flipped the single-file
+read into a regression and left the whole-tree walk in neutral/no-ship
+territory. The source change was reverted; only this evidence remains.
+
+### Scorecard
+
+| Gate | Result |
+| --- | --- |
+| Code-first backlog rows examined in this closeout | 1 |
+| Direct mounted btrfs rows completed | 4 rows: 2 smoke rows plus 2 acceptance rows |
+| Same-worker evidence | Local same-host A/B against clean `59466af0` baseline and mounted kernel btrfs image `/data/tmp/btrdiff2_1340519.img`; acceptance runs used 25 iterations |
+| Direct ext4/btrfs-kernel ratios | 0 / 2 acceptance rows beat kernel; candidate was `8.53x` slower on single-file read and `2.77x` slower on whole-tree walk |
+| Production levers kept | 0 |
+| Production levers rejected/reverted | 1 |
+| Internal A/B win/loss/neutral | `0 / 1 / 1` on acceptance: read loss, walk neutral |
+| Direct kernel win/loss/neutral | `0 / 2 / 0` |
+| Conformance/build guard | Local `cargo check -p ffs-core --all-targets` passed while the scratch candidate was present; source reverted; RCH `cargo build --release -p ffs-cli` passed on `vmi1153651`; RCH `cargo test -p ffs-harness --test conformance -- --nocapture` passed on `vmi1149989` (100 passed / 0 failed / 2 ignored). |
+| Release-readiness score for perf-superiority claims | 58 / 100: direct mounted kernel evidence is real and conformance is green, but this lever did not reduce the remaining btrfs compressed-read gap enough to ship. |
+| Release-readiness score for this row's hygiene | 96 / 100: candidate measured, higher-confidence rerun performed after smoke ambiguity, regression reverted, direct kernel ratios recorded, and conformance/build gates are green. |
+
+### Measured Rows
+
+| Phase | Workload | Baseline | Scratch candidate | Kernel btrfs | Ratio vs baseline | Ratio vs kernel | Verdict |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Smoke, 7 runs | `ffs-cli read --discard /compressible.bin` vs kernel `cat` | `58.5 ms` | `56.2 ms` | `6.5 ms` | `1.041x` old/new | candidate `8.68x` slower than kernel | Routing-only smoke win |
+| Smoke, 7 runs | `ffs-cli walk --read-data --no-stat` vs kernel `cat *` | `43.3 ms` | `39.3 ms` | `12.4 ms` | `1.102x` old/new | candidate `3.18x` slower than kernel | Routing-only smoke win |
+| Acceptance, 25 runs | `ffs-cli read --discard /compressible.bin` vs kernel `cat` | `56.7 ms` | `58.6 ms` | `6.9 ms` | `0.968x` old/new | candidate `8.53x` slower than kernel | Reject: regression |
+| Acceptance, 25 runs | `ffs-cli walk --read-data --no-stat` vs kernel `cat *` | `36.3 ms` | `35.0 ms` | `12.6 ms` | `1.037x` old/new | candidate `2.77x` slower than kernel | Reject: neutral/no-ship |
+
+### Kernel Reference Coverage
+
+This row used a mounted read-only btrfs image as the direct kernel reference.
+The candidate never beats kernel btrfs on either accepted row. The remaining
+gap is not allocator scratch-buffer churn; the next attack should move deeper
+into decode-output placement, logical-to-physical extent lookup fan-out, or a
+structural I/O backend change that can reduce userspace copy/syscall overhead
+without violating the repository's no-unsafe policy.
+
+### Commands
+
+```bash
+hyperfine --warmup 3 --runs 25 \
+  '/data/projects/.rch-targets/frankenfs-cod-b-baseline/release-perf/ffs-cli read --discard /data/tmp/btrdiff2_1340519.img /compressible.bin' \
+  '/data/projects/.rch-targets/frankenfs-cod-b-scratch/release-perf/ffs-cli read --discard /data/tmp/btrdiff2_1340519.img /compressible.bin' \
+  'cat /data/tmp/btrdiff2mnt_1340519/compressible.bin > /dev/null'
+
+hyperfine --warmup 3 --runs 25 \
+  '/data/projects/.rch-targets/frankenfs-cod-b-baseline/release-perf/ffs-cli walk --read-data --no-stat /data/tmp/btrdiff2_1340519.img' \
+  '/data/projects/.rch-targets/frankenfs-cod-b-scratch/release-perf/ffs-cli walk --read-data --no-stat /data/tmp/btrdiff2_1340519.img' \
+  'sh -c "cat /data/tmp/btrdiff2mnt_1340519/* > /dev/null"'
+
+AGENT_NAME=cod-b CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-b \
+  rch exec -- cargo build --release -p ffs-cli
+
+AGENT_NAME=cod-b CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-b \
+  rch exec -- cargo test -p ffs-harness --test conformance -- --nocapture
+```
+
 ## `bd-w3hol` cod-a Fresh Verification
 
 Date: 2026-06-20
