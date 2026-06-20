@@ -362,6 +362,91 @@ CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-b \
 cargo fmt -p ffs-btrfs --check
 ```
 
+## `bd-r9c10` Addendum
+
+Date: 2026-06-20
+Agent: BlackThrush (`cod-b`)
+Scope: `ffs-core` ext4 indirect read gap and `ext4_indirect_read_overlap`
+Production status: incumbent serial-plan / parallel-owned-buffer / serial-assemble path restored
+RCH baseline worker: `vmi1149989`
+RCH candidate worker: `vmi1167313` (RCH did not honor requested worker pin)
+Requested target dir: `/data/projects/.rch-targets/frankenfs-cod-b`
+
+### Verdict
+
+This row is release-ready only as a measured rejection of the direct-output
+copy-elision follow-up. The incumbent `read_ext4_indirect` parallel read path
+already wins strongly against the serial synthetic oracle, but removing
+per-segment owned buffers and filling disjoint output windows directly regressed
+the 64-run row and was neutral at 256 runs. Production code was reverted; the
+benchmark A/B arm remains as a negative-evidence guard.
+
+### Scorecard
+
+| Gate | Result |
+| --- | --- |
+| Code-first backlog rows examined in this addendum | 1 |
+| RCH Criterion rows completed | 2 / 2 |
+| Same-worker evidence | Partial: baseline on `vmi1149989`; candidate same-binary A/B on `vmi1167313` because RCH selected a different worker despite `RCH_WORKER`/`RCH_WORKERS` |
+| Direct ext4/btrfs-kernel ratios | 0 / 1 new direct; prior direct ext4 indirect gap remains `211-224 ms` FrankenFS vs `45 ms` kernel (`~4.7-5.0x` slower) |
+| Production levers kept | 0 |
+| Production levers rejected/reverted | 1 |
+| Conformance/behavior guard after revert | `ext4_indirect_read_overlap` asserts serial, incumbent parallel, and in-place candidate byte equality before measuring; both RCH bench runs passed. RCH `cargo check -p ffs-core --bench ext4_indirect_read_overlap` passed on `vmi1152480`; RCH-wrapper local fallback `cargo test -p ffs-core read_ext4_indirect -- --nocapture` passed 1 focused test; RCH-wrapper local fallback `cargo test -p ffs-harness --test conformance -- --nocapture` passed 100 / 0 / 2 ignored |
+| Release-readiness score for perf-superiority claims | 20 / 100: honest negative evidence against one candidate; the direct ext4-kernel indirect-read gap remains open |
+| Release-readiness score for this row's hygiene | 88 / 100: baseline measured, candidate measured, production reverted, ratios ledgered, focused behavior/conformance green; worker pinning drift, RCH local fallback for tests, and pre-existing `ffs-core` clippy/rustfmt drift prevent a cleaner score |
+
+### Measured Rows
+
+| Bead | Workload | Incumbent | Candidate | Ratio | Verdict |
+| --- | --- | --- | --- | --- | --- |
+| `bd-r9c10` | 16 non-contiguous runs, same-binary A/B on `vmi1167313` | `2.7308 ms` | `2.5461 ms` | `1.073x` incumbent/candidate | Small win, below keep threshold alone |
+| `bd-r9c10` | 64 non-contiguous runs, same-binary A/B on `vmi1167313` | `7.7753 ms` | `8.6526 ms` | `0.899x` incumbent/candidate | Reject: candidate is `11.3%` slower |
+| `bd-r9c10` | 256 non-contiguous runs, same-binary A/B on `vmi1167313` | `25.508 ms` | `25.452 ms` | `1.002x` incumbent/candidate | Neutral |
+
+Baseline incumbent-vs-serial evidence on `vmi1149989`:
+
+| Workload | Serial | Incumbent parallel | Ratio |
+| --- | --- | --- | --- |
+| 16 non-contiguous runs | `5.7337 ms` | `970.27 us` | `5.91x` serial/incumbent |
+| 64 non-contiguous runs | `23.414 ms` | `2.7872 ms` | `8.40x` serial/incumbent |
+| 256 non-contiguous runs | `92.482 ms` | `13.491 ms` | `6.85x` serial/incumbent |
+
+### Kernel Reference Coverage
+
+The direct kernel comparator for this surface remains the existing 32 MiB ext4
+`^extent` image probe, where FrankenFS indirect reads measured `211-224 ms`
+against kernel ext4 `45 ms`. Today's RCH benchmark is an isolated Rust A/B for
+one proposed internal lever against that gap. It does not create a new direct
+kernel win and should not be reported as whole-filesystem domination.
+
+### Commands
+
+```bash
+AGENT_NAME=BlackThrush \
+  CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-b \
+  rch exec -- cargo bench --profile release-perf -p ffs-core \
+  --bench ext4_indirect_read_overlap -- \
+  ext4_indirect_read_overlap --warm-up-time 1 --measurement-time 3
+
+AGENT_NAME=BlackThrush RCH_WORKER=vmi1149989 RCH_WORKERS=vmi1149989 \
+  CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-b \
+  rch exec -- cargo bench --profile release-perf -p ffs-core \
+  --bench ext4_indirect_read_overlap -- \
+  ext4_indirect_read_overlap --warm-up-time 1 --measurement-time 3
+
+AGENT_NAME=BlackThrush \
+  CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-b \
+  rch exec -- cargo check -p ffs-core --bench ext4_indirect_read_overlap
+
+AGENT_NAME=BlackThrush \
+  CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-b \
+  rch exec -- cargo test -p ffs-core read_ext4_indirect -- --nocapture
+
+AGENT_NAME=BlackThrush \
+  CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-b \
+  rch exec -- cargo test -p ffs-harness --test conformance -- --nocapture
+```
+
 ## `bd-xmh5g.389` Addendum
 
 Date: 2026-06-19

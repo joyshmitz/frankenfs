@@ -25,7 +25,7 @@ use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use ffs_block::{BlockBuf, BlockDevice};
 use ffs_error::{FfsError, Result};
 use ffs_types::BlockNumber;
-use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
+use rayon::prelude::{IntoParallelIterator, IntoParallelRefIterator, ParallelIterator};
 use std::hint::black_box;
 use std::time::Duration;
 
@@ -95,6 +95,26 @@ impl BlockDevice for LatencyBlockDevice {
         Ok(())
     }
 
+    fn read_contiguous_into(&self, _cx: &Cx, start: BlockNumber, dst: &mut [u8]) -> Result<()> {
+        if dst.len() % BS != 0 {
+            return Err(FfsError::Format(
+                "bench read_contiguous_into requires block-aligned dst".into(),
+            ));
+        }
+        std::thread::sleep(self.read_latency);
+        for (i, chunk) in dst.chunks_mut(BS).enumerate() {
+            let idx = usize::try_from(start.0 + i as u64)
+                .map_err(|_| FfsError::Format("bench block index overflow".into()))?;
+            chunk.copy_from_slice(
+                self.blocks
+                    .get(idx)
+                    .ok_or_else(|| FfsError::Format("bench block out of range".into()))?
+                    .as_slice(),
+            );
+        }
+        Ok(())
+    }
+
     fn write_block(&self, _cx: &Cx, _block: BlockNumber, _data: &[u8]) -> Result<()> {
         Err(FfsError::ReadOnly)
     }
@@ -123,6 +143,11 @@ fn read_run(cx: &Cx, dev: &LatencyBlockDevice, phys0: u64) -> Result<Vec<u8>> {
     Ok(out)
 }
 
+/// Read one contiguous run directly into the caller's output window.
+fn read_run_into(cx: &Cx, dev: &LatencyBlockDevice, phys0: u64, dst: &mut [u8]) -> Result<()> {
+    dev.read_contiguous_into(cx, BlockNumber(phys0), dst)
+}
+
 /// OLD: read each run serially into the output in byte order.
 fn read_serial(cx: &Cx, dev: &LatencyBlockDevice, run_starts: &[u64]) -> Result<Vec<u8>> {
     let mut buf = vec![0_u8; run_starts.len() * RUN_BYTES];
@@ -147,6 +172,32 @@ fn read_parallel(cx: &Cx, dev: &LatencyBlockDevice, run_starts: &[u64]) -> Resul
     Ok(buf)
 }
 
+/// CANDIDATE: read runs in parallel directly into disjoint output windows.
+fn read_parallel_in_place(
+    cx: &Cx,
+    dev: &LatencyBlockDevice,
+    run_starts: &[u64],
+) -> Result<Vec<u8>> {
+    let mut buf = vec![0_u8; run_starts.len() * RUN_BYTES];
+    let mut jobs = Vec::with_capacity(run_starts.len());
+    {
+        let mut rest = buf.as_mut_slice();
+        for &phys0 in run_starts {
+            let (dst, after_dst) = rest.split_at_mut(RUN_BYTES);
+            rest = after_dst;
+            jobs.push((phys0, dst));
+        }
+    }
+    let reads: Vec<Result<()>> = jobs
+        .into_par_iter()
+        .map(|(phys0, dst)| read_run_into(cx, dev, phys0, dst))
+        .collect();
+    for read in reads {
+        read?;
+    }
+    Ok(buf)
+}
+
 fn bench_indirect(c: &mut Criterion) {
     let cx = Cx::for_testing();
     let mut group = c.benchmark_group("ext4_indirect_read_overlap");
@@ -163,6 +214,11 @@ fn bench_indirect(c: &mut Criterion) {
             read_parallel(&cx, &dev, &run_starts).expect("parallel"),
             "parallel indirect read diverged from serial (runs={runs})"
         );
+        assert_eq!(
+            read_serial(&cx, &dev, &run_starts).expect("serial"),
+            read_parallel_in_place(&cx, &dev, &run_starts).expect("parallel in-place"),
+            "in-place indirect read diverged from serial (runs={runs})"
+        );
 
         group.bench_with_input(BenchmarkId::new("serial", runs), &runs, |b, _| {
             b.iter(|| black_box(read_serial(&cx, &dev, black_box(&run_starts))));
@@ -170,6 +226,13 @@ fn bench_indirect(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("parallel_rayon", runs), &runs, |b, _| {
             b.iter(|| black_box(read_parallel(&cx, &dev, black_box(&run_starts))));
         });
+        group.bench_with_input(
+            BenchmarkId::new("parallel_in_place", runs),
+            &runs,
+            |b, _| {
+                b.iter(|| black_box(read_parallel_in_place(&cx, &dev, black_box(&run_starts))));
+            },
+        );
     }
     group.finish();
 }
