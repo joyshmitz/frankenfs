@@ -641,3 +641,96 @@ hyperfine --warmup 3 --runs 10 \
 
 Production verdict: **no code kept**. Both source candidates were reverted. `bd-2emlm` remains a real open
 gap; the next credible move is a heap profiler or allocation census, not another temp-buffer micro-lever.
+
+### btrfs compressed-read fused copy/drop kept (cod-a/BlackThrush 2026-06-20, bd-xmh5g)
+
+Kept a narrower memory-pressure lever than the rejected direct-to-final zstd
+attempt: regular compressed btrfs extents still decompress into the existing
+owned `Vec`, but the parallel read/decompress job now slices, copies into its
+disjoint final `out` window, and drops that decompressed `Vec` immediately.
+Inline compressed extents keep the old owned-byte result because their overlap
+range is only known after decompression. Uncompressed extents keep the existing
+direct-into-output path.
+
+This preserves the extent-order error policy by storing only a per-extent
+`Done`/`Bytes` result and consuming those results in the serial assembly loop.
+The actual data writes are to pre-carved non-overlapping output windows. The
+change targets the specific live-buffer pressure identified by the remaining
+compressed-read kernel gap: the old path retained every regular compressed
+extent's decompressed `Vec` until serial assembly finished.
+
+Direct mounted-image evidence used `/data/tmp/btrdiff2_1340519.img` with the
+mounted kernel reference `/data/tmp/btrdiff2mnt_1340519`.
+
+| Workload | Baseline | Candidate | FrankenFS old/new | Kernel btrfs | Candidate vs kernel | Verdict |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| Primary 15-run `read --discard /compressible.bin` | `56.1 ms` | `36.8 ms` | `1.52x` faster | `cat` `7.4 ms` | `5.00x` slower | KEEP |
+| Primary 15-run `walk --read-data --no-stat` | `36.6 ms` | `34.0 ms` | `1.08x` faster | `cat *` `11.9 ms` | `2.85x` slower | Neutral-positive/no extra keep credit |
+| Final-source 10-run `read --discard /compressible.bin` | `53.2 ms` | `35.9 ms` | `1.48x` faster | `cat` `6.7 ms` | `5.38x` slower | KEEP confirmation |
+| Final-source 10-run `walk --read-data --no-stat` | `32.4 ms` | `31.9 ms` | `1.015x` faster | `cat *` `11.2 ms` | `2.85x` slower | Neutral |
+
+Win/loss/neutral: internal A/B `1/0/1`; direct kernel `0/2/0`.
+
+Memory smoke moved in the expected direction on single-file read:
+
+| Probe | Baseline | Candidate |
+| --- | ---: | ---: |
+| Max RSS | `83,620 KiB` | `50,868 KiB` |
+| Minor faults | `22,932` | `14,478` |
+
+Byte identity was verified against the mounted kernel file:
+`2e379e112375338695dbd226f27bf096db571a99e5f64b975b0bb2e43b6f86b9`
+for baseline, candidate, and kernel `compressible.bin`.
+
+RCH caveat: `AGENT_NAME=cod-a CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-a rch exec -- cargo build --profile release-perf -p ffs-cli`
+passed on `vmi1149989`, but artifact retrieval left the target-dir binary at
+the clean baseline hash. The accepted direct A/B timings therefore use a local
+release-perf build from the clean detached worktree; the RCH build is recorded
+as a remote compile gate, not as the source of the measured binary.
+
+Isomorphism:
+
+- Ordering preserved: yes. Extents are still validated and consumed in extent
+  order; only regular compressed extent bytes are copied into final disjoint
+  output windows earlier.
+- Tie-breaking unchanged: yes. The first per-idx error is retained, and the
+  serial assembly loop still surfaces errors in extent order.
+- Floating-point: N/A.
+- RNG seeds: N/A.
+- Golden/byte proof: candidate read SHA-256 matches the mounted kernel file;
+  focused btrfs decompression tests and harness conformance passed.
+
+Gates:
+
+```bash
+AGENT_NAME=cod-a CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-a \
+  rch exec -- cargo build --profile release-perf -p ffs-cli
+
+AGENT_NAME=cod-a CARGO_TARGET_DIR=/data/projects/.local-targets/frankenfs-cod-a-batch \
+  cargo build --profile release-perf -p ffs-cli
+
+cargo fmt -p ffs-core --check
+
+AGENT_NAME=cod-a CARGO_TARGET_DIR=/data/projects/.local-targets/frankenfs-cod-a-batch \
+  cargo check -p ffs-core --all-targets
+
+AGENT_NAME=cod-a CARGO_TARGET_DIR=/data/projects/.local-targets/frankenfs-cod-a-batch \
+  cargo test -p ffs-core btrfs_decompress -- --nocapture
+
+AGENT_NAME=cod-a CARGO_TARGET_DIR=/data/projects/.local-targets/frankenfs-cod-a-batch \
+  cargo test -p ffs-harness --test conformance -- --nocapture
+```
+
+Results: `ffs-core` check passed; focused btrfs decompression tests passed
+`10/10`; conformance passed `100 / 0 / 2 ignored`. Scoped clippy is still
+blocked by pre-existing `ffs-repair` and `ffs-core` pedantic debt outside this
+lever (`RequestCommitMode` derivable default, old local static/use/const
+placement, indirect-pointer casts, redundant closures). The candidate-caused
+local-enum clippy lint was fixed by moving helper enums to file scope.
+
+Retry predicate: do not repeat generic scratch reuse or zstd direct-to-final.
+The next credible compressed-read pass should attack the remaining kernel gap
+after this memory win: metadata descent reuse/extent lookup (currently owned by
+`bd-xmh5g.408`), compressed input read staging with a proof that it changes the
+real mounted-image path, or a kernel-shaped streaming API that avoids whole-file
+materialization rather than merely changing the decompression buffer.

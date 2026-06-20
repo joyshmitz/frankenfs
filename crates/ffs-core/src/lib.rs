@@ -98,6 +98,58 @@ thread_local! {
     static BTRFS_ZSTD_DECOMPRESSOR: std::cell::RefCell<Option<zstd::bulk::Decompressor<'static>>> =
         const { std::cell::RefCell::new(None) };
 }
+
+enum BtrfsDeferredReadResult {
+    Bytes(Vec<u8>),
+    Done,
+}
+
+enum BtrfsReadJob<'o> {
+    Inline {
+        idx: usize,
+        data: Vec<u8>,
+        comp: u8,
+        ram: usize,
+    },
+    ReadCompressed {
+        idx: usize,
+        logical: u64,
+        compressed_len: usize,
+        comp: u8,
+        ram: usize,
+        disk_bytenr: u64,
+        extent_offset: u64,
+        extent_delta: u64,
+        dst: &'o mut [u8],
+    },
+    Uncompressed {
+        idx: usize,
+        source_logical: u64,
+        dst: &'o mut [u8],
+    },
+}
+
+enum BtrfsOutputSpec {
+    ReadCompressed {
+        idx: usize,
+        dst_start: usize,
+        copy_len: usize,
+        logical: u64,
+        compressed_len: usize,
+        comp: u8,
+        ram: usize,
+        disk_bytenr: u64,
+        extent_offset: u64,
+        extent_delta: u64,
+    },
+    Uncompressed {
+        idx: usize,
+        dst_start: usize,
+        copy_len: usize,
+        source_logical: u64,
+    },
+}
+
 const E2COMPR_DECOMPRESSED_BYTE_LIMIT: usize = 128 * 1024 * 1024;
 const FSCRYPT_POLICY_V1_VERSION: u8 = 0;
 const FSCRYPT_POLICY_V1_SIZE: usize = 12;
@@ -8591,7 +8643,7 @@ impl OpenFs {
         // length is only known after decompression (overlap can't be
         // pre-checked), matching the assembly loop which also decompresses
         // inline extents before testing overlap.
-        let mut decompressed_by_idx: Vec<Option<Result<Vec<u8>, FfsError>>> =
+        let mut deferred_by_idx: Vec<Option<Result<BtrfsDeferredReadResult, FfsError>>> =
             (0..extents.len()).map(|_| None).collect();
         {
             use rayon::prelude::{IntoParallelIterator, ParallelIterator};
@@ -8614,32 +8666,15 @@ impl OpenFs {
             //                 same point and in the same order as the serial
             //                 path; only the device read runs in parallel.
             // `compressed_len`/`ram` are validated in the serial pass.
-            enum ReadJob<'o> {
-                Inline {
-                    idx: usize,
-                    data: Vec<u8>,
-                    comp: u8,
-                    ram: usize,
-                },
-                Read {
-                    idx: usize,
-                    logical: u64,
-                    compressed_len: usize,
-                    comp: u8,
-                    ram: usize,
-                },
-                Uncompressed {
-                    idx: usize,
-                    source_logical: u64,
-                    dst: &'o mut [u8],
-                },
-            }
-            let mut jobs: Vec<ReadJob<'_>> = Vec::new();
-            // Specs for the uncompressed reads, gathered in extent order during
+            let mut jobs: Vec<BtrfsReadJob<'_>> = Vec::new();
+            // Specs for output-writing reads, gathered in extent order during
             // the serial pass; carved into disjoint `&mut out` windows after the
-            // pass (so the borrow of `out` does not overlap the validation that
-            // can early-return). `(idx, dst_start, copy_len, source_logical)`.
-            let mut uncompressed_specs: Vec<(usize, usize, usize, u64)> = Vec::new();
+            // pass (so the borrow of `out` does not overlap validation that can
+            // early-return). Regular compressed extents copy into the final
+            // window inside the parallel job and then drop the decompressed Vec,
+            // so a large compressed read no longer retains every decompressed
+            // extent until the serial assembly loop.
+            let mut output_specs: Vec<BtrfsOutputSpec> = Vec::new();
             for (idx, (logical_start, extent)) in extents.iter().enumerate() {
                 match extent {
                     BtrfsExtentData::Inline {
@@ -8653,7 +8688,7 @@ impl OpenFs {
                                 block: 0,
                                 detail: "inline extent ram_bytes overflow".into(),
                             })?;
-                        jobs.push(ReadJob::Inline {
+                        jobs.push(BtrfsReadJob::Inline {
                             idx,
                             data: data.clone(),
                             comp: *compression,
@@ -8665,6 +8700,7 @@ impl OpenFs {
                         compression,
                         ram_bytes,
                         disk_bytenr,
+                        extent_offset,
                         disk_num_bytes,
                         num_bytes,
                         ..
@@ -8708,12 +8744,32 @@ impl OpenFs {
                                 detail: "compressed extent ram_bytes exceeds 128MB limit".into(),
                             });
                         }
-                        jobs.push(ReadJob::Read {
+
+                        let extent_delta = overlap_start - logical_start;
+                        let dst_start = usize::try_from(overlap_start - offset).map_err(|_| {
+                            FfsError::Corruption {
+                                block: 0,
+                                detail: "extent destination offset overflow".into(),
+                            }
+                        })?;
+                        let copy_len =
+                            usize::try_from(overlap_end - overlap_start).map_err(|_| {
+                                FfsError::Corruption {
+                                    block: 0,
+                                    detail: "extent copy length overflow".into(),
+                                }
+                            })?;
+                        output_specs.push(BtrfsOutputSpec::ReadCompressed {
                             idx,
                             logical: *disk_bytenr,
+                            dst_start,
+                            copy_len,
                             compressed_len,
                             comp: *compression,
                             ram,
+                            disk_bytenr: *disk_bytenr,
+                            extent_offset: *extent_offset,
+                            extent_delta,
                         });
                     }
                     // Uncompressed regular extents that contribute to the read:
@@ -8769,31 +8825,24 @@ impl OpenFs {
                                 block: *disk_bytenr,
                                 detail: "extent source logical overflow".into(),
                             })?;
-                        uncompressed_specs.push((idx, dst_start, copy_len, source_logical));
+                        output_specs.push(BtrfsOutputSpec::Uncompressed {
+                            idx,
+                            dst_start,
+                            copy_len,
+                            source_logical,
+                        });
                     }
                     _ => {}
                 }
             }
-            // Carve disjoint `&mut out` windows for the uncompressed reads. The
+            // Carve disjoint `&mut out` windows for output-writing jobs. The
             // specs are in increasing `dst_start` order (extents are returned in
             // logical-offset order and their output ranges are disjoint), so a
-            // single forward `split_at_mut` walk hands each read its own
-            // non-overlapping window without copying.
-            // Split each extent's window into <=1 MiB sub-reads so a few-large-
-            // extent file fills the rayon pool: btrfs_read_logical_into issues
-            // ONE ranged device read per extent, so an unsplit large extent
-            // overlaps only N (= extent count) device latencies — for a
-            // defragmented file that is ~1-2 serial reads. Sub-1 MiB chunks
-            // overlap up to the pool the way the ext4 extent path does
-            // (c110c39b: 2.2x cold+warm). Same FFS_READ_CHUNK_BLOCKS knob and
-            // 128 KiB default (32 blocks) as the ext4 path: re-measured on a
-            // 64-core box at 3.14x warm / 1.90x cold vs the prior 1 MiB default
-            // on a 100 MiB uncompressed btrfs read (the 256-block default left
-            // the pool badly under-filled). Each sub-read writes into its own disjoint window
-            // and reads from source_logical+offset (the extent is contiguous in
-            // logical space), so the bytes are identical to one read; all
-            // sub-jobs share the extent's `idx` and the result consumer keeps
-            // the lowest-offset error per idx.
+            // single forward `split_at_mut` walk hands each job its own
+            // non-overlapping window without copying. Uncompressed extents are
+            // still split into <=1 MiB sub-reads so a few-large-extent file
+            // fills the Rayon pool; regular compressed extents stay one job per
+            // compressed extent so each worker can decompress, copy, and drop.
             let bs_usize = self.block_size() as usize;
             static BTRFS_CHUNK_BLOCKS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
             let chunk_blocks = *BTRFS_CHUNK_BLOCKS.get_or_init(|| {
@@ -8806,59 +8855,120 @@ impl OpenFs {
             let chunk_span = (chunk_blocks * bs_usize).max(1);
             let mut remaining: &mut [u8] = &mut out[..];
             let mut consumed: usize = 0;
-            for &(idx, dst_start, copy_len, source_logical) in &uncompressed_specs {
-                let skip = dst_start - consumed;
-                let (_, rest) = remaining.split_at_mut(skip);
-                let (dst, rest_after) = rest.split_at_mut(copy_len);
-                remaining = rest_after;
-                consumed = dst_start + copy_len;
-                let mut sub: &mut [u8] = dst;
-                let mut sub_logical = source_logical;
-                while !sub.is_empty() {
-                    let take = sub.len().min(chunk_span);
-                    let (chunk, rest2) = sub.split_at_mut(take);
-                    jobs.push(ReadJob::Uncompressed {
+            for spec in output_specs {
+                match spec {
+                    BtrfsOutputSpec::ReadCompressed {
                         idx,
-                        source_logical: sub_logical,
-                        dst: chunk,
-                    });
-                    sub_logical += take as u64;
-                    sub = rest2;
+                        dst_start,
+                        copy_len,
+                        logical,
+                        compressed_len,
+                        comp,
+                        ram,
+                        disk_bytenr,
+                        extent_offset,
+                        extent_delta,
+                    } => {
+                        let skip = dst_start - consumed;
+                        let (_, rest) = remaining.split_at_mut(skip);
+                        let (dst, rest_after) = rest.split_at_mut(copy_len);
+                        remaining = rest_after;
+                        consumed = dst_start + copy_len;
+                        jobs.push(BtrfsReadJob::ReadCompressed {
+                            idx,
+                            logical,
+                            compressed_len,
+                            comp,
+                            ram,
+                            disk_bytenr,
+                            extent_offset,
+                            extent_delta,
+                            dst,
+                        });
+                    }
+                    BtrfsOutputSpec::Uncompressed {
+                        idx,
+                        dst_start,
+                        copy_len,
+                        source_logical,
+                    } => {
+                        let skip = dst_start - consumed;
+                        let (_, rest) = remaining.split_at_mut(skip);
+                        let (dst, rest_after) = rest.split_at_mut(copy_len);
+                        remaining = rest_after;
+                        consumed = dst_start + copy_len;
+                        let mut sub: &mut [u8] = dst;
+                        let mut sub_logical = source_logical;
+                        while !sub.is_empty() {
+                            let take = sub.len().min(chunk_span);
+                            let (chunk, rest2) = sub.split_at_mut(take);
+                            jobs.push(BtrfsReadJob::Uncompressed {
+                                idx,
+                                source_logical: sub_logical,
+                                dst: chunk,
+                            });
+                            sub_logical += take as u64;
+                            sub = rest2;
+                        }
+                    }
                 }
             }
-            let results: Vec<(usize, Result<Vec<u8>, FfsError>)> = jobs
+            let results: Vec<(usize, Result<BtrfsDeferredReadResult, FfsError>)> = jobs
                 .into_par_iter()
                 .map(|job| match job {
-                    ReadJob::Inline {
+                    BtrfsReadJob::Inline {
                         idx,
                         data,
                         comp,
                         ram,
-                    } => (idx, Self::btrfs_decompress(&data, comp, ram)),
-                    ReadJob::Read {
+                    } => (
+                        idx,
+                        Self::btrfs_decompress(&data, comp, ram)
+                            .map(BtrfsDeferredReadResult::Bytes),
+                    ),
+                    BtrfsReadJob::ReadCompressed {
                         idx,
                         logical,
                         compressed_len,
                         comp,
                         ram,
+                        disk_bytenr,
+                        extent_offset,
+                        extent_delta,
+                        dst: chunk,
                     } => {
                         let mut compressed = vec![0_u8; compressed_len];
                         match self.btrfs_read_logical_into(cx, logical, &mut compressed) {
-                            Ok(()) => (idx, Self::btrfs_decompress(&compressed, comp, ram)),
+                            Ok(()) => {
+                                let result = Self::btrfs_decompress(&compressed, comp, ram)
+                                    .and_then(|decompressed| {
+                                        let decompressed_slice =
+                                            Self::btrfs_decompressed_extent_slice(
+                                                disk_bytenr,
+                                                extent_offset,
+                                                extent_delta,
+                                                chunk.len(),
+                                                &decompressed,
+                                            )?;
+                                        chunk.copy_from_slice(decompressed_slice);
+                                        Ok(BtrfsDeferredReadResult::Done)
+                                    });
+                                (idx, result)
+                            }
                             Err(err) => (idx, Err(err)),
                         }
                     }
                     // Read the uncompressed extent straight into its disjoint
                     // `out` window. The data is written in place; the entry in
-                    // `decompressed_by_idx` only carries the read's success or
+                    // `deferred_by_idx` only carries the read's success or
                     // error, consumed in idx order by the assembly loop so the
                     // lowest-index read error still wins.
-                    ReadJob::Uncompressed {
+                    BtrfsReadJob::Uncompressed {
                         idx,
                         source_logical,
                         dst,
                     } => match self.btrfs_read_logical_into(cx, source_logical, dst) {
-                        Ok(()) => (idx, Ok(Vec::new())),
+                        Ok(()) => (idx, Ok(BtrfsDeferredReadResult::Done)),
                         Err(err) => (idx, Err(err)),
                     },
                 })
@@ -8871,10 +8981,10 @@ impl OpenFs {
             // identical to the single-read path. Compressed/inline jobs are one
             // per idx, so this is a no-op for them.
             for (idx, res) in results {
-                if matches!(decompressed_by_idx[idx], Some(Err(_))) {
+                if matches!(deferred_by_idx[idx], Some(Err(_))) {
                     continue;
                 }
-                decompressed_by_idx[idx] = Some(res);
+                deferred_by_idx[idx] = Some(res);
             }
         }
 
@@ -8898,9 +9008,15 @@ impl OpenFs {
                         // Decompressed in parallel above (bd-m6g2o); consume this
                         // extent's result in order so a decompress error surfaces
                         // at the same point as the serial path.
-                        let decompressed = decompressed_by_idx[idx]
+                        let decompressed = match deferred_by_idx[idx]
                             .take()
-                            .expect("inline compressed extent gathered for decompress")?;
+                            .expect("inline compressed extent gathered for decompress")?
+                        {
+                            BtrfsDeferredReadResult::Bytes(decompressed) => decompressed,
+                            BtrfsDeferredReadResult::Done => {
+                                unreachable!("inline compressed extent cannot be copied in place")
+                            }
+                        };
                         std::borrow::Cow::Owned(decompressed)
                     } else {
                         std::borrow::Cow::Borrowed(data.as_slice())
@@ -8966,7 +9082,6 @@ impl OpenFs {
                     extent_type,
                     compression,
                     disk_bytenr,
-                    extent_offset,
                     num_bytes,
                     ..
                 } => {
@@ -9016,45 +9131,37 @@ impl OpenFs {
                         "btrfs extent_lookup regular"
                     );
 
-                    let extent_delta = overlap_start - logical_start;
-                    let dst_start = usize::try_from(overlap_start - offset).map_err(|_| {
-                        FfsError::Corruption {
-                            block: 0,
-                            detail: "extent destination offset overflow".into(),
-                        }
-                    })?;
-                    let copy_len = usize::try_from(overlap_end - overlap_start).map_err(|_| {
-                        FfsError::Corruption {
-                            block: 0,
-                            detail: "extent copy length overflow".into(),
-                        }
-                    })?;
-
                     if *compression != 0 {
-                        // Compressed extent: decompressed in parallel above
-                        // (bd-m6g2o). Consume this extent's result in order, then
-                        // slice the decompressed result.
-                        let decompressed = decompressed_by_idx[idx]
+                        // Compressed regular extents were decompressed, sliced,
+                        // copied into this extent's disjoint output window, and
+                        // dropped in the parallel phase above. Consume the
+                        // status in extent order so the lowest-index error still
+                        // wins without retaining all decompressed Vecs.
+                        match deferred_by_idx[idx]
                             .take()
-                            .expect("compressed extent gathered for decompress")?;
-                        let decompressed_slice = Self::btrfs_decompressed_extent_slice(
-                            *disk_bytenr,
-                            *extent_offset,
-                            extent_delta,
-                            copy_len,
-                            &decompressed,
-                        )?;
-                        out[dst_start..dst_start + copy_len].copy_from_slice(decompressed_slice);
+                            .expect("compressed extent copied in parallel")?
+                        {
+                            BtrfsDeferredReadResult::Done => {}
+                            BtrfsDeferredReadResult::Bytes(_) => {
+                                unreachable!("regular compressed extent copied in place")
+                            }
+                        }
                     } else {
                         // Uncompressed: the device read was deferred to the
                         // parallel phase above and written directly into
-                        // out[dst_start..dst_start + copy_len]. Consume the
+                        // this extent's output window. Consume the
                         // deferred read result in extent order so a read error
                         // surfaces at the same point — and in the same order —
                         // as the serial path; the bytes are already in place.
-                        decompressed_by_idx[idx]
+                        match deferred_by_idx[idx]
                             .take()
-                            .expect("uncompressed extent read deferred to parallel phase")?;
+                            .expect("uncompressed extent read deferred to parallel phase")?
+                        {
+                            BtrfsDeferredReadResult::Done => {}
+                            BtrfsDeferredReadResult::Bytes(_) => {
+                                unreachable!("uncompressed extent cannot produce bytes")
+                            }
+                        }
                     }
                     covered_until = covered_until.max(overlap_end);
                 }

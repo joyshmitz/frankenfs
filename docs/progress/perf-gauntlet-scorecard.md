@@ -1,5 +1,103 @@
 # Perf Gauntlet Scorecard
 
+## `bd-xmh5g` cod-a Btrfs Compressed Fused-Copy Keep
+
+Date: 2026-06-20
+Agent: BlackThrush (`cod-a`)
+Scope: `ffs-core` btrfs regular compressed-extent read/decompress assembly in
+`btrfs_read_file_into`
+Commit under measurement: final-source clean worktree candidate
+RCH worker: `vmi1149989` remote compile gate
+Requested target dir: `/data/projects/.rch-targets/frankenfs-cod-a`
+Measured local target dir: `/data/projects/.local-targets/frankenfs-cod-a-batch`
+
+### Verdict
+
+KEEP. The lever fuses assembly for regular compressed extents into the parallel
+read/decompress job: decompress into the existing temporary `Vec`, copy the
+requested decompressed slice into the final disjoint output window, then drop the
+temporary immediately. This keeps the rejected zstd direct-to-final idea out of
+the decoder, but removes the old live-set shape where every regular compressed
+extent's decompressed `Vec` stayed resident until the serial assembly loop.
+
+The single-file compressed read improved materially and RSS dropped. The whole
+tree walk was neutral-positive and does not get extra keep credit. Kernel btrfs
+still wins both direct rows, so this is a gap reduction, not a kernel-domination
+claim.
+
+### Scorecard
+
+| Gate | Result |
+| --- | --- |
+| Direct mounted btrfs rows completed | 4 accepted rows: primary 15-run read/walk plus final-source 10-run read/walk, all with mounted kernel comparators |
+| Direct ext4/btrfs-kernel ratios | Final-source read candidate `35.9 ms` vs kernel `6.7 ms` (`5.38x` slower); final-source walk candidate `31.9 ms` vs kernel `11.2 ms` (`2.85x` slower) |
+| Production levers kept | 1 |
+| Production levers rejected/reverted | 0 |
+| Internal A/B win/loss/neutral | `1 / 0 / 1`: single-file read win, walk neutral |
+| Direct kernel win/loss/neutral | `0 / 2 / 0` |
+| Memory signal | Single-file max RSS `83,620 KiB -> 50,868 KiB`; minor faults `22,932 -> 14,478` |
+| Behavior proof | Candidate read SHA-256 matched mounted kernel file: `2e379e112375338695dbd226f27bf096db571a99e5f64b975b0bb2e43b6f86b9`; focused btrfs decompression tests passed `10/10`; harness conformance passed `100 / 0 / 2 ignored` |
+| Build/check guard | RCH `cargo build --profile release-perf -p ffs-cli` passed on `vmi1149989`, but artifact retrieval left `/data/projects/.rch-targets/frankenfs-cod-a/release-perf/ffs-cli` at the clean baseline hash. Accepted timings use a local release-perf final-source build. Local `cargo fmt -p ffs-core --check` and `cargo check -p ffs-core --all-targets` passed. |
+| Clippy | `cargo clippy -p ffs-core --all-targets --no-deps -- -D warnings` remains blocked by pre-existing pedantic debt outside this lever: `vfs.rs` derivable default, old `BTRFS_CHUNK_BLOCKS` local static, statfs too-many-lines, later local `use`/const placement, indirect-pointer casts, and redundant closures. The candidate-caused local-enum lint was fixed. |
+| Release-readiness score for perf-superiority claims | 61 / 100: a real measured keep with byte/conformance proof and lower RSS, but direct kernel btrfs still leads by `2.85-5.38x`. |
+| Release-readiness score for this row's hygiene | 95 / 100: clean worktree, explicit baseline/candidate binaries, primary and final-source A/B rows, direct kernel ratios, byte proof, conformance, and clippy blocker attribution are recorded. The only deduction is RCH artifact retrieval failing to provide the measured binary. |
+
+### Measured Rows
+
+| Phase | Workload | Baseline | Candidate | Kernel btrfs | Ratio vs baseline | Ratio vs kernel | Verdict |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | --- |
+| Primary A/B, 15 runs | `ffs-cli read --discard /compressible.bin` vs kernel `cat` | `56.1 ms` | `36.8 ms` | `7.4 ms` | `1.52x` old/new | candidate `5.00x` slower than kernel | KEEP |
+| Primary A/B, 15 runs | `ffs-cli walk --read-data --no-stat` vs kernel `cat *` | `36.6 ms` | `34.0 ms` | `11.9 ms` | `1.08x` old/new | candidate `2.85x` slower than kernel | Neutral |
+| Final-source confirmation, 10 runs | `ffs-cli read --discard /compressible.bin` vs kernel `cat` | `53.2 ms` | `35.9 ms` | `6.7 ms` | `1.48x` old/new | candidate `5.38x` slower than kernel | KEEP confirmation |
+| Final-source confirmation, 10 runs | `ffs-cli walk --read-data --no-stat` vs kernel `cat *` | `32.4 ms` | `31.9 ms` | `11.2 ms` | `1.015x` old/new | candidate `2.85x` slower than kernel | Neutral |
+
+### Isomorphism
+
+Ordering preserved: yes. Extents are still validated and consumed in extent
+order; regular compressed extent copies moved earlier only after carving
+disjoint final output windows.
+
+Tie-breaking unchanged: yes. Per-idx first error is retained, and the serial
+assembly loop still consumes results in extent order.
+
+Floating-point identical: N/A.
+
+RNG seeds unchanged: N/A.
+
+Goldens/bytes verified: candidate stdout for `/compressible.bin` matches the
+mounted kernel file SHA-256. Harness conformance passed.
+
+### Commands
+
+```bash
+AGENT_NAME=cod-a CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-a \
+  rch exec -- cargo build --profile release-perf -p ffs-cli
+
+AGENT_NAME=cod-a CARGO_TARGET_DIR=/data/projects/.local-targets/frankenfs-cod-a-batch \
+  cargo build --profile release-perf -p ffs-cli
+
+hyperfine --warmup 3 --runs 15 \
+  --export-json /data/projects/.scratch/batch-fused-ab-single-20260620.json \
+  --command-name frankenfs-baseline-read \
+  '/data/projects/.scratch/ffs-cli-547be7a3-cod-a-batch-baseline-20260620T2107 --log-format json read /data/tmp/btrdiff2_1340519.img /compressible.bin --discard >/dev/null 2>&1' \
+  --command-name frankenfs-fused-copy-read \
+  '/data/projects/.scratch/ffs-cli-547be7a3-cod-a-batch-fused-copy-candidate-local-20260620T2125 --log-format json read /data/tmp/btrdiff2_1340519.img /compressible.bin --discard >/dev/null 2>&1' \
+  --command-name btrfs-kernel-cat \
+  'cat /data/tmp/btrdiff2mnt_1340519/compressible.bin >/dev/null'
+
+hyperfine --warmup 3 --runs 10 \
+  --export-json /data/projects/.scratch/batch-fused-final-single-20260620.json \
+  --command-name frankenfs-baseline-read \
+  '/data/projects/.scratch/ffs-cli-547be7a3-cod-a-batch-baseline-20260620T2107 --log-format json read /data/tmp/btrdiff2_1340519.img /compressible.bin --discard >/dev/null 2>&1' \
+  --command-name frankenfs-fused-copy-final-read \
+  '/data/projects/.scratch/ffs-cli-547be7a3-cod-a-batch-fused-copy-final-20260620T2137 --log-format json read /data/tmp/btrdiff2_1340519.img /compressible.bin --discard >/dev/null 2>&1' \
+  --command-name btrfs-kernel-cat \
+  'cat /data/tmp/btrdiff2mnt_1340519/compressible.bin >/dev/null'
+
+AGENT_NAME=cod-a CARGO_TARGET_DIR=/data/projects/.local-targets/frankenfs-cod-a-batch \
+  cargo test -p ffs-harness --test conformance -- --nocapture
+```
+
 ## `bd-xmh5g` cod-a Guard-Fold Rejection
 
 Date: 2026-06-20
