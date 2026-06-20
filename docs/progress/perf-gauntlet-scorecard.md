@@ -386,3 +386,14 @@ override is preserved. Narrows the warm-seq kernel gap (ext4 warm ~2.4x -> read-
 Residual gap root-caused to `FileByteDevice` pread-per-chunk syscall + page-cache copy (perf: sys 0.277s >>
 user 0.108s, IPC 0.35) — see bd-jgbam (mmap-backed ByteDevice deep swing). Adaptive (core-count-scaled) chunk
 sizing evaluated and rejected as overfit — see perf-negative-results.md.
+
+cod-b 2026-06-20 `bd-27x9a` verification on a real btrfs image with one 100 MiB uncompressed extent
+(`/data/tmp/btrperf_1231197.img:/m.bin`) keeps the direction but not the domination claim. Local hyperfine,
+warm/shared-cache, release-perf CLI: kernel btrfs `dd` mean `48.7 ms`; current ffs default-32 mean `76.3 ms`;
+forced old 256-block chunk mean `91.1 ms`. So current ffs is still `1.57x` slower than kernel on this comparator,
+while remaining `1.19x` faster than forced old chunking. RCH primitive proof is stronger but Rust-internal:
+`btrfs_uncompressed_read_overlap_16extents` on `ovh-a` measured serial `5.0966 ms` vs parallel `405.27 us`
+median (`12.58x`) with byte-identical output asserted by the bench. A follow-up direct-overwrite `FileByteDevice`
+fast path was measured and reverted (`76.3 -> 75.7 ms`, `0.8%`, inside noise; forced 256 flipped faster under the
+same noisy run). Release-readiness verdict: chunking is a real keep versus the old setting, but btrfs-kernel
+domination remains open and should route to file-device/syscall/copy work, not more chunk retuning.
