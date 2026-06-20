@@ -336,6 +336,23 @@ caller `dst` (requires weakening `preserves_read_exact_at_destination_on_error`,
 guards), or (b) `mmap`/uninitialised-buffer reads (require `unsafe`, forbidden here) — i.e. the same structural
 zero-copy gap already recorded in "Bulk-read loss PROFILED — userspace-pread tax, no safe lever".
 
+### MEASUREMENT METHODOLOGY: head-to-head CLI reads must use `--profile release-perf`, not `release` (cc 2026-06-20)
+
+Discovered while profiling the btrfs read gap that `[profile.release]` in the workspace `Cargo.toml` is
+**`opt-level = "z"` (optimise for SIZE) + `lto = true` + `strip = true`** — it is the small-binary profile,
+NOT the speed profile. The performance profile is **`[profile.release-perf]`: `opt-level = 3`,
+`lto = "thin"`, `debug = "line-tables-only"`, `strip = false`** (criterion benches already use it via
+`--profile release-perf`). A plain `cargo build --release -p ffs-cli` produces a size-optimised, symbol-stripped
+binary. **Any `ffs-cli read` head-to-head built with `--release` therefore (a) understates frankenfs throughput
+(size-opt de-optimises hot loops) and (b) cannot be `perf`-profiled (symbols stripped).** The
+ext4-vs-kernel and ext4-vs-btrfs *ratios* in this ledger are still valid (both sides used the same size-opt
+binary), but the absolute MB/s figures are a floor — re-measure with `--profile release-perf` for true numbers
+and to get resolvable symbols. Recorded as a standing methodology fix: **build the CLI with
+`cargo build --profile release-perf -p ffs-cli` (output `target/release-perf/ffs-cli`) for every perf
+head-to-head and every `perf record`.** (The release-perf rebuild this session was blocked by rch-worker
+contention + the slow `ffs-core` opt-3/LTO compile, so the btrfs-gap symbol localisation in bd-2emlm remains
+pending that build.)
+
 ### Pending-lever re-verification harvest — 7 levers closed, 1 magnitude correction (cc 2026-06-20, rch)
 
 Independently re-ran the criterion A/B benches for the 7 open "code-first batch-test pending" perf levers
@@ -359,6 +376,32 @@ acutely sensitive to the bench host's pool size and the sleep duration, so the o
 over-recorded. The lever is still correct to keep (serial 6.7/24.8/104 ms vs parallel 2.7/7.0/24.4 ms), but
 **I/O-overlap absolute ratios from these synthetic latency benches are host-dependent — read them as "clear
 win, magnitude ±", not literal speedups.**
+
+### btrfs read gap ROOT-CAUSED: memory-pressure / 2× RSS, not CPU/syscalls/parallelism (cc 2026-06-20, release-perf + symbols, bd-2emlm)
+
+Rebuilt `ffs-cli` with `--profile release-perf` (opt-level=3 + symbols) and profiled the btrfs vs ext4 read
+head-to-head. Decisive evidence the btrfs gap is **memory-pressure-bound**, not what the original bead guessed:
+
+- **opt-level insensitive:** release (opt-z) → release-perf (opt-3) sped ext4 **24.5→21.6 ms (+13 %)** but left
+  btrfs **80.7 ms unchanged** — so the btrfs cost is NOT CPU-compute (opt-3 optimises compute, not memory/IO).
+- **2× resident memory:** max RSS ext4 **64 MB** vs btrfs **133 MB** for the identical 128 MiB read — btrfs holds
+  ~2× the working set, which drives the **52 471 vs 19 943 page-faults** already recorded.
+- **the page-fault pressure slows the reads themselves:** `perf` children — ext4 spends 38.7 % in
+  `FileByteDevice::read_exact_at` (of a 21 ms read ≈ 8 ms); btrfs spends 22.5 % (of an 80 ms read ≈ **18 ms**) —
+  i.e. the *same* ~1040 preads take **2.25× longer** under btrfs's memory pressure. btrfs self-time also shows
+  ~8 % `crossbeam_deque::Stealer::steal` (rayon workers idle-stealing = imbalanced/under-filled pool) and 5.8 %
+  `__memmove_avx` (the FileByteDevice temp→dst copy), with the remainder in kernel page-fault/scheduler frames.
+
+**Root cause (redirected):** the lever is NOT "parallelise the btrfs read" (it already chunk-parallelises and
+reads direct-into-`dst`) — it is **reduce the btrfs read's memory footprint** so it stops doubling RSS and
+thrashing page-faults. The ~+69 MB btrfs holds over ext4 is not yet pinned to a line (the CPU sampling profile
+shows the *symptom* — page faults — not the *allocation site*); pinning needs a heap profiler (heaptrack/massif)
+or a careful audit of `btrfs_read_file`'s owned allocations (`jobs`/`results`/`decompressed_by_idx`/the output
+buffer lifetime) vs ext4's `read_file_data`. **Deferred, not blindly patched** — a blind footprint change in
+peer-contended `ffs-core` could regress. bd-2emlm updated with this root-cause. Vs the KERNEL btrfs this read is
+still parity (0.97× of `dd bs=128M`), so it is an internal ext4-vs-btrfs gap, not a kernel-loss — a worthwhile
+future win (closing it would make btrfs warm reads beat the kernel as ext4 already does) but correctly sequenced
+behind a heap profile.
 
 ### btrfs uncompressed warm read 3.3× slower than ext4 — INTERNAL gap filed bd-2emlm (cc 2026-06-20)
 
