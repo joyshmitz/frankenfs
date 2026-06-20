@@ -1,5 +1,76 @@
 # Perf Gauntlet Scorecard
 
+## `bd-w3hol` cod-a Fresh Verification
+
+Date: 2026-06-20
+Agent: BlackThrush (`cod-a`)
+Scope: fresh verification of the already-landed `ffs-fuse` per-file-handle
+writeback batching lever for `bd-w3hol`
+Commit under measurement: `5170de3e` (`perf(fuse): batch writeback commits`)
+RCH workers: `hz1` benchmark/build, `vmi1152480` focused tests,
+`vmi1153651` conformance
+Requested target dir: `/data/projects/.rch-targets/frankenfs-cod-a`
+
+### Verdict
+
+KEEP. The fresh cod-a same-worker run still shows the deferred flush path
+beating per-write commit on the FUSE writeback-cache batching benchmark. The
+win is smaller than the earlier `vmi1227854` row, but remains outside a
+neutral/no-ship range for this targeted primitive.
+
+### Scorecard
+
+| Gate | Result |
+| --- | --- |
+| Code-first backlog rows examined in this verification | 1 |
+| RCH Criterion rows completed | 2 / 2 FUSE A/B rows plus 3 / 3 core request-scope rows |
+| Same-worker evidence | Yes, `hz1` for each A/B group |
+| Direct ext4/btrfs-kernel ratios | 0 / 1 direct; no valid kernel comparator isolates FrankenFS's per-FH `RequestScope` batching table |
+| Production levers kept | 1 |
+| Production levers rejected/reverted | 0 |
+| Internal A/B win/loss/neutral | 1 / 0 / 0 |
+| Direct kernel win/loss/neutral | 0 / 0 / 1 |
+| Conformance/build guard | RCH `cargo build --release -p ffs-fuse` passed on `hz1`; RCH `cargo test -p ffs-fuse writeback_cache -- --nocapture` passed on `vmi1152480` (12/12); RCH `cargo test -p ffs-harness --test conformance -- --nocapture` passed on `vmi1153651` (100 passed / 0 failed / 2 ignored). |
+| Release-readiness score for perf-superiority claims | 67 / 100: fresh same-worker keep on the writeback amortization primitive and conformance green, but still no direct mounted ext4/btrfs-kernel write+fsync ratio. |
+| Release-readiness score for this row's hygiene | 95 / 100: fresh bench, focused behavior tests, release build, conformance gate, and canonical negative-evidence row are recorded; remaining risk is only the absent direct mounted kernel comparator. |
+
+### Measured Rows
+
+| Bead | Workload | Old | New | Ratio | Verdict |
+| --- | --- | --- | --- | --- | --- |
+| `bd-w3hol` | `mount_runtime_writeback/per_write_commit_32x32k` vs `deferred_flush_32x32k`, 32 x 32 KiB writes plus flush | `75.412 us` median | `64.716 us` median | `1.165x` old/new; production latency `0.858x` | Keep: `14.2%` lower latency on the isolated commit-amortization primitive |
+| `bd-xmh5g.401` | `mvcc_commit_batching_2000`, core per-write vs request-scope batched commit | `8.7549 ms` median | `6.7427 ms` median | `1.299x` per-write/request-scope; request-scope is `1.7%` slower than raw batched (`6.6308 ms`) | Keep as enabling primitive, not a direct kernel claim |
+
+### Kernel Reference Coverage
+
+No direct ext4/btrfs-kernel comparator is valid for this row. The lever changes
+FrankenFS's in-process FUSE dispatch strategy: multiple write requests against
+one file handle share a deferred `RequestScope` until a durability boundary.
+Linux ext4/btrfs do not expose an equivalent timed primitive. A mounted
+write+fsync benchmark is still required for whole-filesystem superiority
+claims.
+
+### Commands
+
+```bash
+AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-a \
+  rch exec -- cargo bench --profile release-perf -p ffs-fuse \
+  --bench mount_runtime -- mount_runtime_writeback
+
+AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-a \
+  rch exec -- cargo bench --profile release-perf -p ffs-core \
+  --bench mvcc_commit_batching -- mvcc_commit_batching_2000
+
+AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-a \
+  rch exec -- cargo build --release -p ffs-fuse
+
+AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-a \
+  rch exec -- cargo test -p ffs-fuse writeback_cache -- --nocapture
+
+AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-a \
+  rch exec -- cargo test -p ffs-harness --test conformance -- --nocapture
+```
+
 ## `bd-w3hol` Addendum
 
 Date: 2026-06-20
