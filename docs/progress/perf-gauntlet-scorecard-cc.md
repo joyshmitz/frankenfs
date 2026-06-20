@@ -32,10 +32,34 @@ with `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cc`.
 | 8 | bd-r9c10 | ffs-core · ext4_indirect_read_overlap | parallel non-contig runs | **7.85x/18.7x/20.8x** (N=16/64/256) | ✅ WIN (keep) |
 | 9 | bd-8nrzh | ffs-core · ext4_extent_tree_walk_overlap | parallel child reads | **8.85x/44.6x/52.9x** (N=16/64/256) | ✅ WIN (keep) |
 | 10 | bd-giyxr | ffs-core · e2compr_cluster_read_overlap | parallel cluster reads | **3.19x/8.74x/15.6x** (N=4/16/32) | ✅ WIN (keep) |
+| 11 | bd-2emlm | ffs-block · file_device_read | large-read direct (skip per-read scratch) | **13–17.6x** (1 MiB warm A/B; staged_scratch vs direct) | ✅ WIN (keep) |
+
+### Lever 11 — FileByteDevice large-read direct, no per-read scratch (cc 2026-06-20)
+`FileByteDevice::read_exact_at` staged **every** device read through a fresh `vec![0; len]`
+scratch (zero-init → `pread` → `copy_from_slice` into the caller buffer) to honor its
+`preserves_read_exact_at_destination_on_error` all-or-nothing contract. For a *large* read that
+scratch crosses the allocator's mmap threshold, so it mmaps anon pages and pays a first-touch
+page fault per 4 KiB **twice** (the zero-init and again the post-read copy) — pure overhead on
+top of the single `pread`. The fix size-gates the path: reads **≥ 64 KiB** (the bulk
+`read_contiguous_into` chunks land here at 128 KiB) read straight into the caller buffer, with
+one up-front `fstat` length re-check that errors on a backing-file shrink **before** any byte of
+the destination is touched (so the contract still holds — proven by a new large-read short-read
+test). Small reads (4 KiB metadata blocks) keep the freelist-cheap scratch unchanged, so the hot
+metadata read path — where frankenfs already dominates the kernel 3–5× — is **byte-identical with
+zero added syscalls**. Measured **13.0×** (host vmi1227854: 366µs→28µs) and **17.6×** (host hz1:
+1089µs→62µs) on a 1 MiB warm `read_exact_at` A/B; the size-gate's `fstat` is negligible against a
+≥64 KiB read. This closes the **bd-2emlm double-copy residual** on the large-read path
+(prior commit 41cb5e91 had deferred it as "contract-guarded"; the guard is preserved here via the
+length re-check rather than a scratch). Removing the per-read scratch also cuts allocation
+footprint, which my own btrfs root-cause work identified as the dominant cold/memory-pressure cost
+(2× RSS → 2.25× slower preads via page faults). ffs-block 306 tests + ffs-core 1177 tests green;
+clippy clean. **Caveat:** this is the lever's own A/B (staged vs direct in one process), not a
+head-to-head vs the kernel; it proves the scratch elimination delivers and removes a real
+per-read allocation+fault on the bulk path.
 
 ## Summary — release-readiness
 
-- **13 levers measured, 13 kept, 0 reverted.** Every shipped optimization delivers a real,
+- **14 levers measured, 14 kept, 0 reverted.** Every shipped optimization delivers a real,
   measured speedup on its modeled workload; none regressed.
 - The single neutral data point is **inode batch-free on a fully-fragmented file (1.01x)** — by
   design a zero-cost no-op when no contiguous runs exist; on contiguous (sequentially-allocated)
