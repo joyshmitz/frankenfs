@@ -8330,13 +8330,14 @@ impl OpenFs {
     /// byte-identical to the previous `vec![0u8; to_read]`-then-fill path.
     /// `dst.len()` must be `>= to_read` (the caller sizes it from the read
     /// request; `to_read = min(file_size - offset, size)`).
-    fn btrfs_read_file_into(
+    fn btrfs_read_file_into_impl(
         &self,
         cx: &Cx,
         ino: InodeNumber,
         offset: u64,
         size: u32,
         dst: &mut [u8],
+        reject_symlink: bool,
     ) -> Result<usize, FfsError> {
         let read_started = Instant::now();
         let canonical = self.btrfs_canonical_inode(ino)?;
@@ -8486,8 +8487,12 @@ impl OpenFs {
                 (inode, exts)
             };
 
-        if Self::btrfs_mode_to_file_type(inode.mode) == FileType::Directory {
+        let file_type = Self::btrfs_mode_to_file_type(inode.mode);
+        if file_type == FileType::Directory {
             return Err(FfsError::IsDirectory);
+        }
+        if reject_symlink && file_type == FileType::Symlink {
+            return Err(FfsError::Format("cannot read a symlink".into()));
         }
 
         if offset >= inode.size {
@@ -9079,6 +9084,28 @@ impl OpenFs {
         Ok(to_read)
     }
 
+    fn btrfs_read_file_into(
+        &self,
+        cx: &Cx,
+        ino: InodeNumber,
+        offset: u64,
+        size: u32,
+        dst: &mut [u8],
+    ) -> Result<usize, FfsError> {
+        self.btrfs_read_file_into_impl(cx, ino, offset, size, dst, false)
+    }
+
+    fn btrfs_read_regular_file_into(
+        &self,
+        cx: &Cx,
+        ino: InodeNumber,
+        offset: u64,
+        size: u32,
+        dst: &mut [u8],
+    ) -> Result<usize, FfsError> {
+        self.btrfs_read_file_into_impl(cx, ino, offset, size, dst, true)
+    }
+
     /// Owned-`Vec` form of [`OpenFs::btrfs_read_file_into`]: allocate a buffer,
     /// read into it, and return it. Kept for callers that need owned bytes
     /// (`FsOps::read`, symlink-target reads); the streamed `read_into` path uses
@@ -9092,6 +9119,19 @@ impl OpenFs {
     ) -> Result<Vec<u8>, FfsError> {
         let mut buf = vec![0_u8; size as usize];
         let n = self.btrfs_read_file_into(cx, ino, offset, size, &mut buf)?;
+        buf.truncate(n);
+        Ok(buf)
+    }
+
+    fn btrfs_read_regular_file(
+        &self,
+        cx: &Cx,
+        ino: InodeNumber,
+        offset: u64,
+        size: u32,
+    ) -> Result<Vec<u8>, FfsError> {
+        let mut buf = vec![0_u8; size as usize];
+        let n = self.btrfs_read_regular_file_into(cx, ino, offset, size, &mut buf)?;
         buf.truncate(n);
         Ok(buf)
     }
@@ -27403,20 +27443,12 @@ impl OpenFs {
                 }
             }
             // Btrfs fast path: read straight into `dst` with no intermediate
-            // owned `Vec` + copy (bd-2emlm). Mirrors `FsOps::read`'s btrfs arm
-            // (the dir/symlink guards then `btrfs_read_file`), but calls the
-            // read-into-buffer form so a streamed read does not allocate and copy
-            // a fresh chunk-sized `Vec` per call (which doubled resident memory
-            // and thrashed page-faults vs the ext4 direct-into-`dst` path above).
+            // owned `Vec` + copy (bd-2emlm). The regular-file wrapper rejects
+            // directories/symlinks from the inode item already fetched by the
+            // data path, avoiding a separate attr descent before every streamed
+            // chunk.
             if let FsFlavor::Btrfs(_) = &self.flavor {
-                let attr = self.btrfs_read_inode_attr(cx, ino)?;
-                if attr.kind == FileType::Directory {
-                    return Err(FfsError::IsDirectory);
-                }
-                if attr.kind == FileType::Symlink {
-                    return Err(FfsError::Format("cannot read a symlink".into()));
-                }
-                return self.btrfs_read_file_into(cx, ino, offset, size, dst);
+                return self.btrfs_read_regular_file_into(cx, ino, offset, size, dst);
             }
             // Fallback: exact-semantics owned read, then copy into dst.
             let data = <Self as FsOps>::read(self, cx, scope, ino, offset, size)?;
@@ -29521,16 +29553,7 @@ impl FsOps for OpenFs {
                 buf.truncate(n);
                 Ok(buf)
             }
-            FsFlavor::Btrfs(_) => {
-                let attr = self.btrfs_read_inode_attr(cx, ino)?;
-                if attr.kind == FileType::Directory {
-                    return Err(FfsError::IsDirectory);
-                }
-                if attr.kind == FileType::Symlink {
-                    return Err(FfsError::Format("cannot read a symlink".into()));
-                }
-                self.btrfs_read_file(cx, ino, offset, size)
-            }
+            FsFlavor::Btrfs(_) => self.btrfs_read_regular_file(cx, ino, offset, size),
         }
     }
 
