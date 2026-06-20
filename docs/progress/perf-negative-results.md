@@ -17,6 +17,7 @@ met by new profile evidence.
 
 | Date | Bead | Workload | Verdict | Original-kernel ratio | Conformance gate | Readiness impact |
 | --- | --- | --- | --- | --- | --- | --- |
+| 2026-06-20 | `bd-r9c10` | ext4 indirect non-contiguous read overlap plus direct-output copy-elision follow-up (`ext4_indirect_read_overlap`, 16/64/256 synthetic latency-injected runs) | REJECT copy-elision / production reverted; keep incumbent owned-buffer parallel read | Existing direct kernel gap remains a loss from the prior 32 MiB `^extent` image probe: FrankenFS indirect read `211-224 ms` vs kernel ext4 `45 ms`, about `4.7-5.0x` slower. Today's RCH Criterion is Rust-internal: baseline incumbent parallel read on `vmi1149989` measured serial/parallel medians `5.7337 ms / 970.27 us` (16 runs), `23.414 ms / 2.7872 ms` (64), `92.482 ms / 13.491 ms` (256). Candidate same-binary A/B on `vmi1167313`: incumbent `parallel_rayon` vs `parallel_in_place` medians `2.7308 ms / 2.5461 ms` (`1.073x`, small win), `7.7753 ms / 8.6526 ms` (`0.899x`, regression), `25.508 ms / 25.452 ms` (`1.002x`, neutral). Win/loss/neutral: internal A/B `1/1/1`; direct kernel ratio `0/1/0` from the existing gap. | RCH `cargo bench --profile release-perf -p ffs-core --bench ext4_indirect_read_overlap -- ext4_indirect_read_overlap --warm-up-time 1 --measurement-time 3` passed on `vmi1149989` for baseline and on `vmi1167313` for candidate; benchmark asserts byte equality against the serial oracle before measuring. Production source was restored to the incumbent owned-buffer parallel path; only the A/B benchmark guard remains. | Do not ship or retry the direct-output copy-elision variant for `read_ext4_indirect` without new profile evidence: it regresses the 64-run row and is neutral at 256. The remaining ~5x kernel loss is not closed by buffer assembly tweaks; route deeper to indirect pointer resolution/planning, real direct-kernel image fixtures, mmap/io_uring/vectorized device paths, or a genuinely fragmented indirect-image comparator. |
 | 2026-06-20 | `bd-w3hol` | cod-a fresh verification of FUSE writeback-cache write path, 32 x 32 KiB writes to one file handle followed by flush, plus core request-scope batching rerun | KEEP / production retained | Direct ext4/btrfs-kernel ratio remains neutral/unavailable for this isolated primitive: Linux ext4/btrfs do not expose a timed comparator for FrankenFS's in-process per-`(ino, fh)` deferred `RequestScope` table. Fresh cod-a RCH Criterion on `hz1`: old per-write FUSE commit median `75.412 us` vs deferred flush median `64.716 us`, old/new `1.165x`, production latency `0.858x` (`14.2%` lower). Fresh cod-a core primitive rerun on `hz1`: per-write `8.7549 ms`, raw batched `6.6308 ms`, request-scope batched `6.7427 ms`; per-write/request-scope `1.299x`, request-scope is `1.7%` slower than raw batched. Win/loss/neutral: internal A/B `1/0/0`; direct kernel ratio `0/0/1`. | RCH `cargo bench --profile release-perf -p ffs-fuse --bench mount_runtime -- mount_runtime_writeback` passed on `hz1`; RCH `cargo bench --profile release-perf -p ffs-core --bench mvcc_commit_batching -- mvcc_commit_batching_2000` passed on `hz1`; RCH `cargo build --release -p ffs-fuse` passed on `hz1`; RCH `cargo test -p ffs-fuse writeback_cache -- --nocapture` passed on `vmi1152480` (12/12); RCH `cargo test -p ffs-harness --test conformance -- --nocapture` passed on `vmi1153651` (100 passed / 0 failed / 2 ignored). | Confirms the already-landed `bd-w3hol` production lever remains a keep on fresh cod-a evidence. Do not claim whole-filesystem kernel domination from this primitive alone; next direct-kernel work should measure mounted write+fsync after unrelated mounted-suite debt is isolated, or move to the open btrfs decompression oversubscription gap (`bd-defgb`). |
 | 2026-06-20 | `bd-w3hol` | FUSE writeback-cache write path, 32 x 32 KiB writes to one file handle followed by flush, old per-write commit vs per-FH deferred `RequestScope` commit | KEEP / production retained | Direct ext4/btrfs-kernel ratio is neutral/unavailable for this isolated primitive: the Linux kernel does not expose a timed comparator for FrankenFS's per-file-handle `RequestScope` batching table. RCH Criterion on `vmi1227854`: per-write commit median `43.353 us`, deferred flush median `30.213 us`, old/new `1.435x`, production latency `0.697x` (`30.3%` lower). Win/loss/neutral: internal A/B `1/0/0`; direct kernel ratio `0/0/1`. | RCH `cargo build --release -p ffs-fuse` passed on `vmi1153651`; RCH `cargo test -p ffs-fuse writeback_cache -- --nocapture` passed on `ovh-a` (12/12); RCH `cargo clippy -p ffs-fuse --all-targets --no-deps -- -D warnings` passed on `hz1`; RCH `cargo test -p ffs-harness -- --nocapture` on `hz2` cleared lib `2056/2056`, `tests/btrfs_kernel_reference.rs` `7/7`, and `tests/conformance.rs` `100 passed / 0 failed / 2 ignored` before later unrelated mounted `fuse_e2e` failures; RCH focused post-patch `cargo test -p ffs-harness --test fuse_e2e ext4_fuse_inline_data_reads -- --nocapture` passed on `ovh-a` (2/2). | Converts `bd-w3hol` / `bd-xmh5g.401` into a measured keep for write-side commit amortization. Do not claim whole-filesystem kernel domination from this primitive alone; next direct-kernel work should measure mounted write+fsync throughput/latency after the existing unrelated `fuse_e2e` red rows are isolated or quarantined. |
 | 2026-06-20 | `bd-27x9a` | btrfs 100 MiB single uncompressed extent read (`/data/tmp/btrperf_1231197.img`, `/m.bin`, one unencoded extent) | KEEP existing production chunking; no new code shipped | Local hyperfine, warm/shared-cache, release-perf CLI: kernel btrfs `dd` mean `48.7 ms`; current ffs default-32 mean `76.3 ms`; forced old 256-block chunk mean `91.1 ms`. Current ffs is `1.57x` slower than kernel, but `1.19x` faster than the old 256-block setting on this real-image wall-clock comparator. RCH Criterion on `ovh-a` isolates the Rust overlap primitive: serial `5.0966 ms` vs parallel `405.27 us` median (`12.58x`). | RCH `cargo build --release -p ffs-cli` passed on `ovh-a`; RCH `cargo bench --profile release-perf -p ffs-core --bench btrfs_uncompressed_read_overlap -- btrfs_uncompressed_read_overlap_16extents` passed on `ovh-a`; RCH `cargo test -p ffs-core btrfs_read -- --nocapture` passed on `hz1` (21 passed, 1 ignored, 0 failed). Local target verified with `filefrag`: `/m.bin` is one 100 MiB extent, no encoded/shared flags. | Converts `bd-27x9a` from hypothesis to measured evidence: chunking is still better than the old setting, but the kernel gap remains a loss. Do not claim btrfs-kernel domination from this lever; next work should attack file-device/syscall/copy overhead (mmap/io_uring/vectorized direct device) rather than retuning chunk size again. |
@@ -35,6 +36,7 @@ met by new profile evidence.
 
 | Date | Bead | Surface | Lever | Status | Evidence | Retry predicate |
 | --- | --- | --- | --- | --- | --- | --- |
+| 2026-06-20 | `bd-r9c10` | `ffs-core::read_ext4_indirect` non-contiguous run read overlap and direct-output candidate | Audit incumbent serial-plan/parallel-owned-buffer read path against a direct-output in-place variant that removes per-segment `Vec` materialization and serial assembly copy | Rejected / production reverted | Baseline RCH Criterion on `vmi1149989`, command `AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-b rch exec -- cargo bench --profile release-perf -p ffs-core --bench ext4_indirect_read_overlap -- ext4_indirect_read_overlap --warm-up-time 1 --measurement-time 3`: serial vs incumbent `parallel_rayon` medians were `5.7337 ms / 970.27 us` (16 runs, `5.91x`), `23.414 ms / 2.7872 ms` (64, `8.40x`), and `92.482 ms / 13.491 ms` (256, `6.85x`). Candidate same-binary A/B on `vmi1167313`: `parallel_rayon` vs `parallel_in_place` medians `2.7308 ms / 2.5461 ms` (`1.073x` small win), `7.7753 ms / 8.6526 ms` (`0.899x` regression), and `25.508 ms / 25.452 ms` (`1.002x` neutral). Direct ext4-kernel comparator remains the existing indirect 32 MiB `^extent` loss (`211-224 ms` vs `45 ms`, ~`5x` slower), not closed here. | Do not retry direct-output/window-carving copy-elision for this path unless a fresh profile shows segment assembly copy dominates and a same-binary A/B beats all run-count rows by a material margin. Remaining work should re-localize the indirect gap instead of polishing buffer assembly. |
 | 2026-06-20 | `bd-w3hol` | `ffs-fuse` writeback-cache write/flush/fsync/release paths and `ffs-core` request-scope batching primitive | Verify the already-landed per-`(ino, fh)` writeback batch table and core deferred `RequestScope` path under fresh cod-a rch runs | Measured keep | Fresh cod-a RCH Criterion on `hz1`: `mount_runtime_writeback/per_write_commit_32x32k` median `75.412 us`; `mount_runtime_writeback/deferred_flush_32x32k` median `64.716 us`; old/new `1.165x`, production `14.2%` lower latency. Fresh core rerun on `hz1`: per-write `8.7549 ms`, raw batched `6.6308 ms`, request-scope batched `6.7427 ms`; per-write/request-scope `1.299x`. Behavior/build gates: RCH `ffs-fuse` release build passed; RCH `ffs-fuse` writeback tests 12/12; RCH `ffs-harness` conformance 100 passed / 0 failed / 2 ignored. Direct ext4/btrfs-kernel ratio remains neutral/unavailable for this internal batching primitive. | Keep. Retry only if a direct mounted write+fsync ext4/btrfs-kernel comparator shows regression, or if a new correctness test proves a same-FH read/flush/fsync/release semantic gap. For kernel-ratio claims, first isolate mounted `fuse_e2e` unrelated debt and run a direct mounted writeback benchmark. |
 | 2026-06-20 | `bd-w3hol` | `ffs-fuse` writeback-cache write/flush/fsync/release paths | Add a per-`(ino, fh)` writeback batch table that reuses a deferred write `RequestScope` across buffered writes and commits it on flush/fsync/release/destroy; synchronous and NOWAIT writes drain or bypass the deferred scope to preserve durability and lock semantics | Measured keep | RCH Criterion on `vmi1227854`: `mount_runtime_writeback/per_write_commit_32x32k` median `43.353 us`; `mount_runtime_writeback/deferred_flush_32x32k` median `30.213 us`; old/new `1.435x`, production `30.3%` lower latency. Behavior gates: RCH `ffs-fuse` writeback tests 12/12; RCH `ffs-fuse` build and clippy clean; RCH `ffs-harness` conformance 100 passed / 0 failed / 2 ignored; RCH post-patch inline-data FUSE fixture check 2/2; focused local clippy for changed harness test targets passed. Full mounted `fuse_e2e` is not green: a stale full RCH run printed unrelated btrfs rename/security-xattr/renameat2/read-only ioctl failures and was interrupted after several tests hung. | Keep the writeback batching lever. Retry only if a direct mounted write+fsync kernel comparator shows regression, or if a new correctness test proves a same-FH read/flush/fsync/release semantic gap. For kernel-ratio claims, first isolate/quarantine the existing unrelated mounted `fuse_e2e` red rows and then run a direct ext4/btrfs mounted writeback benchmark. |
 | 2026-06-20 | `bd-27x9a` | `ffs-core` btrfs large uncompressed read through `ByteDeviceBlockAdapter` / `FileByteDevice` | Add an opt-in direct-overwrite byte-device read for callers that discard destinations on error, then route contiguous filesystem reads through it to skip `FileByteDevice`'s staging copy | Rejected / production reverted | Local release-perf hyperfine on the same one-extent btrfs target. Baseline before candidate: kernel `48.7 ms`, current ffs default-32 `76.3 ms`, forced 256-block `91.1 ms`. Candidate after direct-overwrite fast path: kernel `49.7 ms`, default-32 `75.7 ms`, forced 256-block `72.5 ms`. The default moved only `0.8%` (`76.3 -> 75.7 ms`), well inside run/load noise, and the forced old chunk result flipped faster than default, so the lever was not a credible keep. The code was reverted; no production source change shipped. | Do not retry `FileByteDevice` direct-overwrite reads as a small trait shim. Retry only with a profile showing staging-copy self-time dominates a real read workload and a same-worker A/B beats staged reads by at least 10% without weakening the public short-read destination-preservation contract. Prefer deeper file-device work: mmap-backed readonly image, `preadv2`/io_uring batching, or fewer larger kernel syscalls with explicit copy accounting. |
@@ -197,6 +199,26 @@ intended *fragmented*-indirect test did not materialize — ext4's old block all
 fsync-interleaved + spacer writes to 25 extents (fragmentation is hard to force; the original 108-extent
 fragmented-read win took deliberate effort), so this measures the contiguous/sequential indirect regime.
 
+#### Follow-up: direct-output copy-elision for indirect reads failed (cod-b/BlackThrush 2026-06-20, bd-r9c10)
+
+The existing `read_ext4_indirect` production path is already serial-plan / parallel-read / serial-assemble:
+it resolves indirect pointers in byte order, reads each coalesced data segment on rayon into an owned buffer,
+then assembles those buffers into the output. The tested follow-up removed the per-segment owned `Vec` and
+let workers fill disjoint output windows directly. Production code was reverted after measurement.
+
+RCH baseline on `vmi1149989` (`AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-b
+rch exec -- cargo bench --profile release-perf -p ffs-core --bench ext4_indirect_read_overlap --
+ext4_indirect_read_overlap --warm-up-time 1 --measurement-time 3`): serial vs incumbent `parallel_rayon`
+medians were 16 runs `5.7337 ms / 970.27 us` (`5.91x`), 64 runs `23.414 ms / 2.7872 ms` (`8.40x`), and
+256 runs `92.482 ms / 13.491 ms` (`6.85x`). RCH did not keep the requested worker for the candidate and
+selected `vmi1167313`; same-binary A/B on that worker measured incumbent `parallel_rayon` vs candidate
+`parallel_in_place`: 16 runs `2.7308 ms / 2.5461 ms` (`1.073x`, small win), 64 runs `7.7753 ms / 8.6526 ms`
+(`0.899x`, regression), and 256 runs `25.508 ms / 25.452 ms` (`1.002x`, neutral). The benchmark asserts byte
+identity against the serial oracle before measuring. Conclusion: direct-output/window-carving copy-elision
+does not close the ~5x direct kernel loss and should not be retried without a fresh profile proving assembly
+copy dominates. Keep only the benchmark guard; route future work to indirect pointer planning, real fragmented
+indirect fixtures, or deeper file-device/syscall/copy levers.
+
 ### FUSE write-path round-trip oracle — BLOCKED by sandbox (cc 2026-06-19)
 
 Attempted a write-path differential oracle (frankenfs writes via `ffs mount --rw` FUSE → kernel reads back,
@@ -283,3 +305,54 @@ decompress-jobs guard (`decompress_jobs > 16`) never even trips, and 8 jobs on 6
 (profile which symbol's parallelism responds to RAYON_NUM_THREADS) BEFORE any cap is attempted — two cap
 attempts (with_min_len, dedicated pool) both missed because the bottleneck was assumed to be the decompress
 fan-out. No code shipped for this lever.
+
+### FileByteDevice thread-local read scratch buffer — MEASURED INERT, reverted (cc 2026-06-20, bd-cc-rscratch)
+
+Hypothesis: the warm sequential-read sys-time is dominated by the per-chunk temp allocation in
+`FileByteDevice::read_exact_at` (`let mut read_buf = vec![0u8; buf.len()]` → pread → `copy_from_slice` into
+the caller's `dst`). The temp exists only to honour `preserves_read_exact_at_destination_on_error == true`
+(a short/failed backing read must leave `dst` byte-for-byte unchanged — exercised by
+`file_byte_device_scalar_read_preserves_buffer_on_short_read`, which truncates the backing file mid-read).
+A per-call `vec![0u8; len]` zero-fills fresh pages every chunk; on a 128 MiB read split into 128 KiB chunks
+that is ~1024 allocations. Attempt: replace the per-call temp with a **thread-local reusable scratch buffer**
+(`thread_local! { static FILE_READ_SCRATCH: RefCell<Vec<u8>> }`, 1 MiB reuse cap, one-off alloc above cap)
+in both `read_exact_at` and `read_vectored_exact_at` — faults the scratch pages in once per worker, keeps the
+exact preservation contract (still copies into `dst` only on success), all tests green.
+
+**Measured INERT.** `perf stat` of `ffs-cli read --discard` on a 128 MiB ext4 extent file (tmpfs image,
+warm): page-faults **19,943 → 19,699** (unchanged), warm engine `duration_us` ~22–25 ms before and after
+(within run-to-run variance). Diagnosis: the page-faults are **not** from the device temp — glibc's dynamic
+`M_MMAP_THRESHOLD` already recycles the ~128 KiB temp from the arena after warm-up, so the thread-local merely
+re-implements what the allocator already does. The faults are dominated by the read engine's **output buffer**
+(`vec![0u8; to_read]` materialising the whole 128 MiB result), and the residual warm cost is the **second
+copy** (page-cache → temp → `dst`, vs the kernel's single page-cache → user copy) plus that output zero-fill —
+both inherent to a `#![forbid(unsafe_code)]` engine that must hand initialised `&mut [u8]` to the read and
+cannot read directly into uninitialised memory. Reverted (only `crates/ffs-block/src/lib.rs`, restored).
+
+**Do-not-retry predicate:** do not re-attempt buffer-recycling for `FileByteDevice` reads as a warm-read
+lever — the allocator already recycles and the page-faults live in the engine output buffer, not the device
+temp. The only paths that would actually remove the residual copy/zero-fill are (a) reading directly into the
+caller `dst` (requires weakening `preserves_read_exact_at_destination_on_error`, which a deliberate test
+guards), or (b) `mmap`/uninitialised-buffer reads (require `unsafe`, forbidden here) — i.e. the same structural
+zero-copy gap already recorded in "Bulk-read loss PROFILED — userspace-pread tax, no safe lever".
+
+### Warm contiguous read re-measured on the 64-core box — chunk-parallelism monotone (cc 2026-06-20, bd-vffrx confirm)
+
+Independent re-measurement of the live `ffs-cli read --discard` warm throughput on a 128 MiB contiguous ext4
+extent file (tmpfs-resident → pure CPU/bandwidth, warm; 7 runs/median), sweeping `FFS_READ_CHUNK_BLOCKS`:
+
+| chunk | warm median | throughput |
+|-------|-------------|------------|
+| 32 blocks (128 KiB) — **shipped default** | 24.5 ms | **5216 MB/s** |
+| 256 blocks (1 MiB) — W160 default | 28.1 ms | 4561 MB/s |
+| 1024 blocks (4 MiB) | 36.7 ms | 3492 MB/s |
+| 4096 blocks (16 MiB) — original default | 59.1 ms | 2165 MB/s |
+
+Monotone: finer chunks → more jobs to fill the 64-thread rayon pool → higher throughput; the 4096→32 retune
+is a **2.4× warm gain** on real many-core hardware. Like-for-like kernel comparators on the same file (warm):
+single-threaded **full-materialise** (`dd bs=128M` / Python `f.read()`) ≈ 1798 MB/s → frankenfs **2.9× FASTER**;
+**cache-hot streaming** (8 MiB reused buffer, never materialises) ≈ 12968 MB/s → frankenfs ~2.5× behind. This
+confirms (not supersedes) the existing verdict: frankenfs's parallel read **beats** any reader that
+materialises the file and trails only an idealised zero-copy streaming reader — the residual is the
+materialisation + double-copy tax above, not a parallelism deficit. (Note: tmpfs image → `drop_caches` does
+not evict, so only the warm/CPU-bound regime is characterised here, which is exactly where the gap lives.)
