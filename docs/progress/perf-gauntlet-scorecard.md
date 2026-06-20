@@ -752,3 +752,68 @@ FrankenFS btrfs timing and still lost to kernel streaming. Source candidates wer
 Do not retry reusable staging scratch or btrfs direct-to-dst as blind standalone levers. The next credible
 `bd-2emlm` pass needs heap allocation attribution for the btrfs read pipeline and must prove RSS drops below the
 current ~133-138 MiB profile before measuring throughput again.
+
+---
+
+## KEEP — sharded MVCC chain-head Cow move verification (cod-b 2026-06-20, bd-xmh5g.395)
+
+Commit under verification: `8d610785` (`make_chain_head_full` moves the resolved `Cow` with
+`into_owned`) plus invariant guard `6fed9db6`.
+RCH bench worker: `vmi1152480`
+Requested target dir: `/data/projects/.rch-targets/frankenfs-cod-b`
+
+### Verdict
+
+Keep the existing production change. The sharded compaction path now matches the single-store
+`make_chain_head_full` implementation and avoids cloning an already-owned decompressed buffer. The fresh
+same-worker Cow-owned A/B shows this is decisively positive for the primitive that the compaction path uses.
+
+This is not a whole-filesystem ext4/btrfs-kernel domination row. The direct kernel ratio is N/A because the
+operation is internal MVCC version materialization; the parent direct ext4 indirect-read loss remains open until
+the mounted comparator can rerun.
+
+### Scorecard
+
+| Gate | Result |
+| --- | --- |
+| Code-first backlog rows examined in this addendum | 1 |
+| RCH Criterion rows completed | 3 / 3 Cow-owned A/B sizes |
+| Same-worker evidence | Yes: `to_vec_clone` and `into_owned_move` measured in one Criterion run on `vmi1152480` |
+| Direct ext4/btrfs-kernel ratios | N/A for this internal MVCC primitive; parent direct ext4 indirect-read loss remains `~4.7-5.0x` slower than kernel from prior mounted evidence |
+| Internal win/loss/neutral | `3/0/0` |
+| Direct kernel win/loss/neutral | `0/0/1` |
+| Production levers kept | 1 already-retained lever (`resolve_data_with(...).into_owned()` in sharded chain-head compaction) |
+| Production levers rejected/reverted | 0 |
+| Conformance/behavior guard | RCH focused test `prune_preserves_read_visible_data_after_chain_head_compaction` passed on `vmi1152480`; RCH `cargo check -p ffs-mvcc --all-targets` passed on `vmi1293453`; RCH `cargo clippy -p ffs-mvcc --all-targets --no-deps -- -D warnings` passed on `vmi1152480`; RCH harness conformance passed on `vmi1153651` (100 passed / 0 failed / 2 ignored); local `cargo fmt -p ffs-mvcc --check` passed. |
+| Known gate caveat | Plain `cargo clippy -p ffs-mvcc --all-targets -- -D warnings` still enters path dependency linting and fails on pre-existing `ffs-repair/src/storage.rs` pedantic debt outside this MVCC closeout. |
+| Release-readiness score for perf-superiority claims | 60 / 100: decisive same-worker internal keep with conformance green, but no direct kernel comparator applies and the parent direct read gap stays open |
+| Release-readiness score for this row's hygiene | 95 / 100: measured A/B, invariant test, check, scoped clippy, fmt, conformance, and canonical ledger row are complete; residual risk is only the unrelated dependency clippy debt |
+
+### Measured Rows
+
+| Workload | Old clone path | Kept move path | Ratio | Verdict |
+| --- | ---: | ---: | ---: | --- |
+| `mvcc_read_block_cow_owned/to_vec_clone/4096` vs `into_owned_move/4096` | `214.82 ns` | `13.523 ns` | `15.89x` old/new | KEEP |
+| `mvcc_read_block_cow_owned/to_vec_clone/16384` vs `into_owned_move/16384` | `1.0014 us` | `12.372 ns` | `80.94x` old/new | KEEP |
+| `mvcc_read_block_cow_owned/to_vec_clone/65536` vs `into_owned_move/65536` | `5.9061 us` | `10.004 ns` | `590.37x` old/new | KEEP |
+
+### Isomorphism
+
+Ordering preserved: yes. `make_chain_head_full` rewrites only the retained chain head from `Identical` to
+`Full`; version order and commit sequences are unchanged.
+
+Tie-breaking unchanged: yes. Snapshot visibility uses the same retained `BlockVersion` and commit sequence.
+
+Floating-point identical: N/A.
+
+RNG seeds unchanged: N/A.
+
+Bytes verified: yes. The focused compaction test proves the retained snapshot still reads the same bytes after
+the older full version is drained, and the A/B benchmark constructs byte-identical buffers for the old and kept
+materialization paths.
+
+### Retry Predicate
+
+Do not reopen the `to_vec` materialization path for `Cow::Owned`. Future work should target an actual remaining
+direct-kernel gap, such as mounted ext4/btrfs streaming read syscall/copy overhead, unless a new profile shows
+compressed MVCC GC compaction itself dominating a realistic write+GC workload.
