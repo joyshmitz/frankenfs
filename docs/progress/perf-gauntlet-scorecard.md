@@ -957,3 +957,69 @@ microbenches without a new direct-image signal. Next work should attack a
 different remaining cost center: output-buffer reuse or decode-direct-to-final
 buffer, btrfs metadata/extent lookup fan-out, or a larger multi-file compressed
 kernel image that reproduces the remaining `2.99-8.51x` loss.
+
+## `bd-xmh5g` Addendum (cod-a btrfs zstd direct-output rejection)
+
+Date: 2026-06-20
+Agent: BlackThrush (`cod-a`)
+Scope: `ffs-core` btrfs zstd transparent decompression for full-overlap regular
+compressed extents
+Production status: rejected/reverted; no source retained
+RCH proof workers: `vmi1152480` for candidate check/build, `vmi1153651` for
+clean-source check, `vmi1227854` for clean-source conformance, `vmi1149989`
+for clean-source release-perf build
+Requested target dir: `/data/projects/.rch-targets/frankenfs-cod-a`
+
+### Verdict
+
+Reject. Direct-to-final zstd decode did not transfer into the mounted-image
+read path. Single-file read worsened from `55.931 ms` to `57.961 ms`
+(`0.965x` old/new); whole-tree walk was neutral at `34.8826 ms` to
+`34.8828 ms` (`1.000x`). The candidate still lost to kernel btrfs by `8.27x`
+on the single-file read and `3.02x` on the walk.
+
+### Scorecard
+
+| Gate | Result |
+| --- | --- |
+| Code-first backlog rows examined in this addendum | 1 |
+| Direct ext4/btrfs-kernel ratios | Single-file candidate `57.961 ms` vs kernel `7.011 ms` (`8.27x` slower); walk candidate `34.883 ms` vs kernel `11.537 ms` (`3.02x` slower) |
+| Production levers kept | 0 |
+| Production levers rejected/reverted | 1 |
+| Internal win/loss/neutral | `0/1/1` |
+| Direct kernel win/loss/neutral | `0/2/0` |
+| Conformance/behavior guard | Candidate RCH `cargo check -p ffs-core` and RCH `cargo build --profile release-perf -p ffs-cli` passed on `vmi1152480`; production code was reverted; clean-source RCH `cargo check -p ffs-core` passed on `vmi1153651`; clean-source RCH `cargo test -p ffs-harness --test conformance -- --nocapture` passed on `vmi1227854` (100 passed / 0 failed / 2 ignored); clean-source RCH `cargo build --profile release-perf -p ffs-cli` passed on `vmi1149989`. |
+| Release-readiness score for perf-superiority claims | 35 / 100: honest direct-kernel measurement and green conformance, but no kept lever and kernel still leads by `3.02-8.27x` |
+| Release-readiness score for this row's hygiene | 94 / 100: baseline/candidate direct rows, kernel ratios, production revert, clean-source check, conformance, and negative-evidence ledger are complete; remaining risk is lack of allocator/flamegraph attribution for the next route. |
+
+### Measured Rows
+
+| Workload | Baseline | Candidate | Ratio | Verdict |
+| --- | ---: | ---: | ---: | --- |
+| FrankenFS `read --discard /compressible.bin` | `55.931 ms` | `57.961 ms` | `0.965x` old/new | Reject |
+| Kernel `cat /compressible.bin` vs candidate | `7.011 ms` kernel | `57.961 ms` FrankenFS | kernel `8.27x` faster | Direct loss |
+| FrankenFS `walk --read-data --no-stat` | `34.8826 ms` | `34.8828 ms` | `1.000x` old/new | Neutral/reject |
+| Kernel `cat *` vs candidate walk | `11.537 ms` kernel | `34.883 ms` FrankenFS | kernel `3.02x` faster | Direct loss |
+
+### Isomorphism
+
+Ordering preserved: yes. The candidate preserved extent-order assembly and only
+changed the destination buffer for full-overlap zstd regular extents.
+
+Tie-breaking unchanged: yes. Extent lookup, compression-type dispatch, checksum
+handling, and partial-extent fallback were unchanged.
+
+Floating-point identical: N/A.
+
+RNG seeds unchanged: N/A.
+
+Bytes verified: yes by the existing btrfs decompression/conformance gates after
+the revert; no production byte path from this candidate remains.
+
+### Retry Predicate
+
+Do not retry direct-to-final zstd decoding without allocation attribution showing
+the decompressed output allocation and final copy dominate the mounted-image
+path. Next work should profile or specialize btrfs extent lookup/metadata
+fan-out, compressed scratch reuse, or CLI/open/read overhead for the remaining
+compressed-read kernel gap.
