@@ -34,6 +34,19 @@ with `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cc`.
 | 10 | bd-giyxr | ffs-core · e2compr_cluster_read_overlap | parallel cluster reads | prior cc **3.19x/8.74x/15.6x** (N=4/16/32); fresh cod-a verification **1.82x/2.75x/5.25x** mean old/new on `vmi1152480` | ✅ WIN (keep) |
 | 11 | bd-2emlm | ffs-block · file_device_read | large-read direct (skip per-read scratch) | **13–17.6x** (1 MiB warm A/B; staged_scratch vs direct) | ✅ WIN (keep) |
 | 12 | bd-jgbam | ffs-block · file_device_read + mounted ext4/btrfs hyperfine | mmap-backed ByteDevice follow-up | safe direct path reconfirmed **15.36x** vs staged; mmap no-ship under `unsafe_code = "forbid"` | ❌ REJECT (no source kept) |
+| 13 | bd-xmh5g.410 | ffs-block · file_device_read | vectored read: single `preadv` scatter, skip staging scratch | **1.86x** (128 KiB / 32-block warm A/B; staged_scratch_scatter `19.4µs` vs preadv_direct `10.4µs`) | ✅ WIN (keep, `79f798a8`) |
+
+### Lever 13 — FileByteDevice vectored read via single `preadv` (cc 2026-06-21)
+Sibling of Lever 11. `read_vectored_exact_at` staged every vectored read through a `vec![0; total_len]`
+scratch (zero-init + one `pread` + scatter-copy into the N destination buffers). Replaced (for reads
+`≥ 64 KiB` with `≤ IOV_MAX` = 1024 iovecs) with a single positioned `nix::sys::uio::preadv` straight
+into the caller's buffers — **same syscall count (one)**, no scratch alloc, no zero-init, no
+scatter-copy; an up-front `fstat` length re-check preserves the all-or-nothing vectored contract on a
+backing-file shrink, and small / `>IOV_MAX` reads keep the freelist-cheap scratch fallback. Measured
+**1.86x** on the 128 KiB / 32-block A/B (the `read_contiguous_blocks_into` shape). ffs-block 306 tests
+green (incl. the vectored short-read preservation test), clippy `--all-targets` clean, conformance
+100/0/2. **Decoupling note:** ffs-block has no `ffs-core` dependency, so this was built/tested/benched
+`-p ffs-block` alone while cod-a's concurrent `ffs-core` WIP (bd-xmh5g.409) was dirty.
 
 ### Lever 11 — FileByteDevice large-read direct, no per-read scratch (cc 2026-06-20)
 `FileByteDevice::read_exact_at` staged **every** device read through a fresh `vec![0; len]`
