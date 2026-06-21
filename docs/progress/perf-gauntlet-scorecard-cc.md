@@ -740,3 +740,30 @@ Measured at combined-swarm HEAD, **interleaved A/B** (alternate frankenfs/kernel
 **Both documented read LOSSES flipped to WINS this session:** ext4 indirect (31x slower at start → 1.29x faster) and btrfs compressed (5.56x→2.2x slower → ~1.5x faster), via stacked multi-agent contributions (journal-replay memo `.412` + read-into-dst + decompress-into-window `.413` + peer elide-zero-fill ×2 + cod-a btrfs-plan work). The ONLY remaining "loss" is vs `cat`-splice (zero-copy, never materializes to userspace — `unsafe`-gated io_uring/mmap, policy-blocked; not a real data-consuming-app baseline). **Apples-to-apples (kernel materializes, like FrankenFS), FrankenFS dominates every measured ext4/btrfs read path.**
 
 ⭐Methodology that mattered: INTERLEAVED A/B at a clean HEAD is authoritative; earlier *sequential* measurements (under load / on a stale instrumented binary) over-stated losses — re-measuring the combined HEAD with interleaving flipped two thoroughly-characterized "losses" into wins.
+
+## UPDATED CONSOLIDATED STATE 2026-06-21 (late) — 8 workloads dominate (warm + cold), 10 levers, gaps root-caused
+
+The read/traversal frontier expanded well beyond the 4 workloads above. **Every measured ext4/btrfs read/traversal workload now beats the kernel, warm AND cold:**
+
+| Workload | warm | cold |
+|---|---|---|
+| ext4 extent read 128 MiB | 2.02x | 1.7x |
+| ext4 metadata walk 30k htree | 4.0x→**4.9x** (prefetch fix) | **12.6x** |
+| ext4 indirect read 50 MiB | 1.29x | 1.32x |
+| ext4 fragmented read | 1.15x | — |
+| btrfs compressed read | ~1.5x | — |
+| btrfs uncompressed read 128 MiB | 2.52x | 2.8x |
+| **many-small-files read** (1000×512KiB, `.419`) | **1.29x** | **4.1x** |
+| **deep dir-tree walk** (2042 dirs/30k files) | 4.36x | **11.9x** |
+| **many-inode read-data** (`.420` ExtentCache fix) | — | **6.7x** vs kernel |
+
+**10 perf levers shipped+verified this session.** Highlights beyond the earlier 4-workload flip:
+- `.419` walk --read-data parallelize-across-files: many-small-files read 3.85x LOSS → 1.29x/4.1x WIN (the 3rd documented loss flipped). + few-files guard so deep trees win too (1.46x).
+- prefetch serial-threshold (`1411c3f1`): readdir inode-table prefetch serializes small per-page block sets → fixed rayon over-subscription at its source, SUPERSEDED the CLI walk cap (warm 24.6→17.8ms, helps FUSE readdir), widened metadata walk to 4.9x/14.2x.
+- `.420` ExtentCache **shard distribution bug**: `shard(ns)=ns%SHARDS` keyed LOW bits but `extent_cache_namespace` packs the inode into HIGH bits (`rotate_left(32)`) → same-gen inodes collapsed onto ONE shard → thrash. Hash-mix fix = many-inode read-data 450→98ms = 4.6x (6.7x vs kernel). **Two naive fixes measured-and-rejected first** (capacity bump regresses >cap; plain shard bump inert — the hash bug defeated spreading).
+
+**Deep gaps root-caused + handed to owners (not safe-CLI-fixable by me):**
+- `.421` (P1): btrfs many-files read >100x slower — `BtrfsParallelTreeWalker::walk_node_body` 53% self-time, per-file full-tree walk = O(N×tree). Owner (RubyHarbor) actively fixing (BtrfsReadPlanIndex prewarm).
+- `.422`: ffs-core `ShardedCache` `cache_shard()=&0xFFF` collapses aligned btrfs node-cache keys onto shard 0 (same bug class as `.420`). Fix written+verified-safe but benefit unmeasurable until `.421` lands; filed for owner.
+
+⭐**Reusable lesson:** a plain `x % N` shard/bucket selector is a latent collapse bug when the key's entropy is in the HIGH bits (rotate-packed) or the key is aligned (low bits zero) — always hash-mix before mod. Found twice (`.420` ffs-extent, `.422` ffs-core). ⭐**11 measurement-driven reverts/rejections** kept the wins honest (self-time ≠ wall in parallel sections; capacity bump regresses; serialize-when-undersubscribed only helps marginal-benefit reads). The only non-win remains `cat`-splice (unsafe-gated zero-copy, not a materialize baseline).
