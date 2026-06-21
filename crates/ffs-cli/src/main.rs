@@ -2354,7 +2354,10 @@ fn walk_one_dir(
         } else {
             let bytes = file_inos
                 .par_iter()
-                .map_init(|| vec![0_u8; READ_CHUNK as usize], |buf, &fino| read_one(buf, fino))
+                .map_init(
+                    || vec![0_u8; READ_CHUNK as usize],
+                    |buf, &fino| read_one(buf, fino),
+                )
                 .try_reduce(|| 0_u64, |a, b| Ok(a + b))?;
             out.bytes += bytes;
         }
@@ -2385,6 +2388,11 @@ fn walk_cmd(path: &PathBuf, no_stat: bool, parallel: bool, read_data: bool) -> R
     let cx = cli_cx();
     let open_fs = OpenFs::open(&cx, path)
         .with_context(|| format!("failed to open image: {}", path.display()))?;
+    if matches!(&open_fs.flavor, FsFlavor::Btrfs(_)) {
+        open_fs
+            .prewarm_btrfs_read_plan_index(&cx)
+            .context("failed to prewarm btrfs walk plan index")?;
+    }
 
     // The FsOps/FUSE layer uses InodeNumber(1) as the canonical root for BOTH
     // ext4 (mapped to inode 2 internally) and btrfs (mapped to the subvolume
@@ -2424,6 +2432,7 @@ fn walk_cmd(path: &PathBuf, no_stat: bool, parallel: bool, read_data: bool) -> R
         let stats_ctr = &a_stats;
         let bytes_ctr = &a_bytes;
         let mut level = vec![root_ino];
+        let mut visited_dirs = std::collections::HashSet::from([root_ino.0]);
         while !level.is_empty() {
             let next: Mutex<Vec<InodeNumber>> = Mutex::new(Vec::new());
             let next_ref = &next;
@@ -2432,7 +2441,6 @@ fn walk_cmd(path: &PathBuf, no_stat: bool, parallel: bool, read_data: bool) -> R
                 for chunk in level.chunks(chunk_size) {
                     s.spawn(move || {
                         let mut local_files = 0_u64;
-                        let mut local_dirs = 0_u64;
                         let mut local_stats = 0_u64;
                         let mut local_bytes = 0_u64;
                         let mut lsub: Vec<InodeNumber> = Vec::new();
@@ -2440,7 +2448,6 @@ fn walk_cmd(path: &PathBuf, no_stat: bool, parallel: bool, read_data: bool) -> R
                             match walk_one_dir(fs_ref, cx_ref, ino, no_stat, read_data) {
                                 Ok(r) => {
                                     local_files += r.files;
-                                    local_dirs += r.dirs;
                                     local_stats += r.stats;
                                     local_bytes += r.bytes;
                                     lsub.extend(r.subdirs);
@@ -2454,7 +2461,6 @@ fn walk_cmd(path: &PathBuf, no_stat: bool, parallel: bool, read_data: bool) -> R
                             }
                         }
                         files_ctr.fetch_add(local_files, Ordering::Relaxed);
-                        dirs_ctr.fetch_add(local_dirs, Ordering::Relaxed);
                         stats_ctr.fetch_add(local_stats, Ordering::Relaxed);
                         bytes_ctr.fetch_add(local_bytes, Ordering::Relaxed);
                         next_ref.lock().unwrap().extend(lsub);
@@ -2465,7 +2471,15 @@ fn walk_cmd(path: &PathBuf, no_stat: bool, parallel: bool, read_data: bool) -> R
             if let Some(e) = pending_err {
                 return Err(e);
             }
-            level = next.into_inner().unwrap();
+            let raw_next = next.into_inner().unwrap();
+            let mut unique_next = Vec::with_capacity(raw_next.len());
+            for dir in raw_next {
+                if visited_dirs.insert(dir.0) {
+                    unique_next.push(dir);
+                }
+            }
+            dirs_ctr.fetch_add(unique_next.len() as u64, Ordering::Relaxed);
+            level = unique_next;
         }
         files = a_files.load(Ordering::Relaxed);
         dirs = a_dirs.load(Ordering::Relaxed);
@@ -2478,13 +2492,18 @@ fn walk_cmd(path: &PathBuf, no_stat: bool, parallel: bool, read_data: bool) -> R
         let mut stat_count: u64 = 0;
         let mut byte_count: u64 = 0;
         let mut stack = vec![root_ino];
+        let mut visited_dirs = std::collections::HashSet::from([root_ino.0]);
         while let Some(ino) = stack.pop() {
             let r = walk_one_dir(&open_fs, &cx, ino, no_stat, read_data)?;
-            dir_count += r.dirs;
             file_count += r.files;
             stat_count += r.stats;
             byte_count += r.bytes;
-            stack.extend(r.subdirs);
+            for subdir in r.subdirs {
+                if visited_dirs.insert(subdir.0) {
+                    dir_count += 1;
+                    stack.push(subdir);
+                }
+            }
         }
         dirs = dir_count;
         files = file_count;

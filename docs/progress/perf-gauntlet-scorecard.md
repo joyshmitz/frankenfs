@@ -2443,3 +2443,70 @@ the decompressed output allocation and final copy dominate the mounted-image
 path. Next work should profile or specialize btrfs extent lookup/metadata
 fan-out, compressed scratch reuse, or CLI/open/read overhead for the remaining
 compressed-read kernel gap.
+
+## `bd-xmh5g.421` Addendum (cod-b btrfs deep-tree read-data win)
+
+Date: 2026-06-21
+Agent: BlackThrush (`cod-b`)
+Scope: `ffs-core` read-only btrfs walk/read planning plus `ffs-cli` directory
+walk duplicate guard
+Production status: retained
+RCH proof worker: `vmi1153651` for `cargo build --release -p ffs-cli`
+Requested target dir: `/data/projects/.rch-targets/frankenfs-cod-b`
+
+### Verdict
+
+Keep. The prior btrfs-convert deep-tree `walk --read-data --no-stat` path was
+super-linear and timed out at 20s in the direct before run (the existing ledger
+also recorded 90s serial / 9min parallel timeouts). The retained lever builds
+one read-only btrfs plan index for CLI walks and bounds directory traversal with
+a global visited-directory set. Current release `ffs-cli` completes the same
+btrfs tree in 141.2 ms wall, with hyperfine median 142.7 ms, and beats the
+mounted kernel btrfs comparator by 4.79x.
+
+### Scorecard
+
+| Gate | Result |
+| --- | --- |
+| Code-first backlog rows examined in this addendum | 1 (`bd-xmh5g.421`) |
+| Direct ext4/btrfs-kernel ratios | btrfs deep-tree read-data: FrankenFS `142.7 ms +/- 6.3` vs kernel btrfs `683.1 ms +/- 14.0` = `4.79x` faster; ext4 same-shape read-data: FrankenFS `152.0 ms +/- 2.9` vs kernel ext4 `677.8 ms +/- 6.9` = `4.46x` faster |
+| Production levers kept | 1 (`OpenFs` read-only btrfs walk/read plan index plus CLI visited-directory guard) |
+| Production levers rejected/reverted | 0 in the final diff; the earlier cache-shard candidate was rejected before this scorecard because .421 still dominated wall time |
+| Internal win/loss/neutral | `1/0/0` (`>141x` old/new against the conservative 20s timeout; `>630x` against the earlier 90s serial ledger row) |
+| Direct kernel win/loss/neutral | `2/0/0` (btrfs 4.79x win, ext4 same-shape 4.46x win) |
+| Conformance/behavior guard | RCH `cargo build --release -p ffs-cli` passed on `vmi1153651`; local `cargo check -p ffs-core -p ffs-cli --all-targets` passed; `rustfmt --edition 2024 --check crates/ffs-core/src/lib.rs` passed; `git diff --check` passed; `cargo test -p ffs-harness --test conformance -- --nocapture` passed 100/0/2. |
+| Known gate caveat | Broad `cargo test -p ffs-harness -- --nocapture` exposed an unrelated writable-btrfs `fuse_e2e` cross-parent rename source-parent nlink failure; the isolated read-only conformance gate is green and the failing path does not use the CLI prewarm/read-only cache. |
+| Release-readiness score for perf-superiority claims | 91 / 100: direct mounted-kernel btrfs and ext4 ratios are both wins, old/new timeout is eliminated, conformance is green; remaining risk is that the btrfs fixture is still btrfs-convert rather than native mkfs.btrfs. |
+| Release-readiness score for this row's hygiene | 93 / 100: one lever, no unrelated files, exact comparator pruning for btrfs `lost+found`/`ext2_saved`, RCH release build, local check, conformance, and ledger are complete. |
+
+### Measured Rows
+
+| Workload | Baseline | Candidate | Ratio | Verdict |
+| --- | ---: | ---: | ---: | --- |
+| FrankenFS btrfs deep-tree `walk --read-data --no-stat` | `>20 s` timeout | `141.2 ms` direct wall / `142.7 ms` hyperfine | `>141x` old/new | KEEP |
+| Mounted kernel btrfs pruned `find ... -exec cat {} +` vs candidate | `683.1 ms` kernel | `142.7 ms` FrankenFS | FrankenFS `4.79x` faster | Direct win |
+| Mounted kernel ext4 same-shape `find ... -exec cat {} +` vs FrankenFS ext4 | `677.8 ms` kernel | `152.0 ms` FrankenFS | FrankenFS `4.46x` faster | Direct win |
+
+### Isomorphism
+
+Ordering preserved: yes. The read-only plan index is built from the existing
+fs-tree key order, and file extent assembly still consumes extents in key order.
+
+Tie-breaking unchanged: yes. Writable COW records are still consulted first.
+The cached path is only used after CLI walk prewarming and stores raw directory
+payloads so malformed entry handling remains deferred to the reached directory.
+
+Floating-point identical: N/A.
+
+RNG seeds unchanged: N/A.
+
+Bytes verified: yes. Btrfs and ext4 comparators both read 30000 files /
+60000 bytes after pruning the btrfs-convert `ext2_saved` payload from the kernel
+side. Harness conformance passed 100/0/2.
+
+### Retry Predicate
+
+Do not re-open per-file full-tree-walk fixes for this fixture unless a native
+`mkfs.btrfs` image reproduces a new read-data loss. Next btrfs work should move
+to a remaining direct-kernel loss, not repeat cache-shard or per-directory queue
+experiments that this row already bounded.

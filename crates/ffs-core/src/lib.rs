@@ -986,6 +986,9 @@ pub struct OpenFs {
     /// Lazily cached on-disk csum-tree items for read-only verify-on-read.
     /// `None` until first use; populated by walking the csum tree once.
     btrfs_csum_read_cache: Mutex<Option<std::sync::Arc<BtrfsCsumItems>>>,
+    /// Read-only btrfs file read plan cache, populated explicitly by bulk
+    /// walkers before issuing many file reads from the same immutable fs tree.
+    btrfs_read_plan_index: Mutex<Option<Arc<BtrfsReadPlanIndex>>>,
     /// Memoized fs-tree root bytenr per subvolume objectid (bd-yuk9v). On a
     /// read-only mount the root tree is immutable, so resolving a subvolume's
     /// ROOT_ITEM once and caching the bytenr removes the per-op root-tree
@@ -1012,6 +1015,13 @@ struct Ext4WriteExtentSnapshot {
     namespace: u64,
     root_namespace: u64,
     extents: Arc<[Ext4Extent]>,
+}
+
+struct BtrfsReadPlanIndex {
+    inodes: BTreeMap<u64, BtrfsInodeItem>,
+    extents: BTreeMap<u64, Arc<[(u64, BtrfsExtentData)]>>,
+    dir_items: BTreeMap<u64, Arc<[(BtrfsKey, Vec<u8>)]>>,
+    parents: BTreeMap<u64, u64>,
 }
 
 /// Opaque per-directory validation token: the directory inode's change-time and
@@ -3309,6 +3319,7 @@ impl OpenFs {
             btrfs_rw_ephemeral_ok: options.btrfs_rw_ephemeral_ok,
             btrfs_verify_data_on_read: options.btrfs_verify_data_on_read,
             btrfs_csum_read_cache: Mutex::new(None),
+            btrfs_read_plan_index: Mutex::new(None),
             btrfs_fs_tree_root_cache: Mutex::new(std::collections::HashMap::new()),
             btrfs_parsed_node_cache: ShardedCache::new(),
         };
@@ -7370,6 +7381,12 @@ impl OpenFs {
             return Ok(self.btrfs_inode_to_attr(canonical, &inode));
         }
 
+        if let Some(index) = self.btrfs_cached_read_plan_index()
+            && let Some(inode) = index.inodes.get(&canonical)
+        {
+            return self.btrfs_inode_attr_from_item(ino, inode.clone());
+        }
+
         let inode = self.btrfs_read_ondisk_inode_item(cx, canonical)?;
         self.btrfs_inode_attr_from_item(ino, inode)
     }
@@ -7571,6 +7588,19 @@ impl OpenFs {
             drop(alloc);
             if let Some(e) = cb_err {
                 return Err(e);
+            }
+        } else if let Some(index) = self.btrfs_cached_read_plan_index() {
+            let dir_inode = index.inodes.get(&canonical_dir).ok_or_else(|| {
+                FfsError::NotFound(format!("btrfs inode objectid {canonical_dir}"))
+            })?;
+            if Self::btrfs_mode_to_file_type(dir_inode.mode) != FileType::Directory {
+                return Err(FfsError::NotDirectory);
+            }
+            readonly_parent_oid = index.parents.get(&canonical_dir).copied();
+            if let Some(items) = index.dir_items.get(&canonical_dir) {
+                for (key, data) in items.iter() {
+                    Self::btrfs_push_dir_rows(canonical_dir, key, data.as_slice(), &mut rows)?;
+                }
             }
         } else {
             // Read-only: one descent yields the INODE_ITEM (dir-type check)
@@ -8364,6 +8394,100 @@ impl OpenFs {
         Ok(())
     }
 
+    /// Preload a read-only btrfs fs-tree index for bulk file reads.
+    ///
+    /// `walk` may visit thousands of directories and tens of thousands of small
+    /// files from one immutable image. Without this prewarm, each directory and
+    /// file performs its own fs-tree descents. One full fs-tree pass builds the
+    /// same inode/dir/extent facts once and lets the normal btrfs readdir/read
+    /// assembly use them for every subsequent operation.
+    ///
+    /// Returns `Ok(true)` when a btrfs index is available, `Ok(false)` for ext4
+    /// or writable btrfs mounts where the COW tree can change under the cache.
+    pub fn prewarm_btrfs_read_plan_index(&self, cx: &Cx) -> ffs_error::Result<bool> {
+        self.btrfs_read_plan_index(cx).map(|idx| idx.is_some())
+    }
+
+    fn btrfs_read_plan_index(&self, cx: &Cx) -> ffs_error::Result<Option<Arc<BtrfsReadPlanIndex>>> {
+        if !matches!(&self.flavor, FsFlavor::Btrfs(_)) || self.btrfs_alloc_state.is_some() {
+            return Ok(None);
+        }
+        if let Some(index) = self.btrfs_read_plan_index.lock().as_ref().cloned() {
+            return Ok(Some(index));
+        }
+
+        let built = self.build_btrfs_read_plan_index(cx)?;
+        let mut guard = self.btrfs_read_plan_index.lock();
+        if let Some(existing) = guard.as_ref() {
+            return Ok(Some(Arc::clone(existing)));
+        }
+        *guard = Some(Arc::clone(&built));
+        Ok(Some(built))
+    }
+
+    fn btrfs_cached_read_plan_index(&self) -> Option<Arc<BtrfsReadPlanIndex>> {
+        self.btrfs_read_plan_index.lock().as_ref().cloned()
+    }
+
+    fn build_btrfs_read_plan_index(&self, cx: &Cx) -> ffs_error::Result<Arc<BtrfsReadPlanIndex>> {
+        let items = self.walk_btrfs_fs_tree(cx)?;
+        let mut inodes = BTreeMap::new();
+        let mut extents: BTreeMap<u64, Vec<(u64, BtrfsExtentData)>> = BTreeMap::new();
+        let mut dir_items: BTreeMap<u64, Vec<(BtrfsKey, Vec<u8>)>> = BTreeMap::new();
+        let mut parents = BTreeMap::new();
+
+        for item in items {
+            match item.key.item_type {
+                BTRFS_ITEM_INODE_ITEM => {
+                    let inode = parse_inode_item(&item.data).map_err(|e| parse_to_ffs_error(&e))?;
+                    inodes.insert(item.key.objectid, inode);
+                }
+                BTRFS_ITEM_EXTENT_DATA => {
+                    let extent =
+                        parse_extent_data(&item.data).map_err(|e| parse_to_ffs_error(&e))?;
+                    extents
+                        .entry(item.key.objectid)
+                        .or_default()
+                        .push((item.key.offset, extent));
+                }
+                BTRFS_ITEM_DIR_ITEM | BTRFS_ITEM_DIR_INDEX => {
+                    dir_items
+                        .entry(item.key.objectid)
+                        .or_default()
+                        .push((item.key, item.data));
+                }
+                BTRFS_ITEM_INODE_REF => {
+                    parents.entry(item.key.objectid).or_insert(item.key.offset);
+                }
+                _ => {}
+            }
+        }
+
+        let extents = extents
+            .into_iter()
+            .map(|(ino, mut rows)| {
+                rows.sort_by_key(|(logical, _)| *logical);
+                let rows: Arc<[(u64, BtrfsExtentData)]> = Arc::from(rows.into_boxed_slice());
+                (ino, rows)
+            })
+            .collect();
+        let dir_items = dir_items
+            .into_iter()
+            .map(|(ino, mut rows)| {
+                rows.sort_by(|lhs, rhs| Self::btrfs_key_order(&lhs.0, &rhs.0));
+                let rows: Arc<[(BtrfsKey, Vec<u8>)]> = Arc::from(rows.into_boxed_slice());
+                (ino, rows)
+            })
+            .collect();
+
+        Ok(Arc::new(BtrfsReadPlanIndex {
+            inodes,
+            extents,
+            dir_items,
+            parents,
+        }))
+    }
+
     /// Verify a btrfs file's on-disk data against the csum tree (bd-x3fcu).
     ///
     /// For a `datasum` inode this gathers the file's regular data extents
@@ -8585,6 +8709,22 @@ impl OpenFs {
                     return Err(e);
                 }
                 (inode, exts)
+            } else if let Some(index) = self.btrfs_cached_read_plan_index() {
+                let inode = index.inodes.get(&canonical).cloned().ok_or_else(|| {
+                    FfsError::NotFound(format!("btrfs INODE_ITEM for objectid {canonical}"))
+                })?;
+                let read_end = offset.saturating_add(u64::from(size));
+                let mut exts = Vec::new();
+                if let Some(rows) = index.extents.get(&canonical) {
+                    for (logical_start, extent) in rows.iter() {
+                        let extent_end = (*logical_start)
+                            .saturating_add(Self::btrfs_extent_logical_len(extent)?);
+                        if *logical_start < read_end && extent_end > offset {
+                            exts.push((*logical_start, extent.clone()));
+                        }
+                    }
+                }
+                (inode, exts)
             } else {
                 // Bound the on-disk walk to the read window on BOTH edges so a
                 // read of a large fragmented file fetches the inode item and only
@@ -8660,8 +8800,10 @@ impl OpenFs {
                 (inode, exts)
             };
 
-        if Self::btrfs_mode_to_file_type(inode.mode) == FileType::Directory {
-            return Err(FfsError::IsDirectory);
+        match Self::btrfs_mode_to_file_type(inode.mode) {
+            FileType::Directory => return Err(FfsError::IsDirectory),
+            FileType::Symlink => return Err(FfsError::Format("cannot read a symlink".into())),
+            _ => {}
         }
 
         if offset >= inode.size {
@@ -27761,13 +27903,6 @@ impl OpenFs {
             // a fresh chunk-sized `Vec` per call (which doubled resident memory
             // and thrashed page-faults vs the ext4 direct-into-`dst` path above).
             if let FsFlavor::Btrfs(_) = &self.flavor {
-                let attr = self.btrfs_read_inode_attr(cx, ino)?;
-                if attr.kind == FileType::Directory {
-                    return Err(FfsError::IsDirectory);
-                }
-                if attr.kind == FileType::Symlink {
-                    return Err(FfsError::Format("cannot read a symlink".into()));
-                }
                 return self.btrfs_read_file_into(cx, ino, offset, size, dst);
             }
             // Fallback: exact-semantics owned read, then copy into dst.
