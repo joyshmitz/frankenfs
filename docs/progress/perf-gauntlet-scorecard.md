@@ -1,5 +1,114 @@
 # Perf Gauntlet Scorecard
 
+## `bd-xmh5g.414` cod-a Btrfs Compressed Input Scratch Rejection
+
+Date: 2026-06-21
+Agent: BlackThrush (`cod-a`)
+Scope: `ffs-core` btrfs compressed-read input staging in
+`btrfs_read_file_into`
+Commit under measurement: local WIP on `ef5038b9`; production hunk manually
+reverted after the focused A/B gate
+RCH workers: `hz2` baseline/candidate release builds, `hz2` clean-source check
+and bench, `vmi1152480` clean-source conformance
+Requested target dir: `/data/projects/.rch-targets/frankenfs-cod-a`
+
+### Verdict
+
+REJECT. The radical lever came from the allocation/arena/buffer-reuse family:
+retain one compressed input `Vec` per Rayon worker/thread and reuse it for tiny
+zstd compressed extents, instead of allocating and zero-initializing
+`vec![0; compressed_len]` for each compressed read job. The hypothesis was that
+the btrfs compressed-read gap was still paying allocator and first-touch tax
+after the earlier zero-fill and direct-zstd-output wins.
+
+The direct 15-run smoke row looked barely positive, but the longer 50-run
+focused A/B rejected it. Candidate mean was `16.2 ms` versus baseline
+`15.9 ms`; hyperfine reported baseline `1.02 +/- 0.13x` faster than the
+candidate. The source hunk was reverted; only this ledger evidence remains.
+
+### Scorecard
+
+| Gate | Result |
+| --- | --- |
+| Direct mounted btrfs rows completed | 1 rejected 15-run A/B row on `/data/tmp/btrdiff2_1340519.img:/compressible.bin`, mounted read-only at `/data/tmp/btrdiff2mnt_1340519`; 1 focused 50-run FrankenFS-only A/B row for keep/reject |
+| Direct ext4/btrfs-kernel ratios | Smoke candidate `16.1 ms` vs kernel btrfs `cat` `6.9 ms`: kernel `cat` is `2.31x` faster. Candidate vs materializing kernel `dd bs=8M` `29.2 ms`: FrankenFS candidate is `1.81x` faster. Baseline in the same smoke row was `17.0 ms`; kernel `cat` was `2.45x` faster than baseline. |
+| Production levers kept | 0 |
+| Production levers rejected/reverted | 1 |
+| Internal A/B win/loss/neutral | `0 / 0 / 1`: 15-run smoke old/new was `1.056x` (`17.0 ms` -> `16.1 ms`), but the 50-run focused A/B was baseline `15.9 ms` vs candidate `16.2 ms`; baseline ran `1.02 +/- 0.13x` faster, so the result is neutral/no-ship |
+| Direct kernel win/loss/neutral | `1 / 1 / 0`: candidate wins vs materializing `dd bs=8M`, loses to fastest mounted-kernel `cat`; no production lever remains after revert |
+| Behavior proof | Baseline stdout, candidate stdout, and mounted kernel file SHA-256 all matched: `2e379e112375338695dbd226f27bf096db571a99e5f64b975b0bb2e43b6f86b9` |
+| Build/check guard | RCH `cargo build --release -p ffs-cli` passed for baseline and candidate on `hz2`; candidate binary SHA-256 `9a39bfcac53f3165a1f3b14850b375f8f14dcd94d8c85263239fe028c72c7150`, baseline binary SHA-256 `bb75561ce0b1d14f5dc1b3ccd7e15de855a838ba4841684d84ba5ae8c7a77597`; local `cargo fmt -p ffs-core --check` and `git diff --check` passed; production hunk was manually reverted and `git diff -- crates/ffs-core/src/lib.rs` was zero after revert; RCH `cargo check -p ffs-core --all-targets` passed on `hz2`; RCH conformance `cargo test -p ffs-harness --test conformance -- --nocapture` passed on `vmi1152480` (`100 passed / 0 failed / 2 ignored`). |
+| Per-crate bench | RCH `cargo bench --profile release -p ffs-core --bench btrfs_decompress_extents -- btrfs_decompress_tiny_zstd_8x4k_to_128k --warm-up-time 1 --measurement-time 1 --sample-size 10 --noplot` passed on `hz2`; serial reused decompressor estimate `387.98 us`, parallel reused decompressor estimate `149.18 us` with wide interval `[99.283 us, 248.44 us]`. |
+| Clippy | Not rerun for this evidence-only closeout. No production source remains after revert; current scoped `ffs-core` clippy debt is already attributed in adjacent rows to pre-existing pedantic issues outside this lane. |
+| Release-readiness score for perf-superiority claims | 42 / 100: direct mounted-kernel evidence is real and the materializing `dd` comparator is still beaten, but the candidate failed the focused same-binary A/B and fastest kernel `cat` remains `2.31x` faster. |
+| Release-readiness score for this row's hygiene | 96 / 100: exact baseline/candidate binaries, direct kernel comparators, longer focused rejection, byte proof, clean-source revert, RCH build/check/bench/conformance, and ledger row are complete. Deduction is no fresh clippy rerun because no source survived. |
+
+### Measured Rows
+
+| Workload | Baseline | Candidate | Kernel btrfs | Ratio vs baseline | Ratio vs kernel | Verdict |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| 15-run `ffs-cli read --discard /compressible.bin` vs kernel `cat` | `17.0 ms +/- 1.5 ms` | `16.1 ms +/- 1.1 ms` | `6.9 ms +/- 0.9 ms` | candidate `1.056x` faster by mean | candidate `2.31x` slower than kernel `cat` | Smoke only |
+| 15-run `ffs-cli read --discard /compressible.bin` vs kernel `dd bs=8M` | `17.0 ms` | `16.1 ms` | `29.2 ms +/- 1.5 ms` | candidate `1.056x` faster | candidate `1.81x` faster than kernel `dd` | No keep |
+| 50-run focused FrankenFS A/B | `15.9 ms +/- 1.2 ms` | `16.2 ms +/- 1.6 ms` | N/A | candidate `0.982x` old/new by mean; hyperfine says baseline `1.02 +/- 0.13x` faster | N/A | REJECT |
+
+### Isomorphism
+
+Ordering preserved: yes before revert. The candidate changed only compressed
+input staging inside each existing `ReadCompressed` job; job order, result
+collection order, and assembly order were unchanged.
+
+Tie-breaking unchanged: yes before revert. The existing idx-ordered
+`deferred_by_idx` population and first-error handling were unchanged.
+
+Floating-point identical: N/A.
+
+RNG seeds unchanged: N/A.
+
+Goldens/bytes verified: baseline stdout, candidate stdout, and mounted kernel
+file SHA-256 all matched:
+`2e379e112375338695dbd226f27bf096db571a99e5f64b975b0bb2e43b6f86b9`.
+
+### Commands
+
+```bash
+AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-a \
+  rch exec -- cargo build --release -p ffs-cli
+
+hyperfine --warmup 3 --runs 15 \
+  --export-json /tmp/frankenfs-cod-a-btrfs-compressed-scratch-ab-20260621.json \
+  --command-name frankenfs-baseline-read \
+  '/tmp/ffs-cli-btrfs-scratch-baseline-ef5038b9 --log-format json read /data/tmp/btrdiff2_1340519.img /compressible.bin --discard >/dev/null 2>&1' \
+  --command-name frankenfs-scratch-candidate \
+  '/tmp/ffs-cli-btrfs-scratch-candidate --log-format json read /data/tmp/btrdiff2_1340519.img /compressible.bin --discard >/dev/null 2>&1' \
+  --command-name btrfs-kernel-cat \
+  'cat /data/tmp/btrdiff2mnt_1340519/compressible.bin >/dev/null' \
+  --command-name btrfs-kernel-dd-8m \
+  'dd if=/data/tmp/btrdiff2mnt_1340519/compressible.bin of=/dev/null bs=8M status=none'
+
+hyperfine --warmup 5 --runs 50 \
+  --export-json /tmp/frankenfs-cod-a-btrfs-compressed-scratch-ab-focused-20260621.json \
+  --command-name frankenfs-baseline-read \
+  '/tmp/ffs-cli-btrfs-scratch-baseline-ef5038b9 --log-format json read /data/tmp/btrdiff2_1340519.img /compressible.bin --discard >/dev/null 2>&1' \
+  --command-name frankenfs-scratch-candidate \
+  '/tmp/ffs-cli-btrfs-scratch-candidate --log-format json read /data/tmp/btrdiff2_1340519.img /compressible.bin --discard >/dev/null 2>&1'
+
+AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-a \
+  rch exec -- cargo check -p ffs-core --all-targets
+
+AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-a \
+  rch exec -- cargo bench --profile release -p ffs-core \
+  --bench btrfs_decompress_extents -- \
+  btrfs_decompress_tiny_zstd_8x4k_to_128k \
+  --warm-up-time 1 --measurement-time 1 --sample-size 10 --noplot
+
+AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-a \
+  rch exec -- cargo test -p ffs-harness --test conformance -- --nocapture
+```
+
+Note: the user-requested `cargo bench --release` spelling is not accepted by
+Cargo for bench runs, so this used the Cargo-equivalent `--profile release`
+spelling.
+
 ## `bd-xmh5g.414` cod-a Btrfs Full-Regular Plan Fast-Path Rejection
 
 Date: 2026-06-21
