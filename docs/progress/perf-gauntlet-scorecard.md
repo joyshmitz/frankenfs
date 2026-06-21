@@ -1,5 +1,103 @@
 # Perf Gauntlet Scorecard
 
+## `bd-xmh5g.423` cod-a Btrfs Read-Plan OnceLock Keep
+
+Date: 2026-06-21
+Agent: BlackThrush (`cod-a`)
+Scope: `ffs-core` read-only btrfs read-plan cache lookup
+Commit under measurement: local candidate on `9c3e459c`
+RCH workers: `hz2` baseline release build/check, `ovh-a` candidate build/bench
+and conformance, `hz1` exact-source check/release build
+Requested target dir: `/data/projects/.rch-targets/frankenfs-cod-a`
+Rebase note: `origin/main` already contained `aab0f354`, which published the
+same `OnceLock` read-plan cache from another agent. This row preserves cod-a's
+independent measurement lane and negative-evidence ratio against mounted kernel
+btrfs.
+
+### Verdict
+
+KEEP. The radical lever came from the read-mostly synchronization family:
+remove a contended mutex from an immutable read-mostly object. The
+`BtrfsReadPlanIndex` is only valid for read-only btrfs mounts and becomes
+immutable after construction, so the old `Mutex<Option<Arc<_>>>` made every
+parallel file read acquire a lock just to clone the same `Arc`.
+
+The production change stores the cached index in `OnceLock<Arc<_>>`. The hot
+path is now `OnceLock::get()` plus `Arc::clone`, with the same lazy build rule
+and the same read-only/writable gating. If concurrent callers race before the
+index is initialized, one `set` wins and the loser returns the winner; duplicate
+build work is still benign, matching the old build-before-insert shape.
+
+### Scorecard
+
+| Gate | Result |
+| --- | --- |
+| Direct mounted ext4/btrfs rows completed | 2 btrfs rows: 30k readable file-tree walk/read-data and 60k readable file-tree walk/read-data. |
+| Direct ext4/btrfs-kernel ratios | 30k baseline: FrankenFS `116.7 ms +/- 1.8` vs kernel btrfs `75.0 ms +/- 3.2` = `1.56x` slower. 30k candidate: FrankenFS `94.9 ms +/- 10.3` vs kernel `73.8 ms +/- 1.4` = `1.29x` slower. 60k candidate: FrankenFS `180.8 ms +/- 3.6` vs kernel `134.6 ms +/- 3.3` = `1.34x` slower. |
+| Production levers kept | 1 |
+| Production levers rejected/reverted | 0 |
+| Internal A/B win/loss/neutral | `1 / 0 / 0`: same local mounted-image command shape, 30k old/new `116.7/94.9 = 1.23x` faster. The 60k row is direct-kernel evidence only because the pre-change 60k baseline was a one-shot command duration (`196.113 ms`) rather than repeated hyperfine proof. |
+| Direct kernel win/loss/neutral | `0 / 2 / 0`: the lever narrows the btrfs gap, but mounted kernel btrfs still wins on both measured readable tree rows. |
+| Behavior proof | Ordering preserved: yes. Cached read-plan contents, key order, read assembly order, writable bypass, and public error behavior are unchanged; only the cache publication primitive changes. Tie-breaking unchanged: yes. Floating-point/RNG: N/A. |
+| Build/check guard | Local `cargo fmt -p ffs-core --check` and `git diff --check` passed. RCH `cargo check -p ffs-core --all-targets` passed on `hz1`. RCH `cargo build --release -p ffs-cli` passed for the measured candidate on `ovh-a`; exact post-cleanup source passed release build on `hz1`. RCH conformance `cargo test -p ffs-harness --test conformance -- --nocapture` passed on `ovh-a` (`100 passed / 0 failed / 2 ignored`). |
+| Per-crate bench | RCH `cargo bench -p ffs-core --bench btrfs_read_io_overlap -- --quiet` passed on `ovh-a`: `serial_read_then_par_decompress` `5.1763 ms`, `par_read_and_decompress` `527.29 us`. This is a nearby btrfs read-path bench, not a direct `btrfs_read_plan_index` microbench. |
+| Clippy | Full `cargo clippy -p ffs-core --all-targets -- -D warnings` failed on pre-existing `ffs-repair` lint debt. `cargo clippy -p ffs-core --all-targets --no-deps -- -D warnings` then reached `ffs-core` and failed on pre-existing pedantic debt outside this lever (`vfs.rs` derivable default, type-complexity, old clone/copy, item-after-statement, too-many-lines, redundant closures, and indirect-pointer cast rows). No `OnceLock` candidate lint was reported. |
+| Release-readiness score for perf-superiority claims | 70 / 100: measured same-lane speedup, green conformance, and exact-source release build are complete; score is capped because direct kernel btrfs still wins and clippy is blocked by unrelated debt. |
+| Release-readiness score for this row's hygiene | 90 / 100: baseline/candidate hyperfine, 60k comparator, per-crate bench, check, release build, conformance, ledger, scorecard, and bead closeout are complete. Deductions are no direct microbench for the `OnceLock` itself and pre-existing clippy debt. |
+
+### Measured Rows
+
+| Workload | Baseline FrankenFS | Candidate FrankenFS | Kernel comparator | Candidate vs old | Candidate vs kernel | Verdict |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| 30k btrfs readable tree, `walk --read-data --no-stat --parallel` | `116.7 ms +/- 1.8` | `94.9 ms +/- 10.3` | `find ... | xargs -P16 cat` `73.8 ms +/- 1.4` | `1.23x` faster | `1.29x` slower | KEEP / narrows loss |
+| 60k btrfs readable tree, `walk --read-data --no-stat --parallel` | one-shot prior `196.113 ms` command duration | `180.8 ms +/- 3.6` | `find ... | xargs -P16 cat` `134.6 ms +/- 3.3` | directional `1.08x` vs one-shot only | `1.34x` slower | Direct loss remains |
+
+### Isomorphism
+
+Ordering preserved: yes. The read plan itself is unchanged, and file reads
+still assemble extents in the same order.
+
+Tie-breaking unchanged: yes. Cache initialization races may still duplicate the
+build, but the published index is equivalent and the first successful
+publication wins.
+
+Floating-point identical: N/A.
+
+RNG seeds unchanged: N/A.
+
+Goldens/bytes verified: conformance passed `100 / 0 / 2 ignored`.
+
+### Commands
+
+```bash
+AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-a \
+  rch exec -- cargo build --release -p ffs-cli
+
+hyperfine --warmup 1 --runs 5 \
+  --export-json /tmp/frankenfs-cod-a-bd-xmh5g-423-baseline-30k-readable-20260621.json \
+  '/data/projects/.rch-targets/frankenfs-cod-a/release/ffs-cli walk /tmp/ffs_btree_707328.img --read-data --no-stat --parallel >/dev/null 2>/dev/null' \
+  'find /tmp/ffs_btreemnt_707328 \( -path /tmp/ffs_btreemnt_707328/lost+found -o -path /tmp/ffs_btreemnt_707328/ext2_saved \) -prune -o -type f -print0 | xargs -0 -P16 -n512 cat >/dev/null'
+
+hyperfine --warmup 1 --runs 5 \
+  --export-json /tmp/frankenfs-cod-a-bd-xmh5g-423-candidate-30k-readable-20260621.json \
+  '/data/projects/.rch-targets/frankenfs-cod-a/release/ffs-cli walk /tmp/ffs_btree_707328.img --read-data --no-stat --parallel >/dev/null 2>/dev/null' \
+  'find /tmp/ffs_btreemnt_707328 \( -path /tmp/ffs_btreemnt_707328/lost+found -o -path /tmp/ffs_btreemnt_707328/ext2_saved \) -prune -o -type f -print0 | xargs -0 -P16 -n512 cat >/dev/null'
+
+hyperfine --warmup 1 --runs 5 \
+  --export-json /tmp/frankenfs-cod-a-bd-xmh5g-423-candidate-60k-readable-20260621.json \
+  '/data/projects/.rch-targets/frankenfs-cod-a/release/ffs-cli walk /var/tmp/ffs_btree60k_714351.img --read-data --no-stat --parallel >/dev/null 2>/dev/null' \
+  'find /var/tmp/ffs_btree60kmnt_714351 \( -path /var/tmp/ffs_btree60kmnt_714351/lost+found -o -path /var/tmp/ffs_btree60kmnt_714351/ext2_saved \) -prune -o -type f -print0 | xargs -0 -P16 -n512 cat >/dev/null'
+
+AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-a \
+  rch exec -- cargo bench -p ffs-core --bench btrfs_read_io_overlap -- --quiet
+
+AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-a \
+  rch exec -- cargo check -p ffs-core --all-targets
+
+AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-a \
+  rch exec -- cargo test -p ffs-harness --test conformance -- --nocapture
+```
+
 ## `bd-xmh5g.422` cod-a Btrfs Parsed-Node Cache Shard Keep
 
 Date: 2026-06-21

@@ -8417,10 +8417,13 @@ impl OpenFs {
         }
 
         let built = self.build_btrfs_read_plan_index(cx)?;
-        let _ = self.btrfs_read_plan_index.set(Arc::clone(&built));
-        Ok(Some(
-            self.btrfs_read_plan_index.get().cloned().unwrap_or(built),
-        ))
+        if self.btrfs_read_plan_index.set(Arc::clone(&built)).is_ok() {
+            return Ok(Some(built));
+        }
+        if let Some(existing) = self.btrfs_read_plan_index.get() {
+            return Ok(Some(Arc::clone(existing)));
+        }
+        Ok(Some(built))
     }
 
     fn btrfs_cached_read_plan_index(&self) -> Option<Arc<BtrfsReadPlanIndex>> {
