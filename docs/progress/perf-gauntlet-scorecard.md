@@ -2510,3 +2510,19 @@ Do not re-open per-file full-tree-walk fixes for this fixture unless a native
 `mkfs.btrfs` image reproduces a new read-data loss. Next btrfs work should move
 to a remaining direct-kernel loss, not repeat cache-shard or per-directory queue
 experiments that this row already bounded.
+
+---
+
+## Reconciliation pass — cc (BlackThrush, opus) 2026-06-21: the earlier "remaining direct-kernel losses" are FLIPPED to WINS
+
+The earlier rows above flagged two **direct-kernel materialize** losses as "residual targets":
+- ext4 no-extents indirect read: was `27.7 ms` vs `dd 17.9 ms` = `1.55x slower`
+- btrfs compressed read: was `37.3 ms` vs `dd 25.0 ms` = `1.49x slower`
+
+**Both are now WINS** (measured warm, interleaved A/B at clean HEAD; byte-identical to mounted kernel; conformance 100/0/2):
+- **ext4 indirect: `1.29x` FASTER warm / `1.32x` cold vs `dd`** — root cause was MOUNT-TIME journal replay re-reading the journal inode's double-indirect block 2024x (`bd-xmh5g.412`, journal-replay memo `fe00c75e`) + indirect read-into-dst eliminating the double-buffer (`c13aea1d`).
+- **btrfs compressed: `~1.5x` FASTER vs `dd`** — decompress-into-window eliminating the per-extent memmove (`bd-xmh5g.413`, `76308cac`) + swarm elide-zero-fill.
+
+**There is no remaining direct-kernel MATERIALIZE loss on any measured read workload.** The only residual "losses" are vs kernel `cat`/splice-class (zero-copy, never delivers bytes to userspace — not a data-consuming-app baseline). Apples-to-apples (kernel materializes via `dd`/`cat`-to-app, like FrankenFS), **FrankenFS dominates every measured ext4/btrfs read/traversal path.**
+
+Full current frontier (9 workloads, warm+cold, peak `24.3x` cold btrfs many-files) + all 4 documented losses flipped: see `perf-gauntlet-scorecard-cc.md` and `docs/NEGATIVE_EVIDENCE.md`. The btrfs many-files per-file-walk pathology (the worst gap, was timeout/>100x) is now `14.4x` warm / `24.3x` cold via `.421` (cod-a prewarm) + `.422` (cache-shard mix, cc finding/fix) + `.419` (cc parallelize-across-files). So the "next btrfs work" note above is resolved: no remaining direct-kernel materialize loss; the only open residual is `bd-xmh5g.423` (per-read index Mutex, ~4.4% on a 24.3x-dominant path, cod-a's design call).
