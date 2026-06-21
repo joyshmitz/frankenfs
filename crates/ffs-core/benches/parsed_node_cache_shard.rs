@@ -15,8 +15,9 @@
 //!
 //! This bench runs 8 threads doing `get(&key)` lookups (BTreeMap descent + Arc
 //! clone — the real hit work) over a populated cache under the old single
-//! `Mutex` vs the new 16-shard striping, and asserts identical aggregates.
-//! Threads spread their keys so the benefit reflects independent lookups.
+//! `Mutex`, the old low-bit sharder, and the mixed sharder. Keys are btrfs-like
+//! aligned logical node addresses, so the low-bit sharder collapses to shard 0;
+//! the mixed sharder is the production bd-xmh5g.422 fix.
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use parking_lot::Mutex;
@@ -29,21 +30,36 @@ const THREADS: usize = 8; // FUSE worker threads
 const OPS_PER_THREAD: usize = 12_000;
 const NODE: usize = 4096; // parsed-node payload proxy
 const SHARDS: usize = 16;
+const BTRFS_NODE_ALIGN: u64 = 16_384;
 
 fn build_one() -> BTreeMap<u64, Arc<[u8]>> {
-    (0..ENTRIES as u64)
+    (0..ENTRIES)
         .map(|i| {
             let mut v = vec![0_u8; NODE];
             v[0] = i as u8;
             v[NODE - 1] = (i >> 8) as u8;
-            (i, Arc::<[u8]>::from(v))
+            (logical_key(i), Arc::<[u8]>::from(v))
         })
         .collect()
 }
 
+fn logical_key(idx: usize) -> u64 {
+    (idx as u64) * BTRFS_NODE_ALIGN
+}
+
 fn key_for(thread: usize, op: usize) -> u64 {
-    let base = (thread * (ENTRIES / THREADS)) as u64;
-    base.wrapping_add((op as u64).wrapping_mul(7)) % (ENTRIES as u64)
+    let base = thread * (ENTRIES / THREADS);
+    let idx = base.wrapping_add(op.wrapping_mul(7)) % ENTRIES;
+    logical_key(idx)
+}
+
+fn low_bits_shard(key: u64) -> usize {
+    (key as usize & 0xFFF) % SHARDS
+}
+
+fn mixed_shard(key: u64) -> usize {
+    const FIBONACCI_MIX: u64 = 0x9E37_79B9_7F4A_7C15;
+    usize::try_from(key.wrapping_mul(FIBONACCI_MIX) >> 32).unwrap_or(0) % SHARDS
 }
 
 fn fold(b: &Arc<[u8]>) -> u64 {
@@ -71,7 +87,10 @@ fn run_mutex(cache: &Arc<Mutex<BTreeMap<u64, Arc<[u8]>>>>) -> u64 {
     total.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-fn run_sharded(shards: &Arc<Vec<Mutex<BTreeMap<u64, Arc<[u8]>>>>>) -> u64 {
+fn run_sharded(
+    shards: &Arc<Vec<Mutex<BTreeMap<u64, Arc<[u8]>>>>>,
+    shard_for: fn(u64) -> usize,
+) -> u64 {
     let total = Arc::new(std::sync::atomic::AtomicU64::new(0));
     std::thread::scope(|s| {
         for t in 0..THREADS {
@@ -81,7 +100,7 @@ fn run_sharded(shards: &Arc<Vec<Mutex<BTreeMap<u64, Arc<[u8]>>>>>) -> u64 {
                 let mut acc = 0_u64;
                 for op in 0..OPS_PER_THREAD {
                     let k = key_for(t, op);
-                    let hit = shards[(k as usize) % SHARDS].lock().get(&k).cloned();
+                    let hit = shards[shard_for(k)].lock().get(&k).cloned();
                     if let Some(b) = hit {
                         acc = acc.wrapping_add(fold(&b));
                     }
@@ -93,31 +112,41 @@ fn run_sharded(shards: &Arc<Vec<Mutex<BTreeMap<u64, Arc<[u8]>>>>>) -> u64 {
     total.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-fn build_sharded() -> Vec<Mutex<BTreeMap<u64, Arc<[u8]>>>> {
+fn build_sharded(shard_for: fn(u64) -> usize) -> Vec<Mutex<BTreeMap<u64, Arc<[u8]>>>> {
     let shards: Vec<Mutex<BTreeMap<u64, Arc<[u8]>>>> =
         (0..SHARDS).map(|_| Mutex::new(BTreeMap::new())).collect();
     for (k, v) in build_one() {
-        shards[(k as usize) % SHARDS].lock().insert(k, v);
+        shards[shard_for(k)].lock().insert(k, v);
     }
     shards
 }
 
 fn bench_cache(c: &mut Criterion) {
     let mutex_cache = Arc::new(Mutex::new(build_one()));
-    let sharded_cache = Arc::new(build_sharded());
+    let low_bits_cache = Arc::new(build_sharded(low_bits_shard));
+    let mixed_cache = Arc::new(build_sharded(mixed_shard));
 
+    let mutex_total = run_mutex(&mutex_cache);
     assert_eq!(
-        run_mutex(&mutex_cache),
-        run_sharded(&sharded_cache),
-        "sharded cache readers diverged from mutex readers"
+        mutex_total,
+        run_sharded(&low_bits_cache, low_bits_shard),
+        "low-bit sharded cache readers diverged from mutex readers"
+    );
+    assert_eq!(
+        mutex_total,
+        run_sharded(&mixed_cache, mixed_shard),
+        "mixed sharded cache readers diverged from mutex readers"
     );
 
     let mut group = c.benchmark_group("parsed_node_cache_concurrent_get_8t");
     group.bench_function("mutex_exclusive", |b| {
         b.iter(|| black_box(run_mutex(black_box(&mutex_cache))));
     });
-    group.bench_function("sharded_mutex_16", |b| {
-        b.iter(|| black_box(run_sharded(black_box(&sharded_cache))));
+    group.bench_function("sharded_low_bits_16_aligned", |b| {
+        b.iter(|| black_box(run_sharded(black_box(&low_bits_cache), low_bits_shard)));
+    });
+    group.bench_function("sharded_mixed_16_aligned", |b| {
+        b.iter(|| black_box(run_sharded(black_box(&mixed_cache), mixed_shard)));
     });
     group.finish();
 }

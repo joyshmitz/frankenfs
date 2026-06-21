@@ -1133,32 +1133,71 @@ const BTRFS_TREE_NODE_CACHE_LIMIT: usize = 512;
 /// writes (measured ~3.2x at 8 threads).
 const FFS_CACHE_SHARDS: usize = 16;
 
-/// Maps a cache key to a shard bucket. Keys are roughly sequential (logical
-/// addresses / block / group numbers), so the low bits modulo `FFS_CACHE_SHARDS`
-/// spread them round-robin. The mask keeps the value well within `usize` on
-/// every target (lossless conversion).
+/// Maps a cache key to a shard bucket. Some callers use naturally aligned
+/// addresses (notably btrfs tree-node logical bytenrs), so low-bit sharding
+/// collapses the whole cache onto shard 0. Mix the key before the final modulo
+/// so sequential blocks still spread while aligned node addresses do too.
 trait CacheShard {
     fn cache_shard(&self) -> usize;
+}
+
+#[inline]
+fn mixed_cache_shard(value: u64) -> usize {
+    const FIBONACCI_MIX: u64 = 0x9E37_79B9_7F4A_7C15;
+    usize::try_from(value.wrapping_mul(FIBONACCI_MIX) >> 32).unwrap_or(0)
 }
 
 impl CacheShard for u64 {
     #[inline]
     fn cache_shard(&self) -> usize {
-        usize::try_from(self & 0xFFF).unwrap_or(0)
+        mixed_cache_shard(*self)
     }
 }
 
 impl CacheShard for BlockNumber {
     #[inline]
     fn cache_shard(&self) -> usize {
-        usize::try_from(self.0 & 0xFFF).unwrap_or(0)
+        mixed_cache_shard(self.0)
     }
 }
 
 impl CacheShard for GroupNumber {
     #[inline]
     fn cache_shard(&self) -> usize {
-        usize::try_from(self.0 & 0xFFF).unwrap_or(0)
+        mixed_cache_shard(u64::from(self.0))
+    }
+}
+
+#[cfg(test)]
+mod cache_shard_tests {
+    use super::{BlockNumber, CacheShard, FFS_CACHE_SHARDS};
+
+    fn occupied_shards(keys: impl IntoIterator<Item = usize>) -> usize {
+        let mut seen = [false; FFS_CACHE_SHARDS];
+        for shard in keys {
+            seen[shard % FFS_CACHE_SHARDS] = true;
+        }
+        seen.into_iter().filter(|occupied| *occupied).count()
+    }
+
+    #[test]
+    fn aligned_btrfs_node_keys_spread_across_cache_shards_bd_xmh5g_422() {
+        let logical_node_shards =
+            (0_u64..128).map(|idx| (idx * 16_384).cache_shard() % FFS_CACHE_SHARDS);
+        assert!(
+            occupied_shards(logical_node_shards) >= FFS_CACHE_SHARDS / 2,
+            "nodesize-aligned btrfs logical addresses must not collapse to one shard"
+        );
+    }
+
+    #[test]
+    fn sequential_block_keys_still_spread_across_cache_shards_bd_xmh5g_422() {
+        let block_shards =
+            (0_u64..128).map(|block| BlockNumber(block).cache_shard() % FFS_CACHE_SHARDS);
+        assert!(
+            occupied_shards(block_shards) >= FFS_CACHE_SHARDS / 2,
+            "mixing must preserve spread for sequential ext4 block-number caches"
+        );
     }
 }
 

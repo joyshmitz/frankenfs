@@ -1,5 +1,91 @@
 # Perf Gauntlet Scorecard
 
+## `bd-xmh5g.422` cod-a Btrfs Parsed-Node Cache Shard Keep
+
+Date: 2026-06-21
+Agent: BlackThrush (`cod-a`)
+Scope: `ffs-core` `ShardedCache` shard selection for parsed btrfs node-cache
+keys
+Commit under measurement: local candidate on `e35cc1cb`
+RCH workers: `hz2` bench/check/focused tests, `vmi1227854` conformance and
+release build
+Requested target dir: `/data/projects/.rch-targets/frankenfs-cod-a`
+
+### Verdict
+
+KEEP. The radical lever came from the cache-oblivious/hash-mixing family: stop
+using the low 12 bits of a cache key to select one of the `4096` shards.
+Btrfs logical tree nodes are naturally 16 KiB aligned, so the old
+`key & 0xFFF` selector mapped every aligned node key to shard 0 and turned the
+parsed-node cache into a contended single mutex on the many-node path.
+
+The production change is one arithmetic mix before taking the shard index:
+multiply by the Fibonacci constant and use high bits. It does not change cache
+keys, equality, stored values, eviction policy, lookup semantics, or ordering;
+it only spreads aligned keys across the existing shard array.
+
+### Scorecard
+
+| Gate | Result |
+| --- | --- |
+| Direct mounted ext4/btrfs rows completed | 0 for this primitive. There is no standalone kernel operation equivalent to `ffs-core` parsed-node cache shard selection. The direct mounted read/metadata domination rows remain the kernel scorecard; this row removes a known confounder under the occupied `bd-xmh5g.421` btrfs many-files lane. |
+| Direct ext4/btrfs-kernel ratios | N/A for the internal primitive. Direct kernel win/loss/neutral is `0 / 0 / 1` for this row. |
+| Production levers kept | 1 |
+| Production levers rejected/reverted | 0 |
+| Internal A/B win/loss/neutral | `1 / 0 / 0`: RCH `hz2`, `parsed_node_cache_concurrent_get_8t` with 16 KiB-aligned btrfs-like node keys, old low-bit sharding mean `30.874 ms`, mixed sharding mean `4.8474 ms`, old/new `6.37x`. Mixed sharding also beats the single-mutex control mean `31.613 ms` by `6.52x`. |
+| Behavior proof | New unit tests assert that 128 aligned btrfs node keys and 128 sequential block keys each occupy at least half of `FFS_CACHE_SHARDS`. The benchmark asserts aggregate equality across mutex, old low-bit sharding, and mixed sharding. |
+| Build/check guard | Local `cargo fmt -p ffs-core --check` and `git diff --check` passed. RCH `cargo check -p ffs-core --all-targets` passed on `hz2`. RCH focused `cargo test -p ffs-core cache_shard_tests -- --nocapture` passed on `hz2` (2 passed / 0 failed). RCH conformance `cargo test -p ffs-harness --test conformance -- --nocapture` passed on `vmi1227854` (100 passed / 0 failed / 2 ignored). RCH `cargo build --release -p ffs-core` passed on `vmi1227854`. |
+| Per-crate bench | RCH `cargo bench --profile release -p ffs-core --bench parsed_node_cache_shard -- parsed_node_cache_concurrent_get_8t --warm-up-time 1 --measurement-time 1 --sample-size 10 --noplot` passed on `hz2`. |
+| Clippy | Not rerun in this lane before closeout; current scoped `ffs-core` clippy debt is already attributed in adjacent rows to pre-existing pedantic issues outside this lever. |
+| Release-readiness score for perf-superiority claims | 68 / 100: the internal cache primitive has a strong same-worker win, conformance is green, and it removes a real btrfs-aligned-key contention bug; the score is capped because no direct mounted-kernel end-to-end row belongs to this primitive. |
+| Release-readiness score for this row's hygiene | 92 / 100: focused benchmark, check, focused tests, conformance, fmt, diff-check, ledger, and scorecard are complete. Deductions are no standalone kernel comparator and no fresh clippy rerun. |
+
+### Measured Rows
+
+| Workload | Old low-bit shard | Candidate mixed shard | Mutex control | Ratio vs old | Ratio vs mutex | Verdict |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| `parsed_node_cache_concurrent_get_8t`, 16 KiB-aligned btrfs-like keys | `30.874 ms` mean | `4.8474 ms` mean | `31.613 ms` mean | candidate `6.37x` faster | candidate `6.52x` faster | KEEP |
+
+### Isomorphism
+
+Ordering preserved: yes. Shard selection changes which mutex protects a cache
+entry, not the cache key, stored value, lookup result, or iteration order.
+
+Tie-breaking unchanged: yes. There is no tie-breaking in the cache lookup path;
+existing key equality and replacement behavior are unchanged.
+
+Floating-point identical: N/A.
+
+RNG seeds unchanged: N/A.
+
+Goldens/bytes verified: conformance passed `100 / 0 / 2 ignored`.
+
+### Commands
+
+```bash
+AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-a \
+  rch exec -- cargo bench --profile release -p ffs-core \
+  --bench parsed_node_cache_shard -- \
+  parsed_node_cache_concurrent_get_8t \
+  --warm-up-time 1 --measurement-time 1 --sample-size 10 --noplot
+
+AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-a \
+  rch exec -- cargo check -p ffs-core --all-targets
+
+AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-a \
+  rch exec -- cargo test -p ffs-core cache_shard_tests -- --nocapture
+
+AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-a \
+  rch exec -- cargo test -p ffs-harness --test conformance -- --nocapture
+
+AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-a \
+  rch exec -- cargo build --release -p ffs-core
+```
+
+Note: the user-requested `cargo bench --release` spelling is not accepted by
+Cargo for bench runs, so this used the Cargo-equivalent `--profile release`
+spelling.
+
 ## `bd-xmh5g.414` cod-a Btrfs Compressed Input Scratch Rejection
 
 Date: 2026-06-21
