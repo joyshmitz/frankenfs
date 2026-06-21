@@ -2399,9 +2399,15 @@ fn walk_cmd(path: &PathBuf, no_stat: bool, parallel: bool, read_data: bool) -> R
     let mode: String;
     let started = Instant::now();
     if parallel {
-        let threads = std::thread::available_parallelism()
-            .map_or(8, std::num::NonZeroUsize::get)
-            .min(16);
+        let threads = std::env::var("FFS_WALK_PARALLEL_THREADS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or_else(|| {
+                std::thread::available_parallelism()
+                    .map_or(8, std::num::NonZeroUsize::get)
+                    .min(16)
+            });
         mode = format!("parallel x{threads}");
         let a_dirs = AtomicU64::new(1); // count root
         let a_files = AtomicU64::new(0);
