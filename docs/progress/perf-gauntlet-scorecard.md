@@ -1,5 +1,106 @@
 # Perf Gauntlet Scorecard
 
+## `bd-xmh5g.416` cod-b Direct-Kernel Scorecard Refresh
+
+Date: 2026-06-21
+Agent: BlackThrush (`cod-b`)
+Scope: evidence-only current-HEAD scorecard after the CLI metadata-walk pool cap
+Commit under measurement: `a20bff76`
+RCH workers: `vmi1167313` release CLI compile, `vmi1153651` conformance
+Requested target dir: `/data/projects/.rch-targets/frankenfs-cod-b`
+
+### Verdict
+
+EVIDENCE-ONLY. No production code changed in this pass. The goal was to refresh
+the honest mounted-kernel frontier after `e9800e82`/`a20bff76`, keep the wins and
+losses in one ledger, and stop carrying the stale `31x` ext4-indirect framing as
+the current gap.
+
+The two headline wins still hold on the warm current binary: metadata walk beats
+kernel `find+stat`, and common ext4 extent reads beat a materializing kernel
+`dd`. The remaining measured losses are ext4 no-extents indirect reads, btrfs
+compressed reads, and all comparisons against kernel `cat`/splice-class paths.
+
+### Scorecard
+
+| Gate | Result |
+| --- | --- |
+| Direct mounted ext4 rows completed | 3 current rows: 30k-file metadata walk, 128 MiB extent read, and 50 MiB no-extents double-indirect read |
+| Direct mounted btrfs rows completed | 1 current compressed-file row on `/data/tmp/btrdiff2_1340519.img:/compressible.bin` |
+| Direct ext4/btrfs-kernel ratios | Metadata walk: FrankenFS `34.1 ms` vs kernel `find+stat` `93.3 ms` = `2.73x` faster. Ext4 extent read: FrankenFS `28.5 ms` vs kernel `dd bs=1M` `53.0 ms` = `1.86x` faster, but vs kernel `cat` `12.2 ms` = `2.33x` slower. Ext4 no-extents indirect: FrankenFS `27.7 ms` vs kernel `dd` `17.9 ms` = `1.55x` slower and vs `cat` `5.5 ms` = `5.01x` slower. Btrfs compressed: FrankenFS `37.3 ms` vs kernel `dd` `25.0 ms` = `1.49x` slower and vs `cat` `6.8 ms` = `5.52x` slower. |
+| Production levers kept | 0 in this pass; previously shipped CLI metadata-walk cap remains under measurement |
+| Production levers rejected/reverted | 0 in this pass |
+| Internal win/loss/neutral | N/A: no candidate A/B was introduced |
+| Direct kernel win/loss/neutral | `2 / 5 / 0`: two materialized/metadata wins; five remaining kernel comparator losses |
+| Behavior proof | SHA-256 of FrankenFS output matched mounted kernel bytes for ext4 extent `b6cfaf9d2c51918b0af3f212577081cc7a41997cbf08de21418c4c5dce631247`, ext4 indirect `c0d8240d06d2b4e07ac97735ae497c82b55909a489fd429f937f61ff396ea9be`, and btrfs compressed `2e379e112375338695dbd226f27bf096db571a99e5f64b975b0bb2e43b6f86b9`. The metadata walk reported `30003` entries and `30002` stats. |
+| Build/check guard | RCH `cargo build --release -p ffs-cli` compiled successfully on `vmi1167313`, then artifact retrieval returned `RCH-E309`; the warm target-dir binary existed at `/data/projects/.rch-targets/frankenfs-cod-b/release/ffs-cli` and was used for timings. RCH `cargo test -p ffs-harness --test conformance -- --nocapture` passed on `vmi1153651` (`100 passed / 0 failed / 2 ignored`). |
+| Clippy | Not rerun: this pass changed only docs/tracker evidence and introduced no Rust source. Existing scoped clippy debt remains tracked in prior rows. |
+| Release-readiness score for perf-superiority claims | 66 / 100: current evidence proves real domination on metadata walk and materialized ext4 extent reads, but ext4 indirect, btrfs compressed, and kernel splice-class rows remain losses. |
+| Release-readiness score for this row's hygiene | 93 / 100: direct mounted ext4/btrfs ratios, byte hashes, warm target-dir binary, RCH build/conformance, and hyperfine JSONs are captured. Deductions are the RCH artifact-sync error and absence of a new production A/B candidate. |
+
+### Measured Rows
+
+| Workload | FrankenFS | Kernel comparator | Ratio | Verdict |
+| --- | ---: | ---: | ---: | --- |
+| ext4 metadata walk, 30k files | `34.1 ms` | `find+stat` `93.3 ms` | FrankenFS `2.73x` faster | WIN |
+| ext4 extent read, 128 MiB | `28.5 ms` | `dd bs=1M` `53.0 ms` | FrankenFS `1.86x` faster | WIN vs materialize |
+| ext4 extent read, 128 MiB | `28.5 ms` | `cat` `12.2 ms` | FrankenFS `2.33x` slower | Loss vs splice-class |
+| ext4 no-extents indirect read, 50 MiB | `27.7 ms` | `dd` `17.9 ms` | FrankenFS `1.55x` slower | Loss, residual target |
+| ext4 no-extents indirect read, 50 MiB | `27.7 ms` | `cat` `5.5 ms` | FrankenFS `5.01x` slower | Loss vs splice-class |
+| btrfs compressed read | `37.3 ms` | `dd` `25.0 ms` | FrankenFS `1.49x` slower | Loss, residual target |
+| btrfs compressed read | `37.3 ms` | `cat` `6.8 ms` | FrankenFS `5.52x` slower | Loss vs splice-class |
+
+The old `31.78x` ext4-indirect loss row is superseded for current routing. After
+the journal-replay memoization and read-into-dst work, the current loss is
+`1.55x` vs materializing kernel `dd` and `5.01x` vs fastest kernel `cat`.
+
+### Isomorphism
+
+Ordering preserved: N/A. No production source changed in this pass.
+
+Tie-breaking unchanged: N/A.
+
+Floating-point identical: N/A.
+
+RNG seeds unchanged: N/A.
+
+Goldens/bytes verified: yes. FrankenFS output hashes matched mounted-kernel
+bytes for the three direct read comparators, and conformance passed
+`100 / 0 / 2 ignored`.
+
+### Commands
+
+```bash
+AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-b \
+  rch exec -- cargo build --release -p ffs-cli
+
+AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-b \
+  rch exec -- cargo test -p ffs-harness --test conformance -- --nocapture
+
+hyperfine --warmup 3 --runs 15 \
+  --export-json /tmp/frankenfs-cod-b-meta-walk-20260621.json \
+  '/data/projects/.rch-targets/frankenfs-cod-b/release/ffs-cli walk /tmp/ffs_meta_3476799.img >/dev/null' \
+  'find /tmp/ffs_metamnt_1695258/bigdir -maxdepth 1 -type f -printf "%s\n" >/dev/null'
+
+hyperfine --warmup 3 --runs 15 \
+  --export-json /tmp/frankenfs-cod-b-ext4-extent-read-20260621.json \
+  '/data/projects/.rch-targets/frankenfs-cod-b/release/ffs-cli read --discard /tmp/ffs_e2e.img /big.bin >/dev/null' \
+  'dd if=/tmp/ffs_rmnt_3672057/big.bin of=/dev/null bs=1M status=none' \
+  'cat /tmp/ffs_rmnt_3672057/big.bin >/dev/null'
+
+hyperfine --warmup 3 --runs 15 \
+  --export-json /tmp/frankenfs-cod-b-ext4-indirect-read-20260621.json \
+  '/data/projects/.rch-targets/frankenfs-cod-b/release/ffs-cli read --discard /data/tmp/extind2_1501351.img /double_ind.bin >/dev/null' \
+  'dd if=/data/tmp/extind2mnt_1501351/double_ind.bin of=/dev/null status=none' \
+  'cat /data/tmp/extind2mnt_1501351/double_ind.bin >/dev/null'
+
+hyperfine --warmup 3 --runs 15 \
+  --export-json /tmp/frankenfs-cod-b-btrfs-compressed-read-20260621.json \
+  '/data/projects/.rch-targets/frankenfs-cod-b/release/ffs-cli read --discard /data/tmp/btrdiff2_1340519.img /compressible.bin >/dev/null' \
+  'dd if=/data/tmp/btrdiff2mnt_1340519/compressible.bin of=/dev/null status=none' \
+  'cat /data/tmp/btrdiff2mnt_1340519/compressible.bin >/dev/null'
+```
+
 ## `bd-xmh5g.411` cod-b Ext4 Indirect Direct-Output Keep
 
 Date: 2026-06-21
