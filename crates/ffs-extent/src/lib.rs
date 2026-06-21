@@ -7364,4 +7364,33 @@ ExtentMapping { logical_start: 5, physical_start: 134, count: 2, unwritten: true
             );
         }
     }
+
+    #[test]
+    fn shard_index_spreads_high_bit_packed_keys_bd_xmh5g_420() {
+        // extent_cache_namespace (ffs-core) packs the inode number into the HIGH
+        // 32 bits via rotate_left(32), so many same-generation inodes share
+        // IDENTICAL low bits. A plain `ns % SHARDS` keys only the low bits and
+        // would collapse every such inode onto ONE shard — the bd-xmh5g.420 bug:
+        // striping inert, that lone shard thrashes its LRU (profiled 17% on a
+        // 30k-file ext4 tree --read-data; the hash fix gave 4.6x / 6.7x vs kernel).
+        // Guard that shard_index hash-mixes so high-bit-packed keys spread.
+        use std::collections::HashSet;
+        let mut shards = HashSet::new();
+        for inode in 1u64..=512 {
+            // Mimic extent_cache_namespace's shape: inode in the high bits, a
+            // CONSTANT generation/const in the low bits (the collapse trigger).
+            let ns = inode.rotate_left(32) ^ 0x9e37_79b9_7f4a_7c15;
+            shards.insert(shard_index(ns));
+        }
+        // A low-bits `% SHARDS` selector hits exactly 1 shard here (identical low
+        // bits). The hashed selector must use most of the shard space.
+        assert!(
+            shards.len() >= EXTENT_CACHE_SHARDS * 3 / 4,
+            "shard_index collapsed high-bit-packed keys onto {} shard(s); expected \
+             >= {} of {} (bd-xmh5g.420 regression — reverted to low-bits % SHARDS?)",
+            shards.len(),
+            EXTENT_CACHE_SHARDS * 3 / 4,
+            EXTENT_CACHE_SHARDS
+        );
+    }
 }
