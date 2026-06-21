@@ -12881,11 +12881,11 @@ impl OpenFs {
 
     /// Read indirect-mapped file data directly into `dst` (no owned `Vec` +
     /// copy). `dst[..min(file_size-offset, size)]` is zero-filled in place so
-    /// hole-skipped ranges read as zero, then the data segments fill their
-    /// windows. Mirrors the plain-extent and btrfs read-into-dst fast paths
-    /// (bd-2emlm): a `read_into` of a legacy non-extent file no longer
-    /// double-buffers the whole read through an owned `Vec`. Returns the number
-    /// of bytes written.
+    /// hole-skipped ranges are zero-filled as they are proven sparse, then the
+    /// data segments fill their windows. Mirrors the plain-extent and btrfs
+    /// read-into-dst fast paths (bd-2emlm): a `read_into` of a legacy
+    /// non-extent file no longer double-buffers the whole read through an owned
+    /// `Vec`. Returns the number of bytes written.
     #[expect(clippy::cast_possible_truncation)]
     fn read_ext4_indirect_into(
         &self,
@@ -12906,7 +12906,6 @@ impl OpenFs {
 
         let to_read = (file_size - offset).min(u64::from(size)) as usize;
         let buf = &mut dst[..to_read];
-        buf.fill(0);
 
         // PLAN (serial): resolve the read into ordered segments. The indirect
         // block resolution is a dependent (and cached) chain, so it stays serial;
@@ -12955,7 +12954,8 @@ impl OpenFs {
                     );
                     bytes_read += span;
                 } else {
-                    // Hole at a full block boundary — already zeroed.
+                    // Hole at a full block boundary.
+                    buf[bytes_read..bytes_read + bs_usize].fill(0);
                     bytes_read += bs_usize;
                 }
                 continue;
@@ -12972,8 +12972,9 @@ impl OpenFs {
                     len: chunk_size,
                     buf_off: bytes_read,
                 });
+            } else {
+                buf[bytes_read..bytes_read + chunk_size].fill(0);
             }
-            // else: Hole — already zeroed.
             bytes_read += chunk_size;
         }
 

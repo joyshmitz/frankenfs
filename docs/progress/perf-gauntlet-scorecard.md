@@ -1,5 +1,93 @@
 # Perf Gauntlet Scorecard
 
+## `bd-xmh5g` cod-a Ext4 Indirect Zero-Fill Elision Keep
+
+Date: 2026-06-21
+Agent: BlackThrush (`cod-a`)
+Scope: `ffs-core` ext4 legacy indirect read assembly in `read_ext4_indirect_into`
+Commit under measurement: local candidate on `665e1cc6`
+RCH workers: `ovh-a` release CLI build, `vmi1227854` check,
+`vmi1264463` focused test, `vmi1293453` bench, `hz2` conformance/clippy attempt
+Requested target dir: `/data/projects/.rch-targets/frankenfs-cod-a`
+
+### Verdict
+
+KEEP. The radical lever was data-movement deletion at the read-buffer boundary:
+do not zero the whole requested output window before planning ext4 indirect
+segments. Instead, zero exactly the ranges proven to be sparse holes while
+data segments are planned, and leave data-backed ranges untouched until the
+existing parallel segment reader overwrites them.
+
+This is a narrow transfer of the btrfs zero-fill elision to the remaining ext4
+indirect loss path. It cuts the exact fixture from `28.8 ms` to `15.5 ms`
+(`1.86x` faster), but it does not dominate the fastest mounted ext4 kernel path:
+kernel `cat` still wins at `5.2 ms` (`2.99x` faster than the candidate).
+
+### Scorecard
+
+| Gate | Result |
+| --- | --- |
+| Direct mounted ext4 rows completed | 1 accepted 15-run A/B row on `/data/tmp/extind2_1501351.img:/double_ind.bin`, mounted read-only at `/data/tmp/extind2mnt_1501351` |
+| Direct mounted btrfs rows completed | None for this lever; btrfs unchanged/N/A |
+| Direct ext4/btrfs-kernel ratios | Candidate `15.5 ms` vs kernel ext4 `cat` `5.2 ms` = `2.99x` slower. The prior same-source baseline was `28.8 ms`, `5.56x` slower than kernel. |
+| Production levers kept | 1 |
+| Production levers rejected/reverted | 0 |
+| Internal A/B win/loss/neutral | `1 / 0 / 0`: baseline `28.8 ms` vs candidate `15.5 ms`, old/new `1.86x` by mean |
+| Direct kernel win/loss/neutral | `0 / 1 / 0`: exact mounted ext4 indirect read still loses to fastest kernel `cat` |
+| Behavior proof | Baseline stdout, candidate stdout, and mounted kernel file SHA-256 all matched: `c0d8240d06d2b4e07ac97735ae497c82b55909a489fd429f937f61ff396ea9be` |
+| Build/check guard | Local `cargo fmt -p ffs-core --check` passed; RCH `cargo build --release -p ffs-cli` passed on `ovh-a`; RCH `cargo check -p ffs-core --all-targets` passed on `vmi1227854`; RCH focused `cargo test -p ffs-core ext4_indirect_read_ -- --nocapture` passed on `vmi1264463`; RCH `cargo bench --profile release -p ffs-core --bench ext4_indirect_read_overlap -- ext4_indirect_read_overlap/large_run_chunked_128blocks --warm-up-time 1 --measurement-time 1 --sample-size 10 --noplot` passed on `vmi1293453`; RCH conformance `cargo test -p ffs-harness --test conformance -- --nocapture` passed on `hz2` (`100 passed / 0 failed / 2 ignored`). |
+| Clippy | RCH scoped clippy `cargo clippy -p ffs-core --lib --no-deps -- -D warnings` failed on pre-existing `ffs-core` pedantic rows: `vfs.rs` derivable default, old item-after-statement rows, redundant closures, and old indirect-pointer cast rows in the allocating reader/resolvers. The changed zero-fill-elision function had no candidate-local lint. |
+| Release-readiness score for perf-superiority claims | 62 / 100: internal improvement is large and conformance is green, but direct mounted-kernel dominance is still not achieved for ext4 indirect reads. |
+| Release-readiness score for this row's hygiene | 94 / 100: same-image baseline/candidate binaries, direct kernel comparator, byte proof, RCH build/check/test/bench/conformance, clippy attribution, and ledger row are complete. Deduction is the existing scoped clippy debt plus remaining kernel loss. |
+
+### Measured Rows
+
+| Workload | Baseline | Candidate | Kernel ext4 | Ratio vs baseline | Ratio vs kernel | Verdict |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| `ffs-cli read --discard /double_ind.bin` vs kernel `cat` | `28.8 ms` mean | `15.5 ms` mean | `5.2 ms` mean | candidate `1.86x` faster | candidate `2.99x` slower than kernel `cat` | KEEP |
+
+### Isomorphism
+
+Ordering preserved: yes. The indirect segment plan and read execution order are
+unchanged; only sparse ranges are zero-filled at the point they are identified.
+
+Tie-breaking unchanged: yes. Error priority and segment ordering remain the
+existing ordered `Vec<Result<_, _>>` surface.
+
+Floating-point identical: N/A.
+
+RNG seeds unchanged: N/A.
+
+Goldens/bytes verified: baseline stdout, candidate stdout, and mounted kernel
+file SHA-256 all matched:
+`c0d8240d06d2b4e07ac97735ae497c82b55909a489fd429f937f61ff396ea9be`.
+
+### Commands
+
+```bash
+AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-a \
+  rch exec -- cargo build --release -p ffs-cli
+
+hyperfine --warmup 3 --runs 15 \
+  --export-json /tmp/frankenfs-ext4-indirect-zero-fill-ab-20260621.json \
+  '/tmp/ffs-cli-ext4-indirect-zero-fill-baseline-665e1cc6 --log-format json read /data/tmp/extind2_1501351.img /double_ind.bin --discard >/dev/null 2>&1' \
+  '/tmp/ffs-cli-ext4-indirect-zero-fill-candidate --log-format json read /data/tmp/extind2_1501351.img /double_ind.bin --discard >/dev/null 2>&1' \
+  'cat /data/tmp/extind2mnt_1501351/double_ind.bin >/dev/null'
+
+AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-a \
+  rch exec -- cargo bench --profile release -p ffs-core \
+  --bench ext4_indirect_read_overlap -- \
+  ext4_indirect_read_overlap/large_run_chunked_128blocks \
+  --warm-up-time 1 --measurement-time 1 --sample-size 10 --noplot
+
+AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-a \
+  rch exec -- cargo test -p ffs-harness --test conformance -- --nocapture
+```
+
+Note: the user-requested `cargo bench --release` spelling is not accepted by
+Cargo for bench runs, so this used the Cargo-equivalent `--profile release`
+spelling.
+
 ## `bd-xmh5g.416` cod-b Direct-Kernel Scorecard Refresh
 
 Date: 2026-06-21
