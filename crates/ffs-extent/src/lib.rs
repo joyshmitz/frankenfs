@@ -1330,10 +1330,28 @@ pub struct ExtentCache {
     configured_capacity: usize,
 }
 
-/// Number of lock-striping shards for [`ExtentCache`]. Mirrors the FUSE worker
-/// count (≤8) with headroom so concurrent lookups on distinct inodes rarely
-/// collide on the same shard.
-const EXTENT_CACHE_SHARDS: usize = 16;
+/// Number of lock-striping shards for [`ExtentCache`]. Sized well above the FUSE
+/// worker count so many-inode workloads spread across shards before any one
+/// shard fills its per-shard capacity and starts evicting. Combined with the
+/// hashed [`shard_index`] (which actually spreads inodes — a plain `ns % SHARDS`
+/// did not, see below), a one-pass walk --read-data over a 30k-file tree spreads
+/// to ~469 inodes/shard < the 1024 per-shard capacity → no eviction (was a
+/// single-shard thrash). bd-xmh5g.420.
+const EXTENT_CACHE_SHARDS: usize = 64;
+
+/// Map a namespace to a shard index. [`extent_cache_namespace`] packs the inode
+/// number into the HIGH 32 bits (`rotate_left(32)`), so a plain `ns % SHARDS`
+/// keys only on the LOW bits — which, when many inodes share a generation (e.g.
+/// a freshly-populated image), are identical, collapsing every inode onto ONE
+/// shard. The striping then does nothing and that lone shard thrashes its LRU
+/// (profiled: 17% self-time in eviction on a 30k-file ext4 tree --read-data).
+/// Fibonacci-hash the whole 64-bit namespace so every bit feeds the index.
+/// bd-xmh5g.420.
+#[inline]
+fn shard_index(ns: u64) -> usize {
+    let mixed = ns.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    ((mixed >> 32) as usize) % EXTENT_CACHE_SHARDS
+}
 
 struct ExtentCacheInner {
     /// Entries keyed by `(namespace, logical_start)`.
@@ -1440,9 +1458,7 @@ impl ExtentCache {
     /// lock.
     #[inline]
     fn shard(&self, ns: u64) -> &RwLock<ExtentCacheInner> {
-        // `ns % SHARDS` is always < SHARDS, so the conversion is lossless.
-        let idx = usize::try_from(ns % EXTENT_CACHE_SHARDS as u64).unwrap_or(0);
-        &self.shards[idx]
+        &self.shards[shard_index(ns)]
     }
 
     /// Look up a logical block in the cache within the given namespace.
@@ -6729,13 +6745,13 @@ ExtentMapping { logical_start: 5, physical_start: 134, count: 2, unwritten: true
                 // per-shard (each namespace's entries live in one shard sized to
                 // the full capacity), so the victim is the LRU entry WITHIN the
                 // inserting namespace's shard — not the global LRU.
-                let shard = ns % EXTENT_CACHE_SHARDS as u64;
+                let shard = shard_index(ns);
                 let resident = cache.debug_resident();
                 let already = resident.iter().any(|(k, _)| *k == key);
                 let in_shard: Vec<((u64, u32), u64)> = resident
                     .iter()
                     .copied()
-                    .filter(|((n, _), _)| n % EXTENT_CACHE_SHARDS as u64 == shard)
+                    .filter(|((n, _), _)| shard_index(*n) == shard)
                     .collect();
                 let expected_victim = if in_shard.len() >= CAP && !already {
                     in_shard
