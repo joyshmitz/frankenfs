@@ -1,5 +1,99 @@
 # Perf Gauntlet Scorecard
 
+## `bd-xmh5g.414` cod-a Btrfs Full-Regular Plan Fast-Path Rejection
+
+Date: 2026-06-21
+Agent: BlackThrush (`cod-a`)
+Scope: `ffs-core` btrfs compressed-read planning in `btrfs_read_file_into`
+Commit under measurement: local WIP on `ffa99c6f`; production hunk manually
+reverted after the A/B gate
+RCH workers: `hz2` baseline release build, `hz1` candidate release build,
+`ovh-a` clean-source conformance
+Requested target dir: `/data/projects/.rch-targets/frankenfs-cod-a`
+
+### Verdict
+
+REJECT. The candidate tried a full-regular-output fast path: when the planned
+compressed/uncompressed regular read jobs cover the whole requested window, skip
+the `deferred_by_idx` vector and the second extent-assembly pass. The intended
+win was to delete serial bookkeeping in the `.414` "PLAN" region without
+touching the already-rejected thread-cap family.
+
+The direct A/B did not clear the keep bar. Candidate mean was `18.575 ms` versus
+baseline `19.289 ms`, only `1.038x` old/new with overlapping variance. The
+candidate still lost to the fastest mounted btrfs kernel path (`cat`) by
+`2.76x`. The source hunk was reverted; only this ledger evidence remains.
+
+### Scorecard
+
+| Gate | Result |
+| --- | --- |
+| Direct mounted btrfs rows completed | 1 rejected 15-run A/B row on `/data/tmp/btrdiff2_1340519.img:/compressible.bin`, mounted read-only at `/data/tmp/btrdiff2mnt_1340519` |
+| Direct ext4/btrfs-kernel ratios | Candidate `18.575 ms` vs kernel btrfs `cat` `6.724 ms` = `2.76x` slower; candidate vs materializing kernel `dd bs=8M` `29.110 ms` = `1.57x` faster. Clean-source post-revert baseline-only row was `16.011 ms` vs kernel `cat` `6.444 ms` and kernel `dd bs=8M` `30.219 ms`. |
+| Production levers kept | 0 |
+| Production levers rejected/reverted | 1 |
+| Internal A/B win/loss/neutral | `0 / 0 / 1`: baseline `19.289 ms` vs candidate `18.575 ms`, old/new `1.038x` by mean; median `1.077x` was not accepted under `2.1-2.6 ms` sigma |
+| Direct kernel win/loss/neutral | `1 / 1 / 0`: candidate wins vs materializing `dd`, loses to fastest mounted-kernel `cat`; no production lever remains after revert |
+| Behavior proof | Candidate stdout matched mounted kernel file SHA-256: `2e379e112375338695dbd226f27bf096db571a99e5f64b975b0bb2e43b6f86b9` |
+| Build/check guard | RCH `cargo build --release -p ffs-cli` passed for baseline on `hz2` and candidate on `hz1`; RCH `cargo bench --profile release -p ffs-core --bench btrfs_decompress_extents -- btrfs_decompress_tiny_zstd_8x4k_to_128k --warm-up-time 1 --measurement-time 1 --sample-size 10 --noplot` passed on `hz2` (serial reused decoder `400.81 us`, parallel reused decoder `174.52 us`); local `cargo fmt -p ffs-core --check` and `git diff --check` passed; production hunk was manually reverted and `git diff -- crates/ffs-core/src/lib.rs` was zero after revert; RCH clean-source `cargo test -p ffs-harness --test conformance -- --nocapture` passed on `ovh-a` (`100 passed / 0 failed / 2 ignored`). |
+| Clippy | Not rerun for this evidence-only closeout. No production source remains after revert; current scoped `ffs-core` clippy is already attributed in adjacent rows to pre-existing pedantic debt outside this lane. |
+| Release-readiness score for perf-superiority claims | 40 / 100: direct mounted-kernel evidence is real and the materializing `dd` comparator is still beaten, but no new source survived and fastest kernel `cat` remains `2.76x` faster than the candidate. |
+| Release-readiness score for this row's hygiene | 94 / 100: exact baseline/candidate binaries, direct kernel comparators, byte proof, clean-source revert, RCH build/conformance gates, and ledger row are complete. Deductions are the rejected lever and no fresh clippy rerun because no source survived. |
+
+### Measured Rows
+
+| Workload | Baseline | Candidate | Kernel btrfs | Ratio vs baseline | Ratio vs kernel | Verdict |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| `ffs-cli read --discard /compressible.bin` vs kernel `cat` | `19.289 ms` mean, `19.528 ms` median | `18.575 ms` mean, `18.123 ms` median | `6.724 ms` mean | candidate `1.038x` faster by mean | candidate `2.76x` slower than kernel `cat` | REJECT |
+| `ffs-cli read --discard /compressible.bin` vs kernel `dd bs=8M` | `19.289 ms` | `18.575 ms` | `29.110 ms` | candidate `1.038x` faster | candidate `1.57x` faster than kernel `dd` | No keep |
+
+### Isomorphism
+
+Ordering preserved: yes before revert. The candidate only returned early after
+all regular read jobs completed successfully and only when those jobs covered
+the full requested window; sparse holes, inline extents, prealloc extents, and
+unsupported extent types stayed on the existing assembly path.
+
+Tie-breaking unchanged: yes before revert for the candidate's fast path. Results
+were consumed in planned job order, which is extent order for the full-regular
+coverage case. The code was reverted, so the shipping path is exactly the prior
+ordering.
+
+Floating-point identical: N/A.
+
+RNG seeds unchanged: N/A.
+
+Goldens/bytes verified: candidate stdout matched the mounted kernel file
+SHA-256:
+`2e379e112375338695dbd226f27bf096db571a99e5f64b975b0bb2e43b6f86b9`.
+
+### Commands
+
+```bash
+AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-a \
+  rch exec -- cargo build --release -p ffs-cli
+
+hyperfine --warmup 3 --runs 15 \
+  --export-json /tmp/frankenfs-cod-a-btrfs-planfast-ab-20260621.json \
+  --command-name frankenfs-baseline-read \
+  '/tmp/ffs-cli-btrfs-planfast-baseline-ffa99c6f --log-format json read /data/tmp/btrdiff2_1340519.img /compressible.bin --discard >/dev/null 2>&1' \
+  --command-name frankenfs-planfast-candidate \
+  '/tmp/ffs-cli-btrfs-planfast-candidate --log-format json read /data/tmp/btrdiff2_1340519.img /compressible.bin --discard >/dev/null 2>&1' \
+  --command-name btrfs-kernel-cat \
+  'cat /data/tmp/btrdiff2mnt_1340519/compressible.bin >/dev/null' \
+  --command-name btrfs-kernel-dd-8m \
+  'dd if=/data/tmp/btrdiff2mnt_1340519/compressible.bin of=/dev/null bs=8M status=none'
+
+AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-a \
+  rch exec -- cargo test -p ffs-harness --test conformance -- --nocapture
+
+AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-a \
+  rch exec -- cargo bench --profile release -p ffs-core \
+  --bench btrfs_decompress_extents -- \
+  btrfs_decompress_tiny_zstd_8x4k_to_128k \
+  --warm-up-time 1 --measurement-time 1 --sample-size 10 --noplot
+```
+
 ## `bd-xmh5g` cod-a Ext4 Indirect Zero-Fill Elision Keep
 
 Date: 2026-06-21
