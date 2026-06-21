@@ -2320,31 +2320,44 @@ fn walk_one_dir(
     // the global rayon pool cooperatively.
     if read_data && !file_inos.is_empty() {
         use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
-        let bytes = file_inos
-            .par_iter()
-            .map_init(
-                || vec![0_u8; READ_CHUNK as usize],
-                |buf, &fino| -> Result<u64> {
-                    let mut off: u64 = 0;
-                    let mut total: u64 = 0;
-                    loop {
-                        let n = open_fs
-                            .read_into(cx, fino, off, buf)
-                            .with_context(|| format!("failed to read inode {}", fino.0))?;
-                        if n == 0 {
-                            break;
-                        }
-                        total += n as u64;
-                        off += n as u64;
-                        if n < READ_CHUNK as usize {
-                            break;
-                        }
-                    }
-                    Ok(total)
-                },
-            )
-            .try_reduce(|| 0_u64, |a, b| Ok(a + b))?;
-        out.bytes += bytes;
+        let read_one = |buf: &mut Vec<u8>, fino: InodeNumber| -> Result<u64> {
+            let mut off: u64 = 0;
+            let mut total: u64 = 0;
+            loop {
+                let n = open_fs
+                    .read_into(cx, fino, off, buf)
+                    .with_context(|| format!("failed to read inode {}", fino.0))?;
+                if n == 0 {
+                    break;
+                }
+                total += n as u64;
+                off += n as u64;
+                if n < READ_CHUNK as usize {
+                    break;
+                }
+            }
+            Ok(total)
+        };
+        // Parallelize across files ONLY when there are enough to fill the pool. A
+        // directory in a deep TREE typically holds few files (~10-30); fanning those
+        // across the 64-wide pool — especially nested under the --parallel cross-dir
+        // path — is over-subscription churn (measured: a 15-files/dir tree is faster
+        // reading each dir's files serially while --parallel carries the across-dir
+        // parallelism). A single big directory (thousands of files) still fans out
+        // and wins big (the many-small-files 5x). Same serialize-when-undersubscribed
+        // rule as the readdir prefetch (1411c3f1).
+        if file_inos.len() < rayon::current_num_threads().max(2) {
+            let mut buf = vec![0_u8; READ_CHUNK as usize];
+            for &fino in &file_inos {
+                out.bytes += read_one(&mut buf, fino)?;
+            }
+        } else {
+            let bytes = file_inos
+                .par_iter()
+                .map_init(|| vec![0_u8; READ_CHUNK as usize], |buf, &fino| read_one(buf, fino))
+                .try_reduce(|| 0_u64, |a, b| Ok(a + b))?;
+            out.bytes += bytes;
+        }
     }
     Ok(out)
 }
