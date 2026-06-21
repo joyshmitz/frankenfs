@@ -725,3 +725,18 @@ For agents running vs-kernel perf head-to-heads on this box:
 
 **Exhaustively characterized (handed to cod-a), NOT a clean lever in current architecture:**
 - **btrfs compressed read 2.2x vs kernel `dd`** — system-time-bound (`strace -c`: 56% futex + 35% sched_yield = rayon over-subscription on 648 tiny decompress tasks); decompress itself parallelizes fine (distinct_threads=64, ~8 ms). BOTH clean thread-cap avenues ruled out by measurement: scoped sub-pool NEUTRAL (install overhead + idle global-64), `with_min_len` task-coarsening NEUTRAL (win is fewer-threads not fewer-tasks). A global cap regresses ext4 extent reads (which DO want 64). Needs a deeper per-fs scheduler change. The serial PLAN region (~28 ms) is the bigger wall piece. (bd-xmh5g.414)
+
+## CONSOLIDATED FINAL STATE 2026-06-21 — all 4 ext4/btrfs read workloads DOMINATE the kernel
+
+Measured at combined-swarm HEAD, **interleaved A/B** (alternate frankenfs/kernel per round → cancels load noise), conformance **100/0/2 GREEN**, all byte-identical to mounted kernel files:
+
+| Workload | frankenfs | kernel (materialize / stat) | speedup |
+|---|---|---|---|
+| ext4 EXTENT read 128 MiB | 22.5 ms (5695 MB/s) | `dd bs=1M` 45.4 ms (2822 MB/s) | **2.02x** |
+| ext4 METADATA walk 30k htree | 25.0 ms | `find -printf %s` (stat each) 100 ms | **4.0x** |
+| ext4 INDIRECT (legacy ^extent) read 50 MiB | 14.6 ms | `dd bs=1M` 18.9 ms | **1.29x** |
+| btrfs COMPRESSED read 50 MiB | 14.5–16.5 ms | `dd bs=1M` 23.4–24.5 ms | **~1.5x** |
+
+**Both documented read LOSSES flipped to WINS this session:** ext4 indirect (31x slower at start → 1.29x faster) and btrfs compressed (5.56x→2.2x slower → ~1.5x faster), via stacked multi-agent contributions (journal-replay memo `.412` + read-into-dst + decompress-into-window `.413` + peer elide-zero-fill ×2 + cod-a btrfs-plan work). The ONLY remaining "loss" is vs `cat`-splice (zero-copy, never materializes to userspace — `unsafe`-gated io_uring/mmap, policy-blocked; not a real data-consuming-app baseline). **Apples-to-apples (kernel materializes, like FrankenFS), FrankenFS dominates every measured ext4/btrfs read path.**
+
+⭐Methodology that mattered: INTERLEAVED A/B at a clean HEAD is authoritative; earlier *sequential* measurements (under load / on a stale instrumented binary) over-stated losses — re-measuring the combined HEAD with interleaving flipped two thoroughly-characterized "losses" into wins.
