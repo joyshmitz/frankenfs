@@ -1,5 +1,91 @@
 # Perf Gauntlet Scorecard
 
+## `bd-xmh5g.409` cod-a Btrfs Physical-Order Read Rejection
+
+Date: 2026-06-21
+Agent: BlackThrush (`cod-a`)
+Scope: `ffs-core` btrfs read job planning in `btrfs_read_file_into`
+Commit under measurement: baseline `922ff58b`; candidate was local WIP only and
+was manually reverted after the A/B gate
+RCH workers: `hz1` check, `hz2` conformance, `vmi1149989` release-perf build
+Requested target dir: `/data/projects/.rch-targets/frankenfs-cod-a`
+
+### Verdict
+
+REJECT. The physical-order scheduling candidate tried to sort btrfs read jobs by
+mapped physical offset only when the planned I/O jobs showed a physical
+inversion. The intended win was to make the converted btrfs fixture's scattered
+128 KiB preads more readahead-friendly without changing already-monotonic
+layouts.
+
+The direct converted-image A/B did not pay. Baseline was `64.590 ms`; candidate
+was `64.874 ms` (`0.996x` old/new). That is neutral-to-slightly-negative and
+below the keep bar. The code was reverted; only this ledger and scorecard remain.
+
+### Scorecard
+
+| Gate | Result |
+| --- | --- |
+| Direct mounted btrfs rows completed | 1 accepted 15-run A/B row on `/tmp/ffs_btrfs_3704674.img:/big.bin` with three mounted-kernel comparators |
+| Direct ext4/btrfs-kernel ratios | Candidate `64.874 ms` vs kernel `cat` `14.977 ms` (`4.33x` slower); candidate vs `dd bs=8M` `67.523 ms` (`1.04x` faster); candidate vs `dd bs=128M` `141.113 ms` (`2.18x` faster) |
+| Production levers kept | 0 |
+| Production levers rejected/reverted | 1 |
+| Internal A/B win/loss/neutral | `0 / 0 / 1`: baseline `64.590 ms` vs candidate `64.874 ms`, old/new `0.996x` |
+| Direct kernel win/loss/neutral | `2 / 1 / 0`: wins only vs materializing `dd`; loses to fastest mounted-kernel `cat` |
+| Behavior proof | Baseline and candidate stdout SHA-256 matched the mounted kernel file: `b6cfaf9d2c51918b0af3f212577081cc7a41997cbf08de21418c4c5dce631247` |
+| Build/check guard | Clean-source local `cargo fmt -p ffs-core --check` passed; RCH `cargo check -p ffs-core --all-targets` passed on `hz1`; RCH `cargo test -p ffs-harness --test conformance -- --nocapture` passed on `hz2` (`100 passed / 0 failed / 2 ignored`); RCH `cargo build --profile release-perf -p ffs-cli` passed on `vmi1149989`. |
+| Clippy | Not rerun for this evidence-only closeout. No production source remains after revert; the prior scorecard records pre-existing scoped `ffs-core` pedantic debt outside this lane. |
+| Release-readiness score for perf-superiority claims | 42 / 100: direct mounted-kernel evidence is real and materializing `dd` remains beaten, but no production lever was kept and fastest kernel `cat` still leads by `4.33x`. |
+| Release-readiness score for this row's hygiene | 96 / 100: exact baseline/candidate binaries, direct kernel comparators, byte proof, clean-source revert, RCH check/conformance/build gates, and ledger row are complete. Deductions are the rejected lever and no fresh clippy rerun because no source survived. |
+
+### Measured Rows
+
+| Workload | Baseline | Candidate | Kernel btrfs | Ratio vs baseline | Ratio vs kernel | Verdict |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| `ffs-cli read --discard /big.bin` vs kernel `cat` | `64.590 ms` | `64.874 ms` | `14.977 ms` | `0.996x` old/new | candidate `4.33x` slower than kernel | REJECT |
+| `ffs-cli read --discard /big.bin` vs kernel `dd bs=8M` | `64.590 ms` | `64.874 ms` | `67.523 ms` | `0.996x` old/new | candidate `1.04x` faster than kernel `dd` | No keep |
+| `ffs-cli read --discard /big.bin` vs kernel `dd bs=128M` | `64.590 ms` | `64.874 ms` | `141.113 ms` | `0.996x` old/new | candidate `2.18x` faster than kernel `dd` | No keep |
+
+### Isomorphism
+
+Ordering preserved: N/A after revert. The candidate proof before revert used the
+same file bytes as the mounted kernel path.
+
+Tie-breaking unchanged: N/A after revert.
+
+Floating-point identical: N/A.
+
+RNG seeds unchanged: N/A.
+
+Goldens/bytes verified: baseline and candidate stdout matched the mounted kernel
+file SHA-256 before revert. Harness conformance passed after revert.
+
+### Commands
+
+```bash
+hyperfine --warmup 3 --runs 15 \
+  --export-json /data/projects/.scratch/bd-xmh5g-409-physical-sort-btrfs-bigbin-20260621.json \
+  --command-name frankenfs-baseline-read \
+  '/data/projects/.scratch/ffs-cli-922ff58b-bd-xmh5g-409-baseline-20260621T0028 --log-format json read /tmp/ffs_btrfs_3704674.img /big.bin --discard >/dev/null 2>&1' \
+  --command-name frankenfs-physical-sort-read \
+  '/data/projects/.scratch/ffs-cli-bd-xmh5g-409-physical-sort-candidate-20260621T0028 --log-format json read /tmp/ffs_btrfs_3704674.img /big.bin --discard >/dev/null 2>&1' \
+  --command-name btrfs-kernel-cat \
+  'cat /tmp/ffs_bmnt_3705579/big.bin >/dev/null' \
+  --command-name btrfs-kernel-dd-8m \
+  'dd if=/tmp/ffs_bmnt_3705579/big.bin of=/dev/null bs=8M status=none' \
+  --command-name btrfs-kernel-dd-128m \
+  'dd if=/tmp/ffs_bmnt_3705579/big.bin of=/dev/null bs=128M status=none'
+
+AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-a \
+  rch exec -- cargo check -p ffs-core --all-targets
+
+AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-a \
+  rch exec -- cargo test -p ffs-harness --test conformance -- --nocapture
+
+AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-a \
+  rch exec -- cargo build --profile release-perf -p ffs-cli
+```
+
 ## `bd-xmh5g` cod-a Btrfs Compressed Fused-Copy Keep
 
 Date: 2026-06-20

@@ -5,6 +5,12 @@ campaign. Historical rows live in `docs/progress/perf-negative-results.md`; new
 campaign closeouts should either update that file directly or add a summary row
 here that points to the detailed progress ledger.
 
+## 2026-06-21 cod-a Verification
+
+| Date | Bead | Surface | Verdict | Ratio vs ext4/btrfs-kernel | Internal win/loss/neutral | Direct kernel win/loss/neutral | Gates |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 2026-06-21 | `bd-xmh5g.409` | `ffs-core` btrfs converted-image physical read-order scheduling candidate: assign physical sort keys to compressed/uncompressed read jobs, sort only on physical inversions, preserve original-order error priority | REJECT / production source manually reverted after measurement | Converted btrfs fixture `/tmp/ffs_btrfs_3704674.img:/big.bin`, mounted at `/tmp/ffs_bmnt_3705579/big.bin`, 15 warm runs. Candidate `64.874 ms` vs fastest mounted-kernel `cat` `14.977 ms`: FrankenFS remains `4.33x` slower (`0.231x` kernel speed). Candidate beats materializing kernel `dd bs=8M` `67.523 ms` by only `1.04x` and beats `dd bs=128M` `141.113 ms` by `2.18x`, matching the prior framing that only splice-style `cat` dominates. | `0/0/1`: baseline `64.590 ms` vs physical-order candidate `64.874 ms`, old/new `0.996x`; this is neutral-to-slightly-negative and below the keep bar, so the candidate was reverted. | `2/1/0`: candidate wins vs materializing `dd bs=8M` and `dd bs=128M`, but loses to fastest mounted-kernel `cat` by `4.33x`. | Byte proof before revert: baseline and candidate stdout SHA-256 both matched mounted kernel file `b6cfaf9d2c51918b0af3f212577081cc7a41997cbf08de21418c4c5dce631247`. Hyperfine JSON: `/data/projects/.scratch/bd-xmh5g-409-physical-sort-btrfs-bigbin-20260621.json`. Clean-source gates after revert: local `cargo fmt -p ffs-core --check` passed; RCH `cargo check -p ffs-core --all-targets` passed on `hz1`; RCH `cargo test -p ffs-harness --test conformance -- --nocapture` passed on `hz2` (`100 passed / 0 failed / 2 ignored`); RCH `cargo build --profile release-perf -p ffs-cli` passed on `vmi1149989`. |
+
 ## 2026-06-20 cod-a Verification
 
 | Date | Bead | Surface | Verdict | Ratio vs ext4/btrfs-kernel | Internal win/loss/neutral | Direct kernel win/loss/neutral | Gates |
