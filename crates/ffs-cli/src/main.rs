@@ -2265,16 +2265,13 @@ fn walk_one_dir(
         bytes: 0,
         subdirs: Vec::new(),
     };
-    // One reusable read buffer for the whole directory's --read-data pass.
-    // read_into fills it in place, so the per-file/per-chunk fresh-Vec
-    // allocations (each an mmap + page-fault churn + munmap, ~2.26x slower
-    // than fixed-buffer reuse, bd-2x68s) collapse to a single buffer reused
-    // across every file in this directory. Allocated only when needed.
-    let mut read_buf: Vec<u8> = if read_data {
-        vec![0_u8; READ_CHUNK as usize]
-    } else {
-        Vec::new()
-    };
+    // bd-xmh5g.419: the file-data reads are collected here and read in PARALLEL
+    // across files after the (cheap) serial metadata pass — reading them serially
+    // left the 64 cores idle and measured 3.85x slower than kernel `cat` on many
+    // small files (per-file overhead ~0.18ms x N dominates). Each rayon worker
+    // reuses one buffer (map_init below), so the per-file fresh-Vec alloc churn
+    // (bd-2x68s) is still avoided.
+    let mut file_inos: Vec<InodeNumber> = Vec::new();
     let mut next_off: u64 = 0;
     loop {
         let off_in = next_off;
@@ -2298,23 +2295,8 @@ fn walk_one_dir(
                 out.stats += 1;
             }
             if read_data && is_file {
-                // Stream the file's bytes through the read engine into the
-                // reused buffer (data is discarded; only the byte count is
-                // kept).
-                let mut off: u64 = 0;
-                loop {
-                    let n = open_fs
-                        .read_into(cx, entry.ino, off, &mut read_buf)
-                        .with_context(|| format!("failed to read inode {}", entry.ino.0))?;
-                    if n == 0 {
-                        break;
-                    }
-                    out.bytes += n as u64;
-                    off += n as u64;
-                    if n < READ_CHUNK as usize {
-                        break;
-                    }
-                }
+                // Defer the read; collected files are read in parallel below.
+                file_inos.push(entry.ino);
             }
             if is_dir {
                 out.dirs += 1;
@@ -2328,6 +2310,41 @@ fn walk_one_dir(
         if next_off <= off_in {
             break;
         }
+    }
+    // bd-xmh5g.419: read this directory's files in PARALLEL across files. The
+    // metadata pass above is cheap (~1us/entry); the per-file data read is the
+    // cost, and reading files serially leaves the pool idle. Each worker reuses
+    // one READ_CHUNK buffer (map_init) — no per-file alloc churn. Data is
+    // discarded; only the byte tally is summed (try_reduce surfaces the first
+    // read error). For nested calls (the --parallel cross-dir path) this shares
+    // the global rayon pool cooperatively.
+    if read_data && !file_inos.is_empty() {
+        use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
+        let bytes = file_inos
+            .par_iter()
+            .map_init(
+                || vec![0_u8; READ_CHUNK as usize],
+                |buf, &fino| -> Result<u64> {
+                    let mut off: u64 = 0;
+                    let mut total: u64 = 0;
+                    loop {
+                        let n = open_fs
+                            .read_into(cx, fino, off, buf)
+                            .with_context(|| format!("failed to read inode {}", fino.0))?;
+                        if n == 0 {
+                            break;
+                        }
+                        total += n as u64;
+                        off += n as u64;
+                        if n < READ_CHUNK as usize {
+                            break;
+                        }
+                    }
+                    Ok(total)
+                },
+            )
+            .try_reduce(|| 0_u64, |a, b| Ok(a + b))?;
+        out.bytes += bytes;
     }
     Ok(out)
 }

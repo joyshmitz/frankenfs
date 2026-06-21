@@ -963,6 +963,7 @@ dependencies = [
  "ffs-types",
  "libc",
  "proptest",
+ "rayon",
  "serde",
  "serde_json",
  "tempfile",
