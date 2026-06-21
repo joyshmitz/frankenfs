@@ -684,9 +684,28 @@ measurements remain the proof that each optimization improves frankenfs's own re
 the ~2x gap to the kernel must keep closing.
 
 ## Measurement caveat (honest)
-These ratios are the **lever's own A/B** (new shape vs old shape, same process), NOT head-to-head
-vs the ext4/btrfs *kernel* — the benches do not invoke the kernel filesystem. They prove each
-optimization captures the speedup it was designed for; an absolute vs-kernel comparison would
-require mounting the port through FUSE against a kernel-fs baseline on identical hardware/workload
-(future e2e work). I/O-overlap ratios are bounded by the rch host's rayon pool size, so absolute
-magnitudes are host-core-dependent (reported, not over-claimed).
+The criterion **lever A/B** ratios (new shape vs old shape, same process) prove each optimization
+captures the speedup it was designed for; they do not invoke the kernel filesystem. I/O-overlap
+ratios are bounded by the rch host's rayon pool size, so absolute magnitudes are host-core-dependent
+(reported, not over-claimed). **UPDATE (cc 2026-06-20/21): the vs-kernel comparison is no longer
+"future e2e work"** — it was done this session via a loop mount (see the release-readiness summary
+real-kernel head-to-head), without needing FUSE.
+
+## Measurement methodology (reusable — cc 2026-06-20/21)
+For agents running vs-kernel perf head-to-heads on this box:
+- **Real kernel comparison without FUSE:** `sudo mount -o loop,ro <image> <mnt>` works here (despite
+  earlier belief it was blocked; `umount` *is* dcg-blocked, so leave RO mounts). Then time `ffs-cli
+  read/walk <image>` (no-FUSE engine, reads the image directly) against the in-kernel driver on
+  `<mnt>`. `btrfs-convert <ext4.img>` makes a btrfs image without the (dcg-blocked) format tool.
+- **⭐ Kernel baseline selection matters — report the right one.** `cat <file> >/dev/null` uses
+  **splice (zero-copy, never materializes bytes to userspace)** → it is the kernel's *best case* and
+  a data-consuming app cannot use it. The **apples-to-apples** baseline for "read data into memory"
+  is `dd if=<file> of=/dev/null bs=1M` (kernel copies to a userspace buffer, like FrankenFS does).
+  FrankenFS read **wins vs `dd`-materialize (1.66–4.9x via parallel chunked reads) and loses only vs
+  `cat`-splice** — so a "read loss" reported only against `cat` is misleading. Always quote both.
+- **Decouple from a peer's dirty crate:** `cargo build/test/bench -p <crate>` for a crate with no
+  dependency on the peer's WIP crate (e.g. ffs-block has no ffs-core dep) compiles without their
+  uncommitted changes — lets you ship+verify a lever while a peer edits an upstream crate.
+- **Footprint vs CPU vs parallelism:** confirm the bottleneck with `perf stat` (page-faults for
+  footprint, CPUs-utilized for parallelism) and `strace -c`/offset-trace (syscall count + access
+  pattern) before assuming a cause — this session twice disproved a plausible-but-wrong root-cause.
