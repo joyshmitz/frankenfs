@@ -379,6 +379,29 @@ pub trait ByteDevice: Send + Sync {
                 "read out of bounds: offset={offset} len={total_len} device_len={len_bytes}"
             )));
         }
+        if !self.preserves_read_vectored_destinations_on_error() {
+            // No all-or-nothing promise on this device: read straight into each
+            // destination buffer. Same per-buffer `read_exact_at` syscall count
+            // as the staged path, but no `vec![0; total_len]` scratch (alloc +
+            // zero-init) and no final scatter-copy of every byte. Devices that
+            // DO advertise preservation take the scratch-deferred branch below
+            // (which leaves `bufs` untouched until every read succeeds), so this
+            // fast path cannot weaken any advertised contract.
+            let mut next_offset = offset.0;
+            for buf in bufs.iter_mut() {
+                if buf.is_empty() {
+                    continue;
+                }
+                let len = u64::try_from(buf.len())
+                    .map_err(|_| FfsError::Format("read length overflows u64".to_owned()))?;
+                self.read_exact_at(cx, ByteOffset(next_offset), &mut **buf)?;
+                next_offset = next_offset
+                    .checked_add(len)
+                    .ok_or_else(|| FfsError::Format("read range overflows u64".to_owned()))?;
+            }
+            cx_checkpoint(cx)?;
+            return Ok(());
+        }
         let scratch_len = usize::try_from(total_len)
             .map_err(|_| FfsError::Format("read length overflows usize".to_owned()))?;
         let mut read_buf = vec![0_u8; scratch_len];
