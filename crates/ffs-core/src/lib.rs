@@ -2950,6 +2950,18 @@ enum Ext4IndirectReadSeg {
     },
 }
 
+enum Ext4IndirectReadJob<'buf> {
+    Run {
+        phys0: u64,
+        dst: &'buf mut [u8],
+    },
+    Partial {
+        phys: u64,
+        in_off: usize,
+        dst: &'buf mut [u8],
+    },
+}
+
 static PARALLEL_EXT4_INDIRECT_READ_CHUNK_BLOCKS: std::sync::OnceLock<usize> =
     std::sync::OnceLock::new();
 
@@ -12678,6 +12690,70 @@ impl OpenFs {
         }
     }
 
+    fn read_ext4_indirect_segments_into(
+        &self,
+        cx: &Cx,
+        scope: &RequestScope,
+        segs: &[Ext4IndirectReadSeg],
+        buf: &mut [u8],
+    ) -> Result<(), FfsError> {
+        use rayon::prelude::{IntoParallelIterator, ParallelIterator};
+
+        // Split the output buffer into disjoint segment windows. Holes are not
+        // represented in `segs`; their skipped ranges remain zero-filled.
+        let mut jobs = Vec::with_capacity(segs.len());
+        let total_len = buf.len();
+        let mut remaining = buf;
+        let mut cursor = 0usize;
+        for seg in segs {
+            let (buf_off, len) = match seg {
+                Ext4IndirectReadSeg::Run { buf_off, span, .. } => (*buf_off, *span),
+                Ext4IndirectReadSeg::Partial { buf_off, len, .. } => (*buf_off, *len),
+            };
+            debug_assert!(buf_off >= cursor);
+            debug_assert!(buf_off + len <= total_len);
+            let gap = buf_off - cursor;
+            let (_, after_gap) = remaining.split_at_mut(gap);
+            let (dst, after_seg) = after_gap.split_at_mut(len);
+            match seg {
+                Ext4IndirectReadSeg::Run { phys0, .. } => {
+                    jobs.push(Ext4IndirectReadJob::Run { phys0: *phys0, dst });
+                }
+                Ext4IndirectReadSeg::Partial { phys, in_off, .. } => {
+                    jobs.push(Ext4IndirectReadJob::Partial {
+                        phys: *phys,
+                        in_off: *in_off,
+                        dst,
+                    });
+                }
+            }
+            remaining = after_seg;
+            cursor = buf_off + len;
+        }
+
+        // READ (parallel): fill each segment's final destination directly.
+        // Rayon preserves Vec collection order for the indexed iterator, so the
+        // follow-up loop surfaces the first byte-ordered error as before.
+        let seg_results: Vec<Result<(), FfsError>> = jobs
+            .into_par_iter()
+            .map(|job| match job {
+                Ext4IndirectReadJob::Run { phys0, dst } => {
+                    self.read_contiguous_into_with_scope(cx, scope, BlockNumber(phys0), dst)
+                }
+                Ext4IndirectReadJob::Partial { phys, in_off, dst } => {
+                    let block_data = self.read_block_with_scope(cx, scope, BlockNumber(phys))?;
+                    dst.copy_from_slice(&block_data.as_slice()[in_off..in_off + dst.len()]);
+                    Ok(())
+                }
+            })
+            .collect();
+
+        for result in seg_results {
+            result?;
+        }
+        Ok(())
+    }
+
     /// Read file data using indirect block pointers (non-extent inodes).
     #[expect(clippy::cast_possible_truncation)]
     fn read_ext4_indirect(
@@ -12768,72 +12844,7 @@ impl OpenFs {
             bytes_read += chunk_size;
         }
 
-        enum Ext4IndirectReadJob<'buf> {
-            Run {
-                phys0: u64,
-                dst: &'buf mut [u8],
-            },
-            Partial {
-                phys: u64,
-                in_off: usize,
-                dst: &'buf mut [u8],
-            },
-        }
-
-        // Split the output buffer into disjoint segment windows. Holes are not
-        // represented in `segs`; their skipped ranges remain zero-filled.
-        let mut jobs = Vec::with_capacity(segs.len());
-        let mut remaining = buf.as_mut_slice();
-        let mut cursor = 0usize;
-        for seg in &segs {
-            let (buf_off, len) = match seg {
-                Ext4IndirectReadSeg::Run { buf_off, span, .. } => (*buf_off, *span),
-                Ext4IndirectReadSeg::Partial { buf_off, len, .. } => (*buf_off, *len),
-            };
-            debug_assert!(buf_off >= cursor);
-            debug_assert!(buf_off + len <= to_read);
-            let gap = buf_off - cursor;
-            let (_, after_gap) = remaining.split_at_mut(gap);
-            let (dst, after_seg) = after_gap.split_at_mut(len);
-            match seg {
-                Ext4IndirectReadSeg::Run { phys0, .. } => {
-                    jobs.push(Ext4IndirectReadJob::Run { phys0: *phys0, dst });
-                }
-                Ext4IndirectReadSeg::Partial { phys, in_off, .. } => {
-                    jobs.push(Ext4IndirectReadJob::Partial {
-                        phys: *phys,
-                        in_off: *in_off,
-                        dst,
-                    });
-                }
-            }
-            remaining = after_seg;
-            cursor = buf_off + len;
-        }
-
-        // READ (parallel): fill each segment's final destination directly.
-        // Rayon preserves Vec collection order for the indexed iterator, so the
-        // follow-up loop surfaces the first byte-ordered error as before.
-        let seg_results: Vec<Result<(), FfsError>> = {
-            use rayon::prelude::{IntoParallelIterator, ParallelIterator};
-            jobs.into_par_iter()
-                .map(|job| match job {
-                    Ext4IndirectReadJob::Run { phys0, dst } => {
-                        self.read_contiguous_into_with_scope(cx, scope, BlockNumber(phys0), dst)
-                    }
-                    Ext4IndirectReadJob::Partial { phys, in_off, dst } => {
-                        let block_data =
-                            self.read_block_with_scope(cx, scope, BlockNumber(phys))?;
-                        dst.copy_from_slice(&block_data.as_slice()[in_off..in_off + dst.len()]);
-                        Ok(())
-                    }
-                })
-                .collect()
-        };
-
-        for result in seg_results {
-            result?;
-        }
+        self.read_ext4_indirect_segments_into(cx, scope, &segs, &mut buf)?;
         Ok(buf)
     }
 
