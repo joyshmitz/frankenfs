@@ -26,10 +26,16 @@ use criterion::{Criterion, criterion_group, criterion_main};
 use ffs_block::{ByteDevice, FileByteDevice};
 use ffs_types::ByteOffset;
 use std::hint::black_box;
-use std::io::Write;
+use std::io::{IoSliceMut, Write};
 use std::os::unix::fs::FileExt;
 
 const SPAN: usize = 4096 * 256; // a 1 MiB contiguous read, matching read_contiguous.rs
+
+// Vectored A/B (bd-xmh5g.410): 128 KiB run scattered into 32 block-sized buffers
+// (the `read_contiguous_blocks_into` shape; 128 KiB >= the 64 KiB direct gate).
+const VBLOCKS: usize = 32;
+const VBLK: usize = 4096;
+const VSPAN: usize = VBLOCKS * VBLK;
 
 fn main_bench(c: &mut Criterion) {
     // A real file, filled with non-zero data so a missed copy is visible, then
@@ -74,6 +80,43 @@ fn main_bench(c: &mut Criterion) {
     });
 
     group.finish();
+
+    // ── Vectored A/B (bd-xmh5g.410): scatter a 128 KiB contiguous run into 32
+    //    block-sized buffers (the `read_contiguous_blocks_into` shape). ──
+    let mut vgroup = c.benchmark_group("file_device_vectored_read_128k");
+
+    // Old shape: one big zeroed staging Vec + one pread + scatter-copy into the
+    // 32 per-block buffers.
+    vgroup.bench_function("staged_scratch_scatter", |b| {
+        b.iter(|| {
+            let mut bufs: Vec<Vec<u8>> = (0..VBLOCKS).map(|_| vec![0_u8; VBLK]).collect();
+            let mut scratch = vec![0_u8; VSPAN];
+            raw.read_exact_at(scratch.as_mut_slice(), 0).unwrap();
+            let mut off = 0usize;
+            for buf in &mut bufs {
+                buf.copy_from_slice(&scratch[off..off + VBLK]);
+                off += VBLK;
+            }
+            black_box(bufs)
+        });
+    });
+
+    // New shape: the real FileByteDevice scatters straight into the buffers via
+    // a single positioned `preadv` — no scratch, no zero-init, no scatter-copy.
+    vgroup.bench_function("preadv_direct", |b| {
+        b.iter(|| {
+            let mut bufs: Vec<Vec<u8>> = (0..VBLOCKS).map(|_| vec![0_u8; VBLK]).collect();
+            {
+                let mut slices: Vec<IoSliceMut<'_>> =
+                    bufs.iter_mut().map(|b| IoSliceMut::new(b)).collect();
+                dev.read_vectored_exact_at(black_box(&cx), ByteOffset(0), &mut slices)
+                    .unwrap();
+            }
+            black_box(bufs)
+        });
+    });
+
+    vgroup.finish();
 }
 
 criterion_group!(file_device_read, main_bench);

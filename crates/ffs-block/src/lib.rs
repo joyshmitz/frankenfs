@@ -444,6 +444,11 @@ pub struct FileByteDevice {
 /// above it the scratch mmaps fresh pages whose first-touch faults dominate.
 const FILE_DEVICE_DIRECT_READ_MIN_DEFAULT: usize = 64 * 1024;
 
+/// Max iovec count for the single-`preadv` vectored direct-read fast path. The
+/// kernel caps a vectored read at `IOV_MAX` (1024) iovecs; beyond that `preadv`
+/// would short-read, so larger buffer arrays fall back to the staged scratch.
+const FILE_DEVICE_PREADV_IOV_MAX: usize = 1024;
+
 /// Resolve the direct-read threshold, allowing `FFS_DIRECT_READ_MIN_BYTES` to
 /// override the default (read once). Set it to a huge value to force the staged
 /// path for every read (used to A/B the lever in a single binary); set it low to
@@ -594,6 +599,37 @@ impl ByteDevice for FileByteDevice {
                 "read out of bounds: offset={offset} len={total_len} file_len={}",
                 self.len
             )));
+        }
+
+        // Large vectored read: scatter straight into the caller's buffers with a
+        // single positioned `preadv` — no `vec![0; total_len]` staging Vec (which
+        // mmaps + page-faults for large totals), no zero-init, no post-read
+        // scatter-copy. Same syscall count as the staged path (one). Guard the
+        // backing-shrink TOCTOU with an up-front length re-check so the
+        // destinations are never partially dirtied on a short read, preserving
+        // the all-or-nothing contract this device advertises. Capped at a safe
+        // iovec count (kernel `IOV_MAX` is 1024) and gated on size so small reads
+        // keep the freelist-cheap scratch (cheaper than an extra `fstat`).
+        if total_len >= file_device_direct_read_min() && bufs.len() <= FILE_DEVICE_PREADV_IOV_MAX {
+            let live_len = self.file.metadata()?.len();
+            if end > live_len {
+                return Err(FfsError::Io(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    format!("short backing vectored read: offset={offset} len={total_len} live_len={live_len}"),
+                )));
+            }
+            let off = i64::try_from(offset.0)
+                .map_err(|_| FfsError::Format("read offset overflows i64".to_owned()))?;
+            let read = nix::sys::uio::preadv(self.file.as_ref(), bufs, off)
+                .map_err(|e| FfsError::Io(std::io::Error::from_raw_os_error(e as i32)))?;
+            if read != total_len {
+                return Err(FfsError::Io(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    format!("short vectored read: got {read} of {total_len} bytes"),
+                )));
+            }
+            cx_checkpoint(cx)?;
+            return Ok(());
         }
 
         let mut read_buf = vec![0_u8; total_len];
