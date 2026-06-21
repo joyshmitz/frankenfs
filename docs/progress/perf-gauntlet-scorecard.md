@@ -2808,6 +2808,97 @@ fixture or a higher file-count fixture shows renewed cached-read contention.
 The remaining btrfs work should move to any fresh profiler-backed direct-kernel
 loss, not to cache-publication churn.
 
+## `bd-xmh5g.424` Addendum (cod-b ffs-block preadv vectored-read verification)
+
+Date: 2026-06-21
+Agent: BlackThrush (`cod-b`)
+Scope: `ffs-block` `FileByteDevice::read_vectored_exact_at` direct-scatter read
+Production status: evidence-only; no source changed in this pass
+RCH proof worker: `vmi1149989`
+Requested target dir: `/data/projects/.rch-targets/frankenfs-cod-b`
+
+### Verdict
+
+Evidence-only keep for the existing pending direct-`preadv` implementation, but
+do not treat it as a new end-to-end performance lever. The isolated primitive is
+large and real: a 128 KiB contiguous read scattered into 32 block buffers moves
+from staged scratch+scatter at `32.582 us` to direct `preadv` at `5.000 us`
+(`6.52x`). Current whole-command walks are already dominated by other retained
+read-path work, so the direct-read threshold toggle is neutral on ext4 metadata
+and only `1.04x` on btrfs 30k read-data, below the `1.05x` production-transfer
+bar.
+
+### Scorecard
+
+| Gate | Result |
+| --- | --- |
+| Code-first backlog rows examined in this addendum | 1 (`bd-xmh5g.424`) |
+| Direct ext4/btrfs-kernel ratios | ext4 30k tree metadata walk: FrankenFS default `34.1 ms +/- 1.1` vs mounted kernel ext4 `find` `56.7 ms +/- 4.3` = FrankenFS `1.66x` faster. btrfs 30k read-data: FrankenFS default `93.5 ms +/- 6.1` vs mounted kernel btrfs `709.8 ms +/- 12.8` = FrankenFS `7.59x` faster. |
+| Production levers kept | 0 new in this pass; existing `FileByteDevice::read_vectored_exact_at` direct `preadv` remains in source. |
+| Production levers rejected/reverted | 0 source hunks in this pass. Further staging-scratch variants are rejected unless a fresh profile shows staging still hot. |
+| Internal A/B win/loss/neutral | `1/0/2`: RCH Criterion primitive staged `32.582 us` -> direct `5.000 us` = `6.52x`; ext4 transfer default `34.1 ms` vs forced staged `33.6 ms` = neutral/noise; btrfs transfer forced staged `97.7 ms` -> default `93.5 ms` = `1.04x`, below keep threshold. |
+| Direct kernel win/loss/neutral | `2/0/0`: current source beats mounted kernel ext4 metadata walk and mounted kernel btrfs 30k read-data. |
+| Conformance/behavior guard | RCH `cargo bench --profile release -p ffs-block --bench file_device_read -- file_device_vectored_read_128k --warm-up-time 1 --measurement-time 1 --sample-size 10 --noplot` passed on `vmi1149989`; RCH `cargo check -p ffs-block --all-targets` passed on `vmi1149989`; RCH `cargo test -p ffs-harness --test conformance -- --nocapture` passed on `vmi1149989` with `100 passed / 0 failed / 2 ignored`. No code diff. |
+| Known gate caveat | `rch` honored the requested local `CARGO_TARGET_DIR` input but rewrote it to a worker-scoped cold target path on `vmi1149989`, causing a 5m29s scoped bench build. |
+| Release-readiness score for perf-superiority claims | 84 / 100: direct mounted ext4 and btrfs rows are wins, and the primitive proof is strong; score is capped because the end-to-end transfer toggle is neutral-to-small rather than a fresh production keep. |
+| Release-readiness score for this row's hygiene | 93 / 100: one scoped crate bench, direct kernel comparator, no new scratch/worktree, no source edit, explicit no-retry predicate, RCH check, conformance, and ledger entry are complete. Deduction is for `rch` worker-scoped cold target rewrites and neutral whole-command transfer. |
+
+### Measured Rows
+
+| Workload | Baseline / forced staged | Current default | Kernel | Ratio | Verdict |
+| --- | ---: | ---: | ---: | ---: | --- |
+| `file_device_vectored_read_128k` Criterion primitive | `32.582 us` staged scratch+scatter | `5.000 us` direct `preadv` | N/A | `6.52x` old/new | Primitive keep |
+| ext4 30k tree `walk --no-stat` | `33.6 ms +/- 1.8` forced staged | `34.1 ms +/- 1.1` | `56.7 ms +/- 4.3` | default is neutral vs forced staged; `1.66x` faster than kernel | Transfer neutral, direct win |
+| btrfs 30k `walk --parallel --read-data --no-stat` | `97.7 ms +/- 1.9` forced staged | `93.5 ms +/- 6.1` | `709.8 ms +/- 12.8` | `1.04x` forced/default; `7.59x` faster than kernel | Transfer neutral, direct win |
+
+### Isomorphism
+
+Ordering preserved: yes. `preadv` receives the same contiguous logical byte
+range and the same ordered destination slices as the staged scratch path.
+
+Tie-breaking unchanged: yes. Bounds checks and live-length rechecks happen
+before I/O, and the caller-visible all-or-nothing destination contract is
+unchanged.
+
+Floating-point identical: N/A.
+
+RNG seeds unchanged: N/A.
+
+Bytes verified: the `ffs-block` Criterion bench asserts direct scalar
+equivalence and exercises the same file contents; the whole-command comparator
+uses existing mounted ext4/btrfs fixtures already covered by conformance and
+the current read-path scorecard.
+
+### Commands
+
+```bash
+AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-b \
+  rch exec -- cargo bench --profile release -p ffs-block --bench file_device_read -- \
+  file_device_vectored_read_128k --warm-up-time 1 --measurement-time 1 --sample-size 10 --noplot
+
+hyperfine --warmup 2 --runs 7 \
+  --export-json /tmp/frankenfs-cod-b-vectored-transfer-20260621.json \
+  --command-name ffs-ext4-tree-default \
+  '/data/projects/.rch-targets/frankenfs-cod-b/release/ffs-cli --log-format json walk --no-stat /tmp/ffs_tree_3927494.img >/dev/null 2>&1' \
+  --command-name ffs-ext4-tree-forced-staged \
+  'FFS_DIRECT_READ_MIN_BYTES=1073741824 /data/projects/.rch-targets/frankenfs-cod-b/release/ffs-cli --log-format json walk --no-stat /tmp/ffs_tree_3927494.img >/dev/null 2>&1' \
+  --command-name kernel-ext4-tree \
+  'find /tmp/ffs_treemnt_3927494 -path /tmp/ffs_treemnt_3927494/lost+found -prune -o -type f -printf "" >/dev/null 2>&1' \
+  --command-name ffs-btrfs30k-default \
+  '/data/projects/.rch-targets/frankenfs-cod-b/release/ffs-cli --log-format json walk --parallel --read-data --no-stat /tmp/ffs_btree_707328.img >/dev/null 2>&1' \
+  --command-name ffs-btrfs30k-forced-staged \
+  'FFS_DIRECT_READ_MIN_BYTES=1073741824 /data/projects/.rch-targets/frankenfs-cod-b/release/ffs-cli --log-format json walk --parallel --read-data --no-stat /tmp/ffs_btree_707328.img >/dev/null 2>&1' \
+  --command-name kernel-btrfs30k-read \
+  'find /tmp/ffs_btreemnt_707328 -path /tmp/ffs_btreemnt_707328/lost+found -prune -o -path /tmp/ffs_btreemnt_707328/ext2_saved -prune -o -type f -exec cat {} + >/dev/null 2>&1'
+```
+
+### Retry Predicate
+
+Do not retry file-device staging-scratch elimination variants on these ext4
+tree or btrfs 30k walk fixtures. The primitive is already fixed; further work
+requires a fresh profile showing staging allocation or scatter-copy reappearing
+as a material whole-command hotspot.
+
 ---
 
 ## Reconciliation pass — cc (BlackThrush, opus) 2026-06-21: the earlier "remaining direct-kernel losses" are FLIPPED to WINS
