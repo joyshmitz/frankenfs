@@ -79,8 +79,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::io::IoSliceMut;
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 use tracing::{debug, error, info, trace, warn};
@@ -988,7 +988,7 @@ pub struct OpenFs {
     btrfs_csum_read_cache: Mutex<Option<std::sync::Arc<BtrfsCsumItems>>>,
     /// Read-only btrfs file read plan cache, populated explicitly by bulk
     /// walkers before issuing many file reads from the same immutable fs tree.
-    btrfs_read_plan_index: Mutex<Option<Arc<BtrfsReadPlanIndex>>>,
+    btrfs_read_plan_index: OnceLock<Arc<BtrfsReadPlanIndex>>,
     /// Memoized fs-tree root bytenr per subvolume objectid (bd-yuk9v). On a
     /// read-only mount the root tree is immutable, so resolving a subvolume's
     /// ROOT_ITEM once and caching the bytenr removes the per-op root-tree
@@ -3319,7 +3319,7 @@ impl OpenFs {
             btrfs_rw_ephemeral_ok: options.btrfs_rw_ephemeral_ok,
             btrfs_verify_data_on_read: options.btrfs_verify_data_on_read,
             btrfs_csum_read_cache: Mutex::new(None),
-            btrfs_read_plan_index: Mutex::new(None),
+            btrfs_read_plan_index: OnceLock::new(),
             btrfs_fs_tree_root_cache: Mutex::new(std::collections::HashMap::new()),
             btrfs_parsed_node_cache: ShardedCache::new(),
         };
@@ -8412,21 +8412,19 @@ impl OpenFs {
         if !matches!(&self.flavor, FsFlavor::Btrfs(_)) || self.btrfs_alloc_state.is_some() {
             return Ok(None);
         }
-        if let Some(index) = self.btrfs_read_plan_index.lock().as_ref().cloned() {
+        if let Some(index) = self.btrfs_read_plan_index.get().cloned() {
             return Ok(Some(index));
         }
 
         let built = self.build_btrfs_read_plan_index(cx)?;
-        let mut guard = self.btrfs_read_plan_index.lock();
-        if let Some(existing) = guard.as_ref() {
-            return Ok(Some(Arc::clone(existing)));
-        }
-        *guard = Some(Arc::clone(&built));
-        Ok(Some(built))
+        let _ = self.btrfs_read_plan_index.set(Arc::clone(&built));
+        Ok(Some(
+            self.btrfs_read_plan_index.get().cloned().unwrap_or(built),
+        ))
     }
 
     fn btrfs_cached_read_plan_index(&self) -> Option<Arc<BtrfsReadPlanIndex>> {
-        self.btrfs_read_plan_index.lock().as_ref().cloned()
+        self.btrfs_read_plan_index.get().cloned()
     }
 
     fn build_btrfs_read_plan_index(&self, cx: &Cx) -> ffs_error::Result<Arc<BtrfsReadPlanIndex>> {

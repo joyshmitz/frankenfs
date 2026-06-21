@@ -2617,6 +2617,101 @@ experiments that this row already bounded.
 
 ---
 
+## `bd-xmh5g.423` Addendum (cod-b btrfs read-plan lock-free publication)
+
+Date: 2026-06-21
+Agent: BlackThrush (`cod-b`)
+Scope: `ffs-core` read-only `BtrfsReadPlanIndex` cache publication
+Production status: retained
+RCH proof workers: `vmi1153651` baseline release build, `ovh-a` candidate
+release build, `hz2` check, `vmi1152480` conformance
+Requested target dir: `/data/projects/.rch-targets/frankenfs-cod-b`
+
+### Verdict
+
+Keep. The radical lever came from the RCU/read-mostly publication family:
+`BtrfsReadPlanIndex` is immutable after prewarm on read-only btrfs images, so
+the old `Mutex<Option<Arc<_>>>` was pure per-file reader contention. Replacing
+it with `OnceLock<Arc<_>>` removes the cached-read lock without changing the
+plan contents, lookup semantics, or writable-btrfs bypass.
+
+The measured win is modest but real on the end-to-end btrfs many-files path:
+`1.15x` old/new at 30k files and `1.08x` at 60k files, with mounted-kernel
+btrfs ratios widened on both fixtures.
+
+### Scorecard
+
+| Gate | Result |
+| --- | --- |
+| Code-first backlog rows examined in this addendum | 1 (`bd-xmh5g.423`) |
+| Direct ext4/btrfs-kernel ratios | 30k btrfs: candidate `95.2 ms +/- 5.6` vs kernel `697.3 ms +/- 13.1` = `7.33x` faster. 60k btrfs: candidate `183.6 ms +/- 9.0` vs kernel `1.454 s +/- 0.022` = `7.92x` faster. Ext4 is N/A for this btrfs-only cache publication lever. |
+| Production levers kept | 1 (`OpenFs::btrfs_read_plan_index` now publishes the immutable plan with `OnceLock<Arc<_>>`) |
+| Production levers rejected/reverted | 0 |
+| Internal A/B win/loss/neutral | `2/0/0`: baseline 30k `109.3 ms +/- 7.8` -> candidate `95.2 ms +/- 5.6` = `1.15x`; baseline 60k `198.0 ms +/- 8.1` -> candidate `183.6 ms +/- 9.0` = `1.08x` |
+| Direct kernel win/loss/neutral | `2/0/0`: candidate beats mounted kernel btrfs at 30k and 60k |
+| Conformance/behavior guard | Local `cargo fmt -p ffs-core --check` and `git diff --check` passed. RCH `cargo build --release -p ffs-cli` passed for baseline and candidate. RCH `cargo check -p ffs-core --all-targets` passed on `hz2`. RCH `cargo test -p ffs-harness --test conformance -- --nocapture` passed on `vmi1152480` with `100 passed / 0 failed / 2 ignored`. |
+| Known gate caveat | `rch` selected different workers and all selected workers had cold dependency caches, despite the requested warm `CARGO_TARGET_DIR`; runtime A/B was still local from the retrieved release binary and the same mounted fixtures. Full workspace build/clippy was not run because the user explicitly constrained the run to disk-frugal per-crate work. |
+| Release-readiness score for perf-superiority claims | 88 / 100: direct mounted-kernel btrfs ratios are wins, same-local-runtime A/B clears the keep bar, and conformance is green; score is capped because the lever is btrfs-only and the rch build workers were not identical. |
+| Release-readiness score for this row's hygiene | 91 / 100: one source lever, no new worktree or `.scratch`, direct kernel ratios, 30k/60k scaling, RCH build/check/conformance, fmt, diff-check, ledger, and scorecard are complete. Deduction is no fresh clippy due disk/per-crate scope. |
+
+### Measured Rows
+
+| Workload | Baseline | Candidate | Kernel btrfs | Candidate ratio | Verdict |
+| --- | ---: | ---: | ---: | ---: | --- |
+| 30k files `walk --parallel --read-data --no-stat` | `109.3 ms +/- 7.8` | `95.2 ms +/- 5.6` | `697.3 ms +/- 13.1` | `1.15x` old/new; `7.33x` faster than kernel | KEEP |
+| 60k files `walk --parallel --read-data --no-stat` | `198.0 ms +/- 8.1` | `183.6 ms +/- 9.0` | `1.454 s +/- 0.022` | `1.08x` old/new; `7.92x` faster than kernel | KEEP |
+
+### Isomorphism
+
+Ordering preserved: yes. The cached plan contents and extent assembly order are
+unchanged; readers only avoid a mutex while cloning the already-published
+`Arc`.
+
+Tie-breaking unchanged: yes. Writable COW records still bypass the read-only
+cache. Error priority, directory parsing timing, checksum behavior, and mount
+selection are unchanged.
+
+Floating-point identical: N/A.
+
+RNG seeds unchanged: N/A.
+
+Bytes verified: walk reports the same file counts and byte totals on both
+fixtures: 30k files / 60000 bytes and 60k files / 120000 bytes. Harness
+conformance passed 100/0/2.
+
+### Commands
+
+```bash
+AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-b \
+  rch exec -- cargo build --release -p ffs-cli
+
+hyperfine --warmup 3 --runs 10 \
+  --export-json /tmp/frankenfs-cod-b-btrfs-readplan-oncelock-candidate-20260621.json \
+  --command-name ffs-btrfs30k-oncelock \
+  '/data/projects/.rch-targets/frankenfs-cod-b/release/ffs-cli --log-format json walk --parallel --read-data --no-stat /tmp/ffs_btree_707328.img >/dev/null 2>&1' \
+  --command-name kernel-btrfs30k-read \
+  'find /tmp/ffs_btreemnt_707328 -path /tmp/ffs_btreemnt_707328/lost+found -prune -o -path /tmp/ffs_btreemnt_707328/ext2_saved -prune -o -type f -exec cat {} + >/dev/null 2>&1' \
+  --command-name ffs-btrfs60k-oncelock \
+  '/data/projects/.rch-targets/frankenfs-cod-b/release/ffs-cli --log-format json walk --parallel --read-data --no-stat /var/tmp/ffs_btree60k_714351.img >/dev/null 2>&1' \
+  --command-name kernel-btrfs60k-read \
+  'find /var/tmp/ffs_btree60kmnt_714351 -path /var/tmp/ffs_btree60kmnt_714351/lost+found -prune -o -path /var/tmp/ffs_btree60kmnt_714351/ext2_saved -prune -o -type f -exec cat {} + >/dev/null 2>&1'
+
+AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-b \
+  rch exec -- cargo check -p ffs-core --all-targets
+
+AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-b \
+  rch exec -- cargo test -p ffs-harness --test conformance -- --nocapture
+```
+
+### Retry Predicate
+
+Do not retry mutex-vs-`OnceLock` publication variants unless a native btrfs
+fixture or a higher file-count fixture shows renewed cached-read contention.
+The remaining btrfs work should move to any fresh profiler-backed direct-kernel
+loss, not to cache-publication churn.
+
+---
+
 ## Reconciliation pass — cc (BlackThrush, opus) 2026-06-21: the earlier "remaining direct-kernel losses" are FLIPPED to WINS
 
 The earlier rows above flagged two **direct-kernel materialize** losses as "residual targets":
@@ -2629,4 +2724,4 @@ The earlier rows above flagged two **direct-kernel materialize** losses as "resi
 
 **There is no remaining direct-kernel MATERIALIZE loss on any measured read workload.** The only residual "losses" are vs kernel `cat`/splice-class (zero-copy, never delivers bytes to userspace — not a data-consuming-app baseline). Apples-to-apples (kernel materializes via `dd`/`cat`-to-app, like FrankenFS), **FrankenFS dominates every measured ext4/btrfs read/traversal path.**
 
-Full current frontier (9 workloads, warm+cold, peak `24.3x` cold btrfs many-files) + all 4 documented losses flipped: see `perf-gauntlet-scorecard-cc.md` and `docs/NEGATIVE_EVIDENCE.md`. The btrfs many-files per-file-walk pathology (the worst gap, was timeout/>100x) is now `14.4x` warm / `24.3x` cold via `.421` (cod-a prewarm) + `.422` (cache-shard mix, cc finding/fix) + `.419` (cc parallelize-across-files). So the "next btrfs work" note above is resolved: no remaining direct-kernel materialize loss; the only open residual is `bd-xmh5g.423` (per-read index Mutex, ~4.4% on a 24.3x-dominant path, cod-a's design call).
+Full current frontier (9 workloads, warm+cold, peak `24.3x` cold btrfs many-files) + all 4 documented losses flipped: see `perf-gauntlet-scorecard-cc.md` and `docs/NEGATIVE_EVIDENCE.md`. The btrfs many-files per-file-walk pathology (the worst gap, was timeout/>100x) is now `14.4x` warm / `24.3x` cold via `.421` (cod-a prewarm) + `.422` (cache-shard mix, cc finding/fix) + `.419` (cc parallelize-across-files). The prior `.423` residual per-read index mutex is now closed by the lock-free `OnceLock` publication row above; no direct-kernel materialize loss is reopened here.
