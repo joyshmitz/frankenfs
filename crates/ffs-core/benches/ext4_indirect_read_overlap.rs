@@ -242,6 +242,43 @@ fn read_large_run_chunked(
     Ok(buf)
 }
 
+/// CANDIDATE large-run shape: split one run, fill ordered output chunks in place.
+fn read_large_run_chunked_in_place(
+    cx: &Cx,
+    dev: &LatencyBlockDevice,
+    blocks: usize,
+    chunk_blocks: usize,
+) -> Result<Vec<u8>> {
+    let mut chunks = Vec::new();
+    let mut block_off = 0_usize;
+    while block_off < blocks {
+        let take_blocks = (blocks - block_off).min(chunk_blocks);
+        chunks.push((block_off, take_blocks));
+        block_off += take_blocks;
+    }
+
+    let mut buf = vec![0_u8; blocks * BS];
+    let mut jobs = Vec::with_capacity(chunks.len());
+    {
+        let mut rest = buf.as_mut_slice();
+        for &(block_off, take_blocks) in &chunks {
+            let bytes = take_blocks * BS;
+            let (dst, after_dst) = rest.split_at_mut(bytes);
+            rest = after_dst;
+            jobs.push((block_off, dst));
+        }
+    }
+
+    let reads: Vec<Result<()>> = jobs
+        .into_par_iter()
+        .map(|(block_off, dst)| dev.read_contiguous_into(cx, BlockNumber(block_off as u64), dst))
+        .collect();
+    for read in reads {
+        read?;
+    }
+    Ok(buf)
+}
+
 fn bench_indirect(c: &mut Criterion) {
     let cx = Cx::for_testing();
     let mut group = c.benchmark_group("ext4_indirect_read_overlap");
@@ -289,6 +326,12 @@ fn bench_indirect(c: &mut Criterion) {
                 .expect("large-run chunked"),
             "chunked large-run indirect read diverged from one-run read (chunk_blocks={chunk_blocks})",
         );
+        assert_eq!(
+            single_large,
+            read_large_run_chunked_in_place(&cx, &dev, LARGE_RUN_BLOCKS, chunk_blocks)
+                .expect("large-run chunked in-place"),
+            "in-place chunked large-run indirect read diverged from one-run read (chunk_blocks={chunk_blocks})",
+        );
     }
     group.bench_with_input(
         BenchmarkId::new("large_run_single", LARGE_RUN_BLOCKS),
@@ -307,6 +350,23 @@ fn bench_indirect(c: &mut Criterion) {
             |b, &blocks| {
                 b.iter(|| {
                     black_box(read_large_run_chunked(
+                        &cx,
+                        &dev,
+                        black_box(blocks),
+                        black_box(chunk_blocks),
+                    ))
+                });
+            },
+        );
+        group.bench_with_input(
+            BenchmarkId::new(
+                format!("large_run_chunked_in_place_{chunk_blocks}blocks"),
+                LARGE_RUN_BLOCKS,
+            ),
+            &LARGE_RUN_BLOCKS,
+            |b, &blocks| {
+                b.iter(|| {
+                    black_box(read_large_run_chunked_in_place(
                         &cx,
                         &dev,
                         black_box(blocks),

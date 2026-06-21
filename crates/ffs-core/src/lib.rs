@@ -12768,44 +12768,71 @@ impl OpenFs {
             bytes_read += chunk_size;
         }
 
-        // READ (parallel): fetch each segment's bytes across the rayon pool. A
-        // blocking read parks its worker, so the per-segment access latencies
-        // overlap up to the pool size (the I/O-overlap lever shared with the
-        // extent read path, bd-yg6tk).
-        let seg_reads: Vec<Result<Vec<u8>, FfsError>> = {
-            use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
-            segs.par_iter()
-                .map(|seg| match seg {
-                    Ext4IndirectReadSeg::Run { phys0, span, .. } => {
-                        let mut tmp = vec![0_u8; *span];
-                        self.read_contiguous_into_with_scope(
-                            cx,
-                            scope,
-                            BlockNumber(*phys0),
-                            &mut tmp,
-                        )?;
-                        Ok(tmp)
+        enum Ext4IndirectReadJob<'buf> {
+            Run {
+                phys0: u64,
+                dst: &'buf mut [u8],
+            },
+            Partial {
+                phys: u64,
+                in_off: usize,
+                dst: &'buf mut [u8],
+            },
+        }
+
+        // Split the output buffer into disjoint segment windows. Holes are not
+        // represented in `segs`; their skipped ranges remain zero-filled.
+        let mut jobs = Vec::with_capacity(segs.len());
+        let mut remaining = buf.as_mut_slice();
+        let mut cursor = 0usize;
+        for seg in &segs {
+            let (buf_off, len) = match seg {
+                Ext4IndirectReadSeg::Run { buf_off, span, .. } => (*buf_off, *span),
+                Ext4IndirectReadSeg::Partial { buf_off, len, .. } => (*buf_off, *len),
+            };
+            debug_assert!(buf_off >= cursor);
+            debug_assert!(buf_off + len <= to_read);
+            let gap = buf_off - cursor;
+            let (_, after_gap) = remaining.split_at_mut(gap);
+            let (dst, after_seg) = after_gap.split_at_mut(len);
+            match seg {
+                Ext4IndirectReadSeg::Run { phys0, .. } => {
+                    jobs.push(Ext4IndirectReadJob::Run { phys0: *phys0, dst });
+                }
+                Ext4IndirectReadSeg::Partial { phys, in_off, .. } => {
+                    jobs.push(Ext4IndirectReadJob::Partial {
+                        phys: *phys,
+                        in_off: *in_off,
+                        dst,
+                    });
+                }
+            }
+            remaining = after_seg;
+            cursor = buf_off + len;
+        }
+
+        // READ (parallel): fill each segment's final destination directly.
+        // Rayon preserves Vec collection order for the indexed iterator, so the
+        // follow-up loop surfaces the first byte-ordered error as before.
+        let seg_results: Vec<Result<(), FfsError>> = {
+            use rayon::prelude::{IntoParallelIterator, ParallelIterator};
+            jobs.into_par_iter()
+                .map(|job| match job {
+                    Ext4IndirectReadJob::Run { phys0, dst } => {
+                        self.read_contiguous_into_with_scope(cx, scope, BlockNumber(phys0), dst)
                     }
-                    Ext4IndirectReadSeg::Partial {
-                        phys, in_off, len, ..
-                    } => {
+                    Ext4IndirectReadJob::Partial { phys, in_off, dst } => {
                         let block_data =
-                            self.read_block_with_scope(cx, scope, BlockNumber(*phys))?;
-                        Ok(block_data.as_slice()[*in_off..*in_off + *len].to_vec())
+                            self.read_block_with_scope(cx, scope, BlockNumber(phys))?;
+                        dst.copy_from_slice(&block_data.as_slice()[in_off..in_off + dst.len()]);
+                        Ok(())
                     }
                 })
                 .collect()
         };
 
-        // ASSEMBLE (serial): copy each segment into the output in byte order,
-        // surfacing the first error in byte order exactly as the old loop did.
-        for (seg, read) in segs.iter().zip(seg_reads) {
-            let data = read?;
-            let buf_off = match seg {
-                Ext4IndirectReadSeg::Run { buf_off, .. }
-                | Ext4IndirectReadSeg::Partial { buf_off, .. } => *buf_off,
-            };
-            buf[buf_off..buf_off + data.len()].copy_from_slice(&data);
+        for result in seg_results {
+            result?;
         }
         Ok(buf)
     }

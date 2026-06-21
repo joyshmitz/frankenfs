@@ -1,5 +1,99 @@
 # Perf Gauntlet Scorecard
 
+## `bd-xmh5g.411` cod-b Ext4 Indirect Direct-Output Keep
+
+Date: 2026-06-21
+Agent: BlackThrush (`cod-b`)
+Scope: `ffs-core` ext4 non-extent indirect read path and
+`crates/ffs-core/benches/ext4_indirect_read_overlap.rs`
+Commit under measurement: local candidate for `bd-xmh5g.411`
+RCH workers: `vmi1152480` check/test, `vmi1153651` bench/conformance,
+`hz2` release CLI build
+Requested target dir: `/data/projects/.rch-targets/frankenfs-cod-b`
+
+### Verdict
+
+KEEP the direct-output segment fill. The old ext4 indirect read path allocated
+one `Vec` per planned data segment, read into those temporary buffers in
+parallel, then copied every segment into the caller output buffer serially. The
+candidate splits the final output buffer into disjoint windows up front and lets
+each Rayon job fill its final destination directly. Holes remain zero-filled,
+partial-block reads keep the existing full-block read plus slice-copy behavior,
+and ordered collection preserves the prior first-error surface.
+
+The keep is internal and measured. It does not close the mounted-kernel gap:
+exact ext4 no-extents indirect reads still lose badly to kernel ext4 `cat`, and
+the rechecked btrfs scorecard row also remains a kernel loss.
+
+### Scorecard
+
+| Gate | Result |
+| --- | --- |
+| Direct mounted ext4 rows completed | 1 exact no-extents indirect row on `/data/tmp/extind2_1501351.img:/double_ind.bin`, mounted read-only at `/data/tmp/extind2mnt_1501351` |
+| Direct mounted btrfs rows completed | 1 current-scorecard row on `/data/tmp/btrdiff2_1340519.img:/compressible.bin`, already mounted read-only |
+| Direct ext4/btrfs-kernel ratios | Ext4 indirect: FrankenFS `147.9 ms` vs kernel ext4 `cat` `4.7 ms` = `31.78x` slower. Btrfs scorecard read: FrankenFS `37.7 ms` vs kernel btrfs `cat` `6.8 ms` = `5.56x` slower. |
+| Production levers kept | 1 |
+| Production levers rejected/reverted | 0 |
+| Internal win/loss/neutral | `1 / 0 / 0` primary: default 128-block chunked temp-buffer path `57.593 ms` mean vs in-place direct-output `24.090 ms` mean = `2.39x`. Supporting chunk-size rows also won; fragmented 256-run row is treated as noisy/neutral routing evidence. |
+| Direct kernel win/loss/neutral | `0 / 2 / 0`: exact ext4 indirect and btrfs scorecard reads both lose to fastest mounted-kernel `cat`. |
+| Behavior proof | SHA-256 of FrankenFS stdout matched mounted kernel file for both direct comparators: ext4 double-indirect `c0d8240d06d2b4e07ac97735ae497c82b55909a489fd429f937f61ff396ea9be`; btrfs compressible `2e379e112375338695dbd226f27bf096db571a99e5f64b975b0bb2e43b6f86b9`. Benchmark assertions compare old chunked output and in-place output against the single-run reference. |
+| Build/check guard | Local `cargo fmt -p ffs-core --check` passed; RCH `cargo check -p ffs-core --lib` passed on `vmi1152480`; RCH focused `cargo test -p ffs-core ext4_indirect_read_ -- --nocapture` passed on `vmi1152480`; RCH conformance `cargo test -p ffs-harness --test conformance -- --nocapture` passed on `vmi1153651` (`100 passed / 0 failed / 2 ignored`); RCH `cargo build --release -p ffs-cli` passed on `hz2`. |
+| Clippy | Not run for this narrow production diff; prior scorecard rows record pre-existing scoped `ffs-core` pedantic debt outside this lane. |
+| Release-readiness score for perf-superiority claims | 45 / 100: the internal lever is real and conformance is green, but direct mounted-kernel read rows still lose. |
+| Release-readiness score for this row's hygiene | 94 / 100: exact RCH target dir, per-crate bench, behavior hash, mounted ext4/btrfs ratios, conformance, and ledger rows are complete. Deduction is no fresh clippy because scoped `ffs-core` clippy is already known polluted by unrelated pedantic debt. |
+
+### Measured Rows
+
+| Workload | Previous path | Candidate | Ratio | Verdict |
+| --- | ---: | ---: | ---: | --- |
+| `large_run_chunked_128blocks/8192` | `57.593 ms` mean | `24.090 ms` mean | `2.39x` old/new | KEEP |
+| `large_run_chunked_64blocks/8192` | `47.148 ms` mean | `21.147 ms` mean | `2.23x` old/new | Supporting win |
+| `large_run_chunked_256blocks/8192` | `52.573 ms` mean | `24.064 ms` mean | `2.18x` old/new | Supporting win |
+| Mounted ext4 `cat /double_ind.bin` vs FrankenFS | `4.7 ms` kernel | `147.9 ms` FrankenFS | kernel `31.78x` faster | Direct loss |
+| Mounted btrfs `cat /compressible.bin` vs FrankenFS | `6.8 ms` kernel | `37.7 ms` FrankenFS | kernel `5.56x` faster | Direct loss |
+
+### Isomorphism
+
+Ordering preserved: yes. Segment planning order is unchanged; the code only
+changes where each planned segment is read.
+
+Tie-breaking unchanged: yes. Rayon collection into `Vec<Result<_, _>>`
+preserves job order for the indexed vector iterator, and the serial result loop
+surfaces the first byte-ordered read error as before.
+
+Floating-point identical: N/A.
+
+RNG seeds unchanged: N/A.
+
+Goldens/bytes verified: yes. The benchmark asserts in-place output equals the
+single-run reference, and mounted ext4/btrfs SHA-256 hashes matched the kernel
+files before timing. Harness conformance passed `100 / 0 / 2 ignored`.
+
+### Commands
+
+```bash
+AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-b \
+  rch exec -- cargo bench --profile release -p ffs-core \
+  --bench ext4_indirect_read_overlap -- \
+  ext4_indirect_read_overlap \
+  --warm-up-time 1 --measurement-time 2 --sample-size 10 --noplot
+
+AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-b \
+  rch exec -- cargo test -p ffs-harness --test conformance -- --nocapture
+
+hyperfine --warmup 3 --runs 15 \
+  '/data/projects/.rch-targets/frankenfs-cod-b/release/ffs-cli read --discard /data/tmp/extind2_1501351.img /double_ind.bin' \
+  'cat /data/tmp/extind2mnt_1501351/double_ind.bin > /dev/null'
+
+hyperfine --warmup 3 --runs 15 \
+  '/data/projects/.rch-targets/frankenfs-cod-b/release/ffs-cli read --discard /data/tmp/btrdiff2_1340519.img /compressible.bin' \
+  'cat /data/tmp/btrdiff2mnt_1340519/compressible.bin > /dev/null'
+```
+
+Note: the user-requested `cargo bench --release` spelling is not accepted by
+Cargo for bench runs, so this used the Cargo-equivalent `--profile release`
+spelling.
+
 ## `bd-xmh5g` cod-a Btrfs Tiny-Frame Scheduling Rejection
 
 Date: 2026-06-21
