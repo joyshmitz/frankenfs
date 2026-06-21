@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 #![allow(clippy::cast_possible_truncation)]
+#![allow(clippy::significant_drop_tightening)]
 
 //! Same-machine A/B for the `FileByteDevice::read_exact_at` direct-read lever.
 //!
