@@ -646,6 +646,31 @@ enum Command {
         #[arg(long)]
         discard: bool,
     },
+    /// Random-read benchmark: open once, then read `count` random page-aligned
+    /// blocks of `size` bytes from `path` (no FUSE) and report engine time,
+    /// throughput and IOPS. This is the random-access analogue of `read` — it
+    /// exercises one extent-map lookup per access (sequential `read` coalesces
+    /// contiguous runs, hiding per-lookup cost), for a head-to-head against a
+    /// kernel random `pread` loop.
+    RandRead {
+        /// Path to the filesystem image.
+        image: PathBuf,
+        /// Absolute path of the file inside the image (e.g. /bigfile).
+        path: String,
+        /// Number of random reads to issue.
+        #[arg(long, default_value_t = 100_000)]
+        count: usize,
+        /// Bytes per read (page-aligned offset, this many bytes each).
+        #[arg(long, default_value_t = 4096)]
+        size: usize,
+        /// Issue the reads concurrently across the rayon pool (models a
+        /// many-threaded random-read workload); default is single-threaded.
+        #[arg(long)]
+        parallel: bool,
+        /// Deterministic PRNG seed for the offset sequence (reproducible A/B).
+        #[arg(long, default_value_t = 0x9E37_79B9_7F4A_7C15)]
+        seed: u64,
+    },
     /// Recursively walk every directory and stat every entry (no FUSE).
     ///
     /// Equivalent to `find <mnt> | xargs stat` — a metadata-heavy workload
@@ -1021,6 +1046,7 @@ impl Command {
         match self {
             Self::Inspect { .. } => "inspect",
             Self::Read { .. } => "read",
+            Self::RandRead { .. } => "randread",
             Self::Walk { .. } => "walk",
             Self::MvccStats { .. } => "mvcc-stats",
             Self::Info { .. } => "info",
@@ -1808,6 +1834,14 @@ fn run() -> Result<()> {
             path,
             discard,
         } => read_file_cmd(&image, &path, discard),
+        Command::RandRead {
+            image,
+            path,
+            count,
+            size,
+            parallel,
+            seed,
+        } => randread_cmd(&image, &path, count, size, parallel, seed),
         Command::Walk {
             image,
             no_stat,
@@ -2232,6 +2266,103 @@ fn read_file_cmd(path: &PathBuf, file_path: &str, discard: bool) -> Result<()> {
     if discard {
         eprintln!("read {total} bytes from {file_path}");
     }
+    Ok(())
+}
+
+/// Random-read benchmark (no FUSE): open once, resolve `file_path`, then issue
+/// `count` random page-aligned reads of `size` bytes each via the positioned
+/// read engine (`read_into`). Reports the engine time (excluding open/resolve),
+/// throughput and IOPS as a JSON-able `info!` line, for a head-to-head against
+/// a kernel random `pread` loop. Random access does one extent-map lookup per
+/// read (sequential `read` coalesces runs), so this exercises the per-lookup
+/// path (e.g. the `ffs-extent` cache) that sequential reads hide (bd-7f6yr).
+fn randread_cmd(
+    path: &PathBuf,
+    file_path: &str,
+    count: usize,
+    size: usize,
+    parallel: bool,
+    seed: u64,
+) -> Result<()> {
+    use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
+    let cx = cli_cx();
+    let open_fs = OpenFs::open(&cx, path)
+        .with_context(|| format!("failed to open image: {}", path.display()))?;
+    let mut ino = InodeNumber(1);
+    for comp in file_path.split('/').filter(|c| !c.is_empty()) {
+        let attr = open_fs
+            .lookup(&cx, ino, std::ffi::OsStr::new(comp))
+            .with_context(|| format!("failed to resolve {file_path} at component {comp:?}"))?;
+        ino = attr.ino;
+    }
+    let fsize = open_fs
+        .getattr(&cx, ino)
+        .with_context(|| format!("failed to stat {file_path}"))?
+        .size;
+    if size == 0 || (fsize as usize) < size {
+        bail!("file {file_path} ({fsize} B) is smaller than the read size {size} B");
+    }
+    // Page-aligned random offsets in [0, fsize - size]. SplitMix64 keeps the
+    // sequence deterministic across A/B runs (no wall-clock/RNG entropy).
+    let bs: u64 = 4096;
+    let span_blocks = ((fsize - size as u64) / bs).max(1);
+    let mut state = seed;
+    let mut next_off = || -> u64 {
+        state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^= z >> 31;
+        (z % span_blocks) * bs
+    };
+    let offsets: Vec<u64> = (0..count).map(|_| next_off()).collect();
+
+    let started = Instant::now();
+    let total_bytes: u64 = if parallel {
+        // Each task reads into its own small buffer; `read_into` is `&self` and
+        // self-scoping, so concurrent positioned reads are isomorphic to serial.
+        offsets
+            .par_iter()
+            .map(|&off| {
+                let mut buf = vec![0_u8; size];
+                open_fs
+                    .read_into(&cx, ino, off, &mut buf)
+                    .map(|n| n as u64)
+                    .unwrap_or(0)
+            })
+            .sum()
+    } else {
+        let mut buf = vec![0_u8; size];
+        let mut acc: u64 = 0;
+        for &off in &offsets {
+            acc += open_fs
+                .read_into(&cx, ino, off, &mut buf)
+                .with_context(|| format!("failed random read at {off}"))? as u64;
+        }
+        acc
+    };
+    let elapsed = started.elapsed();
+    let duration_us = u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX);
+    let secs = elapsed.as_secs_f64().max(1e-9);
+    let iops = (count as f64) / secs;
+    let mib_s = (total_bytes as f64) / secs / (1024.0 * 1024.0);
+    info!(
+        target: "ffs::cli::randread",
+        count,
+        size,
+        parallel,
+        bytes = total_bytes,
+        duration_us,
+        iops = iops as u64,
+        mib_per_s = mib_s as u64,
+        "randread_done"
+    );
+    eprintln!(
+        "randread: {count} x {size}B {} -> {total_bytes} B in {duration_us} us = {} IOPS, {} MiB/s",
+        if parallel { "parallel" } else { "serial" },
+        iops as u64,
+        mib_s as u64
+    );
     Ok(())
 }
 
