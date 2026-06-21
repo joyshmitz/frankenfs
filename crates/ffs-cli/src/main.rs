@@ -2346,6 +2346,22 @@ fn walk_cmd(path: &PathBuf, no_stat: bool, parallel: bool, read_data: bool) -> R
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicU64, Ordering};
 
+    // A metadata-only walk (readdir + getattr, no file-data reads) spends most of
+    // its work in the readdir inode-table prefetch, which fans tiny per-page block
+    // reads across the global rayon pool. On a 64-wide pool that's heavy
+    // over-subscription churn (a flamegraph showed ~48% in crossbeam steal/epoch/
+    // park); measured `64 threads 38.7ms -> 8 threads 20.5ms` (1.89x) on a 30k-file
+    // htree dir. The walk is a standalone command (no concurrent file-data reads
+    // that need all cores), so cap the global pool to a small width up front.
+    // `--read-data` walks DO stream file bytes and keep the full pool.
+    if !read_data {
+        let threads = std::thread::available_parallelism().map_or(8, |n| n.get().min(8));
+        // Best-effort: no-op if the global pool is already initialized.
+        let _ = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build_global();
+    }
+
     let cx = cli_cx();
     let open_fs = OpenFs::open(&cx, path)
         .with_context(|| format!("failed to open image: {}", path.display()))?;
