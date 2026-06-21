@@ -989,6 +989,15 @@ pub struct OpenFs {
     /// Read-only btrfs file read plan cache, populated explicitly by bulk
     /// walkers before issuing many file reads from the same immutable fs tree.
     btrfs_read_plan_index: OnceLock<Arc<BtrfsReadPlanIndex>>,
+    /// Per-inode read-only btrfs extent-list cache (bd-n5w92). A single-file
+    /// random read otherwise re-descends the on-disk fs tree on EVERY
+    /// `btrfs_read_file_into` to fetch the inode item + overlapping EXTENT_DATA
+    /// (~180 us/read, 75x ext4). For a read-only mount with no pending tree log
+    /// the inode's extents are immutable, so resolve them once (the full extent
+    /// list) and filter the read window in-memory thereafter. Keyed by inode
+    /// objectid (as a `BlockNumber` to reuse the `CacheShard` impl).
+    btrfs_ro_inode_extents:
+        ShardedCache<BlockNumber, Arc<(BtrfsInodeItem, Vec<(u64, BtrfsExtentData)>)>>,
     /// Memoized fs-tree root bytenr per subvolume objectid (bd-yuk9v). On a
     /// read-only mount the root tree is immutable, so resolving a subvolume's
     /// ROOT_ITEM once and caching the bytenr removes the per-op root-tree
@@ -3320,6 +3329,7 @@ impl OpenFs {
             btrfs_verify_data_on_read: options.btrfs_verify_data_on_read,
             btrfs_csum_read_cache: Mutex::new(None),
             btrfs_read_plan_index: OnceLock::new(),
+            btrfs_ro_inode_extents: ShardedCache::new(),
             btrfs_fs_tree_root_cache: Mutex::new(std::collections::HashMap::new()),
             btrfs_parsed_node_cache: ShardedCache::new(),
         };
@@ -8629,6 +8639,57 @@ impl OpenFs {
     /// fully covered data reads do not pay an extra whole-buffer write.
     /// `dst.len()` must be `>= to_read` (the caller sizes it from the read
     /// request; `to_read = min(file_size - offset, size)`).
+
+    /// Resolve a btrfs inode's item + its FULL EXTENT_DATA list from the on-disk
+    /// fs tree (bd-n5w92), for the per-inode read-only extent cache. Unlike the
+    /// windowed walk in `btrfs_read_file_into`, this fetches every EXTENT_DATA of
+    /// the inode (offset `0..u64::MAX`) so the cached list serves any read offset
+    /// via an in-memory filter. Caller must hold the no-pending-tree-log
+    /// invariant (the on-disk tree is then the complete extent source).
+    fn btrfs_load_inode_all_extents(
+        &self,
+        cx: &Cx,
+        canonical: u64,
+    ) -> Result<(BtrfsInodeItem, Vec<(u64, BtrfsExtentData)>), FfsError> {
+        let inode_lo = BtrfsKey {
+            objectid: canonical,
+            item_type: BTRFS_ITEM_INODE_ITEM,
+            offset: 0,
+        };
+        let inode_hi = BtrfsKey {
+            objectid: canonical,
+            item_type: BTRFS_ITEM_INODE_ITEM,
+            offset: u64::MAX,
+        };
+        let inode_items = self.walk_btrfs_fs_tree_range(cx, inode_lo, inode_hi)?;
+        let inode_entry = Self::btrfs_find_inode_item(&inode_items, canonical)?;
+        let inode = parse_inode_item(&inode_entry.data).map_err(|e| parse_to_ffs_error(&e))?;
+
+        let ext_lo = BtrfsKey {
+            objectid: canonical,
+            item_type: BTRFS_ITEM_EXTENT_DATA,
+            offset: 0,
+        };
+        let ext_hi = BtrfsKey {
+            objectid: canonical,
+            item_type: BTRFS_ITEM_EXTENT_DATA,
+            offset: u64::MAX,
+        };
+        let items = self.walk_btrfs_fs_tree_range(cx, ext_lo, ext_hi)?;
+        let exts = items
+            .iter()
+            .filter(|item| {
+                item.key.objectid == canonical && item.key.item_type == BTRFS_ITEM_EXTENT_DATA
+            })
+            .map(|item| {
+                parse_extent_data(&item.data)
+                    .map(|parsed| (item.key.offset, parsed))
+                    .map_err(|e| parse_to_ffs_error(&e))
+            })
+            .collect::<Result<_, _>>()?;
+        Ok((inode, exts))
+    }
+
     fn btrfs_read_file_into(
         &self,
         cx: &Cx,
@@ -8726,6 +8787,36 @@ impl OpenFs {
                     }
                 }
                 (inode, exts)
+            } else if self.btrfs_tree_log_items.is_empty() {
+                // bd-n5w92: per-inode read-only extent cache. With no pending
+                // tree log the on-disk fs tree is the complete, immutable extent
+                // source, so resolve the inode's FULL extent list once and filter
+                // the read window in-memory thereafter — a random read becomes an
+                // in-memory range filter instead of a fresh O(log N) tree descent
+                // (~180 us/read). The filter (logical_start < read_end &&
+                // extent_end > offset) is identical to the cached-index branch
+                // above, and the assembly loop still zero-fills holes, so reads
+                // are byte-identical to the windowed walk.
+                let key = BlockNumber(canonical);
+                let entry = match self.btrfs_ro_inode_extents.get(&key) {
+                    Some(e) => e,
+                    None => {
+                        let built = self.btrfs_load_inode_all_extents(cx, canonical)?;
+                        let arc = Arc::new(built);
+                        self.btrfs_ro_inode_extents.insert(key, Arc::clone(&arc));
+                        arc
+                    }
+                };
+                let read_end = offset.saturating_add(u64::from(size));
+                let mut exts: Vec<(u64, BtrfsExtentData)> = Vec::new();
+                for (logical_start, extent) in entry.1.iter() {
+                    let extent_end =
+                        (*logical_start).saturating_add(Self::btrfs_extent_logical_len(extent)?);
+                    if *logical_start < read_end && extent_end > offset {
+                        exts.push((*logical_start, extent.clone()));
+                    }
+                }
+                (entry.0, exts)
             } else {
                 // Bound the on-disk walk to the read window on BOTH edges so a
                 // read of a large fragmented file fetches the inode item and only
