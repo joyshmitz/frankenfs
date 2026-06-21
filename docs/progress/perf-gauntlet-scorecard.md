@@ -88,6 +88,99 @@ Note: the user-requested `cargo bench --release` spelling is not accepted by
 Cargo for bench runs, so this used the Cargo-equivalent `--profile release`
 spelling.
 
+## `bd-xmh5g.417` cod-b Ext4 Indirect Materialized-Kernel Addendum
+
+Date: 2026-06-21
+Agent: BlackThrush (`cod-b`)
+Scope: independent proof and direct-kernel `dd bs=1M` comparator for the ext4
+indirect zero-fill elision already retained in the current source
+RCH workers: `vmi1227854` check/focused test, `ovh-a` release build/conformance,
+`vmi1153651` per-crate bench
+Requested target dir: `/data/projects/.rch-targets/frankenfs-cod-b`
+
+### Verdict
+
+KEEP / VERIFIED. This pass did not add a second production lever on top of the
+source-retained ext4 sparse zero-fill change; it added a reused-buffer
+correctness test and a cod-b head-to-head materialized-kernel comparator.
+
+The important routing change is that ext4 no-extents indirect reads now beat a
+materializing kernel read path: candidate `14.2 ms` vs kernel `dd bs=1M`
+`17.7 ms` (`1.25x` faster). Kernel `cat` remains faster at `5.7 ms`
+(`2.51x` faster than FrankenFS), so the remaining loss is the splice-class
+path, not the materialized read path.
+
+### Scorecard
+
+| Gate | Result |
+| --- | --- |
+| Direct mounted ext4 rows completed | 1 current no-extents double-indirect read row on `/data/tmp/extind2_1501351.img:/double_ind.bin` |
+| Direct ext4/btrfs-kernel ratios | Candidate `14.2 ms` vs saved baseline `28.0 ms` = `1.97x` faster. Candidate vs kernel `dd bs=1M` `17.7 ms` = FrankenFS `1.25x` faster. Candidate vs kernel `cat` `5.7 ms` = FrankenFS `2.51x` slower. |
+| Updated aggregate current frontier | `3 / 4 / 0`: metadata walk, ext4 extent materialize, and ext4 indirect materialize are wins; ext4 extent `cat`, ext4 indirect `cat`, btrfs compressed `dd`, and btrfs compressed `cat` remain losses. |
+| Production levers kept | 0 new production levers in this addendum; 1 correctness test added for the retained zero-fill lever |
+| Production levers rejected/reverted | 0 |
+| Internal win/loss/neutral | `1 / 0 / 0`: same-host saved-binary A/B old/new mean `1.97x` |
+| Direct kernel win/loss/neutral | `1 / 1 / 0`: win vs materializing kernel `dd bs=1M`, loss vs kernel `cat` |
+| Behavior proof | Baseline binary, candidate binary, and mounted-kernel file all SHA-256 `c0d8240d06d2b4e07ac97735ae497c82b55909a489fd429f937f61ff396ea9be`. The new unit test pre-fills the destination with `0xA5` and verifies both a full-block hole and trailing partial hole are zeroed. |
+| Build/check guard | Local `cargo fmt -p ffs-core --check` and `git diff --check` passed. RCH `cargo check -p ffs-core --lib` passed on `vmi1227854`. RCH focused `cargo test -p ffs-core read_ext4_indirect -- --nocapture` passed on `vmi1227854` (2 tests). RCH `cargo build --release -p ffs-cli` passed on `ovh-a`. RCH conformance passed on `ovh-a`: `100 passed / 0 failed / 2 ignored`. |
+| Per-crate bench | RCH `cargo bench --profile release -p ffs-core --bench ext4_indirect_read_overlap -- ext4_indirect_read_overlap/large_run_chunked_in_place_128blocks/8192 --warm-up-time 1 --measurement-time 1 --sample-size 10 --noplot` passed on `vmi1153651`; estimate `28.539 ms`, interval `[24.336 ms, 33.695 ms]`. |
+| Clippy | Not rerun for this addendum. The cod-a row above records the scoped clippy attempt and attributes failures to pre-existing `ffs-core` pedantic debt outside the zero-fill lever. |
+| Release-readiness score for perf-superiority claims | 74 / 100: materialized ext4 indirect domination is now measured and conformance-green, but kernel `cat` remains `2.51x` faster and btrfs compressed remains open. |
+| Release-readiness score for this row's hygiene | 91 / 100: direct baseline/candidate/kernel A/B, byte proof, reused-buffer test, RCH check/build/bench/conformance, and ledger update are complete. Deductions are cold-worker target drift and deferred clippy because of known unrelated lint debt. |
+
+### Measured Rows
+
+| Workload | FrankenFS / baseline | Comparator | Ratio | Verdict |
+| --- | ---: | ---: | ---: | --- |
+| ext4 no-extents indirect read, 50 MiB | candidate `14.2 ms` | saved baseline `28.0 ms` | candidate `1.97x` faster | KEEP |
+| ext4 no-extents indirect read, 50 MiB | candidate `14.2 ms` | kernel `dd bs=1M` `17.7 ms` | FrankenFS `1.25x` faster | WIN vs materialize |
+| ext4 no-extents indirect read, 50 MiB | candidate `14.2 ms` | kernel `cat` `5.7 ms` | FrankenFS `2.51x` slower | Loss vs splice-class |
+
+### Isomorphism
+
+Ordering preserved: yes. The indirect pointer walk still emits the same mapped
+data segments in logical byte order; sparse ranges are zero-filled only where
+the same resolver proves there is no mapped block.
+
+Tie-breaking unchanged: yes. Pointer resolution, error priority, and segment
+ordering are unchanged.
+
+Floating-point identical: N/A.
+
+RNG seeds unchanged: N/A.
+
+Goldens/bytes verified: yes. Baseline, candidate, and mounted-kernel bytes match
+the same SHA-256, and conformance passed `100 / 0 / 2 ignored`.
+
+### Commands
+
+```bash
+AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-b \
+  rch exec -- cargo check -p ffs-core --lib
+
+AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-b \
+  rch exec -- cargo test -p ffs-core read_ext4_indirect -- --nocapture
+
+AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-b \
+  rch exec -- cargo build --release -p ffs-cli
+
+hyperfine --warmup 3 --runs 15 \
+  --export-json /tmp/frankenfs-cod-b-bd-xmh5g-417-ext4-indirect-zero-fill-ab.json \
+  '/tmp/frankenfs-cod-b-bd-xmh5g-417-baseline-ffs-cli read --discard /data/tmp/extind2_1501351.img /double_ind.bin >/dev/null' \
+  '/data/projects/.rch-targets/frankenfs-cod-b/release/ffs-cli read --discard /data/tmp/extind2_1501351.img /double_ind.bin >/dev/null' \
+  'dd if=/data/tmp/extind2mnt_1501351/double_ind.bin of=/dev/null bs=1M status=none' \
+  'cat /data/tmp/extind2mnt_1501351/double_ind.bin >/dev/null'
+
+AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-b \
+  rch exec -- cargo bench --profile release -p ffs-core \
+  --bench ext4_indirect_read_overlap -- \
+  ext4_indirect_read_overlap/large_run_chunked_in_place_128blocks/8192 \
+  --warm-up-time 1 --measurement-time 1 --sample-size 10 --noplot
+
+AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-b \
+  rch exec -- cargo test -p ffs-harness --test conformance -- --nocapture
+```
+
 ## `bd-xmh5g.416` cod-b Direct-Kernel Scorecard Refresh
 
 Date: 2026-06-21

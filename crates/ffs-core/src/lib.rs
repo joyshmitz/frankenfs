@@ -35728,6 +35728,66 @@ mod tests {
         );
     }
 
+    #[test]
+    fn read_ext4_indirect_into_zero_fills_reused_buffer_holes() {
+        const BS: usize = 4096;
+
+        let mut image = build_ext4_image_with_extents();
+        let pattern: Vec<u8> = (0..BS)
+            .map(|i| u8::try_from((i * 17) % 251).expect("pattern byte fits u8"))
+            .collect();
+        image[30 * BS..31 * BS].copy_from_slice(&pattern);
+
+        let cx = Cx::for_testing();
+        let fs = OpenFs::from_device(
+            &cx,
+            Box::new(TestDevice::from_vec(image)),
+            &OpenOptions::default(),
+        )
+        .expect("open crafted ext4 image");
+        let scope = RequestScope::empty();
+
+        // Non-extent inode, 3 logical blocks:
+        // block 0 -> hole, block 1 -> data(30), block 2 -> trailing partial hole.
+        let mut inode = make_test_inode(ffs_types::S_IFREG | 0o644, 0, 0);
+        let mut ptrs = vec![0_u8; 15 * 4];
+        ptrs[4..8].copy_from_slice(&30_u32.to_le_bytes());
+        inode.extent_bytes = ptrs.into();
+        inode.size = (2 * BS + 123) as u64;
+
+        let read_len = 2 * BS + 123;
+        let mut dst = vec![0xA5; read_len + 19];
+        let written = fs
+            .read_ext4_indirect_into(
+                &cx,
+                &scope,
+                &inode,
+                0,
+                u32::try_from(read_len).expect("test read length fits u32"),
+                &mut dst,
+            )
+            .expect("indirect read into reused buffer");
+
+        assert_eq!(written, read_len, "reads the requested live file bytes");
+        assert!(
+            dst[..BS].iter().all(|&b| b == 0),
+            "leading full-block hole must overwrite stale buffer bytes"
+        );
+        assert_eq!(
+            &dst[BS..2 * BS],
+            &pattern[..],
+            "mapped block reads through verbatim"
+        );
+        assert!(
+            dst[2 * BS..read_len].iter().all(|&b| b == 0),
+            "trailing partial hole must overwrite stale buffer bytes"
+        );
+        assert!(
+            dst[read_len..].iter().all(|&b| b == 0xA5),
+            "bytes outside the read window must not be touched"
+        );
+    }
+
     /// bd-laay3 increment 1: a legacy indirect-block-mapped (non-extent) file
     /// supports in-place OVERWRITE of its already-mapped blocks — full-block and
     /// partial (sub-block RMW) — and persists across a re-read, while growth and
