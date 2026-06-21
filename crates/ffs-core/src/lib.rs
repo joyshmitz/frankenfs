@@ -12859,8 +12859,7 @@ impl OpenFs {
         // Per-pass memo of the most-recently-read pointer block at each indirect
         // depth, so a sequential walk reads each indirect block once instead of
         // once per logical block (bd-vdlyu — the PLAN is resolution-bound).
-        let mut memo: [std::collections::HashMap<u64, Vec<u8>>; 3] =
-            std::array::from_fn(|_| std::collections::HashMap::new());
+        let mut memo: [Option<(u64, Vec<u8>)>; 3] = [None, None, None];
         while bytes_read < to_read {
             let current_offset = offset + bytes_read as u64;
             let logical_block =
@@ -13039,23 +13038,14 @@ impl OpenFs {
         phys: u64,
         idx: usize,
         depth: usize,
-        memo: &mut [std::collections::HashMap<u64, Vec<u8>>; 3],
+        memo: &mut [Option<(u64, Vec<u8>)>; 3],
     ) -> Result<u64, FfsError> {
-        // Cache every distinct pointer block seen this PLAN pass, keyed by phys
-        // (bd-xmh5g.412). The old single-slot-per-depth memo (bd-vdlyu) only held
-        // the most-recent block, so the run-extension probe — which resolves
-        // next_lb to test contiguity and may touch a neighbouring pointer block —
-        // evicted the block the main loop was about to reuse, forcing the SAME
-        // indirect block to be re-read thousands of times (a strace of a 50 MiB
-        // double-indirect read showed ONE block read 2024x; 94% of preads were
-        // re-reads). A per-depth map holds all of a read's indirect blocks (a
-        // handful — ~size/4 MiB) so each is read exactly once.
-        let cache = &mut memo[depth];
-        if !cache.contains_key(&phys) {
+        let slot = &mut memo[depth];
+        if slot.as_ref().map(|(p, _)| *p) != Some(phys) {
             let bytes = self.read_block_with_scope(cx, scope, BlockNumber(phys))?;
-            cache.insert(phys, bytes);
+            *slot = Some((phys, bytes));
         }
-        let data = cache.get(&phys).expect("inserted above");
+        let data = &slot.as_ref().expect("slot populated above").1;
         let off = idx * 4;
         Ok(if off + 4 <= data.len() {
             u64::from(u32::from_le_bytes([
@@ -13077,7 +13067,7 @@ impl OpenFs {
         scope: &RequestScope,
         inode: &Ext4Inode,
         logical_block: u32,
-        memo: &mut [std::collections::HashMap<u64, Vec<u8>>; 3],
+        memo: &mut [Option<(u64, Vec<u8>)>; 3],
     ) -> Result<Option<u64>, FfsError> {
         let bs = self.block_size();
         let ptrs_per_block = u64::from(bs) / 4;
