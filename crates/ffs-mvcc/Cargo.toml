@@ -65,3 +65,7 @@ harness = false
 
 [lints]
 workspace = true
+
+[[bench]]
+name = "zstd_decompress_reuse"
+harness = false
