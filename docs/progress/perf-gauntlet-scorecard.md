@@ -2993,3 +2993,97 @@ The earlier rows above flagged two **direct-kernel materialize** losses as "resi
 **There is no remaining direct-kernel MATERIALIZE loss on any measured read workload.** The only residual "losses" are vs kernel `cat`/splice-class (zero-copy, never delivers bytes to userspace — not a data-consuming-app baseline). Apples-to-apples (kernel materializes via `dd`/`cat`-to-app, like FrankenFS), **FrankenFS dominates every measured ext4/btrfs read/traversal path.**
 
 Full current frontier (9 workloads, warm+cold, peak `24.3x` cold btrfs many-files) + all 4 documented losses flipped: see `perf-gauntlet-scorecard-cc.md` and `docs/NEGATIVE_EVIDENCE.md`. The btrfs many-files per-file-walk pathology (the worst gap, was timeout/>100x) is now `14.4x` warm / `24.3x` cold via `.421` (cod-a prewarm) + `.422` (cache-shard mix, cc finding/fix) + `.419` (cc parallelize-across-files). The prior `.423` residual per-read index mutex is now closed by the lock-free `OnceLock` publication row above; no direct-kernel materialize loss is reopened here.
+
+---
+
+## `bd-xmh5g.415` Addendum (cod-a e2compr indirect pointer memo)
+
+Date: 2026-06-21
+Agent: cod-a
+Scope: `ffs-core` e2compr read path
+Production status: kept
+Requested target dir: `/data/projects/.rch-targets/frankenfs-cod-a`
+
+### Verdict
+
+Keep the production change. The e2compr read loop was resolving the same
+indirect pointer blocks repeatedly while checking the cluster-end sentinel and
+then scanning present blocks in that cluster. Threading the existing
+one-slot-per-depth memo through `read_ext4_compressed` and
+`decompress_e2compr_cluster` preserves pointer results and collapses repeated
+pointer-block reads during the serial planning phase.
+
+There is no direct mounted-kernel e2compr comparator because modern ext4/btrfs
+kernel paths do not expose historical e2compr. This row is therefore scored as
+an internal e2compr win and a neutral direct-kernel row; the current direct
+materializing/stat kernel frontier remains the `.425` closeout, where current
+FrankenFS wins all five measured ext4/btrfs materializing/stat rows.
+
+### Scorecard
+
+| Gate | Result |
+| --- | --- |
+| Production levers kept | 1: pass the existing `resolve_indirect_block_memo` through compressed ext4 read and cluster decompression. |
+| Production levers rejected/reverted | 0: measured internal win is well above keep threshold. |
+| Internal A/B win/loss/neutral | `1/0/0`: pointer-resolution bench old reread vs memo was `4.04x`, `15.95x`, and `32.37x` faster for 4/16/32 cluster blocks. |
+| Direct kernel win/loss/neutral | `0/0/1`: no mounted-kernel e2compr comparator exists. |
+| Conformance | RCH `cargo test -p ffs-harness --test conformance -- --nocapture` passed on `vmi1152480` with `100 passed / 0 failed / 2 ignored`. |
+| Build/check | RCH `cargo check -p ffs-core --all-targets` passed on `hz2`; RCH `cargo build --release -p ffs-core` compiled successfully on `vmi1149989` but returned `RCH-E309` because custom-target artifact retrieval timed out. |
+| Clippy | Scoped clippy is blocked by pre-existing `ffs-core` pedantic debt outside this lever (`vfs.rs` derivable default, existing type complexity/items-after-statements/redundant-closure rows, and old indirect-pointer cast rows). |
+| Disk hygiene | No new `.scratch` or worktree was created; all remote commands used `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-a`. |
+
+### Measured Rows
+
+| Workload | Old reread | Memo | Ratio | Verdict |
+| --- | ---: | ---: | ---: | --- |
+| `e2compr_indirect_pointer_memo/old_reread/4` vs `memo/4` | `2.5553 ms` | `633.12 us` | `4.04x` | Keep |
+| `e2compr_indirect_pointer_memo/old_reread/16` vs `memo/16` | `10.193 ms` | `639.11 us` | `15.95x` | Keep |
+| `e2compr_indirect_pointer_memo/old_reread/32` vs `memo/32` | `20.912 ms` | `646.03 us` | `32.37x` | Keep |
+
+The bench asserts `resolve_cluster_old(...) == resolve_cluster_memo(...)`
+before Criterion measures each cluster size.
+
+### Isomorphism
+
+Ordering preserved: yes. Logical-block resolution order is unchanged; the memo
+only avoids re-reading a pointer block when the requested physical pointer-block
+number matches the per-depth cached block.
+
+Tie-breaking unchanged: yes. Missing pointers, compressed sentinel handling,
+and sparse zero-fill behavior are unchanged.
+
+Floating-point identical: N/A.
+
+RNG seeds unchanged: N/A.
+
+Goldens/conformance: RCH focused e2compr tests passed `25 passed / 0 failed`,
+and the shared conformance harness passed `100 passed / 0 failed / 2 ignored`.
+
+### Commands
+
+```bash
+AGENT_NAME=cod-a CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-a \
+  rch exec -- cargo bench -p ffs-core --bench e2compr_cluster_read_overlap -- --quiet
+
+AGENT_NAME=cod-a CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-a \
+  rch exec -- cargo bench -p ffs-core --bench e2compr_cluster_read_overlap -- \
+  e2compr_indirect_pointer_memo --quiet
+
+AGENT_NAME=cod-a CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-a \
+  rch exec -- cargo check -p ffs-core --all-targets
+
+AGENT_NAME=cod-a CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-a \
+  rch exec -- cargo test -p ffs-core e2compr -- --nocapture
+
+AGENT_NAME=cod-a CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-a \
+  rch exec -- cargo test -p ffs-harness --test conformance -- --nocapture
+
+AGENT_NAME=cod-a CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-a \
+  rch exec -- cargo build --release -p ffs-core
+```
+
+### Retry Predicate
+
+Do not retry broader e2compr indirect-pointer memo variants unless a fresh trace
+shows repeated non-memo indirect resolution outside `read_ext4_compressed` or a
+modern comparator fixture exposes a supported mounted-kernel e2compr path.

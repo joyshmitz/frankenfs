@@ -12733,6 +12733,7 @@ impl OpenFs {
         // Build the full decompressed file image for the requested range.
         let mut buf = vec![0_u8; to_read];
         let mut bytes_read = 0_usize;
+        let mut indirect_memo: [Option<(u64, Vec<u8>)>; 3] = [None, None, None];
 
         while bytes_read < to_read {
             let current_offset = offset + bytes_read as u64;
@@ -12748,7 +12749,7 @@ impl OpenFs {
 
             // Check if this cluster is compressed by examining the last block pointer.
             let last_ptr = self
-                .resolve_indirect_block(cx, scope, inode, cluster_end - 1)?
+                .resolve_indirect_block_memo(cx, scope, inode, cluster_end - 1, &mut indirect_memo)?
                 .unwrap_or(0);
 
             if last_ptr == ffs_types::EXT2_COMPRESSED_BLKADDR {
@@ -12759,6 +12760,7 @@ impl OpenFs {
                     inode,
                     cluster_start,
                     cluster_nblocks,
+                    &mut indirect_memo,
                 )?;
 
                 // Copy the requested portion from the decompressed cluster.
@@ -12780,9 +12782,13 @@ impl OpenFs {
                 let remaining_in_block = bs_usize - offset_in_block;
                 let chunk_size = remaining_in_block.min(to_read - bytes_read);
 
-                if let Some(phys_block) =
-                    self.resolve_indirect_block(cx, scope, inode, logical_block)?
-                {
+                if let Some(phys_block) = self.resolve_indirect_block_memo(
+                    cx,
+                    scope,
+                    inode,
+                    logical_block,
+                    &mut indirect_memo,
+                )? {
                     let block_data =
                         self.read_block_with_scope(cx, scope, BlockNumber(phys_block))?;
                     buf[bytes_read..bytes_read + chunk_size].copy_from_slice(
@@ -12803,6 +12809,7 @@ impl OpenFs {
         inode: &Ext4Inode,
         cluster_start: u32,
         cluster_nblocks: u32,
+        indirect_memo: &mut [Option<(u64, Vec<u8>)>; 3],
     ) -> Result<Vec<u8>, FfsError> {
         let bs_usize = self.block_size() as usize;
         let (_, cluster_full_size) = Self::e2compr_cluster_shape(bs_usize, cluster_nblocks)?;
@@ -12815,7 +12822,7 @@ impl OpenFs {
         let mut valid_ptrs: Vec<u64> = Vec::with_capacity(cluster_nblocks as usize);
         for i in 0..cluster_nblocks {
             let ptr = self
-                .resolve_indirect_block(cx, scope, inode, cluster_start + i)?
+                .resolve_indirect_block_memo(cx, scope, inode, cluster_start + i, indirect_memo)?
                 .unwrap_or(0);
             if ptr != 0 && ptr != ffs_types::EXT2_COMPRESSED_BLKADDR {
                 valid_ptrs.push(ptr);
