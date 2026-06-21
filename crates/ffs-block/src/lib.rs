@@ -8298,6 +8298,32 @@ mod tests {
     }
 
     #[test]
+    fn default_vectored_read_rejects_later_oob_before_partial_read() {
+        // bd-d1vrr: a [valid, out-of-range] request must reject in the block-
+        // bounds preflight before issuing ANY scalar read_block, leaving both
+        // caller buffers untouched (no partial overwrite of the first buffer).
+        let cx = Cx::for_testing();
+        let dev = RangeCheckedReadBlockDevice::default();
+        let blocks = [BlockNumber(0), BlockNumber(2)];
+        let mut bufs = [BlockBuf::new(vec![0xAA; 4]), BlockBuf::new(vec![0xBB; 4])];
+
+        let err = dev
+            .read_vectored(&blocks, &mut bufs, &cx)
+            .expect_err("out-of-range later block should fail before reads");
+
+        assert!(
+            matches!(err, FfsError::Format(ref message)
+                if message.contains("block out of range")
+                    && message.contains("block=2")
+                    && message.contains("block_count=2")),
+            "expected out-of-range Format error, got {err:?}"
+        );
+        assert_eq!(dev.reads.load(Ordering::Relaxed), 0);
+        assert_eq!(bufs[0].as_slice(), &[0xAA; 4]);
+        assert_eq!(bufs[1].as_slice(), &[0xBB; 4]);
+    }
+
+    #[test]
     fn arc_state_warms_up_without_premature_eviction() {
         let mut state = ArcState::new(2);
         arc_access(&mut state, BlockNumber(1));
