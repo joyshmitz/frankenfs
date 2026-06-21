@@ -15471,7 +15471,18 @@ impl OpenFs {
         // them. Without this, a write followed by a read of the same block via
         // one adapter instance returns stale data (bd-vdi91: failed-mkdir /
         // rename-over-existing left a stale block-bitmap csum).
-        MvccBlockDevice::new(base, Arc::clone(&self.mvcc_store), snapshot).with_read_your_writes()
+        if self.is_writable() {
+            MvccBlockDevice::new(base, Arc::clone(&self.mvcc_store), snapshot)
+                .with_read_your_writes()
+        } else {
+            // bd-eflng: a read-only filesystem never writes, so no version is
+            // ever pruned and the per-adapter snapshot register/release (store
+            // *write* lock) plus the read-your-writes per-block `store.read()`
+            // re-resolution are pure overhead that serialized concurrent random
+            // reads ~88x vs the kernel. Skip both: no registration, and reads
+            // resolve at the (stable) construction snapshot.
+            MvccBlockDevice::new_unregistered(base, Arc::clone(&self.mvcc_store), snapshot)
+        }
     }
 
     /// Get a direct block adapter over the underlying byte device.

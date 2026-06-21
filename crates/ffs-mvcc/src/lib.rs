@@ -4013,6 +4013,12 @@ enum SnapshotOwnership {
     Inline { snapshot: Snapshot },
     /// Snapshot managed by a SnapshotHandle (RAII, auto-released on drop).
     Handle { handle: SnapshotHandle },
+    /// Snapshot NOT registered on the store (bd-eflng). Used by read-only
+    /// adapters where no writes occur, so no version is ever pruned and the
+    /// active-snapshot ref-counting is pure overhead. Registering/releasing it
+    /// would take the store *write* lock on every adapter construction/drop,
+    /// serializing concurrent readers. Drop does nothing.
+    Unregistered { snapshot: Snapshot },
 }
 
 #[derive(Debug)]
@@ -4044,6 +4050,23 @@ impl<D: BlockDevice> MvccBlockDevice<D> {
             base,
             store,
             ownership: SnapshotOwnership::Inline { snapshot },
+            read_your_writes: false,
+        }
+    }
+
+    /// Construct a read-only adapter that does NOT register its snapshot on the
+    /// store (bd-eflng). Safe only when no writes can prune versions (a
+    /// read-only filesystem): registration exists to hold back version pruning
+    /// for a live reader, but with no writers nothing is ever pruned. Skipping
+    /// it avoids the per-construction/-drop store *write* lock (and, with
+    /// `read_your_writes` left `false`, the per-block `store.read()` snapshot
+    /// re-resolution) that serialized concurrent random reads ~88x vs kernel.
+    #[must_use]
+    pub fn new_unregistered(base: D, store: Arc<RwLock<MvccStore>>, snapshot: Snapshot) -> Self {
+        Self {
+            base,
+            store,
+            ownership: SnapshotOwnership::Unregistered { snapshot },
             read_your_writes: false,
         }
     }
@@ -4083,6 +4106,7 @@ impl<D: BlockDevice> MvccBlockDevice<D> {
     pub fn snapshot(&self) -> Snapshot {
         match &self.ownership {
             SnapshotOwnership::Inline { snapshot } => *snapshot,
+            SnapshotOwnership::Unregistered { snapshot } => *snapshot,
             SnapshotOwnership::Handle { handle } => handle.snapshot(),
         }
     }
@@ -4119,6 +4143,9 @@ impl<D: BlockDevice> Drop for MvccBlockDevice<D> {
                     released,
                     "mvcc snapshot was not registered or already released: {snapshot:?}"
                 );
+            }
+            SnapshotOwnership::Unregistered { .. } => {
+                // Never registered (read-only adapter), so nothing to release.
             }
             SnapshotOwnership::Handle { .. } => {
                 // SnapshotHandle's own Drop handles release.
