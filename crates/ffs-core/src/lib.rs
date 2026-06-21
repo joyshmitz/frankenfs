@@ -2980,6 +2980,39 @@ fn ext4_indirect_read_chunk_bytes(bs_usize: usize) -> usize {
         .unwrap_or(128 * bs_usize)
 }
 
+/// bd-xmh5g.414: a compressed-heavy btrfs read spawns one tiny decompress task
+/// per compressed extent — hundreds of them. On the wide global rayon pool those
+/// short tasks cause heavy over-subscription churn: a `strace -c` of a 50 MiB /
+/// 648-extent compressed read showed **56% futex + 35% sched_yield** of syscall
+/// time (parking/yielding 64 threads for ~8 ms of actual work), and capping the
+/// pool measured `64 threads 43.2 ms -> 8 threads 33.8 ms` (**1.28x**, narrowing
+/// the gap to kernel `dd`-materialize from 2.2x to ~1.68x).
+///
+/// Returns a small fixed pool to run the decompress `par_iter` on, but ONLY when
+/// the compressed-job count exceeds the global pool width (genuine
+/// over-subscription). Uncompressed reads — real per-task I/O+copy work that
+/// scales across all cores — never qualify and keep the global pool unchanged.
+/// Pool width is `FFS_BTRFS_DECOMPRESS_THREADS` (default 8).
+fn btrfs_decompress_scoped_pool(compressed_jobs: usize) -> Option<&'static rayon::ThreadPool> {
+    if compressed_jobs <= rayon::current_num_threads() {
+        return None;
+    }
+    static POOL: std::sync::OnceLock<Option<rayon::ThreadPool>> = std::sync::OnceLock::new();
+    POOL.get_or_init(|| {
+        let threads = std::env::var("FFS_BTRFS_DECOMPRESS_THREADS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(8);
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .thread_name(|i| format!("ffs-btrfs-decompress-{i}"))
+            .build()
+            .ok()
+    })
+    .as_ref()
+}
+
 fn push_ext4_indirect_run_chunks(
     segs: &mut Vec<Ext4IndirectReadSeg>,
     phys0: u64,
@@ -8996,9 +9029,13 @@ impl OpenFs {
                     }
                 }
             }
-            let results: Vec<(usize, Result<BtrfsDeferredReadResult, FfsError>)> = jobs
-                .into_par_iter()
-                .map(|job| match job {
+            let compressed_jobs = jobs
+                .iter()
+                .filter(|j| matches!(j, BtrfsReadJob::ReadCompressed { .. }))
+                .count();
+            let run_jobs = move || -> Vec<(usize, Result<BtrfsDeferredReadResult, FfsError>)> {
+                jobs.into_par_iter()
+                    .map(|job| match job {
                     BtrfsReadJob::Inline {
                         idx,
                         data,
@@ -9069,7 +9106,15 @@ impl OpenFs {
                         Err(err) => (idx, Err(err)),
                     },
                 })
-                .collect();
+                    .collect()
+            };
+            // bd-xmh5g.414: when the compressed-job count over-subscribes the
+            // global pool, run the decompress par_iter on a small fixed pool to
+            // cut futex/sched_yield churn; uncompressed reads keep the global pool.
+            let results = match btrfs_decompress_scoped_pool(compressed_jobs) {
+                Some(pool) => pool.install(run_jobs),
+                None => run_jobs(),
+            };
             // `results` preserves job order (extent order, then increasing
             // sub-chunk offset within an extent). An uncompressed extent may now
             // contribute several sub-jobs under one `idx`; keep the FIRST error
