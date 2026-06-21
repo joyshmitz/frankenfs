@@ -756,7 +756,7 @@ The read/traversal frontier expanded well beyond the 4 workloads above. **Every 
 | **many-small-files read** (1000×512KiB, `.419`) | **1.29x** | **4.1x** |
 | **deep dir-tree walk** (2042 dirs/30k files) | 4.36x | **11.9x** |
 | **many-inode read-data** (`.420` ExtentCache fix) | — | **6.7x** vs kernel |
-| **btrfs many-files read** (tree 30k, `.421`+`.422`+`.419`) | **14.4x** (was >100x SLOWER / timeout) | — |
+| **btrfs many-files read** (tree 30k, `.421`+`.422`+`.419`) | **14.4x** (was >100x SLOWER / timeout) | **24.3x** |
 | **btrfs metadata walk** (deep tree, `.421`) | **1.8x** (was >60s timeout) | — |
 
 ⭐**9th/10th workloads — the worst gap flipped:** btrfs many-files read/walk went from >100x SLOWER (every btrfs walk timed out >60-90s) to a 14.4x read WIN + 1.8x walk WIN, once `.421` (cod-a prewarm read-plan, 13ad5696) + `.422` (cache shard mix, my fix via cod-a 1d4ee90b) + `.419` (parallelize-across-files, mine) all landed. Cross-agent: my `.421` profile/scale-evidence + `.422` root-cause+written-fix drove cod-a's fixes. The 4th documented loss flipped.
