@@ -35616,6 +35616,18 @@ mod tests {
         let mut inode = make_test_inode(ffs_types::S_IFREG | 0o644, 0, 0);
         inode.extent_bytes = vec![0_u8; 15 * 4].into();
 
+        // Direct-level hole: a zero pointer in i_block[0..12] resolves to a hole
+        // (None), never physical block 0 (which would read the superblock as file
+        // data). Pins the direct branch alongside the indirection roots (bd-xmh5g.323).
+        assert_eq!(
+            fs.resolve_indirect_block(&cx, &scope, &inode, 0).unwrap(),
+            None
+        );
+        assert_eq!(
+            fs.resolve_indirect_block(&cx, &scope, &inode, 11).unwrap(),
+            None
+        );
+
         // Single / double / triple indirect roots are all zero -> holes.
         assert_eq!(
             fs.resolve_indirect_block(&cx, &scope, &inode, 12).unwrap(),
