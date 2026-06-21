@@ -8460,9 +8460,9 @@ impl OpenFs {
     /// This is the read-into-buffer form used by [`OpenFs::read_into`]'s btrfs
     /// fast path: it writes straight into `dst[..to_read]` with no intermediate
     /// owned `Vec` allocation + copy (bd-2emlm — the owned-`Vec` form doubled
-    /// the resident set on a streamed read and thrashed page-faults). `dst` is
-    /// zeroed over `[..to_read]` first so unwritten holes read back as zero,
-    /// byte-identical to the previous `vec![0u8; to_read]`-then-fill path.
+    /// the resident set on a streamed read and thrashed page-faults). Holes and
+    /// preallocated ranges are zero-filled during the extent assembly pass, so
+    /// fully covered data reads do not pay an extra whole-buffer write.
     /// `dst.len()` must be `>= to_read` (the caller sizes it from the read
     /// request; `to_read = min(file_size - offset, size)`).
     fn btrfs_read_file_into(
@@ -8495,7 +8495,7 @@ impl OpenFs {
                 //   - Upper bound: an item keyed at or past the window end starts
                 //     after the last byte read and cannot contribute.
                 // The assembly loop below skips any non-overlapping item the range
-                // still returns, and the output buffer is pre-zeroed for holes, so
+                // still returns and explicitly zero-fills any uncovered gaps, so
                 // the read result is byte-identical to the full scan.
                 let seek = BtrfsKey {
                     objectid: canonical,
@@ -8638,12 +8638,29 @@ impl OpenFs {
         let to_read =
             usize::try_from((inode.size - offset).min(u64::from(size))).unwrap_or(size as usize);
         // Borrow the caller's buffer instead of allocating an owned `Vec`
-        // (bd-2emlm). Zero `[..to_read]` so holes read back as zero, exactly as
-        // the previous `vec![0u8; to_read]` did before the fill loops overwrote
-        // the covered ranges.
+        // (bd-2emlm). Do not zero the whole read window up front: the assembly
+        // loop below proves coverage in extent order and zero-fills only true
+        // holes/prealloc gaps.
         let out: &mut [u8] = &mut dst[..to_read];
-        out.fill(0);
         let read_end = offset.saturating_add(to_read as u64);
+        let zero_fill_range =
+            |out: &mut [u8], range_start: u64, range_end: u64| -> Result<(), FfsError> {
+                if range_start >= range_end {
+                    return Ok(());
+                }
+                let dst_start =
+                    usize::try_from(range_start - offset).map_err(|_| FfsError::Corruption {
+                        block: 0,
+                        detail: "hole destination offset overflow".into(),
+                    })?;
+                let dst_end =
+                    usize::try_from(range_end - offset).map_err(|_| FfsError::Corruption {
+                        block: 0,
+                        detail: "hole destination end overflow".into(),
+                    })?;
+                out[dst_start..dst_end].fill(0);
+                Ok(())
+            };
 
         // Verify data checksums on read (bd-tkv2n), opt-in via
         // OpenOptions.btrfs_verify_data_on_read. For a datasum inode, verify the
@@ -9150,6 +9167,7 @@ impl OpenFs {
                             zero_len,
                             "btrfs hole_fill"
                         );
+                        zero_fill_range(out, covered_until, overlap_start)?;
                     }
 
                     let src_start =
@@ -9201,6 +9219,7 @@ impl OpenFs {
                             zero_len,
                             "btrfs hole_fill"
                         );
+                        zero_fill_range(out, covered_until, overlap_start)?;
                     }
 
                     // Preallocated extents have no initialized data yet.
@@ -9211,6 +9230,7 @@ impl OpenFs {
                             zero_len = overlap_end - overlap_start,
                             "btrfs hole_fill"
                         );
+                        zero_fill_range(out, overlap_start, overlap_end)?;
                         covered_until = covered_until.max(overlap_end);
                         continue;
                     }
@@ -9272,6 +9292,7 @@ impl OpenFs {
                 zero_len,
                 "btrfs hole_fill"
             );
+            zero_fill_range(out, covered_until, read_end)?;
         }
 
         trace!(
@@ -27671,8 +27692,14 @@ impl OpenFs {
                 if plain_indirect {
                     Self::ext4_reject_encrypted(&inode)?;
                     let want = ext4_read_buffer_len(inode.size, offset, size)?;
-                    return self
-                        .read_ext4_indirect_into(cx, scope, &inode, offset, size, &mut dst[..want]);
+                    return self.read_ext4_indirect_into(
+                        cx,
+                        scope,
+                        &inode,
+                        offset,
+                        size,
+                        &mut dst[..want],
+                    );
                 }
             }
             // Btrfs fast path: read straight into `dst` with no intermediate
