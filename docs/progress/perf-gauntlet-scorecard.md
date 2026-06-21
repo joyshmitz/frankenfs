@@ -194,6 +194,102 @@ AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-co
   rch exec -- cargo test -p ffs-harness --test conformance -- --nocapture
 ```
 
+## `bd-xmh5g.408` cod-b Btrfs Metadata-Descent Rejection
+
+Date: 2026-06-21
+Agent: BlackThrush (`cod-b`)
+Scope: `ffs-core` btrfs read/read_into dir/symlink guard descent plus
+`ffs-cli read` final lookup/getattr reuse
+Commit under measurement: detached-worktree candidate at `d5ebffea`, source
+reverted before commit
+RCH worker: `vmi1227854` clean-source release-perf build
+Requested target dir: `/data/projects/.rch-targets/frankenfs-cod-b`
+
+### Verdict
+
+REJECT. The combined lever removed the redundant btrfs pre-read
+`btrfs_read_inode_attr` guard from `read`/`read_into` by using the inode item
+already fetched in `btrfs_read_file_into`, while preserving symlink payload
+reads for `readlink`. It also reused the final `lookup` attr in `ffs-cli read`
+instead of immediately calling `getattr` on the same inode for file size.
+
+The direct mounted-kernel A/B did not justify keeping source. Single-file read
+was only `1.03x` old/new, below the keep threshold, and whole-tree walk was
+slightly slower/noise. A `pread64` diagnostic showed the same syscall count on
+the target (`332` baseline, `332` candidate), so the suspected duplicate
+metadata descents are already hidden by the current cache/read shape for this
+image. Production source was manually reverted; this section is evidence only.
+
+### Scorecard
+
+| Gate | Result |
+| --- | --- |
+| Direct mounted btrfs rows completed | 4 rows: single-file read and whole-tree walk, each with baseline, candidate, and mounted-kernel comparator |
+| Same-host evidence | Local detached-worktree A/B at `d5ebffea` against `/data/tmp/btrdiff2_1340519.img` and mounted reference `/data/tmp/btrdiff2mnt_1340519`; accepted runs used 15 iterations |
+| Direct ext4/btrfs-kernel ratios | Candidate single-file read `37.6 ms` vs kernel `7.5 ms` (`5.01x` slower); candidate walk `34.1 ms` vs kernel `12.2 ms` (`2.79x` slower) |
+| Production levers kept | 0 |
+| Production levers rejected/reverted | 1 combined metadata-elision lever |
+| Internal A/B win/loss/neutral | `0 / 1 / 1`: single-file neutral-positive below keep threshold; walk slight loss/noise |
+| Direct kernel win/loss/neutral | `0 / 2 / 0` |
+| Syscall diagnostic | `strace -f -c -e pread64` single-file read: baseline `332` preads, candidate `332` preads |
+| Build/check guard | RCH clean-source `cargo build --profile release-perf -p ffs-cli` passed on `vmi1227854`; isolated local release-perf baseline and candidate builds passed; `cargo check -p ffs-core --all-targets` and `cargo check -p ffs-cli --all-targets` passed; post-revert `cargo test -p ffs-harness --test conformance -- --nocapture` passed `100 / 0 / 2 ignored` |
+| Behavior proof | Focused `cargo test -p ffs-core btrfs_read -- --nocapture` passed `21 / 0 / 1 ignored`; `cargo test -p ffs-core readlink -- --nocapture` passed `4 / 0`; `cargo test -p ffs-core btrfs_symlink_target_passes_btrfs_check -- --nocapture` passed `1 / 0` |
+| Formatting | `rustfmt --edition 2024 --check --config skip_children=true crates/ffs-core/src/lib.rs crates/ffs-cli/src/main.rs` passed. Full `cargo fmt -p ffs-cli --check` remains blocked by pre-existing `crates/ffs-cli/src/cmd_repair.rs` formatting drift unrelated to this candidate. |
+| Release-readiness score for perf-superiority claims | 35 / 100: direct mounted-kernel evidence is real, but no production code was kept and kernel still leads by `2.79-5.01x` on the accepted candidate rows. |
+| Release-readiness score for this row's hygiene | 96 / 100: isolated detached worktree, current HEAD baseline/candidate binaries copied aside, direct kernel ratios, pread diagnostic, focused behavior tests, conformance, and source revert are recorded. Remaining deductions are lack of full clippy because of pre-existing workspace pedantic debt and the known package fmt drift outside the edited files. |
+
+### Measured Rows
+
+| Phase | Workload | Baseline | Candidate | Kernel btrfs | Ratio vs baseline | Ratio vs kernel | Verdict |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | --- |
+| Acceptance, 15 runs | `ffs-cli read --discard /compressible.bin` vs kernel `cat` | `38.7 ms` | `37.6 ms` | `7.5 ms` | `1.03x` old/new | candidate `5.01x` slower than kernel | Reject: below keep threshold |
+| Acceptance, 15 runs | `ffs-cli walk --read-data --no-stat` vs kernel `cat *` | `33.9 ms` | `34.1 ms` | `12.2 ms` | `0.994x` old/new | candidate `2.79x` slower than kernel | Reject: slight loss/noise |
+| Diagnostic | single-file `strace -f -c -e pread64` | `332` preads | `332` preads | N/A | no syscall-count change | N/A | Confirms no real metadata I/O reduction on this fixture |
+
+### Isomorphism
+
+Ordering preserved: yes. The candidate only moved regular-file type checks to
+the inode item already fetched by the read helper and reused the final CLI
+lookup attr for file size.
+
+Tie-breaking unchanged: yes. Btrfs symlink payload reads stayed allowed only
+for `readlink`; public regular reads still rejected symlink inodes.
+
+Floating-point identical: N/A.
+
+RNG seeds unchanged: N/A.
+
+Goldens/bytes verified: focused btrfs read and symlink tests passed; post-revert
+harness conformance passed `100 / 0 / 2 ignored`.
+
+### Commands
+
+```bash
+AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-b \
+  rch exec -- cargo build --profile release-perf -p ffs-cli
+
+AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-b \
+  cargo build --profile release-perf -p ffs-cli
+
+hyperfine --warmup 3 --runs 15 \
+  --export-json /data/projects/.scratch/bd-xmh5g-408-d5ebffea-read-20260621.json \
+  --command-name frankenfs-baseline-read \
+  '/data/projects/.scratch/ffs-cli-d5ebffea-bd-xmh5g-408-baseline --log-format json read /data/tmp/btrdiff2_1340519.img /compressible.bin --discard >/dev/null 2>&1' \
+  --command-name frankenfs-candidate-read \
+  '/data/projects/.scratch/ffs-cli-d5ebffea-bd-xmh5g-408-candidate --log-format json read /data/tmp/btrdiff2_1340519.img /compressible.bin --discard >/dev/null 2>&1' \
+  --command-name btrfs-kernel-cat \
+  'cat /data/tmp/btrdiff2mnt_1340519/compressible.bin >/dev/null'
+
+hyperfine --warmup 3 --runs 15 \
+  --export-json /data/projects/.scratch/bd-xmh5g-408-d5ebffea-walk-20260621.json \
+  --command-name frankenfs-baseline-walk \
+  '/data/projects/.scratch/ffs-cli-d5ebffea-bd-xmh5g-408-baseline --log-format json walk --read-data --no-stat /data/tmp/btrdiff2_1340519.img >/dev/null 2>&1' \
+  --command-name frankenfs-candidate-walk \
+  '/data/projects/.scratch/ffs-cli-d5ebffea-bd-xmh5g-408-candidate --log-format json walk --read-data --no-stat /data/tmp/btrdiff2_1340519.img >/dev/null 2>&1' \
+  --command-name btrfs-kernel-cat-all \
+  'sh -c "cat /data/tmp/btrdiff2mnt_1340519/* >/dev/null"'
+```
+
 ## `bd-xmh5g.407` cod-b CLI Read-Tile Rejection
 
 Date: 2026-06-20
