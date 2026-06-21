@@ -602,26 +602,26 @@ impl ByteDevice for FileByteDevice {
         }
 
         // Large vectored read: scatter straight into the caller's buffers with a
-        // single positioned `preadv` — no `vec![0; total_len]` staging Vec (which
-        // mmaps + page-faults for large totals), no zero-init, no post-read
-        // scatter-copy. Same syscall count as the staged path (one). Guard the
-        // backing-shrink TOCTOU with an up-front length re-check so the
-        // destinations are never partially dirtied on a short read, preserving
-        // the all-or-nothing contract this device advertises. Capped at a safe
-        // iovec count (kernel `IOV_MAX` is 1024) and gated on size so small reads
-        // keep the freelist-cheap scratch (cheaper than an extra `fstat`).
+        // single positioned `preadv`. This keeps the old syscall count (one),
+        // but removes the zeroed staging Vec, first-touch faults, and scatter
+        // copy. As in the scalar large-read path, re-check the live file length
+        // first so a backing-file shrink fails before partially dirtying any
+        // destination slices. Small reads keep the freelist-cheap scratch path.
         if total_len >= file_device_direct_read_min() && bufs.len() <= FILE_DEVICE_PREADV_IOV_MAX {
             let live_len = self.file.metadata()?.len();
             if end > live_len {
                 return Err(FfsError::Io(std::io::Error::new(
                     std::io::ErrorKind::UnexpectedEof,
-                    format!("short backing vectored read: offset={offset} len={total_len} live_len={live_len}"),
+                    format!(
+                        "short backing vectored read: offset={offset} len={total_len} live_len={live_len}"
+                    ),
                 )));
             }
             let off = i64::try_from(offset.0)
                 .map_err(|_| FfsError::Format("read offset overflows i64".to_owned()))?;
             let read = nix::sys::uio::preadv(self.file.as_ref(), bufs, off)
-                .map_err(|e| FfsError::Io(std::io::Error::from_raw_os_error(e as i32)))?;
+                .map_err(std::io::Error::from)
+                .map_err(FfsError::Io)?;
             if read != total_len {
                 return Err(FfsError::Io(std::io::Error::new(
                     std::io::ErrorKind::UnexpectedEof,
@@ -7720,7 +7720,10 @@ mod tests {
                 if io_err.kind() == std::io::ErrorKind::UnexpectedEof),
             "expected short-read UnexpectedEof, got {err:?}"
         );
-        assert!(dst.iter().all(|&b| b == 0xAA), "destination must be preserved");
+        assert!(
+            dst.iter().all(|&b| b == 0xAA),
+            "destination must be preserved"
+        );
     }
 
     #[test]

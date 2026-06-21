@@ -86,6 +86,65 @@ AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-co
   rch exec -- cargo build --profile release-perf -p ffs-cli
 ```
 
+## `bd-xmh5g.410` cod-b Disk-Low Code-Only Pending Bench
+
+Date: 2026-06-20
+Agent: BlackThrush (`cod-b`)
+Scope: `ffs-block::FileByteDevice::read_vectored_exact_at`
+Commit under measurement: pending
+RCH worker: pending
+Requested target dir: `/data/projects/.rch-targets/frankenfs-cod-b`
+
+### Verdict
+
+PENDING-BENCH. Disk pressure paused all new cargo build/check/test/bench and
+RCH execution for this turn. The code-only lever is retained for the next bench
+window: large vectored reads now use one positioned `preadv` directly into the
+caller-provided `IoSliceMut`s when the total read is at least the existing
+`FileByteDevice` direct-read threshold and the iovec count is within Linux
+`IOV_MAX`. Small reads and over-wide iovec arrays keep the old staging scratch.
+
+The intended win surface is the same syscall count as the old large vectored
+path, but without allocating and zeroing a full staging `Vec`, first-touching
+those pages, then scatter-copying into the block buffers. This is unscored until
+the next-turn A/B and conformance gates run.
+
+### Scorecard
+
+| Gate | Result |
+| --- | --- |
+| Code-only lever committed | Yes: `FileByteDevice::read_vectored_exact_at` single-`preadv` fast path |
+| Cargo build/check/test/bench this turn | Not run by disk-low directive |
+| Direct ext4/btrfs-kernel ratios | Pending |
+| Internal A/B win/loss/neutral | Pending |
+| Direct kernel win/loss/neutral | Pending |
+| Behavior proof | Static isomorphism only this turn: ordering of caller slices is preserved by `preadv`; offset/end bounds are unchanged; an up-front live-length check preserves destination-on-shrink behavior before mutation; small and over-`IOV_MAX` paths retain the old fallback. |
+| Release-readiness score for perf-superiority claims | Unchanged / no upgrade: candidate is not benchmark-verified yet |
+| Release-readiness score for this row's hygiene | 70 / 100: clean source branch and explicit pending gates, but no executable cargo or direct-kernel evidence yet by directive. |
+
+### Pending Commands
+
+```bash
+AGENT_NAME=cod-b CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-b \
+  rch exec -- cargo check -p ffs-block --all-targets
+
+AGENT_NAME=cod-b CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-b \
+  rch exec -- cargo test -p ffs-block file_byte_device_vectored -- --nocapture
+
+AGENT_NAME=cod-b CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-b \
+  rch exec -- cargo bench --profile release-perf -p ffs-block --bench file_device_read -- file_device_vectored_read_128k
+
+AGENT_NAME=cod-b CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-b \
+  rch exec -- cargo bench --profile release-perf -p ffs-block --bench read_contiguous -- read_contiguous
+```
+
+### Stop Rule
+
+Keep only if the accepted same-source A/B clears `>1.05x` on the real vectored
+read surface and conformance stays green. Revert and move this row to rejected
+negative evidence if the win is neutral/regressive or if any behavior gate
+fails.
+
 ## `bd-xmh5g` cod-a Btrfs Compressed Fused-Copy Keep
 
 Date: 2026-06-20
