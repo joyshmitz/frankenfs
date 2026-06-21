@@ -2355,7 +2355,15 @@ fn walk_cmd(path: &PathBuf, no_stat: bool, parallel: bool, read_data: bool) -> R
     // that need all cores), so cap the global pool to a small width up front.
     // `--read-data` walks DO stream file bytes and keep the full pool.
     if !read_data {
-        let threads = std::thread::available_parallelism().map_or(8, |n| n.get().min(8));
+        // Default cap 8 (warm metadata walks over-subscribe the 64-wide pool; sweep
+        // showed 4-8 optimal warm). Overridable via FFS_WALK_POOL_THREADS for cold
+        // tuning (cold walks may want more threads to overlap scattered inode-table
+        // disk seeks).
+        let threads = std::env::var("FFS_WALK_POOL_THREADS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or_else(|| std::thread::available_parallelism().map_or(8, |n| n.get().min(8)));
         // Best-effort: no-op if the global pool is already initialized.
         let _ = rayon::ThreadPoolBuilder::new()
             .num_threads(threads)
