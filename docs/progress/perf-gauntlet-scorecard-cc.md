@@ -709,3 +709,19 @@ For agents running vs-kernel perf head-to-heads on this box:
 - **Footprint vs CPU vs parallelism:** confirm the bottleneck with `perf stat` (page-faults for
   footprint, CPUs-utilized for parallelism) and `strace -c`/offset-trace (syscall count + access
   pattern) before assuming a cause — this session twice disproved a plausible-but-wrong root-cause.
+
+## Session 2026-06-21 — head-to-head dominations re-verified + levers shipped
+
+**Both flagship dominations re-measured on mounted kernel fixtures (apples-to-apples), no regression:**
+- **ext4 EXTENT read 128 MiB warm: frankenfs 22.1 ms / 5787 MB/s vs kernel `dd bs=1M` 43.3 ms / 2954 MB/s = 1.96x FASTER** (loses only to `cat`-splice 10 ms, the zero-copy idealization). 64-core parallel chunked read into the caller buffer. sha256 byte-identical.
+- **ext4 METADATA walk 30k-file htree warm: frankenfs 24.6 ms vs kernel `find -printf %s` (stat each) 100 ms = 4.0x FASTER** (vs `ls -lRU` 190 ms = 7.7x). Bulk inode-table parse vs ~30k getattr syscalls. ⭐match the comparator to the work: a bare `find -type f` is readdir-`d_type`-only (20 ms) and under-counts vs frankenfs's stat-every-entry — force the kernel to stat.
+
+**Levers shipped this session (all byte-identical, conformance 100/0/2):**
+- **bd-xmh5g.412 (fe00c75e)** — journal-replay memo: the "31x ext4-indirect read" gap was MISDIAGNOSED; a backtrace showed the 2024x re-read of the journal inode's double-indirect block in `collect_ext4_journal_segments` at mount. Switched the sequential walk to `resolve_indirect_block_memo`: **preads 2149→127 (17x fewer) at every legacy-ext4 open.**
+- **bd-2emlm-sibling (c13aea1d)** — ext4 indirect read-into-dst: `read_into`'s indirect fallback double-buffered (owned Vec + copy); `read_ext4_indirect_into` fills `dst` directly. **48→38 ms (1.26x); gap to kernel `dd` 2.35x→1.84x.**
+- **bd-xmh5g.413 (76308cac)** — btrfs zstd `decompress_to_buffer` into the output window: memmove 15.14%→0.14% (CPU/alloc win; wall-neutral, coordination-bound).
+- **metadata-walk pool cap (e9800e82)** — the readdir inode-table prefetch over-subscribes the 64-wide global pool (~48% rayon coordination); the walk is standalone so cap its pool to min(8,nproc) for metadata-only walks. **38.7→24.6 ms (1.57x); walk domination 1.80x→4.0x.**
+- (earlier this campaign: FileByteDevice `read_exact_at` direct 13x + `read_vectored_exact_at` preadv 1.86x, on the lever's own A/B.)
+
+**Exhaustively characterized (handed to cod-a), NOT a clean lever in current architecture:**
+- **btrfs compressed read 2.2x vs kernel `dd`** — system-time-bound (`strace -c`: 56% futex + 35% sched_yield = rayon over-subscription on 648 tiny decompress tasks); decompress itself parallelizes fine (distinct_threads=64, ~8 ms). BOTH clean thread-cap avenues ruled out by measurement: scoped sub-pool NEUTRAL (install overhead + idle global-64), `with_min_len` task-coarsening NEUTRAL (win is fewer-threads not fewer-tasks). A global cap regresses ext4 extent reads (which DO want 64). Needs a deeper per-fs scheduler change. The serial PLAN region (~28 ms) is the bigger wall piece. (bd-xmh5g.414)
