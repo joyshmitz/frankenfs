@@ -393,6 +393,49 @@ fan-out that still responds to `RAYON_NUM_THREADS`. Do not retry dedicated pools
 `with_min_len`, or decompressor-context-only microbenches without a new direct
 image signal.
 
+#### Follow-up: one-tile serial zstd scheduling rejected at the synthetic gate (cod-a/BlackThrush 2026-06-21, bd-xmh5g)
+
+Tested a narrower scheduling hypothesis from the remaining btrfs compressed-read
+gap: when a one-megabyte `ffs-cli read` tile decomposes into only `8` independent
+128 KiB zstd frames, skip Rayon and run the current thread-local zstd
+decompressor serially. This would have targeted worker scheduling overhead
+without changing decompression semantics or output ordering.
+
+RCH `vmi1153651`, command `AGENT_NAME=BlackThrush
+CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-a rch exec -- cargo
+bench --profile release -p ffs-core --bench btrfs_decompress_extents --
+btrfs_decompress_tiny_zstd_8x4k_to_128k --warm-up-time 1 --measurement-time 1
+--sample-size 10 --noplot`, measured current parallel reused decompressor
+median `406.30 us` versus serial reused decompressor median `471.70 us`.
+Serial scheduling is `0.861x` the current path by median. Criterion intervals
+overlapped (`serial [444.38, 525.59] us`, `parallel [292.57, 630.26] us`) and
+the parallel row was noisy, so this is negative routing evidence rather than
+positive proof for either family.
+
+Win/loss/neutral: internal A/B `0/1/0` for the serial-scheduling candidate;
+direct kernel `0/0/1` because no production candidate reached mounted-kernel
+A/B. The direct kernel target remains unchanged from the retained btrfs
+compressed-read row: final-source single-file `/compressible.bin` still loses
+`35.9 ms` versus kernel `cat` `6.7 ms` (`5.38x` slower), and whole-tree `walk
+--read-data --no-stat` still loses `31.9 ms` versus kernel `cat *` `11.2 ms`
+(`2.85x` slower).
+
+No production code was changed. The retained benchmark guard asserts serial and
+parallel decompression produce identical decompressed byte counts, so future
+agents can rerun this exact scheduling gate before retrying the family. Local
+`cargo fmt -p ffs-core --check` passed; RCH `cargo check -p ffs-core
+--all-targets` passed on `vmi1152480`; `rch exec -- cargo test -p ffs-harness
+--test conformance -- --nocapture` fell back local because no admissible workers
+were available and passed `100 / 0 / 2 ignored`; RCH `cargo build --release -p
+ffs-core` passed on `ovh-a`. RCH scoped clippy `cargo clippy -p ffs-core
+--bench btrfs_decompress_extents --no-deps -- -D warnings` failed before the
+benchmark target on existing/current shared `ffs-core` library pedantic rows:
+`vfs.rs` derivable default, item-after-statement rows, redundant closures, old
+indirect-pointer casts, and cod-b's in-progress ext4 direct-output enum. No
+benchmark/doc-caused lint was reported. Note: `cargo bench --release` is not
+valid Cargo syntax for benches, so the command uses the equivalent `--profile
+release` spelling.
+
 #### Follow-up: direct-to-final zstd extent decode rejected (cod-a/BlackThrush 2026-06-20, bd-xmh5g)
 
 Tested the next data-movement lever from the graveyard: for regular zstd

@@ -1,5 +1,81 @@
 # Perf Gauntlet Scorecard
 
+## `bd-xmh5g` cod-a Btrfs Tiny-Frame Scheduling Rejection
+
+Date: 2026-06-21
+Agent: BlackThrush (`cod-a`)
+Scope: `ffs-core` btrfs zstd decompression scheduling, benchmark-only guard in
+`crates/ffs-core/benches/btrfs_decompress_extents.rs`
+Commit under measurement: production source unchanged; candidate was the
+serial-scheduling hypothesis only
+RCH worker: `vmi1153651`
+Requested target dir: `/data/projects/.rch-targets/frankenfs-cod-a`
+
+### Verdict
+
+REJECT as a production lever. The alien-graveyard scheduling idea was to avoid
+Rayon overhead for the small compressed-frame groups produced by a one-megabyte
+`ffs-cli read` tile. The measured shape was `8` independent 128 KiB zstd frames
+with the existing thread-local decompressor reuse, comparing current parallel
+execution with a serial single-thread loop.
+
+The probe did not justify touching `btrfs_read_file_into`. The current parallel
+path measured faster by median (`406.30 us` vs serial `471.70 us`), while the
+parallel row was noisy enough that this is routing evidence, not a new keep. No
+production source changed.
+
+### Scorecard
+
+| Gate | Result |
+| --- | --- |
+| Direct mounted btrfs rows completed | None for this candidate; it was rejected at the synthetic scheduling gate before production code changed |
+| Direct ext4/btrfs-kernel ratios | Unchanged from current retained btrfs compressed-read scorecard: final-source single-file `35.9 ms` vs kernel `cat` `6.7 ms` (`5.38x` slower); whole-tree walk `31.9 ms` vs kernel `cat *` `11.2 ms` (`2.85x` slower) |
+| Production levers kept | 0 |
+| Production levers rejected/reverted | 1 rejected before production edit |
+| Internal A/B win/loss/neutral | `0 / 1 / 0`: serial scheduling `471.70 us` vs current parallel scheduling `406.30 us`; serial candidate is `0.861x` the current path by median |
+| Direct kernel win/loss/neutral | `0 / 0 / 1`: no production candidate reached the mounted-kernel A/B |
+| Behavior proof | Benchmark assertion verifies serial and parallel reused-decoder paths produce identical decompressed byte counts |
+| Build/check guard | Local `cargo fmt -p ffs-core --check` passed; RCH Criterion bench passed on `vmi1153651`; RCH `cargo check -p ffs-core --all-targets` passed on `vmi1152480`; `rch exec -- cargo test -p ffs-harness --test conformance -- --nocapture` fell back local because no admissible workers were available and passed `100 / 0 / 2 ignored`; RCH `cargo build --release -p ffs-core` passed on `ovh-a`; no production source changed |
+| Clippy | Blocked before the benchmark target: RCH `cargo clippy -p ffs-core --bench btrfs_decompress_extents --no-deps -- -D warnings` failed on pre-existing/current shared `ffs-core` library pedantic rows (`vfs.rs` derivable default, item-after-statement rows, redundant closures, old indirect-pointer casts, and cod-b's in-progress ext4 direct-output enum). No benchmark/doc-caused lint was reported. |
+| Release-readiness score for perf-superiority claims | 38 / 100: the residual btrfs compressed-read kernel gap remains large and this scheduling lever did not transfer |
+| Release-readiness score for this row's hygiene | 88 / 100: targeted per-crate RCH bench, exact command, ratio, and ledger row are complete; deductions are no mounted-kernel A/B because the lever died before production and no clippy/conformance rerun was needed for production |
+
+### Measured Rows
+
+| Workload | Current path | Serial candidate | Ratio vs current | Kernel btrfs | Verdict |
+| --- | ---: | ---: | ---: | ---: | --- |
+| `btrfs_decompress_tiny_zstd_8x4k_to_128k` reused decoder scheduling | `406.30 us` median, interval `[292.57, 630.26] us` | `471.70 us` median, interval `[444.38, 525.59] us` | serial `0.861x` current speed | N/A synthetic gate; direct retained workload still loses to kernel by `5.38x` single-file and `2.85x` walk | REJECT |
+
+### Isomorphism
+
+Ordering preserved: yes for the benchmarked decompression-only primitive; the
+assertion compares total decompressed bytes between serial and parallel paths.
+No production ordering policy changed.
+
+Tie-breaking unchanged: N/A.
+
+Floating-point identical: N/A.
+
+RNG seeds unchanged: N/A.
+
+Goldens/bytes verified: no production candidate; existing direct-kernel byte
+identity from the retained btrfs compressed-read rows remains the last mounted
+proof.
+
+### Commands
+
+```bash
+AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-a \
+  rch exec -- cargo bench --profile release -p ffs-core \
+  --bench btrfs_decompress_extents -- \
+  btrfs_decompress_tiny_zstd_8x4k_to_128k \
+  --warm-up-time 1 --measurement-time 1 --sample-size 10 --noplot
+```
+
+Note: the user-requested `cargo bench --release` spelling is not accepted by
+Cargo for bench runs, so this used the Cargo-equivalent `--profile release`
+spelling.
+
 ## `bd-xmh5g.409` cod-a Btrfs Physical-Order Read Rejection
 
 Date: 2026-06-21

@@ -29,6 +29,7 @@ use std::hint::black_box;
 const N: usize = 16; // compressed extents in the read (≈2 MiB read)
 const LARGE_N: usize = 272; // ≈34 MiB compressed-read fan-out from bd-defgb
 const TINY_FRAME_N: usize = 321; // /data/tmp/btrdiff2 compressible.bin fan-out
+const TINY_CHUNK_FRAME_N: usize = 8; // one 1 MiB CLI read chunk over 128 KiB zstd extents
 const SMALL_FILES: usize = 64;
 const SMALL_EXTENTS_PER_FILE: usize = 4;
 const DEDICATED_POOL_MAX_THREADS: usize = 16;
@@ -223,6 +224,25 @@ fn decompress_tiny_frames_reused(blobs: &[Vec<u8>]) -> usize {
         .sum()
 }
 
+fn decompress_tiny_frames_reused_serial(blobs: &[Vec<u8>]) -> usize {
+    blobs
+        .iter()
+        .map(|blob| {
+            BENCH_ZSTD_DECOMPRESSOR.with(|slot| {
+                let mut slot = slot.borrow_mut();
+                let decoder = slot.get_or_insert_with(|| {
+                    zstd::bulk::Decompressor::new().expect("create reusable zstd decoder")
+                });
+                let mut out = Vec::with_capacity(RAM);
+                decoder
+                    .decompress_to_buffer(first_zstd_frame(blob), &mut out)
+                    .expect("reused zstd decompress");
+                out.len()
+            })
+        })
+        .sum()
+}
+
 fn bench_decompress(c: &mut Criterion) {
     if !should_build_group(&[
         "btrfs_decompress_extents_n16_128k",
@@ -326,10 +346,39 @@ fn bench_decompress_tiny_frames(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_decompress_tiny_frame_scheduling(c: &mut Criterion) {
+    if !should_build_group(&[
+        "btrfs_decompress_tiny_zstd_8x4k_to_128k",
+        "serial_thread_reused_decompressor",
+        "parallel_thread_reused_decompressor",
+    ]) {
+        return;
+    }
+
+    let blob = build_quick_brown_blob();
+    let blobs = vec![blob; TINY_CHUNK_FRAME_N];
+
+    assert_eq!(
+        decompress_tiny_frames_reused_serial(&blobs),
+        decompress_tiny_frames_reused(&blobs),
+        "serial and parallel reused zstd decoders changed decompressed byte count"
+    );
+
+    let mut group = c.benchmark_group("btrfs_decompress_tiny_zstd_8x4k_to_128k");
+    group.bench_function("serial_thread_reused_decompressor", |b| {
+        b.iter(|| black_box(decompress_tiny_frames_reused_serial(black_box(&blobs))));
+    });
+    group.bench_function("parallel_thread_reused_decompressor", |b| {
+        b.iter(|| black_box(decompress_tiny_frames_reused(black_box(&blobs))));
+    });
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_decompress,
     bench_decompress_pool,
-    bench_decompress_tiny_frames
+    bench_decompress_tiny_frames,
+    bench_decompress_tiny_frame_scheduling
 );
 criterion_main!(benches);
