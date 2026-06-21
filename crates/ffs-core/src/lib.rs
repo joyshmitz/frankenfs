@@ -5494,10 +5494,20 @@ impl OpenFs {
             let mut current_start = None;
             let mut current_blocks = 0_u64;
             let mut previous_phys = None;
+            // The journal inode is large and indirect-mapped, and this is a
+            // sequential 0..N logical walk run at EVERY mount (journal replay).
+            // The non-memo `resolve_indirect_block` re-reads the inode's
+            // double-/single-indirect pointer blocks once PER logical block — a
+            // strace showed the dind block re-read 2024x for a ~8 MiB journal,
+            // dominating "read" wall time since every op opens the fs (bd-xmh5g.412).
+            // The per-PLAN single-slot memo (bd-vdlyu) is exactly right for this
+            // sequential walk: dind stays resident, the single-indirect block
+            // turns over once per 1024 logical blocks. Byte-identical mapping.
+            let mut memo: [Option<(u64, Vec<u8>)>; 3] = [None, None, None];
 
             for logical in 0..logical_blocks {
                 let phys = self
-                    .resolve_indirect_block(cx, &scope, journal_inode, logical)?
+                    .resolve_indirect_block_memo(cx, &scope, journal_inode, logical, &mut memo)?
                     .ok_or_else(|| FfsError::Corruption {
                         block: u64::from(logical),
                         detail: "ext4 journal inode missing indirect block mapping".to_owned(),
