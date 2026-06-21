@@ -9595,6 +9595,7 @@ impl OpenFs {
         scope: &RequestScope,
         entries: &[DirEntry],
     ) {
+        use rayon::prelude::{IntoParallelIterator, ParallelIterator};
         if entries.len() < EXT4_READDIR_INODE_PREFETCH_MIN_ENTRIES || self.is_writable() {
             return;
         }
@@ -9650,7 +9651,6 @@ impl OpenFs {
             return;
         }
 
-        use rayon::prelude::{IntoParallelIterator, ParallelIterator};
         let reads: Vec<(BlockNumber, Result<(), FfsError>)> = blocks
             .into_par_iter()
             .map(|block| {
