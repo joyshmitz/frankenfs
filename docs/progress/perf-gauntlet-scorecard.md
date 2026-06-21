@@ -86,6 +86,110 @@ Note: the user-requested `cargo bench --release` spelling is not accepted by
 Cargo for bench runs, so this used the Cargo-equivalent `--profile release`
 spelling.
 
+## `bd-xmh5g.414` / `bd-xmh5g.418` cod-a Current-Source Closeout
+
+Date: 2026-06-21
+Agent: BlackThrush (`cod-a`)
+Scope: remaining open btrfs-compressed thread-cap and read-segment
+serialize-guard rows
+Commit under measurement: `13ad5696`
+RCH workers: `hz2` release build and decompression bench, `ovh-a` conformance
+Requested target dir: `/data/projects/.rch-targets/frankenfs-cod-a`
+
+### Verdict
+
+CLOSE / evidence-only. No production source changed in this pass. The `.414`
+thread-cap family is superseded by retained zero-fill/decompress/window/plan
+work: the current btrfs compressed read beats the materializing kernel `dd`
+row, while the fastest `cat`/splice-class comparator remains an honest loss.
+The `.418` serialize-when-undersubscribed guard is rejected: it over-corrects
+real segment reads, turning useful per-file read parallelism into serial work.
+
+The radical lever family examined here is adaptive parallelism. The measured
+lesson is narrower than the tempting blanket rule: the readdir-prefetch
+serialize guard works for cheap cache-hit metadata reads, but applying the same
+rule to real read segments regresses. The next valid lever is architectural
+parallelism at the file/walk level or zero-copy/splice-class output, not another
+micro-guard around segment `par_iter`.
+
+### Scorecard
+
+| Gate | Result |
+| --- | --- |
+| Direct mounted ext4/btrfs rows completed | 2 current-source read rows: btrfs compressed `/data/tmp/btrdiff2_1340519.img:/compressible.bin`, ext4 indirect `/data/tmp/extind2_1501351.img:/double_ind.bin` |
+| Direct ext4/btrfs-kernel ratios | Btrfs compressed: FrankenFS `16.1 ms` vs kernel btrfs `cat` `6.4 ms` = `2.52x` slower; FrankenFS `16.1 ms` vs kernel `dd bs=8M` `29.8 ms` = `1.85x` faster. Ext4 indirect: FrankenFS `14.4 ms` vs kernel ext4 `cat` `4.9 ms` = `2.93x` slower; FrankenFS `14.4 ms` vs kernel `dd bs=1M` `15.3 ms` = `1.06x` faster, effectively parity-to-slight-win. |
+| Production levers kept | 0 |
+| Production levers rejected/reverted | 0 in this pass; `.418` had already been measured and rejected in bead notes (`131.5 ms` baseline vs `228 ms` guarded). |
+| Internal A/B win/loss/neutral | `0 / 0 / 1`: no new candidate survived to an internal A/B. The focused decompression bench remains healthy on `hz2`: serial reused decompressor `390.32 us`, parallel reused decompressor `159.22 us`. |
+| Direct kernel win/loss/neutral | `2 / 2 / 0`: wins vs materializing `dd` for btrfs compressed and ext4 indirect, losses vs fastest kernel `cat` for both rows. |
+| Behavior proof | FrankenFS stdout matched mounted kernel SHA-256 for btrfs compressed `2e379e112375338695dbd226f27bf096db571a99e5f64b975b0bb2e43b6f86b9` and ext4 indirect `c0d8240d06d2b4e07ac97735ae497c82b55909a489fd429f937f61ff396ea9be`. |
+| Build/check guard | RCH `cargo build --release -p ffs-cli` passed on `hz2`. RCH conformance `cargo test -p ffs-harness --test conformance -- --nocapture` passed on `ovh-a` (`100 passed / 0 failed / 2 ignored`). |
+| Per-crate bench | RCH `cargo bench --profile release -p ffs-core --bench btrfs_decompress_extents -- btrfs_decompress_tiny_zstd_8x4k_to_128k --warm-up-time 1 --measurement-time 1 --sample-size 10 --noplot` passed on `hz2`. |
+| Clippy | Not rerun for this evidence-only closeout. No production source changed; current scoped clippy debt is already attributed in nearby rows to pre-existing pedantic issues outside this lane. |
+| Release-readiness score for perf-superiority claims | 72 / 100: current materializing-kernel rows are wins/parity and conformance is green, but fastest splice-class `cat` rows remain losses and no new source lever was kept. |
+| Release-readiness score for this row's hygiene | 94 / 100: exact target-dir binary, mounted-kernel ratios, byte hashes, per-crate RCH bench, RCH release build, RCH conformance, ledger row, and scorecard are complete. Deduction is no fresh clippy because this is an evidence-only closeout. |
+
+### Measured Rows
+
+| Workload | FrankenFS | Kernel comparator | Ratio | Verdict |
+| --- | ---: | ---: | ---: | --- |
+| Btrfs compressed `read --discard /compressible.bin` | `16.1 ms +/- 0.9 ms` | `cat` `6.4 ms +/- 1.3 ms` | FrankenFS `2.52x` slower | Loss vs splice-class |
+| Btrfs compressed `read --discard /compressible.bin` | `16.1 ms +/- 0.9 ms` | `dd bs=8M` `29.8 ms +/- 1.6 ms` | FrankenFS `1.85x` faster | Win vs materialize |
+| Ext4 indirect `read --discard /double_ind.bin` | `14.4 ms +/- 0.8 ms` | `cat` `4.9 ms +/- 0.3 ms` | FrankenFS `2.93x` slower | Loss vs splice-class |
+| Ext4 indirect `read --discard /double_ind.bin` | `14.4 ms +/- 0.8 ms` | `dd bs=1M` `15.3 ms +/- 0.9 ms` | FrankenFS `1.06x` faster | Near-parity win vs materialize |
+| `btrfs_decompress_tiny_zstd_8x4k_to_128k` | serial `390.32 us` | parallel `159.22 us` | parallel `2.45x` faster | Guard healthy |
+
+### Isomorphism
+
+Ordering preserved: yes. No production source changed in this closeout.
+
+Tie-breaking unchanged: yes. No result-order or first-error policy changed.
+
+Floating-point identical: N/A.
+
+RNG seeds unchanged: N/A.
+
+Goldens/bytes verified: btrfs compressed and ext4 indirect stdout hashes
+matched mounted kernel files; conformance passed `100 / 0 / 2 ignored`.
+
+### Commands
+
+```bash
+AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-a \
+  rch exec -- cargo build --release -p ffs-cli
+
+hyperfine --warmup 2 --runs 7 \
+  --export-json /tmp/frankenfs-cod-a-current-btrfs-compressed-20260621.json \
+  --command-name ffs-btrfs-read \
+  '/data/projects/.rch-targets/frankenfs-cod-a/release/ffs-cli --log-format json read /data/tmp/btrdiff2_1340519.img /compressible.bin --discard >/dev/null 2>&1' \
+  --command-name kernel-btrfs-cat \
+  'cat /data/tmp/btrdiff2mnt_1340519/compressible.bin >/dev/null' \
+  --command-name kernel-btrfs-dd-8m \
+  'dd if=/data/tmp/btrdiff2mnt_1340519/compressible.bin of=/dev/null bs=8M status=none'
+
+hyperfine --warmup 2 --runs 7 \
+  --export-json /tmp/frankenfs-cod-a-current-ext4-indirect-20260621.json \
+  --command-name ffs-ext4-indirect-read \
+  '/data/projects/.rch-targets/frankenfs-cod-a/release/ffs-cli --log-format json read /data/tmp/extind2_1501351.img /double_ind.bin --discard >/dev/null 2>&1' \
+  --command-name kernel-ext4-cat \
+  'cat /data/tmp/extind2mnt_1501351/double_ind.bin >/dev/null' \
+  --command-name kernel-ext4-dd-1m \
+  'dd if=/data/tmp/extind2mnt_1501351/double_ind.bin of=/dev/null bs=1M status=none'
+
+AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-a \
+  rch exec -- cargo bench --profile release -p ffs-core \
+  --bench btrfs_decompress_extents -- \
+  btrfs_decompress_tiny_zstd_8x4k_to_128k \
+  --warm-up-time 1 --measurement-time 1 --sample-size 10 --noplot
+
+AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-a \
+  rch exec -- cargo test -p ffs-harness --test conformance -- --nocapture
+```
+
+Note: the user-requested `cargo bench --release` spelling is not accepted by
+Cargo for bench runs, so this used the Cargo-equivalent `--profile release`
+spelling.
+
 ## `bd-xmh5g.414` cod-a Btrfs Compressed Input Scratch Rejection
 
 Date: 2026-06-21
