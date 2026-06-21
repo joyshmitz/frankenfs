@@ -9627,13 +9627,25 @@ impl OpenFs {
         if blocks.is_empty() {
             return;
         }
-        if blocks.len() == 1 {
-            if let Err(err) = self.read_ext4_inode_table_block_with_scope(cx, scope, blocks[0]) {
-                trace!(
-                    block = blocks[0].0,
-                    error = %err,
-                    "ext4 readdir inode-table prefetch failed"
-                );
+        // Read serially when there are fewer blocks than worker threads: spinning
+        // up the rayon par_iter to read a handful of inode-table blocks over a wide
+        // pool is pure over-subscription churn (futex wake/steal/park). A readdir
+        // page usually leaves only a few uncached inode-table blocks, so on a
+        // 64-wide pool the per-page par_iter cost dominates — measured ~1.7x slower
+        // on a readdir-heavy walk at a 64-pool, even COLD (the coordination cost
+        // outweighs the cold-I/O overlap). Only fan out when there are enough
+        // blocks to actually use the pool. (The ffs-cli metadata-walk pool cap
+        // mitigates this for the CLI; this fixes the FUSE readdir path too, where
+        // the global pool stays 64.)
+        if blocks.len() < rayon::current_num_threads().max(2) {
+            for &block in &blocks {
+                if let Err(err) = self.read_ext4_inode_table_block_with_scope(cx, scope, block) {
+                    trace!(
+                        block = block.0,
+                        error = %err,
+                        "ext4 readdir inode-table prefetch failed"
+                    );
+                }
             }
             return;
         }
