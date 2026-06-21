@@ -1,5 +1,84 @@
 # Perf Gauntlet Scorecard
 
+## `bd-xmh5g.425` cod-b Current Materializing Frontier Recheck
+
+Date: 2026-06-21
+Agent: BlackThrush (`cod-b`)
+Scope: current HEAD evidence pass against mounted ext4/btrfs kernel
+materializing/stat comparators
+Commit under measurement: local `main` with no Rust source diff
+RCH worker: `hz2`
+Requested target dir: `/data/projects/.rch-targets/frankenfs-cod-b`
+
+### Verdict
+
+EVIDENCE-ONLY CLOSE. Current HEAD already dominates every measured
+data-consuming/stat kernel comparator in this pass, so no new production lever
+was justified. The alien-graveyard/alien-artifact audit points the remaining
+non-materializing gap at kernel-bypass/io_uring/splice-class transfer rather
+than another small staging-scratch tweak inside the safe Rust read path.
+
+### Scorecard
+
+| Gate | Result |
+| --- | --- |
+| Direct mounted ext4/btrfs rows completed | 5 rows: ext4 128 MiB extent read, ext4 stat walk, ext4 indirect read, btrfs compressed read, btrfs 30k walk read-data. |
+| Direct ext4/btrfs-kernel ratios | `5 / 0 / 0`: ext4 extent `1.85x`, ext4 stat walk `3.43x`, ext4 indirect `1.09x`, btrfs compressed `1.59x`, btrfs 30k read-data `7.42x`, all in FrankenFS' favor against materializing/stat comparators. |
+| Production levers kept | 0 new levers. Existing direct-read/materialization work remains retained. |
+| Production levers rejected/reverted | 0 this pass; no source candidate was attempted. |
+| Internal A/B win/loss/neutral | `0 / 0 / 1` for source changes. Nearby primitive health stayed positive in RCH `ffs-block` Criterion: 1 MiB staged scratch `936.96 us` vs direct `49.305 us` (`19.0x`), and 128 KiB staged scatter `10.500 us` vs `preadv_direct` `8.3016 us` (`1.26x`). |
+| Behavior proof | `cmp` byte proof passed for ext4 extent `/big.bin`, ext4 indirect `/double_ind.bin`, and btrfs compressed `/compressible.bin` against mounted kernel files. Ordering/tie-breaking/floating-point/RNG are unchanged because no source changed. |
+| Build/check guard | RCH `cargo build --release -p ffs-cli` on `hz2` compiled successfully but returned `RCH-E309` exit 102 after custom-target artifact retrieval timed out. RCH `cargo bench --profile release -p ffs-block --bench file_device_read -- --measurement-time 1 --warm-up-time 1 --sample-size 10` passed on `hz2`. RCH conformance `cargo test -p ffs-harness --test conformance -- --nocapture` passed on `hz2` (`100 passed / 0 failed / 2 ignored`). |
+| Release-readiness score for perf-superiority claims | 88 / 100: direct mounted-kernel materializing/stat proof is broad and green, byte proof and conformance are green, but the score is capped by the known non-materializing `cat`/splice comparator caveat and the RCH build artifact retrieval failure. |
+| Release-readiness score for this row's hygiene | 92 / 100: per-crate bench, conformance, byte proof, ledger, scorecard, and bead closeout are complete; deduction for RCH cold worker target rewrite despite the requested warm target. |
+
+### Measured Rows
+
+| Workload | FrankenFS | Kernel comparator | Ratio | Verdict |
+| --- | ---: | ---: | ---: | --- |
+| ext4 extent read, `/tmp/ffs_e2e.img:/big.bin` | `25.4 ms +/- 0.6` | mounted ext4 `dd bs=1M` `46.9 ms +/- 5.0` | `1.85x` faster | WIN |
+| ext4 stat walk, `/tmp/ffs_tree_3927494.img` | `40.9 ms +/- 1.2` | mounted ext4 `find -printf` `140.2 ms +/- 9.4` | `3.43x` faster | WIN |
+| ext4 indirect read, `/data/tmp/extind2_1501351.img:/double_ind.bin` | `14.0 ms +/- 0.5` | mounted ext4 `dd bs=1M` `15.3 ms +/- 1.6` | `1.09x` faster | WIN / near parity |
+| btrfs compressed read, `/data/tmp/btrdiff2_1340519.img:/compressible.bin` | `15.5 ms +/- 0.3` | mounted btrfs `dd bs=1M` `24.7 ms +/- 1.0` | `1.59x` faster | WIN |
+| btrfs 30k walk read-data, `/tmp/ffs_btree_707328.img` | `96.2 ms +/- 5.2` | mounted btrfs `find ... -exec cat {} +` `713.8 ms +/- 14.6` | `7.42x` faster | WIN |
+
+### Isomorphism
+
+Ordering preserved: yes, no source changed.
+
+Tie-breaking unchanged: yes, no source changed.
+
+Floating-point identical: N/A.
+
+RNG seeds unchanged: N/A.
+
+Goldens/bytes verified: RCH conformance passed `100 / 0 / 2 ignored`; three
+read byte comparisons matched mounted kernel output with `cmp`.
+
+### Commands
+
+```bash
+hyperfine --warmup 1 --runs 5 \
+  --export-json /tmp/frankenfs-cod-b-bd-xmh5g-425-frontier-20260621.json \
+  --command-name ffs-ext4-extent-read '/data/projects/.rch-targets/frankenfs-cod-b/release/ffs-cli --log-format json read --discard /tmp/ffs_e2e.img /big.bin >/dev/null 2>&1' \
+  --command-name kernel-ext4-extent-dd 'dd if=/tmp/ffs_rmnt_3672057/big.bin of=/dev/null bs=1M status=none' \
+  --command-name ffs-ext4-stat-walk '/data/projects/.rch-targets/frankenfs-cod-b/release/ffs-cli --log-format json walk /tmp/ffs_tree_3927494.img >/dev/null 2>&1' \
+  --command-name kernel-ext4-stat-walk 'find /tmp/ffs_treemnt_3927494 -path /tmp/ffs_treemnt_3927494/lost+found -prune -o -type f -printf "%s\n" >/dev/null 2>&1' \
+  --command-name ffs-ext4-indirect-read '/data/projects/.rch-targets/frankenfs-cod-b/release/ffs-cli --log-format json read --discard /data/tmp/extind2_1501351.img /double_ind.bin >/dev/null 2>&1' \
+  --command-name kernel-ext4-indirect-dd 'dd if=/data/tmp/extind2mnt_1501351/double_ind.bin of=/dev/null bs=1M status=none' \
+  --command-name ffs-btrfs-compressed-read '/data/projects/.rch-targets/frankenfs-cod-b/release/ffs-cli --log-format json read --discard /data/tmp/btrdiff2_1340519.img /compressible.bin >/dev/null 2>&1' \
+  --command-name kernel-btrfs-compressed-dd 'dd if=/data/tmp/btrdiff2mnt_1340519/compressible.bin of=/dev/null bs=1M status=none' \
+  --command-name ffs-btrfs30k-read '/data/projects/.rch-targets/frankenfs-cod-b/release/ffs-cli --log-format json walk --parallel --read-data --no-stat /tmp/ffs_btree_707328.img >/dev/null 2>&1' \
+  --command-name kernel-btrfs30k-read 'find /tmp/ffs_btreemnt_707328 -path /tmp/ffs_btreemnt_707328/lost+found -prune -o -path /tmp/ffs_btreemnt_707328/ext2_saved -prune -o -type f -exec cat {} + >/dev/null 2>&1'
+
+AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-b \
+  rch exec -- cargo bench --profile release -p ffs-block \
+  --bench file_device_read -- --measurement-time 1 --warm-up-time 1 --sample-size 10
+
+AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-b \
+  rch exec -- cargo test -p ffs-harness --test conformance -- --nocapture
+```
+
 ## `bd-xmh5g.423` cod-a Btrfs Read-Plan OnceLock Keep
 
 Date: 2026-06-21
