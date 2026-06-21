@@ -12840,7 +12840,6 @@ impl OpenFs {
     }
 
     /// Read file data using indirect block pointers (non-extent inodes).
-    #[expect(clippy::cast_possible_truncation)]
     fn read_ext4_indirect(
         &self,
         cx: &Cx,
@@ -12849,16 +12848,44 @@ impl OpenFs {
         offset: u64,
         size: u32,
     ) -> Result<Vec<u8>, FfsError> {
+        let file_size = inode.size;
+        if offset >= file_size {
+            return Ok(Vec::new());
+        }
+        let to_read = (file_size - offset).min(u64::from(size)) as usize;
+        let mut buf = vec![0_u8; to_read];
+        self.read_ext4_indirect_into(cx, scope, inode, offset, size, &mut buf)?;
+        Ok(buf)
+    }
+
+    /// Read indirect-mapped file data directly into `dst` (no owned `Vec` +
+    /// copy). `dst[..min(file_size-offset, size)]` is zero-filled in place so
+    /// hole-skipped ranges read as zero, then the data segments fill their
+    /// windows. Mirrors the plain-extent and btrfs read-into-dst fast paths
+    /// (bd-2emlm): a `read_into` of a legacy non-extent file no longer
+    /// double-buffers the whole read through an owned `Vec`. Returns the number
+    /// of bytes written.
+    #[expect(clippy::cast_possible_truncation)]
+    fn read_ext4_indirect_into(
+        &self,
+        cx: &Cx,
+        scope: &RequestScope,
+        inode: &Ext4Inode,
+        offset: u64,
+        size: u32,
+        dst: &mut [u8],
+    ) -> Result<usize, FfsError> {
         let bs = u64::from(self.block_size());
         let bs_usize = self.block_size() as usize;
         let chunk_bytes = ext4_indirect_read_chunk_bytes(bs_usize);
         let file_size = inode.size;
         if offset >= file_size {
-            return Ok(Vec::new());
+            return Ok(0);
         }
 
         let to_read = (file_size - offset).min(u64::from(size)) as usize;
-        let mut buf = vec![0_u8; to_read];
+        let buf = &mut dst[..to_read];
+        buf.fill(0);
 
         // PLAN (serial): resolve the read into ordered segments. The indirect
         // block resolution is a dependent (and cached) chain, so it stays serial;
@@ -12929,8 +12956,8 @@ impl OpenFs {
             bytes_read += chunk_size;
         }
 
-        self.read_ext4_indirect_segments_into(cx, scope, &segs, &mut buf)?;
-        Ok(buf)
+        self.read_ext4_indirect_segments_into(cx, scope, &segs, buf)?;
+        Ok(to_read)
     }
 
     /// Resolve a logical block number via indirect block pointers.
@@ -27630,6 +27657,22 @@ impl OpenFs {
                     Self::ext4_reject_encrypted(&inode)?;
                     let want = ext4_read_buffer_len(inode.size, offset, size)?;
                     return self.read_file_data(cx, scope, &inode, offset, &mut dst[..want]);
+                }
+                // Legacy non-extent (indirect-mapped) file: same read-into-dst
+                // fast path so a `read_into` does not fall through to the owned
+                // `Vec`-allocating `FsOps::read` + copy below (bd-2emlm sibling).
+                // Same guard set as `FsOps::read`'s indirect branch: not a
+                // dir/symlink/compressed/inline file, not encrypted.
+                let plain_indirect = !inode.is_dir()
+                    && !inode.is_symlink()
+                    && inode.flags & EXT4_COMPRBLK_FL == 0
+                    && !Self::ext4_inode_uses_inline_data(&inode)
+                    && inode.flags & ffs_types::EXT4_EXTENTS_FL == 0;
+                if plain_indirect {
+                    Self::ext4_reject_encrypted(&inode)?;
+                    let want = ext4_read_buffer_len(inode.size, offset, size)?;
+                    return self
+                        .read_ext4_indirect_into(cx, scope, &inode, offset, size, &mut dst[..want]);
                 }
             }
             // Btrfs fast path: read straight into `dst` with no intermediate
