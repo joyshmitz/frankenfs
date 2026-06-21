@@ -7998,6 +7998,67 @@ impl OpenFs {
         Self::validate_btrfs_decompressed_len("zstd", out, uncompressed_size)
     }
 
+    /// Decompress a zstd-compressed btrfs extent straight into `dst` (the
+    /// caller's final output window) — no intermediate `Vec` and no
+    /// post-decompress `copy_from_slice` into the window. This is the
+    /// bd-xmh5g.413 lever: a flamegraph of the compressed read showed
+    /// `__memmove_avx` at ~15% (the decompressed-`Vec`→window copy) vs zstd
+    /// decode at ~3%, so eliminating that copy is the win. Only valid when the
+    /// window receives the WHOLE extent (`dst.len() == uncompressed_size`,
+    /// source offset 0); partial / non-zstd reads keep the `Vec` path. Uses the
+    /// same reused thread-local decoder as `btrfs_decompress_zstd_frame` and is
+    /// byte-identical to it followed by a full-extent copy.
+    fn btrfs_decompress_zstd_into(compressed: &[u8], dst: &mut [u8]) -> Result<(), FfsError> {
+        let frame_len =
+            zstd::zstd_safe::find_frame_compressed_size(compressed).map_err(|code| {
+                FfsError::Corruption {
+                    block: 0,
+                    detail: format!(
+                        "btrfs zstd frame size probe failed: {}",
+                        zstd::zstd_safe::get_error_name(code)
+                    ),
+                }
+            })?;
+        let frame = compressed
+            .get(..frame_len)
+            .ok_or_else(|| FfsError::Corruption {
+                block: 0,
+                detail: format!(
+                    "btrfs zstd frame length {frame_len} exceeds compressed extent {}",
+                    compressed.len()
+                ),
+            })?;
+        let written = BTRFS_ZSTD_DECOMPRESSOR.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            if slot.is_none() {
+                *slot =
+                    Some(
+                        zstd::bulk::Decompressor::new().map_err(|e| FfsError::Corruption {
+                            block: 0,
+                            detail: format!("btrfs zstd decompressor init failed: {e}"),
+                        })?,
+                    );
+            }
+            let decoder = slot.as_mut().expect("zstd decompressor initialized above");
+            decoder
+                .decompress_to_buffer(frame, dst)
+                .map_err(|e| FfsError::Corruption {
+                    block: 0,
+                    detail: format!("btrfs zstd decompression failed: {e}"),
+                })
+        })?;
+        if written != dst.len() {
+            return Err(FfsError::Corruption {
+                block: 0,
+                detail: format!(
+                    "btrfs zstd decompressed length mismatch: wrote {written}, expected {}",
+                    dst.len()
+                ),
+            });
+        }
+        Ok(())
+    }
+
     fn btrfs_decompress_lzo(
         compressed: &[u8],
         uncompressed_size: usize,
@@ -8952,19 +9013,33 @@ impl OpenFs {
                         let mut compressed = vec![0_u8; compressed_len];
                         match self.btrfs_read_logical_into(cx, logical, &mut compressed) {
                             Ok(()) => {
-                                let result = Self::btrfs_decompress(&compressed, comp, ram)
-                                    .and_then(|decompressed| {
-                                        let decompressed_slice =
-                                            Self::btrfs_decompressed_extent_slice(
-                                                disk_bytenr,
-                                                extent_offset,
-                                                extent_delta,
-                                                chunk.len(),
-                                                &decompressed,
-                                            )?;
-                                        chunk.copy_from_slice(decompressed_slice);
-                                        Ok(BtrfsDeferredReadResult::Done)
-                                    });
+                                // bd-xmh5g.413: when the window receives the WHOLE
+                                // zstd extent, decompress straight into it — no
+                                // intermediate Vec, no post-decompress memmove
+                                // (the ~15% `__memmove_avx` in the flamegraph).
+                                // Byte-identical to the Vec+copy path for this case.
+                                let whole_zstd_extent = comp == 3
+                                    && extent_offset.checked_add(extent_delta) == Some(0)
+                                    && chunk.len() == ram;
+                                let result = if whole_zstd_extent {
+                                    Self::btrfs_decompress_zstd_into(&compressed, chunk)
+                                        .map(|()| BtrfsDeferredReadResult::Done)
+                                } else {
+                                    Self::btrfs_decompress(&compressed, comp, ram).and_then(
+                                        |decompressed| {
+                                            let decompressed_slice =
+                                                Self::btrfs_decompressed_extent_slice(
+                                                    disk_bytenr,
+                                                    extent_offset,
+                                                    extent_delta,
+                                                    chunk.len(),
+                                                    &decompressed,
+                                                )?;
+                                            chunk.copy_from_slice(decompressed_slice);
+                                            Ok(BtrfsDeferredReadResult::Done)
+                                        },
+                                    )
+                                };
                                 (idx, result)
                             }
                             Err(err) => (idx, Err(err)),
