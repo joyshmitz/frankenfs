@@ -277,13 +277,22 @@ impl<'a> Scrubber<'a> {
         }
         let total = end - start.0;
 
-        // Partition into a bounded number of chunks (~8 per pool thread) so the
-        // chunk reports stay cheap to merge while there are enough chunks to
-        // keep every pool worker busy. Each chunk covers at least one read
-        // batch. A range that fits in a single chunk is scanned inline to skip
-        // the rayon fan-out entirely.
+        // Partition into ~one chunk per pool thread (not 8) so each chunk spans
+        // MANY read batches and its reusable `bufs` pool is actually reused
+        // across them. The previous ~8-chunks-per-thread split produced, on a
+        // typical image, chunks of exactly one `SCRUB_READ_BATCH_BLOCKS` batch
+        // (`total / (threads*8)` fell below the batch floor), so every chunk
+        // re-allocated + re-zeroed its read buffers on its first (and only)
+        // batch and never reached the fast vectored read path — profiling put
+        // ~76% of scrub self-time in buffer alloc/zero/free (memset, AlignedVec,
+        // mprotect/madvise), not validation. Targeting one chunk per thread
+        // keeps every worker busy (scrub work is uniform per block, so no
+        // load-balancing slack is needed) while letting each chunk amortize one
+        // buffer-pool allocation over all its batches. Each chunk still covers
+        // at least one read batch; a range that fits in a single chunk is
+        // scanned inline to skip the rayon fan-out entirely.
         let parallelism = rayon::current_num_threads().max(1) as u64;
-        let chunk = (total / (parallelism * 8))
+        let chunk = (total / parallelism)
             .max(SCRUB_READ_BATCH_BLOCKS as u64)
             .max(1);
         let num_chunks = usize::try_from(total.div_ceil(chunk)).unwrap_or(usize::MAX);
