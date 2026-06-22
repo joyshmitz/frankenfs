@@ -1025,6 +1025,21 @@ pub struct OpenFs {
     /// the on-disk inode is immutable so last-writer-wins publish is safe; a
     /// writable mount skips the slot (the inode can change under it).
     ext4_hot_inode: arc_swap::ArcSwapOption<(u64, Arc<Ext4Inode>)>,
+    /// Lock-free single-slot "hot extent list" for the ext4 read path. Once the
+    /// inode-table Mutex convoy is gone (see [`Self::ext4_hot_inode`]), the next
+    /// per-read serial point is `resolve_extent` → `ExtentCache::lookup`, which
+    /// takes the extent cache's per-namespace shard `RwLock` in shared mode for
+    /// EVERY logical block; at high parallelism on one hot file all readers
+    /// ping-pong that one shard's reader-count cacheline (the 64t profile's
+    /// top self-time after the Cx-per-request fix). This slot holds the hot
+    /// inode's FULL resolved extent mapping list (sorted, non-overlapping), so a
+    /// hot single-file read resolves each block by in-memory `partition_point` —
+    /// no RwLock, no per-block `BTreeMap` range query — mirroring the btrfs
+    /// in-memory extent filter. Keyed by the extent-cache namespace. RO only and
+    /// only populated once the inode is already hot (its [`Self::ext4_hot_inode`]
+    /// slot matched on a prior read), so a multi-file workload that reads each
+    /// inode once never pays the full-tree walk to build the list.
+    ext4_hot_extents: arc_swap::ArcSwapOption<(u64, Arc<[ffs_extent::ExtentMapping]>)>,
     /// Memoized fs-tree root bytenr per subvolume objectid (bd-yuk9v). On a
     /// read-only mount the root tree is immutable, so resolving a subvolume's
     /// ROOT_ITEM once and caching the bytenr removes the per-op root-tree
@@ -3383,6 +3398,7 @@ impl OpenFs {
             btrfs_ro_inode_extents: ShardedCache::new(),
             btrfs_hot_inode_extents: arc_swap::ArcSwapOption::empty(),
             ext4_hot_inode: arc_swap::ArcSwapOption::empty(),
+            ext4_hot_extents: arc_swap::ArcSwapOption::empty(),
             btrfs_fs_tree_root_cache: Mutex::new(std::collections::HashMap::new()),
             btrfs_parsed_node_cache: ShardedCache::new(),
             btrfs_decompressed_extent_cache: ShardedCache::new(),
@@ -10991,6 +11007,74 @@ impl OpenFs {
     ///
     /// Returns `Ok(None)` if the logical block falls in a hole (no mapping).
     ///
+    /// Resolve one logical block from a sorted, non-overlapping extent mapping
+    /// list (the lock-free hot-extent path). Byte-identical to the per-block
+    /// translation `resolve_extent` performs over a freshly walked leaf: the
+    /// covering extent is the last whose `logical_start <= logical_block`; a
+    /// block past that extent's span, or with no covering extent, or with a
+    /// zero physical start, is a hole (`None`).
+    fn ext4_resolve_block_from_mappings(
+        mappings: &[ffs_extent::ExtentMapping],
+        logical_block: u32,
+    ) -> Option<(u64, bool)> {
+        let pp = mappings.partition_point(|m| m.logical_start <= logical_block);
+        if pp == 0 {
+            return None;
+        }
+        let mapping = mappings[pp - 1];
+        if logical_block >= mapping.logical_start.saturating_add(mapping.count) {
+            return None;
+        }
+        if mapping.physical_start == 0 {
+            None
+        } else {
+            let offset = u64::from(logical_block - mapping.logical_start);
+            mapping
+                .physical_start
+                .checked_add(offset)
+                .map(|phys| (phys, mapping.unwritten))
+        }
+    }
+
+    /// Publish the hot inode's FULL resolved extent list into the lock-free
+    /// [`Self::ext4_hot_extents`] slot (once), so subsequent `resolve_extent`
+    /// calls for it skip the `ExtentCache` shard `RwLock`. Best-effort and a
+    /// no-op when the slot already holds this namespace, when the inode is not
+    /// extent-mapped, or on a writable mount (the on-disk extent tree could then
+    /// change under the cached list). The mapping conversion mirrors
+    /// `walk_extent_tree_leaf` exactly so an in-memory resolve is byte-identical.
+    fn ext4_ensure_hot_extents(
+        &self,
+        cx: &Cx,
+        scope: &RequestScope,
+        inode: &Ext4Inode,
+    ) -> Result<(), FfsError> {
+        if inode.flags & EXT4_EXTENTS_FL == 0 || self.is_writable() {
+            return Ok(());
+        }
+        let ns = extent_cache_namespace(inode);
+        if self
+            .ext4_hot_extents
+            .load()
+            .as_ref()
+            .is_some_and(|slot| slot.0 == ns)
+        {
+            return Ok(());
+        }
+        let extents = self.collect_extents_with_scope(cx, scope, inode)?;
+        let mappings: Arc<[ffs_extent::ExtentMapping]> = extents
+            .iter()
+            .map(|ext| ffs_extent::ExtentMapping {
+                logical_start: ext.logical_block,
+                physical_start: ext.physical_start,
+                count: u32::from(ext.actual_len()),
+                unwritten: ext.is_unwritten(),
+            })
+            .collect();
+        self.ext4_hot_extents.store(Some(Arc::new((ns, mappings))));
+        Ok(())
+    }
+
     /// Uses the internal extent cache to avoid repeated tree traversals for
     /// sequential reads. Consecutive blocks within the same extent are served
     /// from cache after the first tree walk.
@@ -11021,6 +11105,19 @@ impl OpenFs {
         // practically unique per-inode key to prevent cross-inode cache
         // pollution.
         let ns = extent_cache_namespace(inode);
+
+        // Lock-free hot-extent fast path: a hot single-file read stream resolves
+        // the same inode every read; once its full extent list is published (see
+        // `ext4_ensure_hot_extents`), resolve the block in-memory with zero lock
+        // and no `BTreeMap` query — skipping the `ExtentCache` shard `RwLock`
+        // that otherwise serializes every reader on one hot file's namespace.
+        let hot = self.ext4_hot_extents.load();
+        if let Some(slot) = hot.as_ref() {
+            if slot.0 == ns {
+                return Ok(Self::ext4_resolve_block_from_mappings(&slot.1, logical_block));
+            }
+        }
+        drop(hot);
 
         // Fast path: check extent cache.
         if let Some(hit) = self.extent_cache.lookup(ns, logical_block) {
@@ -28137,6 +28234,7 @@ impl OpenFs {
                 } else {
                     None
                 };
+                let inode_was_hot = hot_hit.is_some();
                 let inode = match hot_hit {
                     // Clone the small fixed-size inode out of the Arc (a
                     // thread-local memcpy, no shared state) so the downstream
@@ -28161,6 +28259,15 @@ impl OpenFs {
                     && inode.flags & ffs_types::EXT4_EXTENTS_FL != 0;
                 if plain_extent {
                     Self::ext4_reject_encrypted(&inode)?;
+                    // Once the inode is hot (resolved from the lock-free slot on
+                    // a prior read), publish its full extent list so the per-block
+                    // `resolve_extent` calls below skip the `ExtentCache` RwLock.
+                    // Gated on `inode_was_hot` so a one-shot multi-file read never
+                    // pays the full-tree walk. Best-effort: on error the locked
+                    // path resolves identically.
+                    if inode_was_hot {
+                        let _ = self.ext4_ensure_hot_extents(cx, scope, &inode);
+                    }
                     let want = ext4_read_buffer_len(inode.size, offset, size)?;
                     return self.read_file_data(cx, scope, &inode, offset, &mut dst[..want]);
                 }
