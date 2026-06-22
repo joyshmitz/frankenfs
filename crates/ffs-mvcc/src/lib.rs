@@ -2984,8 +2984,12 @@ impl MvccStore {
             // path — gate on a real `enabled!` check so it never runs when the
             // evidence target is disabled (a lazy field expr is insufficient
             // under the dynamic EnvFilter; see the note in `release_snapshot`).
-            if tracing::enabled!(target: "ffs::mvcc::evidence", tracing::Level::INFO) {
-                info!(
+            // Gated at DEBUG, not INFO: the default `info` filter must NOT pay
+            // this per-commit O(tracked_blocks) scan (it was ~46% of delete CPU
+            // under the default filter). Enable explicitly with
+            // `RUST_LOG=ffs::mvcc::evidence=debug` for the diagnostic.
+            if tracing::enabled!(target: "ffs::mvcc::evidence", tracing::Level::DEBUG) {
+                debug!(
                     target: "ffs::mvcc::evidence",
                     event = "snapshot_advanced",
                     old_commit_seq = forced_snapshot.0,
@@ -3451,11 +3455,15 @@ impl MvccStore {
                 // filters at runtime — the full scan still ran on EVERY write
                 // commit (71% of write-path self-time; ~5x slower 4 KiB writes).
                 // Gate on a real runtime `enabled!` check so the scan only runs
-                // when a subscriber will actually record the event.
+                // when a subscriber will actually record the event. Gated at
+                // DEBUG, not INFO: the default `info` filter must NOT pay this
+                // per-commit O(tracked_blocks) scan (it dominated write- and
+                // delete-commit CPU under the default filter). Enable with
+                // `RUST_LOG=ffs::mvcc::evidence=debug` for the diagnostic.
                 if new_watermark.0 > old_commit_seq
-                    && tracing::enabled!(target: "ffs::mvcc::evidence", tracing::Level::INFO)
+                    && tracing::enabled!(target: "ffs::mvcc::evidence", tracing::Level::DEBUG)
                 {
-                    info!(
+                    debug!(
                         target: "ffs::mvcc::evidence",
                         event = "snapshot_advanced",
                         old_commit_seq,
