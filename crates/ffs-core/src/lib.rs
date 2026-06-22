@@ -10058,7 +10058,6 @@ impl OpenFs {
         scope: &RequestScope,
         entries: &[DirEntry],
     ) {
-        use rayon::prelude::{IntoParallelIterator, ParallelIterator};
         if entries.len() < EXT4_READDIR_INODE_PREFETCH_MIN_ENTRIES || self.is_writable() {
             return;
         }
@@ -10091,40 +10090,20 @@ impl OpenFs {
         if blocks.is_empty() {
             return;
         }
-        // Read serially when there are fewer blocks than worker threads: spinning
-        // up the rayon par_iter to read a handful of inode-table blocks over a wide
-        // pool is pure over-subscription churn (futex wake/steal/park). A readdir
-        // page usually leaves only a few uncached inode-table blocks, so on a
-        // 64-wide pool the per-page par_iter cost dominates — measured ~1.7x slower
-        // on a readdir-heavy walk at a 64-pool, even COLD (the coordination cost
-        // outweighs the cold-I/O overlap). Only fan out when there are enough
-        // blocks to actually use the pool. (The ffs-cli metadata-walk pool cap
-        // mitigates this for the CLI; this fixes the FUSE readdir path too, where
-        // the global pool stays 64.)
-        if blocks.len() < rayon::current_num_threads().max(2) {
-            for &block in &blocks {
-                if let Err(err) = self.read_ext4_inode_table_block_with_scope(cx, scope, block) {
-                    trace!(
-                        block = block.0,
-                        error = %err,
-                        "ext4 readdir inode-table prefetch failed"
-                    );
-                }
-            }
-            return;
-        }
-
-        let reads: Vec<(BlockNumber, Result<(), FfsError>)> = blocks
-            .into_par_iter()
-            .map(|block| {
-                let result = self
-                    .read_ext4_inode_table_block_with_scope(cx, scope, block)
-                    .map(|_| ());
-                (block, result)
-            })
-            .collect();
-        for (block, result) in reads {
-            if let Err(err) = result {
+        // Read the inode-table blocks SERIALLY — never fan out onto rayon. The
+        // par_iter was net-NEGATIVE in every measurement: a readdir page leaves
+        // only a handful of uncached blocks (so a 64-wide pool over-subscribes —
+        // "~1.7x slower even COLD"), and on a large htree dir the hash-ordered
+        // entries scatter inodes across up to ~512 blocks/page, so the fan-out's
+        // futex yield/steal/thread-spawn coordination DOMINATED ~60% of readdir
+        // self-time and the full walk was ~1.4x (with-stat) / ~2.25x (no-stat)
+        // SLOWER than serial, warm (bd-neteo). Serial still warms the getattr
+        // cache (the prefetch's whole point); only the never-beneficial parallel
+        // dispatch is dropped. The old `blocks.len() < current_num_threads()`
+        // guard serialized small pages but let htree scattered-inode pages fan
+        // out — the exact case that hurt.
+        for &block in &blocks {
+            if let Err(err) = self.read_ext4_inode_table_block_with_scope(cx, scope, block) {
                 trace!(
                     block = block.0,
                     error = %err,
