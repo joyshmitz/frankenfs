@@ -17631,6 +17631,65 @@ impl OpenFs {
             // rec_len spans past the reserved tail, so a linear remove_entry scan
             // rejects it as corrupt. Skip it — the entry is always in a leaf.
             let dx_root_phys = Self::ext4_htree_dx_root_phys(&parent_inode, &extents);
+
+            // htree fast path: descend the dx index to the single hash-correct
+            // leaf and remove the entry there — O(log N) — instead of the linear
+            // scan of every directory block below, which is O(N) per unlink =
+            // O(N^2) for a delete-heavy directory (mirrors the add path's
+            // hash-correct-leaf routing). The linear scan stays as the
+            // correctness fallback when the htree path can't locate the entry
+            // (stale/odd index, non-ASCII casefold).
+            if parent_inode.has_htree_index() {
+                if let Some(sb) = self.ext4_superblock() {
+                    let resolve_logical = |logical: u32| -> Option<BlockNumber> {
+                        let pos = extents.partition_point(|e| e.logical_block <= logical);
+                        let ext = extents.get(pos.checked_sub(1)?)?;
+                        if ext.is_unwritten() {
+                            return None;
+                        }
+                        let start = ext.logical_block;
+                        let len = u32::from(ext.actual_len());
+                        (logical >= start && logical < start.saturating_add(len))
+                            .then(|| BlockNumber(ext.physical_start + u64::from(logical - start)))
+                    };
+                    let read_leaf = |lb| {
+                        resolve_logical(lb).and_then(|phys| self.read_block_vec(cx, phys).ok())
+                    };
+                    let casefold = parent_inode.flags & ffs_types::EXT4_CASEFOLD_FL != 0;
+                    let target_logical = if casefold {
+                        ffs_ondisk::htree_target_leaf_block_casefold(
+                            &sb.hash_seed,
+                            sb.has_large_dir(),
+                            name,
+                            |v| sb.effective_dirhash_version(v),
+                            read_leaf,
+                        )
+                    } else {
+                        ffs_ondisk::htree_target_leaf_block(
+                            &sb.hash_seed,
+                            sb.has_large_dir(),
+                            name,
+                            |v| sb.effective_dirhash_version(v),
+                            read_leaf,
+                        )
+                    };
+                    if let Some(target_phys) = target_logical.and_then(|tl| resolve_logical(tl)) {
+                        if Some(target_phys) != dx_root_phys {
+                            let mut data = self.read_block_vec(cx, target_phys)?;
+                            if ffs_dir::remove_entry(&mut data, name, reserved_tail)? {
+                                self.stamp_ext4_dir_block(
+                                    &mut data,
+                                    parent_ino_u32,
+                                    parent_inode.generation,
+                                );
+                                tx_dev.write_block(cx, target_phys, &data)?;
+                                removed = true;
+                            }
+                        }
+                    }
+                }
+            }
+
             'outer: for ext in &extents {
                 if removed {
                     break;
