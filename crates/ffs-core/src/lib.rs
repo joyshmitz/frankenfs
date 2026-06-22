@@ -1040,6 +1040,16 @@ pub struct OpenFs {
     /// slot matched on a prior read), so a multi-file workload that reads each
     /// inode once never pays the full-tree walk to build the list.
     ext4_hot_extents: arc_swap::ArcSwapOption<(u64, Arc<[ffs_extent::ExtentMapping]>)>,
+    /// Cached MVCC snapshot for a read-only mount. `with_latest_scope` (per
+    /// `read_into`) and `block_device_adapter` (per block read) both call
+    /// `mvcc_store.read().current_snapshot()`, taking the store's `RwLock` in
+    /// shared mode on every read; at high parallelism on one fs all readers
+    /// ping-pong that one reader-count cacheline (the residual `lock_shared_slow`
+    /// after the inode/extent locks are gone). A read-only mount never commits,
+    /// so `current_snapshot()` is constant — resolve it once and serve it from
+    /// this lock-free `OnceLock` thereafter (an atomic acquire, no `RwLock`). A
+    /// writable mount skips the cache (the snapshot advances on every commit).
+    ro_snapshot: std::sync::OnceLock<Snapshot>,
     /// Memoized fs-tree root bytenr per subvolume objectid (bd-yuk9v). On a
     /// read-only mount the root tree is immutable, so resolving a subvolume's
     /// ROOT_ITEM once and caching the bytenr removes the per-op root-tree
@@ -3399,6 +3409,7 @@ impl OpenFs {
             btrfs_hot_inode_extents: arc_swap::ArcSwapOption::empty(),
             ext4_hot_inode: arc_swap::ArcSwapOption::empty(),
             ext4_hot_extents: arc_swap::ArcSwapOption::empty(),
+            ro_snapshot: std::sync::OnceLock::new(),
             btrfs_fs_tree_root_cache: Mutex::new(std::collections::HashMap::new()),
             btrfs_parsed_node_cache: ShardedCache::new(),
             btrfs_decompressed_extent_cache: ShardedCache::new(),
@@ -15811,7 +15822,9 @@ impl OpenFs {
             dev: self.dev.as_ref(),
             block_size: self.block_size(),
         };
-        let snapshot = self.mvcc_store.read().current_snapshot();
+        // RO mounts serve this from the lock-free `ro_snapshot` cache (the
+        // snapshot is invariant without commits); writable mounts re-read live.
+        let snapshot = self.latest_snapshot();
         // Read-your-writes: this no-tx adapter's own write_block commits advance
         // the store, so reads must resolve at the current snapshot to observe
         // them. Without this, a write followed by a read of the same block via
@@ -27845,11 +27858,27 @@ impl OpenFs {
         0
     }
 
+    /// The latest MVCC snapshot, served lock-free on a read-only mount. A RO
+    /// mount never commits, so `current_snapshot()` is invariant: resolve it
+    /// once under the store `RwLock`, then cache it in `ro_snapshot` and return
+    /// the cached copy (a `OnceLock` atomic load — no `RwLock`) on every later
+    /// read. A writable mount always re-reads the live snapshot.
+    #[inline]
+    fn latest_snapshot(&self) -> Snapshot {
+        if self.is_writable() {
+            self.mvcc_store.read().current_snapshot()
+        } else {
+            *self
+                .ro_snapshot
+                .get_or_init(|| self.mvcc_store.read().current_snapshot())
+        }
+    }
+
     fn with_latest_scope<T>(
         &self,
         f: impl FnOnce(&mut RequestScope) -> ffs_error::Result<T>,
     ) -> ffs_error::Result<T> {
-        let snapshot = self.mvcc_store.read().current_snapshot();
+        let snapshot = self.latest_snapshot();
         let mut scope = RequestScope::with_snapshot(snapshot);
         f(&mut scope)
     }
