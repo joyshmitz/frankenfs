@@ -11951,10 +11951,8 @@ impl OpenFs {
         // the lowest-offset error first — isomorphic to the serial read
         // (bd-strse / bd-307e4 precedent).
         {
-            use rayon::prelude::{IntoParallelIterator, ParallelIterator};
-            let results: Vec<Result<(), FfsError>> = jobs
-                .into_par_iter()
-                .map(|job| match job {
+            let exec_job = |job: IoJob<'_>| -> Result<(), FfsError> {
+                match job {
                     IoJob::Run { phys, dst } => {
                         self.read_contiguous_into_with_scope(cx, scope, BlockNumber(phys), dst)
                     }
@@ -11968,10 +11966,29 @@ impl OpenFs {
                         dst.copy_from_slice(&block_data[off..off + len]);
                         Ok(())
                     }
-                })
-                .collect();
-            for result in results {
-                result?;
+                }
+            };
+            // Only fan the chunk reads onto the rayon pool when it actually helps.
+            // A single job has no overlap to gain, and — crucially — when this
+            // read already runs INSIDE a rayon worker (a parallel multi-file walk,
+            // or any caller that parallelized across files), an inner `par_iter`
+            // is NESTED parallelism: it floods the pool with tiny jobs whose
+            // steal/join/StackJob coordination dominated (~27% of a small-file
+            // parallel walk profile) while the outer loop already saturates every
+            // core. Read serially in those cases; keep the chunk overlap only for
+            // a top-level large single-stream read (called from the main thread,
+            // where the pool is otherwise idle — the documented 32-block win).
+            let nested = rayon::current_thread_index().is_some();
+            if jobs.len() <= 1 || nested {
+                for job in jobs {
+                    exec_job(job)?;
+                }
+            } else {
+                use rayon::prelude::{IntoParallelIterator, ParallelIterator};
+                let results: Vec<Result<(), FfsError>> = jobs.into_par_iter().map(exec_job).collect();
+                for result in results {
+                    result?;
+                }
             }
         }
 
