@@ -143,3 +143,15 @@ Detailed historical context and retry predicates remain in
 Isomorphism notes for `bd-xmh5g.421`: read-only btrfs prewarming is opt-in from the CLI walk path and the writable COW path bypasses the cache first. Directory payloads are stored raw and parsed only when a directory is reached, preserving malformed-entry error timing. File reads still assemble extents in key order and reject directories/symlinks on the same public surface. The visited-directory guard only skips duplicate directory inodes after first visit, which is correct for normal trees and bounds malformed cycles.
 
 Isomorphism notes for `bd-xmh5g.423`: the cached btrfs read plan contents are unchanged; only publication changes from `Mutex<Option<Arc<_>>>` to `OnceLock<Arc<_>>`. Ordering, extent assembly, directory parsing, writable-COW bypass, checksum behavior, and error priority are unchanged. A rare concurrent first-use race may build an equivalent unused index, but only one immutable `Arc` is published and all cached readers observe that same plan.
+
+### 2026-06-21 current-HEAD regression-guard (CrimsonFox cc/opus)
+
+After the swarm advanced the read-only read path (my `9376f4d6` register/release skip + `b4b9f331` btrfs extent cache, plus a peer's `ba7b2907` "bypass read-only overlay probes" + cod-b's `.415` e2compr), rebuilt `ffs-cli` from clean HEAD and re-measured random read vs kernel (100k × 4 KiB, warm, 64-core):
+
+| workload | frankenfs | kernel | ratio |
+| --- | --- | --- | --- |
+| ext4 random read (16t optimum) | `~58 ms` (byte-identical `7b6b1f9a`) | 16t `17 ms` / 64t `14 ms` | `~3.4x` slower (stable; was `3.3x` post-`9376f4d6`) |
+| btrfs uncompressed random read (serial) | `1874 MiB/s` / `~2.08 µs/read` (byte-identical `b6cfaf9d`) | — | `~ext4 parity` (was the 75x-heavier gap) |
+
+**Both shipped fixes survived the peer commits intact** (`new_unregistered`/`SnapshotOwnership::Unregistered` present in HEAD ffs-mvcc; `btrfs_load_inode_all_extents`/`btrfs_ro_inode_extents` in HEAD ffs-core). The peer's RO-overlay-probe bypass (`ba7b2907`) is **marginal for ext4 random read (within load noise)** — consistent with the earlier finding that the post-fix ext4 residual is *distributed* (no single ≥10% lever), not a single fixable contention point. No regression.
+
