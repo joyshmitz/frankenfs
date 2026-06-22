@@ -8715,6 +8715,47 @@ impl OpenFs {
         Ok((inode, exts))
     }
 
+    /// Filter a `logical_start`-sorted, non-overlapping extent slice to those
+    /// overlapping the read window `[offset, read_end)` via a binary-searched
+    /// lower bound + forward scan that stops at the first extent past the
+    /// window — O(log N + overlapping) instead of the O(N) scan over every
+    /// extent of the inode. Profiling a single-thread compressed random read
+    /// put `btrfs_read_file_into` self-time at ~47%, dominated by this per-read
+    /// scan of the inode's FULL cached extent list (bd-n5w92 / read-plan
+    /// index): a 4 KiB random read of a many-extent file (e.g. a database on
+    /// btrfs = tens of thousands of extents) re-scanned every extent to find
+    /// the one or two it overlaps. Byte-identical selection: extents are sorted
+    /// by `logical_start` and do not overlap, so the overlapping extents form a
+    /// contiguous run and any extent before the lower bound has
+    /// `extent_end <= offset` (cannot overlap). The full predicate
+    /// (`logical_start < read_end && extent_end > offset`) is re-applied in the
+    /// forward scan, so a hole/gap entry landing on the lower bound is still
+    /// skipped exactly as the linear filter skipped it.
+    fn btrfs_filter_window_extents(
+        rows: &[(u64, BtrfsExtentData)],
+        offset: u64,
+        read_end: u64,
+    ) -> Result<Vec<(u64, BtrfsExtentData)>, FfsError> {
+        // First extent whose `logical_start > offset`; the extent covering
+        // `offset` (if any) is the immediately preceding entry, so start the
+        // forward scan one slot earlier (saturating at 0).
+        let start = rows
+            .partition_point(|(ls, _)| *ls <= offset)
+            .saturating_sub(1);
+        let mut exts: Vec<(u64, BtrfsExtentData)> = Vec::new();
+        for (logical_start, extent) in &rows[start..] {
+            if *logical_start >= read_end {
+                break;
+            }
+            let extent_end =
+                (*logical_start).saturating_add(Self::btrfs_extent_logical_len(extent)?);
+            if extent_end > offset {
+                exts.push((*logical_start, extent.clone()));
+            }
+        }
+        Ok(exts)
+    }
+
     fn btrfs_read_file_into(
         &self,
         cx: &Cx,
@@ -8801,16 +8842,10 @@ impl OpenFs {
                     FfsError::NotFound(format!("btrfs INODE_ITEM for objectid {canonical}"))
                 })?;
                 let read_end = offset.saturating_add(u64::from(size));
-                let mut exts = Vec::new();
-                if let Some(rows) = index.extents.get(&canonical) {
-                    for (logical_start, extent) in rows.iter() {
-                        let extent_end = (*logical_start)
-                            .saturating_add(Self::btrfs_extent_logical_len(extent)?);
-                        if *logical_start < read_end && extent_end > offset {
-                            exts.push((*logical_start, extent.clone()));
-                        }
-                    }
-                }
+                let exts = match index.extents.get(&canonical) {
+                    Some(rows) => Self::btrfs_filter_window_extents(rows, offset, read_end)?,
+                    None => Vec::new(),
+                };
                 (inode, exts)
             } else if self.btrfs_tree_log_items.is_empty() {
                 // bd-n5w92: per-inode read-only extent cache. With no pending
@@ -8833,14 +8868,7 @@ impl OpenFs {
                     }
                 };
                 let read_end = offset.saturating_add(u64::from(size));
-                let mut exts: Vec<(u64, BtrfsExtentData)> = Vec::new();
-                for (logical_start, extent) in entry.1.iter() {
-                    let extent_end =
-                        (*logical_start).saturating_add(Self::btrfs_extent_logical_len(extent)?);
-                    if *logical_start < read_end && extent_end > offset {
-                        exts.push((*logical_start, extent.clone()));
-                    }
-                }
+                let exts = Self::btrfs_filter_window_extents(&entry.1, offset, read_end)?;
                 (entry.0, exts)
             } else {
                 // Bound the on-disk walk to the read window on BOTH edges so a
