@@ -199,3 +199,22 @@ Small binary-only bench (warm HEAD `9dbdb38e`, NO build, 128 MiB btrfs-convert u
 ### 2026-06-22 random-read size curve (3-point) — confirms copy-bound + frankenfs ~15-16 GB/s ceiling (CrimsonFox cc/opus)
 
 Refines the earlier 2-point size sweep with a 3-point same-run curve (warm HEAD `9dbdb38e`, NO build, 5k reads, 16t, ext4 warm): 4 KiB `ff 5474 / k 11706 = 2.14x`; 16 KiB `ff 15129 / k 25326 = 1.67x`; 64 KiB `ff 15837 / k 32891 = 2.08x`. The gap is **~2x across all sizes (size-independent)** — confirming the post-fix random-read residual is copy-bound, not per-read-overhead-bound. New observation: **frankenfs random read saturates at ~15-16 GB/s** (16 KiB and 64 KiB both land ~15-16 GB/s), while the kernel keeps scaling (25→33 GB/s) — the in-kernel driver's copy path is more memory-bandwidth-efficient than frankenfs's safe userspace copy. This ~2x copy-efficiency ceiling is the structural residual (closable only via the forbidden mmap/splice path), consistent with the read-surface profiling's "distributed, no single lever." Byte-identical.
+
+### 2026-06-22 CONSOLIDATED current-HEAD vs-kernel scorecard (CrimsonFox cc/opus)
+
+Synthesis of this session's binary-only measurements at HEAD `9dbdb38e` (warm HEAD `ffs-cli`, NO build; baselines: random = C pthreads `pread` loop on the RO loop-mount; sequential = `dd bs=1M` materialize / `cat` splice; metadata = `find -type f -printf %s`). All byte-identical to kernel. Ratios are same-run (load-robust).
+
+| workload | regime | frankenfs vs kernel | nature |
+| --- | --- | --- | --- |
+| ext4 random read | warm 100k/16t | **3.15x SLOWER** (7.4 vs 23.2 GB/s) | copy-efficiency ceiling (ff saturates ~15-16 GB/s) |
+| ext4 random read | warm 10k/16t (small N) | **2.15x SLOWER** | gap tightens at small N |
+| ext4 random read | **COLD** 10k/16t | **~14.5x FASTER** | I/O-bound, direct-image-read + parallel-seek (loop caveat) |
+| btrfs uncompressed random read | warm | **1.65x SLOWER** / ~ext4 parity | `b4b9f331` fix holds (was 75x-heavier) |
+| ext4 sequential read | warm | **2.1x FASTER** vs `dd` materialize | parallel chunked read-into-buffer |
+| btrfs uncompressed sequential | warm | **2.34x FASTER** vs `dd` | " |
+| btrfs compressed sequential | warm | **1.5x FASTER** vs `dd` | decompress-into-window (`.413`) |
+| ext4 metadata walk (30k) | warm | **3.9x FASTER** | bulk inode parse vs per-file getattr |
+| btrfs metadata walk (1001) | warm | **~1.9x FASTER** (~1.5x net of `find` spawn) | scales with N |
+| any sequential | warm | loses to `cat` splice (~4x) | zero-copy idealization, not a data-consuming app |
+
+**Verdict:** FrankenFS DOMINATES the kernel on metadata (2-4x), cold I/O-bound reads (~14x), and warm sequential *materialize* (2.1-2.34x, both FS). It LOSES only on warm random/cache-resident reads (~2-3x) and the splice idealization — both being the structural copy-bandwidth tax of a safe userspace FS vs the in-kernel driver, closable only via mmap/splice (forbidden by `#![forbid(unsafe_code)]`). The two shipped fixes (`9376f4d6` ext4 register/release 88x→3.x, `b4b9f331` btrfs descent 75x→parity) removed the per-read contention pathologies; the read-surface profiling confirms no single surgical lever remains.
