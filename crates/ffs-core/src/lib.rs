@@ -9437,119 +9437,134 @@ impl OpenFs {
                     }
                 }
             }
-            let results: Vec<(usize, Result<BtrfsDeferredReadResult, FfsError>)> = jobs
-                .into_par_iter()
-                .map(|job| match job {
-                    BtrfsReadJob::Inline {
-                        idx,
-                        data,
-                        comp,
-                        ram,
-                    } => (
-                        idx,
-                        Self::btrfs_decompress(&data, comp, ram)
-                            .map(BtrfsDeferredReadResult::Bytes),
-                    ),
-                    BtrfsReadJob::ReadCompressed {
-                        idx,
-                        logical,
-                        compressed_len,
-                        comp,
-                        ram,
-                        disk_bytenr,
-                        extent_offset,
-                        extent_delta,
-                        dst: chunk,
-                    } => {
-                        // bd-xmh5g.413: when the window receives the WHOLE zstd
-                        // extent, decompress straight into it — no intermediate
-                        // Vec, no post-decompress memmove. This is the sequential
-                        // whole-extent case; it does not touch the decompressed-
-                        // extent cache (keeping that path's bounded memory).
-                        let whole_zstd_extent = comp == 3
-                            && extent_offset.checked_add(extent_delta) == Some(0)
-                            && chunk.len() == ram;
-                        // bd-4tw2n: partial-slice (random) read of a compressed
-                        // extent. On a read-only mount, serve the requested window
-                        // from the cached FULL decompressed extent if present —
-                        // skipping BOTH the compressed-blob device read and the
-                        // whole-extent decode. Byte-identical: the cached buffer
-                        // is exactly what `btrfs_decompress` produced when first
-                        // read, and the slice is computed identically.
-                        if !whole_zstd_extent
-                            && decomp_cache_enabled
-                            && let Some(full) =
-                                self.btrfs_decompressed_extent_cache.get(&disk_bytenr)
-                        {
-                            let result = Self::btrfs_decompressed_extent_slice(
-                                disk_bytenr,
-                                extent_offset,
-                                extent_delta,
-                                chunk.len(),
-                                &full,
-                            )
-                            .map(|slice| {
-                                chunk.copy_from_slice(slice);
-                                BtrfsDeferredReadResult::Done
-                            });
-                            return (idx, result);
-                        }
-                        let mut compressed = vec![0_u8; compressed_len];
-                        match self.btrfs_read_logical_into(cx, logical, &mut compressed) {
-                            Ok(()) => {
-                                let result = if whole_zstd_extent {
-                                    Self::btrfs_decompress_zstd_into(&compressed, chunk)
-                                        .map(|()| BtrfsDeferredReadResult::Done)
-                                } else {
-                                    Self::btrfs_decompress(&compressed, comp, ram).and_then(
-                                        |decompressed| {
-                                            let decompressed_slice =
-                                                Self::btrfs_decompressed_extent_slice(
-                                                    disk_bytenr,
-                                                    extent_offset,
-                                                    extent_delta,
-                                                    chunk.len(),
-                                                    &decompressed,
-                                                )?;
-                                            chunk.copy_from_slice(decompressed_slice);
-                                            // bd-4tw2n: retain the FULL decompressed
-                                            // extent so a later random read of any
-                                            // window of this extent hits the cache
-                                            // above. Bounded by the admission cap;
-                                            // only the partial-slice path fills it.
-                                            if decomp_cache_enabled {
-                                                let full: Arc<[u8]> =
-                                                    Arc::from(decompressed.into_boxed_slice());
-                                                self.btrfs_decompressed_extent_cache.insert_within(
-                                                    disk_bytenr,
-                                                    full,
-                                                    decomp_cache_limit,
-                                                );
-                                            }
-                                            Ok(BtrfsDeferredReadResult::Done)
-                                        },
-                                    )
-                                };
-                                (idx, result)
+            let exec_job =
+                |job: BtrfsReadJob<'_>| -> (usize, Result<BtrfsDeferredReadResult, FfsError>) {
+                    match job {
+                        BtrfsReadJob::Inline {
+                            idx,
+                            data,
+                            comp,
+                            ram,
+                        } => (
+                            idx,
+                            Self::btrfs_decompress(&data, comp, ram)
+                                .map(BtrfsDeferredReadResult::Bytes),
+                        ),
+                        BtrfsReadJob::ReadCompressed {
+                            idx,
+                            logical,
+                            compressed_len,
+                            comp,
+                            ram,
+                            disk_bytenr,
+                            extent_offset,
+                            extent_delta,
+                            dst: chunk,
+                        } => {
+                            // bd-xmh5g.413: when the window receives the WHOLE zstd
+                            // extent, decompress straight into it — no intermediate
+                            // Vec, no post-decompress memmove. This is the sequential
+                            // whole-extent case; it does not touch the decompressed-
+                            // extent cache (keeping that path's bounded memory).
+                            let whole_zstd_extent = comp == 3
+                                && extent_offset.checked_add(extent_delta) == Some(0)
+                                && chunk.len() == ram;
+                            // bd-4tw2n: partial-slice (random) read of a compressed
+                            // extent. On a read-only mount, serve the requested window
+                            // from the cached FULL decompressed extent if present —
+                            // skipping BOTH the compressed-blob device read and the
+                            // whole-extent decode. Byte-identical: the cached buffer
+                            // is exactly what `btrfs_decompress` produced when first
+                            // read, and the slice is computed identically.
+                            if !whole_zstd_extent
+                                && decomp_cache_enabled
+                                && let Some(full) =
+                                    self.btrfs_decompressed_extent_cache.get(&disk_bytenr)
+                            {
+                                let result = Self::btrfs_decompressed_extent_slice(
+                                    disk_bytenr,
+                                    extent_offset,
+                                    extent_delta,
+                                    chunk.len(),
+                                    &full,
+                                )
+                                .map(|slice| {
+                                    chunk.copy_from_slice(slice);
+                                    BtrfsDeferredReadResult::Done
+                                });
+                                return (idx, result);
                             }
-                            Err(err) => (idx, Err(err)),
+                            let mut compressed = vec![0_u8; compressed_len];
+                            match self.btrfs_read_logical_into(cx, logical, &mut compressed) {
+                                Ok(()) => {
+                                    let result = if whole_zstd_extent {
+                                        Self::btrfs_decompress_zstd_into(&compressed, chunk)
+                                            .map(|()| BtrfsDeferredReadResult::Done)
+                                    } else {
+                                        Self::btrfs_decompress(&compressed, comp, ram).and_then(
+                                            |decompressed| {
+                                                let decompressed_slice =
+                                                    Self::btrfs_decompressed_extent_slice(
+                                                        disk_bytenr,
+                                                        extent_offset,
+                                                        extent_delta,
+                                                        chunk.len(),
+                                                        &decompressed,
+                                                    )?;
+                                                chunk.copy_from_slice(decompressed_slice);
+                                                // bd-4tw2n: retain the FULL decompressed
+                                                // extent so a later random read of any
+                                                // window of this extent hits the cache
+                                                // above. Bounded by the admission cap;
+                                                // only the partial-slice path fills it.
+                                                if decomp_cache_enabled {
+                                                    let full: Arc<[u8]> =
+                                                        Arc::from(decompressed.into_boxed_slice());
+                                                    self.btrfs_decompressed_extent_cache
+                                                        .insert_within(
+                                                            disk_bytenr,
+                                                            full,
+                                                            decomp_cache_limit,
+                                                        );
+                                                }
+                                                Ok(BtrfsDeferredReadResult::Done)
+                                            },
+                                        )
+                                    };
+                                    (idx, result)
+                                }
+                                Err(err) => (idx, Err(err)),
+                            }
                         }
+                        // Read the uncompressed extent straight into its disjoint
+                        // `out` window. The data is written in place; the entry in
+                        // `deferred_by_idx` only carries the read's success or
+                        // error, consumed in idx order by the assembly loop so the
+                        // lowest-index read error still wins.
+                        BtrfsReadJob::Uncompressed {
+                            idx,
+                            source_logical,
+                            dst,
+                        } => match self.btrfs_read_logical_into(cx, source_logical, dst) {
+                            Ok(()) => (idx, Ok(BtrfsDeferredReadResult::Done)),
+                            Err(err) => (idx, Err(err)),
+                        },
                     }
-                    // Read the uncompressed extent straight into its disjoint
-                    // `out` window. The data is written in place; the entry in
-                    // `deferred_by_idx` only carries the read's success or
-                    // error, consumed in idx order by the assembly loop so the
-                    // lowest-index read error still wins.
-                    BtrfsReadJob::Uncompressed {
-                        idx,
-                        source_logical,
-                        dst,
-                    } => match self.btrfs_read_logical_into(cx, source_logical, dst) {
-                        Ok(()) => (idx, Ok(BtrfsDeferredReadResult::Done)),
-                        Err(err) => (idx, Err(err)),
-                    },
-                })
-                .collect();
+                };
+            // Skip the inner rayon fan-out when there's a single job (no overlap
+            // to exploit) or when already running inside a rayon worker (the
+            // parallel rand-read / multi-file read path): nesting the tiny
+            // decompress/read jobs onto the pool floods it with steal/yield/
+            // thread coordination that dominated ~25% of a 64t compressed read,
+            // while the outer loop already saturates the cores. Mirrors the ext4
+            // read_file_data nested-parallelism fix (3e94e916). A top-level large
+            // read (main thread) keeps the parallel decompress overlap.
+            let results: Vec<(usize, Result<BtrfsDeferredReadResult, FfsError>)> =
+                if jobs.len() <= 1 || rayon::current_thread_index().is_some() {
+                    jobs.into_iter().map(exec_job).collect()
+                } else {
+                    jobs.into_par_iter().map(exec_job).collect()
+                };
             // `results` preserves job order (extent order, then increasing
             // sub-chunk offset within an extent). An uncompressed extent may now
             // contribute several sub-jobs under one `idx`; keep the FIRST error
@@ -11116,7 +11131,10 @@ impl OpenFs {
         let hot = self.ext4_hot_extents.load();
         if let Some(slot) = hot.as_ref() {
             if slot.0 == ns {
-                return Ok(Self::ext4_resolve_block_from_mappings(&slot.1, logical_block));
+                return Ok(Self::ext4_resolve_block_from_mappings(
+                    &slot.1,
+                    logical_block,
+                ));
             }
         }
         drop(hot);
@@ -11976,7 +11994,8 @@ impl OpenFs {
                 }
             } else {
                 use rayon::prelude::{IntoParallelIterator, ParallelIterator};
-                let results: Vec<Result<(), FfsError>> = jobs.into_par_iter().map(exec_job).collect();
+                let results: Vec<Result<(), FfsError>> =
+                    jobs.into_par_iter().map(exec_job).collect();
                 for result in results {
                     result?;
                 }
