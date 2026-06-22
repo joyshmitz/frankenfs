@@ -3517,26 +3517,37 @@ impl MvccStore {
     ///
     /// Returns the watermark that was used.
     pub fn prune_safe(&mut self) -> CommitSeq {
-        let old_count = self.version_count();
         let wm = self
             .watermark()
             .unwrap_or_else(|| self.current_snapshot().high);
+        // `version_count()` is an O(tracked_blocks) scan, and it runs TWICE here
+        // (before + after) ONLY to compute `freed`/`remaining` for the debug
+        // trace below. Same disabled-log O(N) antipattern as the per-commit scan
+        // fixed in the write path (b1619f0b): gate both scans behind a real
+        // `enabled!` check so they never run when the gc logs are off (a lazy
+        // field expr is insufficient under the dynamic EnvFilter). Enabling
+        // TRACE implies DEBUG, so the DEBUG check covers both branches. The
+        // actual pruning (`prune_versions_older_than`) always runs.
+        let log_counts = tracing::enabled!(tracing::Level::DEBUG);
+        let old_count = if log_counts { self.version_count() } else { 0 };
         self.prune_versions_older_than(wm);
-        let new_count = self.version_count();
-        let freed = old_count.saturating_sub(new_count);
-        if freed > 0 {
-            debug!(
-                watermark = wm.0,
-                versions_freed = freed,
-                versions_remaining = new_count,
-                "watermark_advance: pruned old versions"
-            );
-        } else {
-            trace!(
-                watermark = wm.0,
-                versions_count = new_count,
-                "gc_eligible: no versions to prune"
-            );
+        if log_counts {
+            let new_count = self.version_count();
+            let freed = old_count.saturating_sub(new_count);
+            if freed > 0 {
+                debug!(
+                    watermark = wm.0,
+                    versions_freed = freed,
+                    versions_remaining = new_count,
+                    "watermark_advance: pruned old versions"
+                );
+            } else {
+                trace!(
+                    watermark = wm.0,
+                    versions_count = new_count,
+                    "gc_eligible: no versions to prune"
+                );
+            }
         }
         if !self.active_snapshots.is_empty() {
             trace!(
