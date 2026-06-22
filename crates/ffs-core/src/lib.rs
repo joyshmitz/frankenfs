@@ -1012,6 +1012,19 @@ pub struct OpenFs {
     /// same immutable RO extent list the sharded cache holds).
     btrfs_hot_inode_extents:
         arc_swap::ArcSwapOption<(u64, Arc<(BtrfsInodeItem, Vec<(u64, BtrfsExtentData)>)>)>,
+    /// Lock-free single-slot "hot inode" cache for the ext4 read path — the
+    /// ext4 analog of [`Self::btrfs_hot_inode_extents`]. Every `read_into`
+    /// resolves the inode via `read_inode_with_scope`, which hits the
+    /// [`Self::ext4_inode_table_block_cache`] shard *Mutex* on the (single,
+    /// hot) inode-table block. A single-file random-read stream resolves the
+    /// SAME inode every read, so at high parallelism all worker threads convoy
+    /// on that one shard lock and the parallel read negative-scales (64t
+    /// collapses below 8t). This slot serves the most-recently-resolved parsed
+    /// inode lock-free (an `arc-swap` load), so a hot single-file stream skips
+    /// the shard Mutex (and the re-parse) after the first read. Read-only only:
+    /// the on-disk inode is immutable so last-writer-wins publish is safe; a
+    /// writable mount skips the slot (the inode can change under it).
+    ext4_hot_inode: arc_swap::ArcSwapOption<(u64, Arc<Ext4Inode>)>,
     /// Memoized fs-tree root bytenr per subvolume objectid (bd-yuk9v). On a
     /// read-only mount the root tree is immutable, so resolving a subvolume's
     /// ROOT_ITEM once and caching the bytenr removes the per-op root-tree
@@ -3369,6 +3382,7 @@ impl OpenFs {
             btrfs_read_plan_index: OnceLock::new(),
             btrfs_ro_inode_extents: ShardedCache::new(),
             btrfs_hot_inode_extents: arc_swap::ArcSwapOption::empty(),
+            ext4_hot_inode: arc_swap::ArcSwapOption::empty(),
             btrfs_fs_tree_root_cache: Mutex::new(std::collections::HashMap::new()),
             btrfs_parsed_node_cache: ShardedCache::new(),
             btrfs_decompressed_extent_cache: ShardedCache::new(),
@@ -28105,8 +28119,39 @@ impl OpenFs {
         let size = u32::try_from(dst.len()).unwrap_or(u32::MAX);
         self.with_latest_scope(|scope| {
             if let FsFlavor::Ext4(_) = &self.flavor {
-                let inode =
-                    self.read_inode_with_scope(cx, scope, Self::ext4_canonical_inode(ino))?;
+                let canonical = Self::ext4_canonical_inode(ino);
+                // Lock-free hot-inode fast path: a single-file random-read
+                // stream resolves the SAME inode every read, so serving the
+                // parsed inode from the ArcSwap slot avoids the
+                // `ext4_inode_table_block_cache` shard *Mutex* on the one hot
+                // inode-table block (which serializes concurrent readers and
+                // negative-scales the parallel read — mirrors the btrfs
+                // hot-inode slot). RO only: the on-disk inode is immutable, so a
+                // last-writer-wins publish is safe; a writable mount skips it.
+                let read_only = !self.is_writable();
+                let hot_hit = if read_only {
+                    let hot = self.ext4_hot_inode.load();
+                    hot.as_ref()
+                        .filter(|slot| slot.0 == canonical.0)
+                        .map(|slot| Arc::clone(&slot.1))
+                } else {
+                    None
+                };
+                let inode = match hot_hit {
+                    // Clone the small fixed-size inode out of the Arc (a
+                    // thread-local memcpy, no shared state) so the downstream
+                    // `&inode` uses are unchanged; the win is skipping the shard
+                    // Mutex, not the cheap struct copy.
+                    Some(slot) => (*slot).clone(),
+                    None => {
+                        let parsed = self.read_inode_with_scope(cx, scope, canonical)?;
+                        if read_only {
+                            self.ext4_hot_inode
+                                .store(Some(Arc::new((canonical.0, Arc::new(parsed.clone())))));
+                        }
+                        parsed
+                    }
+                };
                 // Fast path: exactly the uncompressed-extent case `read` fills a
                 // window for (not dir/symlink/compressed/inline/indirect).
                 let plain_extent = !inode.is_dir()
