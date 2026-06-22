@@ -975,6 +975,7 @@ dependencies = [
 name = "ffs-core"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "asupersync",
  "criterion",
  "ffs-alloc",

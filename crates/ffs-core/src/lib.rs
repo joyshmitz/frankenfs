@@ -998,6 +998,20 @@ pub struct OpenFs {
     /// objectid (as a `BlockNumber` to reuse the `CacheShard` impl).
     btrfs_ro_inode_extents:
         ShardedCache<BlockNumber, Arc<(BtrfsInodeItem, Vec<(u64, BtrfsExtentData)>)>>,
+    /// Lock-free single-slot "hot inode" cache in front of
+    /// [`Self::btrfs_ro_inode_extents`]. A single-file random-read stream
+    /// resolves the SAME inode every read; `btrfs_ro_inode_extents.get()` takes
+    /// the key's `ShardedCache` shard *Mutex* (exclusive — it serializes even
+    /// concurrent readers) on every read, so at high parallelism on one file
+    /// all worker threads convoy on that one shard lock. This `ArcSwapOption`
+    /// slot serves the most-recently-resolved inode lock-free (an `arc-swap`
+    /// load, no mutex), so a hot single-file stream skips the shard lock
+    /// entirely after the first read. On a different inode it misses and falls
+    /// back to the sharded cache, then publishes the new inode into the slot
+    /// (last-writer-wins; a transient over-write is harmless — the value is the
+    /// same immutable RO extent list the sharded cache holds).
+    btrfs_hot_inode_extents:
+        arc_swap::ArcSwapOption<(u64, Arc<(BtrfsInodeItem, Vec<(u64, BtrfsExtentData)>)>)>,
     /// Memoized fs-tree root bytenr per subvolume objectid (bd-yuk9v). On a
     /// read-only mount the root tree is immutable, so resolving a subvolume's
     /// ROOT_ITEM once and caching the bytenr removes the per-op root-tree
@@ -3354,6 +3368,7 @@ impl OpenFs {
             btrfs_csum_read_cache: Mutex::new(None),
             btrfs_read_plan_index: OnceLock::new(),
             btrfs_ro_inode_extents: ShardedCache::new(),
+            btrfs_hot_inode_extents: arc_swap::ArcSwapOption::empty(),
             btrfs_fs_tree_root_cache: Mutex::new(std::collections::HashMap::new()),
             btrfs_parsed_node_cache: ShardedCache::new(),
             btrfs_decompressed_extent_cache: ShardedCache::new(),
@@ -8858,13 +8873,31 @@ impl OpenFs {
                 // above, and the assembly loop still zero-fills holes, so reads
                 // are byte-identical to the windowed walk.
                 let key = BlockNumber(canonical);
-                let entry = match self.btrfs_ro_inode_extents.get(&key) {
-                    Some(e) => e,
-                    None => {
-                        let built = self.btrfs_load_inode_all_extents(cx, canonical)?;
-                        let arc = Arc::new(built);
-                        self.btrfs_ro_inode_extents.insert(key, Arc::clone(&arc));
-                        arc
+                // Lock-free hot-inode fast path: a single-file read stream hits
+                // the same `canonical` every read; serve it from the ArcSwap slot
+                // (no shard Mutex) when it matches. `load()` is a cheap arc-swap
+                // guard (no global refcount bump on the fast path); we clone only
+                // the inner entry Arc on a hit.
+                let hot = self.btrfs_hot_inode_extents.load();
+                let entry = match hot.as_ref() {
+                    Some(slot) if slot.0 == canonical => Arc::clone(&slot.1),
+                    _ => {
+                        drop(hot);
+                        let e = match self.btrfs_ro_inode_extents.get(&key) {
+                            Some(e) => e,
+                            None => {
+                                let built = self.btrfs_load_inode_all_extents(cx, canonical)?;
+                                let arc = Arc::new(built);
+                                self.btrfs_ro_inode_extents.insert(key, Arc::clone(&arc));
+                                arc
+                            }
+                        };
+                        // Publish into the lock-free slot for the next read of
+                        // this inode (last-writer-wins; the value is the same
+                        // immutable RO extent list the sharded cache holds).
+                        self.btrfs_hot_inode_extents
+                            .store(Some(Arc::new((canonical, Arc::clone(&e)))));
+                        e
                     }
                 };
                 let read_end = offset.saturating_add(u64::from(size));
