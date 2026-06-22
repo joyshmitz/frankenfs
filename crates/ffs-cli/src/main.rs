@@ -671,6 +671,30 @@ enum Command {
         #[arg(long, default_value_t = 0x9E37_79B9_7F4A_7C15)]
         seed: u64,
     },
+    /// Benchmark file writes (no FUSE): `enable_writes`, then write `count`
+    /// blocks of `size` bytes into an existing file at sequential or random
+    /// page-aligned offsets, timing total throughput. Each write goes through
+    /// the full MVCC commit path, so this measures the write/commit engine for a
+    /// head-to-head vs a kernel RW mount's `pwrite`. MUTATES the image — run on a
+    /// throwaway copy.
+    WriteBench {
+        /// Path to the filesystem image (mutated in place).
+        image: PathBuf,
+        /// Absolute path of an existing file inside the image to overwrite.
+        path: String,
+        /// Number of writes to issue.
+        #[arg(long, default_value_t = 50_000)]
+        count: usize,
+        /// Bytes per write.
+        #[arg(long, default_value_t = 4096)]
+        size: usize,
+        /// Random page-aligned offsets instead of sequential.
+        #[arg(long)]
+        random: bool,
+        /// Deterministic PRNG seed for random offsets.
+        #[arg(long, default_value_t = 0x9E37_79B9_7F4A_7C15)]
+        seed: u64,
+    },
     /// Recursively walk every directory and stat every entry (no FUSE).
     ///
     /// Equivalent to `find <mnt> | xargs stat` — a metadata-heavy workload
@@ -1047,6 +1071,7 @@ impl Command {
             Self::Inspect { .. } => "inspect",
             Self::Read { .. } => "read",
             Self::RandRead { .. } => "randread",
+            Self::WriteBench { .. } => "writebench",
             Self::Walk { .. } => "walk",
             Self::MvccStats { .. } => "mvcc-stats",
             Self::Info { .. } => "info",
@@ -1842,6 +1867,14 @@ fn run() -> Result<()> {
             parallel,
             seed,
         } => randread_cmd(&image, &path, count, size, parallel, seed),
+        Command::WriteBench {
+            image,
+            path,
+            count,
+            size,
+            random,
+            seed,
+        } => writebench_cmd(&image, &path, count, size, random, seed),
         Command::Walk {
             image,
             no_stat,
@@ -2276,6 +2309,85 @@ fn read_file_cmd(path: &PathBuf, file_path: &str, discard: bool) -> Result<()> {
 /// a kernel random `pread` loop. Random access does one extent-map lookup per
 /// read (sequential `read` coalesces runs), so this exercises the per-lookup
 /// path (e.g. the `ffs-extent` cache) that sequential reads hide (bd-7f6yr).
+fn writebench_cmd(
+    path: &PathBuf,
+    file_path: &str,
+    count: usize,
+    size: usize,
+    random: bool,
+    seed: u64,
+) -> Result<()> {
+    let cx = cli_cx();
+    let mut open_fs = OpenFs::open(&cx, path)
+        .with_context(|| format!("failed to open image: {}", path.display()))?;
+    open_fs
+        .enable_writes(&cx)
+        .with_context(|| "failed to enable writes (alloc state)".to_string())?;
+    let mut ino = InodeNumber(1);
+    for comp in file_path.split('/').filter(|c| !c.is_empty()) {
+        let attr = open_fs
+            .lookup(&cx, ino, std::ffi::OsStr::new(comp))
+            .with_context(|| format!("failed to resolve {file_path} at component {comp:?}"))?;
+        ino = attr.ino;
+    }
+    let fsize = open_fs
+        .getattr(&cx, ino)
+        .with_context(|| format!("failed to stat {file_path}"))?
+        .size;
+    if size == 0 || (fsize as usize) < size {
+        bail!("file {file_path} ({fsize} B) is smaller than the write size {size} B");
+    }
+    let bs: u64 = 4096;
+    let span_blocks = ((fsize - size as u64) / bs).max(1);
+    let mut state = seed;
+    let mut next_off = |i: usize| -> u64 {
+        if random {
+            state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = state;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^= z >> 31;
+            (z % span_blocks) * bs
+        } else {
+            ((i as u64) % span_blocks) * bs
+        }
+    };
+    let buf = vec![0xA5_u8; size];
+    let started = Instant::now();
+    let mut total_bytes: u64 = 0;
+    for i in 0..count {
+        let off = next_off(i);
+        total_bytes += u64::from(
+            open_fs
+                .write(&cx, ino, off, &buf)
+                .with_context(|| format!("failed write at {off}"))?,
+        );
+    }
+    let elapsed = started.elapsed();
+    let duration_us = u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX);
+    let secs = elapsed.as_secs_f64().max(1e-9);
+    let iops = (count as f64) / secs;
+    let mib_s = (total_bytes as f64) / secs / (1024.0 * 1024.0);
+    info!(
+        target: "ffs::cli::writebench",
+        count,
+        size,
+        random,
+        bytes = total_bytes,
+        duration_us,
+        iops = iops as u64,
+        mib_per_s = mib_s as u64,
+        "writebench_done"
+    );
+    eprintln!(
+        "writebench: {count} x {size}B {} -> {total_bytes} B in {duration_us} us = {} IOPS, {} MiB/s",
+        if random { "random" } else { "sequential" },
+        iops as u64,
+        mib_s as u64
+    );
+    Ok(())
+}
+
 fn randread_cmd(
     path: &PathBuf,
     file_path: &str,

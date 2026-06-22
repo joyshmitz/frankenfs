@@ -2972,7 +2972,6 @@ impl MvccStore {
             let new_watermark = self
                 .watermark()
                 .unwrap_or_else(|| self.current_snapshot().high);
-            let versions_eligible = self.versions_eligible_at_watermark(new_watermark);
             info!(
                 target: "ffs::mvcc::gc",
                 block = block.0,
@@ -2981,14 +2980,20 @@ impl MvccStore {
                 new_watermark = new_watermark.0,
                 "chain_pressure_force_advance_oldest_snapshot"
             );
-            info!(
-                target: "ffs::mvcc::evidence",
-                event = "snapshot_advanced",
-                old_commit_seq = forced_snapshot.0,
-                new_commit_seq = new_watermark.0,
-                versions_eligible,
-                trigger = "chain_pressure"
-            );
+            // Same O(tracked_blocks) evidence-only scan as the release_snapshot
+            // path — gate on a real `enabled!` check so it never runs when the
+            // evidence target is disabled (a lazy field expr is insufficient
+            // under the dynamic EnvFilter; see the note in `release_snapshot`).
+            if tracing::enabled!(target: "ffs::mvcc::evidence", tracing::Level::INFO) {
+                info!(
+                    target: "ffs::mvcc::evidence",
+                    event = "snapshot_advanced",
+                    old_commit_seq = forced_snapshot.0,
+                    new_commit_seq = new_watermark.0,
+                    versions_eligible = self.versions_eligible_at_watermark(new_watermark),
+                    trigger = "chain_pressure"
+                );
+            }
             if !self.chain_trim_blocked_by_snapshot(block, new_watermark) {
                 return Ok(());
             }
@@ -3437,14 +3442,25 @@ impl MvccStore {
                 let new_watermark = self
                     .watermark()
                     .unwrap_or_else(|| self.current_snapshot().high);
-                if new_watermark.0 > old_commit_seq {
-                    let versions_eligible = self.versions_eligible_at_watermark(new_watermark);
+                // `versions_eligible_at_watermark` is an O(tracked_blocks) scan
+                // of every version chain, and it feeds ONLY this evidence log
+                // field. It MUST be skipped when the evidence target is
+                // disabled. A lazy `info!` field expression is NOT enough: the
+                // `fmt`+`EnvFilter` subscriber registers the callsite as
+                // `Interest::sometimes`, so tracing evaluates the field then
+                // filters at runtime — the full scan still ran on EVERY write
+                // commit (71% of write-path self-time; ~5x slower 4 KiB writes).
+                // Gate on a real runtime `enabled!` check so the scan only runs
+                // when a subscriber will actually record the event.
+                if new_watermark.0 > old_commit_seq
+                    && tracing::enabled!(target: "ffs::mvcc::evidence", tracing::Level::INFO)
+                {
                     info!(
                         target: "ffs::mvcc::evidence",
                         event = "snapshot_advanced",
                         old_commit_seq,
                         new_commit_seq = new_watermark.0,
-                        versions_eligible,
+                        versions_eligible = self.versions_eligible_at_watermark(new_watermark),
                         trigger = "release_snapshot"
                     );
                 }
