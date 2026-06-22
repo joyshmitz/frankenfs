@@ -712,6 +712,23 @@ enum Command {
         #[arg(long, default_value_t = 0x9E37_79B9_7F4A_7C15)]
         seed: u64,
     },
+    /// Benchmark the metadata-WRITE PATH: `enable_writes`, then create `count`
+    /// empty files in `dir`, timing total throughput. Each create exercises the
+    /// existence-check lookup + inode alloc + directory insert + MVCC commit.
+    /// NOTE: the creates commit to the in-memory MVCC overlay and are NOT
+    /// flushed to the image (no `sync`), so this measures the create PATH's
+    /// in-engine CPU cost — NOT a persisted head-to-head vs a kernel RW mount
+    /// (a re-open / kernel mount will not see the files). MUTATES the in-memory
+    /// state only.
+    CreateBench {
+        /// Path to the filesystem image (mutated in place).
+        image: PathBuf,
+        /// Absolute path of an existing directory to create files in.
+        dir: String,
+        /// Number of files to create.
+        #[arg(long, default_value_t = 20_000)]
+        count: usize,
+    },
     /// Recursively walk every directory and stat every entry (no FUSE).
     ///
     /// Equivalent to `find <mnt> | xargs stat` — a metadata-heavy workload
@@ -1090,6 +1107,7 @@ impl Command {
             Self::RandRead { .. } => "randread",
             Self::WriteBench { .. } => "writebench",
             Self::LookupBench { .. } => "lookupbench",
+            Self::CreateBench { .. } => "createbench",
             Self::Walk { .. } => "walk",
             Self::MvccStats { .. } => "mvcc-stats",
             Self::Info { .. } => "info",
@@ -1899,6 +1917,7 @@ fn run() -> Result<()> {
             count,
             seed,
         } => lookupbench_cmd(&image, &dir, count, seed),
+        Command::CreateBench { image, dir, count } => createbench_cmd(&image, &dir, count),
         Command::Walk {
             image,
             no_stat,
@@ -2333,6 +2352,48 @@ fn read_file_cmd(path: &PathBuf, file_path: &str, discard: bool) -> Result<()> {
 /// a kernel random `pread` loop. Random access does one extent-map lookup per
 /// read (sequential `read` coalesces runs), so this exercises the per-lookup
 /// path (e.g. the `ffs-extent` cache) that sequential reads hide (bd-7f6yr).
+fn createbench_cmd(path: &PathBuf, dir_path: &str, count: usize) -> Result<()> {
+    let cx = cli_cx();
+    let mut open_fs = OpenFs::open(&cx, path)
+        .with_context(|| format!("failed to open image: {}", path.display()))?;
+    open_fs
+        .enable_writes(&cx)
+        .with_context(|| "failed to enable writes (alloc state)".to_string())?;
+    let mut parent = InodeNumber(1);
+    for comp in dir_path.split('/').filter(|c| !c.is_empty()) {
+        let attr = open_fs
+            .lookup(&cx, parent, std::ffi::OsStr::new(comp))
+            .with_context(|| format!("failed to resolve {dir_path} at component {comp:?}"))?;
+        parent = attr.ino;
+    }
+    let started = Instant::now();
+    let mut created = 0_u64;
+    for i in 0..count {
+        let name = format!("cb_{i:08}");
+        open_fs
+            .create(&cx, parent, std::ffi::OsStr::new(&name), 0o644, 0, 0)
+            .with_context(|| format!("failed to create {name}"))?;
+        created += 1;
+    }
+    let elapsed = started.elapsed();
+    let duration_us = u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX);
+    let secs = elapsed.as_secs_f64().max(1e-9);
+    let creates_per_s = (count as f64) / secs;
+    info!(
+        target: "ffs::cli::createbench",
+        count,
+        created,
+        duration_us,
+        creates_per_s = creates_per_s as u64,
+        "createbench_done"
+    );
+    eprintln!(
+        "createbench: {count} creates in {dir_path} -> {created} created in {duration_us} us = {} creates/s",
+        creates_per_s as u64
+    );
+    Ok(())
+}
+
 fn lookupbench_cmd(path: &PathBuf, dir_path: &str, count: usize, seed: u64) -> Result<()> {
     let cx = cli_cx();
     let open_fs = OpenFs::open(&cx, path)

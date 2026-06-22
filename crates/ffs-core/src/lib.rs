@@ -11494,18 +11494,24 @@ impl OpenFs {
                 // access latencies overlap up to the pool size (the extent-tree
                 // analogue of the btrfs parallel walk bd-h6p3w). The child-block
                 // cache (bd-nlggu) is already thread-safe.
-                let child_datas: Vec<Result<_, FfsError>> = {
+                // Serialize the child-block fetch unless it can use the pool AND
+                // we're not already inside a rayon worker: fanning a few warm
+                // (cached) extent-tree blocks out wakes the idle pool for nothing
+                // and the steal/yield coordination dominates — this fired per
+                // create (the dir's extent resolution) and was a major share of a
+                // create-heavy workload's ~90% rayon overhead. A genuinely cold
+                // deep tree from a top-level caller still fans out.
+                let fetch_block = |leaf_block: u64| -> Result<_, FfsError> {
+                    self.read_ext4_file_data_block_with_scope(cx, scope, BlockNumber(leaf_block))
+                };
+                let child_datas: Vec<Result<_, FfsError>> = if survivors.len()
+                    < rayon::current_num_threads().max(2)
+                    || rayon::current_thread_index().is_some()
+                {
+                    survivors.iter().map(|&b| fetch_block(b)).collect()
+                } else {
                     use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
-                    survivors
-                        .par_iter()
-                        .map(|&leaf_block| {
-                            self.read_ext4_file_data_block_with_scope(
-                                cx,
-                                scope,
-                                BlockNumber(leaf_block),
-                            )
-                        })
-                        .collect()
+                    survivors.par_iter().map(|&b| fetch_block(b)).collect()
                 };
 
                 // CONSUME (serial): parse + validate + recurse in child order so
@@ -12228,21 +12234,34 @@ impl OpenFs {
         // scan pays one device-read latency per block in sequence.
         let casefold = dir_inode.flags & ffs_types::EXT4_CASEFOLD_FL != 0;
         let block_size = self.block_size();
-        let block_results: Vec<Result<Option<Ext4DirEntry>, FfsError>> = {
+        let scan_block = |phys: BlockNumber| -> Result<Option<Ext4DirEntry>, FfsError> {
+            let block_data = self.read_ext4_file_data_block_with_scope(cx, scope, phys)?;
+            if casefold {
+                lookup_in_dir_block_casefold(&block_data, block_size, name)
+                    .map_err(|e| parse_to_ffs_error(&e))
+            } else {
+                lookup_in_dir_block(&block_data, block_size, name)
+                    .map_err(|e| parse_to_ffs_error(&e))
+            }
+        };
+        // Only fan the per-block scan onto rayon when it can actually pay for the
+        // dispatch: a small block set (or a warm/cached dir, the common case)
+        // overlaps no device latency, so the par_iter just wakes the whole idle
+        // pool and the steal/yield/epoch coordination dominates — it was ~90% of
+        // a create-heavy workload's time (each create's negative-lookup existence
+        // check fanned a handful of cached dir blocks out per file). Serialize
+        // unless there are enough blocks to use the pool AND we're not already in
+        // a rayon worker (nested fan-out is pure churn — same as bd-neteo /
+        // 3e94e916). A genuinely cold large directory still fans out from a
+        // top-level caller.
+        let block_results: Vec<Result<Option<Ext4DirEntry>, FfsError>> = if planned.len()
+            < rayon::current_num_threads().max(2)
+            || rayon::current_thread_index().is_some()
+        {
+            planned.into_iter().map(scan_block).collect()
+        } else {
             use rayon::prelude::{IntoParallelIterator, ParallelIterator};
-            planned
-                .into_par_iter()
-                .map(|phys| {
-                    let block_data = self.read_ext4_file_data_block_with_scope(cx, scope, phys)?;
-                    if casefold {
-                        lookup_in_dir_block_casefold(&block_data, block_size, name)
-                            .map_err(|e| parse_to_ffs_error(&e))
-                    } else {
-                        lookup_in_dir_block(&block_data, block_size, name)
-                            .map_err(|e| parse_to_ffs_error(&e))
-                    }
-                })
-                .collect()
+            planned.into_par_iter().map(scan_block).collect()
         };
 
         for result in block_results {
