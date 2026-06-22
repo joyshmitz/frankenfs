@@ -941,6 +941,11 @@ pub struct OpenFs {
     /// any mutation bumps ctime/mtime, so a stale snapshot is detected and rebuilt
     /// rather than relying on hooking every mutation path.
     readdir_snapshot: Mutex<Option<ReaddirSnapshot>>,
+    /// Per-directory authoritative name set for O(1) negative lookups
+    /// (the create existence-check). See [`DirNameIndex`]. Single hot slot
+    /// (a create stream hammers one directory); validation-keyed so it is
+    /// self-invalidating and can never yield a wrong "absent" (bd-f8rd8).
+    dir_name_index: Mutex<Option<DirNameIndex>>,
     /// When set, `readdir` skips the speculative inode-table prefetch
     /// ([`Self::prefetch_ext4_readdir_inode_table_blocks`]). The prefetch warms
     /// the getattr cache for a stat-heavy listing, but for a readdir-ONLY
@@ -1131,6 +1136,22 @@ struct ReaddirSnapshot {
     validation: ReaddirValidation,
     /// Full listing, sorted ascending by continuation cookie (`offset`).
     entries: Arc<Vec<DirEntry>>,
+}
+
+/// Authoritative set of entry names for one directory, used to answer a
+/// NEGATIVE name lookup (the create existence-check) in O(1) instead of the
+/// O(N) linear block scan that `lookup_name_with_scope` falls back to on an
+/// htree miss. Validation-keyed exactly like [`ReaddirSnapshot`]: a name absent
+/// from `names` is genuinely absent ONLY while `validation` matches the dir's
+/// current (ctime/mtime/size); any unhandled mutation changes the validation,
+/// the match fails, and the lookup safely rebuilds + linear-scans — so a missed
+/// maintenance path can never produce a wrong "absent", only a slow rebuild.
+/// Built lazily on a negative miss; `OpenFs::create` keeps it current
+/// incrementally so a create-heavy directory stays O(1)/lookup (bd-f8rd8).
+struct DirNameIndex {
+    inode: u64,
+    validation: ReaddirValidation,
+    names: std::collections::HashSet<Vec<u8>>,
 }
 
 /// Upper bound on entries visible through one [`slice_readdir_snapshot`] call.
@@ -3405,6 +3426,7 @@ impl OpenFs {
             extent_cache: ffs_extent::ExtentCache::new(),
             ext4_write_extent_snapshot: Mutex::new(None),
             readdir_snapshot: Mutex::new(None),
+            dir_name_index: Mutex::new(None),
             readdir_prefetch_disabled: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
             readdir_full_reads: std::sync::atomic::AtomicUsize::new(0),
@@ -4895,6 +4917,23 @@ impl OpenFs {
     /// with a duplicate cross-block entry, since [`ffs_dir::add_entry`] does not
     /// itself check for an existing name).
     fn apply_fast_commit_add_dentry(
+        &self,
+        cx: &Cx,
+        dentry: &ffs_journal::FcDentry,
+    ) -> Result<bool, FfsError> {
+        let result = self.apply_fast_commit_add_dentry_inner(cx, dentry);
+        // bd-f8rd8: a fast-commit add splices an entry into block slack WITHOUT
+        // bumping the parent's ctime/mtime/size (replay preserves timestamps), so
+        // the negative-lookup name index's validation key cannot detect it — and
+        // the inner idempotency lookup itself rebuilds a now-stale index. Clear
+        // AFTER the whole apply so the next lookup rebuilds against the new state.
+        // (The FsOps mutation paths all bump ctime and are caught by the key;
+        // fast-commit replay is the lone validation-blind exception.)
+        *self.dir_name_index.lock() = None;
+        result
+    }
+
+    fn apply_fast_commit_add_dentry_inner(
         &self,
         cx: &Cx,
         dentry: &ffs_journal::FcDentry,
@@ -12203,6 +12242,31 @@ impl OpenFs {
             return Ok(Some(entry));
         }
 
+        // Negative fast path (bd-f8rd8): an authoritative per-dir name index
+        // answers a name-ABSENT lookup (the create existence check) in O(1),
+        // skipping the O(N) block scan below. Validation-keyed (ctime/mtime/
+        // size) exactly like the readdir snapshot, so any mismatch falls through
+        // to the safe scan; a name PRESENT in the index still scans (the htree
+        // missed it → the entry lives in a non-indexed block the scan locates).
+        // Guarded on a stamped inode number so it can never key two dirs alike.
+        let dir_validation = ReaddirValidation {
+            ctime: (u64::from(dir_inode.ctime) << 32) | u64::from(dir_inode.ctime_extra),
+            mtime: u64::from(dir_inode.mtime),
+            size: dir_inode.size,
+        };
+        let index_keyable = dir_inode.number != 0;
+        if index_keyable {
+            let guard = self.dir_name_index.lock();
+            if let Some(idx) = guard.as_ref() {
+                if idx.inode == dir_inode.number
+                    && idx.validation == dir_validation
+                    && !idx.names.contains(name)
+                {
+                    return Ok(None);
+                }
+            }
+        }
+
         let bs = u64::from(self.block_size());
         let num_blocks = dir_logical_block_count(dir_inode.size, bs)?;
 
@@ -12267,6 +12331,30 @@ impl OpenFs {
         for result in block_results {
             if let Some(entry) = result? {
                 return Ok(Some(entry));
+            }
+        }
+
+        // Confirmed-negative full scan: (re)build the authoritative name index
+        // for this dir so the next negative lookup is O(1). Skip if a current
+        // index already exists. `read_dir_with_scope` re-reads the (now warm)
+        // blocks the scan just touched — one extra O(N) parse, amortized over a
+        // create-heavy stream by the incremental update in `OpenFs::create`.
+        if index_keyable {
+            let have_current = {
+                let guard = self.dir_name_index.lock();
+                matches!(guard.as_ref(), Some(idx)
+                    if idx.inode == dir_inode.number && idx.validation == dir_validation)
+            };
+            if !have_current {
+                if let Ok(entries) = self.read_dir_with_scope(cx, scope, dir_inode) {
+                    let names: std::collections::HashSet<Vec<u8>> =
+                        entries.into_iter().map(|e| e.name).collect();
+                    *self.dir_name_index.lock() = Some(DirNameIndex {
+                        inode: dir_inode.number,
+                        validation: dir_validation,
+                        names,
+                    });
+                }
             }
         }
 
@@ -27989,12 +28077,58 @@ impl OpenFs {
         uid: u32,
         gid: u32,
     ) -> ffs_error::Result<InodeAttr> {
-        self.handle_ext4_write_result(
+        let result = self.handle_ext4_write_result(
             "create",
             self.with_latest_scope(|scope| {
                 <Self as FsOps>::create(self, cx, scope, parent, name, mode, uid, gid)
             }),
-        )
+        );
+        if result.is_ok() {
+            // bd-f8rd8: keep the parent's negative-lookup name index current so a
+            // create-heavy directory's existence checks stay O(1) instead of
+            // re-scanning the growing dir each create (O(N^2)). Done here, AFTER
+            // the commit, because the post-insert parent ctime/mtime/size — which
+            // the index validation is keyed on — is only visible once committed.
+            // Best-effort + validation-keyed: on any error or mismatch the index
+            // simply rebuilds on the next negative lookup (never a wrong answer).
+            self.note_dir_name_index_insert(cx, parent, name.as_encoded_bytes());
+        }
+        result
+    }
+
+    /// Incrementally add `name` to the parent directory's authoritative
+    /// negative-lookup name index (see [`DirNameIndex`]), re-stamping its
+    /// validation to the parent's just-committed state, so the slot stays
+    /// current across a create stream. A no-op unless the slot already holds
+    /// this parent's index (a different dir, or none yet → the next negative
+    /// lookup rebuilds). Read-only / non-ext4 / read failures are ignored.
+    fn note_dir_name_index_insert(&self, cx: &Cx, parent: InodeNumber, name: &[u8]) {
+        if !matches!(&self.flavor, FsFlavor::Ext4(_)) {
+            return;
+        }
+        let canonical = Self::ext4_canonical_inode(parent);
+        let Ok(parent_inode) = self.read_inode(cx, canonical) else {
+            *self.dir_name_index.lock() = None;
+            return;
+        };
+        if parent_inode.number == 0 {
+            return;
+        }
+        let validation = ReaddirValidation {
+            ctime: (u64::from(parent_inode.ctime) << 32) | u64::from(parent_inode.ctime_extra),
+            mtime: u64::from(parent_inode.mtime),
+            size: parent_inode.size,
+        };
+        let mut guard = self.dir_name_index.lock();
+        match guard.as_mut() {
+            Some(idx) if idx.inode == parent_inode.number => {
+                idx.names.insert(name.to_vec());
+                idx.validation = validation;
+            }
+            // No index for this dir yet (or a stale/other-dir slot): drop it so
+            // the next negative lookup rebuilds against the fresh state.
+            _ => *guard = None,
+        }
     }
 
     /// `mknod(2)` for char/block devices, FIFOs, and sockets.
