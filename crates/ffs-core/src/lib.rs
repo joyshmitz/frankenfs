@@ -941,6 +941,17 @@ pub struct OpenFs {
     /// any mutation bumps ctime/mtime, so a stale snapshot is detected and rebuilt
     /// rather than relying on hooking every mutation path.
     readdir_snapshot: Mutex<Option<ReaddirSnapshot>>,
+    /// When set, `readdir` skips the speculative inode-table prefetch
+    /// ([`Self::prefetch_ext4_readdir_inode_table_blocks`]). The prefetch warms
+    /// the getattr cache for a stat-heavy listing, but for a readdir-ONLY
+    /// consumer (`ls -f`, a `getdents` count, a name-only enumeration) nothing
+    /// reads the prefetched inode-table blocks, so the prefetch is pure waste —
+    /// and on a large htree directory (hash-ordered entries → up to ~512
+    /// SCATTERED inode-table blocks per page) it fans out onto rayon and the
+    /// coordination (futex yield/steal/thread-spawn) dominated ~60% of readdir
+    /// self-time in profiling (bd-neteo). A readdir-only caller sets this to
+    /// elide that dead work.
+    readdir_prefetch_disabled: std::sync::atomic::AtomicBool,
     /// Test-only per-instance counter of readdir snapshot MISSES (full dir
     /// read+parse/walk). Per-instance (not a global static) so concurrently
     /// running tests do not interfere. A paginated listing of an unchanged
@@ -3394,6 +3405,7 @@ impl OpenFs {
             extent_cache: ffs_extent::ExtentCache::new(),
             ext4_write_extent_snapshot: Mutex::new(None),
             readdir_snapshot: Mutex::new(None),
+            readdir_prefetch_disabled: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
             readdir_full_reads: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
@@ -28196,6 +28208,17 @@ impl OpenFs {
             .map(|page| page.to_vec())
     }
 
+    /// Disable (or re-enable) the speculative inode-table prefetch that
+    /// `readdir` performs to warm the getattr cache. A readdir-ONLY consumer
+    /// (no following `getattr` — e.g. `ls -f`, name enumeration, a `getdents`
+    /// count) should disable it: nothing reads the prefetched inode-table
+    /// blocks, so the prefetch is dead work whose rayon fan-out can dominate
+    /// readdir on a large htree directory (see [`Self::readdir_prefetch_disabled`]).
+    pub fn set_readdir_prefetch_disabled(&self, disabled: bool) {
+        self.readdir_prefetch_disabled
+            .store(disabled, std::sync::atomic::Ordering::Relaxed);
+    }
+
     /// Return raw directory-entry payloads for a btrfs directory inode.
     ///
     /// Each entry is `(item_type, key_offset, raw_bytes)` where `item_type`
@@ -30326,7 +30349,12 @@ impl FsOps for OpenFs {
                 if let Some(page) =
                     readdir_snapshot_serve(&self.readdir_snapshot, canonical.0, validation, offset)
                 {
-                    self.prefetch_ext4_readdir_inode_table_blocks(cx, scope, page.as_slice());
+                    if !self
+                        .readdir_prefetch_disabled
+                        .load(std::sync::atomic::Ordering::Relaxed)
+                    {
+                        self.prefetch_ext4_readdir_inode_table_blocks(cx, scope, page.as_slice());
+                    }
                     return Ok(page);
                 }
 
@@ -30351,7 +30379,12 @@ impl FsOps for OpenFs {
                     .collect();
                 let full = Arc::new(full);
                 let page = slice_readdir_snapshot(Arc::clone(&full), offset);
-                self.prefetch_ext4_readdir_inode_table_blocks(cx, scope, page.as_slice());
+                if !self
+                    .readdir_prefetch_disabled
+                    .load(std::sync::atomic::Ordering::Relaxed)
+                {
+                    self.prefetch_ext4_readdir_inode_table_blocks(cx, scope, page.as_slice());
+                }
                 readdir_snapshot_store(&self.readdir_snapshot, canonical.0, validation, full);
                 Ok(page)
             }

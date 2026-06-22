@@ -2738,6 +2738,13 @@ fn walk_cmd(path: &PathBuf, no_stat: bool, parallel: bool, read_data: bool) -> R
     let cx = cli_cx();
     let open_fs = OpenFs::open(&cx, path)
         .with_context(|| format!("failed to open image: {}", path.display()))?;
+    // A pure readdir walk (no per-entry getattr AND no file-data read) never
+    // touches the entries' inodes, so the speculative inode-table prefetch in
+    // readdir is dead work — disable it to elide its rayon fan-out (bd-neteo).
+    // `--read-data` still resolves each inode, so keep the prefetch there.
+    if no_stat && !read_data {
+        open_fs.set_readdir_prefetch_disabled(true);
+    }
     if matches!(&open_fs.flavor, FsFlavor::Btrfs(_)) {
         open_fs
             .prewarm_btrfs_read_plan_index(&cx)
