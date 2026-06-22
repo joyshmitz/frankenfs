@@ -2742,7 +2742,7 @@ fn walk_cmd(path: &PathBuf, no_stat: bool, parallel: bool, read_data: bool) -> R
     // touches the entries' inodes, so the speculative inode-table prefetch in
     // readdir is dead work — disable it to elide its rayon fan-out (bd-neteo).
     // `--read-data` still resolves each inode, so keep the prefetch there.
-    if no_stat && !read_data {
+    if (no_stat && !read_data) || std::env::var_os("FFS_NO_READDIR_PREFETCH").is_some() {
         open_fs.set_readdir_prefetch_disabled(true);
     }
     if matches!(&open_fs.flavor, FsFlavor::Btrfs(_)) {
