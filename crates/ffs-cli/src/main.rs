@@ -2321,12 +2321,21 @@ fn randread_cmd(
     let total_bytes: u64 = if parallel {
         // Each task reads into its own small buffer; `read_into` is `&self` and
         // self-scoping, so concurrent positioned reads are isomorphic to serial.
+        // Each read gets its OWN `Cx::for_request()`, exactly as the FUSE layer
+        // does per request (`Cx::for_request()` in every fuse handler). Sharing
+        // a single Cx across all parallel reads is a measurement ARTIFACT: every
+        // `cx_checkpoint` then takes that one Cx's inner RwLock in shared mode,
+        // so at 64 threads all workers ping-pong one reader-count cacheline
+        // (~32% `lock_shared_slow` + ~27% `Cx::checkpoint` in the 64t profile) —
+        // contention a real FUSE mount never sees. A per-read Cx restores the
+        // like-for-like head-to-head vs the kernel (which has no such object).
         offsets
             .par_iter()
             .map(|&off| {
+                let read_cx = cli_cx();
                 let mut buf = vec![0_u8; size];
                 open_fs
-                    .read_into(&cx, ino, off, &mut buf)
+                    .read_into(&read_cx, ino, off, &mut buf)
                     .map(|n| n as u64)
                     .unwrap_or(0)
             })
