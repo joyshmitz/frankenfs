@@ -272,3 +272,15 @@ Two verification results closing out the read-path lever hunt this session:
 - **btrfs binary-search filter is regression-free on the sequential path.** A full-file read routes through the same `btrfs_filter_window_extents` with a window spanning all 648 extents (lower bound = 0, forward scan touches all — necessary work, same as before). Measured frankenfs sequential `read --discard` of comp.bin ~3.7-4.1 GB/s vs kernel `dd bs=1M` materialize ~2.4 GB/s = **~1.6x faster**, matching the pre-change ~1.5x (no regression). Byte-identical (sha256==kernel, established earlier).
 
 Net read-path standing after this session: btrfs compressed/fragmented random read single-thread flipped to ~2.1x FASTER than kernel (2 shipped levers); sequential ~1.6x faster than dd materialize; ext4 already optimal; the only open read gap is parallel coordination (~10x, the .414 family, separate owner). No further cheap read-path lever identified.
+
+### 2026-06-22 SYNTHESIS: warm random-read gap vs kernel is filesystem-agnostic + entirely PARALLEL-coordination-bound (CrimsonFox cc/opus)
+
+Cross-checked ext4 against the btrfs findings to localize the remaining warm random-read deficit. ext4 fragmented file (`frag.bin`, 9 extents, 50k×4 KiB, warm; kernel = `krandread` `pread` loop on the loop-mount), byte-identical (`231f9f11`):
+- **single-thread: frankenfs ~1811 vs kernel ~1668 MiB/s = ~parity (1.08x faster)**
+- **parallel 64t: frankenfs ~2227 vs kernel 16t ~21000 = ~9.5x SLOWER**
+
+This matches the btrfs compressed numbers (single-thread ~2.1x faster, parallel ~10x slower) and yields the campaign-level synthesis:
+- **single-thread warm random read is at PARITY-or-BETTER on BOTH filesystems** — frankenfs's in-process engine (no per-read `pread` syscall, cached metadata, O(log N) extent resolution) offsets the userspace copy-tax. The earlier scorecard "ext4 random read ~2-3x slower" is a HIGH-THREAD-COUNT/scale effect, not a single-thread property.
+- **the entire remaining warm-random-read gap vs kernel is PARALLEL COORDINATION (~10x, ext4 AND btrfs alike)** — it is filesystem-agnostic, so it lives in the shared read dispatch (rayon per-read job dispatch + per-read MVCC/adapter/lock churn), NOT in any FS-specific extent/decompress path. Both FS-specific read paths are now effectively closed (this session's btrfs levers; ext4 already cached+binary-searched).
+
+ACTIONABLE: the one remaining universal warm-read lever is the parallel coordination overhead (the bd-xmh5g.414 family — scoped/capped read-dispatch pool, lighter per-read snapshot path). Single-thread copy-tax is NOT worth further chasing (already at parity). Measurement only; no code change this turn.
