@@ -695,6 +695,23 @@ enum Command {
         #[arg(long, default_value_t = 0x9E37_79B9_7F4A_7C15)]
         seed: u64,
     },
+    /// Benchmark name lookups in a directory (no FUSE): readdir the directory
+    /// once to collect its entry names, then resolve `count` random names via
+    /// `lookup`, timing total throughput. On a large htree-indexed directory
+    /// this exposes whether lookup uses the index (O(log N)) or linear-scans
+    /// every block (O(N)) — a head-to-head vs a kernel mount's `stat`.
+    LookupBench {
+        /// Path to the filesystem image.
+        image: PathBuf,
+        /// Absolute path of the directory whose entries are looked up.
+        dir: String,
+        /// Number of lookups to issue.
+        #[arg(long, default_value_t = 20_000)]
+        count: usize,
+        /// Deterministic PRNG seed for the name sequence.
+        #[arg(long, default_value_t = 0x9E37_79B9_7F4A_7C15)]
+        seed: u64,
+    },
     /// Recursively walk every directory and stat every entry (no FUSE).
     ///
     /// Equivalent to `find <mnt> | xargs stat` — a metadata-heavy workload
@@ -1072,6 +1089,7 @@ impl Command {
             Self::Read { .. } => "read",
             Self::RandRead { .. } => "randread",
             Self::WriteBench { .. } => "writebench",
+            Self::LookupBench { .. } => "lookupbench",
             Self::Walk { .. } => "walk",
             Self::MvccStats { .. } => "mvcc-stats",
             Self::Info { .. } => "info",
@@ -1875,6 +1893,12 @@ fn run() -> Result<()> {
             random,
             seed,
         } => writebench_cmd(&image, &path, count, size, random, seed),
+        Command::LookupBench {
+            image,
+            dir,
+            count,
+            seed,
+        } => lookupbench_cmd(&image, &dir, count, seed),
         Command::Walk {
             image,
             no_stat,
@@ -2309,6 +2333,80 @@ fn read_file_cmd(path: &PathBuf, file_path: &str, discard: bool) -> Result<()> {
 /// a kernel random `pread` loop. Random access does one extent-map lookup per
 /// read (sequential `read` coalesces runs), so this exercises the per-lookup
 /// path (e.g. the `ffs-extent` cache) that sequential reads hide (bd-7f6yr).
+fn lookupbench_cmd(path: &PathBuf, dir_path: &str, count: usize, seed: u64) -> Result<()> {
+    let cx = cli_cx();
+    let open_fs = OpenFs::open(&cx, path)
+        .with_context(|| format!("failed to open image: {}", path.display()))?;
+    let mut ino = InodeNumber(1);
+    for comp in dir_path.split('/').filter(|c| !c.is_empty()) {
+        let attr = open_fs
+            .lookup(&cx, ino, std::ffi::OsStr::new(comp))
+            .with_context(|| format!("failed to resolve {dir_path} at component {comp:?}"))?;
+        ino = attr.ino;
+    }
+    // Collect ALL the directory's entry names via paginated readdir (a single
+    // page returns only the first dir blocks' entries — querying just those
+    // would make a linear-scan lookup terminate early and hide its O(N) cost).
+    let mut names: Vec<Vec<u8>> = Vec::new();
+    let mut off = 0_u64;
+    loop {
+        let page = open_fs
+            .readdir(&cx, ino, off)
+            .with_context(|| format!("failed to readdir {dir_path} at offset {off}"))?;
+        let entries = page.to_vec();
+        if entries.is_empty() {
+            break;
+        }
+        for e in &entries {
+            off = off.max(e.offset);
+            if e.name.as_slice() != b"." && e.name.as_slice() != b".." {
+                names.push(e.name.clone());
+            }
+        }
+    }
+    if names.is_empty() {
+        bail!("directory {dir_path} has no entries to look up");
+    }
+    let n_names = names.len() as u64;
+    let mut state = seed;
+    let mut next_idx = || -> usize {
+        state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^= z >> 31;
+        usize::try_from(z % n_names).unwrap_or(0)
+    };
+    use std::os::unix::ffi::OsStrExt;
+    let started = Instant::now();
+    let mut found = 0_u64;
+    for _ in 0..count {
+        let name = std::ffi::OsStr::from_bytes(&names[next_idx()]);
+        if open_fs.lookup(&cx, ino, name).is_ok() {
+            found += 1;
+        }
+    }
+    let elapsed = started.elapsed();
+    let duration_us = u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX);
+    let secs = elapsed.as_secs_f64().max(1e-9);
+    let lookups_per_s = (count as f64) / secs;
+    info!(
+        target: "ffs::cli::lookupbench",
+        count,
+        dir_entries = names.len(),
+        found,
+        duration_us,
+        lookups_per_s = lookups_per_s as u64,
+        "lookupbench_done"
+    );
+    eprintln!(
+        "lookupbench: {count} lookups in {dir_path} ({} entries) -> {found} found in {duration_us} us = {} lookups/s",
+        names.len(),
+        lookups_per_s as u64
+    );
+    Ok(())
+}
+
 fn writebench_cmd(
     path: &PathBuf,
     file_path: &str,
