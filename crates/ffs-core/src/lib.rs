@@ -1018,6 +1018,22 @@ pub struct OpenFs {
     /// by `BTRFS_TREE_NODE_CACHE_LIMIT` (the hot upper nodes are read first, so
     /// a small cache captures most of the benefit).
     btrfs_parsed_node_cache: ShardedCache<u64, Arc<BtrfsParsedNode>>,
+    /// Read-only decompressed compressed-extent cache (bd-4tw2n), keyed by the
+    /// compressed extent's `disk_bytenr` -> the FULL decompressed extent bytes
+    /// (`Arc<[u8]>`). A random 4 KiB read of a 128 KiB compressed extent
+    /// otherwise re-reads the compressed blob AND re-decompresses the whole
+    /// extent every time (zstd/zlib/lzo cannot partial-decompress -> ~32x read
+    /// amplification + per-read decode CPU), whereas the kernel page-cache
+    /// holds DECOMPRESSED pages so a warm random read is a cache hit. Caching
+    /// the decompressed extent turns a repeat read of any window of the same
+    /// extent into an `Arc` lookup + slice copy, skipping both the device read
+    /// and the decode. Only consulted/populated when writes are disabled
+    /// (`btrfs_alloc_state` is `None`) — the on-disk compressed data is then
+    /// immutable. Only the partial-slice path populates it; the whole-extent
+    /// (sequential) path decompresses straight into the output window and never
+    /// caches, preserving its bounded memory. Bounded by
+    /// `BTRFS_DECOMPRESSED_EXTENT_CACHE_LIMIT`.
+    btrfs_decompressed_extent_cache: ShardedCache<u64, Arc<[u8]>>,
 }
 
 struct Ext4WriteExtentSnapshot {
@@ -1140,6 +1156,14 @@ const EXT4_FILE_DATA_BLOCK_CACHE_LIMIT: usize = 256;
 /// 8 MiB; the hot upper-tree nodes (root + internal) are read first on every
 /// descent, so even a modest cap captures the bulk of the repeated-read win.
 const BTRFS_TREE_NODE_CACHE_LIMIT: usize = 512;
+
+/// Max entries in the read-only decompressed compressed-extent cache
+/// (bd-4tw2n). Each entry is one fully-decompressed compressed extent (up to
+/// the 128 KiB btrfs compression cluster), so the default 4096 bounds the
+/// cache near ~512 MiB worst case while still capturing the random-read
+/// working set of a database-sized file. Override with
+/// `FFS_BTRFS_DECOMP_CACHE_ENTRIES` (0 disables the cache).
+const BTRFS_DECOMPRESSED_EXTENT_CACHE_LIMIT: usize = 4096;
 
 /// Number of lock shards for the concurrent read-only block/metadata caches
 /// (bd-tag2s). FUSE serves reads from up to `min(available_parallelism, 8)`
@@ -3332,6 +3356,7 @@ impl OpenFs {
             btrfs_ro_inode_extents: ShardedCache::new(),
             btrfs_fs_tree_root_cache: Mutex::new(std::collections::HashMap::new()),
             btrfs_parsed_node_cache: ShardedCache::new(),
+            btrfs_decompressed_extent_cache: ShardedCache::new(),
         };
 
         if fs.is_ext4() && !options.skip_validation {
@@ -9016,6 +9041,18 @@ impl OpenFs {
         // length is only known after decompression (overlap can't be
         // pre-checked), matching the assembly loop which also decompresses
         // inline extents before testing overlap.
+        // bd-4tw2n: the read-only decompressed-extent cache is consulted/filled
+        // only when writes are disabled (the on-disk compressed data is then
+        // immutable). The limit is read once from the environment so memory can
+        // be tuned per workload; 0 disables the cache.
+        static BTRFS_DECOMP_CACHE_ENTRIES: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+        let decomp_cache_limit = *BTRFS_DECOMP_CACHE_ENTRIES.get_or_init(|| {
+            std::env::var("FFS_BTRFS_DECOMP_CACHE_ENTRIES")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(BTRFS_DECOMPRESSED_EXTENT_CACHE_LIMIT)
+        });
+        let decomp_cache_enabled = self.btrfs_alloc_state.is_none() && decomp_cache_limit > 0;
         let mut deferred_by_idx: Vec<Option<Result<BtrfsDeferredReadResult, FfsError>>> =
             (0..extents.len()).map(|_| None).collect();
         {
@@ -9310,17 +9347,42 @@ impl OpenFs {
                         extent_delta,
                         dst: chunk,
                     } => {
+                        // bd-xmh5g.413: when the window receives the WHOLE zstd
+                        // extent, decompress straight into it — no intermediate
+                        // Vec, no post-decompress memmove. This is the sequential
+                        // whole-extent case; it does not touch the decompressed-
+                        // extent cache (keeping that path's bounded memory).
+                        let whole_zstd_extent = comp == 3
+                            && extent_offset.checked_add(extent_delta) == Some(0)
+                            && chunk.len() == ram;
+                        // bd-4tw2n: partial-slice (random) read of a compressed
+                        // extent. On a read-only mount, serve the requested window
+                        // from the cached FULL decompressed extent if present —
+                        // skipping BOTH the compressed-blob device read and the
+                        // whole-extent decode. Byte-identical: the cached buffer
+                        // is exactly what `btrfs_decompress` produced when first
+                        // read, and the slice is computed identically.
+                        if !whole_zstd_extent
+                            && decomp_cache_enabled
+                            && let Some(full) =
+                                self.btrfs_decompressed_extent_cache.get(&disk_bytenr)
+                        {
+                            let result = Self::btrfs_decompressed_extent_slice(
+                                disk_bytenr,
+                                extent_offset,
+                                extent_delta,
+                                chunk.len(),
+                                &full,
+                            )
+                            .map(|slice| {
+                                chunk.copy_from_slice(slice);
+                                BtrfsDeferredReadResult::Done
+                            });
+                            return (idx, result);
+                        }
                         let mut compressed = vec![0_u8; compressed_len];
                         match self.btrfs_read_logical_into(cx, logical, &mut compressed) {
                             Ok(()) => {
-                                // bd-xmh5g.413: when the window receives the WHOLE
-                                // zstd extent, decompress straight into it — no
-                                // intermediate Vec, no post-decompress memmove
-                                // (the ~15% `__memmove_avx` in the flamegraph).
-                                // Byte-identical to the Vec+copy path for this case.
-                                let whole_zstd_extent = comp == 3
-                                    && extent_offset.checked_add(extent_delta) == Some(0)
-                                    && chunk.len() == ram;
                                 let result = if whole_zstd_extent {
                                     Self::btrfs_decompress_zstd_into(&compressed, chunk)
                                         .map(|()| BtrfsDeferredReadResult::Done)
@@ -9336,6 +9398,20 @@ impl OpenFs {
                                                     &decompressed,
                                                 )?;
                                             chunk.copy_from_slice(decompressed_slice);
+                                            // bd-4tw2n: retain the FULL decompressed
+                                            // extent so a later random read of any
+                                            // window of this extent hits the cache
+                                            // above. Bounded by the admission cap;
+                                            // only the partial-slice path fills it.
+                                            if decomp_cache_enabled {
+                                                let full: Arc<[u8]> =
+                                                    Arc::from(decompressed.into_boxed_slice());
+                                                self.btrfs_decompressed_extent_cache.insert_within(
+                                                    disk_bytenr,
+                                                    full,
+                                                    decomp_cache_limit,
+                                                );
+                                            }
                                             Ok(BtrfsDeferredReadResult::Done)
                                         },
                                     )
@@ -66103,6 +66179,140 @@ mod tests {
                 "btrfs check after partial compressed reflink:\n{output}"
             );
         }
+    }
+
+    /// bd-4tw2n: the read-only decompressed-extent cache must serve a repeated
+    /// partial (random) read of a compressed extent byte-identically to the
+    /// first read, populating exactly once. A 4 KiB random read of a compressed
+    /// extent otherwise re-reads the compressed blob AND re-decompresses the
+    /// whole extent every time; the cache (keyed by `disk_bytenr`) turns the
+    /// second read of any window into a slice copy. Builds a ZLIB-compressed
+    /// extent (FrankenFS never writes compressed), snapshots the image, reopens
+    /// it READ-ONLY (the only mode the cache engages in), then reads the same
+    /// 4 KiB window twice (miss then hit) plus a different window — every read
+    /// must equal the original bytes, and the cache must hold the extent after
+    /// the first read. Skips when btrfs-progs is unavailable.
+    #[test]
+    fn btrfs_ro_decompressed_extent_cache_hit_matches_miss_bd_4tw2n() {
+        let Some((fs, dev, _tmp, _image)) = open_writable_btrfs_mkfs(256) else {
+            return; // btrfs-progs unavailable
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(u64::from(BTRFS_FIRST_FREE_OBJECTID));
+        let src = fs
+            .create(&cx, root, OsStr::new("csrc.bin"), 0o644, 0, 0)
+            .expect("create src");
+        // Highly compressible 16 KiB payload.
+        let data: Vec<u8> = (0..16384u32).map(|i| (i % 251) as u8).collect();
+        fs.write(&cx, src.ino, 0, &data).expect("write src data");
+
+        // Replace src's uncompressed extent with one ZLIB-compressed extent over
+        // [0, n) — FrankenFS's own writes are never compressed.
+        {
+            let alloc_mutex = fs.require_btrfs_alloc_state().expect("alloc state");
+            let mut alloc = alloc_mutex.write();
+            let canonical = fs.btrfs_canonical_inode(src.ino).expect("canonical");
+            let n = data.len() as u64;
+            fs.btrfs_remove_overlapping_extent_data(&cx, &mut alloc, canonical, 0, n)
+                .expect("remove uncompressed extent");
+            let blob = btrfs_test_zlib_compress(&data);
+            let sectorsize = u64::from(alloc.sectorsize);
+            let alloc_size = (blob.len() as u64 + sectorsize - 1) & !(sectorsize - 1);
+            let allocation = alloc
+                .extent_alloc
+                .alloc_data(alloc_size)
+                .expect("alloc data");
+            let mut padded = blob;
+            padded.resize(alloc_size as usize, 0);
+            fs.btrfs_write_logical(&cx, allocation.bytenr, &padded)
+                .expect("write compressed blob");
+            let extent = BtrfsExtentData::Regular {
+                generation: alloc.generation,
+                ram_bytes: n,
+                extent_type: BTRFS_FILE_EXTENT_REG,
+                compression: ffs_btrfs::BTRFS_COMPRESS_ZLIB,
+                disk_bytenr: allocation.bytenr,
+                disk_num_bytes: alloc_size,
+                extent_offset: 0,
+                num_bytes: n,
+            };
+            let key = BtrfsKey {
+                objectid: canonical,
+                item_type: BTRFS_ITEM_EXTENT_DATA,
+                offset: 0,
+            };
+            alloc
+                .fs_tree
+                .insert(key, &extent.to_bytes())
+                .expect("insert compressed extent");
+            OpenFs::btrfs_register_data_extent_backref(
+                &mut alloc,
+                allocation.bytenr,
+                alloc_size,
+                canonical,
+                0,
+            )
+            .expect("register backref");
+            fs.btrfs_capture_data_extent_csums(
+                &cx,
+                &mut alloc,
+                allocation.bytenr,
+                alloc_size,
+                None,
+            )
+            .expect("capture csums");
+        }
+        let _ = fs.flush_mvcc_to_device(&cx);
+        fs.btrfs_full_transaction_commit(&cx, "4tw2n-compressed-ro-cache")
+            .expect("commit");
+        let bytes = dev.snapshot_bytes();
+        drop(fs);
+
+        // Reopen READ-ONLY (no `enable_writes`): `btrfs_alloc_state` is None, so
+        // the decompressed-extent cache engages.
+        let ro_dev = TestDevice::from_vec(bytes);
+        let ro = OpenFs::from_device(&cx, Box::new(ro_dev), &OpenOptions::default())
+            .expect("reopen read-only");
+        assert!(
+            !ro.is_writable(),
+            "reopened fs must be read-only for the decompressed-extent cache to engage"
+        );
+        let ino = ro
+            .lookup(&cx, root, OsStr::new("csrc.bin"))
+            .expect("lookup")
+            .ino;
+
+        use std::sync::atomic::Ordering;
+        // Partial window [4096, 8192): first read misses + populates the cache.
+        let first = ro.read(&cx, ino, 4096, 4096).expect("first partial read");
+        assert_eq!(
+            first,
+            &data[4096..8192],
+            "first (cache-miss) partial read must match the original"
+        );
+        assert!(
+            ro.btrfs_decompressed_extent_cache
+                .len
+                .load(Ordering::Relaxed)
+                >= 1,
+            "the decompressed extent must be cached after the first partial read"
+        );
+        // Second read of the same window must hit the cache, byte-identically.
+        let second = ro.read(&cx, ino, 4096, 4096).expect("second partial read");
+        assert_eq!(
+            second, first,
+            "cache-hit read must be byte-identical to the cache-miss read"
+        );
+        // A different window of the same extent must also be correct from cache.
+        let third = ro.read(&cx, ino, 8192, 4096).expect("third partial read");
+        assert_eq!(
+            third,
+            &data[8192..12288],
+            "cache-hit read of a different window must match the original"
+        );
+        // The full extent reads back identical too (whole-window slice from cache).
+        let full = ro.read(&cx, ino, 0, data.len() as u32).expect("full read");
+        assert_eq!(full, data, "full read must match the original");
     }
 
     /// bd-iypb9: partial-range reflink of an INLINE extent. Inline data lives in
