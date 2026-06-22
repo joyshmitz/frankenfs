@@ -28157,6 +28157,22 @@ impl OpenFs {
         )
     }
 
+    /// Flush ALL committed MVCC block versions to the underlying image device,
+    /// making everything written this session durable on disk — the persist step
+    /// a real mount performs at sync/umount. Without this, writes and creates
+    /// committed to the in-memory MVCC overlay are lost on close (a re-open or
+    /// kernel mount sees nothing), so a benchmark/tool that needs a PERSISTED,
+    /// kernel-comparable result must call it after its mutations. Read-only
+    /// mounts return `ReadOnly`.
+    pub fn sync_all_to_device(&self, cx: &Cx) -> ffs_error::Result<()> {
+        if !self.is_writable() {
+            return Err(FfsError::ReadOnly);
+        }
+        let base_dev = self.direct_block_device_adapter();
+        self.mvcc_store.read().flush_to_device(cx, &base_dev)?;
+        Ok(())
+    }
+
     pub fn flush(
         &self,
         cx: &Cx,

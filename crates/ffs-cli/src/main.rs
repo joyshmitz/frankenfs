@@ -712,14 +712,13 @@ enum Command {
         #[arg(long, default_value_t = 0x9E37_79B9_7F4A_7C15)]
         seed: u64,
     },
-    /// Benchmark the metadata-WRITE PATH: `enable_writes`, then create `count`
-    /// empty files in `dir`, timing total throughput. Each create exercises the
-    /// existence-check lookup + inode alloc + directory insert + MVCC commit.
-    /// NOTE: the creates commit to the in-memory MVCC overlay and are NOT
-    /// flushed to the image (no `sync`), so this measures the create PATH's
-    /// in-engine CPU cost — NOT a persisted head-to-head vs a kernel RW mount
-    /// (a re-open / kernel mount will not see the files). MUTATES the in-memory
-    /// state only.
+    /// Benchmark metadata WRITES: `enable_writes`, then create `count` empty
+    /// files in `dir` and FLUSH the overlay to the image (`sync_all_to_device`),
+    /// timing the whole thing. Each create is existence-check lookup + inode
+    /// alloc + directory insert + MVCC commit, then one final persist — a valid
+    /// persisted head-to-head vs a kernel RW mount creating files (tar-extract /
+    /// git-checkout shape; the re-opened image / kernel mount sees the files).
+    /// MUTATES the image — run on a throwaway copy.
     CreateBench {
         /// Path to the filesystem image (mutated in place).
         image: PathBuf,
@@ -2375,6 +2374,13 @@ fn createbench_cmd(path: &PathBuf, dir_path: &str, count: usize) -> Result<()> {
             .with_context(|| format!("failed to create {name}"))?;
         created += 1;
     }
+    // Persist the committed creates to the image (the step a real mount does at
+    // umount). Without this the creates live only in the in-memory MVCC overlay
+    // and a re-open / kernel mount sees nothing — so the throughput would not be
+    // a valid persisted head-to-head vs a kernel RW mount (bd-c2bvq).
+    open_fs
+        .sync_all_to_device(&cx)
+        .with_context(|| "failed to flush created files to image".to_string())?;
     let elapsed = started.elapsed();
     let duration_us = u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX);
     let secs = elapsed.as_secs_f64().max(1e-9);
