@@ -4055,12 +4055,11 @@ impl<D: BlockDevice> MvccBlockDevice<D> {
     }
 
     /// Construct a read-only adapter that does NOT register its snapshot on the
-    /// store (bd-eflng). Safe only when no writes can prune versions (a
-    /// read-only filesystem): registration exists to hold back version pruning
-    /// for a live reader, but with no writers nothing is ever pruned. Skipping
-    /// it avoids the per-construction/-drop store *write* lock (and, with
-    /// `read_your_writes` left `false`, the per-block `store.read()` snapshot
-    /// re-resolution) that serialized concurrent random reads ~88x vs kernel.
+    /// store (bd-eflng). Safe only for immutable/read-only filesystem views:
+    /// registration exists to hold back version pruning for live readers, but
+    /// with no writers nothing is ever pruned, and no MVCC overlay version can
+    /// become visible. Reads therefore go straight to the base device instead of
+    /// taking a store read lock for a guaranteed-miss overlay probe.
     #[must_use]
     pub fn new_unregistered(base: D, store: Arc<RwLock<MvccStore>>, snapshot: Snapshot) -> Self {
         Self {
@@ -4105,8 +4104,8 @@ impl<D: BlockDevice> MvccBlockDevice<D> {
     #[must_use]
     pub fn snapshot(&self) -> Snapshot {
         match &self.ownership {
-            SnapshotOwnership::Inline { snapshot } => *snapshot,
-            SnapshotOwnership::Unregistered { snapshot } => *snapshot,
+            SnapshotOwnership::Inline { snapshot }
+            | SnapshotOwnership::Unregistered { snapshot } => *snapshot,
             SnapshotOwnership::Handle { handle } => handle.snapshot(),
         }
     }
@@ -4119,6 +4118,13 @@ impl<D: BlockDevice> MvccBlockDevice<D> {
         } else {
             self.snapshot()
         }
+    }
+
+    /// Unregistered devices are used only for immutable/read-only filesystem
+    /// views: no writer can create MVCC overlay versions, so every overlay probe
+    /// is a guaranteed miss. Treat that mode as a direct base-device view.
+    fn reads_base_directly(&self) -> bool {
+        matches!(&self.ownership, SnapshotOwnership::Unregistered { .. }) && !self.read_your_writes
     }
 
     /// Shared reference to the MVCC store.
@@ -4144,11 +4150,8 @@ impl<D: BlockDevice> Drop for MvccBlockDevice<D> {
                     "mvcc snapshot was not registered or already released: {snapshot:?}"
                 );
             }
-            SnapshotOwnership::Unregistered { .. } => {
-                // Never registered (read-only adapter), so nothing to release.
-            }
-            SnapshotOwnership::Handle { .. } => {
-                // SnapshotHandle's own Drop handles release.
+            SnapshotOwnership::Unregistered { .. } | SnapshotOwnership::Handle { .. } => {
+                // No inline registration was acquired here.
             }
         }
     }
@@ -4156,6 +4159,10 @@ impl<D: BlockDevice> Drop for MvccBlockDevice<D> {
 
 impl<D: BlockDevice> BlockDevice for MvccBlockDevice<D> {
     fn read_block(&self, cx: &Cx, block: BlockNumber) -> ffs_error::Result<BlockBuf> {
+        if self.reads_base_directly() {
+            return self.base.read_block(cx, block);
+        }
+
         let snap = self.read_snapshot();
         // Check version store first (shared lock, no I/O).
         {
@@ -4191,6 +4198,9 @@ impl<D: BlockDevice> BlockDevice for MvccBlockDevice<D> {
             .0
             .checked_add(count)
             .ok_or_else(|| FfsError::Format("block range overflow".to_owned()))?;
+        if self.reads_base_directly() {
+            return self.base.read_contiguous_blocks(cx, start, bufs);
+        }
         let snap = self.read_snapshot();
 
         // Single pass under one read guard at a single snapshot: capture the
@@ -4264,6 +4274,9 @@ impl<D: BlockDevice> BlockDevice for MvccBlockDevice<D> {
             .0
             .checked_add(count_u64)
             .ok_or_else(|| FfsError::Format("block range overflow".to_owned()))?;
+        if self.reads_base_directly() {
+            return self.base.read_contiguous_into(cx, start, dst);
+        }
         let snap = self.read_snapshot();
 
         // Capture MVCC-visible blocks once under a single read guard at one
@@ -4315,6 +4328,12 @@ impl<D: BlockDevice> BlockDevice for MvccBlockDevice<D> {
     }
 
     fn write_block(&self, _cx: &Cx, block: BlockNumber, data: &[u8]) -> ffs_error::Result<()> {
+        if self.reads_base_directly() {
+            return Err(FfsError::UnsupportedFeature(
+                "unregistered MVCC block device is read-only".to_owned(),
+            ));
+        }
+
         // Stage into a new single-block transaction and commit immediately.
         // For batched writes, callers should use the MvccStore API directly.
         let mut guard = self.store.write();
@@ -5637,6 +5656,40 @@ mod tests {
 
         let buf = dev.read_block(&cx, BlockNumber(3)).expect("read block 3");
         assert_eq!(buf.as_slice(), &[0xAB; 512]);
+    }
+
+    #[test]
+    fn unregistered_mvcc_device_is_direct_read_only_view_bd_xmh5g_416() {
+        let cx = test_cx();
+        let block = BlockNumber(3);
+        let base = MemBlockDevice::new(512, 16);
+        base.write_block(&cx, block, &[0xAB; 512])
+            .expect("seed base");
+
+        let store = Arc::new(RwLock::new(MvccStore::new()));
+        {
+            let mut guard = store.write();
+            let mut txn = guard.begin();
+            txn.stage_write(block, vec![0xCD; 512]);
+            guard.commit(txn).expect("seed overlay");
+        }
+        let snap = store.read().current_snapshot();
+        let dev = MvccBlockDevice::new_unregistered(base, Arc::clone(&store), snap);
+
+        let buf = dev.read_block(&cx, block).expect("direct read-only read");
+        assert_eq!(
+            buf.as_slice(),
+            &[0xAB; 512],
+            "unregistered/read-only mode must bypass MVCC overlay probes"
+        );
+
+        let err = dev
+            .write_block(&cx, block, &[0xEF; 512])
+            .expect_err("unregistered mode is a read-only base-device view");
+        assert!(
+            matches!(err, FfsError::UnsupportedFeature(_)),
+            "unexpected error kind: {err:?}"
+        );
     }
 
     #[test]

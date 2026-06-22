@@ -1,5 +1,78 @@
 # Perf Gauntlet Scorecard
 
+## `bd-xmh5g` cod-a Read-only MVCC Direct-Base Bypass
+
+Date: 2026-06-21
+Agent: BlackThrush (`cod-a`)
+Scope: `ffs-mvcc` read-only block-device adapter overhead inside the ext4/btrfs
+read path
+Commit under measurement: local candidate on current `main`
+RCH workers: `ovh-a` baseline bench, `hz2` candidate bench/test/conformance
+Requested target dir: `/data/projects/.rch-targets/frankenfs-cod-a`
+
+### Verdict
+
+KEEP. The alien-graveyard lever is a read-mostly immutable fast path: once an
+`OpenFs` is read-only, no MVCC overlay version can become visible, so probing the
+store on every base-device read is a guaranteed-miss synchronization tax.
+`MvccBlockDevice::new_unregistered` now treats that mode as a direct base-device
+view for scalar and contiguous reads, and rejects accidental writes.
+
+### Scorecard
+
+| Gate | Result |
+| --- | --- |
+| Direct ext4/btrfs-kernel ratio | Not freshly rerun for this tiny primitive under the disk-low/per-crate directive. It targets the documented warm random-read residual after `bd-eflng`; the large gap was already reduced from ~88x to a remaining best-case ~3.3x vs kernel. |
+| Internal A/B win/loss/neutral | `1 / 0 / 0`: wrapper/direct overhead fell from `1.72x` to `1.04x`; normalized improvement `1.66x`. |
+| Direct kernel win/loss/neutral | `0 / 0 / 1`: internal read-only primitive, no new direct kernel row, no new kernel loss. |
+| Production levers kept | 1 |
+| Production levers rejected/reverted | 0 |
+| Behavior proof | New unit test pins unregistered mode as a read-only direct view: base bytes win over any store overlay, and writes return `UnsupportedFeature`. |
+| Build/check | RCH `cargo check -p ffs-mvcc --all-targets` passed on `ovh-a`; after final bench cleanup, RCH `cargo check -p ffs-mvcc --bench read_visible_sequential` passed on `vmi1152480`; local `cargo fmt --check --package ffs-mvcc --package ffs-core` and `git diff --check` passed. |
+| Conformance | RCH `cargo test -p ffs-harness --test conformance -- --nocapture` passed on `hz2`: `100 passed / 0 failed / 2 ignored`. |
+| Known gate caveat | RCH scoped clippy `cargo clippy -p ffs-mvcc --all-targets --no-deps -- -D warnings` cleared the new match-arm lint after cleanup, then failed on pre-existing pedantic debt in untouched bench `crates/ffs-mvcc/benches/zstd_decompress_reuse.rs:21`. |
+
+### Measured Rows
+
+| Run | Worker | Direct base | Unregistered MVCC | Ratio |
+| --- | --- | ---: | ---: | ---: |
+| Baseline | `ovh-a` | `10.206 us` | `17.540 us` | `1.72x` overhead |
+| Candidate | `hz2` | `12.872 us` | `13.342 us` | `1.04x` overhead |
+
+### Isomorphism
+
+Ordering preserved: yes. Read-only mode has no writes and no visible MVCC
+overlays; reads expose the same base-device bytes.
+
+Tie-breaking unchanged: N/A.
+
+Floating-point identical: N/A.
+
+RNG seeds unchanged: N/A.
+
+Goldens/bytes verified: focused unit test passed; conformance passed `100 / 0 /
+2 ignored`.
+
+### Commands
+
+```bash
+AGENT_NAME=cod-a CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-a \
+  rch exec -- cargo bench -p ffs-mvcc --bench read_visible_sequential --profile release
+
+RCH_WORKER=hz2 AGENT_NAME=cod-a CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-a \
+  rch exec -- cargo test -p ffs-mvcc \
+  unregistered_mvcc_device_is_direct_read_only_view_bd_xmh5g_416 -- --nocapture
+
+RCH_WORKER=hz2 AGENT_NAME=cod-a CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-a \
+  rch exec -- cargo test -p ffs-harness --test conformance -- --nocapture
+
+AGENT_NAME=cod-a CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-a \
+  rch exec -- cargo check -p ffs-mvcc --all-targets
+
+RCH_WORKER=vmi1152480 AGENT_NAME=cod-a CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-a \
+  rch exec -- cargo check -p ffs-mvcc --bench read_visible_sequential
+```
+
 ## `bd-xmh5g.425` cod-b Current Materializing Frontier Recheck
 
 Date: 2026-06-21

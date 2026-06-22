@@ -15574,11 +15574,10 @@ impl OpenFs {
                 .with_read_your_writes()
         } else {
             // bd-eflng: a read-only filesystem never writes, so no version is
-            // ever pruned and the per-adapter snapshot register/release (store
-            // *write* lock) plus the read-your-writes per-block `store.read()`
-            // re-resolution are pure overhead that serialized concurrent random
-            // reads ~88x vs the kernel. Skip both: no registration, and reads
-            // resolve at the (stable) construction snapshot.
+            // ever pruned and no MVCC overlay can become visible. Skip both the
+            // per-adapter snapshot register/release (store *write* lock) and the
+            // per-block guaranteed-miss overlay probe: unregistered mode is a
+            // direct base-device view.
             MvccBlockDevice::new_unregistered(base, Arc::clone(&self.mvcc_store), snapshot)
         }
     }
