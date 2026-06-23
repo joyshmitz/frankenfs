@@ -1154,7 +1154,10 @@ struct ReaddirSnapshot {
 struct DirNameIndex {
     inode: u64,
     validation: ReaddirValidation,
-    names: std::collections::HashSet<Vec<u8>>,
+    // FxHashSet (not the default SipHash): an internal, non-adversarial name set
+    // where ~15% of parallel-create CPU was the default hasher (bd-bhh0i). FxHash
+    // is a fast multiply-xor — safe here, the keys are our own entry names.
+    names: rustc_hash::FxHashSet<Vec<u8>>,
 }
 
 /// Number of shards for the per-directory name index. A single slot thrashed
@@ -12368,7 +12371,7 @@ impl OpenFs {
             };
             if !have_current {
                 if let Ok(entries) = self.read_dir_with_scope(cx, scope, dir_inode) {
-                    let names: std::collections::HashSet<Vec<u8>> =
+                    let names: rustc_hash::FxHashSet<Vec<u8>> =
                         entries.into_iter().map(|e| e.name).collect();
                     *self.dir_name_index_shard(dir_inode.number).lock() = Some(DirNameIndex {
                         inode: dir_inode.number,

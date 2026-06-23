@@ -998,6 +998,7 @@ dependencies = [
  "parking_lot",
  "proptest",
  "rayon",
+ "rustc-hash",
  "serde",
  "serde_json",
  "sha2 0.11.0",
