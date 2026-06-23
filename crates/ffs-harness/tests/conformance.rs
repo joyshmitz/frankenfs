@@ -2259,7 +2259,7 @@ fn try_mount_ffs_with_options(
     image: &Path,
     mountpoint: &Path,
     mount_opts: &MountOptions,
-) -> Option<fuser::BackgroundSession> {
+) -> Option<ffs_harness::stale_mounts::MountGuard> {
     // Self-heal dead mounts leaked by earlier crashed/killed runs.
     ffs_harness::stale_mounts::reap_stale_frankenfs_mounts_once();
     let cx = Cx::for_testing();
@@ -2272,7 +2272,9 @@ fn try_mount_ffs_with_options(
     match mount_background(Box::new(fs), mountpoint, mount_opts) {
         Ok(session) => {
             if wait_for_fuse_mount_ready(mountpoint) {
-                Some(session)
+                Some(ffs_harness::stale_mounts::MountGuard::new(
+                    session, mountpoint,
+                ))
             } else {
                 eprintln!(
                     "FUSE mount did not become visible after {:?} (skipping conformance mount probe): {}",

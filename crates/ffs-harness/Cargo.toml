@@ -9,11 +9,19 @@ rust-version.workspace = true
 [dependencies]
 anyhow = { workspace = true }
 asupersync = { workspace = true }
+# `stale_mounts::install_teardown_hooks` installs a SIGINT/SIGTERM handler that
+# reclaims leaked FUSE mounts on abrupt exit; the `termination` feature makes it
+# also fire on SIGTERM (the signal a test runner's timeout-kill sends).
+ctrlc = { workspace = true, features = ["termination"] }
 ffs-btrfs = { workspace = true }
 ffs-core = { workspace = true }
 ffs-fuse = { workspace = true }
 ffs-ondisk = { workspace = true }
 ffs-types = { workspace = true }
+# `fuser` is a runtime dependency because `stale_mounts::MountGuard` (in the
+# library) owns a `fuser::BackgroundSession`. The e2e/conformance tests use it
+# directly too, so it stays available to them transitively.
+fuser = { workspace = true }
 hex = { workspace = true }
 parking_lot = { workspace = true }
 serde = { workspace = true }
@@ -32,7 +40,6 @@ ffs-error = { workspace = true }
 ffs-inode = { workspace = true }
 ffs-xattr = { workspace = true }
 flate2 = { workspace = true }
-fuser = { workspace = true }
 insta = { workspace = true }
 libc = { workspace = true }
 nix = { workspace = true }
