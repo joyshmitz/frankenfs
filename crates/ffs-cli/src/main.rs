@@ -1,5 +1,13 @@
 #![forbid(unsafe_code)]
 
+// jemalloc global allocator: glibc malloc was ~40% of single-thread create CPU
+// and its arena lock convoyed parallel writers into NEGATIVE scaling (bd-bhh0i).
+// jemalloc gives ~1.6x single-thread and ~2.2x parallel on alloc-heavy paths
+// (block-read + dir-parse buffers). Safe to declare under forbid(unsafe_code) —
+// the GlobalAlloc impl's unsafety lives in the jemallocator crate.
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 mod cmd_evidence;
 mod cmd_repair;
 mod mount_console;
