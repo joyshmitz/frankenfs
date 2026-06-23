@@ -727,6 +727,10 @@ enum Command {
         /// Number of files to create.
         #[arg(long, default_value_t = 20_000)]
         count: usize,
+        /// Parallel writer threads (each creates count/threads files in its
+        /// own subdir, isolating the MVCC commit-lock contention). 1 = serial.
+        #[arg(long, default_value_t = 1)]
+        threads: usize,
     },
     /// Benchmark mkdir: create `count` subdirectories in `dir` + flush, timing
     /// total throughput. Each mkdir is an existence-check lookup + inode/dir
@@ -1976,7 +1980,7 @@ fn run() -> Result<()> {
             count,
             seed,
         } => lookupbench_cmd(&image, &dir, count, seed),
-        Command::CreateBench { image, dir, count } => createbench_cmd(&image, &dir, count),
+        Command::CreateBench { image, dir, count, threads } => createbench_cmd(&image, &dir, count, threads),
         Command::MkdirBench { image, dir, count } => mkdirbench_cmd(&image, &dir, count),
         Command::RmdirBench { image, dir, count } => rmdirbench_cmd(&image, &dir, count),
         Command::UnlinkBench { image, dir, count } => unlinkbench_cmd(&image, &dir, count),
@@ -2415,7 +2419,7 @@ fn read_file_cmd(path: &PathBuf, file_path: &str, discard: bool) -> Result<()> {
 /// a kernel random `pread` loop. Random access does one extent-map lookup per
 /// read (sequential `read` coalesces runs), so this exercises the per-lookup
 /// path (e.g. the `ffs-extent` cache) that sequential reads hide (bd-7f6yr).
-fn createbench_cmd(path: &PathBuf, dir_path: &str, count: usize) -> Result<()> {
+fn createbench_cmd(path: &PathBuf, dir_path: &str, count: usize, threads: usize) -> Result<()> {
     let cx = cli_cx();
     let mut open_fs = OpenFs::open(&cx, path)
         .with_context(|| format!("failed to open image: {}", path.display()))?;
@@ -2428,6 +2432,45 @@ fn createbench_cmd(path: &PathBuf, dir_path: &str, count: usize) -> Result<()> {
             .lookup(&cx, parent, std::ffi::OsStr::new(comp))
             .with_context(|| format!("failed to resolve {dir_path} at component {comp:?}"))?;
         parent = attr.ino;
+    }
+    // Parallel mode: each thread creates in its own subdir, so the only shared
+    // contention is the MVCC commit lock — isolating whether writes scale.
+    if threads > 1 {
+        let mut tdirs: Vec<InodeNumber> = Vec::with_capacity(threads);
+        for t in 0..threads {
+            let attr = open_fs
+                .mkdir(&cx, parent, std::ffi::OsStr::new(&format!("t{t}")), 0o755, 0, 0)
+                .with_context(|| format!("failed to mkdir t{t}"))?;
+            tdirs.push(attr.ino);
+        }
+        let per = count / threads;
+        let started = Instant::now();
+        std::thread::scope(|s| {
+            for (t, &tdir) in tdirs.iter().enumerate() {
+                let fs = &open_fs;
+                let cxr = &cx;
+                s.spawn(move || {
+                    for i in 0..per {
+                        let name = format!("cb_{t}_{i:08}");
+                        fs.create(cxr, tdir, std::ffi::OsStr::new(&name), 0o644, 0, 0)
+                            .unwrap_or_else(|e| panic!("create {name}: {e:?}"));
+                    }
+                });
+            }
+        });
+        open_fs
+            .sync_all_to_device(&cx)
+            .with_context(|| "failed to flush creates".to_string())?;
+        let elapsed = started.elapsed();
+        let total = (per * threads) as f64;
+        let cps = total / elapsed.as_secs_f64().max(1e-9);
+        eprintln!(
+            "createbench: {} creates / {threads} threads in {} us = {} creates/s",
+            per * threads,
+            elapsed.as_micros(),
+            cps as u64
+        );
+        return Ok(());
     }
     let started = Instant::now();
     let mut created = 0_u64;

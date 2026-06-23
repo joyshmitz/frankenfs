@@ -942,10 +942,13 @@ pub struct OpenFs {
     /// rather than relying on hooking every mutation path.
     readdir_snapshot: Mutex<Option<ReaddirSnapshot>>,
     /// Per-directory authoritative name set for O(1) negative lookups
-    /// (the create existence-check). See [`DirNameIndex`]. Single hot slot
-    /// (a create stream hammers one directory); validation-keyed so it is
-    /// self-invalidating and can never yield a wrong "absent" (bd-f8rd8).
-    dir_name_index: Mutex<Option<DirNameIndex>>,
+    /// (the create existence-check). See [`DirNameIndex`]. SHARDED by dir inode
+    /// (`inode % DIR_NAME_INDEX_SHARDS`): a single slot thrashed catastrophically
+    /// under PARALLEL writers to different directories (each create rebuilt the
+    /// index via read_dir_with_scope's par_iter → rayon convoy, ~4x NEGATIVE
+    /// scaling, bd-par1). Validation-keyed so each shard self-invalidates and can
+    /// never yield a wrong "absent" (bd-f8rd8).
+    dir_name_index: Box<[Mutex<Option<DirNameIndex>>]>,
     /// When set, `readdir` skips the speculative inode-table prefetch
     /// ([`Self::prefetch_ext4_readdir_inode_table_blocks`]). The prefetch warms
     /// the getattr cache for a stat-heavy listing, but for a readdir-ONLY
@@ -1153,6 +1156,11 @@ struct DirNameIndex {
     validation: ReaddirValidation,
     names: std::collections::HashSet<Vec<u8>>,
 }
+
+/// Number of shards for the per-directory name index. A single slot thrashed
+/// under parallel writers to distinct directories; sharding by `inode % N`
+/// keeps concurrent directories on separate slots (bd-par1).
+const DIR_NAME_INDEX_SHARDS: usize = 64;
 
 /// Upper bound on entries visible through one [`slice_readdir_snapshot`] call.
 ///
@@ -3426,7 +3434,9 @@ impl OpenFs {
             extent_cache: ffs_extent::ExtentCache::new(),
             ext4_write_extent_snapshot: Mutex::new(None),
             readdir_snapshot: Mutex::new(None),
-            dir_name_index: Mutex::new(None),
+            dir_name_index: (0..DIR_NAME_INDEX_SHARDS)
+                .map(|_| Mutex::new(None))
+                .collect(),
             readdir_prefetch_disabled: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
             readdir_full_reads: std::sync::atomic::AtomicUsize::new(0),
@@ -4929,7 +4939,9 @@ impl OpenFs {
         // AFTER the whole apply so the next lookup rebuilds against the new state.
         // (The FsOps mutation paths all bump ctime and are caught by the key;
         // fast-commit replay is the lone validation-blind exception.)
-        *self.dir_name_index.lock() = None;
+        *self
+            .dir_name_index_shard(u64::from(dentry.parent_ino))
+            .lock() = None;
         result
     }
 
@@ -12166,15 +12178,24 @@ impl OpenFs {
                     DirSeg::Cached { .. } => None,
                 })
                 .collect();
-            let results: Vec<(usize, DirRunRead)> = specs
-                .into_par_iter()
-                .map(|(i, phys, run_len)| {
-                    (
-                        i,
-                        self.read_contiguous_blocks_with_scope(cx, scope, phys, run_len),
-                    )
-                })
-                .collect();
+            // Serialize a small or nested fan-out: a handful of cold runs from a
+            // non-rayon caller (e.g. a parallel writer building its name index)
+            // would otherwise convoy the global pool (bd-par1). Only a genuinely
+            // large cold readdir from a top-level caller fans out.
+            let read_run = |(i, phys, run_len): (usize, BlockNumber, usize)| {
+                (
+                    i,
+                    self.read_contiguous_blocks_with_scope(cx, scope, phys, run_len),
+                )
+            };
+            let results: Vec<(usize, DirRunRead)> = if specs.len()
+                < rayon::current_num_threads().max(2)
+                || rayon::current_thread_index().is_some()
+            {
+                specs.into_iter().map(read_run).collect()
+            } else {
+                specs.into_par_iter().map(read_run).collect()
+            };
             for (i, res) in results {
                 cold_reads[i] = Some(res);
             }
@@ -12256,7 +12277,7 @@ impl OpenFs {
         };
         let index_keyable = dir_inode.number != 0;
         if index_keyable {
-            let guard = self.dir_name_index.lock();
+            let guard = self.dir_name_index_shard(dir_inode.number).lock();
             if let Some(idx) = guard.as_ref() {
                 if idx.inode == dir_inode.number
                     && idx.validation == dir_validation
@@ -12341,7 +12362,7 @@ impl OpenFs {
         // create-heavy stream by the incremental update in `OpenFs::create`.
         if index_keyable {
             let have_current = {
-                let guard = self.dir_name_index.lock();
+                let guard = self.dir_name_index_shard(dir_inode.number).lock();
                 matches!(guard.as_ref(), Some(idx)
                     if idx.inode == dir_inode.number && idx.validation == dir_validation)
             };
@@ -12349,7 +12370,7 @@ impl OpenFs {
                 if let Ok(entries) = self.read_dir_with_scope(cx, scope, dir_inode) {
                     let names: std::collections::HashSet<Vec<u8>> =
                         entries.into_iter().map(|e| e.name).collect();
-                    *self.dir_name_index.lock() = Some(DirNameIndex {
+                    *self.dir_name_index_shard(dir_inode.number).lock() = Some(DirNameIndex {
                         inode: dir_inode.number,
                         validation: dir_validation,
                         names,
@@ -28167,7 +28188,6 @@ impl OpenFs {
         }
         let canonical = Self::ext4_canonical_inode(parent);
         let Ok(parent_inode) = self.read_inode(cx, canonical) else {
-            *self.dir_name_index.lock() = None;
             return;
         };
         if parent_inode.number == 0 {
@@ -28178,7 +28198,7 @@ impl OpenFs {
             mtime: u64::from(parent_inode.mtime),
             size: parent_inode.size,
         };
-        let mut guard = self.dir_name_index.lock();
+        let mut guard = self.dir_name_index_shard(parent_inode.number).lock();
         match guard.as_mut() {
             Some(idx) if idx.inode == parent_inode.number => {
                 idx.names.insert(name.to_vec());
@@ -28188,6 +28208,12 @@ impl OpenFs {
             // the next negative lookup rebuilds against the fresh state.
             _ => *guard = None,
         }
+    }
+
+    /// The name-index shard for a directory inode (sharded by `inode % N` to
+    /// avoid the single-slot thrash under parallel writers, bd-par1).
+    fn dir_name_index_shard(&self, inode: u64) -> &Mutex<Option<DirNameIndex>> {
+        &self.dir_name_index[(inode % DIR_NAME_INDEX_SHARDS as u64) as usize]
     }
 
     /// `mknod(2)` for char/block devices, FIFOs, and sockets.
