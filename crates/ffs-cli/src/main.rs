@@ -728,6 +728,19 @@ enum Command {
         #[arg(long, default_value_t = 20_000)]
         count: usize,
     },
+    /// Benchmark mkdir: create `count` subdirectories in `dir` + flush, timing
+    /// total throughput. Each mkdir is an existence-check lookup + inode/dir
+    /// alloc + parent insert + MVCC commit — exercises the name-index across a
+    /// mkdir stream (bd-f8rd8). MUTATES the image — run on a throwaway copy.
+    MkdirBench {
+        /// Path to the filesystem image (mutated in place).
+        image: PathBuf,
+        /// Absolute path of an existing directory to create subdirs in.
+        dir: String,
+        /// Number of subdirectories to create.
+        #[arg(long, default_value_t = 20_000)]
+        count: usize,
+    },
     /// Benchmark metadata DELETES: create `count` files (setup, untimed), then
     /// time unlinking all of them + a final flush. Each unlink is a positive
     /// lookup + directory-entry removal + inode/bitmap free + MVCC commit — a
@@ -1136,6 +1149,7 @@ impl Command {
             Self::WriteBench { .. } => "writebench",
             Self::LookupBench { .. } => "lookupbench",
             Self::CreateBench { .. } => "createbench",
+            Self::MkdirBench { .. } => "mkdirbench",
             Self::UnlinkBench { .. } => "unlinkbench",
             Self::RenameBench { .. } => "renamebench",
             Self::Walk { .. } => "walk",
@@ -1948,6 +1962,7 @@ fn run() -> Result<()> {
             seed,
         } => lookupbench_cmd(&image, &dir, count, seed),
         Command::CreateBench { image, dir, count } => createbench_cmd(&image, &dir, count),
+        Command::MkdirBench { image, dir, count } => mkdirbench_cmd(&image, &dir, count),
         Command::UnlinkBench { image, dir, count } => unlinkbench_cmd(&image, &dir, count),
         Command::RenameBench { image, dir, count } => renamebench_cmd(&image, &dir, count),
         Command::Walk {
@@ -2429,6 +2444,51 @@ fn createbench_cmd(path: &PathBuf, dir_path: &str, count: usize) -> Result<()> {
     eprintln!(
         "createbench: {count} creates in {dir_path} -> {created} created in {duration_us} us = {} creates/s",
         creates_per_s as u64
+    );
+    Ok(())
+}
+
+fn mkdirbench_cmd(path: &PathBuf, dir_path: &str, count: usize) -> Result<()> {
+    let cx = cli_cx();
+    let mut open_fs = OpenFs::open(&cx, path)
+        .with_context(|| format!("failed to open image: {}", path.display()))?;
+    open_fs
+        .enable_writes(&cx)
+        .with_context(|| "failed to enable writes (alloc state)".to_string())?;
+    let mut parent = InodeNumber(1);
+    for comp in dir_path.split('/').filter(|c| !c.is_empty()) {
+        let attr = open_fs
+            .lookup(&cx, parent, std::ffi::OsStr::new(comp))
+            .with_context(|| format!("failed to resolve {dir_path} at component {comp:?}"))?;
+        parent = attr.ino;
+    }
+    let started = Instant::now();
+    let mut made = 0_u64;
+    for i in 0..count {
+        let name = format!("md_{i:08}");
+        open_fs
+            .mkdir(&cx, parent, std::ffi::OsStr::new(&name), 0o755, 0, 0)
+            .with_context(|| format!("failed to mkdir {name}"))?;
+        made += 1;
+    }
+    open_fs
+        .sync_all_to_device(&cx)
+        .with_context(|| "failed to flush mkdirs to image".to_string())?;
+    let elapsed = started.elapsed();
+    let duration_us = u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX);
+    let secs = elapsed.as_secs_f64().max(1e-9);
+    let mkdirs_per_s = (count as f64) / secs;
+    info!(
+        target: "ffs::cli::mkdirbench",
+        count,
+        made,
+        duration_us,
+        mkdirs_per_s = mkdirs_per_s as u64,
+        "mkdirbench_done"
+    );
+    eprintln!(
+        "mkdirbench: {count} mkdirs in {dir_path} -> {made} made in {duration_us} us = {} mkdirs/s",
+        mkdirs_per_s as u64
     );
     Ok(())
 }

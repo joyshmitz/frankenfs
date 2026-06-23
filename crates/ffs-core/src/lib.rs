@@ -28207,12 +28207,18 @@ impl OpenFs {
         uid: u32,
         gid: u32,
     ) -> ffs_error::Result<InodeAttr> {
-        self.handle_ext4_write_result(
+        let result = self.handle_ext4_write_result(
             "mknod",
             self.with_latest_scope(|scope| {
                 <Self as FsOps>::mknod(self, cx, scope, parent, name, mode, rdev, uid, gid)
             }),
-        )
+        );
+        if result.is_ok() {
+            // bd-f8rd8: keep the parent's name index current across this add too,
+            // so a mixed create/mknod stream keeps O(1) existence checks.
+            self.note_dir_name_index_insert(cx, parent, name.as_encoded_bytes());
+        }
+        result
     }
 
     pub fn mkdir(
@@ -28224,12 +28230,19 @@ impl OpenFs {
         uid: u32,
         gid: u32,
     ) -> ffs_error::Result<InodeAttr> {
-        self.handle_ext4_write_result(
+        let result = self.handle_ext4_write_result(
             "mkdir",
             self.with_latest_scope(|scope| {
                 <Self as FsOps>::mkdir(self, cx, scope, parent, name, mode, uid, gid)
             }),
-        )
+        );
+        if result.is_ok() {
+            // bd-f8rd8: keep the parent's name index current so a mkdir-heavy (or
+            // mixed create+mkdir, e.g. tar-extract) directory keeps O(1)
+            // existence checks instead of rebuilding the index on every mkdir.
+            self.note_dir_name_index_insert(cx, parent, name.as_encoded_bytes());
+        }
+        result
     }
 
     pub fn unlink(&self, cx: &Cx, parent: InodeNumber, name: &OsStr) -> ffs_error::Result<()> {
@@ -28613,12 +28626,17 @@ impl OpenFs {
         new_parent: InodeNumber,
         new_name: &OsStr,
     ) -> ffs_error::Result<InodeAttr> {
-        self.handle_ext4_write_result(
+        let result = self.handle_ext4_write_result(
             "link",
             self.with_latest_scope(|scope| {
                 <Self as FsOps>::link(self, cx, scope, ino, new_parent, new_name)
             }),
-        )
+        );
+        if result.is_ok() {
+            // bd-f8rd8: the new hardlink adds `new_name` into `new_parent`.
+            self.note_dir_name_index_insert(cx, new_parent, new_name.as_encoded_bytes());
+        }
+        result
     }
 
     pub fn symlink(
@@ -28630,12 +28648,17 @@ impl OpenFs {
         uid: u32,
         gid: u32,
     ) -> ffs_error::Result<InodeAttr> {
-        self.handle_ext4_write_result(
+        let result = self.handle_ext4_write_result(
             "symlink",
             self.with_latest_scope(|scope| {
                 <Self as FsOps>::symlink(self, cx, scope, parent, name, target, uid, gid)
             }),
-        )
+        );
+        if result.is_ok() {
+            // bd-f8rd8: keep the parent's name index current across symlink adds.
+            self.note_dir_name_index_insert(cx, parent, name.as_encoded_bytes());
+        }
+        result
     }
 
     pub fn readlink(&self, cx: &Cx, ino: InodeNumber) -> ffs_error::Result<Vec<u8>> {
