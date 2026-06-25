@@ -3582,10 +3582,34 @@ impl InMemoryCowBtrfsTree {
         entry: BtrfsTreeItem,
         allow_replace: bool,
     ) -> Result<InsertResult, BtrfsMutationError> {
-        let node = self.node_ref(node_id)?.clone();
-        let result = match node {
-            BtrfsCowNode::Leaf { items } => self.insert_into_leaf(items, entry, allow_replace),
+        // Build the modified node's vectors with ONE extra capacity slot
+        // (bd-btrcow2): the subsequent `insert` then shifts in place instead of
+        // reallocating-and-recopying the whole vector. A plain `.clone()` yields
+        // an EXACT-capacity vector, so the insert below forced a second full
+        // copy of every key/item on every COW insert (the `realloc`/`finish_grow`
+        // ~13% of btrfs create). `extend(iter().cloned())` does the same single
+        // payload clone the derived `Clone` did (Arc data is a refcount bump).
+        enum Prepared {
+            Leaf(Vec<BtrfsTreeItem>),
+            Internal(Vec<BtrfsKey>, Vec<u64>),
+        }
+        let prepared = match self.node_ref(node_id)? {
+            BtrfsCowNode::Leaf { items } => {
+                let mut v = Vec::with_capacity(items.len().saturating_add(1));
+                v.extend(items.iter().cloned());
+                Prepared::Leaf(v)
+            }
             BtrfsCowNode::Internal { keys, children } => {
+                let mut k = Vec::with_capacity(keys.len().saturating_add(1));
+                k.extend(keys.iter().cloned());
+                let mut c = Vec::with_capacity(children.len().saturating_add(1));
+                c.extend(children.iter().cloned());
+                Prepared::Internal(k, c)
+            }
+        };
+        let result = match prepared {
+            Prepared::Leaf(items) => self.insert_into_leaf(items, entry, allow_replace),
+            Prepared::Internal(keys, children) => {
                 self.insert_into_internal(keys, children, entry, allow_replace)
             }
         };
