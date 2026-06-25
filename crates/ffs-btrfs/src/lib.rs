@@ -2766,10 +2766,16 @@ impl std::fmt::Display for BtrfsMutationError {
 }
 
 /// Key/value payload stored in leaf nodes for the in-memory COW model.
+///
+/// `data` is an `Arc<[u8]>` (bd-btrcow) so cloning a `BtrfsCowNode` during a COW
+/// b-tree mutation shares each unchanged item's payload via a refcount bump
+/// instead of deep-copying every item's bytes — the dominant cost of btrfs
+/// metadata writes (node clone was ~40% of create, with the item-data copy the
+/// largest slice). A replaced item just swaps in a fresh `Arc`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BtrfsTreeItem {
     pub key: BtrfsKey,
-    pub data: Vec<u8>,
+    pub data: Arc<[u8]>,
 }
 
 /// In-memory btrfs B-tree node model used for mutation planning and testing.
@@ -3211,7 +3217,7 @@ impl InMemoryCowBtrfsTree {
         match self.node_ref(node_id)? {
             BtrfsCowNode::Leaf { items } => items
                 .binary_search_by(|item| key_cmp(&item.key, key))
-                .map(|idx| items[idx].data.clone())
+                .map(|idx| items[idx].data.to_vec())
                 .map_err(|_| BtrfsMutationError::KeyNotFound),
             BtrfsCowNode::Internal { keys, children } => {
                 let idx = keys.partition_point(|k| key_cmp(k, key) != Ordering::Greater);
@@ -3370,7 +3376,7 @@ impl InMemoryCowBtrfsTree {
         self.insert_entry(
             BtrfsTreeItem {
                 key,
-                data: item.to_vec(),
+                data: item.into(),
             },
             true,
         )
@@ -3403,7 +3409,7 @@ impl InMemoryCowBtrfsTree {
             return self.insert_entry(
                 BtrfsTreeItem {
                     key: insert_key,
-                    data: update_item.to_vec(),
+                    data: update_item.into(),
                 },
                 false,
             );
@@ -3426,7 +3432,7 @@ impl InMemoryCowBtrfsTree {
             self.root,
             BtrfsTreeItem {
                 key: insert_key,
-                data: insert_item.to_vec(),
+                data: insert_item.into(),
             },
             false,
         ) {
@@ -3447,7 +3453,7 @@ impl InMemoryCowBtrfsTree {
             after_insert_root,
             BtrfsTreeItem {
                 key: *update_key,
-                data: update_item.to_vec(),
+                data: update_item.into(),
             },
             true,
         ) {
@@ -3539,7 +3545,7 @@ impl InMemoryCowBtrfsTree {
             insert_idx,
             BtrfsTreeItem {
                 key: insert_key,
-                data: insert_item.to_vec(),
+                data: insert_item.into(),
             },
         );
 
@@ -3551,7 +3557,7 @@ impl InMemoryCowBtrfsTree {
         if key_cmp(&existing.key, update_key) != Ordering::Equal {
             return Err(BtrfsMutationError::KeyNotFound);
         }
-        existing.data = update_item.to_vec();
+        existing.data = update_item.into();
 
         if self.leaf_exceeds_capacity(&items) {
             return Ok(None);
@@ -4089,7 +4095,7 @@ impl InMemoryCowBtrfsTree {
             BtrfsCowNode::Leaf { items } => Ok(items
                 .binary_search_by(|item| key_cmp(&item.key, key))
                 .ok()
-                .map(|idx| items[idx].data.clone())),
+                .map(|idx| items[idx].data.to_vec())),
             BtrfsCowNode::Internal { keys, children } => {
                 if children.len() != keys.len().saturating_add(1) {
                     return Err(BtrfsMutationError::BrokenInvariant(
@@ -4232,7 +4238,7 @@ impl BtrfsBTree for InMemoryCowBtrfsTree {
         self.insert_entry(
             BtrfsTreeItem {
                 key,
-                data: item.to_vec(),
+                data: item.into(),
             },
             false,
         )
@@ -4281,7 +4287,7 @@ impl BtrfsBTree for InMemoryCowBtrfsTree {
         self.insert_entry(
             BtrfsTreeItem {
                 key: *key,
-                data: item.to_vec(),
+                data: item.into(),
             },
             true,
         )
@@ -4297,7 +4303,7 @@ impl BtrfsBTree for InMemoryCowBtrfsTree {
         }
         let mut out = Vec::new();
         self.for_each_in_range(self.root, start, end, &mut |item| {
-            out.push((item.key, item.data.clone()));
+            out.push((item.key, item.data.to_vec()));
         })?;
         Ok(out)
     }
@@ -20283,7 +20289,7 @@ mod tests {
                     item_type: INODE_ITEM_KEY,
                     offset: 0,
                 },
-                data: vec![0xAA; 160],
+                data: vec![0xAA; 160].into(),
             },
             BtrfsTreeItem {
                 key: BtrfsKey {
@@ -20291,7 +20297,7 @@ mod tests {
                     item_type: DIR_ITEM_KEY,
                     offset: 0x1234,
                 },
-                data: vec![0xBB; 32],
+                data: vec![0xBB; 32].into(),
             },
         ];
         let node = BtrfsCowNode::Leaf { items };

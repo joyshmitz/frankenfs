@@ -6470,7 +6470,7 @@ impl OpenFs {
                     item_type: item.key.item_type,
                     offset: item.key.offset,
                 },
-                data: item.data.clone(),
+                data: item.data.as_slice().into(),
             };
             root_tree
                 .update(&tree_item.key, &tree_item.data)
@@ -6501,7 +6501,7 @@ impl OpenFs {
                     item_type: item.key.item_type,
                     offset: item.key.offset,
                 },
-                data: item.data.clone(),
+                data: item.data.as_slice().into(),
             };
             // Allow replace in case of duplicate keys from multiple walks.
             fs_tree
@@ -23263,7 +23263,7 @@ impl OpenFs {
             .into_iter()
             .filter_map(|(key, data)| {
                 match Self::btrfs_tree_log_item_matches_inode(&key, &data, canonical) {
-                    Ok(true) => Some(Ok(BtrfsTreeItem { key, data })),
+                    Ok(true) => Some(Ok(BtrfsTreeItem { key, data: data.into() })),
                     Ok(false) => None,
                     Err(err) => Some(Err(err)),
                 }
