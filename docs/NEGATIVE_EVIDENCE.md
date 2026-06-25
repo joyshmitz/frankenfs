@@ -967,3 +967,33 @@ The radical lever on the biggest measured gap (btrfs create 3.0x / delete 5.5x s
 MEASURED (per-crate, ffs-btrfs, btrfs-create-shaped workload — 4 inserts hitting 2 leaves, 2 items per objectid, over a pre-filled depth-3 tree): insert_many vs 4 separate `insert()`s = **1.58 / 1.86 / 1.59x faster** (median ~1.68x) — the 2nd item of each objectid pair lands in-place (0 clones) instead of a full path re-clone. CORRECTNESS: new `insert_many_matches_sequential_bd_cowbatch` proves the batched tree is byte-identical (every key resolves identically + `validate_invariants`) to one-by-one insertion — the gate against in-place COW corruption (bd-rdcache lesson). Full ffs-btrfs suite **400 passed / 0 failed**. Conformance unaffected (additive primitive, not yet on the production path).
 
 PROJECTED kernel impact once wired into `btrfs_create` (ffs-core, the realizing follow-up — collect its 4 items INODE_ITEM/DIR_ITEM/DIR_INDEX/INODE_REF and call `insert_many`): btrfs create's ~4 path-re-clones drop toward ~2, narrowing the 3.0x-slower-than-kernel gap toward ~2x. Per-crate primitive landed + measured now; ffs-core wiring tracked next.
+
+### 2026-06-25 SHIPPED bench row: bulk `insert_many_then_update` collapses 256 COW write mutations to one root-leaf COW - 13.3x faster internally (IvoryBirch codex/gpt-5)
+
+Follow-up on the documented biggest remaining kernel gap: btrfs create/delete remain **3.0x / 5.5x slower** than the kernel in the interleaved scorecard, and the root cause is still COW-clone volume plus missing kernel-style delayed-ref batching. The prior `bd-cowbatch` source commit (`56fdc677`) landed the deeper primitive surface, including `InMemoryCowBtrfsTree::insert_many_then_update`; this entry lands the explicit Criterion row that measures the update-bearing write shape.
+
+Per-crate remote benchmark, release profile, worker `hz2`:
+
+```bash
+AGENT_NAME=IvoryBirch RCH_REQUIRE_REMOTE=1 RCH_TEST_SLOTS=4 \
+  CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-b \
+  rch exec -- cargo bench -j 1 --profile release -p ffs-btrfs \
+  --bench cow_write_mutation -- btrfs_cow_write_mutation_256x4k \
+  --warm-up-time 1 --measurement-time 2 --sample-size 10 --noplot
+```
+
+`cargo bench --release` was tried first because the campaign prompt requested that spelling; remote Cargo rejects `--release` for `bench`, so the accepted release-equivalent invocation is `--profile release`.
+
+Measured rows:
+
+| row | median | interval | ratio vs bulk |
+| --- | ---: | ---: | ---: |
+| `sequential_insert_then_update` | `829.74 us` | `758.98-871.32 us` | `13.33x` |
+| `batched_insert_then_update` | `427.70 us` | `415.21-447.30 us` | `6.87x` |
+| `bulk_insert_many_then_update` | `62.232 us` | `57.273-69.343 us` | `1.00x` |
+
+Conservative interval ratios are still material: sequential/bulk `10.95x`, prior per-write batch/bulk `5.99x`. The benchmark asserts identical digests before timing, and the focused proof test preserved the golden digest `bd523dce52c8af3935c65703cec9a593e76a0a9eb505799247cf882a05ab730f`.
+
+Gates: `cargo check -p ffs-btrfs --all-targets` passed; focused `cargo test -p ffs-btrfs insert_then_update_matches_sequential_and_preserves_order_bd_hfkty -- --nocapture` passed; remote conformance `rch exec -- cargo test -j 1 -p ffs-harness --test conformance -- --nocapture` passed on `ovh-a` with `100 passed / 0 failed / 2 ignored`. Scoped clippy remains blocked by pre-existing lint debt outside this bench row (`ffs-repair::storage` pedantic lints and existing `ffs-btrfs` ignored-test/redundant-continue lints), so no unrelated cleanup was folded into this perf commit.
+
+Kernel ratio impact: this is not a direct mounted-kernel create/delete rerun and does not change the official scorecard yet; btrfs writes remain **3.0x create / 5.5x delete slower** than kernel until `ffs-core` routes create/delete batches through the primitive. It is a real internal win on the exact COW update-bearing write shape and a necessary landing step for the remaining kernel-gap lever, not a kernel-parity claim.

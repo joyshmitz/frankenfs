@@ -80,6 +80,19 @@ fn run_batched_insert_then_update(mut tree: InMemoryCowBtrfsTree) -> InMemoryCow
     tree
 }
 
+fn run_bulk_insert_many_then_update(mut tree: InMemoryCowBtrfsTree) -> InMemoryCowBtrfsTree {
+    let payloads: Vec<_> = (0..WRITES)
+        .map(|i| (extent_key(i), extent_payload(i)))
+        .collect();
+    let refs: Vec<_> = payloads
+        .iter()
+        .map(|(key, payload)| (*key, payload.as_slice()))
+        .collect();
+    tree.insert_many_then_update(&refs, &inode_key(), &inode_payload(WRITES - 1))
+        .expect("bulk insert extents and final inode update");
+    tree
+}
+
 fn tree_digest(tree: &InMemoryCowBtrfsTree) -> u64 {
     tree.validate_invariants().expect("tree invariants");
     let all = tree
@@ -120,10 +133,16 @@ fn tree_digest(tree: &InMemoryCowBtrfsTree) -> u64 {
 fn bench_cow_write_mutation(c: &mut Criterion) {
     let sequential = run_sequential_insert_then_update(fresh_tree());
     let batched = run_batched_insert_then_update(fresh_tree());
+    let bulk = run_bulk_insert_many_then_update(fresh_tree());
     assert_eq!(
         tree_digest(&sequential),
         tree_digest(&batched),
         "batched COW mutation diverged from sequential insert/update"
+    );
+    assert_eq!(
+        tree_digest(&sequential),
+        tree_digest(&bulk),
+        "bulk COW mutation diverged from sequential insert/update"
     );
 
     let mut group = c.benchmark_group("btrfs_cow_write_mutation_256x4k");
@@ -138,6 +157,13 @@ fn bench_cow_write_mutation(c: &mut Criterion) {
         b.iter_batched(
             fresh_tree,
             |tree| black_box(tree_digest(&run_batched_insert_then_update(tree))),
+            BatchSize::SmallInput,
+        );
+    });
+    group.bench_function("bulk_insert_many_then_update", |b| {
+        b.iter_batched(
+            fresh_tree,
+            |tree| black_box(tree_digest(&run_bulk_insert_many_then_update(tree))),
             BatchSize::SmallInput,
         );
     });
