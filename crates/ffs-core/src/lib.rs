@@ -25723,23 +25723,114 @@ impl OpenFs {
             Self::btrfs_validate_purgeable_items(&alloc, child_oid)?;
         }
 
-        // Remove DIR_ITEM and DIR_INDEX entries.
-        self.btrfs_remove_dir_entry(&mut alloc, parent_oid, name, dir_index)?;
+        // bd-cowbatch: when the whole delete reduces to exactly 4 clean key-removes
+        // + one parent INODE_ITEM update — a linked-once inode (nlink<=1) with NO
+        // other items (no extents/xattrs/extra refs) whose name does NOT hash-
+        // collide — batch the removes via remove_many + one coalesced parent update
+        // (i_size -= 2*name_len AND mtime/ctime, disjoint fields) instead of ~5
+        // separate path-COWs. CONSERVATIVE so there is NO false positive (=> no
+        // data-loss risk): a hash collision makes the stored DIR_ITEM bytes LONGER
+        // than this single entry, any extent/xattr/extra ref makes the child item
+        // count != 2, and a multi-link makes child_will_be_purged false — every
+        // such case falls back to the proven per-op path below. Byte-identical to it
+        // (same 4 keys removed, same final parent value; remove_many is byte-
+        // identical to sequential delete).
+        let dir_item_key = BtrfsKey {
+            objectid: parent_oid,
+            item_type: BTRFS_ITEM_DIR_ITEM,
+            offset: u64::from(ffs_btrfs::btrfs_name_hash(name)),
+        };
+        let single_dir_item_len = child.try_to_bytes().map_err(|e| parse_to_ffs_error(&e))?.len();
+        let dir_items = alloc
+            .fs_tree
+            .range(&dir_item_key, &dir_item_key)
+            .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+        let child_lo = BtrfsKey { objectid: child_oid, item_type: 0, offset: 0 };
+        let child_hi = BtrfsKey {
+            objectid: child_oid,
+            item_type: u8::MAX,
+            offset: u64::MAX,
+        };
+        let child_items = alloc
+            .fs_tree
+            .range(&child_lo, &child_hi)
+            .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+        let inode_key = BtrfsKey {
+            objectid: child_oid,
+            item_type: BTRFS_ITEM_INODE_ITEM,
+            offset: 0,
+        };
+        let ref_key = BtrfsKey {
+            objectid: child_oid,
+            item_type: BTRFS_ITEM_INODE_REF,
+            offset: parent_oid,
+        };
+        let dir_index_key = BtrfsKey {
+            objectid: parent_oid,
+            item_type: BTRFS_ITEM_DIR_INDEX,
+            offset: dir_index,
+        };
+        let batchable = child_will_be_purged
+            && dir_items.len() == 1
+            && dir_items[0].1.len() == single_dir_item_len
+            && child_items.len() == 2
+            && child_items
+                .iter()
+                .any(|(k, _)| k.item_type == BTRFS_ITEM_INODE_ITEM && k.offset == 0)
+            && child_items
+                .iter()
+                .any(|(k, _)| k.item_type == BTRFS_ITEM_INODE_REF && k.offset == parent_oid);
 
-        // Remove the INODE_REF back-pointer from child → parent.
-        Self::btrfs_remove_inode_ref(&mut alloc, child_oid, parent_oid, name)?;
+        if batchable {
+            let mut parent_inode = self.btrfs_read_inode_from_tree(&alloc, parent_oid)?;
+            let size_delta = Self::btrfs_dir_entry_size_delta(name.len());
+            parent_inode.size = i64::try_from(parent_inode.size)
+                .ok()
+                .and_then(|size| size.checked_sub(size_delta))
+                .and_then(|size| u64::try_from(size).ok())
+                .ok_or_else(|| FfsError::Corruption {
+                    block: 0,
+                    detail: format!(
+                        "btrfs dir {parent_oid} size adjustment out of range (size={}, delta=-{size_delta})",
+                        parent_inode.size
+                    ),
+                })?;
+            parent_inode.mtime_sec = secs;
+            parent_inode.mtime_nsec = nanos;
+            parent_inode.ctime_sec = secs;
+            parent_inode.ctime_nsec = nanos;
+            let parent_key = BtrfsKey {
+                objectid: parent_oid,
+                item_type: BTRFS_ITEM_INODE_ITEM,
+                offset: 0,
+            };
+            alloc
+                .fs_tree
+                .remove_many(&[dir_item_key, dir_index_key, ref_key, inode_key])
+                .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+            alloc
+                .fs_tree
+                .update(&parent_key, &parent_inode.to_bytes())
+                .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+        } else {
+            // Remove DIR_ITEM and DIR_INDEX entries.
+            self.btrfs_remove_dir_entry(&mut alloc, parent_oid, name, dir_index)?;
 
-        // Drop the removed link (-1 for both files and directories).
-        self.btrfs_adjust_nlink(&mut alloc, child_oid, -1, secs, nanos)?;
+            // Remove the INODE_REF back-pointer from child → parent.
+            Self::btrfs_remove_inode_ref(&mut alloc, child_oid, parent_oid, name)?;
 
-        // If nlink reached 0, purge the orphaned inode and all its data.
-        let child_inode = self.btrfs_read_inode_from_tree(&alloc, child_oid)?;
-        if child_inode.nlink == 0 {
-            debug_assert!(child_will_be_purged);
-            self.btrfs_purge_inode(&mut alloc, child_oid)?;
+            // Drop the removed link (-1 for both files and directories).
+            self.btrfs_adjust_nlink(&mut alloc, child_oid, -1, secs, nanos)?;
+
+            // If nlink reached 0, purge the orphaned inode and all its data.
+            let child_inode = self.btrfs_read_inode_from_tree(&alloc, child_oid)?;
+            if child_inode.nlink == 0 {
+                debug_assert!(child_will_be_purged);
+                self.btrfs_purge_inode(&mut alloc, child_oid)?;
+            }
+
+            self.btrfs_touch_inode_times(&mut alloc, parent_oid, secs, nanos)?;
         }
-
-        self.btrfs_touch_inode_times(&mut alloc, parent_oid, secs, nanos)?;
         drop(alloc);
 
         Ok(())
