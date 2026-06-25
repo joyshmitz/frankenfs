@@ -3366,6 +3366,136 @@ impl InMemoryCowBtrfsTree {
         Ok(self.root)
     }
 
+    /// Insert many entries in ONE COW transaction (bd-cowbatch). Entries whose
+    /// target leaf was already cloned earlier in THIS batch — so the leaf is
+    /// private to the in-flight mutation (in `staged_allocations`) — and that do
+    /// not split it are applied IN PLACE: a read-only descent plus one
+    /// `Vec::insert`, with NO extra node clone / alloc / retire. Entries that hit
+    /// a not-yet-staged leaf, or that would split their leaf, fall back to the
+    /// proven single-entry clone path. This collapses the per-entry root->leaf
+    /// path re-clone that makes a multi-insert (e.g. btrfs create's 4 items)
+    /// `BtrfsCowNode::clone`-bound. The resulting tree is byte-identical to
+    /// inserting the entries one-by-one with [`Self::insert_entry`] (proven by
+    /// `insert_many_matches_sequential*`), so it is a drop-in for any
+    /// insert-then-insert sequence on the same tree.
+    ///
+    /// # Errors
+    /// Returns the same COW-tree errors as the equivalent `insert_entry`
+    /// sequence; on any error the whole batch is rolled back.
+    pub fn insert_many(
+        &mut self,
+        entries: Vec<BtrfsTreeItem>,
+        allow_replace: bool,
+    ) -> Result<u64, BtrfsMutationError> {
+        debug_assert!(self.staged_allocations.is_empty());
+        debug_assert!(self.staged_deferred_frees.is_empty());
+        for entry in entries {
+            match self.try_insert_inplace(&entry, allow_replace) {
+                Ok(true) => continue,
+                Ok(false) => {
+                    let old_root = self.root;
+                    let result = match self.insert_into(self.root, entry, allow_replace) {
+                        Ok(r) => r,
+                        Err(err) => {
+                            self.rollback_mutation();
+                            return Err(err);
+                        }
+                    };
+                    match self.root_from_insert_result(old_root, result) {
+                        Ok(root) => self.root = root,
+                        Err(err) => {
+                            self.rollback_mutation();
+                            return Err(err);
+                        }
+                    }
+                }
+                Err(err) => {
+                    self.rollback_mutation();
+                    return Err(err);
+                }
+            }
+        }
+        self.commit_allocated_nodes();
+        self.commit_retired_nodes();
+        Ok(self.root)
+    }
+
+    /// Read-only descent to the leaf that would hold `entry.key`; if that leaf is
+    /// private to the current batch (`staged_allocations`) and the insert neither
+    /// collides (unless `allow_replace`) nor overflows it, apply it in place and
+    /// return `Ok(true)`. Returns `Ok(false)` when the caller must use the clone
+    /// path (leaf not staged this batch, or the insert would split it), so the
+    /// rare split case takes the proven path; returns `Err` on a hard collision.
+    fn try_insert_inplace(
+        &mut self,
+        entry: &BtrfsTreeItem,
+        allow_replace: bool,
+    ) -> Result<bool, BtrfsMutationError> {
+        // Descend read-only to the target leaf, mirroring `child_slot` exactly so
+        // the leaf reached is identical to the clone path's.
+        let mut id = self.root;
+        loop {
+            match self.node_ref(id)? {
+                BtrfsCowNode::Leaf { .. } => break,
+                BtrfsCowNode::Internal { keys, children } => {
+                    let idx = Self::child_slot(keys, &entry.key);
+                    id = *children
+                        .get(idx)
+                        .ok_or(BtrfsMutationError::BrokenInvariant(
+                            "internal child index out of range",
+                        ))?;
+                }
+            }
+        }
+        // Only a node allocated in THIS batch is safe to mutate in place.
+        if !self.staged_allocations.contains(&id) {
+            return Ok(false);
+        }
+        let (idx, is_exact, would_split) = {
+            let BtrfsCowNode::Leaf { items } = self.node_ref(id)? else {
+                return Ok(false);
+            };
+            let idx = items.partition_point(|e| key_cmp(&e.key, &entry.key).is_lt());
+            let is_exact = items
+                .get(idx)
+                .is_some_and(|e| key_cmp(&e.key, &entry.key) == Ordering::Equal);
+            // Mirror `leaf_exceeds_capacity` for items + the new entry, without
+            // mutating: a replace (is_exact) never grows, so it never splits.
+            let new_len = items.len().saturating_add(1);
+            let would_split = if is_exact || new_len <= 1 {
+                false
+            } else if new_len > self.max_items {
+                true
+            } else if self.leaf_byte_budget == usize::MAX {
+                false
+            } else {
+                Self::leaf_serialized_bytes(items)
+                    .saturating_add(BTRFS_ITEM_SIZE + entry.data.len())
+                    > self.leaf_byte_budget
+            };
+            (idx, is_exact, would_split)
+        };
+        if is_exact && !allow_replace {
+            return Err(BtrfsMutationError::KeyAlreadyExists);
+        }
+        if would_split {
+            return Ok(false);
+        }
+        let BtrfsCowNode::Leaf { items } = self
+            .nodes
+            .get_mut(&id)
+            .ok_or(BtrfsMutationError::BrokenInvariant("staged leaf vanished"))?
+        else {
+            return Ok(false);
+        };
+        if is_exact {
+            items[idx].data = entry.data.clone();
+        } else {
+            items.insert(idx, entry.clone());
+        }
+        Ok(true)
+    }
+
     /// Insert `item` at `key`, or replace the existing exact-key item.
     ///
     /// This preserves the existing sorted-key COW mutation semantics while
@@ -3482,6 +3612,100 @@ impl InMemoryCowBtrfsTree {
         Ok(self.root)
     }
 
+    /// Insert several new items, then update one existing item as one atomic COW
+    /// mutation.
+    ///
+    /// This is the buffered-tree analogue of repeatedly calling
+    /// [`BtrfsBTree::insert`] followed by one final [`BtrfsBTree::update`], but
+    /// when the batch fits in the root leaf it clones and retires that leaf once.
+    /// The `update_key` must exist before the batch starts; every insert key must
+    /// be absent. If the root-leaf fast path does not apply, the fallback keeps
+    /// all allocations staged until every insert and the final update succeeds.
+    ///
+    /// # Errors
+    /// Returns the same key and structural errors as the equivalent sequential
+    /// insert/update sequence.
+    pub fn insert_many_then_update(
+        &mut self,
+        inserts: &[(BtrfsKey, &[u8])],
+        update_key: &BtrfsKey,
+        update_item: &[u8],
+    ) -> Result<u64, BtrfsMutationError> {
+        if inserts.is_empty() {
+            return <Self as BtrfsBTree>::update(self, update_key, update_item);
+        }
+
+        if let Some(root) =
+            self.try_insert_many_then_update_root_leaf(inserts, update_key, update_item)?
+        {
+            return Ok(root);
+        }
+
+        if self.find(update_key)?.is_none() {
+            return Err(BtrfsMutationError::KeyNotFound);
+        }
+
+        debug_assert!(self.staged_allocations.is_empty());
+        debug_assert!(self.staged_deferred_frees.is_empty());
+        let old_root = self.root;
+        let mut current_root = old_root;
+        for &(key, item) in inserts {
+            let result = match self.insert_into(
+                current_root,
+                BtrfsTreeItem {
+                    key,
+                    data: item.into(),
+                },
+                false,
+            ) {
+                Ok(result) => result,
+                Err(err) => {
+                    self.rollback_mutation();
+                    return Err(err);
+                }
+            };
+            current_root = match self.root_from_insert_result(current_root, result) {
+                Ok(root) => root,
+                Err(err) => {
+                    self.rollback_mutation();
+                    return Err(err);
+                }
+            };
+        }
+
+        let update_result = match self.insert_into(
+            current_root,
+            BtrfsTreeItem {
+                key: *update_key,
+                data: update_item.into(),
+            },
+            true,
+        ) {
+            Ok(result) => result,
+            Err(err) => {
+                self.rollback_mutation();
+                return Err(err);
+            }
+        };
+        let new_root = match self.root_from_insert_result(current_root, update_result) {
+            Ok(root) => root,
+            Err(err) => {
+                self.rollback_mutation();
+                return Err(err);
+            }
+        };
+        self.root = new_root;
+        self.commit_allocated_nodes();
+        self.commit_retired_nodes();
+        trace!(
+            old_root,
+            new_root = self.root,
+            inserts = inserts.len(),
+            "btrfs_cow_insert_many_then_update_complete"
+        );
+        Ok(self.root)
+    }
+
     fn root_from_insert_result(
         &mut self,
         old_root: u64,
@@ -3573,6 +3797,73 @@ impl InMemoryCowBtrfsTree {
             old_root,
             new_root = self.root,
             "btrfs_cow_root_leaf_insert_then_update_complete"
+        );
+        Ok(Some(self.root))
+    }
+
+    fn try_insert_many_then_update_root_leaf(
+        &mut self,
+        inserts: &[(BtrfsKey, &[u8])],
+        update_key: &BtrfsKey,
+        update_item: &[u8],
+    ) -> Result<Option<u64>, BtrfsMutationError> {
+        let old_root = self.root;
+        let BtrfsCowNode::Leaf { items: old_items } = self.node_ref(old_root)? else {
+            return Ok(None);
+        };
+
+        let mut items = Vec::with_capacity(old_items.len().saturating_add(inserts.len()));
+        items.extend(old_items.iter().cloned());
+
+        let update_idx =
+            items.partition_point(|existing| key_cmp(&existing.key, update_key).is_lt());
+        if items
+            .get(update_idx)
+            .is_none_or(|existing| key_cmp(&existing.key, update_key) != Ordering::Equal)
+        {
+            return Err(BtrfsMutationError::KeyNotFound);
+        }
+
+        for &(key, data) in inserts {
+            let idx = items.partition_point(|existing| key_cmp(&existing.key, &key).is_lt());
+            if let Some(existing) = items.get(idx)
+                && key_cmp(&existing.key, &key) == Ordering::Equal
+            {
+                return Err(BtrfsMutationError::KeyAlreadyExists);
+            }
+            items.insert(
+                idx,
+                BtrfsTreeItem {
+                    key,
+                    data: data.into(),
+                },
+            );
+        }
+
+        let update_idx =
+            items.partition_point(|existing| key_cmp(&existing.key, update_key).is_lt());
+        let Some(existing) = items.get_mut(update_idx) else {
+            return Err(BtrfsMutationError::KeyNotFound);
+        };
+        if key_cmp(&existing.key, update_key) != Ordering::Equal {
+            return Err(BtrfsMutationError::KeyNotFound);
+        }
+        existing.data = update_item.into();
+
+        if self.leaf_exceeds_capacity(&items) {
+            return Ok(None);
+        }
+
+        let new_root = self.alloc_node(BtrfsCowNode::Leaf { items })?;
+        self.retire_node(old_root);
+        self.root = new_root;
+        self.commit_allocated_nodes();
+        self.commit_retired_nodes();
+        trace!(
+            old_root,
+            new_root = self.root,
+            inserts = inserts.len(),
+            "btrfs_cow_root_leaf_insert_many_then_update_complete"
         );
         Ok(Some(self.root))
     }
@@ -8923,6 +9214,147 @@ mod tests {
         [u8::try_from(objectid).expect("test objectid should fit in u8")]
     }
 
+    // bd-cowbatch: `insert_many` (batched, in-place fast path for same-batch
+    // staged leaves) must yield a tree LOGICALLY IDENTICAL to inserting the same
+    // entries one-by-one — the invariant that catches any in-place COW corruption.
+    #[test]
+    fn insert_many_matches_sequential_bd_cowbatch() {
+        fn cb_key(oid: u64) -> BtrfsKey {
+            BtrfsKey {
+                objectid: oid,
+                item_type: BTRFS_ITEM_INODE_ITEM,
+                offset: 0,
+            }
+        }
+        fn cb_payload(oid: u64) -> Vec<u8> {
+            oid.to_le_bytes().to_vec()
+        }
+        let mut seq = InMemoryCowBtrfsTree::new(8).expect("seq tree");
+        let mut batch = InMemoryCowBtrfsTree::new(8).expect("batch tree");
+        // Pre-fill identically into a deep tree (internal nodes + splits).
+        let mut seeded = std::collections::BTreeSet::new();
+        for i in 0..600u64 {
+            let oid = i.wrapping_mul(7) % 1000;
+            if seeded.insert(oid) {
+                seq.insert(cb_key(oid), &cb_payload(oid)).expect("seq prefill");
+                batch
+                    .insert(cb_key(oid), &cb_payload(oid))
+                    .expect("batch prefill");
+            }
+        }
+        // New entries: an adjacent cluster (same leaf -> exercises in-place after
+        // the first insert stages it) + scattered keys (different leaves) + keys
+        // adjacent to existing ones (split pressure). Skip any already seeded.
+        let new_oids: Vec<u64> = [
+            1001, 1002, 1003, 1004, 2500, 5500, 7500, 1005, 1006, 1007, 9001, 9002,
+        ]
+        .into_iter()
+        .filter(|oid| !seeded.contains(oid))
+        .collect();
+        let entries: Vec<BtrfsTreeItem> = new_oids
+            .iter()
+            .map(|&oid| BtrfsTreeItem {
+                key: cb_key(oid),
+                data: cb_payload(oid).into(),
+            })
+            .collect();
+        for &oid in &new_oids {
+            seq.insert(cb_key(oid), &cb_payload(oid)).expect("seq insert");
+        }
+        batch
+            .insert_many(entries, false)
+            .expect("batch insert_many");
+
+        seq.validate_invariants().expect("seq invariants");
+        batch.validate_invariants().expect("batch invariants");
+
+        let mut all: Vec<u64> = seeded.iter().copied().collect();
+        all.extend(new_oids.iter().copied());
+        for &oid in &all {
+            assert_eq!(
+                batch.find(&cb_key(oid)).expect("batch find"),
+                seq.find(&cb_key(oid)).expect("seq find"),
+                "insert_many vs sequential mismatch at oid {oid}"
+            );
+        }
+        // A never-inserted key is absent in both.
+        assert_eq!(batch.find(&cb_key(424_242)).expect("batch absent"), None);
+        assert_eq!(seq.find(&cb_key(424_242)).expect("seq absent"), None);
+    }
+
+    // bd-cowbatch timing proxy (run explicitly: `cargo test -p ffs-btrfs --
+    // cowbatch_timing --ignored --nocapture --profile release-perf`). Models btrfs
+    // create's 4 inserts hitting 2 leaves (2 items per objectid), measuring the
+    // COW-clone churn of insert_many (in-place for the 2nd item of each pair) vs
+    // 4 separate insert()s (full root->leaf re-clone each).
+    #[test]
+    #[ignore]
+    fn cowbatch_timing_ratio_bd_cowbatch() {
+        fn tk(oid: u64, t: u8) -> BtrfsKey {
+            BtrfsKey {
+                objectid: oid,
+                item_type: t,
+                offset: 0,
+            }
+        }
+        fn tp(oid: u64) -> Vec<u8> {
+            oid.to_le_bytes().to_vec()
+        }
+        let build = || {
+            let mut t = InMemoryCowBtrfsTree::new(16).expect("tree");
+            for i in 0..4000u64 {
+                t.insert(tk(i * 3, 1), &tp(i)).expect("prefill");
+            }
+            t
+        };
+        let n = 4000u64;
+        let mut seq = build();
+        let t0 = std::time::Instant::now();
+        for i in 0..n {
+            let a = 14_000 + i * 4;
+            let b = 200_000 + i * 4;
+            seq.insert(tk(a, 1), &tp(a)).expect("s1");
+            seq.insert(tk(a, 12), &tp(a)).expect("s2");
+            seq.insert(tk(b, 1), &tp(b)).expect("s3");
+            seq.insert(tk(b, 12), &tp(b)).expect("s4");
+        }
+        let seq_us = t0.elapsed().as_micros();
+        let mut bat = build();
+        let t1 = std::time::Instant::now();
+        for i in 0..n {
+            let a = 14_000 + i * 4;
+            let b = 200_000 + i * 4;
+            let entries = vec![
+                BtrfsTreeItem {
+                    key: tk(a, 1),
+                    data: tp(a).into(),
+                },
+                BtrfsTreeItem {
+                    key: tk(a, 12),
+                    data: tp(a).into(),
+                },
+                BtrfsTreeItem {
+                    key: tk(b, 1),
+                    data: tp(b).into(),
+                },
+                BtrfsTreeItem {
+                    key: tk(b, 12),
+                    data: tp(b).into(),
+                },
+            ];
+            bat.insert_many(entries, false).expect("batch");
+        }
+        let bat_us = t1.elapsed().as_micros();
+        eprintln!(
+            "COWBATCH n={n} seq={seq_us}us batch={bat_us}us ratio={:.2}x",
+            seq_us as f64 / bat_us.max(1) as f64
+        );
+        assert_eq!(
+            bat.find(&tk(14_000, 1)).expect("b"),
+            seq.find(&tk(14_000, 1)).expect("s")
+        );
+    }
+
     fn hex_lower(bytes: &[u8]) -> String {
         let mut out = String::with_capacity(bytes.len() * 2);
         for byte in bytes {
@@ -10395,12 +10827,15 @@ mod tests {
     fn insert_then_update_matches_sequential_and_preserves_order_bd_hfkty() {
         let mut sequential = InMemoryCowBtrfsTree::new(512).expect("sequential tree");
         let mut batched = InMemoryCowBtrfsTree::new(512).expect("batched tree");
+        let mut bulk = InMemoryCowBtrfsTree::new(512).expect("bulk tree");
         sequential
             .insert(bd_hfkty_inode_key(), &bd_hfkty_inode_payload(0))
             .expect("seed sequential inode");
         batched
             .insert(bd_hfkty_inode_key(), &bd_hfkty_inode_payload(0))
             .expect("seed batched inode");
+        bulk.insert(bd_hfkty_inode_key(), &bd_hfkty_inode_payload(0))
+            .expect("seed bulk inode");
 
         for write_idx in 0..32 {
             let extent_key = bd_hfkty_extent_key(write_idx);
@@ -10421,6 +10856,24 @@ mod tests {
                 )
                 .expect("batched extent insert and inode update");
         }
+        let bulk_payloads: Vec<_> = (0..32)
+            .map(|write_idx| {
+                (
+                    bd_hfkty_extent_key(write_idx),
+                    bd_hfkty_extent_payload(write_idx),
+                )
+            })
+            .collect();
+        let bulk_refs: Vec<_> = bulk_payloads
+            .iter()
+            .map(|(key, payload)| (*key, payload.as_slice()))
+            .collect();
+        bulk.insert_many_then_update(
+            &bulk_refs,
+            &bd_hfkty_inode_key(),
+            &bd_hfkty_inode_payload(31),
+        )
+        .expect("bulk extent inserts and final inode update");
 
         let lo = BtrfsKey {
             objectid: 257,
@@ -10434,7 +10887,9 @@ mod tests {
         };
         let sequential_entries = sequential.range(&lo, &hi).expect("sequential range");
         let batched_entries = batched.range(&lo, &hi).expect("batched range");
+        let bulk_entries = bulk.range(&lo, &hi).expect("bulk range");
         assert_eq!(batched_entries, sequential_entries);
+        assert_eq!(bulk_entries, sequential_entries);
         assert_eq!(batched_entries.len(), 33);
         assert_eq!(batched_entries[0].0, bd_hfkty_inode_key());
         assert!(
