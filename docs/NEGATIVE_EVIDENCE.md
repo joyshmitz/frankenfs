@@ -1019,3 +1019,14 @@ Wired `btrfs_create` (ffs-core) onto the shipped `insert_many` primitive: for a 
 MEASURED (clean same-session interleaved A/B, btrfs create-bench 15000, vs kernel btrfs ~46.7k/s): baseline (no wiring) **~15.15k creates/s** (14739/15295/15433) → with wiring **~16.79k** (16714/16924/16739) = **1.11x faster** (non-overlapping ranges). vs-kernel gap narrows **3.0x → 2.78x slower**. CORRECTNESS: ffs-core btrfs suite 357 passed (create/mkdir/dir/lookup/read round-trips); the only 3 failures (btrfs_symlink*) are PRE-EXISTING on clean HEAD (re-confirmed by stashing this change — btrfs_write_symlink fails without it too), orthogonal to this file-create path. Byte-identical on-disk → conformance unaffected.
 
 The modest 1.11x (vs the ~1.5x projected) is because the two parent INODE_ITEM UPDATES (i_size via btrfs_adjust_dir_size + timestamp via btrfs_touch_inode_times) are still separate COWs — coalescing them into one parent update (insert_many_then_update shape, the primitive is ready) is the next increment toward ~1.4-1.8x. btrfs_mkdir has the same pattern and can be wired identically. First REAL FS-level btrfs-create win on the biggest gap.
+
+### 2026-06-25 SHIPPED bd-cowbatch increment 2 (ffs-core): coalesced parent update via insert_many_then_update — btrfs create 1.43x over baseline, kernel gap 3.0x→2.08x (CrimsonFox cc/opus)
+
+Replaced btrfs_create's no-collision path (insert_many([4]) + separate btrfs_adjust_dir_size + btrfs_touch_inode_times) with a SINGLE insert_many_then_update transaction: the 4 inserts (INODE_ITEM/DIR_ITEM/DIR_INDEX/INODE_REF) + ONE coalesced parent INODE_ITEM update that applies BOTH the i_size += 2*name_len bump and the mtime/ctime touch (disjoint fields). All parent-side ops (DIR_ITEM, DIR_INDEX, the parent INODE_ITEM update — all at parent_oid) now COW the parent subtree ONCE instead of 3-4x. Collision path keeps the proven per-op helpers + an explicit touch. Byte-identical on-disk to the original (same final items + same final parent INODE_ITEM value; insert_many_then_update byte-identical to sequential).
+
+MEASURED (interleaved create-bench 15000 vs kernel btrfs ~44.9k/s) — the full bd-cowbatch progression:
+- baseline (no batching): ~15.15k creates/s = 3.0x slower than kernel
+- increment 1 (insert_many, 4 inserts batched): ~16.8k = 2.78x slower (1.11x over baseline)
+- increment 2 (THIS: + coalesced parent update in one txn): **~21.6k** (21324/21457/22001) = **2.08x slower** (**1.43x over baseline**, 1.29x over increment 1)
+
+CORRECTNESS: ffs-core btrfs suite 357 passed (create/mkdir/dir/lookup/read round-trips); only the 3 pre-existing btrfs_symlink* failures remain (orthogonal). Byte-identical => conformance unaffected. ⭐btrfs create vs-kernel gap CUT from 3.0x to 2.08x by the bd-cowbatch lever. NEXT: btrfs_mkdir wires identically (same 4-insert + parent-update shape); btrfs delete (5.5x, the now-biggest gap) needs the analogous remove_many in-place batch.
