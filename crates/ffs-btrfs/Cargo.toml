@@ -12,6 +12,7 @@ ffs-mvcc = { workspace = true }
 ffs-ondisk = { workspace = true }
 ffs-types = { workspace = true }
 rayon = { workspace = true }
+rustc-hash = "2"
 thiserror = { workspace = true }
 tracing = { workspace = true }
 

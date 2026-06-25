@@ -12,6 +12,7 @@ use ffs_mvcc::{CommitError, MvccStore, Transaction};
 pub use ffs_ondisk::btrfs::*;
 use ffs_types::{BlockNumber, CommitSeq, ParseError, Snapshot, TxnId};
 use rayon::prelude::{IntoParallelIterator, ParallelIterator};
+use rustc_hash::FxHashMap;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Range;
@@ -3127,7 +3128,7 @@ pub struct InMemoryCowBtrfsTree {
     deferred_frees: Vec<u64>,
     staged_allocations: Vec<u64>,
     staged_deferred_frees: Vec<u64>,
-    nodes: BTreeMap<u64, BtrfsCowNode>,
+    nodes: FxHashMap<u64, BtrfsCowNode>,
 }
 
 impl InMemoryCowBtrfsTree {
@@ -3147,7 +3148,7 @@ impl InMemoryCowBtrfsTree {
             return Err(BtrfsMutationError::InvalidConfig("max_items must be >= 3"));
         }
         let root = 1_u64;
-        let mut nodes = BTreeMap::new();
+        let mut nodes = FxHashMap::default();
         nodes.insert(root, BtrfsCowNode::Leaf { items: Vec::new() });
         Ok(Self {
             max_items,
@@ -3601,9 +3602,9 @@ impl InMemoryCowBtrfsTree {
             }
             BtrfsCowNode::Internal { keys, children } => {
                 let mut k = Vec::with_capacity(keys.len().saturating_add(1));
-                k.extend(keys.iter().cloned());
+                k.extend(keys.iter().copied());
                 let mut c = Vec::with_capacity(children.len().saturating_add(1));
-                c.extend(children.iter().cloned());
+                c.extend(children.iter().copied());
                 Prepared::Internal(k, c)
             }
         };
