@@ -13,6 +13,52 @@ met by new profile evidence.
   produce the verdict.
 - Rejected ideas require a concrete retry predicate, not a vague "try later."
 
+## BOLD-VERIFY measured verdict - 2026-06-25
+
+### `bd-9e810` ext4 base-device block cache below MVCC - KEEP
+
+Source is already retained on `main` as `5f266067`:
+`perf(ffs-core): add bounded ext4 base-device block cache below MVCC`.
+
+Lever: add an ext4-only `OpenFs::ext4_base_block_cache` under the MVCC overlay,
+served by `CachedByteDeviceBlockAdapter`, so repeated writable-path
+`read_block_vec` calls for htree/name-index metadata avoid redundant base-device
+preads. Direct adapter writes invalidate the affected base block ranges before
+reaching the device. Btrfs remains uncached here because it still has raw
+physical write paths outside this adapter.
+
+Measured result: RCH same-worker Criterion on `hz2`:
+
+```bash
+cargo bench --profile release -p ffs-core --bench ext4_lookup_run_overlap -- ext4_base_block_cache --warm-up-time 1 --measurement-time 2 --sample-size 10 --noplot
+```
+
+This measured `ext4_base_block_cache_1092reads_42unique`:
+`uncached_read_block_vec` `[88.481 ms, 93.202 ms, 99.916 ms]` vs
+`cached_read_block_vec` `[3.6667 ms, 3.7183 ms, 3.7794 ms]`. Median ratio is
+`25.07x`; conservative interval ratio is `23.41x`.
+
+Kernel ratio: no standalone ext4/btrfs-kernel comparator exists for this
+internal cache primitive. The lever targets the existing ext4 delete residual
+where the bead trace recorded 1092 `pread64` calls to 42 unique offsets
+(about 26x repeated base metadata reads). Using the bead's 18% wall attribution,
+the component win projects about `1.21x` end-to-end ext4 delete speedup and
+would narrow the prior fair-kernel delete gap from `~1.3x` slower to
+`~1.07x` slower. That projection is not a replacement for a future full mounted
+kernel delete rerun.
+
+Gates: RCH `cargo check -p ffs-core --all-targets` passed on `hz2`; RCH focused
+test `cargo test -p ffs-core
+ext4_base_block_cache_reuses_reads_and_invalidates_direct_writes --
+--nocapture` passed on `ovh-a`; RCH conformance `cargo test -p ffs-harness
+--test conformance -- --nocapture` passed on `vmi1153651` with
+`100 passed / 0 failed / 2 ignored`; local `cargo fmt -p ffs-core --check` and
+`git diff --check` passed. The requested `cargo bench --release` spelling was
+attempted first and rejected by Cargo for bench mode, so the supported
+equivalent `--profile release` was used. Scoped RCH `cargo clippy -p ffs-core
+--all-targets --no-deps -- -D warnings` remains blocked by pre-existing
+`ffs-core` pedantic debt outside this lever.
+
 ## Gauntlet Release-Readiness Scorecard
 
 | Date | Bead | Workload | Verdict | Original-kernel ratio | Conformance gate | Readiness impact |
