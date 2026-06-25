@@ -879,3 +879,19 @@ IMPLICATIONS: (a) it does NOT inflate the per-op create/delete RATE (the drop is
 
 Hypothesis: the ext4 4K-write (2.5x slower than kernel) might pay a SECOND 4KiB copy when staged bytes are wrapped into the MVCC version store — `AlignedVec::from_vec` (ffs-block:167) copies when the source Vec is not `alignment`-aligned (the `copy_detected` trace at :183). If the staged `to_vec` Vec were unaligned, every commit would copy twice.
 REFUTED empirically: `RUST_LOG=ffs::block::io=trace` over 200 4K overlay writes → **0 copy_detected events**. jemalloc page-aligns the 4096-byte staging Vec, so `from_vec` takes ownership with ZERO copy (ptr % 4096 == 0 branch at :174). The 4K-write path therefore has exactly ONE copy — the unavoidable `to_vec` staging (write_block takes `&[u8]`, must own the bytes for the transaction) — plus the MVCC commit machinery. No redundant copy to remove; the ~2.5x gap is the genuine per-op MVCC-commit + single-copy floor (with FxHashMap version maps now O(1) per 93ee0569). Confirms the ext4 4K-write is at its structural floor; no contained lever remains there.
+
+### 2026-06-25 Interleaved BTRFS read completes the scorecard: ~3x faster than kernel dd-materialize (CrimsonFox cc/opus)
+
+Interleaved btrfs read head-to-head (kernel `dd bs=1M` on /tmp/kbtr_mnt/big.dat vs frankenfs `read --discard /tmp/bt_k.img /big.dat` — SAME 128MiB file in the SAME kernel-created btrfs image, alternated per round, warm). frankenfs engine **~6.2 GB/s** (5649/6667/5694 MiB/s, duration_us) vs kernel dd **~2.0 GB/s** (1.4/2.4/2.1 GB/s) = **frankenfs ~3.0x FASTER**. Note: kernel btrfs read (~2.0 GB/s) is notably slower than kernel ext4 read (~3.1 GB/s) — btrfs pays per-block csum verification + extent-tree indirection on read; frankenfs's 64-core parallel chunked read + the RO extent/decompressed-extent caches (bd-n5w92, bd-4tw2n) beat the kernel's single-thread btrfs read by an even wider margin than on ext4. Same materialize-vs-materialize caveat as ext4 (frankenfs trails only zero-copy cat-splice, not a fair comparison).
+
+⭐⭐⭐COMPLETE definitive interleaved kernel scorecard (ALL major ops, both filesystems):
+| op | frankenfs vs kernel |
+|----|---------------------|
+| ext4 read (128MiB materialize) | 1.85x FASTER |
+| btrfs read (128MiB materialize) | ~3.0x FASTER |
+| ext4 create | 1.35x FASTER |
+| ext4 delete | 1.32x slower |
+| ext4 4K random write | ~2.5x slower (verified floor, no redundant copy) |
+| btrfs create | 3.0x slower (COW-clone-volume-bound) |
+| btrfs delete | 5.5x slower (COW-clone-volume-bound) |
+frankenfs WINS both bulk reads (big, parallel) + ext4 create; trails on small-write/delete (per-op MVCC-commit+copy floor) and btrfs writes (per-op COW-clone volume → deep insert-batching is the only remaining lever). BOLD-VERIFY campaign complete across every op + both filesystems.
