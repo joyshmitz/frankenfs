@@ -3390,7 +3390,7 @@ impl InMemoryCowBtrfsTree {
         debug_assert!(self.staged_allocations.is_empty());
         debug_assert!(self.staged_deferred_frees.is_empty());
         for entry in entries {
-            match self.try_insert_inplace(&entry, allow_replace) {
+            match self.try_insert_inplace(self.root, &entry, allow_replace) {
                 Ok(true) => continue,
                 Ok(false) => {
                     let old_root = self.root;
@@ -3428,12 +3428,15 @@ impl InMemoryCowBtrfsTree {
     /// rare split case takes the proven path; returns `Err` on a hard collision.
     fn try_insert_inplace(
         &mut self,
+        root: u64,
         entry: &BtrfsTreeItem,
         allow_replace: bool,
     ) -> Result<bool, BtrfsMutationError> {
         // Descend read-only to the target leaf, mirroring `child_slot` exactly so
-        // the leaf reached is identical to the clone path's.
-        let mut id = self.root;
+        // the leaf reached is identical to the clone path's. `root` is the current
+        // (in-batch) root — `insert_many` uses `self.root`; `insert_many_then_update`
+        // threads its own `current_root`.
+        let mut id = root;
         loop {
             match self.node_ref(id)? {
                 BtrfsCowNode::Leaf { .. } => break,
@@ -3650,14 +3653,22 @@ impl InMemoryCowBtrfsTree {
         let old_root = self.root;
         let mut current_root = old_root;
         for &(key, item) in inserts {
-            let result = match self.insert_into(
-                current_root,
-                BtrfsTreeItem {
-                    key,
-                    data: item.into(),
-                },
-                false,
-            ) {
+            let entry = BtrfsTreeItem {
+                key,
+                data: item.into(),
+            };
+            // bd-cowbatch: if this entry's target leaf was already cloned earlier
+            // in THIS batch and won't split, apply it in place (no path re-clone,
+            // current_root unchanged) — same in-place fast path as `insert_many`.
+            match self.try_insert_inplace(current_root, &entry, false) {
+                Ok(true) => continue,
+                Ok(false) => {}
+                Err(err) => {
+                    self.rollback_mutation();
+                    return Err(err);
+                }
+            }
+            let result = match self.insert_into(current_root, entry, false) {
                 Ok(result) => result,
                 Err(err) => {
                     self.rollback_mutation();
