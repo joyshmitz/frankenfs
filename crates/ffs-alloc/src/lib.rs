@@ -1576,34 +1576,35 @@ fn persist_group_desc_with_bitmap_overrides(
     };
 
     if pctx.has_metadata_csum {
-        let block_bitmap_buf;
-        let block_bitmap = if let Some(bitmap) = block_bitmap_override {
-            bitmap
-        } else {
-            block_bitmap_buf = dev.read_block(cx, stats.block_bitmap_block)?;
-            block_bitmap_buf.as_slice()
-        };
-        let inode_bitmap_buf;
-        let inode_bitmap = if let Some(bitmap) = inode_bitmap_override {
-            bitmap
-        } else {
-            inode_bitmap_buf = dev.read_block(cx, stats.inode_bitmap_block)?;
-            inode_bitmap_buf.as_slice()
-        };
-        ffs_ondisk::ext4::stamp_block_bitmap_checksum(
-            block_bitmap,
-            pctx.csum_seed,
-            pctx.blocks_per_group,
-            &mut updated,
-            pctx.desc_size,
-        );
-        ffs_ondisk::ext4::stamp_inode_bitmap_checksum(
-            inode_bitmap,
-            pctx.csum_seed,
-            pctx.inodes_per_group,
-            &mut updated,
-            pctx.desc_size,
-        );
+        // Only re-stamp a bitmap's descriptor checksum when THAT bitmap actually
+        // changed this op (its override is `Some`). When it is unchanged, the
+        // descriptor parsed into `existing` (copied via `..existing`) already
+        // carries the correct checksum, so preserving it is sound — every bitmap
+        // mutation routes through a `Some` override that re-stamps it, so the
+        // on-disk checksum is always kept in sync with the bitmap content.
+        // This removes a per-op BASE read of the unchanged bitmap block that was
+        // pure waste: an inode alloc/free (block_bitmap_override=None) re-read the
+        // group block-bitmap block (e.g. block 51) on EVERY op only to recompute
+        // a byte-identical checksum. Measured: ~2 base preads/op on the delete
+        // path (the dominant amplification, ~93% of delbench preads). bd-bmpcsum.
+        if let Some(block_bitmap) = block_bitmap_override {
+            ffs_ondisk::ext4::stamp_block_bitmap_checksum(
+                block_bitmap,
+                pctx.csum_seed,
+                pctx.blocks_per_group,
+                &mut updated,
+                pctx.desc_size,
+            );
+        }
+        if let Some(inode_bitmap) = inode_bitmap_override {
+            ffs_ondisk::ext4::stamp_inode_bitmap_checksum(
+                inode_bitmap,
+                pctx.csum_seed,
+                pctx.inodes_per_group,
+                &mut updated,
+                pctx.desc_size,
+            );
+        }
     }
 
     // bd-0ta4z: once a group's bitmap is written explicitly, the group is no
@@ -3718,7 +3719,7 @@ mod tests {
             if offset + ds > block_size {
                 break;
             }
-            let gd = Ext4GroupDesc {
+            let mut gd = Ext4GroupDesc {
                 block_bitmap: gs.block_bitmap_block.0,
                 inode_bitmap: gs.inode_bitmap_block.0,
                 inode_table: gs.inode_table_block.0,
@@ -3731,6 +3732,29 @@ mod tests {
                 block_bitmap_csum: 0,
                 inode_bitmap_csum: 0,
             };
+            // Seed VALID bitmap checksums for the (all-zero, unwritten) bitmaps so
+            // the descriptor matches a real mke2fs'd filesystem. `persist_group_desc`
+            // now preserves the checksum of any bitmap it does NOT modify this op
+            // (bd-bmpcsum), so the precondition must be a well-formed descriptor —
+            // exactly what a real fs provides — rather than the all-zero csums the
+            // old always-restamp behavior happened to heal as a side effect.
+            if pctx.has_metadata_csum {
+                let zero_bitmap = vec![0_u8; block_size];
+                ffs_ondisk::ext4::stamp_block_bitmap_checksum(
+                    &zero_bitmap,
+                    pctx.csum_seed,
+                    pctx.blocks_per_group,
+                    &mut gd,
+                    pctx.desc_size,
+                );
+                ffs_ondisk::ext4::stamp_inode_bitmap_checksum(
+                    &zero_bitmap,
+                    pctx.csum_seed,
+                    pctx.inodes_per_group,
+                    &mut gd,
+                    pctx.desc_size,
+                );
+            }
             gd.write_to_bytes(&mut buf[offset..], pctx.desc_size)
                 .unwrap();
         }
