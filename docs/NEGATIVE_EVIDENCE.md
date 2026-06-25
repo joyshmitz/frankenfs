@@ -934,3 +934,27 @@ IMPLICATION (honest nuance): this 4K-GRANULAR write-bench is the WORST case — 
 Measured the overlay write across block sizes (commit amortization), then verified the large-write case against the kernel interleaved (corrects a mid-analysis assumption that large writes WIN — they do not). frankenfs overlay write-bench by size: 4K **774**, 16K **2364**, 64K **4106**, 128K **4657** MiB/s — the per-block MVCC commit clearly amortizes as the write spans more blocks per commit. BUT the kernel scales too: interleaved 128K buffered pwrite (`/tmp/kbw.c`) vs frankenfs — kernel **~8000 MiB/s** (6281/8979/8725) vs frankenfs **~5000** (4462/4979/5937) = **frankenfs ~1.6x SLOWER**.
 
 So the write gap NARROWS with block size — 4K **~2.6x** slower → 128K **~1.6x** slower — as the commit overhead amortizes over more data, but frankenfs trails the kernel at every size: the kernel's buffered write is a single memcpy into the page cache (~8 GB/s), while frankenfs always pays the `to_vec` staging copy + MVCC version install + commit even when amortized. No lever (the residual is the same MVCC-commit+copy floor, just amortized); honest correction recorded — frankenfs does NOT win large writes, it narrows the gap to ~1.6x. This refines the write dimension: the 2.5x headline is the 4K worst case; real large writes are ~1.6x.
+
+### 2026-06-25 REJECTED: one-descent btrfs COW update — duplicate `find` removal is below noise (IvoryBirch codex/gpt-5)
+
+Hypothesis: btrfs write/delete still pays duplicate COW-tree descents around `InMemoryCowBtrfsTree::update`: `update()` first performs a read-only `find()` to preserve missing-key semantics, then performs the COW replacement descent via `insert_entry(..., allow_replace=true)`. A contained update-only descent could preserve `KeyNotFound` without the pre-find, and the non-root fallback of `insert_then_update` could similarly rollback on a missing update key instead of prechecking.
+
+Implemented the one-descent update path in `crates/ffs-btrfs/src/lib.rs`, routed `BtrfsBTree::update` and the `insert_then_update` fallback through it, then reverted after same-worker Criterion. Behavior proof for the candidate: `cargo check -p ffs-btrfs --all-targets` passed locally with `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-b`; `cargo fmt -p ffs-btrfs --check` passed after revert. Ordering/tie-breaking unchanged in the candidate: keys remain sorted, exact missing updates still return `KeyNotFound`, and rollback leaves the old root installed if the second half of a batch fails. Floating point/RNG: N/A.
+
+Bench command, both runs pinned to `hz2` with `RCH_TEST_SLOTS=4` because all 8-slot workers were busy:
+
+```bash
+AGENT_NAME=IvoryBirch RCH_WORKER=hz2 RCH_REQUIRE_REMOTE=1 RCH_TEST_SLOTS=4 \
+  CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-b \
+  rch exec -- cargo bench --profile release -p ffs-btrfs --bench cow_write_mutation -- \
+  btrfs_cow_write_mutation_256x4k --warm-up-time 1 --measurement-time 3 --sample-size 20 --noplot
+```
+
+Same-worker `hz2` result:
+
+| row | baseline | candidate | old/new | Criterion verdict |
+| --- | ---: | ---: | ---: | --- |
+| `sequential_insert_then_update` | `769.04 us` | `746.46 us` | `1.030x` | no change, `p=0.44` |
+| `batched_insert_then_update` | `420.04 us` | `411.26 us` | `1.021x` | no change, `p=0.77` |
+
+Verdict: **reverted**. The duplicate update pre-find is real but not a measurable end-to-end COW mutation lever; the bench rows move only 2-3% and Criterion rejects the change. Kernel scorecard impact is unchanged: ext4 create remains about `1.35x` faster than kernel, ext4 delete about `1.32x` slower, ext4 4K write about `2.5x` slower, btrfs create about `3.0x` slower, and btrfs delete about `5.5x` slower. The btrfs write gap remains COW-clone-volume-bound; retry only if a fresh profile shows `find()`/update precheck as a top hotspot. The next credible btrfs-write lever is still deep COW insert/delete batching or transaction-local in-place mutation, not another single-descent microtrim.
