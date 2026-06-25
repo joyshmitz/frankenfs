@@ -838,3 +838,12 @@ BOLD-VERIFY of a risky peer change by the agent who found the relevant trap. `5f
 - Invalidates the affected base block(s) on EVERY write through the adapter (`invalidate_block`/`invalidate_range` at write_block / write_contiguous), so a flush that rewrites the base device evicts stale entries (the role my bd-rdcache flush-clear played, here finer-grained).
 - Cleared on all recovery/sync paths; scoped EXT4-ONLY because btrfs has raw physical write paths that would bypass adapter invalidation (the peer explicitly noted this — the correct boundary).
 VERDICT: coherent; no corruption risk; nothing to fix. This is the generalized, correctly-implemented version of the bd-rdcache/bd-gdcache base-block caching idea (cache BELOW MVCC + invalidate-on-write, NOT an above-MVCC logical predicate). ⭐For the record: the htree-coherence trap that defeated bd-rdcache is structurally avoided by caching below the overlay; future base-cache work should follow this shape.
+
+### 2026-06-25 DEFINITIVE interleaved ext4 kernel scorecard (corrects prior cross-time confound): create ~1.35x FASTER, delete ~1.32x slower (CrimsonFox cc/opus)
+
+Re-ran the ext4 kernel head-to-head with kernel and frankenfs INTERLEAVED in one tight loop (same machine load each round — the gold standard, since the same frankenfs binary swings ±35% by load, which confounded the earlier separate-run measurements). Current main (includes the peer's 5f266067 base-device cache + 93ee0569 + my checkpoint fix). Kernel harness `syncfs(fd)`-fair.
+
+- ext4 CREATE: frankenfs **~54.3k creates/s** (53009/55616/54287) vs kernel **~40.0k** (40158/39689/40066) = **frankenfs ~1.35x FASTER** (tight, non-overlapping ranges, interleaved).
+- ext4 DELETE: frankenfs **~65.1k unlinks/s** (63815/65669/65860) vs kernel **~86.4k** (84811/87061/87350) = **frankenfs ~1.32x SLOWER** (tight, non-overlapping).
+
+⭐CORRECTS the 2026-06-25 entry (53183a01) which read create as "≈ parity" — that comparison was cross-time (kernel and frankenfs measured minutes apart under different load). The INTERLEAVED same-load measurement is reliable and shows ext4 create is decisively FASTER than the kernel (~1.35x), not parity. So the honest ext4 standing is: **create ~1.35x faster, delete ~1.32x slower** than the kernel (the delete gap = the structural per-op MVCC-commit + copy tax, unchanged). Methodology note for all future head-to-heads: INTERLEAVE kernel/frankenfs per round (load swings ±35%); never compare separate runs.
