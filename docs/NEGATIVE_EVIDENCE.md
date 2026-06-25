@@ -905,3 +905,19 @@ Profiled the real 4K random-write commit (ffs-cli write-bench 40000x, current ma
 Added the random-read dimension the scorecard lacked (bulk reads win big, but random 4K read is a distinct workload). Interleaved (`/tmp/krr.c` random pread loop vs `ffs-cli rand-read`, warm, same big.dat): kernel **~764k IOPS** (~3.0 GB/s) vs frankenfs **~400-500k IOPS** (~2.0 GB/s) = **frankenfs ~1.5x SLOWER**. Profile of the per-read path: **40% is the `pread` syscall itself** (the fundamental block I/O — the kernel pays the same), and the frankenfs-specific engine overhead is ~16%: `Ext4Inode::clone` 3.95%, `read_into`/`read_file_data` ~9%, `with_latest_scope` ~3%, memcpy ~3.5%.
 
 The one clearly-removable chunk — `read_into`'s per-read `(*slot).clone()` of the hot-inode (lib.rs:28747; already served lock-free from the `ext4_hot_inode` ArcSwap slot, the clone is the deliberately-kept "cheap struct copy") — is ~4%, eliminable by deref-ing the `Arc<Ext4Inode>` instead of cloning. But ~4% is BELOW the reliable interleaved-measurement threshold (load swings dwarf it), so it cannot be confirmed a win and is not shippable per REVERT-~0-gain. The rest (extent resolve, overlay scope, read path) is inherent per-read resolution the kernel avoids via its cached in-memory inode + extent map. ⭐NET: ext4 random read is pread-bound + inherent-engine-bound; no contained lever above the noise floor. The read scorecard is now complete: BULK reads frankenfs wins (1.85x ext4 / 3.0x btrfs, parallel), RANDOM 4K read frankenfs ~1.5x slower (per-read engine overhead the kernel's cached inode avoids).
+
+### 2026-06-25 Metadata-walk dimension (interleaved): frankenfs ~1.1x faster at 8k files, scales to ~2x at 30k (CrimsonFox cc/opus)
+
+Added the metadata/stat-heavy dimension with a clean persisted fixture (`mke2fs -d` from an 8000-file tree, both kernel-mountable RO and frankenfs-walkable). Interleaved (kernel `find -type f` readdir+stat vs `ffs-cli walk` engine, warm, 4 rounds): kernel **~14ms** vs frankenfs **~12.5ms** (12.0/12.0/13.9/13.0) = **frankenfs ~1.1x FASTER** (8009 stats in the walk). Marginal at this scale; the previously-recorded ~2.03x was a 30k-file fixture — the advantage (one bulk inode-table parse vs N per-entry getattr syscalls) amortizes as file count grows, so the win scales with directory size. Not a code lever (no change), a scorecard dimension: frankenfs metadata walk is at parity-to-faster, widening with scale.
+
+⭐⭐FINAL BOLD-VERIFY coverage (every major workload, both filesystems, interleaved):
+| workload | frankenfs vs kernel |
+|----------|---------------------|
+| bulk read ext4 / btrfs | 1.85x / 3.0x FASTER |
+| metadata walk (stat-heavy) | ~1.1x faster @8k → ~2x @30k |
+| create ext4 | 1.35x FASTER |
+| random 4K read ext4 | 1.5x slower (pread-bound + inherent) |
+| delete ext4 | 1.32x slower (MVCC floor) |
+| 4K write ext4 | 2.5x slower (MVCC floor, verified) |
+| create/delete btrfs | 3.0x / 5.5x slower (COW-clone volume) |
+frankenfs WINS bulk reads, ext4 create, metadata walk; trails small random/write/delete (per-op MVCC floor) + btrfs writes (deep COW-batching = only remaining lever). Every gap profiled/traced; no contained lever above the measurement noise floor remains.
