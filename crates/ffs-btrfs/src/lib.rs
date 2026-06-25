@@ -3499,6 +3499,121 @@ impl InMemoryCowBtrfsTree {
         Ok(true)
     }
 
+    /// Remove many keys in ONE COW transaction (bd-cowbatch, the delete analog of
+    /// [`Self::insert_many`]). A key whose target leaf was already cloned earlier in
+    /// THIS batch (private, in `staged_allocations`) and whose removal leaves the
+    /// leaf a valid node (root may empty; a non-root leaf must keep >= min_items) is
+    /// removed IN PLACE — a read-only descent plus one `Vec::remove`, with NO extra
+    /// node clone / alloc / retire and NO rebalance. A key in a not-yet-staged leaf,
+    /// a missing key, or a removal that would underflow (needs rebalance/merge)
+    /// falls back to the proven single-key `delete_from` path. The resulting tree is
+    /// byte-identical to deleting the keys one-by-one with [`BtrfsBTree::delete`].
+    ///
+    /// # Errors
+    /// Returns the same COW-tree errors as the equivalent `delete` sequence (incl.
+    /// `KeyNotFound` for an absent key); on any error the whole batch is rolled back.
+    pub fn remove_many(&mut self, keys: &[BtrfsKey]) -> Result<u64, BtrfsMutationError> {
+        debug_assert!(self.staged_allocations.is_empty());
+        debug_assert!(self.staged_deferred_frees.is_empty());
+        for key in keys {
+            match self.try_remove_inplace(self.root, key) {
+                Ok(true) => continue,
+                Ok(false) => {
+                    let deleted = match self.delete_from(self.root, key) {
+                        Ok(d) => d,
+                        Err(err) => {
+                            self.rollback_mutation();
+                            return Err(err);
+                        }
+                    };
+                    if !deleted.deleted {
+                        self.rollback_mutation();
+                        return Err(BtrfsMutationError::KeyNotFound);
+                    }
+                    self.root = match self.normalized_root_after_delete(deleted.node_id) {
+                        Ok(root) => root,
+                        Err(err) => {
+                            self.rollback_mutation();
+                            return Err(err);
+                        }
+                    };
+                }
+                Err(err) => {
+                    self.rollback_mutation();
+                    return Err(err);
+                }
+            }
+        }
+        self.commit_allocated_nodes();
+        self.commit_retired_nodes();
+        Ok(self.root)
+    }
+
+    /// Read-only descent to the leaf for `key`; if that leaf is private to the
+    /// current batch (`staged_allocations`), contains `key`, and removing it keeps
+    /// the leaf valid (the root may go empty; a non-root leaf must stay >=
+    /// min_items), remove it in place and return `Ok(true)`. Returns `Ok(false)`
+    /// when the caller must use `delete_from` (leaf not staged this batch, key
+    /// absent, or the removal would underflow and need rebalance/merge).
+    fn try_remove_inplace(
+        &mut self,
+        root: u64,
+        key: &BtrfsKey,
+    ) -> Result<bool, BtrfsMutationError> {
+        let mut id = root;
+        let mut leaf_is_root = true;
+        loop {
+            match self.node_ref(id)? {
+                BtrfsCowNode::Leaf { .. } => break,
+                BtrfsCowNode::Internal { keys, children } => {
+                    leaf_is_root = false;
+                    let idx = Self::child_slot(keys, key);
+                    id = *children
+                        .get(idx)
+                        .ok_or(BtrfsMutationError::BrokenInvariant(
+                            "internal child index out of range",
+                        ))?;
+                }
+            }
+        }
+        if !self.staged_allocations.contains(&id) {
+            return Ok(false);
+        }
+        let (idx, found, len) = {
+            let BtrfsCowNode::Leaf { items } = self.node_ref(id)? else {
+                return Ok(false);
+            };
+            let idx = items.partition_point(|e| key_cmp(&e.key, key).is_lt());
+            let found = items
+                .get(idx)
+                .is_some_and(|e| key_cmp(&e.key, key) == Ordering::Equal);
+            (idx, found, items.len())
+        };
+        if !found {
+            return Ok(false);
+        }
+        // Removing the leaf's FIRST (minimum) item changes its minimum key, which a
+        // non-root parent holds as this leaf's separator; repairing that separator
+        // up the path is the clone path's job, so defer first-item removals.
+        if idx == 0 && !leaf_is_root {
+            return Ok(false);
+        }
+        // Removing would underflow a non-root leaf -> needs rebalance/merge, which
+        // the in-place fast path does not do: defer to the proven clone path.
+        if !leaf_is_root && len.saturating_sub(1) < self.min_items {
+            return Ok(false);
+        }
+        let BtrfsCowNode::Leaf { items } = self
+            .nodes
+            .get_mut(&id)
+            .ok_or(BtrfsMutationError::BrokenInvariant("staged leaf vanished"))?
+        else {
+            return Ok(false);
+        };
+        items.remove(idx);
+        Ok(true)
+    }
+
     /// Insert `item` at `key`, or replace the existing exact-key item.
     ///
     /// This preserves the existing sorted-key COW mutation semantics while
@@ -9417,6 +9532,57 @@ mod tests {
             let mut all: Vec<u64> = present.iter().copied().collect();
             all.extend(batch_keys.iter().copied());
             for &oid in &all {
+                proptest::prop_assert_eq!(
+                    bat.find(&pk(oid)).expect("bat find"),
+                    seq.find(&pk(oid)).expect("seq find")
+                );
+            }
+        }
+
+        /// bd-cowbatch remove_many hardened gate: over random fanouts, random
+        /// prefills and random delete subsets (multi-leaf, underflow/rebalance +
+        /// in-place mix), remove_many yields a tree LOGICALLY IDENTICAL to deleting
+        /// the keys one-by-one — catches any in-place COW-delete corruption.
+        #[test]
+        fn proptest_remove_many_matches_sequential_bd_cowbatch(
+            max_items in 3_usize..=12,
+            prefill in proptest::collection::vec(0_u64..400, 1..240),
+            del in proptest::collection::vec(0_u64..400, 1..60),
+        ) {
+            fn pk(oid: u64) -> BtrfsKey {
+                BtrfsKey { objectid: oid, item_type: BTRFS_ITEM_INODE_ITEM, offset: 0 }
+            }
+            fn pp(oid: u64) -> Vec<u8> {
+                oid.to_le_bytes().to_vec()
+            }
+            let mut seq = InMemoryCowBtrfsTree::new(max_items).expect("seq tree");
+            let mut bat = InMemoryCowBtrfsTree::new(max_items).expect("bat tree");
+            let mut present = std::collections::BTreeSet::new();
+            for &oid in &prefill {
+                if present.insert(oid) {
+                    seq.insert(pk(oid), &pp(oid)).expect("seq prefill");
+                    bat.insert(pk(oid), &pp(oid)).expect("bat prefill");
+                }
+            }
+            // Delete only existing keys (delete errors on a missing key), each once.
+            let mut to_del = Vec::new();
+            let mut seen = std::collections::BTreeSet::new();
+            for &oid in &del {
+                if present.contains(&oid) && seen.insert(oid) {
+                    to_del.push(oid);
+                }
+            }
+            proptest::prop_assume!(!to_del.is_empty());
+            for &oid in &to_del {
+                seq.delete(&pk(oid)).expect("seq delete");
+            }
+            let keys: Vec<BtrfsKey> = to_del.iter().map(|&oid| pk(oid)).collect();
+            bat.remove_many(&keys).expect("bat remove_many");
+            seq.validate_invariants().expect("seq invariants");
+            bat.validate_invariants().expect("bat invariants");
+            // Every prefilled key resolves identically (deleted => None in both;
+            // surviving => same payload in both).
+            for &oid in &present {
                 proptest::prop_assert_eq!(
                     bat.find(&pk(oid)).expect("bat find"),
                     seq.find(&pk(oid)).expect("seq find")
