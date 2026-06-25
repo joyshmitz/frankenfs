@@ -26,13 +26,20 @@
 use criterion::{Criterion, criterion_group, criterion_main};
 use rayon::prelude::{IntoParallelIterator, ParallelIterator};
 use std::hint::black_box;
+use std::sync::Arc;
 use std::time::Duration;
 
 const BLOCKS: usize = 64; // present directory blocks scanned on an htree miss
 const BS: usize = 4096; // ext4 block size
+const HOT_READS: usize = 1092; // bd-9e810 delete trace pread64 count
+const HOT_UNIQUE_BLOCKS: usize = 42; // bd-9e810 unique physical offsets
 /// Per-block read access latency. Models a real-disk/SSD-queue round trip; the
 /// in-memory unit-test device is zero-latency and cannot exhibit overlap.
 const READ_LATENCY: Duration = Duration::from_micros(250);
+/// Small per-block metadata read latency used by the cache A/B. The model
+/// isolates syscall/device round-trip elimination; cache hits still materialize
+/// an owned Vec, matching `read_block_vec` callers.
+const HOT_READ_LATENCY: Duration = Duration::from_micros(4);
 
 /// Deterministic pseudo-random byte (no `Math.random` in benches).
 fn prng(seed: u64) -> u8 {
@@ -69,6 +76,49 @@ fn parallel_blocks() -> Option<usize> {
     results.into_iter().flatten().next()
 }
 
+fn htree_hot_blocks() -> Vec<Arc<[u8]>> {
+    (0..HOT_UNIQUE_BLOCKS)
+        .map(|block| {
+            let mut bytes = vec![0_u8; BS];
+            for (i, byte) in bytes.iter_mut().enumerate() {
+                *byte = prng((block as u64) << 32 ^ i as u64);
+            }
+            Arc::from(bytes.into_boxed_slice())
+        })
+        .collect()
+}
+
+fn htree_uncached_base_reads(blocks: &[Arc<[u8]>]) -> u64 {
+    let mut checksum = 0_u64;
+    for read in 0..HOT_READS {
+        let block = read % HOT_UNIQUE_BLOCKS;
+        std::thread::sleep(HOT_READ_LATENCY);
+        let mut bytes = vec![0_u8; BS];
+        bytes.copy_from_slice(blocks[block].as_ref());
+        checksum ^= u64::from(bytes[(read * 31) % BS]);
+    }
+    checksum
+}
+
+fn htree_cached_base_reads(blocks: &[Arc<[u8]>]) -> u64 {
+    let mut checksum = 0_u64;
+    let mut cache: Vec<Option<Arc<[u8]>>> = vec![None; HOT_UNIQUE_BLOCKS];
+    for read in 0..HOT_READS {
+        let block = read % HOT_UNIQUE_BLOCKS;
+        if cache[block].is_none() {
+            std::thread::sleep(HOT_READ_LATENCY);
+            cache[block] = Some(Arc::clone(&blocks[block]));
+        }
+        let bytes = cache[block]
+            .as_ref()
+            .expect("cache entry populated")
+            .as_ref()
+            .to_vec();
+        checksum ^= u64::from(bytes[(read * 31) % BS]);
+    }
+    checksum
+}
+
 fn bench_ext4_lookup_run_overlap(c: &mut Criterion) {
     // Isomorphism: identical outcome (`None`) regardless of read order.
     assert_eq!(
@@ -91,5 +141,31 @@ fn bench_ext4_lookup_run_overlap(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_ext4_lookup_run_overlap);
+fn bench_ext4_base_block_cache(c: &mut Criterion) {
+    let blocks = htree_hot_blocks();
+    assert_eq!(
+        htree_uncached_base_reads(&blocks),
+        htree_cached_base_reads(&blocks),
+        "cached htree metadata read stream changed bytes"
+    );
+
+    let mut group = c.benchmark_group("ext4_base_block_cache_1092reads_42unique");
+    group
+        .sample_size(10)
+        .warm_up_time(Duration::from_millis(300))
+        .measurement_time(Duration::from_secs(3));
+    group.bench_function("uncached_read_block_vec", |b| {
+        b.iter(|| black_box(htree_uncached_base_reads(black_box(&blocks))));
+    });
+    group.bench_function("cached_read_block_vec", |b| {
+        b.iter(|| black_box(htree_cached_base_reads(black_box(&blocks))));
+    });
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_ext4_lookup_run_overlap,
+    bench_ext4_base_block_cache
+);
 criterion_main!(benches);

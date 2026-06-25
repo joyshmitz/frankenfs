@@ -911,6 +911,15 @@ pub struct OpenFs {
     /// The writable path bypasses this cache because file data changes are
     /// published through MVCC and eventually persisted to these blocks.
     ext4_file_data_block_cache: ShardedCache<BlockNumber, Arc<[u8]>>,
+    /// Bounded ext4 base-device block cache for repeated metadata reads.
+    ///
+    /// This sits below the MVCC overlay and is ext4-only: htree/name-index
+    /// mutation streams repeatedly re-read the same root/node blocks through
+    /// `read_block_vec`, while btrfs has raw physical write paths outside this
+    /// adapter. Direct adapter writes invalidate matching entries before they
+    /// reach the device, so recovery and journal replay do not publish stale
+    /// post-write reads.
+    ext4_base_block_cache: ShardedCache<BlockNumber, BlockBuf>,
     /// Mutable btrfs allocation state (COW FS tree, extent allocator).
     ///
     /// Protected by a Mutex since write operations need exclusive access.
@@ -1245,6 +1254,7 @@ fn systemtime_nanos(t: std::time::SystemTime) -> u64 {
 type BtrfsCsumItems = Vec<(BtrfsKey, Vec<u8>)>;
 
 const EXT4_FILE_DATA_BLOCK_CACHE_LIMIT: usize = 256;
+const EXT4_BASE_BLOCK_CACHE_LIMIT: usize = 1024;
 
 /// Maximum number of btrfs tree nodes cached by physical address on a
 /// read-only mount (bd-jgx7u). At a 16 KiB nodesize this caps the cache near
@@ -1864,6 +1874,130 @@ impl BlockDevice for ByteDeviceBlockAdapter<'_> {
 
     fn sync(&self, cx: &Cx) -> Result<(), FfsError> {
         self.dev.sync(cx)
+    }
+}
+
+/// Ext4-only cached view over the raw byte device.
+///
+/// The cache is optional because btrfs still has direct physical writes that do
+/// not all flow through this adapter. For ext4, this wrapper sits below MVCC:
+/// staged versions still win before base reads, and direct writes invalidate the
+/// affected base block(s) before touching the underlying device.
+struct CachedByteDeviceBlockAdapter<'a> {
+    base: ByteDeviceBlockAdapter<'a>,
+    cache: Option<&'a ShardedCache<BlockNumber, BlockBuf>>,
+}
+
+impl CachedByteDeviceBlockAdapter<'_> {
+    fn read_block_vec(&self, cx: &Cx, block: BlockNumber) -> Result<Vec<u8>, FfsError> {
+        if let Some(cache) = self.cache {
+            if let Some(cached) = cache.get(&block) {
+                return Ok(cached.as_slice().to_vec());
+            }
+        }
+
+        let bytes = self.base.read_block_vec(cx, block)?;
+        if let Some(cache) = self.cache {
+            cache.insert_within(
+                block,
+                BlockBuf::new(bytes.clone()),
+                EXT4_BASE_BLOCK_CACHE_LIMIT,
+            );
+        }
+        Ok(bytes)
+    }
+
+    fn invalidate_block(&self, block: BlockNumber) {
+        if let Some(cache) = self.cache {
+            cache.remove(&block);
+        }
+    }
+
+    fn invalidate_range(&self, start: BlockNumber, count: usize) -> Result<(), FfsError> {
+        if self.cache.is_none() {
+            return Ok(());
+        }
+        for idx in 0..count {
+            let delta = u64::try_from(idx)
+                .map_err(|_| FfsError::Format("block index does not fit u64".to_owned()))?;
+            let block = BlockNumber(start.0.checked_add(delta).ok_or_else(|| {
+                FfsError::Format("contiguous write block range overflow".to_owned())
+            })?);
+            self.invalidate_block(block);
+        }
+        Ok(())
+    }
+}
+
+impl BlockDevice for CachedByteDeviceBlockAdapter<'_> {
+    fn read_block(&self, cx: &Cx, block: BlockNumber) -> Result<BlockBuf, FfsError> {
+        if let Some(cache) = self.cache {
+            if let Some(cached) = cache.get(&block) {
+                return Ok(cached);
+            }
+        }
+
+        let buf = self.base.read_block(cx, block)?;
+        if let Some(cache) = self.cache {
+            cache.insert_within(block, buf.clone_ref(), EXT4_BASE_BLOCK_CACHE_LIMIT);
+        }
+        Ok(buf)
+    }
+
+    fn supports_contiguous_reads(&self) -> bool {
+        self.base.supports_contiguous_reads()
+    }
+
+    fn read_contiguous_blocks(
+        &self,
+        cx: &Cx,
+        start: BlockNumber,
+        bufs: &mut [BlockBuf],
+    ) -> Result<(), FfsError> {
+        self.base.read_contiguous_blocks(cx, start, bufs)
+    }
+
+    fn read_contiguous_into(
+        &self,
+        cx: &Cx,
+        start: BlockNumber,
+        dst: &mut [u8],
+    ) -> Result<(), FfsError> {
+        self.base.read_contiguous_into(cx, start, dst)
+    }
+
+    fn write_block(&self, cx: &Cx, block: BlockNumber, data: &[u8]) -> Result<(), FfsError> {
+        self.invalidate_block(block);
+        self.base.write_block(cx, block, data)
+    }
+
+    fn write_contiguous_blocks(
+        &self,
+        cx: &Cx,
+        start: BlockNumber,
+        data: &[u8],
+    ) -> Result<(), FfsError> {
+        let bs = usize::try_from(self.block_size())
+            .map_err(|_| FfsError::Format("block_size does not fit usize".to_owned()))?;
+        if bs == 0 || data.len() % bs != 0 {
+            return Err(FfsError::Format(
+                "write_contiguous_blocks: data length must be a multiple of block size".to_owned(),
+            ));
+        }
+        self.invalidate_range(start, data.len() / bs)?;
+        self.base.write_contiguous_blocks(cx, start, data)
+    }
+
+    fn block_size(&self) -> u32 {
+        self.base.block_size()
+    }
+
+    fn block_count(&self) -> u64 {
+        self.base.block_count()
+    }
+
+    fn sync(&self, cx: &Cx) -> Result<(), FfsError> {
+        self.base.sync(cx)
     }
 }
 
@@ -3433,6 +3567,7 @@ impl OpenFs {
             ext4_group_desc_cache: ShardedCache::new(),
             ext4_inode_table_block_cache: ShardedCache::new(),
             ext4_file_data_block_cache: ShardedCache::new(),
+            ext4_base_block_cache: ShardedCache::new(),
             btrfs_alloc_state: None,
             extent_cache: ffs_extent::ExtentCache::new(),
             ext4_write_extent_snapshot: Mutex::new(None),
@@ -4146,6 +4281,7 @@ impl OpenFs {
         self.ext4_inode_table_block_cache.clear();
         self.ext4_group_desc_cache.clear();
         self.ext4_file_data_block_cache.clear();
+        self.ext4_base_block_cache.clear();
 
         info!(
             orphan_head = head,
@@ -4399,9 +4535,12 @@ impl OpenFs {
         }
 
         // Always use unversioned device adapter for journal replay.
-        let block_dev = ByteDeviceBlockAdapter {
-            dev: &*self.dev,
-            block_size,
+        let block_dev = CachedByteDeviceBlockAdapter {
+            base: ByteDeviceBlockAdapter {
+                dev: &*self.dev,
+                block_size,
+            },
+            cache: self.ext4_base_block_cache_for_adapter(),
         };
 
         let journal_start_block = segments[0].start.0;
@@ -4429,6 +4568,7 @@ impl OpenFs {
             **sb = Ext4Superblock::parse_superblock_region(&sb_region)
                 .map_err(|e| parse_to_ffs_error(&e))?;
         }
+        self.ext4_base_block_cache.clear();
 
         info!(
             journal_inum,
@@ -4535,6 +4675,7 @@ impl OpenFs {
             **cache = Ext4Superblock::parse_superblock_region(&sb_region)
                 .map_err(|e| parse_to_ffs_error(&e))?;
         }
+        self.ext4_base_block_cache.clear();
 
         info!(
             journal_dev,
@@ -4827,6 +4968,7 @@ impl OpenFs {
         self.ext4_inode_table_block_cache.clear();
         self.ext4_group_desc_cache.clear();
         self.ext4_file_data_block_cache.clear();
+        self.ext4_base_block_cache.clear();
         debug!(
             ino,
             "fc_apply: freed zero-link inode + its blocks at recovery"
@@ -4880,10 +5022,7 @@ impl OpenFs {
         updated[offset_in_block..offset_in_block + write_len]
             .copy_from_slice(&raw_inode[..write_len]);
 
-        let block_dev = ByteDeviceBlockAdapter {
-            dev: &*self.dev,
-            block_size: sb.block_size,
-        };
+        let block_dev = self.direct_block_device_adapter();
         block_dev.write_block(cx, block_num, &updated)?;
         self.ext4_inode_table_block_cache.remove(&block_num);
         debug!(
@@ -5114,7 +5253,6 @@ impl OpenFs {
             .ok_or_else(|| FfsError::Format("not an ext4 filesystem".into()))?;
         let has_csum = sb.has_metadata_csum();
         let csum_seed = sb.csum_seed();
-        let block_size_u16 = sb.block_size;
         let reserved_tail = self.ext4_dir_reserved_tail();
 
         let mut block = self
@@ -5136,10 +5274,7 @@ impl OpenFs {
                         parent_generation,
                     );
                 }
-                let block_dev = ByteDeviceBlockAdapter {
-                    dev: &*self.dev,
-                    block_size: block_size_u16,
-                };
+                let block_dev = self.direct_block_device_adapter();
                 block_dev.write_block(cx, phys, &block)?;
                 self.ext4_file_data_block_cache.remove(&phys);
                 debug!(
@@ -5194,17 +5329,12 @@ impl OpenFs {
             return Ok(true);
         }
 
-        let sb = self
-            .ext4_superblock()
+        self.ext4_superblock()
             .ok_or_else(|| FfsError::Format("not an ext4 filesystem".into()))?;
-        let block_size_u16 = sb.block_size;
         let reserved_tail = self.ext4_dir_reserved_tail();
         let extents = self.collect_extents(cx, &parent)?;
         let dx_root_phys = Self::ext4_htree_dx_root_phys(&parent, &extents);
-        let block_dev = ByteDeviceBlockAdapter {
-            dev: &*self.dev,
-            block_size: block_size_u16,
-        };
+        let block_dev = self.direct_block_device_adapter();
 
         for ext in &extents {
             for block in Self::extent_phys_blocks(ext) {
@@ -5276,10 +5406,7 @@ impl OpenFs {
             .ok_or_else(|| FfsError::Format("not an ext4 filesystem".into()))?
             .csum_seed();
         let mut alloc = self.load_ext4_alloc_state(cx)?;
-        let block_dev = ByteDeviceBlockAdapter {
-            dev: &*self.dev,
-            block_size: alloc.geo.block_size,
-        };
+        let block_dev = self.direct_block_device_adapter();
 
         let mut any_freed = false;
         for range in del_ranges {
@@ -5371,6 +5498,7 @@ impl OpenFs {
             self.ext4_inode_table_block_cache.clear();
             self.ext4_group_desc_cache.clear();
             self.ext4_file_data_block_cache.clear();
+            self.ext4_base_block_cache.clear();
         }
         Ok(())
     }
@@ -5400,10 +5528,7 @@ impl OpenFs {
         let sb = self
             .ext4_superblock()
             .ok_or_else(|| FfsError::Format("not an ext4 filesystem".into()))?;
-        let block_dev = ByteDeviceBlockAdapter {
-            dev: &*self.dev,
-            block_size: sb.block_size,
-        };
+        let block_dev = self.direct_block_device_adapter();
         let mut no_grow = NoGrowBlockAllocator {
             has_metadata_csum: sb.has_metadata_csum(),
             csum_seed: sb.csum_seed(),
@@ -5519,10 +5644,7 @@ impl OpenFs {
         let sb = self
             .ext4_superblock()
             .ok_or_else(|| FfsError::Format("not an ext4 filesystem".into()))?;
-        let block_dev = ByteDeviceBlockAdapter {
-            dev: &*self.dev,
-            block_size: sb.block_size,
-        };
+        let block_dev = self.direct_block_device_adapter();
         let mut no_grow = NoGrowBlockAllocator {
             has_metadata_csum: sb.has_metadata_csum(),
             csum_seed: sb.csum_seed(),
@@ -6745,11 +6867,7 @@ impl OpenFs {
         );
 
         // Build a BlockDevice adapter for journal I/O.
-        let block_size = self.block_size();
-        let block_dev = ByteDeviceBlockAdapter {
-            dev: self.dev.as_ref(),
-            block_size,
-        };
+        let block_dev = self.direct_block_device_adapter();
 
         // Hold the MVCC write lock across preflight, journal I/O, and final
         // visibility so no other writer can invalidate this transaction in between.
@@ -10764,10 +10882,7 @@ impl OpenFs {
             }
         }
 
-        let base = ByteDeviceBlockAdapter {
-            dev: self.dev.as_ref(),
-            block_size: self.block_size(),
-        };
+        let base = self.direct_block_device_adapter();
         base.read_block_vec(cx, block)
     }
 
@@ -16011,10 +16126,13 @@ impl OpenFs {
 
     /// Get a block device adapter for the underlying byte device, wrapped
     /// in MVCC versioning logic at the current latest snapshot.
-    fn block_device_adapter(&self) -> MvccBlockDevice<ByteDeviceBlockAdapter<'_>> {
-        let base = ByteDeviceBlockAdapter {
-            dev: self.dev.as_ref(),
-            block_size: self.block_size(),
+    fn block_device_adapter(&self) -> MvccBlockDevice<CachedByteDeviceBlockAdapter<'_>> {
+        let base = CachedByteDeviceBlockAdapter {
+            base: ByteDeviceBlockAdapter {
+                dev: self.dev.as_ref(),
+                block_size: self.block_size(),
+            },
+            cache: self.ext4_base_block_cache_for_adapter(),
         };
         // RO mounts serve this from the lock-free `ro_snapshot` cache (the
         // snapshot is invariant without commits); writable mounts re-read live.
@@ -16042,11 +16160,18 @@ impl OpenFs {
     /// Mount-time recovery must persist to the image or replay overlay itself,
     /// not to the runtime MVCC version store, because recovery establishes the
     /// baseline state later readers consume.
-    fn direct_block_device_adapter(&self) -> ByteDeviceBlockAdapter<'_> {
-        ByteDeviceBlockAdapter {
-            dev: self.dev.as_ref(),
-            block_size: self.block_size(),
+    fn direct_block_device_adapter(&self) -> CachedByteDeviceBlockAdapter<'_> {
+        CachedByteDeviceBlockAdapter {
+            base: ByteDeviceBlockAdapter {
+                dev: self.dev.as_ref(),
+                block_size: self.block_size(),
+            },
+            cache: self.ext4_base_block_cache_for_adapter(),
         }
+    }
+
+    fn ext4_base_block_cache_for_adapter(&self) -> Option<&ShardedCache<BlockNumber, BlockBuf>> {
+        self.is_ext4().then_some(&self.ext4_base_block_cache)
     }
 
     /// Locate the ext4 superblock on disk as `(block, in-block byte offset)`.
@@ -23263,7 +23388,10 @@ impl OpenFs {
             .into_iter()
             .filter_map(|(key, data)| {
                 match Self::btrfs_tree_log_item_matches_inode(&key, &data, canonical) {
-                    Ok(true) => Some(Ok(BtrfsTreeItem { key, data: data.into() })),
+                    Ok(true) => Some(Ok(BtrfsTreeItem {
+                        key,
+                        data: data.into(),
+                    })),
                     Ok(false) => None,
                     Err(err) => Some(Err(err)),
                 }
@@ -62724,6 +62852,43 @@ mod tests {
             fs.read_block_with_scope(&cx, &RequestScope::empty(), block)
                 .expect("read empty-scope current MVCC block"),
             overlay
+        );
+    }
+
+    #[test]
+    fn ext4_base_block_cache_reuses_reads_and_invalidates_direct_writes() {
+        let image = build_ext4_image_with_state(EXT4_VALID_FS);
+        let (dev, counters) = CountingByteDevice::new(image);
+        let cx = Cx::for_testing();
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
+        let block = BlockNumber(8);
+
+        let before = counters.scalar.load(std::sync::atomic::Ordering::SeqCst);
+        let first = fs.read_block_vec(&cx, block).expect("first base read");
+        let after_first = counters.scalar.load(std::sync::atomic::Ordering::SeqCst);
+        let second = fs.read_block_vec(&cx, block).expect("cached base read");
+        let after_second = counters.scalar.load(std::sync::atomic::Ordering::SeqCst);
+
+        assert_eq!(first, second, "cached base block changed bytes");
+        assert_eq!(after_first, before + 1, "first read must touch device");
+        assert_eq!(
+            after_second, after_first,
+            "second read must come from ext4 base-block cache"
+        );
+
+        let replacement = vec![0xA5; usize::try_from(fs.block_size()).expect("block size fits")];
+        fs.direct_block_device_adapter()
+            .write_block(&cx, block, &replacement)
+            .expect("direct write invalidates cache");
+        let after_write = counters.scalar.load(std::sync::atomic::Ordering::SeqCst);
+        fs.read_block_vec(&cx, block)
+            .expect("post-invalidation read");
+        let after_invalidated_read = counters.scalar.load(std::sync::atomic::Ordering::SeqCst);
+
+        assert_eq!(
+            after_invalidated_read,
+            after_write + 1,
+            "direct write must evict the cached base block"
         );
     }
 
