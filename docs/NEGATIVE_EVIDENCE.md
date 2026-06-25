@@ -921,3 +921,9 @@ Added the metadata/stat-heavy dimension with a clean persisted fixture (`mke2fs 
 | 4K write ext4 | 2.5x slower (MVCC floor, verified) |
 | create/delete btrfs | 3.0x / 5.5x slower (COW-clone volume) |
 frankenfs WINS bulk reads, ext4 create, metadata walk; trails small random/write/delete (per-op MVCC floor) + btrfs writes (deep COW-batching = only remaining lever). Every gap profiled/traced; no contained lever above the measurement noise floor remains.
+
+### 2026-06-25 REFUTED lever: sequential overlay write does NOT coalesce — same as random, per-block-commit-bound (CrimsonFox cc/opus)
+
+Hypothesis: sequential 4K writes might coalesce contiguous blocks into fewer MVCC commits (amortizing the per-commit overhead that makes 4K write 2.5x slower than kernel), so a sequential-write fast path could be a lever. REFUTED by measurement: frankenfs overlay write-bench (32768x 4K, current main) — sequential **795 MiB/s** vs random **867 MiB/s** = essentially the same (random marginally faster, within noise). The write-bench issues one `write_block` → one full MVCC commit PER 4K block regardless of offset, so sequentiality gives no benefit; the per-block commit + copy dominates either way (the verified 2.5x floor applies to both).
+
+IMPLICATION (honest nuance): this 4K-GRANULAR write-bench is the WORST case — one commit per 4K. A real large write (a single `FsOps::write` of e.g. 128KiB) that stages N contiguous blocks into ONE transaction + ONE commit would amortize the commit overhead and be substantially faster than 2.5x; the 4K-granular bench does not measure that batched path. So the 2.5x figure is the small-granular-write floor, not the large-write throughput. No lever from sequential coalescing at the write_block layer (each call is its own op); any large-write amortization lives in the ext4_write multi-block-per-commit path (already batches per FsOps::write call), not here.
