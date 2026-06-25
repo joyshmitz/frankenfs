@@ -589,12 +589,18 @@ impl PersistentMvccStore {
         let next_txn = store_guard.next_txn;
         let next_commit = store_guard.next_commit;
 
-        // Collect all versions
-        let versions_snapshot: Vec<(BlockNumber, Vec<BlockVersion>)> = store_guard
+        // Collect all versions. `versions` is an FxHashMap (93ee0569) whose
+        // iteration order is non-deterministic, so sort by block to keep the
+        // serialized checkpoint byte-for-byte DETERMINISTIC (block-ascending) —
+        // the golden checkpoint + any cross-run/replay comparison depend on it.
+        // (93ee0569 added the flush-path sort but missed this checkpoint one,
+        // leaving `checkpoint_golden_report` failing on main. bd-mvcckptsort.)
+        let mut versions_snapshot: Vec<(BlockNumber, Vec<BlockVersion>)> = store_guard
             .versions
             .iter()
             .map(|(k, v)| (*k, v.clone()))
             .collect();
+        versions_snapshot.sort_unstable_by_key(|(block, _)| *block);
 
         // Write to temp file first (still holding store read lock to block
         // concurrent commits — the file I/O cost is acceptable because
