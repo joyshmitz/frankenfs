@@ -27,6 +27,7 @@ use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use smallvec::{SmallVec, smallvec};
 use std::collections::{BTreeMap, BTreeSet};
+use rustc_hash::FxHashMap;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::Path;
@@ -1514,8 +1515,8 @@ impl MvccEvidenceSink {
 pub struct MvccStore {
     pub(crate) next_txn: u64,
     pub(crate) next_commit: u64,
-    pub(crate) versions: BTreeMap<BlockNumber, Vec<BlockVersion>>,
-    pub(crate) physical_versions: BTreeMap<BlockNumber, Vec<PhysicalBlockVersion>>,
+    pub(crate) versions: FxHashMap<BlockNumber, Vec<BlockVersion>>,
+    pub(crate) physical_versions: FxHashMap<BlockNumber, Vec<PhysicalBlockVersion>>,
     /// Active snapshots: each entry is a `CommitSeq` from which a reader is
     /// still potentially reading.  The set uses a `BTreeMap` so that the
     /// minimum (oldest active snapshot) can be obtained in O(log n).
@@ -1573,8 +1574,8 @@ impl MvccStore {
         Self {
             next_txn: 1,
             next_commit: 1,
-            versions: BTreeMap::new(),
-            physical_versions: BTreeMap::new(),
+            versions: FxHashMap::default(),
+            physical_versions: FxHashMap::default(),
             active_snapshots: BTreeMap::new(),
             force_advanced_releases: BTreeMap::new(),
             ssi_log: Vec::new(),
@@ -3287,17 +3288,22 @@ impl MvccStore {
         let snapshot = self.current_snapshot();
         let mut flushed = 0usize;
 
-        // `versions` is a BTreeMap, so this iterates in ascending block order.
-        // Coalesce maximal runs of contiguous blocks and write each run with a
-        // single `write_contiguous_blocks` (one ranged device write for a
-        // byte-backed device) instead of one `write_block` per block. The bytes
-        // and locations are identical to the scalar path, so the final on-disk
-        // state is unchanged (bd-ryqep).
+        // `versions` is an FxHashMap (bd-mvccmap: O(1) commit/read entry vs the
+        // old BTreeMap's O(log N)), so collect + sort the blocks here to restore
+        // ASCENDING order before coalescing — flush is once per sync, so this one
+        // O(N log N) sort is amortized over many O(1) per-op commits. Then
+        // coalesce maximal runs of contiguous blocks and write each run with a
+        // single `write_contiguous_blocks` (one ranged device write) instead of
+        // one `write_block` per block. Bytes/locations identical to the scalar
+        // path (bd-ryqep), so the on-disk state is unchanged.
         let mut run_start: Option<BlockNumber> = None;
         let mut run_next: u64 = 0; // next block number that would continue the run
         let mut run_buf: Vec<u8> = Vec::new();
 
-        for (block, versions) in &self.versions {
+        let mut sorted_versions: Vec<(&BlockNumber, &Vec<BlockVersion>)> =
+            self.versions.iter().collect();
+        sorted_versions.sort_unstable_by_key(|(block, _)| **block);
+        for (block, versions) in sorted_versions {
             // Binary-search the newest visible version instead of an O(n) reverse
             // linear scan; identical index for an ascending-ordered chain.
             let Some(idx) = newest_visible_index(versions, snapshot.high) else {
