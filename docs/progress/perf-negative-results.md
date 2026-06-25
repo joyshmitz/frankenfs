@@ -15,6 +15,57 @@ met by new profile evidence.
 
 ## BOLD-VERIFY measured verdict - 2026-06-25
 
+### `bd-xmh5g` ffs-btrfs direct COW update descent - REJECT
+
+Lever attempted in a clean scratch worktree:
+`/data/projects/.scratch/frankenfs-ivory-btrfs-update-20260625`.
+The candidate replaced `BtrfsBTree::update`'s current existence-probe plus
+replace-capable insertion path with a direct COW descent that rewrites only the
+path to an existing leaf item, and reused that helper for the non-root
+`insert_then_update` fallback. The benchmark added a same-binary A/B group over
+a multi-level COW tree: 2048 seeded extent items, 512 existing-key updates, old
+model `get` + `upsert` versus direct `update`. The candidate source and bench
+were reverted after measurement.
+
+Measured result: RCH had no admissible remote worker and ran through its local
+fallback, still under the requested `rch exec` wrapper and crate-scoped target:
+
+```bash
+AGENT_NAME=IvoryBirch CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-a \
+  rch exec -- cargo bench --profile release -p ffs-btrfs \
+  --bench cow_write_mutation -- btrfs_cow_direct_update \
+  --warm-up-time 1 --measurement-time 2 --sample-size 10 --noplot
+```
+
+Criterion measured:
+
+- `old_find_then_upsert`: `[1.8556 ms, 1.9392 ms, 1.9942 ms]`
+- `direct_update`: `[1.8019 ms, 1.8619 ms, 1.9155 ms]`
+
+Midpoint old/new is only `1.04x`, and conservative interval ratio is
+`1.8556 / 1.9155 = 0.969x`. This is below the keep threshold and not
+conservative-positive, so the lever is a no-ship.
+
+Kernel ratio: no standalone ext4/btrfs-kernel ratio exists for this internal
+in-memory btrfs COW-tree primitive. It was a candidate for the btrfs
+write/create mutation frontier, but the component movement is too small to
+justify a mounted-kernel rerun. Direct kernel W/L/N is `0/0/1`; internal W/L/N
+is `0/0/1`.
+
+Gates before revert: local `cargo fmt -p ffs-btrfs --check` passed; local
+`git diff --check` passed; local
+`cargo test -p ffs-btrfs update -- --nocapture` passed `13/0`; local
+`cargo check -p ffs-btrfs --all-targets` passed. Post-revert source is
+identical to `HEAD` for `crates/ffs-btrfs/src/lib.rs` and
+`crates/ffs-btrfs/benches/cow_write_mutation.rs`; RCH conformance
+`cargo test -p ffs-harness --test conformance -- --nocapture` passed on
+`ovh-a` with `100 passed / 0 failed / 2 ignored`.
+
+Retry predicate: do not retry direct existing-key COW update as a standalone
+`ffs-btrfs` lever unless a fresh profile shows update descent itself as a
+material hotspot and the new same-worker A/B clears the keep threshold with a
+conservative-positive interval.
+
 ### `bd-9e810` ext4 base-device block cache below MVCC - KEEP
 
 Source is already retained on `main` as `5f266067`:
