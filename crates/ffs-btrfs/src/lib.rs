@@ -9355,6 +9355,65 @@ mod tests {
         );
     }
 
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(96))]
+        /// bd-cowbatch hardened gate: over RANDOM node fanouts, random prefills and
+        /// random insert batches (multi-leaf, split pressure, in-place + clone-path
+        /// mix), `insert_many` must yield a tree LOGICALLY IDENTICAL to inserting
+        /// the same entries one-by-one — catches any in-place COW corruption the
+        /// fixed unit test misses.
+        #[test]
+        fn proptest_insert_many_matches_sequential_bd_cowbatch(
+            max_items in 3_usize..=12,
+            prefill in proptest::collection::vec(0_u64..400, 0..220),
+            batch in proptest::collection::vec(0_u64..400, 1..40),
+        ) {
+            fn pk(oid: u64) -> BtrfsKey {
+                BtrfsKey { objectid: oid, item_type: BTRFS_ITEM_INODE_ITEM, offset: 0 }
+            }
+            fn pp(oid: u64) -> Vec<u8> {
+                oid.to_le_bytes().to_vec()
+            }
+            let mut seq = InMemoryCowBtrfsTree::new(max_items).expect("seq tree");
+            let mut bat = InMemoryCowBtrfsTree::new(max_items).expect("bat tree");
+            let mut present = std::collections::BTreeSet::new();
+            for &oid in &prefill {
+                if present.insert(oid) {
+                    seq.insert(pk(oid), &pp(oid)).expect("seq prefill");
+                    bat.insert(pk(oid), &pp(oid)).expect("bat prefill");
+                }
+            }
+            // Insert-set must be free of duplicates (allow_replace=false), so drop
+            // any batch key already present or repeated within the batch.
+            let mut seen = present.clone();
+            let mut batch_keys = Vec::new();
+            for &oid in &batch {
+                if seen.insert(oid) {
+                    batch_keys.push(oid);
+                }
+            }
+            proptest::prop_assume!(!batch_keys.is_empty());
+            for &oid in &batch_keys {
+                seq.insert(pk(oid), &pp(oid)).expect("seq insert");
+            }
+            let entries: Vec<BtrfsTreeItem> = batch_keys
+                .iter()
+                .map(|&oid| BtrfsTreeItem { key: pk(oid), data: pp(oid).into() })
+                .collect();
+            bat.insert_many(entries, false).expect("bat insert_many");
+            seq.validate_invariants().expect("seq invariants");
+            bat.validate_invariants().expect("bat invariants");
+            let mut all: Vec<u64> = present.iter().copied().collect();
+            all.extend(batch_keys.iter().copied());
+            for &oid in &all {
+                proptest::prop_assert_eq!(
+                    bat.find(&pk(oid)).expect("bat find"),
+                    seq.find(&pk(oid)).expect("seq find")
+                );
+            }
+        }
+    }
+
     fn hex_lower(bytes: &[u8]) -> String {
         let mut out = String::with_capacity(bytes.len() * 2);
         for byte in bytes {
