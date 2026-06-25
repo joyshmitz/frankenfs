@@ -6322,6 +6322,7 @@ impl OpenFs {
             (|| {
                 let base_dev = self.direct_block_device_adapter();
                 let flushed = self.mvcc_store.read().flush_to_device(cx, &base_dev)?;
+                self.clear_ext4_writable_group_desc_cache();
                 // Sync the superblock free-count totals so a device snapshot is
                 // e2fsck-consistent (bd-nd61w); no-op for btrfs / read-only ext4.
                 self.ext4_sync_superblock_free_totals(cx)?;
@@ -9891,6 +9892,41 @@ impl OpenFs {
         true
     }
 
+    /// Cacheability for the parsed group-descriptor cache that is ALSO sound in a
+    /// WRITABLE mount (bd-gdcache). Unlike [`Self::can_cache_ext4_read_only_block`]
+    /// it does not bail on `is_writable()`: a base block is cacheable whenever no
+    /// overlay version shadows it. When the scope carries no snapshot (the write-
+    /// transaction scopes), the store's CURRENT snapshot is used so a GDT block
+    /// written by ANY prior committed transaction (a free-count update from an
+    /// inode/block alloc/free) is detected and the cache is bypassed — i.e. the
+    /// cached descriptor is served ONLY while the on-disk GDT is authoritative
+    /// (no pending overlay write), and the immutable `inode_table` location it
+    /// supplies is always correct. The caller MUST clear `ext4_group_desc_cache`
+    /// on `flush_to_device` (which mutates the base GDT), via
+    /// [`Self::clear_ext4_writable_group_desc_cache`]. This removes a per-op base
+    /// re-read + re-parse + re-verify of the shared GDT block (block 1) on the
+    /// data-write path, where every write resolves the file inode → group desc.
+    fn can_cache_ext4_writable_group_desc(&self, scope: &RequestScope, block: BlockNumber) -> bool {
+        if scope
+            .tx
+            .as_ref()
+            .and_then(|tx| tx.staged_write(block))
+            .is_some()
+        {
+            return false;
+        }
+        let store = self.mvcc_store.read();
+        let snapshot = scope.snapshot.unwrap_or_else(|| store.current_snapshot());
+        store.read_visible(block, snapshot).is_none()
+    }
+
+    /// Invalidate the writable-mode group-descriptor cache after a
+    /// `flush_to_device` makes the base GDT diverge from any cached descriptor
+    /// (bd-gdcache).
+    fn clear_ext4_writable_group_desc_cache(&self) {
+        self.ext4_group_desc_cache.clear();
+    }
+
     pub fn read_group_desc_with_scope(
         &self,
         cx: &Cx,
@@ -9914,7 +9950,7 @@ impl OpenFs {
         })?;
         let desc_len = usize::from(desc_size);
 
-        let cacheable = self.can_cache_ext4_read_only_block(scope, block_num);
+        let cacheable = self.can_cache_ext4_writable_group_desc(scope, block_num);
         if cacheable {
             let cached = self.ext4_group_desc_cache.get(&group);
             if let Some(cached) = cached {
@@ -23138,6 +23174,7 @@ impl OpenFs {
         // that data written through the MVCC store becomes durable on disk.
         let base_dev = self.direct_block_device_adapter();
         let flushed = self.mvcc_store.read().flush_to_device(cx, &base_dev)?;
+        self.clear_ext4_writable_group_desc_cache();
         if flushed > 0 {
             trace!(
                 target: "ffs::ext4::rw",
@@ -23425,6 +23462,7 @@ impl OpenFs {
             // Flush committed MVCC block versions to the underlying device.
             let base_dev = self.direct_block_device_adapter();
             let flushed = self.mvcc_store.read().flush_to_device(cx, &base_dev)?;
+            self.clear_ext4_writable_group_desc_cache();
             if flushed > 0 {
                 trace!(
                     target: "ffs::btrfs::rw",
@@ -28405,6 +28443,7 @@ impl OpenFs {
         }
         let base_dev = self.direct_block_device_adapter();
         self.mvcc_store.read().flush_to_device(cx, &base_dev)?;
+        self.clear_ext4_writable_group_desc_cache();
         Ok(())
     }
 
