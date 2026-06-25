@@ -25951,58 +25951,158 @@ impl OpenFs {
             }
         }
 
-        // Remove old entry and its INODE_REF.
-        self.btrfs_remove_dir_entry(&mut alloc, parent_oid, name, child_dir_index)?;
-        Self::btrfs_remove_inode_ref(&mut alloc, child.child_objectid, parent_oid, name)?;
-
-        // If target exists, remove it first and handle nlink cleanup.
-        let target = match self.btrfs_lookup_dir_entry(&alloc, new_parent_oid, new_name) {
-            Ok(target) => Some(target),
-            Err(FfsError::NotFound(_)) => None,
-            Err(err) => return Err(err),
+        // bd-cowbatch: a SAME-DIR rename with no target collision and single old
+        // entries is exactly 3 clean key-removes + 3 clean key-inserts + one parent
+        // INODE_ITEM update — batch it via remove_many + insert_many_then_update
+        // instead of ~6 separate path-COWs. The child INODE_ITEM is NOT touched by
+        // rename (only parent timestamps), so this is simpler than delete's purge.
+        // CONSERVATIVE so there is NO false positive (=> no data-movement risk):
+        // cross-parent, an existing target, a multi-entry old DIR_ITEM/INODE_REF, or
+        // any new-name hash collision (incl old==new hash) all fall back to the
+        // proven per-op path. Byte-identical to it (same keys, same fresh DIR_INDEX
+        // seq, same final parent value; remove_many/insert_many byte-identical to
+        // sequential).
+        let old_dir_item_key = BtrfsKey {
+            objectid: parent_oid,
+            item_type: BTRFS_ITEM_DIR_ITEM,
+            offset: u64::from(ffs_btrfs::btrfs_name_hash(name)),
         };
-        if let Some(target) = target {
-            let target_oid = target.child_objectid;
-            let target_is_dir = target.file_type == BTRFS_FT_DIR;
-            let target_dir_index =
-                Self::btrfs_require_inode_ref_index(&alloc, target_oid, new_parent_oid, new_name)?;
-            self.btrfs_remove_dir_entry(&mut alloc, new_parent_oid, new_name, target_dir_index)?;
-            Self::btrfs_remove_inode_ref(&mut alloc, target_oid, new_parent_oid, new_name)?;
-            // Removing the overwritten target drops its single link (-1 for both
-            // files and btrfs directories); the new parent's nlink is unchanged
-            // (bd-egyf6). `target_is_dir` no longer affects the link math.
-            let _ = target_is_dir;
-            self.btrfs_adjust_nlink(&mut alloc, target_oid, -1, secs, nanos)?;
-            let target_inode = self.btrfs_read_inode_from_tree(&alloc, target_oid)?;
-            if target_inode.nlink == 0 {
-                debug_assert!(target_will_be_purged);
-                self.btrfs_purge_inode(&mut alloc, target_oid)?;
+        let new_dir_item_key = BtrfsKey {
+            objectid: new_parent_oid,
+            item_type: BTRFS_ITEM_DIR_ITEM,
+            offset: u64::from(ffs_btrfs::btrfs_name_hash(new_name)),
+        };
+        let ref_key = BtrfsKey {
+            objectid: child.child_objectid,
+            item_type: BTRFS_ITEM_INODE_REF,
+            offset: parent_oid,
+        };
+        let rename_batchable = parent_oid == new_parent_oid && {
+            let old_dir_items = alloc.fs_tree.range(&old_dir_item_key, &old_dir_item_key).unwrap_or_default();
+            let new_dir_items = alloc.fs_tree.range(&new_dir_item_key, &new_dir_item_key).unwrap_or_default();
+            let old_refs = alloc.fs_tree.range(&ref_key, &ref_key).unwrap_or_default();
+            let single_item_len = child.try_to_bytes().map(|b| b.len());
+            let single_ref_len =
+                Self::btrfs_serialize_inode_ref_payload(&[(child_dir_index, name.to_vec())]).map(|b| b.len());
+            new_dir_items.is_empty()
+                && old_dir_items.len() == 1
+                && matches!(single_item_len, Ok(len) if old_dir_items[0].1.len() == len)
+                && old_refs.len() == 1
+                && matches!(single_ref_len, Ok(len) if old_refs[0].1.len() == len)
+        };
+        if rename_batchable {
+            let new_seq = Self::btrfs_consume_dir_index_seq(&mut alloc, parent_oid)?;
+            let new_dir_item = BtrfsDirItem {
+                child_objectid: child.child_objectid,
+                child_key_type: child.child_key_type,
+                child_key_offset: child.child_key_offset,
+                file_type: child.file_type,
+                name: new_name.to_vec(),
+            };
+            let new_dir_bytes = new_dir_item.try_to_bytes().map_err(|e| parse_to_ffs_error(&e))?;
+            let new_ref_payload =
+                Self::btrfs_serialize_inode_ref_payload(&[(new_seq, new_name.to_vec())])?;
+            let old_dir_index_key = BtrfsKey {
+                objectid: parent_oid,
+                item_type: BTRFS_ITEM_DIR_INDEX,
+                offset: child_dir_index,
+            };
+            let new_dir_index_key = BtrfsKey {
+                objectid: parent_oid,
+                item_type: BTRFS_ITEM_DIR_INDEX,
+                offset: new_seq,
+            };
+            let mut parent_inode = self.btrfs_read_inode_from_tree(&alloc, parent_oid)?;
+            let delta = Self::btrfs_dir_entry_size_delta(new_name.len())
+                - Self::btrfs_dir_entry_size_delta(name.len());
+            parent_inode.size = i64::try_from(parent_inode.size)
+                .ok()
+                .and_then(|size| size.checked_add(delta))
+                .and_then(|size| u64::try_from(size).ok())
+                .ok_or_else(|| FfsError::Corruption {
+                    block: 0,
+                    detail: format!(
+                        "btrfs dir {parent_oid} rename size adjustment out of range (size={}, delta={delta})",
+                        parent_inode.size
+                    ),
+                })?;
+            parent_inode.mtime_sec = secs;
+            parent_inode.mtime_nsec = nanos;
+            parent_inode.ctime_sec = secs;
+            parent_inode.ctime_nsec = nanos;
+            let parent_key = BtrfsKey {
+                objectid: parent_oid,
+                item_type: BTRFS_ITEM_INODE_ITEM,
+                offset: 0,
+            };
+            alloc
+                .fs_tree
+                .remove_many(&[old_dir_item_key, old_dir_index_key, ref_key])
+                .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+            let parent_bytes = parent_inode.to_bytes();
+            let inserts: [(BtrfsKey, &[u8]); 3] = [
+                (new_dir_item_key, new_dir_bytes.as_slice()),
+                (new_dir_index_key, new_dir_bytes.as_slice()),
+                (ref_key, new_ref_payload.as_slice()),
+            ];
+            alloc
+                .fs_tree
+                .insert_many_then_update(&inserts, &parent_key, parent_bytes.as_slice())
+                .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+        } else {
+            // Remove old entry and its INODE_REF.
+            self.btrfs_remove_dir_entry(&mut alloc, parent_oid, name, child_dir_index)?;
+            Self::btrfs_remove_inode_ref(&mut alloc, child.child_objectid, parent_oid, name)?;
+
+            // If target exists, remove it first and handle nlink cleanup.
+            let target = match self.btrfs_lookup_dir_entry(&alloc, new_parent_oid, new_name) {
+                Ok(target) => Some(target),
+                Err(FfsError::NotFound(_)) => None,
+                Err(err) => return Err(err),
+            };
+            if let Some(target) = target {
+                let target_oid = target.child_objectid;
+                let target_is_dir = target.file_type == BTRFS_FT_DIR;
+                let target_dir_index =
+                    Self::btrfs_require_inode_ref_index(&alloc, target_oid, new_parent_oid, new_name)?;
+                self.btrfs_remove_dir_entry(&mut alloc, new_parent_oid, new_name, target_dir_index)?;
+                Self::btrfs_remove_inode_ref(&mut alloc, target_oid, new_parent_oid, new_name)?;
+                // Removing the overwritten target drops its single link (-1 for both
+                // files and btrfs directories); the new parent's nlink is unchanged
+                // (bd-egyf6). `target_is_dir` no longer affects the link math.
+                let _ = target_is_dir;
+                self.btrfs_adjust_nlink(&mut alloc, target_oid, -1, secs, nanos)?;
+                let target_inode = self.btrfs_read_inode_from_tree(&alloc, target_oid)?;
+                if target_inode.nlink == 0 {
+                    debug_assert!(target_will_be_purged);
+                    self.btrfs_purge_inode(&mut alloc, target_oid)?;
+                }
             }
-        }
 
-        // Insert in new location.
-        let dir_item = BtrfsDirItem {
-            child_objectid: child.child_objectid,
-            child_key_type: child.child_key_type,
-            child_key_offset: child.child_key_offset,
-            file_type: child.file_type,
-            name: new_name.to_vec(),
-        };
-        let dir_index_seq = self.btrfs_insert_dir_entry(&mut alloc, new_parent_oid, &dir_item)?;
-        Self::btrfs_insert_inode_ref(
-            &mut alloc,
-            child.child_objectid,
-            new_parent_oid,
-            new_name,
-            dir_index_seq,
-        )?;
+            // Insert in new location.
+            let dir_item = BtrfsDirItem {
+                child_objectid: child.child_objectid,
+                child_key_type: child.child_key_type,
+                child_key_offset: child.child_key_offset,
+                file_type: child.file_type,
+                name: new_name.to_vec(),
+            };
+            let dir_index_seq = self.btrfs_insert_dir_entry(&mut alloc, new_parent_oid, &dir_item)?;
+            Self::btrfs_insert_inode_ref(
+                &mut alloc,
+                child.child_objectid,
+                new_parent_oid,
+                new_name,
+                dir_index_seq,
+            )?;
 
-        // Moving a directory across parents does not change either parent's
-        // nlink in btrfs (directories stay at nlink == 1) — bd-egyf6.
+            // Moving a directory across parents does not change either parent's
+            // nlink in btrfs (directories stay at nlink == 1) — bd-egyf6.
 
-        self.btrfs_touch_inode_times(&mut alloc, parent_oid, secs, nanos)?;
-        if new_parent_oid != parent_oid {
-            self.btrfs_touch_inode_times(&mut alloc, new_parent_oid, secs, nanos)?;
+            self.btrfs_touch_inode_times(&mut alloc, parent_oid, secs, nanos)?;
+            if new_parent_oid != parent_oid {
+                self.btrfs_touch_inode_times(&mut alloc, new_parent_oid, secs, nanos)?;
+            }
         }
         drop(alloc);
 
