@@ -935,6 +935,7 @@ dependencies = [
  "ffs-types",
  "proptest",
  "rayon",
+ "rustc-hash",
  "serde_json",
  "sha2 0.11.0",
  "tempfile",
