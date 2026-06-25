@@ -25101,11 +25101,12 @@ impl OpenFs {
             item_type: BTRFS_ITEM_INODE_ITEM,
             offset: 0,
         };
-        alloc
-            .fs_tree
-            .insert(inode_key, &inode.to_bytes())
-            .map_err(|e| btrfs_mutation_to_ffs(&e))?;
-
+        // bd-cowbatch (identical shape to btrfs_create): a fresh mkdir's fs-tree
+        // items are all clean inserts (DIR_ITEM merges only on name-hash collision),
+        // so batch INODE_ITEM + DIR_ITEM + DIR_INDEX + INODE_REF + the coalesced
+        // parent INODE_ITEM update (i_size += 2*name_len AND mtime/ctime) into ONE
+        // insert_many_then_update transaction. Collision falls back to per-op.
+        // btrfs does NOT bump the parent's nlink for a new subdirectory (bd-egyf6).
         let dir_item = BtrfsDirItem {
             child_objectid: new_oid,
             child_key_type: BTRFS_ITEM_INODE_ITEM,
@@ -25113,14 +25114,73 @@ impl OpenFs {
             file_type: BTRFS_FT_DIR,
             name: name.to_vec(),
         };
-        let dir_index_seq = self.btrfs_insert_dir_entry(&mut alloc, parent_oid, &dir_item)?;
-
-        // Add INODE_REF for parent backref (index must match DIR_INDEX.offset).
-        Self::btrfs_insert_inode_ref(&mut alloc, new_oid, parent_oid, name, dir_index_seq)?;
-
-        // btrfs does NOT bump the parent's nlink for a new subdirectory
-        // (directories stay at nlink == 1) — bd-egyf6.
-        self.btrfs_touch_inode_times(&mut alloc, parent_oid, secs, nanos)?;
+        let dir_item_key = BtrfsKey {
+            objectid: parent_oid,
+            item_type: BTRFS_ITEM_DIR_ITEM,
+            offset: u64::from(ffs_btrfs::btrfs_name_hash(name)),
+        };
+        let dir_item_collision = alloc
+            .fs_tree
+            .range(&dir_item_key, &dir_item_key)
+            .is_ok_and(|items| !items.is_empty());
+        if dir_item_collision {
+            alloc
+                .fs_tree
+                .insert(inode_key, &inode.to_bytes())
+                .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+            let dir_index_seq = self.btrfs_insert_dir_entry(&mut alloc, parent_oid, &dir_item)?;
+            Self::btrfs_insert_inode_ref(&mut alloc, new_oid, parent_oid, name, dir_index_seq)?;
+            self.btrfs_touch_inode_times(&mut alloc, parent_oid, secs, nanos)?;
+        } else {
+            let dir_index_seq = Self::btrfs_consume_dir_index_seq(&mut alloc, parent_oid)?;
+            let dir_bytes = dir_item.try_to_bytes().map_err(|e| parse_to_ffs_error(&e))?;
+            let ref_payload =
+                Self::btrfs_serialize_inode_ref_payload(&[(dir_index_seq, name.to_vec())])?;
+            let inode_bytes = inode.to_bytes();
+            let dir_index_key = BtrfsKey {
+                objectid: parent_oid,
+                item_type: BTRFS_ITEM_DIR_INDEX,
+                offset: dir_index_seq,
+            };
+            let ref_key = BtrfsKey {
+                objectid: new_oid,
+                item_type: BTRFS_ITEM_INODE_REF,
+                offset: parent_oid,
+            };
+            let mut parent_inode = self.btrfs_read_inode_from_tree(&alloc, parent_oid)?;
+            let size_delta = Self::btrfs_dir_entry_size_delta(name.len());
+            parent_inode.size = i64::try_from(parent_inode.size)
+                .ok()
+                .and_then(|size| size.checked_add(size_delta))
+                .and_then(|size| u64::try_from(size).ok())
+                .ok_or_else(|| FfsError::Corruption {
+                    block: 0,
+                    detail: format!(
+                        "btrfs dir {parent_oid} size adjustment out of range (size={}, delta={size_delta})",
+                        parent_inode.size
+                    ),
+                })?;
+            parent_inode.mtime_sec = secs;
+            parent_inode.mtime_nsec = nanos;
+            parent_inode.ctime_sec = secs;
+            parent_inode.ctime_nsec = nanos;
+            let parent_key = BtrfsKey {
+                objectid: parent_oid,
+                item_type: BTRFS_ITEM_INODE_ITEM,
+                offset: 0,
+            };
+            let parent_bytes = parent_inode.to_bytes();
+            let inserts: [(BtrfsKey, &[u8]); 4] = [
+                (inode_key, inode_bytes.as_slice()),
+                (dir_item_key, dir_bytes.as_slice()),
+                (dir_index_key, dir_bytes.as_slice()),
+                (ref_key, ref_payload.as_slice()),
+            ];
+            alloc
+                .fs_tree
+                .insert_many_then_update(&inserts, &parent_key, parent_bytes.as_slice())
+                .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+        }
         drop(alloc);
 
         Ok(self.btrfs_inode_to_attr(new_oid, &inode))
