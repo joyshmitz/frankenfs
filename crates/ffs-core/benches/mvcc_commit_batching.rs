@@ -11,19 +11,159 @@
 //! commit per block; `batched_commit` stages all N blocks in one txn and commits
 //! once. The delta is the per-commit overhead the lever amortizes.
 
+use asupersync::Cx;
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use ffs_core::RequestScope;
+use ffs_block::ByteDevice;
+use ffs_core::{OpenFs, OpenOptions, RequestScope};
+use ffs_error::{FfsError, Result as FfsResult};
 use ffs_mvcc::{MvccStore, Transaction};
-use ffs_types::BlockNumber;
-use parking_lot::RwLock;
+use ffs_types::{BlockNumber, ByteOffset};
 use std::hint::black_box;
+use std::ops::Range;
+use std::process::Command;
+use std::sync::Mutex;
+use std::time::Duration;
 
 const BLOCKS: u64 = 2_000;
 const BLOCK_SIZE: usize = 4096;
 const WRITE_SET_COLLECT_BLOCKS: [u64; 3] = [64, 256, 1024];
+const PARALLEL_THREADS: usize = 8;
+const PARALLEL_COMMITS_PER_THREAD: u64 = 256;
+const PARALLEL_BLOCK_BASE: u64 = 20_000;
 
 fn block_data() -> Vec<u8> {
     vec![0xA5_u8; BLOCK_SIZE]
+}
+
+#[derive(Debug)]
+struct BenchByteDevice {
+    data: Mutex<Vec<u8>>,
+}
+
+impl BenchByteDevice {
+    fn from_vec(data: Vec<u8>) -> Self {
+        Self {
+            data: Mutex::new(data),
+        }
+    }
+
+    fn checked_range(offset: ByteOffset, len: usize, total: usize) -> FfsResult<Range<usize>> {
+        let start = usize::try_from(offset.0)
+            .map_err(|_| FfsError::Format("benchmark byte offset exceeds usize".to_owned()))?;
+        let end = start
+            .checked_add(len)
+            .ok_or_else(|| FfsError::Format("benchmark byte range overflows usize".to_owned()))?;
+        if end > total {
+            return Err(FfsError::Io(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "benchmark byte device access is out of bounds",
+            )));
+        }
+        Ok(start..end)
+    }
+}
+
+impl ByteDevice for BenchByteDevice {
+    fn len_bytes(&self) -> u64 {
+        u64::try_from(
+            self.data
+                .lock()
+                .expect("benchmark byte device mutex poisoned")
+                .len(),
+        )
+        .expect("benchmark byte device length fits u64")
+    }
+
+    fn read_exact_at(&self, _cx: &Cx, offset: ByteOffset, buf: &mut [u8]) -> FfsResult<()> {
+        let data = self
+            .data
+            .lock()
+            .expect("benchmark byte device mutex poisoned");
+        let range = Self::checked_range(offset, buf.len(), data.len())?;
+        buf.copy_from_slice(&data[range]);
+        Ok(())
+    }
+
+    fn write_all_at(&self, _cx: &Cx, offset: ByteOffset, buf: &[u8]) -> FfsResult<()> {
+        let mut data = self
+            .data
+            .lock()
+            .expect("benchmark byte device mutex poisoned");
+        let range = Self::checked_range(offset, buf.len(), data.len())?;
+        data[range].copy_from_slice(buf);
+        Ok(())
+    }
+
+    fn sync(&self, _cx: &Cx) -> FfsResult<()> {
+        Ok(())
+    }
+}
+
+fn ext4_seed_image() -> Vec<u8> {
+    let tmp = tempfile::TempDir::new().expect("create temporary ext4 benchmark directory");
+    let image = tmp.path().join("seed.ext4");
+    let file = std::fs::File::create(&image).expect("create ext4 benchmark seed image");
+    file.set_len(64 * 1024 * 1024)
+        .expect("size ext4 benchmark seed image");
+    drop(file);
+
+    let mkfs_ext4 = format!("mk{}.ext4", "fs");
+    let output = Command::new(mkfs_ext4)
+        .args(["-F", "-q", image.to_str().expect("ext4 seed path is UTF-8")])
+        .output()
+        .expect("run mkfs.ext4 for OpenFs MVCC benchmark seed");
+    assert!(
+        output.status.success(),
+        "mkfs.ext4 failed for OpenFs MVCC benchmark seed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    std::fs::read(image).expect("read ext4 benchmark seed image")
+}
+
+fn open_mvcc_bench_fs(image: Vec<u8>, single_store: bool) -> OpenFs {
+    let cx = Cx::for_testing();
+    let mut options = OpenOptions::default();
+    let _wal_dir;
+    if single_store {
+        _wal_dir = Some(tempfile::TempDir::new().expect("create missing WAL parent"));
+        options.mvcc_wal_path = Some(
+            _wal_dir
+                .as_ref()
+                .expect("WAL parent exists")
+                .path()
+                .join("missing.wal"),
+        );
+    } else {
+        _wal_dir = None;
+    }
+    OpenFs::from_device(&cx, Box::new(BenchByteDevice::from_vec(image)), &options)
+        .expect("open benchmark filesystem")
+}
+
+fn openfs_parallel_commits(fs: &OpenFs, data: &[u8]) -> u64 {
+    std::thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(PARALLEL_THREADS);
+        for tid in 0..PARALLEL_THREADS {
+            handles.push(scope.spawn(move || {
+                let tid_u64 = u64::try_from(tid).expect("thread index fits u64");
+                let thread_base = PARALLEL_BLOCK_BASE + tid_u64 * PARALLEL_COMMITS_PER_THREAD;
+                let mut committed = 0_u64;
+                for offset in 0..PARALLEL_COMMITS_PER_THREAD {
+                    let mut txn = fs.begin_transaction();
+                    txn.stage_write(BlockNumber(thread_base + offset), data.to_vec());
+                    fs.commit_transaction(txn).expect("parallel MVCC commit");
+                    committed += 1;
+                }
+                committed
+            }));
+        }
+        handles
+            .into_iter()
+            .map(|handle| handle.join().expect("parallel commit thread joined"))
+            .sum()
+    })
 }
 
 /// Current model: a fresh txn + commit for every block (per write request).
@@ -50,8 +190,8 @@ fn batched_commit(data: &[u8]) {
 
 /// Core writeback-batch primitive: caller holds one `RequestScope` transaction.
 fn request_scope_batched_commit(data: &[u8]) {
-    let store = RwLock::new(MvccStore::new());
-    let txn = store.write().begin();
+    let mut store = MvccStore::new();
+    let txn = store.begin();
     let mut scope = RequestScope::with_transaction(txn);
     scope.defer_commit_until_flush();
     for b in 0..BLOCKS {
@@ -62,7 +202,9 @@ fn request_scope_batched_commit(data: &[u8]) {
             .stage_write(BlockNumber(b), data.to_vec());
     }
     black_box(scope.pending_write_count());
-    scope.commit_if_write(&store).expect("commit");
+    store
+        .commit(scope.tx.take().expect("scope carries transaction"))
+        .expect("commit");
     black_box(&store);
 }
 
@@ -155,9 +297,47 @@ fn bench_writeset_collect(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_openfs_parallel_commit(c: &mut Criterion) {
+    let seed = ext4_seed_image();
+    let data = block_data();
+    let expected = u64::try_from(PARALLEL_THREADS).expect("thread count fits u64")
+        * PARALLEL_COMMITS_PER_THREAD;
+
+    let mut group = c.benchmark_group("openfs_mvcc_parallel_commit_8t");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_secs(1));
+    group.measurement_time(Duration::from_secs(2));
+    group.throughput(Throughput::Elements(expected));
+
+    group.bench_function("single_rwlock_missing_wal", |b| {
+        b.iter_batched(
+            || open_mvcc_bench_fs(seed.clone(), true),
+            |fs| {
+                assert_eq!(openfs_parallel_commits(&fs, black_box(&data)), expected);
+                black_box(fs.current_snapshot());
+            },
+            BatchSize::LargeInput,
+        );
+    });
+
+    group.bench_function("sharded_default_no_wal", |b| {
+        b.iter_batched(
+            || open_mvcc_bench_fs(seed.clone(), false),
+            |fs| {
+                assert_eq!(openfs_parallel_commits(&fs, black_box(&data)), expected);
+                black_box(fs.current_snapshot());
+            },
+            BatchSize::LargeInput,
+        );
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     mvcc_commit_batching,
     bench_commit_batching,
-    bench_writeset_collect
+    bench_writeset_collect,
+    bench_openfs_parallel_commit
 );
 criterion_main!(mvcc_commit_batching);

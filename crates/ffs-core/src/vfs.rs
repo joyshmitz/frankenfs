@@ -4,6 +4,7 @@
 //! test harness) consume. Format-specific implementations (ext4, btrfs) live
 //! behind the [`FsOps`] trait so that callers are filesystem-agnostic.
 
+use crate::fs_mvcc_store::FsMvccStore;
 use asupersync::Cx;
 use ffs_error::FfsError;
 use ffs_types::{CommitSeq, InodeNumber, Snapshot};
@@ -489,13 +490,13 @@ impl RequestScope {
     ///
     /// Returns the commit sequence on success, or an error if the commit failed.
     /// Returns `Ok(CommitSeq(0))` if no transaction was attached.
-    pub fn commit_if_write(
+    pub(crate) fn commit_if_write(
         &mut self,
-        mvcc_store: &parking_lot::RwLock<ffs_mvcc::MvccStore>,
+        mvcc_store: &FsMvccStore,
     ) -> ffs_error::Result<CommitSeq> {
         self.tx.take().map_or(Ok(CommitSeq(0)), |tx| {
             let tx_id = tx.id().0;
-            mvcc_store.write().commit(tx).map_err(|error| match error {
+            mvcc_store.commit(tx).map_err(|error| match error {
                 ffs_mvcc::CommitError::Conflict { block, .. }
                 | ffs_mvcc::CommitError::ChainBackpressure { block, .. } => {
                     ffs_error::FfsError::MvccConflict {

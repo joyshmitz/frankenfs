@@ -3299,10 +3299,8 @@ fn mvcc_stats_cmd(path: &PathBuf, json: bool) -> Result<()> {
     let open_fs = OpenFs::open_with_options(&cx, path, &open_opts)
         .with_context(|| format!("failed to open image: {}", path.display()))?;
 
-    let mvcc_guard = open_fs.mvcc_store().read();
-    let block_stats = mvcc_guard.block_version_stats();
-    let ebr_stats = mvcc_guard.ebr_stats();
-    drop(mvcc_guard);
+    let block_stats = open_fs.mvcc_block_version_stats();
+    let ebr_stats = open_fs.mvcc_ebr_stats();
 
     let output = MvccStatsOutput {
         block_versions: BlockVersionStatsOutput {
@@ -3671,15 +3669,13 @@ fn encode_btrfs_chunk_entry_bytes(chunk: &ffs_ondisk::BtrfsChunkEntry) -> Vec<u8
 }
 
 fn build_mvcc_info(open_fs: &OpenFs) -> MvccInfoOutput {
-    let mvcc_guard = open_fs.mvcc_store().read();
-    let current_commit_seq = mvcc_guard.current_snapshot().high.0;
-    let active_snapshot_count = mvcc_guard.active_snapshot_count();
-    let oldest_active_snapshot = mvcc_guard.watermark().map(|seq| seq.0);
-    let block_stats = mvcc_guard.block_version_stats();
-    let total_versioned_entries = mvcc_guard.version_count();
-    let ebr_stats = mvcc_guard.ebr_stats();
-    let txn_outcomes = mvcc_guard.transaction_outcome_stats();
-    drop(mvcc_guard);
+    let current_commit_seq = open_fs.current_snapshot().high.0;
+    let active_snapshot_count = open_fs.mvcc_active_snapshot_count();
+    let oldest_active_snapshot = open_fs.mvcc_oldest_active_snapshot().map(|seq| seq.0);
+    let block_stats = open_fs.mvcc_block_version_stats();
+    let total_versioned_entries = open_fs.mvcc_version_count();
+    let ebr_stats = open_fs.mvcc_ebr_stats();
+    let txn_outcomes = open_fs.mvcc_transaction_outcome_stats();
 
     let wal_replay = build_wal_replay_info(open_fs);
     if let Some(wal) = &wal_replay {

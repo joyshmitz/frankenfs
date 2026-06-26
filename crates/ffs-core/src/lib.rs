@@ -4,6 +4,8 @@
 pub mod degradation;
 /// NFS-style file handles for `name_to_handle_at(2)` / `open_by_handle_at(2)`.
 pub mod file_handle;
+/// MVCC-store lock-model abstraction for the parallel-write wiring.
+mod fs_mvcc_store;
 /// VFS semantics layer: filesystem-agnostic types and the [`vfs::FsOps`] trait.
 pub mod vfs;
 
@@ -59,7 +61,10 @@ use ffs_journal::{
 };
 use ffs_mvcc::persist::WalRecoveryReport;
 use ffs_mvcc::wal_replay::{ReplayOutcome as MvccReplayOutcome, TailPolicy, WalReplayEngine};
-use ffs_mvcc::{CommitError, MergeProof, MvccBlockDevice, MvccStore, Transaction};
+use ffs_mvcc::{
+    BlockVersionStats, CommitError, EbrVersionStats, MergeProof, MvccStore, Transaction,
+    TransactionOutcomeStats,
+};
 use ffs_ondisk::{
     BtrfsChunkEntry, BtrfsSuperblock, EXT4_ERROR_FS, EXT4_ORPHAN_FS, EXT4_VALID_FS, Ext4DirEntry,
     Ext4Extent, Ext4FileType, Ext4GroupDesc, Ext4ImageReader, Ext4Inode, Ext4Superblock, Ext4Xattr,
@@ -73,6 +78,7 @@ use ffs_types::{
     Snapshot,
 };
 use ffs_xattr::{XattrReadAccess, XattrWriteAccess};
+use fs_mvcc_store::{FsMvccBlockDevice, FsMvccStore};
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -884,7 +890,7 @@ pub struct OpenFs {
     ///
     /// Shared across all snapshots/transactions that operate on this filesystem.
     /// Writes stage versions here; reads check here before falling back to device.
-    mvcc_store: Arc<RwLock<MvccStore>>,
+    mvcc_store: Arc<FsMvccStore>,
     /// Optional JBD2 writer for ext4 compatibility-mode write path.
     ///
     /// When present, `commit_transaction_journaled` journals writes to the
@@ -1447,7 +1453,6 @@ const _: () = {
 
 impl std::fmt::Debug for OpenFs {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mvcc_guard = self.mvcc_store.read();
         f.debug_struct("OpenFs")
             .field("flavor", &self.flavor)
             .field("ext4_geometry", &self.ext4_geometry)
@@ -1465,8 +1470,11 @@ impl std::fmt::Debug for OpenFs {
                 &self.ext4_forced_read_only.load(Ordering::SeqCst),
             )
             .field("dev_len", &self.dev.len_bytes())
-            .field("mvcc_version_count", &mvcc_guard.version_count())
-            .field("mvcc_active_snapshots", &mvcc_guard.active_snapshot_count())
+            .field("mvcc_version_count", &self.mvcc_store.version_count())
+            .field(
+                "mvcc_active_snapshots",
+                &self.mvcc_store.active_snapshot_count(),
+            )
             .field("jbd2_writer", &self.jbd2_writer.is_some())
             .field("writable", &self.is_writable())
             .field("repair_lifecycle", &self.repair_flush_lifecycle.is_some())
@@ -3767,9 +3775,9 @@ impl OpenFs {
     /// and an empty store is returned (read-only fallback).
     fn init_mvcc_store(
         options: &OpenOptions,
-    ) -> Result<(Arc<RwLock<MvccStore>>, Option<WalRecoveryReport>), FfsError> {
+    ) -> Result<(Arc<FsMvccStore>, Option<WalRecoveryReport>), FfsError> {
         let Some(wal_path) = &options.mvcc_wal_path else {
-            return Ok((Arc::new(RwLock::new(MvccStore::new())), None));
+            return Ok((Arc::new(FsMvccStore::sharded()), None));
         };
 
         if !wal_path.exists() {
@@ -3777,7 +3785,7 @@ impl OpenFs {
                 wal_path = %wal_path.display(),
                 "mvcc_wal_not_found"
             );
-            return Ok((Arc::new(RwLock::new(MvccStore::new())), None));
+            return Ok((Arc::new(FsMvccStore::single()), None));
         }
 
         let wal_size = std::fs::metadata(wal_path).map_or(0, |m| m.len());
@@ -3786,7 +3794,7 @@ impl OpenFs {
                 wal_path = %wal_path.display(),
                 "mvcc_wal_empty"
             );
-            return Ok((Arc::new(RwLock::new(MvccStore::new())), None));
+            return Ok((Arc::new(FsMvccStore::single()), None));
         }
 
         info!(
@@ -3805,7 +3813,7 @@ impl OpenFs {
                 size = wal_bytes.len(),
                 "mvcc_wal_too_small"
             );
-            return Ok((Arc::new(RwLock::new(MvccStore::new())), None));
+            return Ok((Arc::new(FsMvccStore::single()), None));
         }
 
         // Validate header.
@@ -3815,7 +3823,7 @@ impl OpenFs {
                 error = %e,
                 "mvcc_wal_bad_header"
             );
-            return Ok((Arc::new(RwLock::new(MvccStore::new())), None));
+            return Ok((Arc::new(FsMvccStore::single()), None));
         }
 
         let data = &wal_bytes[header_size..];
@@ -3847,7 +3855,10 @@ impl OpenFs {
                     "mvcc_wal_replay_done"
                 );
 
-                Ok((Arc::new(RwLock::new(store)), Some(recovery)))
+                Ok((
+                    Arc::new(FsMvccStore::Single(RwLock::new(store))),
+                    Some(recovery),
+                ))
             }
             Err(e) => {
                 // FailFast policy triggered — fall back to empty store.
@@ -3864,7 +3875,7 @@ impl OpenFs {
                     wal_total_bytes: wal_size,
                     ..WalRecoveryReport::default()
                 };
-                Ok((Arc::new(RwLock::new(MvccStore::new())), Some(recovery)))
+                Ok((Arc::new(FsMvccStore::single()), Some(recovery)))
             }
         }
     }
@@ -5966,13 +5977,39 @@ impl OpenFs {
 
     // ── MVCC transaction API ─────────────────────────────────────────
 
-    /// Get the shared MVCC store for this filesystem.
-    ///
-    /// The returned `Arc<RwLock<MvccStore>>` can be cloned and used to create
-    /// `MvccBlockDevice` wrappers or access versioned data directly.
     #[must_use]
-    pub fn mvcc_store(&self) -> &Arc<RwLock<MvccStore>> {
-        &self.mvcc_store
+    pub fn mvcc_block_version_stats(&self) -> BlockVersionStats {
+        self.mvcc_store.block_version_stats()
+    }
+
+    #[must_use]
+    pub fn mvcc_ebr_stats(&self) -> EbrVersionStats {
+        self.mvcc_store.ebr_stats()
+    }
+
+    #[must_use]
+    pub fn mvcc_transaction_outcome_stats(&self) -> TransactionOutcomeStats {
+        self.mvcc_store.transaction_outcome_stats()
+    }
+
+    #[must_use]
+    pub fn mvcc_active_snapshot_count(&self) -> usize {
+        self.mvcc_store.active_snapshot_count()
+    }
+
+    #[must_use]
+    pub fn mvcc_oldest_active_snapshot(&self) -> Option<CommitSeq> {
+        self.mvcc_store.watermark()
+    }
+
+    #[must_use]
+    pub fn mvcc_version_count(&self) -> usize {
+        self.mvcc_store.version_count()
+    }
+
+    #[must_use]
+    pub fn mvcc_read_visible(&self, block: BlockNumber, snapshot: Snapshot) -> Option<Vec<u8>> {
+        self.mvcc_store.read_visible(block, snapshot)
     }
 
     /// Get the current snapshot sequence for new read-only operations.
@@ -5981,7 +6018,7 @@ impl OpenFs {
     /// at the start of their operation and use it throughout.
     #[must_use]
     pub fn current_snapshot(&self) -> Snapshot {
-        let snap = self.mvcc_store.read().current_snapshot();
+        let snap = self.mvcc_store.current_snapshot();
         trace!(
             target: "ffs::mvcc",
             snapshot_high = snap.high.0,
@@ -5999,7 +6036,7 @@ impl OpenFs {
     /// # Logging
     /// - `txn_begin`: transaction ID and snapshot sequence
     pub fn begin_transaction(&self) -> Transaction {
-        let txn = self.mvcc_store.write().begin();
+        let txn = self.mvcc_store.begin();
         debug!(
             target: "ffs::mvcc",
             txn_id = txn.id.0,
@@ -6036,7 +6073,7 @@ impl OpenFs {
         );
 
         let start = std::time::Instant::now();
-        let result = self.mvcc_store.write().commit(txn);
+        let result = self.mvcc_store.commit(txn);
         let duration_us = start.elapsed().as_micros() as u64;
 
         match &result {
@@ -6142,7 +6179,7 @@ impl OpenFs {
         );
 
         let start = std::time::Instant::now();
-        let result = self.mvcc_store.write().commit_ssi(txn);
+        let result = self.mvcc_store.commit_ssi(txn);
         let duration_us = start.elapsed().as_micros() as u64;
 
         match &result {
@@ -6234,6 +6271,12 @@ impl OpenFs {
     /// can be used to atomically journal block writes before committing
     /// to the MVCC store.
     pub fn attach_jbd2_writer(&mut self, writer: Jbd2Writer) {
+        if self.mvcc_store.is_sharded()
+            && self.mvcc_store.version_count() == 0
+            && self.mvcc_store.active_snapshot_count() == 0
+        {
+            self.mvcc_store = Arc::new(FsMvccStore::single());
+        }
         self.jbd2_writer = Some(Mutex::new(writer));
     }
 
@@ -6443,7 +6486,7 @@ impl OpenFs {
             "flush_mvcc_to_device",
             (|| {
                 let base_dev = self.direct_block_device_adapter();
-                let flushed = self.mvcc_store.read().flush_to_device(cx, &base_dev)?;
+                let flushed = self.mvcc_store.flush_to_device(cx, &base_dev)?;
                 self.clear_ext4_writable_group_desc_cache();
                 // Sync the superblock free-count totals so a device snapshot is
                 // e2fsck-consistent (bd-nd61w); no-op for btrfs / read-only ext4.
@@ -6871,7 +6914,10 @@ impl OpenFs {
 
         // Hold the MVCC write lock across preflight, journal I/O, and final
         // visibility so no other writer can invalidate this transaction in between.
-        let mut mvcc_guard = self.mvcc_store.write();
+        let single_store = self.mvcc_store.as_single().ok_or_else(|| {
+            FfsError::Format("JBD2 journaled commit requires the single-lock MVCC store".to_owned())
+        })?;
+        let mut mvcc_guard = single_store.write();
 
         // Phase 1: preflight conflict checks. This does not make versions visible.
         mvcc_guard.preflight_commit_fcw(&txn).map_err(|e| {
@@ -6986,8 +7032,7 @@ impl OpenFs {
 
         // Check MVCC store first (shared lock, no I/O).
         {
-            let guard = self.mvcc_store.read();
-            if let Some(bytes) = guard.read_visible(block, snapshot) {
+            if let Some(bytes) = self.mvcc_store.read_visible(block, snapshot) {
                 let duration_us = start.elapsed().as_micros() as u64;
                 trace!(
                     target: "ffs::mvcc",
@@ -6997,7 +7042,7 @@ impl OpenFs {
                     duration_us,
                     "mvcc_version_hit"
                 );
-                return Ok(bytes.into_owned());
+                return Ok(bytes);
             }
         }
 
@@ -7062,7 +7107,7 @@ impl OpenFs {
     /// Useful for recording reads when using SSI mode.
     #[must_use]
     pub fn latest_block_version(&self, block: BlockNumber) -> CommitSeq {
-        self.mvcc_store.read().latest_commit_seq(block)
+        self.mvcc_store.latest_commit_seq(block)
     }
 
     /// Prune old versions that are no longer needed by any active snapshot.
@@ -7070,12 +7115,11 @@ impl OpenFs {
     /// Call this periodically to reclaim memory from superseded versions.
     /// Returns the watermark that was used for pruning.
     pub fn prune_mvcc_versions(&self) -> CommitSeq {
-        let mut guard = self.mvcc_store.write();
-        let watermark = guard.prune_safe();
+        let watermark = self.mvcc_store.prune_safe();
         debug!(
             target: "ffs::mvcc",
             watermark = watermark.0,
-            remaining_versions = guard.version_count(),
+            remaining_versions = self.mvcc_store.version_count(),
             "mvcc_prune"
         );
         watermark
@@ -10001,11 +10045,7 @@ impl OpenFs {
             return false;
         }
         if let Some(snapshot) = scope.snapshot {
-            return self
-                .mvcc_store
-                .read()
-                .read_visible(block, snapshot)
-                .is_none();
+            return self.mvcc_store.read_visible(block, snapshot).is_none();
         }
         true
     }
@@ -10033,9 +10073,10 @@ impl OpenFs {
         {
             return false;
         }
-        let store = self.mvcc_store.read();
-        let snapshot = scope.snapshot.unwrap_or_else(|| store.current_snapshot());
-        store.read_visible(block, snapshot).is_none()
+        let snapshot = scope
+            .snapshot
+            .unwrap_or_else(|| self.mvcc_store.current_snapshot());
+        self.mvcc_store.read_visible(block, snapshot).is_none()
     }
 
     /// Invalidate the writable-mode group-descriptor cache after a
@@ -10854,8 +10895,8 @@ impl OpenFs {
         //    adapter below.
         if scope.tx.is_some() {
             if let Some(snapshot) = scope.snapshot {
-                if let Some(visible) = self.mvcc_store.read().read_visible(block, snapshot) {
-                    return Ok(visible.into_owned());
+                if let Some(visible) = self.mvcc_store.read_visible(block, snapshot) {
+                    return Ok(visible);
                 }
             }
         }
@@ -10874,12 +10915,9 @@ impl OpenFs {
         cx: &Cx,
         block: BlockNumber,
     ) -> Result<Vec<u8>, FfsError> {
-        let snapshot = self.mvcc_store.read().current_snapshot();
-        {
-            let store = self.mvcc_store.read();
-            if let Some(visible) = store.read_visible(block, snapshot) {
-                return Ok(visible.into_owned());
-            }
+        let snapshot = self.mvcc_store.current_snapshot();
+        if let Some(visible) = self.mvcc_store.read_visible(block, snapshot) {
+            return Ok(visible);
         }
 
         let base = self.direct_block_device_adapter();
@@ -10911,8 +10949,8 @@ impl OpenFs {
         //    see read_block_with_scope and bd-bw90c).
         if scope.tx.is_some() {
             if let Some(snapshot) = scope.snapshot {
-                if let Some(visible) = self.mvcc_store.read().read_visible(block, snapshot) {
-                    return Ok(Arc::<[u8]>::from(visible.as_ref()));
+                if let Some(visible) = self.mvcc_store.read_visible(block, snapshot) {
+                    return Ok(Arc::<[u8]>::from(visible));
                 }
             }
         }
@@ -10945,8 +10983,7 @@ impl OpenFs {
         }
         if scope.tx.is_some() {
             if let Some(snapshot) = scope.snapshot {
-                let store = self.mvcc_store.read();
-                if let Some(visible) = store.read_visible(block, snapshot) {
+                if let Some(visible) = self.mvcc_store.read_visible(block, snapshot) {
                     return Ok(f(visible.as_ref()));
                 }
             }
@@ -11013,11 +11050,7 @@ impl OpenFs {
         {
             // Hold the MVCC read lock only when a tx-scoped snapshot can be
             // consulted; no device I/O happens under it.
-            let store = if scope.tx.is_some() && scope.snapshot.is_some() {
-                Some(self.mvcc_store.read())
-            } else {
-                None
-            };
+            let overlay_snapshot = scope.tx.is_some().then_some(scope.snapshot).flatten();
             for block_num in start.0..end {
                 let block = BlockNumber(block_num);
                 if let Some(staged) = scope.tx.as_ref().and_then(|tx| tx.staged_write(block)) {
@@ -11025,9 +11058,9 @@ impl OpenFs {
                     any_overlay = true;
                     continue;
                 }
-                if let (Some(store), Some(snapshot)) = (store.as_ref(), scope.snapshot) {
-                    if let Some(visible) = store.read_visible(block, snapshot) {
-                        resolved.push(Some(visible.into_owned()));
+                if let Some(snapshot) = overlay_snapshot {
+                    if let Some(visible) = self.mvcc_store.read_visible(block, snapshot) {
+                        resolved.push(Some(visible));
                         any_overlay = true;
                         continue;
                     }
@@ -11133,11 +11166,7 @@ impl OpenFs {
         let mut resolved: Vec<Option<Vec<u8>>> = Vec::with_capacity(count);
         let mut any_overlay = false;
         {
-            let store = if scope.tx.is_some() && scope.snapshot.is_some() {
-                Some(self.mvcc_store.read())
-            } else {
-                None
-            };
+            let overlay_snapshot = scope.tx.is_some().then_some(scope.snapshot).flatten();
             for block_num in start.0..end {
                 let block = BlockNumber(block_num);
                 if let Some(staged) = scope.tx.as_ref().and_then(|tx| tx.staged_write(block)) {
@@ -11145,9 +11174,9 @@ impl OpenFs {
                     any_overlay = true;
                     continue;
                 }
-                if let (Some(store), Some(snapshot)) = (store.as_ref(), scope.snapshot) {
-                    if let Some(visible) = store.read_visible(block, snapshot) {
-                        resolved.push(Some(visible.into_owned()));
+                if let Some(snapshot) = overlay_snapshot {
+                    if let Some(visible) = self.mvcc_store.read_visible(block, snapshot) {
+                        resolved.push(Some(visible));
                         any_overlay = true;
                         continue;
                     }
@@ -16126,7 +16155,7 @@ impl OpenFs {
 
     /// Get a block device adapter for the underlying byte device, wrapped
     /// in MVCC versioning logic at the current latest snapshot.
-    fn block_device_adapter(&self) -> MvccBlockDevice<CachedByteDeviceBlockAdapter<'_>> {
+    fn block_device_adapter(&self) -> FsMvccBlockDevice<CachedByteDeviceBlockAdapter<'_>> {
         let base = CachedByteDeviceBlockAdapter {
             base: ByteDeviceBlockAdapter {
                 dev: self.dev.as_ref(),
@@ -16143,7 +16172,7 @@ impl OpenFs {
         // one adapter instance returns stale data (bd-vdi91: failed-mkdir /
         // rename-over-existing left a stale block-bitmap csum).
         if self.is_writable() {
-            MvccBlockDevice::new(base, Arc::clone(&self.mvcc_store), snapshot)
+            FsMvccBlockDevice::new(base, Arc::clone(&self.mvcc_store), snapshot)
                 .with_read_your_writes()
         } else {
             // bd-eflng: a read-only filesystem never writes, so no version is
@@ -16151,7 +16180,7 @@ impl OpenFs {
             // per-adapter snapshot register/release (store *write* lock) and the
             // per-block guaranteed-miss overlay probe: unregistered mode is a
             // direct base-device view.
-            MvccBlockDevice::new_unregistered(base, Arc::clone(&self.mvcc_store), snapshot)
+            FsMvccBlockDevice::new_unregistered(base, Arc::clone(&self.mvcc_store), snapshot)
         }
     }
 
@@ -16844,9 +16873,7 @@ impl OpenFs {
         tstamp_nanos: u32,
     ) -> ffs_error::Result<()> {
         let block_dev = self.block_device_adapter();
-        let mut store_guard = self.mvcc_store.write();
-        let mut txn = store_guard.begin();
-        drop(store_guard);
+        let mut txn = self.mvcc_store.begin();
 
         let result = (|| -> ffs_error::Result<()> {
             let tx_dev = TransactionBlockAdapter {
@@ -17249,7 +17276,6 @@ impl OpenFs {
 
         if result.is_ok() {
             self.mvcc_store
-                .write()
                 .commit(txn)
                 .map_err(|e| FfsError::Format(e.to_string()))?;
         }
@@ -17754,9 +17780,7 @@ impl OpenFs {
     ) -> ffs_error::Result<()> {
         Self::validate_single_path_component(name)?;
         let block_dev = self.block_device_adapter();
-        let mut store_guard = self.mvcc_store.write();
-        let mut txn = store_guard.begin();
-        drop(store_guard);
+        let mut txn = self.mvcc_store.begin();
         let result = (|| -> ffs_error::Result<()> {
             let tx_dev = TransactionBlockAdapter {
                 base: &block_dev,
@@ -17967,7 +17991,6 @@ impl OpenFs {
 
         if result.is_ok() {
             self.mvcc_store
-                .write()
                 .commit(txn)
                 .map_err(|e| FfsError::Format(e.to_string()))?;
         }
@@ -23298,7 +23321,7 @@ impl OpenFs {
         // Flush committed MVCC block versions to the underlying device so
         // that data written through the MVCC store becomes durable on disk.
         let base_dev = self.direct_block_device_adapter();
-        let flushed = self.mvcc_store.read().flush_to_device(cx, &base_dev)?;
+        let flushed = self.mvcc_store.flush_to_device(cx, &base_dev)?;
         self.clear_ext4_writable_group_desc_cache();
         if flushed > 0 {
             trace!(
@@ -23589,7 +23612,7 @@ impl OpenFs {
 
             // Flush committed MVCC block versions to the underlying device.
             let base_dev = self.direct_block_device_adapter();
-            let flushed = self.mvcc_store.read().flush_to_device(cx, &base_dev)?;
+            let flushed = self.mvcc_store.flush_to_device(cx, &base_dev)?;
             self.clear_ext4_writable_group_desc_cache();
             if flushed > 0 {
                 trace!(
@@ -28603,11 +28626,11 @@ impl OpenFs {
     #[inline]
     fn latest_snapshot(&self) -> Snapshot {
         if self.is_writable() {
-            self.mvcc_store.read().current_snapshot()
+            self.mvcc_store.current_snapshot()
         } else {
             *self
                 .ro_snapshot
-                .get_or_init(|| self.mvcc_store.read().current_snapshot())
+                .get_or_init(|| self.mvcc_store.current_snapshot())
         }
     }
 
@@ -28924,7 +28947,7 @@ impl OpenFs {
             return Err(FfsError::ReadOnly);
         }
         let base_dev = self.direct_block_device_adapter();
-        self.mvcc_store.read().flush_to_device(cx, &base_dev)?;
+        self.mvcc_store.flush_to_device(cx, &base_dev)?;
         self.clear_ext4_writable_group_desc_cache();
         Ok(())
     }
@@ -29370,10 +29393,8 @@ impl OpenFs {
                 .ext4_rename2_exchange_staged(cx, scope, parent, name, new_parent, new_name);
         }
 
-        let mut store = self.mvcc_store.write();
-        let txn = store.begin();
+        let txn = self.mvcc_store.begin();
         let snapshot = txn.snapshot();
-        drop(store);
 
         let mut local_scope = RequestScope {
             snapshot: Some(snapshot),
@@ -34687,11 +34708,9 @@ impl FsOps for OpenFs {
     fn begin_request_scope(&self, _cx: &Cx, op: RequestOp) -> ffs_error::Result<RequestScope> {
         let (snapshot, tx) = if op.is_write() {
             // Write operations must use a transaction for isolation and atomicity.
-            let mut store = self.mvcc_store.write();
-            let txn = store.begin();
+            let txn = self.mvcc_store.begin();
             let snapshot = txn.snapshot;
-            store.register_snapshot(snapshot);
-            drop(store);
+            self.mvcc_store.register_snapshot(snapshot);
             trace!(
                 target: "ffs::mvcc",
                 op = ?op,
@@ -34702,7 +34721,7 @@ impl FsOps for OpenFs {
         } else {
             // Read operations use a lightweight snapshot.
             let snapshot = self.current_snapshot();
-            self.mvcc_store.write().register_snapshot(snapshot);
+            self.mvcc_store.register_snapshot(snapshot);
             trace!(
                 target: "ffs::mvcc",
                 op = ?op,
@@ -34726,7 +34745,7 @@ impl FsOps for OpenFs {
         scope: RequestScope,
     ) -> ffs_error::Result<()> {
         if let Some(snapshot) = scope.snapshot {
-            let released = self.mvcc_store.write().release_snapshot(snapshot);
+            let released = self.mvcc_store.release_snapshot(snapshot);
             if released {
                 trace!(
                     target: "ffs::mvcc",
@@ -34747,7 +34766,6 @@ impl FsOps for OpenFs {
         if let Some(tx) = scope.tx {
             let txn_id = tx.id().0;
             self.mvcc_store
-                .write()
                 .abort(tx, ffs_mvcc::TxnAbortReason::Timeout, None);
             trace!(
                 target: "ffs::mvcc",
@@ -38620,7 +38638,7 @@ mod tests {
         let fs =
             OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).expect("open ext4");
 
-        let mut txn = fs.mvcc_store.write().begin();
+        let mut txn = fs.begin_transaction();
         txn.stage_write(BlockNumber(STAGED), vec![0xEE_u8; BS]);
         let scope = RequestScope {
             snapshot: None,
@@ -38707,7 +38725,7 @@ mod tests {
         let fs =
             OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).expect("open ext4");
 
-        let mut txn = fs.mvcc_store.write().begin();
+        let mut txn = fs.begin_transaction();
         txn.stage_write(BlockNumber(STAGED), vec![0xEE_u8; BS]);
         let scope = RequestScope {
             snapshot: None,
@@ -63153,7 +63171,7 @@ mod tests {
         let cx = Cx::for_testing();
         let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
 
-        assert_eq!(fs.mvcc_store().read().active_snapshot_count(), 0);
+        assert_eq!(fs.mvcc_active_snapshot_count(), 0);
 
         let scope = fs
             .begin_request_scope(&cx, RequestOp::Read)
@@ -63162,7 +63180,7 @@ mod tests {
             .snapshot
             .expect("request scope should carry pinned snapshot");
         assert!(scope.tx.is_none(), "request scope should not allocate txn");
-        assert_eq!(fs.mvcc_store().read().active_snapshot_count(), 1);
+        assert_eq!(fs.mvcc_active_snapshot_count(), 1);
 
         fs.end_request_scope(
             &cx,
@@ -63174,7 +63192,7 @@ mod tests {
             },
         )
         .expect("end request scope");
-        assert_eq!(fs.mvcc_store().read().active_snapshot_count(), 0);
+        assert_eq!(fs.mvcc_active_snapshot_count(), 0);
     }
 
     #[test]
@@ -63278,7 +63296,7 @@ mod tests {
         let bytes_a = vec![0xA1_u8; block_size];
         let bytes_b = vec![0xB2_u8; block_size];
 
-        assert_eq!(fs.mvcc_store().read().active_snapshot_count(), 0);
+        assert_eq!(fs.mvcc_active_snapshot_count(), 0);
         let base_snapshot = fs.current_snapshot();
 
         let mut scope = fs
@@ -63287,7 +63305,7 @@ mod tests {
         assert!(scope.is_deferred_until_flush());
         assert!(scope.tx.is_some(), "batch scope must carry a transaction");
         assert_eq!(scope.pending_write_count(), 0);
-        assert_eq!(fs.mvcc_store().read().active_snapshot_count(), 1);
+        assert_eq!(fs.mvcc_active_snapshot_count(), 1);
 
         {
             let block_dev = fs.block_device_adapter();
@@ -63320,7 +63338,7 @@ mod tests {
             .commit_writeback_batch_scope(&cx, scope)
             .expect("commit writeback batch");
         assert_eq!(commit.0, base_snapshot.high.0 + 1);
-        assert_eq!(fs.mvcc_store().read().active_snapshot_count(), 0);
+        assert_eq!(fs.mvcc_active_snapshot_count(), 0);
 
         let committed_snapshot = fs.current_snapshot();
         assert_eq!(committed_snapshot.high, commit);
@@ -63364,7 +63382,7 @@ mod tests {
 
         fs.end_request_scope(&cx, RequestOp::Read, RequestScope::empty())
             .expect("empty request scope should be a no-op");
-        assert_eq!(fs.mvcc_store().read().active_snapshot_count(), 0);
+        assert_eq!(fs.mvcc_active_snapshot_count(), 0);
     }
 
     #[derive(Debug, Default)]
@@ -63455,7 +63473,7 @@ mod tests {
             &[block],
             "mounted-path repair writeback should notify repair refresh lifecycle once"
         );
-        assert_eq!(fs.mvcc_store().read().active_snapshot_count(), 0);
+        assert_eq!(fs.mvcc_active_snapshot_count(), 0);
     }
 
     #[test]
@@ -63482,7 +63500,7 @@ mod tests {
             "expected format error, got: {err:?}"
         );
         assert_eq!(dev_view.snapshot_bytes(), image);
-        assert_eq!(fs.mvcc_store().read().active_snapshot_count(), 0);
+        assert_eq!(fs.mvcc_active_snapshot_count(), 0);
     }
 
     #[test]
@@ -63533,7 +63551,7 @@ mod tests {
                 .is_empty(),
             "duplicate repair target must not refresh repair symbols"
         );
-        assert_eq!(fs.mvcc_store().read().active_snapshot_count(), 0);
+        assert_eq!(fs.mvcc_active_snapshot_count(), 0);
     }
 
     #[test]
@@ -63563,7 +63581,7 @@ mod tests {
             "client write must commit after repair in this deterministic schedule"
         );
         assert_eq!(durable_block_bytes(&fs, &cx, block), client_data);
-        assert_eq!(fs.mvcc_store().read().active_snapshot_count(), 0);
+        assert_eq!(fs.mvcc_active_snapshot_count(), 0);
     }
 
     #[test]
@@ -63598,7 +63616,7 @@ mod tests {
             "expected stale repair failure, got {err:?}"
         );
         assert_eq!(durable_block_bytes(&fs, &cx, block), client_data);
-        assert_eq!(fs.mvcc_store().read().active_snapshot_count(), 0);
+        assert_eq!(fs.mvcc_active_snapshot_count(), 0);
     }
 
     #[test]
@@ -63625,7 +63643,7 @@ mod tests {
 
         assert_eq!(durable_block_bytes(&fs, &cx, repair_block), repair_data);
         assert_eq!(durable_block_bytes(&fs, &cx, client_block), client_data);
-        assert_eq!(fs.mvcc_store().read().active_snapshot_count(), 0);
+        assert_eq!(fs.mvcc_active_snapshot_count(), 0);
     }
 
     #[test]
@@ -63655,7 +63673,7 @@ mod tests {
             "expected cancellation, got: {err:?}"
         );
         assert_eq!(dev_view.snapshot_bytes(), image);
-        assert_eq!(fs.mvcc_store().read().active_snapshot_count(), 0);
+        assert_eq!(fs.mvcc_active_snapshot_count(), 0);
     }
 
     #[test]
@@ -63691,7 +63709,7 @@ mod tests {
             "stale repair writeback must not refresh repair symbols"
         );
         assert_eq!(durable_block_bytes(&fs, &cx, block), client_data);
-        assert_eq!(fs.mvcc_store().read().active_snapshot_count(), 0);
+        assert_eq!(fs.mvcc_active_snapshot_count(), 0);
     }
 
     #[test]
@@ -63723,7 +63741,7 @@ mod tests {
         )
         .expect("reopen flushed image");
         assert_eq!(durable_block_bytes(&reopened, &cx, block), repair_data);
-        assert_eq!(fs.mvcc_store().read().active_snapshot_count(), 0);
+        assert_eq!(fs.mvcc_active_snapshot_count(), 0);
     }
 
     #[test]
@@ -81794,17 +81812,8 @@ mod tests {
 
         // Verify replayed data is visible.
         let snap = fs.current_snapshot();
-        let (data10, data20) = {
-            let store = fs.mvcc_store().read();
-            (
-                store
-                    .read_visible(BlockNumber(10), snap)
-                    .map(|data| data.to_vec()),
-                store
-                    .read_visible(BlockNumber(20), snap)
-                    .map(|data| data.to_vec()),
-            )
-        };
+        let data10 = fs.mvcc_read_visible(BlockNumber(10), snap);
+        let data20 = fs.mvcc_read_visible(BlockNumber(20), snap);
         let expected10 = [0xAA; 16];
         let expected20 = [0xBB; 16];
         assert_eq!(data10.as_deref(), Some(&expected10[..]));
@@ -81898,10 +81907,8 @@ mod tests {
         let report = fs.mvcc_wal_recovery().expect("should have recovery report");
         // Store is empty due to FailFast fallback.
         let snap = fs.current_snapshot();
-        let store = fs.mvcc_store().read();
-        assert_eq!(store.version_count(), 0);
-        assert!(store.read_visible(BlockNumber(1), snap).is_none());
-        drop(store);
+        assert_eq!(fs.mvcc_version_count(), 0);
+        assert!(fs.mvcc_read_visible(BlockNumber(1), snap).is_none());
         assert!(!report.outcome.is_clean());
     }
 
