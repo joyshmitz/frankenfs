@@ -1415,3 +1415,21 @@ Acting on last turn's profiled root-cause (the create regression's `read_visible
 MEASURED A/B (WITHOUT/landed vs WITH), 4 rounds each: create-bench single-thread = 1.064/0.965/1.009/1.020 (avg ~1.01x), write-bench 4K = 1.000/1.103/1.000/1.000 (avg ~1.03x). NOISE-LEVEL — ~0 gain. REVERTED (shelved, recoverable).
 
 WHY ~0 (the narrowing result): the 2 cacheability sites are NOT the profiled 4.09% `read_visible` alloc bottleneck. They're guarded by an earlier `staged_write(block).is_some() -> return false` short-circuit, so on the write/create bench the checked block is usually staged and `read_visible`/`contains_visible` is never reached; and the 4KB alloc is cheap against the ~67us/write op. The 4.09% is the OTHER 8 `read_visible` call sites — the use-the-bytes reads (overlay dir-block / read-path reads during the op), which materialise the bytes for real use. CONSEQUENCE: the create-regression fix is NOT the existence-check (cheap), it's the BORROWED-READ API for the use-the-bytes sites (`read_visible_with(.., |bytes| ..)` or `Arc<[u8]>` versions) — exactly last turn's higher-leverage direction, now confirmed by elimination. That fix is the wiring owner's cross-cutting lane (ffs-core read sites + both stores). This reject sharpens the handoff: skip the existence-check micro-opt (measured inert), do the borrowed-read on the use-the-bytes sites.
+
+### 2026-06-26 COMPLETE Single-vs-Sharded default decision matrix (measured) — Sharded default is a common-case net loss; recommend Single until allocator lands (CrimsonFox cc/opus)
+
+Completed the measured matrix for the landed default-Sharded wiring (Single binary = origin/main pre-wiring, Sharded binary = landed wiring), interleaved A/B:
+
+| workload | Single | Sharded | Sharded/Single |
+|----------|--------|---------|----------------|
+| single-thread create | 57.3k creates/s | 37.2k | 0.65x |
+| single-thread 4K-overwrite | ~30 MiB/s | ~27 MiB/s | ~0.93x |
+| create 8t | 27.3k | 30.2k | ~1.10x |
+| create 16t | 25.9k | 24.7k | 0.95x |
+| parallel random read | 12.7-13.6M IOPS | 14.7-14.8M | 1.09-1.16x |
+| serial random read | ~8.6M | ~8.6M | ~parity |
+| parallel overwrite (no-alloc, MVCC-level only) | — | — | 1.43x |
+
+FINDING: the landed Sharded DEFAULT is a NET LOSS for the common cases. Single-thread regresses (creates 0.65x, writes 0.93x — the publication-gate + per-shard machinery costs on every commit, where the single store's one uncontended RwLock is cheaper). Parallel CREATES regress too (8t barely 1.10x, and 16t is 0.95x — SLOWER: the create's inode/block allocation serializes on the allocator regardless of the MVCC store, so sharding the MVCC can't help and the gate overhead makes it net-negative up through 16 threads). Sharded WINS only parallel random reads (1.1x, 8 shard read-locks less contended than one) and the no-alloc parallel-overwrite path (1.43x at the MVCC level — not realized end-to-end because allocating writes still serialize on the allocator).
+
+RECOMMENDATION (data-backed, for the wiring owner): default to SINGLE until the allocator is sharded. Sharded only pays off for parallel-overwrite-heavy workloads (no allocation), which is niche AND not realized end-to-end today (the allocator isn't sharded, so any allocating parallel write still serializes). Single is 1.5x faster single-threaded and parity-to-faster on parallel creates through 16t; the read win is small (1.1x). So the common-case-optimal default is Single NOW; flip to Sharded (or gate on observed concurrency) once the allocator sharding lands and makes parallel allocating-writes actually scale — at which point Sharded's commit concurrency stops being masked. This is the complete measured basis for the default selection; not flipping it unilaterally (the wiring owner's deliberate choice + active lane), but the data says the current default costs the common case.
