@@ -1103,3 +1103,31 @@ UNIVERSAL (confirmed ext4 too — the bottleneck is NOT btrfs-specific): ext4 cr
 | 8 | 158890 | 26927 | **5.90x slower** |
 
 frankenfs ext4 create WINS serial (47.3k vs 36.3k = 1.3x) but NEGATIVE-scales (47.3k→27k→26.9k) while the kernel scales ~4.4x (36k→159k) — so the ext4 parallel gap reaches **5.9x at 8 threads**, even larger than btrfs's 3.5x (the kernel's ext4 metadata parallelizes harder). This proves the negative-scaling is the FS-AGNOSTIC global-write-lock serialization (every metadata op takes one exclusive lock over the whole fs state + the MVCC commit lock), NOT a btrfs COW artifact. The single commit-lock-sharding / fine-grained-fs-lock architectural lever therefore lifts BOTH filesystems at multi-core — the dominant remaining frankenfs perf gap. The serial bd-cowbatch wins are real but are dwarfed by this parallel loss on any multi-core box.
+
+PROFILE of the parallel btrfs create (4 threads, perf -g): the CPU self-time is dominated by `InMemoryCowBtrfsTree::insert_into` 45% + the key/item `extend` clone ~34% — the SAME COW-clone volume as the serial path — with NO prominent futex/park/lock-wait hotspot. Interpretation: the global lock SERIALIZES the COW work (only one thread mutates the fs-tree at a time; the others park off-CPU so they don't show in CPU self-time), and the drop BELOW the serial rate (47k→27k) is the lock-handoff + cache-line bouncing on the shared fs-tree/allocator. Two consequences: (1) reducing the per-op COW clone — the peer's single-thread internal-in-place lever — ALSO helps the parallel case (less serialized work per op), so it is doubly valuable; (2) closing the parallel gap to the kernel's positive scaling still requires fine-grained / disjoint-subtree locking so multiple threads COW concurrently (architectural, the btrfs COW-tree's locking model = the peer's lane). No contained single-turn parallel lever exists; the dominant remaining win is the architectural concurrent-mutation work.
+
+### 2026-06-26 REJECTED: staged internal-node reuse for btrfs COW insert batches did not improve the multi-leaf batch shape (IvoryBirch codex/gpt-5)
+
+BOLD-VERIFY land-or-dig pass checked `.scratch`/worktree heads first; no unlanded measured worktree win remained that was not already represented by a production successor on `main`. The new lever tested the documented follow-up from the bd-cowbatch campaign: reuse an internal node allocated earlier in the same COW batch, updating its child pointer in place instead of cloning that staged internal again. This is the B-epsilon/write-buffering idea applied inside `InMemoryCowBtrfsTree::insert_into` for multi-leaf `insert_many_then_update` batches.
+
+MEASURED on `hz2` via RCH, per-crate only:
+
+```
+AGENT_NAME=IvoryBirch \
+CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-b \
+RCH_REQUIRE_REMOTE=1 RCH_TEST_SLOTS=4 \
+rch exec -- cargo bench -j 1 --profile release -p ffs-btrfs \
+  --bench cow_write_mutation -- btrfs_cow_staged_internal_multi_leaf \
+  --warm-up-time 1 --measurement-time 2 --sample-size 10 --noplot
+```
+
+Literal `cargo bench --release` was also probed through RCH and rejected by Cargo (`unexpected argument '--release'`), so the measured runs used the repository-compatible `--profile release` form. The worker cache was cold/noisy despite the requested target dir, but the Criterion comparison used the same worker and same benchmark row.
+
+| row | baseline | staged-internal candidate | old/new |
+|-----|----------|---------------------------|---------|
+| sequential control | `[92.208, 99.836, 103.37] us` | `[92.276, 96.639, 102.49] us` | N/A control |
+| bulk `insert_many_then_update` | `[97.234, 105.78, 110.37] us` | `[107.76, 112.03, 114.22] us` | midpoint `0.944x`; conservative `97.234/114.22 = 0.851x` |
+
+Criterion reported no statistically significant improvement (`p=0.46` for bulk) and the midpoint regressed. Candidate source and the temporary benchmark row were reverted. Correctness before revert was green for the relevant invariant gates: `cargo test -j 1 -p ffs-btrfs insert_many -- --nocapture` passed `insert_many_matches_sequential_bd_cowbatch` and `proptest_insert_many_matches_sequential_bd_cowbatch`.
+
+KERNEL RATIO: no new ext4/btrfs-kernel win exists from this rejected internal primitive. The direct btrfs metadata ratios remain the current ledger values: create `2.08x` slower than kernel, mkdir `2.42x`, delete `3.65x`, rename `3.93x`; ext4/btrfs parallel negative-scaling ratios remain unchanged. This reject says not to pursue staged internal-node insert reuse as the next btrfs COW micro-lever unless a different benchmark/profile shows a real hot path.
