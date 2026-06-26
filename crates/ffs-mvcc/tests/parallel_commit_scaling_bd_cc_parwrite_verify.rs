@@ -252,3 +252,69 @@ fn sharded_read_gap_methods_match_bd_cc_shardread() {
     assert!(store.read_visible_physical(BN(99), snap).is_none());
     eprintln!("sharded read-gap methods verified byte-exact + physical identity");
 }
+
+/// bd-cc-shardflush: verify ShardedMvccStore::flush_to_device writes every
+/// committed block to the device byte-exact (the durable checkpoint completing
+/// the OpenFs store interface). Contiguous blocks (10..13) + a separated one (50).
+#[test]
+fn sharded_flush_to_device_checkpoints_committed_blocks_bd_cc_shardflush() {
+    use asupersync::Cx;
+    use ffs_mvcc::sharded::ShardedMvccStore;
+    use ffs_types::BlockNumber as BN;
+    use std::collections::HashMap;
+
+    struct MemDev {
+        bs: u32,
+        count: u64,
+        blocks: parking_lot::Mutex<HashMap<BN, Vec<u8>>>,
+    }
+    impl ffs_block::BlockDevice for MemDev {
+        fn read_block(&self, _cx: &Cx, b: BN) -> ffs_error::Result<ffs_block::BlockBuf> {
+            Ok(ffs_block::BlockBuf::new(
+                self.blocks
+                    .lock()
+                    .get(&b)
+                    .cloned()
+                    .unwrap_or_else(|| vec![0_u8; self.bs as usize]),
+            ))
+        }
+        fn write_block(&self, _cx: &Cx, b: BN, data: &[u8]) -> ffs_error::Result<()> {
+            self.blocks.lock().insert(b, data.to_vec());
+            Ok(())
+        }
+        fn block_size(&self) -> u32 {
+            self.bs
+        }
+        fn block_count(&self) -> u64 {
+            self.count
+        }
+        fn sync(&self, _cx: &Cx) -> ffs_error::Result<()> {
+            Ok(())
+        }
+    }
+
+    let store = ShardedMvccStore::for_host_parallelism();
+    let blocks = [10_u64, 11, 12, 50];
+    for &b in &blocks {
+        let mut txn = store.begin();
+        txn.stage_write(BN(b), vec![b as u8; 4096]);
+        store.commit(txn).map_err(|(e, _)| e).expect("commit");
+    }
+    let dev = MemDev {
+        bs: 4096,
+        count: 64,
+        blocks: parking_lot::Mutex::new(HashMap::new()),
+    };
+    let cx = Cx::for_testing();
+    let flushed = store.flush_to_device(&cx, &dev).expect("flush");
+    assert_eq!(flushed, blocks.len(), "all committed blocks flushed");
+    let dev_blocks = dev.blocks.lock();
+    for &b in &blocks {
+        assert_eq!(
+            dev_blocks.get(&BN(b)).expect("block must be on device"),
+            &vec![b as u8; 4096],
+            "block {b} bytes must be on device byte-exact"
+        );
+    }
+    eprintln!("sharded flush_to_device checkpointed {flushed} blocks byte-exact (3-run + 1 separated)");
+}

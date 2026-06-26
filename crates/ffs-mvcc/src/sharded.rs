@@ -14,6 +14,9 @@ use crate::{
     ContentionMetrics, MergeProof, Transaction, detect_ssi_dangerous_structure,
     resolve_version_bytes_cow_at_or_before, validate_transaction_id,
 };
+use asupersync::Cx;
+use ffs_block::BlockDevice;
+use ffs_error::Result as FfsResult;
 use ffs_types::{BlockNumber, CommitSeq, Snapshot, TxnId};
 use parking_lot::{Condvar, Mutex, RwLock, RwLockWriteGuard};
 use std::collections::{BTreeMap, BTreeSet};
@@ -729,6 +732,58 @@ impl ShardedMvccStore {
             .get(&logical)
             .and_then(|versions| crate::newest_visible_index(versions, snapshot.high))
             .map(|_| logical)
+    }
+
+    /// Durable checkpoint (bd-cc-shardflush): write the visible-at-current-snapshot
+    /// version of every block across all shards to `device`, coalescing contiguous
+    /// runs into one ranged `write_contiguous_blocks` each (mirrors
+    /// `MvccStore::flush_to_device` / bd-ryqep over the sharded layout — same
+    /// bytes/locations). A CONSISTENT checkpoint up to `current_snapshot().high`:
+    /// each shard is read under its own lock, and `snapshot.high` bounds visibility
+    /// so the result is a coherent prefix; concurrent commits beyond `high` land in
+    /// the next checkpoint (and the WAL). Completes the OpenFs store interface so the
+    /// sharded store is wireable.
+    pub fn flush_to_device<D: BlockDevice>(&self, cx: &Cx, device: &D) -> FfsResult<usize> {
+        let snapshot = self.current_snapshot();
+        // Collect visible (block, bytes) across all shards (each under its read lock,
+        // briefly), then sort + coalesce + write holding no shard lock.
+        let mut items: Vec<(BlockNumber, Vec<u8>)> = Vec::new();
+        for shard in &self.shards {
+            let shard = shard.read();
+            for (block, versions) in &shard.versions {
+                if let Some(bytes) =
+                    crate::resolve_version_bytes_at_or_before(versions, snapshot.high)
+                {
+                    items.push((*block, bytes));
+                }
+            }
+        }
+        items.sort_unstable_by_key(|(block, _)| block.0);
+
+        let mut flushed = 0_usize;
+        let mut run_start: Option<BlockNumber> = None;
+        let mut run_next: u64 = 0;
+        let mut run_buf: Vec<u8> = Vec::new();
+        for (block, data) in &items {
+            let continues = run_start.is_some() && block.0 == run_next;
+            if !continues {
+                if let Some(start) = run_start.take() {
+                    device.write_contiguous_blocks(cx, start, &run_buf)?;
+                    run_buf.clear();
+                }
+                run_start = Some(*block);
+            }
+            run_buf.extend_from_slice(data);
+            run_next = block.0.saturating_add(1);
+            flushed += 1;
+        }
+        if let Some(start) = run_start.take() {
+            device.write_contiguous_blocks(cx, start, &run_buf)?;
+        }
+        if flushed > 0 {
+            device.sync(cx)?;
+        }
+        Ok(flushed)
     }
 
     /// Commit a transaction with first-committer-wins (FCW) conflict detection.
