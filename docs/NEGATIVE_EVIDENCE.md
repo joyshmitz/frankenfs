@@ -1093,3 +1093,13 @@ The single-thread bd-cowbatch wins narrowed the SERIAL gaps; measured the PARALL
 frankenfs goes 20.6k (1t) → 16.1k (4t) → 15.1k (16t) — adding threads makes it SLOWER. ROOT CAUSE: every writer serializes on the global MVCC commit lock + the single shared `InMemoryCowBtrfsTree` (one `alloc_mutex.write()` per op holds the whole fs-tree), so parallel metadata has zero (negative) scaling; the kernel parallelizes across subdirs. So the PARALLEL metadata gap (~4x, widening with cores) now exceeds every serial gap.
 
 LEVER (architectural, deep — NOT a contained single-turn change, distinct from the peer's single-thread internal-in-place): shard the MVCC commit lock + allow concurrent COW-tree mutation on disjoint subtrees (per-subvolume / per-objectid-range locking, lock-free snapshot registration — cf the earlier bd-snaplock attempt which was wall-neutral because a single Mutex just relocates the serialization point). This is the frankenfs parallel-write architecture work; surfaced as the highest-value remaining lever (it dominates at multi-core), to be a dedicated effort. Recorded as a measured loss per the BOLD-VERIFY ledger.
+
+UNIVERSAL (confirmed ext4 too — the bottleneck is NOT btrfs-specific): ext4 create-bench --threads vs kernel ext4 parallel (kpcreate, 16000):
+
+| threads | kernel ext4 creates/s | frankenfs ext4 creates/s | gap |
+|---------|-----------------------|--------------------------|-----|
+| 1 | 36270  | 47331 | frankenfs **1.3x FASTER** (serial) |
+| 4 | 101467 | 27029 | 3.75x slower |
+| 8 | 158890 | 26927 | **5.90x slower** |
+
+frankenfs ext4 create WINS serial (47.3k vs 36.3k = 1.3x) but NEGATIVE-scales (47.3k→27k→26.9k) while the kernel scales ~4.4x (36k→159k) — so the ext4 parallel gap reaches **5.9x at 8 threads**, even larger than btrfs's 3.5x (the kernel's ext4 metadata parallelizes harder). This proves the negative-scaling is the FS-AGNOSTIC global-write-lock serialization (every metadata op takes one exclusive lock over the whole fs state + the MVCC commit lock), NOT a btrfs COW artifact. The single commit-lock-sharding / fine-grained-fs-lock architectural lever therefore lifts BOTH filesystems at multi-core — the dominant remaining frankenfs perf gap. The serial bd-cowbatch wins are real but are dwarfed by this parallel loss on any multi-core box.
