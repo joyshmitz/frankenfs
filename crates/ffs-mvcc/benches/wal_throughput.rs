@@ -1246,6 +1246,181 @@ fn bench_merge_proof_success_rate(c: &mut Criterion) {
     });
 }
 
+const GDT_BLOCK_BYTES: usize = 4096;
+const GDT_WRITERS: usize = 8;
+const GDT_DESCRIPTOR_BYTES: usize = 64;
+
+fn apply_gdt_descriptor(bytes: &mut [u8], writer: usize) {
+    let start = writer * GDT_DESCRIPTOR_BYTES;
+    let end = start + GDT_DESCRIPTOR_BYTES;
+    let value = u8::try_from(writer + 1).expect("writer marker fits u8");
+    bytes[start..end].fill(value);
+}
+
+fn assert_gdt_descriptors(bytes: &[u8]) {
+    for writer in 0..GDT_WRITERS {
+        let start = writer * GDT_DESCRIPTOR_BYTES;
+        let end = start + GDT_DESCRIPTOR_BYTES;
+        let value = u8::try_from(writer + 1).expect("writer marker fits u8");
+        assert!(
+            bytes[start..end].iter().all(|&b| b == value),
+            "descriptor {writer} did not land"
+        );
+    }
+}
+
+/// Model the ext4 group-descriptor-table conflict found in the parallel
+/// metadata-write profile: all writers begin from the same snapshot, update
+/// different descriptor-sized byte ranges inside one 4 KiB block, and then
+/// commit. Strict FCW needs retry waves; SafeMerge commits the whole wave.
+fn strict_retry_gdt_descriptor_writers() -> Vec<u8> {
+    let block = BlockNumber(1659);
+    let mut store = MvccStore::new();
+    store.set_conflict_policy(ConflictPolicy::Strict);
+
+    let mut seed = store.begin();
+    seed.stage_write(block, vec![0; GDT_BLOCK_BYTES]);
+    store.commit(seed).expect("seed GDT block");
+
+    let mut remaining: Vec<usize> = (0..GDT_WRITERS).collect();
+    while !remaining.is_empty() {
+        let snapshot = store.current_snapshot();
+        let base = store
+            .read_visible(block, snapshot)
+            .expect("seeded GDT block visible")
+            .into_owned();
+        let txns: Vec<(usize, _)> = remaining
+            .iter()
+            .map(|&writer| {
+                let mut bytes = base.clone();
+                apply_gdt_descriptor(&mut bytes, writer);
+                let mut txn = store.begin();
+                txn.stage_write(block, bytes);
+                (writer, txn)
+            })
+            .collect();
+
+        let mut retry = Vec::new();
+        for (index, (writer, txn)) in txns.into_iter().enumerate() {
+            let result = store.commit(txn);
+            if index == 0 {
+                result.expect("first writer in wave commits");
+            } else {
+                result.expect_err("same-snapshot strict writer must conflict");
+                retry.push(writer);
+            }
+        }
+        remaining = retry;
+    }
+
+    let latest = store.current_snapshot();
+    let bytes = store
+        .read_visible(block, latest)
+        .expect("final GDT block visible")
+        .into_owned();
+    assert_gdt_descriptors(&bytes);
+    bytes
+}
+
+fn safe_merge_gdt_descriptor_writers() -> Vec<u8> {
+    let block = BlockNumber(1659);
+    let mut store = MvccStore::new();
+    store.set_conflict_policy(ConflictPolicy::SafeMerge);
+
+    let mut seed = store.begin();
+    seed.stage_write(block, vec![0; GDT_BLOCK_BYTES]);
+    store.commit(seed).expect("seed GDT block");
+
+    let snapshot = store.current_snapshot();
+    let base = store
+        .read_visible(block, snapshot)
+        .expect("seeded GDT block visible")
+        .into_owned();
+    let txns: Vec<_> = (0..GDT_WRITERS)
+        .map(|writer| {
+            let mut bytes = base.clone();
+            apply_gdt_descriptor(&mut bytes, writer);
+            let mut txn = store.begin();
+            txn.stage_write_with_proof(
+                block,
+                bytes,
+                MergeProof::independent_key_range(
+                    writer * GDT_DESCRIPTOR_BYTES,
+                    GDT_DESCRIPTOR_BYTES,
+                ),
+            );
+            txn
+        })
+        .collect();
+
+    for txn in txns {
+        store.commit(txn).expect("range-proof writer commits");
+    }
+
+    let latest = store.current_snapshot();
+    let bytes = store
+        .read_visible(block, latest)
+        .expect("final GDT block visible")
+        .into_owned();
+    assert_gdt_descriptors(&bytes);
+    bytes
+}
+
+fn serial_gdt_descriptor_writers() -> Vec<u8> {
+    let block = BlockNumber(1659);
+    let mut store = MvccStore::new();
+    store.set_conflict_policy(ConflictPolicy::Strict);
+
+    let mut seed = store.begin();
+    seed.stage_write(block, vec![0; GDT_BLOCK_BYTES]);
+    store.commit(seed).expect("seed GDT block");
+
+    for writer in 0..GDT_WRITERS {
+        let snapshot = store.current_snapshot();
+        let mut bytes = store
+            .read_visible(block, snapshot)
+            .expect("GDT block visible")
+            .into_owned();
+        apply_gdt_descriptor(&mut bytes, writer);
+        let mut txn = store.begin();
+        txn.stage_write(block, bytes);
+        store.commit(txn).expect("serial writer commits");
+    }
+
+    let latest = store.current_snapshot();
+    let bytes = store
+        .read_visible(block, latest)
+        .expect("final GDT block visible")
+        .into_owned();
+    assert_gdt_descriptors(&bytes);
+    bytes
+}
+
+fn bench_gdt_disjoint_range_conflict(c: &mut Criterion) {
+    assert_eq!(
+        strict_retry_gdt_descriptor_writers(),
+        safe_merge_gdt_descriptor_writers(),
+        "range-proof merge must match strict retry-wave final bytes"
+    );
+    assert_eq!(
+        serial_gdt_descriptor_writers(),
+        safe_merge_gdt_descriptor_writers(),
+        "range-proof merge must match serial final bytes"
+    );
+
+    let mut group = c.benchmark_group("mvcc_gdt_disjoint_range_conflict_8writers");
+    group.bench_function("strict_retry_waves", |b| {
+        b.iter(|| black_box(strict_retry_gdt_descriptor_writers()));
+    });
+    group.bench_function("strict_serial_no_conflict", |b| {
+        b.iter(|| black_box(serial_gdt_descriptor_writers()));
+    });
+    group.bench_function("safe_merge_one_wave", |b| {
+        b.iter(|| black_box(safe_merge_gdt_descriptor_writers()));
+    });
+    group.finish();
+}
+
 /// Measure sharded MVCC commit throughput on disjoint writer-owned block ranges.
 ///
 /// This is the high-core counterpart to `bench_mvcc_contention`: it keeps the
@@ -1703,6 +1878,7 @@ criterion_group!(
     bench_write_amplification,
     bench_mvcc_contention,
     bench_merge_proof_success_rate,
+    bench_gdt_disjoint_range_conflict,
     bench_sharded_mvcc_contention,
     bench_shard_index_routing_ab,
     bench_pruning_throughput,
