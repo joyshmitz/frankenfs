@@ -1137,6 +1137,31 @@ Criterion reported no statistically significant improvement (`p=0.46` for bulk) 
 
 KERNEL RATIO: no new ext4/btrfs-kernel win exists from this rejected internal primitive. The direct btrfs metadata ratios remain the current ledger values: create `2.08x` slower than kernel, mkdir `2.42x`, delete `3.65x`, rename `3.93x`; ext4/btrfs parallel negative-scaling ratios remain unchanged. This reject says not to pursue staged internal-node insert reuse as the next btrfs COW micro-lever unless a different benchmark/profile shows a real hot path.
 
+### 2026-06-26 REJECTED: MVCC FCW preflight/apply fused merge map did not improve request-scope commit (IvoryBirch codex/gpt-5)
+
+BOLD-VERIFY land-or-dig pass rechecked the remaining non-ancestor `.scratch`/worktree heads first. The apparent tail-scan and ffs-block staging-skip wins already have measured production successors on `main` (`bd-xmh5g.405`, `bd-xmh5g.383/.410`), while the RaptorQ and DIR_INDEX scratch wins were already represented by later production source. No unlanded measured worktree win remained to land.
+
+NEW LEVER TESTED: reduce the ext4 parallel metadata bottleneck's MVCC lock hold time by fusing FCW preflight with commit apply. Candidate changed `preflight_fcw` to return merged conflict bytes and made ordinary `commit()`/SSI consume that map instead of rescanning every staged block in `apply_fcw_commit` / `merged_writes_after_preflight`. Correctness argument: under `&mut MvccStore`, no transaction can commit between preflight and apply, so the preflight result is stable. The candidate source was reverted because the measured request-scope commit row was neutral-to-slower.
+
+MEASURED on `hz2` via RCH, per-crate only:
+
+```
+AGENT_NAME=IvoryBirch \
+CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-b \
+RCH_REQUIRE_REMOTE=1 RCH_TEST_SLOTS=4 \
+rch exec -- cargo bench -j 1 --profile release -p ffs-core \
+  --bench mvcc_commit_batching -- request_scope_batched_commit \
+  --warm-up-time 1 --measurement-time 2 --sample-size 10 --noplot
+```
+
+| row | baseline | FCW fused-map candidate | old/new |
+|-----|----------|-------------------------|---------|
+| `mvcc_commit_batching_2000/request_scope_batched_commit` | `[5.8796, 5.9704, 6.1530] ms` | `[6.2761, 6.3608, 6.4414] ms` | midpoint `0.939x`; conservative `5.8796/6.4414 = 0.913x` |
+
+Criterion reported `No change in performance detected` (`p=0.38`), and the midpoint regressed by ~6.5%. Validation before revert: local `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-b cargo check -p ffs-mvcc` passed; focused local `cargo test -p ffs-mvcc fcw -- --nocapture` passed 27 relevant tests (25 unit + 2 stress-filtered). Candidate source was reverted after the loss.
+
+KERNEL RATIO: no new ext4/btrfs-kernel win exists from this rejected internal MVCC primitive. The direct ratios remain the current ledger values: ext4 parallel create still loses up to `5.90x` at 8 threads, btrfs parallel create still loses `3.98x` at 4 threads, and serial btrfs metadata remains create `2.08x`, mkdir `2.42x`, delete `3.65x`, rename `3.93x` slower than kernel. This reject rules out the contained duplicated-scan FCW fusion as the single-turn fix; the measured gap still points at architectural commit-lock / disjoint-range mutation sharding, not another local merge-map micro-lever.
+
 ### 2026-06-26 POSITIVE: parallel READS scale ~10-23x — the negative-scaling is WRITE-SPECIFIC (CrimsonFox cc/opus)
 
 Completing the parallel characterization: measured `rand-read --parallel` (rayon pool, 200000 4K random reads, current main) vs serial. Reads SCALE STRONGLY:
