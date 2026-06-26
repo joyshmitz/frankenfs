@@ -221,3 +221,34 @@ fn parallel_commit_scaling_sharded_vs_single_locked() {
         sharded_nt / sharded_1t
     );
 }
+
+/// bd-cc-shardread: verify the read-interface gap methods added to ShardedMvccStore
+/// (read_visible_block_buf, read_visible_physical) — completing the store's read
+/// interface toward the FS wiring. block_buf must equal read_visible's bytes;
+/// physical is logical-identity for a committed block (the no-COW ext4 fallback)
+/// and None for an uncommitted block.
+#[test]
+fn sharded_read_gap_methods_match_bd_cc_shardread() {
+    use ffs_mvcc::sharded::ShardedMvccStore;
+    use ffs_types::BlockNumber as BN;
+
+    let store = ShardedMvccStore::for_host_parallelism();
+    let block = BN(42);
+    let snap0 = store.current_snapshot();
+    assert!(store.read_visible_block_buf(block, snap0).is_none());
+    assert!(store.read_visible_physical(block, snap0).is_none());
+
+    let mut txn = store.begin();
+    let data = vec![0x7E_u8; 4096];
+    txn.stage_write(block, data.clone());
+    store.commit(txn).map_err(|(e, _)| e).expect("commit");
+
+    let snap = store.current_snapshot();
+    let bytes = store.read_visible(block, snap).expect("visible bytes");
+    let buf = store.read_visible_block_buf(block, snap).expect("visible buf");
+    assert_eq!(buf.as_slice(), bytes.as_slice(), "block_buf must match read_visible bytes");
+    assert_eq!(bytes, data);
+    assert_eq!(store.read_visible_physical(block, snap), Some(block));
+    assert!(store.read_visible_physical(BN(99), snap).is_none());
+    eprintln!("sharded read-gap methods verified byte-exact + physical identity");
+}

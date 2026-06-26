@@ -696,6 +696,41 @@ impl ShardedMvccStore {
             .and_then(|versions| crate::resolve_version_bytes_at_or_before(versions, snapshot.high))
     }
 
+    /// Read the visible version of `block` as an owned [`ffs_block::BlockBuf`]
+    /// (bd-cc-shardread). Mirrors [`Self::read_visible`] but returns the FS's
+    /// block-buffer type, completing the read interface the OpenFs store needs.
+    /// Byte-identical to `read_visible` wrapped in a `BlockBuf` (verified by
+    /// `sharded_read_visible_block_buf_matches_read_visible`).
+    #[must_use]
+    pub fn read_visible_block_buf(
+        &self,
+        block: BlockNumber,
+        snapshot: Snapshot,
+    ) -> Option<ffs_block::BlockBuf> {
+        self.read_visible(block, snapshot)
+            .map(ffs_block::BlockBuf::new)
+    }
+
+    /// Resolve the visible PHYSICAL block for a logical block (bd-cc-shardread).
+    /// The sharded store backs the no-COW ext4 write path and does NOT track COW
+    /// physical remapping, so a visible logical block maps to itself — exactly the
+    /// behaviour of `MvccStore::read_visible_physical` when a block has no
+    /// `physical_versions` chain (its documented fallback). A cheap existence
+    /// check (no byte resolution) under the shard read lock.
+    #[must_use]
+    pub fn read_visible_physical(
+        &self,
+        logical: BlockNumber,
+        snapshot: Snapshot,
+    ) -> Option<BlockNumber> {
+        let shard = self.shards[self.shard_index(logical)].read();
+        shard
+            .versions
+            .get(&logical)
+            .and_then(|versions| crate::newest_visible_index(versions, snapshot.high))
+            .map(|_| logical)
+    }
+
     /// Commit a transaction with first-committer-wins (FCW) conflict detection.
     ///
     /// Shard locks are acquired in sorted order to prevent deadlocks.
