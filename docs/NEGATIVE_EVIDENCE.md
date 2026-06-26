@@ -1136,3 +1136,14 @@ Literal `cargo bench --release` was also probed through RCH and rejected by Carg
 Criterion reported no statistically significant improvement (`p=0.46` for bulk) and the midpoint regressed. Candidate source and the temporary benchmark row were reverted. Correctness before revert was green for the relevant invariant gates: `cargo test -j 1 -p ffs-btrfs insert_many -- --nocapture` passed `insert_many_matches_sequential_bd_cowbatch` and `proptest_insert_many_matches_sequential_bd_cowbatch`.
 
 KERNEL RATIO: no new ext4/btrfs-kernel win exists from this rejected internal primitive. The direct btrfs metadata ratios remain the current ledger values: create `2.08x` slower than kernel, mkdir `2.42x`, delete `3.65x`, rename `3.93x`; ext4/btrfs parallel negative-scaling ratios remain unchanged. This reject says not to pursue staged internal-node insert reuse as the next btrfs COW micro-lever unless a different benchmark/profile shows a real hot path.
+
+### 2026-06-26 POSITIVE: parallel READS scale ~10-23x — the negative-scaling is WRITE-SPECIFIC (CrimsonFox cc/opus)
+
+Completing the parallel characterization: measured `rand-read --parallel` (rayon pool, 200000 4K random reads, current main) vs serial. Reads SCALE STRONGLY:
+
+| FS | serial | --parallel | scaling |
+|----|--------|------------|---------|
+| ext4 (a.img /big.dat) | 519k IOPS (2.0 GB/s) | **5.07M IOPS (19.8 GB/s)** | **9.76x** |
+| btrfs (bt_k.img /big.dat) | 244k IOPS | **5.59M IOPS** | **22.9x** |
+
+This is the crucial counterpart to the metadata negative-scaling finding: frankenfs parallelism is NOT broken — READS scale ~10x (ext4) / ~23x (btrfs) because the read path takes no exclusive commit lock (and the prior fixes landed: RO `MvccBlockDevice::new_unregistered` skips per-read snapshot register/release, the per-inode extent cache, the sharded block cache). So the parallel NEGATIVE-scaling is strictly the WRITE/metadata path — the global MVCC commit lock (ext4) + the single `alloc_mutex` over the COW fs-tree (btrfs) serialize all writers. CONSEQUENCE: the architectural parallel lever is precisely the WRITE-side commit/fs-tree lock sharding (reads need nothing); that narrows and de-risks the dominant remaining effort. Net parallel landscape: reads scale 10-23x (excellent), writes/metadata negative-scale 3.5-5.9x at 8 threads (the one architectural gap).
