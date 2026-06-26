@@ -85,6 +85,70 @@ fn throughput(threads: usize, d: &[u8], f: impl Fn(usize, &[u8])) -> f64 {
     (total as f64) / secs
 }
 
+/// Correctness gate (NOT ignored — runs in normal test): the `ShardedMvccStore`'s
+/// `CommitPublicationGate` makes out-of-order concurrent commits become in-order
+/// visible. Stress it: N threads each blind-commit DISTINCT data to DISJOINT blocks
+/// concurrently, then verify EVERY committed block reads back its exact value at the
+/// final snapshot. A lost/torn/mis-ordered commit (a gate or shard-install bug) fails
+/// here — catching it BEFORE the parwrite wiring lands a broken transaction core.
+#[test]
+fn sharded_parallel_commit_is_correct_bd_cc_parwrite_verify() {
+    use ffs_mvcc::sharded::ShardedMvccStore;
+
+    const THREADS: usize = 8;
+    const PER_THREAD: u64 = 1500;
+
+    // block b's payload: first 8 bytes = b.to_le_bytes(), rest a b-derived fill.
+    fn payload(block: u64) -> Vec<u8> {
+        let mut v = vec![(block as u8) ^ 0x5A; BS];
+        v[..8].copy_from_slice(&block.to_le_bytes());
+        v
+    }
+
+    let store = Arc::new(ShardedMvccStore::for_host_parallelism());
+    let mut handles = Vec::with_capacity(THREADS);
+    for t in 0..THREADS {
+        let store = Arc::clone(&store);
+        handles.push(thread::spawn(move || {
+            let base = base_for(t);
+            for i in 0..PER_THREAD {
+                let block = base + i;
+                let mut txn = store.begin();
+                txn.stage_write(BlockNumber(block), payload(block));
+                // disjoint blocks => no FCW conflict => every commit must succeed
+                store
+                    .commit(txn)
+                    .unwrap_or_else(|(e, _)| panic!("commit of block {block} failed: {e:?}"));
+            }
+        }));
+    }
+    for h in handles {
+        h.join().unwrap();
+    }
+
+    // After all writers joined, every committed block must be visible with its exact
+    // payload at the latest snapshot.
+    let snapshot = store.current_snapshot();
+    let mut verified = 0_u64;
+    for t in 0..THREADS {
+        let base = base_for(t);
+        for i in 0..PER_THREAD {
+            let block = base + i;
+            let got = store
+                .read_visible(BlockNumber(block), snapshot)
+                .unwrap_or_else(|| panic!("block {block} not visible after parallel commit"));
+            assert_eq!(
+                got,
+                payload(block),
+                "block {block} read back wrong bytes (gate/install corruption)"
+            );
+            verified += 1;
+        }
+    }
+    assert_eq!(verified, THREADS as u64 * PER_THREAD);
+    eprintln!("sharded parallel-commit correctness: {verified} blocks verified byte-exact");
+}
+
 #[test]
 #[ignore = "timing measurement; run with --ignored --nocapture"]
 fn parallel_commit_scaling_sharded_vs_single_locked() {
