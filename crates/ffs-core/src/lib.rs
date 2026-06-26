@@ -24982,7 +24982,9 @@ impl OpenFs {
             self.btrfs_touch_inode_times(&mut alloc, parent_oid, secs, nanos)?;
         } else {
             let dir_index_seq = Self::btrfs_consume_dir_index_seq(&mut alloc, parent_oid)?;
-            let dir_bytes = dir_item.try_to_bytes().map_err(|e| parse_to_ffs_error(&e))?;
+            let dir_bytes = dir_item
+                .try_to_bytes()
+                .map_err(|e| parse_to_ffs_error(&e))?;
             let ref_payload =
                 Self::btrfs_serialize_inode_ref_payload(&[(dir_index_seq, name.to_vec())])?;
             let inode_bytes = inode.to_bytes();
@@ -25133,7 +25135,9 @@ impl OpenFs {
             self.btrfs_touch_inode_times(&mut alloc, parent_oid, secs, nanos)?;
         } else {
             let dir_index_seq = Self::btrfs_consume_dir_index_seq(&mut alloc, parent_oid)?;
-            let dir_bytes = dir_item.try_to_bytes().map_err(|e| parse_to_ffs_error(&e))?;
+            let dir_bytes = dir_item
+                .try_to_bytes()
+                .map_err(|e| parse_to_ffs_error(&e))?;
             let ref_payload =
                 Self::btrfs_serialize_inode_ref_payload(&[(dir_index_seq, name.to_vec())])?;
             let inode_bytes = inode.to_bytes();
@@ -25740,12 +25744,19 @@ impl OpenFs {
             item_type: BTRFS_ITEM_DIR_ITEM,
             offset: u64::from(ffs_btrfs::btrfs_name_hash(name)),
         };
-        let single_dir_item_len = child.try_to_bytes().map_err(|e| parse_to_ffs_error(&e))?.len();
+        let single_dir_item_len = child
+            .try_to_bytes()
+            .map_err(|e| parse_to_ffs_error(&e))?
+            .len();
         let dir_items = alloc
             .fs_tree
             .range(&dir_item_key, &dir_item_key)
             .map_err(|e| btrfs_mutation_to_ffs(&e))?;
-        let child_lo = BtrfsKey { objectid: child_oid, item_type: 0, offset: 0 };
+        let child_lo = BtrfsKey {
+            objectid: child_oid,
+            item_type: 0,
+            offset: 0,
+        };
         let child_hi = BtrfsKey {
             objectid: child_oid,
             item_type: u8::MAX,
@@ -25978,12 +25989,19 @@ impl OpenFs {
             offset: parent_oid,
         };
         let rename_batchable = parent_oid == new_parent_oid && {
-            let old_dir_items = alloc.fs_tree.range(&old_dir_item_key, &old_dir_item_key).unwrap_or_default();
-            let new_dir_items = alloc.fs_tree.range(&new_dir_item_key, &new_dir_item_key).unwrap_or_default();
+            let old_dir_items = alloc
+                .fs_tree
+                .range(&old_dir_item_key, &old_dir_item_key)
+                .unwrap_or_default();
+            let new_dir_items = alloc
+                .fs_tree
+                .range(&new_dir_item_key, &new_dir_item_key)
+                .unwrap_or_default();
             let old_refs = alloc.fs_tree.range(&ref_key, &ref_key).unwrap_or_default();
             let single_item_len = child.try_to_bytes().map(|b| b.len());
             let single_ref_len =
-                Self::btrfs_serialize_inode_ref_payload(&[(child_dir_index, name.to_vec())]).map(|b| b.len());
+                Self::btrfs_serialize_inode_ref_payload(&[(child_dir_index, name.to_vec())])
+                    .map(|b| b.len());
             new_dir_items.is_empty()
                 && old_dir_items.len() == 1
                 && matches!(single_item_len, Ok(len) if old_dir_items[0].1.len() == len)
@@ -25999,7 +26017,9 @@ impl OpenFs {
                 file_type: child.file_type,
                 name: new_name.to_vec(),
             };
-            let new_dir_bytes = new_dir_item.try_to_bytes().map_err(|e| parse_to_ffs_error(&e))?;
+            let new_dir_bytes = new_dir_item
+                .try_to_bytes()
+                .map_err(|e| parse_to_ffs_error(&e))?;
             let new_ref_payload =
                 Self::btrfs_serialize_inode_ref_payload(&[(new_seq, new_name.to_vec())])?;
             let old_dir_index_key = BtrfsKey {
@@ -26035,10 +26055,6 @@ impl OpenFs {
                 item_type: BTRFS_ITEM_INODE_ITEM,
                 offset: 0,
             };
-            alloc
-                .fs_tree
-                .remove_many(&[old_dir_item_key, old_dir_index_key, ref_key])
-                .map_err(|e| btrfs_mutation_to_ffs(&e))?;
             let parent_bytes = parent_inode.to_bytes();
             let inserts: [(BtrfsKey, &[u8]); 3] = [
                 (new_dir_item_key, new_dir_bytes.as_slice()),
@@ -26047,7 +26063,12 @@ impl OpenFs {
             ];
             alloc
                 .fs_tree
-                .insert_many_then_update(&inserts, &parent_key, parent_bytes.as_slice())
+                .remove_many_then_insert_many_then_update(
+                    &[old_dir_item_key, old_dir_index_key, ref_key],
+                    &inserts,
+                    &parent_key,
+                    parent_bytes.as_slice(),
+                )
                 .map_err(|e| btrfs_mutation_to_ffs(&e))?;
         } else {
             // Remove old entry and its INODE_REF.
@@ -26063,9 +26084,18 @@ impl OpenFs {
             if let Some(target) = target {
                 let target_oid = target.child_objectid;
                 let target_is_dir = target.file_type == BTRFS_FT_DIR;
-                let target_dir_index =
-                    Self::btrfs_require_inode_ref_index(&alloc, target_oid, new_parent_oid, new_name)?;
-                self.btrfs_remove_dir_entry(&mut alloc, new_parent_oid, new_name, target_dir_index)?;
+                let target_dir_index = Self::btrfs_require_inode_ref_index(
+                    &alloc,
+                    target_oid,
+                    new_parent_oid,
+                    new_name,
+                )?;
+                self.btrfs_remove_dir_entry(
+                    &mut alloc,
+                    new_parent_oid,
+                    new_name,
+                    target_dir_index,
+                )?;
                 Self::btrfs_remove_inode_ref(&mut alloc, target_oid, new_parent_oid, new_name)?;
                 // Removing the overwritten target drops its single link (-1 for both
                 // files and btrfs directories); the new parent's nlink is unchanged
@@ -26087,7 +26117,8 @@ impl OpenFs {
                 file_type: child.file_type,
                 name: new_name.to_vec(),
             };
-            let dir_index_seq = self.btrfs_insert_dir_entry(&mut alloc, new_parent_oid, &dir_item)?;
+            let dir_index_seq =
+                self.btrfs_insert_dir_entry(&mut alloc, new_parent_oid, &dir_item)?;
             Self::btrfs_insert_inode_ref(
                 &mut alloc,
                 child.child_objectid,

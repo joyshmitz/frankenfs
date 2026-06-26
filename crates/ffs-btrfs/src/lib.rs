@@ -3390,25 +3390,26 @@ impl InMemoryCowBtrfsTree {
         debug_assert!(self.staged_allocations.is_empty());
         debug_assert!(self.staged_deferred_frees.is_empty());
         for entry in entries {
-            match self.try_insert_inplace(self.root, &entry, allow_replace) {
-                Ok(true) => continue,
-                Ok(false) => {
-                    let old_root = self.root;
-                    let result = match self.insert_into(self.root, entry, allow_replace) {
-                        Ok(r) => r,
-                        Err(err) => {
-                            self.rollback_mutation();
-                            return Err(err);
-                        }
-                    };
-                    match self.root_from_insert_result(old_root, result) {
-                        Ok(root) => self.root = root,
-                        Err(err) => {
-                            self.rollback_mutation();
-                            return Err(err);
-                        }
-                    }
+            let inserted_inplace = match self.try_insert_inplace(self.root, &entry, allow_replace) {
+                Ok(inserted_inplace) => inserted_inplace,
+                Err(err) => {
+                    self.rollback_mutation();
+                    return Err(err);
                 }
+            };
+            if inserted_inplace {
+                continue;
+            }
+            let old_root = self.root;
+            let result = match self.insert_into(self.root, entry, allow_replace) {
+                Ok(r) => r,
+                Err(err) => {
+                    self.rollback_mutation();
+                    return Err(err);
+                }
+            };
+            match self.root_from_insert_result(old_root, result) {
+                Ok(root) => self.root = root,
                 Err(err) => {
                     self.rollback_mutation();
                     return Err(err);
@@ -3516,28 +3517,29 @@ impl InMemoryCowBtrfsTree {
         debug_assert!(self.staged_allocations.is_empty());
         debug_assert!(self.staged_deferred_frees.is_empty());
         for key in keys {
-            match self.try_remove_inplace(self.root, key) {
-                Ok(true) => continue,
-                Ok(false) => {
-                    let deleted = match self.delete_from(self.root, key) {
-                        Ok(d) => d,
-                        Err(err) => {
-                            self.rollback_mutation();
-                            return Err(err);
-                        }
-                    };
-                    if !deleted.deleted {
-                        self.rollback_mutation();
-                        return Err(BtrfsMutationError::KeyNotFound);
-                    }
-                    self.root = match self.normalized_root_after_delete(deleted.node_id) {
-                        Ok(root) => root,
-                        Err(err) => {
-                            self.rollback_mutation();
-                            return Err(err);
-                        }
-                    };
+            let removed_inplace = match self.try_remove_inplace(self.root, key) {
+                Ok(removed_inplace) => removed_inplace,
+                Err(err) => {
+                    self.rollback_mutation();
+                    return Err(err);
                 }
+            };
+            if removed_inplace {
+                continue;
+            }
+            let deleted = match self.delete_from(self.root, key) {
+                Ok(d) => d,
+                Err(err) => {
+                    self.rollback_mutation();
+                    return Err(err);
+                }
+            };
+            if !deleted.deleted {
+                self.rollback_mutation();
+                return Err(BtrfsMutationError::KeyNotFound);
+            }
+            self.root = match self.normalized_root_after_delete(deleted.node_id) {
+                Ok(root) => root,
                 Err(err) => {
                     self.rollback_mutation();
                     return Err(err);
@@ -3830,6 +3832,127 @@ impl InMemoryCowBtrfsTree {
             "btrfs_cow_insert_many_then_update_complete"
         );
         Ok(self.root)
+    }
+
+    /// Remove several existing keys, insert several new items, then update one
+    /// existing item as one atomic COW mutation.
+    ///
+    /// This is the buffered-tree analogue of calling [`Self::remove_many`] and
+    /// then [`Self::insert_many_then_update`], but it keeps the cloned COW path
+    /// private across the whole delete/insert/update sequence. That matches the
+    /// btrfs same-directory rename shape: remove old DIR_ITEM/DIR_INDEX/INODE_REF,
+    /// insert new DIR_ITEM/DIR_INDEX/INODE_REF, then touch the parent INODE_ITEM.
+    ///
+    /// # Errors
+    /// Returns the same key and structural errors as the equivalent sequential
+    /// delete/insert/update sequence; on any error the whole batch is rolled back.
+    pub fn remove_many_then_insert_many_then_update(
+        &mut self,
+        removals: &[BtrfsKey],
+        inserts: &[(BtrfsKey, &[u8])],
+        update_key: &BtrfsKey,
+        update_item: &[u8],
+    ) -> Result<u64, BtrfsMutationError> {
+        if removals.is_empty() {
+            return self.insert_many_then_update(inserts, update_key, update_item);
+        }
+        if inserts.is_empty() {
+            self.remove_many(removals)?;
+            return <Self as BtrfsBTree>::update(self, update_key, update_item);
+        }
+
+        debug_assert!(self.staged_allocations.is_empty());
+        debug_assert!(self.staged_deferred_frees.is_empty());
+        let old_root = self.root;
+        let mut current_root = old_root;
+
+        if let Err(err) = self.apply_staged_removals(&mut current_root, removals) {
+            self.rollback_mutation();
+            return Err(err);
+        }
+        if let Err(err) = self.apply_staged_inserts(&mut current_root, inserts) {
+            self.rollback_mutation();
+            return Err(err);
+        }
+        let new_root = match self.replace_existing_in_root(current_root, update_key, update_item) {
+            Ok(root) => root,
+            Err(err) => {
+                self.rollback_mutation();
+                return Err(err);
+            }
+        };
+        self.root = new_root;
+        self.commit_allocated_nodes();
+        self.commit_retired_nodes();
+        trace!(
+            old_root,
+            new_root = self.root,
+            removals = removals.len(),
+            inserts = inserts.len(),
+            "btrfs_cow_remove_many_then_insert_many_then_update_complete"
+        );
+        Ok(self.root)
+    }
+
+    fn apply_staged_removals(
+        &mut self,
+        current_root: &mut u64,
+        removals: &[BtrfsKey],
+    ) -> Result<(), BtrfsMutationError> {
+        for key in removals {
+            if self.try_remove_inplace(*current_root, key)? {
+                continue;
+            }
+            let deleted = self.delete_from(*current_root, key)?;
+            if !deleted.deleted {
+                return Err(BtrfsMutationError::KeyNotFound);
+            }
+            *current_root = self.normalized_root_after_delete(deleted.node_id)?;
+        }
+        Ok(())
+    }
+
+    fn apply_staged_inserts(
+        &mut self,
+        current_root: &mut u64,
+        inserts: &[(BtrfsKey, &[u8])],
+    ) -> Result<(), BtrfsMutationError> {
+        for &(key, item) in inserts {
+            let entry = BtrfsTreeItem {
+                key,
+                data: item.into(),
+            };
+            if self.try_insert_inplace(*current_root, &entry, false)? {
+                continue;
+            }
+            let result = self.insert_into(*current_root, entry, false)?;
+            *current_root = self.root_from_insert_result(*current_root, result)?;
+        }
+        Ok(())
+    }
+
+    fn replace_existing_in_root(
+        &mut self,
+        current_root: u64,
+        update_key: &BtrfsKey,
+        update_item: &[u8],
+    ) -> Result<u64, BtrfsMutationError> {
+        match self.find_in(current_root, update_key) {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                return Err(BtrfsMutationError::KeyNotFound);
+            }
+            Err(err) => return Err(err),
+        }
+        let update_result = self.insert_into(
+            current_root,
+            BtrfsTreeItem {
+                key: *update_key,
+                data: update_item.into(),
+            },
+            true,
+        )?;
+        self.root_from_insert_result(current_root, update_result)
     }
 
     fn root_from_insert_result(
@@ -9362,7 +9485,8 @@ mod tests {
         for i in 0..600u64 {
             let oid = i.wrapping_mul(7) % 1000;
             if seeded.insert(oid) {
-                seq.insert(cb_key(oid), &cb_payload(oid)).expect("seq prefill");
+                seq.insert(cb_key(oid), &cb_payload(oid))
+                    .expect("seq prefill");
                 batch
                     .insert(cb_key(oid), &cb_payload(oid))
                     .expect("batch prefill");
@@ -9385,7 +9509,8 @@ mod tests {
             })
             .collect();
         for &oid in &new_oids {
-            seq.insert(cb_key(oid), &cb_payload(oid)).expect("seq insert");
+            seq.insert(cb_key(oid), &cb_payload(oid))
+                .expect("seq insert");
         }
         batch
             .insert_many(entries, false)
@@ -9408,13 +9533,109 @@ mod tests {
         assert_eq!(seq.find(&cb_key(424_242)).expect("seq absent"), None);
     }
 
+    #[test]
+    fn remove_many_insert_many_update_matches_sequential_rename_shape_bd_cowbatch() {
+        fn rk(objectid: u64, item_type: u8, offset: u64) -> BtrfsKey {
+            BtrfsKey {
+                objectid,
+                item_type,
+                offset,
+            }
+        }
+        fn rp(tag: u64) -> Vec<u8> {
+            let mut payload = vec![0_u8; 24];
+            payload[0..8].copy_from_slice(&tag.to_le_bytes());
+            payload[8..16].copy_from_slice(&(tag.wrapping_mul(17)).to_le_bytes());
+            payload[16..24].copy_from_slice(&(tag ^ 0xa5a5_a5a5_a5a5_a5a5).to_le_bytes());
+            payload
+        }
+        fn full_range(tree: &InMemoryCowBtrfsTree) -> Vec<(BtrfsKey, Vec<u8>)> {
+            tree.range(
+                &BtrfsKey {
+                    objectid: 0,
+                    item_type: 0,
+                    offset: 0,
+                },
+                &BtrfsKey {
+                    objectid: u64::MAX,
+                    item_type: u8::MAX,
+                    offset: u64::MAX,
+                },
+            )
+            .expect("full range")
+        }
+
+        let mut seq = InMemoryCowBtrfsTree::new(8).expect("seq tree");
+        let mut fused = InMemoryCowBtrfsTree::new(8).expect("fused tree");
+        for i in 0..700_u64 {
+            let key = rk(i.wrapping_mul(5).wrapping_add(10), BTRFS_ITEM_INODE_ITEM, 0);
+            let payload = rp(i);
+            seq.insert(key, &payload).expect("seq prefill");
+            fused.insert(key, &payload).expect("fused prefill");
+        }
+
+        let parent_oid = 1_000_000_u64;
+        let child_oid = 1_000_001_u64;
+        let parent_key = rk(parent_oid, BTRFS_ITEM_INODE_ITEM, 0);
+        let old_dir_item_key = rk(parent_oid, BTRFS_ITEM_DIR_ITEM, 10);
+        let old_dir_index_key = rk(parent_oid, BTRFS_ITEM_DIR_INDEX, 30);
+        let ref_key = rk(child_oid, BTRFS_ITEM_INODE_REF, parent_oid);
+        let new_dir_item_key = rk(parent_oid, BTRFS_ITEM_DIR_ITEM, 11);
+        let new_dir_index_key = rk(parent_oid, BTRFS_ITEM_DIR_INDEX, 31);
+
+        let initial_items = [
+            (parent_key, rp(1)),
+            (old_dir_item_key, rp(2)),
+            (old_dir_index_key, rp(3)),
+            (ref_key, rp(4)),
+        ];
+        for (key, payload) in &initial_items {
+            seq.insert(*key, payload).expect("seq rename seed");
+            fused.insert(*key, payload).expect("fused rename seed");
+        }
+
+        let removals = [old_dir_item_key, old_dir_index_key, ref_key];
+        let insert_payloads = [
+            (new_dir_item_key, rp(20)),
+            (new_dir_index_key, rp(21)),
+            (ref_key, rp(22)),
+        ];
+        let insert_refs: Vec<_> = insert_payloads
+            .iter()
+            .map(|(key, payload)| (*key, payload.as_slice()))
+            .collect();
+        let parent_payload = rp(99);
+
+        for key in removals {
+            seq.delete(&key).expect("seq remove");
+        }
+        for (key, payload) in &insert_payloads {
+            seq.insert(*key, payload).expect("seq insert");
+        }
+        seq.update(&parent_key, &parent_payload)
+            .expect("seq parent update");
+
+        fused
+            .remove_many_then_insert_many_then_update(
+                &removals,
+                &insert_refs,
+                &parent_key,
+                &parent_payload,
+            )
+            .expect("fused rename batch");
+
+        seq.validate_invariants().expect("seq invariants");
+        fused.validate_invariants().expect("fused invariants");
+        assert_eq!(full_range(&fused), full_range(&seq));
+    }
+
     // bd-cowbatch timing proxy (run explicitly: `cargo test -p ffs-btrfs --
     // cowbatch_timing --ignored --nocapture --profile release-perf`). Models btrfs
     // create's 4 inserts hitting 2 leaves (2 items per objectid), measuring the
     // COW-clone churn of insert_many (in-place for the 2nd item of each pair) vs
     // 4 separate insert()s (full root->leaf re-clone each).
     #[test]
-    #[ignore]
+    #[ignore = "manual timing proxy; run explicitly under release-perf"]
     fn cowbatch_timing_ratio_bd_cowbatch() {
         fn tk(oid: u64, t: u8) -> BtrfsKey {
             BtrfsKey {
