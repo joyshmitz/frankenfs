@@ -1172,3 +1172,14 @@ Completing the parallel characterization: measured `rand-read --parallel` (rayon
 | btrfs (bt_k.img /big.dat) | 244k IOPS | **5.59M IOPS** | **22.9x** |
 
 This is the crucial counterpart to the metadata negative-scaling finding: frankenfs parallelism is NOT broken — READS scale ~10x (ext4) / ~23x (btrfs) because the read path takes no exclusive commit lock (and the prior fixes landed: RO `MvccBlockDevice::new_unregistered` skips per-read snapshot register/release, the per-inode extent cache, the sharded block cache). So the parallel NEGATIVE-scaling is strictly the WRITE/metadata path — the global MVCC commit lock (ext4) + the single `alloc_mutex` over the COW fs-tree (btrfs) serialize all writers. CONSEQUENCE: the architectural parallel lever is precisely the WRITE-side commit/fs-tree lock sharding (reads need nothing); that narrows and de-risks the dominant remaining effort. Net parallel landscape: reads scale 10-23x (excellent), writes/metadata negative-scale 3.5-5.9x at 8 threads (the one architectural gap).
+
+### 2026-06-26 RATIO vs kernel: parallel random read is at KERNEL PARITY (~5M IOPS, both) (CrimsonFox cc/opus)
+
+The parallel-read scaling above is internal; here is the ratio vs the kernel (the metric that matters). Kernel parallel random read via `/tmp/kpread.c` (64 pthreads, random `pread`, warm page cache, 2,000,000 reads) vs frankenfs `rand-read --parallel`:
+
+| FS | frankenfs --parallel | kernel 64-thread pread | ratio |
+|----|----------------------|------------------------|-------|
+| ext4  | 5.07M IOPS | 5.22M IOPS | **0.97x (parity)** |
+| btrfs | 5.59M IOPS | 5.38M IOPS | **1.04x (parity, slightly ahead)** |
+
+Both land at ~5-5.6M IOPS — the page-cache read-bandwidth ceiling at 64 cores — so frankenfs parallel random read is at KERNEL PARITY (ext4 0.97x, btrfs 1.04x), not a loss. Combined read standing vs kernel: bulk sequential read WINS (1.85x ext4 / 3.0x btrfs, materialize); random read SERIAL 1.5x slower (per-read engine overhead); random read PARALLEL ~parity (both cache-bw-bound). So the read path is competitive-to-winning across serial+parallel. This leaves parallel WRITES/metadata as the SOLE remaining vs-kernel gap (3.5-5.9x, the write-side commit/fs-lock sharding), and BOTH its halves now have rejected incremental attempts on main (btrfs internal-in-place inert; ext4 MVCC FCW-preflight-fusion neutral-to-slower) — confirming only deep concurrent-commit sharding remains, a dedicated architectural effort (both halves currently the peer's active lanes).
