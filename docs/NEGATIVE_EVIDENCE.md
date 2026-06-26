@@ -1444,3 +1444,19 @@ Implemented an `FFS_MVCC_STORE=single` env toggle in `init_mvcc_store` (no-WAL p
 ROOT CAUSE + CORRECTION: the single store (`MvccStore`) caps version chains (64) and relies on `prune_safe`/watermark advance to bound them. The WIRED single path (`FsMvccStore::single()`, no WAL) does NOT drive the prune → watermark stays 0 → the chain grows unbounded → backpressure. The decision-matrix "Single 57k" (2026-06-26 prior entry) was measured on the PRE-WIRING binary (origin/main 76ee0375), whose code path drove the prune; the WIRED single does not. So that entry CONFLATED two different single-store paths. CONSEQUENCE: the Sharded default is JUSTIFIED, not a "common-case net loss" — the wired single store is NOT a viable no-WAL alternative for create-heavy workloads (it backpressures), while Sharded handles it. The toggle's premise (opt into a faster wired Single) is FALSE → REVERTED (shelved).
 
 FOLLOW-UP for the wiring owner: the wired `FsMvccStore::single()` path (used when a JBD2/MVCC-WAL is configured) bounds its chain via the WAL-driven prune; a no-WAL single config is currently non-viable for sustained writes (no prune driver). If a no-WAL single mode is ever wanted, `init`/the commit path must drive `prune_safe` (or register a GC snapshot) for the single store. Net for the default decision: KEEP Sharded (it's the only no-WAL store that survives create-heavy); my prior "net loss" framing is corrected by this measured backpressure failure.
+
+### 2026-06-26 BUG (measured, serious): MVCC version memory grows UNBOUNDED — prune is never driven by the real path (CrimsonFox cc/opus)
+
+Investigating the wired-single backpressure led to the shipping default. MEASURED (Sharded default, create-bench single-thread, RSS via /usr/bin/time -v):
+
+| creates | RSS | creates/s | result |
+|---------|-----|-----------|--------|
+| 16000 | 365 MB | 26.5k | ok |
+| 64000 | 1401 MB | 25.6k | ok |
+| 128000 | 2181 MB | — | FAIL (backpressure/limit) |
+
+RSS grows LINEARLY (~22 KB per create) and the run FAILS at 128k. ROOT CAUSE (confirmed by grep): the FS exposes `prune_mvcc_versions` (lib.rs:7117, "Call this periodically to reclaim memory") which calls `mvcc_store.prune_safe()` — but NOTHING in the real path calls it. The FUSE layer (ffs-fuse) doesn't; the commit path doesn't (the sharded `commit` installs versions + publishes, no prune); `flush_to_device` doesn't. The only `prune_safe`/`prune_mvcc_versions` callers are tests + the unused public API. So every committed version is retained forever → the version chain on hot metadata blocks (bitmap/GDT/dir block ~59) grows one entry per write → unbounded memory. The single store caps chains (64) and backpressures (fails writes); the sharded store grows further (~2.1 GB at 128k) then fails. The watermark stays 0 because prune is never invoked to advance it.
+
+SEVERITY: this is NOT a bench artifact — it affects ANY sustained-write workload. A long-running write-heavy FUSE mount accumulates MVCC versions unbounded until OOM (sharded) or write-rejection backpressure (single). The create-bench just exposes it quickly (pure writes, no other work).
+
+FIX DIRECTION (wiring/FUSE owner's lane): drive `prune_mvcc_versions` from the real path — e.g. after `flush_to_device` (superseded versions are durable post-flush) and/or every N commits — paired with the snapshot lifecycle so the GC watermark actually advances (register/release read snapshots correctly so `prune_safe` can reclaim). This is independent of the Single-vs-Sharded default question; both stores leak without a prune driver. Highest-priority robustness item surfaced this session: the default FS has unbounded write-path memory growth. Measured + root-caused; the fix is a commit/flush-path change in the peers' active wiring lane.
