@@ -19,6 +19,7 @@ use ffs_block::BlockDevice;
 use ffs_error::Result as FfsResult;
 use ffs_types::{BlockNumber, CommitSeq, Snapshot, TxnId};
 use parking_lot::{Condvar, Mutex, RwLock, RwLockWriteGuard};
+use smallvec::SmallVec;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::{debug, info, trace};
@@ -115,6 +116,8 @@ struct MvccShard {
 }
 
 type ShardWriteGuard<'a> = RwLockWriteGuard<'a, MvccShard>;
+type ShardIndexVec = SmallVec<[usize; 4]>;
+type ShardGuardVec<'a> = SmallVec<[(usize, ShardWriteGuard<'a>); 4]>;
 
 #[derive(Debug, Clone, Copy)]
 struct CommitInstallContext {
@@ -407,7 +410,7 @@ impl ShardedMvccStore {
             })
     }
 
-    fn lock_shards(&self, shard_indices: &[usize]) -> Vec<(usize, ShardWriteGuard<'_>)> {
+    fn lock_shards(&self, shard_indices: &[usize]) -> ShardGuardVec<'_> {
         shard_indices
             .iter()
             .map(|&idx| (idx, self.shards[idx].write()))
@@ -549,8 +552,8 @@ impl ShardedMvccStore {
         );
     }
 
-    fn ssi_shards_for_txn(&self, txn: &Transaction) -> Vec<usize> {
-        let mut shard_indices: Vec<usize> = txn
+    fn ssi_shards_for_txn(&self, txn: &Transaction) -> ShardIndexVec {
+        let mut shard_indices: ShardIndexVec = txn
             .write_set()
             .keys()
             .chain(txn.read_set().keys())
@@ -1061,10 +1064,9 @@ impl ShardedMvccStore {
     // ── Internals ───────────────────────────────────────────────────────
 
     /// Sorted, deduplicated shard indices touched by a transaction's writes.
-    fn involved_shards(&self, txn: &Transaction) -> Vec<usize> {
-        // Avoid BTreeSet allocation: shard indices are small (typically 1-4),
-        // so Vec + sort + dedup is faster than B-tree node allocation.
-        let mut indices: Vec<usize> = txn
+    fn involved_shards(&self, txn: &Transaction) -> ShardIndexVec {
+        // Avoid BTreeSet and heap allocation for the common short shard lists.
+        let mut indices: ShardIndexVec = txn
             .write_set()
             .keys()
             .map(|block| self.shard_index(*block))
