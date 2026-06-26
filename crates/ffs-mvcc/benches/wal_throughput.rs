@@ -1472,6 +1472,81 @@ fn bench_sharded_mvcc_contention(c: &mut Criterion) {
     }
 }
 
+fn latest_published_seq_reverse_scan(
+    versions: &[CommitSeq],
+    published_high: CommitSeq,
+) -> CommitSeq {
+    versions
+        .iter()
+        .rev()
+        .find(|seq| **seq <= published_high)
+        .copied()
+        .unwrap_or(CommitSeq(0))
+}
+
+fn latest_published_seq_partition_point(
+    versions: &[CommitSeq],
+    published_high: CommitSeq,
+) -> CommitSeq {
+    if let Some(commit_seq) = versions
+        .last()
+        .copied()
+        .filter(|commit_seq| *commit_seq <= published_high)
+    {
+        return commit_seq;
+    }
+
+    let visible_len = versions.partition_point(|seq| *seq <= published_high);
+    if visible_len == 0 {
+        CommitSeq(0)
+    } else {
+        versions[visible_len - 1]
+    }
+}
+
+fn bench_sharded_latest_published_search_ab(c: &mut Criterion) {
+    let versions: Vec<CommitSeq> = (1..=4096_u64).map(CommitSeq).collect();
+    let probes = [
+        ("old_snapshot", CommitSeq(16)),
+        ("mid_snapshot", CommitSeq(2048)),
+        ("latest_snapshot", CommitSeq(4096)),
+    ];
+
+    let mut group = c.benchmark_group("sharded_latest_published_seq_chain4096");
+    for &(label, published_high) in &probes {
+        assert_eq!(
+            latest_published_seq_reverse_scan(&versions, published_high),
+            latest_published_seq_partition_point(&versions, published_high)
+        );
+
+        group.bench_with_input(
+            BenchmarkId::new("reverse_scan", label),
+            &published_high,
+            |b, high| {
+                b.iter(|| {
+                    black_box(latest_published_seq_reverse_scan(
+                        black_box(&versions),
+                        black_box(*high),
+                    ));
+                });
+            },
+        );
+        group.bench_with_input(
+            BenchmarkId::new("partition_point", label),
+            &published_high,
+            |b, high| {
+                b.iter(|| {
+                    black_box(latest_published_seq_partition_point(
+                        black_box(&versions),
+                        black_box(*high),
+                    ));
+                });
+            },
+        );
+    }
+    group.finish();
+}
+
 fn bench_shard_index_routing_ab(c: &mut Criterion) {
     let shard_count = 1024_u64;
     let shard_mask = shard_count - 1;
@@ -1880,6 +1955,7 @@ criterion_group!(
     bench_merge_proof_success_rate,
     bench_gdt_disjoint_range_conflict,
     bench_sharded_mvcc_contention,
+    bench_sharded_latest_published_search_ab,
     bench_shard_index_routing_ab,
     bench_pruning_throughput,
     bench_coalesced_append,

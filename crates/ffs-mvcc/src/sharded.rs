@@ -364,12 +364,10 @@ impl ShardedMvccStore {
             .versions
             .get(&block)
             .and_then(|versions| {
-                versions
-                    .iter()
-                    .rev()
-                    .find(|version| version.commit_seq <= published_high)
+                crate::newest_visible_index(versions, published_high)
+                    .map(|idx| versions[idx].commit_seq)
             })
-            .map_or(CommitSeq(0), |version| version.commit_seq)
+            .unwrap_or(CommitSeq(0))
     }
 
     fn resolved_write_bytes_locked(
