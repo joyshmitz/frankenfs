@@ -1183,3 +1183,20 @@ The parallel-read scaling above is internal; here is the ratio vs the kernel (th
 | btrfs | 5.59M IOPS | 5.38M IOPS | **1.04x (parity, slightly ahead)** |
 
 Both land at ~5-5.6M IOPS — the page-cache read-bandwidth ceiling at 64 cores — so frankenfs parallel random read is at KERNEL PARITY (ext4 0.97x, btrfs 1.04x), not a loss. Combined read standing vs kernel: bulk sequential read WINS (1.85x ext4 / 3.0x btrfs, materialize); random read SERIAL 1.5x slower (per-read engine overhead); random read PARALLEL ~parity (both cache-bw-bound). So the read path is competitive-to-winning across serial+parallel. This leaves parallel WRITES/metadata as the SOLE remaining vs-kernel gap (3.5-5.9x, the write-side commit/fs-lock sharding), and BOTH its halves now have rejected incremental attempts on main (btrfs internal-in-place inert; ext4 MVCC FCW-preflight-fusion neutral-to-slower) — confirming only deep concurrent-commit sharding remains, a dedicated architectural effort (both halves currently the peer's active lanes).
+
+### 2026-06-26 CONSOLIDATED frankenfs-vs-kernel scorecard (campaign close: every measured dimension in one table) (CrimsonFox cc/opus)
+
+Authoritative summary of the measured ratios scattered above (all interleaved/same-machine vs the real ext4/btrfs kernel; >1x = frankenfs slower, <1x = frankenfs faster):
+
+| workload | serial vs kernel | parallel vs kernel | bound by |
+|----------|------------------|--------------------|----------|
+| bulk read (128 MiB materialize) | **0.54x ext4 / 0.33x btrfs (FRANKENFS FASTER, 1.85x/3.0x)** | cache-bw bound | 64-core parallel chunked read |
+| random 4K read | 1.5x slower (ext4) | **~parity** (5.07M vs 5.22M IOPS ext4; 5.59M vs 5.38M btrfs) | per-read engine (serial); cache bw (parallel) |
+| metadata walk (stat-heavy) | **~0.9x @8k → ~0.5x @30k (FASTER, scales with size)** | (reads, scale) | bulk inode parse vs per-entry getattr |
+| create | ext4 **0.77x (FASTER 1.3x)** / btrfs 2.08x | NEGATIVE-scale (btrfs 3.98x@4t, ext4 5.90x@8t) | serial: COW/commit; parallel: write lock |
+| mkdir | btrfs 2.42x | negative-scale | same |
+| delete | ext4 1.32x / btrfs 3.65x | negative-scale | same |
+| rename | btrfs 3.93x | negative-scale | same |
+| 4K random write | 2.5x slower (ext4) | negative-scale | MVCC commit + forbid-unsafe to_vec floor |
+
+⭐ONE-LINE STANDING: frankenfs **beats the kernel** on bulk reads, metadata walk, ext4 create, and is at **parity** on parallel random read; it **trails** on small serial random read (1.5x, inherent per-read engine), ext4 4K-write (2.5x, MVCC+copy floor), serial btrfs metadata (2-4x, bd-cowbatch-optimized, internal-in-place rejected), and — the SOLE dominant architectural gap — **parallel writes/metadata** (3.5-5.9x, negative-scaling on the global write commit/fs-lock; reads prove the parallelism is otherwise sound). Contained-lever surface EXHAUSTED across the whole landscape (confirmed by 5 shipped bd-cowbatch wirings + ~10 measured rejects across both agents); the only remaining win is the deep concurrent-commit / disjoint-subtree-lock sharding (architectural, multi-turn, both FS halves the peer's active lanes).
