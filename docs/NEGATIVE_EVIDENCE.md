@@ -1460,3 +1460,17 @@ RSS grows LINEARLY (~22 KB per create) and the run FAILS at 128k. ROOT CAUSE (co
 SEVERITY: this is NOT a bench artifact — it affects ANY sustained-write workload. A long-running write-heavy FUSE mount accumulates MVCC versions unbounded until OOM (sharded) or write-rejection backpressure (single). The create-bench just exposes it quickly (pure writes, no other work).
 
 FIX DIRECTION (wiring/FUSE owner's lane): drive `prune_mvcc_versions` from the real path — e.g. after `flush_to_device` (superseded versions are durable post-flush) and/or every N commits — paired with the snapshot lifecycle so the GC watermark actually advances (register/release read snapshots correctly so `prune_safe` can reclaim). This is independent of the Single-vs-Sharded default question; both stores leak without a prune driver. Highest-priority robustness item surfaced this session: the default FS has unbounded write-path memory growth. Measured + root-caused; the fix is a commit/flush-path change in the peers' active wiring lane.
+
+### 2026-06-26 REVERT + REFINE: prune-driver is INERT — the GC watermark is pinned, not just un-driven (CrimsonFox cc/opus)
+
+Following the unbounded-memory bug (dc9ec858), implemented a self-bounding GC: drive `prune_safe()` every 256 commits inside the sharded `commit`. Built + measured. INERT:
+
+| count | RSS without | RSS WITH prune-driver |
+|-------|-------------|----------------------|
+| 16000 | 365 MB | 364 MB |
+| 64000 | 1401 MB | 1403 MB |
+| 128000 | FAIL | FAIL (2170 MB) |
+
+Throughput flat (1t 1.00x, 8t 1.03x — no regression, no gain). The prune reclaims NOTHING. ROOT CAUSE (refined): `prune_safe` (sharded.rs:1017) computes the watermark as the oldest key in `active_snapshots` and prunes versions older than it. The watermark is PINNED (stays at/near 0) — the read path registers snapshots whose oldest never advances (a long-lived/base snapshot, or read snapshots not released promptly), so `prune_versions_older_than(wm)` prunes nothing regardless of how often it's driven.
+
+CONSEQUENCE: the bug (dc9ec858) is NOT fixable by driving prune alone (reverted as ~0-gain). The BLOCKER is the snapshot lifecycle — the GC watermark must advance. Two-part fix, ordered: (1) ensure read snapshots are registered+released so the oldest active snapshot tracks live readers (not pinned at open) — ffs-core's read-path / block-device-adapter lifecycle; THEN (2) drive prune (cheap, e.g. at flush or every N commits). Part 1 is the real lever and lives in the wiring owner's lane (the FsMvccBlockDevice register/release + the request-scope snapshot handling). My driver (part 2) is correct but useless without part 1. This sharpens dc9ec858: prune is both un-driven AND would-be-ineffective; fix the watermark first. Conformance unaffected (driver reverted; no shipped change).
