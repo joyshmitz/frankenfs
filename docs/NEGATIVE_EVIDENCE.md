@@ -1078,3 +1078,18 @@ MEASURED (clean same-session interleaved A/B, rename-bench 12000 vs kernel btrfs
 ### 2026-06-25 bd-cowbatch campaign CONFORMANCE-VERIFIED end-to-end: all 4 metadata wirings 100/0/2 GREEN (CrimsonFox cc/opus)
 
 Formal correctness closure for the full bd-cowbatch campaign (all 4 btrfs metadata ops wired: create/mkdir/delete/rename). Ran the e2e conformance suite with every wiring live: `cargo test -p ffs-harness --test conformance` => **100 passed / 0 failed / 2 ignored**. This confirms end-to-end what the per-commit byte-identical reasoning + the 357 ffs-core btrfs round-trip tests asserted: each coalesced-batch common-case path produces byte-identical on-disk results to the per-op path, and every non-common case falls back. The campaign is complete and verified — btrfs create 3.0x→2.08x, mkdir 3.5x→2.42x, delete 5.25x→3.65x, rename 4.9x→3.93x (5 FS-realization commits 8b818c81/b5e22c17/d518312a/aee47f35/f90648f5 + 3 proptest-hardened primitives), all conformance-GREEN. Remaining levers (deeper, deferred): internal-node in-place reuse (deepen all 4) + the create-family dedup.
+
+### 2026-06-25 MEASURED LOSS: btrfs metadata NEGATIVE-SCALES under parallelism — the parallel gap is the biggest (~4x at 4 threads), architectural (CrimsonFox cc/opus)
+
+The single-thread bd-cowbatch wins narrowed the SERIAL gaps; measured the PARALLEL dimension (create-bench --threads vs `/tmp/kpcreate.c` pthreads kernel harness, 16000 total, btrfs). frankenfs create NEGATIVE-scales (slower with more threads) while the kernel POSITIVE-scales:
+
+| threads | kernel creates/s | frankenfs creates/s | gap |
+|---------|------------------|---------------------|-----|
+| 1  | 38089 | 20599 | 1.85x |
+| 4  | 64025 | **16105** | **3.98x** |
+| 8  | 52714 | 15198 | 3.47x |
+| 16 | 46557 | 15060 | 3.09x |
+
+frankenfs goes 20.6k (1t) → 16.1k (4t) → 15.1k (16t) — adding threads makes it SLOWER. ROOT CAUSE: every writer serializes on the global MVCC commit lock + the single shared `InMemoryCowBtrfsTree` (one `alloc_mutex.write()` per op holds the whole fs-tree), so parallel metadata has zero (negative) scaling; the kernel parallelizes across subdirs. So the PARALLEL metadata gap (~4x, widening with cores) now exceeds every serial gap.
+
+LEVER (architectural, deep — NOT a contained single-turn change, distinct from the peer's single-thread internal-in-place): shard the MVCC commit lock + allow concurrent COW-tree mutation on disjoint subtrees (per-subvolume / per-objectid-range locking, lock-free snapshot registration — cf the earlier bd-snaplock attempt which was wall-neutral because a single Mutex just relocates the serialization point). This is the frankenfs parallel-write architecture work; surfaced as the highest-value remaining lever (it dominates at multi-core), to be a dedicated effort. Recorded as a measured loss per the BOLD-VERIFY ledger.
