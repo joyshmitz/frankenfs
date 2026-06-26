@@ -149,6 +149,50 @@ fn sharded_parallel_commit_is_correct_bd_cc_parwrite_verify() {
     eprintln!("sharded parallel-commit correctness: {verified} blocks verified byte-exact");
 }
 
+/// FCW-under-concurrency gate: the serializability guarantee. N threads all begin at
+/// the SAME snapshot (synced by a barrier so no commit lands before any begin), then
+/// all blind-commit the SAME block concurrently. First-committer-wins means EXACTLY
+/// ONE must succeed and the other N-1 must be rejected as conflicts — never two
+/// winners (that would be lost-update corruption of the transaction core the parwrite
+/// effort is wiring). Repeated over several rounds to shake out races.
+#[test]
+fn sharded_concurrent_same_block_fcw_exactly_one_winner_bd_cc_parwrite_verify() {
+    use ffs_mvcc::sharded::ShardedMvccStore;
+    use std::sync::Barrier;
+
+    const THREADS: usize = 8;
+    const ROUNDS: u64 = 200;
+
+    let store = Arc::new(ShardedMvccStore::for_host_parallelism());
+    let contended = BlockNumber(777);
+
+    for round in 0..ROUNDS {
+        let barrier = Arc::new(Barrier::new(THREADS));
+        let mut handles = Vec::with_capacity(THREADS);
+        for t in 0..THREADS {
+            let store = Arc::clone(&store);
+            let barrier = Arc::clone(&barrier);
+            handles.push(thread::spawn(move || {
+                // All begin at the same snapshot (no commit has landed this round yet).
+                let mut txn = store.begin();
+                let mut payload = vec![0xC3_u8; BS];
+                payload[..8].copy_from_slice(&((round << 8) | t as u64).to_le_bytes());
+                txn.stage_write(contended, payload);
+                barrier.wait(); // every thread has begun before any commits
+                store.commit(txn).is_ok()
+            }));
+        }
+        let winners: usize = handles.into_iter().map(|h| h.join().unwrap() as usize).sum();
+        assert_eq!(
+            winners, 1,
+            "round {round}: FCW broke under concurrency — {winners} winners (expected exactly 1; >1 = lost-update corruption)"
+        );
+    }
+    eprintln!(
+        "sharded FCW-under-concurrency: {ROUNDS} rounds x {THREADS} threads on one block, exactly 1 winner each — serializability holds"
+    );
+}
+
 #[test]
 #[ignore = "timing measurement; run with --ignored --nocapture"]
 fn parallel_commit_scaling_sharded_vs_single_locked() {
