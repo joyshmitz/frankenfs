@@ -7430,15 +7430,22 @@ pub fn split_htree_leaf(
     }
 
     // Collect the full leaf's real entries (skip ./.. and the csum tail).
+    // Borrow the names straight from `target_leaf` via `DirBlockIter` instead of
+    // `parse_dir_block` (which allocates an owned `Vec<u8>` per entry). The names
+    // only feed `dx_hash` and the borrowed `(ino, ft, &[u8])` pack refs below —
+    // all within this function while `target_leaf` is live — so the ~N per-leaf
+    // name allocations + frees per split are pure churn (jemalloc `do_rallocx`/
+    // `extent_recycle` in the rename/create profile). DirBlockIter already skips
+    // deleted (inode 0) entries and the csum tail; a parse error → rebuild
+    // fallback, exactly as parse_dir_block did.
     let block_size_u32 = u32::try_from(block_size).map_err(|_| HtreeSplitFallback::Unsupported)?;
-    let (entries, _tail) = parse_dir_block(target_leaf, block_size_u32)
-        .map_err(|_| HtreeSplitFallback::Unsupported)?;
-    let mut real: Vec<(u32, u32, u8, Vec<u8>)> = Vec::with_capacity(entries.len());
-    for e in entries {
-        if e.inode == 0 || e.name.is_empty() || e.name == b"." || e.name == b".." {
+    let mut real: Vec<(u32, u32, u8, &[u8])> = Vec::new();
+    for e in DirBlockIter::new(target_leaf, block_size_u32) {
+        let e = e.map_err(|_| HtreeSplitFallback::Unsupported)?;
+        if e.name.is_empty() || e.name == b"." || e.name == b".." {
             continue;
         }
-        let hash = dx_hash(hash_version, &e.name, hash_seed).0;
+        let hash = dx_hash(hash_version, e.name, hash_seed).0;
         real.push((hash, e.inode, e.file_type.to_raw(), e.name));
     }
 
@@ -7459,11 +7466,11 @@ pub fn split_htree_leaf(
     // block, so neither pack can overflow.
     let left_refs: Vec<(u32, u8, &[u8])> = real[..split_index]
         .iter()
-        .map(|(_, ino, ft, name)| (*ino, *ft, name.as_slice()))
+        .map(|(_, ino, ft, name)| (*ino, *ft, *name))
         .collect();
     let right_refs: Vec<(u32, u8, &[u8])> = real[split_index..]
         .iter()
-        .map(|(_, ino, ft, name)| (*ino, *ft, name.as_slice()))
+        .map(|(_, ino, ft, name)| (*ino, *ft, *name))
         .collect();
     let mut old_leaf = pack_dir_block_entries(&left_refs, block_size, has_metadata_csum)
         .map_err(|_| HtreeSplitFallback::Unsupported)?;
