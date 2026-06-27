@@ -2065,3 +2065,17 @@ Valid profile of the LANDED code (release-perf, rename-bench 32000 = 8389/s; too
 CORRECTION: my pre-read `collect_extents` candidate (last turn) is WRONG — it does not appear in the residual top. I held back from implementing the collect_extents-skip lever pending this profile, and the profile refuted it — the discipline paid off (would have been a no-op change).
 
 CONCLUSION: the rename residual (~3.3x vs kernel) has NO clean new lever for me — it is the inherent ext4 add_entry scan (38%) + the peers' MVCC/alloc machinery (~35%) versus the kernel's in-kernel path. The #1 lever (O(N^2)->O(log N), 5eb32cc6) captured the big structural win (~200x->~3.3x); the residual is inherent + peers'-lane. This CLOSES the rename investigation: the dominant frankenfs metadata-write gap is now a ~3.3x userspace-overhead residual, down from ~200x, with the remaining levers in the owners' ffs-dir(micro-opt)/ffs-mvcc/ffs-alloc lanes.
+
+### 2026-06-26 POST-LAND rename size-sweep: O(N^2) rebuild ELIMINATED (39x), but secondary super-linear residual = MVCC version accumulation (peers') (CrimsonFox cc/opus)
+
+Definitive post-land size-sweep (release-perf, idle box, healed toolchain) of the landed htree fix (5eb32cc6):
+- n=2000: 39263 ren/s = 25.5 us/op
+- n=8000: 23308 ren/s = 42.9 us/op
+- n=32000: 6726 ren/s = 148.7 us/op
+(pre-fix was 172/s = 5814 us/op @32000; kernel ~34344/s = ~29 us/op, FLAT)
+
+The O(N^2) htree-REBUILD is ELIMINATED: 5814 -> 148.7 us/op @32000 = ~39x improvement. BUT the per-op still grows ~5.8x for 16x size (~O(N^0.65) per-op => ~O(N^1.65) total) — the 8000->32000 step is 3.47x per-op for 4x size, clearly super-linear, NOT the kernel's flat O(log N). So the rename is now ~O(N^1.65), a huge improvement from O(N^2) but not yet O(log N).
+
+CAUSE of the secondary super-linear residual (per the valid profile, 6ecb7bab): the MVCC VERSION ACCUMULATION — read_visible (13%) + resolve_version_bytes_cow_at_or_before (6.71%) + prune_versions grow as the rename CHURN piles up per-block versions in the overlay (each rename creates versions; resolve/prune cost is O(versions-per-block)). This is the peers' ffs-mvcc sharded-store lane (version management / pruning cadence), the same shared metadata-write root as delete (2.22x).
+
+REFINES the landed win honestly: the dominant O(N^2) structural cost is gone (the big win, ~39x); the remaining super-linear residual is the MVCC version machinery, the peers' lane — NOT a clean lever for me. Ratio @32000: ~3.3-5.1x vs kernel (run variance 6726-10340/s release-perf; the version accumulation makes it run-dependent). The metadata-write story: rename O(N^2)->O(N^1.65) landed; the path to O(N log N) is the peers' MVCC-version-accumulation lever.
