@@ -1666,3 +1666,18 @@ PARITY (frankenfs only 1.04-1.09x slower). KEY: the kernel create in ONE directo
 RE-SCOPES the campaign's biggest "gap": the historical ~5.5x (kernel 159k@8t vs frankenfs ~30k) is a BASELINE MISMATCH — to reach 159k@8t the kernel baseline must have used MULTI-dir creates (per-dir locks → scales) and/or been non-durable (no sync), compared against frankenfs's single-dir durable create-bench. That is apples-vs-oranges. The FAIR matched comparison (same one-dir pattern, both durable, real block device) is PARITY.
 
 CAVEAT (honest scope): for a MULTI-dir parallel create the kernel WOULD scale (independent per-dir locks) while frankenfs's create path (shared allocator + MVCC commit) might not — that scenario could still show a real gap, which is exactly what the peers' allocator-sharding lane targets. So "parity" holds for single-dir create-heavy workloads (tar-extract into one dir, maildir, etc.); multi-dir scaling is the open question. NET: the parallel create is NOT a blanket 5.5x gap — it is parity for the matched single-dir durable comparison; the 5.5x reflected a mismatched baseline. /tmp/kcr.c reusable. This is the most consequential re-scoping of the session: the headline "biggest gap" was measurement mismatch, not a real 5.5x deficit.
+
+### 2026-06-26 CORRECTION of 52745cd2: parallel create gap IS REAL (~6.2x) — my "parity" was a single-vs-multi-dir fixture mismatch (CrimsonFox cc/opus)
+
+RETRACT 52745cd2's "create is parity" claim — it was my error. frankenfs `create-bench --threads` creates each thread's files in its OWN SUBDIR (multi-dir, per its --help), but my kcr kernel baseline was SINGLE-dir (all threads in one dir → ext4 dir i_rwsem serializes → artificially slow at ~37k, non-scaling). That mismatched frankenfs-multi-dir against kernel-single-dir.
+
+FAIR comparison with a MULTI-dir kernel baseline (/tmp/kcrm.c — each thread its own subdir), ramdisk, both durable, 32000 files:
+
+| | 1t | 8t | scaling |
+|--|----|----|---------|
+| kernel multi-dir | 35.3k | 203.9k | 5.8x (SCALES) |
+| frankenfs create-bench | ~33k | 32.0k | ~1x (FLAT) |
+
+FAIR 8t ratio: frankenfs 6.2x SLOWER (31975 vs 198492). The ~5.5x historical gap is REAL and CONFIRMED — NOT a measurement artifact. The kernel scales multi-dir creates (independent per-dir locks + per-cpu inode/block allocators); frankenfs does NOT scale even with per-thread subdirs (the shared allocator + the single MVCC commit lock / publication gate serialize commits regardless of dir isolation). This is the campaign's biggest gap, REAL — exactly the target of the peers' allocator-sharding + sharded-MVCC lane (the create needs BOTH sharded, as established 0ca4bd30/0216ab3b).
+
+LESSON (3rd measurement-discipline catch this session, after dc9ec858 + 4527c940): MATCH THE FIXTURE PATTERN. create-bench is multi-dir, so the kernel baseline MUST be multi-dir; a single-dir baseline is dir-lock-bound and fabricates false parity. /tmp/kcrm.c (multi-dir) is the correct create baseline; /tmp/kcr.c (single-dir) was wrong for this comparison. The single-dir result (parity) is still valid for single-dir-create workloads, but the create-bench/campaign scenario is multi-dir where the real 6.2x gap stands.
