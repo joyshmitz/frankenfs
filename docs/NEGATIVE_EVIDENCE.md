@@ -1868,3 +1868,15 @@ Confirmed the #1 lever (rename ~200x -> O(log N) via htree LEAF SPLIT at the lib
 NEW code needed (only the 16992 `Err(NoSpace)` branch): (1) alloc a new leaf block; (2) redistribute the full leaf's entries across old+new by hash midpoint (reuse the rebuild's hash-keyed redistribute, scoped to one leaf); (3) insert ONE dx-index entry for the new leaf (`htree_insert` into the dx node); (4) recursively split the dx NODE if it is itself full (the one deep edge case — for a 2-level htree); (5) retry `add_entry`. Replaces the call to `ext4_rebuild_htree_dir` in that branch. Everything else (descend+add for non-full leaves, 16966-16995) is already correct + O(log N).
 
 RECOMMENDATION (honest terminus of my solo contribution): this is CORRECTNESS-CRITICAL (htree/dx invariants, dx-node-split, hash-bucket consistency, large-dir 2-level case) — a silent-corruption risk if rushed. It is the ffs-core/ffs-dir OWNERS' careful-review lane, NOT a loop-pressured solo attempt by an error-prone process (I retracted 4+ over-claims this session; an FS index data-structure change must not be rushed). I will VERIFY it the moment it lands: re-measure rename at 32000 -> confirm O(log N) -> ~200x to kernel parity (/tmp/kren.c ready). This completes my handoff of the dominant FS lever: located (16992) + root-caused (full-leaf rebuild vs split) + feasibility (primitives exist, contained 5-step delta) + verification plan. The measurement/root-cause campaign is COMPLETE; the implementation is the owners' lane.
+
+### 2026-06-26 MEASURED btrfs WIN: frankenfs btrfs metadata walk ~4x FASTER than kernel-btrfs (CrimsonFox cc/opus)
+
+Extended the campaign to the 2nd filesystem (btrfs). Clean warm walk A/B, compiled-C baseline (no python inflation):
+- btrfs-convert the 32k-file image (cp lk.img -> btrfs-convert); frankenfs auto-detects btrfs.
+- frankenfs btrfs walk: ~9-12ms (3 dirs + 32002 files = 32005 entries, 0.31 us/entry, serial).
+- kernel btrfs (C nftw FTW_PHYS = lstat each): ~42-44ms.
+- frankenfs 3.74x / 4.27x / 4.71x FASTER (3 warm rounds).
+
+This is BIGGER than the ext4 walk win (2.5x): the kernel's btrfs metadata access is heavier (per-inode btrfs B-tree descent) than ext4's contiguous inode table, while frankenfs's bulk btrfs-tree parse is efficient on both. So frankenfs WINS the metadata walk on BOTH filesystems — ext4 2.5x, btrfs ~4x.
+
+CAVEAT: kernel mounted via loop (btrfs-convert image; a native-ramdisk btrfs is setup-heavy/dcg-tricky); measured WARM so the loop's per-read overhead is page-cache-amortized -> the ~4x is the warm metadata ratio (the python-baseline first pass showed 4-5x vs inflated python os.stat; the C nftw baseline corrects to a still-decisive ~4x). Reusable: `cp lk.img x; btrfs-convert x` + /tmp/kwalk2.c (C nftw). Scorecard adds btrfs-walk = ~4x (WIN), confirming the metadata-READ advantage generalizes across filesystems (frankenfs's batch on-disk parse beats per-inode kernel syscalls; the gaps are all on the metadata-WRITE side — delete/rename/create).
