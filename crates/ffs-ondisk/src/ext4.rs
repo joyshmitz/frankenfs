@@ -5855,6 +5855,21 @@ pub fn parse_dx_root_with_large_dir(
     block: &[u8],
     large_dir: bool,
 ) -> Result<Ext4DxRoot, ParseError> {
+    let (hash_version, indirect_levels) = parse_dx_root_info_with_large_dir(block, large_dir)?;
+    // Entries start at 0x20, with the first 8 bytes being dx_countlimit
+    let entries = parse_dx_entries(block, 0x20)?;
+
+    Ok(Ext4DxRoot {
+        hash_version,
+        indirect_levels,
+        entries,
+    })
+}
+
+fn parse_dx_root_info_with_large_dir(
+    block: &[u8],
+    large_dir: bool,
+) -> Result<(u8, u8), ParseError> {
     // The DX root info starts at byte 0x1C in the directory block
     // (after the fake "." entry at 0x00 and ".." entry at 0x0C)
     if block.len() < 0x28 {
@@ -5901,15 +5916,7 @@ pub fn parse_dx_root_with_large_dir(
             reason: "expected 0",
         });
     }
-
-    // Entries start at 0x20, with the first 8 bytes being dx_countlimit
-    let entries = parse_dx_entries(block, 0x20)?;
-
-    Ok(Ext4DxRoot {
-        hash_version,
-        indirect_levels,
-        entries,
-    })
+    Ok((hash_version, indirect_levels))
 }
 
 /// Parse DX entries starting at `count_limit_offset` in a block.
@@ -5964,6 +5971,101 @@ fn parse_dx_entries(
     }
 
     Ok(entries)
+}
+
+fn dx_entries_materialized_len(
+    data: &[u8],
+    count_limit_offset: usize,
+) -> Result<usize, ParseError> {
+    if count_limit_offset + 4 > data.len() {
+        return Err(ParseError::InsufficientData {
+            needed: count_limit_offset + 4,
+            offset: 0,
+            actual: data.len(),
+        });
+    }
+
+    let limit = usize::from(read_le_u16(data, count_limit_offset)?);
+    let count = usize::from(read_le_u16(data, count_limit_offset + 2)?);
+    if count > limit {
+        return Err(ParseError::InvalidField {
+            field: "dx_count",
+            reason: "count exceeds limit",
+        });
+    }
+    if count == 0 {
+        return Ok(0);
+    }
+
+    // Match `parse_dx_entries`: entry 0's block lives in the count/limit slot,
+    // and later entries are consumed only while full 8-byte records are present.
+    let _ = read_le_u32(data, count_limit_offset + 4)?;
+    let following = data
+        .len()
+        .saturating_sub(count_limit_offset.saturating_add(8))
+        / 8;
+    Ok(count.min(1 + following))
+}
+
+fn dx_entry_offset(count_limit_offset: usize, idx: usize) -> Result<usize, ParseError> {
+    let prev = idx.checked_sub(1).ok_or(ParseError::InvalidField {
+        field: "dx_entries",
+        reason: "entry 0 has no explicit hash slot",
+    })?;
+    count_limit_offset
+        .checked_add(8)
+        .and_then(|base| {
+            prev.checked_mul(8)
+                .and_then(|delta| base.checked_add(delta))
+        })
+        .ok_or(ParseError::InvalidField {
+            field: "dx_entries",
+            reason: "entry offset overflow",
+        })
+}
+
+fn dx_entry_hash_at(data: &[u8], count_limit_offset: usize, idx: usize) -> Result<u32, ParseError> {
+    if idx == 0 {
+        return Ok(0);
+    }
+    read_le_u32(data, dx_entry_offset(count_limit_offset, idx)?)
+}
+
+fn dx_entry_block_at(
+    data: &[u8],
+    count_limit_offset: usize,
+    idx: usize,
+) -> Result<u32, ParseError> {
+    if idx == 0 {
+        return read_le_u32(data, count_limit_offset + 4);
+    }
+    read_le_u32(data, dx_entry_offset(count_limit_offset, idx)? + 4)
+}
+
+fn dx_find_leaf_block_in_data(
+    data: &[u8],
+    count_limit_offset: usize,
+    hash: u32,
+) -> Result<Option<u32>, ParseError> {
+    let entry_count = dx_entries_materialized_len(data, count_limit_offset)?;
+    if entry_count == 0 {
+        return Ok(None);
+    }
+
+    // Same rightmost <= binary search as `dx_find_leaf_idx`, but read entries
+    // directly from the on-disk table instead of materializing a Vec.
+    let mut lo = 0_usize;
+    let mut hi = entry_count;
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        if dx_entry_hash_at(data, count_limit_offset, mid)? <= hash {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    let idx = lo.saturating_sub(1);
+    dx_entry_block_at(data, count_limit_offset, idx).map(Some)
 }
 
 /// Maximum number of DX entries (including the implicit entry 0) that fit in a
@@ -7107,12 +7209,10 @@ where
     B: AsRef<[u8]>,
 {
     let block0 = read_logical_dir_block(0)?;
-    let dx_root = parse_dx_root_with_large_dir(block0.as_ref(), has_large_dir).ok()?;
-    if dx_root.entries.is_empty() {
-        return None;
-    }
+    let (root_hash_version, indirect_levels) =
+        parse_dx_root_info_with_large_dir(block0.as_ref(), has_large_dir).ok()?;
 
-    let hash_version = effective_hash_version(dx_root.hash_version);
+    let hash_version = effective_hash_version(root_hash_version);
     // Casefold dirs index by the folded name (byte-exact for ASCII), so the
     // target leaf for an insert is the one the folded hash maps to.
     let folded = if casefold {
@@ -7123,21 +7223,20 @@ where
     let hash_input = folded.as_deref().unwrap_or(name);
     let (hash, _minor) = dx_hash(hash_version, hash_input, hash_seed);
 
-    let indirect_levels = usize::from(dx_root.indirect_levels);
-    let mut entries = dx_root.entries;
-    let mut idx = dx_find_leaf_idx(&entries, hash);
-
-    for _ in 0..indirect_levels {
-        let child_block = entries.get(idx)?.block;
-        let child_data = read_logical_dir_block(child_block)?;
-        entries = parse_dx_entries(child_data.as_ref(), 8).ok()?;
-        if entries.is_empty() {
-            return None;
+    let mut block_data = block0;
+    let mut count_limit_offset = 0x20;
+    for level in 0..=usize::from(indirect_levels) {
+        let target_block =
+            dx_find_leaf_block_in_data(block_data.as_ref(), count_limit_offset, hash)
+                .ok()
+                .flatten()?;
+        if level == usize::from(indirect_levels) {
+            return Some(target_block);
         }
-        idx = dx_find_leaf_idx(&entries, hash);
+        block_data = read_logical_dir_block(target_block)?;
+        count_limit_offset = 8;
     }
-
-    Some(entries.get(idx)?.block)
+    None
 }
 
 /// Resolve the DX leaf block that a new entry named `name` must be inserted into

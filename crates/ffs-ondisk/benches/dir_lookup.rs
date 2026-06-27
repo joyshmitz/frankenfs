@@ -10,8 +10,9 @@
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use ffs_ondisk::{
-    ext4::build_htree_directory, htree_target_leaf_block, lookup_in_dir_block,
-    lookup_in_dir_block_casefold,
+    dx_hash,
+    ext4::{Ext4DxEntry, build_htree_directory},
+    htree_target_leaf_block, lookup_in_dir_block, lookup_in_dir_block_casefold, parse_dx_root,
 };
 use ffs_types::all_zero_bytes;
 use std::hint::black_box;
@@ -124,6 +125,37 @@ fn gated_tail_scan_probe(block: &[u8]) -> usize {
     malformed_tail_positions
 }
 
+fn bench_dx_find_leaf_idx(entries: &[Ext4DxEntry], hash: u32) -> usize {
+    let mut lo = 0_usize;
+    let mut hi = entries.len();
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        if entries[mid].hash <= hash {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    lo.saturating_sub(1)
+}
+
+fn htree_target_leaf_block_allocating_root(
+    hash_seed: &[u32; 4],
+    name: &[u8],
+    read_logical_dir_block: impl FnOnce(u32) -> Option<Arc<[u8]>>,
+) -> Option<u32> {
+    let block0 = read_logical_dir_block(0)?;
+    let root = parse_dx_root(block0.as_ref()).ok()?;
+    if root.entries.is_empty() || root.indirect_levels != 0 {
+        return None;
+    }
+    let hash_version = root.hash_version;
+    let (hash, _) = dx_hash(hash_version, name, hash_seed);
+    root.entries
+        .get(bench_dx_find_leaf_idx(&root.entries, hash))
+        .map(|entry| entry.block)
+}
+
 fn bench_dir_lookup(c: &mut Criterion) {
     let block = build_dense_dir_block();
     let (htree_blocks, htree_names) = build_htree_blocks();
@@ -185,6 +217,15 @@ fn bench_dir_lookup(c: &mut Criterion) {
                 false,
                 black_box(htree_name),
                 |v| v,
+                |lb| htree_blocks.get(lb as usize).map(Arc::clone),
+            ))
+        });
+    });
+    group.bench_function("htree_target_leaf_allocating_root_arc_owner", |b| {
+        b.iter(|| {
+            black_box(htree_target_leaf_block_allocating_root(
+                black_box(&[0; 4]),
+                black_box(htree_name),
                 |lb| htree_blocks.get(lb as usize).map(Arc::clone),
             ))
         });
