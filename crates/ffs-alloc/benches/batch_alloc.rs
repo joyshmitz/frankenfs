@@ -17,7 +17,7 @@ use ffs_error::Result as FfsResult;
 use ffs_types::{BlockNumber, GroupNumber};
 use std::collections::HashMap;
 use std::hint::black_box;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
 /// In-memory block device for benchmarks.
 struct MemBlockDevice {
@@ -98,6 +98,7 @@ fn make_groups(geo: &FsGeometry) -> Vec<GroupStats> {
             flags: 0,
             block_bitmap_csum: 0,
             inode_bitmap_csum: 0,
+            reserved_cache: OnceLock::new(),
         })
         .collect()
 }

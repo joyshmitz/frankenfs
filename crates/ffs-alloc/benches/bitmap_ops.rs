@@ -12,6 +12,7 @@ use ffs_alloc::{
 use ffs_block::BlockBuf;
 use ffs_types::{BlockNumber, GroupNumber};
 use std::hint::black_box;
+use std::sync::OnceLock;
 
 /// Build a realistic ext4-like bitmap: 4096 bytes (32768 bits),
 /// ~5% free blocks scattered in clusters.
@@ -499,6 +500,7 @@ fn bench_largest_free_run_cache_vs_bitmap_scan(c: &mut Criterion) {
             flags: 0,
             block_bitmap_csum: 0,
             inode_bitmap_csum: 0,
+            reserved_cache: OnceLock::new(),
         })
         .collect();
 
