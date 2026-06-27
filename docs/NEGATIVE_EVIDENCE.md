@@ -2079,3 +2079,14 @@ The O(N^2) htree-REBUILD is ELIMINATED: 5814 -> 148.7 us/op @32000 = ~39x improv
 CAUSE of the secondary super-linear residual (per the valid profile, 6ecb7bab): the MVCC VERSION ACCUMULATION — read_visible (13%) + resolve_version_bytes_cow_at_or_before (6.71%) + prune_versions grow as the rename CHURN piles up per-block versions in the overlay (each rename creates versions; resolve/prune cost is O(versions-per-block)). This is the peers' ffs-mvcc sharded-store lane (version management / pruning cadence), the same shared metadata-write root as delete (2.22x).
 
 REFINES the landed win honestly: the dominant O(N^2) structural cost is gone (the big win, ~39x); the remaining super-linear residual is the MVCC version machinery, the peers' lane — NOT a clean lever for me. Ratio @32000: ~3.3-5.1x vs kernel (run variance 6726-10340/s release-perf; the version accumulation makes it run-dependent). The metadata-write story: rename O(N^2)->O(N^1.65) landed; the path to O(N log N) is the peers' MVCC-version-accumulation lever.
+
+### 2026-06-26 DELETE size-sweep (dig for removal lever): FLAT O(log N), no lever — confirms MVCC-commit-bound (peers') (CrimsonFox cc/opus)
+
+Dug the delete (2.22x) for an O(dir)-removal lever like the rename had. Size-sweep (release-perf, idle box):
+- n=2000: 25.7 us/op; n=8000: 25.4 us/op; n=32000: 29.1 us/op (34390 unlinks/s) — FLAT regardless of dir size.
+
+So the delete's removal is ALREADY O(log N) (lookup-then-clear, no O(dir) block scan — unlike the rename's pre-fix removal, which was the linear scan the agent fixed). NO removal lever. The ~2.2-2.5x vs kernel (29.1us vs kernel's ~11.5us @32000) is the CONSTANT per-op MVCC COMMIT (10.71% in the earlier profile) — the peers' ffs-mvcc lane.
+
+CONTRAST cleanly separating the two metadata-write residuals: the DELETE (one op per file, no churn) is FLAT (the constant per-op MVCC commit); the RENAME (insert+remove churn) is SUPER-LINEAR (per-block MVCC VERSION accumulation, 756a7ac7). Both are the per-op MVCC machinery — commit (delete) + version management/pruning (rename) — the peers' ffs-mvcc sharded-store lane.
+
+CONFIRMED (definitive): no clean metadata-write perf lever remains for me. The campaign's perf surface, fully mapped post-#1-land: READS win on both FS (walk 2.5-4x, read 1.4-2x); metadata-WRITES are the per-op MVCC machinery — rename O(N^2)->O(N^1.65) LANDED (the big win, ~39x), delete 2.2x (flat, MVCC commit), create FS-fast/FUSE-gated — all remaining write levers in the peers' ffs-mvcc/ffs-alloc lanes (per-op commit, version pruning, GDT-persist deferral bd-bhh0i). Owners' correctness findings (btrfs subvolume, superblock free-count, fsck leniency) handed off. My contribution: the #1 lever landed + the surface mapped + the rest precisely characterized and handed off.
