@@ -7081,13 +7081,17 @@ where
         let frame = invalid_unless!(frames.last());
         let leaf_block = invalid_unless!(frame.entries.get(frame.idx)).block;
         let leaf_data = invalid_unless!(read_logical_dir_block(leaf_block));
-        let (entries, _) = invalid_unless!(parse_dir_block(leaf_data.as_ref(), block_size).ok());
+        // Search the leaf in place (`lookup_in_dir_block` walks it and allocates
+        // only the one matching entry) instead of `parse_dir_block` materializing
+        // a `Vec<Ext4DirEntry>` with an owned name `Vec` per entry just to find
+        // ONE. This leaf search is ~40% of every htree lookup (`parse_dir_block`
+        // 21.6% self + the ~N per-entry allocs' jemalloc churn) and lookup is in
+        // every metadata op. Both helpers validate the whole block identically,
+        // so the accept/reject (`IndexInvalid`) behaviour is unchanged.
         let matched = if casefold {
-            entries
-                .into_iter()
-                .find(|entry| ext4_casefold_names_collide(&entry.name, name))
+            invalid_unless!(lookup_in_dir_block_casefold(leaf_data.as_ref(), block_size, name).ok())
         } else {
-            entries.into_iter().find(|entry| entry.name == name)
+            invalid_unless!(lookup_in_dir_block(leaf_data.as_ref(), block_size, name).ok())
         };
         if let Some(entry) = matched {
             return HtreeFindResult::Found(entry);
