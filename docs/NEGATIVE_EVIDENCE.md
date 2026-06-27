@@ -1981,3 +1981,16 @@ Pinpointed the stale-free-count gap (c4bb5890) to its precise location (code-rea
 - The e2fsck message "Free blocks count wrong / Free inodes count wrong" (with NO "for group N" qualifier) is e2fsck's GLOBAL/superblock count check — matching exactly: the per-group GDT is fine, the superblock global is stale.
 
 NARROW FIX (owners' lane, ffs-alloc + superblock persist): on inode/block alloc+free, also adjust the SUPERBLOCK GLOBAL s_free_inodes_count / s_free_blocks_count (sum the per-group deltas already computed for the GDT) and persist the superblock — the per-group GDT path is already correct, so this is a small additive change at the same site that calls persist_group_desc_with_bitmap_overrides. Plus the c4bb5890 fsck-check + post-write gate. This is a contained correctness/spec-compliance lever, distinct from the perf levers. (Non-perf code-read done deliberately because the htree-leaf-split agent's background builds contend for cores, making perf A/Bs unreliable per 961941e3.)
+
+### 2026-06-26 CORRECTION + BUG: frankenfs btrfs walk OVER-COUNTS ~2x (DIR_ITEM+DIR_INDEX?) — confounds the d9e66fc6 walk win (CrimsonFox cc/opus)
+
+A count cross-check (run to VALIDATE the btrfs walk win) caught a real over-enumeration bug:
+- frankenfs walk (btw.img): 3 dirs + 32002 files (32006 stats).
+- kernel `find /mnt`: 3 dirs + 16002 files. ~2x mismatch, SAME dir count.
+- Ruled out subvolume artifact: the btrfs-convert ext2_saved subvolume (ID 256) holds only 1 file (the saved image, per kernel ls), NOT the ~16000 excess.
+
+So frankenfs's btrfs walk over-enumerates the converted files ~2x. LIKELY CAUSE: btrfs stores TWO items per directory entry — a DIR_ITEM (keyed by name-hash, for lookup) and a DIR_INDEX (keyed by sequence, for readdir) — and frankenfs's walk appears to count BOTH, while the kernel's readdir enumerates only DIR_INDEX (1x). (Alternative: descending into the ext2_saved image-file as a nested fs — less likely given same dir count.) Root-cause is in the ffs-core btrfs walk/readdir path (owners' btrfs-read lane; NON-overlapping with the in-flight ext4-htree write work).
+
+IMPACT on the d9e66fc6 btrfs walk win (~4x): CONFOUNDED — the time comparison was frankenfs(32002 entries, 10ms) vs kernel(16002, 42ms), NOT equal sets. The WIN DIRECTION still holds and is likely LARGER per-entry (frankenfs did ~2x the enumeration work and was still ~4x faster -> ~8x per-entry), but the headline "~4x" must be RESTATED on equal enumeration (re-measure after the double-count is fixed, or scope both to the same DIR_INDEX set). I am DOWNGRADING d9e66fc6's "~4x" to "win-direction-confirmed, ratio pending equal-count re-measure".
+
+LESSON (re-confirmed, important): a perf "win" must enumerate the SAME set as the baseline — always cross-check COUNTS, not just times. The count check caught both a correctness bug AND a confounded headline ratio. (Same validation discipline that caught the overlay/contention/serial-gap issues earlier this session.)
