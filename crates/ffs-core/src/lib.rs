@@ -5196,14 +5196,13 @@ impl OpenFs {
         let sb = self
             .ext4_superblock()
             .ok_or_else(|| FfsError::Format("not an ext4 filesystem".into()))?;
-        let read_leaf = |lb: u32| -> Option<Vec<u8>> {
+        let read_leaf = |lb: u32| {
             let (phys, unwritten) = self.resolve_extent(cx, scope, parent, lb).ok().flatten()?;
             if unwritten {
                 return None;
             }
             self.read_ext4_file_data_block_with_scope(cx, scope, BlockNumber(phys))
                 .ok()
-                .map(|b| b.to_vec())
         };
         let target_logical = if casefold {
             ffs_ondisk::htree_target_leaf_block_casefold(
@@ -12653,7 +12652,6 @@ impl OpenFs {
                     }
                     self.read_ext4_file_data_block_with_scope(cx, scope, BlockNumber(phys))
                         .ok()
-                        .map(|block| block.to_vec())
                 })
         };
 
@@ -17567,7 +17565,11 @@ impl OpenFs {
         // full leaf) so the single new entry always fits.
         let name_hash = ffs_ondisk::dx_hash(hash_version, name, &hash_seed).0;
         let into_new = name_hash >= split_hash;
-        let target_buf = if into_new { &mut new_leaf } else { &mut old_leaf };
+        let target_buf = if into_new {
+            &mut new_leaf
+        } else {
+            &mut old_leaf
+        };
         ffs_dir::add_entry(target_buf, child_ino_u32, name, file_type, reserved_tail)?;
         // Re-stamp the leaf we just modified (the split already stamped both, but
         // add_entry changed this one's bytes).
@@ -17651,13 +17653,14 @@ impl OpenFs {
         );
 
         let block_size_u64 = u64::from(alloc.geo.block_size);
-        parent_upd.size = parent_upd
-            .size
-            .checked_add(block_size_u64)
-            .ok_or_else(|| FfsError::Corruption {
-                block: 0,
-                detail: format!("inode {} directory size overflow on leaf split", parent.0),
-            })?;
+        parent_upd.size =
+            parent_upd
+                .size
+                .checked_add(block_size_u64)
+                .ok_or_else(|| FfsError::Corruption {
+                    block: 0,
+                    detail: format!("inode {} directory size overflow on leaf split", parent.0),
+                })?;
         parent_upd.blocks = Self::ext4_checked_inode_blocks_delta(
             parent_upd.blocks,
             parent,
@@ -51518,7 +51521,9 @@ mod tests {
         // each split is O(log N), making the whole create burst O(N log N) rather
         // than the O(N^2) the per-create full rebuild would cost.
         let rebuilds = fs.htree_rebuilds.load(std::sync::atomic::Ordering::SeqCst);
-        let leaf_splits = fs.htree_leaf_splits.load(std::sync::atomic::Ordering::SeqCst);
+        let leaf_splits = fs
+            .htree_leaf_splits
+            .load(std::sync::atomic::Ordering::SeqCst);
         assert!(
             leaf_splits > 0,
             "the incremental leaf-split fast path must have run at least once"

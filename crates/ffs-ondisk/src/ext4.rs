@@ -6909,7 +6909,7 @@ pub enum HtreeFindResult {
 /// entry — only "found", "not in index", or "index unusable". Callers gate on
 /// the directory's INDEX flag and choose their not-found policy (trust the index
 /// vs. linear fallback for a possibly-stale index).
-fn htree_find_entry_inner<F, H>(
+fn htree_find_entry_inner<F, H, B>(
     block_size: u32,
     hash_seed: &[u32; 4],
     has_large_dir: bool,
@@ -6919,8 +6919,9 @@ fn htree_find_entry_inner<F, H>(
     casefold: bool,
 ) -> HtreeFindResult
 where
-    F: FnMut(u32) -> Option<Vec<u8>>,
+    F: FnMut(u32) -> Option<B>,
     H: Fn(u8) -> u8,
+    B: AsRef<[u8]>,
 {
     macro_rules! invalid_unless {
         ($e:expr) => {
@@ -6932,7 +6933,8 @@ where
     }
 
     let block0 = invalid_unless!(read_logical_dir_block(0));
-    let dx_root = invalid_unless!(parse_dx_root_with_large_dir(&block0, has_large_dir).ok());
+    let dx_root =
+        invalid_unless!(parse_dx_root_with_large_dir(block0.as_ref(), has_large_dir).ok());
     if dx_root.entries.is_empty() {
         return HtreeFindResult::IndexInvalid;
     }
@@ -6962,7 +6964,7 @@ where
         let frame = invalid_unless!(frames.last());
         let child_block = invalid_unless!(frame.entries.get(frame.idx)).block;
         let child_data = invalid_unless!(read_logical_dir_block(child_block));
-        let child_entries = invalid_unless!(parse_dx_entries(&child_data, 8).ok());
+        let child_entries = invalid_unless!(parse_dx_entries(child_data.as_ref(), 8).ok());
         if child_entries.is_empty() {
             return HtreeFindResult::IndexInvalid;
         }
@@ -6977,7 +6979,7 @@ where
         let frame = invalid_unless!(frames.last());
         let leaf_block = invalid_unless!(frame.entries.get(frame.idx)).block;
         let leaf_data = invalid_unless!(read_logical_dir_block(leaf_block));
-        let (entries, _) = invalid_unless!(parse_dir_block(&leaf_data, block_size).ok());
+        let (entries, _) = invalid_unless!(parse_dir_block(leaf_data.as_ref(), block_size).ok());
         let matched = if casefold {
             entries
                 .into_iter()
@@ -7011,7 +7013,7 @@ where
         while level + 1 < frames.len() {
             let child_block = frames[level].entries[frames[level].idx].block;
             let child_data = invalid_unless!(read_logical_dir_block(child_block));
-            let child_entries = invalid_unless!(parse_dx_entries(&child_data, 8).ok());
+            let child_entries = invalid_unless!(parse_dx_entries(child_data.as_ref(), 8).ok());
             if child_entries.is_empty() {
                 return HtreeFindResult::IndexInvalid;
             }
@@ -7023,7 +7025,7 @@ where
 }
 
 /// Locate a directory entry through the htree (DX) index by exact name match.
-pub fn htree_find_entry<F, H>(
+pub fn htree_find_entry<F, H, B>(
     block_size: u32,
     hash_seed: &[u32; 4],
     has_large_dir: bool,
@@ -7032,8 +7034,9 @@ pub fn htree_find_entry<F, H>(
     read_logical_dir_block: F,
 ) -> HtreeFindResult
 where
-    F: FnMut(u32) -> Option<Vec<u8>>,
+    F: FnMut(u32) -> Option<B>,
     H: Fn(u8) -> u8,
+    B: AsRef<[u8]>,
 {
     htree_find_entry_inner(
         block_size,
@@ -7055,7 +7058,7 @@ where
 /// is ASCII-lowercase). For exotic Unicode whose fold differs from the kernel's,
 /// the descent simply misses and returns `NotFoundInIndex` — callers MUST keep
 /// their linear casefold-scan fallback, which remains the source of truth.
-pub fn htree_find_entry_casefold<F, H>(
+pub fn htree_find_entry_casefold<F, H, B>(
     block_size: u32,
     hash_seed: &[u32; 4],
     has_large_dir: bool,
@@ -7064,8 +7067,9 @@ pub fn htree_find_entry_casefold<F, H>(
     read_logical_dir_block: F,
 ) -> HtreeFindResult
 where
-    F: FnMut(u32) -> Option<Vec<u8>>,
+    F: FnMut(u32) -> Option<B>,
     H: Fn(u8) -> u8,
+    B: AsRef<[u8]>,
 {
     htree_find_entry_inner(
         block_size,
@@ -7089,7 +7093,7 @@ where
 /// lives in the leaf whose hash range contains `dx_hash(name)`). Returns `None` if
 /// the index cannot be parsed/read, so callers must refuse to mutate rather than
 /// fall back to a linear write into the DX root.
-fn htree_target_leaf_block_inner<F, H>(
+fn htree_target_leaf_block_inner<F, H, B>(
     hash_seed: &[u32; 4],
     has_large_dir: bool,
     name: &[u8],
@@ -7098,11 +7102,12 @@ fn htree_target_leaf_block_inner<F, H>(
     casefold: bool,
 ) -> Option<u32>
 where
-    F: FnMut(u32) -> Option<Vec<u8>>,
+    F: FnMut(u32) -> Option<B>,
     H: Fn(u8) -> u8,
+    B: AsRef<[u8]>,
 {
     let block0 = read_logical_dir_block(0)?;
-    let dx_root = parse_dx_root_with_large_dir(&block0, has_large_dir).ok()?;
+    let dx_root = parse_dx_root_with_large_dir(block0.as_ref(), has_large_dir).ok()?;
     if dx_root.entries.is_empty() {
         return None;
     }
@@ -7125,7 +7130,7 @@ where
     for _ in 0..indirect_levels {
         let child_block = entries.get(idx)?.block;
         let child_data = read_logical_dir_block(child_block)?;
-        entries = parse_dx_entries(&child_data, 8).ok()?;
+        entries = parse_dx_entries(child_data.as_ref(), 8).ok()?;
         if entries.is_empty() {
             return None;
         }
@@ -7137,7 +7142,7 @@ where
 
 /// Resolve the DX leaf block that a new entry named `name` must be inserted into
 /// (exact-name hashing). See [`htree_target_leaf_block_inner`].
-pub fn htree_target_leaf_block<F, H>(
+pub fn htree_target_leaf_block<F, H, B>(
     hash_seed: &[u32; 4],
     has_large_dir: bool,
     name: &[u8],
@@ -7145,8 +7150,9 @@ pub fn htree_target_leaf_block<F, H>(
     read_logical_dir_block: F,
 ) -> Option<u32>
 where
-    F: FnMut(u32) -> Option<Vec<u8>>,
+    F: FnMut(u32) -> Option<B>,
     H: Fn(u8) -> u8,
+    B: AsRef<[u8]>,
 {
     htree_target_leaf_block_inner(
         hash_seed,
@@ -7164,7 +7170,7 @@ where
 /// the kernel indexes `EXT4_CASEFOLD_FL` directories. Byte-exact to the kernel
 /// for ASCII names; callers must restrict casefold inserts to names where the
 /// fold is exact.
-pub fn htree_target_leaf_block_casefold<F, H>(
+pub fn htree_target_leaf_block_casefold<F, H, B>(
     hash_seed: &[u32; 4],
     has_large_dir: bool,
     name: &[u8],
@@ -7172,8 +7178,9 @@ pub fn htree_target_leaf_block_casefold<F, H>(
     read_logical_dir_block: F,
 ) -> Option<u32>
 where
-    F: FnMut(u32) -> Option<Vec<u8>>,
+    F: FnMut(u32) -> Option<B>,
     H: Fn(u8) -> u8,
+    B: AsRef<[u8]>,
 {
     htree_target_leaf_block_inner(
         hash_seed,
@@ -7200,13 +7207,14 @@ where
 /// `indirect_levels == 0` the root entries already point at leaves; each further
 /// level descends every interior node via [`DX_NODE_COUNT_OFFSET`]. Pinned by
 /// `htree_leaf_logical_blocks_enumerates_every_leaf_*`.
-pub fn htree_leaf_logical_blocks<F>(
+pub fn htree_leaf_logical_blocks<F, B>(
     block0: &[u8],
     has_large_dir: bool,
     mut read_logical: F,
 ) -> Option<Vec<u32>>
 where
-    F: FnMut(u32) -> Option<Vec<u8>>,
+    F: FnMut(u32) -> Option<B>,
+    B: AsRef<[u8]>,
 {
     let dx_root = parse_dx_root_with_large_dir(block0, has_large_dir).ok()?;
     let indirect_levels = usize::from(dx_root.indirect_levels);
@@ -7218,7 +7226,7 @@ where
         let mut next = Vec::with_capacity(level_blocks.len());
         for interior in level_blocks {
             let data = read_logical(interior)?;
-            let entries = parse_dx_entries(&data, DX_NODE_COUNT_OFFSET).ok()?;
+            let entries = parse_dx_entries(data.as_ref(), DX_NODE_COUNT_OFFSET).ok()?;
             for e in entries {
                 next.push(e.block);
             }
@@ -7323,10 +7331,9 @@ pub fn split_htree_leaf(
     }
 
     // Collect the full leaf's real entries (skip ./.. and the csum tail).
-    let block_size_u32 =
-        u32::try_from(block_size).map_err(|_| HtreeSplitFallback::Unsupported)?;
-    let (entries, _tail) =
-        parse_dir_block(target_leaf, block_size_u32).map_err(|_| HtreeSplitFallback::Unsupported)?;
+    let block_size_u32 = u32::try_from(block_size).map_err(|_| HtreeSplitFallback::Unsupported)?;
+    let (entries, _tail) = parse_dir_block(target_leaf, block_size_u32)
+        .map_err(|_| HtreeSplitFallback::Unsupported)?;
     let mut real: Vec<(u32, u32, u8, Vec<u8>)> = Vec::with_capacity(entries.len());
     for e in entries {
         if e.inode == 0 || e.name.is_empty() || e.name == b"." || e.name == b".." {
@@ -7379,8 +7386,7 @@ pub fn split_htree_leaf(
     );
 
     let mut dx_root_out = dx_root_block.to_vec();
-    let root_limit_u16 =
-        u16::try_from(root_limit).map_err(|_| HtreeSplitFallback::Unsupported)?;
+    let root_limit_u16 = u16::try_from(root_limit).map_err(|_| HtreeSplitFallback::Unsupported)?;
     write_dx_root(
         &mut dx_root_out,
         hash_version,
@@ -7900,7 +7906,13 @@ mod tests {
             .validate_geometry()
             .unwrap_err();
         assert!(
-            matches!(err, ParseError::InvalidField { field: "s_inodes_per_group", .. }),
+            matches!(
+                err,
+                ParseError::InvalidField {
+                    field: "s_inodes_per_group",
+                    ..
+                }
+            ),
             "got {err}",
         );
 
@@ -7968,7 +7980,13 @@ mod tests {
             .validate_v1()
             .unwrap_err();
         assert!(
-            matches!(err, ParseError::InvalidField { field: "s_inodes_count", .. }),
+            matches!(
+                err,
+                ParseError::InvalidField {
+                    field: "s_inodes_count",
+                    ..
+                }
+            ),
             "got {err}",
         );
 
@@ -9277,8 +9295,7 @@ mod tests {
         raw[160..].fill(0xA5);
 
         let full = Ext4Inode::parse_from_bytes(&raw).expect("full inode parse");
-        let metadata =
-            Ext4Inode::parse_metadata_from_bytes(&raw).expect("metadata inode parse");
+        let metadata = Ext4Inode::parse_metadata_from_bytes(&raw).expect("metadata inode parse");
         assert_eq!(full.xattr_ibody.as_slice(), &raw[160..]);
         assert!(metadata.xattr_ibody.is_empty());
 
@@ -9416,7 +9433,14 @@ mod tests {
         let err = super::verify_bitmap_free_count(&[0x00], 16, 16, "block_bitmap")
             .expect_err("short bitmap must be rejected");
         assert!(
-            matches!(err, ParseError::InsufficientData { needed: 2, actual: 1, .. }),
+            matches!(
+                err,
+                ParseError::InsufficientData {
+                    needed: 2,
+                    actual: 1,
+                    ..
+                }
+            ),
             "got {err:?}",
         );
     }
@@ -10508,7 +10532,13 @@ mod tests {
         let entries: Vec<(u32, u8, &[u8])> = names
             .iter()
             .enumerate()
-            .map(|(i, n)| (1000 + u32::try_from(i).unwrap(), EXT4_FT_REG_FILE, n.as_slice()))
+            .map(|(i, n)| {
+                (
+                    1000 + u32::try_from(i).unwrap(),
+                    EXT4_FT_REG_FILE,
+                    n.as_slice(),
+                )
+            })
             .collect();
 
         let mut blocks = build_htree_directory_stamped(
@@ -10564,7 +10594,11 @@ mod tests {
         blocks[target_logical as usize] = split.old_leaf.clone();
         assert_eq!(blocks.len(), new_leaf_logical as usize);
         blocks.push(split.new_leaf.clone());
-        assert_eq!(blocks.len() - 1, leaf_count_before + 1, "exactly one new leaf");
+        assert_eq!(
+            blocks.len() - 1,
+            leaf_count_before + 1,
+            "exactly one new leaf"
+        );
 
         // Add the new entry into the half that now owns its hash.
         let nh = dx_hash(hash_version, &new_name, &seed).0;
@@ -10584,8 +10618,10 @@ mod tests {
                 .map(|e| (e.inode, e.file_type.to_raw(), e.name))
                 .collect();
             refs.push((9999, EXT4_FT_REG_FILE, new_name.clone()));
-            let packed_refs: Vec<(u32, u8, &[u8])> =
-                refs.iter().map(|(i, ft, n)| (*i, *ft, n.as_slice())).collect();
+            let packed_refs: Vec<(u32, u8, &[u8])> = refs
+                .iter()
+                .map(|(i, ft, n)| (*i, *ft, n.as_slice()))
+                .collect();
             let mut packed = pack_dir_block_entries(&packed_refs, bs, true).expect("repack");
             stamp_dir_block_checksum(&mut packed, csum_seed, dir_ino, generation);
             blocks[leaf_idx] = packed;
@@ -10646,22 +10682,48 @@ mod tests {
         let hash_version = 1_u8;
 
         // Two-level index => MultiLevelIndex decline.
-        let names: Vec<Vec<u8>> = (0..8000).map(|i| format!("f_{i:06}").into_bytes()).collect();
+        let names: Vec<Vec<u8>> = (0..8000)
+            .map(|i| format!("f_{i:06}").into_bytes())
+            .collect();
         let entries: Vec<(u32, u8, &[u8])> = names
             .iter()
             .enumerate()
-            .map(|(i, n)| (10 + u32::try_from(i).unwrap(), EXT4_FT_REG_FILE, n.as_slice()))
+            .map(|(i, n)| {
+                (
+                    10 + u32::try_from(i).unwrap(),
+                    EXT4_FT_REG_FILE,
+                    n.as_slice(),
+                )
+            })
             .collect();
         let blocks = build_htree_directory_stamped(
-            2, 2, &entries, bs, hash_version, &seed, csum_seed, dir_ino, generation,
+            2,
+            2,
+            &entries,
+            bs,
+            hash_version,
+            &seed,
+            csum_seed,
+            dir_ino,
+            generation,
         )
         .expect("two-level build");
         assert!(parse_dx_root(&blocks[0]).unwrap().indirect_levels >= 1);
         let some_leaf = blocks[1].clone();
         assert!(matches!(
             split_htree_leaf(
-                &blocks[0], &some_leaf, 1, 99, bs, hash_version, &seed, true, false, csum_seed,
-                dir_ino, generation
+                &blocks[0],
+                &some_leaf,
+                1,
+                99,
+                bs,
+                hash_version,
+                &seed,
+                true,
+                false,
+                csum_seed,
+                dir_ino,
+                generation
             ),
             Err(HtreeSplitFallback::MultiLevelIndex)
         ));
@@ -10672,16 +10734,40 @@ mod tests {
         let small_entries: Vec<(u32, u8, &[u8])> = small_names
             .iter()
             .enumerate()
-            .map(|(i, n)| (1 + u32::try_from(i).unwrap(), EXT4_FT_REG_FILE, n.as_slice()))
+            .map(|(i, n)| {
+                (
+                    1 + u32::try_from(i).unwrap(),
+                    EXT4_FT_REG_FILE,
+                    n.as_slice(),
+                )
+            })
             .collect();
         let single_dir = build_htree_directory_stamped(
-            2, 2, &small_entries, bs, hash_version, &seed, csum_seed, dir_ino, generation,
+            2,
+            2,
+            &small_entries,
+            bs,
+            hash_version,
+            &seed,
+            csum_seed,
+            dir_ino,
+            generation,
         )
         .unwrap();
         assert!(matches!(
             split_htree_leaf(
-                &single_dir[0], &single, 1, 99, bs, hash_version, &seed, true, false, csum_seed,
-                dir_ino, generation
+                &single_dir[0],
+                &single,
+                1,
+                99,
+                bs,
+                hash_version,
+                &seed,
+                true,
+                false,
+                csum_seed,
+                dir_ino,
+                generation
             ),
             Err(HtreeSplitFallback::NoCleanBoundary)
         ));
@@ -13844,8 +13930,14 @@ mod tests {
     #[test]
     fn dir_logical_block_count_boundaries_and_overflow() {
         // Ceil division of a directory's size into logical blocks.
-        assert_eq!(Ext4ImageReader::dir_logical_block_count(0, 4096).unwrap(), 0);
-        assert_eq!(Ext4ImageReader::dir_logical_block_count(1, 4096).unwrap(), 1);
+        assert_eq!(
+            Ext4ImageReader::dir_logical_block_count(0, 4096).unwrap(),
+            0
+        );
+        assert_eq!(
+            Ext4ImageReader::dir_logical_block_count(1, 4096).unwrap(),
+            1
+        );
         assert_eq!(
             Ext4ImageReader::dir_logical_block_count(4096, 4096).unwrap(),
             1

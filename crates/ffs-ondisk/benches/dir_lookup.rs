@@ -9,9 +9,13 @@
 //! walk) to establish per-lookup latency.
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use ffs_ondisk::{lookup_in_dir_block, lookup_in_dir_block_casefold};
+use ffs_ondisk::{
+    ext4::build_htree_directory, htree_target_leaf_block, lookup_in_dir_block,
+    lookup_in_dir_block_casefold,
+};
 use ffs_types::all_zero_bytes;
 use std::hint::black_box;
+use std::sync::Arc;
 
 const BLOCK_SIZE: u32 = 4096;
 const EXT4_FT_DIR_CSUM: u8 = 0xDE;
@@ -38,6 +42,24 @@ fn build_dense_dir_block() -> Vec<u8> {
         offset += this_rec;
     }
     block
+}
+
+fn build_htree_blocks() -> (Vec<Arc<[u8]>>, Vec<Vec<u8>>) {
+    let names: Vec<Vec<u8>> = (0..250)
+        .map(|idx| format!("entry_{idx:04}").into_bytes())
+        .collect();
+    let entries: Vec<(u32, u8, &[u8])> = names
+        .iter()
+        .enumerate()
+        .map(|(idx, name)| (idx as u32 + 2, 1, name.as_slice()))
+        .collect();
+    let blocks = build_htree_directory(2, 2, &entries, BLOCK_SIZE as usize, 1, &[0; 4], false)
+        .expect("benchmark htree directory builds");
+    let blocks = blocks
+        .into_iter()
+        .map(|block| Arc::<[u8]>::from(block.into_boxed_slice()))
+        .collect();
+    (blocks, names)
 }
 
 fn bench_rec_len_from_disk(raw: u16) -> usize {
@@ -104,6 +126,11 @@ fn gated_tail_scan_probe(block: &[u8]) -> usize {
 
 fn bench_dir_lookup(c: &mut Criterion) {
     let block = build_dense_dir_block();
+    let (htree_blocks, htree_names) = build_htree_blocks();
+    let htree_name = htree_names
+        .last()
+        .expect("benchmark htree has names")
+        .as_slice();
     // Absent name → the lookup must walk every entry (worst case).
     let absent: &[u8] = b"zzzzzzzz";
 
@@ -135,6 +162,32 @@ fn bench_dir_lookup(c: &mut Criterion) {
     });
     group.bench_function("tail_scan_gated_suffix_probe_dense_4k", |b| {
         b.iter(|| black_box(gated_tail_scan_probe(black_box(&block))));
+    });
+    group.bench_function("htree_target_leaf_vec_owner", |b| {
+        b.iter(|| {
+            black_box(htree_target_leaf_block(
+                black_box(&[0; 4]),
+                false,
+                black_box(htree_name),
+                |v| v,
+                |lb| {
+                    htree_blocks
+                        .get(lb as usize)
+                        .map(|block| block.as_ref().to_vec())
+                },
+            ))
+        });
+    });
+    group.bench_function("htree_target_leaf_arc_owner", |b| {
+        b.iter(|| {
+            black_box(htree_target_leaf_block(
+                black_box(&[0; 4]),
+                false,
+                black_box(htree_name),
+                |v| v,
+                |lb| htree_blocks.get(lb as usize).map(Arc::clone),
+            ))
+        });
     });
     group.finish();
 }
