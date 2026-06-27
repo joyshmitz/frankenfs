@@ -7228,6 +7228,195 @@ where
     Some(level_blocks)
 }
 
+/// Outcome of an incremental single-level htree leaf split (bd-gauub fast path).
+///
+/// All three returned blocks are fully serialized AND checksum-stamped (when the
+/// directory uses `metadata_csum`); the caller writes them through the block
+/// device unchanged. `new_leaf_logical` is the logical block number the caller
+/// passed in for the freshly-allocated leaf; `split_hash` is the boundary hash
+/// inserted into the DX root (the lowest hash now living in the new leaf).
+#[derive(Debug, Clone)]
+pub struct HtreeLeafSplit {
+    /// Repacked original (left) leaf — keeps the lower-hash half.
+    pub old_leaf: Vec<u8>,
+    /// Freshly packed new (right) leaf — holds the upper-hash half.
+    pub new_leaf: Vec<u8>,
+    /// Updated DX root block with the new `(split_hash -> new_leaf)` entry
+    /// inserted in sorted position and `count` bumped.
+    pub dx_root: Vec<u8>,
+    /// The boundary hash inserted into the DX index.
+    pub split_hash: u32,
+}
+
+/// Why an incremental htree leaf split could not be performed and the caller must
+/// fall back to a full rebuild (correctness over speed for these rarer cases).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HtreeSplitFallback {
+    /// The DX index has interior levels (`indirect_levels > 0`); inserting into
+    /// the correct interior node is out of scope for the single-level fast path.
+    MultiLevelIndex,
+    /// The DX root has no free entry slot (`count == limit`); a split would grow
+    /// the index a level, which the rebuild handles.
+    DxRootFull,
+    /// The full leaf has fewer than two distinct hashes, so there is no clean
+    /// hash boundary to split on (an equal-hash collision run needs a chain).
+    NoCleanBoundary,
+    /// The DX root, the leaf, or the directory shape could not be parsed / is
+    /// unsupported here (e.g. casefold is handled by the caller, not this fn).
+    Unsupported,
+}
+
+/// Incrementally split one full htree leaf and insert a single DX entry, instead
+/// of rebuilding the whole directory (bd-gauub: the O(log N) rename fast path).
+///
+/// `dx_root_block` is logical block 0 (the DX root); `target_leaf` is the full
+/// leaf the lookup descent routed the new name to; `new_leaf_logical` is the
+/// logical block number the caller has allocated for the new (right) leaf.
+///
+/// On success the entries of `target_leaf` are split at the clean hash boundary
+/// closest to a 50/50 byte split: hashes `< split_hash` stay in `old_leaf`,
+/// hashes `>= split_hash` move to `new_leaf`. A `(split_hash -> new_leaf_logical)`
+/// entry is inserted into the DX root's sorted entry array and `count` is bumped.
+/// All three blocks are repacked and (when `has_metadata_csum`) checksum-stamped,
+/// ready to write. After the split the caller re-descends (or selects old/new by
+/// hash) and retries the `add_entry` — both leaves now have room.
+///
+/// Returns `Err(HtreeSplitFallback)` for the cases the single-level fast path
+/// does not handle (multi-level index, full DX root, no clean hash boundary,
+/// unparseable input); the caller falls back to the proven full rebuild, which
+/// stays correct. This function performs hashing with the SAME `hash_version` /
+/// `hash_seed` the lookup descent uses, so split placement is consistent with
+/// `htree_target_leaf_block`. Casefold directories must be handled by the caller
+/// (it knows `EXT4_CASEFOLD_FL`); pass already-exact names only.
+///
+/// Pinned by `htree_leaf_split_*` unit tests: the split is navigable by the
+/// read-half for every entry and every block's checksum verifies.
+#[allow(clippy::too_many_arguments)]
+pub fn split_htree_leaf(
+    dx_root_block: &[u8],
+    target_leaf: &[u8],
+    target_leaf_logical: u32,
+    new_leaf_logical: u32,
+    block_size: usize,
+    hash_version: u8,
+    hash_seed: &[u32; 4],
+    has_metadata_csum: bool,
+    has_large_dir: bool,
+    csum_seed: u32,
+    dir_ino: u32,
+    generation: u32,
+) -> Result<HtreeLeafSplit, HtreeSplitFallback> {
+    if dx_root_block.len() != block_size || target_leaf.len() != block_size {
+        return Err(HtreeSplitFallback::Unsupported);
+    }
+
+    // Parse the DX root. Only the single-level (indirect_levels == 0) shape is
+    // handled here; deeper indices fall back to rebuild.
+    let dx_root = parse_dx_root_with_large_dir(dx_root_block, has_large_dir)
+        .map_err(|_| HtreeSplitFallback::Unsupported)?;
+    if dx_root.indirect_levels != 0 {
+        return Err(HtreeSplitFallback::MultiLevelIndex);
+    }
+    let root_limit = usize::from(dx_root_entry_limit(block_size, has_metadata_csum));
+    if dx_root.entries.len() >= root_limit {
+        return Err(HtreeSplitFallback::DxRootFull);
+    }
+
+    // Collect the full leaf's real entries (skip ./.. and the csum tail).
+    let block_size_u32 =
+        u32::try_from(block_size).map_err(|_| HtreeSplitFallback::Unsupported)?;
+    let (entries, _tail) =
+        parse_dir_block(target_leaf, block_size_u32).map_err(|_| HtreeSplitFallback::Unsupported)?;
+    let mut real: Vec<(u32, u32, u8, Vec<u8>)> = Vec::with_capacity(entries.len());
+    for e in entries {
+        if e.inode == 0 || e.name.is_empty() || e.name == b"." || e.name == b".." {
+            continue;
+        }
+        let hash = dx_hash(hash_version, &e.name, hash_seed).0;
+        real.push((hash, e.inode, e.file_type.to_raw(), e.name));
+    }
+
+    // Sort by hash so we can split on a clean boundary (matches the read-half's
+    // hash-sorted leaf invariant). Ties keep insertion order — irrelevant since
+    // an equal-hash run never straddles the boundary.
+    real.sort_by_key(|&(h, _, _, _)| h);
+
+    // Choose the split point: (hash, on-disk rec_len) per entry.
+    let split_input: Vec<(u32, usize)> = real
+        .iter()
+        .map(|(h, _, _, name)| (*h, dir_entry_rec_len(name.len())))
+        .collect();
+    let (split_index, split_hash) =
+        choose_htree_leaf_split(&split_input).ok_or(HtreeSplitFallback::NoCleanBoundary)?;
+
+    // Pack the two halves. A subset of one block's entries always re-fits one
+    // block, so neither pack can overflow.
+    let left_refs: Vec<(u32, u8, &[u8])> = real[..split_index]
+        .iter()
+        .map(|(_, ino, ft, name)| (*ino, *ft, name.as_slice()))
+        .collect();
+    let right_refs: Vec<(u32, u8, &[u8])> = real[split_index..]
+        .iter()
+        .map(|(_, ino, ft, name)| (*ino, *ft, name.as_slice()))
+        .collect();
+    let mut old_leaf = pack_dir_block_entries(&left_refs, block_size, has_metadata_csum)
+        .map_err(|_| HtreeSplitFallback::Unsupported)?;
+    let mut new_leaf = pack_dir_block_entries(&right_refs, block_size, has_metadata_csum)
+        .map_err(|_| HtreeSplitFallback::Unsupported)?;
+
+    // Insert (split_hash -> new_leaf_logical) into the DX root, keeping the entry
+    // array sorted by hash. Entry 0 has an implicit hash of 0 and stays first;
+    // dx_find_leaf_idx routes a lookup to the rightmost entry with hash <= target,
+    // so the new right leaf must be reachable at exactly split_hash.
+    let mut dx_entries = dx_root.entries;
+    let insert_at = dx_entries.partition_point(|e| e.hash <= split_hash);
+    dx_entries.insert(
+        insert_at,
+        Ext4DxEntry {
+            hash: split_hash,
+            block: new_leaf_logical,
+        },
+    );
+
+    let mut dx_root_out = dx_root_block.to_vec();
+    let root_limit_u16 =
+        u16::try_from(root_limit).map_err(|_| HtreeSplitFallback::Unsupported)?;
+    write_dx_root(
+        &mut dx_root_out,
+        hash_version,
+        0,
+        root_limit_u16,
+        &dx_entries,
+    )
+    .map_err(|_| HtreeSplitFallback::Unsupported)?;
+
+    // The old leaf must keep its existing logical->physical mapping; its identity
+    // in the DX root (the entry pointing at target_leaf_logical) is unchanged.
+    debug_assert!(
+        dx_entries.iter().any(|e| e.block == target_leaf_logical),
+        "old leaf logical block dropped from DX root during split"
+    );
+
+    if has_metadata_csum {
+        stamp_dir_block_checksum(&mut old_leaf, csum_seed, dir_ino, generation);
+        stamp_dir_block_checksum(&mut new_leaf, csum_seed, dir_ino, generation);
+        stamp_dx_block_checksum(
+            &mut dx_root_out,
+            csum_seed,
+            dir_ino,
+            generation,
+            DX_ROOT_COUNT_OFFSET,
+        );
+    }
+
+    Ok(HtreeLeafSplit {
+        old_leaf,
+        new_leaf,
+        dx_root: dx_root_out,
+        split_hash,
+    })
+}
+
 // ── ext4 directory hash functions ───────────────────────────────────────────
 
 /// Hash version constants from the ext4 DX root.
@@ -10295,6 +10484,207 @@ mod tests {
                 other => panic!("entry {name:?} not reachable: {other:?}"),
             }
         }
+    }
+
+    /// bd-gauub (incremental leaf split): `split_htree_leaf` splits ONE full leaf
+    /// and inserts ONE dx_entry, keeping the directory navigable for EVERY entry
+    /// and keeping all three blocks' checksums valid — the O(log N) rename fast
+    /// path that replaces the O(dir) rebuild. The read-half `htree_find_entry` is
+    /// the oracle: after the split, every original name plus the new name must
+    /// still resolve through the (now wider) single-level index.
+    #[test]
+    fn htree_leaf_split_keeps_dir_navigable_and_checksummed_bd_gauub() {
+        let bs = 1024_usize; // small block => few entries per leaf, easy to overfill
+        let seed = [0x1357_9bdf_u32, 0x2468_ace0, 0xfeed_beef, 0x0bad_cafe];
+        let csum_seed = 0x55aa_33cc_u32;
+        let dir_ino = 131_u32;
+        let generation = 9_u32;
+        let hash_version = 1_u8; // half_md4
+
+        // Enough entries to make several single-level leaves at 1 KiB.
+        let names: Vec<Vec<u8>> = (0..400)
+            .map(|i| format!("name_{i:05}").into_bytes())
+            .collect();
+        let entries: Vec<(u32, u8, &[u8])> = names
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (1000 + u32::try_from(i).unwrap(), EXT4_FT_REG_FILE, n.as_slice()))
+            .collect();
+
+        let mut blocks = build_htree_directory_stamped(
+            2,
+            2,
+            &entries,
+            bs,
+            hash_version,
+            &seed,
+            csum_seed,
+            dir_ino,
+            generation,
+        )
+        .expect("stamped htree build");
+        // Single level only (this test exercises the single-level fast path).
+        let root = parse_dx_root(&blocks[0]).expect("dx_root");
+        assert_eq!(root.indirect_levels, 0, "test assumes single-level index");
+        let leaf_count_before = blocks.len() - 1;
+
+        // Pick a real target leaf: route an arbitrary new name to its leaf via the
+        // same descent the insert path uses.
+        let new_name = b"freshly_inserted_entry".to_vec();
+        let target_logical = htree_target_leaf_block(
+            &seed,
+            false,
+            &new_name,
+            |v| v,
+            |lb| blocks.get(lb as usize).cloned(),
+        )
+        .expect("target leaf");
+        let target_leaf = blocks[target_logical as usize].clone();
+        let new_leaf_logical = u32::try_from(blocks.len()).unwrap();
+
+        let split = split_htree_leaf(
+            &blocks[0],
+            &target_leaf,
+            target_logical,
+            new_leaf_logical,
+            bs,
+            hash_version,
+            &seed,
+            true, // has_metadata_csum
+            false,
+            csum_seed,
+            dir_ino,
+            generation,
+        )
+        .expect("leaf split should succeed for a multi-distinct-hash leaf");
+
+        // Apply the split to our in-memory block vector: dx_root + old leaf rewritten,
+        // new leaf appended at new_leaf_logical.
+        blocks[0] = split.dx_root.clone();
+        blocks[target_logical as usize] = split.old_leaf.clone();
+        assert_eq!(blocks.len(), new_leaf_logical as usize);
+        blocks.push(split.new_leaf.clone());
+        assert_eq!(blocks.len() - 1, leaf_count_before + 1, "exactly one new leaf");
+
+        // Add the new entry into the half that now owns its hash.
+        let nh = dx_hash(hash_version, &new_name, &seed).0;
+        let into_new = nh >= split.split_hash;
+        let leaf_idx = if into_new {
+            new_leaf_logical as usize
+        } else {
+            target_logical as usize
+        };
+        // Pack a fresh copy with the new entry appended (re-using parse+pack to keep
+        // the test self-contained).
+        {
+            let (es, _t) = parse_dir_block(&blocks[leaf_idx], u32::try_from(bs).unwrap()).unwrap();
+            let mut refs: Vec<(u32, u8, Vec<u8>)> = es
+                .into_iter()
+                .filter(|e| e.inode != 0 && e.name != b"." && e.name != b".." && !e.name.is_empty())
+                .map(|e| (e.inode, e.file_type.to_raw(), e.name))
+                .collect();
+            refs.push((9999, EXT4_FT_REG_FILE, new_name.clone()));
+            let packed_refs: Vec<(u32, u8, &[u8])> =
+                refs.iter().map(|(i, ft, n)| (*i, *ft, n.as_slice())).collect();
+            let mut packed = pack_dir_block_entries(&packed_refs, bs, true).expect("repack");
+            stamp_dir_block_checksum(&mut packed, csum_seed, dir_ino, generation);
+            blocks[leaf_idx] = packed;
+        }
+
+        // Every block's checksum verifies.
+        assert!(verify_dx_block_checksum(
+            &blocks[0],
+            csum_seed,
+            dir_ino,
+            generation,
+            DX_ROOT_COUNT_OFFSET
+        ));
+        for leaf in &blocks[1..] {
+            verify_dir_block_checksum(leaf, csum_seed, dir_ino, generation)
+                .expect("leaf checksum after split");
+        }
+
+        // Every original name still resolves through the widened index.
+        for (i, name) in names.iter().enumerate() {
+            match htree_find_entry(
+                u32::try_from(bs).unwrap(),
+                &seed,
+                false,
+                name,
+                |v| v,
+                |lb| blocks.get(lb as usize).cloned(),
+            ) {
+                HtreeFindResult::Found(e) => {
+                    assert_eq!(e.inode, 1000 + u32::try_from(i).unwrap(), "name {name:?}");
+                }
+                other => panic!("post-split: {name:?} not reachable: {other:?}"),
+            }
+        }
+        // The new name resolves too.
+        match htree_find_entry(
+            u32::try_from(bs).unwrap(),
+            &seed,
+            false,
+            &new_name,
+            |v| v,
+            |lb| blocks.get(lb as usize).cloned(),
+        ) {
+            HtreeFindResult::Found(e) => assert_eq!(e.inode, 9999),
+            other => panic!("post-split: new name not reachable: {other:?}"),
+        }
+    }
+
+    /// bd-gauub: the fast path declines (so the caller falls back to rebuild) for
+    /// a multi-level index and for a leaf with no clean hash boundary.
+    #[test]
+    fn htree_leaf_split_declines_unsupported_shapes_bd_gauub() {
+        let bs = 1024_usize;
+        let seed = [0x0bad_f00d_u32, 0xfeed_face, 0xdead_beef, 0xcafe_b0ba];
+        let csum_seed = 0x1111_2222_u32;
+        let dir_ino = 5_u32;
+        let generation = 1_u32;
+        let hash_version = 1_u8;
+
+        // Two-level index => MultiLevelIndex decline.
+        let names: Vec<Vec<u8>> = (0..8000).map(|i| format!("f_{i:06}").into_bytes()).collect();
+        let entries: Vec<(u32, u8, &[u8])> = names
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (10 + u32::try_from(i).unwrap(), EXT4_FT_REG_FILE, n.as_slice()))
+            .collect();
+        let blocks = build_htree_directory_stamped(
+            2, 2, &entries, bs, hash_version, &seed, csum_seed, dir_ino, generation,
+        )
+        .expect("two-level build");
+        assert!(parse_dx_root(&blocks[0]).unwrap().indirect_levels >= 1);
+        let some_leaf = blocks[1].clone();
+        assert!(matches!(
+            split_htree_leaf(
+                &blocks[0], &some_leaf, 1, 99, bs, hash_version, &seed, true, false, csum_seed,
+                dir_ino, generation
+            ),
+            Err(HtreeSplitFallback::MultiLevelIndex)
+        ));
+
+        // A single-entry leaf has only one distinct hash => NoCleanBoundary decline.
+        let single = pack_dir_block_entries(&[(7, EXT4_FT_REG_FILE, b"only")], bs, true).unwrap();
+        let small_names: Vec<Vec<u8>> = (0..3).map(|i| format!("s{i}").into_bytes()).collect();
+        let small_entries: Vec<(u32, u8, &[u8])> = small_names
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (1 + u32::try_from(i).unwrap(), EXT4_FT_REG_FILE, n.as_slice()))
+            .collect();
+        let single_dir = build_htree_directory_stamped(
+            2, 2, &small_entries, bs, hash_version, &seed, csum_seed, dir_ino, generation,
+        )
+        .unwrap();
+        assert!(matches!(
+            split_htree_leaf(
+                &single_dir[0], &single, 1, 99, bs, hash_version, &seed, true, false, csum_seed,
+                dir_ino, generation
+            ),
+            Err(HtreeSplitFallback::NoCleanBoundary)
+        ));
     }
 
     /// bd-owt2r (multi-level write-half): when the leaves overflow a single DX

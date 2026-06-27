@@ -986,6 +986,12 @@ pub struct OpenFs {
     /// than once per overflowing create (which would be O(N) rebuilds).
     #[cfg(test)]
     htree_rebuilds: std::sync::atomic::AtomicUsize,
+    /// Test-only per-instance counter of ext4 htree incremental LEAF SPLITS
+    /// (bd-gauub). The O(log N) rename fast path increments this instead of
+    /// `htree_rebuilds` when it splits one full leaf rather than rebuilding the
+    /// whole index.
+    #[cfg(test)]
+    htree_leaf_splits: std::sync::atomic::AtomicUsize,
     /// Optional repair lifecycle hook for notifying when blocks are committed.
     ///
     /// When present, `commit_transaction` and `commit_transaction_ssi` call
@@ -3588,6 +3594,8 @@ impl OpenFs {
             readdir_full_reads: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
             htree_rebuilds: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            htree_leaf_splits: std::sync::atomic::AtomicUsize::new(0),
             repair_flush_lifecycle: None,
             move_ext_donor_fds: Mutex::new(BTreeMap::new()),
             btrfs_inode_path_cache: Mutex::new(None),
@@ -12456,8 +12464,20 @@ impl OpenFs {
         name: &[u8],
     ) -> Result<Option<Ext4DirEntry>, FfsError> {
         Self::ext4_reject_inline_data_dir(dir_inode)?;
-        if let Some(entry) = self.htree_lookup_name_with_scope(cx, scope, dir_inode, name) {
-            return Ok(Some(entry));
+        // htree descent: for a non-casefold htree directory the dx index is
+        // AUTHORITATIVE — our writer (insert split / rebuild) always routes every
+        // entry to its hash-correct leaf and never linearly appends, and the
+        // kernel maintains the same invariant. So a clean descent that does not
+        // find the name (`NotFoundInIndex`) proves the name is ABSENT, and we can
+        // skip the O(N) linear block scan below entirely. This is the dominant
+        // rename cost: each rename's target-existence check is a negative lookup,
+        // and a per-op O(N) scan makes a rename burst O(N^2) (bd-gauub). Only a
+        // genuinely unreadable index (`IndexInvalid`) or a casefold dir (whose
+        // fold routing this descent does not replicate) falls through to the scan.
+        match self.htree_lookup_name_authoritative(cx, scope, dir_inode, name) {
+            Some(Some(entry)) => return Ok(Some(entry)),
+            Some(None) => return Ok(None),
+            None => {}
         }
 
         // Negative fast path (bd-f8rd8): an authoritative per-dir name index
@@ -12586,9 +12606,36 @@ impl OpenFs {
         dir_inode: &Ext4Inode,
         name: &[u8],
     ) -> Option<Ext4DirEntry> {
-        // Never returns Err: any resolve/read/parse failure is swallowed to None
-        // so the caller falls back to the linear scan (the source of truth). The
-        // htree index may also be stale relative to linearly-appended entries.
+        // A positive htree hit is always trustworthy; a miss (authoritative or
+        // not) yields None here so the caller can decide. See
+        // `htree_lookup_name_authoritative` for the negative-distinction variant.
+        match self.htree_lookup_name_authoritative(cx, scope, dir_inode, name) {
+            Some(Some(entry)) => Some(entry),
+            _ => None,
+        }
+    }
+
+    /// htree descent that distinguishes a definitive negative from an unusable
+    /// index:
+    /// - `Some(Some(entry))` — the name was found via the index.
+    /// - `Some(None)` — the index was navigated cleanly and the name is ABSENT
+    ///   (`NotFoundInIndex`). For a non-casefold htree dir this is authoritative
+    ///   (the index always covers every entry), so the caller may return "absent"
+    ///   WITHOUT a linear scan — the lever that makes a negative lookup O(log N).
+    /// - `None` — the fast path does not apply or cannot be trusted (not an htree
+    ///   dir; casefold, whose fold routing this does not replicate; or the index
+    ///   is absent/unparseable/unreadable, `IndexInvalid`). The caller MUST do the
+    ///   linear scan, which stays authoritative.
+    ///
+    /// Never returns `Err`: any resolve/read/parse failure becomes `None` so the
+    /// caller falls back to the safe scan.
+    fn htree_lookup_name_authoritative(
+        &self,
+        cx: &Cx,
+        scope: &RequestScope,
+        dir_inode: &Ext4Inode,
+        name: &[u8],
+    ) -> Option<Option<Ext4DirEntry>> {
         if !dir_inode.has_htree_index() {
             return None;
         }
@@ -12635,7 +12682,12 @@ impl OpenFs {
         };
 
         match found {
-            HtreeFindResult::Found(entry) => Some(entry),
+            HtreeFindResult::Found(entry) => Some(Some(entry)),
+            // A clean negative is authoritative ONLY for a non-casefold dir: a
+            // casefold descent that misses an exotic-Unicode name must fall back
+            // to the linear casefold scan (the index fold may diverge), so report
+            // "index unusable" (None) for casefold, not "absent".
+            HtreeFindResult::NotFoundInIndex if !casefold => Some(None),
             HtreeFindResult::NotFoundInIndex | HtreeFindResult::IndexInvalid => None,
         }
     }
@@ -16850,6 +16902,83 @@ impl OpenFs {
             .map(|e| BlockNumber(e.physical_start))
     }
 
+    /// Remove `name` from an htree directory by descending the dx index to the
+    /// hash-correct leaf (O(log N)) and removing it there, instead of linearly
+    /// scanning every directory block (O(dir)). This is the removal counterpart
+    /// to the hash-target insert and is what keeps a rename — lookup + remove +
+    /// insert — O(log N) per op for a large directory instead of O(N) (bd-gauub).
+    ///
+    /// Returns `Ok(Some(true))` if the entry was found and removed (the block was
+    /// written through `dev`), or `Ok(None)` when the htree fast path does not
+    /// apply or cannot confidently locate the entry (not an htree dir; casefold,
+    /// which the index may route differently; the dx index is unreadable; or the
+    /// name is not in the hash-target leaf — e.g. a stale index or a linearly
+    /// appended entry). In the `None` case the caller MUST fall back to the linear
+    /// block scan, which stays authoritative.
+    #[allow(clippy::too_many_arguments)]
+    fn ext4_htree_remove_dir_entry(
+        &self,
+        cx: &Cx,
+        dev: &dyn BlockDevice,
+        dir: InodeNumber,
+        dir_inode: &Ext4Inode,
+        extents: &[Ext4Extent],
+        name: &[u8],
+        reserved_tail: usize,
+    ) -> Result<Option<bool>, FfsError> {
+        if !dir_inode.has_htree_index() {
+            return Ok(None);
+        }
+        // Casefold htree directories route by the case-folded name; the index may
+        // place an entry under a fold that the verbatim-name descent here would
+        // miss. Leave those to the linear scan (correctness over speed).
+        if dir_inode.flags & ffs_types::EXT4_CASEFOLD_FL != 0 {
+            return Ok(None);
+        }
+        let Some(sb) = self.ext4_superblock() else {
+            return Ok(None);
+        };
+
+        let resolve_logical = |logical: u32| -> Option<BlockNumber> {
+            let pos = extents.partition_point(|e| e.logical_block <= logical);
+            let ext = extents.get(pos.checked_sub(1)?)?;
+            if ext.is_unwritten() {
+                return None;
+            }
+            let start = ext.logical_block;
+            let len = u32::from(ext.actual_len());
+            (logical >= start && logical < start.saturating_add(len))
+                .then(|| BlockNumber(ext.physical_start + u64::from(logical - start)))
+        };
+        let read_leaf =
+            |lb| resolve_logical(lb).and_then(|phys| self.read_block_vec(cx, phys).ok());
+
+        let Some(target_logical) = ffs_ondisk::htree_target_leaf_block(
+            &sb.hash_seed,
+            sb.has_large_dir(),
+            name,
+            |v| sb.effective_dirhash_version(v),
+            read_leaf,
+        ) else {
+            return Ok(None);
+        };
+        let Some(target_phys) = resolve_logical(target_logical) else {
+            return Ok(None);
+        };
+
+        let mut data = self.read_block_vec(cx, target_phys)?;
+        if ffs_dir::remove_entry(&mut data, name, reserved_tail)? {
+            let dir_ino_u32 = u32::try_from(dir.0)
+                .map_err(|_| FfsError::Format("inode number exceeds ext4 32-bit limit".into()))?;
+            self.stamp_ext4_dir_block(&mut data, dir_ino_u32, dir_inode.generation);
+            dev.write_block(cx, target_phys, &data)?;
+            return Ok(Some(true));
+        }
+        // The name was not in its hash-target leaf — the index may be stale or the
+        // entry was linearly appended. Let the caller's linear scan handle it.
+        Ok(None)
+    }
+
     /// Repoint a directory's `..` entry to `new_parent_ino` in place. `.`/`..`
     /// are always the first two entries at fixed offsets 0 and 12 (ext4 invariant,
     /// enforced by e2fsck), so this works for both linear dir blocks and htree
@@ -17014,17 +17143,43 @@ impl OpenFs {
                         )?;
                         return Ok(());
                     }
-                    // The hash-correct leaf is full: a leaf split is needed.
-                    // Rather than incremental dx surgery (corruption-prone), gather
-                    // every entry plus the new one and rebuild the whole htree with
-                    // the proven build_htree_directory writer (bd-rzq1y). Correct by
-                    // construction — e2fsck validates htree validity, not shape.
+                    // The hash-correct leaf is full: a leaf split is needed. The
+                    // O(log N) fast path (bd-gauub) splits just this one leaf and
+                    // inserts ONE dx_entry into the dx_root, instead of the O(dir)
+                    // full rebuild — which makes rename (insert+remove at capacity)
+                    // O(log N)/op instead of O(N^2). Only the single-level,
+                    // dx-root-has-room, non-casefold case is handled incrementally;
+                    // everything else falls back to the proven full rebuild, which
+                    // stays correct by construction (e2fsck validates htree
+                    // validity, not shape). casefold falls back because the split
+                    // helper hashes the verbatim name (the rebuild re-hashes by the
+                    // fold), so a fold-indexed dir must keep using the rebuild.
                     Err(FfsError::NoSpace) => {
-                        // The hash-correct leaf is full → rebuild the whole index.
-                        // ext4_rebuild_htree_dir is casefold-aware (it re-hashes by
-                        // the fold and refuses if any entry is non-ASCII), so the
-                        // common ASCII casefold case rebuilds correctly too
-                        // (bd-owt2r).
+                        if !casefold {
+                            match self.ext4_split_htree_leaf_and_add(
+                                cx,
+                                dev,
+                                alloc,
+                                parent,
+                                parent_inode,
+                                &extents,
+                                target_logical,
+                                target_phys,
+                                &data,
+                                name,
+                                child_ino_u32,
+                                file_type,
+                                csum_seed,
+                                tstamp_secs,
+                                tstamp_nanos,
+                            )? {
+                                // Split succeeded and the entry was added.
+                                Some(()) => return Ok(()),
+                                // The split path declined (multi-level index, full
+                                // dx_root, or no clean hash boundary) → rebuild.
+                                None => {}
+                            }
+                        }
                         return self.ext4_rebuild_htree_dir(
                             cx,
                             dev,
@@ -17294,6 +17449,246 @@ impl OpenFs {
                 .map_err(|e| FfsError::Format(e.to_string()))?;
         }
         result
+    }
+
+    /// Incrementally split one full htree leaf and add the new entry, the O(log N)
+    /// rename fast path (bd-gauub). Allocates ONE new leaf, moves the upper-hash
+    /// half of the full leaf into it, inserts ONE `(split_hash -> new_leaf)` entry
+    /// into the single-level dx_root, then adds the new name into whichever half
+    /// now owns its hash. Returns `Ok(Some(()))` on success, `Ok(None)` when the
+    /// fast path declines (multi-level index, full dx_root, or no clean hash
+    /// boundary) so the caller falls back to the full rebuild. Runs inside the
+    /// caller's mvcc transaction (all writes go through `dev`). Casefold is
+    /// excluded by the caller (it hashes the verbatim name).
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn ext4_split_htree_leaf_and_add(
+        &self,
+        cx: &Cx,
+        dev: &dyn BlockDevice,
+        alloc: &mut Ext4AllocState,
+        parent: InodeNumber,
+        parent_inode: &Ext4Inode,
+        extents: &[Ext4Extent],
+        target_logical: u32,
+        target_phys: BlockNumber,
+        target_leaf: &[u8],
+        name: &[u8],
+        child_ino_u32: u32,
+        file_type: Ext4FileType,
+        csum_seed: u32,
+        tstamp_secs: u64,
+        tstamp_nanos: u32,
+    ) -> Result<Option<()>, FfsError> {
+        let block_size = usize::try_from(alloc.geo.block_size)
+            .map_err(|_| FfsError::Format("block size does not fit usize".into()))?;
+        let parent_ino_u32 = u32::try_from(parent.0)
+            .map_err(|_| FfsError::Format("inode number exceeds ext4 32-bit limit".into()))?;
+        let generation = parent_inode.generation;
+        let reserved_tail = self.ext4_dir_reserved_tail();
+
+        let (hash_seed, hash_version, has_metadata_csum, has_large_dir) = {
+            let sb = self
+                .ext4_superblock()
+                .ok_or_else(|| FfsError::Format("htree leaf split on non-ext4 fs".into()))?;
+            (
+                sb.hash_seed,
+                sb.effective_dirhash_version(sb.def_hash_version),
+                sb.has_metadata_csum(),
+                sb.has_large_dir(),
+            )
+        };
+
+        // The new leaf takes the next free logical block (one past the current
+        // highest-mapped logical block) — exactly as the linear growth path
+        // appends a block. The dx_root keeps the OLD leaf at `target_logical`.
+        let logical_end = extents
+            .iter()
+            .map(|e| e.logical_block + u32::from(e.actual_len()))
+            .max()
+            .unwrap_or(0);
+        let new_leaf_logical = logical_end;
+
+        // Read the dx_root (logical block 0). It must be physically mapped for an
+        // htree directory; if not, decline so the rebuild handles it.
+        let resolve = |logical: u32| -> Option<BlockNumber> {
+            for ext in extents {
+                if ext.is_unwritten() {
+                    continue;
+                }
+                let start = ext.logical_block;
+                let len = u32::from(ext.actual_len());
+                if logical >= start && logical < start.saturating_add(len) {
+                    return Some(BlockNumber(ext.physical_start + u64::from(logical - start)));
+                }
+            }
+            None
+        };
+        let Some(dx_root_phys) = resolve(0) else {
+            return Ok(None);
+        };
+        let dx_root_block = self.read_block_vec(cx, dx_root_phys)?;
+
+        // Pure split: repacks both leaves and the dx_root, all checksum-stamped.
+        let split = match ffs_ondisk::split_htree_leaf(
+            &dx_root_block,
+            target_leaf,
+            target_logical,
+            new_leaf_logical,
+            block_size,
+            hash_version,
+            &hash_seed,
+            has_metadata_csum,
+            has_large_dir,
+            csum_seed,
+            parent_ino_u32,
+            generation,
+        ) {
+            Ok(s) => s,
+            // Any decline (multi-level, full dx_root, no clean boundary,
+            // unparseable) → fall back to the proven full rebuild.
+            Err(_) => return Ok(None),
+        };
+
+        #[cfg(test)]
+        self.htree_leaf_splits
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+
+        let ffs_ondisk::HtreeLeafSplit {
+            mut old_leaf,
+            mut new_leaf,
+            dx_root,
+            split_hash,
+        } = split;
+
+        // Add the new entry into whichever half now owns its hash. dx_find_leaf_idx
+        // routes a lookup to the rightmost entry with hash <= target, so a name
+        // with hash >= split_hash lives in the new (right) leaf; otherwise the old
+        // (left) leaf. Both halves were packed loosely (a strict subset of one
+        // full leaf) so the single new entry always fits.
+        let name_hash = ffs_ondisk::dx_hash(hash_version, name, &hash_seed).0;
+        let into_new = name_hash >= split_hash;
+        let target_buf = if into_new { &mut new_leaf } else { &mut old_leaf };
+        ffs_dir::add_entry(target_buf, child_ino_u32, name, file_type, reserved_tail)?;
+        // Re-stamp the leaf we just modified (the split already stamped both, but
+        // add_entry changed this one's bytes).
+        self.stamp_ext4_dir_block(target_buf, parent_ino_u32, generation);
+
+        // Allocate the physical block for the new leaf and map it at
+        // `new_leaf_logical` in the extent tree.
+        let hint = self.numa_allocation_hint(
+            &alloc.geo,
+            AllocHint {
+                goal_block: extents.last().map(Self::extent_end_hint),
+                ..AllocHint::default()
+            },
+            "ext4_htree_leaf_split",
+            Some(parent),
+        );
+        let new_alloc = ffs_alloc::alloc_blocks_persist(
+            cx,
+            dev,
+            &alloc.geo,
+            &mut alloc.groups,
+            1,
+            &hint,
+            &alloc.persist_ctx,
+        )?;
+
+        // Write all three blocks: old leaf in place, new leaf at the fresh phys,
+        // dx_root at logical 0.
+        dev.write_block(cx, target_phys, &old_leaf)?;
+        dev.write_block(cx, new_alloc.start, &new_leaf)?;
+        dev.write_block(cx, dx_root_phys, &dx_root)?;
+
+        // Map the new leaf's logical block in the extent tree and update the
+        // parent inode (size, data + extent-tree metadata block accounting, link
+        // count, timestamps), mirroring the linear dir-growth path.
+        let mut parent_upd = parent_inode.clone();
+        let extent = Ext4Extent {
+            logical_block: new_leaf_logical,
+            raw_len: 1,
+            physical_start: new_alloc.start.0,
+        };
+        let mut root_bytes = Self::extent_root(&parent_upd);
+        let sectors_per_block = if parent_upd.is_huge_file() {
+            1
+        } else {
+            alloc.geo.block_size / EXT4_SECTOR_SIZE
+        };
+        let tree_hint = self.numa_allocation_hint(
+            &alloc.geo,
+            AllocHint {
+                goal_block: Some(new_alloc.start),
+                ..AllocHint::default()
+            },
+            "ext4_htree_leaf_split_tree",
+            Some(parent),
+        );
+        let parent_extent_ns = extent_cache_namespace(&parent_upd);
+        let dir_meta_before =
+            Self::ext4_count_extent_tree_meta_blocks_via_dev(cx, dev, &root_bytes)?;
+        {
+            let mut tree_alloc = ffs_extent::GroupBlockAllocator {
+                cx,
+                dev,
+                geo: &alloc.geo,
+                groups: &mut alloc.groups,
+                hint: tree_hint,
+                pctx: &alloc.persist_ctx,
+                ino: parent_ino_u32,
+                generation,
+            };
+            ffs_btree::insert(cx, dev, &mut root_bytes, extent, &mut tree_alloc)?;
+        }
+        let dir_meta_after =
+            Self::ext4_count_extent_tree_meta_blocks_via_dev(cx, dev, &root_bytes)?;
+        self.invalidate_ext4_write_extent_snapshot(&parent_upd);
+        Self::set_extent_root(&mut parent_upd, &root_bytes);
+        self.extent_cache.invalidate_range(
+            parent_extent_ns,
+            new_leaf_logical,
+            u64::from(u32::MAX - new_leaf_logical),
+        );
+
+        let block_size_u64 = u64::from(alloc.geo.block_size);
+        parent_upd.size = parent_upd
+            .size
+            .checked_add(block_size_u64)
+            .ok_or_else(|| FfsError::Corruption {
+                block: 0,
+                detail: format!("inode {} directory size overflow on leaf split", parent.0),
+            })?;
+        parent_upd.blocks = Self::ext4_checked_inode_blocks_delta(
+            parent_upd.blocks,
+            parent,
+            i128::from(sectors_per_block),
+        )?;
+        Self::ext4_apply_extent_meta_delta(
+            &mut parent_upd,
+            parent,
+            dir_meta_before,
+            dir_meta_after,
+            u64::from(sectors_per_block),
+        )?;
+        if file_type == Ext4FileType::Dir {
+            parent_upd.links_count = Self::ext4_dir_link_inc(
+                parent_upd.links_count,
+                parent,
+                parent_upd.flags & ffs_types::EXT4_INDEX_FL != 0,
+            )?;
+        }
+        ffs_inode::touch_mtime_ctime(&mut parent_upd, tstamp_secs, tstamp_nanos);
+        ffs_inode::write_inode(
+            cx,
+            dev,
+            &alloc.geo,
+            &alloc.groups,
+            parent,
+            &parent_upd,
+            csum_seed,
+        )?;
+
+        Ok(Some(()))
     }
 
     /// Rebuild an htree directory from all its current entries plus the new one,
@@ -20437,24 +20832,38 @@ impl OpenFs {
             // Remove the existing target.
             let extents = self.collect_extents(cx, &new_parent_inode)?;
             let reserved_tail = self.ext4_dir_reserved_tail();
-            let dx_root_phys = Self::ext4_htree_dx_root_phys(&new_parent_inode, &extents);
-            'rm_existing: for ext in &extents {
-                for block in Self::extent_phys_blocks(ext) {
-                    if Some(block) == dx_root_phys {
-                        continue;
-                    }
-                    let mut data = self.read_block_vec(cx, block)?;
-                    if ffs_dir::remove_entry(&mut data, new_name, reserved_tail)? {
-                        let np_ino_u32 = u32::try_from(new_parent.0).map_err(|_| {
-                            FfsError::Format("inode number exceeds ext4 32-bit limit".into())
-                        })?;
-                        self.stamp_ext4_dir_block(
-                            &mut data,
-                            np_ino_u32,
-                            new_parent_inode.generation,
-                        );
-                        block_dev.write_block(cx, block, &data)?;
-                        break 'rm_existing;
+            // htree fast path first (O(log N)); linear scan fallback (bd-gauub).
+            let removed_existing_via_htree = self
+                .ext4_htree_remove_dir_entry(
+                    cx,
+                    &block_dev,
+                    new_parent,
+                    &new_parent_inode,
+                    &extents,
+                    new_name,
+                    reserved_tail,
+                )?
+                .unwrap_or(false);
+            if !removed_existing_via_htree {
+                let dx_root_phys = Self::ext4_htree_dx_root_phys(&new_parent_inode, &extents);
+                'rm_existing: for ext in &extents {
+                    for block in Self::extent_phys_blocks(ext) {
+                        if Some(block) == dx_root_phys {
+                            continue;
+                        }
+                        let mut data = self.read_block_vec(cx, block)?;
+                        if ffs_dir::remove_entry(&mut data, new_name, reserved_tail)? {
+                            let np_ino_u32 = u32::try_from(new_parent.0).map_err(|_| {
+                                FfsError::Format("inode number exceeds ext4 32-bit limit".into())
+                            })?;
+                            self.stamp_ext4_dir_block(
+                                &mut data,
+                                np_ino_u32,
+                                new_parent_inode.generation,
+                            );
+                            block_dev.write_block(cx, block, &data)?;
+                            break 'rm_existing;
+                        }
                     }
                 }
             }
@@ -20545,20 +20954,40 @@ impl OpenFs {
         let src_parent_fresh = self.read_inode(cx, parent)?;
         let src_extents = self.collect_extents(cx, &src_parent_fresh)?;
         let reserved_tail = self.ext4_dir_reserved_tail();
-        let dx_root_phys = Self::ext4_htree_dx_root_phys(&src_parent_fresh, &src_extents);
-        'rm_src: for ext in &src_extents {
-            for block in Self::extent_phys_blocks(ext) {
-                if Some(block) == dx_root_phys {
-                    continue;
-                }
-                let mut data = self.read_block_vec(cx, block)?;
-                if ffs_dir::remove_entry(&mut data, name, reserved_tail)? {
-                    let src_ino_u32 = u32::try_from(parent.0).map_err(|_| {
-                        FfsError::Format("inode number exceeds ext4 32-bit limit".into())
-                    })?;
-                    self.stamp_ext4_dir_block(&mut data, src_ino_u32, src_parent_fresh.generation);
-                    block_dev.write_block(cx, block, &data)?;
-                    break 'rm_src;
+        // htree fast path: descend the dx index to the hash-target leaf and remove
+        // there (O(log N)), keeping rename O(log N) per op for a large directory.
+        // Falls back to the linear block scan when it does not apply (bd-gauub).
+        let removed_via_htree = self
+            .ext4_htree_remove_dir_entry(
+                cx,
+                &block_dev,
+                parent,
+                &src_parent_fresh,
+                &src_extents,
+                name,
+                reserved_tail,
+            )?
+            .unwrap_or(false);
+        if !removed_via_htree {
+            let dx_root_phys = Self::ext4_htree_dx_root_phys(&src_parent_fresh, &src_extents);
+            'rm_src: for ext in &src_extents {
+                for block in Self::extent_phys_blocks(ext) {
+                    if Some(block) == dx_root_phys {
+                        continue;
+                    }
+                    let mut data = self.read_block_vec(cx, block)?;
+                    if ffs_dir::remove_entry(&mut data, name, reserved_tail)? {
+                        let src_ino_u32 = u32::try_from(parent.0).map_err(|_| {
+                            FfsError::Format("inode number exceeds ext4 32-bit limit".into())
+                        })?;
+                        self.stamp_ext4_dir_block(
+                            &mut data,
+                            src_ino_u32,
+                            src_parent_fresh.generation,
+                        );
+                        block_dev.write_block(cx, block, &data)?;
+                        break 'rm_src;
+                    }
                 }
             }
         }
@@ -51058,34 +51487,45 @@ mod tests {
         install_htree_dir(&fs, &cx, dir_ino, &blocks);
         let initial_size = fs.read_inode(&cx, dir_ino).unwrap().size;
 
-        // Create enough new files to overflow leaves and force rebuild(s).
+        // Create enough new files to overflow leaves. With the bd-gauub
+        // incremental leaf-split fast path each overflow now splits ONE full leaf
+        // (O(log N)) instead of rebuilding the whole index, so the overflow is
+        // serviced by `htree_leaf_splits`, not `htree_rebuilds`.
         fs.htree_rebuilds
+            .store(0, std::sync::atomic::Ordering::SeqCst);
+        fs.htree_leaf_splits
             .store(0, std::sync::atomic::Ordering::SeqCst);
         let mut new_names: Vec<Vec<u8>> = Vec::new();
         for i in 0..600 {
             let nm = format!("created_{i:04}.dat");
             fs.create(&cx, dir_ino, OsStr::new(&nm), 0o644, 0, 0)
-                .unwrap_or_else(|e| panic!("create {nm} must succeed (rebuild): {e:?}"));
+                .unwrap_or_else(|e| panic!("create {nm} must succeed: {e:?}"));
             new_names.push(nm.into_bytes());
         }
 
-        // The directory must have grown — only the rebuild path allocates blocks
-        // for an htree dir, so growth proves the overflow/rebuild path ran.
+        // The directory must have grown — both the split and the rebuild paths
+        // allocate blocks for an htree dir, so growth proves the overflow path ran.
         let final_size = fs.read_inode(&cx, dir_ino).unwrap().size;
         assert!(
             final_size > initial_size,
-            "htree dir must have grown via rebuild: {initial_size} -> {final_size}"
+            "htree dir must have grown via leaf split: {initial_size} -> {final_size}"
         );
 
-        // SCORE (loose-pack doubling): 600 creates must trigger only a handful of
-        // full rebuilds (O(log N), doubling), NOT one per overflowing create
-        // (O(N)). With tight packing every create past the first overflow would
-        // rebuild the whole directory (~hundreds of rebuilds, O(N^2) total work).
+        // SCORE (bd-gauub): the overflow is serviced by INCREMENTAL leaf splits,
+        // not full rebuilds. The single-level fast path handles every overflow
+        // here (the dx_root has ample room for ~50 leaves at this block size), so
+        // the rebuild path must NOT run, and the split path must run repeatedly —
+        // each split is O(log N), making the whole create burst O(N log N) rather
+        // than the O(N^2) the per-create full rebuild would cost.
         let rebuilds = fs.htree_rebuilds.load(std::sync::atomic::Ordering::SeqCst);
-        assert!(rebuilds > 0, "the rebuild path must have run at least once");
+        let leaf_splits = fs.htree_leaf_splits.load(std::sync::atomic::Ordering::SeqCst);
         assert!(
-            rebuilds <= 30,
-            "600 creates must rebuild ~logarithmically (doubling), got {rebuilds} rebuilds"
+            leaf_splits > 0,
+            "the incremental leaf-split fast path must have run at least once"
+        );
+        assert_eq!(
+            rebuilds, 0,
+            "single-level overflow must split incrementally, not rebuild (got {rebuilds} rebuilds, {leaf_splits} splits)"
         );
 
         let find = |name: &[u8]| -> ffs_ondisk::HtreeFindResult {

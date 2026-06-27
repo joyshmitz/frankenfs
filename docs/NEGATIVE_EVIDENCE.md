@@ -2015,3 +2015,20 @@ REAL CAUSE (verified by `comm` of FUSE vs kernel name sets): the ~16000 extra en
 IMPACT on d9e66fc6 walk win: the btw.img fixture is CONTAMINATED by ext2_saved -> frankenfs walked 32002 (main 16000 + ext2_saved-as-main 16000) vs kernel 16002 (main 16000 + ext2_saved 1). The win still HOLDS and is LARGER per real entry (frankenfs did 2x work, still ~4x faster -> ~8x per main-subvol entry), but a clean ratio needs a btrfs fixture WITHOUT ext2_saved (native btrfs, or delete the subvolume).
 
 LESSONS: (1) compare actual NAME SETS, not just counts, to root-cause an enumeration discrepancy — `comm` instantly localized it to /ext2_saved/*. (2) I asserted 41f0c43f from CODE-READING (8788 collects both keys) WITHOUT verifying it produced the predicted dup NAMES; the empirical check refuted it. Verify a root-cause hypothesis's prediction empirically BEFORE asserting. (7th self-correction this session; the validation discipline keeps catching them.)
+
+### 2026-06-26 LANDED: ext4 htree rename O(N^2)->O(log N) — ~200x gap closed to ~3.3x vs kernel (CrimsonFox cc/opus)
+
+LANDED the campaign's #1 lever (the dominant measured gap, rename ~200x). Implemented in an isolated agent worktree, independently verified by me, now on main.
+
+MEASURED (rename-bench, 32000 files, single dir):
+- before: 172-187 renames/s (O(N^2): per-op time grew with dir size).
+- after: 10,340/s (release-perf) = ~3.3x vs kernel (34344/s); my independent release build reproduced 7,088/s (32000 in 5.66s) = ~41-60x over the old 172/s. O(N^2) ELIMINATED (near-flat per-op).
+
+The ~200x had THREE O(N)-per-op costs (the agent traced all three; fixing the insert alone left it at 187/s):
+1. Insert: full-htree rebuild on a full leaf -> incremental LEAF SPLIT (split one leaf + insert one dx_entry). New pure `ffs_ondisk::split_htree_leaf` (re-hashes with the lookup path's params, splits at the clean hash boundary, repacks both leaves, stamps). Declines (->rebuild) for multi-level index / full dx_root / no clean boundary / casefold.
+2. Removal: linear O(dir) block scan -> htree descent to the hash-target leaf (O(log N)).
+3. Negative lookup (the rename target-existence check): O(N) block scan + index rebuild every op -> authoritative dx-descent miss (the dx index always covers every entry; our writer never linearly appends, the kernel's invariant), non-casefold only.
+
+INDEPENDENT VERIFICATION (not blind-trusting the agent): anti-corruption gate test PASSED (6000-file split + rename-churn: every name findable, exact enumeration, no dupes/losses); ffs-ondisk 666+21 tests green; ffs-core 1180 passed / 5 failed = the SAME 5 pre-existing clean-HEAD failures (btrfs_symlink x3, largest_contiguous_free_run, read_block_with_empty_scope), ZERO htree/dir/rename failures; e2fsck Pass 2 (directory structure) CLEAN (only the orthogonal pre-existing superblock free-count gap, c4bb5890); kernel RO mount enumerates exactly the renamed set. Diff: ffs-ondisk +390, ffs-core +560, new gate test; clean cp-land (main's ffs-core/ffs-ondisk were identical to the worktree base).
+
+Files: crates/ffs-ondisk/src/{ext4.rs,lib.rs}, crates/ffs-core/src/lib.rs, crates/ffs-core/tests/htree_leaf_split_gate.rs. Residual at 32000: mild sub-linear growth (per-op MVCC commit / collect_extents as the extent tree grows) — a separate, smaller lever. This closes the campaign's dominant gap.
