@@ -1651,3 +1651,18 @@ Put the image on /dev/ram0 (real block device, brd — NO loop) and re-ran the r
 CORRECTION of f031d545: the kernel's read does NOT scale with threads EVEN on a real block device (parallel-64 2.3 ≈ single-thread dd 3.0). So the non-scaling is NOT the loop device's single request queue (my prior hypothesis — WRONG); it is memory-bandwidth-bound memcpy (64 threads copying a single warm file's cache pages saturate ~3 GiB/s single-socket). RETRACT the f031d545 "loop-specific, shrinks on a real device" caveat — the win PERSISTS on a real block device.
 
 CONFIRMED: the read win is REAL, not loop-confounded — frankenfs (4.7 GiB/s) beats the kernel 1.6x (vs dd-1t 3.0) to 2.0x (vs parallel-64 2.3) on a real ramdisk block device. frankenfs scales (parallel chunked, hits 4.7 > the kernel's memcpy-bound 3.0) where the kernel's single-file read cannot. REMAINING CAVEAT: frankenfs `read --discard` vs dd materialize — if --discard skips the final user-buffer copy it is partly idealization; treat the conservative ~1.6x (vs dd-1t materialize) as the fair figure. NET: read win confirmed real + non-loop (1.6-2.0x); kernel single-file read is memcpy-bandwidth-bound (doesn't scale); my loop hypothesis corrected via the ramdisk test. The disciplined process (hypothesis -> ramdisk test -> correction) upgraded f031d545's "loop-specific" to "real, non-loop".
+
+### 2026-06-26 FAIR parallel create (ramdisk, both durable): the BIGGEST claimed gap (5.5x) is actually PARITY (CrimsonFox cc/opus)
+
+Built /tmp/kcr.c (C pthreads parallel create: open O_CREAT|O_EXCL + close, one syncfs at end — matches frankenfs create-bench's create-N + one-flush). Fresh ext4 on /dev/ram0 (REAL block device, no loop), 16000 files, both durable:
+
+| threads | frankenfs | kernel-ramdisk | ratio |
+|---------|-----------|----------------|-------|
+| 1 | 33.7k | 35.2k | 1.04x |
+| 8 | 34.0k | 37.1k | 1.09x |
+
+PARITY (frankenfs only 1.04-1.09x slower). KEY: the kernel create in ONE directory does NOT scale either (8t 37k ≈ 1t 35k) — ext4's directory `i_rwsem` serializes concurrent creates into a single dir, exactly as frankenfs is one-dir-bound. So for the create-bench's single-dir pattern, BOTH are dir-lock-bound → parity.
+
+RE-SCOPES the campaign's biggest "gap": the historical ~5.5x (kernel 159k@8t vs frankenfs ~30k) is a BASELINE MISMATCH — to reach 159k@8t the kernel baseline must have used MULTI-dir creates (per-dir locks → scales) and/or been non-durable (no sync), compared against frankenfs's single-dir durable create-bench. That is apples-vs-oranges. The FAIR matched comparison (same one-dir pattern, both durable, real block device) is PARITY.
+
+CAVEAT (honest scope): for a MULTI-dir parallel create the kernel WOULD scale (independent per-dir locks) while frankenfs's create path (shared allocator + MVCC commit) might not — that scenario could still show a real gap, which is exactly what the peers' allocator-sharding lane targets. So "parity" holds for single-dir create-heavy workloads (tar-extract into one dir, maildir, etc.); multi-dir scaling is the open question. NET: the parallel create is NOT a blanket 5.5x gap — it is parity for the matched single-dir durable comparison; the 5.5x reflected a mismatched baseline. /tmp/kcr.c reusable. This is the most consequential re-scoping of the session: the headline "biggest gap" was measurement mismatch, not a real 5.5x deficit.
