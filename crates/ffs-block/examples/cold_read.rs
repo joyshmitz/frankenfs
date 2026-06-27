@@ -32,6 +32,12 @@ fn main() {
         .unwrap_or(1024)
         * 1024;
     let threads: usize = args.next().and_then(|s| s.parse().ok()).unwrap_or(1);
+    // 4th arg: access pattern — "seq" (default) sweeps each thread's contiguous
+    // range; "rand" does `len/chunk` reads at random chunk-aligned offsets across
+    // the whole file (the random-read workload). The random arm answers whether
+    // the default `POSIX_FADV_SEQUENTIAL` hint regresses random access (read
+    // amplification) vs `none`/`random`.
+    let pattern = args.next().unwrap_or_else(|| "seq".into());
 
     let dev = Arc::new(FileByteDevice::open(&path).expect("open device"));
     let len = dev.len_bytes();
@@ -39,16 +45,39 @@ fn main() {
 
     let start = Instant::now();
     let per = len / threads as u64;
+    let nchunks = len / chunk as u64; // chunk-aligned slots in the file
+    let rand = pattern == "rand";
     let mut handles = Vec::new();
     for t in 0..threads {
         let dev = Arc::clone(&dev);
         let begin = per * t as u64;
         let end = if t + 1 == threads { len } else { per * (t as u64 + 1) };
+        let pat_rand = rand;
         handles.push(std::thread::spawn(move || {
             let cx = Cx::for_testing();
             let mut buf = vec![0_u8; chunk];
-            let mut off = begin;
             let mut sum: u64 = 0;
+            if pat_rand {
+                // Per-thread LCG (deterministic, no rand dep); each thread issues
+                // `nchunks/threads` reads at random chunk-aligned offsets.
+                let mut state: u64 = 0x9E37_79B9_7F4A_7C15 ^ (t as u64).wrapping_mul(0x1234_5);
+                let reads = (nchunks / threads as u64).max(1);
+                for _ in 0..reads {
+                    state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                    let slot = if nchunks == 0 { 0 } else { (state >> 33) % nchunks };
+                    let off = slot * chunk as u64;
+                    let n = std::cmp::min(chunk as u64, len - off) as usize;
+                    dev.read_exact_at(&cx, ByteOffset(off), &mut buf[..n])
+                        .expect("read");
+                    let mut i = 0;
+                    while i < n {
+                        sum = sum.wrapping_add(u64::from(buf[i]));
+                        i += 4096;
+                    }
+                }
+                return sum;
+            }
+            let mut off = begin;
             while off < end {
                 let n = std::cmp::min(chunk as u64, end - off) as usize;
                 dev.read_exact_at(&cx, ByteOffset(off), &mut buf[..n])
@@ -72,7 +101,7 @@ fn main() {
     let mib = len as f64 / (1024.0 * 1024.0);
     let secs = elapsed.as_secs_f64();
     println!(
-        "fadvise={mode} threads={threads} chunk_kib={} bytes={len} elapsed_ms={:.2} MiB_s={:.1} cksum={sum}",
+        "fadvise={mode} pattern={pattern} threads={threads} chunk_kib={} bytes={len} elapsed_ms={:.2} MiB_s={:.1} cksum={sum}",
         chunk / 1024,
         secs * 1000.0,
         mib / secs,
