@@ -464,6 +464,40 @@ fn file_device_direct_read_min() -> usize {
     })
 }
 
+/// Read-ahead advice applied to a `FileByteDevice`'s fd at open via
+/// `posix_fadvise`, controlled by `FFS_READ_FADVISE` (parsed once).
+///
+/// The default (`sequential`) declares the dominant access pattern of a
+/// bulk-read filesystem so the kernel widens its read-ahead window — a single
+/// advisory syscall at open, byte-neutral and inert when the data is already
+/// page-cache-resident (the warm tmpfs bench case). It only changes I/O on a
+/// COLD read from a real disk, where the kernel's larger prefetch window closes
+/// the gap to its own `cat`/readahead path. Settable values:
+///   * `sequential` (default) — `POSIX_FADV_SEQUENTIAL` (2x kernel readahead).
+///   * `willneed` — eagerly prefetch the whole file at open.
+///   * `random` — `POSIX_FADV_RANDOM` (suppress readahead; A/B floor).
+///   * `none`/`off` — no advice (pre-lever behavior, for A/B isolation).
+fn file_device_open_fadvise() -> Option<nix::fcntl::PosixFadviseAdvice> {
+    use nix::fcntl::PosixFadviseAdvice;
+    use std::sync::OnceLock;
+    static MODE: OnceLock<Option<PosixFadviseAdvice>> = OnceLock::new();
+    *MODE.get_or_init(|| {
+        match std::env::var("FFS_READ_FADVISE")
+            .ok()
+            .as_deref()
+            .map(str::trim)
+            .map(str::to_ascii_lowercase)
+            .as_deref()
+        {
+            Some("none" | "off" | "") => None,
+            Some("willneed") => Some(PosixFadviseAdvice::POSIX_FADV_WILLNEED),
+            Some("random") => Some(PosixFadviseAdvice::POSIX_FADV_RANDOM),
+            // Default (unset or "sequential"): declare sequential access.
+            _ => Some(PosixFadviseAdvice::POSIX_FADV_SEQUENTIAL),
+        }
+    })
+}
+
 impl FileByteDevice {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let (file, writable) = OpenOptions::new()
@@ -478,6 +512,13 @@ impl FileByteDevice {
                     .map(|file| (file, false))
             })?;
         let len = file.metadata()?.len();
+        // Declare the access pattern so the kernel sizes its read-ahead window
+        // for our bulk reads (cold-read lever; inert when warm). Advisory: any
+        // error is ignored — it never affects correctness.
+        if let Some(advice) = file_device_open_fadvise() {
+            use std::os::unix::io::AsRawFd;
+            let _ = nix::fcntl::posix_fadvise(file.as_raw_fd(), 0, 0, advice);
+        }
         Ok(Self {
             file: Arc::new(file),
             len,

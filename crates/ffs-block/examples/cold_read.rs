@@ -1,0 +1,80 @@
+#![forbid(unsafe_code)]
+//! Cold-read A/B harness for the `posix_fadvise` read-ahead lever (bd-5v3mh).
+//!
+//! Warm tmpfs benches cannot see read-ahead — the data is already page-cache
+//! resident, so the kernel's prefetch window is irrelevant. This harness reads a
+//! file on a REAL disk (e.g. /data ext4) through `FileByteDevice`, the exact
+//! device the FS read path uses, so a `drop_caches` between runs exposes the
+//! cold gap the warm path hides. The `FFS_READ_FADVISE` env var (read by
+//! `FileByteDevice::open`) selects the advice; run the same binary twice with
+//! different values, dropping caches before each, to A/B the lever.
+//!
+//! Usage:
+//!   FFS_READ_FADVISE=sequential cargo run --release --example cold_read -- <path> [chunk_kib] [threads]
+//!
+//! Reads the whole file in `chunk_kib`-sized `read_exact_at` calls (default
+//! 1024), optionally split across `threads` contiguous ranges (default 1, to
+//! mirror the parallel chunk read of the real path). Prints elapsed + MiB/s and
+//! a checksum byte so the read cannot be optimized away.
+
+use asupersync::Cx;
+use ffs_block::{ByteDevice, FileByteDevice};
+use ffs_types::ByteOffset;
+use std::sync::Arc;
+use std::time::Instant;
+
+fn main() {
+    let mut args = std::env::args().skip(1);
+    let path = args.next().expect("usage: cold_read <path> [chunk_kib] [threads]");
+    let chunk: usize = args
+        .next()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1024)
+        * 1024;
+    let threads: usize = args.next().and_then(|s| s.parse().ok()).unwrap_or(1);
+
+    let dev = Arc::new(FileByteDevice::open(&path).expect("open device"));
+    let len = dev.len_bytes();
+    let mode = std::env::var("FFS_READ_FADVISE").unwrap_or_else(|_| "sequential(default)".into());
+
+    let start = Instant::now();
+    let per = len / threads as u64;
+    let mut handles = Vec::new();
+    for t in 0..threads {
+        let dev = Arc::clone(&dev);
+        let begin = per * t as u64;
+        let end = if t + 1 == threads { len } else { per * (t as u64 + 1) };
+        handles.push(std::thread::spawn(move || {
+            let cx = Cx::for_testing();
+            let mut buf = vec![0_u8; chunk];
+            let mut off = begin;
+            let mut sum: u64 = 0;
+            while off < end {
+                let n = std::cmp::min(chunk as u64, end - off) as usize;
+                dev.read_exact_at(&cx, ByteOffset(off), &mut buf[..n])
+                    .expect("read");
+                // Touch one byte per page so the read is not elided and pages fault.
+                let mut i = 0;
+                while i < n {
+                    sum = sum.wrapping_add(u64::from(buf[i]));
+                    i += 4096;
+                }
+                off += n as u64;
+            }
+            sum
+        }));
+    }
+    let mut sum: u64 = 0;
+    for h in handles {
+        sum = sum.wrapping_add(h.join().expect("join"));
+    }
+    let elapsed = start.elapsed();
+    let mib = len as f64 / (1024.0 * 1024.0);
+    let secs = elapsed.as_secs_f64();
+    println!(
+        "fadvise={mode} threads={threads} chunk_kib={} bytes={len} elapsed_ms={:.2} MiB_s={:.1} cksum={sum}",
+        chunk / 1024,
+        secs * 1000.0,
+        mib / secs,
+    );
+}
