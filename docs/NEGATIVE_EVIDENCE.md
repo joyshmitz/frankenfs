@@ -1484,3 +1484,16 @@ Re-examined the dc9ec858 finding ("MVCC versions grow unbounded -> OOM at 128k, 
 3. The snapshot lifecycle is actually BALANCED: `begin_request_scope` registers a snapshot (lib.rs:34727/34738) and `end_request_scope` releases the SAME snapshot (34762). This contradicts the ab227422 "watermark pinned by a leak" story.
 
 NET: create-bench (no sync, 400MB image) accumulates overlay state until the image fills — a benchmark characteristic, not a demonstrated real-workload memory bug. The version chains DO grow (the single store's cap-64 backpressures), but whether that harms a REAL (syncing) workload is UNMEASURED — I have no syncing-workload or FUSE-mount memory measurement. DOWNGRADING dc9ec858/ab227422 from "serious bug" to "unverified — likely benchmark artifact." Honest correction: I attributed a test-image-full and no-sync overlay accumulation to a version-memory leak without isolating the source. The open question for the wiring owner (does the overlay drain on sync/flush, or does prune need driving) remains valid but is NOT the OOM emergency dc9ec858 implied.
+
+### 2026-06-26 MEASURED (fresh, non-MVCC): ext4 directory lookup is 1.41x slower than kernel — O(log N) htree works; residual is per-lookup index re-descent (CrimsonFox cc/opus)
+
+Pivoted off the MVCC area to a fresh gap. Created a 16002-entry ext4 dir (create-bench) and measured `lookup-bench` vs a kernel RO-loop-mount `os.stat` loop, 20000 random names:
+
+| | lookups/s | per-op | over |
+|--|-----------|--------|------|
+| frankenfs lookup | 228,878 | 4.37 us | 16002 entries |
+| kernel stat (lookup+getattr) | 322,305 | 3.10 us | 16002 entries |
+
+Ratio 1.41x slower (and the kernel does MORE per op — stat = lookup + getattr — so the lookup-only gap is real). CRUCIALLY it is O(log N), not O(N): 16k entries via a linear scan would be ms-scale; 4.37us confirms the htree name index is used (htree_find_leaf etc. in ffs-dir are the pure primitives, all index-ordered). So this is NOT an algorithmic defect — it is per-lookup overhead: the htree DESCENT re-reads + re-parses the index blocks (dx_root + interior dx_node) on every lookup.
+
+LEVER: a per-dir parsed-htree-index cache (cache the dx_root/dx_node parsed index keyed by dir inode, mirroring the btrfs per-inode RO extent cache bd-n5w92) eliminates the per-lookup re-read+re-parse of the (unchanging, for RO/between-writes) index nodes -> should close most of the 1.41x for lookup-heavy workloads (stat storms, `ls -l`, `git status`, path resolution). LANE: the descent orchestration is in ffs-core (it imports the ffs-dir primitives at lib.rs:71 and drives the block reads), which is the wiring owner's actively-edited lane (3 live dirty files this session); the htree primitives themselves (ffs-dir) are clean but pure. So the cache integration is the wiring owner's to land. NET: a real, modest, fresh gap (lookup 1.41x, O(log N)) with a concrete, btrfs-proven lever (parsed-index cache); recorded with the kernel ratio + the lever + its lane.
