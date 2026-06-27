@@ -1938,3 +1938,15 @@ CONSEQUENCE: the write-side A/Bs were FAIR durable-vs-durable, NOT optimistic-ov
 THE REAL e2fsck FINDING (minor, genuine): only the SUPERBLOCK/GDT FREE-COUNTS are stale — "Free blocks count wrong (26567 vs counted 26551)", "Free inodes count wrong (32756 vs counted 30756)". The free-inode/free-block COUNT fields are not decremented for the allocations, though the bitmaps + dir entries + inodes are all correct and kernel-readable. e2fsck's "12 files" summary is computed FROM the stale free-count (32768-32756=12), not from the reachable set. So frankenfs's durable write is DATA-correct + kernel-compatible but leaves an e2fsck-dirty free-count (an `e2fsck -fy` would reconcile it). This is a small write-path SPEC-COMPLIANCE lever (maintain superblock/GDT free-inode/free-block counts on alloc/free) for the owners (ffs-core/ffs-alloc) — distinct from the perf levers.
 
 LESSON: the e2fsck "N files" summary reflects the (possibly stale) superblock count, not the actual reachable inode set — always cross-check with an independent walk. Here frankenfs AND the kernel both enumerated 2000, proving the data is intact; only the bookkeeping count is off. (Good catch on my own over-claim — same discipline as the 4 earlier retractions this session.)
+
+### 2026-06-26 Connected spec-compliance finding: write leaves stale free-counts AND fsck doesn't catch them (CrimsonFox cc/opus)
+
+Followed the stale-free-count thread (d13fde95) to its root — TWO connected gaps, both CORRECTNESS/spec-compliance (distinct from the perf levers):
+
+1. WRITE path: frankenfs's durable write does not maintain the superblock/GDT free-inode/free-block COUNT fields on alloc/free (ffs-alloc grep shows no decrement of free_inodes_count/free_blocks_count). After create-bench the data is correct + kernel-visible, but e2fsck flags "Free blocks count wrong / Free inodes count wrong".
+
+2. FSCK path: frankenfs's OWN fsck does NOT catch it. VERIFIED: `ffs-cli fsck <post-write-image>` reports "outcome: Clean" (it validates superblock parse + GD parse + checksum scrub, but does NOT verify free-count-vs-bitmap consistency) — MORE LENIENT than kernel e2fsck, which flags the same image. So frankenfs-fsck-Clean != e2fsck-clean.
+
+Plus a test gap: the only fsck test (cli_fsck_ext4_clean_image, crates/ffs-cli/tests/cli_e2e.rs:273) checks a freshly-created CLEAN image, never a post-frankenfs-write image — so neither the stale-count nor the fsck-leniency is gated.
+
+FIX (owners' lane, ffs-alloc + ffs-repair/ffs-cli-fsck): (a) decrement/increment superblock + bg_free_inodes_count/bg_free_blocks_count on inode/block alloc+free; (b) add a free-count-vs-bitmap consistency check to `ffs-cli fsck`; (c) add a post-write fsck gate (create-bench -> ffs fsck AND e2fsck -fn -> assert clean). These are spec-compliance correctness levers: frankenfs's writes are data-correct + kernel-readable but not yet e2fsck-clean, and its fsck doesn't detect the difference. LESSON: cross-check frankenfs fsck "Clean" against kernel e2fsck — they disagree here. (Non-perf finding surfaced while validating the gate for the in-flight htree leaf-split work.)
