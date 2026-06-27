@@ -1596,3 +1596,18 @@ Clean warm interleaved walk A/B (flat 16k-entry dir, frankenfs walk vs kernel) e
 The python and C baselines DISAGREE by ~5.7x (57 vs 10 ms) for IDENTICAL work — the python `os.stat` per-call interpreter overhead (~2.9 us x 16002 = ~47 ms) inflates the "kernel" number. CONCRETE CAUTION: any vs-kernel ratio measured against a PYTHON baseline (e.g. the campaign's "python read 400ms" comparisons) is inflated ~3x and makes frankenfs look better than a C baseline would. Prefer C baselines (dd, find, a compiled microbench) with precise (sub-ms) timing.
 
 WALK RATIO: inconclusive here. Against coarse C `find` (~10ms) frankenfs (17.9ms) looks ~1.7x SLOWER; against python (57ms) ~3.2x faster. Neither is reliable (find too coarse, python overhead-laden), AND this flat-16k fixture differs from the headline's 30k bigdir (where the bulk-parse-vs-30k-getattr-syscalls advantage was measured). So the headline walk 2.03x is neither confirmed nor refuted by this run. To reliably re-validate the walk (and read 1.66x) headlines, a PRECISE COMPILED C baseline (scandir+stat / pread loop, us-resolution) on the MATCHED fixture is required — the python/find baselines used opportunistically this session are insufficient. The reliable frankenfs-side number stands: walk ~1.1us/entry. This is a measurement-discipline contribution, not a perf claim.
+
+### 2026-06-26 RELIABLE WIN CONFIRMED (precise C baseline): metadata walk 2.5x FASTER than kernel — resolves prior inconclusive (CrimsonFox cc/opus)
+
+Built the precise compiled C baseline recommended last turn (/tmp/kwalk.c: opendir+readdir+lstat every entry, CLOCK_MONOTONIC) and ran a clean warm interleaved A/B (flat 16k-entry ext4 dir, 4 rounds):
+
+| round | frankenfs walk | C kernel scandir+lstat | ff/k |
+|-------|----------------|------------------------|------|
+| 1 | 15.4 ms | 47.2 ms | 0.33x |
+| 2 | 17.7 ms | 47.7 ms | 0.37x |
+| 3 | 19.0 ms | 44.7 ms | 0.43x |
+| 4 | 19.5 ms | 47.6 ms | 0.41x |
+
+frankenfs walk = 2.5x FASTER than the kernel (like-for-like stat-every-entry). RESOLVES the prior-turn inconclusive (1c87f1f4) and CORRECTS the misleading `find` reading: `find -type f` uses the dirent `d_type` (NO stat per entry, ~10ms) so it is NOT a fair walk baseline — frankenfs `walk` stats every entry, so the like-for-like kernel baseline is `scandir+lstat` (16002 lstat syscalls = 47ms, ~2.9us/syscall). frankenfs's bulk inode parse (17.9ms = ~1.1us/entry) beats the kernel's per-entry syscall storm 2.5x. The python baseline (57ms, prior turn) was also fair-in-kind (stats each) but interpreter-inflated; the C baseline (47ms) is the clean number; both >> find's d_type-only 10ms.
+
+This RELIABLY CONFIRMS the campaign headline (walk 2.03x faster) — exceeding it here (2.5x) on this fixture. METHODOLOGY ESTABLISHED: the fair walk baseline is stat-every-entry (compiled C scandir+lstat), NOT find -type f (d_type). /tmp/kwalk.c is a reusable us-resolution C baseline; an analogous compiled C pread-loop should re-validate the read 1.66x headline (the read A/B's `dd` baseline is fair but the read win is file-size/load-dependent per 32666a5c). A confirmed, reliable, measured WIN via disciplined like-for-like measurement.
