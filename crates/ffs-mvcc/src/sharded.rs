@@ -19,6 +19,7 @@ use ffs_block::BlockDevice;
 use ffs_error::Result as FfsResult;
 use ffs_types::{BlockNumber, CommitSeq, Snapshot, TxnId};
 use parking_lot::{Condvar, Mutex, RwLock, RwLockWriteGuard};
+use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -109,7 +110,7 @@ impl std::fmt::Debug for CommitPublicationGate {
 /// A single shard of the version store.
 #[derive(Debug, Default)]
 struct MvccShard {
-    versions: BTreeMap<BlockNumber, Vec<BlockVersion>>,
+    versions: FxHashMap<BlockNumber, Vec<BlockVersion>>,
     /// Per-shard SSI log.  Entries are kept here because SSI checks
     /// are per-block and shards are block-partitioned.
     ssi_log: Vec<CommittedTxnRecord>,
