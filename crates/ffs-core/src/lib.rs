@@ -18371,7 +18371,7 @@ impl OpenFs {
             }
 
             // Update parent timestamps.
-            let mut parent_upd = self.read_inode(cx, parent)?;
+            let mut parent_upd = parent_inode;
             if expect_dir {
                 // ext4_dec_count: the parent loses the removed subdir's `..`
                 // backlink, but a directory's link count never drops below 2
