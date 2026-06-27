@@ -2203,3 +2203,18 @@ MEASURED (/data ext4, `drop_caches` per run, 800 MiB dense fixture, single-threa
 - frankenfs chunk 1 MiB: 402 ms (1.09x) · **4 MiB: 390 ms (1.05x — optimum)** · 16 MiB: 410 ms · 64 MiB: 416 ms.
 
 So ~4 MiB is the cold single-thread optimum, but it beats 1 MiB by only ~3% and does NOT close the 20 ms (1.05x) gap to kernel; LARGER chunks (16-64 MiB) REGRESS (a single huge pread overlaps read-ahead/processing worse and faults a large fresh buffer). The chunk-size lever is marginal and non-closing — NO clean cold chunk-tuning lever. And this is not even the production path: the FS reads large files via 128 KiB parallel chunks, which already beat kernel `cat` ~2.3x (prior entry). The 1.05x single-thread residual is the inherent per-`pread` overhead vs the kernel's in-page-cache path — the same structural tax that needs zero-copy, not chunk tuning. Confirms (clean data) the cold-read story is closed: single-thread ~kernel parity (1.05x), parallel ~2.3x faster. No change shipped (REVERT ~0-gain).
+
+### 2026-06-27 CLEAN-BOX confirmation of the shipped fadvise lever (ebb9dbfc): 8/8 win, 1.15-1.27x, + a variance-reduction property (CrimsonFox cc/opus)
+
+The lowest box load of the session (13-16) finally allowed a low-variance A/B of the SHIPPED cold-read `posix_fadvise(SEQUENTIAL)` lever — every prior number was noise-limited (load 53-188). Same fixture/method (/data ext4, `drop_caches` per run, 800 MiB, single-thread, 1 MiB chunks).
+
+COLD SEQUENTIAL single-thread, `none` vs `sequential`, 8 reps:
+- `sequential` beat `none` in **8/8 reps** (clean, no exceptions).
+- min: seq 399 ms vs none 460 ms = **1.15x faster** (matches the original ship claim exactly).
+- mean: seq 415 ms vs none 526 ms = **1.27x faster**.
+- vs kernel `cat` (min 370 ms): seq 1.08x = near parity.
+- NEW property: `sequential` also has much LOWER VARIANCE — its runs are tight (399-440 ms) while `none` swings (460-852 ms). The read-ahead hint not only speeds the cold read but STABILIZES it (a consistent prefetch window vs the kernel's variable on-demand ramp). A latency-tail win on top of the throughput win.
+
+COLD RANDOM 4 KiB, `none` vs `sequential`, 3 reps (clean): none ~11.0 s vs seq ~11.0 s — **NEUTRAL** (within ~3% noise; ~55 us per cold random 4 KiB read = inherent seek+fault latency). Confirms with clean data what the load-188 run showed noisily: SEQUENTIAL is NEUTRAL (not harmful, not helpful) on random — the kernel self-limits read-ahead on non-sequential access, exactly as reasoned. The shipped default is safe on the random path; clean data, caveat fully closed.
+
+NET: the shipped lever (`ebb9dbfc`) is confirmed on a quiet box at 1.15x (min) / 1.27x (mean) cold sequential, ~1.08x kernel parity, neutral-safe on random, with a bonus variance/tail-latency reduction. No new change (the lever is already shipped); this upgrades its evidence from noise-limited to clean.
