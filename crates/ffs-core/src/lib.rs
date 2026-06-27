@@ -6146,7 +6146,8 @@ impl OpenFs {
             }
         }
 
-        if result.is_ok() {
+        if let Ok(commit_seq) = &result {
+            self.prune_mvcc_after_commit_if_due(*commit_seq);
             self.notify_repair_flush_lifecycle(txn_id, &write_blocks);
         }
 
@@ -6205,7 +6206,8 @@ impl OpenFs {
             }
         }
 
-        if result.is_ok() {
+        if let Ok(commit_seq) = &result {
+            self.prune_mvcc_after_commit_if_due(*commit_seq);
             self.notify_repair_flush_lifecycle(txn_id, &write_blocks);
         }
 
@@ -7123,6 +7125,18 @@ impl OpenFs {
             "mvcc_prune"
         );
         watermark
+    }
+
+    fn prune_mvcc_after_commit_if_due(&self, commit_seq: CommitSeq) {
+        if let Some(watermark) = self.mvcc_store.prune_after_commit_if_due(commit_seq) {
+            debug!(
+                target: "ffs::mvcc",
+                commit_seq = commit_seq.0,
+                watermark = watermark.0,
+                remaining_versions = self.mvcc_store.version_count(),
+                "mvcc_prune_after_commit"
+            );
+        }
     }
 
     // ── Btrfs tree-walk via device ───────────────────────────────────
@@ -34789,7 +34803,8 @@ impl FsOps for OpenFs {
             .as_ref()
             .map_or_else(Vec::new, |tx| tx.write_set().keys().copied().collect());
         let result = scope.commit_if_write(&self.mvcc_store);
-        if result.is_ok() {
+        if let Ok(commit_seq) = &result {
+            self.prune_mvcc_after_commit_if_due(*commit_seq);
             if let Some(tx_id) = tx_id {
                 self.notify_repair_flush_lifecycle(tx_id, &write_blocks);
             }
@@ -63224,6 +63239,65 @@ mod tests {
             fs.read_block_with_scope(&cx, &RequestScope::empty(), block)
                 .expect("read empty-scope current MVCC block"),
             overlay
+        );
+    }
+
+    #[test]
+    fn writable_current_adapter_does_not_pin_gc_watermark_bd_mvccgc() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let block = BlockNumber(8);
+        let bytes = vec![0xC7_u8; usize::try_from(fs.block_size()).expect("block size fits")];
+
+        assert_eq!(fs.mvcc_active_snapshot_count(), 0);
+        {
+            let block_dev = fs.block_device_adapter();
+            assert_eq!(
+                fs.mvcc_active_snapshot_count(),
+                0,
+                "read-your-writes adapters resolve at the live snapshot and must not pin one"
+            );
+            block_dev
+                .write_block(&cx, block, &bytes)
+                .expect("write through current adapter");
+            assert_eq!(
+                block_dev
+                    .read_block(&cx, block)
+                    .expect("read own committed write")
+                    .as_slice(),
+                bytes.as_slice()
+            );
+            assert_eq!(fs.mvcc_active_snapshot_count(), 0);
+        }
+        assert_eq!(fs.mvcc_active_snapshot_count(), 0);
+    }
+
+    #[test]
+    fn open_fs_commit_prunes_unpinned_hot_block_versions_bd_mvccgc() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let block = BlockNumber(9);
+        let bs = usize::try_from(fs.block_size()).expect("block size fits");
+        let _current_adapter = fs.block_device_adapter();
+
+        assert_eq!(fs.mvcc_active_snapshot_count(), 0);
+        for seq in 0..512_u64 {
+            let mut txn = fs.begin_transaction();
+            let byte = u8::try_from(seq % 251).expect("modulo fits u8");
+            fs.stage_block_write(&mut txn, block, vec![byte; bs]);
+            fs.commit_transaction(txn)
+                .expect("commit hot-block overwrite");
+        }
+
+        assert_eq!(fs.mvcc_active_snapshot_count(), 0);
+        assert_eq!(fs.mvcc_oldest_active_snapshot(), None);
+        assert!(
+            fs.mvcc_version_count() <= 1,
+            "periodic prune should retain only the current hot-block version, got {}",
+            fs.mvcc_version_count()
         );
     }
 

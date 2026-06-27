@@ -17,6 +17,8 @@ use ffs_types::{BlockNumber, CommitSeq, Snapshot};
 use parking_lot::RwLock;
 use std::sync::Arc;
 
+const MVCC_COMMIT_PRUNE_INTERVAL: u64 = 256;
+
 /// The OpenFs MVCC store: single-lock or sharded, behind a uniform `&self` API.
 ///
 /// The enum is always owned behind `Arc`; boxing a variant would add another
@@ -133,6 +135,11 @@ impl FsMvccStore {
         }
     }
 
+    pub(super) fn prune_after_commit_if_due(&self, commit_seq: CommitSeq) -> Option<CommitSeq> {
+        (commit_seq.0 != 0 && commit_seq.0 % MVCC_COMMIT_PRUNE_INTERVAL == 0)
+            .then(|| self.prune_safe())
+    }
+
     pub(super) fn flush_to_device<D: BlockDevice>(&self, cx: &Cx, device: &D) -> FfsResult<usize> {
         match self {
             Self::Single(lock) => lock.read().flush_to_device(cx, device),
@@ -224,6 +231,14 @@ impl<D: BlockDevice> FsMvccBlockDevice<D> {
     }
 
     pub(super) fn with_read_your_writes(mut self) -> Self {
+        if let SnapshotOwnership::Inline { snapshot } = self.ownership {
+            let released = self.store.release_snapshot(snapshot);
+            debug_assert!(
+                released,
+                "mvcc snapshot was not registered or already released: {snapshot:?}"
+            );
+            self.ownership = SnapshotOwnership::Unregistered { snapshot };
+        }
         self.read_your_writes = true;
         self
     }
@@ -251,8 +266,9 @@ impl<D: BlockDevice> FsMvccBlockDevice<D> {
 impl<D: BlockDevice> Drop for FsMvccBlockDevice<D> {
     fn drop(&mut self) {
         if let SnapshotOwnership::Inline { snapshot } = self.ownership {
+            let released = self.store.release_snapshot(snapshot);
             debug_assert!(
-                self.store.release_snapshot(snapshot),
+                released,
                 "mvcc snapshot was not registered or already released: {snapshot:?}"
             );
         }
@@ -403,9 +419,11 @@ impl<D: BlockDevice> BlockDevice for FsMvccBlockDevice<D> {
 
         let mut txn = self.store.begin();
         txn.stage_write(block, data.to_vec());
-        self.store
+        let commit_seq = self
+            .store
             .commit(txn)
             .map_err(|error| FfsError::Format(error.to_string()))?;
+        self.store.prune_after_commit_if_due(commit_seq);
         Ok(())
     }
 

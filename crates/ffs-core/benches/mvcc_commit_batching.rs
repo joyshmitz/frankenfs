@@ -30,6 +30,9 @@ const WRITE_SET_COLLECT_BLOCKS: [u64; 3] = [64, 256, 1024];
 const PARALLEL_THREADS: usize = 8;
 const PARALLEL_COMMITS_PER_THREAD: u64 = 256;
 const PARALLEL_BLOCK_BASE: u64 = 20_000;
+const HOT_BLOCK_COMMITS: u64 = 4_096;
+const HOT_BLOCK_COUNT: u64 = 8;
+const HOT_BLOCK_BASE: u64 = 2_048;
 
 fn block_data() -> Vec<u8> {
     vec![0xA5_u8; BLOCK_SIZE]
@@ -164,6 +167,19 @@ fn openfs_parallel_commits(fs: &OpenFs, data: &[u8]) -> u64 {
             .map(|handle| handle.join().expect("parallel commit thread joined"))
             .sum()
     })
+}
+
+fn openfs_hot_block_overwrite_commits(fs: &OpenFs, data: &[u8]) -> usize {
+    for offset in 0..HOT_BLOCK_COMMITS {
+        let mut txn = fs.begin_transaction();
+        txn.stage_write(
+            BlockNumber(HOT_BLOCK_BASE + offset % HOT_BLOCK_COUNT),
+            data.to_vec(),
+        );
+        fs.commit_transaction(txn)
+            .expect("hot-block overwrite MVCC commit");
+    }
+    fs.mvcc_version_count()
 }
 
 /// Current model: a fresh txn + commit for every block (per write request).
@@ -334,10 +350,40 @@ fn bench_openfs_parallel_commit(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_openfs_hot_block_prune(c: &mut Criterion) {
+    let seed = ext4_seed_image();
+    let data = block_data();
+
+    let mut group = c.benchmark_group("openfs_mvcc_hot_block_prune");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_secs(1));
+    group.measurement_time(Duration::from_secs(2));
+    group.throughput(Throughput::Elements(HOT_BLOCK_COMMITS));
+
+    group.bench_function("no_active_readers", |b| {
+        b.iter_batched(
+            || open_mvcc_bench_fs(seed.clone(), false),
+            |fs| {
+                assert_eq!(fs.mvcc_active_snapshot_count(), 0);
+                let versions = openfs_hot_block_overwrite_commits(&fs, black_box(&data));
+                assert!(
+                    versions <= usize::try_from(HOT_BLOCK_COUNT).expect("hot block count fits"),
+                    "hot-block version chains should be pruned, got {versions}"
+                );
+                black_box((fs.current_snapshot(), versions));
+            },
+            BatchSize::LargeInput,
+        );
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     mvcc_commit_batching,
     bench_commit_batching,
     bench_writeset_collect,
-    bench_openfs_parallel_commit
+    bench_openfs_parallel_commit,
+    bench_openfs_hot_block_prune
 );
 criterion_main!(mvcc_commit_batching);
