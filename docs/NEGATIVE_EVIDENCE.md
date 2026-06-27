@@ -1994,3 +1994,14 @@ So frankenfs's btrfs walk over-enumerates the converted files ~2x. LIKELY CAUSE:
 IMPACT on the d9e66fc6 btrfs walk win (~4x): CONFOUNDED — the time comparison was frankenfs(32002 entries, 10ms) vs kernel(16002, 42ms), NOT equal sets. The WIN DIRECTION still holds and is likely LARGER per-entry (frankenfs did ~2x the enumeration work and was still ~4x faster -> ~8x per-entry), but the headline "~4x" must be RESTATED on equal enumeration (re-measure after the double-count is fixed, or scope both to the same DIR_INDEX set). I am DOWNGRADING d9e66fc6's "~4x" to "win-direction-confirmed, ratio pending equal-count re-measure".
 
 LESSON (re-confirmed, important): a perf "win" must enumerate the SAME set as the baseline — always cross-check COUNTS, not just times. The count check caught both a correctness bug AND a confounded headline ratio. (Same validation discipline that caught the overlay/contention/serial-gap issues earlier this session.)
+
+### 2026-06-26 ROOT CAUSE of btrfs walk 2x over-count (cdaf7711): dir_items collects BOTH DIR_ITEM + DIR_INDEX (lib.rs:8788) (CrimsonFox cc/opus)
+
+Root-caused the btrfs walk over-enumeration (cdaf7711) to one site:
+- ffs-core lib.rs:8788-8792: `BTRFS_ITEM_DIR_ITEM | BTRFS_ITEM_DIR_INDEX => dir_items.entry(item.key.objectid).or_default().push((item.key, item.data))` — the bulk fs-tree load pushes BOTH key types into the per-directory `dir_items` map.
+- In btrfs EVERY directory entry exists as TWO items: a DIR_ITEM (key type 84, keyed by name-hash, used for name LOOKUP) and a DIR_INDEX (key type 96, keyed by sequence, used for READDIR ordering) — both carry the same name + location. So `dir_items[dir]` holds 2 rows per file.
+- The walk enumerates all of `dir_items` -> counts each file TWICE. The kernel's readdir enumerates only DIR_INDEX (1x). Hence the measured 32002 (frankenfs) vs 16002 (kernel).
+
+FIX (ffs-core btrfs walk/readdir consumer of `dir_items`, owners' btrfs-read lane): for directory LISTING/walk, enumerate only DIR_INDEX rows (type 96) — keep DIR_ITEM (type 84) available for name LOOKUP (lookup is unaffected: it finds the name under either key). Equivalently, dedup by name. One-filter fix at the dir_items consumer.
+
+SEVERITY should-check (NOT asserted): the owners should verify whether the FUSE readdir path shares this both-keys enumeration. If it does, FUSE readdir would return DUPLICATE dirents (user-visible: `ls` shows each file twice on a btrfs mount), escalating this from a benchmark-count artifact to a real correctness bug. The walk-command path is confirmed affected (the 2x measurement); the FUSE path is unverified here. CONFIRMS cdaf7711: d9e66fc6's "~4x" compared 2x-inflated frankenfs to 1x kernel -> win direction holds (~8x/entry) but re-measure on equal counts after the filter. Validation chain: count cross-check -> over-count bug -> this root cause (no perf measurement needed; contention-immune).
