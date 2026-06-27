@@ -1585,3 +1585,14 @@ Applying the discipline lesson, redid the read measurement CLEANLY: real-data fi
 frankenfs ~2.25 GB/s ≈ kernel dd ~2.2 GB/s = PARITY-to-slightly-faster (reliable ratio ~1.0-1.05x). This is a trustworthy this-box number (clean interleaved A/B), in contrast to this session's two retracted single-run claims (dc9ec858, 4527c940).
 
 It COMPLEMENTS, not contradicts, the campaign headline (read 1.66x vs dd, 5.3 vs 3.2 GB/s): that was a larger file (128MiB+) likely on an unloaded box; mine is 100MiB with both sides equally load-depressed (~2.2 vs the headline's ~3.2 absolute), so the load cancels in the RATIO — and the ratio here is parity-to-slightly-faster, not 1.66x. The read win is therefore file-size/load-dependent: reliably competitive (>= parity) everywhere measured, reaching 1.66x only on the larger-file/unloaded setup. NET: no gap (read is >= kernel parity), no new lever; a reliable, disciplined data point that tempers the headline's magnitude while confirming the read is never a loss. The non-conflicting lever surface remains exhausted; this is the disciplined-verification value in action.
+
+### 2026-06-26 METHODOLOGICAL CAUTION: python os.stat baselines inflate the kernel ~3x; walk ratio inconclusive on flat-16k (CrimsonFox cc/opus)
+
+Clean warm interleaved walk A/B (flat 16k-entry dir, frankenfs walk vs kernel) exposed a measurement-methodology issue worth recording:
+- frankenfs walk: 17.9 ms (16002 entries) = RELIABLE ~1.1 us/entry (bulk inode parse).
+- kernel via python `os.scandir`+`os.stat`: 57 ms (3.2x slower than frankenfs).
+- kernel via C `find -type f`: ~10 ms (but /usr/bin/time 0.01s resolution is too coarse).
+
+The python and C baselines DISAGREE by ~5.7x (57 vs 10 ms) for IDENTICAL work — the python `os.stat` per-call interpreter overhead (~2.9 us x 16002 = ~47 ms) inflates the "kernel" number. CONCRETE CAUTION: any vs-kernel ratio measured against a PYTHON baseline (e.g. the campaign's "python read 400ms" comparisons) is inflated ~3x and makes frankenfs look better than a C baseline would. Prefer C baselines (dd, find, a compiled microbench) with precise (sub-ms) timing.
+
+WALK RATIO: inconclusive here. Against coarse C `find` (~10ms) frankenfs (17.9ms) looks ~1.7x SLOWER; against python (57ms) ~3.2x faster. Neither is reliable (find too coarse, python overhead-laden), AND this flat-16k fixture differs from the headline's 30k bigdir (where the bulk-parse-vs-30k-getattr-syscalls advantage was measured). So the headline walk 2.03x is neither confirmed nor refuted by this run. To reliably re-validate the walk (and read 1.66x) headlines, a PRECISE COMPILED C baseline (scandir+stat / pread loop, us-resolution) on the MATCHED fixture is required — the python/find baselines used opportunistically this session are insufficient. The reliable frankenfs-side number stands: walk ~1.1us/entry. This is a measurement-discipline contribution, not a perf claim.
