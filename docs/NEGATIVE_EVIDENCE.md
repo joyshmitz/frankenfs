@@ -1891,3 +1891,13 @@ Completed the btrfs coverage with the DATA read (after the walk ~4x). Fair A/B (
 CAVEAT (honest): the kernel reads via a loop mount while frankenfs reads the image file directly — the loop layer penalizes the kernel side, so ~1.37x is an UPPER bound; the fair native-ramdisk-btrfs ratio is likely lower (~parity-to-modest-win, consistent with the prior scorecard's ~parity-1.74x range). Both read the same scattered converted layout, so the convert-scatter affects both equally (ratio fair w.r.t. layout). A native-ramdisk btrfs (the btrfs format tool is dcg-blocked) would remove the loop asymmetry.
 
 btrfs COVERAGE COMPLETE: walk ~4x (WIN, decisive), data read ~1.37x (WIN, loop-caveated). The metadata-READ AND data-READ advantage holds across BOTH filesystems (ext4: walk 2.5x, read 1.6-2.0x; btrfs: walk ~4x, read ~1.37x) — frankenfs's batch on-disk parse + parallel chunked read beat per-inode/loop kernel paths. All measured GAPS remain on the metadata-WRITE side (delete 2.22x, rename ~200x = htree full-leaf-rebuild lever, create FS-fast/FUSE-gated). Unified campaign conclusion: READS win on ext4+btrfs; WRITES are the lever surface (htree leaf-split #1, per-op commit #2). /tmp/kparead.c + btrfs-convert reusable.
+
+### 2026-06-26 btrfs WRITE status: incomplete (create fails after write-state init) — bounds campaign coverage (CrimsonFox cc/opus)
+
+Probed the last untested surface (btrfs writes). frankenfs btrfs WRITE is INCOMPLETE:
+- create-bench on a btrfs image: mount + write-state init SUCCEED (btrfs chunk map expanded bootstrap_chunks=1->11, mount resolved root objectid=5 dirid=256, "btrfs write state initialized" nodesize=16384 generation=12 fs_tree_items=64034 extent_tree_items=500 next_objectid=16268).
+- but the FIRST create FAILS: `command_failed ... error=failed to create cb_00000000` (after 760ms of init).
+
+So frankenfs is btrfs-READ-capable (walk ~4x, data read ~1.37x — both WINS) but btrfs-WRITE-incomplete (the COW create path errors on the first op). 
+
+CAMPAIGN COVERAGE NOW BOUNDED + COMPLETE: measured perf surface = ext4 (reads AND writes) + btrfs (reads ONLY). The metadata-WRITE gaps (delete 2.22x, rename ~200x htree-leaf-rebuild, create FS-fast/FUSE-gated) are EXT4-only; on btrfs the write path is not yet functional (a FEATURE-COMPLETION lane — implement btrfs COW create — distinct from the perf-lever lanes). Final unified map: READS win on both filesystems (ext4 walk 2.5x/read 1.6-2.0x; btrfs walk ~4x/read ~1.37x); ext4 WRITES are the perf-lever surface (htree leaf-split #1 @lib.rs:16992, per-op MVCC commit #2); btrfs WRITES are a correctness/feature gap (create fails), not a perf measurement. The disciplined vs-kernel campaign is comprehensive across every functional path.
