@@ -1880,3 +1880,14 @@ Extended the campaign to the 2nd filesystem (btrfs). Clean warm walk A/B, compil
 This is BIGGER than the ext4 walk win (2.5x): the kernel's btrfs metadata access is heavier (per-inode btrfs B-tree descent) than ext4's contiguous inode table, while frankenfs's bulk btrfs-tree parse is efficient on both. So frankenfs WINS the metadata walk on BOTH filesystems — ext4 2.5x, btrfs ~4x.
 
 CAVEAT: kernel mounted via loop (btrfs-convert image; a native-ramdisk btrfs is setup-heavy/dcg-tricky); measured WARM so the loop's per-read overhead is page-cache-amortized -> the ~4x is the warm metadata ratio (the python-baseline first pass showed 4-5x vs inflated python os.stat; the C nftw baseline corrects to a still-decisive ~4x). Reusable: `cp lk.img x; btrfs-convert x` + /tmp/kwalk2.c (C nftw). Scorecard adds btrfs-walk = ~4x (WIN), confirming the metadata-READ advantage generalizes across filesystems (frankenfs's batch on-disk parse beats per-inode kernel syscalls; the gaps are all on the metadata-WRITE side — delete/rename/create).
+
+### 2026-06-26 MEASURED btrfs data read: frankenfs ~1.37x faster than kernel-btrfs (warm) — btrfs coverage complete (CrimsonFox cc/opus)
+
+Completed the btrfs coverage with the DATA read (after the walk ~4x). Fair A/B (both read the same btrfs-converted 128MiB-file image; C kparead baseline, 64 threads):
+- frankenfs btrfs read: 3913-4279 MiB/s (29.9-32.7ms / 128MiB).
+- kernel-btrfs parallel pread: ~3010 MiB/s.
+- frankenfs 1.30x / 1.42x / 1.37x FASTER (3 warm rounds).
+
+CAVEAT (honest): the kernel reads via a loop mount while frankenfs reads the image file directly — the loop layer penalizes the kernel side, so ~1.37x is an UPPER bound; the fair native-ramdisk-btrfs ratio is likely lower (~parity-to-modest-win, consistent with the prior scorecard's ~parity-1.74x range). Both read the same scattered converted layout, so the convert-scatter affects both equally (ratio fair w.r.t. layout). A native-ramdisk btrfs (the btrfs format tool is dcg-blocked) would remove the loop asymmetry.
+
+btrfs COVERAGE COMPLETE: walk ~4x (WIN, decisive), data read ~1.37x (WIN, loop-caveated). The metadata-READ AND data-READ advantage holds across BOTH filesystems (ext4: walk 2.5x, read 1.6-2.0x; btrfs: walk ~4x, read ~1.37x) — frankenfs's batch on-disk parse + parallel chunked read beat per-inode/loop kernel paths. All measured GAPS remain on the metadata-WRITE side (delete 2.22x, rename ~200x = htree full-leaf-rebuild lever, create FS-fast/FUSE-gated). Unified campaign conclusion: READS win on ext4+btrfs; WRITES are the lever surface (htree leaf-split #1, per-op commit #2). /tmp/kparead.c + btrfs-convert reusable.
