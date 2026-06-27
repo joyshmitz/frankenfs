@@ -1637,3 +1637,17 @@ TWO reliable findings: (1) frankenfs read is ~2.1x faster than the kernel here �
 NUANCE (important for interpreting ALL image-based vs-kernel ratios, incl. walk 2.5x / 13ff3116): these compare frankenfs-direct-image-parse vs kernel-loop-mounted-image. That is FAIR for the image-reading use case (reading/inspecting a disk image without a real block device — the kernel MUST loop-mount). But on a REAL multi-queue block device (NVMe), the kernel WOULD scale, so frankenfs's parallel advantage would SHRINK (the 2.1x is partly the loop's single-queue non-scaling, not pure frankenfs speed). LOAD-dependence also applies: frankenfs scales with free cores (5.1 unloaded; dropped to ~2.2 = parity when the box was loaded, 32666a5c).
 
 NET: the read win is real + reliable for the image use case (~2.1x, frankenfs scales where the loop-mounted kernel can't), but is loop-specific and load-dependent — not a blanket "2.1x faster than the kernel FS on any device." Disciplined like-for-like + honest scope. /tmp/kparead.c reusable.
+
+### 2026-06-26 FAIR non-loop read re-validation (ramdisk): read win is REAL (1.6-2.0x), corrects the loop hypothesis (CrimsonFox cc/opus)
+
+Put the image on /dev/ram0 (real block device, brd — NO loop) and re-ran the read A/B to test the f031d545 loop hypothesis:
+
+| | throughput |
+|--|-----------|
+| frankenfs read | ~4.7 GiB/s (4.37-4.97) |
+| kernel-ramdisk dd (1t) | ~3.0 GB/s (2.6-3.3) |
+| kernel-ramdisk parallel-64 C | ~2.3 GiB/s (2.22-2.32) |
+
+CORRECTION of f031d545: the kernel's read does NOT scale with threads EVEN on a real block device (parallel-64 2.3 ≈ single-thread dd 3.0). So the non-scaling is NOT the loop device's single request queue (my prior hypothesis — WRONG); it is memory-bandwidth-bound memcpy (64 threads copying a single warm file's cache pages saturate ~3 GiB/s single-socket). RETRACT the f031d545 "loop-specific, shrinks on a real device" caveat — the win PERSISTS on a real block device.
+
+CONFIRMED: the read win is REAL, not loop-confounded — frankenfs (4.7 GiB/s) beats the kernel 1.6x (vs dd-1t 3.0) to 2.0x (vs parallel-64 2.3) on a real ramdisk block device. frankenfs scales (parallel chunked, hits 4.7 > the kernel's memcpy-bound 3.0) where the kernel's single-file read cannot. REMAINING CAVEAT: frankenfs `read --discard` vs dd materialize — if --discard skips the final user-buffer copy it is partly idealization; treat the conservative ~1.6x (vs dd-1t materialize) as the fair figure. NET: read win confirmed real + non-loop (1.6-2.0x); kernel single-file read is memcpy-bandwidth-bound (doesn't scale); my loop hypothesis corrected via the ramdisk test. The disciplined process (hypothesis -> ramdisk test -> correction) upgraded f031d545's "loop-specific" to "real, non-loop".
