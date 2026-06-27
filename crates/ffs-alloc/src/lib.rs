@@ -23,6 +23,7 @@ use ffs_block::BlockDevice;
 use ffs_error::{FfsError, Result};
 use ffs_ondisk::{Ext4GroupDesc, Ext4Superblock};
 use ffs_types::{BlockNumber, GroupNumber, InodeNumber};
+use std::sync::{Arc, OnceLock};
 
 // ── Bitmap operations ───────────────────────────────────────────────────────
 
@@ -653,6 +654,16 @@ pub struct GroupStats {
     pub block_bitmap_csum: u32,
     /// CRC32C of the inode bitmap (updated on inode allocation/free when metadata_csum enabled).
     pub inode_bitmap_csum: u32,
+    /// Memoized sorted reserved-block offsets for this group (bd-resv-cache).
+    /// `reserved_blocks_in_group` rebuilt + re-sorted this set (~thousands of
+    /// flex_bg metadata offsets → an O(N log N) quicksort that was ~42% of
+    /// mkdir/block-allocation CPU) on EVERY block allocation, yet it is a pure
+    /// function of the fixed mkfs metadata layout and invariant for the FS
+    /// lifetime. Compute once per group, reuse thereafter. `OnceLock` is
+    /// `Sync`+`Clone`+`Debug` (so `GroupStats` stays `Clone`/`Debug`) and fills
+    /// through `&self`, so the immutable-`&[GroupStats]` callers can populate it.
+    #[doc(hidden)]
+    pub reserved_cache: OnceLock<Arc<[u32]>>,
 }
 
 impl GroupStats {
@@ -671,6 +682,7 @@ impl GroupStats {
             inode_bitmap_block: BlockNumber(gd.inode_bitmap),
             inode_table_block: BlockNumber(gd.inode_table),
             flags: gd.flags,
+            reserved_cache: OnceLock::new(),
         }
     }
 
@@ -1424,6 +1436,13 @@ pub fn reserved_blocks_in_group(
         return Vec::new();
     }
 
+    // Memoized: the reserved set is invariant for the FS lifetime (fixed mkfs
+    // metadata layout), so reuse it instead of rebuilding + re-sorting on every
+    // allocation (bd-resv-cache).
+    if let Some(cached) = groups[gidx].reserved_cache.get() {
+        return cached.to_vec();
+    }
+
     let gs = &groups[gidx];
     let group_start =
         u64::from(geo.first_data_block) + u64::from(group.0) * u64::from(geo.blocks_per_group);
@@ -1489,6 +1508,9 @@ pub fn reserved_blocks_in_group(
 
     reserved.sort_unstable();
     reserved.dedup();
+    // Populate the cache for subsequent allocations in this group. `set` may
+    // race under concurrent allocation; first writer wins, the rest reuse it.
+    let _ = groups[gidx].reserved_cache.set(Arc::from(reserved.as_slice()));
     reserved
 }
 
@@ -2924,6 +2946,7 @@ mod tests {
                     flags: 0,
                     block_bitmap_csum: 0,
                     inode_bitmap_csum: 0,
+                    reserved_cache: OnceLock::new(),
                 }
             })
             .collect()
@@ -2946,6 +2969,7 @@ mod tests {
                     flags: 0,
                     block_bitmap_csum: 0,
                     inode_bitmap_csum: 0,
+                    reserved_cache: OnceLock::new(),
                 }
             })
             .collect()
@@ -5066,6 +5090,7 @@ mod tests {
             flags: 0,
             block_bitmap_csum: 0,
             inode_bitmap_csum: 0,
+            reserved_cache: OnceLock::new(),
         };
         assert!(!gs.block_bitmap_uninit());
         assert!(!gs.inode_bitmap_uninit());
@@ -6067,7 +6092,7 @@ mod tests {
         );
 
         let expected = "\
-GroupStats { group: GroupNumber(1), free_blocks: 8192, block_largest_free_run: None, free_inodes: 2048, used_dirs: 0, block_bitmap_block: BlockNumber(8193), inode_bitmap_block: BlockNumber(8194), inode_table_block: BlockNumber(8195), flags: 0, block_bitmap_csum: 0, inode_bitmap_csum: 0 }
+GroupStats { group: GroupNumber(1), free_blocks: 8192, block_largest_free_run: None, free_inodes: 2048, used_dirs: 0, block_bitmap_block: BlockNumber(8193), inode_bitmap_block: BlockNumber(8194), inode_table_block: BlockNumber(8195), flags: 0, block_bitmap_csum: 0, inode_bitmap_csum: 0, reserved_cache: OnceLock::new() }
 AllocHint { goal_group: Some(GroupNumber(1)), goal_block: Some(BlockNumber(8323)), numa: None }
 BlockAlloc { start: BlockNumber(8323), count: 4 }
 InodeAlloc { ino: InodeNumber(17), group: GroupNumber(1) }
@@ -6430,6 +6455,7 @@ InodeAlloc { ino: InodeNumber(17), group: GroupNumber(1) }
                 flags,
                 block_bitmap_csum: 0,
                 inode_bitmap_csum: 0,
+                reserved_cache: OnceLock::new(),
             };
             prop_assert_eq!(gs.block_bitmap_uninit(), flags & GD_FLAG_BLOCK_UNINIT != 0);
             prop_assert_eq!(gs.inode_bitmap_uninit(), flags & GD_FLAG_INODE_UNINIT != 0);
@@ -6456,6 +6482,7 @@ InodeAlloc { ino: InodeNumber(17), group: GroupNumber(1) }
                     flags: 0,
                     block_bitmap_csum: 0,
                     inode_bitmap_csum: 0,
+                    reserved_cache: OnceLock::new(),
                     })
 
                 .collect();
@@ -6485,6 +6512,7 @@ InodeAlloc { ino: InodeNumber(17), group: GroupNumber(1) }
                     flags: 0,
                     block_bitmap_csum: 0,
                     inode_bitmap_csum: 0,
+                    reserved_cache: OnceLock::new(),
                     })
 
                 .collect();
