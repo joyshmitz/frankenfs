@@ -2218,3 +2218,21 @@ COLD SEQUENTIAL single-thread, `none` vs `sequential`, 8 reps:
 COLD RANDOM 4 KiB, `none` vs `sequential`, 3 reps (clean): none ~11.0 s vs seq ~11.0 s — **NEUTRAL** (within ~3% noise; ~55 us per cold random 4 KiB read = inherent seek+fault latency). Confirms with clean data what the load-188 run showed noisily: SEQUENTIAL is NEUTRAL (not harmful, not helpful) on random — the kernel self-limits read-ahead on non-sequential access, exactly as reasoned. The shipped default is safe on the random path; clean data, caveat fully closed.
 
 NET: the shipped lever (`ebb9dbfc`) is confirmed on a quiet box at 1.15x (min) / 1.27x (mean) cold sequential, ~1.08x kernel parity, neutral-safe on random, with a bonus variance/tail-latency reduction. No new change (the lever is already shipped); this upgrades its evidence from noise-limited to clean.
+
+### 2026-06-27 LEVER-EXHAUSTION MAP — ffs-block / ffs-alloc / ffs-types (read + alloc lanes), verified closed this session (CrimsonFox cc/opus)
+
+Consolidated so the swarm stops re-treading these. Every row was verified by measurement or code inspection THIS session; the decoupled read/alloc lanes (ffs-block, ffs-alloc, ffs-types — all `#![forbid(unsafe_code)]`) have NO clean shippable lever remaining. The one shipped win is the cold-read fadvise lever (`ebb9dbfc`).
+
+| Candidate lever | Verdict | Evidence |
+| --- | --- | --- |
+| Cold-read read-ahead hint | **SHIPPED** (`ebb9dbfc`) | `posix_fadvise(SEQUENTIAL)` at device open: 1.15-1.27x cold single-thread, ~1.08x kernel parity, +variance reduction; per-mount (no hot-path cost). |
+| Cold parallel read | win, no lever | scales + beats kernel `cat` ~2.3x; no over-parallelization collapse; flat 16-64t plateau. |
+| Cold-read chunk size | no clean lever | ~4 MiB marginal optimum (3% over 1 MiB), larger regresses, doesn't close 1.05x; parallel default already wins. |
+| 4 KiB `BlockBuf` malloc convoy (bd-bhh0i) | REFUTED | parallel alloc scales near-perfectly to 16t (conv_index ~1.0); glibc per-thread arenas; pool would be inert. |
+| 128 KiB read-chunk mmap_lock convoy | REFUTED | min-of-N conv_index ~1.0 at 4K/64K/128K/256K; no convoy; residual is the per-byte copy tax (needs zero-copy, unsafe-blocked). |
+| crc32c checksum (btrfs per-block verify) | RULED OUT | measured 5.7 GiB/s = HW SSE4.2 (`crc32c` 0.6.8); faster than the read + parallelizes; not a bottleneck. |
+| Read zero-fill elision | already done | ext4 + btrfs read paths fill only hole gaps (`covered_until` tracking), not a blanket memset. |
+| ffs-alloc bitmap free-bit scan | already optimal | word-at-a-time `chunks_exact(8)` + `(!word).trailing_zeros()` (TZCNT); A/B-tuned benches present. |
+| Allocator goal spreading (bd-bhh0i) | likely inert | Orlov dir-spread + NUMA goal resolution already present; and the disjoint-block store bench shows the 8.3x is intrinsic per-commit overhead, NOT shared-bitmap contention. |
+
+WHERE THE REAL GAPS LIVE (NOT my accessible lanes): (1) the residual parallel-read ~2x copy tax needs zero-copy (io_uring/mmap) — `#![forbid(unsafe_code)]`-blocked in ffs-block. (2) The biggest gap, bd-bhh0i ext4 parallel write 8.3x (17193 vs kernel 143117 ops/s @8t), is the per-op MVCC commit/publication coordination in the ffs-mvcc sharded store — peer IvoryBirch's active lane (their own shard-routing + publication-gate levers already rejected; the next lever is a lower-overhead commit-batching primitive there). My contribution this session: the cold-read win shipped + clean-confirmed, and this map of what is already optimal/blocked.
