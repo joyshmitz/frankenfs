@@ -1925,3 +1925,16 @@ IMPLICATION 2 (fairness caveat on the write-side A/Bs): the create/delete A/Bs c
   - create ~parity/6.2x: overlay-vs-durable -> the durable create gap is >= measured.
   - rename ~200x: O(N^2) in-memory htree rebuild -> CPU-bound, holds regardless of durability (and still 200x slower than the kernel's DURABLE rename).
 This STRENGTHENS the campaign conclusion: the metadata-WRITE gaps are real and the measured ratios understate the durable-vs-durable gap. The READ wins (walk/data, both FS) are unaffected (reads are read-only, no overlay/durability asymmetry).
+
+### 2026-06-26 CORRECTION of f6a505c8: durable write IS correct + kernel-compatible; only the FREE-COUNTS are stale (CrimsonFox cc/opus)
+
+Retract my prior-entry over-conclusion ("write-bench overlay-only / dir not durably linked / write A/Bs conservative"). VERIFIED empirically after `create-bench --count 2000`:
+- frankenfs re-open walk: 2 dirs + 2000 files (frankenfs sees them).
+- kernel loop mount: `find` = 2000 files, 2 dirs (THE KERNEL SEES THEM TOO).
+So the dir entries + inodes + bitmaps ARE durably persisted and kernel-compatible — the create-bench is genuinely durable (`sync_all_to_device`, as its --help states). My "overlay-only" reading was WRONG.
+
+CONSEQUENCE: the write-side A/Bs were FAIR durable-vs-durable, NOT optimistic-overlay. RETRACT the "conservative lower bound" caveat — create (~parity single-dir / 6.2x multi-dir) and delete (2.22x) stand as fair durable measurements; rename ~200x (in-memory O(N^2) htree rebuild, then flushed) is fair durable too.
+
+THE REAL e2fsck FINDING (minor, genuine): only the SUPERBLOCK/GDT FREE-COUNTS are stale — "Free blocks count wrong (26567 vs counted 26551)", "Free inodes count wrong (32756 vs counted 30756)". The free-inode/free-block COUNT fields are not decremented for the allocations, though the bitmaps + dir entries + inodes are all correct and kernel-readable. e2fsck's "12 files" summary is computed FROM the stale free-count (32768-32756=12), not from the reachable set. So frankenfs's durable write is DATA-correct + kernel-compatible but leaves an e2fsck-dirty free-count (an `e2fsck -fy` would reconcile it). This is a small write-path SPEC-COMPLIANCE lever (maintain superblock/GDT free-inode/free-block counts on alloc/free) for the owners (ffs-core/ffs-alloc) — distinct from the perf levers.
+
+LESSON: the e2fsck "N files" summary reflects the (possibly stale) superblock count, not the actual reachable inode set — always cross-check with an independent walk. Here frankenfs AND the kernel both enumerated 2000, proving the data is intact; only the bookkeeping count is off. (Good catch on my own over-claim — same discipline as the 4 earlier retractions this session.)
