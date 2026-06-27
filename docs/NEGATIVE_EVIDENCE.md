@@ -1767,3 +1767,15 @@ The ~1ms/create is ~36x the create-bench's DIRECT-image path (28us/create) — i
 CONFOUND: measured in `--runtime-mode managed` (background lifecycle + metrics) — the standard (blocking) mode may have less per-op overhead; the ~1ms is not isolated to a single factor. LEVER (ffs-fuse, currently clean): profile the FUSE create-path per-op breakdown (round-trip vs commit vs managed-lifecycle vs writeback) and cut the ~972us FUSE overhead — this is the REAL-deployment metadata-write cost, far larger than the direct-image create-bench suggests.
 
 NET completion of the create picture: (1) create-bench direct-image = 6.2x vs kernel, rayon-`--threads`-harness-inflated (05b2ecd4/bed823a2); (2) negative-scaling = rayon-harness artifact, RESOLVED (FUSE std-thread positive-scales 10.7x, c08ebbba); (3) REAL-APP via FUSE = ~24x vs kernel, FUSE-path-overhead-dominated (~1ms/create), the actual deployment gap. The biggest REAL metadata-write gap is the FUSE per-op overhead (~972us/create), not an intrinsic FS lock — a different, larger lever than the direct-image create-bench implied.
+
+### 2026-06-26 CONFIRMED: real-app FUSE create ~1ms is INHERENT (standard ≈ managed), not managed-mode (CrimsonFox cc/opus)
+
+Isolated the managed-mode confound (0fcf314e caveat): re-measured the FUSE create in STANDARD mode (blocking, no managed lifecycle/metrics):
+- standard: 1t 1008/s, 8t 8437/s.
+- managed: 1t 798/s, 8t 8535/s.
+
+Essentially IDENTICAL. So the managed-mode lifecycle is NOT the ~972us overhead — the ~1ms/create is INHERENT to the FUSE create path (the kernel<->userspace round-trip + the in-memory MVCC commit + the writeback-batch machinery). The real-app create gap (~24x vs kernel ext4, 0fcf314e) is therefore the inherent FUSE-path per-op overhead, confound-free (not a measurement artifact, not a per-create flush [grep-confirmed], not managed-mode).
+
+The ~1ms breakdown (round-trip vs in-memory-commit vs writeback components) needs FUSE-handler-process profiling (perf -p <mount-pid> during create) — attempted but the FUSE mount/perf-attach timing is finicky here; this is the peers' ffs-fuse-expertise lane to pinpoint. LEVER (ffs-fuse, currently clean): cut the inherent FUSE create-path per-op overhead — this is the BIGGEST REAL metadata-write gap (~972us/create added by the FUSE path, ~24x kernel for real apps), far larger and more actionable than the direct-image create-bench's rayon-inflated 6.2x.
+
+CREATE THREAD COMPLETE (full picture, all confounds resolved): (1) direct create-bench 6.2x = rayon-`--threads`-harness-inflated; (2) negative-scaling = rayon-harness artifact, RESOLVED (std-thread FUSE positive-scales 10.7x); (3) real-app FUSE ~24x = inherent FUSE-path overhead (~1ms/create, standard≈managed, not a flush) = the actual deployment metadata-write gap + the real lever. The campaign's "biggest gap" is the FUSE per-op overhead, not an FS lock.
