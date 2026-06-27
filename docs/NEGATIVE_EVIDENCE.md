@@ -1621,3 +1621,19 @@ Built /tmp/krpread.c (C pthreads parallel random-pread baseline: NT threads x ra
 - Ratio: frankenfs ~1.4x slower at warm steady-state (1.38-1.46x in the stable rounds).
 
 This UPDATES the campaign's historical parallel-random-read residual (memory: 88x pre-fix -> 3.3x post-new_unregistered-fix) to ~1.4x NOW — substantially narrowed (the landed FsMvccStore wiring + the RO-snapshot/read-path fixes brought it much closer to kernel). The residual ~1.4x is the per-random-read FS overhead (extent-map lookup + MVCC read_visible overlay-miss + ShardedCache shard lookup) vs the kernel's direct pread; the fix for the remainder is ffs-core/ffs-mvcc (the peers' lane). NOTABLE: frankenfs is markedly MORE STABLE than the kernel baseline (6.6M +/-3% vs kernel 5.5-10.6M) — predictable tail latency. NET: a reliable, modest, C-baselined gap (~1.4x), down from 3.3x; the parallel random read is now near kernel parity. /tmp/krpread.c + /tmp/kwalk.c are reusable us-resolution C baselines for disciplined re-validation.
+
+### 2026-06-26 RELIABLE read re-validation (fair parallel C baseline) + LOOP-DEVICE nuance (CrimsonFox cc/opus)
+
+Built /tmp/kparead.c (C pthreads parallel chunked read) to compare LIKE-for-LIKE (frankenfs parallel vs kernel parallel, not vs single-thread dd). Warm interleaved, 100MiB real-data, 3 rounds:
+
+| | throughput |
+|--|-----------|
+| frankenfs read (parallel) | ~5.1 GiB/s (4.91-5.26) |
+| kernel dd (1 thread) | ~2.4 GB/s |
+| kernel C parallel-64 read | ~2.4 GiB/s (2.33-2.47) |
+
+TWO reliable findings: (1) frankenfs read is ~2.1x faster than the kernel here — confirming the read win's DIRECTION (headline 1.66x). (2) The kernel's image read DOES NOT SCALE: 64-thread parallel C read (~2.4) ≈ single-thread dd (~2.4). The bottleneck is the LOOP DEVICE's single request queue (the kernel can only read a file-backed image via loop-mount, which serializes); frankenfs reads the raw image DIRECTLY (no block device) so it scales across cores (5.1).
+
+NUANCE (important for interpreting ALL image-based vs-kernel ratios, incl. walk 2.5x / 13ff3116): these compare frankenfs-direct-image-parse vs kernel-loop-mounted-image. That is FAIR for the image-reading use case (reading/inspecting a disk image without a real block device — the kernel MUST loop-mount). But on a REAL multi-queue block device (NVMe), the kernel WOULD scale, so frankenfs's parallel advantage would SHRINK (the 2.1x is partly the loop's single-queue non-scaling, not pure frankenfs speed). LOAD-dependence also applies: frankenfs scales with free cores (5.1 unloaded; dropped to ~2.2 = parity when the box was loaded, 32666a5c).
+
+NET: the read win is real + reliable for the image use case (~2.1x, frankenfs scales where the loop-mounted kernel can't), but is loop-specific and load-dependent — not a blanket "2.1x faster than the kernel FS on any device." Disciplined like-for-like + honest scope. /tmp/kparead.c reusable.
