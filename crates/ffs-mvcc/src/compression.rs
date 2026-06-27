@@ -20,7 +20,7 @@
 //! Use [`resolve_data_with`] to walk backward through a version chain and find
 //! the actual bytes for an `Identical` marker, decompressing if necessary.
 
-use ffs_block::{AlignedVec, BlockBuf, DEFAULT_BLOCK_ALIGNMENT};
+use ffs_block::{AlignedVec, BlockBuf};
 use serde::de::{EnumAccess, VariantAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::borrow::Cow;
@@ -48,10 +48,20 @@ pub enum VersionData {
 impl VersionData {
     #[must_use]
     pub fn full(bytes: Vec<u8>) -> Self {
-        Self::Full(Arc::new(AlignedVec::from_vec(
-            bytes,
-            DEFAULT_BLOCK_ALIGNMENT,
-        )))
+        // Store the bytes at their natural alignment, NOT forced to 4096. The
+        // realign path of `AlignedVec::from_vec` (taken whenever the input Vec
+        // is not already 4096-aligned, i.e. essentially every write) allocates
+        // ~8 KiB, zero-memsets ALL of it, then copies the 4 KiB in — and a
+        // flamegraph of the parallel-write commit shows that memset/calloc is
+        // ~29% of the per-op cost (bd-bhh0i, docs/NEGATIVE_EVIDENCE.md). The
+        // 4096 alignment only existed to let `Full` reads hand back a
+        // page-aligned `BlockBuf` zero-copy; reads still wrap the `Arc`
+        // zero-copy at the natural alignment (`from_shared_aligned`), and
+        // frankenfs serves version data through BUFFERED I/O (no O_DIRECT), so
+        // in-memory versions need no page alignment. (`Zstd`/`Brotli` reads
+        // already return unaligned `BlockBuf::new(decoded)`, so the read path
+        // already tolerates unaligned version data.)
+        Self::Full(Arc::new(AlignedVec::from_vec(bytes, 1)))
     }
 
     /// Returns `true` if this version is a dedup marker (no data stored).
