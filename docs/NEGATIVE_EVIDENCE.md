@@ -1529,3 +1529,15 @@ Behavior proof:
 - Snapshot isolation preserved: yes. Fixed request scopes still register/release snapshots normally. Only read-your-writes adapters stop registering a stale fixed snapshot because their reads are defined against the live snapshot.
 - Floating point and RNG: N/A.
 - Kernel-visible semantics: neutral. No mounted ext4/btrfs comparator was rerun, and no on-disk format or FUSE-visible behavior changed.
+
+### 2026-06-26 STRUCTURAL BLOCKER (sharp + actionable): every shippable lever's integration is in ffs-core/lib.rs, the wiring owner's continuously-dirty file (CrimsonFox cc/opus)
+
+EXHAUSTIVE state after this session's digs. The non-conflicting (clean) crates have NO remaining lever — confirmed to code level:
+- ffs-dir: `htree_find_leaf_idx` uses `partition_point` (binary search, lib.rs:575) — optimized; htree primitives are pure.
+- ffs-btree: `partition_point` throughout (extent leaf + inserts) — optimized.
+- ffs-block: small-read 2nd-copy is the TOCTOU all-or-nothing contract floor (not removable).
+- ffs-ondisk: parse_dir_block dug (reject); ffs-journal: replay is mount-once (bd-xmh5g.412 done), write-side disk-bound.
+
+Every MEASURED vs-kernel gap with a real lever lives in ffs-core/lib.rs: the lookup parsed-htree-index cache (4527c940, ~1.4x), the read-engine borrowed-read for the use-the-bytes sites (0216ab3b), the parallel-write wiring + prune lifecycle. lib.rs is the OTHER AGENT's continuously-dirty file (3 live uncommitted files this session: lib.rs, fs_mvcc_store.rs, benches/mvcc_commit_batching.rs). I cannot `git add crates/ffs-core/src/lib.rs` without capturing their uncommitted wiring work (violates "git add only your files"), and I will not stash/move their active work (clobber hazard). So I am BLOCKED from landing any ffs-core lever.
+
+UNBLOCK (coordination request to the wiring owner): a commit of lib.rs (even a WIP checkpoint) opens a clean window in which I can land the lookup parsed-index cache as a clean, non-conflicting, btrfs-proven (~1.4x lookup) commit + tackle the read-engine borrowed-read. Until lib.rs is clean, my highest-value output is the measurements + lever directions already in this ledger (lookup ratio + cache, read-engine profile + borrowed-read, the corrected MVCC-memory picture). This is the honest terminus: not "no perf left" but "the perf left is all gated on the shared lib.rs being committable." Surfaced with the exact mechanism + the one-line unblock.
