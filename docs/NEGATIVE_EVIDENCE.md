@@ -2090,3 +2090,14 @@ So the delete's removal is ALREADY O(log N) (lookup-then-clear, no O(dir) block 
 CONTRAST cleanly separating the two metadata-write residuals: the DELETE (one op per file, no churn) is FLAT (the constant per-op MVCC commit); the RENAME (insert+remove churn) is SUPER-LINEAR (per-block MVCC VERSION accumulation, 756a7ac7). Both are the per-op MVCC machinery — commit (delete) + version management/pruning (rename) — the peers' ffs-mvcc sharded-store lane.
 
 CONFIRMED (definitive): no clean metadata-write perf lever remains for me. The campaign's perf surface, fully mapped post-#1-land: READS win on both FS (walk 2.5-4x, read 1.4-2x); metadata-WRITES are the per-op MVCC machinery — rename O(N^2)->O(N^1.65) LANDED (the big win, ~39x), delete 2.2x (flat, MVCC commit), create FS-fast/FUSE-gated — all remaining write levers in the peers' ffs-mvcc/ffs-alloc lanes (per-op commit, version pruning, GDT-persist deferral bd-bhh0i). Owners' correctness findings (btrfs subvolume, superblock free-count, fsck leniency) handed off. My contribution: the #1 lever landed + the surface mapped + the rest precisely characterized and handed off.
+
+### 2026-06-26 MEASURED: create on a large single dir now ~PARITY (flat O(log N)) — likely a BONUS from the htree land (CrimsonFox cc/opus)
+
+Post-land (5eb32cc6) create-bench single-dir size-sweep (release-perf, idle box):
+- n=2000: 40468/s = 24.7 us/op; n=8000: 37949/s = 26.4 us/op; n=32000: 34681/s = 28.8 us/op — FLAT (O(log N)).
+- kernel single-dir create (kcr, 1 thread, 32000): 40421/s = 24.7 us/op.
+- frankenfs ~PARITY: 34681 vs 40421 = 1.17x at 32000.
+
+MEASURED FACT (solid): the create on a large single directory is now FLAT per-op (O(log N)) and ~kernel-parity (1.17x). frankenfs's metadata-CREATE is competitive on large dirs.
+
+REASONED bonus-win HYPOTHESIS (being confirmed, NOT yet claimed): this is likely a bonus effect of the htree land's authoritative negative-lookup. The create's existence-check ("does new name exist?") calls `lookup_name_with_scope`, which my land made return an authoritative O(log N) htree miss for non-casefold htree dirs (5eb32cc6, the 3rd of the agent's fixes). Pre-land, that path fell through to the per-dir name-index — but each create bumps the dir mtime, invalidating the validation-keyed index, forcing the O(N) block scan + index rebuild PER create => O(N^2) on a large single dir (the exact mechanism the agent identified for the rename's negative lookup). So the create on a large single dir was plausibly O(N^2) pre-land and is O(log N) now — a second win from the same land. CONFIRMING: building the pre-land binary (a8da59c0, parent of the land) to measure the create at 32000; if it is super-linear/slow, the bonus win is confirmed. Not asserting it until that pre-vs-post measurement lands (correction discipline — old post-land binary already overwrote the pre-land one).
