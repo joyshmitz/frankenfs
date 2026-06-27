@@ -2244,3 +2244,23 @@ Extended the lever search past the decoupled lanes into ffs-core (clean) and ffs
 - **ffs-mvcc commit path** (the bd-bhh0i bottleneck): now clean, but a clean micro-lever here is RULED OUT BY MY OWN EARLIER REFUTATIONS — the 8.3x is the LOCK/publication COORDINATION (a serialization), not allocatable work-removal (the `BlockBuf` convoy was refuted; the disjoint-block bench shows intrinsic per-commit overhead). A micro-alloc/clone elision in the commit path would be inert because the lock dominates; the only real lever is reducing the coordination itself (group/flush commit batching), which is a major commit-protocol redesign in peer IvoryBirch's active design space — not a parachute-in change.
 
 So no clean shippable lever for me past the decoupled lanes either. Paired this dig with an INDEPENDENT conformance validation of the INTEGRATED pushed main (HEAD `0de3020e`) — built+ran `cargo test -p ffs-harness --test conformance` in a throwaway worktree off `origin/main` (so peer WIP in the shared tree doesn't perturb it): **PASS (exit 0** on rch worker hz2, 315 s; the combined-HEAD validation no single peer's per-change run establishes). Net: the read/alloc lanes and the accessible parts of ffs-core/ffs-mvcc are exhausted for clean levers; the integrated tree is green.
+
+### 2026-06-27 ⭐MEASURED + LOCALIZED the bd-bhh0i bottleneck: sharded-MVCC disjoint commit NEGATIVELY scales — thundering-herd publication gate (CrimsonFox cc/opus)
+
+Built a 1->32 writer scaling probe (new `crates/ffs-mvcc/examples/commit_scale.rs`, mirrors the `sharded_mvcc_disjoint` bench's commit loop: each writer commits one-block txns into its OWN block range; reports commits/s + per-writer efficiency vs the 1-writer serial baseline — relative, so robust to box load). This is the first low-thread-count scaling curve for the parallel-write gap (the existing bench only sweeps 8/16/32).
+
+MEASURED (2 runs, calm box load ~21; disjoint writers — which SHOULD scale, per-shard locks):
+| writers | total commits/s | per-writer eff |
+| --- | --- | --- |
+| 1 | ~646 K | 1.00 |
+| 2 | ~726 K | 0.56 |
+| 4 | ~557 K | 0.21 |
+| 8 | ~456 K | 0.09 |
+| 16 | ~162 K | 0.015 |
+| 32 | ~169 K | 0.01 |
+
+The commit path **NEGATIVELY scales**: total throughput PEAKS at ~2 writers then COLLAPSES — at 32 writers it is **~3.5x SLOWER than a single writer** (169 K vs 646 K commits/s), and per-writer efficiency falls to ~1%. This is the mechanism behind bd-bhh0i (ext4 parallel write 8.3x vs kernel): the kernel scales ~linearly; frankenfs's commit goes BACKWARDS under disjoint parallelism.
+
+ROOT CAUSE (localized by reading the path): `ShardedMvccStore::commit` does its version installs under PER-SHARD locks (correctly parallel for disjoint blocks — NOT the problem), then drops them and calls `publication_gate.publish(seq)` for ordered visibility. `publish` (sharded.rs:71) is an in-order BLOCKING gate: take the global `wait_lock: Mutex<PublicationState>`, insert seq into a `ready_commits` BTreeSet, then loop — advance the consecutive-prefix `completed` watermark and **`self.ready.notify_all()`** on every advance, else block on the condvar. With N disjoint committers finishing out of order, each prefix advance wakes ALL N blocked waiters; all but one re-check (not their turn) and re-sleep => O(N^2) wakeups + wait_lock re-contention = a classic THUNDERING HERD, which is exactly the negative scaling measured. The in-source comment ("the gate only preserves monotonic snapshot visibility WITHOUT burning CPU when commits finish out of order") is REFUTED by this measurement — it burns CPU catastrophically.
+
+LEVER (precise, for the owner — ffs-mvcc is peer IvoryBirch's active bd-bhh0i lane; this is a correctness-critical MVCC-visibility change, NOT a parachute-in from me): eliminate the thundering herd — wake ONLY the next-in-line waiter(s) whose seq just became <= the advanced `completed` (per-seq parker registry / targeted notify), OR make `commit()` non-blocking (register seq + advance cooperatively, return without waiting on its own publication) if read-your-writes visibility is served by a different watermark. This explains why the peer's prior levers (high-bit shard routing, CAS publication gate) did not land — they did not target the notify_all herd. Handing off the diagnosis + the reusable `commit_scale` probe (`cargo run --release --example commit_scale -- [ops_per_writer]`) so the fix can be A/B'd directly (predicate: per-writer eff stays > ~0.5 to 8t instead of collapsing to 0.09).
