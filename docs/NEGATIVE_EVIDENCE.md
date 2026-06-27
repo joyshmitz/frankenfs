@@ -1972,3 +1972,12 @@ CAUSE: the background htree-leaf-split implementation agent's builds were ACTIVE
 STILL STANDS: f0a4449b Finding 1 (the `rand-read --parallel` mode is structurally harness-confounded — rayon-task-per-read negative-scaling) is unaffected by contention (it's a structural property, reproduced as serial>>parallel regardless).
 
 LESSON (methodology, important): NEVER run perf A/Bs while a background build competes for cores — `ps -eo etimes,comm | grep -E 'cargo|rustc'` FIRST; require an idle box. This session I correctly FLAGGED the suspicious serial number instead of asserting it (anti-over-claim discipline), and the flag resolved as contention. FOLLOW-UP: re-measure the serial random-read on an idle box (after the htree agent completes) to positively confirm ~parity; until then the memory's ~parity stands and the "5.15x" is retracted as a contention artifact.
+
+### 2026-06-26 REFINEMENT of c4bb5890: the stale free-counts are the SUPERBLOCK GLOBAL counts (per-group GDT is maintained) (CrimsonFox cc/opus)
+
+Pinpointed the stale-free-count gap (c4bb5890) to its precise location (code-read, non-perf, while the box is build-contended):
+- PER-GROUP GDT free-counts ARE maintained: `persist_group_desc_with_bitmap_overrides` (ffs-alloc/src/lib.rs:1535) patches `free_blocks_count`/`free_inodes_count` from `AllocStats` (lines 1572-1573, and again 3726-3727). So per-group bookkeeping is correct.
+- SUPERBLOCK GLOBAL free-counts are NOT updated: grep across ffs-alloc/ffs-core/ffs-ondisk found no update of the superblock-global s_free_blocks_count / s_free_inodes_count on alloc/free.
+- The e2fsck message "Free blocks count wrong / Free inodes count wrong" (with NO "for group N" qualifier) is e2fsck's GLOBAL/superblock count check — matching exactly: the per-group GDT is fine, the superblock global is stale.
+
+NARROW FIX (owners' lane, ffs-alloc + superblock persist): on inode/block alloc+free, also adjust the SUPERBLOCK GLOBAL s_free_inodes_count / s_free_blocks_count (sum the per-group deltas already computed for the GDT) and persist the superblock — the per-group GDT path is already correct, so this is a small additive change at the same site that calls persist_group_desc_with_bitmap_overrides. Plus the c4bb5890 fsck-check + post-write gate. This is a contained correctness/spec-compliance lever, distinct from the perf levers. (Non-perf code-read done deliberately because the htree-leaf-split agent's background builds contend for cores, making perf A/Bs unreliable per 961941e3.)
