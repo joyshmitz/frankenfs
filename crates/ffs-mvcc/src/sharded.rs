@@ -700,19 +700,24 @@ impl ShardedMvccStore {
             .and_then(|versions| crate::resolve_version_bytes_at_or_before(versions, snapshot.high))
     }
 
-    /// Read the visible version of `block` as an owned [`ffs_block::BlockBuf`]
-    /// (bd-cc-shardread). Mirrors [`Self::read_visible`] but returns the FS's
-    /// block-buffer type, completing the read interface the OpenFs store needs.
+    /// Read the visible version of `block` as a [`ffs_block::BlockBuf`]
+    /// (bd-cc-shardread). Mirrors [`Self::read_visible`] but shares
+    /// uncompressed `VersionData::Full` storage instead of cloning through an
+    /// owned `Vec`, completing the read interface the OpenFs store needs.
     /// Byte-identical to `read_visible` wrapped in a `BlockBuf` (verified by
-    /// `sharded_read_visible_block_buf_matches_read_visible`).
+    /// `sharded_read_visible_block_buf_shares_full_version_storage`).
     #[must_use]
     pub fn read_visible_block_buf(
         &self,
         block: BlockNumber,
         snapshot: Snapshot,
     ) -> Option<ffs_block::BlockBuf> {
-        self.read_visible(block, snapshot)
-            .map(ffs_block::BlockBuf::new)
+        let shard_idx = self.shard_index(block);
+        let shard = self.shards[shard_idx].read();
+        shard.versions.get(&block).and_then(|versions| {
+            let idx = crate::newest_visible_index(versions, snapshot.high)?;
+            compression::resolve_block_buf_with(versions, idx, |version| &version.data)
+        })
     }
 
     /// Resolve the visible PHYSICAL block for a logical block (bd-cc-shardread).
@@ -1326,6 +1331,35 @@ mod tests {
         let snap = store.current_snapshot();
         let data = store.read_visible(BlockNumber(1), snap).expect("visible");
         assert_eq!(data, vec![0xAA; 8]);
+    }
+
+    #[test]
+    fn sharded_read_visible_block_buf_shares_full_version_storage() {
+        let store = make_store(8);
+        let block = BlockNumber(17);
+        let bytes = vec![0xBC; 4096];
+        let mut txn = store.begin();
+        txn.stage_write(block, bytes.clone());
+        store.commit(txn).expect("commit");
+
+        let stored = {
+            let shard = store.shards[store.shard_index(block)].read();
+            let versions = shard.versions.get(&block).expect("version chain");
+            let compression::VersionData::Full(shared) = &versions[0].data else {
+                panic!("uncompressed staged write should remain full");
+            };
+            ffs_block::BlockBuf::from_shared_aligned(Arc::clone(shared))
+        };
+
+        let snap = store.current_snapshot();
+        let read = store
+            .read_visible_block_buf(block, snap)
+            .expect("visible block buf");
+        assert_eq!(read.as_slice(), bytes.as_slice());
+        assert!(
+            read.shares_storage_with(&stored),
+            "sharded read_visible_block_buf should share uncompressed VersionData::Full storage"
+        );
     }
 
     #[test]

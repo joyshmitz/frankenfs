@@ -8,11 +8,9 @@
 //! 512-deep chain, read at an old snapshot). This is the COMMON case: a large
 //! sequential read touches thousands of distinct blocks once each, at HEAD. It
 //! exercises the integrated per-block read cost — the version-store lookup
-//! (`newest_visible_index`) PLUS `into_owned()` on the resolved `Cow` (the
-//! uncompressed clone that the Arc-backed-read lever bd-xmh5g.394 targets) — so
-//! the batch run can quantify realistic read throughput vs the reference, the
-//! top-line "beat the original on realistic workloads" metric, and see the
-//! aggregate weight of the clone the lever would remove.
+//! (`newest_visible_index`) PLUS owned materialization of the resolved bytes.
+//! The paired `read_visible_block_buf` arm covers the production block-device
+//! read surface used by the sharded OpenFs store.
 
 use asupersync::Cx;
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
@@ -94,7 +92,13 @@ impl BlockDevice for SharedReadDevice {
 fn bench_sequential_scan(c: &mut Criterion) {
     let (store, latest) = build_store();
     let snap = Snapshot { high: latest };
-    assert!(store.read_visible(BlockNumber(0), snap).is_some());
+    let first = store
+        .read_visible(BlockNumber(0), snap)
+        .expect("first block");
+    let first_buf = store
+        .read_visible_block_buf(BlockNumber(0), snap)
+        .expect("first block buf");
+    assert_eq!(first_buf.as_slice(), first.as_slice());
     assert!(store.read_visible(BlockNumber(BLOCKS - 1), snap).is_some());
 
     let mut group = c.benchmark_group("mvcc_read_visible_sequential");
@@ -103,10 +107,17 @@ fn bench_sequential_scan(c: &mut Criterion) {
         b.iter(|| {
             for blk in 0..BLOCKS {
                 // The sharded read_visible resolves the visible version AND
-                // materializes it into an owned Vec — the per-block lookup +
-                // block-sized copy that the Arc-backed-read lever bd-xmh5g.394
-                // would replace with a shared Arc on the uncompressed path.
+                // materializes it into an owned Vec: the per-block lookup plus
+                // block-sized copy that dominates overlay reads under churn.
                 let data = store.read_visible(black_box(BlockNumber(blk)), snap);
+                black_box(data);
+            }
+        });
+    });
+    group.bench_function("scan_2000_blocks_block_buf", |b| {
+        b.iter(|| {
+            for blk in 0..BLOCKS {
+                let data = store.read_visible_block_buf(black_box(BlockNumber(blk)), snap);
                 black_box(data);
             }
         });
