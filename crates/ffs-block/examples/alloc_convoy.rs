@@ -17,18 +17,26 @@
 use ffs_block::BlockBuf;
 use std::time::Instant;
 
-fn run(threads: usize, per: usize) -> f64 {
+fn run(threads: usize, per: usize, sz: usize) -> f64 {
     let start = Instant::now();
     let handles: Vec<_> = (0..threads)
         .map(|_| {
             std::thread::spawn(move || {
                 let mut acc: u64 = 0;
+                let mask = sz - 1;
                 for i in 0..per {
-                    let mut b = BlockBuf::zeroed(4096);
-                    // Touch a byte so the alloc+zero can't be optimized away.
+                    let mut b = BlockBuf::zeroed(sz);
                     let s = b.make_mut();
-                    s[i & 4095] = (i as u8).wrapping_add(1);
-                    acc = acc.wrapping_add(u64::from(s[i & 4095]));
+                    // Touch one byte per 4 KiB page so a freshly-mmap'd buffer
+                    // faults every page (the read path's first-touch cost), not
+                    // just the alloc — exposes mmap_lock/page-table convoy.
+                    let mut p = 0;
+                    while p < sz {
+                        s[p] = (i as u8).wrapping_add(1);
+                        acc = acc.wrapping_add(u64::from(s[p]));
+                        p += 4096;
+                    }
+                    std::hint::black_box(&mask);
                     std::hint::black_box(&b);
                 }
                 acc
@@ -47,23 +55,32 @@ fn run(threads: usize, per: usize) -> f64 {
 
 fn main() {
     let mut args = std::env::args().skip(1);
-    let per: usize = args.next().and_then(|s| s.parse().ok()).unwrap_or(2_000_000);
-    let thread_set: Vec<usize> = {
+    // bytes of total alloc work per thread (scaled into iterations per size).
+    let work: usize = args
+        .next()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(4_000_000_000);
+    let sizes: Vec<usize> = {
         let rest: Vec<usize> = args.filter_map(|s| s.parse().ok()).collect();
-        if rest.is_empty() { vec![1, 2, 4, 8, 16] } else { rest }
+        if rest.is_empty() {
+            // 4K (control, arena), 64K (arena), 128K (== glibc mmap threshold),
+            // 256K (clearly mmap'd). The read path chunks at 128K (32 blocks).
+            vec![4096, 65536, 131072, 262144]
+        } else {
+            rest
+        }
     };
-    // Warm up allocator arenas.
-    let _ = run(1, per / 20);
-    let base = run(1, per);
-    println!("threads=1  ns/alloc(per-thread)={base:.1}  (baseline)");
-    for &t in thread_set.iter().filter(|&&t| t != 1) {
-        let ns = run(t, per);
-        // Aggregate ns/alloc already normalizes by total allocs; if there is NO
-        // convoy it stays ~flat vs the 1-thread baseline (each thread on its own
-        // core/arena). A convoy makes it climb toward t*baseline.
+    println!("# parallel scaling of alloc+per-page-touch by buffer size (1/T decay = perfect; flat ~1.0 = convoy)");
+    for &sz in &sizes {
+        let per = (work / sz).max(1000);
+        let _ = run(1, per / 20, sz); // warm arenas for this size
+        let base = run(1, per, sz);
+        let ns8 = run(8, per, sz);
+        let s8 = ns8 / base; // ideal perfect = 0.125
         println!(
-            "threads={t:<2} ns/alloc(per-thread)={ns:.1}  scaling={:.2}x vs 1t (1.0=perfect, ->{t} = full convoy)",
-            ns / base
+            "size={:>7}B  per_thread={per:>8}  1t={base:7.1}ns  8t={ns8:7.1}ns  scaling_8t={s8:.3} (ideal 0.125; convoy ->1.0)  conv_index={:.2}x",
+            sz,
+            s8 * 8.0 // 1.0 = perfect parallel; ->8 = full serialization
         );
     }
 }
