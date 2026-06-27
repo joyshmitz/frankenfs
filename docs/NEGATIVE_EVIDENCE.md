@@ -1571,3 +1571,17 @@ Applied the discipline lesson to a read re-baseline and to the campaign state:
 CAMPAIGN STATE (verified this session): the non-conflicting clean crates are optimized to code level — ffs-dir htree_find_leaf_idx + ffs-btree are partition_point (binary), ffs-ondisk lookup_in_dir_block is alloc-free (walk_dir_block_entries), ffs-block small-read is the TOCTOU contract floor, ffs-journal is mount-once/disk-bound. My two solo "gaps" this session (dc9ec858 memory, 4527c940 lookup) were single-run noise, both retracted under clean re-measurement. Every real remaining lever (parallel-write wiring, prune lifecycle, read-engine borrowed-read) integrates in ffs-core/lib.rs — the wiring owner's continuously-evolving file — and they implement my SOUND findings there (fe5945b5 acted on the version-chain accumulation).
 
 RELIABLE VALUE GOING FORWARD: disciplined verification of peer landings (clean interleaved multi-round like-for-like A/B), as done for fe5945b5. No new peer perf landing exists since fe5945b5 (verified). RECOMMENDATION to the operator: re-engage this lane when (a) a peer lands a perf change to verify, or (b) lib.rs is committed/clean long enough to land a handed-off lever (the read-engine borrowed-read profiled at 0216ab3b is the strongest candidate). Solo gap-hunting in the verified-optimized clean crates now yields noise, not levers.
+
+### 2026-06-26 DISCIPLINED read A/B (reliable): frankenfs read ≈ kernel dd parity on this box (CrimsonFox cc/opus)
+
+Applying the discipline lesson, redid the read measurement CLEANLY: real-data file (100MiB urandom, not zeros), warm both sides first, interleaved, 3 rounds, 64-core box, like-for-like (frankenfs `read --discard` = read+discard vs kernel `dd of=/dev/null` = read+discard):
+
+| round | frankenfs | kernel dd |
+|-------|-----------|-----------|
+| 1 | 1.88 GiB/s | 2.1 GB/s |
+| 2 | 2.37 GiB/s | 2.2 GB/s |
+| 3 | 2.17 GiB/s | 2.2 GB/s |
+
+frankenfs ~2.25 GB/s ≈ kernel dd ~2.2 GB/s = PARITY-to-slightly-faster (reliable ratio ~1.0-1.05x). This is a trustworthy this-box number (clean interleaved A/B), in contrast to this session's two retracted single-run claims (dc9ec858, 4527c940).
+
+It COMPLEMENTS, not contradicts, the campaign headline (read 1.66x vs dd, 5.3 vs 3.2 GB/s): that was a larger file (128MiB+) likely on an unloaded box; mine is 100MiB with both sides equally load-depressed (~2.2 vs the headline's ~3.2 absolute), so the load cancels in the RATIO — and the ratio here is parity-to-slightly-faster, not 1.66x. The read win is therefore file-size/load-dependent: reliably competitive (>= parity) everywhere measured, reaching 1.66x only on the larger-file/unloaded setup. NET: no gap (read is >= kernel parity), no new lever; a reliable, disciplined data point that tempers the headline's magnitude while confirming the read is never a loss. The non-conflicting lever surface remains exhausted; this is the disciplined-verification value in action.
