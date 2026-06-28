@@ -37,7 +37,15 @@ impl FsMvccStore {
     }
 
     pub(super) fn sharded() -> Self {
-        Self::Sharded(ShardedMvccStore::new(8))
+        // Size shards to the host (available_parallelism, bounded) rather than a
+        // fixed 8: at 16/32 disjoint parallel writers the 8-shard cap adds
+        // shard-lock contention that host-sized sharding avoids (measured
+        // sharded_mvcc_disjoint: 16w 3.74->3.21 ms = 1.17x, 32w 10.53->8.15 ms
+        // = 1.29x; 8w neutral). Correctness-identical (more shards, same
+        // semantics) and the documented preferred high-core constructor. The
+        // residual parallel-write gap (bd-bhh0i) is the global active_snapshots
+        // lock, not shard count (docs/NEGATIVE_EVIDENCE.md).
+        Self::Sharded(ShardedMvccStore::for_host_parallelism())
     }
 
     pub(super) const fn is_sharded(&self) -> bool {
