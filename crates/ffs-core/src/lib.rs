@@ -17542,8 +17542,28 @@ impl OpenFs {
             generation,
         ) {
             Ok(s) => s,
-            // Any decline (multi-level, full dx_root, no clean boundary,
-            // unparseable) → fall back to the proven full rebuild.
+            Err(ffs_ondisk::HtreeSplitFallback::MultiLevelIndex) => {
+                return self.ext4_split_htree_dx_node_leaf_and_add(
+                    cx,
+                    dev,
+                    alloc,
+                    parent,
+                    parent_inode,
+                    extents,
+                    target_logical,
+                    target_phys,
+                    target_leaf,
+                    &dx_root_block,
+                    name,
+                    child_ino_u32,
+                    file_type,
+                    csum_seed,
+                    tstamp_secs,
+                    tstamp_nanos,
+                );
+            }
+            // Any remaining decline (full dx_root, no clean boundary,
+            // unparseable) falls back to the proven full rebuild.
             Err(_) => return Ok(None),
         };
 
@@ -17624,6 +17644,241 @@ impl OpenFs {
                 ..AllocHint::default()
             },
             "ext4_htree_leaf_split_tree",
+            Some(parent),
+        );
+        let parent_extent_ns = extent_cache_namespace(&parent_upd);
+        let dir_meta_before =
+            Self::ext4_count_extent_tree_meta_blocks_via_dev(cx, dev, &root_bytes)?;
+        {
+            let mut tree_alloc = ffs_extent::GroupBlockAllocator {
+                cx,
+                dev,
+                geo: &alloc.geo,
+                groups: &mut alloc.groups,
+                hint: tree_hint,
+                pctx: &alloc.persist_ctx,
+                ino: parent_ino_u32,
+                generation,
+            };
+            ffs_btree::insert(cx, dev, &mut root_bytes, extent, &mut tree_alloc)?;
+        }
+        let dir_meta_after =
+            Self::ext4_count_extent_tree_meta_blocks_via_dev(cx, dev, &root_bytes)?;
+        self.invalidate_ext4_write_extent_snapshot(&parent_upd);
+        Self::set_extent_root(&mut parent_upd, &root_bytes);
+        self.extent_cache.invalidate_range(
+            parent_extent_ns,
+            new_leaf_logical,
+            u64::from(u32::MAX - new_leaf_logical),
+        );
+
+        let block_size_u64 = u64::from(alloc.geo.block_size);
+        parent_upd.size =
+            parent_upd
+                .size
+                .checked_add(block_size_u64)
+                .ok_or_else(|| FfsError::Corruption {
+                    block: 0,
+                    detail: format!("inode {} directory size overflow on leaf split", parent.0),
+                })?;
+        parent_upd.blocks = Self::ext4_checked_inode_blocks_delta(
+            parent_upd.blocks,
+            parent,
+            i128::from(sectors_per_block),
+        )?;
+        Self::ext4_apply_extent_meta_delta(
+            &mut parent_upd,
+            parent,
+            dir_meta_before,
+            dir_meta_after,
+            u64::from(sectors_per_block),
+        )?;
+        if file_type == Ext4FileType::Dir {
+            parent_upd.links_count = Self::ext4_dir_link_inc(
+                parent_upd.links_count,
+                parent,
+                parent_upd.flags & ffs_types::EXT4_INDEX_FL != 0,
+            )?;
+        }
+        ffs_inode::touch_mtime_ctime(&mut parent_upd, tstamp_secs, tstamp_nanos);
+        ffs_inode::write_inode(
+            cx,
+            dev,
+            &alloc.geo,
+            &alloc.groups,
+            parent,
+            &parent_upd,
+            csum_seed,
+        )?;
+
+        Ok(Some(()))
+    }
+
+    /// Split a full leaf under a two-level htree interior node. This is the
+    /// post-promotion rename fast path: root-full directories are rebuilt once
+    /// into a two-level shape, then later leaf overflows can update only the
+    /// parent `dx_node` instead of rebuilding the whole directory again.
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn ext4_split_htree_dx_node_leaf_and_add(
+        &self,
+        cx: &Cx,
+        dev: &dyn BlockDevice,
+        alloc: &mut Ext4AllocState,
+        parent: InodeNumber,
+        parent_inode: &Ext4Inode,
+        extents: &[Ext4Extent],
+        target_logical: u32,
+        target_phys: BlockNumber,
+        target_leaf: &[u8],
+        dx_root_block: &[u8],
+        name: &[u8],
+        child_ino_u32: u32,
+        file_type: Ext4FileType,
+        csum_seed: u32,
+        tstamp_secs: u64,
+        tstamp_nanos: u32,
+    ) -> Result<Option<()>, FfsError> {
+        let block_size = usize::try_from(alloc.geo.block_size)
+            .map_err(|_| FfsError::Format("block size does not fit usize".into()))?;
+        let parent_ino_u32 = u32::try_from(parent.0)
+            .map_err(|_| FfsError::Format("inode number exceeds ext4 32-bit limit".into()))?;
+        let generation = parent_inode.generation;
+        let reserved_tail = self.ext4_dir_reserved_tail();
+
+        let (hash_seed, hash_version, has_metadata_csum, has_large_dir) = {
+            let sb = self
+                .ext4_superblock()
+                .ok_or_else(|| FfsError::Format("htree leaf split on non-ext4 fs".into()))?;
+            (
+                sb.hash_seed,
+                sb.effective_dirhash_version(sb.def_hash_version),
+                sb.has_metadata_csum(),
+                sb.has_large_dir(),
+            )
+        };
+
+        let dx_root = ffs_ondisk::ext4::parse_dx_root_with_large_dir(dx_root_block, has_large_dir)
+            .map_err(|_| FfsError::Corruption {
+                block: 0,
+                detail: format!(
+                    "htree directory inode {} dx_root became unreadable during split",
+                    parent.0
+                ),
+            })?;
+        if dx_root.indirect_levels != 1 || dx_root.entries.is_empty() {
+            return Ok(None);
+        }
+
+        let name_hash = ffs_ondisk::dx_hash(hash_version, name, &hash_seed).0;
+        let node_idx = ffs_ondisk::ext4::dx_find_leaf_idx(&dx_root.entries, name_hash);
+        let Some(node_logical) = dx_root.entries.get(node_idx).map(|e| e.block) else {
+            return Ok(None);
+        };
+
+        let resolve = |logical: u32| -> Option<BlockNumber> {
+            for ext in extents {
+                if ext.is_unwritten() {
+                    continue;
+                }
+                let start = ext.logical_block;
+                let len = u32::from(ext.actual_len());
+                if logical >= start && logical < start.saturating_add(len) {
+                    return Some(BlockNumber(ext.physical_start + u64::from(logical - start)));
+                }
+            }
+            None
+        };
+        let Some(node_phys) = resolve(node_logical) else {
+            return Ok(None);
+        };
+        let dx_node_block = self.read_block_vec(cx, node_phys)?;
+
+        let logical_end = extents
+            .iter()
+            .map(|e| e.logical_block + u32::from(e.actual_len()))
+            .max()
+            .unwrap_or(0);
+        let new_leaf_logical = logical_end;
+
+        let split = match ffs_ondisk::ext4::split_htree_leaf_in_dx_node(
+            &dx_node_block,
+            target_leaf,
+            target_logical,
+            new_leaf_logical,
+            block_size,
+            hash_version,
+            &hash_seed,
+            has_metadata_csum,
+            csum_seed,
+            parent_ino_u32,
+            generation,
+        ) {
+            Ok(s) => s,
+            Err(_) => return Ok(None),
+        };
+
+        #[cfg(test)]
+        self.htree_leaf_splits
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+
+        let ffs_ondisk::ext4::HtreeNodeLeafSplit {
+            mut old_leaf,
+            mut new_leaf,
+            dx_node,
+            split_hash,
+        } = split;
+
+        let into_new = name_hash >= split_hash;
+        let target_buf = if into_new {
+            &mut new_leaf
+        } else {
+            &mut old_leaf
+        };
+        ffs_dir::add_entry(target_buf, child_ino_u32, name, file_type, reserved_tail)?;
+        self.stamp_ext4_dir_block(target_buf, parent_ino_u32, generation);
+
+        let hint = self.numa_allocation_hint(
+            &alloc.geo,
+            AllocHint {
+                goal_block: extents.last().map(Self::extent_end_hint),
+                ..AllocHint::default()
+            },
+            "ext4_htree_dx_node_leaf_split",
+            Some(parent),
+        );
+        let new_alloc = ffs_alloc::alloc_blocks_persist(
+            cx,
+            dev,
+            &alloc.geo,
+            &mut alloc.groups,
+            1,
+            &hint,
+            &alloc.persist_ctx,
+        )?;
+
+        dev.write_block(cx, target_phys, &old_leaf)?;
+        dev.write_block(cx, new_alloc.start, &new_leaf)?;
+        dev.write_block(cx, node_phys, &dx_node)?;
+
+        let mut parent_upd = parent_inode.clone();
+        let extent = Ext4Extent {
+            logical_block: new_leaf_logical,
+            raw_len: 1,
+            physical_start: new_alloc.start.0,
+        };
+        let mut root_bytes = Self::extent_root(&parent_upd);
+        let sectors_per_block = if parent_upd.is_huge_file() {
+            1
+        } else {
+            alloc.geo.block_size / EXT4_SECTOR_SIZE
+        };
+        let tree_hint = self.numa_allocation_hint(
+            &alloc.geo,
+            AllocHint {
+                goal_block: Some(new_alloc.start),
+                ..AllocHint::default()
+            },
+            "ext4_htree_dx_node_leaf_split_tree",
             Some(parent),
         );
         let parent_extent_ns = extent_cache_namespace(&parent_upd);

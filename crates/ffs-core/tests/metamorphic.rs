@@ -8,6 +8,7 @@ use ffs_ondisk::{self, Ext4CompatFeatures, Ext4IncompatFeatures, Ext4Inode, Ext4
 use ffs_types::{BlockNumber, ByteOffset, EXT4_EXTENTS_FL, GroupNumber, InodeNumber};
 use parking_lot::Mutex;
 use proptest::prelude::*;
+use std::sync::OnceLock;
 
 const INODE_CHECKSUM_LO_OFFSET: usize = 0x7C;
 const INODE_CHECKSUM_HI_OFFSET: usize = 0x82;
@@ -114,6 +115,8 @@ fn representative_groups() -> Vec<GroupStats> {
         flags: 0,
         block_bitmap_csum: 0,
         inode_bitmap_csum: 0,
+        reserved_cache: OnceLock::new(),
+        reserved_confirmed: OnceLock::new(),
     }]
 }
 

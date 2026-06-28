@@ -6941,7 +6941,7 @@ fn build_htree_directory_stamped_with_large_dir_inner(
 }
 
 /// Find the rightmost entry index whose hash is <= target_hash.
-fn dx_find_leaf_idx(entries: &[Ext4DxEntry], hash: u32) -> usize {
+pub fn dx_find_leaf_idx(entries: &[Ext4DxEntry], hash: u32) -> usize {
     // Binary search: find rightmost entry where entry.hash <= hash
     let mut lo = 0_usize;
     let mut hi = entries.len();
@@ -7359,6 +7359,20 @@ pub struct HtreeLeafSplit {
     pub split_hash: u32,
 }
 
+/// Incremental htree split result when the parent index block is an interior
+/// `dx_node` rather than the DX root.
+#[derive(Debug, Clone)]
+pub struct HtreeNodeLeafSplit {
+    /// Repacked original (left) leaf — keeps the lower-hash half.
+    pub old_leaf: Vec<u8>,
+    /// Freshly packed new (right) leaf — holds the upper-hash half.
+    pub new_leaf: Vec<u8>,
+    /// Updated interior DX node with the new `(split_hash -> new_leaf)` entry.
+    pub dx_node: Vec<u8>,
+    /// The boundary hash inserted into the interior DX node.
+    pub split_hash: u32,
+}
+
 /// Why an incremental htree leaf split could not be performed and the caller must
 /// fall back to a full rebuild (correctness over speed for these rarer cases).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -7369,6 +7383,9 @@ pub enum HtreeSplitFallback {
     /// The DX root has no free entry slot (`count == limit`); a split would grow
     /// the index a level, which the rebuild handles.
     DxRootFull,
+    /// The interior DX node has no free entry slot; splitting that node is a
+    /// separate promotion step, so callers must fall back.
+    DxNodeFull,
     /// The full leaf has fewer than two distinct hashes, so there is no clean
     /// hash boundary to split on (an equal-hash collision run needs a chain).
     NoCleanBoundary,
@@ -7489,9 +7506,27 @@ pub fn promote_dx_root_to_two_level(
     .ok()?;
 
     if has_metadata_csum {
-        stamp_dx_block_checksum(&mut node_a, csum_seed, dir_ino, generation, DX_NODE_COUNT_OFFSET);
-        stamp_dx_block_checksum(&mut node_b, csum_seed, dir_ino, generation, DX_NODE_COUNT_OFFSET);
-        stamp_dx_block_checksum(&mut new_root, csum_seed, dir_ino, generation, DX_ROOT_COUNT_OFFSET);
+        stamp_dx_block_checksum(
+            &mut node_a,
+            csum_seed,
+            dir_ino,
+            generation,
+            DX_NODE_COUNT_OFFSET,
+        );
+        stamp_dx_block_checksum(
+            &mut node_b,
+            csum_seed,
+            dir_ino,
+            generation,
+            DX_NODE_COUNT_OFFSET,
+        );
+        stamp_dx_block_checksum(
+            &mut new_root,
+            csum_seed,
+            dir_ino,
+            generation,
+            DX_ROOT_COUNT_OFFSET,
+        );
     }
 
     Some((new_root, node_a, node_b))
@@ -7626,6 +7661,111 @@ pub fn split_htree_leaf(
         old_leaf,
         new_leaf,
         dx_root: dx_root_out,
+        split_hash,
+    })
+}
+
+/// Incrementally split one full htree leaf whose parent is an interior `dx_node`.
+///
+/// This is the two-level counterpart to [`split_htree_leaf`]: it repacks the
+/// target leaf into left/right halves, inserts one `(split_hash -> new_leaf)` DX
+/// entry into the already-selected parent node, and leaves the DX root unchanged.
+/// It intentionally handles only the common "node has spare slot" case; a full
+/// `dx_node` still falls back to the proven full rebuild until node promotion is
+/// wired separately.
+#[allow(clippy::too_many_arguments)]
+pub fn split_htree_leaf_in_dx_node(
+    dx_node_block: &[u8],
+    target_leaf: &[u8],
+    target_leaf_logical: u32,
+    new_leaf_logical: u32,
+    block_size: usize,
+    hash_version: u8,
+    hash_seed: &[u32; 4],
+    has_metadata_csum: bool,
+    csum_seed: u32,
+    dir_ino: u32,
+    generation: u32,
+) -> Result<HtreeNodeLeafSplit, HtreeSplitFallback> {
+    if dx_node_block.len() != block_size || target_leaf.len() != block_size {
+        return Err(HtreeSplitFallback::Unsupported);
+    }
+
+    let node_limit = usize::from(dx_node_entry_limit(block_size, has_metadata_csum));
+    let mut dx_entries = parse_dx_entries(dx_node_block, DX_NODE_COUNT_OFFSET)
+        .map_err(|_| HtreeSplitFallback::Unsupported)?;
+    if dx_entries.is_empty() {
+        return Err(HtreeSplitFallback::Unsupported);
+    }
+    if dx_entries.len() >= node_limit {
+        return Err(HtreeSplitFallback::DxNodeFull);
+    }
+    if !dx_entries.iter().any(|e| e.block == target_leaf_logical) {
+        return Err(HtreeSplitFallback::Unsupported);
+    }
+
+    let block_size_u32 = u32::try_from(block_size).map_err(|_| HtreeSplitFallback::Unsupported)?;
+    let mut real: Vec<(u32, u32, u8, &[u8])> = Vec::new();
+    for e in DirBlockIter::new(target_leaf, block_size_u32) {
+        let e = e.map_err(|_| HtreeSplitFallback::Unsupported)?;
+        if e.name.is_empty() || e.name == b"." || e.name == b".." {
+            continue;
+        }
+        let hash = dx_hash(hash_version, e.name, hash_seed).0;
+        real.push((hash, e.inode, e.file_type.to_raw(), e.name));
+    }
+    real.sort_by_key(|&(h, _, _, _)| h);
+
+    let split_input: Vec<(u32, usize)> = real
+        .iter()
+        .map(|(h, _, _, name)| (*h, dir_entry_rec_len(name.len())))
+        .collect();
+    let (split_index, split_hash) =
+        choose_htree_leaf_split(&split_input).ok_or(HtreeSplitFallback::NoCleanBoundary)?;
+
+    let left_refs: Vec<(u32, u8, &[u8])> = real[..split_index]
+        .iter()
+        .map(|(_, ino, ft, name)| (*ino, *ft, *name))
+        .collect();
+    let right_refs: Vec<(u32, u8, &[u8])> = real[split_index..]
+        .iter()
+        .map(|(_, ino, ft, name)| (*ino, *ft, *name))
+        .collect();
+    let mut old_leaf = pack_dir_block_entries(&left_refs, block_size, has_metadata_csum)
+        .map_err(|_| HtreeSplitFallback::Unsupported)?;
+    let mut new_leaf = pack_dir_block_entries(&right_refs, block_size, has_metadata_csum)
+        .map_err(|_| HtreeSplitFallback::Unsupported)?;
+
+    let insert_at = dx_entries.partition_point(|e| e.hash <= split_hash);
+    dx_entries.insert(
+        insert_at,
+        Ext4DxEntry {
+            hash: split_hash,
+            block: new_leaf_logical,
+        },
+    );
+
+    let mut dx_node = vec![0_u8; block_size];
+    let node_limit_u16 = u16::try_from(node_limit).map_err(|_| HtreeSplitFallback::Unsupported)?;
+    write_dx_node(&mut dx_node, node_limit_u16, &dx_entries)
+        .map_err(|_| HtreeSplitFallback::Unsupported)?;
+
+    if has_metadata_csum {
+        stamp_dir_block_checksum(&mut old_leaf, csum_seed, dir_ino, generation);
+        stamp_dir_block_checksum(&mut new_leaf, csum_seed, dir_ino, generation);
+        stamp_dx_block_checksum(
+            &mut dx_node,
+            csum_seed,
+            dir_ino,
+            generation,
+            DX_NODE_COUNT_OFFSET,
+        );
+    }
+
+    Ok(HtreeNodeLeafSplit {
+        old_leaf,
+        new_leaf,
+        dx_node,
         split_hash,
     })
 }
@@ -10752,7 +10892,11 @@ mod tests {
         // Each node is under-full (room for a future leaf-split).
         let node_limit = usize::from(dx_node_entry_limit(block_size, false));
         assert!(a_entries.len() < node_limit && b_entries.len() < node_limit);
-        assert_eq!(a_entries.len() + b_entries.len(), leaves.len(), "no entry dropped");
+        assert_eq!(
+            a_entries.len() + b_entries.len(),
+            leaves.len(),
+            "no entry dropped"
+        );
 
         // ORACLE: for every original (hash, leaf), the two-level descent reaches
         // the same leaf block the single-level index pointed at.
@@ -10932,6 +11076,159 @@ mod tests {
         ) {
             HtreeFindResult::Found(e) => assert_eq!(e.inode, 9999),
             other => panic!("post-split: new name not reachable: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn htree_dx_node_leaf_split_keeps_two_level_dir_navigable_bd_bhh0i() {
+        let bs = 1024_usize;
+        let seed = [0x0bad_f00d_u32, 0xfeed_face, 0xdead_beef, 0xcafe_b0ba];
+        let csum_seed = 0x2222_3333_u32;
+        let dir_ino = 313_u32;
+        let generation = 12_u32;
+        let hash_version = 1_u8;
+
+        let names: Vec<Vec<u8>> = (0..8000)
+            .map(|i| format!("file_{i:06}").into_bytes())
+            .collect();
+        let entries: Vec<(u32, u8, &[u8])> = names
+            .iter()
+            .enumerate()
+            .map(|(i, n)| {
+                (
+                    100 + u32::try_from(i).unwrap(),
+                    EXT4_FT_REG_FILE,
+                    n.as_slice(),
+                )
+            })
+            .collect();
+
+        let mut blocks = build_htree_directory_stamped(
+            2,
+            2,
+            &entries,
+            bs,
+            hash_version,
+            &seed,
+            csum_seed,
+            dir_ino,
+            generation,
+        )
+        .expect("two-level htree build");
+        let root = parse_dx_root(&blocks[0]).expect("parse dx root");
+        assert_eq!(root.indirect_levels, 1, "test requires a two-level htree");
+
+        let new_name = b"fresh_dx_node_split_entry".to_vec();
+        let new_hash = dx_hash(hash_version, &new_name, &seed).0;
+        let node_logical = root.entries[dx_find_leaf_idx(&root.entries, new_hash)].block;
+        let target_logical = htree_target_leaf_block(
+            &seed,
+            false,
+            &new_name,
+            |v| v,
+            |lb| blocks.get(lb as usize).cloned(),
+        )
+        .expect("target leaf");
+        let new_leaf_logical = u32::try_from(blocks.len()).unwrap();
+
+        let split = split_htree_leaf_in_dx_node(
+            &blocks[node_logical as usize],
+            &blocks[target_logical as usize],
+            target_logical,
+            new_leaf_logical,
+            bs,
+            hash_version,
+            &seed,
+            true,
+            csum_seed,
+            dir_ino,
+            generation,
+        )
+        .expect("dx_node leaf split");
+
+        let into_new = new_hash >= split.split_hash;
+        blocks[node_logical as usize] = split.dx_node.clone();
+        blocks[target_logical as usize] = split.old_leaf.clone();
+        assert_eq!(blocks.len(), new_leaf_logical as usize);
+        blocks.push(split.new_leaf.clone());
+
+        let leaf_idx = if into_new {
+            new_leaf_logical as usize
+        } else {
+            target_logical as usize
+        };
+        {
+            let (es, _tail) =
+                parse_dir_block(&blocks[leaf_idx], u32::try_from(bs).unwrap()).unwrap();
+            let mut refs: Vec<(u32, u8, Vec<u8>)> = es
+                .into_iter()
+                .filter(|e| e.inode != 0 && e.name != b"." && e.name != b".." && !e.name.is_empty())
+                .map(|e| (e.inode, e.file_type.to_raw(), e.name))
+                .collect();
+            refs.push((999_001, EXT4_FT_REG_FILE, new_name.clone()));
+            let packed_refs: Vec<(u32, u8, &[u8])> = refs
+                .iter()
+                .map(|(i, ft, n)| (*i, *ft, n.as_slice()))
+                .collect();
+            let mut packed = pack_dir_block_entries(&packed_refs, bs, true).expect("repack");
+            stamp_dir_block_checksum(&mut packed, csum_seed, dir_ino, generation);
+            blocks[leaf_idx] = packed;
+        }
+
+        assert!(verify_dx_block_checksum(
+            &blocks[0],
+            csum_seed,
+            dir_ino,
+            generation,
+            DX_ROOT_COUNT_OFFSET
+        ));
+        assert!(verify_dx_block_checksum(
+            &blocks[node_logical as usize],
+            csum_seed,
+            dir_ino,
+            generation,
+            DX_NODE_COUNT_OFFSET
+        ));
+        verify_dir_block_checksum(
+            &blocks[target_logical as usize],
+            csum_seed,
+            dir_ino,
+            generation,
+        )
+        .expect("old leaf checksum");
+        verify_dir_block_checksum(
+            &blocks[new_leaf_logical as usize],
+            csum_seed,
+            dir_ino,
+            generation,
+        )
+        .expect("new leaf checksum");
+
+        for (i, name) in names.iter().enumerate().step_by(257) {
+            match htree_find_entry(
+                u32::try_from(bs).unwrap(),
+                &seed,
+                false,
+                name,
+                |v| v,
+                |lb| blocks.get(lb as usize).cloned(),
+            ) {
+                HtreeFindResult::Found(e) => {
+                    assert_eq!(e.inode, 100 + u32::try_from(i).unwrap(), "name {name:?}");
+                }
+                other => panic!("post-dx_node-split: {name:?} not reachable: {other:?}"),
+            }
+        }
+        match htree_find_entry(
+            u32::try_from(bs).unwrap(),
+            &seed,
+            false,
+            &new_name,
+            |v| v,
+            |lb| blocks.get(lb as usize).cloned(),
+        ) {
+            HtreeFindResult::Found(e) => assert_eq!(e.inode, 999_001),
+            other => panic!("post-dx_node-split: new name not reachable: {other:?}"),
         }
     }
 
