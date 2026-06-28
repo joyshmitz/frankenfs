@@ -103,6 +103,7 @@ fn make_groups(geo: &FsGeometry) -> Vec<GroupStats> {
             block_bitmap_csum: 0,
             inode_bitmap_csum: 0,
             reserved_cache: OnceLock::new(),
+            reserved_confirmed: OnceLock::new(),
         })
         .collect()
 }

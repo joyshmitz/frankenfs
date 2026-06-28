@@ -501,6 +501,7 @@ fn bench_largest_free_run_cache_vs_bitmap_scan(c: &mut Criterion) {
             block_bitmap_csum: 0,
             inode_bitmap_csum: 0,
             reserved_cache: OnceLock::new(),
+            reserved_confirmed: OnceLock::new(),
         })
         .collect();
 
