@@ -3160,3 +3160,29 @@ AGENT_NAME=cod-a CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod-a \
 Do not retry broader e2compr indirect-pointer memo variants unless a fresh trace
 shows repeated non-memo indirect resolution outside `read_ext4_compressed` or a
 modern comparator fixture exposes a supported mounted-kernel e2compr path.
+
+## Metadata + write vs LIVE ext4 kernel — CrimsonFox (cc, opus) 2026-06-28
+
+The read-path rows above are complemented by a metadata/data-WRITE vs-live-kernel
+sweep this session. Method: `sudo mount -o loop` (RW) a throwaway 3 GiB ext4
+image for the kernel side (`os.rename`/`os.open`/`os.mkdir`/`pwrite` loops + final
+sync), vs `ffs-cli {rename,create,mkdir,write}-bench` on a fresh copy of the same
+image (also +sync). N=40000, apples-to-apples (both create-then-mutate + durability
+sync). Numbers are µs/op.
+
+| op | live ext4 kernel | FrankenFS | ratio | note |
+| --- | --- | --- | --- | --- |
+| rename | 30.9 | 18.1 | **1.71x FASTER** | preflight target-leaf fix `51294142` (O(N^2)→O(N)); was ~3.5x slower pre-fix |
+| create | 27.6 | 24.6 | **1.12x FASTER** | — |
+| mkdir | 39.4 | 51.5 | 1.31x slower | dir-block setup + 2nd inode commit + 3x adapter snapshot churn (MVCC-adjacent, owner-lane) |
+| write (4 KiB sparse-fill) | 5.8 | 8.8 | 1.52x slower | extent-coalescing fix `2aa92946` (O(N^2)→O(N)); was ~170x slower pre-fix |
+
+Verdict: FrankenFS metadata is **at/above the live kernel for rename + create**, and
+within **1.3–1.5x** for mkdir + fine-grained write. Both residuals trace to the
+same inherent per-op MVCC write-path overhead (commit + version install + per-op
+`active_snapshots` adapter register/release) — the bd-bhh0i family, profile-confirmed
+futex/synchronization-bound and owner-lane (read-lock+atomic refcount lever spec'd
+in docs/NEGATIVE_EVIDENCE.md, `25e4ca94`). No safe-Rust single-thread lever remains
+on these paths; the shipped fixes already closed the two O(N^2) cliffs (rename,
+fine-grained write) that were the catastrophic vs-kernel losses. (delete/rmdir
+vs-kernel not measured: destructive `os.unlink`/`os.rmdir` are dcg-blocked.)
