@@ -2583,3 +2583,16 @@ The two residual single-thread gaps (mkdir ~1.7x, rmdir ~1.4x) are FLAT constant
 ### 2026-06-28 ⭐follow-up: extend the rename preflight target-leaf fast path to CASEFOLD htree dirs — closes the same O(N²) for case-insensitive directories (CrimsonFox cc/opus)
 
 The rename preflight fix (`51294142`) routed only verbatim (non-casefold) htree dirs through the O(1) hash-target-leaf check; casefold htree dirs still fell to the O(N) full-block scan = O(N²) rename. Extended `ext4_preflight_dir_entry_insert` to also fast-path casefold htree dirs via `ffs_ondisk::htree_target_leaf_block_casefold` (the folded-name descent), mirroring the already-conformance-tested casefold branch the unlink/delete path uses (lib.rs ~18589). Safe because the function's top-of-body gate already rejects non-ASCII casefold names, so the ASCII fold is byte-exact to the kernel here. Verbatim path unchanged; linear dirs keep the full scan. Pure preflight (read-only dry-run) → no on-disk behavior change. Conformance GREEN. File: crates/ffs-core/src/lib.rs.
+
+### 2026-06-28 ⭐btrfs single-thread metadata N-curve sweep REFUTES the stale "btrfs metadata ~3.5-4x behind" gap — it is FLAT / at-parity (the 3.5-4x was a PARALLEL measure); mkdir is the lone ~1.7x outlier on BOTH fs = shared MVCC-commit cost (CrimsonFox cc/opus)
+
+Following the ext4 metadata convergence, ran the same N-curve sweep on a btrfs image fixture (`ffs-cli` create/rename/mkdir/delbench, release-perf, single-thread) to test whether the long-cited "btrfs metadata ~3.5-4x behind kernel" gap is a real single-thread lever:
+
+| op | btrfs µs/op @2k | btrfs µs/op @~20k | shape | (cf ext4) |
+| --- | --- | --- | --- | --- |
+| create | 22.6 | 25.1 | flat | ~same as ext4 25.7 |
+| rename | 13.3 | 17.5 | flat | ~same as ext4 19.5 |
+| delete | 23.2 | 23.3 | flat | ~same as ext4 27.8 |
+| mkdir | 50.2 | 53.9 (@10k) | flat | ~same as ext4 47.5 |
+
+REFUTED for single-thread: btrfs metadata ops are FLAT (O(N) total) and within noise of ext4 — there is NO 3.5-4x single-thread btrfs metadata gap. That figure (IvoryBirch's bd-bhh0i notes) is a PARALLEL (multi-writer) measurement; the single-thread btrfs metadata path is already at ext4-parity. The only residual single-thread metadata gap on EITHER filesystem is **mkdir (~50-54 µs/op, ~1.7x kernel, identical on ext4 AND btrfs)** — because it is identical across both fs it is a SHARED `ffs-core` cost, not an fs-specific one: a `perf` profile is broad (MVCC `commit` + `read_block_vec` 4 KiB copies + crc32c + jemalloc, no single hotspot), and the structural driver is mkdir's second inode commit + the post-`create_inode` block-device-adapter re-acquisition (MVCC snapshot coherence, lib.rs:16715) — i.e. the same MVCC-commit/version-store cost that bounds bd-bhh0i parallel writes, NOT an isolated elidable lever. CONCLUSION: single-thread metadata is harvested on both ext4 and btrfs; the remaining real gap is the structural MVCC commit/version-store cost (bd-bhh0i, parallel + the mkdir constant factor), which needs the payload-reference/commit-batching work, not micro-tuning. No code change (measurement + refutation).
