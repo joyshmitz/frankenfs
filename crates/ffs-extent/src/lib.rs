@@ -1061,8 +1061,16 @@ pub fn mark_written(
         // Build replacement extents based on overlap type.
         let replacements = split_for_mark_written(&ext, logical_start, range_end, ext_end)?;
 
+        // Coalesce the newly-WRITTEN replacement into a contiguous written
+        // predecessor (ext4 adjacent-extent merge), so sequentially filling a
+        // fallocated (unwritten) region in small chunks keeps O(1) written
+        // extents instead of one per write — the same O(N^2) extent-tree
+        // fragmentation fixed on the plain allocation path
+        // (docs/NEGATIVE_EVIDENCE.md, the DB preallocate-then-write workload).
+        // `try_merge_written` only merges written↔written, so the unwritten
+        // sides of a partial split are never wrongly absorbed.
         for replacement in replacements {
-            ffs_btree::insert(cx, dev, root_bytes, replacement, &mut tree_alloc)?;
+            ffs_btree::insert_coalescing(cx, dev, root_bytes, replacement, &mut tree_alloc)?;
         }
     }
 
