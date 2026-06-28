@@ -18292,23 +18292,80 @@ impl OpenFs {
         let extents = self.collect_extents(cx, parent_inode)?;
         let reserved_tail = self.ext4_dir_reserved_tail();
 
-        // For an htree dir, logical block 0 is the dx_root: a linear add_entry
-        // dry-run rejects its index-spanning '..' as corrupt. Skip it — the real
-        // insert (ext4_add_dir_entry) routes htree entries to the hash-correct
-        // leaf (and rebuilds on overflow), so an htree insert always has room.
-        let dx_root_phys = Self::ext4_htree_dx_root_phys(parent_inode, &extents);
-        for ext in &extents {
-            if ext.is_unwritten() {
-                continue;
+        // The real insert (ext4_add_dir_entry) routes an htree entry to the SINGLE
+        // hash-correct leaf (and rebuilds on overflow, so it never runs out of
+        // room). The former preflight dry-ran add_entry over EVERY directory block
+        // — O(dir_blocks) per insert, i.e. O(N^2) over a rename burst (this was the
+        // dominant rename cost: `add_entry` + the per-block MVCC `read_block_vec`
+        // copy together ~57% of profile self-time) — and discarded the per-block
+        // result anyway. For an htree dir, dry-run add_entry ONLY on the block the
+        // real insert will touch: the hash-target leaf (descent mirrors
+        // ext4_htree_remove_dir_entry). This keeps the atomicity guarantee — a
+        // corrupt or too-full target leaf is caught BEFORE ext4_rename removes the
+        // source entry — at O(1) instead of O(N). Casefold htree dirs (routing by
+        // the folded name) and linear dirs (the insert may touch any block) keep
+        // the full per-block scan.
+        let htree_fast = parent_inode.has_htree_index()
+            && parent_inode.flags & ffs_types::EXT4_CASEFOLD_FL == 0;
+        let target_checked = if htree_fast {
+            if let Some(sb) = self.ext4_superblock() {
+                let resolve_logical = |logical: u32| -> Option<BlockNumber> {
+                    let pos = extents.partition_point(|e| e.logical_block <= logical);
+                    let ext = extents.get(pos.checked_sub(1)?)?;
+                    if ext.is_unwritten() {
+                        return None;
+                    }
+                    let start = ext.logical_block;
+                    let len = u32::from(ext.actual_len());
+                    (logical >= start && logical < start.saturating_add(len))
+                        .then(|| BlockNumber(ext.physical_start + u64::from(logical - start)))
+                };
+                let read_leaf =
+                    |lb| resolve_logical(lb).and_then(|phys| self.read_block_vec(cx, phys).ok());
+                let target = ffs_ondisk::htree_target_leaf_block(
+                    &sb.hash_seed,
+                    sb.has_large_dir(),
+                    name,
+                    |v| sb.effective_dirhash_version(v),
+                    read_leaf,
+                )
+                .and_then(|tl| resolve_logical(tl));
+                if let Some(target_phys) = target {
+                    let mut data = self.read_block_vec(cx, target_phys)?;
+                    match ffs_dir::add_entry(&mut data, 1, name, file_type, reserved_tail) {
+                        Ok(_) | Err(FfsError::NoSpace) => {}
+                        Err(err) => return Err(err),
+                    }
+                    true
+                } else {
+                    // Unreadable/stale index: fall through to the empty-block
+                    // name-fits dry-run (the real insert will rebuild).
+                    true
+                }
+            } else {
+                false
             }
-            for block in Self::extent_phys_blocks(ext) {
-                if Some(block) == dx_root_phys {
+        } else {
+            false
+        };
+        if !target_checked {
+            // Linear dir or casefold htree: dry-run over every block. For an htree
+            // dir, logical block 0 is the dx_root whose index-spanning '..' a linear
+            // add_entry would reject as corrupt — skip it.
+            let dx_root_phys = Self::ext4_htree_dx_root_phys(parent_inode, &extents);
+            for ext in &extents {
+                if ext.is_unwritten() {
                     continue;
                 }
-                let mut data = self.read_block_vec(cx, block)?;
-                match ffs_dir::add_entry(&mut data, 1, name, file_type, reserved_tail) {
-                    Ok(_) | Err(FfsError::NoSpace) => {}
-                    Err(err) => return Err(err),
+                for block in Self::extent_phys_blocks(ext) {
+                    if Some(block) == dx_root_phys {
+                        continue;
+                    }
+                    let mut data = self.read_block_vec(cx, block)?;
+                    match ffs_dir::add_entry(&mut data, 1, name, file_type, reserved_tail) {
+                        Ok(_) | Err(FfsError::NoSpace) => {}
+                        Err(err) => return Err(err),
+                    }
                 }
             }
         }
