@@ -2802,3 +2802,17 @@ Pulling the session's kernel-verified results together, the gaps split cleanly i
 | btrfs rename | 4.6x slower | per-op COW-from-committed-root residual |
 
 The three remaining residuals (ext4 write 1.52x, ext4 mkdir 1.31x, btrfs rename 4.6x — btrfs worst because its COW b-tree re-COWs root→leaf from the committed root each op) are the SAME phenomenon: **FrankenFS commits per FsOp**, so every metadata/data op pays a full MVCC commit (version install + publication gate + per-op `active_snapshots` adapter register/release) and, on btrfs, a full from-root COW. The **kernel amortizes**: it keeps metadata dirty in memory, COWs/dirties each node once per TRANSACTION, and flushes once at `sync`. So the single structural lever that would close ALL three residuals (and bd-bhh0i parallel-write, profile-confirmed futex/inherent) is **commit batching / metadata-write deferral** — coalescing many FsOps into one transaction/flush, exactly IvoryBirch's listed bd-bhh0i structural direction. This is owner-lane (it changes the commit/transaction model — durability, crash-consistency, snapshot-visibility semantics; not a safe blind per-crate change). CONCLUSION of the vs-kernel sweep: FrankenFS is at/above the live kernel for rename+create+read; the remaining write/mkdir/btrfs-rename residuals are one structural commit-granularity gap, owner-lane. The safe-Rust per-op lever space is exhausted and kernel-verified.
+
+### 2026-06-28 ⚠️CORRECTION to the synthesis (10cf435a): btrfs CREATE is 1.36x FASTER than the kernel — so residuals are NOT uniform "commit granularity"; the slow ops have OP-SPECIFIC costs (CrimsonFox cc/opus)
+
+Measured the missing btrfs create-vs-kernel head-to-head: frankenfs btrfs create **48.7 µs/op vs btrfs kernel 66.2 µs/op = 1.36x FASTER**. This DISPROVES the `10cf435a` synthesis that the residuals are a uniform per-op commit-granularity gap: btrfs create has the SAME per-op commit granularity as btrfs rename, yet create BEATS the kernel while rename is 4.6x slower. Likewise on ext4, create is 1.12x FASTER while write/mkdir are slower — same asymmetry. So the slow ops are NOT uniformly commit-bound; each has an OP-SPECIFIC extra cost:
+
+| op | vs kernel | op-specific cost |
+| --- | --- | --- |
+| ext4 create | 1.12x FASTER | — |
+| btrfs create | 1.36x FASTER | — |
+| ext4 write 4 KiB | 1.52x slower | per-4 KiB-block MVCC version install (vs kernel page-cache + delayed alloc) |
+| ext4 mkdir | 1.31x slower | dir-block alloc+init+CRC + 2nd inode commit + adapter churn |
+| btrfs rename | 4.6x slower | touches ~2x leaves (remove old DIR_ITEM+DIR_INDEX + insert new into different hash-leaves + ref + parent inode) via `remove_many_then_insert_many_then_update` (lib.rs:26858) + `require_inode_ref_index` lookups — more COW footprint per op than create's `insert_many_then_update` |
+
+So FrankenFS metadata CREATE beats the live kernel on BOTH filesystems — the per-op MVCC/COW commit path is competitive. The remaining slow ops each pay a distinct, op-specific cost (write: per-block version churn; mkdir: dir-setup; btrfs rename: 2x-leaf COW footprint). The btrfs rename lever is therefore to reduce its per-op COW footprint (fewer/coalesced leaf touches), not "batch commits" — though that's an intricate btrfs-core change for a single op. CORRECTS the over-general `10cf435a`; the per-op-granularity framing was wrong because create disproves it. No code change (measurement + correction).
