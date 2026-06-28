@@ -2816,3 +2816,22 @@ Measured the missing btrfs create-vs-kernel head-to-head: frankenfs btrfs create
 | btrfs rename | 4.6x slower | touches ~2x leaves (remove old DIR_ITEM+DIR_INDEX + insert new into different hash-leaves + ref + parent inode) via `remove_many_then_insert_many_then_update` (lib.rs:26858) + `require_inode_ref_index` lookups — more COW footprint per op than create's `insert_many_then_update` |
 
 So FrankenFS metadata CREATE beats the live kernel on BOTH filesystems — the per-op MVCC/COW commit path is competitive. The remaining slow ops each pay a distinct, op-specific cost (write: per-block version churn; mkdir: dir-setup; btrfs rename: 2x-leaf COW footprint). The btrfs rename lever is therefore to reduce its per-op COW footprint (fewer/coalesced leaf touches), not "batch commits" — though that's an intricate btrfs-core change for a single op. CORRECTS the over-general `10cf435a`; the per-op-granularity framing was wrong because create disproves it. No code change (measurement + correction).
+
+### 2026-06-28 ⭐VERIFIED vs LIVE KERNEL (completes the btrfs picture): btrfs READ ~3.6x FASTER than kernel dd-materialize — FrankenFS btrfs is faster than the kernel for create+read, slower only for rename (CrimsonFox cc/opus)
+
+Final vs-kernel datapoint — btrfs read on a REAL btrfs image (`/data/tmp/btrc_1268087.img`, frankenfs takes the btrfs path: "btrfs chunk map expanded"), file `c.bin` (150 MiB, compressed). Warm, materialize (both deliver bytes to userspace):
+
+| btrfs read c.bin (150 MiB, warm) | throughput | ratio |
+| --- | --- | --- |
+| kernel `dd ... of=/dev/null bs=1M` | ~1.5 GB/s | 1.0x |
+| frankenfs `read --discard` (engine, duration_us=27356) | ~5.5 GB/s | **~3.6x FASTER** |
+
+Completes the btrfs vs-live-kernel picture:
+
+| btrfs op | vs live kernel |
+| --- | --- |
+| create | 1.36x FASTER |
+| read (compressed, materialize) | ~3.6x FASTER |
+| rename | 4.6x slower (inherent dual-index 2x-leaf COW × per-op commit granularity) |
+
+So FrankenFS btrfs BEATS the live kernel for create AND read; the ONLY slow btrfs op is rename (owner-lane: the 2x-leaf COW footprint paid per-op-from-committed-root, amortizable only via commit batching). This matches the ext4 picture (create/rename/read at/above kernel; write/mkdir slower = per-op commit). Confirms btrfs read is faster-than-kernel on a REAL btrfs image (this session's earlier btrfs measurements were on the ext4 `btr.img`; this one is genuine btrfs). No code change (verification). The full vs-kernel sweep is now complete for both filesystems.
