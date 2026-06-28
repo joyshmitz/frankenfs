@@ -17509,17 +17509,15 @@ impl OpenFs {
         // Read the dx_root (logical block 0). It must be physically mapped for an
         // htree directory; if not, decline so the rebuild handles it.
         let resolve = |logical: u32| -> Option<BlockNumber> {
-            for ext in extents {
-                if ext.is_unwritten() {
-                    continue;
-                }
-                let start = ext.logical_block;
-                let len = u32::from(ext.actual_len());
-                if logical >= start && logical < start.saturating_add(len) {
-                    return Some(BlockNumber(ext.physical_start + u64::from(logical - start)));
-                }
+            let pos = extents.partition_point(|e| e.logical_block <= logical);
+            let ext = extents.get(pos.checked_sub(1)?)?;
+            if ext.is_unwritten() {
+                return None;
             }
-            None
+            let start = ext.logical_block;
+            let len = u32::from(ext.actual_len());
+            (logical >= start && logical < start.saturating_add(len))
+                .then_some(BlockNumber(ext.physical_start + u64::from(logical - start)))
         };
         let Some(dx_root_phys) = resolve(0) else {
             return Ok(None);
@@ -17776,17 +17774,15 @@ impl OpenFs {
         };
 
         let resolve = |logical: u32| -> Option<BlockNumber> {
-            for ext in extents {
-                if ext.is_unwritten() {
-                    continue;
-                }
-                let start = ext.logical_block;
-                let len = u32::from(ext.actual_len());
-                if logical >= start && logical < start.saturating_add(len) {
-                    return Some(BlockNumber(ext.physical_start + u64::from(logical - start)));
-                }
+            let pos = extents.partition_point(|e| e.logical_block <= logical);
+            let ext = extents.get(pos.checked_sub(1)?)?;
+            if ext.is_unwritten() {
+                return None;
             }
-            None
+            let start = ext.logical_block;
+            let len = u32::from(ext.actual_len());
+            (logical >= start && logical < start.saturating_add(len))
+                .then_some(BlockNumber(ext.physical_start + u64::from(logical - start)))
         };
         let Some(node_phys) = resolve(node_logical) else {
             return Ok(None);
