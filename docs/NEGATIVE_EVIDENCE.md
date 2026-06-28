@@ -2565,3 +2565,17 @@ MEASURED A/B (`ffs-cli rename-bench /`, fresh `mke2fs` ext4 4096/^64bit, release
 | 40,000 | 108.5 | 19.5 | **5.57x** |
 
 The candidate per-op is now **FLAT (~14.6→18.8→19.5 µs/op)** = O(N) total (was superlinear) and at ~19.5 µs/op **BEATS the kernel's flat ~30 µs/op rename** (vs ext4-kernel: was ~3.6x slower at N=40k → now ~1.5x FASTER). Correctness: the change writes nothing (read-only preflight), so the resulting image is structurally identical to baseline — `e2fsck -fn` reports the IDENTICAL pre-existing superblock-counter staleness on both baseline and candidate N=40k images (free inodes 200052/160052, free blocks 756140/755853, "12/200064 files, 30292/786432 blocks" — byte-identical output, NOT introduced here), and all 40000 renames apply correctly (debugfs: 40000 `rn_*`, 0 `rb_*`). File: crates/ffs-core/src/lib.rs (`ext4_preflight_dir_entry_insert`).
+
+### 2026-06-28 CONVERGENCE: full single-thread ext4 metadata-op N-curve sweep — after the rename preflight fix, ALL ops are flat/O(N); remaining gaps are constant-factor (mkdir/rmdir) or the contested parallel-write structural gap (CrimsonFox cc/opus)
+
+After shipping the rename preflight fix (`51294142`), swept every `ffs-cli` metadata bench at N=2000 vs N=40000 (fresh `mke2fs` ext4 4096/^64bit, release-perf, single-thread) to find the next hidden O(N²). Result — every op is now FLAT (per-op constant in N = O(N) total), no remaining O(N²):
+
+| op | µs/op @2k | µs/op @40k | vs ext4-kernel | shape |
+| --- | --- | --- | --- | --- |
+| create | 24.3 | 25.7 | ~parity | flat |
+| rename | 14.6 | 19.5 | **~1.5x FASTER** (post-fix) | flat |
+| delete (unlink) | 20.0 | 27.8 | ~parity | flat (htree O(1) removal already in place, lib.rs:18573) |
+| rmdir | 39.1 | 41.2 | ~1.4x slower | flat |
+| mkdir | 53.7 | 47.5 | ~1.7x slower | flat |
+
+The two residual single-thread gaps (mkdir ~1.7x, rmdir ~1.4x) are FLAT constant-factor, and `perf` shows BROAD profiles with no dominant hotspot (mkdir N=40k: memmove 10.6% = MVCC `read_block_vec` 4 KiB block copies, MVCC `commit` 5.5%, crc32c ~5.7%, jemalloc churn ~6%, kernel syscalls ~10%, `ext4_add_dir_entry` only 2.6%) — i.e. the inherent cost of a dir-creating op's two inode commits + dir-block init + checksums, not a single elidable lever. The recurring cross-cutting cost across EVERY metadata profile is the MVCC full-4 KiB-block copy on each `read_block_vec`/`read_visible` — eliminating it (borrow version bytes instead of copy) is the "payload-reference storage" structural change already scoped under bd-bhh0i (parallel writes, 8.32x — the biggest remaining gap), which is `forbid(unsafe)`-constrained and correctness-critical. CONCLUSION: the clean per-crate single-thread metadata levers are harvested; the rename O(N²) (preflight full-dir scan) was the last one. Remaining wins require the structural MVCC zero-copy/commit-batching work (bd-bhh0i) or the blocked zero-copy read path (pz64v), not micro-tuning.
