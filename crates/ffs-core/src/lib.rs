@@ -18302,12 +18302,10 @@ impl OpenFs {
         // real insert will touch: the hash-target leaf (descent mirrors
         // ext4_htree_remove_dir_entry). This keeps the atomicity guarantee — a
         // corrupt or too-full target leaf is caught BEFORE ext4_rename removes the
-        // source entry — at O(1) instead of O(N). Casefold htree dirs (routing by
-        // the folded name) and linear dirs (the insert may touch any block) keep
-        // the full per-block scan.
-        let htree_fast = parent_inode.has_htree_index()
-            && parent_inode.flags & ffs_types::EXT4_CASEFOLD_FL == 0;
-        let target_checked = if htree_fast {
+        // source entry — at O(1) instead of O(N). Both verbatim and casefold htree
+        // dirs use this fast path (casefold descends by the folded name); only
+        // linear dirs (the insert may touch any block) keep the full per-block scan.
+        let target_checked = if parent_inode.has_htree_index() {
             if let Some(sb) = self.ext4_superblock() {
                 let resolve_logical = |logical: u32| -> Option<BlockNumber> {
                     let pos = extents.partition_point(|e| e.logical_block <= logical);
@@ -18322,14 +18320,29 @@ impl OpenFs {
                 };
                 let read_leaf =
                     |lb| resolve_logical(lb).and_then(|phys| self.read_block_vec(cx, phys).ok());
-                let target = ffs_ondisk::htree_target_leaf_block(
-                    &sb.hash_seed,
-                    sb.has_large_dir(),
-                    name,
-                    |v| sb.effective_dirhash_version(v),
-                    read_leaf,
-                )
-                .and_then(|tl| resolve_logical(tl));
+                // Casefold htree dirs route by the folded name; the top-of-fn gate
+                // already rejected non-ASCII casefold names, so the ASCII fold is
+                // byte-exact here. Mirror the delete path's casefold descent
+                // (ext4_htree_remove_dir_entry's sibling at the unlink site).
+                let casefold = parent_inode.flags & ffs_types::EXT4_CASEFOLD_FL != 0;
+                let target_logical = if casefold {
+                    ffs_ondisk::htree_target_leaf_block_casefold(
+                        &sb.hash_seed,
+                        sb.has_large_dir(),
+                        name,
+                        |v| sb.effective_dirhash_version(v),
+                        read_leaf,
+                    )
+                } else {
+                    ffs_ondisk::htree_target_leaf_block(
+                        &sb.hash_seed,
+                        sb.has_large_dir(),
+                        name,
+                        |v| sb.effective_dirhash_version(v),
+                        read_leaf,
+                    )
+                };
+                let target = target_logical.and_then(|tl| resolve_logical(tl));
                 if let Some(target_phys) = target {
                     let mut data = self.read_block_vec(cx, target_phys)?;
                     match ffs_dir::add_entry(&mut data, 1, name, file_type, reserved_tail) {
@@ -18349,9 +18362,9 @@ impl OpenFs {
             false
         };
         if !target_checked {
-            // Linear dir or casefold htree: dry-run over every block. For an htree
-            // dir, logical block 0 is the dx_root whose index-spanning '..' a linear
-            // add_entry would reject as corrupt — skip it.
+            // Linear dir (or htree with no readable superblock): dry-run over every
+            // block. For an htree dir, logical block 0 is the dx_root whose
+            // index-spanning '..' a linear add_entry would reject as corrupt — skip it.
             let dx_root_phys = Self::ext4_htree_dx_root_phys(parent_inode, &extents);
             for ext in &extents {
                 if ext.is_unwritten() {
