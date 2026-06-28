@@ -637,7 +637,7 @@ fn zero_run_starts_at_least(mut free: u64, n: u32) -> u64 {
 // ── Group stats ─────────────────────────────────────────────────────────────
 
 /// Cached per-group statistics loaded from group descriptors.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct GroupStats {
     pub group: GroupNumber,
     pub free_blocks: u32,
@@ -664,6 +664,46 @@ pub struct GroupStats {
     /// through `&self`, so the immutable-`&[GroupStats]` callers can populate it.
     #[doc(hidden)]
     pub reserved_cache: OnceLock<Arc<[u32]>>,
+    /// Set once the on-disk block bitmap is confirmed to already carry every
+    /// reserved-metadata bit for this group (bd-resv-mark). In steady state the
+    /// per-alloc "mark reserved bits" loop is a pure no-op (mkfs marks metadata
+    /// blocks and they are never freed — `free_blocks` validates not-reserved),
+    /// so after the first allocation that needs to set nothing, subsequent
+    /// allocations skip the O(N) loop entirely. `OnceLock` fills through `&self`.
+    #[doc(hidden)]
+    pub reserved_confirmed: OnceLock<()>,
+}
+
+impl std::fmt::Debug for GroupStats {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Render the runtime memoization caches (`reserved_cache`,
+        // `reserved_confirmed`) as a stable `OnceLock::new()` placeholder rather
+        // than dumping their contents, so the allocator diagnostic golden snapshot
+        // is invariant under cache population (bd-resv-cache / bd-resv-mark). A
+        // derived `Debug` would otherwise leak the populated reserved set and break
+        // the exact-string golden every time a cache field is added or filled.
+        struct Memo;
+        impl std::fmt::Debug for Memo {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("OnceLock::new()")
+            }
+        }
+        f.debug_struct("GroupStats")
+            .field("group", &self.group)
+            .field("free_blocks", &self.free_blocks)
+            .field("block_largest_free_run", &self.block_largest_free_run)
+            .field("free_inodes", &self.free_inodes)
+            .field("used_dirs", &self.used_dirs)
+            .field("block_bitmap_block", &self.block_bitmap_block)
+            .field("inode_bitmap_block", &self.inode_bitmap_block)
+            .field("inode_table_block", &self.inode_table_block)
+            .field("flags", &self.flags)
+            .field("block_bitmap_csum", &self.block_bitmap_csum)
+            .field("inode_bitmap_csum", &self.inode_bitmap_csum)
+            .field("reserved_cache", &Memo)
+            .field("reserved_confirmed", &Memo)
+            .finish()
+    }
 }
 
 impl GroupStats {
@@ -683,6 +723,7 @@ impl GroupStats {
             inode_table_block: BlockNumber(gd.inode_table),
             flags: gd.flags,
             reserved_cache: OnceLock::new(),
+            reserved_confirmed: OnceLock::new(),
         }
     }
 
@@ -1893,6 +1934,14 @@ pub fn alloc_blocks_persist(
     Err(FfsError::NoSpace)
 }
 
+/// Escape hatch for bd-resv-mark: when set (env `FFS_ALLOC_FORCE_RESERVED_MARK`),
+/// always run the per-alloc reserved-bit marking loop instead of skipping it once
+/// a group is confirmed. Read once. Default (unset) takes the skip fast path.
+fn force_reserved_mark() -> bool {
+    static FORCE: OnceLock<bool> = OnceLock::new();
+    *FORCE.get_or_init(|| std::env::var_os("FFS_ALLOC_FORCE_RESERVED_MARK").is_some())
+}
+
 /// Try to allocate `count` blocks in a group, skipping reserved blocks and
 /// persisting group descriptor updates.
 #[expect(clippy::too_many_arguments)]
@@ -1929,9 +1978,21 @@ fn try_alloc_safe(
     let mut bitmap = bitmap_buf.as_slice().to_vec();
     let mut rollback_clear_bits = Vec::with_capacity(reserved.len() + count as usize);
 
-    // Ensure all reserved blocks are marked as allocated in the bitmap.
-    for &r in &reserved {
-        bitmap_set_with_clear_undo(&mut bitmap, r, &mut rollback_clear_bits);
+    // Ensure all reserved blocks are marked as allocated in the bitmap. Once a
+    // group's on-disk bitmap is confirmed to already carry every reserved bit
+    // (the post-mkfs steady state — reserved metadata blocks are never freed),
+    // this O(N≈flex_bg) loop is a pure no-op, so skip it (bd-resv-mark): the
+    // first alloc that sets nothing records the confirmation. The post-find
+    // `is_reserved` verification below stays as a belt-and-suspenders guard, so
+    // correctness does not depend on this fast path. `FFS_ALLOC_FORCE_RESERVED_MARK`
+    // forces the old always-mark behaviour (A/B baseline / safety escape hatch).
+    if force_reserved_mark() || groups[gidx].reserved_confirmed.get().is_none() {
+        for &r in &reserved {
+            bitmap_set_with_clear_undo(&mut bitmap, r, &mut rollback_clear_bits);
+        }
+        if rollback_clear_bits.is_empty() {
+            let _ = groups[gidx].reserved_confirmed.set(());
+        }
     }
 
     let start = hint.goal_block.map_or(0, |goal| {
@@ -2947,6 +3008,7 @@ mod tests {
                     block_bitmap_csum: 0,
                     inode_bitmap_csum: 0,
                     reserved_cache: OnceLock::new(),
+                    reserved_confirmed: OnceLock::new(),
                 }
             })
             .collect()
@@ -2970,6 +3032,7 @@ mod tests {
                     block_bitmap_csum: 0,
                     inode_bitmap_csum: 0,
                     reserved_cache: OnceLock::new(),
+                    reserved_confirmed: OnceLock::new(),
                 }
             })
             .collect()
@@ -5091,6 +5154,7 @@ mod tests {
             block_bitmap_csum: 0,
             inode_bitmap_csum: 0,
             reserved_cache: OnceLock::new(),
+            reserved_confirmed: OnceLock::new(),
         };
         assert!(!gs.block_bitmap_uninit());
         assert!(!gs.inode_bitmap_uninit());
@@ -6092,7 +6156,7 @@ mod tests {
         );
 
         let expected = "\
-GroupStats { group: GroupNumber(1), free_blocks: 8192, block_largest_free_run: None, free_inodes: 2048, used_dirs: 0, block_bitmap_block: BlockNumber(8193), inode_bitmap_block: BlockNumber(8194), inode_table_block: BlockNumber(8195), flags: 0, block_bitmap_csum: 0, inode_bitmap_csum: 0, reserved_cache: OnceLock::new() }
+GroupStats { group: GroupNumber(1), free_blocks: 8192, block_largest_free_run: None, free_inodes: 2048, used_dirs: 0, block_bitmap_block: BlockNumber(8193), inode_bitmap_block: BlockNumber(8194), inode_table_block: BlockNumber(8195), flags: 0, block_bitmap_csum: 0, inode_bitmap_csum: 0, reserved_cache: OnceLock::new(), reserved_confirmed: OnceLock::new() }
 AllocHint { goal_group: Some(GroupNumber(1)), goal_block: Some(BlockNumber(8323)), numa: None }
 BlockAlloc { start: BlockNumber(8323), count: 4 }
 InodeAlloc { ino: InodeNumber(17), group: GroupNumber(1) }
@@ -6456,6 +6520,7 @@ InodeAlloc { ino: InodeNumber(17), group: GroupNumber(1) }
                 block_bitmap_csum: 0,
                 inode_bitmap_csum: 0,
                 reserved_cache: OnceLock::new(),
+                reserved_confirmed: OnceLock::new(),
             };
             prop_assert_eq!(gs.block_bitmap_uninit(), flags & GD_FLAG_BLOCK_UNINIT != 0);
             prop_assert_eq!(gs.inode_bitmap_uninit(), flags & GD_FLAG_INODE_UNINIT != 0);
@@ -6483,6 +6548,7 @@ InodeAlloc { ino: InodeNumber(17), group: GroupNumber(1) }
                     block_bitmap_csum: 0,
                     inode_bitmap_csum: 0,
                     reserved_cache: OnceLock::new(),
+                    reserved_confirmed: OnceLock::new(),
                     })
 
                 .collect();
@@ -6513,6 +6579,7 @@ InodeAlloc { ino: InodeNumber(17), group: GroupNumber(1) }
                     block_bitmap_csum: 0,
                     inode_bitmap_csum: 0,
                     reserved_cache: OnceLock::new(),
+                    reserved_confirmed: OnceLock::new(),
                     })
 
                 .collect();
