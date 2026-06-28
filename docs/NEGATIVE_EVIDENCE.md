@@ -2753,3 +2753,16 @@ Live-kernel head-to-heads for the metadata create/mkdir paths (RW loop mount, `o
 | mkdir | 39.4 | 51.5 | 1.31x slower |
 
 create BEATS the live kernel (1.12x). mkdir is **1.31x** slower than the LIVE kernel — this CORRECTS the earlier "~1.7x" mkdir figure (which compared to a stale/inferred kernel baseline; the real live-kernel mkdir is 39.4 µs/op, slower than assumed). The ~12 µs/op mkdir delta over create is the extra dir-block alloc+init (`.`/`..` + checksum) + the 2nd inode commit + the 3x `block_device_adapter` snapshot register/release churn (`533bf004`) — i.e. the MVCC-adjacent per-op overhead, the same `active_snapshots`-family cost that is owner-lane (read-lock+atomic refcount, `25e4ca94`). So mkdir's residual is bounded (1.31x vs live kernel) and tied to the known owner-lane primitive, not a fresh safe lever. (delete/rmdir vs-kernel not measured: `os.unlink`/`os.rmdir` are dcg-blocked in heredocs.) No code change (verification).
+
+### 2026-06-28 ⚠️⚠️RETRACTION + real measurement: my "btrfs metadata flat/at-parity" (4f78205f) was measured on `btr.img` which is EXT4 (not btrfs) — REAL btrfs metadata is SLOWER and GROWS (a missed gap) (CrimsonFox cc/opus)
+
+The fixture `/tmp/btr.img` I used for this session's "btrfs" sweeps is EXT4, not btrfs: it has ext4 magic `0xEF53` (`dumpe2fs`), the kernel mounts it `type ext4`, and frankenfs reads it via the ext4 path ("ext4 journal replay"). A real btrfs image (`/tmp/btrfs_test.img`, `/data/tmp/btrc_*.img`) makes frankenfs take the btrfs path ("btrfs chunk map expanded from chunk tree", `btrfs_mount_selection_resolved`). So **the btrfs claims in `4f78205f` (metadata flat/at-parity) and the btrfs-data-write-flat entry were actually EXT4 re-measurements — RETRACTED.**
+
+REAL btrfs metadata (on genuine btrfs images, `create-bench`/`rename-bench`, current binary):
+
+| op | N=2000 µs/op | N=20000 µs/op | shape | vs ext4 |
+| --- | --- | --- | --- | --- |
+| create | 27.5 | 49.9 | GROWS (1.81x for 10x N) | ext4 flat ~24 |
+| rename | 86.4 | 144.3 | GROWS (1.67x for 10x N) | ext4 18 (post-fix), kernel ~31 |
+
+So btrfs metadata is NOT flat/at-parity — btrfs create grows with N, and btrfs **rename is ~5-8x slower than ext4 rename and grows** (86-144 µs/op vs ext4's flat 18). This is a REAL, previously-missed btrfs metadata gap (I'd been measuring ext4 on a misnamed fixture all session). LESSON: verify the fixture's ACTUAL fs type (frankenfs log: "btrfs chunk map" vs "ext4 journal replay"; `dumpe2fs`/`btrfs filesystem show`) before labeling a measurement btrfs — a `btr*`-named image is not necessarily btrfs. The btrfs rename/create growth is the next lever target (under investigation).
