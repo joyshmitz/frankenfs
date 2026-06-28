@@ -7400,6 +7400,103 @@ pub enum HtreeSplitFallback {
 /// `htree_target_leaf_block`. Casefold directories must be handled by the caller
 /// (it knows `EXT4_CASEFOLD_FL`); pass already-exact names only.
 ///
+/// Promote a FULL single-level htree dx_root to two levels (bd-rename-2lvl, the
+/// rename O(N²) fix's first half). When `split_htree_leaf` would decline with
+/// `DxRootFull`, the dir's index is a single-level dx_root packed with leaf
+/// pointers and the kernel/ext4 answer is NOT a full directory rebuild — it is to
+/// insert an interior level: split the dx_root's leaf-pointer entries at a clean
+/// hash boundary into TWO interior dx_nodes (each ~half-full so a subsequent
+/// leaf-split has room — NOT the full-pack `build_htree_directory` chunking), and
+/// rebuild the dx_root as `indirect_levels=1` pointing at the two nodes. The
+/// caller allocates+maps two new blocks and passes their LOGICAL numbers.
+///
+/// Returns `(new_dx_root_block, dx_node_a_block, dx_node_b_block)` — three full
+/// `block_size` buffers, checksum-stamped when `has_metadata_csum`. The `.`/`..`
+/// dirent header of the dx_root (bytes `0x00..0x18`) is preserved; only the index
+/// (`0x18+`) is rewritten. Returns `None` when promotion does not apply: not
+/// single-level, fewer than two entries, no clean hash boundary, or a half would
+/// exceed `dx_node_entry_limit`.
+///
+/// This is piece (1) of the rename dx-split (see docs/NEGATIVE_EVIDENCE.md); piece
+/// (2) — splitting a dx_node on later adds — and the `split_htree_leaf`/caller
+/// wiring are the remaining work. Validated in isolation by
+/// `promote_dx_root_to_two_level_routes_every_entry`.
+#[allow(clippy::too_many_arguments)]
+pub fn promote_dx_root_to_two_level(
+    dx_root_block: &[u8],
+    block_size: usize,
+    has_metadata_csum: bool,
+    large_dir: bool,
+    node_a_logical: u32,
+    node_b_logical: u32,
+    csum_seed: u32,
+    dir_ino: u32,
+    generation: u32,
+) -> Option<(Vec<u8>, Vec<u8>, Vec<u8>)> {
+    if dx_root_block.len() != block_size {
+        return None;
+    }
+    let dx_root = parse_dx_root_with_large_dir(dx_root_block, large_dir).ok()?;
+    if dx_root.indirect_levels != 0 || dx_root.entries.len() < 2 {
+        return None;
+    }
+    let entries = &dx_root.entries;
+
+    // Clean hash boundary nearest the middle (each dx_entry is one fixed-size
+    // slot, so weight every entry equally). `choose_htree_leaf_split` only returns
+    // a boundary where the hash strictly increases, preserving the routing
+    // invariant (left covers [.., split_hash), right covers [split_hash, ..)).
+    let split_input: Vec<(u32, usize)> = entries.iter().map(|e| (e.hash, 1usize)).collect();
+    let (split_index, split_hash) = choose_htree_leaf_split(&split_input)?;
+
+    let node_limit = dx_node_entry_limit(block_size, has_metadata_csum);
+    let (left, right) = entries.split_at(split_index);
+    if left.is_empty()
+        || right.is_empty()
+        || left.len() > usize::from(node_limit)
+        || right.len() > usize::from(node_limit)
+    {
+        return None;
+    }
+
+    let mut node_a = vec![0_u8; block_size];
+    write_dx_node(&mut node_a, node_limit, left).ok()?;
+    let mut node_b = vec![0_u8; block_size];
+    write_dx_node(&mut node_b, node_limit, right).ok()?;
+
+    // New dx_root: two entries, `indirect_levels = 1`. Entry 0's hash is implicit
+    // (0); entry 1 routes hashes >= `split_hash` to node B. Preserve `.`/`..`
+    // (0x00..0x18) by starting from the original block.
+    let root_entries = [
+        Ext4DxEntry {
+            hash: 0,
+            block: node_a_logical,
+        },
+        Ext4DxEntry {
+            hash: split_hash,
+            block: node_b_logical,
+        },
+    ];
+    let root_limit = dx_root_entry_limit(block_size, has_metadata_csum);
+    let mut new_root = dx_root_block.to_vec();
+    write_dx_root(
+        &mut new_root,
+        dx_root.hash_version,
+        1,
+        root_limit,
+        &root_entries,
+    )
+    .ok()?;
+
+    if has_metadata_csum {
+        stamp_dx_block_checksum(&mut node_a, csum_seed, dir_ino, generation, DX_NODE_COUNT_OFFSET);
+        stamp_dx_block_checksum(&mut node_b, csum_seed, dir_ino, generation, DX_NODE_COUNT_OFFSET);
+        stamp_dx_block_checksum(&mut new_root, csum_seed, dir_ino, generation, DX_ROOT_COUNT_OFFSET);
+    }
+
+    Some((new_root, node_a, node_b))
+}
+
 /// Pinned by `htree_leaf_split_*` unit tests: the split is navigable by the
 /// read-half for every entry and every block's checksum verifies.
 #[allow(clippy::too_many_arguments)]
@@ -10617,6 +10714,64 @@ mod tests {
                 }
                 other => panic!("entry {name:?} not reachable: {other:?}"),
             }
+        }
+    }
+
+    /// bd-rename-2lvl piece (1): `promote_dx_root_to_two_level` must produce a
+    /// two-level index through which EVERY original leaf is still reachable by the
+    /// read-half descent (dx_root → dx_node → leaf), and leave both dx_nodes
+    /// under-full so a subsequent leaf-split has room.
+    #[test]
+    fn promote_dx_root_to_two_level_routes_every_entry() {
+        let block_size = 4096usize;
+        // Build a single-level dx_root with N leaf pointers, hashes strictly
+        // increasing so a clean boundary exists. Entry 0's hash is implicit (0).
+        let n = 40u32;
+        let leaves: Vec<Ext4DxEntry> = (0..n)
+            .map(|i| Ext4DxEntry {
+                hash: i * 1000,
+                block: 100 + i, // leaf logical blocks
+            })
+            .collect();
+        let root_limit = dx_root_entry_limit(block_size, false);
+        let mut root = vec![0u8; block_size];
+        write_dx_root(&mut root, 1, 0, root_limit, &leaves).expect("build single-level root");
+
+        let (a_log, b_log) = (900u32, 901u32);
+        let (new_root, node_a, node_b) =
+            promote_dx_root_to_two_level(&root, block_size, false, false, a_log, b_log, 0, 2, 7)
+                .expect("promotion applies");
+
+        // New root is two-level with exactly two entries.
+        let parsed_root = parse_dx_root_with_large_dir(&new_root, false).expect("parse new root");
+        assert_eq!(parsed_root.indirect_levels, 1, "must be two-level");
+        assert_eq!(parsed_root.entries.len(), 2, "root indexes two dx_nodes");
+
+        let a_entries = parse_dx_entries(&node_a, DX_NODE_COUNT_OFFSET).expect("parse node a");
+        let b_entries = parse_dx_entries(&node_b, DX_NODE_COUNT_OFFSET).expect("parse node b");
+        // Each node is under-full (room for a future leaf-split).
+        let node_limit = usize::from(dx_node_entry_limit(block_size, false));
+        assert!(a_entries.len() < node_limit && b_entries.len() < node_limit);
+        assert_eq!(a_entries.len() + b_entries.len(), leaves.len(), "no entry dropped");
+
+        // ORACLE: for every original (hash, leaf), the two-level descent reaches
+        // the same leaf block the single-level index pointed at.
+        for leaf in &leaves {
+            let ridx = dx_find_leaf_idx(&parsed_root.entries, leaf.hash);
+            let node_logical = parsed_root.entries[ridx].block;
+            let node_entries = if node_logical == a_log {
+                &a_entries
+            } else if node_logical == b_log {
+                &b_entries
+            } else {
+                panic!("root routed to an unknown dx_node block {node_logical}");
+            };
+            let nidx = dx_find_leaf_idx(node_entries, leaf.hash);
+            assert_eq!(
+                node_entries[nidx].block, leaf.block,
+                "hash {} routed to leaf {} but should reach {}",
+                leaf.hash, node_entries[nidx].block, leaf.block
+            );
         }
     }
 
