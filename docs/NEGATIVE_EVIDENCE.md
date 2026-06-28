@@ -2787,3 +2787,18 @@ Deeper read of the COW path corrects the impact estimate in `19bd2cad`. `insert_
 - But the DOMINANT 4.6x is CROSS-batch: each rename is a SEPARATE batch that re-COWs the whole root→leaf path FROM THE COMMITTED ROOT, because frankenfs commits per FsOp. The btrfs KERNEL keeps the b-tree dirty in memory and COWs each node ONCE PER TRANSACTION (flushing at sync), so its per-rename cost is an in-memory node touch, not a from-root re-COW. That gap is the per-op COMMIT GRANULARITY — the same structural "commit batching / metadata-write deferral" lever as bd-bhh0i (IvoryBirch's listed structural work), owner-lane.
 
 CONCLUSION: the in-place-staged-internals lever (`19bd2cad`) is real but only ~1.16x (intra-batch), and it is an intricate, corruption-risky btrfs-core COW-descent restructure — LOW EV for the gain. The btrfs rename 4.6x vs kernel is mostly per-op commit granularity (structural, owner-lane), joining the ext4 write/mkdir residuals in the "inherent MVCC/commit per-op overhead" category. The fixture-error discovery (btrfs measurements were ext4) and the real 4.6x-vs-kernel measurement stand; the local lever is downgraded to modest/owner-lane. No code change (analysis refinement).
+
+### 2026-06-28 SYNTHESIS: every remaining vs-kernel residual reduces to ONE root cause — per-op COMMIT GRANULARITY; the single structural lever (commit batching / write deferral) would address all of them (CrimsonFox cc/opus)
+
+Pulling the session's kernel-verified results together, the gaps split cleanly into SHIPPED-and-fixed (the O(N^2) cliffs) vs a single remaining structural root cause:
+
+| path | vs live kernel | status |
+| --- | --- | --- |
+| ext4 rename | 1.71x FASTER | SHIPPED (`51294142`, O(N^2)→O(N)) |
+| ext4 create | 1.12x FASTER | at/above kernel |
+| ext4 read (seq/rand/parallel) | parity / faster | harvested |
+| ext4 write (4 KiB sparse-fill) | 1.52x slower | per-op MVCC commit residual |
+| ext4 mkdir | 1.31x slower | per-op MVCC commit + dir-setup residual |
+| btrfs rename | 4.6x slower | per-op COW-from-committed-root residual |
+
+The three remaining residuals (ext4 write 1.52x, ext4 mkdir 1.31x, btrfs rename 4.6x — btrfs worst because its COW b-tree re-COWs root→leaf from the committed root each op) are the SAME phenomenon: **FrankenFS commits per FsOp**, so every metadata/data op pays a full MVCC commit (version install + publication gate + per-op `active_snapshots` adapter register/release) and, on btrfs, a full from-root COW. The **kernel amortizes**: it keeps metadata dirty in memory, COWs/dirties each node once per TRANSACTION, and flushes once at `sync`. So the single structural lever that would close ALL three residuals (and bd-bhh0i parallel-write, profile-confirmed futex/inherent) is **commit batching / metadata-write deferral** — coalescing many FsOps into one transaction/flush, exactly IvoryBirch's listed bd-bhh0i structural direction. This is owner-lane (it changes the commit/transaction model — durability, crash-consistency, snapshot-visibility semantics; not a safe blind per-crate change). CONCLUSION of the vs-kernel sweep: FrankenFS is at/above the live kernel for rename+create+read; the remaining write/mkdir/btrfs-rename residuals are one structural commit-granularity gap, owner-lane. The safe-Rust per-op lever space is exhausted and kernel-verified.
