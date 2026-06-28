@@ -17740,17 +17740,19 @@ impl OpenFs {
         };
 
         let resolve = |logical: u32| -> Option<u64> {
-            for ext in extents {
-                if ext.is_unwritten() {
-                    continue;
-                }
-                let start = ext.logical_block;
-                let len = u32::from(ext.actual_len());
-                if logical >= start && logical < start.saturating_add(len) {
-                    return Some(ext.physical_start + u64::from(logical - start));
-                }
+            // Directory extents are sorted and non-overlapping. The covering
+            // extent, if any, is the last one whose start is <= `logical`; this
+            // avoids an O(extents) scan for every block read/write during a
+            // fallback htree rebuild of a fragmented large directory.
+            let pos = extents.partition_point(|e| e.logical_block <= logical);
+            let ext = extents.get(pos.checked_sub(1)?)?;
+            if ext.is_unwritten() {
+                return None;
             }
-            None
+            let start = ext.logical_block;
+            let len = u32::from(ext.actual_len());
+            (logical >= start && logical < start.saturating_add(len))
+                .then_some(ext.physical_start + u64::from(logical - start))
         };
 
         let n_blocks = u32::try_from(parent_inode.size / block_size_u64)

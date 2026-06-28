@@ -20,10 +20,13 @@ use std::hint::black_box;
 
 const E: u32 = 512; // extents in a fragmented large directory
 const R: u32 = 4; // resolve_logical calls per insert (htree descent + target)
+const REBUILD_E: u32 = 4096; // one-block extents in a fragmented rebuild input
 
 /// (logical_start, len, physical_start) — length-1 extents 0..E.
-fn build_extents() -> Vec<(u32, u32, u64)> {
-    (0..E).map(|i| (i, 1, 900_000_u64 + u64::from(i))).collect()
+fn build_extents(count: u32) -> Vec<(u32, u32, u64)> {
+    (0..count)
+        .map(|i| (i, 1, 900_000_u64 + u64::from(i)))
+        .collect()
 }
 
 /// OLD: linear scan, skipping unwritten (none here), first covering extent.
@@ -45,7 +48,7 @@ fn binary(extents: &[(u32, u32, u64)], logical: u32) -> Option<u64> {
 }
 
 fn bench_resolve_logical(c: &mut Criterion) {
-    let extents = build_extents();
+    let extents = build_extents(E);
     // Htree descent touches blocks spread across the directory.
     let probes: Vec<u32> = (0..R).map(|i| (i * (E / R)) % E).collect();
 
@@ -75,5 +78,39 @@ fn bench_resolve_logical(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_resolve_logical);
+fn bench_rebuild_resolve_logical(c: &mut Criterion) {
+    let extents = build_extents(REBUILD_E);
+    let logicals: Vec<u32> = (0..REBUILD_E).collect();
+
+    for &p in &logicals {
+        assert_eq!(linear(&extents, p), binary(&extents, p), "diverged at {p}");
+    }
+
+    let mut group = c.benchmark_group("htree_rebuild_resolve_all_4096blocks_over_4096ext");
+    group.bench_function("linear_scan", |b| {
+        b.iter(|| {
+            let mut acc = 0_u64;
+            for &p in black_box(&logicals) {
+                acc ^= linear(black_box(&extents), p).unwrap_or(0);
+            }
+            black_box(acc)
+        });
+    });
+    group.bench_function("binary_partition_point", |b| {
+        b.iter(|| {
+            let mut acc = 0_u64;
+            for &p in black_box(&logicals) {
+                acc ^= binary(black_box(&extents), p).unwrap_or(0);
+            }
+            black_box(acc)
+        });
+    });
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_resolve_logical,
+    bench_rebuild_resolve_logical
+);
 criterion_main!(benches);
