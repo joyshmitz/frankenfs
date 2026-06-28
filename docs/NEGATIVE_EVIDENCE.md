@@ -2730,3 +2730,15 @@ Closed the loop on the headline rename win with a direct LIVE-KERNEL head-to-hea
 | frankenfs (`ffs-cli rename-bench`, current main) | **18.1** | **55,381** | **1.71x FASTER** |
 
 So the preflight target-leaf fix (`51294142`, which turned the rename O(N²) into O(N) by checking only the hash-target leaf instead of all dir blocks) doesn't just beat old-frankenfs — it **beats the live Linux ext4 kernel by 1.71x** at N=40000 (pre-fix frankenfs was O(N²), ~108 µs/op ≈ 3.5x SLOWER than the kernel's flat ~31 µs/op). This is the definitive vs-kernel confirmation of the session's headline metadata win. Method: `sudo mount -o loop` (RW) the throwaway image for the kernel side; `ffs-cli rename-bench` on a separate fresh copy for frankenfs; both include the durability sync. No code change (verification).
+
+### 2026-06-28 ⭐VERIFIED vs LIVE KERNEL: the extent-coalescing fix (2aa92946) closes 4 KiB sparse-fill from ~170x SLOWER to 1.52x vs a live ext4 mount; residual 1.52x is inherent MVCC write-path overhead (CrimsonFox cc/opus)
+
+Live-kernel head-to-head for the write-coalescing win (4 KiB sequential fill of a sparse/hole file, the fine-grained allocation path). Same workload both sides — sparse file, 40000 sequential 4 KiB writes (each allocates), + a final sync:
+
+| 4 KiB sparse-fill N=40000 + sync | µs/op | MB/s | ratio |
+| --- | --- | --- | --- |
+| live ext4 kernel (RW loop mount, `pwrite` loop) | 5.8 | 703 | 1.0x |
+| frankenfs current (coalescing) | 8.8 | 444 | 1.52x slower |
+| frankenfs PRE-coalescing (`O(N^2)`) | ~991 | ~4 | ~170x slower |
+
+So the coalescing fix (`2aa92946`, written-extent merge on the write-alloc path) took fine-grained sparse-fill from **~170x slower than the kernel to 1.52x** — frankenfs writes are now within a small constant of the live kernel. The residual 1.52x (≈3 µs/op) is the inherent frankenfs write-path overhead per 4 KiB block — the full MVCC commit (version install + publication + per-op adapter snapshot register/release) vs the kernel's direct page write + delayed allocation. That residual is the same MVCC commit/adapter machinery behind bd-bhh0i (publication gate + `active_snapshots`, profile-confirmed futex/inherent + owner-lane), not a separate safe lever. Confirms the second shipped win vs a live kernel. No code change (verification).
