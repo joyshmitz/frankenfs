@@ -2691,3 +2691,14 @@ While root-causing bd-bhh0i I found `FsMvccStore::sharded()` (the production par
 | 32 | 10.53 ms | 8.15 ms | **1.29x** |
 
 FIX: `sharded()` now uses `ShardedMvccStore::for_host_parallelism()`. CORRECTNESS-IDENTICAL — more shards, same semantics; no change to the snapshot/prune/lock-ordering machinery; the bench's own use of `for_host_parallelism` is already conformance/test-covered. This removes the shard-lock-contention COMPONENT of parallel writes (16+ writers); the RESIDUAL gap (bd-bhh0i, ~8x at 8 threads) is the GLOBAL `active_snapshots.write()` lock (`edc90b1b`), which shard count does not address (the bench already had 256 shards and still scaled negatively). 8-writer neutral, so no regression at low concurrency. File: crates/ffs-core/src/fs_mvcc_store.rs.
+
+### 2026-06-28 ❌REVERT (~marginal + non-portable): bumping `FFS_CACHE_SHARDS` 16→64 = only 1.05x parallel read — the read-cache path is already near-optimal at 16 shards (CrimsonFox cc/opus)
+
+Applied the config-mismatch lesson (from the shipped MVCC shard win `a2807896`) to the read-side `ShardedCache` (7 block caches, `Mutex<BTreeMap>` shards keyed `% FFS_CACHE_SHARDS=16`, lib.rs:1294). A/B parallel random read (`ffs-cli rand-read --parallel`, 500000×4 KiB, warm, 64-core, median of 3):
+
+| FFS_CACHE_SHARDS | parallel rand-read |
+| --- | --- |
+| 16 (current) | ~31,450 MiB/s |
+| 64 | ~33,170 MiB/s |
+
+Only **1.05x** (clean separation but marginal). REVERTED: (1) the gain is ~5%, near `~0-gain`; (2) `FFS_CACHE_SHARDS` is a `const` (used in `[bool; FFS_CACHE_SHARDS]` array sizes, lib.rs:1336), so a hardcoded 64 is NON-PORTABLE — it 4x's per-cache shard memory on small-core boxes for no benefit; a portable host-sized version would need de-const-ifying those arrays (a bigger change not justified by ~5%). The parallel-read path is already healthy (scales 11.6x, 31 GB/s warm — not bandwidth- or cache-shard-bound). Distinct from the MVCC store shard win (that used the existing `for_host_parallelism()` constructor, was 1.17-1.29x, and the version-store contention IS shard-sensitive; the read cache's brief `get()` critical section — BTreeMap lookup + Arc-clone — is not). NOTE: the comment at lib.rs:1290 already documents that Mutex-shards beat RwLock here (RwLock's reader-count atomic ping-pongs, measured 1.8-2.8x worse) — so RwLock-ifying the cache is also a known dead end. No production change.
