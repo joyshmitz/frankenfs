@@ -1079,6 +1079,8 @@ mod tests {
                 flags: 0,
                 block_bitmap_csum: 0,
                 inode_bitmap_csum: 0,
+                reserved_cache: std::sync::OnceLock::new(),
+                reserved_confirmed: std::sync::OnceLock::new(),
             })
             .collect()
     }
@@ -2921,6 +2923,8 @@ mod tests {
             flags: 0,
             block_bitmap_csum: 0,
             inode_bitmap_csum: 0,
+            reserved_cache: std::sync::OnceLock::new(),
+            reserved_confirmed: std::sync::OnceLock::new(),
         }];
         let inode = Ext4Inode {
             mode: 0o100_644,
