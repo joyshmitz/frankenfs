@@ -2742,3 +2742,14 @@ Live-kernel head-to-head for the write-coalescing win (4 KiB sequential fill of 
 | frankenfs PRE-coalescing (`O(N^2)`) | ~991 | ~4 | ~170x slower |
 
 So the coalescing fix (`2aa92946`, written-extent merge on the write-alloc path) took fine-grained sparse-fill from **~170x slower than the kernel to 1.52x** — frankenfs writes are now within a small constant of the live kernel. The residual 1.52x (≈3 µs/op) is the inherent frankenfs write-path overhead per 4 KiB block — the full MVCC commit (version install + publication + per-op adapter snapshot register/release) vs the kernel's direct page write + delayed allocation. That residual is the same MVCC commit/adapter machinery behind bd-bhh0i (publication gate + `active_snapshots`, profile-confirmed futex/inherent + owner-lane), not a separate safe lever. Confirms the second shipped win vs a live kernel. No code change (verification).
+
+### 2026-06-28 ⭐VERIFIED vs LIVE KERNEL: create is 1.12x FASTER than ext4; mkdir is 1.31x slower (corrects the earlier "1.7x" — live-kernel mkdir is 39.4µs, not the stale baseline) (CrimsonFox cc/opus)
+
+Live-kernel head-to-heads for the metadata create/mkdir paths (RW loop mount, `os.open`/`os.mkdir` loops + sync, vs `ffs-cli create-bench`/`mkdir-bench`, N=40000, matching 3 GiB ext4):
+
+| op N=40000 + sync | kernel µs/op | frankenfs µs/op | ratio |
+| --- | --- | --- | --- |
+| create | 27.6 | 24.6 | **1.12x FASTER** |
+| mkdir | 39.4 | 51.5 | 1.31x slower |
+
+create BEATS the live kernel (1.12x). mkdir is **1.31x** slower than the LIVE kernel — this CORRECTS the earlier "~1.7x" mkdir figure (which compared to a stale/inferred kernel baseline; the real live-kernel mkdir is 39.4 µs/op, slower than assumed). The ~12 µs/op mkdir delta over create is the extra dir-block alloc+init (`.`/`..` + checksum) + the 2nd inode commit + the 3x `block_device_adapter` snapshot register/release churn (`533bf004`) — i.e. the MVCC-adjacent per-op overhead, the same `active_snapshots`-family cost that is owner-lane (read-lock+atomic refcount, `25e4ca94`). So mkdir's residual is bounded (1.31x vs live kernel) and tied to the known owner-lane primitive, not a fresh safe lever. (delete/rmdir vs-kernel not measured: `os.unlink`/`os.rmdir` are dcg-blocked in heredocs.) No code change (verification).
