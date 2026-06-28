@@ -20065,7 +20065,7 @@ impl OpenFs {
                             groups,
                             persist_ctx,
                         } = &mut *alloc;
-                        ffs_extent::allocate_extent(
+                        ffs_extent::allocate_extent_coalescing(
                             cx,
                             &tx_dev,
                             &mut root_bytes,
@@ -20086,7 +20086,7 @@ impl OpenFs {
                             groups,
                             persist_ctx,
                         } = &mut *alloc;
-                        ffs_extent::allocate_extent(
+                        ffs_extent::allocate_extent_coalescing(
                             cx,
                             &block_dev,
                             &mut root_bytes,

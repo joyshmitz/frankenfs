@@ -365,6 +365,8 @@ impl BlockAllocator for GroupBlockAllocator<'_> {
 /// (goal = after last extent for contiguity).
 ///
 /// Returns the mapping for the newly allocated extent.
+/// Allocate and map `count` contiguous logical blocks, NON-coalescing: the new
+/// extent is always a distinct tree entry. See [`allocate_extent_coalescing`].
 #[expect(clippy::too_many_arguments)]
 pub fn allocate_extent(
     cx: &Cx,
@@ -377,6 +379,50 @@ pub fn allocate_extent(
     hint: &AllocHint,
     pctx: &ffs_alloc::PersistCtx,
     owner: ExtentOwner,
+) -> Result<ExtentMapping> {
+    allocate_extent_inner(
+        cx, dev, root_bytes, geo, groups, logical_start, count, hint, pctx, owner, false,
+    )
+}
+
+/// Like [`allocate_extent`], but COALESCES the new extent into a contiguous
+/// written predecessor (ext4 adjacent-extent merge) so a sequential write run
+/// stays O(1) extents instead of one per allocation — the latter makes per-write
+/// `collect_extents` re-walks O(N^2) for fine-grained writes
+/// (docs/NEGATIVE_EVIDENCE.md). The returned mapping still reports only the
+/// newly-allocated blocks (for i_blocks accounting); merging only changes how
+/// the extent tree records them. Use on the file data-write path only.
+#[expect(clippy::too_many_arguments)]
+pub fn allocate_extent_coalescing(
+    cx: &Cx,
+    dev: &dyn BlockDevice,
+    root_bytes: &mut [u8; 60],
+    geo: &FsGeometry,
+    groups: &mut [GroupStats],
+    logical_start: u32,
+    count: u32,
+    hint: &AllocHint,
+    pctx: &ffs_alloc::PersistCtx,
+    owner: ExtentOwner,
+) -> Result<ExtentMapping> {
+    allocate_extent_inner(
+        cx, dev, root_bytes, geo, groups, logical_start, count, hint, pctx, owner, true,
+    )
+}
+
+#[expect(clippy::too_many_arguments)]
+fn allocate_extent_inner(
+    cx: &Cx,
+    dev: &dyn BlockDevice,
+    root_bytes: &mut [u8; 60],
+    geo: &FsGeometry,
+    groups: &mut [GroupStats],
+    logical_start: u32,
+    count: u32,
+    hint: &AllocHint,
+    pctx: &ffs_alloc::PersistCtx,
+    owner: ExtentOwner,
+    coalesce: bool,
 ) -> Result<ExtentMapping> {
     cx_checkpoint(cx)?;
 
@@ -418,7 +464,11 @@ pub fn allocate_extent(
         ino: owner.ino,
         generation: owner.generation,
     };
-    ffs_btree::insert(cx, dev, root_bytes, extent, &mut tree_alloc)?;
+    if coalesce {
+        ffs_btree::insert_coalescing(cx, dev, root_bytes, extent, &mut tree_alloc)?;
+    } else {
+        ffs_btree::insert(cx, dev, root_bytes, extent, &mut tree_alloc)?;
+    }
 
     Ok(ExtentMapping {
         logical_start,
@@ -1967,6 +2017,8 @@ mod tests {
                 flags: 0,
                 block_bitmap_csum: 0,
                 inode_bitmap_csum: 0,
+                reserved_cache: std::sync::OnceLock::new(),
+                reserved_confirmed: std::sync::OnceLock::new(),
             })
             .collect()
     }

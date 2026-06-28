@@ -584,12 +584,71 @@ fn write_node(
 ///
 /// Returns the (possibly modified) root bytes. If the tree needed to grow
 /// in depth, new blocks are allocated via `alloc`.
+/// Try to merge a newly-allocated `new` extent into its contiguous WRITTEN
+/// predecessor `prev`, extending `prev` in place. Returns `true` on merge.
+///
+/// This is ext4's standard adjacent-extent coalescing: two written extents
+/// (`raw_len <= EXT_INIT_MAX_LEN`) that are exactly logical- AND
+/// physically-contiguous and whose combined length still fits one written
+/// extent become a single extent. Unwritten extents (`raw_len >
+/// EXT_INIT_MAX_LEN`) never merge (their boundaries are semantically
+/// significant for `mark_written`/fallocate). Used only on the allocation path
+/// (`insert_coalescing`) so a physically-contiguous sequential write run stays
+/// O(1) extents instead of one extent per block (which made `collect_extents`
+/// re-walks O(N^2) for fine-grained allocation — see docs/NEGATIVE_EVIDENCE.md).
+fn try_merge_written(prev: &mut Ext4Extent, new: &Ext4Extent) -> bool {
+    if prev.raw_len == 0 || prev.raw_len > EXT_INIT_MAX_LEN {
+        return false; // prev empty or unwritten
+    }
+    if new.raw_len == 0 || new.raw_len > EXT_INIT_MAX_LEN {
+        return false; // new empty or unwritten
+    }
+    if u64::from(prev.logical_block) + u64::from(prev.raw_len) != u64::from(new.logical_block) {
+        return false; // logical gap
+    }
+    if prev.physical_start + u64::from(prev.raw_len) != new.physical_start {
+        return false; // physical gap
+    }
+    let combined = u32::from(prev.raw_len) + u32::from(new.raw_len);
+    if combined > u32::from(EXT_INIT_MAX_LEN) {
+        return false; // would exceed a single written extent
+    }
+    prev.raw_len += new.raw_len;
+    true
+}
+
 pub fn insert(
     cx: &Cx,
     dev: &dyn BlockDevice,
     root_bytes: &mut [u8; 60],
     extent: Ext4Extent,
     alloc: &mut dyn BlockAllocator,
+) -> Result<()> {
+    insert_inner(cx, dev, root_bytes, extent, alloc, false)
+}
+
+/// Like [`insert`], but coalesces the new extent into a contiguous written
+/// predecessor when possible (ext4 adjacent-extent merge). Use ONLY for the
+/// data-block allocation path (`allocate_extent`); `collapse_range` /
+/// `insert_range` keep the plain non-coalescing [`insert`] so their exact
+/// extent boundaries are preserved.
+pub fn insert_coalescing(
+    cx: &Cx,
+    dev: &dyn BlockDevice,
+    root_bytes: &mut [u8; 60],
+    extent: Ext4Extent,
+    alloc: &mut dyn BlockAllocator,
+) -> Result<()> {
+    insert_inner(cx, dev, root_bytes, extent, alloc, true)
+}
+
+fn insert_inner(
+    cx: &Cx,
+    dev: &dyn BlockDevice,
+    root_bytes: &mut [u8; 60],
+    extent: Ext4Extent,
+    alloc: &mut dyn BlockAllocator,
+    coalesce: bool,
 ) -> Result<()> {
     let (header, _) = parse_header(root_bytes)?;
     validate_header(&header, ROOT_MAX_ENTRIES)?;
@@ -607,6 +666,12 @@ pub fn insert(
         // Leaf root: try to insert directly.
         let mut extents = parse_leaf_entries(root_bytes, &header)?;
         let insert_pos = extents.partition_point(|e| e.logical_block < extent.logical_block);
+
+        // Coalesce into the contiguous written predecessor (no new entry).
+        if coalesce && insert_pos > 0 && try_merge_written(&mut extents[insert_pos - 1], &extent) {
+            write_leaf_root(root_bytes, &header, &extents);
+            return Ok(());
+        }
 
         if usize::from(header.entries) < usize::from(header.max_entries) {
             // Space available: insert in sorted position.
@@ -627,7 +692,7 @@ pub fn insert(
     let child_block = indexes[child_pos].leaf_block;
     let old_separator = indexes[child_pos].logical_block;
 
-    let split = insert_descend(cx, dev, child_block, header.depth - 1, extent, alloc)?;
+    let split = insert_descend(cx, dev, child_block, header.depth - 1, extent, alloc, coalesce)?;
 
     // If the new extent became the first key in the child subtree,
     // the parent separator must be updated to match.
@@ -673,6 +738,7 @@ fn insert_descend(
     depth: u16,
     extent: Ext4Extent,
     alloc: &mut dyn BlockAllocator,
+    coalesce: bool,
 ) -> Result<Option<Ext4ExtentIndex>> {
     cx_checkpoint(cx)?;
 
@@ -687,6 +753,17 @@ fn insert_descend(
         // Leaf node.
         let mut extents = parse_leaf_entries(data, &header)?;
         let insert_pos = extents.partition_point(|e| e.logical_block < extent.logical_block);
+
+        // Coalesce into the contiguous written predecessor (no new entry, no
+        // split). The predecessor's logical_block is unchanged, so no parent
+        // separator update is needed. Cross-leaf coalescing (predecessor in a
+        // prior leaf, i.e. insert_pos == 0) is intentionally skipped — it falls
+        // back to a plain insert, which stays correct.
+        if coalesce && insert_pos > 0 && try_merge_written(&mut extents[insert_pos - 1], &extent) {
+            let new_data = serialize_leaf_block(block_size, &extents);
+            write_node(cx, dev, &*alloc, BlockNumber(block), new_data)?;
+            return Ok(None);
+        }
 
         if usize::from(header.entries) < usize::from(max) {
             // Space available.
@@ -734,7 +811,7 @@ fn insert_descend(
         let child_block = indexes[child_pos].leaf_block;
         let old_separator = indexes[child_pos].logical_block;
 
-        let split = insert_descend(cx, dev, child_block, depth - 1, extent, alloc)?;
+        let split = insert_descend(cx, dev, child_block, depth - 1, extent, alloc, coalesce)?;
 
         // If the new extent became the first key in the child subtree,
         // the parent separator must be updated to match.
