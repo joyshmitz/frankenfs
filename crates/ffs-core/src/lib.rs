@@ -29472,12 +29472,21 @@ impl OpenFs {
         uid: u32,
         gid: u32,
     ) -> ffs_error::Result<InodeAttr> {
-        let result = self.handle_ext4_write_result(
-            "create",
-            self.with_latest_scope(|scope| {
-                <Self as FsOps>::create(self, cx, scope, parent, name, mode, uid, gid)
-            }),
-        );
+        fs_mvcc_store::op_batch_begin();
+        let inner = self.with_latest_scope(|scope| {
+            <Self as FsOps>::create(self, cx, scope, parent, name, mode, uid, gid)
+        });
+        let mut result = self.handle_ext4_write_result("create", inner);
+        // Commit the op's staged block writes as ONE transaction (bd-bhh0i), or
+        // discard them on failure (atomic rollback). Must run before the
+        // name-index update below, which reads the parent's committed state.
+        if result.is_ok() {
+            if let Err(err) = self.mvcc_store.op_batch_commit_if_active() {
+                result = Err(FfsError::Format(format!("op-batch commit failed: {err}")));
+            }
+        } else {
+            fs_mvcc_store::op_batch_abort();
+        }
         if result.is_ok() {
             // bd-f8rd8: keep the parent's negative-lookup name index current so a
             // create-heavy directory's existence checks stay O(1) instead of
