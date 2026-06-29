@@ -3286,3 +3286,17 @@ Completing the matrix with the parallel-write row (8-way, +sync, real kernel ext
 | ratio (ffs/kernel) | 0.84x | **0.18x (kernel 5.5x faster)** | — |
 
 This is the campaign's BIGGEST measured gap vs the kernel: at 8 parallel writers the kernel scales 3.4x while frankenfs NEGATIVELY scales (29.4k→21.4k), opening a **5.5x** deficit. Root cause is the bd-bhh0i commit-path convoy already diagnosed+measured this session: per-FsOp commits funnel through the GLOBAL in-order `CommitPublicationGate` mutex + the GLOBAL `active_snapshots` RwLock (register/release per adapter), serializing — and convoying — all parallel committers. Both safe-Rust attempts to fix the gate are REFUTED with measurement (retry-spin busy-spins; CAS-once regresses via failed-CAS cache-line contention); the only remaining lever is the owner-lane reduction of commits-per-FsOp (intra-op batching via `commit_request_scope` unification) which also relieves the gate frequency Nx. NET measured standing: frankenfs beats kernel on ext4 rename (1.61x), btrfs create (1.16x), btrfs mkdir (9.6x); trails on ext4 create/mkdir (single-thread, ~0.8x) and — by far the largest — PARALLEL ext4 create (0.18x / 5.5x). The 5.5x parallel-write gap is the single highest-value target and is squarely owner-lane.
+
+### 2026-06-29 ⭐SHIPPED (MEASURED perf win): byte-wise inode-bitmap padding fill — create 1.14x / parallel 1.18x (CrimsonFox)
+
+A `perf record` of parallel `create-bench` (8t, count=40000, release-perf symbolized) found `ffs_alloc::fill_inode_bitmap_padding_with_clear_undo` as the #1 frankenfs self-time function at **13.48%** — a regression from this session's own inode-bitmap-padding correctness fix (42c56abc): it iterated the contiguous padding region (`inodes_per_group`..end ≈ 7168 bits) ONE BIT AT A TIME with a per-bit `bitmap_get`, on EVERY inode alloc, even though after the first alloc the whole region is already `0xFF`.
+
+FIX (ffs-alloc, byte-wise): skip whole already-`0xFF` bytes in O(1); only descend to bits in non-full bytes, recording just the NEWLY-set bits for rollback (so the rollback contract is byte-identical and the common already-padded case touches zero individual bits).
+
+MEASURED (local build, create-bench, vs this session's pre-fix baseline same binary minus this function):
+| | before (bit-wise) | after (byte-wise) | ratio |
+| --- | --- | --- | --- |
+| single-thread create | ~29,400/s | ~33,025/s | **1.14x** |
+| 8-thread create | ~21,441/s | ~25,310/s | **1.18x** |
+
+Matches the profile (removing ~13% self-time → ~1.15x). Conformance GREEN: ffs-alloc 213/0 (incl. the persist-rollback-restore test — byte-wise yields the same undo set), e2fsck 0 errors on both create- and mkdir-bench images (padding still correct). Helps every inode allocation (create + mkdir). This also narrows the measured vs-kernel ext4 gaps: single-thread create 0.84x→~0.94x, mkdir likewise improved.

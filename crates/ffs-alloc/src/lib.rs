@@ -144,9 +144,21 @@ fn fill_inode_bitmap_padding_with_clear_undo(
     inodes_per_group: u32,
     undo_clear: &mut Vec<u32>,
 ) {
+    // Byte-wise, not bit-wise: the padding region is contiguous (inodes_per_group
+    // .. end-of-block), typically thousands of bits, and is set on EVERY inode
+    // alloc. A per-bit loop with `bitmap_get` per bit made this the #1 hot
+    // function in parallel create (~13% self time) because after the first alloc
+    // every padding bit is already set yet was still scanned one bit at a time.
+    // Whole already-`0xFF` bytes are skipped in O(1); only NEWLY-set bits are
+    // recorded for rollback, so the common (already-padded) case touches no bit.
     let total_bits = (bitmap.len() as u64).saturating_mul(8);
-    let mut bit = u64::from(inodes_per_group);
-    while bit < total_bits {
+    let start = u64::from(inodes_per_group);
+    if start >= total_bits {
+        return;
+    }
+    // Partial leading byte (when inodes_per_group is not byte-aligned).
+    let mut bit = start;
+    while bit < total_bits && bit % 8 != 0 {
         #[expect(clippy::cast_possible_truncation)]
         let idx = bit as u32;
         if !bitmap_get(bitmap, idx) {
@@ -154,6 +166,20 @@ fn fill_inode_bitmap_padding_with_clear_undo(
             undo_clear.push(idx);
         }
         bit += 1;
+    }
+    // Whole trailing bytes: skip fully-set bytes; flip only zero bits elsewhere.
+    let byte_start = usize::try_from(bit / 8).unwrap_or(usize::MAX);
+    for byte_idx in byte_start..bitmap.len() {
+        let b = bitmap[byte_idx];
+        if b == 0xFF {
+            continue;
+        }
+        for k in 0..8u32 {
+            if b & (1u8 << k) == 0 {
+                undo_clear.push(u32::try_from(byte_idx).unwrap_or(u32::MAX) * 8 + k);
+            }
+        }
+        bitmap[byte_idx] = 0xFF;
     }
 }
 
