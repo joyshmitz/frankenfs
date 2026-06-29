@@ -3370,3 +3370,15 @@ With the write path mined (3 wins, single-thread create now beats kernel) and th
 BLOCKER (why not landed this turn): cannot build a rand-read data fixture via the CLI to measure the actual parallel-read win. `rand-read`/`write-bench` require a PRE-SIZED file with data; `create-bench` makes only EMPTY files (`/t{t}/cb_{t}_{i:08}`), and `write-bench` refuses an empty/too-small file ("file 0 B smaller than write size") rather than extending it. The real-kernel route (mount + dd + umount) is umount-blocked. So the MEASURED ratio the campaign requires is unobtainable for this lever right now.
 
 ACTIONABLE NEXT STEP (unblock then land): add a CLI affordance to create a sized data file (e.g. write-bench `--create`/`--extend`, or a `fallocate`+fill subcommand), OR identify a path inside an existing data-bearing image (e.g. /data/tmp/indfrag_*.img). Then env-toggle A/B the Mutex→RwLock ShardedCache change on parallel rand-read (target) + single-thread create (regression gate) + conformance/e2fsck. The remaining big lever beyond this stays the owner-lane parallel-WRITE convoy (gate-blocking).
+
+### 2026-06-29 REFUTED (~0-gain, shelved): ShardedCache Mutex→RwLock for parallel reads; + LANDED write-bench --create fixture tooling (CrimsonFox)
+
+Acting on last turn's surfaced blocker, added `write-bench --create` (create the file in its parent + pre-fill `count*size` bytes + `sync_all_to_device`) so a sized rand-read data fixture is buildable without a kernel mount — UNBLOCKING parallel random-read measurement. Then implemented the scoped lever: `ShardedCache` shards `Mutex<BTreeMap>` → `RwLock<BTreeMap>` (get/contains → shared `read()`, insert/remove/clear → `write()`) so concurrent gets on the same hot shard share instead of serializing.
+
+MEASURED (env-built A/B, same fixture /bigfile 64MB, rand-read --parallel --seed 42 count=200000; create regression gate count=10000):
+| | Mutex (baseline) | RwLock | ratio |
+| --- | --- | --- | --- |
+| parallel rand-read | ~7.44M IOPS | ~7.53M IOPS | ~1.01x (NEUTRAL, heavy overlap) |
+| single-thread create | ~37,361/s | ~36,747/s | ~0.98x (slight regression) |
+
+NEUTRAL → REVERTED (shelved stash `rwlock-cache-AB`, not dropped). ROOT CAUSE: a WARM fixture's parallel random read runs at ~7.5M IOPS — it is NOT Mutex-contention-bound; the Mutex hold (BTreeMap get + Arc clone) is too brief to contend even same-shard at that rate, and the per-inode extent cache means readers don't all hammer one inode-block shard. The 3.3x parallel-read residual (memory) was measured COLD (/data ext4 dense + drop_caches), which needs root to reproduce — not reproducible on a warm local fixture, so the RwLock benefit (if any) is unmeasurable here and the change is a measured no-win on the workload I CAN run. LESSON: the hot-shard-contention hypothesis didn't survive measurement once a real fixture existed — warm random read is throughput/overhead-bound, not lock-bound. KEPT: `write-bench --create` (e2fsck-clean fixture, valid fs) lands as reusable read-path measurement tooling that resolves the prior blocker.

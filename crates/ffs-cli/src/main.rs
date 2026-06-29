@@ -702,6 +702,12 @@ enum Command {
         /// Deterministic PRNG seed for random offsets.
         #[arg(long, default_value_t = 0x9E37_79B9_7F4A_7C15)]
         seed: u64,
+        /// Create the file (in its parent dir) if missing and pre-fill it with
+        /// `count * size` bytes of data before benchmarking. Lets this command
+        /// build a sized data fixture for `rand-read` (whose file must already
+        /// have blocks) without a kernel mount.
+        #[arg(long)]
+        create: bool,
     },
     /// Benchmark name lookups in a directory (no FUSE): readdir the directory
     /// once to collect its entry names, then resolve `count` random names via
@@ -1981,7 +1987,8 @@ fn run() -> Result<()> {
             size,
             random,
             seed,
-        } => writebench_cmd(&image, &path, count, size, random, seed),
+            create,
+        } => writebench_cmd(&image, &path, count, size, random, seed, create),
         Command::LookupBench {
             image,
             dir,
@@ -2807,6 +2814,7 @@ fn writebench_cmd(
     size: usize,
     random: bool,
     seed: u64,
+    create: bool,
 ) -> Result<()> {
     let cx = cli_cx();
     let mut open_fs = OpenFs::open(&cx, path)
@@ -2815,11 +2823,43 @@ fn writebench_cmd(
         .enable_writes(&cx)
         .with_context(|| "failed to enable writes (alloc state)".to_string())?;
     let mut ino = InodeNumber(1);
-    for comp in file_path.split('/').filter(|c| !c.is_empty()) {
-        let attr = open_fs
-            .lookup(&cx, ino, std::ffi::OsStr::new(comp))
-            .with_context(|| format!("failed to resolve {file_path} at component {comp:?}"))?;
-        ino = attr.ino;
+    if create {
+        // Resolve the parent dir, create the final component if missing, and
+        // pre-fill it with count*size bytes so `rand-read` has real blocks.
+        let comps: Vec<&str> = file_path.split('/').filter(|c| !c.is_empty()).collect();
+        let (name, parents) = comps
+            .split_last()
+            .with_context(|| format!("invalid file path {file_path}"))?;
+        for comp in parents {
+            ino = open_fs
+                .lookup(&cx, ino, std::ffi::OsStr::new(comp))
+                .with_context(|| format!("failed to resolve parent component {comp:?}"))?
+                .ino;
+        }
+        let file_ino = match open_fs.lookup(&cx, ino, std::ffi::OsStr::new(name)) {
+            Ok(attr) => attr.ino,
+            Err(_) => {
+                open_fs
+                    .create(&cx, ino, std::ffi::OsStr::new(name), 0o644, 0, 0)
+                    .with_context(|| format!("failed to create {file_path}"))?
+                    .ino
+            }
+        };
+        let fill = vec![0xA5_u8; size];
+        for i in 0..count {
+            let off = (i as u64) * size as u64;
+            open_fs
+                .write(&cx, file_ino, off, &fill)
+                .with_context(|| format!("failed prefill write at {off}"))?;
+        }
+        ino = file_ino;
+    } else {
+        for comp in file_path.split('/').filter(|c| !c.is_empty()) {
+            let attr = open_fs
+                .lookup(&cx, ino, std::ffi::OsStr::new(comp))
+                .with_context(|| format!("failed to resolve {file_path} at component {comp:?}"))?;
+            ino = attr.ino;
+        }
     }
     let fsize = open_fs
         .getattr(&cx, ino)
@@ -2876,6 +2916,11 @@ fn writebench_cmd(
         iops as u64,
         mib_s as u64
     );
+    // Persist the overlay (created file + written blocks) to the image so a
+    // fresh open (e.g. a following `rand-read`) observes them.
+    open_fs
+        .sync_all_to_device(&cx)
+        .with_context(|| "failed to sync writes to device".to_string())?;
     Ok(())
 }
 
