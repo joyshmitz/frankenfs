@@ -3435,3 +3435,15 @@ This closes the convoy investigation. The parallel-create 5.5x convoy is the FUN
 - gate batch-drain / targeted-wakeup: already done (advance_ready_prefix) / unsafe (notify_one deadlocks).
 
 The ONLY remaining convoy fix is to remove the in-order constraint itself: out-of-order publication with a snapshot-visibility model that tolerates gaps (per-seq visibility set or epoch-batched async publication decoupling commit from publish). That is a major MVCC redesign, loom-gated (no loom infra in-tree → not shippable blind), and a focused multi-turn effort — NOT a 60m per-op land. Session's clean safe-Rust frontier (read/write/walk + every per-op convoy approach) is now exhaustively mapped: 4 measured wins banked (369f1493, c47c9009, a2509ad7, 00a2bdb1); the sole open gap requires the redesign above.
+
+### 2026-06-29 DIG (consolidation): biggest remaining gaps both confirmed owner-lane this session — GroupCommit wiring (960x durable, machinery EXISTS) is #1 (CrimsonFox)
+
+After exhausting the clean per-op space (4 wins; read/write/walk/convoy-batching all won or measured-dead), re-examined the two largest gaps for a safe lever:
+- **inode-bitmap scan** (`try_alloc_inode_in_group_persist` → `bitmap_find_free(.., start=0)`): scans from group start per create (no cursor), BUT `bitmap_find_free` is already word-at-a-time (64 bits/iter) and is NOT in the create profile (<1.3% self) — a cursor/hint would be a sub-1% marginal win on an already-fast scan. Not worth the added cursor state + reset correctness. Deferred.
+- **GroupCommitCoordinator** (ffs-journal wal_buffer.rs:933): confirmed built+tested but UNWIRED — 0 refs in ffs-core/ffs-fuse. `commit_transaction_journaled` (lib.rs:6902) still does a JBD2 txn + fdatasync PER FsOp (~9ms/op fsync barrier). This is the campaign's LARGEST gap vs kernel: the kernel's JBD2 group-commits (one fsync amortizes many txns), so FrankenFS's durable mode is ~960x slower per-op (MEASURED at the journal level, cc_group_commit_fsync.rs: per-op 9100µs vs group 9.2µs). Wiring `GroupCommitCoordinator.flush_epoch` into the journaled commit path = closing a ~960x vs-kernel durable gap with EXISTING machinery (integration, not invention).
+
+CONSOLIDATED next-focus targets (both owner-lane, both need focused multi-turn effort — NOT 60m per-op lands, and not safe to blind-ship given prior GDT-corruption history):
+1. **GroupCommit wiring (960x, durable mode)** — route journaled fsync callers through epoch-batched group commit; the proof-obligations are spec'd (048290cf: 5 concurrency-automata obligations — un-fsync'd epoch must not report durable; fsync callers block until epoch-durable). Needs a durable-mode FS bench (attach_jbd2_writer + per-op fsync) to A/B at FS level. HIGHEST value.
+2. **Convoy out-of-order publication (5.5x, default parallel write)** — remove the in-order CommitPublicationGate constraint via a gap-tolerant snapshot model; loom-gated (no loom in-tree).
+
+The per-op safe-Rust frontier is exhausted; both remaining levers are integration/redesign work. The session banked 4 measured wins (369f1493, c47c9009, a2509ad7, 00a2bdb1) + write-bench --create tooling.
