@@ -3116,3 +3116,22 @@ EXACTLY WHAT'S NEEDED to land this 1.83x: the op-batch boundary must wrap the al
 #### Correction (same day): root-cause refined — persist path does NOT bypass the batch
 
 On inspection `ffs-alloc` writes BOTH the block-bitmap block (`dev.write_block(cx, gs.block_bitmap_block, &bitmap)`) AND the group descriptor (`persist_group_desc_with_bitmap_overrides`, which carries the free-count + bitmap checksum) through the SAME `dev` (the `FsMvccBlockDevice` adapter), during allocation, inside the create — so they ARE staged into the op-batch, not bypassing it. So the earlier "persist_ctx bypasses the batch" mechanism is wrong. The bitmap block and its group-desc checksum are written from the same in-memory `bitmap` at alloc time, so within one staged commit they are self-consistent. The group-1 off-by-22 / checksum mismatch is therefore a subtler read-your-writes-or-flush-ordering divergence (candidates: the bitmap read at alloc returning a non-latest version under some path, or `sync_all_to_device` flushing overlay block-versions in an order where the committed bitmap and group-desc versions for group 1 don't correspond) — to be pinned by the follow-up before re-attempting. The 1.83x measurement and the per-block-commit-overhead conclusion stand; only the corruption mechanism is still open. Code shelved (`stash@{0}`).
+
+### 2026-06-29 (cont.) bd-bhh0i intra-op batching — corruption PINPOINTED: group-1 GDT free_blocks_count never persists under deferred commit (CrimsonFox)
+
+Diagnosed the 1.83x intra-op-batch corruption empirically with the already-built batch binary (no rebuild). `e2fsck` after `FFS_OP_BATCH=1 create-bench` at increasing counts:
+
+| count | group-1 GDT `free_blocks_count` (recorded) | e2fsck counted | off-by |
+| --- | --- | --- | --- |
+| 200  | — (clean) | — | 0 |
+| 500  | 26220 | 26214 | 6 |
+| 1000 | 26220 | 26210 | 10 |
+| 2000 | 26220 | 26202 | 18 |
+
+The recorded value is **stuck at the pristine 26220** (zero decrements ever persist), while the BITMAP block decrements correctly (e2fsck's `counted` tracks real allocations). So under intra-op batching the **group-descriptor `free_blocks_count` write is lost**, but the bitmap-block write persists — even though both go through `dev.write_block` (ffs-alloc.rs: bitmap at 1802, GDT at 1709) on the same batched adapter. Off-by grows ~linearly at ~1 per 110 creates = the parent-dir-block-growth rate (empty files allocate no data blocks; only occasional dir-block growth allocates in group 1). count<200 = no group-1 alloc yet = clean.
+
+This is the SAME class as the pre-existing bd-wvud1 ("free inodes count wrong", present on BOTH arms / on main): GDT/superblock COUNT-field updates are fragile. Intra-op batching extends it to free_blocks because the deferred single-commit changes the visibility/ordering of the GDT count-field RMW relative to per-block commit.
+
+NEXT STEP (instrumented, build-blocked this turn — see blocker): added `FFS_OP_BATCH_DEBUG` to dump the staged block numbers per op in `op_batch_commit_if_active`, to confirm whether the group-1 GDT block reaches `op_batch.writes` at all (→ commit/flush drops the count field) or never gets staged (→ `persist_group_desc`'s GDT write reaches a different device view than the bitmap write). Code + instrument shelved on `git stash` for the next build window.
+
+BLOCKER (build infra): rch worker pool carries mixed nightlies; the pooled warm `CARGO_TARGET_DIR` keeps getting invalidated ("crate X compiled by rustc <nightly-A> ... recompile ... consider cargo clean") → forced clean rebuild on a fresh worker → intermittently fails mid-build (`regex-automata`, `cfg_aliases`, `nix`). 3 of ~5 build attempts this session failed this way; each is a ~5-10 min full sync+rebuild. Needs a pinned-toolchain build host (or `rust-toolchain.toml` enforced on workers + a per-worker non-pooled target) to make the diagnose→fix→verify loop reliable. The 1.83x measurement and the GDT-count pinpoint stand; landing is gated on (a) a working build and (b) the GDT-count-field fix.
