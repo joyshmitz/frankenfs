@@ -1942,6 +1942,16 @@ fn force_reserved_mark() -> bool {
     *FORCE.get_or_init(|| std::env::var_os("FFS_ALLOC_FORCE_RESERVED_MARK").is_some())
 }
 
+/// A/B + safety escape hatch (bd-allocrun): when set (env
+/// `FFS_ALLOC_EAGER_LARGEST_RUN`), keep the OLD behaviour of eagerly recomputing
+/// the largest-free-run cache after EVERY allocation (including `count == 1`).
+/// Default (unset) invalidates the cache on a single-block alloc and recomputes
+/// it lazily on demand, skipping the per-alloc full-bitmap rescan. Read once.
+fn eager_largest_run() -> bool {
+    static EAGER: OnceLock<bool> = OnceLock::new();
+    *EAGER.get_or_init(|| std::env::var_os("FFS_ALLOC_EAGER_LARGEST_RUN").is_some())
+}
+
 /// Try to allocate `count` blocks in a group, skipping reserved blocks and
 /// persisting group descriptor updates.
 #[expect(clippy::too_many_arguments)]
@@ -2027,7 +2037,25 @@ fn try_alloc_safe(
         let previous_free_blocks = groups[gidx].free_blocks;
         let previous_largest_free_run = groups[gidx].block_largest_free_run;
         groups[gidx].free_blocks = previous_free_blocks.saturating_sub(alloc_count);
-        groups[gidx].refresh_block_largest_free_run(&bitmap, blocks_in_group);
+        // Maintain the largest-free-run cache off the single-block hot path
+        // (bd-allocrun). The cache is ONLY consumed two ways, both of which
+        // handle a `None` (unknown) entry correctly: (1) the `count > 1`
+        // early-reject in this fn + `alloc_blocks` treats `None` as "do not
+        // reject" and falls through to the exact `bitmap_find_contiguous`; and
+        // (2) ffs-core's largest-free-extent query recomputes exactly from the
+        // bitmap when the cache is `None`. So for a `count == 1` allocation (the
+        // common single-block create/mkdir/inode/indirect path) we INVALIDATE in
+        // O(1) instead of running a full O(blocks_in_group) `bitmap_largest_free
+        // _run` rescan per alloc — deferring that scan to the far rarer max-run
+        // query. A `count > 1` alloc keeps the cache EXACT so subsequent
+        // contiguous-alloc early-rejects stay effective. The cache is never left
+        // stale-LOW (the unsafe direction), only `None`, so no consumer is
+        // mis-served.
+        if alloc_count > 1 || eager_largest_run() {
+            groups[gidx].refresh_block_largest_free_run(&bitmap, blocks_in_group);
+        } else {
+            groups[gidx].invalidate_block_largest_free_run();
+        }
 
         // Persist group descriptor (includes bitmap checksum stamping if metadata_csum).
         if let Err(error) = persist_group_desc_with_bitmap_overrides(
@@ -3955,11 +3983,18 @@ mod tests {
         let gidx = group.0 as usize;
         let bitmap = dev.read_block(cx, groups[gidx].block_bitmap_block).unwrap();
         let expected = bitmap_largest_free_run(bitmap.as_slice(), geo.blocks_in_group(group));
-        assert_eq!(
-            groups[gidx].cached_block_largest_free_run(),
-            Some(expected),
-            "bitmap mutations must keep the largest-free-run cache exact"
-        );
+        // Invariant (bd-allocrun): the cache is never stale-LOW (the only unsafe
+        // direction for the `count > 1` early-reject). It is either `None` —
+        // lazily invalidated by a `count == 1` alloc and recomputed exactly on
+        // demand by both consumers — or `Some(exact)`. A wrong non-`None` value
+        // is still a hard failure.
+        match groups[gidx].cached_block_largest_free_run() {
+            None => {}
+            Some(cached) => assert_eq!(
+                cached, expected,
+                "largest-free-run cache, when populated, must be exact (never stale-low)"
+            ),
+        }
     }
 
     fn read_gdt_free_inodes(

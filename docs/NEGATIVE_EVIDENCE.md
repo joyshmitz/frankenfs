@@ -3036,3 +3036,19 @@ The ~1.15 µs/block fixed cost is per-call alloc bookkeeping (group-descriptor l
 AUDIT of `alloc_blocks_persist` callers in ffs-core: most are GENUINELY single-block (one dir block, one inode-table block, one bitmap block — cannot batch). The modern ext4 **extent** write path already batches via `allocate_extent_coalescing` (shipped, 120x@N=40k). The ONE remaining single-alloc-LOOP is `ext4_write_indirect` (lib.rs:20336 `while pos < end` → `alloc_blocks_persist(…, 1, …)` per hole, line 20370): a K-block indirect-mapped write pays K individual alloc-persists.
 
 LEVER (identified, NOT taken — legacy + risky + low-EV): pre-resolve holes in the write range, `alloc_blocks_batch_persist` the data blocks once, consume during the mapping loop. NOT shipped because: (1) the **indirect path is legacy** — modern ext4 is extent-mapped (the common path already coalesces); (2) batching is correctness-risky — the indirect-metadata (single/double/triple pointer) blocks are allocated interleaved inside `write_block_ptr` per block, so only the DATA-block allocation is trivially batchable, requiring a hole pre-scan that doubles `resolve_indirect_block` calls; (3) low EV (rare workload) does not justify the regression risk on a correctness-sensitive growth path under the REVERT-~0-gain/conformance-GREEN discipline. Recorded as a precise, measured lever for a focused legacy-path effort. No code change (measurement + audit; the common extent path is already batched).
+
+### 2026-06-28 ⭐⭐SHIPPED (measured ~1.15x): skip the per-alloc full-bitmap largest-free-run RESCAN on the single-block path (count==1) — invalidate+lazy-recompute instead, exactness preserved on demand (CrimsonFox cc/opus)
+
+REAL measured win on the block-allocation hot path. `try_alloc_safe` (ffs-alloc) ran `refresh_block_largest_free_run` — a full O(blocks_in_group) bitmap scan — after EVERY allocation, but the cached value is consumed only two ways, both of which already handle a `None` entry correctly: (1) the `count > 1` early-reject (`try_alloc_safe` + `alloc_blocks`) treats `None` as "do not reject" and falls through to the exact `bitmap_find_contiguous`; (2) ffs-core's largest-free-extent query (lib.rs:10744) recomputes exactly from the bitmap on `None`. So for a `count == 1` allocation (the common single-block create/mkdir/inode/indirect path) the eager rescan is wasted.
+
+FIX: for `count == 1`, `invalidate_block_largest_free_run()` (O(1)) instead of the full rescan; `count > 1` keeps the exact refresh so contiguous-alloc early-rejects stay effective. The cache is never left stale-LOW (the only unsafe direction for the early-reject) — only `None` — so no consumer is mis-served, and the scan is merely DEFERRED to the far rarer max-run query. Env escape-hatch `FFS_ALLOC_EAGER_LARGEST_RUN=1` restores the old eager behaviour (A/B + safety).
+
+MEASURED — same-worker, same-binary, interleaved A/B (env toggle, rch), `alloc_100_blocks/single_100x1` (100 × `alloc_blocks_persist(1)`):
+
+| arm | run1 | run2 | median |
+| --- | --- | --- | --- |
+| EAGER (old: refresh every alloc) | 147.49 µs | 138.34 µs | ~142.9 µs |
+| LEVER (invalidate on count==1) | 122.32 µs | 127.29 µs | ~124.8 µs |
+| **ratio** | | | **~1.15x** (1.43 → 1.25 µs/block) |
+
+Lever < eager in BOTH interleaved pairs (drift-cancelled). CORRECTNESS: byte-identical allocation results by construction (the find_free/find_contiguous logic and inputs are unchanged; only the perf-hint cache's maintenance TIMING differs — when `None`, the early-reject falls through to the SAME find that produces the SAME block). ffs-alloc tests 213/0 (the exact-cache invariant test relaxed to its true post-change form: the cache is `None` or exact, never stale-low). Helps every single-block allocation across create/mkdir/inode/indirect. Broadly applicable, safe, env-revertible.
