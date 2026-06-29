@@ -3212,3 +3212,7 @@ A full `cargo test --workspace` sweep (after ffs-core 1185/0 + ffs-fuse 571/0) s
 3. `readme_quantitative_claims::readme_quantitative_claims_match_code` — README is missing `92 criterion benchmarks` and the btrfs item-type `(20 currently)` count; code grew past the README. PEER DRIFT: README must be re-synced to the current benchmark/constant counts.
 
 ffs-core + ffs-fuse remain fully green (this stretch fixed 5 there). These 3 are logged for their owners; (1) requires the real-btrfs nlink oracle, (2)/(3) are mechanical doc/manifest re-syncs from recent peer additions.
+
+### 2026-06-29 ⭐SHIPPED: README quantitative-claims drift fixed — readme_quantitative_claims green (CrimsonFox)
+
+Fixed 1 of the 3 surfaced workspace RED tests (the self-contained one, no external oracle needed). `readme_quantitative_claims_match_code` re-derives inventory counts from source and asserts README matches; README had drifted as the codebase grew: "12 criterion benchmarks" (×2; actual `git ls-files crates/*/benches/*.rs` = **92**) and btrfs item-type "(19 currently)" (actual = **20**). Updated both. VERIFIED: the test reads README at runtime — existing binary now reports `readme_quantitative_claims` 2/0. Remaining 2 RED tests unchanged (module_census needs a peer's stale_mounts.rs census entry; btrfs nlink needs the real-btrfs oracle).

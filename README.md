@@ -32,7 +32,7 @@
 
 **The approach.** FrankenFS extracts ext4 and btrfs behavior from ~205K lines of Linux kernel C (v6.19), re-implements that behavior in Rust with `#![forbid(unsafe_code)]`, and adds experimental layers for block-level MVCC, RaptorQ repair symbols, and explicit-opt-in FUSE writeback-cache barriers.
 
-It runs as a normal Linux process via FUSE. The current `ParityReport::current()` printout is 97/97 rows in the tracked feature denominator, while the B-series accounting keeps implemented, kernel-verified, and rejection-only rows separate instead of treating the table as a blanket readiness score. Public readiness wording is gated by a checked-in release-gate policy with structured proof bundles, and the workspace ships **21 crates, a source-derived test inventory, 63 fuzz targets, 12 criterion benchmarks, 125 tracked end-to-end gate scripts, and 23 evidence-event types** under `#![forbid(unsafe_code)]`. The README count guard `readme_quantitative_claims_match_code` re-derives these inventory numbers from source so fast-moving test counts are not hand-pinned here.
+It runs as a normal Linux process via FUSE. The current `ParityReport::current()` printout is 97/97 rows in the tracked feature denominator, while the B-series accounting keeps implemented, kernel-verified, and rejection-only rows separate instead of treating the table as a blanket readiness score. Public readiness wording is gated by a checked-in release-gate policy with structured proof bundles, and the workspace ships **21 crates, a source-derived test inventory, 63 fuzz targets, 92 criterion benchmarks, 125 tracked end-to-end gate scripts, and 23 evidence-event types** under `#![forbid(unsafe_code)]`. The README count guard `readme_quantitative_claims_match_code` re-derives these inventory numbers from source so fast-moving test counts are not hand-pinned here.
 
 | Pillar | What it does | Why it matters |
 |---|---|---|
@@ -2571,7 +2571,7 @@ All 63 libfuzzer targets are in `fuzz/fuzz_targets/`. Each one is driven by `car
 |---|---|
 | `fuzz_btrfs_metadata` | Superblock + B-tree header decoding |
 | `fuzz_btrfs_verify_superblock_checksum` | Superblock CRC32C validation |
-| `fuzz_btrfs_tree_items` | Declared btrfs item-type constants in B-tree leaves (19 currently) |
+| `fuzz_btrfs_tree_items` | Declared btrfs item-type constants in B-tree leaves (20 currently) |
 | `fuzz_btrfs_tree_log` | Tree-log replay (`replay_tree_log` over synthesized log trees) |
 | `fuzz_btrfs_chunk_mapping` | `sys_chunk_array` + chunk-tree resolution |
 | `fuzz_btrfs_raid_profile` | Single / DUP / RAID0/1/5/6/10 stripe selection |
@@ -3415,7 +3415,7 @@ Rows in the btrfs experimental RW contract can still be `partially supported` or
 - **Writeback-cache.** Epoch-based commit barriers with per-inode staged/visible/durable tracking, deferred visibility for MVCC isolation, dirty-page ordering oracle, 12-point crash/replay matrix artifact gate, runtime guard, and host/lane manifest checks. Kernel option default-off; explicit opt-in is evidence-gated.
 - **Observability.** Evidence ledger with 23 event types and 8 operator presets (`replay-anomalies`, `repair-failures`, `pressure-transitions`, `contention`, `metrics`, `cache`, `mvcc`, `repair-live`), contention metrics, policy-switch detection, structured logging across all subsystems, JSONL audit trail.
 - **CLI.** `inspect`, `mvcc-stats`, `info`, `dump`, `fsck`, `repair`, `mount` (22 flags), `scrub`, `parity`, `evidence`, `mkfs`.
-- **Testing.** Source-derived `#[test]` / `proptest!` inventory across 21 crates, 63 fuzz targets, 12 criterion benchmarks, 125 tracked end-to-end gate scripts, metamorphic-relation proptests across the checksum/parser surface, and 226 tracked insta snapshots covering every emitted report shape.
+- **Testing.** Source-derived `#[test]` / `proptest!` inventory across 21 crates, 63 fuzz targets, 92 criterion benchmarks, 125 tracked end-to-end gate scripts, metamorphic-relation proptests across the checksum/parser surface, and 226 tracked insta snapshots covering every emitted report shape.
 
 ### What's next
 
