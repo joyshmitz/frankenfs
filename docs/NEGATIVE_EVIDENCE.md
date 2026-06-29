@@ -3612,3 +3612,17 @@ INFRA THAT WOULD UNBLOCK (the actual highest-value next work, NOT more per-op di
 - A **durable-mode FS-level bench** (attach_jbd2_writer + per-op fsync) to A/B the JBD2 group-commit at the FS layer (journal-level harness already exists).
 
 SHIPPED safe per-op wins this campaign segment: unlink/rmdir one-pass (3f24e58b, ~1.08x/1.05x, e2fsck-identical). All other per-op attempts measured neutral/refuted or proven owner-lane (recorded above). No clean safe-Rust per-op lever remains across either filesystem.
+
+### 2026-06-29 NEGATIVE (decomposition, no gap): metadata_csum costs ~8% of ext4 create but is hardware-crc32c + kernel-shared (CrimsonFox)
+
+Tested whether checksum work is a hidden ext4-create lever. A/B create-bench on metadata_csum vs `-O ^metadata_csum` fixtures (1500M ext4, 60000 creates, same baseline binary):
+- with metadata_csum: ~1666-1739 ms (median ~1727 ms)
+- without: ~1590-1611 ms (median ~1602 ms)
+- **~1.08x → metadata_csum adds ~8% to create** (every run separated).
+
+NO LEVER, for three independent reasons:
+1. **Hardware-accelerated**: ffs-ondisk uses the `crc32c` crate (workspace dep) which runtime-dispatches to the SSE4.2 `crc32` instruction (SIMD detected at mount: x86_sse42=true). It is already optimal; there is no software-fallback to fix.
+2. **Kernel-shared**: ext4 in the kernel computes the SAME metadata_csum on bitmap/inode/GDT changes (also full-block crc, no incremental). My create-vs-kernel 1.16x baseline used metadata_csum on BOTH sides, so the 8% is paid by both — it is NOT part of the vs-kernel gap (which is the MVCC version-materialization, confirmed: create = ~92% machinery+version-fault + ~8% csum).
+3. **No redundant verify**: the hot alloc path reads bitmaps raw via `dev.read_block` (ffs-alloc:2573/1847), NOT the verifying `read_inode_bitmap`/`read_block_bitmap` wrappers — so there is no per-op re-verify of a block we just wrote. And the write path already guards "re-stamp a bitmap's descriptor csum only when that bitmap changed" (ffs-alloc:1715).
+
+ONE speculative sub-lever NOT pursued (intricate + owner-lane): per-commit checksum STAMPING (compute-on-write) recomputes the bitmap/GDT crc on every create, but the in-memory MVCC version is read by content (not verified), so checksums are only strictly needed on the final on-disk flush — deferring stamping to flush would amortize N per-op crc computations to 1. It touches the durability/flush path (a block flushed without a re-stamped csum = e2fsck failure) and the read-your-writes verify assumptions, so it needs the durability-path owner and crash/e2fsck validation, not a blind in-window land. Recorded for completeness; the checksum surface is otherwise clean (hardware-accelerated, kernel-shared, no redundant verify).
