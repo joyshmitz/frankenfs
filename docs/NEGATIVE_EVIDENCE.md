@@ -3794,3 +3794,13 @@ MEASURED (env-toggle A/B, single binary, single-thread create-bench 60000, 1500M
 | create | ~1670 ms | ~720 ms | **~2.32x** (3/3 runs) |
 
 GATES: e2fsck CLEAN on the deferred 30k-create image (all 5 passes, only the cosmetic "extent tree could be narrower / Optimize? no" that baseline also shows); conformance 100/0/2 GREEN (default path unchanged — env OFF = per-op GDT write + flush pass no-op); ffs-alloc 213/0; ffs-core builds. The campaign's biggest measured single lever, now shipped (opt-in). FOLLOW-UP: validate unlink/mkdir/rename + FUSE flush paths under deferral, then consider default-on.
+
+### 2026-06-29 GDT-defer default-on: NOT YET — 2 conformance tests go e2fsck-dirty under deferral; broad CLI ops validated (CrimsonFox)
+
+Follow-up to the shipped opt-in GDT-defer 2.3x lever (78ed6a0d): validated MORE write ops under deferral (FFS_SKIP_GDT=1, e2fsck exit-0 = clean):
+- delbench (unlink) 15k: CLEAN. rdbench (rmdir) 10k: CLEAN. rename-bench 10k: CLEAN. mkdir-bench 10k: CLEAN. write-bench (40k data-block writes, exercises BLOCK_UNINIT + free_blocks in-use check): CLEAN. So all single-op CLI metadata+data paths are e2fsck-clean under deferral.
+- Crash-consistency unchanged: in BOTH modes the device GDT is only updated at the flush boundary (non-deferred flushes the GDT MVCC versions; deferred writes GDT directly from GroupStats — same boundary), so deferral does not worsen the durability model. FUSE destroy routes through flush_on_destroy -> flush_mvcc_to_device (GDT pass wired).
+
+Then flipped default-ON (defer unless FFS_GDT_PER_OP) and ran full conformance: **2 FAILURES** — `ext4_e2compr_write_readback_conforms_for_gzip_and_lzo` and `full_conformance_gate_pass`. So at least one path those tests use persists/snapshots via a boundary the GDT flush pass is NOT wired into (candidate: the e2compr write-readback path, or an in-test device-snapshot/reopen that bypasses sync_all_to_device/flush_mvcc_to_device), leaving an e2fsck-dirty GDT. REVERTED to opt-in (the shipped 78ed6a0d behavior); conformance back to 100/0/2 GREEN.
+
+CONCLUSION: the 2.3x lever ships opt-in (FFS_SKIP_GDT) and is broadly validated; DEFAULT-ON is blocked on wiring the GDT flush pass into the remaining persist boundary(ies) the e2compr/gate tests exercise. NEXT: identify that boundary (grep the e2compr write-readback + full_conformance_gate persist path), wire ext4_flush_group_descriptors there, re-run conformance default-on. Bounded, well-scoped follow-up to convert opt-in → default-path 2.3x.

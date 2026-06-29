@@ -1669,11 +1669,17 @@ pub fn reserved_inodes_in_group(geo: &FsGeometry, group: GroupNumber) -> Vec<u32
 /// Reads the GDT block containing `group`, patches the free_blocks/inodes/dirs
 /// fields, recomputes the checksum (if enabled), and writes the block back.
 /// Returns true when GDT-block persistence is deferred to flush (env
-/// FFS_SKIP_GDT, bd-cc-gdt-defer). In deferral mode the per-op GDT write is
-/// skipped — the in-memory `GroupStats` is the authoritative count — and
+/// FFS_SKIP_GDT, bd-cc-gdt-defer; OPT-IN). In deferral mode the per-op GDT write
+/// is skipped — the in-memory `GroupStats` is the authoritative count — and
 /// `ext4_flush_group_descriptors` (ffs-core) writes every descriptor once at
-/// flush, collapsing ~80k per-op GDT versions to ~5 direct writes (~2.3x
-/// single-thread create). MUST be paired with the flush pass or e2fsck-dirty.
+/// flush, collapsing the ~80k per-op MVCC versions on the one shared GDT block
+/// to ~5 direct writes (~2.3x single-thread create). MUST be paired with the
+/// flush pass (wired into flush_mvcc_to_device AND sync_all_to_device) or the
+/// persisted image is e2fsck-dirty. Validated e2fsck-clean across
+/// create/unlink/rmdir/rename/mkdir/write. NOT default-on: 2 conformance tests
+/// (ext4_e2compr_write_readback, full_conformance_gate_pass) go e2fsck-dirty
+/// under deferral — those paths persist via a boundary the GDT flush pass is not
+/// yet wired into; default-on needs that wiring first (bd-cc-gdt-defer-default).
 #[must_use]
 pub fn gdt_persistence_deferred() -> bool {
     use std::sync::OnceLock;
