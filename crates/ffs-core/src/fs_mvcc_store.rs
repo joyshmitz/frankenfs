@@ -19,113 +19,6 @@ use std::sync::Arc;
 
 const MVCC_COMMIT_PRUNE_INTERVAL: u64 = 256;
 
-// ── Intra-op write batching (bd-bhh0i) ──────────────────────────────────────
-//
-// The no-tx writable adapter (`FsMvccBlockDevice::write_block`) commits per
-// single block, so one metadata FsOp (a create touches inode-table, bitmaps,
-// dir block, …) becomes N independent commits — each through the global
-// in-order `CommitPublicationGate` + a `next_commit`/prune cycle. Under an op
-// batch, all of an op's block writes STAGE into one thread-local buffer and
-// commit ONCE at op end (1 commit / FsOp), the §15.4 metadata analog of the
-// FUSE data writeback-batch. Reads within the op consult the staged buffer
-// first (read-your-writes), so correctness is preserved and a failed op simply
-// discards the buffer (atomic rollback — strictly safer than per-block commit).
-//
-// Env-gated `FFS_OP_BATCH=0` reverts to per-block commit for A/B.
-
-use std::cell::RefCell;
-use std::collections::BTreeMap;
-
-struct OpBatch {
-    writes: BTreeMap<BlockNumber, Vec<u8>>,
-    depth: u32,
-}
-
-thread_local! {
-    static OP_BATCH: RefCell<Option<OpBatch>> = const { RefCell::new(None) };
-}
-
-fn op_batch_feature_enabled() -> bool {
-    use std::sync::OnceLock;
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("FFS_OP_BATCH")
-            .map(|v| v != "0")
-            .unwrap_or(true)
-    })
-}
-
-/// Begin (or re-enter) an op batch on this thread. No-op when the feature is
-/// disabled. Nested begins increment a depth so only the outermost end commits.
-pub(super) fn op_batch_begin() {
-    if !op_batch_feature_enabled() {
-        return;
-    }
-    OP_BATCH.with(|b| {
-        let mut slot = b.borrow_mut();
-        match slot.as_mut() {
-            Some(batch) => batch.depth = batch.depth.saturating_add(1),
-            None => {
-                *slot = Some(OpBatch {
-                    writes: BTreeMap::new(),
-                    depth: 1,
-                });
-            }
-        }
-    });
-}
-
-/// True if writes on this thread should stage into the op batch.
-pub(super) fn op_batch_active() -> bool {
-    OP_BATCH.with(|b| b.borrow().is_some())
-}
-
-fn op_batch_stage(block: BlockNumber, data: Vec<u8>) {
-    OP_BATCH.with(|b| {
-        if let Some(batch) = b.borrow_mut().as_mut() {
-            batch.writes.insert(block, data);
-        }
-    });
-}
-
-fn op_batch_get(block: BlockNumber) -> Option<Vec<u8>> {
-    OP_BATCH.with(|b| {
-        b.borrow()
-            .as_ref()
-            .and_then(|batch| batch.writes.get(&block).cloned())
-    })
-}
-
-/// End the outermost batch and return its staged writes for a single commit;
-/// returns `None` for a nested end (decrements depth) or when inactive. Use
-/// [`op_batch_abort`] on the error path to discard instead.
-fn op_batch_end_take() -> Option<BTreeMap<BlockNumber, Vec<u8>>> {
-    OP_BATCH.with(|b| {
-        let mut slot = b.borrow_mut();
-        if let Some(batch) = slot.as_mut() {
-            if batch.depth > 1 {
-                batch.depth -= 1;
-                return None;
-            }
-        }
-        slot.take().map(|batch| batch.writes)
-    })
-}
-
-/// Discard the outermost batch without committing (error/rollback path).
-pub(super) fn op_batch_abort() {
-    OP_BATCH.with(|b| {
-        let mut slot = b.borrow_mut();
-        if let Some(batch) = slot.as_mut() {
-            if batch.depth > 1 {
-                batch.depth -= 1;
-                return;
-            }
-        }
-        *slot = None;
-    });
-}
-
 /// The OpenFs MVCC store: single-lock or sharded, behind a uniform `&self` API.
 ///
 /// The enum is always owned behind `Arc`; boxing a variant would add another
@@ -164,44 +57,6 @@ impl FsMvccStore {
             Self::Single(lock) => lock.write().begin(),
             Self::Sharded(store) => store.begin(),
         }
-    }
-
-    /// Commit this thread's outermost op batch (if any) as ONE transaction
-    /// (bd-bhh0i). Returns the commit seq if a non-empty batch committed,
-    /// `None` for a nested end / inactive / empty batch. On commit error the
-    /// staged writes are dropped (the op had already failed-safe).
-    pub(super) fn op_batch_commit_if_active(&self) -> Result<Option<CommitSeq>, CommitError> {
-        let Some(writes) = op_batch_end_take() else {
-            return Ok(None);
-        };
-        if writes.is_empty() {
-            return Ok(None);
-        }
-        if std::env::var("FFS_OP_BATCH_DEBUG").is_ok() {
-            let blocks: Vec<u64> = writes.keys().map(|b| b.0).collect();
-            let gd = writes.get(&BlockNumber(1)).map(|buf| {
-                let fb = |g: usize| -> u16 {
-                    let o = g * 64 + 0x0c;
-                    if o + 2 <= buf.len() {
-                        u16::from_le_bytes([buf[o], buf[o + 1]])
-                    } else {
-                        0
-                    }
-                };
-                (fb(0), fb(1), fb(2), fb(3))
-            });
-            eprintln!(
-                "OPBATCH_COMMIT n={} blocks={blocks:?} gdt_fb(g0,g1,g2,g3)={gd:?}",
-                blocks.len()
-            );
-        }
-        let mut txn = self.begin();
-        for (block, data) in writes {
-            txn.stage_write(block, data);
-        }
-        let commit_seq = self.commit(txn)?;
-        self.prune_after_commit_if_due(commit_seq);
-        Ok(Some(commit_seq))
     }
 
     pub(super) fn commit(&self, txn: Transaction) -> Result<CommitSeq, CommitError> {
@@ -433,13 +288,6 @@ impl<D: BlockDevice> BlockDevice for FsMvccBlockDevice<D> {
         if self.reads_base_directly() {
             return self.base.read_block(cx, block);
         }
-        // Read-your-writes for the in-flight op batch (bd-bhh0i): a block this
-        // op already staged is not yet in the store overlay, so check it first.
-        if op_batch_active() {
-            if let Some(bytes) = op_batch_get(block) {
-                return Ok(BlockBuf::new(bytes));
-            }
-        }
         if let Some(buf) = self
             .store
             .read_visible_block_buf(block, self.read_snapshot())
@@ -470,16 +318,6 @@ impl<D: BlockDevice> BlockDevice for FsMvccBlockDevice<D> {
             .ok_or_else(|| FfsError::Format("block range overflow".to_owned()))?;
         if self.reads_base_directly() {
             return self.base.read_contiguous_blocks(cx, start, bufs);
-        }
-        // While an op batch is active, a coalesced read could skip a staged
-        // block; fall back to per-block reads (overlay-aware). Metadata ops
-        // (the only batched callers) issue small reads, so this is rare.
-        if op_batch_active() {
-            for (delta, buf) in bufs.iter_mut().enumerate() {
-                let blk = BlockNumber(start.0 + u64::try_from(delta).unwrap_or(0));
-                *buf = self.read_block(cx, blk)?;
-            }
-            return Ok(());
         }
 
         let snap = self.read_snapshot();
@@ -539,15 +377,6 @@ impl<D: BlockDevice> BlockDevice for FsMvccBlockDevice<D> {
         if self.reads_base_directly() {
             return self.base.read_contiguous_into(cx, start, dst);
         }
-        // Op-batch active: per-block, overlay-aware (see read_contiguous_blocks).
-        if op_batch_active() {
-            for delta in 0..count {
-                let blk = BlockNumber(start.0 + u64::try_from(delta).unwrap_or(0));
-                let buf = self.read_block(cx, blk)?;
-                dst[delta * bs..(delta + 1) * bs].copy_from_slice(buf.as_slice());
-            }
-            return Ok(());
-        }
 
         let snap = self.read_snapshot();
         let mut visible = Vec::with_capacity(count);
@@ -594,14 +423,6 @@ impl<D: BlockDevice> BlockDevice for FsMvccBlockDevice<D> {
             return Err(FfsError::UnsupportedFeature(
                 "unregistered MVCC block device is read-only".to_owned(),
             ));
-        }
-
-        // Intra-op batching (bd-bhh0i): stage into the thread-local op batch
-        // instead of committing per block. Committed once at op end. Reads on
-        // this adapter consult the staged buffer first (read-your-writes).
-        if op_batch_active() {
-            op_batch_stage(block, data.to_vec());
-            return Ok(());
         }
 
         let mut txn = self.store.begin();
