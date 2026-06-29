@@ -3180,3 +3180,13 @@ ROOT CAUSE: ext4 requires the inode-bitmap bits beyond `inodes_per_group` (up to
 FIX (crates/ffs-alloc): new `fill_inode_bitmap_padding` (+ an undo-tracked variant for the persist path's rollback), called in both inode-alloc bitmap-write sites before the write and before the descriptor bitmap-checksum re-stamp, so padding is persisted and covered by the checksum. The free path is unaffected (RMW preserves the already-set padding).
 
 MEASURED (binary oracle = e2fsck): `mkdir-bench` 1500 → was `Padding at end of inode bitmap is not set` + WARNING; now CLEAN (0 errors). Also verified at 4000 dirs (`4013 files, 0.0% non-contiguous`, clean) = spreads across all groups. create/delete/rename remain clean (0 errors). ffs-alloc tests 213/0 (the rollback-restore test `alloc_inode_persist_gdt_write_failure_restores_bitmap_and_group_stats` passes — the undo-tracked padding variant restores the bitmap exactly on persist failure). Together with bd-wvud1, frankenfs create/mkdir/delete/rename images are now fully e2fsck-clean.
+
+### 2026-06-29 ⭐SHIPPED (correctness win): btrfs readlink — symlink round-trip now works; 3 broken main tests green (CrimsonFox)
+
+Three btrfs tests had been FAILING on main (flagged in the prior turn's regression sweep): `btrfs_write_symlink`, `btrfs_symlink_rejects_target_exceeding_path_max`, `btrfs_symlink_target_passes_btrfs_check` (the last runs a real `btrfs check`). All three round-trip a symlink through `readlink`.
+
+ROOT CAUSE: btrfs stores a symlink's target as the inode's inline `EXTENT_DATA` (btrfs_symlink, lib.rs:27208). `readlink` reads it via `btrfs_read_file` → `btrfs_read_file_into`, but that reader unconditionally rejects symlink inodes (`FileType::Symlink => Err("cannot read a symlink")`) — a guard that is correct for the `read()` syscall (POSIX EINVAL) but wrongly also blocked `readlink`, which legitimately must read the target bytes. So btrfs symlink CREATE worked but READLINK always failed → the symlink was unusable.
+
+FIX: thread an `allow_symlink: bool` through `btrfs_read_file`/`btrfs_read_file_into`; the two `read()`/`read_into` syscall call sites pass `false` (guard preserved), the `readlink` call site passes `true`. Minimal, localized.
+
+VERIFIED (binary oracle = unit tests incl. real `btrfs check`): all 3 now PASS; ffs-core lib suite 1180/5 → **1183/2** (the 3 symlink fails fixed, zero new regressions; the remaining 2 — largest_contiguous_free_run_drops_after_punching, read_block_with_empty_scope_matches — are separate pre-existing issues untouched by this change).

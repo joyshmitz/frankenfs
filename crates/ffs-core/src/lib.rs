@@ -9069,6 +9069,11 @@ impl OpenFs {
         offset: u64,
         size: u32,
         dst: &mut [u8],
+        // `readlink` reads a symlink's target, which btrfs stores as the inode's
+        // inline EXTENT_DATA — the same data this reader returns. The `read()`
+        // syscall paths must still reject symlinks (POSIX EINVAL), so they pass
+        // `false`; only the readlink path passes `true`.
+        allow_symlink: bool,
     ) -> Result<usize, FfsError> {
         let read_started = Instant::now();
         let canonical = self.btrfs_canonical_inode(ino)?;
@@ -9271,7 +9276,9 @@ impl OpenFs {
 
         match Self::btrfs_mode_to_file_type(inode.mode) {
             FileType::Directory => return Err(FfsError::IsDirectory),
-            FileType::Symlink => return Err(FfsError::Format("cannot read a symlink".into())),
+            FileType::Symlink if !allow_symlink => {
+                return Err(FfsError::Format("cannot read a symlink".into()));
+            }
             _ => {}
         }
 
@@ -10030,9 +10037,10 @@ impl OpenFs {
         ino: InodeNumber,
         offset: u64,
         size: u32,
+        allow_symlink: bool,
     ) -> Result<Vec<u8>, FfsError> {
         let mut buf = vec![0_u8; size as usize];
-        let n = self.btrfs_read_file_into(cx, ino, offset, size, &mut buf)?;
+        let n = self.btrfs_read_file_into(cx, ino, offset, size, &mut buf, allow_symlink)?;
         buf.truncate(n);
         Ok(buf)
     }
@@ -29961,7 +29969,7 @@ impl OpenFs {
             // a fresh chunk-sized `Vec` per call (which doubled resident memory
             // and thrashed page-faults vs the ext4 direct-into-`dst` path above).
             if let FsFlavor::Btrfs(_) = &self.flavor {
-                return self.btrfs_read_file_into(cx, ino, offset, size, dst);
+                return self.btrfs_read_file_into(cx, ino, offset, size, dst, false);
             }
             // Fallback: exact-semantics owned read, then copy into dst.
             let data = <Self as FsOps>::read(self, cx, scope, ino, offset, size)?;
@@ -32092,7 +32100,7 @@ impl FsOps for OpenFs {
                 if attr.kind == FileType::Symlink {
                     return Err(FfsError::Format("cannot read a symlink".into()));
                 }
-                self.btrfs_read_file(cx, ino, offset, size)
+                self.btrfs_read_file(cx, ino, offset, size, false)
             }
         }
     }
@@ -32139,7 +32147,7 @@ impl FsOps for OpenFs {
                 let capped = attr.size.min(LINUX_PATH_MAX);
                 let read_size = u32::try_from(capped)
                     .map_err(|_| FfsError::Format("symlink size exceeds u32 capacity".into()))?;
-                let mut target = self.btrfs_read_file(cx, ino, 0, read_size)?;
+                let mut target = self.btrfs_read_file(cx, ino, 0, read_size, true)?;
                 if let Some(nul) = target.iter().position(|b| *b == 0) {
                     target.truncate(nul);
                 }
