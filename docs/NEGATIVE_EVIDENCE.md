@@ -3640,3 +3640,19 @@ CONCLUSION: building the FS-level durable bench requires (a) constructing a `Jbd
 Checked the last unaudited read-path surface — compressed-read decode (memory: "decode-bound", the dominant cost for compressed btrfs reads). NO codec lever: ffs-core/ffs-btrfs use the `zstd` crate (C libzstd binding, the reference impl — identical to the kernel's in-kernel zstd, so same decode speed), LZO via `lzokay-native`, zlib via `flate2`. The per-read re-decode amplification (decompress a 128 KiB extent per 4 KiB read) is already mitigated by the shipped RO decompressed-extent cache (90bf7cfa) + the `zstd_decompress_reuse` buffer-reuse path. So compressed read is library-optimal AND re-decode-cached = kernel-parity, no safe lever.
 
 AUDIT COMPLETE: every read/write/metadata surface is now measured or code-verified vs kernel — ext4 (read parity, write/create ~1.16x inherent-MVCC, mkdir/rename/unlink won, lookup/walk parity), btrfs (read won, create owner-lane node-retention, rename CoW-inherent, unlink cowbatch), checksum (hardware crc32c, kernel-shared, 8%), compression (libzstd, kernel-parity). The clean safe-Rust per-op lever surface is exhaustively closed across both filesystems; every residual is the owner-lane MVCC version-retention / in-order-publication / durable-group-commit / btrfs-node-prune layer, each pinpointed to file:line in the entries above and each gated on loom or crash-injection validation infra absent in-tree.
+
+### 2026-06-29 REFUTED (measured NEUTRAL, shelved): btrfs node hot/cold split — degradation is heap/alloc pressure, not live-map ops (CrimsonFox)
+
+Tested whether the btrfs-create degradation is the `alloc_node`/`node_ref` hot path probing a `self.nodes` FxHashMap bloated to 40k+ entries (retained CoW nodes) — i.e. cache-unfriendly inserts/rehashes on a giant map. Implemented a hot/cold split (different primitive from the test-refuted eager-free: nodes are KEPT, just relocated): added `retired_nodes: FxHashMap`, `commit_retired_nodes` MOVES each retired node from `nodes` (live, hot) to `retired_nodes` (cold), `node_snapshot` checks both. So the descent/alloc hot path probes only the small live map (~tree size, hundreds of nodes), while previous-version reads still resolve. ALL 365 ffs-btrfs tests pass (incl. cow_insert_preserves_previous_root_node — node_snapshot's both-map lookup preserves the contract).
+
+MEASURED (btrfs create scaling, same fixture, single-thread):
+| count | HEAD us/op | hot/cold split us/op |
+| --- | --- | --- |
+| 2000 | 29.19 | 28.03 |
+| 8000 | 40.46 | 39.37 |
+| 20000 | 50.86 | 54.25 |
+| 40000 | 61.05 | 59.01 |
+
+NEUTRAL — the per-op curve still climbs identically. REVERTED (shelved `btrfs-hotcold-split-MEASURED-NEUTRAL`).
+
+CONCLUSION (sharpens the root cause): the degradation is NOT the live-map hashmap operations (the split made the hot map small but changed nothing), so it is the retained-node MEMORY/ALLOCATION pressure — each create CoW-clones ~depth nodes (BtrfsCowNode::clone, deep-copies parsed item Vecs) and the cumulative retained heap (every CoW node kept for previous-version reads) grows to hundreds of MB, so per-op allocation+fault cost climbs with heap size (matching the ~42% kernel-mm profile frames). The only fixes therefore REDUCE retained memory: (a) eager-free when no snapshot pins the generation (test-refuted as unconditional; needs generation-watermark gating = owner-lane), or (b) store retired nodes in compact serialized bytes instead of parsed `BtrfsCowNode` (smaller footprint + fewer allocations, but adds serialize-on-retire / parse-on-read cost — a real but uncertain follow-up). Map-locality is foreclosed; the lever is memory-footprint, which is owner-lane (generation gating) or a separate serialize-format experiment.
