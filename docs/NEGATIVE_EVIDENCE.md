@@ -3200,3 +3200,15 @@ The two remaining pre-existing ffs-core lib failures were STALE TESTS that the c
 2. `largest_contiguous_free_run_drops_after_punching_alloc_in_middle`: patches the on-disk block bitmap OUT OF BAND (`fs.dev.write_all_at`), bypassing the allocator path that keeps the per-group largest-free-run cache (bd-allocrun) and the base-block read cache consistent. The first query had populated both caches, so the post-patch query returned the stale run. Fix: the white-box test now invalidates the group's largest-free-run cache AND clears `ext4_base_block_cache` after the out-of-band write (modelling that an external bitmap change must invalidate read caches), so the recompute reads the patched device.
 
 VERIFIED: ffs-core lib suite **1180/5 → 1185/0** (all green; this stretch fixed 3 btrfs_symlink via the readlink fix, then these 2). No production code touched. Combined with this stretch's correctness landings (superblock free-totals, inode-bitmap padding, btrfs readlink), ffs-core unit tests are now fully passing and ext4 create/mkdir/del/rename + btrfs symlink images are e2fsck/test clean.
+
+### 2026-06-29 SURFACED: 3 workspace test failures (beyond ffs-core/ffs-fuse, which are green) — CrimsonFox
+
+A full `cargo test --workspace` sweep (after ffs-core 1185/0 + ffs-fuse 571/0) surfaced 3 remaining RED tests, all in ffs-harness, none cleanly mine to land:
+
+1. `fuse_e2e::btrfs_openfs_mkfs_fixture_cross_parent_directory_rename_updates_parent_nlink_accounting` — asserts source-parent nlink `before-1` (=0) after moving a subdir out; actual stays **1**. This is **btrfs directory-nlink semantics**: real btrfs reports dir `st_nlink = 1` regardless of subdir count (unlike ext4's `2 + subdirs`), so frankenfs keeping it at 1 is arguably CORRECT and the test's ext4-style `before-1` expectation is wrong — but the real-btrfs sibling test (`btrfs_fuse_..._nlink_accounting`, needs a loop mount) is the oracle and wasn't run here. NEEDS the real-btrfs oracle before deciding test-vs-code; do not blind-fix.
+
+2. `module_census::module_census_matches_tracked_harness_src_tree` — the tracked src tree contains `src/stale_mounts.rs` (a peer added it) that the census manifest lacks. PEER DRIFT: whoever added `stale_mounts.rs` must update the census. Mechanical (add the entry) but peer-owned bookkeeping.
+
+3. `readme_quantitative_claims::readme_quantitative_claims_match_code` — README is missing `92 criterion benchmarks` and the btrfs item-type `(20 currently)` count; code grew past the README. PEER DRIFT: README must be re-synced to the current benchmark/constant counts.
+
+ffs-core + ffs-fuse remain fully green (this stretch fixed 5 there). These 3 are logged for their owners; (1) requires the real-btrfs nlink oracle, (2)/(3) are mechanical doc/manifest re-syncs from recent peer additions.
