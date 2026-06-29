@@ -3052,3 +3052,30 @@ MEASURED — same-worker, same-binary, interleaved A/B (env toggle, rch), `alloc
 | **ratio** | | | **~1.15x** (1.43 → 1.25 µs/block) |
 
 Lever < eager in BOTH interleaved pairs (drift-cancelled). CORRECTNESS: byte-identical allocation results by construction (the find_free/find_contiguous logic and inputs are unchanged; only the perf-hint cache's maintenance TIMING differs — when `None`, the early-reject falls through to the SAME find that produces the SAME block). ffs-alloc tests 213/0 (the exact-cache invariant test relaxed to its true post-change form: the cache is `None` or exact, never stale-low). Helps every single-block allocation across create/mkdir/inode/indirect. Broadly applicable, safe, env-revertible.
+
+### 2026-06-28 ⭐⭐MEASURED on CURRENT HEAD (bd-bhh0i): parallel `create` STILL negatively scales after BOTH jemalloc AND 256-shard fixes — root cause is per-block-commit through the GLOBAL `CommitPublicationGate` + `active_snapshots` lock, NOT malloc, NOT shard count (CrimsonFox cc/opus)
+
+Re-measured the campaign's biggest un-dominated gap (bd-bhh0i parallel metadata writes) on a freshly-built HEAD binary (8319465d, jemalloc-on, `FsMvccStore::sharded()` → `for_host_parallelism()` = **256 shards** on this 64-core host). `ffs-cli create-bench` (per-thread disjoint subdirs, 16000 creates, +`sync_all_to_device`):
+
+| threads | creates/s | scaling vs 1t |
+| --- | --- | --- |
+| 1 | 35 566 | 1.00x |
+| 4 | 26 783 | 0.75x |
+| 8 | 25 495 | 0.72x |
+| 16 | 23 658 | 0.67x |
+| 32 | 23 402 | 0.66x |
+
+**NEGATIVE scaling persists** — throughput DROPS as threads increase, despite (a) jemalloc shipped (14f443cb, killed the glibc malloc-arena convoy) and (b) the 256-shard store (a2807896, targets 16/32w disjoint-shard contention). So neither the allocator nor shard count is the residual bottleneck on this path — both already-shipped levers leave the negative-scaling signature intact.
+
+ROOT CAUSE (code-confirmed, current HEAD): the no-tx writable adapter commits **per single block**, not per FsOp. `FsMvccBlockDevice::write_block` (fs_mvcc_store.rs:421) does `begin() → stage_write(ONE block) → store.commit(txn) → prune_after_commit_if_due` for EVERY block. An ext4 `create` writes several metadata blocks (inode-table block, dir block, bitmap, group-desc, …) → **N commits per create**. Each commit hits TWO process-global serialization points that are NOT sharded:
+
+1. **`CommitPublicationGate`** (sharded.rs:35) — a single `Mutex<PublicationState>` + `Condvar` taken by EVERY commit to publish in commit-seq order (monotonic snapshot visibility). Even fully disjoint-shard writes funnel through this one Mutex; a commit whose lower-seq predecessors haven't published BLOCKS on the condvar. This is the classic in-order-commit convoy.
+2. **`active_snapshots: RwLock<BTreeMap<CommitSeq,u64>>`** (sharded.rs:202) — `register_snapshot`/`release_snapshot` take the **global write lock** once per writable `block_device_adapter()` (lib.rs:16239, Inline ownership; Drop releases). Multiple adapters per create → multiple global-W acquisitions per create, plus periodic `prune_safe()` (every `MVCC_COMMIT_PRUNE_INTERVAL` commits, fs_mvcc_store.rs:146) holding the SAME global-W for the whole multi-shard scan. (Write-side analog of the random-read 88x snapshot-lock gap fixed in 9376f4d6.)
+
+RULED OUT (with reasoning, so the swarm stops chasing them):
+- **malloc/allocator** — jemalloc shipped; negative scaling unchanged. Per-thread arenas don't touch a Mutex/RwLock convoy.
+- **shard count** — 256 shards (was 8); negative scaling unchanged. Confirms the bead's "residual is the global lock, not shard count."
+- **key-sharding the `active_snapshots` map** — INERT by construction: every writer registers `latest_snapshot()`, which is the SAME (or near-same) hot CommitSeq across threads at any instant, so all registrations hash to ONE shard. Sharding a map by a key that is identical across contenders cannot reduce contention. (The hot-single-key problem; an atomic refcount has the same issue because each commit advances the seq, churning keys.)
+- **Ivory's "sharded MVCC in-order publication fast path"** (bead note 2026-06-27, measured 0.83x WORSE, reverted) was attacking gate #1 directly AND was measured on the per-crate `wal_throughput` bench, which does **NOT** link the CLI's jemalloc — a confounded env vs the deployed binary.
+
+THE REAL LEVER (owner-lane, NOT taken here — conformance-checkable, not loom-gated): **intra-op write batching** — accumulate ALL of one FsOp's block writes into ONE `Transaction` and commit ONCE, cutting commits-per-create from N→1 and therefore the global-gate + global-snapshot-lock hits by ~Nx. This is the metadata analog of the FUSE data writeback-batch (`RequestScope` DeferredUntilFlush, lib.rs), which today is write(data)-only — metadata ops still commit per-request (and the no-tx adapter commits per-BLOCK). Correctness obligation: reads within the op must see the op's own staged-but-uncommitted writes (read-your-writes WITHIN the open transaction), since ext4 create does read-modify-write on bitmap/dir blocks. That is a transaction-staging-visibility change, validatable by the existing create/e2fsck conformance suite — NOT a data-race needing loom. No code change in this entry (measurement + root-cause + lever spec); supersedes the bead's outdated "self.mvcc_store.write().commit whole-store lock" framing (the store is now `Arc<FsMvccStore>`, interior-sharded, commit is `&self`).
