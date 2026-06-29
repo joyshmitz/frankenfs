@@ -3018,3 +3018,21 @@ Profiled and allocator-A/B'd the commit hot path (per directive: build+bench per
 ROOT CAUSE: the cost is faulting GENUINELY-NEW pages for retained version payloads (the distinct-block bench never frees, so neither allocator can recycle; both must fault). This is the SAME inherent 4 KiB materialization the kernel page cache also faults (6b9f99b4) — not allocator overhead. A real overwrite+prune workload recycles buffers (fewer faults), so this is an upper bound, not the production steady state. Either way: the allocator is not a commit lever, and there is no safe-Rust commit-path win hiding behind malloc.
 
 CONCLUSION: build+bench confirms (third independent method, after the 1.06x batching A/B and the 700 ns sub-phase decomposition) that the per-op commit path has no safe-Rust lever — it is lean machinery + inherent kernel-shared page materialization. Reverted the jemalloc change (~0-gain, neutral-to-worse). The dig has now exhausted the commit path by profile, by decomposition, by batching A/B, and by allocator A/B; the sole remaining lever stays the owner-lane `GroupCommitCoordinator` wiring (durable mode, 960x, spec'd in 048290cf). No production code change (measurement; jemalloc probe reverted).
+
+### 2026-06-28 ⭐MEASURED (ffs-alloc bench, NEW area): single-block alloc-persist is ~40x slower than batched (1.15 µs vs 0.03 µs/block); the only remaining single-alloc-LOOP is the LEGACY ext4 indirect-write path — modern extent writes already coalesce (CrimsonFox cc/opus)
+
+Profiled a fresh area (block allocation, on every create/write/mkdir) per directive (build+bench `-p ffs-alloc`). `batch_alloc` bench, rch, --measurement-time 3:
+
+| op | time | per-block |
+| --- | --- | --- |
+| `single_20x1` (20 × `alloc_blocks_persist(1)`) | 23.36 µs | ~1.17 µs |
+| `batch_20` (`alloc_blocks_batch_persist(20)`) | 2.19 µs | ~0.11 µs |
+| `single_100x1` | 114.6 µs | ~1.15 µs |
+| `batch_100` | 2.64 µs | ~0.026 µs |
+| **ratio** | | **~40x** (batch persists bitmap+group-desc+csum+stats ONCE, not per block) |
+
+The ~1.15 µs/block fixed cost is per-call alloc bookkeeping (group-descriptor lookup, bitmap scan, checksum, GroupStats update, persist) — NOT device I/O (the bench device is in-memory). So any production path that allocates K blocks one-at-a-time pays ~40x vs batching K.
+
+AUDIT of `alloc_blocks_persist` callers in ffs-core: most are GENUINELY single-block (one dir block, one inode-table block, one bitmap block — cannot batch). The modern ext4 **extent** write path already batches via `allocate_extent_coalescing` (shipped, 120x@N=40k). The ONE remaining single-alloc-LOOP is `ext4_write_indirect` (lib.rs:20336 `while pos < end` → `alloc_blocks_persist(…, 1, …)` per hole, line 20370): a K-block indirect-mapped write pays K individual alloc-persists.
+
+LEVER (identified, NOT taken — legacy + risky + low-EV): pre-resolve holes in the write range, `alloc_blocks_batch_persist` the data blocks once, consume during the mapping loop. NOT shipped because: (1) the **indirect path is legacy** — modern ext4 is extent-mapped (the common path already coalesces); (2) batching is correctness-risky — the indirect-metadata (single/double/triple pointer) blocks are allocated interleaved inside `write_block_ptr` per block, so only the DATA-block allocation is trivially batchable, requiring a hole pre-scan that doubles `resolve_indirect_block` calls; (3) low EV (rare workload) does not justify the regression risk on a correctness-sensitive growth path under the REVERT-~0-gain/conformance-GREEN discipline. Recorded as a precise, measured lever for a focused legacy-path effort. No code change (measurement + audit; the common extent path is already batched).
