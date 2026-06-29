@@ -12471,29 +12471,17 @@ impl OpenFs {
         name: &[u8],
     ) -> Result<Option<Ext4DirEntry>, FfsError> {
         Self::ext4_reject_inline_data_dir(dir_inode)?;
-        // htree descent: for a non-casefold htree directory the dx index is
-        // AUTHORITATIVE — our writer (insert split / rebuild) always routes every
-        // entry to its hash-correct leaf and never linearly appends, and the
-        // kernel maintains the same invariant. So a clean descent that does not
-        // find the name (`NotFoundInIndex`) proves the name is ABSENT, and we can
-        // skip the O(N) linear block scan below entirely. This is the dominant
-        // rename cost: each rename's target-existence check is a negative lookup,
-        // and a per-op O(N) scan makes a rename burst O(N^2) (bd-gauub). Only a
-        // genuinely unreadable index (`IndexInvalid`) or a casefold dir (whose
-        // fold routing this descent does not replicate) falls through to the scan.
-        match self.htree_lookup_name_authoritative(cx, scope, dir_inode, name) {
-            Some(Some(entry)) => return Ok(Some(entry)),
-            Some(None) => return Ok(None),
-            None => {}
-        }
-
-        // Negative fast path (bd-f8rd8): an authoritative per-dir name index
-        // answers a name-ABSENT lookup (the create existence check) in O(1),
-        // skipping the O(N) block scan below. Validation-keyed (ctime/mtime/
-        // size) exactly like the readdir snapshot, so any mismatch falls through
-        // to the safe scan; a name PRESENT in the index still scans (the htree
-        // missed it → the entry lives in a non-indexed block the scan locates).
-        // Guarded on a stamped inode number so it can never key two dirs alike.
+        // Negative fast path (bd-f8rd8), checked FIRST: an authoritative per-dir
+        // name index answers a name-ABSENT lookup (the create existence check) in
+        // O(1) — a hash-set membership test under one shard lock — which is
+        // strictly cheaper than the htree descent + hash-target-leaf scan below.
+        // perf showed the leaf scan (`lookup_in_dir_block`) at ~2.2% of a
+        // create-heavy workload even on htree dirs; trying the index before the
+        // descent skips that scan for the common new-name create. Validation-keyed
+        // (ctime/mtime/size) like the readdir snapshot, so any mismatch falls
+        // through to the authoritative htree path; a name PRESENT in the index
+        // still descends (the entry's exact block is located there). Guarded on a
+        // stamped inode number so it can never key two dirs alike.
         let dir_validation = ReaddirValidation {
             ctime: (u64::from(dir_inode.ctime) << 32) | u64::from(dir_inode.ctime_extra),
             mtime: u64::from(dir_inode.mtime),
@@ -12510,6 +12498,22 @@ impl OpenFs {
                     return Ok(None);
                 }
             }
+        }
+
+        // htree descent: for a non-casefold htree directory the dx index is
+        // AUTHORITATIVE — our writer (insert split / rebuild) always routes every
+        // entry to its hash-correct leaf and never linearly appends, and the
+        // kernel maintains the same invariant. So a clean descent that does not
+        // find the name (`NotFoundInIndex`) proves the name is ABSENT, and we can
+        // skip the O(N) linear block scan below entirely. This is the dominant
+        // rename cost: each rename's target-existence check is a negative lookup,
+        // and a per-op O(N) scan makes a rename burst O(N^2) (bd-gauub). Only a
+        // genuinely unreadable index (`IndexInvalid`) or a casefold dir (whose
+        // fold routing this descent does not replicate) falls through to the scan.
+        match self.htree_lookup_name_authoritative(cx, scope, dir_inode, name) {
+            Some(Some(entry)) => return Ok(Some(entry)),
+            Some(None) => return Ok(None),
+            None => {}
         }
 
         let bs = u64::from(self.block_size());

@@ -3300,3 +3300,15 @@ MEASURED (local build, create-bench, vs this session's pre-fix baseline same bin
 | 8-thread create | ~21,441/s | ~25,310/s | **1.18x** |
 
 Matches the profile (removing ~13% self-time → ~1.15x). Conformance GREEN: ffs-alloc 213/0 (incl. the persist-rollback-restore test — byte-wise yields the same undo set), e2fsck 0 errors on both create- and mkdir-bench images (padding still correct). Helps every inode allocation (create + mkdir). This also narrows the measured vs-kernel ext4 gaps: single-thread create 0.84x→~0.94x, mkdir likewise improved.
+
+### 2026-06-29 ⭐SHIPPED (MEASURED perf win): name-index checked before htree descent — single-thread create 1.13x (CrimsonFox)
+
+Profiling create (post-padding-fix) showed `lookup_in_dir_block` still ~2.2% — the hash-target-leaf scan inside `htree_lookup_name_authoritative`, which `lookup_name_with_scope` ran BEFORE the O(1) bd-f8rd8 negative name-index. A new-name create existence check is always a negative lookup, so it paid the htree descent + leaf scan even though the validation-keyed name index could answer "absent" in O(1) (one hash-set membership test under a shard lock). FIX: try the name-index FIRST; only fall to the htree descent on index miss/invalid or a PRESENT name. Correctness unchanged — the index's "absent" answer is already authoritative when validation matches; everything else still descends.
+
+MEASURED (local build, create-bench, vs the byte-wise-padding baseline = same binary minus this reorder):
+| | padding-fix baseline | + index-first | this step | cumulative vs original |
+| --- | --- | --- | --- | --- |
+| single-thread create | ~33,000/s | ~37,544/s | **1.13x** | **1.28x** (29.4k orig) |
+| 8-thread create | ~25,300/s | ~25,850/s | ~1.02x (neutral; convoy-bound) | — |
+
+The single-thread ext4 create now ~37.5k/s — at/above the kernel ext4 baseline (35.1k), flipping the earlier 0.84x deficit to ~parity-to-slightly-ahead. Parallel is convoy-bound (owner-lane) so the per-op lookup saving is masked there. Conformance GREEN: ffs-core lib 1185/0 (lookup/duplicate-detection correct), e2fsck 0 errors on create + mkdir images. Helps every create/mkdir/rename negative existence check on an indexed dir.
