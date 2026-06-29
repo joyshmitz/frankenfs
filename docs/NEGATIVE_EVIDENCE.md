@@ -3670,3 +3670,17 @@ Net: the CoW representation is already memory-efficient (Arc-shared item data); 
 Checked the last unaudited parallel-read serialization candidate — the per-read extent resolution. ext4 reads resolve logical→physical via `resolve_extent` → `ffs_extent::ExtentCache::lookup` (flagged as "the per-read serial point" in OpenFs docs). NO lever: `ExtentCache` is already striped (`Box<[RwLock<ExtentCacheInner>]>` keyed by inode namespace) AND `lookup` takes `shard.read()` (shared) on the hot path (ffs-extent:1534), updating recency via atomic `last_access` and escalating to `.write()` only in the rare physical-overflow/eviction case (1561). So concurrent random readers of the same file share the read lock — no serialization. Already optimal (mirrors the conclusion that converting the data-block ShardedCache Mutex→RwLock was neutral: the read paths are not lock-bound).
 
 This completes the parallel-random-read lock audit: snapshot registration (fixed 9376f4d6, 88x→3.3x), data-block ShardedCache shard lock (RwLock conversion measured neutral this session), and extent resolution (RwLock-read + atomic LRU, optimal) are all addressed/optimal. The residual ~3.3x vs kernel on parallel random read is per-read MVCC read_visible overhead + rayon coordination at kernel-comparable absolute levels, not a remaining lock convoy. The read-path lock surface is exhaustively clean.
+
+### 2026-06-29 CORRECTION (measured): the parallel-write convoy is per-commit GLOBAL-LOCK acquisition, NOT the publish-wait condvar (CrimsonFox)
+
+Built an env-gated no-wait `publish()` prototype (FFS_PUBLISH_NOWAIT) to QUANTIFY how much of the convoy is the in-order publish-wait (`CommitPublicationGate::publish` condvar wait, sharded.rs:93) that a prior entry named the primary blocker. No-wait advances the contiguous prefix and returns WITHOUT blocking on predecessors. Env-toggle A/B (same binary, create-bench --threads, 96000 creates):
+| threads | wait (OFF) creates/s | no-wait (ON) creates/s |
+| --- | --- | --- |
+| 1 | 33450 | 32256 |
+| 8 | 24736 | 24689 |
+| 16 | 23057 | 23839 |
+| 32 | 22955 | 21971 |
+
+NEUTRAL — eliminating the condvar wait did NOT improve parallel scaling; the negative scaling (8t = 0.74x of 1t) persists unchanged. This REFUTES the prior pinpoint (1eb2d2a2/6226cd23 named the publish-wait as the primary convoy blocker). REVERTED (shelved).
+
+CORRECTED ROOT CAUSE: with no-wait, every committer STILL takes `self.wait_lock.lock()` (the gate's single `Mutex<PublicationState>`, sharded.rs:77) to insert its seq + advance the prefix, and STILL hits the `active_snapshots.write()` global lock in register/release. So the convoy is the per-commit GLOBAL-LOCK ACQUISITION — the gate's `wait_lock` Mutex (taken by EVERY publish) plus the `active_snapshots` RwLock.write (every register/release) — which serializes even fully disjoint-shard writers, NOT the in-order condvar wait (which is downstream of already-holding the Mutex and is measurably free to remove). The publish-wait is correctly load-bearing for read-your-writes (so it can't just be removed anyway), but it is NOT the throughput bottleneck. The real convoy fix must make publication + snapshot-refcounting LOCK-FREE or per-shard so disjoint committers don't contend on a process-global Mutex/RwLock per commit — a larger redesign than relaxing the wait, still owner-lane (loom), but now correctly localized to the global-lock acquisition rather than the wait. This supersedes the "publish-wait is primary" framing in the prior two convoy entries.
