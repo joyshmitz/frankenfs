@@ -3262,3 +3262,15 @@ Re-attempted the bd-bhh0i publication-gate lock-free fast path with the fix for 
 | 32 | 11.23 ms | (not reached) |
 
 ROOT CAUSE: removing the retry loop killed the busy-spin, but under N-writer contention every committer's single CAS on the shared `completed_commit` atomic mostly LOSES (16 cores racing the same cache line) and then falls to the mutex anyway — so it pays the full mutex path PLUS heavy cache-line ping-pong on `completed_commit`, which is strictly worse than the plain mutex+condvar. CONCLUSION (now doubly confirmed): the ordered publication gate is NOT improvable by a lock-free CAS fast path in safe Rust — both the retry-spin form AND the CAS-once form regress under contention; the mutex+condvar is already optimal for contended publish. The bd-bhh0i parallel-write convoy's only remaining lever is the owner-lane reduction of commits-per-FsOp (intra-op batching via `commit_request_scope` unification), not the gate primitive. Reverted (uncommitted; stashed `cc-gate-cas-once-REFUTED-failed-cas-contention`); conformance unaffected (no code on main).
+
+### 2026-06-29 MEASURED DOMINATION MATRIX: frankenfs vs real kernel ext4/btrfs, single-thread metadata +sync (CrimsonFox)
+
+Full head-to-head vs real kernel loop mounts (same images, both flush to device once at end). Now valid since this session's e2fsck + btrfs-check correctness fixes made frankenfs images clean on both filesystems. Ratio = frankenfs / kernel (>1 = frankenfs FASTER):
+
+| op (single-thread, +sync) | ext4 ratio | btrfs ratio |
+| --- | --- | --- |
+| create | 0.84x (29.4k vs 35.1k) | **1.16x** ✅ (35.0k vs 30.3k) |
+| mkdir  | 0.72x (15.8k vs 21.8k) | **9.6x** ✅✅ (35.7k vs 3.7k) |
+| rename | **1.61x** ✅ (48.8k vs 30.4k) | 0.43x (10.8k vs 25.2k) |
+
+DOMINATES on 3 of 6: ext4 rename (1.61x, from the O(N²)->O(N) htree-preflight fix 51294142), btrfs create (1.16x), and btrfs mkdir **9.6x** (kernel btrfs pays a full CoW b-tree transaction per mkdir at ~270us/op; frankenfs's in-memory MVCC + single deferred flush is ~28us/op). LAGS on 3: ext4 create (0.84x) and ext4 mkdir (0.72x) — both bound by per-FsOp commit amortization the kernel gets from delayed-alloc/page-cache writeback (owner-lane intra-op-batching lever); btrfs rename (0.43x) — the known btrfs commit-layer gap (tree-mutation lever measured-neutral 0adac5d6; owner-lane commit-serialization). All six frankenfs images are correctness-clean (ext4 e2fsck / btrfs check). This is the campaign's first comprehensive clean measured matrix: frankenfs already beats in-kernel ext4 on rename and in-kernel btrfs on create+mkdir; the remaining lags are all the same commit-amortization lever class (owner-lane), not correctness/structural deficiencies.
