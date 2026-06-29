@@ -3274,3 +3274,15 @@ Full head-to-head vs real kernel loop mounts (same images, both flush to device 
 | rename | **1.61x** ✅ (48.8k vs 30.4k) | 0.43x (10.8k vs 25.2k) |
 
 DOMINATES on 3 of 6: ext4 rename (1.61x, from the O(N²)->O(N) htree-preflight fix 51294142), btrfs create (1.16x), and btrfs mkdir **9.6x** (kernel btrfs pays a full CoW b-tree transaction per mkdir at ~270us/op; frankenfs's in-memory MVCC + single deferred flush is ~28us/op). LAGS on 3: ext4 create (0.84x) and ext4 mkdir (0.72x) — both bound by per-FsOp commit amortization the kernel gets from delayed-alloc/page-cache writeback (owner-lane intra-op-batching lever); btrfs rename (0.43x) — the known btrfs commit-layer gap (tree-mutation lever measured-neutral 0adac5d6; owner-lane commit-serialization). All six frankenfs images are correctness-clean (ext4 e2fsck / btrfs check). This is the campaign's first comprehensive clean measured matrix: frankenfs already beats in-kernel ext4 on rename and in-kernel btrfs on create+mkdir; the remaining lags are all the same commit-amortization lever class (owner-lane), not correctness/structural deficiencies.
+
+### 2026-06-29 MEASURED: parallel ext4 create gap quantified vs kernel — 5.5x (the #1 gap, bd-bhh0i) — CrimsonFox
+
+Completing the matrix with the parallel-write row (8-way, +sync, real kernel ext4 loop mount, true multiprocess vs frankenfs `create-bench --threads 8`):
+
+| ext4 create | 1 thread | 8-way | scaling |
+| --- | --- | --- | --- |
+| kernel | 35,070/s | 118,734/s | **3.4x UP** |
+| frankenfs | 29,400/s | 21,441/s | **0.65x DOWN (negative)** |
+| ratio (ffs/kernel) | 0.84x | **0.18x (kernel 5.5x faster)** | — |
+
+This is the campaign's BIGGEST measured gap vs the kernel: at 8 parallel writers the kernel scales 3.4x while frankenfs NEGATIVELY scales (29.4k→21.4k), opening a **5.5x** deficit. Root cause is the bd-bhh0i commit-path convoy already diagnosed+measured this session: per-FsOp commits funnel through the GLOBAL in-order `CommitPublicationGate` mutex + the GLOBAL `active_snapshots` RwLock (register/release per adapter), serializing — and convoying — all parallel committers. Both safe-Rust attempts to fix the gate are REFUTED with measurement (retry-spin busy-spins; CAS-once regresses via failed-CAS cache-line contention); the only remaining lever is the owner-lane reduction of commits-per-FsOp (intra-op batching via `commit_request_scope` unification) which also relieves the gate frequency Nx. NET measured standing: frankenfs beats kernel on ext4 rename (1.61x), btrfs create (1.16x), btrfs mkdir (9.6x); trails on ext4 create/mkdir (single-thread, ~0.8x) and — by far the largest — PARALLEL ext4 create (0.18x / 5.5x). The 5.5x parallel-write gap is the single highest-value target and is squarely owner-lane.
