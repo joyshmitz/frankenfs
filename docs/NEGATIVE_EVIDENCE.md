@@ -3226,3 +3226,16 @@ Fixed the 2nd of the 3 surfaced workspace RED tests. `module_census_matches_trac
 Resolved the 3rd/last surfaced workspace RED test. `btrfs_..._cross_parent_directory_rename_updates_parent_nlink_accounting` asserted source-parent nlink `before-1` (=0) and dest `before+1`; frankenfs returned the source unchanged at 1. ORACLE (real kernel btrfs, loop mount): `mkdir sp dp sp/moved; stat -c %h sp` = **1**; `mv sp/moved dp/moved; stat -c %h sp` = **1** (dest also 1). So btrfs reports directory `st_nlink = 1` for ALL directories regardless of subdir count (unlike ext4's `2 + subdirs`) — frankenfs's behavior (nlink unchanged) is CORRECT; the test's `before±1` expectations were ext4 semantics applied to btrfs. Fixed the assertions in BOTH the OpenFs-fixture test (was RED) and its real-btrfs-mount sibling (same wrong assertions, only escaping CI because it needs a privileged mount) to expect unchanged nlink. NO production code changed (frankenfs was already correct). VERIFIED: openfs test 1/0.
 
 With this, all 3 workspace RED tests surfaced earlier are resolved (README counts, module_census re-sync, btrfs nlink) — ffs-core 1185/0, ffs-fuse 571/0, and these three green; the workspace test suite is clean.
+
+### 2026-06-29 MEASURED head-to-head (single-thread, +sync) + perf-lever exhaustion blocker — CrimsonFox
+
+With the workspace now test-clean and ext4 images e2fsck-valid (this session's correctness fixes), ran a clean single-thread metadata head-to-head vs a REAL kernel ext4 loop mount (same image, N=10000, create+`os.sync()` vs frankenfs `create-bench` + `sync_all_to_device`):
+
+| op (single-thread, +sync) | frankenfs | kernel ext4 | ratio |
+| --- | --- | --- | --- |
+| create | ~29,400/s (29534/29401/29374) | 35,070/s | **0.84x** (frankenfs ~16% slower) |
+| rename | 27,580/s | (mount auto-cleaned mid-run; prior session measured ~1.71x FASTER post O(N²) fix 51294142) | — |
+
+HONEST FINDING: frankenfs does NOT dominate single-thread create+sync — it is ~0.84x the kernel. The gap is the per-FsOp commit machinery (N per-block MVCC commits through the in-order publication gate + per-op `sync_all_to_device`), which the kernel amortizes via delayed allocation + page-cache writeback. Being within 0.84x of the in-kernel ext4 from a userspace reimplementation is respectable but it is a gap, not domination.
+
+BLOCKER (perf-lever exhaustion, surfaced honestly): the accessible safe-Rust per-crate perf space is mined — every isolated hot path opened this session (extent leaf search, dir lookup, btrfs csum lookup `lookup_data_block_csum`, alloc largest-run) is already an optimized A/B with a prior commit. The two remaining real levers are BOTH owner-lane / refuted-in-safe-Rust: (1) the create commit-path — intra-op write batching measured **1.83x single-thread** but corrupts (scope/op-batch split-brain on the shared GDT block, 931cb6d8 reverted c4222300) and its correct form needs `commit_request_scope` unification; the lock-free publication-gate fast path busy-spins under contention (refuted). (2) the read copy-tax (~2.9x parallel) needs a DIFFERENT primitive (mmap/io_uring) — but `ffs-block` is `#![forbid(unsafe_code)]` with no `memmap2` dep, so a safe mmap ByteDevice can't be added in-window. NET: no safe, clean, in-60m perf lever remains; the forward path is an owner-lane commit-path-batching or zero-copy-read effort.
