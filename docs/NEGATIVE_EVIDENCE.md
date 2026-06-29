@@ -3007,3 +3007,14 @@ Consolidates this session's 10 measured/code-grounded entries into one navigable
 - io_uring is ORTHOGONAL (FUSE-dispatch / a different unmeasured gap, ae70e443), NOT the fsync-barrier lever.
 
 **Bottom line:** FrankenFS's default path matches/beats the kernel everywhere measured. The safe-Rust per-crate lever space is exhausted (bitmap word-scan, hardware crc32c, lean commit, optimized readdir all already done). The sole remaining large lever is the owner-lane, now-fully-specified wiring of `GroupCommitCoordinator` for the durable mode — a focused crash-consistency-validated effort, not an end-of-turn change. No code change (synthesis).
+
+### 2026-06-28 ⭐MEASURED (perf + jemalloc A/B): the commit path is PAGE-FAULT-bound on inherent new-data materialization — the allocator is NOT a lever (jemalloc neutral-to-worse), confirming commit is not safe-Rust-improvable (CrimsonFox cc/opus)
+
+Profiled and allocator-A/B'd the commit hot path (per directive: build+bench per-crate, /extreme-software-optimization profile-first).
+
+- **perf profile** of `commit_breakdown` phase C (system allocator, 400k ops): **69% in `_int_malloc`**, call chain into the kernel page-fault/mmap path (`0xffffffff…`). Commit is allocator/page-fault-bound — the version store faults NEW pages for each retained 4 KiB payload.
+- **jemalloc A/B** (added `tikv-jemallocator` as `#[global_allocator]` to the example — production `ffs-cli` already uses it, main.rs:8): commit C = **3962 ns/op with jemalloc vs ~2740–3000 ns/op system malloc = NEUTRAL-TO-WORSE.** Confirms the prior `wal_throughput` jemalloc probe (7c2c7f4c). REFUTES the hypothesis that the example's system allocator inflated the earlier commit numbers — jemalloc is in fact slightly worse on this retain-everything pattern.
+
+ROOT CAUSE: the cost is faulting GENUINELY-NEW pages for retained version payloads (the distinct-block bench never frees, so neither allocator can recycle; both must fault). This is the SAME inherent 4 KiB materialization the kernel page cache also faults (6b9f99b4) — not allocator overhead. A real overwrite+prune workload recycles buffers (fewer faults), so this is an upper bound, not the production steady state. Either way: the allocator is not a commit lever, and there is no safe-Rust commit-path win hiding behind malloc.
+
+CONCLUSION: build+bench confirms (third independent method, after the 1.06x batching A/B and the 700 ns sub-phase decomposition) that the per-op commit path has no safe-Rust lever — it is lean machinery + inherent kernel-shared page materialization. Reverted the jemalloc change (~0-gain, neutral-to-worse). The dig has now exhausted the commit path by profile, by decomposition, by batching A/B, and by allocator A/B; the sole remaining lever stays the owner-lane `GroupCommitCoordinator` wiring (durable mode, 960x, spec'd in 048290cf). No production code change (measurement; jemalloc probe reverted).
