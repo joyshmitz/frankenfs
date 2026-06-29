@@ -274,6 +274,20 @@ pub fn add_entry(
 ///   the removed slot (coalescing free space).
 /// - Otherwise the target entry is marked deleted (`inode = 0`).
 pub fn remove_entry(block: &mut [u8], name: &[u8], reserved_tail: usize) -> Result<bool> {
+    Ok(remove_entry_take_inode(block, name, reserved_tail)?.is_some())
+}
+
+/// Like [`remove_entry`], but on success returns the inode number of the entry
+/// that was removed (the value read from the matched dirent's `inode` field)
+/// instead of just a found/not-found bool. Lets a caller that needs the child
+/// inode — e.g. `unlink`/`rmdir`, which otherwise does a separate positive
+/// `lookup_name` (a second htree descent + leaf read + scan) just to learn it —
+/// collapse "find the child" and "remove the entry" into one descent + scan.
+pub fn remove_entry_take_inode(
+    block: &mut [u8],
+    name: &[u8],
+    reserved_tail: usize,
+) -> Result<Option<u32>> {
     validate_name(name)?;
 
     let mut off = 0usize;
@@ -289,7 +303,7 @@ pub fn remove_entry(block: &mut [u8], name: &[u8], reserved_tail: usize) -> Resu
     // interior node precedes the target leaf would spuriously fail (on
     // metadata_csum the fake dirent's rec_len exceeds `limit`). bd-y8tcx.
     if is_interior_htree_dx_node_block(block) {
-        return Ok(false);
+        return Ok(None);
     }
 
     while off + DIR_ENTRY_HEADER_LEN <= limit {
@@ -353,7 +367,7 @@ pub fn remove_entry(block: &mut [u8], name: &[u8], reserved_tail: usize) -> Resu
             // Clear metadata for cleanliness.
             block[off + 6] = 0;
             block[off + 7] = 0;
-            return Ok(true);
+            return Ok(Some(cur_ino));
         }
 
         if cur_ino != 0 {
@@ -362,7 +376,7 @@ pub fn remove_entry(block: &mut [u8], name: &[u8], reserved_tail: usize) -> Resu
         off = end;
     }
 
-    Ok(false)
+    Ok(None)
 }
 
 fn update_live_entry_header(

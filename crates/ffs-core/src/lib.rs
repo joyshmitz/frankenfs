@@ -18561,40 +18561,25 @@ impl OpenFs {
             if !parent_inode.is_dir() {
                 return Err(FfsError::NotDirectory);
             }
-
-            // Look up the child to get its inode number.
-            let Some(entry) = self.lookup_name(cx, &parent_inode, name)? else {
-                return Err(FfsError::NotFound(
-                    String::from_utf8_lossy(name).into_owned(),
-                ));
-            };
-            let child_ino = InodeNumber(u64::from(entry.inode));
-            let child_inode = self.read_inode(cx, child_ino)?;
-            // Immutable and append-only files cannot be deleted (kernel: EPERM).
-            Self::ext4_reject_immutable_or_append(&child_inode)?;
-
-            if expect_dir {
-                if !child_inode.is_dir() {
-                    return Err(FfsError::NotDirectory);
-                }
-                // Check directory is empty (only . and ..).
-                let entries = self.read_dir(cx, &child_inode)?;
-                let real_entries = entries
-                    .iter()
-                    .filter(|e| e.name != b"." && e.name != b"..")
-                    .count();
-                if real_entries > 0 {
-                    return Err(FfsError::NotEmpty);
-                }
-            } else if child_inode.is_dir() {
-                return Err(FfsError::IsDirectory);
-            }
+            // Inline-data directories are unsupported for entry mutation: the
+            // old path got this rejection from `lookup_name`, which the one-pass
+            // removal below no longer calls — so assert it loudly here (bd-4y9ca).
+            Self::ext4_reject_inline_data_dir(&parent_inode)?;
 
             let mut alloc = alloc_mutex.write();
 
-            // Remove directory entry from parent blocks.
+            // Remove the child's directory entry from the parent's blocks AND
+            // learn its inode number in ONE pass: `remove_entry_take_inode`
+            // returns the removed dirent's inode, so unlink no longer does a
+            // separate positive `lookup_name` (a second htree descent + leaf
+            // read + scan) just to find the child — the descent below already
+            // visits the hash-correct leaf. Validation (immutable/append, the
+            // is-dir / rmdir-empty checks) runs AFTER the staged removal; any
+            // rejection returns Err, so the MVCC transaction is dropped
+            // uncommitted and the removal never persists — observably identical
+            // to checking before removing (bd-cc-unlink-1pass).
             let extents = self.collect_extents(cx, &parent_inode)?;
-            let mut removed = false;
+            let mut removed_ino: Option<u32> = None;
             let reserved_tail = self.ext4_dir_reserved_tail();
             let parent_ino_u32 = u32::try_from(parent.0)
                 .map_err(|_| FfsError::Format("inode number exceeds ext4 32-bit limit".into()))?;
@@ -18648,45 +18633,73 @@ impl OpenFs {
                     if let Some(target_phys) = target_logical.and_then(|tl| resolve_logical(tl)) {
                         if Some(target_phys) != dx_root_phys {
                             let mut data = self.read_block_vec(cx, target_phys)?;
-                            if ffs_dir::remove_entry(&mut data, name, reserved_tail)? {
+                            if let Some(ino) =
+                                ffs_dir::remove_entry_take_inode(&mut data, name, reserved_tail)?
+                            {
                                 self.stamp_ext4_dir_block(
                                     &mut data,
                                     parent_ino_u32,
                                     parent_inode.generation,
                                 );
                                 tx_dev.write_block(cx, target_phys, &data)?;
-                                removed = true;
+                                removed_ino = Some(ino);
                             }
                         }
                     }
                 }
             }
 
-            'outer: for ext in &extents {
-                if removed {
-                    break;
-                }
-                for block in Self::extent_phys_blocks(ext) {
-                    if Some(block) == dx_root_phys {
-                        continue;
-                    }
-                    let mut data = self.read_block_vec(cx, block)?;
-                    if ffs_dir::remove_entry(&mut data, name, reserved_tail)? {
-                        self.stamp_ext4_dir_block(
-                            &mut data,
-                            parent_ino_u32,
-                            parent_inode.generation,
-                        );
-                        tx_dev.write_block(cx, block, &data)?;
-                        removed = true;
-                        break 'outer;
+            if removed_ino.is_none() {
+                'outer: for ext in &extents {
+                    for block in Self::extent_phys_blocks(ext) {
+                        if Some(block) == dx_root_phys {
+                            continue;
+                        }
+                        let mut data = self.read_block_vec(cx, block)?;
+                        if let Some(ino) =
+                            ffs_dir::remove_entry_take_inode(&mut data, name, reserved_tail)?
+                        {
+                            self.stamp_ext4_dir_block(
+                                &mut data,
+                                parent_ino_u32,
+                                parent_inode.generation,
+                            );
+                            tx_dev.write_block(cx, block, &data)?;
+                            removed_ino = Some(ino);
+                            break 'outer;
+                        }
                     }
                 }
             }
-            if !removed {
+            let Some(child_ino_u32) = removed_ino else {
                 return Err(FfsError::NotFound(
                     String::from_utf8_lossy(name).into_owned(),
                 ));
+            };
+
+            // The entry is now removed (staged in the txn). Read the child and
+            // run the kernel-equivalent rejections; any Err here drops the txn,
+            // so the staged removal is discarded and nothing persists.
+            let child_ino = InodeNumber(u64::from(child_ino_u32));
+            let child_inode = self.read_inode(cx, child_ino)?;
+            // Immutable and append-only files cannot be deleted (kernel: EPERM).
+            Self::ext4_reject_immutable_or_append(&child_inode)?;
+
+            if expect_dir {
+                if !child_inode.is_dir() {
+                    return Err(FfsError::NotDirectory);
+                }
+                // Check directory is empty (only . and ..).
+                let entries = self.read_dir(cx, &child_inode)?;
+                let real_entries = entries
+                    .iter()
+                    .filter(|e| e.name != b"." && e.name != b"..")
+                    .count();
+                if real_entries > 0 {
+                    return Err(FfsError::NotEmpty);
+                }
+            } else if child_inode.is_dir() {
+                return Err(FfsError::IsDirectory);
             }
 
             // Decrement child link count.
