@@ -3394,3 +3394,12 @@ MEASURED (clean same-binary A/B, fixture /bigfile 64MB, rand-read --seed 42 coun
 | parallel random read | ~7.88M IOPS | ~7.87M IOPS | ~1.00x (neutral; parallel is bandwidth/dispatch-bound, sublinear ~17x scaling, so per-read CPU savings don't move the shared-bottleneck aggregate) |
 
 Single-thread is the clean per-read-latency signal and the win helps EVERY `read_into` (every FUSE read goes through this path), even where parallel aggregate is bw-bound (lower per-read CPU frees cores). Correctness: read-only inode, borrow vs clone is identical data; ffs-core lib 1185/0 (read path). RO-only fast path (writable mount unaffected).
+
+### 2026-06-29 DIG: read path mined post inode-borrow win — single-thread rand-read now IO-bound; btrfs RO + read_file_data already optimal (CrimsonFox)
+
+Re-profiled single-thread random read WITH the inode-borrow win (00a2bdb1) in: `Ext4Inode::clone` is GONE; the profile is now dominated by KERNEL (~27%: device read / page-cache / syscall) + memmove/memset (~6.7%, inherent data copy), with userspace FS minimal (read_file_data 2.0%, read_into 1.7%). Single-thread ext4 random read is now IO/kernel-bound — the inode-borrow was the last clean userspace lever on it. Checked the sibling read sub-paths for the same "heap struct cloned per read" pattern and found them already optimal:
+- **btrfs RO read** (`btrfs_read_file_into` hot path, bd-n5w92): serves the cached extent list via `Arc::clone` (cheap refcount, not deep clone) and `btrfs_filter_window_extents` by ref — already the borrow form my ext4 fix introduced.
+- **read_file_data**: zero-fills only HOLE segments; data-bearing segments read in place (zero-copy, "each read lands in place") — no redundant whole-buffer memset. The profile's memset is the BENCH's per-read `vec![0; size]` (harness, not FS).
+- **parallel rand-read**: bandwidth/dispatch-bound (~7.88M IOPS, sublinear ~17x scaling) — per-read CPU levers (inode-borrow, RwLock) are all neutral there.
+
+CONCLUSION: the read path's clean, safe, measurable FS levers are now mined (ext4 inode-borrow shipped; btrfs RO + read_file_data already optimal; single-thread IO-bound; parallel bw-bound). Remaining read costs are inherent (device IO, data copy). The only remaining read lever class is the WRITABLE-mount path (ext4 read skips the RO hot-inode slot; btrfs writable re-descends the COW tree per read) — both need write-invalidation-aware caching (harder, less-common scenario). The session's biggest remaining gap stays the owner-lane parallel-WRITE convoy.
