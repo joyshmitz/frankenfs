@@ -15193,21 +15193,27 @@ fn btrfs_openfs_mkfs_fixture_cross_parent_directory_rename_updates_parent_nlink_
             std::ffi::OsStr::new("moved_dir"),
         )
         .expect("lookup OpenFs renamed destination child");
+    // btrfs reports directory st_nlink = 1 for ALL directories regardless of
+    // subdirectory count (unlike ext4's `2 + subdirs`), so moving a child
+    // directory across parents does NOT change either parent's nlink. Verified
+    // against a real kernel btrfs loop mount (mkdir sp/dp/sp/moved; mv
+    // sp/moved dp/; stat -c %h sp == 1 before AND after). The earlier
+    // `before-1`/`before+1` expectations encoded ext4 semantics and were wrong.
     assert_eq!(
         fs_ops
             .getattr(&cx, &mut RequestScope::empty(), source_parent.ino)
             .expect("stat source parent after OpenFs rename")
             .nlink,
-        source_parent_nlink_before - 1,
-        "OpenFs cross-parent rename must decrement source parent nlink"
+        source_parent_nlink_before,
+        "btrfs cross-parent rename must leave source parent nlink unchanged (dirs are nlink=1)"
     );
     assert_eq!(
         fs_ops
             .getattr(&cx, &mut RequestScope::empty(), destination_parent.ino)
             .expect("stat destination parent after OpenFs rename")
             .nlink,
-        destination_parent_nlink_before + 1,
-        "OpenFs cross-parent rename must increment destination parent nlink"
+        destination_parent_nlink_before,
+        "btrfs cross-parent rename must leave destination parent nlink unchanged (dirs are nlink=1)"
     );
     assert_eq!(
         destination_child.ino, source_child.ino,
@@ -15271,19 +15277,23 @@ fn btrfs_fuse_cross_parent_directory_rename_updates_parent_nlink_accounting() {
             destination_entries_expected_after,
             "destination parent entries must gain the moved directory"
         );
+        // btrfs directories are always st_nlink = 1 (it does not track the
+        // ext4 `2 + subdirs` convention), so a cross-parent directory move
+        // leaves both parents' nlink unchanged. Verified against a real kernel
+        // btrfs loop mount.
         assert_eq!(
             fs::metadata(&source_parent)
                 .expect("stat btrfs source parent after rename")
                 .nlink(),
-            source_parent_nlink_before - 1,
-            "moving a child directory out must decrement the source parent st_nlink"
+            source_parent_nlink_before,
+            "btrfs source parent st_nlink stays constant (dirs are nlink=1)"
         );
         assert_eq!(
             fs::metadata(&destination_parent)
                 .expect("stat btrfs destination parent after rename")
                 .nlink(),
-            destination_parent_nlink_before + 1,
-            "moving a child directory in must increment the destination parent st_nlink"
+            destination_parent_nlink_before,
+            "btrfs destination parent st_nlink stays constant (dirs are nlink=1)"
         );
 
         let destination_child_meta =
