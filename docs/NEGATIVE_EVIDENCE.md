@@ -3250,3 +3250,15 @@ Single-thread create+sync, real kernel loop mounts vs frankenfs `create-bench`, 
 | ext4 create (N=10000) | ~29,400/s | 35,070/s | 0.84x (slower) |
 
 FINDING: frankenfs **beats in-kernel btrfs** on create+sync (1.16x) — its in-memory MVCC + single deferred device flush is lighter than btrfs's CoW b-tree + transaction commit per sync. It **trails in-kernel ext4** (0.84x) because mature in-kernel ext4 amortizes via delayed allocation + page-cache writeback that frankenfs's per-FsOp commit path does not. Both frankenfs images are correctness-clean (ext4 `e2fsck` clean after this session's superblock-free-totals + inode-bitmap-padding fixes; btrfs `btrfs check` "no error found" across create/mkdir/rename/delete). So the create gap vs ext4 is purely the commit-path-amortization lever (owner-lane intra-op batching / group-commit), not a correctness or structural deficiency. This is the campaign's first clean, e2fsck/check-valid, head-to-head domination data point on btrfs.
+
+### 2026-06-29 REFUTED (2nd form): lock-free publication-gate fast path — CAS-once-no-retry still regresses parallel writes (CrimsonFox)
+
+Re-attempted the bd-bhh0i publication-gate lock-free fast path with the fix for the prior busy-spin refutation: a SINGLE CAS attempt with NO retry loop (a lost CAS falls straight to the mutex path, eliminating the spin storm). Built + A/B per-crate on `sharded_mvcc_disjoint` (local build, `FFS_GATE_LOCKFREE` 1 vs 0):
+
+| writers | LOCKFREE=0 (mutex, baseline) | LOCKFREE=1 (CAS-once fast path) |
+| --- | --- | --- |
+| 8  | 1.70 ms | 1.78 ms (worse) |
+| 16 | 3.76 ms | **stalls / severely slower** (killed at 120s timeout) |
+| 32 | 11.23 ms | (not reached) |
+
+ROOT CAUSE: removing the retry loop killed the busy-spin, but under N-writer contention every committer's single CAS on the shared `completed_commit` atomic mostly LOSES (16 cores racing the same cache line) and then falls to the mutex anyway — so it pays the full mutex path PLUS heavy cache-line ping-pong on `completed_commit`, which is strictly worse than the plain mutex+condvar. CONCLUSION (now doubly confirmed): the ordered publication gate is NOT improvable by a lock-free CAS fast path in safe Rust — both the retry-spin form AND the CAS-once form regress under contention; the mutex+condvar is already optimal for contended publish. The bd-bhh0i parallel-write convoy's only remaining lever is the owner-lane reduction of commits-per-FsOp (intra-op batching via `commit_request_scope` unification), not the gate primitive. Reverted (uncommitted; stashed `cc-gate-cas-once-REFUTED-failed-cas-contention`); conformance unaffected (no code on main).
