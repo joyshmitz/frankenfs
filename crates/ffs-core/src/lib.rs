@@ -16248,8 +16248,24 @@ impl OpenFs {
         // one adapter instance returns stale data (bd-vdi91: failed-mkdir /
         // rename-over-existing left a stale block-bitmap csum).
         if self.is_writable() {
-            FsMvccBlockDevice::new(base, Arc::clone(&self.mvcc_store), snapshot)
-                .with_read_your_writes()
+            // `with_read_your_writes()` immediately converts an Inline adapter to
+            // Unregistered AND releases the snapshot it just registered — so
+            // `new(..).with_read_your_writes()` did a wasteful register+release
+            // round-trip on the GLOBAL `active_snapshots` write lock per adapter
+            // (two lock acquisitions per FsOp), netting the same Unregistered
+            // state. Construct Unregistered directly: byte-identical end state
+            // (Unregistered + read_your_writes, reads at live current_snapshot =
+            // the chain head, which prune never removes), zero global-lock ops —
+            // removing a per-op serialization point from the parallel-write path
+            // (bd-bhh0i). Env `FFS_WRITABLE_ADAPTER_REGISTER=1` restores the old
+            // register+release round-trip for A/B.
+            if std::env::var("FFS_WRITABLE_ADAPTER_REGISTER").as_deref() == Ok("1") {
+                FsMvccBlockDevice::new(base, Arc::clone(&self.mvcc_store), snapshot)
+                    .with_read_your_writes()
+            } else {
+                FsMvccBlockDevice::new_unregistered(base, Arc::clone(&self.mvcc_store), snapshot)
+                    .with_read_your_writes()
+            }
         } else {
             // bd-eflng: a read-only filesystem never writes, so no version is
             // ever pruned and no MVCC overlay can become visible. Skip both the

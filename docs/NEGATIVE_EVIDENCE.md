@@ -3338,3 +3338,15 @@ A release-perf profile of random positive lookups (lookup-bench, 40002-entry htr
 | early-exit on match | 284,704 |
 
 Ratio ~0.98x — NEUTRAL (within run-to-run noise; not the ~1.15x the 31.75% self-time predicted). ROOT CAUSE / LESSON: the 31.75% was measured on the `release-perf` profile (debuginfo SUPPRESSES inlining), which OVERSTATES a small leaf-scan helper's self-time vs the fully-optimized `release` binary where it inlines and the real per-lookup cost is dominated by the inode read + group-desc read + cache lookups, not the (short, cache-resident, branch-predicted) leaf scan. Halving an already-cheap scan saves nothing measurable. ffs-ondisk 668/0 (the early-exit is correct — whole-block validation preserved for negative lookups and parse_dir_block). REVERTED (~0-gain; also a validation relaxation not worth a non-win). LESSON: cross-check release-perf profile self-% against an actual A/B on the optimized release binary before committing to a sub-5% function lever — debuginfo inlining differences can inflate it.
+
+### 2026-06-29 ⭐SHIPPED (MEASURED perf win): drop the wasteful per-op snapshot register+release round-trip on the writable adapter — create 1.04x single / 1.06x parallel (CrimsonFox)
+
+Reading the adapter constructors revealed a provably-wasteful round-trip: the writable no-tx `block_device_adapter()` did `FsMvccBlockDevice::new(..)` (which `register_snapshot` under the GLOBAL `active_snapshots` write lock) then `.with_read_your_writes()` — which IMMEDIATELY converts the adapter to `Unregistered` AND `release_snapshot`s the snapshot it just registered. So every FsOp paid TWO global `active_snapshots` lock acquisitions (register + release) that net to the same `Unregistered` end state. (The adapter reads at live `current_snapshot()` = the chain head, which prune never removes, so it never needed the registration.) FIX: construct `new_unregistered(..).with_read_your_writes()` directly — byte-identical end state, ZERO global-lock ops, removing a per-op serialization point from the write path (bd-bhh0i convoy's lock half — distinct from the gate half, which was refuted).
+
+MEASURED (env-toggle same-binary A/B, `FFS_WRITABLE_ADAPTER_REGISTER` 0=new vs 1=old):
+| | OLD (register+release) | NEW (unregistered) | ratio |
+| --- | --- | --- | --- |
+| single-thread create | ~36,170/s | ~37,630/s | ~1.04x |
+| 8-thread create | ~23,926/s | ~25,268/s | ~1.06x (NEW won all 4 interleaved pairs) |
+
+CORRECTNESS: provably identical end state (Unregistered + read_your_writes); the eliminated register+release net to nothing. e2fsck 0 errors (create + mkdir), ffs-core lib 1185/0. Helps every writable FsOp (create/mkdir/rename/delete). Env-revertible. This is the only safe-Rust dent in the parallel-convoy `active_snapshots` half (the gate half stays refuted/owner-lane); modest because the convoy is gate-dominated, but real and free.
