@@ -1668,7 +1668,46 @@ pub fn reserved_inodes_in_group(geo: &FsGeometry, group: GroupNumber) -> Vec<u32
 ///
 /// Reads the GDT block containing `group`, patches the free_blocks/inodes/dirs
 /// fields, recomputes the checksum (if enabled), and writes the block back.
+/// Returns true when GDT-block persistence is deferred to flush (env
+/// FFS_SKIP_GDT, bd-cc-gdt-defer). In deferral mode the per-op GDT write is
+/// skipped — the in-memory `GroupStats` is the authoritative count — and
+/// `ext4_flush_group_descriptors` (ffs-core) writes every descriptor once at
+/// flush, collapsing ~80k per-op GDT versions to ~5 direct writes (~2.3x
+/// single-thread create). MUST be paired with the flush pass or e2fsck-dirty.
+#[must_use]
+pub fn gdt_persistence_deferred() -> bool {
+    use std::sync::OnceLock;
+    static SKIP: OnceLock<bool> = OnceLock::new();
+    *SKIP.get_or_init(|| std::env::var("FFS_SKIP_GDT").is_ok())
+}
+
 fn persist_group_desc_with_bitmap_overrides(
+    cx: &Cx,
+    dev: &dyn BlockDevice,
+    pctx: &PersistCtx,
+    group: GroupNumber,
+    stats: &GroupStats,
+    block_bitmap_override: Option<&[u8]>,
+    inode_bitmap_override: Option<&[u8]>,
+) -> Result<()> {
+    if gdt_persistence_deferred() {
+        return Ok(());
+    }
+    persist_group_desc_force(
+        cx,
+        dev,
+        pctx,
+        group,
+        stats,
+        block_bitmap_override,
+        inode_bitmap_override,
+    )
+}
+
+/// Write group `group`'s descriptor to the GDT block from `stats`, unconditional
+/// of the deferral flag. Used by the flush-time GDT sync to persist all
+/// descriptors at once from the authoritative in-memory counts.
+pub fn persist_group_desc_force(
     cx: &Cx,
     dev: &dyn BlockDevice,
     pctx: &PersistCtx,

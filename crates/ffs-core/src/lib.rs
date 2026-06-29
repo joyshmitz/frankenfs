@@ -6497,6 +6497,12 @@ impl OpenFs {
                 let base_dev = self.direct_block_device_adapter();
                 let flushed = self.mvcc_store.flush_to_device(cx, &base_dev)?;
                 self.clear_ext4_writable_group_desc_cache();
+                // When GDT persistence is deferred (bd-cc-gdt-defer), write every
+                // group descriptor once here from the authoritative in-memory
+                // GroupStats — the per-op GDT write was skipped to avoid a ~80k
+                // version-chain on the one shared GDT block (~2.3x create). No-op
+                // otherwise.
+                self.ext4_flush_group_descriptors(cx)?;
                 // Sync the superblock free-count totals so a device snapshot is
                 // e2fsck-consistent (bd-nd61w); no-op for btrfs / read-only ext4.
                 self.ext4_sync_superblock_free_totals(cx)?;
@@ -16323,6 +16329,68 @@ impl OpenFs {
     /// (NOTE: the group `bg_used_dirs_count` total is a separate gap in the
     /// worker-owned ffs-alloc inode alloc/free path — not corrected here.)
     #[allow(clippy::significant_drop_tightening)]
+    /// Flush-time GDT persistence (bd-cc-gdt-defer). When GDT writes are
+    /// deferred per-op, write every group descriptor directly to the device
+    /// from the authoritative in-memory `GroupStats`, re-reading each group's
+    /// current bitmaps (raw, no verify) to stamp the descriptor's bitmap
+    /// checksums. Collapses ~80k per-op GDT versions to one direct write per
+    /// GDT block. No-op when deferral is off or for btrfs / read-only ext4.
+    fn ext4_flush_group_descriptors(&self, cx: &Cx) -> Result<(), FfsError> {
+        if !ffs_alloc::gdt_persistence_deferred() {
+            return Ok(());
+        }
+        if !matches!(self.flavor, FsFlavor::Ext4(_)) {
+            return Ok(());
+        }
+        let Ok(alloc_mutex) = self.require_alloc_state() else {
+            return Ok(());
+        };
+        let alloc = alloc_mutex.read();
+        // UNCACHED adapter: the per-group loop does a read-modify-write of the
+        // SAME GDT block (all descriptors for a small fs live in one block), so
+        // each group's update must see the prior groups' writes. The cached
+        // adapter can serve a stale pre-write block here, clobbering earlier
+        // descriptors (bd-cc-gdt-defer). Go straight to the byte device.
+        let direct = ByteDeviceBlockAdapter {
+            dev: self.dev.as_ref(),
+            block_size: self.block_size(),
+        };
+        for gidx in 0..alloc.groups.len() {
+            let group = GroupNumber(
+                u32::try_from(gidx)
+                    .map_err(|_| FfsError::Format("group index exceeds u32".into()))?,
+            );
+            let gs = &alloc.groups[gidx];
+            // Read the bitmaps from the DEVICE (post flush_to_device) via the
+            // direct adapter, so the descriptor's bitmap checksum is stamped
+            // over the exact bytes e2fsck will read — not the MVCC overlay view.
+            let block_bitmap = direct.read_block(cx, gs.block_bitmap_block)?.into_inner();
+            let inode_bitmap = direct.read_block(cx, gs.inode_bitmap_block)?.into_inner();
+            // Only pass a bitmap override (which CLEARS the matching UNINIT flag
+            // in persist_group_desc) for a group that is actually IN USE: an
+            // untouched lazy-init group keeps its original padding-less bitmap,
+            // so clearing UNINIT there makes e2fsck flag "padding not set". A
+            // group is in use iff some inode/block is consumed (free < capacity);
+            // every touched group's bitmap already carries padding (the alloc
+            // path writes it), so its csum stamps cleanly (bd-cc-gdt-defer).
+            let inode_override = (gs.free_inodes < alloc.geo.inodes_in_group(group))
+                .then_some(inode_bitmap.as_slice());
+            let block_override = (gs.free_blocks < alloc.geo.blocks_in_group(group))
+                .then_some(block_bitmap.as_slice());
+            ffs_alloc::persist_group_desc_force(
+                cx,
+                &direct,
+                &alloc.persist_ctx,
+                group,
+                gs,
+                block_override,
+                inode_override,
+            )
+            .map_err(|e| FfsError::Format(format!("flush GDT group {}: {e}", group.0)))?;
+        }
+        Ok(())
+    }
+
     fn ext4_sync_superblock_free_totals(&self, cx: &Cx) -> Result<(), FfsError> {
         let (has_csum, is_64bit) = match &self.flavor {
             FsFlavor::Ext4(sb) => (sb.has_metadata_csum(), sb.is_64bit()),
@@ -29759,6 +29827,12 @@ impl OpenFs {
         let base_dev = self.direct_block_device_adapter();
         self.mvcc_store.flush_to_device(cx, &base_dev)?;
         self.clear_ext4_writable_group_desc_cache();
+        // When GDT persistence is deferred (bd-cc-gdt-defer), write every group
+        // descriptor here from the authoritative in-memory GroupStats — the
+        // per-op GDT write was skipped to avoid the ~80k version-chain on the
+        // one shared GDT block (~2.3x create). Must run on THIS path too:
+        // sync_all_to_device is the CLI / create-bench durability boundary.
+        self.ext4_flush_group_descriptors(cx)?;
         // Sync the superblock free-block/free-inode TOTALS from the in-memory
         // alloc state so a device snapshot is e2fsck-consistent (bd-wvud1): the
         // per-group descriptors + bitmaps are kept current during writes, but

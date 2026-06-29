@@ -3781,3 +3781,16 @@ RESULT (FFS_SKIP_GDT=1, 30000 creates, e2fsck): MAJOR progress —
 - ONE remaining e2fsck error: "Padding at end of inode bitmap is not set". Cause: my flush pass passes `Some(bitmap)` overrides for ALL groups, which clears `GD_FLAG_INODE_UNINIT` even for groups never allocated from — but an untouched group's on-disk inode bitmap still lacks the trailing padding bits (`fill_inode_bitmap_padding` only runs on the alloc path), so e2fsck flags a now-"initialized" group whose bitmap padding isn't set.
 
 So allocation is proven correct (group 0 packs), descriptors now persist correctly, and the lever is one small fix from clean: the flush pass must NOT mark untouched groups initialized — pass the bitmap override (clear UNINIT) ONLY for groups that were actually allocated from (free_inodes reduced / used_dirs>0), and pass None (preserve original UNINIT descriptor) for untouched groups. Shelved `gdt-defer-WIP-WIRING-FIXED-group0-correct-only-padding-error-left`. The ~2.3x lever is now very close: alloc correct + descriptor persistence correct + only the untouched-group UNINIT/padding handling remains.
+
+### 2026-06-29 ★SHIPPED: GDT-block persistence deferral — 2.3x single-thread ext4 create, e2fsck-clean, conformance GREEN (CrimsonFox)
+
+LANDED the GDT-deferral lever (env FFS_SKIP_GDT, opt-in). For a small ext4 fs ALL group descriptors live in ONE 4 KiB GDT block, so every create's `persist_group_desc` writes that same block → an ~80k-deep MVCC version chain (~320 MB retained) + a 4 KiB read-clone + 4 KiB version-install PER create on the one hot shared block — ~55% of create cost. Since the in-memory `GroupStats` is the authoritative count (the allocator reads it, never the GDT block), the per-op GDT write is pure deferred-able persistence.
+
+IMPLEMENTATION (ffs-alloc + ffs-core): `gdt_persistence_deferred()` env-gate; `persist_group_desc_with_bitmap_overrides` skips the per-op GDT write in deferral mode and delegates to a new pub `persist_group_desc_force`; `ext4_flush_group_descriptors` (wired into BOTH durability boundaries — `flush_mvcc_to_device` AND `sync_all_to_device`, the CLI/create-bench path) writes every descriptor once from `GroupStats` via an UNCACHED byte-device adapter (the per-group read-modify-write of the shared GDT block must see prior writes), reading each group's post-flush bitmap to stamp the descriptor csum. Clears UNINIT/itable_unused only for IN-USE groups (free < capacity) so untouched lazy-init groups keep their padding-less bitmaps (else e2fsck "padding not set").
+
+MEASURED (env-toggle A/B, single binary, single-thread create-bench 60000, 1500M ext4):
+| | normal (per-op GDT) | deferred | ratio |
+| --- | --- | --- | --- |
+| create | ~1670 ms | ~720 ms | **~2.32x** (3/3 runs) |
+
+GATES: e2fsck CLEAN on the deferred 30k-create image (all 5 passes, only the cosmetic "extent tree could be narrower / Optimize? no" that baseline also shows); conformance 100/0/2 GREEN (default path unchanged — env OFF = per-op GDT write + flush pass no-op); ffs-alloc 213/0; ffs-core builds. The campaign's biggest measured single lever, now shipped (opt-in). FOLLOW-UP: validate unlink/mkdir/rename + FUSE flush paths under deferral, then consider default-on.
