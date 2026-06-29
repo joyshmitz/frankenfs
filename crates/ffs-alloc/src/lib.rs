@@ -110,6 +110,53 @@ pub fn bitmap_set(bitmap: &mut [u8], idx: u32) {
     }
 }
 
+/// Set the inode-bitmap "padding" bits — every bit from `inodes_per_group` to
+/// the end of the bitmap block — to 1, as ext4 requires (e2fsck:
+/// "Padding at end of inode bitmap is not set"). These bits do not map to real
+/// inodes and must read as allocated/unavailable. frankenfs only hit this on
+/// groups whose inode bitmap it writes for the first time (e.g. mkdir's Orlov
+/// allocator spreading directories into a previously-uninitialised group);
+/// `mke2fs`-initialised group-0 bitmaps already carry the padding. Idempotent,
+/// LSB-first within a byte to match [`bitmap_set`]. (bd-wvud1 follow-up.)
+pub fn fill_inode_bitmap_padding(bitmap: &mut [u8], inodes_per_group: u32) {
+    let total_bits = (bitmap.len() as u64).saturating_mul(8);
+    let mut bit = u64::from(inodes_per_group);
+    // Partial leading byte: set bit-by-bit until byte-aligned.
+    while bit < total_bits && bit % 8 != 0 {
+        bitmap[(bit / 8) as usize] |= 1u8 << (bit % 8);
+        bit += 1;
+    }
+    // Whole trailing bytes: set to 0xFF.
+    if bit < total_bits {
+        let byte_start = (bit / 8) as usize;
+        for b in bitmap.iter_mut().skip(byte_start) {
+            *b = 0xFF;
+        }
+    }
+}
+
+/// Like [`fill_inode_bitmap_padding`] but records each bit it newly sets into
+/// `undo_clear`, so a later rollback (`rollback_set_mutations`) restores the
+/// bitmap to its exact pre-mutation bytes. Used on the persist path, which must
+/// be able to undo the bitmap write if the group-descriptor write fails.
+fn fill_inode_bitmap_padding_with_clear_undo(
+    bitmap: &mut [u8],
+    inodes_per_group: u32,
+    undo_clear: &mut Vec<u32>,
+) {
+    let total_bits = (bitmap.len() as u64).saturating_mul(8);
+    let mut bit = u64::from(inodes_per_group);
+    while bit < total_bits {
+        #[expect(clippy::cast_possible_truncation)]
+        let idx = bit as u32;
+        if !bitmap_get(bitmap, idx) {
+            bitmap_set(bitmap, idx);
+            undo_clear.push(idx);
+        }
+        bit += 1;
+    }
+}
+
 fn bitmap_set_with_clear_undo(bitmap: &mut [u8], idx: u32, undo_clear: &mut Vec<u32>) {
     if !bitmap_get(bitmap, idx) {
         bitmap_set(bitmap, idx);
@@ -2518,6 +2565,7 @@ fn try_alloc_inode_in_group(
         }
 
         bitmap_set(&mut bitmap, idx);
+        fill_inode_bitmap_padding(&mut bitmap, geo.inodes_per_group);
         dev.write_block(cx, gs.inode_bitmap_block, &bitmap)?;
 
         groups[gidx].free_inodes = groups[gidx].free_inodes.saturating_sub(1);
@@ -2632,6 +2680,17 @@ fn try_alloc_inode_in_group_persist(
     }
 
     bitmap_set_with_clear_undo(&mut bitmap, idx, &mut rollback_clear_bits);
+    // Set the inode-bitmap padding (bd-wvud1 follow-up): a first-time write of a
+    // previously-uninitialised group's inode bitmap must carry the trailing
+    // padding bits, or e2fsck flags "Padding at end of inode bitmap is not set".
+    // Done before the write AND before the descriptor checksum re-stamp below so
+    // the stored bitmap checksum covers the padded bitmap. Undo-tracked so a
+    // group-descriptor write failure below rolls the bitmap back exactly.
+    fill_inode_bitmap_padding_with_clear_undo(
+        &mut bitmap,
+        geo.inodes_per_group,
+        &mut rollback_clear_bits,
+    );
     dev.write_block(cx, bitmap_block, &bitmap)?;
     let previous_used_dirs = groups[gidx].used_dirs;
     groups[gidx].free_inodes = groups[gidx].free_inodes.saturating_sub(1);

@@ -3170,3 +3170,13 @@ MEASURED (binary oracle = e2fsck, local build, count=2000 create-bench):
 - AFTER: **CLEAN** — `2013/102400 files (0.0% non-contiguous)`, no count errors, no warning.
 
 Reuses an existing, conformance-tested helper. ffs-core lib tests: 1180 passed / 5 failed BOTH before and after my change (the 5 are pre-existing — 3× btrfs_symlink*, largest_contiguous_free_run_drops_after_punching, read_block_with_empty_scope_matches — verified by stashing the change and re-running: identical 5). Zero regressions.
+
+### 2026-06-29 ⭐SHIPPED (correctness win): inode-bitmap padding — mkdir images now e2fsck-clean (bd-wvud1 follow-up, CrimsonFox)
+
+After bd-wvud1 made `create`+sync e2fsck-clean, sweeping the other ops found `mkdir`-heavy images STILL e2fsck-dirty: "Padding at end of inode bitmap is not set" + `WARNING: Filesystem still has errors`. (create/delete/rename were clean.)
+
+ROOT CAUSE: ext4 requires the inode-bitmap bits beyond `inodes_per_group` (up to the end of the bitmap block) to be set to 1 ("padding"). `mke2fs` sets them on group 0, but when frankenfs writes a previously-uninitialised group's inode bitmap for the FIRST time it only set the reserved + allocated bits. `mkdir` exposes this because the Orlov allocator spreads new directories across groups (group 1/2/3), whose inode bitmaps frankenfs writes fresh; `create` stayed in group 0 so it never showed.
+
+FIX (crates/ffs-alloc): new `fill_inode_bitmap_padding` (+ an undo-tracked variant for the persist path's rollback), called in both inode-alloc bitmap-write sites before the write and before the descriptor bitmap-checksum re-stamp, so padding is persisted and covered by the checksum. The free path is unaffected (RMW preserves the already-set padding).
+
+MEASURED (binary oracle = e2fsck): `mkdir-bench` 1500 → was `Padding at end of inode bitmap is not set` + WARNING; now CLEAN (0 errors). Also verified at 4000 dirs (`4013 files, 0.0% non-contiguous`, clean) = spreads across all groups. create/delete/rename remain clean (0 errors). ffs-alloc tests 213/0 (the rollback-restore test `alloc_inode_persist_gdt_write_failure_restores_bitmap_and_group_stats` passes — the undo-tracked padding variant restores the bitmap exactly on persist failure). Together with bd-wvud1, frankenfs create/mkdir/delete/rename images are now fully e2fsck-clean.
