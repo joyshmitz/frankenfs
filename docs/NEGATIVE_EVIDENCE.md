@@ -3496,3 +3496,12 @@ MEASURED (clean two-binary interleaved A/B, delbench/rdbench N=20000, 400M ext4 
 - vs kernel ext4 (15.5 us/op via live loop mount): unlink ~27 us/op -> ~26 us/op, so 1.75x -> ~1.68x. The residual is the per-op MVCC commit + version-retention (same structural cause as the create/write residual), NOT the dir-block work.
 
 GATES: conformance 100/0/2 GREEN; ffs-dir 88/0; ffs-core lib 1185/0 (the prior 1184/1 failure was exactly the inline-data check, now restored); **e2fsck byte-identical to baseline** (12/102400 files, 10811/102400 blocks after 15000 deletes, both binaries). A real, modest, correctness-clean per-op win on a previously-unmined op.
+
+### 2026-06-29 NEGATIVE (parity, no lever): standalone ext4 lookup is already at/above kernel — metadata per-op frontier confirmed exhausted (CrimsonFox)
+
+After landing the unlink one-pass win, swept the remaining unmined op for a gap: standalone name lookup (every metadata op pays it, so a gap there would be high-leverage). Measured `ffs-cli lookup-bench` vs a kernel `stat()` harness (/tmp/klookup.c: create 30000 files, warm-stat all, then time 200000 random `stat`s), 30k-entry htree dir, 1200M ext4 (200k inodes) on /data:
+- **kernel ext4** (loop mount): 379393 lookups/s = 2.636 us/op
+- **FrankenFS** (lookup-bench, 3 runs): ~410000-455000/s = ~2.3 us/op
+- **ratio: ~1.13x FASTER than kernel** (note: kernel side is full `stat()` = lookup + getattr, frankenfs side is name->inode resolution, so not perfectly apples-to-apples, but frankenfs is clearly at parity or better — no lever). The c47c9009 lookup-index fast path + htree hash-target routing already put lookup at kernel parity.
+
+This completes the ext4 metadata per-op map for the campaign: read (won, IO-bound), write/create (won, beats kernel), mkdir (won 2.77x), rename (won, 1.71x faster than kernel), unlink/rmdir (won this session ~1.08x/~1.05x), lookup (parity/faster), walk/stat (alloc-optimal). The rename source-removal does an analogous positive-lookup-then-rescan double-touch that `remove_entry_take_inode` could in principle collapse, but rename is already net faster than kernel and its add-before-remove ordering is crash-safety-delicate — no headroom, high risk, declined. The clean safe-Rust per-op metadata frontier is exhausted; remaining gaps are the owner-lane integration/redesign levers (durable group-commit 960x — JBD2-level batching, crash-injection-gated; parallel-write convoy 5.5x — out-of-order publication, loom-gated) and CoW-inherent btrfs rename.
