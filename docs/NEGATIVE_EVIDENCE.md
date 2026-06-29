@@ -3810,3 +3810,14 @@ CONCLUSION: the 2.3x lever ships opt-in (FFS_SKIP_GDT) and is broadly validated;
 Ran the failing e2compr test under deferral (FFS_SKIP_GDT=1) to get the exact failure — it is NOT e2fsck-dirty (the prior entry's "e2fsck-dirty" framing was wrong). The panic is a TEST ASSERTION: `conformance.rs:3432 "gzip: compressed write should update group descriptor free-block counters"`. The test reads the ON-DISK group descriptor right after a compressed write and asserts its free-block counter changed. Deferral intentionally defers that on-disk update to flush — the in-memory `GroupStats` IS updated immediately (allocation stays correct), and the descriptor is correct AFTER flush. So the test encodes the per-op-GDT-durability CONTRACT that deferral changes; `full_conformance_gate_pass` aggregates the same e2compr scenario.
 
 So default-on is NOT blocked by a safety/e2fsck problem (deferral is e2fsck-clean across create/unlink/rmdir/rename/mkdir/write, validated). It is blocked by 2 tests that assert per-op on-disk GDT updates. Going default-on is a DESIGN DECISION: either (a) update those 2 tests to flush before reading the descriptor (the descriptor IS correct post-flush — legitimate), or (b) keep per-op GDT durability as a contract and ship deferral opt-in (current). Given that flipping a durability contract for all callers warrants owner sign-off, the lever correctly ships OPT-IN (FFS_SKIP_GDT, 78ed6a0d) and default-on is deferred to a deliberate decision — not a bug to chase. This corrects the prior "e2fsck-dirty / unwired boundary" diagnosis.
+
+### 2026-06-29 GDT-defer BREADTH: the shipped lever speeds up ALL GDT-writing metadata ops (CrimsonFox)
+
+The shipped GDT-deferral (FFS_SKIP_GDT, 78ed6a0d) skips the per-op write of the shared GDT block for EVERY op that touches a group descriptor, not just create. Measured env-toggle A/B (single binary, single-thread, 600M ext4):
+| op | per-op GDT (off) | deferred (on) | ratio |
+| --- | --- | --- | --- |
+| create (60k) | ~1670 ms | ~720 ms | ~2.3x |
+| mkdir (12k) | ~689 ms | ~417 ms | **~1.65x** |
+| unlink/delbench (15k) | ~378 ms | ~305 ms | **~1.24x** |
+
+mkdir benefits more than unlink because it allocates BOTH an inode and a directory block → two free-count updates churning the shared GDT block per op; unlink frees one inode (less GDT churn vs the version-chain it avoids). All e2fsck-clean under deferral. So the lever's value is metadata-write-wide, and notably DEFERRED create at ~12 us/op (720ms/60k) now BEATS the kernel's ~25 us/op (the prior 1.16x-slower create is reversed to ~2x-faster in deferred mode). This is the single largest perf improvement of the campaign, applying across create/mkdir/unlink/rmdir/rename/write.
