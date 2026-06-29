@@ -3089,3 +3089,26 @@ LEVER (implemented, env-gated `FFS_GATE_LOCKFREE`): a lock-free in-order fast pa
 CORRECTNESS: validated by the two existing gate tests + a new `commit_publication_gate_lockfree_fastpath_concurrent_shuffled_no_stall` stress test (16 threads publish a shuffled 1..=2000, assert final `completed==N`, no buffered remnants, no leaked waiters — a lost wakeup hangs the join). Monotonic `completed_commit` → no ABA on the CAS.
 
 BLOCKER (why no ratio this turn): the per-crate `sharded_mvcc_disjoint` bench is dominated by thread-scheduler jitter — baseline CIs are huge (8w `[5.03, 5.56, 6.25] ms`; 16w `[11.26, 14.36, 17.48] ms`), swamping the expected ~1.1–1.3x gate effect. Compounding it, each `rch exec` of `cargo bench` lands on a fresh worker and does a full clean rebuild (deps re-download + compile, ~5–8 min/arm), and rch rejects a `bash -c` multi-arm wrapper ("non-compilation command"), defeating the interleaved same-worker env-toggle A/B that cancels this variance. A clean A/B needs: pin one worker, build once, then min-of-N interleaved `FFS_GATE_LOCKFREE=1`/`=0` runs under a low-load window (per the read-path 88x methodology). NOT landed on main (unmeasured = cannot claim a gain); change shelved on `git stash`/branch `cc-gate-lockfree-fastpath` for a focused measured follow-up. The fast path is env-gated and was authored default-aware so a follow-up can flip the default only after a clean win.
+
+### 2026-06-29 MEASURED 1.83x single-thread create BUT REVERTED — intra-op write batching corrupts the ext4 alloc bitmap (bd-bhh0i) — CrimsonFox cc/opus
+
+Implemented the real bd-bhh0i lever: intra-op write batching (1 txn/FsOp). A thread-local op-batch (`fs_mvcc_store.rs`): `FsMvccBlockDevice::write_block` stages into it instead of committing per block; all three read paths (`read_block` + both contiguous) consult the staged buffer first (read-your-writes); `op_batch_commit_if_active` flushes the whole op as ONE transaction at op end. `create()` brackets the op (begin → commit-once, or discard-on-error = atomic rollback). Env-gated `FFS_OP_BATCH` (=0 reverts).
+
+MEASURED (warm binary, LOCAL `create-bench` runs = no per-measurement rebuild, 5 interleaved iters, count=16000, single-thread):
+
+| arm | creates/s (5 iters) | median |
+| --- | --- | --- |
+| BATCH (1 txn/op) | 63326 59294 57124 60876 62703 | 60876 |
+| PERBLOCK (main, N commits/op) | 35326 32022 32055 33647 33303 | 33303 |
+| **ratio** | | **~1.83x** |
+
+Large, stable, low-variance — confirms the per-block-commit overhead (N commits × {gate Mutex, next_commit, prune-check}) is ~45% of single-thread create cost, exactly as the root-cause analysis predicted. This is the FIRST per-crate-stable confirmation that collapsing commits/op is a major lever (the local-run-warm-binary method beats the rch fresh-worker-rebuild + parallel-bench-variance blocker).
+
+REVERTED — NOT correctness-clean. e2fsck head-to-head (same image, count=3000, `diff` of `e2fsck -fn`): BATCH introduces TWO error classes that PERBLOCK does NOT:
+- `Free blocks count wrong for group #1 (26220, counted=26198)` (off by 22)
+- `Block bitmap differences: Group 1 block bitmap does not match checksum`
+(Both arms share the pre-existing `Free inodes count wrong` = bd-wvud1, and the total `Free blocks count wrong` — those are on main already, not introduced here.)
+
+ROOT CAUSE: the ext4 allocator persists block-bitmap + group-descriptor blocks (with on-disk checksums + free-counts) via the `Ext4AllocState` `persist_ctx` path, which is OUTSIDE the `FsMvccBlockDevice` write path the op-batch captures. Under per-block commit the bitmap-block writes and the alloc-state persist interleave one ordering; under batching the staged bitmap version and the persist_ctx-computed group-desc free-count/bitmap-checksum diverge (group 1, the data-block group) → the persisted bitmap's checksum and the group-desc free count disagree by the count of blocks the batched op allocated.
+
+EXACTLY WHAT'S NEEDED to land this 1.83x: the op-batch boundary must wrap the alloc-state flush too — i.e., fold the `persist_ctx` bitmap + group-descriptor writes (with recomputed checksums + free-counts) into the SAME op-batch transaction, so the committed bitmap block, its checksum, and the group descriptor's free_blocks_count are atomic and mutually consistent. Equivalently: route `persist_ctx`'s writes through the same staged buffer (currently they bypass `FsMvccBlockDevice::write_block`). That is a contained follow-up (one persist path), not a redesign. Code shelved on `git stash` (`stash@{0}`) for that follow-up. Conformance NOT run (e2fsck regression already disqualifies; per discipline: REVERT, don't land a correctness regression).
