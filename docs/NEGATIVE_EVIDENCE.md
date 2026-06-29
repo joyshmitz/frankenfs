@@ -3350,3 +3350,15 @@ MEASURED (env-toggle same-binary A/B, `FFS_WRITABLE_ADAPTER_REGISTER` 0=new vs 1
 | 8-thread create | ~23,926/s | ~25,268/s | ~1.06x (NEW won all 4 interleaved pairs) |
 
 CORRECTNESS: provably identical end state (Unregistered + read_your_writes); the eliminated register+release net to nothing. e2fsck 0 errors (create + mkdir), ffs-core lib 1185/0. Helps every writable FsOp (create/mkdir/rename/delete). Env-revertible. This is the only safe-Rust dent in the parallel-convoy `active_snapshots` half (the gate half stays refuted/owner-lane); modest because the convoy is gate-dominated, but real and free.
+
+### 2026-06-29 SCORECARD: cumulative measured impact of the 3 single-thread create-path wins vs kernel (CrimsonFox)
+
+The three wins this stretch — byte-wise inode-bitmap padding (369f1493), name-index-before-htree (c47c9009), and drop-wasteful-snapshot-register+release (a2509ad7) — measured head-to-head vs a real ext4 kernel loop mount (single-thread, local release binary, best-of-3):
+
+| op | kernel | FrankenFS BEFORE | FrankenFS AFTER (3 wins) | shift |
+| --- | --- | --- | --- | --- |
+| create | ~35,070/s | ~29,400/s (0.84x) | ~37,842/s (**1.08x**) | **0.84x → 1.08x — flipped to BEATING kernel** |
+| mkdir | ~21,844/s | ~15,819/s (0.72x) | ~18,076/s (0.83x) | 0.72x → 0.83x (improved; residual = inherent dir-block init + owner-lane commit) |
+| rename | ~30,900/s | (already ahead) | ~45,528/s (**1.47x**) | strong (benefits from padding + adapter wins) |
+
+So single-thread ext4 metadata is now create-AHEAD / rename-AHEAD / mkdir-0.83x. CODE-READ CONFIRMATION the create/mkdir hot paths are now lean (no remaining clean lever ≥ a few %): adapter creation is cheap post-register-fix (Arc clone + atomic, no lock); `current_snapshot()` is a single atomic load; the parent inode is read once and threaded (not re-read); mkdir's single dir-extent is stored INLINE in i_block (`ffs_btree::insert` allocates no separate tree block); mkdir's 3 adapter re-creations are redundant-but-cheap (read-your-writes reads live current, shared cache ref — not worth eliminating). The remaining measured gaps are owner-lane (the 5.5x PARALLEL convoy, gate-blocking; mkdir's per-op commit) — NOT safe-Rust per-op shaving, which is now measured-exhausted on this path.
