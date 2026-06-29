@@ -3411,3 +3411,15 @@ Profiled `walk` (recursive readdir + getattr-per-entry; 40002 stats) — top use
 A pure-attr parse decoding only the ~10 InodeAttr fields could shave maybe ~4% of walk (~1.04x) but needs a new parse variant usable only where extents/dir-state are never touched (not readdir), and the gain is release-perf-inflated — deferred (low-EV, maintenance cost).
 
 CONCLUSION: with read (inode-borrow win + IO-bound), write (3 wins, create beats kernel), and walk/stat (already alloc-optimized) all confirmed mined, the clean safe-Rust per-op lever space across the measurable metadata workloads is exhausted. Session net: 4 measured wins (369f1493 padding, c47c9009 lookup-index, a2509ad7 snapshot-roundtrip, 00a2bdb1 inode-borrow) + write-bench --create tooling. The sole remaining large gap is the owner-lane parallel-WRITE convoy (gate-blocking serialization; intra-op batching).
+
+### 2026-06-29 REFUTED (measured REGRESSION, shelved): batch ext4_create's inode-alloc writes into one MVCC txn — 0.92x single / 0.96x parallel (CrimsonFox)
+
+Located the convoy lever's machinery: `ext4_add_dir_entry` ALREADY batches its writes via `mvcc_store.begin()` + `TransactionBlockAdapter` (stages writes, read-your-writes via `staged_write`) + one `commit`, but `ext4_create`'s `create_inode` call uses the per-block `block_device_adapter` (a commit per block write). Mirrored add_dir_entry's exact pattern to wrap create_inode in one txn (commit once on success, drop staged on error so create_inode's in-memory geo/groups rollback stays authoritative). e2fsck CLEAN on single AND 8-thread create (the TransactionBlockAdapter pattern is correct — unlike the prior thread-local op_batch that corrupted the GDT).
+
+MEASURED (clean same-binary A/B, create-bench):
+| | baseline (per-block) | create_inode batched | ratio |
+| --- | --- | --- | --- |
+| single-thread create | ~38,486/s | ~35,493/s | ~0.92x (REGRESSION) |
+| 8-thread create | ~26,047/s | ~25,038/s | ~0.96x (REGRESSION) |
+
+ROOT CAUSE / KEY CONVOY FINDING: the per-block commit path is LEAN (~700ns machinery, measured prior), and `create_inode` issues only a FEW block writes — so the `TransactionBlockAdapter` staging overhead (a parking_lot `Mutex<&mut Transaction>` lock + `BTreeMap` stage_write/staged_write on EVERY read and write, including the bitmap/GDT RMW reads) EXCEEDS the savings from collapsing those few commits into one. Corroborates the prior "in-memory MVCC batching = only 1.06x" decomposition (5dafad44): the parallel-create 5.5x convoy is NOT commit COUNT or per-commit COST — it is the in-order `CommitPublicationGate` BLOCKING (threads waiting for the prior seq to publish). Reducing commit count via the heavyweight staging adapter cannot beat the lean per-block path and does not relieve the blocking. REVERTED (shelved stash `create-inode-batch-AB`). The genuine convoy fix would need either a far leaner staging path (no per-op Mutex/BTreeMap) or out-of-order publication (a major MVCC snapshot-visibility redesign) — both deeper owner-lane than a per-op-adapter swap.
