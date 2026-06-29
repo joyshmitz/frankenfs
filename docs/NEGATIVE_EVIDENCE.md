@@ -2979,3 +2979,31 @@ The skill's accretive output is the **proof-obligation spec** the owner-lane wir
 5. **Bounded staleness:** visible−durable gap ≤ one epoch interval (time- or op-count-triggered flush) — a compositional-latency bound giving a worst-case data-loss-window guarantee on crash.
 
 CONCLUSION: the math router confirms the durable-commit lever is operational/integration, not mathematical — reinforcing that the remaining work is wiring `GroupCommitCoordinator` (not a new primitive). The deliverable is the 5-obligation safety spec above, which is the acceptance criteria for that owner-lane wiring (and the `crash_consistency.rs` test plan it implies). This is the alien-artifact-quality close: the correctness framework is specified; implementation remains a focused, crash-consistency-validated effort. No code change (formal spec for the identified lever).
+
+### 2026-06-28 ⭐⭐SCORECARD (session synthesis, 30-sec read): FrankenFS vs kernel — measured state + the ONE forward lever (CrimsonFox cc/opus)
+
+Consolidates this session's 10 measured/code-grounded entries into one navigable reference so the next agent does not re-derive.
+
+**vs-kernel op scorecard (measured this campaign):**
+
+| op | ext4 | btrfs | status |
+| --- | --- | --- | --- |
+| create | 1.12x FASTER | 1.36x FASTER | harvested (beats kernel) |
+| read (seq/rand/parallel/cold) | parity–faster | ~3.6x FASTER | harvested |
+| rename | 1.71x FASTER | 4.6x slower* | ext4 shipped O(N²)→O(N); *btrfs = per-op commit granularity |
+| write (4 KiB) | 1.52x slower* | — | *default path = lean in-mem machinery + kernel-shared payload, NOT structural |
+| mkdir | 1.31x slower* | — | *same: in-mem machinery; reserved-block cache already shipped 2.77x |
+
+**What the slow* numbers actually are (measured this session):**
+- MVCC commit machinery = **~700 ns/op, lean** (6b9f99b4); install/lock/preflight/publish all ns–sub-µs.
+- The apparent ~3 µs/op "commit" = ~2.2 µs inherent 4 KiB page-fault materialization the **kernel page cache also pays** (6b9f99b4).
+- In-memory commit batching = **only 1.06x** (5dafad44) → residual is NOT MVCC-amortizable.
+- **DEFAULT FS path commits IN-MEMORY + defers flush to boundary** (832fbd19) = already the kernel's deferred-writeback model → the write/mkdir residuals are kernel-shared inherent cost, NOT a structural gap, and do NOT fsync per op.
+
+**The ONE forward lever (measured, scoped, spec'd):**
+- Per-op `fdatasync` vs epoch-batched = **~960x** measured on real disk (40c09b0d). Applies ONLY to the OPT-IN durable (JBD2-journaled) mode.
+- Mechanism `GroupCommitCoordinator` (1 fsync/epoch) is **BUILT + tested but UNWIRED** into cross-FsOp commit (1815c6c3).
+- `/alien-artifact-coding` confirmed: **integration, not new math** — the correct watermark primitive (`durable ≤ visible`) is already in-codebase (publication gate + EpochManager). Deliverable = the 5 concurrency-automata proof-obligations + `crash_consistency.rs` test plan (048290cf).
+- io_uring is ORTHOGONAL (FUSE-dispatch / a different unmeasured gap, ae70e443), NOT the fsync-barrier lever.
+
+**Bottom line:** FrankenFS's default path matches/beats the kernel everywhere measured. The safe-Rust per-crate lever space is exhausted (bitmap word-scan, hardware crc32c, lean commit, optimized readdir all already done). The sole remaining large lever is the owner-lane, now-fully-specified wiring of `GroupCommitCoordinator` for the durable mode — a focused crash-consistency-validated effort, not an end-of-turn change. No code change (synthesis).
