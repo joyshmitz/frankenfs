@@ -42831,6 +42831,23 @@ mod tests {
         fs.dev
             .write_all_at(&cx, ByteOffset(gd.block_bitmap * 4096), &bitmap)
             .expect("write back patched bitmap");
+        // This test mutates the on-disk bitmap OUT OF BAND (the first
+        // `largest_contiguous_free_run` above populated the per-group
+        // largest-free-run cache). In production the cache is kept consistent by
+        // the allocator path, which invalidates it on every alloc; an out-of-band
+        // device write has no such hook, so the white-box test must invalidate it
+        // itself before re-querying — otherwise the stale cached run is returned.
+        // The base-block read cache also holds the pre-patch bitmap block (the
+        // first query read it); clear it so the recompute reads the patched device.
+        fs.ext4_base_block_cache.clear();
+        if let Some(alloc_mutex) = fs.ext4_alloc_state.as_ref() {
+            alloc_mutex
+                .write()
+                .groups
+                .get_mut(0)
+                .expect("group 0 exists")
+                .invalidate_block_largest_free_run();
+        }
 
         let after = fs
             .largest_contiguous_free_run(&cx)
@@ -64001,7 +64018,13 @@ mod tests {
         let image = build_ext4_image_with_state(EXT4_VALID_FS);
         let dev = TestDevice::from_vec(image);
         let cx = Cx::for_testing();
-        let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
+        let mut fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
+        // The test writes through `block_device_adapter().write_block`, which only
+        // yields a writable (snapshot-registered) adapter on a writable fs — a
+        // read-only fs returns an unregistered RO adapter (bd-... new_unregistered)
+        // whose write_block is correctly rejected. Enable writes so the
+        // write→empty-scope-read overlay round-trip this test asserts can run.
+        fs.enable_writes(&cx).expect("enable writes");
         let block = BlockNumber(8);
 
         let base = fs

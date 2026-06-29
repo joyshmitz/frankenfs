@@ -3190,3 +3190,13 @@ ROOT CAUSE: btrfs stores a symlink's target as the inode's inline `EXTENT_DATA` 
 FIX: thread an `allow_symlink: bool` through `btrfs_read_file`/`btrfs_read_file_into`; the two `read()`/`read_into` syscall call sites pass `false` (guard preserved), the `readlink` call site passes `true`. Minimal, localized.
 
 VERIFIED (binary oracle = unit tests incl. real `btrfs check`): all 3 now PASS; ffs-core lib suite 1180/5 → **1183/2** (the 3 symlink fails fixed, zero new regressions; the remaining 2 — largest_contiguous_free_run_drops_after_punching, read_block_with_empty_scope_matches — are separate pre-existing issues untouched by this change).
+
+### 2026-06-29 ⭐SHIPPED (conformance win): last 2 ffs-core lib-test failures fixed — suite fully green 1185/0 (CrimsonFox)
+
+The two remaining pre-existing ffs-core lib failures were STALE TESTS that the codebase's own correctness optimizations had outgrown (both test-only fixes, no production change):
+
+1. `read_block_with_empty_scope_matches_current_adapter_view`: writes via `block_device_adapter().write_block` but never called `enable_writes`. The `new_unregistered` optimization (RO adapters skip snapshot registration) correctly returns a read-only adapter for a non-writable fs, so the write was rejected. Fix: `enable_writes` in the test (the write→empty-scope-read overlay round-trip it asserts requires a writable fs).
+
+2. `largest_contiguous_free_run_drops_after_punching_alloc_in_middle`: patches the on-disk block bitmap OUT OF BAND (`fs.dev.write_all_at`), bypassing the allocator path that keeps the per-group largest-free-run cache (bd-allocrun) and the base-block read cache consistent. The first query had populated both caches, so the post-patch query returned the stale run. Fix: the white-box test now invalidates the group's largest-free-run cache AND clears `ext4_base_block_cache` after the out-of-band write (modelling that an external bitmap change must invalidate read caches), so the recompute reads the patched device.
+
+VERIFIED: ffs-core lib suite **1180/5 → 1185/0** (all green; this stretch fixed 3 btrfs_symlink via the readlink fix, then these 2). No production code touched. Combined with this stretch's correctness landings (superblock free-totals, inode-bitmap padding, btrfs readlink), ffs-core unit tests are now fully passing and ext4 create/mkdir/del/rename + btrfs symlink images are e2fsck/test clean.
