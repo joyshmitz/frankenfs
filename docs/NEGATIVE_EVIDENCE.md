@@ -3382,3 +3382,15 @@ MEASURED (env-built A/B, same fixture /bigfile 64MB, rand-read --parallel --seed
 | single-thread create | ~37,361/s | ~36,747/s | ~0.98x (slight regression) |
 
 NEUTRAL → REVERTED (shelved stash `rwlock-cache-AB`, not dropped). ROOT CAUSE: a WARM fixture's parallel random read runs at ~7.5M IOPS — it is NOT Mutex-contention-bound; the Mutex hold (BTreeMap get + Arc clone) is too brief to contend even same-shard at that rate, and the per-inode extent cache means readers don't all hammer one inode-block shard. The 3.3x parallel-read residual (memory) was measured COLD (/data ext4 dense + drop_caches), which needs root to reproduce — not reproducible on a warm local fixture, so the RwLock benefit (if any) is unmeasurable here and the change is a measured no-win on the workload I CAN run. LESSON: the hot-shard-contention hypothesis didn't survive measurement once a real fixture existed — warm random read is throughput/overhead-bound, not lock-bound. KEPT: `write-bench --create` (e2fsck-clean fixture, valid fs) lands as reusable read-path measurement tooling that resolves the prior blocker.
+
+### 2026-06-29 ⭐SHIPPED (MEASURED perf win): borrow the hot inode from its Arc instead of deep-cloning per read — single-thread random read 1.10x (CrimsonFox)
+
+Profiling warm parallel random read (enabled by the new write-bench --create fixture) showed `Ext4Inode::clone` at ~6.6% + associated malloc/sdallocx churn. `read_into`'s lock-free hot-inode fast path served the parsed inode from an ArcSwap slot but then DEEP-CLONED the `Ext4Inode` out of the Arc on every read (`(*slot).clone()`), and the struct carries a heap `xattr_ibody: Vec<u8>` (never touched on the read path) — so each read paid a heap alloc+free for a field it ignores. The comment even mislabeled it a "cheap struct copy". FIX: on a hot hit, BORROW the inode straight out of the Arc (`slot.as_ref()`, `inode: &Ext4Inode`); on a miss, own the parsed inode locally. Every downstream use was already `&inode`.
+
+MEASURED (clean same-binary A/B, fixture /bigfile 64MB, rand-read --seed 42 count=200000):
+| | with per-read clone | borrow from Arc | ratio |
+| --- | --- | --- | --- |
+| single-thread random read | ~460,612 IOPS | ~507,541 IOPS | **1.10x** |
+| parallel random read | ~7.88M IOPS | ~7.87M IOPS | ~1.00x (neutral; parallel is bandwidth/dispatch-bound, sublinear ~17x scaling, so per-read CPU savings don't move the shared-bottleneck aggregate) |
+
+Single-thread is the clean per-read-latency signal and the win helps EVERY `read_into` (every FUSE read goes through this path), even where parallel aggregate is bw-bound (lower per-read CPU frees cores). Correctness: read-only inode, borrow vs clone is identical data; ffs-core lib 1185/0 (read path). RO-only fast path (writable mount unaffected).

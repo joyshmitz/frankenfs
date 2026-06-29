@@ -29923,19 +29923,23 @@ impl OpenFs {
                     None
                 };
                 let inode_was_hot = hot_hit.is_some();
-                let inode = match hot_hit {
-                    // Clone the small fixed-size inode out of the Arc (a
-                    // thread-local memcpy, no shared state) so the downstream
-                    // `&inode` uses are unchanged; the win is skipping the shard
-                    // Mutex, not the cheap struct copy.
-                    Some(slot) => (*slot).clone(),
+                // On a hot hit, BORROW the inode straight out of the Arc instead
+                // of deep-cloning the Ext4Inode per read: the struct carries a
+                // heap `xattr_ibody: Vec<u8>` (never touched on the read path), so
+                // the per-read clone was ~6.6% of warm random-read plus its
+                // malloc/free churn (profiled). Every downstream use is `&inode`.
+                // On a miss, read, publish to the hot slot, and own it locally.
+                let parsed_storage;
+                let inode: &Ext4Inode = match hot_hit.as_ref() {
+                    Some(slot) => slot.as_ref(),
                     None => {
                         let parsed = self.read_inode_with_scope(cx, scope, canonical)?;
                         if read_only {
                             self.ext4_hot_inode
                                 .store(Some(Arc::new((canonical.0, Arc::new(parsed.clone())))));
                         }
-                        parsed
+                        parsed_storage = parsed;
+                        &parsed_storage
                     }
                 };
                 // Fast path: exactly the uncompressed-extent case `read` fills a
@@ -29943,10 +29947,10 @@ impl OpenFs {
                 let plain_extent = !inode.is_dir()
                     && !inode.is_symlink()
                     && inode.flags & EXT4_COMPRBLK_FL == 0
-                    && !Self::ext4_inode_uses_inline_data(&inode)
+                    && !Self::ext4_inode_uses_inline_data(inode)
                     && inode.flags & ffs_types::EXT4_EXTENTS_FL != 0;
                 if plain_extent {
-                    Self::ext4_reject_encrypted(&inode)?;
+                    Self::ext4_reject_encrypted(inode)?;
                     // Once the inode is hot (resolved from the lock-free slot on
                     // a prior read), publish its full extent list so the per-block
                     // `resolve_extent` calls below skip the `ExtentCache` RwLock.
@@ -29954,10 +29958,10 @@ impl OpenFs {
                     // pays the full-tree walk. Best-effort: on error the locked
                     // path resolves identically.
                     if inode_was_hot {
-                        let _ = self.ext4_ensure_hot_extents(cx, scope, &inode);
+                        let _ = self.ext4_ensure_hot_extents(cx, scope, inode);
                     }
                     let want = ext4_read_buffer_len(inode.size, offset, size)?;
-                    return self.read_file_data(cx, scope, &inode, offset, &mut dst[..want]);
+                    return self.read_file_data(cx, scope, inode, offset, &mut dst[..want]);
                 }
                 // Legacy non-extent (indirect-mapped) file: same read-into-dst
                 // fast path so a `read_into` does not fall through to the owned
@@ -29967,15 +29971,15 @@ impl OpenFs {
                 let plain_indirect = !inode.is_dir()
                     && !inode.is_symlink()
                     && inode.flags & EXT4_COMPRBLK_FL == 0
-                    && !Self::ext4_inode_uses_inline_data(&inode)
+                    && !Self::ext4_inode_uses_inline_data(inode)
                     && inode.flags & ffs_types::EXT4_EXTENTS_FL == 0;
                 if plain_indirect {
-                    Self::ext4_reject_encrypted(&inode)?;
+                    Self::ext4_reject_encrypted(inode)?;
                     let want = ext4_read_buffer_len(inode.size, offset, size)?;
                     return self.read_ext4_indirect_into(
                         cx,
                         scope,
-                        &inode,
+                        inode,
                         offset,
                         size,
                         &mut dst[..want],
