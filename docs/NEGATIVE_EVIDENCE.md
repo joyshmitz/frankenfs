@@ -2871,3 +2871,28 @@ RECOMMENDATION CARD:
 - **Rollback:** single env gate; revert = default-off.
 
 STATUS: this is the precise, graveyard-grounded structural lever — recorded as the next-cycle owner-lane target (commit-model change, NOT a safe blind per-crate edit, so NOT attempted blind this cycle). The safe per-op btrfs-tree-mutation lever space is exhausted and A/B-confirmed; the remaining headroom is the commit-frequency model (§15.4). No code change this entry (dig + EV-scored recommendation).
+
+### 2026-06-28 ⭐MEASURED (commit-cost decomposition refutes "bloated commit machinery"): the sharded-MVCC commit MACHINERY is only ~700 ns/op — the apparent ~3 µs/op commit is dominated by inherent 4 KiB-payload page-fault materialization the kernel ALSO pays (CrimsonFox cc/opus)
+
+Following the §15.4 epoch-group-commit dig, I drilled into WHERE the per-op commit cost actually goes, to test whether the commit path itself is bloated (a safe per-crate lever) vs. inherent (structural/amortization only). Tooling: `ffs-mvcc/examples/commit_breakdown.rs` (single-thread, distinct-block, `ShardedMvccStore::for_host_parallelism`), plus a throwaway sub-phase instrumentation of `ShardedMvccStore::commit()` (Instant timers around lock_shards / preflight_fcw / next_seq / install_loop / publish — profiling worktree `frankenfs-cc-mvcc-commit-prof-20260628`, NOT for merge).
+
+MEASURED (100 000 ops, ns/op):
+
+| phase | ns/op |
+| --- | --- |
+| A begin+drop (Transaction alloc) | 21 |
+| B-A stage_write + 4 KiB payload clone | 63 |
+| **C-B commit() total** | **2896** |
+| ↳ lock_shards (1 shard write lock) | 60 |
+| ↳ preflight_fcw (conflict scan + contention-metric EMA) | 99 |
+| ↳ next_commit_seq (atomic fetch_update) | 28 |
+| ↳ install_loop (into_staged_writes + version-store FxHashMap insert + BlockVersion) | 447 |
+| ↳ publish (publication gate) | 64 |
+| **↳ sum of timed sub-phases** | **698** |
+| **↳ UNACCOUNTED (commit total − sub-phases)** | **~2200** |
+
+TWO findings:
+1. **The commit MACHINERY is lean: ~700 ns/op** (locks 60 + preflight 99 + seq 28 + install 447 + publish 64). The locks are ns-scale even uncontended; the version-store install (FxHashMap insert + one `BlockVersion` holding the moved 4 KiB) is the largest machinery item at 447 ns and is irreducible work (you must store the new version). So the per-op commit path is NOT bloated — there is no fat safe per-crate lever hiding in the commit machinery. This corroborates the existing `commit_breakdown` header note ("bd-bhh0i is NOT lock-bound; every commit lock is ns-scale").
+2. **The ~2200 ns "missing" cost is inherent payload materialization, NOT commit overhead.** It is constant per-op across 5 k / 50 k / 300 k ops (2957 / 3078 / 3118 ns) → it is NOT a growing-working-set/cache artifact; it is a fixed PER-OP cost. It does not appear in any commit sub-phase because it is paid in the example loop's `payload.clone()` whose allocation, in phase C, is RETAINED by the version store (never freed) — forcing the allocator to fault in fresh pages each op (first-touch zeroing + TLB), whereas phase B frees-and-reuses one hot block. **The live kernel pays the identical first-touch page-fault cost when it materializes 4 KiB of new data into the page cache** — so this component is shared, not a FrankenFS-specific gap.
+
+CONCLUSION: the ext4-write 1.52x vs-kernel residual is NOT caused by a bloated per-op commit path (machinery ~700 ns; rest is kernel-shared data materialization). This RULES OUT "trim the commit machinery" as the lever and REINFORCES §15.4: the kernel pays the ~700 ns commit machinery ONCE PER TRANSACTION (many block writes amortized into one metadata commit + one flush), while FrankenFS pays it PER FsOp. The lever is amortization (epoch/transaction batching), not shaving the already-lean per-op path. Safe per-crate commit-machinery optimization space is measured-exhausted; the headroom is the commit-FREQUENCY model (owner-lane, §15.4). No production code change (measurement; instrumentation is throwaway).
