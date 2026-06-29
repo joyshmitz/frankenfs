@@ -7,14 +7,14 @@
     "meta": "Harness plumbing, operational readiness reports, evidence packaging, dashboards, gates, schedulers, benchmark/report metadata, and CLI/runtime support around those lanes."
   },
   "summary": {
-    "modules": 87,
-    "total_loc": 154306,
+    "modules": 88,
+    "total_loc": 154888,
     "conformance_modules": 23,
     "conformance_loc": 29403,
-    "conformance_loc_basis_points": 1905,
-    "meta_modules": 64,
-    "meta_loc": 124903,
-    "meta_loc_basis_points": 8095
+    "conformance_loc_basis_points": 1898,
+    "meta_modules": 65,
+    "meta_loc": 125485,
+    "meta_loc_basis_points": 8102
   },
   "modules": [
     {
@@ -110,7 +110,7 @@
     {
       "path": "src/e2e.rs",
       "classification": "meta",
-      "loc": 3719
+      "loc": 3724
     },
     {
       "path": "src/error_taxonomy.rs",
@@ -160,7 +160,7 @@
     {
       "path": "src/lib.rs",
       "classification": "meta",
-      "loc": 2300
+      "loc": 2301
     },
     {
       "path": "src/log_contract.rs",
@@ -381,6 +381,11 @@
       "path": "src/soak_canary_campaign.rs",
       "classification": "meta",
       "loc": 2309
+    },
+    {
+      "path": "src/stale_mounts.rs",
+      "classification": "meta",
+      "loc": 576
     },
     {
       "path": "src/support_state_accounting.rs",
