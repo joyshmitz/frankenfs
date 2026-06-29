@@ -3158,3 +3158,15 @@ Re-measured the previously-shelved lock-free in-order gate fast path (`FFS_GATE_
 ROOT CAUSE: the fast path's `while … { let c = completed(); … if CAS(c→target) … }` retries the CAS on loss. Under N-writer contention many threads lose the CAS and re-spin → a busy-spin storm that the original mutex+condvar design deliberately avoids (the existing `commit_publication_gate_preserves_order_without_busy_spin` test encodes this invariant). Same outcome class as IvoryBirch's rejected publication fast path (0.83x). The single-thread stress test passed precisely because it has no contention to trigger the spin storm.
 
 CONCLUSION: the publication gate is NOT improvable by a lock-free CAS fast path in safe Rust — busy-spin regresses, condvar-sleep is already optimal for the contended case. Code stashed (`cc-gate-lockfree-REFUTED-cas-retry-busyspin`), never committed to main. Combined with the intra-op-batch revert (931cb6d8→c4222300, corrupting), BOTH safe-Rust bd-bhh0i commit-path levers are now refuted with measurement; the only remaining path is the owner-lane re-architecture (route metadata ops through the existing `commit_request_scope` single-path per-op txn — see prior entry). OPS NOTE: killed 4 stray busy-spinning bench processes that were skewing machine-wide measurements (load 17 on 64c).
+
+### 2026-06-29 ⭐SHIPPED (correctness win): bd-wvud1 — sync_all_to_device now e2fsck-clean (CrimsonFox)
+
+Every frankenfs `create`+`sync_all_to_device` image was `e2fsck`-DIRTY: "Free inodes count wrong" (off by exactly #files), "Free blocks count wrong", and e2fsck miscounted the directory tree ("13 files" instead of all created files, 7.7% non-contiguous). A filesystem that fails `fsck` cannot claim to dominate the kernel, so this is a real domination gap, not cosmetic.
+
+ROOT CAUSE: there are two flush paths. `flush_mvcc_to_device` (the FUSE durability boundary) already calls `ext4_sync_superblock_free_totals` (bd-nd61w) to write the superblock totals `s_free_blocks_count`/`s_free_inodes_count` from the in-memory alloc state. But `sync_all_to_device` (the CLI / `create-bench` durability boundary, lib.rs:29714) flushed the MVCC overlay + cleared the GD cache but OMITTED the superblock-totals sync — so the per-group descriptors/bitmaps were current while the superblock totals stayed at their original values. One-line fix: call `ext4_sync_superblock_free_totals(cx)` at the end of `sync_all_to_device`, mirroring `flush_mvcc_to_device`.
+
+MEASURED (binary oracle = e2fsck, local build, count=2000 create-bench):
+- BEFORE: `Free inodes count wrong (102387, counted=100387)` + `Free blocks count wrong` + `WARNING: Filesystem still has errors` + `13/102400 files (7.7% non-contiguous)`.
+- AFTER: **CLEAN** — `2013/102400 files (0.0% non-contiguous)`, no count errors, no warning.
+
+Reuses an existing, conformance-tested helper. ffs-core lib tests: 1180 passed / 5 failed BOTH before and after my change (the 5 are pre-existing — 3× btrfs_symlink*, largest_contiguous_free_run_drops_after_punching, read_block_with_empty_scope_matches — verified by stashing the change and re-running: identical 5). Zero regressions.

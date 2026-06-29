@@ -29718,6 +29718,16 @@ impl OpenFs {
         let base_dev = self.direct_block_device_adapter();
         self.mvcc_store.flush_to_device(cx, &base_dev)?;
         self.clear_ext4_writable_group_desc_cache();
+        // Sync the superblock free-block/free-inode TOTALS from the in-memory
+        // alloc state so a device snapshot is e2fsck-consistent (bd-wvud1): the
+        // per-group descriptors + bitmaps are kept current during writes, but
+        // nothing updates the superblock totals s_free_blocks_count /
+        // s_free_inodes_count on this flush path. `flush_mvcc_to_device` already
+        // does this; `sync_all_to_device` (the CLI / create-bench durability
+        // boundary) omitted it, leaving every persisted image reporting
+        // "Free inodes count wrong" off by exactly the number of created files.
+        // No-op for btrfs / read-only ext4.
+        self.ext4_sync_superblock_free_totals(cx)?;
         Ok(())
     }
 
