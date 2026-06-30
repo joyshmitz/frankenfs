@@ -16479,8 +16479,20 @@ impl OpenFs {
             return Err(FfsError::NotDirectory);
         }
 
-        // Check for duplicate name — POSIX requires EEXIST.
-        if self.lookup_name(cx, &parent_inode, name)?.is_some() {
+        // Check for duplicate name — POSIX requires EEXIST. For a hash-indexed
+        // (htree) directory the insert path (ext4_add_dir_entry ->
+        // ffs_dir::add_entry_reject_existing) performs a byte-exact duplicate
+        // check on the hash-correct target leaf, which is the ONLY block a
+        // duplicate of `name` could occupy — so this separate positive
+        // lookup_name (a full second htree descent) is redundant and is skipped.
+        // Casefold htree directories index by the folded name (a byte-different
+        // duplicate can fold-collide), and linear directories may hold a
+        // duplicate in a block other than the one with free space, so both keep
+        // the lookup_name pre-check.
+        let htree_dedup_covers = parent_inode.has_htree_index()
+            && parent_inode.flags & ffs_types::EXT4_CASEFOLD_FL == 0
+            && std::env::var_os("FFS_NO_HTREE_CREATE_DEDUP").is_none();
+        if !htree_dedup_covers && self.lookup_name(cx, &parent_inode, name)?.is_some() {
             return Err(FfsError::Exists);
         }
 
@@ -17212,7 +17224,20 @@ impl OpenFs {
                 })?;
 
                 let mut data = self.read_block_vec(cx, target_phys)?;
-                match ffs_dir::add_entry(&mut data, child_ino_u32, name, file_type, reserved_tail) {
+                // Fold the duplicate-name (EEXIST) check into this target-leaf
+                // scan. For a hash-indexed directory the hash-correct leaf is the
+                // ONLY block a duplicate of `name` could occupy, so rejecting a
+                // duplicate here is a complete check — letting the create-family
+                // callers skip a separate positive `lookup_name` (a full second
+                // htree descent). A full leaf with no duplicate still returns
+                // NoSpace and falls through to the leaf-split path below.
+                match ffs_dir::add_entry_reject_existing(
+                    &mut data,
+                    child_ino_u32,
+                    name,
+                    file_type,
+                    reserved_tail,
+                ) {
                     Ok(_) => {
                         self.stamp_ext4_dir_block(&mut data, parent_ino_u32, parent_generation);
                         dev.write_block(cx, target_phys, &data)?;

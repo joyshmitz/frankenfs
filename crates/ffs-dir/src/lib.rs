@@ -267,6 +267,98 @@ pub fn add_entry(
     Err(FfsError::NoSpace)
 }
 
+/// Scan a single directory block for a live entry whose name matches `name`.
+///
+/// Returns `Ok(true)` if a non-tombstone entry with this exact name exists in
+/// the block, `Ok(false)` otherwise. Interior htree index (dx_node) blocks have
+/// no addressable entries and always return `Ok(false)`. Performs the same
+/// `rec_len`/`name_len` bounds validation as the other single-block scanners, so
+/// a corrupt entry surfaces as [`FfsError::Corruption`] rather than a silent
+/// miss.
+pub fn block_contains_live_name(block: &[u8], name: &[u8], reserved_tail: usize) -> Result<bool> {
+    validate_name(name)?;
+    let limit = validate_reserved_tail(block.len(), reserved_tail)?;
+    if is_interior_htree_dx_node_block(block) {
+        return Ok(false);
+    }
+    let mut off = 0usize;
+    while off + DIR_ENTRY_HEADER_LEN <= limit {
+        let rec_len =
+            usize::from(
+                read_u16_le(block, off + 4).ok_or_else(|| FfsError::Corruption {
+                    block: 0,
+                    detail: "unable to read directory entry rec_len".to_owned(),
+                })?,
+            );
+        if rec_len < DIR_ENTRY_HEADER_LEN || (rec_len % 4) != 0 {
+            return Err(FfsError::Corruption {
+                block: 0,
+                detail: "invalid directory entry rec_len".to_owned(),
+            });
+        }
+        let end = off
+            .checked_add(rec_len)
+            .ok_or_else(|| FfsError::Corruption {
+                block: 0,
+                detail: "directory entry offset overflow".to_owned(),
+            })?;
+        if end > limit {
+            return Err(FfsError::Corruption {
+                block: 0,
+                detail: "directory entry exceeds usable block area".to_owned(),
+            });
+        }
+        let cur_ino = read_u32_le(block, off).ok_or_else(|| FfsError::Corruption {
+            block: 0,
+            detail: "unable to read directory entry inode".to_owned(),
+        })?;
+        let cur_name_len = usize::from(block[off + 6]);
+        let name_end = off
+            .checked_add(DIR_ENTRY_HEADER_LEN + cur_name_len)
+            .ok_or_else(|| FfsError::Corruption {
+                block: 0,
+                detail: "directory entry name offset overflow".to_owned(),
+            })?;
+        if name_end > end {
+            return Err(FfsError::Corruption {
+                block: 0,
+                detail: format!(
+                    "directory entry name_len {cur_name_len} exceeds rec_len {rec_len} at offset {off}"
+                ),
+            });
+        }
+        if cur_ino != 0 && &block[off + DIR_ENTRY_HEADER_LEN..name_end] == name {
+            return Ok(true);
+        }
+        off = end;
+    }
+    Ok(false)
+}
+
+/// Like [`add_entry`], but first verifies `name` is not already present as a
+/// live entry in this block, returning [`FfsError::Exists`] if it is.
+///
+/// This lets an htree insert fold the duplicate-name (EEXIST) check into the
+/// same target-leaf scan it already performs, so the create-family paths
+/// (`create`/`mkdir`/`mknod`/`symlink`) can skip a separate positive
+/// `lookup_name` descent — a full second htree traversal — when the directory
+/// is hash-indexed: the hash-correct leaf is the only block any duplicate of
+/// `name` could occupy, so scanning it here is a complete duplicate check.
+/// Linear directories must keep their own full-directory pre-check, since a
+/// duplicate may live in a different block than the one with free space.
+pub fn add_entry_reject_existing(
+    block: &mut [u8],
+    ino: u32,
+    name: &[u8],
+    file_type: Ext4FileType,
+    reserved_tail: usize,
+) -> Result<usize> {
+    if block_contains_live_name(block, name, reserved_tail)? {
+        return Err(FfsError::Exists);
+    }
+    add_entry(block, ino, name, file_type, reserved_tail)
+}
+
 /// Remove a directory entry by name from a single directory block.
 ///
 /// On success:
@@ -1183,6 +1275,40 @@ mod tests {
         write_entry(&mut block, 12, 2, 12, Ext4FileType::RegFile, b"b").unwrap();
         let err = add_entry(&mut block, 3, b"c", Ext4FileType::RegFile, 0).unwrap_err();
         assert_eq!(err.to_errno(), libc::ENOSPC);
+    }
+
+    #[test]
+    fn add_entry_reject_existing_rejects_duplicate_live_name() {
+        // A live "a" exists with slack; add_entry would happily split that slack
+        // and insert a SECOND "a" (directory corruption). The reject variant must
+        // refuse with EEXIST instead, while still allowing a distinct name.
+        let mut block = vec![0u8; 1024];
+        write_entry(&mut block, 0, 10, 1024, Ext4FileType::RegFile, b"a").unwrap();
+
+        let err =
+            add_entry_reject_existing(&mut block, 11, b"a", Ext4FileType::RegFile, 0).unwrap_err();
+        assert_eq!(err.to_errno(), libc::EEXIST);
+
+        // A different name still inserts (folds the EEXIST check into the scan).
+        let off =
+            add_entry_reject_existing(&mut block, 12, b"b", Ext4FileType::RegFile, 0).unwrap();
+        assert!(off > 0);
+        let (entries, _) = parse_dir_block(&block, 1024).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert!(entries.iter().any(|e| e.name == b"a" && e.inode == 10));
+        assert!(entries.iter().any(|e| e.name == b"b" && e.inode == 12));
+    }
+
+    #[test]
+    fn add_entry_reject_existing_ignores_deleted_tombstone_with_same_name() {
+        // A tombstone (inode 0) carrying the same name must NOT block reuse — the
+        // name is not live, so the entry should be (re)inserted successfully.
+        let mut block = vec![0u8; 1024];
+        write_entry(&mut block, 0, 0, 1024, Ext4FileType::RegFile, b"a").unwrap();
+        let off = add_entry_reject_existing(&mut block, 7, b"a", Ext4FileType::RegFile, 0).unwrap();
+        assert_eq!(off, 0);
+        let (entries, _) = parse_dir_block(&block, 1024).unwrap();
+        assert!(entries.iter().any(|e| e.name == b"a" && e.inode == 7));
     }
 
     #[test]
