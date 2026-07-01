@@ -3993,3 +3993,37 @@ byte-for-byte the same, just computed cheaply). ffs-btrfs 365/0 (incl.
 `validate_invariants`, which asserts `separator == first_key(child)` for every
 internal node, + `proptest_insert_many_matches_sequential`); conformance
 100/0/2 GREEN; clippy + fmt clean.
+
+## REJECT (neutral) — 2026-07-01 — `bd-envcache` per-op env-var memoization (CrimsonFox)
+
+**Context:** re-profiled the biggest remaining ext4 write-side gap, file removal,
+with the same "profile-first, distrust the inherited label" lens that flipped
+btrfs rename twice. ext4 file removal is now **~20 us/op (50k/s) = ~1.29x vs
+kernel 15.5 us/op** — already improved from the 1.68x note (the one-pass removal
+`3f24e58b` landed since). `perf record` of `delbench --count 40000` shows a FLAT
+profile with no mineable hot frame: `__memmove` 10.1% (MVCC version-buffer
+materialization), `ShardedMvccStore::commit` 5.7%, `crc32c` ~5.9% (metadata block
+checksums), `parse_extent_leaf` 2.5%, kernel page-faults ~8%. This is inherent
+per-op MVCC + checksum work the kernel also pays — no structural lever like the
+btrfs COW leak.
+
+**Lever tried (REJECTED, shelved `stash@{0}`):** the ONE clearly-wasteful frame
+was `getenv` 1.09% self-time, from `OpenFs::block_device_adapter` calling
+`std::env::var("FFS_WRITABLE_ADAPTER_REGISTER")` on every block op of every
+writable-mount FsOp (plus the per-create `FFS_NO_HTREE_CREATE_DEDUP` check).
+Memoized both via `OnceLock<bool>` (process-static flags, byte-identical).
+**MEASURED NEUTRAL:** ext4 removal 40k interleaved 7x = **0.995x median** (NEW
+overlaps OLD); ext4 create = 1.053x median but with NEW/OLD overlap (not clean
+separation). WHY: for the DEFAULT unset var, `std::env::var` returns
+`Err(NotPresent)` WITHOUT allocating a `String` (the alloc only happens when the
+var is present), so the per-op cost is just a cheap `getenv` `environ` scan
+(~50-100 ns) — real CPU (hence the 1.09% sample) but off the memmove/commit-bound
+critical path, so removing it does not move wall-clock. Per the revert-~0-gain
+rule, shelved rather than landed.
+
+**Retry predicate:** revisit only if a block-op-dense writable workload (e.g.
+large sequential metadata mutation) profiles `getenv` ABOVE the critical path, or
+if a future change makes `block_device_adapter` allocation-bound. Separately,
+`parse_extent_leaf` 2.5% during empty-file removal is worth a look — the directory
+inode's extent tree may be re-parsed per op to map logical→physical dir blocks (a
+caching opportunity), but it was not pursued here.
