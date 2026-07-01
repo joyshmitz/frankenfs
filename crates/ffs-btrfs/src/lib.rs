@@ -4524,16 +4524,19 @@ impl InMemoryCowBtrfsTree {
         }
     }
 
-    /// Returns `true` iff the children array was structurally changed (a rotate
-    /// moved entries between siblings, or a merge removed a child), meaning the
-    /// parent's separators can no longer be carried forward and must be
-    /// recomputed. Returns `false` when the child still had `>= min_items` (the
-    /// common case) and nothing was touched — the caller can then reuse the old
-    /// separators and recompute at most the one immediately left of `child_idx`
-    /// (`delete_from`), instead of re-deriving all ~`max_items` separators by
-    /// descending to every child's leftmost leaf (bd-btrcow-sepkeep).
+    /// Rebalance the (possibly underflowing) child at `child_idx`, maintaining the
+    /// parent's `keys` (separators) IN PLACE so the caller never has to re-derive
+    /// them by descending to every child's leftmost leaf (~`max_items` `first_key`
+    /// descents — the dominant cost of mass deletion, bd-btrcow-sepkeep2). Each
+    /// structural op touches at most the separators immediately around `child_idx`:
+    /// a rotate refreshes one or two adjacent separators via a single `first_key`
+    /// each; a merge drops the one separator between the merged pair. Returns
+    /// `true` iff a rotate/merge happened; `false` (the common no-underflow case)
+    /// leaves `keys` untouched and lets the caller fix only `keys[child_idx - 1]`
+    /// (the deleted child's minimum may have shifted).
     fn rebalance_child(
         &mut self,
+        keys: &mut Vec<BtrfsKey>,
         children: &mut Vec<u64>,
         child_idx: usize,
     ) -> Result<bool, BtrfsMutationError> {
@@ -4562,6 +4565,16 @@ impl InMemoryCowBtrfsTree {
                 children[child_idx] = new_child;
                 self.retire_node(old_left);
                 self.retire_node(old_child);
+                // The child borrowed the left sibling's largest item, which is
+                // smaller than everything the child held, so the child's new
+                // minimum IS that borrowed item; the left sibling lost only its
+                // last item, so its minimum (and thus keys[child_idx - 2]) is
+                // unchanged. Refresh just the separator between them.
+                keys[child_idx - 1] = self.first_key(children[child_idx])?.ok_or(
+                    BtrfsMutationError::BrokenInvariant(
+                        "internal separator child must contain a key",
+                    ),
+                )?;
                 debug!(
                     child_idx,
                     left_keys, child_keys, "btrfs_cow_delete_borrow_left"
@@ -4581,6 +4594,23 @@ impl InMemoryCowBtrfsTree {
                 children[child_idx + 1] = new_right;
                 self.retire_node(old_child);
                 self.retire_node(old_right);
+                // The right sibling lost its first (smallest) item, so its new
+                // minimum is the separator between the child and the right —
+                // refresh keys[child_idx]. The child appended that item at its end
+                // (larger than all it held), so the child's minimum is set only by
+                // the earlier delete; refresh keys[child_idx - 1] too when it exists.
+                keys[child_idx] = self.first_key(children[child_idx + 1])?.ok_or(
+                    BtrfsMutationError::BrokenInvariant(
+                        "internal separator child must contain a key",
+                    ),
+                )?;
+                if child_idx > 0 {
+                    keys[child_idx - 1] = self.first_key(children[child_idx])?.ok_or(
+                        BtrfsMutationError::BrokenInvariant(
+                            "internal separator child must contain a key",
+                        ),
+                    )?;
+                }
                 debug!(
                     child_idx,
                     right_keys, child_keys, "btrfs_cow_delete_borrow_right"
@@ -4595,6 +4625,9 @@ impl InMemoryCowBtrfsTree {
             let merged = self.merge_adjacent_nodes(children[child_idx - 1], children[child_idx])?;
             children[child_idx - 1] = merged;
             children.remove(child_idx);
+            // The merged node takes the left sibling's minimum (unchanged), so the
+            // only separator that moves is the one between the merged pair, now gone.
+            keys.remove(child_idx - 1);
             self.retire_node(old_left);
             self.retire_node(old_child);
             debug!(merged_child = child_idx - 1, "btrfs_cow_delete_merge_left");
@@ -4604,6 +4637,10 @@ impl InMemoryCowBtrfsTree {
             let merged = self.merge_adjacent_nodes(children[child_idx], children[child_idx + 1])?;
             children[child_idx] = merged;
             children.remove(child_idx + 1);
+            // child_idx == 0: the merged node is the new first child (no separator
+            // to its left in this node — its minimum propagates up via the parent),
+            // so only the separator between the merged pair is removed.
+            keys.remove(child_idx);
             self.retire_node(old_child);
             self.retire_node(old_right);
             debug!(merged_child = child_idx, "btrfs_cow_delete_merge_right");
@@ -4658,32 +4695,24 @@ impl InMemoryCowBtrfsTree {
                     });
                 }
                 children[idx] = child_result.node_id;
-                let structurally_changed = self.rebalance_child(&mut children, idx)?;
-                let new_id = if structurally_changed {
-                    // A rotate/merge shifted entries between siblings (or dropped a
-                    // child), so the separators no longer line up — recompute them
-                    // all. This is the rare underflow path.
-                    self.alloc_internal_node(children)?
-                } else {
-                    // Common path: only `children[idx]` was COW-replaced. Every
-                    // other separator still equals its child's unchanged subtree
-                    // minimum, so carry the old `keys` forward and refresh only
-                    // `keys[idx - 1]` (the separator to the left of the touched
-                    // child), whose subtree minimum may have shifted if the deleted
-                    // item was that subtree's smallest. `children[0]`'s minimum has
-                    // no separator in THIS node (it propagates up via the parent),
-                    // so `idx == 0` leaves `keys` untouched. Avoids re-deriving all
-                    // ~max_items separators by descending to every child's leftmost
-                    // leaf (bd-btrcow-sepkeep).
-                    if idx > 0 {
-                        keys[idx - 1] = self.first_key(children[idx])?.ok_or(
-                            BtrfsMutationError::BrokenInvariant(
-                                "internal separator child must contain a key",
-                            ),
-                        )?;
-                    }
-                    self.alloc_node(BtrfsCowNode::Internal { keys, children })?
-                };
+                // `rebalance_child` maintains `keys` in place across any rotate/merge
+                // (bd-btrcow-sepkeep2). On the common no-underflow path it returns
+                // `false` and leaves `keys` untouched, so we refresh only the one
+                // separator left of the touched child, whose subtree minimum may have
+                // shifted if the deleted item was that subtree's smallest.
+                // `children[0]`'s minimum has no separator in THIS node (it
+                // propagates up via the parent), so `idx == 0` leaves `keys`
+                // untouched. Either way the full ~max_items separator recompute is
+                // gone.
+                let did_rebalance = self.rebalance_child(&mut keys, &mut children, idx)?;
+                if !did_rebalance && idx > 0 {
+                    keys[idx - 1] = self.first_key(children[idx])?.ok_or(
+                        BtrfsMutationError::BrokenInvariant(
+                            "internal separator child must contain a key",
+                        ),
+                    )?;
+                }
+                let new_id = self.alloc_node(BtrfsCowNode::Internal { keys, children })?;
                 self.retire_node(node_id);
                 Ok(DeleteResult {
                     node_id: new_id,

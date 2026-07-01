@@ -4113,3 +4113,30 @@ its paired OLD). **Correctness:** `btrfs check` CLEAN on a NEW-mkdir image;
 ffs-core btrfs 360/0 (incl. `btrfs_mkdir_duplicate_name_returns_eexist`, the mknod
 EEXIST/fifo/socket/dev tests, and the symlink btrfs-check test); conformance
 100/0/2 GREEN; fmt clean.
+
+## KEEP — 2026-07-01 — `bd-btrcow-sepkeep2` btrfs delete rebalance separator maintenance (CrimsonFox)
+
+**Biggest btrfs mutation gap this turn.** Profiled btrfs file removal (`delbench`
+30k, real btrfs fixture): `alloc_internal_node` was **19.71%** self-time (plus more
+under `BtrfsCowNode::clone`). The earlier `bd-btrcow-sepkeep` fix only bypassed the
+full `compute_internal_keys` recompute on the NO-underflow delete path; mass
+deletion constantly underflows leaves → `rebalance_child` rotates/merges → the
+parent rebuild fell back to `alloc_internal_node`, which re-derives EVERY separator
+by descending to each child's leftmost leaf (up to `max_items` = 651 `first_key`
+descents per rebalanced delete).
+
+**Fix:** `rebalance_child` now maintains the parent's `keys` IN PLACE. Each
+structural op touches at most the separators adjacent to `child_idx` — a
+rotate-from-left refreshes `keys[idx-1]` (child's new min = borrowed item), a
+rotate-from-right refreshes `keys[idx]` (right's new min) and `keys[idx-1]`
+(child's delete-shifted min), a merge drops the single separator between the merged
+pair — each via at most one `first_key`. `delete_from` no longer calls
+`alloc_internal_node` at all (it remains only for the rare internal-sibling
+rebalance). O(max_items) → O(1) separator descents per rebalanced delete.
+
+**MEASURED ~1.53x** btrfs removal (delbench 30k, interleaved A/B vs the
+create-family-dedup binary: OLD ~19808 → NEW ~30302 unlinks/s median, every NEW run
+> every OLD run). **Correctness:** `btrfs check` CLEAN after 20k create + 20k delete
+(maximum rotate/merge exercise); ffs-btrfs 365/0 (incl. `validate_invariants`
+asserting `separator == first_key(child)` for every internal node, +
+`proptest_insert_many_matches_sequential`); conformance 100/0/2 GREEN; fmt clean.
