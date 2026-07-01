@@ -4524,23 +4524,31 @@ impl InMemoryCowBtrfsTree {
         }
     }
 
+    /// Returns `true` iff the children array was structurally changed (a rotate
+    /// moved entries between siblings, or a merge removed a child), meaning the
+    /// parent's separators can no longer be carried forward and must be
+    /// recomputed. Returns `false` when the child still had `>= min_items` (the
+    /// common case) and nothing was touched — the caller can then reuse the old
+    /// separators and recompute at most the one immediately left of `child_idx`
+    /// (`delete_from`), instead of re-deriving all ~`max_items` separators by
+    /// descending to every child's leftmost leaf (bd-btrcow-sepkeep).
     fn rebalance_child(
         &mut self,
         children: &mut Vec<u64>,
         child_idx: usize,
-    ) -> Result<(), BtrfsMutationError> {
+    ) -> Result<bool, BtrfsMutationError> {
         if child_idx >= children.len() {
             return Err(BtrfsMutationError::BrokenInvariant(
                 "child index out of bounds",
             ));
         }
         if children.len() <= 1 {
-            return Ok(());
+            return Ok(false);
         }
 
         let child_keys = self.node_key_count(children[child_idx])?;
         if child_keys >= self.min_items {
-            return Ok(());
+            return Ok(false);
         }
 
         if child_idx > 0 {
@@ -4558,7 +4566,7 @@ impl InMemoryCowBtrfsTree {
                     child_idx,
                     left_keys, child_keys, "btrfs_cow_delete_borrow_left"
                 );
-                return Ok(());
+                return Ok(true);
             }
         }
 
@@ -4577,7 +4585,7 @@ impl InMemoryCowBtrfsTree {
                     child_idx,
                     right_keys, child_keys, "btrfs_cow_delete_borrow_right"
                 );
-                return Ok(());
+                return Ok(true);
             }
         }
 
@@ -4600,7 +4608,7 @@ impl InMemoryCowBtrfsTree {
             self.retire_node(old_right);
             debug!(merged_child = child_idx, "btrfs_cow_delete_merge_right");
         }
-        Ok(())
+        Ok(true)
     }
 
     fn delete_from(
@@ -4632,7 +4640,10 @@ impl InMemoryCowBtrfsTree {
                     deleted: true,
                 })
             }
-            BtrfsCowNode::Internal { keys, mut children } => {
+            BtrfsCowNode::Internal {
+                mut keys,
+                mut children,
+            } => {
                 if children.len() != keys.len().saturating_add(1) {
                     return Err(BtrfsMutationError::BrokenInvariant(
                         "internal node child count mismatch",
@@ -4647,8 +4658,32 @@ impl InMemoryCowBtrfsTree {
                     });
                 }
                 children[idx] = child_result.node_id;
-                self.rebalance_child(&mut children, idx)?;
-                let new_id = self.alloc_internal_node(children)?;
+                let structurally_changed = self.rebalance_child(&mut children, idx)?;
+                let new_id = if structurally_changed {
+                    // A rotate/merge shifted entries between siblings (or dropped a
+                    // child), so the separators no longer line up — recompute them
+                    // all. This is the rare underflow path.
+                    self.alloc_internal_node(children)?
+                } else {
+                    // Common path: only `children[idx]` was COW-replaced. Every
+                    // other separator still equals its child's unchanged subtree
+                    // minimum, so carry the old `keys` forward and refresh only
+                    // `keys[idx - 1]` (the separator to the left of the touched
+                    // child), whose subtree minimum may have shifted if the deleted
+                    // item was that subtree's smallest. `children[0]`'s minimum has
+                    // no separator in THIS node (it propagates up via the parent),
+                    // so `idx == 0` leaves `keys` untouched. Avoids re-deriving all
+                    // ~max_items separators by descending to every child's leftmost
+                    // leaf (bd-btrcow-sepkeep).
+                    if idx > 0 {
+                        keys[idx - 1] = self.first_key(children[idx])?.ok_or(
+                            BtrfsMutationError::BrokenInvariant(
+                                "internal separator child must contain a key",
+                            ),
+                        )?;
+                    }
+                    self.alloc_node(BtrfsCowNode::Internal { keys, children })?
+                };
                 self.retire_node(node_id);
                 Ok(DeleteResult {
                     node_id: new_id,

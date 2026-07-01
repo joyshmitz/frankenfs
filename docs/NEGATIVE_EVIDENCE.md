@@ -3955,3 +3955,41 @@ ffs-core btrfs 360/0; conformance 100/0/2 GREEN; clippy + fmt clean.
 node clone/alloc/**drop** (COW machinery), and the throughput-decays-with-N
 signature pinpointed the retained-version leak. Profile FIRST beats trusting a
 stale root-cause label.
+
+## KEEP — 2026-07-01 — `bd-btrcow-sepkeep` btrfs delete separator-carry-forward (CrimsonFox)
+
+**Lever (ffs-btrfs, KEEP/SHIPPED):** after the `bd-btrcow-evict` fix, a fresh
+`perf record` of `rename-bench` showed `InMemoryCowBtrfsTree::alloc_internal_node`
+at 17.3% self-time. It calls `compute_internal_keys`, which re-derives EVERY
+separator of a COW'd internal node by descending to each child's leftmost leaf
+via `first_key` — up to `max_items` descents (651 for a 16 KiB nodesize). The
+delete path (`delete_from`) called it on every internal node it rebuilt, even
+though only the one child on the delete path was COW-replaced and every other
+separator still equals its unchanged child's subtree minimum. (The INSERT path
+already carried separators forward; only DELETE recomputed.)
+
+**Fix:** `rebalance_child` now returns whether it structurally changed the
+children (rotate/merge — the rare underflow case); `delete_from` reuses the old
+`keys` on the common no-underflow path and recomputes only `keys[idx-1]` (the
+separator left of the touched child, whose subtree minimum may have shifted),
+falling back to the full `alloc_internal_node` recompute only on the rare
+structural change. O(max_items) → O(1) separator descents per delete.
+
+**MEASURED (rename-bench, real btrfs fixture, interleaved A/B vs the eviction-only
+binary; the win scales with tree size = wider internal nodes):**
+
+| count | eviction-only | +sepkeep | ratio | NEW vs ORIG (kernel 36.5 us/op) |
+|---|---|---|---|---|
+| 5000  | 25153 r/s | 26293 r/s | 1.045x | 1.04x (near parity) |
+| 20000 | 17762 r/s | ~18900 r/s | ~1.06x | 1.45x |
+| 40000 | 13761 r/s (median) | 15567 r/s | **1.13x** (clean sep: NEW min > OLD max) | **1.76x** |
+
+Combined with `bd-btrcow-evict`, btrfs rename at 40k is now 1.76x vs kernel
+(was 4.66x before either fix). Helps every btrfs delete/unlink/rename.
+
+**Correctness:** `btrfs check` CLEAN; NEW vs eviction-only images STRUCTURALLY
+IDENTICAL (bytes used / tree / fs-tree / csum all byte-equal — separators are
+byte-for-byte the same, just computed cheaply). ffs-btrfs 365/0 (incl.
+`validate_invariants`, which asserts `separator == first_key(child)` for every
+internal node, + `proptest_insert_many_matches_sequential`); conformance
+100/0/2 GREEN; clippy + fmt clean.
