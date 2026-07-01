@@ -4027,3 +4027,51 @@ if a future change makes `block_device_adapter` allocation-bound. Separately,
 `parse_extent_leaf` 2.5% during empty-file removal is worth a look — the directory
 inode's extent tree may be re-parsed per op to map logical→physical dir blocks (a
 caching opportunity), but it was not pursued here.
+
+## SURFACE (owner-lane) — 2026-07-01 — ext4 parallel create negative scaling = the `alloc_mutex.write()` convoy (CrimsonFox)
+
+**Biggest gap vs ORIG measured this turn.** ext4 parallel create (create-bench
+`--threads N`, each thread in its OWN subdir so the only shared state is the
+alloc/commit path) SCALES NEGATIVELY at HEAD — more threads = LOWER aggregate
+throughput, where the kernel scales up:
+
+| threads | creates/s (default) | creates/s (`FFS_SKIP_GDT=1`) |
+|---|---|---|
+| 1  | 35940 | 78667 |
+| 2  | 30076 | — |
+| 4  | 26684 | 55455 |
+| 8  | 27488 | 58369 |
+| 16 | 26042 | 48436 |
+
+**Ruled out (fresh measurement, so these are NOT the fix):**
+- **GDT shared-block write** — `FFS_SKIP_GDT=1` gives the known 2.2x SINGLE-thread
+  win (35940→78667) but scaling stays negative (78667→48436). The shared
+  group-descriptor block is not the parallel bottleneck.
+- **MVCC layer** — the pure `sharded_mvcc_disjoint` bench (N writers, fully
+  disjoint blocks, no alloc) does ~261k commits/s @8w → ~217k @16w = only MILD
+  negative scaling (partly thread-spawn-in-`b.iter` overhead). Create achieves
+  only ~135k block-commits/s @8t (27k creates × ~5 blocks), well under the MVCC
+  ceiling — so the publication gate / commit path is NOT the create bottleneck.
+  (Confirms the earlier `publish-nowait` NEUTRAL result — the gate is not the
+  limiter.)
+
+**Root cause (pinpointed):** `OpenFs::ext4_create` / `ext4_mkdir` take a single
+GLOBAL `alloc_mutex.write()` over the ENTIRE `Ext4AllocState` (lib.rs:16793) for
+every create — fully serializing parallel creates at the alloc layer regardless
+of which group they touch. Secondary: inode allocation uses
+`goal_group = parent_group` (lib.rs:16507/16813) with NO Orlov-style directory
+spreading, so the per-thread subdirs (all created in root) inherit root's group,
+and every thread's children then convoy through the SAME group's inode-bitmap
+block. This is exactly the `bd-bhh0i` / convoy target: the git-log plan
+(interior-mutability per-group locks: `alloc_mutex.read()` fast path + per-group
+`GroupStats` Mutex/atomics) is the correct owner-lane fix. Upper bound already
+sized (8 independent processes, no shared lock = ~489k creates/s = ~9x).
+
+**Why not landed this turn:** the fix is a RwLock→per-group-locks refactor of the
+alloc state (owner-lane, lock-ordering + FCW + e2fsck validation), not a
+contained ~15-min change; and the tractable-looking Orlov dir-spreading
+alternative changes on-disk placement (e2fsck/golden-layout risk) so it was not
+rushed. No ~0-gain code was landed. Contained sub-lever candidate for a future
+turn: spread fresh-directory inode allocation across groups (Orlov) so subdirs
+don't cluster — reduces the secondary bitmap convoy without the full alloc-state
+refactor, but still needs golden/e2fsck validation.
