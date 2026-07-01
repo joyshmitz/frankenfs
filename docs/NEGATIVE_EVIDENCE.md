@@ -4140,3 +4140,31 @@ create-family-dedup binary: OLD ~19808 → NEW ~30302 unlinks/s median, every NE
 (maximum rotate/merge exercise); ffs-btrfs 365/0 (incl. `validate_invariants`
 asserting `separator == first_key(child)` for every internal node, +
 `proptest_insert_many_matches_sequential`); conformance 100/0/2 GREEN; fmt clean.
+
+## SURFACE — 2026-07-01 — single-thread mutation frontier state after the btrfs COW sweep (CrimsonFox)
+
+**btrfs mutations now at kernel PARITY** — the 6-commit COW sweep (dead-version
+eviction 2.6-3.0x → sepkeep +1.13x → create-family dedup 1.13x/1.07x → rebalance
+sepkeep 1.53x) closed the gap. Fresh measurement, current HEAD binary, real btrfs
+fixture vs the live-kernel baseline (36.5 us/op): btrfs rename **30.7 us/op =
+1.19x FASTER than kernel @5k**, **36.4 us = parity @20k**, 39.5 us = 0.92x @40k
+(residual = per-op COW clone growing with tree depth — inherent, kernel COWs too).
+Was 4.66x SLOWER before the sweep.
+
+**ext4 single-thread mutations are inherent** (no contained algorithmic lever
+left — the O(N^2) rename preflight and the create-path lookup dedup already
+landed; the create/mkdir profiles are flat = per-op MVCC version-materialization
+the kernel also pays). Measured this turn: ext4 create 29.4 us/op (~1.16x vs
+kernel 25.3), ext4 mkdir 62.2 us/op, ext4 removal ~20 us (~1.29x).
+
+**One concrete ext4 lead (NOT landed — marginal, needs a cross-crate refactor):**
+`ext4_mkdir` writes the new inode table block TWICE — `ffs_inode::create_inode`
+persists the inode body (its final `write_inode`), then `ext4_mkdir` calls
+`write_inode` AGAIN (lib.rs:16911) after setting size/blocks/links_count=2/extent
+root. `ext4_create` writes once (no post-alloc inode mutation). Eliminating the
+redundant first write needs a deferred-body `create_inode` variant + moving the
+single persist into each caller (create/mkdir/mknod/symlink) — estimated only
+~1.03x on mkdir (one of ~6 block materializations), below the revert-near-zero
+bar for the refactor risk, so shelved as a documented lead. **Remaining real
+frontier = the parallel-create `alloc_mutex.write()` convoy (owner-lane, sized
+~9x) and the read paths (already dominate).**
