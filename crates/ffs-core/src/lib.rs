@@ -25827,14 +25827,38 @@ impl OpenFs {
 
         let mut alloc = alloc_mutex.write();
         self.btrfs_require_directory_inode(&alloc, parent_oid)?;
-        Self::btrfs_preflight_dir_entry_insert(&alloc, parent_oid, name, alloc.next_objectid)?;
 
-        // Check for duplicate name — POSIX requires EEXIST.
-        if self
-            .btrfs_lookup_dir_entry(&alloc, parent_oid, name)
-            .is_ok()
-        {
-            return Err(FfsError::Exists);
+        // ONE descent to the parent's DIR_ITEM leaf at hash(name) serves all three
+        // checks the create path needs: corruption preflight (the payload parses),
+        // EEXIST (an entry with this exact name already exists), and the
+        // hash-collision flag (the DIR_ITEM key already holds entries, so the
+        // insert below must read-merge instead of using the batch fast path).
+        // These were three separate htree descents to the SAME key —
+        // `btrfs_preflight_dir_entry_insert` + `btrfs_lookup_dir_entry` + the inline
+        // collision `range` — which showed up as ~10% of create self-time in
+        // `for_each_in_range` (bd-btrcreate-dedup). The DIR_INDEX half of the old
+        // preflight probed (parent, DIR_INDEX, next_objectid), a fresh never-used
+        // sequence slot that is always empty for a create, so it is dropped.
+        let name_hash = ffs_btrfs::btrfs_name_hash(name);
+        let dir_item_key = BtrfsKey {
+            objectid: parent_oid,
+            item_type: BTRFS_ITEM_DIR_ITEM,
+            offset: u64::from(name_hash),
+        };
+        let existing_dir_items = alloc
+            .fs_tree
+            .range(&dir_item_key, &dir_item_key)
+            .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+        let dir_item_collision = !existing_dir_items.is_empty();
+        for (_, payload) in &existing_dir_items {
+            let entries = Self::btrfs_parse_dir_items(
+                payload,
+                "malformed btrfs DIR_ITEM payload during create",
+            )?;
+            if entries.iter().any(|e| e.name == name) {
+                // POSIX requires EEXIST for a duplicate name.
+                return Err(FfsError::Exists);
+            }
         }
 
         let new_oid = alloc.next_objectid;
@@ -25886,18 +25910,10 @@ impl OpenFs {
             file_type: BTRFS_FT_REG_FILE,
             name: name.to_vec(),
         };
-        let dir_item_key = BtrfsKey {
-            objectid: parent_oid,
-            item_type: BTRFS_ITEM_DIR_ITEM,
-            offset: u64::from(ffs_btrfs::btrfs_name_hash(name)),
-        };
-        let dir_item_collision = alloc
-            .fs_tree
-            .range(&dir_item_key, &dir_item_key)
-            .is_ok_and(|items| !items.is_empty());
         if dir_item_collision {
             // Rare name-hash collision: DIR_ITEM must read-merge existing entries —
-            // use the proven per-op path unchanged.
+            // use the proven per-op path unchanged. `dir_item_key` and
+            // `dir_item_collision` were computed by the single DIR_ITEM descent above.
             alloc
                 .fs_tree
                 .insert(inode_key, &inode.to_bytes())

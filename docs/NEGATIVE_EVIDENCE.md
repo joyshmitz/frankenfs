@@ -4075,3 +4075,23 @@ rushed. No ~0-gain code was landed. Contained sub-lever candidate for a future
 turn: spread fresh-directory inode allocation across groups (Orlov) so subdirs
 don't cluster — reduces the secondary bitmap convoy without the full alloc-state
 refactor, but still needs golden/e2fsck validation.
+
+## KEEP — 2026-07-01 — `bd-btrcreate-dedup` btrfs create single-descent dir-entry check (CrimsonFox)
+
+**Lever (ffs-btrfs/ffs-core, KEEP/SHIPPED):** profiled btrfs single-thread create
+(`create-bench --threads 1`, real btrfs fixture). `insert_into` 44% (inherent COW
+leaf clone) dominated, but `for_each_in_range` was **9.68%** — btrfs_create issued
+THREE separate htree descents to the SAME parent DIR_ITEM leaf at hash(name):
+`btrfs_preflight_dir_entry_insert` (parse-validation) + `btrfs_lookup_dir_entry`
+(EEXIST) + an inline `range` (hash-collision flag) — plus a 4th always-empty
+DIR_INDEX preflight descent to (parent, DIR_INDEX, next_objectid) (a fresh
+never-used sequence slot). Collapsed to ONE `range(dir_item_key)` descent that
+yields all three answers (parse each payload = validation; scan for name = EEXIST;
+non-empty = collision); dropped the always-empty DIR_INDEX probe.
+
+**MEASURED ~1.13x** btrfs create (create-bench 40k, interleaved A/B vs clean
+no-dedup baseline: OLD ~68285 → NEW ~76848 creates/s median; clean runs
+67-71k→77k). **Correctness:** `btrfs check` CLEAN on the NEW-created image;
+ffs-core btrfs 360/0; conformance 100/0/2 GREEN. Same redundant-descent pattern
+exists in `btrfs_mkdir`/`btrfs_mknod`/`btrfs_symlink` (fresh-oid create family) —
+noted follow-up, not changed this turn.
