@@ -3908,3 +3908,50 @@ DESIGN (interior-mutability, lower-blast-radius than restructuring `groups: Vec<
 MILESTONES (each build+conformance-green): (a) GroupStats free-counter atomics under the existing write lock (behavior-identical, buildable); (b) per-group bitmap Mutex + create_inode takes `&[Mutex<GroupStats>]` (still under outer write lock — behavior-identical); (c) flip ext4_create fast path to `.read()` + measure create --threads scaling vs the ~489k ceiling; revert if conflicts/regression. VALIDATION: e2fsck after parallel create + conformance + the existing bd-bky2f lock-ordering threaded tests.
 
 This is the campaign's top remaining lever, fully measured/justified/de-risked. Landed win: GDT-defer (2.3x single-thread create, beats kernel). Reusable `ext4_add_dir_entry_dev` extraction shelved. Default-on (route statfs/read_group_desc through GroupStats) is the separate owner-level semantic follow-up.
+
+## KEEP — 2026-07-01 — `bd-btrcow-evict` btrfs COW dead-version eviction (CrimsonFox)
+
+**Lever (ffs-btrfs, KEEP/SHIPPED):** `InMemoryCowBtrfsTree::commit_retired_nodes`
+left every superseded COW node version in the in-memory `nodes` FxHashMap
+forever — the monotonic block allocator never reissues an id, and only the
+rollback path removed nodes. So `nodes` grew with the operation count (~3
+retired nodes/rename never reclaimed): an unbounded memory leak that (1) decayed
+mutation throughput via ever-worsening FxHashMap cache misses and (2) paid a
+giant one-shot drop when the tree was released (perf: `drop_glue::<InMemoryCowBtrfsTree>`
+8.92% self + `insert_into`/`alloc_internal_node`/`clone` COW churn). Fix = a
+two-generation eviction ring: retired nodes are parked in `prev_committed_retired`
+for exactly one generation (so the COW snapshot contract — the immediately
+previous root stays readable via `node_snapshot`, asserted by
+`cow_insert_preserves_previous_root_node` — holds) and evicted at the next
+commit when they are two generations back and unreachable from `root`.
+Production only ever reads the current `root` (MVCC versioning lives in
+`MvccStore`), so one generation back is the whole requirement.
+
+**MEASURED (btrfs rename, `ffs-cli rename-bench`, real btrfs fixture, interleaved
+two-binary A/B pre-fix vs post-fix, renames/s → us/op):**
+
+| count | OLD (pre-fix) | NEW (post-fix) | speedup | NEW vs ORIG (kernel 36.5 us/op) |
+|---|---|---|---|---|
+| 5000  | 9337 r/s (107.1 us) | 24109 r/s (41.5 us) | 2.58x | **1.14x** (near parity) |
+| 20000 | 5874 r/s (170.2 us) | 17245 r/s (58.0 us) | 2.93x | **1.59x** |
+| 40000 | 4667 r/s (214.3 us) | 13982 r/s (71.5 us) | 3.00x | 1.96x |
+
+OLD is steeply O(N) in tree size (107→214 us/op, the leak); NEW is far flatter
+(41→71 us, residual = genuine tree depth/working-set, shared with kernel).
+**vs ORIG (live btrfs kernel RW loop mount, 20k create+rename+sync = 36.5 us/op):
+the gap collapses from 4.66x slower to 1.59x slower (1.14x at 5k).** Helps EVERY
+btrfs mutation (create/rename/unlink/mkdir), not just rename.
+
+**Correctness:** `btrfs check` CLEAN on the NEW-produced image; OLD vs NEW images
+STRUCTURALLY IDENTICAL (bytes used / tree bytes / fs-tree bytes / csum bytes all
+match to the byte — the ring only reclaims dead in-memory versions, never the
+persisted output, root, or free accounting). ffs-btrfs 365/0 (+38 doc, incl.
+`cow_insert_preserves_previous_root_node`, `proptest_insert_many_matches_sequential`);
+ffs-core btrfs 360/0; conformance 100/0/2 GREEN; clippy + fmt clean.
+
+**Method note:** the biggest write-side gap (btrfs rename) was mis-attributed to
+"the per-op commit/serialization layer, owner-lane" in prior notes; a fresh
+`perf record` of `rename-bench` showed the cost is in `ffs_btrfs::InMemoryCowBtrfsTree`
+node clone/alloc/**drop** (COW machinery), and the throughput-decays-with-N
+signature pinpointed the retained-version leak. Profile FIRST beats trusting a
+stale root-cause label.

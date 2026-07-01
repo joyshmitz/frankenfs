@@ -3128,6 +3128,14 @@ pub struct InMemoryCowBtrfsTree {
     deferred_frees: Vec<u64>,
     staged_allocations: Vec<u64>,
     staged_deferred_frees: Vec<u64>,
+    /// Block ids retired by the PREVIOUS committed batch, retained for exactly
+    /// one generation so the immediately-previous version stays readable via
+    /// `node_snapshot(old_root)` (the COW snapshot contract — see
+    /// `cow_insert_preserves_previous_root_node`). Evicted from `nodes` at the
+    /// next commit, when they become two generations back and unreachable from
+    /// `root`. Bounds `nodes` to ~2x the live tree instead of leaking every
+    /// superseded version for the life of the tree (bd-btrcow-evict).
+    prev_committed_retired: Vec<u64>,
     nodes: FxHashMap<u64, BtrfsCowNode>,
 }
 
@@ -3159,6 +3167,7 @@ impl InMemoryCowBtrfsTree {
             deferred_frees: Vec::new(),
             staged_allocations: Vec::new(),
             staged_deferred_frees: Vec::new(),
+            prev_committed_retired: Vec::new(),
             nodes,
         })
     }
@@ -3277,6 +3286,28 @@ impl InMemoryCowBtrfsTree {
     }
 
     fn commit_retired_nodes(&mut self) {
+        // Two-generation eviction (bd-btrcow-evict). Without this, every COW that
+        // retires a node leaves the superseded version in `nodes` forever (the
+        // monotonic allocator never reissues a block id), so `nodes` grows with
+        // the operation count — an unbounded memory leak that decays mutation
+        // throughput via FxHashMap cache misses and pays a giant one-shot drop
+        // when the tree is finally released (measured ~9% of btrfs rename).
+        //
+        // We cannot evict a node the instant it is retired: the COW snapshot
+        // contract requires the immediately-previous version to stay readable via
+        // `node_snapshot(old_root)` (see `cow_insert_preserves_previous_root_node`;
+        // production only ever reads the current `root`, MVCC versioning lives in
+        // `MvccStore`, so one generation back is the whole requirement). So this
+        // batch's retired nodes are parked in `prev_committed_retired` and only
+        // evicted at the NEXT commit, when they are two generations back and
+        // unreachable from `root`. The rollback path keeps retired nodes (it
+        // clears `staged_deferred_frees` via `discard_retired_nodes` WITHOUT
+        // removing them), so eviction is correct only here, post-commit.
+        for block in self.prev_committed_retired.drain(..) {
+            self.nodes.remove(&block);
+        }
+        self.prev_committed_retired
+            .extend_from_slice(&self.staged_deferred_frees);
         for block in self.staged_deferred_frees.drain(..) {
             self.allocator.defer_free(block);
             self.deferred_frees.push(block);
