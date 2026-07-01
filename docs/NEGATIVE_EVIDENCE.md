@@ -4095,3 +4095,21 @@ no-dedup baseline: OLD ~68285 → NEW ~76848 creates/s median; clean runs
 ffs-core btrfs 360/0; conformance 100/0/2 GREEN. Same redundant-descent pattern
 exists in `btrfs_mkdir`/`btrfs_mknod`/`btrfs_symlink` (fresh-oid create family) —
 noted follow-up, not changed this turn.
+
+## KEEP — 2026-07-01 — `bd-btrcreate-dedup` extended to mkdir/mknod/symlink (CrimsonFox)
+
+**Follow-up to the create dedup above.** Extracted the single-descent check into a
+shared `btrfs_create_dir_entry_check` helper (one `range(dir_item_key)` → parse
+validation + EEXIST + collision flag) and applied it to `btrfs_mkdir`,
+`btrfs_mknod`, and `btrfs_symlink`, which each did the same three redundant
+descents (`preflight` + `lookup_dir_entry` + inline collision) plus the
+always-empty DIR_INDEX probe. mknod/symlink use only the EEXIST+preflight result
+(they always take the per-op insert path); mkdir also uses the collision flag for
+its batch fast path.
+
+**MEASURED ~1.074x** btrfs mkdir (mkdir-bench 20k, interleaved A/B vs the
+create-dedup-only binary: OLD ~78528 → NEW ~84354 mkdirs/s median, every NEW run >
+its paired OLD). **Correctness:** `btrfs check` CLEAN on a NEW-mkdir image;
+ffs-core btrfs 360/0 (incl. `btrfs_mkdir_duplicate_name_returns_eexist`, the mknod
+EEXIST/fifo/socket/dev tests, and the symlink btrfs-check test); conformance
+100/0/2 GREEN; fmt clean.

@@ -26004,16 +26004,10 @@ impl OpenFs {
 
         let mut alloc = alloc_mutex.write();
         self.btrfs_require_directory_inode(&alloc, parent_oid)?;
-        Self::btrfs_preflight_dir_entry_insert(&alloc, parent_oid, name, alloc.next_objectid)?;
         // No parent nlink change for a btrfs subdirectory (bd-egyf6).
-
-        // Check for duplicate name — POSIX requires EEXIST.
-        if self
-            .btrfs_lookup_dir_entry(&alloc, parent_oid, name)
-            .is_ok()
-        {
-            return Err(FfsError::Exists);
-        }
+        // One DIR_ITEM descent serves preflight + EEXIST + collision (bd-btrcreate-dedup).
+        let (dir_item_key, dir_item_collision) =
+            self.btrfs_create_dir_entry_check(&alloc, parent_oid, name)?;
 
         let new_oid = alloc.next_objectid;
         alloc.next_objectid = alloc.next_objectid.saturating_add(1);
@@ -26058,15 +26052,8 @@ impl OpenFs {
             file_type: BTRFS_FT_DIR,
             name: name.to_vec(),
         };
-        let dir_item_key = BtrfsKey {
-            objectid: parent_oid,
-            item_type: BTRFS_ITEM_DIR_ITEM,
-            offset: u64::from(ffs_btrfs::btrfs_name_hash(name)),
-        };
-        let dir_item_collision = alloc
-            .fs_tree
-            .range(&dir_item_key, &dir_item_key)
-            .is_ok_and(|items| !items.is_empty());
+        // `dir_item_key` and `dir_item_collision` were computed by the single
+        // DIR_ITEM descent above (bd-btrcreate-dedup).
         if dir_item_collision {
             alloc
                 .fs_tree
@@ -26556,14 +26543,10 @@ impl OpenFs {
 
         let mut alloc = alloc_mutex.write();
         self.btrfs_require_directory_inode(&alloc, parent_oid)?;
-        Self::btrfs_preflight_dir_entry_insert(&alloc, parent_oid, name, alloc.next_objectid)?;
-
-        if self
-            .btrfs_lookup_dir_entry(&alloc, parent_oid, name)
-            .is_ok()
-        {
-            return Err(FfsError::Exists);
-        }
+        // One DIR_ITEM descent serves preflight + EEXIST + collision (bd-btrcreate-dedup).
+        // One DIR_ITEM descent serves preflight + EEXIST (mknod always uses the
+        // per-op insert path, so the collision flag is unused here) (bd-btrcreate-dedup).
+        self.btrfs_create_dir_entry_check(&alloc, parent_oid, name)?;
 
         let new_oid = alloc.next_objectid;
         alloc.next_objectid = alloc.next_objectid.saturating_add(1);
@@ -27309,15 +27292,9 @@ impl OpenFs {
 
         let mut alloc = alloc_mutex.write();
         self.btrfs_require_directory_inode(&alloc, parent_oid)?;
-        Self::btrfs_preflight_dir_entry_insert(&alloc, parent_oid, name, alloc.next_objectid)?;
-
-        // Check for duplicate name — POSIX requires EEXIST.
-        if self
-            .btrfs_lookup_dir_entry(&alloc, parent_oid, name)
-            .is_ok()
-        {
-            return Err(FfsError::Exists);
-        }
+        // One DIR_ITEM descent serves preflight + EEXIST (symlink always uses the
+        // per-op insert path, so the collision flag is unused here) (bd-btrcreate-dedup).
+        self.btrfs_create_dir_entry_check(&alloc, parent_oid, name)?;
 
         let new_oid = alloc.next_objectid;
         alloc.next_objectid = alloc.next_objectid.saturating_add(1);
@@ -28640,6 +28617,46 @@ impl OpenFs {
     /// not an O(N) scan of every entry in the directory (bd-a9wot). Mirrors the
     /// hash-keyed access `btrfs_getxattr` already uses for XATTR_ITEM.
     #[allow(clippy::unused_self)]
+    /// Single DIR_ITEM-leaf descent shared by the create family
+    /// (create/mkdir/mknod/symlink). One `range` on the parent's DIR_ITEM key at
+    /// hash(name) answers all three checks these paths need — corruption preflight
+    /// (each existing payload parses), EEXIST (an entry with this exact `name`
+    /// already exists → `FfsError::Exists`), and the hash-collision flag (the key
+    /// already holds entries, so the caller's batch insert must fall back to the
+    /// read-merge per-op path). Replaces the former three separate descents to the
+    /// SAME key (`btrfs_preflight_dir_entry_insert` + `btrfs_lookup_dir_entry` +
+    /// an inline collision `range`) plus an always-empty DIR_INDEX preflight probe
+    /// (bd-btrcreate-dedup). Returns the DIR_ITEM key (reused for the insert) and
+    /// the collision flag.
+    fn btrfs_create_dir_entry_check(
+        &self,
+        alloc: &BtrfsAllocState,
+        parent_oid: u64,
+        name: &[u8],
+    ) -> ffs_error::Result<(BtrfsKey, bool)> {
+        let dir_item_key = BtrfsKey {
+            objectid: parent_oid,
+            item_type: BTRFS_ITEM_DIR_ITEM,
+            offset: u64::from(ffs_btrfs::btrfs_name_hash(name)),
+        };
+        let existing_dir_items = alloc
+            .fs_tree
+            .range(&dir_item_key, &dir_item_key)
+            .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+        let dir_item_collision = !existing_dir_items.is_empty();
+        for (_, payload) in &existing_dir_items {
+            let entries = Self::btrfs_parse_dir_items(
+                payload,
+                "malformed btrfs DIR_ITEM payload during create",
+            )?;
+            if entries.iter().any(|e| e.name == name) {
+                // POSIX requires EEXIST for a duplicate name.
+                return Err(FfsError::Exists);
+            }
+        }
+        Ok((dir_item_key, dir_item_collision))
+    }
+
     fn btrfs_lookup_dir_entry(
         &self,
         alloc: &BtrfsAllocState,
