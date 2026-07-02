@@ -18821,7 +18821,14 @@ impl OpenFs {
             // rejection returns Err, so the MVCC transaction is dropped
             // uncommitted and the removal never persists — observably identical
             // to checking before removing (bd-cc-unlink-1pass).
-            let extents = self.collect_extents(cx, &parent_inode)?;
+            // Cached extent snapshot: unlink removes a dirent but never grows or
+            // shrinks the parent's extent tree, so the mapping is stable across a
+            // stream of unlinks in the same directory — reuse the parse instead of
+            // re-parsing the parent's whole extent tree per op (bd-cc-itableloc
+            // sibling; ~6% of a rename came from this pattern, delbench analog).
+            let extents = self
+                .ext4_write_extents_with_scope(cx, &RequestScope::empty(), &parent_inode)?
+                .to_vec();
             let mut removed_ino: Option<u32> = None;
             let reserved_tail = self.ext4_dir_reserved_tail();
             let parent_ino_u32 = u32::try_from(parent.0)

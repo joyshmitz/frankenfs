@@ -4865,3 +4865,17 @@ extent-root content), so the fresh post-growth re-read that rename requires stil
 69433 > max OLD 68436 renames/s — cleanly separated, ~71.3k vs ~65.7k). Gates: ffs-core `--lib`
 **1185/0**, conformance **100/0/2**, e2fsck CLEAN on a 40k-rename image (no corrupt/unattached
 entries). Also helps rename-over-existing (the 21458 path).
+
+## ★ LANDED — 2026-07-02 — cache unlink's parent-dir extent resolution → ~1.07x unlink (CrimsonFox)
+
+Same lever as the rename win, applied to `ext4_unlink_impl` (lib.rs:18824): it re-parsed the
+parent directory's extent tree per unlink via uncached `collect_extents`. Unlink removes a dirent
+but NEVER grows or shrinks the parent's extent tree (kernel never reclaims dir blocks), so the
+mapping is stable across a stream of unlinks in one directory — routed it through the cached
+`ext4_write_extents_with_scope` snapshot so the first unlink parses and the rest reuse it (empty-
+file deletes do no child-extent work, so nothing evicts the parent from the single-entry snapshot).
+**MEASURED ~1.07x unlink** (two-binary interleaved A/B, 40k-file delbench, 14 runs: NEW wins 13/14
+paired, median NEW ~63.1k vs OLD ~58.3k unlinks/s). Common `rm -rf` / git-checkout shape. Gates:
+ffs-core `--lib` **1185/0**, conformance **100/0/2**, e2fsck CLEAN on a 40k-delete image. The
+directory-extent-cache (7c57c57b) now covers all three mutating dir ops that re-descend the parent:
+create/mkdir (add), rename (add+remove), unlink/rmdir (remove).
