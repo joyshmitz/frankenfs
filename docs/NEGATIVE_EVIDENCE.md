@@ -5268,3 +5268,31 @@ files), or `btrreal_1735906.img` (612 dirs + 9682 files) — NOT create-bench+re
 create-bench overlay doesn't survive re-open; a real harness bug to fix separately). ext4
 create-bench persists correctly, so ext4 lookup benches (extbig2 + 30000 created, walk-confirmed)
 were correctly framed.
+
+## SURFACE — 2026-07-02 — FIRST real-large-dir btrfs profiling (unlocked by the fixture correction); lookup beats ext4, both at floor (CrimsonFox)
+
+With the persisted fixtures (btr3_572980, 30000-file dir), profiled btrfs lookup + walk on a REAL
+large dir for the first time (all prior btrfs profiling was the 1-file tree per the f08e1e03
+correction):
+
+- **btrfs lookup** (btr3, 2.66M lookups/s): descent-bound — `floor_descend` 28.8% + **`partition_point`
+  14.2%** (the in-node binary search, ~3× bigger than on the shallow tree where it was hidden) +
+  `btrfs_read_parsed_node` 11.4% + to_vec/parse ~13%. All inherent B-tree traversal; `key_cmp`
+  already short-circuits (`then_with` on objectid→type→offset). Notably btrfs lookup (2.66M/s) now
+  BEATS ext4 (~1.0M/s) on a large dir — ext4's htree leaf is UNSORTED (linear `lookup_in_dir_block`
+  scan, format-inherent) while btrfs is all-binary-search. The session's btrfs wins landed and hold.
+
+- **btrfs walk** (btr3, 0.40 µs/entry, parallel): `prewarm_btrfs_read_plan_index` 5.9% (one-time
+  index build, amortized over 30k reads — net win vs per-entry descents) + I/O + CRC + parse. Two
+  apparent "levers" are DELIBERATE DEFENSES, not redundant work: (1) `btrfs_dedup_dir_rows` uses
+  SipHash (`hash_one::<&&[u8]>` ~2.6%) on a set that holds up to 30000 ATTACKER-CONTROLLED names —
+  FxHash there is a hash-collision DoS vector, so SipHash is correct (unlike the safe u64-node-bytenr
+  FxHashSet swap 0f1cf775); (2) readdir reads BOTH DIR_ITEM + DIR_INDEX then dedups because
+  DIR_INDEX-only would SILENTLY MISS DIR_ITEM-only entries in malformed images (no self-verification
+  possible, unlike the ext4 htree fast path cc6e7cc9). Respect both, as with the ext4 dir-block
+  full-validation.
+
+Completes the btrfs perf picture on REAL workloads: lookup descent-floored (and ahead of ext4),
+walk fast and floored, both dominated by inherent work + deliberate defenses. No contained lever
+found; no code landed this turn (first real-large-dir characterization + defensive-choice
+documentation).
