@@ -4344,3 +4344,31 @@ the shared GDT block (its commit machinery + 4 KiB version materialization), NOT
 version-chain management — do NOT chase "prune more aggressively" as a create lever. The
 only path to that 2.32x remains GDT-defer-default (owner-lane durability flip, blocker at
 conformance.rs:3432). Env change reverted; no code landed.
+
+## CORRECTION + REJECT — 2026-07-02 — GDT-defer-default is NOT a one-assertion fix (ATTEMPTED, reverted) (CrimsonFox)
+
+⚠️CORRECTS the prior surface (3e5e1332) which claimed the GDT-defer-default blocker was
+"exactly ONE over-strict assertion at conformance.rs:3432." That was WRONG. I ATTEMPTED
+the full change with a safety gate:
+- Flipped `gdt_persistence_deferred()` default ON (`FFS_SKIP_GDT=0` = eager opt-out).
+- Fixed the assertion HONESTLY: made `ext4_free_block_counters` (used only by the e2compr
+  test) `flush_mvcc_to_device` first, so the on-disk GD read reflects the PERSISTED state
+  (a stronger invariant, valid in both modes — not a weakening).
+
+**RESULT: the e2compr assertion STILL FAILS** (`after_first_gd_free_blocks <
+baseline_gd_free_blocks`, now conformance.rs:3442) even with the flush. So flushing does
+NOT make the on-disk GD reflect a compressed write under deferral — meaning the
+compressed-write path (`ext4_write_compressed`) does not update the GD-visible free-block
+count when GDT is deferred (the ORIGINAL doc comment on `gdt_persistence_deferred` was
+right: "those paths persist via a boundary the GDT flush pass is not wired into"). The
+bitmap check passes (bitmap eager), so it is specifically the GD/GroupStats accounting on
+the compressed path that diverges under deferral. Fixing THAT (wire the compressed-write
+GD update / flush pass into that path, then re-validate the full suite + e2fsck) is the
+real owner-lane work — NOT a test tweak.
+
+**Confirmed SAFE parts (so the owner has them):** e2fsck IS clean under `FFS_SKIP_GDT=1`
+across create/mkdir/delbench (verified directly this turn); allocation stays correct
+because it reads the authoritative bitmap (stale on-disk GD after crash is a cosmetic
+free-count hint e2fsck recomputes). So the blocker is narrowly the compressed-write GD
+path, not general durability. Attempt shelved (git stash, NOT dropped); tree clean; no
+code landed on main.
