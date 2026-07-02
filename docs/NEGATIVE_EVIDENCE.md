@@ -4250,3 +4250,24 @@ write, let the block-alloc's write capture both from GroupStats) is ~1.13x but i
 safe when both allocs land in the SAME group (parent_group) — the block-spill-to-another-
 group case would drop the inode-group descriptor update, so it needs the same deferral
 machinery. Instrumentation was reverted; no code landed.
+
+## SURFACE (negative) — 2026-07-02 — ext4 write/create/overwrite paths have NO redundant block writes (CrimsonFox)
+
+Extended the `FFS_TRACE_WRITES` per-block-commit trace to the create/write/overwrite/
+append paths to hunt more mkdir-class double-writes. Result — the data-mutation paths
+are CLEAN (each block committed exactly once per logical op):
+- **ext4 create**: 3 blocks, none repeated (GDT once, inode-bitmap once, inode-table once).
+- **ext4 overwrite** (`write-bench` no `--create`, count=1): exactly 2 writes — inode-table
+  + the data block, each once. No zero-fill-then-overwrite (allocate_extent makes an
+  UNWRITTEN extent — reads return zeroes virtually, no disk zero-fill), no double.
+- **ext4 append**: block-bitmap + GDT + data + inode, each once. The apparent
+  `[data, inode] × 2` in a `write-bench --create count=1` trace is a HARNESS ARTIFACT —
+  `--create` runs a prefill write loop AND then the timed benchmark write loop, so the
+  same offset is written twice as two legitimate `write()` ops, not one op double-writing.
+
+So the only redundant per-op WRITE in the ext4 metadata paths is the mkdir/mknod GDT
+double-write (surfaced above, owner-lane). create/write are at the inherent
+per-op-MVCC-commit floor — no contained redundant-write lever remains on them.
+⚠️Method note: `write-bench --create` prefills THEN benchmarks the same offsets; use the
+plain overwrite mode (no `--create`, on a pre-sized file) to trace a single clean write.
+Instrumentation reverted; no code landed.
