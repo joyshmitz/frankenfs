@@ -16267,6 +16267,25 @@ impl OpenFs {
         hint
     }
 
+    /// Memoized A/B toggle for the writable adapter's snapshot register/release
+    /// round-trip (bd-bhh0i). Read once — this is on the per-FsOp hot path
+    /// (`block_device_adapter` is called once per create/write/unlink/…), where a
+    /// raw `std::env::var` was ~3% of a create (getenv syscall per op, perf).
+    fn writable_adapter_register() -> bool {
+        use std::sync::OnceLock;
+        static V: OnceLock<bool> = OnceLock::new();
+        *V.get_or_init(|| std::env::var("FFS_WRITABLE_ADAPTER_REGISTER").as_deref() == Ok("1"))
+    }
+
+    /// Memoized toggle for the htree one-descent create dedup (skips the redundant
+    /// positive `lookup_name` pre-check). Read once — `ext4_create` is a hot path
+    /// and the raw per-create `env::var_os` showed up in the getenv profile.
+    fn htree_create_dedup_enabled() -> bool {
+        use std::sync::OnceLock;
+        static V: OnceLock<bool> = OnceLock::new();
+        *V.get_or_init(|| std::env::var_os("FFS_NO_HTREE_CREATE_DEDUP").is_none())
+    }
+
     /// Get a block device adapter for the underlying byte device, wrapped
     /// in MVCC versioning logic at the current latest snapshot.
     fn block_device_adapter(&self) -> FsMvccBlockDevice<CachedByteDeviceBlockAdapter<'_>> {
@@ -16297,7 +16316,7 @@ impl OpenFs {
             // removing a per-op serialization point from the parallel-write path
             // (bd-bhh0i). Env `FFS_WRITABLE_ADAPTER_REGISTER=1` restores the old
             // register+release round-trip for A/B.
-            if std::env::var("FFS_WRITABLE_ADAPTER_REGISTER").as_deref() == Ok("1") {
+            if Self::writable_adapter_register() {
                 FsMvccBlockDevice::new(base, Arc::clone(&self.mvcc_store), snapshot)
                     .with_read_your_writes()
             } else {
@@ -16549,7 +16568,7 @@ impl OpenFs {
         // the lookup_name pre-check.
         let htree_dedup_covers = parent_inode.has_htree_index()
             && parent_inode.flags & ffs_types::EXT4_CASEFOLD_FL == 0
-            && std::env::var_os("FFS_NO_HTREE_CREATE_DEDUP").is_none();
+            && Self::htree_create_dedup_enabled();
         if !htree_dedup_covers && self.lookup_name(cx, &parent_inode, name)?.is_some() {
             return Err(FfsError::Exists);
         }

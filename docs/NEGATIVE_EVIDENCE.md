@@ -4648,3 +4648,22 @@ allocation+copy, the result is only ever borrowed, so it is never slower and cle
 landed it as a validated cleanup, NOT claiming a perf ratio. Gates: **ffs-alloc 213/0,
 conformance 100/0/2.** Temp toggle stripped. Reserved-set copy is now closed (neutral); no
 further reserved-path lever.
+
+## ★ LANDED — 2026-07-02 — per-op getenv on the create/write hot path → ~1.06x create (CrimsonFox)
+
+`perf`-profiled create-bench post-GDT-defer (40k, threads=1): **~4% self-time in `getenv`**.
+Root cause — two un-memoized `std::env::var` reads on the per-FsOp hot path:
+- `OpenFs::block_device_adapter` (lib.rs:16300) read `FFS_WRITABLE_ADAPTER_REGISTER` on EVERY
+  call — and it is constructed once per create/write/unlink/rename/mkdir (a getenv syscall per
+  op, ~3% of a create).
+- `ext4_create` (lib.rs:16552) read `FFS_NO_HTREE_CREATE_DEDUP` per create.
+
+Both are static A/B toggles; wrapped each in an `OnceLock` memo (`writable_adapter_register()`,
+`htree_create_dedup_enabled()`) — read once, byte-identical behavior (env is constant for a
+process). **MEASURED ~1.06x create**, two-binary interleaved A/B (fresh release-perf OLD vs NEW,
+30k creates, fresh 500M ext4 copies): OLD 100320/102514/82833/98470 vs NEW
+106202/108158/92411/102762 creates/s — **every NEW run > its paired OLD run** (~6%, cleanly
+separated). Broad: `block_device_adapter` is on every writable FsOp, so unlink/rename/mkdir/write
+benefit too. Gates: ffs-core `--lib` **1185/0**, conformance **100/0/2**. The read-path
+`FFS_*_READ_CHUNK_BLOCKS` getenvs were already `OnceLock`-memoized (checked). ⭐LESSON: `perf`
+surfaces `getenv` syscalls that hide in "config" reads — memoize any `env::var` reachable per-op.
