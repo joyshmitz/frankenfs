@@ -5414,3 +5414,24 @@ IMPACT: btrfs lookup wins (parent-dir, child-attr, name-index) remain measured o
 fixtures' shallow roots (deep fs tree, so descent-skip is representative; large-diverse-map
 magnitude untested). Fixing this persistence unblocks flat-large-dir btrfs benching. No code landed
 this turn (root-caused a real bug; the simple fix is measured-negative and reverted).
+
+## SURFACE (deeper) — 2026-07-02 — btrfs sync-persist fix wired correctly BUT exposes a btrfs-commit node-overflow bug (≥~20 new dir entries) (CrimsonFox)
+
+Follow-up to the sync_all_to_device root-cause. Wired the CORRECT destroy sequence into
+sync_all_to_device for btrfs (`flush_mvcc_to_device` — the complete wrapper, not the partial
+`flush_to_device` that caused the first overflow — then `btrfs_full_transaction_commit`). Result at
+varying create counts (create N → re-open walk):
+- **n=1 → walk sees 2 files (1 + c.bin); n=5 → 6 files: PERSISTS.** The sync-path commit is correct
+  for small batches — btrfs create-bench NOW persists via the CLI.
+- **n=20, n=100 → `node overflow: data`, image unreadable.** The commit cannot fit ≥~20 new DIR_ITEM/
+  DIR_INDEX entries into the directory's tree node — btrfs_full_transaction_commit does NOT split an
+  overflowing node during the commit (a real btrfs-commit bug, independent of the sync path).
+- Also a double-commit smell: create-bench's sync commits, then OpenFs drop → flush_on_destroy
+  commits AGAIN; small batches still persist but this needs idempotency/skip-if-synced.
+
+So the persistence blocker is TWO btrfs-commit issues, not a sync wiring: (1) node-splitting during
+`btrfs_full_transaction_commit` for batched dir inserts, (2) sync/destroy double-commit. Reverted the
+sync wiring (it corrupts on the ≥20 batches benching needs). This is a focused btrfs COW-commit
+effort (gate: create 30000 → re-open walk sees 30000 + btrfs-check clean), NOT a contained fix. The
+existing btrfs write tests commit only a few files, so this node-overflow path was untested. No code
+landed this turn (two-attempt root-cause of a deep btrfs-commit bug; reverted).
