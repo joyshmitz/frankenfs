@@ -5137,3 +5137,19 @@ btrfs 360/0, conformance 100/0/2 (ENOTDIR negatives hold). **Cumulative btrfs re
 3.1x this session** (walker FxHashSet × DIR_ITEM point × INODE_ITEM point × floor depth-limit ×
 MVCC empty-store skip × root AtomicU64 × parent-dir cache). Third application of the
 lock-free-cache-for-an-invariant pattern (after MVCC flag faa65c91 + root 5de1eb15).
+
+## NEGATIVE (reverted) — 2026-07-02 — ext4 lookup parent-inode cache is NEUTRAL (the pattern is fs-dependent) (CrimsonFox)
+
+The btrfs parent-dir cache (2aedcfbd) was ~1.44x because btrfs's read-only parent read is a full
+point-descent + parse. Applied the analogous idea to ext4 `OpenFs::lookup`: a dedicated
+`ext4_hot_parent: ArcSwapOption<(u64, Arc<Ext4Inode>)>` slot (RO-only, only verified dirs cached, so
+ENOTDIR unchanged) so a directory scan reuses the parsed, dir-verified parent instead of re-reading
+it per name. **MEASURED NEUTRAL** (600k lookups, 14 runs: NEW 8/14, medians dead even ~1.13M).
+WHY fs-dependent: ext4's parent read is a cached inode-table BLOCK get + a light `MetadataOnly`
+parse (~40 fields, no ibody) — cheap — so skipping it saves nothing that the child read + htree
+leaf scan + dx nav don't already dominate; the ArcSwap load + Arc clone offsets the tiny parse
+saving. (The `ext4_hot_inode` sibling exists for PARALLEL reads — avoiding the inode-table block
+Mutex convoy — but `lookup-bench` has no `--threads`, so the parallel/convoy benefit is unmeasurable
+here; not landing on an unmeasured hypothesis.) Reverted (stash `cc-ext4-hot-parent-…`). ⭐LESSON:
+the lock-free-cache-for-an-invariant pattern's PAYOFF scales with the cost of the work it skips —
+huge when that work is a tree descent (btrfs), neutral when it's an already-cached block read (ext4).
