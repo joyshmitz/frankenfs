@@ -5218,3 +5218,25 @@ owner-lane `concurrency_perf` trio (S3-FIFO cache eviction is the most self-cont
 `ShardedCache` currently uses an insert-until-cap policy with no eviction — a real structural cache
 upgrade, loom-gateable, but a redesign not a per-op fix). No code landed this turn (dig confirmed
 exhaustion from a second, independent source).
+
+## SURFACE — 2026-07-02 — CRC-stamp-per-commit classified: owner-lane "stamp-at-writeback" deferral (the last hand-waved lever) (CrimsonFox)
+
+Pinned down the metadata-CRC cost (crc_u64_parallel3 ~7% of ext4 create). `stamp_ext4_dir_block` →
+`ffs_ondisk::ext4::stamp_dir_block_checksum` fires inside `ext4_add_dir_entry` on EVERY create, so
+the parent dir leaf's 4 KiB CRC (the largest per-create checksum) is recomputed per create — but a
+create-heavy dir puts ~200 entries in a leaf across ~200 versions and only the FINAL version is
+flushed, so ~199/200 of those stamps are on MVCC versions that get pruned before ever reaching the
+device. Genuinely redundant work, and the direct analog of the SHIPPED GDT-persistence deferral
+(55ed807f, ~2.54x create — GroupStats authoritative, GDT derived → defer to flush).
+
+**Why it's owner-lane, not a contained fix:** the correct form is "stamp metadata CRCs at
+writeback" — move CRC stamping out of the per-op write path and into the MVCC flush path (stamp each
+metadata block's checksum as it is written to device, like the kernel checksums at writeback). That
+touches the flush/writeback pipeline and EVERY metadata stamper (dir block, inode, bitmaps), and
+requires proving no in-memory version READ verifies the stamped CRC (in-memory versions are trusted,
+but that invariant must be established across all readers before deferring). A loom/e2fsck-gated
+structural change, ~3–5% of create (smaller than GDT-defer, which also collapsed a version chain).
+Added to the owner-lane inventory alongside S3-FIFO cache eviction, parallel-create convoy, and the
+MVCC whole-block version-model. **This completes the classification: every profiled hot-path cost is
+now either inherent or a characterized owner-lane structural lever — no contained per-op lever
+remains.** No code landed this turn (definitive classification of the final ambiguous lever).
