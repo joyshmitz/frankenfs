@@ -4168,3 +4168,24 @@ single persist into each caller (create/mkdir/mknod/symlink) — estimated only
 bar for the refactor risk, so shelved as a documented lead. **Remaining real
 frontier = the parallel-create `alloc_mutex.write()` convoy (owner-lane, sized
 ~9x) and the read paths (already dominate).**
+
+## SURFACE — 2026-07-02 — parallel random-read gap CLOSED (now beats kernel) (CrimsonFox)
+
+Re-measured the parallel random-read path (the old `bd-xmh5g` 88x-slower gap that
+was reduced to ~3.3x, with a flagged residual "ShardedCache shard-Mutex on the hot
+inode block"). On the hot-block parallel case (all reads funnel through the same
+cache shard — exactly the shard-mutex contention the residual named),
+`ffs-cli rand-read --parallel` (64-way rayon) vs the kernel `krandread` (64
+pthreads, `pread`) on the same ext4 image, warm:
+- frankenfs **3,592,571 IOPS / 14033 MiB/s** vs kernel **2,767,175 IOPS / 10809
+  MiB/s** = **frankenfs 1.30x FASTER** (a second run: 3.75M vs 2.39M = 1.57x).
+So the shard-mutex residual is no longer a gap — the parallel random-read path now
+BEATS the kernel. Closes that ledger item.
+
+⚠️ Harness caveat: `write-bench --create` builds the rand-read fixture but the
+kernel mount sees the file as **512 bytes** despite ~145k blocks allocated
+(e2fsck-clean, inode extent tree present) — i_size is not persisted in a
+kernel-visible way through that fixture flow, so `span` collapses to 1 and BOTH
+sides read the hot single block (still a valid shard-contention microbench, but a
+proper spread-random test needs the fixture builder fixed). Recorded so the next
+random-read digger fixes the builder before testing spread-random.
