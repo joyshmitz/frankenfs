@@ -5343,3 +5343,17 @@ walk identical. **Cumulative ext4 lookup ~3.5x this cluster** (present-index 2.1
 1.41x × parent-slot 1.15x). ⭐LESSON: a cache that measures NEUTRAL while its target is masked by a
 bigger cost becomes a WIN once that cost is removed — re-test shelved neutrals after landing an
 adjacent win.
+
+## ★★ LANDED — 2026-07-02 — btrfs read-only child-attr cache (shared cache) → ~1.70x btrfs lookup (CrimsonFox)
+
+Extended the read-only inode-attr cache to `btrfs_read_inode_attr` (reusing the FxHashMap-backed
+`ext4_inode_attr_cache`, keyed by u64 objectid — no collision on a single-flavor mount). Without a
+read-plan index (the lookup-bench / mounted-image case) btrfs re-descended the fs tree per lookup to
+read the child inode; a directory scan repeats children, immutable on a read-only mount, so the
+cached attr skips a WHOLE floor descent + parse. **MEASURED ~1.70x btrfs lookup** on btr3's real
+30000-entry dir (400k lookups, 10 runs: NEW wins 10/10, median 4.997M vs 2.942M lookups/s). Gates:
+ffs-core btrfs 359/0 (pre-existing reflink flake only), conformance 100/0/2. Correct by read-only
+immutability. Bigger than the ext4 attr cache because a btrfs child read is a full B-tree descent,
+not a cached-block-get + parse. **Cumulative btrfs read-only lookup ~5x this session** (walker
+FxHashSet × point-descents × depth-limit × root × parent-dir × parsed-node FxHashMap × child-attr
+cache). The single read-only attr cache now serves BOTH filesystems.

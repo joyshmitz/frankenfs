@@ -7808,14 +7808,26 @@ impl OpenFs {
             return Ok(self.btrfs_inode_to_attr(canonical, &inode));
         }
 
-        if let Some(index) = self.btrfs_cached_read_plan_index()
-            && let Some(inode) = index.inodes.get(&canonical)
-        {
-            return self.btrfs_inode_attr_from_item(ino, inode.clone());
+        // Read-only mount: the inode is immutable, so reuse a resolved attr across a
+        // directory scan's repeated child re-resolutions instead of re-descending
+        // the fs tree per lookup (bd-cc-ext4-attrcache, shared cache — keyed by u64,
+        // no collision on a single-flavor mount). Matches the ext4 read-only attr
+        // cache; the FxHashMap-backed ShardedCache makes the get O(1).
+        if let Some(attr) = self.ext4_inode_attr_cache.get(&canonical) {
+            return Ok(attr);
         }
 
-        let inode = self.btrfs_read_ondisk_inode_item(cx, canonical)?;
-        self.btrfs_inode_attr_from_item(ino, inode)
+        let attr = if let Some(index) = self.btrfs_cached_read_plan_index()
+            && let Some(inode) = index.inodes.get(&canonical)
+        {
+            self.btrfs_inode_attr_from_item(ino, inode.clone())?
+        } else {
+            let inode = self.btrfs_read_ondisk_inode_item(cx, canonical)?;
+            self.btrfs_inode_attr_from_item(ino, inode)?
+        };
+        self.ext4_inode_attr_cache
+            .insert_within(canonical, attr.clone(), EXT4_INODE_ATTR_CACHE_LIMIT);
+        Ok(attr)
     }
 
     /// Read just the parsed `INODE_ITEM` of an inode from the on-disk fs tree.
