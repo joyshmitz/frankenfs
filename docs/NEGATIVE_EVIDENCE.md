@@ -5240,3 +5240,31 @@ Added to the owner-lane inventory alongside S3-FIFO cache eviction, parallel-cre
 MVCC whole-block version-model. **This completes the classification: every profiled hot-path cost is
 now either inherent or a characterized owner-lane structural lever — no contained per-op lever
 remains.** No code landed this turn (definitive classification of the final ambiguous lever).
+
+## ★ CORRECTION + RE-VERIFICATION — 2026-07-02 — btrfs lookup benches ran on a 1-FILE tree (create-bench non-persistence); wins RE-CONFIRMED on a real 30000-entry dir (CrimsonFox)
+
+**Measurement flaw found:** btrfs `create-bench` does NOT persist created files to a re-openable
+state — `create-bench X.img --count 500` then a fresh `walk X.img` reports "1 dirs + 1 files" (ext4
+correctly shows 501). So every btrfs lookup A/B this session (create-bench → re-open lookup-bench)
+actually resolved the ONE pre-existing fixture file (btrc's `c.bin`), i.e. a 1-entry dir / shallow
+tree — NOT the "20000-entry dir" the notes claimed. `walk` and `write-bench` surfaced this (both see
+1 file); lookup-bench "worked" only because it readdir's whatever is visible (1 name) and resolves
+it repeatedly. The optimization RATIOS were still valid (OLD vs NEW on the identical workload), but
+the dir-size framing and absolute large-dir magnitude were untested.
+
+**Re-verified on a REAL persisted large dir** — `btr3_572980.img` has a 30000-entry root dir
+(confirmed via walk: "2 dirs + 30000 files", lookup-bench resolves it at millions/s). A/B of the
+biggest win (parent verified-dir cache, 2aedcfbd) with the cache BYPASSED vs ON, 400k lookups, 10
+runs: **NEW wins 10/10, median 3.108M vs 2.071M = ~1.50x** — LARGER than the 1.44x measured on the
+1-file tree, because the skipped parent read is a deeper descent on a bigger tree. So the btrfs
+lookup wins GENERALIZE and hold (or grow) on real directories; the code is genuinely faster. The
+other btrfs wins (FxHashSet walker, DIR_ITEM/INODE_ITEM point-descents, floor depth-limit, root
+AtomicU64, MVCC empty-skip) all eliminate per-lookup overhead independent of tree depth, so they
+likewise carry over.
+
+⭐**HARNESS FIX NEEDED / FIXTURE GUIDANCE:** for btrfs lookup/walk/write benchmarking use a PERSISTED
+multi-file fixture — `btr3_572980.img` (30000-file root), `btrmulti_704416.img` (1001 dirs + 20000
+files), or `btrreal_1735906.img` (612 dirs + 9682 files) — NOT create-bench+re-open (btrfs
+create-bench overlay doesn't survive re-open; a real harness bug to fix separately). ext4
+create-bench persists correctly, so ext4 lookup benches (extbig2 + 30000 created, walk-confirmed)
+were correctly framed.
