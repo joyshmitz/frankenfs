@@ -4387,3 +4387,23 @@ compressed-cluster allocations the same way the mainline extent path does), NOT 
 a test tweak. Both attempts shelved via `git stash` (NOT dropped: "...ATTEMPT-FAILED..." and
 "...ATTEMPT2-FAILED..."). Mainline create/mkdir/unlink e2fsck-clean under deferral is
 re-confirmed; the blocker is isolated to the e2compr compressed-cluster accounting path.
+
+## SURFACE — 2026-07-02 — truncate is clean (per-range free); the two big write levers likely share a read-your-writes root cause (CrimsonFox)
+
+**ext4 truncate is clean, not a lever:** the extent path (`ffs_extent::punch_hole`, the
+common case) frees whole extent RANGES in one `free_blocks_persist(.., f.count, ..)` per
+freed range (lib ~586/687), not per-block. `free_one_block` (count=1) is only the legacy
+INDIRECT path. So no O(N)-per-block batching lever exists on truncate.
+
+**⭐Synthesis for the owner — the two biggest remaining write levers may share ONE root
+cause.** In GDT-defer ATTEMPT 2, forcing `ext4_flush_group_descriptors` inside
+`ext4_write_compressed` did NOT make the immediately-following on-disk GD read reflect the
+allocation — i.e. a WRITE to the store followed by a READ in the same op did not observe
+the write. That is the SAME shape as the still-open intra-op-write-batching bug (1 txn per
+FsOp → the bitmap RMW does not see its own staged writes → group-1 bitmap corruption,
+shelved). Both are read-your-writes / MVCC-visibility divergences on the write path. A
+single fix to intra-op read-your-writes (reads within an op/txn must observe that op's
+staged/committed writes through the block-device adapter) would plausibly unblock BOTH the
+1.83x intra-op-batch AND the 2.32x GDT-defer wins. That is the highest-leverage owner-lane
+target: the MVCC/adapter read-your-writes path, not the per-op accounting sites. No code
+landed; tree clean.
