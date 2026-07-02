@@ -4927,3 +4927,27 @@ backs every btrfs tree read (lookup / getattr / readdir / file read), so all btr
 benefit. Gates: ffs-btrfs **365/0**, conformance **100/0/2**. (The residual btrfs-lookup gap vs
 ext4 is the walker's per-walk `collect_leaf_items` + node-descent machinery used even for a
 single-key point lookup — a larger point-descent-fast-path lever, characterized for later.)
+
+## SURFACE — 2026-07-02 — btrfs read-only lookup runs a single-key point lookup through the full range-walker (biggest remaining btrfs read lever) (CrimsonFox)
+
+After the FxHashSet walker win (0f1cf775), re-profiled btrfs lookup (300k, read-only `OpenFs::open`,
+20k-entry dir). btrfs lookup is still ~4× slower than ext4. The read-only `btrfs_lookup_child` path
+(lib.rs:7822+) resolves a name via a SINGLE-KEY on-disk range walk `walk_btrfs_fs_tree_range(cx,
+(parent,DIR_ITEM,hash), (…,hash+1))` — but that dispatches the FULL `BtrfsParallelTreeWalker`, so a
+point lookup pays: **19% `collect_leaf_items`** (a `Vec<u8>::to_vec()` copy of the matched item,
+though the caller `parse_dir_items` then drops it — the zero-copy `range_with` / borrowed walker
+already used by btrfs readdir would avoid it) + **13% `walk_node_body`** + **~18% HashSet
+alloc/grow/free churn** (the walker allocates fresh `active_path`+`visited_nodes` cycle sets per
+descent, and lookup does ~1–2 descents/op). A narrow/point walk descends ONE deterministic path
+(binary-search → one child per level) and can never revisit a node, so the cycle-detection sets are
+pure overhead.
+
+**The lever:** give the read-only keyed lookup a lean point-descent instead of the general
+range-walker — the on-disk primitive `ffs_btrfs::walk_tree_floor` (lib.rs:2253, O(log N), reads
+only the path) already exists; combined with a borrowed (no-`to_vec`) leaf read and skipping the
+per-descent HashSet (a depth limit suffices for a single path), this could close much of the ~4×
+gap. NOT landed: it needs the tree-log overlay applied on the point-descent result for correctness
+(the range walk does `btrfs_apply_tree_log_overlay_range`), so it is a focused multi-step btrfs
+change, not a one-liner. Characterized for a dedicated effort. The writable path already uses the
+in-memory COW tree (`btrfs_read_inode_from_tree` / `btrfs_lookup_dir_entry(&alloc)`), so this is a
+read-only-mount lever. No code landed this turn (profiling + characterization).
