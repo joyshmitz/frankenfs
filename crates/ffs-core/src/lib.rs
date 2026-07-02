@@ -85,7 +85,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::io::IoSliceMut;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
@@ -1106,6 +1106,12 @@ pub struct OpenFs {
     /// descent. Only consulted/populated when writes are disabled
     /// (`btrfs_alloc_state` is `None`), since a commit can move the root.
     btrfs_fs_tree_root_cache: Mutex<rustc_hash::FxHashMap<u64, u64>>,
+    /// Lock-free cache of the MOUNTED subvolume's fs-tree root bytenr (the only
+    /// subvol queried on the hot read path). A read-only mount's root is immutable,
+    /// so once resolved this serves every subsequent same-subvol call without the
+    /// `btrfs_fs_tree_root_cache` Mutex — btrfs lookup resolves the root ~3×/op (one
+    /// per point-descent). 0 = unset (a valid btrfs root bytenr is never 0).
+    btrfs_fs_tree_root_fast: AtomicU64,
     /// Verified+parsed btrfs tree nodes cached by logical address (bd-jgx7u,
     /// bd-3n3ds — the kernel's `extent_buffer` model). On a read-only mount the
     /// on-disk metadata is immutable, so repeated tree descents (every
@@ -3620,6 +3626,7 @@ impl OpenFs {
             ext4_hot_extents: arc_swap::ArcSwapOption::empty(),
             ro_snapshot: std::sync::OnceLock::new(),
             btrfs_fs_tree_root_cache: Mutex::new(rustc_hash::FxHashMap::default()),
+            btrfs_fs_tree_root_fast: AtomicU64::new(0),
             btrfs_parsed_node_cache: ShardedCache::new(),
             btrfs_decompressed_extent_cache: ShardedCache::new(),
         };
@@ -7600,14 +7607,30 @@ impl OpenFs {
         // O(1) amortized. Writable mounts (alloc_state present) resolve fresh
         // since a transaction commit can move the root.
         let cacheable = self.btrfs_alloc_state.is_none();
-        if cacheable && let Some(&bytenr) = self.btrfs_fs_tree_root_cache.lock().get(&subvol_id) {
-            return Ok(bytenr);
+        let is_mounted_subvol = self
+            .btrfs_context
+            .as_ref()
+            .is_some_and(|c| c.subvol_objectid == subvol_id);
+        if cacheable {
+            // Lock-free fast path for the mounted subvolume (the hot read path).
+            if is_mounted_subvol {
+                let fast = self.btrfs_fs_tree_root_fast.load(Ordering::Relaxed);
+                if fast != 0 {
+                    return Ok(fast);
+                }
+            }
+            if let Some(&bytenr) = self.btrfs_fs_tree_root_cache.lock().get(&subvol_id) {
+                return Ok(bytenr);
+            }
         }
         let bytenr = self.btrfs_resolve_fs_tree_root_uncached(cx, subvol_id)?;
         if cacheable {
             self.btrfs_fs_tree_root_cache
                 .lock()
                 .insert(subvol_id, bytenr);
+            if is_mounted_subvol {
+                self.btrfs_fs_tree_root_fast.store(bytenr, Ordering::Relaxed);
+            }
         }
         Ok(bytenr)
     }

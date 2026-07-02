@@ -5097,3 +5097,26 @@ create (writable) neutral (the per-commit flag store is free). Gates: ffs-mvcc *
 (visibility/read-after-write), conformance **100/0/2**. Broad + Pareto: every read on a read-only
 mount (lookup / getattr / file read) skips the MVCC probe; writable mounts are unaffected. Modest but
 free redundant-work elimination.
+
+## ★ LANDED — 2026-07-02 — btrfs fs-tree root resolve: lock-free AtomicU64 fast path → ~1.09x btrfs lookup (CrimsonFox)
+
+`btrfs_fs_tree_root_bytenr` memoized the mounted subvolume's (immutable, read-only) fs-tree root in
+a `Mutex<FxHashMap<u64,u64>>`, but btrfs lookup resolves the root ~3×/op (once per point-descent),
+so it took that Mutex ~3× per lookup for a one-entry map. Added `btrfs_fs_tree_root_fast: AtomicU64`
+(0 = unset): the first same-subvol resolve stores it, and every subsequent mounted-subvol call
+returns it with a Relaxed load — no lock. Correct because a read-only mount's root never moves
+(writable mounts skip the whole cache); other subvols still use the Mutex map. **MEASURED ~1.09x
+btrfs lookup** (two-binary interleaved A/B, 400k lookups, 10 runs: NEW wins 10/10, median 2.720M vs
+2.499M lookups/s). Gates: ffs-core btrfs 360/0, conformance 100/0/2. **Cumulative btrfs read-only
+lookup ≈ 2.15x this session** (FxHashSet walker × DIR_ITEM point × INODE_ITEM point × floor
+depth-limit × MVCC empty-store skip × root AtomicU64). Same lock-free-cache-for-an-invariant pattern
+as the MVCC flag (faa65c91).
+
+## NEGATIVE (reverted) — 2026-07-02 — ShardedCache BTreeMap→FxHashMap is neutral (CrimsonFox)
+
+`ShardedCache` (the block/parsed-node cache) uses `Mutex<BTreeMap>` per shard; swapped to
+`Mutex<FxHashMap>` for O(1) gets (was ~10% `ShardedCache::get` on ext4 lookup). **MEASURED NEUTRAL**
+(500k lookups, NEW 5/10, means within noise). The working set is small, so BTreeMap (log n ≈ 5–6 u64
+compares) ties FxHashMap (hash + probe); the `get` cost is the per-call Mutex lock + Arc clone, NOT
+the map lookup. Reverted (stash `cc-ffs-core-sharded-cache-FxHashMap-…`). Consistent with the session
+meta-lesson: structure swaps on a non-bottleneck are neutral; the lock/clone, not the map, is the floor.
