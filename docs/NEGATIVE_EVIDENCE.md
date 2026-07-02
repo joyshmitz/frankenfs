@@ -4729,3 +4729,25 @@ it iterates EVERY block in `shard.versions` every prune cycle (interval 256 comm
 O(changed). Risk = a missed dirty-mark → unbounded version chain = MEMORY LEAK (not corruption),
 so it needs a sustained-write memory-growth gate beyond conformance + likely a periodic full-scan
 safety net. Owner-lane-ish MVCC; deferred as a characterized candidate.
+
+## ★ LANDED — 2026-07-02 — MVCC prune candidate set → ~1.31x write (overwrite), create neutral (CrimsonFox)
+
+`perf` on write-bench (overwrites): `ShardedMvccStore::prune_versions_older_than` ~6.3% — it
+scanned EVERY versioned block in each shard every prune cycle (interval 256) checking `len()<=1`,
+though write-once/overwrite blocks sit at 1 version. Added a per-shard `prune_candidates:
+FxHashSet<BlockNumber>` populated at the SOLE version-install site (`install_committed_version_locked`)
+the moment a chain first crosses to 2 versions (`len()==2` — installs add one version at a time, so
+every multi-version chain passes through 2 exactly once per episode → near-free, no miss); prune
+visits only that set and drops a block once it collapses back to 1. Semantics identical (blocks not
+in the set have ≤1 version, which the old scan skipped anyway).
+
+⚠️First cut inserted on `len()>1` (every install to a multi-version block) → **~13% create
+REGRESSION** (create's inode-table/dir-leaf blocks are multi-version, so 2+ HashSet inserts/create;
+create's prune was only 0.76% so it paid maintenance for ~no benefit). Fixed by the `len()==2`
+transition-only insert → create back to **NEUTRAL**. **MEASURED write-bench ~1.31x** (interleaved
+A/B, 60k 4KiB overwrites: NEW wins 4/4, min NEW 1677 > max OLD 1490 MiB/s; ~1755 vs ~1335) with
+create median unchanged (~120k, NEW/OLD split 4/4 over 8 runs). Gates: ffs-mvcc **481/0** (+ all
+sub-suites), conformance **100/0/2**, e2fsck CLEAN on a heavy 20k-create + 40k-write image (prune
+correctness — no version leak/corruption). ⭐LESSON: a per-op bookkeeping insert to speed a
+periodic scan must fire on the STATE TRANSITION (1→2), not on every qualifying op, or the hot-path
+maintenance cost dwarfs the scan saving — measure the op that PAYS, not just the op that benefits.

@@ -19,7 +19,7 @@ use ffs_block::BlockDevice;
 use ffs_error::Result as FfsResult;
 use ffs_types::{BlockNumber, CommitSeq, Snapshot, TxnId};
 use parking_lot::{Condvar, Mutex, RwLock, RwLockWriteGuard};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -114,6 +114,14 @@ struct MvccShard {
     /// Per-shard SSI log.  Entries are kept here because SSI checks
     /// are per-block and shards are block-partitioned.
     ssi_log: Vec<CommittedTxnRecord>,
+    /// Blocks in this shard whose version chain currently has >1 version — the
+    /// only blocks `prune_versions_older_than` needs to visit. `install_committed_version_locked`
+    /// (the sole version-add site) inserts a block here when its chain grows past
+    /// 1, so this set is complete; prune drops a block once it collapses back to a
+    /// single version. Lets prune skip the O(all-blocks) scan of single-version
+    /// blocks (the common case under write-once/overwrite workloads, ~6% of a
+    /// write-bench overwrite) and touch only O(changed) (bd-cc-prunecand).
+    prune_candidates: FxHashSet<BlockNumber>,
 }
 
 type ShardWriteGuard<'a> = RwLockWriteGuard<'a, MvccShard>;
@@ -551,6 +559,15 @@ impl ShardedMvccStore {
                 data: version_data,
             },
         );
+        // Record the block as a prune candidate the moment its chain FIRST crosses
+        // to 2 versions. Installs add one version at a time, so every multi-version
+        // chain passes through `len == 2` exactly once per episode — inserting only
+        // then (not on every 2→3→… install to an already-tracked block) keeps this
+        // near-free on the hot path while still catching every prunable block; prune
+        // drops a block once it collapses back to 1 version (bd-cc-prunecand).
+        if versions.len() == 2 {
+            shard.prune_candidates.insert(block);
+        }
     }
 
     fn ssi_shards_for_txn(&self, txn: &Transaction) -> ShardIndexVec {
@@ -991,7 +1008,17 @@ impl ShardedMvccStore {
     pub fn prune_versions_older_than(&self, watermark: CommitSeq) {
         for (idx, shard_lock) in self.shards.iter().enumerate() {
             let mut shard = shard_lock.write();
-            for versions in shard.versions.values_mut() {
+            // Visit only blocks whose chain has grown past 1 version (the prune
+            // candidates), instead of scanning every versioned block in the shard.
+            // A block that collapses back to a single version is dropped from the
+            // set; one that is still multi-version (watermark not yet past its 2nd
+            // version) is retained for a later cycle (bd-cc-prunecand).
+            let candidates = std::mem::take(&mut shard.prune_candidates);
+            let mut still: FxHashSet<BlockNumber> = FxHashSet::default();
+            for block in candidates {
+                let Some(versions) = shard.versions.get_mut(&block) else {
+                    continue;
+                };
                 if versions.len() <= 1 {
                     continue;
                 }
@@ -1007,7 +1034,11 @@ impl ShardedMvccStore {
                     Self::make_chain_head_full(versions, keep_from);
                     versions.drain(0..keep_from);
                 }
+                if versions.len() > 1 {
+                    still.insert(block);
+                }
             }
+            shard.prune_candidates = still;
             // Prune SSI log for this shard too.
             shard.ssi_log.retain(|r| r.commit_seq > watermark);
             drop(shard);
