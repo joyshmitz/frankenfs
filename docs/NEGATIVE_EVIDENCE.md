@@ -4816,3 +4816,21 @@ less-dominant growing-write path. Characterized for a future focused effort.
 
 Everything else (create/mkdir/write-overwrite at MVCC floor, reads I/O/decompression-bound, delete
 at commit floor) has no contained lever. No code landed this turn (measurement + characterization).
+
+## NEUTRAL (shelved) — 2026-07-02 — bw-tree shadowed_keys Vec-vs-BTreeSet is neutral (alloc isn't the cost) (CrimsonFox)
+
+Implemented the characterized bw-tree candidate: replaced `shadowed_keys: BTreeSet<BwKey>` in
+`bounded_range_from_base` with a size-guarded `ShadowKeys` enum (`Vec` + linear `contains` for the
+common ≤64-op chain, `BTreeSet` fallback for a pathological long chain — no O(N²) risk). Validated:
+ffs-btree **156/0** (incl. proptests), conformance **100/0/2**, e2fsck CLEAN on a 100k-block
+growing write (0.0% non-contiguous). **MEASURED NEUTRAL** (interleaved A/B, 100k-block growing
+writes: OLD ~1785 vs NEW ~1769 MiB/s, OLD 4/6). WHY: the `Vec` still heap-allocates per
+materialization (just one alloc vs the BTreeSet's 1–2 node allocs) and its linear `contains` does
+MORE key compares than a BTree for a 16-key set — a wash. The 2.23% `IntoIter::dying_next` in the
+profile was the BTree node-walk drop, but the alloc/drop itself is cheap (jemalloc); the real
+growing-write cost is the inherent 13% `memmove` (version-buffer copy) + page-faults, NOT the
+shadow-set structure. A true win would need a zero-heap inline `SmallVec` (new dep) and would
+likely still be neutral for the same reason (this is the 2nd such neutral this session, after
+full-block-write zero-fill — micro-allocation elision on these paths does not move the needle).
+Shelved (stash `cc-bwtree-shadowkeys-Vec-vs-BTreeSet-MEASURED-NEUTRAL-…`); no code landed. The
+growing-write path is at its inherent MVCC-materialization floor.
