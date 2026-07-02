@@ -927,6 +927,13 @@ pub struct OpenFs {
     /// The writable path bypasses this cache because file data changes are
     /// published through MVCC and eventually persisted to these blocks.
     ext4_file_data_block_cache: ShardedCache<BlockNumber, Arc<[u8]>>,
+    /// Read-only parsed inode ATTR cache (inode number → InodeAttr). On a read-only
+    /// mount inodes are immutable, so a resolved attr can be reused across repeated
+    /// lookups/getattrs (a directory scan re-resolves the same children) instead of
+    /// re-reading the inode-table block + re-parsing the inode every time — the
+    /// dominant cost of an ext4 lookup once name resolution is O(1)
+    /// (bd-cc-ext4-attrcache). Never populated on writable mounts.
+    ext4_inode_attr_cache: ShardedCache<u64, InodeAttr>,
     /// Bounded ext4 base-device block cache for repeated metadata reads.
     ///
     /// This sits below the MVCC overlay and is ext4-only: htree/name-index
@@ -1294,6 +1301,7 @@ fn systemtime_nanos(t: std::time::SystemTime) -> u64 {
 type BtrfsCsumItems = Vec<(BtrfsKey, Vec<u8>)>;
 
 const EXT4_FILE_DATA_BLOCK_CACHE_LIMIT: usize = 256;
+const EXT4_INODE_ATTR_CACHE_LIMIT: usize = 65536;
 const EXT4_BASE_BLOCK_CACHE_LIMIT: usize = 1024;
 
 /// Maximum number of btrfs tree nodes cached by physical address on a
@@ -1389,7 +1397,7 @@ mod cache_shard_tests {
     }
 }
 
-type CacheShards<K, V> = Box<[Mutex<BTreeMap<K, V>>]>;
+type CacheShards<K, V> = Box<[Mutex<rustc_hash::FxHashMap<K, V>>]>;
 
 /// A lock-striped map cache: each key maps to one of `FFS_CACHE_SHARDS`
 /// independent `Mutex<BTreeMap>` shards, so point operations (get/insert/remove)
@@ -1403,18 +1411,18 @@ struct ShardedCache<K, V> {
     len: std::sync::atomic::AtomicUsize,
 }
 
-impl<K: Ord + CacheShard, V: Clone> ShardedCache<K, V> {
+impl<K: std::hash::Hash + Eq + CacheShard, V: Clone> ShardedCache<K, V> {
     fn new() -> Self {
         Self {
             shards: (0..FFS_CACHE_SHARDS)
-                .map(|_| Mutex::new(BTreeMap::new()))
+                .map(|_| Mutex::new(rustc_hash::FxHashMap::default()))
                 .collect(),
             len: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
     #[inline]
-    fn shard(&self, key: &K) -> &Mutex<BTreeMap<K, V>> {
+    fn shard(&self, key: &K) -> &Mutex<rustc_hash::FxHashMap<K, V>> {
         &self.shards[key.cache_shard() % FFS_CACHE_SHARDS]
     }
 
@@ -3610,6 +3618,7 @@ impl OpenFs {
             ext4_inode_table_locations: OnceLock::new(),
             ext4_inode_table_block_cache: ShardedCache::new(),
             ext4_file_data_block_cache: ShardedCache::new(),
+            ext4_inode_attr_cache: ShardedCache::new(),
             ext4_base_block_cache: ShardedCache::new(),
             btrfs_alloc_state: None,
             extent_cache: ffs_extent::ExtentCache::new(),
@@ -10733,11 +10742,25 @@ impl OpenFs {
         scope: &RequestScope,
         ino: InodeNumber,
     ) -> Result<InodeAttr, FfsError> {
+        // On a read-only mount the inode is immutable, so serve a previously
+        // resolved attr without re-reading + re-parsing the inode (a directory scan
+        // re-resolves the same children repeatedly). Writable mounts skip the cache.
+        let read_only = !self.is_writable();
+        if read_only {
+            if let Some(attr) = self.ext4_inode_attr_cache.get(&ino.0) {
+                return Ok(attr);
+            }
+        }
         let sb = self
             .ext4_superblock()
             .ok_or_else(|| FfsError::Format("not an ext4 filesystem".into()))?;
         let inode = self.read_inode_metadata_with_scope(cx, scope, ino)?;
-        Ok(inode_to_attr(sb, ino, &inode))
+        let attr = inode_to_attr(sb, ino, &inode);
+        if read_only {
+            self.ext4_inode_attr_cache
+                .insert_within(ino.0, attr.clone(), EXT4_INODE_ATTR_CACHE_LIMIT);
+        }
+        Ok(attr)
     }
 
     /// Traverse the ext4 orphan inode list (`s_last_orphan` + inode `dtime` links).

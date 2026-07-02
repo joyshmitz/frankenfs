@@ -5311,3 +5311,20 @@ only), conformance 100/0/2, walk output byte-identical OLD vs NEW (readdir unaff
 construction: the snapshot is the full readdir (same source as htree), read-only immutability keeps
 it complete + current. Helps every read-only-mount name lookup (ls -l, scans, backup/forensic/
 container-image mounts); rw case deferred (needs mutation-invalidation).
+
+## ★★ LANDED — 2026-07-02 — ext4 read-only inode-attr cache + ShardedCache FxHashMap → ~1.41x ext4 lookup (on top of present-index) (CrimsonFox)
+
+Post present-index (d9062dbb), ext4 lookup is child-inode-read-bound (read 24% + parse 19% + cache
+11%). Added a read-only `ext4_inode_attr_cache: ShardedCache<u64, InodeAttr>` in
+`read_inode_attr_with_scope` (inode immutable on a read-only mount → a resolved attr is reused across
+the repeated child re-resolutions a directory scan does; writable mounts skip it). ALONE it was
+NEUTRAL (6/12) — the ShardedCache used a `BTreeMap`, so the 30000-entry cache's O(log N) get cost
+~as much as the read+parse it replaced. Diagnosed the BTreeMap as the limiter and swapped
+`ShardedCache` to `FxHashMap` (O(1) get; the earlier BTreeMap→FxHashMap was neutral only because
+those caches were small). **Compound MEASURED ~1.41x ext4 lookup** (extbig2+30000, 600k lookups, 12
+runs: NEW wins 12/12, median 3.319M vs 2.352M lookups/s). Gates: ffs-core 1184/0 (pre-existing
+btrfs-reflink flake only), conformance 100/0/2 (attr-cache build). Correct by read-only immutability
+(same pattern as the present-index). **Cumulative ext4 lookup ~3.0x this cluster** (present-index
+2.17x × attr-cache+FxHash 1.41x). ⭐LESSON: a large (30000-entry) cache NEEDS an O(1) map — the
+BTreeMap→FxHashMap swap that was neutral on small caches (256/512) is the difference between neutral
+and 1.41x on a big one.
