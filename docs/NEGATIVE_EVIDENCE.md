@@ -5391,3 +5391,26 @@ get is slower, so the real magnitude on a big flat dir is lower (untested; fixtu
 files — need a flat-large-dir fixture). Gates: ffs-core btrfs 359/0 (reflink flake only), conformance
 100/0/2. Completes the btrfs read-only lookup pattern set (walker-hash, point-descents, depth-limit,
 root, parent-dir, parsed-node FxHashMap, child-attr, name-index) — resolution + child read both O(1).
+
+## SURFACE + NEGATIVE — 2026-07-02 — btrfs create-bench non-persistence ROOT-CAUSED to sync_all_to_device (simple fix FAILS: node overflow) (CrimsonFox)
+
+ROOT CAUSE of the btrfs create-bench non-persistence (walk sees 1 file after creating N): the CLI
+durability boundary `sync_all_to_device` (lib.rs:30248) does `mvcc_store.flush_to_device` +
+ext4-only steps (GDT, superblock totals) but NEVER commits the btrfs transaction. Created/modified
+btrfs metadata lives in the in-memory COW tree and reaches disk (with the superblock root pointer
+updated) only via `btrfs_full_transaction_commit` — which `destroy` (unmount, lib.rs:36196) calls
+but `sync_all_to_device` does not. So a CLI create-bench → re-open never sees the files.
+
+ATTEMPTED FIX (wire `btrfs_full_transaction_commit` into `sync_all_to_device` for writable btrfs,
+mirroring `destroy`): **FAILS** — create-bench errors `btrfs mutation: invalid config: node
+overflow: data`, and the image is left unreadable (`btrfs inode objectid 256 not found`). So the
+commit has prerequisites/ordering the sync path doesn't satisfy — likely the preceding
+`mvcc_store.flush_to_device` interferes, or the commit expects a specific pre-state (the destroy
+path may run it without a prior MVCC flush, or with a fresh transaction). Reverted. NOT a one-call
+fix — a focused btrfs-durability effort (understand the commit's transaction prerequisites +
+correct ordering vs the MVCC flush), gateable by "create N → re-open walk sees N" + btrfs-check.
+
+IMPACT: btrfs lookup wins (parent-dir, child-attr, name-index) remain measured on the nested
+fixtures' shallow roots (deep fs tree, so descent-skip is representative; large-diverse-map
+magnitude untested). Fixing this persistence unblocks flat-large-dir btrfs benching. No code landed
+this turn (root-caused a real bug; the simple fix is measured-negative and reverted).
