@@ -4494,3 +4494,32 @@ stale bytes":
   csums), so the SHIPPED opt-in `FFS_SKIP_GDT=1` path is fine for its crash-safety guarantee; the
   gap is purely mid-op read-back consistency. Attempt re-shelved (stash intact); tree clean, no
   code landed.
+
+## DOWNGRADE — 2026-07-02 — GDT-defer-default blocker is now MECHANICAL, not deep; fix pattern PROVEN 16→7 (CrimsonFox)
+
+Corrects my own prior "deep multi-turn / needs AtomicU32 struct-ripple" framing. The
+read-your-writes override in `read_group_desc` is NOT needed and IS unsafe (it self-deadlocks:
+`largest_contiguous_free_run` lib.rs:10747 holds `alloc_mutex.write()` while calling
+`read_block_bitmap`→`read_group_desc`; re-reading alloc state there = deadlock). The correct fix
+is a 2-liner — NO struct change, NO lock, NO deadlock:
+
+- **`read_block_bitmap`/`read_inode_bitmap` (lib.rs:10647/10677): skip the bitmap-csum cross-check
+  under deferral** (`&& !ffs_alloc::gdt_persistence_deferred()`). Under deferral the descriptor's
+  `bg_*_bitmap_csum` is a flush-lazy hint that lags the eager MVCC-authoritative bitmap, so the
+  read-time cross-check is structurally inapplicable; flush re-stamps a consistent csum →
+  e2fsck-clean at rest. Eager mode keeps the full check.
+
+**MEASURED on ATTEMPT4 base + this 2-liner: full `ffs-core --lib` 16 fails → 7 fails.** The
+remaining 7 are ALL one class — an assertion reads the ON-DISK group-descriptor free counts (or
+runs e2fsck "Pass 5: group summary") right after a block/inode-freeing op WITHOUT a flush, seeing
+the deferred (stale) descriptor: `write_statfs_group_stats_match_device_descriptors_bd_qsmav`
+(statfs 14283 vs desc-sum 14287 = the 16 KiB write's 4 blocks), `ext4_indirect_{unlink,full_lifecycle}_…_bd_laay3`
+(gd delta 0-vs-3 / off-by-1), and 4 fast-commit recovery tests (`…passes_e2fsck`, `…_bd_w6fxn`,
+`…delete…_bd_4tmpw`, `…mixed_batch…_bd_6nwjx`) whose recovery-mount snapshot is e2fsck'd
+un-flushed. **Fix pattern PROVEN**: add `flush_mvcc_to_device` before the on-disk-descriptor read /
+e2fsck snapshot — the honest deferral contract (descriptors reconcile at a durability boundary; a
+real crash-recovery flushes after replay). 3 of the 7 flushes already applied in the shelved WIP
+(stash `cc-gdt-defer-default-WIP-16to7-skipverify-PROVEN-…`); 4 fast-commit flushes + full
+validation (conformance 100/0/2 + e2fsck via mkfs + create-bench 2.29x remeasure) remain. This is
+now a bounded mechanical finish, not invention — the deep-owner-lane verdict is RETRACTED for
+lever #1 (GDT-defer-default → 2.29x create / 1.27x mkdir / every allocating op).
