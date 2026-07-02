@@ -5064,3 +5064,19 @@ median 928k vs 758k lookups/s). Gates: ffs-ondisk **668/0** (dir-block parse/val
 conformance **100/0/2**. Broad: every ext4 name lookup on a linear or htree directory (stat / open
 / path resolution). ⭐Redundant-WORK elimination again (stop early), the session's winning class —
 NOT alloc tuning.
+
+## ★ LANDED — 2026-07-02 — ext4 htree: raw on-demand dx binary search (skip parse-all Vec) → ~1.14x ext4 lookup (CrimsonFox)
+
+After the leaf early-stop (8446acf8), `parse_dx_entries` was ~10% of an ext4 lookup: `htree_find_entry`
+parsed ALL ~hundreds of dx index entries into a `Vec<Ext4DxEntry>` per lookup, then `dx_find_leaf_idx`
+(a BINARY search, O(log N)) used just ~log(N) of them — the parse-all is redundant work. Added raw
+on-demand accessors (`dx_entry_hash_raw`/`dx_entry_block_raw`/`dx_count_raw`/`dx_find_leaf_idx_raw`)
+and a fast path for single-level htrees (the common shape): binary-search the raw root block straight
+to the leaf, no Vec. **Self-verifying**: `lookup_in_dir_block` confirms the name is in the chosen
+leaf, so a wrong leaf / header quirk simply misses and falls through to the UNCHANGED frame-based slow
+path (collision chains, multi-level dirs) — the fast path can never return a wrong result, which makes
+it safe by construction. **MEASURED ~1.14x ext4 lookup** (two-binary interleaved A/B, 500k lookups,
+8 runs: NEW wins 7/8, median 1.080M vs 950k lookups/s). Gates: ffs-ondisk **668/0** (htree tests),
+conformance **100/0/2**. Broad: every ext4 name lookup. **Cumulative ext4 lookup ~1.39x this session**
+(itable-loc × leaf early-stop 8446acf8 × dx raw fast path). ⭐Redundant-WORK elimination (parse-all →
+search-path-only), the session's winning class.

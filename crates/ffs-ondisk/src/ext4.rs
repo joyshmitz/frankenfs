@@ -6972,6 +6972,71 @@ pub fn dx_find_leaf_idx(entries: &[Ext4DxEntry], hash: u32) -> usize {
     if lo > 0 { lo - 1 } else { 0 }
 }
 
+// ── Raw dx-index accessors (no `Vec<Ext4DxEntry>` materialization) ──────────
+//
+// A dx index block packs 8-byte entries after an 8-byte countlimit header at
+// `count_offset`: entry 0 stores only a block ptr at `+4` (its hash is implicitly
+// 0); entry `i>=1` stores hash at `+8*i` and block ptr at `+8*i+4`. Reading the
+// few entries a binary search actually touches — instead of parsing all of them
+// into a Vec on every lookup — is the point of these (bd-cc-dxraw).
+
+#[inline]
+fn dx_entry_hash_raw(block: &[u8], count_offset: usize, idx: usize) -> Option<u32> {
+    if idx == 0 {
+        return Some(0);
+    }
+    let off = count_offset.checked_add(idx.checked_mul(8)?)?;
+    read_le_u32(block, off).ok()
+}
+
+#[inline]
+fn dx_entry_block_raw(block: &[u8], count_offset: usize, idx: usize) -> Option<u32> {
+    let base = if idx == 0 {
+        count_offset.checked_add(4)?
+    } else {
+        count_offset.checked_add(idx.checked_mul(8)?)?.checked_add(4)?
+    };
+    read_le_u32(block, base).ok()
+}
+
+/// dx entry count from the raw countlimit header — but only when `count <= limit`
+/// and every entry lies within the block; otherwise 0, so the caller falls back to
+/// the validating [`parse_dx_entries`] path rather than trusting a malformed header.
+#[inline]
+fn dx_count_raw(block: &[u8], count_offset: usize) -> usize {
+    let (Ok(limit), Ok(count)) = (
+        read_le_u16(block, count_offset),
+        read_le_u16(block, count_offset + 2),
+    ) else {
+        return 0;
+    };
+    let count = usize::from(count);
+    if count == 0 || count > usize::from(limit) {
+        return 0;
+    }
+    match dx_entry_block_raw(block, count_offset, count - 1) {
+        Some(_) => count,
+        None => 0,
+    }
+}
+
+/// Raw analogue of [`dx_find_leaf_idx`]: the rightmost entry with `hash <= target`,
+/// reading hashes on demand from `block` instead of a parsed slice.
+#[inline]
+fn dx_find_leaf_idx_raw(block: &[u8], count_offset: usize, count: usize, hash: u32) -> Option<usize> {
+    let mut lo = 0_usize;
+    let mut hi = count;
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        if dx_entry_hash_raw(block, count_offset, mid)? <= hash {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    Some(if lo > 0 { lo - 1 } else { 0 })
+}
+
 /// Find the leaf block for a given hash in a sorted DX entry list.
 #[cfg(test)]
 fn dx_find_leaf(entries: &[Ext4DxEntry], hash: u32) -> u32 {
@@ -7050,13 +7115,12 @@ where
     }
 
     let block0 = invalid_unless!(read_logical_dir_block(0));
-    let dx_root =
-        invalid_unless!(parse_dx_root_with_large_dir(block0.as_ref(), has_large_dir).ok());
-    if dx_root.entries.is_empty() {
-        return HtreeFindResult::IndexInvalid;
-    }
 
-    let hash_version = effective_hash_version(dx_root.hash_version);
+    // Compute the name hash from the root header alone (hash version + depth), with
+    // no entry-Vec materialization yet.
+    let (root_hash_version, root_indirect_levels) =
+        invalid_unless!(parse_dx_root_info_with_large_dir(block0.as_ref(), has_large_dir).ok());
+    let hash_version = effective_hash_version(root_hash_version);
     // For casefold dirs the kernel hashes the case-folded name; matching that
     // (byte-exact for ASCII, where casefold == ASCII-lowercase) lets the htree
     // index resolve case-insensitive lookups. An exotic-Unicode fold that
@@ -7069,8 +7133,44 @@ where
     };
     let hash_input = folded.as_deref().unwrap_or(name);
     let (hash, _minor) = dx_hash(hash_version, hash_input, hash_seed);
+    let indirect_levels = usize::from(root_indirect_levels);
 
-    let indirect_levels = usize::from(dx_root.indirect_levels);
+    // Fast path (bd-cc-dxraw): a single-level htree — the common shape for moderate
+    // directories — reaches the leaf in ONE raw binary search over the root index
+    // block, so a present, non-colliding name resolves without parsing the ~hundreds
+    // of dx entries into a Vec (`parse_dx_entries` was ~10% of an ext4 lookup). A hit
+    // is self-verifying: `lookup_in_dir_block` confirms the name is in the chosen
+    // leaf, so a wrong leaf (or any header quirk) simply misses and falls through to
+    // the authoritative frame path below — the fast path can NEVER return a wrong
+    // result. Multi-level dirs and collision chains take the slow path.
+    if indirect_levels == 0 {
+        let count = dx_count_raw(block0.as_ref(), 0x20);
+        if count > 0
+            && let Some(idx) = dx_find_leaf_idx_raw(block0.as_ref(), 0x20, count, hash)
+            && let Some(leaf_block) = dx_entry_block_raw(block0.as_ref(), 0x20, idx)
+            && let Some(leaf_data) = read_logical_dir_block(leaf_block)
+        {
+            let matched = if casefold {
+                lookup_in_dir_block_casefold(leaf_data.as_ref(), block_size, name)
+                    .ok()
+                    .flatten()
+            } else {
+                lookup_in_dir_block(leaf_data.as_ref(), block_size, name)
+                    .ok()
+                    .flatten()
+            };
+            if let Some(entry) = matched {
+                return HtreeFindResult::Found(entry);
+            }
+        }
+    }
+
+    // Slow path: parse the full index and descend with collision handling.
+    let dx_root =
+        invalid_unless!(parse_dx_root_with_large_dir(block0.as_ref(), has_large_dir).ok());
+    if dx_root.entries.is_empty() {
+        return HtreeFindResult::IndexInvalid;
+    }
     let root_idx = dx_find_leaf_idx(&dx_root.entries, hash);
     let mut frames = vec![Ext4DxFrame {
         entries: dx_root.entries,
