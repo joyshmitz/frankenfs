@@ -4751,3 +4751,17 @@ sub-suites), conformance **100/0/2**, e2fsck CLEAN on a heavy 20k-create + 40k-w
 correctness — no version leak/corruption). ⭐LESSON: a per-op bookkeeping insert to speed a
 periodic scan must fire on the STATE TRANSITION (1→2), not on every qualifying op, or the hot-path
 maintenance cost dwarfs the scan saving — measure the op that PAYS, not just the op that benefits.
+
+## NEUTRAL (shelved) — 2026-07-02 — full-block-overwrite zero-fill elision is free anyway (CrimsonFox)
+
+After the prune-candidate win, write-bench (full-block overwrites) is dominated by 13% `memmove`
++ ~14% kernel page-faults (inherent MVCC version materialization). Hypothesis: `ext4_write`'s
+full-block path allocated `vec![0u8; bs]` (zero-fill 4 KiB) then immediately `copy_from_slice`'d
+the whole block over it — a redundant memset. Rewrote it to build the version buffer directly from
+the data (`data[..].to_vec()`, no zero-fill, no separate copy); byte-identical, ffs-core **1185/0**,
+conformance **100/0/2**. **MEASURED NEUTRAL** (interleaved A/B, 60k full-block overwrites: NEW 3/6,
+means equal ~896 MiB/s). WHY: `vec![0u8; bs]` is `alloc_zeroed`, which for a 4 KiB allocation
+serves an already-zeroed page (no explicit memset), so both paths do exactly ONE 4 KiB data memcpy
+— the "extra" zero-fill was never a real cost. The 13% `memmove` is the unavoidable data copy into
+the retained MVCC version buffer, not the zero-fill. Shelved (stash `cc-fullblock-write-zerofill-elide-MEASURED-NEUTRAL-…`);
+no code landed. Write overwrite is at its inherent MVCC-materialization floor.
