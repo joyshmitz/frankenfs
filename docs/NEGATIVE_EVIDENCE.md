@@ -4912,3 +4912,18 @@ btrfs create/write is COW-bound. All remaining upside is owner-lane: the paralle
 (per-group alloc sharding), the btrfs COW commit layer / node representation, and the MVCC
 version-model (the ~11–14% `memmove` retained-version copy). No code landed this turn (btrfs
 profiling + closure).
+
+## ★ LANDED — 2026-07-02 — btrfs tree-walker sets to FxHashSet (drop default SipHash) → ~1.07x btrfs lookup (CrimsonFox)
+
+`perf` on btrfs lookup (300k on a 20k-entry dir, ~5× slower than ext4 lookup): ~15.7%
+`HashMap<u64,(),std::hash::random::RandomState>::insert` + 2.9% `hash_one::<&u64>` + rehash — the
+`BtrfsParallelTreeWalker`'s `active_path` / `visited_nodes` cycle-detection sets (and
+`floor_descend`'s `visited`) used the DEFAULT hasher (SipHash: DoS-resistant but slow), keyed by
+internal node bytenrs (u64, not attacker-controlled). Switched them to `FxHashSet<u64>` (rustc-hash,
+already a dep) — a textbook Pareto change: faster non-crypto hash for internal keys, identical set
+semantics (cycle detection unaffected). **MEASURED ~1.07x btrfs lookup** (two-binary interleaved
+A/B, 300k lookups, 6 runs: NEW wins 6/6 paired, ~1.37M vs ~1.28M lookups/s). Broad: the walker
+backs every btrfs tree read (lookup / getattr / readdir / file read), so all btrfs metadata reads
+benefit. Gates: ffs-btrfs **365/0**, conformance **100/0/2**. (The residual btrfs-lookup gap vs
+ext4 is the walker's per-walk `collect_leaf_items` + node-descent machinery used even for a
+single-key point lookup — a larger point-descent-fast-path lever, characterized for later.)

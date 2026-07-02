@@ -12,7 +12,7 @@ use ffs_mvcc::{CommitError, MvccStore, Transaction};
 pub use ffs_ondisk::btrfs::*;
 use ffs_types::{BlockNumber, CommitSeq, ParseError, Snapshot, TxnId};
 use rayon::prelude::{IntoParallelIterator, ParallelIterator};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Range;
@@ -2082,8 +2082,8 @@ pub fn walk_tree_with_nodes(
         node_provider,
         nodesize,
         out: Vec::new(),
-        active_path: HashSet::new(),
-        visited_nodes: HashSet::new(),
+        active_path: FxHashSet::default(),
+        visited_nodes: FxHashSet::default(),
         range: None,
     };
     walker.walk_node(root_logical)?;
@@ -2103,8 +2103,8 @@ pub fn walk_tree_borrowed_with_nodes(
         node_provider,
         nodesize,
         out: Vec::new(),
-        active_path: HashSet::new(),
-        visited_nodes: HashSet::new(),
+        active_path: FxHashSet::default(),
+        visited_nodes: FxHashSet::default(),
         range: None,
     };
     walker.walk_node(root_logical)?;
@@ -2155,8 +2155,8 @@ pub fn walk_tree_range_with_nodes(
         node_provider,
         nodesize,
         out: Vec::new(),
-        active_path: HashSet::new(),
-        visited_nodes: HashSet::new(),
+        active_path: FxHashSet::default(),
+        visited_nodes: FxHashSet::default(),
         range: Some((lo, hi)),
     };
     walker.walk_node(root_logical)?;
@@ -2180,8 +2180,8 @@ pub fn walk_tree_parallel_with_nodes(
         node_provider,
         nodesize,
         out: Vec::new(),
-        active_path: HashSet::new(),
-        visited_nodes: HashSet::new(),
+        active_path: FxHashSet::default(),
+        visited_nodes: FxHashSet::default(),
         range: None,
     };
     walker.walk_node(root_logical)?;
@@ -2206,8 +2206,8 @@ pub fn walk_tree_range_parallel_with_nodes(
         node_provider,
         nodesize,
         out: Vec::new(),
-        active_path: HashSet::new(),
-        visited_nodes: HashSet::new(),
+        active_path: FxHashSet::default(),
+        visited_nodes: FxHashSet::default(),
         range: Some((lo, hi)),
     };
     walker.walk_node(root_logical)?;
@@ -2229,8 +2229,8 @@ pub fn walk_tree_range_borrowed_with_nodes(
         node_provider,
         nodesize,
         out: Vec::new(),
-        active_path: HashSet::new(),
-        visited_nodes: HashSet::new(),
+        active_path: FxHashSet::default(),
+        visited_nodes: FxHashSet::default(),
         range: Some((lo, hi)),
     };
     walker.walk_node(root_logical)?;
@@ -2277,7 +2277,7 @@ pub fn walk_tree_floor_with_nodes(
     nodesize: u32,
     target: BtrfsKey,
 ) -> Result<Option<BtrfsLeafEntry>, ParseError> {
-    let mut visited = HashSet::new();
+    let mut visited = FxHashSet::default();
     floor_descend(node_provider, root_logical, nodesize, &target, &mut visited)
 }
 
@@ -2286,7 +2286,7 @@ fn floor_descend(
     logical: u64,
     nodesize: u32,
     target: &BtrfsKey,
-    visited: &mut HashSet<u64>,
+    visited: &mut FxHashSet<u64>,
 ) -> Result<Option<BtrfsLeafEntry>, ParseError> {
     let nodesize_u64 = u64::from(nodesize);
     if nodesize_u64 == 0 {
@@ -2368,8 +2368,8 @@ struct BtrfsTreeWalker<'a> {
     node_provider: &'a mut dyn FnMut(u64) -> Result<Arc<BtrfsParsedNode>, ParseError>,
     nodesize: u32,
     out: Vec<BtrfsLeafEntry>,
-    active_path: HashSet<u64>,
-    visited_nodes: HashSet<u64>,
+    active_path: FxHashSet<u64>,
+    visited_nodes: FxHashSet<u64>,
     /// When `Some((lo, hi))`, prune internal-node children and leaf items
     /// outside the half-open key range `[lo, hi)`. `None` walks the whole tree.
     range: Option<(BtrfsKey, BtrfsKey)>,
@@ -2452,8 +2452,8 @@ struct BtrfsParallelTreeWalker<'a> {
     node_provider: &'a (dyn Fn(u64) -> Result<Arc<BtrfsParsedNode>, ParseError> + Sync),
     nodesize: u32,
     out: Vec<BtrfsLeafEntry>,
-    active_path: HashSet<u64>,
-    visited_nodes: HashSet<u64>,
+    active_path: FxHashSet<u64>,
+    visited_nodes: FxHashSet<u64>,
     range: Option<(BtrfsKey, BtrfsKey)>,
 }
 
@@ -2625,8 +2625,8 @@ struct BtrfsBorrowedTreeWalker<'a> {
     node_provider: &'a mut dyn FnMut(u64) -> Result<Arc<BtrfsParsedNode>, ParseError>,
     nodesize: u32,
     out: Vec<BtrfsLeafEntryBatch>,
-    active_path: HashSet<u64>,
-    visited_nodes: HashSet<u64>,
+    active_path: FxHashSet<u64>,
+    visited_nodes: FxHashSet<u64>,
     range: Option<(BtrfsKey, BtrfsKey)>,
 }
 
