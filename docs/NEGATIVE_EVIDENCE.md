@@ -4892,3 +4892,23 @@ binary, 40k renames, 8 runs: NEW wins 8/8, min NEW 74181 > max OLD 70998 renames
 separated, ~75.9k vs ~67.6k). Cumulative rename ≈ **1.16x** vs the pre-cache baseline (~65.7k →
 ~75.9k). Gates: ffs-core `--lib` **1185/0**, conformance **100/0/2**, e2fsck CLEAN on a 40k-rename
 image. rename now resolves the parent's extents once per op regardless of sub-steps.
+
+## SURFACE — 2026-07-02 — btrfs create is COW-bound (inherent); no contained lever, matches prior owner-lane verdict (CrimsonFox)
+
+Profiled btrfs create (`perf`, 20k creates on the zstd fixture): **43.78% `InMemoryCowBtrfsTree::insert_into`**
+(the O(N) leaf COW-copy — `v.extend(items.iter().cloned())`, an Arc-refcount-bump per item; the
+former double-copy was already eliminated via `with_capacity(+1)` per the code comment) + **16%
+`drop_glue::<BtrfsCowNode>`** (Arc-decrement churn dropping retired nodes from the 2-gen eviction
+ring) + 3.2% `try_insert_inplace` (which confirms already-COW'd nodes ARE reused within a batch, so
+the upper tree path is not re-COW'd per item). This is inherent to a Vec-of-items COW B-tree —
+copying a node to modify it while preserving the old version is exactly what kernel btrfs does;
+reducing it needs a structural-sharing node representation (owner-lane redesign), not a
+redundant-work fix. No getenv / redundant-scan / per-op re-parse lever like ext4 had.
+
+**Cross-filesystem contained frontier now mapped exhaustively.** ext4 metadata ops (create/mkdir/
+lookup/rename/unlink) got 9 profiled wins this session and now sit at the inherent MVCC-materialization
+(memmove) + metadata_csum (CRC) + commit floor; ext4/btrfs reads are I/O- or decompression-bound;
+btrfs create/write is COW-bound. All remaining upside is owner-lane: the parallel-create convoy
+(per-group alloc sharding), the btrfs COW commit layer / node representation, and the MVCC
+version-model (the ~11–14% `memmove` retained-version copy). No code landed this turn (btrfs
+profiling + closure).
