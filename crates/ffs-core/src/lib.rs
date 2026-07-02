@@ -1082,6 +1082,12 @@ pub struct OpenFs {
     /// the on-disk inode is immutable so last-writer-wins publish is safe; a
     /// writable mount skips the slot (the inode can change under it).
     ext4_hot_inode: arc_swap::ArcSwapOption<(u64, Arc<Ext4Inode>)>,
+    /// Lock-free slot for the LOOKUP parent inode. A directory scan resolves many
+    /// names under one parent, and once name resolution + child attr are O(1) the
+    /// per-lookup parent inode read+parse becomes the dominant cost — reuse the
+    /// parsed, dir-verified parent instead. RO only (immutable); writable skips
+    /// (bd-cc-ext4-hotparent).
+    ext4_hot_parent: arc_swap::ArcSwapOption<(u64, Arc<Ext4Inode>)>,
     /// Lock-free single-slot "hot extent list" for the ext4 read path. Once the
     /// inode-table Mutex convoy is gone (see [`Self::ext4_hot_inode`]), the next
     /// per-read serial point is `resolve_extent` → `ExtentCache::lookup`, which
@@ -3644,6 +3650,7 @@ impl OpenFs {
             btrfs_ro_inode_extents: ShardedCache::new(),
             btrfs_hot_inode_extents: arc_swap::ArcSwapOption::empty(),
             ext4_hot_inode: arc_swap::ArcSwapOption::empty(),
+            ext4_hot_parent: arc_swap::ArcSwapOption::empty(),
             ext4_hot_extents: arc_swap::ArcSwapOption::empty(),
             ro_snapshot: std::sync::OnceLock::new(),
             btrfs_fs_tree_root_cache: Mutex::new(rustc_hash::FxHashMap::default()),
@@ -32391,14 +32398,42 @@ impl FsOps for OpenFs {
         match &self.flavor {
             FsFlavor::Ext4(_) => {
                 let parent_ino = Self::ext4_canonical_inode(parent);
-                let parent_inode = self.read_inode_metadata_with_scope(cx, scope, parent_ino)?;
-                if !parent_inode.is_dir() {
-                    return Err(FfsError::NotDirectory);
-                }
+                // Reuse the parsed, dir-verified parent across a directory scan's
+                // repeated lookups (RO mount → immutable) instead of re-reading +
+                // re-parsing the parent inode every time (bd-cc-ext4-hotparent).
+                let read_only = !self.is_writable();
+                let hot_parent = if read_only {
+                    self.ext4_hot_parent
+                        .load()
+                        .as_ref()
+                        .filter(|slot| slot.0 == parent_ino.0)
+                        .map(|slot| Arc::clone(&slot.1))
+                } else {
+                    None
+                };
+                let parent_storage;
+                let parent_inode: &Ext4Inode = match hot_parent.as_ref() {
+                    Some(slot) => slot.as_ref(),
+                    None => {
+                        let parsed =
+                            self.read_inode_metadata_with_scope(cx, scope, parent_ino)?;
+                        if !parsed.is_dir() {
+                            return Err(FfsError::NotDirectory);
+                        }
+                        if read_only {
+                            self.ext4_hot_parent.store(Some(Arc::new((
+                                parent_ino.0,
+                                Arc::new(parsed.clone()),
+                            ))));
+                        }
+                        parent_storage = parsed;
+                        &parent_storage
+                    }
+                };
 
                 let name_bytes = name.as_encoded_bytes();
                 let entry = self
-                    .lookup_name_with_scope(cx, scope, &parent_inode, name_bytes)?
+                    .lookup_name_with_scope(cx, scope, parent_inode, name_bytes)?
                     .ok_or_else(|| FfsError::NotFound(name.to_string_lossy().into_owned()))?;
 
                 let child_ino = InodeNumber(u64::from(entry.inode));

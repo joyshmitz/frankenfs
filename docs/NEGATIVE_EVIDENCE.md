@@ -5328,3 +5328,18 @@ btrfs-reflink flake only), conformance 100/0/2 (attr-cache build). Correct by re
 2.17x × attr-cache+FxHash 1.41x). ⭐LESSON: a large (30000-entry) cache NEEDS an O(1) map — the
 BTreeMap→FxHashMap swap that was neutral on small caches (256/512) is the difference between neutral
 and 1.41x on a big one.
+
+## ★ LANDED — 2026-07-02 — ext4 read-only lookup parent-inode hot slot → ~1.15x ext4 lookup (CrimsonFox)
+
+Post present-index + attr-cache, ext4 lookup's dominant cost is the PARENT inode read+parse
+(`read_inode_metadata_with_scope` 29% — read once per lookup for the dir-check + htree/present-index
+input). A directory scan repeats the same parent, immutable on a read-only mount. Re-added
+`ext4_hot_parent: ArcSwapOption<(u64, Arc<Ext4Inode>)>` in `OpenFs::lookup` (RO-gated) to reuse the
+parsed, dir-verified parent. This EXACT cache measured NEUTRAL earlier (8757b5c7) — because then the
+parent read was MASKED by the htree leaf scan; the present-index + attr-cache wins EXPOSED it, so the
+same cache now wins. **MEASURED ~1.15x ext4 lookup** (extbig2+30000, 600k lookups, 10 runs: NEW wins
+9/10, median 3.400M vs 2.955M). Gates: ffs-core 1184/0 (reflink flake only), conformance 100/0/2,
+walk identical. **Cumulative ext4 lookup ~3.5x this cluster** (present-index 2.17x × attr+FxHash
+1.41x × parent-slot 1.15x). ⭐LESSON: a cache that measures NEUTRAL while its target is masked by a
+bigger cost becomes a WIN once that cost is removed — re-test shelved neutrals after landing an
+adjacent win.
