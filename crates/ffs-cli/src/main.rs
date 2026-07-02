@@ -3074,8 +3074,13 @@ fn walk_one_dir(
             if entry.name == b"." || entry.name == b".." {
                 continue;
             }
-            let is_dir = format!("{:?}", entry.kind) == "Directory";
-            let is_file = format!("{:?}", entry.kind) == "RegularFile";
+            // Direct enum compare, not `format!("{:?}", entry.kind) == "..."`:
+            // the old form heap-allocated a String and ran Debug formatting twice
+            // per entry purely to compare a Copy enum — dead work on every one of
+            // (potentially) tens of thousands of dir entries. `FileType` is
+            // `PartialEq`, so this is a single integer compare.
+            let is_dir = entry.kind == ffs_core::FileType::Directory;
+            let is_file = entry.kind == ffs_core::FileType::RegularFile;
             if !no_stat {
                 let _attr = open_fs
                     .getattr(cx, entry.ino)

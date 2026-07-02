@@ -30355,12 +30355,14 @@ impl OpenFs {
             .map(|page| page.to_vec())
     }
 
-    /// Disable (or re-enable) the speculative inode-table prefetch that
-    /// `readdir` performs to warm the getattr cache. A readdir-ONLY consumer
-    /// (no following `getattr` — e.g. `ls -f`, name enumeration, a `getdents`
-    /// count) should disable it: nothing reads the prefetched inode-table
-    /// blocks, so the prefetch is dead work whose rayon fan-out can dominate
-    /// readdir on a large htree directory (see [`Self::readdir_prefetch_disabled`]).
+    /// Disable (or re-enable) the speculative readdir work that warms later
+    /// operations: the inode-table prefetch (for a following `getattr`) and the
+    /// read-only name->dirent present-index (for a following `lookup`). A
+    /// readdir-ONLY consumer (no following `getattr`/`lookup` — e.g. `ls -f`,
+    /// name enumeration, a `getdents` count, `walk --no-stat`) should disable it:
+    /// nothing reads the prefetched inode-table blocks and nothing queries the
+    /// present-index, so both are dead work whose fan-out / per-name clones can
+    /// dominate readdir on a large htree directory.
     pub fn set_readdir_prefetch_disabled(&self, disabled: bool) {
         self.readdir_prefetch_disabled
             .store(disabled, std::sync::atomic::Ordering::Relaxed);
@@ -32555,9 +32557,19 @@ impl FsOps for OpenFs {
                 // the htree + linearly scanning the hash-leaf per name. Non-casefold
                 // only (keys on exact name bytes); read-only only (never goes stale)
                 // (bd-cc-ext4-presentidx).
+                //
+                // Skip the build entirely for a readdir-ONLY consumer (the same
+                // `readdir_prefetch_disabled` contract that suppresses the inode-table
+                // prefetch above): `ls -f`, getdents/name-enumeration, and a
+                // `walk --no-stat` never issue the follow-up lookup this index would
+                // accelerate, so cloning every name into an FxHashMap per readdir is
+                // pure dead work (~7% of a 30000-entry read-only `walk --no-stat`).
                 if canonical.0 != 0
                     && !self.is_writable()
                     && inode.flags & ffs_types::EXT4_CASEFOLD_FL == 0
+                    && !self
+                        .readdir_prefetch_disabled
+                        .load(std::sync::atomic::Ordering::Relaxed)
                 {
                     let present: rustc_hash::FxHashMap<Vec<u8>, (u32, Ext4FileType)> =
                         raw_entries
