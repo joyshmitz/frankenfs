@@ -1112,6 +1112,12 @@ pub struct OpenFs {
     /// `btrfs_fs_tree_root_cache` Mutex — btrfs lookup resolves the root ~3×/op (one
     /// per point-descent). 0 = unset (a valid btrfs root bytenr is never 0).
     btrfs_fs_tree_root_fast: AtomicU64,
+    /// Last inode verified to be a directory on the read-only btrfs lookup path.
+    /// Directory-ness is immutable on a read-only mount, and a directory scan
+    /// (`ls`, readdir+stat) resolves many names under the SAME parent, so repeat
+    /// lookups skip re-descending + re-parsing the parent INODE_ITEM purely for the
+    /// ENOTDIR check (bd-cc-btrfs-parent). 0 = unset (inode 0 is never a parent).
+    btrfs_verified_dir_inode: AtomicU64,
     /// Verified+parsed btrfs tree nodes cached by logical address (bd-jgx7u,
     /// bd-3n3ds — the kernel's `extent_buffer` model). On a read-only mount the
     /// on-disk metadata is immutable, so repeated tree descents (every
@@ -3627,6 +3633,7 @@ impl OpenFs {
             ro_snapshot: std::sync::OnceLock::new(),
             btrfs_fs_tree_root_cache: Mutex::new(rustc_hash::FxHashMap::default()),
             btrfs_fs_tree_root_fast: AtomicU64::new(0),
+            btrfs_verified_dir_inode: AtomicU64::new(0),
             btrfs_parsed_node_cache: ShardedCache::new(),
             btrfs_decompressed_extent_cache: ShardedCache::new(),
         };
@@ -7866,9 +7873,17 @@ impl OpenFs {
         // keyed lookup (btrfs_lookup_dir_entry, bd-a9wot) and the keyed getxattr
         // fast path. Real btrfs always writes a DIR_ITEM, so this resolves the
         // name without ever scanning the directory (bd-k115m).
-        let parent_attr = self.btrfs_read_inode_attr(cx, parent)?;
-        if parent_attr.kind != FileType::Directory {
-            return Err(FfsError::NotDirectory);
+        // Skip the parent INODE_ITEM read+parse when this parent was already
+        // verified to be a directory (invariant on a read-only mount) — a directory
+        // scan repeats the same parent, so this drops one of the two inode reads per
+        // lookup (bd-cc-btrfs-parent).
+        if self.btrfs_verified_dir_inode.load(Ordering::Relaxed) != parent.0 {
+            let parent_attr = self.btrfs_read_inode_attr(cx, parent)?;
+            if parent_attr.kind != FileType::Directory {
+                return Err(FfsError::NotDirectory);
+            }
+            self.btrfs_verified_dir_inode
+                .store(parent.0, Ordering::Relaxed);
         }
         let name_hash = ffs_btrfs::btrfs_name_hash(name);
         let dir_item_lo = BtrfsKey {

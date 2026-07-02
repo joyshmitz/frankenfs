@@ -5120,3 +5120,20 @@ as the MVCC flag (faa65c91).
 compares) ties FxHashMap (hash + probe); the `get` cost is the per-call Mutex lock + Arc clone, NOT
 the map lookup. Reverted (stash `cc-ffs-core-sharded-cache-FxHashMap-…`). Consistent with the session
 meta-lesson: structure swaps on a non-bottleneck are neutral; the lock/clone, not the map, is the floor.
+
+## ★★ LANDED — 2026-07-02 — btrfs read-only lookup: cache last verified-directory parent → ~1.44x btrfs lookup (CrimsonFox)
+
+The read-only `btrfs_lookup_child` read + parsed the PARENT inode (`btrfs_read_inode_attr(parent)`)
+on every call purely for the `ENOTDIR` check — a full point-descent + `parse_inode_item` +
+attr-convert, i.e. ONE of the ~3 descents per lookup (parent inode + dir_item + child inode). A
+directory's dir-ness is immutable on a read-only mount and a directory scan (`ls`, readdir+stat,
+path resolution of siblings) repeats the SAME parent, so added `btrfs_verified_dir_inode: AtomicU64`
+(lock-free): a repeat parent skips the whole parent read; a new/non-dir parent still reads +
+verifies + records. Safe because only VERIFIED directories are cached, so the ENOTDIR path is
+unchanged (a non-dir never matches the cache). **MEASURED ~1.44x btrfs lookup** (two-binary
+interleaved A/B, 400k lookups, 10 runs: NEW wins 10/10, median 4.052M vs 2.814M lookups/s) — the
+biggest single btrfs win, since it drops a full descent+parse (~1/3 of the op). Gates: ffs-core
+btrfs 360/0, conformance 100/0/2 (ENOTDIR negatives hold). **Cumulative btrfs read-only lookup ≈
+3.1x this session** (walker FxHashSet × DIR_ITEM point × INODE_ITEM point × floor depth-limit ×
+MVCC empty-store skip × root AtomicU64 × parent-dir cache). Third application of the
+lock-free-cache-for-an-invariant pattern (after MVCC flag faa65c91 + root 5de1eb15).
