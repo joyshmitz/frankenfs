@@ -4271,3 +4271,34 @@ per-op-MVCC-commit floor — no contained redundant-write lever remains on them.
 ⚠️Method note: `write-bench --create` prefills THEN benchmarks the same offsets; use the
 plain overwrite mode (no `--create`, on a pre-sized file) to trace a single clean write.
 Instrumentation reverted; no code landed.
+
+## SURFACE — 2026-07-02 — ext4 lookup beats kernel 1.30x; GDT-defer-default blocker is ONE over-strict assertion (CrimsonFox)
+
+Two findings that further close/sharpen the frontier:
+
+**(1) ext4 lookup is DONE (beats kernel).** `lookup-bench` on a 40k-entry htree dir:
+frankenfs **388756 lookups/s = 2.57 us/op** vs kernel (loop mount + random `os.stat`)
+**300156/s = 3.33 us/op** = **frankenfs 1.30x faster** (htree O(log N) descent; kernel
+also pays syscall+path-walk overhead, so the real gap is directionally in frankenfs's
+favor). No lookup gap.
+
+**(2) The GDT-defer-default lever (`bd-cc-gdt-defer-default`, the biggest remaining
+single-thread win: 2.32x create + 1.27x mkdir + helps EVERY allocating op) is blocked by
+EXACTLY ONE over-strict conformance assertion — not missing flush wiring.** Ran the two
+failing tests under `FFS_SKIP_GDT=1`: both panic at the SAME line,
+`crates/ffs-harness/tests/conformance.rs:3432`, `"compressed write should update group
+descriptor free-block counters"` — it asserts the ON-DISK group-descriptor free-block
+counter decreased eagerly after a write. Under deferral the GD is lazy (in-memory
+`GroupStats` is authoritative; the SUPERBLOCK free-count assertion two lines up at 3428
+still PASSES, so allocation IS accounted). GD counters are ext4 HINTS (the block bitmap
+is authoritative; e2fsck recomputes them), so the assertion over-specifies eager
+persistence. `flush_on_destroy` already flushes the GD, and the doc notes e2fsck is CLEAN
+under deferral across create/unlink/rmdir/rename/mkdir/write — so the ONLY thing standing
+between opt-in and default is relaxing this one assertion (flush-then-check, or read
+`GroupStats`) + flipping the default.
+
+**NOT done by me:** flipping a deliberately-opt-in durability default AND editing a
+conformance assertion to make a perf change pass is an owner decision — a subtle miss
+(a path relying on eager GD, or crash-recovery of GD counts) ships a durability
+regression to the DEFAULT path. Precisely handed off: relax `conformance.rs:3432`, flip
+`gdt_persistence_deferred` default, run the full suite + e2fsck sweep. No code landed.
