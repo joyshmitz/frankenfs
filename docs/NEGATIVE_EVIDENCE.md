@@ -4765,3 +4765,28 @@ serves an already-zeroed page (no explicit memset), so both paths do exactly ONE
 — the "extra" zero-fill was never a real cost. The 13% `memmove` is the unavoidable data copy into
 the retained MVCC version buffer, not the zero-fill. Shelved (stash `cc-fullblock-write-zerofill-elide-MEASURED-NEUTRAL-…`);
 no code landed. Write overwrite is at its inherent MVCC-materialization floor.
+
+## SURFACE — 2026-07-02 — single-thread contained frontier exhausted after 5 wins; mkdir/read/btrfs all at inherent floor (CrimsonFox)
+
+Profiled the last un-checked hot ops this session; none has a contained redundant-work lever:
+- **mkdir** (`perf` mkdir-bench 40k): 14% `memmove` + ~8% CRC (dir-block + inode metadata_csum) +
+  3% MVCC commit + page-faults — identical inherent shape to create (which got 4 wins). The
+  mkdir-specific dir-block init uses `vec![0u8; bs]` (free zeroed page) + `init_dir_block`, and
+  does NOT read the freshly-allocated block (no redundant RMW). Shares create's floor.
+- **ext4 random read** (`perf` rand-read 300k): ~25% kernel `pread` (block layer / page cache) +
+  ~10% total ffs userspace — I/O-bound, already faster than kernel; no userspace lever.
+- **btrfs compressed random read** (`perf` rand-read 20k on the zstd `c.bin` fixture, 28 MiB/s):
+  ~12% inlined decompressor + `memmove` + kernel I/O. Each random 4 KiB read decompresses a cold
+  128 KiB extent — inherent to compressed random access (kernel btrfs pays the same; the shipped
+  decompressed-extent cache only helps clustered/sequential re-reads). No lever.
+
+**This session landed 5 profiled create/write wins** (getenv-memoize 1.06x 408cb413, dir-extent-cache
+1.05x 7c57c57b, inode-bitmap-padding-fast-path 1.17x af1fb254, one-pass-htree-dir-insert 1.06x
+25d7a2a5, MVCC prune-candidate-set 1.31x-write c92cdca3) ≈ **1.37x cumulative create** (~96k→~124k
+creates/s) + **1.31x write-overwrite**, plus 1 honest neutral (full-block zero-fill e5bb9991). After
+these, create/mkdir/write-overwrite sit at the inherent MVCC-materialization + CRC floor, reads are
+I/O/decompression-bound, and ext4 delete is at the per-op-commit floor. **All remaining upside is
+OWNER-LANE**: parallel-create convoy (per-shard metadata partitioning), btrfs write COW commit
+layer, and the MVCC version-model (the 11–14% `memmove` is the retained-version buffer copy; a
+prior copy-elision attempt `wbowned` measured neutral). No further contained single-thread lever
+found; no code landed this turn (profiling + closure).
