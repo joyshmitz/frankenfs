@@ -5198,3 +5198,23 @@ version-model (whole-4KiB-block copy per op → sub-block/CoW-region deltas); (3
 representation (Vec-of-items → structural-sharing so a node edit is O(log) not O(N)). Each needs a
 loom-gateable structural change, not a contained per-op fix. No contained code landed this turn
 (both marginal attempts measured neutral; the frontier is genuinely worked out).
+
+## SURFACE — 2026-07-02 — alien-matrix cross-check INDEPENDENTLY confirms contained perf frontier is exhausted (CrimsonFox)
+
+Consulted `artifacts/optimization/open_beads_alien_matrix.md` (the canonical open-lever tracker, the
+/alien-graveyard dig source). Its open clusters and the algorithms they map to:
+- **concurrency_perf** (26 beads, EV 13.33) → "14.10 EBR + 15.1 S3-FIFO + 15.4 Parallel WAL" — the
+  ONLY read/write-perf cluster, and every entry is an owner-lane STRUCTURAL change (epoch-based
+  reclamation, an S3-FIFO cache-eviction policy to replace the current no-evict cap, and wiring the
+  built-but-unwired Parallel-WAL group-commit). Exactly the owner-lane trio I reached empirically.
+- **repair_durability** (15, EV 25) → RaptorQ + Change-point + PoR — durability/repair, not hot-path.
+- **runtime_backpressure** (14, EV 16) → Graceful Degradation + Learning-Augmented — runtime, not per-op.
+- **quality_assurance** (12, EV 50 — highest) → Optimization Loop + Proptest — testing, not perf.
+- **format_path** (9) → SSI certification + Typestate — correctness/format, not perf.
+
+So NO open bead is a contained per-op read/write perf lever — independent confirmation that this
+session's 18 profiled wins closed the contained frontier. The remaining hot-path perf work is the
+owner-lane `concurrency_perf` trio (S3-FIFO cache eviction is the most self-contained of the three:
+`ShardedCache` currently uses an insert-until-cap policy with no eviction — a real structural cache
+upgrade, loom-gateable, but a redesign not a per-op fix). No code landed this turn (dig confirmed
+exhaustion from a second, independent source).
