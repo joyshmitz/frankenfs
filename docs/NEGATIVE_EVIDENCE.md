@@ -4790,3 +4790,29 @@ OWNER-LANE**: parallel-create convoy (per-shard metadata partitioning), btrfs wr
 layer, and the MVCC version-model (the 11–14% `memmove` is the retained-version buffer copy; a
 prior copy-elision attempt `wbowned` measured neutral). No further contained single-thread lever
 found; no code landed this turn (profiling + closure).
+
+## SURFACE — 2026-07-02 — parallel convoy re-confirmed post-wins; growing-write bw-tree BTreeSet is a marginal/delicate candidate (CrimsonFox)
+
+Two data points after this session's 5 single-thread wins:
+
+**Parallel create still negatively scales** (fresh measure, post-wins): 1t=113643 → 2t=98272 →
+4t=68197 → 8t=63563 → 16t=55303 → 32t=51568 creates/s. The single-thread wins raised the absolute
+numbers but not the scaling signature. `perf` at 8t shows the SAME per-op work as 1t (memmove
+11%, commit 3.6%, CRC, add_entry) — i.e. the loss is pure serialization, not extra work. Confirms
+the owner-lane blocker: the global `alloc_mutex.write()` held across the whole create + Orlov
+subdir-clustering onto shared inode-table blocks (the commit-publication gate was previously
+MEASURED-INERT, so it is NOT the serializer — the alloc_mutex is). Fix = per-group alloc locking +
+dir-spreading, together (releasing the lock alone → FCW conflicts, already REFUTED).
+
+**Growing-write bw-tree candidate (contained, marginal, delicate — NOT landed):** `perf` on a
+120k-block growing file write shows ~2.2% self in `BTreeMap<BlockNumber,SetValZST>::IntoIter::dying_next`
+= dropping the `shadowed_keys: BTreeSet<BwKey>` built per bw-tree node materialization
+(`bounded_range_from_base`, bw_tree.rs:1036), once per extent op. Delta chains are normally
+≤ `DEFAULT_CONSOLIDATION_THRESHOLD`=16, so an inline `SmallVec` + linear `contains` would drop the
+per-op heap alloc + BTree-node dealloc (~2-3%). BUT chains can spike to `MAX_CHAIN_WALK`=16384
+before consolidation catches up, making a naive linear `contains` O(N²)-unsafe — a clean fix needs
+a short-chain-only fast path with a BTreeSet fallback, not worth rushing for ~3% on the
+less-dominant growing-write path. Characterized for a future focused effort.
+
+Everything else (create/mkdir/write-overwrite at MVCC floor, reads I/O/decompression-bound, delete
+at commit floor) has no contained lever. No code landed this turn (measurement + characterization).
