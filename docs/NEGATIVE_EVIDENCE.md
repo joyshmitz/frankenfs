@@ -4851,3 +4851,17 @@ cleanly separated, ~4.39M vs ~3.72M). Broad: helps EVERY inode read (stat / open
 / file read), the most frequent ops. Gates: ffs-core `--lib` **1185/0**, conformance **100/0/2**.
 ⭐LESSON: an invariant field (mkfs-fixed layout) resolved through a per-op MVCC-aware cache probe
 is pure waste — memoize it in a plain lock-free array and skip the versioned-read machinery.
+
+## ★ LANDED — 2026-07-02 — route rename's remove-side extent resolution through the dir-extent cache → ~1.09x rename (CrimsonFox)
+
+`perf` on rename-bench (40k, one dir): `parse_extent_leaf` ~5.9% — `ext4_rename` re-parsed the
+parent directory's extent tree per op via UNCACHED `collect_extents` on the remove side (src-parent
+remove at lib.rs:21580, existing-target remove at 21458), while the shipped dir-extent-cache
+(`ext4_write_extents_with_scope`, 7c57c57b) only covered the ADD side. Routed both remove-side
+resolutions through the cached snapshot: the add already populated it for this parent, so a
+non-growing rename reuses the parse; a growing add invalidated the snapshot (it is keyed by
+extent-root content), so the fresh post-growth re-read that rename requires still happens.
+**MEASURED ~1.09x rename** (two-binary interleaved A/B, 40k renames, 6 runs: NEW wins 6/6, min NEW
+69433 > max OLD 68436 renames/s — cleanly separated, ~71.3k vs ~65.7k). Gates: ffs-core `--lib`
+**1185/0**, conformance **100/0/2**, e2fsck CLEAN on a 40k-rename image (no corrupt/unattached
+entries). Also helps rename-over-existing (the 21458 path).

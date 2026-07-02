@@ -21454,8 +21454,11 @@ impl OpenFs {
                 Self::ext4_checked_links_count_delta(existing_inode.links_count, existing_ino, -1)?;
             }
 
-            // Remove the existing target.
-            let extents = self.collect_extents(cx, &new_parent_inode)?;
+            // Remove the existing target. Cached extent snapshot (self-invalidating
+            // on growth) instead of a fresh full parse (bd-cc-itableloc sibling).
+            let extents = self
+                .ext4_write_extents_with_scope(cx, &RequestScope::empty(), &new_parent_inode)?
+                .to_vec();
             let reserved_tail = self.ext4_dir_reserved_tail();
             // htree fast path first (O(log N)); linear scan fallback (bd-gauub).
             let removed_existing_via_htree = self
@@ -21577,7 +21580,15 @@ impl OpenFs {
         // the directory's htree, so the pre-mutation `parent_inode` snapshot's
         // extents would be stale.
         let src_parent_fresh = self.read_inode(cx, parent)?;
-        let src_extents = self.collect_extents(cx, &src_parent_fresh)?;
+        // Route through the cached write-extent snapshot (bd-cc-itableloc sibling):
+        // the add above already populated it for this parent, so a non-growing
+        // rename reuses the parse; a growing add invalidated the snapshot, so this
+        // still re-collects the fresh post-growth extents the comment above needs
+        // (the snapshot is keyed by extent-root content). Saves the per-rename
+        // `parse_extent_leaf` re-parse of the parent's extent tree.
+        let src_extents = self
+            .ext4_write_extents_with_scope(cx, &RequestScope::empty(), &src_parent_fresh)?
+            .to_vec();
         let reserved_tail = self.ext4_dir_reserved_tail();
         // htree fast path: descend the dx index to the hash-target leaf and remove
         // there (O(log N)), keeping rename O(log N) per op for a large directory.
