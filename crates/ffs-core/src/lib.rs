@@ -17211,9 +17211,22 @@ impl OpenFs {
             };
             let dev = &tx_dev;
 
-            // Collect existing directory extents.
+            // Collect existing directory extents. Route through the cached
+            // write-extent snapshot (keyed by parent inode identity + extent-root
+            // content) instead of re-parsing the parent's whole extent tree on
+            // EVERY insert: a create-heavy directory grows only ~1 block per ~200
+            // entries, so the layout is stable across the intervening inserts, yet
+            // `collect_extents` re-read + re-parsed every external extent leaf per
+            // create (`parse_extent_leaf` ~4% of a create, perf). The existing
+            // growth path already `invalidate_ext4_write_extent_snapshot`s the
+            // parent when it allocates a new dir block, so the cache never serves a
+            // stale mapping; a cache miss simply re-collects (always correct), and
+            // the single-entry cache degrades to neutral (not wrong) under a mixed
+            // create+file-write workload (bd-cc-dirextcache).
             Self::ext4_reject_inline_data_dir(parent_inode)?;
-            let extents = self.collect_extents(cx, parent_inode)?;
+            let extents = self
+                .ext4_write_extents_with_scope(cx, &RequestScope::empty(), parent_inode)?
+                .to_vec();
 
             // Try adding to each existing block.
             let child_ino_u32 = u32::try_from(child_ino.0)

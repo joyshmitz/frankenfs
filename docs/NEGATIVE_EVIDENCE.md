@@ -4667,3 +4667,23 @@ separated). Broad: `block_device_adapter` is on every writable FsOp, so unlink/r
 benefit too. Gates: ffs-core `--lib` **1185/0**, conformance **100/0/2**. The read-path
 `FFS_*_READ_CHUNK_BLOCKS` getenvs were already `OnceLock`-memoized (checked). ⭐LESSON: `perf`
 surfaces `getenv` syscalls that hide in "config" reads — memoize any `env::var` reachable per-op.
+
+## ★ LANDED — 2026-07-02 — cache the parent dir's extents across inserts → ~1.05x create (CrimsonFox)
+
+`perf` on create-bench (post-getenv-fix): `parse_extent_leaf` ~4% + `collect_extents`. Root
+cause: `ext4_add_dir_entry` re-parsed the parent directory's ENTIRE extent tree on EVERY insert
+(`collect_extents`), even though a create-heavy dir grows only ~1 block per ~200 entries — the
+extent layout is stable across the intervening inserts. Routed it through the existing cached
+`ext4_write_extents_with_scope` snapshot (keyed by parent inode identity + extent-root content);
+the growth path ALREADY calls `invalidate_ext4_write_extent_snapshot(&parent_upd)` when it
+allocates a new dir block, so the cache never serves a stale mapping, a miss simply re-collects
+(always correct), and the single-entry cache degrades to neutral (not wrong) under mixed
+create+file-write. Kept `.to_vec()` so callers are unchanged (avoids the re-parse; the small
+extent-array copy remains). **MEASURED ~1.05x create** (two-binary interleaved A/B, 30k creates,
+10 runs: NEW wins 8/10, median NEW ~103.7k vs OLD ~98.4k creates/s). Helps every dir-insert op
+(create/mkdir/link/mknod/symlink) once the dir has an external extent tree. Gates: ffs-core
+`--lib` **1185/0**, conformance **100/0/2**, e2fsck CLEAN on a 30k-create image (30012 files; the
+"extent tree could be narrower" note is pre-existing on OLD too, not a regression). ⭐GOTCHA: a
+40k-create test hit `ENOSPC` at file 38388 = the 600M image's ~38400-inode limit, NOT a cache bug
+(create-bench errors before its final flush, so e2fsck then shows only the pre-existing files —
+size the image's inode count to the create count).
