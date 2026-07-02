@@ -7841,7 +7841,24 @@ impl OpenFs {
             item_type: BTRFS_ITEM_DIR_ITEM,
             offset: u64::from(name_hash) + 1,
         };
-        let bucket = self.walk_btrfs_fs_tree_range(cx, dir_item_lo, dir_item_hi)?;
+        // The DIR_ITEM key is exact — (parent, DIR_ITEM, name_hash) — so a point
+        // descent to that single key resolves the name in O(log N) node reads
+        // instead of dispatching the full parallel range-walker (per-descent cycle
+        // HashSets + `collect_leaf_items` copy + walk machinery, ~50% of a btrfs
+        // read-only lookup, perf) for a one-key span. The floor descent returns the
+        // largest key <= target, so filter to an exact match. Only valid when there
+        // is no tree-log overlay to merge (empty on a clean read-only mount); a
+        // non-empty log falls back to the overlay-applying range walk. Keys are
+        // unique in a btrfs tree, so the floor-exact result is identical to the
+        // one-key range walk's (bd-cc-btrfs-point).
+        let bucket: Vec<BtrfsLeafEntry> = if self.btrfs_tree_log_items.is_empty() {
+            self.walk_btrfs_fs_tree_floor(cx, dir_item_lo)?
+                .filter(|e| e.key == dir_item_lo)
+                .into_iter()
+                .collect()
+        } else {
+            self.walk_btrfs_fs_tree_range(cx, dir_item_lo, dir_item_hi)?
+        };
         for item in &bucket {
             let dir_items = parse_dir_items(&item.data).map_err(|e| parse_to_ffs_error(&e))?;
             for dir_item in dir_items {

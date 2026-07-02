@@ -4991,3 +4991,21 @@ cheap, and `alloc_zeroed` pages are free. The wins this session all came from el
 WORK (re-parses, re-descents, per-op syscalls, wrong hasher, whole-region rescans), never from
 shaving allocations. The remaining btrfs-lookup gap needs the structural point-descent (0d6d7d48),
 not alloc tuning. No code landed this turn (measured-negative, reverted).
+
+## ★ LANDED — 2026-07-02 — btrfs read-only dir lookup: point-descent instead of the range-walker → ~1.09x btrfs lookup (CrimsonFox)
+
+Executed the 0d6d7d48 characterization (redundant-WORK elimination, not alloc tuning). The
+read-only `btrfs_lookup_child` (lib.rs:7844) resolved a name by dispatching the full parallel
+range-walker over the SINGLE-KEY span `(parent,DIR_ITEM,name_hash) .. +1` — paying the per-descent
+cycle HashSets + `collect_leaf_items` copy + walk machinery for a one-key lookup. Replaced it (when
+`btrfs_tree_log_items.is_empty()`, the clean read-only case) with the existing lean
+`walk_btrfs_fs_tree_floor` point-descent (O(log N) node reads, no HashSet, returns one entry),
+filtered to the exact key — identical result since btrfs keys are unique. A non-empty tree-log
+falls back to the overlay-applying range walk (correct); the rare DIR_INDEX fallback is unchanged.
+**MEASURED ~1.09x btrfs lookup** (two-binary interleaved A/B, 300k lookups, 8 runs: NEW wins 7/8,
+median NEW 1.575M vs OLD 1.443M lookups/s). Gates: ffs-core `--lib` **1185/0**, conformance
+**100/0/2** (exercises real btrfs lookups), lookups resolve correctly. Smaller than the raw
+walker-% because the O(log N) node READS are inherent (shared with the walker) and the inode reads
+already hit the cached read-plan index — the win is eliminating the walker's HashSet/collect/parallel
+overhead. Combined with the FxHashSet walker win (0f1cf775), btrfs read-only lookup is now ~1.16x
+faster than session start. Residual gap vs ext4 is the inherent node-read descent + inode parse.
