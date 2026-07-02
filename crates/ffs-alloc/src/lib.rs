@@ -1680,11 +1680,38 @@ pub fn reserved_inodes_in_group(geo: &FsGeometry, group: GroupNumber) -> Vec<u32
 /// (ext4_e2compr_write_readback, full_conformance_gate_pass) go e2fsck-dirty
 /// under deferral — those paths persist via a boundary the GDT flush pass is not
 /// yet wired into; default-on needs that wiring first (bd-cc-gdt-defer-default).
+thread_local! {
+    /// Per-thread override of [`gdt_persistence_deferred`], `None` = use the global
+    /// env default. Set by [`set_gdt_persistence_deferred_for_test`] so an
+    /// eager-GDT-path unit test (in any crate) can pin eager mode regardless of the
+    /// now-default deferral, without depending on the process-global `OnceLock` init
+    /// order. Untouched in production (always `None` → one cheap TLS load per call).
+    static GDT_DEFER_OVERRIDE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// Test-only: pin `gdt_persistence_deferred()` on the current thread. Pass
+/// `Some(false)` to force eager per-op GD persistence (what the eager-path alloc
+/// tests validate), `Some(true)` for deferral, or `None` to fall back to the env
+/// default. `#[doc(hidden)]` — not part of the stable API.
+#[doc(hidden)]
+pub fn set_gdt_persistence_deferred_for_test(value: Option<bool>) {
+    GDT_DEFER_OVERRIDE.with(|c| c.set(value));
+}
+
 #[must_use]
 pub fn gdt_persistence_deferred() -> bool {
+    if let Some(forced) = GDT_DEFER_OVERRIDE.with(std::cell::Cell::get) {
+        return forced;
+    }
     use std::sync::OnceLock;
     static SKIP: OnceLock<bool> = OnceLock::new();
-    *SKIP.get_or_init(|| std::env::var("FFS_SKIP_GDT").is_ok())
+    // Default ON (bd-cc-gdt-defer-default): GroupStats is the authoritative in-memory
+    // count and the GD is flushed at every durability boundary
+    // (flush_mvcc_to_device / sync_all_to_device / flush_on_destroy). Allocation reads
+    // the authoritative bitmap, so a stale on-disk GD after an unclean stop is a
+    // cosmetic free-count hint that e2fsck recomputes — no corruption. Opt back into
+    // eager per-op GD persistence with FFS_SKIP_GDT=0 (for A/B).
+    *SKIP.get_or_init(|| std::env::var("FFS_SKIP_GDT").as_deref() != Ok("0"))
 }
 
 fn persist_group_desc_with_bitmap_overrides(
@@ -4286,6 +4313,10 @@ mod tests {
 
     #[test]
     fn alloc_persist_skips_reserved_and_updates_gdt() {
+        // GDT persistence now defaults to deferral (bd-cc-gdt-defer); this test
+        // asserts the on-disk descriptor after a per-op `*_persist`, so it
+        // validates the EAGER persist path — pin eager mode.
+        set_gdt_persistence_deferred_for_test(Some(false));
         let cx = test_cx();
         let dev = MemBlockDevice::new(4096);
         let geo = make_geometry();
@@ -4328,6 +4359,9 @@ mod tests {
 
     #[test]
     fn alloc_persist_gdt_write_failure_restores_bitmap_and_group_stats() {
+        // Validates the EAGER per-op GDT persist path (bd-cc-gdt-defer default is
+        // now deferral, which skips the descriptor write) — pin eager mode.
+        set_gdt_persistence_deferred_for_test(Some(false));
         let cx = test_cx();
         let dev = MemBlockDevice::new(4096);
         let geo = make_geometry();
@@ -4375,6 +4409,8 @@ mod tests {
 
     #[test]
     fn free_persist_gdt_write_failure_restores_bitmap_and_group_stats() {
+        // Validates the EAGER per-op GDT persist path (bd-cc-gdt-defer). Pin eager.
+        set_gdt_persistence_deferred_for_test(Some(false));
         let cx = test_cx();
         let dev = MemBlockDevice::new(4096);
         let geo = make_geometry();
@@ -4424,6 +4460,8 @@ mod tests {
 
     #[test]
     fn alloc_inode_persist_gdt_write_failure_restores_bitmap_and_group_stats() {
+        // Validates the EAGER per-op GDT persist path (bd-cc-gdt-defer). Pin eager.
+        set_gdt_persistence_deferred_for_test(Some(false));
         let cx = test_cx();
         let dev = MemBlockDevice::new(4096);
         let geo = make_geometry();
@@ -4466,6 +4504,8 @@ mod tests {
 
     #[test]
     fn free_inode_persist_gdt_write_failure_restores_bitmap_and_group_stats() {
+        // Validates the EAGER per-op GDT persist path (bd-cc-gdt-defer). Pin eager.
+        set_gdt_persistence_deferred_for_test(Some(false));
         let cx = test_cx();
         let dev = MemBlockDevice::new(4096);
         let geo = make_geometry();
@@ -4651,6 +4691,8 @@ mod tests {
 
     #[test]
     fn alloc_and_free_persist_keep_bitmap_checksums_in_sync() {
+        // Validates the EAGER per-op GDT persist path (bd-cc-gdt-defer). Pin eager.
+        set_gdt_persistence_deferred_for_test(Some(false));
         let cx = test_cx();
         let dev = MemBlockDevice::new(4096);
         let mut geo = make_geometry();
@@ -4931,6 +4973,8 @@ mod tests {
 
     #[test]
     fn free_blocks_persist_cross_boundary_splits_bigalloc_segments() {
+        // Validates the EAGER per-op GDT persist path (bd-cc-gdt-defer). Pin eager.
+        set_gdt_persistence_deferred_for_test(Some(false));
         let cx = test_cx();
         let dev = MemBlockDevice::new(4096);
         let mut geo = make_geometry();
@@ -7360,6 +7404,8 @@ InodeAlloc { ino: InodeNumber(17), group: GroupNumber(1) }
 
     #[test]
     fn batch_alloc_gdt_write_failure_restores_bitmap_and_group_stats() {
+        // Validates the EAGER per-op GDT persist path (bd-cc-gdt-defer). Pin eager.
+        set_gdt_persistence_deferred_for_test(Some(false));
         let cx = test_cx();
         let dev = MemBlockDevice::new(4096);
         let geo = make_geometry();

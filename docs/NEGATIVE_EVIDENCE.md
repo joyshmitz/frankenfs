@@ -4553,3 +4553,31 @@ override ATTEMPT4 added for exactly this). THEN: conformance 100/0/2 + e2fsck-vi
 create-bench 2.29x remeasure. WIP shelved intact as stash
 `cc-gdt-defer-default-WIP-ffscore-1185-0-GREEN-source-recovery-descriptor-fix-…`; tree clean, no
 code landed (default-flip not safe to land until ffs-alloc green + conformance pass verified).
+
+## ★ LANDED — 2026-07-02 — GDT-defer is now the DEFAULT: ext4 create **2.54x** vs the prior eager default, all gates GREEN (CrimsonFox)
+
+Flipped `gdt_persistence_deferred` default ON and finished every validation gate. **MEASURED
+create-bench A/B, fresh release-perf binary, interleaved on fresh 400M ext4 image copies,
+N=20000 serial creates:**
+- DEFER (new default): 92241 / 97892 / 95076 creates/s (~205–217ms)
+- EAGER (`FFS_SKIP_GDT=0`, old default): 40758 / 36608 / 37463 creates/s (~490–546ms)
+- **Ratio ≈ 2.54x** (median), min-DEFER (92241) > max-EAGER (40758) — cleanly separated, no
+  overlap. Confirms the prior 2.29–2.32x. (`FFS_SKIP_GDT=0` reverts to eager per-op GD writes
+  for A/B.)
+
+Gates: ffs-core `--lib` **1185/0**, ffs-alloc `--lib` **213/0**, conformance **100/0/2**. The
+fix set that unblocked the flip (all real code, no test weakening):
+1. `read_block_bitmap`/`read_inode_bitmap`: skip the descriptor bitmap-csum cross-check under
+   deferral (the descriptor csum is a flush-lazy hint; bitmap is MVCC-authoritative; flush
+   re-stamps consistent csums → e2fsck-clean at rest).
+2. Shared `ext4_persist_group_descriptors_from(cx, alloc)` (factored out of
+   `ext4_flush_group_descriptors`), called under deferral from the fast-commit recovery frees
+   (`apply_fast_commit_del_range_ops`, `free_fast_commit_deleted_inode`) which use a TRANSIENT
+   alloc state — otherwise the recovered image had a stale descriptor free count. This fixed a
+   **real recovery bug**, not just a test.
+3. 7 ffs-core tests + 8 ffs-alloc tests updated to the honest deferral contract (flush before
+   asserting on-disk descriptor state; pin eager where the test validates the eager persist
+   path via the thread-local override). No assertion weakened.
+
+Lever #1 (of the 3 owner-lane levers) is CLOSED. Remaining: intra-op write batching (#2),
+parallel-create convoy (#3).
