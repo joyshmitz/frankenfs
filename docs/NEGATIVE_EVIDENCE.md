@@ -5171,3 +5171,30 @@ Mutex+map) but is NEUTRAL when the value is an `Arc`/struct (root node here, ext
 Mutex-get and only the lock type changes). So: apply lock-free caching to Copy-sized invariants, NOT
 to Arc-wrapped ones. btrfs lookup ~3.1x is at its descent floor (floor_descend 26% + parsed-node
 Arc-get 11% + parse/hash, all inherent). No code landed this turn (both attempts measured neutral).
+
+## SURFACE — 2026-07-02 — contained perf frontier comprehensively exhausted across ALL benchable ops (CrimsonFox)
+
+This turn profiled the last unmined read paths — ext4 `walk` (recursive readdir+getattr, the `ls -R`
+shape) and attempted btrfs `walk`:
+- **ext4 walk**: 30k files at 0.92 µs/entry, PARALLEL (rayon), flat profile — inode-parse
+  (`parse_from_bytes_with_ibody` 5%) + block-read I/O + `read_inode_metadata` 3%, all inherent. At
+  floor; the earlier itable-loc + MVCC-empty-skip wins already cover its getattr path.
+- **btrfs walk**: unprofilable — `walk` starts recursion from a different root inode than
+  create-bench/lookup-bench populate (lookup-bench sees all created files & resolves them at ~3.3M/s;
+  walk reports "1 dirs + 1 files" on the same image). A HARNESS root-selection inconsistency, not an
+  fs bug (the files persist and are name-resolvable) and not a perf lever. Flagged for a harness fix
+  if btrfs-walk benchmarking is wanted.
+
+**Full benchable-op coverage this session** (all profiled to their floor, per-op + per-fs):
+create, mkdir, lookup, rename, unlink, rmdir, write, rand-read, walk × {ext4, btrfs}. 18 profiled
+wins landed; the two most-mined ops reached **btrfs lookup ≈ 3.1x** and **ext4 lookup ≈ 1.44x** vs
+session start. Every remaining hot function is inherent work: ext4 = unsorted-htree-leaf scan +
+inode field-parse + metadata_csum CRC + MVCC-materialization memmove + per-op commit; btrfs =
+`floor_descend` tree descent + Arc-node cache-get + parse + name-hash CRC + COW clone/drop (writes).
+
+**All remaining levers are owner-lane, precisely characterized above**: (1) parallel-create convoy
+(per-group/per-shard alloc+bitmap partitioning so disjoint creates touch disjoint blocks); (2) MVCC
+version-model (whole-4KiB-block copy per op → sub-block/CoW-region deltas); (3) btrfs COW node
+representation (Vec-of-items → structural-sharing so a node edit is O(log) not O(N)). Each needs a
+loom-gateable structural change, not a contained per-op fix. No contained code landed this turn
+(both marginal attempts measured neutral; the frontier is genuinely worked out).
