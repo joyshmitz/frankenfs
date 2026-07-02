@@ -4687,3 +4687,21 @@ extent-array copy remains). **MEASURED ~1.05x create** (two-binary interleaved A
 40k-create test hit `ENOSPC` at file 38388 = the 600M image's ~38400-inode limit, NOT a cache bug
 (create-bench errors before its final flush, so e2fsck then shows only the pre-existing files —
 size the image's inode count to the create count).
+
+## ★ LANDED — 2026-07-02 — inode-bitmap padding-fill O(1) fast path → ~1.17x create (CrimsonFox)
+
+`perf` on create-bench (post dir-extent-cache): **~10% self in `fill_inode_bitmap_padding_with_clear_undo`**.
+It was already byte-wise (skips whole 0xFF bytes) but STILL scanned the entire multi-KB padding
+region [inodes_per_group, 32768) on EVERY inode alloc just to confirm it was already all-0xFF —
+after the first alloc that is pure waste (the padding is invariant, set once as a contiguous
+block). Added an O(1) fast path: if the FINAL bitmap byte is 0xFF and it lies wholly in the
+padding region (`start <= total_bits - 8`, true for any real geometry since inodes_per_group is a
+few thousand vs 32768 bits/block), the whole region is already set → return, recording nothing for
+rollback exactly as the full scan does when all bytes are 0xFF. Falls through to the full loop for
+a tiny final group whose last byte still holds inode bits. **MEASURED ~1.17x create** (two-binary
+interleaved A/B, 30k creates, 6 runs: NEW wins 6/6, min NEW 112639 > max OLD 112060 — cleanly
+separated, ~120.4k vs ~102.8k creates/s). Gates: ffs-alloc `--lib` **213/0**, conformance
+**100/0/2**, e2fsck CLEAN on a 30k-create image (NO "Padding at end of inode bitmap is not set" —
+the fast path preserves the padding invariant). Helps every inode-allocating op (create/mkdir/…).
+⭐LESSON: an "already optimized to skip 0xFF bytes" scan STILL pays O(region) per op to VERIFY it's
+skippable — add an O(1) sentinel check (last byte) so the common already-done case is truly free.

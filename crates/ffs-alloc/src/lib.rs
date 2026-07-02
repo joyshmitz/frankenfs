@@ -156,6 +156,19 @@ fn fill_inode_bitmap_padding_with_clear_undo(
     if start >= total_bits {
         return;
     }
+    // O(1) fast path: the padding region [inodes_per_group, total_bits) is set as
+    // ONE contiguous block, so once the FINAL byte is 0xFF the whole region is
+    // already padded and there is nothing to do. For any real geometry the last
+    // byte lies wholly in the padding region (inodes_per_group is at most a few
+    // thousand; the bitmap block holds 32768 bits), so `start <= total_bits - 8`
+    // guarantees this. This skips re-scanning the multi-KB padding region on every
+    // inode alloc after the first — the byte-wise scan below was still ~10% of a
+    // create (bd-cc-inodepad). Records nothing for rollback, exactly as the full
+    // scan does when it finds every byte already 0xFF. Falls through to the full
+    // loop for a tiny final group whose last byte still holds inode bits.
+    if bitmap.last() == Some(&0xFF) && start <= total_bits.saturating_sub(8) {
+        return;
+    }
     // Partial leading byte (when inodes_per_group is not byte-aligned).
     let mut bit = start;
     while bit < total_bits && bit % 8 != 0 {
