@@ -4407,3 +4407,43 @@ staged/committed writes through the block-device adapter) would plausibly unbloc
 1.83x intra-op-batch AND the 2.32x GDT-defer wins. That is the highest-leverage owner-lane
 target: the MVCC/adapter read-your-writes path, not the per-op accounting sites. No code
 landed; tree clean.
+
+## ★ CONSOLIDATED CAMPAIGN STATE — 2026-07-02 (CrimsonFox) — supersedes the scattered Cc surfaces above
+
+**Contained single-thread perf frontier is COMPLETE.** Verified op-by-op that every
+ext4/btrfs operation either beats the kernel or sits at the inherent per-op-MVCC-commit
+floor — no contained redundant-work lever remains:
+- ext4 create / write / overwrite / append / unlink / rmdir / truncate: each block
+  committed exactly once (traced via FFS_TRACE_WRITES); truncate frees per-extent-range.
+- ext4 lookup 1.30x, random read 1.30–1.57x, sequential reads + metadata walk: all FASTER
+  than kernel.
+- btrfs create / mkdir / rename / unlink: at kernel PARITY after the COW sweep.
+
+**7 measured wins shipped this campaign (all on main, e2fsck/btrfs-check + conformance
+100/0/2):** btrfs dead-version eviction (2.6–3.0x rename), separator-carry-forward (+1.13x),
+create-family DIR_ITEM dedup, rebalance separator-maintenance (1.53x unlink); ext4
+mkdir/mknod inode-defer (1.53x mkdir / 2.5x vs kernel), ext4 create-path lookup dedup.
+
+**All remaining upside is OWNER-LANE — 3 levers, exact blockers:**
+1. **GDT-defer-default → 2.32x create + 1.27x mkdir + every allocating op.** Blocker:
+   GD-read-visibility under deferral. The descriptor is written direct-to-byte-device
+   (bypassing MVCC + base-block cache, deliberately for e2fsck-exact bytes) but read back
+   via the MVCC/cached path, so `read_group_desc` returns stale bytes. 3 root-cause-targeted
+   fixes attempted (test-flush; force-flush in ext4_write_compressed; base-block-cache
+   clear) — ALL failed the e2compr assertion → it is a deep multi-layer MVCC/direct-write/
+   cache interaction, NOT a one-liner. Production is SAFE (e2fsck reads base direct = clean;
+   allocation uses authoritative in-memory GroupStats); only the niche e2compr test's read
+   view is stale. Attempts preserved in stashes "...gdt-defer-ATTEMPT[1..3]...".
+2. **Intra-op write batching → 1.83x create.** Blocker: a read inside the batched FsOp
+   bypasses the tx adapter's staged writes (`TransactionBlockAdapter::read_block` IS correct
+   — it checks `staged_write` first; the offending read uses the non-tx `FsMvccBlockDevice`).
+   Shelved WIP across several stashes; still-open group-1 bitmap corruption.
+3. **Parallel-create convoy → ~9x.** Blocker: global `alloc_mutex.write()` held for the whole
+   create (incl. the disjoint-parent dir insert). Needs the per-group interior-mutability
+   alloc refactor (git-log convoy plan).
+
+**★ Highest-leverage owner target:** the write-path MVCC read-your-writes / visibility model
+underlies BOTH #1 (committed-write visibility through the cached read path) and #2
+(staged-write visibility through non-tx reads). One focused fix there could unblock ~2x+
+create. That — not per-op accounting sites or test tweaks — is where the next dedicated
+multi-turn effort should go.
