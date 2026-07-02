@@ -353,10 +353,127 @@ pub fn add_entry_reject_existing(
     file_type: Ext4FileType,
     reserved_tail: usize,
 ) -> Result<usize> {
-    if block_contains_live_name(block, name, reserved_tail)? {
-        return Err(FfsError::Exists);
+    // Single pass: reject a duplicate live `name` AND locate the first fitting
+    // slot in ONE scan, instead of `block_contains_live_name` + `add_entry` each
+    // walking the whole ~4 KiB block (the two scans were ~4% and ~3% of a create,
+    // perf). Semantics are identical to the two-pass form: the whole block is
+    // scanned for a live duplicate before any write (we insert only after the
+    // loop completes dup-free), and the chosen slot is exactly the first-fitting
+    // one `add_entry` would pick — a leading tombstone with `rec_len >= need`, or
+    // the first live entry with `slack >= need` split in place (bd-cc-1pass-add).
+    if ino == 0 {
+        return Err(FfsError::Format(
+            "directory entry inode cannot be zero".to_owned(),
+        ));
     }
-    add_entry(block, ino, name, file_type, reserved_tail)
+    validate_name(name)?;
+    let need = required_rec_len(name.len());
+    let limit = validate_reserved_tail(block.len(), reserved_tail)?;
+    if need > limit {
+        return Err(FfsError::NoSpace);
+    }
+    if is_interior_htree_dx_node_block(block) {
+        return Err(FfsError::NoSpace);
+    }
+
+    // First fitting slot, recorded during the scan and applied only once the
+    // whole block is confirmed free of a live duplicate.
+    enum Slot {
+        Tombstone { off: usize, rec_len: usize },
+        Split { off: usize, actual: usize, slack: usize },
+    }
+    let mut slot: Option<Slot> = None;
+
+    let mut off = 0usize;
+    while off + DIR_ENTRY_HEADER_LEN <= limit {
+        let rec_len =
+            usize::from(
+                read_u16_le(block, off + 4).ok_or_else(|| FfsError::Corruption {
+                    block: 0,
+                    detail: "unable to read directory entry rec_len".to_owned(),
+                })?,
+            );
+        if rec_len < DIR_ENTRY_HEADER_LEN || (rec_len % 4) != 0 {
+            return Err(FfsError::Corruption {
+                block: 0,
+                detail: "invalid directory entry rec_len".to_owned(),
+            });
+        }
+        let end = off
+            .checked_add(rec_len)
+            .ok_or_else(|| FfsError::Corruption {
+                block: 0,
+                detail: "directory entry offset overflow".to_owned(),
+            })?;
+        if end > limit {
+            return Err(FfsError::Corruption {
+                block: 0,
+                detail: "directory entry exceeds usable block area".to_owned(),
+            });
+        }
+
+        let cur_ino = read_u32_le(block, off).ok_or_else(|| FfsError::Corruption {
+            block: 0,
+            detail: "unable to read directory entry inode".to_owned(),
+        })?;
+        let cur_name_len = usize::from(block[off + 6]);
+
+        // Validate name_len against rec_len to prevent out-of-bounds access.
+        if DIR_ENTRY_HEADER_LEN + cur_name_len > rec_len {
+            return Err(FfsError::Corruption {
+                block: 0,
+                detail: format!(
+                    "directory entry name_len {cur_name_len} exceeds rec_len {rec_len} at offset {off}"
+                ),
+            });
+        }
+
+        if cur_ino == 0 {
+            if slot.is_none() && rec_len >= need {
+                slot = Some(Slot::Tombstone { off, rec_len });
+            }
+            off = end;
+            continue;
+        }
+
+        // Live entry: duplicate check (mirrors `block_contains_live_name`).
+        if &block[off + DIR_ENTRY_HEADER_LEN..off + DIR_ENTRY_HEADER_LEN + cur_name_len] == name {
+            return Err(FfsError::Exists);
+        }
+
+        let actual = required_rec_len(cur_name_len);
+        if actual > rec_len {
+            return Err(FfsError::Corruption {
+                block: 0,
+                detail: "directory entry name length exceeds rec_len".to_owned(),
+            });
+        }
+        if slot.is_none() && rec_len - actual >= need {
+            slot = Some(Slot::Split {
+                off,
+                actual,
+                slack: rec_len - actual,
+            });
+        }
+
+        off = end;
+    }
+
+    match slot {
+        Some(Slot::Tombstone { off, rec_len }) => {
+            write_entry(block, off, ino, rec_len, file_type, name)?;
+            Ok(off)
+        }
+        Some(Slot::Split { off, actual, slack }) => {
+            let actual_u16 = u16::try_from(actual)
+                .map_err(|_| FfsError::Format("actual rec_len exceeds u16".to_owned()))?;
+            write_u16_le(block, off + 4, actual_u16)?;
+            let new_off = off + actual;
+            write_entry(block, new_off, ino, slack, file_type, name)?;
+            Ok(new_off)
+        }
+        None => Err(FfsError::NoSpace),
+    }
 }
 
 /// Remove a directory entry by name from a single directory block.

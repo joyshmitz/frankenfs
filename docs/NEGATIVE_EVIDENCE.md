@@ -4705,3 +4705,27 @@ separated, ~120.4k vs ~102.8k creates/s). Gates: ffs-alloc `--lib` **213/0**, co
 the fast path preserves the padding invariant). Helps every inode-allocating op (create/mkdir/…).
 ⭐LESSON: an "already optimized to skip 0xFF bytes" scan STILL pays O(region) per op to VERIFY it's
 skippable — add an O(1) sentinel check (last byte) so the common already-done case is truly free.
+
+## ★ LANDED — 2026-07-02 — one-pass htree dir insert (merge dup-check + slot-find) → ~1.06x create (CrimsonFox)
+
+`perf` on create-bench: `block_contains_live_name` ~4% + `add_entry` ~3% — `add_entry_reject_existing`
+walked the whole ~4 KiB target leaf TWICE per insert (pass 1 = live-duplicate check, pass 2 =
+first-fitting-slot scan). Merged into ONE pass: record the first fitting slot (leading tombstone
+with `rec_len >= need`, else first live entry with `slack >= need`) while scanning for a live
+duplicate, and apply the insert only after the loop completes dup-free. Semantics identical
+(whole block scanned for a dup before any write; same slot `add_entry` would pick) — it just does
+the rec_len-walk + bounds-validation ONCE instead of twice (strict Pareto: never more work).
+**MEASURED ~1.06x create** (two-binary interleaved A/B, 30k creates, 12 runs: NEW wins 9/12,
+median NEW ~126k vs OLD ~117k creates/s). Helps every htree dir-insert (create/mkdir/link/mknod/
+symlink). Gates: ffs-dir **90/0**, conformance **100/0/2**, e2fsck CLEAN on a 30k-create image (no
+duplicate/corrupt dir entries). `add_entry` + `block_contains_live_name` stay for their other
+callers (linear-dir pre-check, direct inserts).
+
+### Also characterized (NOT landed) — MVCC prune scans all versioned blocks
+`perf` on write-bench (overwrites): `ShardedMvccStore::prune_versions_older_than` ~6.3% —
+it iterates EVERY block in `shard.versions` every prune cycle (interval 256 commits) checking
+`len() <= 1`, even though write-once blocks sit at 1 version. A per-shard "dirty blocks" set
+(blocks that got a version since last prune, sticky until pruned back to 1) would cut it to
+O(changed). Risk = a missed dirty-mark → unbounded version chain = MEMORY LEAK (not corruption),
+so it needs a sustained-write memory-growth gate beyond conformance + likely a periodic full-scan
+safety net. Owner-lane-ish MVCC; deferred as a characterized candidate.
