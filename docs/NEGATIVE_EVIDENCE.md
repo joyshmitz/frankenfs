@@ -4971,3 +4971,23 @@ what kernel btrfs does); the only structural reduction is a sharing-friendly nod
 (owner-lane). btrfs READS have the real remaining lever (read-only point-lookup via the full
 range-walker — the 0d6d7d48 surface: point-descent + borrowed leaf read + skip per-descent HashSet,
 a focused multi-step change). No code landed this turn (btrfs delete profiling + closure).
+
+## NEGATIVE (reverted) — 2026-07-02 — pre-sizing the btrfs walker's cycle sets is SLOWER (CrimsonFox)
+
+Hypothesis: the `BtrfsParallelTreeWalker`'s `active_path`/`visited_nodes` sets grow from empty
+(0→4→8, rehashing) per walk, so `reserve(16)` would skip the rehashes (`reserve_rehash` was ~2.6%
+of btrfs lookup). Applied a `walker_node_set()` helper (`FxHashSet` + `reserve(16)`) to all walker
+constructors + `floor_descend`. ffs-btrfs 365/0. **MEASURED ~4% SLOWER** (interleaved A/B, 300k
+btrfs lookups, 8 runs: OLD empty-set median 1.45M vs NEW reserve-16 median 1.40M lookups/s, OLD
+wins 7/8). WHY: a point/inode lookup touches only ~3-8 nodes, so `reserve(16)` OVER-allocates a
+bigger table than the walk needs — the empty-then-grow path (jemalloc-cheap small growth to 8) is
+faster than one larger upfront alloc; the rehash was never the real cost. Reverted (stash
+`cc-btrfs-walker-reserve16-…`).
+
+**3rd micro-allocation neutral/negative this session** (after full-block-write zero-fill and
+bw-tree `shadowed_keys`). Firm meta-conclusion: on these hot paths, per-op allocation TUNING
+(pre-size / elide-copy / swap-structure) does NOT help — jemalloc's small-alloc path is already
+cheap, and `alloc_zeroed` pages are free. The wins this session all came from eliminating redundant
+WORK (re-parses, re-descents, per-op syscalls, wrong hasher, whole-region rescans), never from
+shaving allocations. The remaining btrfs-lookup gap needs the structural point-descent (0d6d7d48),
+not alloc tuning. No code landed this turn (measured-negative, reverted).
