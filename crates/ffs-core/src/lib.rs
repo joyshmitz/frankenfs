@@ -17145,8 +17145,21 @@ impl OpenFs {
             )));
         }
 
-        // Check for duplicate name — POSIX requires EEXIST.
-        if self.lookup_name(cx, &parent_inode, name)?.is_some() {
+        // Check for duplicate name — POSIX requires EEXIST. For a non-casefold
+        // htree directory the insert path (ext4_add_dir_entry ->
+        // ffs_dir::add_entry_reject_existing) performs a byte-exact duplicate
+        // check on the hash-correct target leaf — the ONLY block a duplicate of
+        // `name` could occupy — so this separate positive lookup_name (a full
+        // second htree descent + leaf read + scan) is redundant and is skipped,
+        // mirroring ext4_create's `htree_dedup_covers` (bd-cc-mkdir-dedup). On a
+        // collision the insert returns Err and mkdir's rollback below frees the
+        // just-allocated inode+dir-block, so the observable EEXIST is unchanged.
+        // Casefold htree (folded-name collisions) and linear dirs (a duplicate can
+        // sit in a block other than the one with free space) keep the pre-check.
+        let htree_dedup_covers = parent_inode.has_htree_index()
+            && parent_inode.flags & ffs_types::EXT4_CASEFOLD_FL == 0
+            && Self::htree_create_dedup_enabled();
+        if !htree_dedup_covers && self.lookup_name(cx, &parent_inode, name)?.is_some() {
             return Err(FfsError::Exists);
         }
 
