@@ -5027,3 +5027,23 @@ getattr/lookup). **Cumulative btrfs read-only lookup this session ≈ 1.55x** (F
 getattr/stat and any inode read on an index-less read-only mount. ⭐The point-descent (single-key
 lookup should NOT dispatch the range-walker) generalizes across btrfs single-key reads — exactly
 the redundant-WORK class the session's meta-lesson predicts wins.
+
+## ★ LANDED — 2026-07-02 — btrfs floor-descent depth-limit (drop per-descent HashSet) + FxHash root cache → ~1.27x btrfs lookup (CrimsonFox)
+
+After both point-descents, `floor_descend` (ffs-btrfs) became the hot path (22%) but still allocated
+a `visited: FxHashSet<u64>` per descent (~19%: insert 5% + malloc 6% + capacity 4% + free 3.6%) —
+run ~3×/lookup (dir item + parent/child inode). A floor descent follows ONE child per level
+(root→leaf), so a node is revisitable only via a pointer CYCLE; the HashSet only ever caught that,
+and on a single path it NEVER fires. Replaced it with a `depth: u16` counter bounded by
+`BTRFS_MAX_TREE_LEVEL + 1` (8) — zero allocation, identical cycle defense. Also swapped the
+per-lookup `btrfs_fs_tree_root_cache` from `std::HashMap` (SipHash, `hash_one` was 4.2%) to
+`FxHashMap` (internal u64 subvol keys). **MEASURED ~1.27x btrfs lookup** (interleaved A/B, 400k
+lookups, 8 runs: NEW wins 8/8 with NO overlap, min NEW 2.49M > max OLD 2.24M; median 2.697M vs
+2.132M). Gates: ffs-btrfs **365/0** (floor isomorphism tests), conformance **100/0/2**.
+
+⭐SHARPENS the meta-lesson: ELIMINATING a genuinely-redundant allocation (the floor HashSet, unused
+on a single path) WINS, while TUNING a needed-but-mis-sized one (the walker sets' reserve(16),
+28f6a96a) LOSES — the test is "is this work necessary at all," not "can I make the alloc cheaper."
+**Cumulative btrfs read-only lookup ≈ 1.97x this session** (FxHashSet walker × DIR_ITEM point ×
+INODE_ITEM point × floor depth-limit/FxHash root). Also speeds every btrfs file-extent floor
+descent (read path) and getattr.

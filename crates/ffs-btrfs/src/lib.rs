@@ -2277,8 +2277,7 @@ pub fn walk_tree_floor_with_nodes(
     nodesize: u32,
     target: BtrfsKey,
 ) -> Result<Option<BtrfsLeafEntry>, ParseError> {
-    let mut visited = FxHashSet::default();
-    floor_descend(node_provider, root_logical, nodesize, &target, &mut visited)
+    floor_descend(node_provider, root_logical, nodesize, &target, 0)
 }
 
 fn floor_descend(
@@ -2286,8 +2285,21 @@ fn floor_descend(
     logical: u64,
     nodesize: u32,
     target: &BtrfsKey,
-    visited: &mut FxHashSet<u64>,
+    depth: u16,
 ) -> Result<Option<BtrfsLeafEntry>, ParseError> {
+    // A floor descent follows ONE child per level (root -> leaf), so a node can be
+    // revisited only through a cycle in the tree pointers. A depth bound catches
+    // that with zero allocation — the prior per-descent `visited` HashSet (alloc +
+    // insert/level) was pure overhead on this single-path descent, and a read-only
+    // btrfs lookup runs it ~3× per op (dir item + parent/child inode). A valid
+    // btrfs tree is at most `BTRFS_MAX_TREE_LEVEL + 1` (8) nodes deep; anything
+    // deeper is corrupt (bd-cc-btrfs-point).
+    if depth > u16::from(BTRFS_MAX_TREE_LEVEL) + 1 {
+        return Err(ParseError::InvalidField {
+            field: "logical_address",
+            reason: "btrfs floor descent exceeded max tree depth (cycle in tree pointers)",
+        });
+    }
     let nodesize_u64 = u64::from(nodesize);
     if nodesize_u64 == 0 {
         return Err(ParseError::InvalidField {
@@ -2299,12 +2311,6 @@ fn floor_descend(
         return Err(ParseError::InvalidField {
             field: "logical_address",
             reason: "not aligned to nodesize",
-        });
-    }
-    if !visited.insert(logical) {
-        return Err(ParseError::InvalidField {
-            field: "logical_address",
-            reason: "duplicate node reference in btrfs tree pointers",
         });
     }
 
@@ -2359,7 +2365,7 @@ fn floor_descend(
                     reason: "not aligned to nodesize",
                 });
             }
-            floor_descend(node_provider, blockptr, nodesize, target, visited)
+            floor_descend(node_provider, blockptr, nodesize, target, depth + 1)
         }
     }
 }

@@ -1105,7 +1105,7 @@ pub struct OpenFs {
     /// ROOT_ITEM once and caching the bytenr removes the per-op root-tree
     /// descent. Only consulted/populated when writes are disabled
     /// (`btrfs_alloc_state` is `None`), since a commit can move the root.
-    btrfs_fs_tree_root_cache: Mutex<std::collections::HashMap<u64, u64>>,
+    btrfs_fs_tree_root_cache: Mutex<rustc_hash::FxHashMap<u64, u64>>,
     /// Verified+parsed btrfs tree nodes cached by logical address (bd-jgx7u,
     /// bd-3n3ds — the kernel's `extent_buffer` model). On a read-only mount the
     /// on-disk metadata is immutable, so repeated tree descents (every
@@ -3619,7 +3619,7 @@ impl OpenFs {
             ext4_hot_inode: arc_swap::ArcSwapOption::empty(),
             ext4_hot_extents: arc_swap::ArcSwapOption::empty(),
             ro_snapshot: std::sync::OnceLock::new(),
-            btrfs_fs_tree_root_cache: Mutex::new(std::collections::HashMap::new()),
+            btrfs_fs_tree_root_cache: Mutex::new(rustc_hash::FxHashMap::default()),
             btrfs_parsed_node_cache: ShardedCache::new(),
             btrfs_decompressed_extent_cache: ShardedCache::new(),
         };
