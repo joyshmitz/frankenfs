@@ -4951,3 +4951,23 @@ gap. NOT landed: it needs the tree-log overlay applied on the point-descent resu
 change, not a one-liner. Characterized for a dedicated effort. The writable path already uses the
 in-memory COW tree (`btrfs_read_inode_from_tree` / `btrfs_lookup_dir_entry(&alloc)`), so this is a
 read-only-mount lever. No code landed this turn (profiling + characterization).
+
+## SURFACE — 2026-07-02 — btrfs delete is COW-bound like create; leaf clone-then-shift lever is likely-neutral (CrimsonFox)
+
+Profiled btrfs delete (`perf`, 20k delbench on the fixture, ~39k unlinks/s): **26.2%
+`BtrfsCowNode::clone`** (COW-copies each node on the delete path — an Arc-refcount-bump per item)
++ **23.9% `drop_glue::<BtrfsCowNode>`** (Arc-decrement churn dropping the retired path from the
+2-gen eviction ring) + **18% `insert_into`** (rebalance re-inserts) = ~68% inherent COW node churn,
+the same shape as btrfs create (43% insert_into + 16% drop). `delete_from` (lib.rs:4656) does
+`node_ref(id).clone()` then `items.remove(idx)` (a shift); a build-excluding-idx would skip the
+shift AND avoid the clone when the key is absent — BUT for a real delete stream every key is
+present, and the per-item COW copy (Arc bump) is inherent and DOMINATES the shift, so this is the
+same class as the two micro-copy-elision neutrals already measured this session (full-block-write
+zero-fill, bw-tree shadowed_keys). Not landed — likely-neutral, and a btrfs tree-mutation change
+carries correctness risk not justified by a shift-saving.
+
+**btrfs writes are uniformly COW-bound** (create AND delete: clone-path + drop-retired-path, exactly
+what kernel btrfs does); the only structural reduction is a sharing-friendly node representation
+(owner-lane). btrfs READS have the real remaining lever (read-only point-lookup via the full
+range-walker — the 0d6d7d48 surface: point-descent + borrowed leaf read + skip per-descent HashSet,
+a focused multi-step change). No code landed this turn (btrfs delete profiling + closure).
