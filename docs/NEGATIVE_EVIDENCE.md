@@ -4218,3 +4218,35 @@ tests. Only ops that unconditionally `write_inode` the final body qualify.
 
 **Correctness:** `e2fsck` CLEAN on a NEW-mkdir image; ffs-core mkdir 11/0, mknod
 15/0, symlink 21/0 (post-revert); conformance 100/0/2 GREEN; fmt clean.
+
+## SURFACE — 2026-07-02 — mkdir writes the GDT block TWICE; GDT-defer-default is the top lever, blocked by exactly 2 tests (CrimsonFox)
+
+**Applied the "redundant per-op metadata WRITE is ~20us" lesson** (from bd-mkinode-defer)
+with a throwaway `FFS_TRACE_WRITES` counter in `FsMvccBlockDevice::write_block`
+(per-block commit point) — logged block numbers for single create vs single mkdir:
+- **create**: writes 3 distinct blocks, none repeated (GDT block 1 once).
+- **mkdir**: writes the GDT block (block 1) **TWICE** — `alloc_inode_persist`
+  (free_inodes--) then `alloc_blocks_persist` for the dir data block (free_blocks--).
+  (The inode-table block is now written once, post bd-mkinode-defer.)
+
+So every mkdir (and any op that allocs both an inode AND a block) pays TWO GDT-block
+MVCC commits. Sizing via the existing `FFS_SKIP_GDT` (defers ALL per-op GDT writes to
+flush): **mkdir 22629 → 28750 mkdirs/s = 1.27x** (create is the documented 2.32x).
+
+**GDT-defer-default (`bd-cc-gdt-defer-default`) is the single biggest remaining
+single-thread lever** — it helps EVERY allocating op (create/mkdir/mknod/unlink/write).
+Ran the full conformance suite with `FFS_SKIP_GDT=1`: **98 pass, exactly 2 fail** —
+`ext4_e2compr_write_readback_conforms_for_gzip_and_lzo` and `full_conformance_gate_pass`
+(both go e2fsck-dirty). `flush_on_destroy` DOES flush the GDT (via
+`flush_mvcc_to_device`), so the blocker is NOT the general drop path — it is these two
+tests' specific persist boundaries (the e2compr rewrite / gate path) where the deferred
+GDT is not flushed before the e2fsck check.
+
+**NOT landed:** flipping the default is a codebase-wide durability-semantics change the
+maintainers deliberately left opt-in; making it safe needs the GDT flush wired into
+those two persist boundaries + a full e2fsck sweep (owner-lane, correctness-sensitive —
+a miss ships e2fsck-dirty images). A narrow per-op coalesce (skip the inode-alloc GDT
+write, let the block-alloc's write capture both from GroupStats) is ~1.13x but is only
+safe when both allocs land in the SAME group (parent_group) — the block-spill-to-another-
+group case would drop the inode-group descriptor update, so it needs the same deferral
+machinery. Instrumentation was reverted; no code landed.
