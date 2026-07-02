@@ -194,7 +194,10 @@ fn htree_leaf_split_inserts_renames_stay_consistent_bd_gauub() {
         listed2.len(),
         "post-rename readdir produced duplicate names"
     );
-    assert_eq!(listed2_set, renamed, "post-rename readdir set != renamed set");
+    assert_eq!(
+        listed2_set, renamed,
+        "post-rename readdir set != renamed set"
+    );
 
     // Persist so an external e2fsck / kernel mount can validate the on-disk index.
     fs.sync_all_to_device(&cx).expect("flush to image");
