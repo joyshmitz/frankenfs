@@ -129,7 +129,7 @@ fn make_persist_ctx() -> PersistCtx {
 
 fn make_fragmented_bitmap(geo: &FsGeometry, groups: &[GroupStats], group: GroupNumber) -> Vec<u8> {
     let mut bitmap = vec![0xAA_u8; geo.block_size as usize];
-    for rel in ffs_alloc::reserved_blocks_in_group(geo, groups, group) {
+    for &rel in ffs_alloc::reserved_blocks_in_group(geo, groups, group).iter() {
         bitmap_set(&mut bitmap, rel);
     }
     bitmap
@@ -141,7 +141,7 @@ fn make_final_run_bitmap(geo: &FsGeometry, groups: &[GroupStats], group: GroupNu
     for rel in run_start..run_start + 64 {
         bitmap_clear(&mut bitmap, rel);
     }
-    for rel in ffs_alloc::reserved_blocks_in_group(geo, groups, group) {
+    for &rel in ffs_alloc::reserved_blocks_in_group(geo, groups, group).iter() {
         bitmap_set(&mut bitmap, rel);
     }
     bitmap

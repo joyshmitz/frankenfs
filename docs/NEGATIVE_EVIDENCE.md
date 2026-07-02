@@ -4638,3 +4638,13 @@ allocs across groups, so the big group-0 copy is only a fraction of ops) but it 
 per-op copy elimination on the block-alloc hot path. WIP shelved as
 `cc-resv-arc-WIP-eliminate-per-op-toVec-copy-…` (has the temp toggle to remove); next: strip the
 toggle, A/B mkdir/write, run conformance, land if measurable. No code landed this turn.
+
+**UPDATE (LANDED as a strict simplification):** completed the A/B — **MEASURED NEUTRAL on
+mkdir** (NEW 24711/27947/24270/21824 vs OLD 21502–26666 mkdirs/s, ranges overlap; Orlov spreads
+dir allocs so the large group-0 copy is only a fraction of ops, and the copy is fast memcpy).
+write-bench overwrites pre-allocated blocks (no alloc during timing) so it can't exercise it
+either. But the change is a **strict Pareto improvement** — `Arc::clone` replaces an
+allocation+copy, the result is only ever borrowed, so it is never slower and cleaner API — so
+landed it as a validated cleanup, NOT claiming a perf ratio. Gates: **ffs-alloc 213/0,
+conformance 100/0/2.** Temp toggle stripped. Reserved-set copy is now closed (neutral); no
+further reserved-path lever.

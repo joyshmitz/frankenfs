@@ -1544,17 +1544,21 @@ pub fn reserved_blocks_in_group(
     geo: &FsGeometry,
     groups: &[GroupStats],
     group: GroupNumber,
-) -> Vec<u32> {
+) -> Arc<[u32]> {
     let gidx = group.0 as usize;
     if gidx >= groups.len() {
-        return Vec::new();
+        return Arc::from([] as [u32; 0]);
     }
 
     // Memoized: the reserved set is invariant for the FS lifetime (fixed mkfs
     // metadata layout), so reuse it instead of rebuilding + re-sorting on every
-    // allocation (bd-resv-cache).
+    // allocation (bd-resv-cache). Return the cached Arc directly (refcount bump)
+    // instead of `to_vec`-copying the whole set — for a flex_bg group 0 the
+    // reserved set is every flex-group member's inode-table blocks (tens of KB),
+    // and the hot alloc/free callers only borrow it via `is_reserved` / iteration
+    // (bd-resv-arc).
     if let Some(cached) = groups[gidx].reserved_cache.get() {
-        return cached.to_vec();
+        return Arc::clone(cached);
     }
 
     let gs = &groups[gidx];
@@ -1624,8 +1628,9 @@ pub fn reserved_blocks_in_group(
     reserved.dedup();
     // Populate the cache for subsequent allocations in this group. `set` may
     // race under concurrent allocation; first writer wins, the rest reuse it.
-    let _ = groups[gidx].reserved_cache.set(Arc::from(reserved.as_slice()));
-    reserved
+    let arc: Arc<[u32]> = Arc::from(reserved.as_slice());
+    let _ = groups[gidx].reserved_cache.set(Arc::clone(&arc));
+    arc
 }
 
 /// Check if a relative block offset in a group is reserved.
@@ -1920,7 +1925,7 @@ fn try_alloc_in_group(
     let mut bitmap = bitmap_buf.as_slice().to_vec();
 
     let reserved = reserved_blocks_in_group(geo, groups, group);
-    for &r in &reserved {
+    for &r in reserved.iter() {
         bitmap_set(&mut bitmap, r);
     }
 
@@ -2142,7 +2147,7 @@ fn try_alloc_safe(
     // correctness does not depend on this fast path. `FFS_ALLOC_FORCE_RESERVED_MARK`
     // forces the old always-mark behaviour (A/B baseline / safety escape hatch).
     if force_reserved_mark() || groups[gidx].reserved_confirmed.get().is_none() {
-        for &r in &reserved {
+        for &r in reserved.iter() {
             bitmap_set_with_clear_undo(&mut bitmap, r, &mut rollback_clear_bits);
         }
         if rollback_clear_bits.is_empty() {
@@ -2454,7 +2459,7 @@ fn try_alloc_batch_in_group(
     let mut rollback_clear_bits = Vec::with_capacity(reserved.len() + max_count as usize);
 
     // Mark reserved blocks.
-    for &r in &reserved {
+    for &r in reserved.iter() {
         bitmap_set_with_clear_undo(&mut bitmap, r, &mut rollback_clear_bits);
     }
 
@@ -2647,7 +2652,7 @@ fn try_alloc_inode_in_group(
 
     // Mark reserved inodes as allocated.
     let reserved = reserved_inodes_in_group(geo, group);
-    for &r in &reserved {
+    for &r in reserved.iter() {
         bitmap_set(&mut bitmap, r);
     }
 
@@ -2761,7 +2766,7 @@ fn try_alloc_inode_in_group_persist(
     let inodes_in_group = geo.inodes_in_group(group);
     let reserved = reserved_inodes_in_group(geo, group);
     let mut rollback_clear_bits = Vec::with_capacity(reserved.len() + 1);
-    for &r in &reserved {
+    for &r in reserved.iter() {
         bitmap_set_with_clear_undo(&mut bitmap, r, &mut rollback_clear_bits);
     }
 
@@ -4059,7 +4064,7 @@ mod tests {
             let gidx = group_idx as usize;
             let mut bitmap = vec![0_u8; geo.block_size as usize];
             let blocks_in_group = geo.blocks_in_group(group);
-            for rel in reserved_blocks_in_group(geo, groups, group) {
+            for &rel in reserved_blocks_in_group(geo, groups, group).iter() {
                 bitmap_set(&mut bitmap, rel);
             }
             if let Some(occupied) = occupied_by_group.get(gidx) {
