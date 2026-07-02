@@ -4879,3 +4879,16 @@ paired, median NEW ~63.1k vs OLD ~58.3k unlinks/s). Common `rm -rf` / git-checko
 ffs-core `--lib` **1185/0**, conformance **100/0/2**, e2fsck CLEAN on a 40k-delete image. The
 directory-extent-cache (7c57c57b) now covers all three mutating dir ops that re-descend the parent:
 create/mkdir (add), rename (add+remove), unlink/rmdir (remove).
+
+## ★ LANDED — 2026-07-02 — cache rename's preflight extent resolution → +1.12x rename (cumulative ~1.16x) (CrimsonFox)
+
+Follow-up to 83b259d0: `ext4_preflight_dir_entry_insert` (lib.rs:18563, called only by rename just
+before the add) STILL re-parsed the parent's extent tree via uncached `collect_extents` — it was
+the FIRST parent-extent resolution per rename, so it dominated even after add+remove were cached.
+Routed it through `ext4_write_extents_with_scope` too, so the whole rename (preflight → add →
+remove) shares ONE parse (and hits across renames; self-invalidates on a growing add). **MEASURED
++1.12x rename** on top of the prior win (two-binary interleaved A/B vs the add+remove-cached
+binary, 40k renames, 8 runs: NEW wins 8/8, min NEW 74181 > max OLD 70998 renames/s — cleanly
+separated, ~75.9k vs ~67.6k). Cumulative rename ≈ **1.16x** vs the pre-cache baseline (~65.7k →
+~75.9k). Gates: ffs-core `--lib` **1185/0**, conformance **100/0/2**, e2fsck CLEAN on a 40k-rename
+image. rename now resolves the parent's extents once per op regardless of sub-steps.

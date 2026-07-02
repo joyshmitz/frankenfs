@@ -18560,7 +18560,14 @@ impl OpenFs {
             ));
         }
 
-        let extents = self.collect_extents(cx, parent_inode)?;
+        // Cached extent snapshot: this preflight runs just before the add on the
+        // rename path, so caching it here lets the add + remove reuse the same
+        // parse (the snapshot self-invalidates on a growing add via its
+        // extent-root key) — one parse per rename instead of one per sub-step
+        // (bd-cc-itableloc sibling).
+        let extents = self
+            .ext4_write_extents_with_scope(cx, &RequestScope::empty(), parent_inode)?
+            .to_vec();
         let reserved_tail = self.ext4_dir_reserved_tail();
 
         // The real insert (ext4_add_dir_entry) routes an htree entry to the SINGLE
