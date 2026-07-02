@@ -1201,6 +1201,12 @@ struct DirNameIndex {
     // where ~15% of parallel-create CPU was the default hasher (bd-bhh0i). FxHash
     // is a fast multiply-xor — safe here, the keys are our own entry names.
     names: rustc_hash::FxHashSet<Vec<u8>>,
+    /// Name → (inode, file_type) map that answers a PRESENT-name lookup in O(1),
+    /// skipping the htree descent + linear hash-leaf scan. Populated ONLY on a
+    /// read-only mount (where the directory is immutable, so this snapshot can
+    /// never go stale) from a full readdir; `None` on writable mounts and after
+    /// any incremental membership insert (bd-cc-ext4-presentidx).
+    present: Option<rustc_hash::FxHashMap<Vec<u8>, (u32, Ext4FileType)>>,
 }
 
 /// Number of shards for the per-directory name index. A single slot thrashed
@@ -12658,11 +12664,26 @@ impl OpenFs {
         if index_keyable {
             let guard = self.dir_name_index_shard(dir_inode.number).lock();
             if let Some(idx) = guard.as_ref() {
-                if idx.inode == dir_inode.number
-                    && idx.validation == dir_validation
-                    && !idx.names.contains(name)
-                {
-                    return Ok(None);
+                if idx.inode == dir_inode.number && idx.validation == dir_validation {
+                    // A complete name->dirent snapshot (read-only mount, immutable
+                    // dir) answers a PRESENT lookup in O(1) too — return the entry
+                    // directly instead of descending the htree and linearly scanning
+                    // the hash-target leaf (~24% of an ext4 lookup on a large dir).
+                    // Absent names return `None` since the snapshot is complete.
+                    if let Some(present) = idx.present.as_ref() {
+                        return Ok(present.get(name).map(|&(inode, file_type)| {
+                            Ext4DirEntry {
+                                inode,
+                                rec_len: 0,
+                                name_len: u8::try_from(name.len()).unwrap_or(u8::MAX),
+                                file_type,
+                                name: name.to_vec(),
+                            }
+                        }));
+                    }
+                    if !idx.names.contains(name) {
+                        return Ok(None);
+                    }
                 }
             }
         }
@@ -12769,6 +12790,7 @@ impl OpenFs {
                         inode: dir_inode.number,
                         validation: dir_validation,
                         names,
+                        present: None,
                     });
                 }
             }
@@ -29947,6 +29969,9 @@ impl OpenFs {
             Some(idx) if idx.inode == parent_inode.number => {
                 idx.names.insert(name.to_vec());
                 idx.validation = validation;
+                // A membership insert doesn't carry the full dirent, so the
+                // present-serve snapshot can no longer be trusted as complete.
+                idx.present = None;
             }
             // No index for this dir yet (or a stale/other-dir slot): drop it so
             // the next negative lookup rebuilds against the fresh state.
@@ -32400,6 +32425,29 @@ impl FsOps for OpenFs {
                 self.readdir_full_reads
                     .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 let raw_entries = self.read_dir_with_scope(cx, scope, &inode)?;
+                // On a read-only mount the directory is immutable, so cache this full
+                // readdir as a name->dirent snapshot: subsequent present-name lookups
+                // (ls -l, directory scans) answer O(1) from it instead of descending
+                // the htree + linearly scanning the hash-leaf per name. Non-casefold
+                // only (keys on exact name bytes); read-only only (never goes stale)
+                // (bd-cc-ext4-presentidx).
+                if canonical.0 != 0
+                    && !self.is_writable()
+                    && inode.flags & ffs_types::EXT4_CASEFOLD_FL == 0
+                {
+                    let present: rustc_hash::FxHashMap<Vec<u8>, (u32, Ext4FileType)> =
+                        raw_entries
+                            .iter()
+                            .map(|e| (e.name.clone(), (e.inode, e.file_type)))
+                            .collect();
+                    let names = present.keys().cloned().collect();
+                    *self.dir_name_index_shard(canonical.0).lock() = Some(DirNameIndex {
+                        inode: canonical.0,
+                        validation,
+                        names,
+                        present: Some(present),
+                    });
+                }
                 // Build the FULL list (offset 0) once; cookies are 1-indexed
                 // positions (ascending), so the binary-search slice serves any
                 // page exactly.

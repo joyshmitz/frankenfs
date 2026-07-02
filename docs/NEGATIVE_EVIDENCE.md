@@ -5296,3 +5296,18 @@ Completes the btrfs perf picture on REAL workloads: lookup descent-floored (and 
 walk fast and floored, both dominated by inherent work + deliberate defenses. No contained lever
 found; no code landed this turn (first real-large-dir characterization + defensive-choice
 documentation).
+
+## ★★ LANDED — 2026-07-02 — ext4 read-only lookup: name→dirent snapshot built on readdir → ~2.17x ext4 lookup (CrimsonFox)
+
+The per-dir name index only answered ABSENT lookups (membership set) — present names (ls/scan
+workload) fell through to the full htree descent + linear hash-leaf scan every time. Added a
+`present: Option<FxHashMap<name,(inode,file_type)>>` field, built from the full readdir ONLY on a
+read-only mount (dir immutable → snapshot can never go stale, so no invalidation logic needed) for
+non-casefold dirs; `lookup_name_with_scope` then answers PRESENT and absent in O(1) from it instead
+of descending. Cleared on any incremental membership insert; writable mounts never build it (fall to
+htree). **MEASURED ~2.17x ext4 lookup** (extbig2+30000-entry dir, 500k lookups, 10 runs: NEW wins
+10/10, median 2.372M vs 1.094M lookups/s). Gates: ffs-core 1184/0 (pre-existing btrfs-reflink flake
+only), conformance 100/0/2, walk output byte-identical OLD vs NEW (readdir unaffected). Correct by
+construction: the snapshot is the full readdir (same source as htree), read-only immutability keeps
+it complete + current. Helps every read-only-mount name lookup (ls -l, scans, backup/forensic/
+container-image mounts); rw case deferred (needs mutation-invalidation).
