@@ -4581,3 +4581,36 @@ fix set that unblocked the flip (all real code, no test weakening):
 
 Lever #1 (of the 3 owner-lane levers) is CLOSED. Remaining: intra-op write batching (#2),
 parallel-create convoy (#3).
+
+## REFUTED — 2026-07-02 — convoy-batched create (commit-after-lock-release) fails; FCW conflict on shared metadata blocks (CrimsonFox)
+
+Post-GDT-defer re-measured parallel create — still negatively scales (1t=90k → 32t=45k
+creates/s), confirming the convoy is the remaining ext4 gap. Resurrected the shelved
+`convoy-prototype-WIP` (stash), which applied cleanly to HEAD now that its prerequisite
+(GDT-defer) is the default. It stages `create_inode` + `ext4_add_dir_entry_dev` into ONE MVCC
+txn under the alloc lock, RELEASES the lock, then commits — so disjoint creates' commits run
+concurrently instead of serializing. Env-gated `FFS_CONVOY`. **MEASURED and REFUTED:**
+
+- **Single-thread ~1.8x SLOWER** (OFF 74284 vs ON 41679 creates/s) — the separate txn
+  begin/commit + `TransactionBlockAdapter` Mutex overhead exceeds any benefit; the default
+  post-GDT-defer path is already lean.
+- **Parallel creates FAIL**: at t=8 the bench panics with
+  `Format("first-committer-wins conflict on block 84: snapshot=CommitSeq(215), observed=CommitSeq(221)")`
+  — e2fsck of the resulting image shows only 12/38400 files (almost all creates errored).
+
+**ROOT CAUSE (decisive):** inode/block allocation reads the bitmap from the COMMITTED device
+view (`try_alloc_*_in_group` → `dev.read_block`), so alloc correctness REQUIRES the prior
+alloc's bitmap write to be committed before the next alloc reads it. Deferring the commit past
+the alloc-lock release breaks that: a second thread takes the lock and reads the stale
+(pre-commit) bitmap/inode-table block, both write the SAME block, and first-committer-wins
+rejects the loser → the create errors (no retry). Even a retry loop would just re-serialize on
+the conflict. So batching the commit outside the alloc lock is fundamentally unsound while
+concurrent creates share metadata blocks.
+
+**Sharpened blocker for the real convoy fix (#3):** it is NOT "hold the lock for less time" —
+it is that concurrent creates must touch DISJOINT metadata blocks. Requires per-group (or
+per-shard) inode-table + bitmap partitioning so disjoint-parent creates commit to different
+blocks and never FCW-conflict, with the alloc watermark advanced per shard. Owner-lane,
+loom-gateable. Prototype re-shelved as stash `cc-convoy-prototype-REFUTED-2026-07-02-…`; tree
+clean, no code landed. Intra-op batching (#2) shares this constraint: batching a single op's
+writes is fine, but it does not fix parallel scaling without the per-shard metadata split.
