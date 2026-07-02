@@ -7791,8 +7791,25 @@ impl OpenFs {
             item_type: BTRFS_ITEM_INODE_ITEM,
             offset: u64::MAX,
         };
-        let items = self.walk_btrfs_fs_tree_range(cx, inode_lo, inode_hi)?;
-        let inode_item = Self::btrfs_find_inode_item(&items, canonical)?;
+        // The INODE_ITEM span is effectively one key ((objectid, INODE_ITEM)), so a
+        // point descent resolves it in O(log N) node reads instead of dispatching
+        // the full parallel range-walker per inode read — and a read-only lookup
+        // reads two inodes (parent + child) per op when the read-plan index is
+        // absent, so this is the dominant remaining walker cost (perf, sibling of
+        // the DIR_ITEM point descent). Floor to the top of the span and match on
+        // objectid+type (the inode item is the only INODE_ITEM key for the object,
+        // so this equals the range walk's `btrfs_find_inode_item`). Skip only when
+        // no tree-log overlay must be merged (bd-cc-btrfs-point).
+        let inode_item = if self.btrfs_tree_log_items.is_empty() {
+            self.walk_btrfs_fs_tree_floor(cx, inode_hi)?
+                .filter(|e| {
+                    e.key.objectid == canonical && e.key.item_type == BTRFS_ITEM_INODE_ITEM
+                })
+                .ok_or_else(|| FfsError::NotFound(format!("btrfs inode objectid {canonical}")))?
+        } else {
+            let items = self.walk_btrfs_fs_tree_range(cx, inode_lo, inode_hi)?;
+            Self::btrfs_find_inode_item(&items, canonical)?.clone()
+        };
         parse_inode_item(&inode_item.data).map_err(|e| parse_to_ffs_error(&e))
     }
 

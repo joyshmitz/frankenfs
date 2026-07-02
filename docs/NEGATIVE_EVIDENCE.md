@@ -5009,3 +5009,21 @@ walker-% because the O(log N) node READS are inherent (shared with the walker) a
 already hit the cached read-plan index — the win is eliminating the walker's HashSet/collect/parallel
 overhead. Combined with the FxHashSet walker win (0f1cf775), btrfs read-only lookup is now ~1.16x
 faster than session start. Residual gap vs ext4 is the inherent node-read descent + inode parse.
+
+## ★ LANDED — 2026-07-02 — btrfs on-disk inode-item read: point-descent, not range-walker → ~1.33x btrfs lookup (CrimsonFox)
+
+Re-profiling after the DIR_ITEM point-descent (c6aefc22) showed the walker STILL dominant — from
+`btrfs_read_ondisk_inode_item` (lib.rs:7779), which a read-only mount without a read-plan index
+calls TWICE per lookup (parent + child inode). It range-walked the effectively-single-key
+`(objectid, INODE_ITEM)` span through the full parallel walker. Replaced with the lean
+`walk_btrfs_fs_tree_floor` point-descent (floor to the top of the span, match objectid+type — the
+inode item is the only INODE_ITEM key for the object, so identical to the range walk's
+`btrfs_find_inode_item`), gated on an empty tree-log (else range-walk fallback). **MEASURED ~1.33x
+btrfs lookup** (two-binary interleaved A/B, 400k lookups, 8 runs: NEW wins 8/8 paired, median NEW
+2.166M vs OLD 1.625M lookups/s). Biggest single btrfs win — the 2×/op inode reads were the
+dominant walker cost. Gates: ffs-core `--lib` **1185/0**, conformance **100/0/2** (real btrfs
+getattr/lookup). **Cumulative btrfs read-only lookup this session ≈ 1.55x** (FxHashSet walker
+0f1cf775 × DIR_ITEM point-descent c6aefc22 × INODE_ITEM point-descent). Also speeds btrfs
+getattr/stat and any inode read on an index-less read-only mount. ⭐The point-descent (single-key
+lookup should NOT dispatch the range-walker) generalizes across btrfs single-key reads — exactly
+the redundant-WORK class the session's meta-lesson predicts wins.
