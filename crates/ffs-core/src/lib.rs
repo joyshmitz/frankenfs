@@ -6890,8 +6890,12 @@ impl OpenFs {
         // Resolve the CSUM_TREE ROOT_ITEM among the root items already walked
         // above; if present, walk the csum tree and load its EXTENT_CSUM items.
         // A filesystem with no csum tree yields an empty tree.
-        let mut csum_tree =
-            InMemoryCowBtrfsTree::new(max_items).map_err(|e| btrfs_mutation_to_ffs(&e))?;
+        let mut csum_tree = InMemoryCowBtrfsTree::new(max_items)
+            .map_err(|e| btrfs_mutation_to_ffs(&e))?
+            // EXTENT_CSUM items are variable-size (many block checksums per item),
+            // so — like fs_tree/root_tree — this tree needs the byte budget or a leaf
+            // overflows `nodesize` on serialization at commit (bd-6uyto/bd-cc-btrfs-syncpersist).
+            .with_leaf_byte_budget((nodesize as usize).saturating_sub(101));
         if let Some(csum_root_entry) = root_items.iter().find(|item| {
             item.key.objectid == BTRFS_CSUM_TREE_OBJECTID
                 && item.key.item_type == BTRFS_ITEM_ROOT_ITEM
@@ -26669,8 +26673,9 @@ impl OpenFs {
 
         // Build the subvolume's own fs-tree: its root directory (inode 256).
         let max_items = ((alloc.nodesize as usize).saturating_sub(101) / 25).max(3);
-        let mut subvol_tree =
-            InMemoryCowBtrfsTree::new(max_items).map_err(|e| btrfs_mutation_to_ffs(&e))?;
+        let mut subvol_tree = InMemoryCowBtrfsTree::new(max_items)
+            .map_err(|e| btrfs_mutation_to_ffs(&e))?
+            .with_leaf_byte_budget((alloc.nodesize as usize).saturating_sub(101));
         let root_dir = BtrfsInodeItem {
             generation: alloc.generation,
             size: 0,
@@ -26807,8 +26812,9 @@ impl OpenFs {
                 .map_err(|e| btrfs_mutation_to_ffs(&e))?
         };
         let max_items = ((alloc.nodesize as usize).saturating_sub(101) / 25).max(3);
-        let mut snap_tree =
-            InMemoryCowBtrfsTree::new(max_items).map_err(|e| btrfs_mutation_to_ffs(&e))?;
+        let mut snap_tree = InMemoryCowBtrfsTree::new(max_items)
+            .map_err(|e| btrfs_mutation_to_ffs(&e))?
+            .with_leaf_byte_budget((alloc.nodesize as usize).saturating_sub(101));
         for (key, data) in &source_items {
             snap_tree
                 .insert(*key, data)

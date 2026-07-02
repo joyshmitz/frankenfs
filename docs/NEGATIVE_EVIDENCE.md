@@ -5435,3 +5435,20 @@ sync wiring (it corrupts on the ≥20 batches benching needs). This is a focused
 effort (gate: create 30000 → re-open walk sees 30000 + btrfs-check clean), NOT a contained fix. The
 existing btrfs write tests commit only a few files, so this node-overflow path was untested. No code
 landed this turn (two-attempt root-cause of a deep btrfs-commit bug; reverted).
+
+## LANDED (correctness) + BLOCKER — 2026-07-02 — btrfs csum/subvol/snap trees given leaf_byte_budget; create-bench overflow is a DEEPER commit bug (CrimsonFox)
+
+While root-causing btrfs create-bench non-persistence, found a real latent gap: the in-memory COW
+trees for **csum (load_btrfs_alloc_state), subvol (create_subvolume), snapshot (create_snapshot)**
+were created via `InMemoryCowBtrfsTree::new(max_items)` WITHOUT `.with_leaf_byte_budget(...)`, unlike
+fs_tree/root_tree. Their items are variable-size (EXTENT_CSUM = many block checksums; dir entries),
+so a large such tree overflows `nodesize` on serialization at commit (bd-6uyto). Wired the
+nodesize-derived budget into all three (consistent with fs/root). LANDED as a correctness fix (not a
+measured perf ratio — no bench triggers those trees' overflow yet; the mechanism + fs/root precedent
+validate it).
+
+⭐ONE BLOCKER: btrfs create-bench still doesn't persist via CLI — `sync_all_to_device` doesn't commit
+btrfs, and wiring `btrfs_full_transaction_commit` in (the correct destroy sequence) overflows a node
+at n≥20 EVEN with the csum/subvol/snap budgets, so the overflow is in the fs_tree or extent-tree
+COMMIT path (not those three) and needs commit-time instrumentation to isolate which leaf exceeds
+nodesize — a focused btrfs-COW-commit debug, gated by "create 30000 → re-open walk sees 30000".
