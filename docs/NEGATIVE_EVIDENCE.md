@@ -4614,3 +4614,27 @@ blocks and never FCW-conflict, with the alloc watermark advanced per shard. Owne
 loom-gateable. Prototype re-shelved as stash `cc-convoy-prototype-REFUTED-2026-07-02-…`; tree
 clean, no code landed. Intra-op batching (#2) shares this constraint: batching a single op's
 writes is fine, but it does not fix parallel scaling without the per-shard metadata split.
+
+## DIG — 2026-07-02 — GDT-defer breadth confirmed on unlink/rmdir; ext4 delete is at the MVCC floor; found a per-op reserved-set copy (CANDIDATE, WIP shelved) (CrimsonFox)
+
+Measured ext4 delete post-GDT-defer (delbench/rdbench 20k, DEFER default vs `FFS_SKIP_GDT=0`
+eager, interleaved): **unlink 58289 vs 41768 = ~1.40x**, **rmdir 25428 vs 20946 = ~1.19x** —
+GDT-defer's per-op-GDT-write elimination helps every freeing op too (already shipped in
+55ed807f; unlink is now ~kernel-competitive, was 1.68x slower). `perf`-profiled rdbench: the
+rmdir-specific work is minor (empty-check `read_dir` 0.35%, `free_blocks_persist` 2.6%,
+`delete_inode` 0.11%); the dominant cost is 13.6% `memmove` = inherent MVCC 4 KiB version-buffer
+materialization, shared with unlink. **So ext4 delete is at the per-op-commit floor — no
+redundant-work lever** (owner-lane version-model only).
+
+**One real redundancy surfaced (CANDIDATE, shelved WIP):** `ffs_alloc::reserved_blocks_in_group`
+memoizes the reserved set as `Arc<[u32]>` (bd-resv-cache) but the cache-HIT path returns
+`cached.to_vec()` — copying the whole set on EVERY block alloc/free. For a flex_bg **group 0** the
+set is every flex-member's inode-table blocks (~8k u32 ≈ 32 KB), copied per op even though the
+hot callers only borrow it (`is_reserved` binary-search / iteration). Changed the return to
+`Arc<[u32]>` (cache-hit = refcount bump, no copy); callers `is_reserved(&r,..)` deref-coerce, 6
+iteration sites → `.iter()`. **ffs-alloc 213/0 GREEN.** Measurement (mkdir-bench A/B via a temp
+`FFS_RESV_TOVEC` toggle) was interrupted before a number; expected small (Orlov spreads dir
+allocs across groups, so the big group-0 copy is only a fraction of ops) but it is a genuine
+per-op copy elimination on the block-alloc hot path. WIP shelved as
+`cc-resv-arc-WIP-eliminate-per-op-toVec-copy-…` (has the temp toggle to remove); next: strip the
+toggle, A/B mkdir/write, run conformance, land if measurable. No code landed this turn.
