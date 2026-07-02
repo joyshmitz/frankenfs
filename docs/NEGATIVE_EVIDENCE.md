@@ -4324,3 +4324,23 @@ conformance.rs:3432 + durability-default flip), (b) intra-op write batching (1.8
 create, shelved on a read-your-writes bug, stash@{0}), (c) the parallel-create
 `alloc_mutex.write()` convoy (~9x, per-group interior-mutability refactor). Instrumentation
 reverted; no code landed.
+
+## REJECT (neutral) — 2026-07-02 — MVCC prune-interval tuning does NOT affect create (chain length is not the bottleneck) (CrimsonFox)
+
+Tested the hypothesis that the create cost attributed to the hot shared GDT block is
+its MVCC version-chain growing between prunes (`MVCC_COMMIT_PRUNE_INTERVAL = 256`,
+`prune_after_commit_if_due` in `fs-core/src/fs_mvcc_store.rs`). Made the interval
+env-tunable and A/B'd create-bench (40k, single-thread) across intervals 16 / 256 / 4096
+/ 100000 (100000 = NO pruning at all during the run → the GDT chain grows to the full
+40k). **MEASURED NEUTRAL: all ~33-34k creates/s regardless.** WHY: version installs
+APPEND (monotonic `commit_seq` → `versions.insert` at the tail = O(1), no shift) and
+reads binary-search (`newest_visible_index`, O(log N)), so even a 40k-long chain neither
+slows the per-op commit nor the reads. Also confirms the `active_snapshots`-unregistered
+writable adapter lets the prune watermark advance, so chains ARE bounded to ~256 in
+normal runs — no unbounded leak like the btrfs COW case.
+
+⭐So the GDT-defer 2.32x create win is PURELY the elimination of the per-create WRITE of
+the shared GDT block (its commit machinery + 4 KiB version materialization), NOT
+version-chain management — do NOT chase "prune more aggressively" as a create lever. The
+only path to that 2.32x remains GDT-defer-default (owner-lane durability flip, blocker at
+conformance.rs:3432). Env change reverted; no code landed.
