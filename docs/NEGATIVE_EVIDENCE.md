@@ -5357,3 +5357,20 @@ immutability. Bigger than the ext4 attr cache because a btrfs child read is a fu
 not a cached-block-get + parse. **Cumulative btrfs read-only lookup ~5x this session** (walker
 FxHashSet × point-descents × depth-limit × root × parent-dir × parsed-node FxHashMap × child-attr
 cache). The single read-only attr cache now serves BOTH filesystems.
+
+## SURFACE — 2026-07-02 — btrfs lookup now DIR_ITEM-descent-bound; a read-only name→child cache (btrfs present-index) is the next ~1.5x lever (CrimsonFox)
+
+After the btrfs child-attr cache (369f79c8), btrfs lookup on btr3's real 30000-entry dir (~5M/s) is
+dominated by the DIR_ITEM name-resolution descent: `floor_descend` 26% + `partition_point` 14% +
+`parse_dir_items` 7% + `btrfs_name_hash` crc32c 4% = ~51% is resolving name→child_objectid (the
+child inode read is now cached, ~5%). This is EXACTLY what the ext4 present-index (d9062dbb) solved
+for ext4: on a read-only mount the directory is immutable, so a name→child_objectid map built once
+on readdir can serve `btrfs_lookup_child`'s name resolution O(1), skipping the per-lookup fs-tree
+descent. Est. ~1.5x btrfs lookup (the ~51% descent → an FxHashMap get). Structure: per-dir cache
+`ShardedCache<u64 dir_objectid, Arc<FxHashMap<Vec<u8> name, u64 child_objectid>>>`, built in the
+btrfs read-only readdir path (which already collects the dir's rows), served in `btrfs_lookup_child`
+after the `btrfs_verified_dir_inode` check and before the `name_hash`/descent. Read-only-safe (no
+invalidation; writable falls to the descent), same pattern as the ext4 present-index + the shared
+attr cache. Not landed: it's a map-of-maps build+serve on the correctness-critical btrfs lookup path
+— a focused effort, not a time-pressured rush. Cluster banked: 22 wins, ext4 lookup ~3.5x, btrfs
+lookup ~5x this session.
