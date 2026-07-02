@@ -4447,3 +4447,50 @@ underlies BOTH #1 (committed-write visibility through the cached read path) and 
 (staged-write visibility through non-tx reads). One focused fix there could unblock ~2x+
 create. That — not per-op accounting sites or test tweaks — is where the next dedicated
 multi-turn effort should go.
+
+## SHARPEN + CORRECT — 2026-07-02 — GDT-defer-default blocker is the BITMAP-csum cross-check, NOT the descriptor's own csum; "production is SAFE" is an over-claim (CrimsonFox)
+
+Re-applied ATTEMPT4 (stash "cc-gdt-defer-ATTEMPT4-BREAKTHROUGH-2.29x…", flips
+`gdt_persistence_deferred` default ON + clears `ext4_group_desc_cache`/`ext4_base_block_cache`
+after the GDT flush + force-flushes GD in `ext4_write_compressed`) and ran the FULL
+`ffs-core --lib` suite. Result: **1169 pass / 16 fail** — the exact 16 the stash label named.
+Traced every failure to ONE mechanism, sharper than the consolidated "read_group_desc returns
+stale bytes":
+
+- The 16 failures are NOT the descriptor's own `bg_checksum` (that verifies fine — the on-disk
+  GDT block is byte-unchanged since mkfs/last-flush, so `verify_group_desc_checksum` in
+  `read_group_desc_with_scope` passes). They are the **bitmap** cross-check: `read_block_bitmap`
+  / `read_inode_bitmap` (lib.rs:10647/10677) read the group descriptor, then call
+  `verify_block_bitmap_checksum(current_bitmap, …, &gd, …)` against the descriptor's stored
+  `bg_block_bitmap_csum` / `bg_inode_bitmap_csum`. Under deferral the **bitmap block is eager
+  (current)** but the descriptor's stored bitmap-csum is **stale** (only re-stamped at flush by
+  `persist_group_desc_force`) → CRC32C mismatch → the read ERRORS. Sample:
+  `write_unlink_last_link…` panics at the FIRST `count_free_inodes_in_group` with
+  `Format("invalid field: bg_inode_bitmap_csum (inode bitmap CRC32C mismatch)")`.
+
+- **Why there is no cheap live fix:** `GroupStats.block_bitmap_csum`/`inode_bitmap_csum`
+  (ffs-alloc:727/729) are set only in `from_group_desc` (load time) — NEITHER ffs-alloc NOR
+  ffs-core updates them on alloc/free (grep-confirmed: 0 write sites). The live csum authority is
+  the bitmap BYTES, recomputed only at persist. So a correct deferral-aware read path needs the
+  csum maintained live in `GroupStats` at every mutation. The natural chokepoint is
+  `persist_group_desc_with_bitmap_overrides` (ffs-alloc:1690) — it already receives the mutated
+  bitmap override bytes and early-returns under deferral (line 1699); it could `stamp_*_bitmap_checksum`
+  into `GroupStats` there instead of returning. **Blocker to THAT:** `stats: &GroupStats` is
+  immutable at the chokepoint, and the csum changes per-op → needs `AtomicU32` fields (breaks the
+  derived `Clone`/`Debug` + every `GroupStats { … }` literal — the exact struct-ripple trap in
+  memory `feedback_struct_field_add_all_targets`). Then `read_group_desc_with_scope` overrides the
+  parsed descriptor's `free_blocks_count`/`free_inodes_count`/`used_dirs_count`/`flags` +
+  `block_bitmap_csum`/`inode_bitmap_csum` from `GroupStats` under deferral. Multi-file, hot-path,
+  struct-changing — genuinely multi-turn, matches the "deep owner-lane" verdict.
+
+- **⚠️CORRECTS the consolidated "Production is SAFE … only the niche e2compr test's read view is
+  stale" (bc553064).** That is an over-claim: ANY bitmap read through the csum-verifying path
+  breaks post-mutation under default-on deferral, not just e2compr. `largest_contiguous_free_run`
+  (lib.rs:10742, the bd-oqphq statvfs-fragmentation / fallocate-planning API) invalidates its
+  per-group run cache on every free and then reads the bitmap on the next query → would ERROR
+  under default-on. It is a **public API not yet wired into FUSE/CLI statvfs**, so this is a
+  LATENT regression (not active today), but it means default-on is not "safe minus one test" — it
+  needs the live-csum fix before the flip. e2fsck-at-rest stays clean (flush re-stamps consistent
+  csums), so the SHIPPED opt-in `FFS_SKIP_GDT=1` path is fine for its crash-safety guarantee; the
+  gap is purely mid-op read-back consistency. Attempt re-shelved (stash intact); tree clean, no
+  code landed.
