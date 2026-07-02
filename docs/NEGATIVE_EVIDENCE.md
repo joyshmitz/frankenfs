@@ -5374,3 +5374,20 @@ invalidation; writable falls to the descent), same pattern as the ext4 present-i
 attr cache. Not landed: it's a map-of-maps build+serve on the correctness-critical btrfs lookup path
 — a focused effort, not a time-pressured rush. Cluster banked: 22 wins, ext4 lookup ~3.5x, btrfs
 lookup ~5x this session.
+
+## ★ LANDED — 2026-07-02 — btrfs read-only name→child cache (btrfs present-index) → O(1) name resolution (CrimsonFox)
+
+Built the characterized btrfs analog of the ext4 present-index: a read-only per-dir
+`ShardedCache<u64 dir_objectid, Arc<FxHashMap<name, u64 child_objectid>>>`, populated once from the
+btrfs readdir's deduped rows, served in `btrfs_lookup_child` (before the parent dir-check + descent).
+ALGORITHMIC win: replaces the per-lookup O(log N) DIR_ITEM fs-tree descent + `parse_dir_items` (~51%
+of a btrfs lookup post-attr-cache) with an O(1) map get. Correct by read-only immutability + the map
+being the complete readdir snapshot (absent-in-map ⇒ absent; presence ⇒ parent is a dir); writable
+mounts skip it. **MEASURED ~5.8x on btr3 root** (500k lookups, 10/10, median 29.0M vs 5.0M
+lookups/s; found=100000 confirms real resolution, not fast-fail). ⚠️CAVEAT: btr3's root has 1 direct
+entry (its 30000 files nest in a subdir), so 5.8x reflects a 1-ENTRY map on a DEEP fs tree — the
+descent-skip is representative (descent depth = fs-tree depth, not dir size) but a large diverse-map
+get is slower, so the real magnitude on a big flat dir is lower (untested; fixtures nest their
+files — need a flat-large-dir fixture). Gates: ffs-core btrfs 359/0 (reflink flake only), conformance
+100/0/2. Completes the btrfs read-only lookup pattern set (walker-hash, point-descents, depth-limit,
+root, parent-dir, parsed-node FxHashMap, child-attr, name-index) — resolution + child read both O(1).

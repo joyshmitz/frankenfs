@@ -1145,6 +1145,12 @@ pub struct OpenFs {
     /// by `BTRFS_TREE_NODE_CACHE_LIMIT` (the hot upper nodes are read first, so
     /// a small cache captures most of the benefit).
     btrfs_parsed_node_cache: ShardedCache<u64, Arc<BtrfsParsedNode>>,
+    /// Read-only per-directory name→child_objectid map (the btrfs analog of the
+    /// ext4 present-index). On a read-only mount the directory is immutable, so a
+    /// map built once from readdir serves `btrfs_lookup_child` name resolution in
+    /// O(1), skipping the per-lookup DIR_ITEM fs-tree descent (bd-cc-btrfs-nameidx).
+    /// Keyed by dir objectid; never populated on writable mounts.
+    btrfs_dir_entry_cache: ShardedCache<u64, Arc<rustc_hash::FxHashMap<Vec<u8>, u64>>>,
     /// Read-only decompressed compressed-extent cache (bd-4tw2n), keyed by the
     /// compressed extent's `disk_bytenr` -> the FULL decompressed extent bytes
     /// (`Arc<[u8]>`). A random 4 KiB read of a 128 KiB compressed extent
@@ -1315,6 +1321,7 @@ const EXT4_BASE_BLOCK_CACHE_LIMIT: usize = 1024;
 /// 8 MiB; the hot upper-tree nodes (root + internal) are read first on every
 /// descent, so even a modest cap captures the bulk of the repeated-read win.
 const BTRFS_TREE_NODE_CACHE_LIMIT: usize = 512;
+const BTRFS_DIR_ENTRY_CACHE_LIMIT: usize = 4096;
 
 /// Max entries in the read-only decompressed compressed-extent cache
 /// (bd-4tw2n). Each entry is one fully-decompressed compressed extent (up to
@@ -3657,6 +3664,7 @@ impl OpenFs {
             btrfs_fs_tree_root_fast: AtomicU64::new(0),
             btrfs_verified_dir_inode: AtomicU64::new(0),
             btrfs_parsed_node_cache: ShardedCache::new(),
+            btrfs_dir_entry_cache: ShardedCache::new(),
             btrfs_decompressed_extent_cache: ShardedCache::new(),
         };
 
@@ -7907,6 +7915,20 @@ impl OpenFs {
         // keyed lookup (btrfs_lookup_dir_entry, bd-a9wot) and the keyed getxattr
         // fast path. Real btrfs always writes a DIR_ITEM, so this resolves the
         // name without ever scanning the directory (bd-k115m).
+        // Read-only name→child map (built once on readdir) resolves the name in O(1),
+        // skipping the DIR_ITEM fs-tree descent + parse entirely (bd-cc-btrfs-nameidx).
+        // The map is the complete readdir snapshot, so absent-in-map means absent; its
+        // presence implies the parent is a directory (readdir verified that), so this
+        // also subsumes the parent dir-check. A miss falls to the descent below.
+        if let Some(map) = self.btrfs_dir_entry_cache.get(&canonical_parent) {
+            return match map.get(name) {
+                Some(&child_oid) => self.btrfs_read_inode_attr(cx, InodeNumber(child_oid)),
+                None => Err(FfsError::NotFound(
+                    String::from_utf8_lossy(name).into_owned(),
+                )),
+            };
+        }
+
         // Skip the parent INODE_ITEM read+parse when this parent was already
         // verified to be a directory (invariant on a read-only mount) — a directory
         // scan repeats the same parent, so this drops one of the two inode reads per
@@ -8122,6 +8144,22 @@ impl OpenFs {
         // Remove duplicate names (DIR_ITEM and DIR_INDEX can both describe
         // the same entry). Keep first-by-sort-key for stable pagination.
         let deduped = Self::btrfs_dedup_dir_rows(rows);
+
+        // On a read-only mount the directory is immutable, so cache this readdir as
+        // a complete name→child_objectid map: subsequent lookups resolve names O(1)
+        // without the per-lookup DIR_ITEM fs-tree descent (bd-cc-btrfs-nameidx).
+        // Writable mounts skip it (the COW tree already serves keyed lookups).
+        if self.btrfs_alloc_state.is_none() && canonical_dir != 0 {
+            let map: rustc_hash::FxHashMap<Vec<u8>, u64> = deduped
+                .iter()
+                .map(|(_, e)| (e.name.clone(), e.ino.0))
+                .collect();
+            self.btrfs_dir_entry_cache.insert_within(
+                canonical_dir,
+                Arc::new(map),
+                BTRFS_DIR_ENTRY_CACHE_LIMIT,
+            );
+        }
 
         if deduped.len() > 1000 {
             debug!(
