@@ -5153,3 +5153,21 @@ Mutex convoy — but `lookup-bench` has no `--threads`, so the parallel/convoy b
 here; not landing on an unmeasured hypothesis.) Reverted (stash `cc-ext4-hot-parent-…`). ⭐LESSON:
 the lock-free-cache-for-an-invariant pattern's PAYOFF scales with the cost of the work it skips —
 huge when that work is a tree descent (btrfs), neutral when it's an already-cached block read (ext4).
+
+## NEGATIVE (reverted) — 2026-07-02 — btrfs lock-free root-NODE cache is neutral (Arc clone dominates) + breaks node-count tests (CrimsonFox)
+
+Extended the lock-free-cache-for-an-invariant pattern (root bytenr 5de1eb15 = ~1.09x) to the fs-tree
+root PARSED NODE: a `btrfs_hot_root_node: ArcSwapOption<(u64, Arc<BtrfsParsedNode>)>` slot serving
+the root (read ~2×/lookup) without the `btrfs_parsed_node_cache` shard Mutex. **MEASURED NEUTRAL**
+(400k lookups, 12 runs: NEW 5/12, medians even ~4.12M) AND broke 2 ffs-core tests
+(`btrfs_targeted_descent_..._reads_fewer_nodes_bd_n040r`, `btrfs_lookup_readdir_fuse_walk_bd_e94n2`)
+that count nodes read through the normal provider — the lock-free slot bypasses the counted path.
+Reverted (stash `cc-btrfs-hot-root-node-…`).
+
+⭐⭐REFINES the lock-free-cache-for-an-invariant pattern: it WINS when the cached value is a cheap
+COPY (root bytenr `u64` 5de1eb15, MVCC/dir-verified flags faa65c91/2aedcfbd — an atomic load beats a
+Mutex+map) but is NEUTRAL when the value is an `Arc`/struct (root node here, ext4 parent inode
+8757b5c7 — the Arc clone / struct materialization is needed EITHER way, so ArcSwap-load ≈
+Mutex-get and only the lock type changes). So: apply lock-free caching to Copy-sized invariants, NOT
+to Arc-wrapped ones. btrfs lookup ~3.1x is at its descent floor (floor_descend 26% + parsed-node
+Arc-get 11% + parse/hash, all inherent). No code landed this turn (both attempts measured neutral).
