@@ -281,7 +281,18 @@ pub mod file_type {
 /// Allocates an inode number via `ffs-alloc`, initializes fields, writes to disk.
 /// Returns `(InodeNumber, Ext4Inode)`.
 #[expect(clippy::too_many_arguments)]
-pub fn create_inode(
+/// Allocate an inode number (with its bitmap/group-descriptor persist) and build
+/// the initial [`Ext4Inode`] WITHOUT persisting the inode body to the inode
+/// table. Callers that immediately mutate the returned inode and write it back
+/// themselves — `mkdir` (size/blocks/links_count/extent root), `mknod` (rdev),
+/// `symlink` (target) — use this to skip the redundant inode-table-block write
+/// that [`create_inode`] would do one step before the caller's own `write_inode`
+/// overwrites it (bd-mkinode-defer). [`create_inode`] is `prepare_inode` followed
+/// by that persist, for callers whose returned inode is already final
+/// (`ext4_create`). No intermediate reader observes the still-unwritten inode
+/// slot: the number is already reserved in the bitmap and every create-family
+/// caller writes the final body before any lookup can resolve the new name.
+pub fn prepare_inode(
     cx: &Cx,
     dev: &dyn BlockDevice,
     geo: &FsGeometry,
@@ -290,7 +301,6 @@ pub fn create_inode(
     uid: u32,
     gid: u32,
     parent_group: GroupNumber,
-    csum_seed: u32,
     now_secs: u64,
     now_nsec: u32,
     pctx: &ffs_alloc::PersistCtx,
@@ -379,9 +389,42 @@ pub fn create_inode(
         number: 0,
     };
 
-    write_inode(cx, dev, geo, groups, alloc.ino, &inode, csum_seed)?;
-
     Ok((alloc.ino, inode))
+}
+
+/// Allocate and persist a fresh inode with its initial body. Equivalent to
+/// [`prepare_inode`] followed by [`write_inode`]; used by callers (e.g.
+/// `ext4_create`) whose returned inode needs no further mutation.
+#[allow(clippy::too_many_arguments)]
+pub fn create_inode(
+    cx: &Cx,
+    dev: &dyn BlockDevice,
+    geo: &FsGeometry,
+    groups: &mut [GroupStats],
+    mode: u16,
+    uid: u32,
+    gid: u32,
+    parent_group: GroupNumber,
+    csum_seed: u32,
+    now_secs: u64,
+    now_nsec: u32,
+    pctx: &ffs_alloc::PersistCtx,
+) -> Result<(InodeNumber, Ext4Inode)> {
+    let (ino, inode) = prepare_inode(
+        cx,
+        dev,
+        geo,
+        groups,
+        mode,
+        uid,
+        gid,
+        parent_group,
+        now_secs,
+        now_nsec,
+        pctx,
+    )?;
+    write_inode(cx, dev, geo, groups, ino, &inode, csum_seed)?;
+    Ok((ino, inode))
 }
 
 // ── Delete ──────────────────────────────────────────────────────────────────

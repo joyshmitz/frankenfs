@@ -4189,3 +4189,32 @@ kernel-visible way through that fixture flow, so `span` collapses to 1 and BOTH
 sides read the hot single block (still a valid shard-contention microbench, but a
 proper spread-random test needs the fixture builder fixed). Recorded so the next
 random-read digger fixes the builder before testing spread-random.
+
+## KEEP — 2026-07-02 — `bd-mkinode-defer` ext4 mkdir/mknod skip the redundant inode-body write (CrimsonFox)
+
+**The mkdir double-inode-write lead (surfaced in `bb534d5d`) turned out FAR bigger
+than the ~1.03x estimate.** `ffs_inode::create_inode` persists the new inode's body
+(`write_inode`), but `ext4_mkdir` / `ext4_mknod` then modify the inode
+(size/blocks/links_count/extent root; rdev) and call `write_inode` AGAIN — so the
+inode-table block was materialized TWICE per op (each write = read-modify-write +
+CRC32C recompute + a fresh MVCC version-chain entry + commit). Split `create_inode`
+into `prepare_inode` (alloc number + bitmap + build inode, NO body write) +
+`create_inode` (= prepare + write, unchanged for `ext4_create` and other callers);
+`ext4_mkdir`/`ext4_mknod` now call `prepare_inode` and rely on their existing
+single `write_inode`. Safe: the inode number is reserved in the bitmap and both
+callers write the final body before any lookup can resolve the new name, so no
+reader observes the unwritten slot.
+
+**MEASURED ~1.526x ext4 mkdir** (mkdir-bench 20k, interleaved A/B vs the pre-defer
+binary: OLD ~16532 → NEW ~25230 mkdirs/s median, every NEW run > every OLD run;
+60.5 → 39.6 us/op). vs ORIG: frankenfs mkdir was already 1.64x faster than the
+kernel (99.1 us/op, loop mount + os.mkdir + sync) and is now **2.5x faster**.
+`ext4_mknod` gets the same fix (no bench, but it double-wrote identically).
+
+**Symlink was REVERTED** (kept `create_inode`): its fast-target path stores the
+link inline and does NOT re-write the inode, so deferring the body write left a
+fast symlink unpersisted — caught immediately by 3 `write_symlink_slow_target*`
+tests. Only ops that unconditionally `write_inode` the final body qualify.
+
+**Correctness:** `e2fsck` CLEAN on a NEW-mkdir image; ffs-core mkdir 11/0, mknod
+15/0, symlink 21/0 (post-revert); conformance 100/0/2 GREEN; fmt clean.

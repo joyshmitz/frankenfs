@@ -16648,7 +16648,9 @@ impl OpenFs {
             u32::try_from(parent.0.saturating_sub(1) / u64::from(geo.inodes_per_group))
                 .map_err(|_| FfsError::Format("parent inode group index exceeds u32".into()))?,
         );
-        let (ino, mut new_inode) = ffs_inode::create_inode(
+        // prepare_inode (no body persist): mknod strips EXT4_EXTENTS_FL / stores
+        // rdev below and write_inode's the final inode once (bd-mkinode-defer).
+        let (ino, mut new_inode) = ffs_inode::prepare_inode(
             cx,
             &block_dev,
             geo,
@@ -16657,7 +16659,6 @@ impl OpenFs {
             uid,
             gid,
             parent_group,
-            csum_seed,
             tstamp_secs,
             tstamp_nanos,
             persist_ctx,
@@ -16802,7 +16803,10 @@ impl OpenFs {
                 groups,
                 persist_ctx,
             } = &mut *alloc;
-            ffs_inode::create_inode(
+            // prepare_inode (no body persist): mkdir sets size/blocks/links_count/
+            // extent root below and write_inode's the final inode once, so the
+            // create_inode body write would be redundant (bd-mkinode-defer).
+            ffs_inode::prepare_inode(
                 cx,
                 &block_dev,
                 geo,
@@ -16811,7 +16815,6 @@ impl OpenFs {
                 uid,
                 gid,
                 parent_group,
-                csum_seed,
                 tstamp_secs,
                 tstamp_nanos,
                 persist_ctx,
@@ -19015,6 +19018,11 @@ impl OpenFs {
                     groups,
                     persist_ctx,
                 } = &mut *alloc;
+                // NOTE: symlink keeps create_inode (persist body). Its fast-target
+                // path stores the link inline and does NOT re-write the inode, so
+                // deferring the body write would leave a fast symlink unpersisted
+                // (bd-mkinode-defer applies only to mkdir/mknod, which always
+                // write_inode the final body).
                 ffs_inode::create_inode(
                     cx,
                     &block_dev,
