@@ -4834,3 +4834,20 @@ likely still be neutral for the same reason (this is the 2nd such neutral this s
 full-block-write zero-fill — micro-allocation elision on these paths does not move the needle).
 Shelved (stash `cc-bwtree-shadowkeys-Vec-vs-BTreeSet-MEASURED-NEUTRAL-…`); no code landed. The
 growing-write path is at its inherent MVCC-materialization floor.
+
+## ★ LANDED — 2026-07-02 — memoize per-group inode-table location → ~1.18x lookup (CrimsonFox)
+
+`perf` on lookup-bench (400k lookups): `read_group_desc_with_scope` ~4.25% + a share of the ~6%
+`read_visible` self-time. EVERY inode read (`read_inode_raw_with_scope_using` +
+`ext4_inode_table_block_for_inode_with_scope`) resolved the child inode's `bg_inode_table` start
+via a full `read_group_desc_with_scope` — a per-op MVCC `read_visible` cacheability probe +
+parsed-descriptor-cache lookup — even though the inode-table location of a group is FIXED at mkfs
+and never moves. Added `ext4_inode_table_locations: OnceLock<Box<[u64]>>`, populated once (reading
+each group's descriptor a single time) and served lock-free thereafter. Byte-identical inode reads
+(same location the descriptor returned); works for read-only + writable mounts; safe under
+GDT-defer (only free counts change, never `inode_table`). **MEASURED ~1.18x lookup** (two-binary
+interleaved A/B, 400k lookups, 6 runs: NEW wins 6/6, min NEW 3.91M > max OLD 3.89M lookups/s —
+cleanly separated, ~4.39M vs ~3.72M). Broad: helps EVERY inode read (stat / open / path resolution
+/ file read), the most frequent ops. Gates: ffs-core `--lib` **1185/0**, conformance **100/0/2**.
+⭐LESSON: an invariant field (mkfs-fixed layout) resolved through a per-op MVCC-aware cache probe
+is pure waste — memoize it in a plain lock-free array and skip the versioned-read machinery.

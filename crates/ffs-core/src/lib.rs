@@ -907,6 +907,16 @@ pub struct OpenFs {
     /// The writable path bypasses this cache because group descriptor counters
     /// can change during allocation/free operations.
     ext4_group_desc_cache: ShardedCache<GroupNumber, Ext4GroupDesc>,
+    /// Per-group inode-table start block (`bg_inode_table`), memoized once.
+    ///
+    /// The inode-table location of a group is fixed at mkfs and never moves, yet
+    /// EVERY inode read (`read_inode_raw_with_scope_using`) resolved it via a full
+    /// `read_group_desc_with_scope` — a per-op MVCC `read_visible` cacheability
+    /// probe + parsed-descriptor cache lookup that was ~4% + a share of the 6%
+    /// `read_visible` self-time on the lookup/stat hot path (perf). Populate this
+    /// lock-free array once (reading each group's descriptor a single time) and
+    /// serve the invariant location straight from it thereafter (bd-cc-itableloc).
+    ext4_inode_table_locations: OnceLock<Box<[u64]>>,
     /// Read-only ext4 inode-table block cache.
     ///
     /// The writable path bypasses this cache because inode metadata changes
@@ -3579,6 +3589,7 @@ impl OpenFs {
             jbd2_writer: None,
             ext4_alloc_state: None,
             ext4_group_desc_cache: ShardedCache::new(),
+            ext4_inode_table_locations: OnceLock::new(),
             ext4_inode_table_block_cache: ShardedCache::new(),
             ext4_file_data_block_cache: ShardedCache::new(),
             ext4_base_block_cache: ShardedCache::new(),
@@ -10354,13 +10365,16 @@ impl OpenFs {
         ino: InodeNumber,
     ) -> Result<BlockNumber, FfsError> {
         let loc = sb.locate_inode(ino).map_err(|e| parse_to_ffs_error(&e))?;
-        let gd = self.read_group_desc_with_scope(cx, scope, loc.group)?;
+        // The inode-table start of a group is invariant, so serve it from the
+        // memoized per-group array instead of a full descriptor read + MVCC
+        // cacheability probe on every inode read (bd-cc-itableloc).
+        let inode_table = self.ext4_inode_table_location(cx, scope, loc.group)?;
         let bs = u64::from(sb.block_size);
         let inode_table_start_byte =
-            gd.inode_table
+            inode_table
                 .checked_mul(bs)
                 .ok_or_else(|| FfsError::Corruption {
-                    block: gd.inode_table,
+                    block: inode_table,
                     detail: "inode table offset overflow".into(),
                 })?;
         let inode_offset_in_table = u64::from(loc.index) * u64::from(sb.inode_size);
@@ -10535,6 +10549,46 @@ impl OpenFs {
         self.read_inode_raw_with_scope_using(cx, scope, ino, Ext4Inode::parse_from_bytes)
     }
 
+    /// Invariant inode-table start block for `group`, memoized lock-free.
+    ///
+    /// The per-group `bg_inode_table` is fixed at mkfs, so on first use build a
+    /// dense array by reading each group's descriptor once, then serve every
+    /// subsequent inode read from it — skipping the per-read `read_group_desc`
+    /// MVCC cacheability probe + parsed-descriptor cache lookup (bd-cc-itableloc).
+    /// Works for read-only and writable mounts alike (the descriptor read does).
+    fn ext4_inode_table_location(
+        &self,
+        cx: &Cx,
+        scope: &RequestScope,
+        group: GroupNumber,
+    ) -> Result<u64, FfsError> {
+        let gidx = group.0 as usize;
+        if let Some(locs) = self.ext4_inode_table_locations.get() {
+            return locs.get(gidx).copied().ok_or_else(|| {
+                FfsError::InvalidGeometry("group number exceeds inode-table location table".into())
+            });
+        }
+        let sb = self
+            .ext4_superblock()
+            .ok_or_else(|| FfsError::Format("not an ext4 filesystem".into()))?;
+        let geo = FsGeometry::from_superblock(sb);
+        let mut locs = Vec::with_capacity(geo.group_count as usize);
+        for g in 0..geo.group_count {
+            locs.push(
+                self.read_group_desc_with_scope(cx, scope, GroupNumber(g))?
+                    .inode_table,
+            );
+        }
+        // First writer wins; a racing builder's array is dropped. The values are
+        // invariant so any winner is correct.
+        let locs = self
+            .ext4_inode_table_locations
+            .get_or_init(|| locs.into_boxed_slice());
+        locs.get(gidx).copied().ok_or_else(|| {
+            FfsError::InvalidGeometry("group number exceeds inode-table location table".into())
+        })
+    }
+
     fn read_inode_raw_with_scope_using(
         &self,
         cx: &Cx,
@@ -10547,13 +10601,16 @@ impl OpenFs {
             .ok_or_else(|| FfsError::Format("not an ext4 filesystem".into()))?;
 
         let loc = sb.locate_inode(ino).map_err(|e| parse_to_ffs_error(&e))?;
-        let gd = self.read_group_desc_with_scope(cx, scope, loc.group)?;
+        // The inode-table start of a group is invariant, so serve it from the
+        // memoized per-group array instead of a full descriptor read + MVCC
+        // cacheability probe on every inode read (bd-cc-itableloc).
+        let inode_table = self.ext4_inode_table_location(cx, scope, loc.group)?;
         let bs = u64::from(sb.block_size);
         let inode_table_start_byte =
-            gd.inode_table
+            inode_table
                 .checked_mul(bs)
                 .ok_or_else(|| FfsError::Corruption {
-                    block: gd.inode_table,
+                    block: inode_table,
                     detail: "inode table offset overflow".into(),
                 })?;
 
