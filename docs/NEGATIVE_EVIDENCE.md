@@ -4372,3 +4372,18 @@ because it reads the authoritative bitmap (stale on-disk GD after crash is a cos
 free-count hint e2fsck recomputes). So the blocker is narrowly the compressed-write GD
 path, not general durability. Attempt shelved (git stash, NOT dropped); tree clean; no
 code landed on main.
+
+**ATTEMPT 2 (also FAILED, shelved) — 2026-07-02:** tried the cleaner unblock that touches
+NO conformance test — flip `gdt_persistence_deferred` default ON + force a
+`ext4_flush_group_descriptors` (no-op in eager mode) at the END of `ext4_write_compressed`
+so the compressed-write GD stays eager while the mainline create/write win defers. **The
+e2compr assertion STILL fails** (`after_first_gd < baseline_gd`) even with the forced
+flush. Since the BITMAP free-count check two lines up PASSES (blocks ARE allocated,
+bitmap decremented), the divergence is specifically that `ext4_write_compressed`'s
+GD/`GroupStats` free-BLOCK accounting does not track its allocation under deferral —
+flushing writes an unchanged/stale GD count. So the real owner-lane fix is inside the
+compressed-write block accounting (make it decrement `GroupStats.free_blocks` for its
+compressed-cluster allocations the same way the mainline extent path does), NOT a flush or
+a test tweak. Both attempts shelved via `git stash` (NOT dropped: "...ATTEMPT-FAILED..." and
+"...ATTEMPT2-FAILED..."). Mainline create/mkdir/unlink e2fsck-clean under deferral is
+re-confirmed; the blocker is isolated to the e2compr compressed-cluster accounting path.
