@@ -992,6 +992,16 @@ pub struct OpenFs {
     /// self-time in profiling (bd-neteo). A readdir-only caller sets this to
     /// elide that dead work.
     readdir_prefetch_disabled: std::sync::atomic::AtomicBool,
+    /// A ONE-PASS consumer (e.g. `walk` = `find | xargs stat`: readdir each
+    /// dir + getattr each entry by inode, never a name `lookup`, each inode
+    /// visited once) sets this to skip the read-only *repeat-access* caches
+    /// that only pay off when the same name/inode is touched again: the readdir
+    /// present-index (name->dirent, for a following `lookup`) and the
+    /// per-inode attr cache (for a re-`getattr`). Building/growing them during
+    /// a single-pass sweep is pure overhead — every probe misses. Default
+    /// `false`; only opt-in walk-style callers set it (a later `lookup`/re-stat
+    /// still returns the correct answer, just via the uncached path).
+    readonly_lookup_cache_disabled: std::sync::atomic::AtomicBool,
     /// Test-only per-instance counter of readdir snapshot MISSES (full dir
     /// read+parse/walk). Per-instance (not a global static) so concurrently
     /// running tests do not interfere. A paginated listing of an unchanged
@@ -3641,6 +3651,7 @@ impl OpenFs {
                 .map(|_| Mutex::new(None))
                 .collect(),
             readdir_prefetch_disabled: std::sync::atomic::AtomicBool::new(false),
+            readonly_lookup_cache_disabled: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
             readdir_full_reads: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
@@ -10816,8 +10827,18 @@ impl OpenFs {
         // On a read-only mount the inode is immutable, so serve a previously
         // resolved attr without re-reading + re-parsing the inode (a directory scan
         // re-resolves the same children repeatedly). Writable mounts skip the cache.
+        // The attr cache pays off only when the SAME inode is re-resolved (a
+        // lookup scan re-stating children). A ONE-PASS walk getattrs each inode
+        // exactly once, so every probe misses and every insert just grows/rehashes
+        // the map — pure overhead (~3% of a full stat walk). A walk-style caller
+        // opts out via `readonly_lookup_cache_disabled`; the inode is still read
+        // and parsed fresh, so the returned attr is identical.
         let read_only = !self.is_writable();
-        if read_only {
+        let use_attr_cache = read_only
+            && !self
+                .readonly_lookup_cache_disabled
+                .load(std::sync::atomic::Ordering::Relaxed);
+        if use_attr_cache {
             if let Some(attr) = self.ext4_inode_attr_cache.get(&ino.0) {
                 return Ok(attr);
             }
@@ -10827,7 +10848,7 @@ impl OpenFs {
             .ok_or_else(|| FfsError::Format("not an ext4 filesystem".into()))?;
         let inode = self.read_inode_metadata_with_scope(cx, scope, ino)?;
         let attr = inode_to_attr(sb, ino, &inode);
-        if read_only {
+        if use_attr_cache {
             self.ext4_inode_attr_cache
                 .insert_within(ino.0, attr.clone(), EXT4_INODE_ATTR_CACHE_LIMIT);
         }
@@ -30355,16 +30376,26 @@ impl OpenFs {
             .map(|page| page.to_vec())
     }
 
-    /// Disable (or re-enable) the speculative readdir work that warms later
-    /// operations: the inode-table prefetch (for a following `getattr`) and the
-    /// read-only name->dirent present-index (for a following `lookup`). A
-    /// readdir-ONLY consumer (no following `getattr`/`lookup` — e.g. `ls -f`,
-    /// name enumeration, a `getdents` count, `walk --no-stat`) should disable it:
-    /// nothing reads the prefetched inode-table blocks and nothing queries the
-    /// present-index, so both are dead work whose fan-out / per-name clones can
+    /// Disable (or re-enable) the speculative inode-table prefetch that
+    /// `readdir` performs to warm the getattr cache. A readdir-ONLY consumer
+    /// (no following `getattr` — e.g. `ls -f`, name enumeration, a `getdents`
+    /// count, `walk --no-stat`) should disable it: nothing reads the prefetched
+    /// inode-table blocks, so the prefetch is dead work whose rayon fan-out can
     /// dominate readdir on a large htree directory.
     pub fn set_readdir_prefetch_disabled(&self, disabled: bool) {
         self.readdir_prefetch_disabled
+            .store(disabled, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Disable (or re-enable) the read-only repeat-access caches for a ONE-PASS
+    /// consumer. See [`Self::readonly_lookup_cache_disabled`]: `walk` (readdir +
+    /// getattr-by-inode over every entry, never a name `lookup`, each inode once)
+    /// sets this so the readdir present-index and the per-inode attr cache are
+    /// neither built nor grown during the sweep — every probe would miss, so they
+    /// are pure overhead. Correctness is unchanged: a later `lookup`/re-`getattr`
+    /// simply takes the uncached htree/inode-read path.
+    pub fn set_readonly_lookup_cache_disabled(&self, disabled: bool) {
+        self.readonly_lookup_cache_disabled
             .store(disabled, std::sync::atomic::Ordering::Relaxed);
     }
 
@@ -32558,17 +32589,18 @@ impl FsOps for OpenFs {
                 // only (keys on exact name bytes); read-only only (never goes stale)
                 // (bd-cc-ext4-presentidx).
                 //
-                // Skip the build entirely for a readdir-ONLY consumer (the same
-                // `readdir_prefetch_disabled` contract that suppresses the inode-table
-                // prefetch above): `ls -f`, getdents/name-enumeration, and a
-                // `walk --no-stat` never issue the follow-up lookup this index would
-                // accelerate, so cloning every name into an FxHashMap per readdir is
-                // pure dead work (~7% of a 30000-entry read-only `walk --no-stat`).
+                // Skip the build entirely for a ONE-PASS consumer (the
+                // `readonly_lookup_cache_disabled` contract): `ls -f`,
+                // getdents/name-enumeration, and any `walk` (--no-stat OR full stat,
+                // which getattrs by inode and never issues a name `lookup`) never
+                // query this index, so cloning every name into an FxHashMap per
+                // readdir is pure dead work (~7% of a 30000-entry read-only
+                // `walk --no-stat`; still ~2% under a full stat walk).
                 if canonical.0 != 0
                     && !self.is_writable()
                     && inode.flags & ffs_types::EXT4_CASEFOLD_FL == 0
                     && !self
-                        .readdir_prefetch_disabled
+                        .readonly_lookup_cache_disabled
                         .load(std::sync::atomic::Ordering::Relaxed)
                 {
                     let present: rustc_hash::FxHashMap<Vec<u8>, (u32, Ext4FileType)> =

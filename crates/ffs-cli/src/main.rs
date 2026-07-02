@@ -3188,6 +3188,13 @@ fn walk_cmd(path: &PathBuf, no_stat: bool, parallel: bool, read_data: bool) -> R
     if (no_stat && !read_data) || std::env::var_os("FFS_NO_READDIR_PREFETCH").is_some() {
         open_fs.set_readdir_prefetch_disabled(true);
     }
+    // A walk is a ONE-PASS sweep in EVERY mode: it getattrs entries by inode and
+    // never resolves a name via `lookup`, and visits each inode once. So the
+    // read-only repeat-access caches (readdir present-index + per-inode attr
+    // cache) can only ever miss here — disable them so they are not built/grown
+    // during the walk. (The prefetch above is orthogonal: it warms getattr and
+    // stays on for the stat walk.)
+    open_fs.set_readonly_lookup_cache_disabled(true);
     if matches!(&open_fs.flavor, FsFlavor::Btrfs(_)) {
         open_fs
             .prewarm_btrfs_read_plan_index(&cx)
