@@ -3551,7 +3551,7 @@ fn validate_dir_block_slice_len(block: &[u8], block_size: u32) -> Result<(), Par
 fn walk_dir_block_entries(
     block: &[u8],
     block_size: u32,
-    mut on_entry: impl FnMut(u32, u8, u32, u8, &[u8]),
+    mut on_entry: impl FnMut(u32, u8, u32, u8, &[u8]) -> core::ops::ControlFlow<()>,
 ) -> Result<Option<Ext4DirEntryTail>, ParseError> {
     validate_dir_block_slice_len(block, block_size)?;
 
@@ -3643,13 +3643,23 @@ fn walk_dir_block_entries(
                 reason: "name extends past rec_len",
             });
         }
-        on_entry(
+        // A consumer that has found what it needs (e.g. a name lookup) returns
+        // `Break`, stopping the walk here. The entries up to and including this one
+        // were fully validated; skipping the remainder trades whole-block
+        // validation-after-match (defense-in-depth only — the accepted entry is
+        // already parsed and correct) for not re-parsing ~half the leaf on every
+        // htree lookup (`lookup_in_dir_block` was ~31% of an ext4 lookup, perf).
+        if on_entry(
             inode,
             file_type_raw,
             rec_len,
             name_len,
             &block[offset + 8..name_end],
-        );
+        )
+        .is_break()
+        {
+            return Ok(None);
+        }
 
         offset = entry_end;
     }
@@ -3681,6 +3691,7 @@ pub fn parse_dir_block(
                 file_type: Ext4FileType::from_raw(file_type_raw),
                 name: name.to_vec(),
             });
+            core::ops::ControlFlow::Continue(())
         },
     )?;
     Ok((entries, tail))
@@ -3707,7 +3718,7 @@ pub fn lookup_in_dir_block(
         block,
         block_size,
         |inode, file_type_raw, rec_len, name_len, name| {
-            if found.is_none() && name == target {
+            if name == target {
                 found = Some(Ext4DirEntry {
                     inode,
                     rec_len,
@@ -3715,7 +3726,9 @@ pub fn lookup_in_dir_block(
                     file_type: Ext4FileType::from_raw(file_type_raw),
                     name: name.to_vec(),
                 });
+                return core::ops::ControlFlow::Break(());
             }
+            core::ops::ControlFlow::Continue(())
         },
     )?;
     Ok(found)
@@ -3745,7 +3758,7 @@ pub fn lookup_in_dir_block_casefold(
         block,
         block_size,
         |inode, file_type_raw, rec_len, name_len, name| {
-            if found.is_none() && casefold_key_eq(name, &target_lower) {
+            if casefold_key_eq(name, &target_lower) {
                 found = Some(Ext4DirEntry {
                     inode,
                     rec_len,
@@ -3753,7 +3766,9 @@ pub fn lookup_in_dir_block_casefold(
                     file_type: Ext4FileType::from_raw(file_type_raw),
                     name: name.to_vec(),
                 });
+                return core::ops::ControlFlow::Break(());
             }
+            core::ops::ControlFlow::Continue(())
         },
     )?;
     Ok(found)

@@ -5047,3 +5047,20 @@ on a single path) WINS, while TUNING a needed-but-mis-sized one (the walker sets
 **Cumulative btrfs read-only lookup ≈ 1.97x this session** (FxHashSet walker × DIR_ITEM point ×
 INODE_ITEM point × floor depth-limit/FxHash root). Also speeds every btrfs file-extent floor
 descent (read path) and getattr.
+
+## ★ LANDED — 2026-07-02 — ext4 htree lookup: stop scanning the leaf block at the match → ~1.23x ext4 lookup (CrimsonFox)
+
+`perf` on ext4 lookup (30k-entry htree dir): **~31% `lookup_in_dir_block`** — it walked the ENTIRE
+htree leaf block (~200 entries, parsing rec_len/name per entry) even after finding the target name,
+because `walk_dir_block_entries` validated the whole block (defense-in-depth, deliberate per its
+comment). For a lookup the accepted entry is already parsed and correct, so re-parsing the ~half of
+the leaf after the match is redundant. Changed `walk_dir_block_entries`'s callback to return
+`ControlFlow`; `lookup_in_dir_block` (+ the casefold variant) now `Break`s at the match (returning
+`Ok(None)` tail, which lookup ignores), while `parse_dir_block` still walks fully (`Continue`).
+Entries up to and including the match are still fully validated; only validation-AFTER-match (which
+cannot change the lookup result) is skipped. **MEASURED ~1.23x ext4 lookup** (two-binary
+interleaved A/B, 500k lookups, 8 runs: NEW wins 8/8 with NO overlap, min NEW 855k > max OLD 826k;
+median 928k vs 758k lookups/s). Gates: ffs-ondisk **668/0** (dir-block parse/validation tests),
+conformance **100/0/2**. Broad: every ext4 name lookup on a linear or htree directory (stat / open
+/ path resolution). ⭐Redundant-WORK elimination again (stop early), the session's winning class —
+NOT alloc tuning.
