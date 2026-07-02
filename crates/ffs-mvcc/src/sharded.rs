@@ -22,7 +22,7 @@ use parking_lot::{Condvar, Mutex, RwLock, RwLockWriteGuard};
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tracing::{debug, info, trace};
 
 /// Number of MVCC version-store shards to provision per available CPU.
@@ -205,6 +205,15 @@ pub struct ShardedMvccStore {
     next_txn: AtomicU64,
     next_commit: AtomicU64,
     publication_gate: CommitPublicationGate,
+    /// Set true the first time any commit installs a version, before that commit
+    /// publishes. A read-only mount never writes, so this stays false and every
+    /// `read_visible`/`read_visible_physical` returns `None` without hashing +
+    /// read-locking a shard to probe an always-empty version map (bd-cc-mvccempty).
+    /// Monotonic: once set it never clears (installed blocks retain their latest
+    /// version). Ordering is carried by the existing publish/snapshot sync — a
+    /// snapshot that can see a version was taken after that commit published, hence
+    /// after this store, so a reader loading `false` provably has no visible version.
+    any_version_installed: AtomicBool,
     /// Inline snapshot tracking. **Lock-rank 0** — must be acquired
     /// before `shards` and `contention_metrics`.
     active_snapshots: RwLock<BTreeMap<CommitSeq, u64>>,
@@ -266,6 +275,7 @@ impl ShardedMvccStore {
             next_txn: AtomicU64::new(1),
             next_commit: AtomicU64::new(1),
             publication_gate: CommitPublicationGate::new(),
+            any_version_installed: AtomicBool::new(false),
             active_snapshots: RwLock::new(BTreeMap::new()),
             compression_policy: policy,
             conflict_policy: RwLock::new(ConflictPolicy::default()),
@@ -704,6 +714,11 @@ impl ShardedMvccStore {
     /// Read the version of `block` visible at `snapshot`.
     #[must_use]
     pub fn read_visible(&self, block: BlockNumber, snapshot: Snapshot) -> Option<Vec<u8>> {
+        // No version has ever been installed (read-only mount): skip the shard hash
+        // + read-lock + empty-map probe entirely (bd-cc-mvccempty).
+        if !self.any_version_installed.load(Ordering::Acquire) {
+            return None;
+        }
         let shard_idx = self.shard_index(block);
         let shard = self.shards[shard_idx].read();
         // Newest-first check then O(log n) binary search over the ascending
@@ -750,6 +765,9 @@ impl ShardedMvccStore {
         logical: BlockNumber,
         snapshot: Snapshot,
     ) -> Option<BlockNumber> {
+        if !self.any_version_installed.load(Ordering::Acquire) {
+            return None;
+        }
         let shard = self.shards[self.shard_index(logical)].read();
         shard
             .versions
@@ -871,6 +889,9 @@ impl ShardedMvccStore {
                 Some(&staged.merge_proof),
                 install_ctx,
             );
+            // A version now exists; enable the version-aware read path. Set before
+            // publish so any snapshot that can see this commit also sees the flag.
+            self.any_version_installed.store(true, Ordering::Release);
         }
 
         // Release shard locks before ordered publication. All version data is
@@ -940,6 +961,9 @@ impl ShardedMvccStore {
                 Some(&staged.merge_proof),
                 install_ctx,
             );
+        }
+        if !write_keys.is_empty() {
+            self.any_version_installed.store(true, Ordering::Release);
         }
 
         let ssi_record = CommittedTxnRecord {

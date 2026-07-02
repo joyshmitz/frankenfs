@@ -5080,3 +5080,20 @@ it safe by construction. **MEASURED ~1.14x ext4 lookup** (two-binary interleaved
 conformance **100/0/2**. Broad: every ext4 name lookup. **Cumulative ext4 lookup ~1.39x this session**
 (itable-loc × leaf early-stop 8446acf8 × dx raw fast path). ⭐Redundant-WORK elimination (parse-all →
 search-path-only), the session's winning class.
+
+## ★ LANDED — 2026-07-02 — MVCC read_visible empty-store short-circuit → ~1.04x ext4 read-only lookup (CrimsonFox)
+
+`read_visible`/`read_visible_physical` hashed the block, read-locked a shard, and probed the version
+map on EVERY block read — but a read-only mount never installs a version, so that map is always empty
+and the probe always returns `None`. Added an `any_version_installed: AtomicBool` on
+`ShardedMvccStore`, set (Release) the first time either commit path installs a version, before the
+commit publishes; both readers now short-circuit to `None` when it is false without touching a shard.
+**Correct by the existing publish/snapshot ordering**: a snapshot that can see a version was taken
+after that commit published, hence after the flag store, so a reader loading `false` provably has no
+visible version (the flag store happens-before publish happens-before snapshot-taken happens-before
+the load). Monotonic — once set it never clears. **MEASURED ~1.04x ext4 read-only lookup** (two-binary
+interleaved A/B, 600k lookups, 12 runs: NEW wins 11/12, median 1.053M vs 1.008M lookups/s); ext4
+create (writable) neutral (the per-commit flag store is free). Gates: ffs-mvcc **481/0**
+(visibility/read-after-write), conformance **100/0/2**. Broad + Pareto: every read on a read-only
+mount (lookup / getattr / file read) skips the MVCC probe; writable mounts are unaffected. Modest but
+free redundant-work elimination.
