@@ -4523,3 +4523,33 @@ real crash-recovery flushes after replay). 3 of the 7 flushes already applied in
 validation (conformance 100/0/2 + e2fsck via mkfs + create-bench 2.29x remeasure) remain. This is
 now a bounded mechanical finish, not invention — the deep-owner-lane verdict is RETRACTED for
 lever #1 (GDT-defer-default → 2.29x create / 1.27x mkdir / every allocating op).
+
+## PROGRESS — 2026-07-02 — GDT-defer-default: ffs-core 16→**0** GREEN; found+fixed a real recovery bug; only 8 mechanical ffs-alloc pins + conformance/perf remain (CrimsonFox)
+
+Finished the mechanical work above and it converged. Full `ffs-core --lib` under
+default-ON deferral is now **1185 passed / 0 failed** (was 16 fails). Two of the 7 flush
+fixes turned out to mask a **real deferral bug in the fast-commit recovery path**, not just
+a test-model gap:
+
+- `apply_fast_commit_del_range_ops` (lib.rs:5406) and `free_fast_commit_deleted_inode`
+  (lib.rs:4953) free blocks/inodes through a **transient** alloc state
+  (`load_ext4_alloc_state`), and under deferral `punch_hole`/`delete_inode` skip the per-op
+  descriptor write, so that transient state was dropped un-flushed → recovered image had a
+  stale descriptor free count (e2fsck "Free blocks count wrong for group #0 (6522,
+  counted=6523)"). A test-side `fs2.flush_mvcc_to_device` does NOT fix it — the recovery
+  mount has no stored `ext4_alloc_state`, so the flush no-ops.
+- **Fix (real code, in the shelved WIP):** extracted `ext4_persist_group_descriptors_from(cx,
+  alloc)` (shared with `ext4_flush_group_descriptors`) and call it from both recovery paths
+  under deferral, persisting the transient state's descriptors before it drops. Eager mode
+  unchanged (the flag makes it a no-op; `punch_hole`/`delete_inode` already wrote eagerly).
+
+**Remaining before landing (all mechanical, ~15 min):** 8 `ffs-alloc` unit tests
+(`alloc_persist_skips_reserved_and_updates_gdt`, `*_persist_gdt_write_failure_restores_*` ×5,
+`free_blocks_persist_cross_boundary_splits_bigalloc_segments`,
+`alloc_and_free_persist_keep_bitmap_checksums_in_sync`) assert the ON-DISK GDT after a
+`*_persist` call — they validate EAGER persistence, so each must pin eager with
+`ffs_alloc::set_gdt_persistence_deferred_for_test(Some(false))` at test start (the thread-local
+override ATTEMPT4 added for exactly this). THEN: conformance 100/0/2 + e2fsck-via-mkfs +
+create-bench 2.29x remeasure. WIP shelved intact as stash
+`cc-gdt-defer-default-WIP-ffscore-1185-0-GREEN-source-recovery-descriptor-fix-…`; tree clean, no
+code landed (default-flip not safe to land until ffs-alloc green + conformance pass verified).
