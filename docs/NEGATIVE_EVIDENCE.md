@@ -4302,3 +4302,25 @@ conformance assertion to make a perf change pass is an owner decision — a subt
 (a path relying on eager GD, or crash-recovery of GD counts) ships a durability
 regression to the DEFAULT path. Precisely handed off: relax `conformance.rs:3432`, flip
 `gdt_persistence_deferred` default, run the full suite + e2fsck sweep. No code landed.
+
+## SURFACE — 2026-07-02 — ext4 rmdir is clean (no double-write); single-thread mutation frontier now fully mapped (CrimsonFox)
+
+Traced ext4 rmdir (`rdbench`) via `FFS_TRACE_WRITES` — it commits ~1 block per op
+(free inode-table slot + free bitmaps/entry, no redundant re-write). frankenfs rmdir
+= **20660 rmdirs/s = 48.4 us/op** (the shell-`rmdir`-loop kernel baseline is
+fork-dominated at 3422 us/op = meaningless; rmdir needs a C harness like `krandread`
+for a fair kernel number, but the trace shows rmdir is at the inherent per-op-commit
+floor, no double-write like mkdir had).
+
+**Op-by-op frontier map is now COMPLETE** (all traced/measured this campaign): btrfs
+create/mkdir/rename/unlink at kernel PARITY (6-commit COW sweep); ext4 create / write /
+overwrite / append / unlink / rmdir CLEAN (each block committed once, inherent
+per-op-MVCC floor); ext4 mkdir/mknod had the inode double-write (FIXED, 1.5x,
+bd-mkinode-defer) and retain the GDT double-write (owner-lane); ext4 lookup 1.30x
+FASTER, random read 1.30-1.57x FASTER, sequential reads + metadata walk dominate.
+**No contained single-thread redundant-work lever remains.** The three real remaining
+gaps are all owner-lane: (a) GDT-defer-default (2.32x create, one-assertion blocker at
+conformance.rs:3432 + durability-default flip), (b) intra-op write batching (1.83x
+create, shelved on a read-your-writes bug, stash@{0}), (c) the parallel-create
+`alloc_mutex.write()` convoy (~9x, per-group interior-mutability refactor). Instrumentation
+reverted; no code landed.
