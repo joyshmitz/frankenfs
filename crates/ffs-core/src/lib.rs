@@ -7835,8 +7835,15 @@ impl OpenFs {
         // directory scan's repeated child re-resolutions instead of re-descending
         // the fs tree per lookup (bd-cc-ext4-attrcache, shared cache — keyed by u64,
         // no collision on a single-flavor mount). Matches the ext4 read-only attr
-        // cache; the FxHashMap-backed ShardedCache makes the get O(1).
-        if let Some(attr) = self.ext4_inode_attr_cache.get(&canonical) {
+        // cache; the FxHashMap-backed ShardedCache makes the get O(1). A ONE-PASS
+        // walk visits each inode once, so every probe misses — opt out via the same
+        // flag as the ext4 attr cache (the fresh tree/index read below is unchanged).
+        let use_attr_cache = !self
+            .readonly_lookup_cache_disabled
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if use_attr_cache
+            && let Some(attr) = self.ext4_inode_attr_cache.get(&canonical)
+        {
             return Ok(attr);
         }
 
@@ -7848,8 +7855,10 @@ impl OpenFs {
             let inode = self.btrfs_read_ondisk_inode_item(cx, canonical)?;
             self.btrfs_inode_attr_from_item(ino, inode)?
         };
-        self.ext4_inode_attr_cache
-            .insert_within(canonical, attr.clone(), EXT4_INODE_ATTR_CACHE_LIMIT);
+        if use_attr_cache {
+            self.ext4_inode_attr_cache
+                .insert_within(canonical, attr.clone(), EXT4_INODE_ATTR_CACHE_LIMIT);
+        }
         Ok(attr)
     }
 
@@ -8173,8 +8182,15 @@ impl OpenFs {
         // On a read-only mount the directory is immutable, so cache this readdir as
         // a complete name→child_objectid map: subsequent lookups resolve names O(1)
         // without the per-lookup DIR_ITEM fs-tree descent (bd-cc-btrfs-nameidx).
-        // Writable mounts skip it (the COW tree already serves keyed lookups).
-        if self.btrfs_alloc_state.is_none() && canonical_dir != 0 {
+        // Writable mounts skip it (the COW tree already serves keyed lookups). A
+        // ONE-PASS walk never issues that lookup, so cloning every name into the map
+        // is pure dead work — skip it under the same flag as the ext4 present-index.
+        if self.btrfs_alloc_state.is_none()
+            && canonical_dir != 0
+            && !self
+                .readonly_lookup_cache_disabled
+                .load(std::sync::atomic::Ordering::Relaxed)
+        {
             let map: rustc_hash::FxHashMap<Vec<u8>, u64> = deduped
                 .iter()
                 .map(|(_, e)| (e.name.clone(), e.ino.0))
