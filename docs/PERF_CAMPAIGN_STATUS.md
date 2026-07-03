@@ -30,6 +30,7 @@ attempts corrupted the filesystem).
 | `scripts/build-perf.sh` — validated one-command max-perf build | d8f898ce | see below |
 | `str2hashbuf` → `[u32;8]` stack array (htree hash, per insert/lookup) | a6c4c505 | ~1.34x (fn) |
 | `write_inode` serializes into a stack buffer (`serialize_inode_into`) | dab75bb3 | ~1.13x (fn) |
+| btrfs `delete_from` leaf fast-path (skip removed item on COW copy) | a1a2a26c | ~1.5% btrfs unlink |
 
 ## Build-config levers (perf-stat-measured; the late vein)
 
@@ -76,6 +77,25 @@ Then every hot op was stall-analyzed (`perf stat` counters) and its promising le
 - ⚠️**META-LESSON**: a *streaming* microbench (iterate all keys) exaggerates
   table-size/density and can INVERT the real-path result. Pure-function microbenches
   translate; structural cache-layout changes MUST be verified with a real-binary A/B.
+
+## btrfs-write front (fresh, after ext4 exhausted)
+
+btrfs metadata writes work and were profiled for the first time — a different world
+from ext4: **COW-tree-node churn**, not crc/RMW. Throughput ladder is inherent
+tree-op count: create ~77k/s > unlink ~38.5k > rename ~19k (rename does delete 4 +
+insert 4 + rebalance ≈ 4× create).
+
+- **Win**: `delete_from` leaf fast-path (a1a2a26c) — build the N−1 COW result skipping
+  the removed item vs full-node `.clone()` + `Vec::remove` shift. Real-binary A/B:
+  −1.5% cycles btrfs unlink (all 3 pairs), behavior-preserving (365+38 tests).
+- **Refuted** (real-binary A/B): `BtrfsCowNode` leaf-Vec **pool** (instr −1.7% but
+  cycles FLAT — jemalloc buffer-free cheap; the 17% `drop_glue` is item Arc-refcount,
+  not buffer; 5829c6f5); `merge_adjacent_nodes` targeted-copy (NEUTRAL — merges are
+  rare; **frequency, not pattern-fit, decides**; 80706777).
+- **All hot COW ops audited optimal-or-inherent**: `insert_into` (bd-btrcow2), leaf
+  `split` (`split_off`), `delete_from`-leaf (landed); the per-item Arc-refcount
+  clone+drop (~22% of writes) is cheaper than the data-copy it replaces (a persistent
+  vector would slow read-heavy btrfs's Vec-index — net loss). btrfs writes at COW floor.
 
 ## Lever categories — ALL closed
 
