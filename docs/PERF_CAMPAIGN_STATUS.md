@@ -96,6 +96,15 @@ insert 4 + rebalance ≈ 4× create).
   `split` (`split_off`), `delete_from`-leaf (landed); the per-item Arc-refcount
   clone+drop (~22% of writes) is cheaper than the data-copy it replaces (a persistent
   vector would slow read-heavy btrfs's Vec-index — net loss). btrfs writes at COW floor.
+- **Also refuted (real-binary A/B, fully gated inc. `btrfs check`)**: `BtrfsCowNode`
+  leaf-Vec pool (cycles flat), `merge_adjacent_nodes` targeted-copy (rare),
+  **staged-internal in-place** (eliminates 10.6% of COWs but NEUTRAL — 174adddb).
+- ⚠️**META-LESSON #2 — COW/op COUNT ≠ COST**: the staged-internal candidate was *sized*
+  at 10.6% of `insert_into` COWs, passed 365+38 tests + `btrfs check` clean, yet was
+  neutral (~0.2% instr) — because those redundant COWs are cheap INTERNAL nodes, while
+  cost lives in the LEAF Arc-item copies. Same trap as the node-pool (17% `drop_glue`
+  was cheap buffer-free). SIZE cost-per-op-type before building, not count. Every
+  count-based btrfs-write redundancy turned out cheap; the cost is in inherent ops.
 
 ## Lever categories — ALL closed
 
