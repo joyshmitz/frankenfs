@@ -2058,7 +2058,14 @@ pub fn free_blocks(
 
         dev.write_block(cx, gs.block_bitmap_block, &bitmap)?;
         groups[gidx].free_blocks = groups[gidx].free_blocks.saturating_add(segment.count);
-        groups[gidx].refresh_block_largest_free_run(&bitmap, geo.blocks_in_group(segment.group));
+        // Freeing only GROWS the group's largest contiguous free run, so INVALIDATE
+        // (O(1), recompute-on-demand) instead of an O(blocks_in_group) `bitmap_largest
+        // _free_run` rescan per free — mirrors the count==1 alloc path (2217). `None`
+        // falls through to the exact bitmap query for statvfs / fallocate / the
+        // contiguous-alloc early-reject, so no consumer is mis-served (a stale non-None
+        // value would be the unsafe direction; `None` never is). The run is an in-memory
+        // hint (not an on-disk GD field), so this is e2fsck-neutral. bd-cc-free-largestrun.
+        groups[gidx].invalidate_block_largest_free_run();
     }
     Ok(())
 }
@@ -2341,7 +2348,14 @@ pub fn free_blocks_persist(
         let gidx = segment.group.0 as usize;
         dev.write_block(cx, groups[gidx].block_bitmap_block, &bitmap)?;
         groups[gidx].free_blocks = groups[gidx].free_blocks.saturating_add(segment.count);
-        groups[gidx].refresh_block_largest_free_run(&bitmap, geo.blocks_in_group(segment.group));
+        // Freeing only GROWS the group's largest contiguous free run, so INVALIDATE
+        // (O(1), recompute-on-demand) instead of an O(blocks_in_group) `bitmap_largest
+        // _free_run` rescan per free — mirrors the count==1 alloc path (2217). `None`
+        // falls through to the exact bitmap query for statvfs / fallocate / the
+        // contiguous-alloc early-reject, so no consumer is mis-served (a stale non-None
+        // value would be the unsafe direction; `None` never is). The run is an in-memory
+        // hint (not an on-disk GD field), so this is e2fsck-neutral. bd-cc-free-largestrun.
+        groups[gidx].invalidate_block_largest_free_run();
 
         // Persist group descriptor.
         if let Err(error) = persist_group_desc_with_bitmap_overrides(
