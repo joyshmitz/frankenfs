@@ -8,12 +8,15 @@ in `docs/bd-bhh0i-parallel-create-plan.md`.
 ## TL;DR
 
 Single-turn *code* optimization is **exhausted** (every op on both filesystems at
-its floor). A late **build-config** vein — unlocked by switching to a noise-immune
-`perf stat` instruction/cycle metric — then produced real wins (fat LTO landed;
-target-cpu=v3 + PGO surfaced and scripted). The **only** substantive *code* lever
-left is **bd-bhh0i** (parallel metadata-write serialization, proven ~7x) — a
-multi-turn, loom-gated, correctness-critical effort that must not be rushed into
-one commit (two prior attempts corrupted the filesystem).
+its floor, verified at the hardware-counter level). Three veins were mined after the
+whole-op floors: **build-config** (fat LTO landed; target-cpu=v3 + PGO surfaced and
+scripted — noise-immune `perf stat` metric), **per-function allocs** (str2hashbuf,
+serialize landed via criterion), and a **microarch verify phase** (every hot op
+stall-analyzed; six promising levers built as real binaries and A/B-refuted — see
+the verify-phase section). The **only** substantive *code* lever left is **bd-bhh0i**
+(parallel metadata-write serialization, proven ~7x) — a multi-turn, loom-gated,
+correctness-critical effort that must not be rushed into one commit (two prior
+attempts corrupted the filesystem).
 
 ## Landed wins (all measured, gated, on `main`)
 
@@ -25,6 +28,8 @@ one commit (two prior attempts corrupted the filesystem).
 | (earlier) mkdir/mknod/link/symlink htree dedup, eager unlink/rmdir | — | 1.05–2.85x |
 | `release-perf` fat LTO (thin→fat) | cd251273 | ~2–3% (instr) |
 | `scripts/build-perf.sh` — validated one-command max-perf build | d8f898ce | see below |
+| `str2hashbuf` → `[u32;8]` stack array (htree hash, per insert/lookup) | a6c4c505 | ~1.34x (fn) |
+| `write_inode` serializes into a stack buffer (`serialize_inode_into`) | dab75bb3 | ~1.13x (fn) |
 
 ## Build-config levers (perf-stat-measured; the late vein)
 
@@ -42,6 +47,35 @@ instruction/cycle counts (deterministic for fixed work) exposed them:
   (d8f898ce): **create −14.3%, lookup −27%** vs plain fat-LTO, e2fsck-clean. Run
   `scripts/build-perf.sh` for the max-perf binary; the default build stays portable.
 - allocator already jemalloc-optimal (0303500d); crc32c already optimal.
+
+## Per-function + microarch verify phase (criterion + real-binary A/B)
+
+After the whole-op floors, a re-profile reopened a **per-function** vein — criterion
+(noise-robust on this loaded machine) surfaced masked per-call heap allocs in hot
+functions. Two landed (both byte-identical, criterion-verified):
+
+- **`str2hashbuf`** (a6c4c505): `vec![0;buf_size]` → `[u32;8]` stack array on the
+  ext4 htree hash (every create/mkdir/rename/link/symlink insert + htree lookup) —
+  −34% on the `dir_lookup` htree bench.
+- **`serialize_inode_into`** (dab75bb3): `write_inode` serializes into a stack buffer
+  instead of `vec![0;inode_size]` — −12.5% on a new `serialize_inode` bench.
+
+Then every hot op was stall-analyzed (`perf stat` counters) and its promising levers
+**built as real binaries and A/B'd** — six refuted, none shipped on a microbench:
+
+- **lookup** = cache-miss-bound (37% miss, hashmap pointer-chasing), NOT dTLB-bound
+  (THP refuted). **create** = user-side cache-stall-bound (`ext4_add_dir_entry` #1
+  @18% = 4 KiB dir-leaf RMW memcpy + `dir_csum` crc), NOT syscall-bound. **btrfs
+  lookup** = attr-cache + `read_inode_attr` (cache-latency floor). **btrfs write** =
+  memmove/I/O-bound.
+- Refuted with measurement: present-index inline-key (neutral), MVCC chain inline
+  (3× slower reads), `prepare_inode` inline (slower), jemalloc THP (not TLB-bound),
+  `btrfs_canonical_inode` inline (real-binary A/B neutral), **attr-cache
+  `Arc<InodeAttr>`** (microbench said 6.6× faster, **real-binary A/B was +7% cycles**
+  — 66402846).
+- ⚠️**META-LESSON**: a *streaming* microbench (iterate all keys) exaggerates
+  table-size/density and can INVERT the real-path result. Pure-function microbenches
+  translate; structural cache-layout changes MUST be verified with a real-binary A/B.
 
 ## Lever categories — ALL closed
 
