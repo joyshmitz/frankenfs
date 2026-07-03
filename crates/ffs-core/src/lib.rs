@@ -16433,6 +16433,28 @@ impl FsOps for Ext4FsOps {
 
 // ── ext4 write-path helpers ─────────────────────────────────────────────────
 
+/// Result of `ext4_preflight_dir_entry_insert`'s optional target-existence probe.
+///
+/// The rename path needs to know whether `new_name` already exists in the target
+/// directory (to remove/clobber it) BEFORE it removes the source entry. On a
+/// non-casefold htree dir the preflight already reads the single hash-target leaf
+/// (the only block an existing `new_name` could occupy — the same invariant the
+/// create/mkdir dedup guard relies on), so it scans that leaf in-place and reports
+/// the answer here, letting `ext4_rename` skip a full second htree descent
+/// (`lookup_name`) — the dominant addressable rename cost (bd-cc-rename-probe).
+enum RenameTargetProbe {
+    /// Non-casefold htree fast path scanned the hash-target leaf: `new_name` is
+    /// definitively absent — the caller may skip its own `lookup_name`.
+    Absent,
+    /// The hash-target leaf already holds `new_name`; the caller uses this entry
+    /// for the overwrite path.
+    Present(Ext4DirEntry),
+    /// Existence was NOT determined (casefold dir needs fold-aware matching,
+    /// linear dir may hold the name in any block, or the htree index was stale) —
+    /// the caller MUST run its own `lookup_name`.
+    NotChecked,
+}
+
 impl OpenFs {
     /// Extract 60-byte extent tree root from inode's extent_bytes.
     fn extent_root(inode: &Ext4Inode) -> [u8; 60] {
@@ -18787,7 +18809,12 @@ impl OpenFs {
         parent_inode: &Ext4Inode,
         name: &[u8],
         file_type: Ext4FileType,
-    ) -> ffs_error::Result<()> {
+    ) -> ffs_error::Result<RenameTargetProbe> {
+        // Existence probe for the caller (ext4_rename). Defaults to NotChecked; the
+        // non-casefold htree fast path below fills it in from the hash-target leaf
+        // it already reads, letting rename skip a second htree descent
+        // (bd-cc-rename-probe).
+        let mut probe = RenameTargetProbe::NotChecked;
         // Mirror ext4_add_dir_entry's casefold gate up-front: a non-ASCII name in
         // a casefold htree directory cannot be placed in the fold-correct dx leaf
         // (bd-owt2r/bd-vsuni), so the real insert will refuse it. Reject here in
@@ -18869,6 +18896,21 @@ impl OpenFs {
                 let target = target_logical.and_then(|tl| resolve_logical(tl));
                 if let Some(target_phys) = target {
                     let mut data = self.read_block_vec(cx, target_phys)?;
+                    // Probe existence from this exact leaf BEFORE the dry-run add_entry
+                    // mutates `data`. For a non-casefold htree dir an existing
+                    // `new_name` MUST live in this hash-target leaf (same invariant the
+                    // create/mkdir dedup guard uses), so a byte-exact scan here is
+                    // equivalent to the caller's `lookup_name` — which it then skips.
+                    // Casefold needs fold-aware matching (lookup_in_dir_block_casefold),
+                    // so leave it NotChecked and let rename's lookup_name handle it.
+                    if !casefold {
+                        probe = match lookup_in_dir_block(&data, self.block_size(), name)
+                            .map_err(|e| parse_to_ffs_error(&e))?
+                        {
+                            Some(entry) => RenameTargetProbe::Present(entry),
+                            None => RenameTargetProbe::Absent,
+                        };
+                    }
                     match ffs_dir::add_entry(&mut data, 1, name, file_type, reserved_tail) {
                         Ok(_) | Err(FfsError::NoSpace) => {}
                         Err(err) => return Err(err),
@@ -18925,7 +18967,7 @@ impl OpenFs {
             empty_block[tail_off + 7] = 0xDE;
         }
         match ffs_dir::add_entry(&mut empty_block, 1, name, file_type, reserved_tail) {
-            Ok(_) | Err(FfsError::NoSpace) => Ok(()),
+            Ok(_) | Err(FfsError::NoSpace) => Ok(probe),
             Err(err) => Err(err),
         }
     }
@@ -21678,7 +21720,15 @@ impl OpenFs {
             )));
         }
 
-        self.ext4_preflight_dir_entry_insert(cx, &new_parent_inode, new_name, ft)?;
+        // The preflight reads the new_name hash-target leaf; on a non-casefold
+        // htree dir it also reports whether new_name already exists there, letting
+        // us skip a second full htree descent (`lookup_name`) below. The scan is
+        // valid until the target leaf is mutated — nothing between here and the
+        // consumption touches new_parent's leaf (the child `..`-update below writes
+        // only the moved dir's own block), and the whole rename holds one
+        // `alloc.write()`, so there is no TOCTOU (bd-cc-rename-probe).
+        let target_probe =
+            self.ext4_preflight_dir_entry_insert(cx, &new_parent_inode, new_name, ft)?;
 
         let planned_child_dir_update = if child_inode.is_dir() && parent != new_parent {
             // Preflight the old parent's `..`-backref decrement (applied below):
@@ -21712,7 +21762,18 @@ impl OpenFs {
             None
         };
 
-        if let Some(existing) = self.lookup_name(cx, &new_parent_inode, new_name)? {
+        // Resolve target existence from the preflight probe when it definitively
+        // checked (non-casefold htree); otherwise fall back to a real lookup
+        // (casefold needs fold-aware matching, linear/stale-index may hold the name
+        // in any block).
+        let existing_target = match target_probe {
+            RenameTargetProbe::Present(entry) => Some(entry),
+            RenameTargetProbe::Absent => None,
+            RenameTargetProbe::NotChecked => {
+                self.lookup_name(cx, &new_parent_inode, new_name)?
+            }
+        };
+        if let Some(existing) = existing_target {
             let existing_ino = InodeNumber(u64::from(existing.inode));
             // POSIX: renaming a file onto one of its own hard links (old and new
             // resolve to the same inode) is a no-op: the kernel's vfs_rename
