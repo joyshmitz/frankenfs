@@ -134,4 +134,4 @@ inherits = "release"
 opt-level = 3
 debug = "line-tables-only"
 strip = false
-lto = "thin"
+lto = "fat"
