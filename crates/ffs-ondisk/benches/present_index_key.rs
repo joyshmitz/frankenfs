@@ -69,5 +69,86 @@ fn bench_present_index_key(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_present_index_key);
+// Second hypothesis (bd-cc-mvcc-chain-inline): the MVCC version store is
+// `FxHashMap<BlockNumber, Vec<BlockVersion>>`. A newly-written block (the common
+// case in create) has a SINGLE-element chain, so the `Vec` is a per-block heap
+// alloc + a deref-on-read. `BlockVersion` is ~56 bytes (the 4 KiB payload is behind
+// `VersionData::Full`'s pointer), so `SmallVec<[BlockVersion;1]>` would store the
+// sole version INLINE in the hashmap value — no chain alloc on create, no deref on
+// read — BUT makes the hashmap slots ~2.3× bigger (worse density) on the hot read
+// path. This models it with a 56-byte value, measuring BOTH build (create's alloc)
+// and get (read's deref).
+#[derive(Clone, Copy)]
+struct Val56 {
+    _a: u64,
+    _b: u64,
+    _c: u64,
+    _d: [u8; 32],
+}
+const V56: Val56 = Val56 {
+    _a: 1,
+    _b: 2,
+    _c: 3,
+    _d: [7u8; 32],
+};
+
+fn bench_chain_value(c: &mut Criterion) {
+    const N: u64 = 30_000;
+    let mut group = c.benchmark_group("mvcc_chain_value_30k");
+
+    group.bench_function("build_vec", |b| {
+        b.iter(|| {
+            let mut m: FxHashMap<u64, Vec<Val56>> = FxHashMap::default();
+            for k in 0..N {
+                m.insert(black_box(k), vec![V56]);
+            }
+            black_box(m.len())
+        });
+    });
+    group.bench_function("build_smallvec1", |b| {
+        b.iter(|| {
+            let mut m: FxHashMap<u64, SmallVec<[Val56; 1]>> = FxHashMap::default();
+            for k in 0..N {
+                let mut sv = SmallVec::<[Val56; 1]>::new();
+                sv.push(V56);
+                m.insert(black_box(k), sv);
+            }
+            black_box(m.len())
+        });
+    });
+
+    let vec_map: FxHashMap<u64, Vec<Val56>> = (0..N).map(|k| (k, vec![V56])).collect();
+    let sv_map: FxHashMap<u64, SmallVec<[Val56; 1]>> = (0..N)
+        .map(|k| {
+            let mut sv = SmallVec::<[Val56; 1]>::new();
+            sv.push(V56);
+            (k, sv)
+        })
+        .collect();
+    group.bench_function("get_vec", |b| {
+        b.iter(|| {
+            let mut acc = 0u64;
+            for k in 0..N {
+                if let Some(v) = vec_map.get(&black_box(k)) {
+                    acc = acc.wrapping_add(v[0]._a);
+                }
+            }
+            black_box(acc)
+        });
+    });
+    group.bench_function("get_smallvec1", |b| {
+        b.iter(|| {
+            let mut acc = 0u64;
+            for k in 0..N {
+                if let Some(v) = sv_map.get(&black_box(k)) {
+                    acc = acc.wrapping_add(v[0]._a);
+                }
+            }
+            black_box(acc)
+        });
+    });
+    group.finish();
+}
+
+criterion_group!(benches, bench_present_index_key, bench_chain_value);
 criterion_main!(benches);
