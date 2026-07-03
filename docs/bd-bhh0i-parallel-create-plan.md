@@ -24,6 +24,18 @@ In-process parallel `create-bench` into `/` NEGATIVE-scales:
 
 16 threads is *slower* than 1. The kernel is ~8.3x faster @8t.
 
+## Scope — this is ALL parallel ext4 metadata WRITES, not just create
+
+Every ext4 mutation op takes the SAME whole-state `alloc_mutex.write()`, so they
+ALL convoy on it under parallelism (verified 2026-07-03): `ext4_create`
+(lib.rs:16881), `ext4_mknod` (17030), `ext4_mkdir` (17197), `ext4_unlink_impl`
+(19116), `ext4_link` (19364), `ext4_symlink` (19481), `ext4_fallocate` (19794),
+and rename. So the shard+spread fix below lifts the parallel ceiling for the WHOLE
+metadata-write surface, not only create — the proven ~7x create ceiling is the
+per-op measurement, and the mechanism (single-lock convoy) is identical for the
+rest. That broadens the payoff and is a reason to do the shared-infrastructure
+work once (shard the lock + spread allocation) rather than per-op.
+
 ## Ceiling: PROVEN ~7x (why this is worth the effort)
 
 Independent-process ceiling test (safe, unsafe-free, reusable): run N single-thread
