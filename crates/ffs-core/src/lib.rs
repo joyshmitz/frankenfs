@@ -16992,7 +16992,15 @@ impl OpenFs {
             return Err(FfsError::NotDirectory);
         }
 
-        if self.lookup_name(cx, &parent_inode, name)?.is_some() {
+        // Skip the redundant positive lookup_name on a non-casefold htree dir:
+        // the insert (ext4_add_dir_entry -> add_entry_reject_existing) dup-checks
+        // the hash-correct leaf, and mknod's delete_inode rollback below frees the
+        // speculative inode on a collision — same guard as ext4_create/ext4_mkdir
+        // (bd-cc-mkdir-dedup). Casefold/linear dirs keep the pre-check.
+        let htree_dedup_covers = parent_inode.has_htree_index()
+            && parent_inode.flags & ffs_types::EXT4_CASEFOLD_FL == 0
+            && Self::htree_create_dedup_enabled();
+        if !htree_dedup_covers && self.lookup_name(cx, &parent_inode, name)?.is_some() {
             return Err(FfsError::Exists);
         }
 
@@ -19334,7 +19342,18 @@ impl OpenFs {
         if !new_parent_inode.is_dir() {
             return Err(FfsError::NotDirectory);
         }
-        if self.lookup_name(cx, &new_parent_inode, new_name)?.is_some() {
+        // Skip the redundant positive lookup_name on a non-casefold htree dir:
+        // the insert (ext4_add_dir_entry -> add_entry_reject_existing) dup-checks
+        // the hash-correct leaf, and on a collision the rollback below rewrites the
+        // ORIGINAL source inode (undoing the link-count bump), so EEXIST + link
+        // accounting are unchanged — same guard as ext4_create/ext4_mkdir
+        // (bd-cc-mkdir-dedup). Casefold/linear dirs keep the pre-check.
+        let htree_dedup_covers = new_parent_inode.has_htree_index()
+            && new_parent_inode.flags & ffs_types::EXT4_CASEFOLD_FL == 0
+            && Self::htree_create_dedup_enabled();
+        if !htree_dedup_covers
+            && self.lookup_name(cx, &new_parent_inode, new_name)?.is_some()
+        {
             return Err(FfsError::Exists);
         }
 
@@ -19422,7 +19441,16 @@ impl OpenFs {
             if !parent_inode.is_dir() {
                 return Err(FfsError::NotDirectory);
             }
-            if self.lookup_name(cx, &parent_inode, name)?.is_some() {
+            // Skip the redundant positive lookup_name on a non-casefold htree dir:
+            // the insert (ext4_add_dir_entry -> add_entry_reject_existing)
+            // dup-checks the hash-correct leaf, and symlink's delete_inode rollback
+            // frees the speculative inode (+ any target block) on a collision —
+            // same guard as ext4_create/ext4_mkdir (bd-cc-mkdir-dedup).
+            // Casefold/linear dirs keep the pre-check.
+            let htree_dedup_covers = parent_inode.has_htree_index()
+                && parent_inode.flags & ffs_types::EXT4_CASEFOLD_FL == 0
+                && Self::htree_create_dedup_enabled();
+            if !htree_dedup_covers && self.lookup_name(cx, &parent_inode, name)?.is_some() {
                 return Err(FfsError::Exists);
             }
 
