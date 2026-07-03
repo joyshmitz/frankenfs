@@ -32,6 +32,7 @@ tracing = { workspace = true }
 flate2 = { workspace = true }
 lzokay-native = { workspace = true }
 zstd = { workspace = true }
+lzo = "0.1"
 
 [dev-dependencies]
 criterion = { workspace = true }

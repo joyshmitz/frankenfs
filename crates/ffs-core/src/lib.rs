@@ -8777,12 +8777,12 @@ impl OpenFs {
             let remaining = uncompressed_size - out.len();
             let page_size = remaining.min(sector_size);
             let decompressed =
-                lzokay_native::decompress_all(&compressed[pos..seg_end], Some(page_size)).map_err(
-                    |_| FfsError::Corruption {
+                lzo::decompress(&compressed[pos..seg_end], page_size).map_err(|_| {
+                    FfsError::Corruption {
                         block: 0,
                         detail: "btrfs LZO segment decompression failed".into(),
-                    },
-                )?;
+                    }
+                })?;
             out.extend_from_slice(&decompressed);
             pos = seg_end;
         }
@@ -14061,14 +14061,15 @@ impl OpenFs {
                 Ok(output)
             }
             E2ComprCodec::Lzo1x1 => {
-                // LZO: lzokay-native.
-                let output =
-                    lzokay_native::decompress_all(compressed, Some(ulen)).map_err(|e| {
-                        FfsError::Corruption {
-                            block: 0,
-                            detail: format!("e2compr LZO decompress failed: {e}"),
-                        }
-                    })?;
+                // LZO1X decode via the `lzo` crate (faster than lzokay-native's
+                // decode, which profiled at 95% self-time on compressed reads —
+                // bd-cc-lzo-decode).
+                let output = lzo::decompress(compressed, ulen).map_err(|_| {
+                    FfsError::Corruption {
+                        block: 0,
+                        detail: "e2compr LZO decompress failed".into(),
+                    }
+                })?;
                 Ok(output)
             }
             E2ComprCodec::None => {

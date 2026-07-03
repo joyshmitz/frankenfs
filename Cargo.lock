@@ -995,6 +995,7 @@ dependencies = [
  "ffs-xattr",
  "flate2",
  "libc",
+ "lzo",
  "lzokay-native",
  "parking_lot",
  "proptest",
@@ -1848,6 +1849,12 @@ checksum = "7f66e8d5d03f609abc3a39e6f08e4164ebf1447a732906d39eb9b99b7919ef39"
 dependencies = [
  "hashbrown 0.16.1",
 ]
+
+[[package]]
+name = "lzo"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "987ae180dd550693b0e370c73131f32910c12469562ec2d5c4a1a92e59ac4128"
 
 [[package]]
 name = "lzokay-native"
