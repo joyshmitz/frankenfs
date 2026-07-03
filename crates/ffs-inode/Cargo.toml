@@ -31,3 +31,7 @@ harness = false
 
 [lints]
 workspace = true
+
+[[bench]]
+name = "crc_incremental"
+harness = false
