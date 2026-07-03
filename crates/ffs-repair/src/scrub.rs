@@ -465,7 +465,7 @@ pub struct ZeroCheckValidator;
 
 impl BlockValidator for ZeroCheckValidator {
     fn validate(&self, _block: BlockNumber, data: &BlockBuf) -> BlockVerdict {
-        if data.as_slice().iter().all(|&b| b == 0) {
+        if is_all_zero(data.as_slice()) {
             BlockVerdict::Corrupt(vec![(
                 CorruptionKind::UnexpectedZeroes,
                 Severity::Warning,
@@ -475,6 +475,18 @@ impl BlockValidator for ZeroCheckValidator {
             BlockVerdict::Clean
         }
     }
+}
+
+/// Word-wise all-zeros test: scan `u64` chunks (8× fewer loop iterations than a
+/// byte-by-byte `iter().all(|&b| b == 0)`, and the compiler can widen the fold to
+/// SIMD) while preserving the same first-non-zero early-exit. Hot on the scrub path
+/// where `ZeroCheckValidator::validate` was ~7% self-time re-scanning whole 4 KiB
+/// blocks (bd-cc-scrub-zerocheck). Behaviour-identical: true iff every byte is 0.
+#[inline]
+fn is_all_zero(data: &[u8]) -> bool {
+    let mut chunks = data.chunks_exact(8);
+    chunks.all(|chunk| u64::from_ne_bytes(chunk.try_into().unwrap()) == 0)
+        && chunks.remainder().iter().all(|&b| b == 0)
 }
 
 /// Validator for the canonical ext4 primary superblock.
