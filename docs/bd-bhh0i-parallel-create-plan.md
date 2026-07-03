@@ -74,6 +74,14 @@ Note: the shared-GDT-block constraint is ALREADY GONE — `gdt_persistence_defer
 (ffs-alloc:1720) skips the per-op GD write, flushing once at the durability
 boundary. So the remaining shared block is the inode-table block.
 
+## No cheap shortcut (checked)
+
+The `alloc_mutex` is ALREADY `parking_lot::RwLock<Ext4AllocState>` (lib.rs:82, 904)
+— the fast, contention-optimized lock. So there is NO lock-implementation shortcut
+(std→parking_lot is already done). The convoy is the whole-state-lock *design* (one
+lock over all alloc state, held for the entire op), not the lock impl — the fix is
+genuinely the sharding below.
+
 ## The two-part fix
 
 **Part A — shard `alloc_mutex` per group.** Replace the single
