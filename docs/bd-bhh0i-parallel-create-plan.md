@@ -24,6 +24,26 @@ In-process parallel `create-bench` into `/` NEGATIVE-scales:
 
 16 threads is *slower* than 1. The kernel is ~8.3x faster @8t.
 
+### Re-quantified 2026-07-03 (current `release-perf` v3+PGO binary)
+
+Re-measured after the build-config wins landed, to confirm the wall persists and
+size the fix target precisely:
+
+- **ext4** create-bench 40k: 1t **100.3k/s** → 2t 77.8k → 4t 65.7k → 8t **54.6k**.
+- **btrfs** create-bench 20k: 1t **77.2k/s** → 2t 60.1k → 4t 53.4k → 8t **48.8k**
+  — btrfs negative-scales the SAME way, so the serializer is the **shared** MVCC/
+  lock write path, not fs-specific (the fix helps BOTH filesystems).
+- **Build-config did NOT move the wall**: target-cpu(~8.5%)+PGO(~10-24%) cut
+  *instructions*, but the parallel curve is unchanged from `73815b0d` → pure
+  contention, not instruction count. An instruction win cannot fix it.
+- **Fix target quantified** (`perf record` @8t): the work that runs *serialized
+  under `alloc_mutex.write()`* is `__memmove` 9.3% (MVCC version-block copy) +
+  `commit` 3.8% + crc ~5% + `add_entry_reject_existing` 2.7% + `bitmap_find_free`
+  1.0% ≈ **21% of create**. `RawRwLock::unlock_exclusive_slow` 0.73% (+kernel
+  futex) confirms contention. Per-group sharding lets disjoint-group creates run
+  this ~21% CONCURRENTLY — that IS the ~13x upside. The crc/memmove are already
+  HW-optimal/inherent; the win is removing the *serialization*, not the work.
+
 ## Scope — this is ALL parallel ext4 metadata WRITES, not just create
 
 Every ext4 mutation op takes the SAME whole-state `alloc_mutex.write()`, so they
