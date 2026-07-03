@@ -4659,6 +4659,43 @@ impl InMemoryCowBtrfsTree {
         node_id: u64,
         key: &BtrfsKey,
     ) -> Result<DeleteResult, BtrfsMutationError> {
+        // Leaf fast path (bd-cc-btrcow-del): build the COW result with the target
+        // item SKIPPED, instead of a full-node `.clone()` (`BtrfsCowNode::clone`
+        // ~14.5% of btrfs unlink) followed by `Vec::remove`'s shift. Same N−1 item
+        // clones (Arc refcount, inherent), minus the removed item's clone and the
+        // post-`idx` element shift. Internal nodes keep the clone path below (they
+        // COW the whole keys+children on the delete descent).
+        if matches!(self.node_ref(node_id)?, BtrfsCowNode::Leaf { .. }) {
+            let new_items = {
+                let BtrfsCowNode::Leaf { items } = self.node_ref(node_id)? else {
+                    unreachable!("matches! confirmed Leaf");
+                };
+                let idx = items.partition_point(|existing| key_cmp(&existing.key, key).is_lt());
+                match items.get(idx) {
+                    Some(existing) if key_cmp(&existing.key, key) == Ordering::Equal => {
+                        let mut v = Vec::with_capacity(items.len().saturating_sub(1));
+                        v.extend(items[..idx].iter().cloned());
+                        v.extend(items[idx + 1..].iter().cloned());
+                        Some(v)
+                    }
+                    _ => None,
+                }
+            };
+            return match new_items {
+                Some(items) => {
+                    let new_id = self.alloc_node(BtrfsCowNode::Leaf { items })?;
+                    self.retire_node(node_id);
+                    Ok(DeleteResult {
+                        node_id: new_id,
+                        deleted: true,
+                    })
+                }
+                None => Ok(DeleteResult {
+                    node_id,
+                    deleted: false,
+                }),
+            };
+        }
         let node = self.node_ref(node_id)?.clone();
         match node {
             BtrfsCowNode::Leaf { mut items } => {
