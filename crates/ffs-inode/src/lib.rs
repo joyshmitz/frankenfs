@@ -113,12 +113,23 @@ pub fn write_inode(
     })?;
 
     let inode_size = usize::from(geo.inode_size);
-    let mut raw = serialize_inode(inode, inode_size);
+    // Serialize into a STACK buffer for the standard inode_size (128/256),
+    // avoiding the per-write `vec![0; inode_size]` heap alloc; unusual large
+    // inode_size (>256) falls back to a heap buffer (bd-cc-serialize-into).
+    let mut stack_buf = [0u8; 256];
+    let mut heap_buf: Vec<u8>;
+    let raw: &mut [u8] = if inode_size <= stack_buf.len() {
+        &mut stack_buf[..inode_size]
+    } else {
+        heap_buf = vec![0u8; inode_size];
+        &mut heap_buf
+    };
+    serialize_inode_into(inode, inode_size, raw);
 
     // Compute and write checksum.
     #[expect(clippy::cast_possible_truncation)]
     let ino32 = ino.0 as u32;
-    compute_and_set_checksum(&mut raw, csum_seed, ino32);
+    compute_and_set_checksum(raw, csum_seed, ino32);
 
     // Read the block, patch the inode bytes, write back.
     let buf = dev.read_block(cx, loc.block)?;
@@ -129,17 +140,19 @@ pub fn write_inode(
             detail: "inode extends beyond block boundary".into(),
         });
     }
-    block_data[loc.byte_offset..loc.byte_offset + inode_size].copy_from_slice(&raw);
+    block_data[loc.byte_offset..loc.byte_offset + inode_size].copy_from_slice(raw);
     dev.write_block(cx, loc.block, &block_data)?;
 
     Ok(())
 }
 
-/// Serialize an `Ext4Inode` into raw bytes of the given `inode_size`.
-#[must_use]
+/// Serialize into a caller-provided `buf` (`buf.len()` must be `inode_size`) —
+/// lets the hot write path (`write_inode`) use a stack buffer instead of the
+/// per-call `vec![0; inode_size]` heap allocation (bd-cc-serialize-into).
 #[expect(clippy::cast_possible_truncation)]
-pub fn serialize_inode(inode: &Ext4Inode, inode_size: usize) -> Vec<u8> {
-    let mut buf = vec![0u8; inode_size];
+pub fn serialize_inode_into(inode: &Ext4Inode, inode_size: usize, buf: &mut [u8]) {
+    debug_assert_eq!(buf.len(), inode_size);
+    buf.fill(0);
 
     // Mode (0x00).
     buf[0x00..0x02].copy_from_slice(&inode.mode.to_le_bytes());
@@ -223,7 +236,15 @@ pub fn serialize_inode(inode: &Ext4Inode, inode_size: usize) -> Vec<u8> {
                 .copy_from_slice(&inode.xattr_ibody[..xattr_copy]);
         }
     }
+}
 
+/// Serialize an `Ext4Inode` into a freshly-allocated `Vec` (convenience wrapper
+/// over [`serialize_inode_into`] for the non-hot callers; the hot `write_inode`
+/// path uses a stack buffer).
+#[must_use]
+pub fn serialize_inode(inode: &Ext4Inode, inode_size: usize) -> Vec<u8> {
+    let mut buf = vec![0u8; inode_size];
+    serialize_inode_into(inode, inode_size, &mut buf);
     buf
 }
 

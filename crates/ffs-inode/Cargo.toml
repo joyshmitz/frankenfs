@@ -25,5 +25,9 @@ proptest = { workspace = true }
 name = "inode_free_runs"
 harness = false
 
+[[bench]]
+name = "serialize_inode"
+harness = false
+
 [lints]
 workspace = true
