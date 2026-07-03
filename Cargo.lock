@@ -1191,6 +1191,7 @@ dependencies = [
  "criterion",
  "ffs-types",
  "proptest",
+ "rustc-hash",
  "serde",
  "smallvec",
 ]
