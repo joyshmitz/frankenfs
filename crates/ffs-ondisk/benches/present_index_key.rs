@@ -150,5 +150,69 @@ fn bench_chain_value(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_present_index_key, bench_chain_value);
+// Third hypothesis (bd-cc-attr-cache-arc): the attr cache is
+// `ShardedCache<u64, InodeAttr>` and `get` returns an OWNED ~120-byte `InodeAttr`
+// clone per getattr (both filesystems' hottest read op). Storing `InodeAttr` INLINE
+// makes each hashmap slot ~128 B (fat-slot / bad density — the same pattern the
+// chain_value bench showed is 3× slower). `Arc<InodeAttr>` would make the slot 8 B
+// (good density) and turn `get`'s 120-B memcpy into an 8-B atomic Arc clone — at the
+// cost of a deref indirection when the caller reads fields. The chain_value result
+// PREDICTS the pointer wins here (opposite of the chain, where the Vec was already a
+// pointer). This models it: 30k entries, get-then-read-fields.
+#[derive(Clone)]
+struct Val120 {
+    f: [u64; 15],
+}
+impl Val120 {
+    fn new(k: u64) -> Self {
+        Self { f: [k; 15] }
+    }
+    #[inline]
+    fn sum(&self) -> u64 {
+        // Read several fields, as a real getattr->FUSE-reply build would.
+        self.f[0] ^ self.f[7] ^ self.f[14]
+    }
+}
+
+fn bench_attr_cache_value(c: &mut Criterion) {
+    use std::sync::Arc;
+    const N: u64 = 30_000;
+    let val_map: FxHashMap<u64, Val120> = (0..N).map(|k| (k, Val120::new(k))).collect();
+    let arc_map: FxHashMap<u64, Arc<Val120>> =
+        (0..N).map(|k| (k, Arc::new(Val120::new(k)))).collect();
+
+    let mut group = c.benchmark_group("attr_cache_value_30k");
+    group.bench_function("inline_val120_get_clone", |b| {
+        b.iter(|| {
+            let mut acc = 0u64;
+            for k in 0..N {
+                if let Some(v) = val_map.get(&black_box(k)) {
+                    let owned: Val120 = v.clone(); // get returns owned, as ShardedCache does
+                    acc = acc.wrapping_add(owned.sum());
+                }
+            }
+            black_box(acc)
+        });
+    });
+    group.bench_function("arc_val120_get_clone", |b| {
+        b.iter(|| {
+            let mut acc = 0u64;
+            for k in 0..N {
+                if let Some(v) = arc_map.get(&black_box(k)) {
+                    let owned: Arc<Val120> = Arc::clone(v);
+                    acc = acc.wrapping_add(owned.sum());
+                }
+            }
+            black_box(acc)
+        });
+    });
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_present_index_key,
+    bench_chain_value,
+    bench_attr_cache_value
+);
 criterion_main!(benches);
