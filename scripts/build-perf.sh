@@ -33,6 +33,9 @@ TARGET_CPU="${FFS_TARGET_CPU:-x86-64-v3}"
 PGO_DIR="${PGO_DIR:-/tmp/ffs-pgo}"
 PROFILE="release-perf"
 BIN="ffs-cli"
+# Respect CARGO_TARGET_DIR (this repo commonly redirects it, e.g. /data/tmp/...).
+TARGET_DIR="${CARGO_TARGET_DIR:-target}"
+OUT="$TARGET_DIR/${PROFILE}/${BIN}"
 
 # Locate llvm-profdata (rustup component OR system).
 PROFDATA="$(find "${RUSTUP_HOME:-$HOME/.rustup}" -name llvm-profdata 2>/dev/null | head -1)"
@@ -50,7 +53,7 @@ if [ "${SKIP_TRAIN:-0}" != "1" ]; then
   rm -rf "$PGO_DIR"; mkdir -p "$PGO_DIR"
   RUSTFLAGS="-C target-cpu=$TARGET_CPU -C profile-generate=$PGO_DIR" \
     cargo build --profile "$PROFILE" -p "$BIN"
-  INSTR="target/${PROFILE}/${BIN}"
+  INSTR="$OUT"
 
   if [ -z "$TRAIN_IMG" ]; then
     SRC="$(ls -1 ./*.img /data/tmp/*ext*.img 2>/dev/null | head -1 || true)"
@@ -74,4 +77,4 @@ echo ">> [4/4] optimized build (profile-use + fat LTO + target-cpu=$TARGET_CPU)"
 RUSTFLAGS="-C target-cpu=$TARGET_CPU -C profile-use=$PGO_DIR/merged.profdata -Cllvm-args=-pgo-warn-missing-function" \
   cargo build --profile "$PROFILE" -p "$BIN"
 
-echo ">> done: target/${PROFILE}/${BIN}  (fat LTO + target-cpu=$TARGET_CPU + PGO)"
+echo ">> done: $OUT  (fat LTO + target-cpu=$TARGET_CPU + PGO)"
