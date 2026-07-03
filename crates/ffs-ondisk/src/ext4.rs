@@ -7972,7 +7972,7 @@ fn dx_hash_half_md4(name: &[u8], seed: &[u32; 4], signed: bool) -> (u32, u32) {
     while offset < name.len() {
         let chunk_len = (name.len() - offset).min(32);
         let buf = str2hashbuf(&name[offset..offset + chunk_len], 8, signed);
-        half_md4_transform(&mut a, &mut b, &mut c, &mut d, &buf);
+        half_md4_transform(&mut a, &mut b, &mut c, &mut d, &buf[..8]);
         offset += chunk_len;
     }
 
@@ -7988,7 +7988,7 @@ fn dx_hash_tea(name: &[u8], seed: &[u32; 4], signed: bool) -> (u32, u32) {
     while offset < name.len() {
         let chunk_len = (name.len() - offset).min(16);
         let buf = str2hashbuf(&name[offset..offset + chunk_len], 4, signed);
-        tea_transform(&mut a, &mut b, &buf);
+        tea_transform(&mut a, &mut b, &buf[..4]);
         offset += chunk_len;
     }
 
@@ -8006,8 +8006,14 @@ fn dx_hash_tea(name: &[u8], seed: &[u32; 4], signed: bool) -> (u32, u32) {
     clippy::cast_sign_loss,
     clippy::cast_possible_truncation
 )]
-fn str2hashbuf(name: &[u8], buf_size: usize, signed: bool) -> Vec<u32> {
-    let mut buf = vec![0_u32; buf_size];
+// Returns a fixed [u32; 8] (max `buf_size` across callers is 8) on the STACK —
+// avoids the per-call `vec![0; buf_size]` heap allocation this ran on EVERY htree
+// hash (dx_hash_half_md4 / dx_hash_tea, i.e. every create/mkdir/rename dir-entry
+// insert). Callers use `&buf[..buf_size]`; entries past `buf_size` stay 0 and are
+// never read (bd-cc-str2hashbuf-stack).
+fn str2hashbuf(name: &[u8], buf_size: usize, signed: bool) -> [u32; 8] {
+    debug_assert!(buf_size <= 8);
+    let mut buf = [0_u32; 8];
     let len = name.len();
 
     // Pad = length byte replicated across all 4 bytes of a u32 (kernel convention).
@@ -16351,7 +16357,8 @@ mod tests {
     #[test]
     fn str2hashbuf_basic() {
         let buf = super::str2hashbuf(b"abc", 4, false);
-        assert_eq!(buf.len(), 4);
+        // Fixed [u32; 8] stack array now; callers read only `&buf[..buf_size]`.
+        assert_eq!(buf.len(), 8);
         // Kernel packs big-endian within each word via val = char + (val << 8).
         // pad for len=3: 0x03030303. After 3 chars: val = 0x03616263.
         assert_eq!(buf[0], 0x0361_6263);
