@@ -45,5 +45,32 @@ fn bench_serialize(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_serialize);
+// prepare_inode builds the empty extent-tree root for every created inode. The
+// old code did `vec![0;60].into()` — `From<Vec>` for SmallVec SPILLS (reuses the
+// heap buffer, never inlines), so every created inode's extent_bytes was heap-
+// allocated. The fix builds a stack array and `.as_slice().into()` (`From<&[u8]>`
+// copies inline for len<=64). This isolates that construction difference.
+fn bench_extent_bytes_construct(c: &mut Criterion) {
+    use ffs_ondisk::ext4::Ext4InodeBlockBytes;
+    let mut group = c.benchmark_group("prepare_inode_extent_bytes");
+    group.bench_function("vec_into_spill", |b| {
+        b.iter(|| {
+            let mut v = vec![0u8; 60];
+            v[0] = 0x0A;
+            v[4] = 4;
+            black_box(Ext4InodeBlockBytes::from(black_box(v)))
+        });
+    });
+    group.bench_function("array_slice_into_inline", |b| {
+        b.iter(|| {
+            let mut a = [0u8; 60];
+            a[0] = 0x0A;
+            a[4] = 4;
+            black_box(Ext4InodeBlockBytes::from(black_box(a).as_slice()))
+        });
+    });
+    group.finish();
+}
+
+criterion_group!(benches, bench_serialize, bench_extent_bytes_construct);
 criterion_main!(benches);

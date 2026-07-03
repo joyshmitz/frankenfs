@@ -360,6 +360,10 @@ pub fn prepare_inode(
     };
 
     // Initialize extent tree root (empty tree: magic + 0 entries, max 4, depth 0).
+    // NB: `vec![0;60].into()` (From<Vec> = SmallVec spill, reusing the jemalloc
+    // buffer) benchmarks FASTER here than a stack-array `.as_slice().into()`
+    // inline copy — the small-alloc + buffer-reuse beats copying 60B inline
+    // (see benches/serialize_inode.rs prepare_inode_extent_bytes; bd-cc-prepare-inode-inline REFUTED).
     let mut extent_bytes = vec![0u8; 60];
     extent_bytes[0] = (EXT4_EXTENT_MAGIC & 0xFF) as u8;
     extent_bytes[1] = (EXT4_EXTENT_MAGIC >> 8) as u8;
