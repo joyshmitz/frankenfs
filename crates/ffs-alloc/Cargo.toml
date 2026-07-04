@@ -47,3 +47,7 @@ harness = false
 [[bench]]
 name = "contiguous_scan_width"
 harness = false
+
+[[bench]]
+name = "take_bits_scan_width"
+harness = false

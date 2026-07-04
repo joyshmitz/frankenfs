@@ -367,6 +367,13 @@ fn bitmap_find_free_range(bitmap: &[u8], mut idx: u32, end: u32) -> Option<u32> 
     None
 }
 
+/// Benchmark-only shim: exercise the cyclic multi-block take with a no-op
+/// recorder (see bench `take_bits_scan_width`).
+#[doc(hidden)]
+pub fn bench_take_free_bits_cyclic(bitmap: &mut [u8], count: u32, max_count: u32, start: u32) -> u32 {
+    bitmap_take_free_bits_cyclic(bitmap, count, max_count, start, |_| {})
+}
+
 fn bitmap_take_free_bits_cyclic<F>(
     bitmap: &mut [u8],
     count: u32,
@@ -419,6 +426,24 @@ where
     }
 
     while end.saturating_sub(idx) >= 64 {
+        // 4-wide fast path: skip 256 fully-allocated bits at once. When all 4
+        // words are `MAX` there are no free bits to take, so nothing is marked
+        // or recorded and `idx` simply advances 256 — identical to four
+        // single-word steps that find no free bit. Mass-alloc into a filling
+        // group scans long all-`MAX` prefixes (bench `take_bits_scan_width`).
+        if end.saturating_sub(idx) >= 256 {
+            let byte_idx = (idx / 8) as usize;
+            if let Some(block) = bitmap.get(byte_idx..byte_idx + 32) {
+                let w0 = u64::from_le_bytes(block[0..8].try_into().unwrap());
+                let w1 = u64::from_le_bytes(block[8..16].try_into().unwrap());
+                let w2 = u64::from_le_bytes(block[16..24].try_into().unwrap());
+                let w3 = u64::from_le_bytes(block[24..32].try_into().unwrap());
+                if (w0 & w1 & w2 & w3) == u64::MAX {
+                    idx += 256;
+                    continue;
+                }
+            }
+        }
         let byte_idx = (idx / 8) as usize;
         let Some(chunk) = bitmap.get_mut(byte_idx..byte_idx + 8) else {
             return taken;
