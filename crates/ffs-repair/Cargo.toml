@@ -83,3 +83,7 @@ path = "src/bin/ffs-demo.rs"
 
 [lints]
 workspace = true
+
+[[bench]]
+name = "scrub_composite_mono"
+harness = false

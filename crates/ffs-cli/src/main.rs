@@ -65,8 +65,8 @@ use ffs_repair::pipeline::{
 };
 use ffs_repair::recovery::{RecoveryWriteback, RecoveryWritebackBlock};
 use ffs_repair::scrub::{
-    BlockValidator, BtrfsSuperblockValidator, BtrfsTreeBlockValidator, CompositeValidator,
-    Ext4SuperblockValidator, ScrubReport, Scrubber, Severity, ZeroCheckValidator,
+    BlockValidator, BtrfsScrubValidator, CompositeValidator, Ext4SuperblockValidator, ScrubReport,
+    Scrubber, Severity, ZeroCheckValidator,
 };
 use ffs_types::{
     BTRFS_SUPER_INFO_OFFSET, BTRFS_SUPER_INFO_SIZE, BlockNumber, ByteOffset,
@@ -7579,15 +7579,9 @@ pub fn scrub_validator(flavor: &FsFlavor, block_size: u32) -> Box<dyn BlockValid
             Box::new(ZeroCheckValidator),
             Box::new(Ext4SuperblockValidator::new(block_size)),
         ])),
-        FsFlavor::Btrfs(sb) => Box::new(CompositeValidator::new(vec![
-            Box::new(ZeroCheckValidator),
-            Box::new(BtrfsSuperblockValidator::new(block_size)),
-            Box::new(BtrfsTreeBlockValidator::new(
-                block_size,
-                sb.fsid,
-                sb.csum_type,
-            )),
-        ])),
+        FsFlavor::Btrfs(sb) => {
+            Box::new(BtrfsScrubValidator::new(block_size, sb.fsid, sb.csum_type))
+        }
     }
 }
 
