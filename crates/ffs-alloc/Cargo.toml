@@ -67,3 +67,7 @@ harness = false
 [[bench]]
 name = "alloc_range_undo"
 harness = false
+
+[[bench]]
+name = "reserved_overlap_check"
+harness = false

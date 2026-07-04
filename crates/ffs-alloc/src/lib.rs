@@ -2481,11 +2481,16 @@ pub fn free_blocks_persist(
         let gidx = segment.group.0 as usize;
         let reserved = reserved_blocks_in_group(geo, groups, segment.group);
 
-        // Validate none of the blocks being freed are reserved.
-        for i in segment.rel_start..segment.rel_start + segment.count {
-            if is_reserved(&reserved, i) {
+        // Validate none of the blocks being freed are reserved. `reserved` is
+        // sorted ascending, so one binary search for the first reserved block
+        // >= rel_start decides overlap for the whole segment — O(log R) vs the
+        // old per-block O(count · log R) scan.
+        let seg_end = segment.rel_start + segment.count;
+        let rp = reserved.partition_point(|&r| r < segment.rel_start);
+        if let Some(&r) = reserved.get(rp) {
+            if r < seg_end {
                 return Err(FfsError::Corruption {
-                    block: geo.group_block_to_absolute(segment.group, i).0,
+                    block: geo.group_block_to_absolute(segment.group, r).0,
                     detail: "attempt to free reserved metadata block".into(),
                 });
             }
