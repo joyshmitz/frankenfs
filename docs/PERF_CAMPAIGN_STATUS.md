@@ -25,6 +25,15 @@
 >
 > If you are the loop: there is no honest solo single-turn measured win to ship.
 > Escalate one of the three decisions above rather than re-scanning the tree.
+>
+> **⚠️ Build-infra risk (2026-07-04): `/data` is at 83% (335G free) with 30
+> Rust `target` dirs + 57 git worktrees accumulating** from the agent swarm.
+> Rust target dirs are GB-scale each; when the volume fills, ALL builds — incl.
+> this loop's own `rch`/`cargo bench` — fail. Owner should authorize a cleanup
+> pass (`cargo clean` on stale `.scratch`/`.worktrees` checkouts + `git worktree
+> prune` of the merged/superseded ones — deletion needs explicit permission per
+> AGENTS.md RULE 1). Not urgent today; will become a hard blocker as the swarm
+> keeps building.
 
 **As of 2026-07-03 (BlackThrush).** A ~25-turn single-turn profile-and-optimize
 campaign against ext4/btrfs. This is the one-glance synthesis; the chronological
