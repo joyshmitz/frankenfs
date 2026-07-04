@@ -2770,6 +2770,38 @@ fn parse_descriptor_tags_strict_with_format(
     None
 }
 
+/// Benchmark-only shim: exercise the descriptor-tag decode either as the old
+/// two-pass (strict count THEN parse) or the new single strict-parse, returning
+/// the resulting tag count so the internal `DescriptorTag` / `Jbd2TagFormat`
+/// types stay private. Not part of the public API (guards the dedup in
+/// `05ce88c5`; see bench `descriptor_decode`).
+#[doc(hidden)]
+#[must_use]
+pub fn bench_descriptor_decode(
+    block: &[u8],
+    is_64bit: bool,
+    has_tail: bool,
+    format: u8,
+    one_pass: bool,
+) -> usize {
+    let tag_format = match format {
+        0 => Jbd2TagFormat::Legacy,
+        1 => Jbd2TagFormat::CsumV2,
+        _ => Jbd2TagFormat::CsumV3,
+    };
+    if one_pass {
+        parse_descriptor_tags_strict_with_format(block, is_64bit, has_tail, tag_format)
+            .map_or(0, |tags| tags.len())
+    } else {
+        match strict_descriptor_tag_count_with_format(block, is_64bit, has_tail, tag_format) {
+            Some(_) => {
+                parse_descriptor_tags_with_format(block, is_64bit, has_tail, tag_format).len()
+            }
+            None => 0,
+        }
+    }
+}
+
 fn strict_descriptor_tag_count_with_format(
     block: &[u8],
     is_64bit: bool,

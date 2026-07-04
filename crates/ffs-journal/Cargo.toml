@@ -27,5 +27,9 @@ serde_json = { workspace = true }
 name = "journal_replay_apply_io_overlap"
 harness = false
 
+[[bench]]
+name = "descriptor_decode"
+harness = false
+
 [lints]
 workspace = true
