@@ -55,3 +55,7 @@ harness = false
 [[bench]]
 name = "take_bits_scan_width"
 harness = false
+
+[[bench]]
+name = "bitmap_set_range_width"
+harness = false
