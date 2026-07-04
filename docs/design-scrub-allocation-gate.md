@@ -56,6 +56,25 @@ This is exactly the class of change the campaign discipline says must **not** be
 rushed (the bd-bhh0i FS-corruptions came from rushing correctness-sensitive
 work).
 
+## The crux: `BLOCK_UNINIT` makes the common case the hard case (analysis 2026-07-04)
+
+Do **not** attempt a "simple version that returns None (→ full-scan fallback)
+for `BLOCK_UNINIT` groups" — it would be **useless**: `mkfs.ext4` sets
+`uninit_bg` by default, so on any fresh image essentially **every** group is
+`BLOCK_UNINIT` and the fast path would never activate.
+
+Why uninit groups are the hard part: for a `BLOCK_UNINIT` group the on-disk
+block bitmap is **not initialized on disk** (that is the whole point of the
+flag), so you **cannot read it** to learn which blocks are allocated. The
+allocated blocks of an uninit group must be **synthesized** from geometry —
+they are exactly the group's owned metadata: its backup superblock + GDT (only
+in groups selected by `sparse_super`), and its block-bitmap / inode-bitmap /
+inode-table blocks — whose **physical locations under `flex_bg` are clustered
+into the first group of the flex group**, not at the group's own start. So a
+correct enumerator must compute the flex_bg metadata layout, not just read
+bitmaps. This is the intricate, correctness-critical core; there is no safe
+"common-case-only" shortcut. Budget it as a focused, e2fsck-gated task.
+
 ## Proposed implementation (owner to approve)
 
 1. Add an opt-in flag `scrub --allocated-only` (default OFF → existing
