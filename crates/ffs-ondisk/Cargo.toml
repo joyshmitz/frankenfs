@@ -75,3 +75,7 @@ harness = false
 [[bench]]
 name = "bitmap_csum_recompute"
 harness = false
+
+[[bench]]
+name = "crc_incremental"
+harness = false

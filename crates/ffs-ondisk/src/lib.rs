@@ -7,6 +7,7 @@
 //! superblock fields, plus btrfs superblocks, headers, leaf item tables,
 //! and internal node key-pointers.
 
+pub mod crc_incremental;
 pub mod btrfs;
 pub mod ext4;
 
