@@ -13459,14 +13459,20 @@ impl OpenFs {
             Vec::with_capacity(inode.extent_bytes.len() + inode.xattr_ibody.len());
         inline_data.extend_from_slice(&inode.extent_bytes);
 
-        // Parse ibody xattrs to find the system.data continuation.
-        let xattrs = ffs_ondisk::parse_ibody_xattrs(inode).map_err(|e| parse_to_ffs_error(&e))?;
-        for xattr in &xattrs {
-            // name_index 7 = EXT4_XATTR_INDEX_SYSTEM, name = "data"
-            if xattr.name_index == 7 && xattr.name == b"data" {
-                inline_data.extend_from_slice(&xattr.value);
-                break;
-            }
+        // Find the system.data continuation (name_index 7 =
+        // EXT4_XATTR_INDEX_SYSTEM, name "data") by name — early-exit, and
+        // materialise only THAT value, instead of parsing every ibody attribute
+        // (name + value `Vec` each) just to scan for one (bd-abu3z finder
+        // family). Isomorphic: same first `(SYSTEM,"data")` match, same value
+        // (system.data is small so it is never EA-inode-backed).
+        if let Some((_, value, _inum)) = ffs_ondisk::find_ibody_xattr_by_index_name(
+            inode,
+            ffs_types::EXT4_XATTR_INDEX_SYSTEM,
+            b"data",
+        )
+        .map_err(|e| parse_to_ffs_error(&e))?
+        {
+            inline_data.extend_from_slice(&value);
         }
 
         let inline_capacity =
