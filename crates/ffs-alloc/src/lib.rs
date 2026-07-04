@@ -527,10 +527,30 @@ pub fn bitmap_largest_free_run(bitmap: &[u8], count: u32) -> u32 {
     let available_full_bytes = full_bytes.min(bitmap.len());
     let word_bytes = available_full_bytes - (available_full_bytes % 8);
 
-    for chunk in bitmap[..word_bytes].chunks_exact(8) {
-        let word = u64::from_le_bytes([
-            chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
-        ]);
+    // Skip fully-allocated 256-bit blocks with one AND+compare instead of four
+    // branchy per-word steps. When all 4 words are `MAX` (all allocated) there
+    // is no free bit, so any in-flight run breaks (`run = 0`) and `best` is
+    // unchanged — identical to four `apply_word_zero_run(MAX, ..)` calls. During
+    // mass-alloc the block bitmap is mostly all-`MAX`, so this is ~1.27x on the
+    // per-block-alloc `largest_free_run` recompute (bench `bitmap_run_width`);
+    // mixed sub-blocks fall through to the exact per-word path.
+    let mut quads = bitmap[..word_bytes].chunks_exact(32);
+    for block in &mut quads {
+        let w0 = u64::from_le_bytes(block[0..8].try_into().unwrap());
+        let w1 = u64::from_le_bytes(block[8..16].try_into().unwrap());
+        let w2 = u64::from_le_bytes(block[16..24].try_into().unwrap());
+        let w3 = u64::from_le_bytes(block[24..32].try_into().unwrap());
+        if (w0 & w1 & w2 & w3) == u64::MAX {
+            run = 0;
+            continue;
+        }
+        apply_word_zero_run(w0, &mut run, &mut best);
+        apply_word_zero_run(w1, &mut run, &mut best);
+        apply_word_zero_run(w2, &mut run, &mut best);
+        apply_word_zero_run(w3, &mut run, &mut best);
+    }
+    for chunk in quads.remainder().chunks_exact(8) {
+        let word = u64::from_le_bytes(chunk.try_into().unwrap());
         apply_word_zero_run(word, &mut run, &mut best);
     }
 

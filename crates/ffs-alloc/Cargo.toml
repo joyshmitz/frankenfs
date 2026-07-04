@@ -35,3 +35,11 @@ workspace = true
 [[bench]]
 name = "bitmap_scan_width"
 harness = false
+
+[[bench]]
+name = "bitmap_count_width"
+harness = false
+
+[[bench]]
+name = "bitmap_run_width"
+harness = false
