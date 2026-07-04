@@ -563,31 +563,38 @@ impl BlockValidator for Ext4SuperblockValidator {
 /// Checks parseability and superblock checksum integrity.
 #[derive(Debug, Clone, Copy)]
 pub struct BtrfsSuperblockValidator {
-    block_size: u32,
+    /// Precomputed superblock target block + intra-block offset. `validate`
+    /// runs on EVERY scanned block, so hoisting the `byte_offset / block_size`
+    /// division out of the per-block path (it is a compile-time-opaque method
+    /// call under `dyn BlockValidator`, so LLVM cannot lift it) into `new()`
+    /// leaves the hot path a single block-number compare.
+    target_block: u64,
+    offset: usize,
 }
 
 impl BtrfsSuperblockValidator {
     #[must_use]
     pub fn new(block_size: u32) -> Self {
-        Self { block_size }
-    }
-
-    fn target_block_and_offset(self) -> (u64, usize) {
-        if self.block_size == 0 {
-            return (0, 0);
+        let (target_block, offset) = if block_size == 0 {
+            (0, 0)
+        } else {
+            let block_size = u64::from(block_size);
+            let byte_offset = BTRFS_SUPER_INFO_OFFSET as u64;
+            (
+                byte_offset / block_size,
+                usize::try_from(byte_offset % block_size).unwrap_or(0),
+            )
+        };
+        Self {
+            target_block,
+            offset,
         }
-        let block_size = u64::from(self.block_size);
-        let byte_offset = BTRFS_SUPER_INFO_OFFSET as u64;
-        (
-            byte_offset / block_size,
-            usize::try_from(byte_offset % block_size).unwrap_or(0),
-        )
     }
 }
 
 impl BlockValidator for BtrfsSuperblockValidator {
     fn validate(&self, block: BlockNumber, data: &BlockBuf) -> BlockVerdict {
-        let (target_block, offset) = self.target_block_and_offset();
+        let (target_block, offset) = (self.target_block, self.offset);
         if block.0 != target_block {
             return BlockVerdict::Skip;
         }
@@ -630,29 +637,33 @@ pub struct BtrfsTreeBlockValidator {
     block_size: u32,
     fsid: [u8; 16],
     csum_type: u16,
+    /// Precomputed superblock block number. `validate` runs on EVERY scanned
+    /// block and checked `BTRFS_SUPER_INFO_OFFSET / block_size` per call (a
+    /// division, uninlinable under `dyn BlockValidator`); hoisting it into
+    /// `new()` leaves the hot path a single block-number compare.
+    superblock_block: u64,
 }
 
 impl BtrfsTreeBlockValidator {
     #[must_use]
     pub fn new(block_size: u32, fsid: [u8; 16], csum_type: u16) -> Self {
+        let superblock_block = if block_size == 0 {
+            0
+        } else {
+            (BTRFS_SUPER_INFO_OFFSET as u64) / u64::from(block_size)
+        };
         Self {
             block_size,
             fsid,
             csum_type,
+            superblock_block,
         }
-    }
-
-    fn superblock_block(self) -> u64 {
-        if self.block_size == 0 {
-            return 0;
-        }
-        (BTRFS_SUPER_INFO_OFFSET as u64) / u64::from(self.block_size)
     }
 }
 
 impl BlockValidator for BtrfsTreeBlockValidator {
     fn validate(&self, block: BlockNumber, data: &BlockBuf) -> BlockVerdict {
-        if block.0 == self.superblock_block() {
+        if block.0 == self.superblock_block {
             return BlockVerdict::Skip;
         }
 

@@ -42,6 +42,10 @@ name = "scrub_fsid_precheck"
 harness = false
 
 [[bench]]
+name = "scrub_sb_block_hoist"
+harness = false
+
+[[bench]]
 name = "encode_parallel"
 harness = false
 
