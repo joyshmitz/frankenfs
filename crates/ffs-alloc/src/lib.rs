@@ -1902,8 +1902,49 @@ const INCREMENTAL_BITMAP_CSUM_MAX_DELTA_BYTES: usize = 128;
 
 enum BitmapChecksumUpdate {
     Unchanged,
-    Incremental { byte_start: usize, delta: Vec<u8> },
+    Incremental { start_bit: u32, bit_count: u32 },
     Full,
+}
+
+#[derive(Clone, Copy)]
+enum BitmapChecksumKind {
+    Block,
+    Inode,
+}
+
+impl BitmapChecksumKind {
+    fn checksum_bits(self, pctx: &PersistCtx) -> u32 {
+        match self {
+            Self::Block => pctx.blocks_per_group,
+            Self::Inode => pctx.inodes_per_group,
+        }
+    }
+
+    fn set_checksum(self, checksum: u32, desc: &mut Ext4GroupDesc) {
+        match self {
+            Self::Block => desc.block_bitmap_csum = checksum,
+            Self::Inode => desc.inode_bitmap_csum = checksum,
+        }
+    }
+
+    fn stamp_full(self, bitmap: &[u8], pctx: &PersistCtx, desc: &mut Ext4GroupDesc) {
+        match self {
+            Self::Block => ffs_ondisk::ext4::stamp_block_bitmap_checksum(
+                bitmap,
+                pctx.csum_seed,
+                pctx.blocks_per_group,
+                desc,
+                pctx.desc_size,
+            ),
+            Self::Inode => ffs_ondisk::ext4::stamp_inode_bitmap_checksum(
+                bitmap,
+                pctx.csum_seed,
+                pctx.inodes_per_group,
+                desc,
+                pctx.desc_size,
+            ),
+        }
+    }
 }
 
 struct BitmapOverride<'a> {
@@ -1919,18 +1960,15 @@ impl<'a> BitmapOverride<'a> {
         }
     }
 
-    fn from_bit_range(
-        before: &[u8],
-        after: &'a [u8],
+    fn from_flipped_bit_range(
+        bitmap: &'a [u8],
         start_bit: u32,
         bit_count: u32,
         checksum_bits: u32,
     ) -> Self {
         Self {
-            bitmap: after,
-            checksum_update: bitmap_checksum_update_from_bit_range(
-                before,
-                after,
+            bitmap,
+            checksum_update: bitmap_checksum_update_from_flipped_bit_range(
                 start_bit,
                 bit_count,
                 checksum_bits,
@@ -1939,9 +1977,7 @@ impl<'a> BitmapOverride<'a> {
     }
 }
 
-fn bitmap_checksum_update_from_bit_range(
-    before: &[u8],
-    after: &[u8],
+fn bitmap_checksum_update_from_flipped_bit_range(
     start_bit: u32,
     bit_count: u32,
     checksum_bits: u32,
@@ -1950,32 +1986,85 @@ fn bitmap_checksum_update_from_bit_range(
         return BitmapChecksumUpdate::Unchanged;
     }
     let checksum_len = (checksum_bits / 8) as usize;
-    if checksum_len > before.len() || checksum_len > after.len() {
+
+    let Some(end_bit) = start_bit.checked_add(bit_count) else {
+        return BitmapChecksumUpdate::Full;
+    };
+    if end_bit > checksum_bits {
         return BitmapChecksumUpdate::Full;
     }
-
-    let end_bit = start_bit.saturating_add(bit_count).min(checksum_bits);
     let first = (start_bit / 8) as usize;
     let last_exclusive = end_bit.div_ceil(8) as usize;
     if first >= last_exclusive {
         return BitmapChecksumUpdate::Unchanged;
     }
+    if last_exclusive > checksum_len {
+        return BitmapChecksumUpdate::Full;
+    }
     let width = last_exclusive - first;
-    if width > INCREMENTAL_BITMAP_CSUM_MAX_DELTA_BYTES {
+    if width > INCREMENTAL_BITMAP_CSUM_MAX_DELTA_BYTES || width > checksum_len / 32 {
         return BitmapChecksumUpdate::Full;
     }
 
-    let delta: Vec<u8> = before[first..last_exclusive]
-        .iter()
-        .zip(&after[first..last_exclusive])
-        .map(|(old, new)| old ^ new)
-        .collect();
-    if delta.iter().all(|byte| *byte == 0) {
-        return BitmapChecksumUpdate::Unchanged;
-    }
     BitmapChecksumUpdate::Incremental {
-        byte_start: first,
-        delta,
+        start_bit,
+        bit_count,
+    }
+}
+
+fn bitmap_checksum_incremental_from_flipped_bit_range(
+    existing_checksum: u32,
+    start_bit: u32,
+    bit_count: u32,
+    checksum_bits: u32,
+) -> Option<u32> {
+    if bit_count == 0 || start_bit >= checksum_bits {
+        return Some(existing_checksum);
+    }
+    let checksum_len = (checksum_bits / 8) as usize;
+    let end_bit = start_bit.checked_add(bit_count)?;
+    if end_bit > checksum_bits {
+        return None;
+    }
+
+    let byte_start = (start_bit / 8) as usize;
+    let byte_end = end_bit.div_ceil(8) as usize;
+    if byte_start >= byte_end || byte_end > checksum_len {
+        return None;
+    }
+    let span = byte_end - byte_start;
+    if span > INCREMENTAL_BITMAP_CSUM_MAX_DELTA_BYTES || span > checksum_len / 32 {
+        return None;
+    }
+
+    let local_start = start_bit % 8;
+    let suffix = checksum_len - byte_end;
+    if span <= 16 {
+        let mut delta = [0_u8; 16];
+        fill_flipped_bit_delta(&mut delta[..span], local_start, bit_count);
+        return Some(ffs_ondisk::crc_incremental::crc32c_update_region(
+            existing_checksum,
+            &delta[..span],
+            suffix,
+        ));
+    }
+
+    let mut delta = [0_u8; INCREMENTAL_BITMAP_CSUM_MAX_DELTA_BYTES];
+    fill_flipped_bit_delta(&mut delta[..span], local_start, bit_count);
+    Some(ffs_ondisk::crc_incremental::crc32c_update_region(
+        existing_checksum,
+        &delta[..span],
+        suffix,
+    ))
+}
+
+fn fill_flipped_bit_delta(delta: &mut [u8], local_start: u32, bit_count: u32) {
+    if local_start == 0 && bit_count % 8 == 0 {
+        delta.fill(u8::MAX);
+    } else {
+        for bit in local_start..local_start + bit_count {
+            delta[(bit / 8) as usize] |= 1_u8 << (bit % 8);
+        }
     }
 }
 
@@ -1985,8 +2074,8 @@ fn persist_group_desc_with_bitmap_overrides(
     pctx: &PersistCtx,
     group: GroupNumber,
     stats: &GroupStats,
-    block_bitmap_override: Option<BitmapOverride<'_>>,
-    inode_bitmap_override: Option<BitmapOverride<'_>>,
+    block_bitmap_override: Option<&BitmapOverride<'_>>,
+    inode_bitmap_override: Option<&BitmapOverride<'_>>,
 ) -> Result<()> {
     if gdt_persistence_deferred() {
         return Ok(());
@@ -2014,14 +2103,16 @@ pub fn persist_group_desc_force(
     block_bitmap_override: Option<&[u8]>,
     inode_bitmap_override: Option<&[u8]>,
 ) -> Result<()> {
+    let block_bitmap_override = block_bitmap_override.map(BitmapOverride::full);
+    let inode_bitmap_override = inode_bitmap_override.map(BitmapOverride::full);
     persist_group_desc_force_with_bitmap_overrides(
         cx,
         dev,
         pctx,
         group,
         stats,
-        block_bitmap_override.map(BitmapOverride::full),
-        inode_bitmap_override.map(BitmapOverride::full),
+        block_bitmap_override.as_ref(),
+        inode_bitmap_override.as_ref(),
     )
 }
 
@@ -2031,8 +2122,8 @@ fn persist_group_desc_force_with_bitmap_overrides(
     pctx: &PersistCtx,
     group: GroupNumber,
     stats: &GroupStats,
-    block_bitmap_override: Option<BitmapOverride<'_>>,
-    inode_bitmap_override: Option<BitmapOverride<'_>>,
+    block_bitmap_override: Option<&BitmapOverride<'_>>,
+    inode_bitmap_override: Option<&BitmapOverride<'_>>,
 ) -> Result<()> {
     let ds = usize::from(pctx.desc_size);
     if ds == 0 {
@@ -2064,9 +2155,7 @@ fn persist_group_desc_force_with_bitmap_overrides(
     let existing_block_bitmap_csum = existing.block_bitmap_csum;
     let existing_inode_bitmap_csum = existing.inode_bitmap_csum;
     let block_bitmap_written = block_bitmap_override.is_some();
-    let inode_bitmap = inode_bitmap_override
-        .as_ref()
-        .map(|override_| override_.bitmap);
+    let inode_bitmap = inode_bitmap_override.map(|override_| override_.bitmap);
 
     let mut updated = Ext4GroupDesc {
         free_blocks_count: stats.free_blocks,
@@ -2087,37 +2176,23 @@ fn persist_group_desc_force_with_bitmap_overrides(
         // group block-bitmap block (e.g. block 51) on EVERY op only to recompute
         // a byte-identical checksum. Measured: ~2 base preads/op on the delete
         // path (the dominant amplification, ~93% of delbench preads). bd-bmpcsum.
-        if let Some(block_bitmap) = block_bitmap_override.as_ref() {
+        if let Some(block_bitmap) = block_bitmap_override {
             stamp_bitmap_checksum_from_override(
+                BitmapChecksumKind::Block,
                 block_bitmap,
                 existing_block_bitmap_csum,
                 existing_flags & GD_FLAG_BLOCK_UNINIT != 0,
-                pctx.csum_seed,
-                pctx.blocks_per_group,
-                pctx.desc_size,
-                |checksum, updated| updated.block_bitmap_csum = checksum,
-                |bitmap, seed, bits, updated, desc_size| {
-                    ffs_ondisk::ext4::stamp_block_bitmap_checksum(
-                        bitmap, seed, bits, updated, desc_size,
-                    );
-                },
+                pctx,
                 &mut updated,
             );
         }
-        if let Some(inode_bitmap) = inode_bitmap_override.as_ref() {
+        if let Some(inode_bitmap) = inode_bitmap_override {
             stamp_bitmap_checksum_from_override(
+                BitmapChecksumKind::Inode,
                 inode_bitmap,
                 existing_inode_bitmap_csum,
                 existing_flags & GD_FLAG_INODE_UNINIT != 0,
-                pctx.csum_seed,
-                pctx.inodes_per_group,
-                pctx.desc_size,
-                |checksum, updated| updated.inode_bitmap_csum = checksum,
-                |bitmap, seed, bits, updated, desc_size| {
-                    ffs_ondisk::ext4::stamp_inode_bitmap_checksum(
-                        bitmap, seed, bits, updated, desc_size,
-                    );
-                },
+                pctx,
                 &mut updated,
             );
         }
@@ -2164,44 +2239,39 @@ fn persist_group_desc_force_with_bitmap_overrides(
 }
 
 fn stamp_bitmap_checksum_from_override(
+    kind: BitmapChecksumKind,
     bitmap_override: &BitmapOverride<'_>,
     existing_checksum: u32,
     existing_uninit: bool,
-    csum_seed: u32,
-    checksum_bits: u32,
-    desc_size: u16,
-    set_checksum: impl Fn(u32, &mut Ext4GroupDesc),
-    full_stamp: impl Fn(&[u8], u32, u32, &mut Ext4GroupDesc, u16),
+    pctx: &PersistCtx,
     updated: &mut Ext4GroupDesc,
 ) {
-    if desc_size >= 64 && !existing_uninit {
+    let checksum_bits = kind.checksum_bits(pctx);
+    if pctx.desc_size >= 64 && !existing_uninit {
         match &bitmap_override.checksum_update {
             BitmapChecksumUpdate::Unchanged => {
-                set_checksum(existing_checksum, updated);
+                kind.set_checksum(existing_checksum, updated);
                 return;
             }
-            BitmapChecksumUpdate::Incremental { byte_start, delta } => {
-                let checksum_len = (checksum_bits / 8) as usize;
-                let suffix = checksum_len.saturating_sub(*byte_start + delta.len());
-                let checksum = ffs_ondisk::crc_incremental::crc32c_update_region(
+            BitmapChecksumUpdate::Incremental {
+                start_bit,
+                bit_count,
+            } => {
+                if let Some(checksum) = bitmap_checksum_incremental_from_flipped_bit_range(
                     existing_checksum,
-                    delta,
-                    suffix,
-                );
-                set_checksum(checksum, updated);
-                return;
+                    *start_bit,
+                    *bit_count,
+                    checksum_bits,
+                ) {
+                    kind.set_checksum(checksum, updated);
+                    return;
+                }
             }
             BitmapChecksumUpdate::Full => {}
         }
     }
 
-    full_stamp(
-        bitmap_override.bitmap,
-        csum_seed,
-        checksum_bits,
-        updated,
-        desc_size,
-    );
+    kind.stamp_full(bitmap_override.bitmap, pctx, updated);
 }
 
 // ── Block allocator ─────────────────────────────────────────────────────────
@@ -2535,8 +2605,7 @@ fn try_alloc_safe(
         // below) — no per-bit undo push needed here.
         bitmap_set_range(&mut bitmap, rel_start, alloc_count);
         let block_bitmap_override = if rollback_clear_bits.is_empty() {
-            BitmapOverride::from_bit_range(
-                bitmap_buf.as_slice(),
+            BitmapOverride::from_flipped_bit_range(
                 &bitmap,
                 rel_start,
                 alloc_count,
@@ -2577,7 +2646,7 @@ fn try_alloc_safe(
             pctx,
             group,
             &groups[gidx],
-            Some(block_bitmap_override),
+            Some(&block_bitmap_override),
             None,
         ) {
             groups[gidx].free_blocks = previous_free_blocks;
@@ -2685,9 +2754,7 @@ pub fn free_blocks_persist(
         // range is exact; the segment's own range is the rollback undo (re-set
         // it), so no per-bit undo Vec is needed. O(count/8) via memset.
         bitmap_clear_range(&mut bitmap, segment.rel_start, segment.count);
-        let checksum_update = bitmap_checksum_update_from_bit_range(
-            bitmap_buf.as_slice(),
-            &bitmap,
+        let checksum_update = bitmap_checksum_update_from_flipped_bit_range(
             segment.rel_start,
             segment.count,
             pctx.blocks_per_group,
@@ -2718,16 +2785,17 @@ pub fn free_blocks_persist(
         groups[gidx].invalidate_block_largest_free_run();
 
         // Persist group descriptor.
+        let block_bitmap_override = BitmapOverride {
+            bitmap: &bitmap,
+            checksum_update,
+        };
         if let Err(error) = persist_group_desc_with_bitmap_overrides(
             cx,
             dev,
             pctx,
             segment.group,
             &groups[gidx],
-            Some(BitmapOverride {
-                bitmap: &bitmap,
-                checksum_update,
-            }),
+            Some(&block_bitmap_override),
             None,
         ) {
             groups[gidx].free_blocks = previous_free_blocks;
@@ -2895,7 +2963,7 @@ fn try_alloc_batch_in_group(
         pctx,
         group,
         &groups[gidx],
-        Some(block_bitmap_override),
+        Some(&block_bitmap_override),
         None,
     ) {
         groups[gidx].free_blocks = previous_free_blocks;
@@ -3192,13 +3260,7 @@ fn try_alloc_inode_in_group_persist(
         &mut rollback_clear_bits,
     );
     let inode_bitmap_override = if rollback_clear_bits.len() == 1 && rollback_clear_bits[0] == idx {
-        BitmapOverride::from_bit_range(
-            bitmap_buf.as_slice(),
-            &bitmap,
-            idx,
-            1,
-            pctx.inodes_per_group,
-        )
+        BitmapOverride::from_flipped_bit_range(&bitmap, idx, 1, pctx.inodes_per_group)
     } else {
         BitmapOverride::full(&bitmap)
     };
@@ -3221,7 +3283,7 @@ fn try_alloc_inode_in_group_persist(
         group,
         &groups[gidx],
         None,
-        Some(inode_bitmap_override),
+        Some(&inode_bitmap_override),
     ) {
         groups[gidx].free_inodes = previous_free_inodes;
         groups[gidx].used_dirs = previous_used_dirs;
@@ -3396,13 +3458,8 @@ pub fn free_inode_persist(
     }
 
     bitmap_clear_with_set_undo(&mut bitmap, bit_idx, &mut rollback_set_bits);
-    let inode_bitmap_override = BitmapOverride::from_bit_range(
-        bitmap_buf.as_slice(),
-        &bitmap,
-        bit_idx,
-        1,
-        pctx.inodes_per_group,
-    );
+    let inode_bitmap_override =
+        BitmapOverride::from_flipped_bit_range(&bitmap, bit_idx, 1, pctx.inodes_per_group);
     dev.write_block(cx, bitmap_block, &bitmap)?;
     let previous_used_dirs = groups[gidx].used_dirs;
     groups[gidx].rewind_inode_search_start_on_free(bit_idx);
@@ -3420,7 +3477,7 @@ pub fn free_inode_persist(
         group,
         &groups[gidx],
         None,
-        Some(inode_bitmap_override),
+        Some(&inode_bitmap_override),
     ) {
         groups[gidx].free_inodes = previous_free_inodes;
         groups[gidx].used_dirs = previous_used_dirs;
@@ -4760,7 +4817,8 @@ mod tests {
         let csum_seed = 0x1357_2468;
         let blocks_per_group = 32_768;
         let desc_size = 64;
-        let before = vec![0xA5_u8; 4096];
+        let mut before = vec![0xA5_u8; 4096];
+        before[3000..3008].fill(0);
         let mut after = before.clone();
         after[3000..3008].fill(0xFF);
 
@@ -4795,31 +4853,30 @@ mod tests {
         );
 
         let override_ =
-            BitmapOverride::from_bit_range(&before, &after, 3000 * 8, 8 * 8, blocks_per_group);
+            BitmapOverride::from_flipped_bit_range(&after, 3000 * 8, 8 * 8, blocks_per_group);
         assert!(matches!(
             override_.checksum_update,
             BitmapChecksumUpdate::Incremental { .. }
         ));
         let mut incremental = existing.clone();
+        let pctx = PersistCtx {
+            desc_size,
+            csum_seed,
+            blocks_per_group,
+            ..make_persist_ctx()
+        };
         stamp_bitmap_checksum_from_override(
+            BitmapChecksumKind::Block,
             &override_,
             existing.block_bitmap_csum,
             false,
-            csum_seed,
-            blocks_per_group,
-            desc_size,
-            |checksum, updated| updated.block_bitmap_csum = checksum,
-            |bitmap, seed, bits, updated, desc_size| {
-                ffs_ondisk::ext4::stamp_block_bitmap_checksum(
-                    bitmap, seed, bits, updated, desc_size,
-                );
-            },
+            &pctx,
             &mut incremental,
         );
         assert_eq!(incremental.block_bitmap_csum, full.block_bitmap_csum);
 
         let wide_override =
-            BitmapOverride::from_bit_range(&before, &after, 0, 2048, blocks_per_group);
+            BitmapOverride::from_flipped_bit_range(&after, 0, 2048, blocks_per_group);
         assert!(matches!(
             wide_override.checksum_update,
             BitmapChecksumUpdate::Full

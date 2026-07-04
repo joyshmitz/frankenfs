@@ -7,6 +7,8 @@ use criterion::{Criterion, criterion_group, criterion_main};
 use ffs_ondisk::{Ext4GroupDesc, crc_incremental::crc32c_update_region};
 use std::hint::black_box;
 
+const INCREMENTAL_BITMAP_CSUM_MAX_DELTA_BYTES: usize = 128;
+
 fn group_desc() -> Ext4GroupDesc {
     Ext4GroupDesc {
         block_bitmap: 0,
@@ -39,6 +41,39 @@ fn incremental_range_update(
     crc32c_update_region(old_checksum, &delta, checksum_len - byte_start - byte_len)
 }
 
+fn incremental_mask_stack_update(
+    old_checksum: u32,
+    start_bit: u32,
+    bit_count: u32,
+    checksum_len: usize,
+) -> u32 {
+    let byte_start = (start_bit / 8) as usize;
+    let byte_end = (start_bit + bit_count).div_ceil(8) as usize;
+    let span = byte_end - byte_start;
+    assert!(span <= INCREMENTAL_BITMAP_CSUM_MAX_DELTA_BYTES);
+
+    let local_start = start_bit % 8;
+    if span <= 16 {
+        let mut delta = [0_u8; 16];
+        fill_flipped_bit_delta(&mut delta[..span], local_start, bit_count);
+        return crc32c_update_region(old_checksum, &delta[..span], checksum_len - byte_end);
+    }
+
+    let mut delta = [0_u8; INCREMENTAL_BITMAP_CSUM_MAX_DELTA_BYTES];
+    fill_flipped_bit_delta(&mut delta[..span], local_start, bit_count);
+    crc32c_update_region(old_checksum, &delta[..span], checksum_len - byte_end)
+}
+
+fn fill_flipped_bit_delta(delta: &mut [u8], local_start: u32, bit_count: u32) {
+    if local_start == 0 && bit_count % 8 == 0 {
+        delta.fill(u8::MAX);
+    } else {
+        for bit in local_start..local_start + bit_count {
+            delta[(bit / 8) as usize] |= 1_u8 << (bit % 8);
+        }
+    }
+}
+
 fn bench(c: &mut Criterion) {
     let csum_seed = 0x1357_2468;
     let blocks_per_group = 32_768;
@@ -46,8 +81,11 @@ fn bench(c: &mut Criterion) {
     let checksum_len = (blocks_per_group / 8) as usize;
     let byte_start = 3000usize;
     let byte_len = 8usize;
+    let start_bit = u32::try_from(byte_start * 8).unwrap();
+    let bit_count = u32::try_from(byte_len * 8).unwrap();
 
-    let before = vec![0xA5_u8; checksum_len];
+    let mut before = vec![0xA5_u8; checksum_len];
+    before[byte_start..byte_start + byte_len].fill(0);
     let mut after = before.clone();
     after[byte_start..byte_start + byte_len].fill(0xFF);
 
@@ -79,6 +117,15 @@ fn bench(c: &mut Criterion) {
         ),
         full_desc.block_bitmap_csum
     );
+    assert_eq!(
+        incremental_mask_stack_update(
+            before_desc.block_bitmap_csum,
+            start_bit,
+            bit_count,
+            checksum_len,
+        ),
+        full_desc.block_bitmap_csum
+    );
 
     let mut group = c.benchmark_group("bitmap_csum_incremental_persist");
     group.bench_function("full_stamp_4k_8byte_change", |b| {
@@ -102,6 +149,16 @@ fn bench(c: &mut Criterion) {
                 black_box(&after),
                 black_box(byte_start),
                 black_box(byte_len),
+                black_box(checksum_len),
+            ))
+        });
+    });
+    group.bench_function("incremental_mask_stack_8byte_change", |b| {
+        b.iter(|| {
+            black_box(incremental_mask_stack_update(
+                black_box(before_desc.block_bitmap_csum),
+                black_box(start_bit),
+                black_box(bit_count),
                 black_box(checksum_len),
             ))
         });
