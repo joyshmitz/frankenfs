@@ -5988,49 +5988,69 @@ impl Filesystem for FrankenFuse {
                 .readdir(cx, scope, InodeNumber(ino), fs_offset)
         }) {
             Ok(entries) => {
-                // bd-xmh5g.399: fetch every entry's attributes in PARALLEL so a
-                // cold `ls -l` does not pay a serial inode-table-block read per
-                // entry; then add them to the reply in original order. I/O-overlap:
-                // the blocking inode reads park their cores and overlap across the
+                // bd-xmh5g.399: fetch entries' attributes in PARALLEL so a cold
+                // `ls -l` does not pay a serial inode-table-block read per entry;
+                // then add them to the reply in original order. I/O-overlap: the
+                // blocking inode reads park their cores and overlap across the
                 // rayon pool. Conformance-neutral — identical entries, attributes,
                 // and ordering; getattr is already concurrency-safe (the FUSE
                 // dispatcher calls it from multiple worker threads), Cx is Sync, and
                 // with_request_scope takes &self.
+                //
+                // The `ops.readdir` page is capped at 512 entries, but the client
+                // reply buffer fills (`reply.add` -> `full`) after only ~150-200,
+                // so a single 512-wide fan-out computed ~300 getattrs whose results
+                // are discarded — and because successive readdirplus cookies advance
+                // by only the entries that fit, a full `ls -l` re-fetched that
+                // discarded window on every page (~512·N/F getattrs vs the ideal N).
+                // Fan out in BOUNDED BATCHES in entry order and stop the moment the
+                // reply buffer is full: identical entries/attrs/order, but wasted
+                // getattrs are bounded to < one batch instead of 512−F.
                 use rayon::prelude::*;
                 let this: &Self = &*self;
                 let cx_ref = &cx;
-                let attrs: Vec<Option<FileAttr>> = entries
-                    .par_iter()
-                    .map(|entry| {
-                        this.with_request_scope(cx_ref, RequestOp::Getattr, |cx, scope| {
-                            this.inner.ops.getattr(cx, scope, entry.ino)
+                // Batch wide enough to saturate the rayon pool for I/O-overlap,
+                // small enough that overshoot past a full buffer stays tiny.
+                const READDIRPLUS_GETATTR_BATCH: usize = 128;
+                let mut buffer_full = false;
+                for batch in entries.chunks(READDIRPLUS_GETATTR_BATCH) {
+                    let attrs: Vec<Option<FileAttr>> = batch
+                        .par_iter()
+                        .map(|entry| {
+                            this.with_request_scope(cx_ref, RequestOp::Getattr, |cx, scope| {
+                                this.inner.ops.getattr(cx, scope, entry.ino)
+                            })
+                            .ok()
+                            .map(|attr| to_file_attr(&attr))
                         })
-                        .ok()
-                        .map(|attr| to_file_attr(&attr))
-                    })
-                    .collect();
+                        .collect();
 
-                for (entry, attr) in entries.iter().zip(attrs) {
-                    // If we couldn't get attrs, skip this entry (same as before).
-                    let Some(attr) = attr else {
-                        continue;
-                    };
-                    #[cfg(unix)]
-                    let name = OsStr::from_bytes(&entry.name);
-                    #[cfg(not(unix))]
-                    let owned_name = entry.name_str();
-                    #[cfg(not(unix))]
-                    let name = OsStr::new(&owned_name);
+                    for (entry, attr) in batch.iter().zip(attrs) {
+                        // If we couldn't get attrs, skip this entry (same as before).
+                        let Some(attr) = attr else {
+                            continue;
+                        };
+                        #[cfg(unix)]
+                        let name = OsStr::from_bytes(&entry.name);
+                        #[cfg(not(unix))]
+                        let owned_name = entry.name_str();
+                        #[cfg(not(unix))]
+                        let name = OsStr::new(&owned_name);
 
-                    let full = reply.add(
-                        entry.ino.0,
-                        i64::try_from(entry.offset).unwrap_or(i64::MAX),
-                        name,
-                        &ATTR_TTL,
-                        &attr,
-                        0, // generation - not tracked
-                    );
-                    if full {
+                        let full = reply.add(
+                            entry.ino.0,
+                            i64::try_from(entry.offset).unwrap_or(i64::MAX),
+                            name,
+                            &ATTR_TTL,
+                            &attr,
+                            0, // generation - not tracked
+                        );
+                        if full {
+                            buffer_full = true;
+                            break;
+                        }
+                    }
+                    if buffer_full {
                         break;
                     }
                 }
