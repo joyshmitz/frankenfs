@@ -13,8 +13,9 @@
 //! hot path a plain compare. This benches the per-block cheap path a DATA block
 //! traverses (2 validators → Skip) OLD (divisions) vs NEW (precomputed).
 //!
-//! RESULT (2026-07-04, BlackThrush): WIN. release-perf/opt-3, local:
-//!   old_per_block_div 384.9 ns  vs  new_precomputed 280.5 ns  = ~1.37x
+//! RESULT (2026-07-04, BlackThrush): WIN. release-perf/opt-3, two runs agree:
+//!   local  old 384.9 ns  vs  new 280.5 ns  = ~1.37x
+//!   rch    old 485.7 ns  vs  new 341.8 ns  = ~1.42x
 //! for the 256-block per-block sb/tree-block reject path. Behaviour-identical
 //! (equivalence assert passed). Production hoisted the two divisions into the
 //! validators' `new()`. Real scrub impact scales with the validation-vs-I/O
