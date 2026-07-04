@@ -55,3 +55,7 @@ harness = false
 [[bench]]
 name = "extent_child_cache"
 harness = false
+
+[[bench]]
+name = "extent_snapshot_copy"
+harness = false
