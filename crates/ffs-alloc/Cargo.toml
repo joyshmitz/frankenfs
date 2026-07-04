@@ -31,3 +31,7 @@ harness = false
 
 [lints]
 workspace = true
+
+[[bench]]
+name = "bitmap_scan_width"
+harness = false
