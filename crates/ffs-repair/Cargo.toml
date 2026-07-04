@@ -34,6 +34,10 @@ name = "gf_simd_probe"
 harness = false
 
 [[bench]]
+name = "xor_into_probe"
+harness = false
+
+[[bench]]
 name = "encode_parallel"
 harness = false
 
