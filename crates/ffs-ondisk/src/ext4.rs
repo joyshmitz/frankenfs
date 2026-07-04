@@ -2280,6 +2280,53 @@ pub fn stamp_dir_block_checksum(dir_block: &mut [u8], csum_seed: u32, ino: u32, 
     dir_block[bs - 4..bs].copy_from_slice(&computed.to_le_bytes());
 }
 
+/// Incrementally update a directory block's checksum tail after a single
+/// contiguous in-place change, instead of re-CRCing the whole ~4 KiB block.
+///
+/// A directory mutation (add/remove one entry) touches one contiguous span
+/// `[region_start, region_start+delta.len())` where `delta[i] = before[i] XOR
+/// after[i]` (0 for bytes within the span that are unchanged, e.g. the shortened
+/// entry's untouched name between its rewritten `rec_len` and the new entry).
+/// The stored tail already holds the checksum of the *old* block, and the
+/// per-inode seed cancels in the same-length XOR difference, so the new tail is
+/// `crc32c_update_region(old_tail, delta, suffix)` — no seed/ino/generation
+/// needed. On the create/unlink hot path this replaces a ~4084-byte CRC with a
+/// ~30-byte one (bench `dir_csum_incremental`).
+///
+/// Returns `false` (caller must call [`stamp_dir_block_checksum`] instead) when
+/// the block is too small or the change reaches past the checksummed region.
+/// Requires the tail to already hold a valid checksum for the pre-change block
+/// (true for every mutation of an already-stamped block). Result-identical to a
+/// full recompute (proptest-verified).
+#[must_use]
+pub fn stamp_dir_block_checksum_incremental(
+    dir_block: &mut [u8],
+    region_start: usize,
+    delta: &[u8],
+) -> bool {
+    let bs = dir_block.len();
+    if bs < 12 {
+        return false;
+    }
+    let coverage_end = bs - 12;
+    let Some(region_end) = region_start.checked_add(delta.len()) else {
+        return false;
+    };
+    if region_end > coverage_end {
+        return false;
+    }
+    let old_tail = u32::from_le_bytes([
+        dir_block[bs - 4],
+        dir_block[bs - 3],
+        dir_block[bs - 2],
+        dir_block[bs - 1],
+    ]);
+    let suffix = coverage_end - region_end;
+    let new_tail = crate::crc_incremental::crc32c_update_region(old_tail, delta, suffix);
+    dir_block[bs - 4..bs].copy_from_slice(&new_tail.to_le_bytes());
+    true
+}
+
 /// `count_offset` of the `dx_countlimit` within a DX **root** block (after the
 /// fake "."/".." entries and `dx_root_info`).
 pub const DX_ROOT_COUNT_OFFSET: usize = 0x20;
@@ -22764,5 +22811,50 @@ mod bitmap_csum_incremental_verify {
     #[test]
     fn incremental_none_for_16bit_desc() {
         assert!(bitmap_checksum_incremental(0, 0, 8, 32768, 32).is_none());
+    }
+}
+
+#[cfg(test)]
+mod dir_csum_incremental_verify {
+    use super::*;
+    #[test]
+    fn incremental_matches_full_dir_stamp_prop() {
+        let mut state = 0x51A7_3C9Fu32;
+        let mut next = || { state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223); state };
+        let bs = 4096usize;
+        let coverage_end = bs - 12;
+        let seed = 0xDEAD_BEEFu32;
+        let ino = 42u32;
+        let generation = 7u32;
+        let mut block = vec![0u8; bs];
+        for b in block.iter_mut() { *b = (next() & 0xFF) as u8; }
+        stamp_dir_block_checksum(&mut block, seed, ino, generation);
+        let mut checked = 0;
+        for _ in 0..400 {
+            // one contiguous change within coverage (like an entry insert/remove)
+            let len = 1 + (next() as usize % 48);
+            let start = (next() as usize) % (coverage_end - len);
+            let mut new_bytes = vec![0u8; len];
+            for b in new_bytes.iter_mut() { *b = (next() & 0xFF) as u8; }
+            let delta: Vec<u8> = new_bytes.iter().zip(&block[start..start+len]).map(|(n,o)| n^o).collect();
+            // apply the change to two copies
+            let mut inc = block.clone();
+            inc[start..start+len].copy_from_slice(&new_bytes);
+            let mut full = inc.clone();
+            // incremental tail update (inc still carries the OLD tail from `block`)
+            assert!(stamp_dir_block_checksum_incremental(&mut inc, start, &delta));
+            // full recompute oracle
+            stamp_dir_block_checksum(&mut full, seed, ino, generation);
+            assert_eq!(&inc[bs-4..], &full[bs-4..], "start={start} len={len}");
+            block = full; // chain (like successive mutations)
+            checked += 1;
+        }
+        assert!(checked > 100);
+    }
+    #[test]
+    fn incremental_rejects_out_of_coverage() {
+        let mut block = vec![0u8; 4096];
+        assert!(!stamp_dir_block_checksum_incremental(&mut block, 4090, &[0u8; 8]));
+        assert!(!stamp_dir_block_checksum_incremental(&mut [0u8; 8], 0, &[0u8; 1]));
     }
 }
