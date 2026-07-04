@@ -163,6 +163,10 @@ name = "ext4_alloc_lock_convoy"
 harness = false
 
 [[bench]]
+name = "ext4_group_lock_layout"
+harness = false
+
+[[bench]]
 name = "ext4_indirect_read_overlap"
 harness = false
 

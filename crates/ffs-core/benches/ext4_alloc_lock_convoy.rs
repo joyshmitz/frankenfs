@@ -10,11 +10,11 @@
 //! sharding; it is a small guard that quantifies why lock-implementation swaps
 //! cannot recover the measured bd-bhh0i gap while real sharding can.
 
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
 use parking_lot::{Mutex, RwLock};
 use std::hint::black_box;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 const GROUPS: usize = 8;
 const THREADS: usize = 8;
