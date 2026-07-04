@@ -90,3 +90,7 @@ harness = false
 
 [lints]
 workspace = true
+
+[[bench]]
+name = "leaf_search_lazy"
+harness = false
