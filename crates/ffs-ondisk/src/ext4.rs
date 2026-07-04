@@ -4666,6 +4666,30 @@ pub struct Ext4ImageReader {
     pub sb: Ext4Superblock,
 }
 
+/// Per-level memo of the last-resolved child extent block, for reusing an
+/// already read+parsed child across a sequential walk of consecutive logical
+/// blocks (the read / readdir / lookup hot loops).
+///
+/// For a depth-0 (inline leaf) inode this is never touched — the common case my
+/// `resolve_extent_with_tree` hoist already covers. For a depth ≥ 1 tree,
+/// `walk_extent_tree` re-reads AND re-parses (heap-allocating `Vec<Ext4Extent>`
+/// + sort/overlap validation) the child index/leaf block on EVERY logical block,
+/// even though consecutive blocks overwhelmingly fall under the same index entry
+/// (one 4 KiB extent leaf covers up to ~340 extents). This cache holds the last
+/// child parsed at each tree level (indexed by `remaining_depth`, ≤
+/// `MAX_EXTENT_DEPTH`); when the next block resolves to the same `leaf_block`,
+/// the parsed child is reused instead of re-read + re-parsed. Behaviour is
+/// identical: a cached child was validated when first parsed and the underlying
+/// image block is immutable, so reuse yields the same result the per-block
+/// re-parse would have.
+#[derive(Debug, Default)]
+pub struct ExtentResolveCache {
+    /// `levels[d]` = the child `(leaf_block, header, tree)` last read by an
+    /// Index node at `remaining_depth == d`. Index `0` is unused (leaf level).
+    levels: [Option<(u64, Ext4ExtentHeader, ExtentTree)>;
+        Ext4ImageReader::MAX_EXTENT_DEPTH as usize + 1],
+}
+
 impl Ext4ImageReader {
     /// Create a reader by parsing the superblock from `image`.
     pub fn new(image: &[u8]) -> Result<Self, ParseError> {
@@ -4828,6 +4852,116 @@ impl Ext4ImageReader {
         logical_block: u32,
     ) -> Result<Option<u64>, ParseError> {
         self.walk_extent_tree(image, header, tree, logical_block, header.depth)
+    }
+
+    /// Like [`resolve_extent_with_tree`], but reuses child index/leaf blocks
+    /// across calls via `cache` (see [`ExtentResolveCache`]). Callers that walk
+    /// consecutive logical blocks of one inode (read / readdir / lookup) should
+    /// build one cache before the loop and pass it per block, so a depth ≥ 1
+    /// tree does not re-read + re-parse the same child block for every block.
+    /// Identical result to `resolve_extent_with_tree` for the same inputs; for a
+    /// depth-0 tree the cache is never consulted (zero overhead).
+    pub fn resolve_extent_with_tree_cached(
+        &self,
+        image: &[u8],
+        header: &Ext4ExtentHeader,
+        tree: &ExtentTree,
+        logical_block: u32,
+        cache: &mut ExtentResolveCache,
+    ) -> Result<Option<u64>, ParseError> {
+        self.walk_extent_tree_cached(image, tree, logical_block, header.depth, cache)
+    }
+
+    /// Recursive extent tree walker with a per-level child cache. Mirrors
+    /// [`walk_extent_tree`] exactly for the leaf scan and index selection; the
+    /// only difference is that the chosen child block is taken from `cache` when
+    /// its `leaf_block` matches, else read + parsed and stored back.
+    fn walk_extent_tree_cached(
+        &self,
+        image: &[u8],
+        tree: &ExtentTree,
+        logical_block: u32,
+        remaining_depth: u16,
+        cache: &mut ExtentResolveCache,
+    ) -> Result<Option<u64>, ParseError> {
+        if remaining_depth > Self::MAX_EXTENT_DEPTH {
+            return Err(ParseError::InvalidField {
+                field: "eh_depth",
+                reason: "extent tree depth exceeds maximum",
+            });
+        }
+
+        match tree {
+            ExtentTree::Leaf(extents) => {
+                for ext in extents {
+                    let start = ext.logical_block;
+                    let len = u32::from(ext.actual_len());
+                    if logical_block >= start && logical_block < start.saturating_add(len) {
+                        let offset_within = u64::from(logical_block - start);
+                        let phys = ext.physical_start.checked_add(offset_within).ok_or(
+                            ParseError::InvalidField {
+                                field: "ee_start",
+                                reason: "physical block + offset overflow",
+                            },
+                        )?;
+                        return Ok(Some(phys));
+                    }
+                }
+                Ok(None)
+            }
+            ExtentTree::Index(indexes) => {
+                if remaining_depth == 0 {
+                    return Err(ParseError::InvalidField {
+                        field: "eh_depth",
+                        reason: "extent index at depth 0",
+                    });
+                }
+                let mut chosen: Option<&Ext4ExtentIndex> = None;
+                for idx in indexes {
+                    if idx.logical_block <= logical_block {
+                        chosen = Some(idx);
+                    } else {
+                        break;
+                    }
+                }
+                let Some(idx) = chosen else {
+                    return Ok(None);
+                };
+
+                // Take the cached child out (so `cache` is free to be borrowed
+                // mutably by the recursion, which uses a different level index),
+                // reusing it iff it is the same child block; otherwise read +
+                // parse + validate exactly as `walk_extent_tree` does.
+                let slot = remaining_depth as usize;
+                let cached = cache.levels[slot].take();
+                let (child_header, child_tree) = match cached {
+                    Some((lb, h, t)) if lb == idx.leaf_block => (h, t),
+                    _ => {
+                        let child_block =
+                            self.read_block(image, ffs_types::BlockNumber(idx.leaf_block))?;
+                        let (child_header, child_tree) = parse_extent_tree(child_block)?;
+                        if child_header.depth + 1 != remaining_depth {
+                            return Err(ParseError::InvalidField {
+                                field: "eh_depth",
+                                reason: "child extent tree depth inconsistency",
+                            });
+                        }
+                        (child_header, child_tree)
+                    }
+                };
+
+                let result = self.walk_extent_tree_cached(
+                    image,
+                    &child_tree,
+                    logical_block,
+                    remaining_depth - 1,
+                    cache,
+                );
+                // Store the child back for the next (usually same-child) block.
+                cache.levels[slot] = Some((idx.leaf_block, child_header, child_tree));
+                result
+            }
+        }
     }
 
     /// Recursive extent tree walker with depth tracking.
@@ -5010,6 +5144,8 @@ impl Ext4ImageReader {
         // parsed on the first iteration regardless — identical behaviour,
         // including error propagation.
         let (header, tree) = parse_inode_extent_tree(inode)?;
+        // Reuse child index/leaf blocks across the read's blocks (depth ≥ 1).
+        let mut extent_cache = ExtentResolveCache::default();
 
         while bytes_read < to_read {
             let current_offset = offset + bytes_read as u64;
@@ -5023,7 +5159,13 @@ impl Ext4ImageReader {
             let remaining_in_block = bs_usize - offset_in_block;
             let chunk_size = remaining_in_block.min(to_read - bytes_read);
 
-            match self.resolve_extent_with_tree(image, &header, &tree, logical_block)? {
+            match self.resolve_extent_with_tree_cached(
+                image,
+                &header,
+                &tree,
+                logical_block,
+                &mut extent_cache,
+            )? {
                 Some(phys_block) => {
                     let block_data = self.read_block(image, ffs_types::BlockNumber(phys_block))?;
                     buf[bytes_read..bytes_read + chunk_size].copy_from_slice(
@@ -5065,9 +5207,12 @@ impl Ext4ImageReader {
         // Parse the extent tree once (invariant across all dir blocks) rather
         // than re-parsing + re-allocating it per block in the loop below.
         let (header, tree) = parse_inode_extent_tree(inode)?;
+        let mut extent_cache = ExtentResolveCache::default();
 
         for lb in 0..num_blocks {
-            if let Some(phys) = self.resolve_extent_with_tree(image, &header, &tree, lb)? {
+            if let Some(phys) =
+                self.resolve_extent_with_tree_cached(image, &header, &tree, lb, &mut extent_cache)?
+            {
                 let block_data = self.read_block(image, ffs_types::BlockNumber(phys))?;
                 let (entries, _tail) = parse_dir_block(block_data, self.sb.block_size)?;
                 all_entries.extend(entries);
@@ -5096,9 +5241,12 @@ impl Ext4ImageReader {
         // Parse the extent tree once (invariant across all dir blocks) rather
         // than re-parsing + re-allocating it per block in the loop below.
         let (header, tree) = parse_inode_extent_tree(dir_inode)?;
+        let mut extent_cache = ExtentResolveCache::default();
 
         for lb in 0..num_blocks {
-            if let Some(phys) = self.resolve_extent_with_tree(image, &header, &tree, lb)? {
+            if let Some(phys) =
+                self.resolve_extent_with_tree_cached(image, &header, &tree, lb, &mut extent_cache)?
+            {
                 let block_data = self.read_block(image, ffs_types::BlockNumber(phys))?;
                 if let Some(entry) = lookup_in_dir_block(block_data, self.sb.block_size, name)? {
                     return Ok(Some(entry));
@@ -14151,6 +14299,87 @@ mod tests {
         // Non-existent logical block should be None (hole)
         let hole = reader.resolve_extent(&image, &root_inode, 999).unwrap();
         assert_eq!(hole, None);
+    }
+
+    #[test]
+    fn extent_resolve_cache_matches_uncached_depth1() {
+        // Build a depth-0 child extent leaf block: `exts` = (logical, len, phys).
+        fn leaf_block_bytes(exts: &[(u32, u16, u32)]) -> Vec<u8> {
+            let mut b = vec![0_u8; 4096];
+            b[0..2].copy_from_slice(&EXT4_EXTENT_MAGIC.to_le_bytes());
+            b[2..4].copy_from_slice(&(exts.len() as u16).to_le_bytes());
+            b[4..6].copy_from_slice(&340_u16.to_le_bytes()); // max_entries
+            b[6..8].copy_from_slice(&0_u16.to_le_bytes()); // depth=0 (leaf)
+            for (i, (lb, len, phys)) in exts.iter().enumerate() {
+                let o = 12 + i * 12;
+                b[o..o + 4].copy_from_slice(&lb.to_le_bytes());
+                b[o + 4..o + 6].copy_from_slice(&len.to_le_bytes());
+                b[o + 6..o + 8].copy_from_slice(&0_u16.to_le_bytes()); // start_hi
+                b[o + 8..o + 12].copy_from_slice(&phys.to_le_bytes()); // start_lo
+            }
+            b
+        }
+
+        let mut image = build_test_image();
+        // Two child leaves at free blocks 50/51 covering logical 0..16 and 16..32.
+        image[50 * 4096..50 * 4096 + 4096]
+            .copy_from_slice(&leaf_block_bytes(&[(0, 8, 2000), (8, 8, 3000)]));
+        image[51 * 4096..51 * 4096 + 4096]
+            .copy_from_slice(&leaf_block_bytes(&[(16, 8, 4000), (24, 8, 5000)]));
+
+        // Root: depth-1 index with two entries pointing at blocks 50 and 51.
+        let mut root = [0_u8; 60];
+        root[0..2].copy_from_slice(&EXT4_EXTENT_MAGIC.to_le_bytes());
+        root[2..4].copy_from_slice(&2_u16.to_le_bytes()); // entries=2
+        root[4..6].copy_from_slice(&4_u16.to_le_bytes()); // max_entries
+        root[6..8].copy_from_slice(&1_u16.to_le_bytes()); // depth=1
+        root[12..16].copy_from_slice(&0_u32.to_le_bytes()); // ei_block=0
+        root[16..20].copy_from_slice(&50_u32.to_le_bytes()); // ei_leaf=50
+        root[24..28].copy_from_slice(&16_u32.to_le_bytes()); // ei_block=16
+        root[28..32].copy_from_slice(&51_u32.to_le_bytes()); // ei_leaf=51
+
+        let reader = Ext4ImageReader::new(&image).unwrap();
+        let (h, tree) = parse_extent_tree(&root).unwrap();
+
+        // Cached must match uncached for sequential, reverse, and out-of-order
+        // access (exercises cache hit, evict, and per-call miss).
+        let orders: Vec<Vec<u32>> = vec![
+            (0..40).collect(),
+            (0..40).rev().collect(),
+            vec![31, 0, 16, 15, 16, 0, 31, 8, 24, 999],
+        ];
+        for order in orders {
+            let mut cache = ExtentResolveCache::default();
+            for lb in order {
+                let uncached = reader.resolve_extent_with_tree(&image, &h, &tree, lb).unwrap();
+                let cached = reader
+                    .resolve_extent_with_tree_cached(&image, &h, &tree, lb, &mut cache)
+                    .unwrap();
+                assert_eq!(uncached, cached, "cached != uncached at logical block {lb}");
+            }
+        }
+
+        // Spot-check concrete mappings across the child boundary via the cache.
+        let mut cache = ExtentResolveCache::default();
+        assert_eq!(
+            reader
+                .resolve_extent_with_tree_cached(&image, &h, &tree, 0, &mut cache)
+                .unwrap(),
+            Some(2000)
+        );
+        assert_eq!(
+            reader
+                .resolve_extent_with_tree_cached(&image, &h, &tree, 24, &mut cache)
+                .unwrap(),
+            Some(5000)
+        );
+        // A hole past the last extent.
+        assert_eq!(
+            reader
+                .resolve_extent_with_tree_cached(&image, &h, &tree, 32, &mut cache)
+                .unwrap(),
+            None
+        );
     }
 
     #[test]

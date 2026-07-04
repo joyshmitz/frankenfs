@@ -47,3 +47,7 @@ harness = false
 [[bench]]
 name = "extent_resolve_hoist"
 harness = false
+
+[[bench]]
+name = "extent_child_cache"
+harness = false
