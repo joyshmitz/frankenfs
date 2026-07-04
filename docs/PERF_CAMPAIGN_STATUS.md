@@ -1,9 +1,21 @@
 # Perf campaign status — read this first
 
-> ## ⛔ LOOP-GUARD (2026-07-04, BlackThrush) — the solo per-crate dig is EXHAUSTED. Do not re-scan; escalate.
+> ## ⚠️ LOOP-GUARD (updated 2026-07-04, BlackThrush) — MOSTLY exhausted, but composite/multi-stage sub-paths still hide levers. Actually BENCH candidates; don't assume "covered".
 >
-> A land-or-dig loop has fired ~9+ times against this campaign. Every firing
-> re-derives the same result. Before spending another turn:
+> ⭐**CORRECTION**: an earlier version of this guard said the dig was fully
+> EXHAUSTED. That was too strong — I then found **e8932055 (~1.52x scrub fsid
+> pre-check)** in a path I'd dismissed as "covered". LESSON: a crate having SOME
+> landed benches does NOT mean every sub-path is optimal. The scrub byte→word win
+> optimized ZeroCheck (stage 1 of the `CompositeValidator`) but nobody had touched
+> `BtrfsTreeBlockValidator` (stage 2), which parsed a 64-byte header on EVERY
+> block. **Where to still look: COMPOSITE/multi-stage per-block paths** — a landed
+> win on stage 1 can leave stage 2 dominant. And **actually run the bench** rather
+> than reasoning "it'll be neutral/covered" (measure-don't-reason applies to the
+> DECISION TO BENCH). Infra: budget ~45min/bench under swarm saturation; run rch
+> AND local in parallel, take whichever returns.
+>
+> A land-or-dig loop has fired ~10+ times. Most firings re-derive exhaustion, but
+> real levers still surface (see above). Before spending another turn:
 > - **LAND branch is EMPTY** (verified). No worktree holds an un-landed measured
 >   win. ⚠️`frankenfs-opt-385d89cd`@`1938784f` ("RaptorQ no-corruption seed,
 >   6.77x") LOOKS landable but is **SUPERSEDED** by `26da04a8`+`63723d88` already
