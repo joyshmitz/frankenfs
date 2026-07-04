@@ -1,0 +1,160 @@
+#![forbid(unsafe_code)]
+
+//! Synthetic A/B for the bd-bhh0i allocation-state convoy.
+//!
+//! The product gap is already localized to one global `RwLock<Ext4AllocState>`
+//! taken in exclusive mode across metadata writes. This benchmark isolates the
+//! lock topology from filesystem semantics: the same per-group accounting work
+//! runs under (a) the current whole-state `RwLock::write`, (b) a whole-state
+//! `Mutex`, and (c) per-group `Mutex` shards. It is not a production proof for
+//! sharding; it is a small guard that quantifies why lock-implementation swaps
+//! cannot recover the measured bd-bhh0i gap while real sharding can.
+
+use criterion::{criterion_group, criterion_main, Criterion};
+use parking_lot::{Mutex, RwLock};
+use std::hint::black_box;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+
+const GROUPS: usize = 8;
+const THREADS: usize = 8;
+const OPS_PER_THREAD: usize = 20_000;
+
+#[derive(Clone)]
+struct GroupModel {
+    free_inodes: u64,
+    checksum_words: [u64; 16],
+}
+
+impl GroupModel {
+    fn new(group: usize) -> Self {
+        let mut checksum_words = [0_u64; 16];
+        for (idx, slot) in checksum_words.iter_mut().enumerate() {
+            *slot = ((group as u64) << 32) ^ (idx as u64).wrapping_mul(0x9E37_79B9);
+        }
+        Self {
+            free_inodes: 1_000_000,
+            checksum_words,
+        }
+    }
+
+    fn account_alloc(&mut self, op: usize) -> u64 {
+        self.free_inodes = self.free_inodes.wrapping_sub(1);
+        let lane = op & (self.checksum_words.len() - 1);
+        let mix = (op as u64)
+            .wrapping_mul(0xA24B_AED4_963E_E407)
+            .rotate_left((lane as u32) & 31);
+        self.checksum_words[lane] = self.checksum_words[lane]
+            .wrapping_add(self.free_inodes)
+            .rotate_left(7)
+            ^ mix;
+        self.checksum_words[lane]
+    }
+}
+
+fn make_groups() -> Vec<GroupModel> {
+    (0..GROUPS).map(GroupModel::new).collect()
+}
+
+fn run_global_rwlock(state: &Arc<RwLock<Vec<GroupModel>>>) -> u64 {
+    let total = Arc::new(AtomicU64::new(0));
+    std::thread::scope(|scope| {
+        for thread_id in 0..THREADS {
+            let state = Arc::clone(state);
+            let total = Arc::clone(&total);
+            scope.spawn(move || {
+                let group = thread_id % GROUPS;
+                let mut local = 0_u64;
+                for op in 0..OPS_PER_THREAD {
+                    let mut groups = state.write();
+                    local = local.wrapping_add(groups[group].account_alloc(op));
+                }
+                total.fetch_add(local, Ordering::Relaxed);
+            });
+        }
+    });
+    total.load(Ordering::Relaxed)
+}
+
+fn run_global_mutex(state: &Arc<Mutex<Vec<GroupModel>>>) -> u64 {
+    let total = Arc::new(AtomicU64::new(0));
+    std::thread::scope(|scope| {
+        for thread_id in 0..THREADS {
+            let state = Arc::clone(state);
+            let total = Arc::clone(&total);
+            scope.spawn(move || {
+                let group = thread_id % GROUPS;
+                let mut local = 0_u64;
+                for op in 0..OPS_PER_THREAD {
+                    let mut groups = state.lock();
+                    local = local.wrapping_add(groups[group].account_alloc(op));
+                }
+                total.fetch_add(local, Ordering::Relaxed);
+            });
+        }
+    });
+    total.load(Ordering::Relaxed)
+}
+
+fn run_sharded_mutex(state: &Arc<Vec<Mutex<GroupModel>>>) -> u64 {
+    let total = Arc::new(AtomicU64::new(0));
+    std::thread::scope(|scope| {
+        for thread_id in 0..THREADS {
+            let state = Arc::clone(state);
+            let total = Arc::clone(&total);
+            scope.spawn(move || {
+                let group = thread_id % GROUPS;
+                let mut local = 0_u64;
+                for op in 0..OPS_PER_THREAD {
+                    let mut group_state = state[group].lock();
+                    local = local.wrapping_add(group_state.account_alloc(op));
+                }
+                total.fetch_add(local, Ordering::Relaxed);
+            });
+        }
+    });
+    total.load(Ordering::Relaxed)
+}
+
+fn bench_ext4_alloc_lock_convoy(c: &mut Criterion) {
+    let rwlock_probe = Arc::new(RwLock::new(make_groups()));
+    let mutex_probe = Arc::new(Mutex::new(make_groups()));
+    let sharded_probe = Arc::new(
+        make_groups()
+            .into_iter()
+            .map(Mutex::new)
+            .collect::<Vec<_>>(),
+    );
+
+    let expected = run_global_rwlock(&Arc::new(RwLock::new(make_groups())));
+    assert_eq!(
+        expected,
+        run_global_mutex(&Arc::new(Mutex::new(make_groups()))),
+        "global mutex changed accounting result"
+    );
+    assert_eq!(
+        expected,
+        run_sharded_mutex(&Arc::new(
+            make_groups()
+                .into_iter()
+                .map(Mutex::new)
+                .collect::<Vec<_>>()
+        )),
+        "sharded mutex changed accounting result"
+    );
+
+    let mut group = c.benchmark_group("ext4_alloc_lock_convoy_8t");
+    group.bench_function("global_rwlock_write", |b| {
+        b.iter(|| black_box(run_global_rwlock(black_box(&rwlock_probe))));
+    });
+    group.bench_function("global_mutex", |b| {
+        b.iter(|| black_box(run_global_mutex(black_box(&mutex_probe))));
+    });
+    group.bench_function("sharded_group_mutex", |b| {
+        b.iter(|| black_box(run_sharded_mutex(black_box(&sharded_probe))));
+    });
+    group.finish();
+}
+
+criterion_group!(benches, bench_ext4_alloc_lock_convoy);
+criterion_main!(benches);
