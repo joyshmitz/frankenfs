@@ -71,3 +71,7 @@ harness = false
 [[bench]]
 name = "csum_seed_cost"
 harness = false
+
+[[bench]]
+name = "bitmap_csum_recompute"
+harness = false
