@@ -415,7 +415,10 @@ impl<'a> RepairGroupStorage<'a> {
                     ))
                 })?
                 .to_vec();
-            if symbol.iter().all(|byte| *byte == 0) {
+            // 4-wide u64 OR-reduce all-zero test (see scrub::is_all_zero); the
+            // byte-wise `.all(==0)` is not auto-vectorized (~15x slower on a
+            // block-sized symbol — bench `zero_scan_width`).
+            if crate::scrub::is_all_zero(&symbol) {
                 continue;
             }
             let esi = base_esi

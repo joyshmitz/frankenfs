@@ -488,7 +488,7 @@ impl BlockValidator for ZeroCheckValidator {
 /// where `ZeroCheckValidator::validate` was ~7% self-time re-scanning whole 4 KiB
 /// blocks (bd-cc-scrub-zerocheck). Behaviour-identical: true iff every byte is 0.
 #[inline]
-fn is_all_zero(data: &[u8]) -> bool {
+pub(crate) fn is_all_zero(data: &[u8]) -> bool {
     // OR-reduce 4 u64s (256 bits) per iteration with one early-exit branch. The
     // compiler does not auto-vectorize the single-u64 `.all(== 0)` scan, so this
     // is ~2.1x on the full-scan (all-zero / free block) case with NO regression
