@@ -4805,7 +4805,29 @@ impl Ext4ImageReader {
         logical_block: u32,
     ) -> Result<Option<u64>, ParseError> {
         let (header, tree) = parse_inode_extent_tree(inode)?;
-        self.walk_extent_tree(image, &header, &tree, logical_block, header.depth)
+        self.resolve_extent_with_tree(image, &header, &tree, logical_block)
+    }
+
+    /// Resolve a logical block against an ALREADY-PARSED extent tree.
+    ///
+    /// `resolve_extent` re-parses the inode's extent tree (a header decode plus
+    /// a heap-allocating `Vec<Ext4Extent>` build with per-extent `from_le_bytes`
+    /// and sort/overlap validation) on every call. That tree is invariant for
+    /// the lifetime of one read/readdir/lookup, yet those paths call
+    /// `resolve_extent` once per logical block inside a loop — so the identical
+    /// parse+alloc is repeated for every block of the request (up to 32× for a
+    /// 128 KiB read). Callers that walk multiple blocks of one inode should
+    /// `parse_inode_extent_tree` ONCE before the loop and call this per block,
+    /// hoisting that invariant work out of the hot path. Result is identical to
+    /// `resolve_extent` for the same `(inode, logical_block)`.
+    pub fn resolve_extent_with_tree(
+        &self,
+        image: &[u8],
+        header: &Ext4ExtentHeader,
+        tree: &ExtentTree,
+        logical_block: u32,
+    ) -> Result<Option<u64>, ParseError> {
+        self.walk_extent_tree(image, header, tree, logical_block, header.depth)
     }
 
     /// Recursive extent tree walker with depth tracking.
@@ -4976,6 +4998,19 @@ impl Ext4ImageReader {
         let bs_usize = self.sb.block_size as usize; // block_size ≤ 65536, always fits usize
         let mut bytes_read = 0_usize;
 
+        // Nothing to read (e.g. empty `buf`): match the old per-block loop,
+        // which would never have parsed the extent tree in this case.
+        if to_read == 0 {
+            return Ok(0);
+        }
+
+        // Parse the inode's extent tree ONCE (invariant across every block of
+        // this read) instead of re-parsing + re-allocating it per block inside
+        // the loop. `to_read > 0` here, so the old per-block path would have
+        // parsed on the first iteration regardless — identical behaviour,
+        // including error propagation.
+        let (header, tree) = parse_inode_extent_tree(inode)?;
+
         while bytes_read < to_read {
             let current_offset = offset + bytes_read as u64;
             let logical_block =
@@ -4988,7 +5023,7 @@ impl Ext4ImageReader {
             let remaining_in_block = bs_usize - offset_in_block;
             let chunk_size = remaining_in_block.min(to_read - bytes_read);
 
-            match self.resolve_extent(image, inode, logical_block)? {
+            match self.resolve_extent_with_tree(image, &header, &tree, logical_block)? {
                 Some(phys_block) => {
                     let block_data = self.read_block(image, ffs_types::BlockNumber(phys_block))?;
                     buf[bytes_read..bytes_read + chunk_size].copy_from_slice(
@@ -5023,9 +5058,16 @@ impl Ext4ImageReader {
         let num_blocks = Self::dir_logical_block_count(inode.size, bs)?;
 
         let mut all_entries = Vec::new();
+        if num_blocks == 0 {
+            return Ok(all_entries);
+        }
+
+        // Parse the extent tree once (invariant across all dir blocks) rather
+        // than re-parsing + re-allocating it per block in the loop below.
+        let (header, tree) = parse_inode_extent_tree(inode)?;
 
         for lb in 0..num_blocks {
-            if let Some(phys) = self.resolve_extent(image, inode, lb)? {
+            if let Some(phys) = self.resolve_extent_with_tree(image, &header, &tree, lb)? {
                 let block_data = self.read_block(image, ffs_types::BlockNumber(phys))?;
                 let (entries, _tail) = parse_dir_block(block_data, self.sb.block_size)?;
                 all_entries.extend(entries);
@@ -5047,9 +5089,16 @@ impl Ext4ImageReader {
     ) -> Result<Option<Ext4DirEntry>, ParseError> {
         let bs = u64::from(self.sb.block_size);
         let num_blocks = Self::dir_logical_block_count(dir_inode.size, bs)?;
+        if num_blocks == 0 {
+            return Ok(None);
+        }
+
+        // Parse the extent tree once (invariant across all dir blocks) rather
+        // than re-parsing + re-allocating it per block in the loop below.
+        let (header, tree) = parse_inode_extent_tree(dir_inode)?;
 
         for lb in 0..num_blocks {
-            if let Some(phys) = self.resolve_extent(image, dir_inode, lb)? {
+            if let Some(phys) = self.resolve_extent_with_tree(image, &header, &tree, lb)? {
                 let block_data = self.read_block(image, ffs_types::BlockNumber(phys))?;
                 if let Some(entry) = lookup_in_dir_block(block_data, self.sb.block_size, name)? {
                     return Ok(Some(entry));

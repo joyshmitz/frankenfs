@@ -43,3 +43,7 @@ workspace = true
 [[bench]]
 name = "present_index_key"
 harness = false
+
+[[bench]]
+name = "extent_resolve_hoist"
+harness = false
