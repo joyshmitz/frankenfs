@@ -2356,20 +2356,25 @@ fn try_alloc_safe(
     };
 
     if let Some((rel_start, alloc_count)) = found {
-        // Verify no allocated block is reserved.
-        for i in rel_start..rel_start + alloc_count {
-            if is_reserved(&reserved, i) {
+        let alloc_end = rel_start + alloc_count;
+        // Verify no allocated block is reserved. `reserved` is sorted ascending,
+        // so a single binary search for the first reserved block >= rel_start
+        // decides overlap for the whole run — O(log R) vs the old per-block
+        // O(alloc_count · log R) scan.
+        let p = reserved.partition_point(|&r| r < rel_start);
+        if let Some(&r) = reserved.get(p) {
+            if r < alloc_end {
                 return Err(FfsError::Corruption {
-                    block: geo.group_block_to_absolute(group, i).0,
+                    block: geo.group_block_to_absolute(group, r).0,
                     detail: "alloc would overlap reserved metadata block".into(),
                 });
             }
         }
 
-        // Mark blocks as allocated.
-        for i in rel_start..rel_start + alloc_count {
-            bitmap_set_with_clear_undo(&mut bitmap, i, &mut rollback_clear_bits);
-        }
+        // Mark blocks as allocated word-at-a-time. The run was found free-
+        // contiguous, so the alloc range itself is the rollback undo (cleared
+        // below) — no per-bit undo push needed here.
+        bitmap_set_range(&mut bitmap, rel_start, alloc_count);
 
         dev.write_block(cx, groups[gidx].block_bitmap_block, &bitmap)?;
         let previous_free_blocks = groups[gidx].free_blocks;
@@ -2407,7 +2412,10 @@ fn try_alloc_safe(
         ) {
             groups[gidx].free_blocks = previous_free_blocks;
             groups[gidx].block_largest_free_run = previous_largest_free_run;
+            // Undo: clear the reserved-mark bits (per-bit, usually none) plus the
+            // alloc range (range-clear, dual of the range-set above).
             rollback_set_mutations(&mut bitmap, &rollback_clear_bits);
+            bitmap_clear_range(&mut bitmap, rel_start, alloc_count);
             restore_bitmap_after_group_desc_error(
                 cx,
                 dev,

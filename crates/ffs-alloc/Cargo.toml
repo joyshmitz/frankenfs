@@ -63,3 +63,7 @@ harness = false
 [[bench]]
 name = "free_range_undo"
 harness = false
+
+[[bench]]
+name = "alloc_range_undo"
+harness = false
