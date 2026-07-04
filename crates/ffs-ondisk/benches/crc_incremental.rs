@@ -16,9 +16,14 @@ fn bench(c: &mut Criterion) {
     let mut after = bitmap.clone(); after[start..start+8].copy_from_slice(&new_bytes);
     assert_eq!(crc32c_update_region(old_crc, &delta, suffix), crc32c::crc32c(&after));
     bitmap[start..start+8].copy_from_slice(&new_bytes); // reflect the change for the full-recompute arm
+    // larger delta (128 bytes = 1024 blocks) to exercise the raw-crc portion.
+    let start2 = 100usize; let nb2 = [0xFFu8; 128];
+    let delta2: Vec<u8> = nb2.iter().zip(&bitmap[start2..start2+128]).map(|(n,o)| n^o).collect();
+    let suffix2 = bitmap.len() - start2 - 128;
     let mut g = c.benchmark_group("crc_bitmap_update");
     g.bench_function("full_recompute", |b| b.iter(|| black_box(crc32c::crc32c(black_box(&bitmap)))));
-    g.bench_function("incremental", |b| b.iter(|| black_box(crc32c_update_region(black_box(old_crc), black_box(&delta), black_box(suffix)))));
+    g.bench_function("incremental_8b", |b| b.iter(|| black_box(crc32c_update_region(black_box(old_crc), black_box(&delta), black_box(suffix)))));
+    g.bench_function("incremental_128b", |b| b.iter(|| black_box(crc32c_update_region(black_box(old_crc), black_box(&delta2), black_box(suffix2)))));
     g.finish();
 }
 criterion_group!(benches, bench);

@@ -19,16 +19,35 @@ use std::sync::OnceLock;
 /// Reflected CRC32C polynomial (Castagnoli, bit-reversed form).
 const POLY: u32 = 0x82F6_3B78;
 
+/// Byte-indexed CRC32C table for the reflected polynomial, built once.
+fn crc32c_byte_table() -> &'static [u32; 256] {
+    static TABLE: OnceLock<[u32; 256]> = OnceLock::new();
+    TABLE.get_or_init(|| {
+        let mut t = [0u32; 256];
+        let mut i = 0usize;
+        while i < 256 {
+            let mut c = i as u32;
+            let mut b = 0;
+            while b < 8 {
+                c = if c & 1 != 0 { (c >> 1) ^ POLY } else { c >> 1 };
+                b += 1;
+            }
+            t[i] = c;
+            i += 1;
+        }
+        t
+    })
+}
+
 /// Raw reflected CRC32C: init 0, no final XOR. Linear in its input, unlike the
-/// standard crc (init/final make it affine). Bit-at-a-time — only used on the
-/// short changed region, so speed is irrelevant.
+/// standard crc (init/final make it affine). Table-driven (one lookup per byte)
+/// so it stays cheap even on a larger changed region, keeping the incremental
+/// win over the SIMD full recompute across a wider delta range.
 fn raw_crc32c(data: &[u8]) -> u32 {
+    let table = crc32c_byte_table();
     let mut crc = 0u32;
     for &b in data {
-        crc ^= u32::from(b);
-        for _ in 0..8 {
-            crc = if crc & 1 != 0 { (crc >> 1) ^ POLY } else { crc >> 1 };
-        }
+        crc = table[((crc ^ u32::from(b)) & 0xFF) as usize] ^ (crc >> 8);
     }
     crc
 }
