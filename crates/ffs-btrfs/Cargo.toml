@@ -29,6 +29,10 @@ name = "extent_fetch"
 harness = false
 
 [[bench]]
+name = "xattr_names"
+harness = false
+
+[[bench]]
 name = "readdir_dedup"
 harness = false
 

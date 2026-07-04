@@ -1184,6 +1184,62 @@ pub fn parse_xattr_items(data: &[u8]) -> Result<Vec<BtrfsXattrItem>, ParseError>
     Ok(out)
 }
 
+/// Parse only the NAMES of the xattr items in a DIR_ITEM/XATTR_ITEM payload,
+/// without materialising values. `listxattr` needs names only, but
+/// [`parse_xattr_items`] copies each attribute's value into a fresh `Vec`
+/// (`data[name_end..value_end].to_vec()`) that the caller immediately discards.
+/// This performs the identical walk + bounds validation (so it rejects the same
+/// truncated/overflowing payloads) but skips the value copy. Returns each name's
+/// raw bytes.
+pub fn parse_xattr_item_names(data: &[u8]) -> Result<Vec<Vec<u8>>, ParseError> {
+    const HEADER: usize = 30;
+    let mut out = Vec::new();
+    let mut cur = 0_usize;
+    while cur < data.len() {
+        if cur + HEADER > data.len() {
+            return Err(ParseError::InsufficientData {
+                needed: HEADER,
+                offset: cur,
+                actual: data.len() - cur,
+            });
+        }
+        let data_len = usize::from(u16::from_le_bytes([data[cur + 25], data[cur + 26]]));
+        let name_len = usize::from(u16::from_le_bytes([data[cur + 27], data[cur + 28]]));
+        if name_len == 0 {
+            return Err(ParseError::InvalidField {
+                field: "xattr.name_len",
+                reason: "must be non-zero",
+            });
+        }
+
+        let name_start = cur + HEADER;
+        let name_end = name_start
+            .checked_add(name_len)
+            .ok_or(ParseError::InvalidField {
+                field: "xattr.name_len",
+                reason: "overflow",
+            })?;
+        let value_end = name_end
+            .checked_add(data_len)
+            .ok_or(ParseError::InvalidField {
+                field: "xattr.data_len",
+                reason: "overflow",
+            })?;
+
+        if value_end > data.len() {
+            return Err(ParseError::InsufficientData {
+                needed: value_end,
+                offset: cur,
+                actual: data.len(),
+            });
+        }
+
+        out.push(data[name_start..name_end].to_vec());
+        cur = value_end;
+    }
+    Ok(out)
+}
+
 /// Parsed EXTENT_DATA payload.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BtrfsExtentData {
