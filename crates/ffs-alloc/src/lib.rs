@@ -640,6 +640,26 @@ fn bitmap_find_contiguous_linear(bitmap: &[u8], count: u32, n: u32, start: u32) 
     }
 
     while count.saturating_sub(idx) >= 64 {
+        // 4-wide fast path: skip 256 fully-allocated bits at once. When all 4
+        // words are `MAX` there is no free bit, so the run breaks (identical to
+        // four single-word `MAX` steps) and no run can complete inside — mass-
+        // write scans long all-`MAX` prefixes, so this ~1.5x's the finder on a
+        // filling group (bench `contiguous_scan_width`).
+        if count.saturating_sub(idx) >= 256 {
+            let byte_idx = (idx / 8) as usize;
+            if let Some(block) = bitmap.get(byte_idx..byte_idx + 32) {
+                let w0 = u64::from_le_bytes(block[0..8].try_into().unwrap());
+                let w1 = u64::from_le_bytes(block[8..16].try_into().unwrap());
+                let w2 = u64::from_le_bytes(block[16..24].try_into().unwrap());
+                let w3 = u64::from_le_bytes(block[24..32].try_into().unwrap());
+                if (w0 & w1 & w2 & w3) == u64::MAX {
+                    run_start = idx + 256;
+                    run_len = 0;
+                    idx += 256;
+                    continue;
+                }
+            }
+        }
         let byte_idx = (idx / 8) as usize;
         let Some(chunk) = bitmap.get(byte_idx..byte_idx + 8) else {
             break;

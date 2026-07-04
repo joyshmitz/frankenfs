@@ -43,3 +43,7 @@ harness = false
 [[bench]]
 name = "bitmap_run_width"
 harness = false
+
+[[bench]]
+name = "contiguous_scan_width"
+harness = false
