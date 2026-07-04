@@ -673,7 +673,10 @@ fn replay_jbd2_inner(
                     break;
                 }
                 stats.descriptor_blocks = stats.descriptor_blocks.saturating_add(1);
-                let Some(tag_count) = strict_descriptor_tag_count_with_format(
+                // Single strict pass: parse the tags AND apply the strict
+                // "must be LAST-terminated within bounds" gate at once, instead
+                // of scanning the same tag region twice (count then parse).
+                let Some(tags) = parse_descriptor_tags_strict_with_format(
                     raw.as_slice(),
                     is_64bit,
                     has_tail,
@@ -681,19 +684,12 @@ fn replay_jbd2_inner(
                 ) else {
                     break;
                 };
-                let tags = parse_descriptor_tags_with_format(
-                    raw.as_slice(),
-                    is_64bit,
-                    has_tail,
-                    tag_format,
-                );
-                debug_assert_eq!(tags.len(), tag_count);
                 stats.descriptor_tags = stats
                     .descriptor_tags
                     .saturating_add(u64::try_from(tags.len()).unwrap_or(u64::MAX));
 
                 // Check if all data blocks fit within the journal region.
-                let tag_count_u64 = u64::try_from(tag_count).unwrap_or(u64::MAX);
+                let tag_count_u64 = u64::try_from(tags.len()).unwrap_or(u64::MAX);
                 if tag_count_u64 >= total_blocks {
                     break;
                 }
@@ -2705,6 +2701,73 @@ fn parse_descriptor_tags_with_format(
     }
 
     tags
+}
+
+/// Strict descriptor-tag parse: build the tag `Vec` in ONE pass, returning
+/// `None` under exactly the conditions [`strict_descriptor_tag_count_with_format`]
+/// rejects (no `LAST`-terminated tag within bounds, a tag record overflowing the
+/// block, or an out-of-range read). Merges the previously separate
+/// count-then-parse passes the replay loop ran back-to-back over the same block
+/// (a 2× scan of every descriptor's tag region): the strict gate and the tag
+/// materialisation are the identical iteration, so `tags.len()` is the count.
+///
+/// Behaviour-identical to `strict_...count` + `parse_...tags` at the replay
+/// call site: it aborts (→ `None`) on precisely the malformations the strict
+/// count aborts on, and on success yields exactly the tags
+/// `parse_descriptor_tags_with_format` produces for a well-formed descriptor
+/// (same target-high reconstruction, same `LAST` termination).
+fn parse_descriptor_tags_strict_with_format(
+    block: &[u8],
+    is_64bit: bool,
+    has_tail: bool,
+    tag_format: Jbd2TagFormat,
+) -> Option<Vec<DescriptorTag>> {
+    let base_tag_size = tag_format.tag_size(is_64bit);
+    let mut tags = Vec::new();
+    let mut offset = JBD2_HEADER_SIZE;
+    let limit = if has_tail {
+        block.len().saturating_sub(4)
+    } else {
+        block.len()
+    };
+
+    while offset.checked_add(base_tag_size)? <= limit {
+        let (flags, data_checksum) =
+            read_descriptor_tag_flags_and_checksum(block, offset, tag_format)?;
+        let tag_size = descriptor_tag_record_size(base_tag_size, flags)?;
+        if offset.checked_add(tag_size)? > limit {
+            return None;
+        }
+
+        // Target reconstruction mirrors `parse_descriptor_tags_with_format`
+        // exactly (tolerant high-word read) so the produced tags are identical.
+        let target_low = read_be_u32(block, offset)?;
+        let mut target = u64::from(target_low);
+        let high_offset = match tag_format {
+            Jbd2TagFormat::CsumV3 => Some(JBD2_TAG_HIGH_OFFSET_V3),
+            Jbd2TagFormat::Legacy | Jbd2TagFormat::CsumV2 if is_64bit => Some(8),
+            Jbd2TagFormat::Legacy | Jbd2TagFormat::CsumV2 => None,
+        };
+        if let Some(high_offset) = high_offset
+            && let Some(target_high) = read_be_u32(block, offset.saturating_add(high_offset))
+        {
+            target |= u64::from(target_high) << 32;
+        }
+
+        let tag = DescriptorTag {
+            target: BlockNumber(target),
+            flags,
+            data_checksum,
+        };
+        let is_last = tag.is_last();
+        tags.push(tag);
+        if is_last {
+            return Some(tags);
+        }
+        offset = offset.checked_add(tag_size)?;
+    }
+
+    None
 }
 
 fn strict_descriptor_tag_count_with_format(
@@ -4974,6 +5037,62 @@ mod tests {
         assert_eq!(tags[0].target, BlockNumber(5));
         assert_eq!(tags[1].target, BlockNumber(6));
         assert!(tags[1].is_last());
+    }
+
+    #[test]
+    fn strict_parse_matches_count_then_parse_across_formats() {
+        // Build a Legacy descriptor with `n` SAME_UUID tags (8-byte records),
+        // the last one LAST-terminated — the shape the replay loop decodes.
+        fn legacy_multi_tag(n: usize) -> Vec<u8> {
+            let mut desc = vec![0_u8; 512];
+            encode_jbd2_header(&mut desc, JBD2_BLOCKTYPE_DESCRIPTOR, 7);
+            for i in 0..n {
+                let off = JBD2_HEADER_SIZE + i * 8;
+                desc[off..off + 4].copy_from_slice(&u32::try_from(i + 1).unwrap().to_be_bytes());
+                let mut fl = JBD2_TAG_FLAG_SAME_UUID;
+                if i == n - 1 {
+                    fl |= JBD2_TAG_FLAG_LAST;
+                }
+                desc[off + JBD2_TAG_FLAGS_OFFSET_V1_V2
+                    ..off + JBD2_TAG_FLAGS_OFFSET_V1_V2 + 2]
+                    .copy_from_slice(&u16::try_from(fl).unwrap().to_be_bytes());
+            }
+            desc
+        }
+
+        // Well-formed: strict single-pass yields exactly count-then-parse's tags.
+        for n in [1_usize, 2, 5, 20] {
+            let desc = legacy_multi_tag(n);
+            let old_count =
+                strict_descriptor_tag_count_with_format(&desc, false, false, Jbd2TagFormat::Legacy);
+            let old_tags =
+                parse_descriptor_tags_with_format(&desc, false, false, Jbd2TagFormat::Legacy);
+            let new_tags = parse_descriptor_tags_strict_with_format(
+                &desc,
+                false,
+                false,
+                Jbd2TagFormat::Legacy,
+            );
+            assert_eq!(old_count, Some(n), "strict count for n={n}");
+            assert_eq!(new_tags.as_ref().map(Vec::len), Some(n), "strict-parse len n={n}");
+            assert_eq!(new_tags, Some(old_tags), "strict-parse tags == parse tags n={n}");
+        }
+
+        // Malformed (no LAST terminator): both the old strict gate and the new
+        // strict-parse abort with None.
+        let mut no_last = legacy_multi_tag(3);
+        // Clear the LAST flag on the final tag.
+        let last_off = JBD2_HEADER_SIZE + 2 * 8 + JBD2_TAG_FLAGS_OFFSET_V1_V2;
+        no_last[last_off..last_off + 2]
+            .copy_from_slice(&u16::try_from(JBD2_TAG_FLAG_SAME_UUID).unwrap().to_be_bytes());
+        assert_eq!(
+            strict_descriptor_tag_count_with_format(&no_last, false, false, Jbd2TagFormat::Legacy),
+            None
+        );
+        assert_eq!(
+            parse_descriptor_tags_strict_with_format(&no_last, false, false, Jbd2TagFormat::Legacy),
+            None
+        );
     }
 
     #[test]
