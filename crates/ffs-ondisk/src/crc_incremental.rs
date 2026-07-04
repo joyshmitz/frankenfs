@@ -53,15 +53,15 @@ fn raw_crc32c(data: &[u8]) -> u32 {
 }
 
 /// Multiply a GF(2) 32×32 matrix (stored column-major as 32 u32s) by a vector.
-fn gf2_matrix_times(mat: &[u32; 32], mut vec: u32) -> u32 {
+fn gf2_matrix_times(mat: &[u32; 32], vec: u32) -> u32 {
+    // Branchless: XOR row `i` in whenever bit `i` of `vec` is set, using a
+    // full-width mask instead of a data-dependent branch. The per-shift caller
+    // feeds ~random CRC values, so the old `if vec & 1` branch mispredicted ~50%
+    // of iterations; masking is misprediction-free (and auto-vectorizes).
     let mut sum = 0u32;
-    let mut i = 0usize;
-    while vec != 0 {
-        if vec & 1 != 0 {
-            sum ^= mat[i];
-        }
-        vec >>= 1;
-        i += 1;
+    for (i, &row) in mat.iter().enumerate() {
+        let mask = 0u32.wrapping_sub((vec >> i) & 1);
+        sum ^= row & mask;
     }
     sum
 }
