@@ -37,6 +37,10 @@ harness = false
 name = "xattr_lookup"
 harness = false
 
+[[bench]]
+name = "listxattr_names"
+harness = false
+
 [lints]
 workspace = true
 

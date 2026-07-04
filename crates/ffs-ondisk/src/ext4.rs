@@ -5524,6 +5524,26 @@ impl Ext4ImageReader {
         Ok(result)
     }
 
+    /// Names-only counterpart of [`list_xattrs`] for `listxattr`: returns every
+    /// attribute's full name (inode body first, then the external block) WITHOUT
+    /// materialising or bounds-validating any value. Same names, same order as
+    /// `list_xattrs(..).map(full_name)` for a well-formed inode; skips the
+    /// per-value `Vec` allocations `listxattr` would immediately discard. Like
+    /// the by-name finders (bd-abu3z), a corrupt UNRELATED value can no longer
+    /// abort the name listing (a strict superset of a consistent inode's names).
+    pub fn list_xattr_names(
+        &self,
+        image: &[u8],
+        inode: &Ext4Inode,
+    ) -> Result<Vec<String>, ParseError> {
+        let mut names = parse_ibody_xattr_names(inode)?;
+        if inode.file_acl != 0 {
+            let block_data = self.read_block(image, ffs_types::BlockNumber(inode.file_acl))?;
+            names.extend(parse_xattr_block_names(block_data)?);
+        }
+        Ok(names)
+    }
+
     /// Get a specific xattr by name index and name.
     ///
     /// Uses the by-name early-exit finders instead of materialising every
@@ -6074,6 +6094,82 @@ pub fn parse_xattr_block(block_data: &[u8]) -> Result<Vec<Ext4Xattr>, ParseError
     }
     let entries_region = &block_data[32..];
     parse_xattr_entries(entries_region, block_data, 32)
+}
+
+/// Walk an xattr entry table and return each attribute's full name, WITHOUT
+/// materialising values. `listxattr` needs names only, but the materialise-all
+/// path ([`parse_xattr_entries`]) allocates a name `Vec` + a value `Vec` per
+/// entry (and validates every value's in-block bounds) just to have the caller
+/// take `full_name()` and drop the values. This builds the `full_name` `String`
+/// directly during the single entry-table walk and never touches the value
+/// region — so a corrupt UNRELATED value can no longer abort a `listxattr` (a
+/// strict superset of the names a consistent block resolves, consistent with
+/// the by-name finders, bd-abu3z).
+fn parse_xattr_entry_names(data: &[u8]) -> Result<Vec<String>, ParseError> {
+    let mut names = Vec::new();
+    let mut offset = 0_usize;
+    loop {
+        if offset + 4 > data.len() {
+            break;
+        }
+        let name_len = data[offset];
+        let name_index = data[offset + 1];
+        if name_len == 0 && name_index == 0 {
+            break;
+        }
+        if offset + 16 > data.len() {
+            break;
+        }
+        let name_start = offset + 16;
+        let name_end = name_start + usize::from(name_len);
+        if name_end > data.len() {
+            return Err(ParseError::InvalidField {
+                field: "xattr_name",
+                reason: "name extends past data boundary",
+            });
+        }
+        names.push(format!(
+            "{}{}",
+            xattr_name_index_prefix(name_index),
+            String::from_utf8_lossy(&data[name_start..name_end])
+        ));
+        offset = (name_end + 3) & !3;
+    }
+    Ok(names)
+}
+
+/// Names-only counterpart of [`parse_xattr_block`] for `listxattr`: validates
+/// the 32-byte block header, then returns full names without materialising any
+/// value. See [`parse_xattr_entry_names`].
+pub fn parse_xattr_block_names(block_data: &[u8]) -> Result<Vec<String>, ParseError> {
+    if block_data.len() < 32 {
+        return Err(ParseError::InsufficientData {
+            needed: 32,
+            offset: 0,
+            actual: block_data.len(),
+        });
+    }
+    let magic = read_le_u32(block_data, 0)?;
+    if magic != EXT4_XATTR_MAGIC {
+        return Err(ParseError::InvalidMagic {
+            expected: u64::from(EXT4_XATTR_MAGIC),
+            actual: u64::from(magic),
+        });
+    }
+    parse_xattr_entry_names(&block_data[32..])
+}
+
+/// Names-only counterpart of [`parse_ibody_xattrs`] for `listxattr`: returns the
+/// inode-body attribute full names without materialising values. An empty ibody
+/// (missing/mismatched magic) yields no names, exactly as `parse_ibody_xattrs`.
+pub fn parse_ibody_xattr_names(inode: &Ext4Inode) -> Result<Vec<String>, ParseError> {
+    if inode.xattr_ibody.len() < 4 {
+        return Ok(Vec::new());
+    }
+    if read_le_u32(&inode.xattr_ibody, 0)? != EXT4_XATTR_MAGIC {
+        return Ok(Vec::new());
+    }
+    parse_xattr_entry_names(&inode.xattr_ibody[4..])
 }
 
 /// Like [`parse_ibody_xattrs`] but also returns each attribute's `e_value_inum`
@@ -15366,6 +15462,25 @@ mod tests {
                 .unwrap()
                 .as_deref(),
             Some(&b"0x1"[..])
+        );
+
+        // list_xattr_names must equal the materialise-all-then-full_name path,
+        // in the same (ibody-first, then block) order.
+        let names_only = reader.list_xattr_names(&image, &inode).unwrap();
+        let materialize_all: Vec<String> = reader
+            .list_xattrs(&image, &inode)
+            .unwrap()
+            .iter()
+            .map(Ext4Xattr::full_name)
+            .collect();
+        assert_eq!(names_only, materialize_all, "list_xattr_names != materialize-all names");
+        assert_eq!(
+            names_only,
+            vec![
+                "security.selinux".to_owned(),
+                "user.comment".to_owned(),
+                "trusted.cap".to_owned(),
+            ]
         );
     }
 
