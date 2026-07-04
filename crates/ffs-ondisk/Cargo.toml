@@ -59,3 +59,7 @@ harness = false
 [[bench]]
 name = "extent_snapshot_copy"
 harness = false
+
+[[bench]]
+name = "read_copy_coalesce"
+harness = false
