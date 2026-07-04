@@ -16386,14 +16386,30 @@ impl FsOps for Ext4FsOps {
         name: &str,
     ) -> ffs_error::Result<Option<Vec<u8>>> {
         let inode = self.read_live_inode(ino)?;
-        let xattrs = self
-            .reader
-            .list_xattrs(&self.image, &inode)
+        // Probe the inode body first and read the external block only on a miss:
+        // the by-name finder materialises only the matched value instead of
+        // every attribute's name+value, and an ibody-resident attribute never
+        // touches the external block (bd-abu3z, ~7.2x on the block case; bench
+        // `xattr_lookup`). Isomorphic to the old ibody++block `find(full_name)`:
+        // names are unique across the two regions and the ibody is probed first,
+        // so it resolves the same entry (and the same empty value for an
+        // EA-inode-backed attribute, which this read-only backend does not
+        // resolve — matching the prior `list_xattrs` path).
+        let found = ffs_ondisk::find_ibody_xattr_by_name(&inode, name)
             .map_err(|e| parse_to_ffs_error(&e))?;
-        Ok(xattrs
-            .into_iter()
-            .find(|x| x.full_name() == name)
-            .map(|x| x.value))
+        let found = match found {
+            Some(v) => Some(v),
+            None if inode.file_acl != 0 => {
+                let block_data = self
+                    .reader
+                    .read_block(&self.image, BlockNumber(inode.file_acl))
+                    .map_err(|e| parse_to_ffs_error(&e))?;
+                ffs_ondisk::find_xattr_block_value_by_name(block_data, name)
+                    .map_err(|e| parse_to_ffs_error(&e))?
+            }
+            None => None,
+        };
+        Ok(found.map(|(_name_index, value, _value_inum)| value))
     }
 
     fn get_inode_state(
