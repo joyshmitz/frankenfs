@@ -29,6 +29,10 @@ harness = false
 name = "group_order"
 harness = false
 
+[[bench]]
+name = "inode_alloc_cursor"
+harness = false
+
 [lints]
 workspace = true
 

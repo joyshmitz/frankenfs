@@ -370,7 +370,12 @@ fn bitmap_find_free_range(bitmap: &[u8], mut idx: u32, end: u32) -> Option<u32> 
 /// Benchmark-only shim: exercise the cyclic multi-block take with a no-op
 /// recorder (see bench `take_bits_scan_width`).
 #[doc(hidden)]
-pub fn bench_take_free_bits_cyclic(bitmap: &mut [u8], count: u32, max_count: u32, start: u32) -> u32 {
+pub fn bench_take_free_bits_cyclic(
+    bitmap: &mut [u8],
+    count: u32,
+    max_count: u32,
+    start: u32,
+) -> u32 {
     bitmap_take_free_bits_cyclic(bitmap, count, max_count, start, |_| {})
 }
 
@@ -821,6 +826,13 @@ pub struct GroupStats {
     /// checksum-verified block bitmap when known.
     pub block_largest_free_run: Option<u32>,
     pub free_inodes: u32,
+    /// Next candidate bit for inode bitmap searches.
+    ///
+    /// The bitmap remains authoritative: this cursor only avoids re-scanning the
+    /// already allocated prefix on create-heavy workloads, and the free path
+    /// rewinds it so recently freed lower inodes are still reusable.
+    #[doc(hidden)]
+    pub inode_search_start: u32,
     pub used_dirs: u32,
     pub block_bitmap_block: BlockNumber,
     pub inode_bitmap_block: BlockNumber,
@@ -891,6 +903,7 @@ impl GroupStats {
             free_blocks: gd.free_blocks_count,
             block_largest_free_run: None,
             free_inodes: gd.free_inodes_count,
+            inode_search_start: 0,
             used_dirs: gd.used_dirs_count,
             block_bitmap_csum: gd.block_bitmap_csum,
             inode_bitmap_csum: gd.inode_bitmap_csum,
@@ -923,6 +936,26 @@ impl GroupStats {
     /// Mark the cached largest free block run stale after a bitmap mutation.
     pub fn invalidate_block_largest_free_run(&mut self) {
         self.block_largest_free_run = None;
+    }
+
+    /// Return a bounded inode bitmap search start.
+    #[must_use]
+    pub fn inode_search_start(&self, inodes_in_group: u32) -> u32 {
+        self.inode_search_start
+            .min(inodes_in_group.saturating_sub(1))
+    }
+
+    /// Advance the inode bitmap cursor after allocating `idx`.
+    pub fn advance_inode_search_start(&mut self, idx: u32, inodes_in_group: u32) {
+        self.inode_search_start = idx
+            .checked_add(1)
+            .filter(|next| *next < inodes_in_group)
+            .unwrap_or(0);
+    }
+
+    /// Rewind the cursor when a lower inode becomes free again.
+    pub fn rewind_inode_search_start_on_free(&mut self, idx: u32) {
+        self.inode_search_start = self.inode_search_start.min(idx);
     }
 
     /// Whether the inode bitmap is uninitialized (all free).
@@ -2773,7 +2806,8 @@ fn try_alloc_inode_in_group(
         bitmap_set(&mut bitmap, r);
     }
 
-    let found = bitmap_find_free(&bitmap, inodes_in_group, 0);
+    let start = groups[gidx].inode_search_start(inodes_in_group);
+    let found = bitmap_find_free(&bitmap, inodes_in_group, start);
     if let Some(idx) = found {
         // Compute absolute inode number: group * inodes_per_group + idx + 1.
         let ino = u64::from(group.0) * u64::from(geo.inodes_per_group) + u64::from(idx) + 1;
@@ -2788,6 +2822,7 @@ fn try_alloc_inode_in_group(
         fill_inode_bitmap_padding(&mut bitmap, geo.inodes_per_group);
         dev.write_block(cx, gs.inode_bitmap_block, &bitmap)?;
 
+        groups[gidx].advance_inode_search_start(idx, inodes_in_group);
         groups[gidx].free_inodes = groups[gidx].free_inodes.saturating_sub(1);
 
         Ok(Some(InodeAlloc {
@@ -2887,7 +2922,9 @@ fn try_alloc_inode_in_group_persist(
         bitmap_set_with_clear_undo(&mut bitmap, r, &mut rollback_clear_bits);
     }
 
-    let Some(idx) = bitmap_find_free(&bitmap, inodes_in_group, 0) else {
+    let previous_inode_search_start = groups[gidx].inode_search_start;
+    let start = groups[gidx].inode_search_start(inodes_in_group);
+    let Some(idx) = bitmap_find_free(&bitmap, inodes_in_group, start) else {
         return Ok(None);
     };
 
@@ -2913,6 +2950,7 @@ fn try_alloc_inode_in_group_persist(
     );
     dev.write_block(cx, bitmap_block, &bitmap)?;
     let previous_used_dirs = groups[gidx].used_dirs;
+    groups[gidx].advance_inode_search_start(idx, inodes_in_group);
     groups[gidx].free_inodes = groups[gidx].free_inodes.saturating_sub(1);
     // ext4 tracks the number of directory inodes per group in
     // `bg_used_dirs_count`; the Orlov allocator reads it for dir spreading and
@@ -2933,6 +2971,7 @@ fn try_alloc_inode_in_group_persist(
     ) {
         groups[gidx].free_inodes = previous_free_inodes;
         groups[gidx].used_dirs = previous_used_dirs;
+        groups[gidx].inode_search_start = previous_inode_search_start;
         rollback_set_mutations(&mut bitmap, &rollback_clear_bits);
         restore_bitmap_after_group_desc_error(
             cx,
@@ -3023,6 +3062,7 @@ pub fn free_inode(
 
     bitmap_clear(&mut bitmap, bit_idx);
     dev.write_block(cx, gs.inode_bitmap_block, &bitmap)?;
+    groups[gidx].rewind_inode_search_start_on_free(bit_idx);
     groups[gidx].free_inodes = groups[gidx].free_inodes.saturating_add(1);
     Ok(())
 }
@@ -3069,6 +3109,7 @@ pub fn free_inode_persist(
     let mut bitmap = bitmap_buf.as_slice().to_vec();
     let mut rollback_set_bits = Vec::with_capacity(1);
     let previous_free_inodes = groups[gidx].free_inodes;
+    let previous_inode_search_start = groups[gidx].inode_search_start;
     let group = GroupNumber(group_idx);
     let bit_idx = u32::try_from(ino_zero % u64::from(geo.inodes_per_group)).map_err(|_| {
         FfsError::Corruption {
@@ -3103,6 +3144,7 @@ pub fn free_inode_persist(
     bitmap_clear_with_set_undo(&mut bitmap, bit_idx, &mut rollback_set_bits);
     dev.write_block(cx, bitmap_block, &bitmap)?;
     let previous_used_dirs = groups[gidx].used_dirs;
+    groups[gidx].rewind_inode_search_start_on_free(bit_idx);
     groups[gidx].free_inodes = groups[gidx].free_inodes.saturating_add(1);
     // Mirror the directory-count maintenance done on allocation: freeing a
     // directory inode decrements `bg_used_dirs_count` for its group (bd-0y7jp).
@@ -3121,6 +3163,7 @@ pub fn free_inode_persist(
     ) {
         groups[gidx].free_inodes = previous_free_inodes;
         groups[gidx].used_dirs = previous_used_dirs;
+        groups[gidx].inode_search_start = previous_inode_search_start;
         rollback_clear_mutations(&mut bitmap, &rollback_set_bits);
         restore_bitmap_after_group_desc_error(
             cx,
@@ -3307,6 +3350,7 @@ mod tests {
                     free_blocks: geo.blocks_per_group,
                     block_largest_free_run: None,
                     free_inodes: geo.inodes_per_group,
+                    inode_search_start: 0,
                     used_dirs: 0,
                     block_bitmap_block: BlockNumber(group_start + 1),
                     inode_bitmap_block: BlockNumber(group_start + 2),
@@ -3331,6 +3375,7 @@ mod tests {
                     free_blocks: geo.blocks_per_group,
                     block_largest_free_run: None,
                     free_inodes: geo.inodes_per_group,
+                    inode_search_start: 0,
                     used_dirs: 0,
                     block_bitmap_block: BlockNumber(group_start + 1),
                     inode_bitmap_block: BlockNumber(group_start + 2),
@@ -3957,6 +4002,22 @@ mod tests {
 
         free_inode(&cx, &dev, &geo, &mut groups, result.ino).unwrap();
         assert_eq!(groups[1].free_inodes, 2048);
+    }
+
+    #[test]
+    fn freed_lower_inode_rewinds_search_cursor() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let geo = make_geometry();
+        let mut groups = make_groups(&geo);
+
+        let first = alloc_inode(&cx, &dev, &geo, &mut groups, GroupNumber(1), false).unwrap();
+        let second = alloc_inode(&cx, &dev, &geo, &mut groups, GroupNumber(1), false).unwrap();
+        assert_ne!(first.ino, second.ino);
+
+        free_inode(&cx, &dev, &geo, &mut groups, first.ino).unwrap();
+        let reused = alloc_inode(&cx, &dev, &geo, &mut groups, GroupNumber(1), false).unwrap();
+        assert_eq!(reused.ino, first.ino);
     }
 
     #[test]
@@ -4592,6 +4653,7 @@ mod tests {
         seed_gdt_block(&dev, &pctx, &groups);
 
         let initial_free = groups[0].free_inodes;
+        let initial_inode_search_start = groups[0].inode_search_start;
         let bitmap_block = groups[0].inode_bitmap_block;
         let initial_bitmap = dev
             .read_block(&cx, bitmap_block)
@@ -4614,6 +4676,7 @@ mod tests {
 
         assert!(matches!(err, FfsError::Io(_)));
         assert_eq!(groups[0].free_inodes, initial_free);
+        assert_eq!(groups[0].inode_search_start, initial_inode_search_start);
         assert_eq!(
             dev.read_block(&cx, bitmap_block).unwrap().as_slice(),
             initial_bitmap.as_slice()
@@ -4638,6 +4701,7 @@ mod tests {
         let alloc = alloc_inode_persist(&cx, &dev, &geo, &mut groups, GroupNumber(0), false, &pctx)
             .unwrap();
         let initial_free = groups[0].free_inodes;
+        let initial_inode_search_start = groups[0].inode_search_start;
         let bitmap_block = groups[0].inode_bitmap_block;
         let initial_bitmap = dev
             .read_block(&cx, bitmap_block)
@@ -4652,6 +4716,7 @@ mod tests {
 
         assert!(matches!(err, FfsError::Io(_)));
         assert_eq!(groups[0].free_inodes, initial_free);
+        assert_eq!(groups[0].inode_search_start, initial_inode_search_start);
         assert_eq!(
             dev.read_block(&cx, bitmap_block).unwrap().as_slice(),
             initial_bitmap.as_slice()
@@ -5477,6 +5542,7 @@ mod tests {
             free_blocks: 100,
             block_largest_free_run: None,
             free_inodes: 50,
+            inode_search_start: 0,
             used_dirs: 0,
             block_bitmap_block: BlockNumber(1),
             inode_bitmap_block: BlockNumber(2),
@@ -6843,6 +6909,7 @@ InodeAlloc { ino: InodeNumber(17), group: GroupNumber(1) }
                 free_blocks: 100,
                 block_largest_free_run: None,
                 free_inodes: 100,
+                inode_search_start: 0,
                 used_dirs: 0,
                 block_bitmap_block: BlockNumber(1),
                 inode_bitmap_block: BlockNumber(2),
@@ -6871,6 +6938,7 @@ InodeAlloc { ino: InodeNumber(17), group: GroupNumber(1) }
                     free_blocks: 0,
                     block_largest_free_run: None,
                     free_inodes: 0,
+                    inode_search_start: 0,
                     used_dirs: 100,
                     block_bitmap_block: BlockNumber(u64::from(g) * 100 + 1),
                     inode_bitmap_block: BlockNumber(u64::from(g) * 100 + 2),
@@ -6902,6 +6970,7 @@ InodeAlloc { ino: InodeNumber(17), group: GroupNumber(1) }
                     free_blocks: 1000,
                     block_largest_free_run: None,
                     free_inodes: 0,
+                    inode_search_start: 0,
                     used_dirs: 100,
                     block_bitmap_block: BlockNumber(u64::from(g) * 100 + 1),
                     inode_bitmap_block: BlockNumber(u64::from(g) * 100 + 2),

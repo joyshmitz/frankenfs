@@ -491,6 +491,7 @@ fn bench_largest_free_run_cache_vs_bitmap_scan(c: &mut Criterion) {
             free_blocks: bitmap_count_free(bitmap, 32768),
             block_largest_free_run: Some(bitmap_largest_free_run(bitmap, 32768)),
             free_inodes: 0,
+            inode_search_start: 0,
             used_dirs: 0,
             block_bitmap_block: BlockNumber(
                 u64::try_from(idx).expect("benchmark group count is bounded by u64"),

@@ -91,6 +91,7 @@ fn make_groups(geo: &FsGeometry) -> Vec<GroupStats> {
             free_blocks: geo.blocks_per_group,
             block_largest_free_run: None,
             free_inodes: geo.inodes_per_group,
+            inode_search_start: 0,
             used_dirs: 0,
             block_bitmap_block: BlockNumber(u64::from(g) * 100 + 1),
             inode_bitmap_block: BlockNumber(u64::from(g) * 100 + 2),
