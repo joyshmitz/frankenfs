@@ -87,3 +87,7 @@ workspace = true
 [[bench]]
 name = "scrub_composite_mono"
 harness = false
+
+[[bench]]
+name = "zero_scan_width"
+harness = false
