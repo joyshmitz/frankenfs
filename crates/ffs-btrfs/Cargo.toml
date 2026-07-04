@@ -69,6 +69,10 @@ name = "alloc_gap_scan"
 harness = false
 
 [[bench]]
+name = "alloc_maxend_fuse"
+harness = false
+
+[[bench]]
 name = "cow_descent_scan"
 harness = false
 
