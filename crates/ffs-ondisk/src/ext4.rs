@@ -5525,6 +5525,22 @@ impl Ext4ImageReader {
     }
 
     /// Get a specific xattr by name index and name.
+    ///
+    /// Uses the by-name early-exit finders instead of materialising every
+    /// attribute (name + value `Vec` per entry) via `list_xattrs` just to
+    /// `find` one — the same transform the device backend already uses
+    /// (bd-abu3z): scan the entry table once, allocate only the matched value,
+    /// and probe the inode body FIRST so an ibody-resident attribute (e.g.
+    /// `security.selinux`, hit on nearly every access) never reads or parses the
+    /// external xattr block at all. The block-lookup transform measures ~7.2x
+    /// over `parse_all_then_find` (bench `xattr_lookup`, 24-entry block).
+    ///
+    /// Behaviour matches the old materialise-all-then-`find` for a well-formed
+    /// image: same ibody-before-block order, same unique-name assumption, same
+    /// value (including the empty-value + `e_value_inum` convention for
+    /// EA-inode-backed values). Like the sibling finders, a corrupt *unrelated*
+    /// entry/block can no longer abort a lookup the ibody already answered — a
+    /// strict superset of what a consistent image resolves.
     pub fn get_xattr(
         &self,
         image: &[u8],
@@ -5532,11 +5548,20 @@ impl Ext4ImageReader {
         name_index: u8,
         name: &[u8],
     ) -> Result<Option<Vec<u8>>, ParseError> {
-        let all = self.list_xattrs(image, inode)?;
-        Ok(all
-            .into_iter()
-            .find(|x| x.name_index == name_index && x.name == name)
-            .map(|x| x.value))
+        if let Some((_, value, _inum)) =
+            find_ibody_xattr_by_index_name(inode, name_index, name)?
+        {
+            return Ok(Some(value));
+        }
+        if inode.file_acl != 0 {
+            let block_data = self.read_block(image, ffs_types::BlockNumber(inode.file_acl))?;
+            if let Some((_, value, _inum)) =
+                find_xattr_block_value_by_index_name(block_data, name_index, name)?
+            {
+                return Ok(Some(value));
+            }
+        }
+        Ok(None)
     }
 
     // ── Hash-tree (htree/DX) directory lookup ───────────────────────────
@@ -5827,6 +5852,24 @@ fn find_xattr_value_by_full_name(
     value_offset_base: usize,
     target: &str,
 ) -> Result<Option<(u8, Vec<u8>, u32)>, ParseError> {
+    find_xattr_value_matching(data, value_base, value_offset_base, |name_index, name| {
+        xattr_entry_full_name_matches(name_index, name, target)
+    })
+}
+
+/// Shared entry-table walker for the by-name finders. Scans the xattr entry
+/// table once and materializes only the value of the first entry for which
+/// `matches(name_index, name_bytes)` returns true. Behaviour (bounds validation,
+/// EA-inode handling, single-value materialization) is identical to
+/// [`find_xattr_value_by_full_name`]; only the match predicate varies, so a
+/// caller holding a split `(name_index, name)` can match directly without
+/// reconstructing a full-name string.
+fn find_xattr_value_matching(
+    data: &[u8],
+    value_base: &[u8],
+    value_offset_base: usize,
+    matches: impl Fn(u8, &[u8]) -> bool,
+) -> Result<Option<(u8, Vec<u8>, u32)>, ParseError> {
     let mut offset = 0_usize;
     // (name_index, value_offs, value_inum, value_size) of the matched entry.
     let mut matched: Option<(u8, u16, u32, u32)> = None;
@@ -5853,9 +5896,7 @@ fn find_xattr_value_by_full_name(
                 reason: "name extends past data boundary",
             });
         }
-        if matched.is_none()
-            && xattr_entry_full_name_matches(name_index, &data[name_start..name_end], target)
-        {
+        if matched.is_none() && matches(name_index, &data[name_start..name_end]) {
             matched = Some((name_index, value_offs, value_inum, value_size));
         }
         offset = (name_end + 3) & !3;
@@ -5948,6 +5989,53 @@ pub fn find_xattr_block_value_by_name(
     }
     let entries_region = &block_data[32..];
     find_xattr_value_by_full_name(entries_region, block_data, 32, target)
+}
+
+/// Find one inode-body xattr by split `(name_index, name)` without materializing
+/// the rest. Direct-match counterpart of [`find_ibody_xattr_by_name`] for
+/// callers (e.g. `getxattr` by index+name) that already hold the on-disk name
+/// index and suffix. Matches exactly `entry.name_index == name_index &&
+/// entry.name == name`.
+pub fn find_ibody_xattr_by_index_name(
+    inode: &Ext4Inode,
+    name_index: u8,
+    name: &[u8],
+) -> Result<Option<(u8, Vec<u8>, u32)>, ParseError> {
+    if inode.xattr_ibody.len() < 4 {
+        return Ok(None);
+    }
+    if read_le_u32(&inode.xattr_ibody, 0)? != EXT4_XATTR_MAGIC {
+        return Ok(None);
+    }
+    let entries = &inode.xattr_ibody[4..];
+    find_xattr_value_matching(entries, entries, 0, |ni, nm| ni == name_index && nm == name)
+}
+
+/// Find one external-block xattr by split `(name_index, name)` without
+/// materializing the rest. Direct-match counterpart of
+/// [`find_xattr_block_value_by_name`].
+pub fn find_xattr_block_value_by_index_name(
+    block_data: &[u8],
+    name_index: u8,
+    name: &[u8],
+) -> Result<Option<(u8, Vec<u8>, u32)>, ParseError> {
+    if block_data.len() < 32 {
+        return Err(ParseError::InsufficientData {
+            needed: 32,
+            offset: 0,
+            actual: block_data.len(),
+        });
+    }
+    if read_le_u32(block_data, 0)? != EXT4_XATTR_MAGIC {
+        return Err(ParseError::InvalidMagic {
+            expected: u64::from(EXT4_XATTR_MAGIC),
+            actual: u64::from(read_le_u32(block_data, 0)?),
+        });
+    }
+    let entries_region = &block_data[32..];
+    find_xattr_value_matching(entries_region, block_data, 32, |ni, nm| {
+        ni == name_index && nm == name
+    })
 }
 
 /// Parse inline (ibody) xattrs from an `Ext4Inode`.
@@ -15164,6 +15252,121 @@ mod tests {
             "e_value_offs @0x02 + e_value_size @0x08"
         );
         assert_eq!(entries[0].full_name(), "security.kernel");
+    }
+
+    #[test]
+    fn get_xattr_by_name_finder_matches_materialize_all() {
+        // Lay out xattr entries + values in one region. `value_base_start` is the
+        // offset of this region within the finder's value_base (0 for the ibody
+        // region after the 4-byte magic; 32 for the external block).
+        fn build_region(items: &[(u8, &[u8], &[u8])], value_base_start: usize, len: usize) -> Vec<u8> {
+            let mut buf = vec![0_u8; len];
+            let mut eo = 0_usize; // entry cursor (front)
+            let mut vo = len; // value cursor (back)
+            for (idx, name, val) in items {
+                vo -= val.len();
+                buf[vo..vo + val.len()].copy_from_slice(val);
+                buf[eo] = u8::try_from(name.len()).unwrap();
+                buf[eo + 1] = *idx;
+                buf[eo + 2..eo + 4]
+                    .copy_from_slice(&u16::try_from(value_base_start + vo).unwrap().to_le_bytes());
+                buf[eo + 8..eo + 12].copy_from_slice(&u32::try_from(val.len()).unwrap().to_le_bytes());
+                buf[eo + 16..eo + 16 + name.len()].copy_from_slice(name);
+                eo = (eo + 16 + name.len() + 3) & !3;
+            }
+            buf // trailing zeros form the (0,0) terminator
+        }
+
+        // ibody: magic + region (values addressed from region start).
+        let mut ibody = EXT4_XATTR_MAGIC.to_le_bytes().to_vec();
+        ibody.extend(build_region(
+            &[(ffs_types::EXT4_XATTR_INDEX_SECURITY, b"selinux", b"sysadm_u:obj")],
+            0,
+            252,
+        ));
+        // external block: 32-byte header (magic@0) + region at [32..] (absolute value offsets).
+        let mut block = vec![0_u8; 4096];
+        block[0..4].copy_from_slice(&EXT4_XATTR_MAGIC.to_le_bytes());
+        let region = build_region(
+            &[
+                (ffs_types::EXT4_XATTR_INDEX_USER, b"comment", b"hello-world"),
+                (ffs_types::EXT4_XATTR_INDEX_TRUSTED, b"cap", b"0x1"),
+            ],
+            32,
+            4064,
+        );
+        block[32..].copy_from_slice(&region);
+
+        let mut image = build_test_image();
+        image[50 * 4096..51 * 4096].copy_from_slice(&block);
+
+        let inode = Ext4Inode {
+            mode: 0o100_644,
+            uid: 0,
+            gid: 0,
+            size: 0,
+            links_count: 1,
+            blocks: 0,
+            flags: 0,
+            version: 0,
+            generation: 0,
+            file_acl: 50,
+            atime: 0,
+            ctime: 0,
+            mtime: 0,
+            dtime: 0,
+            atime_extra: 0,
+            ctime_extra: 0,
+            mtime_extra: 0,
+            crtime: 0,
+            crtime_extra: 0,
+            extra_isize: 32,
+            checksum: 0,
+            version_hi: 0,
+            projid: 0,
+            extent_bytes: vec![0_u8; 60].into(),
+            xattr_ibody: ibody,
+            number: 0,
+        };
+
+        let reader = Ext4ImageReader::new(&image).unwrap();
+
+        // Old materialise-all-then-find, replicated for the equivalence oracle.
+        let old_get = |ni: u8, name: &[u8]| -> Option<Vec<u8>> {
+            reader
+                .list_xattrs(&image, &inode)
+                .unwrap()
+                .into_iter()
+                .find(|x| x.name_index == ni && x.name == name)
+                .map(|x| x.value)
+        };
+
+        let cases: &[(u8, &[u8])] = &[
+            (ffs_types::EXT4_XATTR_INDEX_SECURITY, b"selinux"), // ibody hit (block skipped)
+            (ffs_types::EXT4_XATTR_INDEX_USER, b"comment"),     // block hit
+            (ffs_types::EXT4_XATTR_INDEX_TRUSTED, b"cap"),      // block hit (2nd entry)
+            (ffs_types::EXT4_XATTR_INDEX_USER, b"absent"),      // miss
+            (ffs_types::EXT4_XATTR_INDEX_SECURITY, b"other"),   // miss
+        ];
+        for (ni, name) in cases {
+            let new = reader.get_xattr(&image, &inode, *ni, name).unwrap();
+            assert_eq!(new, old_get(*ni, name), "get_xattr mismatch for index {ni} name {name:?}");
+        }
+        // Concrete spot-checks.
+        assert_eq!(
+            reader
+                .get_xattr(&image, &inode, ffs_types::EXT4_XATTR_INDEX_SECURITY, b"selinux")
+                .unwrap()
+                .as_deref(),
+            Some(&b"sysadm_u:obj"[..])
+        );
+        assert_eq!(
+            reader
+                .get_xattr(&image, &inode, ffs_types::EXT4_XATTR_INDEX_TRUSTED, b"cap")
+                .unwrap()
+                .as_deref(),
+            Some(&b"0x1"[..])
+        );
     }
 
     #[test]
