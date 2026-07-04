@@ -59,3 +59,7 @@ harness = false
 [[bench]]
 name = "bitmap_set_range_width"
 harness = false
+
+[[bench]]
+name = "free_range_undo"
+harness = false

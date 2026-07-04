@@ -2485,32 +2485,33 @@ pub fn free_blocks_persist(
 
         let bitmap_buf = dev.read_block(cx, groups[gidx].block_bitmap_block)?;
         let mut bitmap = bitmap_buf.as_slice().to_vec();
-        let mut rollback_set_bits = Vec::with_capacity(segment.count as usize);
 
-        // Validate all blocks are currently allocated (double-free detection).
-        for i in segment.rel_start..segment.rel_start + segment.count {
-            if !bitmap_get(&bitmap, i) {
-                return Err(FfsError::Corruption {
-                    block: geo.group_block_to_absolute(segment.group, i).0,
-                    detail: "double-free: block already free in bitmap".into(),
-                });
-            }
+        // Validate all blocks are currently allocated (double-free detection):
+        // the first FREE bit in the range is the first double-free. Reuses the
+        // 4-wide `bitmap_find_free_range` scan — O(count/8) vs the old per-bit
+        // loop.
+        let end = segment.rel_start + segment.count;
+        if let Some(bad) = bitmap_find_free_range(&bitmap, segment.rel_start, end) {
+            return Err(FfsError::Corruption {
+                block: geo.group_block_to_absolute(segment.group, bad).0,
+                detail: "double-free: block already free in bitmap".into(),
+            });
         }
 
-        for i in segment.rel_start..segment.rel_start + segment.count {
-            bitmap_clear_with_set_undo(&mut bitmap, i, &mut rollback_set_bits);
-        }
+        // All bits were set (validated above), so clearing the whole contiguous
+        // range is exact; the segment's own range is the rollback undo (re-set
+        // it), so no per-bit undo Vec is needed. O(count/8) via memset.
+        bitmap_clear_range(&mut bitmap, segment.rel_start, segment.count);
 
         prepared.push((
             segment,
             bitmap,
-            rollback_set_bits,
             groups[gidx].free_blocks,
             groups[gidx].block_largest_free_run,
         ));
     }
 
-    for (segment, mut bitmap, rollback_set_bits, previous_free_blocks, previous_largest_free_run) in
+    for (segment, mut bitmap, previous_free_blocks, previous_largest_free_run) in
         prepared
     {
         let gidx = segment.group.0 as usize;
@@ -2537,7 +2538,9 @@ pub fn free_blocks_persist(
         ) {
             groups[gidx].free_blocks = previous_free_blocks;
             groups[gidx].block_largest_free_run = previous_largest_free_run;
-            rollback_clear_mutations(&mut bitmap, &rollback_set_bits);
+            // Undo the range-clear: re-set the segment's range (it was fully set
+            // before the clear, validated by the double-free scan above).
+            bitmap_set_range(&mut bitmap, segment.rel_start, segment.count);
             restore_bitmap_after_group_desc_error(
                 cx,
                 dev,
