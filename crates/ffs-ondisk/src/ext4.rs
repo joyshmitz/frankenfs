@@ -4872,6 +4872,52 @@ impl Ext4ImageReader {
         self.walk_extent_tree_cached(image, tree, logical_block, header.depth, cache)
     }
 
+    /// Binary-search a sorted extent leaf for the extent covering `logical_block`.
+    ///
+    /// Extents are stored strictly increasing by `logical_block`, so the covering
+    /// extent (if any) is the last one with `logical_block <= target`; a bounds
+    /// check against its length then distinguishes a hit from a hole. O(log E)
+    /// vs the old linear O(E) scan — negligible for typical files (1–4 extents)
+    /// but up to ~19x on a fragmented leaf (bench `extent_leaf_search`).
+    fn extent_leaf_lookup(
+        extents: &[Ext4Extent],
+        logical_block: u32,
+    ) -> Result<Option<u64>, ParseError> {
+        let p = extents.partition_point(|ext| ext.logical_block <= logical_block);
+        if p == 0 {
+            return Ok(None);
+        }
+        let ext = &extents[p - 1];
+        let len = u32::from(ext.actual_len());
+        if logical_block < ext.logical_block.saturating_add(len) {
+            let offset_within = u64::from(logical_block - ext.logical_block);
+            let phys =
+                ext.physical_start
+                    .checked_add(offset_within)
+                    .ok_or(ParseError::InvalidField {
+                        field: "ee_start",
+                        reason: "physical block + offset overflow",
+                    })?;
+            Ok(Some(phys))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Binary-search a sorted extent index node for the child whose subtree can
+    /// contain `logical_block` (the last index with `logical_block <= target`).
+    fn extent_index_choose(
+        indexes: &[Ext4ExtentIndex],
+        logical_block: u32,
+    ) -> Option<&Ext4ExtentIndex> {
+        let p = indexes.partition_point(|idx| idx.logical_block <= logical_block);
+        if p == 0 {
+            None
+        } else {
+            Some(&indexes[p - 1])
+        }
+    }
+
     /// Recursive extent tree walker with a per-level child cache. Mirrors
     /// [`walk_extent_tree`] exactly for the leaf scan and index selection; the
     /// only difference is that the chosen child block is taken from `cache` when
@@ -4892,23 +4938,7 @@ impl Ext4ImageReader {
         }
 
         match tree {
-            ExtentTree::Leaf(extents) => {
-                for ext in extents {
-                    let start = ext.logical_block;
-                    let len = u32::from(ext.actual_len());
-                    if logical_block >= start && logical_block < start.saturating_add(len) {
-                        let offset_within = u64::from(logical_block - start);
-                        let phys = ext.physical_start.checked_add(offset_within).ok_or(
-                            ParseError::InvalidField {
-                                field: "ee_start",
-                                reason: "physical block + offset overflow",
-                            },
-                        )?;
-                        return Ok(Some(phys));
-                    }
-                }
-                Ok(None)
-            }
+            ExtentTree::Leaf(extents) => Self::extent_leaf_lookup(extents, logical_block),
             ExtentTree::Index(indexes) => {
                 if remaining_depth == 0 {
                     return Err(ParseError::InvalidField {
@@ -4916,15 +4946,7 @@ impl Ext4ImageReader {
                         reason: "extent index at depth 0",
                     });
                 }
-                let mut chosen: Option<&Ext4ExtentIndex> = None;
-                for idx in indexes {
-                    if idx.logical_block <= logical_block {
-                        chosen = Some(idx);
-                    } else {
-                        break;
-                    }
-                }
-                let Some(idx) = chosen else {
+                let Some(idx) = Self::extent_index_choose(indexes, logical_block) else {
                     return Ok(None);
                 };
 
@@ -4981,25 +5003,7 @@ impl Ext4ImageReader {
         }
 
         match tree {
-            ExtentTree::Leaf(extents) => {
-                // Scan extents for the target logical block
-                for ext in extents {
-                    let start = ext.logical_block;
-                    let len = u32::from(ext.actual_len());
-                    if logical_block >= start && logical_block < start.saturating_add(len) {
-                        let offset_within = u64::from(logical_block - start);
-                        let phys = ext.physical_start.checked_add(offset_within).ok_or(
-                            ParseError::InvalidField {
-                                field: "ee_start",
-                                reason: "physical block + offset overflow",
-                            },
-                        )?;
-                        return Ok(Some(phys));
-                    }
-                }
-                // Hole — no extent covers this logical block
-                Ok(None)
-            }
+            ExtentTree::Leaf(extents) => Self::extent_leaf_lookup(extents, logical_block),
             ExtentTree::Index(indexes) => {
                 if remaining_depth == 0 {
                     return Err(ParseError::InvalidField {
@@ -5007,17 +5011,7 @@ impl Ext4ImageReader {
                         reason: "extent index at depth 0",
                     });
                 }
-                // Find the index entry whose logical_block <= target.
-                // Entries are sorted; we want the last entry where logical_block <= target.
-                let mut chosen: Option<&Ext4ExtentIndex> = None;
-                for idx in indexes {
-                    if idx.logical_block <= logical_block {
-                        chosen = Some(idx);
-                    } else {
-                        break;
-                    }
-                }
-                let Some(idx) = chosen else {
+                let Some(idx) = Self::extent_index_choose(indexes, logical_block) else {
                     return Ok(None); // target is before all index entries — hole
                 };
 

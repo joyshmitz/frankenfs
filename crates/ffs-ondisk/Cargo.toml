@@ -63,3 +63,7 @@ harness = false
 [[bench]]
 name = "read_copy_coalesce"
 harness = false
+
+[[bench]]
+name = "extent_leaf_search"
+harness = false
