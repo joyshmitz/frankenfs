@@ -16371,11 +16371,12 @@ impl FsOps for Ext4FsOps {
 
     fn listxattr(&self, _cx: &Cx, ino: InodeNumber) -> ffs_error::Result<Vec<String>> {
         let inode = self.read_live_inode(ino)?;
-        let xattrs = self
-            .reader
-            .list_xattrs(&self.image, &inode)
-            .map_err(|e| parse_to_ffs_error(&e))?;
-        Ok(xattrs.iter().map(Ext4Xattr::full_name).collect())
+        // Names-only walk: listxattr needs names, not values, so skip the
+        // per-attribute value `Vec` allocation the materialise-all path did and
+        // then discarded (~1.67x, bench `listxattr_names`).
+        self.reader
+            .list_xattr_names(&self.image, &inode)
+            .map_err(|e| parse_to_ffs_error(&e))
     }
 
     fn getxattr(
@@ -33014,15 +33015,19 @@ impl FsOps for OpenFs {
         match &self.flavor {
             FsFlavor::Ext4(_) => {
                 let inode = self.read_inode(cx, Self::ext4_canonical_inode(ino))?;
-                let mut xattrs =
-                    ffs_ondisk::parse_ibody_xattrs(&inode).map_err(|e| parse_to_ffs_error(&e))?;
+                // Names-only walk: skip the per-attribute value `Vec` allocation
+                // the materialise-all path built and then discarded (~1.67x,
+                // bench `listxattr_names`). Same names, same order (ibody first).
+                let mut names =
+                    ffs_ondisk::parse_ibody_xattr_names(&inode).map_err(|e| parse_to_ffs_error(&e))?;
                 if inode.file_acl != 0 {
                     let block_data = self.read_block_vec(cx, BlockNumber(inode.file_acl))?;
-                    let block_xattrs = ffs_ondisk::parse_xattr_block(&block_data)
-                        .map_err(|e| parse_to_ffs_error(&e))?;
-                    xattrs.extend(block_xattrs);
+                    names.extend(
+                        ffs_ondisk::parse_xattr_block_names(&block_data)
+                            .map_err(|e| parse_to_ffs_error(&e))?,
+                    );
                 }
-                Ok(xattrs.iter().map(Ext4Xattr::full_name).collect())
+                Ok(names)
             }
             FsFlavor::Btrfs(_) => self.btrfs_listxattr(cx, ino),
         }
