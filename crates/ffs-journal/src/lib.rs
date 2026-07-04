@@ -304,6 +304,8 @@ impl DescriptorTag {
 
 const JBD2_COMMIT_CHKSUM_OFFSET: usize = 16;
 const JBD2_CHECKSUM_TAIL_SIZE: usize = 4;
+const JBD2_ZERO_CHECKSUM_FIELD: [u8; JBD2_CHECKSUM_TAIL_SIZE] = [0; JBD2_CHECKSUM_TAIL_SIZE];
+const JBD2_COMMIT_SEGMENTED_CHECKSUM_MIN: usize = 4096;
 
 fn checksum_jbd2_tail_zeroed_block(block: &[u8], seed: u32) -> Option<u32> {
     if block.len() < JBD2_CHECKSUM_TAIL_SIZE {
@@ -312,7 +314,25 @@ fn checksum_jbd2_tail_zeroed_block(block: &[u8], seed: u32) -> Option<u32> {
 
     let tail = block.len() - JBD2_CHECKSUM_TAIL_SIZE;
     let checksum = crc32c::crc32c_append(!seed, &block[..tail]);
-    let checksum = crc32c::crc32c_append(checksum, &[0_u8; JBD2_CHECKSUM_TAIL_SIZE]);
+    let checksum = crc32c::crc32c_append(checksum, &JBD2_ZERO_CHECKSUM_FIELD);
+    Some(!checksum)
+}
+
+fn checksum_jbd2_commit_zeroed_block(block: &[u8], seed: u32) -> Option<u32> {
+    let after_field = JBD2_COMMIT_CHKSUM_OFFSET.checked_add(JBD2_CHECKSUM_TAIL_SIZE)?;
+    if block.len() < after_field {
+        return None;
+    }
+
+    if block.len() < JBD2_COMMIT_SEGMENTED_CHECKSUM_MIN {
+        let mut temp = block.to_vec();
+        temp[JBD2_COMMIT_CHKSUM_OFFSET..after_field].copy_from_slice(&JBD2_ZERO_CHECKSUM_FIELD);
+        return Some(!crc32c::crc32c_append(!seed, &temp));
+    }
+
+    let checksum = crc32c::crc32c_append(!seed, &block[..JBD2_COMMIT_CHKSUM_OFFSET]);
+    let checksum = crc32c::crc32c_append(checksum, &JBD2_ZERO_CHECKSUM_FIELD);
+    let checksum = crc32c::crc32c_append(checksum, &block[after_field..]);
     Some(!checksum)
 }
 
@@ -403,15 +423,12 @@ fn verify_jbd2_block_checksum(block: &[u8], sb: &Jbd2Superblock) -> bool {
         }
         JBD2_BLOCKTYPE_COMMIT => {
             // Commit block checksum is at offset 16.
-            if block.len() < JBD2_COMMIT_CHKSUM_OFFSET + 4 {
+            if block.len() < JBD2_COMMIT_CHKSUM_OFFSET + JBD2_CHECKSUM_TAIL_SIZE {
                 return false;
             }
             let stored = read_be_u32(block, JBD2_COMMIT_CHKSUM_OFFSET).unwrap_or(0);
-            let mut temp = block.to_vec();
-            temp[JBD2_COMMIT_CHKSUM_OFFSET..JBD2_COMMIT_CHKSUM_OFFSET + 4]
-                .copy_from_slice(&0_u32.to_be_bytes());
             let seed = sb.csum_seed();
-            let computed = !crc32c::crc32c_append(!seed, &temp);
+            let computed = checksum_jbd2_commit_zeroed_block(block, seed).unwrap_or(0);
             stored == computed
         }
         _ => true,
@@ -3697,6 +3714,36 @@ mod tests {
     }
 
     #[test]
+    fn commit_checksum_zeroed_helper_matches_clone_zero_model() {
+        let seed = 0xA55A_F00D;
+        assert_eq!(
+            checksum_jbd2_commit_zeroed_block(&[0_u8; JBD2_COMMIT_CHKSUM_OFFSET], seed),
+            None
+        );
+
+        for len in [20_usize, 512, 4096, 16_384] {
+            let mut block = commit_block(len, 0x5566_7788);
+            for (i, byte) in block.iter_mut().enumerate().skip(JBD2_HEADER_SIZE) {
+                *byte = (i as u8).wrapping_mul(37).wrapping_add(11);
+            }
+            block[JBD2_COMMIT_CHKSUM_OFFSET..JBD2_COMMIT_CHKSUM_OFFSET + JBD2_CHECKSUM_TAIL_SIZE]
+                .copy_from_slice(&0xDEAD_BEEFu32.to_be_bytes());
+
+            let mut clone_zero = block.clone();
+            clone_zero
+                [JBD2_COMMIT_CHKSUM_OFFSET..JBD2_COMMIT_CHKSUM_OFFSET + JBD2_CHECKSUM_TAIL_SIZE]
+                .copy_from_slice(&0_u32.to_be_bytes());
+            let expected = !crc32c::crc32c_append(!seed, &clone_zero);
+
+            assert_eq!(
+                checksum_jbd2_commit_zeroed_block(&block, seed),
+                Some(expected),
+                "segmented checksum must match clone-zero model for len={len}"
+            );
+        }
+    }
+
+    #[test]
     fn verify_jbd2_commit_checksum_v3_uses_uuid_seed() {
         let good_uuid = *b"ffs-jbd2-v3-seed";
         let bad_uuid = *b"ffs-jbd2-v3-alt!";
@@ -5085,8 +5132,7 @@ mod tests {
                 if i == n - 1 {
                     fl |= JBD2_TAG_FLAG_LAST;
                 }
-                desc[off + JBD2_TAG_FLAGS_OFFSET_V1_V2
-                    ..off + JBD2_TAG_FLAGS_OFFSET_V1_V2 + 2]
+                desc[off + JBD2_TAG_FLAGS_OFFSET_V1_V2..off + JBD2_TAG_FLAGS_OFFSET_V1_V2 + 2]
                     .copy_from_slice(&u16::try_from(fl).unwrap().to_be_bytes());
             }
             desc
@@ -5106,8 +5152,16 @@ mod tests {
                 Jbd2TagFormat::Legacy,
             );
             assert_eq!(old_count, Some(n), "strict count for n={n}");
-            assert_eq!(new_tags.as_ref().map(Vec::len), Some(n), "strict-parse len n={n}");
-            assert_eq!(new_tags, Some(old_tags), "strict-parse tags == parse tags n={n}");
+            assert_eq!(
+                new_tags.as_ref().map(Vec::len),
+                Some(n),
+                "strict-parse len n={n}"
+            );
+            assert_eq!(
+                new_tags,
+                Some(old_tags),
+                "strict-parse tags == parse tags n={n}"
+            );
         }
 
         // Malformed (no LAST terminator): both the old strict gate and the new
@@ -5115,8 +5169,11 @@ mod tests {
         let mut no_last = legacy_multi_tag(3);
         // Clear the LAST flag on the final tag.
         let last_off = JBD2_HEADER_SIZE + 2 * 8 + JBD2_TAG_FLAGS_OFFSET_V1_V2;
-        no_last[last_off..last_off + 2]
-            .copy_from_slice(&u16::try_from(JBD2_TAG_FLAG_SAME_UUID).unwrap().to_be_bytes());
+        no_last[last_off..last_off + 2].copy_from_slice(
+            &u16::try_from(JBD2_TAG_FLAG_SAME_UUID)
+                .unwrap()
+                .to_be_bytes(),
+        );
         assert_eq!(
             strict_descriptor_tag_count_with_format(&no_last, false, false, Jbd2TagFormat::Legacy),
             None

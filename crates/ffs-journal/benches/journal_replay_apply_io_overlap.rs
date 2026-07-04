@@ -44,6 +44,7 @@ const READ_LATENCY: Duration = Duration::from_micros(250);
 const COMMIT_CHKSUM_OFFSET: usize = 16;
 const CHECKSUM_FIELD_SIZE: usize = 4;
 const CHECKSUM_ZERO_FIELD: [u8; CHECKSUM_FIELD_SIZE] = [0; CHECKSUM_FIELD_SIZE];
+const COMMIT_SEGMENTED_CHECKSUM_MIN: usize = 4096;
 
 /// Deterministic pseudo-random byte (no `Math.random` in benches).
 fn prng(seed: u64) -> u8 {
@@ -85,6 +86,22 @@ fn commit_checksum_segmented(block: &[u8], seed: u32) -> Option<u32> {
         checksum,
         &block[COMMIT_CHKSUM_OFFSET + CHECKSUM_FIELD_SIZE..],
     );
+    Some(!checksum)
+}
+
+fn commit_checksum_adaptive(block: &[u8], seed: u32) -> Option<u32> {
+    let after_field = COMMIT_CHKSUM_OFFSET + CHECKSUM_FIELD_SIZE;
+    if block.len() < after_field {
+        return None;
+    }
+
+    if block.len() < COMMIT_SEGMENTED_CHECKSUM_MIN {
+        return commit_checksum_old_clone(block, seed);
+    }
+
+    let checksum = crc32c::crc32c_append(!seed, &block[..COMMIT_CHKSUM_OFFSET]);
+    let checksum = crc32c::crc32c_append(checksum, &CHECKSUM_ZERO_FIELD);
+    let checksum = crc32c::crc32c_append(checksum, &block[after_field..]);
     Some(!checksum)
 }
 
@@ -319,6 +336,11 @@ fn bench_commit_checksum(c: &mut Criterion) {
             commit_checksum_segmented(&block, seed),
             "segmented commit checksum diverged from clone-zero model (len={len})"
         );
+        assert_eq!(
+            commit_checksum_old_clone(&block, seed),
+            commit_checksum_adaptive(&block, seed),
+            "adaptive commit checksum diverged from clone-zero model (len={len})"
+        );
 
         group.bench_with_input(
             BenchmarkId::new("clone_zero_full_crc", len),
@@ -329,6 +351,9 @@ fn bench_commit_checksum(c: &mut Criterion) {
         );
         group.bench_with_input(BenchmarkId::new("segmented_zero_crc", len), &len, |b, _| {
             b.iter(|| black_box(commit_checksum_segmented(black_box(&block), seed)));
+        });
+        group.bench_with_input(BenchmarkId::new("adaptive_zero_crc", len), &len, |b, _| {
+            b.iter(|| black_box(commit_checksum_adaptive(black_box(&block), seed)));
         });
     }
     group.finish();
