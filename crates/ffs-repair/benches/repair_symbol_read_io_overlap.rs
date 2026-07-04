@@ -115,16 +115,44 @@ impl BlockDevice for LatencyBlockDevice {
 
 type SymbolBatch = Vec<(u32, Vec<u8>)>;
 
+fn symbol_slice(bytes: &[u8]) -> Result<&[u8]> {
+    bytes
+        .get(..SYMBOL_SIZE)
+        .ok_or_else(|| FfsError::RepairFailed("raw symbol slice out of bounds".into()))
+}
+
+fn all_zero_unrolled4(data: &[u8]) -> bool {
+    let mut chunks = data.chunks_exact(32);
+    for block in &mut chunks {
+        let w0 = u64::from_ne_bytes(block[0..8].try_into().unwrap());
+        let w1 = u64::from_ne_bytes(block[8..16].try_into().unwrap());
+        let w2 = u64::from_ne_bytes(block[16..24].try_into().unwrap());
+        let w3 = u64::from_ne_bytes(block[24..32].try_into().unwrap());
+        if (w0 | w1 | w2 | w3) != 0 {
+            return false;
+        }
+    }
+    let mut tail = chunks.remainder().chunks_exact(8);
+    tail.all(|chunk| u64::from_ne_bytes(chunk.try_into().unwrap()) == 0)
+        && tail.remainder().iter().all(|&byte| byte == 0)
+}
+
 /// Representative raw-symbol parse: first `SYMBOL_SIZE` bytes, skip all-zero.
 fn parse_symbol(block_index: u32, bytes: &[u8]) -> Result<Option<(u32, Vec<u8>)>> {
-    let symbol = bytes
-        .get(..SYMBOL_SIZE)
-        .ok_or_else(|| FfsError::RepairFailed("raw symbol slice out of bounds".into()))?
-        .to_vec();
+    let symbol = symbol_slice(bytes)?.to_vec();
     if symbol.iter().all(|b| *b == 0) {
         return Ok(None);
     }
     Ok(Some((block_index, symbol)))
+}
+
+/// NEW raw-symbol parse shape: skip the allocation/copy for all-zero symbols.
+fn parse_symbol_zero_then_copy(block_index: u32, bytes: &[u8]) -> Result<Option<(u32, Vec<u8>)>> {
+    let symbol = symbol_slice(bytes)?;
+    if all_zero_unrolled4(symbol) {
+        return Ok(None);
+    }
+    Ok(Some((block_index, symbol.to_vec())))
 }
 
 /// OLD: serial read loop, parse inline — N read latencies back to back.
@@ -177,6 +205,32 @@ fn bench_symbol_read(c: &mut Criterion) {
         });
     }
     group.finish();
+
+    let zero = vec![0u8; BS];
+    let mut nonzero_early = vec![0u8; BS];
+    nonzero_early[0] = 1;
+    let mut nonzero_late = vec![0u8; BS];
+    nonzero_late[SYMBOL_SIZE - 1] = 1;
+
+    for (name, block) in [
+        ("zero", &zero),
+        ("nonzero_early", &nonzero_early),
+        ("nonzero_late", &nonzero_late),
+    ] {
+        assert_eq!(
+            parse_symbol(7, block).expect("old parse"),
+            parse_symbol_zero_then_copy(7, block).expect("new parse"),
+            "raw symbol zero-skip changed parse result for {name}"
+        );
+        let mut group = c.benchmark_group(format!("raw_symbol_zero_skip_{name}"));
+        group.bench_function("copy_then_zero", |b| {
+            b.iter(|| black_box(parse_symbol(7, black_box(block))));
+        });
+        group.bench_function("zero_then_copy", |b| {
+            b.iter(|| black_box(parse_symbol_zero_then_copy(7, black_box(block))));
+        });
+        group.finish();
+    }
 }
 
 criterion_group!(benches, bench_symbol_read);

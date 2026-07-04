@@ -405,26 +405,21 @@ impl<'a> RepairGroupStorage<'a> {
             (0..desc.repair_block_count).zip(reads.into_iter().zip(blocks.iter()))
         {
             let bytes = read?;
-            let symbol = bytes
-                .as_slice()
-                .get(..symbol_size)
-                .ok_or_else(|| {
-                    FfsError::RepairFailed(format!(
-                        "raw symbol slice out of bounds at block {}",
-                        block_num.0
-                    ))
-                })?
-                .to_vec();
-            // 4-wide u64 OR-reduce all-zero test (see scrub::is_all_zero); the
-            // byte-wise `.all(==0)` is not auto-vectorized (~15x slower on a
-            // block-sized symbol — bench `zero_scan_width`).
-            if crate::scrub::is_all_zero(&symbol) {
+            let symbol = bytes.as_slice().get(..symbol_size).ok_or_else(|| {
+                FfsError::RepairFailed(format!(
+                    "raw symbol slice out of bounds at block {}",
+                    block_num.0
+                ))
+            })?;
+            // Avoid allocating/copying raw symbols that are already all-zero;
+            // scrub::is_all_zero keeps the prior 4-wide scan shape.
+            if crate::scrub::is_all_zero(symbol) {
                 continue;
             }
             let esi = base_esi
                 .checked_add(block_index)
                 .ok_or_else(|| FfsError::RepairFailed("raw ESI overflow".to_owned()))?;
-            out.push((esi, symbol));
+            out.push((esi, symbol.to_vec()));
         }
 
         Ok(out)
@@ -1194,10 +1189,7 @@ mod tests {
         assert_eq!(layout.group_end_exclusive(), 1);
         assert_eq!(layout.repair_start_block(), BlockNumber(0));
         assert_eq!(layout.validation_start_block(), BlockNumber(0));
-        assert_eq!(
-            layout.descriptor_blocks(),
-            [BlockNumber(0), BlockNumber(0)]
-        );
+        assert_eq!(layout.descriptor_blocks(), [BlockNumber(0), BlockNumber(0)]);
     }
 
     #[test]
