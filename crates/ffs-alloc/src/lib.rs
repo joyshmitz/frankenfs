@@ -1854,28 +1854,22 @@ pub fn reserved_inodes_in_group(geo: &FsGeometry, group: GroupNumber) -> Vec<u32
     reserved
 }
 
-/// Persist a group descriptor's counter fields back to the on-disk GDT.
-///
-/// Reads the GDT block containing `group`, patches the free_blocks/inodes/dirs
-/// fields, recomputes the checksum (if enabled), and writes the block back.
-/// Returns true when GDT-block persistence is deferred to flush (env
-/// FFS_SKIP_GDT, bd-cc-gdt-defer; OPT-IN). In deferral mode the per-op GDT write
-/// is skipped — the in-memory `GroupStats` is the authoritative count — and
-/// `ext4_flush_group_descriptors` (ffs-core) writes every descriptor once at
-/// flush, collapsing the ~80k per-op MVCC versions on the one shared GDT block
-/// to ~5 direct writes (~2.3x single-thread create). MUST be paired with the
-/// flush pass (wired into flush_mvcc_to_device AND sync_all_to_device) or the
-/// persisted image is e2fsck-dirty. Validated e2fsck-clean across
-/// create/unlink/rmdir/rename/mkdir/write. NOT default-on: 2 conformance tests
-/// (ext4_e2compr_write_readback, full_conformance_gate_pass) go e2fsck-dirty
-/// under deferral — those paths persist via a boundary the GDT flush pass is not
-/// yet wired into; default-on needs that wiring first (bd-cc-gdt-defer-default).
+// Returns true when GDT-block persistence is deferred to flush (env
+// FFS_SKIP_GDT, bd-cc-gdt-defer; OPT-IN). In deferral mode the per-op GDT write
+// is skipped — the in-memory `GroupStats` is the authoritative count — and
+// `ext4_flush_group_descriptors` (ffs-core) writes every descriptor once at
+// flush, collapsing the ~80k per-op MVCC versions on the one shared GDT block
+// to ~5 direct writes (~2.3x single-thread create). MUST be paired with the
+// flush pass (wired into flush_mvcc_to_device AND sync_all_to_device) or the
+// persisted image is e2fsck-dirty. Validated e2fsck-clean across
+// create/unlink/rmdir/rename/mkdir/write. NOT default-on: 2 conformance tests
+// (ext4_e2compr_write_readback, full_conformance_gate_pass) go e2fsck-dirty
+// under deferral — those paths persist via a boundary the GDT flush pass is not
+// yet wired into; default-on needs that wiring first (bd-cc-gdt-defer-default).
 thread_local! {
-    /// Per-thread override of [`gdt_persistence_deferred`], `None` = use the global
-    /// env default. Set by [`set_gdt_persistence_deferred_for_test`] so an
-    /// eager-GDT-path unit test (in any crate) can pin eager mode regardless of the
-    /// now-default deferral, without depending on the process-global `OnceLock` init
-    /// order. Untouched in production (always `None` → one cheap TLS load per call).
+    // Per-thread override of `gdt_persistence_deferred`, `None` = use the global
+    // env default. Test code can pin eager mode regardless of process-global
+    // `OnceLock` init order; production leaves this as `None`.
     static GDT_DEFER_OVERRIDE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
 }
 
@@ -1904,19 +1898,100 @@ pub fn gdt_persistence_deferred() -> bool {
     *SKIP.get_or_init(|| std::env::var("FFS_SKIP_GDT").as_deref() != Ok("0"))
 }
 
+const INCREMENTAL_BITMAP_CSUM_MAX_DELTA_BYTES: usize = 128;
+
+enum BitmapChecksumUpdate {
+    Unchanged,
+    Incremental { byte_start: usize, delta: Vec<u8> },
+    Full,
+}
+
+struct BitmapOverride<'a> {
+    bitmap: &'a [u8],
+    checksum_update: BitmapChecksumUpdate,
+}
+
+impl<'a> BitmapOverride<'a> {
+    fn full(bitmap: &'a [u8]) -> Self {
+        Self {
+            bitmap,
+            checksum_update: BitmapChecksumUpdate::Full,
+        }
+    }
+
+    fn from_bit_range(
+        before: &[u8],
+        after: &'a [u8],
+        start_bit: u32,
+        bit_count: u32,
+        checksum_bits: u32,
+    ) -> Self {
+        Self {
+            bitmap: after,
+            checksum_update: bitmap_checksum_update_from_bit_range(
+                before,
+                after,
+                start_bit,
+                bit_count,
+                checksum_bits,
+            ),
+        }
+    }
+}
+
+fn bitmap_checksum_update_from_bit_range(
+    before: &[u8],
+    after: &[u8],
+    start_bit: u32,
+    bit_count: u32,
+    checksum_bits: u32,
+) -> BitmapChecksumUpdate {
+    if bit_count == 0 || start_bit >= checksum_bits {
+        return BitmapChecksumUpdate::Unchanged;
+    }
+    let checksum_len = (checksum_bits / 8) as usize;
+    if checksum_len > before.len() || checksum_len > after.len() {
+        return BitmapChecksumUpdate::Full;
+    }
+
+    let end_bit = start_bit.saturating_add(bit_count).min(checksum_bits);
+    let first = (start_bit / 8) as usize;
+    let last_exclusive = end_bit.div_ceil(8) as usize;
+    if first >= last_exclusive {
+        return BitmapChecksumUpdate::Unchanged;
+    }
+    let width = last_exclusive - first;
+    if width > INCREMENTAL_BITMAP_CSUM_MAX_DELTA_BYTES {
+        return BitmapChecksumUpdate::Full;
+    }
+
+    let delta: Vec<u8> = before[first..last_exclusive]
+        .iter()
+        .zip(&after[first..last_exclusive])
+        .map(|(old, new)| old ^ new)
+        .collect();
+    if delta.iter().all(|byte| *byte == 0) {
+        return BitmapChecksumUpdate::Unchanged;
+    }
+    BitmapChecksumUpdate::Incremental {
+        byte_start: first,
+        delta,
+    }
+}
+
 fn persist_group_desc_with_bitmap_overrides(
     cx: &Cx,
     dev: &dyn BlockDevice,
     pctx: &PersistCtx,
     group: GroupNumber,
     stats: &GroupStats,
-    block_bitmap_override: Option<&[u8]>,
-    inode_bitmap_override: Option<&[u8]>,
+    block_bitmap_override: Option<BitmapOverride<'_>>,
+    inode_bitmap_override: Option<BitmapOverride<'_>>,
 ) -> Result<()> {
     if gdt_persistence_deferred() {
         return Ok(());
     }
-    persist_group_desc_force(
+    persist_group_desc_force_with_bitmap_overrides(
         cx,
         dev,
         pctx,
@@ -1938,6 +2013,26 @@ pub fn persist_group_desc_force(
     stats: &GroupStats,
     block_bitmap_override: Option<&[u8]>,
     inode_bitmap_override: Option<&[u8]>,
+) -> Result<()> {
+    persist_group_desc_force_with_bitmap_overrides(
+        cx,
+        dev,
+        pctx,
+        group,
+        stats,
+        block_bitmap_override.map(BitmapOverride::full),
+        inode_bitmap_override.map(BitmapOverride::full),
+    )
+}
+
+fn persist_group_desc_force_with_bitmap_overrides(
+    cx: &Cx,
+    dev: &dyn BlockDevice,
+    pctx: &PersistCtx,
+    group: GroupNumber,
+    stats: &GroupStats,
+    block_bitmap_override: Option<BitmapOverride<'_>>,
+    inode_bitmap_override: Option<BitmapOverride<'_>>,
 ) -> Result<()> {
     let ds = usize::from(pctx.desc_size);
     if ds == 0 {
@@ -1965,6 +2060,13 @@ pub fn persist_group_desc_force(
     // Read existing descriptor to preserve fields we don't track.
     let existing = Ext4GroupDesc::parse_from_bytes(&buf[offset_in_block..], pctx.desc_size)
         .map_err(|e| FfsError::Format(format!("GDT parse: {e}")))?;
+    let existing_flags = existing.flags;
+    let existing_block_bitmap_csum = existing.block_bitmap_csum;
+    let existing_inode_bitmap_csum = existing.inode_bitmap_csum;
+    let block_bitmap_written = block_bitmap_override.is_some();
+    let inode_bitmap = inode_bitmap_override
+        .as_ref()
+        .map(|override_| override_.bitmap);
 
     let mut updated = Ext4GroupDesc {
         free_blocks_count: stats.free_blocks,
@@ -1985,22 +2087,38 @@ pub fn persist_group_desc_force(
         // group block-bitmap block (e.g. block 51) on EVERY op only to recompute
         // a byte-identical checksum. Measured: ~2 base preads/op on the delete
         // path (the dominant amplification, ~93% of delbench preads). bd-bmpcsum.
-        if let Some(block_bitmap) = block_bitmap_override {
-            ffs_ondisk::ext4::stamp_block_bitmap_checksum(
+        if let Some(block_bitmap) = block_bitmap_override.as_ref() {
+            stamp_bitmap_checksum_from_override(
                 block_bitmap,
+                existing_block_bitmap_csum,
+                existing_flags & GD_FLAG_BLOCK_UNINIT != 0,
                 pctx.csum_seed,
                 pctx.blocks_per_group,
-                &mut updated,
                 pctx.desc_size,
+                |checksum, updated| updated.block_bitmap_csum = checksum,
+                |bitmap, seed, bits, updated, desc_size| {
+                    ffs_ondisk::ext4::stamp_block_bitmap_checksum(
+                        bitmap, seed, bits, updated, desc_size,
+                    );
+                },
+                &mut updated,
             );
         }
-        if let Some(inode_bitmap) = inode_bitmap_override {
-            ffs_ondisk::ext4::stamp_inode_bitmap_checksum(
+        if let Some(inode_bitmap) = inode_bitmap_override.as_ref() {
+            stamp_bitmap_checksum_from_override(
                 inode_bitmap,
+                existing_inode_bitmap_csum,
+                existing_flags & GD_FLAG_INODE_UNINIT != 0,
                 pctx.csum_seed,
                 pctx.inodes_per_group,
-                &mut updated,
                 pctx.desc_size,
+                |checksum, updated| updated.inode_bitmap_csum = checksum,
+                |bitmap, seed, bits, updated, desc_size| {
+                    ffs_ondisk::ext4::stamp_inode_bitmap_checksum(
+                        bitmap, seed, bits, updated, desc_size,
+                    );
+                },
+                &mut updated,
             );
         }
     }
@@ -2013,7 +2131,7 @@ pub fn persist_group_desc_force(
     // the descriptor's "unused inodes" tail. It is monotonic — taken as a `min`
     // so it never grows back when inodes are freed (the inode table stays
     // initialized up to the high-water mark).
-    if let Some(ibitmap) = inode_bitmap_override {
+    if let Some(ibitmap) = inode_bitmap {
         updated.flags &= !GD_FLAG_INODE_UNINIT;
         if let Some(highest_used) = highest_set_bit_index(ibitmap, pctx.inodes_per_group) {
             let unused = pctx
@@ -2022,7 +2140,7 @@ pub fn persist_group_desc_force(
             updated.itable_unused = updated.itable_unused.min(unused);
         }
     }
-    if block_bitmap_override.is_some() {
+    if block_bitmap_written {
         updated.flags &= !GD_FLAG_BLOCK_UNINIT;
     }
 
@@ -2043,6 +2161,47 @@ pub fn persist_group_desc_force(
 
     dev.write_block(cx, block_num, &buf)?;
     Ok(())
+}
+
+fn stamp_bitmap_checksum_from_override(
+    bitmap_override: &BitmapOverride<'_>,
+    existing_checksum: u32,
+    existing_uninit: bool,
+    csum_seed: u32,
+    checksum_bits: u32,
+    desc_size: u16,
+    set_checksum: impl Fn(u32, &mut Ext4GroupDesc),
+    full_stamp: impl Fn(&[u8], u32, u32, &mut Ext4GroupDesc, u16),
+    updated: &mut Ext4GroupDesc,
+) {
+    if desc_size >= 64 && !existing_uninit {
+        match &bitmap_override.checksum_update {
+            BitmapChecksumUpdate::Unchanged => {
+                set_checksum(existing_checksum, updated);
+                return;
+            }
+            BitmapChecksumUpdate::Incremental { byte_start, delta } => {
+                let checksum_len = (checksum_bits / 8) as usize;
+                let suffix = checksum_len.saturating_sub(*byte_start + delta.len());
+                let checksum = ffs_ondisk::crc_incremental::crc32c_update_region(
+                    existing_checksum,
+                    delta,
+                    suffix,
+                );
+                set_checksum(checksum, updated);
+                return;
+            }
+            BitmapChecksumUpdate::Full => {}
+        }
+    }
+
+    full_stamp(
+        bitmap_override.bitmap,
+        csum_seed,
+        checksum_bits,
+        updated,
+        desc_size,
+    );
 }
 
 // ── Block allocator ─────────────────────────────────────────────────────────
@@ -2375,6 +2534,17 @@ fn try_alloc_safe(
         // contiguous, so the alloc range itself is the rollback undo (cleared
         // below) — no per-bit undo push needed here.
         bitmap_set_range(&mut bitmap, rel_start, alloc_count);
+        let block_bitmap_override = if rollback_clear_bits.is_empty() {
+            BitmapOverride::from_bit_range(
+                bitmap_buf.as_slice(),
+                &bitmap,
+                rel_start,
+                alloc_count,
+                pctx.blocks_per_group,
+            )
+        } else {
+            BitmapOverride::full(&bitmap)
+        };
 
         dev.write_block(cx, groups[gidx].block_bitmap_block, &bitmap)?;
         let previous_free_blocks = groups[gidx].free_blocks;
@@ -2407,7 +2577,7 @@ fn try_alloc_safe(
             pctx,
             group,
             &groups[gidx],
-            Some(&bitmap),
+            Some(block_bitmap_override),
             None,
         ) {
             groups[gidx].free_blocks = previous_free_blocks;
@@ -2515,16 +2685,24 @@ pub fn free_blocks_persist(
         // range is exact; the segment's own range is the rollback undo (re-set
         // it), so no per-bit undo Vec is needed. O(count/8) via memset.
         bitmap_clear_range(&mut bitmap, segment.rel_start, segment.count);
+        let checksum_update = bitmap_checksum_update_from_bit_range(
+            bitmap_buf.as_slice(),
+            &bitmap,
+            segment.rel_start,
+            segment.count,
+            pctx.blocks_per_group,
+        );
 
         prepared.push((
             segment,
             bitmap,
+            checksum_update,
             groups[gidx].free_blocks,
             groups[gidx].block_largest_free_run,
         ));
     }
 
-    for (segment, mut bitmap, previous_free_blocks, previous_largest_free_run) in
+    for (segment, mut bitmap, checksum_update, previous_free_blocks, previous_largest_free_run) in
         prepared
     {
         let gidx = segment.group.0 as usize;
@@ -2546,7 +2724,10 @@ pub fn free_blocks_persist(
             pctx,
             segment.group,
             &groups[gidx],
-            Some(&bitmap),
+            Some(BitmapOverride {
+                bitmap: &bitmap,
+                checksum_update,
+            }),
             None,
         ) {
             groups[gidx].free_blocks = previous_free_blocks;
@@ -2690,6 +2871,7 @@ fn try_alloc_batch_in_group(
             count: 1,
         });
     });
+    let block_bitmap_override = BitmapOverride::full(&bitmap);
 
     if allocated.is_empty() {
         return Ok(Vec::new());
@@ -2713,7 +2895,7 @@ fn try_alloc_batch_in_group(
         pctx,
         group,
         &groups[gidx],
-        Some(&bitmap),
+        Some(block_bitmap_override),
         None,
     ) {
         groups[gidx].free_blocks = previous_free_blocks;
@@ -3009,6 +3191,17 @@ fn try_alloc_inode_in_group_persist(
         geo.inodes_per_group,
         &mut rollback_clear_bits,
     );
+    let inode_bitmap_override = if rollback_clear_bits.len() == 1 && rollback_clear_bits[0] == idx {
+        BitmapOverride::from_bit_range(
+            bitmap_buf.as_slice(),
+            &bitmap,
+            idx,
+            1,
+            pctx.inodes_per_group,
+        )
+    } else {
+        BitmapOverride::full(&bitmap)
+    };
     dev.write_block(cx, bitmap_block, &bitmap)?;
     let previous_used_dirs = groups[gidx].used_dirs;
     groups[gidx].advance_inode_search_start(idx, inodes_in_group);
@@ -3028,7 +3221,7 @@ fn try_alloc_inode_in_group_persist(
         group,
         &groups[gidx],
         None,
-        Some(&bitmap),
+        Some(inode_bitmap_override),
     ) {
         groups[gidx].free_inodes = previous_free_inodes;
         groups[gidx].used_dirs = previous_used_dirs;
@@ -3203,6 +3396,13 @@ pub fn free_inode_persist(
     }
 
     bitmap_clear_with_set_undo(&mut bitmap, bit_idx, &mut rollback_set_bits);
+    let inode_bitmap_override = BitmapOverride::from_bit_range(
+        bitmap_buf.as_slice(),
+        &bitmap,
+        bit_idx,
+        1,
+        pctx.inodes_per_group,
+    );
     dev.write_block(cx, bitmap_block, &bitmap)?;
     let previous_used_dirs = groups[gidx].used_dirs;
     groups[gidx].rewind_inode_search_start_on_free(bit_idx);
@@ -3220,7 +3420,7 @@ pub fn free_inode_persist(
         group,
         &groups[gidx],
         None,
-        Some(&bitmap),
+        Some(inode_bitmap_override),
     ) {
         groups[gidx].free_inodes = previous_free_inodes;
         groups[gidx].used_dirs = previous_used_dirs;
@@ -4553,6 +4753,77 @@ mod tests {
             pctx.desc_size,
         )
         .unwrap();
+    }
+
+    #[test]
+    fn bitmap_checksum_incremental_override_matches_full_stamp() {
+        let csum_seed = 0x1357_2468;
+        let blocks_per_group = 32_768;
+        let desc_size = 64;
+        let before = vec![0xA5_u8; 4096];
+        let mut after = before.clone();
+        after[3000..3008].fill(0xFF);
+
+        let mut existing = Ext4GroupDesc {
+            block_bitmap: 0,
+            inode_bitmap: 0,
+            inode_table: 0,
+            free_blocks_count: 0,
+            free_inodes_count: 0,
+            used_dirs_count: 0,
+            itable_unused: 0,
+            flags: 0,
+            checksum: 0,
+            block_bitmap_csum: 0,
+            inode_bitmap_csum: 0,
+        };
+        ffs_ondisk::ext4::stamp_block_bitmap_checksum(
+            &before,
+            csum_seed,
+            blocks_per_group,
+            &mut existing,
+            desc_size,
+        );
+
+        let mut full = existing.clone();
+        ffs_ondisk::ext4::stamp_block_bitmap_checksum(
+            &after,
+            csum_seed,
+            blocks_per_group,
+            &mut full,
+            desc_size,
+        );
+
+        let override_ =
+            BitmapOverride::from_bit_range(&before, &after, 3000 * 8, 8 * 8, blocks_per_group);
+        assert!(matches!(
+            override_.checksum_update,
+            BitmapChecksumUpdate::Incremental { .. }
+        ));
+        let mut incremental = existing.clone();
+        stamp_bitmap_checksum_from_override(
+            &override_,
+            existing.block_bitmap_csum,
+            false,
+            csum_seed,
+            blocks_per_group,
+            desc_size,
+            |checksum, updated| updated.block_bitmap_csum = checksum,
+            |bitmap, seed, bits, updated, desc_size| {
+                ffs_ondisk::ext4::stamp_block_bitmap_checksum(
+                    bitmap, seed, bits, updated, desc_size,
+                );
+            },
+            &mut incremental,
+        );
+        assert_eq!(incremental.block_bitmap_csum, full.block_bitmap_csum);
+
+        let wide_override =
+            BitmapOverride::from_bit_range(&before, &after, 0, 2048, blocks_per_group);
+        assert!(matches!(
+            wide_override.checksum_update,
+            BitmapChecksumUpdate::Full
+        ));
     }
 
     #[test]

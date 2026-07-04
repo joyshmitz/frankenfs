@@ -71,3 +71,7 @@ harness = false
 [[bench]]
 name = "reserved_overlap_check"
 harness = false
+
+[[bench]]
+name = "bitmap_csum_incremental_persist"
+harness = false
