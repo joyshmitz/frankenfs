@@ -5983,6 +5983,11 @@ impl Filesystem for FrankenFuse {
             return;
         };
         match self.with_request_scope(&cx, RequestOp::Readdir, |cx, scope| {
+            // readdirplus getattrs every returned entry itself (below), so the
+            // readdir-internal inode-table prefetch fan-out is a redundant SECOND
+            // parallel pass over the same blocks the getattr fan-out reads. Skip
+            // it here (plain `readdir` leaves it on for readdir-then-stat walks).
+            scope.skip_readdir_prefetch = true;
             self.inner
                 .ops
                 .readdir(cx, scope, InodeNumber(ino), fs_offset)

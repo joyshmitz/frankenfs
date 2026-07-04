@@ -428,12 +428,20 @@ impl Default for RequestCommitMode {
 /// Current read-only implementations can return an empty scope. Future write
 /// implementations may attach a transaction captured at request
 /// start so that begin/end hooks can manage commit/abort semantics.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RequestScope {
     pub snapshot: Option<Snapshot>,
     pub tx: Option<ffs_mvcc::Transaction>,
     #[serde(default)]
     pub commit_mode: RequestCommitMode,
+    /// Set by callers (e.g. `readdirplus`) that immediately `getattr` every
+    /// returned entry themselves, so the readdir-internal inode-table prefetch
+    /// fan-out is pure duplicate work (a second parallel pass over the same
+    /// blocks the caller's getattr fan-out already reads). Default `false`
+    /// preserves the prefetch for plain-`readdir`-then-stat callers (e.g. a
+    /// `find | xargs stat` walk) that DO benefit from the cache warm.
+    #[serde(default)]
+    pub skip_readdir_prefetch: bool,
 }
 
 impl RequestScope {
@@ -444,6 +452,7 @@ impl RequestScope {
             snapshot: None,
             tx: None,
             commit_mode: RequestCommitMode::PerRequest,
+            skip_readdir_prefetch: false,
         }
     }
 
@@ -454,6 +463,7 @@ impl RequestScope {
             snapshot: Some(snapshot),
             tx: None,
             commit_mode: RequestCommitMode::PerRequest,
+            skip_readdir_prefetch: false,
         }
     }
 
@@ -464,6 +474,7 @@ impl RequestScope {
             snapshot: Some(tx.snapshot()),
             tx: Some(tx),
             commit_mode: RequestCommitMode::PerRequest,
+            skip_readdir_prefetch: false,
         }
     }
 

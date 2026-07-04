@@ -30937,6 +30937,7 @@ impl OpenFs {
             snapshot: Some(snapshot),
             tx: Some(txn),
             commit_mode: RequestCommitMode::PerRequest,
+            skip_readdir_prefetch: false,
         };
         match self.ext4_rename2_exchange_staged(
             cx,
@@ -32734,9 +32735,10 @@ impl FsOps for OpenFs {
                 if let Some(page) =
                     readdir_snapshot_serve(&self.readdir_snapshot, canonical.0, validation, offset)
                 {
-                    if !self
-                        .readdir_prefetch_disabled
-                        .load(std::sync::atomic::Ordering::Relaxed)
+                    if !scope.skip_readdir_prefetch
+                        && !self
+                            .readdir_prefetch_disabled
+                            .load(std::sync::atomic::Ordering::Relaxed)
                     {
                         self.prefetch_ext4_readdir_inode_table_blocks(cx, scope, page.as_slice());
                     }
@@ -32798,9 +32800,10 @@ impl FsOps for OpenFs {
                     .collect();
                 let full = Arc::new(full);
                 let page = slice_readdir_snapshot(Arc::clone(&full), offset);
-                if !self
-                    .readdir_prefetch_disabled
-                    .load(std::sync::atomic::Ordering::Relaxed)
+                if !scope.skip_readdir_prefetch
+                    && !self
+                        .readdir_prefetch_disabled
+                        .load(std::sync::atomic::Ordering::Relaxed)
                 {
                     self.prefetch_ext4_readdir_inode_table_blocks(cx, scope, page.as_slice());
                 }
@@ -36338,6 +36341,7 @@ impl FsOps for OpenFs {
             snapshot,
             tx,
             commit_mode: RequestCommitMode::PerRequest,
+            skip_readdir_prefetch: false,
         })
     }
 
@@ -40263,6 +40267,7 @@ mod tests {
             snapshot: None,
             tx: Some(txn),
             commit_mode: RequestCommitMode::PerRequest,
+            skip_readdir_prefetch: false,
         };
 
         // Reference (prior behavior): per-block read_block_with_scope. Reset
@@ -40350,6 +40355,7 @@ mod tests {
             snapshot: None,
             tx: Some(txn),
             commit_mode: RequestCommitMode::PerRequest,
+            skip_readdir_prefetch: false,
         };
 
         let reference: Vec<Vec<u8>> = (START..START + COUNT as u64)
@@ -64845,6 +64851,7 @@ mod tests {
                 snapshot: Some(pinned),
                 tx: None,
                 commit_mode: RequestCommitMode::PerRequest,
+                skip_readdir_prefetch: false,
             },
         )
         .expect("end request scope");
