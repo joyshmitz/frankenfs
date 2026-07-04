@@ -657,11 +657,26 @@ impl BlockValidator for BtrfsTreeBlockValidator {
         }
 
         let slice = data.as_slice();
+
+        // Cheap fsid pre-check before the full header parse. Only blocks whose
+        // fsid (16 bytes at offset 0x20) matches THIS filesystem are btrfs
+        // metadata candidates; the vast majority of a device (data + free
+        // blocks) will not match, and on a data-heavy image the ZeroCheck ahead
+        // of this validator early-exits at the first non-zero byte, leaving the
+        // ~64-byte header copy + field parse as the dominant per-block cost. A
+        // 16-byte fsid compare skips that parse for every non-metadata block.
+        // Behaviour-identical: `parse_from_block` also rejects on fsid mismatch,
+        // and a slice too short for the fsid (< 0x30) already parsed to Skip.
+        if slice.get(0x20..0x30) != Some(&self.fsid[..]) {
+            return BlockVerdict::Skip;
+        }
+
         let Ok(header) = BtrfsHeader::parse_from_block(slice) else {
             return BlockVerdict::Skip;
         };
 
-        // Treat only blocks that appear to belong to this filesystem as btrfs metadata candidates.
+        // fsid already confirmed above; retained for defence in depth (the parse
+        // re-reads the same bytes, so this is always true here).
         if header.fsid != self.fsid {
             return BlockVerdict::Skip;
         }

@@ -38,6 +38,10 @@ name = "xor_into_probe"
 harness = false
 
 [[bench]]
+name = "scrub_fsid_precheck"
+harness = false
+
+[[bench]]
 name = "encode_parallel"
 harness = false
 
