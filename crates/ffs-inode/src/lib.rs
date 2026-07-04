@@ -631,6 +631,29 @@ fn free_indirect_blocks(
     Ok(())
 }
 
+/// Fast all-zero test for the indirect-block "is this block now empty?" check.
+///
+/// The idiomatic byte-wise `data.iter().all(|&b| b == 0)` is NOT auto-vectorized
+/// (~1.5 µs on a 4 KiB block); a 4-wide u64 OR-reduce is ~15x faster (~99 ns)
+/// with no regression on a non-empty block (early-exit at the first set byte).
+/// Result-identical. Same fix as ffs-core `is_block_all_zero` (bench
+/// `sparse_zero_scan`).
+fn indirect_block_all_zero(data: &[u8]) -> bool {
+    let mut chunks = data.chunks_exact(32);
+    for block in &mut chunks {
+        let w0 = u64::from_ne_bytes(block[0..8].try_into().unwrap());
+        let w1 = u64::from_ne_bytes(block[8..16].try_into().unwrap());
+        let w2 = u64::from_ne_bytes(block[16..24].try_into().unwrap());
+        let w3 = u64::from_ne_bytes(block[24..32].try_into().unwrap());
+        if (w0 | w1 | w2 | w3) != 0 {
+            return false;
+        }
+    }
+    let mut tail = chunks.remainder().chunks_exact(8);
+    tail.all(|c| u64::from_ne_bytes(c.try_into().unwrap()) == 0)
+        && tail.remainder().iter().all(|&b| b == 0)
+}
+
 /// Recursively free data blocks at or beyond logical block `cutoff` within an
 /// indirect pointer block at indirection `level`, whose first entry maps logical
 /// block `base`. Frees deeper metadata blocks that become empty, zeroes the
@@ -728,7 +751,7 @@ fn free_indirect_subtree_range(
         }
     }
 
-    let empty = data.iter().all(|&b| b == 0);
+    let empty = indirect_block_all_zero(&data);
     // Persist zeroed slots only when the block survives; an emptied block is
     // freed by the caller, so its contents become unreachable.
     if dirty && !empty {

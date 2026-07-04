@@ -35,3 +35,7 @@ workspace = true
 [[bench]]
 name = "crc_incremental"
 harness = false
+
+[[bench]]
+name = "indirect_zero_scan"
+harness = false
