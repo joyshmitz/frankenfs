@@ -48,7 +48,8 @@ use ffs_btrfs::{
     InMemoryCowBtrfsTree, btrfs_inode_flags_to_fsflags, btrfs_inode_flags_to_xflags,
     enumerate_snapshots, enumerate_subvolumes, fsflags_to_btrfs_inode_flags, generate_send_stream,
     lookup_data_block_csum, map_logical_to_physical, parse_btrfs_tree_node, parse_dir_items,
-    parse_extent_data, parse_inode_item, parse_root_item, parse_xattr_items, walk_chunk_tree,
+    parse_extent_data, parse_inode_item, parse_root_item, parse_xattr_item_names,
+    parse_xattr_items, walk_chunk_tree,
     walk_tree, walk_tree_floor_with_nodes, walk_tree_parallel_with_nodes,
     walk_tree_range_parallel_with_nodes,
     writeback::{DiskWritebackContext, WriteDependencyDag, WritebackExecutor},
@@ -28475,10 +28476,10 @@ impl OpenFs {
     /// on-disk FS tree for XATTR_ITEM entries (type 24).
     fn btrfs_listxattr(&self, cx: &Cx, ino: InodeNumber) -> ffs_error::Result<Vec<String>> {
         let canonical = self.btrfs_canonical_inode(ino)?;
-        let xattr_entries = self.btrfs_collect_xattr_items(cx, canonical)?;
-        Ok(xattr_entries
+        let names = self.btrfs_collect_xattr_names(cx, canonical)?;
+        Ok(names
             .into_iter()
-            .map(|x| String::from_utf8_lossy(&x.name).into_owned())
+            .map(|name| String::from_utf8_lossy(&name).into_owned())
             .collect())
     }
 
@@ -28555,11 +28556,11 @@ impl OpenFs {
     }
 
     /// Collect all xattr items for a given objectid from COW tree or on-disk tree.
-    fn btrfs_collect_xattr_items(
+    fn btrfs_collect_xattr_names(
         &self,
         cx: &Cx,
         objectid: u64,
-    ) -> ffs_error::Result<Vec<ffs_btrfs::BtrfsXattrItem>> {
+    ) -> ffs_error::Result<Vec<Vec<u8>>> {
         if let Some(alloc_mutex) = self.btrfs_alloc_state.as_ref() {
             let alloc = alloc_mutex.read();
             let start = BtrfsKey {
@@ -28579,8 +28580,10 @@ impl OpenFs {
             drop(alloc);
             let mut result = Vec::new();
             for (_k, data) in &items {
-                let parsed = parse_xattr_items(data).map_err(|e| parse_to_ffs_error(&e))?;
-                result.extend(parsed);
+                // listxattr needs names only: skip the per-attribute value `Vec`
+                // the materialise-all path built and then discarded.
+                let names = parse_xattr_item_names(data).map_err(|e| parse_to_ffs_error(&e))?;
+                result.extend(names);
             }
             Ok(result)
         } else {
@@ -28600,8 +28603,9 @@ impl OpenFs {
             let items = self.walk_btrfs_fs_tree_range(cx, lo, hi)?;
             let mut result = Vec::new();
             for item in &items {
-                let parsed = parse_xattr_items(&item.data).map_err(|e| parse_to_ffs_error(&e))?;
-                result.extend(parsed);
+                let names =
+                    parse_xattr_item_names(&item.data).map_err(|e| parse_to_ffs_error(&e))?;
+                result.extend(names);
             }
             Ok(result)
         }
