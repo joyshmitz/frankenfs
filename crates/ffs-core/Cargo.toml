@@ -177,3 +177,7 @@ harness = false
 [[bench]]
 name = "e2compr_cluster_read_overlap"
 harness = false
+
+[[bench]]
+name = "sparse_zero_scan"
+harness = false
