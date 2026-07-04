@@ -74,5 +74,49 @@ fn bench(c: &mut Criterion) {
     }
 }
 
-criterion_group!(benches, bench);
+/// Amortized: the production parsed-node cache parses a node ONCE (miss) then
+/// reuses it across K searches (hits). Model that: parse all keys once, then K
+/// searches over the parsed Vec.
+fn eager_amortized(buf: &[u8], n: usize, k: usize) -> u64 {
+    let keys: Vec<u64> = (0..n).map(|i| read_objectid(buf, i)).collect();
+    let mut acc = 0u64;
+    for t in 0..k {
+        if let Ok(idx) = keys.binary_search(&((t % n) as u64)) {
+            acc = acc.wrapping_add(idx as u64);
+        }
+    }
+    acc
+}
+
+/// A lazy raw-search node has no parsed form to cache, so it re-decodes O(log N)
+/// keys per search: K raw searches.
+fn lazy_amortized(buf: &[u8], n: usize, k: usize) -> u64 {
+    let mut acc = 0u64;
+    for t in 0..k {
+        if let Some(idx) = lazy_search(buf, n, (t % n) as u64) {
+            acc = acc.wrapping_add(idx as u64);
+        }
+    }
+    acc
+}
+
+fn bench_amortized(c: &mut Criterion) {
+    let n = 200usize;
+    let buf = build_item_table(n);
+    // K = searches per node before eviction. Production walk has high cache-hit
+    // (leaves hold ~200 items each accessed by many files), so K is large.
+    for k in [1usize, 8, 64] {
+        assert_eq!(eager_amortized(&buf, n, k), lazy_amortized(&buf, n, k));
+        let mut g = c.benchmark_group(format!("btrfs_leaf_amortized_200items_k{k}"));
+        g.bench_function("eager_parse_once_then_k", |b| {
+            b.iter(|| black_box(eager_amortized(black_box(&buf), n, black_box(k))));
+        });
+        g.bench_function("lazy_k_raw", |b| {
+            b.iter(|| black_box(lazy_amortized(black_box(&buf), n, black_box(k))));
+        });
+        g.finish();
+    }
+}
+
+criterion_group!(benches, bench, bench_amortized);
 criterion_main!(benches);
