@@ -2025,6 +2025,7 @@ mod tests {
                 flags: 0,
                 block_bitmap_csum: 0,
                 inode_bitmap_csum: 0,
+                inode_search_start: 0,
                 reserved_cache: std::sync::OnceLock::new(),
                 reserved_confirmed: std::sync::OnceLock::new(),
             })

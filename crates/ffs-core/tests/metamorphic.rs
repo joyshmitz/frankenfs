@@ -115,6 +115,7 @@ fn representative_groups() -> Vec<GroupStats> {
         flags: 0,
         block_bitmap_csum: 0,
         inode_bitmap_csum: 0,
+        inode_search_start: 0,
         reserved_cache: OnceLock::new(),
         reserved_confirmed: OnceLock::new(),
     }]
