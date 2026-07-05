@@ -5435,8 +5435,15 @@ impl OpenFs {
                     continue;
                 }
                 let mut data = self.read_block_vec(cx, block)?;
-                if ffs_dir::remove_entry(&mut data, &dentry.name, reserved_tail)? {
-                    self.stamp_ext4_dir_block(&mut data, parent_ino, parent.generation);
+                if let Some((_ino, edit)) =
+                    ffs_dir::remove_entry_take_inode_tracked(&mut data, &dentry.name, reserved_tail)?
+                {
+                    self.stamp_ext4_dir_block_after_edit(
+                        &mut data,
+                        parent_ino,
+                        parent.generation,
+                        &edit,
+                    );
                     block_dev.write_block(cx, block, &data)?;
                     self.ext4_file_data_block_cache.remove(&block);
                     debug!(
@@ -17423,6 +17430,41 @@ impl OpenFs {
         }
     }
 
+    /// Update an ext4 directory block's `metadata_csum` tail after a
+    /// [`ffs_dir::remove_entry_take_inode_tracked`] mutation, using the
+    /// *incremental* checksum path — a ~10x saving over re-CRCing the whole
+    /// ~4 KiB block, since a removal changes only a tiny bounded span (the
+    /// coalesced predecessor `rec_len` + the cleared entry header). Falls back to
+    /// a full recompute if the reported span is unusable (e.g. reaches the
+    /// checksum tail). No-op when the filesystem lacks `metadata_csum`. Verified
+    /// bit-identical to [`Self::stamp_ext4_dir_block`] by the ffs-dir proptest
+    /// `remove_tracked_incremental_matches_full_stamp`.
+    fn stamp_ext4_dir_block_after_edit(
+        &self,
+        block: &mut [u8],
+        dir_ino: u32,
+        generation: u32,
+        edit: &ffs_dir::DirBlockEdit,
+    ) {
+        if let Some(sb) = self.ext4_superblock() {
+            if sb.has_metadata_csum() {
+                let delta = edit.delta(block);
+                if !ffs_ondisk::ext4::stamp_dir_block_checksum_incremental(
+                    block,
+                    edit.region_start,
+                    &delta,
+                ) {
+                    ffs_ondisk::stamp_dir_block_checksum(
+                        block,
+                        sb.csum_seed(),
+                        dir_ino,
+                        generation,
+                    );
+                }
+            }
+        }
+    }
+
     /// Stamp the CRC32C of an htree dx_root block (logical block 0 of an
     /// `EXT4_INDEX_FL` directory). The dx_root checksum lives at the dx tail
     /// ([`DX_ROOT_COUNT_OFFSET`]), not at the trailing fake-dirent the regular
@@ -17525,10 +17567,17 @@ impl OpenFs {
         };
 
         let mut data = self.read_block_vec(cx, target_phys)?;
-        if ffs_dir::remove_entry(&mut data, name, reserved_tail)? {
+        if let Some((_ino, edit)) =
+            ffs_dir::remove_entry_take_inode_tracked(&mut data, name, reserved_tail)?
+        {
             let dir_ino_u32 = u32::try_from(dir.0)
                 .map_err(|_| FfsError::Format("inode number exceeds ext4 32-bit limit".into()))?;
-            self.stamp_ext4_dir_block(&mut data, dir_ino_u32, dir_inode.generation);
+            self.stamp_ext4_dir_block_after_edit(
+                &mut data,
+                dir_ino_u32,
+                dir_inode.generation,
+                &edit,
+            );
             dev.write_block(cx, target_phys, &data)?;
             return Ok(Some(true));
         }
@@ -19236,13 +19285,18 @@ impl OpenFs {
                     if let Some(target_phys) = target_logical.and_then(|tl| resolve_logical(tl)) {
                         if Some(target_phys) != dx_root_phys {
                             let mut data = self.read_block_vec(cx, target_phys)?;
-                            if let Some(ino) =
-                                ffs_dir::remove_entry_take_inode(&mut data, name, reserved_tail)?
+                            if let Some((ino, edit)) =
+                                ffs_dir::remove_entry_take_inode_tracked(
+                                    &mut data,
+                                    name,
+                                    reserved_tail,
+                                )?
                             {
-                                self.stamp_ext4_dir_block(
+                                self.stamp_ext4_dir_block_after_edit(
                                     &mut data,
                                     parent_ino_u32,
                                     parent_inode.generation,
+                                    &edit,
                                 );
                                 // Defer the persist until the validations below pass.
                                 pending_dir_write = Some((target_phys, data));
@@ -19260,13 +19314,14 @@ impl OpenFs {
                             continue;
                         }
                         let mut data = self.read_block_vec(cx, block)?;
-                        if let Some(ino) =
-                            ffs_dir::remove_entry_take_inode(&mut data, name, reserved_tail)?
+                        if let Some((ino, edit)) =
+                            ffs_dir::remove_entry_take_inode_tracked(&mut data, name, reserved_tail)?
                         {
-                            self.stamp_ext4_dir_block(
+                            self.stamp_ext4_dir_block_after_edit(
                                 &mut data,
                                 parent_ino_u32,
                                 parent_inode.generation,
+                                &edit,
                             );
                             // Defer the persist until the validations below pass.
                             pending_dir_write = Some((block, data));
@@ -21887,14 +21942,21 @@ impl OpenFs {
                             continue;
                         }
                         let mut data = self.read_block_vec(cx, block)?;
-                        if ffs_dir::remove_entry(&mut data, new_name, reserved_tail)? {
+                        if let Some((_ino, edit)) =
+                            ffs_dir::remove_entry_take_inode_tracked(
+                                &mut data,
+                                new_name,
+                                reserved_tail,
+                            )?
+                        {
                             let np_ino_u32 = u32::try_from(new_parent.0).map_err(|_| {
                                 FfsError::Format("inode number exceeds ext4 32-bit limit".into())
                             })?;
-                            self.stamp_ext4_dir_block(
+                            self.stamp_ext4_dir_block_after_edit(
                                 &mut data,
                                 np_ino_u32,
                                 new_parent_inode.generation,
+                                &edit,
                             );
                             block_dev.write_block(cx, block, &data)?;
                             break 'rm_existing;
@@ -22019,14 +22081,17 @@ impl OpenFs {
                         continue;
                     }
                     let mut data = self.read_block_vec(cx, block)?;
-                    if ffs_dir::remove_entry(&mut data, name, reserved_tail)? {
+                    if let Some((_ino, edit)) =
+                        ffs_dir::remove_entry_take_inode_tracked(&mut data, name, reserved_tail)?
+                    {
                         let src_ino_u32 = u32::try_from(parent.0).map_err(|_| {
                             FfsError::Format("inode number exceeds ext4 32-bit limit".into())
                         })?;
-                        self.stamp_ext4_dir_block(
+                        self.stamp_ext4_dir_block_after_edit(
                             &mut data,
                             src_ino_u32,
                             src_parent_fresh.generation,
+                            &edit,
                         );
                         block_dev.write_block(cx, block, &data)?;
                         break 'rm_src;

@@ -476,6 +476,38 @@ pub fn add_entry_reject_existing(
     }
 }
 
+/// The contiguous byte span a directory-block mutation changed, captured so the
+/// caller can update the block's `metadata_csum` tail *incrementally* instead of
+/// re-CRCing the whole ~4 KiB block.
+///
+/// `old_bytes` is the pre-image of `block[region_start .. region_start +
+/// old_bytes.len())`. A mutation may write two disjoint fields (e.g. a
+/// predecessor's `rec_len` and the removed entry's header); the span is the
+/// single enclosing range, with the untouched interior bytes contributing a zero
+/// delta — exactly what [`ffs_ondisk::stamp_dir_block_checksum_incremental`]
+/// expects.
+#[derive(Debug, Clone)]
+pub struct DirBlockEdit {
+    /// Offset of the first byte the mutation could have changed.
+    pub region_start: usize,
+    /// Pre-image of the changed span (before the mutation was applied).
+    pub old_bytes: Vec<u8>,
+}
+
+impl DirBlockEdit {
+    /// XOR delta of the changed span against the post-mutation `block`
+    /// (`delta[i] = old_bytes[i] ^ block[region_start + i]`). Feed this to
+    /// [`ffs_ondisk::stamp_dir_block_checksum_incremental`] with `region_start`.
+    #[must_use]
+    pub fn delta(&self, block: &[u8]) -> Vec<u8> {
+        let mut d = self.old_bytes.clone();
+        for (i, byte) in d.iter_mut().enumerate() {
+            *byte ^= block[self.region_start + i];
+        }
+        d
+    }
+}
+
 /// Remove a directory entry by name from a single directory block.
 ///
 /// On success:
@@ -497,6 +529,22 @@ pub fn remove_entry_take_inode(
     name: &[u8],
     reserved_tail: usize,
 ) -> Result<Option<u32>> {
+    Ok(remove_entry_take_inode_tracked(block, name, reserved_tail)?.map(|(ino, _)| ino))
+}
+
+/// Like [`remove_entry_take_inode`], but also returns a [`DirBlockEdit`]
+/// describing the exact byte span the removal changed, so a `metadata_csum`
+/// caller can update the dir-block checksum tail incrementally
+/// ([`ffs_ondisk::stamp_dir_block_checksum_incremental`]) rather than re-CRCing
+/// the whole block. The removal touches at most two small disjoint fields (the
+/// predecessor's `rec_len` and the removed entry's 8-byte header), so the
+/// enclosing span is tiny — a ~10x checksum saving on the unlink/rmdir/rename
+/// hot path (bench `dir_csum_incremental`).
+pub fn remove_entry_take_inode_tracked(
+    block: &mut [u8],
+    name: &[u8],
+    reserved_tail: usize,
+) -> Result<Option<(u32, DirBlockEdit)>> {
     validate_name(name)?;
 
     let mut off = 0usize;
@@ -563,6 +611,19 @@ pub fn remove_entry_take_inode(
         }
 
         if cur_ino != 0 && &block[off + DIR_ENTRY_HEADER_LEN..name_end] == name {
+            // Snapshot the enclosing changed span BEFORE mutating so the caller
+            // can update the metadata_csum tail incrementally. Two disjoint
+            // writes: the predecessor's `rec_len` (when present) at `prev_off+4`
+            // and this entry's 8-byte header at `off`. `prev_off < off` (forward
+            // scan), so the enclosing span is `[region_start, off + 8)`; the
+            // untouched interior bytes yield a zero delta.
+            let region_start = match prev_off_opt {
+                Some(prev_off) => prev_off + 4,
+                None => off,
+            };
+            let region_end = off + DIR_ENTRY_HEADER_LEN;
+            let old_bytes = block[region_start..region_end].to_vec();
+
             if let Some(prev_off) = prev_off_opt {
                 let merged = (off + rec_len)
                     .checked_sub(prev_off)
@@ -576,7 +637,13 @@ pub fn remove_entry_take_inode(
             // Clear metadata for cleanliness.
             block[off + 6] = 0;
             block[off + 7] = 0;
-            return Ok(Some(cur_ino));
+            return Ok(Some((
+                cur_ino,
+                DirBlockEdit {
+                    region_start,
+                    old_bytes,
+                },
+            )));
         }
 
         if cur_ino != 0 {
@@ -2391,5 +2458,58 @@ mod tests {
         assert_eq!(entries[idx].hash & 1, 1);
         assert_eq!(entries[idx].hash & !1, 100);
         assert_eq!(entries[idx].block, 3);
+    }
+
+    proptest! {
+        /// Removing an entry then updating the metadata_csum tail *incrementally*
+        /// from the [`DirBlockEdit`] must yield a byte-identical block to a full
+        /// checksum recompute — for any dir layout, removed entry (with or
+        /// without a live predecessor to coalesce into), seed/ino/generation.
+        #[test]
+        fn remove_tracked_incremental_matches_full_stamp(
+            seed in any::<u32>(),
+            ino in any::<u32>(),
+            generation in any::<u32>(),
+            names in proptest::collection::btree_set(valid_dir_name_strategy(16), 1..12),
+            victim_idx in any::<prop::sample::Index>(),
+        ) {
+            let block_len = 512_usize;
+            let reserved_tail = 12_usize;
+            let mut block = vec![0_u8; block_len];
+            init_dir_block(&mut block, 2, 2, reserved_tail).unwrap();
+
+            // Insert as many names as fit; track which actually landed.
+            let mut inserted: Vec<Vec<u8>> = Vec::new();
+            for (i, name) in names.iter().enumerate() {
+                let child_ino = u32::try_from(i + 3).unwrap();
+                if add_entry(&mut block, child_ino, name, Ext4FileType::RegFile, reserved_tail).is_ok() {
+                    inserted.push(name.clone());
+                }
+            }
+            prop_assume!(!inserted.is_empty());
+
+            // Stamp the pre-removal block fully (the on-disk starting state).
+            ffs_ondisk::stamp_dir_block_checksum(&mut block, seed, ino, generation);
+
+            let victim = victim_idx.get(&inserted);
+            let (_removed_ino, edit) =
+                remove_entry_take_inode_tracked(&mut block, victim, reserved_tail)
+                    .unwrap()
+                    .expect("victim was inserted, so it must be present");
+
+            // Incremental tail update from the reported edit span.
+            let delta = edit.delta(&block);
+            let applied = ffs_ondisk::ext4::stamp_dir_block_checksum_incremental(
+                &mut block,
+                edit.region_start,
+                &delta,
+            );
+            prop_assert!(applied, "incremental update should apply for an in-region edit");
+
+            // Full recompute of the post-removal block must match byte-for-byte.
+            let mut reference = block.clone();
+            ffs_ondisk::stamp_dir_block_checksum(&mut reference, seed, ino, generation);
+            prop_assert_eq!(block, reference);
+        }
     }
 }
