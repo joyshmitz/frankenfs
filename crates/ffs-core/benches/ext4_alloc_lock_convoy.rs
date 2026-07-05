@@ -19,6 +19,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 const GROUPS: usize = 8;
 const THREADS: usize = 8;
 const OPS_PER_THREAD: usize = 20_000;
+const MICRO_BATCH: usize = 64;
 
 #[derive(Clone)]
 struct GroupModel {
@@ -96,6 +97,31 @@ fn run_global_mutex(state: &Arc<Mutex<Vec<GroupModel>>>) -> u64 {
     total.load(Ordering::Relaxed)
 }
 
+fn run_global_rwlock_microbatch(state: &Arc<RwLock<Vec<GroupModel>>>) -> u64 {
+    let total = Arc::new(AtomicU64::new(0));
+    std::thread::scope(|scope| {
+        for thread_id in 0..THREADS {
+            let state = Arc::clone(state);
+            let total = Arc::clone(&total);
+            scope.spawn(move || {
+                let group = thread_id % GROUPS;
+                let mut local = 0_u64;
+                let mut op = 0;
+                while op < OPS_PER_THREAD {
+                    let end = (op + MICRO_BATCH).min(OPS_PER_THREAD);
+                    let mut groups = state.write();
+                    for batched_op in op..end {
+                        local = local.wrapping_add(groups[group].account_alloc(batched_op));
+                    }
+                    op = end;
+                }
+                total.fetch_add(local, Ordering::Relaxed);
+            });
+        }
+    });
+    total.load(Ordering::Relaxed)
+}
+
 fn run_sharded_mutex(state: &Arc<Vec<Mutex<GroupModel>>>) -> u64 {
     let total = Arc::new(AtomicU64::new(0));
     std::thread::scope(|scope| {
@@ -119,6 +145,7 @@ fn run_sharded_mutex(state: &Arc<Vec<Mutex<GroupModel>>>) -> u64 {
 fn bench_ext4_alloc_lock_convoy(c: &mut Criterion) {
     let rwlock_probe = Arc::new(RwLock::new(make_groups()));
     let mutex_probe = Arc::new(Mutex::new(make_groups()));
+    let microbatch_probe = Arc::new(RwLock::new(make_groups()));
     let sharded_probe = Arc::new(
         make_groups()
             .into_iter()
@@ -131,6 +158,11 @@ fn bench_ext4_alloc_lock_convoy(c: &mut Criterion) {
         expected,
         run_global_mutex(&Arc::new(Mutex::new(make_groups()))),
         "global mutex changed accounting result"
+    );
+    assert_eq!(
+        expected,
+        run_global_rwlock_microbatch(&Arc::new(RwLock::new(make_groups()))),
+        "microbatched global rwlock changed accounting result"
     );
     assert_eq!(
         expected,
@@ -149,6 +181,9 @@ fn bench_ext4_alloc_lock_convoy(c: &mut Criterion) {
     });
     group.bench_function("global_mutex", |b| {
         b.iter(|| black_box(run_global_mutex(black_box(&mutex_probe))));
+    });
+    group.bench_function("global_rwlock_microbatch_64", |b| {
+        b.iter(|| black_box(run_global_rwlock_microbatch(black_box(&microbatch_probe))));
     });
     group.bench_function("sharded_group_mutex", |b| {
         b.iter(|| black_box(run_sharded_mutex(black_box(&sharded_probe))));
