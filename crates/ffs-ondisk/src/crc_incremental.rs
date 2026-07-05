@@ -132,6 +132,63 @@ fn crc32c_shift_bits(crc: u32, mut zero_bits: u64) -> u32 {
     c
 }
 
+/// Identity operator (column-major): column `n` selects bit `n`.
+fn gf2_identity() -> [u32; 32] {
+    let mut m = [0u32; 32];
+    for (n, col) in m.iter_mut().enumerate() {
+        *col = 1u32 << n;
+    }
+    m
+}
+
+/// GF(2) 32×32 matrix product `a·b` (column-major), so
+/// `gf2_matrix_times(a·b, v) == gf2_matrix_times(a, gf2_matrix_times(b, v))`.
+fn gf2_matrix_mul(a: &[u32; 32], b: &[u32; 32]) -> [u32; 32] {
+    let mut out = [0u32; 32];
+    for (n, col) in out.iter_mut().enumerate() {
+        *col = gf2_matrix_times(a, b[n]);
+    }
+    out
+}
+
+/// Byte-granular shift operators for a *constant-time* CRC advance. `lo[j]`
+/// advances by `j` zero bytes (`8j` bits), `hi[k]` by `k·256` zero bytes. Any
+/// byte count `n < 65536` factors as `hi[n>>8] · lo[n & 0xFF]`, so
+/// [`crc32c_shift_bytes`] is exactly TWO matrix-vector products regardless of
+/// `n` — versus [`crc32c_shift_bits`]'s `popcount(8n)` products (1..≈15, avg ~8
+/// for a random offset in a 4 KiB block). ~64 KiB of static tables, built once.
+#[allow(clippy::type_complexity)]
+fn byte_shift_operators() -> &'static ([[u32; 32]; 256], [[u32; 32]; 256]) {
+    static TABLES: OnceLock<([[u32; 32]; 256], [[u32; 32]; 256])> = OnceLock::new();
+    TABLES.get_or_init(|| {
+        let ops = shift_operators();
+        let op8 = ops[3]; // shift by 2^3 = 8 bits = 1 byte
+        let op2048 = ops[11]; // shift by 2^11 = 2048 bits = 256 bytes
+        let mut lo = [[0u32; 32]; 256];
+        let mut hi = [[0u32; 32]; 256];
+        lo[0] = gf2_identity();
+        hi[0] = gf2_identity();
+        for j in 1..256 {
+            lo[j] = gf2_matrix_mul(&op8, &lo[j - 1]);
+            hi[j] = gf2_matrix_mul(&op2048, &hi[j - 1]);
+        }
+        (lo, hi)
+    })
+}
+
+/// Advance `crc` as if `zero_bytes` zero bytes were appended, in constant time
+/// (two matrix-vector products) for any `zero_bytes < 65536` — covering every
+/// ext4/btrfs block size. Falls back to the bit-decomposition shift for larger
+/// counts (never reached for ≤64 KiB blocks).
+fn crc32c_shift_bytes(crc: u32, zero_bytes: usize) -> u32 {
+    if zero_bytes >= 65536 {
+        return crc32c_shift_bits(crc, (zero_bytes as u64) * 8);
+    }
+    let (lo, hi) = byte_shift_operators();
+    let c = gf2_matrix_times(&lo[zero_bytes & 0xFF], crc);
+    gf2_matrix_times(&hi[zero_bytes >> 8], c)
+}
+
 /// Incrementally update a standard CRC32C after an in-place change.
 ///
 /// `old_crc` is `crc32c(buffer_before)`. The change replaced `buffer[start..start+delta.len()]`
@@ -141,7 +198,11 @@ fn crc32c_shift_bits(crc: u32, mut zero_bits: u64) -> u32 {
 #[must_use]
 pub fn crc32c_update_region(old_crc: u32, delta: &[u8], suffix_bytes: usize) -> u32 {
     let raw = raw_crc32c(delta);
-    old_crc ^ crc32c_shift_bits(raw, (suffix_bytes as u64) * 8)
+    // Constant-time (two matrix products) suffix shift, independent of where in
+    // the block the change lands — replaces the popcount-many products of the
+    // bit-decomposition shift, which dominated the incremental cost after the
+    // hardware-crc delta win.
+    old_crc ^ crc32c_shift_bytes(raw, suffix_bytes)
 }
 
 #[cfg(test)]
