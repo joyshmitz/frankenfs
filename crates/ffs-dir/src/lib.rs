@@ -158,6 +158,34 @@ fn write_entry(
     Ok(())
 }
 
+/// Largest changed-span (bytes) for which an *incremental* dir-block checksum
+/// update ([`ffs_ondisk::stamp_dir_block_checksum_incremental`]) beats a full
+/// ~4 KiB CRC recompute. Above this the caller must full-recompute.
+///
+/// An insert into a near-full block splits a small slack, so the changed span is
+/// ~one entry (tens of bytes) — well under this — capturing the common
+/// large-directory create/rename. An insert into a near-*empty* block splits the
+/// one huge free slot (span ≈ whole block), and its zero-fill of the vacated
+/// slack can touch arbitrary stale bytes, so the span exceeds this and we fall
+/// back to a full recompute (which is exactly today's behaviour). The bench
+/// `dir_csum_incremental` crosses over well below 256 B, so this is conservative.
+pub const INCREMENTAL_DIR_CSUM_MAX_SPAN: usize = 256;
+
+/// Build a [`DirBlockEdit`] snapshotting `block[region_start..region_end]` — but
+/// only when the span is non-empty and small enough for an incremental checksum
+/// to win ([`INCREMENTAL_DIR_CSUM_MAX_SPAN`]); otherwise `None`, signalling the
+/// caller to full-recompute. Must be called on the PRE-mutation block.
+fn dir_block_edit(block: &[u8], region_start: usize, region_end: usize) -> Option<DirBlockEdit> {
+    let len = region_end.checked_sub(region_start)?;
+    if len == 0 || len > INCREMENTAL_DIR_CSUM_MAX_SPAN {
+        return None;
+    }
+    Some(DirBlockEdit {
+        region_start,
+        old_bytes: block[region_start..region_end].to_vec(),
+    })
+}
+
 /// Add a directory entry into a single directory block.
 ///
 /// Uses ext4-style `rec_len` management:
@@ -174,6 +202,22 @@ pub fn add_entry(
     file_type: Ext4FileType,
     reserved_tail: usize,
 ) -> Result<usize> {
+    add_entry_tracked(block, ino, name, file_type, reserved_tail).map(|(off, _)| off)
+}
+
+/// Like [`add_entry`], but also returns an optional [`DirBlockEdit`] describing
+/// the changed byte span, so a `metadata_csum` caller can update the dir-block
+/// checksum tail *incrementally* instead of re-CRCing the whole block. The edit
+/// is `Some` only when the change span is small enough to win
+/// ([`INCREMENTAL_DIR_CSUM_MAX_SPAN`]) — an insert into a near-empty block
+/// (huge slack + zero-fill) returns `None`, telling the caller to full-recompute.
+pub fn add_entry_tracked(
+    block: &mut [u8],
+    ino: u32,
+    name: &[u8],
+    file_type: Ext4FileType,
+    reserved_tail: usize,
+) -> Result<(usize, Option<DirBlockEdit>)> {
     if ino == 0 {
         return Err(FfsError::Format(
             "directory entry inode cannot be zero".to_owned(),
@@ -236,8 +280,11 @@ pub fn add_entry(
 
         if cur_ino == 0 {
             if rec_len >= need {
+                // Tombstone reuse overwrites the whole slot `[off, off+rec_len)`
+                // (header + name + zero-fill). Snapshot before the write.
+                let edit = dir_block_edit(block, off, end);
                 write_entry(block, off, ino, rec_len, file_type, name)?;
-                return Ok(off);
+                return Ok((off, edit));
             }
             off = end;
             continue;
@@ -253,12 +300,18 @@ pub fn add_entry(
 
         let slack = rec_len - actual;
         if slack >= need {
+            // The split rewrites the shortened entry's `rec_len` (at `off+4`) and
+            // writes the new entry into the vacated slack `[off+actual, end)`; the
+            // untouched interior (the shortened entry's name) yields a zero delta.
+            // The enclosing changed span is `[off+4, end)`. Snapshot before the
+            // writes.
+            let edit = dir_block_edit(block, off + 4, end);
             let actual_u16 = u16::try_from(actual)
                 .map_err(|_| FfsError::Format("actual rec_len exceeds u16".to_owned()))?;
             write_u16_le(block, off + 4, actual_u16)?;
             let new_off = off + actual;
             write_entry(block, new_off, ino, slack, file_type, name)?;
-            return Ok(new_off);
+            return Ok((new_off, edit));
         }
 
         off = end;
@@ -353,6 +406,21 @@ pub fn add_entry_reject_existing(
     file_type: Ext4FileType,
     reserved_tail: usize,
 ) -> Result<usize> {
+    add_entry_reject_existing_tracked(block, ino, name, file_type, reserved_tail).map(|(off, _)| off)
+}
+
+/// Like [`add_entry_reject_existing`], but also returns an optional
+/// [`DirBlockEdit`] describing the changed byte span for an incremental
+/// `metadata_csum` tail update (see [`add_entry_tracked`]). The edit is `Some`
+/// only when the change span is small enough to win
+/// ([`INCREMENTAL_DIR_CSUM_MAX_SPAN`]).
+pub fn add_entry_reject_existing_tracked(
+    block: &mut [u8],
+    ino: u32,
+    name: &[u8],
+    file_type: Ext4FileType,
+    reserved_tail: usize,
+) -> Result<(usize, Option<DirBlockEdit>)> {
     // Single pass: reject a duplicate live `name` AND locate the first fitting
     // slot in ONE scan, instead of `block_contains_live_name` + `add_entry` each
     // walking the whole ~4 KiB block (the two scans were ~4% and ~3% of a create,
@@ -461,16 +529,20 @@ pub fn add_entry_reject_existing(
 
     match slot {
         Some(Slot::Tombstone { off, rec_len }) => {
+            let end = off + rec_len;
+            let edit = dir_block_edit(block, off, end);
             write_entry(block, off, ino, rec_len, file_type, name)?;
-            Ok(off)
+            Ok((off, edit))
         }
         Some(Slot::Split { off, actual, slack }) => {
+            let end = off + actual + slack;
+            let edit = dir_block_edit(block, off + 4, end);
             let actual_u16 = u16::try_from(actual)
                 .map_err(|_| FfsError::Format("actual rec_len exceeds u16".to_owned()))?;
             write_u16_le(block, off + 4, actual_u16)?;
             let new_off = off + actual;
             write_entry(block, new_off, ino, slack, file_type, name)?;
-            Ok(new_off)
+            Ok((new_off, edit))
         }
         None => Err(FfsError::NoSpace),
     }
@@ -2510,6 +2582,69 @@ mod tests {
             let mut reference = block.clone();
             ffs_ondisk::stamp_dir_block_checksum(&mut reference, seed, ino, generation);
             prop_assert_eq!(block, reference);
+        }
+
+        /// Adding an entry then updating the metadata_csum tail *incrementally*
+        /// from the tracked [`DirBlockEdit`] (when `Some`) must yield a
+        /// byte-identical block to a full recompute — covering both the
+        /// tombstone-reuse and slack-split insert cases across block fills. When
+        /// the edit is `None` (span too large) the caller full-recomputes, which
+        /// is trivially identical, so we assert only the `Some` path here.
+        #[test]
+        fn add_tracked_incremental_matches_full_stamp(
+            seed in any::<u32>(),
+            ino in any::<u32>(),
+            generation in any::<u32>(),
+            preload in proptest::collection::btree_set(valid_dir_name_strategy(16), 0..24),
+            new_name in valid_dir_name_strategy(16),
+            reuse_tombstone in any::<bool>(),
+        ) {
+            let block_len = 512_usize;
+            let reserved_tail = 12_usize;
+            let mut block = vec![0_u8; block_len];
+            init_dir_block(&mut block, 2, 2, reserved_tail).unwrap();
+
+            // Preload entries to vary block fill (near-empty .. near-full).
+            let mut next_ino = 3_u32;
+            for name in &preload {
+                if *name == new_name {
+                    continue;
+                }
+                if add_entry(&mut block, next_ino, name, Ext4FileType::RegFile, reserved_tail).is_ok() {
+                    next_ino += 1;
+                }
+            }
+            // Optionally create a leading tombstone by removing the first added
+            // entry, exercising the tombstone-reuse branch.
+            if reuse_tombstone {
+                if let Some(first) = preload.iter().find(|n| **n != new_name) {
+                    let _ = remove_entry(&mut block, first, reserved_tail);
+                }
+            }
+
+            // Stamp the pre-insert block fully (the on-disk starting state).
+            ffs_ondisk::stamp_dir_block_checksum(&mut block, seed, ino, generation);
+
+            let Ok((_off, maybe_edit)) =
+                add_entry_tracked(&mut block, next_ino, &new_name, Ext4FileType::RegFile, reserved_tail)
+            else {
+                return Ok(()); // NoSpace: nothing to check.
+            };
+
+            if let Some(edit) = maybe_edit {
+                prop_assert!(edit.old_bytes.len() <= INCREMENTAL_DIR_CSUM_MAX_SPAN);
+                let delta = edit.delta(&block);
+                let applied = ffs_ondisk::ext4::stamp_dir_block_checksum_incremental(
+                    &mut block,
+                    edit.region_start,
+                    &delta,
+                );
+                prop_assert!(applied, "incremental update should apply for an in-region edit");
+
+                let mut reference = block.clone();
+                ffs_ondisk::stamp_dir_block_checksum(&mut reference, seed, ino, generation);
+                prop_assert_eq!(block, reference);
+            }
         }
     }
 }

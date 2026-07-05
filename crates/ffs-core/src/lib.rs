@@ -17439,6 +17439,24 @@ impl OpenFs {
     /// checksum tail). No-op when the filesystem lacks `metadata_csum`. Verified
     /// bit-identical to [`Self::stamp_ext4_dir_block`] by the ffs-dir proptest
     /// `remove_tracked_incremental_matches_full_stamp`.
+    /// Stamp an ext4 directory block's `metadata_csum` tail after an insert,
+    /// using the incremental path when the tracked add reported a small enough
+    /// changed span (`edit = Some`) and a full recompute otherwise (`edit =
+    /// None`, e.g. a split of a near-empty block's huge free slot). No-op when
+    /// the filesystem lacks `metadata_csum`.
+    fn stamp_ext4_dir_block_maybe_incremental(
+        &self,
+        block: &mut [u8],
+        dir_ino: u32,
+        generation: u32,
+        edit: Option<&ffs_dir::DirBlockEdit>,
+    ) {
+        match edit {
+            Some(edit) => self.stamp_ext4_dir_block_after_edit(block, dir_ino, generation, edit),
+            None => self.stamp_ext4_dir_block(block, dir_ino, generation),
+        }
+    }
+
     fn stamp_ext4_dir_block_after_edit(
         &self,
         block: &mut [u8],
@@ -17745,15 +17763,20 @@ impl OpenFs {
                 // callers skip a separate positive `lookup_name` (a full second
                 // htree descent). A full leaf with no duplicate still returns
                 // NoSpace and falls through to the leaf-split path below.
-                match ffs_dir::add_entry_reject_existing(
+                match ffs_dir::add_entry_reject_existing_tracked(
                     &mut data,
                     child_ino_u32,
                     name,
                     file_type,
                     reserved_tail,
                 ) {
-                    Ok(_) => {
-                        self.stamp_ext4_dir_block(&mut data, parent_ino_u32, parent_generation);
+                    Ok((_, edit)) => {
+                        self.stamp_ext4_dir_block_maybe_incremental(
+                            &mut data,
+                            parent_ino_u32,
+                            parent_generation,
+                            edit.as_ref(),
+                        );
                         dev.write_block(cx, target_phys, &data)?;
 
                         let mut parent_upd = parent_inode.clone();
@@ -17838,15 +17861,20 @@ impl OpenFs {
                 }
                 for block in Self::extent_phys_blocks(ext) {
                     let mut data = self.read_block_vec(cx, block)?;
-                    match ffs_dir::add_entry(
+                    match ffs_dir::add_entry_tracked(
                         &mut data,
                         child_ino_u32,
                         name,
                         file_type,
                         reserved_tail,
                     ) {
-                        Ok(_) => {
-                            self.stamp_ext4_dir_block(&mut data, parent_ino_u32, parent_generation);
+                        Ok((_, edit)) => {
+                            self.stamp_ext4_dir_block_maybe_incremental(
+                                &mut data,
+                                parent_ino_u32,
+                                parent_generation,
+                                edit.as_ref(),
+                            );
                             dev.write_block(cx, block, &data)?;
 
                             // Update parent metadata (timestamps and link count if it's a new directory).
