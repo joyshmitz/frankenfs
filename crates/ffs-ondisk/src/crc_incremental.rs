@@ -39,17 +39,40 @@ fn crc32c_byte_table() -> &'static [u32; 256] {
     })
 }
 
+/// Delta length at/below which the byte-wise software table beats the
+/// hardware-crc path. For a short delta the one-lookup-per-byte loop is only a
+/// handful of iterations, cheaper than a `crc32c` crate call plus the single
+/// init-constant shift the standard→raw conversion needs; above it the hardware
+/// CRC32C (8 bytes/instruction) wins decisively. Measured crossover is a few
+/// tens of bytes (bench `crc_incremental`: `incremental_8b` unchanged,
+/// `incremental_128b` drops sharply).
+const HW_RAW_CRC_MIN_LEN: usize = 16;
+
 /// Raw reflected CRC32C: init 0, no final XOR. Linear in its input, unlike the
-/// standard crc (init/final make it affine). Table-driven (one lookup per byte)
-/// so it stays cheap even on a larger changed region, keeping the incremental
-/// win over the SIMD full recompute across a wider delta range.
+/// standard crc (init/final make it affine), which is what the incremental
+/// combine needs.
+///
+/// Short deltas use the byte-wise table (one lookup per byte). Longer deltas use
+/// the hardware-accelerated `crc32c` crate (SSE4.2 CRC32 instruction, ~8
+/// bytes/instr) and convert its *standard* result to the raw form via CRC
+/// linearity: `std(d) = shift(0xFFFF_FFFF, 8·len) XOR R0(d) XOR 0xFFFF_FFFF`
+/// (init all-ones, invert output), hence
+/// `R0(d) = std(d) XOR 0xFFFF_FFFF XOR shift(0xFFFF_FFFF, 8·len)`. The single
+/// init-constant shift is O(log len) and independent of the delta bytes, so for
+/// a delta beyond [`HW_RAW_CRC_MIN_LEN`] this replaces up to hundreds of table
+/// iterations with a few hardware CRC instructions.
 fn raw_crc32c(data: &[u8]) -> u32 {
-    let table = crc32c_byte_table();
-    let mut crc = 0u32;
-    for &b in data {
-        crc = table[((crc ^ u32::from(b)) & 0xFF) as usize] ^ (crc >> 8);
+    if data.len() <= HW_RAW_CRC_MIN_LEN {
+        let table = crc32c_byte_table();
+        let mut crc = 0u32;
+        for &b in data {
+            crc = table[((crc ^ u32::from(b)) & 0xFF) as usize] ^ (crc >> 8);
+        }
+        crc
+    } else {
+        let std = crc32c::crc32c(data);
+        std ^ 0xFFFF_FFFF ^ crc32c_shift_bits(0xFFFF_FFFF, (data.len() as u64) * 8)
     }
-    crc
 }
 
 /// Multiply a GF(2) 32×32 matrix (stored column-major as 32 u32s) by a vector.
@@ -154,6 +177,13 @@ mod tests {
         check(&base, 2000, &[0x5A; 32]);
         check(&base, 4064, &[0xAB; 32]);
         check(&base, 1, &[0u8; 100]);
+        // Straddle the byte-table / hardware-crc crossover (HW_RAW_CRC_MIN_LEN).
+        check(&base, 10, &[0x11; 15]);
+        check(&base, 10, &[0x22; 16]);
+        check(&base, 10, &[0x33; 17]);
+        check(&base, 500, &[0xC3; 200]);
+        check(&base, 0, &[0x7Eu8; 256]);
+        check(&base, 3840, &[0x01u8; 256]);
     }
 
     #[test]
@@ -166,7 +196,9 @@ mod tests {
         };
         let base: Vec<u8> = (0..8192u32).map(|i| (i.wrapping_mul(101) & 0xFF) as u8).collect();
         for _ in 0..500 {
-            let len = 1 + (next() as usize % 64);
+            // Sizes 1..=300 exercise both the byte-table (<= HW_RAW_CRC_MIN_LEN)
+            // and hardware-crc (>) branches, spanning the create path's 256 B gate.
+            let len = 1 + (next() as usize % 300);
             let start = (next() as usize) % (base.len() - len);
             let new_bytes: Vec<u8> = (0..len).map(|_| (next() & 0xFF) as u8).collect();
             check(&base, start, &new_bytes);
