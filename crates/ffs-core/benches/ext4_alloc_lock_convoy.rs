@@ -6,9 +6,10 @@
 //! taken in exclusive mode across metadata writes. This benchmark isolates the
 //! lock topology from filesystem semantics: the same per-group accounting work
 //! runs under (a) the current whole-state `RwLock::write`, (b) a whole-state
-//! `Mutex`, and (c) per-group `Mutex` shards. It is not a production proof for
-//! sharding; it is a small guard that quantifies why lock-implementation swaps
-//! cannot recover the measured bd-bhh0i gap while real sharding can.
+//! `Mutex`, (c) per-group `Mutex` shards, and (d) a per-group atomic range
+//! lease. It is not a production proof for sharding; it is a small guard that
+//! quantifies why lock-implementation swaps cannot recover the measured
+//! bd-bhh0i gap while real sharding can.
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use parking_lot::{Mutex, RwLock};
@@ -53,8 +54,57 @@ impl GroupModel {
     }
 }
 
+#[repr(align(64))]
+struct AtomicGroupModel {
+    free_inodes: AtomicU64,
+    checksum_words: [AtomicU64; 16],
+}
+
+impl AtomicGroupModel {
+    fn new(group: usize) -> Self {
+        Self {
+            free_inodes: AtomicU64::new(1_000_000),
+            checksum_words: std::array::from_fn(|idx| {
+                AtomicU64::new(((group as u64) << 32) ^ (idx as u64).wrapping_mul(0x9E37_79B9))
+            }),
+        }
+    }
+
+    fn account_alloc_range_lease(&self, start_op: usize, count: usize) -> u64 {
+        let first_free_inode = self
+            .free_inodes
+            .fetch_sub(count as u64, Ordering::Relaxed)
+            .wrapping_sub(1);
+        let mut checksum_words: [u64; 16] =
+            std::array::from_fn(|idx| self.checksum_words[idx].load(Ordering::Relaxed));
+        let mut local = 0_u64;
+        for offset in 0..count {
+            let op = start_op + offset;
+            let free_inodes = first_free_inode.wrapping_sub(offset as u64);
+            let lane = op & (checksum_words.len() - 1);
+            let mix = (op as u64)
+                .wrapping_mul(0xA24B_AED4_963E_E407)
+                .rotate_left((lane as u32) & 31);
+            let next = checksum_words[lane]
+                .wrapping_add(free_inodes)
+                .rotate_left(7)
+                ^ mix;
+            checksum_words[lane] = next;
+            local = local.wrapping_add(next);
+        }
+        for (idx, word) in checksum_words.into_iter().enumerate() {
+            self.checksum_words[idx].store(word, Ordering::Relaxed);
+        }
+        local
+    }
+}
+
 fn make_groups() -> Vec<GroupModel> {
     (0..GROUPS).map(GroupModel::new).collect()
+}
+
+fn make_atomic_groups() -> Arc<Vec<AtomicGroupModel>> {
+    Arc::new((0..GROUPS).map(AtomicGroupModel::new).collect())
 }
 
 fn run_global_rwlock(state: &Arc<RwLock<Vec<GroupModel>>>) -> u64 {
@@ -142,6 +192,22 @@ fn run_sharded_mutex(state: &Arc<Vec<Mutex<GroupModel>>>) -> u64 {
     total.load(Ordering::Relaxed)
 }
 
+fn run_per_group_atomic_range_lease(state: &Arc<Vec<AtomicGroupModel>>) -> u64 {
+    let total = Arc::new(AtomicU64::new(0));
+    std::thread::scope(|scope| {
+        for thread_id in 0..THREADS {
+            let state = Arc::clone(state);
+            let total = Arc::clone(&total);
+            scope.spawn(move || {
+                let group = thread_id % GROUPS;
+                let local = state[group].account_alloc_range_lease(0, OPS_PER_THREAD);
+                total.fetch_add(local, Ordering::Relaxed);
+            });
+        }
+    });
+    total.load(Ordering::Relaxed)
+}
+
 fn bench_ext4_alloc_lock_convoy(c: &mut Criterion) {
     let rwlock_probe = Arc::new(RwLock::new(make_groups()));
     let mutex_probe = Arc::new(Mutex::new(make_groups()));
@@ -152,6 +218,7 @@ fn bench_ext4_alloc_lock_convoy(c: &mut Criterion) {
             .map(Mutex::new)
             .collect::<Vec<_>>(),
     );
+    let atomic_probe = make_atomic_groups();
 
     let expected = run_global_rwlock(&Arc::new(RwLock::new(make_groups())));
     assert_eq!(
@@ -174,6 +241,11 @@ fn bench_ext4_alloc_lock_convoy(c: &mut Criterion) {
         )),
         "sharded mutex changed accounting result"
     );
+    assert_eq!(
+        expected,
+        run_per_group_atomic_range_lease(&make_atomic_groups()),
+        "per-group atomic range-lease model changed accounting result"
+    );
 
     let mut group = c.benchmark_group("ext4_alloc_lock_convoy_8t");
     group.bench_function("global_rwlock_write", |b| {
@@ -187,6 +259,9 @@ fn bench_ext4_alloc_lock_convoy(c: &mut Criterion) {
     });
     group.bench_function("sharded_group_mutex", |b| {
         b.iter(|| black_box(run_sharded_mutex(black_box(&sharded_probe))));
+    });
+    group.bench_function("per_group_atomic_range_lease", |b| {
+        b.iter(|| black_box(run_per_group_atomic_range_lease(black_box(&atomic_probe))));
     });
     group.finish();
 }
