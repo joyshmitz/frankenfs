@@ -18251,10 +18251,17 @@ impl OpenFs {
         } else {
             &mut old_leaf
         };
-        ffs_dir::add_entry(target_buf, child_ino_u32, name, file_type, reserved_tail)?;
+        let (_off, edit) =
+            ffs_dir::add_entry_tracked(target_buf, child_ino_u32, name, file_type, reserved_tail)?;
         // Re-stamp the leaf we just modified (the split already stamped both, but
-        // add_entry changed this one's bytes).
-        self.stamp_ext4_dir_block(target_buf, parent_ino_u32, generation);
+        // add_entry changed this one's bytes) — incrementally when the changed
+        // span is small (the single inserted entry), else a full recompute.
+        self.stamp_ext4_dir_block_maybe_incremental(
+            target_buf,
+            parent_ino_u32,
+            generation,
+            edit.as_ref(),
+        );
 
         // Allocate the physical block for the new leaf and map it at
         // `new_leaf_logical` in the extent tree.
@@ -18493,8 +18500,14 @@ impl OpenFs {
         } else {
             &mut old_leaf
         };
-        ffs_dir::add_entry(target_buf, child_ino_u32, name, file_type, reserved_tail)?;
-        self.stamp_ext4_dir_block(target_buf, parent_ino_u32, generation);
+        let (_off, edit) =
+            ffs_dir::add_entry_tracked(target_buf, child_ino_u32, name, file_type, reserved_tail)?;
+        self.stamp_ext4_dir_block_maybe_incremental(
+            target_buf,
+            parent_ino_u32,
+            generation,
+            edit.as_ref(),
+        );
 
         let hint = self.numa_allocation_hint(
             &alloc.geo,
