@@ -17,6 +17,29 @@ fn bench(c: &mut Criterion) {
     g.bench_function("full_recompute_1k", |b| b.iter(|| black_box(crc32c::crc32c(black_box(&bitmap1k)))));
     g.bench_function("crc_of_delta_8b", |b| b.iter(|| black_box(crc32c::crc32c(black_box(&delta)))));
     g.finish();
+
+    // Zero-tail-aware block-bitmap checksum (production `block_bitmap_checksum_value`).
+    // A group fills bottom-up, so a partially-full group's 4 KiB bitmap is a live
+    // prefix + a zero tail (free high blocks) — the zero tail is skipped via the
+    // GF(2) shift. `full` (0xA5, no trailing zeros) falls back to the straight CRC
+    // and is the ORIG cost; `partial` (25% full) shows the win.
+    use ffs_ondisk::ext4::block_bitmap_checksum_value;
+    let seed = 0xDEAD_BEEFu32;
+    let clusters = 32768u32; // 4096-byte bitmap
+    let desc = 64u16;
+    let mut partial = vec![0u8; 4096];
+    for byte in partial.iter_mut().take(1024) {
+        *byte = 0xFF; // ~8192 of 32768 blocks allocated (25% full)
+    }
+    let full = vec![0xA5u8; 4096];
+    let mut g2 = c.benchmark_group("bitmap_csum_value");
+    g2.bench_function("full_straight", |b| {
+        b.iter(|| black_box(block_bitmap_checksum_value(black_box(&full), seed, clusters, desc)))
+    });
+    g2.bench_function("partial_zeroaware", |b| {
+        b.iter(|| black_box(block_bitmap_checksum_value(black_box(&partial), seed, clusters, desc)))
+    });
+    g2.finish();
 }
 criterion_group!(benches, bench);
 criterion_main!(benches);

@@ -1757,7 +1757,9 @@ impl Ext4GroupDesc {
 /// for inode bitmaps.
 fn ext4_bitmap_checksum(raw_bitmap: &[u8], csum_seed: u32, checksum_len: usize) -> u32 {
     let len = checksum_len.min(raw_bitmap.len());
-    ext4_chksum(csum_seed, &raw_bitmap[..len])
+    // A partially-full group's bitmap is a live prefix (allocated low blocks/
+    // inodes) followed by a zero tail (free high ones); skip that tail.
+    ext4_chksum_skip_zero_tail(csum_seed, &raw_bitmap[..len])
 }
 
 #[must_use]
@@ -2276,28 +2278,32 @@ pub fn stamp_dir_block_checksum(dir_block: &mut [u8], csum_seed: u32, ino: u32, 
     let seed = ext4_chksum(csum_seed, &ino.to_le_bytes());
     let seed = ext4_chksum(seed, &generation.to_le_bytes());
     let coverage_end = bs - 12;
-    let computed = crc_dir_coverage(seed, &dir_block[..coverage_end]);
+    let computed = ext4_chksum_skip_zero_tail(seed, &dir_block[..coverage_end]);
     dir_block[bs - 4..bs].copy_from_slice(&computed.to_le_bytes());
 }
 
-/// CRC the directory-block coverage region, skipping a large trailing zero run
-/// algebraically instead of streaming it. A freshly-built dir block (mkdir's
-/// initial `.`/`..` block, a newly-allocated leaf, or a large-slack insert) is a
-/// short entry prefix followed by ~4 KiB of zeros, so CRCing only the non-zero
-/// prefix and advancing the running CRC over the zero tail
-/// ([`crate::crc_incremental::crc32c_shift_bytes`]) replaces a ~4 KiB CRC with a
-/// ~tens-of-bytes CRC. Falls back to a straight CRC when the trailing zero run is
-/// too short to beat the reverse-scan + shift overhead. Result-identical to
-/// `ext4_chksum(seed, coverage)` (proptest `stamp_dir_block_checksum_zero_tail`).
-fn crc_dir_coverage(seed: u32, coverage: &[u8]) -> u32 {
+/// `ext4_chksum(seed, data)` that skips a large trailing zero run algebraically
+/// instead of streaming it. Two ext4 metadata regions are a short live prefix
+/// followed by a long zero tail: a freshly-built directory block (mkdir's initial
+/// `.`/`..` block, a newly-allocated leaf, a large-slack insert = entries then a
+/// ~4 KiB zero gap) and a partially-full group's block/inode bitmap (allocators
+/// fill bottom-up, so the high blocks/inodes — the tail bytes — are still 0).
+/// Since `crc(prefix ++ zeros) = crc32c_shift_bytes(crc(prefix), N)`, a 4-wide
+/// reverse zero-scan finds the content boundary and the zero tail costs one
+/// GF(2) shift instead of a full CRC. Falls back to a straight CRC when the
+/// trailing zero run is too short to beat the reverse-scan + shift overhead
+/// (self-correcting: a full region's reverse-scan hits non-zero immediately).
+/// Result-identical to `ext4_chksum(seed, data)` (proptest
+/// `stamp_dir_block_checksum_zero_tail_matches_full`).
+fn ext4_chksum_skip_zero_tail(seed: u32, data: &[u8]) -> u32 {
     const MIN_ZERO_RUN: usize = 256;
-    let content_end = last_nonzero_len(coverage);
-    let zero_run = coverage.len() - content_end;
+    let content_end = last_nonzero_len(data);
+    let zero_run = data.len() - content_end;
     if zero_run >= MIN_ZERO_RUN {
-        let prefix_crc = ext4_chksum(seed, &coverage[..content_end]);
+        let prefix_crc = ext4_chksum(seed, &data[..content_end]);
         crate::crc_incremental::crc32c_shift_bytes(prefix_crc, zero_run)
     } else {
-        ext4_chksum(seed, coverage)
+        ext4_chksum(seed, data)
     }
 }
 
