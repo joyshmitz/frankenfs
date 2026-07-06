@@ -180,7 +180,14 @@ fn byte_shift_operators() -> &'static ([[u32; 32]; 256], [[u32; 32]; 256]) {
 /// (two matrix-vector products) for any `zero_bytes < 65536` — covering every
 /// ext4/btrfs block size. Falls back to the bit-decomposition shift for larger
 /// counts (never reached for ≤64 KiB blocks).
-fn crc32c_shift_bytes(crc: u32, zero_bytes: usize) -> u32 {
+///
+/// This is a raw running-CRC advance: given the running CRC after some prefix,
+/// it returns the running CRC after that prefix followed by `zero_bytes` zeros,
+/// without touching those bytes. Callers that CRC a block with a large trailing
+/// zero run (a freshly-built directory block: entries then a zero gap) can CRC
+/// only the non-zero prefix and shift over the rest.
+#[must_use]
+pub fn crc32c_shift_bytes(crc: u32, zero_bytes: usize) -> u32 {
     if zero_bytes >= 65536 {
         return crc32c_shift_bits(crc, (zero_bytes as u64) * 8);
     }

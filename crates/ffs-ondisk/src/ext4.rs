@@ -2276,8 +2276,50 @@ pub fn stamp_dir_block_checksum(dir_block: &mut [u8], csum_seed: u32, ino: u32, 
     let seed = ext4_chksum(csum_seed, &ino.to_le_bytes());
     let seed = ext4_chksum(seed, &generation.to_le_bytes());
     let coverage_end = bs - 12;
-    let computed = ext4_chksum(seed, &dir_block[..coverage_end]);
+    let computed = crc_dir_coverage(seed, &dir_block[..coverage_end]);
     dir_block[bs - 4..bs].copy_from_slice(&computed.to_le_bytes());
+}
+
+/// CRC the directory-block coverage region, skipping a large trailing zero run
+/// algebraically instead of streaming it. A freshly-built dir block (mkdir's
+/// initial `.`/`..` block, a newly-allocated leaf, or a large-slack insert) is a
+/// short entry prefix followed by ~4 KiB of zeros, so CRCing only the non-zero
+/// prefix and advancing the running CRC over the zero tail
+/// ([`crate::crc_incremental::crc32c_shift_bytes`]) replaces a ~4 KiB CRC with a
+/// ~tens-of-bytes CRC. Falls back to a straight CRC when the trailing zero run is
+/// too short to beat the reverse-scan + shift overhead. Result-identical to
+/// `ext4_chksum(seed, coverage)` (proptest `stamp_dir_block_checksum_zero_tail`).
+fn crc_dir_coverage(seed: u32, coverage: &[u8]) -> u32 {
+    const MIN_ZERO_RUN: usize = 256;
+    let content_end = last_nonzero_len(coverage);
+    let zero_run = coverage.len() - content_end;
+    if zero_run >= MIN_ZERO_RUN {
+        let prefix_crc = ext4_chksum(seed, &coverage[..content_end]);
+        crate::crc_incremental::crc32c_shift_bytes(prefix_crc, zero_run)
+    } else {
+        ext4_chksum(seed, coverage)
+    }
+}
+
+/// Index one past the last non-zero byte in `buf` (0 if all-zero), via a 4-wide
+/// reverse word scan that skips 32-byte all-zero blocks in one OR-reduce (the
+/// same branchless-scan shape as the allocator's zero finders), then a byte tail.
+fn last_nonzero_len(buf: &[u8]) -> usize {
+    let mut end = buf.len();
+    while end >= 32 {
+        let base = end - 32;
+        let word = |o: usize| -> u64 {
+            u64::from_ne_bytes(buf[base + o..base + o + 8].try_into().unwrap())
+        };
+        if (word(0) | word(8) | word(16) | word(24)) != 0 {
+            break;
+        }
+        end = base;
+    }
+    while end > 0 && buf[end - 1] == 0 {
+        end -= 1;
+    }
+    end
 }
 
 /// Incrementally update a directory block's checksum tail after a single
@@ -16649,6 +16691,38 @@ mod tests {
     }
 
     proptest! {
+        /// The zero-tail-skipping `crc_dir_coverage` fast path (used by
+        /// `stamp_dir_block_checksum`) must be byte-identical to a straight
+        /// `ext4_chksum` over the whole coverage, for any content prefix, any
+        /// trailing-zero-run length (straddling the MIN_ZERO_RUN threshold), and
+        /// any seed/ino/generation.
+        #[test]
+        fn stamp_dir_block_checksum_zero_tail_matches_full(
+            seed in any::<u32>(),
+            ino in any::<u32>(),
+            generation in any::<u32>(),
+            content in proptest::collection::vec(any::<u8>(), 0..300),
+            zero_tail in 0usize..5000,
+        ) {
+            let coverage_len = content.len() + zero_tail;
+            let bs = coverage_len + 12;
+            let mut block = vec![0u8; bs];
+            block[..content.len()].copy_from_slice(&content);
+
+            let s = ext4_chksum(seed, &ino.to_le_bytes());
+            let s = ext4_chksum(s, &generation.to_le_bytes());
+            let expected = ext4_chksum(s, &block[..coverage_len]);
+
+            stamp_dir_block_checksum(&mut block, seed, ino, generation);
+            let got = u32::from_le_bytes([
+                block[bs - 4],
+                block[bs - 3],
+                block[bs - 2],
+                block[bs - 1],
+            ]);
+            prop_assert_eq!(got, expected);
+        }
+
         /// Metamorphic relation: if the same directory names are re-indexed
         /// under hash_version=1 (half_md4) and hash_version=2 (TEA), and the
         /// DX entries are regenerated consistently for that version, each
