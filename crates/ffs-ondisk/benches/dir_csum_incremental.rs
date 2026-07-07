@@ -90,6 +90,22 @@ fn bench(c: &mut Criterion) {
         })
     });
     ge.finish();
+
+    // Superblock checksum: coverage is [0, 0x3FC); the ~392-byte s_reserved[98]
+    // region before s_checksum is zero on standard filesystems.
+    use ffs_ondisk::ext4::{ext4_chksum, ext4_chksum_skip_zero_tail};
+    let mut sb = vec![0u8; 0x3FC];
+    for (i, byte) in sb.iter_mut().take(0x274).enumerate() {
+        *byte = (i as u8).wrapping_add(1); // live fields up to s_reserved
+    }
+    let mut gs = c.benchmark_group("sb_csum");
+    gs.bench_function("full_straight", |b| {
+        b.iter(|| black_box(ext4_chksum(black_box(!0u32), black_box(&sb))))
+    });
+    gs.bench_function("zero_aware", |b| {
+        b.iter(|| black_box(ext4_chksum_skip_zero_tail(black_box(!0u32), black_box(&sb))))
+    });
+    gs.finish();
 }
 criterion_group!(benches, bench);
 criterion_main!(benches);

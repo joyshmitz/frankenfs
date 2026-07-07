@@ -4460,7 +4460,7 @@ impl OpenFs {
         // Phase 2: Update in-memory flavor cache.
         if let FsFlavor::Ext4(sb) = &mut self.flavor {
             if sb.has_metadata_csum() {
-                let csum = ffs_ondisk::ext4_chksum(
+                let csum = ffs_ondisk::ext4::ext4_chksum_skip_zero_tail(
                     !0u32,
                     &block_data[sb_off..sb_off + EXT4_SB_CHECKSUM_OFFSET],
                 );
@@ -16856,7 +16856,7 @@ impl OpenFs {
             block_data[sb_off + 0x158..sb_off + 0x15C].copy_from_slice(&fb_hi.to_le_bytes());
         }
         if has_csum {
-            let csum = ffs_ondisk::ext4_chksum(
+            let csum = ffs_ondisk::ext4::ext4_chksum_skip_zero_tail(
                 !0u32,
                 &block_data[sb_off..sb_off + EXT4_SB_CHECKSUM_OFFSET],
             );
@@ -34354,7 +34354,7 @@ impl FsOps for OpenFs {
                 block_data[label_start..label_start + label.len()].copy_from_slice(label);
 
                 if sb.has_metadata_csum() {
-                    let checksum = ffs_ondisk::ext4::ext4_chksum(
+                    let checksum = ffs_ondisk::ext4::ext4_chksum_skip_zero_tail(
                         !0u32,
                         &block_data[sb_off..sb_off + EXT4_SB_CHECKSUM_OFFSET],
                     );
@@ -54417,8 +54417,10 @@ mod tests {
         );
         feature_incompat |= incompat_bits;
         data[incompat_off..incompat_off + 4].copy_from_slice(&feature_incompat.to_le_bytes());
-        let checksum =
-            ffs_ondisk::ext4::ext4_chksum(!0u32, &data[sb_off..sb_off + EXT4_SB_CHECKSUM_OFFSET]);
+        let checksum = ffs_ondisk::ext4::ext4_chksum_skip_zero_tail(
+            !0u32,
+            &data[sb_off..sb_off + EXT4_SB_CHECKSUM_OFFSET],
+        );
         data[checksum_off..checksum_off + 4].copy_from_slice(&checksum.to_le_bytes());
 
         let cx = Cx::for_testing();

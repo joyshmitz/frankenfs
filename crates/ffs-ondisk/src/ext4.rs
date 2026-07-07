@@ -1268,7 +1268,9 @@ impl Ext4Superblock {
             });
         }
         // kernel: ext4_chksum(sbi, ~0, es, offsetof(s_checksum))
-        let computed = ext4_chksum(!0u32, &raw_region[..EXT4_SB_CHECKSUM_OFFSET]);
+        // The ~392-byte s_reserved[98] region before s_checksum is zero on
+        // standard filesystems, so skip that zero tail algebraically.
+        let computed = ext4_chksum_skip_zero_tail(!0u32, &raw_region[..EXT4_SB_CHECKSUM_OFFSET]);
         if computed != self.checksum {
             return Err(ParseError::InvalidField {
                 field: "s_checksum",
@@ -2295,7 +2297,8 @@ pub fn stamp_dir_block_checksum(dir_block: &mut [u8], csum_seed: u32, ino: u32, 
 /// (self-correcting: a full region's reverse-scan hits non-zero immediately).
 /// Result-identical to `ext4_chksum(seed, data)` (proptest
 /// `stamp_dir_block_checksum_zero_tail_matches_full`).
-fn ext4_chksum_skip_zero_tail(seed: u32, data: &[u8]) -> u32 {
+#[must_use]
+pub fn ext4_chksum_skip_zero_tail(seed: u32, data: &[u8]) -> u32 {
     const MIN_ZERO_RUN: usize = 256;
     let content_end = last_nonzero_len(data);
     let zero_run = data.len() - content_end;
