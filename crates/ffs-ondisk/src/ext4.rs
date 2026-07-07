@@ -2561,7 +2561,10 @@ pub fn stamp_extent_block_checksum(
 
     let seed = ext4_chksum(csum_seed, &ino.to_le_bytes());
     let seed = ext4_chksum(seed, &generation.to_le_bytes());
-    let computed = ext4_chksum(seed, &extent_block[..tail_off]);
+    // Coverage spans ALL `eh_max` entry slots; a non-full extent node
+    // (`eh_entries < eh_max`) leaves the trailing slots zeroed, so skip that
+    // zero run algebraically.
+    let computed = ext4_chksum_skip_zero_tail(seed, &extent_block[..tail_off]);
     extent_block[tail_off..tail_off + 4].copy_from_slice(&computed.to_le_bytes());
 }
 

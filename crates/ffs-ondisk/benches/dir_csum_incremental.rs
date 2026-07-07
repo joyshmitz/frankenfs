@@ -3,7 +3,7 @@
 //!   CARGO_TARGET_DIR=/data/projects/.rch-targets/fs-cc rch exec -- cargo bench --profile release-perf -p ffs-ondisk --bench dir_csum_incremental
 use criterion::{Criterion, criterion_group, criterion_main};
 use std::hint::black_box;
-use ffs_ondisk::ext4::{stamp_dir_block_checksum, stamp_dir_block_checksum_incremental};
+use ffs_ondisk::ext4::{stamp_dir_block_checksum, stamp_dir_block_checksum_incremental, stamp_extent_block_checksum};
 fn bench(c: &mut Criterion) {
     let bs = 4096usize;
     let seed = 0xDEAD_BEEFu32; let ino = 42u32; let generation = 7u32;
@@ -61,6 +61,35 @@ fn bench(c: &mut Criterion) {
         })
     });
     gf.finish();
+
+    // Extent-tree node checksum: coverage spans all eh_max slots. A NOT-FULL node
+    // (few entries, rest zeroed) has a zero tail the zero-aware CRC skips; a FULL
+    // node (all slots used) falls back to the straight CRC (the ORIG cost).
+    let eh_max: u16 = 340; // 4 KiB block: (4096-16)/12
+    let mut not_full = vec![0u8; bs];
+    not_full[0..2].copy_from_slice(&0xF30Au16.to_le_bytes()); // eh_magic
+    not_full[2..4].copy_from_slice(&4u16.to_le_bytes()); // eh_entries = 4
+    not_full[4..6].copy_from_slice(&eh_max.to_le_bytes());
+    for (i, byte) in not_full.iter_mut().skip(12).take(48).enumerate() {
+        *byte = (i as u8).wrapping_add(1); // 4 used extents (48 bytes)
+    }
+    let mut full = vec![0xA5u8; bs];
+    full[2..4].copy_from_slice(&eh_max.to_le_bytes());
+    full[4..6].copy_from_slice(&eh_max.to_le_bytes());
+    let mut ge = c.benchmark_group("extent_csum");
+    ge.bench_function("full_straight", |b| {
+        b.iter(|| {
+            stamp_extent_block_checksum(black_box(&mut full), black_box(seed), black_box(ino), black_box(generation));
+            black_box(full[bs - 1])
+        })
+    });
+    ge.bench_function("not_full_zeroaware", |b| {
+        b.iter(|| {
+            stamp_extent_block_checksum(black_box(&mut not_full), black_box(seed), black_box(ino), black_box(generation));
+            black_box(not_full[bs - 1])
+        })
+    });
+    ge.finish();
 }
 criterion_group!(benches, bench);
 criterion_main!(benches);
