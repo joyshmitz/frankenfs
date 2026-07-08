@@ -6,10 +6,10 @@
 //! taken in exclusive mode across metadata writes. This benchmark isolates the
 //! lock topology from filesystem semantics: the same per-group accounting work
 //! runs under (a) the current whole-state `RwLock::write`, (b) a whole-state
-//! `Mutex`, (c) per-group `Mutex` shards, and (d) a per-group atomic range
-//! lease. It is not a production proof for sharding; it is a small guard that
-//! quantifies why lock-implementation swaps cannot recover the measured
-//! bd-bhh0i gap while real sharding can.
+//! `Mutex`, (c) per-group `Mutex` shards, (d) a per-group atomic range lease,
+//! and (e) a private per-thread/group delta fold. It is not a production proof
+//! for sharding; it is a small guard that quantifies why lock-implementation
+//! swaps cannot recover the measured bd-bhh0i gap while real sharding can.
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use parking_lot::{Mutex, RwLock};
@@ -208,6 +208,44 @@ fn run_per_group_atomic_range_lease(state: &Arc<Vec<AtomicGroupModel>>) -> u64 {
     total.load(Ordering::Relaxed)
 }
 
+fn run_per_thread_group_delta_fold() -> u64 {
+    let total = Arc::new(AtomicU64::new(0));
+    let published = Arc::new(
+        (0..GROUPS)
+            .map(|group| Mutex::new(GroupModel::new(group)))
+            .collect::<Vec<_>>(),
+    );
+
+    std::thread::scope(|scope| {
+        for thread_id in 0..THREADS {
+            let total = Arc::clone(&total);
+            let published = Arc::clone(&published);
+            scope.spawn(move || {
+                let group = thread_id % GROUPS;
+                let mut local_group = GroupModel::new(group);
+                let mut local = 0_u64;
+                for op in 0..OPS_PER_THREAD {
+                    local = local.wrapping_add(local_group.account_alloc(op));
+                }
+                *published[group].lock() = local_group;
+                total.fetch_add(local, Ordering::Relaxed);
+            });
+        }
+    });
+
+    let mut digest = 0_u64;
+    for group in published.iter() {
+        let group = group.lock();
+        digest = digest.wrapping_add(group.free_inodes);
+        for word in group.checksum_words {
+            digest ^= word.rotate_left((word & 31) as u32);
+        }
+    }
+    black_box(digest);
+
+    total.load(Ordering::Relaxed)
+}
+
 fn bench_ext4_alloc_lock_convoy(c: &mut Criterion) {
     let rwlock_probe = Arc::new(RwLock::new(make_groups()));
     let mutex_probe = Arc::new(Mutex::new(make_groups()));
@@ -246,6 +284,11 @@ fn bench_ext4_alloc_lock_convoy(c: &mut Criterion) {
         run_per_group_atomic_range_lease(&make_atomic_groups()),
         "per-group atomic range-lease model changed accounting result"
     );
+    assert_eq!(
+        expected,
+        run_per_thread_group_delta_fold(),
+        "per-thread/group delta-fold model changed accounting result"
+    );
 
     let mut group = c.benchmark_group("ext4_alloc_lock_convoy_8t");
     group.bench_function("global_rwlock_write", |b| {
@@ -262,6 +305,9 @@ fn bench_ext4_alloc_lock_convoy(c: &mut Criterion) {
     });
     group.bench_function("per_group_atomic_range_lease", |b| {
         b.iter(|| black_box(run_per_group_atomic_range_lease(black_box(&atomic_probe))));
+    });
+    group.bench_function("per_thread_group_delta_fold", |b| {
+        b.iter(|| black_box(run_per_thread_group_delta_fold()));
     });
     group.finish();
 }
