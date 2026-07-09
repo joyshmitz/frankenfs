@@ -2861,6 +2861,17 @@ impl Ext4Inode {
         Self::parse_from_bytes_with_ibody(bytes, Ext4InodeIbodyParse::MetadataOnly)
     }
 
+    /// Parse only the fields `inode_to_attr` needs (getattr/lookup hot path).
+    ///
+    /// Like [`Self::parse_metadata_from_bytes`] but ALSO skips the 60-byte
+    /// `i_block`/extent copy for non-device inodes — the attr path reads
+    /// `extent_bytes` only via `device_number()` (char/block-device rdev, which
+    /// is still supplied). The parsed inode MUST NOT escape the attr computation
+    /// (a regular file's `extent_bytes` is empty here).
+    pub fn parse_attr_from_bytes(bytes: &[u8]) -> Result<Self, ParseError> {
+        Self::parse_from_bytes_with_ibody(bytes, Ext4InodeIbodyParse::AttrOnly)
+    }
+
     #[allow(clippy::too_many_lines, clippy::similar_names)]
     fn parse_from_bytes_with_ibody(
         bytes: &[u8],
@@ -2881,6 +2892,8 @@ impl Ext4Inode {
 
         let is_reg = (mode & ffs_types::S_IFMT) == ffs_types::S_IFREG;
         let is_dir = (mode & ffs_types::S_IFMT) == ffs_types::S_IFDIR;
+        let is_device = (mode & ffs_types::S_IFMT) == ffs_types::S_IFCHR
+            || (mode & ffs_types::S_IFMT) == ffs_types::S_IFBLK;
         let size_lo = u64::from(read_le_u32(bytes, 0x04)?);
         let size_hi = if (is_reg || is_dir) && bytes.len() >= 0x70 {
             u64::from(read_le_u32(bytes, 0x6C)?)
@@ -2895,8 +2908,15 @@ impl Ext4Inode {
         let file_acl_lo = u64::from(read_le_u32(bytes, 0x68)?);
 
         // Extent bytes: i_block[0..14] = 60 bytes at offset 0x28
-        // Only read if we have enough data (some truncated test inodes may be short)
-        let extent_bytes = if bytes.len() >= 0x28 + 60 {
+        // Only read if we have enough data (some truncated test inodes may be short).
+        // AttrOnly skips this 60-byte copy for non-devices (the attr path reads
+        // it only via device_number() for char/block-device rdev).
+        let need_extent_bytes =
+            ibody_parse != Ext4InodeIbodyParse::AttrOnly || is_device;
+        let extent_bytes = if !need_extent_bytes {
+            // AttrOnly + non-device: skip the 60-byte copy entirely (empty).
+            Ext4InodeBlockBytes::new()
+        } else if bytes.len() >= 0x28 + 60 {
             Ext4InodeBlockBytes::from_slice(&read_fixed::<60>(bytes, 0x28)?)
         } else {
             Ext4InodeBlockBytes::from_slice(&[0_u8; 60])
@@ -3309,6 +3329,12 @@ impl Ext4Inode {
 enum Ext4InodeIbodyParse {
     Full,
     MetadataOnly,
+    /// Like `MetadataOnly`, but ALSO skips the 60-byte `i_block`/extent copy for
+    /// non-device inodes. The attr path (`inode_to_attr`) reads `extent_bytes`
+    /// only via `device_number()` for char/block devices (which we still
+    /// supply); for regular files/dirs/symlinks it never touches it, so the copy
+    /// is pure waste. The parsed inode never escapes the attr computation.
+    AttrOnly,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

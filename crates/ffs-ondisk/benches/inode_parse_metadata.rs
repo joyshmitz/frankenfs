@@ -26,15 +26,33 @@ fn make_inode() -> [u8; 256] {
     b
 }
 
+/// A char-device inode: i_block[0] holds the old-format rdev.
+fn make_device_inode() -> [u8; 256] {
+    let mut b = make_inode();
+    b[0..2].copy_from_slice(&0x21A4u16.to_le_bytes()); // i_mode = S_IFCHR | 0644
+    b[0x28..0x2C].copy_from_slice(&0x0103u32.to_le_bytes()); // i_block[0] = rdev 1:3
+    b
+}
+
 fn bench(c: &mut Criterion) {
     let buf = make_inode();
     let full = Ext4Inode::parse_from_bytes(&buf).expect("full parse");
     let meta = Ext4Inode::parse_metadata_from_bytes(&buf).expect("metadata parse");
-    // The metadata parse skips the ibody copy; both agree on the fixed fields.
+    let attr = Ext4Inode::parse_attr_from_bytes(&buf).expect("attr parse");
+    // metadata skips the ibody copy; attr ALSO skips the extent copy (non-device).
     assert_eq!(full.size, meta.size);
-    assert_eq!(full.mode, meta.mode);
+    assert_eq!(full.mode, attr.mode);
     assert!(meta.xattr_ibody.is_empty());
     assert!(!full.xattr_ibody.is_empty());
+    assert!(attr.extent_bytes.is_empty(), "attr skips extents for a regular file");
+    // But a DEVICE inode keeps extent_bytes so device_number() still works.
+    let dev = make_device_inode();
+    let dev_attr = Ext4Inode::parse_attr_from_bytes(&dev).expect("attr parse device");
+    assert_eq!(
+        dev_attr.device_number(),
+        Ext4Inode::parse_from_bytes(&dev).unwrap().device_number(),
+        "device rdev preserved under attr parse"
+    );
 
     let mut g = c.benchmark_group("inode_parse");
     g.bench_function("full", |b| {
@@ -42,6 +60,9 @@ fn bench(c: &mut Criterion) {
     });
     g.bench_function("metadata", |b| {
         b.iter(|| black_box(Ext4Inode::parse_metadata_from_bytes(black_box(&buf)).unwrap()))
+    });
+    g.bench_function("attr", |b| {
+        b.iter(|| black_box(Ext4Inode::parse_attr_from_bytes(black_box(&buf)).unwrap()))
     });
     g.finish();
 }

@@ -10803,6 +10803,24 @@ impl OpenFs {
         Ok(inode)
     }
 
+    /// Attr-path read: parses via `parse_attr_from_bytes`, which additionally
+    /// skips the 60-byte extent copy for non-device inodes. The returned inode
+    /// MUST be consumed only by `inode_to_attr` (a regular file's `extent_bytes`
+    /// is empty here); `inode_to_attr` reads them only via `device_number()`.
+    fn read_inode_attr_only_with_scope(
+        &self,
+        cx: &Cx,
+        scope: &RequestScope,
+        ino: InodeNumber,
+    ) -> Result<Ext4Inode, FfsError> {
+        let inode =
+            self.read_inode_raw_with_scope_using(cx, scope, ino, Ext4Inode::parse_attr_from_bytes)?;
+        if inode.mode == 0 {
+            return Err(FfsError::NotFound(format!("inode {}", ino.0)));
+        }
+        Ok(inode)
+    }
+
     fn read_inode_raw_with_scope(
         &self,
         cx: &Cx,
@@ -10940,7 +10958,7 @@ impl OpenFs {
         let sb = self
             .ext4_superblock()
             .ok_or_else(|| FfsError::Format("not an ext4 filesystem".into()))?;
-        let inode = self.read_inode_metadata_with_scope(cx, scope, ino)?;
+        let inode = self.read_inode_attr_only_with_scope(cx, scope, ino)?;
         let attr = inode_to_attr(sb, ino, &inode);
         if use_attr_cache {
             self.ext4_inode_attr_cache
