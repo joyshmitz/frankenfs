@@ -1400,6 +1400,35 @@ fn path_component_has_slash_or_nul(name: &[u8]) -> bool {
     false
 }
 
+/// Index of the first NUL byte, via the has-zero-byte SWAR trick — word-at-a-time
+/// instead of a byte-by-byte `iter().position(|&b| b == 0)`. Used to trim a
+/// symlink target at its NUL terminator; a slow-symlink buffer (up to PATH_MAX)
+/// with no NUL scans to the end, where 8 bytes/iter is a large win. Bit-identical
+/// to `buf.iter().position(|&b| b == 0)`.
+#[inline]
+fn first_nul(buf: &[u8]) -> Option<usize> {
+    const ONES: u64 = 0x0101_0101_0101_0101;
+    const HIGHS: u64 = 0x8080_8080_8080_8080;
+    let mut i = 0;
+    while i + 8 <= buf.len() {
+        let w = u64::from_le_bytes(buf[i..i + 8].try_into().unwrap());
+        let z = w.wrapping_sub(ONES) & !w & HIGHS;
+        if z != 0 {
+            // Little-endian: the lowest-address zero byte sets the lowest 0x80,
+            // so `trailing_zeros / 8` is its index within the word.
+            return Some(i + (z.trailing_zeros() / 8) as usize);
+        }
+        i += 8;
+    }
+    while i < buf.len() {
+        if buf[i] == 0 {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
 impl CacheShard for u64 {
     #[inline]
     fn cache_shard(&self) -> usize {
@@ -13167,7 +13196,7 @@ impl OpenFs {
         // Fast symlink: target stored inline in extent_bytes
         if let Some(target) = inode.fast_symlink_target() {
             let mut buf = target.to_vec();
-            if let Some(pos) = buf.iter().position(|&b| b == 0) {
+            if let Some(pos) = first_nul(&buf) {
                 buf.truncate(pos);
             }
             return Ok(buf);
@@ -13183,7 +13212,7 @@ impl OpenFs {
         let mut buf = vec![0_u8; len];
         self.read_file_data(cx, scope, inode, 0, &mut buf)?;
         // Trim trailing NUL
-        if let Some(pos) = buf.iter().position(|&b| b == 0) {
+        if let Some(pos) = first_nul(&buf) {
             buf.truncate(pos);
         }
         Ok(buf)
