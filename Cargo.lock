@@ -1015,6 +1015,7 @@ dependencies = [
 name = "ffs-dir"
 version = "0.1.0"
 dependencies = [
+ "criterion",
  "ffs-error",
  "ffs-ondisk",
  "libc",
