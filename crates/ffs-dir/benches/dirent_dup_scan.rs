@@ -64,6 +64,47 @@ fn scan<F: Fn(&[u8], &[u8]) -> bool>(block: &[u8], name: &[u8], reserved_tail: u
     false
 }
 
+/// Same scan but reading rec_len/ino/name_len via `Option`-returning bounds-
+/// checked accessors (mirrors production `read_u16_le`/`read_u32_le`), vs `scan`
+/// which indexes directly (the loop invariant proves in-bounds → the compiler
+/// elides the checks). Isolates the per-entry read overhead.
+#[inline]
+fn scan_checked<F: Fn(&[u8], &[u8]) -> bool>(
+    block: &[u8],
+    name: &[u8],
+    reserved_tail: usize,
+    eq: F,
+) -> bool {
+    let rd16 = |b: &[u8], i: usize| -> Option<u16> {
+        b.get(i..i + 2).map(|s| u16::from_le_bytes([s[0], s[1]]))
+    };
+    let rd32 = |b: &[u8], i: usize| -> Option<u32> {
+        b.get(i..i + 4).map(|s| u32::from_le_bytes([s[0], s[1], s[2], s[3]]))
+    };
+    let limit = block.len() - reserved_tail;
+    let mut off = 0usize;
+    while off + HDR <= limit {
+        let Some(rec_len) = rd16(block, off + 4).map(usize::from) else {
+            break;
+        };
+        if rec_len < HDR || rec_len % 4 != 0 {
+            break;
+        }
+        let end = off + rec_len;
+        if end > limit {
+            break;
+        }
+        let Some(cur_ino) = rd32(block, off) else { break };
+        let cur_name_len = usize::from(block[off + 6]);
+        let name_end = off + HDR + cur_name_len;
+        if name_end <= end && cur_ino != 0 && eq(&block[off + HDR..name_end], name) {
+            return true;
+        }
+        off = end;
+    }
+    false
+}
+
 fn bench(c: &mut Criterion) {
     let bs = 4096usize;
     let reserved_tail = 12usize;
@@ -92,6 +133,11 @@ fn bench(c: &mut Criterion) {
     });
     g.bench_function("swar", |b| {
         b.iter(|| black_box(scan(black_box(&block), black_box(miss), reserved_tail, names_eq_swar)))
+    });
+    // Checked-read (production read_u16_le style) + SWAR vs direct-index + SWAR:
+    // isolates whether the Option-returning bounds-checked reads cost anything.
+    g.bench_function("swar_checked_read", |b| {
+        b.iter(|| black_box(scan_checked(black_box(&block), black_box(miss), reserved_tail, names_eq_swar)))
     });
     g.finish();
     eprintln!("leaf entries scanned per call: {entries}");
