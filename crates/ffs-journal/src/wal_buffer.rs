@@ -60,6 +60,7 @@ impl EpochCounter {
     /// This is the only contention point in the per-core WAL design: a single
     /// atomic compare-and-update. Under typical workloads epoch advancement is
     /// infrequent (once per group commit), so contention is negligible.
+    #[allow(deprecated)]
     pub fn advance(&self) -> u64 {
         match self
             .value
@@ -323,6 +324,7 @@ thread_local! {
 /// Next thread-local core ID (used for tracing, not for CPU affinity).
 static NEXT_CORE_ID: AtomicU64 = AtomicU64::new(0);
 
+#[allow(deprecated)]
 fn allocate_core_id(counter: &AtomicU64) -> usize {
     let id = match counter.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
         current.checked_add(1)
@@ -535,6 +537,7 @@ impl EpochManager {
         }
     }
 
+    #[allow(deprecated)]
     fn increment_commits_in_epoch(&self) -> u64 {
         match self
             .commits_in_epoch

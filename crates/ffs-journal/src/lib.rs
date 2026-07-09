@@ -756,16 +756,18 @@ fn replay_jbd2_inner(
                     break;
                 }
                 stats.revoke_blocks = stats.revoke_blocks.saturating_add(1);
-                let Some(revokes) = strict_revoke_entries(raw.as_slice(), is_64bit, has_tail)
-                else {
+                let txn = pending.entry(header.sequence).or_default();
+                let Some(revoke_count) = extend_strict_revoke_events(
+                    raw.as_slice(),
+                    is_64bit,
+                    has_tail,
+                    &mut txn.body_events,
+                ) else {
                     break;
                 };
                 stats.revoke_entries = stats
                     .revoke_entries
-                    .saturating_add(u64::try_from(revokes.len()).unwrap_or(u64::MAX));
-                let txn = pending.entry(header.sequence).or_default();
-                txn.body_events
-                    .extend(revokes.into_iter().map(TxnBodyEvent::Revoke));
+                    .saturating_add(u64::try_from(revoke_count).unwrap_or(u64::MAX));
                 idx = idx.saturating_add(1);
             }
             _ => {
@@ -2959,7 +2961,7 @@ fn scan_committed_tail_transaction(
             }
             JBD2_BLOCKTYPE_REVOKE => {
                 saw_body = true;
-                if strict_revoke_entries(raw.as_slice(), is_64bit, has_tail).is_none() {
+                if strict_revoke_entry_count(raw.as_slice(), is_64bit, has_tail).is_none() {
                     return Ok(None);
                 }
                 idx = idx.saturating_add(1);
@@ -3009,6 +3011,86 @@ fn strict_revoke_entries(block: &[u8], is_64bit: bool, has_tail: bool) -> Option
     }
 
     Some(out)
+}
+
+fn strict_revoke_layout(block: &[u8], is_64bit: bool, has_tail: bool) -> Option<(usize, usize)> {
+    let r_count = usize::try_from(read_be_u32(block, 12)?).ok()?;
+    let entry_size = if is_64bit { 8 } else { 4 };
+    let limit = if has_tail {
+        block.len().saturating_sub(4)
+    } else {
+        block.len()
+    };
+
+    if r_count < JBD2_REVOKE_HEADER_SIZE || r_count > limit {
+        return None;
+    }
+    if (r_count - JBD2_REVOKE_HEADER_SIZE) % entry_size != 0 {
+        return None;
+    }
+
+    let entry_count = (r_count - JBD2_REVOKE_HEADER_SIZE) / entry_size;
+    Some((r_count, entry_count))
+}
+
+fn strict_revoke_entry_count(block: &[u8], is_64bit: bool, has_tail: bool) -> Option<usize> {
+    strict_revoke_layout(block, is_64bit, has_tail).map(|(_, entry_count)| entry_count)
+}
+
+fn extend_strict_revoke_events(
+    block: &[u8],
+    is_64bit: bool,
+    has_tail: bool,
+    events: &mut Vec<TxnBodyEvent>,
+) -> Option<usize> {
+    let (r_count, entry_count) = strict_revoke_layout(block, is_64bit, has_tail)?;
+    let entry_size = if is_64bit { 8 } else { 4 };
+    events.reserve(entry_count);
+
+    let mut offset = JBD2_REVOKE_HEADER_SIZE;
+    while offset.checked_add(entry_size)? <= r_count {
+        let target = if is_64bit {
+            let high = read_be_u32(block, offset)?;
+            let low = read_be_u32(block, offset + 4)?;
+            BlockNumber((u64::from(high) << 32) | u64::from(low))
+        } else {
+            BlockNumber(u64::from(read_be_u32(block, offset)?))
+        };
+        events.push(TxnBodyEvent::Revoke(target));
+        offset = offset.checked_add(entry_size)?;
+    }
+
+    Some(entry_count)
+}
+
+/// Benchmark-only shim: compare the original strict revoke decode path
+/// (materialize a `Vec<BlockNumber>`, then append events) with the fused
+/// scanner used by replay. Returns a deterministic checksum so the private
+/// event representation stays hidden from the benchmark crate.
+#[doc(hidden)]
+#[must_use]
+pub fn bench_revoke_decode(
+    block: &[u8],
+    is_64bit: bool,
+    has_tail: bool,
+    fused_events: bool,
+) -> u64 {
+    let mut events = Vec::new();
+    if fused_events {
+        if extend_strict_revoke_events(block, is_64bit, has_tail, &mut events).is_none() {
+            return 0;
+        }
+    } else {
+        let Some(revokes) = strict_revoke_entries(block, is_64bit, has_tail) else {
+            return 0;
+        };
+        events.extend(revokes.into_iter().map(TxnBodyEvent::Revoke));
+    }
+
+    let len = u64::try_from(events.len()).unwrap_or(u64::MAX);
+    events.iter().fold(len, |acc, event| match event {
+        TxnBodyEvent::Write(target, _) | TxnBodyEvent::Revoke(target) => acc ^ target.0,
+    })
 }
 
 #[cfg(test)]
@@ -3724,7 +3806,8 @@ mod tests {
         for len in [20_usize, 512, 4096, 16_384] {
             let mut block = commit_block(len, 0x5566_7788);
             for (i, byte) in block.iter_mut().enumerate().skip(JBD2_HEADER_SIZE) {
-                *byte = (i as u8).wrapping_mul(37).wrapping_add(11);
+                let low = u8::try_from(i & 0xFF).expect("masked index fits in u8");
+                *byte = low.wrapping_mul(37).wrapping_add(11);
             }
             block[JBD2_COMMIT_CHKSUM_OFFSET..JBD2_COMMIT_CHKSUM_OFFSET + JBD2_CHECKSUM_TAIL_SIZE]
                 .copy_from_slice(&0xDEAD_BEEFu32.to_be_bytes());
