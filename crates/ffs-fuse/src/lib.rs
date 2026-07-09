@@ -830,7 +830,7 @@ pub struct AtomicMetrics {
 }
 
 impl AtomicMetrics {
-    #[expect(
+    #[allow(
         deprecated,
         reason = "try_update requires Rust 1.95; workspace MSRV is 1.85"
     )]
@@ -1721,7 +1721,7 @@ struct IoctlTraceProbe {
 }
 
 impl IoctlTraceProbe {
-    #[expect(
+    #[allow(
         deprecated,
         reason = "try_update requires Rust 1.95; workspace MSRV is 1.85"
     )]

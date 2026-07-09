@@ -56,7 +56,7 @@ pub struct CoreMetrics {
 }
 
 impl CoreMetrics {
-    #[expect(
+    #[allow(
         deprecated,
         reason = "try_update requires Rust 1.95; workspace MSRV is 1.85"
     )]
@@ -71,7 +71,7 @@ impl CoreMetrics {
         }
     }
 
-    #[expect(
+    #[allow(
         deprecated,
         reason = "try_update requires Rust 1.95; workspace MSRV is 1.85"
     )]
@@ -86,7 +86,7 @@ impl CoreMetrics {
         }
     }
 
-    #[expect(
+    #[allow(
         deprecated,
         reason = "try_update requires Rust 1.95; workspace MSRV is 1.85"
     )]
