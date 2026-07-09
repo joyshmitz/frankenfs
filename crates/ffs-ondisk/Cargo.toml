@@ -107,3 +107,7 @@ harness = false
 [[bench]]
 name = "nul_scan"
 harness = false
+
+[[bench]]
+name = "walk_header_read"
+harness = false
