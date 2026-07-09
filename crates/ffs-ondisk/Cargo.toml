@@ -95,3 +95,7 @@ harness = false
 [[bench]]
 name = "path_validate"
 harness = false
+
+[[bench]]
+name = "root_ns_hash"
+harness = false

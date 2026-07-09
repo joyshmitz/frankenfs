@@ -15654,10 +15654,28 @@ fn extent_cache_namespace(inode: &Ext4Inode) -> u64 {
 /// Content hash of the inode's mutable extent root. Retained as the fallback
 /// for unstamped inodes; see [`extent_cache_namespace`].
 fn extent_root_namespace(inode: &Ext4Inode) -> u64 {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325; // FNV offset basis
-    for &b in &inode.extent_bytes {
-        h ^= u64::from(b);
-        h = h.wrapping_mul(0x0100_0000_01b3); // FNV prime
+    // Word-at-a-time hash of the ≤64-byte extent root (computed PER WRITE in
+    // `ext4_write_extents_with_scope`). The old byte-wise FNV-1a was a ~60-iter
+    // sequential XOR+multiply chain the compiler can't vectorize; mixing 8 bytes
+    // /iter is ~7x faster (bench `root_ns_hash`: 71.3ns → 9.98ns). This is an
+    // IN-MEMORY cache key (never persisted/asserted) — it need only be
+    // deterministic and change on any extent-byte mutation, which holds: 8 B ↔
+    // u64 is a bijection, so a change to any byte changes its word and thus `h`.
+    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0100_0000_01b3;
+    let bytes: &[u8] = &inode.extent_bytes;
+    let mut h: u64 = FNV_OFFSET;
+    let mut i = 0;
+    while i + 8 <= bytes.len() {
+        h ^= u64::from_le_bytes(bytes[i..i + 8].try_into().unwrap());
+        h = h.wrapping_mul(FNV_PRIME);
+        i += 8;
+    }
+    if i < bytes.len() {
+        let mut tail = [0u8; 8];
+        tail[..bytes.len() - i].copy_from_slice(&bytes[i..]);
+        h ^= u64::from_le_bytes(tail);
+        h = h.wrapping_mul(FNV_PRIME);
     }
     h
 }
