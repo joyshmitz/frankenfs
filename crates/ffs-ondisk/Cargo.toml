@@ -83,3 +83,7 @@ harness = false
 [[bench]]
 name = "dir_csum_incremental"
 harness = false
+
+[[bench]]
+name = "lookup_leaf_scan"
+harness = false
