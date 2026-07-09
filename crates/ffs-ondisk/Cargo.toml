@@ -135,3 +135,7 @@ harness = false
 [[bench]]
 name = "names_eq_crossover"
 harness = false
+
+[[bench]]
+name = "bloom_negative"
+harness = false
