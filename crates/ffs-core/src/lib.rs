@@ -33208,7 +33208,7 @@ impl FsOps for OpenFs {
                 let read_size = u32::try_from(capped)
                     .map_err(|_| FfsError::Format("symlink size exceeds u32 capacity".into()))?;
                 let mut target = self.btrfs_read_file(cx, ino, 0, read_size, true)?;
-                if let Some(nul) = target.iter().position(|b| *b == 0) {
+                if let Some(nul) = first_nul(&target) {
                     target.truncate(nul);
                 }
                 Ok(target)
@@ -33736,7 +33736,7 @@ impl FsOps for OpenFs {
         if target_len == 0 || target_len_exceeds_max {
             return Err(FfsError::NameTooLong);
         }
-        if target_bytes.contains(&0) {
+        if first_nul(target_bytes).is_some() {
             return Err(FfsError::Format(
                 "symlink target must not contain NUL".into(),
             ));
