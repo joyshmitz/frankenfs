@@ -119,3 +119,7 @@ harness = false
 [[bench]]
 name = "inode_parse_metadata"
 harness = false
+
+[[bench]]
+name = "inode_attr_times"
+harness = false
