@@ -234,13 +234,21 @@ impl ChallengeSet {
                 });
             }
         } else {
-            let mut visited = std::collections::HashSet::with_capacity(count as usize);
+            const BITS_PER_WORD: usize = 64;
+            let target_len = usize::try_from(count).expect("challenge count fits usize");
+            let word_count = usize::try_from(total_blocks)
+                .expect("block count fits usize")
+                .div_ceil(BITS_PER_WORD);
+            let mut visited = vec![0_u64; word_count];
             let mut buf = [0_u8; 4];
-            while selected.len() < count as usize {
+            while selected.len() < target_len {
                 reader.fill(&mut buf);
                 let raw = u32::from_le_bytes(buf);
                 let idx = raw % total_blocks;
-                if visited.insert(idx) {
+                let word = usize::try_from(idx / 64).expect("block index fits usize");
+                let mask = 1_u64 << (idx & 63);
+                if visited[word] & mask == 0 {
+                    visited[word] |= mask;
                     selected.push(Challenge {
                         index: u64::from(idx),
                         table_offset: idx,
@@ -673,9 +681,7 @@ mod tests {
         assert_eq!(responses.responses.len(), 50);
 
         // Verification.
-        let result = verify_responses(&key, &challenges, &responses, |idx| {
-            get_block(&blocks, idx)
-        });
+        let result = verify_responses(&key, &challenges, &responses, |idx| get_block(&blocks, idx));
 
         assert!(result.audit_passed);
         assert_eq!(result.passed, 50);
@@ -856,9 +862,7 @@ mod tests {
             nonce,
         };
 
-        let result = verify_responses(&key, &challenges, &responses, |idx| {
-            get_block(&blocks, idx)
-        });
+        let result = verify_responses(&key, &challenges, &responses, |idx| get_block(&blocks, idx));
 
         assert!(!result.audit_passed);
         assert_eq!(result.passed, 0);
@@ -890,9 +894,7 @@ mod tests {
             authenticator: compute_authenticator(&key, extra_index, &extra_block),
         });
 
-        let result = verify_responses(&key, &challenges, &responses, |idx| {
-            get_block(&blocks, idx)
-        });
+        let result = verify_responses(&key, &challenges, &responses, |idx| get_block(&blocks, idx));
         let challenged: Vec<u64> = challenges.challenges.iter().map(|c| c.index).collect();
 
         assert!(!result.audit_passed);

@@ -42,7 +42,7 @@ fn block_bytes(idx: u64) -> Vec<u8> {
     (0..BS).map(|i| prng(idx << 20 ^ i as u64)).collect()
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Challenge {
     index: u64,
     table_offset: u32,
@@ -119,7 +119,13 @@ fn bench_respond(c: &mut Criterion) {
         );
 
         group.bench_with_input(BenchmarkId::new("serial", n), &n, |b, _| {
-            b.iter(|| black_box(respond_serial(black_box(&challenges), black_box(&auth), read_block)));
+            b.iter(|| {
+                black_box(respond_serial(
+                    black_box(&challenges),
+                    black_box(&auth),
+                    read_block,
+                ))
+            });
         });
         group.bench_with_input(BenchmarkId::new("parallel_rayon", n), &n, |b, _| {
             b.iter(|| {
@@ -295,8 +301,7 @@ fn bench_build(c: &mut Criterion) {
     let key = [0x37_u8; 32];
     let mut group = c.benchmark_group("por_authtable_build");
     for &n in &[4096_usize, 16384, 32768] {
-        let blocks: Vec<(u64, Vec<u8>)> =
-            (0..n as u64).map(|i| (i, block_bytes(i))).collect();
+        let blocks: Vec<(u64, Vec<u8>)> = (0..n as u64).map(|i| (i, block_bytes(i))).collect();
 
         // Isomorphism: parallel build produces the identical authenticators, in order.
         assert_eq!(
@@ -315,5 +320,120 @@ fn bench_build(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_respond, bench_verify, bench_build);
+fn generate_hashset(seed: &[u8; 32], total_blocks: u32, challenge_count: u32) -> Vec<Challenge> {
+    let count = challenge_count.min(total_blocks).min(1_000_000);
+    let mut selected = Vec::with_capacity(count as usize);
+
+    if count == total_blocks {
+        for i in 0..total_blocks {
+            selected.push(Challenge {
+                index: u64::from(i),
+                table_offset: i,
+            });
+        }
+        return selected;
+    }
+
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(seed);
+    hasher.update(b"por-challenge-indices");
+    let mut reader = hasher.finalize_xof();
+    let mut visited = std::collections::HashSet::with_capacity(count as usize);
+    let mut buf = [0_u8; 4];
+    while selected.len() < count as usize {
+        reader.fill(&mut buf);
+        let raw = u32::from_le_bytes(buf);
+        let idx = raw % total_blocks;
+        if visited.insert(idx) {
+            selected.push(Challenge {
+                index: u64::from(idx),
+                table_offset: idx,
+            });
+        }
+    }
+    selected
+}
+
+fn generate_bitset(seed: &[u8; 32], total_blocks: u32, challenge_count: u32) -> Vec<Challenge> {
+    const BITS_PER_WORD: usize = 64;
+
+    let count = challenge_count.min(total_blocks).min(1_000_000);
+    let mut selected = Vec::with_capacity(count as usize);
+
+    if count == total_blocks {
+        for i in 0..total_blocks {
+            selected.push(Challenge {
+                index: u64::from(i),
+                table_offset: i,
+            });
+        }
+        return selected;
+    }
+
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(seed);
+    hasher.update(b"por-challenge-indices");
+    let mut reader = hasher.finalize_xof();
+    let word_count = usize::try_from(total_blocks)
+        .unwrap()
+        .div_ceil(BITS_PER_WORD);
+    let mut visited = vec![0_u64; word_count];
+    let mut buf = [0_u8; 4];
+    while selected.len() < count as usize {
+        reader.fill(&mut buf);
+        let raw = u32::from_le_bytes(buf);
+        let idx = raw % total_blocks;
+        let word = usize::try_from(idx / 64).unwrap();
+        let mask = 1_u64 << (idx & 63);
+        if visited[word] & mask == 0 {
+            visited[word] |= mask;
+            selected.push(Challenge {
+                index: u64::from(idx),
+                table_offset: idx,
+            });
+        }
+    }
+    selected
+}
+
+fn bench_challenge_generate(c: &mut Criterion) {
+    let seed = *blake3::hash(b"por-challenge-generation-bench").as_bytes();
+    let mut group = c.benchmark_group("por_challenge_generate");
+    for &(total_blocks, challenge_count) in &[(32_768_u32, 8_840_u32), (1_000_000, 8_840)] {
+        assert_eq!(
+            generate_hashset(&seed, total_blocks, challenge_count),
+            generate_bitset(&seed, total_blocks, challenge_count),
+            "bitset challenge generation diverged from legacy HashSet"
+        );
+
+        let label = format!("{total_blocks}_blocks_{challenge_count}_challenges");
+        group.bench_function(format!("hashset_legacy/{label}"), |b| {
+            b.iter(|| {
+                black_box(generate_hashset(
+                    black_box(&seed),
+                    black_box(total_blocks),
+                    black_box(challenge_count),
+                ))
+            });
+        });
+        group.bench_function(format!("bitset/{label}"), |b| {
+            b.iter(|| {
+                black_box(generate_bitset(
+                    black_box(&seed),
+                    black_box(total_blocks),
+                    black_box(challenge_count),
+                ))
+            });
+        });
+    }
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_respond,
+    bench_verify,
+    bench_build,
+    bench_challenge_generate
+);
 criterion_main!(benches);
