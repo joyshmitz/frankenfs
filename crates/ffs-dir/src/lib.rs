@@ -84,6 +84,39 @@ fn write_u32_le(buf: &mut [u8], off: usize, value: u32) -> Result<()> {
     Ok(())
 }
 
+/// SWAR one-pass test for a `/` or NUL byte, via the has-zero-byte trick
+/// (`haszero(w) | haszero(w ^ '/'*0x0101..)`), replacing two byte-by-byte
+/// `slice::contains` passes on the hot `validate_name` (every add/remove entry).
+/// Bit-identical to `name.contains(&b'/') || name.contains(&0)` (ffs-ondisk bench
+/// `path_validate`: ~3.4x on an 11-byte name — `slice::contains` for `u8` is not
+/// vectorized). Same has-zero SWAR primitive as ffs-core's path-component check.
+#[inline]
+fn name_has_slash_or_nul(name: &[u8]) -> bool {
+    const ONES: u64 = 0x0101_0101_0101_0101;
+    const HIGHS: u64 = 0x8080_8080_8080_8080;
+    const SLASH: u64 = 0x2F2F_2F2F_2F2F_2F2F;
+    #[inline]
+    fn haszero(v: u64) -> u64 {
+        v.wrapping_sub(ONES) & !v & HIGHS
+    }
+    let mut i = 0;
+    while i + 8 <= name.len() {
+        let w = u64::from_le_bytes(name[i..i + 8].try_into().unwrap());
+        if (haszero(w) | haszero(w ^ SLASH)) != 0 {
+            return true;
+        }
+        i += 8;
+    }
+    while i < name.len() {
+        let b = name[i];
+        if b == b'/' || b == 0 {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
 fn validate_name(name: &[u8]) -> Result<()> {
     if name.is_empty() {
         return Err(FfsError::Format(
@@ -95,12 +128,13 @@ fn validate_name(name: &[u8]) -> Result<()> {
             "directory entry name exceeds 255 bytes".to_owned(),
         ));
     }
-    if name.contains(&b'/') {
-        return Err(FfsError::Format(
-            "directory entry name cannot contain '/'".to_owned(),
-        ));
-    }
-    if name.contains(&0) {
+    // One SWAR pass for '/' or NUL; pinpoint the precise error on the cold path.
+    if name_has_slash_or_nul(name) {
+        if name.contains(&b'/') {
+            return Err(FfsError::Format(
+                "directory entry name cannot contain '/'".to_owned(),
+            ));
+        }
         return Err(FfsError::Format(
             "directory entry name cannot contain NUL".to_owned(),
         ));
