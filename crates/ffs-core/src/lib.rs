@@ -9401,11 +9401,18 @@ impl OpenFs {
                 // (no shard Mutex) when it matches. `load()` is a cheap arc-swap
                 // guard (no global refcount bump on the fast path); we clone only
                 // the inner entry Arc on a hit.
+                // Hold the arc_swap Guard and BORROW the entry Arc straight out
+                // on a hit, instead of `Arc::clone`-ing it per read — same
+                // lock-free-access tuning as the ext4 hot-inode/hot-parent slots
+                // (measured ~1.24x on lookup-bench, 31c57895). The Guard keeps
+                // the slot alive for the borrow; the entry is only borrowed
+                // (`&entry.1` for the window filter, `entry.0` copied out).
                 let hot = self.btrfs_hot_inode_extents.load();
-                let entry = match hot.as_ref() {
-                    Some(slot) if slot.0 == canonical => Arc::clone(&slot.1),
+                let entry_storage;
+                let entry: &Arc<(BtrfsInodeItem, Vec<(u64, BtrfsExtentData)>)> = match hot.as_ref()
+                {
+                    Some(slot) if slot.0 == canonical => &slot.1,
                     _ => {
-                        drop(hot);
                         let e = match self.btrfs_ro_inode_extents.get(&key) {
                             Some(e) => e,
                             None => {
@@ -9420,7 +9427,8 @@ impl OpenFs {
                         // immutable RO extent list the sharded cache holds).
                         self.btrfs_hot_inode_extents
                             .store(Some(Arc::new((canonical, Arc::clone(&e)))));
-                        e
+                        entry_storage = e;
+                        &entry_storage
                     }
                 };
                 let read_end = offset.saturating_add(u64::from(size));
