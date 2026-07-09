@@ -12177,12 +12177,19 @@ impl OpenFs {
         scope: &RequestScope,
         root_bytes: &[u8; 60],
     ) -> Result<u64, FfsError> {
+        // Fast path: a depth-0 (inline) extent tree has ZERO external meta blocks
+        // — the common case (extents fit in the inode). Read eh_depth
+        // (root_bytes[6..8]) directly and return 0 WITHOUT parsing the leaf
+        // extents (`parse_extent_leaf`), which the full parse below would do only
+        // to rediscover the same 0. A corrupt root with depth 0 also returned 0
+        // before (parse Err -> Ok(0)), so behavior is byte-identical; only a real
+        // external tree (depth > 0) pays the full parse + recursion.
+        if u16::from_le_bytes([root_bytes[6], root_bytes[7]]) == 0 {
+            return Ok(0);
+        }
         let Ok((header, tree)) = parse_extent_tree(root_bytes) else {
             return Ok(0);
         };
-        if header.depth == 0 {
-            return Ok(0);
-        }
         let mut count = 0_u64;
         self.count_extent_tree_meta_recursive(cx, scope, &tree, header.depth, &mut count)?;
         Ok(count)
@@ -12286,12 +12293,15 @@ impl OpenFs {
         dev: &dyn BlockDevice,
         root_bytes: &[u8; 60],
     ) -> Result<u64, FfsError> {
+        // Fast path: depth-0 (inline) extent tree = zero external meta blocks;
+        // read eh_depth directly and skip the leaf-extent parse (see the
+        // non-`_via_dev` sibling). Behavior-identical (corrupt-depth-0 -> 0).
+        if u16::from_le_bytes([root_bytes[6], root_bytes[7]]) == 0 {
+            return Ok(0);
+        }
         let Ok((header, tree)) = parse_extent_tree(root_bytes) else {
             return Ok(0);
         };
-        if header.depth == 0 {
-            return Ok(0);
-        }
         let mut count = 0_u64;
         Self::count_extent_tree_meta_recursive_via_dev(cx, dev, &tree, header.depth, &mut count)?;
         Ok(count)

@@ -99,3 +99,7 @@ harness = false
 [[bench]]
 name = "root_ns_hash"
 harness = false
+
+[[bench]]
+name = "extent_meta_count"
+harness = false
