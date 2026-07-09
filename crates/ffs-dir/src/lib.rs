@@ -21,11 +21,16 @@ const DIR_ENTRY_HEADER_LEN: usize = 8;
 /// `a == b` (bench `dirent_dup_scan`: 1.43x scanning 203 same-length entries).
 #[inline]
 fn names_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
+    let n = a.len();
+    if n != b.len() {
         return false;
     }
+    if n < 8 {
+        return a == b;
+    }
+    // Full 8-byte words up to (but not including) the final 8-byte window.
     let mut i = 0;
-    while i + 8 <= a.len() {
+    while i + 8 < n {
         if u64::from_ne_bytes(a[i..i + 8].try_into().unwrap())
             != u64::from_ne_bytes(b[i..i + 8].try_into().unwrap())
         {
@@ -33,13 +38,12 @@ fn names_eq(a: &[u8], b: &[u8]) -> bool {
         }
         i += 8;
     }
-    while i < a.len() {
-        if a[i] != b[i] {
-            return false;
-        }
-        i += 1;
-    }
-    true
+    // Final (possibly OVERLAPPING) word over the last 8 bytes — one word-compare
+    // instead of a byte-wise tail loop, so non-multiple-of-8 lengths (12/13/… —
+    // common dir names) stay all-word-compares (~1.3-1.6x faster than the old
+    // byte tail, which LOST to `==` there; bench ffs-ondisk names_eq_crossover).
+    u64::from_ne_bytes(a[n - 8..n].try_into().unwrap())
+        == u64::from_ne_bytes(b[n - 8..n].try_into().unwrap())
 }
 /// Fake file type for metadata checksum tail.
 const EXT4_FT_DIR_CSUM: u8 = 0xDE;

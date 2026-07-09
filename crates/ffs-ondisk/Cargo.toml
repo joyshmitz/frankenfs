@@ -131,3 +131,7 @@ harness = false
 [[bench]]
 name = "casefold_cmp"
 harness = false
+
+[[bench]]
+name = "names_eq_crossover"
+harness = false
