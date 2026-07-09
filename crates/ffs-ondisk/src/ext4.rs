@@ -3431,10 +3431,15 @@ fn parse_extent_leaf(bytes: &[u8], entries_len: usize) -> Result<Vec<Ext4Extent>
                 field: "extent_entries",
                 reason: "entry offset overflow",
             })?;
-        let logical_block = read_le_u32(bytes, base)?;
-        let raw_len = read_le_u16(bytes, base + 4)?;
-        let start_hi = u64::from(read_le_u16(bytes, base + 6)?);
-        let start_lo = u64::from(read_le_u32(bytes, base + 8)?);
+        // One bounds check for the whole 12-byte entry, then const-offset
+        // array reads (no per-field bounds check) — the caller pre-validates
+        // `bytes.len() >= 12 + entries_len*12`, so the 4 separate `read_le_*`
+        // checks were provably-redundant-but-not-elided in this loop.
+        let e = read_fixed::<12>(bytes, base)?;
+        let logical_block = u32::from_le_bytes([e[0], e[1], e[2], e[3]]);
+        let raw_len = u16::from_le_bytes([e[4], e[5]]);
+        let start_hi = u64::from(u16::from_le_bytes([e[6], e[7]]));
+        let start_lo = u64::from(u32::from_le_bytes([e[8], e[9], e[10], e[11]]));
         let physical_start = start_lo | (start_hi << 32);
         let extent = Ext4Extent {
             logical_block,
@@ -3480,9 +3485,12 @@ fn parse_extent_index(
                 field: "extent_indexes",
                 reason: "index offset overflow",
             })?;
-        let logical_block = read_le_u32(bytes, base)?;
-        let leaf_lo = u64::from(read_le_u32(bytes, base + 4)?);
-        let leaf_hi = u64::from(read_le_u16(bytes, base + 8)?);
+        // One bounds check for the 12-byte entry, then const-offset array
+        // reads (caller pre-validates the region length — see parse_extent_leaf).
+        let e = read_fixed::<12>(bytes, base)?;
+        let logical_block = u32::from_le_bytes([e[0], e[1], e[2], e[3]]);
+        let leaf_lo = u64::from(u32::from_le_bytes([e[4], e[5], e[6], e[7]]));
+        let leaf_hi = u64::from(u16::from_le_bytes([e[8], e[9]]));
         let leaf_block = leaf_lo | (leaf_hi << 32);
 
         if let Some(prev) = indexes.last() {

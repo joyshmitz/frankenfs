@@ -87,3 +87,7 @@ harness = false
 [[bench]]
 name = "lookup_leaf_scan"
 harness = false
+
+[[bench]]
+name = "extent_leaf_parse"
+harness = false
