@@ -127,3 +127,7 @@ harness = false
 [[bench]]
 name = "dx_hash_transform"
 harness = false
+
+[[bench]]
+name = "casefold_cmp"
+harness = false

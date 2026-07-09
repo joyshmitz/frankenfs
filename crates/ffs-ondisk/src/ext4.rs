@@ -4039,9 +4039,55 @@ pub fn ext4_casefold_key(name: &[u8]) -> Vec<u8> {
 /// per-call `Vec` allocation. Non-ASCII names (which may fold via Unicode rules,
 /// e.g. `ß`→`ss`) fall back to materialising the key.
 #[must_use]
+/// Lowercase 8 ASCII bytes (high bit clear) branchlessly: add 0x20 to bytes in
+/// `'A'..='Z'`. No cross-byte carry — each cleared 7-bit byte plus the constant
+/// stays below 0x100. Non-ASCII high bits are preserved (callers gate on ASCII).
+#[inline]
+fn swar_ascii_to_lower(w: u64) -> u64 {
+    const ONES: u64 = 0x0101_0101_0101_0101;
+    const HIGHS: u64 = 0x8080_8080_8080_8080;
+    let hi = w & HIGHS;
+    let x = w & 0x7f7f_7f7f_7f7f_7f7f;
+    let ge_a = x + (0x7f - 0x41 + 1) * ONES; // 0x80 set where byte >= 'A'
+    let gt_z = x + (0x7f - 0x5a) * ONES; // 0x80 set where byte > 'Z'
+    let is_upper = ge_a & !gt_z & HIGHS; // 0x80 where 'A'..='Z'
+    (x | (is_upper >> 2)) | hi // 0x80 >> 2 = 0x20
+}
+
+/// ASCII case-insensitive byte-slice equality. Word-at-a-time SWAR for short
+/// names (the common filename length) — the case-folding analogue of `names_eq`;
+/// `eq_ignore_ascii_case` autovectorizes for LONG slices, so defer to it past a
+/// length where its AVX path beats a u64 SWAR (bench `casefold_cmp`: SWAR 1.64x
+/// at 13-14 B, loses at 33 B). Bit-identical to `a.eq_ignore_ascii_case(b)`.
+#[inline]
+fn ascii_ci_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    if a.len() > 16 {
+        return a.eq_ignore_ascii_case(b);
+    }
+    let mut i = 0;
+    while i + 8 <= a.len() {
+        let wa = u64::from_ne_bytes(a[i..i + 8].try_into().unwrap());
+        let wb = u64::from_ne_bytes(b[i..i + 8].try_into().unwrap());
+        if swar_ascii_to_lower(wa) != swar_ascii_to_lower(wb) {
+            return false;
+        }
+        i += 8;
+    }
+    while i < a.len() {
+        if !a[i].eq_ignore_ascii_case(&b[i]) {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
 fn casefold_key_eq(name: &[u8], folded_target: &[u8]) -> bool {
     if name.is_ascii() {
-        name.eq_ignore_ascii_case(folded_target)
+        ascii_ci_eq(name, folded_target)
     } else {
         ext4_casefold_key(name) == folded_target
     }
@@ -4053,7 +4099,7 @@ fn casefold_key_eq(name: &[u8], folded_target: &[u8]) -> bool {
 #[must_use]
 pub fn ext4_casefold_eq(left: &[u8], right: &[u8]) -> bool {
     if left.is_ascii() && right.is_ascii() {
-        left.eq_ignore_ascii_case(right)
+        ascii_ci_eq(left, right)
     } else {
         ext4_casefold_key(left) == ext4_casefold_key(right)
     }
