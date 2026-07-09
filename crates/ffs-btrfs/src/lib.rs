@@ -8331,8 +8331,8 @@ impl SendStreamBuilder {
         assert!(self.has_header, "must write header first");
         assert!(!self.finalized, "stream already finalized");
 
-        let mut payload = Vec::new();
-        for (atype, adata) in attrs {
+        let mut payload_len = 0usize;
+        for (_, adata) in attrs {
             // The btrfs send TLV length field is a u16. Casting a longer
             // attribute would silently wrap the declared length and emit a
             // corrupt, unparseable stream. Callers that carry bulk data (file
@@ -8344,24 +8344,34 @@ impl SendStreamBuilder {
                 adata.len(),
                 u16::MAX
             );
-            payload.extend_from_slice(&(*atype as u16).to_le_bytes());
-            payload.extend_from_slice(&(adata.len() as u16).to_le_bytes());
-            payload.extend_from_slice(adata);
+            payload_len = payload_len
+                .checked_add(4)
+                .and_then(|len| len.checked_add(adata.len()))
+                .expect("send-stream command payload length overflow");
         }
 
-        let payload_len = payload.len() as u32;
-        let full_len = 10 + payload.len();
+        let payload_len_u32 =
+            u32::try_from(payload_len).expect("send-stream command payload exceeds u32 length");
+        let full_len = 10usize
+            .checked_add(payload_len)
+            .expect("send-stream command frame length overflow");
 
-        let mut frame = Vec::with_capacity(full_len);
-        frame.extend_from_slice(&payload_len.to_le_bytes());
-        frame.extend_from_slice(&(cmd as u16).to_le_bytes());
-        frame.extend_from_slice(&[0_u8; 4]); // CRC placeholder
-        frame.extend_from_slice(&payload);
+        let frame_start = self.buffer.len();
+        self.buffer.reserve(full_len);
+        self.buffer
+            .extend_from_slice(&payload_len_u32.to_le_bytes());
+        self.buffer.extend_from_slice(&(cmd as u16).to_le_bytes());
+        self.buffer.extend_from_slice(&[0_u8; 4]); // CRC placeholder
+        for (atype, adata) in attrs {
+            self.buffer
+                .extend_from_slice(&(*atype as u16).to_le_bytes());
+            self.buffer
+                .extend_from_slice(&(adata.len() as u16).to_le_bytes());
+            self.buffer.extend_from_slice(adata);
+        }
 
-        let crc = send_stream_command_crc32c(&frame);
-        frame[6..10].copy_from_slice(&crc.to_le_bytes());
-
-        self.buffer.extend_from_slice(&frame);
+        let crc = send_stream_command_crc32c(&self.buffer[frame_start..]);
+        self.buffer[frame_start + 6..frame_start + 10].copy_from_slice(&crc.to_le_bytes());
     }
 
     /// Add the End command and finalize the stream.
@@ -8716,6 +8726,184 @@ pub fn build_update_extent_command(
     )
 }
 
+fn add_subvol_command_direct(
+    builder: &mut SendStreamBuilder,
+    path: &[u8],
+    uuid: &[u8; 16],
+    ctransid: u64,
+) {
+    let ctransid_bytes = ctransid.to_le_bytes();
+    builder.add_command(
+        SendCommand::Subvol,
+        &[
+            (SendAttr::Path, path),
+            (SendAttr::Uuid, &uuid[..]),
+            (SendAttr::Ctransid, &ctransid_bytes),
+        ],
+    );
+}
+
+fn add_path_ino_command_direct(
+    builder: &mut SendStreamBuilder,
+    cmd: SendCommand,
+    path: &[u8],
+    ino: u64,
+) {
+    let ino_bytes = ino.to_le_bytes();
+    builder.add_command(cmd, &[(SendAttr::Path, path), (SendAttr::Ino, &ino_bytes)]);
+}
+
+fn add_path_u64_command_direct(
+    builder: &mut SendStreamBuilder,
+    cmd: SendCommand,
+    path: &[u8],
+    attr: SendAttr,
+    value: u64,
+) {
+    let value_bytes = value.to_le_bytes();
+    builder.add_command(cmd, &[(SendAttr::Path, path), (attr, &value_bytes)]);
+}
+
+fn add_chown_command_direct(builder: &mut SendStreamBuilder, path: &[u8], uid: u64, gid: u64) {
+    let uid_bytes = uid.to_le_bytes();
+    let gid_bytes = gid.to_le_bytes();
+    builder.add_command(
+        SendCommand::Chown,
+        &[
+            (SendAttr::Path, path),
+            (SendAttr::Uid, &uid_bytes),
+            (SendAttr::Gid, &gid_bytes),
+        ],
+    );
+}
+
+fn send_timespec_bytes(sec: i64, nsec: i32) -> [u8; 12] {
+    let mut buf = [0_u8; 12];
+    buf[0..8].copy_from_slice(&sec.to_le_bytes());
+    buf[8..12].copy_from_slice(&nsec.to_le_bytes());
+    buf
+}
+
+fn add_utimes_command_direct(
+    builder: &mut SendStreamBuilder,
+    path: &[u8],
+    atime_sec: i64,
+    atime_nsec: i32,
+    mtime_sec: i64,
+    mtime_nsec: i32,
+    ctime_sec: i64,
+    ctime_nsec: i32,
+) {
+    let atime = send_timespec_bytes(atime_sec, atime_nsec);
+    let mtime = send_timespec_bytes(mtime_sec, mtime_nsec);
+    let ctime = send_timespec_bytes(ctime_sec, ctime_nsec);
+    builder.add_command(
+        SendCommand::Utimes,
+        &[
+            (SendAttr::Path, path),
+            (SendAttr::Atime, &atime),
+            (SendAttr::Mtime, &mtime),
+            (SendAttr::Ctime, &ctime),
+        ],
+    );
+}
+
+fn add_symlink_command_direct(
+    builder: &mut SendStreamBuilder,
+    path: &[u8],
+    ino: u64,
+    link_target: &[u8],
+) {
+    let ino_bytes = ino.to_le_bytes();
+    builder.add_command(
+        SendCommand::Symlink,
+        &[
+            (SendAttr::Path, path),
+            (SendAttr::Ino, &ino_bytes),
+            (SendAttr::PathLink, link_target),
+        ],
+    );
+}
+
+fn add_setxattr_command_direct(
+    builder: &mut SendStreamBuilder,
+    path: &[u8],
+    name: &[u8],
+    data: &[u8],
+) {
+    builder.add_command(
+        SendCommand::SetXattr,
+        &[
+            (SendAttr::Path, path),
+            (SendAttr::XattrName, name),
+            (SendAttr::XattrData, data),
+        ],
+    );
+}
+
+fn add_link_command_direct(builder: &mut SendStreamBuilder, path: &[u8], path_link: &[u8]) {
+    builder.add_command(
+        SendCommand::Link,
+        &[(SendAttr::Path, path), (SendAttr::PathLink, path_link)],
+    );
+}
+
+fn add_mknod_command_direct(
+    builder: &mut SendStreamBuilder,
+    path: &[u8],
+    ino: u64,
+    mode: u64,
+    rdev: u64,
+) {
+    let ino_bytes = ino.to_le_bytes();
+    let mode_bytes = mode.to_le_bytes();
+    let rdev_bytes = rdev.to_le_bytes();
+    builder.add_command(
+        SendCommand::Mknod,
+        &[
+            (SendAttr::Path, path),
+            (SendAttr::Ino, &ino_bytes),
+            (SendAttr::Mode, &mode_bytes),
+            (SendAttr::Rdev, &rdev_bytes),
+        ],
+    );
+}
+
+fn add_write_command_direct(
+    builder: &mut SendStreamBuilder,
+    path: &[u8],
+    offset: u64,
+    data: &[u8],
+) {
+    let offset_bytes = offset.to_le_bytes();
+    builder.add_command(
+        SendCommand::Write,
+        &[
+            (SendAttr::Path, path),
+            (SendAttr::FileOffset, &offset_bytes),
+            (SendAttr::Data, data),
+        ],
+    );
+}
+
+fn add_update_extent_command_direct(
+    builder: &mut SendStreamBuilder,
+    path: &[u8],
+    offset: u64,
+    len: u64,
+) {
+    let offset_bytes = offset.to_le_bytes();
+    let len_bytes = len.to_le_bytes();
+    builder.add_command(
+        SendCommand::UpdateExtent,
+        &[
+            (SendAttr::Path, path),
+            (SendAttr::FileOffset, &offset_bytes),
+            (SendAttr::Size, &len_bytes),
+        ],
+    );
+}
+
 // ── send stream generation from FS tree ───────────────────────────────────
 
 /// Maximum payload bytes per send-stream `DATA` attribute.
@@ -8733,9 +8921,7 @@ const BTRFS_SEND_WRITE_CHUNK: usize = 48 * 1024;
 fn emit_write_chunks(builder: &mut SendStreamBuilder, path: &[u8], file_offset: u64, data: &[u8]) {
     let mut chunk_offset = file_offset;
     for chunk in data.chunks(BTRFS_SEND_WRITE_CHUNK) {
-        let (cmd, attrs) = build_write_command(path, chunk_offset, chunk);
-        let refs: Vec<(SendAttr, &[u8])> = attrs.iter().map(|(a, d)| (*a, d.as_slice())).collect();
-        builder.add_command(cmd, &refs);
+        add_write_command_direct(builder, path, chunk_offset, chunk);
         chunk_offset = chunk_offset.saturating_add(chunk.len() as u64);
     }
 }
@@ -8778,9 +8964,7 @@ where
     builder.write_header();
 
     // Emit subvol command
-    let (cmd, attrs) = build_subvol_command(subvol_name, subvol_uuid, ctransid);
-    let refs: Vec<(SendAttr, &[u8])> = attrs.iter().map(|(a, d)| (*a, d.as_slice())).collect();
-    builder.add_command(cmd, &refs);
+    add_subvol_command_direct(&mut builder, subvol_name, subvol_uuid, ctransid);
 
     // Build inode -> links mapping from INODE_REF items. key.objectid = child
     // inode, key.offset = parent inode; an item can list several names (links
@@ -8815,7 +8999,7 @@ where
     let mut path_cache: HashMap<u64, Vec<u8>> =
         HashMap::with_capacity(inode_parents.len().saturating_add(1));
     path_cache.insert(BTRFS_FIRST_FREE_OBJECTID, Vec::new());
-    let mut build_path = |ino: u64| -> Vec<u8> {
+    let mut build_path = |ino: u64, cache_terminal: bool| -> Vec<u8> {
         if let Some(path) = path_cache.get(&ino) {
             return path.clone();
         }
@@ -8839,14 +9023,18 @@ where
         }
 
         let mut path = base_path;
-        for (node, name) in trail.iter().rev() {
+        let trail_len = trail.len();
+        for (position, (node, name)) in trail.iter().rev().enumerate() {
             if !path.is_empty() {
                 path.push(b'/');
             }
             path.extend_from_slice(name);
-            path_cache.insert(*node, path.clone());
+            let terminal = position + 1 == trail_len;
+            if cache_terminal || !terminal {
+                path_cache.insert(*node, path.clone());
+            }
         }
-        if trail.is_empty() {
+        if trail.is_empty() && cache_terminal {
             path_cache.insert(ino, path.clone());
         }
         path
@@ -8948,27 +9136,21 @@ where
             continue;
         };
 
-        let path = build_path(ino);
         // Truncate mode to u16 for S_IF* comparisons (upper bits are flags)
         #[expect(clippy::cast_possible_truncation)]
         let file_type = (inode.mode as u16) & ffs_types::S_IFMT;
+        let path = build_path(ino, file_type == ffs_types::S_IFDIR);
 
         // Emit create command based on type
         match file_type {
             ffs_types::S_IFDIR => {
                 // Skip root directory (already created by subvol)
                 if ino != BTRFS_FIRST_FREE_OBJECTID {
-                    let (cmd, attrs) = build_mkdir_command(&path, ino);
-                    let refs: Vec<(SendAttr, &[u8])> =
-                        attrs.iter().map(|(a, d)| (*a, d.as_slice())).collect();
-                    builder.add_command(cmd, &refs);
+                    add_path_ino_command_direct(&mut builder, SendCommand::Mkdir, &path, ino);
                 }
             }
             ffs_types::S_IFREG => {
-                let (cmd, attrs) = build_mkfile_command(&path, ino);
-                let refs: Vec<(SendAttr, &[u8])> =
-                    attrs.iter().map(|(a, d)| (*a, d.as_slice())).collect();
-                builder.add_command(cmd, &refs);
+                add_path_ino_command_direct(&mut builder, SendCommand::Mkfile, &path, ino);
 
                 // Emit write commands for file data
                 for entry in entries
@@ -9011,11 +9193,12 @@ where
                             u64::from_le_bytes(entry.data[45..53].try_into().unwrap_or([0; 8]));
 
                         if extent_type == BTRFS_FILE_EXTENT_PREALLOC || disk_bytenr == 0 {
-                            let (cmd, attrs) =
-                                build_update_extent_command(&path, file_offset, num_bytes);
-                            let refs: Vec<(SendAttr, &[u8])> =
-                                attrs.iter().map(|(a, d)| (*a, d.as_slice())).collect();
-                            builder.add_command(cmd, &refs);
+                            add_update_extent_command_direct(
+                                &mut builder,
+                                &path,
+                                file_offset,
+                                num_bytes,
+                            );
                         } else if disk_num_bytes > 0 {
                             // Read (and, if compressed, decompress) extent data,
                             // then emit the write in uncompressed/logical space.
@@ -9041,10 +9224,13 @@ where
                 }
 
                 // Truncate to exact size
-                let (cmd, attrs) = build_truncate_command(&path, inode.size);
-                let refs: Vec<(SendAttr, &[u8])> =
-                    attrs.iter().map(|(a, d)| (*a, d.as_slice())).collect();
-                builder.add_command(cmd, &refs);
+                add_path_u64_command_direct(
+                    &mut builder,
+                    SendCommand::Truncate,
+                    &path,
+                    SendAttr::Size,
+                    inode.size,
+                );
             }
             ffs_types::S_IFLNK => {
                 // For symlinks, the target is in the inline extent
@@ -9059,29 +9245,17 @@ where
                         }
                     })
                     .unwrap_or(b"");
-                let (cmd, attrs) = build_symlink_command(&path, ino, target);
-                let refs: Vec<(SendAttr, &[u8])> =
-                    attrs.iter().map(|(a, d)| (*a, d.as_slice())).collect();
-                builder.add_command(cmd, &refs);
+                add_symlink_command_direct(&mut builder, &path, ino, target);
             }
             ffs_types::S_IFIFO => {
-                let (cmd, attrs) = build_mkfifo_command(&path, ino);
-                let refs: Vec<(SendAttr, &[u8])> =
-                    attrs.iter().map(|(a, d)| (*a, d.as_slice())).collect();
-                builder.add_command(cmd, &refs);
+                add_path_ino_command_direct(&mut builder, SendCommand::Mkfifo, &path, ino);
             }
             ffs_types::S_IFSOCK => {
-                let (cmd, attrs) = build_mksock_command(&path, ino);
-                let refs: Vec<(SendAttr, &[u8])> =
-                    attrs.iter().map(|(a, d)| (*a, d.as_slice())).collect();
-                builder.add_command(cmd, &refs);
+                add_path_ino_command_direct(&mut builder, SendCommand::Mksock, &path, ino);
             }
             ffs_types::S_IFCHR | ffs_types::S_IFBLK => {
                 let mode_with_type = u64::from(inode.mode);
-                let (cmd, attrs) = build_mknod_command(&path, ino, mode_with_type, inode.rdev);
-                let refs: Vec<(SendAttr, &[u8])> =
-                    attrs.iter().map(|(a, d)| (*a, d.as_slice())).collect();
-                builder.add_command(cmd, &refs);
+                add_mknod_command_direct(&mut builder, &path, ino, mode_with_type, inode.rdev);
             }
             _ => continue,
         }
@@ -9093,17 +9267,14 @@ where
         if file_type != ffs_types::S_IFDIR {
             if let Some(links) = inode_links.get(&ino) {
                 for (parent, name) in links.iter().skip(1) {
-                    let mut link_path = build_path(*parent);
+                    let mut link_path = build_path(*parent, true);
                     // Relative to the subvol root: no leading slash for a link
                     // directly under the root (whose build_path is empty).
                     if !link_path.is_empty() {
                         link_path.push(b'/');
                     }
                     link_path.extend_from_slice(name);
-                    let (cmd, attrs) = build_link_command(&link_path, &path);
-                    let refs: Vec<(SendAttr, &[u8])> =
-                        attrs.iter().map(|(a, d)| (*a, d.as_slice())).collect();
-                    builder.add_command(cmd, &refs);
+                    add_link_command_direct(&mut builder, &link_path, &path);
                 }
             }
         }
@@ -9115,28 +9286,33 @@ where
         {
             if let Ok(xattr_items) = parse_xattr_items(&entry.data) {
                 for xattr in xattr_items {
-                    let (cmd, attrs) = build_setxattr_command(&path, &xattr.name, &xattr.value);
-                    let refs: Vec<(SendAttr, &[u8])> =
-                        attrs.iter().map(|(a, d)| (*a, d.as_slice())).collect();
-                    builder.add_command(cmd, &refs);
+                    add_setxattr_command_direct(&mut builder, &path, &xattr.name, &xattr.value);
                 }
             }
         }
 
         // Emit chmod
         let mode_bits = u64::from(inode.mode & 0o7777);
-        let (cmd, attrs) = build_chmod_command(&path, mode_bits);
-        let refs: Vec<(SendAttr, &[u8])> = attrs.iter().map(|(a, d)| (*a, d.as_slice())).collect();
-        builder.add_command(cmd, &refs);
+        add_path_u64_command_direct(
+            &mut builder,
+            SendCommand::Chmod,
+            &path,
+            SendAttr::Mode,
+            mode_bits,
+        );
 
         // Emit chown
-        let (cmd, attrs) = build_chown_command(&path, u64::from(inode.uid), u64::from(inode.gid));
-        let refs: Vec<(SendAttr, &[u8])> = attrs.iter().map(|(a, d)| (*a, d.as_slice())).collect();
-        builder.add_command(cmd, &refs);
+        add_chown_command_direct(
+            &mut builder,
+            &path,
+            u64::from(inode.uid),
+            u64::from(inode.gid),
+        );
 
         // Emit utimes
         #[expect(clippy::cast_possible_wrap)]
-        let (cmd, attrs) = build_utimes_command(
+        add_utimes_command_direct(
+            &mut builder,
             &path,
             inode.atime_sec as i64,
             inode.atime_nsec as i32,
@@ -9145,8 +9321,6 @@ where
             inode.ctime_sec as i64,
             inode.ctime_nsec as i32,
         );
-        let refs: Vec<(SendAttr, &[u8])> = attrs.iter().map(|(a, d)| (*a, d.as_slice())).collect();
-        builder.add_command(cmd, &refs);
     }
 
     builder.finalize();
