@@ -328,6 +328,7 @@ impl SeekWhence {
 /// These operation tags let `FsOps` implementations choose an MVCC policy per
 /// request (for example: read-snapshot only vs. begin write transaction).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[repr(u8)]
 pub enum RequestOp {
     Getattr,
     Statfs,
@@ -362,48 +363,47 @@ pub enum RequestOp {
     IoctlWrite,
 }
 
+const fn request_op_bit(op: RequestOp) -> u32 {
+    1_u32 << op.as_index()
+}
+
 impl RequestOp {
+    /// Number of request operation variants.
+    pub const COUNT: usize = Self::IoctlWrite as usize + 1;
+    const METADATA_WRITE_MASK: u32 = request_op_bit(Self::Create)
+        | request_op_bit(Self::Mkdir)
+        | request_op_bit(Self::Unlink)
+        | request_op_bit(Self::Rmdir)
+        | request_op_bit(Self::Rename)
+        | request_op_bit(Self::Link)
+        | request_op_bit(Self::Symlink)
+        | request_op_bit(Self::Setattr)
+        | request_op_bit(Self::Setxattr)
+        | request_op_bit(Self::Removexattr)
+        | request_op_bit(Self::IoctlWrite);
+    const WRITE_MASK: u32 = Self::METADATA_WRITE_MASK
+        | request_op_bit(Self::Fsync)
+        | request_op_bit(Self::Fsyncdir)
+        | request_op_bit(Self::Fallocate)
+        | request_op_bit(Self::Write)
+        | request_op_bit(Self::RepairWriteback);
+
+    /// Dense operation index for hot-path policy tables.
+    #[must_use]
+    pub const fn as_index(self) -> usize {
+        self as usize
+    }
+
     /// Whether this operation mutates the filesystem.
     #[must_use]
     pub const fn is_write(self) -> bool {
-        matches!(
-            self,
-            Self::Create
-                | Self::Mkdir
-                | Self::Unlink
-                | Self::Rmdir
-                | Self::Rename
-                | Self::Link
-                | Self::Symlink
-                | Self::Fallocate
-                | Self::Setattr
-                | Self::Setxattr
-                | Self::Removexattr
-                | Self::Write
-                | Self::RepairWriteback
-                | Self::IoctlWrite
-                | Self::Fsync
-                | Self::Fsyncdir
-        )
+        (Self::WRITE_MASK & request_op_bit(self)) != 0
     }
 
     /// Whether this operation is a metadata-only write.
     #[must_use]
     pub const fn is_metadata_write(self) -> bool {
-        matches!(
-            self,
-            Self::Create
-                | Self::Mkdir
-                | Self::Unlink
-                | Self::Rmdir
-                | Self::Rename
-                | Self::Link
-                | Self::Symlink
-                | Self::Setattr
-                | Self::Setxattr
-                | Self::Removexattr
-                | Self::IoctlWrite
-        )
+        (Self::METADATA_WRITE_MASK & request_op_bit(self)) != 0
     }
 }
 
