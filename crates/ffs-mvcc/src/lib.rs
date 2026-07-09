@@ -24,10 +24,10 @@ use ffs_repair::evidence::{
 };
 use ffs_types::{BlockNumber, CommitSeq, Snapshot, TxnId};
 use parking_lot::{Mutex, RwLock};
+use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use smallvec::{SmallVec, smallvec};
 use std::collections::{BTreeMap, BTreeSet};
-use rustc_hash::FxHashMap;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::Path;
@@ -389,9 +389,18 @@ pub(crate) struct StagedWrite {
     pub(crate) merge_proof: MergeProof,
 }
 
+type StagedWrites = SmallVec<[(BlockNumber, StagedWrite); 4]>;
+
+fn staged_write_pos(
+    staged_writes: &[(BlockNumber, StagedWrite)],
+    block: BlockNumber,
+) -> Result<usize, usize> {
+    staged_writes.binary_search_by_key(&block, |(candidate, _)| *candidate)
+}
+
 #[derive(Clone, Copy)]
 pub struct WriteSet<'a> {
-    staged_writes: &'a BTreeMap<BlockNumber, StagedWrite>,
+    staged_writes: &'a [(BlockNumber, StagedWrite)],
 }
 
 impl<'a> WriteSet<'a> {
@@ -407,20 +416,17 @@ impl<'a> WriteSet<'a> {
 
     #[must_use]
     pub fn contains_key(self, block: &BlockNumber) -> bool {
-        self.staged_writes.contains_key(block)
+        staged_write_pos(self.staged_writes, *block).is_ok()
     }
 
     #[must_use]
     pub fn keys(self) -> impl DoubleEndedIterator<Item = &'a BlockNumber> + ExactSizeIterator + 'a {
-        self.staged_writes.keys()
+        self.staged_writes.iter().map(|(block, _)| block)
     }
 
     #[must_use]
     fn key_span(self) -> Option<(BlockNumber, BlockNumber)> {
-        Some((
-            *self.staged_writes.first_key_value()?.0,
-            *self.staged_writes.last_key_value()?.0,
-        ))
+        Some((self.staged_writes.first()?.0, self.staged_writes.last()?.0))
     }
 }
 
@@ -428,7 +434,7 @@ impl<'a> WriteSet<'a> {
 pub struct Transaction {
     pub id: TxnId,
     pub snapshot: Snapshot,
-    staged_writes: BTreeMap<BlockNumber, StagedWrite>,
+    staged_writes: StagedWrites,
     /// Blocks read during the transaction's lifetime.  Each entry maps
     /// the block to the `CommitSeq` of the version that was read (or
     /// `CommitSeq(0)` if the block had no version at that snapshot).
@@ -466,12 +472,12 @@ impl Serialize for Transaction {
         let writes = self
             .staged_writes
             .iter()
-            .map(|(&block, staged)| (block, staged.bytes.clone()))
+            .map(|(block, staged)| (*block, staged.bytes.clone()))
             .collect();
         let merge_proofs = self
             .staged_writes
             .iter()
-            .map(|(&block, staged)| (block, staged.merge_proof.clone()))
+            .map(|(block, staged)| (*block, staged.merge_proof.clone()))
             .collect();
         TransactionSerde {
             id: self.id,
@@ -518,7 +524,7 @@ impl Transaction {
         Self {
             id,
             snapshot,
-            staged_writes: BTreeMap::new(),
+            staged_writes: StagedWrites::new(),
             reads: BTreeMap::new(),
             cow_writes: BTreeMap::new(),
             cow_orphans: BTreeSet::new(),
@@ -547,8 +553,14 @@ impl Transaction {
         bytes: Vec<u8>,
         merge_proof: MergeProof,
     ) {
-        self.staged_writes
-            .insert(block, StagedWrite { bytes, merge_proof });
+        self.insert_staged_write(block, StagedWrite { bytes, merge_proof });
+    }
+
+    fn insert_staged_write(&mut self, block: BlockNumber, staged: StagedWrite) {
+        match staged_write_pos(&self.staged_writes, block) {
+            Ok(idx) => self.staged_writes[idx] = (block, staged),
+            Err(idx) => self.staged_writes.insert(idx, (block, staged)),
+        }
     }
 
     fn stage_cow_rewrite(
@@ -573,7 +585,7 @@ impl Transaction {
                 "cow_orphan_staged_for_free"
             );
         }
-        self.staged_writes.insert(
+        self.insert_staged_write(
             logical,
             StagedWrite {
                 bytes,
@@ -584,9 +596,8 @@ impl Transaction {
 
     #[must_use]
     pub fn staged_write(&self, block: BlockNumber) -> Option<&[u8]> {
-        self.staged_writes
-            .get(&block)
-            .map(|staged| staged.bytes.as_slice())
+        let idx = staged_write_pos(&self.staged_writes, block).ok()?;
+        Some(self.staged_writes[idx].1.bytes.as_slice())
     }
 
     #[must_use]
@@ -634,12 +645,11 @@ impl Transaction {
 
     #[must_use]
     pub fn merge_proof(&self, block: BlockNumber) -> Option<&MergeProof> {
-        self.staged_writes
-            .get(&block)
-            .map(|staged| &staged.merge_proof)
+        let idx = staged_write_pos(&self.staged_writes, block).ok()?;
+        Some(&self.staged_writes[idx].1.merge_proof)
     }
 
-    pub(crate) fn into_staged_writes(self) -> BTreeMap<BlockNumber, StagedWrite> {
+    pub(crate) fn into_staged_writes(self) -> StagedWrites {
         assert!(
             self.cow_writes.is_empty(),
             "COW writes silently dropped by into_staged_writes"
@@ -1818,7 +1828,7 @@ impl MvccStore {
         let txn = Transaction {
             id: TxnId(self.next_txn),
             snapshot: self.current_snapshot(),
-            staged_writes: BTreeMap::new(),
+            staged_writes: StagedWrites::new(),
             reads: BTreeMap::new(),
             cow_writes: BTreeMap::new(),
             cow_orphans: BTreeSet::new(),
@@ -2448,13 +2458,13 @@ impl MvccStore {
         let mut combined_write_bytes: usize = 0;
         let mut merge_variants: BTreeSet<String> = BTreeSet::new();
 
-        for block in txn.staged_writes.keys() {
-            let latest = self.latest_commit_seq(*block);
+        for &block in txn.write_set().keys() {
+            let latest = self.latest_commit_seq(block);
             if latest > txn.snapshot.high {
                 had_conflict = true;
                 let resolution_started = Instant::now();
                 let resolution =
-                    self.preflight_resolve_block_conflict(txn, *block, latest, prev_effective);
+                    self.preflight_resolve_block_conflict(txn, block, latest, prev_effective);
                 let resolution_latency_us =
                     u64::try_from(resolution_started.elapsed().as_micros()).unwrap_or(u64::MAX);
                 self.runtime_metrics
@@ -2481,7 +2491,7 @@ impl MvccStore {
                 }
             }
             if let Some(cap) = chain_cap {
-                if let Err(err) = self.enforce_chain_pressure(txn.id, *block, cap) {
+                if let Err(err) = self.enforce_chain_pressure(txn.id, block, cap) {
                     // Chain backpressure abort — still record the commit attempt.
                     self.contention_metrics.record_commit(
                         self.adaptive_config.ema_alpha,
@@ -2565,7 +2575,8 @@ impl MvccStore {
         let snapshot_high = txn.snapshot.high;
         let effective = self.effective_policy();
         let mut merged_writes = BTreeMap::new();
-        for (&block, staged) in &txn.staged_writes {
+        for (block, staged) in &txn.staged_writes {
+            let block = *block;
             let observed = self.latest_commit_seq(block);
             if observed <= snapshot_high {
                 continue;
@@ -2686,7 +2697,8 @@ impl MvccStore {
         let snapshot_high = txn.snapshot.high;
         let effective = self.effective_policy();
         let mut merged_writes = BTreeMap::new();
-        for (&block, staged) in &txn.staged_writes {
+        for (block, staged) in &txn.staged_writes {
+            let block = *block;
             let observed = self.latest_commit_seq(block);
             if observed <= snapshot_high {
                 continue;
@@ -2753,7 +2765,8 @@ impl MvccStore {
         } = txn;
         let dedup_enabled = self.compression_policy.dedup_identical;
         let store_full = matches!(self.compression_policy.algo, CompressionAlgo::None);
-        let write_keys: BTreeSet<BlockNumber> = staged_writes.keys().copied().collect();
+        let write_keys: BTreeSet<BlockNumber> =
+            staged_writes.iter().map(|(block, _)| *block).collect();
 
         for (block, staged) in staged_writes {
             let version_bytes = merged_writes.remove(&block).unwrap_or(staged.bytes);
