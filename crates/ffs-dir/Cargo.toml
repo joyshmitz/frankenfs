@@ -25,3 +25,7 @@ workspace = true
 [[bench]]
 name = "entry_header_write"
 harness = false
+
+[[bench]]
+name = "entry_header_read"
+harness = false
