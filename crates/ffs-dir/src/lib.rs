@@ -10,6 +10,37 @@ use ffs_ondisk::Ext4FileType;
 
 /// ext4 directory entry header size (`ext4_dir_entry_2`).
 const DIR_ENTRY_HEADER_LEN: usize = 8;
+
+/// Word-at-a-time (SWAR) byte-slice equality. Faster than the byte-wise lowering
+/// of `&[u8] == &[u8]` for same-length directory-name comparisons on the hot
+/// dup-scan (create) / name-find (unlink/rename) / existence paths, where the
+/// length gate does not filter (numbered / log / hash / maildir workloads —
+/// profiled: `add_entry_reject_existing` is the #1 create self-time function and
+/// its inner name compare lowered to a byte loop). A length mismatch still
+/// short-circuits, so varied-length names are unaffected. Bit-identical to
+/// `a == b` (bench `dirent_dup_scan`: 1.43x scanning 203 same-length entries).
+#[inline]
+fn names_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i + 8 <= a.len() {
+        if u64::from_ne_bytes(a[i..i + 8].try_into().unwrap())
+            != u64::from_ne_bytes(b[i..i + 8].try_into().unwrap())
+        {
+            return false;
+        }
+        i += 8;
+    }
+    while i < a.len() {
+        if a[i] != b[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
 /// Fake file type for metadata checksum tail.
 const EXT4_FT_DIR_CSUM: u8 = 0xDE;
 
@@ -380,7 +411,7 @@ pub fn block_contains_live_name(block: &[u8], name: &[u8], reserved_tail: usize)
                 ),
             });
         }
-        if cur_ino != 0 && &block[off + DIR_ENTRY_HEADER_LEN..name_end] == name {
+        if cur_ino != 0 && names_eq(&block[off + DIR_ENTRY_HEADER_LEN..name_end], name) {
             return Ok(true);
         }
         off = end;
@@ -505,7 +536,10 @@ pub fn add_entry_reject_existing_tracked(
         }
 
         // Live entry: duplicate check (mirrors `block_contains_live_name`).
-        if &block[off + DIR_ENTRY_HEADER_LEN..off + DIR_ENTRY_HEADER_LEN + cur_name_len] == name {
+        if names_eq(
+            &block[off + DIR_ENTRY_HEADER_LEN..off + DIR_ENTRY_HEADER_LEN + cur_name_len],
+            name,
+        ) {
             return Err(FfsError::Exists);
         }
 
@@ -682,7 +716,7 @@ pub fn remove_entry_take_inode_tracked(
             });
         }
 
-        if cur_ino != 0 && &block[off + DIR_ENTRY_HEADER_LEN..name_end] == name {
+        if cur_ino != 0 && names_eq(&block[off + DIR_ENTRY_HEADER_LEN..name_end], name) {
             // Snapshot the enclosing changed span BEFORE mutating so the caller
             // can update the metadata_csum tail incrementally. Two disjoint
             // writes: the predecessor's `rec_len` (when present) at `prev_off+4`
@@ -793,7 +827,7 @@ fn update_live_entry_header(
                 ),
             });
         }
-        if cur_ino != 0 && &block[off + DIR_ENTRY_HEADER_LEN..name_end] == name {
+        if cur_ino != 0 && names_eq(&block[off + DIR_ENTRY_HEADER_LEN..name_end], name) {
             write_u32_le(block, off, new_ino)?;
             if let Some(file_type) = new_file_type {
                 block[off + 7] = file_type as u8;
