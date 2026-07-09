@@ -158,6 +158,14 @@ impl WriteDependencyDag {
         result.push(block);
     }
 
+    fn durable_block_set(&self) -> BTreeSet<u64> {
+        self.nodes
+            .iter()
+            .filter(|(_, node)| node.durable)
+            .map(|(block, _)| *block)
+            .collect()
+    }
+
     /// Mark a node as durable after it has been successfully flushed.
     pub fn mark_durable(&mut self, block: u64) -> Result<(), BtrfsMutationError> {
         let node = self
@@ -228,12 +236,7 @@ impl WbI1Oracle {
 
     /// Create from a DAG's current durability state.
     pub fn from_dag(dag: &WriteDependencyDag) -> Self {
-        let durable_blocks = dag
-            .nodes
-            .iter()
-            .filter(|(_, n)| n.durable)
-            .map(|(b, _)| *b)
-            .collect();
+        let durable_blocks = dag.durable_block_set();
         Self { durable_blocks }
     }
 
@@ -379,18 +382,22 @@ impl CrashPoint {
         id: impl Into<String>,
         superblock_durable: bool,
     ) -> Self {
-        let durable_blocks = dag
-            .nodes
-            .iter()
-            .filter(|(_, n)| n.durable)
-            .map(|(b, _)| *b)
-            .collect();
+        let durable_blocks = dag.durable_block_set();
+        Self::from_durable_blocks(&durable_blocks, id, superblock_durable, dag.generation)
+    }
+
+    fn from_durable_blocks(
+        durable_blocks: &BTreeSet<u64>,
+        id: impl Into<String>,
+        superblock_durable: bool,
+        generation: u64,
+    ) -> Self {
         Self {
             id: id.into(),
-            durable_blocks,
+            durable_blocks: durable_blocks.clone(),
             superblock_durable,
             superblock_generation: if superblock_durable {
-                Some(dag.generation)
+                Some(generation)
             } else {
                 None
             },
@@ -428,12 +435,19 @@ impl WritebackExecutor {
     {
         let order = self.dag.reverse_topological_order();
         let total = order.len();
+        let generation = self.dag.generation;
+        let mut durable_blocks = self.dag.durable_block_set();
+        self.crash_points.reserve(total.saturating_mul(2));
 
         for (i, block) in order.into_iter().enumerate() {
             // Record crash point before this flush
             let pre_crash_id = format!("pre_flush_{}", block);
-            self.crash_points
-                .push(CrashPoint::from_dag(&self.dag, pre_crash_id, false));
+            self.crash_points.push(CrashPoint::from_durable_blocks(
+                &durable_blocks,
+                pre_crash_id,
+                false,
+                generation,
+            ));
 
             // Get the level for this block from the DAG
             let level = self.dag.node_level(block).unwrap_or(0);
@@ -441,11 +455,16 @@ impl WritebackExecutor {
             // Flush the node
             flush_node(block, level)?;
             self.dag.mark_durable(block)?;
+            durable_blocks.insert(block);
 
             // Record crash point after this flush
             let post_crash_id = format!("post_flush_{}", block);
-            self.crash_points
-                .push(CrashPoint::from_dag(&self.dag, post_crash_id, false));
+            self.crash_points.push(CrashPoint::from_durable_blocks(
+                &durable_blocks,
+                post_crash_id,
+                false,
+                generation,
+            ));
 
             trace!(
                 block,
@@ -460,21 +479,41 @@ impl WritebackExecutor {
 
     /// Issue fsync barrier before superblock write.
     pub fn fsync_barrier(&mut self) {
-        self.crash_points
-            .push(CrashPoint::from_dag(&self.dag, "pre_fsync_barrier", false));
+        let durable_blocks = self.dag.durable_block_set();
+        let generation = self.dag.generation;
+        self.crash_points.push(CrashPoint::from_durable_blocks(
+            &durable_blocks,
+            "pre_fsync_barrier",
+            false,
+            generation,
+        ));
         self.fsync_barrier_issued = true;
-        self.crash_points
-            .push(CrashPoint::from_dag(&self.dag, "post_fsync_barrier", false));
+        self.crash_points.push(CrashPoint::from_durable_blocks(
+            &durable_blocks,
+            "post_fsync_barrier",
+            false,
+            generation,
+        ));
         debug!("writeback executor fsync barrier issued");
     }
 
     /// Record superblock commit.
     pub fn commit_superblock(&mut self) {
-        self.crash_points
-            .push(CrashPoint::from_dag(&self.dag, "pre_superblock", false));
+        let durable_blocks = self.dag.durable_block_set();
+        let generation = self.dag.generation;
+        self.crash_points.push(CrashPoint::from_durable_blocks(
+            &durable_blocks,
+            "pre_superblock",
+            false,
+            generation,
+        ));
         // After superblock write, the commit is durable
-        self.crash_points
-            .push(CrashPoint::from_dag(&self.dag, "post_superblock", true));
+        self.crash_points.push(CrashPoint::from_durable_blocks(
+            &durable_blocks,
+            "post_superblock",
+            true,
+            generation,
+        ));
         debug!(
             generation = self.dag.generation,
             "writeback executor superblock committed"

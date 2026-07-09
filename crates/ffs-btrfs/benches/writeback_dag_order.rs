@@ -12,8 +12,8 @@
 //! equivalence. The construction group compares the old child-vector
 //! double-clone model against the moved-child production shape.
 
-use criterion::{Criterion, criterion_group, criterion_main};
-use ffs_btrfs::writeback::{WbI1Oracle, WriteDependencyDag};
+use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
+use ffs_btrfs::writeback::{CrashPoint, WbI1Oracle, WriteDependencyDag, WritebackExecutor};
 use ffs_btrfs::{BtrfsBTree, BtrfsCowNode, BtrfsKey, BtrfsMutationError, InMemoryCowBtrfsTree};
 use std::collections::{BTreeMap, BTreeSet};
 use std::hint::black_box;
@@ -199,6 +199,58 @@ fn order_digest(order: &[u64]) -> u64 {
     })
 }
 
+fn crash_points_digest(points: &[CrashPoint]) -> u64 {
+    points.iter().fold(0xcbf2_9ce4_8422_2325_u64, |acc, point| {
+        let id_len = u64::try_from(point.id.len()).expect("crash point id length fits u64");
+        let durable_len =
+            u64::try_from(point.durable_blocks.len()).expect("durable block count fits u64");
+        let mut digest = acc
+            .wrapping_mul(0x100_0000_01b3)
+            .wrapping_add(id_len)
+            .wrapping_add(durable_len)
+            .wrapping_add(u64::from(point.superblock_durable))
+            .wrapping_add(point.superblock_generation.unwrap_or_default());
+        for block in &point.durable_blocks {
+            digest = digest.wrapping_mul(0x100_0000_01b3).wrapping_add(*block);
+        }
+        digest
+    })
+}
+
+fn execute_legacy_full_dag_snapshots(mut dag: WriteDependencyDag) -> u64 {
+    let order = dag.reverse_topological_order();
+    let mut crash_points = Vec::with_capacity(order.len() * 2);
+
+    for block in order {
+        crash_points.push(CrashPoint::from_dag(
+            &dag,
+            format!("pre_flush_{block}"),
+            false,
+        ));
+        let level = dag.node_level(block).unwrap_or(0);
+        black_box(level);
+        dag.mark_durable(block).expect("mark durable");
+        crash_points.push(CrashPoint::from_dag(
+            &dag,
+            format!("post_flush_{block}"),
+            false,
+        ));
+    }
+
+    crash_points_digest(&crash_points)
+}
+
+fn execute_production_executor(dag: WriteDependencyDag) -> u64 {
+    let mut executor = WritebackExecutor::new(dag);
+    executor
+        .execute(|block, level| {
+            black_box((block, level));
+            Ok(())
+        })
+        .expect("execute writeback");
+    crash_points_digest(executor.crash_points())
+}
+
 fn assert_isomorphic(dag: &WriteDependencyDag) {
     let old = btree_visited_order(dag);
     let new = dag.reverse_topological_order();
@@ -262,9 +314,36 @@ fn bench_writeback_dag_build(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_writeback_executor_crash_points(c: &mut Criterion) {
+    let dag = build_dag();
+    assert_eq!(
+        execute_legacy_full_dag_snapshots(dag.clone()),
+        execute_production_executor(dag.clone()),
+        "production executor crash points diverged from legacy full-DAG snapshots"
+    );
+
+    let mut group = c.benchmark_group("writeback_executor_crash_points_2048");
+    group.bench_function("legacy_full_dag_snapshot_each_flush", |b| {
+        b.iter_batched(
+            || dag.clone(),
+            |dag| black_box(execute_legacy_full_dag_snapshots(dag)),
+            BatchSize::SmallInput,
+        );
+    });
+    group.bench_function("production_executor", |b| {
+        b.iter_batched(
+            || dag.clone(),
+            |dag| black_box(execute_production_executor(dag)),
+            BatchSize::SmallInput,
+        );
+    });
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_writeback_dag_order,
-    bench_writeback_dag_build
+    bench_writeback_dag_build,
+    bench_writeback_executor_crash_points
 );
 criterion_main!(benches);
