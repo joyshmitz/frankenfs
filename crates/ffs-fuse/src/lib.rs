@@ -830,6 +830,10 @@ pub struct AtomicMetrics {
 }
 
 impl AtomicMetrics {
+    #[expect(
+        deprecated,
+        reason = "try_update requires Rust 1.95; workspace MSRV is 1.85"
+    )]
     fn saturating_add(counter: &AtomicU64, delta: u64) {
         while counter
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
@@ -1717,6 +1721,10 @@ struct IoctlTraceProbe {
 }
 
 impl IoctlTraceProbe {
+    #[expect(
+        deprecated,
+        reason = "try_update requires Rust 1.95; workspace MSRV is 1.85"
+    )]
     fn saturating_add_u64(counter: &AtomicU64, delta: u64) {
         while counter
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
@@ -6012,11 +6020,12 @@ impl Filesystem for FrankenFuse {
                 // reply buffer is full: identical entries/attrs/order, but wasted
                 // getattrs are bounded to < one batch instead of 512−F.
                 use rayon::prelude::*;
-                let this: &Self = &*self;
-                let cx_ref = &cx;
                 // Batch wide enough to saturate the rayon pool for I/O-overlap,
                 // small enough that overshoot past a full buffer stays tiny.
                 const READDIRPLUS_GETATTR_BATCH: usize = 128;
+
+                let this: &Self = &*self;
+                let cx_ref = &cx;
                 let mut buffer_full = false;
                 for batch in entries.chunks(READDIRPLUS_GETATTR_BATCH) {
                     let attrs: Vec<Option<FileAttr>> = batch

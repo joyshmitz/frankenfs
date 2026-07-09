@@ -56,6 +56,10 @@ pub struct CoreMetrics {
 }
 
 impl CoreMetrics {
+    #[expect(
+        deprecated,
+        reason = "try_update requires Rust 1.95; workspace MSRV is 1.85"
+    )]
     fn saturating_add_u64(counter: &AtomicU64, delta: u64) {
         while counter
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
@@ -67,6 +71,10 @@ impl CoreMetrics {
         }
     }
 
+    #[expect(
+        deprecated,
+        reason = "try_update requires Rust 1.95; workspace MSRV is 1.85"
+    )]
     fn saturating_add_i64(counter: &AtomicI64, delta: i64) {
         while counter
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
@@ -78,6 +86,10 @@ impl CoreMetrics {
         }
     }
 
+    #[expect(
+        deprecated,
+        reason = "try_update requires Rust 1.95; workspace MSRV is 1.85"
+    )]
     fn saturating_decrement_nonnegative_i64(counter: &AtomicI64) {
         while counter
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
@@ -184,20 +196,34 @@ impl CoreMetricsSnapshot {
 
 /// Route an inode to a core.
 ///
-/// Uses a simple modulo hash for locality: consecutive inodes in the
-/// same directory tend to map to the same core.
+/// Uses a mixed inode hash for locality and load distribution.
+#[must_use]
+#[inline]
+fn mixed_inode_fold(ino: u64) -> u32 {
+    // Mix the inode number to avoid pathological patterns.
+    // FNV-1a-like mixing: multiply by a prime, XOR-fold.
+    let mixed = ino.wrapping_mul(0x517c_c1b7_2722_0a95);
+    #[expect(clippy::cast_possible_truncation)] // intentional 64→32 fold
+    {
+        (mixed ^ (mixed >> 32)) as u32
+    }
+}
+
+/// Route an inode to a core.
+///
+/// Uses a mixed inode hash for locality and load distribution.
 #[must_use]
 #[inline]
 pub fn inode_to_core(ino: u64, num_cores: u32) -> u32 {
     if num_cores == 0 {
         return 0;
     }
-    // Mix the inode number to avoid pathological patterns.
-    // FNV-1a-like mixing: multiply by a prime, XOR-fold.
-    let mixed = ino.wrapping_mul(0x517c_c1b7_2722_0a95);
-    #[expect(clippy::cast_possible_truncation)] // intentional 64→32 fold
-    let folded = (mixed ^ (mixed >> 32)) as u32;
-    folded % num_cores
+    let folded = mixed_inode_fold(ino);
+    if num_cores.is_power_of_two() {
+        folded & (num_cores - 1)
+    } else {
+        folded % num_cores
+    }
 }
 
 /// Route a (parent, name) lookup to a core.
@@ -285,6 +311,7 @@ impl PerCoreConfig {
 pub struct PerCoreDispatcher {
     config: PerCoreConfig,
     resolved_cores: u32,
+    core_mask: Option<u32>,
     core_metrics: Vec<Arc<CoreMetrics>>,
 }
 
@@ -301,10 +328,14 @@ impl PerCoreDispatcher {
     pub fn new(config: PerCoreConfig) -> Self {
         let resolved_cores = config.resolved_cores();
         let n = resolved_cores as usize;
+        let core_mask = resolved_cores
+            .is_power_of_two()
+            .then_some(resolved_cores.saturating_sub(1));
         let core_metrics = (0..n).map(|_| Arc::new(CoreMetrics::new())).collect();
         Self {
             config,
             resolved_cores,
+            core_mask,
             core_metrics,
         }
     }
@@ -324,13 +355,15 @@ impl PerCoreDispatcher {
     /// Route an inode-based request to a core.
     #[must_use]
     pub fn route_inode(&self, ino: u64) -> u32 {
-        inode_to_core(ino, self.num_cores())
+        let folded = mixed_inode_fold(ino);
+        self.core_mask
+            .map_or_else(|| folded % self.resolved_cores, |mask| folded & mask)
     }
 
     /// Route a lookup request to a core.
     #[must_use]
     pub fn route_lookup(&self, parent_ino: u64) -> u32 {
-        lookup_to_core(parent_ino, self.num_cores())
+        self.route_inode(parent_ino)
     }
 
     /// Check if work-stealing should be triggered for `core`.
@@ -574,6 +607,16 @@ mod tests {
     use super::*;
     use std::fmt::Write as _;
 
+    fn legacy_inode_to_core(ino: u64, num_cores: u32) -> u32 {
+        if num_cores == 0 {
+            return 0;
+        }
+        let mixed = ino.wrapping_mul(0x517c_c1b7_2722_0a95);
+        #[expect(clippy::cast_possible_truncation)] // intentional 64→32 fold
+        let folded = (mixed ^ (mixed >> 32)) as u32;
+        folded % num_cores
+    }
+
     #[test]
     fn inode_routing_deterministic() {
         for ino in 0..1000 {
@@ -599,6 +642,33 @@ mod tests {
                 count > 800 && count < 1700,
                 "core {core} got {count} requests (expected ~1250)"
             );
+        }
+    }
+
+    #[test]
+    fn inode_routing_matches_legacy_modulo_reference() {
+        for num_cores in [1, 2, 4, 8, 16, 32, 3, 5, 7, 10, 15] {
+            let dispatcher = PerCoreDispatcher::new(PerCoreConfig {
+                num_cores,
+                ..Default::default()
+            });
+            for ino in 0..10_000_u64 {
+                assert_eq!(
+                    inode_to_core(ino, num_cores),
+                    legacy_inode_to_core(ino, num_cores),
+                    "ino={ino} num_cores={num_cores}"
+                );
+                assert_eq!(
+                    dispatcher.route_inode(ino),
+                    legacy_inode_to_core(ino, num_cores),
+                    "dispatcher ino={ino} num_cores={num_cores}"
+                );
+                assert_eq!(
+                    dispatcher.route_lookup(ino),
+                    legacy_inode_to_core(ino, num_cores),
+                    "lookup ino={ino} num_cores={num_cores}"
+                );
+            }
         }
     }
 

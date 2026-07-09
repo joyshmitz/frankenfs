@@ -10,7 +10,7 @@ use asupersync::Cx;
 use criterion::{Criterion, criterion_group, criterion_main};
 use ffs_core::{FsOps, InodeAttr, ReaddirPage, RequestOp, RequestScope};
 use ffs_error::FfsError;
-use ffs_fuse::per_core::{PerCoreConfig, PerCoreDispatcher};
+use ffs_fuse::per_core::{PerCoreConfig, PerCoreDispatcher, inode_to_core};
 use ffs_fuse::{AtomicMetrics, FrankenFuse, MountOptions, WritebackCacheMode};
 use ffs_types::{CommitSeq, InodeNumber};
 use std::ffi::OsStr;
@@ -18,6 +18,42 @@ use std::hint::black_box;
 use std::sync::atomic::Ordering;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::time::Duration;
+
+fn legacy_inode_to_core(ino: u64, num_cores: u32) -> u32 {
+    if num_cores == 0 {
+        return 0;
+    }
+    let mixed = ino.wrapping_mul(0x517c_c1b7_2722_0a95);
+    #[expect(clippy::cast_possible_truncation)] // intentional 64->32 fold
+    let folded = (mixed ^ (mixed >> 32)) as u32;
+    folded % num_cores
+}
+
+fn bench_per_core_route_hash_ab(c: &mut Criterion) {
+    let num_cores = 8_u32;
+    let mut group = c.benchmark_group("mount_runtime_per_core_route_hash_ab");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(1));
+
+    group.bench_function("legacy_modulo", |b| {
+        let mut ino = 2_u64;
+        b.iter(|| {
+            let core = legacy_inode_to_core(black_box(ino), black_box(num_cores));
+            ino = ino.wrapping_add(1);
+            black_box(core);
+        });
+    });
+
+    group.bench_function("power2_mask", |b| {
+        let mut ino = 2_u64;
+        b.iter(|| {
+            let core = inode_to_core(black_box(ino), black_box(num_cores));
+            ino = ino.wrapping_add(1);
+            black_box(core);
+        });
+    });
+    group.finish();
+}
 
 fn bench_per_core_route_inode(c: &mut Criterion) {
     let dispatcher = PerCoreDispatcher::new(PerCoreConfig {
@@ -325,6 +361,7 @@ fn bench_writeback_cache_batching(c: &mut Criterion) {
 
 criterion_group!(
     mount_runtime,
+    bench_per_core_route_hash_ab,
     bench_per_core_route_inode,
     bench_per_core_route_lookup,
     bench_per_core_should_steal,
