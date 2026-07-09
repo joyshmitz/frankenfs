@@ -30768,14 +30768,20 @@ impl OpenFs {
                 // hot-inode slot). RO only: the on-disk inode is immutable, so a
                 // last-writer-wins publish is safe; a writable mount skips it.
                 let read_only = !self.is_writable();
-                let hot_hit = if read_only {
-                    let hot = self.ext4_hot_inode.load();
-                    hot.as_ref()
-                        .filter(|slot| slot.0 == canonical.0)
-                        .map(|slot| Arc::clone(&slot.1))
+                // Hold the arc_swap Guard and BORROW straight out of it instead
+                // of `Arc::clone`-ing the inner Arc per hit (same lock-free-access
+                // tuning as the hot-parent slot below; the clone was ~6.6% of warm
+                // random-read). Guard keeps the slot alive for the borrow.
+                let hot_guard = if read_only {
+                    Some(self.ext4_hot_inode.load())
                 } else {
                     None
                 };
+                let hot_hit: Option<&Arc<Ext4Inode>> = hot_guard.as_ref().and_then(|g| {
+                    g.as_ref()
+                        .filter(|slot| slot.0 == canonical.0)
+                        .map(|slot| &slot.1)
+                });
                 let inode_was_hot = hot_hit.is_some();
                 // On a hot hit, BORROW the inode straight out of the Arc instead
                 // of deep-cloning the Ext4Inode per read: the struct carries a
@@ -30784,8 +30790,8 @@ impl OpenFs {
                 // malloc/free churn (profiled). Every downstream use is `&inode`.
                 // On a miss, read, publish to the hot slot, and own it locally.
                 let parsed_storage;
-                let inode: &Ext4Inode = match hot_hit.as_ref() {
-                    Some(slot) => slot.as_ref(),
+                let inode: &Ext4Inode = match hot_hit {
+                    Some(arc) => arc.as_ref(),
                     None => {
                         let parsed = self.read_inode_with_scope(cx, scope, canonical)?;
                         if read_only {
@@ -32795,18 +32801,26 @@ impl FsOps for OpenFs {
                 // repeated lookups (RO mount → immutable) instead of re-reading +
                 // re-parsing the parent inode every time (bd-cc-ext4-hotparent).
                 let read_only = !self.is_writable();
-                let hot_parent = if read_only {
-                    self.ext4_hot_parent
-                        .load()
-                        .as_ref()
-                        .filter(|slot| slot.0 == parent_ino.0)
-                        .map(|slot| Arc::clone(&slot.1))
+                // Hold the arc_swap Guard and BORROW the parent inode straight
+                // out of it instead of `Arc::clone`-ing the inner Arc per hit —
+                // the clone's incref/decref pair was part of the 8.46% arc_swap
+                // self-time on `lookup-bench` (same-dir stream → hits every
+                // lookup). The Guard keeps the slot alive for the borrow's
+                // lifetime; a concurrent `store` keeps the old value live until
+                // this Guard drops.
+                let hot_guard = if read_only {
+                    Some(self.ext4_hot_parent.load())
                 } else {
                     None
                 };
+                let hot_parent: Option<&Arc<Ext4Inode>> = hot_guard.as_ref().and_then(|g| {
+                    g.as_ref()
+                        .filter(|slot| slot.0 == parent_ino.0)
+                        .map(|slot| &slot.1)
+                });
                 let parent_storage;
-                let parent_inode: &Ext4Inode = match hot_parent.as_ref() {
-                    Some(slot) => slot.as_ref(),
+                let parent_inode: &Ext4Inode = match hot_parent {
+                    Some(arc) => arc.as_ref(),
                     None => {
                         let parsed =
                             self.read_inode_metadata_with_scope(cx, scope, parent_ino)?;
