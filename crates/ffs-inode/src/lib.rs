@@ -154,47 +154,58 @@ pub fn serialize_inode_into(inode: &Ext4Inode, inode_size: usize, buf: &mut [u8]
     debug_assert_eq!(buf.len(), inode_size);
     buf.fill(0);
 
+    // Reslice the fixed 128-byte base area to an array ref ONCE (one bounds
+    // check): const-offset writes into `&mut [u8; 128]` are provably in-bounds,
+    // so the ~30 base-field `copy_from_slice`s drop their per-write bounds check
+    // with NO extra buffer traffic (writes still land straight in `buf`). The
+    // write-side analog of the extent-parse read_fixed hoist (b83531ef); the
+    // caller always sizes `buf` to `inode_size >= 128`. The variable-offset
+    // extended area (0x80+) keeps direct `buf` writes below.
+    let base: &mut [u8; 128] = (&mut buf[..128])
+        .try_into()
+        .expect("ext4 inode buffer is at least 128 bytes");
+
     // Mode (0x00).
-    buf[0x00..0x02].copy_from_slice(&inode.mode.to_le_bytes());
+    base[0x00..0x02].copy_from_slice(&inode.mode.to_le_bytes());
     // UID low (0x02).
-    buf[0x02..0x04].copy_from_slice(&(inode.uid as u16).to_le_bytes());
+    base[0x02..0x04].copy_from_slice(&(inode.uid as u16).to_le_bytes());
     // Size low (0x04).
-    buf[0x04..0x08].copy_from_slice(&(inode.size as u32).to_le_bytes());
+    base[0x04..0x08].copy_from_slice(&(inode.size as u32).to_le_bytes());
     // atime (0x08).
-    buf[0x08..0x0C].copy_from_slice(&inode.atime.to_le_bytes());
+    base[0x08..0x0C].copy_from_slice(&inode.atime.to_le_bytes());
     // ctime (0x0C).
-    buf[0x0C..0x10].copy_from_slice(&inode.ctime.to_le_bytes());
+    base[0x0C..0x10].copy_from_slice(&inode.ctime.to_le_bytes());
     // mtime (0x10).
-    buf[0x10..0x14].copy_from_slice(&inode.mtime.to_le_bytes());
+    base[0x10..0x14].copy_from_slice(&inode.mtime.to_le_bytes());
     // dtime (0x14).
-    buf[0x14..0x18].copy_from_slice(&inode.dtime.to_le_bytes());
+    base[0x14..0x18].copy_from_slice(&inode.dtime.to_le_bytes());
     // GID low (0x18).
-    buf[0x18..0x1A].copy_from_slice(&(inode.gid as u16).to_le_bytes());
+    base[0x18..0x1A].copy_from_slice(&(inode.gid as u16).to_le_bytes());
     // Links count (0x1A).
-    buf[0x1A..0x1C].copy_from_slice(&inode.links_count.to_le_bytes());
+    base[0x1A..0x1C].copy_from_slice(&inode.links_count.to_le_bytes());
     // Blocks low (0x1C).
-    buf[0x1C..0x20].copy_from_slice(&(inode.blocks as u32).to_le_bytes());
+    base[0x1C..0x20].copy_from_slice(&(inode.blocks as u32).to_le_bytes());
     // Flags (0x20).
-    buf[0x20..0x24].copy_from_slice(&inode.flags.to_le_bytes());
+    base[0x20..0x24].copy_from_slice(&inode.flags.to_le_bytes());
     // i_osd1 / l_i_version (0x24) — NFS change attribute low 32 bits.
-    buf[0x24..0x28].copy_from_slice(&inode.version.to_le_bytes());
+    base[0x24..0x28].copy_from_slice(&inode.version.to_le_bytes());
     // i_block / extent bytes (0x28, 60 bytes).
     let copy_len = inode.extent_bytes.len().min(60);
-    buf[0x28..0x28 + copy_len].copy_from_slice(&inode.extent_bytes[..copy_len]);
+    base[0x28..0x28 + copy_len].copy_from_slice(&inode.extent_bytes[..copy_len]);
     // Generation (0x64).
-    buf[0x64..0x68].copy_from_slice(&inode.generation.to_le_bytes());
+    base[0x64..0x68].copy_from_slice(&inode.generation.to_le_bytes());
     // File ACL low (0x68).
-    buf[0x68..0x6C].copy_from_slice(&(inode.file_acl as u32).to_le_bytes());
+    base[0x68..0x6C].copy_from_slice(&(inode.file_acl as u32).to_le_bytes());
     // Size high (0x6C).
-    buf[0x6C..0x70].copy_from_slice(&((inode.size >> 32) as u32).to_le_bytes());
+    base[0x6C..0x70].copy_from_slice(&((inode.size >> 32) as u32).to_le_bytes());
     // Blocks high (0x74, 2 bytes).
-    buf[0x74..0x76].copy_from_slice(&((inode.blocks >> 32) as u16).to_le_bytes());
+    base[0x74..0x76].copy_from_slice(&((inode.blocks >> 32) as u16).to_le_bytes());
     // File ACL high (0x76, 2 bytes).
-    buf[0x76..0x78].copy_from_slice(&((inode.file_acl >> 32) as u16).to_le_bytes());
+    base[0x76..0x78].copy_from_slice(&((inode.file_acl >> 32) as u16).to_le_bytes());
     // UID high (0x78).
-    buf[0x78..0x7A].copy_from_slice(&((inode.uid >> 16) as u16).to_le_bytes());
+    base[0x78..0x7A].copy_from_slice(&((inode.uid >> 16) as u16).to_le_bytes());
     // GID high (0x7A).
-    buf[0x7A..0x7C].copy_from_slice(&((inode.gid >> 16) as u16).to_le_bytes());
+    base[0x7A..0x7C].copy_from_slice(&((inode.gid >> 16) as u16).to_le_bytes());
     // checksum_lo (0x7C) — will be set by compute_and_set_checksum.
 
     // Extended area (when inode_size > 128).
