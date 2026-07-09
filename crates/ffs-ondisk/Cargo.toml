@@ -123,3 +123,7 @@ harness = false
 [[bench]]
 name = "inode_attr_times"
 harness = false
+
+[[bench]]
+name = "dx_hash_transform"
+harness = false
