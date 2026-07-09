@@ -115,3 +115,7 @@ harness = false
 [[bench]]
 name = "htree_split_sort"
 harness = false
+
+[[bench]]
+name = "inode_parse_metadata"
+harness = false

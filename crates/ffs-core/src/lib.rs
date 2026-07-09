@@ -30466,7 +30466,13 @@ impl OpenFs {
             return;
         }
         let canonical = Self::ext4_canonical_inode(parent);
-        let Ok(parent_inode) = self.read_inode(cx, canonical) else {
+        // Metadata-only read: the index validation stamp needs only the parent's
+        // ctime/mtime/size + number, never its xattrs, and this path never
+        // re-serializes the parent — so skip the ibody copy+alloc a full parse
+        // does (1.24x on the read, bench inode_parse_metadata).
+        let Ok(parent_inode) = self
+            .with_latest_scope(|scope| self.read_inode_metadata_with_scope(cx, scope, canonical))
+        else {
             return;
         };
         if parent_inode.number == 0 {
