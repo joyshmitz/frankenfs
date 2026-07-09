@@ -206,7 +206,7 @@ impl BufferedMessages {
     }
 
     #[allow(clippy::needless_pass_by_value)]
-    fn upsert(&self, entry: BufferedMutationEntry) -> Self {
+    fn upsert_with_capacity(&self, entry: BufferedMutationEntry, capacity: usize) -> Option<Self> {
         match self
             .entries
             .binary_search_by_key(&entry.key, |(key, _)| *key)
@@ -215,14 +215,15 @@ impl BufferedMessages {
                 let mut entries = Vec::with_capacity(self.entries.len());
                 entries.extend_from_slice(self.entries.as_slice());
                 entries[index].1 = entry.mutation;
-                Self::from_sorted_entries(entries)
+                Some(Self::from_sorted_entries(entries))
             }
+            Err(_) if self.entries.len() >= capacity => None,
             Err(index) => {
                 let mut entries = Vec::with_capacity(self.entries.len() + 1);
                 entries.extend_from_slice(&self.entries[..index]);
                 entries.push((entry.key, entry.mutation));
                 entries.extend_from_slice(&self.entries[index..]);
-                Self::from_sorted_entries(entries)
+                Some(Self::from_sorted_entries(entries))
             }
         }
     }
@@ -759,11 +760,11 @@ fn message_buffer_append(
     let buffered = BufferedMutation::from_delta(mutation)?;
     match snapshot.head.as_ref() {
         PageDelta::MessageBuffer { messages, next } => {
-            let grows = messages.get(&buffered.key).is_none();
-            if grows && messages.len() >= DEFAULT_MESSAGE_BUFFER_CAPACITY {
+            let Some(new_messages) =
+                messages.upsert_with_capacity(buffered, DEFAULT_MESSAGE_BUFFER_CAPACITY)
+            else {
                 return Some(MessageBufferAppend::FlushRequired);
-            }
-            let new_messages = messages.upsert(buffered);
+            };
             Some(MessageBufferAppend::Buffered {
                 new_head: Arc::new(PageDelta::MessageBuffer {
                     messages: new_messages,
