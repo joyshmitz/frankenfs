@@ -7019,81 +7019,14 @@ impl BtrfsExtentAllocator {
             .values()
             .filter(|bg| (bg.item.flags & type_flags) != 0)
         {
-            let bg_end = bg
-                .start
-                .checked_add(bg.item.total_bytes)
-                .ok_or(BtrfsMutationError::AddressOverflow)?;
-            let range_start = BtrfsKey {
-                objectid: bg.start,
-                item_type: BTRFS_ITEM_EXTENT_ITEM,
-                offset: 0,
-            };
-            let range_end = BtrfsKey {
-                objectid: bg_end,
-                item_type: BTRFS_ITEM_METADATA_ITEM,
-                offset: u64::MAX,
-            };
-            let mut allocated_ranges = Vec::new();
-            let mut materialized_used = 0_u64;
-            let mut extent_keys = Vec::new();
-
-            self.extent_tree
-                .range_with(&range_start, &range_end, |key, _| extent_keys.push(key))?;
-            for key in extent_keys {
-                if key.objectid >= bg_end {
-                    break;
-                }
-                if !matches!(
-                    key.item_type,
-                    BTRFS_ITEM_EXTENT_ITEM | BTRFS_ITEM_METADATA_ITEM
-                ) {
-                    continue;
-                }
-                let extent_start = key.objectid.max(bg.start);
-                let extent_end = key
-                    .objectid
-                    .checked_add(key.offset)
-                    .ok_or(BtrfsMutationError::AddressOverflow)?
-                    .min(bg_end);
-                if extent_start < extent_end {
-                    let extent_len = extent_end - extent_start;
-                    materialized_used = materialized_used
-                        .checked_add(extent_len)
-                        .ok_or(BtrfsMutationError::AddressOverflow)?;
-                    allocated_ranges.push((extent_start, extent_end));
-                }
-            }
-
-            let untracked_used = bg
-                .item
-                .used_bytes
-                .saturating_sub(materialized_used)
-                .min(bg.item.total_bytes);
-            if untracked_used > 0 {
-                allocated_ranges.push((
-                    bg.start,
-                    bg.start
-                        .checked_add(untracked_used)
-                        .ok_or(BtrfsMutationError::AddressOverflow)?,
-                ));
-            }
-            allocated_ranges.sort_unstable_by_key(|&(start, end)| (start, end));
-
-            let mut cursor = bg.start;
-            let mut group_best = 0_u64;
-            for (extent_start, extent_end) in allocated_ranges {
-                if extent_end <= cursor {
-                    continue;
-                }
-                if cursor < extent_start {
-                    group_best = group_best.max(extent_start - cursor);
-                }
-                cursor = extent_end;
-            }
-
-            if cursor < bg_end {
-                group_best = group_best.max(bg_end - cursor);
-            }
+            let scan = self.scan_group_accounting_free_space(bg.start, bg.item.total_bytes)?;
+            let free_ranges = Self::finish_group_free_ranges(
+                bg.start,
+                bg.item.total_bytes,
+                bg.item.used_bytes,
+                scan,
+            )?;
+            let group_best = free_ranges.iter().map(|&(_, len)| len).max().unwrap_or(0);
             best = best.max(group_best.min(bg.item.free_bytes()));
         }
 
@@ -7124,89 +7057,13 @@ impl BtrfsExtentAllocator {
     pub fn free_space_extents(&self) -> Result<Vec<BlockGroupFreeSpace>, BtrfsMutationError> {
         let mut result = Vec::with_capacity(self.block_groups.len());
         for bg in self.block_groups.values() {
-            let bg_end = bg
-                .start
-                .checked_add(bg.item.total_bytes)
-                .ok_or(BtrfsMutationError::AddressOverflow)?;
-            let range_start = BtrfsKey {
-                objectid: bg.start,
-                item_type: BTRFS_ITEM_EXTENT_ITEM,
-                offset: 0,
-            };
-            let range_end = BtrfsKey {
-                objectid: bg_end,
-                item_type: BTRFS_ITEM_METADATA_ITEM,
-                offset: u64::MAX,
-            };
-            let mut allocated_ranges = Vec::new();
-            let mut materialized_used = 0_u64;
-            let mut extent_keys = Vec::new();
-            self.extent_tree
-                .range_with(&range_start, &range_end, |key, _| extent_keys.push(key))?;
-            for key in extent_keys {
-                if key.objectid >= bg_end {
-                    break;
-                }
-                if !matches!(
-                    key.item_type,
-                    BTRFS_ITEM_EXTENT_ITEM | BTRFS_ITEM_METADATA_ITEM
-                ) {
-                    continue;
-                }
-                // A skinny METADATA_ITEM key encodes the tree LEVEL in its
-                // offset, not the byte length — the block is always `nodesize`
-                // bytes. An EXTENT_ITEM key offset is the real byte length.
-                let extent_len = if key.item_type == BTRFS_ITEM_METADATA_ITEM {
-                    self.nodesize
-                } else {
-                    key.offset
-                };
-                let extent_start = key.objectid.max(bg.start);
-                let extent_end = key
-                    .objectid
-                    .checked_add(extent_len)
-                    .ok_or(BtrfsMutationError::AddressOverflow)?
-                    .min(bg_end);
-                if extent_start < extent_end {
-                    materialized_used = materialized_used
-                        .checked_add(extent_end - extent_start)
-                        .ok_or(BtrfsMutationError::AddressOverflow)?;
-                    allocated_ranges.push((extent_start, extent_end));
-                }
-            }
-
-            // Used bytes not represented as an extent item (the reserved
-            // system/superblock prefix) are fenced off at the group start, so
-            // the free-space tree never advertises them as free.
-            let untracked_used = bg
-                .item
-                .used_bytes
-                .saturating_sub(materialized_used)
-                .min(bg.item.total_bytes);
-            if untracked_used > 0 {
-                allocated_ranges.push((
-                    bg.start,
-                    bg.start
-                        .checked_add(untracked_used)
-                        .ok_or(BtrfsMutationError::AddressOverflow)?,
-                ));
-            }
-            allocated_ranges.sort_unstable_by_key(|&(start, end)| (start, end));
-
-            let mut free_ranges = Vec::new();
-            let mut cursor = bg.start;
-            for (extent_start, extent_end) in allocated_ranges {
-                if extent_end <= cursor {
-                    continue;
-                }
-                if cursor < extent_start {
-                    free_ranges.push((cursor, extent_start - cursor));
-                }
-                cursor = extent_end;
-            }
-            if cursor < bg_end {
-                free_ranges.push((cursor, bg_end - cursor));
-            }
+            let scan = self.scan_group_accounting_free_space(bg.start, bg.item.total_bytes)?;
+            let free_ranges = Self::finish_group_free_ranges(
+                bg.start,
+                bg.item.total_bytes,
+                bg.item.used_bytes,
+                scan,
+            )?;
 
             result.push(BlockGroupFreeSpace {
                 start: bg.start,
@@ -7404,6 +7261,31 @@ impl BtrfsExtentAllocator {
         Ok(fenced_ranges)
     }
 
+    fn finish_group_free_ranges(
+        start: u64,
+        total_bytes: u64,
+        used_bytes: u64,
+        mut scan: GroupAccountingFreeSpaceScan,
+    ) -> Result<Vec<(u64, u64)>, BtrfsMutationError> {
+        let end = start
+            .checked_add(total_bytes)
+            .ok_or(BtrfsMutationError::AddressOverflow)?;
+        let untracked_used = used_bytes
+            .saturating_sub(scan.materialized_used)
+            .min(total_bytes);
+        if untracked_used > 0 {
+            let reserved_end = start
+                .checked_add(untracked_used)
+                .ok_or(BtrfsMutationError::AddressOverflow)?;
+            scan.free_ranges = Self::fence_free_ranges_before(scan.free_ranges, reserved_end)?;
+            scan.cursor = scan.cursor.max(reserved_end);
+        }
+        if scan.cursor < end {
+            scan.free_ranges.push((scan.cursor, end - scan.cursor));
+        }
+        Ok(scan.free_ranges)
+    }
+
     /// Fused commit-path pass that, in a SINGLE `EXTENT_ITEM`/`METADATA_ITEM`
     /// key scan per block group, does the work of both
     /// [`Self::sync_block_group_accounting`] and [`Self::free_space_extents`]:
@@ -7445,33 +7327,17 @@ impl BtrfsExtentAllocator {
         let mut grand_total = 0_u64;
         let mut free_space = Vec::with_capacity(groups.len());
         for (start, total_bytes, flags) in groups {
-            let end = start
-                .checked_add(total_bytes)
-                .ok_or(BtrfsMutationError::AddressOverflow)?;
-            let mut scan = self.scan_group_accounting_free_space(start, total_bytes)?;
+            let scan = self.scan_group_accounting_free_space(start, total_bytes)?;
             self.write_block_group_accounting(start, total_bytes, scan.used)?;
             grand_total = grand_total.saturating_add(scan.used);
-
-            let untracked_used = scan
-                .used
-                .saturating_sub(scan.materialized_used)
-                .min(total_bytes);
-            if untracked_used > 0 {
-                let reserved_end = start
-                    .checked_add(untracked_used)
-                    .ok_or(BtrfsMutationError::AddressOverflow)?;
-                scan.free_ranges = Self::fence_free_ranges_before(scan.free_ranges, reserved_end)?;
-                scan.cursor = scan.cursor.max(reserved_end);
-            }
-            if scan.cursor < end {
-                scan.free_ranges.push((scan.cursor, end - scan.cursor));
-            }
+            let used = scan.used;
+            let free_ranges = Self::finish_group_free_ranges(start, total_bytes, used, scan)?;
 
             free_space.push(BlockGroupFreeSpace {
                 start,
                 total_bytes,
                 flags,
-                free_ranges: scan.free_ranges,
+                free_ranges,
             });
         }
         Ok((grand_total, free_space))
@@ -17043,6 +16909,39 @@ mod tests {
                 (bg_start + 0xc000, bg_len - 0xc000),
             ],
             "loaded metadata blocks must be excluded from free space"
+        );
+    }
+
+    #[test]
+    fn largest_free_extent_excludes_loaded_skinny_metadata_items() {
+        let mut alloc = BtrfsExtentAllocator::new(9).expect("alloc");
+        alloc.set_nodesize(0x4000);
+        let bg_start = 0x1d0_0000_u64;
+        let bg_len = 0x20_0000_u64;
+        alloc.add_block_group(bg_start, make_meta_bg(bg_start, bg_len));
+
+        for node in [bg_start, bg_start + 0x8000] {
+            let item = BtrfsExtentItem {
+                refs: 1,
+                generation: 9,
+                flags: BtrfsExtentItem::FLAG_TREE_BLOCK,
+            };
+            let mut value = item.to_bytes();
+            value.push(BTRFS_ITEM_TREE_BLOCK_REF);
+            value.extend_from_slice(&BTRFS_EXTENT_TREE_OBJECTID.to_le_bytes());
+            let key = BtrfsKey {
+                objectid: node,
+                item_type: BTRFS_ITEM_METADATA_ITEM,
+                offset: 0,
+            };
+            alloc.extent_tree_mut().insert(key, &value).expect("insert");
+        }
+
+        assert_eq!(
+            alloc
+                .largest_free_extent(BTRFS_BLOCK_GROUP_METADATA)
+                .expect("largest metadata gap"),
+            bg_len - 0xc000
         );
     }
 

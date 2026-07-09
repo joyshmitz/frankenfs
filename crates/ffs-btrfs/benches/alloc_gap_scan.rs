@@ -19,7 +19,8 @@
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use ffs_btrfs::{
-    BTRFS_BLOCK_GROUP_DATA, BlockGroupFreeSpace, BtrfsBlockGroupItem, BtrfsExtentAllocator,
+    BTRFS_BLOCK_GROUP_DATA, BTRFS_ITEM_EXTENT_ITEM, BTRFS_ITEM_METADATA_ITEM, BlockGroupFreeSpace,
+    BtrfsBTree, BtrfsBlockGroupItem, BtrfsExtentAllocator, BtrfsKey,
 };
 use std::hint::black_box;
 
@@ -125,9 +126,107 @@ fn build_largest_free_allocator() -> BtrfsExtentAllocator {
     alloc
 }
 
+fn legacy_allocated_ranges(alloc: &BtrfsExtentAllocator) -> Vec<(u64, u64)> {
+    let total_bytes = (E as u64 + 16) * EXT_SIZE;
+    let end = bg_end();
+    let range_start = BtrfsKey {
+        objectid: BG_START,
+        item_type: BTRFS_ITEM_EXTENT_ITEM,
+        offset: 0,
+    };
+    let range_end = BtrfsKey {
+        objectid: end,
+        item_type: BTRFS_ITEM_METADATA_ITEM,
+        offset: u64::MAX,
+    };
+    let mut allocated_ranges = Vec::new();
+    let mut materialized_used = 0_u64;
+    for (key, _) in alloc
+        .extent_tree()
+        .range(&range_start, &range_end)
+        .expect("bench extent range")
+    {
+        if key.objectid >= end {
+            break;
+        }
+        if !matches!(
+            key.item_type,
+            BTRFS_ITEM_EXTENT_ITEM | BTRFS_ITEM_METADATA_ITEM
+        ) {
+            continue;
+        }
+        let extent_start = key.objectid.max(BG_START);
+        let extent_end = key
+            .objectid
+            .checked_add(key.offset)
+            .expect("bench extent end")
+            .min(end);
+        if extent_start < extent_end {
+            materialized_used = materialized_used
+                .checked_add(extent_end - extent_start)
+                .expect("bench materialized bytes");
+            allocated_ranges.push((extent_start, extent_end));
+        }
+    }
+
+    let used_bytes = E as u64 * EXT_SIZE;
+    let untracked_used = used_bytes
+        .saturating_sub(materialized_used)
+        .min(total_bytes);
+    if untracked_used > 0 {
+        allocated_ranges.push((BG_START, BG_START + untracked_used));
+    }
+    allocated_ranges.sort_unstable_by_key(|&(start, end)| (start, end));
+    allocated_ranges
+}
+
+fn legacy_largest_free_extent(alloc: &BtrfsExtentAllocator) -> u64 {
+    let mut cursor = BG_START;
+    let mut group_best = 0_u64;
+    for (extent_start, extent_end) in legacy_allocated_ranges(alloc) {
+        if extent_end <= cursor {
+            continue;
+        }
+        if cursor < extent_start {
+            group_best = group_best.max(extent_start - cursor);
+        }
+        cursor = extent_end;
+    }
+    let end = bg_end();
+    if cursor < end {
+        group_best = group_best.max(end - cursor);
+    }
+    group_best.min(16 * EXT_SIZE)
+}
+
+fn legacy_free_space_extents(alloc: &BtrfsExtentAllocator) -> Vec<BlockGroupFreeSpace> {
+    let mut free_ranges = Vec::new();
+    let mut cursor = BG_START;
+    for (extent_start, extent_end) in legacy_allocated_ranges(alloc) {
+        if extent_end <= cursor {
+            continue;
+        }
+        if cursor < extent_start {
+            free_ranges.push((cursor, extent_start - cursor));
+        }
+        cursor = extent_end;
+    }
+    let end = bg_end();
+    if cursor < end {
+        free_ranges.push((cursor, end - cursor));
+    }
+    vec![BlockGroupFreeSpace {
+        start: BG_START,
+        total_bytes: (E as u64 + 16) * EXT_SIZE,
+        flags: BTRFS_BLOCK_GROUP_DATA,
+        free_ranges,
+    }]
+}
+
 fn bench_largest_free_extent(c: &mut Criterion) {
     let alloc = build_largest_free_allocator();
     let expected = 16 * EXT_SIZE;
+    assert_eq!(legacy_largest_free_extent(&alloc), expected);
     assert_eq!(
         alloc
             .largest_free_extent(BTRFS_BLOCK_GROUP_DATA)
@@ -136,7 +235,10 @@ fn bench_largest_free_extent(c: &mut Criterion) {
     );
 
     let mut group = c.benchmark_group("btrfs_largest_free_extent_keyscan_4096");
-    group.bench_function("production_largest_free_extent", |b| {
+    group.bench_function("legacy_range_vec_sort_largest", |b| {
+        b.iter(|| black_box(legacy_largest_free_extent(black_box(&alloc))));
+    });
+    group.bench_function("streaming_largest_free_extent", |b| {
         b.iter(|| {
             black_box(
                 alloc
@@ -150,7 +252,9 @@ fn bench_largest_free_extent(c: &mut Criterion) {
 
 fn bench_free_space_extents(c: &mut Criterion) {
     let alloc = build_largest_free_allocator();
+    let legacy = legacy_free_space_extents(&alloc);
     let free_space = alloc.free_space_extents().expect("free space extents");
+    assert_eq!(legacy, free_space);
     assert_eq!(free_space.len(), 1);
     assert_eq!(
         free_space[0].free_ranges,
@@ -158,7 +262,10 @@ fn bench_free_space_extents(c: &mut Criterion) {
     );
 
     let mut group = c.benchmark_group("btrfs_free_space_extents_keyscan_4096");
-    group.bench_function("production_free_space_extents", |b| {
+    group.bench_function("legacy_range_vec_sort_free_space", |b| {
+        b.iter(|| black_box(legacy_free_space_extents(black_box(&alloc))));
+    });
+    group.bench_function("streaming_free_space_extents", |b| {
         b.iter(|| black_box(alloc.free_space_extents().expect("free space extents")));
     });
     group.finish();
