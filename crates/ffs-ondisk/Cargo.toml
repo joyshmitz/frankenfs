@@ -91,3 +91,7 @@ harness = false
 [[bench]]
 name = "extent_leaf_parse"
 harness = false
+
+[[bench]]
+name = "path_validate"
+harness = false
