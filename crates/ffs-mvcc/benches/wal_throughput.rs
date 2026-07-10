@@ -21,10 +21,16 @@ use ffs_mvcc::{CompressionAlgo, CompressionPolicy, ConflictPolicy, MergeProof, M
 use ffs_types::{BlockNumber, CommitSeq, TxnId};
 use parking_lot::Mutex;
 use serde::Serialize;
+#[cfg(feature = "bench-instrumentation")]
+use sha2::{Digest, Sha256};
 use std::borrow::Cow;
 use std::collections::BTreeSet;
+#[cfg(feature = "bench-instrumentation")]
+use std::fmt::Write;
 use std::fs;
 use std::hint::black_box;
+#[cfg(feature = "bench-instrumentation")]
+use std::io::Read;
 #[cfg(feature = "bench-instrumentation")]
 use std::process::{Command, Stdio};
 #[cfg(feature = "bench-instrumentation")]
@@ -49,6 +55,79 @@ struct ArenaCounters {
     num_wait: u64,
     total_wait_time: u64,
     num_owner_switch: u64,
+}
+
+#[cfg(feature = "bench-instrumentation")]
+impl ArenaCounters {
+    fn saturating_delta(self, before: Self) -> Self {
+        Self {
+            num_ops: self.num_ops.saturating_sub(before.num_ops),
+            num_spin_acq: self.num_spin_acq.saturating_sub(before.num_spin_acq),
+            num_wait: self.num_wait.saturating_sub(before.num_wait),
+            total_wait_time: self.total_wait_time.saturating_sub(before.total_wait_time),
+            num_owner_switch: self
+                .num_owner_switch
+                .saturating_sub(before.num_owner_switch),
+        }
+    }
+
+    fn merge(&mut self, other: Self) {
+        self.num_ops = self.num_ops.saturating_add(other.num_ops);
+        self.num_spin_acq = self.num_spin_acq.saturating_add(other.num_spin_acq);
+        self.num_wait = self.num_wait.saturating_add(other.num_wait);
+        self.total_wait_time = self.total_wait_time.saturating_add(other.total_wait_time);
+        self.num_owner_switch = self.num_owner_switch.saturating_add(other.num_owner_switch);
+    }
+}
+
+#[cfg(feature = "bench-instrumentation")]
+struct ActualArmObservation {
+    elapsed_ns: u64,
+    profile: ffs_mvcc::sharded::CommitLockProfile,
+    commits: u64,
+    arena: ArenaCounters,
+}
+
+#[cfg(feature = "bench-instrumentation")]
+struct ActualNullPair {
+    lhs: ActualArmObservation,
+    rhs: ActualArmObservation,
+    order: &'static str,
+}
+
+#[cfg(feature = "bench-instrumentation")]
+fn median(mut values: Vec<f64>) -> f64 {
+    assert!(!values.is_empty(), "median requires at least one sample");
+    values.sort_by(f64::total_cmp);
+    let midpoint = values.len() / 2;
+    if values.len() % 2 == 0 {
+        values[midpoint - 1].midpoint(values[midpoint])
+    } else {
+        values[midpoint]
+    }
+}
+
+#[cfg(feature = "bench-instrumentation")]
+fn population_cv_pct(values: &[f64]) -> f64 {
+    assert!(!values.is_empty(), "CV requires at least one sample");
+    let mean = values.iter().sum::<f64>() / values.len() as f64;
+    if mean == 0.0 {
+        return 0.0;
+    }
+    let variance = values
+        .iter()
+        .map(|value| (value - mean).powi(2))
+        .sum::<f64>()
+        / values.len() as f64;
+    variance.sqrt() / mean * 100.0
+}
+
+#[cfg(feature = "bench-instrumentation")]
+fn p90(mut values: Vec<f64>) -> f64 {
+    assert!(!values.is_empty(), "p90 requires at least one sample");
+    values.sort_by(f64::total_cmp);
+    let rank = values.len().saturating_mul(90).div_ceil(100);
+    values[rank.saturating_sub(1)]
 }
 
 #[cfg(feature = "bench-instrumentation")]
@@ -106,6 +185,51 @@ fn arena_counters() -> ArenaCounters {
 }
 
 #[cfg(feature = "bench-instrumentation")]
+fn print_bench_evidence_metadata() {
+    let exe = std::env::current_exe().expect("bench executable");
+    let mut file = fs::File::open(&exe).expect("open bench executable for hashing");
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0_u8; 64 * 1024];
+    loop {
+        let bytes_read = file.read(&mut buffer).expect("hash bench executable");
+        if bytes_read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..bytes_read]);
+    }
+    let worker = Command::new("hostname")
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+        .filter(|hostname| !hostname.is_empty())
+        .unwrap_or_else(|| "unknown".to_owned());
+    let digest = hasher.finalize();
+    let mut sha256 = String::with_capacity(digest.len().saturating_mul(2));
+    for byte in digest {
+        write!(&mut sha256, "{byte:02x}").expect("format bench executable hash");
+    }
+    println!("bench_evidence,binary_sha256={sha256},worker={worker}");
+}
+
+#[cfg(all(feature = "bench-instrumentation", target_arch = "x86_64"))]
+fn print_codegen_isa() {
+    println!(
+        "codegen_isa,target_arch=x86_64,compile_sse2={},compile_sse4_2={},compile_avx2={},runtime_sse4_2={},runtime_avx2={}",
+        cfg!(target_feature = "sse2"),
+        cfg!(target_feature = "sse4.2"),
+        cfg!(target_feature = "avx2"),
+        std::is_x86_feature_detected!("sse4.2"),
+        std::is_x86_feature_detected!("avx2"),
+    );
+}
+
+#[cfg(all(feature = "bench-instrumentation", not(target_arch = "x86_64")))]
+fn print_codegen_isa() {
+    println!("codegen_isa,target_arch=non_x86_64");
+}
+
+#[cfg(feature = "bench-instrumentation")]
 fn run_actual_commit_arm(
     writers: usize,
     profiled: bool,
@@ -153,31 +277,135 @@ fn run_actual_commit_arm(
 }
 
 #[cfg(feature = "bench-instrumentation")]
-fn print_actual_sweep() {
-    for writers in [1_usize, 2, 4, 8] {
-        let before = arena_counters();
-        let (orig_elapsed, _, _) = run_actual_commit_arm(writers, false);
-        let mid = arena_counters();
-        let (profiled_elapsed, profile, commits) = run_actual_commit_arm(writers, true);
-        let after = arena_counters();
-        println!(
-            "actual_commit,threads={writers},commits={commits},orig_ms={:.3},profiled_ms={:.3},shard_wait_p99_ns={},shard_hold_p99_ns={},publish_wait_p99_ns={},publish_hold_p99_ns={},prefix_wait_p99_ns={},arena_num_wait_delta={},arena_wait_ns_delta={}",
-            orig_elapsed.as_secs_f64() * 1e3,
-            profiled_elapsed.as_secs_f64() * 1e3,
-            profile.shard_wait().p99_upper_ns,
-            profile.shard_hold().p99_upper_ns,
-            profile.publication_lock_wait().p99_upper_ns,
-            profile.publication_lock_hold().p99_upper_ns,
-            profile.publication_prefix_wait().p99_upper_ns,
-            after
-                .num_wait
-                .saturating_sub(mid.num_wait)
-                .saturating_add(mid.num_wait.saturating_sub(before.num_wait)),
-            after.total_wait_time.saturating_sub(before.total_wait_time),
-        );
-        assert_eq!(profile.shard_wait().samples, commits);
-        assert_eq!(profile.publication_total().samples, commits);
+fn observe_actual_commit_arm(writers: usize) -> ActualArmObservation {
+    const BATCHES_PER_ARM: usize = 16;
+    let before = arena_counters();
+    let mut elapsed_ns = 0_u64;
+    let mut profile = ffs_mvcc::sharded::CommitLockProfile::default();
+    let mut commits = 0_u64;
+    for _ in 0..BATCHES_PER_ARM {
+        let (elapsed, batch_profile, batch_commits) =
+            black_box(run_actual_commit_arm(black_box(writers), black_box(true)));
+        elapsed_ns =
+            elapsed_ns.saturating_add(u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX));
+        profile.merge(&batch_profile);
+        commits = commits.saturating_add(batch_commits);
     }
+    let after = arena_counters();
+    ActualArmObservation {
+        elapsed_ns,
+        profile,
+        commits,
+        arena: after.saturating_delta(before),
+    }
+}
+
+#[cfg(feature = "bench-instrumentation")]
+fn print_actual_null_control() {
+    const PAIRS: usize = 31;
+    for writers in [1_usize, 2, 4, 8] {
+        let mut pairs = Vec::with_capacity(PAIRS);
+        for pair_index in 0..PAIRS {
+            let (lhs, rhs, order) = if pair_index % 2 == 0 {
+                (
+                    observe_actual_commit_arm(writers),
+                    observe_actual_commit_arm(writers),
+                    "AB",
+                )
+            } else {
+                let rhs = observe_actual_commit_arm(writers);
+                let lhs = observe_actual_commit_arm(writers);
+                (lhs, rhs, "BA")
+            };
+            let lhs_shard_wait = lhs.profile.shard_wait();
+            let rhs_shard_wait = rhs.profile.shard_wait();
+            assert_eq!(lhs_shard_wait.samples, lhs.commits);
+            assert_eq!(lhs.profile.publication_total().samples, lhs.commits);
+            assert_eq!(rhs_shard_wait.samples, rhs.commits);
+            assert_eq!(rhs.profile.publication_total().samples, rhs.commits);
+            pairs.push(ActualNullPair { lhs, rhs, order });
+        }
+        print_actual_null_summary(writers, &pairs);
+    }
+}
+
+#[cfg(feature = "bench-instrumentation")]
+fn print_actual_null_summary(writers: usize, pairs: &[ActualNullPair]) {
+    let lhs_elapsed = pairs
+        .iter()
+        .map(|pair| pair.lhs.elapsed_ns as f64)
+        .collect::<Vec<_>>();
+    let rhs_elapsed = pairs
+        .iter()
+        .map(|pair| pair.rhs.elapsed_ns as f64)
+        .collect::<Vec<_>>();
+    let log_ratios = pairs
+        .iter()
+        .map(|pair| (pair.lhs.elapsed_ns as f64 / pair.rhs.elapsed_ns as f64).ln())
+        .collect::<Vec<_>>();
+    let center = median(log_ratios.clone());
+    let spread = p90(log_ratios
+        .iter()
+        .map(|ratio| (ratio - center).abs())
+        .collect());
+    let mut lhs_profile = ffs_mvcc::sharded::CommitLockProfile::default();
+    let mut rhs_profile = ffs_mvcc::sharded::CommitLockProfile::default();
+    let mut lhs_arena = ArenaCounters::default();
+    let mut rhs_arena = ArenaCounters::default();
+    for pair in pairs {
+        lhs_profile.merge(&pair.lhs.profile);
+        rhs_profile.merge(&pair.rhs.profile);
+        lhs_arena.merge(pair.lhs.arena);
+        rhs_arena.merge(pair.rhs.arena);
+    }
+    let ab_pairs = pairs.iter().filter(|pair| pair.order == "AB").count();
+    let ba_pairs = pairs.len().saturating_sub(ab_pairs);
+    let mut raw_pairs = String::with_capacity(pairs.len().saturating_mul(48));
+    for (index, pair) in pairs.iter().enumerate() {
+        if index > 0 {
+            raw_pairs.push(';');
+        }
+        write!(
+            &mut raw_pairs,
+            "{}:{}:{}",
+            pair.order, pair.lhs.elapsed_ns, pair.rhs.elapsed_ns
+        )
+        .expect("format raw A/A pair");
+    }
+    println!(
+        "actual_commit_null_pairs,threads={writers},phase=profiled_aa,batches_per_arm=16,format=order:lhs_ns:rhs_ns,values={raw_pairs}"
+    );
+    println!(
+        "actual_commit_null_summary,threads={writers},phase=profiled_aa,pairs={},batches_per_arm=16,ab_pairs={ab_pairs},ba_pairs={ba_pairs},lhs_median_ms={:.6},rhs_median_ms={:.6},lhs_cv_pct={:.3},rhs_cv_pct={:.3},null_median_ratio={:.6},null_spread_p90_ratio={:.6},null_floor_ratio={:.6},lhs_shard_wait_p99_ns={},rhs_shard_wait_p99_ns={},lhs_shard_hold_p99_ns={},rhs_shard_hold_p99_ns={},lhs_publish_wait_p99_ns={},rhs_publish_wait_p99_ns={},lhs_publish_hold_p99_ns={},rhs_publish_hold_p99_ns={},lhs_prefix_wait_p99_ns={},rhs_prefix_wait_p99_ns={},lhs_arena_num_ops={},rhs_arena_num_ops={},lhs_arena_spin_acq={},rhs_arena_spin_acq={},lhs_arena_num_wait={},rhs_arena_num_wait={},lhs_arena_wait_ns={},rhs_arena_wait_ns={},lhs_arena_owner_switch={},rhs_arena_owner_switch={},decomposition_gate=not_applicable",
+        pairs.len(),
+        median(lhs_elapsed.clone()) / 1e6,
+        median(rhs_elapsed.clone()) / 1e6,
+        population_cv_pct(&lhs_elapsed),
+        population_cv_pct(&rhs_elapsed),
+        center.exp(),
+        spread.exp(),
+        (center.abs() + spread).exp(),
+        lhs_profile.shard_wait().p99_upper_ns,
+        rhs_profile.shard_wait().p99_upper_ns,
+        lhs_profile.shard_hold().p99_upper_ns,
+        rhs_profile.shard_hold().p99_upper_ns,
+        lhs_profile.publication_lock_wait().p99_upper_ns,
+        rhs_profile.publication_lock_wait().p99_upper_ns,
+        lhs_profile.publication_lock_hold().p99_upper_ns,
+        rhs_profile.publication_lock_hold().p99_upper_ns,
+        lhs_profile.publication_prefix_wait().p99_upper_ns,
+        rhs_profile.publication_prefix_wait().p99_upper_ns,
+        lhs_arena.num_ops,
+        rhs_arena.num_ops,
+        lhs_arena.num_spin_acq,
+        rhs_arena.num_spin_acq,
+        lhs_arena.num_wait,
+        rhs_arena.num_wait,
+        lhs_arena.total_wait_time,
+        rhs_arena.total_wait_time,
+        lhs_arena.num_owner_switch,
+        rhs_arena.num_owner_switch,
+    );
 }
 
 #[cfg(feature = "bench-instrumentation")]
@@ -187,8 +415,27 @@ fn profile_only() {
 }
 
 #[cfg(feature = "bench-instrumentation")]
+fn profile_self_time_pct(report: &str, symbol: &str) -> Option<f64> {
+    report
+        .lines()
+        .filter(|line| line.contains(symbol))
+        .filter_map(|line| {
+            line.split_whitespace().find_map(|field| {
+                field
+                    .strip_suffix('%')
+                    .and_then(|percent| percent.parse::<f64>().ok())
+            })
+        })
+        .reduce(f64::max)
+}
+
+#[cfg(feature = "bench-instrumentation")]
 fn spawn_profile_report() {
     let exe = std::env::current_exe().expect("bench executable");
+    let executable_name = exe
+        .file_name()
+        .and_then(|name| name.to_str())
+        .expect("bench executable file name");
     let record = Command::new("perf")
         .args([
             "record",
@@ -202,7 +449,7 @@ fn spawn_profile_report() {
             "-",
         ])
         .arg("--")
-        .arg(exe)
+        .arg(&exe)
         .arg("--profile-only")
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
@@ -213,7 +460,19 @@ fn spawn_profile_report() {
     };
     let perf_data = record.stdout.take().expect("perf pipe");
     let report = Command::new("perf")
-        .args(["report", "-q", "--stdio", "-i", "-", "--percent-limit", "0"])
+        .args([
+            "report",
+            "-q",
+            "--stdio",
+            "--no-children",
+            "-i",
+            "-",
+            "--percent-limit",
+            "0",
+            "--dsos",
+        ])
+        .arg(executable_name)
+        .env("DEBUGINFOD_URLS", "")
         .stdin(Stdio::from(perf_data))
         .output();
     let Ok(report) = report else {
@@ -232,7 +491,16 @@ fn spawn_profile_report() {
             "profile_blocker=perf_permission_denied record_status={status} report_status={}",
             report.status
         );
-    } else if !text.contains("commit_with_probe") || !text.contains("publish_with_probe") {
+    } else if let (Some(commit_pct), Some(publish_pct)) = (
+        profile_self_time_pct(&text, "commit_with_probe"),
+        profile_self_time_pct(&text, "publish_with_probe"),
+    ) && commit_pct > 0.0
+        && publish_pct > 0.0
+    {
+        println!(
+            "profile_target_self_time,commit_with_probe_pct={commit_pct:.6},publish_with_probe_pct={publish_pct:.6},verified_nonzero=true"
+        );
+    } else {
         println!("profile_blocker=target_self_time_not_resolved");
     }
 }
@@ -2156,7 +2424,7 @@ fn bench_bhh0i_actual_contention(c: &mut Criterion) {
         let mut group = c.benchmark_group("bd_bhh0i_actual_commit");
         for writers in [1_usize, 2, 4, 8] {
             group.bench_function(
-                BenchmarkId::new("orig_vs_profiled_interleaved", writers),
+                BenchmarkId::new("probe_overhead_pair_combined_no_ratio", writers),
                 |b| {
                     b.iter_custom(|iters| {
                         let rounds = iters.clamp(2, 12);
@@ -2211,8 +2479,10 @@ fn main() {
             profile_only();
             return;
         }
+        print_bench_evidence_metadata();
+        print_codegen_isa();
+        print_actual_null_control();
         spawn_profile_report();
-        print_actual_sweep();
     }
     wal_benches();
 }

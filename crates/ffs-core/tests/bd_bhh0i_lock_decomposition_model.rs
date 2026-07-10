@@ -186,6 +186,12 @@ struct CommitResult {
     allocated_bits: [Option<usize>; GROUP_COUNT],
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ReplayState {
+    bitmaps: [[bool; GROUP_CAPACITY]; GROUP_COUNT],
+    cursors: [usize; GROUP_COUNT],
+}
+
 #[derive(Debug)]
 struct GroupState {
     bitmap: [bool; GROUP_CAPACITY],
@@ -488,7 +494,7 @@ fn replay(
     specs: [OperationSpec; WRITER_COUNT],
     results: [Option<CommitResult>; WRITER_COUNT],
     high: usize,
-) -> [[bool; GROUP_CAPACITY]; GROUP_COUNT] {
+) -> ReplayState {
     let mut successful: Vec<CommitResult> = results.into_iter().flatten().collect();
     successful.sort_unstable_by_key(|result| result.sequence);
     let mut bitmaps = [[false; GROUP_CAPACITY]; GROUP_COUNT];
@@ -513,7 +519,7 @@ fn replay(
             cursors[group] = (expected_bit + 1) % GROUP_CAPACITY;
         }
     }
-    bitmaps
+    ReplayState { bitmaps, cursors }
 }
 
 fn verify_execution(
@@ -548,9 +554,18 @@ fn verify_execution(
     drop(publication);
 
     let expected_final = replay(specs, results, successful_count);
-    for (group, expected) in expected_final.into_iter().enumerate() {
+    for (group, (expected_bitmap, expected_cursor)) in expected_final
+        .bitmaps
+        .into_iter()
+        .zip(expected_final.cursors)
+        .enumerate()
+    {
         let state = model.groups[group].lock().expect("inspect group state");
-        assert_eq!(state.bitmap, expected);
+        assert_eq!(state.bitmap, expected_bitmap);
+        assert_eq!(
+            state.cursor, expected_cursor,
+            "allocator cursor matches the sequential replay"
+        );
         assert_eq!(
             state.free + state.bitmap.into_iter().filter(|set| *set).count(),
             GROUP_CAPACITY
@@ -571,7 +586,7 @@ fn verify_execution(
             );
             assert_eq!(
                 version.bitmap,
-                replay(specs, results, version.sequence)[version.payload_group],
+                replay(specs, results, version.sequence).bitmaps[version.payload_group],
                 "each installed shard payload matches its sequential group effect"
             );
         }
