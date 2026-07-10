@@ -1477,3 +1477,109 @@ read granularity, readahead/`fadvise`, extent walks (<=14 extents), the copy tax
 "reduce insertions for throughput", or O_DIRECT-for-latency. The only open work is
 `bd-ddryj` (per-reader `struct file` + bounded fan-out) and `bd-vpypn` (extent walks at
 high extent counts, never measured).
+
+---
+
+## 2026-07-10 — Cold-read chain CLOSED: the projection is computed, and it is falsified (bd-kdmu4 owner decision, BlackThrush/cc_ffs)
+
+Final turn of the cold-read chain. Prebuilt `release-perf` binary, **zero local cargo
+builds**, `drop_caches=3` before every run, arms interleaved within each rep.
+
+### 1. Insertions per READ — the requested per-read instrumentation
+
+A 128 KiB read spans 32 x 4 KiB pages, so **32 insertions/read is the "one folio per
+block" ceiling.** frankenfs's real binary, production 128 KiB chunk, `pread` count
+constant at 1,034:
+
+| T | insertions | insertions/read | % of one-folio-per-block ceiling |
+| --- | --- | --- | --- |
+| 1 | 2,230 | 2.16 | 6.7% |
+| 2 | 10,145 | 9.81 | 30.7% |
+| 4 | 12,623 | 12.21 | 38.1% |
+| 8 | 15,137 | 14.64 | 45.7% |
+| 16 | 17,914 | 17.32 | 54.1% |
+| 32 | 23,271 | 22.51 | 70.3% |
+| **64** | **27,174** | **26.28** | **82.1%** |
+
+**The "one folio per block" intuition is 82% correct — but only at 64 threads.** It is a
+symptom of concurrency on a shared `f_ra`, not a property of the page-cache path. Same
+harness, same chunk, T=16, only fd sharing differs (1,027 preads both arms):
+
+| | insertions | insertions/read | % of ceiling |
+| --- | --- | --- | --- |
+| shared fd | 16,430 | 16.00 | 50.0% |
+| **per-thread fd** | **3,895** | **3.79** | **11.9%** |
+
+### 2. CAN frankenfs reduce insertions without bypassing the page cache? YES — 4.2x
+
+Answered definitively, in pure buffered mode, at the production chunk: **16,430 -> 3,895
+insertions (4.2x), 16.00 -> 3.79 per read.** 100% of insertions originate in the readahead
+path (`page_cache_ra_order` / `page_cache_ra_unbounded`); `__filemap_get_folio` ~= 0, so
+there is no per-block `filemap_create_folio` fallback that only a bypass could avoid.
+
+**The premise "insertions are irreducible without O_DIRECT/mmap" is REFUTED.** The
+antecedent for escalating `bd-kdmu4` does not hold.
+
+### 3. The projection, computed as requested — and falsified
+
+**Model A** (Amdahl on spin-wait self-time; eliminating insertions removes all
+`native_queued_spin_lock_slowpath` cycles, assume wall proportional to CPU):
+
+| T | read | spinlock self-time | projected | projected speedup |
+| --- | --- | --- | --- | --- |
+| 64 | 37.0 ms | 42.27% | 21.4 ms | **1.73x** |
+| 16 | 30.1 ms | 10.96% | 26.8 ms | **1.12x** |
+
+**Model B** (aggregate spin-wait / threads, subtracted from wall):
+
+| T | chunk | aggregate wait | per thread | wall | projected |
+| --- | --- | --- | --- | --- | --- |
+| 64 | 1M | 1,143 ms | 17.9 ms | 38.8 ms | 20.9 ms = **1.85x** |
+| 64 | 256K | 3,414 ms | 53.3 ms | 38.3 ms | **-15.0 ms — NEGATIVE WALL** |
+
+Model B predicts a negative wall time. **The projection method is self-refuting**, and
+Model A inherits the same defect in milder form.
+
+**Measurement** (`O_DIRECT` eliminates insertions entirely; raw harness, page-aligned
+`mmap`, `sha256` == kernel mount; no frankenfs code changed):
+
+* T=16: `O_DIRECT` **25.7 ms** vs buffered per-thread fd **25.5 ms** -> **1.00x (-1%)**
+* T=64: `O_DIRECT` 28.4 ms
+* device floor: raw buffered `pread` T=32 = 28.3 ms; kernel dio loop = **26.9 ms**
+
+**Projection 1.12x-1.85x. Measurement 1.00x.** Spin-wait is CPU burned by threads that are
+*already blocked on the device*; it is overlapped with I/O and never on the critical path.
+Wall is bounded below by device bandwidth: 128 MiB at ~4,700-5,000 MiB/s = 25.5-27 ms.
+
+### 4. Owner decision (bd-kdmu4) — SURFACED
+
+After the fan-out cap frankenfs sits at **30.1 ms against the kernel's 26.9 ms**: total
+remaining headroom **3.2 ms (1.12x)**, of which `O_DIRECT` captures **0 ms**. Its only
+benefit is CPU: **1.86x fewer cycles** (323M -> 174M per 128 MiB read).
+
+> `bd-kdmu4` (O_DIRECT / mmap-backed `ByteDevice`) **cannot be justified on latency
+> grounds.** Approve it only if ~150M cycles per 128 MiB read is worth an audited-unsafe or
+> policy change on **CPU-efficiency** grounds. Not implemented; nothing in its scope touched.
+
+The remaining wall lever is the read **fan-out width** (`bd-ddryj`: rayon `nproc`=64 -> 16,
+**1.24x cold, 7/7 paired reps, p=0.0156** on the real binary; warm 1.48x), which needs no
+unsafe and no policy change.
+
+### Ledger-integrity (frankenmermaid `5feb977`)
+
+Code-executed proof for every reject in this section: `native_queued_spin_lock_slowpath`
+**42.27%** self-time (T=64) / **10.96%** (T=16); `__filemap_add_folio` **1.04%**;
+`page_cache_ra_unbounded` **0.40%**; 100% of 29,264 insertion events attributed by callchain
+to `page_cache_ra_*`. Knob provably engaged: insertions/read **16.00 -> 3.79** under the arms.
+No criterion bench was used anywhere in this campaign, so substrate-v2 defects (sequential
+group members; `black_box` DCE) cannot apply — arms are wall-clock runs alternated **inside**
+each rep, and results are consumed via `sha256` / XOR checksums / byte counts.
+
+### Chain closed
+
+Cold-read is now fully explained: kernel page-cache `xa_lock` contention, driven by folio
+insertions, driven by readahead order collapse on a shared `struct file`. Insertions are a
+**CPU** lever, not a throughput lever (three independent confirmations). Do not re-test
+readahead/`fadvise`, extent walks (<=14 extents), the copy tax, read granularity, "reduce
+insertions for throughput", or O_DIRECT-for-latency. Open: `bd-ddryj` (fan-out cap, blocked
+on a build) and `bd-vpypn` (extent walks at high extent counts, never measured).
