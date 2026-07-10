@@ -1890,3 +1890,95 @@ residual 4.67 ms is real but unattributed. Tracked in `bd-zvn7r`(a).
 Do not re-derive the cold-read mechanism (`xa_lock`, folio insertions, readahead, granularity,
 O_DIRECT) — all closed. Do not trust any `ffs-cli read` cold ratio that has not subtracted the
 3.10 ms harness constant. Do not project wall time from a cycle share.
+
+---
+
+## 2026-07-10 — Scope of the harness correction, and is the remaining gap worth a lever? (bd-zvn7r / bd-ddryj / bd-kdmu4, BlackThrush/cc_ffs)
+
+**Metadata:** binary `ffs-cli` `sha256=03b7456d8cd6fa118bd214b2fdf8a03e56cac79e6768b7311613b039c8ae81eb`
+(`release-perf`, 55,453,584 B); allocator `tikv_jemallocator`; worker = local host (`perf` +
+`drop_caches` need root); `rch` verify worker `hz2`; cv per arm 7.7 / 8.6 / 10.7 / 5.7 / 8.8%;
+self-time of the function under test `clear_page_erms` **11.81%** (cluster 28.91%).
+**Zero local cargo builds.**
+
+### Direction of the bias — no sign-flip is at risk
+
+The 64 MiB first-touch is paid **only** by `ffs-cli read`; the kernel and raw-`pread` arms use small
+buffers. So harness inflation always makes frankenfs look **slower**, never faster. Therefore:
+
+* Every prior "frankenfs is slower than kernel ext4" verdict is **conservative and stands.**
+* Only the **magnitudes** are affected — they are **upper bounds**.
+* No "frankenfs is faster" claim survives anywhere in this ledger, so the correction cannot resurrect one.
+
+### Conclusions drawn against the inflated number (do not re-derive; adjust magnitudes only)
+
+All of these used `ffs-cli read` engine time and therefore include a first-touch of
+`min(file_size, 64 MiB)`:
+
+| ledger row | reported | status |
+| --- | --- | --- |
+| `bd-q6k00` ext4 extent 128 MiB cold — **1.42x slower** | inflated | sign stands; magnitude is an upper bound |
+| `bd-5koeh` ext4 indirect 50 MiB — **1.45x slower** | inflated | sign stands; magnitude is an upper bound |
+| `bd-5koeh` ext4 fragmented 48 MiB — **1.31x slower** | inflated | sign stands; magnitude is an upper bound |
+| `bd-ddryj` baseline — ffs **1.54x / 1.25x** kernel | inflated | **superseded**: measured 1.41x / 1.15x |
+| `bd-zvn7r` "94% of residual is frankenfs-attributable" | wrong | **superseded** (floor arm mismatched the destination policy) |
+| `bd-zvn7r` "new #1 frame = anon-page churn 28.91%" | harness | **the cluster is the harness**, not the filesystem |
+
+I have **not** re-measured the indirect/fragmented rows with a corrected harness; scaling the 3.10 ms
+constant by file size would be a projection, and projections have already been falsified twice on this
+workload. They are marked as upper bounds, not restated with new numbers.
+
+### ⚠️ The 2.9x multi-file figure: NOT corrected to 1.41x — different workload, different harness
+
+`bd-kdmu4`'s headline is **multi-file parallel read** (256 files x 256 KiB, `walk --read-data --parallel`)
+against an in-process threaded C reader. My 3.10 ms constant is `ffs-cli read`'s single-file 64 MiB
+`STREAM_CHUNK` staging buffer. **They do not transfer**, and I checked why rather than assuming:
+
+* `walk_one_dir` **already reuses one buffer per rayon worker** (`ffs-cli/src/main.rs:3055-3060`,
+  `map_init`; the per-file fresh-`Vec` churn was fixed in `bd-2x68s`). The multi-file harness does not
+  have the allocation pattern I measured.
+
+**However**, that figure carries its **own** acknowledged harness component — by its author's words, not
+my measurement. From the 2026-06-22 entry (CrimsonFox): the post-fix multi-file profile is `pread` 43.6%
+plus *"~25% OUTER `walk_one_dir` per-inode `par_iter` coordination … a real FUSE mount dispatches each
+getattr/read as a separate per-request worker, never via this nested rayon, **so it's a harness artifact
+not a real-fs cost**"*.
+
+So the multi-file number is **partly instrumentation by its own admission (~25%), by a mechanism
+different from the one I measured**, and the residual real-filesystem multi-file figure was **never
+isolated**. It needs its own audit against the three validity gates (identity / magnitude /
+impossibility). **I am not restating it as 1.41x — that would repeat, in the opposite direction, exactly
+the error this ledger exists to prevent.** `bd-kdmu4` remains RESOLVED on the O_DIRECT question (bypass
+measured at 1.00x) and **UNAUDITED** on its 2.9x premise.
+
+### Is the remaining gap worth a lever?
+
+Honest, harness-corrected, single-file 128 MiB extent read (same binary, 9 interleaved reps):
+
+| | wall | vs kernel |
+| --- | --- | --- |
+| ffs as shipped (rayon = nproc = 64) | 39.78 ms | **1.41x** |
+| ffs with fan-out capped at 16 | 32.67 ms | **1.15x** |
+| raw pread into a warm destination | 28.00 ms | 0.99x |
+| kernel dio loop | 28.30 ms | — |
+
+**YES — for exactly one lever, and it is already named.** `bd-ddryj` (bound the read fan-out) converts
+**1.41x → 1.15x**, an 18% wall reduction on the shipped default. It needs no unsafe, no policy change,
+and it is reconfirmed at 9/9 paired reps (p=0.0039). It is blocked only on the build.
+
+**NO — for anything beyond it.** After the cap, the residual is 4.67 ms (1.15x), and the corrected frame
+table contains no lever:
+
+* `_copy_to_iter` **12.28%** — the buffered copy. The `warm_dst` floor pays it too and still lands at
+  kernel parity, so it cannot explain the residual. Removing it needs `O_DIRECT`/mmap, **measured at 1.00x**.
+* `native_queued_spin_lock_slowpath` **9.32%** — residual `xa_lock`; the fan-out cap already removed the
+  bulk (42.27% → 9.32%). Per-thread fd cuts insertions 4.2x and buys **no wall** (p=0.18).
+* `Stealer::steal` 1.13%, `ext4_mpage_readpages` 0.69% — below any actionable threshold.
+
+The residual 4.67 ms is frankenfs's own userspace work (user CPU 4.5 ms, same order), and `perf` cannot
+resolve it above the 0.1% cut. **Attributing it requires fixing `STREAM_CHUNK` first** so the timed region
+contains only filesystem work — `bd-zvn7r`(a), a small change, blocked on the same build.
+
+**Recommendation: land `bd-ddryj`, fix the harness (`bd-zvn7r`a), and stop hunting the single-file cold
+read.** At 1.15x of a direct-I/O kernel mount, with the floor itself at 0.99x, there is no headroom worth
+an unsafe policy change or a further lever.
