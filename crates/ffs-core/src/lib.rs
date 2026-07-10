@@ -12865,8 +12865,12 @@ impl OpenFs {
         // identical to the serial reader (bd-q2tq5 run-coalescing preserved).
         let mut segs: Vec<DirSeg> = Vec::new();
         let mut lb: u32 = 0;
+        // Sequential mapping hint (bd-vpypn): the readdir plan walks this dir
+        // inode's blocks in increasing logical order, same as the file read path.
+        let mut ehint = 0_usize;
         while lb < num_blocks {
-            let Some((phys, unwritten)) = self.resolve_extent(cx, scope, inode, lb)? else {
+            let Some((phys, unwritten)) = self.resolve_extent_seq(cx, scope, inode, lb, &mut ehint)?
+            else {
                 lb += 1;
                 continue;
             };
@@ -12891,7 +12895,7 @@ impl OpenFs {
                 if next_lb >= num_blocks {
                     break;
                 }
-                match self.resolve_extent(cx, scope, inode, next_lb)? {
+                match self.resolve_extent_seq(cx, scope, inode, next_lb, &mut ehint)? {
                     Some((next_phys, false))
                         if next_phys == phys + u64::from(run_len)
                             && !is_cached(BlockNumber(next_phys)) =>
@@ -13075,8 +13079,11 @@ impl OpenFs {
         // descent stays serial so its order and error semantics are preserved
         // (the lowest-block resolve error still wins); no device reads here.
         let mut planned: Vec<BlockNumber> = Vec::new();
+        let mut ehint = 0_usize; // sequential mapping hint (bd-vpypn)
         for lb in 0..num_blocks {
-            if let Some((phys, unwritten)) = self.resolve_extent(cx, scope, dir_inode, lb)? {
+            if let Some((phys, unwritten)) =
+                self.resolve_extent_seq(cx, scope, dir_inode, lb, &mut ehint)?
+            {
                 if !unwritten {
                     planned.push(BlockNumber(phys));
                 }
