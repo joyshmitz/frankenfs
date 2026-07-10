@@ -798,25 +798,31 @@ impl BlockValidator for CompositeValidator {
     }
 }
 
-/// Monomorphic btrfs scrub validator: the canonical btrfs configuration
-/// (`ZeroCheck` + `BtrfsSuperblock` + `BtrfsTreeBlock`) fused into one concrete
-/// type that **short-circuits the common non-metadata block** instead of
-/// materialising three `BlockVerdict`s and merging them like
-/// `CompositeValidator` does.
+/// Monomorphic btrfs scrub validator.
 ///
-/// On a data-heavy image the vast majority of scanned blocks are non-zero,
-/// non-superblock, and have a non-matching `fsid` — for those, all three
-/// composite validators return `Clean`/`Skip`/`Skip` with no real parse work,
-/// yet `CompositeValidator` still pays 3 `dyn`-indirect calls, three enum
-/// returns, and a merge loop per block. This type does the two cheap gating
-/// checks inline (word-wise zero scan + a 16-byte `fsid` compare gated on the
+/// Fuses the canonical btrfs configuration (`BtrfsSuperblock` +
+/// `BtrfsTreeBlock`) into one concrete type that **short-circuits the common
+/// non-metadata block** instead of materialising two `BlockVerdict`s and merging
+/// them like `CompositeValidator` does.
+///
+/// On a real image the vast majority of scanned blocks are non-superblock and
+/// have a non-matching `fsid` — for those, both composite validators return
+/// `Skip` with no real parse work, yet `CompositeValidator` still pays a
+/// `dyn`-indirect call each, two enum returns, and a merge loop per block. This
+/// type does the cheap gating inline (a 16-byte `fsid` compare gated on the
 /// superblock block number) and returns `Clean` directly for that common case,
 /// only falling through to the real superblock / tree-block validators for the
 /// rare metadata candidate (the superblock block, or a block whose `fsid`
-/// matches this filesystem). Behaviour is identical to the composite by
-/// construction: the fast path is only taken when both metadata validators
-/// would have `Skip`ped and `ZeroCheck` would have been `Clean`, and every
-/// other block runs the exact same sub-validator logic and merge.
+/// matches this filesystem).
+///
+/// Report-equivalent to the composite by construction: the fast path is taken
+/// only when both metadata validators would have `Skip`ped, and `Skip` vs
+/// `Clean` is indistinguishable to [`Scrubber::record_verdict`]. Every other
+/// block runs the exact same sub-validator logic and merge.
+///
+/// It deliberately runs no blind all-zero check: unallocated space is
+/// legitimately zeroed, and a whole-image scrub has no allocation map to tell
+/// free blocks from wrongly-zeroed metadata (bd-scrub-btrfs-false-corrupt).
 ///
 /// Measured ~3.5x faster than the equivalent `CompositeValidator` on a data-heavy
 /// block set (bench `scrub_composite_mono`).
@@ -847,10 +853,8 @@ impl BtrfsScrubValidator {
         }
     }
 
-    /// Cold path: reproduce `CompositeValidator`'s run-all-three-and-merge
-    /// exactly for the rare metadata-candidate block. `ZeroCheck` already ran
-    /// Clean at the call site (block is non-zero), so only the two metadata
-    /// validators need to run here.
+    /// Cold path: reproduce `CompositeValidator`'s run-both-and-merge exactly
+    /// for the rare metadata-candidate block.
     #[cold]
     #[inline(never)]
     fn validate_metadata(&self, block: BlockNumber, data: &BlockBuf) -> BlockVerdict {
@@ -871,45 +875,28 @@ impl BtrfsScrubValidator {
             BlockVerdict::Corrupt(all_issues)
         }
     }
-
-    /// Cold path for a zeroed metadata candidate. The dynamic composite still
-    /// runs metadata validators after `ZeroCheck` reports zeroes, so preserve
-    /// that multi-finding behavior for zeroed superblocks/tree blocks.
-    #[cold]
-    #[inline(never)]
-    fn validate_zero_metadata(&self, block: BlockNumber, data: &BlockBuf) -> BlockVerdict {
-        let mut all_issues = vec![unexpected_zeroes_issue()];
-        for verdict in [
-            self.superblock.validate(block, data),
-            self.tree_block.validate(block, data),
-        ] {
-            if let BlockVerdict::Corrupt(issues) = verdict {
-                all_issues.extend(issues);
-            }
-        }
-        BlockVerdict::Corrupt(all_issues)
-    }
 }
 
 impl BlockValidator for BtrfsScrubValidator {
     fn validate(&self, block: BlockNumber, data: &BlockBuf) -> BlockVerdict {
         let slice = data.as_slice();
 
-        // Stage 1: ZeroCheck, inline. A wholly-zeroed block is Corrupt exactly
-        // as `ZeroCheckValidator` reports it.
-        if is_all_zero(slice) {
-            if block.0 == self.superblock_block || slice.get(0x20..0x30) == Some(&self.fsid[..]) {
-                return self.validate_zero_metadata(block, data);
-            }
-            return BlockVerdict::Corrupt(vec![unexpected_zeroes_issue()]);
-        }
-
         // Fast path: a block that is neither the superblock block nor an
         // fsid-matching tree-block candidate is `Skip`ped by BOTH metadata
-        // validators, and ZeroCheck above was Clean → composite verdict Clean.
+        // validators → verdict Clean.
         // (`BtrfsSuperblockValidator` Skips when block != superblock target;
         // `BtrfsTreeBlockValidator` Skips on the superblock block or on fsid
         // mismatch — mirrored here without any dyn call or enum materialisation.)
+        //
+        // This deliberately does NOT run a blind all-zero check. Unallocated
+        // space is legitimately all zeroes, and a whole-image scrub has no
+        // allocation map to distinguish "free" from "metadata that was wrongly
+        // zeroed". Flagging every zero block made `blocks_corrupt` meaningless
+        // (99.9% on a valid, kernel-mountable image) and poisoned the repair
+        // autopilot's Beta posterior, which is fed `blocks_corrupt`. A zeroed
+        // *superblock* is still caught below: it is not skipped by block number,
+        // and `BtrfsSuperblockValidator` rejects it on the failed magic/parse.
+        // `ZeroCheckValidator` remains available for scoped, known-metadata use.
         if block.0 != self.superblock_block && slice.get(0x20..0x30) != Some(&self.fsid[..]) {
             return BlockVerdict::Clean;
         }
@@ -1547,7 +1534,7 @@ mod tests {
         foreign_data[0x20..0x30].copy_from_slice(&[0x22_u8; 16]);
         dev.write(BlockNumber(0), foreign_data);
 
-        // Block 1 stays all zeroes: non-metadata zero fast path.
+        // Block 1 stays all zeroes: unallocated space, must produce no finding.
         // Block 4 stays all zeroes too, but is the btrfs superblock block;
         // the optimized validator must still run metadata validators there.
 
@@ -1563,7 +1550,6 @@ mod tests {
         dev.write(BlockNumber(6), corrupt_tree);
 
         let composite = CompositeValidator::new(vec![
-            Box::new(ZeroCheckValidator),
             Box::new(BtrfsSuperblockValidator::new(16384)),
             Box::new(BtrfsTreeBlockValidator::new(16384, fsid, 0)),
         ]);
@@ -1671,7 +1657,6 @@ mod tests {
         let zero_block = vec![0_u8; block_size_usize];
 
         let composite = CompositeValidator::new(vec![
-            Box::new(ZeroCheckValidator),
             Box::new(BtrfsSuperblockValidator::new(block_size)),
             Box::new(BtrfsTreeBlockValidator::new(block_size, fsid, 0)),
         ]);
@@ -1694,12 +1679,92 @@ mod tests {
         }
     }
 
+    /// Build an 8-block btrfs device: a valid superblock at block 4 (the
+    /// `BTRFS_SUPER_INFO_OFFSET / 16384` block) and a valid tree block at 5.
+    /// Blocks 0-3, 6, 7 stay all-zero — i.e. unallocated free space.
+    fn sparse_valid_btrfs_device(block_size: u32, fsid: [u8; 16]) -> MemBlockDevice {
+        let block_size_usize = block_size as usize;
+        let dev = MemBlockDevice::new(block_size, 8);
+
+        let mut sb = make_valid_btrfs_superblock_region();
+        sb[0x20..0x30].copy_from_slice(&fsid);
+        let sb_csum = crc32c::crc32c(&sb[0x20..BTRFS_SUPER_INFO_SIZE]);
+        sb[0..4].copy_from_slice(&sb_csum.to_le_bytes());
+        let mut sb_block = vec![0_u8; block_size_usize];
+        sb_block[..BTRFS_SUPER_INFO_SIZE].copy_from_slice(&sb);
+        dev.write(BlockNumber(4), sb_block);
+
+        dev.write(
+            BlockNumber(5),
+            make_valid_btrfs_tree_block(block_size_usize, fsid, 5 * u64::from(block_size)),
+        );
+        dev
+    }
+
+    /// Regression (bd-scrub-btrfs-false-corrupt): a valid image whose free space
+    /// is all zeroes must scrub clean. Before the fix a blind `ZeroCheck` flagged
+    /// every unallocated block, reporting 99.9% of a healthy image as "corrupt"
+    /// and poisoning the repair autopilot's posterior (fed `blocks_corrupt`).
+    #[test]
+    fn btrfs_scrub_does_not_flag_unallocated_zero_blocks() {
+        let fsid = [0x55_u8; 16];
+        let dev = sparse_valid_btrfs_device(16384, fsid);
+
+        let report = Scrubber::new(&dev, &BtrfsScrubValidator::new(16384, fsid, 0))
+            .scrub_all(&test_cx())
+            .expect("scrub should succeed");
+
+        assert_eq!(report.blocks_scanned, 8);
+        assert_eq!(
+            report.blocks_corrupt, 0,
+            "unallocated zero blocks must not be reported as corruption: {:?}",
+            report.findings
+        );
+        assert!(report.is_clean(), "findings: {:?}", report.findings);
+    }
+
+    /// The counterpart guarantee: dropping the blind `ZeroCheck` must not lose
+    /// the one detection it legitimately provided. A zeroed superblock is still
+    /// caught, because `BtrfsSuperblockValidator` rejects the failed magic/parse.
+    #[test]
+    fn btrfs_scrub_still_detects_zeroed_superblock() {
+        let fsid = [0x55_u8; 16];
+        // Every block all-zero, including block 4 (the superblock block).
+        let dev = MemBlockDevice::new(16384, 8);
+
+        let report = Scrubber::new(&dev, &BtrfsScrubValidator::new(16384, fsid, 0))
+            .scrub_all(&test_cx())
+            .expect("scrub should succeed");
+
+        assert_eq!(
+            report.blocks_corrupt, 1,
+            "exactly the zeroed superblock block is corrupt: {:?}",
+            report.findings
+        );
+        assert!(!report.findings.is_empty());
+        assert!(
+            report
+                .findings
+                .iter()
+                .all(|f| f.block == BlockNumber(4) && f.severity >= Severity::Error),
+            "zeroed superblock must be reported at error+ severity on block 4: {:?}",
+            report.findings
+        );
+    }
+
+    /// Signature at the granularity the scrub report actually observes.
+    ///
+    /// `Scrubber::record_verdict` treats `Skip` and `Clean` identically (neither
+    /// yields a finding nor increments `blocks_corrupt`), so they collapse to the
+    /// same signature here. They differ only in whether *any* validator claimed
+    /// the block: the fused `BtrfsScrubValidator` answers `Clean` for a block it
+    /// short-circuits, while `CompositeValidator` answers `Skip` when every
+    /// member skipped. That distinction is invisible to the report.
     fn verdict_signature(verdict: &BlockVerdict) -> (u8, Vec<(CorruptionKind, Severity)>) {
         match verdict {
-            BlockVerdict::Skip => (0, Vec::new()),
-            BlockVerdict::Clean => (1, Vec::new()),
+            BlockVerdict::Skip | BlockVerdict::Clean => (0, Vec::new()),
             BlockVerdict::Corrupt(issues) => (
-                2,
+                1,
                 issues
                     .iter()
                     .map(|(kind, severity, _)| (*kind, *severity))

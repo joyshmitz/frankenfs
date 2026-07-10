@@ -65,8 +65,7 @@ use ffs_repair::pipeline::{
 };
 use ffs_repair::recovery::{RecoveryWriteback, RecoveryWritebackBlock};
 use ffs_repair::scrub::{
-    BlockValidator, BtrfsScrubValidator, CompositeValidator, Ext4SuperblockValidator, ScrubReport,
-    Scrubber, Severity, ZeroCheckValidator,
+    BlockValidator, BtrfsScrubValidator, Ext4SuperblockValidator, ScrubReport, Scrubber, Severity,
 };
 use ffs_types::{
     BTRFS_SUPER_INFO_OFFSET, BTRFS_SUPER_INFO_SIZE, BlockNumber, ByteOffset,
@@ -7575,10 +7574,12 @@ pub fn count_blocks_at_severity_or_higher(report: &ScrubReport, min: Severity) -
 #[must_use]
 pub fn scrub_validator(flavor: &FsFlavor, block_size: u32) -> Box<dyn BlockValidator> {
     match flavor {
-        FsFlavor::Ext4(_) => Box::new(CompositeValidator::new(vec![
-            Box::new(ZeroCheckValidator),
-            Box::new(Ext4SuperblockValidator::new(block_size)),
-        ])),
+        // No blind `ZeroCheckValidator` here: a whole-image scrub has no
+        // allocation map, and unallocated ext4 blocks are legitimately all
+        // zeroes, so zero-flagging them reports free space as corruption. A
+        // zeroed superblock is still caught by `Ext4SuperblockValidator`, which
+        // rejects the failed magic/parse.
+        FsFlavor::Ext4(_) => Box::new(Ext4SuperblockValidator::new(block_size)),
         FsFlavor::Btrfs(sb) => {
             Box::new(BtrfsScrubValidator::new(block_size, sb.fsid, sb.csum_type))
         }
