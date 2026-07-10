@@ -3409,6 +3409,45 @@ enum Ext4IndirectReadJob<'buf> {
     },
 }
 
+static EXT4_READ_POOL: std::sync::OnceLock<Option<rayon::ThreadPool>> = std::sync::OnceLock::new();
+
+/// Bounded worker pool for the ext4 data-read fan-out (bd-ddryj).
+///
+/// The global rayon pool is `nproc` wide. Every worker `pread`s the same inode,
+/// so they all insert readahead folios into that inode's single `address_space`
+/// xarray and serialize on its lock: `native_queued_spin_lock_slowpath` is
+/// 42.27% of self-time at 64 threads and 9.32% at 16. Bounding the fan-out is
+/// worth 1.21x on a cold 128 MiB extent read (null control 1.02x; 9/9 paired,
+/// p=0.0039), and warm reads prefer the same width, so there is no trade.
+///
+/// A DEDICATED pool, not a narrower global one: scrub, walk and repair share the
+/// global pool and are not read-bound. `FFS_READ_PARALLELISM` overrides the
+/// default; a zero or unparseable value falls back to it. If the pool cannot be
+/// built we return `None` and the caller uses the global pool, so a failure here
+/// costs throughput, never correctness.
+fn ext4_read_pool() -> Option<&'static rayon::ThreadPool> {
+    EXT4_READ_POOL
+        .get_or_init(|| {
+            let threads = std::env::var("FFS_READ_PARALLELISM")
+                .ok()
+                .and_then(|raw| raw.parse::<usize>().ok())
+                .filter(|&n| n > 0)
+                .unwrap_or_else(|| {
+                    let cpus =
+                        std::thread::available_parallelism().map_or(4, std::num::NonZeroUsize::get);
+                    // 16 is the measured optimum on this 64-core box; the optimum is
+                    // contention-dependent, so scale with the machine rather than pin it.
+                    (cpus / 4).clamp(4, 16)
+                });
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .thread_name(|i| format!("ffs-read-{i}"))
+                .build()
+                .ok()
+        })
+        .as_ref()
+}
+
 static PARALLEL_EXT4_INDIRECT_READ_CHUNK_BLOCKS: std::sync::OnceLock<usize> =
     std::sync::OnceLock::new();
 
@@ -12673,8 +12712,14 @@ impl OpenFs {
                 }
             } else {
                 use rayon::prelude::{IntoParallelIterator, ParallelIterator};
-                let results: Vec<Result<(), FfsError>> =
-                    jobs.into_par_iter().map(exec_job).collect();
+                // bd-ddryj: fan out on the bounded read pool, not the `nproc`-wide
+                // global one. `nested` is false here, so `install` is called from a
+                // non-worker thread and cannot block a worker of another pool.
+                let results: Vec<Result<(), FfsError>> = if let Some(pool) = ext4_read_pool() {
+                    pool.install(|| jobs.into_par_iter().map(exec_job).collect())
+                } else {
+                    jobs.into_par_iter().map(exec_job).collect()
+                };
                 for result in results {
                     result?;
                 }
