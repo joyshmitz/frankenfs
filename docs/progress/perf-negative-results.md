@@ -1982,3 +1982,66 @@ contains only filesystem work — `bd-zvn7r`(a), a small change, blocked on the 
 **Recommendation: land `bd-ddryj`, fix the harness (`bd-zvn7r`a), and stop hunting the single-file cold
 read.** At 1.15x of a direct-I/O kernel mount, with the floor itself at 0.99x, there is no headroom worth
 an unsafe policy change or a further lever.
+
+---
+
+## 2026-07-10 — COLD-READ LANE CLOSED (bd-ddryj landed; summary of corrections, BlackThrush/cc_ffs)
+
+The cold-read investigation is complete. Binary `sha256=03b7456d…81eb` (`release-perf`);
+worker = local host (`perf`/`drop_caches` need root); `rch` verify workers `hz1`/`hz2`/`ovh-a`/
+`vmi1149989`; null-control median 1.0232x. Zero local cargo builds.
+
+### What was refuted, in order
+
+1. **`xa_lock` contention is the cold-read cost** — TRUE as a mechanism, but it is driven by
+   frankenfs's *own* read fan-out, not by anything intrinsic. Capping the fan-out removes it
+   (`native_queued_spin_lock_slowpath` 42.27% → 9.32%). → `bd-ddryj`, LANDED this turn.
+2. **Folio insertions are the throughput lever** — REFUTED. Insertions drive lock-*wait* (CPU),
+   not wall time: `r(ins/MiB, MiB/s)` = +0.15/+0.25 within a fixed thread count; a T=64 case cut
+   insertions 2.4x and ran 1% slower; per-thread fd cuts them 4.2x for no wall (p=0.18).
+3. **Only O_DIRECT/mmap can help** — REFUTED. Bypassing the page cache is measured at **1.00x**
+   of wall (25.7 vs 25.5 ms) and 1.6x slower at 4 KiB. `bd-kdmu4` needs no unsafe policy change on
+   latency grounds; RESOLVED.
+4. **The gap is 2.9–5x** — for the single-file `ffs-cli read` numbers, the gap was inflated by a
+   measured **3.10 ms** harness constant (its 64 MiB `STREAM_CHUNK` first-touch). Honest single-file
+   gap: **1.41x as-shipped**, **1.15x with the fan-out cap** (the raw floor itself is 0.99x of
+   kernel). See the caveat below on the multi-file figure.
+
+### ⚠️ The one claim I was asked to make and did NOT: "the headline 2.9–5x was 41% harness overhead"
+
+That sentence is **false as written**, and the distinction matters for repo integrity:
+
+* **41% and 1.41x are different arms.** The harness constant is **21%** of the *as-shipped* gap
+  (→1.41x) and **41%** of the *fan-out-capped* gap (→1.15x). One number cannot describe both.
+* **The 2.9–5x headline is a DIFFERENT workload** (`bd-kdmu4`: multi-file parallel read) with a
+  **different harness**, measured by a different agent. My 3.10 ms constant is `ffs-cli read`'s
+  single-file staging buffer, which does not exist in that path (`walk_one_dir` already reuses one
+  buffer per worker, `main.rs:3055-3060`, `bd-2x68s`). I have **not** measured the multi-file
+  harness, so I cannot say what fraction of 2.9x is overhead. Its author separately flagged ~25% of
+  it as nested-`par_iter` coordination "a harness artifact not a real-fs cost", by yet another
+  mechanism — but the residual real-fs figure was never isolated.
+* **The honest statement:** *my own single-file `ffs-cli read` cold numbers were 21–41% harness;
+  `bd-kdmu4`'s multi-file 2.9x is suspect by association but unaudited.* Writing "the headline was
+  41% harness" would restate an unmeasured number — the same class of error (in the opposite
+  direction) as the original "frankenfs dominates kernel" rows this whole audit corrected.
+
+### Prior conclusions drawn against the inflated single-file number
+
+Sign stands (harness bias only ever inflates "frankenfs slower"), magnitude is an upper bound:
+`bd-q6k00` ext4 extent 1.42x; `bd-5koeh` indirect 1.45x / fragmented 1.31x. Superseded outright:
+`bd-ddryj` baseline 1.54x/1.25x → 1.41x/1.15x; "94% frankenfs-attributable" (floor mismatched the
+destination policy); "new #1 frame = anon churn 28.91%" (that cluster is the harness).
+
+### Lane status
+
+* `bd-ddryj` — **LANDED** (`7a6091a2`): dedicated 16-wide read pool. Behavior parity verified
+  remote; perf measured on the equivalent `RAYON_NUM_THREADS=16` config (1.21x effect vs 1.02x null),
+  the built binary not independently re-measured (build blocker).
+* `bd-zvn7r`(a) — harness hygiene: `STREAM_CHUNK=64 MiB` inflates every `ffs-cli read` cold number;
+  shrink / pre-fault / subtract. Open, needs a build.
+* `bd-zvn7r`(b) — does the FUSE read path allocate per-chunk destinations? Open, profile through the mount.
+* `bd-kdmu4` — RESOLVED on O_DIRECT (1.00x); its 2.9x multi-file premise UNAUDITED.
+* `bd-vpypn` — extent walks at high extent counts, never measured. Open.
+
+No further single-file cold-read lever exists: at 1.15x of a direct-I/O kernel mount with the raw
+floor at 0.99x, the residual is inherent copy + userspace work.
