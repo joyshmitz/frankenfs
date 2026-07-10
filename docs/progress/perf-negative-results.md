@@ -1119,3 +1119,127 @@ Retry predicate: do **not** spend further effort on readahead/`fadvise` tuning o
 on chunk-size sweeps for cold reads — both are refuted. The open lever is the
 read fan-out width itself (`into_par_iter` at `crates/ffs-core/src/lib.rs:10108`,
 `12677`, `12819`, all on the global rayon pool). Tracked in `bd-ddryj`.
+
+---
+
+## 2026-07-10 — Cold-read: contention scales with FOLIO INSERTIONS, not reads, not threads (bd-ddryj, BlackThrush/cc_ffs)
+
+Follow-up to the frame table above. Instrumented the cold read with
+`filemap:mm_filemap_add_to_page_cache` (page-cache insertion count),
+`syscalls:sys_enter_pread64` (read count) and `lock:contention_begin`, on the
+prebuilt `release-perf` binary (**no rebuild**), `drop_caches=3` before each run.
+
+### Q: does contention scale with thread count or with read count?
+
+`ffs-cli read`, 128 MiB, `RAYON_NUM_THREADS` swept:
+
+| T | folio inserts | B/insert | preads | lock contentions | cycles (M) |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 2,230 | 60,187 | 1,034 | 0 | 337 |
+| 2 | 10,145 | 13,229 | 1,034 | 1 | 345 |
+| 4 | 12,623 | 10,633 | 1,034 | 78 | 398 |
+| 8 | 15,137 | 8,867 | 1,034 | 669 | 439 |
+| 16 | 17,914 | 7,493 | 1,034 | 2,473 | 548 |
+| 32 | 23,271 | 5,768 | 1,034 | 7,541 | 819 |
+| 64 | 27,174 | 4,940 | 1,034 | 11,912 | 1,467 |
+
+**Read count is constant (1,034) at every thread count.** Contention does *not*
+scale with reads. What scales is the number of distinct page-cache insertions:
+2,230 → 27,174 (**12.2x**), because bytes-per-insertion collapses from ~60 KiB
+(order-4 large folios) to ~4.9 KiB (order-0 pages).
+
+### Why: one shared `struct file` destroys the readahead folio order
+
+`FileByteDevice` holds `file: Arc<File>` (`crates/ffs-block/src/lib.rs:523`), so
+every rayon worker `pread`s through **one** `struct file` and therefore one
+`file->f_ra` readahead state. Interleaved offsets from N workers look
+non-sequential to that single state machine, so `page_cache_ra_unbounded` stops
+allocating large folios and falls back to order-0 — multiplying xarray
+insertions, each taking the `address_space` `xa_lock`.
+
+Controlled proof (same thread count, same reads, same bytes; only fd sharing
+differs), raw parallel `pread` of the identical extents, `sha256`-verified:
+
+| mode | T | inserts | B/insert | cycles (M) | ms |
+| --- | --- | --- | --- | --- | --- |
+| shared fd (what frankenfs does) | 8 | 17,476 | 7,680 | 392 | 36.7 |
+| **per-thread fd** | 8 | **2,978** | **45,070** | 323 | **26.0** |
+| shared fd | 32 | 19,382 | 6,925 | 615 | 30.7 |
+| per-thread fd | 32 | 3,858 | 34,789 | 453 | 27.1 |
+| shared fd | 64 | 19,542 | 6,868 | 655 | 31.8 |
+| per-thread fd | 64 | 4,720 | 28,436 | 597 | 33.0 |
+
+At T=8, giving each thread its own fd cuts insertions **5.9x** and wall **1.41x**.
+Self-time confirms the mechanism: `native_queued_spin_lock_slowpath`
+2.45% → 0.50%, `__filemap_add_folio` 2.29% → 0.14%.
+
+**Answer: contention scales with page-cache insertion count. Thread count only
+matters because a shared `struct file` inflates insertions; read count is
+irrelevant.**
+
+### Lever (a) "larger contiguous reads" — REFUTED as stated
+
+Shared fd, T=8, chunk swept. Bigger reads cut syscalls 147x but do **not** cut
+insertions, and hurt wall time:
+
+| chunk | preads | inserts | B/insert | ms |
+| --- | --- | --- | --- | --- |
+| 128 KiB | 1,027 | 15,374 | 8,730 | 35.2 |
+| 1 MiB | 131 | 18,014 | 7,451 | 34.5 |
+| 8 MiB | 19 | 17,184 | 7,811 | 60.8 |
+| 32 MiB | 7 | 17,149 | 7,827 | 66.6 |
+
+Insertion count is a property of readahead folio order, not of read size. The
+correct form of lever (a) is **preserve large folios by giving each reader its
+own `f_ra`** (per-thread fd), not "read bigger".
+
+### Lever (b) "spread across distinct inodes" — subsumed
+
+The `xa_lock` is per-`address_space`, so distinct inodes would give distinct
+xarrays. But the data show the lock is barely contended once insertions collapse
+(0.50% at T=8 per-thread). The actionable half of (b) is the per-thread
+`struct file`, which is what actually restores folio order. Splitting one file
+across inodes is not possible for a single-file read anyway.
+
+### Lever (c) O_DIRECT — QUANTIFIED, NOT IMPLEMENTED
+
+Measured as a *ceiling only*, in the raw `pread` harness (page-aligned `mmap`
+buffers, `os.preadv`), `sha256` identical to the kernel mount. **No frankenfs
+code was changed; O_DIRECT would require audited-unsafe or a policy change.**
+
+| mode | T | inserts | cycles (M) | ms |
+| --- | --- | --- | --- | --- |
+| O_DIRECT | 1 | ~0 (1,527 residual, loader) | 126 | 50.9 |
+| O_DIRECT | 8 | ~0 | 174 | **25.0** |
+| O_DIRECT | 32 | ~0 | 279 | 26.6 |
+| O_DIRECT | 64 | ~0 | 397 | 28.4 |
+
+Best-of-T wall, same bytes:
+
+| approach | ms | vs today |
+| --- | --- | --- |
+| shared fd (frankenfs today) | 30.7 | 1.00x |
+| per-thread fd | 26.0 | **1.18x** |
+| O_DIRECT | 25.0 | 1.23x |
+| *kernel-best (dio loop, t=32)* | *26.9* | *the comparator* |
+
+**O_DIRECT buys only 1.04x of wall over the safe per-thread-fd fix, but 1.86x of
+CPU (323M → 174M cycles).** So O_DIRECT is a CPU-efficiency play, not a latency
+play; it is not worth an unsafe/policy change to close a 4% wall gap. Per-thread
+fd + a bounded fan-out reaches **26.0 ms vs the kernel's 26.9 ms — parity.**
+
+### Blocker (surfaced, not worked around)
+
+The per-thread-fd gain is measured in the raw `pread` harness, not inside
+frankenfs. Proving it *in* frankenfs needs a modified `FileByteDevice` binary,
+and this box is under a disk constraint that forbids local `cargo build`, while
+`rch exec -- cargo build` **cannot return the artifact**: the globally-exported
+`CARGO_TARGET_DIR=/data/tmp/cargo-target` makes rch treat every build as a
+custom-target-dir build and retrieval yields ~0 bytes (remote compile succeeds;
+`check`/`test` are unaffected because they only stream diagnostics). A criterion
+bench cannot substitute: this is a cold-path effect requiring `drop_caches` (root)
+between reps, which criterion cannot express on a remote worker.
+
+Retry predicate: do **not** re-test chunk size, readahead/`fadvise`, extent
+walks, or the copy tax for cold reads — all refuted. The single open lever is
+per-reader `struct file` + bounded fan-out (`bd-ddryj`).
