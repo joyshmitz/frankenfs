@@ -2084,3 +2084,51 @@ artifact was written and no cod file was touched — the deliverables exist, are
 now carry an independent green run from a second agent. The remaining `bd-bhh0i` work (the actual
 lock-decomposition cutover) stays with cod, is FS-mutating, and is explicitly out of scope here
 (no cutover, no FS mutation beyond fixtures). I did not start it.
+
+---
+
+## 2026-07-10 — ISA finding + bd-bhh0i doc coverage (no collision) (bd-b9dug, BlackThrush/cc_ffs)
+
+### ISA question: does frankenfs emit baseline or AVX2?
+
+**For its own code: BASELINE (SSE2). Only runtime-dispatched deps use AVX2.** Filed as `bd-b9dug`.
+
+Binary `sha256=03b7456d…81eb` (the one used for the entire cold-read campaign): `RUSTFLAGS` unset,
+no `target-cpu`/`target-feature` in `.cargo/config.toml`, `Cargo.toml`, or `rust-toolchain.toml`, so a
+plain `cargo build --profile release-perf` targets the default **x86-64 baseline**. frankenfs's own SWAR
+hot functions (`names_eq`, `dx_hash`, word-at-a-time) disassemble to scalar GPR ops — no `ymm`/`zmm`
+(the SWAR primitives are baseline-compatible by design, so a higher `target-cpu` would not help them,
+but any autovectorizable ffs loop is emitted SSE2). The 1401 AVX2 + 2018 AVX-512 mnemonics present come
+from **runtime-dispatched dep crates** (crc32c, xxhash, memchr, blake3) — the AVX-512 variants are dead
+on this non-AVX512 host; correct portable pattern, not a gap.
+
+**The gap:** production is `scripts/build-perf.sh`, which sets `-C target-cpu=x86-64-v3` (AVX2/BMI2/FMA) +
+fat LTO + PGO (its header records ~8.5% fewer create instructions, ~3% lookup). rch's plain build does not
+apply those flags, so **the benchmark binary ≠ the production binary**.
+
+* A/B ratios are unaffected (same binary both arms) — `bd-ddryj` 1.21x, null 1.02x stand.
+* Absolute vs-kernel numbers are a **second** upper bound: the honest cold-read gap (1.41x / 1.15x) would
+  be tighter on the v3+PGO production binary. Real gap < 1.41x.
+* **Every future workload-class benchmark must use the build-perf.sh binary**, or note it is baseline.
+
+### bd-bhh0i incremental design doc — already delivered by cod; not touched
+
+The owner asked for "the incremental design doc: each step independently safe, e2fsck-clean,
+rollback-able, with the loom proof attached." **That doc already exists and is comprehensive:**
+`docs/bd-bhh0i-parallel-create-plan.md` (316 committed lines, actively being expanded by cod right now —
+a 59-line working-tree diff). It already contains: the incremental owner-reviewed plan with
+independently-revertible steps, e2fsck-clean gates per step (`create-bench N → e2fsck -fn CLEAN`),
+crash-consistency analysis, rollback framing, and the bounded-loom proof section. My independent 7/7
+verification of that loom proof (previous entry) is the second-agent peer review it needed.
+
+**I did not edit cod's doc** — it is active peer work and editing it would collide (and non-src edits
+revert within minutes here). The plan is de-risked by two agents. The FS-mutating cutover stays with cod.
+
+### Unbenchmarked workload classes — beaded (cod's lane); cross-cutting note
+
+fsync/journal-commit latency (`bd-fsync-journal-latency-gap-ptp4x`) and mounted-xattr
+(`bd-mount-xattr-workload-gap-fr6iq`) are already beaded and in cod's lane. I did not start them (cod
+owns new workload classes; starting them mid-wall would collide). Cross-cutting requirement recorded on
+`bd-b9dug`: **all of them must be benchmarked on the v3+PGO production binary**, not the baseline plain
+build, or their absolute vs-kernel numbers will carry the same ISA upper-bound this ledger just found in
+the cold-read numbers.
