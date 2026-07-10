@@ -69,6 +69,10 @@ name = "extent_leaf_search"
 harness = false
 
 [[bench]]
+name = "extent_search_large"
+harness = false
+
+[[bench]]
 name = "csum_seed_cost"
 harness = false
 

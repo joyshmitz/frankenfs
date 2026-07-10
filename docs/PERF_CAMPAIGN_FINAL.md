@@ -85,6 +85,7 @@ lever to become worth revisiting; until then, **do not re-attempt.**
 | 2e1fce5f | bloom-filter `dir_name_index` negative-lookup pre-filter | NEUTRAL ~1.03–1.06x (HashSet neg-probe already 1 cache line) | the baseline gains MANY cache-missing accesses per op (it does not — all paths are O(1)/O(log N)/seq-cached) |
 | 606babe5 / bab1deea | inline present-index keys / MVCC version-chain inline SmallVec | cache-miss-bound / 3x SLOWER on reads (density collapse) | version-chain density stops collapsing under inlining (peer-owned) |
 | a1bab91e | `locate_inode` div→shift strength-reduction | 1.00x NEUTRAL (DIV throughput hidden by loop ILP) | locate_inode becomes a hot standalone loop where the DIV latency is exposed |
+| bd-cc-interp-search | interpolation search on extent mapping resolution (algorithmic, O(log log E)) | 3.46–6.6x FASTER on synthetic-uniform E≥4096 but **2.4–2.9x SLOWER** on realistic non-uniform (skewed) extents; production leaf ≤340 = L1-resident (per-probe DIVIDE loses to comparisons) | a non-peer hot path searches a genuinely LARGE (E≥~2000, cache-miss-bound) NEAR-UNIFORM sorted array — ext4's ≤340-per-leaf extent structure cannot produce it |
 | f31ae693 | `parse_dir_block` `Vec::with_capacity` | below-noise (malloc-bound, the outer realloc is not the cost) | the per-entry `name` alloc is eliminated first, exposing the outer realloc (= the SmallVec task) |
 
 ### Write-path / alloc
