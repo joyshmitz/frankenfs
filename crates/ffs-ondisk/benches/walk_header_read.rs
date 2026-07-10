@@ -79,12 +79,61 @@ fn walk_arrayref(block: &[u8]) -> u64 {
     acc
 }
 
+// Models `parse_dir_block`'s collect (ffs-ondisk:3859), which builds a
+// `Vec<Ext4DirEntry>` from a dir block on EVERY readdir block. It starts from
+// `Vec::new()` and pushes per entry, so a full block (~170-340 entries)
+// reallocates the Vec ~7-9 times. `with_cap` pre-sizes to `block.len()/12` (the
+// max entry count, a 12-byte minimum record), eliminating the reallocations. The
+// walk and per-entry `name.to_vec()` are common to both arms, so this isolates
+// the reallocation delta. Byte-identical output (same entries).
+#[derive(PartialEq)]
+struct BenchEntry {
+    inode: u32,
+    rec_len: u32,
+    name_len: u8,
+    name: Vec<u8>,
+}
+#[inline]
+fn collect(block: &[u8], with_cap: bool) -> Vec<BenchEntry> {
+    let mut v: Vec<BenchEntry> = if with_cap {
+        Vec::with_capacity(block.len() / 12)
+    } else {
+        Vec::new()
+    };
+    let mut off = 0usize;
+    while off + 8 <= block.len() {
+        let inode = read_le_u32(block, off).unwrap();
+        let rec_len = read_le_u16(block, off + 4).unwrap() as usize;
+        let name_len = ensure_slice(block, off + 6, 1).unwrap()[0];
+        if rec_len < 12 {
+            break;
+        }
+        let nl = name_len as usize;
+        let name = if off + 8 + nl <= block.len() {
+            block[off + 8..off + 8 + nl].to_vec()
+        } else {
+            Vec::new()
+        };
+        v.push(BenchEntry { inode, rec_len: rec_len as u32, name_len, name });
+        off += rec_len;
+    }
+    v
+}
+
 fn bench(c: &mut Criterion) {
     let block = make_block();
     assert_eq!(walk_checked(&block), walk_arrayref(&block));
     let mut g = c.benchmark_group("walk_header_read");
     g.bench_function("checked", |b| b.iter(|| black_box(walk_checked(black_box(&block)))));
     g.bench_function("arrayref", |b| b.iter(|| black_box(walk_arrayref(black_box(&block)))));
+    g.finish();
+
+    // parse_dir_block collect: Vec::new vs with_capacity (isolated realloc delta).
+    assert!(collect(&block, false) == collect(&block, true), "collect arms must agree");
+    let mut g = c.benchmark_group("dir_collect");
+    g.bench_function("vecnew_a", |b| b.iter(|| black_box(collect(black_box(&block), false))));
+    g.bench_function("vecnew_b", |b| b.iter(|| black_box(collect(black_box(&block), false))));
+    g.bench_function("withcap", |b| b.iter(|| black_box(collect(black_box(&block), true))));
     g.finish();
 }
 
