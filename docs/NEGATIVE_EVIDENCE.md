@@ -5687,3 +5687,63 @@ btrfs, and wiring `btrfs_full_transaction_commit` in (the correct destroy sequen
 at n≥20 EVEN with the csum/subvol/snap budgets, so the overflow is in the fs_tree or extent-tree
 COMMIT path (not those three) and needs commit-time instrumentation to isolate which leaf exceeds
 nodesize — a focused btrfs-COW-commit debug, gated by "create 30000 → re-open walk sees 30000".
+
+## REJECT / BLOCKER — 2026-07-09 — bd-zero-copy-read-path-pz64v retry condition still not satisfied (cod_ffs)
+
+Lane restart for `bd-zero-copy-read-path-pz64v` began with the mandatory ledger grep across
+`docs/NEGATIVE_EVIDENCE.md`, `docs/progress/perf-negative-results.md`, and
+`docs/PERF_CAMPAIGN_STATUS.md`. Prior entries already closed the safe copy-elision space:
+large scalar `FileByteDevice` reads skip the staging buffer, large vectored reads use one
+positioned `preadv`, `OpenFs::read_into` fills caller buffers for ext4 plain extents,
+ext4 indirect, and btrfs, and the remaining pz64v prize is page-cache / kernel-boundary
+zero-copy. The recorded retry guard still holds: do not add hidden `mmap` or io_uring
+registered-buffer code under `#![forbid(unsafe_code)]`; retry only after either an explicit
+audited-unsafe backend decision plus a borrow-returning read API, or a genuinely safe
+zero-copy abstraction that preserves byte identity and the destination-on-error contract.
+
+Fresh same-worker Criterion on RCH `hz2` revalidated the already-shipped safe fast paths:
+
+| Row | Staged/current comparator | Direct/current fast path | old/new |
+| --- | ---: | ---: | ---: |
+| `file_device_read_1mib` | 913.63 us median (`staged_scratch`) | 51.411 us median (`direct`) | 17.8x |
+| `file_device_vectored_read_128k` | 10.728 us median (`staged_scratch_scatter`) | 7.9739 us median (`preadv_direct`) | 1.35x |
+
+Command:
+
+```bash
+rch exec -- cargo bench --profile release-perf -p ffs-block --bench file_device_read -- 'file_device_(read_1mib|vectored_read_128k)' --warm-up-time 1 --measurement-time 3
+```
+
+The profile-ranked frontier is unchanged:
+
+| Rank | Target | Evidence | Actionability |
+| --- | --- | --- | --- |
+| 1 | Kernel `copy_to_user` / syscall boundary | Prior pz64v measurement: 1 MiB warm `pread` into dst 333 us / 3.2 GB/s vs userspace memcpy 23.6 us / 44.4 GB/s; production parallel chunks only hide part of that tax. | Real prize, but requires zero-copy page-cache access or registered-buffer backend plus a borrow API. Blocked by current safe-code policy. |
+| 2 | Large scalar/vectored staging buffers | Fresh `hz2` Criterion above: the safe `direct` and `preadv_direct` paths already beat staged buffers by 17.8x and 1.35x internally. | Already shipped; no new code lever. |
+| 3 | Small-read destination-preservation staging | Prior small-read / owned-destination attempts were neutral or slower; the current code keeps the scratch path because it is cheaper than an extra syscall below the large-read threshold. | Do not retry without a new profile proving dominance and a >=10% same-worker win. |
+| 4 | Extent/cache/read-side locks | Prior ledgers closed the hot-inode, hot-extent, `ExtentCache`, and mmap-threshold convoy hypotheses. | Not the pz64v residual. |
+
+Fresh `perf stat` and flamegraph attempts were not accepted as decisive new profiles. Two
+same-worker `perf stat` runs on `hz2` were interrupted after RCH target-lock/build wait
+contaminated the counters (one 344.1 s elapsed / 379.0 s task-clock compile-heavy run; one
+108.6 s elapsed / 0.159 s task-clock lock-wait run). A bounded flamegraph attempt:
+
+```bash
+rch exec -- timeout 120 cargo flamegraph --bench file_device_read --profile release-perf -p ffs-block -- file_device_read_1mib/direct --warm-up-time 1 --measurement-time 1 --sample-size 10
+```
+
+timed out while compiling (`exit 124`) and produced no fresh SVG. The existing checked-in
+`profiles/flamegraph_fuse_read.svg` remains historical routing evidence only, not a fresh
+keep/reject proof for this lane.
+
+External API check, current docs: `memmap2::Mmap::map` is still an `unsafe fn` for file-backed
+maps, and the `io-uring` crate exposes raw buffer pointer SQEs / unsafe submission plus
+fixed-buffer registration. That matches the repo-local blocker: `crates/ffs-block/src/lib.rs`
+is `#![forbid(unsafe_code)]`, and `crates/ffs-block/src/io_engine.rs` is copy-by-construction
+(`IoOp::Read { buf: Vec<u8> }` -> `IoCompletion::Read(Vec<u8>)`).
+
+VERDICT: REJECT / BLOCKER, no production source change. Close `bd-zero-copy-read-path-pz64v`
+as not safely actionable in the current architecture. The next valid attempt is not another
+copy micro-tune; it is an explicit project decision to carve an audited unsafe zero-copy read
+module plus a borrow-returning API and conformance plan, or a safe third-party abstraction that
+can prove the same invariants without weakening the workspace unsafe policy.

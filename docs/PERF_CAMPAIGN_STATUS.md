@@ -183,7 +183,12 @@ insert 4 + rebalance ≈ 4× create).
 - **Data write**: MVCC-commit + syscall bound (write-bench 460k IOPS).
 - **Reads**: ext4 rand-read I/O-bound; btrfs uncompressed I/O-bound; btrfs
   compressed = decode-then-cached (bd-4tw2n cache 55×); lookup + readdir at the
-  parallel-safe-cache floor (arc_swap + ShardedCache are intentional).
+  parallel-safe-cache floor (arc_swap + ShardedCache are intentional). The
+  pz64v zero-copy relaunch is closed as a policy/API blocker: incumbent safe
+  direct reads already measure 17.8× over staged 1 MiB reads and `preadv`
+  measures 1.35× over staged 128 KiB scatter on RCH `hz2`, while the remaining
+  page-cache / `copy_to_user` prize needs mmap or io_uring registered buffers
+  plus a borrow-returning API under an explicit audited-unsafe decision.
 - **fsck --force**: I/O-bound (78% kernel `copy_to_user`).
 
 ## The one open lever — bd-bhh0i (decision needed)
