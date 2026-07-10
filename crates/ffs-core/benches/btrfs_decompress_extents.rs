@@ -524,6 +524,57 @@ fn bench_zlib_encode_reuse(c: &mut Criterion) {
     g.finish();
 }
 
+// ── btrfs LZO segment decode: fresh Vec per segment vs reused scratch ───────
+// `btrfs_decompress_lzo` decodes each segment via `lzo::decompress`, which
+// internally does `vec![0u8; page]` (malloc + zero) then `decompress_into`,
+// then the caller `extend_from_slice`s it into `out`. A 128 KiB extent has ~32
+// segments (one per sector) => ~32 (malloc + zero + free). Decoding into a REUSED
+// scratch with `lzo::decompress_into` keeps only one alloc. Byte-identical (same
+// LZO1X output into `out`).
+fn lzo_decode_alloc(segs: &[Vec<u8>], page: usize) -> Vec<u8> {
+    let mut out = Vec::new();
+    for s in segs {
+        let d = lzo::decompress(s, page).expect("lzo decompress");
+        out.extend_from_slice(&d);
+    }
+    out
+}
+
+fn lzo_decode_scratch(segs: &[Vec<u8>], page: usize) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut scratch = vec![0u8; page];
+    for s in segs {
+        let n = lzo::decompress_into(s, &mut scratch[..page]).expect("lzo decompress_into");
+        out.extend_from_slice(&scratch[..n]);
+    }
+    out
+}
+
+fn bench_lzo_segment_decode(c: &mut Criterion) {
+    if !should_build_group(&["lzo_segment_decode"]) {
+        return;
+    }
+    const SECTOR: usize = 4096;
+    const SEGS: usize = 32; // 128 KiB extent = 32 sector-sized LZO segments
+    let payloads: Vec<Vec<u8>> = (0..SEGS)
+        .map(|k| (0..SECTOR).map(|i| b"the quick brown fox "[(i + k) % 20]).collect())
+        .collect();
+    let segs: Vec<Vec<u8>> = payloads
+        .iter()
+        .map(|p| lzokay_native::compress(p).expect("lzo compress"))
+        .collect();
+    assert_eq!(
+        lzo_decode_alloc(&segs, SECTOR),
+        lzo_decode_scratch(&segs, SECTOR),
+        "LZO decode arms must agree"
+    );
+    let mut g = c.benchmark_group("lzo_segment_decode");
+    g.bench_function("alloc_per_seg_a", |b| b.iter(|| black_box(lzo_decode_alloc(black_box(&segs), SECTOR))));
+    g.bench_function("alloc_per_seg_b", |b| b.iter(|| black_box(lzo_decode_alloc(black_box(&segs), SECTOR))));
+    g.bench_function("reused_scratch", |b| b.iter(|| black_box(lzo_decode_scratch(black_box(&segs), SECTOR))));
+    g.finish();
+}
+
 criterion_group!(
     benches,
     bench_decompress,
@@ -531,6 +582,7 @@ criterion_group!(
     bench_decompress_tiny_frames,
     bench_decompress_tiny_frame_scheduling,
     bench_zlib_reuse,
-    bench_zlib_encode_reuse
+    bench_zlib_encode_reuse,
+    bench_lzo_segment_decode
 );
 criterion_main!(benches);
