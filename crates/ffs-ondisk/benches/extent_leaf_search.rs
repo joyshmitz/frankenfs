@@ -22,6 +22,14 @@ fn binary(exts: &[(u32, u32)], target: u32) -> Option<usize> {
     let (start, len) = exts[p - 1];
     if target >= start && target < start + len { Some(p - 1) } else { None }
 }
+// Full per-block resolution for a depth-1 tree on a cache HIT: one index binary
+// search (choose child) + one leaf binary search — the entire CPU cost of
+// resolving one logical block once the child leaf is cached. Everything below
+// this (read_block) is a zero-copy slice; everything above is the block copy.
+fn resolve_depth1(index: &[(u32, u32)], leaf: &[(u32, u32)], target: u32) -> Option<usize> {
+    let _child = binary(index, target)?; // extent_index_choose shape
+    binary(leaf, target) // extent_leaf_lookup on the cached child
+}
 fn bench(c: &mut Criterion) {
     // COMMON case first (e=1,2,4 with a FIRST-extent hit = linear's best case, and
     // the overwhelmingly common shape for real files), then the worst case the
@@ -48,6 +56,30 @@ fn bench(c: &mut Criterion) {
         g.bench_function("linear", |b| b.iter(|| black_box(linear(black_box(&exts), black_box(target)))));
         g.finish();
     }
+    // Full depth-1 per-block resolution (index choose + leaf lookup) on a cache
+    // hit: the ENTIRE ffs-ondisk CPU budget for resolving one logical block.
+    // Compared against a warm 4 KiB block copy (the layer above) to show
+    // resolution is a small fraction of the read. index=256 children, leaf=256
+    // extents (a heavily fragmented file — worst case for resolution cost).
+    let index = make(256);
+    let leaf = make(256);
+    let target = 1023;
+    let mut buf = vec![0u8; 4096];
+    let src = vec![7u8; 4096];
+    let mut g = c.benchmark_group("extent_resolve_vs_copy");
+    g.bench_function("resolve_depth1_a", |b| {
+        b.iter(|| black_box(resolve_depth1(black_box(&index), black_box(&leaf), black_box(target))))
+    });
+    g.bench_function("resolve_depth1_b", |b| {
+        b.iter(|| black_box(resolve_depth1(black_box(&index), black_box(&leaf), black_box(target))))
+    });
+    g.bench_function("copy_4k_block", |b| {
+        b.iter(|| {
+            buf.copy_from_slice(black_box(&src));
+            black_box(buf[0])
+        })
+    });
+    g.finish();
 }
 criterion_group!(benches, bench);
 criterion_main!(benches);
