@@ -39,21 +39,54 @@
 //!
 //! Box load dominates single reps (kernel arm cv≈19% at load 30); take min-of-N.
 //!
-//! ## Do NOT loop-mount the image for the kernel side of a PARALLEL comparison
+//! ## A loop-mounted kernel is only a fair comparator with `--direct-io=on`
 //!
-//! A loop device serializes I/O. Measured on identical physical bytes (a 1 GiB
-//! 5-extent file inside a real ext4 image on /data, `drop_caches` before every
-//! run): reading it through the loop mount is FLAT across a thread sweep —
-//! t=4/8/16/32/64 → 862/904/852/853/851 ms (~1200 MiB/s, no scaling) — while
-//! `pread`ing the same extents straight from the image file scales to 277 ms at
-//! t=32 (3692 MiB/s). That is a **3.08x loop penalty** at matched threads.
+//! A *buffered* loop device serializes I/O; a *direct-I/O* one does not. Same
+//! 128 MiB (sha256-identical across arms), `drop_caches=3` before every run,
+//! min-of-5, thread sweep against the same loop mount:
 //!
-//! Meanwhile `ffs-cli read` preads the image directly and fans out over rayon.
-//! Comparing it against a loop-mounted kernel is parallel-vs-serialized and
-//! manufactures a ~2.8x phantom win. Either put a real ext4 on a spare block
-//! device, or compare against a raw parallel `pread` floor over the same
-//! physical extents. Against that floor frankenfs is 1.68x SLOWER (466 vs 277 ms
-//! for 1 GiB) — the ext4 parse + safe-copy tax is real. See bd-q6k00.
+//! ```text
+//!   loop dio=0 (default)   t=1 97.7   t=8 124.2   t=32 113.6 ms   <- no scaling
+//!   loop dio=1             t=1 52.1   t=8  25.1   t=32  28.2 ms   <- scales
+//! ```
+//!
+//! That is a **4.9x difference at t=8 on identical bytes**, produced by one
+//! ioctl. So the rule is NOT "never loop-mount the kernel side" — it is **give
+//! the kernel its best configuration**:
+//!
+//! ```text
+//!   sudo losetup --direct-io=on /dev/loopN     # then check /sys/block/loopN/loop/dio
+//! ```
+//!
+//! Benchmarking against a *buffered* loop mount measures the loop's workqueue,
+//! not the kernel's ext4, and manufactures a phantom frankenfs win.
+//!
+//! ## Calibrate the buffered-vs-direct asymmetry before trusting a ratio
+//!
+//! `ffs-cli read` preads the image file *buffered*, while a dio loop reads the
+//! backing file *direct* — different I/O modes. Bound that confound with a third
+//! arm: a raw parallel `pread` of the same physical extents (buffered, no fs
+//! parse). At t=32 it lands within **5.2%** of the dio-loop kernel (28.3 vs
+//! 26.9 ms), so at high thread counts the mode difference is device-bound noise
+//! and any larger gap is real. At t=1 it is NOT (109.5 vs 52.1 ms) — never take
+//! a single-threaded buffered-vs-direct ratio at face value.
+//!
+//! ## Honest cold ext4 numbers (128 MiB extent file, 2 extents, real disk)
+//!
+//! ```text
+//!   frankenfs  read      46.6 ms engine, 8.4 ms of which is per-open startup
+//!                        (superblock + GDT + journal replay) -> 38.2 ms of read
+//!   kernel     dio loop, t=32     26.9 ms   <- the kernel's best
+//!   raw pread floor,     t=32     28.3 ms
+//!   kernel     buffered loop, t=1 97.0 ms   <- what a `dd bs=1M` arm measures
+//! ```
+//!
+//! frankenfs is **1.42x SLOWER than the kernel's best** (startup-corrected;
+//! 2.64x on raw wall-clock) and **1.35x slower than a raw parallel `pread`** of
+//! the same extents — that gap is the ext4 parse + safe-copy tax. Comparing it
+//! instead against the buffered single-stream loop yields a bogus "2.54x
+//! FASTER". Both framings are arithmetically correct; only the first is honest.
+//! See bd-q6k00.
 
 use asupersync::Cx;
 use ffs_block::{ByteDevice, FileByteDevice};
