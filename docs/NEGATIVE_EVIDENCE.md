@@ -5,6 +5,11 @@ campaign. Historical rows live in `docs/progress/perf-negative-results.md`; new
 campaign closeouts should either update that file directly or add a summary row
 here that points to the detailed progress ledger.
 
+> **CAMPAIGN COMPLETE (2026-07-10).** The consolidated capstone — shipped wins by
+> axis + every reject with ID · null-control · retry-condition — is
+> `docs/PERF_CAMPAIGN_FINAL.md`. All 5 axes closed; HOLD, no more solo
+> lever-hunting. The detailed prose rows below remain the source of truth.
+
 ## 2026-06-21 Verification
 
 | Date | Bead | Surface | Verdict | Ratio vs ext4/btrfs-kernel | Internal win/loss/neutral | Direct kernel win/loss/neutral | Gates |

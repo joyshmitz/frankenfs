@@ -2,6 +2,10 @@
 
 ## ✅ FINAL FRONTIER SUMMARY — 2026-07-10 (BlackThrush / cc_ffs) — ALL AXES MAPPED, HOLD
 
+> **Consolidated capstone:** `docs/PERF_CAMPAIGN_FINAL.md` — shipped wins by axis
+> + every reject with ID · null-control · retry-condition. Read that for the
+> completed-repo view; the table below is the quick frontier index.
+
 Every subsystem axis has been profiled/audited and is either a landed win or a
 measured floor. **No clean, benchable, non-peer, non-owner-gated single-turn
 solo micro-lever remains.** Holding — stop hunting. Detailed rows in
