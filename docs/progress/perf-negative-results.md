@@ -1583,3 +1583,105 @@ insertions, driven by readahead order collapse on a shared `struct file`. Insert
 readahead/`fadvise`, extent walks (<=14 extents), the copy tax, read granularity, "reduce
 insertions for throughput", or O_DIRECT-for-latency. Open: `bd-ddryj` (fan-out cap, blocked
 on a build) and `bd-vpypn` (extent walks at high extent counts, never measured).
+
+---
+
+## 2026-07-10 — Honest cold baseline re-established; the gap has moved OUT of the kernel (bd-zvn7r, BlackThrush/cc_ffs)
+
+With `xa_lock` and folio insertions off the table, this re-measures the real remaining
+gap and re-ranks the frames. Prebuilt `release-perf` binary, **zero local cargo builds**;
+`drop_caches=3` before every run; **all arms interleaved within each rep** (substrate v2);
+`sha256` identical across arms (`b6cfaf9d…`, kernel mount == `ffs-cli read`).
+Quiet box (load 4.4). 128 MiB, 2 extents, production 128 KiB chunk.
+
+### The baseline (9 interleaved reps, medians)
+
+| arm | median | min | cv | vs kernel |
+| --- | --- | --- | --- | --- |
+| ffs T=64 (**as shipped**) | 42.94 ms | 40.92 | 12.7% | **1.54x** |
+| ffs T=16 (best config) | 34.67 ms | 33.09 | 2.3% | **1.25x** |
+| *(ffs per-open startup, subtracted per rep)* | 4.79 ms | 4.60 | 5.3% | — |
+| raw pread, same fd model + chunk | 28.20 ms | 27.80 | 10.4% | 1.01x |
+| kernel dio loop T=32 | 27.80 ms | 26.70 | 8.5% | — |
+
+`ffs T=16` beats `ffs T=64` in **9/9 paired reps, p=0.0039** — the fan-out cap (`bd-ddryj`)
+reconfirmed on a quiet box.
+
+### Decomposition of the residual
+
+```
+  ffs T=16 read                     34.67 ms
+  raw pread, same fd model+chunk    28.20 ms   -> frankenfs-attributable  +6.47 ms
+  kernel dio loop T=32              27.80 ms   -> buffered page-cache path +0.40 ms
+  TOTAL gap vs kernel                          +6.87 ms  (1.25x)
+```
+
+**94% of the remaining gap is frankenfs's own cost. The buffered page-cache path now costs
+0.40 ms.** That closes the kernel-side story: `xa_lock`, insertions, readahead, granularity
+and the bypass are all done. The gap lives in frankenfs.
+
+### Fresh ranked frame table — ffs, T=16, production chunk, self-time >= 0.1%
+
+| self% | frame | layer |
+| --- | --- | --- |
+| 12.28 | `_copy_to_iter` | kernel — the buffered copy (inherent) |
+| **11.81** | **`clear_page_erms`** | kernel — **zero-filling fresh destination pages** |
+| 9.32 | `native_queued_spin_lock_slowpath` | kernel — residual `xa_lock` (was **42.27%** at T=64) |
+| 5.74 | `asm_exc_page_fault` | kernel |
+| 2.19 | `rmqueue_bulk` | kernel — page allocator |
+| 2.02 | `__filemap_add_folio` | kernel |
+| 1.67 | `lru_gen_add_folio` | kernel |
+| 1.57 | `do_anonymous_page` | kernel |
+| 1.44 | `mod_memcg_lruvec_state` | kernel |
+| 1.13 | `crossbeam_deque::Stealer::steal` | user — rayon |
+| 1.13 | `zap_present_ptes` | kernel |
+| 1.09 | `up_read` | kernel |
+| 0.94 | `get_page_from_freelist` | kernel |
+| 0.80 | `__alloc_frozen_pages_noprof` | kernel |
+| 0.77 | `__mem_cgroup_charge` | kernel |
+| 0.69 | `ext4_mpage_readpages` | kernel |
+
+CPU split at T=16: **user 4.5 ms, sys 188 ms** — frankenfs's *userspace* code is nearly free;
+what it costs is the **kernel work its allocation pattern provokes**.
+
+**New #1 frame owner: the anonymous-page alloc/fault/zero cluster = 28.91% of cycles**
+(`clear_page_erms` + `asm_exc_page_fault` + `rmqueue_bulk` + `lru_gen_add_folio` +
+`do_anonymous_page` + `mod_memcg_lruvec_state` + `zap_present_ptes` + `get_page_from_freelist` +
+`__alloc_frozen_pages` + `__mem_cgroup_charge` + `get_mem_cgroup_from_mm` + …). Measured
+**17,459 page faults (17,385 minor) for a read of 32,768 destination pages**: frankenfs allocates
+a fresh destination buffer per chunk, so pages are faulted, zero-filled, and then immediately
+overwritten by `_copy_to_iter`. Filed as `bd-zvn7r`.
+
+### Recorded so nobody chases it again: per-thread fd cuts insertions 4.2x and buys NO wall time
+
+At the production 128 KiB chunk, T=16, same 1,027 preads, only fd sharing differs:
+insertions **16,430 -> 3,895** (16.00 -> 3.79 per read), yet wall is **1.025x median, 7/9 paired
+reps, p=0.1797 — NOT significant**. Self-time proving the path ran: `__filemap_add_folio`
+**2.02%**, `native_queued_spin_lock_slowpath` **9.32%**, `page_cache_ra_unbounded` **0.40%**
+(T=64 profile). **Per-reader `struct file` is a CPU-efficiency change, not a latency fix.**
+
+### A proxy that failed its own validity check — no REJECT recorded
+
+I built a raw-pread proxy for the buffer-reuse lever (alloc-per-chunk vs reused per-thread buffer,
+128 KiB, T=16, shared fd, `sha256` identical). It showed reuse **slower**: 0.957x median, reuse wins
+**1/7** paired reps, p=1.0. **That result is inadmissible.** The proxy's alloc arm produced only
+**2,364 page faults** against frankenfs's **17,459** (7.4x fewer), because glibc's *dynamic* mmap
+threshold makes CPython recycle the freed 128 KiB block rather than returning it. The proxy never
+exercises the mechanism under test, so its null says nothing about frankenfs.
+
+This is the ledger-integrity rule (`5feb977`) applied to a **proxy** rather than a bench: the arm must
+reproduce the mechanism's **magnitude**, not merely its shape. Same class of error as the earlier
+proxy-chunk artifact. Buffer reuse is therefore **UNTESTED for frankenfs, not refuted** (`bd-zvn7r`).
+
+### Do not project
+
+Do **not** convert the 28.91% cycle share into a projected wall win. Projecting wall from cycle share
+was already proven invalid on this exact workload (`bd-kdmu4`: Model A/B predicted 1.12–1.85x;
+measurement was **1.00x**), because much of this cluster — like spin-wait — is CPU burned by threads
+already blocked on the device. The size of the buffer-churn lever must be **measured in-tree**.
+
+### Blocked
+
+`bd-zvn7r` and `bd-ddryj` both need a modified binary run locally under `drop_caches`.
+`RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec -- cargo build` still does not return the
+artifact. Unblock by fixing rch retrieval, or by granting one local build.
