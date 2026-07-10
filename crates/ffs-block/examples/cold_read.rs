@@ -38,6 +38,22 @@
 //! ```
 //!
 //! Box load dominates single reps (kernel arm cv≈19% at load 30); take min-of-N.
+//!
+//! ## Do NOT loop-mount the image for the kernel side of a PARALLEL comparison
+//!
+//! A loop device serializes I/O. Measured on identical physical bytes (a 1 GiB
+//! 5-extent file inside a real ext4 image on /data, `drop_caches` before every
+//! run): reading it through the loop mount is FLAT across a thread sweep —
+//! t=4/8/16/32/64 → 862/904/852/853/851 ms (~1200 MiB/s, no scaling) — while
+//! `pread`ing the same extents straight from the image file scales to 277 ms at
+//! t=32 (3692 MiB/s). That is a **3.08x loop penalty** at matched threads.
+//!
+//! Meanwhile `ffs-cli read` preads the image directly and fans out over rayon.
+//! Comparing it against a loop-mounted kernel is parallel-vs-serialized and
+//! manufactures a ~2.8x phantom win. Either put a real ext4 on a spare block
+//! device, or compare against a raw parallel `pread` floor over the same
+//! physical extents. Against that floor frankenfs is 1.68x SLOWER (466 vs 277 ms
+//! for 1 GiB) — the ext4 parse + safe-copy tax is real. See bd-q6k00.
 
 use asupersync::Cx;
 use ffs_block::{ByteDevice, FileByteDevice};
