@@ -654,7 +654,6 @@ impl BlockValidator for BtrfsSuperblockValidator {
 /// and tree-block checksum.
 #[derive(Debug, Clone, Copy)]
 pub struct BtrfsTreeBlockValidator {
-    block_size: u32,
     fsid: [u8; 16],
     csum_type: u16,
     /// Precomputed superblock block number. `validate` runs on EVERY scanned
@@ -673,7 +672,6 @@ impl BtrfsTreeBlockValidator {
             (BTRFS_SUPER_INFO_OFFSET as u64) / u64::from(block_size)
         };
         Self {
-            block_size,
             fsid,
             csum_type,
             superblock_block,
@@ -712,19 +710,23 @@ impl BlockValidator for BtrfsTreeBlockValidator {
             return BlockVerdict::Skip;
         }
 
-        let Some(expected_bytenr) = block.0.checked_mul(u64::from(self.block_size)) else {
-            return BlockVerdict::Corrupt(vec![(
-                CorruptionKind::StructuralInvariant,
-                Severity::Critical,
-                format!(
-                    "btrfs tree header invalid: expected bytenr overflow for block {block} and block_size {}",
-                    self.block_size
-                ),
-            )]);
-        };
-
+        // No `expected_bytenr`: `header.bytenr` is a btrfs **logical** address,
+        // resolved to a physical offset through the chunk tree, whereas this is a
+        // *physical* whole-image scrub that only knows `block * block_size`. The
+        // two coincide only under an identity chunk map, so comparing them flags
+        // every valid tree block on a real image (measured: a constant -8 MiB
+        // delta across independent blocks on btr_571421.img — the chunk mapping,
+        // not corruption). See bd-5vb36.
+        //
+        // Nothing is lost. The btrfs metadata checksum covers bytes `0x20..`,
+        // which includes `bytenr` at `0x30..0x38`, so a *corrupted* bytenr still
+        // fails `verify_btrfs_tree_block_checksum` below. The equality check was
+        // only ever a *placement* check, and placement is unverifiable without
+        // the chunk map. `header.validate` still enforces the map-independent
+        // structural invariants (`level <= BTRFS_MAX_LEVEL`, `nritems` fits the
+        // block).
         let mut issues = Vec::new();
-        if let Err(err) = header.validate(slice.len(), Some(expected_bytenr)) {
+        if let Err(err) = header.validate(slice.len(), None) {
             issues.push(parse_error_issue("btrfs tree header invalid", &err));
         }
         if let Err(err) = verify_btrfs_tree_block_checksum(slice, self.csum_type) {
@@ -1699,6 +1701,63 @@ mod tests {
             make_valid_btrfs_tree_block(block_size_usize, fsid, 5 * u64::from(block_size)),
         );
         dev
+    }
+
+    /// Regression (bd-5vb36): a valid tree block whose logical `bytenr` differs
+    /// from its physical offset must scrub Clean. That is the *normal* case — the
+    /// chunk tree maps logical→physical — yet the validator used to compare
+    /// `header.bytenr` against `block * block_size` and flag every such block
+    /// `StructuralInvariant`/Critical.
+    #[test]
+    fn btrfs_tree_block_valid_under_non_identity_chunk_map() {
+        let fsid = [0x55_u8; 16];
+        let dev = MemBlockDevice::new(16384, 8);
+
+        // Physical block 5, but the chunk map places it 8 MiB up in logical space
+        // (the exact shape measured on btr_571421.img).
+        let logical = 5 * 16384_u64 + 8 * 1024 * 1024;
+        dev.write(
+            BlockNumber(5),
+            make_valid_btrfs_tree_block(16384, fsid, logical),
+        );
+
+        let report = Scrubber::new(&dev, &BtrfsTreeBlockValidator::new(16384, fsid, 0))
+            .scrub_all(&test_cx())
+            .expect("scrub should succeed");
+
+        assert_eq!(
+            report.blocks_corrupt, 0,
+            "a chunk-mapped tree block is not corruption: {:?}",
+            report.findings
+        );
+    }
+
+    /// The counterpart guarantee for bd-5vb36: dropping the `bytenr` equality
+    /// check loses no detection, because the metadata checksum covers bytes
+    /// `0x20..` — which includes `bytenr` at `0x30..0x38`. A tampered `bytenr`
+    /// therefore still fails the checksum.
+    #[test]
+    fn btrfs_tree_block_corrupted_bytenr_is_caught_by_checksum() {
+        let fsid = [0x55_u8; 16];
+        let dev = MemBlockDevice::new(16384, 8);
+
+        let mut block = make_valid_btrfs_tree_block(16384, fsid, 5 * 16384);
+        block[0x30] ^= 0x01; // flip a bytenr byte AFTER the checksum was computed
+        dev.write(BlockNumber(5), block);
+
+        let report = Scrubber::new(&dev, &BtrfsTreeBlockValidator::new(16384, fsid, 0))
+            .scrub_all(&test_cx())
+            .expect("scrub should succeed");
+
+        assert_eq!(report.blocks_corrupt, 1);
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|f| f.kind == CorruptionKind::ChecksumMismatch),
+            "a tampered bytenr must still be caught by the checksum: {:?}",
+            report.findings
+        );
     }
 
     /// Regression (bd-scrub-btrfs-false-corrupt): a valid image whose free space
