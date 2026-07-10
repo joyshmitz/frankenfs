@@ -13,6 +13,29 @@ met by new profile evidence.
   produce the verdict.
 - Rejected ideas require a concrete retry predicate, not a vague "try later."
 
+## Mounted xattr coverage gap and fsync evidence correction - 2026-07-10
+
+Status: SURFACED / NO OPTIMIZATION / NO FILESYSTEM MUTATION.
+
+The new-workload audit found **zero** mounted end-to-end xattr performance
+comparisons against kernel ext4/btrfs. Four existing benchmark families measure
+internal parsing/name transforms, and one mounted test is correctness-only.
+Filed P1 `bd-mounted-xattr-workload-gap-fr6iq` for the safest next comparator: a
+preseeded read-only ext4 get/list storm with one persistent syscall loop on both
+arms, inline/external/absent and list-1/list-24 cases, at least 30 interleaved
+same-worker `release-perf` batches, `cv_pct < 5`, and byte/name parity outside
+timing. Set/remove remains excluded without explicit fixture-mutation authority.
+
+The prior fsync row's nominal **3.033x slower** signal (71.744 us versus 23.654
+us) is not a defensible current-source ratio. CV was **44.94% / 97.22%**; the
+direct `OpenFs` and host-syscall arms do not share an API/durability boundary;
+the host filesystem was not proven ext4/JBD2; and the harness duplicates sync
+work on the FrankenFS arm. The refined `hz2` attempts never reached the workload
+executable or `e2fsck`; both stopped during cold fat-LTO compile/link. Updated
+`bd-fsync-journal-latency-gap-ptp4x` with the fair retry gate: verified ext4,
+matched durability semantics, persistent same-boundary arms, >=30 interleaved
+batches, `cv_pct < 5`, and parity/durability validation outside timing.
+
 ## `bd-bhh0i` bounded Loom writer proof and evidence correction - 2026-07-10
 
 Status: WIN AS FORMAL DE-RISK / NO CUTOVER. No production filesystem path was

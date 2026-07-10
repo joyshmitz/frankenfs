@@ -74,11 +74,17 @@
 > Whole-create/crash atomicity and post-install compensation remain owner
 > cutover obligations, as do e2fsck-clean mutation fixtures.
 >
-> New workload class surfaced: write+fsync on ext4 image signaled FrankenFS
-> **3.033x slower** than same-worker kernel ext4 (71.744 us vs 23.654 us median),
-> but the row is high-CV and the refined batch+e2fsck rerun stalled twice. Filed
-> `bd-fsync-journal-latency-gap-ptp4x` to stabilize and remeasure before any
-> optimization.
+> The write+fsync row's nominal **3.033x slower** result (71.744 us vs 23.654 us)
+> is withdrawn as a fair current-source ratio: CV was **44.94% / 97.22%**, API
+> and durability boundaries were unmatched, and the refined runs stopped during
+> cold fat-LTO compile/link before the workload executable or `e2fsck` ran.
+> `bd-fsync-journal-latency-gap-ptp4x` now records the fair retry gate.
+>
+> Xattr is the clearest safe new-workload gap: **0** mounted performance
+> comparators, **4** internal microbenchmark families, and **1** mounted
+> correctness smoke. Filed P1 `bd-mounted-xattr-workload-gap-fr6iq` for a
+> read-only mounted get/list comparator with >=30 interleaved batches and
+> `cv_pct < 5`.
 
 **As of 2026-07-03 (BlackThrush).** A ~25-turn single-turn profile-and-optimize
 campaign against ext4/btrfs. This is the one-glance synthesis; the chronological
