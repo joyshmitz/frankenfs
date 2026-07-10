@@ -7,6 +7,28 @@ COVERAGE-MAP row) — this is the one substantive gap-vs-original that remains, 
 it is a correctness-critical CLI-integration effort, NOT a solo single-turn
 per-crate lever.
 
+> **UPDATE 2026-07-09 (BlackThrush / cc_ffs): gap (2) below — the false
+> positives — is FIXED and needs no allocation gate.** This doc assumed the
+> enumerator was required for *both* halves. It is not. Three independent
+> false-positive classes were root-caused and removed without any allocation map
+> (commits `b2db6d0e`, `fdfba7b2`, `af469da7`):
+>
+> 1. the blind whole-image `ZeroCheckValidator` (removed from both validator
+>    sets — free space is legitimately zero, and a zeroed *superblock* is still
+>    caught by the superblock validator's magic/parse check),
+> 2. `BtrfsTreeBlockValidator` comparing `header.bytenr` (a **logical**,
+>    chunk-mapped address) against the **physical** offset `block * block_size`
+>    (`bd-5vb36`),
+> 3. btrfs backup superblocks at the 64 MiB / 256 GiB mirrors being
+>    misclassified as tree blocks (they carry `fsid` at the same `0x20..0x30`).
+>
+> All 7 valid test images (5 btrfs + 2 ext4) now scrub **0 corrupt / 0 findings**,
+> and an injected single-bit flip in a live tree block is still reported
+> (`checksum_mismatch`/critical). **Only gap (1), the perf half, remains** — and
+> that is what the allocated-block enumerator below is for. Note that with the
+> zero-scan gone, the "~12.89% btrfs / ~7% ext4 zero-scan self-time" figure below
+> no longer applies; the residual free-space cost is the block **reads**.
+
 ## The gap
 
 `ffs-cli scrub` (via `Scrubber` + `CompositeValidator`) reads and validates
@@ -17,11 +39,13 @@ blocks are FREE space, which:
    running `ZeroCheckValidator` (word-wise all-zeros scan) over it. Measured
    share of scrub self-time in the free-space zero-scan alone: **~12.89% btrfs /
    ~7% ext4** (b6bbdd6f-era profiles); the free-block **reads** are a larger
-   cost on top.
-2. **Emits false positives** — `ZeroCheckValidator` flags free zeroed blocks as
-   `UnexpectedZeroes` warnings (61365/102400 ext4, 131050/131072 btrfs blocks on
-   the test images). The reference tools (`e2fsck -fn`, `btrfs scrub`) do **not**
-   report free zeroed space as corruption.
+   cost on top. *(2026-07-09: the zero-scan itself is gone — see the update
+   above. The free-block reads remain.)*
+2. ~~**Emits false positives**~~ — **FIXED 2026-07-09, no enumerator needed.**
+   `ZeroCheckValidator` flagged free zeroed blocks as `UnexpectedZeroes`
+   warnings (61365/102400 ext4, 131050/131072 btrfs blocks on the test images).
+   The reference tools (`e2fsck -fn`, `btrfs scrub`) do **not** report free
+   zeroed space as corruption — and now neither do we.
 
 The reference tools scrub only **allocated** blocks. Closing this gap is both a
 perf win (skip free-space I/O + scan) and a fidelity fix (no free-block false
