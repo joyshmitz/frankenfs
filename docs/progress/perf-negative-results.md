@@ -1789,3 +1789,104 @@ It splits into two, and neither is the product lever it first appeared to be:
 Both need a build (blocked). Neither may be measured with a python proxy: the proxy must
 reproduce the mechanism's magnitude *and* survive the impossibility check, and this one failed
 the second.
+
+---
+
+## 2026-07-10 — How much of the cold-read gap is harness? MEASURED: 3.10 ms (41% of the best-config gap) (bd-zvn7r, BlackThrush/cc_ffs)
+
+**Repro metadata (required on every entry):** binary `ffs-cli`
+`sha256=03b7456d8cd6fa118bd214b2fdf8a03e56cac79e6768b7311613b039c8ae81eb`
+(`release-perf`, 55,453,584 B, built 2026-07-10 04:02:59); allocator `tikv_jemallocator`
+(`ffs-cli/src/main.rs:8`); worker = **local host** (`perf` + `drop_caches` require root, so
+no remote worker is possible for this measurement); `rch` verification worker = `vmi1149989`.
+cv per arm below. **Zero local cargo builds.**
+
+### The rebuilt harness
+
+The previous `bigbuf` floor was inadmissible (it timed **slower** than the thing it floored).
+Two bugs, both mine: `bytearray(n)` **memsets** in CPython, and the allocation sat **inside**
+the timed region. Rebuilt as `preader5.py`:
+
+* `mmap.mmap(-1, n)` instead of `bytearray(n)` — the kernel lazily zero-fills an anonymous
+  mapping, which is what jemalloc's `alloc_zeroed` actually gets; no CPython memset.
+* destination allocation and **all** chunk-list construction hoisted **out** of the timed region.
+* one persistent `ThreadPoolExecutor`, warmed before the timer — no thread spawn inside it.
+* `drop_caches` outside the timer; result consumed via an XOR checksum so nothing can be elided.
+
+Two arms, identical I/O and identical bytes, differing **only** in whether the destination is
+already faulted:
+
+* `cold_dst` — destination created fresh inside the timed region: pays the 64 MiB first-touch
+  during the parallel preads, exactly as `ffs-cli read` does with its `vec![0u8; 64 MiB]`.
+* `warm_dst` — destination created and pre-faulted before the timer: the timed region contains
+  only reads.
+
+**Validity gates, all passing:** identity (both arms return the same XOR checksum; bytes
+`sha256`-identical to the kernel mount); **magnitude** (`cold_dst` 18,090 page faults vs
+frankenfs's 17,467 — the mechanism is reproduced); **impossibility** (`cold_dst` 31.10 ms <
+ffs 35.77 ms — a floor must be faster than the thing it floors).
+
+### The measurement (9 interleaved reps, medians)
+
+| arm | median | cv |
+| --- | --- | --- |
+| ffs T=64 (as shipped) | 42.88 ms | 7.7% |
+| ffs T=16 (best config) | 35.77 ms | 8.6% |
+| floor `cold_dst` (pays 64 MiB first-touch) | 31.10 ms | 10.7% |
+| floor `warm_dst` (reads only) | 28.00 ms | 5.7% |
+| kernel dio loop T=32 | 28.30 ms | 8.8% |
+
+**Destination first-touch cost = `cold_dst` - `warm_dst` = 3.10 ms.** Measured, not projected.
+
+### The honest gap
+
+| config | reported | harness | honest | harness share of gap |
+| --- | --- | --- | --- | --- |
+| ffs T=64 (as shipped) | **1.52x** | 3.10 ms | **1.41x** | 3.10 / 14.58 = **21%** |
+| ffs T=16 (best config) | **1.26x** | 3.10 ms | **1.15x** | 3.10 / 7.47 = **41%** |
+
+**41% of the best-config cold-read gap vs kernel ext4 is harness overhead** — the first-touch of
+`ffs-cli read`'s 64 MiB staging buffer, which no kernel comparator pays. Every `ffs-cli read`
+cold number in this repo, including all of my own `bd-ddryj` baselines, carries this constant.
+
+Note also `warm_dst` (28.00 ms) ~= kernel dio loop (28.30 ms): **a raw parallel `pread` into a warm
+destination is already at kernel parity.** The residual filesystem overhead is
+35.77 - 3.10 - 28.00 = **4.67 ms**.
+
+### SCOPE OF THIS CORRECTION — do not over-claim
+
+This invalidates **my own** `ffs-cli read`-based cold numbers by 21-41% of their gap. It does
+**not** establish that `bd-kdmu4`'s headline "~2.9x slower than kernel" is an artifact: that figure
+was produced by a **different** harness ("multi-file parallel read, in-process threaded", with a
+claimed 41% pread copy tax and 27% nested-rayon coordination), which I have **not** audited. It is
+now *suspect by association* and needs its own audit against the same three validity gates — but
+calling it an artifact without measuring it would repeat exactly the error this ledger exists to
+prevent. **`bd-kdmu4` remains RESOLVED on the O_DIRECT question** (bypass measured at 1.00x); its
+2.9x premise is **unaudited**, not refuted.
+
+### Now hunt the top frame — with the harness cost attributed
+
+The 28.91% anon alloc/fault/zero cluster from the previous ranked table is **the harness**
+(`clear_page_erms` 11.81% + `asm_exc_page_fault` 5.74% + the page-allocator/memcg tail). Removing it,
+the ranked table for actual filesystem work at T=16 is:
+
+| self% | frame | note |
+| --- | --- | --- |
+| 12.28% | `_copy_to_iter` | the buffered copy — **also paid by the `warm_dst` floor**, so not a gap source |
+| 9.32% | `native_queued_spin_lock_slowpath` | residual `xa_lock` (42.27% at T=64; the fan-out cap already removed most) |
+| 1.13% | `crossbeam_deque::Stealer::steal` | rayon work-stealing |
+| 0.69% | `ext4_mpage_readpages` | kernel ext4 readahead |
+
+`_copy_to_iter` is present in both ffs and the floor, so it cannot explain the 4.67 ms residual.
+The residual is frankenfs's own userspace work (user CPU at T=16 is **4.5 ms** — the same order),
+which the current profile cannot resolve further because `perf` attributes it below the 0.1% cut.
+
+**Next step requires a build**: fix `STREAM_CHUNK` (or pre-fault the staging buffer outside the
+timed region) so `ffs-cli read` measures only filesystem work, then re-profile. Until then the
+residual 4.67 ms is real but unattributed. Tracked in `bd-zvn7r`(a).
+
+### Retry predicate
+
+Do not re-derive the cold-read mechanism (`xa_lock`, folio insertions, readahead, granularity,
+O_DIRECT) — all closed. Do not trust any `ffs-cli read` cold ratio that has not subtracted the
+3.10 ms harness constant. Do not project wall time from a cycle share.
