@@ -395,14 +395,14 @@ fn zlib_blob(payload: &[u8]) -> Vec<u8> {
     enc.finish().expect("zlib finish")
 }
 
-// Fresh `ZlibDecoder` per blob — exactly what production `btrfs_decompress` does.
-fn zlib_fresh(blobs: &[Vec<u8>]) -> usize {
+// Fresh `ZlibDecoder` per blob — exactly what production zlib decode does.
+fn zlib_fresh(blobs: &[Vec<u8>], ulen: usize) -> usize {
     use flate2::read::ZlibDecoder;
     use std::io::Read;
     blobs
         .iter()
         .map(|blob| {
-            let mut out = Vec::with_capacity(RAM);
+            let mut out = Vec::with_capacity(ulen);
             ZlibDecoder::new(blob.as_slice())
                 .read_to_end(&mut out)
                 .expect("fresh zlib decode");
@@ -412,8 +412,8 @@ fn zlib_fresh(blobs: &[Vec<u8>]) -> usize {
 }
 
 // Reused thread-local `Decompress`, reset per blob — the zstd optimization applied
-// to zlib. `decompress_vec` fills `out` up to its `RAM` capacity in one Finish.
-fn zlib_reused(blobs: &[Vec<u8>]) -> usize {
+// to zlib. `decompress_vec` fills `out` up to its capacity in one Finish.
+fn zlib_reused(blobs: &[Vec<u8>], ulen: usize) -> usize {
     use flate2::FlushDecompress;
     blobs
         .iter()
@@ -422,7 +422,7 @@ fn zlib_reused(blobs: &[Vec<u8>]) -> usize {
                 let mut slot = slot.borrow_mut();
                 let d = slot.get_or_insert_with(|| flate2::Decompress::new(true));
                 d.reset(true);
-                let mut out = Vec::with_capacity(RAM);
+                let mut out = Vec::with_capacity(ulen);
                 d.decompress_vec(blob, &mut out, FlushDecompress::Finish)
                     .expect("reused zlib decode");
                 out.len()
@@ -432,19 +432,31 @@ fn zlib_reused(blobs: &[Vec<u8>]) -> usize {
 }
 
 fn bench_zlib_reuse(c: &mut Criterion) {
-    if !should_build_group(&["zlib_decode_reuse", "fresh", "reused"]) {
+    if !should_build_group(&["zlib_decode_reuse", "zlib_decode_reuse_e2compr_4k"]) {
         return;
     }
-    // Moderately compressible 128 KiB payload (text-like repetition), N extents.
+    // btrfs scale: 128 KiB extents (the btrfs cap), N of them.
     let payload: Vec<u8> = (0..RAM).map(|i| b"the quick brown fox "[i % 20]).collect();
     let zblobs: Vec<Vec<u8>> = (0..N).map(|_| zlib_blob(&payload)).collect();
-    assert_eq!(zlib_fresh(&zblobs), zlib_reused(&zblobs), "zlib arms must agree");
+    assert_eq!(zlib_fresh(&zblobs, RAM), zlib_reused(&zblobs, RAM), "zlib arms must agree");
     let mut group = c.benchmark_group("zlib_decode_reuse");
-    // null control: two identical fresh arms.
-    group.bench_function("fresh_a", |b| b.iter(|| black_box(zlib_fresh(black_box(&zblobs)))));
-    group.bench_function("fresh_b", |b| b.iter(|| black_box(zlib_fresh(black_box(&zblobs)))));
-    group.bench_function("reused", |b| b.iter(|| black_box(zlib_reused(black_box(&zblobs)))));
+    group.bench_function("fresh_a", |b| b.iter(|| black_box(zlib_fresh(black_box(&zblobs), RAM))));
+    group.bench_function("fresh_b", |b| b.iter(|| black_box(zlib_fresh(black_box(&zblobs), RAM))));
+    group.bench_function("reused", |b| b.iter(|| black_box(zlib_reused(black_box(&zblobs), RAM))));
     group.finish();
+
+    // e2compr scale: 4 KiB ext4 clusters, many of them — the fresh-decoder init is a
+    // LARGER fraction of each small decode, so the reuse win is bigger here.
+    const CLUSTER: usize = 4096;
+    const CLUSTERS: usize = 128;
+    let cpay: Vec<u8> = (0..CLUSTER).map(|i| b"the quick brown fox "[i % 20]).collect();
+    let cblobs: Vec<Vec<u8>> = (0..CLUSTERS).map(|_| zlib_blob(&cpay)).collect();
+    assert_eq!(zlib_fresh(&cblobs, CLUSTER), zlib_reused(&cblobs, CLUSTER), "4k arms must agree");
+    let mut g2 = c.benchmark_group("zlib_decode_reuse_e2compr_4k");
+    g2.bench_function("fresh_a", |b| b.iter(|| black_box(zlib_fresh(black_box(&cblobs), CLUSTER))));
+    g2.bench_function("fresh_b", |b| b.iter(|| black_box(zlib_fresh(black_box(&cblobs), CLUSTER))));
+    g2.bench_function("reused", |b| b.iter(|| black_box(zlib_reused(black_box(&cblobs), CLUSTER))));
+    g2.finish();
 }
 
 criterion_group!(

@@ -104,10 +104,12 @@ const BTRFS_LZO_SECTOR_SIZE: usize = 4096;
 thread_local! {
     static BTRFS_ZSTD_DECOMPRESSOR: std::cell::RefCell<Option<zstd::bulk::Decompressor<'static>>> =
         const { std::cell::RefCell::new(None) };
-    // Per-thread reusable zlib inflate context (bd-4tw2n sibling): the zlib arm of
-    // `btrfs_decompress` otherwise allocates + zeroes a fresh ~32 KiB inflate
-    // window per extent, like the zstd arm did before its thread-local reuse.
-    static BTRFS_ZLIB_DECOMPRESSOR: std::cell::RefCell<Option<flate2::Decompress>> =
+    // Per-thread reusable zlib inflate context (bd-4tw2n sibling), shared by BOTH
+    // deflate readers — btrfs `compress=zlib` extents and ext4 e2compr gzip
+    // clusters — so the ~32 KiB inflate window is allocated + zeroed once per
+    // worker instead of once per extent/cluster (as the fresh `ZlibDecoder::new`
+    // per call did, and as the zstd arm did before its own thread-local reuse).
+    static ZLIB_INFLATE_CTX: std::cell::RefCell<Option<flate2::Decompress>> =
         const { std::cell::RefCell::new(None) };
 }
 
@@ -8677,7 +8679,7 @@ impl OpenFs {
                 // the old `ZlibDecoder::read_to_end` + validate did; a short stream
                 // still zero-pads to `ram_bytes` (sector-padded tail) the same way.
                 use flate2::FlushDecompress;
-                let out = BTRFS_ZLIB_DECOMPRESSOR.with(|slot| -> Result<Vec<u8>, FfsError> {
+                let out = ZLIB_INFLATE_CTX.with(|slot| -> Result<Vec<u8>, FfsError> {
                     let mut slot = slot.borrow_mut();
                     let decoder = slot.get_or_insert_with(|| flate2::Decompress::new(true));
                     decoder.reset(true);
@@ -14331,18 +14333,30 @@ impl OpenFs {
 
         match codec {
             E2ComprCodec::Gzip { .. } => {
-                // GZIP: raw deflate via flate2.
-                use flate2::read::ZlibDecoder;
-                use std::io::Read;
-                let mut decoder = ZlibDecoder::new(compressed);
-                let mut output = Vec::with_capacity(ulen);
-                decoder
-                    .read_to_end(&mut output)
-                    .map_err(|e| FfsError::Corruption {
-                        block: 0,
-                        detail: format!("e2compr gzip decompress failed: {e}"),
-                    })?;
-                Ok(output)
+                // GZIP: zlib-wrapped deflate via flate2. Reuse the per-thread
+                // inflate context (shared with the btrfs zlib arm) so the ~32 KiB
+                // window is allocated once per worker, not once per e2compr cluster
+                // — ext4 compresses per cluster, so this decode is per-block and the
+                // fresh-decoder init was a large fraction of each small decode.
+                // Capacity `ulen + 1` so an over-long (corrupt) stream decodes one
+                // byte past `ulen`; the caller's `decompressed.len() != ulen` check
+                // then rejects it exactly as `ZlibDecoder::read_to_end` + that check
+                // did. A short stream returns < `ulen` and the caller rejects it the
+                // same way (e2compr does NOT sector-pad, unlike btrfs).
+                use flate2::FlushDecompress;
+                ZLIB_INFLATE_CTX.with(|slot| -> Result<Vec<u8>, FfsError> {
+                    let mut slot = slot.borrow_mut();
+                    let decoder = slot.get_or_insert_with(|| flate2::Decompress::new(true));
+                    decoder.reset(true);
+                    let mut output = Vec::with_capacity(ulen.saturating_add(1));
+                    decoder
+                        .decompress_vec(compressed, &mut output, FlushDecompress::Finish)
+                        .map_err(|e| FfsError::Corruption {
+                            block: 0,
+                            detail: format!("e2compr gzip decompress failed: {e}"),
+                        })?;
+                    Ok(output)
+                })
             }
             E2ComprCodec::Lzo1x1 => {
                 // LZO1X decode via the `lzo` crate (faster than lzokay-native's
