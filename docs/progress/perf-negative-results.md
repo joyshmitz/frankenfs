@@ -1374,3 +1374,106 @@ established **only for <= 14 extents**.
 **A file with hundreds or thousands of extents was never measured. That regime is
 UNTESTED, not refuted, and is reopened as `bd-vpypn`** — which must also cover the
 random-read path, where the extent map is consulted per access rather than once.
+
+---
+
+## 2026-07-10 — Where folio insertions originate, and whether frankenfs can reduce them WITHOUT bypass (bd-ddryj / bd-kdmu4 evidence, BlackThrush/cc_ffs)
+
+Hypothesis under test (as posed): *"if bigger reads do not reduce insertions, the
+insertions are driven by the FUSE/page-cache path itself, one folio per block
+regardless of request size"* — implying the only remaining lever is `O_DIRECT` or an
+mmap-backed `ByteDevice`, i.e. the audited-unsafe policy change.
+
+**Both halves of that hypothesis are false.** Measured on the prebuilt `release-perf`
+binary (no rebuild), `drop_caches=3` per run, 128 MiB / 2 extents.
+
+Two corrections of premise first: (1) **FUSE is not in this path.** `ffs-cli read`
+`pread`s the image file directly; there is no FUSE round-trip to attribute insertions
+to. (2) **Insertions are not one-per-block.** The
+`filemap:mm_filemap_add_to_page_cache` tracepoint carries an `order` field:
+
+### Folio order distribution, identical 128 KiB requests
+
+| | order-0 (4 KiB) | order-2 (16 KiB) | order-6 (256 KiB) | mean |
+| --- | --- | --- | --- | --- |
+| T=1 | 1,599 (72.8%) | 78 | **506 — covering 126 of 128 MiB** | **62.8 KiB/insert** |
+| T=64 | **28,191 (96.3%)** | 905 | 7 | **4.7 KiB/insert** |
+
+At T=1 the kernel inserts **256 KiB folios for 128 KiB reads** — the folio is *larger
+than the request*. Folio order is decoupled from request size, which is exactly why
+the granularity sweep found no lever.
+
+### Insertion origin (callchain-attributed, 100% of events)
+
+| T | origin | share | orders emitted |
+| --- | --- | --- | --- |
+| 1 | `page_cache_ra_order` | 90.2% (1,981) | ord6 x506, ord2 x78, ord0 x1,383 |
+| 1 | `page_cache_ra_unbounded` | 9.8% (215) | ord0 only |
+| 1 | `__filemap_get_folio` | 0.0% (1) | — |
+| 64 | `page_cache_ra_unbounded` | 57.6% (16,848) | **ord0 only** |
+| 64 | `page_cache_ra_order` | 42.4% (12,413) | ord0 x11,340, ord2 x905, ord4 x99 |
+| 64 | `__filemap_get_folio` | 0.0% (3) | — |
+
+**Every insertion originates in the readahead path.** There is no per-block
+`filemap_create_folio` fallback doing the work (`__filemap_get_folio` ≈ 0). Under
+concurrency the insertions *migrate* to `page_cache_ra_unbounded`, which allocates
+**only order-0 folios**, and even `page_cache_ra_order` stops choosing large orders.
+
+### Can frankenfs reduce insertions WITHOUT bypassing the page cache? YES — 8.8x
+
+Same T=8, same reads, same bytes, pure **buffered** `pread` (no `O_DIRECT`, no `mmap`);
+only fd sharing differs. `sha256` identical to the kernel mount.
+
+| | insertions | mean | large folios (order>=4) | covering |
+| --- | --- | --- | --- | --- |
+| shared fd (what `FileByteDevice` does) | 16,989 | 7.8 KiB | 477 | 44 MiB |
+| **per-thread fd** | **1,926** | **69.2 KiB** | **1,011** | **126 MiB** |
+
+Order-5 (128 KiB) folios go from 232 to **1,000**, i.e. essentially the entire file is
+inserted as large folios again. This is a **pure page-cache-resident fix**: give each
+reader its own `struct file` so its `f_ra` sees a sequential stream.
+
+**The hypothesis that insertions are irreducible without bypass is REFUTED.**
+
+Code-executed proof (ledger-integrity rule, `5feb977`): the readahead insertion path
+under test is hot and provably ran — `__filemap_add_folio` **1.04% self-time**,
+`page_cache_ra_unbounded` **0.40% self-time**; 100% of the 29,264 (T=64) / 2,197 (T=1)
+insertion events attribute by callchain to `page_cache_ra_*`; and the knob provably
+engaged (insertions moved 16,989 -> 1,926 under the arms). No arm measured dead code.
+
+### What the bypass would buy — MEASURED, not projected
+
+A projection from the insertion-count-vs-lock-wait curve was requested. **That
+projection is invalid and is not offered here.** Within a fixed thread count,
+`r(ins/MiB, MiB/s)` = +0.15 (T=16) / +0.25 (T=64): insertion count has no predictive
+power over throughput, because spin-wait is CPU burned while other threads block on the
+device — overlapped with I/O. A lock-wait-based projection would forecast a large win
+where the direct measurement shows none.
+
+Direct measurement instead (raw `pread` harness, page-aligned `mmap` buffers, per-thread
+fd, T=16, `sha256` identical to the kernel mount; **no frankenfs code changed**):
+
+| chunk | O_DIRECT | buffered, per-thread fd |
+| --- | --- | --- |
+| 4K | 419 MiB/s | **665 MiB/s** (buffered wins — bypass forfeits readahead) |
+| 256K | **4,981 MiB/s** (25.7 ms) | — |
+| 1M | 4,923 MiB/s | **5,020 MiB/s** (25.5 ms) |
+
+**Bypassing the page cache buys 0% of wall time** (25.5 ms buffered vs 25.7 ms
+`O_DIRECT`) once fds are per-thread and chunk >= 256 KiB, and it is **1.6x SLOWER at
+4 KiB**. Its only benefit is CPU: **1.86x fewer cycles** (323M -> 174M at T=8).
+
+### Owner decision, surfaced (bd-kdmu4)
+
+`O_DIRECT` / mmap-backed `ByteDevice` **cannot be justified on latency grounds.** The
+safe, `forbid(unsafe_code)`-compatible fix — per-reader `struct file` plus a bounded
+fan-out (`bd-ddryj`) — reaches **25.5 ms vs the kernel's 26.9 ms**, i.e. parity, with
+zero policy change. If the owner ever approves `bd-kdmu4`, the justification must be
+**CPU efficiency (~150M cycles saved per 128 MiB read)**, not throughput. Recommendation:
+do not approve it for latency.
+
+Retry predicate: the cold-read mechanism is now closed end-to-end. Do **not** re-test
+read granularity, readahead/`fadvise`, extent walks (<=14 extents), the copy tax,
+"reduce insertions for throughput", or O_DIRECT-for-latency. The only open work is
+`bd-ddryj` (per-reader `struct file` + bounded fan-out) and `bd-vpypn` (extent walks at
+high extent counts, never measured).
