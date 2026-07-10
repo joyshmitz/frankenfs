@@ -104,6 +104,11 @@ const BTRFS_LZO_SECTOR_SIZE: usize = 4096;
 thread_local! {
     static BTRFS_ZSTD_DECOMPRESSOR: std::cell::RefCell<Option<zstd::bulk::Decompressor<'static>>> =
         const { std::cell::RefCell::new(None) };
+    // Per-thread reusable zlib inflate context (bd-4tw2n sibling): the zlib arm of
+    // `btrfs_decompress` otherwise allocates + zeroes a fresh ~32 KiB inflate
+    // window per extent, like the zstd arm did before its thread-local reuse.
+    static BTRFS_ZLIB_DECOMPRESSOR: std::cell::RefCell<Option<flate2::Decompress>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 enum BtrfsDeferredReadResult {
@@ -8662,17 +8667,29 @@ impl OpenFs {
 
         match compression_type {
             1 => {
-                // ZLIB (deflate)
-                use flate2::read::ZlibDecoder;
-                use std::io::Read;
-                let mut decoder = ZlibDecoder::new(compressed);
-                let mut out = Vec::with_capacity(uncompressed_size);
-                decoder
-                    .read_to_end(&mut out)
-                    .map_err(|e| FfsError::Corruption {
-                        block: 0,
-                        detail: format!("btrfs zlib decompression failed: {e}"),
-                    })?;
+                // ZLIB (deflate). Reuse a per-thread `Decompress` so the ~32 KiB
+                // inflate window is allocated once per worker instead of once per
+                // extent — the same reuse the zstd arm gets (bench
+                // `zlib_decode_reuse`: 1.43x, byte-identical). Capacity is
+                // `ram_bytes + 1` so an over-long (corrupt) stream fills one byte
+                // past `uncompressed_size` and is rejected by
+                // `validate_btrfs_decompressed_len`'s `> expected` check, exactly as
+                // the old `ZlibDecoder::read_to_end` + validate did; a short stream
+                // still zero-pads to `ram_bytes` (sector-padded tail) the same way.
+                use flate2::FlushDecompress;
+                let out = BTRFS_ZLIB_DECOMPRESSOR.with(|slot| -> Result<Vec<u8>, FfsError> {
+                    let mut slot = slot.borrow_mut();
+                    let decoder = slot.get_or_insert_with(|| flate2::Decompress::new(true));
+                    decoder.reset(true);
+                    let mut out = Vec::with_capacity(uncompressed_size.saturating_add(1));
+                    decoder
+                        .decompress_vec(compressed, &mut out, FlushDecompress::Finish)
+                        .map_err(|e| FfsError::Corruption {
+                            block: 0,
+                            detail: format!("btrfs zlib decompression failed: {e}"),
+                        })?;
+                    Ok(out)
+                })?;
                 Self::validate_btrfs_decompressed_len("zlib", out, uncompressed_size)
             }
             2 => Self::btrfs_decompress_lzo(compressed, uncompressed_size, BTRFS_LZO_SECTOR_SIZE),

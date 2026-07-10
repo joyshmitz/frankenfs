@@ -374,11 +374,85 @@ fn bench_decompress_tiny_frame_scheduling(c: &mut Criterion) {
     group.finish();
 }
 
+// ── zlib decoder reuse (bd-4tw2n sibling) ──────────────────────────────────
+// `btrfs_decompress`'s ZSTD arm reuses a thread-local decoder (the tiny-frame
+// bench above proves that win), but its ZLIB arm creates a fresh
+// `flate2::read::ZlibDecoder` per extent, allocating + zeroing the ~32 KiB
+// inflate window every call. This isolates that per-extent init cost: fresh
+// decoder per blob vs a reused thread-local `flate2::Decompress` reset per blob.
+// Byte-identical output (same deflate stream, same inflated bytes; asserted).
+thread_local! {
+    static BENCH_ZLIB_DECOMPRESSOR: RefCell<Option<flate2::Decompress>> =
+        const { RefCell::new(None) };
+}
+
+fn zlib_blob(payload: &[u8]) -> Vec<u8> {
+    use flate2::Compression;
+    use flate2::write::ZlibEncoder;
+    use std::io::Write;
+    let mut enc = ZlibEncoder::new(Vec::new(), Compression::default());
+    enc.write_all(payload).expect("zlib encode");
+    enc.finish().expect("zlib finish")
+}
+
+// Fresh `ZlibDecoder` per blob — exactly what production `btrfs_decompress` does.
+fn zlib_fresh(blobs: &[Vec<u8>]) -> usize {
+    use flate2::read::ZlibDecoder;
+    use std::io::Read;
+    blobs
+        .iter()
+        .map(|blob| {
+            let mut out = Vec::with_capacity(RAM);
+            ZlibDecoder::new(blob.as_slice())
+                .read_to_end(&mut out)
+                .expect("fresh zlib decode");
+            out.len()
+        })
+        .sum()
+}
+
+// Reused thread-local `Decompress`, reset per blob — the zstd optimization applied
+// to zlib. `decompress_vec` fills `out` up to its `RAM` capacity in one Finish.
+fn zlib_reused(blobs: &[Vec<u8>]) -> usize {
+    use flate2::FlushDecompress;
+    blobs
+        .iter()
+        .map(|blob| {
+            BENCH_ZLIB_DECOMPRESSOR.with(|slot| {
+                let mut slot = slot.borrow_mut();
+                let d = slot.get_or_insert_with(|| flate2::Decompress::new(true));
+                d.reset(true);
+                let mut out = Vec::with_capacity(RAM);
+                d.decompress_vec(blob, &mut out, FlushDecompress::Finish)
+                    .expect("reused zlib decode");
+                out.len()
+            })
+        })
+        .sum()
+}
+
+fn bench_zlib_reuse(c: &mut Criterion) {
+    if !should_build_group(&["zlib_decode_reuse", "fresh", "reused"]) {
+        return;
+    }
+    // Moderately compressible 128 KiB payload (text-like repetition), N extents.
+    let payload: Vec<u8> = (0..RAM).map(|i| b"the quick brown fox "[i % 20]).collect();
+    let zblobs: Vec<Vec<u8>> = (0..N).map(|_| zlib_blob(&payload)).collect();
+    assert_eq!(zlib_fresh(&zblobs), zlib_reused(&zblobs), "zlib arms must agree");
+    let mut group = c.benchmark_group("zlib_decode_reuse");
+    // null control: two identical fresh arms.
+    group.bench_function("fresh_a", |b| b.iter(|| black_box(zlib_fresh(black_box(&zblobs)))));
+    group.bench_function("fresh_b", |b| b.iter(|| black_box(zlib_fresh(black_box(&zblobs)))));
+    group.bench_function("reused", |b| b.iter(|| black_box(zlib_reused(black_box(&zblobs)))));
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_decompress,
     bench_decompress_pool,
     bench_decompress_tiny_frames,
-    bench_decompress_tiny_frame_scheduling
+    bench_decompress_tiny_frame_scheduling,
+    bench_zlib_reuse
 );
 criterion_main!(benches);
