@@ -5212,11 +5212,28 @@ impl Ext4ImageReader {
                     return Ok(None);
                 };
 
+                let slot = remaining_depth as usize;
+
+                // Fast path (bd-vpypn): a leaf child (`remaining_depth == 1`) that
+                // is already cached. `extent_leaf_lookup` borrows the leaf in place,
+                // and the depth-0 leaf recursion never touches `cache`, so the
+                // take/store-back dance below is pure overhead here — it moves the
+                // owned `ExtentTree` (a `Vec`) out of the array and back on every
+                // block. Borrowing in place is byte-identical (same extent found)
+                // and leaves the cache slot unchanged (the store-back would restore
+                // the identical `(idx.leaf_block, header, tree)`). Measured 1.14x on
+                // the per-block cache-hit micro-op (bench `extent_leaf_search`).
+                if remaining_depth == 1
+                    && let Some((lb, _, ExtentTree::Leaf(exts))) = &cache.levels[slot]
+                    && *lb == idx.leaf_block
+                {
+                    return Self::extent_leaf_lookup(exts, logical_block);
+                }
+
                 // Take the cached child out (so `cache` is free to be borrowed
                 // mutably by the recursion, which uses a different level index),
                 // reusing it iff it is the same child block; otherwise read +
                 // parse + validate exactly as `walk_extent_tree` does.
-                let slot = remaining_depth as usize;
                 let cached = cache.levels[slot].take();
                 let (child_header, child_tree) = match cached {
                     Some((lb, h, t)) if lb == idx.leaf_block => (h, t),

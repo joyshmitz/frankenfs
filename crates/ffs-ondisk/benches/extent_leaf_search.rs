@@ -30,6 +30,33 @@ fn resolve_depth1(index: &[(u32, u32)], leaf: &[(u32, u32)], target: u32) -> Opt
     let _child = binary(index, target)?; // extent_index_choose shape
     binary(leaf, target) // extent_leaf_lookup on the cached child
 }
+
+// Models `walk_extent_tree_cached`'s depth-1 cache-HIT path. `ExtentTree` owns a
+// `Vec`, so `.take()` + store-back moves that owned enum out of the array and back
+// on every block, purely for the borrow checker (the leaf recursion never touches
+// `cache`). The lever borrows the leaf in place instead. Both are byte-identical.
+#[derive(Clone, Copy)]
+struct Hdr { magic: u16, entries: u16, max: u16, depth: u16, generation: u32 }
+#[derive(Clone)]
+enum Tree { Leaf(Vec<(u32, u32)>), #[allow(dead_code)] Index(Vec<(u32, u32)>) }
+type Slot = Option<(u64, Hdr, Tree)>;
+
+fn take_store(slot: &mut Slot, key: u64, target: u32) -> Option<usize> {
+    let cached = slot.take();
+    let (h, t) = match cached {
+        Some((lb, h, t)) if lb == key => (h, t),
+        _ => return None,
+    };
+    let r = if let Tree::Leaf(exts) = &t { binary(exts, target) } else { None };
+    *slot = Some((key, h, t));
+    r
+}
+fn borrow_in_place(slot: &Slot, key: u64, target: u32) -> Option<usize> {
+    if let Some((lb, _, Tree::Leaf(exts))) = slot {
+        if *lb == key { return binary(exts, target); }
+    }
+    None
+}
 fn bench(c: &mut Criterion) {
     // COMMON case first (e=1,2,4 with a FIRST-extent hit = linear's best case, and
     // the overwhelmingly common shape for real files), then the worst case the
@@ -78,6 +105,27 @@ fn bench(c: &mut Criterion) {
             buf.copy_from_slice(black_box(&src));
             black_box(buf[0])
         })
+    });
+    g.finish();
+
+    // The extent-cache lever: take/store (current) vs borrow-in-place (candidate)
+    // on the depth-1 cache-HIT path. leaf=256 extents. Arms proven identical.
+    let key = 42u64;
+    let hdr = Hdr { magic: 0xf30a, entries: 256, max: 256, depth: 0, generation: 0 };
+    let leaf256 = make(256);
+    let tgt = 1023u32;
+    let mut slot: Slot = Some((key, hdr, Tree::Leaf(leaf256.clone())));
+    let slot_ref: Slot = Some((key, hdr, Tree::Leaf(leaf256)));
+    assert_eq!(take_store(&mut slot, key, tgt), borrow_in_place(&slot_ref, key, tgt));
+    let mut g = c.benchmark_group("extent_cache_hit");
+    g.bench_function("take_store_a", |b| {
+        b.iter(|| black_box(take_store(black_box(&mut slot), black_box(key), black_box(tgt))))
+    });
+    g.bench_function("take_store_b", |b| {
+        b.iter(|| black_box(take_store(black_box(&mut slot), black_box(key), black_box(tgt))))
+    });
+    g.bench_function("borrow_in_place", |b| {
+        b.iter(|| black_box(borrow_in_place(black_box(&slot_ref), black_box(key), black_box(tgt))))
     });
     g.finish();
 }
