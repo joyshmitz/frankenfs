@@ -23,13 +23,29 @@ fn binary(exts: &[(u32, u32)], target: u32) -> Option<usize> {
     if target >= start && target < start + len { Some(p - 1) } else { None }
 }
 fn bench(c: &mut Criterion) {
-    for e in [4u32, 64, 256] {
+    // COMMON case first (e=1,2,4 with a FIRST-extent hit = linear's best case, and
+    // the overwhelmingly common shape for real files), then the worst case the
+    // original bench covered. `extent_leaf_lookup` runs per resolved block on EVERY
+    // read, so the common case is the hot case; the "negligible for 1-4 extents"
+    // claim in ext4.rs::extent_leaf_lookup is verified here, not assumed.
+    // Cases: (extent_count, target, label).
+    let cases: &[(u32, u32, &str)] = &[
+        (1, 1, "e1_hit0"),        // single contiguous extent — the 90%+ case
+        (2, 1, "e2_hit0"),        // first-extent hit, linear returns immediately
+        (4, 1, "e4_hit0"),        // first-extent hit
+        (4, 15, "e4_hitlast"),    // last-extent hit (linear worst case, small E)
+        (64, 255, "e64_hitlast"), // fragmented, last hit — binary's win case
+        (256, 1023, "e256_hitlast"),
+    ];
+    for &(e, target, label) in cases {
         let exts = make(e);
-        let target = (e - 1) * 4 + 1; // in the LAST extent (linear worst case)
-        assert_eq!(linear(&exts, target), binary(&exts, target));
-        let mut g = c.benchmark_group(format!("extent_search_e{e}"));
+        assert_eq!(linear(&exts, target), binary(&exts, target), "arms must agree for {label}");
+        let mut g = c.benchmark_group(format!("extent_search_{label}"));
+        // NULL CONTROL: identical arm registered twice — its ratio is the noise
+        // floor; any linear-vs-binary gap smaller than binary-vs-binary is noise.
+        g.bench_function("binary_a", |b| b.iter(|| black_box(binary(black_box(&exts), black_box(target)))));
+        g.bench_function("binary_b", |b| b.iter(|| black_box(binary(black_box(&exts), black_box(target)))));
         g.bench_function("linear", |b| b.iter(|| black_box(linear(black_box(&exts), black_box(target)))));
-        g.bench_function("binary", |b| b.iter(|| black_box(binary(black_box(&exts), black_box(target)))));
         g.finish();
     }
 }
