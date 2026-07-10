@@ -2920,7 +2920,9 @@ mod coordination_tests {
             vec![1, 2]
         );
         // All fresh (no stale) -> nothing to repair.
-        assert!(select_ext4_repair_groups(flags, false, &all, &[(0, Fresh), (1, Fresh)]).is_empty());
+        assert!(
+            select_ext4_repair_groups(flags, false, &all, &[(0, Fresh), (1, Fresh)]).is_empty()
+        );
         // A clean filesystem short-circuits to empty.
         assert!(select_ext4_repair_groups(flags, true, &all, &[(0, Untracked)]).is_empty());
         // No stale, no fresh, not clean (untracked) -> conservative full set.
@@ -2971,7 +2973,10 @@ mod coordination_tests {
         let (grouped, outside) = group_btrfs_corrupt_blocks(&report, &specs);
         assert_eq!(grouped.get(&1), Some(&vec![BlockNumber(110)]));
         assert_eq!(grouped.get(&2), Some(&vec![BlockNumber(210)]));
-        assert_eq!(outside, 1, "block 300 lies outside every spec's source range");
+        assert_eq!(
+            outside, 1,
+            "block 300 lies outside every spec's source range"
+        );
         // The Warning-severity finding must not be grouped.
         assert!(!grouped.values().any(|v| v.contains(&BlockNumber(120))));
     }
@@ -3016,7 +3021,11 @@ mod coordination_tests {
         let total: u64 = parts.iter().map(|(_, width)| *width).sum();
         assert_eq!(total, 100);
         for win in parts.windows(2) {
-            assert_eq!(win[0].0.0 + win[0].1, win[1].0.0, "ranges must be contiguous");
+            assert_eq!(
+                win[0].0.0 + win[0].1,
+                win[1].0.0,
+                "ranges must be contiguous"
+            );
         }
         let last = parts.last().unwrap();
         assert_eq!(last.0.0 + last.1, 110, "must end at start + count");
