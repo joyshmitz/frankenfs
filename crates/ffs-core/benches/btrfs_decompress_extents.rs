@@ -459,12 +459,78 @@ fn bench_zlib_reuse(c: &mut Criterion) {
     g2.finish();
 }
 
+// ── write-side: zlib ENCODE reuse (e2compr_compress) ───────────────────────
+// `e2compr_compress`'s gzip arm creates a fresh `ZlibEncoder` per cluster,
+// allocating the (larger) deflate state. This probes BOTH (1) whether a reused
+// `flate2::Compress` produces BYTE-IDENTICAL output to `ZlibEncoder` — REQUIRED
+// since the compressed bytes are written to disk + checksummed — and (2) the
+// reuse speedup. If the identity assert fails, the lever is NOT shippable.
+thread_local! {
+    static BENCH_ZLIB_COMPRESSOR: RefCell<Option<flate2::Compress>> = const { RefCell::new(None) };
+}
+
+fn zlib_encode_fresh(payloads: &[Vec<u8>], level: u32) -> Vec<Vec<u8>> {
+    use flate2::Compression;
+    use flate2::write::ZlibEncoder;
+    use std::io::Write;
+    payloads
+        .iter()
+        .map(|p| {
+            let mut e = ZlibEncoder::new(Vec::new(), Compression::new(level));
+            e.write_all(p).expect("fresh zlib encode");
+            e.finish().expect("fresh zlib finish")
+        })
+        .collect()
+}
+
+fn zlib_encode_reused(payloads: &[Vec<u8>], level: u32) -> Vec<Vec<u8>> {
+    use flate2::{Compression, FlushCompress};
+    payloads
+        .iter()
+        .map(|p| {
+            BENCH_ZLIB_COMPRESSOR.with(|slot| {
+                let mut slot = slot.borrow_mut();
+                let c = slot.get_or_insert_with(|| flate2::Compress::new(Compression::new(level), true));
+                c.reset();
+                let mut out = Vec::with_capacity(p.len() + p.len() / 2 + 128);
+                c.compress_vec(p, &mut out, FlushCompress::Finish)
+                    .expect("reused zlib compress");
+                out
+            })
+        })
+        .collect()
+}
+
+fn bench_zlib_encode_reuse(c: &mut Criterion) {
+    if !should_build_group(&["zlib_encode_reuse_4k"]) {
+        return;
+    }
+    const CLUSTER: usize = 4096;
+    const CLUSTERS: usize = 128;
+    const LEVEL: u32 = 6; // flate2 default; e2compr methods map to fixed levels
+    let payloads: Vec<Vec<u8>> = (0..CLUSTERS)
+        .map(|k| (0..CLUSTER).map(|i| b"the quick brown fox "[(i + k) % 20]).collect())
+        .collect();
+    // DECISIVE: reused compressor must emit byte-identical output (written to disk).
+    assert_eq!(
+        zlib_encode_fresh(&payloads, LEVEL),
+        zlib_encode_reused(&payloads, LEVEL),
+        "reused zlib compress diverged from ZlibEncoder — NOT byte-identical, lever unshippable"
+    );
+    let mut g = c.benchmark_group("zlib_encode_reuse_4k");
+    g.bench_function("fresh_a", |b| b.iter(|| black_box(zlib_encode_fresh(black_box(&payloads), LEVEL))));
+    g.bench_function("fresh_b", |b| b.iter(|| black_box(zlib_encode_fresh(black_box(&payloads), LEVEL))));
+    g.bench_function("reused", |b| b.iter(|| black_box(zlib_encode_reused(black_box(&payloads), LEVEL))));
+    g.finish();
+}
+
 criterion_group!(
     benches,
     bench_decompress,
     bench_decompress_pool,
     bench_decompress_tiny_frames,
     bench_decompress_tiny_frame_scheduling,
-    bench_zlib_reuse
+    bench_zlib_reuse,
+    bench_zlib_encode_reuse
 );
 criterion_main!(benches);

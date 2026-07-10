@@ -111,6 +111,13 @@ thread_local! {
     // per call did, and as the zstd arm did before its own thread-local reuse).
     static ZLIB_INFLATE_CTX: std::cell::RefCell<Option<flate2::Decompress>> =
         const { std::cell::RefCell::new(None) };
+    // Per-thread reusable zlib DEFLATE context for e2compr gzip WRITES, keyed by
+    // compression level (e2compr methods map to fixed levels). Reusing it avoids
+    // allocating the deflate state (window + hash chains, larger than the inflate
+    // window) per cluster. Byte-identical to a fresh `ZlibEncoder` at the same
+    // level (bench `zlib_encode_reuse_4k` asserts it), so on-disk bytes are unchanged.
+    static ZLIB_DEFLATE_CTX: std::cell::RefCell<Option<(u32, flate2::Compress)>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 enum BtrfsDeferredReadResult {
@@ -15816,18 +15823,31 @@ impl OpenFs {
 
         match codec {
             E2ComprCodec::Gzip { level } => {
-                // GZIP: raw deflate via flate2.
-                use flate2::Compression;
-                use flate2::write::ZlibEncoder;
-                use std::io::Write;
-                let mut encoder = ZlibEncoder::new(Vec::new(), Compression::new(level));
-                encoder.write_all(data).map_err(|e| FfsError::Corruption {
-                    block: 0,
-                    detail: format!("e2compr gzip compress failed: {e}"),
-                })?;
-                encoder.finish().map_err(|e| FfsError::Corruption {
-                    block: 0,
-                    detail: format!("e2compr gzip compress finish failed: {e}"),
+                // GZIP: zlib-wrapped deflate via flate2. Reuse a per-thread deflate
+                // context keyed by `level` so the deflate state is allocated once
+                // per worker, not once per cluster; byte-identical to a fresh
+                // `ZlibEncoder` at the same level (bench `zlib_encode_reuse_4k`
+                // asserts it) so the on-disk bytes are unchanged. The output
+                // capacity covers deflate's worst-case expansion (a stored block
+                // adds only ~5 B/64 KiB + a few header bytes, far under `len/2`), so
+                // `Finish` always completes in one call.
+                use flate2::{Compression, FlushCompress};
+                ZLIB_DEFLATE_CTX.with(|slot| -> Result<Vec<u8>, FfsError> {
+                    let mut slot = slot.borrow_mut();
+                    if matches!(slot.as_ref(), Some((lvl, _)) if *lvl == level) {
+                        slot.as_mut().unwrap().1.reset();
+                    } else {
+                        *slot = Some((level, flate2::Compress::new(Compression::new(level), true)));
+                    }
+                    let compressor = &mut slot.as_mut().unwrap().1;
+                    let mut out = Vec::with_capacity(data.len() + data.len() / 2 + 128);
+                    compressor
+                        .compress_vec(data, &mut out, FlushCompress::Finish)
+                        .map_err(|e| FfsError::Corruption {
+                            block: 0,
+                            detail: format!("e2compr gzip compress failed: {e}"),
+                        })?;
+                    Ok(out)
                 })
             }
             E2ComprCodec::Lzo1x1 => {
