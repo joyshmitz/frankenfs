@@ -112,11 +112,13 @@ fn run_actual_commit_arm(
 ) -> (Duration, ffs_mvcc::sharded::CommitLockProfile, u64) {
     use ffs_mvcc::sharded::{CommitLockProfile, ShardedMvccStore};
     const OPS: u64 = 256;
-    let shard_count = 16_u64;
-    let store = Arc::new(ShardedMvccStore::new(shard_count as usize));
+    let shard_count = 16_usize;
+    let shard_stride = u64::try_from(shard_count).expect("benchmark shard count must fit u64");
+    let store = Arc::new(ShardedMvccStore::new(shard_count));
     let start_gate = Arc::new(Barrier::new(writers));
     let mut handles = Vec::with_capacity(writers);
     for writer in 0..writers {
+        let writer = u64::try_from(writer).expect("benchmark writer index must fit u64");
         let store = Arc::clone(&store);
         let start_gate = Arc::clone(&start_gate);
         handles.push(thread::spawn(move || {
@@ -124,8 +126,7 @@ fn run_actual_commit_arm(
             start_gate.wait();
             let start = Instant::now();
             for i in 0..OPS {
-                let block =
-                    BlockNumber(i.saturating_mul(shard_count).saturating_add(writer as u64));
+                let block = BlockNumber(i.saturating_mul(shard_stride).saturating_add(writer));
                 let mut txn = store.begin();
                 txn.stage_write(block, vec![0xAB; 4096]);
                 if profiled {
@@ -2162,11 +2163,11 @@ fn bench_bhh0i_actual_contention(c: &mut Criterion) {
                         let start = Instant::now();
                         for round in 0..rounds {
                             if round % 2 == 0 {
-                                let _ = run_actual_commit_arm(writers, false);
-                                let _ = run_actual_commit_arm(writers, true);
+                                black_box(run_actual_commit_arm(black_box(writers), false));
+                                black_box(run_actual_commit_arm(black_box(writers), true));
                             } else {
-                                let _ = run_actual_commit_arm(writers, true);
-                                let _ = run_actual_commit_arm(writers, false);
+                                black_box(run_actual_commit_arm(black_box(writers), true));
+                                black_box(run_actual_commit_arm(black_box(writers), false));
                             }
                         }
                         let elapsed = start.elapsed();
