@@ -1685,3 +1685,107 @@ already blocked on the device. The size of the buffer-churn lever must be **meas
 `bd-zvn7r` and `bd-ddryj` both need a modified binary run locally under `drop_caches`.
 `RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec -- cargo build` still does not return the
 artifact. Unblock by fixing rch retrieval, or by granting one local build.
+
+---
+
+## 2026-07-10 — The new #1 frame is in the BENCHMARK HARNESS, not the filesystem (bd-zvn7r re-scoped, BlackThrush/cc_ffs)
+
+**Reproducibility metadata (new ledger rule):** binary `ffs-cli`
+`sha256=03b7456d8cd6fa118bd214b2fdf8a03e56cac79e6768b7311613b039c8ae81eb`
+(55,453,584 bytes, `release-perf`, built 2026-07-10 04:02:59); allocator
+`tikv_jemallocator` (`ffs-cli/src/main.rs:8`); worker = local host (perf/`drop_caches`
+need root, so no remote worker); `rch` verification worker = `hz1`. cv per arm below.
+Zero local cargo builds.
+
+### Naming the frame, with self-time
+
+From the T=16 profile (`perf record -F 4999 -e cycles`, prebuilt binary above):
+
+| self% | frame |
+| --- | --- |
+| 12.28% | `_copy_to_iter` |
+| **11.81%** | **`clear_page_erms`** |
+| 9.32% | `native_queued_spin_lock_slowpath` |
+| 5.74% | `asm_exc_page_fault` |
+| 2.19% | `rmqueue_bulk` |
+| 1.57% | `do_anonymous_page` |
+| 1.13% | `zap_present_ptes` |
+| 0.94% | `get_page_from_freelist` |
+| 0.80% | `__alloc_frozen_pages_noprof` |
+| 0.77% | `__mem_cgroup_charge` |
+
+**Anon-page alloc/fault/zero cluster = 28.91% of cycles.**
+
+### Where it comes from — traced to an exact line, and it is NOT the FS engine
+
+`ffs-cli read` streams the file in `STREAM_CHUNK = 64 MiB` slices through **one reused
+`vec![0_u8; 64 MiB]`** (`crates/ffs-cli/src/main.rs:2403-2407`; the reuse itself was an
+earlier fix, `bd-2x68s`). First-touching that buffer faults **16,384 pages**, each of which
+the kernel must `clear_page_erms` before the read overwrites it.
+
+Numerically confirmed on the real binary:
+
+| run | page-faults |
+| --- | --- |
+| `ffs read /small.bin` (4 KiB file) | 1,008 (process baseline) |
+| `ffs read /big.bin` (128 MiB file) | 17,474 |
+| difference | **16,466 ≈ 16,384 = 64 MiB / 4 KiB** |
+
+A *per-chunk* destination would have faulted 32,768 pages (128 MiB). It faults 16,384 — the
+64 MiB buffer, once, reused for the second half. And `ffs-block::read_exact_at` already
+avoids a staging buffer for large reads (`lib.rs:573-592`), so the engine is not the source.
+
+**Consequence: this frame belongs to the CLI harness, not to the filesystem.** A FUSE mount
+serving 128 KiB reads never allocates a 64 MiB destination. Optimising it would optimise the
+benchmark, not the product.
+
+### ⚠️ Self-correction: my own baseline is contaminated by this
+
+Last section attributed "+6.47 ms frankenfs-attributable, 94% of the residual". That
+over-attributes. The floor arm preaded into a **128 KiB** per-chunk buffer (~2 MiB of anon
+memory touched, glibc-recycled: **2,338 faults**), while ffs first-touches **64 MiB**
+(17,474 faults). The kernel comparator never pays that cost. **The engine-only gap is
+therefore smaller than 6.47 ms and is currently UNMEASURED.**
+
+The headline gaps (ffs T=64 **1.54x**, T=16 **1.25x** vs kernel) carry the same contamination:
+they include the CLI's 64 MiB first-touch, which the kernel arm does not perform.
+
+### A floor arm that failed the impossibility check — inadmissible, no REJECT recorded
+
+I rebuilt the floor with frankenfs's real destination policy (one reused 64 MiB buffer,
+`preader4.py bigbuf`, `sha256` identical to the kernel mount). It **reproduced the mechanism**:
+17,593 faults vs frankenfs's 17,471. But as a *timing* arm it is invalid:
+
+| arm | median (7 interleaved reps) | cv |
+| --- | --- | --- |
+| ffs T=16 | 35.57 ms | 12.2% |
+| floor bigbuf (64 MiB dest) | **65.90 ms** | 16.0% |
+| floor smallbuf (128 KiB dest) | 30.60 ms | 26.6% |
+| kernel dio loop T=32 | 27.50 ms | 10.0% |
+
+**A floor cannot be slower than the thing it floors** (frankenfs does strictly more work than a
+raw `pread` of the same extents). The `bigbuf` arm's 65.90 ms is python overhead — per-chunk
+`memoryview` slicing, window recomputation, GIL — not I/O. Its implied "+35.30 ms destination
+policy cost" is therefore **discarded, not recorded**. This is the same impossibility check that
+originally caught the loop-device artifact in `bd-q6k00` ("frankenfs faster than the raw-device
+floor, which is physically impossible").
+
+Fault count valid; wall time invalid. **The wall cost of the 64 MiB first-touch remains
+unmeasured**, and may not be projected from the 28.91% cycle share — that projection method was
+already falsified on this workload (`bd-kdmu4`: predicted 1.12-1.85x, measured 1.00x).
+
+### Re-scope of bd-zvn7r
+
+It splits into two, and neither is the product lever it first appeared to be:
+
+1. **Measurement hygiene (harness).** `STREAM_CHUNK = 64 MiB` makes every `ffs-cli read`
+   benchmark pay a 64 MiB anon first-touch that no kernel comparator pays. Either shrink it,
+   pre-fault the buffer outside the timed region, or subtract it. Until then **every
+   `ffs-cli read` cold number is inflated by an unmeasured constant.**
+2. **The real question, still open.** Does the *engine* (`OpenFs::read_into`, the rayon chunk
+   jobs, `ffs-block`) allocate per-chunk destinations on the **FUSE** path? Unknown. It must be
+   profiled through the FUSE mount, not through `ffs-cli read`.
+
+Both need a build (blocked). Neither may be measured with a python proxy: the proxy must
+reproduce the mechanism's magnitude *and* survive the impossibility check, and this one failed
+the second.
