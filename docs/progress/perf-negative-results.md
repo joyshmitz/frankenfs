@@ -2045,3 +2045,42 @@ destination policy); "new #1 frame = anon churn 28.91%" (that cluster is the har
 
 No further single-file cold-read lever exists: at 1.15x of a direct-I/O kernel mount with the raw
 floor at 0.99x, the residual is inherent copy + userspace work.
+
+---
+
+## 2026-07-10 — bd-bhh0i de-risk: INDEPENDENT VERIFICATION of cod's safety proof (no collision, BlackThrush/cc_ffs)
+
+cod (`cod_ffs`) owns `bd-bhh0i` and is usage-walled, but its work is active and recent
+(loom model `da92afd7`, contention instrumentation `ef7073b8` / `52730e52`, all today).
+The three de-risk deliverables the owner named already exist as cod's artifacts:
+
+1. **Lock-hold histograms at 1/2/4/8 threads** — `crates/ffs-core/benches/bd_bhh0i_contention.rs`
+   (records wait/hold/alloc-ns distributions; the 8t p99 figures are already in the ledger:
+   global alloc 176.341 µs, disjoint group 0.290 µs, synthetic publish 127.449 µs).
+2. **Loom model proven deadlock-free + linearizable** —
+   `crates/ffs-core/tests/bd_bhh0i_lock_decomposition_model.rs`.
+3. **Incremental plan** — `docs/bd-bhh0i-parallel-create-plan.md`.
+
+Rather than duplicate active peer work (which would collide when cod returns), I did the one
+useful non-colliding thing: **independently ran cod's loom safety proof** to confirm it holds.
+`RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec -- cargo test -p ffs-core --test
+bd_bhh0i_lock_decomposition_model` on remote `vmi1227854` — **7/7 passed** (6.43 s):
+
+* `disjoint_group_commits_are_deadlock_free_and_linearizable`
+* `same_group_commits_serialize_and_replay_linearly`
+* `opposing_multi_group_requests_normalize_to_one_lock_order`
+* `disjoint_groups_with_cross_mapped_shards_normalize_both_lock_orders`
+* `installed_unpublished_versions_are_hidden_until_the_prefix_is_complete`
+* `post_publication_prune_preserves_registered_snapshot_visibility`
+* `failure_before_install_leaves_no_allocator_or_mvcc_effect`
+
+The model checks exactly the properties the owner asked for: deadlock-freedom, linearizability
+(commit order respects every non-overlap edge and replays against a sequential bitmap allocator),
+lock-order normalization (opposing multi-group requests reduce to one order), and the visibility
+invariant (installed-but-unpublished versions stay hidden until `completed_prefix` publishes).
+
+**Verdict: bd-bhh0i's safety substrate is de-risked and the proof is reproducible.** No new
+artifact was written and no cod file was touched — the deliverables exist, are high quality, and
+now carry an independent green run from a second agent. The remaining `bd-bhh0i` work (the actual
+lock-decomposition cutover) stays with cod, is FS-mutating, and is explicitly out of scope here
+(no cutover, no FS mutation beyond fixtures). I did not start it.
