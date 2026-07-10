@@ -16,6 +16,28 @@
 //! 1024), optionally split across `threads` contiguous ranges (default 1, to
 //! mirror the parallel chunk read of the real path). Prints elapsed + MiB/s and
 //! a checksum byte so the read cannot be optimized away.
+//!
+//! ## Do NOT use `cat` as the kernel baseline (2026-07-09)
+//!
+//! On this box `cat` is an alias for `bat`, and `/usr/bin/cat` is uutils
+//! coreutils — **both issue 832-byte `read()` calls**, so they measure syscall
+//! overhead, not the kernel's cold read path. Measured on an 800 MiB dense
+//! fixture on /data ext4 with `drop_caches=3` before every run: `cat` 2932 ms
+//! (273 MiB/s) versus 513 ms (1558 MiB/s) for a plain 1 MiB-read loop over the
+//! same file. Any "vs kernel `cat`" cold ratio taken here is off by ~6x.
+//!
+//! Use a pure read loop at the SAME chunk size instead — no output write, so it
+//! is apples-to-apples with this harness (`dd ... of=/dev/null` also pays a
+//! `write()` per block and reads ~20% slow):
+//!
+//! ```text
+//! python3 -c 'import os,sys,time
+//! fd=os.open(sys.argv[1],os.O_RDONLY); s=time.perf_counter()
+//! while os.read(fd,1<<20): pass
+//! print(f"{(time.perf_counter()-s)*1000:.1f} ms")' <path>
+//! ```
+//!
+//! Box load dominates single reps (kernel arm cv≈19% at load 30); take min-of-N.
 
 use asupersync::Cx;
 use ffs_block::{ByteDevice, FileByteDevice};
