@@ -1010,3 +1010,112 @@ after this memory win: metadata descent reuse/extent lookup (currently owned by
 `bd-xmh5g.408`), compressed input read staging with a proof that it changes the
 real mounted-image path, or a kernel-shaped streaming API that avoids whole-file
 materialization rather than merely changing the decompression buffer.
+
+---
+
+## 2026-07-10 — Cold-read WHY: ranked frame table (bd-5koeh follow-up, BlackThrush/cc_ffs)
+
+The cold-read hypothesis in `bd-5v3mh` ("frankenfs issues no readahead hints")
+is **refuted** and its lever already shipped; the three ext4 cold rows re-derived
+under a valid method all show frankenfs **slower** than kernel ext4. This section
+answers *why*, from a profile of the exact prebuilt `release-perf` binary that
+produced those numbers (no rebuild: `strip=false`, `debug="line-tables-only"`).
+
+Workload: `ffs-cli read /data/tmp/q6k00/cold_ext4.img /big.bin --discard`
+(128 MiB, 2 extents), `drop_caches=3` immediately before, `perf record -F 4999 -e cycles`.
+
+### Ranked self-time frames (>= 0.1%), default RAYON_NUM_THREADS=64
+
+| self% | frame | layer |
+| --- | --- | --- |
+| 39.07 | `native_queued_spin_lock_slowpath` | kernel — **lock contention** |
+| 6.27 | `crossbeam_deque::Stealer::steal` | user — rayon work-stealing |
+| 5.69 | `_copy_to_iter` | kernel — the actual copy |
+| 5.21 | `clear_page_erms` | kernel — zero-fill of fresh anon pages |
+| 2.59 | `crossbeam_epoch::Global::try_advance` | user — rayon epoch GC |
+| 1.84 | `entry_SYSRETQ_unsafe_stack` | kernel — syscall return |
+| 1.28 | `asm_exc_page_fault` | kernel — fault entry |
+| 1.04 | `__filemap_add_folio` | kernel — page-cache insert |
+| 0.78 | `up_read` | kernel |
+| 0.74 | `pick_task_fair` | kernel — scheduler |
+| 0.70 | `zap_present_ptes` | kernel — teardown |
+| 0.67 | `rmqueue_bulk` | kernel — page allocator |
+| 0.62 | `update_curr` | kernel — scheduler |
+| 0.59 | `_raw_spin_lock` | kernel |
+| 0.53 | `xas_find_conflict` | kernel — xarray |
+| 0.49 | `rayon_core::WorkerThread::wait_until_cold` | user |
+| 0.47 | `std::sys::sync::mutex::futex::Mutex::lock_contended` | user |
+| 0.40 | `page_cache_ra_unbounded` | kernel — readahead |
+| 0.38 | `get_page_from_freelist` | kernel — page allocator |
+| 0.35 | `xas_load` | kernel — xarray |
+| 0.34 | `lru_gen_add_folio` | kernel — LRU |
+
+### The three candidate causes, tested and ranked
+
+1. **Per-block syscall overhead — REFUTED.** `perf stat` counts **1,034**
+   `pread64` calls for 128 MiB, i.e. ~128 KiB per call (1024 data preads + ~10
+   metadata). The read path is not per-4-KiB-block. Syscall entry/exit is
+   ~1.8% of self-time.
+2. **Extent-tree walks — REFUTED.** The 128 MiB file has 2 extents; the
+   fragmented fixture has 9 and the indirect fixture has 14. If walking drove
+   the cost, tax would rise with extent count. It does not: parse+copy tax vs a
+   same-mode floor is 1.35x (2 extents), 1.15x (9 extents), 1.36x (14 extents) —
+   uncorrelated. No extent/indirect frame appears above 0.1% self-time.
+3. **Copy tax — REAL BUT MINOR.** `_copy_to_iter` is 5.69% and
+   `clear_page_erms` 5.21% (zero-filling freshly-allocated destination pages,
+   19,279 page faults). Together ~11%, not the dominant term.
+
+### Actual cause: kernel page-cache lock contention from over-parallelized buffered pread
+
+`perf record -g` resolves the contended lock unambiguously:
+
+```
+32.99%  File::read_exact_at -> __libc_pread -> __x64_sys_pread64 -> vfs_read
+        -> ext4_file_read_iter -> generic_file_read_iter -> filemap_read
+        -> filemap_get_pages (32.71%)
+           -> page_cache_sync_ra (31.62%)
+              -> page_cache_ra_unbounded -> filemap_add_folio
+                 -> __filemap_add_folio (28.34%)   [xarray xa_lock]
+```
+
+Every rayon worker preads the **same inode**, so all 64 threads serialize
+inserting folios into that one `address_space` xarray. Cold read converts I/O
+parallelism into lock contention. This is why the DIO-loop kernel arm is fast:
+`O_DIRECT` never touches `filemap_add_folio`.
+
+### Confirmation by prediction (byte-identical, prebuilt binary, no rebuild)
+
+`RAYON_NUM_THREADS` sweep, cold, min-of-5, engine time minus 8.4 ms startup:
+
+| threads | 1 | 2 | 4 | 8 | **16** | 32 | 64 (default) |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| read (ms) | 86.2 | 63.3 | 40.4 | 32.0 | **30.1** | 32.9 | 37.0 |
+
+Contention falls exactly as predicted:
+
+| | spinlock self% | rayon steal | sys CPU |
+| --- | --- | --- | --- |
+| T=64 | 42.27% | 5.42% | 0.446 s |
+| T=16 | 10.96% | 1.26% | 0.158 s |
+
+Paired interleaved A/B (7 reps): T=16 faster **7/7**, sign-test p=0.0156,
+1.24x faster; `sha256` identical to the kernel mount at both thread counts.
+Generalizes: indirect **1.44x** faster, fragmented **1.19x** faster at T=16.
+
+Effect on the kernel gap (vs kernel-best, dio loop):
+
+| fixture | T=64 | T=16 |
+| --- | --- | --- |
+| ext4 extent 128 MiB | 1.37x slower | **1.11x slower** |
+| ext4 indirect 50 MiB | 1.45x slower | **1.09x slower** |
+| ext4 fragmented 48 MiB | 1.31x slower | **1.09x slower** |
+
+**Warm reads want the same cap** (page-cache hot, min-of-5): T=4/8/16/32/64 read
+= 15.5 / 9.0 / **8.5** / 10.0 / 12.6 ms. So capping read fan-out carries no
+warm-path regression risk — the rayon default (`nproc`=64) over-parallelizes
+reads in both regimes.
+
+Retry predicate: do **not** spend further effort on readahead/`fadvise` tuning or
+on chunk-size sweeps for cold reads — both are refuted. The open lever is the
+read fan-out width itself (`into_par_iter` at `crates/ffs-core/src/lib.rs:10108`,
+`12677`, `12819`, all on the global rayon pool). Tracked in `bd-ddryj`.
