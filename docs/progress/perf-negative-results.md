@@ -2132,3 +2132,58 @@ owns new workload classes; starting them mid-wall would collide). Cross-cutting 
 `bd-b9dug`: **all of them must be benchmarked on the v3+PGO production binary**, not the baseline plain
 build, or their absolute vs-kernel numbers will carry the same ISA upper-bound this ledger just found in
 the cold-read numbers.
+
+---
+
+## 2026-07-10 — ISA verdict (plain), SWAR-widen correction, and the workload-class gap matrix (bd-b9dug, BlackThrush/cc_ffs)
+
+### ISA verdict, plainly
+
+**On the workers, frankenfs emits BASELINE x86-64 (SSE2) for its own code.** Definitive: `RUSTFLAGS`
+unset, no `target-cpu`/`target-feature` in any config, so a plain `cargo build --profile release-perf`
+targets the default baseline. Corroborating instruction counts in the benchmark binary
+(`sha256=03b7456d…81eb`): `pdep`/`pext`/`blsr` = **0** (BMI2, no baseline fallback), `bsr` 922 vs `lzcnt`
+34 — consistent with baseline codegen. The AVX2/AVX-512 present is runtime-dispatched dep code
+(crc32c/xxhash/memchr/blake3), portable and partly dead on this non-AVX512 host. The production binary
+(`build-perf.sh`) is `target-cpu=x86-64-v3` + PGO.
+
+### The SWAR-widen premise is wrong — corrected
+
+A build-widen (`target-cpu=v3`) only changes compiler **auto-emission**; it cannot turn hand-written u64
+SWAR (GPR XOR/mask/shift) into vectors. So the named SWAR paths — `extent_root_namespace` (7.14x),
+`names_eq`, symlink NUL-trim, casefold — **do not benefit from a build-fix**: they are ISA-independent by
+construction and identical on baseline and v3. Rewriting them as explicit AVX2 is a code change blocked
+by `forbid(unsafe_code)` (`std::arch` SIMD is unsafe).
+
+**Where the measured v3 uplift really lands:** `build-perf.sh` records v3 as ~8.5% fewer **create**
+instructions, ~3% **lookup** — not read. Those paths' hot loops include the allocator bitmap bit-scan
+(`ffs-alloc/src/succinct.rs:426,435` `trailing_zeros`, `count_zeros`), which v3's `tzcnt`/`lzcnt` (and
+possibly `pdep`/`pext`) accelerate over baseline `bsf`/`bsr`. That is **cod's active allocator lane**, not
+the SWAR hash paths and not the read path (v3 gives read ~0 — the read gap is copy + userspace per the
+cold-read closeout). Net: the build-widen is a real build-config decision, but its beneficiaries are the
+allocator/metadata path (coordinate with cod), not my SWAR paths.
+
+### Unbenchmarked workload classes — honest gap matrix
+
+| class | harness | status |
+| --- | --- | --- |
+| fsync / journal-commit latency | **none in ffs-cli** (fsync exists only on the FUSE path) | needs a new `FsyncBench` subcommand → **build-blocked**; beaded `bd-fsync-journal-latency-gap-ptp4x` (cod) |
+| xattr get/set/list storm | **none in ffs-cli** | needs a new subcommand → **build-blocked**; beaded `bd-mount-xattr-workload-gap-fr6iq` (cod) |
+| small-file storm (create) | `CreateBench` (exists) | single-thread create is mined; **parallel** create = `bd-bhh0i` (cod's active write lane) → collision |
+| readdir+stat storm | `Walk --no-stat` / `Walk` (exists) | **cold** readdir+stat = the withdrawn cold-read metadata-walk row (do not re-mine); **warm** CPU is mined (lookup fully dissected) |
+
+**Honest surface: the measurable-now set is empty under the active constraints** {no local build; cod owns
+the write/alloc lane; do not re-mine cold-read}. fsync and xattr — the two genuinely new classes — both
+need a new CLI harness, which needs a build. The two with harnesses overlap cod's lane or the withdrawn
+cold-read rows. This is a *build-blocked + coordination* boundary, not a lack of candidates: with one
+granted build, `FsyncBench` + `XattrBench` subcommands would unblock the two new classes cleanly (they do
+not touch the read path or the allocator).
+
+### bd-bhh0i incremental design doc — cod's, still active, not touched
+
+Re-checked this turn: `docs/bd-bhh0i-parallel-create-plan.md` still carries cod's uncommitted 59-line
+working-tree diff (actively editing while walled). It already has the incremental owner-reviewed plan with
+independently-revertible steps, per-step `e2fsck -fn` gates, crash-consistency, rollback, and the loom
+proof section. My independent **7/7** verification stands as its second-agent peer review. Editing it would
+collide and non-src edits revert within minutes — so I did not. The plan is sign-off-ready and de-risked by
+two agents; the FS-mutating cutover remains cod's.
