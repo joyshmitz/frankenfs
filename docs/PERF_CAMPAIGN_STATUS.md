@@ -54,6 +54,21 @@
 > AGENTS.md RULE 1). Not urgent today; will become a hard blocker as the swarm
 > keeps building.
 
+> ## 2026-07-10 cod_ffs addendum
+>
+> `bd-bhh0i` remains owner-gated. The safe de-risk pass added only bench/model
+> evidence: current global alloc lock 8t p99 wait **176.341 us** vs modeled
+> decomposed per-group p99 **0.290 us**, with the publish lock then becoming p99
+> **127.449 us**; bounded model **168** interleavings, **0** deadlocks,
+> `linearizable=true`. This is not a cutover proof. It strengthens the owner plan
+> and still requires real loom/shuttle plus e2fsck-clean mutation fixtures.
+>
+> New workload class surfaced: write+fsync on ext4 image signaled FrankenFS
+> **3.033x slower** than same-worker kernel ext4 (71.744 us vs 23.654 us median),
+> but the row is high-CV and the refined batch+e2fsck rerun stalled twice. Filed
+> `bd-fsync-journal-latency-gap-ptp4x` to stabilize and remeasure before any
+> optimization.
+
 **As of 2026-07-03 (BlackThrush).** A ~25-turn single-turn profile-and-optimize
 campaign against ext4/btrfs. This is the one-glance synthesis; the chronological
 detail is in `docs/NEGATIVE_EVIDENCE.md`, and the one open lever has its own plan

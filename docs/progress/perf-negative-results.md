@@ -13,6 +13,41 @@ met by new profile evidence.
   produce the verdict.
 - Rejected ideas require a concrete retry predicate, not a vague "try later."
 
+## `bd-bhh0i` safe contention de-risk + fsync workload gap signal - 2026-07-10
+
+Status: SURFACED / NO CUTOVER. This was an analysis and benchmark-harness commit
+only. It did not attempt the owner-gated parallel metadata write cutover and did
+not touch the mmap/io_uring read path.
+
+Contention characterization added `crates/ffs-core/benches/bd_bhh0i_contention.rs`.
+RCH release-perf on `hz2` measured the current global alloc lock at 8 threads:
+p95 wait `66.920 us`, p99 wait `176.341 us`, mean hold `0.423 us`. The proposed
+decomposed per-group lock model kept 8-thread p95 wait at `0.240 us` and p99 at
+`0.290 us`, but the separate publish lock then convoys at p95 `64.549 us` and p99
+`127.449 us`. Conclusion: per-group allocation removes the allocator convoy for
+disjoint groups, but an owner-approved design must also handle publication
+ordering or the convoy moves.
+
+The bench's bounded model explored `168` two-thread terminal interleavings for
+disjoint groups plus a global ordered publication lock: `deadlocks=0` and
+`linearizable=true`. This is not a loom/shuttle substitute; retry/cutover
+condition remains owner ACK plus a real loom or shuttle model and e2fsck-clean
+parallel mutation fixtures.
+
+New workload class: `fsync_latency_workload` found a same-worker RCH signal on
+`ovh-a`: FrankenFS ext4 write+fsync median `71.744 us` vs kernel ext4 `23.654 us`,
+or `3.033x` slower. The raw per-op CV was high (`44.94%` vs `97.22%`), so this is
+not a final keep-gate result. Refined batch-median plus in-worker `e2fsck -fn`
+reruns on `hz2` stalled twice in the executable phase and were interrupted.
+Filed `bd-fsync-journal-latency-gap-ptp4x` to stabilize the harness, collect
+low-CV same-worker evidence, and profile fsync/journal internals if the gap holds.
+
+Gates: targeted rustfmt on both new benches passed; RCH `cargo check -p ffs-core
+--bench bd_bhh0i_contention` passed; RCH `cargo check -p ffs-core --bench
+fsync_latency_workload` passed before refinement; local `cargo check -p ffs-core
+--bench fsync_latency_workload` passed after refinement. Warnings were pre-existing
+`fetch_update` deprecations and the unused htree helper.
+
 ## BOLD-VERIFY measured verdict - 2026-06-25
 
 ### `bd-xmh5g` ffs-btrfs direct COW update descent - REJECT

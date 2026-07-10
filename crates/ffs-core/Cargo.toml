@@ -167,6 +167,14 @@ name = "ext4_group_lock_layout"
 harness = false
 
 [[bench]]
+name = "bd_bhh0i_contention"
+harness = false
+
+[[bench]]
+name = "fsync_latency_workload"
+harness = false
+
+[[bench]]
 name = "ext4_indirect_read_overlap"
 harness = false
 

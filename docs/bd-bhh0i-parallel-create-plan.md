@@ -147,6 +147,66 @@ inode-table block; Part B without A is neutral (the single lock still serializes
 - A/B via the independent-process ceiling test (warm) to confirm the in-process
   result approaches the cross-process ceiling.
 
+## De-risk pass 2026-07-10 (cod_ffs, no cutover)
+
+This pass intentionally did not mutate the production metadata path. It added a
+bench-only contention probe (`bd_bhh0i_contention`) and a bounded state model so
+the owner can review the shape of the lock decomposition before any filesystem
+cutover. Release-perf run was on RCH worker `hz2`.
+
+Measured lock wait histograms, microseconds:
+
+| threads | current global alloc wait p95 | current global alloc wait p99 | decomposed group wait p95 | decomposed group wait p99 | decomposed publish wait p95 | decomposed publish wait p99 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 0.080 | 0.080 | 0.080 | 0.080 | 0.080 | 0.080 |
+| 2 | 4.190 | 21.150 | 0.200 | 0.210 | 0.500 | 0.860 |
+| 4 | 15.300 | 86.709 | 0.200 | 0.230 | 13.360 | 50.360 |
+| 8 | 66.920 | 176.341 | 0.240 | 0.290 | 64.549 | 127.449 |
+
+At 8 threads the current model has a global alloc-lock mean hold time of only
+0.423 us, but p99 wait is 176.341 us, so the pain is convoy amplification rather
+than the protected work itself. The decomposed group lock keeps the 8-thread p99
+wait at 0.290 us for disjoint groups. The separate publish lock then becomes the
+remaining serialized point: 8-thread p99 wait 127.449 us with a 0.137 us mean hold.
+That confirms the cutover cannot stop at "make alloc per-group"; the publication
+ordering gate also needs an audited design, or the convoy just moves.
+
+The bench's deterministic bounded model explored 168 two-thread terminal
+interleavings for disjoint groups plus a global ordered publication lock:
+
+- deadlocks: 0
+- final deltas linearizable: true
+- digest equality across current/decomposed simulated effects: true for 1/2/4/8
+  thread measurements
+
+This is useful owner-review evidence, not a replacement for loom or shuttle. The
+real cutover still needs a loom/shuttle model over the actual lock types,
+publication sequence, MVCC commit ordering, and inode-table RMW exposure.
+
+Incremental owner-reviewed plan, each step independently revertible:
+
+1. Keep the bench-only histograms and bounded model. Rollback: remove the bench
+   entries; no production behavior changes.
+2. Add a loom or shuttle model for proposed lock order only, with no production
+   code use. Rollback: remove the model target. Gate: model exhausts without
+   deadlock or lost update.
+3. Factor `Ext4AllocState` into immutable geometry plus per-group mutable records
+   while still protected by the existing single lock. Rollback: restore the old
+   struct shape. Gate: conformance plus create/mkdir/link/symlink/mknod tests.
+4. Add read-only contention counters around the existing single lock and publish
+   gate. Rollback: remove counters. Gate: zero behavior diff; counters disabled
+   or bench-only in normal builds.
+5. Introduce per-group locks behind an owner-disabled feature/config path, with
+   production default still using the single lock. Rollback: disable the path.
+   Gate: loom/shuttle model plus e2fsck-clean fixture mutations.
+6. Add the allocation-spread policy behind the same disabled path. Rollback:
+   disable spread. Gate: parallel create 1/2/4/8/16 curve, e2fsck -fn clean,
+   single-thread create non-regression.
+7. Only after owner ACK, flip the path for measurement. Rollback: one config
+   revert to the single-lock implementation. Gate: same-worker release-perf A/B,
+   conformance, e2fsck-clean parallel mutation fixtures, and no rename/link/mkdir
+   regressions.
+
 ## Risks
 
 - HIGH: concurrency correctness (2 prior attempts corrupted → e2fsck dirty). This is
