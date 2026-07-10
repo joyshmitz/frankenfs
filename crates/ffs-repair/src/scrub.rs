@@ -656,32 +656,53 @@ impl BlockValidator for BtrfsSuperblockValidator {
 pub struct BtrfsTreeBlockValidator {
     fsid: [u8; 16],
     csum_type: u16,
-    /// Precomputed superblock block number. `validate` runs on EVERY scanned
-    /// block and checked `BTRFS_SUPER_INFO_OFFSET / block_size` per call (a
-    /// division, uninlinable under `dyn BlockValidator`); hoisting it into
-    /// `new()` leaves the hot path a single block-number compare.
-    superblock_block: u64,
+    /// Precomputed block numbers of the superblock and its mirrors. `validate`
+    /// runs on EVERY scanned block and checked `BTRFS_SUPER_INFO_OFFSET /
+    /// block_size` per call (a division, uninlinable under `dyn
+    /// BlockValidator`); hoisting it into `new()` leaves the hot path a handful
+    /// of block-number compares.
+    superblock_blocks: [u64; BTRFS_SUPER_MIRROR_OFFSETS.len()],
 }
+
+/// Byte offsets btrfs reserves for the superblock and its mirrors.
+///
+/// A tree block never lives at one of these. The mirrors matter to a *physical*
+/// scrub because a superblock carries its `fsid` at `0x20..0x30` — exactly where
+/// a tree block does — so the cheap `fsid` pre-check in
+/// [`BtrfsTreeBlockValidator`] misclassifies a backup superblock as a tree block
+/// and then checksums the whole block instead of the 4096-byte superblock
+/// region, yielding a spurious `ChecksumMismatch` (bd-scrub-btrfs-false-corrupt).
+const BTRFS_SUPER_MIRROR_OFFSETS: [u64; 3] = [
+    BTRFS_SUPER_INFO_OFFSET as u64, // 64 KiB — primary
+    0x0400_0000,                    // 64 MiB
+    0x40_0000_0000,                 // 256 GiB
+];
 
 impl BtrfsTreeBlockValidator {
     #[must_use]
     pub fn new(block_size: u32, fsid: [u8; 16], csum_type: u16) -> Self {
-        let superblock_block = if block_size == 0 {
-            0
-        } else {
-            (BTRFS_SUPER_INFO_OFFSET as u64) / u64::from(block_size)
-        };
+        let mut superblock_blocks = [0_u64; BTRFS_SUPER_MIRROR_OFFSETS.len()];
+        if block_size != 0 {
+            for (slot, offset) in superblock_blocks.iter_mut().zip(BTRFS_SUPER_MIRROR_OFFSETS) {
+                *slot = offset / u64::from(block_size);
+            }
+        }
         Self {
             fsid,
             csum_type,
-            superblock_block,
+            superblock_blocks,
         }
     }
 }
 
 impl BlockValidator for BtrfsTreeBlockValidator {
     fn validate(&self, block: BlockNumber, data: &BlockBuf) -> BlockVerdict {
-        if block.0 == self.superblock_block {
+        // Skip the superblock and every mirror: btrfs reserves those offsets, so
+        // no tree block lives there, and a superblock's `fsid` sits at the same
+        // `0x20..0x30` a tree block's does — without this the `fsid` pre-check
+        // below misclassifies a backup superblock as a tree block and checksums
+        // the whole block instead of its 4096-byte superblock region.
+        if self.superblock_blocks.contains(&block.0) {
             return BlockVerdict::Skip;
         }
 
@@ -1701,6 +1722,35 @@ mod tests {
             make_valid_btrfs_tree_block(block_size_usize, fsid, 5 * u64::from(block_size)),
         );
         dev
+    }
+
+    /// Regression (bd-scrub-btrfs-false-corrupt): a btrfs backup superblock must
+    /// not be validated as a tree block. It carries its `fsid` at `0x20..0x30`,
+    /// exactly where a tree block does, so the cheap `fsid` pre-check used to
+    /// misclassify it and checksum the whole 16 KiB block instead of the
+    /// 4096-byte superblock region — a spurious `ChecksumMismatch` on block 4096
+    /// (the 64 MiB mirror) of every real btrfs image.
+    #[test]
+    fn btrfs_tree_block_validator_skips_superblock_mirrors() {
+        let fsid = [0x55_u8; 16];
+        let validator = BtrfsTreeBlockValidator::new(16384, fsid, 0);
+
+        // Shaped like a real backup superblock: fsid at 0x20, btrfs magic at 0x40.
+        let mut block = vec![0_u8; 16384];
+        block[0x20..0x30].copy_from_slice(&fsid);
+        block[0x40..0x48].copy_from_slice(b"_BHRfS_M");
+        let buf = BlockBuf::new(block);
+
+        // 64 KiB / 64 MiB / 256 GiB mirrors at a 16 KiB block size.
+        for mirror_block in [4_u64, 4096, 16_777_216] {
+            assert!(
+                matches!(
+                    validator.validate(BlockNumber(mirror_block), &buf),
+                    BlockVerdict::Skip
+                ),
+                "superblock mirror at block {mirror_block} must be skipped by the tree-block validator",
+            );
+        }
     }
 
     /// Regression (bd-5vb36): a valid tree block whose logical `bytenr` differs
