@@ -5747,3 +5747,49 @@ as not safely actionable in the current architecture. The next valid attempt is 
 copy micro-tune; it is an explicit project decision to carve an audited unsafe zero-copy read
 module plus a borrow-returning API and conformance plan, or a safe third-party abstraction that
 can prove the same invariants without weakening the workspace unsafe policy.
+
+## REJECT / BLOCKER — 2026-07-09 continuation — bd-zero-copy-read-path-pz64v still needs an audited-unsafe mmap/io_uring policy change (cod_ffs)
+
+User explicitly restarted the pz64v lane after the docs-only closeout above, so I
+reopened the bead, re-ran the ledger grep, and profiled the same `ffs-block` read
+surface again before considering code. The do-not-retry set remains respected:
+no S3-FIFO TLS slab, no bloom `dir_name_index` prefilter, no DenseVisited
+writeback bitset, no `write_block_owned` move-not-copy.
+
+Fresh same-worker RCH `hz2`, same benchmark binary, release-perf:
+
+| Row | Staged/current comparator | Direct/current fast path | old/new |
+| --- | ---: | ---: | ---: |
+| `file_device_read_1mib` | 917.20 us median (`staged_scratch`) | 49.163 us median (`direct`) | 18.7x |
+| `file_device_vectored_read_128k` | 10.135 us median (`staged_scratch_scatter`) | 8.0194 us median (`preadv_direct`) | 1.26x |
+
+Command:
+
+```bash
+RCH_WORKER=hz2 RCH_WORKERS=hz2 CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenfs-cod_ffs-pz64v \
+  rch exec -- cargo bench --profile release-perf -p ffs-block --bench file_device_read -- \
+  'file_device_(read_1mib|vectored_read_128k)' --warm-up-time 1 --measurement-time 3
+```
+
+Interpretation: the safe direct-read and `preadv` levers are not merely present;
+they are still the measured fast path. The residual pz64v target is not a hidden
+staging buffer inside `FileByteDevice`. A scoped mmap candidate could be valuable
+only by replacing `pread`'s kernel `copy_to_user` with userspace copying from a
+file mapping, or by returning borrowed page-cache-backed slices. Both variants
+cross the same policy boundary:
+
+| Candidate | Why it can attack pz64v | Blocking invariant |
+| --- | --- | --- |
+| mmap-backed `ByteDevice` that copies from `&mmap[offset..end]` into `dst` | Avoids per-read `pread` syscall and kernel `copy_to_user`; keeps the current `read_exact_at(dst)` API. | `memmap2` file-backed constructors, including `map_copy_read_only`, are unsafe because the underlying file can be modified. `ffs-block` inherits workspace `unsafe_code = "forbid"` and has `#![forbid(unsafe_code)]`. Sound production use needs read-only/mutation invariants, not a hidden env toggle. |
+| mmap-backed borrowed read API | Removes even the userspace copy for consumers that can borrow bytes. | Requires the unsafe map plus a new borrow-returning API through `OpenFs`/`ByteDevice`, lifetime rules for overlay/journal replay, and conformance proof for fallback/corruption paths. |
+| io_uring registered buffers / fixed reads | Can amortize submission and pin buffers once. | The Rust `io-uring` API uses raw buffer pointers / unsafe submission, and registered buffers are mainly an O_DIRECT-style map/unmap optimization; the current `IoEngine` still completes reads as owned `Vec<u8>`, so it would not remove the API copy without an API redesign. |
+
+Concrete blocker surfaced, not hand-waved: the code cutover is a policy change
+before it is a perf patch. The minimally reviewable next step is a dedicated
+`unsafe-io` design/implementation bead that explicitly relaxes `unsafe_code = "forbid"`
+for one audited module/crate, documents the mmap/io_uring safety
+invariants (read-only file identity, no truncation or writes while mapped, overlay
+fallback, journal replay behavior), and adds a conformance gate proving
+byte-identity plus destination-on-error preservation. Without that decision, any
+production patch here would either fail the workspace lint or silently weaken the
+project's safety contract. No production code changed in this continuation.
