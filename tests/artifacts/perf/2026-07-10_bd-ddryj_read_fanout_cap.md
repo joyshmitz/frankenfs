@@ -69,6 +69,39 @@ read-bound. A dedicated pool confines the change to the read path.
 16 is the optimum **on this 64-core box**. The optimum is contention-dependent and will move with core
 count and device speed. It must be re-measured on a second machine before any constant is hardcoded.
 
+## Null control + provenance (2026-07-10, decision: TAKE IT)
+
+**Null control** — the identical arm registered twice (`T=16` vs `T=16`), interleaved within each
+rep, `drop_caches` between, 9 reps, per-rep startup subtracted:
+
+| arm | median | cv |
+| --- | --- | --- |
+| A (T=16) | 35.20 ms | 3.8% |
+| B (T=16, identical to A) | 34.40 ms | 10.4% |
+| **null ratio A/B** | **1.0232x** (min-based 1.0132x) | — |
+
+No order effect: A beats B in 4/9 reps, p=1.0000. (For reference, franken_whisper's null control read
+**1.1163x at cv 29.0%**; `drop_caches` + within-rep interleaving + a quiet box tighten it to 1.02x.)
+
+**The effect** — T=64 (shipped) vs T=16 (capped), same session, same interleave:
+
+| arm | median | cv |
+| --- | --- | --- |
+| C (T=64, as shipped) | 42.57 ms | 4.6% |
+| **effect ratio C/A** | **1.2095x** (min-based 1.1897x) | — |
+
+Paired: A beats C in **9/9** reps, **p=0.0039**. **Effect exceeds the null-control deviation by ~8x**
+(0.2095 vs 0.0232). Harness-corrected against the kernel: **1.40x → 1.13x**.
+
+**Provenance:** binary `ffs-cli`
+`sha256=03b7456d8cd6fa118bd214b2fdf8a03e56cac79e6768b7311613b039c8ae81eb` (`release-perf`,
+55,453,584 B, built 2026-07-10 04:02:59); allocator `tikv_jemallocator`; self-time of the function
+under test `native_queued_spin_lock_slowpath` **42.27%** at T=64 → **9.32%** at T=16 (the mechanism the
+lever removes); worker = **local host** (`perf` + `drop_caches` require root, so no remote worker is
+possible for this measurement); `rch` verification worker `ovh-a`; cv per arm 3.8 / 10.4 / 4.6%.
+
+**Verdict: the lever is real and material.** It is the only remaining wall lever in the cold-read lane.
+
 ## Gates required before this may land
 
 1. `sha256` byte-identity per fixture (extent / indirect / fragmented) against the kernel mount.
