@@ -57,6 +57,43 @@ fn borrow_in_place(slot: &Slot, key: u64, target: u32) -> Option<usize> {
     }
     None
 }
+// Sequential resolution of a whole file (blocks 0..total in order), the read
+// engine's access pattern. `binary_seq` = one partition_point per block (current
+// ext4_resolve_block_from_mappings). `hint_seq` carries the last hit index and
+// checks the current + next extent (O(1)) before falling back to binary. Results
+// byte-identical; the hint just skips the log-E search when the next block is in
+// the same or next extent — which sequential reads always are.
+fn binary_seq(exts: &[(u32, u32)], total: u32) -> u64 {
+    let mut acc = 0u64;
+    let mut blk = 0u32;
+    while blk < total {
+        if let Some(i) = binary(exts, blk) {
+            acc = acc.wrapping_add(i as u64);
+        }
+        blk += 1;
+    }
+    acc
+}
+fn hint_seq(exts: &[(u32, u32)], total: u32) -> u64 {
+    let mut acc = 0u64;
+    let mut hint = 0usize;
+    let mut blk = 0u32;
+    while blk < total {
+        // Single-candidate hint: check ONLY the last-hit extent (the sequential
+        // common case — same extent as the previous block); on a miss (extent
+        // boundary or non-sequential) fall back to binary, which is identical.
+        let found = match exts.get(hint) {
+            Some(&(start, len)) if blk >= start && blk < start + len => Some(hint),
+            _ => binary(exts, blk),
+        };
+        if let Some(i) = found {
+            acc = acc.wrapping_add(i as u64);
+            hint = i;
+        }
+        blk += 1;
+    }
+    acc
+}
 fn bench(c: &mut Criterion) {
     // COMMON case first (e=1,2,4 with a FIRST-extent hit = linear's best case, and
     // the overwhelmingly common shape for real files), then the worst case the
@@ -128,6 +165,20 @@ fn bench(c: &mut Criterion) {
         b.iter(|| black_box(borrow_in_place(black_box(&slot_ref), black_box(key), black_box(tgt))))
     });
     g.finish();
+
+    // Sequential whole-file resolution: binary-per-block vs last-hit-hint. Files
+    // with E extents each covering 4 blocks, read block-by-block in order (the
+    // read engine's pattern). Arms proven identical over the full sweep.
+    for e in [1u32, 4, 64, 256] {
+        let exts = make(e);
+        let total = e * 4;
+        assert_eq!(binary_seq(&exts, total), hint_seq(&exts, total), "seq arms must agree e{e}");
+        let mut g = c.benchmark_group(format!("extent_resolve_seq_e{e}"));
+        g.bench_function("binary_seq_a", |b| b.iter(|| black_box(binary_seq(black_box(&exts), black_box(total)))));
+        g.bench_function("binary_seq_b", |b| b.iter(|| black_box(binary_seq(black_box(&exts), black_box(total)))));
+        g.bench_function("hint_seq", |b| b.iter(|| black_box(hint_seq(black_box(&exts), black_box(total)))));
+        g.finish();
+    }
 }
 criterion_group!(benches, bench);
 criterion_main!(benches);
