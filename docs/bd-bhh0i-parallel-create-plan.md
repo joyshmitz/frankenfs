@@ -157,6 +157,13 @@ bench-only contention probe (`bd_bhh0i_contention`) and a bounded state model so
 the owner can review the shape of the lock decomposition before any filesystem
 cutover. Release-perf run was on RCH worker `hz2`.
 
+Measurement boundary: the probe uses synthetic `parking_lot` allocation/group/
+publish mutexes and wall-clock timing around a 4 KiB `Vec` allocation. It does
+not instrument actual `CommitPublicationGate`, shard/`active_snapshots` lock
+wait/hold times, or malloc-arena contention counters. The table below is routing
+evidence, not completion of that actual-path counter requirement. Step 4 remains
+open and must use safe external profiling or audited bench-only instrumentation.
+
 Measured lock wait histograms, microseconds:
 
 | threads | current global alloc wait p95 | current global alloc wait p99 | decomposed group wait p95 | decomposed group wait p99 | decomposed publish wait p95 | decomposed publish wait p99 |

@@ -62,6 +62,9 @@
 > synthetic publish-mutex p99 **127.449 us** is routing-only and does not prove
 > the real publication gate is the next bottleneck. The old 168-interleaving
 > hand model is now labeled final-state conservation, not linearizability.
+> The whole 1/2/4/8 sweep is synthetic: it does not instrument actual MVCC locks
+> or malloc-arena contention. Those production-shaped counters remain an owner
+> de-risk obligation and require safe external or bench-only instrumentation.
 >
 > A bounded Loom suite now has seven finite projections: disjoint/same/opposing
 > group lock order, independently cross-mapped shard locks, an exact early

@@ -13,6 +13,23 @@ met by new profile evidence.
   produce the verdict.
 - Rejected ideas require a concrete retry predicate, not a vague "try later."
 
+## `bd-bhh0i` synthetic-counter scope correction - 2026-07-10
+
+Status: REJECT AS ACTUAL-PATH EVIDENCE / RETAIN AS ROUTING EVIDENCE.
+
+`bd_bhh0i_contention` does not satisfy the requested MVCC commit-lock and malloc
+arena counter sweep. It measures synthetic `parking_lot` global/group/publish
+mutexes and wall-clock latency of a 4 KiB `Vec` allocation. The 8-thread p99
+values (176.341 us global allocation lock, 0.290 us disjoint group lock, 127.449
+us synthetic publish lock) remain useful for routing, but are not measurements
+of `CommitPublicationGate`, shard/`active_snapshots` locking, or allocator-arena
+lock events.
+
+Retry condition: collect 1/2/4/8 same-worker `release-perf` wait/hold histograms
+at the actual MVCC locks and allocator contention through a safe external
+profiler or audited bench-only facility. Do not introduce unsafe production Rust
+and do not mutate a filesystem outside fixtures.
+
 ## Mounted xattr coverage gap and fsync evidence correction - 2026-07-10
 
 Status: SURFACED / NO OPTIMIZATION / NO FILESYSTEM MUTATION.
