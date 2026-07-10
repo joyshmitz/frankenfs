@@ -1,14 +1,14 @@
 # bd-bhh0i — Parallel metadata-write scaling: implementation plan
 
-**Status:** design (no code landed). Owner-lane, loom-gated, multi-turn.
-**Author:** BlackThrush. **Proven payoff:** ~7x (see Ceiling below).
+**Status:** design (no production code landed). Owner-lane, loom-gated, multi-turn.
+**Author:** BlackThrush. **Parallelism signal:** up to ~7x across independent
+filesystem states; this is an upper-bound experiment, not a cutover payoff.
 
 This consolidates ~10 turns of investigation (see the `docs/NEGATIVE_EVIDENCE.md`
 rows dated 2026-07-03, commits `dc92e926`, `5e72f0f0`, `73815b0d`) into an
-executable plan. It is the **sole substantive remaining perf lever**: every other
-single-node ext4/btrfs read/write path is at its floor (I/O, HW-crc, mature
-libzstd) or owned by a dependency (asupersync `Cx::for_request`). Do NOT re-profile
-those — the answer is always "floor or bd-bhh0i".
+executable plan for this owner-gated profiled workload. It is not a global
+performance ceiling or a reason to stop profiling: new workload classes and new
+profiles may identify structurally different primitives elsewhere.
 
 ## Symptom
 
@@ -30,9 +30,11 @@ Re-measured after the build-config wins landed, to confirm the wall persists and
 size the fix target precisely:
 
 - **ext4** create-bench 40k: 1t **100.3k/s** → 2t 77.8k → 4t 65.7k → 8t **54.6k**.
-- **btrfs** create-bench 20k: 1t **77.2k/s** → 2t 60.1k → 4t 53.4k → 8t **48.8k**
-  — btrfs negative-scales the SAME way, so the serializer is the **shared** MVCC/
-  lock write path, not fs-specific (the fix helps BOTH filesystems).
+- **btrfs** create-bench 20k: 1t **77.2k/s** → 2t 60.1k → 4t 53.4k → 8t **48.8k**.
+  The similar curve is routing evidence for a second concurrency problem, not
+  proof of the same serializer: `Ext4AllocState` and the proposed per-group
+  allocator exist only on ext4. A separate btrfs profile is required before
+  claiming this ext4 decomposition helps btrfs.
 - **Build-config did NOT move the wall**: target-cpu(~8.5%)+PGO(~10-24%) cut
   *instructions*, but the parallel curve is unchanged from `73815b0d` → pure
   contention, not instruction count. An instruction win cannot fix it.
@@ -41,32 +43,33 @@ size the fix target precisely:
   `commit` 3.8% + crc ~5% + `add_entry_reject_existing` 2.7% + `bitmap_find_free`
   1.0% ≈ **21% of create**. `RawRwLock::unlock_exclusive_slow` 0.73% (+kernel
   futex) confirms contention. Per-group sharding lets disjoint-group creates run
-  this ~21% CONCURRENTLY — that IS the ~13x upside. The crc/memmove are already
-  HW-optimal/inherent; the win is removing the *serialization*, not the work.
+  this ~21% concurrently. That identifies a mechanism; it does not predict a
+  speedup because queueing, publication, and newly exposed shared-block conflicts
+  still require measurement. The crc/memmove work itself remains in each op.
 
-## Scope — this is ALL parallel ext4 metadata WRITES, not just create
+## Scope hypothesis — parallel ext4 metadata writes, validated per operation
 
 Every ext4 mutation op takes the SAME whole-state `alloc_mutex.write()`, so they
 ALL convoy on it under parallelism (verified 2026-07-03): `ext4_create`
 (lib.rs:16881), `ext4_mknod` (17030), `ext4_mkdir` (17197), `ext4_unlink_impl`
 (19116), `ext4_link` (19364), `ext4_symlink` (19481), `ext4_fallocate` (19794),
-and rename. So the shard+spread fix below lifts the parallel ceiling for the WHOLE
-metadata-write surface, not only create — the proven ~7x create ceiling is the
-per-op measurement, and the mechanism (single-lock convoy) is identical for the
-rest. That broadens the payoff and is a reason to do the shared-infrastructure
-work once (shard the lock + spread allocation) rather than per-op.
+and rename. That shared lock makes the design relevant beyond create, but it does
+not prove the same speedup or even the same next bottleneck for every operation.
+Each operation needs an independent profile, behavior gate, and measured A/B
+before any broader performance claim.
 
-## Ceiling: PROVEN ~7x (why this is worth the effort)
+## Independent-process parallelism signal (~7x upper bound, not a ceiling)
 
-Independent-process ceiling test (safe, unsafe-free, reusable): run N single-thread
+Independent-process upper-bound test (safe, unsafe-free, reusable): run N single-thread
 `create-bench` on N **separate** image copies concurrently, aggregate vs single.
 Warm: 1 proc ~118k; **8 independent procs ~747k aggregate (~7x)**; 8 threads/1 proc
 = 65k (negative). ⚠️ WARM it first — a cold first run measured a misleading 1.7x
 (page-cache/binary warmup).
 
-Conclusion: the create **work** parallelizes ~7x. The in-process collapse is
-*entirely* in-process shared-state serialization, and frankenfs's per-op work is
-competitive with the kernel — the whole gap is recoverable.
+Conclusion: create work on independent filesystem states can parallelize about
+7x on this worker. The experiment removes shared-image coordination and therefore
+cannot prove that this decomposition realizes that speedup, that serialization
+explains the whole kernel gap, or that the gap is recoverable on one image.
 
 ## Root cause (two serializers, both must be fixed)
 
@@ -139,13 +142,13 @@ inode-table block; Part B without A is neutral (the single lock still serializes
   publication gate is an in-order Condvar barrier, sharded.rs:72 — verify no
   deadlock/lost-update under reordering).
 - `create-bench --threads {1,2,4,8,16}` scaling curve must go POSITIVE (target: 8t ≥
-  4x single-thread; stretch: approach the ~7x independent-process ceiling).
+  4x single-thread; the ~7x independent-process result is context, not a gate).
 - `create-bench 3000 → e2fsck -fn` CLEAN after parallel runs (0 orphans, 0 bitmap
   drift, correct free counts).
 - Single-threaded create must NOT regress (the ~118k baseline).
 - Full ffs-core create/mkdir/link/symlink/mknod + conformance 100/0/2.
-- A/B via the independent-process ceiling test (warm) to confirm the in-process
-  result approaches the cross-process ceiling.
+- A/B against the single-lock implementation on the same worker; retain the warm
+  independent-process result only as an upper-bound context arm.
 
 ## De-risk pass 2026-07-10 (cod_ffs, no cutover)
 
@@ -166,30 +169,101 @@ Measured lock wait histograms, microseconds:
 At 8 threads the current model has a global alloc-lock mean hold time of only
 0.423 us, but p99 wait is 176.341 us, so the pain is convoy amplification rather
 than the protected work itself. The decomposed group lock keeps the 8-thread p99
-wait at 0.290 us for disjoint groups. The separate publish lock then becomes the
-remaining serialized point: 8-thread p99 wait 127.449 us with a 0.137 us mean hold.
-That confirms the cutover cannot stop at "make alloc per-group"; the publication
-ordering gate also needs an audited design, or the convoy just moves.
+wait at 0.290 us for disjoint groups. The synthetic plain publish mutex then has
+an 8-thread p99 wait of 127.449 us with a 0.137 us mean hold. That last number is
+**routing-only**: the synthetic mutex is not `CommitPublicationGate`, and prior
+real-path evidence measured the sharded MVCC path above the create target and a
+publish-nowait candidate neutral. It therefore does not establish that the real
+publication gate is the next bottleneck. Publication still needs correctness
+modeling because it is part of the accepted lock graph, not because this probe
+proved a performance bottleneck.
 
 The bench's deterministic bounded model explored 168 two-thread terminal
 interleavings for disjoint groups plus a global ordered publication lock:
 
 - deadlocks: 0
-- final deltas linearizable: true
+- final-state conservation: true
 - digest equality across current/decomposed simulated effects: true for 1/2/4/8
   thread measurements
 
-This is useful owner-review evidence, not a replacement for loom or shuttle. The
-real cutover still needs a loom/shuttle model over the actual lock types,
-publication sequence, MVCC commit ordering, and inode-table RMW exposure.
+That hand model has no invocation/response history or reader oracle, so it does
+not prove linearizability. It remains useful owner-review evidence only.
+
+### Bounded Loom writer proof and separate safety projections
+
+`crates/ffs-core/tests/bd_bhh0i_lock_decomposition_model.rs` is the executable
+model for the accepted lean eager-commit design. Loom substitutes its own
+instrumented synchronization primitives; it does not execute the production
+`parking_lot` implementations. The abstraction/simulation map is:
+
+- outer allocator shared guard -> Loom `RwLock` read guard;
+- proposed per-group exclusive guards -> Loom `Mutex` guards, always sorted;
+- writer-side production shard `RwLock<W>` and metrics `RwLock<W>` -> Loom
+  `Mutex` guards (same exclusive ownership and rank). Group and MVCC-shard sets
+  are independently mapped and sorted, including a disjoint-group/shared-shard
+  case. Every group effect maps to at least one shard and every installed shard
+  payload is replayed against that group's sequential prefix; reader/shard
+  interaction -> Loom `RwLock` in the separate visibility projection;
+- production ready-prefix mutex/condition variable/atomic watermark -> Loom
+  `Mutex`/`Condvar`/`AtomicUsize` with the same Release publication and Acquire
+  snapshot boundary. A mutex-protected shadow removes redundant modeled atomic
+  predicate branches; each prefix advance still performs the Release store read
+  by snapshots.
+
+The suite uses three separately checked finite projections rather than
+multiplying every actor into one intractable model. They are not a formal proof
+of arbitrary composition:
+
+1. Two writers exercise `outer R -> groups(sorted) -> shards(sorted) -> metrics
+   -> sequence/install -> drop shards -> ready-prefix publish`, while retaining
+   every group guard through publication. Disjoint, same-group, opposing
+   multi-group, cross-mapped group/shard, and early-abort cases replay returned
+   allocation bits against a sequential bitmap allocator. A Loom-synchronized
+   ghost history records every invocation and response; the sequence order must
+   respect every recorded response-before-invocation edge. Every installed MVCC
+   payload must also match its explicitly mapped group effect in the sequential
+   replay. For these five enumerated configurations, exhaustive over modeled
+   schedules, this proves the allocation-result/group-state and mapped-payload
+   writer projection deadlock-free and linearizable.
+2. A fully installed/ready sequence-2 state, a sequence-1 installer, and one
+   reader force an out-of-order publication gap and prove that a snapshot
+   returns the complete newest version at or below the Acquire-loaded contiguous
+   prefix; installed-but-unpublished sequence 2 is hidden on both modeled shards.
+3. A preseeded sequence-1 version plus a sequence-2 writer and registered reader
+   exercises the real post-commit `active_snapshots -> shards` prune rank while
+   the proposed group guard remains held. The registered snapshot's version is
+   retained.
+
+The writer projection's linearization point is each
+`completed_prefix.store(sequence, Release)`. All shard versions are installed
+and shard guards dropped before that point; the operation responds only after
+its own sequence is in the completed prefix. The writer proof is bounded to two
+groups, two independently mapped shards, two writers, and one operation per
+writer. It exhausts schedules for the five enumerated configurations, not every
+possible operation within those numeric bounds. The other projections add at
+most one reader. Together they provide bounded evidence for the default sharded,
+no-JBD2 bitmap-allocation primitive, not a composed proof of whole `ext4_create`,
+multi-block crash atomicity, starvation freedom, the single-store/JBD2 path, or
+compensation after an installed write. Failure is modeled only at the exact
+early-abort point before metrics, sequence assignment, and install; it must leave
+allocator and MVCC state unchanged. Those exclusions are explicit cutover
+obligations, not inferred guarantees.
+
+Gate result: RCH worker `ovh-a` passed all **7/7** final projections in **3.40
+seconds**. `max_permutations`, `max_duration`, and `preemption_bound` are unset.
+The per-execution branch bound is 1000; there is no permutation, duration, or
+preemption sampling limit.
 
 Incremental owner-reviewed plan, each step independently revertible:
 
 1. Keep the bench-only histograms and bounded model. Rollback: remove the bench
    entries; no production behavior changes.
-2. Add a loom or shuttle model for proposed lock order only, with no production
-   code use. Rollback: remove the model target. Gate: model exhausts without
-   deadlock or lost update.
+2. Add Loom models for the proposed primitive only, with no production code use.
+   **Implemented as the bounded writer proof and separate safety projections
+   above.** Rollback: remove the test target and its dev dependency. Gate: every
+   finite projection exhausts without permutation, duration, or preemption
+   sampling limits and without deadlock, lost update, prefix-visibility
+   violation, or sequential-replay mismatch.
 3. Factor `Ext4AllocState` into immutable geometry plus per-group mutable records
    while still protected by the existing single lock. Rollback: restore the old
    struct shape. Gate: conformance plus create/mkdir/link/symlink/mknod tests.

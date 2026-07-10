@@ -13,6 +13,63 @@ met by new profile evidence.
   produce the verdict.
 - Rejected ideas require a concrete retry predicate, not a vague "try later."
 
+## `bd-bhh0i` bounded Loom writer proof and evidence correction - 2026-07-10
+
+Status: WIN AS FORMAL DE-RISK / NO CUTOVER. No production filesystem path was
+changed or mutated.
+
+The new `bd_bhh0i_lock_decomposition_model` uses seven finite Loom projections
+bounded to two groups, two independently mapped shards, two writers with one
+allocation each, and at most one reader. The modeled accepted protocol retains
+sorted allocation-group guards across the lean eager MVCC commit and
+ready-prefix publication; it does not model the ledger-rejected
+commit-after-release staging family. The checks cover disjoint and same-group
+operations, opposing multi-group requests, disjoint groups with cross-mapped
+shared shards, an exact early abort, installed-but-unpublished visibility, and
+post-publication pruning. For the five enumerated writer configurations,
+exhaustive over modeled schedules, the writer projection proves:
+
+- sorted group/shard acquisition completes without deadlock;
+- returned allocation bits replay against a sequential bitmap allocator, and a
+  Loom-synchronized ghost history shows the commit sequence preserves every
+  response-before-invocation edge;
+- independently mapped MVCC shard payloads each replay to the corresponding
+  group's exact sequential prefix;
+
+Separate safety projections establish that:
+
+- all shard versions are installed before the Release publication point and a
+  reader at the Acquire-loaded prefix sees a complete prefix only;
+- the exact early abort before metrics, sequence assignment, and install
+  consumes no sequence and changes no allocator/MVCC state;
+- `active_snapshots -> shards` pruning retains a registered snapshot version.
+
+The seven projections are deliberately separate, not a formal composition of
+writers, reader registration, and pruning. They exhaust without permutation,
+duration, or preemption sampling limits. The bounded writer proof and separate
+safety evidence cover the default sharded, no-JBD2 bitmap-allocation primitive,
+not whole `ext4_create`, crash atomicity, starvation freedom, Single/JBD2, or
+post-install compensation. RCH worker `ovh-a` passed all **7/7** final
+projections in **3.40 seconds**.
+
+Evidence correction: the earlier hand-enumerated 168-terminal model proves
+final-state conservation, not linearizability, and its output is relabeled. The
+synthetic plain publish mutex's 8-thread p99 wait of 127.449 us is routing-only;
+it cannot establish that the real `CommitPublicationGate` is the next
+bottleneck, especially because the prior real-path MVCC ceiling and neutral
+publish-nowait experiment point the other way. The 8-thread global allocation
+lock p99 wait of 176.341 us versus 0.290 us for disjoint synthetic group locks
+remains valid contention characterization.
+
+Gates: RCH workspace check passed with unrelated existing warnings; the full
+`ffs-harness` run passed **2057/2058**, with only
+`source_scope_scan_logs_workspace_hashes_and_counts` failing in the parallel
+run, then passing **1/1** in isolated RCH replay. Targeted rustfmt and
+`git diff --check` passed. UBS found **0 critical** findings in the two changed
+Rust files (225 heuristic warnings). Workspace fmt/clippy remain red on
+unrelated pre-existing formatting and warning debt; those files were not
+modified.
+
 ## `bd-bhh0i` safe contention de-risk + fsync workload gap signal - 2026-07-10
 
 Status: SURFACED / NO CUTOVER. This was an analysis and benchmark-harness commit

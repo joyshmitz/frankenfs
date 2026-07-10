@@ -5,8 +5,9 @@
 //! This bench does not change filesystem behavior. It measures synthetic
 //! critical-section wait/hold distributions for the current whole-state
 //! allocation lock shape versus a decomposed per-group allocation shape with a
-//! separate publication lock, then runs a bounded state-space model for the
-//! proposed lock order.
+//! separate synthetic publication lock. Its small hand-enumerated model proves
+//! final-state conservation only; the separate Loom test models the accepted
+//! eager MVCC publication protocol and its lock order.
 
 use parking_lot::Mutex;
 use std::hint::black_box;
@@ -344,7 +345,7 @@ fn run_model() {
     };
     explore_model(state, &mut terminal, &mut deadlocks);
     println!(
-        "bounded_model,threads=2,terminal_interleavings={terminal},deadlocks={deadlocks},linearizable=true"
+        "bounded_model,threads=2,terminal_interleavings={terminal},deadlocks={deadlocks},final_state_conserved=true,linearizable=unproven"
     );
     assert!(terminal > 0);
     assert_eq!(deadlocks, 0);

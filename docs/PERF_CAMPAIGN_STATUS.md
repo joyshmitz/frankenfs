@@ -56,12 +56,23 @@
 
 > ## 2026-07-10 cod_ffs addendum
 >
-> `bd-bhh0i` remains owner-gated. The safe de-risk pass added only bench/model
-> evidence: current global alloc lock 8t p99 wait **176.341 us** vs modeled
-> decomposed per-group p99 **0.290 us**, with the publish lock then becoming p99
-> **127.449 us**; bounded model **168** interleavings, **0** deadlocks,
-> `linearizable=true`. This is not a cutover proof. It strengthens the owner plan
-> and still requires real loom/shuttle plus e2fsck-clean mutation fixtures.
+> `bd-bhh0i` remains owner-gated. The safe de-risk pass added no production path
+> and performed no filesystem mutation. Current global alloc lock 8t p99 wait is
+> **176.341 us** versus **0.290 us** for disjoint synthetic group locks. The
+> synthetic publish-mutex p99 **127.449 us** is routing-only and does not prove
+> the real publication gate is the next bottleneck. The old 168-interleaving
+> hand model is now labeled final-state conservation, not linearizability.
+>
+> A bounded Loom suite now has seven finite projections: disjoint/same/opposing
+> group lock order, independently cross-mapped shard locks, an exact early
+> abort, hidden installed-but-unpublished versions, and
+> registered-snapshot-safe pruning. A synchronized ghost invocation/response
+> history makes the two-writer projection a bounded deadlock-free and
+> linearizable proof for five enumerated configurations, exhaustive over modeled
+> schedules rather than every possible two-group operation. Visibility and
+> pruning are separate safety projections, not a formal composition.
+> Whole-create/crash atomicity and post-install compensation remain owner
+> cutover obligations, as do e2fsck-clean mutation fixtures.
 >
 > New workload class surfaced: write+fsync on ext4 image signaled FrankenFS
 > **3.033x slower** than same-worker kernel ext4 (71.744 us vs 23.654 us median),
@@ -207,13 +218,14 @@ insert 4 + rebalance ≈ 4× create).
   zero-copy, a borrow-returning API.
 - **fsck --force**: I/O-bound (78% kernel `copy_to_user`).
 
-## The one open lever — bd-bhh0i (decision needed)
+## Owner-gated create lever — bd-bhh0i (decision needed)
 
 **Symptom:** in-process parallel create NEGATIVE-scales (1t 118k → 16t 59k). All
 ext4 metadata-write ops convoy on the single whole-state `alloc_mutex.write()`.
 
-**Proven ceiling:** ~7x (8 independent processes hit ~747k aggregate vs 118k single;
-work parallelizes, in-process serialization is the whole gap).
+**Independent-state upper bound:** ~7x (8 independent processes hit ~747k
+aggregate vs 118k single). This proves available parallelism on separate images,
+not that one shared-image cutover recovers the whole kernel gap.
 
 **Fix (two-part, both required):** shard `alloc_mutex` per group AND spread inode
 allocation so concurrent creates touch disjoint inode-table blocks (per-group
