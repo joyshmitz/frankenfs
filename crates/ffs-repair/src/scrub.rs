@@ -583,41 +583,66 @@ impl BlockValidator for Ext4SuperblockValidator {
 /// Checks parseability and superblock checksum integrity.
 #[derive(Debug, Clone, Copy)]
 pub struct BtrfsSuperblockValidator {
-    /// Precomputed superblock target block + intra-block offset. `validate`
-    /// runs on EVERY scanned block, so hoisting the `byte_offset / block_size`
-    /// division out of the per-block path (it is a compile-time-opaque method
-    /// call under `dyn BlockValidator`, so LLVM cannot lift it) into `new()`
-    /// leaves the hot path a single block-number compare.
-    target_block: u64,
+    /// Precomputed target for the primary superblock and for every mirror the
+    /// filesystem is large enough to contain. `validate` runs on EVERY scanned
+    /// block, so hoisting the `byte_offset / block_size` division out of the
+    /// per-block path (it is a compile-time-opaque method call under `dyn
+    /// BlockValidator`, so LLVM cannot lift it) into `new()` leaves the hot path
+    /// a handful of block-number compares.
+    targets: [Option<SuperblockTarget>; BTRFS_SUPER_MIRROR_OFFSETS.len()],
+}
+
+/// Where one superblock copy lives: its block, its offset inside that block, and
+/// its absolute byte offset (which a valid copy stores in its own `bytenr`).
+#[derive(Debug, Clone, Copy)]
+struct SuperblockTarget {
+    block: u64,
     offset: usize,
+    byte_offset: u64,
 }
 
 impl BtrfsSuperblockValidator {
+    /// `total_bytes` is the filesystem size taken from the superblock (NOT the
+    /// image file size). btrfs writes a superblock mirror only where the
+    /// filesystem actually spans it, so a mirror offset beyond `total_bytes` is
+    /// legitimately absent and must not be reported.
     #[must_use]
-    pub fn new(block_size: u32) -> Self {
-        let (target_block, offset) = if block_size == 0 {
-            (0, 0)
-        } else {
-            let block_size = u64::from(block_size);
-            let byte_offset = BTRFS_SUPER_INFO_OFFSET as u64;
-            (
-                byte_offset / block_size,
-                usize::try_from(byte_offset % block_size).unwrap_or(0),
-            )
-        };
-        Self {
-            target_block,
-            offset,
+    pub fn new(block_size: u32, total_bytes: u64) -> Self {
+        let mut targets = [None; BTRFS_SUPER_MIRROR_OFFSETS.len()];
+        if block_size == 0 {
+            return Self { targets };
         }
+        let block_size = u64::from(block_size);
+        for (slot, byte_offset) in targets.iter_mut().zip(BTRFS_SUPER_MIRROR_OFFSETS) {
+            // The primary is always a target: it is where the superblock was
+            // read from, so its absence is corruption, not a size artifact.
+            let is_primary = byte_offset == BTRFS_SUPER_INFO_OFFSET as u64;
+            let spanned = byte_offset
+                .checked_add(BTRFS_SUPER_INFO_SIZE as u64)
+                .is_some_and(|end| end <= total_bytes);
+            if is_primary || spanned {
+                *slot = Some(SuperblockTarget {
+                    block: byte_offset / block_size,
+                    offset: usize::try_from(byte_offset % block_size).unwrap_or(0),
+                    byte_offset,
+                });
+            }
+        }
+        Self { targets }
     }
 }
 
 impl BlockValidator for BtrfsSuperblockValidator {
     fn validate(&self, block: BlockNumber, data: &BlockBuf) -> BlockVerdict {
-        let (target_block, offset) = (self.target_block, self.offset);
-        if block.0 != target_block {
+        let Some(target) = self
+            .targets
+            .iter()
+            .flatten()
+            .find(|target| target.block == block.0)
+        else {
             return BlockVerdict::Skip;
-        }
+        };
+        let offset = target.offset;
 
         let end = offset.saturating_add(BTRFS_SUPER_INFO_SIZE);
         let Some(region) = data.as_slice().get(offset..end) else {
@@ -632,8 +657,24 @@ impl BlockValidator for BtrfsSuperblockValidator {
         };
 
         let mut issues = Vec::new();
-        if let Err(err) = BtrfsSuperblock::parse_superblock_region(region) {
-            issues.push(parse_error_issue("btrfs superblock parse failed", &err));
+        match BtrfsSuperblock::parse_superblock_region(region) {
+            Ok(superblock) => {
+                // Unlike a tree block's `bytenr` (a chunk-mapped LOGICAL address
+                // — see bd-5vb36), a superblock copy stores its own PHYSICAL byte
+                // offset, so this comparison is well-founded: the primary holds
+                // 65536, the 64 MiB mirror holds 67108864, and so on.
+                if superblock.bytenr != target.byte_offset {
+                    issues.push((
+                        CorruptionKind::StructuralInvariant,
+                        Severity::Critical,
+                        format!(
+                            "btrfs superblock bytenr {} does not match its own offset {}",
+                            superblock.bytenr, target.byte_offset
+                        ),
+                    ));
+                }
+            }
+            Err(err) => issues.push(parse_error_issue("btrfs superblock parse failed", &err)),
         }
         if let Err(err) = verify_btrfs_superblock_checksum(region) {
             issues.push(parse_error_issue("btrfs superblock checksum invalid", &err));
@@ -666,12 +707,16 @@ pub struct BtrfsTreeBlockValidator {
 
 /// Byte offsets btrfs reserves for the superblock and its mirrors.
 ///
-/// A tree block never lives at one of these. The mirrors matter to a *physical*
-/// scrub because a superblock carries its `fsid` at `0x20..0x30` — exactly where
-/// a tree block does — so the cheap `fsid` pre-check in
-/// [`BtrfsTreeBlockValidator`] misclassifies a backup superblock as a tree block
-/// and then checksums the whole block instead of the 4096-byte superblock
+/// A tree block never lives at one of these, so [`BtrfsTreeBlockValidator`]
+/// skips them all. That matters to a *physical* scrub because a superblock
+/// carries its `fsid` at `0x20..0x30` — exactly where a tree block does — so the
+/// cheap `fsid` pre-check would otherwise misclassify a backup superblock as a
+/// tree block and checksum the whole block instead of the 4096-byte superblock
 /// region, yielding a spurious `ChecksumMismatch` (bd-scrub-btrfs-false-corrupt).
+///
+/// [`BtrfsSuperblockValidator`] instead validates each of these *as a
+/// superblock*, but only where the filesystem's `total_bytes` actually spans the
+/// offset — btrfs writes a mirror only when the device covers it (bd-xqzgy).
 const BTRFS_SUPER_MIRROR_OFFSETS: [u64; 3] = [
     BTRFS_SUPER_INFO_OFFSET as u64, // 64 KiB — primary
     0x0400_0000,                    // 64 MiB
@@ -853,25 +898,28 @@ impl BlockValidator for CompositeValidator {
 pub struct BtrfsScrubValidator {
     superblock: BtrfsSuperblockValidator,
     tree_block: BtrfsTreeBlockValidator,
-    /// Precomputed superblock block number (== the block both metadata
-    /// validators special-case). Used by the inline fast-path gate.
-    superblock_block: u64,
+    /// Precomputed block numbers of the superblock and its mirrors (the blocks
+    /// both metadata validators special-case). Used by the inline fast-path gate.
+    superblock_blocks: [u64; BTRFS_SUPER_MIRROR_OFFSETS.len()],
     /// This filesystem's `fsid` — the tree-block validator's Skip key.
     fsid: [u8; 16],
 }
 
 impl BtrfsScrubValidator {
+    /// `total_bytes` is the filesystem size from the superblock; it decides which
+    /// superblock mirrors are expected to exist. See [`BtrfsSuperblockValidator::new`].
     #[must_use]
-    pub fn new(block_size: u32, fsid: [u8; 16], csum_type: u16) -> Self {
-        let superblock_block = if block_size == 0 {
-            0
-        } else {
-            (BTRFS_SUPER_INFO_OFFSET as u64) / u64::from(block_size)
-        };
+    pub fn new(block_size: u32, fsid: [u8; 16], csum_type: u16, total_bytes: u64) -> Self {
+        let mut superblock_blocks = [0_u64; BTRFS_SUPER_MIRROR_OFFSETS.len()];
+        if block_size != 0 {
+            for (slot, offset) in superblock_blocks.iter_mut().zip(BTRFS_SUPER_MIRROR_OFFSETS) {
+                *slot = offset / u64::from(block_size);
+            }
+        }
         Self {
-            superblock: BtrfsSuperblockValidator::new(block_size),
+            superblock: BtrfsSuperblockValidator::new(block_size, total_bytes),
             tree_block: BtrfsTreeBlockValidator::new(block_size, fsid, csum_type),
-            superblock_block,
+            superblock_blocks,
             fsid,
         }
     }
@@ -882,7 +930,6 @@ impl BtrfsScrubValidator {
     #[inline(never)]
     fn validate_metadata(&self, block: BlockNumber, data: &BlockBuf) -> BlockVerdict {
         let mut all_issues = Vec::new();
-        // any_checked is already true: the inline ZeroCheck above returned Clean.
         for verdict in [
             self.superblock.validate(block, data),
             self.tree_block.validate(block, data),
@@ -904,12 +951,17 @@ impl BlockValidator for BtrfsScrubValidator {
     fn validate(&self, block: BlockNumber, data: &BlockBuf) -> BlockVerdict {
         let slice = data.as_slice();
 
-        // Fast path: a block that is neither the superblock block nor an
+        // Fast path: a block that is neither a superblock/mirror block nor an
         // fsid-matching tree-block candidate is `Skip`ped by BOTH metadata
         // validators → verdict Clean.
-        // (`BtrfsSuperblockValidator` Skips when block != superblock target;
-        // `BtrfsTreeBlockValidator` Skips on the superblock block or on fsid
-        // mismatch — mirrored here without any dyn call or enum materialisation.)
+        // (`BtrfsSuperblockValidator` Skips when the block is not one of its
+        // targets; `BtrfsTreeBlockValidator` Skips on any superblock mirror block
+        // or on fsid mismatch — mirrored here without any dyn call or enum
+        // materialisation.)
+        //
+        // The mirror blocks must be gated on the BLOCK NUMBER, not the fsid: a
+        // superblock copy that was wrongly zeroed has no fsid to match, so an
+        // fsid-only gate would short-circuit it to Clean and never validate it.
         //
         // This deliberately does NOT run a blind all-zero check. Unallocated
         // space is legitimately all zeroes, and a whole-image scrub has no
@@ -917,10 +969,12 @@ impl BlockValidator for BtrfsScrubValidator {
         // zeroed". Flagging every zero block made `blocks_corrupt` meaningless
         // (99.9% on a valid, kernel-mountable image) and poisoned the repair
         // autopilot's Beta posterior, which is fed `blocks_corrupt`. A zeroed
-        // *superblock* is still caught below: it is not skipped by block number,
-        // and `BtrfsSuperblockValidator` rejects it on the failed magic/parse.
+        // *superblock* is still caught below: it is reached by block number, and
+        // `BtrfsSuperblockValidator` rejects it on the failed magic/parse.
         // `ZeroCheckValidator` remains available for scoped, known-metadata use.
-        if block.0 != self.superblock_block && slice.get(0x20..0x30) != Some(&self.fsid[..]) {
+        if !self.superblock_blocks.contains(&block.0)
+            && slice.get(0x20..0x30) != Some(&self.fsid[..])
+        {
             return BlockVerdict::Clean;
         }
 
@@ -1194,9 +1248,19 @@ mod tests {
         sb
     }
 
+    /// Filesystem size of the 8-block × 16 KiB devices these tests build. Too
+    /// small to span any superblock mirror, so only the primary is a target.
+    const TEST_FS_BYTES: u64 = 8 * 16384;
+
     fn make_valid_btrfs_superblock_region() -> Vec<u8> {
+        make_valid_btrfs_superblock_region_at(BTRFS_SUPER_INFO_OFFSET as u64)
+    }
+
+    /// A valid superblock copy that lives at `bytenr` (each btrfs superblock copy
+    /// records its own physical byte offset).
+    fn make_valid_btrfs_superblock_region_at(bytenr: u64) -> Vec<u8> {
         let mut sb = vec![0_u8; BTRFS_SUPER_INFO_SIZE];
-        sb[0x30..0x38].copy_from_slice(&(BTRFS_SUPER_INFO_OFFSET as u64).to_le_bytes());
+        sb[0x30..0x38].copy_from_slice(&bytenr.to_le_bytes());
         sb[0x40..0x48].copy_from_slice(&ffs_types::BTRFS_MAGIC.to_le_bytes());
         sb[0x48..0x50].copy_from_slice(&1_u64.to_le_bytes()); // generation
         sb[0x50..0x58].copy_from_slice(&4096_u64.to_le_bytes()); // root
@@ -1486,7 +1550,7 @@ mod tests {
         block4[..BTRFS_SUPER_INFO_SIZE].copy_from_slice(&sb);
         dev.write(BlockNumber(4), block4);
 
-        let report = Scrubber::new(&dev, &BtrfsSuperblockValidator::new(16384))
+        let report = Scrubber::new(&dev, &BtrfsSuperblockValidator::new(16384, TEST_FS_BYTES))
             .scrub_all(&cx)
             .expect("scrub should succeed");
         assert!(report.is_clean());
@@ -1502,7 +1566,7 @@ mod tests {
         block4[..BTRFS_SUPER_INFO_SIZE].copy_from_slice(&sb);
         dev.write(BlockNumber(4), block4);
 
-        let report = Scrubber::new(&dev, &BtrfsSuperblockValidator::new(16384))
+        let report = Scrubber::new(&dev, &BtrfsSuperblockValidator::new(16384, TEST_FS_BYTES))
             .scrub_all(&cx)
             .expect("scrub should succeed");
 
@@ -1535,7 +1599,7 @@ mod tests {
         let report = Scrubber::new(
             &dev,
             &CompositeValidator::new(vec![
-                Box::new(BtrfsSuperblockValidator::new(16384)),
+                Box::new(BtrfsSuperblockValidator::new(16384, TEST_FS_BYTES)),
                 Box::new(BtrfsTreeBlockValidator::new(16384, fsid, 0)),
             ]),
         )
@@ -1573,10 +1637,10 @@ mod tests {
         dev.write(BlockNumber(6), corrupt_tree);
 
         let composite = CompositeValidator::new(vec![
-            Box::new(BtrfsSuperblockValidator::new(16384)),
+            Box::new(BtrfsSuperblockValidator::new(16384, TEST_FS_BYTES)),
             Box::new(BtrfsTreeBlockValidator::new(16384, fsid, 0)),
         ]);
-        let optimized = BtrfsScrubValidator::new(16384, fsid, 0);
+        let optimized = BtrfsScrubValidator::new(16384, fsid, 0, TEST_FS_BYTES);
 
         let composite_report = Scrubber::new(&dev, &composite)
             .scrub_all(&test_cx())
@@ -1680,10 +1744,10 @@ mod tests {
         let zero_block = vec![0_u8; block_size_usize];
 
         let composite = CompositeValidator::new(vec![
-            Box::new(BtrfsSuperblockValidator::new(block_size)),
+            Box::new(BtrfsSuperblockValidator::new(block_size, TEST_FS_BYTES)),
             Box::new(BtrfsTreeBlockValidator::new(block_size, fsid, 0)),
         ]);
-        let mono = BtrfsScrubValidator::new(block_size, fsid, 0);
+        let mono = BtrfsScrubValidator::new(block_size, fsid, 0, TEST_FS_BYTES);
 
         for (block, data) in [
             (superblock, sb_block),
@@ -1753,6 +1817,123 @@ mod tests {
         }
     }
 
+    /// A 16 KiB block holding a superblock copy for `bytenr` at its start.
+    fn mirror_block_at(bytenr: u64) -> Vec<u8> {
+        let mut block = vec![0_u8; 16384];
+        block[..BTRFS_SUPER_INFO_SIZE]
+            .copy_from_slice(&make_valid_btrfs_superblock_region_at(bytenr));
+        block
+    }
+
+    /// Issues carried by a `Corrupt` verdict; empty for `Clean`/`Skip`, so callers
+    /// assert non-emptiness with a message instead of panicking.
+    fn corrupt_issues(verdict: BlockVerdict) -> Vec<(CorruptionKind, Severity, String)> {
+        match verdict {
+            BlockVerdict::Corrupt(issues) => issues,
+            BlockVerdict::Clean | BlockVerdict::Skip => Vec::new(),
+        }
+    }
+
+    /// A filesystem large enough to span the 64 MiB mirror but not the 256 GiB one.
+    const ONE_GIB: u64 = 1 << 30;
+    /// Block number of the 64 MiB mirror at a 16 KiB block size.
+    const MIRROR_64MIB_BLOCK: u64 = 0x0400_0000 / 16384;
+
+    /// bd-xqzgy: a valid backup superblock is now VALIDATED as a superblock
+    /// (previously it was skipped outright, so a corrupt one went unreported).
+    #[test]
+    fn btrfs_superblock_validator_accepts_valid_backup_mirror() {
+        let validator = BtrfsSuperblockValidator::new(16384, ONE_GIB);
+        let buf = BlockBuf::new(mirror_block_at(0x0400_0000));
+
+        assert!(matches!(
+            validator.validate(BlockNumber(MIRROR_64MIB_BLOCK), &buf),
+            BlockVerdict::Clean
+        ));
+    }
+
+    /// bd-xqzgy: the detection the skip was costing us — a corrupt backup
+    /// superblock is now reported instead of silently ignored.
+    #[test]
+    fn btrfs_superblock_validator_detects_corrupt_backup_mirror() {
+        let validator = BtrfsSuperblockValidator::new(16384, ONE_GIB);
+
+        let mut block = mirror_block_at(0x0400_0000);
+        block[0x100] ^= 0x01; // inside the checksummed region
+        let buf = BlockBuf::new(block);
+
+        let issues = corrupt_issues(validator.validate(BlockNumber(MIRROR_64MIB_BLOCK), &buf));
+        assert!(
+            !issues.is_empty(),
+            "a corrupt backup superblock must be reported"
+        );
+        assert!(
+            issues
+                .iter()
+                .any(|(kind, _, _)| *kind == CorruptionKind::ChecksumMismatch)
+        );
+    }
+
+    /// bd-xqzgy: a superblock copy records its OWN physical offset in `bytenr`
+    /// (unlike a tree block's chunk-mapped logical bytenr, see bd-5vb36), so a
+    /// mirror carrying the primary's bytenr is structurally wrong. Checksum is
+    /// recomputed, so only the bytenr check can catch this.
+    #[test]
+    fn btrfs_superblock_validator_detects_mirror_with_wrong_bytenr() {
+        let validator = BtrfsSuperblockValidator::new(16384, ONE_GIB);
+        // A well-formed, correctly-checksummed superblock — but it claims to live
+        // at the primary offset while sitting at the 64 MiB mirror.
+        let buf = BlockBuf::new(mirror_block_at(BTRFS_SUPER_INFO_OFFSET as u64));
+
+        let issues = corrupt_issues(validator.validate(BlockNumber(MIRROR_64MIB_BLOCK), &buf));
+        assert!(
+            !issues.is_empty(),
+            "a mirror whose bytenr is not its own offset must be reported"
+        );
+        assert!(
+            issues
+                .iter()
+                .any(|(kind, _, _)| *kind == CorruptionKind::StructuralInvariant)
+        );
+    }
+
+    /// bd-xqzgy: btrfs writes a mirror only where the filesystem spans it, so a
+    /// mirror offset beyond `total_bytes` is legitimately absent and must be
+    /// skipped — not reported. (Measured: `btr2_572550.img` is a 2 GiB file whose
+    /// 64 MiB region is all-zero because it holds no filesystem at all.)
+    #[test]
+    fn btrfs_superblock_validator_skips_mirror_outside_filesystem() {
+        // 32 MiB filesystem: the 64 MiB mirror was never written.
+        let validator = BtrfsSuperblockValidator::new(16384, 32 * 1024 * 1024);
+        let buf = BlockBuf::new(vec![0_u8; 16384]);
+
+        assert!(matches!(
+            validator.validate(BlockNumber(MIRROR_64MIB_BLOCK), &buf),
+            BlockVerdict::Skip
+        ));
+    }
+
+    /// The fused validator must reach a wrongly-ZEROED mirror. Its `fsid` is
+    /// zeroes, so an fsid-only fast-path gate would short-circuit it to `Clean`
+    /// and never validate it; the gate keys on the block number instead.
+    #[test]
+    fn btrfs_scrub_validator_reports_zeroed_backup_mirror() {
+        let fsid = [0x55_u8; 16];
+        let validator = BtrfsScrubValidator::new(16384, fsid, 0, ONE_GIB);
+        let buf = BlockBuf::new(vec![0_u8; 16384]); // mirror expected, but zeroed
+
+        let issues = corrupt_issues(validator.validate(BlockNumber(MIRROR_64MIB_BLOCK), &buf));
+        assert!(
+            !issues.is_empty(),
+            "an expected-but-zeroed backup superblock must be reported"
+        );
+        assert!(
+            issues
+                .iter()
+                .all(|(_, severity, _)| *severity >= Severity::Error)
+        );
+    }
+
     /// Regression (bd-5vb36): a valid tree block whose logical `bytenr` differs
     /// from its physical offset must scrub Clean. That is the *normal* case — the
     /// chunk tree maps logical→physical — yet the validator used to compare
@@ -1819,9 +2000,12 @@ mod tests {
         let fsid = [0x55_u8; 16];
         let dev = sparse_valid_btrfs_device(16384, fsid);
 
-        let report = Scrubber::new(&dev, &BtrfsScrubValidator::new(16384, fsid, 0))
-            .scrub_all(&test_cx())
-            .expect("scrub should succeed");
+        let report = Scrubber::new(
+            &dev,
+            &BtrfsScrubValidator::new(16384, fsid, 0, TEST_FS_BYTES),
+        )
+        .scrub_all(&test_cx())
+        .expect("scrub should succeed");
 
         assert_eq!(report.blocks_scanned, 8);
         assert_eq!(
@@ -1841,9 +2025,12 @@ mod tests {
         // Every block all-zero, including block 4 (the superblock block).
         let dev = MemBlockDevice::new(16384, 8);
 
-        let report = Scrubber::new(&dev, &BtrfsScrubValidator::new(16384, fsid, 0))
-            .scrub_all(&test_cx())
-            .expect("scrub should succeed");
+        let report = Scrubber::new(
+            &dev,
+            &BtrfsScrubValidator::new(16384, fsid, 0, TEST_FS_BYTES),
+        )
+        .scrub_all(&test_cx())
+        .expect("scrub should succeed");
 
         assert_eq!(
             report.blocks_corrupt, 1,

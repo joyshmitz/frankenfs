@@ -31,6 +31,9 @@ const BLOCK_SIZE: u32 = 16_384;
 const SUPER_INFO_OFFSET: u64 = 64 * 1024;
 const FSID: [u8; 16] = [0x11; 16];
 const CSUM_CRC32C: u16 = 0;
+/// Filesystem size: too small to span any superblock mirror, so only the primary
+/// is a validator target (the bench only touches data blocks 100.. anyway).
+const TOTAL_BYTES: u64 = 1 << 20;
 
 fn make_block(seed: usize) -> Vec<u8> {
     let mut b = vec![0u8; BLOCK];
@@ -118,11 +121,11 @@ fn bench(c: &mut Criterion) {
         fsid: FSID,
     };
     // The ACTUAL production type this bench justifies.
-    let prod = BtrfsScrubValidator::new(BLOCK_SIZE, FSID, CSUM_CRC32C);
+    let prod = BtrfsScrubValidator::new(BLOCK_SIZE, FSID, CSUM_CRC32C, TOTAL_BYTES);
 
     let composite = CompositeValidator::new(vec![
         Box::new(ZeroCheckValidator),
-        Box::new(BtrfsSuperblockValidator::new(BLOCK_SIZE)),
+        Box::new(BtrfsSuperblockValidator::new(BLOCK_SIZE, TOTAL_BYTES)),
         Box::new(BtrfsTreeBlockValidator::new(BLOCK_SIZE, FSID, CSUM_CRC32C)),
     ]);
 

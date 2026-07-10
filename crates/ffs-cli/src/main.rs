@@ -7580,9 +7580,15 @@ pub fn scrub_validator(flavor: &FsFlavor, block_size: u32) -> Box<dyn BlockValid
         // zeroed superblock is still caught by `Ext4SuperblockValidator`, which
         // rejects the failed magic/parse.
         FsFlavor::Ext4(_) => Box::new(Ext4SuperblockValidator::new(block_size)),
-        FsFlavor::Btrfs(sb) => {
-            Box::new(BtrfsScrubValidator::new(block_size, sb.fsid, sb.csum_type))
-        }
+        // `sb.total_bytes` (the filesystem size, not the image file size) decides
+        // which superblock mirrors btrfs actually wrote, and so which are
+        // expected to validate.
+        FsFlavor::Btrfs(sb) => Box::new(BtrfsScrubValidator::new(
+            block_size,
+            sb.fsid,
+            sb.csum_type,
+            sb.total_bytes,
+        )),
     }
 }
 
