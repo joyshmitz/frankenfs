@@ -157,12 +157,16 @@ bench-only contention probe (`bd_bhh0i_contention`) and a bounded state model so
 the owner can review the shape of the lock decomposition before any filesystem
 cutover. Release-perf run was on RCH worker `hz2`.
 
-Measurement boundary: the probe uses synthetic `parking_lot` allocation/group/
-publish mutexes and wall-clock timing around a 4 KiB `Vec` allocation. It does
-not instrument actual `CommitPublicationGate`, shard/`active_snapshots` lock
-wait/hold times, or malloc-arena contention counters. The table below is routing
-evidence, not completion of that actual-path counter requirement. Step 4 remains
-open and must use safe external profiling or audited bench-only instrumentation.
+Measurement boundary: the original probe uses synthetic `parking_lot`
+allocation/group/publish mutexes and wall-clock timing around a 4 KiB `Vec`
+allocation; that table remains routing evidence only. A follow-up bench-only
+instrumentation path now records the real `ShardedMvccStore` shard-lock and
+ordered-publication wait/hold histograms, plus safe jemalloc mutex counters, at
+1/2/4/8 writers. The direct commit path does not acquire `active_snapshots`:
+the current writable adapter is unregistered, so that lock is not silently
+claimed as part of these rows. Remote perf self-time verification remains
+blocked by the worker's `perf_event_paranoid=4` / missing CAP_PERFMON and must
+be rerun on a permitted worker before any reject or optimization conclusion.
 
 Measured lock wait histograms, microseconds:
 
@@ -275,8 +279,12 @@ Incremental owner-reviewed plan, each step independently revertible:
    while still protected by the existing single lock. Rollback: restore the old
    struct shape. Gate: conformance plus create/mkdir/link/symlink/mknod tests.
 4. Add read-only contention counters around the existing single lock and publish
-   gate. Rollback: remove counters. Gate: zero behavior diff; counters disabled
-   or bench-only in normal builds.
+   gate. **Bench-only implementation:** the real sharded commit body is shared
+   by uninstrumented ORIG and `commit_profiled`; worker-local log2 histograms
+   avoid shared probe contention, and normal builds do not expose the recording
+   entry point. Safe jemalloc JSON reports arena/bin mutex counters. Rollback:
+   remove the feature and bench dependencies. Gate: exact commit-count/digest
+   parity, profile self-time on a permitted worker, and no production FS change.
 5. Introduce per-group locks behind an owner-disabled feature/config path, with
    production default still using the single lock. Rollback: disable the path.
    Gate: loom/shuttle model plus e2fsck-clean fixture mutations.

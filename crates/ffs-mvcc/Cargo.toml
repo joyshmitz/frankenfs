@@ -6,6 +6,10 @@ license-file.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[features]
+default = []
+bench-instrumentation = []
+
 [dependencies]
 arc-swap = { workspace = true }
 asupersync = { workspace = true }
@@ -31,6 +35,8 @@ criterion = { workspace = true }
 crc32c = { workspace = true }
 proptest = { workspace = true }
 sha2 = { workspace = true }
+tikv-jemalloc-ctl = { version = "0.7", features = ["stats", "use_std"] }
+tikv-jemallocator = { version = "0.7", features = ["stats"] }
 
 [[bench]]
 name = "wal_throughput"

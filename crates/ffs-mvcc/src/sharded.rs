@@ -32,6 +32,224 @@ pub const MIN_MVCC_SHARDS: usize = 16;
 /// Maximum shard count for host-sized sharded stores.
 pub const MAX_MVCC_SHARDS: usize = 1024;
 
+#[derive(Clone, Copy)]
+enum CommitLockPhase {
+    ShardWait,
+    ShardHold,
+    PublicationLockWait,
+    PublicationLockHold,
+    PublicationPrefixWait,
+    PublicationTotal,
+}
+
+trait CommitLockProbe {
+    type Stamp;
+
+    fn start(&self) -> Self::Stamp;
+    fn finish(&mut self, phase: CommitLockPhase, started: Self::Stamp);
+}
+
+struct NoopCommitLockProbe;
+
+impl CommitLockProbe for NoopCommitLockProbe {
+    type Stamp = ();
+
+    #[inline(always)]
+    fn start(&self) {}
+
+    #[inline(always)]
+    fn finish(&mut self, _phase: CommitLockPhase, _started: ()) {}
+}
+
+/// Log2 timing histogram used by the bench-only commit-lock probe.
+///
+/// Each worker owns its profile while committing, so recording introduces no
+/// shared atomics or probe mutex that could manufacture contention. Normal
+/// builds do not expose or instantiate this type.
+#[cfg(feature = "bench-instrumentation")]
+#[derive(Clone, Debug)]
+pub struct LockTimingHistogram {
+    buckets: [u64; 64],
+    samples: u64,
+    total_ns: u64,
+    max_ns: u64,
+}
+
+#[cfg(feature = "bench-instrumentation")]
+impl Default for LockTimingHistogram {
+    fn default() -> Self {
+        Self {
+            buckets: [0; 64],
+            samples: 0,
+            total_ns: 0,
+            max_ns: 0,
+        }
+    }
+}
+
+#[cfg(feature = "bench-instrumentation")]
+impl LockTimingHistogram {
+    fn record(&mut self, elapsed_ns: u64) {
+        let bucket = usize::try_from(elapsed_ns.max(1).ilog2()).expect("ilog2 fits usize");
+        self.buckets[bucket] = self.buckets[bucket].saturating_add(1);
+        self.samples = self.samples.saturating_add(1);
+        self.total_ns = self.total_ns.saturating_add(elapsed_ns);
+        self.max_ns = self.max_ns.max(elapsed_ns);
+    }
+
+    fn merge(&mut self, other: &Self) {
+        for (dst, src) in self.buckets.iter_mut().zip(&other.buckets) {
+            *dst = dst.saturating_add(*src);
+        }
+        self.samples = self.samples.saturating_add(other.samples);
+        self.total_ns = self.total_ns.saturating_add(other.total_ns);
+        self.max_ns = self.max_ns.max(other.max_ns);
+    }
+
+    fn percentile_upper_ns(&self, percentile: u64) -> u64 {
+        if self.samples == 0 {
+            return 0;
+        }
+        let target = self.samples.saturating_mul(percentile).saturating_add(99) / 100;
+        let mut cumulative = 0_u64;
+        for (index, count) in self.buckets.iter().enumerate() {
+            cumulative = cumulative.saturating_add(*count);
+            if cumulative >= target {
+                let shift = u32::try_from(index + 1).expect("histogram shift fits u32");
+                return 1_u64
+                    .checked_shl(shift)
+                    .map_or(u64::MAX, |upper| upper.saturating_sub(1));
+            }
+        }
+        u64::MAX
+    }
+
+    /// Return a compact summary. Percentiles are inclusive upper bounds of the
+    /// matching power-of-two bucket rather than interpolated point estimates.
+    #[must_use]
+    pub fn summary(&self) -> LockTimingSummary {
+        LockTimingSummary {
+            samples: self.samples,
+            mean_ns: self.total_ns.checked_div(self.samples).unwrap_or(0),
+            p50_upper_ns: self.percentile_upper_ns(50),
+            p95_upper_ns: self.percentile_upper_ns(95),
+            p99_upper_ns: self.percentile_upper_ns(99),
+            max_ns: self.max_ns,
+        }
+    }
+}
+
+/// Compact view of a bench-only commit-lock timing histogram.
+#[cfg(feature = "bench-instrumentation")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LockTimingSummary {
+    /// Number of recorded lock events.
+    pub samples: u64,
+    /// Integer mean duration in nanoseconds.
+    pub mean_ns: u64,
+    /// Inclusive upper bound of the p50 log2 bucket, in nanoseconds.
+    pub p50_upper_ns: u64,
+    /// Inclusive upper bound of the p95 log2 bucket, in nanoseconds.
+    pub p95_upper_ns: u64,
+    /// Inclusive upper bound of the p99 log2 bucket, in nanoseconds.
+    pub p99_upper_ns: u64,
+    /// Largest observed duration in nanoseconds.
+    pub max_ns: u64,
+}
+
+/// Worker-local timing profile for the real sharded MVCC commit path.
+#[cfg(feature = "bench-instrumentation")]
+#[derive(Clone, Debug, Default)]
+pub struct CommitLockProfile {
+    shard_wait: LockTimingHistogram,
+    shard_hold: LockTimingHistogram,
+    publication_lock_wait: LockTimingHistogram,
+    publication_lock_hold: LockTimingHistogram,
+    publication_prefix_wait: LockTimingHistogram,
+    publication_total: LockTimingHistogram,
+}
+
+#[cfg(feature = "bench-instrumentation")]
+impl CommitLockProfile {
+    /// Merge another worker's counters after both workers have stopped.
+    pub fn merge(&mut self, other: &Self) {
+        self.shard_wait.merge(&other.shard_wait);
+        self.shard_hold.merge(&other.shard_hold);
+        self.publication_lock_wait
+            .merge(&other.publication_lock_wait);
+        self.publication_lock_hold
+            .merge(&other.publication_lock_hold);
+        self.publication_prefix_wait
+            .merge(&other.publication_prefix_wait);
+        self.publication_total.merge(&other.publication_total);
+    }
+
+    /// Shard write-lock acquisition wait histogram.
+    #[must_use]
+    pub fn shard_wait(&self) -> LockTimingSummary {
+        self.shard_wait.summary()
+    }
+
+    /// Shard write-lock hold histogram.
+    #[must_use]
+    pub fn shard_hold(&self) -> LockTimingSummary {
+        self.shard_hold.summary()
+    }
+
+    /// Initial publication-mutex acquisition wait histogram.
+    #[must_use]
+    pub fn publication_lock_wait(&self) -> LockTimingSummary {
+        self.publication_lock_wait.summary()
+    }
+
+    /// Publication-mutex held-segment histogram. Condvar sleep is excluded.
+    #[must_use]
+    pub fn publication_lock_hold(&self) -> LockTimingSummary {
+        self.publication_lock_hold.summary()
+    }
+
+    /// Ordered-prefix Condvar wait histogram. This includes sleep and reacquire.
+    #[must_use]
+    pub fn publication_prefix_wait(&self) -> LockTimingSummary {
+        self.publication_prefix_wait.summary()
+    }
+
+    /// End-to-end ordered-publication call histogram.
+    #[must_use]
+    pub fn publication_total(&self) -> LockTimingSummary {
+        self.publication_total.summary()
+    }
+}
+
+#[cfg(feature = "bench-instrumentation")]
+impl CommitLockProbe for CommitLockProfile {
+    type Stamp = std::time::Instant;
+
+    #[inline]
+    fn start(&self) -> Self::Stamp {
+        std::time::Instant::now()
+    }
+
+    #[inline]
+    fn finish(&mut self, phase: CommitLockPhase, started: Self::Stamp) {
+        let elapsed_ns = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        match phase {
+            CommitLockPhase::ShardWait => self.shard_wait.record(elapsed_ns),
+            CommitLockPhase::ShardHold => self.shard_hold.record(elapsed_ns),
+            CommitLockPhase::PublicationLockWait => {
+                self.publication_lock_wait.record(elapsed_ns);
+            }
+            CommitLockPhase::PublicationLockHold => {
+                self.publication_lock_hold.record(elapsed_ns);
+            }
+            CommitLockPhase::PublicationPrefixWait => {
+                self.publication_prefix_wait.record(elapsed_ns);
+            }
+            CommitLockPhase::PublicationTotal => self.publication_total.record(elapsed_ns),
+        }
+    }
+}
+
 struct CommitPublicationGate {
     completed_commit: AtomicU64,
     wait_lock: Mutex<PublicationState>,
@@ -70,12 +288,24 @@ impl CommitPublicationGate {
     }
 
     fn publish(&self, commit_seq: CommitSeq) {
+        self.publish_with_probe(commit_seq, &mut NoopCommitLockProbe);
+    }
+
+    #[cfg_attr(feature = "bench-instrumentation", inline(never))]
+    fn publish_with_probe<P: CommitLockProbe>(&self, commit_seq: CommitSeq, probe: &mut P) {
+        let total_started = probe.start();
         if self.completed() >= commit_seq.0 {
+            probe.finish(CommitLockPhase::PublicationTotal, total_started);
             return;
         }
 
+        let lock_wait_started = probe.start();
         let mut state = self.wait_lock.lock();
+        probe.finish(CommitLockPhase::PublicationLockWait, lock_wait_started);
+        let mut lock_hold_started = probe.start();
         if self.completed() >= commit_seq.0 {
+            probe.finish(CommitLockPhase::PublicationLockHold, lock_hold_started);
+            probe.finish(CommitLockPhase::PublicationTotal, total_started);
             return;
         }
 
@@ -86,11 +316,17 @@ impl CommitPublicationGate {
                 self.ready.notify_all();
             }
             if self.completed() >= commit_seq.0 {
+                probe.finish(CommitLockPhase::PublicationLockHold, lock_hold_started);
+                probe.finish(CommitLockPhase::PublicationTotal, total_started);
                 return;
             }
 
             state.waiters = state.waiters.saturating_add(1);
+            probe.finish(CommitLockPhase::PublicationLockHold, lock_hold_started);
+            let prefix_wait_started = probe.start();
             self.ready.wait(&mut state);
+            probe.finish(CommitLockPhase::PublicationPrefixWait, prefix_wait_started);
+            lock_hold_started = probe.start();
             state.waiters = state.waiters.saturating_sub(1);
         }
     }
@@ -833,6 +1069,29 @@ impl ShardedMvccStore {
     /// Shard locks are acquired in sorted order to prevent deadlocks.
     #[allow(clippy::result_large_err)]
     pub fn commit(&self, txn: Transaction) -> Result<CommitSeq, (CommitError, Transaction)> {
+        self.commit_with_probe(txn, &mut NoopCommitLockProbe)
+    }
+
+    /// Commit through the production algorithm while recording worker-local
+    /// lock timings. This entry point exists only for the characterization
+    /// binary and is absent from normal builds.
+    #[cfg(feature = "bench-instrumentation")]
+    #[allow(clippy::result_large_err)]
+    pub fn commit_profiled(
+        &self,
+        txn: Transaction,
+        profile: &mut CommitLockProfile,
+    ) -> Result<CommitSeq, (CommitError, Transaction)> {
+        self.commit_with_probe(txn, profile)
+    }
+
+    #[cfg_attr(feature = "bench-instrumentation", inline(never))]
+    #[allow(clippy::result_large_err)]
+    fn commit_with_probe<P: CommitLockProbe>(
+        &self,
+        txn: Transaction,
+        probe: &mut P,
+    ) -> Result<CommitSeq, (CommitError, Transaction)> {
         if let Err(error) = validate_transaction_id(txn.id()) {
             return Err((error, txn));
         }
@@ -844,7 +1103,10 @@ impl ShardedMvccStore {
 
         let shard_indices = self.involved_shards(&txn);
         let effective = self.effective_policy();
+        let shard_wait_started = probe.start();
         let mut shard_guards = self.lock_shards(&shard_indices);
+        probe.finish(CommitLockPhase::ShardWait, shard_wait_started);
+        let shard_hold_started = probe.start();
 
         if let Err(error) = self.preflight_fcw_locked(
             &txn,
@@ -852,12 +1114,18 @@ impl ShardedMvccStore {
             effective,
             "sharded_fcw_conflict_merged",
         ) {
+            drop(shard_guards);
+            probe.finish(CommitLockPhase::ShardHold, shard_hold_started);
             return Err((error, txn));
         }
 
         let commit_seq = match self.next_commit_seq() {
             Ok(seq) => seq,
-            Err(err) => return Err((err, txn)),
+            Err(err) => {
+                drop(shard_guards);
+                probe.finish(CommitLockPhase::ShardHold, shard_hold_started);
+                return Err((err, txn));
+            }
         };
         trace!(
             commit_seq = commit_seq.0,
@@ -898,7 +1166,8 @@ impl ShardedMvccStore {
         // already installed; the gate only preserves monotonic snapshot
         // visibility without burning CPU when commits finish out of order.
         drop(shard_guards);
-        self.publication_gate.publish(commit_seq);
+        probe.finish(CommitLockPhase::ShardHold, shard_hold_started);
+        self.publication_gate.publish_with_probe(commit_seq, probe);
 
         Ok(commit_seq)
     }
