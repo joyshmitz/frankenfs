@@ -1,5 +1,28 @@
 # Perf campaign status — read this first
 
+## ✅ FINAL FRONTIER SUMMARY — 2026-07-10 (BlackThrush / cc_ffs) — ALL AXES MAPPED, HOLD
+
+Every subsystem axis has been profiled/audited and is either a landed win or a
+measured floor. **No clean, benchable, non-peer, non-owner-gated single-turn
+solo micro-lever remains.** Holding — stop hunting. Detailed rows in
+`docs/NEGATIVE_EVIDENCE.md` + `docs/progress/perf-negative-results.md`.
+
+| Axis | Status | Key landed wins | Key rejects / floor evidence (IDs) |
+| --- | --- | --- | --- |
+| **Read / IO** | CLOSED — I/O-bound or cache-served | extent resolve binary-search + seq-hint; indirect memoized; arc_swap hot-inode/hot-parent borrow (31c57895, 0218b2d8) | read-copy coalescing neutral (9ae9f08f); O_DIRECT 1.00x **owner-gated bd-kdmu4**; zero-copy relaunch closed (policy/API, pz64v); cold-read = loop-device artifact (frankenfs-cold-read-honest-numbers) |
+| **Compression** | CLOSED — codecs reuse contexts or stateless | zlib decoder reuse 1.43x; e2compr gzip decode 2.21x / encode 1.44x | LZO per-segment scratch reuse REJECT decode-dominated (**bd-cc-lzo**); zstd already reused |
+| **Checksum** | CLOSED (this session, a5a97e12) — verify segmented, stamp no-copy, crc32c HW | zero-run-aware CRC family (253f2862, e4d192e4, 8221c6f4, 041f04f4); incremental dir-block csum 10.3x (56cb5f94 + wirings 4976d6d7/c9e12ff4/43b967e6); incremental crc32c 11.6x (ff222d17) | inode-csum stamp already no-copy (**bd-cc-inode-csum-stamp**); csum_seed cache = parity-tail (5998f96c, 183f7c38) |
+| **Write-path** | CLOSED — commit-dominated (peer MVCC) | serialize_inode reslice 1.066x (61254de6); write_entry reslice 1.16x (ab0d6cae); add_entry SWAR | copy-elim e2e-neutral BOTH adapters (33c51394 FsMvccBlockDevice, 44ad26b2 TransactionBlockAdapter); serialize buf.fill = sub-noise + commit-swamped; **bd-bhh0i** parallel-create owner-gated; alloc = **peer lane** (af91cc18, 2d331770, b9389ced, fa8a8035, 6e9d6a8c) |
+| **Metadata / dir** | CLOSED — parse/lookup/getattr done | AttrOnly parse 1.11x (8314ca8c); MetadataOnly note_index 1.24x (bc47b311); htree sort_unstable 1.47x (a4ba9241); SWAR name compare 1.80x (2ad5ec95) + casefold (3dcf558f) + overlapping-word (317b8fbe); has-zero validate (2a380996); lookup fully dissected (8419f2a7) | locate_inode strength-reduction NEUTRAL (a1bab91e, 2026-07-05); inode_to_attr construction FREE (19a20908); Arc<InodeAttr> turn ~10% REGRESSION (22387e32); bloom neg-lookup NEUTRAL (2e1fce5f); dx_hash floor (8d143aac); readdir per-entry name = flagged broad-surface SmallVec (jemalloc-refuted) |
+
+**The only remaining headroom is NOT a solo micro-lever:**
+1. **Peer-owned** — MVCC commit (the write bottleneck), ffs-alloc (most-recently-active peer lane), btrfs.rs (bd-xmh5g). Coordinate, don't collide.
+2. **bd-bhh0i** parallel-create — a loom+e2fsck-gated multi-turn concurrency refactor (owner decision needed; see below).
+3. **Structural unblock** — a returnable binary (fix rch artifact retrieval → its own remote target dir gives metadata-only retrieval) reopens the block-copy read path + enables v3+PGO production numbers (bd-b9dug).
+4. **Scoped design task** — `Ext4DirEntry::name` → SmallVec (kills the readdir per-entry alloc; broad public-type surface, marginal given jemalloc).
+
+**HOLD: no honest single-turn measured solo win remains.** Await an owner decision on (1)–(4).
+
 > ## ⚠️ LOOP-GUARD (updated 2026-07-04, BlackThrush) — MOSTLY exhausted, but composite/multi-stage sub-paths still hide levers. Actually BENCH candidates; don't assume "covered".
 >
 > ⭐**CORRECTION**: an earlier version of this guard said the dig was fully
