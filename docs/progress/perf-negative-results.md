@@ -1243,3 +1243,134 @@ between reps, which criterion cannot express on a remote worker.
 Retry predicate: do **not** re-test chunk size, readahead/`fadvise`, extent
 walks, or the copy tax for cold reads — all refuted. The single open lever is
 per-reader `struct file` + bounded fan-out (`bd-ddryj`).
+
+---
+
+## 2026-07-10 — Cold-read: the insertion-count-vs-throughput curve (bd-ddryj, BlackThrush/cc_ffs)
+
+Requested sweep: folio insertions per MiB and lock-wait time at 4K/16K/64K/256K/1M
+read granularities. Measured on frankenfs's **real** read path — granularity via
+`FFS_READ_CHUNK_BLOCKS` (4 KiB blocks), verified to move `pread` count
+(1 block → 32,777 preads; 256 blocks → 138). Prebuilt `release-perf` binary,
+**no rebuild**. `drop_caches=3` before every run. 128 MiB, 2 extents.
+
+Lock wait is real spin-wait time from `perf lock contention` (tracepoint mode),
+summed across threads, attributed by caller. **Caveat:** `perf lock record`
+instruments every contention event and inflates the run, so wait totals are
+comparable *between arms* but must not be compared against the uninstrumented
+`read` column.
+
+| T | chunk | preads | ins/MiB | B/insert | wait (readahead) | contended | read | MiB/s |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | 4K | 32,777 | 16 | 67,311 | 0 ms | 0 | 134.2 ms | 954 |
+| 1 | 16K | 8,202 | 16 | 66,576 | 0 ms | 0 | 100.6 ms | 1,272 |
+| 1 | 64K | 2,058 | 17 | 62,777 | 0 ms | 1 | 91.2 ms | 1,403 |
+| 1 | 256K | 522 | 18 | 58,534 | 0 ms | 0 | 90.1 ms | 1,421 |
+| 1 | 1M | 138 | 17 | 61,909 | 0 ms | 2 | 92.0 ms | 1,391 |
+| 16 | 4K | 32,777 | 105 | 9,986 | 42 ms | 3,113 | 41.0 ms | 3,123 |
+| 16 | 16K | 8,202 | 111 | 9,459 | 84 ms | 5,158 | 34.1 ms | 3,750 |
+| 16 | 64K | 2,058 | 134 | 7,828 | 235 ms | 10,930 | 32.9 ms | 3,896 |
+| 16 | 256K | 522 | 169 | 6,195 | 366 ms | 15,250 | 35.4 ms | 3,611 |
+| 16 | 1M | 138 | 115 | 9,100 | 233 ms | 9,468 | 31.7 ms | 4,041 |
+| 64 | 4K | 32,777 | 143 | 7,323 | 1,814 ms | 20,064 | 47.1 ms | 2,717 |
+| 64 | 16K | 8,202 | 156 | 6,739 | 2,114 ms | 21,773 | 39.5 ms | 3,239 |
+| 64 | 64K | 2,058 | 198 | 5,303 | 3,208 ms | 26,713 | 41.8 ms | 3,065 |
+| 64 | 256K | 522 | 254 | 4,128 | 3,414 ms | 32,024 | 38.3 ms | 3,340 |
+| 64 | 1M | 138 | 107 | 9,800 | 1,143 ms | 9,036 | 38.8 ms | 3,303 |
+
+All wait is attributed to `page_cache_ra_unbounded+0x14b` and
+`page_cache_ra_order+0x1fe` — the `xa_lock` taken while inserting readahead folios.
+
+### The curve refutes the premise: insertions drive LOCK WAIT, not THROUGHPUT
+
+* `r(lockwait, ins/MiB)` = **+0.80** across all 15 points — insertions really do
+  cause the contention.
+* `r(ins/MiB, MiB/s)` **within a fixed thread count** = +0.15 (T=16), +0.25 (T=64).
+  Insertion count has **no predictive power over throughput**.
+* The pooled `r(ins/MiB, MiB/s)` = +0.78 is Simpson's paradox: thread count raises
+  both insertions and throughput. Do not read it as causal.
+* Direct counter-example, same T=64: **256K → 254 ins/MiB, 3,414 ms wait, 3,340 MiB/s**
+  vs **1M → 107 ins/MiB, 1,143 ms wait, 3,303 MiB/s**. Cutting insertions 2.4x and
+  lock wait 3.0x made it **1% slower**.
+
+Spin-wait is CPU burned *while other threads wait on the device*; it is overlapped
+with I/O, so it costs cycles, not wall. That is why capping fan-out helped (fewer
+threads → less CPU burn *and* less readahead thrash) while shrinking insertions via
+read size does not.
+
+### Each requested lever, quantified
+
+1. **Larger contiguous reads → fewer, bigger folios: REFUTED.** ins/MiB is flat in
+   chunk size at T=1 (16→18 from 4K to 1M) and *rises* with chunk at T=16/64
+   (105→169, 143→254) before falling only at 1M. Read size does not select folio
+   order. The T=1 throughput gain (954 → 1,421 MiB/s, **1.49x**) is pure syscall
+   amortization — insertions never move.
+2. **Readahead that batches into one insertion: ALREADY HAPPENS — concurrency
+   destroys it.** At T=1 the kernel yields ~64 KiB folios (67,311 B/insert) even for
+   4 KiB reads. At T=64 it collapses to ~4–7 KiB. The knob is not IO size; it is
+   readahead *sequentiality per `struct file`*. Restoring it (per-thread fd, prior
+   commit `7155b208`) cut insertions 5.9x **and** wall 1.41x — the only change that
+   moved both.
+3. **Hugepage / large-folio-friendly IO sizes: REFUTED.** Folio order is chosen by
+   the readahead state machine, not by the read size (see T=1, 4K reads → order-4
+   folios). No IO size recovers order-4 folios at T=64 on a shared fd.
+
+### Lever (c): what bypassing the page cache would buy — QUANTIFIED, NOT IMPLEMENTED
+
+Measured only as a ceiling in the raw `pread` harness (page-aligned `mmap` buffers,
+`O_DIRECT`, per-thread fd, T=16), `sha256` identical to the kernel mount.
+**No frankenfs code was changed. O_DIRECT/mmap remain owner-gated (`bd-kdmu4`).**
+
+| chunk | O_DIRECT MiB/s | O_DIRECT ms | buffered per-thread fd |
+| --- | --- | --- | --- |
+| 4K | 419 | 305.8 | **665 MiB/s** (192.5 ms) — buffered *wins*, readahead covers small reads |
+| 16K | 1,139 | 112.4 | — |
+| 64K | 3,216 | 39.8 | — |
+| 256K | **4,981** | 25.7 | — |
+| 1M | 4,923 | 26.0 | **5,020 MiB/s** (25.5 ms) |
+
+**Bypassing the page cache buys 0% of wall time** once fds are per-thread and the
+chunk is >= 256 KiB (25.5 ms buffered vs 25.7 ms O_DIRECT), and it is **1.6x SLOWER
+than buffered at 4 KiB** because it forfeits readahead entirely. Its only real
+benefit is CPU: 1.86x fewer cycles (323M → 174M, prior commit). O_DIRECT is a
+CPU-efficiency play, not a latency play — it does not justify an audited-unsafe or
+policy change on latency grounds.
+
+### Net
+
+The one lever that moves wall time is **restore per-reader readahead sequentiality
+(per-thread `struct file`) + a bounded fan-out**, already filed as `bd-ddryj`.
+frankenfs's shipped default (128 KiB chunks) is already near-optimal on granularity;
+`FFS_READ_CHUNK_BLOCKS` is not worth tuning.
+
+Retry predicate: do **not** re-test read granularity, readahead/`fadvise`, extent
+walks, the copy tax, or "reduce insertions" as a throughput lever for cold reads.
+All are now measured and refuted. Insertion count is a *lock-wait* (CPU) lever only.
+
+### Ledger-integrity re-audit (frankenmermaid `5feb977` rule), 2026-07-10
+
+frankenmermaid found four REJECT rows that had been A/B'd on a benchmark where the
+code under test never executed (0.000% self-time), so those rows measured dead code.
+House rule adopted: **every REJECT must carry the self-time figure proving the
+function under test actually ran on the measured input.**
+
+Re-auditing the cold-read rejects above with `perf report --percent-limit 0`:
+
+| reject | code-executed proof (self-time) | verdict |
+| --- | --- | --- |
+| per-block syscall overhead | `entry_SYSRETQ_unsafe_stack` **1.84%**; `__x64_sys_pread64` on a 32.99% callchain | VALID — path is hot, just not the cost |
+| copy tax | `_copy_to_iter` **5.69%**; `clear_page_erms` **5.21%** | VALID — executed, quantified at ~11% |
+| readahead / folio-insertion levers | `__filemap_add_folio` **1.04%**; `page_cache_ra_unbounded` **0.40%**; 100% of spin-wait attributed to `page_cache_ra_*`; insertions varied 2,230→27,174 across arms | VALID |
+| read-granularity lever | knob provably engaged: `pread` count moved **32,777 → 138** (237x) | VALID |
+| **extent-tree walks** | `<ffs_core::OpenFs>::resolve_extent` **0.05%**; extent-map `arc_swap::load` **0.10%**; `ext4_es_lookup_extent` **0.13%** | **VALID BUT NARROW — see below** |
+
+The extent-walk reject is **not** the frankenmermaid failure mode: the code did run
+(non-zero self-time). But its self-time is ~0 because the fixtures barely exercise
+it — `big.bin` has **2** extents, `frag.bin` **9**, `double_ind.bin` **14**, and a
+sequential read parses the tree ~once, caching the map in an `arc_swap`ed
+`Arc<[ExtentMapping]>`. So the claim "extent walks are not the cold-read cost" is
+established **only for <= 14 extents**.
+
+**A file with hundreds or thousands of extents was never measured. That regime is
+UNTESTED, not refuted, and is reopened as `bd-vpypn`** — which must also cover the
+random-read path, where the extent map is consulted per access rather than once.
