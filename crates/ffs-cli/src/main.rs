@@ -3198,17 +3198,24 @@ fn walk_cmd(path: &PathBuf, no_stat: bool, parallel: bool, read_data: bool) -> R
     // FASTER than the old cap (warm 24.6 -> 17.8ms, cold 25.2 -> 23.4ms at the
     // natural 64-wide pool), and the fix also covers the FUSE readdir path.)
 
-    // For the --read-data path ONLY, cap the GLOBAL rayon pool the per-file data
-    // reads fan onto. Each read worker's cold pread first-touches + faults its
-    // destination-buffer pages, so an nproc-wide pool has that many buffers
-    // faulting CONCURRENTLY -> kernel LRU-lock (folio_lruvec_lock_irqsave)
-    // contention that was ~45% of the parallel multi-file walk (bd-kdmu4). A
-    // ~16-wide pool cuts the concurrent faulters: measured cold on a 64-core box
-    // (256x256 KiB ext4), 64 threads 20.7 ms / 20,430 faults -> 16 threads
-    // 15.9 ms / 5,559 faults = 1.30x, byte-identical. Metadata-only walks keep
-    // the full pool (they benefit from it -- the removed cap above), so this is
-    // gated on read_data. build_global is best-effort (already-init = no-op).
-    if parallel && read_data {
+    // Cap the GLOBAL rayon pool the per-file/per-inode work fans onto to
+    // min(nproc, 16) for ANY parallel walk. An nproc-wide pool (e.g. 64)
+    // over-provisions the walk's actual parallelism and adds pure overhead:
+    //   * --read-data: each read worker's cold pread first-touches + faults its
+    //     destination buffer, so nproc buffers fault CONCURRENTLY -> kernel
+    //     LRU-lock (folio_lruvec_lock_irqsave) contention (~45% of cycles,
+    //     bd-kdmu4). 64t 20.7 ms/20,430 faults -> 16t 15.9 ms/5,559 = 1.30x.
+    //   * metadata-only (getattr): rayon idle-worker Sleep::sleep/wait_until_cold
+    //     churn + 64-thread pool spin-up dominate a short walk (bd-57lae). 16t is
+    //     a clear optimum, monotonically better than 64t and NEVER a regression
+    //     across scales (re-measured cold: flat 256 files 3.5->2.3 ms = 1.5x;
+    //     585 dirs/5,120 files 12.0->10.7 = 1.13x; 1,111 dirs/10,000 files
+    //     16.5->16.0 = 1.03x, asymptotically neutral). This differs from the old
+    //     removed metadata cap (a different mechanism that regressed deep trees);
+    //     a direct global-pool cap wins small and is neutral large.
+    // bd-ddryj already caps the INNER read fan-out; this caps the OUTER walk.
+    // build_global is best-effort (already-init = no-op). Byte-identical.
+    if parallel {
         let cap = std::thread::available_parallelism()
             .map_or(8, std::num::NonZeroUsize::get)
             .min(16);
