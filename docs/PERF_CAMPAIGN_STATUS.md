@@ -90,6 +90,25 @@ solo micro-lever remains.** Holding — stop hunting. Detailed rows in
 > incl* = 4× std `SystemTime` conversion (floor) + lean struct build. **No beatable
 > byte-identical wall-clock-translatable frame at line level — HOLD confirmed at the
 > strongest evidence tier.**
+>
+> ### FRONTIER VERDICT (2026-07-11, BlackThrush) — the getattr composite is AT ITS FLOOR; HOLD is the frontier, not a pause
+>
+> The composite callgrind harness uses an **in-memory** device (`BenchByteDevice`,
+> `Mutex<Vec<u8>>`) — **no syscalls in the hot loop**, which is exactly WHY callgrind
+> could attribute the entire getattr composite to userspace. That userspace is
+> already at its floor: every hot frame is lean-CPU (`parse` bounds-hoisted +
+> AttrOnly), **std-API-floored** (4× `SystemTime` `UNIX_EPOCH.checked_add` ≈16% — no
+> safe-Rust byte-identical shortcut; `std::time` exposes no raw-`Timespec` ctor and
+> `#![forbid(unsafe_code)]` bars a direct build), **peer-owned** (MVCC `read_visible`
+> ~4%), or a **codegen artifact** (`Ext4Inode` struct-move memcpy ~3%). In
+> PRODUCTION the dominant getattr cost on a cold cache is the inode-table-block
+> READ = a **kernel/device I/O** (the "get*" an in-memory profile cannot see), which
+> is NOT a safe-Rust userspace lever and is callgrind-blind by construction. **Both
+> boundaries — userspace CPU (measured lean at line level) and I/O/kernel (not a
+> userspace lever) — are reached. There is no beatable safe-Rust userspace frame at
+> or below the top. This floor IS the solo frontier. HOLD.** The remaining kernel
+> gap closes only at the non-solo levers: MVCC commit/`read_visible` (peer),
+> `bd-bhh0i` parallel-create (owner-gated), the returnable-binary unblock (bd-b9dug).
 
 > ## ⚠️ LOOP-GUARD (updated 2026-07-04, BlackThrush) — MOSTLY exhausted, but composite/multi-stage sub-paths still hide levers. Actually BENCH candidates; don't assume "covered".
 >
