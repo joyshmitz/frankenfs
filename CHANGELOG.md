@@ -1,10 +1,10 @@
 # Changelog
 
-All notable changes to FrankenFS are documented in this file, organized by capability area rather than chronological diff order. This project has no formal releases or tags; development has been continuous since inception. Commit links point to the canonical GitHub repository.
+All notable changes to FrankenFS are documented in this file, organized by capability area rather than chronological diff order. Development has been continuous since inception; **`v0.2.0` (2026-07-11) is the project's first tagged release**, cut to mark the completion of the solo performance-optimization campaign. Commit links point to the canonical GitHub repository.
 
 > **Repository:** <https://github.com/Dicklesworthstone/frankenfs>
-> **Period covered:** 2026-02-09 through 2026-05-18
-> **Total commits:** 3,448
+> **Period covered:** 2026-02-09 through 2026-07-11
+> **Total commits:** 3,448 (through the 2026-05-18 capability cutoff; the performance campaign below adds the 2026-05-18 → 2026-07-11 window)
 > **Tracker:** [`.beads/issues.jsonl`](https://github.com/Dicklesworthstone/frankenfs/blob/main/.beads/issues.jsonl) (raw rows as of 2026-05-18: 2,859 closed, 45 open, 1 deferred; source-aware queue excludes 28 foreign-looking open rows)
 
 > **What's new since the 2026-04-07 cutoff (2,765 additional commits):** the
@@ -19,6 +19,197 @@ All notable changes to FrankenFS are documented in this file, organized by capab
 > `per-core`) with their own evidence manifests. The mounted write workload
 > matrix, repair-writeback serializer, swarm responsiveness lanes, and soak /
 > canary campaign reporter all landed in the same window.
+
+---
+
+## Version Timeline
+
+| Version | Date | Kind | Headline |
+|---|---|---|---|
+| **v0.2.0** | 2026-07-11 | First tagged release (GitHub Release) | Performance-campaign consolidation: measured, byte-identical wins across checksum, metadata/directory, extent/read, allocator, compression, MVCC, and btrfs-COW subsystems, plus an honest negative-evidence ledger of every rejected lever |
+| _(pre-tag)_ | 2026-02-09 → 2026-05-18 | Untagged continuous development | V1 parity matrix complete (97/97 tracked rows); release-gate policy, proof bundles, adaptive mount-runtime modes, hostile-image containment, metamorphic proptests, asupersync 0.2 → 0.3 (documented in the capability sections below) |
+
+> This is the first entry in the project's release history. Prior to `v0.2.0` FrankenFS had no formal releases or tags; the capability sections that follow this changelog reconstruct that untagged history by subsystem.
+
+---
+
+## v0.2.0 — Performance Campaign (2026-05-18 → 2026-07-11)
+
+A multi-agent, negative-evidence-ledger-first optimization campaign. Every kept
+lever is **measured** (honest same-worker A/B interleaved in one binary, gated on
+**median** self-time vs a **paired null control** — the identical arm run twice —
+with cv < 5%), **isomorphism-preserving** (behaviour proven byte-identical, and
+btrfs images pass `btrfs-check` / ext4 images pass `e2fsck` before the win is
+kept), and **profile-first** (the mechanism comes from a callgrind/perf profile
+or the code, never a guess). One lever per commit. Rejected levers are not
+deleted — they are recorded with their null-control result and a *retry
+condition* in the negative-evidence ledger, so no one re-attempts a dead end.
+
+The comparator throughout is the mounted **kernel** filesystem (ext4 / btrfs).
+Ratios below are the measured medians from the campaign; where a candidate
+*failed* honest scrutiny (e.g. a headline cold-read row that flipped sign under
+a corrected harness), that too is recorded rather than shipped.
+
+### Checksum / CRC — the deepest vein
+
+Incremental and zero-run-aware CRC primitives replaced whole-block recomputation
+across every checksum site.
+
+- **Incremental `crc32c` primitive** — roll a delta into an existing CRC instead
+  of re-CRC-ing the whole block: **11.6×** vs full recompute
+  [`ff222d17`](https://github.com/Dicklesworthstone/frankenfs/commit/ff222d17), widened to **14×** with a table-driven `raw_crc32c`
+  [`2372577b`](https://github.com/Dicklesworthstone/frankenfs/commit/2372577b) and **24.7×** with a branchless `gf2_matrix_times`
+  [`17380f69`](https://github.com/Dicklesworthstone/frankenfs/commit/17380f69).
+- **Incremental dir-block checksum** — **10.3×** vs full recompute
+  [`56cb5f94`](https://github.com/Dicklesworthstone/frankenfs/commit/56cb5f94), wired into the CREATE/rename insert path (span-gated)
+  at **9.25×** [`4976d6d7`](https://github.com/Dicklesworthstone/frankenfs/commit/4976d6d7).
+- **Zero-run-aware CRCs** — algebraically skip the zero tail: superblock **1.12×**
+  [`041f04f4`](https://github.com/Dicklesworthstone/frankenfs/commit/041f04f4) (completing the vein), plus zero-run-aware bitmap
+  (2.54×), extent-node (3.52×) and dir-block (3.92×) variants.
+- **Axis close** — the write-side inode checksum stamp was verified already
+  no-copy (single-pass zero-in-place); crc32c uses the HW instruction and
+  `csum_seed` is cached at open [`a5a97e12`](https://github.com/Dicklesworthstone/frankenfs/commit/a5a97e12).
+
+### Metadata & directory operations — algorithmic complexity kills
+
+The highest-value wins: several directory operations were quadratic and are now
+linear or logarithmic.
+
+- **Name-index closes the create existence-check `O(N²)`** — create went from
+  **26× slower than kernel to kernel parity**
+  [`1fcd0b62`](https://github.com/Dicklesworthstone/frankenfs/commit/1fcd0b62); hook extended to mkdir/mknod/symlink/link,
+  `O(N²)→O(N)`, **75× → 1.35×** vs kernel [`96aa5c53`](https://github.com/Dicklesworthstone/frankenfs/commit/96aa5c53).
+- **Delete htree fast-path** — removal `O(N²)→O(log N)`, delete gap **5.3× → 2.1×**
+  [`85d46923`](https://github.com/Dicklesworthstone/frankenfs/commit/85d46923).
+- **Coalesce contiguous extents on the file write-allocation path** —
+  `O(N²)→O(N)`, **120× at N=40k** on fine-grained 4 KiB allocation
+  [`2aa92946`](https://github.com/Dicklesworthstone/frankenfs/commit/2aa92946).
+- **Rename preflights only the hash-target leaf**, not all dir blocks —
+  `O(N²)→O(N)`, **5.57× at N=40k** [`51294142`](https://github.com/Dicklesworthstone/frankenfs/commit/51294142).
+- **Shard the name-index** to fix a parallel-create rayon convoy — 4× *negative*
+  scaling → 2×, kernel gap **16× → 8.3×** [`4cfc2dac`](https://github.com/Dicklesworthstone/frankenfs/commit/4cfc2dac).
+- **htree leaf-search borrow** — lookup **2.5×**, helps every metadata op
+  [`d52eb62e`](https://github.com/Dicklesworthstone/frankenfs/commit/d52eb62e); skeletal `AttrOnly` inode parse for getattr **1.11×**
+  [`8314ca8c`](https://github.com/Dicklesworthstone/frankenfs/commit/8314ca8c); `MetadataOnly` parse for the name-index stamp **1.24×**
+  [`bc47b311`](https://github.com/Dicklesworthstone/frankenfs/commit/bc47b311); `sort_unstable` for htree hash sorts **1.47×**
+  [`a4ba9241`](https://github.com/Dicklesworthstone/frankenfs/commit/a4ba9241).
+
+### SWAR / word-at-a-time primitives
+
+Branchless byte-processing on hot string and hash paths.
+
+- **Word-at-a-time hash for `extent_root_namespace`** — **7.14×**
+  [`96c27663`](https://github.com/Dicklesworthstone/frankenfs/commit/96c27663).
+- **SWAR one-pass path-component validation** (has-byte trick) — **3.41×**
+  [`2a380996`](https://github.com/Dicklesworthstone/frankenfs/commit/2a380996); the has-zero family (name/path validate, first-NUL symlink) lands
+  **3.1–4.0×**.
+- **SWAR ASCII case-fold compare** for casefold directories — **1.64×**
+  [`3dcf558f`](https://github.com/Dicklesworthstone/frankenfs/commit/3dcf558f); SWAR word-at-a-time name compare **1.80×**.
+- **`str2hashbuf` on a stack `[u32;8]`** — ~34% faster htree hash, removes a
+  per-hash heap alloc [`a6c4c505`](https://github.com/Dicklesworthstone/frankenfs/commit/a6c4c505).
+
+### Extent resolution & read path
+
+- **Binary-search the ext4 extent leaf + index** — `O(E)→O(log E)`, **up to 19×**
+  [`2785e425`](https://github.com/Dicklesworthstone/frankenfs/commit/2785e425).
+- **Sequential mapping hint** on the per-block read resolve — **2.0–2.5×**, no
+  downside [`751251da`](https://github.com/Dicklesworthstone/frankenfs/commit/751251da), extended to the readdir plan loops
+  [`8334e658`](https://github.com/Dicklesworthstone/frankenfs/commit/8334e658).
+- **Fix `ExtentCache` shard distribution** (hash the namespace) — **4.6×**
+  many-inode read-data [`0301f38a`](https://github.com/Dicklesworthstone/frankenfs/commit/0301f38a); extent-cache depth-1 borrow-in-place skips
+  the per-block `Vec` take/store [`23986087`](https://github.com/Dicklesworthstone/frankenfs/commit/23986087).
+- **Memoize journal-inode indirect resolution** in journal replay — fixes a
+  **2024×** re-read at every mount [`fe00c75e`](https://github.com/Dicklesworthstone/frankenfs/commit/fe00c75e), plus a multi-entry indirect-block
+  memo [`f7c9f328`](https://github.com/Dicklesworthstone/frankenfs/commit/f7c9f328).
+- **btrfs read directly into the caller buffer** in `read_into` — **1.37× warm,
+  RSS halved, beats kernel** [`54b0ae94`](https://github.com/Dicklesworthstone/frankenfs/commit/54b0ae94); RO decompressed-extent cache
+  **1.55×** compressed random read [`90bf7cfa`](https://github.com/Dicklesworthstone/frankenfs/commit/90bf7cfa).
+
+### Allocator
+
+- **Binary range-overlap for the free-path reserved check** — **up to 3110×**
+  [`af91cc18`](https://github.com/Dicklesworthstone/frankenfs/commit/af91cc18).
+- **Cache the per-group reserved-block set** — mkdir **2.77×**, all
+  block-allocation ops [`37cdf5f8`](https://github.com/Dicklesworthstone/frankenfs/commit/37cdf5f8); skip the per-alloc reserved-marking loop once
+  the group is confirmed — mkdir **1.16×** [`c5df77f0`](https://github.com/Dicklesworthstone/frankenfs/commit/c5df77f0).
+- **Byte-wise inode-bitmap padding fill** — create **1.14×** / parallel **1.18×**
+  [`369f1493`](https://github.com/Dicklesworthstone/frankenfs/commit/369f1493); skip the per-alloc largest-free-run rescan on the single-block path
+  (~1.15×, exact-on-demand) [`8319465d`](https://github.com/Dicklesworthstone/frankenfs/commit/8319465d).
+- **Skip re-reading the unchanged bitmap** for the descriptor checksum —
+  **15.8× fewer delete preads** [`b296dbdb`](https://github.com/Dicklesworthstone/frankenfs/commit/b296dbdb).
+
+### Compression — codec-context reuse
+
+Swapped the DEFLATE backend to the pure-safe-Rust `zlib-rs` (byte-identical
+output, no C toolchain, compatible with `unsafe_code = "forbid"`) and reuse the
+codec context across calls.
+
+- **Thread-local zlib inflate context reuse** in `btrfs_decompress` — **1.43×**
+  decode, avoids the 32 KiB inflate-window alloc per call
+  [`32a86235`](https://github.com/Dicklesworthstone/frankenfs/commit/32a86235); shared with e2compr gzip inflate — **2.21× at 4 KiB**
+  [`85f0ccea`](https://github.com/Dicklesworthstone/frankenfs/commit/85f0ccea); level-keyed deflate (write) context reuse — **1.44×**
+  [`a1e666c0`](https://github.com/Dicklesworthstone/frankenfs/commit/a1e666c0).
+
+### MVCC concurrency
+
+- **Skip per-read snapshot register/release** for read-only reads — **5×**
+  parallel random read [`9376f4d6`](https://github.com/Dicklesworthstone/frankenfs/commit/9376f4d6).
+- **Drop the forced 4096-realign** on version storage — **1.82× commit, 1.35×
+  throughput** [`eb229915`](https://github.com/Dicklesworthstone/frankenfs/commit/eb229915).
+- **Size the sharded store to host parallelism** instead of a fixed 8 shards —
+  parallel writes **1.17× @16w / 1.29× @32w** [`a2807896`](https://github.com/Dicklesworthstone/frankenfs/commit/a2807896).
+
+### btrfs COW batching
+
+- **COW `insert_many` in-place batching** — **1.68×** on the btrfs-create insert
+  pattern [`56fdc677`](https://github.com/Dicklesworthstone/frankenfs/commit/56fdc677); coalesce the create/mkdir/delete/rename parent updates via
+  `insert_many`/`remove_many`: create **1.43×** (gap 3.0× → 2.08×)
+  [`b5e22c17`](https://github.com/Dicklesworthstone/frankenfs/commit/b5e22c17), mkdir **1.45×** [`d518312a`](https://github.com/Dicklesworthstone/frankenfs/commit/d518312a), delete **1.44×**
+  [`aee47f35`](https://github.com/Dicklesworthstone/frankenfs/commit/aee47f35), rename **1.25×** [`f90648f5`](https://github.com/Dicklesworthstone/frankenfs/commit/f90648f5).
+- **`Arc<[u8]>` for COW item data** — **1.47×** create [`2e4e848d`](https://github.com/Dicklesworthstone/frankenfs/commit/2e4e848d); **`FxHashMap`**
+  node store — **1.20×** delete [`8b04930e`](https://github.com/Dicklesworthstone/frankenfs/commit/8b04930e); separator-carry-forward removal makes
+  rename separator recompute `O(max_items)→O(1)`, **+1.13× @40k**
+  [`c911e8a5`](https://github.com/Dicklesworthstone/frankenfs/commit/c911e8a5).
+- **Fan-out gate the prefetch pool** — btrfs metadata walk **4.3×** (7× → 1.6× vs
+  kernel) [`18fb0e88`](https://github.com/Dicklesworthstone/frankenfs/commit/18fb0e88); cold metadata is now **~3× faster than kernel** on a
+  40k-file directory [`c27194d0`](https://github.com/Dicklesworthstone/frankenfs/commit/c27194d0).
+
+### CLI / global allocator
+
+- **jemalloc global allocator** — create **1.26–1.6× faster** (now faster than
+  kernel single-thread), parallel **2.2×** [`14f443cb`](https://github.com/Dicklesworthstone/frankenfs/commit/14f443cb).
+- **Parallelize `walk --read-data`** across files — many-small-files read **3.85×
+  loss → 1.29× win** [`de194cb9`](https://github.com/Dicklesworthstone/frankenfs/commit/de194cb9); cap the rayon pool for metadata-only walk —
+  **1.57×** (4.0× vs kernel `find + stat`) [`e9800e82`](https://github.com/Dicklesworthstone/frankenfs/commit/e9800e82).
+
+### Honesty ledger — what was measured and *not* shipped
+
+The campaign is as much about rejected levers as kept ones. Representative
+findings recorded (not shipped) in the negative-evidence ledger:
+
+- **Cold-read headline correction** — the previously-reported "1.7× faster than
+  kernel" cold row **flipped sign under a corrected harness**: frankenfs is
+  actually **1.42× slower**, and ext4-indirect / fragmented cold rows are slower
+  too [`913dd5c6`](https://github.com/Dicklesworthstone/frankenfs/commit/913dd5c6), [`b873beac`](https://github.com/Dicklesworthstone/frankenfs/commit/b873beac). 41% of the best-config gap was traced to
+  benchmark-harness overhead, not the filesystem [`ac08c8fd`](https://github.com/Dicklesworthstone/frankenfs/commit/ac08c8fd).
+- **`Arc<InodeAttr>` whole-workspace change** — ~10% *regression* on both
+  filesystems (a 130 B POD memcpy is cheaper than two atomic RMWs + a miss
+  alloc); retry only if `InodeAttr` grows large.
+- **Interpolation search on extent resolution** — 3.46–6.6× faster on synthetic
+  uniform data but **2.4–2.9× slower** on realistic skewed extents; ext4's
+  ≤340-entry leaves are L1-resident, so comparisons beat the per-probe divide.
+  Rejected [`ae941d38`](https://github.com/Dicklesworthstone/frankenfs/commit/ae941d38).
+- **The GDT-defer 2.3× lever** was measured real (per-op group-descriptor writes
+  are ~55% of ext4 create) but **shelved unshipped** pending a focused flush-pass
+  fix rather than landed blind [`8451bb5e`](https://github.com/Dicklesworthstone/frankenfs/commit/8451bb5e).
+
+**Evidence sources for this section:** `docs/PERF_CAMPAIGN_FINAL.md` (the shipped
+wins-by-axis and consolidated reject tables), `docs/PERF_CAMPAIGN_STATUS.md`
+(live frontier statement), `docs/NEGATIVE_EVIDENCE.md` and
+`docs/progress/perf-negative-results.md` (per-lever null-control ledger), the
+`perf(` / `bench(` commit history on `main`, and the `.beads/issues.jsonl`
+tracker rows (bd-4tw2n, bd-vpypn, bd-ddryj, bd-bhh0i, bd-cowbatch, bd-xmh5g,
+bd-f8rd8, and siblings).
 
 ---
 

@@ -1788,6 +1788,42 @@ FrankenFS tracks these edges lazily inside the commit path in `ffs-mvcc` and abo
 
 FrankenFS publishes benchmarks under `crates/*/benches/` (criterion-based) and dated baselines under `benchmarks/`. The headline numbers, all on commodity Linux hardware, are:
 
+### Measured wins vs the kernel (`v0.2.0` performance campaign)
+
+The `v0.2.0` release consolidates a solo, negative-evidence-ledger-first
+optimization campaign. Every kept lever is measured against the mounted **kernel**
+filesystem (ext4 / btrfs), proven **byte-identical** before it is kept (btrfs
+images pass `btrfs-check`, ext4 images pass `e2fsck`), and gated on **median**
+self-time vs a **paired null control** (the identical arm run twice, cv < 5%) in
+one honest same-worker A/B binary. Representative headline results:
+
+| Subsystem | Lever | Result | Commit |
+|---|---|---|---|
+| Metadata / directory | Name-index closes the create existence-check `O(N²)` | **26× slower → kernel parity** | [`1fcd0b62`](https://github.com/Dicklesworthstone/frankenfs/commit/1fcd0b62) |
+| Write allocation | Coalesce contiguous extents, `O(N²)→O(N)` | **120× at N=40k** | [`2aa92946`](https://github.com/Dicklesworthstone/frankenfs/commit/2aa92946) |
+| Allocator | Binary range-overlap reserved-check | **up to 3110×** | [`af91cc18`](https://github.com/Dicklesworthstone/frankenfs/commit/af91cc18) |
+| Journal replay | Memoize indirect-block resolution | fixes **2024×** re-read/mount | [`fe00c75e`](https://github.com/Dicklesworthstone/frankenfs/commit/fe00c75e) |
+| Checksum | Incremental `crc32c` (branchless `gf2_matrix_times`) | **24.7×** vs full recompute | [`17380f69`](https://github.com/Dicklesworthstone/frankenfs/commit/17380f69) |
+| Extent resolution | Binary-search leaf + index, `O(E)→O(log E)` | **up to 19×** | [`2785e425`](https://github.com/Dicklesworthstone/frankenfs/commit/2785e425) |
+| Allocator | Skip re-reading unchanged bitmap for descriptor csum | **15.8× fewer delete preads** | [`b296dbdb`](https://github.com/Dicklesworthstone/frankenfs/commit/b296dbdb) |
+| Directory hash | Word-at-a-time `extent_root_namespace` hash (SWAR) | **7.14×** | [`96c27663`](https://github.com/Dicklesworthstone/frankenfs/commit/96c27663) |
+| MVCC | Skip per-read snapshot register/release | **5×** parallel random read | [`9376f4d6`](https://github.com/Dicklesworthstone/frankenfs/commit/9376f4d6) |
+| btrfs metadata | Fan-out gate the prefetch pool | **4.3×** (7× → 1.6× vs kernel) | [`18fb0e88`](https://github.com/Dicklesworthstone/frankenfs/commit/18fb0e88) |
+| CLI | jemalloc global allocator | create **1.26–1.6×**, now faster than kernel single-thread | [`14f443cb`](https://github.com/Dicklesworthstone/frankenfs/commit/14f443cb) |
+| btrfs read | Read directly into caller buffer | **1.37× warm, RSS halved, beats kernel** | [`54b0ae94`](https://github.com/Dicklesworthstone/frankenfs/commit/54b0ae94) |
+
+**Honesty methodology.** Claims are median-gated against a paired null control,
+not best-of-N; wins are isomorphism-preserving (behaviour proven byte-identical
+before keeping); and every *rejected* lever is recorded — with its null-control
+result and a concrete retry condition — in the negative-evidence ledger
+(`docs/NEGATIVE_EVIDENCE.md`, `docs/PERF_CAMPAIGN_FINAL.md`) rather than quietly
+dropped. When honest scrutiny contradicted an earlier claim it was corrected in
+the open: a previously-reported "1.7× faster than kernel" cold-read row flipped
+sign under a corrected harness (frankenfs is actually ~1.42× slower there), and
+that finding is documented instead of buried. See the
+[CHANGELOG](CHANGELOG.md#v020--performance-campaign-2026-05-18--2026-07-11) for
+the full per-subsystem win list and the reject ledger.
+
 ### Verification-gate results
 
 | Subsystem | Workload | Result |
