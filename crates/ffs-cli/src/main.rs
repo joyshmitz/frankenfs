@@ -3198,6 +3198,25 @@ fn walk_cmd(path: &PathBuf, no_stat: bool, parallel: bool, read_data: bool) -> R
     // FASTER than the old cap (warm 24.6 -> 17.8ms, cold 25.2 -> 23.4ms at the
     // natural 64-wide pool), and the fix also covers the FUSE readdir path.)
 
+    // For the --read-data path ONLY, cap the GLOBAL rayon pool the per-file data
+    // reads fan onto. Each read worker's cold pread first-touches + faults its
+    // destination-buffer pages, so an nproc-wide pool has that many buffers
+    // faulting CONCURRENTLY -> kernel LRU-lock (folio_lruvec_lock_irqsave)
+    // contention that was ~45% of the parallel multi-file walk (bd-kdmu4). A
+    // ~16-wide pool cuts the concurrent faulters: measured cold on a 64-core box
+    // (256x256 KiB ext4), 64 threads 20.7 ms / 20,430 faults -> 16 threads
+    // 15.9 ms / 5,559 faults = 1.30x, byte-identical. Metadata-only walks keep
+    // the full pool (they benefit from it -- the removed cap above), so this is
+    // gated on read_data. build_global is best-effort (already-init = no-op).
+    if parallel && read_data {
+        let cap = std::thread::available_parallelism()
+            .map_or(8, std::num::NonZeroUsize::get)
+            .min(16);
+        let _ = rayon::ThreadPoolBuilder::new()
+            .num_threads(cap)
+            .build_global();
+    }
+
     let cx = cli_cx();
     let open_fs = OpenFs::open(&cx, path)
         .with_context(|| format!("failed to open image: {}", path.display()))?;
