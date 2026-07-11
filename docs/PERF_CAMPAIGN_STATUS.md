@@ -27,6 +27,31 @@ solo micro-lever remains.** Holding — stop hunting. Detailed rows in
 
 **HOLD: no honest single-turn measured solo win remains.** Await an owner decision on (1)–(4).
 
+> ### 2026-07-10 addendum (BlackThrush) — PROFILING HARD-BLOCKER LIFTED
+>
+> The directive-memory HARD BLOCKER ("profiling unavailable — `perf_event_paranoid=4`
+> on all rch workers → frankenfs perf work is guesswork, the profile-first
+> directive can't be executed with integrity") is **now lifted**: `valgrind`/
+> `callgrind` is installed and **live-verified working** on rch worker `ovh-a`
+> (`51.222.245.56`, non-root, 16c, 361 GB free) — callgrind is instrumentation-based,
+> needs neither root nor a PMU. The Contabo `root@` workers have `perf` but no PMU
+> passthrough (virtualized → hardware sampling unavailable). **What this changes:**
+> for the first time the campaign can do real profile-first CPU-composite
+> attribution (rank frames WITHIN a real `ls -l`/read op, not just isolated
+> micro-A/Bs) via `callgrind_annotate` on a bench binary built on `ovh-a` — text
+> output is retrievable, sidestepping the returnable-binary blocker. **What it does
+> NOT change:** callgrind measures Ir (instruction retirement) — blind to
+> cache-miss stalls, I/O wait, and lock contention, which ARE the frontier's
+> remaining gaps (I/O-bound reads, commit/contention-bound writes). So it refines
+> the CPU frontier (already covered by ~75 benches) and helps peer/owner work; it
+> cannot reopen a solo CPU lever. Recipe recorded in `[[blackthrush-campaign-state]]`.
+> A fresh new-primitive probe this turn (succinct/SIMD/cache-oblivious + readdir
+> names + xattr) was EMPTY — see the `bd-cc-profiling-unblock` row in
+> `docs/NEGATIVE_EVIDENCE.md`. **VERDICT: HOLD on solo CPU levers; the actionable
+> next step is an owner decision to profile-first a CPU-bound composite with
+> callgrind, or to pursue the I/O/contention items (`bd-bhh0i`, mounted comparator)
+> that Ir cannot see.**
+
 > ## ⚠️ LOOP-GUARD (updated 2026-07-04, BlackThrush) — MOSTLY exhausted, but composite/multi-stage sub-paths still hide levers. Actually BENCH candidates; don't assume "covered".
 >
 > ⭐**CORRECTION**: an earlier version of this guard said the dig was fully
