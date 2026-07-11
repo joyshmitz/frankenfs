@@ -52,6 +52,29 @@ solo micro-lever remains.** Holding — stop hunting. Detailed rows in
 > callgrind, or to pursue the I/O/contention items (`bd-bhh0i`, mounted comparator)
 > that Ir cannot see.**
 
+> ### 2026-07-10 addendum-2 (BlackThrush) — COMPOSITE PROFILE EXECUTED → median-neutral → HOLD
+>
+> Ran the profile-first CPU-composite the prior addendum called for: callgrind on
+> the REAL FUSE `getattr`/`lookup` paths (`ovh-a`, throwaway harness
+> `crates/ffs-core/benches/cg_metadata_composite.rs`, untracked). **Campaign's
+> first composite attribution.** *getattr = 954 Ir/call:* `inode_to_attr` **27.9%
+> incl** (FALSIFIES the code-reasoned "inode_to_attr FREE" `19a20908`), of which the
+> 4× `SystemTime` timestamp conversions ≈ **16%** (std `UNIX_EPOCH.checked_add`
+> FLOOR under `#![forbid(unsafe_code)]`); `AttrOnly` parse ~18% (already landed
+> `8314ca8c`); MVCC `read_visible` ~4% (PEER ffs-mvcc). *lookup = 2631 Ir/call:*
+> ~3 malloc/free per call. **One lever tried** — the common serial linear-scan arm
+> collected a per-block results `Vec` then searched; rewrote to early-exit (drop
+> the `Vec`, stop at first match, output-identical, getattr control byte-identical):
+> deterministic **−7.79% Ir** (394.65M→363.9M, malloc 3→2/lookup) **but WALL-CLOCK
+> MEDIAN NEUTRAL (60M-loop, setup-subtracted: 10.52s→10.46s = 0.57%, within cv~4%
+> noise)** — the `locate_inode` (`a1bab91e`) Ir-positive/median-neutral pattern
+> (lookup is memory-stall-bound; callgrind is Ir-blind exactly there, as the prior
+> addendum predicted). **REJECTED per the median gate; recoverable `stash@{0}`; no
+> production bytes changed.** See `bd-cc-composite-callgrind` in
+> `docs/NEGATIVE_EVIDENCE.md`. **VERDICT: frontier now re-confirmed by REAL PROFILE
+> DATA (not code-reasoning) — getattr/lookup Ir is landed / std-floored / peer /
+> median-neutral; HOLD stands.**
+
 > ## ⚠️ LOOP-GUARD (updated 2026-07-04, BlackThrush) — MOSTLY exhausted, but composite/multi-stage sub-paths still hide levers. Actually BENCH candidates; don't assume "covered".
 >
 > ⭐**CORRECTION**: an earlier version of this guard said the dig was fully
