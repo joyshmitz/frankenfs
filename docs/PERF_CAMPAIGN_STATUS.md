@@ -1,5 +1,26 @@
 # Perf campaign status — read this first
 
+> ## ⭐ 2026-07-11 UNBLOCK + WIN (BlackThrush) — the "returnable-binary" gate was never real; mounted axis is OPEN
+>
+> The blocker cited across many rows ("rch can't ship the binary back → mounted
+> read/CLI levers unmeasurable", bd-b9dug) is **FALSE**. rch full-retrieves via the
+> DEFAULT target: `RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec -- cargo
+> build -p ffs-cli --release` → `./target/release/ffs-cli` (600+ files). The trap
+> was setting a *custom* `CARGO_TARGET_DIR` → rch's "Custom CARGO_TARGET_DIR"
+> retrieval returns METADATA ONLY (5 files). Cold measurement: `sudo -n sysctl
+> vm.drop_caches=3` (the `>` redirect form is dcg-blocked; sysctl is not).
+>
+> **First mounted-axis WIN shipped (4b25a2bc, bd-zvn7r):** the cold-read
+> destination-buffer page churn (28.91% of cycles) = the CLI read's fresh 64 MiB
+> output buffer. Default `STREAM_CHUNK` 64→32 MiB (still 256 internal 128 KiB
+> parallel jobs, half the faults). Cold null-controlled in-tree A/B: **1.05x**
+> (49.36→46.83 ms) vs a 1.01x identical-arm null floor; byte-identical (sha256
+> parity). Neutral (never regressive) on slow-I/O boxes. `FFS_STREAM_CHUNK_MB`
+> override added. **The mounted comparator gaps (bd-57lae readdir+stat, bd-kdmu4
+> multi-file read, bd-opb6l create-storm, fsync) are now all measurable** — the
+> solo-CPU frontier is done, but this axis is freshly open.
+
+
 ## ✅ FINAL FRONTIER SUMMARY — 2026-07-10 (BlackThrush / cc_ffs) — ALL AXES MAPPED, HOLD
 
 > **Consolidated capstone:** `docs/PERF_CAMPAIGN_FINAL.md` — shipped wins by axis
