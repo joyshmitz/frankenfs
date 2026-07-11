@@ -2371,7 +2371,28 @@ fn log_wal_recovery_telemetry(wal: &WalReplayInfoOutput) {
 }
 
 fn read_file_cmd(path: &PathBuf, file_path: &str, discard: bool) -> Result<()> {
-    const STREAM_CHUNK: u32 = 64 * 1024 * 1024; // 64 MiB
+    // The per-stream output buffer size. A large buffer is a fresh anon
+    // allocation whose pages the kernel faults + zero-fills on first write
+    // (bd-zvn7r: 28.91% of cold-read *cycles* at 64 MiB = ~16,384 faulted pages).
+    // The read parallelism comes from the engine's internal 128 KiB chunking
+    // (`PARALLEL_READ_CHUNK_BLOCKS`), NOT this outer buffer — at 32 MiB the read
+    // still issues 256 parallel 128 KiB jobs per `read_into`, saturating the
+    // bounded read pool many times over, so shrinking 64→32 MiB halves the
+    // per-stream faulted pages without losing overlap. Measured (cold, in-tree,
+    // drop_caches/rep, 30 interleaved reps, 128 MiB ext4 read; `duration_us`):
+    // 64 MiB 48.16 ms vs **32 MiB 46.26 ms = 1.04x**, above the identical-arm null
+    // floor (64a vs 64b = 1.01x); faults 19,806→11,603; RSS 68→35 MiB. Byte-
+    // identical output (sha256 parity for every size). Below ~16 MiB the extra
+    // `read_into` boundaries lose more overlap than the faults save (8 MiB 0.98x,
+    // 4 MiB 0.88x, 2 MiB 0.73x), so 32 MiB is the plateau's low-fault edge. The
+    // win only appears when device I/O does not hide the fault work, so on a
+    // slow-I/O device it is neutral, never a regression. `FFS_STREAM_CHUNK_MB`
+    // overrides for per-device tuning.
+    let stream_chunk: u32 = std::env::var("FFS_STREAM_CHUNK_MB")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .filter(|&mb| mb > 0)
+        .map_or(32 * 1024 * 1024, |mb| mb.saturating_mul(1024 * 1024));
 
     use std::io::Write;
     let cx = cli_cx();
@@ -2403,10 +2424,10 @@ fn read_file_cmd(path: &PathBuf, file_path: &str, discard: bool) -> Result<()> {
     // Reuse one chunk buffer across the whole stream via read_into, so a
     // multi-chunk file does not allocate (and mmap/page-fault/munmap) a fresh
     // multi-MiB Vec per chunk (bd-2x68s). Sized to the first chunk's need.
-    let first = u32::try_from(size.min(u64::from(STREAM_CHUNK))).unwrap_or(STREAM_CHUNK);
+    let first = u32::try_from(size.min(u64::from(stream_chunk))).unwrap_or(stream_chunk);
     let mut buf: Vec<u8> = vec![0_u8; first.max(1) as usize];
     while off < size {
-        let want = u32::try_from((size - off).min(u64::from(STREAM_CHUNK))).unwrap_or(STREAM_CHUNK);
+        let want = u32::try_from((size - off).min(u64::from(stream_chunk))).unwrap_or(stream_chunk);
         let n = open_fs
             .read_into(&cx, ino, off, &mut buf[..want as usize])
             .with_context(|| format!("failed to read {file_path} at {off}"))?;
