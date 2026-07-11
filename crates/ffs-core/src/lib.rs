@@ -16809,6 +16809,27 @@ enum RenameTargetProbe {
     NotChecked,
 }
 
+/// Outcome of attempting to insert a dir entry into the parent's EXISTING
+/// directory blocks (no allocation). `Inserted` means the entry was staged and
+/// the parent inode updated; the `NeedsGrowth*` variants signal that the caller
+/// must run the (write-locked) growth path. Extracted from `ext4_add_dir_entry`
+/// so the narrowed create path (bd-bhh0i) can run the common case under a
+/// shared lock.
+enum DirInsertOutcome {
+    /// Entry added to an existing block; parent inode already updated.
+    Inserted,
+    /// The htree target leaf is full — carries the nav context so the caller
+    /// can split that one leaf (bd-gauub) or fall back to the full rebuild.
+    NeedsGrowthHtree {
+        target_logical: u32,
+        target_phys: BlockNumber,
+        leaf: Vec<u8>,
+    },
+    /// All linear blocks are full — caller converts to htree or allocates a
+    /// new directory block.
+    NeedsGrowthLinear,
+}
+
 impl OpenFs {
     /// Extract 60-byte extent tree root from inode's extent_bytes.
     fn extent_root(inode: &Ext4Inode) -> [u8; 60] {
@@ -17924,6 +17945,191 @@ impl OpenFs {
         Ok(())
     }
 
+    /// Attempt to insert `name -> child_ino_u32` into the parent directory's
+    /// EXISTING blocks (the htree target leaf, or a linear block with free
+    /// space), staging the block write + the parent-inode update through `dev`.
+    /// Reads `alloc` immutably (geometry + group descriptors for the inode
+    /// write) and never allocates — a full target returns a `NeedsGrowth*`
+    /// outcome so the caller runs the write-locked growth path. Extracted
+    /// verbatim from `ext4_add_dir_entry` (bd-bhh0i slice A, behaviour-
+    /// preserving): the read/write/stamp order is byte-for-byte identical.
+    #[allow(clippy::too_many_arguments)]
+    fn ext4_try_insert_existing(
+        &self,
+        cx: &Cx,
+        dev: &dyn BlockDevice,
+        alloc: &Ext4AllocState,
+        parent: InodeNumber,
+        parent_inode: &Ext4Inode,
+        extents: &[Ext4Extent],
+        name: &[u8],
+        child_ino_u32: u32,
+        parent_ino_u32: u32,
+        parent_generation: u32,
+        file_type: Ext4FileType,
+        reserved_tail: usize,
+        csum_seed: u32,
+        tstamp_secs: u64,
+        tstamp_nanos: u32,
+    ) -> ffs_error::Result<DirInsertOutcome> {
+        if parent_inode.has_htree_index() {
+            let casefold = parent_inode.flags & ffs_types::EXT4_CASEFOLD_FL != 0;
+            if casefold && !name.is_ascii() {
+                return Err(FfsError::UnsupportedFeature(format!(
+                    "non-ASCII casefold htree directory inode {} insert is not yet supported (bd-owt2r: needs byte-exact UTF-8 normalization)",
+                    parent.0
+                )));
+            }
+            let resolve_logical = |logical: u32| -> Option<BlockNumber> {
+                let pos = extents.partition_point(|e| e.logical_block <= logical);
+                let ext = extents.get(pos.checked_sub(1)?)?;
+                if ext.is_unwritten() {
+                    return None;
+                }
+                let start = ext.logical_block;
+                let len = u32::from(ext.actual_len());
+                (logical >= start && logical < start.saturating_add(len))
+                    .then(|| BlockNumber(ext.physical_start + u64::from(logical - start)))
+            };
+
+            let sb = self
+                .ext4_superblock()
+                .ok_or_else(|| FfsError::Format("htree directory on non-ext4 fs".into()))?;
+            let read_leaf =
+                |lb| resolve_logical(lb).and_then(|phys| self.read_block_vec(cx, phys).ok());
+            let target_logical = if casefold {
+                ffs_ondisk::htree_target_leaf_block_casefold(
+                    &sb.hash_seed,
+                    sb.has_large_dir(),
+                    name,
+                    |v| sb.effective_dirhash_version(v),
+                    read_leaf,
+                )
+            } else {
+                ffs_ondisk::htree_target_leaf_block(
+                    &sb.hash_seed,
+                    sb.has_large_dir(),
+                    name,
+                    |v| sb.effective_dirhash_version(v),
+                    read_leaf,
+                )
+            }
+            .ok_or_else(|| FfsError::Corruption {
+                block: 0,
+                detail: format!(
+                    "htree directory inode {} index is unreadable; refusing to insert (would corrupt dx_root, bd-wb4cd)",
+                    parent.0
+                ),
+            })?;
+            let target_phys = resolve_logical(target_logical).ok_or_else(|| {
+                FfsError::Corruption {
+                    block: 0,
+                    detail: format!(
+                        "htree directory inode {} dx index references unmapped leaf block {target_logical}",
+                        parent.0
+                    ),
+                }
+            })?;
+
+            let mut data = self.read_block_vec(cx, target_phys)?;
+            match ffs_dir::add_entry_reject_existing_tracked(
+                &mut data,
+                child_ino_u32,
+                name,
+                file_type,
+                reserved_tail,
+            ) {
+                Ok((_, edit)) => {
+                    self.stamp_ext4_dir_block_maybe_incremental(
+                        &mut data,
+                        parent_ino_u32,
+                        parent_generation,
+                        edit.as_ref(),
+                    );
+                    dev.write_block(cx, target_phys, &data)?;
+
+                    let mut parent_upd = parent_inode.clone();
+                    ffs_inode::touch_mtime_ctime(&mut parent_upd, tstamp_secs, tstamp_nanos);
+                    if file_type == Ext4FileType::Dir {
+                        parent_upd.links_count = Self::ext4_dir_link_inc(
+                            parent_upd.links_count,
+                            parent,
+                            parent_upd.flags & ffs_types::EXT4_INDEX_FL != 0,
+                        )?;
+                    }
+                    ffs_inode::write_inode(
+                        cx,
+                        dev,
+                        &alloc.geo,
+                        &alloc.groups,
+                        parent,
+                        &parent_upd,
+                        csum_seed,
+                    )?;
+                    return Ok(DirInsertOutcome::Inserted);
+                }
+                Err(FfsError::NoSpace) => {
+                    return Ok(DirInsertOutcome::NeedsGrowthHtree {
+                        target_logical,
+                        target_phys,
+                        leaf: data,
+                    });
+                }
+                Err(e) => return Err(e),
+            }
+        }
+
+        for ext in extents {
+            if ext.is_unwritten() {
+                continue;
+            }
+            for block in Self::extent_phys_blocks(ext) {
+                let mut data = self.read_block_vec(cx, block)?;
+                match ffs_dir::add_entry_tracked(
+                    &mut data,
+                    child_ino_u32,
+                    name,
+                    file_type,
+                    reserved_tail,
+                ) {
+                    Ok((_, edit)) => {
+                        self.stamp_ext4_dir_block_maybe_incremental(
+                            &mut data,
+                            parent_ino_u32,
+                            parent_generation,
+                            edit.as_ref(),
+                        );
+                        dev.write_block(cx, block, &data)?;
+
+                        let mut parent_upd = parent_inode.clone();
+                        ffs_inode::touch_mtime_ctime(&mut parent_upd, tstamp_secs, tstamp_nanos);
+                        if file_type == Ext4FileType::Dir {
+                            parent_upd.links_count = Self::ext4_dir_link_inc(
+                                parent_upd.links_count,
+                                parent,
+                                parent_upd.flags & ffs_types::EXT4_INDEX_FL != 0,
+                            )?;
+                        }
+                        ffs_inode::write_inode(
+                            cx,
+                            dev,
+                            &alloc.geo,
+                            &alloc.groups,
+                            parent,
+                            &parent_upd,
+                            csum_seed,
+                        )?;
+                        return Ok(DirInsertOutcome::Inserted);
+                    }
+                    Err(FfsError::NoSpace) => {}
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+
+        Ok(DirInsertOutcome::NeedsGrowthLinear)
+    }
+
     /// Add a directory entry by scanning existing dir blocks, or allocating a new one.
     #[allow(clippy::too_many_arguments, clippy::significant_drop_tightening)]
     #[expect(clippy::too_many_lines)]
@@ -17981,124 +18187,29 @@ impl OpenFs {
             // route the entry to the hash-correct leaf — the same leaf
             // htree_find_entry navigates to — so the index stays consistent and
             // the dx_root is never linear-written.
-            if parent_inode.has_htree_index() {
-                // Casefold htree directories index by the case-folded name. For
-                // ASCII names FrankenFS's fold is byte-exact to the kernel, so we
-                // can locate the hash-correct leaf and add there. Non-ASCII names
-                // fold via an approximation that may diverge from the kernel's
-                // normalization tables — and the write side has no linear-scan
-                // safety net — so refuse those rather than place an entry the
-                // kernel would never find (bd-owt2r).
-                let casefold = parent_inode.flags & ffs_types::EXT4_CASEFOLD_FL != 0;
-                if casefold && !name.is_ascii() {
-                    return Err(FfsError::UnsupportedFeature(format!(
-                        "non-ASCII casefold htree directory inode {} insert is not yet supported (bd-owt2r: needs byte-exact UTF-8 normalization)",
-                        parent.0
-                    )));
-                }
-                let resolve_logical = |logical: u32| -> Option<BlockNumber> {
-                    // Directory extents are sorted ascending by logical_block and
-                    // non-overlapping, so the only extent that can cover `logical`
-                    // is the last whose start is <= it — a partition_point binary
-                    // search instead of a linear scan of all E extents per
-                    // htree-leaf-read (bd-urrco). If that extent is unwritten or
-                    // doesn't reach `logical`, no extent maps it (any earlier ends
-                    // at/before its start; any later starts past `logical`), so the
-                    // answer is None — identical to the old skip-unwritten scan.
-                    let pos = extents.partition_point(|e| e.logical_block <= logical);
-                    let ext = extents.get(pos.checked_sub(1)?)?;
-                    if ext.is_unwritten() {
-                        return None;
-                    }
-                    let start = ext.logical_block;
-                    let len = u32::from(ext.actual_len());
-                    (logical >= start && logical < start.saturating_add(len))
-                        .then(|| BlockNumber(ext.physical_start + u64::from(logical - start)))
-                };
-
-                let sb = self
-                    .ext4_superblock()
-                    .ok_or_else(|| FfsError::Format("htree directory on non-ext4 fs".into()))?;
-                let read_leaf =
-                    |lb| resolve_logical(lb).and_then(|phys| self.read_block_vec(cx, phys).ok());
-                let target_logical = if casefold {
-                    ffs_ondisk::htree_target_leaf_block_casefold(
-                        &sb.hash_seed,
-                        sb.has_large_dir(),
-                        name,
-                        |v| sb.effective_dirhash_version(v),
-                        read_leaf,
-                    )
-                } else {
-                    ffs_ondisk::htree_target_leaf_block(
-                        &sb.hash_seed,
-                        sb.has_large_dir(),
-                        name,
-                        |v| sb.effective_dirhash_version(v),
-                        read_leaf,
-                    )
-                }
-                .ok_or_else(|| FfsError::Corruption {
-                    block: 0,
-                    detail: format!(
-                        "htree directory inode {} index is unreadable; refusing to insert (would corrupt dx_root, bd-wb4cd)",
-                        parent.0
-                    ),
-                })?;
-                let target_phys = resolve_logical(target_logical).ok_or_else(|| {
-                    FfsError::Corruption {
-                        block: 0,
-                        detail: format!(
-                            "htree directory inode {} dx index references unmapped leaf block {target_logical}",
-                            parent.0
-                        ),
-                    }
-                })?;
-
-                let mut data = self.read_block_vec(cx, target_phys)?;
-                // Fold the duplicate-name (EEXIST) check into this target-leaf
-                // scan. For a hash-indexed directory the hash-correct leaf is the
-                // ONLY block a duplicate of `name` could occupy, so rejecting a
-                // duplicate here is a complete check — letting the create-family
-                // callers skip a separate positive `lookup_name` (a full second
-                // htree descent). A full leaf with no duplicate still returns
-                // NoSpace and falls through to the leaf-split path below.
-                match ffs_dir::add_entry_reject_existing_tracked(
-                    &mut data,
-                    child_ino_u32,
-                    name,
-                    file_type,
-                    reserved_tail,
-                ) {
-                    Ok((_, edit)) => {
-                        self.stamp_ext4_dir_block_maybe_incremental(
-                            &mut data,
-                            parent_ino_u32,
-                            parent_generation,
-                            edit.as_ref(),
-                        );
-                        dev.write_block(cx, target_phys, &data)?;
-
-                        let mut parent_upd = parent_inode.clone();
-                        ffs_inode::touch_mtime_ctime(&mut parent_upd, tstamp_secs, tstamp_nanos);
-                        if file_type == Ext4FileType::Dir {
-                            parent_upd.links_count = Self::ext4_dir_link_inc(
-                                parent_upd.links_count,
-                                parent,
-                                parent_upd.flags & ffs_types::EXT4_INDEX_FL != 0,
-                            )?;
-                        }
-                        ffs_inode::write_inode(
-                            cx,
-                            dev,
-                            &alloc.geo,
-                            &alloc.groups,
-                            parent,
-                            &parent_upd,
-                            csum_seed,
-                        )?;
-                        return Ok(());
-                    }
+            match self.ext4_try_insert_existing(
+                cx,
+                dev,
+                alloc,
+                parent,
+                parent_inode,
+                &extents,
+                name,
+                child_ino_u32,
+                parent_ino_u32,
+                parent_generation,
+                file_type,
+                reserved_tail,
+                csum_seed,
+                tstamp_secs,
+                tstamp_nanos,
+            )? {
+                DirInsertOutcome::Inserted => return Ok(()),
+                DirInsertOutcome::NeedsGrowthHtree {
+                    target_logical,
+                    target_phys,
+                    leaf,
+                } => {
                     // The hash-correct leaf is full: a leaf split is needed. The
                     // O(log N) fast path (bd-gauub) splits just this one leaf and
                     // inserts ONE dx_entry into the dx_root, instead of the O(dir)
@@ -18110,103 +18221,44 @@ impl OpenFs {
                     // validity, not shape). casefold falls back because the split
                     // helper hashes the verbatim name (the rebuild re-hashes by the
                     // fold), so a fold-indexed dir must keep using the rebuild.
-                    Err(FfsError::NoSpace) => {
-                        if !casefold {
-                            match self.ext4_split_htree_leaf_and_add(
-                                cx,
-                                dev,
-                                alloc,
-                                parent,
-                                parent_inode,
-                                &extents,
-                                target_logical,
-                                target_phys,
-                                &data,
-                                name,
-                                child_ino_u32,
-                                file_type,
-                                csum_seed,
-                                tstamp_secs,
-                                tstamp_nanos,
-                            )? {
-                                // Split succeeded and the entry was added.
-                                Some(()) => return Ok(()),
-                                // The split path declined (multi-level index, full
-                                // dx_root, or no clean hash boundary) → rebuild.
-                                None => {}
-                            }
-                        }
-                        return self.ext4_rebuild_htree_dir(
+                    let casefold = parent_inode.flags & ffs_types::EXT4_CASEFOLD_FL != 0;
+                    if !casefold {
+                        if let Some(()) = self.ext4_split_htree_leaf_and_add(
                             cx,
                             dev,
                             alloc,
                             parent,
                             parent_inode,
                             &extents,
+                            target_logical,
+                            target_phys,
+                            &leaf,
                             name,
                             child_ino_u32,
                             file_type,
                             csum_seed,
                             tstamp_secs,
                             tstamp_nanos,
-                        );
-                    }
-                    Err(e) => return Err(e),
-                }
-            }
-
-            for ext in &extents {
-                if ext.is_unwritten() {
-                    continue;
-                }
-                for block in Self::extent_phys_blocks(ext) {
-                    let mut data = self.read_block_vec(cx, block)?;
-                    match ffs_dir::add_entry_tracked(
-                        &mut data,
-                        child_ino_u32,
-                        name,
-                        file_type,
-                        reserved_tail,
-                    ) {
-                        Ok((_, edit)) => {
-                            self.stamp_ext4_dir_block_maybe_incremental(
-                                &mut data,
-                                parent_ino_u32,
-                                parent_generation,
-                                edit.as_ref(),
-                            );
-                            dev.write_block(cx, block, &data)?;
-
-                            // Update parent metadata (timestamps and link count if it's a new directory).
-                            let mut parent_upd = parent_inode.clone();
-                            ffs_inode::touch_mtime_ctime(
-                                &mut parent_upd,
-                                tstamp_secs,
-                                tstamp_nanos,
-                            );
-                            if file_type == Ext4FileType::Dir {
-                                parent_upd.links_count = Self::ext4_dir_link_inc(
-                                    parent_upd.links_count,
-                                    parent,
-                                    parent_upd.flags & ffs_types::EXT4_INDEX_FL != 0,
-                                )?;
-                            }
-
-                            ffs_inode::write_inode(
-                                cx,
-                                dev,
-                                &alloc.geo,
-                                &alloc.groups,
-                                parent,
-                                &parent_upd,
-                                csum_seed,
-                            )?;
+                        )? {
                             return Ok(());
                         }
-                        Err(FfsError::NoSpace) => {}
-                        Err(e) => return Err(e),
                     }
+                    return self.ext4_rebuild_htree_dir(
+                        cx,
+                        dev,
+                        alloc,
+                        parent,
+                        parent_inode,
+                        &extents,
+                        name,
+                        child_ino_u32,
+                        file_type,
+                        csum_seed,
+                        tstamp_secs,
+                        tstamp_nanos,
+                    );
                 }
+                DirInsertOutcome::NeedsGrowthLinear => {}
             }
 
             // All linear blocks are full. If the filesystem supports hash indexing
