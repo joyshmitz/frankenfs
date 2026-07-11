@@ -74,6 +74,22 @@ solo micro-lever remains.** Holding — stop hunting. Detailed rows in
 > `docs/NEGATIVE_EVIDENCE.md`. **VERDICT: frontier now re-confirmed by REAL PROFILE
 > DATA (not code-reasoning) — getattr/lookup Ir is landed / std-floored / peer /
 > median-neutral; HOLD stands.**
+>
+> **LINE-LEVEL follow-up (`callgrind_annotate --auto=yes`, same getattr profile):**
+> read the two hottest self-Ir frames line-by-line to hunt a beatable line —
+> confirms NO clean lever. *`parse_from_bytes_with_ibody` (13% self)* is ALREADY
+> lean: the `if bytes.len() < 128` length check is hoisted so every sub-128 field
+> read (`read_le_u16/u32`) bounds-ELIDES (per-line cost 0.1–0.5%, no fat line), and
+> `AttrOnly` already skips the 60 B `extent_bytes` copy for non-devices — the
+> `read_fixed` bounds-hoist model is already applied, nothing left to hoist.
+> *`read_inode_attr_with_scope` (13% self)* — its visible code lines are all
+> 0.1–1.7%; the 13% is INLINED `Result`/`?`/error machinery + the inlined
+> `read_inode_attr_only_with_scope` wrapper, not real work. *memcpy 3.1%* is the
+> `Ext4Inode` struct-MOVE on the `Ok(inode)` return (codegen artifact, memory-bound,
+> not algorithmic waste — Box'ing it would ADD an alloc). *`inode_to_attr` 27.9%
+> incl* = 4× std `SystemTime` conversion (floor) + lean struct build. **No beatable
+> byte-identical wall-clock-translatable frame at line level — HOLD confirmed at the
+> strongest evidence tier.**
 
 > ## ⚠️ LOOP-GUARD (updated 2026-07-04, BlackThrush) — MOSTLY exhausted, but composite/multi-stage sub-paths still hide levers. Actually BENCH candidates; don't assume "covered".
 >
