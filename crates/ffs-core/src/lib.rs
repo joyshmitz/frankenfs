@@ -54416,6 +54416,96 @@ mod tests {
         );
     }
 
+    /// Inode analogue of the block test above: three consecutive single-inode
+    /// allocations must each succeed, return DISTINCT real inode numbers, and
+    /// debit exactly one inode from the group each allocation lands in (with no
+    /// other group's free count perturbed) — the same observable effect the
+    /// single-lock allocator produces.
+    #[test]
+    #[cfg(feature = "bhh0i_sharded_alloc")]
+    fn bd_bhh0i_sharded_alloc_inode_allocates_valid_distinct_inodes() {
+        let Some((fs, _tmp)) = open_writable_ext4_mkfs(64) else {
+            return; // mkfs.ext4 unavailable on this host — skip like sibling tests.
+        };
+        let cx = Cx::for_testing();
+
+        // Geometry is derived lock-free from the live superblock, exactly how
+        // the sharded path expects the caller to supply it.
+        let sb = fs.ext4_superblock().expect("ext4 superblock");
+        let geo = FsGeometry::from_superblock(sb);
+
+        // Immutable persist context, cloned out of the single-lock alloc state
+        // (`PersistCtx: Clone`) — the very context the single-lock path feeds
+        // `alloc_inode_persist`.
+        let pctx = fs
+            .ext4_alloc_state
+            .as_ref()
+            .expect("ext4 write state present after enable_writes")
+            .read()
+            .persist_ctx
+            .clone();
+
+        // The block device the single-lock alloc path writes bitmaps through.
+        let dev = fs.block_device_adapter();
+
+        // The sharded per-group allocator populated by `enable_writes` under
+        // this feature.
+        let sharded = fs
+            .ext4_sharded_alloc
+            .as_ref()
+            .expect("sharded allocator present under bhh0i_sharded_alloc feature");
+
+        // Group 0 has free inodes on a fresh mkfs image; use it as the target.
+        let target = ffs_types::GroupNumber(0);
+        let group_count = sharded.group_count();
+
+        let mut allocated = Vec::new();
+        for call in 0..3 {
+            // Per-group free-inode snapshot before the allocation.
+            let free_before: Vec<u32> = (0..group_count)
+                .map(|g| sharded.lock_group(g).free_inodes)
+                .collect();
+            let total_before = sharded.total_free().inodes;
+
+            let alloc = sharded
+                .alloc_inode(&cx, &dev, &geo, target, false, &pctx)
+                .unwrap_or_else(|e| panic!("sharded alloc_inode call {call} errored: {e:?}"))
+                .unwrap_or_else(|| panic!("sharded alloc_inode call {call} found no free inode"));
+
+            // The returned inode carries its landing group directly; that group's
+            // free count must have fallen by exactly one, and the whole-array
+            // total fell by exactly one too, so no sibling group was perturbed.
+            let landing = alloc.group.0 as usize;
+            assert!(
+                landing < group_count,
+                "call {call}: landing group {landing} out of range (group_count={group_count})"
+            );
+            let free_after_landing = sharded.lock_group(landing).free_inodes;
+            assert_eq!(
+                free_after_landing,
+                free_before[landing] - 1,
+                "call {call}: landing group {landing} free_inodes must drop by exactly 1"
+            );
+            let total_after = sharded.total_free().inodes;
+            assert_eq!(
+                total_after,
+                total_before - 1,
+                "call {call}: exactly one inode consumed across all groups"
+            );
+
+            allocated.push(alloc.ino);
+        }
+
+        // All three allocations must be distinct real inodes.
+        let distinct: std::collections::HashSet<u64> =
+            allocated.iter().map(|i| i.0).collect();
+        assert_eq!(
+            distinct.len(),
+            3,
+            "the three sharded allocations must be distinct inodes: {allocated:?}"
+        );
+    }
+
     /// Run `e2fsck -fn` (force, read-only) on an image; returns (clean, output).
     fn run_e2fsck(image: &std::path::Path) -> Option<(bool, String)> {
         let out = std::process::Command::new("e2fsck")
