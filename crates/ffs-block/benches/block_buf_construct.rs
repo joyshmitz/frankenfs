@@ -82,6 +82,37 @@ fn bench_block_buf_construct(c: &mut Criterion) {
             black_box(std::sync::Arc::<[u8]>::from(buf.as_slice()))
         });
     });
+
+    // The read-only inode-table cache used to convert each device-returned
+    // `BlockBuf` miss into `Arc<[u8]>`, allocating and copying all 4 KiB. The
+    // candidate stores the native `BlockBuf` and clones its shared backing.
+    // Keep two identical old-shape controls in the same binary so their spread
+    // is the null floor for this isolated ownership transfer.
+    let copied = std::sync::Arc::<[u8]>::from(filled.as_slice());
+    let shared = filled.clone_ref();
+    assert_eq!(copied.as_ref(), shared.as_slice());
+    assert!(filled.shares_storage_with(&shared));
+
+    c.bench_function("inode_cache_miss_arc_copy_a", |b| {
+        b.iter(|| {
+            let buf = black_box(&filled);
+            black_box(std::sync::Arc::<[u8]>::from(buf.as_slice()))
+        });
+    });
+
+    c.bench_function("inode_cache_miss_arc_copy_b", |b| {
+        b.iter(|| {
+            let buf = black_box(&filled);
+            black_box(std::sync::Arc::<[u8]>::from(buf.as_slice()))
+        });
+    });
+
+    c.bench_function("inode_cache_miss_blockbuf_share", |b| {
+        b.iter(|| {
+            let buf = black_box(&filled);
+            black_box(buf.clone_ref())
+        });
+    });
 }
 
 // ── small-read staging buffer: fresh `vec![0;n]` per read vs reused scratch ──

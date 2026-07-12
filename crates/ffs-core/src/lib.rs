@@ -946,7 +946,7 @@ pub struct OpenFs {
     ///
     /// The writable path bypasses this cache because inode metadata changes
     /// are published through MVCC and eventually persisted to these blocks.
-    ext4_inode_table_block_cache: ShardedCache<BlockNumber, Arc<[u8]>>,
+    ext4_inode_table_block_cache: ShardedCache<BlockNumber, BlockBuf>,
     /// Bounded read-only ext4 file-data block cache for scalar tail reads.
     ///
     /// The writable path bypasses this cache because file data changes are
@@ -5242,7 +5242,7 @@ impl OpenFs {
                 detail: "inode crosses block boundary or truncated block".into(),
             });
         }
-        let mut updated = block.to_vec();
+        let mut updated = block.as_slice().to_vec();
         let write_len = raw_inode.len().min(inode_size);
         updated[offset_in_block..offset_in_block + write_len]
             .copy_from_slice(&raw_inode[..write_len]);
@@ -10750,21 +10750,28 @@ impl OpenFs {
         cx: &Cx,
         scope: &RequestScope,
         block: BlockNumber,
-    ) -> Result<Arc<[u8]>, FfsError> {
+    ) -> Result<BlockBuf, FfsError> {
         let cacheable = self.can_cache_ext4_read_only_block(scope, block);
         if cacheable {
             let cached = self.ext4_inode_table_block_cache.get(&block);
             if let Some(cached) = cached {
                 return Ok(cached);
             }
+
+            // Keep the device's native shared, aligned buffer in the read-only
+            // inode-table cache. Converting it to `Arc<[u8]>` allocates and
+            // copies the whole block even though every consumer only borrows a
+            // slice and the cache already needs shared ownership.
+            let block_data = self.block_device_adapter().read_block(cx, block)?;
+            self.ext4_inode_table_block_cache
+                .insert(block, block_data.clone_ref());
+            return Ok(block_data);
         }
 
-        let block_data = self.read_block_arc_with_scope(cx, scope, block)?;
-        if cacheable {
-            self.ext4_inode_table_block_cache
-                .insert(block, Arc::clone(&block_data));
-        }
-        Ok(block_data)
+        // Writable/overlay reads cannot enter the read-only cache. Preserve the
+        // staged-write -> snapshot -> device ordering, materialising an owned
+        // buffer only for these non-cacheable paths.
+        Ok(BlockBuf::new(self.read_block_with_scope(cx, scope, block)?))
     }
 
     fn ext4_inode_table_block_for_inode_with_scope(
@@ -11059,8 +11066,9 @@ impl OpenFs {
             });
         }
 
-        let mut inode = parse(&block_data[offset_in_block..offset_in_block + inode_size])
-            .map_err(|e| parse_to_ffs_error(&e))?;
+        let mut inode =
+            parse(&block_data.as_slice()[offset_in_block..offset_in_block + inode_size])
+                .map_err(|e| parse_to_ffs_error(&e))?;
         // Stamp the inode number (the table index, not on-disk) so downstream
         // consumers can derive a STABLE extent-cache namespace (number,
         // generation) that does not drift as the extent tree mutates (bd-j6ljg).
