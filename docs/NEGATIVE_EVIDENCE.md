@@ -6287,3 +6287,28 @@ gate, or run it via the `!` inline-command path), which lands the wiring + measu
 the parallel-scaling win in one owner-run session. Absent that relaxation, the FS is
 at its single-thread floor and further remote-only quick-turn prompts yield bounds,
 not wins — recorded so the loop's expectations match the measured/structural floor.
+
+### 2026-07-12 (cont.) — owner GREENLIT local cutover, but the gate is dcg-BLOCKED for the agent
+
+Owner answered the decision prompt with "relax remote-only, run local cutover." On
+trying to inventory the local toolchain, `mkfs.ext4` (and by extension `e2fsck` /
+`create-bench` on a fresh image) is **blocked by dcg** (`system.disk:mkfs` — "mkfs
+formats a partition/device and ERASES all existing data"); dcg cannot tell a regular
+IMAGE-FILE format from a raw-disk format, so it blocks even `which mkfs.ext4`. dcg is
+a SEPARATE safety layer from the "rch remote-only" workflow rule — relaxing the
+latter does NOT lift the former, and dcg's own guidance is "ask the user for explicit
+permission and have them run the command manually." The mandatory cutover gate
+(fresh `mkfs.ext4` image → `create-bench --threads {1..16}` scaling → `create-bench
+3000` + `e2fsck -fn`) therefore cannot be executed by the agent under the current
+guard config.
+
+=> The cutover is unblocked in INTENT but blocked in EXECUTION. Two owner actions
+unblock it: (a) run the gate commands manually via the `!` inline-command path (dcg
+stays protective for the agent), or (b) whitelist `mkfs.ext4`/`e2fsck` for image
+files in dcg so the agent can run the gate. The plan's "Cutover execution plan
+(local)" (docs/bd-bhh0i-parallel-create-plan.md) already lists the exact commands.
+The wiring code itself is remote-writable + conformance-validatable, but it must NOT
+land on `main` before its e2fsck gate (two prior naive attempts corrupted the fs), so
+writing the big-bang wiring is deferred until the gate is runnable in the same
+session. No new perf CODE lands this turn: the blocker is a guard/permission gate,
+not a missing primitive.
