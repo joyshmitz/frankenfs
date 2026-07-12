@@ -406,12 +406,44 @@ e2fsck gating), spans multiple turns, and its parallel result cannot even be
 measured under this session's ±40% benchmark noise. Rushing it risks a third
 filesystem-corrupting refutation.
 
-## The decision
+## Status (2026-07-12) — decision #1 TAKEN; sharded primitives COMPLETE; cutover is the sole remaining step
 
-1. **Authorize the multi-turn bd-bhh0i effort** — land safe, loom+e2fsck-gated
-   increments over several turns (ideally on a quiet machine for the final A/B), or
-2. **Consider the single-turn perf campaign complete** — the frontier is fully
-   mapped and the remaining gap is a known, planned, owner-lane concurrency project.
+Decision #1 (authorize the multi-turn bd-bhh0i effort) was taken. The sharded
+per-group allocator + every primitive the cutover wiring needs is now landed,
+cfg-gated (`bhh0i_sharded_alloc`, default OFF = byte-identical production), and
+remote-validated:
 
-Everything reachable in single-turn increments has been landed or rigorously
-refuted. There is no honest single-turn measured win left to ship.
+- **Allocation:** `PerGroupAlloc::{alloc_blocks, alloc_inode}` (Part-A per-group
+  scan), `total_free` (fold consumers), `group_free_snapshot` + `choose_dir_group`
+  (sharded Orlov dir placement), `spread_start_group` (Part-B contention seed).
+- **Inode write:** `write_inode_at` (location-supplied write) + `inode_location`
+  (resolve location from the sharded structure) → the create path composes
+  `alloc_inode → inode_location → write_inode_at` with ZERO single-lock-groups reads.
+- **Gates passed remotely:** loom model (`bd_bhh0i_lock_decomposition_model`) covers
+  the per-group lock primitive; real-mkfs conformance tests cover single-thread +
+  parallel block/inode alloc, dir `used_dirs` accounting, and `inode_location`
+  byte-identity vs the incumbent. All green.
+
+**The ONLY remaining step is the cutover WIRING** — route the ext4 mutation ops +
+fold consumers through the sharded structure under the flag (a single BIG-BANG:
+partial flag-on wiring diverges the sharded vs single-lock `groups`), then run its
+MANDATORY gates. Those gates are **local-only and currently un-runnable by the
+agent**: `mkfs.ext4`/`e2fsck`/`create-bench` are (a) non-compilation commands rch
+rejects, and (b) `mkfs`/`e2fsck` are blocked by dcg (`system.disk:mkfs`), which the
+owner relaxing "remote-only" does NOT lift. And per this doc's own note, the
+parallel scaling A/B "cannot even be measured under this session's ±40% benchmark
+noise" — it needs the quiet local machine.
+
+**To finish:** the owner runs the local gate (via the `!` inline-command path, or by
+whitelisting `mkfs.ext4`/`e2fsck` for image files in dcg): build flag-off + flag-on
+cli, `mkfs.ext4` an image, `create-bench --threads {1..16}` (scaling must go
+POSITIVE, target 8t ≥ 4× 1t), `create-bench 3000` + `e2fsck -fn` (0 orphans / 0
+bitmap drift / correct counts), single-thread non-regression. Only after
+e2fsck-clean + positive scaling does the wiring land + the default flip. Exact
+commands: `docs/bd-bhh0i-parallel-create-plan.md` → "Cutover execution plan (local)".
+
+Everything reachable under **remote-only** has been landed or rigorously refuted:
+the single-turn micro-lever surface is exhausted (re-verified: bitmap SWAR,
+btrfs-btree binary-search+cache), and the sharded primitives are complete. There is
+no honest remote-only measured win left — the parallel win requires the owner-run
+local gate.
