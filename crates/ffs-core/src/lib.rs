@@ -25551,7 +25551,14 @@ impl OpenFs {
         ino: InodeNumber,
         datasync: bool,
     ) -> ffs_error::Result<()> {
-        let operation_id = Self::btrfs_sync_operation_id(op, ino, datasync);
+        // operation_id feeds only the tracing records below (info/warn/trace);
+        // skip its per-sync format+alloc when the target is disabled below WARN
+        // (the least-severe level any record uses). Mirrors ext4_sync_with_logging.
+        let operation_id = if tracing::enabled!(target: "ffs::btrfs::rw", tracing::Level::WARN) {
+            Self::btrfs_sync_operation_id(op, ino, datasync)
+        } else {
+            String::new()
+        };
         info!(
             target: "ffs::btrfs::rw",
             operation_id = %operation_id,
@@ -28565,7 +28572,13 @@ impl OpenFs {
         mode: i32,
     ) -> ffs_error::Result<()> {
         let scenario_id = Self::btrfs_fallocate_scenario_id(mode);
-        let operation_id = Self::btrfs_fallocate_operation_id(ino, offset, length, mode);
+        // operation_id feeds only the info! records in this fn; skip its
+        // format+alloc when INFO is disabled.
+        let operation_id = if tracing::enabled!(target: "ffs::btrfs::rw", tracing::Level::INFO) {
+            Self::btrfs_fallocate_operation_id(ino, offset, length, mode)
+        } else {
+            String::new()
+        };
         info!(
             target: "ffs::btrfs::rw",
             operation_id = %operation_id,
@@ -36725,7 +36738,14 @@ impl FsOps for OpenFs {
         match &self.flavor {
             FsFlavor::Ext4(_) => {
                 let scenario_id = Self::EXT4_RW_SCENARIO_FLUSH;
-                let operation_id = Self::ext4_flush_operation_id(ino, fh, lock_owner);
+                // operation_id feeds only the two info! records below; skip its
+                // per-flush format+alloc when INFO is disabled (see the same guard
+                // in ext4_sync_with_logging).
+                let operation_id = if tracing::enabled!(target: "ffs::ext4::rw", tracing::Level::INFO) {
+                    Self::ext4_flush_operation_id(ino, fh, lock_owner)
+                } else {
+                    String::new()
+                };
                 info!(
                     target: "ffs::ext4::rw",
                     operation_id = %operation_id,
@@ -36751,7 +36771,13 @@ impl FsOps for OpenFs {
             }
             FsFlavor::Btrfs(_) => {
                 let scenario_id = Self::BTRFS_RW_SCENARIO_FLUSH;
-                let operation_id = Self::btrfs_flush_operation_id(ino, fh, lock_owner);
+                // Only the two info! records below use operation_id — skip its
+                // per-flush format+alloc when INFO is disabled.
+                let operation_id = if tracing::enabled!(target: "ffs::btrfs::rw", tracing::Level::INFO) {
+                    Self::btrfs_flush_operation_id(ino, fh, lock_owner)
+                } else {
+                    String::new()
+                };
                 info!(
                     target: "ffs::btrfs::rw",
                     operation_id = %operation_id,
