@@ -124,6 +124,26 @@ impl PerGroupAlloc {
         FreeTotals { blocks, inodes }
     }
 
+    /// Per-group free counts, snapshotted one group-lock at a time — the input a
+    /// sharded Orlov directory allocator needs (`orlov_choose_group_for_dir` reads
+    /// each group's `free_inodes`/`free_blocks`/`used_dirs` plus the fs-wide
+    /// averages to spread directories across groups). Same per-group-instant
+    /// snapshot semantics as [`Self::total_free`]: exact at a quiesced point,
+    /// advisory under concurrent mutation — fine for a placement heuristic.
+    pub(crate) fn group_free_snapshot(&self) -> Vec<GroupFree> {
+        self.groups
+            .iter()
+            .map(|g| {
+                let s = g.stats.lock();
+                GroupFree {
+                    free_blocks: s.free_blocks,
+                    free_inodes: s.free_inodes,
+                    used_dirs: s.used_dirs,
+                }
+            })
+            .collect()
+    }
+
     /// Sharded per-group block allocation (bd-bhh0i Part A): walk the
     /// goal→neighbors→full order (`ffs_alloc::allocation_group_order`), locking
     /// ONE group at a time, and allocate `count` blocks in the first group that
@@ -233,6 +253,15 @@ impl PerGroupAlloc {
 pub(crate) struct FreeTotals {
     pub(crate) blocks: u64,
     pub(crate) inodes: u64,
+}
+
+/// One group's free counts, as the sharded Orlov directory allocator reads them
+/// (see [`PerGroupAlloc::group_free_snapshot`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct GroupFree {
+    pub(crate) free_blocks: u32,
+    pub(crate) free_inodes: u32,
+    pub(crate) used_dirs: u32,
 }
 
 /// Part-B contention spread (bd-bhh0i): choose the group a new inode's allocation
@@ -470,5 +499,33 @@ mod tests {
         // Debit 7 blocks from whichever group the scan commits to.
         assert!(sharded.alloc_in_scan_order(0..3, try_take(7)).is_some());
         assert_eq!(sharded.total_free(), FreeTotals { blocks: 143, inodes: 15 });
+    }
+
+    #[test]
+    fn group_free_snapshot_reports_every_group() {
+        let mut stats: Vec<GroupStats> = (0..3).map(|g| sample_group(g, 100 + g, 10 + g)).collect();
+        stats[1].used_dirs = 4;
+        let sharded = PerGroupAlloc::from_group_stats(stats);
+        let snap = sharded.group_free_snapshot();
+        assert_eq!(snap.len(), 3);
+        assert_eq!(snap[0], GroupFree { free_blocks: 100, free_inodes: 10, used_dirs: 0 });
+        assert_eq!(snap[1], GroupFree { free_blocks: 101, free_inodes: 11, used_dirs: 4 });
+        assert_eq!(snap[2], GroupFree { free_blocks: 102, free_inodes: 12, used_dirs: 0 });
+    }
+
+    #[test]
+    fn group_free_snapshot_reflects_post_allocation() {
+        let stats: Vec<GroupStats> = [10u32, 10, 10]
+            .into_iter()
+            .enumerate()
+            .map(|(g, fb)| sample_group(g as u32, fb, 5))
+            .collect();
+        let sharded = PerGroupAlloc::from_group_stats(stats);
+        // Debit 4 blocks from group 1 specifically (single-group scan order).
+        assert_eq!(sharded.alloc_in_scan_order([1usize], try_take(4)), Some(1));
+        let snap = sharded.group_free_snapshot();
+        assert_eq!(snap[0].free_blocks, 10);
+        assert_eq!(snap[1].free_blocks, 6, "group 1 snapshot must show the debit");
+        assert_eq!(snap[2].free_blocks, 10);
     }
 }
