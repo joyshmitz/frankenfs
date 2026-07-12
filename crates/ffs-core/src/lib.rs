@@ -6566,8 +6566,10 @@ impl OpenFs {
     ) -> ffs_error::Result<()> {
         for recovered in recovered_blocks {
             cx.checkpoint().map_err(|_| FfsError::Cancelled)?;
-            let observed = self.read_block_with_scope(cx, scope, recovered.block)?;
-            if observed.as_slice() != recovered.expected_current {
+            let stale = self.with_block_bytes(cx, scope, recovered.block, |observed| {
+                observed != recovered.expected_current
+            })?;
+            if stale {
                 return Err(FfsError::RepairFailed(format!(
                     "stale repair writeback rejected at block {}: mounted bytes changed since repair planning",
                     recovered.block.0
@@ -14113,11 +14115,15 @@ impl OpenFs {
                     logical_block,
                     &mut indirect_memo,
                 )? {
-                    let block_data =
-                        self.read_block_with_scope(cx, scope, BlockNumber(phys_block))?;
-                    buf[bytes_read..bytes_read + chunk_size].copy_from_slice(
-                        &block_data[offset_in_block..offset_in_block + chunk_size],
-                    );
+                    // Borrow the cached block (shared Arc BlockBuf) and copy the
+                    // chunk out in place, instead of cloning the whole block into a
+                    // fresh Vec just to copy a slice of it — extends bd-wxmi1's
+                    // zero-copy pointer resolve to the indirect DATA read.
+                    self.with_block_bytes(cx, scope, BlockNumber(phys_block), |block_data| {
+                        buf[bytes_read..bytes_read + chunk_size].copy_from_slice(
+                            &block_data[offset_in_block..offset_in_block + chunk_size],
+                        );
+                    })?;
                 }
                 bytes_read += chunk_size;
             }
@@ -14475,11 +14481,10 @@ impl OpenFs {
                 Ext4IndirectReadJob::Run { phys0, dst } => {
                     self.read_contiguous_into_with_scope(cx, scope, BlockNumber(phys0), dst)
                 }
-                Ext4IndirectReadJob::Partial { phys, in_off, dst } => {
-                    let block_data = self.read_block_with_scope(cx, scope, BlockNumber(phys))?;
-                    dst.copy_from_slice(&block_data.as_slice()[in_off..in_off + dst.len()]);
-                    Ok(())
-                }
+                Ext4IndirectReadJob::Partial { phys, in_off, dst } => self
+                    .with_block_bytes(cx, scope, BlockNumber(phys), |block_data| {
+                        dst.copy_from_slice(&block_data[in_off..in_off + dst.len()]);
+                    }),
             })
             .collect();
 
