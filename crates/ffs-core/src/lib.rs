@@ -6,6 +6,9 @@ pub mod degradation;
 pub mod file_handle;
 /// MVCC-store lock-model abstraction for the parallel-write wiring.
 mod fs_mvcc_store;
+/// bd-bhh0i step 5: per-group allocator lock decomposition (default-off primitive).
+#[cfg(feature = "bhh0i_sharded_alloc")]
+mod sharded_alloc;
 /// VFS semantics layer: filesystem-agnostic types and the [`vfs::FsOps`] trait.
 pub mod vfs;
 

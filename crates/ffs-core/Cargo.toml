@@ -6,6 +6,13 @@ license-file.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[features]
+# bd-bhh0i step 5: per-group ext4 allocator lock decomposition. Default OFF —
+# production keeps the single alloc `RwLock` (byte-identical). Enabling it
+# compiles the `sharded_alloc` primitive + its tests so the decomposition can be
+# Loom/bench/cargo-validated remote-only before the (local-e2fsck-gated) cutover.
+bhh0i_sharded_alloc = []
+
 [dependencies]
 rustc-hash = "2"
 arc-swap = { workspace = true }
