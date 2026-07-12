@@ -6076,3 +6076,39 @@ bytes straight from `mvcc_store.read_visible` (ffs-mvcc peer — the owned clone
 there), and its miss-path `vec![0;bs]` zero-init is sub-noise against the device
 read AND escapes as an owned return (no thread-local reuse under
 `#![forbid(unsafe_code)]`). No mine-side micro-lever remains on the frontier path.
+
+### 2026-07-12 (cont.) — TWO DECEPTIVE-SURFACE closed doors re-confirmed (DO NOT reopen)
+
+After the eager-log vein closed, I turned to the *algorithmic* class (like the
+dec1133b DAG-fusion win). Two candidates in my lanes LOOK freshly tractable from
+their source but are already **benched-closed** — and both carry misleading
+surface signals that will re-lure a future turn. Pinning them here with the guard
+evidence so the trap is named:
+
+1. **`collect_nodes` double-clone** (ffs-btrfs/writeback.rs:97-116) clones the
+   child `Vec<u64>` twice per internal node (materialize @99 + DagNode copy @108)
+   — *looks* like an obvious clone-reduction. It is NOT: `writeback_dag_order.rs`
+   bench `bd-xmh5g.400` (scorecard §2103-2106) measured the **double-clone as the
+   FASTEST shape at 89.928µs**; the "single-clone model" is 25.2% slower (112.58µs)
+   and the "moved-child path" 23.3% slower (110.91µs). Counterintuitive cause:
+   moving the child vec into the `BTreeMap`-backed `DagNode` forces a cache-cold
+   map read-back for the recursion loop, vs. the hot local clone. The source
+   comment @95 warns of this; the bench exists to guard it. `node_snapshot`
+   returns owned `BtrfsCowNode` (match-by-value IS possible) but that's exactly the
+   rejected single-clone shape. **DO NOT reopen — the "wasteful double clone" is
+   the measured optimum.**
+
+2. **`locate_inode` div→shift** (ffs-inode/src/lib.rs:56-57 still do `/` and `%`
+   by `geo.block_size`). The untracked `benches/locate_inode.rs` carries a stale
+   header comment calling `locate_inode` "the shipped strength-reduced form" —
+   **FALSE**: production still divides, and strength-reduction was **REFUTED**
+   (2026-07-05 row above: `division 24.674µs` vs `strength_reduced 24.942µs` =
+   1.00x, DIV throughput hidden by loop ILP; re-confirmed 2026-07-10). The bench is
+   that rejection's retained throwaway. The stale "shipped" comment nearly cost a
+   full turn re-implementing a refuted lever. **DO NOT reopen — measured 1.00x.**
+
+Also spot-checked the getattr-hot inode parse (`parse_from_bytes_with_ibody`,
+ffs-ondisk/ext4.rs:2876, mine): already AttrOnly-skips the 60-byte extent copy for
+non-devices (8314ca8c); the remaining base/OS/extended field reads are cheap
+`read_le_*` that MUST populate `Ext4Inode` struct fields regardless of mode — no
+cheap skip without the rejected struct-split (broad public-type change). No lever.
