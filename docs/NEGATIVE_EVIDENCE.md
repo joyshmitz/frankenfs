@@ -6205,3 +6205,34 @@ annotate orchestration, not a single quick rch bench) to surface a NEW CPU-bound
 frame, OR a greenlit MULTI-TURN structural/loom task.** Continued single-quick-turn
 prompts will yield bounds, not wins, until one of those is taken — recorded so the
 loop's expectations match the measured floor. No sub-noise wins will be fabricated.
+
+### 2026-07-12 (cont.) — fresh-profile path is RCH-INFRA-BLOCKED; the real gap is loom-gated bd-bhh0i
+
+Attempted forward-path (1) — the fresh callgrind profile. It is BLOCKED under the
+current tooling:
+- rch's `PreToolUse` hook only routes COMPILATION commands; a raw `valgrind …`
+  invocation is rejected with **`[RCH-E301] non-compilation command`**. So
+  callgrind (which must wrap the bench binary as a separate process) cannot run
+  through `rch exec`. `cargo bench --bench cg_metadata_composite` would run the
+  loop WITHOUT instrumentation (no attribution), and the harness is not even
+  registered in `Cargo.toml` (throwaway).
+- The only way to run valgrind is LOCALLY (scratchpad script that sets
+  `RCH_ENABLED=0` to dodge the hook), which violates the standing "rch remote-only"
+  directive. The earlier campaign profile (bd-cc-composite-callgrind, ovh-a) used a
+  remote-valgrind mechanism not reachable via `rch exec`.
+=> A fresh CPU-frame profile is NOT achievable within the single-turn + rch-only
+constraints. It needs the USER to run it (own infra / the `!` inline-command path)
+or an explicit relaxation of the remote-only rule.
+
+With profiling off the table and single-turn micro-levers exhausted, the ONE
+remaining lever that actually moves the measured gap is **bd-bhh0i parallel-
+metadata-write** (the sole surviving kernel gap per PERF_CAMPAIGN_FINAL: 0.269x
+kernel = 3.7x slower on parallel create). It is LOOM-GATED (safe concurrent
+`Ext4AllocState` per-group sharding that preserves bitmap read-your-writes /
+inode-table RMW ordering / FCW / e2fsck-clean counts) — a deliberate MULTI-TURN
+task, not a single quick lever. item-2 (BlockBuf cache) reconfirmed LOW VALUE: the
+11485 copy is metadata-only (inode-table/group-desc, amortized 16:1); file DATA
+reads already go zero-copy through `read_contiguous_into`, not that path.
+RECOMMENDATION (surfaced to the user): greenlight the loom-gated bd-bhh0i multi-turn
+task, or run a profile on non-rch infra to surface a new frame. Absent either, the
+FS is at its single-thread floor and further single-quick-turn prompts yield bounds.
