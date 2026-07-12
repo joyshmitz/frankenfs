@@ -54642,6 +54642,107 @@ mod tests {
         );
     }
 
+    /// bd-bhh0i cutover-critical: the sharded inode-allocation path must maintain
+    /// `bg_used_dirs_count` EXACTLY as the single-lock path does — increment it by
+    /// one for a directory, leave it untouched for a regular file. The sharded
+    /// Orlov chooser (`choose_dir_group`, which reads `used_dirs` via
+    /// `group_free_snapshot`) AND e2fsck both depend on this: if the sharded core
+    /// skipped the directory bump, every directory would keep re-selecting the same
+    /// group, defeating the spread that prevents the shared-inode-table-block RMW
+    /// storm that corrupted the two prior naive cutover attempts. The primitive
+    /// tests above cover block/inode COUNTS but never the directory `used_dirs`
+    /// bump, its is-directory gate, or the `choose_dir_group()` → `alloc_inode()`
+    /// composition on a REAL mkfs image; this pins all three.
+    #[test]
+    #[cfg(feature = "bhh0i_sharded_alloc")]
+    fn bd_bhh0i_sharded_dir_alloc_maintains_used_dirs() {
+        let Some((fs, _tmp)) = open_writable_ext4_mkfs(64) else {
+            return; // mkfs.ext4 unavailable on this host — skip like sibling tests.
+        };
+        let cx = Cx::for_testing();
+
+        // Geometry / persist context / device, sourced exactly as the sibling
+        // sharded tests (and the cutover) do.
+        let sb = fs.ext4_superblock().expect("ext4 superblock");
+        let geo = FsGeometry::from_superblock(sb);
+        let pctx = fs
+            .ext4_alloc_state
+            .as_ref()
+            .expect("ext4 write state present after enable_writes")
+            .read()
+            .persist_ctx
+            .clone();
+        let dev = fs.block_device_adapter();
+        let sharded = fs
+            .ext4_sharded_alloc
+            .as_ref()
+            .expect("sharded allocator present under bhh0i_sharded_alloc feature");
+        let group_count = sharded.group_count();
+
+        // Fs-wide directory count / free-inode count across every group.
+        let used_dirs = || {
+            (0..group_count)
+                .map(|g| sharded.lock_group(g).used_dirs)
+                .sum::<u32>()
+        };
+        let free_inodes = || {
+            (0..group_count)
+                .map(|g| sharded.lock_group(g).free_inodes)
+                .sum::<u32>()
+        };
+
+        // Allocate three DIRECTORIES through the real cutover composition: pick the
+        // target group with choose_dir_group(), then allocate an inode there as a
+        // directory. Each must bump exactly one group's used_dirs by one.
+        for i in 0..3u32 {
+            let target = sharded.choose_dir_group().unwrap_or_else(|| {
+                panic!("dir {i}: choose_dir_group found no group with a free inode")
+            });
+            let landing_used_before = sharded.lock_group(target.0 as usize).used_dirs;
+            let ud_before = used_dirs();
+            let fi_before = free_inodes();
+
+            let alloc = sharded
+                .alloc_inode(&cx, &dev, &geo, target, true, &pctx)
+                .unwrap_or_else(|e| panic!("dir {i}: sharded alloc_inode errored: {e:?}"))
+                .unwrap_or_else(|| panic!("dir {i}: sharded alloc_inode found no free inode"));
+
+            // On a spacious fresh fs the directory lands in the chosen group, whose
+            // used_dirs bumped by exactly one...
+            assert_eq!(alloc.group, target, "dir {i}: must land in the chosen group");
+            assert_eq!(
+                sharded.lock_group(alloc.group.0 as usize).used_dirs,
+                landing_used_before + 1,
+                "dir {i}: landing group used_dirs must bump by exactly one"
+            );
+            // ...so the fs-wide directory count rose by exactly one and one inode
+            // was consumed.
+            assert_eq!(used_dirs(), ud_before + 1, "dir {i}: fs-wide used_dirs must rise by one");
+            assert_eq!(free_inodes(), fi_before - 1, "dir {i}: exactly one inode consumed");
+        }
+
+        // A regular FILE must NOT touch used_dirs (the is_directory gate), while
+        // still consuming exactly one inode.
+        let ud_before_file = used_dirs();
+        let fi_before_file = free_inodes();
+        let file = sharded
+            .alloc_inode(&cx, &dev, &geo, ffs_types::GroupNumber(0), false, &pctx)
+            .expect("file sharded alloc_inode errored")
+            .expect("file sharded alloc_inode found no free inode");
+        assert_eq!(
+            used_dirs(),
+            ud_before_file,
+            "a regular file must leave used_dirs unchanged (landed group {}, ino {})",
+            file.group.0,
+            file.ino.0
+        );
+        assert_eq!(
+            free_inodes(),
+            fi_before_file - 1,
+            "the regular file must still consume exactly one inode"
+        );
+    }
+
     /// Run `e2fsck -fn` (force, read-only) on an image; returns (clean, output).
     fn run_e2fsck(image: &std::path::Path) -> Option<(bool, String)> {
         let out = std::process::Command::new("e2fsck")
