@@ -516,10 +516,19 @@ impl WritebackExecutor {
         let order = self.dag.reverse_topological_order_with_levels();
         let total = order.len();
         let generation = self.dag.generation;
-        let mut durable_blocks = self.dag.durable_block_set();
-        if self.record_crash_points {
+        // The running durable-block set and the per-node `mark_durable` exist
+        // solely to build crash points and verify WB-I1 (both test/verification
+        // only). Production writeback never reads DAG durability, so skip the
+        // whole bookkeeping — including the O(N) `durable_block_set` seed and the
+        // per-node node-map `get_mut` — when crash tracking is off. Byte-identical
+        // on disk: `flush_node` still runs for every (block, level) and the
+        // durable flag is never serialized.
+        let mut durable_blocks = if self.record_crash_points {
             self.crash_points.reserve(total.saturating_mul(2));
-        }
+            self.dag.durable_block_set()
+        } else {
+            BTreeSet::new()
+        };
 
         for (i, (block, level)) in order.into_iter().enumerate() {
             // Record crash point before this flush (test/verification only)
@@ -535,10 +544,11 @@ impl WritebackExecutor {
 
             // Flush the node
             flush_node(block, level)?;
-            self.dag.mark_durable(block)?;
 
-            // Record crash point after this flush (test/verification only)
+            // Durability bookkeeping + post-flush crash point (test/verification
+            // only): mark_durable mutates only the in-memory durable flag.
             if self.record_crash_points {
+                self.dag.mark_durable(block)?;
                 durable_blocks.insert(block);
                 let post_crash_id = format!("post_flush_{}", block);
                 self.crash_points.push(CrashPoint::from_durable_blocks(

@@ -653,6 +653,75 @@ fn bench_writeback_dag_order_sweep_guard(c: &mut Criterion) {
     group.finish();
 }
 
+// ── durability bookkeeping in execute (crash-tracking-off fast path) ────────
+//
+// execute's per-node `mark_durable` (a node-map get_mut) plus the durable-set
+// seed exist only to build crash points / verify WB-I1. With crash tracking
+// off (production writeback) that bookkeeping is dead, so it is now gated. The
+// per-node mark_durable is the dominant part and is measurable via the public
+// API here. The digest folds (block, level) identically in both arms, so the
+// durability bookkeeping provably does not change the flush result.
+
+/// execute-style flush loop that KEEPS the per-node durability bookkeeping
+/// (matches production before this change). `mark_durable` is idempotent, so
+/// the DAG can start fully durable and be re-driven in place across iterations
+/// — no per-iteration clone, which is what made the earlier bench noisy.
+fn flush_loop_mark(dag: &mut WriteDependencyDag) -> u64 {
+    let order = dag.reverse_topological_order_with_levels();
+    let mut digest = 0xcbf2_9ce4_8422_2325_u64;
+    for (block, level) in order {
+        digest = digest
+            .wrapping_mul(0x100_0000_01b3)
+            .wrapping_add(block)
+            .wrapping_add(u64::from(level));
+        dag.mark_durable(block).expect("mark durable");
+    }
+    digest
+}
+
+/// execute-style flush loop with the durability bookkeeping skipped (matches
+/// production after this change, crash tracking off).
+fn flush_loop_no_mark(dag: &WriteDependencyDag) -> u64 {
+    dag.reverse_topological_order_with_levels().into_iter().fold(
+        0xcbf2_9ce4_8422_2325_u64,
+        |acc, (block, level)| {
+            acc.wrapping_mul(0x100_0000_01b3)
+                .wrapping_add(block)
+                .wrapping_add(u64::from(level))
+        },
+    )
+}
+
+fn bench_writeback_execute_durability(c: &mut Criterion) {
+    let dag = build_dag();
+    // Pre-mark every node durable once; mark_durable is then idempotent, so the
+    // flush loop can be re-run in place with zero per-iteration allocation.
+    let mut dag_durable = dag.clone();
+    for block in dag_durable.blocks().collect::<Vec<_>>() {
+        dag_durable.mark_durable(block).expect("pre-mark durable");
+    }
+
+    assert_eq!(
+        flush_loop_mark(&mut dag.clone()),
+        flush_loop_no_mark(&dag),
+        "skipping durability bookkeeping changed the flush (block, level) result"
+    );
+
+    let mut group = c.benchmark_group("writeback_execute_durability_2048");
+    group.bench_function("with_durability_a", |b| {
+        let mut d = dag_durable.clone();
+        b.iter(|| black_box(flush_loop_mark(black_box(&mut d))));
+    });
+    group.bench_function("with_durability_b", |b| {
+        let mut d = dag_durable.clone();
+        b.iter(|| black_box(flush_loop_mark(black_box(&mut d))));
+    });
+    group.bench_function("without_durability", |b| {
+        b.iter(|| black_box(flush_loop_no_mark(black_box(&dag))));
+    });
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_writeback_dag_order,
@@ -661,6 +730,7 @@ criterion_group!(
     bench_writeback_dag_block_level_iteration_current,
     bench_writeback_executor_crash_tracking,
     bench_writeback_order_with_levels,
-    bench_writeback_dag_order_sweep_guard
+    bench_writeback_dag_order_sweep_guard,
+    bench_writeback_execute_durability
 );
 criterion_main!(benches);
