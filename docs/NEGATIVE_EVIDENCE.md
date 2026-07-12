@@ -6039,3 +6039,40 @@ byte-identical lever surfaced:
 
 Confirms the floor: the only post-floor gain was the rare-path xattr alloc-
 reduction (bcbc24d0, honestly scoped as non-hot). No production code changed.
+
+### 2026-07-12 (cont.) — eager-log-timing VEIN exhausted in non-peer lanes; 3 adjacent eager classes verified clean
+
+The one durable post-floor vein this campaign was the **eager-compute-only-for-
+tracing** class: values (operation-id strings, `Instant::now` clocks, format!
+previews) that were computed unconditionally but consumed ONLY by a `trace!/
+debug!/info!/warn!` field whose target is off by default. Guarding each with
+`tracing::enabled!(target, Level)` (→ `Option<Instant>` / `String::new()`) makes
+the hot per-op path pay nothing while remaining byte-identical when logging is on
+(log-contract tests still assert operation_id/duration_us). Landed **12 guards /
+7 commits** (2884acfe, b60882e3, 6c8b5c74, 963860a8, 9e05a537, 8d36ecae, b58cb8a6).
+
+This vein is now **exhausted across every non-peer lane** — full re-sweep of
+ffs-core, ffs-block, ffs-journal, ffs-inode, ffs-dir, and ffs-btrfs/writeback.rs
+for `let x = Instant::now()` / `let x = format!` / eager `collect`-for-log turned
+up no remaining production site. The only unguarded eager-log site left is
+`ffs-btrfs/src/lib.rs:5678` (`commit_started` → `info!` duration_us in the
+transaction commit) — but that is (a) in the bd-xmh5g peer serializer file and
+(b) `Instant::now` on the per-*transaction-commit* path (infrequent vs per-block
+reads) → marginal even if taken. Left for the serializer owner.
+
+Three **adjacent eager classes** grepped this turn and confirmed already clean —
+no lever, no code to change:
+- eager error construction `.ok_or(format!(...))`: **0 hits** in every lane — all
+  fallible lookups already use lazy `.ok_or_else(|| format!(...))`.
+- eager default `.unwrap_or(<alloc/format/vec/clone>)`: **0 production hits**
+  (only `ffs-journal:1779` `payload.get(4..).unwrap_or(&[])` — a cheap empty-slice
+  default, not an eager alloc).
+- `.collect::<Vec<_>>().{len,is_empty,first,last,count}()` (Vec built for a scalar):
+  **0 hits** in any lane.
+
+Re-confirms the "MVCC block-copy is the unifying frontier cost" profile (b1730ffc)
+is a **peer** lever: `read_block_at_snapshot` (ffs-core, mine) returns the hit-path
+bytes straight from `mvcc_store.read_visible` (ffs-mvcc peer — the owned clone lives
+there), and its miss-path `vec![0;bs]` zero-init is sub-noise against the device
+read AND escapes as an owned return (no thread-local reuse under
+`#![forbid(unsafe_code)]`). No mine-side micro-lever remains on the frontier path.
