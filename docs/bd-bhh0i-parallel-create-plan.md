@@ -651,3 +651,30 @@ parked in `stash@{0}`. No work lost.
    free counts; A/B vs the flag-off single-lock build on the same box; single-thread
    non-regression. e2fsck-clean is MANDATORY (two prior naive attempts corrupted).
 4. Only after e2fsck-clean + positive scaling: flip the default (or keep it a config).
+
+### 2026-07-12 (cont.) — cutover-step-1 primitives landed (both remote-validated, flag-off)
+
+Two more byte-identical, cfg-gated (`bhh0i_sharded_alloc`, default off) slices landed
++ pushed, completing the primitives cutover-step-1 above still needed:
+
+- **`ffs_inode::write_inode_at`** (`eb9af783`): split `write_inode`'s location half
+  out so the sharded create path can write an inode at an `InodeLocation` it computed
+  from the sharded allocator instead of resolving through a `&[GroupStats]` slice.
+  Byte-identical (129 ffs-inode unit + 10 golden byte-exact conformance pass); the
+  serialize/checksum/read-patch-write body moved verbatim.
+- **`PerGroupAlloc::choose_dir_group`** (`cb03d10c`, slice c3): the "dir Orlov via a
+  lock-free free-count snapshot" step-1 explicitly calls for. Mirrors the single-lock
+  `orlov_choose_group_for_dir` EXACTLY off `group_free_snapshot()` (no whole-state
+  lock). 8 unit tests pin the incumbent semantics, incl. the non-obvious all-equal →
+  LAST-group tie-break (`score <= avg_dirs`) — proven remotely (25/25 sharded tests).
+
+**Sharded primitive set is now COMPLETE for cutover step 1:** `alloc_blocks` /
+`alloc_inode` (Part A), `total_free` (fold consumers), `group_free_snapshot` +
+`choose_dir_group` (dir Orlov), `spread_start_group` (Part-B seed), and now
+`write_inode_at` (location-supplied write). What remains is step-1 WIRING itself —
+route `ext4_create`/`mknod`/`mkdir`/`unlink`/`link`/`symlink`/`fallocate`/rename
+through these under the flag (inode `target = spread_start_group(...)`, dirs via
+`choose_dir_group()`), reroute the fold/`groups` readers — then remote conformance
+(step 2) and the MANDATORY local e2fsck + positive-scaling gates (step 3). The wiring
+is the first slice that TOUCHES the mutation path, so it is the loom-model-gated,
+multi-turn cutover proper — not a further additive primitive.
