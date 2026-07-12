@@ -167,6 +167,65 @@ impl PerGroupAlloc {
         })
         .transpose()
     }
+
+    /// Sharded per-group inode allocation (bd-bhh0i Part A): walk the
+    /// target→±neighbors→full order, locking ONE group at a time, and allocate an
+    /// inode in the first group that can satisfy. Simpler than `alloc_blocks` —
+    /// the inode core computes its own reserved set (`reserved_inodes_in_group` is
+    /// geo+group only), so no per-group cache read. The scan order mirrors the
+    /// single-lock `alloc_inode_persist` (target, then ±1..=8, then the full
+    /// 0..group_count skipping target; neighbors re-appear in the full sweep
+    /// exactly as the single-lock loop re-tries them — harmless, already-failed).
+    ///
+    /// c2 scope: `target` is the caller's group for BOTH files and directories.
+    /// Directory Orlov placement (an all-groups above-average-free scan) and the
+    /// Part-B contention spread are slice c3 — they need a lock-free free-count
+    /// snapshot; `is_directory` is still threaded so `used_dirs` accounting is
+    /// correct wherever the inode lands.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn alloc_inode(
+        &self,
+        cx: &asupersync::Cx,
+        dev: &dyn ffs_block::BlockDevice,
+        geo: &ffs_alloc::FsGeometry,
+        target: ffs_types::GroupNumber,
+        is_directory: bool,
+        pctx: &ffs_alloc::PersistCtx,
+    ) -> Result<Option<ffs_alloc::InodeAlloc>, ffs_error::FfsError> {
+        let group_count = geo.group_count;
+        let target_idx = target.0;
+        let mut order: Vec<usize> = Vec::with_capacity(17 + group_count as usize);
+        order.push(target_idx as usize);
+        for delta in 1..=8u32 {
+            for dir in [1_i64, -1_i64] {
+                let g = i64::from(target_idx) + dir * i64::from(delta);
+                if g >= 0 && (g as u32) < group_count {
+                    order.push(g as usize);
+                }
+            }
+        }
+        for g in 0..group_count {
+            if g != target_idx {
+                order.push(g as usize);
+            }
+        }
+        self.alloc_in_scan_order(order, |g, stats| {
+            match ffs_alloc::try_alloc_inode_in_group_persist_core(
+                cx,
+                dev,
+                geo,
+                stats,
+                ffs_types::GroupNumber(u32::try_from(g).unwrap_or(u32::MAX)),
+                is_directory,
+                pctx,
+            ) {
+                Ok(Some(alloc)) => Some(Ok(alloc)), // allocated → stop the scan
+                Ok(None) => None,                   // group can't satisfy → continue
+                Err(err) => Some(Err(err)),         // real error → stop, propagate
+            }
+        })
+        .transpose()
+    }
 }
 
 /// Aggregate free counts across all groups (see [`PerGroupAlloc::total_free`]).
