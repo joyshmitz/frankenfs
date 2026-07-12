@@ -223,6 +223,18 @@ fn build_inline_ibody_for_inode_state(
 }
 
 fn build_external_block(block_len: usize, entries: &[Ext4Xattr]) -> Result<Vec<u8>> {
+    // Borrowed-slice wrapper (test / non-owning callers): clone to get a sortable
+    // owned Vec. The owning production callers use `build_external_block_owned`
+    // directly and skip this clone.
+    build_external_block_owned(block_len, entries.to_vec())
+}
+
+/// Owned-entries variant of [`build_external_block`]: sorts the caller's Vec IN
+/// PLACE (no `entries.to_vec()` deep clone of every name+value) before encoding.
+/// The four production setxattr/removexattr callers own their `external_entries`
+/// and do not reuse it, so they hand it over here. Byte-identical output to
+/// `build_external_block` — same sort key, same encoding.
+fn build_external_block_owned(block_len: usize, mut entries: Vec<Ext4Xattr>) -> Result<Vec<u8>> {
     if block_len < EXTERNAL_HEADER_LEN {
         return Err(FfsError::Format(
             "external xattr block shorter than 32-byte header".to_owned(),
@@ -234,8 +246,8 @@ fn build_external_block(block_len: usize, entries: &[Ext4Xattr]) -> Result<Vec<u
         return Ok(out);
     }
 
-    let mut sorted_entries = entries.to_vec();
-    sort_external_entries(&mut sorted_entries);
+    sort_external_entries(&mut entries);
+    let sorted_entries = entries;
 
     out[0..4].copy_from_slice(&EXT4_XATTR_MAGIC.to_le_bytes());
     out[4..8].copy_from_slice(&1_u32.to_le_bytes()); // h_refcount
@@ -423,7 +435,7 @@ pub fn set_xattr(
             ));
         };
         let block = &mut **block;
-        let new_block = build_external_block(block.len(), &external_entries)?;
+        let new_block = build_external_block_owned(block.len(), external_entries)?;
         inode.xattr_ibody =
             build_inline_ibody_for_inode_state(inode.xattr_ibody.len(), &inline_entries, true)?;
         block.copy_from_slice(&new_block);
@@ -454,7 +466,7 @@ pub fn set_xattr(
             name,
             value: value.to_vec(),
         });
-        let new_block = build_external_block(block.len(), &external_entries)?;
+        let new_block = build_external_block_owned(block.len(), external_entries)?;
 
         inode.xattr_ibody = new_ibody;
         block.copy_from_slice(&new_block);
@@ -481,7 +493,7 @@ pub fn set_xattr(
         name,
         value: value.to_vec(),
     });
-    let new_block = build_external_block(block.len(), &external_entries)?;
+    let new_block = build_external_block_owned(block.len(), external_entries)?;
     inode.xattr_ibody =
         build_inline_ibody_for_inode_state(inode.xattr_ibody.len(), &inline_entries, true)?;
     block.copy_from_slice(&new_block);
@@ -527,14 +539,17 @@ pub fn remove_xattr(
     };
     external_entries.remove(pos);
 
-    let new_block = build_external_block(block.len(), &external_entries)?;
+    // Capture emptiness before handing ownership of `external_entries` to the
+    // owned builder (which sorts it in place without a clone).
+    let external_now_empty = external_entries.is_empty();
+    let new_block = build_external_block_owned(block.len(), external_entries)?;
     inode.xattr_ibody = build_inline_ibody_for_inode_state(
         inode.xattr_ibody.len(),
         &inline_entries,
-        !external_entries.is_empty(),
+        !external_now_empty,
     )?;
     block.copy_from_slice(&new_block);
-    if external_entries.is_empty() {
+    if external_now_empty {
         inode.file_acl = 0;
     }
     Ok(true)
