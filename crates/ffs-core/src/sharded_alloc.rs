@@ -259,6 +259,39 @@ impl PerGroupAlloc {
         })
         .transpose()
     }
+
+    /// Resolve an allocated inode's on-disk location (its inode-table block + byte
+    /// offset within that block) from the sharded structure, so the cutover's
+    /// inode-write path composes `alloc_inode` → `inode_location` →
+    /// `ffs_inode::write_inode_at` WITHOUT reading the single-lock `groups` slice
+    /// (self-containment is the point of the decomposition). Byte-identical to the
+    /// single-lock `ffs_inode::locate_inode` for the same state — same
+    /// `ffs_types::inode_to_group` / `inode_index_in_group` arithmetic, same
+    /// `inode_table_block + block_offset`, same `None` guards (invalid ino/geo,
+    /// group out of range, block-offset overflow). The ONLY difference: the target
+    /// group's `inode_table_block` is read under that group's own lock instead of
+    /// from `groups[gidx]`. That field is immutable mkfs layout, so the lock is a
+    /// formality — but it keeps the write path entirely off the single-lock groups.
+    pub(crate) fn inode_location(
+        &self,
+        ino: ffs_types::InodeNumber,
+        geo: &ffs_alloc::FsGeometry,
+    ) -> Option<ffs_inode::InodeLocation> {
+        if ino.0 == 0 || geo.inodes_per_group == 0 || geo.block_size == 0 || geo.inode_size == 0 {
+            return None;
+        }
+        let gidx = ffs_types::inode_to_group(ino, geo.inodes_per_group).0 as usize;
+        if gidx >= self.groups.len() {
+            return None;
+        }
+        let index = ffs_types::inode_index_in_group(ino, geo.inodes_per_group);
+        let byte_in_table = u64::from(index) * u64::from(geo.inode_size);
+        let block_offset = byte_in_table / u64::from(geo.block_size);
+        let byte_offset = (byte_in_table % u64::from(geo.block_size)) as usize;
+        let inode_table_block = self.groups[gidx].stats.lock().inode_table_block.0;
+        let block = ffs_types::BlockNumber(inode_table_block.checked_add(block_offset)?);
+        Some(ffs_inode::InodeLocation { block, byte_offset })
+    }
 }
 
 /// Aggregate free counts across all groups (see [`PerGroupAlloc::total_free`]).

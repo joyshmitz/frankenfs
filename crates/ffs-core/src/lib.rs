@@ -54743,6 +54743,49 @@ mod tests {
         );
     }
 
+    /// bd-bhh0i cutover primitive: the sharded structure must resolve an inode's
+    /// on-disk location byte-identically to the single-lock `ffs_inode::locate_inode`,
+    /// so the sharded create path can compose `alloc_inode` -> `inode_location` ->
+    /// `write_inode_at` WITHOUT reading the single-lock `groups` slice. Checks the
+    /// resolver against the incumbent for reserved, group-boundary, and out-of-range
+    /// inode numbers on a REAL mkfs image (real geometry + real inode_table_block).
+    #[test]
+    #[cfg(feature = "bhh0i_sharded_alloc")]
+    fn bd_bhh0i_sharded_inode_location_matches_single_lock() {
+        let Some((fs, _tmp)) = open_writable_ext4_mkfs(64) else {
+            return; // mkfs.ext4 unavailable on this host — skip like sibling tests.
+        };
+        let sb = fs.ext4_superblock().expect("ext4 superblock");
+        let geo = FsGeometry::from_superblock(sb);
+        let guard = fs
+            .ext4_alloc_state
+            .as_ref()
+            .expect("ext4 write state present after enable_writes")
+            .read();
+        let single_lock_groups = &guard.groups;
+        let sharded = fs
+            .ext4_sharded_alloc
+            .as_ref()
+            .expect("sharded allocator present under bhh0i_sharded_alloc feature");
+
+        // Reserved (0/1/2/11), the group-0 boundary (ipg-1, ipg, ipg+1), a second-
+        // group number, and past-the-end (total_inodes, +1). The sharded resolver
+        // must agree with the incumbent on every one, including the None cases.
+        let ipg = u64::from(geo.inodes_per_group);
+        let ti = u64::from(geo.total_inodes);
+        for &ino in &[0u64, 1, 2, 11, ipg - 1, ipg, ipg + 1, 2 * ipg, ti, ti + 1] {
+            let a = sharded
+                .inode_location(InodeNumber(ino), &geo)
+                .map(|l| (l.block.0, l.byte_offset));
+            let b = ffs_inode::locate_inode(InodeNumber(ino), &geo, single_lock_groups)
+                .map(|l| (l.block.0, l.byte_offset));
+            assert_eq!(
+                a, b,
+                "sharded inode_location must match single-lock locate_inode at inode {ino}"
+            );
+        }
+    }
+
     /// Run `e2fsck -fn` (force, read-only) on an image; returns (clean, output).
     fn run_e2fsck(image: &std::path::Path) -> Option<(bool, String)> {
         let out = std::process::Command::new("e2fsck")
