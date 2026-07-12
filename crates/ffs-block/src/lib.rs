@@ -5525,7 +5525,16 @@ impl<D: BlockDevice> ArcCache<D> {
         }
 
         let blocks: Vec<BlockNumber> = flushes.iter().map(|candidate| candidate.block).collect();
-        let block_preview: Vec<u64> = blocks.iter().take(16).map(|block| block.0).collect();
+        // block_preview feeds only the debug! record below; skip the (up to
+        // 16-element) allocation + collect when the refresh debug target is
+        // disabled (the default). `blocks` itself is still needed for
+        // on_flush_committed, so only the preview is guarded.
+        let block_preview: Vec<u64> =
+            if tracing::enabled!(target: "ffs::repair::refresh", tracing::Level::DEBUG) {
+                blocks.iter().take(16).map(|block| block.0).collect()
+            } else {
+                Vec::new()
+            };
         debug!(
             target: "ffs::repair::refresh",
             event = "flush_triggers_refresh",
