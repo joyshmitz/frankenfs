@@ -6363,3 +6363,33 @@ inode-table cache — in `ffs-core/lib.rs` + `ffs-ondisk`. My bd-ddryj read fan-
 landed + compile-validated; no non-colliding, non-local-gated lever remains for this
 lane. Efficient allocation = redirect to a non-peer subsystem or unblock the bd-bhh0i
 local e2fsck gate.)
+
+### 2026-07-12 (cont.) — bd-eflng residual (parallel random read 3.3x) = parsed-inode RO cache; BlackThrush lane, deferred (win unvalidatable remote-only)
+
+Recovered the handed-off state via Agent Mail (CrimsonFox → BlackThrush, June): the
+parallel warm random-read gap was cut 88x → 3.3x by `MvccBlockDevice::new_unregistered`
+(9376f4d6), and the prototyped lock-free `with_latest_scope` snapshot was MEASURED INERT
+(rejected, entry 371). The CORRECTED root-cause of the 3.3x residual is MULTI-LOCK:
+  (a) a per-read EXCLUSIVE RwLock in the inode/block read path, and
+  (b) `ShardedCache` shard-`Mutex` recency contention on the HOT inode-table block —
+      every read of one file resolves the same inode → same block → same shard → serialized
+      (`WordLock::lock_slow` ~3.79%; bd-xmh5g.382 family).
+
+The lever CrimsonFox handed to this lane: a **per-inode PARSED-`Ext4Inode` RO cache**
+(`ShardedCache<u64 ino, Arc<Ext4Inode>>`, RO-gated like `ext4_inode_attr_cache`), which
+kills the per-read re-read+re-parse AND removes one contended block-cache `get` on the hot
+inode block. It is DISTINCT from the two caches that DO exist: `ext4_inode_attr_cache`
+(InodeAttr, for getattr — not the read-data path's `Ext4Inode`) and the raw-block
+`ext4_inode_table_block_cache` (BlockBuf, bd-57lae `e6e70201` — fixed the cache-MISS alloc,
+not the shard-Mutex CONTENTION or the re-parse).
+
+**Why NOT landed this turn (recorded so it is not re-derived):** its WIN is parallel-
+contention relief, measurable ONLY via the `ffs-cli rand-read --parallel` harness — which
+needs the rch fleet (currently saturated by the codex swarm) OR a local ext4 image
+(`mkfs.ext4` dcg-blocked). A correctness-critical read-DATA-path cache must not land
+unvalidated, and single-thread conformance cannot exercise the parallel-safety/win. It is
+also a deep read-path change sharing `ffs-core/lib.rs` with the active xattr peer
+(OliveCliff). **Claimed as BlackThrush's lane; deferred until the fleet allows a parallel
+A/B (or the local rand-read gate is unblocked) and the read-path region is uncontested.**
+bd-ddryj (the single-file read fan-out cap) remains the correct, landed, validated lever
+per this ledger's own 2026-07-10 analysis (line 53).
