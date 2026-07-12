@@ -414,3 +414,57 @@ touch). Gate: ffs-core create/mkdir/link/symlink/mknod + conformance 100/0/2 +
 e2fsck-clean fixture mutation, all byte-identical to the pre-refactor single-lock
 behavior. A full map of every `ext4_alloc_state.read()/.write()` site and the
 fields each touches is being compiled to drive the mechanical reroute.
+
+### Lock-site reconnaissance (complete map) + design implications
+
+Full map done. `Ext4AllocState { geo, groups: Vec<GroupStats>, persist_ctx }`
+(666) under `RwLock` (919); accessor `require_alloc_state()` (17263). ~35
+PRODUCTION lock sites (rest are tests or the btrfs `require_btrfs_alloc_state`).
+
+**WRITE sites (mutation):** 11239 `largest_contiguous_free_run` (upgrades to WRITE
+only to memoize `block_largest_free_run`, loops ALL groups), 17316 create, 17465
+mknod, 17632 mkdir (+`used_dirs`), 19665 unlink (frees→counts INCREMENT), 19919
+link, 20036/20145/20167 symlink, 20349 fallocate, 21112 write, 21509
+write_indirect, 21726 fallocate_indirect, 22071/22103/22161 write_compressed
+(takes the `&RwLock` as a param @21988), 22249 rename, 22692 setattr-truncate,
+23062/23143/23211 setxattr, 23266, 23345/23425 removexattr, 33050 move_ext.
+**READ sites** (10853,17121,17213,22920/22931,23197,23411,31642,33560,34340,
+34522/34533,36526/36537): almost all take the lock ONLY to read `geo` +
+`groups[g].inode_table_block` (an IMMUTABLE-after-mkfs locator) to `write_inode`.
+
+**Three facts that shape the design:**
+1. **No per-op global counter.** The superblock `s_free_blocks/inodes_count` are
+   recomputed by a whole-`groups` FOLD only at the durability boundary
+   (`ext4_sync_superblock_free_totals` 17204) and at `statfs` (33560); GDT is
+   deferred (`gdt_persistence_deferred`, flushed once at 17111). So a per-op alloc
+   touches ONLY its group's `free_blocks/free_inodes/cursors/bitmap` + persists
+   that group's descriptor — **per-group allocs are already independent; there is
+   NO global free-counter to contend on.** Part A just needs per-group locks + a
+   consistent whole-array snapshot for the 4 fold consumers (17213, 33560, flush,
+   11239).
+2. **Multi-group scan hazard (the crux of Part A).** `alloc_blocks_persist`
+   (ffs-alloc:2480) and `alloc_inode_persist` (ffs-alloc:3149) select via
+   `allocation_group_order` = goal group → ±1..=8 neighbors → full `0..group_count`
+   fallback, and mutate whichever group FIRST satisfies. A single call can scan
+   many groups' bitmaps and commit to a non-goal group. Per-group locking must
+   therefore acquire group locks one-at-a-time along the scan (kernel-style), NOT
+   assume a single fixed target group. Frees (`free_blocks_persist`) can also span
+   groups when a run crosses a boundary.
+3. **Read sites want only geo + immutable locators.** Extracting the immutable
+   geometry (geo + per-group `{block_bitmap_block, inode_bitmap_block,
+   inode_table_block}` locators, fixed at mkfs) into a lock-free structure lets the
+   ~14 inode-write READ sites drop the alloc read-lock entirely (byte-identical:
+   same immutable values; the inode-table block RMW is synchronized by the MVCC/
+   block layer, not this lock). That is the concrete, high-value first slice.
+
+Benches ready (SilverPine): `ext4_alloc_lock_convoy` (6 lock topologies, same
+accounting digest — proves only real per-group shards recover the convoy, not
+lock-impl swaps) and `ext4_group_lock_layout` (Plain vs cache-line-Padded group
+records + per-thread delta-fold — the false-sharing + global-total guards).
+
+**Refined step-3 slice order:** (3a) extract immutable `Ext4AllocGeometry`
+{geo + per-group locators} to a lock-free `OpenFs` field, reroute the ~14 inode-
+write read sites off the lock; (3b) wrap the remaining mutable per-group state
+(`free_blocks/free_inodes/inode_search_start/used_dirs/run-cache`) in a
+`GroupAllocRecords` type still under the single lock. Each slice byte-identical +
+e2fsck-gated independently.
