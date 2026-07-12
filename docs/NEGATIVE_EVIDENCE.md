@@ -6176,3 +6176,32 @@ Fresh floor-verification this turn (no cheap lever in any):
 - **getattr inode read**: Arc-shared via `ext4_inode_table_block_cache` (10699).
 VERDICT: solo single-turn micro-lever surface exhausted across all reachable hot
 paths; only item-2 (multi-turn, cache-amortized) and refuted SmallVec remain.
+
+### 2026-07-12 (cont.) — truncate/extent-collect + read-plan Vecs floor-verified; TERMINAL for single-turn levers
+
+Checked the truncate/extent-free subsystem (unexamined this campaign):
+- `collect_extents_recursive` (12292) is fully optimized — range-pruning (bd-yd3a0),
+  parallel/serial child-fetch heuristic (bd-h6p3w), `extend_from_slice` at leaves.
+  The only unsized collections (`survivors` 12327 bound `indexes.len()`; file-read
+  `jobs` 12762 bound `segs.len()`; readdir `planned` 13147 bound `num_blocks`) grow
+  without `with_capacity` — but pre-sizing them is byte-identical HYGIENE on
+  I/O-masked paths (the device reads dominate the few reallocations = sub-noise),
+  NOT a defensible perf lever. Left unchanged rather than commit a sub-noise "win"
+  (fd678afe discipline). Logged here so a future turn does not re-"discover" them.
+
+**TERMINAL STATE for single-turn byte-identical micro-levers.** Across the campaign
+every reachable hot path is now verified at its CPU/alloc floor or I/O-masked:
+getattr (Arc cache), lookup (neg-fast-path + O(1) snapshot), inode parse (AttrOnly),
+write (commit-dominated, staging e2e-neutral), MVCC read (clone→share/borrow
+harvested), journal (segmented checksums), extent resolve (binary-search + per-level
+cache), extent collect/truncate (pruned + parallel), allocator/btree/FUSE (prior
+floor-mapping). The ONLY remaining levers are NOT single-turn: (a) item-2 BlockBuf
+block cache — cache-amortized 16:1 by inode-table packing = low value; (b) refuted
+`Ext4DirEntry.name` SmallVec (broad public type, refuted 5×); (c) owner/loom-gated
+bd-bhh0i parallel-create sharding. **Advancing the perf gap now requires EITHER a
+fresh callgrind profile on a current workload (heavy: needs an ovh-a-class worker
+with valgrind; the `cg_metadata_composite` harness is a multi-step build→valgrind→
+annotate orchestration, not a single quick rch bench) to surface a NEW CPU-bound
+frame, OR a greenlit MULTI-TURN structural/loom task.** Continued single-quick-turn
+prompts will yield bounds, not wins, until one of those is taken — recorded so the
+loop's expectations match the measured floor. No sub-noise wins will be fabricated.
