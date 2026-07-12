@@ -144,6 +144,19 @@ impl PerGroupAlloc {
             .collect()
     }
 
+    /// Sharded Orlov directory placement (bd-bhh0i slice c3): choose the group a
+    /// new DIRECTORY inode should target, computed off the lock-free
+    /// [`Self::group_free_snapshot`] rather than the single whole-state lock. The
+    /// caller feeds the result into [`Self::alloc_inode`] as `target` for
+    /// directories (files keep passing their parent group), replacing the
+    /// single-lock `orlov_choose_group_for_dir` step. Advisory under concurrency
+    /// like every snapshot consumer here — Orlov is a placement heuristic and the
+    /// subsequent goal→neighbors→full scan falls through if the chosen group has
+    /// since filled. `None` only when no group has a free inode.
+    pub(crate) fn choose_dir_group(&self) -> Option<ffs_types::GroupNumber> {
+        choose_dir_group_from_snapshot(&self.group_free_snapshot())
+    }
+
     /// Sharded per-group block allocation (bd-bhh0i Part A): walk the
     /// goal→neighbors→full order (`ffs_alloc::allocation_group_order`), locking
     /// ONE group at a time, and allocate `count` blocks in the first group that
@@ -262,6 +275,61 @@ pub(crate) struct GroupFree {
     pub(crate) free_blocks: u32,
     pub(crate) free_inodes: u32,
     pub(crate) used_dirs: u32,
+}
+
+/// The pure Orlov directory-placement decision over a per-group free snapshot
+/// (see [`PerGroupAlloc::choose_dir_group`]). Factored out as a free function so
+/// it is unit-checkable against the single-lock `orlov_choose_group_for_dir` spec
+/// without building a `PerGroupAlloc`. Mirrors that function EXACTLY:
+///
+///  * fs-wide INTEGER averages of free inodes, free blocks, and used dirs;
+///  * keep only groups at/above BOTH the free-inode and free-block average;
+///  * among those, take the fewest `used_dirs` — the first qualifying group wins,
+///    and the incumbent's `score == best && score <= avg_dirs` clause lets a
+///    later, equally-few group replace the earlier one (copied verbatim);
+///  * if NONE qualify, fall back to the first group with any free inode;
+///  * empty input → `None` (the incumbent's `NoSpace` on empty groups). The
+///    incumbent's post-filter fallback can also return `NoSpace`, but that state
+///    is unreachable for non-empty input — `best` stays `MAX` only when no group
+///    sits above BOTH averages, which forces `avg_free_inodes > 0`, hence some
+///    group has a free inode for the fallback to find — mirrored regardless.
+///
+/// The snapshot index IS the group number: `group_free_snapshot` preserves group
+/// order and the allocator indexes `groups[group.0]`, so `groups[i].group == i`.
+/// That lets the decision run on the field-only [`GroupFree`] with no group tag,
+/// matching the incumbent's `gs.group` under that invariant.
+fn choose_dir_group_from_snapshot(snapshot: &[GroupFree]) -> Option<ffs_types::GroupNumber> {
+    if snapshot.is_empty() {
+        return None;
+    }
+    let n = snapshot.len() as u64;
+    let avg_free_inodes = snapshot.iter().map(|g| u64::from(g.free_inodes)).sum::<u64>() / n;
+    let avg_free_blocks = snapshot.iter().map(|g| u64::from(g.free_blocks)).sum::<u64>() / n;
+    let avg_dirs = snapshot.iter().map(|g| u64::from(g.used_dirs)).sum::<u64>() / n;
+
+    let mut best_group: u32 = 0;
+    let mut best_score = u64::MAX;
+    for (idx, g) in snapshot.iter().enumerate() {
+        if u64::from(g.free_inodes) < avg_free_inodes {
+            continue;
+        }
+        if u64::from(g.free_blocks) < avg_free_blocks {
+            continue;
+        }
+        let score = u64::from(g.used_dirs);
+        if score < best_score || (score == best_score && score <= avg_dirs) {
+            best_score = score;
+            best_group = u32::try_from(idx).unwrap_or(u32::MAX);
+        }
+    }
+
+    if best_score == u64::MAX {
+        return snapshot
+            .iter()
+            .position(|g| g.free_inodes > 0)
+            .map(|idx| ffs_types::GroupNumber(u32::try_from(idx).unwrap_or(u32::MAX)));
+    }
+    Some(ffs_types::GroupNumber(best_group))
 }
 
 /// Part-B contention spread (bd-bhh0i): choose the group a new inode's allocation
@@ -527,5 +595,90 @@ mod tests {
         assert_eq!(snap[0].free_blocks, 10);
         assert_eq!(snap[1].free_blocks, 6, "group 1 snapshot must show the debit");
         assert_eq!(snap[2].free_blocks, 10);
+    }
+
+    fn gf(free_blocks: u32, free_inodes: u32, used_dirs: u32) -> GroupFree {
+        GroupFree {
+            free_blocks,
+            free_inodes,
+            used_dirs,
+        }
+    }
+
+    #[test]
+    fn choose_dir_empty_snapshot_is_none() {
+        assert_eq!(choose_dir_group_from_snapshot(&[]), None);
+        // And through the whole primitive on a zero-group allocator.
+        let sharded = PerGroupAlloc::from_group_stats(Vec::new());
+        assert_eq!(sharded.choose_dir_group(), None);
+    }
+
+    #[test]
+    fn choose_dir_all_equal_picks_last_group_via_tie_break() {
+        // Every group identical: all qualify and all have equal dirs == avg_dirs
+        // (0 == 0), so the incumbent's `score == best && score <= avg_dirs` clause
+        // fires for EACH later group, walking the winner all the way to the LAST
+        // group. A faithful mirror of orlov_choose_group_for_dir's real (and
+        // non-obvious) all-equal behavior: last-qualifying-wins, NOT first. This
+        // guard exists precisely to pin that surprise.
+        let snap = vec![gf(100, 50, 0); 4];
+        assert_eq!(choose_dir_group_from_snapshot(&snap), Some(GroupNumber(3)));
+    }
+
+    #[test]
+    fn choose_dir_prefers_only_group_above_both_averages() {
+        // avg_blocks = avg_inodes = (10+10+200+10)/4 = 57; only group 2 clears
+        // BOTH averages, so it is chosen despite equal (0) dir counts.
+        let snap = vec![gf(10, 10, 0), gf(10, 10, 0), gf(200, 200, 0), gf(10, 10, 0)];
+        assert_eq!(choose_dir_group_from_snapshot(&snap), Some(GroupNumber(2)));
+    }
+
+    #[test]
+    fn choose_dir_breaks_ties_by_fewest_used_dirs() {
+        // Both groups qualify (identical free counts, at the average); the one
+        // with fewer directories wins (score 2 < 7).
+        let snap = vec![gf(100, 100, 7), gf(100, 100, 2)];
+        assert_eq!(choose_dir_group_from_snapshot(&snap), Some(GroupNumber(1)));
+    }
+
+    #[test]
+    fn choose_dir_equal_dirs_prefers_later_group_at_or_below_avg() {
+        // Three qualifying groups with EQUAL dirs (5). avg_dirs = 15/3 = 5, so the
+        // incumbent's `score == best && score <= avg_dirs` (5 <= 5) clause fires
+        // for each, letting the LAST equally-few group replace the prior ones.
+        let snap = vec![gf(100, 100, 5), gf(100, 100, 5), gf(100, 100, 5)];
+        assert_eq!(choose_dir_group_from_snapshot(&snap), Some(GroupNumber(2)));
+    }
+
+    #[test]
+    fn choose_dir_equal_dirs_keeps_earlier_group_above_avg() {
+        // Two qualifying groups tied at 5 dirs, plus a below-average group (1,1,0)
+        // that is FILTERED OUT of selection yet still drags avg_dirs down to
+        // 10/3 = 3. Now the tied score 5 > avg_dirs, so `score <= avg_dirs` is
+        // false and the EARLIER group 0 is kept — the other half of the clause.
+        let snap = vec![gf(100, 100, 5), gf(100, 100, 5), gf(1, 1, 0)];
+        assert_eq!(choose_dir_group_from_snapshot(&snap), Some(GroupNumber(0)));
+    }
+
+    #[test]
+    fn choose_dir_falls_back_to_first_free_when_none_above_both_averages() {
+        // Split profile: group 0 high-inode/low-block, group 1 low-inode/high-
+        // block. avg_inodes = avg_blocks = 5, so NEITHER group clears both
+        // averages; the main loop selects nothing and the incumbent falls back to
+        // the first group with a free inode (group 0).
+        let snap = vec![gf(0, 10, 0), gf(10, 0, 0)];
+        assert_eq!(choose_dir_group_from_snapshot(&snap), Some(GroupNumber(0)));
+    }
+
+    #[test]
+    fn choose_dir_group_runs_through_the_snapshot() {
+        // End-to-end through the method: equal free counts (all qualify), so the
+        // emptiest group by dir count (group 1) is chosen.
+        let mut stats: Vec<GroupStats> = (0..3).map(|g| sample_group(g, 100, 100)).collect();
+        stats[0].used_dirs = 9;
+        stats[1].used_dirs = 1;
+        stats[2].used_dirs = 9;
+        let sharded = PerGroupAlloc::from_group_stats(stats);
+        assert_eq!(sharded.choose_dir_group(), Some(GroupNumber(1)));
     }
 }
