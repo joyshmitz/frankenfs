@@ -5886,3 +5886,38 @@ test/infrequent, so no production code changed in this sweep:
 Cross-crate `.iter().map(...).sum/.max/.filter().count()` over
 ffs-ondisk / ffs-btrfs writeback / ffs-inode production code found no further
 big-array multi-pass; the ffs-inode `groups...sum()` hits are `#[cfg(test)]`.
+
+### 2026-07-12 (cont.) — ext4 namespace-mutation ops are saturated; one bounded future lever
+
+Swept the not-yet-seen ops this turn (`ext4_create` / `mkdir` / `link` / `rename` /
+`ext4_rename2_exchange` / `symlink` / `mknod`) for the read/compute-then-discard
+and multi-pass classes. All are already carrying the `bd-cc` op-level family:
+
+- the redundant positive `lookup_name` dup-check is skipped on non-casefold htree
+  dirs (`htree_dedup_covers`, bd-cc-mkdir-dedup) — create/mkdir/link/rename/symlink;
+- the create_inode body write is deferred where the op rewrites the final inode
+  anyway (bd-mkinode-defer) — mkdir/mknod;
+- rename uses a single preflight probe of the target leaf instead of a second full
+  htree descent (bd-cc-rename-probe).
+
+`now_timestamp()` (a vDSO `clock_gettime`) and `sb.csum_seed()` (a cached field
+read) are computed up front but are used on the common success path and are
+sub-noise on the rare early-return error path — not worth deferring.
+
+**Bounded future lever (do not land as a quick micro-pass):** the rename and
+`rename2_exchange` `..`-fixup call `collect_extents(child_inode)?.first()` — a
+collect-all-use-one that walks/collects the whole extent tree to read only logical
+block 0. `resolve_extent(_, scope, inode, 0)` would resolve just block 0. BUT: (1)
+it wins only for a *large multi-extent directory renamed across parents* (rare op ×
+rare input; typical dirs are one extent → neutral); (2) it needs the request scope
+threaded through and goes via the `ExtentCache` shard lock; (3) it changes the
+indirect-vs-extent and "first extent starts at logical 0" assumptions, a
+correctness surface on an e2fsck-gated path. Worth doing only inside a scoped
+rename-extent-resolve change with the rename e2fsck suite as the gate, not as a
+drive-by.
+
+Net: the ext4 op-level structural surface in the non-peer lanes is saturated this
+session (10 byte-identical wins landed: btrfs writeback ×5, JBD2 ×2, ext4
+sync/statfs ×3). Next real headroom is peer-owned (MVCC commit / ffs-alloc
+per-group dirty tracking) or an explicit structural redesign, per
+PERF_CAMPAIGN_STATUS frontier. No production code changed in this continuation.
