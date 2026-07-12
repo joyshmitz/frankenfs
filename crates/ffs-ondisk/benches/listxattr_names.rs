@@ -29,7 +29,10 @@ fn build_block(value_len: usize) -> Vec<u8> {
     for i in 0..N {
         let name = format!("attr{i:02}");
         let name_bytes = name.as_bytes();
-        let value_offs = 2048 + i * value_len;
+        // Pack values backwards from the end of the block. The previous
+        // `2048 + i * value_len` layout overflowed the 4 KiB fixture for the
+        // 24 x 128-byte row before Criterion could benchmark it.
+        let value_offs = BLOCK_LEN - (i + 1) * value_len;
         block[entry_off] = name_bytes.len() as u8;
         block[entry_off + 1] = EXT4_XATTR_INDEX_USER;
         block[entry_off + 2..entry_off + 4].copy_from_slice(&(value_offs as u16).to_le_bytes());
@@ -37,7 +40,10 @@ fn build_block(value_len: usize) -> Vec<u8> {
         block[entry_off + 8..entry_off + 12].copy_from_slice(&(value_len as u32).to_le_bytes());
         block[entry_off + 12..entry_off + 16].copy_from_slice(&0_u32.to_le_bytes());
         block[entry_off + 16..entry_off + 16 + name_bytes.len()].copy_from_slice(name_bytes);
-        for (j, b) in block[value_offs..value_offs + value_len].iter_mut().enumerate() {
+        for (j, b) in block[value_offs..value_offs + value_len]
+            .iter_mut()
+            .enumerate()
+        {
             *b = (i as u8).wrapping_mul(31).wrapping_add(j as u8);
         }
         entry_off = (entry_off + 16 + name_bytes.len() + 3) & !3;
@@ -56,12 +62,44 @@ fn parse_all_then_names(block: &[u8]) -> Vec<String> {
         .collect()
 }
 
+/// Frozen control for the former names-only formatter. This intentionally
+/// mirrors the old `format!("{}{}", prefix, from_utf8_lossy(name))` shape while
+/// walking the same valid user-namespace fixture as the production parser.
+fn parse_names_format_control(block: &[u8]) -> Vec<String> {
+    assert_eq!(
+        u32::from_le_bytes(block[0..4].try_into().unwrap()),
+        EXT4_XATTR_MAGIC
+    );
+    let data = &block[32..];
+    let mut names = Vec::new();
+    let mut offset = 0_usize;
+    loop {
+        let name_len = usize::from(data[offset]);
+        let name_index = data[offset + 1];
+        if name_len == 0 && name_index == 0 {
+            break;
+        }
+        assert_eq!(name_index, EXT4_XATTR_INDEX_USER);
+        let name_start = offset + 16;
+        let name_end = name_start + name_len;
+        names.push(format!(
+            "user.{}",
+            String::from_utf8_lossy(&data[name_start..name_end])
+        ));
+        offset = (name_end + 3) & !3;
+    }
+    names
+}
+
 fn bench_group(c: &mut Criterion, value_len: usize, label: &str) {
     let block = build_block(value_len);
     // Isomorphism: names-only returns the same full names as materialise-all.
     let old = parse_all_then_names(&block);
     let new = parse_xattr_block_names(&block).unwrap();
-    assert_eq!(old, new, "names-only diverged from materialise-all ({label})");
+    assert_eq!(
+        old, new,
+        "names-only diverged from materialise-all ({label})"
+    );
     assert_eq!(new.len(), N);
 
     let mut g = c.benchmark_group(format!("ext4_listxattr_block_24_{label}"));
@@ -74,9 +112,32 @@ fn bench_group(c: &mut Criterion, value_len: usize, label: &str) {
     g.finish();
 }
 
+fn bench_formatter_ab(c: &mut Criterion) {
+    let block = build_block(32);
+    let control = parse_names_format_control(&block);
+    let candidate = parse_xattr_block_names(&block).unwrap();
+    assert_eq!(
+        control, candidate,
+        "formatter candidate changed listxattr output"
+    );
+
+    let mut g = c.benchmark_group("ext4_listxattr_block_24_formatter_ab");
+    g.bench_function("format_control_a", |b| {
+        b.iter(|| black_box(parse_names_format_control(black_box(&block))));
+    });
+    g.bench_function("format_control_b", |b| {
+        b.iter(|| black_box(parse_names_format_control(black_box(&block))));
+    });
+    g.bench_function("preallocated", |b| {
+        b.iter(|| black_box(parse_xattr_block_names(black_box(&block)).unwrap()));
+    });
+    g.finish();
+}
+
 fn bench(c: &mut Criterion) {
     bench_group(c, 32, "smallval"); // SELinux/caps-sized values
     bench_group(c, 128, "largeval"); // ACL/EA-sized values
+    bench_formatter_ab(c);
 }
 
 criterion_group!(listxattr_names, bench);

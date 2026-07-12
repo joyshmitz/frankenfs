@@ -6401,11 +6401,12 @@ fn parse_xattr_entry_names(data: &[u8]) -> Result<Vec<String>, ParseError> {
                 reason: "name extends past data boundary",
             });
         }
-        names.push(format!(
-            "{}{}",
-            xattr_name_index_prefix(name_index),
-            String::from_utf8_lossy(&data[name_start..name_end])
-        ));
+        let prefix = xattr_name_index_prefix(name_index);
+        let name = String::from_utf8_lossy(&data[name_start..name_end]);
+        let mut full_name = String::with_capacity(prefix.len() + name.len());
+        full_name.push_str(prefix);
+        full_name.push_str(&name);
+        names.push(full_name);
         offset = (name_end + 3) & !3;
     }
     Ok(names)
@@ -15796,6 +15797,42 @@ mod tests {
         assert_eq!(entries[0].name, b"test");
         assert_eq!(entries[0].value, b"val");
         assert_eq!(entries[0].full_name(), "user.test");
+    }
+
+    #[test]
+    fn parse_xattr_entry_names_matches_full_name_for_all_prefixes_and_invalid_utf8() {
+        let indexes = [
+            ffs_types::EXT4_XATTR_INDEX_USER,
+            ffs_types::EXT4_XATTR_INDEX_POSIX_ACL_ACCESS,
+            ffs_types::EXT4_XATTR_INDEX_POSIX_ACL_DEFAULT,
+            ffs_types::EXT4_XATTR_INDEX_TRUSTED,
+            ffs_types::EXT4_XATTR_INDEX_SECURITY,
+            ffs_types::EXT4_XATTR_INDEX_SYSTEM,
+            ffs_types::EXT4_XATTR_INDEX_RICHACL,
+            u8::MAX,
+        ];
+        let mut data = vec![0_u8; 256];
+        let mut expected = Vec::new();
+        let mut offset = 0_usize;
+        for (i, name_index) in indexes.into_iter().enumerate() {
+            let name = [b'a' + i as u8, 0xFF];
+            data[offset] = name.len() as u8;
+            data[offset + 1] = name_index;
+            data[offset + 16..offset + 16 + name.len()].copy_from_slice(&name);
+            expected.push(
+                Ext4Xattr {
+                    name_index,
+                    name: name.to_vec(),
+                    value: Vec::new(),
+                }
+                .full_name(),
+            );
+            offset = (offset + 16 + name.len() + 3) & !3;
+        }
+        data[offset] = 0;
+        data[offset + 1] = 0;
+
+        assert_eq!(super::parse_xattr_entry_names(&data).unwrap(), expected);
     }
 
     #[test]
