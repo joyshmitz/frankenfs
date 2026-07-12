@@ -6112,3 +6112,39 @@ ffs-ondisk/ext4.rs:2876, mine): already AttrOnly-skips the 60-byte extent copy f
 non-devices (8314ca8c); the remaining base/OS/extended field reads are cheap
 `read_le_*` that MUST populate `Ext4Inode` struct fields regardless of mode — no
 cheap skip without the rejected struct-split (broad public-type change). No lever.
+
+### 2026-07-12 (cont.) — MVCC block-copy frontier HARVESTED at all cheap sites; remainder is STRUCTURAL
+
+After the peer-boundary reframe unlocked ffs-mvcc/ffs-core, the profile-attributed
+"MVCC block-copy is the unifying frontier cost" (b1730ffc) was attacked at every
+CHEAP (non-return-type-changing) site — clone→share/borrow via the tested
+`read_visible_block_buf` (shares `VersionData::Full` Arc) and `with_block_bytes`
+(borrow): 5d4a8f8d (2 `.is_none()` cacheability probes), 75f2936f (`with_block_bytes`
++ `read_block_arc_with_scope` MVCC branches), 99943772 (indirect DATA read + Partial
++ repair-verify). Per-block clone eliminated ≈71ns@4K / 885ns@64K (bench
+`read_block_uncompressed_clone_vs_share`); indirect resolve loop 68.9µs→11.7µs
+(≈5.9x, `indirect_ptr_resolve`). All byte-identical (mvcc 481/0, core 1184-pass, conf 100/0).
+
+Verified THIS turn that the rest of the read path is ALREADY optimal or I/O-masked
+— no cheap lever remains:
+- **FsMvccBlockDevice** (`read_block`/`read_contiguous_*`, fs_mvcc_store.rs:287+)
+  already uses `read_visible_block_buf` (shares, no clone).
+- **getattr inode read** (`read_ext4_inode_table_block_with_scope`, lib.rs:10699)
+  returns `Arc<[u8]>` served from `ext4_inode_table_block_cache` = refcount bump,
+  no 4KiB clone on hit; `read_inode_raw` parses a borrowed slice out of the Arc.
+- **`read_contiguous_blocks`/`read_contiguous_into`** allocate a `Vec<Option<
+  BlockBuf>>` even when the range has no overlay, BUT the base device read
+  dominates that alloc → I/O-masked (same class as the ledgered read-copy-coalesce
+  reject). An `any_version_installed` early-out only helps the empty-store case.
+
+REMAINING = STRUCTURAL return-type/cache-type changes (multi-turn, deliberate task,
+NOT single-turn micro-levers), mapped for a future turn:
+1. `read_block_with_scope` 11423 + `read_current_block_vec_from_device` 11444 +
+   `mvcc_read_visible` 6229 RETURN `Vec<u8>` (owned) — sharing needs callers to
+   accept `BlockBuf` (return-type change, many callers).
+2. `read_block_arc_with_scope` device branch (11485) copies `dev.read_block()`
+   BlockBuf (`Arc<AlignedVec>`) → `Arc<[u8]>` — a REQUIRED type conversion; only a
+   BlockBuf-typed block cache (touch cache decl + all get/insert/consumers)
+   eliminates it. Amortized by the cache today.
+`read_block_at_snapshot` 7274 is TEST-ONLY (not the frontier). VERDICT: cheap MVCC
+frontier CLOSED; HOLD for a deliberate structural session on items 1–2.
