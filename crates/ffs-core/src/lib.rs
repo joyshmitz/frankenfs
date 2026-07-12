@@ -10455,7 +10455,14 @@ impl OpenFs {
             return false;
         }
         if let Some(snapshot) = scope.snapshot {
-            return self.mvcc_store.read_visible(block, snapshot).is_none();
+            // Existence-only test: `read_visible_block_buf` is byte-identical to
+            // `read_visible` for Some/None but SHARES `Full` version storage
+            // instead of cloning an owned Vec (or decompressing) just to discard
+            // it — the bytes are never read here (bd-cc-shardread).
+            return self
+                .mvcc_store
+                .read_visible_block_buf(block, snapshot)
+                .is_none();
         }
         true
     }
@@ -10486,7 +10493,12 @@ impl OpenFs {
         let snapshot = scope
             .snapshot
             .unwrap_or_else(|| self.mvcc_store.current_snapshot());
-        self.mvcc_store.read_visible(block, snapshot).is_none()
+        // Existence-only test (hot: every data write resolves inode -> group desc):
+        // share `Full` storage via `read_visible_block_buf` instead of cloning the
+        // whole GDT block through an owned Vec only to test `.is_none()`.
+        self.mvcc_store
+            .read_visible_block_buf(block, snapshot)
+            .is_none()
     }
 
     /// Invalidate the writable-mode group-descriptor cache after a

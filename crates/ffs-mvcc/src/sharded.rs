@@ -981,6 +981,12 @@ impl ShardedMvccStore {
         block: BlockNumber,
         snapshot: Snapshot,
     ) -> Option<ffs_block::BlockBuf> {
+        // Mirror `read_visible`'s empty-store fast path (bd-cc-mvccempty): with no
+        // version ever installed (read-only mount), skip the shard hash + read-lock
+        // + empty-map probe — the result is `None` either way (no map holds `block`).
+        if !self.any_version_installed.load(Ordering::Acquire) {
+            return None;
+        }
         let shard_idx = self.shard_index(block);
         let shard = self.shards[shard_idx].read();
         shard.versions.get(&block).and_then(|versions| {
