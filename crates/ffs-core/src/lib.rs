@@ -54315,6 +54315,107 @@ mod tests {
         Some((fs, tmp))
     }
 
+    /// bd-bhh0i: runtime validation of the sharded per-group block allocator
+    /// (`sharded_alloc::PerGroupAlloc::alloc_blocks`, default-off behind the
+    /// `bhh0i_sharded_alloc` feature) against a REAL on-disk ext4 image — real
+    /// group descriptors and block bitmaps, produced by `mkfs.ext4` — so the
+    /// allocator actually reads and writes bitmaps through the same MVCC block
+    /// device the single-lock `alloc_blocks_persist` path uses.
+    ///
+    /// Three consecutive single-block allocations must each succeed, return
+    /// DISTINCT real blocks, and debit exactly one block from the group each
+    /// allocation lands in (with no other group's free count perturbed) — the
+    /// same observable effect the single-lock allocator produces.
+    #[test]
+    #[cfg(feature = "bhh0i_sharded_alloc")]
+    fn bd_bhh0i_sharded_alloc_blocks_allocates_valid_distinct_blocks() {
+        let Some((fs, _tmp)) = open_writable_ext4_mkfs(64) else {
+            return; // mkfs.ext4 unavailable on this host — skip like sibling tests.
+        };
+        let cx = Cx::for_testing();
+
+        // Geometry is derived lock-free from the live superblock, exactly how
+        // the sharded path expects the caller to supply it.
+        let sb = fs.ext4_superblock().expect("ext4 superblock");
+        let geo = FsGeometry::from_superblock(sb);
+
+        // Immutable persist context, cloned out of the single-lock alloc state
+        // (`PersistCtx: Clone`) — the very context the single-lock path feeds
+        // `alloc_blocks_persist`.
+        let pctx = fs
+            .ext4_alloc_state
+            .as_ref()
+            .expect("ext4 write state present after enable_writes")
+            .read()
+            .persist_ctx
+            .clone();
+
+        // The block device the single-lock alloc path writes bitmaps through
+        // (same accessor `alloc_blocks_persist` callers use in the write path).
+        let dev = fs.block_device_adapter();
+
+        // The sharded per-group allocator populated (each group's reserved-set
+        // cache pre-filled) by `enable_writes` under this feature.
+        let sharded = fs
+            .ext4_sharded_alloc
+            .as_ref()
+            .expect("sharded allocator present under bhh0i_sharded_alloc feature");
+
+        let hint = AllocHint::default();
+        let group_count = sharded.group_count();
+
+        let mut allocated = Vec::new();
+        for call in 0..3 {
+            // Per-group free-block snapshot before the allocation.
+            let free_before: Vec<u32> = (0..group_count)
+                .map(|g| sharded.lock_group(g).free_blocks)
+                .collect();
+            let total_before = sharded.total_free().blocks;
+
+            let alloc = sharded
+                .alloc_blocks(&cx, &dev, &geo, &hint, 1, &pctx)
+                .unwrap_or_else(|e| panic!("sharded alloc_blocks call {call} errored: {e:?}"))
+                .unwrap_or_else(|| panic!("sharded alloc_blocks call {call} found no free block"));
+            assert_eq!(alloc.count, 1, "call {call}: expected exactly one block");
+
+            // The returned block must map to a real group whose free count fell
+            // by exactly one; the whole-array total fell by exactly one too, so
+            // no sibling group was perturbed.
+            let landing = usize::try_from(
+                (alloc.start.0 - u64::from(geo.first_data_block))
+                    / u64::from(geo.blocks_per_group),
+            )
+            .expect("landing group index fits usize");
+            assert!(
+                landing < group_count,
+                "call {call}: landing group {landing} out of range (group_count={group_count})"
+            );
+            let free_after_landing = sharded.lock_group(landing).free_blocks;
+            assert_eq!(
+                free_after_landing,
+                free_before[landing] - 1,
+                "call {call}: landing group {landing} free_blocks must drop by exactly 1"
+            );
+            let total_after = sharded.total_free().blocks;
+            assert_eq!(
+                total_after,
+                total_before - 1,
+                "call {call}: exactly one block consumed across all groups"
+            );
+
+            allocated.push(alloc.start);
+        }
+
+        // All three allocations must be distinct real blocks.
+        let distinct: std::collections::HashSet<u64> =
+            allocated.iter().map(|b| b.0).collect();
+        assert_eq!(
+            distinct.len(),
+            3,
+            "the three sharded allocations must be distinct blocks: {allocated:?}"
+        );
+    }
+
     /// Run `e2fsck -fn` (force, read-only) on an image; returns (clean, output).
     fn run_e2fsck(image: &std::path::Path) -> Option<(bool, String)> {
         let out = std::process::Command::new("e2fsck")
