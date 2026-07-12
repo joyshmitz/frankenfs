@@ -441,11 +441,106 @@ fn bench_writeback_dag_block_level_iteration_current(c: &mut Criterion) {
     group.finish();
 }
 
+// ── crash-tracking opt-out (production writeback never reads crash points) ──
+//
+// `WritebackExecutor::execute` records two crash points per flushed node, each
+// cloning the growing durable-block `BTreeSet` (O(N²) copies over a commit) and
+// formatting a per-node id string. The production btrfs commit drives writeback
+// purely for the disk side effects in `flush_node` and never reads
+// `crash_points()`, so it now calls `.without_crash_tracking()`. This measures
+// the per-`execute` saving on the 2048-node DAG.
+
+/// Run `execute`, capturing the exact `(block, level)` flush sequence and the
+/// number of crash points recorded. Used to prove the toggle is byte-identical
+/// on the disk-write path.
+fn execute_flush_sequence(dag: WriteDependencyDag, track: bool) -> (Vec<(u64, u8)>, usize) {
+    let mut executor = if track {
+        WritebackExecutor::new(dag)
+    } else {
+        WritebackExecutor::new(dag).without_crash_tracking()
+    };
+    let mut calls: Vec<(u64, u8)> = Vec::new();
+    executor
+        .execute(|block, level| {
+            calls.push((block, level));
+            Ok(())
+        })
+        .expect("execute writeback");
+    let crash_points = executor.crash_points().len();
+    (calls, crash_points)
+}
+
+/// Minimal-closure `execute` for timing: measures the crash-tracking cost with
+/// a trivial flush body so the recording delta dominates. Returns the crash
+/// point count to defeat dead-code elimination.
+fn execute_measure(dag: WriteDependencyDag, track: bool) -> usize {
+    let mut executor = if track {
+        WritebackExecutor::new(dag)
+    } else {
+        WritebackExecutor::new(dag).without_crash_tracking()
+    };
+    executor
+        .execute(|block, level| {
+            black_box((block, level));
+            Ok(())
+        })
+        .expect("execute writeback");
+    executor.crash_points().len()
+}
+
+fn bench_writeback_executor_crash_tracking(c: &mut Criterion) {
+    let dag = build_dag();
+
+    // Byte-identity proof: the `flush_node` closure performs every disk write in
+    // production, and it receives the identical `(block, level)` sequence whether
+    // or not crash points are recorded. Disabling recording only drops telemetry
+    // that production never reads.
+    let (tracked_calls, tracked_cp) = execute_flush_sequence(dag.clone(), true);
+    let (untracked_calls, untracked_cp) = execute_flush_sequence(dag.clone(), false);
+    assert_eq!(
+        tracked_calls, untracked_calls,
+        "without_crash_tracking changed the flush (block, level) sequence"
+    );
+    assert_eq!(
+        untracked_cp, 0,
+        "untracked executor must record zero crash points"
+    );
+    assert!(
+        tracked_cp >= tracked_calls.len(),
+        "tracked executor must still record per-flush crash points"
+    );
+
+    let mut group = c.benchmark_group("writeback_executor_crash_tracking_2048");
+    group.bench_function("record_crash_points_a", |b| {
+        b.iter_batched(
+            || dag.clone(),
+            |dag| black_box(execute_measure(dag, true)),
+            BatchSize::SmallInput,
+        );
+    });
+    group.bench_function("record_crash_points_b", |b| {
+        b.iter_batched(
+            || dag.clone(),
+            |dag| black_box(execute_measure(dag, true)),
+            BatchSize::SmallInput,
+        );
+    });
+    group.bench_function("without_crash_tracking", |b| {
+        b.iter_batched(
+            || dag.clone(),
+            |dag| black_box(execute_measure(dag, false)),
+            BatchSize::SmallInput,
+        );
+    });
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_writeback_dag_order,
     bench_writeback_dag_build,
     bench_writeback_executor_crash_points,
-    bench_writeback_dag_block_level_iteration_current
+    bench_writeback_dag_block_level_iteration_current,
+    bench_writeback_executor_crash_tracking
 );
 criterion_main!(benches);

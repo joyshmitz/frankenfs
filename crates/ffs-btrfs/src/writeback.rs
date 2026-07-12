@@ -416,16 +416,37 @@ pub struct WritebackExecutor {
     dag: WriteDependencyDag,
     crash_points: Vec<CrashPoint>,
     fsync_barrier_issued: bool,
+    record_crash_points: bool,
 }
 
 impl WritebackExecutor {
     /// Create a new writeback executor for the given DAG.
+    ///
+    /// Crash-point recording is enabled by default so the DPOR / WB-I1
+    /// verification tests can inspect `crash_points()`.
     pub fn new(dag: WriteDependencyDag) -> Self {
         Self {
             dag,
             crash_points: Vec::new(),
             fsync_barrier_issued: false,
+            record_crash_points: true,
         }
+    }
+
+    /// Disable per-flush crash-point recording for this executor.
+    ///
+    /// The production btrfs commit path drives writeback purely for its disk
+    /// side effects (`flush_node`) and never reads `crash_points()` or calls
+    /// `verify_wb_i1()`. Recording them there is pure waste: each `execute`
+    /// otherwise clones the growing durable-block `BTreeSet` twice per node
+    /// (O(N²) copies) and formats two per-node id strings. Turning it off is
+    /// byte-identical on the disk output — the `flush_node` closure still sees
+    /// the exact same `(block, level)` sequence — it only drops the unread
+    /// telemetry. Test / verification callers keep the default (recording on).
+    #[must_use]
+    pub fn without_crash_tracking(mut self) -> Self {
+        self.record_crash_points = false;
+        self
     }
 
     /// Execute writeback in reverse topological order.
@@ -442,17 +463,21 @@ impl WritebackExecutor {
         let total = order.len();
         let generation = self.dag.generation;
         let mut durable_blocks = self.dag.durable_block_set();
-        self.crash_points.reserve(total.saturating_mul(2));
+        if self.record_crash_points {
+            self.crash_points.reserve(total.saturating_mul(2));
+        }
 
         for (i, block) in order.into_iter().enumerate() {
-            // Record crash point before this flush
-            let pre_crash_id = format!("pre_flush_{}", block);
-            self.crash_points.push(CrashPoint::from_durable_blocks(
-                &durable_blocks,
-                pre_crash_id,
-                false,
-                generation,
-            ));
+            // Record crash point before this flush (test/verification only)
+            if self.record_crash_points {
+                let pre_crash_id = format!("pre_flush_{}", block);
+                self.crash_points.push(CrashPoint::from_durable_blocks(
+                    &durable_blocks,
+                    pre_crash_id,
+                    false,
+                    generation,
+                ));
+            }
 
             // Get the level for this block from the DAG
             let level = self.dag.node_level(block).unwrap_or(0);
@@ -460,16 +485,18 @@ impl WritebackExecutor {
             // Flush the node
             flush_node(block, level)?;
             self.dag.mark_durable(block)?;
-            durable_blocks.insert(block);
 
-            // Record crash point after this flush
-            let post_crash_id = format!("post_flush_{}", block);
-            self.crash_points.push(CrashPoint::from_durable_blocks(
-                &durable_blocks,
-                post_crash_id,
-                false,
-                generation,
-            ));
+            // Record crash point after this flush (test/verification only)
+            if self.record_crash_points {
+                durable_blocks.insert(block);
+                let post_crash_id = format!("post_flush_{}", block);
+                self.crash_points.push(CrashPoint::from_durable_blocks(
+                    &durable_blocks,
+                    post_crash_id,
+                    false,
+                    generation,
+                ));
+            }
 
             trace!(
                 block,
@@ -484,41 +511,45 @@ impl WritebackExecutor {
 
     /// Issue fsync barrier before superblock write.
     pub fn fsync_barrier(&mut self) {
-        let durable_blocks = self.dag.durable_block_set();
-        let generation = self.dag.generation;
-        self.crash_points.push(CrashPoint::from_durable_blocks(
-            &durable_blocks,
-            "pre_fsync_barrier",
-            false,
-            generation,
-        ));
         self.fsync_barrier_issued = true;
-        self.crash_points.push(CrashPoint::from_durable_blocks(
-            &durable_blocks,
-            "post_fsync_barrier",
-            false,
-            generation,
-        ));
+        if self.record_crash_points {
+            let durable_blocks = self.dag.durable_block_set();
+            let generation = self.dag.generation;
+            self.crash_points.push(CrashPoint::from_durable_blocks(
+                &durable_blocks,
+                "pre_fsync_barrier",
+                false,
+                generation,
+            ));
+            self.crash_points.push(CrashPoint::from_durable_blocks(
+                &durable_blocks,
+                "post_fsync_barrier",
+                false,
+                generation,
+            ));
+        }
         debug!("writeback executor fsync barrier issued");
     }
 
     /// Record superblock commit.
     pub fn commit_superblock(&mut self) {
-        let durable_blocks = self.dag.durable_block_set();
-        let generation = self.dag.generation;
-        self.crash_points.push(CrashPoint::from_durable_blocks(
-            &durable_blocks,
-            "pre_superblock",
-            false,
-            generation,
-        ));
-        // After superblock write, the commit is durable
-        self.crash_points.push(CrashPoint::from_durable_blocks(
-            &durable_blocks,
-            "post_superblock",
-            true,
-            generation,
-        ));
+        if self.record_crash_points {
+            let durable_blocks = self.dag.durable_block_set();
+            let generation = self.dag.generation;
+            self.crash_points.push(CrashPoint::from_durable_blocks(
+                &durable_blocks,
+                "pre_superblock",
+                false,
+                generation,
+            ));
+            // After superblock write, the commit is durable
+            self.crash_points.push(CrashPoint::from_durable_blocks(
+                &durable_blocks,
+                "post_superblock",
+                true,
+                generation,
+            ));
+        }
         debug!(
             generation = self.dag.generation,
             "writeback executor superblock committed"

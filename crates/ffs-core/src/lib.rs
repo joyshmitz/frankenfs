@@ -25748,7 +25748,7 @@ impl OpenFs {
         );
 
         // Create the writeback executor
-        let mut executor = WritebackExecutor::new(dag);
+        let mut executor = WritebackExecutor::new(dag).without_crash_tracking();
 
         // Serialize and write each node in reverse topological order
         let mut bytes_written = 0u64;
@@ -25877,7 +25877,7 @@ impl OpenFs {
                 alloc.sectorsize,
                 csum_allocated_addrs,
             );
-            let mut csum_executor = WritebackExecutor::new(csum_dag);
+            let mut csum_executor = WritebackExecutor::new(csum_dag).without_crash_tracking();
             let csum_flush_result = csum_executor.execute(|block, level| {
                 let serialized = csum_disk_ctx.serialize_node(&alloc.csum_tree, block, level)?;
                 let node_bytes = serialized.len() as u64;
@@ -25967,7 +25967,7 @@ impl OpenFs {
                 alloc.sectorsize,
                 subvol_allocated_addrs,
             );
-            let mut subvol_executor = WritebackExecutor::new(subvol_dag);
+            let mut subvol_executor = WritebackExecutor::new(subvol_dag).without_crash_tracking();
             let subvol_flush_result = subvol_executor.execute(|block, level| {
                 let serialized = subvol_disk_ctx.serialize_node(subvol_tree, block, level)?;
                 let node_bytes = serialized.len() as u64;
@@ -26070,7 +26070,7 @@ impl OpenFs {
         );
 
         // Write extent_tree nodes
-        let mut extent_executor = WritebackExecutor::new(extent_dag);
+        let mut extent_executor = WritebackExecutor::new(extent_dag).without_crash_tracking();
         let extent_flush_result = extent_executor.execute(|block, level| {
             let serialized =
                 extent_disk_ctx.serialize_node(alloc.extent_alloc.extent_tree(), block, level)?;
@@ -26184,7 +26184,7 @@ impl OpenFs {
         // Write root_tree nodes — same logical→physical translation as
         // above, so that the next mount's resolver finds them via the
         // chunk tree.
-        let mut root_executor = WritebackExecutor::new(root_dag);
+        let mut root_executor = WritebackExecutor::new(root_dag).without_crash_tracking();
         let root_flush_result = root_executor.execute(|block, level| {
             let serialized = root_disk_ctx.serialize_node(&alloc.root_tree, block, level)?;
             let node_bytes = serialized.len() as u64;
