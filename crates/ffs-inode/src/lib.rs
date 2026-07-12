@@ -113,6 +113,22 @@ pub fn write_inode(
     })?;
 
     let inode_size = usize::from(geo.inode_size);
+    write_inode_at(cx, dev, loc, inode_size, ino, inode, csum_seed)
+}
+
+/// Write an inode to a KNOWN on-disk location (bd-bhh0i): the location-resolution
+/// half of `write_inode` factored out so the sharded per-group create path can
+/// supply an `InodeLocation` it computed from the sharded allocator, instead of a
+/// `&[GroupStats]` slice.
+pub fn write_inode_at(
+    cx: &Cx,
+    dev: &dyn BlockDevice,
+    loc: InodeLocation,
+    inode_size: usize,
+    ino: InodeNumber,
+    inode: &Ext4Inode,
+    csum_seed: u32,
+) -> Result<()> {
     // Serialize into a STACK buffer for the standard inode_size (128/256),
     // avoiding the per-write `vec![0; inode_size]` heap alloc; unusual large
     // inode_size (>256) falls back to a heap buffer (bd-cc-serialize-into).
