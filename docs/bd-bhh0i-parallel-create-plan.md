@@ -620,3 +620,34 @@ the scaling win. Until then the cutover cannot be safely landed or measured. Nex
 remote steps if continuing: the in-memory parallel-create correctness test, then the
 feature-gated cutover code (compile + conformance validatable), holding the flag OFF
 until the local e2fsck gate is available.
+
+## 2026-07-12 — CUTOVER GREENLIT (run locally); toolchain verified
+
+Owner chose "run the cutover locally" — local execution is authorized for the
+cutover gates (relaxing rch-remote-only for e2fsck / create-bench). Local toolchain
+CONFIRMED present: `e2fsck 1.47.2`, `mkfs.ext4`, `debugfs` (`/usr/sbin`), and
+`create-bench` (`crates/ffs-cli/src/main.rs`). Local builds run via the
+`RCH_ENABLED=0` scratchpad-script workaround (target dir `/data/tmp/cargo-target`);
+the `/data/tmp/*.img` fixtures are btrfs — a fresh ext4 image is `mkfs.ext4`'d for
+the ext4 create-bench + e2fsck gate.
+
+Also reconciled a git artifact: after `2064dacb` (parallel test) was committed +
+pushed, a subagent misread it as an rch auto-commit and `reset --mixed HEAD~1`;
+local was fast-forwarded back to `origin/main` (2064dacb), the identical duplicate
+parked in `stash@{0}`. No work lost.
+
+### Cutover execution plan (local)
+1. Write the feature-gated cutover: in `ext4_create`/`mknod`/`mkdir`/`unlink`/`link`/
+   `symlink`/`fallocate`/rename, under `#[cfg(feature="bhh0i_sharded_alloc")]` route
+   block/inode allocation through `self.ext4_sharded_alloc.alloc_blocks`/`alloc_inode`
+   (inode `target = spread_start_group(parent, per-thread-seed, group_count)`; dir
+   Orlov via a lock-free free-count snapshot), route the fold consumers
+   (`ext4_sync_superblock_free_totals`, `statfs`) and any other `groups` reader to the
+   sharded structure. Flag OFF ⇒ byte-identical single-lock (unchanged).
+2. Remote-validate feature-on: compile + `conformance` (single-thread correctness).
+3. LOCAL gates (the authorized step): build flag-on ffs-cli; `mkfs.ext4` an image;
+   `create-bench --threads {1,2,4,8,16}` — scaling MUST go positive (target 8t ≥ 4x
+   1t); `create-bench 3000` then `e2fsck -fn` = 0 orphans / 0 bitmap drift / correct
+   free counts; A/B vs the flag-off single-lock build on the same box; single-thread
+   non-regression. e2fsck-clean is MANDATORY (two prior naive attempts corrupted).
+4. Only after e2fsck-clean + positive scaling: flip the default (or keep it a config).
