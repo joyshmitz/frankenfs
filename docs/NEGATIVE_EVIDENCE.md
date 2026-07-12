@@ -6236,3 +6236,54 @@ reads already go zero-copy through `read_contiguous_into`, not that path.
 RECOMMENDATION (surfaced to the user): greenlight the loom-gated bd-bhh0i multi-turn
 task, or run a profile on non-rch infra to surface a new frame. Absent either, the
 FS is at its single-thread floor and further single-quick-turn prompts yield bounds.
+
+### 2026-07-12 (cont.) — bd-bhh0i sharded PRIMITIVES now complete; only the local-gated big-bang cutover remains
+
+Three turns of bd-bhh0i slices landed + remote-validated since the loom-gated task
+was greenlit: `write_inode_at` (location-supplied inode write, `eb9af783`),
+`choose_dir_group` (sharded Orlov dir placement, `cb03d10c`), and the cutover-
+critical `used_dirs`-accounting test (`401f41cc`) — on top of the earlier
+`group_free_snapshot` / `spread_start_group` / `alloc_blocks` / `alloc_inode` /
+`total_free` primitives. **The sharded-primitive surface is now itself exhausted:**
+every input the cutover wiring needs exists, cfg-gated (`bhh0i_sharded_alloc`,
+default off) + remote-tested single-thread AND parallel (real mkfs images, distinct
+allocs, correct debits, dir accounting).
+
+This turn re-probed for a FRESH single-turn micro-lever before concluding — not just
+citing the prior "terminal" rows:
+- **`bitmap_find_free`** (runs on every inode/block alloc, on the create serial
+  floor) is ALREADY fully SWAR-optimized: leading byte-align → 4-words-at-a-time
+  (256-bit `w0&w1&w2&w3` OR-reduce) → word-at-a-time (`(!word).trailing_zeros()`) →
+  byte tier. No lever; the has-zero/word-at-a-time model is already applied here.
+- A **differential conformance test** (sharded `alloc_inode` vs single-lock
+  `alloc_inode_persist` on twin mkfs images) was analyzed and REJECTED as near-
+  tautological under feasible remote conditions: the two paths share
+  `try_alloc_inode_in_group_persist_core`, `choose_dir_group` is already unit-proven
+  byte-identical to `orlov_choose_group_for_dir`, and on a spacious fresh fs the scan
+  never falls through to neighbors — so the only genuinely-untested equivalence
+  (scan-order fallback) would require exhausting a group's inodes (thousands of
+  allocations), too heavy for a quick remote test, and everything cheaper just
+  re-confirms already-proven components.
+
+**Structural blocker for "remote-only + small-increment":** the sole remaining
+lever is the cutover WIRING (route `ext4_create`/`mknod`/`mkdir`/`unlink`/`link`/
+`symlink`/`fallocate`/rename + the fold consumers + every `groups` reader through
+the sharded structure under the flag). It is NOT decomposable into small flag-on
+slices — with the flag ON, a partially-wired op set makes the sharded and single-
+lock `groups` DIVERGE (each mutates only its own structure), so allocation decisions
+read stale free counts → double-alloc/exhaustion. It is therefore a single BIG-BANG
+change whose MANDATORY gate is a LOCAL `e2fsck -fn` + positive-scaling A/B (two prior
+naive attempts corrupted the fs; conformance alone does not catch parallel on-disk
+inconsistency — that is precisely why e2fsck-clean is mandatory). `rch exec` cannot
+run `e2fsck`/`create-bench` (non-compilation, ≥1 GiB fixtures outside the repo), so
+under the standing "remote-only" rule the remaining lever cannot be responsibly
+landed this turn: writing the big-bang wiring without its local e2fsck gate is the
+exact rushed move the plan forbids.
+
+=> No honest remote-only single-turn perf WIN exists right now. The primitives are
+done; the cutover is one atomic, local-e2fsck-gated step. **RECOMMENDATION:** run the
+already-greenlit local cutover (relax remote-only for the `e2fsck`/`create-bench`
+gate, or run it via the `!` inline-command path), which lands the wiring + measures
+the parallel-scaling win in one owner-run session. Absent that relaxation, the FS is
+at its single-thread floor and further remote-only quick-turn prompts yield bounds,
+not wins — recorded so the loop's expectations match the measured/structural floor.
