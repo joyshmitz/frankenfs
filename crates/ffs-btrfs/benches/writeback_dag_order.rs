@@ -535,12 +535,86 @@ fn bench_writeback_executor_crash_tracking(c: &mut Criterion) {
     group.finish();
 }
 
+// ── stream (block, level) from the postorder walk vs re-probe node_level ────
+//
+// `WritebackExecutor::execute` needs each flushed node's tree level. The old
+// path built `reverse_topological_order()` then re-probed `node_level(block)`
+// per node — a second BTreeMap lookup per flush. `reverse_topological_order_
+// with_levels()` reads the level from the node already visited during the
+// postorder walk, dropping the per-node relookup. Both produce the identical
+// (block, level) sequence, so the flush order and disk output are unchanged.
+
+fn order_then_relookup(dag: &WriteDependencyDag) -> Vec<(u64, u8)> {
+    dag.reverse_topological_order()
+        .into_iter()
+        .map(|block| (block, dag.node_level(block).unwrap_or(0)))
+        .collect()
+}
+
+fn order_levels_digest(order: &[(u64, u8)]) -> u64 {
+    order
+        .iter()
+        .fold(0xcbf2_9ce4_8422_2325_u64, |acc, (block, level)| {
+            acc.wrapping_mul(0x100_0000_01b3)
+                .wrapping_add(*block)
+                .wrapping_add(u64::from(*level))
+        })
+}
+
+/// Faithful to `execute`'s old path: build the block order once, then read each
+/// node's level via a per-node `node_level` probe folded inline (no re-collect).
+fn digest_order_then_relookup(dag: &WriteDependencyDag) -> u64 {
+    dag.reverse_topological_order().into_iter().fold(
+        0xcbf2_9ce4_8422_2325_u64,
+        |acc, block| {
+            let level = dag.node_level(block).unwrap_or(0);
+            acc.wrapping_mul(0x100_0000_01b3)
+                .wrapping_add(block)
+                .wrapping_add(u64::from(level))
+        },
+    )
+}
+
+/// Faithful to `execute`'s new path: the level rides along from the postorder
+/// walk, no per-node relookup.
+fn digest_order_with_levels(dag: &WriteDependencyDag) -> u64 {
+    order_levels_digest(&dag.reverse_topological_order_with_levels())
+}
+
+fn bench_writeback_order_with_levels(c: &mut Criterion) {
+    let dag = build_dag();
+    let relookup = order_then_relookup(&dag);
+    let streamed = dag.reverse_topological_order_with_levels();
+    assert_eq!(
+        relookup, streamed,
+        "streaming levels from the postorder walk changed the (block, level) flush sequence"
+    );
+    assert_eq!(
+        digest_order_then_relookup(&dag),
+        digest_order_with_levels(&dag),
+        "relookup and streamed level digests diverged"
+    );
+
+    let mut group = c.benchmark_group("writeback_order_with_levels_2048");
+    group.bench_function("order_then_relookup_a", |b| {
+        b.iter(|| black_box(digest_order_then_relookup(black_box(&dag))));
+    });
+    group.bench_function("order_then_relookup_b", |b| {
+        b.iter(|| black_box(digest_order_then_relookup(black_box(&dag))));
+    });
+    group.bench_function("order_with_levels", |b| {
+        b.iter(|| black_box(digest_order_with_levels(black_box(&dag))));
+    });
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_writeback_dag_order,
     bench_writeback_dag_build,
     bench_writeback_executor_crash_points,
     bench_writeback_dag_block_level_iteration_current,
-    bench_writeback_executor_crash_tracking
+    bench_writeback_executor_crash_tracking,
+    bench_writeback_order_with_levels
 );
 criterion_main!(benches);

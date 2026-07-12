@@ -158,6 +158,48 @@ impl WriteDependencyDag {
         result.push(block);
     }
 
+    /// Reverse topological order paired with each node's tree level.
+    ///
+    /// Identical block order to `reverse_topological_order`, but the level is
+    /// read from the same node visited during the postorder walk. This lets
+    /// the writeback executor flush each node without a second per-node probe
+    /// of the node map (`node_level`) — the block always has a node here (the
+    /// postorder walk only pushes blocks it resolved), so the paired level is
+    /// exactly what `node_level(block).unwrap_or(0)` would return.
+    pub fn reverse_topological_order_with_levels(&self) -> Vec<(u64, u8)> {
+        let mut result = Vec::with_capacity(self.nodes.len());
+        let mut visited = HashSet::with_capacity(self.nodes.len());
+
+        self.push_postorder_with_levels(self.root, &mut visited, &mut result);
+
+        for block in self.nodes.keys().copied() {
+            self.push_postorder_with_levels(block, &mut visited, &mut result);
+        }
+
+        result
+    }
+
+    fn push_postorder_with_levels(
+        &self,
+        block: u64,
+        visited: &mut HashSet<u64>,
+        result: &mut Vec<(u64, u8)>,
+    ) {
+        if !visited.insert(block) {
+            return;
+        }
+
+        let Some(node) = self.nodes.get(&block) else {
+            return;
+        };
+
+        for child in &node.children {
+            self.push_postorder_with_levels(*child, visited, result);
+        }
+
+        result.push((block, node.level));
+    }
+
     fn durable_block_set(&self) -> BTreeSet<u64> {
         self.nodes
             .iter()
@@ -459,7 +501,10 @@ impl WritebackExecutor {
     where
         F: FnMut(u64, u8) -> Result<(), BtrfsMutationError>,
     {
-        let order = self.dag.reverse_topological_order();
+        // Stream (block, level) from the postorder walk itself: the level is
+        // read from the same node visited during ordering, so there is no
+        // second per-node probe of the node map inside the flush loop.
+        let order = self.dag.reverse_topological_order_with_levels();
         let total = order.len();
         let generation = self.dag.generation;
         let mut durable_blocks = self.dag.durable_block_set();
@@ -467,7 +512,7 @@ impl WritebackExecutor {
             self.crash_points.reserve(total.saturating_mul(2));
         }
 
-        for (i, block) in order.into_iter().enumerate() {
+        for (i, (block, level)) in order.into_iter().enumerate() {
             // Record crash point before this flush (test/verification only)
             if self.record_crash_points {
                 let pre_crash_id = format!("pre_flush_{}", block);
@@ -478,9 +523,6 @@ impl WritebackExecutor {
                     generation,
                 ));
             }
-
-            // Get the level for this block from the DAG
-            let level = self.dag.node_level(block).unwrap_or(0);
 
             // Flush the node
             flush_node(block, level)?;
