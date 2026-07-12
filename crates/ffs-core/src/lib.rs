@@ -10229,6 +10229,16 @@ impl OpenFs {
             let results: Vec<(usize, Result<BtrfsDeferredReadResult, FfsError>)> =
                 if jobs.len() <= 1 || rayon::current_thread_index().is_some() {
                     jobs.into_iter().map(exec_job).collect()
+                } else if let Some(pool) = ext4_read_pool() {
+                    // bd-ddryj: bound this cold btrfs read fan-out on the shared
+                    // 16-wide read pool instead of the nproc-wide global one, so the
+                    // concurrent preads into one file's page-cache address_space stop
+                    // converting I/O parallelism into `xa_lock` spinlock contention —
+                    // the same lever the ext4 file-data fan-out already takes.
+                    // `ext4_read_pool` is the historical name for a fs-agnostic bounded
+                    // read pool; the guard above makes this branch non-nested, so
+                    // `install` runs from a non-worker thread.
+                    pool.install(|| jobs.into_par_iter().map(exec_job).collect())
                 } else {
                     jobs.into_par_iter().map(exec_job).collect()
                 };
@@ -13050,6 +13060,12 @@ impl OpenFs {
                 || rayon::current_thread_index().is_some()
             {
                 specs.into_iter().map(read_run).collect()
+            } else if let Some(pool) = ext4_read_pool() {
+                // bd-ddryj: bound the cold-readdir fan-out on the shared 16-wide read
+                // pool, not the nproc-wide global one — the same page-cache xa_lock
+                // contention the ext4 file-data read path caps. The guard above makes
+                // this branch non-nested, so `install` runs from a non-worker thread.
+                pool.install(|| specs.into_par_iter().map(read_run).collect())
             } else {
                 specs.into_par_iter().map(read_run).collect()
             };
