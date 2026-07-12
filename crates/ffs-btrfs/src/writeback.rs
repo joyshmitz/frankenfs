@@ -202,6 +202,11 @@ impl WriteDependencyDag {
         self.nodes.keys().copied()
     }
 
+    /// Return block numbers and tree levels in ascending block-number order.
+    pub fn blocks_with_levels(&self) -> impl Iterator<Item = (u64, u8)> + '_ {
+        self.nodes.iter().map(|(block, node)| (*block, node.level))
+    }
+
     /// Return all block numbers as a collected Vec.
     pub fn all_blocks(&self) -> Vec<u64> {
         self.nodes.keys().copied().collect()

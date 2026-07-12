@@ -13,7 +13,9 @@
 //! double-clone model against the moved-child production shape.
 
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
-use ffs_btrfs::writeback::{CrashPoint, WbI1Oracle, WriteDependencyDag, WritebackExecutor};
+use ffs_btrfs::writeback::{
+    CrashPoint, DiskWritebackContext, WbI1Oracle, WriteDependencyDag, WritebackExecutor,
+};
 use ffs_btrfs::{BtrfsBTree, BtrfsCowNode, BtrfsKey, BtrfsMutationError, InMemoryCowBtrfsTree};
 use std::collections::{BTreeMap, BTreeSet};
 use std::hint::black_box;
@@ -21,6 +23,7 @@ use std::hint::black_box;
 const ITEMS: u64 = 2048;
 const MAX_ITEMS: usize = 8;
 const GENERATION: u64 = 123;
+const NODESIZE: u32 = 16_384;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct BenchDagNode {
@@ -199,6 +202,65 @@ fn order_digest(order: &[u64]) -> u64 {
     })
 }
 
+fn collect_block_levels_current(dag: &WriteDependencyDag) -> Vec<(u64, u8)> {
+    dag.all_blocks()
+        .into_iter()
+        .map(|block| {
+            let level = dag
+                .node_level(block)
+                .expect("block collected from the DAG must have a level");
+            (block, level)
+        })
+        .collect()
+}
+
+fn collect_block_levels_streamed(dag: &WriteDependencyDag) -> Vec<(u64, u8)> {
+    dag.blocks_with_levels().collect()
+}
+
+fn serialize_block_levels(
+    tree: &InMemoryCowBtrfsTree,
+    block_levels: &[(u64, u8)],
+) -> Vec<(u64, Vec<u8>)> {
+    let allocated_addrs = block_levels
+        .iter()
+        .enumerate()
+        .map(|(index, (block, _))| {
+            let index = u64::try_from(index).expect("DAG index fits u64");
+            (*block, 0x4000_0000_u64 + index * u64::from(NODESIZE))
+        })
+        .collect();
+    let context = DiskWritebackContext::with_allocated_addresses(
+        [0x11; 16],
+        [0x22; 16],
+        GENERATION,
+        5,
+        NODESIZE,
+        4096,
+        allocated_addrs,
+    );
+
+    block_levels
+        .iter()
+        .map(|(block, level)| {
+            let bytes = context
+                .serialize_node(tree, *block, *level)
+                .expect("serialize benchmark DAG node");
+            (*block, bytes)
+        })
+        .collect()
+}
+
+fn block_levels_digest(block_levels: &[(u64, u8)]) -> u64 {
+    block_levels
+        .iter()
+        .fold(0xcbf2_9ce4_8422_2325_u64, |acc, (block, level)| {
+            acc.wrapping_mul(0x100_0000_01b3)
+                .wrapping_add(*block)
+                .wrapping_add(u64::from(*level))
+        })
+}
+
 fn crash_points_digest(points: &[CrashPoint]) -> u64 {
     points.iter().fold(0xcbf2_9ce4_8422_2325_u64, |acc, point| {
         let id_len = u64::try_from(point.id.len()).expect("crash point id length fits u64");
@@ -340,10 +402,50 @@ fn bench_writeback_executor_crash_points(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_writeback_dag_block_level_iteration_current(c: &mut Criterion) {
+    let tree = build_tree();
+    let dag = WriteDependencyDag::from_cow_tree(&tree, GENERATION).expect("build DAG");
+    let current_a = collect_block_levels_current(&dag);
+    let current_b = collect_block_levels_current(&dag);
+    assert_eq!(current_a, current_b, "identical current-code arms diverged");
+    let streamed = collect_block_levels_streamed(&dag);
+    assert_eq!(
+        current_a, streamed,
+        "streaming block-level iteration changed allocation order or levels"
+    );
+    assert_eq!(
+        serialize_block_levels(&tree, &current_a),
+        serialize_block_levels(&tree, &streamed),
+        "streaming block-level iteration changed serialized node bytes"
+    );
+
+    let mut group = c.benchmark_group("writeback_dag_block_level_iteration_2048");
+    group.bench_function("all_blocks_then_lookup_a", |b| {
+        b.iter(|| {
+            let block_levels = collect_block_levels_current(black_box(&dag));
+            black_box(block_levels_digest(&block_levels))
+        });
+    });
+    group.bench_function("all_blocks_then_lookup_b", |b| {
+        b.iter(|| {
+            let block_levels = collect_block_levels_current(black_box(&dag));
+            black_box(block_levels_digest(&block_levels))
+        });
+    });
+    group.bench_function("streamed_block_levels", |b| {
+        b.iter(|| {
+            let block_levels = collect_block_levels_streamed(black_box(&dag));
+            black_box(block_levels_digest(&block_levels))
+        });
+    });
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_writeback_dag_order,
     bench_writeback_dag_build,
-    bench_writeback_executor_crash_points
+    bench_writeback_executor_crash_points,
+    bench_writeback_dag_block_level_iteration_current
 );
 criterion_main!(benches);

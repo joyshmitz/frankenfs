@@ -25717,17 +25717,11 @@ impl OpenFs {
         // metadata block groups. This fixes the addressing gap where placeholder
         // addresses (block * nodesize) are not covered by any chunk.
         //
-        // For each block we expect `dag.node_level(block)` to be `Some`, because
-        // the block came from `dag.all_blocks()` (the same internal node map).
-        // If it returns `None`, the DAG is internally inconsistent — surface
-        // that as an error instead of silently writing the node at level 0.
+        // Iterate block and level from the same immutable DAG entry. The DAG's
+        // private BTreeMap preserves the ascending block order used for stable
+        // logical-address allocation without a temporary block Vec or lookup.
         let mut allocated_addrs = std::collections::BTreeMap::new();
-        for block in dag.all_blocks() {
-            let level = dag.node_level(block).ok_or_else(|| {
-                FfsError::Format(format!(
-                    "btrfs commit: fs_tree DAG missing level for block {block}"
-                ))
-            })?;
+        for (block, level) in dag.blocks_with_levels() {
             let allocation = alloc
                 .extent_alloc
                 .alloc_metadata_for_tree(u64::from(nodesize), BTRFS_FS_TREE_OBJECTID, level)
@@ -25867,12 +25861,7 @@ impl OpenFs {
             .map_err(|e| btrfs_mutation_to_ffs(&e))?;
         if csum_dag.node_count() > 0 {
             let mut csum_allocated_addrs = std::collections::BTreeMap::new();
-            for block in csum_dag.all_blocks() {
-                let level = csum_dag.node_level(block).ok_or_else(|| {
-                    FfsError::Format(format!(
-                        "btrfs commit: csum_tree DAG missing level for block {block}"
-                    ))
-                })?;
+            for (block, level) in csum_dag.blocks_with_levels() {
                 let allocation = alloc
                     .extent_alloc
                     .alloc_metadata_for_tree(u64::from(nodesize), BTRFS_CSUM_TREE_OBJECTID, level)
@@ -25962,12 +25951,7 @@ impl OpenFs {
                 continue;
             }
             let mut subvol_allocated_addrs = std::collections::BTreeMap::new();
-            for block in subvol_dag.all_blocks() {
-                let level = subvol_dag.node_level(block).ok_or_else(|| {
-                    FfsError::Format(format!(
-                        "btrfs commit: subvol_tree DAG missing level for block {block}"
-                    ))
-                })?;
+            for (block, level) in subvol_dag.blocks_with_levels() {
                 let allocation = alloc
                     .extent_alloc
                     .alloc_metadata_for_tree(u64::from(nodesize), *subvol_objectid, level)
@@ -26066,12 +26050,7 @@ impl OpenFs {
         // Use alloc_metadata_for_extent_tree to avoid recursive EXTENT_ITEM
         // insertion (extent_tree's own nodes don't add to extent_tree here).
         let mut extent_allocated_addrs = std::collections::BTreeMap::new();
-        for block in extent_dag.all_blocks() {
-            let level = extent_dag.node_level(block).ok_or_else(|| {
-                FfsError::Format(format!(
-                    "btrfs commit: extent_tree DAG missing level for block {block}"
-                ))
-            })?;
+        for (block, level) in extent_dag.blocks_with_levels() {
             let allocation = alloc
                 .extent_alloc
                 .alloc_metadata_for_extent_tree(u64::from(nodesize), level)
@@ -26183,12 +26162,7 @@ impl OpenFs {
 
         // Pre-allocate logical addresses for root_tree nodes
         let mut root_allocated_addrs = std::collections::BTreeMap::new();
-        for block in root_dag.all_blocks() {
-            let level = root_dag.node_level(block).ok_or_else(|| {
-                FfsError::Format(format!(
-                    "btrfs commit: root_tree DAG missing level for block {block}"
-                ))
-            })?;
+        for (block, level) in root_dag.blocks_with_levels() {
             let allocation = alloc
                 .extent_alloc
                 .alloc_metadata_for_root_tree(u64::from(nodesize), level)
