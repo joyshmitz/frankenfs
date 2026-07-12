@@ -1864,8 +1864,12 @@ impl BlockDevice for ByteDeviceBlockAdapter<'_> {
         // alloc+copy that BlockBuf::new(vec![..]) would otherwise pay for an
         // unaligned Vec on every scalar read (bd-kq3b4: per-block memmove/memset).
         let mut buf = BlockBuf::zeroed(block_size);
+        // `buf` is dropped if the read fails (this returns `Err` with no block),
+        // so it needs no destination preservation: the volatile read lets a
+        // staging device (FileByteDevice) read straight in, dropping the per-block
+        // staging copy on the metadata cache-miss path.
         self.dev
-            .read_exact_at(cx, ByteOffset(offset), buf.make_mut())?;
+            .read_exact_at_volatile(cx, ByteOffset(offset), buf.make_mut())?;
         Ok(buf)
     }
 
@@ -2172,7 +2176,7 @@ impl BlockDevice for ExternalJournalReplayAdapter<'_> {
                 )));
             }
             self.journal_dev
-                .read_exact_at(cx, ByteOffset(offset), buf.make_mut())?;
+                .read_exact_at_volatile(cx, ByteOffset(offset), buf.make_mut())?;
         } else {
             if end > self.data_dev.len_bytes() {
                 return Err(FfsError::Format(format!(
@@ -2182,7 +2186,7 @@ impl BlockDevice for ExternalJournalReplayAdapter<'_> {
                 )));
             }
             self.data_dev
-                .read_exact_at(cx, ByteOffset(offset), buf.make_mut())?;
+                .read_exact_at_volatile(cx, ByteOffset(offset), buf.make_mut())?;
         }
 
         Ok(buf)
