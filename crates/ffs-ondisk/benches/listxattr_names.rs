@@ -14,7 +14,7 @@
 //! sized) vs large (ACL/EA sized) so the value-copy avoided is visible.
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use ffs_ondisk::{parse_xattr_block, parse_xattr_block_names};
+use ffs_ondisk::{Ext4Xattr, parse_xattr_block, parse_xattr_block_names};
 use std::hint::black_box;
 
 const N: usize = 24;
@@ -91,6 +91,12 @@ fn parse_names_format_control(block: &[u8]) -> Vec<String> {
     names
 }
 
+/// Frozen control for `Ext4Xattr::full_name` before exact-capacity assembly.
+fn full_name_format_control(xattr: &Ext4Xattr) -> String {
+    assert_eq!(xattr.name_index, EXT4_XATTR_INDEX_USER);
+    format!("user.{}", String::from_utf8_lossy(&xattr.name))
+}
+
 fn bench_group(c: &mut Criterion, value_len: usize, label: &str) {
     let block = build_block(value_len);
     // Isomorphism: names-only returns the same full names as materialise-all.
@@ -134,10 +140,51 @@ fn bench_formatter_ab(c: &mut Criterion) {
     g.finish();
 }
 
+fn bench_full_name_ab(c: &mut Criterion) {
+    let xattrs = parse_xattr_block(&build_block(32)).unwrap();
+    let control: Vec<String> = xattrs.iter().map(full_name_format_control).collect();
+    let candidate: Vec<String> = xattrs.iter().map(Ext4Xattr::full_name).collect();
+    assert_eq!(control, candidate, "full_name candidate changed output");
+
+    let mut g = c.benchmark_group("ext4_xattr_full_name_24_ab");
+    g.bench_function("format_control_a", |b| {
+        b.iter(|| {
+            black_box(
+                black_box(&xattrs)
+                    .iter()
+                    .map(full_name_format_control)
+                    .collect::<Vec<_>>(),
+            )
+        });
+    });
+    g.bench_function("format_control_b", |b| {
+        b.iter(|| {
+            black_box(
+                black_box(&xattrs)
+                    .iter()
+                    .map(full_name_format_control)
+                    .collect::<Vec<_>>(),
+            )
+        });
+    });
+    g.bench_function("exact_capacity_candidate", |b| {
+        b.iter(|| {
+            black_box(
+                black_box(&xattrs)
+                    .iter()
+                    .map(Ext4Xattr::full_name)
+                    .collect::<Vec<_>>(),
+            )
+        });
+    });
+    g.finish();
+}
+
 fn bench(c: &mut Criterion) {
     bench_group(c, 32, "smallval"); // SELinux/caps-sized values
     bench_group(c, 128, "largeval"); // ACL/EA-sized values
     bench_formatter_ab(c);
+    bench_full_name_ab(c);
 }
 
 criterion_group!(listxattr_names, bench);

@@ -5936,11 +5936,12 @@ impl Ext4Xattr {
     /// Return the full attribute name including the namespace prefix.
     #[must_use]
     pub fn full_name(&self) -> String {
-        format!(
-            "{}{}",
-            xattr_name_index_prefix(self.name_index),
-            String::from_utf8_lossy(&self.name)
-        )
+        let prefix = xattr_name_index_prefix(self.name_index);
+        let name = String::from_utf8_lossy(&self.name);
+        let mut full_name = String::with_capacity(prefix.len() + name.len());
+        full_name.push_str(prefix);
+        full_name.push_str(&name);
+        full_name
     }
 }
 
@@ -15833,6 +15834,17 @@ mod tests {
         data[offset + 1] = 0;
 
         assert_eq!(super::parse_xattr_entry_names(&data).unwrap(), expected);
+    }
+
+    #[test]
+    fn xattr_full_name_preserves_lossy_invalid_utf8_output() {
+        let xattr = Ext4Xattr {
+            name_index: ffs_types::EXT4_XATTR_INDEX_USER,
+            name: vec![b'a', 0xFF],
+            value: Vec::new(),
+        };
+
+        assert_eq!(xattr.full_name(), "user.a\u{FFFD}");
     }
 
     #[test]
