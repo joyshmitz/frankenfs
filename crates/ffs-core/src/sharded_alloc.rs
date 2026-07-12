@@ -235,6 +235,81 @@ pub(crate) struct FreeTotals {
     pub(crate) inodes: u64,
 }
 
+/// Part-B contention spread (bd-bhh0i): choose the group a new inode's allocation
+/// scan STARTS from, to spread concurrent creates across DIFFERENT groups — hence
+/// different inode-table blocks — dodging the shared-inode-table-block RMW storm
+/// that re-serializes Part-A-sharded creates (the "block-2085" storm that killed
+/// the two prior naive attempts: siblings packed into one inode-table block whose
+/// per-inode content writes then FCW-contend).
+///
+/// `seed` is the spread source the caller supplies to distribute concurrent
+/// creates (e.g. a per-thread/per-CPU counter, or `hash(parent, name)`). `seed ==
+/// 0` returns the parent group unchanged, so the single-threaded common path keeps
+/// full locality (the child lands beside its parent). Because [`PerGroupAlloc::
+/// alloc_inode`] falls through neighbors→full from this start, a spread start that
+/// is full still allocates — this only steers PLACEMENT, never correctness.
+///
+/// PROVISIONAL POLICY: a simple `(parent + seed) mod group_count` round-robin
+/// offset. The seed source and whether to spread only under measured contention
+/// (vs. accept a small single-thread locality loss) are tuning decisions for the
+/// cutover A/B — this function is the mechanism, not the final policy.
+pub(crate) fn spread_start_group(
+    parent: ffs_types::GroupNumber,
+    seed: u32,
+    group_count: u32,
+) -> ffs_types::GroupNumber {
+    if group_count <= 1 {
+        return parent;
+    }
+    // parent.0 is already < group_count (a valid group); the offset wraps within
+    // [0, group_count), and seed==0 yields the parent exactly (locality kept).
+    ffs_types::GroupNumber((parent.0 % group_count).wrapping_add(seed % group_count) % group_count)
+}
+
+#[cfg(test)]
+mod spread_tests {
+    use super::spread_start_group;
+    use ffs_types::GroupNumber;
+
+    #[test]
+    fn seed_zero_keeps_parent_locality() {
+        for parent in 0..8u32 {
+            assert_eq!(
+                spread_start_group(GroupNumber(parent), 0, 8),
+                GroupNumber(parent),
+                "seed 0 must land on the parent group (single-thread locality)"
+            );
+        }
+    }
+
+    #[test]
+    fn single_group_fs_always_returns_parent() {
+        assert_eq!(spread_start_group(GroupNumber(0), 5, 1), GroupNumber(0));
+        assert_eq!(spread_start_group(GroupNumber(0), 0, 1), GroupNumber(0));
+    }
+
+    #[test]
+    fn distinct_seeds_spread_across_distinct_groups() {
+        // A same-parent storm: parent group 2, concurrent creates seeds 0..8 on an
+        // 8-group fs must each start in a DISTINCT group (spread → distinct
+        // inode-table blocks).
+        let starts: std::collections::HashSet<u32> = (0..8u32)
+            .map(|seed| spread_start_group(GroupNumber(2), seed, 8).0)
+            .collect();
+        assert_eq!(starts.len(), 8, "8 distinct seeds must give 8 distinct start groups");
+    }
+
+    #[test]
+    fn result_is_always_in_range() {
+        for parent in [0u32, 3, 7] {
+            for seed in [0u32, 1, 7, 8, 100, u32::MAX] {
+                let g = spread_start_group(GroupNumber(parent), seed, 8).0;
+                assert!(g < 8, "start group {g} must be a valid index (< group_count)");
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
