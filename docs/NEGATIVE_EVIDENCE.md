@@ -5921,3 +5921,22 @@ session (10 byte-identical wins landed: btrfs writeback ×5, JBD2 ×2, ext4
 sync/statfs ×3). Next real headroom is peer-owned (MVCC commit / ffs-alloc
 per-group dirty tracking) or an explicit structural redesign, per
 PERF_CAMPAIGN_STATUS frontier. No production code changed in this continuation.
+
+### 2026-07-12 (cont.) — measurable-lever sweep after the read_block cleanup: candidates bounded
+
+Following the lesson that copy-elimination is sub-noise (fd678afe/e8307f9a), this
+turn hunted specifically for clearly-MEASURABLE mechanisms (alloc+memset, a
+syscall, or an expensive CRC/hash computed-then-discarded — the classes that gave
+this session's clean wins). Candidates and why each is not a clean landable win:
+
+| Site | Class checked | Verdict |
+| --- | --- | --- |
+| ext4 dir-block / dx-root / inode checksum stamps (`stamp_ext4_dir_block*`, `stamp_ext4_dx_root_block`) | CRC computed-then-discarded | all gate on `sb.has_metadata_csum()` BEFORE computing; the after-edit path is already the ~10x incremental CRC. No JBD2-legacy-style waste. |
+| `ffs_xattr::build_external_block` `entries.to_vec()` before sort | deep-clone-to-sort | real deep clone (name+value Vecs), but the external-xattr-block write is a RARE path with small N, and eliminating it needs a `&[Ext4Xattr]`→`Vec<Ext4Xattr>` signature change across ~15 call sites (or a `&[&Ext4Xattr]` encode change that regresses the common inline path with a ref-Vec alloc). Not worth it. |
+| `serialize_inode` `vec![0; inode_size]` | zero-then-overwrite | explicitly the NON-hot wrapper (the hot `write_inode` uses a stack buffer); and the buffer is partial-fill (reserved inode gaps must stay zero), so not a fully-overwritten staging buffer. |
+| FileByteDevice large-read `metadata()?.len()` fstat | redundant syscall | it is the TOCTOU/all-or-nothing destination guard for the direct large-read path; removing it would let a backing-file shrink partially dirty the caller's buffer. Not byte-identical to drop. |
+
+The clean fully-overwritten alloc+memset (ffs-block staging, jbd2 data block) and
+multi-pass-over-big-array (ext4 free-totals) veins are already mined this session.
+Remaining measurable headroom is peer (MVCC per-block copy; ffs-alloc) or an
+explicit structural change. No production code changed in this continuation.
