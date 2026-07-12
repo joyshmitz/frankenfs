@@ -5990,3 +5990,30 @@ source level; the clean measurable veins are mined and the remaining candidates
 are peer (MVCC block copy / ffs-alloc), structural (create-path block-read fusion,
 GDT write-elision needing a per-group dirty flag), or dead/test-only. No
 production code changed.
+
+### 2026-07-12 (cont.) — peer lanes are inactive AND already optimized (closes the micro-lever campaign floor)
+
+The last 50 commits are all mine (45 Dicklesworthstone + 5 cc_ffs) — the peer
+agents (cod/SilverPine/CrimsonFox) are inactive, so the peer-lane collision
+caution no longer blocks examination. Checked whether the peer lanes hold a clean
+micro-win now that they can be read; they do not:
+
+- `map_logical_to_physical` (btrfs chunk map, ffs-ondisk/btrfs.rs:633) already uses
+  `chunks.partition_point(...)` (binary search) for the sorted-chunk case with a
+  linear fallback — not a linear-scan lever.
+- `map_logical_to_physical` (ext4 extent resolve, ffs-extent) already routes single
+  lookups through `ffs_btree::search_parsed_root` (btree/binary search) and ranges
+  through `walk_range` — the interpolation-search alternative was already REJECTED
+  (bd-cc-interp-search: binary comparisons win on the ≤340-entry L1-resident leaf).
+- ffs-mvcc per-block write copy: the micro copy-elimination is a MEASURED
+  e2e-neutral REJECT on BOTH adapters (33c51394 FsMvccBlockDevice, 44ad26b2
+  TransactionBlockAdapter) — the per-block `to_vec` is noise against the
+  commit-dominated write; only a broad owned-buffer trait redesign (unproven,
+  loom+e2fsck-gated) could move it, and that is not a micro-lever.
+
+CAMPAIGN FLOOR REACHED: after this session's ~11 byte-identical wins and a
+full source-level sweep of every lane (mine + now the inactive peers), the clean
+measurable micro-lever surface is exhausted. Remaining headroom is exclusively a
+broad structural redesign (MVCC owned-buffer handoff) or an owner-gated concurrency
+refactor (bd-bhh0i per-group allocator sharding) — both multi-turn, correctness-
+critical, and unproven. No further single-turn byte-identical micro-lever exists.
