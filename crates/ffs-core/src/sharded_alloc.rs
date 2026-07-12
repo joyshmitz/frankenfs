@@ -66,6 +66,40 @@ impl PerGroupAlloc {
     pub(crate) fn lock_group(&self, group: usize) -> MutexGuard<'_, GroupStats> {
         self.groups[group].stats.lock()
     }
+
+    /// The Part-A multi-group allocation scan. Walks `order` (the goal group →
+    /// ±neighbors → full-fallback sequence produced by
+    /// `ffs_alloc::allocation_group_order`), locking each candidate group ONE AT
+    /// A TIME, and returns the first group where `try_in_group` succeeds. The
+    /// group lock is released before advancing, so at most one group lock is held
+    /// at any instant — exactly the single-acquisition discipline the Loom writer
+    /// projection proves deadlock-free (no two-lock cycle) and linearizable, and
+    /// the resolution for the "a request that can't fit in the goal group mutates
+    /// a different group" hazard that made naive fixed-target locking wrong.
+    ///
+    /// `try_in_group(group, &mut stats)` performs the real in-group allocation
+    /// (bitmap read/set + count decrement, e.g. via `ffs_alloc::try_alloc_safe`
+    /// with the device + geometry captured), returning `Some(result)` on success
+    /// (leaving that group mutated) or `None` to fall through to the next group.
+    /// Out-of-range group indices in `order` are skipped.
+    pub(crate) fn alloc_in_scan_order<T>(
+        &self,
+        order: impl IntoIterator<Item = usize>,
+        mut try_in_group: impl FnMut(usize, &mut GroupStats) -> Option<T>,
+    ) -> Option<T> {
+        for group in order {
+            if group >= self.groups.len() {
+                continue;
+            }
+            let mut stats = self.groups[group].stats.lock();
+            if let Some(result) = try_in_group(group, &mut stats) {
+                return Some(result);
+            }
+            // `stats` (the group lock) is dropped here, before the next group —
+            // never two group locks at once.
+        }
+        None
+    }
 }
 
 #[cfg(test)]
@@ -133,5 +167,80 @@ mod tests {
             assert_eq!(rec.free_blocks, 0, "group {g} lost a block update");
             assert_eq!(rec.free_inodes, 0, "group {g} lost an inode update");
         }
+    }
+
+    /// Try to allocate `want` blocks from a group: succeed (decrement) iff it has
+    /// enough, returning the group index; a stand-in for `try_alloc_safe`.
+    fn try_take(want: u32) -> impl FnMut(usize, &mut GroupStats) -> Option<usize> {
+        move |g, stats| {
+            if stats.free_blocks >= want {
+                stats.free_blocks -= want;
+                Some(g)
+            } else {
+                None
+            }
+        }
+    }
+
+    #[test]
+    fn scan_stops_at_first_satisfying_group_and_mutates_only_it() {
+        let stats: Vec<GroupStats> = [0u32, 0, 5, 10]
+            .into_iter()
+            .enumerate()
+            .map(|(g, fb)| sample_group(g as u32, fb, 0))
+            .collect();
+        let sharded = PerGroupAlloc::from_group_stats(stats);
+        // Order 0,1,2,3: groups 0,1 have 0 free (fail), group 2 has 5 >= 3 -> take.
+        let hit = sharded.alloc_in_scan_order(0..4, try_take(3));
+        assert_eq!(hit, Some(2));
+        assert_eq!(sharded.lock_group(0).free_blocks, 0);
+        assert_eq!(sharded.lock_group(1).free_blocks, 0);
+        assert_eq!(sharded.lock_group(2).free_blocks, 2, "group 2 should be debited");
+        assert_eq!(sharded.lock_group(3).free_blocks, 10, "group 3 untouched (scan stopped)");
+    }
+
+    #[test]
+    fn scan_honors_order_goal_group_first() {
+        let stats: Vec<GroupStats> = [4u32, 4, 4, 4]
+            .into_iter()
+            .enumerate()
+            .map(|(g, fb)| sample_group(g as u32, fb, 0))
+            .collect();
+        let sharded = PerGroupAlloc::from_group_stats(stats);
+        // Goal group 2 first: it satisfies, so it (not group 0) is debited.
+        let hit = sharded.alloc_in_scan_order([2usize, 0, 1, 3], try_take(3));
+        assert_eq!(hit, Some(2));
+        assert_eq!(sharded.lock_group(2).free_blocks, 1);
+        assert_eq!(sharded.lock_group(0).free_blocks, 4, "goal group won; others untouched");
+    }
+
+    #[test]
+    fn scan_returns_none_and_mutates_nothing_when_no_group_fits() {
+        let stats: Vec<GroupStats> = [2u32, 1, 2]
+            .into_iter()
+            .enumerate()
+            .map(|(g, fb)| sample_group(g as u32, fb, 0))
+            .collect();
+        let sharded = PerGroupAlloc::from_group_stats(stats);
+        let hit = sharded.alloc_in_scan_order(0..3, try_take(3));
+        assert_eq!(hit, None);
+        for g in 0..3usize {
+            let expect = [2u32, 1, 2][g];
+            assert_eq!(sharded.lock_group(g).free_blocks, expect, "group {g} must be unchanged");
+        }
+    }
+
+    #[test]
+    fn scan_skips_out_of_range_group_indices() {
+        let stats: Vec<GroupStats> = [0u32, 5]
+            .into_iter()
+            .enumerate()
+            .map(|(g, fb)| sample_group(g as u32, fb, 0))
+            .collect();
+        let sharded = PerGroupAlloc::from_group_stats(stats);
+        // 99 is out of range (skipped), 0 fails, 1 satisfies.
+        let hit = sharded.alloc_in_scan_order([99usize, 0, 1], try_take(3));
+        assert_eq!(hit, Some(1));
+        assert_eq!(sharded.lock_group(1).free_blocks, 2);
     }
 }
