@@ -31,5 +31,9 @@ harness = false
 name = "descriptor_decode"
 harness = false
 
+[[bench]]
+name = "jbd2_data_block_prep"
+harness = false
+
 [lints]
 workspace = true

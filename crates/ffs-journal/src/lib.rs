@@ -1318,9 +1318,18 @@ impl Jbd2Writer {
                     while item_idx < txn.body_items.len() && chunk.len() < tags_per_desc {
                         match &txn.body_items[item_idx] {
                             Jbd2TxnBodyItem::Write(target, payload) => {
-                                let mut padded = vec![0_u8; bs];
                                 let copy_len = payload.len().min(bs);
-                                padded[..copy_len].copy_from_slice(&payload[..copy_len]);
+                                // A full-block payload overwrites every byte, so
+                                // the zero-init would be pure waste — copy it
+                                // directly. Only short payloads need the block
+                                // zero-padded to `bs`.
+                                let mut padded = if copy_len == bs {
+                                    payload[..bs].to_vec()
+                                } else {
+                                    let mut p = vec![0_u8; bs];
+                                    p[..copy_len].copy_from_slice(&payload[..copy_len]);
+                                    p
+                                };
 
                                 let magic_be = JBD2_MAGIC.to_be_bytes();
                                 if padded.len() >= 4 && padded[0..4] == magic_be {
