@@ -33488,10 +33488,19 @@ impl FsOps for OpenFs {
                     self.require_alloc_state()
                 {
                     let alloc = alloc_mutex.read();
-                    let blocks: u64 = alloc.groups.iter().map(|g| u64::from(g.free_blocks)).sum();
-                    let inodes: u64 = alloc.groups.iter().map(|g| u64::from(g.free_inodes)).sum();
+                    // One fused pass over the group array (same aggregation as
+                    // ext4_sync_superblock_free_totals): two separate `.sum()`
+                    // passes reload every ~96-byte group struct a second time
+                    // from memory on a large fs; free_blocks + free_inodes share a
+                    // cache line, so fold both totals at once.
+                    let totals = alloc.groups.iter().fold((0_u64, 0_u64), |(blocks, inodes), g| {
+                        (
+                            blocks + u64::from(g.free_blocks),
+                            inodes + u64::from(g.free_inodes),
+                        )
+                    });
                     drop(alloc);
-                    (blocks, inodes)
+                    totals
                 } else {
                     let geo = FsGeometry::from_superblock(sb);
                     self.read_only_statfs_group_desc_totals(cx, scope, sb, &geo)?
