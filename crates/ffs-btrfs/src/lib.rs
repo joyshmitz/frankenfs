@@ -5399,7 +5399,11 @@ impl DelayedRefQueue {
             return Ok(0);
         }
 
-        let started = std::time::Instant::now();
+        // `started` only feeds the `duration_us` field of the `debug!` below
+        // (target off by default) — capture the clock only when that record
+        // would be emitted, so the per-commit delayed-ref flush pays nothing.
+        let started = tracing::enabled!(target: "ffs::btrfs::alloc", tracing::Level::DEBUG)
+            .then(std::time::Instant::now);
         let mut flushed = 0usize;
         let mut selected = Vec::new();
         let extent_keys: Vec<ExtentKey> = self.refs.keys().copied().collect();
@@ -5479,7 +5483,7 @@ impl DelayedRefQueue {
             target: "ffs::btrfs::alloc",
             flushed,
             remaining = self.pending_count,
-            duration_us = started.elapsed().as_micros(),
+            duration_us = started.map_or(0_u128, |s| s.elapsed().as_micros()),
             "delayed_ref_flush_batch"
         );
 
@@ -5675,7 +5679,11 @@ impl BtrfsTransaction {
             return Err(BtrfsTransactionError::EmptyRootSet);
         }
 
-        let commit_started = std::time::Instant::now();
+        // `commit_started` only feeds the `duration_us` field of the `info!`
+        // below (target off by default) — capture the clock only when enabled so
+        // the transaction-commit path pays nothing for the timing when unlogged.
+        let commit_started = tracing::enabled!(target: "ffs::btrfs::txn", tracing::Level::INFO)
+            .then(std::time::Instant::now);
         let delayed_ref_total = self.delayed_refs.pending_count();
         let mut materialized_refcounts = BTreeMap::new();
         if delayed_ref_total > 0 {
@@ -5691,7 +5699,8 @@ impl BtrfsTransaction {
             .take()
             .ok_or(BtrfsTransactionError::AlreadyFinished)?;
         let commit_seq = store.commit(txn)?;
-        let duration_us = u64::try_from(commit_started.elapsed().as_micros()).unwrap_or(u64::MAX);
+        let duration_us = commit_started
+            .map_or(0_u64, |s| u64::try_from(s.elapsed().as_micros()).unwrap_or(u64::MAX));
         info!(
             target: "ffs::btrfs::txn",
             txn_id = self.txn_id.0,
