@@ -9433,7 +9433,12 @@ impl OpenFs {
         // `false`; only the readlink path passes `true`.
         allow_symlink: bool,
     ) -> Result<usize, FfsError> {
-        let read_started = Instant::now();
+        // read_started only feeds the `duration_us` field of the two trace!
+        // read_complete records below; capture the clock read only when TRACE is
+        // enabled (off by default), so the hot btrfs read path pays nothing for it
+        // otherwise. The trace! records use the same default target/level, so the
+        // guard is consistent with their own enablement.
+        let read_started = tracing::enabled!(tracing::Level::TRACE).then(Instant::now);
         let canonical = self.btrfs_canonical_inode(ino)?;
         trace!(inode = canonical, offset, length = size, "btrfs read_start");
 
@@ -9652,7 +9657,7 @@ impl OpenFs {
             trace!(
                 inode = canonical,
                 bytes_returned = 0_u64,
-                duration_us = read_started.elapsed().as_micros(),
+                duration_us = read_started.map_or(0_u128, |s| s.elapsed().as_micros()),
                 "btrfs read_complete"
             );
             return Ok(0);
@@ -10387,7 +10392,7 @@ impl OpenFs {
         trace!(
             inode = canonical,
             bytes_returned = out.len(),
-            duration_us = read_started.elapsed().as_micros(),
+            duration_us = read_started.map_or(0_u128, |s| s.elapsed().as_micros()),
             "btrfs read_complete"
         );
         Ok(to_read)
