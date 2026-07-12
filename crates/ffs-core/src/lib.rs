@@ -25258,7 +25258,17 @@ impl OpenFs {
         ino: InodeNumber,
         datasync: bool,
     ) -> ffs_error::Result<()> {
-        let operation_id = Self::ext4_sync_operation_id(op, ino, datasync);
+        // operation_id is rendered only into the log records below; skip its
+        // per-sync `format!` + String allocation when the log target is disabled
+        // below WARN (the quiet / perf-benchmark config). WARN is the least-severe
+        // level any record in this function uses, so this never elides an id a
+        // record would actually emit. Mirrors the existing `tracing::enabled!`
+        // guards in ffs-mvcc.
+        let operation_id = if tracing::enabled!(target: "ffs::ext4::rw", tracing::Level::WARN) {
+            Self::ext4_sync_operation_id(op, ino, datasync)
+        } else {
+            String::new()
+        };
         let started = Instant::now();
         info!(
             target: "ffs::ext4::rw",
