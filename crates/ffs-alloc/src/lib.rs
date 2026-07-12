@@ -2525,29 +2525,24 @@ fn eager_largest_run() -> bool {
     *EAGER.get_or_init(|| std::env::var_os("FFS_ALLOC_EAGER_LARGEST_RUN").is_some())
 }
 
-/// Try to allocate `count` blocks in a group, skipping reserved blocks and
-/// persisting group descriptor updates.
+/// Per-group block allocation core (bd-bhh0i): allocate `count` blocks in a single locked group. `try_alloc_safe` (single-lock) and the sharded per-group path share it.
 #[expect(clippy::too_many_arguments)]
-fn try_alloc_safe(
+pub fn try_alloc_blocks_in_group(
     cx: &Cx,
     dev: &dyn BlockDevice,
     geo: &FsGeometry,
-    groups: &mut [GroupStats],
+    stats: &mut GroupStats,
     group: GroupNumber,
     count: u32,
     hint: &AllocHint,
     pctx: &PersistCtx,
+    reserved: &[u32],
 ) -> Result<Option<BlockAlloc>> {
-    let gidx = group.0 as usize;
-    if gidx >= groups.len() {
-        return Ok(None);
-    }
-
-    if groups[gidx].free_blocks < count {
+    if stats.free_blocks < count {
         return Ok(None);
     }
     if count > 1
-        && groups[gidx]
+        && stats
             .cached_block_largest_free_run()
             .is_some_and(|largest| largest < count)
     {
@@ -2555,9 +2550,8 @@ fn try_alloc_safe(
     }
 
     let blocks_in_group = geo.blocks_in_group(group);
-    let reserved = reserved_blocks_in_group(geo, groups, group);
 
-    let bitmap_buf = dev.read_block(cx, groups[gidx].block_bitmap_block)?;
+    let bitmap_buf = dev.read_block(cx, stats.block_bitmap_block)?;
     let mut bitmap = bitmap_buf.as_slice().to_vec();
     let mut rollback_clear_bits = Vec::with_capacity(reserved.len() + count as usize);
 
@@ -2569,12 +2563,12 @@ fn try_alloc_safe(
     // `is_reserved` verification below stays as a belt-and-suspenders guard, so
     // correctness does not depend on this fast path. `FFS_ALLOC_FORCE_RESERVED_MARK`
     // forces the old always-mark behaviour (A/B baseline / safety escape hatch).
-    if force_reserved_mark() || groups[gidx].reserved_confirmed.get().is_none() {
+    if force_reserved_mark() || stats.reserved_confirmed.get().is_none() {
         for &r in reserved.iter() {
             bitmap_set_with_clear_undo(&mut bitmap, r, &mut rollback_clear_bits);
         }
         if rollback_clear_bits.is_empty() {
-            let _ = groups[gidx].reserved_confirmed.set(());
+            let _ = stats.reserved_confirmed.set(());
         }
     }
 
@@ -2621,10 +2615,10 @@ fn try_alloc_safe(
             BitmapOverride::full(&bitmap)
         };
 
-        dev.write_block(cx, groups[gidx].block_bitmap_block, &bitmap)?;
-        let previous_free_blocks = groups[gidx].free_blocks;
-        let previous_largest_free_run = groups[gidx].block_largest_free_run;
-        groups[gidx].free_blocks = previous_free_blocks.saturating_sub(alloc_count);
+        dev.write_block(cx, stats.block_bitmap_block, &bitmap)?;
+        let previous_free_blocks = stats.free_blocks;
+        let previous_largest_free_run = stats.block_largest_free_run;
+        stats.free_blocks = previous_free_blocks.saturating_sub(alloc_count);
         // Maintain the largest-free-run cache off the single-block hot path
         // (bd-allocrun). The cache is ONLY consumed two ways, both of which
         // handle a `None` (unknown) entry correctly: (1) the `count > 1`
@@ -2640,9 +2634,9 @@ fn try_alloc_safe(
         // stale-LOW (the unsafe direction), only `None`, so no consumer is
         // mis-served.
         if alloc_count > 1 || eager_largest_run() {
-            groups[gidx].refresh_block_largest_free_run(&bitmap, blocks_in_group);
+            stats.refresh_block_largest_free_run(&bitmap, blocks_in_group);
         } else {
-            groups[gidx].invalidate_block_largest_free_run();
+            stats.invalidate_block_largest_free_run();
         }
 
         // Persist group descriptor (includes bitmap checksum stamping if metadata_csum).
@@ -2651,12 +2645,12 @@ fn try_alloc_safe(
             dev,
             pctx,
             group,
-            &groups[gidx],
+            &stats,
             Some(&block_bitmap_override),
             None,
         ) {
-            groups[gidx].free_blocks = previous_free_blocks;
-            groups[gidx].block_largest_free_run = previous_largest_free_run;
+            stats.free_blocks = previous_free_blocks;
+            stats.block_largest_free_run = previous_largest_free_run;
             // Undo: clear the reserved-mark bits (per-bit, usually none) plus the
             // alloc range (range-clear, dual of the range-set above).
             rollback_set_mutations(&mut bitmap, &rollback_clear_bits);
@@ -2664,7 +2658,7 @@ fn try_alloc_safe(
             restore_bitmap_after_group_desc_error(
                 cx,
                 dev,
-                groups[gidx].block_bitmap_block,
+                stats.block_bitmap_block,
                 &bitmap,
                 "block bitmap allocation",
                 error,
@@ -2679,6 +2673,51 @@ fn try_alloc_safe(
     } else {
         Ok(None)
     }
+}
+
+/// Try to allocate `count` blocks in a group, skipping reserved blocks and
+/// persisting group descriptor updates.
+#[expect(clippy::too_many_arguments)]
+fn try_alloc_safe(
+    cx: &Cx,
+    dev: &dyn BlockDevice,
+    geo: &FsGeometry,
+    groups: &mut [GroupStats],
+    group: GroupNumber,
+    count: u32,
+    hint: &AllocHint,
+    pctx: &PersistCtx,
+) -> Result<Option<BlockAlloc>> {
+    let gidx = group.0 as usize;
+    if gidx >= groups.len() {
+        return Ok(None);
+    }
+    // Preserve the single-lock hot path EXACTLY: the cheap free-count and
+    // largest-run early-rejects run BEFORE the reserved-set computation, which
+    // the reserved-cache (bd-resv-cache) exists to avoid on the reject path.
+    // `try_alloc_blocks_in_group` re-checks these (harmless; they pass here).
+    if groups[gidx].free_blocks < count {
+        return Ok(None);
+    }
+    if count > 1
+        && groups[gidx]
+            .cached_block_largest_free_run()
+            .is_some_and(|largest| largest < count)
+    {
+        return Ok(None);
+    }
+    let reserved = reserved_blocks_in_group(geo, groups, group);
+    try_alloc_blocks_in_group(
+        cx,
+        dev,
+        geo,
+        &mut groups[gidx],
+        group,
+        count,
+        hint,
+        pctx,
+        &reserved,
+    )
 }
 
 fn restore_bitmap_after_group_desc_error(
