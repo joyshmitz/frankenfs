@@ -3251,25 +3251,24 @@ pub fn alloc_inode_persist(
     Err(FfsError::NoSpace)
 }
 
-/// Try to allocate an inode in a specific group with full on-disk accounting.
-fn try_alloc_inode_in_group_persist(
+/// Per-group inode allocation core (bd-bhh0i): allocate one inode in a single locked group. Shared by try_alloc_inode_in_group_persist (single-lock) and the sharded per-group path.
+pub fn try_alloc_inode_in_group_persist_core(
     cx: &Cx,
     dev: &dyn BlockDevice,
     geo: &FsGeometry,
-    groups: &mut [GroupStats],
+    stats: &mut GroupStats,
     group: GroupNumber,
     is_directory: bool,
     pctx: &PersistCtx,
 ) -> Result<Option<InodeAlloc>> {
-    let gidx = group.0 as usize;
-    if gidx >= groups.len() || geo.inodes_in_group(group) == 0 || groups[gidx].free_inodes == 0 {
+    if geo.inodes_in_group(group) == 0 || stats.free_inodes == 0 {
         return Ok(None);
     }
 
-    let bitmap_block = groups[gidx].inode_bitmap_block;
+    let bitmap_block = stats.inode_bitmap_block;
     let bitmap_buf = dev.read_block(cx, bitmap_block)?;
     let mut bitmap = bitmap_buf.as_slice().to_vec();
-    let previous_free_inodes = groups[gidx].free_inodes;
+    let previous_free_inodes = stats.free_inodes;
 
     let inodes_in_group = geo.inodes_in_group(group);
     let reserved = reserved_inodes_in_group(geo, group);
@@ -3278,8 +3277,8 @@ fn try_alloc_inode_in_group_persist(
         bitmap_set_with_clear_undo(&mut bitmap, r, &mut rollback_clear_bits);
     }
 
-    let previous_inode_search_start = groups[gidx].inode_search_start;
-    let start = groups[gidx].inode_search_start(inodes_in_group);
+    let previous_inode_search_start = stats.inode_search_start;
+    let start = stats.inode_search_start(inodes_in_group);
     let Some(idx) = bitmap_find_free(&bitmap, inodes_in_group, start) else {
         return Ok(None);
     };
@@ -3310,15 +3309,15 @@ fn try_alloc_inode_in_group_persist(
         BitmapOverride::full(&bitmap)
     };
     dev.write_block(cx, bitmap_block, &bitmap)?;
-    let previous_used_dirs = groups[gidx].used_dirs;
-    groups[gidx].advance_inode_search_start(idx, inodes_in_group);
-    groups[gidx].free_inodes = groups[gidx].free_inodes.saturating_sub(1);
+    let previous_used_dirs = stats.used_dirs;
+    stats.advance_inode_search_start(idx, inodes_in_group);
+    stats.free_inodes = stats.free_inodes.saturating_sub(1);
     // ext4 tracks the number of directory inodes per group in
     // `bg_used_dirs_count`; the Orlov allocator reads it for dir spreading and
     // e2fsck verifies it against the actual directory count. Maintain it here so
     // the persisted group descriptor stays consistent (bd-0y7jp).
     if is_directory {
-        groups[gidx].used_dirs = groups[gidx].used_dirs.saturating_add(1);
+        stats.used_dirs = stats.used_dirs.saturating_add(1);
     }
 
     if let Err(error) = persist_group_desc_with_bitmap_overrides(
@@ -3326,13 +3325,13 @@ fn try_alloc_inode_in_group_persist(
         dev,
         pctx,
         group,
-        &groups[gidx],
+        &*stats,
         None,
         Some(&inode_bitmap_override),
     ) {
-        groups[gidx].free_inodes = previous_free_inodes;
-        groups[gidx].used_dirs = previous_used_dirs;
-        groups[gidx].inode_search_start = previous_inode_search_start;
+        stats.free_inodes = previous_free_inodes;
+        stats.used_dirs = previous_used_dirs;
+        stats.inode_search_start = previous_inode_search_start;
         rollback_set_mutations(&mut bitmap, &rollback_clear_bits);
         restore_bitmap_after_group_desc_error(
             cx,
@@ -3348,6 +3347,31 @@ fn try_alloc_inode_in_group_persist(
         ino: InodeNumber(ino),
         group,
     }))
+}
+
+/// Try to allocate an inode in a specific group with full on-disk accounting.
+fn try_alloc_inode_in_group_persist(
+    cx: &Cx,
+    dev: &dyn BlockDevice,
+    geo: &FsGeometry,
+    groups: &mut [GroupStats],
+    group: GroupNumber,
+    is_directory: bool,
+    pctx: &PersistCtx,
+) -> Result<Option<InodeAlloc>> {
+    let gidx = group.0 as usize;
+    if gidx >= groups.len() {
+        return Ok(None);
+    }
+    try_alloc_inode_in_group_persist_core(
+        cx,
+        dev,
+        geo,
+        &mut groups[gidx],
+        group,
+        is_directory,
+        pctx,
+    )
 }
 
 /// Free an inode.
