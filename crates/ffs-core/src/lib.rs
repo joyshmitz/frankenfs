@@ -7257,12 +7257,16 @@ impl OpenFs {
             "mvcc_read_start"
         );
 
-        let start = std::time::Instant::now();
+        // `start` only feeds the `duration_us` field of the two trace! records
+        // below; capture the clock read only when TRACE is enabled for this target
+        // (off by default), so the hot per-block snapshot read pays nothing for it.
+        let start = tracing::enabled!(target: "ffs::mvcc", tracing::Level::TRACE)
+            .then(std::time::Instant::now);
 
         // Check MVCC store first (shared lock, no I/O).
         {
             if let Some(bytes) = self.mvcc_store.read_visible(block, snapshot) {
-                let duration_us = start.elapsed().as_micros() as u64;
+                let duration_us = start.map_or(0_u64, |s| s.elapsed().as_micros() as u64);
                 trace!(
                     target: "ffs::mvcc",
                     block = block.0,
@@ -7287,7 +7291,7 @@ impl OpenFs {
         let mut buf = vec![0_u8; bs];
         self.dev.read_exact_at(cx, ByteOffset(offset), &mut buf)?;
 
-        let duration_us = start.elapsed().as_micros() as u64;
+        let duration_us = start.map_or(0_u64, |s| s.elapsed().as_micros() as u64);
         trace!(
             target: "ffs::mvcc",
             block = block.0,
