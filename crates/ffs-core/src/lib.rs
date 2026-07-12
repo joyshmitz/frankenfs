@@ -6289,9 +6289,12 @@ impl OpenFs {
             "txn_commit_start"
         );
 
-        let start = std::time::Instant::now();
+        // start/duration_us feed only the info!(txn_commit_success) record; skip
+        // the two clock reads when the mvcc INFO target is disabled (the default).
+        let start =
+            tracing::enabled!(target: "ffs::mvcc", tracing::Level::INFO).then(std::time::Instant::now);
         let result = self.mvcc_store.commit(txn);
-        let duration_us = start.elapsed().as_micros() as u64;
+        let duration_us = start.map_or(0_u64, |s| s.elapsed().as_micros() as u64);
 
         match &result {
             Ok(commit_seq) => {
@@ -6396,9 +6399,12 @@ impl OpenFs {
             "txn_commit_start"
         );
 
-        let start = std::time::Instant::now();
+        // start/duration_us feed only the info!(success) record; skip the two
+        // clock reads when the mvcc INFO target is disabled (the default).
+        let start =
+            tracing::enabled!(target: "ffs::mvcc", tracing::Level::INFO).then(std::time::Instant::now);
         let result = self.mvcc_store.commit_ssi(txn);
-        let duration_us = start.elapsed().as_micros() as u64;
+        let duration_us = start.map_or(0_u64, |s| s.elapsed().as_micros() as u64);
 
         match &result {
             Ok(commit_seq) => {
