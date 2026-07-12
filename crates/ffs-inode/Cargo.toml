@@ -39,3 +39,7 @@ harness = false
 [[bench]]
 name = "indirect_zero_scan"
 harness = false
+
+[[bench]]
+name = "locate_inode"
+harness = false
