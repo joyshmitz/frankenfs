@@ -84,5 +84,62 @@ fn bench_block_buf_construct(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, bench_block_buf_construct);
+// ── small-read staging buffer: fresh `vec![0;n]` per read vs reused scratch ──
+//
+// FileByteDevice::read_exact_at, for a sub-`file_device_direct_read_min` read,
+// stages into a scratch buffer (to preserve the destination on a short-read
+// error) then copies to the caller's buffer. The old code did `vec![0; n]` per
+// read — an alloc + zero-init that the positioned read overwrites in full. A
+// per-thread reused buffer drops the alloc+memset. Both arms do the same
+// device-fill memcpy (modelled as a copy from `src`) and the same copy to the
+// destination, so the delta isolates exactly the eliminated per-read alloc+memset.
+fn bench_file_read_staging(c: &mut Criterion) {
+    // Stand-in for the bytes the positioned read deposits into the staging slot.
+    let src = vec![0x5A_u8; BLOCK_SIZE];
+    let mut dst_fresh = vec![0_u8; BLOCK_SIZE];
+    let mut dst_reused = vec![0_u8; BLOCK_SIZE];
+
+    // Byte-identity: both strategies land the same bytes in the destination.
+    {
+        let mut staging = vec![0_u8; BLOCK_SIZE];
+        staging.copy_from_slice(&src);
+        dst_fresh.copy_from_slice(&staging);
+        let mut reused = vec![0_u8; BLOCK_SIZE];
+        reused[..BLOCK_SIZE].copy_from_slice(&src);
+        dst_reused.copy_from_slice(&reused[..BLOCK_SIZE]);
+        assert_eq!(dst_fresh, dst_reused, "staging strategy changed the bytes");
+    }
+
+    c.bench_function("file_read_staging_fresh_a", |b| {
+        b.iter(|| {
+            let mut staging = vec![0_u8; BLOCK_SIZE];
+            staging.copy_from_slice(black_box(&src));
+            dst_fresh.copy_from_slice(&staging);
+            black_box(dst_fresh[0])
+        });
+    });
+    c.bench_function("file_read_staging_fresh_b", |b| {
+        b.iter(|| {
+            let mut staging = vec![0_u8; BLOCK_SIZE];
+            staging.copy_from_slice(black_box(&src));
+            dst_fresh.copy_from_slice(&staging);
+            black_box(dst_fresh[0])
+        });
+    });
+
+    let mut reused = vec![0_u8; BLOCK_SIZE];
+    c.bench_function("file_read_staging_reused", |b| {
+        b.iter(|| {
+            if reused.len() < BLOCK_SIZE {
+                reused.resize(BLOCK_SIZE, 0);
+            }
+            let slot = &mut reused[..BLOCK_SIZE];
+            slot.copy_from_slice(black_box(&src));
+            dst_reused.copy_from_slice(slot);
+            black_box(dst_reused[0])
+        });
+    });
+}
+
+criterion_group!(benches, bench_block_buf_construct, bench_file_read_staging);
 criterion_main!(benches);

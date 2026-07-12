@@ -498,6 +498,15 @@ fn file_device_open_fadvise() -> Option<nix::fcntl::PosixFadviseAdvice> {
     })
 }
 
+thread_local! {
+    /// Per-thread scratch for the small-read staging path (`read_exact_at` on a
+    /// sub-`file_device_direct_read_min` read). Reused across reads so a hot
+    /// metadata read stream does not allocate and zero-init a fresh buffer that
+    /// the positioned read then overwrites in full. Grows only.
+    static FILE_READ_STAGING: std::cell::RefCell<Vec<u8>> =
+        std::cell::RefCell::new(Vec::new());
+}
+
 impl FileByteDevice {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let (file, writable) = OpenOptions::new()
@@ -605,9 +614,23 @@ impl ByteDevice for FileByteDevice {
             return Ok(());
         }
 
-        let mut read_buf = vec![0_u8; buf.len()];
-        self.file.read_exact_at(read_buf.as_mut_slice(), offset.0)?;
-        buf.copy_from_slice(read_buf.as_slice());
+        // Reuse a per-thread staging buffer instead of a fresh `vec![0; n]` on
+        // every small read: `read_exact_at` overwrites the whole slice, so the
+        // zero-init is pure waste, and a hot metadata read stream would otherwise
+        // alloc + memset a scratch buffer per block. The buffer only ever grows
+        // (same-size 4 KiB block reads never resize after the first), the read
+        // fills exactly `buf.len()` bytes, and `buf` is written only on success —
+        // so the all-or-nothing destination contract and the bytes are identical.
+        FILE_READ_STAGING.with(|cell| -> Result<()> {
+            let mut staging = cell.borrow_mut();
+            if staging.len() < buf.len() {
+                staging.resize(buf.len(), 0);
+            }
+            let slot = &mut staging[..buf.len()];
+            self.file.read_exact_at(slot, offset.0)?;
+            buf.copy_from_slice(slot);
+            Ok(())
+        })?;
         cx_checkpoint(cx)?;
         Ok(())
     }
