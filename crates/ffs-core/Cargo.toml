@@ -65,6 +65,10 @@ name = "group_desc_read"
 harness = false
 
 [[bench]]
+name = "gdt_flush_untouched_reads"
+harness = false
+
+[[bench]]
 name = "extent_collect_window"
 harness = false
 

@@ -1,0 +1,96 @@
+#![forbid(unsafe_code)]
+
+//! A/B benchmark for the group-descriptor flush read scope
+//! (`ext4_persist_group_descriptors_from`, bd-cc-gdt-defer).
+//!
+//! The GDT flush at the durability boundary stamps every group descriptor's
+//! bitmap checksum. It only needs the on-device bitmap bytes for a group that is
+//! actually IN USE (an untouched lazy-init group passes no override). The old
+//! code read both bitmaps for EVERY group up front and then discarded the bytes
+//! for untouched groups; the new code reads only in-use groups. Each skipped
+//! read is a real `read_block(...).into_inner()` = a block-sized allocation plus
+//! a block-sized memcpy off the device. This models a large filesystem with few
+//! touched groups (the common case for the create/durability path).
+
+use criterion::{Criterion, criterion_group, criterion_main};
+use std::hint::black_box;
+
+const BS: usize = 4096;
+const GROUPS: usize = 128;
+/// 1 group in 16 is touched → 8 in-use, 120 untouched.
+const IN_USE_EVERY: usize = 16;
+
+fn in_use(g: usize) -> bool {
+    g % IN_USE_EVERY == 0
+}
+
+/// Mirrors `direct.read_block(cx, block)?.into_inner()`: a block-sized alloc +
+/// memcpy off the backing device.
+fn read_block(device: &[u8], block: usize) -> Vec<u8> {
+    device[block * BS..(block + 1) * BS].to_vec()
+}
+
+/// Stand-in for `persist_group_desc_force`: identical work in both arms, so the
+/// measured delta is purely the eliminated untouched-group reads. Consumes the
+/// override (Some only for in-use groups) so it cannot be elided.
+fn persist_stub(block_override: Option<&[u8]>, inode_override: Option<&[u8]>) -> u64 {
+    let mut acc = 1_u64;
+    if let Some(b) = block_override {
+        acc = acc.wrapping_add(u64::from(b[0]));
+    }
+    if let Some(i) = inode_override {
+        acc = acc.wrapping_add(u64::from(i[0]));
+    }
+    acc
+}
+
+/// Old: read both bitmaps for EVERY group; use the override only when in use.
+fn flush_read_all(device: &[u8]) -> u64 {
+    let mut acc = 0_u64;
+    for g in 0..GROUPS {
+        let bb = read_block(device, 2 * g);
+        let ib = read_block(device, 2 * g + 1);
+        let bo = in_use(g).then_some(bb.as_slice());
+        let io = in_use(g).then_some(ib.as_slice());
+        acc = acc.wrapping_add(persist_stub(bo, io));
+    }
+    acc
+}
+
+/// New: read each bitmap only for an in-use group.
+fn flush_read_in_use(device: &[u8]) -> u64 {
+    let mut acc = 0_u64;
+    for g in 0..GROUPS {
+        let bb = in_use(g).then(|| read_block(device, 2 * g));
+        let ib = in_use(g).then(|| read_block(device, 2 * g + 1));
+        acc = acc.wrapping_add(persist_stub(bb.as_deref(), ib.as_deref()));
+    }
+    acc
+}
+
+fn bench_gdt_flush_untouched_reads(c: &mut Criterion) {
+    let device = vec![0x5A_u8; GROUPS * 2 * BS];
+
+    // Both arms persist the identical descriptor result — reading a bitmap that
+    // is then discarded cannot change what gets stamped.
+    assert_eq!(
+        flush_read_all(&device),
+        flush_read_in_use(&device),
+        "narrowing the read scope changed the persisted result"
+    );
+
+    let mut group = c.benchmark_group("gdt_flush_untouched_reads_128groups");
+    group.bench_function("read_all_groups_a", |b| {
+        b.iter(|| black_box(flush_read_all(black_box(&device))));
+    });
+    group.bench_function("read_all_groups_b", |b| {
+        b.iter(|| black_box(flush_read_all(black_box(&device))));
+    });
+    group.bench_function("read_in_use_only", |b| {
+        b.iter(|| black_box(flush_read_in_use(black_box(&device))));
+    });
+    group.finish();
+}
+
+criterion_group!(benches, bench_gdt_flush_untouched_reads);
+criterion_main!(benches);

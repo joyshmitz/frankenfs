@@ -17106,11 +17106,6 @@ impl OpenFs {
                     .map_err(|_| FfsError::Format("group index exceeds u32".into()))?,
             );
             let gs = &alloc.groups[gidx];
-            // Read the bitmaps from the DEVICE (post flush_to_device) via the
-            // direct adapter, so the descriptor's bitmap checksum is stamped
-            // over the exact bytes e2fsck will read — not the MVCC overlay view.
-            let block_bitmap = direct.read_block(cx, gs.block_bitmap_block)?.into_inner();
-            let inode_bitmap = direct.read_block(cx, gs.inode_bitmap_block)?.into_inner();
             // Only pass a bitmap override (which CLEARS the matching UNINIT flag
             // in persist_group_desc) for a group that is actually IN USE: an
             // untouched lazy-init group keeps its original padding-less bitmap,
@@ -17118,10 +17113,26 @@ impl OpenFs {
             // group is in use iff some inode/block is consumed (free < capacity);
             // every touched group's bitmap already carries padding (the alloc
             // path writes it), so its csum stamps cleanly (bd-cc-gdt-defer).
-            let inode_override = (gs.free_inodes < alloc.geo.inodes_in_group(group))
-                .then_some(inode_bitmap.as_slice());
-            let block_override = (gs.free_blocks < alloc.geo.blocks_in_group(group))
-                .then_some(block_bitmap.as_slice());
+            //
+            // Read each bitmap from the DEVICE (post flush_to_device) via the
+            // direct adapter ONLY for an in-use group — that is the only case the
+            // bytes are used (to stamp the descriptor's bitmap checksum over the
+            // exact bytes e2fsck will read). Untouched groups pass None, so their
+            // two per-group device reads were pure waste; on a large fs with few
+            // touched groups that is the bulk of the flush. Byte-identical: the
+            // override handed to persist_group_desc_force is unchanged.
+            let inode_bitmap = if gs.free_inodes < alloc.geo.inodes_in_group(group) {
+                Some(direct.read_block(cx, gs.inode_bitmap_block)?.into_inner())
+            } else {
+                None
+            };
+            let block_bitmap = if gs.free_blocks < alloc.geo.blocks_in_group(group) {
+                Some(direct.read_block(cx, gs.block_bitmap_block)?.into_inner())
+            } else {
+                None
+            };
+            let inode_override = inode_bitmap.as_deref();
+            let block_override = block_bitmap.as_deref();
             ffs_alloc::persist_group_desc_force(
                 cx,
                 &direct,
