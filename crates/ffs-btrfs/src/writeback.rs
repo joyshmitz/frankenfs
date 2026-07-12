@@ -130,9 +130,14 @@ impl WriteDependencyDag {
 
         // Robustness for malformed in-memory DAGs: include any nodes not
         // reachable from the recorded root, still preserving child-before-parent
-        // order within each reachable component.
-        for block in self.nodes.keys().copied() {
-            self.push_postorder(block, &mut visited, &mut result);
+        // order within each reachable component. A well-formed DAG has every
+        // node reachable from the root, so the walk already emitted all of them
+        // — skip the all-nodes sweep unless something was left out (each sweep
+        // call is otherwise a redundant already-visited probe).
+        if result.len() != self.nodes.len() {
+            for block in self.nodes.keys().copied() {
+                self.push_postorder(block, &mut visited, &mut result);
+            }
         }
 
         trace!(
@@ -172,8 +177,12 @@ impl WriteDependencyDag {
 
         self.push_postorder_with_levels(self.root, &mut visited, &mut result);
 
-        for block in self.nodes.keys().copied() {
-            self.push_postorder_with_levels(block, &mut visited, &mut result);
+        // Same well-formed-DAG fast path as reverse_topological_order: skip the
+        // all-nodes sweep when the root walk already emitted every node.
+        if result.len() != self.nodes.len() {
+            for block in self.nodes.keys().copied() {
+                self.push_postorder_with_levels(block, &mut visited, &mut result);
+            }
         }
 
         result

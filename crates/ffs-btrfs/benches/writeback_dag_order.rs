@@ -196,6 +196,22 @@ fn btree_visited_order(dag: &WriteDependencyDag) -> Vec<u64> {
     result
 }
 
+/// Guarded variant of `btree_visited_order`: skip the all-nodes robustness
+/// sweep when the root walk already emitted every node. Mirrors the production
+/// fast path in `reverse_topological_order` so the sweep's redundant
+/// already-visited probes can be measured in isolation.
+fn btree_visited_order_guarded(dag: &WriteDependencyDag) -> Vec<u64> {
+    let mut result = Vec::with_capacity(dag.node_count());
+    let mut visited = BTreeSet::new();
+    btree_push_postorder(dag, dag.root(), &mut visited, &mut result);
+    if result.len() != dag.node_count() {
+        for block in dag.blocks() {
+            btree_push_postorder(dag, block, &mut visited, &mut result);
+        }
+    }
+    result
+}
+
 fn order_digest(order: &[u64]) -> u64 {
     order.iter().fold(0xcbf2_9ce4_8422_2325_u64, |acc, block| {
         acc.wrapping_mul(0x100_0000_01b3).wrapping_add(*block)
@@ -608,6 +624,35 @@ fn bench_writeback_order_with_levels(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_writeback_dag_order_sweep_guard(c: &mut Criterion) {
+    let dag = build_dag();
+    let unguarded = btree_visited_order(&dag);
+    let guarded = btree_visited_order_guarded(&dag);
+    assert_eq!(
+        unguarded, guarded,
+        "skipping the all-nodes sweep on a fully-reachable DAG changed the flush order"
+    );
+    // Also assert the production methods agree with the reference order (the
+    // production guard lives in reverse_topological_order[_with_levels]).
+    assert_eq!(
+        dag.reverse_topological_order(),
+        unguarded,
+        "production reverse_topological_order diverged from the reference sweep order"
+    );
+
+    let mut group = c.benchmark_group("writeback_dag_order_sweep_guard_2048");
+    group.bench_function("unguarded_full_sweep_a", |b| {
+        b.iter(|| black_box(order_digest(&btree_visited_order(black_box(&dag)))));
+    });
+    group.bench_function("unguarded_full_sweep_b", |b| {
+        b.iter(|| black_box(order_digest(&btree_visited_order(black_box(&dag)))));
+    });
+    group.bench_function("guarded_skip_sweep", |b| {
+        b.iter(|| black_box(order_digest(&btree_visited_order_guarded(black_box(&dag)))));
+    });
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_writeback_dag_order,
@@ -615,6 +660,7 @@ criterion_group!(
     bench_writeback_executor_crash_points,
     bench_writeback_dag_block_level_iteration_current,
     bench_writeback_executor_crash_tracking,
-    bench_writeback_order_with_levels
+    bench_writeback_order_with_levels,
+    bench_writeback_dag_order_sweep_guard
 );
 criterion_main!(benches);
