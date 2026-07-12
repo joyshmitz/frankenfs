@@ -6394,3 +6394,29 @@ also a deep read-path change sharing `ffs-core/lib.rs` with the active xattr pee
 A/B (or the local rand-read gate is unblocked) and the read-path region is uncontested.**
 bd-ddryj (the single-file read fan-out cap) remains the correct, landed, validated lever
 per this ledger's own 2026-07-10 analysis (line 53).
+
+### 2026-07-12 (cont.) — REFINEMENT of the bd-eflng parsed-inode cache: a ShardedCache mirror does NOT relieve single-file contention (moves it); parse-only win — the real fix is a LOCK-FREE hot-inode read
+
+Analyzed the handed-off parsed-`Ext4Inode` RO cache (prior entry `8992d2aa`) at
+implementation depth. Correcting that entry's implied value for the bd-eflng target
+workload (single-file parallel random read):
+
+A straightforward `ShardedCache<u64 ino, Ext4Inode>` mirror of `ext4_inode_attr_cache`
+(RO-gated, `readonly_lookup_cache_disabled`-honoring) would, on a HIT, skip
+`read_inode_raw_with_scope` (the block-cache `get` + `parse_from_bytes`). BUT for a
+random read of ONE file, EVERY read resolves the SAME `ino` → the SAME ro-inode-cache
+shard → the SAME per-shard `Mutex` (`ShardedCache.get` takes `WordLock`, the exact
+`lock_slow` the profile blamed). So the shard-Mutex contention does NOT disappear — it
+MOVES from the inode-table-block cache (keyed by block) to the ro-inode cache (keyed by
+ino), same single hot key → same single shard. The only NET win is eliminating the
+`parse_from_bytes` CPU (a fraction of the ~4% read_inode+parse self-time), which helps
+the compute-bound portion under saturation but leaves the dominant multi-lock residual
+(the per-read exclusive RwLock + the shard-Mutex) intact.
+
+=> A correctness-critical read-DATA-path cache for a marginal, non-contention (parse-only)
+win fails risk/reward — NOT landed. The REAL bd-eflng residual fix is a **lock-free hot-
+inode read** for single-file workloads (e.g. `arc_swap`/per-CPU published latest RO inode,
+or a read-optimized cache whose `get` does not take a per-shard write-Mutex), which is a
+larger structural change — still validation-gated (parallel `rand-read` A/B needs the
+fleet/local). The ShardedCache-mirror version is explicitly REJECTED here so the swarm
+does not implement the marginal one. bd-ddryj remains the correct landed read lever.
