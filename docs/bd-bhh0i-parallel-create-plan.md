@@ -387,3 +387,30 @@ Incremental owner-reviewed plan, each step independently revertible:
   overcounts; removing it is neutral-to-negative).
 - asupersync `Cx::for_request` per-request cost (7.7% of every FUSE op) — real but
   DEPENDENCY-owned (`new_with_drivers` is `pub(crate)`); not a frankenfs-crate change.
+
+## Execution log
+
+### 2026-07-12 — ownership assumed (cc_ffs/BlackThrush); resuming at step 3
+User GREENLIT the multi-turn bd-bhh0i effort. Peers (cod/SilverPine) are inactive
+(last 60 commits all mine), so per the "ONE agent owns Ext4AllocState end-to-end"
+rule I now own this lane. Reviewed the full plan + verified the prior work is on
+disk:
+- **Steps 1–2 DONE**: bench histograms + bounded model (de-risk pass), and the
+  Loom decomposition proof `crates/ffs-core/tests/bd_bhh0i_lock_decomposition_
+  model.rs` (935 lines, 7/7 projections on RCH `vmi1152480`). Loom is a workspace
+  dep; the test models the design (not production code) so it needs no `--cfg loom`.
+- **Steps 3–7 NOT started**: `Ext4AllocState` (lib.rs:666) is still
+  `{ geo, groups: Vec<GroupStats>, persist_ctx }` under the single
+  `RwLock` (lib.rs:919). No `GroupAllocState`/per-group record type yet.
+
+**Next increment = step 3 (behavior-preserving, single-lock retained, NO
+concurrency change → byte-identical + e2fsck-clean):** factor the struct so the
+immutable `geo` is reachable WITHOUT the alloc lock (many `.read()` sites take the
+lock only to read geometry — those become lock-free), and wrap the mutable
+per-group state (`groups[g]` free counts/cursors/bitmap-locations) in a distinct
+`GroupAllocRecords` type that step 5 can later put behind per-group locks. Loom is
+NOT re-run for step 3 (it validates the step-5 concurrency, which step 3 does not
+touch). Gate: ffs-core create/mkdir/link/symlink/mknod + conformance 100/0/2 +
+e2fsck-clean fixture mutation, all byte-identical to the pre-refactor single-lock
+behavior. A full map of every `ext4_alloc_state.read()/.write()` site and the
+fields each touches is being compiled to drive the mechanical reroute.
