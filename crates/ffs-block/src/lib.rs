@@ -696,20 +696,32 @@ impl ByteDevice for FileByteDevice {
             return Ok(());
         }
 
-        let mut read_buf = vec![0_u8; total_len];
-        self.file.read_exact_at(read_buf.as_mut_slice(), offset.0)?;
-        let mut copied = 0_usize;
-        for buf in bufs {
-            let len = buf.len();
-            if len == 0 {
-                continue;
+        // Small vectored read: reuse the per-thread staging scratch (same as the
+        // scalar small-read path) instead of `vec![0; total_len]` per read — the
+        // positioned read overwrites the slot in full, so the zero-init is waste.
+        // The caller's `bufs` are scattered into only after the read succeeds, so
+        // the all-or-nothing destination contract and the bytes are unchanged.
+        FILE_READ_STAGING.with(|cell| -> Result<()> {
+            let mut staging = cell.borrow_mut();
+            if staging.len() < total_len {
+                staging.resize(total_len, 0);
             }
-            let end = copied
-                .checked_add(len)
-                .ok_or_else(|| FfsError::Format("read length overflows usize".to_owned()))?;
-            (**buf).copy_from_slice(&read_buf[copied..end]);
-            copied = end;
-        }
+            let slot = &mut staging[..total_len];
+            self.file.read_exact_at(slot, offset.0)?;
+            let mut copied = 0_usize;
+            for buf in bufs {
+                let len = buf.len();
+                if len == 0 {
+                    continue;
+                }
+                let end = copied
+                    .checked_add(len)
+                    .ok_or_else(|| FfsError::Format("read length overflows usize".to_owned()))?;
+                (**buf).copy_from_slice(&slot[copied..end]);
+                copied = end;
+            }
+            Ok(())
+        })?;
 
         cx_checkpoint(cx)?;
         Ok(())
