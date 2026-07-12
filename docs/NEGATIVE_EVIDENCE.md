@@ -5860,3 +5860,29 @@ fallback, journal replay behavior), and adds a conformance gate proving
 byte-identity plus destination-on-error preservation. Without that decision, any
 production patch here would either fail the workspace lint or silently weaken the
 project's safety contract. No production code changed in this continuation.
+
+## 2026-07-12 — sweep: multi-pass / read-then-discard patterns on ext4 metadata + JBD2 paths
+
+After five wins this session on these two classes — (a) multi-pass over a large
+out-of-cache array, (b) expensive read/compute then used only in a subset — this
+turn swept the adjacent surface for further instances. Wins landed first:
+untouched-group bitmap-read elision (`3f7b3791`), free-totals sum fusion on the
+sync path (`593a5f61`) and its `statfs` sibling (`d62d155e`); JBD2 data-block
+zero-init elision (`2ec6f1a3`) and legacy tag data-CRC elision (`b43f1279`).
+
+Remaining candidates — every one already-optimized (with ref), peer-owned, or
+test/infrequent, so no production code changed in this sweep:
+
+| Site | Class checked | Verdict |
+| --- | --- | --- |
+| `ext4_sync_superblock_free_totals` + `statfs` group free-sum | multi-pass big array | FUSED (`593a5f61`, `d62d155e`); `grep 'groups.iter().map(free).sum'` now 0 |
+| `read_only_statfs_group_desc_totals` | multi-pass / recompute | already rayon-parallel + GD-cache; residual per-group `group_desc_offset` is arithmetic and RO-statfs is infrequent (sub-noise) |
+| `get_xattr` / `list_xattr_names` / `listxattr` | read/parse-then-discard | early-exit finders + names-only walk already landed (bd-abu3z, ~7.2x / ~1.67x) |
+| JBD2 tail/commit checksums | compute-then-discard | `has_checksum`-gated; only the legacy per-tag data CRC discarded (fixed `b43f1279`) |
+| JBD2 desc/revoke/commit buffers | zero-then-overwrite | partially filled → zero-init required; only the full-block data buffer was elidable (fixed `2ec6f1a3`) |
+| btrfs statfs / compressed-read / dir-dedup | multi-pass | peer (`btrfs.rs` / ffs-alloc) or already overlap-parallel + zero-copy (bd-307e4/bd-strse) |
+| GDT-flush per-untouched-group `persist` WRITE elision | write elision | **NOT byte-identical-safe**: under GDT deferral the on-disk descriptor for a pristine group is mkfs's value on the first flush, which may differ byte-wise from FrankenFS's computed pristine descriptor even when both are e2fsck-clean. Skipping `persist` would change the image vs the current always-persist behaviour. Needs a per-group dirty flag (ffs-alloc, peer) to be safe. |
+
+Cross-crate `.iter().map(...).sum/.max/.filter().count()` over
+ffs-ondisk / ffs-btrfs writeback / ffs-inode production code found no further
+big-array multi-pass; the ffs-inode `groups...sum()` hits are `#[cfg(test)]`.
