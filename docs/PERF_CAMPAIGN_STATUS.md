@@ -20,6 +20,34 @@
 > multi-file read, bd-opb6l create-storm, fsync) are now all measurable** — the
 > solo-CPU frontier is done, but this axis is freshly open.
 
+> ## ⭐ 2026-07-11 WRITE-PATH WIN (BlackThrush) — btrfs commit DAG (block,level) fusion (dec1133b, bd-…-oci7t)
+>
+> A fresh, profile-first micro-lever survived the "HOLD" verdict on the **btrfs
+> metadata write path**. The five `btrfs_full_transaction_commit`
+> address-allocation loops (fs / csum / subvol / extent / root tree) each
+> collected `dag.all_blocks()` into a throwaway `Vec<u64>`, then re-probed every
+> node's level through `dag.node_level(block)` — a second O(log N) BTreeMap
+> lookup per node plus an **unreachable** `ok_or_else` error branch (the block
+> always came from that same node map, so the lookup can never be `None`).
+>
+> Lever: `WriteDependencyDag::blocks_with_levels()` = `self.nodes.iter()` yielding
+> `(block, level)` in the **same ascending block order** (BTreeMap in-order =
+> `keys().collect()` order), streamed directly in all five loops. Drops the Vec
+> alloc + the N redundant lookups + the dead branch, per tree per commit.
+> **Byte-identical by construction** — same nodes, same order → same stateful
+> allocator address + level per block. Bench `serialize_block_levels` asserts
+> literal byte-equality of every serialized node; it passed.
+>
+> Measured (rch vmi1293453, release-perf, same-worker A/A/B, 2048-node DAG):
+> `all_blocks+node_level` A 6.750 µs / B 6.986 µs (1.03x A/A null floor) vs
+> streamed **1.659 µs = 4.07x** (3.92x conservative CI). Gates: ffs-core btrfs
+> commit correctness 28/0 (btrfs-check-clean created-file / subvol /
+> rename-exchange / truncate-down / boundary / clone + commit-persist remount);
+> prior run ffs-btrfs writeback 37/0 + all-targets check + clippy. Lesson: a
+> "campaign complete / HOLD" verdict on the *solo-CPU* surface does not close the
+> *write-path structural loops* — a redundant collect-then-relookup over a private
+> ordered map is still a clean, byte-exact 4x micro-lever.
+
 
 ## ✅ FINAL FRONTIER SUMMARY — 2026-07-10 (BlackThrush / cc_ffs) — ALL AXES MAPPED, HOLD
 
