@@ -561,3 +561,62 @@ delegates to a new `pub fn try_alloc_blocks_in_group(cx, dev, geo, stats: &mut
 GroupStats, group, count, hint, pctx, reserved: &[u32])` — single-lock path
 byte-identical, `cargo test -p ffs-alloc` gated; (b2) the ffs-core sharded method +
 an in-memory-mkfs integration test asserting sharded==single-lock alloc bits/counts.
+
+## 2026-07-12 — SHARDED ALLOCATOR COMPLETE + VALIDATED; cutover handoff (needs local e2fsck)
+
+The full default-off (`bhh0i_sharded_alloc`) sharded allocator is built and
+remote-validated across 13 byte-identical slices — production is unchanged with
+the feature off:
+
+- **Block path** (runtime-proven on a real `mkfs.ext4` image): `PerGroupAlloc`
+  (padded per-group `Mutex<GroupStats>`) · `alloc_in_scan_order` (multi-group scan,
+  one lock at a time) · `total_free` fold · OpenFs `ext4_sharded_alloc` field +
+  mount construction · `pub ffs_alloc::allocation_group_order` · `pub
+  try_alloc_blocks_in_group` (single-lock byte-identical extraction) · reserved
+  pre-population at mount · `PerGroupAlloc::alloc_blocks` · block integration test.
+- **Inode path** (runtime-proven): `pub try_alloc_inode_in_group_persist_core`
+  (single-lock byte-identical extraction) · `PerGroupAlloc::alloc_inode` · inode
+  integration test.
+- **Part-B spread**: `spread_start_group(parent, seed, group_count)` (+ tests).
+- **Foundation**: the Loom decomposition proof (`bd_bhh0i_lock_decomposition_model`)
+  is GREEN on current main (7/7).
+
+### The cutover (the actual 3.7x-gap perf delivery) — remaining, and why it is NOT remote-only
+
+The cutover is a single ATOMIC, feature-gated switch of the authoritative per-group
+allocation state from `RwLock<Ext4AllocState>.groups` to `PerGroupAlloc`:
+1. In `ext4_create`/`mknod`/`mkdir`/`unlink`/`link`/`symlink`/`fallocate`/rename,
+   route allocation through `self.ext4_sharded_alloc.alloc_blocks` / `alloc_inode`
+   (inode `target = spread_start_group(parent, seed, group_count)`; dir Orlov via a
+   lock-free free-count snapshot) instead of `alloc_blocks_persist` /
+   `alloc_inode_persist`.
+2. Route the whole-array fold consumers (`ext4_sync_superblock_free_totals`,
+   `statfs`) to `PerGroupAlloc::total_free` — they read STALE data if switched
+   before step 1, so this is part of the same atomic switch, not a standalone slice.
+3. Every other reader of `groups` (e.g. `read_group_desc` cacheability, per-op group
+   stats) must read the sharded structure when the feature is on.
+
+**Remote-validatable** (do first, feature-on): compile; `cargo test -p ffs-harness
+--test conformance` (single-thread create/mkdir/link/symlink/mknod correctness); an
+in-memory **parallel** create test (N threads on one `PerGroupAlloc` → all distinct
+blocks/inodes, correct counts, no corruption — complements the green Loom design
+proof with real threads).
+
+**LOCAL-ONLY (the mandatory gates rch cannot run — it rejects non-compilation
+commands, and the ≥1 GiB fixture images are outside the repo)**:
+```
+# after the feature-on cutover build lands a runnable ffs-cli:
+create-bench --threads {1,2,4,8,16}   # scaling MUST go POSITIVE (target 8t ≥ 4x 1t)
+create-bench 3000 && e2fsck -fn <img> # 0 orphans, 0 bitmap drift, correct free counts
+# A/B vs the flag-off single-lock build on the same worker; single-thread non-regression.
+```
+
+### Handoff decision
+
+The allocator is done; the cutover needs a **local e2fsck run** (or a relaxation of
+the rch-remote-only rule so e2fsck/create-bench can run) to (a) prove parallel-mutation
+e2fsck-clean — MANDATORY, two prior naive attempts corrupted the fs — and (b) measure
+the scaling win. Until then the cutover cannot be safely landed or measured. Next
+remote steps if continuing: the in-memory parallel-create correctness test, then the
+feature-gated cutover code (compile + conformance validatable), holding the flag OFF
+until the local e2fsck gate is available.
