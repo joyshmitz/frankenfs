@@ -5940,3 +5940,29 @@ The clean fully-overwritten alloc+memset (ffs-block staging, jbd2 data block) an
 multi-pass-over-big-array (ext4 free-totals) veins are already mined this session.
 Remaining measurable headroom is peer (MVCC per-block copy; ffs-alloc) or an
 explicit structural change. No production code changed in this continuation.
+
+### 2026-07-12 (cont.) — create hot path: prepare_inode/write_inode double-read the inode-table block (marginal + structural)
+
+Evidence-backed bound (confirmed by reading the code, not guessed). Every ext4
+create/mkdir does TWO `read_block` calls on the SAME inode-table block:
+- `ffs_inode::prepare_inode` (lib.rs ~355): `read_block(loc.block)` to extract the
+  4-byte old i_generation at offset 0x64 (bumped for NFS stale-handle detection,
+  returned in the FUSE entry `generation`, so it must be known at prepare time).
+- `ffs_inode::write_inode` (lib.rs ~135): `read_block(loc.block)` for the RMW that
+  serializes the final inode into its 256-byte slot (the 9.71% `to_vec` memmove
+  from bd-bhh0i's profile).
+
+Why this is NOT a clean micro-lever:
+- Both reads go through the block cache, so prepare's read WARMS the block that
+  write_inode then HITS — the 4 KiB I/O is shared, not doubled. The only true
+  redundancy is the second cache lookup + BlockBuf materialization (~tens of ns).
+- Eliminating it means folding the generation read into write_inode's existing RMW
+  (or threading prepare's BlockBuf through the create/mkdir/link/symlink callers
+  into write_inode), plus surfacing the computed generation back for the returned
+  attr. That is a structural change to the create flow and touches write_inode —
+  the bd-bhh0i alloc-lock-serialized, e2fsck+loom-gated hot path — for a marginal
+  (shared-I/O) gain. Not worth a drive-by; only inside a scoped create-path
+  restructure with the create e2fsck suite + parallel-create gate.
+
+prepare_inode's `vec![0;60]` extent-bytes buffer is already the measured-optimal
+form (bd-cc-prepare-inode-inline REFUTED). No production code changed.
