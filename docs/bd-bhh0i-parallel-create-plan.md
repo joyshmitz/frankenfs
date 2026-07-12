@@ -468,3 +468,34 @@ write read sites off the lock; (3b) wrap the remaining mutable per-group state
 (`free_blocks/free_inodes/inode_search_start/used_dirs/run-cache`) in a
 `GroupAllocRecords` type still under the single lock. Each slice byte-identical +
 e2fsck-gated independently.
+
+### 2026-07-12 — step-3 EXECUTION constraints (scoped before touching code)
+
+Two facts discovered while scoping the code change, both shaping how step 3 lands:
+
+1. **Step 3 is a BIG-BANG refactor, not small slices.** Removing `geo` from
+   `Ext4AllocState` (or wrapping `groups`) forces every access site to change
+   atomically: **49 `let Ext4AllocState { … }` destructures + 50+ direct
+   `alloc.geo` reads** (all production, `<line 38046`). There is no "reroute 3
+   sites" sub-slice — the struct shape is either changed everywhere or nowhere.
+   So step 3 must be a single carefully-staged refactor (best done in an isolated
+   worktree, compile-iterated via rch), NOT rushed across a normal quick turn.
+2. **The e2fsck gate needs LOCAL image access** (`docs` build-gate workarounds:
+   real fixture images live outside the repo; remote rch workers can't see them),
+   which the standing rch-remote-only rule forbids. RESOLUTION: for the immutable
+   **geometry/locator extraction (slice 3a/3b, step 3)** this does NOT block —
+   those slices touch ZERO mutation logic (only reroute reads of values that are
+   provably immutable after mount: locator writes exist only at construction,
+   ffs-alloc:959-961 + 3673-3700; all others are tests), so no bitmap/count drift
+   is possible and the remote cargo gate (create/mkdir/link/symlink/mknod +
+   conformance byte-identical) is SUFFICIENT. The e2fsck-clean gate becomes
+   MANDATORY at **step 5** (per-group locks — the first change to mutation
+   concurrency) and will require either a local run or a remote-only relaxation.
+
+**Foundation check:** re-ran the step-2 Loom decomposition proof
+(`bd_bhh0i_lock_decomposition_model`) on current `main` before building step 3
+(main moved since it last ran) — **GREEN: 7/7 passed in 2.14s on RCH**
+(`cargo test -p ffs-core --test bd_bhh0i_lock_decomposition_model --release`),
+including `disjoint_group_commits_are_deadlock_free_and_linearizable` + the
+out-of-order-publication visibility and post-commit prune projections. The
+decomposition design is still valid on current `main`; step 3 may proceed.
