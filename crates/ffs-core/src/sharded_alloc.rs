@@ -100,6 +100,36 @@ impl PerGroupAlloc {
         }
         None
     }
+
+    /// Sum of `free_blocks` and `free_inodes` across every group, each read under
+    /// its own lock. Backs the whole-array fold consumers the single lock served
+    /// (`ext4_sync_superblock_free_totals` and `statfs`).
+    ///
+    /// Snapshot semantics: this reads groups one lock at a time, so it is NOT a
+    /// globally-atomic instant — with concurrent allocations in flight the totals
+    /// can lag by the in-flight per-group deltas. That is acceptable for both
+    /// consumers: the superblock total is written at the durability boundary,
+    /// where the allocation storm has quiesced and every group's count is final
+    /// (so the fold is EXACT there — the state e2fsck checks), and `statfs` is
+    /// advisory. It mirrors the single-lock fold's result whenever no mutation is
+    /// concurrent, which is the only point either total is persisted or gated.
+    pub(crate) fn total_free(&self) -> FreeTotals {
+        let mut blocks = 0_u64;
+        let mut inodes = 0_u64;
+        for group in &self.groups {
+            let stats = group.stats.lock();
+            blocks += u64::from(stats.free_blocks);
+            inodes += u64::from(stats.free_inodes);
+        }
+        FreeTotals { blocks, inodes }
+    }
+}
+
+/// Aggregate free counts across all groups (see [`PerGroupAlloc::total_free`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FreeTotals {
+    pub(crate) blocks: u64,
+    pub(crate) inodes: u64,
 }
 
 #[cfg(test)]
@@ -242,5 +272,25 @@ mod tests {
         let hit = sharded.alloc_in_scan_order([99usize, 0, 1], try_take(3));
         assert_eq!(hit, Some(1));
         assert_eq!(sharded.lock_group(1).free_blocks, 2);
+    }
+
+    #[test]
+    fn total_free_sums_all_groups() {
+        let stats: Vec<GroupStats> = (0..4)
+            .map(|g| sample_group(g, 100 + g, 10 + g))
+            .collect();
+        let sharded = PerGroupAlloc::from_group_stats(stats);
+        // blocks = 100+101+102+103 = 406; inodes = 10+11+12+13 = 46.
+        assert_eq!(sharded.total_free(), FreeTotals { blocks: 406, inodes: 46 });
+    }
+
+    #[test]
+    fn total_free_reflects_post_allocation_state() {
+        let stats: Vec<GroupStats> = (0..3).map(|g| sample_group(g, 50, 5)).collect();
+        let sharded = PerGroupAlloc::from_group_stats(stats);
+        assert_eq!(sharded.total_free(), FreeTotals { blocks: 150, inodes: 15 });
+        // Debit 7 blocks from whichever group the scan commits to.
+        assert!(sharded.alloc_in_scan_order(0..3, try_take(7)).is_some());
+        assert_eq!(sharded.total_free(), FreeTotals { blocks: 143, inodes: 15 });
     }
 }
