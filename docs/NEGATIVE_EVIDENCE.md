@@ -6017,3 +6017,25 @@ measurable micro-lever surface is exhausted. Remaining headroom is exclusively a
 broad structural redesign (MVCC owned-buffer handoff) or an owner-gated concurrency
 refactor (bd-bhh0i per-group allocator sharding) — both multi-turn, correctness-
 critical, and unproven. No further single-turn byte-identical micro-lever exists.
+
+### 2026-07-12 (cont.) — post-cleanup re-examination + ffs-btree (last unexamined hot crate) confirmed optimized
+
+Applied the "re-examine a 'needs a big refactor' bound for a low-churn form"
+lesson (which yielded bcbc24d0) to the remaining bounds; no further cheap
+byte-identical lever surfaced:
+- ffs-xattr set-path clones (`inline_entries.clone()` @476, `name.clone()` @479):
+  NECESSARY — both originals are reused on the inline→external fall-through
+  (inline_entries at build_inline_ibody_for_inode_state @498, name pushed into
+  external_entries @493). The speculative inline-candidate clone is only wasted on
+  the rare overflow path; a size-precheck to skip it helps only that rare case.
+- ffs-inode `base.clone()` @1941-1984: `#[test]` fixtures, not production.
+- btrfs `serialize_node` `child_generations` all-same-value Vec: per-node, but
+  peer-owned serializer API (`BtrfsNodeSerializeParams`, bd-fdwuh/bd-6uyto) — a
+  scalar-generation change would touch the peer node serializer.
+- `ffs-btree` (last unexamined hot-read-path crate; used by ext4 extent resolve
+  every read): `search_parsed_root` / `search` are binary-search descents that are
+  explicitly allocation-free w.r.t. the returned leaf window (its own doc + the
+  `search_parsed_root_matches_byte_search` test). Not a lever.
+
+Confirms the floor: the only post-floor gain was the rare-path xattr alloc-
+reduction (bcbc24d0, honestly scoped as non-hot). No production code changed.
