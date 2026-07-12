@@ -141,5 +141,57 @@ fn bench_file_read_staging(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, bench_block_buf_construct, bench_file_read_staging);
+// ── read_block: staged read-then-copy vs volatile direct read ───────────────
+//
+// ByteBlockDevice::read_block reads a fresh, throwaway BlockBuf. When the inner
+// device stages small reads (FileByteDevice), the old `read_exact_at` filled a
+// staging slot then copied it into the block buffer — two block-sized memcpys.
+// `read_exact_at_volatile` reads straight into the buffer (it is discarded on
+// error, so no destination-preservation is needed), leaving one memcpy. Both
+// allocate the same BlockBuf; the delta is the eliminated staging→buffer copy.
+fn bench_read_block_staged_vs_direct(c: &mut Criterion) {
+    // Stand-in for the bytes the positioned read deposits.
+    let src = vec![0x5A_u8; BLOCK_SIZE];
+    let mut staging = vec![0_u8; BLOCK_SIZE]; // reused staging (post-3188e083)
+
+    {
+        let mut a = BlockBuf::zeroed(BLOCK_SIZE);
+        staging.copy_from_slice(&src);
+        a.make_mut().copy_from_slice(&staging);
+        let mut b = BlockBuf::zeroed(BLOCK_SIZE);
+        b.make_mut().copy_from_slice(&src);
+        assert_eq!(a.as_slice(), b.as_slice(), "read_block strategy changed bytes");
+    }
+
+    c.bench_function("read_block_staged_a", |b| {
+        b.iter(|| {
+            let mut buf = BlockBuf::zeroed(BLOCK_SIZE);
+            staging.copy_from_slice(black_box(&src));
+            buf.make_mut().copy_from_slice(&staging);
+            black_box(buf.as_slice()[0])
+        });
+    });
+    c.bench_function("read_block_staged_b", |b| {
+        b.iter(|| {
+            let mut buf = BlockBuf::zeroed(BLOCK_SIZE);
+            staging.copy_from_slice(black_box(&src));
+            buf.make_mut().copy_from_slice(&staging);
+            black_box(buf.as_slice()[0])
+        });
+    });
+    c.bench_function("read_block_direct", |b| {
+        b.iter(|| {
+            let mut buf = BlockBuf::zeroed(BLOCK_SIZE);
+            buf.make_mut().copy_from_slice(black_box(&src));
+            black_box(buf.as_slice()[0])
+        });
+    });
+}
+
+criterion_group!(
+    benches,
+    bench_block_buf_construct,
+    bench_file_read_staging,
+    bench_read_block_staged_vs_direct
+);
 criterion_main!(benches);

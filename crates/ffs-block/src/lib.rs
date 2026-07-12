@@ -347,6 +347,23 @@ pub trait ByteDevice: Send + Sync {
     /// Read exactly `buf.len()` bytes from `offset` into `buf`.
     fn read_exact_at(&self, cx: &Cx, offset: ByteOffset, buf: &mut [u8]) -> Result<()>;
 
+    /// Like [`read_exact_at`](Self::read_exact_at), but the caller does NOT
+    /// require the destination to be preserved on error — `buf` may be partially
+    /// written when this returns `Err`. Devices that stage small reads solely to
+    /// honour the all-or-nothing destination contract can skip that staging (and
+    /// its copy) here. Callers use this only when `buf` is a throwaway buffer
+    /// that is discarded on failure (e.g. a fresh block buffer read into and then
+    /// dropped if the read fails). The default delegates to `read_exact_at`, so
+    /// the bytes are identical on success.
+    fn read_exact_at_volatile(
+        &self,
+        cx: &Cx,
+        offset: ByteOffset,
+        buf: &mut [u8],
+    ) -> Result<()> {
+        self.read_exact_at(cx, offset, buf)
+    }
+
     /// Read a contiguous byte range into multiple buffers.
     ///
     /// The default preserves scalar `read_exact_at` semantics. File-backed
@@ -631,6 +648,41 @@ impl ByteDevice for FileByteDevice {
             buf.copy_from_slice(slot);
             Ok(())
         })?;
+        cx_checkpoint(cx)?;
+        Ok(())
+    }
+
+    fn read_exact_at_volatile(
+        &self,
+        cx: &Cx,
+        offset: ByteOffset,
+        buf: &mut [u8],
+    ) -> Result<()> {
+        cx_checkpoint(cx)?;
+        if buf.is_empty() {
+            cx_checkpoint(cx)?;
+            return Ok(());
+        }
+        let end = offset
+            .0
+            .checked_add(
+                u64::try_from(buf.len())
+                    .map_err(|_| FfsError::Format("read length overflows u64".to_owned()))?,
+            )
+            .ok_or_else(|| FfsError::Format("read range overflows u64".to_owned()))?;
+        if end > self.len {
+            return Err(FfsError::Format(format!(
+                "read out of bounds: offset={offset} len={} file_len={}",
+                buf.len(),
+                self.len
+            )));
+        }
+        // The caller discards `buf` on error, so there is no destination to
+        // preserve: read straight into it — no staging buffer, no post-read copy,
+        // and no length-recheck fstat. On success the bytes are identical to
+        // `read_exact_at`; on a short backing read `buf` may be partially written,
+        // which the caller drops.
+        self.file.read_exact_at(buf, offset.0)?;
         cx_checkpoint(cx)?;
         Ok(())
     }
@@ -1203,8 +1255,12 @@ impl<D: ByteDevice> BlockDevice for ByteBlockDevice<D> {
         let block_size = usize::try_from(self.block_size)
             .map_err(|_| FfsError::Format("block_size does not fit usize".to_owned()))?;
         let mut buf = BlockBuf::zeroed(block_size);
+        // `buf` is freshly allocated here and dropped if the read fails, so it
+        // needs no destination-preservation. The volatile read lets a device that
+        // otherwise stages small reads (FileByteDevice) read straight into `buf`,
+        // dropping the per-block staging copy on the metadata cache-miss path.
         self.inner
-            .read_exact_at(cx, ByteOffset(offset), buf.make_mut())?;
+            .read_exact_at_volatile(cx, ByteOffset(offset), buf.make_mut())?;
         cx_checkpoint(cx)?;
         Ok(buf)
     }
