@@ -11474,8 +11474,11 @@ impl OpenFs {
         //    see read_block_with_scope and bd-bw90c).
         if scope.tx.is_some() {
             if let Some(snapshot) = scope.snapshot {
-                if let Some(visible) = self.mvcc_store.read_visible(block, snapshot) {
-                    return Ok(Arc::<[u8]>::from(visible));
+                // Share the visible version (no clone), then one copy into the
+                // Arc — vs `read_visible`'s owned Vec clone THEN Arc copy (two
+                // full-block copies) for the same `Arc<[u8]>` bytes (bd-cc-shardread).
+                if let Some(visible) = self.mvcc_store.read_visible_block_buf(block, snapshot) {
+                    return Ok(Arc::<[u8]>::from(visible.as_slice()));
                 }
             }
         }
@@ -11508,8 +11511,12 @@ impl OpenFs {
         }
         if scope.tx.is_some() {
             if let Some(snapshot) = scope.snapshot {
-                if let Some(visible) = self.mvcc_store.read_visible(block, snapshot) {
-                    return Ok(f(visible.as_ref()));
+                // `f` only borrows the bytes read-only, so SHARE the visible
+                // version (Arc BlockBuf, no copy) rather than cloning the whole
+                // block via `read_visible` just to borrow it — this completes the
+                // fn's own no-copy contract on the MVCC-hit branch (bd-cc-shardread).
+                if let Some(visible) = self.mvcc_store.read_visible_block_buf(block, snapshot) {
+                    return Ok(f(visible.as_slice()));
                 }
             }
         }
