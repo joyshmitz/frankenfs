@@ -6420,3 +6420,35 @@ or a read-optimized cache whose `get` does not take a per-shard write-Mutex), wh
 larger structural change — still validation-gated (parallel `rand-read` A/B needs the
 fleet/local). The ShardedCache-mirror version is explicitly REJECTED here so the swarm
 does not implement the marginal one. bd-ddryj remains the correct landed read lever.
+
+### 2026-07-12 (cont.) — bd-eflng CORRECT fix DESIGNED (lock-free single-entry hot-inode cache); blocked: OliveCliff holds exclusive lib.rs reservation
+
+Superseding the rejected ShardedCache mirror (prior entry `da70cb08`), the real fix for the
+single-file parallel-random-read shard-Mutex residual is a **lock-free single-entry hot-inode
+RO cache** — READY to implement, blocked only by an exclusive `crates/ffs-core/src/lib.rs`
+reservation held by OliveCliff (Agent Mail, expires ~2026-07-13T01:35) + the fleet gate.
+
+DESIGN (drop-in, mirrors the `ext4_inode_attr_cache` RO-gating exactly):
+- Field: `ext4_hot_ro_inode: arc_swap::ArcSwapOption<HotInode>` where
+  `struct HotInode { ino: u64, inode: Ext4Inode }` (`Ext4Inode: Clone`; arc_swap already a dep).
+- In `read_inode_with_scope` (the full-`parse_from_bytes` read-DATA path, lib.rs:10929):
+  ```
+  let use_cache = !self.is_writable()
+      && !self.readonly_lookup_cache_disabled.load(Relaxed);
+  if use_cache { if let Some(h) = &*self.ext4_hot_ro_inode.load() {
+      if h.ino == ino.0 { return Ok(h.inode.clone()); } } }
+  let inode = self.read_inode_raw_with_scope(cx, scope, ino)?;
+  if inode.mode == 0 { return Err(NotFound); }
+  if use_cache { self.ext4_hot_ro_inode.store(Some(Arc::new(HotInode{ino: ino.0, inode: inode.clone()}))); }
+  Ok(inode)
+  ```
+WHY it beats the ShardedCache mirror: the `arc_swap::load` is a lock-free RCU read (no
+per-shard `WordLock`), so a single hot `ino` (the exact rand-read pattern) is served WITHOUT
+the shard-Mutex — genuinely relieving the contention instead of moving it. Single-entry, so
+multi-file access thrashes to a cheap `store` (bounded, negligible vs the block read it
+replaces). RO-gated + immutable inode ⇒ byte-identical (conformance-validatable). VALIDATION
+plan: (1) isolating micro-bench `arc_swap.load` vs `ShardedCache.get` under N-thread same-key
+contention (remote, quantifies the win); (2) conformance 100/0/2 (correctness); (3) end-to-end
+`ffs-cli rand-read --parallel` single-file WIN + multi-file NON-regression (fleet/local A/B,
+deferred). NOT landed this turn: lib.rs is reserved by the active xattr peer, and the fleet
+slot (frankenfs per-project=1) is swarm-held. Whoever holds lib.rs next can implement verbatim.
