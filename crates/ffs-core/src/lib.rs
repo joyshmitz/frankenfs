@@ -920,6 +920,13 @@ pub struct OpenFs {
     /// Protected by a Mutex since write operations need exclusive access.
     /// `None` for btrfs or when opened in read-only mode.
     ext4_alloc_state: Option<RwLock<Ext4AllocState>>,
+    /// bd-bhh0i step 5: default-off per-group-lock allocation records, populated
+    /// alongside `ext4_alloc_state` in `enable_writes`. Read by the sharded
+    /// allocation path (wired in a later slice); absent entirely with the feature
+    /// off, so production keeps the single `ext4_alloc_state` lock (byte-identical).
+    #[cfg(feature = "bhh0i_sharded_alloc")]
+    #[allow(dead_code)]
+    ext4_sharded_alloc: Option<crate::sharded_alloc::PerGroupAlloc>,
     /// Read-only ext4 group descriptor cache.
     ///
     /// The writable path bypasses this cache because group descriptor counters
@@ -3760,6 +3767,8 @@ impl OpenFs {
             mvcc_store,
             jbd2_writer: None,
             ext4_alloc_state: None,
+            #[cfg(feature = "bhh0i_sharded_alloc")]
+            ext4_sharded_alloc: None,
             ext4_group_desc_cache: ShardedCache::new(),
             ext4_inode_table_locations: OnceLock::new(),
             ext4_inode_table_block_cache: ShardedCache::new(),
@@ -6747,7 +6756,17 @@ impl OpenFs {
         match &self.flavor {
             FsFlavor::Ext4(_) => {
                 let alloc_state = self.load_ext4_alloc_state(cx)?;
+                // bd-bhh0i: mirror the per-group records into the default-off
+                // sharded structure (clone leaves the single-lock path's initial
+                // state identical). Unused until the sharded alloc path is wired.
+                #[cfg(feature = "bhh0i_sharded_alloc")]
+                let sharded =
+                    crate::sharded_alloc::PerGroupAlloc::from_group_stats(alloc_state.groups.clone());
                 self.ext4_alloc_state = Some(RwLock::new(alloc_state));
+                #[cfg(feature = "bhh0i_sharded_alloc")]
+                {
+                    self.ext4_sharded_alloc = Some(sharded);
+                }
                 self.ext4_forced_read_only.store(false, Ordering::SeqCst);
             }
             FsFlavor::Btrfs(_) => {
