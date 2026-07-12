@@ -6338,3 +6338,28 @@ peer's live lane). Result EMPTY:
 => No solo remote-only micro-lever exists for this lane. bd-bhh0i sharded primitives
 are complete; the sole remaining win is the local-e2fsck-gated cutover (dcg-blocked
 for the agent). Recorded so the loop stops re-hunting the mined surface.
+
+### 2026-07-12 (cont.) — bd-vpypn RESOLVED by existing evidence: extent-walk is µs-scale even at E65536 (rejection holds at high extent counts)
+
+bd-vpypn (ledger-integrity reopen) flagged that the cold-read rejection of "extent-tree
+walks as a cause" only covered ≤14 extents, leaving the cost UNTESTED at high extent
+counts (heavily-fragmented large files, where the flattened `mappings` array
+`ext4_resolve_block_from_mappings` searches is large). Re-checked against the existing
+`extent_search_large.rs` characterization (bd-cc-interp-search, 2026-07-10), which
+benches binary `partition_point` on the flattened sorted-starts array across the full
+range: **uniform E4096 = 2.40µs, E65536 = 4.85µs** (and the interp-search alternative
+was REJECTED because ext4's ≤340-per-leaf structure never produces such large flattened
+arrays anyway). So the extent-resolve search is **µs-scale even at 65,536 extents** —
+roughly 1000× below the millisecond-scale cold-read I/O it is embedded in. The
+extent-walk is therefore NOT a hidden cold-read cost at ANY reachable extent count; the
+original rejection (commits e01ad7d4 / 7155b208) holds at high fragmentation, and the
+row is valid (the code executed: `resolve_extent` 0.05% self-time, `mappings` load 0.10%
+per `perf report --percent-limit 0`). bd-vpypn's scope concern is closed by existing
+measurement — no new bench needed, no lever here.
+
+(Swarm note: the reachable frankenfs perf surface is being actively + productively mined
+by the peer lane — `426303c8` listxattr preallocate 1.77x, `e6e70201` BlockBuf
+inode-table cache — in `ffs-core/lib.rs` + `ffs-ondisk`. My bd-ddryj read fan-out cap is
+landed + compile-validated; no non-colliding, non-local-gated lever remains for this
+lane. Efficient allocation = redirect to a non-peer subsystem or unblock the bd-bhh0i
+local e2fsck gate.)
