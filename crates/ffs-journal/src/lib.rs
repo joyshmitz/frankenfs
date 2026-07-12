@@ -357,8 +357,10 @@ fn stamp_jbd2_tag_data_checksum(
     sequence: u32,
     seed: u32,
 ) -> Result<()> {
-    let checksum = checksum_jbd2_data_block(data_block, sequence, seed);
     match format {
+        // Legacy tags carry no data checksum field. The old code computed a full
+        // data-block CRC up front and then discarded it here — pure per-write
+        // waste. Compute the CRC only in the arms that actually stamp it.
         Jbd2TagFormat::Legacy => Ok(()),
         Jbd2TagFormat::CsumV2 => {
             if tag.len() < JBD2_TAG_CHECKSUM_OFFSET_V1_V2 + 2 {
@@ -366,6 +368,7 @@ fn stamp_jbd2_tag_data_checksum(
                     "JBD2 tag too small for checksum".to_owned(),
                 ));
             }
+            let checksum = checksum_jbd2_data_block(data_block, sequence, seed);
             let checksum = u16::try_from(checksum & 0xFFFF)
                 .map_err(|_| FfsError::Format("JBD2 checksum truncation failed".to_owned()))?;
             tag[JBD2_TAG_CHECKSUM_OFFSET_V1_V2..JBD2_TAG_CHECKSUM_OFFSET_V1_V2 + 2]
@@ -378,6 +381,7 @@ fn stamp_jbd2_tag_data_checksum(
                     "JBD2 tag too small for checksum".to_owned(),
                 ));
             }
+            let checksum = checksum_jbd2_data_block(data_block, sequence, seed);
             tag[JBD2_TAG_CHECKSUM_OFFSET_V3..JBD2_TAG_CHECKSUM_OFFSET_V3 + JBD2_CHECKSUM_TAIL_SIZE]
                 .copy_from_slice(&checksum.to_be_bytes());
             Ok(())

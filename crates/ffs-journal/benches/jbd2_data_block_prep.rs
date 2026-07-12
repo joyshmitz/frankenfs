@@ -81,5 +81,62 @@ fn bench_jbd2_data_block_prep(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_jbd2_data_block_prep);
+// ── legacy tag data-checksum elision ───────────────────────────────────────
+//
+// `stamp_jbd2_tag_data_checksum` used to compute a full data-block CRC up front
+// and then discard it for the `Legacy` tag format (legacy tags carry no data
+// checksum). The lever moves the CRC into the checksummed arms so legacy
+// journals skip it. This measures the per-block CRC that legacy writes no longer
+// pay. `checksum_jbd2_data_block` mirrors the private production helper exactly.
+
+fn checksum_jbd2_data_block(block: &[u8], sequence: u32, seed: u32) -> u32 {
+    let sequence = sequence.to_be_bytes();
+    let checksum = crc32c::crc32c_append(!seed, &sequence);
+    !crc32c::crc32c_append(checksum, block)
+}
+
+/// Old legacy path: compute the data-block CRC, then discard it. `black_box` on
+/// the result models production, where the value was assigned before the match
+/// and so computed unconditionally (a pure call the optimizer cannot elide).
+fn legacy_stamp_old(data: &[u8], seq: u32, seed: u32) -> u64 {
+    let mut acc = 0_u64;
+    for _ in 0..BLOCKS {
+        let checksum = checksum_jbd2_data_block(black_box(data), seq, seed);
+        acc = acc.wrapping_add(u64::from(black_box(checksum)));
+    }
+    acc
+}
+
+/// New legacy path: no data-block CRC at all.
+fn legacy_stamp_new(data: &[u8], _seq: u32, _seed: u32) -> u64 {
+    let mut acc = 0_u64;
+    for i in 0..BLOCKS {
+        // Touch the data pointer so both arms observe the same input, without
+        // hashing it.
+        acc = acc
+            .wrapping_add(i as u64)
+            .wrapping_add(u64::from(black_box(data)[0]));
+    }
+    acc
+}
+
+fn bench_jbd2_legacy_tag_stamp(c: &mut Criterion) {
+    let data = vec![0x5A_u8; BS];
+    let seq = 0x0123_4567_u32;
+    let seed = 0x89AB_CDEF_u32;
+
+    let mut group = c.benchmark_group("jbd2_legacy_tag_stamp_256x4096");
+    group.bench_function("compute_and_discard_crc_a", |b| {
+        b.iter(|| black_box(legacy_stamp_old(black_box(&data), seq, seed)));
+    });
+    group.bench_function("compute_and_discard_crc_b", |b| {
+        b.iter(|| black_box(legacy_stamp_old(black_box(&data), seq, seed)));
+    });
+    group.bench_function("skip_crc", |b| {
+        b.iter(|| black_box(legacy_stamp_new(black_box(&data), seq, seed)));
+    });
+    group.finish();
+}
+
+criterion_group!(benches, bench_jbd2_data_block_prep, bench_jbd2_legacy_tag_stamp);
 criterion_main!(benches);
