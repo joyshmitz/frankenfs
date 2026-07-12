@@ -499,3 +499,35 @@ Two facts discovered while scoping the code change, both shaping how step 3 land
 including `disjoint_group_commits_are_deadlock_free_and_linearizable` + the
 out-of-order-publication visibility and post-commit prune projections. The
 decomposition design is still valid on current `main`; step 3 may proceed.
+
+### 2026-07-12 — STEP 3 DE-SCOPED: the geo extraction is UNNECESSARY
+
+Key realization that removes the ~100-site big-bang: **`geo` in `Ext4AllocState`
+is a convenience field, not a lock requirement.** `FsGeometry::from_superblock`
+(ffs-alloc:1507) is CHEAP (≈20 field copies + one division for `group_count` + a
+BIGALLOC feature check — no allocation, no I/O) and derives geo purely from the
+immutable superblock, which `OpenFs::ext4_superblock()` (lib.rs:4131) already hands
+out lock-free; `largest_contiguous_free_run` already does exactly this at
+lib.rs:11237. So step 5's per-group-lock code can derive geo lock-free whenever it
+needs allocation math OUTSIDE the group locks — there is NO need to extract `geo`
+into a new field or touch the ~100 `alloc.geo` sites. **Slice 3a (geo extraction)
+is DROPPED.**
+
+That leaves the only real prep = making `groups` per-group-lockable, which IS
+step 5's change. So steps 3b+5 collapse into a single **feature-flagged** change:
+introduce the per-group-lock `groups` structure behind a default-OFF cfg/config
+path (production keeps the single `RwLock` → **byte-identical, e2fsck-safe by
+construction because the sharded path is not taken**), with the sharded path
+exercised by the Loom model (DONE, green) + the `ext4_alloc_lock_convoy` /
+`ext4_group_lock_layout` benches + the create/mkdir/link/symlink/mknod +
+conformance suites — all REMOTE-gatable. The mandatory e2fsck-clean gate and the
+production cutover (step 7) remain deferred until a LOCAL e2fsck run is available
+(rch-remote-only cannot see the fixture images), but that gates the CUTOVER, not
+the implementation — so the feature-flagged per-group allocator can be built and
+validated entirely remote-only first.
+
+**Revised remaining path:** (i) build the default-off per-group-lock `groups`
+structure + sharded alloc path (feature-flagged), remote-validated byte-identical
+with the flag off and Loom/bench/cargo-validated with it on; (ii) local e2fsck-clean
+parallel-mutation fixture gate + the step-7 measured A/B cutover, when a local run
+or a remote-only relaxation for e2fsck is available.
