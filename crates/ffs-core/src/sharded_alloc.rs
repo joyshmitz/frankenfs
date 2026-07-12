@@ -123,6 +123,50 @@ impl PerGroupAlloc {
         }
         FreeTotals { blocks, inodes }
     }
+
+    /// Sharded per-group block allocation (bd-bhh0i Part A): walk the
+    /// goal→neighbors→full order (`ffs_alloc::allocation_group_order`), locking
+    /// ONE group at a time, and allocate `count` blocks in the first group that
+    /// can satisfy. Disjoint-group callers never contend. `reserved` is read from
+    /// each locked group's own pre-populated cache (filled at `enable_writes`), so
+    /// no sibling-group access is needed. `pctx`/`geo` are immutable and supplied
+    /// lock-free by the caller. Mirrors the single-lock `alloc_blocks_persist`
+    /// result for the same starting state (it composes the identical
+    /// `try_alloc_blocks_in_group` core over the identical scan order).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn alloc_blocks(
+        &self,
+        cx: &asupersync::Cx,
+        dev: &dyn ffs_block::BlockDevice,
+        geo: &ffs_alloc::FsGeometry,
+        hint: &ffs_alloc::AllocHint,
+        count: u32,
+        pctx: &ffs_alloc::PersistCtx,
+    ) -> Result<Option<ffs_alloc::BlockAlloc>, ffs_error::FfsError> {
+        let order = ffs_alloc::allocation_group_order(geo, hint)?;
+        self.alloc_in_scan_order(order.iter().map(|g| g.0 as usize), |g, stats| {
+            // Read this locked group's own pre-populated reserved set. The Arc
+            // clone releases the `reserved_cache` borrow before the `&mut stats`
+            // call below; empty only if unpopulated (never, under the feature).
+            let reserved = stats.reserved_cache.get().cloned().unwrap_or_default();
+            match ffs_alloc::try_alloc_blocks_in_group(
+                cx,
+                dev,
+                geo,
+                stats,
+                ffs_types::GroupNumber(u32::try_from(g).unwrap_or(u32::MAX)),
+                count,
+                hint,
+                pctx,
+                &reserved,
+            ) {
+                Ok(Some(alloc)) => Some(Ok(alloc)), // allocated → stop the scan
+                Ok(None) => None,                   // group can't satisfy → continue
+                Err(err) => Some(Err(err)),         // real error → stop, propagate
+            }
+        })
+        .transpose()
+    }
 }
 
 /// Aggregate free counts across all groups (see [`PerGroupAlloc::total_free`]).
