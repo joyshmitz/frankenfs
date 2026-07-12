@@ -6148,3 +6148,31 @@ NOT single-turn micro-levers), mapped for a future turn:
    eliminates it. Amortized by the cache today.
 `read_block_at_snapshot` 7274 is TEST-ONLY (not the frontier). VERDICT: cheap MVCC
 frontier CLOSED; HOLD for a deliberate structural session on items 1–2.
+
+### 2026-07-12 (cont.) — CORRECTION to c068e705 item-1 (it's a NON-lever) + journal/lookup/write-staging floor-verified
+
+**Correcting the prior entry:** structural item-1 (make the `Vec<u8>`-returning
+`read_visible` callers accept `BlockBuf`) is NOT a lever. `read_block_with_scope`'s
+remaining callers after the 99943772 borrow-only sweep are RMW (indirect-pointer
+writes 14928/14962/14997 need an owned MUTABLE Vec to `write_indirect_pointer_slot`
+then stage/write), a par/serial collect (14162), or the owned memo (14733) — a
+shared immutable BlockBuf can't serve any of them (they'd `.to_vec()` it → same
+clone). `read_current_block_vec_from_device` 11444 exists only to feed that Vec;
+`mvcc_read_visible` 6229 is a public-API Vec contract. So the ONLY real remaining
+MVCC structural lever is item-2 (BlockBuf-typed block cache to kill the 11485
+`Arc<AlignedVec>`→`Arc<[u8]>` device-branch copy) — and that copy is amortized by
+the cache. NET: the MVCC frontier is MORE closed than c068e705 stated.
+
+Fresh floor-verification this turn (no cheap lever in any):
+- **ffs-journal**: commit/tail checksums are segmented no-clone (the `< 4096`
+  commit-checksum `to_vec` @328 fires once-per-commit on non-default small blocks =
+  I/O-masked sub-noise); `stamp_jbd2_tag_data_checksum` already computes the CRC
+  only in the stamping arms (b43f1279); recovery reads (@863) are owned-mutable RMW.
+- **ext4 lookup** (`lookup_name_with_scope` 13072): negative-fast-path name index
+  (bd-f8rd8) + O(1) present-snapshot; the sole alloc is the returned entry's
+  `name.to_vec()` = the refuted SmallVec residual (public `Ext4DirEntry.name`).
+- **write staging** (`TransactionBlockAdapter` 2249/2259): `&[u8]` trait boundary
+  forces `to_vec` for owned staging — already ledgered e2e-neutral (33c51394/44ad26b2).
+- **getattr inode read**: Arc-shared via `ext4_inode_table_block_cache` (10699).
+VERDICT: solo single-turn micro-lever surface exhausted across all reachable hot
+paths; only item-2 (multi-turn, cache-amortized) and refuted SmallVec remain.
