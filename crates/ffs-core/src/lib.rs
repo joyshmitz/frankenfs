@@ -25258,18 +25258,20 @@ impl OpenFs {
         ino: InodeNumber,
         datasync: bool,
     ) -> ffs_error::Result<()> {
-        // operation_id is rendered only into the log records below; skip its
-        // per-sync `format!` + String allocation when the log target is disabled
-        // below WARN (the quiet / perf-benchmark config). WARN is the least-severe
-        // level any record in this function uses, so this never elides an id a
-        // record would actually emit. Mirrors the existing `tracing::enabled!`
-        // guards in ffs-mvcc.
-        let operation_id = if tracing::enabled!(target: "ffs::ext4::rw", tracing::Level::WARN) {
+        // operation_id and the sync duration are rendered only into the log
+        // records below; check enablement once and skip BOTH the per-sync
+        // `format!` + String allocation AND the two `Instant` clock reads when the
+        // log target is disabled below WARN (the quiet / perf-benchmark config).
+        // WARN is the least-severe level any record here uses, so this never elides
+        // a field a record would emit. Mirrors the `tracing::enabled!` guards in
+        // ffs-mvcc.
+        let log_enabled = tracing::enabled!(target: "ffs::ext4::rw", tracing::Level::WARN);
+        let operation_id = if log_enabled {
             Self::ext4_sync_operation_id(op, ino, datasync)
         } else {
             String::new()
         };
-        let started = Instant::now();
+        let started = log_enabled.then(Instant::now);
         info!(
             target: "ffs::ext4::rw",
             operation_id = %operation_id,
@@ -25308,7 +25310,9 @@ impl OpenFs {
             );
         }
 
-        let duration_us = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
+        let duration_us = started
+            .map(|s| u64::try_from(s.elapsed().as_micros()).unwrap_or(u64::MAX))
+            .unwrap_or(0);
         match self.dev.sync(cx) {
             Ok(()) => {
                 info!(
