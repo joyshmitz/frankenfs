@@ -1223,7 +1223,13 @@ pub fn resolve_numa_allocation_goal(
     GroupNumber(0)
 }
 
-fn allocation_group_order(geo: &FsGeometry, hint: &AllocHint) -> Result<Vec<GroupNumber>> {
+/// The allocation group scan order for a `hint`: optional NUMA-preferred groups,
+/// then the goal group, its ±neighbors, and finally a full `0..group_count`
+/// fallback. Pure function of `geo` + `hint` (no state, no I/O). Exposed for the
+/// bd-bhh0i per-group sharded allocator (ffs-core), which walks this same order
+/// but locks one group at a time via `PerGroupAlloc::alloc_in_scan_order`; the
+/// single-lock `alloc_blocks_persist` path uses it identically.
+pub fn allocation_group_order(geo: &FsGeometry, hint: &AllocHint) -> Result<Vec<GroupNumber>> {
     let group_len = usize::try_from(geo.group_count)
         .map_err(|_| FfsError::InvalidGeometry("group_count does not fit usize".into()))?;
     let mut order = Vec::with_capacity(group_len);

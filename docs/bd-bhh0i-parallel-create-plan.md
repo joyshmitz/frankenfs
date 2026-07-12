@@ -531,3 +531,33 @@ structure + sharded alloc path (feature-flagged), remote-validated byte-identica
 with the flag off and Loom/bench/cargo-validated with it on; (ii) local e2fsck-clean
 parallel-mutation fixture gate + the step-7 measured A/B cutover, when a local run
 or a remote-only relaxation for e2fsck is available.
+
+### 2026-07-12 — slice-(b) enablement + a per-group `try_alloc` extraction dependency
+
+Primitives landed in `ffs-core/src/sharded_alloc.rs` (default-off): `PerGroupAlloc`
+(padded per-group `Mutex<GroupStats>`), `alloc_in_scan_order` (multi-group scan,
+one lock at a time), `total_free` fold; and the OpenFs `ext4_sharded_alloc` field
+constructed at mount. Next is the first *read* of that field — a sharded block-alloc
+method composing `ffs_alloc::allocation_group_order` (now **pub**) with
+`alloc_in_scan_order` over a per-group `try_alloc` closure.
+
+**Discovered dependency (why slice-b's closure body is a careful, not quick,
+extraction):** the per-group allocation body lives in `ffs_alloc::try_alloc_safe`
+(private, whole-`&mut [GroupStats]` slice). It only mutates `groups[gidx]`, so the
+allocation/bitmap/count/descriptor-persist logic extracts cleanly to a
+`&mut GroupStats` per-group fn — EXCEPT `reserved_blocks_in_group(geo, groups,
+group)` (pub) genuinely needs OTHER groups: for **flex_bg** a group's reserved set
+is every flex-group member's inode-table blocks, i.e. the immutable LOCATORS of
+sibling groups. So the sharded per-group `try_alloc` needs lock-free read access to
+all groups' immutable locators (`{block_bitmap_block, inode_bitmap_block,
+inode_table_block}`, fixed at mkfs). RESOLUTION: extract an immutable
+`Arc<[GroupLocators]>` (or reuse the reserved-set, which is itself immutable +
+already `OnceLock`-memoized per group) into a shared read-only side table the
+per-group `try_alloc` consults — NOT behind the per-group mutex. This is the one
+piece of the earlier "immutable geometry extraction" that IS needed (only the
+locators, for reserved/flex_bg — not the whole geo). Small + immutable, so still
+byte-identical + remote-cargo-gatable. Slice-(b) plan: (b1) `try_alloc_safe`
+delegates to a new `pub fn try_alloc_blocks_in_group(cx, dev, geo, stats: &mut
+GroupStats, group, count, hint, pctx, reserved: &[u32])` — single-lock path
+byte-identical, `cargo test -p ffs-alloc` gated; (b2) the ffs-core sharded method +
+an in-memory-mkfs integration test asserting sharded==single-lock alloc bits/counts.
