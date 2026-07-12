@@ -54416,6 +54416,142 @@ mod tests {
         );
     }
 
+    /// Concurrency counterpart to the single-threaded block test above. The whole
+    /// point of the bd-bhh0i per-group lock decomposition is that disjoint-group
+    /// allocations proceed on REAL OS threads without corrupting each other, so
+    /// this drives the sharded `alloc_blocks` path from `N` concurrent threads —
+    /// one per distinct starting group — that all borrow the SAME `PerGroupAlloc`,
+    /// block device, geometry, and persist context by shared reference (the exact
+    /// aliasing the cutover must survive). Two invariants are checked across ALL
+    /// threads at once, against a real on-disk ext4 image:
+    ///
+    ///   * every block handed out across every thread is DISTINCT — the core
+    ///     no-double-allocation guarantee under concurrency (a `HashSet` of the
+    ///     raw block numbers whose length equals the total allocated), and
+    ///   * the whole-array free-block total fell by EXACTLY the number allocated —
+    ///     every concurrent debit landed once, with no lost update from a racing
+    ///     per-group count decrement.
+    ///
+    /// That `&PerGroupAlloc`, `&dyn BlockDevice`, `&FsGeometry`, and `&PersistCtx`
+    /// can all be shared across `thread::scope` at once is itself load-bearing for
+    /// the cutover: it compiles only because every one of those four is `Sync`.
+    /// Each worker builds its own `Cx::for_testing()`, so the shared-across-threads
+    /// surface this test pins down is exactly those four allocator types.
+    #[test]
+    #[cfg(feature = "bhh0i_sharded_alloc")]
+    fn bd_bhh0i_sharded_alloc_blocks_parallel_no_double_alloc() {
+        let Some((fs, _tmp)) = open_writable_ext4_mkfs(64) else {
+            return; // mkfs.ext4 unavailable on this host — skip like sibling tests.
+        };
+
+        // Geometry is derived lock-free from the live superblock, exactly how the
+        // sharded path expects the caller to supply it.
+        let sb = fs.ext4_superblock().expect("ext4 superblock");
+        let geo = FsGeometry::from_superblock(sb);
+
+        // Immutable persist context, cloned out of the single-lock alloc state —
+        // the very context the single-lock path feeds `alloc_blocks_persist`.
+        let pctx = fs
+            .ext4_alloc_state
+            .as_ref()
+            .expect("ext4 write state present after enable_writes")
+            .read()
+            .persist_ctx
+            .clone();
+
+        // The block device the single-lock alloc path writes bitmaps through.
+        let dev = fs.block_device_adapter();
+
+        // The sharded per-group allocator populated by `enable_writes`.
+        let sharded = fs
+            .ext4_sharded_alloc
+            .as_ref()
+            .expect("sharded allocator present under bhh0i_sharded_alloc feature");
+
+        let gc = sharded.group_count();
+        if gc < 2 {
+            return; // need at least two groups to exercise disjoint-group concurrency.
+        }
+
+        // Whole-array free-block total before any concurrent allocation.
+        let total_before = sharded.total_free().blocks;
+
+        // One thread per distinct starting group (capped at 4), each issuing K
+        // single-block allocations. Reference bindings are Copy, so each `move`
+        // worker captures its own copy and all threads share the underlying
+        // allocator / device / geometry / persist context by shared reference —
+        // which requires each of those four to be `Sync`.
+        let n = gc.min(4);
+        const K: usize = 20;
+        let sharded_ref: &crate::sharded_alloc::PerGroupAlloc = sharded;
+        let dev_ref = &dev;
+        let geo_ref = &geo;
+        let pctx_ref = &pctx;
+
+        let per_thread: Vec<Vec<BlockNumber>> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..n)
+                .map(|t| {
+                    scope.spawn(move || {
+                        // Each worker owns its Cx so the only cross-thread sharing
+                        // is the four allocator types under test.
+                        let cx = Cx::for_testing();
+
+                        // Distinct starting group per thread, so the scans begin in
+                        // different groups (they still fall through to
+                        // neighbors → full-fallback if that family is exhausted).
+                        let mut hint = AllocHint::default();
+                        hint.goal_group = Some(GroupNumber(t as u32));
+
+                        let mut got: Vec<BlockNumber> = Vec::with_capacity(K);
+                        for call in 0..K {
+                            match sharded_ref
+                                .alloc_blocks(&cx, dev_ref, geo_ref, &hint, 1, pctx_ref)
+                            {
+                                Ok(Some(alloc)) => got.push(alloc.start),
+                                Ok(None) => break, // group family full — stop early.
+                                Err(e) => panic!(
+                                    "thread {t} call {call}: sharded alloc_blocks errored: {e:?}"
+                                ),
+                            }
+                        }
+                        got
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().expect("allocator worker thread panicked"))
+                .collect()
+        });
+
+        // Flatten every thread's allocations into one list.
+        let all: Vec<BlockNumber> = per_thread.into_iter().flatten().collect();
+        let total_allocated = all.len();
+        assert!(
+            total_allocated > 0,
+            "expected at least one concurrent allocation to succeed across {n} threads"
+        );
+
+        // Core no-double-allocation guarantee: every block handed out across ALL
+        // threads is distinct — two concurrent scans never landed the same block.
+        let distinct: std::collections::HashSet<u64> = all.iter().map(|b| b.0).collect();
+        assert_eq!(
+            distinct.len(),
+            total_allocated,
+            "every concurrently-allocated block must be distinct (no double-alloc): {all:?}"
+        );
+
+        // Every concurrent debit landed exactly once — no lost update from a racing
+        // per-group free-count decrement.
+        let total_after = sharded.total_free().blocks;
+        assert_eq!(
+            total_after,
+            total_before - total_allocated as u64,
+            "whole-array free-block total must fall by exactly the number allocated \
+             (before={total_before}, after={total_after}, allocated={total_allocated})"
+        );
+    }
+
     /// Inode analogue of the block test above: three consecutive single-inode
     /// allocations must each succeed, return DISTINCT real inode numbers, and
     /// debit exactly one inode from the group each allocation lands in (with no
