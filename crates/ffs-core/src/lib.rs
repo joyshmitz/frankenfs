@@ -17168,9 +17168,16 @@ impl OpenFs {
         };
         let (total_free_blocks, total_free_inodes) = {
             let alloc = alloc_mutex.read();
-            let blocks: u64 = alloc.groups.iter().map(|g| u64::from(g.free_blocks)).sum();
-            let inodes: u64 = alloc.groups.iter().map(|g| u64::from(g.free_inodes)).sum();
-            (blocks, inodes)
+            // Sum both free totals in ONE pass over the group array. Two separate
+            // `.sum()` passes reload every group's (large) struct a second time;
+            // on a big filesystem the array exceeds cache, so fusing halves the
+            // memory traffic. free_blocks + free_inodes share a cache line.
+            alloc.groups.iter().fold((0_u64, 0_u64), |(blocks, inodes), g| {
+                (
+                    blocks + u64::from(g.free_blocks),
+                    inodes + u64::from(g.free_inodes),
+                )
+            })
         };
 
         let (sb_block, sb_off) = self.ext4_superblock_location();

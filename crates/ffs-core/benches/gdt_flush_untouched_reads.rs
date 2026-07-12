@@ -92,5 +92,74 @@ fn bench_gdt_flush_untouched_reads(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_gdt_flush_untouched_reads);
+// ── superblock free-totals sum: two passes vs one fused pass ────────────────
+//
+// ext4_sync_superblock_free_totals summed free_blocks and free_inodes across the
+// group array in two separate `.sum()` passes. Each `GroupStats` is ~96 bytes, so
+// on a large filesystem the array exceeds cache and the second pass reloads every
+// group. Fusing to one fold halves that memory traffic (free_blocks + free_inodes
+// share a cache line). This models the array size at ~16k groups (a multi-TB fs).
+
+/// ~96-byte stand-in for `GroupStats` so the array's cache footprint matches
+/// production; free_blocks + free_inodes sit near the front (one cache line).
+#[derive(Clone, Default)]
+struct GroupLike {
+    _group: u32,
+    free_blocks: u32,
+    _largest: u64,
+    free_inodes: u32,
+    _search: u32,
+    _used_dirs: u32,
+    _pad: [u64; 9],
+}
+
+const SUM_GROUPS: usize = 16_384;
+
+fn two_pass_sum(groups: &[GroupLike]) -> (u64, u64) {
+    let blocks: u64 = groups.iter().map(|g| u64::from(g.free_blocks)).sum();
+    let inodes: u64 = groups.iter().map(|g| u64::from(g.free_inodes)).sum();
+    (blocks, inodes)
+}
+
+fn one_pass_sum(groups: &[GroupLike]) -> (u64, u64) {
+    groups.iter().fold((0_u64, 0_u64), |(blocks, inodes), g| {
+        (
+            blocks + u64::from(g.free_blocks),
+            inodes + u64::from(g.free_inodes),
+        )
+    })
+}
+
+fn bench_ext4_free_totals_sum(c: &mut Criterion) {
+    let groups: Vec<GroupLike> = (0..SUM_GROUPS)
+        .map(|k| GroupLike {
+            free_blocks: (k as u32) & 0xFFFF,
+            free_inodes: (k as u32).wrapping_mul(3) & 0xFFFF,
+            ..Default::default()
+        })
+        .collect();
+    assert_eq!(
+        two_pass_sum(&groups),
+        one_pass_sum(&groups),
+        "fusing the free-totals sum changed the totals"
+    );
+
+    let mut group = c.benchmark_group("ext4_free_totals_sum_16384groups");
+    group.bench_function("two_pass_a", |b| {
+        b.iter(|| black_box(two_pass_sum(black_box(&groups))));
+    });
+    group.bench_function("two_pass_b", |b| {
+        b.iter(|| black_box(two_pass_sum(black_box(&groups))));
+    });
+    group.bench_function("one_pass_fold", |b| {
+        b.iter(|| black_box(one_pass_sum(black_box(&groups))));
+    });
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_gdt_flush_untouched_reads,
+    bench_ext4_free_totals_sum
+);
 criterion_main!(benches);
